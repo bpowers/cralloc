@@ -1,6 +1,6 @@
 //! The front end: per-CPU slabs of magazines, and the routines that work on them.
 //!
-//! Each CPU number has a [`Slab`] in the static [`SLABS`]. A slab's hot word for a small class
+//! Each CPU number has a [`Slab`] in the static `SLABS`. A slab's hot word for a small class
 //! is the address of the next free slot of the magazine loaded for that class, or zero, or a
 //! marker; its cold part holds the CPU's spare magazines and the counters the idle check and
 //! the drain use. The array is zero-initialized, and zero is a valid slab with no magazines,
@@ -8,7 +8,7 @@
 //!
 //! Only the [`Routines`] write a slab, each with one restartable sequence that commits with a
 //! single store, and the drain (`depot::drain`). The routines are assembly generated from Lean
-//! into `generated/` and wrapped as [`Real`]; [`Twin`] implements the same specifications in
+//! into `generated/` and wrapped as `Real`; [`Twin`] implements the same specifications in
 //! Rust for every environment where assembly cannot run (Miri, Kani and the simulated-OS
 //! tests), over a simulated processor (`os::Machine`) that tests control. Which one a heap uses
 //! is chosen where the heap is made, by build configuration.
@@ -50,6 +50,8 @@ use crate::classes::{MagazineSize, SMALL_COUNT, SmallClass};
 /// The slabs, one per CPU number. Zero-initialized: untouched slabs cost no memory.
 // Crate-private: a twin or a routine wrapper made outside the crate could write these slabs
 // without restarting, behind the heap's back.
+// Only the generated routines use it, which Miri and Kani do not build.
+#[cfg_attr(any(miri, kani), allow(dead_code))]
 pub(crate) static SLABS: Slabs<[Slab; SLAB_COUNT]> = Slabs::new();
 
 /// The slot mask of each small class's magazines, indexed by class index, for the out-of-line

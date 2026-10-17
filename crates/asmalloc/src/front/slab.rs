@@ -157,7 +157,7 @@ impl Cpu {
     }
 }
 
-/// An array of slabs, one per CPU number. The allocator's is [`super::SLABS`], with
+/// An array of slabs, one per CPU number. The allocator's is `front::SLABS`, with
 /// [`SLAB_COUNT`] of them; tests make small ones. `Slabs` (with the default parameter) is the
 /// unsized view every user takes, so code is not generic over the count.
 #[repr(transparent)]
