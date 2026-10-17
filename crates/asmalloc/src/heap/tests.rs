@@ -139,8 +139,8 @@ fn bursts<H: GlobalAlloc>(heap: &H, size: usize, burst: usize, rounds: usize) {
 }
 
 /// Grows a buffer from one byte to `top`, then shrinks it, through `realloc`, checking the
-/// contents survive and that large growth moves rarely.
-fn realloc_walk<H: Inspect>(heap: &H, top: usize) {
+/// contents survive and that large growth moves rarely while headroom fits in a `region`.
+fn realloc_walk<H: Inspect>(heap: &H, top: usize, region: usize) {
     let align = 8;
     let mut size = 1;
     // SAFETY: a valid, non-empty layout.
@@ -157,7 +157,7 @@ fn realloc_walk<H: Inspect>(heap: &H, top: usize) {
         assert!(!q.is_null());
         // SAFETY: the first `size` bytes were carried over.
         assert!(unsafe { holds(q, size, 7) }, "at {size}");
-        if next > MAX_SMALL_SIZE && size > MAX_SMALL_SIZE {
+        if next > MAX_SMALL_SIZE && size > MAX_SMALL_SIZE && next * HEADROOM <= region {
             large_steps += 1;
             large_moves += usize::from(q != p);
         }
@@ -173,15 +173,12 @@ fn realloc_walk<H: Inspect>(heap: &H, top: usize) {
             "{large_moves} moves in {large_steps} doublings with headroom {HEADROOM}"
         );
     }
-    // Shrinking stays in place while the object is large and keeps its contents.
+    // Shrinking keeps the contents, in place or not.
     while size > 1 {
         let next = size / 2;
         // SAFETY: as above.
         let q = unsafe { heap.realloc(p, layout(size, align), next) };
         assert!(!q.is_null());
-        if next > MAX_SMALL_SIZE {
-            assert_eq!(q, p, "a large shrink that fits stays in place");
-        }
         // SAFETY: the first `next` bytes were carried over.
         assert!(unsafe { holds(q, next, 7) }, "at {next}");
         p = q;
@@ -275,7 +272,7 @@ fn a_simulated_heap_exchanges_magazines() {
 #[cfg_attr(miri, ignore)]
 fn a_simulated_heap_resizes_in_place_and_with_headroom() {
     let heap = SimHeap::<Shape>::new();
-    realloc_walk(&heap, 8 << 20);
+    realloc_walk(&heap, 8 << 20, 1 << 20);
 }
 
 #[test]
@@ -307,6 +304,21 @@ fn a_thread_without_a_lease_is_served_by_the_back_end() {
     every_class(&heap, 1);
     drop(leases);
     bursts(&heap, 64, 300, 2);
+}
+
+#[test]
+fn a_large_shrink_stays_in_place_unless_it_leaves_most_of_the_block() {
+    let heap = SimHeap::<Shape>::new();
+    let l = layout(200 << 10, 8);
+    // SAFETY: valid layouts; each block is freed once with the layout it has.
+    unsafe {
+        let p = heap.alloc(l);
+        let q = heap.realloc(p, l, 120 << 10);
+        assert_eq!(q, p, "a shrink to more than a quarter of the slot stays");
+        let r = heap.realloc(q, layout(120 << 10, 8), 40 << 10);
+        assert_ne!(r, q, "a shrink to less than a quarter of the slot moves");
+        heap.dealloc(r, layout(40 << 10, 8));
+    }
 }
 
 #[test]
@@ -400,7 +412,7 @@ mod process {
 
     #[test]
     fn the_process_heap_resizes_in_place_and_with_headroom() {
-        realloc_walk(&Asmalloc, 32 << 20);
+        realloc_walk(&Asmalloc, 32 << 20, 1 << 32);
     }
 
     #[test]

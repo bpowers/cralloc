@@ -106,12 +106,14 @@ impl<O: Os> Heap<O> {
     /// The back end, starting the heap if no thread has. `None` if the address space cannot be
     /// reserved.
     fn start(&self) -> Option<Back<'_, O>> {
-        if let Some(back) = self.back.get() {
-            return Some(back);
-        }
-        let back = self.back.get_or_reserve().ok()?;
+        let back = match self.back.get() {
+            Some(back) => back,
+            None => self.back.get_or_reserve().ok()?,
+        };
         // The generated routines hand object addresses over as integers. Exposing the
-        // reservation's provenance gives every object address one to take back.
+        // reservation's provenance gives every object address one to take back. Every slow
+        // path exposes it (it costs no instruction), so no thread can pop an object before
+        // some exposure it is ordered after.
         let _ = back.space().base().expose_provenance();
         Some(back)
     }
@@ -245,6 +247,7 @@ impl<O: Os> Heap<O> {
         let Some(back) = self.back() else {
             self.os().abort("free of a block when no heap exists");
         };
+        let _ = back.space().base().expose_provenance();
         let source = BackSource(back);
         // SAFETY: HEAP-02.
         let cache = unsafe { Cache::new(&self.depot, back.space(), routines, &source) };

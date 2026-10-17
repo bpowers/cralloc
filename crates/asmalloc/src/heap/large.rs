@@ -7,9 +7,11 @@
 //!
 //! A resize stays in place only when the caller's next free will still find the right class:
 //! for a small object, when the new layout has the same class; for a large one, when the new
-//! layout is still large and fits the slot or run. Anything else moves the object. An object
-//! that outgrows its block moves to one with [`HEADROOM`] times the room it asked for, so a
-//! buffer that doubles is copied every other doubling, not at each one. Small objects get no
+//! layout is still large and fits the slot or run, and (a decision beyond the design) is at
+//! least a [`HEADROOM`]th of it, so that a big buffer shrunk to a sliver does not keep its
+//! pages. Anything else moves the object. An object that outgrows its block moves to one with
+//! [`HEADROOM`] times the room it asked for, so a buffer that doubles is copied every other
+//! doubling, not at each one; but not past a region, since a run commits all its memory at once. Small objects get no
 //! headroom: their class comes from the layout, so their slot must be exactly their class.
 //!
 //! Fresh slots and runs read as zero; the back end says when a reused large slot is known to,
@@ -109,10 +111,12 @@ impl<O: Os> Heap<O> {
         if let Some(class) = small(layout) {
             return class.size();
         }
-        let whole = self.back().and_then(|back| match back.lookup(ptr.as_ptr())? {
-            Kind::Slot(class) => Some(class.size()),
-            Kind::Run(regions) => Some(regions << back.space().plan().region_shift()),
-        });
+        let whole = self
+            .back()
+            .and_then(|back| match back.lookup(ptr.as_ptr())? {
+                Kind::Slot(class) => Some(class.size()),
+                Kind::Run(regions) => Some(regions << back.space().plan().region_shift()),
+            });
         match whole {
             Some(len) => len,
             None => self
@@ -142,9 +146,14 @@ impl<O: Os> Heap<O> {
             (Some(_), None) => false,
             // Still large, fitting the block, and aligned as the new layout asks: the next free
             // reads the block from the address and finds it whole.
+            // A shrink to less than a [`HEADROOM`]th of the block moves, so the pages it gives
+            // up go back with the old block instead of staying resident in a block that is
+            // mostly empty.
             (None, next) => {
+                let needed = new.size().next_multiple_of(new.align());
                 next.is_none_or(|c| !c.is_small())
-                    && new.size().next_multiple_of(new.align()) <= len
+                    && needed <= len
+                    && needed >= len / HEADROOM
                     && ptr.addr().get() & (new.align() - 1) == 0
             }
         };
@@ -156,9 +165,15 @@ impl<O: Os> Heap<O> {
         }
         // Growing a large object out of its block: take headroom. A zeroed grow takes none, so
         // that it never clears room nobody asked for.
+        // Not for a run: it commits all its regions at once, so headroom would be commit charge,
+        // not just address space.
+        let region = self
+            .back()
+            .map_or(0, |back| back.space().plan().region_size());
         let roomy = (!zero && new.size() > len && small(new).is_none())
             .then(|| with_headroom(new))
-            .flatten();
+            .flatten()
+            .filter(|layout| layout.size() <= region);
         let fill = if zero { Zero::Whole } else { Zero::No };
         // SAFETY: passed through from the caller.
         let grant = unsafe {

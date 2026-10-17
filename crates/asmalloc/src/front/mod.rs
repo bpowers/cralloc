@@ -43,12 +43,14 @@ pub(crate) use crate::heap::{pop_slow, push_slow};
 #[cfg(all(target_os = "linux", target_arch = "x86_64", not(miri), not(kani)))]
 pub(crate) use crate::os::linux::__rseq_offset;
 #[cfg(all(target_os = "linux", target_arch = "x86_64", not(miri), not(kani)))]
-pub use real::Real;
+pub(crate) use real::Real;
 
 use crate::classes::{MagazineSize, SMALL_COUNT, SmallClass};
 
 /// The slabs, one per CPU number. Zero-initialized: untouched slabs cost no memory.
-pub static SLABS: Slabs<[Slab; SLAB_COUNT]> = Slabs::new();
+// Crate-private: a twin or a routine wrapper made outside the crate could write these slabs
+// without restarting, behind the heap's back.
+pub(crate) static SLABS: Slabs<[Slab; SLAB_COUNT]> = Slabs::new();
 
 /// The slot mask of each small class's magazines, indexed by class index, for the out-of-line
 /// routines, which take the class in a register. Index 0 is no class; it holds the smallest

@@ -37,8 +37,9 @@ impl Asmalloc {
         HEAP.contains(ptr)
     }
 
-    /// The bytes the block starting at `ptr` may use: its whole slot or run. `None` if no slot
-    /// or run of the heap starts at `ptr`.
+    /// The bytes the block starting at `ptr` may use: the class size of a small block; for a
+    /// large one, the size last asked for rounded up to a page, not the whole slot or run.
+    /// `None` if no slot or run of the heap starts at `ptr`.
     pub fn usable_size(ptr: *const u8) -> Option<usize> {
         HEAP.usable_size(ptr)
     }
@@ -166,17 +167,26 @@ fn small_class(class: usize) -> SmallClass {
 /// Where the out-of-line pop routine jumps when it misses, with its own arguments: the object's
 /// address, or 0 if there is no memory. The thread's `rseq_cs` still names the routine's
 /// sequence, which it has left, so an interruption only clears it.
+///
+/// # Safety
+///
+/// Reached only by the tail jump of the out-of-line pop, whose caller passed a small class.
 #[cold]
 #[inline(never)]
-pub(crate) extern "sysv64" fn pop_slow(class: usize) -> usize {
+pub(crate) unsafe extern "sysv64" fn pop_slow(class: usize) -> usize {
     // SAFETY: GLOBAL-02.
     unsafe { HEAP.alloc_slow(Real, small_class(class)) }.expose_provenance()
 }
 
 /// Where the out-of-line push routine jumps when it misses, with its own arguments.
+///
+/// # Safety
+///
+/// Reached only by the tail jump of the out-of-line push, whose caller passed a small class and
+/// an object of it that the caller owned and gave up (`Asmalloc::free_small`).
 #[cold]
 #[inline(never)]
-pub(crate) extern "sysv64" fn push_slow(class: usize, object: usize) {
+pub(crate) unsafe extern "sysv64" fn push_slow(class: usize, object: usize) {
     let class = small_class(class);
     let Some(object) = NonNull::new(ptr::with_exposed_provenance_mut::<u8>(object)) else {
         HEAP.os().abort("free of a null pointer through a routine");

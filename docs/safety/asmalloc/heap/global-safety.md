@@ -23,10 +23,11 @@ slab invariant, `front/twin-safety.md`). No unwinding: the allocator's paths nev
 **Precondition** (H, `heap/mod-safety.md`): the slab array of the routines is used only with
 this heap; plus each method's own contract, passed on from the caller's.
 
-**Proof.** `Real::slabs()` is `front::SLABS`. Nothing in the crate writes `SLABS` except
-`Real`'s routines and the slow paths and drain of a `Cache`, and the only `Cache`s made with
-`Real` are `HEAP`'s (`Heap::alloc_slow`, `Heap::free_slow`). `HEAP` is the only `Heap` ever run
-with `Real`. The callers' contracts (`GlobalAlloc`, `Allocator`) are what the heap's methods
+**Proof.** `Real::slabs()` is `front::SLABS`. Both `Real` and `SLABS` are private to the crate,
+so code outside it can neither run routines nor build a twin on these slabs. Inside the crate,
+nothing writes `SLABS` except `Real`'s routines and the slow paths and drain of a `Cache`, and
+the only `Cache`s made with `Real` are `HEAP`'s (`Heap::alloc_slow`, `Heap::free_slow`). `HEAP`
+is the only `Heap` ever run with `Real`. The callers' contracts (`GlobalAlloc`, `Allocator`) are what the heap's methods
 ask: a valid layout, and for frees and resizes a block this heap returned with a layout that
 fits it. `pop_slow` and `push_slow` are entered from the routines (GLOBAL-04).
 
@@ -47,7 +48,9 @@ reaches `HEAP`, so blocks may move between handles.
 
 **Preconditions.** As for `Heap::free_slow` and `Heap::alloc_slow`.
 
-**Proof.** These run only as the tail of the out-of-line routines, whose callers
+**Proof.** Both are `unsafe fn`s whose contract is that they are reached only as the tail of
+the out-of-line routines; the crate never calls them, and only the generated routines name
+them (`sym`). They run only as the tail of the out-of-line routines, whose callers
 (`Asmalloc::alloc_small`, `Asmalloc::free_small`) pass a small class's index and, for a push,
 an object of that class they own (`free_small`'s contract). The index is checked again
 (`small_class` aborts otherwise) and the object address is non-null-checked. The thread's

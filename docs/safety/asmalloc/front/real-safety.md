@@ -37,7 +37,8 @@ below are those sections, discharged once here for every call in the file.
 - (S): the slab invariant of `front/twin-safety.md`, which every writer of a slab keeps:
   the routines themselves (proved in Lean), the slow paths through `store_if_equal` and
   `stack_push` (SLOW-01, SPARE-01), and the drain. `Real` changes nothing about that argument:
-  it is the same specification with the same writers.
+  it is the same specification with the same writers. `SLABS` and `Real` are private to the
+  crate, so no code outside it can write these slabs, with a twin or otherwise.
 
 ## REAL-01: the inlined routines (`slab_pop`, `slab_push`, `current_cpu`)
 

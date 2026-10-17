@@ -25,9 +25,10 @@ use super::{MASKS, SLABS};
 use crate::classes::{SMALL_COUNT, SmallClass};
 use core::ptr::{self, NonNull};
 
-/// The generated routines, on the static [`SLABS`]. A zero-sized handle.
+/// The generated routines, on the static [`SLABS`]. A zero-sized handle, private to the crate:
+/// only the process heap may run them, since they write the one slab array it owns.
 #[derive(Clone, Copy, Debug, Default)]
-pub struct Real;
+pub(crate) struct Real;
 
 /// Instantiates the inlined pop and push for every small class, by class index. The list must
 /// be `1..=SMALL_COUNT`; the constant below checks it.
@@ -78,7 +79,7 @@ impl Real {
     /// Pops an object of `class` with the out-of-line routine, which on a miss continues in the
     /// heap's slow path (`pop_slow`). Null if the heap has no memory.
     #[inline]
-    pub fn pop_out_of_line(self, class: SmallClass) -> *mut u8 {
+    pub(crate) fn pop_out_of_line(self, class: SmallClass) -> *mut u8 {
         // SAFETY: REAL-02.
         let address = unsafe { outline::slab_pop(class.class().index() as usize) };
         ptr::with_exposed_provenance_mut(address)
@@ -92,7 +93,7 @@ impl Real {
     /// `object` is a block of `class` that the heap handed out and the caller owns; it gives
     /// it up.
     #[inline]
-    pub unsafe fn push_out_of_line(self, class: SmallClass, object: NonNull<u8>) {
+    pub(crate) unsafe fn push_out_of_line(self, class: SmallClass, object: NonNull<u8>) {
         // SAFETY: REAL-02.
         unsafe {
             outline::slab_push(
