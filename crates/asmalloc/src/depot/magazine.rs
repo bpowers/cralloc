@@ -38,18 +38,18 @@ const UNIT: usize = MagazineSize::MIN.bytes();
 /// A magazine's number: its offset in the magazine area in units of the smallest magazine.
 /// Never zero, because the generation page comes first.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
-pub struct MagazineId(NonZeroU32);
+pub(crate) struct MagazineId(NonZeroU32);
 
 impl MagazineId {
     /// The number, for a depot head.
     #[inline(always)]
-    pub const fn get(self) -> u32 {
+    pub(crate) const fn get(self) -> u32 {
         self.0.get()
     }
 
     /// The id with this number, if it is not zero.
     #[inline(always)]
-    pub const fn new(number: u32) -> Option<MagazineId> {
+    pub(crate) const fn new(number: u32) -> Option<MagazineId> {
         match NonZeroU32::new(number) {
             Some(n) => Some(MagazineId(n)),
             None => None,
@@ -64,7 +64,7 @@ impl MagazineId {
 /// A magazine this thread holds: not loaded in any slab, on no stack. See the module
 /// documentation. It borrows the reservation it lies in, so it cannot outlive it.
 #[derive(Debug, PartialEq, Eq)]
-pub struct Magazine<'a> {
+pub(crate) struct Magazine<'a> {
     base: NonNull<u8>,
     size: MagazineSize,
     id: MagazineId,
@@ -73,7 +73,7 @@ pub struct Magazine<'a> {
 
 /// What the last slot of an unloaded magazine records.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub struct Record {
+pub(crate) struct Record {
     /// Objects in slots 1 to `level`.
     pub level: usize,
     /// Magazines below this one on the spare stack it was pushed on.
@@ -83,19 +83,19 @@ pub struct Record {
 impl Magazine<'_> {
     /// The number.
     #[inline]
-    pub fn id(&self) -> MagazineId {
+    pub(crate) fn id(&self) -> MagazineId {
         self.id
     }
 
     /// The size.
     #[inline]
-    pub fn size(&self) -> MagazineSize {
+    pub(crate) fn size(&self) -> MagazineSize {
         self.size
     }
 
     /// The address of slot 0, which is what spare stacks hold.
     #[inline]
-    pub fn base(&self) -> NonNull<u8> {
+    pub(crate) fn base(&self) -> NonNull<u8> {
         self.base
     }
 
@@ -113,7 +113,7 @@ impl Magazine<'_> {
     }
 
     /// The level and depth recorded in the last slot.
-    pub fn record(&self) -> Record {
+    pub(crate) fn record(&self) -> Record {
         let word = self.slot(self.size.slots() - 1).load(Acquire).addr() as u64;
         Record {
             level: ((word as u32) as usize).min(self.size.capacity()),
@@ -122,7 +122,7 @@ impl Magazine<'_> {
     }
 
     /// Records a level and a spare depth in the last slot.
-    pub fn set_record(&self, record: Record) {
+    pub(crate) fn set_record(&self, record: Record) {
         debug_assert!(record.level <= self.size.capacity());
         let word = (record.depth as u64) << 32 | record.level as u64;
         self.slot(self.size.slots() - 1)
@@ -130,24 +130,24 @@ impl Magazine<'_> {
     }
 
     /// The level recorded in the last slot.
-    pub fn level(&self) -> usize {
+    pub(crate) fn level(&self) -> usize {
         self.record().level
     }
 
     /// Records a level, with no spare depth.
-    pub fn set_level(&self, level: usize) {
+    pub(crate) fn set_level(&self, level: usize) {
         self.set_record(Record { level, depth: 0 });
     }
 
     /// The object in slot `index`, `1..=capacity`.
-    pub fn object(&self, index: usize) -> *mut u8 {
+    pub(crate) fn object(&self, index: usize) -> *mut u8 {
         debug_assert!((1..=self.size.capacity()).contains(&index));
         self.slot(index).load(Relaxed)
     }
 
     /// Puts an object in slot `index`, `1..=capacity`. Any other index is refused, so that
     /// no call can overwrite the link or the record, which stacks and the slow paths trust.
-    pub fn set_object(&self, index: usize, object: NonNull<u8>) {
+    pub(crate) fn set_object(&self, index: usize, object: NonNull<u8>) {
         debug_assert!((1..=self.size.capacity()).contains(&index));
         if (1..=self.size.capacity()).contains(&index) {
             self.slot(index).store(object.as_ptr(), Relaxed);
@@ -155,7 +155,7 @@ impl Magazine<'_> {
     }
 
     /// The slab word that loads this magazine at `level`: the address of slot `level + 1`.
-    pub fn word(&self, level: usize) -> *mut u8 {
+    pub(crate) fn word(&self, level: usize) -> *mut u8 {
         debug_assert!(level <= self.size.capacity());
         self.base.as_ptr().wrapping_add((level + 1) * SLOT_BYTES)
     }
@@ -178,7 +178,7 @@ pub(super) const fn admits(
 }
 
 /// The magazine area of a heap, with the depot's counters for it.
-pub struct Area<'a, O: Os> {
+pub(crate) struct Area<'a, O: Os> {
     space: Space<'a, O>,
     depot: &'a Depot,
 }
@@ -287,7 +287,7 @@ impl<'a, O: Os> Area<'a, O> {
 
     /// A new, empty magazine of `size`, or `None` if the area is used up or cannot be made
     /// writable. Its memory is fresh, so it reads as an empty magazine.
-    pub fn create(&self, size: MagazineSize) -> Option<Magazine<'a>> {
+    pub(crate) fn create(&self, size: MagazineSize) -> Option<Magazine<'a>> {
         let bytes = size.bytes();
         let mut carved = self.depot.carved.load(Acquire);
         let start = loop {

@@ -42,10 +42,10 @@ mod verify;
 
 pub use drain::Drained;
 pub use generation::Generation;
-pub use magazine::{Area, Magazine, MagazineId, Record};
+pub(crate) use magazine::{Area, Magazine};
 pub use source::Source;
 pub use spare::{MAX_SPARES, SPARE_BUDGET, spare_limit};
-pub use stack::Stack;
+pub(crate) use stack::Stack;
 
 use crate::classes::{MagazineSize, SMALL_COUNT, SmallClass};
 use crate::front::sync::{AtomicU64, AtomicUsize};
@@ -118,12 +118,12 @@ impl Depot {
     }
 
     /// The stack of magazines with objects of `class`.
-    pub fn full(&self, class: SmallClass) -> &Stack {
+    pub(crate) fn full(&self, class: SmallClass) -> &Stack {
         &self.full[class.ordinal() % SMALL_COUNT]
     }
 
     /// The stack of empty magazines of `size`.
-    pub fn empty(&self, size: MagazineSize) -> &Stack {
+    pub(crate) fn empty(&self, size: MagazineSize) -> &Stack {
         &self.empty[size.ordinal() % MagazineSize::COUNT]
     }
 }
@@ -131,6 +131,9 @@ impl Depot {
 /// The caches and the depot as one thread sees them: the slow paths, the heartbeat and the
 /// drain, for a heap at `space` whose middle tier is `depot`, writing slabs through `routines`
 /// and getting objects from `source`.
+///
+/// Magazines, the magazine area and the depot stacks are the crate's own: outside the crate a
+/// magazine cannot be named, so no safe call can aim a slab or a stack at the wrong memory.
 pub struct Cache<'a, O: Os, R: Routines, S: Source> {
     depot: &'a Depot,
     area: Area<'a, O>,
@@ -167,14 +170,10 @@ impl<'a, O: Os, R: Routines, S: Source> Cache<'a, O, R, S> {
         &self.routines
     }
 
-    /// The magazine area.
-    pub fn area(&self) -> Area<'a, O> {
+    /// The magazine area, for tests' audits.
+    #[cfg(test)]
+    pub(crate) fn area(&self) -> Area<'a, O> {
         self.area
-    }
-
-    /// The depot.
-    pub fn depot(&self) -> &'a Depot {
-        self.depot
     }
 
     fn slab(&self, cpu: Cpu) -> &Slab {

@@ -39,14 +39,14 @@ impl Packed {
 }
 
 /// A stack of magazines of one size. See the module documentation.
-pub struct Stack {
+pub(crate) struct Stack {
     head: AtomicU64,
 }
 
 impl Stack {
     /// An empty stack.
     #[allow(clippy::new_without_default)]
-    pub const fn new() -> Stack {
+    pub(crate) const fn new() -> Stack {
         Stack {
             head: AtomicU64::new(0),
         }
@@ -62,7 +62,7 @@ impl Stack {
 
     /// Pushes a magazine this thread holds; its recorded level counts toward the stack's
     /// objects. Afterwards the stack owns it.
-    pub fn push<O: Os>(&self, area: Area<'_, O>, magazine: Magazine<'_>) {
+    pub(crate) fn push<O: Os>(&self, area: Area<'_, O>, magazine: Magazine<'_>) {
         let level = magazine.level() as u32;
         let mut head = Packed::from_word(self.head.load(Acquire));
         loop {
@@ -93,7 +93,11 @@ impl Stack {
     }
 
     /// Pops a magazine of `size`, which this thread then holds.
-    pub fn pop<'a, O: Os>(&self, area: Area<'a, O>, size: MagazineSize) -> Option<Magazine<'a>> {
+    pub(crate) fn pop<'a, O: Os>(
+        &self,
+        area: Area<'a, O>,
+        size: MagazineSize,
+    ) -> Option<Magazine<'a>> {
         let mut head = Packed::from_word(self.head.load(Acquire));
         loop {
             let top = MagazineId::new(head.number)?;
@@ -119,7 +123,7 @@ impl Stack {
 
     /// The number of objects in the stack, as of a moment during the call: the count in the
     /// top magazine's link. A hint for the depot's targets.
-    pub fn objects<O: Os>(&self, area: Area<'_, O>, size: MagazineSize) -> u32 {
+    pub(crate) fn objects<O: Os>(&self, area: Area<'_, O>, size: MagazineSize) -> u32 {
         let head = Packed::from_word(self.head.load(Relaxed));
         if head.number == 0 {
             0

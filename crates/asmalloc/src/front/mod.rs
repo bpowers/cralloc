@@ -23,7 +23,7 @@ mod twin;
 #[cfg(kani)]
 mod verify;
 
-pub use routines::{Routines, StackPop, StackPush, StoreIfEqual};
+pub use routines::{NO_CPU, Routines, StackPop, StackPush, StoreIfEqual};
 pub use slab::{Cpu, Field, SLAB_BYTES, SLAB_COUNT, SLAB_SHIFT, Slab, Slabs, Spare};
 pub use twin::{Aborted, Machine, Pinned, Step, Twin};
 
@@ -88,6 +88,9 @@ mod tests {
             assert_eq!(get("SLAB_BYTES"), SLAB_BYTES as u64);
             assert_eq!(get("WORD_BYTES"), SLOT_BYTES as u64);
             assert_eq!(get("MARKER_SHIFT"), MARKER_SHIFT as u64);
+            if source.contains("NO_CPU") {
+                assert_eq!(get("NO_CPU"), NO_CPU as u64);
+            }
             assert_eq!(get("RSEQ_CPU_ID"), rseq::CPU_ID as u64);
             assert_eq!(get("RSEQ_CS"), rseq::RSEQ_CS as u64);
             // Every small class's hot word is within the words the routines may address, and

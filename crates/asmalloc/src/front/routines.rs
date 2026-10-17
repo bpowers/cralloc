@@ -19,8 +19,13 @@
 //! "Fail" means the routine returns the stated failure having changed nothing.
 
 use super::slab::{Cpu, Field, Slabs};
-use crate::classes::SmallClass;
+use crate::classes::{SmallClass, is_marker};
 use core::ptr::NonNull;
+
+/// What the generated routines return when the thread's CPU number has no slab
+/// (`NO_CPU` in `lean/generated`). No slab word or head is ever 2: a slot address is a multiple
+/// of 8 and a marker has its lowest bit set.
+pub const NO_CPU: usize = 2;
 
 /// What [`Routines::store_if_equal`] did.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -31,6 +36,20 @@ pub enum StoreIfEqual {
     Mismatch(*mut u8),
     /// The thread's CPU number has no slab.
     NoCpu,
+}
+
+impl StoreIfEqual {
+    /// The outcome of the generated `slab_cas`, which returns the word it read.
+    #[inline(always)]
+    pub fn from_raw(read: *mut u8, expected: *mut u8) -> StoreIfEqual {
+        if read.addr() == NO_CPU {
+            StoreIfEqual::NoCpu
+        } else if read.addr() == expected.addr() {
+            StoreIfEqual::Stored
+        } else {
+            StoreIfEqual::Mismatch(read)
+        }
+    }
 }
 
 /// What [`Routines::stack_push`] did.
@@ -45,6 +64,20 @@ pub enum StackPush {
     NoCpu,
 }
 
+impl StackPush {
+    /// The outcome of the generated `slab_stack_push`, which returns the head it read.
+    #[inline(always)]
+    pub fn from_raw(read: usize) -> StackPush {
+        if read == NO_CPU {
+            StackPush::NoCpu
+        } else if is_marker(read) {
+            StackPush::Marker
+        } else {
+            StackPush::Pushed
+        }
+    }
+}
+
 /// What [`Routines::stack_pop`] did.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum StackPop {
@@ -56,7 +89,31 @@ pub enum StackPop {
     NoCpu,
 }
 
+impl StackPop {
+    /// The outcome of the generated `slab_stack_pop`, which returns the head it read: the
+    /// popped magazine, zero, a marker, or [`NO_CPU`]. The pointer must carry the provenance of
+    /// the magazine area, which the caller restores from the address.
+    #[inline(always)]
+    pub fn from_raw(read: *mut u8) -> StackPop {
+        if read.addr() == NO_CPU {
+            StackPop::NoCpu
+        } else if is_marker(read.addr()) {
+            StackPop::Empty
+        } else {
+            match NonNull::new(read) {
+                Some(magazine) => StackPop::Popped(magazine),
+                None => StackPop::Empty,
+            }
+        }
+    }
+}
+
 /// The routines, and the slab array they work on.
+///
+/// The generated assembly implements them as `slab_pop`, `slab_push`, `slab_cas`,
+/// `slab_stack_push` and `slab_stack_pop` (with [`Field::offset`] as the offset), whose raw
+/// results the `from_raw` functions above decode; reading the CPU number needs one more small
+/// routine, since Rust cannot reach the thread pointer without assembly.
 ///
 /// # Safety
 ///
@@ -115,4 +172,44 @@ pub unsafe trait Routines {
     /// with `Empty` if `h` is zero or a marker; otherwise read `n = M[h]` (the link, inside the
     /// sequence, which is what rules out ABA), commit `S[field] = n`, and return `Popped(h)`.
     fn stack_pop(&self, field: Field) -> StackPop;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use core::ptr;
+
+    fn word(address: usize) -> *mut u8 {
+        ptr::without_provenance_mut(address)
+    }
+
+    #[test]
+    fn raw_results_decode_as_the_specifications_say() {
+        let marker = word(7 << crate::classes::MARKER_SHIFT | 1);
+        let slot = word(0x1000_0040);
+        assert_eq!(StoreIfEqual::from_raw(slot, slot), StoreIfEqual::Stored);
+        assert_eq!(
+            StoreIfEqual::from_raw(word(0), word(0)),
+            StoreIfEqual::Stored
+        );
+        assert_eq!(
+            StoreIfEqual::from_raw(marker, slot),
+            StoreIfEqual::Mismatch(marker)
+        );
+        assert_eq!(
+            StoreIfEqual::from_raw(word(NO_CPU), slot),
+            StoreIfEqual::NoCpu
+        );
+        assert_eq!(StackPush::from_raw(0), StackPush::Pushed);
+        assert_eq!(StackPush::from_raw(slot.addr()), StackPush::Pushed);
+        assert_eq!(StackPush::from_raw(marker.addr()), StackPush::Marker);
+        assert_eq!(StackPush::from_raw(NO_CPU), StackPush::NoCpu);
+        assert_eq!(
+            StackPop::from_raw(slot),
+            StackPop::Popped(NonNull::new(slot).unwrap())
+        );
+        assert_eq!(StackPop::from_raw(word(0)), StackPop::Empty);
+        assert_eq!(StackPop::from_raw(marker), StackPop::Empty);
+        assert_eq!(StackPop::from_raw(word(NO_CPU)), StackPop::NoCpu);
+    }
 }
