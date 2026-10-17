@@ -88,13 +88,36 @@ def parseArgs (args : List String) : Option (Bool × FilePath) :=
     | rest => (false, rest)
   match rest with
   | [] => some (check, defaultDir)
-  | [d] => if d.startsWith "-" then none else some (check, d)
+  -- An empty path would make `dir / name` absolute (`"" / "mod.rs"` is `/mod.rs`).
+  | [d] => if d.startsWith "-" || d.isEmpty then none else some (check, d)
   | _ => none
 
+/-- The `.rs` files under `dir` but those of `expected`, each with whether
+this emitter wrote it (it starts with `Rust.header`). It does not follow a
+symbolic link to a directory, which could lead outside `dir`. -/
+def strays (dir : FilePath) (expected : List FilePath) : IO (List (FilePath × Bool)) := do
+  unless ← dir.pathExists do return []
+  let mut out := []
+  let enter (p : FilePath) : IO Bool := do return (← p.symlinkMetadata).type != .symlink
+  for path in ← dir.walkDir enter do
+    if path.extension == some "rs" && !expected.contains path.normalize then
+      out := out ++ [(path, (← IO.FS.readFile path).startsWith Rust.header)]
+  return out
+
 /-- Writes `files` (paths relative to `dir` and their contents) under `dir`,
-deleting any other `.rs` file under `dir`; or, if `check`, writes nothing
-and fails if the files on disk differ from `files`. -/
+deleting any other `.rs` file under `dir` that it wrote before; or, if
+`check`, writes nothing and fails if the files on disk differ from `files`.
+Any other `.rs` file there would be unverified code; one that it did not
+write (without `Rust.header`) is not deleted but refused, before anything is
+written, since a wrong `dir` must not destroy hand-written source. -/
 def sync (dir : FilePath) (check : Bool) (files : List (String × String)) : IO Bool := do
+  let others ← strays dir (files.map fun (n, _) => (dir / n).normalize)
+  let foreign := others.filter (!·.2)
+  unless foreign.isEmpty do
+    for (path, _) in foreign do
+      IO.eprintln s!"{path} was not written by Emit.lean: the output directory must hold only \
+        generated files"
+    return false
   let mut ok := true
   unless check do IO.FS.createDirAll dir
   for (name, text) in files do
@@ -109,21 +132,18 @@ def sync (dir : FilePath) (check : Bool) (files : List (String × String)) : IO 
     else
       IO.FS.writeFile path text
       IO.println s!"wrote {path}"
-  -- Any other `.rs` file there would be unverified code.
-  let expectedPaths := files.map fun (n, _) => (dir / n).normalize
-  if ← dir.pathExists then
-    for path in ← dir.walkDir do
-      if path.extension == some "rs" && !expectedPaths.contains path.normalize then
-        if check then
-          IO.eprintln s!"{path} is not generated from any artifact"
-          ok := false
-        else
-          IO.FS.removeFile path
-          IO.println s!"removed stale {path}"
+  for (path, _) in others do
+    if check then
+      IO.eprintln s!"{path} is not generated from any artifact"
+      ok := false
+    else
+      IO.FS.removeFile path
+      IO.println s!"removed stale {path}"
   return ok
 
 /-- Writes the files generated from `as` under the directory in `args` (by
-default `defaultDir`), deleting any other `.rs` file there; or, if `args`
+default `defaultDir`), deleting any other `.rs` file there that it wrote
+(`sync`); or, if `args`
 starts with `--check`, writes nothing and fails if the files on disk differ
 from what would be generated. -/
 def run (as : List Artifact) (args : List String) : IO UInt32 := do

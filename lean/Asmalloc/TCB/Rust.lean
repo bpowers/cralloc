@@ -433,6 +433,22 @@ def checkApi (a : Artifact) : Except String Unit :=
     throw s!"{a.target.name}: {a.name} is not made from an `Api` with a contract \
       (`Api.contracts`)"
 
+/-- Whether `n` is a plain Rust identifier: an ASCII letter or `_`, then
+ASCII letters, digits and `_`. -/
+def rustIdent (n : String) : Bool :=
+  match n.toList with
+  | [] => false
+  | c :: cs => (c.isAlpha || c == '_') && cs.all fun c => c.isAlphanum || c == '_'
+
+/-- The artifact's name and module are Rust identifiers: the name is a
+function's, and the module names the file `<target>/<module>.rs`, which must
+stay inside the output directory. -/
+def checkNames (a : Artifact) : Except String Unit := do
+  unless rustIdent a.name do
+    throw s!"{a.target.name}: `{a.name}` is not a Rust identifier"
+  unless rustIdent a.module && a.module != "mod" do
+    throw s!"{a.target.name}: {a.name}'s module `{a.module}` is not a Rust identifier (or is `mod`)"
+
 /-- No two artifacts of a target have the same name. -/
 def checkUnique (as : List Artifact) : Except String Unit :=
   as.forM fun a =>
@@ -594,7 +610,8 @@ def render (ps : List Prepared) (moduleOf : Artifact → String → String) : Li
 /-- The generated files, as paths relative to the output directory and their
 contents: `mod.rs`, and for each target `<target>/mod.rs` and one
 `<target>/<module>.rs` per module; an error if an artifact is not made from
-an `Api` with a contract (`checkApi`), two artifacts of a target have the
+an `Api` with a contract (`checkApi`), its name or module is not a Rust
+identifier (`checkNames`), two artifacts of a target have the
 same name (`checkUnique`), a call is not of the code it runs (`checkCalls`),
 its tables of constants are not as `checkConsts` requires, an artifact's
 features are not those its code requires (`checkFeatures`), its code has an
@@ -611,6 +628,7 @@ def files (as : List Artifact) : Except String (List (String × String)) := do
   -- which `badCall` and `distinctCalls` skip at once.
   let as := ShareCommon.shareCommon' as
   forMPar as checkApi
+  forMPar as checkNames
   checkUnique as
   let ps := prepareAll as
   forMPar ps (checkCalls ps)

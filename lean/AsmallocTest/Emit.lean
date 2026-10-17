@@ -45,6 +45,8 @@ def parsed (args : List String) : Option (Bool × String) :=
 #guard parsed ["../crates/asmalloc/src/asm"] == some (false, "../crates/asmalloc/src/asm")
 #guard parsed ["--check", "out"] == some (true, "out")
 #guard parseArgs ["out", "--check"] == none
+#guard parseArgs [""] == none
+#guard parseArgs ["--check", ""] == none
 #guard parseArgs ["--part", "f"] == none
 #guard parseArgs ["a", "b"] == none
 

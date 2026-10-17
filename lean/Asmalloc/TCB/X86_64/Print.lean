@@ -129,6 +129,11 @@ silently truncate it (LLVM before 22 does), so such an operand must not be
 printed. -/
 def MemOp.dispOk (m : MemOp) : Bool := decide (-2 ^ 31 ≤ m.disp ∧ m.disp < 2 ^ 31)
 
+/-- Whether the scale of `m` is one the SIB byte encodes: 1, 2, 4 or 8 (SDM
+Vol. 2 §2.1.5, Table 2-3, the `SS` field). The model multiplies by any
+number (`State.offset`); only these may be printed. -/
+def MemOp.scaleOk (m : MemOp) : Bool := m.scale == 1 || m.scale == 2 || m.scale == 4 || m.scale == 8
+
 def Src.memOps : Src → List MemOp
   | .reg _ | .imm _ => []
   | .mem m => [m]
@@ -169,8 +174,9 @@ def printer : Printer isa where
     | .leaSym _ name off =>
       if -2 ^ 31 ≤ off ∧ off < 2 ^ 31 then none
       else some s!"the offset {off} from {name} does not fit in 32 bits"
-    | _ => match i.memOps.filter (!·.dispOk) with
-      | [] => none
-      | m :: _ => some s!"the displacement of the memory operand {m.addr} does not fit in 32 bits"
+    | _ => match i.memOps.filter (!·.dispOk), i.memOps.filter (!·.scaleOk) with
+      | m :: _, _ => some s!"the displacement of the memory operand {m.addr} does not fit in 32 bits"
+      | [], m :: _ => some s!"the scale of the memory operand {m.addr} is not 1, 2, 4 or 8"
+      | [], [] => none
 
 end VG.X86_64

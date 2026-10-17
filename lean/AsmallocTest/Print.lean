@@ -170,6 +170,10 @@ def sampleFs : Prog isa := .block [
 #guard (printer.unencodable (.store8 { base := .rsi, disp := 4294967304 } .rax)).isSome
 #guard (printer.unencodable (.adox .rax (.mem { base := .rsi, disp := -4294967304 }))).isSome
 #guard printer.unencodable (.alu .add .rax (.imm 0x7fffffff)) == none
+-- A scale the SIB byte cannot encode.
+#guard printer.unencodable (.mov .rax (.mem { base := .rdi, index := some .rcx, scale := 3 })) ==
+  some "the scale of the memory operand [rdi+rcx*3] is not 1, 2, 4 or 8"
+#guard printer.unencodable (.lea .rax { base := .rdi, index := some .rcx, scale := 8 }) == none
 
 -- A cold branch (`Code.iteCold`): `je` to its code after the `ret`, which
 -- jumps back to the code after the `ite`; the else branch falls through, with

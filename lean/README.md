@@ -75,8 +75,11 @@ Asmalloc/
   Proof/        Proofs (untrusted)
     Framework/      determinism, weakest-precondition rules, memory frames,
                     contract tactics, symbolic execution
+    Examples/       small proved programs, one per instruction family the
+                    routines rely on, showing the lemmas each needs
   Artifacts/    One registration file per routine and target, listing what it emits
-AsmallocTest/   Golden tests for the printers and the emitter, tests of the audits
+AsmallocTest/   Golden tests for the printers and the emitter, tests of the
+                semantics on concrete states, and of the audits
 Emit.lean       Renders every artifact into `generated/` (or the directory given)
 generated/      The emitted Rust, checked in
 scripts/        The checks: imports, registration files, the audit's negative test
@@ -135,10 +138,13 @@ Everything in `Impl/` and `Proof/` is checked by Lean and need not be read.
 * Never edit `generated/` by hand.
 
 For symbolic execution, step a block with `runBlock_cons`, `runStep_some`
-and `runBlock_nil` (`Proof/Framework/X86_64/Exec.lean`) and read registers
-through writes with the `RegUpd` lemmas; never unfold `State.setReg`,
-`arithFlags` or `State.setFlags`. Upstream's `CLAUDE.md`, "Keeping proofs
-fast", explains why, with more patterns worth following.
+and `runBlock_nil` (`Proof/Framework/X86_64/Exec.lean`), read registers
+through writes with the `RegUpd` lemmas, give loads and stores their region
+facts with the `Access` lemmas, and read flags and conditions with the
+`Flags` lemmas; never unfold `State.setReg`, `arithFlags` or
+`State.setFlags`. `Proof/Examples/` shows each in use. Upstream's
+`CLAUDE.md`, "Keeping proofs fast", explains why, with more patterns worth
+following.
 
 ## Building, checking and emitting
 
