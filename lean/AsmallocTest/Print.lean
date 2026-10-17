@@ -102,7 +102,7 @@ def sample32 : Prog isa := .block [
 
 /-- The byte instructions, every 8-bit register name, and 64-bit `bswap`. -/
 def sample8 : Prog isa := .block ([
-  .movzx8 .rax (.mk .rsi (some .rcx) 1 32),
+  .movzx8 .rax (.mk .rsi (some .rcx) 1 32 none),
   .movzx8 .r15 { base := .r12 },
   .bswap .rax,
   .bswap .r9] ++
@@ -133,6 +133,28 @@ def sample8 : Prog isa := .block ([
   "ret"
 ]
 
+/-- Memory operands naming the FS segment, of every width and form. -/
+def sampleFs : Prog isa := .block [
+  .mov .rax (.mem { base := .rdi, seg := some .fs }),
+  .mov32 .r8 (.mem { base := .rdx, disp := 24, seg := some .fs }),
+  .store { base := .rdx, disp := 8, seg := some .fs } .r10,
+  .store32 { base := .rdi, index := some .rsi, scale := 4, disp := -320, seg := some .fs } .rcx,
+  .alu .add .rax (.mem { base := .rdi, index := some .rsi, scale := 8, disp := -8, seg := some .fs }),
+  .movzx8 .rcx { base := .rdx, disp := 3, seg := some .fs },
+  .store8 { base := .rdx, seg := some .fs } .rcx
+]
+
+#guard text (printer.function sampleFs) == [
+  "mov rax, QWORD PTR fs:[rdi]",
+  "mov r8d, DWORD PTR fs:[rdx+24]",
+  "mov QWORD PTR fs:[rdx+8], r10",
+  "mov DWORD PTR fs:[rdi+rsi*4-320], ecx",
+  "add rax, QWORD PTR fs:[rdi+rsi*8-8]",
+  "movzx ecx, BYTE PTR fs:[rdx+3]",
+  "mov BYTE PTR fs:[rdx], cl",
+  "ret"
+]
+
 -- A displacement is encoded in 32 bits, sign-extended: the printer refuses
 -- one outside `[-2^31, 2^31)`, for every kind of memory operand, and accepts
 -- the bounds.
@@ -143,6 +165,8 @@ def sample8 : Prog isa := .block ([
   some "the displacement of the memory operand [rdi+2147483648] does not fit in 32 bits"
 #guard printer.unencodable (.store { base := .rdi, index := some .rcx, disp := -2147483649 } .rax) ==
   some "the displacement of the memory operand [rdi+rcx*1-2147483649] does not fit in 32 bits"
+#guard printer.unencodable (.store { base := .rdx, disp := 2147483648, seg := some .fs } .rax) ==
+  some "the displacement of the memory operand fs:[rdx+2147483648] does not fit in 32 bits"
 #guard (printer.unencodable (.store8 { base := .rsi, disp := 4294967304 } .rax)).isSome
 #guard (printer.unencodable (.adox .rax (.mem { base := .rsi, disp := -4294967304 }))).isSome
 #guard printer.unencodable (.alu .add .rax (.imm 0x7fffffff)) == none

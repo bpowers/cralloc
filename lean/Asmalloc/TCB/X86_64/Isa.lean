@@ -28,6 +28,12 @@ Modelling choices:
   PF and AF are not modelled, and no modelled instruction reads them.
 * Memory accesses must lie within the state's permitted regions: loads within
   `rd ++ wr`, stores within `wr`; otherwise the instruction faults.
+* A memory operand may name the FS segment (`MemOp.seg`), which adds the
+  segment's base, `State.fsBase`, to its address (`State.ea`). Thread-local
+  memory is therefore one more region, at an address relative to `fsBase`;
+  the model knows nothing else about it. GS, and the instructions that read
+  or write the segment bases (`rdfsbase`, `wrfsbase`, `swapgs`), are not
+  modelled.
 * Calls (`call`) and returns (`ret`) are near and direct (SDM Vol. 2, "CALL",
   "RET"). The return addresses are the next of the state's `unknowns`,
   which nothing constrains (see `TCB/Code.lean`).

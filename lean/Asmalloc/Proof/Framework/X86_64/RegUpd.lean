@@ -50,6 +50,7 @@ theorem cf_setReg (r : Reg) (v : BitVec 64) : (s.setReg r v).cf = s.cf := rfl
 theorem sf_setReg (r : Reg) (v : BitVec 64) : (s.setReg r v).sf = s.sf := rfl
 theorem of_setReg (r : Reg) (v : BitVec 64) : (s.setReg r v).of = s.of := rfl
 theorem syms_setReg (r : Reg) (v : BitVec 64) : (s.setReg r v).syms = s.syms := rfl
+theorem fsBase_setReg (r : Reg) (v : BitVec 64) : (s.setReg r v).fsBase = s.fsBase := rfl
 
 /-- A 32-bit value written to a register (zero-extended) and read back. -/
 theorem setWidth_setWidth_32 (x : BitVec 32) : (x.setWidth 64).setWidth 32 = x := by
@@ -66,6 +67,7 @@ theorem mem_setFlags (a b c d : Option Bool) : (s.setFlags a b c d).mem = s.mem 
 theorem rd_setFlags (a b c d : Option Bool) : (s.setFlags a b c d).rd = s.rd := rfl
 theorem wr_setFlags (a b c d : Option Bool) : (s.setFlags a b c d).wr = s.wr := rfl
 theorem syms_setFlags (a b c d : Option Bool) : (s.setFlags a b c d).syms = s.syms := rfl
+theorem fsBase_setFlags (a b c d : Option Bool) : (s.setFlags a b c d).fsBase = s.fsBase := rfl
 
 theorem gpr_arithFlags {w : Nat} (x : BitVec w) (c o : Bool) : (arithFlags s x c o).gpr = s.gpr :=
   rfl
@@ -74,6 +76,8 @@ theorem rd_arithFlags {w : Nat} (x : BitVec w) (c o : Bool) : (arithFlags s x c 
 theorem wr_arithFlags {w : Nat} (x : BitVec w) (c o : Bool) : (arithFlags s x c o).wr = s.wr := rfl
 theorem syms_arithFlags {w : Nat} (x : BitVec w) (c o : Bool) :
     (arithFlags s x c o).syms = s.syms := rfl
+theorem fsBase_arithFlags {w : Nat} (x : BitVec w) (c o : Bool) :
+    (arithFlags s x c o).fsBase = s.fsBase := rfl
 theorem zf_arithFlags {w : Nat} (x : BitVec w) (c o : Bool) :
     (arithFlags s x c o).zf = some (x == 0) := rfl
 theorem cf_arithFlags {w : Nat} (x : BitVec w) (c o : Bool) :

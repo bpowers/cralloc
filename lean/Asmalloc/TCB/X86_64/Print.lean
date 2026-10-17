@@ -34,13 +34,19 @@ def Reg.name8 : Reg → String
   | .r8 => "r8b" | .r9 => "r9b" | .r10 => "r10b" | .r11 => "r11b"
   | .r12 => "r12b" | .r13 => "r13b" | .r14 => "r14b" | .r15 => "r15b"
 
-/-- `[base+index*scale+disp]` -/
+/-- `[base+index*scale+disp]`, after `fs:` if the operand names the FS
+segment: the segment-override syntax of Intel's assembler, which LLVM's
+accepts and encodes with the FS segment-override prefix, `64H` (SDM Vol. 2
+§2.1.1, "Instruction Prefixes"). -/
 def MemOp.addr (m : MemOp) : String :=
+  let seg := match m.seg with
+    | none => ""
+    | some .fs => "fs:"
   let idx := match m.index with
     | none => ""
     | some i => s!"+{i.name}*{m.scale}"
   let d := if m.disp = 0 then "" else if m.disp > 0 then s!"+{m.disp}" else s!"{m.disp}"
-  s!"[{m.base.name}{idx}{d}]"
+  s!"{seg}[{m.base.name}{idx}{d}]"
 
 def MemOp.str (m : MemOp) : String := s!"QWORD PTR {m.addr}"
 
