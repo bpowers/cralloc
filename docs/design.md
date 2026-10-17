@@ -218,7 +218,7 @@ less.
 ### Address space
 
 At first use asmalloc reserves 16 TiB of address space, inaccessible and uncommitted. About
-3970 regions of 4 GiB hold objects and the rest holds metadata. If the process cannot have
+3940 regions of 4 GiB hold objects and the rest holds metadata and magazines. If the process cannot have
 that much address space, as under an address-space limit or valgrind, the region size is
 halved until the reservation fits, so the number of regions stays the same; below a floor
 of a few megabytes per region the allocator cannot start. A region is
