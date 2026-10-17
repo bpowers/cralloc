@@ -9,14 +9,18 @@
 //! choose.
 //!
 //! The stores that commit are release stores and the loads of a field acquire loads, which is
-//! what the routines' plain `mov`s are on x86-64. The ledger for the unsafe blocks here is
+//! what the routines' plain `mov`s are on x86-64. A twin's memory accesses are not switch
+//! points for the interleaving checker (`sync::quiet`): `Machine::step` is the only place a
+//! twin can be interrupted, as the step before an instruction is the only place a sequence can
+//! be, so nothing can slip in between a step's check and its access. The ledger for the unsafe blocks here is
 //! `docs/safety/asmalloc/front/twin-safety.md`.
 
 use super::routines::{Routines, StackPop, StackPush, StoreIfEqual};
 use super::slab::{Cpu, Field, Slabs};
-use super::sync::AtomicPtr;
+use super::sync::quiet;
 use crate::classes::{SLOT_BYTES, SmallClass, is_marker};
 use core::ptr::NonNull;
+use core::sync::atomic::AtomicPtr;
 use core::sync::atomic::Ordering::{Acquire, Relaxed, Release};
 
 /// A step of a routine, before which the OS may interrupt it.
@@ -110,7 +114,7 @@ impl<'a, M: Machine> Twin<'a, M> {
         let Some(cpu) = self.enter()? else {
             return Ok(None);
         };
-        let field = self.slabs.slab(cpu).field(Field::hot(class));
+        let field = quiet(self.slabs.slab(cpu).field(Field::hot(class)));
         self.machine.step(Step::Load)?;
         let word = field.load(Acquire);
         if class.magazine().alloc_slow(word.addr()) {
@@ -129,7 +133,7 @@ impl<'a, M: Machine> Twin<'a, M> {
         let Some(cpu) = self.enter()? else {
             return Ok(false);
         };
-        let field = self.slabs.slab(cpu).field(Field::hot(class));
+        let field = quiet(self.slabs.slab(cpu).field(Field::hot(class)));
         self.machine.step(Step::Load)?;
         let word = field.load(Acquire);
         if class.magazine().free_slow(word.addr()) {
@@ -152,7 +156,7 @@ impl<'a, M: Machine> Twin<'a, M> {
         let Some(cpu) = self.enter()? else {
             return Ok(StoreIfEqual::NoCpu);
         };
-        let field = self.slabs.slab(cpu).field(field);
+        let field = quiet(self.slabs.slab(cpu).field(field));
         self.machine.step(Step::Load)?;
         let word = field.load(Acquire);
         if word.addr() != expected.addr() {
@@ -167,7 +171,7 @@ impl<'a, M: Machine> Twin<'a, M> {
         let Some(cpu) = self.enter()? else {
             return Ok(StackPush::NoCpu);
         };
-        let field = self.slabs.slab(cpu).field(field);
+        let field = quiet(self.slabs.slab(cpu).field(field));
         self.machine.step(Step::Load)?;
         let head = field.load(Acquire);
         if is_marker(head.addr()) {
@@ -185,7 +189,7 @@ impl<'a, M: Machine> Twin<'a, M> {
         let Some(cpu) = self.enter()? else {
             return Ok(StackPop::NoCpu);
         };
-        let field = self.slabs.slab(cpu).field(field);
+        let field = quiet(self.slabs.slab(cpu).field(field));
         self.machine.step(Step::Load)?;
         let head = field.load(Acquire);
         let Some(magazine) = NonNull::new(head).filter(|h| !is_marker(h.addr().get())) else {
@@ -290,7 +294,7 @@ mod tests {
 
         fn field(&self, cpu: i32, field: Field) -> &AtomicPtr<u8> {
             let cpu = self.slabs().cpu(cpu).unwrap();
-            self.slabs().slab(cpu).field(field)
+            quiet(self.slabs().slab(cpu).field(field))
         }
 
         /// The address of slot `slot` of magazine `m`.

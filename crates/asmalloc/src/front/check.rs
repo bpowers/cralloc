@@ -108,20 +108,75 @@ fn with_run<R>(f: impl FnOnce(&Run<'_>, usize) -> R) -> Option<R> {
     Some(f(unsafe { &*run }, me))
 }
 
-/// A point at which the checker may switch threads. Does nothing outside a checker run.
+/// A point at which the checker may switch threads, or, on a thread inside
+/// [`interrupt_at`], at which the interrupt may fire. Does nothing otherwise.
 pub(crate) fn switch_point() {
-    with_run(|run, me| run.switch(me));
+    if with_run(|run, me| run.switch(me)).is_none() {
+        interrupt_point();
+    }
+}
+
+/// A single-threaded interrupt: `action` runs at the `remaining`-th switch point from now.
+struct Interrupt {
+    remaining: usize,
+    action: *const (dyn Fn() + 'static),
+}
+
+std::thread_local! {
+    static INTERRUPT: std::cell::RefCell<Option<Interrupt>> = const { std::cell::RefCell::new(None) };
+}
+
+fn interrupt_point() {
+    let due = INTERRUPT.with(|slot| {
+        let mut slot = slot.borrow_mut();
+        let interrupt = slot.as_mut()?;
+        if interrupt.remaining > 0 {
+            interrupt.remaining -= 1;
+            return None;
+        }
+        slot.take().map(|interrupt| interrupt.action)
+    });
+    if let Some(action) = due {
+        // SAFETY: `interrupt_at` stores the action and removes it before it returns or
+        // unwinds, so the closure it borrowed is alive whenever it is found here.
+        unsafe { (*action)() };
+    }
+}
+
+/// Clears the interrupt when `interrupt_at` returns or unwinds.
+struct Disarm;
+
+impl Drop for Disarm {
+    fn drop(&mut self) {
+        INTERRUPT.with(|slot| slot.borrow_mut().take());
+    }
+}
+
+/// Runs `body` on this thread and runs `action` once, at the switch point numbered `at`
+/// (from zero) within it, as a signal handler or a fork would. Switch points inside `action`
+/// are not counted. Returns `body`'s result and whether the interrupt fired, that is, whether
+/// `body` had more than `at` switch points.
+pub(crate) fn interrupt_at<R>(at: usize, action: &dyn Fn(), body: impl FnOnce() -> R) -> (R, bool) {
+    // SAFETY: only the lifetime is erased; `Disarm` removes the pointer before `action` can
+    // go away, so it is never used after.
+    let action: *const (dyn Fn() + 'static) = unsafe { core::mem::transmute(action) };
+    INTERRUPT.with(|slot| {
+        *slot.borrow_mut() = Some(Interrupt {
+            remaining: at,
+            action,
+        })
+    });
+    let disarm = Disarm;
+    let result = body();
+    let fired = INTERRUPT.with(|slot| slot.borrow().is_none());
+    drop(disarm);
+    (result, fired)
 }
 
 /// A nondeterministic choice among `count` options, explored exhaustively. Outside a checker
 /// run it is always 0.
 pub(crate) fn choose(count: usize) -> usize {
     with_run(|run, _| run.choose(count)).unwrap_or(0)
-}
-
-/// Whether the calling thread is a checker thread.
-pub(crate) fn active() -> bool {
-    with_run(|_, _| ()).is_some()
 }
 
 impl State {

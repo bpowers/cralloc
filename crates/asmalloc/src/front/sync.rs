@@ -11,6 +11,20 @@
 #[cfg(not(test))]
 pub(crate) use core::sync::atomic::{AtomicPtr, AtomicU64, AtomicUsize};
 
+/// The plain `core` atomic inside a field, for code whose interruption points are explicit:
+/// the twins, which are interrupted only by `Machine::step`, so that nothing can come between
+/// a step's check and its access.
+#[cfg(not(test))]
+#[inline(always)]
+pub(crate) fn quiet<T>(atomic: &AtomicPtr<T>) -> &core::sync::atomic::AtomicPtr<T> {
+    atomic
+}
+
+#[cfg(test)]
+pub(crate) fn quiet<T>(atomic: &AtomicPtr<T>) -> &core::sync::atomic::AtomicPtr<T> {
+    &atomic.0
+}
+
 #[cfg(test)]
 pub(crate) use self::checked::{AtomicPtr, AtomicU64, AtomicUsize};
 
@@ -21,7 +35,7 @@ mod checked {
 
     /// `core::sync::atomic::AtomicPtr`, with a switch point before each operation.
     #[repr(transparent)]
-    pub(crate) struct AtomicPtr<T>(atomic::AtomicPtr<T>);
+    pub(crate) struct AtomicPtr<T>(pub(super) atomic::AtomicPtr<T>);
 
     impl<T> AtomicPtr<T> {
         pub(crate) const fn new(value: *mut T) -> AtomicPtr<T> {
@@ -74,6 +88,8 @@ mod checked {
             #[repr(transparent)]
             pub(crate) struct $name(atomic::$name);
 
+            // The two integer types share one list of operations; neither uses all of them.
+            #[allow(dead_code)]
             impl $name {
                 pub(crate) const fn new(value: $int) -> $name {
                     $name(atomic::$name::new(value))
@@ -113,6 +129,11 @@ mod checked {
                 pub(crate) fn fetch_max(&self, value: $int, order: Ordering) -> $int {
                     switch_point();
                     self.0.fetch_max(value, order)
+                }
+
+                pub(crate) fn fetch_or(&self, value: $int, order: Ordering) -> $int {
+                    switch_point();
+                    self.0.fetch_or(value, order)
                 }
             }
         };
