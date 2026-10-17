@@ -28,11 +28,6 @@ section
 
 variable {c : Spec.Slab.Ctx isa} {s : State}
 
-theorem σ3_syms : (σ3 s).syms = s.syms := rfl
-theorem σ3_params : (σ3 s).params = s.params := rfl
-theorem σ3_mem : (σ3 s).mem = m1 s := rfl
-theorem σ3_rd : (σ3 s).rd = s.rd := rfl
-theorem σ3_wr : (σ3 s).wr = s.wr := rfl
 theorem σ4i_mem : (σ4i s).mem = m1 s := rfl
 theorem σ4i_rd : (σ4i s).rd = s.rd := rfl
 theorem σ4i_wr : (σ4i s).wr = s.wr := rfl

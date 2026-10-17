@@ -61,6 +61,11 @@ theorem exec_leaSym (d : Reg) (n : String) (off : Int) (offP : Option String) :
     exec (.leaSym d n off offP) σ =
       some (σ.setReg d (σ.syms n + BitVec.ofInt 64 off + ((offP.map σ.params).getD 0))) := rfl
 
+/-- `lea r, [rip + n]`. -/
+theorem exec_leaSym0 (d : Reg) (n : String) :
+    exec (.leaSym d n) σ = some (σ.setReg d (σ.syms n)) := by
+  rw [exec_leaSym]; simp
+
 theorem exec_lea (d : Reg) (m : MemOp) : exec (.lea d m) σ = some (σ.setReg d (σ.offset m)) := rfl
 
 theorem exec_test32_immP (d : Reg) (n : String) :
@@ -265,6 +270,12 @@ theorem exec_cmp : exec (.alu32 .cmp .r8 (.imm 8192)) (σ1 s) = some (σ2 s) := 
 theorem eval_cid : eval .ae (σ2 s) = some (!decide ((cid32 s).toNat < 8192)) := rfl
 
 theorem exec_shl_r8 : exec (.shift .shl .r8 12) (σ2 s) = some (σ3 s) := exec_shl _ _
+
+theorem σ3_syms : (σ3 s).syms = s.syms := rfl
+theorem σ3_params : (σ3 s).params = s.params := rfl
+theorem σ3_mem : (σ3 s).mem = m1 s := rfl
+theorem σ3_rd : (σ3 s).rd = s.rd := rfl
+theorem σ3_wr : (σ3 s).wr = s.wr := rfl
 
 theorem gpr_σ3_r8 : (σ3 s).gpr .r8 = sh s := by
   simp only [σ3, shl12, RegUpd.gpr_setReg_self, σ2, RegUpd.gpr_arithFlags, gpr_σ1_r8]; rfl

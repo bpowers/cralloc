@@ -94,13 +94,13 @@ def pushInline : Prog isa := .rseq arm (
   .exit .e [] (some "miss")] ++ pushTail .rdi)
 
 /-- `slab_pop` out of line, of the class in `rdi`. -/
-def pop : Prog isa := .rseq arm (
+def popTable : Prog isa := .rseq arm (
   cidSteps [] (some "slow") ++ wordTable ++ [
   .instr (.alu32 .test .rcx maskEntry),
   .exit .e [] (some "slow")] ++ popTail)
 
 /-- `slab_push` out of line, of `p` in `rsi` to the class in `rdi`. -/
-def push : Prog isa := .rseq arm (
+def pushTable : Prog isa := .rseq arm (
   cidSteps [] (some "slow") ++ wordTable ++ [
   .instr (.lea .rax { base := .rcx, disp := 8 }),
   .instr (.alu32 .test .rax maskEntry),

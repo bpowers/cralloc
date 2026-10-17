@@ -401,6 +401,29 @@ theorem ofWord_add8 {n : Nat} {m m' : Mem} {w : BitVec 64} (k : Nat) (hk' : k 鈮
       omega]
     exact hx
 
+/-- The slot a word names is its base plus 8 per slot. -/
+theorem magBase_add_slot {n : Nat} {w : BitVec 64} (h : IsSlot n w) :
+    magBase n w + BitVec.ofNat 64 (8 * slot n w) = w := by
+  apply BitVec.eq_of_toNat_eq
+  rw [BitVec.toNat_add, magBase_toNat h, BitVec.toNat_ofNat]
+  have := le_toNat_of_isSlot h
+  have := w.isLt
+  rw [Nat.mod_eq_of_lt (by omega), Nat.mod_eq_of_lt (by omega)]
+  omega
+
+/-- The magazine a word names depends only on the slots below it. -/
+theorem ofWord_congr {n : Nat} {m m' : Mem} {w : BitVec 64}
+    (hm : 鈭� i < slot n w - 1, m'.readW (magBase n w + BitVec.ofNat 64 (8 * (i + 1))) 64 =
+      m.readW (magBase n w + BitVec.ofNat 64 (8 * (i + 1))) 64) :
+    Mag.ofWord n m' w = Mag.ofWord n m w := by
+  unfold Mag.ofWord
+  split
+  路 rfl
+  路 split
+    路 rfl
+    路 congr 1
+      exact List.map_congr_left fun i hi => hm i (List.mem_range.mp hi)
+
 /-! ## The routines' tests, as they make them -/
 
 /-- The 32-bit test of a word with a mask held in 64 bits. -/
