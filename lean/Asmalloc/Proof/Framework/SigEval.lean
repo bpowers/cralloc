@@ -304,10 +304,10 @@ elab "sig_apply_check" : tactic => liftMetaTactic fun g => g.withContext do
   let s := t.appArg!
   let mut k := t.appFn!.appArg!
   for _ in [0:32] do
-    if k.isAppOfArity `VG.Sig.contract 7 then break
+    if k.isAppOfArity `VG.Sig.contract 8 then break
     let some k' ← unfoldDefinition? k | break
     k := k'.headBeta
-  unless k.isAppOfArity `VG.Sig.contract 7 do
+  unless k.isAppOfArity `VG.Sig.contract 8 do
     throwError "sig_apply_check: not a contract built with `Sig.contract`"
   let f := mkAppN (mkConst `VG.Sig.contract_pre_of_check) (k.getAppArgs.push s)
   let .forallE _ hcTy (.forallE _ hTy _ _) _ ← whnfR (← inferType f)
@@ -369,7 +369,7 @@ elab "sig_and_intros" : tactic => do
 def contractArgs? (k : Expr) : MetaM (Option (Array Expr)) := do
   let mut k := k
   for _ in [0:32] do
-    if k.isAppOfArity `VG.Sig.contract 7 then return some k.getAppArgs
+    if k.isAppOfArity `VG.Sig.contract 8 then return some k.getAppArgs
     let some k' ← unfoldDefinition? k | return none
     k := k'.headBeta
   return none
@@ -383,7 +383,7 @@ def contractIff? (t : Expr) : MetaM (Option (Option (Expr × Expr))) := do
     let some a ← contractArgs? t.appFn!.appArg! | return none
     let s := t.appArg!
     return some (some (mkAppN (mkConst `VG.Sig.contract_pre_iff) (a.push s),
-      mkAppN (mkConst `VG.Sig.preE) #[a[0]!, a[1]!, a[2]!, a[3]!, a[5]!, a[6]!, s]))
+      mkAppN (mkConst `VG.Sig.preE) #[a[0]!, a[1]!, a[2]!, a[3]!, a[5]!, a[6]!, a[7]!, s]))
   if t.isAppOfArity `VG.Contract.post 4 then
     if (← contractArgs? t.appFn!.appFn!.appArg!).isSome then return some none
   return none

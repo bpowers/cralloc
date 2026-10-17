@@ -43,9 +43,15 @@ Modelling choices:
 * A `static` the code reads (`Artifact.consts`) is at the address
   `State.syms name`, where `name` is its name, which `leaSym` (`lea` of a
   RIP-relative operand, resolved by the linker) puts in a register, or that
-  address plus a constant. No
+  address plus a constant; `movGot` reads the address from the symbol's slot in
+  the global offset table, for a symbol of another shared object (glibc's
+  `__rseq_offset`). No
   instruction changes `syms`: a static's address is fixed for the run of
   the program.
+* A compile-time constant the code names (a `const` operand: an immediate,
+  `Src.immP`, or an offset of a symbol, `leaSym`) has the value
+  `State.params name`, fixed for the run. The compiler writes the constant's
+  value into the instruction's text; the contract says what it may be.
 * `push` and `pop` (of 64-bit registers other than `rsp`) only occur as the
   push and pop of a frame (see `push`), as a sequence of them. A caller
   passes arguments on the stack by pushing them, the last first, just
@@ -94,7 +100,7 @@ outside the readable regions faults either way. An immediate source does not
 exist, and a condition on an undefined flag faults, as a branch on it does. -/
 def execCmov (cc : Cond) (dst : Reg) (src : Src) (s : State) : Option State :=
   match src with
-  | .imm _ => none
+  | .imm _ | .immP _ => none
   | _ => (readSrc s src).bind fun temp => (eval cc s).map fun c =>
     if c then s.setReg dst temp else s
 
@@ -156,10 +162,19 @@ inductive Instr
   /-- `movabs r64, imm64`: `MOV r64, imm64` (REX.W + B8+rd io), a full 64-bit
   immediate. -/
   | movImm64 (dst : Reg) (v : BitVec 64)
-  /-- `lea r64, [rip + name + off]` (REX.W + 8D /r, with a RIP-relative
-  memory operand): the address of the `static` `name`, `State.syms name`,
-  plus `off`. -/
-  | leaSym (dst : Reg) (name : String) (off : Int := 0)
+  /-- `lea r64, [rip + name + off + offP]` (REX.W + 8D /r, with a
+  RIP-relative memory operand): the address of the symbol `name`,
+  `State.syms name`, plus `off`, plus the compile-time constant `offP` if
+  given (`State.params`). -/
+  | leaSym (dst : Reg) (name : String) (off : Int := 0) (offP : Option String := none)
+  /-- `mov r64, QWORD PTR [rip + name@GOTPCREL]` (REX.W + 8B /r, with a
+  RIP-relative memory operand): the address of the symbol `name`, read from
+  its slot in the global offset table. -/
+  | movGot (dst : Reg) (name : String)
+  /-- `lea r64, [rip + 3f]` (REX.W + 8D /r, with a RIP-relative memory
+  operand): the address of the routine's restartable-sequence descriptor,
+  `State.csDesc`, which the printer labels `3` (`Printer.rseqLines`). -/
+  | leaRseqCs (dst : Reg)
   /-- `lea r64, [base + index * scale + disp]` (REX.W + 8D /r): the operand's
   offset (`State.offset`), computed without accessing memory. The operand
   names no segment (the printer refuses one). -/
@@ -252,9 +267,26 @@ def exec : Instr → State → Option State
   -- instruction"), its `disp32` written by the linker so that the sum is the
   -- static's address `S` plus the constant `off` of the operand (`S + A - P`,
   -- with the addend `A = off - 4`: System V AMD64 psABI §4.4, "Relocation
-  -- Types", `R_X86_64_PC32`): `DEST := S + off`. A sum beyond `disp32`'s
-  -- range (±2 GB from the instruction) does not link.
-  | .leaSym d name off, s => some (s.setReg d (s.syms name + BitVec.ofInt 64 off))
+  -- Types", `R_X86_64_PC32`): `DEST := S + off`, plus the value of the
+  -- compile-time constant `offP`, which the compiler writes into the operand
+  -- as a number. A sum beyond `disp32`'s range (±2 GB from the instruction)
+  -- does not link.
+  | .leaSym d name off offP, s =>
+    some (s.setReg d (s.syms name + BitVec.ofInt 64 off + ((offP.map s.params).getD 0)))
+  -- `movGot`: SDM Vol. 2, "MOV—Move", `MOV r64, r/m64` (`REX.W + 8B /r`),
+  -- `DEST := SRC`, with a RIP-relative source (§2.2.1.6) whose `disp32` the
+  -- linker writes so that it addresses the global offset table's slot for
+  -- `name` (`R_X86_64_GOTPCREL`, or `R_X86_64_REX_GOTPCRELX`, which a linker
+  -- may relax into `lea` of the symbol itself: System V AMD64 psABI §4.4 and
+  -- Appendix B.2). The dynamic linker fills the slot with the symbol's
+  -- address `S` before any code of the program runs and, with RELRO, maps it
+  -- read-only, so the load reads `S` and never faults: `DEST := S`. No flags
+  -- are affected.
+  | .movGot d name, s => some (s.setReg d (s.syms name))
+  -- `leaRseqCs`: "LEA" as for `leaSym`, of the local label the descriptor
+  -- has (`Printer.rseqLines`), which the assembler resolves: `DEST :=` its
+  -- address.
+  | .leaRseqCs d, s => some (s.setReg d s.csDesc)
   -- `lea`: SDM Vol. 2, "LEA—Load Effective Address", `LEA r64, m` (`REX.W + 8D
   -- /r`), with a 64-bit operand size and address size: "Computes the
   -- effective address of the second operand (the source operand) and stores
@@ -365,15 +397,37 @@ two, `rax` and `rdx`, `mulx` two of its choosing, and stores none. -/
 def Instr.dst : Instr → Option Reg
   | .mov d _ | .alu _ d _ | .inc d | .dec d | .mov32 d _ | .alu32 _ d _ | .shift32 _ d _ | .bswap32 d
   | .rorx32 d .. | .andn32 d .. | .rorx d .. | .andn d .. | .movzx8 d _ | .bswap d | .shift _ d _
-  | .shiftCl _ d | .shiftx _ d .. | .movImm64 d _ | .leaSym d .. | .lea d _ | .adcx d _ | .adox d _
+  | .shiftCl _ d | .shiftx _ d .. | .movImm64 d _ | .leaSym d .. | .movGot d _ | .leaRseqCs d | .lea d _ | .adcx d _ | .adox d _
   | .cmov _ d _ | .pop d _ | .imul d _ => some d
   | .store .. | .store32 .. | .store8 .. | .mul _ | .mulx .. | .push _ | .alloc _ | .free _ => none
+
+/-- The memory accesses of an instruction run from `s` to `s'` (`Event`):
+a load of the bytes of its memory source (8 for a 64-bit operand, 4 for a
+32-bit one, 1 for `movzx8`), with the value `s` holds there; a store of the
+bytes of its memory destination, with the value `s'` holds there. Each such
+instruction makes exactly one access (SDM Vol. 2, each instruction's
+"Operation"). The pushes, pops, calls and returns of frames and calls are
+not listed: a restartable sequence, whose accesses a contract constrains,
+has none (`Rust.checkRseq`). -/
+def Instr.events (i : Instr) (s s' : State) : List Event :=
+  let rd (m : MemOp) (n : Nat) : List Event := [⟨s.ea m, n, false, (s.mem.read (s.ea m) n).toNat⟩]
+  let wr (m : MemOp) (n : Nat) : List Event := [⟨s.ea m, n, true, (s'.mem.read (s.ea m) n).toNat⟩]
+  match i with
+  | .mov _ (.mem m) | .alu _ _ (.mem m) | .mulx _ _ (.mem m) | .adcx _ (.mem m) | .adox _ (.mem m)
+  | .cmov _ _ (.mem m) => rd m 8
+  | .mov32 _ (.mem m) | .alu32 _ _ (.mem m) => rd m 4
+  | .movzx8 _ m => rd m 1
+  | .store m _ => wr m 8
+  | .store32 m _ => wr m 4
+  | .store8 m _ => wr m 1
+  | _ => []
 
 abbrev isa : ISA where
   State := State
   Instr := Instr
   Cond := Cond
   exec := exec
+  events := Instr.events
   eval := eval
   call := call
   ret := ret

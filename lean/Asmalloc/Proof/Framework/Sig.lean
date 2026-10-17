@@ -111,7 +111,7 @@ theorem Sig.forall_mem_bound_iff {n : Nat} {l : List (Region × Bool)} :
 /-- The precondition of `sig.contract A pre _ writeArgs stack`, with its
 disjointness and bounds facts as `Sig.conj` of lists, which evaluate. -/
 def Sig.preE {M : ISA} (A : Abi M) (sig : Sig) (pre : Curry (sig.words A.ptrBits) (Mem → Prop))
-    (writeArgs : Bool) (stack : Nat) (s : M.State) : Prop :=
+    (writeArgs : Bool) (stack : Nat) (x : Sig.Extra M) (s : M.State) : Prop :=
   let ws := sig.words A.ptrBits
   let widths := ws.map (·.bits A.ptrBits)
   match A.args widths with
@@ -124,12 +124,12 @@ def Sig.preE {M : ISA} (A : Abi M) (sig : Sig) (pre : Curry (sig.words A.ptrBits
     Sig.conj (Sig.pairFacts all) ∧
     Sig.conj ((A.reserved stack s).flatMap fun r => all.map fun a => r.Disjoint a.1) ∧
     Sig.conj (bufs.map fun a => a.1.base.toNat + a.1.len ≤ 2 ^ A.ptrBits) ∧
-    Curry.apply ws pre (vals s) (A.mem s)
+    Curry.apply ws pre (vals s) (A.mem s) ∧ x.pre s
 
 theorem Sig.contract_pre_iff {M : ISA} {A : Abi M} {sig : Sig}
     {pre : Curry (sig.words A.ptrBits) (Mem → Prop)} {post : sig.Post A.ptrBits} {writeArgs : Bool}
-    {stack : Nat} {s : M.State} :
-    (sig.contract A pre post writeArgs stack).pre s ↔ Sig.preE A sig pre writeArgs stack s := by
+    {stack : Nat} {x : Sig.Extra M} {s : M.State} :
+    (sig.contract A pre post writeArgs stack x).pre s ↔ Sig.preE A sig pre writeArgs stack x s := by
   simp only [Sig.contract, Sig.preE]
   generalize A.args ((sig.words A.ptrBits).map (·.bits A.ptrBits)) = o
   cases o with

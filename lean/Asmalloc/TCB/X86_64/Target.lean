@@ -94,6 +94,79 @@ def abi : Abi isa where
   reservedDoc n := some (if n = 0 then "the return address on the stack" else
     s!"the return address on the stack or the {n} bytes of stack below it")
   sym := some fun s name => s.syms name
+  tp := some fun s => s.fsBase
+  param := some fun s name => s.params name
+
+/-! ## Restartable sequences
+
+glibc registers a `struct rseq` for every thread at the thread pointer plus
+the value of its variable `__rseq_offset` (glibc manual, "Restartable
+Sequences": "the offset of the area relative to the thread pointer"); on
+x86-64 the thread pointer is the FS segment's base (System V AMD64 psABI,
+"Thread-Local Storage"). The field `rseq_cs`, the address of the
+descriptor of the sequence the thread is in, is at offset 8, `cpu_id` at 4
+and `mm_cid` at 24 (`include/uapi/linux/rseq.h`, `struct rseq`). The model
+reads `__rseq_offset` as the symbol of that name (`State.syms`).
+-/
+
+/-- The name of glibc's variable holding the rseq area's offset from the
+thread pointer. -/
+def rseqOffsetSym : String := "__rseq_offset"
+
+/-- The address of the thread's rseq area. -/
+def rseqArea (s : State) : Addr := s.fsBase + s.mem.readW (s.syms rseqOffsetSym) 64
+
+/-- The address of the area's `rseq_cs` field. -/
+def rseqCsAddr (s : State) : Addr := rseqArea s + 8
+
+/-- `rseq_cs` points at the routine's descriptor. -/
+def armed (s : State) : Prop := s.mem.readW (rseqCsAddr s) 64 = s.csDesc
+
+/-- The instruction, run in `a`, stores the descriptor's address into
+`rseq_cs`: a 64-bit store of a register holding it, to the field's address.
+(It then also changes nothing else, `store`.) -/
+def arms : Instr → State → Prop
+  | .store m r, a => a.ea m = rseqCsAddr a ∧ a.gpr r = a.csDesc
+  | _, _ => False
+
+/-- What an abort keeps (`Target.rely`). The kernel aborts a sequence on its
+way back to user mode, by setting the saved instruction pointer to the abort
+handler and changing nothing else the thread saved (`rseq_entry.h`, the
+abort path; docs/research/linux-rseq-contract.md, "Aborts"): the thread
+resumes with the registers and flags it was interrupted with, and its FS
+base. If a signal handler ran first, `sigreturn` restores them from the
+signal frame, which the handler leaves alone. The program's symbols,
+constants and descriptor are the same. The memory may differ; the
+contract's `env` says how. So may the thread's permissions: they are what
+the contract's precondition makes of the state the thread resumes in (a
+retry may find a different magazine, say, after a migration). -/
+def rely (p p' : State) : Prop :=
+  p'.gpr = p.gpr ∧ p'.cf = p.cf ∧ p'.zf = p.zf ∧ p'.sf = p.sf ∧ p'.of = p.of ∧
+  p'.fsBase = p.fsBase ∧ p'.syms = p.syms ∧ p'.params = p.params ∧ p'.csDesc = p.csDesc ∧
+  p'.unknowns = p.unknowns
+
+/-! ## Inline functions
+
+`inlineTarget` emits functions inline (`Target.inline`): an
+`#[inline(always)]` Rust function whose body is one `asm!` block with
+`options(nostack)`. The arguments are in the System V argument registers,
+named as explicit register operands, so `abi` describes where they are; the
+result is in `rax`. `asm!` requires the stack pointer, and every register
+the block does not declare as an output, to hold at its end what it held at
+its start (the Rust Reference, "Inline assembly", "Rules for inline
+assembly"), and the direction flag to be clear at both, which no modelled
+instruction changes. The block may not touch the stack below the stack
+pointer, which no region a contract grants contains. -/
+
+/-- Every register but those named in `rs` holds in `s'` what it held in
+`s`. -/
+def preservedExcept (rs : List String) (s s' : State) : Prop :=
+  ∀ r : Reg, r.name ∉ rs → s'.gpr r = s.gpr r
+
+/-- The registers an `asm!` block may declare as clobbers: all but the
+stack pointer. -/
+def clobberable : List Reg := [.rax, .rcx, .rdx, .rbx, .rbp, .rsi, .rdi,
+  .r8, .r9, .r10, .r11, .r12, .r13, .r14, .r15]
 
 abbrev target : Target where
   name := "x86_64"
@@ -104,5 +177,23 @@ abbrev target : Target where
   rustCfg := "all(target_arch = \"x86_64\", target_pointer_width = \"64\")"
   rustAbi := "sysv64"
   abi := abi
+  arms := arms
+  armed := armed
+  rely := rely
+
+/-- The inline target: the same model, printer and argument registers, with
+the obligations of `asm!` in place of a call's (see above). -/
+abbrev inlineTarget : Target :=
+  { target with
+    name := "x86_64_inline"
+    abiPreserved := fun s s' => s'.gpr .rsp = s.gpr .rsp
+    inline := true
+    argRegs := argRegs.map Reg.name
+    retReg := "rax"
+    regs := clobberable.map Reg.name
+    preservedExcept := preservedExcept
+    -- An inlined routine: one more than the twelve the processor delivers at
+    -- full speed (docs/design.md, "Front end").
+    printer := { printer with uopLimit := some 13 } }
 
 end VG.X86_64

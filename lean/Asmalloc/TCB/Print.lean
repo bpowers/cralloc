@@ -12,9 +12,9 @@ conditional branches:
 * `loop body c` ⟶  `Ltop: body; b<c> Ltop`
 * `call name body` ⟶  `<call> name` (the call instruction of the function
   `name`, which is emitted separately: see `VG.Rust.files`)
-* an instruction naming a `static` (`Printer.symLines`) ⟶ a line with a
-  RIP-relative operand of its address (`Line.sym`), which `VG.Rust.files`
-  writes with the static's symbol
+* an instruction naming a symbol or a compile-time parameter ⟶ a line that
+  refers to it as an operand of the `asm!` block (`Line.ops`, `Piece.ref`),
+  which `VG.Rust.files` declares (`sym` or `const`)
 * `frame push body pop` ⟶  `push; body; pop`
 
 Structured-control-flow labels are numeric local labels (`N:`, referenced
@@ -45,6 +45,30 @@ same, at the same addresses, whatever `t` is. The cold code comes before the
 `funcAlign` directives. The printer keys on exactly that shape: a `then`
 branch `.seq (.seq (.block []) (.block [])) t` is reserved for cold branches.
 
+A restartable sequence (`Code.rseq arm body`) is printed with fixed labels,
+which the emitter allows only once per function (`Rust.checkRseq`):
+
+```
+5:  arm                       restart point: the abort handler jumps here
+6:  body                      start of the sequence (start_ip)
+7:                            just past the commit
+    .pushsection __rseq_cs, "aw"
+    .balign 32
+3:  .long 0, 0                the descriptor, struct rseq_cs: version, flags,
+    .quad 6b, 7b - 6b, 4f     start_ip, post_commit_offset, abort_ip
+    .popsection
+    .pushsection .text.unlikely, "ax"
+    <rseqSig>                 ends with the 4-byte signature before abort_ip
+4:  jmp 5b                    the abort handler
+    <exits' code>             out of line (`lowerBody`)
+    .popsection
+```
+
+So the abort handler lies outside the sequence, after the signature, and
+the arming code (x86-64's `leaRseqCs`, `lea r, [rip + 3f]`) names this
+descriptor. The descriptor holds absolute addresses, which the dynamic
+linker relocates, so its section is writable.
+
 Together with each ISA's instruction printer this is part of the trusted
 base; it is small enough to check by inspection and is covered by the golden
 tests in `AsmallocTest/Print.lean`.
@@ -54,29 +78,35 @@ tests in `AsmallocTest/Print.lean`.
 
 namespace VG
 
-/-- The part of a `static`'s address a line names: the address plus `off`
-as a RIP-relative memory operand, `[rip + <sym> + off]` (x86-64's `lea`). -/
-inductive SymPart
-  | ripRel (off : Int)
-  deriving DecidableEq, Repr
-
 /-- The text of a constant added to a symbol in an operand: nothing for 0,
 ` + k` or ` - k` otherwise. -/
 def symOffset (off : Int) : String :=
   if off = 0 then "" else if off > 0 then s!" + {off}" else s!" - {-off}"
 
+/-- Part of a line of assembly: text, or a reference to an operand of the
+`asm!` block by its name (a symbol, a compile-time constant, or a label),
+which the template writes as `{name}`. -/
+inductive Piece
+  | text (s : String)
+  | ref (name : String)
+  deriving DecidableEq, Repr
+
 /-- A line of assembly: text, a call instruction of the function it names,
-or text followed by a RIP-relative operand of the address of the `static` it
-names. -/
+or text with references to operands (`Piece`). -/
 inductive Line
   | text (s : String)
   | call (name : String)
-  | sym (s : String) (part : SymPart) (name : String)
+  | ops (ps : List Piece)
   deriving DecidableEq, Repr
 
+/-- The operands a line refers to (`Piece.ref`). -/
+def Line.refs : Line → List String
+  | .ops ps => ps.filterMap fun | .ref n => some n | .text _ => none
+  | _ => []
+
 structure Printer (M : ISA) where
-  /-- Assembly text for one instruction (may be several lines). -/
-  instr : M.Instr → List String
+  /-- The lines of one instruction. -/
+  instr : M.Instr → List Line
   /-- Conditional branch to a label, taken when the condition is true. -/
   branch : M.Cond → String → String
   /-- Unconditional branch to a label. -/
@@ -86,9 +116,6 @@ structure Printer (M : ISA) where
   /-- The mnemonic of the call instruction whose operand is a function's
   symbol (`ISA.call`), e.g. `call`. -/
   call : String
-  /-- The lines of an instruction that names a `static` (`Line.sym`); `none`
-  for the others, whose lines are `instr`'s text. -/
-  symLines : M.Instr → Option (List Line) := fun _ => none
   /-- Why the assembler cannot encode an instruction as the model describes
   it (e.g. an x86-64 displacement too wide for its field, which some
   assemblers silently truncate), or `none` if it can. The emitter refuses
@@ -98,17 +125,61 @@ structure Printer (M : ISA) where
   start (see the module docs). They come after its return, so any padding
   they insert is never executed. -/
   funcAlign : List String := []
+  /-- The lines just before a restartable sequence's abort handler, which
+  must end with the signature the C library registers its area with; `none`
+  on a target that cannot print a restartable sequence (`Rust.checkRseq`). -/
+  rseqSig : Option (List String) := none
+  /-- Whether an instruction is a plain store of a register, which is what
+  a restartable sequence's commit must be (`Rust.checkRseq`). -/
+  plainStore : M.Instr → Bool := fun _ => false
+  /-- Whether an instruction fuses with a conditional branch right after it
+  into one micro-op (a compare or a test). -/
+  fuses : M.Instr → Bool := fun _ => false
+  /-- The most fused micro-ops a function's hot path may have (`Rust.checkUops`),
+  if the target has a limit. -/
+  uopLimit : Option Nat := none
 
 variable {M : ISA} (P : Printer M)
 
 /-- The number of the `n`-th label of a function. -/
 def labelNum (n : Nat) : String := s!"2{n}"
 
+/-- The lines of a restartable sequence's body, and of its exits' code out
+of line, using labels `labelNum n`: an exit straight to an external target
+branches to it; any other branches to a label of its own, whose code ends
+with a jump to the end of the sequence (label `7`) or to its external
+target. -/
+def Printer.lowerBody : List (Step M.Instr M.Cond) → Nat → List Line × List Line × Nat
+  | [], n => ([], [], n)
+  | .instr i :: rest, n =>
+    let (l, k, n) := lowerBody rest n
+    (P.instr i ++ l, k, n)
+  | .exit c [] (some t) :: rest, n =>
+    let (l, k, n) := lowerBody rest n
+    (.ops [.text (P.branch c ""), .ref t] :: l, k, n)
+  | .exit c cold ext :: rest, n =>
+    let lab := labelNum n
+    let (l, k, n) := lowerBody rest (n + 1)
+    let back : Line := match ext with
+      | none => .text (P.jump "7b")
+      | some t => .ops [.text (P.jump ""), .ref t]
+    (.text (P.branch c (lab ++ "f")) :: l,
+      [.text (lab ++ ":")] ++ cold.flatMap P.instr ++ [back] ++ k, n)
+
+/-- The lines of the restartable sequence `rseq arm body` (see the module
+docs), given its body's lines and its exits' code (`lowerBody`). -/
+def Printer.rseqLines (arm : List M.Instr) (body cold : List Line) : List Line :=
+  [.text "5:"] ++ arm.flatMap P.instr ++ [.text "6:"] ++ body ++ [.text "7:"] ++
+  ([".pushsection __rseq_cs, \"aw\"", ".balign 32", "3:", ".long 0, 0",
+    ".quad 6b, 7b - 6b, 4f", ".popsection", ".pushsection .text.unlikely, \"ax\""] ++
+    P.rseqSig.getD [] ++ ["4:", P.jump "5b"]).map .text ++
+  cold ++ [.text ".popsection"]
+
 /-- Lower code to lines of assembly, using labels `labelNum n`: the lines in
 place, the lines of its cold branches (`Code.iteCold`), placed after the
 function's return, and the next unused label number. -/
 def Printer.lower : Code M.Instr M.Cond → Nat → List Line × List Line × Nat
-  | .block is, n => (is.flatMap fun i => (P.symLines i).getD ((P.instr i).map .text), [], n)
+  | .block is, n => (is.flatMap P.instr, [], n)
   | .seq c₁ c₂, n =>
     let (l₁, k₁, n) := lower c₁ n
     let (l₂, k₂, n) := lower c₂ n
@@ -134,8 +205,27 @@ def Printer.lower : Code M.Instr M.Cond → Nat → List Line × List Line × Na
   | .call name _, n => ([.call name], [], n)
   | .frame i body j, n =>
     let (lb, kb, n) := lower body n
-    ((P.symLines i).getD ((P.instr i).map .text) ++ lb ++
-      (P.symLines j).getD ((P.instr j).map .text), kb, n)
+    (P.instr i ++ lb ++ P.instr j, kb, n)
+  | .rseq arm body, n =>
+    let (lb, kb, n) := P.lowerBody body n
+    (P.rseqLines arm lb kb, [], n)
+
+/-- The fused micro-ops of a restartable sequence's body when no exit is
+taken: one per instruction and per exit, but an exit right after an
+instruction that fuses with it (`fuses`) counts with that instruction. -/
+def Printer.stepUops : List (Step M.Instr M.Cond) → Nat
+  | [] => 0
+  | .instr i :: .exit _ _ _ :: rest => (if P.fuses i then 1 else 2) + stepUops rest
+  | _ :: rest => 1 + stepUops rest
+
+/-- The fused micro-ops of a function's hot path, if the code has one the
+count is defined for: a block (every instruction), or a restartable
+sequence when no exit is taken (its arm and its body, `stepUops`); and the
+return, unless `inline`. Each instruction counts one. -/
+def Printer.hotUops (inline : Bool) : Code M.Instr M.Cond → Option Nat
+  | .block is => some (is.length + if inline then 0 else P.ret.length)
+  | .rseq arm body => some (arm.length + P.stepUops body + if inline then 0 else P.ret.length)
+  | _ => none
 
 /-- The complete body of a function: the lowered code, the return, and the
 cold branches' code after it. -/

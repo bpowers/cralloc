@@ -165,6 +165,11 @@ structure Abi (M : ISA) where
   (`Artifact.consts`), on a target whose code can name one; `none` on the
   others. -/
   sym : Option (M.State → String → BitVec 64) := none
+  /-- The thread pointer, on a target that has one (x86-64: the FS base). -/
+  tp : Option (M.State → Addr) := none
+  /-- The value of each compile-time constant the code can name
+  (`Operand.const`), by name, on a target whose code can name one. -/
+  param : Option (M.State → String → BitVec 64) := none
 
 /-! ## Tables of constants
 
@@ -203,6 +208,38 @@ def Abi.withConsts {M : ISA} (A : Abi M) (cs : List (String × List (BitVec 64))
         Abi.constsHeld (A.mem s) (f s) cs ∧
         (∀ t ∈ Abi.constRegions (f s) cs, t.base.toNat + t.len ≤ 2 ^ A.ptrBits ∧
           (∀ r ∈ A.wr s, t.Disjoint r) ∧ ∀ r ∈ A.reserved n s, t.Disjoint r) }
+
+/-! ## Memory beyond the buffers
+
+A function may be granted memory its signature does not describe: a
+routine's thread-local area, a `static` it writes, a block the state names.
+`A.withExtra (some e)` is the calling convention as a contract for such code
+sees it: `e s` lists the extra regions of the state `s` and whether each is
+writable, as a function of what the state holds (its symbols, thread
+pointer, constants and memory); the code may read each and write the
+writable ones (they come after the buffers in the regions it may read and
+write, before any tables of constants), and they do not wrap around the
+address space, overlap each other where either is writable, overlap the
+stack the function uses, or overlap a buffer where either is writable.
+`Sig.contract` then pins the state's regions to exactly the buffers and
+these, as it does to the buffers alone. -/
+
+def Abi.withExtra {M : ISA} (A : Abi M) : Option (M.State → List (Region × Bool)) → Abi M
+  | none => A
+  | some e =>
+    let ro s := ((e s).filter (!·.2)).map (·.1)
+    let rw s := ((e s).filter (·.2)).map (·.1)
+    { A with
+      rd s := (A.rd s).take ((A.rd s).length - (ro s).length)
+      wr s := (A.wr s).take ((A.wr s).length - (rw s).length)
+      wf ws n s := A.wf ws n s ∧
+        (A.rd s).drop ((A.rd s).length - (ro s).length) = ro s ∧
+        (A.wr s).drop ((A.wr s).length - (rw s).length) = rw s ∧
+        (∀ x ∈ e s, x.1.base.toNat + x.1.len ≤ 2 ^ A.ptrBits) ∧
+        (e s).Pairwise (fun a b => (a.2 || b.2) → a.1.Disjoint b.1) ∧
+        (∀ x ∈ e s, ∀ r ∈ A.reserved n s, x.1.Disjoint r) ∧
+        (∀ x ∈ e s, ∀ r ∈ (A.rd s).take ((A.rd s).length - (ro s).length), x.2 → x.1.Disjoint r) ∧
+        (∀ x ∈ e s, ∀ r ∈ (A.wr s).take ((A.wr s).length - (rw s).length), x.1.Disjoint r) }
 
 /-- The `n` bytes below the stack pointer `sp`, if any. -/
 def stackBelow (sp : Addr) : Nat → List Region

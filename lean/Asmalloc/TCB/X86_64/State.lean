@@ -40,6 +40,14 @@ structure State where
   sets it (on Linux, to the thread's thread-local storage); no modelled
   instruction changes it. -/
   fsBase : Addr := 0
+  /-- The value of each compile-time constant the code names (a `const`
+  operand, `Operand.const`), by name: fixed for the run, as the instance of
+  a generic function the compiler emits is. -/
+  params : String → BitVec 64 := fun _ => 0
+  /-- The address of the routine's restartable-sequence descriptor
+  (`leaRseqCs`), where the linker places it: the model does not know it, and
+  no instruction changes it. -/
+  csDesc : Addr := 0
 
 /-- A segment override of a memory operand. Only FS is modelled. -/
 inductive Seg

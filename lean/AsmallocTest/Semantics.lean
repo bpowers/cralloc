@@ -1,4 +1,4 @@
-import Asmalloc.TCB.X86_64.Isa
+import Asmalloc.TCB.X86_64.Target
 
 /-!
 # Tests of the x86-64 semantics on concrete states
@@ -93,6 +93,77 @@ def stSym : State := { st with syms := fun n => if n = "T" then 0x1000 else 0 }
 #guard (exec (.leaSym .r9 "T" 24) stSym).map (·.gpr .r9) == some 0x1018
 #guard (exec (.leaSym .r9 "T" (-8)) stSym).map (·.gpr .r9) == some 0xFF8
 #guard (exec (.leaSym .r9 "T" 24) stSym).map flags == some (flags st)
+
+/-! ## Compile-time constants and the global offset table -/
+
+/-- `stSym` with the constants `off = 0x30` and `mask = 0x1_0000_01f0` (whose
+low 32 bits are `0x1f0`). -/
+def stPar : State := { stSym with params := fun n =>
+  if n = "off" then 0x30 else if n = "mask" then 0x1000001f0 else 0 }
+
+-- A symbol plus a literal and a constant offset.
+#guard (exec (.leaSym .r9 "T" 8 (some "off")) stPar).map (·.gpr .r9) == some 0x1038
+-- An immediate from a constant: its low 32 bits, as an immediate is.
+#guard (exec (.alu32 .test .rcx (.immP "mask")) (stPar.setReg .rcx 0x10008)).map flags ==
+  some [some false, some true, some false, some false]
+#guard (exec (.mov32 .rax (.immP "mask")) stPar).map (·.gpr .rax) == some 0x1f0
+-- A 64-bit operation sign-extends the 32-bit immediate.
+#guard (exec (.mov .rax (.immP "mask")) { stPar with params := fun _ => 0x80000000 }).map
+  (·.gpr .rax) == some 0xffffffff80000000
+-- Instructions without an immediate form refuse one.
+#guard (exec (.cmov .e .rax (.immP "mask")) stPar).isNone
+-- The GOT slot of a symbol holds its address; nothing is read from the regions.
+#guard (exec (.movGot .rdx "T") stPar).map (·.gpr .rdx) == some 0x1000
+-- The descriptor's address is the state's.
+#guard (exec (.leaRseqCs .r10) { st with csDesc := 0x4000 }).map (·.gpr .r10) == some 0x4000
+
+/-! ## The body of a restartable sequence
+
+An exit whose condition holds runs its code and continues after the
+sequence, or ends at its external target; one whose condition does not hold
+falls through; one on an undefined flag faults. -/
+
+def body : List (Step Instr Cond) :=
+  [.instr (.mov .rax (.imm 1)), .exit .e [.mov .rax (.imm 2)] none, .exit .b [] (some "slow"),
+    .instr (.mov .rax (.imm 3))]
+
+/-- What a run of `body` ends with: whether it exited to `slow`, and `rax`. -/
+def outcome (s : State) : Option (Bool × BitVec 64) :=
+  (runBody isa body s).map fun | .done s => (false, s.gpr .rax) | .exit _ s => (true, s.gpr .rax)
+
+#guard outcome { st with zf := some true } == some (false, 2)
+#guard outcome { st with zf := some false, cf := some true } == some (true, 1)
+#guard outcome { st with zf := some false, cf := some false } == some (false, 3)
+#guard outcome { st with zf := none } == none
+
+/-- `rax` in each state in which the body may be aborted: before each step,
+until an exit is taken, up to and including before its last step. -/
+def aborts (s : State) : List (BitVec 64) := (bodyPrefixes isa body s).map (·.gpr .rax)
+
+#guard aborts { st with zf := some true } == [-1, 1]
+#guard aborts { st with zf := some false, cf := some true } == [-1, 1, 1]
+#guard aborts { st with zf := some false, cf := some false } == [-1, 1, 1, 1]
+/-! The memory accesses of a sequence: the arm's store, the body's load,
+and its commit, each with its value; an exit taken ends them. -/
+
+def evSeq : Prog isa := .rseq
+  [.store { base := .rdx, disp := 8, seg := some .fs } .r10]
+  [.instr (.mov32 .r8 (.mem { base := .rdx, disp := 24, seg := some .fs })),
+    .exit .e [] none,
+    .instr (.store { base := .rdx, disp := 16, seg := some .fs } .r8)]
+
+#guard Code.events isa evSeq { st with zf := some false } ==
+  [⟨0x6EC8, 8, true, 0x1122334455667788⟩, ⟨0x6ED8, 4, false, 0xDBDAD9D8⟩,
+    ⟨0x6ED0, 8, true, 0xDBDAD9D8⟩]
+#guard Code.events isa evSeq { st with zf := some true } ==
+  [⟨0x6EC8, 8, true, 0x1122334455667788⟩, ⟨0x6ED8, 4, false, 0xDBDAD9D8⟩]
+
+-- A fault ends the run, and with it the states.
+#guard aborts { st with zf := none } == [-1, 1]
+-- Nowhere after the arm faults.
+#guard (Code.abortStates isa (.rseq [.mov .rax (.mem { base := .rax })] body) st).isEmpty
+#guard (Code.abortStates isa (.rseq [.mov .rax (.imm 7)] body) { st with zf := some true }).map
+  (·.gpr .rax) == [7, 1]
 
 /-! ## `inc`, `dec` and `test` with an immediate
 

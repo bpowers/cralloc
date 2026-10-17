@@ -59,4 +59,12 @@ theorem add_verified :
     sig_implies [Spec.Selftest.addContract, Spec.Selftest.addSig, Proof.Selftest.addX86_64,
       X86_64.abi, X86_64.argRegs] [sat] using sat)
 
+/-- `sat` satisfies the precondition; the code does not branch. -/
+theorem add_witness : (∃ w ∈ [sat], (Spec.Selftest.addContract X86_64.abi).pre w) ∧
+    ∀ o ∈ Code.outcomes Impl.Selftest.X86_64.add, ∃ w ∈ [sat],
+      (Spec.Selftest.addContract X86_64.abi).pre w ∧
+        Visits X86_64.isa Impl.Selftest.X86_64.add w o.1 o.2 := by
+  refine ⟨⟨sat, List.mem_singleton_self _, ?_⟩, fun o ho => by cases ho⟩
+  sig_pre [Spec.Selftest.addContract, Spec.Selftest.addSig, X86_64.abi, X86_64.argRegs, sat]
+
 end VG.Proof.Selftest.X86_64

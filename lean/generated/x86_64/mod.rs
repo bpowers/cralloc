@@ -3,3 +3,6 @@
 
 #[rustfmt::skip]
 pub(crate) mod selftest;
+
+#[rustfmt::skip]
+pub(crate) mod slab;

@@ -64,12 +64,16 @@ Its name cannot be a table's (`tableName`).
 
 The code forms a table's address, or an address at a constant offset from
 it, from the static's symbol (a `sym` operand), on x86-64 by `lea` of the
-RIP-relative operand `[rip + <sym> + <off>]` (`SymPart.ripRel`). The linker
-resolves it to the static's address plus the offset, which
+RIP-relative operand `[rip + <sym> + <off>]`. The linker resolves it to the
+static's address plus the offset, which
 the model gives (`State.syms`, fixed for the run as a static's address is)
 and at which the contract (`Abi.withConsts`) says the memory holds the table,
 readable and apart from every writable region: a `static` is a distinct
 immutable object.
+
+Any other symbol or compile-time constant the code names (`Piece.ref`) is
+an operand its `Api` declares (`Operand`): `<name> = sym <path>` or
+`<name> = const <expr>` (`operandText`, `checkOperands`).
 
 An artifact whose code needs CPU features beyond the target's baseline
 (`Artifact.features`) also gets a last `# Safety` item saying the CPU must
@@ -140,12 +144,12 @@ def dedup (as : List String) : List String :=
   as.foldl (init := []) fun acc a => if acc.contains a then acc else acc ++ [a]
 
 /-- The text of one line of the `naked_asm!` template (`escapeBraces`): a
-call names its function, and a static's address its static, as the operand
-of the same name. -/
+call names its function, and a reference to an operand (`Piece.ref`) the
+operand, by the same name. -/
 def lineText (call : String) : Line → String
   | .text l => escapeBraces l
   | .call n => escapeBraces call ++ " {" ++ n ++ "}"
-  | .sym s (.ripRel off) n => escapeBraces s ++ "[rip + {" ++ n ++ "}" ++ symOffset off ++ "]"
+  | .ops ps => String.join (ps.map fun | .text s => escapeBraces s | .ref n => "{" ++ n ++ "}")
 
 /-- One line of the `naked_asm!` template as an argument of its own. -/
 def line (call : String) (l : Line) : String :=
@@ -233,6 +237,8 @@ def ownRequires {I C : Type} (req : I → List String) : List String → Code I 
   | acc, .loop b _ => ownRequires req acc b
   | acc, .call _ _ => acc
   | acc, .frame i b j => add (ownRequires req (add acc (req i)) b) (req j)
+  | acc, .rseq arm body =>
+    (arm ++ body.flatMap Step.instrs).foldl (fun acc i => add acc (req i)) acc
 where
   add (acc fs : List String) : List String :=
     fs.foldl (fun acc f => if acc.contains f then acc else acc ++ [f]) acc
@@ -257,6 +263,7 @@ def ownFirstSome? {I C : Type} (f : I → Option String) : Code I C → Option S
   | .loop b _ => ownFirstSome? f b
   | .call _ _ => none
   | .frame i b j => f i <|> ownFirstSome? f b <|> f j
+  | .rseq arm body => (arm ++ body.flatMap Step.instrs).findSome? f
 
 /-- A `some` of `f` over the instructions of `c`, and of the functions it
 calls, if there is one: the first of those of `c` outside its calls
@@ -320,6 +327,16 @@ def checkLayout (a : Artifact) : Except String Unit := do
     throw s!"{a.target.name}: {a.name} has buffers but its doc does not end with its \
       `# Safety` section"
 
+/-- The declaration of the operand `n` that `a`'s code names: a table of
+constants, which the emitter writes (`tablesFile`), or an operand of
+`Artifact.operands` (`checkOperands` checks it is one of them). -/
+def operandText (a : Artifact) (n : String) : String :=
+  if (a.consts.map (·.1)).contains n then s!"sym super::consts::{n}" else
+  match a.operands.lookup n with
+  | some (.sym p) => s!"sym {p}"
+  | some (.const e) => s!"const {e}"
+  | none => ""
+
 /-- One artifact as a Rust naked function; `moduleOf` gives the module of
 each function it calls. The printer's `funcAlign` comes last, after the
 return (`Printer.function`) and any directives that follow it. -/
@@ -331,7 +348,7 @@ where
   functionOf (a : Artifact) (lines : List Line) (moduleOf : String → String) : String :=
   let body := lines ++ a.target.printer.funcAlign.map .text
   let callees := dedup (body.filterMap fun | .call n => some n | _ => none)
-  let syms := dedup (body.filterMap fun | .sym _ _ n => some n | _ => none)
+  let refs := dedup (body.flatMap Line.refs)
   featuresConst a.name a.features ++
   docComment "" (fullDoc a) ++
   "#[unsafe(naked)]\n" ++
@@ -339,9 +356,126 @@ where
   "    core::arch::naked_asm!(\n" ++
   template a.target.printer.call body ++
   String.join (callees.map fun n => s!"        {n} = sym super::{moduleOf n}::{n},\n") ++
-  String.join (syms.map fun n => s!"        {n} = sym super::consts::{n},\n") ++
+  String.join (refs.map fun n => s!"        {n} = {operandText a n},\n") ++
   "    )\n" ++
   "}\n"
+
+/-- The external targets the code exits to (`Step.exit`), each once. -/
+def exitNames {I C : Type} : Code I C → List String
+  | .rseq _ body => dedup (body.filterMap fun | .exit _ _ (some t) => some t | _ => none)
+  | _ => []
+
+/-- The Rust names of the machine-level arguments of `sig`, in order: each
+parameter's, and a slice's length's after its pointer's. -/
+def argNames (sig : Sig) : List String :=
+  sig.params.flatMap fun (n, p) => match p with
+    | .slice _ _ len => [n, len]
+    | _ => [n]
+
+/-- The lines of an inline artifact's `asm!` block: its code, without a
+return, and the code of its cold branches in a section of their own. -/
+def inlineLines (a : Artifact) : List Line :=
+  let (l, k, _) := a.target.printer.lower a.code 0
+  l ++ (if k.isEmpty then [] else
+    [.text ".pushsection .text.unlikely, \"ax\""] ++ k ++ [.text ".popsection"])
+
+/-- One artifact as an inline Rust function whose body is one `asm!` block:
+
+```rust
+#[inline(always)]
+pub(crate) unsafe fn <name><<generics>><sig> {
+    let ret: <ty>;                       // if it returns a value
+    unsafe {
+        core::arch::asm!(
+            r"<lines>",
+            in("<reg>") <arg>, …           // inout("<reg>") <arg> => _ if a clobber
+            lateout("<ret>") ret,          // if it returns a value
+            out("<reg>") _, …              // the other clobbers
+            <name> = sym <path> | const <expr>, …
+            <exit> = label { return false }, …
+            options(nostack),
+        );
+    }
+    ret                                  // or `true` if it has exits
+}
+```
+
+The arguments are in the target's argument registers, in order (the same as
+its calling convention, `Target.abi`, so the contract reads them where they
+are), and the result in its result register. Every register the code may
+change is declared, from the same list the proof covers
+(`Artifact.clobbersOk`); `asm!` keeps the others. A function with exits
+returns `bool`: `false` from each exit's label, `true` from the end of the
+block. -/
+def inlineFunction (a : Artifact) (lines : List Line) : String :=
+  let T := a.target
+  let args := (T.argRegs.zip (argNames a.sig))
+  let ret := a.sig.ret
+  let exits := exitNames a.code
+  let refs := dedup (lines.flatMap Line.refs) |>.filter (!exits.contains ·)
+  let retTy := match ret with | some ty => ty.rust | none => "bool"
+  let sig := "(" ++ ", ".intercalate (a.sig.params.map fun p => p.2.rust p.1) ++ ")" ++
+    (if exits.isEmpty && ret.isNone then "" else s!" -> {retTy}")
+  let ins := args.map fun (r, n) =>
+    if a.clobbers.contains r then s!"inout(\"{r}\") {n} => _" else s!"in(\"{r}\") {n}"
+  let outs := (if ret.isSome then [s!"lateout(\"{T.retReg}\") ret"] else []) ++
+    -- The result register is an output of its own only if there is a result.
+    (a.clobbers.filter fun c => !(args.map (·.1)).contains c && (ret.isNone || c != T.retReg)).map
+      fun c => s!"out(\"{c}\") _"
+  let gen := if a.generics.isEmpty then "" else s!"<{a.generics}>"
+  featuresConst a.name a.features ++
+  docComment "" (fullDoc a) ++
+  "#[inline(always)]\n" ++
+  s!"pub(crate) unsafe fn {a.name}{gen}{sig} " ++ "{\n" ++
+  (match ret with | some ty => s!"    let ret: {ty.rust};\n" | none => "") ++
+  "    unsafe {\n" ++
+  "        core::arch::asm!(\n" ++
+  "    " ++ template a.target.printer.call lines ++
+  String.join ((ins ++ outs).map fun o => s!"            {o},\n") ++
+  String.join (refs.map fun n => s!"            {n} = {operandText a n},\n") ++
+  String.join (exits.map fun n => s!"            {n} = label \{ return false },\n") ++
+  "            options(nostack),\n" ++
+  "        );\n" ++
+  "    }\n" ++
+  (if ret.isSome then "    ret\n" else if exits.isEmpty then "" else "    true\n") ++
+  "}\n"
+
+/-- Whether code calls a function or has a frame, which an inline function,
+whose `asm!` block may not touch the stack, cannot. -/
+def usesStack {I C : Type} : Code I C → Bool
+  | .block _ | .rseq .. => false
+  | .seq a b => usesStack a || usesStack b
+  | .ite _ t e => usesStack t || usesStack e
+  | .loop b _ => usesStack b
+  | .call .. | .frame .. => true
+
+/-- An artifact of an inline target uses no stack, names only the target's
+registers as clobbers, each once, has no more arguments than argument
+registers, and returns no value if it has exits (`asm!` cannot have a label
+and an output: rust-lang/rust#119364); one of a naked target declares no
+clobbers and no generic parameters. -/
+def checkInline (a : Artifact) : Except String Unit := do
+  let T := a.target
+  let n := s!"{T.name}: {a.name}"
+  if T.inline then
+    if usesStack a.code then throw s!"{n} is inline but calls a function or has a frame"
+    for c in a.clobbers do
+      unless T.regs.contains c do throw s!"{n} clobbers `{c}`, which is not a register it may name"
+    unless (dedup a.clobbers).length == a.clobbers.length do throw s!"{n} declares a clobber twice"
+    unless (argNames a.sig).length ≤ T.argRegs.length do throw s!"{n} has too many arguments"
+    unless (exitNames a.code).isEmpty || a.sig.ret.isNone do
+      throw s!"{n} has exits and returns a value, which `asm!` cannot combine"
+  else
+    unless a.clobbers.isEmpty && a.generics.isEmpty do
+      throw s!"{n} is a naked function but declares clobbers or generic parameters"
+
+/-- The hot path of `a` has at most its target's limit of fused micro-ops
+(`Printer.hotUops`, `Printer.uopLimit`). -/
+def checkUops (a : Artifact) : Except String Unit := do
+  let P := a.target.printer
+  if let (some n, some lim) := (P.hotUops a.target.inline a.code, P.uopLimit) then
+    unless n ≤ lim do
+      throw s!"{a.target.name}: {a.name}'s hot path has {n} fused micro-ops, more than {lim}"
 
 /-- The tables of constants of `a`, which its contract gives it
 (`Artifact.consts`). -/
@@ -449,6 +583,55 @@ def checkNames (a : Artifact) : Except String Unit := do
   unless rustIdent a.module && a.module != "mod" do
     throw s!"{a.target.name}: {a.name}'s module `{a.module}` is not a Rust identifier (or is `mod`)"
 
+/-- Whether `c`, or the code of a function it calls, has a restartable
+sequence. -/
+def hasRseq {I C : Type} : Code I C → Bool
+  | .block _ => false
+  | .seq a b => hasRseq a || hasRseq b
+  | .ite _ t e => hasRseq t || hasRseq e
+  | .loop b _ => hasRseq b
+  | .call _ b => hasRseq b
+  | .frame _ b _ => hasRseq b
+  | .rseq .. => true
+
+/-- The code of `p`'s artifact has a restartable sequence only as the whole
+of its code (`Code.rseq arm body`): the printer gives every sequence the
+same labels and its abort handler restarts it at its arm
+(`Printer.rseqLines`), which is then the function's first instruction, as
+`Code.abortStates` assumes. Then the target can print a sequence
+(`Printer.rseqSig`), the arm is not empty (`Verified` checks that its last
+instruction arms the sequence), the body ends with its commit, a plain
+store (`Printer.plainStore`): a store of a value the code computed, never a
+read-modify-write of memory another thread may have changed meanwhile; and
+each external exit jumps to a function the artifact declares (a `sym`
+operand), which it tail-calls with its arguments as they arrived
+(`Sig.contract`'s `exit`). -/
+def checkRseq (p : Prepared) : Except String Unit := do
+  let a := p.art
+  let P := a.target.printer
+  match a.code with
+  | .rseq arm body =>
+    unless P.rseqSig.isSome do
+      throw s!"{a.target.name}: {a.name} has a restartable sequence, which its target cannot print"
+    if arm.isEmpty then
+      throw s!"{a.target.name}: {a.name}'s restartable sequence has no arming code"
+    match body.getLast? with
+    | some (.instr i) =>
+      unless P.plainStore i do
+        throw s!"{a.target.name}: {a.name}'s restartable sequence does not commit with a plain store"
+    | _ => throw s!"{a.target.name}: {a.name}'s restartable sequence does not end with its commit"
+    for st in body do
+      if let .exit _ _ (some t) := st then
+        if a.target.inline then
+          if (a.operands.lookup t).isSome then
+            throw s!"{a.target.name}: {a.name} exits to `{t}`, which inline is a label, not an operand"
+        else unless a.operands.lookup t matches some (.sym _) do
+          throw s!"{a.target.name}: {a.name} exits to `{t}`, which is not a function it declares \
+            (`Operand.sym`)"
+  | c =>
+    if hasRseq c then
+      throw s!"{a.target.name}: {a.name} has a restartable sequence that is not the whole of its code"
+
 /-- No two artifacts of a target have the same name. -/
 def checkUnique (as : List Artifact) : Except String Unit :=
   as.forM fun a =>
@@ -461,6 +644,32 @@ def tableName (n : String) : Bool :=
   match n.toList with
   | [] => false
   | c :: cs => ('A' ≤ c && c ≤ 'Z') && cs.all fun c => ('A' ≤ c && c ≤ 'Z') || c.isDigit || c == '_'
+
+/-- The constants of the artifacts `as` (`Artifact.rustConsts`), by name,
+each once, in order of their names. -/
+def rustConstsOf (as : List Artifact) : List (String × IntTy × Nat) :=
+  let all := as.flatMap (·.rustConsts)
+  ((dedup (all.map (·.1))).mergeSort (· ≤ ·)).filterMap fun n => all.find? (·.1 == n)
+
+/-- A constant's name is a Rust constant's, its value fits its type, and the
+artifacts of a module that give a constant of that name give the same type
+and value. -/
+def checkRustConsts (as : List Artifact) (a : Artifact) : Except String Unit := do
+  for (n, ty, v) in a.rustConsts do
+    unless tableName n do
+      throw s!"{a.target.name}: {a.name}'s constant {n} is not named as a Rust constant"
+    unless v < 2 ^ ty.bits a.target.abi.ptrBits do
+      throw s!"{a.target.name}: {a.name}'s constant {n} does not fit in a {ty.rust}"
+    for b in as do
+      if b.target.name == a.target.name && b.module == a.module then
+        for (m, ty', v') in b.rustConsts do
+          if m == n && (ty' != ty || v' != v) then
+            throw s!"{a.target.name}: {a.name} and {b.name} give the constant {n} different values"
+
+/-- The constants of a module's artifacts, as Rust. -/
+def rustConstsText (cs : List (String × IntTy × Nat)) : String :=
+  String.join (cs.map fun (n, ty, v) =>
+    s!"\n/// From the specification (`Api.rustConsts`).\npub(crate) const {n}: {ty.rust} = {v};\n")
 
 /-- Tables of the same name in `cs` and `ds` have the same words. -/
 def consistent (cs ds : List (String × List (BitVec 64))) : Bool :=
@@ -490,11 +699,29 @@ def checkConsts (ps : List Prepared) (p : Prepared) : Except String Unit := do
       throw s!"{a.target.name}: {a.name} and {q.art.name} give a table of constants different words"
   if (ps.any fun q => q.art.target.name == a.target.name && q.art.module == "consts") then
     throw s!"{a.target.name}: an artifact's module is `consts`, the module of the tables of constants"
-  let used := p.lines.filterMap fun | .sym _ _ n => some n | _ => none
-  for n in used do
-    unless (ts.map (·.1)).contains n do
-      throw s!"{a.target.name}: {a.name} names the table {n}, which it does not have \
-        (`Artifact.consts`)"
+
+/-- Every operand `p`'s code names (`Line.refs`) is one of its tables of
+constants or of its declared operands (`Artifact.operands`), and none is
+both; each declared operand has a distinct name, which is a Rust identifier
+(the name of an `asm!` operand) and not one the emitter declares itself. -/
+def checkOperands (p : Prepared) : Except String Unit := do
+  let a := p.art
+  let tables := a.consts.map (·.1)
+  let names := a.operands.map (·.1)
+  unless (dedup names).length == names.length do
+    throw s!"{a.target.name}: {a.name} declares two operands of the same name"
+  for n in names do
+    unless rustIdent n do
+      throw s!"{a.target.name}: {a.name}'s operand `{n}` is not a Rust identifier"
+    if tables.contains n then
+      throw s!"{a.target.name}: {a.name}'s operand `{n}` is also a table of constants"
+    if (a.code.calls.map (·.1)).contains n then
+      throw s!"{a.target.name}: {a.name}'s operand `{n}` is also a function it calls"
+  let labels := if a.target.inline then exitNames a.code else []
+  for n in dedup (p.lines.flatMap Line.refs) do
+    unless tables.contains n || names.contains n || labels.contains n do
+      throw s!"{a.target.name}: {a.name} names `{n}`, which is neither a table of constants \
+        (`Artifact.consts`) nor an operand (`Artifact.operands`)"
 
 /-- The tables of constants of the artifacts `arts`, by name, each once. -/
 def tables (arts : List Artifact) : List (String × List (BitVec 64)) :=
@@ -602,8 +829,10 @@ def render (ps : List Prepared) (moduleOf : Artifact → String → String) : Li
       (s!"{t}/{m}.rs",
         header ++ s!"//! Verified `{m}` functions for `{t}`.\n" ++
         "#![allow(dead_code)]\n" ++
+        rustConstsText (rustConstsOf ((arts.filter (·.art.module == m)).map (·.art))) ++
         String.join ((arts.filter (·.art.module == m)).map fun p =>
-          "\n" ++ function.functionOf p.art p.lines (moduleOf p.art)))).map Task.get)
+          "\n" ++ (if p.art.target.inline then inlineFunction p.art (inlineLines p.art)
+            else function.functionOf p.art p.lines (moduleOf p.art))))).map Task.get)
   -- Each target's files on a task of their own.
   ("mod.rs", root) :: ((targets.map fun t => Task.spawn fun _ => perTarget t).map Task.get).flatten
 
@@ -613,7 +842,9 @@ contents: `mod.rs`, and for each target `<target>/mod.rs` and one
 an `Api` with a contract (`checkApi`), its name or module is not a Rust
 identifier (`checkNames`), two artifacts of a target have the
 same name (`checkUnique`), a call is not of the code it runs (`checkCalls`),
-its tables of constants are not as `checkConsts` requires, an artifact's
+its tables of constants are not as `checkConsts` requires, its code names
+an operand it does not declare (`checkOperands`), a restartable sequence is
+not as `checkRseq` requires, an artifact's
 features are not those its code requires (`checkFeatures`), its code has an
 instruction its target's printer cannot encode (`checkEncodable`), or its
 doc has no `# Safety` section at its end for what `fullDoc` adds to it
@@ -633,9 +864,14 @@ def files (as : List Artifact) : Except String (List (String × String)) := do
   let ps := prepareAll as
   forMPar ps (checkCalls ps)
   forMPar ps (checkConsts ps)
+  forMPar ps checkOperands
+  forMPar ps checkRseq
   forMPar ps checkFeatures
   forMPar ps checkEncodable
   forMPar as checkLayout
+  forMPar as checkInline
+  forMPar as checkUops
+  forMPar as (checkRustConsts as)
   return render ps fun a n => ((callee as a n).map (·.module)).getD ""
 
 end VG.Rust

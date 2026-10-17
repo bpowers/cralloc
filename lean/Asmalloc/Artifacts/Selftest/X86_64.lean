@@ -19,6 +19,8 @@ def artifacts : List Artifact := [
     doc := Spec.Selftest.addApi.summary
     code := Impl.Selftest.X86_64.add
     contract := Spec.Selftest.addContract X86_64.abi
-    verified := Proof.Selftest.X86_64.add_verified }]
+    verified := Proof.Selftest.X86_64.add_verified
+    witnesses := [Proof.Selftest.X86_64.sat]
+    witnessOk := Proof.Selftest.X86_64.add_witness }]
 
 end VG.Artifacts.Selftest.X86_64

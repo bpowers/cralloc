@@ -60,6 +60,11 @@ theorem Exec.det {c : Prog M} {s s₁ s₂ : M.State}
       cases ih b
       rw [hq] at hq'; cases hq'
       rfl
+  | rseq ha hb => cases h₂ with
+    | rseq ha' hb' =>
+      rw [ha] at ha'; cases ha'
+      rw [hb] at hb'; cases hb'
+      rfl
 
 theorem Exec.block_iff {is : List M.Instr} {s s' : M.State} :
     Exec M (.block is) s s' ↔ execBlock M is s = some s' :=
@@ -145,6 +150,7 @@ def instrs {I C : Type} : Code I C → List I
   | .loop b _ => instrs b
   | .call _ b => instrs b
   | .frame i b j => i :: instrs b ++ [j]
+  | .rseq arm body => arm ++ body.flatMap Step.instrs
 
 /-- Whether code calls no function and has no frame: whether it runs only
 its own instructions, in the stack it was entered with. -/
@@ -155,6 +161,7 @@ def Code.noCalls {I C : Type} : Code I C → Bool
   | .loop b _ => b.noCalls
   | .call _ _ => false
   | .frame .. => false
+  | .rseq .. => true
 
 /-- `(instrs c).all p`, without building the list of instructions, which is
 much faster for the kernel to evaluate (`decide +kernel`). A block is walked
@@ -168,6 +175,7 @@ noncomputable def Code.allInstrs {I C : Type} (p : I → Bool) : Code I C → Bo
   | .loop b _ => b.allInstrs p
   | .call _ b => b.allInstrs p
   | .frame i b j => p i && b.allInstrs p && p j
+  | .rseq arm body => (arm ++ body.flatMap Step.instrs).all p
 
 theorem Code.allInstrs_eq {I C : Type} (p : I → Bool) (c : Code I C) :
     c.allInstrs p = (instrs c).all p := by
@@ -188,6 +196,11 @@ theorem Code.all_of_allInstrs {I C : Type} {p : I → Bool} {c : Code I C} (h : 
     c.all p = true := by
   induction c with
   | block is => induction is <;> simp_all [Code.all, Code.allInstrs]
+  | rseq arm body =>
+    simp only [Code.allInstrs, List.all_append, Bool.and_eq_true, List.all_flatMap,
+      List.all_eq_true] at h
+    simp only [Code.all, Bool.and_eq_true, List.all_eq_true]
+    exact h
   | _ => simp_all [Code.all, Code.allInstrs]
 
 end VG

@@ -16,9 +16,10 @@ Untrusted: this only changes how proofs are found; the kernel checks them.
 The tactics `TCB/Registration.lean` declares for the default proofs of a
 `Registration`, which a registration file imports this module for:
 
-* `of_sig` proves `ofSig`, `∃ pre post, contract = sig.contract A pre post
-  writeArgs stack`, by unfolding the head of `contract` until it is
-  `Sig.contract`, and then `⟨_, _, rfl⟩`, whose unification does not always
+* `of_sig` proves `ofSig`, `∃ pre post x, contract = sig.contract A pre post
+  writeArgs stack x`, by unfolding the head of `contract` until it is
+  `Sig.contract`, and then `⟨none, _, _, _, rfl⟩` (or with the extra memory
+  found by unification), whose unification does not always
   find the arguments of `Sig.contract` itself.
 * `sp_safe` proves `spSafe`, `code.all (fun i => !T.isa.writesSp i) = true`,
   by `Code.all_of_allInstrs (by decide +kernel)`. Code that depends on a
@@ -50,11 +51,11 @@ elab_rules : tactic
   | `(tactic| of_sig) => do
     let g ← getMainGoal
     let ty ← instantiateMVars (← g.getType)
-    let some c := eqLhs ty | throwError "of_sig: the goal is not `∃ pre post, _ = _`: {ty}"
+    let some c := eqLhs ty | throwError "of_sig: the goal is not `∃ ext pre post x, _ = _`: {ty}"
     if c.hasLooseBVars then throwError "of_sig: the contract depends on `pre` or `post`: {ty}"
     let c' ← toSigContract c
     setGoals [← g.replaceTargetDefEq (ty.replace fun e => if e == c then some c' else none)]
-    evalTactic (← `(tactic| exact ⟨_, _, rfl⟩))
+    evalTactic (← `(tactic| first | exact ⟨none, _, _, _, rfl⟩ | exact ⟨_, _, _, _, rfl⟩))
 
 /-- A free variable of `e` whose type is an enumeration (`Bool`, an
 `inductive` of constructors without fields). -/

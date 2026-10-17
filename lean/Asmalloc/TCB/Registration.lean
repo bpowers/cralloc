@@ -34,7 +34,7 @@ whose calls and frames use `stack` bytes of stack (`Api.contracts`), or, if
 def Api.contract {M : ISA} (api : Api) (A : Abi M) (stack : Nat) : Contract M :=
   match api.contracts with
   | some f => f A stack
-  | none => ⟨fun _ => False, fun _ _ => False⟩
+  | none => { pre := fun _ => False, post := fun _ _ => False }
 
 /-- An implementation of `api` on `target`: what a registration file states
 of a function made from `api` (see `Api.artifact`). -/
@@ -56,13 +56,28 @@ structure Registration (api : Api) (target : Target) where
   verified : Verified target code contract
   ofApi : contract = api.contract (target.abi.withConsts consts) stack := by exact rfl
   /-- `Artifact.ofSig`. -/
-  ofSig : ∃ pre post,
-      contract = api.sig.contract (target.abi.withConsts consts) pre post api.writeArgs stack := by
+  ofSig : ∃ ext pre post x,
+      contract = api.sig.contract ((target.abi.withConsts consts).withExtra ext) pre post
+        api.writeArgs stack x := by
     of_sig
   /-- `Artifact.spSafe`. -/
   spSafe : code.all (fun i => !target.isa.writesSp i) = true := by sp_safe
   /-- `Artifact.features`. -/
   features : List String := []
+  /-- `Artifact.clobbers`. -/
+  clobbers : List String := []
+  /-- `Artifact.clobbersOk`. -/
+  clobbersOk : target.inline = true → ∀ s, contract.pre s →
+      (∀ s', Exec target.isa code s s' →
+        target.preservedExcept (clobbers ++ (if api.sig.ret.isSome then [target.retReg] else [])) s s') ∧
+      (∀ t s', ExecExit target.isa code s t s' → target.preservedExcept clobbers s s') ∧
+      (∀ p ∈ code.abortStates target.isa s, target.preservedExcept clobbers s p) := by
+    exact fun h => nomatch h
+  /-- `Artifact.witnesses`. -/
+  witnesses : List target.isa.State
+  /-- `Artifact.witnessOk`. -/
+  witnessOk : (∃ w ∈ witnesses, contract.pre w) ∧
+    ∀ o ∈ code.outcomes, ∃ w ∈ witnesses, contract.pre w ∧ Visits target.isa code w o.1 o.2
 
 /-- The artifact of the implementation `r` of `api` on `target`: its module,
 signature and `writeArgs` are `api`'s, its name `api`'s followed by
@@ -75,6 +90,9 @@ def Api.artifact (api : Api) (target : Target) (r : Registration api target) : A
   sig := api.sig
   doc := api.doc r.notes
   consts := r.consts
+  operands := api.operands
+  generics := api.generics
+  rustConsts := api.rustConsts
   code := r.code
   contract := r.contract
   verified := r.verified
@@ -88,5 +106,9 @@ def Api.artifact (api : Api) (target : Target) (r : Registration api target) : A
     cases api.contracts <;> exact (by trivial)
   spSafe := r.spSafe
   features := r.features
+  witnesses := r.witnesses
+  witnessOk := r.witnessOk
+  clobbers := r.clobbers
+  clobbersOk := r.clobbersOk
 
 end VG

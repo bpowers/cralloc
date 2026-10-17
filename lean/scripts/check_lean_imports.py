@@ -8,6 +8,9 @@ base small and separate from proofs. Exits non-zero on violations.
   * TCB/   imports only Lean core and TCB/.
   * Spec/  imports only TCB/ and Spec/.
   * Impl/  imports only TCB/, Spec/ and Impl/: never proofs.
+  * No file under Asmalloc/ declares an initializer (`initialize`,
+    `builtin_initialize`, `@[init]`): the emitter imports the registration
+    files and must not run code of theirs at import (Emit.lean).
   * A module of a target (one with a directory of TCB/, e.g. `X86_64`, as a
     component of its path) imports no module of another target. What more
     than one target uses goes in a target-independent module.
@@ -23,6 +26,9 @@ LIB = LEAN / "Asmalloc"
 # The start of an import: `import`, and in a module `public`, `meta` and
 # `all` imports.
 IMPORT = r"\s*(?:public\s+)?(?:meta\s+)?import\s+(?:all\s+)?"
+
+# The syntax of an initializer, outside a comment's first word.
+INIT = re.compile(r"(^|[^\w.`])(builtin_initialize|initialize)\b|@\[(builtin_)?init\b")
 
 ALLOWED_IMPORTS = {
     "TCB": ("Lean", "Init", "Asmalloc.TCB."),
@@ -64,6 +70,9 @@ def main() -> int:
         rel = f.relative_to(LEAN)
         if not is_module(f.read_text()):
             errors.append(f"{rel}: not a module; every file under Asmalloc/ starts with `module`")
+        for n, line in enumerate(f.read_text().splitlines(), 1):
+            if INIT.search(re.sub(r'"([^"\\]|\\.)*"', '""', line).split("--")[0]):
+                errors.append(f"{rel}:{n}: an initializer, which would run when the emitter imports it")
         own = target_of(f.relative_to(LIB).with_suffix("").parts, targets)
         if own is None:
             continue

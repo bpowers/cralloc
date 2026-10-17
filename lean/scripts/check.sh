@@ -10,6 +10,9 @@ cd "$(dirname "$0")/.."
 python3 scripts/check_lean_imports.py
 python3 scripts/check_registrations.py
 lake build --log-level=warning
+# Replays every module through the kernel: a declaration that skipped it
+# (`debug.skipKernelTC`) is rejected here.
+lake env leanchecker Asmalloc
 lake env lean --run Emit.lean --check "$@"
 python3 scripts/audit_negative.py
 # The negative test leaves the self-test built from the files it edited.

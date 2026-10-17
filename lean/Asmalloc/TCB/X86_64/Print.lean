@@ -57,12 +57,14 @@ def MemOp.str8 (m : MemOp) : String := s!"BYTE PTR {m.addr}"
 def Src.str : Src → String
   | .reg r => r.name
   | .imm v => toString v.toInt
+  | .immP n => "{" ++ n ++ "}"
   | .mem m => m.str
 
 /-- A 32-bit source operand. -/
 def Src.str32 : Src → String
   | .reg r => r.name32
   | .imm v => toString v.toInt
+  | .immP n => "{" ++ n ++ "}"
   | .mem m => m.str32
 
 def AluOp.name : AluOp → String
@@ -104,7 +106,10 @@ def Instr.asm : Instr → List String
   | .shiftx op d r c => [s!"{op.name} {d.name}, {r.name}, {c.name}"]
   -- `movabs` always selects the `REX.W + B8+rd io` encoding, whatever the value.
   | .movImm64 d v => [s!"movabs {d.name}, {v.toInt}"]
-  | .leaSym d name off => [s!"lea {d.name}, [rip + {name}{symOffset off}]"]
+  | .leaSym d name off offP =>
+    [s!"lea {d.name}, [rip + {name}{symOffset off}{(offP.map (" + {" ++ · ++ "}")).getD ""}]"]
+  | .movGot d name => [s!"mov {d.name}, QWORD PTR [rip + {name}@GOTPCREL]"]
+  | .leaRseqCs d => [s!"lea {d.name}, [rip + 3f]"]
   | .lea d m => [s!"lea {d.name}, {m.addr}"]
   | .mul r => [s!"mul {r.name}"]
   | .imul d r => [s!"imul {d.name}, {r.name}"]
@@ -135,7 +140,7 @@ number (`State.offset`); only these may be printed. -/
 def MemOp.scaleOk (m : MemOp) : Bool := m.scale == 1 || m.scale == 2 || m.scale == 4 || m.scale == 8
 
 def Src.memOps : Src → List MemOp
-  | .reg _ | .imm _ => []
+  | .reg _ | .imm _ | .immP _ => []
   | .mem m => [m]
 
 /-- The memory operands of an instruction. -/
@@ -144,20 +149,30 @@ def Instr.memOps : Instr → List MemOp
   | .cmov _ _ s => s.memOps
   | .store m _ | .store32 m _ | .movzx8 _ m | .store8 m _ | .lea _ m => [m]
   | .inc _ | .dec _ | .shift32 .. | .bswap32 _ | .rorx32 .. | .andn32 .. | .rorx .. | .andn .. | .bswap _
-  | .shift .. | .shiftCl .. | .shiftx .. | .movImm64 .. | .leaSym .. | .mul _ | .imul ..
+  | .shift .. | .shiftCl .. | .shiftx .. | .movImm64 .. | .leaSym .. | .movGot .. | .leaRseqCs _ | .mul _ | .imul ..
   | .push _ | .pop .. | .alloc _ | .free _ => []
 
+/-- The lines of an instruction, as `TCB/Rust.lean` writes them: those of
+`asm`, but for the instructions that name a symbol or a compile-time
+constant, whose lines refer to it as an operand of the `asm!` block
+(`Piece.ref`). `asm` gives the same text, for reading. -/
+def Instr.lines : Instr → List Line
+  | .leaSym d name off offP =>
+    [.ops ([.text s!"lea {d.name}, [rip + ", .ref name, .text (symOffset off)] ++
+      (match offP with | some p => [.text " + ", .ref p] | none => []) ++ [.text "]"])]
+  | .movGot d name => [.ops [.text s!"mov {d.name}, QWORD PTR [rip + ", .ref name, .text "@GOTPCREL]"]]
+  | .mov d (.immP n) => [.ops [.text s!"mov {d.name}, ", .ref n]]
+  | .alu op d (.immP n) => [.ops [.text s!"{op.name} {d.name}, ", .ref n]]
+  | .mov32 d (.immP n) => [.ops [.text s!"mov {d.name32}, ", .ref n]]
+  | .alu32 op d (.immP n) => [.ops [.text s!"{op.name} {d.name32}, ", .ref n]]
+  | i => i.asm.map .text
+
 def printer : Printer isa where
-  instr := Instr.asm
+  instr := Instr.lines
   branch c l := s!"j{c.name} {l}"
   jump l := s!"jmp {l}"
   ret := ["ret"]
   call := "call"
-  -- The static's RIP-relative address, which `TCB/Rust.lean` writes with
-  -- its symbol; `asm` gives the same text, for reading.
-  symLines
-    | .leaSym d name off => some [.sym s!"lea {d.name}, " (.ripRel off) name]
-    | _ => none
   /- Every function starts on a 64-byte boundary, a cache line: the unit
   AMD's op cache builds its entries from (Zen 4 Software Optimization Guide,
   57647, §2.9.1), and one of the 16- and 32-byte windows Intel's decoders and
@@ -165,13 +180,29 @@ def printer : Printer isa where
   relative to them is fixed by the function alone: a change to other code
   cannot move them, and with them its performance. -/
   funcAlign := [".p2align 6"]
+  /- glibc registers its threads' rseq areas with the signature `0x53053053`
+  on x86 (`RSEQ_SIG`, sysdeps/unix/sysv/linux/x86/bits/rseq.h), which the
+  kernel requires in the four bytes before an abort handler. The three bytes
+  before it make the seven decode as `ud1 edi, DWORD PTR [rip + 0x53053053]`
+  (`0F B9 /r`, SDM Vol. 2 "UD"), as the kernel's selftests do, so that a
+  disassembler stays in step and a stray jump into them traps. -/
+  rseqSig := some [".byte 0x0f, 0xb9, 0x3d", ".long 0x53053053"]
+  plainStore | .store .. => true | _ => false
+  /- A compare or a test and the conditional branch after it decode as one
+  macro-op (AMD Software Optimization Guide for Zen 5, 58455, "Branch
+  Fusion"; Intel's "macro-fusion"). -/
+  fuses | .alu .cmp .. | .alu .test .. | .alu32 .cmp .. | .alu32 .test .. => true | _ => false
+  /- An out-of-line routine's hot path fits in what the processor delivers
+  during the four cycles a call and return take (docs/research/zen5-roofline.md,
+  section 6): 24 fused micro-ops. -/
+  uopLimit := some 24
   unencodable i := match i with
     -- `lea` computes an offset, which a segment does not change (`State.offset`);
     -- one written on it is a mistake.
     | .lea _ { seg := some _, .. } => some "a segment override on `lea`, which computes an offset"
     -- The constant joins the linker's 32-bit displacement (`exec`); refuse one an
     -- assembler might truncate before the linker sees it, as for `dispOk`.
-    | .leaSym _ name off =>
+    | .leaSym _ name off _ =>
       if -2 ^ 31 ≤ off ∧ off < 2 ^ 31 then none
       else some s!"the offset {off} from {name} does not fit in 32 bits"
     | _ => match i.memOps.filter (!·.dispOk), i.memOps.filter (!·.scaleOk) with

@@ -41,22 +41,43 @@ theorem Contract.Implies.sat_left {M : ISA} {k k' : Contract M} (h : k.Implies k
 theorem Contract.Implies.refl {M : ISA} {k : Contract M} (h : ∃ s, k.pre s) : k.Implies k :=
   ⟨fun _ h => h, fun _ _ _ h => h, h⟩
 
+/-- `Verified` under a contract `k'` that asks no more than `k`. What a
+restartable sequence must satisfy (`RseqOk`) does not follow from `k`'s,
+since a retry must meet `k'`'s precondition: `hr`, for code with no
+sequence, is proved by default. -/
 theorem Verified.of_implies {T : Target} {c : Prog T.isa} {k k' : Contract T.isa}
-    (h : Verified T c k) (hk : k.Implies k') : Verified T c k' := by
-  obtain ⟨hc, -⟩ := h
-  refine ⟨fun s hs => ?_, hk.sat⟩
-  obtain ⟨s', he, ha, hp⟩ := hc s (hk.pre s hs)
-  exact ⟨s', he, ha, hk.post s s' hs hp⟩
+    (h : Verified T c k) (hk : k.Implies k')
+    (hx : ∀ t s s', k'.pre s → k.exit t s s' → k'.exit t s s')
+    (hr : ∀ s, k'.pre s → RseqOk T c k' s := by exact fun _ _ => trivial)
+    (hw : c.outcomes = [] := by exact rfl) : Verified T c k' := by
+  obtain ⟨hc, -, -⟩ := h
+  refine ⟨fun s hs => ?_, hr, hk.sat, fun o ho => by rw [hw] at ho; cases ho⟩
+  rcases hc s (hk.pre s hs) with ⟨s', he, ha, hp⟩ | ⟨t, s', he, ha, hx'⟩
+  · exact .inl ⟨s', he, ha, hk.post s s' hs hp⟩
+  · exact .inr ⟨t, s', he, ha, hx t s s' hs hx'⟩
+
+/-- Code without a restartable sequence has nothing to check where one
+could be aborted. -/
+theorem RseqOk.of_ne {T : Target} {c : Prog T.isa} {k : Contract T.isa} {s : T.isa.State}
+    (h : ∀ arm body, c ≠ .rseq arm body) : RseqOk T c k s := by
+  unfold RseqOk; split
+  · exact absurd rfl (h _ _)
+  · trivial
 
 /-- `Verified` from the correctness of `c` under a contract `k` that `k'`
 implies: the proof of a function against a contract of its own, moved to its
-shared contract. -/
+shared contract. `hr` and `hw` are proved by default for code with no
+restartable sequence and no branch, which has no outcome to witness beyond
+the satisfiability that `Contract.Implies` includes. -/
 theorem Verified.of_correct {T : Target} {c : Prog T.isa} {k k' : Contract T.isa}
     (hc : ∀ s, k.pre s → ∃ s', Exec T.isa c s s' ∧ T.abiPreserved s s' ∧ k.post s s')
-    (hk : k.Implies k') : Verified T c k' := by
-  refine ⟨fun s hs => ?_, hk.sat⟩
+    (hk : k.Implies k')
+    (hr : ∀ s, k'.pre s → RseqOk T c k' s := by exact fun _ _ => trivial)
+    (hw : c.outcomes = [] := by exact rfl) :
+    Verified T c k' := by
+  refine ⟨fun s hs => ?_, hr, hk.sat, fun o ho => by rw [hw] at ho; cases ho⟩
   obtain ⟨s', he, ha, hp⟩ := hc s (hk.pre s hs)
-  exact ⟨s', he, ha, hk.post s s' hs hp⟩
+  exact .inl ⟨s', he, ha, hk.post s s' hs hp⟩
 
 theorem Region.disjoint_comm {a b : Region} : a.Disjoint b ↔ b.Disjoint a :=
   ⟨Region.Disjoint.symm, Region.Disjoint.symm⟩
@@ -137,17 +158,18 @@ def Sig.check {M : ISA} (A : Abi M) (sig : Sig) (writeArgs : Bool) (stack : Nat)
 /-- The rest of the precondition of `sig.contract A pre post writeArgs stack`
 at `s`: `A.wf` and `pre`. -/
 def Sig.wfPre {M : ISA} (A : Abi M) (sig : Sig) (pre : Curry (sig.words A.ptrBits) (Mem → Prop))
-    (stack : Nat) (s : M.State) : Prop :=
+    (stack : Nat) (x : Sig.Extra M) (s : M.State) : Prop :=
   let widths := (sig.words A.ptrBits).map (·.bits A.ptrBits)
   match A.args widths with
   | none => False
-  | some vals => A.wf widths stack s ∧ Curry.apply (sig.words A.ptrBits) pre (vals s) (A.mem s)
+  | some vals =>
+    A.wf widths stack s ∧ Curry.apply (sig.words A.ptrBits) pre (vals s) (A.mem s) ∧ x.pre s
 
 theorem Sig.contract_pre_of_check {M : ISA} {A : Abi M} {sig : Sig}
     {pre : Curry (sig.words A.ptrBits) (Mem → Prop)} {post : sig.Post A.ptrBits} {writeArgs : Bool}
-    {stack : Nat} {s : M.State}
-    (hc : Sig.check A sig writeArgs stack s = true) (h : Sig.wfPre A sig pre stack s) :
-    (sig.contract A pre post writeArgs stack).pre s := by
+    {stack : Nat} {x : Sig.Extra M} {s : M.State}
+    (hc : Sig.check A sig writeArgs stack s = true) (h : Sig.wfPre A sig pre stack x s) :
+    (sig.contract A pre post writeArgs stack x).pre s := by
   simp only [Sig.check] at hc
   simp only [Sig.wfPre] at h
   simp only [Sig.contract]
