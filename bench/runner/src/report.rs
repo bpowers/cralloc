@@ -24,6 +24,9 @@ struct Run {
     alloc: String,
     control_of: Option<String>,
     value: f64,
+    /// The run's cgroup `memory.peak`, which ranks memory; NaN in results from before the
+    /// runner recorded it.
+    cg_peak: f64,
     rss_peak: f64,
     rss_mean: f64,
     huge_peak: f64,
@@ -56,6 +59,8 @@ struct Line {
     values: Vec<f64>,
     med: f64,
     spread: f64,
+    cg_peak: Vec<f64>,
+    cg_peak_med: f64,
     rss_peak: Vec<f64>,
     rss_peak_med: f64,
     rss_mean_med: f64,
@@ -149,6 +154,7 @@ fn load(files: &[PathBuf], quiet_only: bool) -> (Vec<String>, Vec<String>, BTree
                 alloc,
                 control_of: v["control_of"].as_str().map(String::from),
                 value: p["value"].as_f64().unwrap_or(f64::NAN),
+                cg_peak: v["cgroup"]["peak"].as_f64().unwrap_or(f64::NAN),
                 rss_peak: m["rss_peak"].as_f64().unwrap_or(f64::NAN),
                 rss_mean: m["rss_mean"].as_f64().unwrap_or(f64::NAN),
                 huge_peak: m["anon_huge_peak"].as_f64().unwrap_or(f64::NAN),
@@ -170,6 +176,7 @@ fn lines_of(g: &Group, alloc_order: &[String]) -> Vec<Line> {
         let col = |f: fn(&Run) -> f64| rs.iter().map(|r| f(r)).collect::<Vec<f64>>();
         let values = col(|r| r.value);
         let rss_peak = col(|r| r.rss_peak);
+        let cg_peak = col(|r| r.cg_peak);
         let mut extra = BTreeMap::new();
         for k in rs[0].extra.keys() {
             let xs: Vec<f64> = rs.iter().filter_map(|r| r.extra.get(k).copied()).collect();
@@ -182,6 +189,8 @@ fn lines_of(g: &Group, alloc_order: &[String]) -> Vec<Line> {
             med: median(&values),
             spread: half_iqr_rel(&values),
             values,
+            cg_peak_med: median(&cg_peak),
+            cg_peak,
             rss_peak_med: median(&rss_peak),
             rss_peak,
             rss_mean_med: median(&col(|r| r.rss_mean)),
@@ -246,7 +255,7 @@ fn margin(second: &Option<RunnerUp>) -> String {
 pub fn report(o: &Options) {
     let (order, alloc_order, groups) = load(&o.files, o.quiet_only);
     let mut controls: Vec<(String, f64, (f64, f64))> = Vec::new();
-    println!("| Workload | Metric | Fastest | Margin | Least peak RSS | Margin | Control |");
+    println!("| Workload | Metric | Fastest | Margin | Least memory (cgroup peak) | Margin | Control |");
     println!("|---|---|---|---|---|---|---|");
     for (i, key) in order.iter().enumerate() {
         if o.filter.as_ref().is_some_and(|f| !key.contains(f.as_str())) {
@@ -258,7 +267,14 @@ pub fn report(o: &Options) {
         let ranked: Vec<&Line> =
             ls.iter().filter(|l| !g.runs.iter().any(|r| r.alloc == l.alloc && r.control_of.is_some())).collect();
         let fast = best(&ranked, |l| (l.med, &l.values), g.higher_better, i as u64);
-        let small = best(&ranked, |l| (l.rss_peak_med, &l.rss_peak), false, i as u64 + 1);
+        // Results from before the runner recorded cgroup peaks rank on VmHWM, and say so.
+        let cgroup = g.runs.iter().all(|r| r.cg_peak.is_finite());
+        let small = if cgroup {
+            best(&ranked, |l| (l.cg_peak_med, &l.cg_peak), false, i as u64 + 1)
+        } else {
+            best(&ranked, |l| (l.rss_peak_med, &l.rss_peak), false, i as u64 + 1)
+        };
+        let small_by = if cgroup { "" } else { " (by VmHWM)" };
         let mut control = "-".to_string();
         for l in &ls {
             let Some(orig) = g.runs.iter().find(|r| r.alloc == l.alloc).and_then(|r| r.control_of.clone()) else {
@@ -279,7 +295,7 @@ pub fn report(o: &Options) {
             }
         }
         println!(
-            "| {key} | {} | {} | {} | {} | {} | {control} |",
+            "| {key} | {} | {} | {} | {}{small_by} | {} | {control} |",
             g.metric,
             fast.map(|f| f.0.alloc.as_str()).unwrap_or("-"),
             fast.map(|f| margin(&f.1)).unwrap_or_default(),
@@ -298,13 +314,13 @@ pub fn report(o: &Options) {
             let extra_keys: Vec<String> = ls.first().map(|l| l.extra.keys().cloned().collect()).unwrap_or_default();
             println!("\n### {key}\n");
             println!(
-                "| Allocator | n | {} ({}) | ± | vs {} | Peak RSS MiB | Mean RSS MiB | THP MiB | Faults |{}",
+                "| Allocator | n | {} ({}) | ± | vs {} | Cgroup peak MiB | VmHWM MiB | Mean RSS MiB | THP MiB | Faults |{}",
                 g.metric,
                 if g.higher_better { "higher is better" } else { "lower is better" },
                 o.reference,
                 extra_keys.iter().map(|k| format!(" {k} |")).collect::<String>()
             );
-            println!("|---|---:|---:|---:|---:|---:|---:|---:|---:|{}", "---:|".repeat(extra_keys.len()));
+            println!("|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|{}", "---:|".repeat(extra_keys.len()));
             for l in &ls {
                 let vs = reference.map(|r| pct(l.med / r)).unwrap_or_else(|| "-".into());
                 let ex: String = extra_keys
@@ -319,11 +335,12 @@ pub fn report(o: &Options) {
                     })
                     .collect();
                 println!(
-                    "| {} | {} | {} | {:.1}% | {vs} | {} | {} | {} | {} |{ex}",
+                    "| {} | {} | {} | {:.1}% | {vs} | {} | {} | {} | {} | {} |{ex}",
                     l.alloc,
                     l.n,
                     fmt(l.med),
                     l.spread * 100.0,
+                    mib(l.cg_peak_med),
                     mib(l.rss_peak_med),
                     mib(l.rss_mean_med),
                     mib(l.huge_med),
@@ -342,6 +359,16 @@ pub fn report(o: &Options) {
     let valid: usize = groups.values().map(|g| g.runs.len()).sum();
     let busy: usize = groups.values().map(|g| g.busy).sum();
     println!("\n{valid} valid runs used, {busy} valid runs left out as busy, {invalid} invalid.");
+    println!(
+        "Memory ranks on each run's cgroup peak (anonymous memory, page tables, and file pages the run was first to \
+         read); VmHWM includes shared libraries. Mean RSS is sampled over the whole process."
+    );
+    if order.iter().any(|k| k.contains("all-alloc") || k.contains("free-only")) {
+        println!(
+            "all-alloc: every thread allocates once before the work, as a service's threads do. free-only: the \
+             consumers never allocate, as a dedicated drop thread; jemalloc gives such a thread no cache."
+        );
+    }
     if !controls.is_empty() {
         let with_ci = controls.iter().filter(|(_, _, (lo, _))| !lo.is_nan()).count();
         let off: Vec<&(String, f64, (f64, f64))> =

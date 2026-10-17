@@ -388,7 +388,7 @@ fn run_one(job: &Job, a: &Allocator, cx: &Context) -> Value {
     };
     let reported = self_report.as_ref().map(|r| {
         let s = |k: &str| r[k].as_str().unwrap_or("").to_string();
-        (s("allocator"), s("mode"), s("library"))
+        (s("allocator"), s("mode"), s("library"), s("version"))
     });
     let reported_peak = self_report.as_ref().and_then(|r| r["vm_hwm"].as_u64());
     let mut problems = Vec::new();
@@ -412,9 +412,16 @@ fn run_one(job: &Job, a: &Allocator, cx: &Context) -> Value {
     }
     match &reported {
         None => problems.push("no allocator report".into()),
-        Some((alloc, mode, library)) => {
+        Some((alloc, mode, library, version)) => {
             if let Some(p) = library_problem(job.mode, a, library) {
                 problems.push(p);
+            }
+            // A preload run reports the preloaded library's version, which may differ.
+            if job.mode == Mode::Native
+                && let Some(e) = &a.expect.version
+                && e != version
+            {
+                problems.push(format!("expected version {e}, process reported {version:?}"));
             }
             if let Some(e) = &a.expect.allocator
                 && e != alloc
@@ -616,7 +623,10 @@ fn header(o: &Options, allocs: &[Allocator], jobs: &[Job], session: &str) -> Val
         "baselines": o.baselines,
         "allocators": allocs.iter().map(|a| json!({
             "name": a.name, "feature": a.feature, "preload": a.preload, "env": a.env,
-            "expect": { "allocator": a.expect.allocator, "mode": a.expect.mode, "library": a.expect.library },
+            "expect": {
+                "allocator": a.expect.allocator, "mode": a.expect.mode, "library": a.expect.library,
+                "version": a.expect.version,
+            },
             "control_of": a.control_of,
         })).collect::<Vec<_>>(),
         "jobs": jobs.iter().map(|j| json!({ "id": j.id, "group": j.group, "mode": j.mode.name() })).collect::<Vec<_>>(),

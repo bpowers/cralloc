@@ -2,7 +2,10 @@
 //!
 //! - `pipeline`: a chain of `threads` stages. The first allocates; each middle stage frees
 //!   what it receives and allocates a replacement for the next stage, as a stream processor
-//!   converting messages does; the last only frees. Objects flow one way.
+//!   converting messages does; the last only frees. Objects flow one way. With `chains=N`,
+//!   N such chains run side by side, independently, on consecutive CPUs of `BENCH_CPUS`
+//!   (chain `c` on threads `c * threads ..`); the primary metric is then per chain, so that
+//!   chains that do not interfere score as one alone.
 //! - `exchange`: a ring of `threads`, each allocating for the next and freeing what the
 //!   previous sent. Every thread allocates and frees at the same rate but never frees its
 //!   own objects.
@@ -13,9 +16,15 @@
 //! Each thread first runs a tenth of the work unmeasured, then, after all have, the measured
 //! run.
 //!
+//! Before any work, each thread allocates and frees one object (`prime=yes`, the default), as
+//! every thread of a real service does at some point. `prime=no` leaves the threads that
+//! only free (the pipeline's last stage, mpmc's consumers) without ever allocating; jemalloc
+//! gives such a thread no thread cache, so the two settings rank it very differently, and
+//! the suite runs both under different names.
+//!
 //! Parameters: `threads` (or `producers` and `consumers`), `objects` per stage or per
 //! producer set (default 10M), `sizes` (see `SizeMix`), `inflight` (queue capacity in objects
-//! per link, default 4096).
+//! per link, default 4096), `prime`, and for `pipeline`, `chains`.
 use crate::obj::{Obj, consume, make};
 use bench_harness::report::{Measure, Phase};
 use bench_harness::{Args, Better, Counters, Cpus, Report, Rng, SizeMix};
@@ -90,38 +99,62 @@ const WARMUP_DIVISOR: usize = 10;
 
 /// Runs `body(i, phase)` on `n` threads, thread `i` pinned to `cpus.nth(i)`: first phase 0,
 /// the warm-up, then, once every thread has finished it, phase 1, which is measured from
-/// the moment all threads are released until the last one finishes.
-fn run_threads(cpus: &Cpus, n: usize, counters: &Counters, body: impl Fn(usize, usize) + Sync) -> Phase {
+/// the moment all threads are released until the last one finishes. Also returns, per thread,
+/// the nanoseconds from that release until the thread finished its measured work.
+fn run_threads(
+    cpus: &Cpus,
+    n: usize,
+    counters: &Counters,
+    prime: bool,
+    body: impl Fn(usize, usize) + Sync,
+) -> (Phase, Vec<u64>) {
     let warmed = Barrier::new(n + 1);
     let go = AtomicBool::new(false);
+    let released = std::sync::OnceLock::<std::time::Instant>::new();
     std::thread::scope(|s| {
         let handles: Vec<_> = (0..n)
             .map(|i| {
-                let (warmed, go, body) = (&warmed, &go, &body);
+                let (warmed, go, body, released) = (&warmed, &go, &body, &released);
                 s.spawn(move || {
                     cpus.pin(i);
+                    if prime {
+                        // The compiler may remove an allocation that does not escape, so the
+                        // object goes through black_box.
+                        let o = std::hint::black_box(make(16, i as u64));
+                        // SAFETY: make just returned it.
+                        unsafe { consume(o, Some(i as u64)) };
+                    }
                     body(i, 0);
                     warmed.wait();
                     while !go.load(Acquire) {
                         std::hint::spin_loop();
                     }
                     body(i, 1);
+                    let end = std::time::Instant::now();
+                    end.duration_since(*released.get().expect("set before go")).as_nanos() as u64
                 })
             })
             .collect();
         warmed.wait();
         let m = Measure::start(counters);
+        released.set(std::time::Instant::now()).expect("set once");
         go.store(true, Release);
-        for h in handles {
-            h.join().unwrap();
-        }
-        m.stop()
+        let per_thread = handles.into_iter().map(|h| h.join().unwrap()).collect();
+        (m.stop(), per_thread)
     })
 }
 
 fn size_mix(args: &Args) -> SizeMix {
     let s = args.str("sizes", "small");
     SizeMix::parse(&s).unwrap_or_else(|| panic!("sizes={s} is not a size mix"))
+}
+
+fn prime(args: &Args) -> bool {
+    match args.str("prime", "yes").as_str() {
+        "yes" => true,
+        "no" => false,
+        p => panic!("prime={p} is not yes or no"),
+    }
 }
 
 fn round_to_batch(n: u64) -> usize {
@@ -133,30 +166,49 @@ fn per_phase(n: usize) -> [usize; 2] {
     [round_to_batch((n / WARMUP_DIVISOR) as u64), n]
 }
 
-fn finish(name: &str, args: &Args, phase: &Phase, allocations: usize, threads: usize) {
+/// Reports a run. `per` divides the wall time for the primary metric: all allocations, or
+/// one chain's when several independent chains ran. `chains_ns` is each chain's own time per
+/// allocation (empty for one chain), to show which chain set the pace.
+fn finish(
+    name: &str,
+    args: &Args,
+    phase: &Phase,
+    allocations: usize,
+    threads: usize,
+    per: (&str, usize),
+    chains_ns: &[f64],
+) {
     let cycles = phase.counters.get("cycles").expect("the cycles counter could not be read");
-    Report::new(name, args)
-        .param("threads", threads as u64)
+    let mut r = Report::new(name, args);
+    r.param("threads", threads as u64)
+        .param("prime", prime(args))
         .phase("run", phase)
         .metric("allocations", allocations as u64)
         // Cycles over all threads, spinning included; frequency-independent, unlike the
         // wall-time ranking.
         .metric("cycles_per_alloc", cycles as f64 / allocations as f64)
-        .primary("ns/alloc", phase.wall_ns as f64 / allocations as f64, Better::Lower)
-        .emit();
+        .primary(per.0, phase.wall_ns as f64 / per.1 as f64, Better::Lower);
+    if !chains_ns.is_empty() {
+        r.metric("chain_ns_per_alloc", chains_ns.to_vec());
+    }
+    r.emit();
 }
 
 pub fn pipeline(args: &Args) {
     let cpus = Cpus::from_env();
     let stages = args.usize("threads", 2);
+    let chains = args.usize("chains", 1);
     assert!(stages >= 2, "a pipeline needs at least two stages");
+    assert!(chains >= 1, "chains must be at least 1");
+    let links = stages - 1;
     let n = per_phase(round_to_batch(args.num("objects", 10_000_000)));
     let (mix, inflight) = (size_mix(args), args.usize("inflight", 4096));
     let counters = Counters::region();
-    let rings: [Vec<Ring>; 2] = std::array::from_fn(|_| (0..stages - 1).map(|_| Ring::new(inflight)).collect());
-    let phase = run_threads(&cpus, stages, &counters, |i, ph| {
-        let (rings, n) = (&rings[ph], n[ph]);
-        let mut rng = Rng::new((ph * 1000 + i) as u64 + 1);
+    let rings: [Vec<Ring>; 2] = std::array::from_fn(|_| (0..chains * links).map(|_| Ring::new(inflight)).collect());
+    let (phase, thread_ns) = run_threads(&cpus, chains * stages, &counters, prime(args), |t, ph| {
+        let (chain, i) = (t / stages, t % stages);
+        let (rings, n) = (&rings[ph][chain * links..(chain + 1) * links], n[ph]);
+        let mut rng = Rng::new((ph * 1000 + t) as u64 + 1);
         let input = i.checked_sub(1).map(|j| &rings[j]);
         let output = rings.get(i);
         let mut batch = [Obj::NULL; BATCH];
@@ -175,11 +227,11 @@ pub fn pipeline(args: &Args) {
             };
             for (k, slot) in batch.iter_mut().enumerate().take(take) {
                 if let Some(r) = input {
-                    // SAFETY: the previous stage made this object and handed it to us.
-                    unsafe { consume(r.get(tail + k)) };
+                    // SAFETY: the previous stage, thread t - 1, made this object for us.
+                    unsafe { consume(r.get(tail + k), Some(t as u64 - 1)) };
                 }
                 if output.is_some() {
-                    *slot = make(mix.sample(&mut rng), i as u64);
+                    *slot = make(mix.sample(&mut rng), t as u64);
                 }
             }
             if let Some(r) = input {
@@ -191,7 +243,15 @@ pub fn pipeline(args: &Args) {
             }
         }
     });
-    finish("pipeline", args, &phase, n[1] * (stages - 1), stages);
+    let per_chain = n[1] * links;
+    let per = if chains == 1 { ("ns/alloc", per_chain) } else { ("ns/alloc per chain", per_chain) };
+    // A chain is done when its last stage is.
+    let chains_ns: Vec<f64> = if chains == 1 {
+        vec![]
+    } else {
+        thread_ns.chunks(stages).map(|c| *c.iter().max().unwrap() as f64 / per_chain as f64).collect()
+    };
+    finish("pipeline", args, &phase, per_chain * chains, chains * stages, per, &chains_ns);
 }
 
 pub fn exchange(args: &Args) {
@@ -203,7 +263,7 @@ pub fn exchange(args: &Args) {
     let (mix, inflight) = (size_mix(args), args.usize("inflight", 4096));
     let counters = Counters::region();
     let rings: [Vec<Ring>; 2] = std::array::from_fn(|_| (0..k).map(|_| Ring::new(inflight)).collect());
-    let phase = run_threads(&cpus, k, &counters, |i, ph| {
+    let (phase, _) = run_threads(&cpus, k, &counters, prime(args), |i, ph| {
         let (rings, n) = (&rings[ph], n[ph]);
         let mut rng = Rng::new((ph * 1000 + i) as u64 + 1);
         let (out, inp) = (&rings[i], &rings[(i + k - 1) % k]);
@@ -222,7 +282,7 @@ pub fn exchange(args: &Args) {
             if avail > 0 {
                 for j in 0..avail {
                     // SAFETY: the previous thread in the ring made this object for us.
-                    unsafe { consume(inp.get(tail + j)) };
+                    unsafe { consume(inp.get(tail + j), Some(((i + k - 1) % k) as u64)) };
                 }
                 tail += avail;
                 inp.release(tail);
@@ -233,7 +293,7 @@ pub fn exchange(args: &Args) {
             }
         }
     });
-    finish("exchange", args, &phase, n[1] * k, k);
+    finish("exchange", args, &phase, n[1] * k, k, ("ns/alloc", n[1] * k), &[]);
 }
 
 pub fn mpmc(args: &Args) {
@@ -247,7 +307,7 @@ pub fn mpmc(args: &Args) {
     let counters = Counters::region();
     let queues: [ArrayQueue<[Obj; BATCH]>; 2] = std::array::from_fn(|_| ArrayQueue::new((inflight / BATCH).max(2)));
     let done = [AtomicUsize::new(0), AtomicUsize::new(0)];
-    let phase = run_threads(&cpus, p + c, &counters, |i, ph| {
+    let (phase, _) = run_threads(&cpus, p + c, &counters, prime(args), |i, ph| {
         let (q, done, batches) = (&queues[ph], &done[ph], batches[ph]);
         let total = batches * p;
         if i < p {
@@ -266,8 +326,9 @@ pub fn mpmc(args: &Args) {
             loop {
                 if let Some(b) = q.pop() {
                     for o in b {
-                        // SAFETY: a producer made this object and gave up ownership.
-                        unsafe { consume(o) };
+                        // SAFETY: a producer made this object and gave up ownership. Any of
+                        // them may have, so only the size is checked.
+                        unsafe { consume(o, None) };
                     }
                     done.fetch_add(1, AcqRel);
                 } else if done.load(Acquire) >= total {
@@ -278,5 +339,6 @@ pub fn mpmc(args: &Args) {
             }
         }
     });
-    finish("mpmc", args, &phase, batches[1] * BATCH * p, p + c);
+    let allocations = batches[1] * BATCH * p;
+    finish("mpmc", args, &phase, allocations, p + c, ("ns/alloc", allocations), &[]);
 }

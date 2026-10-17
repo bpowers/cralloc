@@ -13,6 +13,12 @@ links = "benchalloc"
 [features]
 mi = []        # mimalloc, as the `mimalloc` crate calls it (unsized mi_free)
 mi-sized = []  # the same, freeing with mi_free_size_aligned
+# The `mimalloc` crate itself, default features: the mimalloc that libmimalloc-sys bundles,
+# which is what a Rust program depending on it gets (older than third_party's).
+mi-crate = ["dep:mimalloc"]
+# asmalloc itself. `executable` reads glibc's __rseq_offset with one direct load, which is
+# right for the workload binaries, which are executables.
+asmalloc = ["dep:asmalloc", "asmalloc/executable"]
 # tikv-jemallocator itself, default features: its static, prefixed jemalloc build, which is
 # what a Rust service that depends on it gets.
 je = ["dep:tikv-jemallocator"]
@@ -21,3 +27,5 @@ tc = []       # google/tcmalloc, as `tcmalloc-better` calls it (sized delete)
 [dependencies]
 libc.workspace = true
 tikv-jemallocator = { version = "0.6", optional = true }
+mimalloc = { version = "0.1.52", optional = true }
+asmalloc = { path = "../../crates/asmalloc", optional = true }
