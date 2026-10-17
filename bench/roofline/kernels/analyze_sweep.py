@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Summarize `roofline-kernels routines sweep` output against each routine's instruction layout.
 
-    analyze_sweep.py SWEEP_OUTPUT [BINARY]
+    analyze_sweep.py SWEEP_OUTPUT [BINARY] [--summary]
 
 For every variant and routine, prints the offsets whose call pair or batch is slower than the
 variant's fastest cell by more than half a cycle, and for each bad offset how many 64-byte lines
@@ -12,8 +12,9 @@ import re
 import subprocess
 import sys
 
-out = open(sys.argv[1]).read()
-binary = sys.argv[2] if len(sys.argv) > 2 else "target/release/roofline-kernels"
+args = [a for a in sys.argv[1:] if not a.startswith("--")]
+out = open(args[0]).read()
+binary = args[1] if len(args) > 1 else "target/release/roofline-kernels"
 
 
 def layout(sym):
@@ -41,6 +42,34 @@ def describe(insns, k):
     tail = [t.split()[0] for o, n, t in insns if o + n > last]
     return lines, end - last, tail
 
+
+def summary():
+    """One row per variant: sizes, cycles with each routine at offset 0 (the other split), the
+    fastest cell, and how many of the 64 offsets are within half a cycle of it."""
+    print(f"{'variant':8} {'pop B/u':>8} {'push B/u':>8}  {'@0 pair':>9} {'@0 batch':>9}  "
+          f"{'best':>11}  {'fast pop':>8} {'fast push':>9}  (pop/push; fast = pair and batch)")
+    for block in re.split(r"(?m)^sweep ", out)[1:]:
+        head, *rows = block.strip().splitlines()
+        v = head.split(":")[0]
+        m = re.search(r"pop (\d+) B (\d+) uops, push (\d+) B (\d+) uops", head)
+        cells = {}
+        for r in rows[1:]:
+            f = r.split()
+            if len(f) >= 9 and f[0].isdigit():
+                cells[int(f[0])] = [float(f[1]), float(f[3]), float(f[5]), float(f[7])]
+        if len(cells) < 64:
+            continue
+        best = [min(c[i] for c in cells.values()) for i in range(4)]
+        fast = [sum(1 for c in cells.values() if c[i] <= best[i] + 0.5 and c[i + 1] <= best[i + 1] + 0.5)
+                for i in (0, 2)]
+        c0 = cells[0]
+        print(f"{v:8} {m[1] + '/' + m[2]:>8} {m[3] + '/' + m[4]:>8}  {c0[0]:.2f}/{c0[2]:.2f} "
+              f"{c0[1]:.2f}/{c0[3]:.2f}  {best[0]:.2f}/{best[1]:.2f}  {fast[0]:>8} {fast[1]:>9}")
+
+
+if "--summary" in sys.argv:
+    summary()
+    sys.exit(0)
 
 for block in re.split(r"(?m)^sweep ", out)[1:]:
     head, *rows = block.strip().splitlines()

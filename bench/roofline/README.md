@@ -20,6 +20,7 @@ L3; override with the environment variables below.
 | `inline/` | Whether the allocator fast path is inlined at different kinds of call site, per cargo profile. | `./check.py [variant ...]` |
 | `oscost/` | Cost of mmap, page faults, the madvise family, mprotect, guard pages and zeroing. | `cargo run --release` |
 | `xcore/` | Cost of moving a cache line between cores. | `cargo run --release` |
+| `toolchain/` | The relocation a direct load of glibc's `__rseq_offset` gets, in an executable and a shared library, and the code rustc generates around an `asm!` block that calls. | `./check.sh` |
 
 ## kernels
 

@@ -23,6 +23,7 @@ Contents
 10. Existing allocators
 11. Design rules that follow
 12. Caveats
+13. The proved routines: encoding and placement
 
 ## 1. Summary
 
@@ -477,3 +478,218 @@ the ranking.
   mechanism; they are not a model of a server.
 - The front-end and forwarding explanations are inferred from the measurements, not taken
   from documentation.
+
+## 13. The proved routines: encoding and placement
+
+Measured 2026-10-17 on the pop and push in `lean/generated/` (unchanged from commit e225460 to
+4eff6e5), with `bench/roofline/kernels` (`routines` mode, kernels emitted by
+`gen_routines.py`), `bench/roofline/rust-alloc/run_slab.sh` and
+`bench/roofline/toolchain/check.sh`. The question: which encoding and placement the generator
+should pin.
+
+Method. Each kernel copies a generated sequence instruction for instruction and changes one
+thing. All run real restartable sequences against glibc's registered area; no run saw an
+abort. Out-of-line routines are reached by direct calls with the class in `edi`, as a caller
+would. Each routine was swept over the 64 entry offsets of its line while the other routine was
+placed so that a line boundary splits it in half, a placement that was fast for every size.
+Kernels ran on CPU 2, the Rust stand-in on CPU 3, with their SMT siblings 18 and 19 at 0 to 2.5
+percent busy and CPU 3 at 0 to 4 percent during kernel runs; teammates were building on CPUs 5,
+7, 12 and 20. Load average 2 to 5 on 32 CPUs. Each cell is the fastest of three repetitions in
+each of three to five interleaved rounds, 10 or 20 million iterations. Pair and batch are the
+loops of section 2 with one call per operation, so 8.00 per pair is the floor (two calls).
+
+Noise. Two identical copies of the routines, at different addresses, gave the same value in
+every pair cell; two identical copies of the inline kernels agreed to 0.01. Rounds differed by
+0.00 to 0.05 in almost every cell. The exception is the batch loop: at a few offsets per routine
+where the pair loop is fast (up to 13 of about 40), a batch costs about one cycle more per
+pair. These cells move when the other routine moves or the binary is rebuilt, so they depend
+on addresses, not on the offset alone; the rules below ignore them. None fell at offset 0 for a routine of 76
+bytes or more.
+
+### Placement
+
+Generated out-of-line pop (89 bytes, 16 fused uops) and push (88 bytes, 16), cycles per call
+pair, in two sweeps (two builds) with two copies each:
+
+| Entry at 64n + k | Pop | Push |
+|---|---:|---:|
+| k = 0 to 39 (pop), 0 to 40 (push): the hot path stays in two lines | 8.00 | 8.00 |
+| k = 40 to 63 (pop), 41 to 63 (push): it reaches a third line | 9.00 | 9.00 |
+
+- Crossing one line boundary is free wherever it falls. Reaching a third line costs a cycle per
+  call, even when only the `ret` is there.
+- The offsets at which the routine ends exactly on a line boundary (39 and 40) are just the last
+  fast ones. Offset 0, where the generator puts them today, is fast in every loop and build.
+- Pop and push behave alike, and the boundary between fast and slow was identical in every
+  build and copy.
+- A short tail is different. At offset 0 the 67 to 71-byte variants below leave only their last
+  one to three instructions (3 to 7 bytes) in the second line, and cost 9.00 per pair and 10.00
+  per batch when both routines do. With only one of them placed so, the pair stays at 8.00 and
+  the batch costs 8.8 to 9.9. A 75-byte pop (11-byte tail) was slow at offset 0 in one batch
+  sweep; 74 bytes and up were not. This is the effect section 6 saw for a 61-byte function at
+  offsets 4 to 12.
+
+### Byte savings
+
+Each change alone and combined, at offset 0 (both routines) and split (both placed so a line
+boundary halves them), cycles per pair:
+
+| Variant | Pop B / uops | Push B / uops | Pair, at 0 | Batch, at 0 | Pair, split | Batch, split |
+|---|---:|---:|---:|---:|---:|---:|
+| As generated | 89 / 16 | 88 / 16 | 8.00 | 8.07 | 8.00 | 8.07 |
+| Short jumps to a stub after the `ret` | 81 / 16 | 80 / 16 | 8.00 | 8.07 | 8.00 | 8.07 |
+| Mask from the slab base, 16-bit table below `SLABS` | 87 / 15 | 86 / 15 | 8.00 | 8.07 | 8.00 | 8.07 |
+| Mask from the slab base, 8-byte entries below `SLABS` | 85 / 15 | 84 / 15 | 8.00 | 8.07 | 8.00 | 8.07 |
+| Registers without REX | 86 / 16 | 86 / 16 | 8.00 | 8.07 | 8.00 | 8.07 |
+| Merged address arithmetic | 88 / 16 | 87 / 16 | 8.00 | 8.07 | 8.00 | 8.07 |
+| All four (16-bit table) | 75 / 15 | 75 / 15 | 8.00 | 8.07 | 8.00 | 8.07 |
+| Short jumps, no REX, 8-byte table | 74 / 15 | 74 / 15 | 8.00 | 8.07 | 8.00 | 8.07 |
+| The same with the sign test | 70 / 15 | 70 / 15 | 9.00 | 10.00 | 8.00 | 8.07 |
+| The same with the direct `__rseq_offset` load | 71 / 14 | 71 / 14 | 9.00 | 10.00 | 8.00 | 8.07 |
+| Both | 67 / 14 | 67 / 14 | 9.00 | 10.00 | 8.00 | 8.07 |
+| All four, sign test and direct load | 68 / 14 | 68 / 14 | 9.00 | 10.00 | 8.00 | 8.07 |
+
+- No byte saving buys a cycle at a fast placement: through calls the call is the cost.
+  Several of them, combined, land in the 65 to 75-byte range where offset 0 is slow.
+- Taking the mask from the slab's base register removes a `lea` (one uop), which did not show
+  either. A 16-bit table needs a 66 prefix, so it saves 2 bytes, not more, and cannot hold the
+  masks of magazines of more than 8192 slots, which the specification allows (`MAG_LOG_MAX` 16).
+  Merged arithmetic puts an `add` on the path to the slab load.
+- Inference, not confirmed: a table of 8-byte entries exactly 4096 bytes below `SLABS` gives
+  each entry the page offset of its class's slab words. A copy 6144 bytes below, which cannot
+  alias, measured the same.
+
+### The sign test
+
+`test cpu, cpu; js` in place of `cmp cpu, 8192; jae`: 4 bytes shorter, the same uops. Out of
+line it measured the same as the compare at every fast placement (table above). Inline:
+
+| Inline pop and push | Uops | Pair | Batch |
+|---|---:|---:|---:|
+| As generated (pop counts the caller's null test) | 14 + 13 | 5.27 | 5.81 |
+| Sign test | 14 + 13 | 5.24 | 5.79 |
+| Direct `__rseq_offset` load | 13 + 12 | 4.23 | 5.18 |
+| Direct load and sign test | 13 + 12 | 4.32 | 5.53 |
+
+It buys nothing (with the direct load, the batch was 0.35 slower), and it gives up what the
+compare is for: with it, a CPU number of 8192 or more indexes beyond `SLABS`, so memory safety
+would rest on the kernel's CPU numbers, which the design avoids.
+
+### Reading `__rseq_offset` directly
+
+What the toolchain does (`toolchain/check.sh`): rustc 1.99.1 links with `cc -fuse-ld=lld` (LLD
+23.1.1), `-pie`, `-z relro -z now`. A `mov reg, [rip + __rseq_offset]` in an executable becomes
+an `R_X86_64_COPY` relocation: the linker reserves 8 bytes in `.bss.rel.ro`, and every
+reference, the GOT entry included, binds to that copy. GNU ld 2.46 does the same. In the
+running program the copy held the right value already in a `.preinit_array` function, the
+first user code that runs, and the `cpu_id` it locates matched `getcpu` in the main thread and
+a new one. That follows from glibc's start-up order (glibc source, `elf/rtld.c`): ld.so sets the
+offset in `init_tls`, before it relocates the program, and relocates the program before it runs
+any constructor or routes `malloc` to the program. In a shared library the same instruction
+does not link, with either linker: `relocation R_X86_64_PC32 cannot be used against symbol
+'__rseq_offset'; recompile with -fPIC`. A statically linked program was not tested (no static
+glibc on this machine); there the symbol is local and should need no relocation at all.
+
+Cost: one load and 3 bytes fewer, bringing the inline pop to 12 uops plus the caller's test and
+the push to 12. Inline, a pair costs 1.0 cycle less and a batch 0.6 (table above); under LTO a
+`Box` pair 0.85 less and a batch 0.4 to 0.5 less (below). Out of line it changes nothing.
+
+A crate cannot tell whether it will end up in an executable or a shared library, so the direct
+load has to be chosen by whoever builds the executable. If it is chosen wrongly, linking fails;
+it does not misbehave at run time.
+
+### Per-class out-of-line entries
+
+The inline sequences plus a `ret`, class and mask as immediates, no class argument: pop 80
+bytes and push 78, 14 uops each, against 89 and 88 bytes and 16 uops, and the caller no longer
+sets `edi`. In the kernels they cost the same as the generic routines (8.00 per pair, 8.07 per
+batch). Under LTO a `Box` pair through them costs 8.00 against 8.54 through the generic ones,
+and 6.80 inlined (5.95 with the direct load).
+
+### An inline pop that calls its slow path
+
+The pop jumps on a miss to a cold stub inside the same `asm!` block that calls the slow path
+and returns to the end of the sequence, so the caller has no null test.
+
+| | Pair | Batch |
+|---|---:|---:|
+| Kernels: as generated | 5.27 | 5.81 |
+| Kernels: slow path called from the block | 5.21 | 5.85 |
+| Kernels: the same, with the direct load | 4.20 | 4.98 |
+
+Under LTO it changes nothing for a `Box`, because `Box` and `Vec` test the pointer for null
+whatever the allocator does; that test is the one the inline pop shares today. Only telling the
+compiler the result is never null (`assert_unchecked`, so an allocator that aborts on
+exhaustion) removes it, for 0.02 to 0.08 cycles. And with no branch left in the pop, LLVM
+unrolled the 32-allocation loop completely, which made the batch slower (6.85 against 5.96) and,
+with the direct load, much slower (13.6 against 5.5). Inference: the unrolled code had 20
+percent more ops dispatched than retired and three times the cycles waiting on loads, which
+looks like memory-dependence mispredictions between the 32 copies.
+
+What `asm!` requires for a `call` in a block:
+
+- No `nostack`. The reference then promises a stack pointer aligned for a call and lets the
+  block use the stack below it; rustc reserves the red zone around such a block, and makes a
+  leaf function that contains one push a word to align the stack.
+- That promise was not kept everywhere. When the function had a path needing a frame and
+  another holding the block, shrink-wrapping put the prologue only on the first, and the block
+  ran with the stack misaligned by 8 (`toolchain/asmcall.rs`, function `shrinkwrap`; also seen in
+  the stand-in's out-of-line `alloc` without LTO). A slow-path stub has to align the stack itself.
+- Clobbers: `clobber_abi("C")` declares what any call clobbers, including vector and mask
+  registers the target features enable. A stub that saves registers instead must save vector
+  state too, which in general means `xsave`, since Rust code may use vector registers.
+
+### Under LTO
+
+The stand-in allocator `rust-alloc/src/slab.rs` wraps the same sequences (64-slot magazines,
+slow paths that are plain Rust and not restartable; not a real allocator). Fat LTO, CPU 3,
+cycles per allocate and free, three runs that agreed to within 0.1 but for one batch run of
+the in-block call (7.28):
+
+| Variant | `Box` pair | Constant-layout pair | Batch of 32 |
+|---|---:|---:|---:|
+| Inline, as generated | 6.80 | 5.55 | 5.96 |
+| Inline, direct `__rseq_offset` load | 5.95 | 5.14 | 5.47 to 5.55 |
+| Inline, slow path called from the pop | 6.80 | 5.43 | 6.85 |
+| The same, with the direct load | 5.95 | 4.70 | 13.6 |
+| Out of line, as generated (entry on a line boundary) | 8.54 | 8.00 | 8.00 |
+| Out of line, one entry per class | 8.00 | 8.00 | 8.00 |
+
+Section 9's stand-in cost 5.8 per `Box` pair; it kept the rseq offset in a register and had a
+shorter pop.
+
+### Recommendations for the generator
+
+Measured and inferred as stated above.
+
+1. Placement: keep the entry on a 64-byte boundary, as naked functions give today, and require
+   on the assembled bytes that the hot path (entry to `ret`) be at most 128 bytes and either at
+   most 64 or at least 76. The pop and push (89 and 88) pass with 39 and 40 bytes to spare.
+   Ending on a line boundary is not needed. Mid-line entries are never faster, and a naked
+   function cannot have one.
+2. Byte savings: take none for speed; none gains a cycle. Short jumps (8 bytes) and the mask
+   from the slab base (one uop, up to 4 bytes) are safe if the bytes are ever needed, but stay
+   out of 65 to 75 bytes. Skip the 16-bit table: it saves 2 bytes and narrows the magazines the
+   specification allows.
+3. Keep the range compare. The sign test gains nothing and weakens what the proof can claim.
+4. The direct `__rseq_offset` load is correct in an executable, from its first instruction,
+   and cannot link in a shared library. It is worth 0.4 to 1 cycle per inlined pair, nothing
+   out of line. Offer it as an opt-in for executables (for example a cargo feature the binary
+   enables); the default, the C entry points' library and the preload library keep the GOT.
+5. Per-class entries: not worth generating for speed. They beat the generic out-of-line form
+   by 0.5 per `Box` pair and lose to inlining by 1.2 to 2. Worth having only if inlining's code
+   size becomes a problem.
+6. Do not generate the in-block slow call. It removes a test that Rust's callers repeat anyway,
+   invites full unrolling that ran more than twice as slow, and needs a stub that realigns the stack
+   and preserves vector state.
+
+### What this changes in earlier sections
+
+- Section 6 and the design say a run that crosses a line near its end pays a cycle. For these
+  routines a crossing anywhere is free; the costs are reaching a third line, and a tail of one
+  to three instructions.
+- Section 5 has a call through a register costing the same as a direct call. Calling these
+  routines through registers gave 8, 10 or 12 cycles per pair, changing between repetitions;
+  direct calls gave 8.00 every time.
+- Section 9 and rule 7 offer calling the slow path from inside the `asm!` block as the way to
+  drop the pop's extra test. In Rust the test stays, because the caller makes it.
