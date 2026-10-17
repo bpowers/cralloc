@@ -48,7 +48,12 @@ process light.
 ## Correctness rules
 
 - All assembly is generated from Lean. Never write `asm!`, `naked_asm!` or `global_asm!` by
-  hand in the allocator.
+  hand in the allocator. The one exception is the system-call instruction in the OS
+  interface, which has a ledger entry.
+- The allocator crate has no dependencies, not even on a C library: it makes its own system
+  calls. Test, fuzz and benchmark crates may depend on what they need.
+- Write good, clean Rust: small modules with one job, types that make wrong states hard to
+  build, `unsafe` confined to a few well-named places.
 - Every `unsafe` block has a machine-checked proof (Kani, or Lean for the routines) or an
   entry in the safety ledger at `docs/safety/<crate>/<file>-safety.md`, named after the
   source file without `.rs`. An entry gives the preconditions, the invariants that make them
