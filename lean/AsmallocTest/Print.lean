@@ -1,5 +1,6 @@
 import Asmalloc.TCB.X86_64.Print
 import Asmalloc.TCB.Rust
+import Asmalloc.TCB.X86_64.Target
 
 /-!
 # Golden tests for the trusted printers
@@ -381,6 +382,13 @@ def rseqSample : Prog isa := .rseq
 
 -- The line of an exit to an external target refers to it as an operand.
 #guard (printer.function rseqSample).flatMap Line.refs == ["rs", "slow"]
+
+-- Its hot path: the arm's 4, the load, the compare fused with its branch, the
+-- load, two branches after a load (not fused), the commit; and the return.
+#guard printer.hotUops false rseqSample == some 11
+#guard printer.hotUops true rseqSample == some 10
+#guard printer.uopLimit == some 24
+#guard inlineTarget.printer.uopLimit == some 13
 
 /-! ## CPU features
 

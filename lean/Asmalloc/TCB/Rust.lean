@@ -468,6 +468,14 @@ def checkInline (a : Artifact) : Except String Unit := do
     unless a.clobbers.isEmpty && a.generics.isEmpty do
       throw s!"{n} is a naked function but declares clobbers or generic parameters"
 
+/-- The hot path of `a` has at most its target's limit of fused micro-ops
+(`Printer.hotUops`, `Printer.uopLimit`). -/
+def checkUops (a : Artifact) : Except String Unit := do
+  let P := a.target.printer
+  if let (some n, some lim) := (P.hotUops a.target.inline a.code, P.uopLimit) then
+    unless n ≤ lim do
+      throw s!"{a.target.name}: {a.name}'s hot path has {n} fused micro-ops, more than {lim}"
+
 /-- The tables of constants of `a`, which its contract gives it
 (`Artifact.consts`). -/
 def tablesOf (a : Artifact) : List (String × List (BitVec 64)) := a.consts
@@ -834,6 +842,7 @@ def files (as : List Artifact) : Except String (List (String × String)) := do
   forMPar ps checkEncodable
   forMPar as checkLayout
   forMPar as checkInline
+  forMPar as checkUops
   return render ps fun a n => ((callee as a n).map (·.module)).getD ""
 
 end VG.Rust

@@ -188,6 +188,14 @@ def printer : Printer isa where
   disassembler stays in step and a stray jump into them traps. -/
   rseqSig := some [".byte 0x0f, 0xb9, 0x3d", ".long 0x53053053"]
   plainStore | .store .. => true | _ => false
+  /- A compare or a test and the conditional branch after it decode as one
+  macro-op (AMD Software Optimization Guide for Zen 5, 58455, "Branch
+  Fusion"; Intel's "macro-fusion"). -/
+  fuses | .alu .cmp .. | .alu .test .. | .alu32 .cmp .. | .alu32 .test .. => true | _ => false
+  /- An out-of-line routine's hot path fits in what the processor delivers
+  during the four cycles a call and return take (docs/research/zen5-roofline.md,
+  section 6): 24 fused micro-ops. -/
+  uopLimit := some 24
   unencodable i := match i with
     -- `lea` computes an offset, which a segment does not change (`State.offset`);
     -- one written on it is a mistake.

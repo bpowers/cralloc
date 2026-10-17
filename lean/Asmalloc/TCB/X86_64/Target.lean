@@ -191,6 +191,9 @@ abbrev inlineTarget : Target :=
     argRegs := argRegs.map Reg.name
     retReg := "rax"
     regs := clobberable.map Reg.name
-    preservedExcept := preservedExcept }
+    preservedExcept := preservedExcept
+    -- An inlined routine: one more than the twelve the processor delivers at
+    -- full speed (docs/design.md, "Front end").
+    printer := { printer with uopLimit := some 13 } }
 
 end VG.X86_64

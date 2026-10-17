@@ -132,6 +132,12 @@ structure Printer (M : ISA) where
   /-- Whether an instruction is a plain store of a register, which is what
   a restartable sequence's commit must be (`Rust.checkRseq`). -/
   plainStore : M.Instr → Bool := fun _ => false
+  /-- Whether an instruction fuses with a conditional branch right after it
+  into one micro-op (a compare or a test). -/
+  fuses : M.Instr → Bool := fun _ => false
+  /-- The most fused micro-ops a function's hot path may have (`Rust.checkUops`),
+  if the target has a limit. -/
+  uopLimit : Option Nat := none
 
 variable {M : ISA} (P : Printer M)
 
@@ -203,6 +209,23 @@ def Printer.lower : Code M.Instr M.Cond → Nat → List Line × List Line × Na
   | .rseq arm body, n =>
     let (lb, kb, n) := P.lowerBody body n
     (P.rseqLines arm lb kb, [], n)
+
+/-- The fused micro-ops of a restartable sequence's body when no exit is
+taken: one per instruction and per exit, but an exit right after an
+instruction that fuses with it (`fuses`) counts with that instruction. -/
+def Printer.stepUops : List (Step M.Instr M.Cond) → Nat
+  | [] => 0
+  | .instr i :: .exit _ _ _ :: rest => (if P.fuses i then 1 else 2) + stepUops rest
+  | _ :: rest => 1 + stepUops rest
+
+/-- The fused micro-ops of a function's hot path, if the code has one the
+count is defined for: a block (every instruction), or a restartable
+sequence when no exit is taken (its arm and its body, `stepUops`); and the
+return, unless `inline`. Each instruction counts one. -/
+def Printer.hotUops (inline : Bool) : Code M.Instr M.Cond → Option Nat
+  | .block is => some (is.length + if inline then 0 else P.ret.length)
+  | .rseq arm body => some (arm.length + P.stepUops body + if inline then 0 else P.ret.length)
+  | _ => none
 
 /-- The complete body of a function: the lowered code, the return, and the
 cold branches' code after it. -/
