@@ -12,7 +12,7 @@
 //! cannot run, over a simulated processor ([`Machine`]) that tests control.
 //!
 //! The layout constants here must equal those the Lean specification gives the generated code
-//! (`lean/generated/*/slab.rs`); a test compares them.
+//! (`generated/*/slab.rs`); a test compares them.
 
 #[cfg(test)]
 pub(crate) mod check;
@@ -72,8 +72,8 @@ mod tests {
     #[test]
     fn the_layout_matches_what_the_routines_were_proved_against() {
         for source in [
-            include_str!("../../../../lean/generated/x86_64/slab.rs"),
-            include_str!("../../../../lean/generated/x86_64_inline/slab.rs"),
+            include_str!("generated/x86_64/slab.rs"),
+            include_str!("generated/x86_64_inline/slab.rs"),
         ] {
             let constants = generated_constants(source);
             let get = |name: &str| {

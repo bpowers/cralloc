@@ -38,7 +38,7 @@ pub const MAGAZINE_BUDGET: usize = 128 << 10;
 pub const MARKER: usize = 1;
 
 /// The number of low bits that are exactly [`MARKER`] in every marker. The routines generated
-/// from Lean use the same value (`MARKER_SHIFT` in `lean/generated`).
+/// from Lean use the same value (`MARKER_SHIFT` in `front/generated`).
 pub const MARKER_SHIFT: u32 = 19;
 
 /// Whether a slab word or stack head is a marker.

@@ -8,7 +8,8 @@ path fits in two 64-byte lines, 128 bytes. The micro-op half of the rule is
 `Rust.checkUops`, in Lean; bytes depend on the assembler's encodings, so
 they are measured here, on the assembled output.
 
-Each `naked_asm!` template of `generated/<target>/*.rs` is assembled alone
+Each `naked_asm!` template of `<dir>/<target>/*.rs` (by default the
+allocator crate's `src/front/generated`) is assembled alone
 with `llvm-mc` (the assembler rustc uses), in a section of its own as
 rustc places each function with `-ffunction-sections`, its `sym` operands
 left as undefined symbols (so a branch to one takes the 32-bit form it
@@ -121,7 +122,8 @@ def main() -> int:
     if mc is None or shutil.which("llvm-nm") is None or shutil.which("llvm-readelf") is None:
         print("check_sizes: llvm-mc, llvm-nm and llvm-readelf are needed", file=sys.stderr)
         return 1
-    gen = pathlib.Path(sys.argv[1]) if len(sys.argv) > 1 else LEAN / "generated"
+    default = LEAN.parent / "crates" / "asmalloc" / "src" / "front" / "generated"
+    gen = pathlib.Path(sys.argv[1]) if len(sys.argv) > 1 else default
     bad = []
     count = 0
     with tempfile.TemporaryDirectory() as d:

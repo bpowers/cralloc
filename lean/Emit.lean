@@ -7,7 +7,8 @@ import Asmalloc.TCB.Audit
 
 Renders every artifact (those of each registration file under
 `Asmalloc/Artifacts/`, see `Asmalloc/TCB/Emit.lean`) into Rust, by default
-under `generated/` (relative to `lean/`). Run it from `lean/`:
+under `../crates/asmalloc/src/front/generated/` (relative to `lean/`), where
+the allocator compiles them. Run it from `lean/`:
 
 * `lake env lean --run Emit.lean [DIR]` writes the files (and deletes stale
   `.rs` files).

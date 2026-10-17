@@ -50,7 +50,8 @@ Removed:
 Changed: `Exec` has no trace; `Verified` is total correctness plus
 non-vacuity; the CPU-features constant an artifact may carry is a plain
 `&[&str]` rather than a type of upstream's crate; the emitter writes to a
-directory given on its command line, `generated/` by default.
+directory given on its command line, by default the allocator crate's
+`crates/asmalloc/src/front/generated/` (relative to the repository root).
 
 ## Layout
 
@@ -80,8 +81,8 @@ Asmalloc/
   Artifacts/    One registration file per routine and target, listing what it emits
 AsmallocTest/   Golden tests for the printers and the emitter, tests of the
                 semantics on concrete states, and of the audits
-Emit.lean       Renders every artifact into `generated/` (or the directory given)
-generated/      The emitted Rust, checked in
+Emit.lean       Renders every artifact into the allocator crate's
+                `src/front/generated/` (or the directory given), where it is checked in
 scripts/        The checks: imports, registration files, the audit's negative test
 ```
 
@@ -116,8 +117,8 @@ The self-test (`Spec/Selftest*`, `Impl/Selftest/`, `Proof/Selftest/`,
 
 The front end's pop and push (`Spec/Slab.lean`, `Impl/Slab/`,
 `Proof/Slab/`, `Artifacts/Slab/`) are restartable sequences, each emitted
-inline (`generated/x86_64_inline/slab.rs`, an `asm!` block in an
-`#[inline(always)]` function) and out of line (`generated/x86_64/slab.rs`, a
+inline (`front/generated/x86_64_inline/slab.rs`, an `asm!` block in an
+`#[inline(always)]` function) and out of line (`front/generated/x86_64/slab.rs`, a
 naked function). Their modules also carry the layout constants the proofs
 assume (`Spec.Slab.rustConsts`). The Rust crate must provide what their
 `# Safety` sections and `Spec.Slab.path` name: `front::SLABS`,
@@ -152,7 +153,7 @@ Everything in `Impl/` and `Proof/` is checked by Lean and need not be read.
 * The emitter runs compiled code, so nothing it runs may carry
   `implemented_by`, `extern` or `export`, and nothing under `Asmalloc/` may
   declare a `csimp` theorem or an `initialize` (`TCB/Audit.lean`).
-* Never edit `generated/` by hand.
+* Never edit the generated files by hand.
 
 For symbolic execution, step a block with `runBlock_cons`, `runStep_some`
 and `runBlock_nil` (`Proof/Framework/X86_64/Exec.lean`), read registers
@@ -170,8 +171,8 @@ version from `lean-toolchain`. Then, in this directory:
 
 ```sh
 lake build --log-level=warning          # every proof and golden test
-lake env lean --run Emit.lean           # write generated/
-lake env lean --run Emit.lean --check   # fail if generated/ is out of date
+lake env lean --run Emit.lean           # write ../crates/asmalloc/src/front/generated/
+lake env lean --run Emit.lean --check   # fail if those files are out of date
 lake env lean --run Emit.lean DIR       # write somewhere else
 scripts/check.sh                        # all of the checks
 ```

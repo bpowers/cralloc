@@ -4,7 +4,7 @@
 # Lean emits, the size and alignment of its naked functions, and that the
 # axiom audit still rejects a hidden axiom.
 # Needs `lake` on PATH (elan installs it in ~/.elan/bin). Pass the output
-# directory if it is not `generated/`.
+# directory if it is not the allocator crate's `src/front/generated/`.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
