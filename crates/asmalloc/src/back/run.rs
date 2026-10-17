@@ -27,7 +27,7 @@ impl<O: Os> Back<'_, O> {
     /// refused memory.
     pub fn alloc_run(&self, size: usize, align: usize) -> Option<NonNull<u8>> {
         let plan = self.space.plan();
-        let shift = plan.geometry().region_shift();
+        let shift = plan.region_shift();
         let regions = size.div_ceil(1 << shift).max(1);
         if regions > plan.objects() || !align.is_power_of_two() {
             return None;
@@ -60,7 +60,7 @@ impl<O: Os> Back<'_, O> {
         let Some(Kind::Run(regions)) = self.lookup(ptr.as_ptr()) else {
             self.abort("free of a pointer that is not the start of a run");
         };
-        let shift = self.space.plan().geometry().region_shift();
+        let shift = self.space.plan().region_shift();
         let first = (ptr.addr().get() - self.space.base().addr().get()) >> shift;
         // SAFETY: BACK-RUN-01 in docs/safety/asmalloc/back/run-safety.md. The caller owns the
         // run and is freeing it, so nothing uses its memory, and the range is whole regions of

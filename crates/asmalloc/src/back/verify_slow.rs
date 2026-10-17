@@ -15,35 +15,41 @@
 //! every class, many watermarks and huge-page boundaries, in three geometries.
 
 use super::layout::{Layout, Step, WORD_BYTES, slots_in_region};
-use super::verify::{any_class, any_used_geometry, layouts_fit};
+use super::verify::{any_class, any_plan_of, any_used_plan, layouts_fit};
 use super::word::{BITS, lowest};
-use crate::space::Geometry;
+use crate::classes::MagazineSize;
+use crate::space::{Geometry, Plan};
 
-fn any_geometry() -> Geometry {
+/// Any plan of any geometry `Geometry::try_new` accepts.
+fn any_plan() -> Plan {
+    let ordinal: usize = kani::any();
+    kani::assume(ordinal < MagazineSize::COUNT);
     let geometry = Geometry::try_new(
         kani::any(),
         kani::any(),
         kani::any(),
         kani::any(),
         kani::any(),
+        kani::any(),
+        MagazineSize::from_ordinal(ordinal).unwrap(),
     );
     kani::assume(geometry.is_some());
-    geometry.unwrap()
+    any_plan_of(geometry.unwrap())
 }
 
 #[kani::proof]
 #[kani::unwind(6)]
 fn layouts_fit_every_geometry() {
-    layouts_fit(any_geometry());
+    layouts_fit(any_plan());
 }
 
 /// The slot count without a divide is the quotient.
 #[kani::proof]
 #[kani::solver(kissat)]
 fn slot_counts_are_the_quotient() {
-    let geometry = any_geometry();
+    let plan = any_plan();
     let class = any_class();
-    assert!(slots_in_region(geometry, class) == geometry.slots_per_region(class));
+    assert!(slots_in_region(plan, class) == plan.slots_per_region(class));
 }
 
 /// A carve that commits up to page `committed` also commits the leaf words of every slot that
@@ -51,17 +57,17 @@ fn slot_counts_are_the_quotient() {
 #[kani::proof]
 #[kani::unwind(6)]
 fn leaf_commits_cover_the_committed_slots() {
-    let geometry = any_used_geometry();
+    let plan = any_used_plan();
     let class = any_class();
-    let Some(layout) = Layout::new(geometry, class) else {
+    let Some(layout) = Layout::new(plan, class) else {
         return;
     };
     let committed: u32 = kani::any();
     kani::assume(committed <= layout.region_pages());
     let bytes = layout.leaf_commit(committed);
-    let page = geometry.page_size();
+    let page = plan.geometry().page_size();
     assert!(bytes % page == 0);
-    assert!(bytes <= geometry.metadata_size());
+    assert!(bytes <= plan.metadata_size());
     let slot: u32 = kani::any();
     kani::assume(slot < layout.slots());
     if layout.slot_bytes(slot) < (committed as usize) << layout.page_shift() {
@@ -79,10 +85,10 @@ fn leaf_commits_cover_the_committed_slots() {
 #[kani::proof]
 #[kani::unwind(6)]
 fn purge_steps_move_down_within_one_part() {
-    let geometry = any_used_geometry();
+    let plan = any_used_plan();
     let class = any_class();
     kani::assume(class.size().is_power_of_two());
-    let Some(layout) = Layout::new(geometry, class) else {
+    let Some(layout) = Layout::new(plan, class) else {
         return;
     };
     let carved: u32 = kani::any();

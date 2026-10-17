@@ -26,8 +26,9 @@ use super::testhost::TestHost;
 use super::tree::{self, Host, Node};
 use super::word::{BITS, Word};
 use crate::classes::Class;
+use crate::classes::MagazineSize;
 use crate::os::sim::{Shape, Standard, Tiny};
-use crate::space::{Geometry, RegionId};
+use crate::space::{Geometry, Plan, RegionId};
 use std::collections::BTreeSet;
 use std::sync::Mutex;
 use std::vec::Vec;
@@ -40,8 +41,17 @@ fn class(size: usize) -> Class {
 
 /// A geometry with 32 KiB pages and 1 MiB regions, so that large classes have several slots
 /// and slots of a few pages: what `Purge_big` and the zero bitmap need.
-fn big_geometry() -> Geometry {
-    Geometry::new(15, 16, 20, 4, 15)
+fn big_plan() -> Plan {
+    const BIG: Geometry = Geometry::new(15, 16, 20, 20, 4, 1, MagazineSize::MAX);
+    BIG.largest_plan()
+}
+
+fn tiny() -> Plan {
+    Tiny::GEOMETRY.largest_plan()
+}
+
+fn standard() -> Plan {
+    Standard::GEOMETRY.largest_plan()
 }
 
 /// Frees `slot`, as the program would, from outside any schedule.
@@ -85,7 +95,7 @@ fn free_set(host: &Host8, regions: usize) -> BTreeSet<u64> {
 /// 1, 64 and 65 of region 0 and slot 0 of region 1 free, and slots 128 and 192 of region 0 held
 /// by the program.
 fn summary_setup() -> Host8 {
-    let host = Host8::new(Tiny::GEOMETRY, class(8), 2);
+    let host = Host8::new(tiny(), class(8), 2);
     let (r0, r1) = (host.region_at(0), host.region_at(1));
     host.carve_all(r0, 256);
     host.carve_all(r1, 256);
@@ -258,7 +268,7 @@ fn summary_deep_bounded() {
         },
         2,
         || {
-            let host = Host8::new(Standard::GEOMETRY, class(8), 1);
+            let host = Host8::new(standard(), class(8), 1);
             assert_eq!(host.layout().height(), 2);
             let r0 = host.region_at(0);
             host.carve_all(r0, host.layout().slots());
@@ -357,7 +367,7 @@ fn carving_every_schedule() {
 }
 
 fn carving(config: Config) {
-    let geometry = Tiny::GEOMETRY;
+    let geometry = tiny();
     explore(
         config,
         2,
@@ -388,7 +398,7 @@ fn carving(config: Config) {
             let header = host.meta(region, host.layout().grow_word()).load();
             let grow = super::layout::Grow::unpack(header);
             assert_eq!(grow.carved, 8);
-            assert!(grow.committed as usize * geometry.page_size() >= 8 * 256);
+            assert!(grow.committed as usize * geometry.geometry().page_size() >= 8 * 256);
         },
     );
 }
@@ -445,7 +455,7 @@ fn program(host: &Host8) {
 
 /// Sets up `slots` carved slots of `size` bytes in `geometry`, all written and free except
 /// `held`, which the program holds.
-fn purge_setup(geometry: Geometry, size: usize, slots: u32, held: &[u32]) -> Host8 {
+fn purge_setup(geometry: Plan, size: usize, slots: u32, held: &[u32]) -> Host8 {
     let host = Host8::new(geometry, class(size), 1);
     let region = host.region_at(0);
     host.carve_all(region, slots);
@@ -496,7 +506,7 @@ enum Role {
     Carve,
 }
 
-fn purge_scenario(geometry: Geometry, size: usize, slots: u32, held: &[u32], bound: usize) {
+fn purge_scenario(geometry: Plan, size: usize, slots: u32, held: &[u32], bound: usize) {
     purge_roles(
         geometry,
         size,
@@ -511,7 +521,7 @@ fn purge_scenario(geometry: Geometry, size: usize, slots: u32, held: &[u32], bou
 /// A purge scenario with the given thread roles; with `huge`, the whole region is its
 /// huge-page part, so purges work in whole huge pages.
 fn purge_roles(
-    geometry: Geometry,
+    geometry: Plan,
     size: usize,
     slots: u32,
     held: &[u32],
@@ -585,7 +595,7 @@ fn purge_roles(
 #[cfg_attr(miri, ignore)]
 fn purge_in_huge_pages() {
     purge_roles(
-        Tiny::GEOMETRY,
+        tiny(),
         32,
         16,
         &[3],
@@ -600,7 +610,7 @@ fn purge_in_huge_pages() {
 #[cfg_attr(miri, ignore)]
 fn two_purgers_on_the_same_units() {
     purge_roles(
-        Tiny::GEOMETRY,
+        tiny(),
         48,
         4,
         &[1],
@@ -616,7 +626,7 @@ fn two_purgers_on_the_same_units() {
 #[cfg_attr(miri, ignore)]
 fn a_carve_racing_a_purge() {
     purge_roles(
-        Tiny::GEOMETRY,
+        tiny(),
         48,
         3,
         &[],
@@ -630,23 +640,23 @@ fn a_carve_racing_a_purge() {
 #[test]
 #[cfg_attr(miri, ignore)]
 fn purge_aligned_slots() {
-    purge_scenario(Tiny::GEOMETRY, 32, 4, &[1], 2);
+    purge_scenario(tiny(), 32, 4, &[1], 2);
 }
 
 /// `Purge_straddle.cfg`: 48-byte slots on 64-byte pages, so slot 1 straddles pages 0 and 1.
 #[test]
 #[cfg_attr(miri, ignore)]
 fn purge_straddling_slots() {
-    purge_scenario(Tiny::GEOMETRY, 48, 3, &[1], 2);
+    purge_scenario(tiny(), 48, 3, &[1], 2);
 }
 
 /// `Purge_big.cfg` with the zero bitmap: 64 KiB slots, two 32 KiB pages each, a large class.
 #[test]
 #[cfg_attr(miri, ignore)]
 fn purge_big_slots_and_zero_bits() {
-    let host = Host8::new(big_geometry(), class(64 << 10), 1);
+    let host = Host8::new(big_plan(), class(64 << 10), 1);
     assert!(host.layout().zero_word(0).is_some());
-    purge_scenario(big_geometry(), 64 << 10, 2, &[0], 2);
+    purge_scenario(big_plan(), 64 << 10, 2, &[0], 2);
 }
 
 /// A large class whose slots straddle pages (48 KiB slots on 32 KiB pages): zero bits are set
@@ -654,7 +664,7 @@ fn purge_big_slots_and_zero_bits() {
 #[test]
 #[cfg_attr(miri, ignore)]
 fn purge_big_straddling_slots_and_zero_bits() {
-    purge_scenario(big_geometry(), 48 << 10, 3, &[2], 2);
+    purge_scenario(big_plan(), 48 << 10, 3, &[2], 2);
 }
 
 /// A purge alone, 48 KiB slots on 32 KiB pages with slot 2 held: the top unit (page 3) touches
@@ -663,7 +673,7 @@ fn purge_big_straddling_slots_and_zero_bits() {
 /// though all its pages are now purged, gets none.
 #[test]
 fn purge_sets_zero_bits_only_inside() {
-    let host = purge_setup(big_geometry(), 48 << 10, 3, &[2]);
+    let host = purge_setup(big_plan(), 48 << 10, 3, &[2]);
     let layout = *host.layout();
     let region = host.region_at(0);
     assert_eq!(layout.carved_pages(3), 4);
@@ -681,7 +691,7 @@ fn purge_sets_zero_bits_only_inside() {
 /// access to a metadata word that is not committed.
 #[test]
 fn carving_commits_the_leaf_bitmap_it_needs() {
-    let host = Host8::new(Standard::GEOMETRY, class(8), 1);
+    let host = Host8::new(standard(), class(8), 1);
     let region = host.region_at(0);
     assert!(host.layout().fixed_commit().0 >= Standard::GEOMETRY.page_size());
     let mut carved = Vec::new();

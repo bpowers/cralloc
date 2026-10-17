@@ -187,7 +187,7 @@ impl<'a, O: Os> Back<'a, O> {
     /// The protocols' view of one class, if a slot of it fits in a region.
     #[inline]
     fn host(&self, class: Class) -> Option<ClassHost<'a, O>> {
-        let layout = Layout::new(self.space.plan().geometry(), class)?;
+        let layout = Layout::new(self.space.plan(), class)?;
         let state = self.state.classes.get(class.index() as usize - 1)?;
         Some(ClassHost {
             space: self.space,
