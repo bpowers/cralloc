@@ -8,6 +8,9 @@ use std::path::{Path, PathBuf};
 pub struct Expect {
     pub allocator: Option<String>,
     pub mode: Option<String>,
+    /// Where a native run's allocator code must be: "executable", or the file name of a
+    /// shared library. A preload run must report the preloaded library itself.
+    pub library: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -57,7 +60,9 @@ impl Allocator {
     }
 }
 
-pub fn load(bench_dir: &Path) -> Result<Vec<Allocator>, String> {
+/// Reads `allocators.toml` from `bench_dir`. A `preload` path may start with `{baselines}/`,
+/// the shared baselines directory; other relative paths are relative to `bench_dir`.
+pub fn load(bench_dir: &Path, baselines: &Path) -> Result<Vec<Allocator>, String> {
     let path = bench_dir.join("allocators.toml");
     let text = std::fs::read_to_string(&path).map_err(|e| format!("{}: {e}", path.display()))?;
     let file: File = toml::from_str(&text).map_err(|e| format!("{}: {e}", path.display()))?;
@@ -82,10 +87,9 @@ pub fn load(bench_dir: &Path) -> Result<Vec<Allocator>, String> {
             None => Allocator {
                 name: e.name.clone(),
                 feature: e.feature.clone(),
-                preload: e
-                    .preload
-                    .as_ref()
-                    .map(|p| if p.is_empty() { String::new() } else { abs(bench_dir, p).display().to_string() }),
+                preload: e.preload.as_ref().map(|p| {
+                    if p.is_empty() { String::new() } else { resolve(bench_dir, baselines, p).display().to_string() }
+                }),
                 env: e.env.clone(),
                 expect: e.expect.clone(),
                 control_of: None,
@@ -97,7 +101,10 @@ pub fn load(bench_dir: &Path) -> Result<Vec<Allocator>, String> {
     Ok(out)
 }
 
-fn abs(base: &Path, p: &str) -> PathBuf {
+fn resolve(bench_dir: &Path, baselines: &Path, p: &str) -> PathBuf {
+    if let Some(rest) = p.strip_prefix("{baselines}/") {
+        return baselines.join(rest);
+    }
     let p = Path::new(p);
-    if p.is_absolute() { p.to_path_buf() } else { base.join(p) }
+    if p.is_absolute() { p.to_path_buf() } else { bench_dir.join(p) }
 }

@@ -26,6 +26,17 @@ unsafe extern "C" {
 static NOTHROW: u8 = 0;
 const MIN_ALIGN: usize = 16;
 
+pub const NAME: &str = "tcmalloc";
+
+pub fn entry() -> *const c_void {
+    TCMallocInternalNewAlignedNothrow as *const c_void
+}
+
+/// tcmalloc has no version of its own; build.sh records the commit.
+pub fn version() -> String {
+    String::new()
+}
+
 pub fn per_cpu_caches_active() -> bool {
     // SAFETY: a query with no preconditions.
     unsafe { MallocExtension_Internal_GetPerCpuCachesActive() }

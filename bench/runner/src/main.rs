@@ -3,26 +3,25 @@
 //!   benchrun build  [--allocators a,b]
 //!   benchrun run    [--suite quick|full] [--rounds N] [--only TEXT] [--allocators a,b]
 //!                   [--out FILE] [--seed N] [--max-busy CPUS] [--gate-wait SECONDS]
-//!                   [--runner-cpus LIST] [--sample-ms N]
+//!                   [--runner-cpus LIST] [--sample-ms N] [--mem-cap SIZE]
 //!   benchrun report FILE... [--detail] [--ref NAME] [--only TEXT] [--quiet-only]
 //!   benchrun list   [--suite quick|full]
 //!
 //! See bench/README.md.
+mod cap;
 mod config;
 mod launch;
+mod paths;
 mod report;
 mod run;
 mod stats;
 mod suite;
 mod sys;
 
+use paths::Paths;
 use std::path::PathBuf;
 use std::process::Command;
 use std::time::Duration;
-
-fn bench_dir() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).parent().unwrap().to_path_buf()
-}
 
 struct Flags {
     pos: Vec<String>,
@@ -68,8 +67,8 @@ fn die(msg: &str) -> ! {
     std::process::exit(2)
 }
 
-fn allocators(f: &Flags) -> Vec<config::Allocator> {
-    let all = config::load(&bench_dir()).unwrap_or_else(|e| die(&e));
+fn allocators(f: &Flags, p: &Paths) -> Vec<config::Allocator> {
+    let all = config::load(&p.bench, &p.baselines).unwrap_or_else(|e| die(&e));
     match f.get("allocators") {
         None => all,
         Some(list) => {
@@ -97,11 +96,12 @@ fn jobs(f: &Flags) -> (String, Vec<suite::Job>) {
     (name, v)
 }
 
-fn build(f: &Flags) {
-    let dir = bench_dir();
+fn build(f: &Flags, p: &Paths) {
+    let dir = &p.bench;
+    let _lock = paths::lock_baselines(&p.baselines).unwrap_or_else(|e| die(&e));
     let cpus = std::env::var("BENCH_BUILD_CPUS").unwrap_or_else(|_| "4-7,20-23".into());
     let mut names: Vec<(String, String)> = vec![("glibc".into(), String::new())];
-    for a in allocators(f) {
+    for a in allocators(f, p) {
         if let (Some(b), Some(feat)) = (a.build_name(), a.feature.clone())
             && !names.iter().any(|(n, _)| *n == b)
         {
@@ -116,7 +116,8 @@ fn build(f: &Flags) {
         if !feat.is_empty() {
             c.args(["--features", &format!("bench-alloc/{feat}")]);
         }
-        c.current_dir(&dir);
+        c.env("BENCH_BASELINES", &p.baselines);
+        c.current_dir(dir);
         let st = c.status().unwrap_or_else(|e| die(&format!("cargo: {e}")));
         if !st.success() {
             die(&format!("build for {name} failed"));
@@ -128,11 +129,12 @@ fn main() {
     let mut args = std::env::args().skip(1);
     let cmd = args.next().unwrap_or_default();
     let f = Flags::parse(args);
+    let p = Paths::new();
     match cmd.as_str() {
-        "build" => build(&f),
+        "build" => build(&f, &p),
         "list" => {
             let (_, js) = jobs(&f);
-            let allocs = allocators(&f);
+            let allocs = allocators(&f, &p);
             for j in js {
                 let n = allocs.iter().filter(|a| run::runs_under(&j, a)).count();
                 println!(
@@ -146,20 +148,33 @@ fn main() {
         }
         "run" => {
             let (suite, js) = jobs(&f);
-            let allocs = allocators(&f);
+            let allocs = allocators(&f, &p);
+            let mem_cap = f
+                .get("mem-cap")
+                .map(|s| cap::parse_size(s).unwrap_or_else(|| die("--mem-cap: a size such as 4G")))
+                .unwrap_or(cap::DEFAULT_RUN);
+            if mem_cap > cap::MAX {
+                die("--mem-cap: at most 16G");
+            }
+            // Re-executes this process in a capped scope unless it is in one already.
+            let scope = cap::enter(mem_cap).unwrap_or_else(|e| die(&e));
+            let _lock = paths::lock_baselines(&p.baselines).unwrap_or_else(|e| die(&e));
             let rounds = f.num("rounds", if suite == "full" { 10 } else { 1 });
             let seed = f.num("seed", std::process::id() as u64);
             let out = f.get("out").map(PathBuf::from).unwrap_or_else(|| {
                 let t = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs();
-                bench_dir().join("results").join(format!("{suite}-{t}.jsonl"))
+                p.results.join(format!("{suite}-{t}.jsonl"))
             });
             let runner_cpus = f
                 .get("runner-cpus")
                 .map(|s| bench_harness::Cpus::parse(s).unwrap_or_else(|| die("--runner-cpus: not a CPU list")).0)
                 .unwrap_or_else(|| vec![15]);
             let o = run::Options {
-                bench_dir: bench_dir(),
+                bench_dir: p.bench.clone(),
+                baselines: p.baselines.clone(),
                 out: out.clone(),
+                scope,
+                mem_cap,
                 rounds,
                 seed,
                 runner_cpus,
