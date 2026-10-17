@@ -109,6 +109,7 @@ def Instr.asm : Instr → List String
   | .leaSym d name off offP =>
     [s!"lea {d.name}, [rip + {name}{symOffset off}{(offP.map (" + {" ++ · ++ "}")).getD ""}]"]
   | .movGot d name => [s!"mov {d.name}, QWORD PTR [rip + {name}@GOTPCREL]"]
+  | .movSym d name => [s!"mov {d.name}, QWORD PTR [rip + {name}]"]
   | .leaRseqCs d => [s!"lea {d.name}, [rip + 3f]"]
   | .lea d m => [s!"lea {d.name}, {m.addr}"]
   | .mul r => [s!"mul {r.name}"]
@@ -149,7 +150,7 @@ def Instr.memOps : Instr → List MemOp
   | .cmov _ _ s => s.memOps
   | .store m _ | .store32 m _ | .movzx8 _ m | .store8 m _ | .lea _ m => [m]
   | .inc _ | .dec _ | .shift32 .. | .bswap32 _ | .rorx32 .. | .andn32 .. | .rorx .. | .andn .. | .bswap _
-  | .shift .. | .shiftCl .. | .shiftx .. | .movImm64 .. | .leaSym .. | .movGot .. | .leaRseqCs _ | .mul _ | .imul ..
+  | .shift .. | .shiftCl .. | .shiftx .. | .movImm64 .. | .leaSym .. | .movGot .. | .movSym .. | .leaRseqCs _ | .mul _ | .imul ..
   | .push _ | .pop .. | .alloc _ | .free _ => []
 
 /-- The lines of an instruction, as `TCB/Rust.lean` writes them: those of
@@ -161,6 +162,7 @@ def Instr.lines : Instr → List Line
     [.ops ([.text s!"lea {d.name}, [rip + ", .ref name, .text (symOffset off)] ++
       (match offP with | some p => [.text " + ", .ref p] | none => []) ++ [.text "]"])]
   | .movGot d name => [.ops [.text s!"mov {d.name}, QWORD PTR [rip + ", .ref name, .text "@GOTPCREL]"]]
+  | .movSym d name => [.ops [.text s!"mov {d.name}, QWORD PTR [rip + ", .ref name, .text "]"]]
   | .mov d (.immP n) => [.ops [.text s!"mov {d.name}, ", .ref n]]
   | .alu op d (.immP n) => [.ops [.text s!"{op.name} {d.name}, ", .ref n]]
   | .mov32 d (.immP n) => [.ops [.text s!"mov {d.name32}, ", .ref n]]
