@@ -21,16 +21,20 @@ filter="${1:-}"
 workers="${TLC_WORKERS:-3}"
 prefix="${TLC_PREFIX:-}"
 
-if command -v tlc >/dev/null 2>&1; then
-    tlc=(tlc)
-elif [ -n "${TLA2TOOLS:-}" ]; then
-    tlc=(java -XX:+UseParallelGC -cp "$TLA2TOOLS" tlc2.TLC)
-elif command -v nix >/dev/null 2>&1; then
-    tlc=(nix shell nixpkgs#tlaplus -c tlc)
-else
-    echo "no tlc: install nix, or put tlc on PATH, or set TLA2TOOLS to tla2tools.jar" >&2
+jar="${TLA2TOOLS:-$PWD/tla2tools.jar}"
+if [ ! -f "$jar" ]; then
+    echo "no $jar: see README.md, \"Getting the tools\"" >&2
     exit 2
 fi
+if command -v java >/dev/null 2>&1; then
+    java=(java)
+elif command -v nix >/dev/null 2>&1; then
+    java=(nix shell nixpkgs#jdk_headless -c java)
+else
+    echo "no java and no nix: see README.md, \"Getting the tools\"" >&2
+    exit 2
+fi
+tlc=("${java[@]}" -XX:+UseParallelGC -cp "$jar" tlc2.TLC)
 
 tmp="$(mktemp -d)"
 trap 'rm -rf "$tmp"' EXIT
@@ -43,7 +47,7 @@ run() {
     case "$spec $cfg " in *"$filter"*) ;; *) return ;; esac
     local out="$tmp/$cfg.out"
     local start=$SECONDS
-    $prefix "${tlc[@]}" -workers "$workers" -metadir "$tmp/$cfg.states" \
+    $prefix "${tlc[@]}" -workers "$workers" -noGenerateSpecTE -metadir "$tmp/$cfg.states" \
         -config "$cfg.cfg" "$spec.tla" >"$out" 2>&1
     local secs=$((SECONDS - start))
     [ "$verbose" = 1 ] && cat "$out"
