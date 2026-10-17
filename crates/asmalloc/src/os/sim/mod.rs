@@ -32,11 +32,15 @@ mod cpus;
 mod faults;
 mod memory;
 mod pages;
+mod proof;
+#[cfg(kani)]
+mod verify;
 #[cfg(kani)]
 mod verify_slow;
 
 pub use cpus::{SIM_THREADS, SimThread};
 pub use faults::{Call, Faults};
+pub use proof::{PROOF_THREADS, ProofOs};
 
 use self::cpus::Cpus;
 use self::faults::Injector;
@@ -371,6 +375,15 @@ impl<S: Shape> fmt::Debug for SimOs<S> {
     }
 }
 
+/// The next number of a splitmix64 generator whose state is `state`: the next point of a Weyl
+/// sequence, scrambled.
+fn splitmix(state: &AtomicU64) -> u64 {
+    let mut z = state.fetch_add(GAMMA, Ordering::AcqRel).wrapping_add(GAMMA);
+    z = (z ^ (z >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+    z = (z ^ (z >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
+    z ^ (z >> 31)
+}
+
 fn encode_rseq(area: Option<RseqArea>) -> u64 {
     match area {
         None => 0,
@@ -528,14 +541,7 @@ unsafe impl<S: Shape> Os for SimOs<S> {
     }
 
     fn random(&self) -> u64 {
-        // splitmix64: each call takes the next point of a Weyl sequence and scrambles it.
-        let mut z = self
-            .random
-            .fetch_add(GAMMA, Ordering::AcqRel)
-            .wrapping_add(GAMMA);
-        z = (z ^ (z >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
-        z = (z ^ (z >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
-        z ^ (z >> 31)
+        splitmix(&self.random)
     }
 
     fn abort(&self, message: &str) -> ! {
