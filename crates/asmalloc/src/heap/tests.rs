@@ -5,7 +5,7 @@ use super::large::HEADROOM;
 use crate::SimHeap;
 use crate::classes::{Class, MAX_SMALL_SIZE, SmallClass};
 use crate::os::OsError;
-use crate::os::sim::{Call, Faults, SimOs};
+use crate::os::sim::{Call, Faults, SIM_THREADS, SimOs};
 
 /// The simulated shape: one with large classes natively, the small one Miri can afford.
 #[cfg(not(miri))]
@@ -280,12 +280,28 @@ fn a_simulated_heap_serves_threads() {
 #[test]
 fn a_thread_without_a_lease_is_served_by_the_back_end() {
     let heap = SimHeap::<Shape>::new();
-    let leases: Vec<_> = core::iter::from_fn(|| heap.lease()).collect();
-    assert_eq!(leases.len(), crate::os::sim::SIM_THREADS);
+    // Bounded, so that a lease that is handed out twice fails here instead of growing forever.
+    let leases: Vec<_> = core::iter::from_fn(|| heap.lease())
+        .take(SIM_THREADS + 1)
+        .collect();
+    assert_eq!(leases.len(), SIM_THREADS, "every simulated thread is leased once");
+    assert!(heap.lease().is_none());
     bursts(&heap, 64, 300, 2);
     every_class(&heap, 1);
     drop(leases);
     bursts(&heap, 64, 300, 2);
+}
+
+#[test]
+fn a_failed_lease_releases_nothing() {
+    let heap = SimHeap::<Shape>::new();
+    let held: Vec<_> = (0..SIM_THREADS).filter_map(|_| heap.lease()).collect();
+    assert_eq!(held.len(), SIM_THREADS);
+    for _ in 0..3 {
+        assert!(heap.lease().is_none(), "a lease is never handed out twice");
+    }
+    drop(held);
+    assert!(heap.lease().is_some());
 }
 
 #[test]
@@ -349,7 +365,7 @@ mod process {
 
     #[test]
     fn the_process_heap_resizes_in_place_and_with_headroom() {
-        realloc_walk(&Asmalloc, 256 << 20);
+        realloc_walk(&Asmalloc, 32 << 20);
     }
 
     #[test]

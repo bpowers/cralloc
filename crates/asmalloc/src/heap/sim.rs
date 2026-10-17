@@ -152,10 +152,11 @@ impl<S: Shape> SimHeap<S> {
             .map(|step| (start + step) % SIM_THREADS)
             .find_map(|index| {
                 let taken = &self.leases[index];
+                // Lazily: a `Lease` dropped on a failed claim would release another caller's.
                 taken
                     .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
                     .is_ok()
-                    .then_some(Lease { taken, index })
+                    .then(|| Lease { taken, index })
             })
     }
 
