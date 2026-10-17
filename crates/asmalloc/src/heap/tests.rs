@@ -72,7 +72,12 @@ fn every_class<H: Inspect>(heap: &H, rounds: usize) {
             (MAX_SMALL_SIZE + 1, 8),
         ])
         .collect();
-    sizes.extend([(40 << 10, 16), (60 << 10, 4096), (200 << 10, 8)]);
+    // Under Miri every byte costs; one large size there.
+    if cfg!(miri) {
+        sizes.retain(|&(size, _)| size <= 4096 || size == MAX_SMALL_SIZE + 1);
+    } else {
+        sizes.extend([(40 << 10, 16), (60 << 10, 4096), (200 << 10, 8)]);
+    }
     for round in 0..rounds {
         let mut live = Vec::new();
         for &(size, align) in &sizes {
@@ -262,9 +267,13 @@ fn a_simulated_heap_serves_every_class() {
 #[test]
 fn a_simulated_heap_exchanges_magazines() {
     let heap = SimHeap::<Shape>::new();
-    let rounds = if cfg!(miri) { 3 } else { 40 };
+    if cfg!(miri) {
+        // Past one magazine of 254 objects, so every exchange still runs.
+        bursts(&heap, 48, 300, 2);
+        return;
+    }
     for size in [8, 48, 512, MAX_SMALL_SIZE] {
-        bursts(&heap, size, 600, rounds);
+        bursts(&heap, size, 600, 40);
     }
 }
 
@@ -278,7 +287,12 @@ fn a_simulated_heap_resizes_in_place_and_with_headroom() {
 #[test]
 fn a_simulated_heap_zeroes() {
     let heap = SimHeap::<Shape>::new();
-    zeroed(&heap, &[8, 100, 4096, 40 << 10, 300 << 10]);
+    let sizes: &[usize] = if cfg!(miri) {
+        &[8, 100, 40 << 10]
+    } else {
+        &[8, 100, 4096, 40 << 10, 300 << 10]
+    };
+    zeroed(&heap, sizes);
 }
 
 #[test]
@@ -300,10 +314,11 @@ fn a_thread_without_a_lease_is_served_by_the_back_end() {
         "every simulated thread is leased once"
     );
     assert!(heap.lease().is_none());
-    bursts(&heap, 64, 300, 2);
+    let burst = if cfg!(miri) { 40 } else { 300 };
+    bursts(&heap, 64, burst, 2);
     every_class(&heap, 1);
     drop(leases);
-    bursts(&heap, 64, 300, 2);
+    bursts(&heap, 64, burst, 2);
 }
 
 #[test]
