@@ -7,7 +7,7 @@
 # measurement CPUs. RF_CPU, RF_CPU2 and RF_PAIRS are read by the binaries.
 set -euo pipefail
 cd "$(dirname "$0")"
-allocators=(sys mi mi_sized je floor_tls floor_heap)
+allocators=(sys mi mi_sized je floor_tls floor_heap asm asm_exe)
 profiles=(release lto)
 for a in "${allocators[@]}"; do
   features=()
