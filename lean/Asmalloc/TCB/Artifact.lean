@@ -85,6 +85,11 @@ structure Contract (M : ISA) where
   sequence may be aborted (`Code.abortStates`): typically, that nothing any
   other code can see has changed since entry. -/
   abort : M.State → M.State → Prop := fun _ _ => True
+  /-- What must hold of the entry state and the memory accesses of a run of
+  a restartable sequence (`Code.events`): typically, which locations it
+  reads and writes and how the values it writes follow from those it reads,
+  so that what other threads may do between them can be reasoned about. -/
+  trace : M.State → List Event → Prop := fun _ _ => True
   /-- What must hold of the entry state and the state a run ends in when it
   jumps to the external target `t` (`ExecExit`); nothing can, by default, so
   code with an exit to `t` cannot be verified unless the contract says what
@@ -101,12 +106,13 @@ structure Contract (M : ISA) where
 signature and its postcondition on the arguments say: a postcondition on the
 entry and exit states (`post`); what an exit to each external target leaves
 (`exit`, on top of the arguments, which `Sig.contract` requires to be where
-they were); and the contract's `abort` and `env`. -/
+they were); and the contract's `abort`, `env` and `trace`. -/
 structure Sig.Extra (M : ISA) where
   post : M.State → M.State → Prop := fun _ _ => True
   exit : String → M.State → M.State → Prop := fun _ _ _ => False
   abort : M.State → M.State → Prop := fun _ _ => True
   env : M.State → M.State → Prop := fun _ _ => True
+  trace : M.State → List Event → Prop := fun _ _ => True
 
 /-- The contract of a function with signature `sig` under the calling
 convention `A`: the obligations the signature implies (see `TCB/Sig.lean`),
@@ -147,7 +153,8 @@ def Sig.contract {M : ISA} (A : Abi M) (sig : Sig)
       | none => False
       | some vals => vals s' = vals s ∧ x.exit t s s'
     abort := x.abort
-    env := x.env }
+    env := x.env
+    trace := x.trace }
 
 /-! ## Documenting the obligations `Sig.contract` implies
 
@@ -259,12 +266,41 @@ def Code.abortStates (M : ISA) : Prog M → M.State → List M.State
     | none => []
   | _, _ => []
 
+/-- The memory accesses of a straight-line block run from `s`, until it ends
+or an instruction faults. -/
+def blockEvents (M : ISA) : List M.Instr → M.State → List Event
+  | [], _ => []
+  | i :: is, s => match M.exec i s with
+    | some s₁ => M.events i s s₁ ++ blockEvents M is s₁
+    | none => []
+
+/-- The memory accesses of a restartable sequence's body run from `s`, not
+aborted, including those of the code an exit runs out of line. -/
+def bodyEvents (M : ISA) : List (Step M.Instr M.Cond) → M.State → List Event
+  | [], _ => []
+  | .instr i :: rest, s => match M.exec i s with
+    | some s₁ => M.events i s s₁ ++ bodyEvents M rest s₁
+    | none => []
+  | .exit c cold _ :: rest, s => match M.eval c s with
+    | some false => bodyEvents M rest s
+    | some true => blockEvents M cold s
+    | none => []
+
+/-- The memory accesses of a run of `c` from `s`, not aborted, for a
+restartable sequence: those of its arm, then of its body. -/
+def Code.events (M : ISA) : Prog M → M.State → List Event
+  | .rseq arm body, s => blockEvents M arm s ++ match execBlock M arm s with
+    | some s₁ => bodyEvents M body s₁
+    | none => []
+  | _, _ => []
+
 /-- What a restartable sequence `c` must satisfy, run from `s`: the last
 instruction of its arm points the thread's `rseq_cs` at its descriptor
 (`Target.arms`), whatever it pointed at before, so no sequence another one
 started (in a signal handler, say) can be armed when this one starts; and in
 every state `p` in which it may be aborted (`Code.abortStates`), `rseq_cs`
-still points at it (`Target.armed`), the calling convention's obligations
+still points at it (`Target.armed`), the contract's `trace` holds of the run's
+memory accesses, the calling convention's obligations
 hold relative to entry (so a retry's compose with them), the contract's
 `abort` holds, and every
 state the thread may resume in after the abort (`Target.rely`,
@@ -276,6 +312,7 @@ a sequence. -/
 def RseqOk (T : Target) (c : Prog T.isa) (k : Contract T.isa) (s : T.isa.State) : Prop :=
   match c with
   | .rseq arm _ =>
+    k.trace s (c.events T.isa s) ∧
     (∃ i a, arm.getLast? = some i ∧ execBlock T.isa arm.dropLast s = some a ∧ T.arms i a) ∧
     ∀ p ∈ c.abortStates T.isa s, T.armed p ∧ T.abiPreserved s p ∧ k.abort s p ∧
       ∀ p', T.rely p p' → k.env p p' → k.pre p'

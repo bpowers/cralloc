@@ -33,7 +33,7 @@ theorem Verified.restart_pre {T : Target} {c : Prog T.isa} {k : Contract T.isa}
     have hok := h.2.1 s hs
     unfold RseqOk at hok
     split at hok
-    · exact (hok.2 p hp).2.2.2 p' hrely henv
+    · exact (hok.2.2 p hp).2.2.2 p' hrely henv
     · simp [Code.abortStates] at hp
 
 /-- A verified routine, aborted any finite number of times, meets its

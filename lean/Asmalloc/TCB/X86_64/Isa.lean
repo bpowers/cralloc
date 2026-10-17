@@ -401,11 +401,33 @@ def Instr.dst : Instr → Option Reg
   | .cmov _ d _ | .pop d _ | .imul d _ => some d
   | .store .. | .store32 .. | .store8 .. | .mul _ | .mulx .. | .push _ | .alloc _ | .free _ => none
 
+/-- The memory accesses of an instruction run from `s` to `s'` (`Event`):
+a load of the bytes of its memory source (8 for a 64-bit operand, 4 for a
+32-bit one, 1 for `movzx8`), with the value `s` holds there; a store of the
+bytes of its memory destination, with the value `s'` holds there. Each such
+instruction makes exactly one access (SDM Vol. 2, each instruction's
+"Operation"). The pushes, pops, calls and returns of frames and calls are
+not listed: a restartable sequence, whose accesses a contract constrains,
+has none (`Rust.checkRseq`). -/
+def Instr.events (i : Instr) (s s' : State) : List Event :=
+  let rd (m : MemOp) (n : Nat) : List Event := [⟨s.ea m, n, false, (s.mem.read (s.ea m) n).toNat⟩]
+  let wr (m : MemOp) (n : Nat) : List Event := [⟨s.ea m, n, true, (s'.mem.read (s.ea m) n).toNat⟩]
+  match i with
+  | .mov _ (.mem m) | .alu _ _ (.mem m) | .mulx _ _ (.mem m) | .adcx _ (.mem m) | .adox _ (.mem m)
+  | .cmov _ _ (.mem m) => rd m 8
+  | .mov32 _ (.mem m) | .alu32 _ _ (.mem m) => rd m 4
+  | .movzx8 _ m => rd m 1
+  | .store m _ => wr m 8
+  | .store32 m _ => wr m 4
+  | .store8 m _ => wr m 1
+  | _ => []
+
 abbrev isa : ISA where
   State := State
   Instr := Instr
   Cond := Cond
   exec := exec
+  events := Instr.events
   eval := eval
   call := call
   ret := ret

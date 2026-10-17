@@ -80,6 +80,15 @@ and functional correctness at once.
 
 namespace VG
 
+/-- One access to memory: `bytes` bytes at `addr`, read or written
+(`write`), and the value read or written (little-endian, as a number). -/
+structure Event where
+  addr : Addr
+  bytes : Nat
+  write : Bool
+  value : Nat
+  deriving DecidableEq, Repr
+
 /-- The interface between an architecture model and the generic framework. -/
 structure ISA where
   State : Type
@@ -87,6 +96,10 @@ structure ISA where
   Cond : Type
   /-- Semantics of a straight-line instruction; `none` means the machine faults. -/
   exec : Instr → State → Option State
+  /-- The memory accesses of an instruction run from the first state to the
+  second, in order (`Event`): of the instructions a restartable sequence may
+  contain, whose events its contract may constrain (`Contract.trace`). -/
+  events : Instr → State → State → List Event
   /-- Evaluate a branch condition; `none` if it depends on an undefined flag. -/
   eval : Cond → State → Option Bool
   /-- Semantics of a call instruction, up to the transfer of control to the

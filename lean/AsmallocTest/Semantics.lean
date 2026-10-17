@@ -143,6 +143,21 @@ def aborts (s : State) : List (BitVec 64) := (bodyPrefixes isa body s).map (·.g
 #guard aborts { st with zf := some true } == [-1, 1]
 #guard aborts { st with zf := some false, cf := some true } == [-1, 1, 1]
 #guard aborts { st with zf := some false, cf := some false } == [-1, 1, 1, 1]
+/-! The memory accesses of a sequence: the arm's store, the body's load,
+and its commit, each with its value; an exit taken ends them. -/
+
+def evSeq : Prog isa := .rseq
+  [.store { base := .rdx, disp := 8, seg := some .fs } .r10]
+  [.instr (.mov32 .r8 (.mem { base := .rdx, disp := 24, seg := some .fs })),
+    .exit .e [] none,
+    .instr (.store { base := .rdx, disp := 16, seg := some .fs } .r8)]
+
+#guard Code.events isa evSeq { st with zf := some false } ==
+  [⟨0x6EC8, 8, true, 0x1122334455667788⟩, ⟨0x6ED8, 4, false, 0xDBDAD9D8⟩,
+    ⟨0x6ED0, 8, true, 0xDBDAD9D8⟩]
+#guard Code.events isa evSeq { st with zf := some true } ==
+  [⟨0x6EC8, 8, true, 0x1122334455667788⟩, ⟨0x6ED8, 4, false, 0xDBDAD9D8⟩]
+
 -- A fault ends the run, and with it the states.
 #guard aborts { st with zf := none } == [-1, 1]
 -- Nowhere after the arm faults.
