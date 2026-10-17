@@ -24,7 +24,10 @@ So a reservation starts out zero. The other promises:
 - *A range in the live reservation of this value.* `checked` panics before touching anything if
   the range is not whole pages inside `0..reserved`.
 - `commit` and `advise_huge` change nothing. `purge` zeroes its range, or the first half for a
-  partial fault. `wipe_on_fork` records one range. A failed call acts on no more than its range.
+  partial fault. `wipe_on_fork` records one range, and panics if asked to mark a second, different one, so
+  every range it accepts is wiped by `fork` and a proof that marks more fails instead of passing
+  on memory left unwiped. Marking the same range again is accepted, as on Linux. A failed call
+  acts on no more than its range.
 - `fence` aborts the twin sequences in flight on its CPU, waiting out committing ones.
 - `abort` panics, so it does not return.
 

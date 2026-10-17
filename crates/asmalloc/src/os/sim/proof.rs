@@ -3,8 +3,8 @@
 //! [`super::SimOs`] keeps an atomic per page, so a Kani harness that so much as starts a heap
 //! on it unrolls loops over every page and runs out of memory. [`ProofOs`] holds one reservation
 //! at a time, at the start of its memory, and keeps a fixed handful of words about it, whatever
-//! its size: the reservation's length, one range marked to be wiped on fork, the fault plans and
-//! the simulated threads. Its memory is that of one reservation of the shape's largest plan.
+//! its size: the reservation's length, one range marked to be wiped on fork (marking a second,
+//! different range panics), the fault plans and the simulated threads. Its memory is that of one reservation of the shape's largest plan.
 //!
 //! What it gives up: it does not record which pages are committed, purged or advised, so it
 //! cannot catch a write to uncommitted memory, and it unmaps only whole reservations. Tests that
@@ -182,6 +182,13 @@ unsafe impl<S: Shape> Os for ProofOs<S> {
 
     unsafe fn wipe_on_fork(&self, start: NonNull<u8>, len: usize) -> Result<(), OsError> {
         let offset = self.checked(Call::WipeOnFork, start, len);
+        // It keeps one range, so a second, different one would silently go unwiped; a proof
+        // that marks two must fail here rather than pass on memory a fork would not clear.
+        let marked = self.wipe_len.load(Ordering::Acquire);
+        assert!(
+            marked == 0 || (marked == len && self.wipe_offset.load(Ordering::Acquire) == offset),
+            "the proof simulator wipes one range on fork only"
+        );
         self.faults.enter(Call::WipeOnFork)?;
         self.wipe_offset.store(offset, Ordering::Release);
         self.wipe_len.store(len, Ordering::Release);
@@ -255,6 +262,21 @@ mod tests {
             Err(OsError::ENOMEM),
             "one reservation at a time"
         );
+    }
+
+    /// Review R5: the trait promises every marked range is wiped, so a second one must fail
+    /// loudly rather than be dropped.
+    #[test]
+    #[should_panic(expected = "one range on fork only")]
+    fn a_second_wipe_range_is_refused() {
+        let os = ProofOs::<Tiny>::new();
+        let space = Space::reserve(&os).unwrap();
+        let page = Tiny::GEOMETRY.page_size();
+        let first = space.process_page();
+        let second = space.metadata(space.plan().region(0).unwrap());
+        space.wipe_on_fork(first, page).unwrap();
+        space.wipe_on_fork(first, page).unwrap();
+        let _ = space.wipe_on_fork(second, page);
     }
 
     #[test]
