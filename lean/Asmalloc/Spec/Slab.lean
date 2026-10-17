@@ -15,12 +15,13 @@ end: magazines under rseq".
 ## Layout
 
 `SLABS` is a static array of `SLAB_COUNT` slabs of `SLAB_BYTES` bytes, one
-per concurrency ID (cid). A slab's first words are the slab words, one per
-class: the word of class `c` of cid `i` is at `SLABS + i * SLAB_BYTES + 8 c`
+per CPU number. A slab's first words are the slab words, one per class: the
+word of class `c` of CPU `i` is at `SLABS + i * SLAB_BYTES + 8 c`
 (`wordAddr`). A magazine of `n` slots (`n` a power of two) is `8 n` bytes,
 aligned to its size; slot 0 is a link word and slot `n - 1` is unused, and
-the slots between hold pointers. A slab word is zero (no magazine), the
-marker `1`, or the address of the next free slot of the magazine loaded for
+the slots between hold pointers. A slab word is zero (no magazine), a
+marker (`IsMarker`: its lowest bit set, a drainer's generation above every
+slot-number bit), or the address of the next free slot of the magazine loaded for
 that class: `8 s` past its base, for `1 ≤ s ≤ n - 1`, slots `1` to `s - 1`
 holding the cached pointers (`Mag.ofWord`). The mask of an `n`-slot
 magazine is `8 n - 16` (`magMask`): the bits of the slot number but its
@@ -29,32 +30,36 @@ lowest. The out-of-line routines read the mask of the class `c` from the
 
 ## The invariant
 
-For every cid below `SLAB_COUNT`, the slab word of the routine's class is
-zero, the marker, or a slot address with `s ≥ 1` of a magazine of the
+For every CPU below `SLAB_COUNT`, the slab word of the routine's class is
+zero, a marker, or a slot address with `s ≥ 1` of a magazine of the
 class's size (`WordOk`). That nothing else refers to the magazine, and that
 the pointers are distinct free objects, are properties of the whole
 allocator (docs/design.md, "The invariant"), kept by the slow paths and the
 drainer, which the routines do not rely on: they only move the boundary
-between the free slots and the cached pointers.
+between the free slots and the cached pointers. The abstraction is of one
+word at a time (`Mag.ofWord`), so a slow path's compare-and-store of a whole
+word is a change from one abstract magazine to another.
 
 ## The routines
 
 Each routine reads the thread's rseq area (glibc's `__rseq_offset` from the
-thread pointer, `rseq_cs` at 8, `mm_cid` at 24), points `rseq_cs` at its
-descriptor, reads the cid, takes the slow path if it is not below
-`SLAB_COUNT`, reads the slab word, tests it with the mask, and then pops
+thread pointer, `rseq_cs` at 8, `cpu_id` at 4), points `rseq_cs` at its
+descriptor, reads the CPU number, takes the slow path if it is not below
+`SLAB_COUNT` (as it is not for a thread without a registration, whose
+`cpu_id` reads as a negative number), reads the slab word, tests it with the mask, and then pops
 the top pointer or pushes one, committing by storing the new slab word.
 What each may touch is one function of the state (`Ctx.regions`): the
-variable `__rseq_offset` and the cid field (read), `rseq_cs` (written), the
-mask's table entry (read, out of line), and, if the cid is in range, the
-slab word and the magazine it names (written).
+variable `__rseq_offset` and `cpu_id` (read), `rseq_cs` (written), the
+mask's table entry (read, out of line), and, if the CPU number is in range,
+the slab word and the magazine it names (written). Every marker fails both
+mask tests, so no routine stores over one.
 
 ## What the operating system and other threads may do
 
 A routine is a restartable sequence: it may be aborted, and other threads
 may run, before its commit; then it starts again from its arm. `env` says
 what holds when it does: the precondition, with the regions recomputed from
-the memory then (`Ctx.regions`), for the cid it then reads. That is the
+the memory then (`Ctx.regions`), for the CPU number it then reads. That is the
 invariant above, which every thread and the drainer keep, and the thread's
 own registers, which the abort leaves (`Target.rely`) and which the routine
 proves intact wherever it may be aborted (`Sig.contract`'s `abort`: the
@@ -72,21 +77,25 @@ namespace VG.Spec.Slab
 def SLAB_SHIFT : Nat := 12
 /-- The bytes of a slab. -/
 def SLAB_BYTES : Nat := 2 ^ SLAB_SHIFT
-/-- The number of slabs: one for every cid the kernel may give a thread of
-a process on x86-64. A larger cid takes the slow path. -/
+/-- The number of slabs: one for every CPU number the kernel may give a
+thread on x86-64. A larger one (or a negative one, read as 32 bits) takes
+the slow path. -/
 def SLAB_COUNT : Nat := 8192
 /-- The classes a slab has a word for: a class's word lies in its slab. -/
 def CLASS_LIMIT : Nat := SLAB_BYTES / 8
-/-- The slab word that marks a class's magazine as being drained. -/
-def MARKER : Nat := 1
 /-- The magazine sizes are `2 ^ k` slots, `MAG_LOG_MIN ≤ k ≤ MAG_LOG_MAX`:
 at least 4 (with 2, the mask is zero), and few enough that the mask, and
 so the slot number, is in the low 32 bits a routine tests. -/
 def MAG_LOG_MIN : Nat := 2
 def MAG_LOG_MAX : Nat := 16
+/-- A marker is a slab word whose lowest `MARKER_SHIFT` bits are `1`: its
+lowest bit set, and the drainer's generation it carries above every bit of
+the slot number of every allowed magazine size, so that both mask tests
+fail on it. -/
+def MARKER_SHIFT : Nat := MAG_LOG_MAX + 3
 /-- Offsets of the fields of `struct rseq` (`include/uapi/linux/rseq.h`). -/
 def RSEQ_CS : Nat := 8
-def RSEQ_MM_CID : Nat := 24
+def RSEQ_CPU_ID : Nat := 4
 
 /-- The names the code gives the symbols it uses: glibc's offset of the
 thread's rseq area (`Target.rseqOffsetSym` on x86-64), the slabs, the masks'
@@ -119,9 +128,9 @@ def MaskOk (mask : Nat) : Prop :=
 /-- The slots of a magazine whose mask is `mask`. -/
 def slotsOf (mask : Nat) : Nat := (mask + 16) / 8
 
-/-- The address of the slab word of class `cls` of cid `cid`. -/
-def wordAddr (slabs : Addr) (cid cls : Nat) : Addr :=
-  slabs + BitVec.ofNat 64 (cid * SLAB_BYTES + 8 * cls)
+/-- The address of the slab word of class `cls` of CPU `cpu`. -/
+def wordAddr (slabs : Addr) (cpu cls : Nat) : Addr :=
+  slabs + BitVec.ofNat 64 (cpu * SLAB_BYTES + 8 * cls)
 
 /-! ## Slab words and the abstract magazine -/
 
@@ -137,16 +146,21 @@ def IsSlot (n : Nat) (w : BitVec 64) : Prop := w.toNat % 8 = 0 ∧ 1 ≤ slot n 
 instance (n : Nat) (w : BitVec 64) : Decidable (IsSlot n w) := by
   unfold IsSlot; infer_instance
 
-/-- A slab word of a class whose magazines have `n` slots: no magazine, the
+/-- The word is a marker: a drainer has taken the magazine. -/
+def IsMarker (w : BitVec 64) : Prop := w.toNat % 2 ^ MARKER_SHIFT = 1
+
+instance (w : BitVec 64) : Decidable (IsMarker w) := by unfold IsMarker; infer_instance
+
+/-- A slab word of a class whose magazines have `n` slots: no magazine, a
 marker, or the next free slot of a magazine. -/
 def WordOk (n : Nat) (w : BitVec 64) : Prop :=
-  w.toNat = 0 ∨ w.toNat = MARKER ∨ IsSlot n w
+  w.toNat = 0 ∨ IsMarker w ∨ IsSlot n w
 
 /-- What a slab word stands for. -/
 inductive Mag
   /-- No magazine (zero). -/
   | absent
-  /-- The marker: being drained. -/
+  /-- A marker (any word with its lowest bit set): being drained. -/
   | marker
   /-- A magazine at `base`, whose cached pointers are `items`, the last on
   top. -/
@@ -157,7 +171,7 @@ inductive Mag
 slots: the pointers in slots `1` to `s - 1` for the slot `s` the word
 names. (Of a word that is not `WordOk`, any.) -/
 def Mag.ofWord (n : Nat) (m : Mem) (w : BitVec 64) : Mag :=
-  if w.toNat = 0 then .absent else if w.toNat = MARKER then .marker else
+  if w.toNat = 0 then .absent else if w.toNat % 2 = 1 then .marker else
     .stack (magBase n w) ((List.range (slot n w - 1)).map fun i =>
       m.readW (magBase n w + BitVec.ofNat 64 (8 * (i + 1))) 64)
 
@@ -213,11 +227,11 @@ def arg (i : Nat) : BitVec 64 :=
   | some f => (f s).getD i 0
   | none => 0
 
-/-- The thread's rseq area, its `rseq_cs` and its `mm_cid`. -/
+/-- The thread's rseq area, its `rseq_cs` and its `cpu_id`. -/
 def area : Addr := c.tp s + (c.mem s).readW (c.sym s RSEQ_OFFSET) 64
 def csField : Region := ⟨c.area s + BitVec.ofNat 64 RSEQ_CS, 8⟩
-def cidField : Region := ⟨c.area s + BitVec.ofNat 64 RSEQ_MM_CID, 4⟩
-def cid : Nat := ((c.mem s).readW (c.cidField s).base 32).toNat
+def cpuField : Region := ⟨c.area s + BitVec.ofNat 64 RSEQ_CPU_ID, 4⟩
+def cpu : Nat := ((c.mem s).readW (c.cpuField s).base 32).toNat
 
 /-- The routine's class. -/
 def cls : Nat := match c.form with
@@ -234,27 +248,27 @@ def mask : Nat := match c.form with
 def slots : Nat := slotsOf (c.mask s)
 
 /-- The address of the slab word, and the word, of the class for the
-thread's cid. -/
-def word : Addr := wordAddr (c.sym s SLABS) (c.cid s) (c.cls s)
+thread's CPU. -/
+def word : Addr := wordAddr (c.sym s SLABS) (c.cpu s) (c.cls s)
 def w : BitVec 64 := (c.mem s).readW (c.word s) 64
 
-/-- The cid has a slab. -/
-def InRange : Prop := c.cid s < SLAB_COUNT
+/-- The CPU number has a slab. -/
+def InRange : Prop := c.cpu s < SLAB_COUNT
 
 instance : Decidable (c.InRange s) := by unfold InRange; infer_instance
 
-/-- The abstract magazine of the class for the thread's cid. -/
+/-- The abstract magazine of the class for the thread's CPU. -/
 def mag : Mag := Mag.ofWord (c.slots s) (c.mem s) (c.w s)
 
 /-- The magazine's region, if the word names one. -/
 def magRegion : Region := ⟨magBase (c.slots s) (c.w s), 8 * c.slots s⟩
 
 /-- **The memory a routine may access**, and whether it may write it: the
-variable `__rseq_offset` and the cid field, `rseq_cs`, the mask's table
-entry (out of line), and, if the cid has a slab, the slab word and the
+variable `__rseq_offset` and `cpu_id`, `rseq_cs`, the mask's table
+entry (out of line), and, if the CPU number has a slab, the slab word and the
 magazine it names. A function of the state, so recomputed on a retry. -/
 def regions : List (Region × Bool) :=
-  [(⟨c.sym s RSEQ_OFFSET, 8⟩, false), (c.cidField s, false), (c.csField s, true)] ++
+  [(⟨c.sym s RSEQ_OFFSET, 8⟩, false), (c.cpuField s, false), (c.csField s, true)] ++
   (match c.form with | .table => [(⟨c.maskAddr s, 4⟩, false)] | .inline => []) ++
   (if c.InRange s then
     (⟨c.word s, 8⟩, true) :: (if IsSlot (c.slots s) (c.w s) then [(c.magRegion s, true)] else [])
@@ -274,8 +288,8 @@ def pre : Prop :=
 
 /-! ### Pop -/
 
-/-- The pointer a pop takes and the magazine it leaves; `none` if the cid has
-no slab or the magazine none to give (none, the marker, or empty). -/
+/-- The pointer a pop takes and the magazine it leaves; `none` if the CPU number has
+no slab or the magazine none to give (none, a marker, or empty). -/
 def popResult : Option (BitVec 64 × Mag) := if c.InRange s then (c.mag s).pop else none
 
 /-- A pop that took the pointer `x`: memory changed only in `rseq_cs` and the
@@ -292,8 +306,8 @@ def PopMissed (s' : M.State) : Prop :=
 
 /-! ### Push -/
 
-/-- The magazine a push of `x` leaves; `none` if the cid has no slab or the
-magazine no free slot to spare (none, the marker, or full). -/
+/-- The magazine a push of `x` leaves; `none` if the CPU number has no slab or the
+magazine no free slot to spare (none, a marker, or full). -/
 def pushResult (x : BitVec 64) : Option Mag :=
   if c.InRange s then (c.mag s).push (c.slots s) x else none
 
@@ -313,10 +327,10 @@ def PushMissed (x : BitVec 64) (s' : M.State) : Prop :=
 
 The memory accesses of a run that is not aborted, in terms of the values it
 reads (`Contract.trace`): another thread may change memory between them
-(the drainer exchanging a slab word with the marker, say), so it matters
+(the drainer exchanging a slab word with a marker, say), so it matters
 what the code stores as a function of what it read, not of memory on entry.
-Both read `__rseq_offset` (`o`), arm `rseq_cs` (`d`), read the cid (`i`), and
-then, for a cid with a slab, read the slab word once (`w`) and test it with
+Both read `__rseq_offset` (`o`), arm `rseq_cs` (`d`), read the CPU number (`i`), and
+then, for one with a slab, read the slab word once (`w`) and test it with
 the mask (`k`, read from the table out of line); a pop then reads the slot
 below (`v`) and commits `w - 8`; a push stores its pointer `x` in the free
 slot, which no abstraction of the slab includes, and commits `w + 8`. The
@@ -330,7 +344,7 @@ def wr (a : Addr) (n v : Nat) : Event := ⟨a, n, true, v⟩
 def headTrace (o d i w k : Nat) : List Event :=
   let a := c.tp s + BitVec.ofNat 64 o
   [rd (c.sym s RSEQ_OFFSET) 8 o, wr (a + BitVec.ofNat 64 RSEQ_CS) 8 d,
-    rd (a + BitVec.ofNat 64 RSEQ_MM_CID) 4 i] ++
+    rd (a + BitVec.ofNat 64 RSEQ_CPU_ID) 4 i] ++
   if i < SLAB_COUNT then
     rd (wordAddr (c.sym s SLABS) i (c.cls s)) 8 w ::
       (match c.form with | .table => [rd (c.maskAddr s) 4 k] | .inline => [])
@@ -446,11 +460,11 @@ def safety (cls size : String) : List String := [
     can run code that allocates.",
   s!"{cls} must be below {CLASS_LIMIT}, and {size} the mask `8 * n - 16` of the class's \
     magazines, of `n = 2^k` slots for {MAG_LOG_MIN} ≤ k ≤ {MAG_LOG_MAX}.",
-  s!"In each of the {SLAB_COUNT} slabs of `SLABS`, the class's slab word must be 0, the marker \
-    {MARKER}, or the address of a slot other than slot 0 of a magazine of the class (`8 * n` bytes, \
+  s!"In each of the {SLAB_COUNT} slabs of `SLABS`, the class's slab word must be 0, a marker \
+    (a word whose low {MARKER_SHIFT} bits are 1), or the address of a slot other than slot 0 of a magazine of the class (`8 * n` bytes, \
     aligned to `8 * n`).",
-  "The thread's `rseq_cs`, the class's slab word for its cid, and the magazine it names must \
-    not overlap each other, `__rseq_offset`, the thread's `mm_cid`, the mask's entry in \
+  "The thread's `rseq_cs`, the class's slab word for its CPU, and the magazine it names must \
+    not overlap each other, `__rseq_offset`, the thread's `cpu_id`, the mask's entry in \
     `MAG_MASKS`, or the return address on the stack; none may wrap around the end of the \
     address space (`VG.Spec.Slab.Ctx.regions`)."]
 
@@ -459,8 +473,8 @@ def popInlineApi : Api where
   name := "slab_pop"
   sig := popInlineSig
   contracts := some fun A _ => popInlineContract A
-  summary := "Pops a pointer from the magazine of class `CLASS` of the calling thread's cid, or \
-    returns 0 if the cid has no slab or the magazine none to give.\n\n\
+  summary := "Pops a pointer from the magazine of class `CLASS` of the calling thread's CPU, or \
+    returns 0 if the CPU number has no slab or the magazine none to give.\n\n\
     Contract: `VG.Spec.Slab.popInlineContract`."
   safety := safety "`CLASS`" "`MASK`"
   operands := [(RSEQ_OFFSET, .sym (path RSEQ_OFFSET)), (SLABS, .sym (path SLABS)),
@@ -472,8 +486,8 @@ def pushInlineApi : Api where
   name := "slab_push"
   sig := pushInlineSig
   contracts := some fun A _ => pushInlineContract A
-  summary := "Pushes `p` on the magazine of class `CLASS` of the calling thread's cid and \
-    returns `true`, or returns `false` if the cid has no slab or the magazine no free slot to \
+  summary := "Pushes `p` on the magazine of class `CLASS` of the calling thread's CPU and \
+    returns `true`, or returns `false` if the CPU number has no slab or the magazine no free slot to \
     spare.\n\n\
     Contract: `VG.Spec.Slab.pushInlineContract`."
   safety := safety "`CLASS`" "`MASK`"
@@ -486,8 +500,8 @@ def popApi : Api where
   name := "slab_pop"
   sig := popSig
   contracts := some fun A _ => popContract A
-  summary := "Pops a pointer from the magazine of class `class` of the calling thread's cid and \
-    returns it, or tail-calls `front::pop_slow(class)` if the cid has no slab or the magazine \
+  summary := "Pops a pointer from the magazine of class `class` of the calling thread's CPU and \
+    returns it, or tail-calls `front::pop_slow(class)` if the CPU number has no slab or the magazine \
     none to give.\n\n\
     Contract: `VG.Spec.Slab.popContract`."
   safety := safety "`class`" "`MAG_MASKS[class]`"
@@ -499,8 +513,8 @@ def pushApi : Api where
   name := "slab_push"
   sig := pushSig
   contracts := some fun A _ => pushContract A
-  summary := "Pushes `p` on the magazine of class `class` of the calling thread's cid, or \
-    tail-calls `front::push_slow(class, p)` if the cid has no slab or the magazine no free \
+  summary := "Pushes `p` on the magazine of class `class` of the calling thread's CPU, or \
+    tail-calls `front::push_slow(class, p)` if the CPU number has no slab or the magazine no free \
     slot to spare.\n\n\
     Contract: `VG.Spec.Slab.pushContract`."
   safety := safety "`class`" "`MAG_MASKS[class]`"
