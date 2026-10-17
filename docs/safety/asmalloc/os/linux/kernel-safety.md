@@ -1,8 +1,9 @@
 # Safety ledger: `crates/asmalloc/src/os/linux/kernel.rs`
 
-`LinuxOs`, the `Os` implementation over system calls. Every unsafe block here calls
+`LinuxOs`, the `Os` implementation over system calls. Every unsafe block here but one calls
 `syscall()` (SYSCALL-01) or a thin helper over it, so each entry's obligation is that the
 kernel's contract for the call is met and that the call changes only what the caller may change.
+The exception is the timestamp-counter read in `ticks` (KERNEL-09).
 Neither Kani nor Miri can run this file; the unit tests in it run every call on the real kernel.
 
 References are to the Linux man pages (mmap(2), mprotect(2), madvise(2), munmap(2),
@@ -152,10 +153,30 @@ contents and changes only access, and since nothing touches the range until it i
 again, no Rust access can fault on it except a bug's, which is what the simulator's guarded
 memory exists to expose (SIM-MEMORY-06). Its one caller is `Memory::close`.
 
+## KERNEL-09: `ticks`
+
+**Block.** `core::arch::x86_64::_rdtsc()`.
+
+**Preconditions.** None that the caller can break. The intrinsic is `unsafe` only because all of
+`core::arch` is. It compiles to the `rdtsc` instruction, which every x86-64 processor has, so no
+target feature has to be checked first.
+
+**Proof.** `rdtsc` reads no memory, writes no memory, and writes only `edx` and `eax`, which the
+intrinsic returns as one `u64`; the compiler knows this, as it does for any intrinsic. In user
+mode it faults only if the kernel set `CR4.TSD`, which Linux does only for a thread that asked
+with `prctl(PR_SET_TSC, PR_TSC_SIGSEGV)`. Such a thread gets SIGSEGV on the instruction: the
+process stops, which is no memory-safety violation, and a program that forbids itself the
+counter has opted out of anything that reads it.
+
+**What the value is for.** The idle check's pacing (`depot::heartbeat`), and nothing else. The
+`Os` trait makes no promise about it, so no safety argument rests on it: a counter that runs at
+an unexpected rate, differs between CPUs, or goes back makes a drain come earlier or later, and
+a drain is safe at any time (the drain protocol, `depot/drain.rs`).
+
 ## KERNEL-07: `unsafe impl Os for LinuxOs`
 
 The comment above the impl maps each promise of the `Os` trait to the kernel behaviour that
-provides it, and KERNEL-01 to KERNEL-06 cover the individual calls. The promises not covered by a
+provides it, and KERNEL-01 to KERNEL-06 and KERNEL-09 cover the individual calls. The promises not covered by a
 single call:
 
 - *Valid until unmapped or dropped.* Reservations are mappings of the process. Dropping a
@@ -172,7 +193,7 @@ single call:
 - `bad_arguments_are_errors_not_calls`.
 - `the_design_reservation_is_available`: a 16 TiB reservation.
 - `glibc_registers_rseq`.
-- `rseq_fences_aim_at_one_cpu_after_registering`, `random_numbers_differ` and
+- `rseq_fences_aim_at_one_cpu_after_registering`, `ticks_rise`, `random_numbers_differ` and
   `a_page_can_be_marked_to_be_wiped_on_fork`.
 - `abort_ends_the_process_with_sigabrt` and
   `abort_runs_the_programs_handler_then_ends_the_process_anyway`: child processes, checking
@@ -180,4 +201,4 @@ single call:
 
 **Review.** 2026-10-17, fresh adversarial reviewer: KERNEL-01 to KERNEL-07 accepted, after
 the fixes of its first round. KERNEL-06 changed since (the handler now runs first) and needs
-the reviewer's check again.
+the reviewer's check again. KERNEL-09 is new and needs a fresh reviewer's check.

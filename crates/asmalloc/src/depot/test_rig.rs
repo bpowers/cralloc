@@ -33,12 +33,13 @@ pub(crate) fn tiny_class() -> SmallClass {
     crate::classes::Class::LARGEST_SMALL.small().unwrap()
 }
 
-/// Limits under which every path is reachable with the tiny class: spares on both stacks, and
-/// a depot target of one magazine.
+/// Limits under which every path is reachable with the tiny class: spares on both stacks, a
+/// depot target of one magazine, and a look for an idle slab on every slow path.
 pub(crate) const TIGHT: Tuning = Tuning {
     spare_budget: usize::MAX / 2,
     max_spares: 1,
     depot_target: 2 * (32 << 10),
+    look_every: 1,
 };
 
 /// A fake object: an address that is never dereferenced.

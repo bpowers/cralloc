@@ -30,6 +30,7 @@ So a reservation starts out zero. The other promises:
   acts on no more than its range.
 - `fence` aborts the twin sequences in flight on its CPU, waiting out committing ones.
 - `abort` panics, so it does not return.
+- `ticks` reads a clock that only a test moves; the trait asks nothing of it.
 
 What it does not promise beyond the trait: it does not detect a write to uncommitted memory. That
 is a test aid of `SimOs`, not part of the `Os` contract.
