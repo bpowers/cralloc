@@ -1,0 +1,21 @@
+[package]
+name = "asmalloc"
+version = "0.1.0"
+description = "A memory allocator for multithreaded Rust programs on Linux"
+edition.workspace = true
+license.workspace = true
+publish = false
+# The crate must also build on the nightly that Kani pins (1.93.0-nightly as of Kani 0.67). A
+# pre-release compares below its release, so this says 1.92, which also keeps clippy from
+# suggesting newer APIs.
+rust-version = "1.92"
+
+[features]
+# The simulated OS (`os::sim`) for tests, fuzzing and proofs in other crates. It brings in the
+# `alloc` crate; never enable it in a build that serves as the global allocator.
+sim = []
+
+[dependencies]
+
+[lints]
+workspace = true

@@ -1,0 +1,70 @@
+#!/usr/bin/env bash
+# Run every Kani harness in the workspace, each in its own memory-capped scope, and print one
+# line per harness with its result and time. Exits non-zero if any failed.
+#
+# Usage: scripts/kani-all [PATTERN]
+#   PATTERN  only harnesses whose full path contains it, e.g. `verify_slow` or `space::`.
+#
+# Why one scope per harness: a single `cargo kani` runs its harnesses in one cgroup, and CBMC's
+# memory use accumulates across them, so a set whose members each fit under the cap can still
+# be killed as a whole.
+#
+# Harnesses are found from their `#[kani::proof]` attributes, so the list never goes stale. The
+# convention this relies on: harnesses live in `verify.rs` (quick: the merge gate runs them all
+# together, so each must finish in a few seconds) or `verify_slow.rs` (on demand), and the
+# module path follows the file path.
+set -uo pipefail
+here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+root="$(cd "$here/.." && pwd)"
+cd "$root"
+pattern="${1:-}"
+
+# Prints "package<TAB>module::path::harness" for every harness. Fails if a proof attribute has no
+# function after it, or a harness lives outside a verify.rs or verify_slow.rs file, rather than
+# silently skipping it.
+list() {
+  local file pkg rel module attrs names
+  while IFS= read -r file; do
+    case "$file" in
+      */verify.rs|*/verify_slow.rs) ;;
+      *) echo "kani-all: $file has a harness outside verify.rs or verify_slow.rs" >&2; return 1 ;;
+    esac
+    pkg="${file#crates/}"; pkg="${pkg%%/*}"
+    rel="${file#crates/$pkg/src/}"; rel="${rel%.rs}"; rel="${rel%/mod}"
+    module="${rel//\//::}"
+    attrs=$(grep -cE '#\[.*kani::proof' "$file")
+    # The first function after each proof attribute, however many lines of comments and
+    # attributes come between.
+    names=$(awk '/#\[.*kani::proof/ { want = 1; next }
+                 want && match($0, /fn [A-Za-z_0-9]+/) {
+                   print substr($0, RSTART + 3, RLENGTH - 3); want = 0 }' "$file")
+    if [ "$(printf '%s\n' "$names" | grep -c .)" -ne "$attrs" ]; then
+      echo "kani-all: $file has $attrs proof attributes but a different number of harnesses" >&2
+      return 1
+    fi
+    printf '%s\n' "$names" | while IFS= read -r name; do
+      printf '%s\t%s::%s\n' "$pkg" "$module" "$name"
+    done
+  done < <(grep -rlE '#\[.*kani::proof' crates/*/src --include='*.rs' | sort)
+}
+
+all=$(list) || exit 2
+mapfile -t harnesses < <(printf '%s\n' "$all" | grep -F -- "$pattern")
+[ "${#harnesses[@]}" -gt 0 ] || { echo "kani-all: no harnesses match '$pattern'" >&2; exit 2; }
+failed=0
+for entry in "${harnesses[@]}"; do
+  pkg="${entry%%$'\t'*}"; harness="${entry#*$'\t'}"
+  start=$(date +%s)
+  if out=$(MEMLIMIT_QUIET=1 "$here/kani" -p "$pkg" --harness "$harness" --exact \
+             --output-format terse 2>&1); then
+    status=ok
+  else
+    status=FAILED; failed=$((failed + 1))
+  fi
+  printf '%-72s %-6s %5ds\n' "$harness" "$status" "$(( $(date +%s) - start ))"
+  if [ "$status" = FAILED ]; then
+    printf '%s\n' "$out" | grep -E 'FAILURE|Failed Checks|error|panicked|timed out' | head -5
+  fi
+done
+echo "kani-all: ${#harnesses[@]} harnesses, $failed failed"
+[ "$failed" -eq 0 ]

@@ -1,0 +1,18 @@
+#!/usr/bin/env bash
+# The only sanctioned way to run Kani in this repository.
+#
+# Runs `cargo kani` from the repository root with the given arguments, under scripts/memlimit:
+# a 6 GiB hard cap (KANI_MEM) and a 30 minute timeout (KANI_TIMEOUT). Several people may verify
+# at once on a shared machine, so keep the cap modest and the harnesses small (tiny simulated
+# heaps, small unwind bounds) rather than raising it.
+#
+# Examples:
+#   scripts/kani -p asmalloc --harness the_class_function_is_monotone
+#   KANI_MEM=12G KANI_TIMEOUT=1h scripts/kani -p asmalloc --harness some_slow_harness
+#
+# One invocation runs its harnesses one after another in one cgroup, and CBMC's memory use
+# accumulates across them, so run large harnesses one per invocation (scripts/kani-all does).
+set -euo pipefail
+here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+cd "$here/.."
+exec "$here/memlimit" -m "${KANI_MEM:-6G}" -t "${KANI_TIMEOUT:-30m}" -- cargo kani "$@"
