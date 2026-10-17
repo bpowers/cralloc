@@ -365,3 +365,24 @@ costs nothing measurable. Memory-bound single-threaded jobs drifted by up to thr
 the half hour in both arms alike (jemalloc churn 1M from 372 to 124 cycles/op) with no load on
 their own CPU or its sibling; interleaving cancels such drift, but single sessions on a
 shared machine cannot be trusted for these jobs.
+
+**tcmalloc's shared library now uses initial-exec TLS.** Built `-fPIC` by this GCC, whose
+default is `-mtls-dialect=gnu2`, it reached its thread-locals (`tcmalloc_sampler`,
+`__rseq_abi`) through TLS descriptor calls, two per `malloc`, an indirect call through memory
+that on Zen 5 defeats zero-latency store forwarding (`zen5-roofline.md` section 14). Preloaded
+allocators are normally built with initial-exec TLS, as mimalloc's and jemalloc's shared
+builds are; `build.sh` now passes `--copt=-ftls-model=initial-exec`, the library has no
+`R_X86_64_TLSDESC` relocations left (10 before), and `malloc`, `free` and the aligned `new`
+read their thread-locals with plain `%fs:` loads. The static archive was unaffected (a static
+link relaxes either model). Measured 2026-10-17 on the shared machine, preloaded, per-CPU
+mode, five interleaved runs, medians, before and after:
+
+| Job | TLS descriptors | Initial-exec | Change |
+|---|---:|---:|---:|
+| churn, 1k live (cycles/op) | 45.0 | 37.4 | −17% |
+| churn, 100k live (cycles/op) | 68.1 | 58.7 | −14% |
+| xmalloc-test 4+4, short (Mfrees/s) | 405 | 511 | +26% |
+| larson-sized 8, short (Mops/s) | 308 | 369 | +20%, noisy |
+
+Every tcmalloc preload figure in sections 3 to 8 was measured with the descriptor build and
+understates tcmalloc by about this much.
