@@ -453,7 +453,8 @@ its loaded magazines never runs a heartbeat. Other threads cover for it: any slo
 maintains the shared structures, and the idle check drains a slab that has had no slow path
 for an interval, which sends that CPU to its slow path. Only a process in which every thread
 stays inside its magazines has no heartbeat at all. It keeps what it held when it went
-quiet, which the caps below bound, until a slow path runs or the program calls `collect`.
+quiet: the free memory not yet purged, its parked objects, and the pages those pin. That
+lasts until a slow path runs or the program calls `collect`.
 
 Objects mostly circulate through magazines and the depot without touching the bitmaps. They
 reach the bitmaps when a class's depot stack is over its target, and through the rules under
@@ -478,12 +479,13 @@ for ever. Five rules follow.
   memory it holds that is still resident. Frees and laundered magazines raise it; only
   reuse and purging lower it. It is never reset on the grounds that a pass found nothing
   to purge: in a storm of frees every page still has a live neighbour for a moment, and a
-  count that forgets those bytes stops bounding anything. When the count passes a cap, the
-  call that pushed it there purges until it is back under. Freed large slots have a
-  separate and much smaller cap, checked at the free: a freed large slot can serve only its
-  own class, and one call returns it. Two things lie outside the count: free objects on
-  pages that also hold live ones, which is fragmentation, and objects parked in magazines,
-  spares and the depot, which the next rule handles.
+  count that forgets those bytes stops bounding anything. The call that pushes the count
+  past a cap purges toward it, within a bound on its own work, and the clocked pass does
+  the rest. Free objects on pages that also hold live ones cannot be purged; that is
+  fragmentation, and it stays counted. Freed large slots have a separate and much smaller
+  cap, checked at the free: a freed large slot can serve only its own class, and one call
+  returns it. Objects parked in magazines, spares and the depot are not free and are not
+  in the count; the next rule handles them.
 - **Parked objects do not pin the heap.** An object parked in a magazine holds its page as
   surely as a live one, and parked objects are a random sample of wherever the heap has
   been. Three rules keep them moving back to the bitmaps, where the next fill takes the
@@ -508,7 +510,8 @@ for ever. Five rules follow.
 - **Never split a huge page.** In the huge-page part of a region, purging works only in
   whole 2 MiB units. That includes the unit holding the watermark, whose upper part was
   made resident by the fault and never allocated: a purge first carves the rest of that
-  unit, so that nothing else can, then treats it like any other.
+  unit and frees it, counting it as retained, so the whole unit is ordinary free memory
+  that it can claim like any other.
 
 `collect`, and `malloc_trim` in C, do all of this at once without waiting for the clock:
 drain every slab in use, launder every depot stack, and purge what is free. A program that
@@ -549,16 +552,31 @@ it means the new size is still large and fits the slot. Anything else moves the 
 - **`Allocator`**, on Rust versions that have it, through a zero-sized handle. All handles
   share the one heap. `allocate` returns the full class size. A zero-size request gets a
   dangling, aligned pointer and no block.
-- **C ABI**: `malloc`, `calloc`, `realloc`, `free`, the aligned-allocation family,
-  `malloc_usable_size`, `malloc_trim` and the sized frees. These are exported when a cargo
-  feature asks for them, and always by the `LD_PRELOAD` library. `free(p)` reads the class
-  from the address table and joins the same path as a Rust free. A pointer outside the heap
-  is a caller's bug and aborts the process. The sized frees also take the class from the
-  address, since a wrong size from C would otherwise corrupt the heap. `malloc_usable_size`
-  reports the class size of a small object and, for a large one, its recorded size rounded
-  up to a page. `realloc(p, 0)` frees `p` and
-  returns null, as glibc does. This layer sets `errno` through the C library's own
-  accessor; it is the only part of asmalloc that refers to a C library.
+- **C ABI**: `malloc`, `calloc`, `realloc`, `reallocarray`, `free`, the aligned-allocation
+  family, `malloc_usable_size`, `malloc_trim` and the sized frees: every function glibc
+  exports that takes or returns a block. `free(p)` reads the class from the address table
+  and joins the same path as a Rust free. A pointer outside the heap is a caller's bug and
+  aborts the process. `malloc_usable_size` reports the class size of a small object and,
+  for a large one, its recorded size rounded up to a page; a `realloc` that moves a block
+  copies that much, because callers write into the room they are told they have.
+  `realloc(p, 0)` frees `p` and returns null, as glibc does.
+- **C++**: the replaceable forms of `operator new` and `operator delete`, so that C++
+  allocates without a detour through `malloc` and sized deletes arrive with their size. A
+  failing `new` runs the installed new-handler until none is left; then a nothrow form
+  returns null and a throwing form raises `std::bad_alloc`. An exception cannot unwind
+  through the allocator's Rust frames, so the throwing forms are generated routines that on
+  failure jump to the C++ runtime's own throw function with nothing of ours on the stack.
+- **A size from C or C++ is a prediction, never trusted.** A sized free or delete may use
+  the size to find the class early, but the class from the address is the truth, and a
+  wrong size (a derived object deleted through a base pointer, say) behaves exactly like a
+  free with no size.
+
+A macro exports the C names, and another the C++ names, from the crate that invokes it; a
+cargo feature does the same, and the `LD_PRELOAD` library always exports both. A feature
+alone would not do: cargo unifies features across a workspace, and every test binary would
+then replace `malloc`. The C layer sets `errno` through the C library's accessor and finds
+the new-handler and the throw function by symbol lookup; these are the only parts of
+asmalloc that refer to a C library or a C++ runtime.
 - **`collect`**, a Rust function and what `malloc_trim` calls: return everything that can be
   returned now (see "Returning memory"). `inspect` reports where the heap's memory is,
   without changing it.
