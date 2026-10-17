@@ -618,8 +618,8 @@ mod tests {
         let g = Standard::GEOMETRY.largest_plan();
         let layout = Layout::new(g, Class::SMALLEST).unwrap();
         assert_eq!(layout.leaf_commit(0), 0);
-        // One 1 KiB page holds 128 eight-byte slots: two leaf words, rounded to a page.
-        assert_eq!(layout.leaf_commit(1), 1024);
+        // One page of eight-byte slots needs a few leaf words, rounded up to a page.
+        assert_eq!(layout.leaf_commit(1), Standard::GEOMETRY.page_size());
         let all = layout.leaf_commit(layout.region_pages());
         assert!(all >= layout.leaf_words() as usize * WORD_BYTES);
         let (start, end) = layout.fixed_commit();

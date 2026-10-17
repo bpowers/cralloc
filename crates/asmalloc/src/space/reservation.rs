@@ -545,7 +545,7 @@ mod tests {
     #[test]
     fn the_cell_publishes_one_space() {
         let cell = SpaceCell::new(Sim::with_capacity(
-            2 * largest().size().next_multiple_of(1 << 16),
+            2 * largest().size().next_multiple_of(largest().region_size()),
         ));
         assert_eq!(cell.get(), None);
         let first = cell.get_or_reserve().unwrap();
