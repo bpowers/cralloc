@@ -469,13 +469,23 @@ def checkInline (a : Artifact) : Except String Unit := do
     unless a.clobbers.isEmpty && a.generics.isEmpty do
       throw s!"{n} is a naked function but declares clobbers or generic parameters"
 
-/-- The hot path of `a` has at most its target's limit of fused micro-ops
-(`Printer.hotUops`, `Printer.uopLimit`). -/
-def checkUops (a : Artifact) : Except String Unit := do
-  let P := a.target.printer
-  if let (some n, some lim) := (P.hotUops a.target.inline a.code, P.uopLimit) then
-    unless n ≤ lim do
-      throw s!"{a.target.name}: {a.name}'s hot path has {n} fused micro-ops, more than {lim}"
+/-- On a target whose printer `P` has a limit of fused micro-ops
+(`Printer.uopLimit`), the hot path of the code `c` of the function `n` has
+at most that many (`Printer.hotUops`); code whose hot path the count is not
+defined for is refused there, rather than let through uncounted. -/
+def uopCheck {M : ISA} (P : Printer M) (inline : Bool) (n : String) (c : Prog M) :
+    Except String Unit := do
+  if let some lim := P.uopLimit then
+    match P.hotUops inline c with
+    | some k =>
+      unless k ≤ lim do
+        throw s!"{n}'s hot path has {k} fused micro-ops, more than {lim}"
+    | none =>
+      throw s!"{n} is neither a block nor a restartable sequence, so its hot path's fused \
+        micro-ops cannot be counted against the limit of {lim}"
+
+def checkUops (a : Artifact) : Except String Unit :=
+  uopCheck a.target.printer a.target.inline s!"{a.target.name}: {a.name}" a.code
 
 /-- The tables of constants of `a`, which its contract gives it
 (`Artifact.consts`). -/

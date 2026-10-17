@@ -469,6 +469,16 @@ def safeDoc : String := "Does things.\n\n# Safety\n\n* `p` must be valid."
 #guard Rust.featureDoc safeDoc ["bmi2", "adx", "bmi1"] ==
   safeDoc ++ "\n* The CPU must support the `bmi2`, `adx` and `bmi1` target features."
 
+-- The micro-op limit: a hot path within it, one over it, and code whose hot
+-- path is not counted, which a target with a limit refuses.
+#guard (Rust.uopCheck printer false "f" rseqSample).toBool
+#guard err (Rust.uopCheck { printer with uopLimit := some 10 } false "f" rseqSample) ==
+  some "f's hot path has 11 fused micro-ops, more than 10"
+#guard err (Rust.uopCheck printer false "f" (.loop (.block []) .e)) ==
+  some "f is neither a block nor a restartable sequence, so its hot path's fused micro-ops \
+    cannot be counted against the limit of 24"
+#guard (Rust.uopCheck { printer with uopLimit := none } false "f" (.loop (.block []) .e)).toBool
+
 #guard Rust.featuresConst "vg_f" [] == ""
 #guard Rust.featuresConst "vg_mul_bmi2" ["bmi2", "adx"] ==
   "/// The CPU features `vg_mul_bmi2` requires (`Artifact.features`).\n\
