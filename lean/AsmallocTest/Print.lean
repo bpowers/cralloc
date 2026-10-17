@@ -357,7 +357,7 @@ def rseqSample : Prog isa := .rseq
   "jae <slow>",
   "mov rcx, QWORD PTR [r9+r8*1]",
   "je 20f",
-  "jb 21f",
+  "jb 7f",
   "mov QWORD PTR [r9+r8*1], rcx",
   "7:",
   ".pushsection __rseq_cs, \"aw\"",
@@ -373,8 +373,6 @@ def rseqSample : Prog isa := .rseq
   "jmp 5b",
   "20:",
   "mov eax, 0",
-  "jmp 7b",
-  "21:",
   "jmp 7b",
   ".popsection",
   "ret"
