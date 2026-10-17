@@ -52,6 +52,14 @@ inside the memory; otherwise it panicked. The `purge` contract says no thread re
 the range during the call. The `unmap` contract says nothing touches it after the call begins.
 So the write races with nothing.
 
+## SIM-OS-03: `self.memory.zero(...)` in `wipe_for_fork`
+
+**Proof.** The page index comes from `Pages::with`, which yields only indexes below the number
+of pages, and `Pages::new` was given `memory.len() / page_size` pages, so
+`index << page_shift` plus one page lies inside the memory. `wipe_for_fork`'s own `# Safety`
+says no thread touches a marked page during the call, which is `Memory::zero`'s condition.
+Zeroing a reserved page keeps invariant Z, which concerns unreserved pages only.
+
 **Review.** 2026-10-17, fresh adversarial reviewer: SIM-OS-02 accepted. SIM-OS-01 was not: a
 `Space` could outlive its `SimOs`, and with address reuse a stale range could pass the check;
 also a range spanning two adjacent reservations was accepted. Both are fixed: a `Space` now

@@ -30,10 +30,10 @@ pub(super) mod nr {
     pub const RT_SIGPROCMASK: usize = 14;
     pub const MADVISE: usize = 28;
     pub const GETPID: usize = 39;
-    pub const PRCTL: usize = 157;
     pub const GETTID: usize = 186;
     pub const EXIT_GROUP: usize = 231;
     pub const TGKILL: usize = 234;
+    pub const GETRANDOM: usize = 318;
     pub const MEMBARRIER: usize = 324;
 }
 

@@ -18,6 +18,8 @@ pub(super) const NO_HUGE: u8 = 1 << 4;
 /// The first page of a reservation, so that a range spanning two reservations can be told
 /// from one inside a single reservation.
 pub(super) const START: u8 = 1 << 5;
+/// Marked to read as zero in a forked child.
+pub(super) const WIPE: u8 = 1 << 6;
 
 /// Per-page state, one atomic byte per page, so concurrent calls on different pages never
 /// interfere and the simulator needs no lock.
@@ -113,6 +115,11 @@ impl Pages {
         self.states[first..first + count]
             .iter()
             .any(|state| state.load(Ordering::Acquire) & mask != 0)
+    }
+
+    /// The pages, in order, with all the bits of `mask`.
+    pub(super) fn with(&self, mask: u8) -> impl Iterator<Item = usize> + '_ {
+        (0..self.states.len()).filter(move |&page| self.get(page) & mask == mask)
     }
 
     /// The number of pages with all the bits of `mask`.

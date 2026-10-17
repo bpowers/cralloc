@@ -14,6 +14,8 @@ pub enum Call {
     Purge,
     /// [`crate::os::Os::advise_huge`].
     AdviseHuge,
+    /// [`crate::os::Os::wipe_on_fork`].
+    WipeOnFork,
     /// [`crate::os::Os::unmap`].
     Unmap,
     /// [`crate::os::Os::register_fence`].
@@ -24,11 +26,12 @@ pub enum Call {
 
 impl Call {
     /// Every call.
-    pub const ALL: [Call; 7] = [
+    pub const ALL: [Call; 8] = [
         Call::Reserve,
         Call::Commit,
         Call::Purge,
         Call::AdviseHuge,
+        Call::WipeOnFork,
         Call::Unmap,
         Call::RegisterFence,
         Call::Fence,
@@ -41,6 +44,8 @@ impl Call {
             Call::Reserve | Call::Commit | Call::Purge | Call::AdviseHuge | Call::Unmap => {
                 OsError::ENOMEM
             }
+            // A kernel before 4.14.
+            Call::WipeOnFork => OsError::EINVAL,
             // A kernel without rseq membarrier support.
             Call::RegisterFence => OsError::EINVAL,
             // Fencing without registering.

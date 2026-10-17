@@ -19,20 +19,18 @@ const MAP_NORESERVE: usize = 0x4000;
 const MADV_DONTNEED: usize = 4;
 const MADV_HUGEPAGE: usize = 14;
 const MADV_NOHUGEPAGE: usize = 15;
+const MADV_WIPEONFORK: usize = 18;
 const MEMBARRIER_CMD_PRIVATE_EXPEDITED_RSEQ: usize = 1 << 7;
 const MEMBARRIER_CMD_REGISTER_PRIVATE_EXPEDITED_RSEQ: usize = 1 << 8;
+const MEMBARRIER_CMD_FLAG_CPU: usize = 1;
+/// `getrandom` flag: never block, even before the kernel's pool is initialized (Linux 5.6).
+const GRND_INSECURE: usize = 0x0004;
 const SIGABRT: usize = 6;
 const SIG_DFL: usize = 0;
 const SIG_UNBLOCK: usize = 1;
 const STDERR: usize = 2;
 /// The kernel's `sigset_t` is one 64-bit word on x86-64.
 const SIGSET_SIZE: usize = 8;
-const PR_GET_AUXV: usize = 0x4155_5856;
-const AT_NULL: u64 = 0;
-const AT_RSEQ_FEATURE_SIZE: u64 = 27;
-/// The bytes of `struct rseq` the kernel maintained before `AT_RSEQ_FEATURE_SIZE` existed: up to
-/// and including `flags`, but not `node_id` or `mm_cid` (Linux 6.3).
-const ORIGINAL_RSEQ_FEATURE_SIZE: u32 = 20;
 
 /// The kernel's `struct sigaction` on x86-64 (`include/linux/signal_types.h` with
 /// `__ARCH_HAS_SA_RESTORER`), not glibc's, which is laid out differently.
@@ -74,16 +72,41 @@ unsafe fn range_call(
     .map(|_| ())
 }
 
-fn membarrier(command: usize) -> Result<(), OsError> {
+fn membarrier(command: usize, flags: usize, cpu: u32) -> Result<(), OsError> {
     // SAFETY: membarrier takes no pointers and changes no memory; the rseq commands only
     // restart sequences in flight, which every sequence must tolerate anyway.
     result(unsafe {
         syscall(
             nr::MEMBARRIER,
-            [int(command), int(0), int(0), int(0), int(0), int(0)],
+            [
+                int(command),
+                int(flags),
+                int(cpu as usize),
+                int(0),
+                int(0),
+                int(0),
+            ],
         )
     })
     .map(|_| ())
+}
+
+/// Eight bytes from the kernel's random pool, or `None` if the call fails.
+fn getrandom() -> Option<u64> {
+    let mut value = 0u64;
+    let buffer: Reg = ptr::from_mut(&mut value).cast();
+    // SAFETY: getrandom writes at most 8 bytes to `buffer`, a live, exclusively borrowed local
+    // of 8 bytes, and changes nothing else. `GRND_INSECURE` keeps it from blocking.
+    let written = result(unsafe {
+        syscall(
+            nr::GETRANDOM,
+            [buffer, int(8), int(GRND_INSECURE), int(0), int(0), int(0)],
+        )
+    });
+    match written {
+        Ok(n) if n.addr() == 8 => Some(value),
+        _ => None,
+    }
 }
 
 /// Writes all of `bytes` to standard error, giving up on any error.
@@ -121,45 +144,6 @@ unsafe fn int_call(number: usize, a: usize, b: usize, c: usize) -> usize {
     unsafe { syscall(number, [int(a), int(b), int(c), int(0), int(0), int(0)]) }.addr()
 }
 
-/// The number of bytes of an rseq area the kernel maintains, from `AT_RSEQ_FEATURE_SIZE` in the
-/// auxiliary vector.
-///
-/// glibc 2.40 and later already report this as `__rseq_size`, but 2.35 to 2.39 report 32 on any
-/// kernel. On a kernel older than 6.3 that would claim an `mm_cid` the kernel never writes; every
-/// thread would read zero and share one slab. So the size is capped by what the kernel says.
-/// `PR_GET_AUXV` exists from Linux 6.4; where it fails, or the entry is missing, this answers the
-/// original size, which turns the fast paths off on 6.3 rather than risk them anywhere.
-fn kernel_rseq_feature_size() -> u32 {
-    // Linux 7.2 puts 22 entries in the vector on the reference host, `AT_RSEQ_FEATURE_SIZE`
-    // among the last. A truncated copy only loses the answer, which errs toward the original
-    // size. Iterating by reference keeps the 640-byte buffer from being copied.
-    let mut auxv = [[0u64; 2]; 40];
-    let buffer: Reg = auxv.as_mut_ptr().cast();
-    let len = size_of_val(&auxv);
-    // SAFETY: prctl(PR_GET_AUXV) writes at most `len` bytes of the auxiliary vector into
-    // `buffer`, a live, exclusively borrowed local array of that many bytes, and changes nothing
-    // else. The last two arguments must be zero.
-    let copied = result(unsafe {
-        syscall(
-            nr::PRCTL,
-            [int(PR_GET_AUXV), buffer, int(len), int(0), int(0), int(0)],
-        )
-    });
-    if copied.is_err() {
-        return ORIGINAL_RSEQ_FEATURE_SIZE;
-    }
-    for &[kind, value] in auxv.iter() {
-        match kind {
-            AT_NULL => break,
-            AT_RSEQ_FEATURE_SIZE => {
-                return u32::try_from(value).unwrap_or(ORIGINAL_RSEQ_FEATURE_SIZE);
-            }
-            _ => {}
-        }
-    }
-    ORIGINAL_RSEQ_FEATURE_SIZE
-}
-
 // SAFETY: each promise of `Os`, against the kernel's documented behaviour (mmap(2), mprotect(2),
 // madvise(2), munmap(2), membarrier(2)):
 // - `reserve` maps a fresh private anonymous range, which overlaps nothing that exists; the
@@ -168,16 +152,17 @@ fn kernel_rseq_feature_size() -> u32 {
 //   over-reservation and trim make the start aligned, and only the unused ends are unmapped.
 // - `commit` is mprotect to read and write, which keeps contents. `purge` is MADV_DONTNEED,
 //   after which private anonymous memory reads as zero and stays mapped with its protection.
-//   `advise_huge` is MADV_HUGEPAGE or MADV_NOHUGEPAGE, which change neither.
+//   `advise_huge` is MADV_HUGEPAGE or MADV_NOHUGEPAGE, which change neither. `wipe_on_fork` is
+//   MADV_WIPEONFORK, which changes nothing in this process and makes a child's copy of the
+//   range read as zero.
 // - A failed call reports `-errno`; mprotect and madvise may have acted on part of the range,
 //   never beyond it.
 // - Reservations are mappings of the process, valid until unmapped; dropping a `LinuxOs`
 //   changes nothing.
-// - `fence` is MEMBARRIER_CMD_PRIVATE_EXPEDITED_RSEQ, which returns after every thread of the
-//   process has been interrupted out of any rseq critical section; it fails with EPERM unless
-//   the process registered.
-// - `rseq` reads glibc's process-wide registration facts and caps the size by the kernel's
-//   feature size, so it never reports a concurrency ID the kernel does not maintain.
+// - `fence(cpu)` is MEMBARRIER_CMD_PRIVATE_EXPEDITED_RSEQ with MEMBARRIER_CMD_FLAG_CPU, which
+//   returns after the thread of the process running on that CPU, if any, has been interrupted
+//   out of any rseq critical section; it fails with EPERM unless the process registered.
+// - `rseq` reads glibc's process-wide registration facts.
 // - `abort` ends with exit_group if the signal did not end the process first, so it does not
 //   return.
 // - None of the calls allocates or depends on thread state, so any thread may make them,
@@ -251,22 +236,45 @@ unsafe impl Os for LinuxOs {
         unsafe { range_call(nr::MADVISE, start, len, advice) }
     }
 
+    unsafe fn wipe_on_fork(&self, start: NonNull<u8>, len: usize) -> Result<(), OsError> {
+        // SAFETY: the caller passes whole pages of a live reservation; the advice changes
+        // nothing in this process.
+        unsafe { range_call(nr::MADVISE, start, len, MADV_WIPEONFORK) }
+    }
+
     unsafe fn unmap(&self, start: NonNull<u8>, len: usize) -> Result<(), OsError> {
         // SAFETY: the caller passes whole pages of a live reservation that nothing uses again.
         unsafe { range_call(nr::MUNMAP, start, len, 0) }
     }
 
     fn register_fence(&self) -> Result<(), OsError> {
-        membarrier(MEMBARRIER_CMD_REGISTER_PRIVATE_EXPEDITED_RSEQ)
+        membarrier(MEMBARRIER_CMD_REGISTER_PRIVATE_EXPEDITED_RSEQ, 0, 0)
     }
 
-    fn fence(&self) -> Result<(), OsError> {
-        membarrier(MEMBARRIER_CMD_PRIVATE_EXPEDITED_RSEQ)
+    fn fence(&self, cpu: u32) -> Result<(), OsError> {
+        membarrier(
+            MEMBARRIER_CMD_PRIVATE_EXPEDITED_RSEQ,
+            MEMBARRIER_CMD_FLAG_CPU,
+            cpu,
+        )
     }
 
     fn rseq(&self) -> Option<RseqArea> {
-        let area = glibc::registration()?;
-        RseqArea::new(area.offset(), area.size().min(kernel_rseq_feature_size()))
+        glibc::registration()
+    }
+
+    fn random(&self) -> u64 {
+        if let Some(value) = getrandom() {
+            return value;
+        }
+        // No randomness to be had (a seccomp filter, say). A generation only has to differ from
+        // the parent's, and the stack address and the process id both change across a fork in
+        // practice; a collision costs one CPU's cache its drains, not correctness.
+        let local = 0u8;
+        // SAFETY: getpid takes nothing and changes nothing.
+        let pid = unsafe { int_call(nr::GETPID, 0, 0, 0) };
+        let mixed = ptr::from_ref(&local).addr() as u64 ^ (pid as u64).rotate_left(32);
+        mixed.wrapping_mul(0x9e37_79b9_7f4a_7c15)
     }
 
     fn abort(&self, message: &str) -> ! {
@@ -371,23 +379,40 @@ mod tests {
     }
 
     #[test]
-    fn glibc_registers_rseq_with_a_concurrency_id() {
+    fn glibc_registers_rseq() {
         // The supported platform is glibc 2.43 on Linux 7.2, which always register.
         let area = LinuxOs.rseq().expect("glibc registered rseq");
-        assert!(area.has_cid(), "{area:?}");
+        assert!(area.size() >= crate::os::rseq::ORIGINAL_SIZE, "{area:?}");
         assert_eq!(area.offset() % 32, 0, "the area is 32-byte aligned");
     }
 
     #[test]
-    fn the_kernel_reports_a_feature_size_with_a_concurrency_id() {
-        // Linux 7.2 reports 33 on the reference host.
-        assert!(kernel_rseq_feature_size() >= 28);
+    fn rseq_fences_aim_at_one_cpu_after_registering() {
+        LinuxOs.register_fence().unwrap();
+        LinuxOs.fence(0).unwrap();
+        // A CPU number no machine has: nothing can be in flight there.
+        LinuxOs.fence(8191).unwrap();
     }
 
     #[test]
-    fn rseq_fences_work_after_registering() {
-        LinuxOs.register_fence().unwrap();
-        LinuxOs.fence().unwrap();
+    fn random_numbers_differ() {
+        let a = LinuxOs.random();
+        let b = LinuxOs.random();
+        assert_ne!(a, b);
+    }
+
+    #[test]
+    fn a_page_can_be_marked_to_be_wiped_on_fork() {
+        let os = LinuxOs;
+        let base = os.reserve(PAGE, PAGE).unwrap();
+        // SAFETY: one whole page of a fresh reservation that nothing else uses.
+        unsafe {
+            os.commit(base, PAGE).unwrap();
+            os.wipe_on_fork(base, PAGE).unwrap();
+            base.as_ptr().write(7);
+            assert_eq!(base.as_ptr().read(), 7, "the parent keeps its contents");
+            os.unmap(base, PAGE).unwrap();
+        }
     }
 
     const CHILD: &str = "ASMALLOC_ABORT_CHILD";
