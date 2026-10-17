@@ -110,23 +110,25 @@ structure Facts (c : Spec.Slab.Ctx isa) (s : State) : Prop where
   pre : c.pre s
 
 /-- The regions of a routine, in its three cases. -/
-theorem regions_eq (c : Spec.Slab.Ctx isa) (hA : c.A = abi) (s : State) :
+theorem regions_eq (c : Spec.Slab.Ctx isa) (hA : c.A = abi)
+    (hslot : c.form = .inline ∨ c.form = .table) (s : State) :
     c.regions s = [(⟨s.syms RS, 8⟩, false), (⟨area s + 4, 4⟩, false), (⟨area s + 8, 8⟩, true)] ++
-      (match c.form with | .table => [(⟨c.maskAddr s, 4⟩, false)] | .inline => []) ++
+      (match c.form with | .table => [(⟨c.maskAddr s, 4⟩, false)] | _ => []) ++
       (if c.InRange s then
         (⟨c.word s, 8⟩, true) :: (if IsSlot (c.slots s) (c.w s) then [(c.magRegion s, true)] else [])
       else []) := by
   obtain ⟨A, f, sig⟩ := c
   cases hA
-  rfl
+  rcases hslot with h | h <;> cases h <;> rfl
 
-theorem facts_of_world {c : Spec.Slab.Ctx isa} (hA : c.A = abi) {s : State}
-    (hw : Ctx.World c s) (hp : c.pre s) : Facts c s := by
+theorem facts_of_world {c : Spec.Slab.Ctx isa} (hA : c.A = abi)
+    (hslot : c.form = .inline ∨ c.form = .table) {s : State}
+    (hw : c.World s) (hp : c.pre s) : Facts c s := by
   obtain ⟨hrd, hwr, hnw, hdj, hres⟩ := hw
-  have hreg := regions_eq c hA s
-  simp only [Ctx.ro, Ctx.rw, hreg, hA, abi_rd, abi_wr] at hrd hwr
+  have hreg := regions_eq c hA hslot s
+  simp only [Spec.Slab.Ctx.ro, Spec.Slab.Ctx.rw, hreg, hA, abi_rd, abi_wr] at hrd hwr
   simp only [hreg, hA, abi_reserved, abi_ptrBits] at hnw hdj hres
-  rcases hf : c.form with _ | _ <;>
+  rcases hslot with hf | hf <;>
   by_cases hi : c.InRange s <;> by_cases hs : IsSlot (c.slots s) (c.w s) <;>
   simp only [hf, hi, hs, ↓reduceIte, List.append_nil, List.cons_append, List.nil_append,
     List.filter_cons, List.filter_nil, Bool.not_true, Bool.not_false, List.map_cons,

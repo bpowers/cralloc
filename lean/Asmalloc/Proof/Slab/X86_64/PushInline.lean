@@ -61,7 +61,7 @@ structure Pre (s : State) (k : Nat) : Prop where
   ok : cx.InRange s → WordOk (2 ^ k) (wvi s)
 
 theorem pre_of {s : State} (h : Facts cx s) : ∃ k, Pre s k := by
-  obtain ⟨-, -, ⟨-, hcoff⟩, -, ⟨k, hk, hk', hm⟩, hinv⟩ := h.pre
+  obtain ⟨-, -, ⟨-, hcoff, -, ⟨k, hk, hk', hm⟩⟩, hinv⟩ := h.pre
   have hmask : cx.mask s = (s.params "mask").toNat := rfl
   have hslots : cx.slots s = 2 ^ k := by
     rw [Spec.Slab.Ctx.slots, hm]; exact slotsOf_magMask k hk
@@ -341,7 +341,7 @@ theorem arg0 : cx.arg s 0 = x s := rfl
 
 theorem facts_of_pre (hs : (pushInlineContract abi).pre s) : Facts cx s := by
   have := (pre_iff cx (s := s) hv rfl rfl).mp hs
-  exact facts_of_world rfl this.2.1 this.2.2
+  exact facts_of_world rfl (.inl rfl) this.2.1 this.2.2
 
 /-- Item `i` of the magazine is apart from `rseq_cs`, the slab word, and the
 free slot. -/
@@ -455,7 +455,8 @@ theorem abortOk1 (hp : Pre s k) {p : State} (hm : Mid scratchI s (m1 s) p) :
       ∀ p', inlineTarget.rely p p' → (pushInlineContract abi).env p p' →
         (pushInlineContract abi).pre p' := by
   refine ⟨armed_of_mid hp.facts (xs := []) frame_m1 m1_cs (by simp) hm, inline_abi hm, ?_,
-    fun p' _ he => (env_eq cx p p').mp he⟩
+    fun p' hr he =>
+      retry rfl hv (fun _ => rfl) (fun _ => rfl) (by decide) hp.facts.pre hm (by decide) hr he⟩
   refine (abort_eq p).mpr ⟨by rw [hm.gpr _ (by decide)], ?_, fun hi => by rw [hm.mem]; exact mag_m1 hp hi⟩
   rw [hm.mem, csField_of (c := cx) rfl, mem_of (c := cx) rfl]
   exact frame_m1.mono (by simp)
@@ -469,7 +470,8 @@ theorem abortOk2 (hp : Pre s k) (hi : cx.InRange s) (ht : ¬ tst s = 0) :
   have hcs : (mSlot s).readW (area s + 8) 64 = s.csDesc := by
     rw [mSlot, readW64_writeW_disj hf.cs.symm, m1_cs]
   refine ⟨armed_of_mid hp.facts (xs := [⟨wvi s, 8⟩]) hfr hcs (by simpa using hf.rsVar) mσ9,
-    inline_abi mσ9, ?_, fun p' _ he => (env_eq cx _ p').mp he⟩
+    inline_abi mσ9, ?_, fun p' hr he =>
+      retry rfl hv (fun _ => rfl) (fun _ => rfl) (by decide) hp.facts.pre mσ9 (by decide) hr he⟩
   refine (abort_eq _).mpr ⟨by rw [mσ9.gpr _ (by decide)], ?_, fun _ => mag_slot hp hi ht⟩
   rw [mσ9.mem, csField_of (c := cx) rfl, mem_of (c := cx) rfl, hp.w]
   exact hfr

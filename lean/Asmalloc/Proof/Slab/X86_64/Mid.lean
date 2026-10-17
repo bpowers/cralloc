@@ -134,4 +134,57 @@ theorem preservedExcept_of_mid {names : List String} (hn : ∀ r ∈ rs, r.name 
 
 end
 
+/-! ## A retry's precondition
+
+`env` gives the world a retry starts in; the routine's arguments and
+constants, the rest of the precondition, are those the routine kept. -/
+
+section Retry
+
+variable {c : Spec.Slab.Ctx isa}
+
+/-- An argument, read in a state whose argument registers are another's. -/
+theorem arg_eq (hA : c.A = abi) (hlen : (c.sig.words 64).length ≤ 6) {p s : State}
+    (h : ∀ r ∈ argRegs.take (c.sig.words 64).length, p.gpr r = s.gpr r) (i : Nat) :
+    c.arg p i = c.arg s i := by
+  obtain ⟨A, f, sig⟩ := c
+  simp only at hA
+  subst hA
+  have hl : ((sig.words 64).map (·.bits 64)).length ≤ argRegs.length := by
+    simpa [argRegs] using hlen
+  have hargs : abi.args ((sig.words 64).map (·.bits 64)) =
+      some fun s => (argRegs.take ((sig.words 64).map (·.bits 64)).length).map s.gpr := by
+    simp only [abi, hl, ↓reduceIte]
+  simp only [Spec.Slab.Ctx.arg, abi_ptrBits, hargs]
+  congr 1
+  exact List.map_congr_left fun r hr => h r (by simpa using hr)
+
+/-- The arguments' and constants' facts, in a state with the same. -/
+theorem argsOk_of (hA : c.A = abi) {p s : State} (hpar : p.params = s.params)
+    (harg : ∀ i, c.arg p i = c.arg s i) : c.argsOk p ↔ c.argsOk s := by
+  obtain ⟨A, f, sig⟩ := c
+  simp only at hA
+  subst hA
+  cases f <;> simp only [Spec.Slab.Ctx.argsOk, Spec.Slab.Ctx.cls, Spec.Slab.Ctx.mask, view_param,
+    harg, hpar]
+
+/-- A retry's precondition holds: from `env`, and the arguments and
+constants the routine and the abort kept. -/
+theorem retry (hA : c.A = abi) {post : State → State → Prop}
+    {exit : String → State → State → Prop} {abort : State → State → Prop}
+    {trace : State → List Event → Prop} {vals : State → List (BitVec 64)}
+    (hv : c.A.args ((c.sig.words c.A.ptrBits).map (·.bits c.A.ptrBits)) = some vals)
+    (hb : ∀ x, Sig.bufs c.sig.params (vals x) = [])
+    (ha : ∀ x, c.A.argArea ((c.sig.words c.A.ptrBits).map (·.bits c.A.ptrBits)) x = [])
+    (hlen : (c.sig.words 64).length ≤ 6) {rs : List Reg} {s p p' : State} {m : Mem}
+    (hs : c.pre s) (hm : Mid rs s m p) (hrs : ∀ r ∈ argRegs.take (c.sig.words 64).length, r ∉ rs) (hr : rely p p')
+    (he : (contract c post exit abort trace).env p p') : (contract c post exit abort trace).pre p' := by
+  obtain ⟨htp, hsym, hargs, -⟩ := hs
+  obtain ⟨hg, -, -, -, -, -, -, hpar, -, -⟩ := hr
+  refine pre_of_env c hv (hb p') (ha p') he htp hsym ((argsOk_of hA ?_ ?_).mpr hargs)
+  · rw [hpar, hm.params]
+  · exact arg_eq hA hlen fun r hr' => by rw [hg, hm.gpr r (hrs r hr')]
+
+end Retry
+
 end VG.Proof.Slab.X86_64

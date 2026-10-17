@@ -60,6 +60,9 @@ pub(crate) const MAG_MASK_8192: u32 = 65520;
 pub(crate) const MARKER_SHIFT: u32 = 19;
 
 /// From the specification (`Api.rustConsts`).
+pub(crate) const NO_CPU: usize = 2;
+
+/// From the specification (`Api.rustConsts`).
 pub(crate) const RSEQ_CPU_ID: usize = 4;
 
 /// From the specification (`Api.rustConsts`).

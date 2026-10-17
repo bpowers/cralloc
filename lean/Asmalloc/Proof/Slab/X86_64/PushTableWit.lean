@@ -20,7 +20,8 @@ theorem pre_w (s : State) (hm : ∃ cpu word rd wr, s = PopTable.witT cpu word r
     (hsyms : s.syms SLABS = 0x1000000) (h0 : WordOk 4 (s.mem.readW (wordAddr 0x1000000 0 1) 64)) :
     (pushContract abi).pre s := by
   refine (pre_iff cx (s := s) hv rfl rfl).mpr ⟨trivial, world_of_check rfl hrd hwr hnw hp hres,
-    rfl, rfl, trivial, by rw [hcls]; decide, ⟨2, by decide, by decide, hmask⟩, fun i hi => ?_⟩
+    rfl, rfl, show cx.cls s < CLASS_LIMIT by rw [hcls]; decide, ⟨2, by decide, by decide, hmask⟩,
+    fun i hi => ?_⟩
   rw [hslots, mem_of (c := cx) rfl, sym_of (c := cx) rfl, hcls, hsyms]
   rcases Nat.eq_zero_or_pos i with rfl | h
   · exact h0

@@ -73,7 +73,8 @@ theorem pre_wit (s : State) (hm : ∃ cpu word rd wr, s = wit cpu word rd wr)
     (h0 : WordOk 4 (s.mem.readW (wordAddr 0x1000000 0 1) 64)) :
     (popInlineContract abi).pre s := by
   refine (pre_iff cx (s := s) hv rfl rfl).mpr ⟨trivial, world_of_check rfl hrd hwr hnw hp hres,
-    rfl, rfl, ⟨rfl, hcoff⟩, by rw [hcls]; decide, ⟨2, by decide, by decide, hmask⟩, fun i hi => ?_⟩
+    rfl, rfl, ⟨rfl, hcoff, by rw [hcls]; decide, ⟨2, by decide, by decide, hmask⟩⟩,
+    fun i hi => ?_⟩
   rw [hslots, mem_of (c := cx) rfl, sym_of (c := cx) rfl, hcls, hsyms]
   rcases Nat.eq_zero_or_pos i with rfl | h
   · exact h0

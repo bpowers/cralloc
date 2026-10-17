@@ -67,7 +67,7 @@ structure Pre (s : State) (k : Nat) : Prop where
   ok : cx.InRange s → WordOk (2 ^ k) (wvi s)
 
 theorem pre_of {s : State} (h : Facts cx s) : ∃ k, Pre s k := by
-  obtain ⟨-, -, ⟨-, hcoff⟩, -, ⟨k, hk, hk', hm⟩, hinv⟩ := h.pre
+  obtain ⟨-, -, ⟨-, hcoff, -, ⟨k, hk, hk', hm⟩⟩, hinv⟩ := h.pre
   have hmask : cx.mask s = (s.params "mask").toNat := rfl
   have hslots : cx.slots s = 2 ^ k := by
     rw [Spec.Slab.Ctx.slots, hm]; exact slotsOf_magMask k hk
@@ -334,7 +334,7 @@ theorem hv : cx.A.args ((cx.sig.words cx.A.ptrBits).map (·.bits cx.A.ptrBits)) 
 
 theorem facts_of_pre (hs : (popInlineContract abi).pre s) : Facts cx s := by
   have := (pre_iff cx (s := s) hv rfl rfl).mp hs
-  exact facts_of_world rfl this.2.1 this.2.2
+  exact facts_of_world rfl (.inl rfl) this.2.1 this.2.2
 
 theorem ofNat_toNat64 (v : BitVec 64) : BitVec.ofNat 64 v.toNat = v := by
   rw [BitVec.ofNat_toNat, BitVec.setWidth_eq]
@@ -412,7 +412,8 @@ theorem abortOk (h : Facts cx s) {p : State} (hm : Mid scratchI s (m1 s) p) :
       ∀ p', inlineTarget.rely p p' → (popInlineContract abi).env p p' →
         (popInlineContract abi).pre p' := by
   refine ⟨armed_of_mid h (xs := []) frame_m1 m1_cs (by simp) hm, inline_abi hm, ?_,
-    fun p' _ he => (env_eq cx p p').mp he⟩
+    fun p' hr he =>
+      retry rfl hv (fun _ => rfl) (fun _ => rfl) (by decide) h.pre hm (by decide) hr he⟩
   refine (abort_iff cx hv s p).mpr ⟨rfl, ?_⟩
   show Unchanged [cx.csField s] (cx.mem s) p.mem
   rw [hm.mem]; exact unchanged_cs

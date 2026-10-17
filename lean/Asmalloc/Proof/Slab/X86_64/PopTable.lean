@@ -62,7 +62,7 @@ structure Pre (s : State) (k : Nat) : Prop where
 theorem cls_eq (s : State) : cx.cls s = (s.gpr .rdi).toNat := rfl
 
 theorem pre_of {s : State} (h : Facts cx s) : ∃ k, Pre s k := by
-  obtain ⟨-, -, -, -, ⟨k, hk, hk', hm⟩, hinv⟩ := h.pre
+  obtain ⟨-, -, -, ⟨k, hk, hk', hm⟩, hinv⟩ := h.pre
   have hma : maskA s = cx.maskAddr s := maskA_eq rfl (cls_eq s)
   have hmask : cx.mask s = (mk s).toNat := by
     show (s.mem.readW (cx.maskAddr s) 32).toNat = _; rw [← hma]; rfl
@@ -337,7 +337,7 @@ theorem hv : cx.A.args ((cx.sig.words cx.A.ptrBits).map (·.bits cx.A.ptrBits)) 
 
 theorem facts_of_pre (hs : (popContract abi).pre s) : Facts cx s := by
   have := (pre_iff cx (s := s) hv rfl rfl).mp hs
-  exact facts_of_world rfl this.2.1 this.2.2
+  exact facts_of_world rfl (.inr rfl) this.2.1 this.2.2
 
 /-- The calling convention's obligations, in memory changed only in regions
 apart from the return address. -/
@@ -422,7 +422,8 @@ theorem abortOk (hp : Pre s k) {p : State} (hm : Mid scratchT s (m1 s) p) :
     armed p ∧ target.abiPreserved s p ∧ (popContract abi).abort s p ∧
       ∀ p', target.rely p p' → (popContract abi).env p p' → (popContract abi).pre p' := by
   refine ⟨armed_of_mid hp.facts (xs := []) frame_m1 m1_cs (by simp) hm, abi_m1 hp hm, ?_,
-    fun p' _ he => (env_eq cx p p').mp he⟩
+    fun p' hr he =>
+      retry rfl hv (fun _ => rfl) (fun _ => rfl) (by decide) hp.facts.pre hm (by decide) hr he⟩
   refine (abort_eq p).mpr ⟨by rw [hm.gpr _ (by decide)], ?_⟩
   rw [hm.mem]; exact unchanged_cs
 
