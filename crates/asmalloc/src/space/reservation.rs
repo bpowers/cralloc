@@ -504,7 +504,7 @@ mod tests {
         // SAFETY: committed, and nothing else uses it.
         unsafe { page.as_ptr().write(5) };
         // SAFETY: no other thread touches the page.
-        unsafe { os.wipe_for_fork() };
+        unsafe { os.fork(0) };
         // SAFETY: still committed.
         assert_eq!(unsafe { page.as_ptr().read() }, 0);
     }

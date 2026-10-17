@@ -8,23 +8,34 @@
 //! on a range that is not whole pages, panics. It cannot stop the allocator from writing memory
 //! it never committed; tests check for that with [`SimOs::is_writable`].
 //!
-//! Any call can be made to fail on demand ([`SimOs::set_faults`]), the rseq registration it
-//! reports can be changed ([`SimOs::set_rseq`]), the pages marked to be wiped on fork can be
-//! wiped as a fork would ([`SimOs::wipe_for_fork`]), and `abort` panics so that a test can
-//! observe it. Random numbers come from a seeded generator, so a test is repeatable. The heap's geometry comes from a [`Shape`]: [`Standard`] for tests and fuzzing, [`Tiny`]
-//! for Kani harnesses. Other crates may define their own.
+//! What a test controls:
+//!
+//! - Any call can be made to fail on demand ([`SimOs::set_faults`]).
+//! - The rseq registration it reports can be changed ([`SimOs::set_rseq`]).
+//! - Simulated threads run twins on CPUs the test chooses, and the test can interrupt their
+//!   sequences; `fence` aborts the ones on its CPU ([`SimOs::thread`]).
+//! - A fork happens in place ([`SimOs::fork`]), or only its wiping of marked pages
+//!   ([`SimOs::wipe_for_fork`]).
+//! - Random numbers come from a seeded generator, so a test is repeatable.
+//! - `abort` panics, so a test can observe it.
+//!
+//! The heap's geometry comes from a [`Shape`]: [`Standard`] for tests, Miri and fuzzing,
+//! [`Native`] for large classes, [`Tiny`] for Kani harnesses. Other crates may define their own.
 //!
 //! The simulator takes no locks: every piece of state is an atomic, and racing reservations
 //! claim pages by compare-and-swap.
 
+mod cpus;
 mod faults;
 mod memory;
 mod pages;
 #[cfg(kani)]
 mod verify_slow;
 
+pub use cpus::{SIM_THREADS, SimThread};
 pub use faults::{Call, Faults};
 
+use self::cpus::Cpus;
 use self::faults::Injector;
 use self::memory::Memory;
 use self::pages::{HUGE, NO_HUGE, PURGED, Pages, RESERVED, START, WIPE, WRITABLE};
@@ -102,6 +113,7 @@ pub struct SimOs<S: Shape = Standard> {
     fence_registered: AtomicBool,
     last_fence: AtomicU64,
     random: AtomicU64,
+    cpus: Cpus<SIM_THREADS>,
     shape: PhantomData<fn() -> S>,
 }
 
@@ -129,6 +141,7 @@ impl<S: Shape> SimOs<S> {
             fence_registered: AtomicBool::new(false),
             last_fence: AtomicU64::new(0),
             random: AtomicU64::new(0),
+            cpus: Cpus::new(),
             shape: PhantomData,
         }
     }
@@ -171,6 +184,30 @@ impl<S: Shape> SimOs<S> {
     /// Restarts the random generator from `seed`, so that a test draws a known sequence.
     pub fn set_random_seed(&self, seed: u64) {
         self.random.store(seed, Ordering::Release);
+    }
+
+    /// Simulated thread `index`, below [`SIM_THREADS`], to run twins on. Thread `i` starts on
+    /// CPU `i`; [`Os::fence`] aborts the sequences in flight on the CPU it names.
+    pub fn thread(&self, index: usize) -> SimThread<'_> {
+        self.cpus.thread(index)
+    }
+
+    /// Forks the process in place: the simulator becomes the child. Pages marked by
+    /// [`Os::wipe_on_fork`] read as zero, every simulated thread but `survivor` vanishes (running
+    /// a twin on one panics), and the survivor's sequence in flight, if any, is aborted. The
+    /// rest of memory, with every pointer in it, is as the parent left it.
+    ///
+    /// The parent cannot continue alongside the child: the child's heap must sit at the same
+    /// addresses as the parent's, and one process cannot hold two copies there. A test of the
+    /// parent's side simply does not call this.
+    ///
+    /// # Safety
+    ///
+    /// No thread reads or writes a marked page during the call.
+    pub unsafe fn fork(&self, survivor: usize) {
+        // SAFETY: passed through from the caller.
+        unsafe { self.wipe_for_fork() };
+        self.cpus.fork(survivor);
     }
 
     /// Zeroes every page marked by [`Os::wipe_on_fork`], as the child of a fork would see them.
@@ -309,7 +346,9 @@ fn decode_rseq(word: u64) -> Option<RseqArea> {
 // - A range must lie in one live reservation of this value. `checked_range` panics before
 //   touching anything if it does not: outside this value's memory, not whole reserved pages,
 //   or spanning two reservations.
-// - There are no restartable sequences, so `fence` trivially waits for all of them.
+// - The only restartable sequences are twins on simulated threads. `fence` aborts every one in
+//   flight on its CPU before returning; under cooperative scheduling that is all of them (see
+//   `cpus.rs` for the one window real threads leave).
 // - `wipe_on_fork` only records; nothing forks the simulator, so the promise is about what
 //   `wipe_for_fork` shows a test, and it zeroes exactly the marked pages.
 // - `abort` panics, so it does not return.
@@ -414,6 +453,7 @@ unsafe impl<S: Shape> Os for SimOs<S> {
         self.faults.enter(Call::Fence)?;
         if self.fence_registered() {
             self.last_fence.store(cpu as u64 + 1, Ordering::Release);
+            self.cpus.fence(cpu);
             Ok(())
         } else {
             Err(OsError::EPERM)
@@ -563,6 +603,49 @@ mod tests {
         assert_eq!(os.fence(3), Ok(()));
         assert_eq!(os.last_fence(), Some(3));
         assert_eq!(os.calls(Call::Fence), 2);
+    }
+
+    #[test]
+    fn a_fence_aborts_the_twins_in_flight_on_its_cpu_and_a_failed_one_none() {
+        use crate::os::{Aborted, Machine, Step};
+        let os = Sim::new();
+        os.register_fence().unwrap();
+        let (a, b) = (os.thread(0), os.thread(1));
+        a.step(Step::ReadCpu).unwrap();
+        b.step(Step::ReadCpu).unwrap();
+        os.fence(0).unwrap();
+        assert_eq!(a.step(Step::Load), Err(Aborted));
+        assert_eq!(b.step(Step::Load), Ok(()));
+        a.step(Step::ReadCpu).unwrap();
+        os.set_faults(Call::Fence, Faults::once_after(0));
+        assert!(os.fence(0).is_err());
+        assert_eq!(
+            a.step(Step::Load),
+            Ok(()),
+            "a failed fence interrupts nothing"
+        );
+    }
+
+    #[test]
+    fn a_fork_keeps_memory_wipes_marked_pages_and_one_thread() {
+        use crate::os::{Machine, Step};
+        let os = Sim::with_capacity(region());
+        let base = os.reserve(2 * page(), region()).unwrap();
+        let second = base.map_addr(|a| a.saturating_add(page()));
+        let survivor = os.thread(3);
+        // SAFETY: whole reserved pages that nothing else uses.
+        unsafe {
+            os.commit(base, 2 * page()).unwrap();
+            os.wipe_on_fork(second, page()).unwrap();
+            base.as_ptr().write(1);
+            second.as_ptr().write(2);
+            os.fork(3);
+            assert_eq!(base.as_ptr().read(), 1);
+            assert_eq!(second.as_ptr().read(), 0);
+        }
+        assert_eq!(survivor.step(Step::ReadCpu), Ok(()));
+        let lost = std::panic::catch_unwind(|| os.thread(0).cpu_id());
+        assert!(lost.is_err());
     }
 
     #[test]

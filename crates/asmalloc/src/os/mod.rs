@@ -17,10 +17,12 @@
 
 #[cfg(all(target_os = "linux", target_arch = "x86_64", not(kani)))]
 pub mod linux;
+pub mod machine;
 pub mod rseq;
 #[cfg(any(test, kani, feature = "sim"))]
 pub mod sim;
 
+pub use machine::{Aborted, Machine, Pinned, Step};
 pub use rseq::RseqArea;
 
 use crate::space::Geometry;
