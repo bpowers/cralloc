@@ -9,12 +9,13 @@ use super::syscall::{Reg, int, nr, result, syscall};
 use crate::os::{HugePages, Os, OsError, RseqArea};
 use crate::space::Geometry;
 use core::ptr::{self, NonNull};
-use core::sync::atomic::{AtomicBool, Ordering};
+use core::sync::atomic::{AtomicU32, Ordering};
 
-/// Whether a thread of this process has begun aborting. One process-wide flag, all-zero valid,
-/// so that a SIGABRT handler that ends up in `abort` again goes straight to the default action
-/// instead of raising into itself.
-static ABORTING: AtomicBool = AtomicBool::new(false);
+/// The thread ID of the first thread to abort, or zero (no thread has a zero ID) before any
+/// has. A SIGABRT handler that ends up in `abort` again on that thread goes straight to the
+/// default action instead of raising into itself; any other thread that aborts meanwhile
+/// waits, so it cannot cut the first thread's handler short by resetting the disposition.
+static ABORTING: AtomicU32 = AtomicU32::new(0);
 
 const PROT_NONE: usize = 0;
 const PROT_READ: usize = 1;
@@ -185,13 +186,28 @@ fn unblock_sigabrt() {
     }
 }
 
+fn thread_id() -> u32 {
+    // SAFETY: gettid takes nothing and changes nothing.
+    let tid = unsafe { int_call(nr::GETTID, 0, 0, 0) };
+    // Thread IDs are positive and at most 2^22 (the kernel's PID_MAX_LIMIT).
+    tid as u32
+}
+
 fn raise_sigabrt() {
-    // SAFETY: getpid and gettid take nothing; tgkill sends SIGABRT to this thread, which runs
-    // the disposition the process chose or ends it. Raising it is `abort`'s purpose.
+    // SAFETY: getpid takes nothing; tgkill sends SIGABRT to this thread, which runs the
+    // disposition the process chose or ends it. Raising it is `abort`'s purpose.
     unsafe {
         let pid = int_call(nr::GETPID, 0, 0, 0);
-        let tid = int_call(nr::GETTID, 0, 0, 0);
-        int_call(nr::TGKILL, pid, tid, SIGABRT);
+        int_call(nr::TGKILL, pid, thread_id() as usize, SIGABRT);
+    }
+}
+
+/// Waits for the thread that is aborting to end the process. No lock: pause sleeps until a
+/// signal handler runs, and the loop sleeps again after it.
+fn park() -> ! {
+    loop {
+        // SAFETY: pause takes nothing and only waits for a signal.
+        unsafe { int_call(nr::PAUSE, 0, 0, 0) };
     }
 }
 
@@ -336,10 +352,17 @@ unsafe impl Os for LinuxOs {
         // crash reporter sees it. The heap is still valid; it refused to go on, it is not
         // broken. If the handler returns, or calls back in here (by allocating into the failure
         // that brought us here), restore the default action and raise again, which ends the
-        // process with a core dump.
-        if !ABORTING.swap(true, Ordering::AcqRel) {
-            unblock_sigabrt();
-            raise_sigabrt();
+        // process with a core dump. Another thread that aborts meanwhile parks: resetting the
+        // disposition under a handler still running would end the process before the handler
+        // could finish its report.
+        let me = thread_id();
+        match ABORTING.compare_exchange(0, me, Ordering::AcqRel, Ordering::Acquire) {
+            Ok(_) => {
+                unblock_sigabrt();
+                raise_sigabrt();
+            }
+            Err(first) if first == me => {}
+            Err(_) => park(),
         }
         let default = KernelSigaction {
             handler: SIG_DFL,
@@ -468,6 +491,12 @@ mod tests {
         write_stderr(b"handler ran\n");
     }
 
+    extern "C" fn slow_handler(_: i32) {
+        write_stderr(b"handler start\n");
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        write_stderr(b"handler ran\n");
+    }
+
     /// Run on its own by `abort_ends_the_process_with_sigabrt`; does nothing otherwise. With
     /// the variable set to `handler`, it first installs a SIGABRT handler that returns.
     #[test]
@@ -479,6 +508,15 @@ mod tests {
             // SAFETY: installs a handler that only writes to standard error, which is
             // async-signal-safe.
             unsafe { signal(SIGABRT as i32, returning_handler) };
+        }
+        if mode == "race" {
+            // SAFETY: installs a handler that writes to standard error and sleeps, both
+            // async-signal-safe system calls.
+            unsafe { signal(SIGABRT as i32, slow_handler) };
+            std::thread::spawn(|| {
+                std::thread::sleep(std::time::Duration::from_millis(100));
+                LinuxOs.abort("second thread");
+            });
         }
         LinuxOs.abort("test abort");
     }
@@ -506,6 +544,19 @@ mod tests {
         assert_eq!(output.status.signal(), Some(SIGABRT as i32), "{output:?}");
         let stderr = String::from_utf8_lossy(&output.stderr);
         assert!(stderr.contains("asmalloc: test abort\n"), "{stderr}");
+    }
+
+    /// Review R9: a second thread that aborts while the first one's handler runs must not end
+    /// the process under that handler.
+    #[test]
+    fn a_second_aborting_thread_lets_the_first_handler_finish() {
+        let output = run_abort_child("race");
+        assert_eq!(output.status.signal(), Some(SIGABRT as i32), "{output:?}");
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            stderr.contains("handler ran\n"),
+            "the handler was cut short: {stderr}"
+        );
     }
 
     #[test]
