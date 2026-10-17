@@ -1,4 +1,4 @@
-//! A `Host` over a few words in ordinary memory, for Kani harnesses and the protocol tests.
+//! A `Host` over a few words in ordinary memory, for the protocol tests.
 //!
 //! It runs the production protocols (`tree`, `region`) without a reservation: each region's
 //! metadata is a vector of words laid out as in the heap, and the OS calls only record what they

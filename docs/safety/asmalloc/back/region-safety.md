@@ -55,4 +55,4 @@ scenarios, as `Purge_claim_inside.cfg` predicts. The scenarios include the huge-
 **Review.** 2026-10-17, fresh adversarial reviewer: the protocol was accepted; three gaps were
 found in the argument: exclusivity under a double free, the huge-page part not covered by the
 cited proof, and no explored test of a carve or a second purger racing a purge. All three are
-addressed above and await the same reviewer's check.
+addressed above; the same reviewer checked the fixes and accepted them.

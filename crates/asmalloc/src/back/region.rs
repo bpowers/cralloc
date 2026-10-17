@@ -117,8 +117,11 @@ fn switch_to_huge<H: Host>(host: &H, region: RegionId, now: Grow) -> Option<u32>
         return None;
     }
     let pages = layout.region_pages();
-    // From the latest commit, not the caller's possibly stale one: the huge-page part must start
-    // above every page that small-page purges may have worked on.
+    // From the latest commit, not the caller's possibly stale one, so the huge-page part starts
+    // above the pages small-page purges have worked on. A commit can still land between this
+    // load and the compare-and-swap below, and a purge that read no huge-page part can still
+    // return a small page above `at`. That costs at most a split huge page; it is advice, and
+    // safety never depends on it.
     let latest = Grow::unpack(host.meta(region, layout.grow_word()).load()).committed;
     let at = layout.huge_ceil(latest.max(now.committed));
     if at >= pages {

@@ -1,6 +1,11 @@
 //! Kani proofs too slow for the merge gate: the layout for every geometry, purge-unit and
-//! leaf-commit arithmetic (they divide by symbolic class sizes), `lowest`, and runs of
-//! operations on a small heap. Run with `scripts/kani-all back::verify_slow`.
+//! leaf-commit arithmetic (they divide by symbolic class sizes), and `lowest`. Run with
+//! `scripts/kani-all back::verify_slow`.
+//!
+//! Runs of operations on a small heap are not here: a harness of two symbolic operations on one
+//! region of eight slots ran past twelve minutes under the 6 GiB cap, because Kani cannot bound
+//! the summary walks' loops. Those runs are checked instead by the interleaving explorer
+//! (`back::models`) and the shadow-model tests (`back::tests`).
 //!
 //! Which slots a unit touches, and which lie wholly inside it, is not proved here: CBMC does not
 //! finish the 64-bit multiply in `Divisor::divide` for a symbolic class within the hour.
@@ -10,13 +15,8 @@
 //! every class, many watermarks and huge-page boundaries, in three geometries.
 
 use super::layout::{Layout, Step, WORD_BYTES, slots_in_region};
-use super::region::{self, Purge};
-use super::testhost::TestHost;
-use super::tree::{self, Host};
 use super::verify::{any_class, any_used_geometry, layouts_fit};
-use super::word::{Atomic, BITS, Word, lowest};
-use crate::classes::Class;
-use crate::os::sim::{Shape, Tiny};
+use super::word::{BITS, lowest};
 use crate::space::Geometry;
 
 fn any_geometry() -> Geometry {
@@ -46,58 +46,6 @@ fn slot_counts_are_the_quotient() {
     assert!(slots_in_region(geometry, class) == geometry.slots_per_region(class));
 }
 
-/// Three operations, each any of claim, release and purge with any arguments, on one region of
-/// eight 256-byte slots, all carved and held at the start. After each: every slot is either free
-/// or held, never both; every word with free slots is visible from the top; and the zero bits
-/// (none: a small class) and the purge's claims leave the bitmap as it was.
-#[kani::proof]
-#[kani::unwind(70)]
-fn short_runs_keep_the_bitmap_and_its_summary_consistent() {
-    let class = Class::of_size(256).unwrap();
-    let host = TestHost::<Atomic>::new(Tiny::GEOMETRY, class, 1);
-    let region = host.region_at(0);
-    host.carve_all(region, 8);
-    let all = 0xffu64;
-    let mut held = all;
-    let leaf = tree::Node::leaf(region, 0);
-    for _ in 0..3 {
-        match kani::any::<u8>() % 3 {
-            0 => {
-                let n: u32 = kani::any();
-                kani::assume((1..=8).contains(&n));
-                if let Some(taken) = tree::claim(&host, n) {
-                    assert!(taken.region == region && taken.word == 0);
-                    assert!(taken.bits & held == 0);
-                    assert!(taken.bits.count_ones() <= n);
-                    held |= taken.bits;
-                } else {
-                    assert!(held == all);
-                }
-            }
-            1 => {
-                let bits: u64 = kani::any();
-                kani::assume(bits != 0 && bits & !held == 0);
-                tree::release(&host, region, 0, bits);
-                held &= !bits;
-            }
-            _ => {
-                let cursor: u32 = kani::any();
-                if let Step::Unit(unit) = host.layout().unit_below(8, None, cursor) {
-                    let (outcome, _) = region::purge_unit(&host, region, unit);
-                    let (first, last) = host.layout().touching(unit);
-                    let touching = super::word::bits_in_word(0, first, last);
-                    if matches!(outcome, Purge::Done(_)) {
-                        assert!(touching & held == 0);
-                    }
-                }
-            }
-        }
-        let free = tree::word(&host, leaf).load();
-        assert!(free & held == 0 && free | held == all);
-        assert!(free == 0 || host.path_set(leaf));
-    }
-}
-
 /// A carve that commits up to page `committed` also commits the leaf words of every slot that
 /// starts below it, as whole pages within the leaf bitmap's part of the block.
 #[kani::proof]
@@ -124,11 +72,16 @@ fn leaf_commits_cover_the_committed_slots() {
 /// A purge step moves down: a unit lies wholly below the watermark and below the cursor, ends
 /// on a unit boundary, starts below where it ends, and stays in one part of the region (whole
 /// huge pages in the huge-page part); a skip moves the cursor down.
+///
+/// For classes whose size is a power of two, where `Divisor::divide` is a shift: with an odd
+/// factor of 3, 5 or 7, CBMC does not finish its 64-bit multiply within 20 minutes. The unit
+/// test `layout::tests::purge_passes_tile_the_carved_pages` checks every class.
 #[kani::proof]
 #[kani::unwind(6)]
 fn purge_steps_move_down_within_one_part() {
     let geometry = any_used_geometry();
     let class = any_class();
+    kani::assume(class.size().is_power_of_two());
     let Some(layout) = Layout::new(geometry, class) else {
         return;
     };

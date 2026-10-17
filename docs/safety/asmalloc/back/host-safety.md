@@ -74,15 +74,17 @@ discharged at the call site, BACK-REGION-01.
 claim (step 3) is checked on the protocols' test host instead: `TestHost` records which pages
 of each metadata block have been committed, and its `meta` fails on any other word. It commits
 the fixed part as `assign` does and leaf pages only through `commit_meta`, so every scenario in
-`back::models` (explored under many interleavings) and the Kani run
-`short_runs_keep_the_bitmap_and_its_summary_consistent` check that no protocol touches an
+`back::models` (explored under many interleavings) checks that no protocol touches an
 uncommitted word. `carving_commits_the_leaf_bitmap_it_needs` fails if a carve skips the leaf
 commit. `assign`'s commit before tagging is production code outside the test host; it is
 covered by the argument above and by the `SimOs` tests, which run every other access path
 natively and under Miri with strict provenance, with fault injection and with four threads.
-Bounds are checked on the test host by vector indexing, and by Kani in the same run.
+Bounds are checked on the test host by vector indexing. Kani proves the layout's sections fit
+the block (`layouts_fit_*`) and the leaf commit covers the carved slots
+(`leaf_commits_cover_the_committed_slots`); a Kani run of the protocols themselves on a small
+heap did not finish within the cap, so the access paths are tested, not proved.
 
 **Review.** 2026-10-17, fresh adversarial reviewer: the argument was accepted; the machine
 checks were found to overstate (no test could see an uncommitted access). Fixed above with the
-test host's commit tracking, which a deleted leaf commit now fails. The fix awaits the same
-reviewer's check.
+test host's commit tracking, which a deleted leaf commit now fails. The same reviewer checked the
+fix and accepted it.

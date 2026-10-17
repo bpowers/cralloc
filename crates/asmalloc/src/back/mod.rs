@@ -43,7 +43,7 @@ mod word;
 mod explore;
 #[cfg(test)]
 mod models;
-#[cfg(any(test, kani))]
+#[cfg(test)]
 mod testhost;
 #[cfg(test)]
 mod tests;
