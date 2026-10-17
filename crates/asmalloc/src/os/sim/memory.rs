@@ -1,19 +1,31 @@
-//! The simulated OS's memory: one zeroed host allocation that reservations are carved from.
+//! The simulated OSes' memory: one zeroed range that reservations are carved from.
+//!
+//! Natively, on Linux, the memory a `SimOs` asks for is *guarded*: a real reservation from
+//! [`LinuxOs`], inaccessible until the simulator commits it, so a read or write of memory the
+//! allocator never committed faults, as it would in a real process. A write that the program later
+//! undoes (a bitmap bit set and cleared again) leaves no trace in the contents, so only a fault
+//! catches it. Under Miri and Kani, which cannot change page protections, and for `ProofOs`,
+//! the memory is an ordinary zeroed allocation, and the simulator checks contents instead.
 
+#[cfg(all(target_os = "linux", target_arch = "x86_64", not(miri), not(kani)))]
+use crate::os::Os;
+#[cfg(all(target_os = "linux", target_arch = "x86_64", not(miri), not(kani)))]
+use crate::os::linux::{LinuxOs, protect_none};
 use alloc::alloc::{Layout, alloc_zeroed, dealloc, handle_alloc_error};
 use core::ptr::NonNull;
 
-/// A zero-initialized host allocation, freed on drop.
+/// A zeroed range of memory, released on drop.
 ///
-/// Every pointer the simulated OS hands out is derived from `base`, so it carries the
-/// allocation's provenance, which keeps Miri's strict-provenance checks and Kani's pointer model
-/// able to follow the allocator.
+/// Every pointer the simulated OS hands out is derived from `base`, so it carries the range's
+/// provenance, which keeps Miri's strict-provenance checks and Kani's pointer model able to
+/// follow the allocator.
 pub(super) struct Memory {
     base: NonNull<u8>,
     layout: Layout,
+    guarded: bool,
 }
 
-// SAFETY: `Memory` owns its allocation outright and exposes it only as raw pointers; it holds no
+// SAFETY: `Memory` owns its range outright and exposes it only as raw pointers; it holds no
 // references and no thread-affine state, so moving it to another thread or sharing it is
 // harmless. Callers synchronize their own accesses through the pointers, as `zero` requires.
 unsafe impl Send for Memory {}
@@ -21,21 +33,42 @@ unsafe impl Send for Memory {}
 unsafe impl Sync for Memory {}
 
 impl Memory {
-    /// `len` zero bytes aligned to `align`. Panics if `len` is zero or the layout is invalid,
-    /// and reports allocation failure as the global allocator does.
-    pub(super) fn new(len: usize, align: usize) -> Memory {
+    /// `len` zero bytes aligned to `align`, guarded if `guard` is set and the platform allows it.
+    /// Panics if `len` is zero, the layout is invalid, or the memory cannot be had.
+    pub(super) fn new(len: usize, align: usize, guard: bool) -> Memory {
         assert!(len > 0, "simulated memory must not be empty");
         let layout = Layout::from_size_align(len, align).expect("simulated memory layout");
+        #[cfg(all(target_os = "linux", target_arch = "x86_64", not(miri), not(kani)))]
+        if guard {
+            let base = LinuxOs
+                .reserve(len.next_multiple_of(4096), align.max(4096))
+                .expect("guarded simulated memory");
+            return Memory {
+                base,
+                layout,
+                guarded: true,
+            };
+        }
+        let _ = guard;
         // SAFETY: the layout's size is not zero.
         let ptr = unsafe { alloc_zeroed(layout) };
         let Some(base) = NonNull::new(ptr) else {
             handle_alloc_error(layout)
         };
-        Memory { base, layout }
+        Memory {
+            base,
+            layout,
+            guarded: false,
+        }
     }
 
     pub(super) fn len(&self) -> usize {
         self.layout.size()
+    }
+
+    /// Whether memory the simulator has not committed faults when touched.
+    pub(super) fn guarded(&self) -> bool {
+        self.guarded
     }
 
     /// The pointer `offset` bytes in. Pure address arithmetic; the result is only valid to
@@ -49,7 +82,40 @@ impl Memory {
         ptr.addr().get().wrapping_sub(self.base.addr().get())
     }
 
-    /// Writes `len` zero bytes at `offset`.
+    /// Makes `len` bytes at `offset` readable and writable, if the memory is guarded. The range
+    /// is whole 4 KiB host pages: the simulator's pages are whole host pages when guarded.
+    ///
+    /// # Safety
+    ///
+    /// `offset + len <= self.len()`.
+    pub(super) unsafe fn open(&self, offset: usize, len: usize) {
+        #[cfg(all(target_os = "linux", target_arch = "x86_64", not(miri), not(kani)))]
+        if self.guarded && len != 0 {
+            // SAFETY: the range is inside this value's own `LinuxOs` reservation (caller), and
+            // whole host pages (the simulator's page size is a multiple of 4 KiB when guarded).
+            let opened = unsafe { LinuxOs.commit(self.at(offset), len) };
+            opened.expect("guarded simulated memory: mprotect");
+        }
+        let _ = (offset, len);
+    }
+
+    /// Makes `len` bytes at `offset` inaccessible again, if the memory is guarded.
+    ///
+    /// # Safety
+    ///
+    /// `offset + len <= self.len()`, and nothing reads or writes the range until it is opened
+    /// again.
+    pub(super) unsafe fn close(&self, offset: usize, len: usize) {
+        #[cfg(all(target_os = "linux", target_arch = "x86_64", not(miri), not(kani)))]
+        if self.guarded && len != 0 {
+            // SAFETY: as in `open`; the caller promises nothing touches the range meanwhile.
+            let closed = unsafe { protect_none(self.at(offset), len) };
+            closed.expect("guarded simulated memory: mprotect");
+        }
+        let _ = (offset, len);
+    }
+
+    /// Makes `len` bytes at `offset` read as zero.
     ///
     /// # Safety
     ///
@@ -57,27 +123,37 @@ impl Memory {
     /// call.
     pub(super) unsafe fn zero(&self, offset: usize, len: usize) {
         debug_assert!(offset <= self.len() && len <= self.len() - offset);
+        #[cfg(all(target_os = "linux", target_arch = "x86_64", not(miri), not(kani)))]
+        if self.guarded {
+            if len != 0 {
+                // SAFETY: the range is inside this value's own reservation and whole host pages;
+                // the caller promises nothing touches it, so discarding its contents is safe.
+                // MADV_DONTNEED zero-fills whether or not the pages are accessible.
+                let zeroed = unsafe { LinuxOs.purge(self.at(offset), len) };
+                zeroed.expect("guarded simulated memory: madvise");
+            }
+            return;
+        }
         // SAFETY: the range is inside the allocation (caller), `base` has provenance for all of
         // it, `u8` has no alignment requirement and no invalid values, and the caller promises
         // that nothing else accesses the bytes meanwhile.
         unsafe { self.base.as_ptr().add(offset).write_bytes(0, len) }
     }
-}
 
-impl Memory {
     /// Whether the `len` bytes at `offset` are all zero.
     ///
     /// # Safety
     ///
-    /// `offset + len <= self.len()`, and no thread writes those bytes during the call.
+    /// `offset + len <= self.len()`, the range is accessible (always, unless the memory is
+    /// guarded, when it must be open), and no thread writes those bytes during the call.
     pub(super) unsafe fn is_zero(&self, offset: usize, len: usize) -> bool {
         debug_assert!(offset <= self.len() && len <= self.len() - offset);
         // Callers pass whole pages, which are at least 64 bytes and aligned to their size, so
         // the range is a whole number of aligned words; comparing words is eight times fewer
         // steps under Miri, where a whole reservation is checked at unmap.
         debug_assert!((offset | len).is_multiple_of(size_of::<u64>()));
-        // SAFETY: the range is inside the allocation (caller), which is initialized (it was
-        // allocated zeroed and only ever written with bytes, and every bit pattern is a valid
+        // SAFETY: the range is inside the memory and accessible (caller), initialized (it
+        // started zeroed and is only ever written with bytes, and every bit pattern is a valid
         // `u64`), `base` has provenance for all of it, the start is 8-aligned because the base
         // is region-aligned and the offset a multiple of 8, and nothing writes it while the
         // shared slice lives (caller).
@@ -93,6 +169,14 @@ impl Memory {
 
 impl Drop for Memory {
     fn drop(&mut self) {
+        #[cfg(all(target_os = "linux", target_arch = "x86_64", not(miri), not(kani)))]
+        if self.guarded {
+            let len = self.layout.size().next_multiple_of(4096);
+            // SAFETY: the whole reservation `new` made, released only here; nothing uses it
+            // after the simulator is dropped.
+            let _ = unsafe { LinuxOs.unmap(self.base, len) };
+            return;
+        }
         // SAFETY: `base` came from `alloc_zeroed` with this exact layout and is freed only here.
         unsafe { dealloc(self.base.as_ptr(), self.layout) }
     }

@@ -60,17 +60,19 @@ pub trait Shape: 'static {
     const GEOMETRY: Geometry;
 }
 
-/// The shape for tests, Miri and fuzzing: 1 KiB pages, 8 KiB huge pages, regions of 64 KiB
-/// (32 KiB at the floor), 232 object regions (enough for every class), 16 magazine regions,
-/// about 16 MiB in all.
+/// The shape for tests, Miri and fuzzing: 4 KiB pages, 64 KiB huge pages, regions of 256 KiB
+/// (128 KiB at the floor), 244 object regions (enough for every class), 4 magazine regions,
+/// 64 MiB of address space that the host commits only as it is touched.
 ///
-/// The page size is deliberately not 4 KiB, so that code which assumes 4 KiB pages instead of
-/// asking the geometry fails here. Large classes above 64 KiB do not fit a region; use
-/// [`Native`] to test large classes with many slots.
+/// The pages are host pages, so natively the simulator's memory is guarded: touching a page the
+/// heap has not committed faults. A page is 1/64 of a region, so the free bitmap of the
+/// smallest class fills a page of its own and can be committed apart from the rest of the
+/// region's metadata. Large classes above 256 KiB do not fit a region; use [`Native`] to test
+/// large classes with many slots.
 pub enum Standard {}
 
 impl Shape for Standard {
-    const GEOMETRY: Geometry = Geometry::new(10, 13, 16, 15, 256, 16, MagazineSize::MAX);
+    const GEOMETRY: Geometry = Geometry::new(12, 16, 18, 17, 256, 4, MagazineSize::MAX);
 }
 
 /// The shape for native tests of large classes: 4 KiB pages, 64 KiB huge pages, regions of
@@ -141,7 +143,8 @@ impl<S: Shape> SimOs<S> {
         );
         let geometry = S::GEOMETRY;
         SimOs {
-            memory: Memory::new(bytes, region),
+            // Guarded where each simulated page is whole host pages, so a stray access faults.
+            memory: Memory::new(bytes, region, geometry.page_size().is_multiple_of(4096)),
             pages: Pages::new(bytes / geometry.page_size()),
             faults: Injector::new(),
             rseq: AtomicU64::new(encode_rseq(DEFAULT_RSEQ)),
@@ -268,11 +271,7 @@ impl<S: Shape> SimOs<S> {
     pub fn is_purged(&self, start: NonNull<u8>, len: usize) -> bool {
         self.covering(start, len).is_some_and(|(first, count)| {
             self.pages.all(first, count, RESERVED | PURGED)
-                // SAFETY: the pages are inside `memory`, and the caller writes nothing meanwhile.
-                && unsafe {
-                    self.memory
-                        .is_zero(first << self.page_shift(), count << self.page_shift())
-                }
+                && (first..first + count).all(|index| self.page_reads_zero(index))
         })
     }
 
@@ -307,8 +306,9 @@ impl<S: Shape> SimOs<S> {
 
     /// Panics if a page of `first..first + count` that is not committed holds a nonzero byte:
     /// the allocator wrote memory it had not committed, which Linux would have refused with a
-    /// fault. Checked here when such a page is purged or unmapped; `commit` checks each page it
-    /// is first to commit.
+    /// fault. Checked here when such a page is purged; `commit` checks each page it is first to
+    /// commit. In guarded memory the write itself faults, so nothing is read. Unmap does not
+    /// check: reading a whole reservation made Miri, which needs this check, too slow.
     fn check_untouched(&self, call: Call, first: usize, count: usize) {
         // A test aid, not part of the `Os` contract, and word reads of memory a harness wrote at
         // a symbolic byte cost CBMC minutes; Kani proofs of the heap use `ProofOs` anyway.
@@ -322,9 +322,22 @@ impl<S: Shape> SimOs<S> {
         }
     }
 
+    /// Whether page `index` reads as zero. A closed page of guarded memory is zero (an access
+    /// would have faulted) and is not read. Call it while nothing writes the page.
+    fn page_reads_zero(&self, index: usize) -> bool {
+        if self.memory.guarded() && self.pages.get(index) & WRITABLE == 0 {
+            return true;
+        }
+        let page = S::GEOMETRY.page_size();
+        // SAFETY: the page is inside `memory` (it has a state) and accessible (open, or the
+        // memory is not guarded), and the caller writes nothing meanwhile.
+        unsafe { self.memory.is_zero(index << self.page_shift(), page) }
+    }
+
     /// Panics if page `index`, which is not committed, holds a nonzero byte.
     fn check_page(&self, call: Call, index: usize) {
-        if cfg!(kani) {
+        // Guarded memory faults at the write itself, and its uncommitted pages cannot be read.
+        if cfg!(kani) || self.memory.guarded() {
             return;
         }
         let page = S::GEOMETRY.page_size();
@@ -466,6 +479,11 @@ unsafe impl<S: Shape> Os for SimOs<S> {
     unsafe fn commit(&self, start: NonNull<u8>, len: usize) -> Result<(), OsError> {
         let (first, count) = self.checked_range(Call::Commit, start, len);
         let (applied, result) = self.admit(Call::Commit, count);
+        // SAFETY: `checked_range` put the pages inside `memory`.
+        unsafe {
+            self.memory
+                .open(first << self.page_shift(), applied << self.page_shift())
+        };
         for index in first..first + applied {
             // Overlapping commits may race; only the first checks a page, and it holds the page
             // in `CHECKING` until it is writable, so no correct caller writes it meanwhile.
@@ -515,7 +533,6 @@ unsafe impl<S: Shape> Os for SimOs<S> {
 
     unsafe fn unmap(&self, start: NonNull<u8>, len: usize) -> Result<(), OsError> {
         let (first, count) = self.checked_range(Call::Unmap, start, len);
-        self.check_untouched(Call::Unmap, first, count);
         let (applied, result) = self.admit(Call::Unmap, count);
         if applied == 0 {
             return result;
@@ -533,8 +550,10 @@ unsafe impl<S: Shape> Os for SimOs<S> {
         // nothing touches it once the call begins. Zeroing keeps unreserved memory zero.
         unsafe {
             self.memory
-                .zero(first << self.page_shift(), applied << self.page_shift())
-        };
+                .zero(first << self.page_shift(), applied << self.page_shift());
+            self.memory
+                .close(first << self.page_shift(), applied << self.page_shift());
+        }
         self.pages.release(first, applied);
         result
     }
@@ -737,15 +756,73 @@ mod tests {
         assert!(lost.is_err());
     }
 
+    /// Ordinary memory (the tiny shape's pages are smaller than a host page, so it is never
+    /// guarded) cannot fault, so the simulator checks contents at the first commit.
     #[test]
     #[should_panic(expected = "written before it was committed")]
-    fn writing_before_committing_is_caught_at_commit() {
-        let os = Sim::with_capacity(region());
-        let base = os.reserve(page(), region()).unwrap();
+    fn writing_before_committing_is_caught_at_commit_in_ordinary_memory() {
+        let os = SimOs::<Tiny>::new();
+        let page = Tiny::GEOMETRY.page_size();
+        let base = os.reserve(page, page).unwrap();
         // SAFETY: deliberately breaks the rule; on Linux this write would fault.
         unsafe {
             base.as_ptr().write(7);
-            os.commit(base, page()).unwrap();
+            os.commit(base, page).unwrap();
+        }
+    }
+
+    #[cfg(all(target_os = "linux", target_arch = "x86_64", not(miri)))]
+    const GUARD_CHILD: &str = "ASMALLOC_GUARD_CHILD";
+
+    /// Run on its own by `touching_uncommitted_guarded_memory_faults`; does nothing otherwise.
+    /// Writes a page it reserved but never committed, and a page it committed, purged and
+    /// unmapped, which must fault like the first.
+    #[cfg(all(target_os = "linux", target_arch = "x86_64", not(miri)))]
+    #[test]
+    fn guard_child() {
+        let Some(mode) = std::env::var_os(GUARD_CHILD) else {
+            return;
+        };
+        let os = Sim::with_capacity(region());
+        let base = os.reserve(2 * page(), region()).unwrap();
+        let target = if mode == "unmapped" {
+            // SAFETY: whole reserved pages that nothing else uses.
+            unsafe {
+                os.commit(base, 2 * page()).unwrap();
+                base.as_ptr().write(1);
+                os.unmap(base, 2 * page()).unwrap();
+            }
+            base
+        } else {
+            base.map_addr(|a| a.saturating_add(page()))
+        };
+        std::eprintln!("about to write");
+        // SAFETY: deliberately breaks the rule, to see the fault.
+        unsafe { target.as_ptr().write(7) };
+        std::eprintln!("the write did not fault");
+    }
+
+    #[cfg(all(target_os = "linux", target_arch = "x86_64", not(miri)))]
+    #[test]
+    fn touching_uncommitted_guarded_memory_faults() {
+        use std::os::unix::process::ExitStatusExt;
+        assert!(
+            Sim::new().memory.guarded(),
+            "the standard shape is guarded natively"
+        );
+        for mode in ["never-committed", "unmapped"] {
+            let output = std::process::Command::new("sh")
+                .arg("-c")
+                .arg("ulimit -c 0; exec \"$0\" \"$@\"")
+                .arg(std::env::current_exe().unwrap())
+                .args(["--exact", "os::sim::tests::guard_child", "--nocapture"])
+                .env(GUARD_CHILD, mode)
+                .output()
+                .unwrap();
+            let stderr = std::string::String::from_utf8_lossy(&output.stderr);
+            assert!(stderr.contains("about to write"), "{mode}: {stderr}");
+            assert!(!stderr.contains("did not fault"), "{mode}: {stderr}");
+            assert_eq!(output.status.signal(), Some(11), "{mode}: {output:?}");
         }
     }
 

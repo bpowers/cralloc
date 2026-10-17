@@ -73,5 +73,36 @@ Machine checks: Miri over the simulator's unit tests and the depot's threaded te
 all three callers. Kani does not reach this block: the check is skipped under Kani, because word
 reads of memory a harness wrote at a symbolic byte offset cost CBMC minutes.
 
+## SIM-MEMORY-06: the `LinuxOs` calls of guarded memory
+
+Natively (Linux, x86-64, not Miri or Kani), a `SimOs` whose pages are whole host pages asks for
+*guarded* memory: `new` reserves it from `LinuxOs` (inaccessible), `open` commits a range,
+`close` makes it inaccessible again (`protect_none`, KERNEL-08), `zero` purges, and `drop`
+unmaps the whole reservation.
+
+**Preconditions of the `Os` calls.** The range is whole pages of a live reservation made by
+`LinuxOs`; for `purge`, nothing touches it during the call; for `unmap` and `protect_none`,
+nothing touches it afterwards (until reopened).
+
+**Proof.**
+
+- *Inside a live reservation.* `base` is what `LinuxOs.reserve` returned for
+  `len.next_multiple_of(4096)` bytes, and it is unmapped only in `drop`. Every caller passes an
+  offset and length the simulator checked against `len` (`checked_range`, or the recorded wipe
+  pages).
+- *Whole host pages.* Guarding is chosen only when the shape's page size is a multiple of
+  4096, and every range is a whole number of the shape's pages at a page-aligned offset from a
+  region-aligned base.
+- *No access during or after.* `zero` and `close` carry the purge and unmap conditions as their
+  own `# Safety`, which `SimOs::purge`, `SimOs::unmap` and `SimOs::fork` take from their
+  contracts. A closed page is never read by the simulator itself: `check_page` returns at once
+  for guarded memory, and `page_reads_zero` skips closed pages.
+- *A fault is the point.* An allocator bug that touches a closed page gets SIGSEGV, as it would
+  in a real process. That ends the test; it is not memory unsafety in the simulator.
+
+Machine checks: `os::sim::tests::touching_uncommitted_guarded_memory_faults` runs a child that
+writes a never-committed page and one that writes an unmapped page, and checks both die of
+SIGSEGV; the whole native test suite runs on guarded memory.
+
 **Review.** 2026-10-17, fresh adversarial reviewer: SIM-MEMORY-01 to 04 accepted. SIM-MEMORY-05
-is new and needs the reviewer's check.
+and SIM-MEMORY-06 are new and need the reviewer's check.

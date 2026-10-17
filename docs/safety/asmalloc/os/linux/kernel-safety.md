@@ -128,6 +128,19 @@ and ends with exit_group if even that returns.
 getpid, gettid, tgkill and exit_group here and getpid in `random`, none of which takes a
 pointer.
 
+## KERNEL-08: `protect_none`
+
+**Block.** `range_call(MPROTECT, start, len, PROT_NONE)`, built only for tests and the `sim`
+feature; the allocator never calls it.
+
+**Preconditions** (its `# Safety`). Whole pages of a live `LinuxOs` reservation, which nothing
+reads or writes afterwards until it is committed again.
+
+**Proof.** As KERNEL-01, with the protection lowered instead of raised: mprotect keeps the
+contents and changes only access, and since nothing touches the range until it is committed
+again, no Rust access can fault on it except a bug's, which is what the simulator's guarded
+memory exists to expose (SIM-MEMORY-06). Its one caller is `Memory::close`.
+
 ## KERNEL-07: `unsafe impl Os for LinuxOs`
 
 The comment above the impl maps each promise of the `Os` trait to the kernel behaviour that

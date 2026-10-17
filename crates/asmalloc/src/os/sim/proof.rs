@@ -45,7 +45,7 @@ impl<S: Shape> ProofOs<S> {
     pub fn new() -> ProofOs<S> {
         let region = S::GEOMETRY.largest_plan().region_size();
         ProofOs {
-            memory: Memory::new(capacity_for::<S>(), region),
+            memory: Memory::new(capacity_for::<S>(), region, false),
             reserved: AtomicUsize::new(0),
             wipe_offset: AtomicUsize::new(0),
             wipe_len: AtomicUsize::new(0),

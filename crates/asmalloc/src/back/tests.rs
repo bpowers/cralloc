@@ -183,10 +183,11 @@ fn freeing_a_foreign_pointer_aborts() {
 fn regions_are_assigned_as_a_class_grows() {
     let state = state::<Standard>();
     let back = state.get_or_reserve().unwrap();
-    // 8 KiB slots, eight to a 64 KiB region.
+    // 8 KiB slots: enough for two full regions and a few in a third.
     let class = small(8 << 10);
-    let slots = fill(&back, class, 20);
-    assert_eq!(slots.len(), 20);
+    let per = back.space().plan().slots_per_region(class.class()) as usize;
+    let slots = fill(&back, class, 2 * per + 4);
+    assert_eq!(slots.len(), 2 * per + 4);
     let regions: BTreeSet<usize> = slots
         .iter()
         .map(|&p| back.space().locate(p).unwrap().region.index())
@@ -356,9 +357,10 @@ fn freeing_a_run_tail_aborts() {
 fn the_heap_runs_out_and_recovers() {
     let state = state::<Standard>();
     let back = state.get_or_reserve().unwrap();
-    // 32 KiB slots, two to a region.
+    // 32 KiB slots, in every object region.
     let class = small(32 << 10);
-    let all = 2 * back.space().plan().objects();
+    let plan = back.space().plan();
+    let all = plan.slots_per_region(class.class()) as usize * plan.objects();
     let mut slots = fill(&back, class, all + 5);
     assert_eq!(slots.len(), all);
     assert!(fill(&back, class, 1).is_empty());

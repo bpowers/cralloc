@@ -54,6 +54,21 @@ struct KernelSigaction {
 #[derive(Clone, Copy, Default, Debug)]
 pub struct LinuxOs;
 
+/// Makes a range of a reservation inaccessible again (mprotect to `PROT_NONE`). The allocator
+/// never needs this; the simulator uses it to turn memory it no longer counts as committed back
+/// into memory that faults, as a real reservation's uncommitted pages do.
+///
+/// # Safety
+///
+/// The range is whole pages of a live reservation made by `LinuxOs`, and nothing reads or writes
+/// it afterwards until it is committed again.
+#[cfg(any(test, feature = "sim"))]
+pub(crate) unsafe fn protect_none(start: NonNull<u8>, len: usize) -> Result<(), OsError> {
+    // SAFETY: the caller passes whole pages of a live reservation that nothing touches until it
+    // is committed again; removing access changes no contents.
+    unsafe { range_call(nr::MPROTECT, start, len, PROT_NONE) }
+}
+
 /// A memory call on `start..start + len` with one more argument.
 ///
 /// # Safety
