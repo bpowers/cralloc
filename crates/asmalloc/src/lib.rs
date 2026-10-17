@@ -27,6 +27,8 @@ extern crate alloc;
 extern crate std;
 
 pub mod back;
+#[cfg(all(target_os = "linux", target_arch = "x86_64", not(miri), not(kani)))]
+pub mod c;
 pub mod classes;
 pub mod depot;
 pub mod front;

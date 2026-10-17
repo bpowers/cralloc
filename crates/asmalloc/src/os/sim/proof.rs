@@ -4,7 +4,8 @@
 //! on it unrolls loops over every page and runs out of memory. [`ProofOs`] holds one reservation
 //! at a time, at the start of its memory, and keeps a fixed handful of words about it, whatever
 //! its size: the reservation's length, one range marked to be wiped on fork (marking a second,
-//! different range panics), the fault plans and the simulated threads. Its memory is that of one reservation of the shape's largest plan.
+//! different range panics), the fault plans, the simulated threads and a clock that moves only
+//! when the harness moves it. Its memory is that of one reservation of the shape's largest plan.
 //!
 //! What it gives up: it does not record which pages are committed, purged or advised, so it
 //! cannot catch a write to uncommitted memory, and it unmaps only whole reservations. Tests that
@@ -36,6 +37,7 @@ pub struct ProofOs<S: Shape = Tiny> {
     faults: Injector,
     fence_registered: AtomicBool,
     random: AtomicU64,
+    clock: AtomicU64,
     cpus: Cpus<PROOF_THREADS>,
     shape: PhantomData<fn() -> S>,
 }
@@ -52,6 +54,7 @@ impl<S: Shape> ProofOs<S> {
             faults: Injector::new(),
             fence_registered: AtomicBool::new(false),
             random: AtomicU64::new(0),
+            clock: AtomicU64::new(0),
             cpus: Cpus::new(),
             shape: PhantomData,
         }
@@ -61,6 +64,11 @@ impl<S: Shape> ProofOs<S> {
     /// `purge`, which zeroes the first half of its range.
     pub fn set_faults(&self, call: Call, faults: Faults) {
         self.faults.set(call, faults);
+    }
+
+    /// Moves the clock that [`Os::ticks`] reads forward by `ticks`.
+    pub fn advance_clock(&self, ticks: u64) {
+        self.clock.fetch_add(ticks, Ordering::AcqRel);
     }
 
     /// Simulated thread `index`, below [`PROOF_THREADS`], to run twins on.
@@ -128,7 +136,8 @@ impl<S: Shape> fmt::Debug for ProofOs<S> {
 //   `wipe_on_fork` only records. A failed call has acted on no more than its range.
 // - A range must lie in the reservation; `checked` panics before touching anything otherwise.
 // - `fence` aborts every twin sequence in flight on its CPU, waiting out committing ones.
-// - `abort` panics. All state is atomic.
+// - `abort` panics. `ticks` reads a clock the harness moves; the trait asks nothing of it.
+// - All state is atomic.
 unsafe impl<S: Shape> Os for ProofOs<S> {
     const GEOMETRY: Geometry = S::GEOMETRY;
 
@@ -232,6 +241,10 @@ unsafe impl<S: Shape> Os for ProofOs<S> {
 
     fn random(&self) -> u64 {
         splitmix(&self.random)
+    }
+
+    fn ticks(&self) -> u64 {
+        self.clock.load(Ordering::Acquire)
     }
 
     fn abort(&self, message: &str) -> ! {

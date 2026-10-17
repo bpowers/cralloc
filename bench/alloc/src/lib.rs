@@ -10,6 +10,8 @@
 //! |---|---|---|---|
 //! | `mi` | `libmimalloc-sys`'s static build | the `mimalloc` crate 0.1.52 | `mi_free` |
 //! | `mi-sized` | the same | the same, with the size passed back | `mi_free_size_aligned` |
+//! | `mi-crate` | the `mimalloc` crate itself, with the mimalloc it bundles | itself | `mi_free` |
+//! | `asmalloc` | `asmalloc::Asmalloc`, `executable` feature | itself | its `dealloc` |
 //! | `je` | `tikv-jemallocator` 0.6 itself, default features | itself | `sdallocx` |
 //! | `tc` | google/tcmalloc, static | as `tcmalloc-better` 0.1.19 | `TCMallocInternalDeleteSizedAligned` |
 //!
@@ -35,6 +37,22 @@ use mi as chosen;
 #[cfg(any(feature = "mi", feature = "mi-sized"))]
 #[global_allocator]
 static GLOBAL: mi::Mimalloc = mi::Mimalloc;
+
+#[cfg(feature = "mi-crate")]
+mod mi_crate;
+#[cfg(feature = "mi-crate")]
+use mi_crate as chosen;
+#[cfg(feature = "mi-crate")]
+#[global_allocator]
+static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
+#[cfg(feature = "asmalloc")]
+mod asm;
+#[cfg(feature = "asmalloc")]
+use asm as chosen;
+#[cfg(feature = "asmalloc")]
+#[global_allocator]
+static GLOBAL: asmalloc::Asmalloc = asmalloc::Asmalloc;
 
 #[cfg(feature = "je")]
 mod je;
@@ -83,12 +101,22 @@ pub struct Description {
 /// served some requests: tcmalloc decides its mode on first use.
 pub fn describe() -> Description {
     Description {
-        allocator: NAME,
+        allocator: allocator(),
         mode: mode(),
         library: library_of(chosen::entry()),
         version: chosen::version(),
         glibc_rseq_size: glibc_rseq_size(),
     }
+}
+
+/// `NAME`, unless the allocator can check at run time that it serves this process and finds
+/// it does not.
+fn allocator() -> &'static str {
+    #[cfg(feature = "asmalloc")]
+    if !asm::serves() {
+        return "not served by asmalloc";
+    }
+    NAME
 }
 
 #[cfg(feature = "tc")]

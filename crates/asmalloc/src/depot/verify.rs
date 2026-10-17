@@ -1,6 +1,7 @@
 //! Kani proofs of the depot's word-level arithmetic.
 
 use super::generation::Generation;
+use super::heartbeat::{Look, Sighting};
 use super::magazine::admits;
 use super::stack::Packed;
 use crate::classes::{MagazineSize, SLOT_BYTES, is_marker};
@@ -84,5 +85,37 @@ fn an_admitted_magazine_lies_inside_the_committed_area() {
         assert!(at >= start);
         assert!(at + SLOT_BYTES <= committed);
         assert!(at % SLOT_BYTES == 0);
+    }
+}
+
+/// The idle check never drains on a first sighting, never drains a slab twice without a change
+/// in its counter between, and drains only a sighting at least an interval old: for every
+/// sighting, counter and pair of clock readings.
+#[kani::proof]
+fn a_sighting_drains_once_and_only_after_an_interval() {
+    let sighting = Sighting(kani::any());
+    let activity: u64 = kani::any();
+    let now: u64 = kani::any();
+    match sighting.look(activity, now) {
+        Look::Record(fresh) => {
+            assert!(fresh.look(activity, now) == Look::Wait);
+        }
+        Look::Drain(marked) => {
+            assert!(sighting.0 != 0);
+            assert!(marked.look(activity, kani::any()) == Look::Wait);
+        }
+        Look::Wait => {}
+    }
+    assert!(!matches!(Sighting(0).look(activity, now), Look::Drain(_)));
+    // A slab first seen at `then` is not drained before an interval has passed.
+    let then: u64 = kani::any();
+    let elapsed: u64 = kani::any();
+    kani::assume(elapsed < super::IDLE_TICKS - (1 << 20));
+    if let Look::Record(fresh) = Sighting(0).look(activity, then) {
+        assert!(fresh.look(activity, then.wrapping_add(elapsed)) == Look::Wait);
+        assert!(matches!(
+            fresh.look(activity, then.wrapping_add(super::IDLE_TICKS)),
+            Look::Drain(_)
+        ));
     }
 }

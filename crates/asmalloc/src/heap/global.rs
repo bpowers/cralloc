@@ -16,7 +16,7 @@ use core::ptr::{self, NonNull};
 
 /// The heap. Its slab array is `front::SLABS`, which only [`Real`] writes, and nothing else
 /// uses that array, so the routines' slabs and this heap always go together (HEAP-02).
-static HEAP: Heap<LinuxOs> = Heap::new(LinuxOs);
+pub(super) static HEAP: Heap<LinuxOs> = Heap::new(LinuxOs);
 
 /// asmalloc as Rust's allocator: a zero-sized handle to the process's one heap.
 ///

@@ -8,10 +8,11 @@
 //! object is in exactly one place.
 
 use super::test_rig::{Rig, SimCpu, Small, TIGHT, tiny_class};
-use super::{Drained, Tuning};
-use crate::classes::SmallClass;
+use super::{Drained, IDLE_TICKS, Tuning};
+use crate::classes::{Class, SmallClass};
 use crate::front::check::interrupt_at;
 use crate::front::{Cpu, Routines};
+use crate::os::Os;
 use crate::os::sim::{Call, Faults, SimOs};
 use core::cell::RefCell;
 use core::ptr::NonNull;
@@ -33,8 +34,9 @@ fn cpu(rig: &TestRig, n: i32) -> Cpu {
     rig.slabs().cpu(n).unwrap()
 }
 
-/// Allocations and frees on CPU 0, then on CPU 1 long enough for the heartbeat to find CPU 0
-/// idle and drain it. `user` holds what the program holds.
+/// Allocations and frees on CPU 0, then on CPU 1 with the clock moving an idle interval between
+/// steps, so that CPU 1's heartbeats see CPU 0 stand still for one and drain it. `user` holds
+/// what the program holds.
 fn workload(rig: &TestRig, machine: &SimCpu, user: &RefCell<Vec<NonNull<u8>>>) {
     let class = tiny_class();
     let cache = rig.cache(machine);
@@ -58,10 +60,15 @@ fn workload(rig: &TestRig, machine: &SimCpu, user: &RefCell<Vec<NonNull<u8>>>) {
     free(4);
     alloc(2);
     machine.set_cpu(1);
+    let wait = || rig.os().advance_clock(IDLE_TICKS);
     free(3);
+    wait();
     alloc(3);
+    wait();
     free(2);
+    wait();
     alloc(1);
+    wait();
     free(2);
 }
 
@@ -88,6 +95,113 @@ fn a_workload_keeps_every_magazine_and_object_in_one_place() {
     let slab0 = rig.slabs().slab(cpu(&rig, 0));
     assert!(slab0.activity() > 0);
     assert_eq!(cache.drain(cpu(&rig, 0)), Drained::Done);
+}
+
+/// Slow paths on CPU 1 with the tiny class, whose magazines hold two objects, so that every
+/// call here takes at least one slow path and with it a look at CPU 0.
+fn heartbeats_on_cpu_1(rig: &TestRig) {
+    let machine = SimCpu::new(1);
+    let cache = rig.cache(&machine);
+    let class = tiny_class();
+    let held: Vec<_> = (0..3).filter_map(|_| cache.alloc(class)).collect();
+    assert!(!held.is_empty());
+    for object in held {
+        cache.free(class, object);
+    }
+}
+
+/// Whether CPU 0's slab holds nothing at all.
+fn cpu_0_is_empty(rig: &TestRig) -> bool {
+    let slab = rig.slabs().slab(cpu(rig, 0));
+    crate::front::Slab::drained_fields().all(|field| {
+        slab.field(field)
+            .load(core::sync::atomic::Ordering::Relaxed)
+            .is_null()
+    })
+}
+
+/// A CPU that allocates and frees only on fast paths never moves its activity counter, however
+/// busy it is, while another CPU's heartbeats look at it many times an interval. It is drained,
+/// and refills, but never twice within an interval: counted in looks rather than time, it was
+/// drained on every other look.
+#[test]
+fn a_cpu_busy_on_fast_paths_is_drained_at_most_once_an_interval() {
+    let busy = Class::of_size(64).unwrap().small().unwrap();
+    let tuning = Tuning {
+        look_every: 1,
+        ..Tuning::DEFAULT
+    };
+    let rig: TestRig = Rig::new(&[busy, tiny_class()], 1024, tuning);
+    let machine = SimCpu::new(0);
+    let cache = rig.cache(&machine);
+    let held = cache.alloc(busy).unwrap();
+    let slab = rig.slabs().slab(cpu(&rig, 0));
+    let mut drains = Vec::new();
+    let intervals = 10;
+    let steps_per_interval = 8;
+    for _ in 0..intervals * steps_per_interval {
+        rig.os().advance_clock(IDLE_TICKS / steps_per_interval);
+        for _ in 0..4 {
+            let object = cache.alloc(busy).unwrap();
+            cache.free(busy, object);
+        }
+        let fences = rig.os().calls(Call::Fence);
+        heartbeats_on_cpu_1(&rig);
+        heartbeats_on_cpu_1(&rig);
+        if rig.os().calls(Call::Fence) > fences {
+            assert_eq!(rig.os().last_fence(), Some(0));
+            assert!(cpu_0_is_empty(&rig));
+            drains.push(rig.os().ticks());
+        }
+    }
+    // Each drain costs CPU 0 one slow path, to load a magazine again, and nothing else does.
+    assert_eq!(slab.activity(), 1 + drains.len() as u64);
+    assert!(drains.len() >= intervals as usize / 2, "{drains:?}");
+    for pair in drains.windows(2) {
+        assert!(
+            pair[1] - pair[0] >= IDLE_TICKS,
+            "drained twice in an interval: {drains:?}"
+        );
+    }
+    cache.free(busy, held);
+    rig.census(&[], false);
+}
+
+/// A CPU that stops allocating is drained once its slab has stood still for an interval, and
+/// not again until it has been used.
+#[test]
+fn an_idle_cpu_is_drained_after_an_interval_and_again_only_after_use() {
+    let rig = rig(12, TIGHT);
+    let machine = SimCpu::new(0);
+    let cache = rig.cache(&machine);
+    let class = tiny_class();
+    let mut user: Vec<_> = (0..3).filter_map(|_| cache.alloc(class)).collect();
+    cache.free(class, user.pop().unwrap());
+    assert!(!cpu_0_is_empty(&rig));
+    // The first look records the slab; until an interval has passed, looks only wait.
+    heartbeats_on_cpu_1(&rig);
+    rig.os().advance_clock(IDLE_TICKS - (IDLE_TICKS >> 8));
+    heartbeats_on_cpu_1(&rig);
+    assert_eq!(rig.os().calls(Call::Fence), 0);
+    rig.os().advance_clock(IDLE_TICKS >> 8);
+    heartbeats_on_cpu_1(&rig);
+    assert_eq!(rig.os().calls(Call::Fence), 1);
+    assert!(cpu_0_is_empty(&rig));
+    rig.census(&user, false);
+    // Drained and still idle: nothing more to do, however long it stays so.
+    for _ in 0..10 {
+        rig.os().advance_clock(IDLE_TICKS);
+        heartbeats_on_cpu_1(&rig);
+    }
+    assert_eq!(rig.os().calls(Call::Fence), 1);
+    // Used again, it is drained again an interval after a look sees the use.
+    cache.free(class, user.pop().unwrap());
+    heartbeats_on_cpu_1(&rig);
+    rig.os().advance_clock(IDLE_TICKS);
+    heartbeats_on_cpu_1(&rig);
+    assert_eq!(rig.os().calls(Call::Fence), 2);
+    assert!(cpu_0_is_empty(&rig));
+    rig.census(&user, false);
 }
 
 #[test]

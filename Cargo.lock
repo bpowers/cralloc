@@ -7,6 +7,13 @@ name = "asmalloc"
 version = "0.1.0"
 
 [[package]]
+name = "asmalloc-preload"
+version = "0.1.0"
+dependencies = [
+ "asmalloc",
+]
+
+[[package]]
 name = "asmalloc-testkit"
 version = "0.0.0"
 dependencies = [

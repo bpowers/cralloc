@@ -546,8 +546,13 @@ the one a Rust `Layout` of the same size implies.
 - **Threads.** A thread has no allocator state. Starting and exiting need no code, and
   objects cached under a CPU stay with that CPU.
 - **Idle caches.** Memory can sit in the slab of a CPU the process no longer runs on. Each
-  slab has an activity counter, and a heartbeat that finds one unchanged for long enough
-  drains that slab. Every process has a **generation**, a random number; its marker is the
+  slab has an activity counter that its slow paths advance, and a heartbeat that finds one
+  unchanged for an interval of about a second drains that slab. The interval is wall-clock
+  time, read from the CPU's cycle counter without a system call. It must not be measured in
+  heartbeats: those come faster the harder the process allocates, and a slab that is busy on
+  fast paths alone would be drained over and over. Such a slab still looks idle, and is
+  drained once per interval, which costs it one refill. Every process has a **generation**,
+  a random number; its marker is the
   generation shifted above the low 19 bits, with the lowest bit set.
   1. Claim the slab by writing this generation into its drain flag with a compare-and-swap.
      If the flag already holds this generation, another thread is draining; stop.

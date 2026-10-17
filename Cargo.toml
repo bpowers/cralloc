@@ -9,6 +9,11 @@ license = "Apache-2.0 OR BSD-3-Clause"
 [workspace.lints.rust]
 unsafe_op_in_unsafe_fn = "deny"
 
+# The preload library is a no_std shared library, which cannot unwind (nor can the allocator
+# serving a request). Tests and benchmarks ignore this and unwind as usual.
+[profile.dev]
+panic = "abort"
+
 # The allocator's fast paths only reach their callers through link-time optimization, so our
 # own tests and benchmarks are built the way we recommend users build.
 [profile.release]
@@ -16,3 +21,4 @@ opt-level = 3
 lto = "fat"
 codegen-units = 1
 debug = 1
+panic = "abort"

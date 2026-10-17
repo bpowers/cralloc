@@ -142,36 +142,102 @@ fn rpc(service: &str, label: &str, client_args: &str) -> Job {
 const LARSON: Metric = Metric::Parsed { key: "Throughput =", name: "Mops/s", higher_better: true, scale: 1e-6 };
 const XMALLOC: Metric = Metric::Parsed { key: "free/sec:", name: "Mfrees/s", higher_better: true, scale: 1.0 };
 
+/// Whether the threads that only free (a pipeline's last stage, mpmc's consumers) allocate
+/// once before the work. Jobs that have such threads carry the choice in their id, so that
+/// neither kind can stand in for the other in a report.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Consumers {
+    /// Every thread allocates once first, as a service's threads do: the primary jobs.
+    AllAlloc,
+    /// The consumers never allocate, as a dedicated drop thread does.
+    FreeOnly,
+}
+
+impl Consumers {
+    fn arg(self) -> &'static str {
+        match self {
+            Consumers::AllAlloc => "prime=yes",
+            Consumers::FreeOnly => "prime=no",
+        }
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            Consumers::AllAlloc => "all-alloc",
+            Consumers::FreeOnly => "free-only",
+        }
+    }
+}
+
+/// CPUs for `chains` two-thread pipelines, each on two adjacent cores of one L3 domain,
+/// filling domain A before B: 0,1 then 2,3 then 8,9 then 10,11.
+fn pairs(chains: usize) -> Vec<usize> {
+    both()[..2 * chains].to_vec()
+}
+
+/// A pipeline or mpmc job; `id` and `args` get the consumer choice added.
+fn xjob(id: String, a: &str, cpus: Vec<usize>, c: Consumers, timeout_s: u64) -> Job {
+    rust("cross-thread", format!("{id} {}", c.label()), Mode::Native, &format!("{a} {}", c.arg()), cpus, timeout_s)
+}
+
 /// Every workload, at full size.
 pub fn full() -> Vec<Job> {
+    use Consumers::*;
     use Mode::*;
     let mut v = Vec::new();
-    let x = |name: &str, threads: usize, extra: &str, place: &str| {
-        let cpus = match place {
-            "local" => local(threads),
-            "split" => split(threads),
-            _ => both(),
-        };
-        let a = format!("{name} threads={threads} {extra}");
-        rust("cross-thread", format!("{name} t{threads} {extra} {place}"), Native, &a, cpus, 300)
+    let place_cpus = |threads: usize, place: &str| match place {
+        "local" => local(threads),
+        "split" => split(threads),
+        _ => both(),
+    };
+    let pipe = |threads: usize, extra: &str, place: &str, c: Consumers| {
+        let a = format!("pipeline threads={threads} {extra}");
+        xjob(format!("pipeline t{threads} {extra} {place}"), &a, place_cpus(threads, place), c, 300)
+    };
+    let exch = |threads: usize, extra: &str, place: &str| {
+        let a = format!("exchange threads={threads} {extra}");
+        rust(
+            "cross-thread",
+            format!("exchange t{threads} {extra} {place}"),
+            Native,
+            &a,
+            place_cpus(threads, place),
+            300,
+        )
     };
     for sizes in ["s64", "small", "mixed"] {
-        v.push(x("pipeline", 2, &format!("sizes={sizes}"), "local"));
+        v.push(pipe(2, &format!("sizes={sizes}"), "local", AllAlloc));
     }
-    v.push(x("pipeline", 2, "sizes=large objects=1M inflight=512", "local"));
-    v.push(x("pipeline", 2, "sizes=small", "split"));
-    v.push(x("pipeline", 4, "sizes=small", "local"));
-    v.push(x("pipeline", 8, "sizes=small", "both"));
+    v.push(pipe(2, "sizes=small", "local", FreeOnly));
+    v.push(pipe(2, "sizes=large objects=1M inflight=512", "local", AllAlloc));
+    v.push(pipe(2, "sizes=small", "split", AllAlloc));
+    v.push(pipe(2, "sizes=small", "split", FreeOnly));
+    v.push(pipe(4, "sizes=small", "local", AllAlloc));
+    v.push(pipe(8, "sizes=small", "both", AllAlloc));
+    // Independent two-thread pipelines side by side: two in one L3 domain, two with one in
+    // each, three, and four. Per chain, they should cost what one does alone.
+    for (chains, cpus, place) in
+        [(2, local(4), "local"), (2, vec![0, 1, 8, 9], "split"), (3, pairs(3), "both"), (4, pairs(4), "both")]
+    {
+        let a = format!("pipeline threads=2 chains={chains} sizes=small");
+        v.push(xjob(format!("pipeline t2 x{chains} sizes=small {place}"), &a, cpus, AllAlloc, 300));
+    }
     for sizes in ["small", "mixed"] {
-        v.push(x("exchange", 2, &format!("sizes={sizes}"), "local"));
+        v.push(exch(2, &format!("sizes={sizes}"), "local"));
     }
-    v.push(x("exchange", 2, "sizes=small", "split"));
-    v.push(x("exchange", 4, "sizes=small", "local"));
-    v.push(x("exchange", 8, "sizes=small", "both"));
-    for (p, c, place) in [(1, 3, "local"), (3, 1, "local"), (4, 4, "both")] {
+    v.push(exch(2, "sizes=small", "split"));
+    v.push(exch(4, "sizes=small", "local"));
+    v.push(exch(8, "sizes=small", "both"));
+    for (p, c, place, kinds) in [
+        (1, 3, "local", &[AllAlloc, FreeOnly][..]),
+        (3, 1, "local", &[AllAlloc, FreeOnly]),
+        (4, 4, "both", &[AllAlloc]),
+    ] {
         let cpus = if place == "local" { local(p + c) } else { both() };
         let a = format!("mpmc producers={p} consumers={c} sizes=small");
-        v.push(rust("cross-thread", format!("mpmc p{p} c{c} sizes=small {place}"), Native, &a, cpus, 300));
+        for &k in kinds {
+            v.push(xjob(format!("mpmc p{p} c{c} sizes=small {place}"), &a, cpus.clone(), k, 300));
+        }
     }
     for (t, place) in [(4, "local"), (8, "both")] {
         let cpus = if place == "local" { local(t) } else { both() };
@@ -206,9 +272,9 @@ pub fn full() -> Vec<Job> {
     v.push(rust("preload", "churn live=100k small".into(), Preload, "churn live=100k ops=20M sizes=small", one(), 300));
     v.push(rust(
         "preload",
-        "pipeline t2 sizes=small local".into(),
+        "pipeline t2 sizes=small local all-alloc".into(),
         Preload,
-        "pipeline threads=2 sizes=small",
+        "pipeline threads=2 sizes=small prime=yes",
         local(2),
         300,
     ));
@@ -228,15 +294,19 @@ pub fn full() -> Vec<Job> {
 
 /// A cross-section of the suite at small sizes, for a check that finishes in a few minutes.
 pub fn quick() -> Vec<Job> {
+    use Consumers::*;
     use Mode::*;
     let one = || vec![SINGLE];
+    let pipe =
+        |c| xjob("pipeline t2 sizes=small local".into(), "pipeline threads=2 sizes=small objects=2M", local(2), c, 60);
     vec![
-        rust(
-            "cross-thread",
-            "pipeline t2 sizes=small local".into(),
-            Native,
-            "pipeline threads=2 sizes=small objects=2M",
-            local(2),
+        pipe(AllAlloc),
+        pipe(FreeOnly),
+        xjob(
+            "pipeline t2 x3 sizes=small both".into(),
+            "pipeline threads=2 chains=3 sizes=small objects=2M",
+            pairs(3),
+            AllAlloc,
             60,
         ),
         rust(
@@ -247,12 +317,11 @@ pub fn quick() -> Vec<Job> {
             split(2),
             60,
         ),
-        rust(
-            "cross-thread",
+        xjob(
             "mpmc p3 c1 sizes=small local".into(),
-            Native,
             "mpmc producers=3 consumers=1 sizes=small objects=2M",
             local(4),
+            AllAlloc,
             60,
         ),
         rust(

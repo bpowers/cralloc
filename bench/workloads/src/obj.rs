@@ -35,19 +35,36 @@ pub fn make(size: usize, tag: u64) -> Obj {
     }
 }
 
-/// Reads the header, as a receiver would, frees the object, and returns its tag.
+/// Reads the header, as a receiver would, checks it, and frees the object. `from` is the tag
+/// the sender wrote, or `None` when any sender may have made it.
+///
+/// A header that is wrong means the allocator handed out memory that something else was
+/// using; the process aborts rather than freeing with a wrong layout.
 ///
 /// # Safety
 /// `o` came from [`make`] and has not been freed.
 #[inline]
-pub unsafe fn consume(o: Obj) -> u64 {
+pub unsafe fn consume(o: Obj, from: Option<u64>) {
     unsafe {
         let w = o.0.cast::<u64>();
         let size = w.read() as usize;
         let tag = w.add(1).read();
+        if !(16..=MAX_SIZE).contains(&size) || from.is_some_and(|f| f != tag) {
+            corrupt(o, size, tag, from);
+        }
         dealloc(o.0, Layout::from_size_align_unchecked(size, 8));
-        tag
     }
+}
+
+/// Larger than any object a workload makes, and than any size a stray pointer or a free-list
+/// link read as a size is likely to be.
+const MAX_SIZE: usize = 1 << 32;
+
+#[cold]
+#[inline(never)]
+fn corrupt(o: Obj, size: usize, tag: u64, from: Option<u64>) -> ! {
+    eprintln!("corrupt object at {:p}: header says size {size} tag {tag}, expected tag {from:?}", o.0);
+    std::process::abort()
 }
 
 thread_local! {
