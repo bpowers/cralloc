@@ -20,6 +20,7 @@ L3; override with the environment variables below.
 | `inline/` | Whether the allocator fast path is inlined at different kinds of call site, per cargo profile. | `./check.py [variant ...]` |
 | `oscost/` | Cost of mmap, page faults, the madvise family, mprotect, guard pages and zeroing. | `cargo run --release` |
 | `xcore/` | Cost of moving a cache line between cores. | `cargo run --release` |
+| `centry/` | The C entry points: candidate `malloc`, `free` and `calloc` routines reached directly, through the PLT and through the GOT; a preloadable stand-in around the best of them, compared with glibc, jemalloc, mimalloc and tcmalloc from plain C loops. | `./build.sh`, then `./run.sh run PATTERN` and `./compare.sh` |
 | `toolchain/` | The relocation a direct load of glibc's `__rseq_offset` gets, in an executable and a shared library, and the code rustc generates around an `asm!` block that calls. | `./check.sh` |
 
 ## kernels
@@ -69,6 +70,24 @@ busy `RF_WATCH` (default 3,18,19) was.
 `rust-alloc/run_slab.sh` builds a stand-in allocator around the same sequences (`src/slab.rs`,
 cargo features `slab`, `slab_direct`, `slab_call`, `slab_nonnull`, `slab_ool`, `slab_pc`) under
 fat LTO and runs the single-thread workloads; `RF_CPU=3` keeps it off a CPU a sweep is using.
+
+## centry
+
+```
+cd centry
+./build.sh                                   # gen.py, the library, the drivers, the stand-ins
+./run.sh sizes                               # bytes and fused uops of every routine
+./run.sh run 'kp_mLj_fUjn_*,kb32_*_[dp]'     # kernels by name (fnmatch); see gen.py's docstring
+./run.sh --ibt run 'kp_*_p'                  # the same driver linked with the IBT PLT
+./compare.sh pair:32 burst:32:32 mixed:1:512 # C loops (cloop.c) under each preloaded allocator
+```
+
+`RF_CPU` (default 13; its sibling 29 should be idle), `RF_ITERS`, `RF_REPS`, `RF_ROUNDS` and
+`RF_SIZES` as for the kernels; `RF_COUNTERS` picks up to four of `ins`, `uops`, `dec`, `brmiss`
+or raw AMD events `rXXXX`; `RF_MIXED=lo,hi[,period]` sets the mixed loop's sizes. `compare.sh`
+reads the baseline libraries from the main checkout's `bench/baselines/out` (built by
+`bench/baselines/build.sh`); `RF_ALLOCS` and `RF_BUILDS` narrow it. The stand-in allocator is
+single-threaded and never returns memory; it exists only to put the routines behind `malloc`.
 
 ## rust-alloc
 
