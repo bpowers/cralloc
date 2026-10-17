@@ -697,6 +697,36 @@ def stackPopContract {M : ISA} (A : Abi M) : Contract M :=
     (abort := fun s p => Unchanged [c.csField s] (c.mem s) (A.mem p))
     (trace := c.StackPopTrace)
 
+/-! ### The CPU number
+
+`current_cpu`, for the Rust front end, which cannot read the thread pointer
+without assembly: the thread's `cpu_id` as the routines read it. It is not a
+restartable sequence and arms nothing: it reads `__rseq_offset` and then
+`cpu_id`, once each, and writes nothing. Its answer may be stale by the time
+the caller uses it; the routines read the CPU number again. -/
+
+/-- `current_cpu`: `fn() -> u32`. -/
+def cpuSig : Sig where
+  params := []
+  ret := some .u32
+
+/-- The routines' view of the state, of which `current_cpu` uses only the
+rseq area's fields, which no routine's form changes (`Ctx.rsVar`,
+`Ctx.cpuField`, `Ctx.cpu`). -/
+def cpuView {M : ISA} (A : Abi M) : Ctx M := ⟨A, .cas, cpuSig⟩
+
+/-- What `current_cpu` may read: `__rseq_offset` and the thread's `cpu_id`. -/
+def cpuRegions {M : ISA} (A : Abi M) (s : M.State) : List (Region × Bool) :=
+  [((cpuView A).rsVar s, false), ((cpuView A).cpuField s, false)]
+
+/-- `current_cpu` returns `cpu_id`, zero-extended, and changes no memory. -/
+def cpuContract {M : ISA} (A : Abi M) : Contract M :=
+  let x : Sig.Extra M := {
+    pre := fun _ => A.tp.isSome ∧ A.sym.isSome
+    post := fun s s' => A.ret s' = BitVec.ofNat 64 ((cpuView A).cpu s) ∧ A.mem s' = A.mem s }
+  cpuSig.contract (A.withExtra (some (cpuRegions A))) (post := Curry.const (fun _ _ _ => True) _)
+    (x := x)
+
 /-! ## The functions
 
 Their documentation states what `Ctx.pre` and `Ctx.regions` require of the
@@ -875,5 +905,23 @@ def stackPopApi : Api where
   safety := slowSafety true false
   operands := [(RSEQ_OFFSET, .sym (path RSEQ_OFFSET)), (SLABS, .sym (path SLABS))]
   rustConsts := rustConsts
+
+def currentCpuApi : Api where
+  module := "slab"
+  name := "current_cpu"
+  sig := cpuSig
+  contracts := some fun A _ => cpuContract A
+  summary := "Returns the calling thread's CPU number as the slab routines read it: its rseq \
+    area's `cpu_id`, zero-extended. A number not below `SLAB_COUNT` has no slab (an \
+    unregistered thread's reads as one). Not a restartable sequence: the thread may move to \
+    another CPU before the caller uses the answer.\n\n\
+    Contract: `VG.Spec.Slab.cpuContract`."
+  safety := [
+    "glibc must have registered the calling thread's rseq area, as it does before the thread \
+      can run code that allocates.",
+    "Neither `__rseq_offset` nor the thread's `cpu_id` may overlap the stack the call uses (the \
+      return address on the stack, or, inline, the 128 bytes below the stack pointer and the 8 \
+      bytes at it) or wrap around the end of the address space."]
+  operands := [(RSEQ_OFFSET, .sym (path RSEQ_OFFSET))]
 
 end VG.Spec.Slab
