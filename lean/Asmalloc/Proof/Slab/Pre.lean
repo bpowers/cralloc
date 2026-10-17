@@ -87,7 +87,7 @@ theorem env_eq {M : ISA} (c : Spec.Slab.Ctx M) {post : M.State → M.State → P
     {trace : M.State → List Event → Prop} (p p' : M.State) :
     (contract c post exit abort trace).env p p' ↔
       c.A.rd p' = c.ro p' ∧ c.A.wr p' = c.rw p' ∧
-        Kept (c.rsVar p :: c.A.reserved 0 p) (c.mem p) (c.mem p') ∧ (c.inv p → c.inv p') :=
+        Kept (c.rsVar p :: c.keptStack p) (c.mem p) (c.mem p') ∧ (c.inv p → c.inv p') :=
   Iff.rfl
 
 /-! ## The regions, from the layout and the invariant -/
@@ -138,12 +138,12 @@ theorem more_apart (hinv : c.inv s) (hi : c.InRange s) : ∀ x ∈ c.more s, c.A
   · split
     · intro x hx
       simp only [List.mem_singleton] at hx; subst hx
-      exact (hinv _ hi).2 (by assumption)
+      exact (hinv.1 _ hi).2 (by assumption)
     · simp
   · split
     · intro x hx
       simp only [List.mem_singleton] at hx; subst hx
-      exact (hinv.2 _ hi).2 (by assumption)
+      exact (hinv.2.1 _ hi).2 (by assumption)
     · simp
   · simp
   · simp
@@ -331,12 +331,23 @@ theorem inv_frame (h : Same c s p) {W : List Region} (hm : Frame W (c.mem s) (c.
   have hap := h.apart
   obtain ⟨A, f, sig⟩ := c
   cases f <;> simp only [Spec.Slab.Ctx.inv, Spec.Slab.Ctx.SlotOk] at hinv ⊢
+  · refine ⟨fun i hi => ?_, ?_⟩
+    · rw [hwo i hi, hsl, hap]
+      exact hinv.1 i hi
+    · simp only [Spec.Slab.Ctx.Exclusive, hsl]
+      intro i hi j hj
+      rw [hwo i hi, hwo j hj]
+      exact hinv.2 i hi j hj
+  · refine ⟨by rw [mask_frame h hm hW]; exact hinv.1, fun i hi => ?_, ?_⟩
+    · rw [hwo i hi, hsl, hap]
+      exact hinv.2.1 i hi
+    · simp only [Spec.Slab.Ctx.Exclusive, hsl]
+      intro i hi j hj
+      rw [hwo i hi, hwo j hj]
+      exact hinv.2.2 i hi j hj
   · intro i hi
-    rw [hwo i hi, hsl, hap]
+    rw [hwo i hi]
     exact hinv i hi
-  · refine ⟨by rw [mask_frame h hm hW]; exact hinv.1, fun i hi => ?_⟩
-    rw [hwo i hi, hsl, hap]
-    exact hinv.2 i hi
   all_goals
     intro i hi
     rw [hwo i hi]

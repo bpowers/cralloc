@@ -10,8 +10,8 @@ Each routine's last attempt meets its contract relative to the state it
 starts in (`Verified.restarts`); here what that state keeps of the caller's
 entry, by `restarts_target_run` and `restarts_inline_run`: out of line, the
 arguments, the callee-saved registers, the stack pointer and the return
-address, which `env` keeps (`Spec.Slab.contract`); inline, every register
-but the clobbers.
+address, which `env` keeps out of line (`Spec.Slab.contract`); inline,
+every register but the clobbers.
 -/
 
 @[expose] public section
@@ -23,10 +23,12 @@ open VG.X86_64 VG.Spec.Slab VG.Impl.Slab.X86_64
 /-- `env` keeps the return address's slot. -/
 theorem env_ret {c : Spec.Slab.Ctx isa} (hA : X86 c.A) {post : State → State → Prop}
     {exit : String → State → State → Prop} {abort : State → State → Prop}
-    {trace : State → List Event → Prop} {p p' : State}
+    {trace : State → List Event → Prop} {p p' : State} (hf : c.form ≠ .inline)
     (he : (contract c post exit abort trace).env p p') :
     p'.mem.readW (p.gpr .rsp) 64 = p.mem.readW (p.gpr .rsp) 64 := by
-  have hk := he.2.2.1 ⟨p.gpr .rsp, 8⟩ (List.mem_cons_of_mem _ (hA.retSlot p))
+  have hk := he.2.2.1 ⟨p.gpr .rsp, 8⟩ (List.mem_cons_of_mem _ (by
+    obtain ⟨A, f, sig⟩ := c
+    cases f <;> first | exact absurd rfl hf | exact hA.retSlot p))
   rw [mem_of hA, mem_of hA] at hk
   exact Mem.readW_congr fun i hi => hk _ (rsVar_contains _ (by omega))
 
@@ -41,7 +43,7 @@ theorem popTable_run {s s' : State} (hs : (popContract abi).pre s)
       have := ((abort_iff PopTable.cx PopTable.hv s p).mp
         (PopTable.verified.abortOk hs hp).2.2.1).1
       simpa using this)
-    (fun _ _ he => env_ret PopTable.hX he) hs hr
+    (fun _ _ he => env_ret PopTable.hX (by decide) he) hs hr
 
 theorem pushTable_run {s s' : State} (hs : (pushContract abi).pre s)
     (hr : Restarts target pushTable (pushContract abi) s s') :
@@ -55,7 +57,7 @@ theorem pushTable_run {s s' : State} (hs : (pushContract abi).pre s)
         (PushTable.verified.abortOk hs hp).2.2.1).1
       simp only [List.cons.injEq, and_true] at this
       simpa using this)
-    (fun _ _ he => env_ret PushTable.hX he) hs hr
+    (fun _ _ he => env_ret PushTable.hX (by decide) he) hs hr
 
 theorem popInline_run {s s' : State} (hs : (popInlineContract inlineAbi).pre s)
     (hr : Restarts inlineTarget popInline (popInlineContract inlineAbi) s s') :
@@ -89,7 +91,7 @@ theorem cas_run {s s' : State} (hs : (casContract abi).pre s)
       have := ((abort_iff Cas.cx Cas.hv s p).mp (Cas.verified.abortOk hs hp).2.2.1).1
       simp only [List.cons.injEq, and_true] at this
       simpa using this)
-    (fun _ _ he => env_ret Cas.hX he) hs hr
+    (fun _ _ he => env_ret Cas.hX (by decide) he) hs hr
 
 theorem stackPush_run {s s' : State} (hs : (stackPushContract abi).pre s)
     (hr : Restarts target stackPush (stackPushContract abi) s s') :
@@ -102,7 +104,7 @@ theorem stackPush_run {s s' : State} (hs : (stackPushContract abi).pre s)
       have := ((abort_iff StackPush.cx StackPush.hv s p).mp (StackPush.verified.abortOk hs hp).2.2.1).1
       simp only [List.cons.injEq, and_true] at this
       simpa using this)
-    (fun _ _ he => env_ret StackPush.hX he) hs hr
+    (fun _ _ he => env_ret StackPush.hX (by decide) he) hs hr
 
 theorem stackPop_run {s s' : State} (hs : (stackPopContract abi).pre s)
     (hr : Restarts target stackPop (stackPopContract abi) s s') :
@@ -115,6 +117,6 @@ theorem stackPop_run {s s' : State} (hs : (stackPopContract abi).pre s)
       have := ((abort_iff StackPop.cx StackPop.hv s p).mp (StackPop.verified.abortOk hs hp).2.2.1).1
       simp only [List.cons.injEq, and_true] at this
       simpa using this)
-    (fun _ _ he => env_ret StackPop.hX he) hs hr
+    (fun _ _ he => env_ret StackPop.hX (by decide) he) hs hr
 
 end VG.Proof.Slab.X86_64
