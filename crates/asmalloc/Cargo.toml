@@ -14,6 +14,10 @@ rust-version = "1.92"
 # The simulated OS (`os::sim`) for tests, fuzzing and proofs in other crates. It brings in the
 # `alloc` crate; never enable it in a build that serves as the global allocator.
 sim = []
+# Read glibc's `__rseq_offset` with one load instead of two on the fast path. This links only
+# into an executable (the linker gives it its own copy of the variable); a shared library that
+# enables it fails to link.
+executable = []
 
 [dependencies]
 
