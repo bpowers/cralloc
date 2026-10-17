@@ -29,6 +29,7 @@ pub(super) mod nr {
     pub const RT_SIGACTION: usize = 13;
     pub const RT_SIGPROCMASK: usize = 14;
     pub const MADVISE: usize = 28;
+    pub const PAUSE: usize = 34;
     pub const GETPID: usize = 39;
     pub const GETTID: usize = 186;
     pub const EXIT_GROUP: usize = 231;

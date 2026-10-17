@@ -121,10 +121,11 @@ impl Magazine<'_> {
         }
     }
 
-    /// Records a level and a spare depth in the last slot.
+    /// Records a level and a spare depth in the last slot. A level above the capacity is
+    /// recorded as the capacity, as `record` would read it anyway.
     pub(crate) fn set_record(&self, record: Record) {
-        debug_assert!(record.level <= self.size.capacity());
-        let word = (record.depth as u64) << 32 | record.level as u64;
+        let level = record.level.min(self.size.capacity());
+        let word = (record.depth as u64) << 32 | level as u64;
         self.slot(self.size.slots() - 1)
             .store(ptr::without_provenance_mut(word as usize), Release);
     }
@@ -139,24 +140,29 @@ impl Magazine<'_> {
         self.set_record(Record { level, depth: 0 });
     }
 
-    /// The object in slot `index`, `1..=capacity`.
+    /// The object in slot `index`, `1..=capacity`. Any other index reads null, which every
+    /// caller already refuses, rather than the link or the record.
     pub(crate) fn object(&self, index: usize) -> *mut u8 {
-        debug_assert!((1..=self.size.capacity()).contains(&index));
-        self.slot(index).load(Relaxed)
+        if (1..=self.size.capacity()).contains(&index) {
+            self.slot(index).load(Relaxed)
+        } else {
+            ptr::null_mut()
+        }
     }
 
     /// Puts an object in slot `index`, `1..=capacity`. Any other index is refused, so that
     /// no call can overwrite the link or the record, which stacks and the slow paths trust.
     pub(crate) fn set_object(&self, index: usize, object: NonNull<u8>) {
-        debug_assert!((1..=self.size.capacity()).contains(&index));
         if (1..=self.size.capacity()).contains(&index) {
             self.slot(index).store(object.as_ptr(), Relaxed);
         }
     }
 
-    /// The slab word that loads this magazine at `level`: the address of slot `level + 1`.
+    /// The slab word that loads this magazine at `level`: the address of slot `level + 1`. A
+    /// level above the capacity is taken as the capacity, so the word always names a slot of
+    /// this magazine.
     pub(crate) fn word(&self, level: usize) -> *mut u8 {
-        debug_assert!(level <= self.size.capacity());
+        let level = level.min(self.size.capacity());
         self.base.as_ptr().wrapping_add((level + 1) * SLOT_BYTES)
     }
 }

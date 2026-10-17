@@ -2,7 +2,8 @@
 //! pin its own constants to the ones the proved routines were generated with.
 //!
 //! The constants are read from the emitted source as text, so a test needs neither the routines
-//! nor the symbols they link against.
+//! nor the symbols they link against. A definition that is not emitted as a constant, such as
+//! what a marker is, is pinned by its text in the specification.
 
 use std::string::String;
 use std::vec::Vec;
@@ -18,6 +19,19 @@ const SOURCES: [(&str, &str); 2] = [
         include_str!("../../../lean/generated/x86_64_inline/slab.rs"),
     ),
 ];
+
+/// The slab specification, whose definitions the Rust side mirrors.
+const SPEC: &str = include_str!("../../../lean/Asmalloc/Spec/Slab.lean");
+
+/// The line of the slab specification that begins `def {name} `, trimmed. Panics if there is
+/// none.
+pub(crate) fn lean_definition(name: &str) -> &'static str {
+    let prefix = std::format!("def {name} ");
+    SPEC.lines()
+        .map(str::trim)
+        .find(|line| line.starts_with(&prefix))
+        .unwrap_or_else(|| panic!("lean/Asmalloc/Spec/Slab.lean has no definition {name}"))
+}
 
 /// The value of the emitted constant `name`, as written in `pub(crate) const NAME: TYPE = N;`.
 /// Panics if a file lacks it or two files disagree.

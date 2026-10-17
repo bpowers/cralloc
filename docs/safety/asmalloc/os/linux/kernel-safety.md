@@ -97,15 +97,22 @@ slow path, and duplicates nothing.
 
 ## KERNEL-06: `abort`, `unblock_sigabrt` and `raise_sigabrt`
 
-**Blocks.** rt_sigprocmask in `unblock_sigabrt`; getpid, gettid and tgkill in `raise_sigabrt`;
-rt_sigaction and exit_group in `abort`.
+**Blocks.** rt_sigprocmask in `unblock_sigabrt`; gettid in `thread_id`; getpid and tgkill in
+`raise_sigabrt`; pause in `park`; rt_sigaction and exit_group in `abort`.
 
-**Order.** The first thread to abort sets `ABORTING`, unblocks SIGABRT and raises it with the
-program's disposition in place, as glibc's `abort` does, so a crash reporter's handler runs.
-The heap is valid at that point: the allocator refused to go on, it did not break. If the
-handler returns, or ignores the signal, or calls back into `abort` (the flag is set, so the
-nested call skips straight on), `abort` restores the default action, unblocks and raises again,
-and ends with exit_group if even that returns.
+**Order.** The first thread to abort stores its thread ID in `ABORTING` by compare-and-swap from
+zero, unblocks SIGABRT and raises it with the program's disposition in place, as glibc's
+`abort` does, so a crash reporter's handler runs. The heap is valid at that point: the
+allocator refused to go on, it did not break. If the handler returns, or ignores the signal, or
+calls back into `abort` on the same thread (the stored ID is its own, so the nested call skips
+straight on), `abort` restores the default action, unblocks and raises again, and ends with
+exit_group if even that returns.
+
+Any other thread that aborts meanwhile finds another ID stored and parks in a pause loop. It
+must not go on to reset the disposition: that would end the process while the first thread's
+handler is still writing its report. Parking takes no lock; the process ends when the first
+thread finishes. If a handler never returns to `abort` (it longjmps away), the parked threads
+wait forever, as they would on glibc's abort lock.
 
 **Proof.**
 
@@ -115,6 +122,8 @@ and ends with exit_group if even that returns.
   differs from glibc's. The size argument 8 is the kernel's `sigset_t`. The old-action and
   old-set pointers are null, so nothing is written back.
 - The pointers come from shared references and the kernel only reads them.
+- pause takes nothing and only sleeps until a signal is handled. Thread IDs are positive and
+  below 2^22, so the cast to `u32` keeps them and zero never names a thread.
 - getpid and gettid take nothing. tgkill(pid, tid, SIGABRT) runs the disposition in force: the
   program's handler the first time, the default (end the process with a core dump) the second.
   exit_group(127) ends the process if both raises returned, so the function does not return, as
@@ -123,6 +132,8 @@ and ends with exit_group if even that returns.
   process is ending. A handler that allocates re-enters a heap that is still consistent; at
   worst it aborts again, which the flag turns into the default action.
 - `ABORTING` is one static atomic, all-zero valid; it holds no allocator state.
+
+**Review.** The thread-ID handoff and `park` are new and need a fresh reviewer's check.
 
 **`int_call` itself.** It forwards to `syscall` with three integer arguments. Its callers are
 getpid, gettid, tgkill and exit_group here and getpid in `random`, none of which takes a

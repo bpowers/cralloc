@@ -9,7 +9,7 @@
 //! Only the [`Routines`] write a slab, each with one restartable sequence that commits with a
 //! single store, and the drain (`depot::drain`). The routines are assembly generated from Lean;
 //! [`Twin`] implements the same specifications in Rust for every environment where assembly
-//! cannot run, over a simulated processor ([`Machine`]) that tests control.
+//! cannot run, over a simulated processor ([`Machine`](crate::os::Machine)) that tests control.
 //!
 //! The layout constants here must equal those the Lean specification gives the generated code
 //! (`lean/generated/*/slab.rs`); a test compares them.
