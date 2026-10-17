@@ -132,6 +132,26 @@ impl Stack {
         }
     }
 
+    /// Calls `visit` for each magazine on the stack, top first, without taking any, for at most
+    /// `limit` of them. For the introspection walk: beside pushes and pops it may skip, repeat
+    /// or stop early, but every magazine it visits is one the area admits.
+    pub(super) fn walk<'a, O: Os>(
+        &self,
+        area: Area<'a, O>,
+        size: MagazineSize,
+        limit: usize,
+        mut visit: impl FnMut(&Magazine<'a>),
+    ) {
+        let mut number = Packed::from_word(self.head.load(Relaxed)).number;
+        for _ in 0..limit {
+            let Some(magazine) = MagazineId::new(number).and_then(|id| area.by_id(id, size)) else {
+                return;
+            };
+            number = Packed::from_word(magazine.link().load(Relaxed).addr() as u64).number;
+            visit(&magazine);
+        }
+    }
+
     /// Every magazine on the stack, top first, without taking any. For audits of a quiescent
     /// heap; panics on a loop.
     #[cfg(test)]

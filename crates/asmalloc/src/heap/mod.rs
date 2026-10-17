@@ -157,6 +157,20 @@ impl<O: Os> Heap<O> {
         self.back()?.usable_size(ptr)
     }
 
+    /// Walks the heap for `visitor` (`crate::stats`): read-only, and a racy snapshot beside
+    /// running threads. Reports nothing before the heap has started. `slabs` is the slab array
+    /// this heap is run with.
+    pub(crate) fn inspect(
+        &self,
+        slabs: &crate::front::Slabs,
+        visitor: &mut impl crate::stats::Visitor,
+    ) {
+        if let Some(back) = self.back() {
+            back.inspect(visitor);
+            crate::depot::inspect(&self.depot, back.space(), slabs, visitor);
+        }
+    }
+
     /// Allocates a block for `layout`; null if there is no memory.
     ///
     /// # Safety
