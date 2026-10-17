@@ -1,26 +1,29 @@
 //! Kani proofs of the address-space arithmetic.
 //!
-//! Each property is a function of the geometry. The harnesses here run it on the geometries in
-//! use (the design's and the simulator's two), which are constants and so verify in seconds;
-//! `verify_slow.rs` runs the same properties on every geometry `Geometry::try_new` accepts.
+//! Each property is a function of the geometry and holds for every region size it allows. The
+//! harnesses here run it on the geometries in use (the design's and the simulator's three), which
+//! are constants and so verify in seconds; `verify_slow.rs` runs the same properties on every
+//! geometry `Geometry::try_new` accepts.
 
 use super::reservation::{pack, unpack};
 use super::*;
 use crate::classes::{COUNT, Class};
-use crate::os::sim::{Shape, Standard, Tiny};
+use crate::os::sim::{Native, Shape, Standard, Tiny};
 
 /// One of the geometries in use.
 fn any_used_geometry() -> Geometry {
     match kani::any::<u8>() {
         0 => Geometry::DESIGN,
         1 => Standard::GEOMETRY,
+        2 => Native::GEOMETRY,
         _ => Tiny::GEOMETRY,
     }
 }
 
+/// A plan at any region size the geometry allows.
 fn any_plan(geometry: Geometry) -> Plan {
-    let objects: usize = kani::any();
-    let plan = geometry.plan(objects);
+    let shift: u32 = kani::any();
+    let plan = geometry.plan(shift);
     kani::assume(plan.is_some());
     plan.unwrap()
 }
@@ -38,53 +41,62 @@ pub(super) fn any_class() -> Class {
     Class::from_index(index).unwrap()
 }
 
-/// The largest plan fits the geometry's maximum, one more object region would not, and plans
-/// exist for exactly `1..=max_objects`. The count is below the region size, so it can share a
-/// word with a region-aligned base.
-pub(super) fn largest_plan_is_the_largest_that_fits(geometry: Geometry) {
-    let max = geometry.max_objects();
-    let plan = geometry.largest_plan();
-    assert!(plan.objects() == max);
-    assert!(geometry.plan(max) == Some(plan));
-    assert!(geometry.plan(0).is_none() && geometry.plan(max + 1).is_none());
-    assert!(plan.size() <= geometry.max_reservation());
-    assert!(geometry.reservation_len(max + 1) > geometry.max_reservation());
-    assert!(max >= 1 && max < geometry.region_size() && max <= MAX_REGIONS);
+/// Plans exist for exactly the region sizes from the floor to the largest, every one has the
+/// same object regions, and every one spans at most `max_regions` regions of its own size, so
+/// every address in a reservation has an entry in the class-of-region table.
+pub(super) fn every_plan_fits_its_regions(geometry: Geometry) {
+    let shift: u32 = kani::any();
+    let plan = geometry.plan(shift);
+    assert!(
+        plan.is_some()
+            == (geometry.min_region_shift() <= shift && shift <= geometry.max_region_shift())
+    );
+    if let Some(plan) = plan {
+        assert!(plan.region_shift() == shift);
+        assert!(plan.objects() == geometry.max_objects() && plan.objects() >= 1);
+        assert!(plan.size() <= geometry.max_regions() << shift);
+        assert!((plan.size() - 1) >> shift < MAX_REGIONS);
+    }
+    assert!(geometry.largest_plan().region_shift() == geometry.max_region_shift());
+    assert!(geometry.smallest_plan().region_shift() == geometry.min_region_shift());
 }
 
-/// In every plan the object regions, the metadata blocks and the magazine area are disjoint and
-/// in that order; each starts on a page and is whole pages; and the reservation spans at most
-/// `max_regions` regions, so every address in it has a table index below `MAX_REGIONS`.
-pub(super) fn plans_keep_objects_metadata_and_magazines_apart(geometry: Geometry) {
+/// In every plan the object regions, the magazine area, the metadata blocks and the process page
+/// are disjoint and in that order; each starts on a page and is whole pages; and the magazine
+/// area is aligned to the region size and holds the largest magazine.
+pub(super) fn plans_keep_their_parts_apart(geometry: Geometry) {
     let plan = any_plan(geometry);
     let region = any_object_region(plan);
     let page_mask = geometry.page_size() - 1;
 
     let region_start = plan.region_offset(region);
-    assert!(region_start + geometry.region_size() <= plan.objects_end());
-
-    let metadata = plan.metadata_offset(region);
-    assert!(plan.objects_end() <= metadata);
-    assert!(metadata + geometry.metadata_size() <= plan.metadata_end());
-    assert!(metadata & page_mask == 0 && geometry.metadata_size() & page_mask == 0);
-    if let Some(next) = plan.region(region.index() + 1) {
-        assert!(metadata + geometry.metadata_size() == plan.metadata_offset(next));
-    }
+    assert!(region_start + plan.region_size() <= plan.objects_end());
 
     let magazines = plan.magazines_offset();
-    assert!(plan.metadata_end() <= magazines);
-    assert!(magazines & (geometry.magazine_area_align() - 1) == 0);
-    assert!(magazines & page_mask == 0 && geometry.magazine_area_size() & page_mask == 0);
-    assert!(magazines + geometry.magazine_area_size() == plan.size());
+    assert!(plan.objects_end() <= magazines);
+    assert!(magazines & (plan.region_size() - 1) == 0);
+    assert!(plan.magazine_area_size() >= geometry.max_magazine().bytes());
 
-    assert!(plan.size() <= geometry.max_reservation());
-    assert!((plan.size() - 1) >> geometry.region_shift() < MAX_REGIONS);
+    let metadata = plan.metadata_offset(region);
+    assert!(magazines + plan.magazine_area_size() <= metadata);
+    assert!(metadata + plan.metadata_size() <= plan.metadata_end());
+    assert!(metadata & page_mask == 0 && plan.metadata_size() & page_mask == 0);
+    if let Some(next) = plan.region(region.index() + 1) {
+        assert!(metadata + plan.metadata_size() == plan.metadata_offset(next));
+    }
+
+    let process = plan.process_page_offset();
+    assert!(plan.metadata_end() <= process);
+    assert!(process & page_mask == 0);
+    assert!(process + geometry.page_size() == plan.size());
+
     assert!(geometry.huge_page_size() & page_mask == 0);
-    assert!(geometry.region_size() & (geometry.huge_page_size() - 1) == 0);
+    assert!(plan.region_size() & (geometry.huge_page_size() - 1) == 0);
 }
 
 /// `locate` inverts region offsets: an offset is located exactly when it is inside an object
-/// region, and the region and offset it gives add back up to it.
+/// region, and the region and offset it gives add back up to it. Whatever `slot_at` accepts is
+/// the start of a whole slot inside the region.
 pub(super) fn locate_inverts_region_offsets(geometry: Geometry) {
     let plan = any_plan(geometry);
     let delta: usize = kani::any();
@@ -93,68 +105,66 @@ pub(super) fn locate_inverts_region_offsets(geometry: Geometry) {
         Some(location) => {
             assert!(delta < plan.objects_end());
             assert!(location.region.index() < plan.objects());
-            assert!((location.offset as usize) < geometry.region_size());
+            assert!((location.offset as usize) < plan.region_size());
             assert!(plan.region_offset(location.region) + location.offset as usize == delta);
-            // Whatever `slot_at` accepts is the start of a whole slot inside the region.
             let class = any_class();
             if let Some(index) = plan.slot_at(location, class) {
                 assert!(class.slot_offset(index) == location.offset as usize);
-                assert!(location.offset as usize + class.size() <= geometry.region_size());
+                assert!(location.offset as usize + class.size() <= plan.region_size());
+                assert!(plan.slot_fits(class, index));
             }
         }
     }
 }
 
-/// Every slot that fits in a region lies inside it, is found again by `locate` at the offset
-/// `index * size`, and is aligned to its class's alignment or the region size, whichever is
-/// smaller, given a region-aligned base. With the division proofs in `classes`, `slot` then
+/// Every slot `slot_fits` accepts lies inside its region, is found again by `locate` at the
+/// offset `index * size`, and is aligned to its class's alignment or the region size, whichever
+/// is smaller, given a region-aligned base. With the division proofs in `classes`, `slot` then
 /// recovers the index.
 pub(super) fn slots_lie_inside_their_region_and_are_aligned(geometry: Geometry) {
     let plan = any_plan(geometry);
     let region = any_object_region(plan);
     let class = any_class();
     let index: u32 = kani::any();
-    let (odd, shift) = class.factors();
-    // Slot `index` ends within the region: `(index + 1) * odd << shift <= region_size`.
-    kani::assume(shift <= geometry.region_shift());
-    kani::assume(index as usize * odd + odd <= geometry.region_size() >> shift);
+    kani::assume(plan.slot_fits(class, index));
 
     let offset = plan.slot_offset(region, class, index);
-    assert!(offset + class.size() <= plan.region_offset(region) + geometry.region_size());
+    assert!(offset + class.size() <= plan.region_offset(region) + plan.region_size());
     let location = plan.locate(offset).unwrap();
     assert!(location.region == region);
     assert!(location.offset as usize == class.slot_offset(index));
 
-    let align = if class.align() < geometry.region_size() {
+    let align = if class.align() < plan.region_size() {
         class.align()
     } else {
-        geometry.region_size()
+        plan.region_size()
     };
     let base: usize = kani::any();
-    kani::assume(base & (geometry.region_size() - 1) == 0);
+    kani::assume(base & (plan.region_size() - 1) == 0);
     kani::assume(base <= usize::MAX - plan.size());
     assert!((base + offset) & (align - 1) == 0);
 }
 
-/// The published word gives back the base and count it was made from, and it is never zero, so
-/// "nothing published" cannot be confused with a space.
+/// The published word gives back the base and region shift it was made from, and it is never
+/// zero, so "nothing published" cannot be confused with a space.
 pub(super) fn published_words_round_trip(geometry: Geometry) {
     let plan = any_plan(geometry);
     let base: usize = kani::any();
-    kani::assume(base != 0 && base & (geometry.region_size() - 1) == 0);
-    let word = pack(base, plan.objects());
+    kani::assume(base != 0 && base & (plan.region_size() - 1) == 0);
+    let shift = plan.region_shift() as usize;
+    let word = pack(base, shift);
     assert!(word != 0);
-    assert!(unpack(geometry, word) == (base, plan.objects()));
+    assert!(unpack(word) == (base, shift));
 }
 
 #[kani::proof]
-fn the_largest_used_plans_are_the_largest_that_fit() {
-    largest_plan_is_the_largest_that_fits(any_used_geometry());
+fn every_used_plan_fits_its_regions() {
+    every_plan_fits_its_regions(any_used_geometry());
 }
 
 #[kani::proof]
-fn used_plans_keep_objects_metadata_and_magazines_apart() {
-    plans_keep_objects_metadata_and_magazines_apart(any_used_geometry());
+fn used_plans_keep_their_parts_apart() {
+    plans_keep_their_parts_apart(any_used_geometry());
 }
 
 #[kani::proof]

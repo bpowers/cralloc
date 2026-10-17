@@ -8,6 +8,7 @@
 
 use super::*;
 use crate::classes::{Class, MARKER, MARKER_SHIFT, SLOT_BYTES, is_marker};
+use crate::os::{Aborted, Machine, Step};
 use core::cell::Cell;
 use core::ptr::{self, NonNull};
 use core::sync::atomic::{AtomicPtr, Ordering::Relaxed};

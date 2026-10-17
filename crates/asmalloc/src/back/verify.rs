@@ -5,8 +5,8 @@
 use super::layout::{Grow, Hints, Layout, MAX_LEVELS, WORD_BYTES, slots_in_region};
 use super::word::{BITS, bits_in_word, position, span};
 use crate::classes::{COUNT, Class};
-use crate::os::sim::{Shape, Standard, Tiny};
-use crate::space::Geometry;
+use crate::os::sim::{Native, Shape, Standard, Tiny};
+use crate::space::{Geometry, Plan};
 
 pub(super) fn any_class() -> Class {
     let index: u8 = kani::any();
@@ -14,12 +14,23 @@ pub(super) fn any_class() -> Class {
     Class::from_index(index).unwrap()
 }
 
-pub(super) fn any_used_geometry() -> Geometry {
-    match kani::any::<u8>() {
+/// One of the geometries in use, at any region size it allows.
+pub(super) fn any_used_plan() -> Plan {
+    let geometry = match kani::any::<u8>() {
         0 => Geometry::DESIGN,
         1 => Standard::GEOMETRY,
+        2 => Native::GEOMETRY,
         _ => Tiny::GEOMETRY,
-    }
+    };
+    any_plan_of(geometry)
+}
+
+/// A plan of `geometry` at any region size it allows.
+pub(super) fn any_plan_of(geometry: Geometry) -> Plan {
+    let shift: u32 = kani::any();
+    let plan = geometry.plan(shift);
+    kani::assume(plan.is_some());
+    plan.unwrap()
 }
 
 /// `span` and `bits_in_word` name exactly the bits of a word that lie in a range of items, and
@@ -60,22 +71,22 @@ fn headers_round_trip() {
     assert!(Hints::unpack(0).huge_from.is_none() && Hints::unpack(0).cursor == 0);
 }
 
-/// Every class that fits a region of a used geometry has a layout, and the layout fits in the
+/// Every class that fits a region of a plan has a layout, and the layout fits in the
 /// region's metadata block: the leaf bitmap at offset zero covers every slot, each summary level
 /// has a bit for every word below and ends in one top word, the sections do not overlap, the
 /// clean bitmap covers every page, large classes have a zero bitmap covering every slot, and the
 /// part committed at assignment covers everything after the leaf bitmap.
-pub(super) fn layouts_fit(geometry: Geometry) {
+pub(super) fn layouts_fit(plan: Plan) {
     let class = any_class();
-    let slots = slots_in_region(geometry, class);
-    let layout = Layout::new(geometry, class);
+    let slots = slots_in_region(plan, class);
+    let layout = Layout::new(plan, class);
     if slots == 0 {
         assert!(layout.is_none());
         return;
     }
     let layout = layout.unwrap();
     assert!(layout.slots() == slots);
-    assert!(layout.total_words() as usize * WORD_BYTES <= geometry.metadata_size());
+    assert!(layout.total_words() as usize * WORD_BYTES <= plan.metadata_size());
     assert!(layout.leaf_words() * BITS >= slots && (layout.leaf_words() - 1) * BITS < slots);
     assert!(layout.tree_word(0, 0) == 0);
     assert!(layout.grow_word() == layout.leaf_words());
@@ -105,15 +116,15 @@ pub(super) fn layouts_fit(geometry: Geometry) {
     }
     assert!(end == layout.total_words());
     let (start, stop) = layout.fixed_commit();
-    let page = geometry.page_size();
+    let page = plan.geometry().page_size();
     assert!(start % page == 0 && stop % page == 0);
     assert!(start <= layout.grow_word() as usize * WORD_BYTES);
-    assert!(stop >= end as usize * WORD_BYTES && stop <= geometry.metadata_size());
-    assert!(layout.region_pages() as usize * page == geometry.region_size());
+    assert!(stop >= end as usize * WORD_BYTES && stop <= plan.metadata_size());
+    assert!(layout.region_pages() as usize * page == plan.region_size());
 }
 
 #[kani::proof]
 #[kani::unwind(6)]
 fn layouts_fit_the_used_geometries() {
-    layouts_fit(any_used_geometry());
+    layouts_fit(any_used_plan());
 }

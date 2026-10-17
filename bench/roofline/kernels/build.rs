@@ -1,8 +1,10 @@
 use std::process::Command;
 
 fn main() {
-    println!("cargo:rerun-if-changed=gen_layout.py");
-    let out = format!("{}/layout.rs", std::env::var("OUT_DIR").unwrap());
-    let status = Command::new("python3").args(["gen_layout.py", &out]).status().expect("python3 is needed to generate the layout sweep");
-    assert!(status.success(), "gen_layout.py failed");
+    for (script, file) in [("gen_layout.py", "layout.rs"), ("gen_routines.py", "routines.rs")] {
+        println!("cargo:rerun-if-changed={script}");
+        let out = format!("{}/{file}", std::env::var("OUT_DIR").unwrap());
+        let status = Command::new("python3").args([script, &out]).status().expect("python3 is needed to generate kernels");
+        assert!(status.success(), "{script} failed");
+    }
 }

@@ -1,30 +1,35 @@
 //! The address-space properties of `verify.rs` for every geometry `Geometry::try_new` accepts,
-//! and the slot count, which divides. Too slow for the merge gate (sizing the largest plan of a
-//! symbolic geometry divides); run on demand with `scripts/kani-all verify_slow`.
+//! and the slot count, which divides. Too slow for the merge gate; run on demand with
+//! `scripts/kani-all verify_slow`.
 
 use super::Geometry;
 use super::verify::*;
+use crate::classes::MagazineSize;
 
 fn any_geometry() -> Geometry {
+    let ordinal: usize = kani::any();
+    kani::assume(ordinal < MagazineSize::COUNT);
     let geometry = Geometry::try_new(
         kani::any(),
         kani::any(),
         kani::any(),
         kani::any(),
         kani::any(),
+        kani::any(),
+        MagazineSize::from_ordinal(ordinal).unwrap(),
     );
     kani::assume(geometry.is_some());
     geometry.unwrap()
 }
 
 #[kani::proof]
-fn the_largest_plan_is_the_largest_that_fits() {
-    largest_plan_is_the_largest_that_fits(any_geometry());
+fn every_plan_fits_its_regions_in_every_geometry() {
+    every_plan_fits_its_regions(any_geometry());
 }
 
 #[kani::proof]
-fn plans_keep_objects_metadata_and_magazines_apart_in_every_geometry() {
-    plans_keep_objects_metadata_and_magazines_apart(any_geometry());
+fn plans_keep_their_parts_apart_in_every_geometry() {
+    plans_keep_their_parts_apart(any_geometry());
 }
 
 #[kani::proof]
@@ -42,14 +47,20 @@ fn published_words_round_trip_in_every_geometry() {
     published_words_round_trip(any_geometry());
 }
 
-/// `slots_per_region` counts exactly the slots that fit.
+/// `slots_per_region` counts exactly the slots that fit, and `slot_fits` accepts exactly them.
 #[kani::proof]
 fn slots_per_region_counts_the_slots_that_fit() {
     let geometry = any_geometry();
+    let shift: u32 = kani::any();
+    let plan = geometry.plan(shift);
+    kani::assume(plan.is_some());
+    let plan = plan.unwrap();
     let class = any_class();
-    let slots = geometry.slots_per_region(class) as usize;
+    let slots = plan.slots_per_region(class);
     let size = class.size();
-    assert!(slots * size <= geometry.region_size());
-    assert!((slots + 1) * size > geometry.region_size());
-    assert!(geometry.fits_region(class) == (slots >= 1));
+    assert!(slots as usize * size <= plan.region_size());
+    assert!((slots as usize + 1) * size > plan.region_size());
+    assert!(plan.fits_region(class) == (slots >= 1));
+    let index: u32 = kani::any();
+    assert!(plan.slot_fits(class, index) == (index < slots));
 }

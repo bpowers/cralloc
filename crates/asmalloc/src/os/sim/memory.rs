@@ -64,6 +64,33 @@ impl Memory {
     }
 }
 
+impl Memory {
+    /// Whether the `len` bytes at `offset` are all zero.
+    ///
+    /// # Safety
+    ///
+    /// `offset + len <= self.len()`, and no thread writes those bytes during the call.
+    pub(super) unsafe fn is_zero(&self, offset: usize, len: usize) -> bool {
+        debug_assert!(offset <= self.len() && len <= self.len() - offset);
+        // Callers pass whole pages, which are at least 64 bytes and aligned to their size, so
+        // the range is a whole number of aligned words; comparing words is eight times fewer
+        // steps under Miri, where a whole reservation is checked at unmap.
+        debug_assert!((offset | len).is_multiple_of(size_of::<u64>()));
+        // SAFETY: the range is inside the allocation (caller), which is initialized (it was
+        // allocated zeroed and only ever written with bytes, and every bit pattern is a valid
+        // `u64`), `base` has provenance for all of it, the start is 8-aligned because the base
+        // is region-aligned and the offset a multiple of 8, and nothing writes it while the
+        // shared slice lives (caller).
+        let words = unsafe {
+            core::slice::from_raw_parts(
+                self.base.as_ptr().add(offset).cast::<u64>(),
+                len / size_of::<u64>(),
+            )
+        };
+        words.iter().all(|&word| word == 0)
+    }
+}
+
 impl Drop for Memory {
     fn drop(&mut self) {
         // SAFETY: `base` came from `alloc_zeroed` with this exact layout and is freed only here.

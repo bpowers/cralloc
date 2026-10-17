@@ -10,7 +10,7 @@ use super::tree::{self, Host};
 use super::word::{BITS, Word};
 use crate::classes::Class;
 use crate::os::HugePages;
-use crate::space::{Geometry, Plan, RegionId};
+use crate::space::{Plan, RegionId};
 use alloc::boxed::Box;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering::SeqCst};
@@ -36,6 +36,8 @@ impl TestWord for super::word::Atomic {
 pub(crate) struct TestHost<W> {
     layout: Layout,
     plan: Plan,
+    /// How many of the plan's regions the host has.
+    regions: usize,
     meta: Vec<Box<[W]>>,
     class_words: Box<[W]>,
     top: W,
@@ -55,12 +57,10 @@ pub(crate) struct TestHost<W> {
 }
 
 impl<W: TestWord> TestHost<W> {
-    /// A host for `class` with `regions` regions of `geometry`.
-    pub(crate) fn new(geometry: Geometry, class: Class, regions: usize) -> TestHost<W> {
-        let layout = Layout::new(geometry, class).expect("the class fits the geometry");
-        let plan = geometry
-            .plan(regions)
-            .expect("the geometry has that many regions");
+    /// A host for `class` with the first `regions` regions of `plan`.
+    pub(crate) fn new(plan: Plan, class: Class, regions: usize) -> TestHost<W> {
+        let layout = Layout::new(plan, class).expect("the class fits the plan's regions");
+        assert!(regions <= plan.objects(), "the plan has that many regions");
         let slots = layout.slots() as u64;
         let meta = (0..regions)
             .map(|r| {
@@ -75,6 +75,7 @@ impl<W: TestWord> TestHost<W> {
         let host = TestHost {
             layout,
             plan,
+            regions,
             meta,
             class_words: (0..64).map(|_| W::new(None)).collect(),
             top: W::new(None),
@@ -155,7 +156,7 @@ impl<W: TestWord> TestHost<W> {
     /// Whether every leaf word with free bits can be reached from the class's top word through
     /// set summary bits: the property `Visible` of `tla/Summary.tla` once no thread is at work.
     pub(crate) fn all_visible(&self) -> bool {
-        (0..self.plan.objects()).all(|r| {
+        (0..self.regions).all(|r| {
             let region = self.region_at(r);
             (0..self.layout.leaf_words()).all(|w| {
                 let node = tree::Node::leaf(region, w);
@@ -220,7 +221,11 @@ impl<W: TestWord> Host for TestHost<W> {
     }
 
     fn region(&self, index: usize) -> Option<RegionId> {
-        self.plan.region(index)
+        if index < self.regions {
+            self.plan.region(index)
+        } else {
+            None
+        }
     }
 
     fn meta(&self, region: RegionId, word: u32) -> &W {

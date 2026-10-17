@@ -216,6 +216,49 @@ theorem events_arm (h : ArmOk s) :
     show (armA s).mem = s.mem from rfl, σA_mem, m1, Mem.readW_writeW_self64]
   rfl
 
+/-! ### Armed with `__rseq_offset` read directly
+
+The same states and accesses as `arm`'s: `movSym` loads the variable that
+`movGot` and the load after it reach through its GOT slot. -/
+
+theorem setReg_setReg_same (σ : State) (r : Reg) (a b : BitVec 64) :
+    (σ.setReg r a).setReg r b = σ.setReg r b := by
+  simp only [State.setReg]
+  congr 1
+  funext r'
+  by_cases h : r' = r <;> simp [h]
+
+theorem armB_eq : armB s = s.setReg .r10 (o s) := setReg_setReg_same _ _ _ _
+
+theorem exec_direct1 (h : ArmOk s) : exec (.movSym .r10 RS) s = some (armB s) := by
+  have hin : InRegions (s.rd ++ s.wr) (s.syms RS) 8 := inRd (r := ⟨s.syms RS, 8⟩) h.rsVar
+  simp only [exec, State.load64, hin, ↓reduceIte, Option.map_some, armB_eq]
+  rfl
+
+theorem execBlock_dropLast_armDirect (h : ArmOk s) :
+    execBlock isa armDirect.dropLast s = some (armReg s) := by
+  rw [show armDirect.dropLast = [.movSym .r10 RS, .leaRseqCs .r11] from rfl,
+    execBlock_cons_some (exec_direct1 h), execBlock_cons_some exec_arm3, execBlock_nil']
+
+theorem execBlock_armDirect (h : ArmOk s) : execBlock isa armDirect s = some (σA s) := by
+  rw [armDirect, execBlock_cons_some (exec_direct1 h), execBlock_cons_some exec_arm3,
+    execBlock_cons_some (exec_arm4 h), execBlock_nil']
+
+theorem events_armDirect (h : ArmOk s) : blockEvents isa armDirect s = blockEvents isa arm s := by
+  rw [events_arm h, armDirect, blockEvents_cons_some (exec_direct1 h),
+    blockEvents_cons_some exec_arm3, blockEvents_cons_some (exec_arm4 h), blockEvents_nil']
+  simp only [Instr.events, List.nil_append, List.append_nil, List.cons_append, csOp_ea, toNat_read8]
+  rw [σA_mem, m1, Mem.readW_writeW_self64]
+  rfl
+
+/-- `armDirect` does what `arm` does, and arms the sequence as `RseqOk` asks. -/
+theorem armDirect_same (h : ArmOk s) :
+    execBlock isa armDirect s = execBlock isa arm s ∧
+    blockEvents isa armDirect s = blockEvents isa arm s ∧
+    ∃ i a, armDirect.getLast? = some i ∧ execBlock isa armDirect.dropLast s = some a ∧ arms i a :=
+  ⟨by rw [execBlock_armDirect h, execBlock_arm h], events_armDirect h,
+    _, _, rfl, execBlock_dropLast_armDirect h, arms_arm⟩
+
 end Arm
 
 /-! ## The CPU number -/

@@ -1,10 +1,10 @@
 //! Magazines: where they live, how they are made and named, and what an unloaded one records.
 //!
 //! Magazines are carved from the magazine area of the reservation by advancing a counter, and
-//! are never unmapped, so a stale reference to one reads harmless memory. The area's first page
-//! is the generation page (`generation.rs`); magazines start after it. A magazine is named by
-//! its offset in the area divided by the smallest magazine size, which fits in 32 bits and is
-//! never zero, so the depot can keep a number and a version counter in one word.
+//! are never unmapped, so a stale reference to one reads harmless memory. The area's first unit
+//! (the smallest magazine's size) is left unused, so that a magazine, named by its offset in the
+//! area divided by that unit, has a number that fits in 32 bits and is never zero, and the depot
+//! can keep a number and a version counter in one word.
 //!
 //! A magazine of `n` slots: slot 0 is the link (the depot's or a spare stack's), slots 1 to
 //! `n - 2` hold objects, and while the magazine is not loaded the last slot records its fill
@@ -36,7 +36,7 @@ const COMMIT_AHEAD: usize = 64 << 10;
 const UNIT: usize = MagazineSize::MIN.bytes();
 
 /// A magazine's number: its offset in the magazine area in units of the smallest magazine.
-/// Never zero, because the generation page comes first.
+/// Never zero, because the first unit is not used.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
 pub(crate) struct MagazineId(NonZeroU32);
 
@@ -196,14 +196,16 @@ impl<'a, O: Os> Area<'a, O> {
         Area { space, depot }
     }
 
-    /// The first byte after the generation page: where magazines begin.
+    /// Where magazines begin: one unit in, so that no magazine has the number zero.
     fn start() -> usize {
-        O::GEOMETRY.page_size().max(UNIT)
+        UNIT
     }
 
-    /// The area's size, capped so that every offset in it has a 32-bit number.
-    fn end() -> usize {
-        O::GEOMETRY
+    /// The area's size in this reservation, capped so that every offset in it has a 32-bit
+    /// number.
+    fn end(&self) -> usize {
+        self.space
+            .plan()
             .magazine_area_size()
             .min(u32::MAX as usize * UNIT)
     }
@@ -215,7 +217,7 @@ impl<'a, O: Os> Area<'a, O> {
             .map_addr(|base| base.saturating_add(offset))
     }
 
-    /// The magazine of `size` at `offset`, if one can be there: past the generation page,
+    /// The magazine of `size` at `offset`, if one can be there: past the first unit,
     /// aligned to its size, and inside the committed part.
     fn magazine_at(&self, offset: usize, size: MagazineSize) -> Option<Magazine<'a>> {
         let committed = self.depot.committed.load(Acquire);
@@ -256,7 +258,7 @@ impl<'a, O: Os> Area<'a, O> {
             if committed >= end {
                 return true;
             }
-            let target = (end + COMMIT_AHEAD).next_multiple_of(page).min(Self::end());
+            let target = (end + COMMIT_AHEAD).next_multiple_of(page).min(self.end());
             if self
                 .space
                 .commit(self.at(committed), target - committed)
@@ -270,14 +272,10 @@ impl<'a, O: Os> Area<'a, O> {
         }
     }
 
-    /// The generation page, committed. `None` if it could not be committed.
-    pub(super) fn generation_page(&self) -> Option<NonNull<u8>> {
-        let page = O::GEOMETRY.page_size();
-        if self.depot.committed.load(Acquire) == 0 {
-            self.space.commit(self.at(0), page).ok()?;
-            self.depot.committed.fetch_max(page, AcqRel);
-        }
-        Some(self.at(0))
+    /// The generation page: the reservation's process page, which a forked child reads as
+    /// zero. `generation::prepare` commits it.
+    pub(super) fn generation_page(&self) -> NonNull<u8> {
+        self.space.process_page()
     }
 
     /// The space, for the OS calls on the generation page.
@@ -292,7 +290,7 @@ impl<'a, O: Os> Area<'a, O> {
         let mut carved = self.depot.carved.load(Acquire);
         let start = loop {
             let start = (Self::start() + carved).next_multiple_of(bytes);
-            if start + bytes > Self::end() {
+            if start + bytes > self.end() {
                 return None;
             }
             match self.depot.carved.compare_exchange(

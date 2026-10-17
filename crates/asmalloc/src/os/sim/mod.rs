@@ -5,30 +5,49 @@
 //! Linux does wherever the allocator could tell the difference: reserved memory reads as zero,
 //! commit keeps contents, purge zeroes, and unmapped memory comes back zero when reserved again.
 //! It is stricter than Linux where that catches bugs: a call on memory that is not reserved, or
-//! on a range that is not whole pages, panics. It cannot stop the allocator from writing memory
-//! it never committed; tests check for that with [`SimOs::is_writable`].
+//! on a range that is not whole pages, panics. Memory is ordinary memory, so a write to a page
+//! that was never committed cannot fault, but it is caught: such a page must still be zero when
+//! it is committed, purged or unmapped, or the call panics. [`SimOs::is_writable`] lets a test
+//! check a block before writing, [`SimOs::resident_bytes`] measures what the heap keeps
+//! resident, and [`SimOs::is_purged`] turns false once purged memory is written again.
 //!
-//! Any call can be made to fail on demand ([`SimOs::set_faults`]), the rseq registration it
-//! reports can be changed ([`SimOs::set_rseq`]), the pages marked to be wiped on fork can be
-//! wiped as a fork would ([`SimOs::wipe_for_fork`]), and `abort` panics so that a test can
-//! observe it. Random numbers come from a seeded generator, so a test is repeatable. The heap's geometry comes from a [`Shape`]: [`Standard`] for tests and fuzzing, [`Tiny`]
-//! for Kani harnesses. Other crates may define their own.
+//! What a test controls:
+//!
+//! - Any call can be made to fail on demand ([`SimOs::set_faults`]).
+//! - The rseq registration it reports can be changed ([`SimOs::set_rseq`]).
+//! - Simulated threads run twins on CPUs the test chooses, and the test can interrupt their
+//!   sequences; `fence` aborts the ones on its CPU ([`SimOs::thread`]).
+//! - A fork happens in place ([`SimOs::fork`]), or only its wiping of marked pages
+//!   ([`SimOs::wipe_for_fork`]).
+//! - Random numbers come from a seeded generator, so a test is repeatable.
+//! - `abort` panics, so a test can observe it.
+//!
+//! The heap's geometry comes from a [`Shape`]: [`Standard`] for tests, Miri and fuzzing,
+//! [`Native`] for large classes, [`Tiny`] for Kani harnesses. Other crates may define their own.
 //!
 //! The simulator takes no locks: every piece of state is an atomic, and racing reservations
 //! claim pages by compare-and-swap.
 
+mod cpus;
 mod faults;
 mod memory;
 mod pages;
+mod proof;
+#[cfg(kani)]
+mod verify;
 #[cfg(kani)]
 mod verify_slow;
 
+pub use cpus::{SIM_THREADS, SimThread};
 pub use faults::{Call, Faults};
+pub use proof::{PROOF_THREADS, ProofOs};
 
+use self::cpus::Cpus;
 use self::faults::Injector;
 use self::memory::Memory;
-use self::pages::{HUGE, NO_HUGE, PURGED, Pages, RESERVED, START, WIPE, WRITABLE};
+use self::pages::{CHECKING, HUGE, NO_HUGE, PURGED, Pages, RESERVED, START, WIPE, WRITABLE};
 use super::{HugePages, Os, OsError, RseqArea};
+use crate::classes::MagazineSize;
 use crate::space::Geometry;
 use core::fmt;
 use core::marker::PhantomData;
@@ -41,19 +60,33 @@ pub trait Shape: 'static {
     const GEOMETRY: Geometry;
 }
 
-/// The shape for tests and fuzzing: 1 KiB pages, 8 KiB huge pages, 64 KiB regions, 16 MiB in
-/// all, with 232 object regions (enough for every class) and a 1 MiB magazine area.
+/// The shape for tests, Miri and fuzzing: 1 KiB pages, 8 KiB huge pages, regions of 64 KiB
+/// (32 KiB at the floor), 232 object regions (enough for every class), 16 magazine regions,
+/// about 16 MiB in all.
 ///
 /// The page size is deliberately not 4 KiB, so that code which assumes 4 KiB pages instead of
-/// asking the geometry fails here.
+/// asking the geometry fails here. Large classes above 64 KiB do not fit a region; use
+/// [`Native`] to test large classes with many slots.
 pub enum Standard {}
 
 impl Shape for Standard {
-    const GEOMETRY: Geometry = Geometry::new(10, 13, 16, 256, 20);
+    const GEOMETRY: Geometry = Geometry::new(10, 13, 16, 15, 256, 16, MagazineSize::MAX);
 }
 
-/// The shape for Kani: 64-byte pages, 256-byte huge pages, 2 KiB regions, 8 KiB in all, with two
-/// object regions and a 2 KiB magazine area.
+/// The shape for native tests of large classes: 4 KiB pages, 64 KiB huge pages, regions of
+/// 1 MiB (128 KiB at the floor), 247 object regions, about 256 MiB of address space.
+///
+/// The host commits the simulated memory lazily, so the size costs nothing until it is touched;
+/// it is too large for Miri.
+pub enum Native {}
+
+impl Shape for Native {
+    const GEOMETRY: Geometry = Geometry::new(12, 16, 20, 17, 256, 1, MagazineSize::MAX);
+}
+
+/// The shape for Kani: 64-byte pages, 256-byte huge pages, 2 KiB regions, two object regions,
+/// one magazine region, 8 KiB in all, and magazines capped at the smallest size, so that 64 of
+/// them fit and magazine exchange can be exercised.
 ///
 /// Kani's cost grows with every byte of simulated memory (zeroing 32 KiB already takes it half
 /// a gigabyte), so this shape is as small as the geometry rules allow. Its regions hold only the
@@ -61,7 +94,14 @@ impl Shape for Standard {
 pub enum Tiny {}
 
 impl Shape for Tiny {
-    const GEOMETRY: Geometry = Geometry::new(6, 8, 11, 4, 11);
+    const GEOMETRY: Geometry = Geometry::new(6, 8, 11, 11, 4, 1, MagazineSize::MIN);
+}
+
+/// Bytes of simulated memory that hold one reservation of a shape's largest plan, rounded up to
+/// the largest region size.
+pub const fn capacity_for<S: Shape>() -> usize {
+    let plan = S::GEOMETRY.largest_plan();
+    plan.size().next_multiple_of(plan.region_size())
 }
 
 /// What glibc reports on the reference host: the area 320 bytes below the thread pointer, with
@@ -80,32 +120,35 @@ pub struct SimOs<S: Shape = Standard> {
     fence_registered: AtomicBool,
     last_fence: AtomicU64,
     random: AtomicU64,
+    cpus: Cpus<SIM_THREADS>,
     shape: PhantomData<fn() -> S>,
 }
 
 impl<S: Shape> SimOs<S> {
     /// A simulated OS with room for one reservation of the largest plan.
     pub fn new() -> SimOs<S> {
-        SimOs::with_capacity(S::GEOMETRY.max_reservation())
+        SimOs::with_capacity(capacity_for::<S>())
     }
 
-    /// A simulated OS with `bytes` of memory, a non-zero multiple of the region size. Room for
-    /// two largest plans lets a test race two reservations; less makes [`crate::space::Space`]
-    /// settle for a smaller plan.
+    /// A simulated OS with `bytes` of memory, a non-zero multiple of the largest region size.
+    /// Room for two largest plans lets a test race two reservations; less makes
+    /// [`crate::space::Space`] settle for smaller regions.
     pub fn with_capacity(bytes: usize) -> SimOs<S> {
-        let geometry = S::GEOMETRY;
+        let region = S::GEOMETRY.largest_plan().region_size();
         assert!(
-            bytes > 0 && bytes.is_multiple_of(geometry.region_size()),
-            "simulated memory must be a non-zero number of regions"
+            bytes > 0 && bytes.is_multiple_of(region),
+            "simulated memory must be a non-zero number of the largest regions"
         );
+        let geometry = S::GEOMETRY;
         SimOs {
-            memory: Memory::new(bytes, geometry.region_size()),
+            memory: Memory::new(bytes, region),
             pages: Pages::new(bytes / geometry.page_size()),
             faults: Injector::new(),
             rseq: AtomicU64::new(encode_rseq(DEFAULT_RSEQ)),
             fence_registered: AtomicBool::new(false),
             last_fence: AtomicU64::new(0),
             random: AtomicU64::new(0),
+            cpus: Cpus::new(),
             shape: PhantomData,
         }
     }
@@ -148,6 +191,30 @@ impl<S: Shape> SimOs<S> {
     /// Restarts the random generator from `seed`, so that a test draws a known sequence.
     pub fn set_random_seed(&self, seed: u64) {
         self.random.store(seed, Ordering::Release);
+    }
+
+    /// Simulated thread `index`, below [`SIM_THREADS`], to run twins on. Thread `i` starts on
+    /// CPU `i`; [`Os::fence`] aborts the sequences in flight on the CPU it names.
+    pub fn thread(&self, index: usize) -> SimThread<'_> {
+        self.cpus.thread(index)
+    }
+
+    /// Forks the process in place: the simulator becomes the child. Pages marked by
+    /// [`Os::wipe_on_fork`] read as zero, every simulated thread but `survivor` vanishes (running
+    /// a twin on one panics), and the survivor's sequence in flight, if any, is aborted. The
+    /// rest of memory, with every pointer in it, is as the parent left it.
+    ///
+    /// The parent cannot continue alongside the child: the child's heap must sit at the same
+    /// addresses as the parent's, and one process cannot hold two copies there. A test of the
+    /// parent's side simply does not call this.
+    ///
+    /// # Safety
+    ///
+    /// No thread reads or writes a marked page during the call.
+    pub unsafe fn fork(&self, survivor: usize) {
+        // SAFETY: passed through from the caller.
+        unsafe { self.wipe_for_fork() };
+        self.cpus.fork(survivor);
     }
 
     /// Zeroes every page marked by [`Os::wipe_on_fork`], as the child of a fork would see them.
@@ -195,10 +262,31 @@ impl<S: Shape> SimOs<S> {
         self.covering_all(start, len, RESERVED | WRITABLE)
     }
 
-    /// Whether every page touching `start..start + len` is reserved and has been purged since it
-    /// was last committed.
+    /// Whether every page touching `start..start + len` is reserved, has been purged since it
+    /// was last committed, and still reads as zero, so is not resident: a write after the purge
+    /// would have faulted it back. Call it while nothing writes the range.
     pub fn is_purged(&self, start: NonNull<u8>, len: usize) -> bool {
-        self.covering_all(start, len, RESERVED | PURGED)
+        self.covering(start, len).is_some_and(|(first, count)| {
+            self.pages.all(first, count, RESERVED | PURGED)
+                // SAFETY: the pages are inside `memory`, and the caller writes nothing meanwhile.
+                && unsafe {
+                    self.memory
+                        .is_zero(first << self.page_shift(), count << self.page_shift())
+                }
+        })
+    }
+
+    /// Bytes the heap would have resident: committed pages holding a nonzero byte. A lower
+    /// bound, since a page written only with zeros counts as not resident. Call it while
+    /// nothing writes the memory; it reads every committed page.
+    pub fn resident_bytes(&self) -> usize {
+        let page = S::GEOMETRY.page_size();
+        let resident = (0..self.pages.len())
+            .filter(|&index| self.pages.get(index) & (RESERVED | WRITABLE) == RESERVED | WRITABLE)
+            // SAFETY: the page is inside `memory`, and the caller writes nothing meanwhile.
+            .filter(|&index| !unsafe { self.memory.is_zero(index << self.page_shift(), page) })
+            .count();
+        resident * page
     }
 
     /// The huge-page advice last given for the page holding `at`, if any.
@@ -215,6 +303,49 @@ impl<S: Shape> SimOs<S> {
     /// Bytes currently committed.
     pub fn writable_bytes(&self) -> usize {
         self.pages.count(RESERVED | WRITABLE) << self.page_shift()
+    }
+
+    /// Panics if a page of `first..first + count` that is not committed holds a nonzero byte:
+    /// the allocator wrote memory it had not committed, which Linux would have refused with a
+    /// fault. Checked here when such a page is purged or unmapped; `commit` checks each page it
+    /// is first to commit.
+    fn check_untouched(&self, call: Call, first: usize, count: usize) {
+        // A test aid, not part of the `Os` contract, and word reads of memory a harness wrote at
+        // a symbolic byte cost CBMC minutes; Kani proofs of the heap use `ProofOs` anyway.
+        if cfg!(kani) {
+            return;
+        }
+        for index in first..first + count {
+            if self.pages.get(index) & WRITABLE == 0 {
+                self.check_page(call, index);
+            }
+        }
+    }
+
+    /// Panics if page `index`, which is not committed, holds a nonzero byte.
+    fn check_page(&self, call: Call, index: usize) {
+        if cfg!(kani) {
+            return;
+        }
+        let page = S::GEOMETRY.page_size();
+        // SAFETY: the page is inside `memory` (it has a state). It is not committed, so no
+        // correct caller writes it, and a buggy one is what this looks for: `purge` and `unmap`
+        // exclude concurrent access by contract, and `commit` holds the page in `CHECKING`.
+        let clean = unsafe { self.memory.is_zero(index << self.page_shift(), page) };
+        assert!(
+            clean,
+            "simulated {call:?}: page {index} was written before it was committed"
+        );
+    }
+
+    /// Counts a call on `count` pages and applies its fault plan: how many pages the call acts
+    /// on (all, half for a partial failure, none for a whole one) and its result.
+    fn admit(&self, call: Call, count: usize) -> (usize, Result<(), OsError>) {
+        match self.faults.enter_range(call) {
+            Ok(()) => (count, Ok(())),
+            Err(failure) if failure.partial => (count / 2, Err(failure.error)),
+            Err(failure) => (0, Err(failure.error)),
+        }
     }
 
     /// The first page and page count of a range a memory call was given, which the `Os`
@@ -259,6 +390,15 @@ impl<S: Shape> fmt::Debug for SimOs<S> {
     }
 }
 
+/// The next number of a splitmix64 generator whose state is `state`: the next point of a Weyl
+/// sequence, scrambled.
+fn splitmix(state: &AtomicU64) -> u64 {
+    let mut z = state.fetch_add(GAMMA, Ordering::AcqRel).wrapping_add(GAMMA);
+    z = (z ^ (z >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+    z = (z ^ (z >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
+    z ^ (z >> 31)
+}
+
 fn encode_rseq(area: Option<RseqArea>) -> u64 {
     match area {
         None => 0,
@@ -282,11 +422,13 @@ fn decode_rseq(word: u64) -> Option<RseqArea> {
 //   claim's acquire pairs with. So reserved memory reads as zero.
 // - The memory is always readable and writable, so `commit` needs only to record it, and
 //   changes no contents. `purge` zeroes its range. `advise_huge` only records.
-// - An injected failure changes nothing.
+// - An injected failure changes nothing, or with `Faults::partially` acts on the first half of
+//   its range, never beyond it.
 // - A range must lie in one live reservation of this value. `checked_range` panics before
 //   touching anything if it does not: outside this value's memory, not whole reserved pages,
 //   or spanning two reservations.
-// - There are no restartable sequences, so `fence` trivially waits for all of them.
+// - The only restartable sequences are twins on simulated threads. `fence` aborts every one in
+//   flight on its CPU and waits out any that is committing (see `cpus.rs`).
 // - `wipe_on_fork` only records; nothing forks the simulator, so the promise is about what
 //   `wipe_for_fork` shows a test, and it zeroes exactly the marked pages.
 // - `abort` panics, so it does not return.
@@ -323,19 +465,30 @@ unsafe impl<S: Shape> Os for SimOs<S> {
 
     unsafe fn commit(&self, start: NonNull<u8>, len: usize) -> Result<(), OsError> {
         let (first, count) = self.checked_range(Call::Commit, start, len);
-        self.faults.enter(Call::Commit)?;
-        self.pages.update(first, count, WRITABLE, PURGED);
-        Ok(())
+        let (applied, result) = self.admit(Call::Commit, count);
+        for index in first..first + applied {
+            // Overlapping commits may race; only the first checks a page, and it holds the page
+            // in `CHECKING` until it is writable, so no correct caller writes it meanwhile.
+            if self.pages.begin_commit(index) {
+                self.check_page(Call::Commit, index);
+            }
+            self.pages.update(index, 1, WRITABLE, PURGED | CHECKING);
+        }
+        result
     }
 
     unsafe fn purge(&self, start: NonNull<u8>, len: usize) -> Result<(), OsError> {
         let (first, count) = self.checked_range(Call::Purge, start, len);
-        self.faults.enter(Call::Purge)?;
+        self.check_untouched(Call::Purge, first, count);
+        let (applied, result) = self.admit(Call::Purge, count);
         // SAFETY: `checked_range` put the range inside `memory`, and the caller promises that
         // no thread touches it during the call.
-        unsafe { self.memory.zero(self.memory.offset_of(start), len) };
-        self.pages.update(first, count, PURGED, 0);
-        Ok(())
+        unsafe {
+            self.memory
+                .zero(first << self.page_shift(), applied << self.page_shift())
+        };
+        self.pages.update(first, applied, PURGED, 0);
+        result
     }
 
     unsafe fn advise_huge(
@@ -345,40 +498,45 @@ unsafe impl<S: Shape> Os for SimOs<S> {
         advice: HugePages,
     ) -> Result<(), OsError> {
         let (first, count) = self.checked_range(Call::AdviseHuge, start, len);
-        self.faults.enter(Call::AdviseHuge)?;
+        let (applied, result) = self.admit(Call::AdviseHuge, count);
         match advice {
-            HugePages::Prefer => self.pages.update(first, count, HUGE, NO_HUGE),
-            HugePages::Avoid => self.pages.update(first, count, NO_HUGE, HUGE),
+            HugePages::Prefer => self.pages.update(first, applied, HUGE, NO_HUGE),
+            HugePages::Avoid => self.pages.update(first, applied, NO_HUGE, HUGE),
         }
-        Ok(())
+        result
     }
 
     unsafe fn wipe_on_fork(&self, start: NonNull<u8>, len: usize) -> Result<(), OsError> {
         let (first, count) = self.checked_range(Call::WipeOnFork, start, len);
-        self.faults.enter(Call::WipeOnFork)?;
-        self.pages.update(first, count, WIPE, 0);
-        Ok(())
+        let (applied, result) = self.admit(Call::WipeOnFork, count);
+        self.pages.update(first, applied, WIPE, 0);
+        result
     }
 
     unsafe fn unmap(&self, start: NonNull<u8>, len: usize) -> Result<(), OsError> {
         let (first, count) = self.checked_range(Call::Unmap, start, len);
-        self.faults.enter(Call::Unmap)?;
-        // SAFETY: `checked_range` put the range inside `memory`, and the caller promises that
-        // nothing touches it once the call begins. Zeroing keeps unreserved memory zero.
+        self.check_untouched(Call::Unmap, first, count);
+        let (applied, result) = self.admit(Call::Unmap, count);
+        if applied == 0 {
+            return result;
+        }
         // What remains of a reservation after its head is unmapped is a reservation of its own,
         // as munmap leaves it. This is decided while the range is still reserved: then a
-        // reserved page right after it without `START` can only be this reservation's tail,
-        // never a reservation another thread is making. Doing it after the release would race
-        // with such a thread.
-        let next = first + count;
+        // reserved page right after the unmapped part without `START` can only be this
+        // reservation's tail, never a reservation another thread is making. Doing it after the
+        // release would race with such a thread.
+        let next = first + applied;
         if next < self.pages.len() {
             self.pages.mark_start(next);
         }
         // SAFETY: `checked_range` put the range inside `memory`, and the caller promises that
         // nothing touches it once the call begins. Zeroing keeps unreserved memory zero.
-        unsafe { self.memory.zero(self.memory.offset_of(start), len) };
-        self.pages.release(first, count);
-        Ok(())
+        unsafe {
+            self.memory
+                .zero(first << self.page_shift(), applied << self.page_shift())
+        };
+        self.pages.release(first, applied);
+        result
     }
 
     fn register_fence(&self) -> Result<(), OsError> {
@@ -391,6 +549,7 @@ unsafe impl<S: Shape> Os for SimOs<S> {
         self.faults.enter(Call::Fence)?;
         if self.fence_registered() {
             self.last_fence.store(cpu as u64 + 1, Ordering::Release);
+            self.cpus.fence(cpu);
             Ok(())
         } else {
             Err(OsError::EPERM)
@@ -402,14 +561,7 @@ unsafe impl<S: Shape> Os for SimOs<S> {
     }
 
     fn random(&self) -> u64 {
-        // splitmix64: each call takes the next point of a Weyl sequence and scrambles it.
-        let mut z = self
-            .random
-            .fetch_add(GAMMA, Ordering::AcqRel)
-            .wrapping_add(GAMMA);
-        z = (z ^ (z >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
-        z = (z ^ (z >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
-        z ^ (z >> 31)
+        splitmix(&self.random)
     }
 
     fn abort(&self, message: &str) -> ! {
@@ -430,7 +582,7 @@ mod tests {
     }
 
     fn region() -> usize {
-        Sim::GEOMETRY.region_size()
+        Sim::GEOMETRY.largest_plan().region_size()
     }
 
     #[test]
@@ -540,6 +692,110 @@ mod tests {
         assert_eq!(os.fence(3), Ok(()));
         assert_eq!(os.last_fence(), Some(3));
         assert_eq!(os.calls(Call::Fence), 2);
+    }
+
+    #[test]
+    fn a_fence_aborts_the_twins_in_flight_on_its_cpu_and_a_failed_one_none() {
+        use crate::os::{Aborted, Machine, Step};
+        let os = Sim::new();
+        os.register_fence().unwrap();
+        let (a, b) = (os.thread(0), os.thread(1));
+        a.step(Step::ReadCpu).unwrap();
+        b.step(Step::ReadCpu).unwrap();
+        os.fence(0).unwrap();
+        assert_eq!(a.step(Step::Load), Err(Aborted));
+        assert_eq!(b.step(Step::Load), Ok(()));
+        a.step(Step::ReadCpu).unwrap();
+        os.set_faults(Call::Fence, Faults::once_after(0));
+        assert!(os.fence(0).is_err());
+        assert_eq!(
+            a.step(Step::Load),
+            Ok(()),
+            "a failed fence interrupts nothing"
+        );
+    }
+
+    #[test]
+    fn a_fork_keeps_memory_wipes_marked_pages_and_one_thread() {
+        use crate::os::{Machine, Step};
+        let os = Sim::with_capacity(region());
+        let base = os.reserve(2 * page(), region()).unwrap();
+        let second = base.map_addr(|a| a.saturating_add(page()));
+        let survivor = os.thread(3);
+        // SAFETY: whole reserved pages that nothing else uses.
+        unsafe {
+            os.commit(base, 2 * page()).unwrap();
+            os.wipe_on_fork(second, page()).unwrap();
+            base.as_ptr().write(1);
+            second.as_ptr().write(2);
+            os.fork(3);
+            assert_eq!(base.as_ptr().read(), 1);
+            assert_eq!(second.as_ptr().read(), 0);
+        }
+        assert_eq!(survivor.step(Step::ReadCpu), Ok(()));
+        let lost = std::panic::catch_unwind(|| os.thread(0).cpu_id());
+        assert!(lost.is_err());
+    }
+
+    #[test]
+    #[should_panic(expected = "written before it was committed")]
+    fn writing_before_committing_is_caught_at_commit() {
+        let os = Sim::with_capacity(region());
+        let base = os.reserve(page(), region()).unwrap();
+        // SAFETY: deliberately breaks the rule; on Linux this write would fault.
+        unsafe {
+            base.as_ptr().write(7);
+            os.commit(base, page()).unwrap();
+        }
+    }
+
+    #[test]
+    fn a_partial_fault_acts_on_half_the_range() {
+        let os = Sim::with_capacity(region());
+        let base = os.reserve(4 * page(), region()).unwrap();
+        let third = base.map_addr(|a| a.saturating_add(2 * page()));
+        os.set_faults(Call::Commit, Faults::once_after(0).partially());
+        // SAFETY: whole reserved pages that nothing else uses.
+        unsafe {
+            assert_eq!(os.commit(base, 4 * page()), Err(OsError::ENOMEM));
+        }
+        assert!(os.is_writable(base, 2 * page()));
+        assert!(!os.is_writable(third, page()));
+        assert_eq!(os.faults(Call::Commit), Faults::NONE.partially());
+        // SAFETY: as above.
+        unsafe {
+            os.set_faults(Call::Unmap, Faults::once_after(0).partially());
+            assert!(os.unmap(base, 4 * page()).is_err());
+        }
+        assert!(!os.is_reserved(base, page()));
+        assert!(os.is_reserved(third, 2 * page()));
+        // The remaining half is a reservation of its own.
+        // SAFETY: as above.
+        unsafe { os.commit(third, 2 * page()).unwrap() };
+    }
+
+    #[test]
+    fn purged_memory_stops_counting_as_purged_once_written() {
+        let os = Sim::with_capacity(region());
+        let base = os.reserve(2 * page(), region()).unwrap();
+        // SAFETY: whole reserved pages that nothing else uses.
+        unsafe {
+            os.commit(base, 2 * page()).unwrap();
+            base.as_ptr().write(1);
+            base.as_ptr().add(page()).write(1);
+        }
+        assert_eq!(os.resident_bytes(), 2 * page());
+        // SAFETY: as above.
+        unsafe { os.purge(base, page()).unwrap() };
+        assert!(os.is_purged(base, page()));
+        assert_eq!(os.resident_bytes(), page());
+        // SAFETY: still committed.
+        unsafe { base.as_ptr().write(3) };
+        assert!(
+            !os.is_purged(base, page()),
+            "a write faults the page back in"
+        );
+        assert_eq!(os.resident_bytes(), 2 * page());
     }
 
     #[test]

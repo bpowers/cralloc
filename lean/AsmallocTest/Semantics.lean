@@ -114,6 +114,12 @@ def stPar : State := { stSym with params := fun n =>
 #guard (exec (.cmov .e .rax (.immP "mask")) stPar).isNone
 -- The GOT slot of a symbol holds its address; nothing is read from the regions.
 #guard (exec (.movGot .rdx "T") stPar).map (·.gpr .rdx) == some 0x1000
+-- A direct load of a symbol reads the 8 bytes at its address, only within the
+-- regions.
+#guard (exec (.movSym .rdx "T") { stPar with
+    mem := fun a => if a = 0x1000 then 0x2a else 0, rd := [⟨0x1000, 8⟩] }).map (·.gpr .rdx) ==
+  some 0x2a
+#guard (exec (.movSym .rdx "T") { stPar with rd := [⟨0x1001, 8⟩] }).isNone
 -- The descriptor's address is the state's.
 #guard (exec (.leaRseqCs .r10) { st with csDesc := 0x4000 }).map (·.gpr .r10) == some 0x4000
 

@@ -8,185 +8,77 @@
 //! - after a fork, nothing is duplicated, and the child's drains treat what the parent left as
 //!   absent (`Drain_gen_any`, `Fork_gen_any`).
 //!
-//! Threads run on simulated CPUs. A thread's sequence is in flight on its CPU from its first
-//! step to its commit; another thread starting a sequence on that CPU, or a fence of it, aborts
-//! the sequence, as preemption and `membarrier` do. A thread may also migrate at the start of
-//! any sequence, a bounded number of times per execution. The census of `test_rig.rs` checks
-//! the invariants after every execution.
-//!
-//! The CPU model and the fence that aborts in-flight sequences are a local stand-in until the
-//! simulated OS provides its own.
+//! Threads run on the simulated OS's threads and CPUs (`os::sim::SimThread`): a thread's
+//! sequence is in flight on its CPU from its first step to its commit, and another thread
+//! starting a sequence on that CPU, or a fence of it, aborts the sequence, as preemption and
+//! `membarrier` do. A thread may also migrate at the start of any sequence, a bounded number of
+//! times per execution. The census of `test_rig.rs` checks the invariants after every execution.
 
 use super::test_rig::{Rig, Small, TIGHT, tiny_class};
 use super::{Drained, Source};
 use crate::front::check::{Bounds, Report, choose, explore, switch_point};
-use crate::front::{Aborted, Machine, Step};
-use crate::os::sim::{Call, Faults, SimOs};
-use crate::os::{HugePages, Os, OsError, RseqArea};
-use crate::space::Geometry;
-use core::cell::Cell;
+use crate::os::sim::{Call, Faults, SimOs, SimThread};
+use crate::os::{Aborted, Machine, Os, Step};
 use core::ptr::NonNull;
 use std::sync::Mutex;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::vec::Vec;
 
 const CPUS: usize = 2;
 const THREADS: usize = 3;
 
-/// Which thread is in flight on each CPU, and which threads' sequences have been aborted.
-struct Cpus {
-    in_flight: [AtomicUsize; CPUS],
-    aborted: [AtomicBool; THREADS],
-    migrations: AtomicUsize,
-}
-
-impl Cpus {
-    fn new(migrations: usize) -> Cpus {
-        Cpus {
-            in_flight: [const { AtomicUsize::new(0) }; CPUS],
-            aborted: [const { AtomicBool::new(false) }; THREADS],
-            migrations: AtomicUsize::new(migrations),
-        }
-    }
-
-    /// Aborts whatever sequence is in flight on `cpu`.
-    fn abort_on(&self, cpu: usize) {
-        let thread = self.in_flight[cpu].swap(0, Ordering::SeqCst);
-        if thread != 0 {
-            self.aborted[thread - 1].store(true, Ordering::SeqCst);
-        }
-    }
-}
-
-/// The simulated OS with a fence that aborts the sequences in flight on the fenced CPU.
-struct CheckOs {
-    sim: SimOs<Small>,
-    cpus: Cpus,
-}
-
-// SAFETY: every method but `fence` is the simulator's, which keeps the promises. `fence` aborts
-// the sequence in flight on the CPU, if any, before it returns; a thread that is not in flight
-// there starts its next sequence after the fence, as `membarrier` promises.
-unsafe impl Os for CheckOs {
-    const GEOMETRY: Geometry = <SimOs<Small> as Os>::GEOMETRY;
-
-    fn reserve(&self, len: usize, align: usize) -> Result<NonNull<u8>, OsError> {
-        self.sim.reserve(len, align)
-    }
-
-    unsafe fn commit(&self, start: NonNull<u8>, len: usize) -> Result<(), OsError> {
-        // SAFETY: the caller's obligations are the simulator's.
-        unsafe { self.sim.commit(start, len) }
-    }
-
-    unsafe fn purge(&self, start: NonNull<u8>, len: usize) -> Result<(), OsError> {
-        // SAFETY: as above.
-        unsafe { self.sim.purge(start, len) }
-    }
-
-    unsafe fn advise_huge(
-        &self,
-        start: NonNull<u8>,
-        len: usize,
-        advice: HugePages,
-    ) -> Result<(), OsError> {
-        // SAFETY: as above.
-        unsafe { self.sim.advise_huge(start, len, advice) }
-    }
-
-    unsafe fn wipe_on_fork(&self, start: NonNull<u8>, len: usize) -> Result<(), OsError> {
-        // SAFETY: as above.
-        unsafe { self.sim.wipe_on_fork(start, len) }
-    }
-
-    unsafe fn unmap(&self, start: NonNull<u8>, len: usize) -> Result<(), OsError> {
-        // SAFETY: as above.
-        unsafe { self.sim.unmap(start, len) }
-    }
-
-    fn register_fence(&self) -> Result<(), OsError> {
-        self.sim.register_fence()
-    }
-
-    fn fence(&self, cpu: u32) -> Result<(), OsError> {
-        self.sim.fence(cpu)?;
-        self.cpus.abort_on(cpu as usize);
-        Ok(())
-    }
-
-    fn rseq(&self) -> Option<RseqArea> {
-        self.sim.rseq()
-    }
-
-    fn random(&self) -> u64 {
-        self.sim.random()
-    }
-
-    fn abort(&self, message: &str) -> ! {
-        self.sim.abort(message)
-    }
-}
-
-/// The CPU of one checker thread.
+/// The CPU of one checker thread: a simulated thread, with the checker's switch point before
+/// every step and the migrations it may choose at the start of a sequence.
 struct CheckCpu<'a> {
-    me: usize,
-    cpu: Cell<usize>,
-    cpus: &'a Cpus,
+    thread: SimThread<'a>,
+    migrations: &'a AtomicUsize,
 }
 
 impl Machine for CheckCpu<'_> {
     fn cpu_id(&self) -> i32 {
-        self.cpu.get() as i32
+        self.thread.cpu_id()
     }
 
     fn step(&self, step: Step) -> Result<(), Aborted> {
         switch_point();
-        if step != Step::ReadCpu {
-            return if self.cpus.aborted[self.me].load(Ordering::SeqCst) {
-                Err(Aborted)
-            } else {
-                Ok(())
-            };
+        if step == Step::ReadCpu {
+            let budget = self.migrations.load(Ordering::SeqCst);
+            if budget > 0 && choose(2) == 1 {
+                self.migrations.store(budget - 1, Ordering::SeqCst);
+                let next = (self.thread.cpu_id() + 1) % CPUS as i32;
+                self.thread.set_cpu(next);
+            }
         }
-        self.cpus.aborted[self.me].store(false, Ordering::SeqCst);
-        let budget = self.cpus.migrations.load(Ordering::SeqCst);
-        if budget > 0 && choose(2) == 1 {
-            self.cpus.migrations.store(budget - 1, Ordering::SeqCst);
-            self.cpu.set((self.cpu.get() + 1) % CPUS);
-        }
-        // Starting a sequence here means whatever was in flight here was preempted.
-        let cpu = self.cpu.get();
-        let previous = self.cpus.in_flight[cpu].swap(self.me + 1, Ordering::SeqCst);
-        if previous != 0 && previous != self.me + 1 {
-            self.cpus.aborted[previous - 1].store(true, Ordering::SeqCst);
-        }
-        Ok(())
+        self.thread.step(step)
+    }
+
+    fn committed(&self) {
+        self.thread.committed();
     }
 }
 
 /// One execution's heap, and the objects the program holds.
 struct World {
-    rig: Rig<CheckOs, CPUS>,
+    rig: Rig<SimOs<Small>, CPUS>,
+    migrations: AtomicUsize,
     user: Mutex<Vec<usize>>,
 }
 
 impl World {
     fn new(objects: usize, migrations: usize) -> World {
-        let os = CheckOs {
-            sim: SimOs::new(),
-            cpus: Cpus::new(migrations),
-        };
         World {
-            rig: Rig::with_os(os, &[tiny_class()], objects, TIGHT),
+            rig: Rig::with_os(SimOs::new(), &[tiny_class()], objects, TIGHT),
+            migrations: AtomicUsize::new(migrations),
             user: Mutex::new(Vec::new()),
         }
     }
 
     fn machine(&self, me: usize, cpu: usize) -> CheckCpu<'_> {
+        let thread = self.rig.os().thread(me);
+        thread.set_cpu(cpu as i32);
         CheckCpu {
-            me,
-            cpu: Cell::new(cpu),
-            cpus: &self.rig.os().cpus,
+            thread,
+            migrations: &self.migrations,
         }
     }
 
@@ -346,7 +238,7 @@ fn a_drain_that_backs_out_keeps_one_owner_under_every_schedule(bounds: Bounds, o
         || {
             let world = World::new(6, 0);
             world.populate();
-            world.rig.os().sim.set_faults(Call::Fence, Faults::ALWAYS);
+            world.rig.os().set_faults(Call::Fence, Faults::ALWAYS);
             world
         },
         |world, me| {
@@ -390,7 +282,7 @@ fn a_fork_at_any_step_duplicates_nothing(bounds: Bounds, ops: &[Op]) {
         },
         |world| {
             // SAFETY: at a fork the checker has stopped every other thread.
-            unsafe { world.rig.os().sim.wipe_for_fork() };
+            unsafe { world.rig.os().wipe_for_fork() };
             // The fork came from a signal handler, which goes on in the child before the
             // interrupted code resumes: it allocates and frees on the CPU being drained, over
             // whatever the parent's drain left there.
@@ -402,7 +294,7 @@ fn a_fork_at_any_step_duplicates_nothing(bounds: Bounds, ops: &[Op]) {
             if forked {
                 let child = world.machine(0, 0);
                 for cpu in 0..CPUS {
-                    child.cpu.set(cpu);
+                    child.thread.set_cpu(cpu as i32);
                     world.alloc(&child);
                     world.free(&child);
                 }
@@ -463,7 +355,7 @@ fn depot_stacks_keep_one_owner_under_every_schedule(bounds: Bounds) {
 }
 
 #[test]
-fn the_check_os_fence_aborts_the_sequence_in_flight() {
+fn a_fence_aborts_the_sequence_in_flight_on_its_cpu() {
     let world = World::new(2, 0);
     let a = world.machine(0, 1);
     a.step(Step::ReadCpu).unwrap();

@@ -8,8 +8,8 @@ reference is used.
 
 **Invariant of `Magazine`.** `base` is the magazine area's base pointer advanced by an offset
 that `admits` accepted against the committed mark when the handle was made: at or past the
-generation page, a multiple of the magazine's size, and with the whole magazine inside the first
-`committed` bytes of the area. Only `Area::magazine_at` builds a `Magazine`, and it checks
+first unit of the area, a multiple of the magazine's size, and with the whole magazine inside
+the first `committed` bytes of the area. Only `Area::magazine_at` builds a `Magazine`, and it checks
 exactly this. `Magazine` has no public constructor and its fields are private.
 
 **The binding.** An `Area` pairs a `Space` with the `Depot` whose `carved` and `committed`
@@ -24,8 +24,8 @@ carve the same magazines.
   `depot::verify::an_admitted_magazine_lies_inside_the_committed_area` proves (for every size,
   offset, start, committed mark and slot) that an admitted magazine's slots lie between the start
   and the committed mark. The committed mark only grows (`fetch_max`), and only after the memory
-  under it was committed successfully (`Area::commit_to`, `Area::generation_page`), so it was
-  committed when the handle was made and still is.
+  under it was committed successfully (`Area::commit_to`), so it was committed when the handle
+  was made and still is.
 - *Valid for the lifetime.* Committed memory of a live reservation stays readable and writable
   until it is unmapped (the `Os` contract). A `Magazine<'a>` is made only by an `Area<'a, O>`,
   which holds a `Space<'a, O>`, so the borrow checker keeps the handle from outliving the

@@ -263,6 +263,12 @@ def sample64 : Prog isa := .block [
     .leaSym .r9 "SLABS" 8 (some "off"), .movGot .rdx "rs", .mov .rax (.imm 1)] : Prog isa)) ==
   ["test ecx, <mask>", "lea r9, [rip + <SLABS> + 8 + <off>]",
     "mov rdx, QWORD PTR [rip + <rs>@GOTPCREL]", "mov rax, 1", "ret"]
+#guard text (printer.function (.block [.movSym .rdx "rs"] : Prog isa)) ==
+  ["mov rdx, QWORD PTR [rip + <rs>]", "ret"]
+-- A function selected by a cargo feature, with it or without it.
+#guard Rust.cargoCfg (some ("executable", true)) == "#[cfg(feature = \"executable\")]\n"
+#guard Rust.cargoCfg (some ("executable", false)) == "#[cfg(not(feature = \"executable\"))]\n"
+#guard Rust.cargoCfg none == ""
 #guard Rust.line printer.call (.ops [.text "test ecx, ", .ref "mask"]) ==
   "        r\"test ecx, {mask}\",\n"
 #guard (printer.function (.block [.alu32 .test .rcx (.immP "mask")] : Prog isa)).flatMap Line.refs ==

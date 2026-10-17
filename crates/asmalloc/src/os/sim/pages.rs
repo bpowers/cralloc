@@ -18,6 +18,9 @@ pub(super) const NO_HUGE: u8 = 1 << 4;
 /// The first page of a reservation, so that a range spanning two reservations can be told
 /// from one inside a single reservation.
 pub(super) const START: u8 = 1 << 5;
+/// A commit is checking that the page was not written before it was committed. The page is not
+/// writable yet, so no correct caller touches it while this is set.
+pub(super) const CHECKING: u8 = 1 << 6;
 /// Marked to read as zero in a forked child.
 pub(super) const WIPE: u8 = 1 << 6;
 
@@ -98,6 +101,30 @@ impl Pages {
     /// Marks `page` as the first of a reservation if it is reserved and not already marked.
     /// A compare-and-swap that requires `RESERVED`, so a page another thread releases
     /// meanwhile stays free rather than gaining a stray `START`.
+    /// Starts committing `page`. Returns true if this call is the first to commit it, so it
+    /// must check the page is untouched and then set `WRITABLE` (clearing `CHECKING`); false if
+    /// the page is writable already. While another commit is checking the page, waits for it:
+    /// overlapping commits are allowed, and neither may return before the page is writable.
+    pub(super) fn begin_commit(&self, page: usize) -> bool {
+        let state = &self.states[page];
+        loop {
+            let old = state.load(Ordering::Acquire);
+            if old & WRITABLE != 0 {
+                return false;
+            }
+            if old & CHECKING != 0 {
+                core::hint::spin_loop();
+                continue;
+            }
+            if state
+                .compare_exchange_weak(old, old | CHECKING, Ordering::AcqRel, Ordering::Acquire)
+                .is_ok()
+            {
+                return true;
+            }
+        }
+    }
+
     pub(super) fn mark_start(&self, page: usize) {
         let state = &self.states[page];
         let mut old = state.load(Ordering::Acquire);

@@ -1,8 +1,9 @@
 //! Magazine sizes and the slot-number tests the fast paths make.
 //!
 //! A magazine of `n` slots is `8n` bytes, `n` a power of two, aligned to its size. Slot 0 is the
-//! depot's link word, slot `n - 1` is never used, and slots 1 to `n - 2` hold pointers to free
-//! objects. A slab word is the address of the next free slot of the loaded magazine, so its low
+//! depot's link word, slot `n - 1` holds the fill level while the magazine is not loaded, and
+//! slots 1 to `n - 2` hold pointers to free objects. A slab word is the address of the next free
+//! slot of the loaded magazine, so its low
 //! bits are the slot number times 8, and the fast paths can bound-check with one mask:
 //! `8n - 16` covers every slot-number bit except the lowest.
 //!
@@ -48,6 +49,46 @@ pub const fn is_marker(word: usize) -> bool {
 }
 
 const _: () = assert!(MagazineSize::MAX.bytes() <= 1 << MARKER_SHIFT);
+
+/// A marker: a slab word or stack head that stands for "being drained by the process of this
+/// generation". Its word is `(generation << MARKER_SHIFT) | MARKER`, so its low
+/// [`MARKER_SHIFT`] bits are exactly 1 and it fails both slot tests whatever the generation.
+///
+/// The generation keeps its low `64 - MARKER_SHIFT` bits; generation 0 gives the word 1, which
+/// a child forked before drawing its generation would write.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+#[repr(transparent)]
+pub struct Marker(usize);
+
+impl Marker {
+    /// The marker of a generation.
+    #[inline(always)]
+    pub const fn new(generation: u64) -> Marker {
+        Marker(((generation as usize) << MARKER_SHIFT) | MARKER)
+    }
+
+    /// The marker a word is, if it is one.
+    #[inline(always)]
+    pub const fn from_word(word: usize) -> Option<Marker> {
+        if is_marker(word) {
+            Some(Marker(word))
+        } else {
+            None
+        }
+    }
+
+    /// The word to store.
+    #[inline(always)]
+    pub const fn word(self) -> usize {
+        self.0
+    }
+
+    /// The generation, in the bits it keeps.
+    #[inline(always)]
+    pub const fn generation(self) -> u64 {
+        (self.0 >> MARKER_SHIFT) as u64
+    }
+}
 
 const MIN_LOG2: u8 = 2;
 const MAX_LOG2: u8 = 8;
@@ -165,6 +206,42 @@ impl MagazineSize {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::generated::lean_constant;
+
+    #[test]
+    fn the_masks_and_marker_match_the_routines() {
+        for size in MagazineSize::all() {
+            let name = std::format!("MAG_MASK_{}", size.slots());
+            assert_eq!(size.mask() as u64, lean_constant(&name), "{name}");
+        }
+        assert!(MagazineSize::MIN.slots().trailing_zeros() as u64 >= lean_constant("MAG_LOG_MIN"));
+        assert!(MagazineSize::MAX.slots().trailing_zeros() as u64 <= lean_constant("MAG_LOG_MAX"));
+        assert_eq!(MARKER_SHIFT as u64, lean_constant("MARKER_SHIFT"));
+        assert_eq!(SLOT_BYTES as u64, lean_constant("WORD_BYTES"));
+        assert!((crate::classes::SMALL_COUNT as u64) < lean_constant("CLASS_LIMIT"));
+    }
+
+    #[test]
+    fn markers_carry_their_generation_and_fail_both_tests() {
+        for generation in [0u64, 1, 0xdead_beef, u64::MAX] {
+            let marker = Marker::new(generation);
+            assert!(is_marker(marker.word()));
+            assert_eq!(Marker::from_word(marker.word()), Some(marker));
+            assert_eq!(
+                marker.generation(),
+                generation & ((1 << (64 - MARKER_SHIFT)) - 1)
+            );
+            for size in MagazineSize::all() {
+                assert!(size.alloc_slow(marker.word()) && size.free_slow(marker.word()));
+            }
+        }
+        assert_eq!(Marker::new(0).word(), MARKER);
+        // Odd words that are not markers can pass a test, which is why a marker's low bits are
+        // fixed: 0x11 passes the allocation test of a 4-slot magazine, 0x9 its free test.
+        assert_eq!(Marker::from_word(0x11), None);
+        assert!(!MagazineSize::MIN.alloc_slow(0x11));
+        assert!(!MagazineSize::MIN.free_slow(0x9));
+    }
 
     #[test]
     fn sizes_round_trip() {

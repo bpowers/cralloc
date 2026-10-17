@@ -85,7 +85,7 @@ pub struct Depot {
     full: [Stack; SMALL_COUNT],
     /// Per magazine size, by ordinal: empty magazines.
     empty: [Stack; MagazineSize::COUNT],
-    /// Bytes of the magazine area handed out after the generation page.
+    /// Bytes of the magazine area handed out after its first unit.
     carved: AtomicUsize,
     /// Bytes of the magazine area known to be writable, from its start.
     committed: AtomicUsize,

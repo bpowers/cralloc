@@ -21,7 +21,7 @@
 
 use super::word::BITS;
 use crate::classes::{Class, Divisor};
-use crate::space::Geometry;
+use crate::space::Plan;
 
 /// The most levels a region's bit tree has, leaf included: a 4 GiB region of 8-byte slots has
 /// 2^23 leaf words, then 2^17, 2^11, 2^5 and 1.
@@ -132,10 +132,11 @@ pub(crate) enum Step {
 }
 
 impl Layout {
-    /// The layout of `class` in `geometry`, or `None` if a slot does not fit in a region or the
-    /// metadata does not fit in the region's block.
-    pub(crate) const fn new(geometry: Geometry, class: Class) -> Option<Layout> {
-        let slots = slots_in_region(geometry, class);
+    /// The layout of `class` in a reservation laid out as `plan`, or `None` if a slot does not
+    /// fit in a region or the metadata does not fit in the region's block.
+    pub(crate) const fn new(plan: Plan, class: Class) -> Option<Layout> {
+        let geometry = plan.geometry();
+        let slots = slots_in_region(plan, class);
         if slots == 0 {
             return None;
         }
@@ -154,7 +155,7 @@ impl Layout {
             next += count[level];
         }
         let page_shift = geometry.page_size().trailing_zeros();
-        let pages = (geometry.region_size() >> page_shift) as u32;
+        let pages = (plan.region_size() >> page_shift) as u32;
         let clean = next;
         let clean_count = pages.div_ceil(BITS);
         next += clean_count;
@@ -165,7 +166,7 @@ impl Layout {
             next += count[0];
             at
         };
-        if next as usize * WORD_BYTES > geometry.metadata_size() {
+        if next as usize * WORD_BYTES > plan.metadata_size() {
             return None;
         }
         Some(Layout {
@@ -406,12 +407,12 @@ impl Layout {
     }
 }
 
-/// The number of slots of `class` in a region of `geometry`: `region_size / size`, zero if a
-/// slot does not fit. Without a divide instruction, because the back end computes layouts at run
-/// time from the reserved space's geometry: `Divisor` gives `m = (region_size - 1) / size`, and
-/// one more slot fits exactly when the size divides the region size.
-pub(crate) const fn slots_in_region(geometry: Geometry, class: Class) -> u32 {
-    let region = geometry.region_size();
+/// The number of slots of `class` in a region of `plan`: `region_size / size`, zero if a slot
+/// does not fit. Without a divide instruction, because the back end computes layouts at run time
+/// from the reservation's plan: `Divisor` gives `m = (region_size - 1) / size`, and one more
+/// slot fits exactly when the size divides the region size.
+pub(crate) const fn slots_in_region(plan: Plan, class: Class) -> u32 {
+    let region = plan.region_size();
     let size = class.size();
     if size > region {
         return 0;
@@ -427,17 +428,30 @@ pub(crate) const fn slots_in_region(geometry: Geometry, class: Class) -> u32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::classes::MagazineSize;
     use crate::classes::{MAX_SMALL_SIZE, SmallClass};
-    use crate::os::sim::{Shape, Standard, Tiny};
+    use crate::os::sim::{Native, Shape, Standard, Tiny};
+    use crate::space::{Geometry, Plan};
+
+    /// The plans the tests cover: the largest and smallest of the design, and the simulator's.
+    fn plans() -> [Plan; 5] {
+        [
+            Geometry::DESIGN.largest_plan(),
+            Geometry::DESIGN.smallest_plan(),
+            Standard::GEOMETRY.largest_plan(),
+            Native::GEOMETRY.largest_plan(),
+            Tiny::GEOMETRY.largest_plan(),
+        ]
+    }
 
     #[test]
     fn every_class_that_fits_has_a_layout_in_the_used_geometries() {
-        for geometry in [Geometry::DESIGN, Standard::GEOMETRY, Tiny::GEOMETRY] {
+        for plan in plans() {
             for class in Class::all() {
-                let layout = Layout::new(geometry, class);
-                assert_eq!(layout.is_some(), geometry.fits_region(class), "{class:?}");
+                let layout = Layout::new(plan, class);
+                assert_eq!(layout.is_some(), plan.fits_region(class), "{class:?}");
                 let Some(layout) = layout else { continue };
-                assert!(layout.total_words() as usize * WORD_BYTES <= geometry.metadata_size());
+                assert!(layout.total_words() as usize * WORD_BYTES <= plan.metadata_size());
                 assert_eq!(layout.level_words(layout.height()), 1);
                 assert_eq!(layout.zero_word(0).is_some(), !class.is_small());
             }
@@ -446,11 +460,11 @@ mod tests {
 
     #[test]
     fn slot_counts_match_division() {
-        for geometry in [Geometry::DESIGN, Standard::GEOMETRY, Tiny::GEOMETRY] {
+        for plan in plans() {
             for class in Class::all() {
                 assert_eq!(
-                    slots_in_region(geometry, class),
-                    geometry.slots_per_region(class),
+                    slots_in_region(plan, class),
+                    plan.slots_per_region(class),
                     "{class:?}"
                 );
             }
@@ -459,7 +473,7 @@ mod tests {
 
     #[test]
     fn the_design_tree_has_five_levels_for_eight_byte_slots() {
-        let layout = Layout::new(Geometry::DESIGN, Class::SMALLEST).unwrap();
+        let layout = Layout::new(Geometry::DESIGN.largest_plan(), Class::SMALLEST).unwrap();
         assert_eq!(layout.slots(), 1 << 29);
         assert_eq!(layout.height(), 4);
         assert_eq!(
@@ -471,7 +485,7 @@ mod tests {
 
     #[test]
     fn the_tiny_geometry_fills_its_metadata_exactly_for_eight_byte_slots() {
-        let layout = Layout::new(Tiny::GEOMETRY, Class::SMALLEST).unwrap();
+        let layout = Layout::new(Tiny::GEOMETRY.largest_plan(), Class::SMALLEST).unwrap();
         assert_eq!(layout.total_words() as usize * WORD_BYTES, 64);
         assert_eq!(layout.fixed_commit(), (0, 64));
     }
@@ -481,11 +495,14 @@ mod tests {
         for page in 6..=12 {
             for region in page + crate::space::METADATA_SHIFT..=20 {
                 for huge in page..=region {
-                    let Some(g) = Geometry::try_new(page, huge, region, 64, page.max(11)) else {
+                    let Some(g) =
+                        Geometry::try_new(page, huge, region, region, 64, 1, MagazineSize::MIN)
+                    else {
                         continue;
                     };
-                    for class in Class::all().filter(|&c| g.fits_region(c)) {
-                        assert!(Layout::new(g, class).is_some(), "{g:?} {class:?}");
+                    let plan = g.largest_plan();
+                    for class in Class::all().filter(|&c| plan.fits_region(c)) {
+                        assert!(Layout::new(plan, class).is_some(), "{g:?} {class:?}");
                     }
                 }
             }
@@ -528,9 +545,12 @@ mod tests {
     #[test]
     #[cfg_attr(miri, ignore)]
     fn purge_passes_tile_the_carved_pages() {
-        // 4 KiB pages, 64 KiB huge pages, 1 MiB regions: several slots of large classes.
-        let wide = Geometry::new(12, 16, 20, 32, 20);
-        for g in [Standard::GEOMETRY, Tiny::GEOMETRY, wide] {
+        for g in [
+            Standard::GEOMETRY.largest_plan(),
+            Standard::GEOMETRY.smallest_plan(),
+            Tiny::GEOMETRY.largest_plan(),
+            Native::GEOMETRY.largest_plan(),
+        ] {
             for class in Class::all().filter(|&c| g.fits_region(c)) {
                 let layout = Layout::new(g, class).unwrap();
                 let slots = layout.slots();
@@ -595,7 +615,7 @@ mod tests {
 
     #[test]
     fn leaf_commits_cover_every_slot_below_the_commit() {
-        let g = Standard::GEOMETRY;
+        let g = Standard::GEOMETRY.largest_plan();
         let layout = Layout::new(g, Class::SMALLEST).unwrap();
         assert_eq!(layout.leaf_commit(0), 0);
         // One 1 KiB page holds 128 eight-byte slots: two leaf words, rounded to a page.
