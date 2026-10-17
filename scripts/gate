@@ -1,0 +1,31 @@
+#!/usr/bin/env bash
+# The merge gate: formatting, lints, unit tests and the quick Kani proofs, in about a minute.
+# Run it before asking for a merge.
+#
+# Never add a slow step. The slow proofs (`scripts/kani-all verify_slow`, or all of them with
+# `scripts/kani-all`), Miri and benchmarks run on demand. A Kani harness belongs in the gate
+# when it lives in a `verify.rs` module and finishes in a few seconds; slower ones go in
+# `verify_slow.rs`.
+set -euo pipefail
+here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+cd "$here/.."
+
+step() {
+  printf '\n== %s (%ss so far)\n' "$1" "$SECONDS"
+}
+
+step format
+cargo fmt --all --check
+step lints
+cargo clippy --workspace --all-targets --all-features -- -D warnings
+step tests
+cargo test --workspace --all-features --quiet
+step "quick proofs"
+# Kani is verbose; show its summary, or everything if it fails.
+if ! proofs=$(MEMLIMIT_QUIET=1 KANI_TIMEOUT="${KANI_TIMEOUT:-5m}" \
+    "$here/kani" -p asmalloc --harness ::verify:: --output-format terse 2>&1); then
+  printf '%s\n' "$proofs"
+  exit 1
+fi
+printf '%s\n' "$proofs" | grep -E '^Complete' || true
+printf '\ngate: passed in %ss\n' "$SECONDS"
