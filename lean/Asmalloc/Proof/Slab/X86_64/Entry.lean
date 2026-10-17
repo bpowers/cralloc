@@ -78,4 +78,43 @@ theorem pushInline_run {s s' : State} (hs : (pushInlineContract inlineAbi).pre s
     (fun _ h => List.mem_append_left _ h) (fun _ hs => PushInline.clobbersOk hs) hs hr
   simpa only [List.append_nil] using this
 
+theorem cas_run {s s' : State} (hs : (casContract abi).pre s)
+    (hr : Restarts target cas (casContract abi) s s') :
+    (casContract abi).pre s' ∧ (∀ r ∈ [Reg.rdi, Reg.rsi, Reg.rdx], s'.gpr r = s.gpr r) ∧
+      ((∃ s'', Exec isa cas s' s'' ∧ abiPreserved s s'' ∧ (casContract abi).post s' s'') ∨
+        (∃ t s'', ExecExit isa cas s' t s'' ∧ abiPreserved s s'' ∧
+          (casContract abi).exit t s' s'')) :=
+  restarts_target_run Cas.verified
+    (fun s hs p hp => by
+      have := ((abort_iff Cas.cx Cas.hv s p).mp (Cas.verified.abortOk hs hp).2.2.1).1
+      simp only [List.cons.injEq, and_true] at this
+      simpa using this)
+    (fun _ _ he => env_ret Cas.hX he) hs hr
+
+theorem stackPush_run {s s' : State} (hs : (stackPushContract abi).pre s)
+    (hr : Restarts target stackPush (stackPushContract abi) s s') :
+    (stackPushContract abi).pre s' ∧ (∀ r ∈ [Reg.rdi, Reg.rsi], s'.gpr r = s.gpr r) ∧
+      ((∃ s'', Exec isa stackPush s' s'' ∧ abiPreserved s s'' ∧ (stackPushContract abi).post s' s'') ∨
+        (∃ t s'', ExecExit isa stackPush s' t s'' ∧ abiPreserved s s'' ∧
+          (stackPushContract abi).exit t s' s'')) :=
+  restarts_target_run StackPush.verified
+    (fun s hs p hp => by
+      have := ((abort_iff StackPush.cx StackPush.hv s p).mp (StackPush.verified.abortOk hs hp).2.2.1).1
+      simp only [List.cons.injEq, and_true] at this
+      simpa using this)
+    (fun _ _ he => env_ret StackPush.hX he) hs hr
+
+theorem stackPop_run {s s' : State} (hs : (stackPopContract abi).pre s)
+    (hr : Restarts target stackPop (stackPopContract abi) s s') :
+    (stackPopContract abi).pre s' ∧ (∀ r ∈ [Reg.rdi], s'.gpr r = s.gpr r) ∧
+      ((∃ s'', Exec isa stackPop s' s'' ∧ abiPreserved s s'' ∧ (stackPopContract abi).post s' s'') ∨
+        (∃ t s'', ExecExit isa stackPop s' t s'' ∧ abiPreserved s s'' ∧
+          (stackPopContract abi).exit t s' s'')) :=
+  restarts_target_run StackPop.verified
+    (fun s hs p hp => by
+      have := ((abort_iff StackPop.cx StackPop.hv s p).mp (StackPop.verified.abortOk hs hp).2.2.1).1
+      simp only [List.cons.injEq, and_true] at this
+      simpa using this)
+    (fun _ _ he => env_ret StackPop.hX he) hs hr
+
 end VG.Proof.Slab.X86_64

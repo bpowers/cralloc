@@ -107,4 +107,49 @@ def pushTable : Prog isa := .rseq arm (
   .instr (.alu32 .test .rax maskEntry),
   .exit .e [] (some "slow")] ++ pushTail .rsi)
 
+/-! ## The slow path's routines
+
+Out of line, each on the word at the byte offset in `rdi`, rounded down to a
+word of the slab (`and r9d, 4088`), so that any offset is safe; `rax` is the
+word read, or `NO_CPU` (2) without a slab. -/
+
+/-- The word at the offset in `rdi`, into `rax`; `[r9 + r8]` addresses it. -/
+def offsetWord : List (Step Instr Cond) := [
+  .instr (.mov32 .r9 (.reg .rdi)),
+  .instr (.alu32 .and .r9 (.imm 4088)),
+  .instr (.alu .add .r8 (.reg .r9)),
+  .instr (.leaSym .r9 "SLABS"),
+  .instr (.mov .rax (.mem slabWord))]
+
+/-- No slab: return 2. -/
+def noCpu : List Instr := [.mov32 .rax (.imm 2)]
+
+/-- `slab_cas(offset, expected, new)`: store `new` (`rdx`) if the word is
+`expected` (`rsi`); return the word. -/
+def cas : Prog isa := .rseq arm (
+  cpuSteps noCpu none ++ offsetWord ++ [
+  .instr (.alu .cmp .rax (.reg .rsi)),
+  .exit .ne [] none,
+  .instr (.store slabWord .rdx)])
+
+/-- `slab_stack_push(offset, magazine)`: unless the head is a marker, link
+it from the magazine (`rsi`) and commit the magazine; return the head. -/
+def stackPush : Prog isa := .rseq arm (
+  cpuSteps noCpu none ++ offsetWord ++ [
+  .instr (.alu32 .test .rax (.imm 1)),
+  .exit .ne [] none,
+  .instr (.store { base := .rsi } .rax),
+  .instr (.store slabWord .rsi)])
+
+/-- `slab_stack_pop(offset)`: unless the head is a marker or zero, commit
+its link; return the head. -/
+def stackPop : Prog isa := .rseq arm (
+  cpuSteps noCpu none ++ offsetWord ++ [
+  .instr (.alu32 .test .rax (.imm 1)),
+  .exit .ne [] none,
+  .instr (.alu .test .rax (.reg .rax)),
+  .exit .e [] none,
+  .instr (.mov .rcx (.mem { base := .rax })),
+  .instr (.store slabWord .rcx)])
+
 end VG.Impl.Slab.X86_64

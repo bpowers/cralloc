@@ -3,10 +3,12 @@ module
 public import Asmalloc.Proof.Slab.X86_64.Reg
 public import Asmalloc.Proof.Framework.Registration
 
-/-! # The front end's pop and push on x86-64
+/-! # The front end's routines on x86-64
 
-Inline (`x86_64_inline`), an `asm!` block of 13 fused micro-ops, and out of
-line (`x86_64`), a naked function that tail-calls its slow path. -/
+The pop and push inline (`x86_64_inline`), an `asm!` block of 13 fused
+micro-ops, and out of line (`x86_64`), a naked function that tail-calls its
+slow path; and the slow path's store-if-equal and spare-stack push and pop,
+out of line. -/
 
 @[expose] public section
 
@@ -38,6 +40,21 @@ def artifacts : List Artifact := [
     code := pushTable
     verified := pushTable_verified
     witnesses := PushTable.witnesses
-    witnessOk := pushTable_witnessOk }]
+    witnessOk := pushTable_witnessOk },
+  casApi.artifact VG.X86_64.target {
+    code := cas
+    verified := cas_verified
+    witnesses := Cas.witnesses
+    witnessOk := cas_witnessOk },
+  stackPushApi.artifact VG.X86_64.target {
+    code := stackPush
+    verified := stackPush_verified
+    witnesses := StackPush.witnesses
+    witnessOk := stackPush_witnessOk },
+  stackPopApi.artifact VG.X86_64.target {
+    code := stackPop
+    verified := stackPop_verified
+    witnesses := StackPop.witnesses
+    witnessOk := stackPop_witnessOk }]
 
 end VG.Artifacts.Slab.X86_64

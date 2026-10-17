@@ -4,6 +4,9 @@ public import Asmalloc.Proof.Slab.X86_64.PopInlineWit
 public import Asmalloc.Proof.Slab.X86_64.PushInlineWit
 public import Asmalloc.Proof.Slab.X86_64.PopTableWit
 public import Asmalloc.Proof.Slab.X86_64.PushTableWit
+public import Asmalloc.Proof.Slab.X86_64.Cas
+public import Asmalloc.Proof.Slab.X86_64.StackPush
+public import Asmalloc.Proof.Slab.X86_64.StackPop
 public import Asmalloc.TCB.Registration
 
 /-!
@@ -97,5 +100,41 @@ theorem pushInline_clobbersOk : inlineTarget.inline = true → ∀ s,
   have hs' : (pushInlineContract inlineAbi).pre s := by
     rw [← withConsts_nil_inline]; exact hs
   exact PushInline.clobbersOk hs'
+
+theorem cas_verified :
+    Verified target cas (casApi.contract (target.abi.withConsts []) 0) := by
+  show Verified target cas (casContract (abi.withConsts []))
+  rw [withConsts_nil]; exact Cas.verified
+
+theorem cas_witnessOk :
+    (∃ w ∈ Cas.witnesses, (casApi.contract (target.abi.withConsts []) 0).pre w) ∧
+    ∀ o ∈ cas.outcomes, ∃ w ∈ Cas.witnesses,
+      (casApi.contract (target.abi.withConsts []) 0).pre w ∧ Visits target.isa cas w o.1 o.2 := by
+  show (∃ w ∈ Cas.witnesses, (casContract (abi.withConsts [])).pre w) ∧ _
+  rw [withConsts_nil]; exact Cas.witnessOk
+
+theorem stackPush_verified :
+    Verified target stackPush (stackPushApi.contract (target.abi.withConsts []) 0) := by
+  show Verified target stackPush (stackPushContract (abi.withConsts []))
+  rw [withConsts_nil]; exact StackPush.verified
+
+theorem stackPush_witnessOk :
+    (∃ w ∈ StackPush.witnesses, (stackPushApi.contract (target.abi.withConsts []) 0).pre w) ∧
+    ∀ o ∈ stackPush.outcomes, ∃ w ∈ StackPush.witnesses,
+      (stackPushApi.contract (target.abi.withConsts []) 0).pre w ∧ Visits target.isa stackPush w o.1 o.2 := by
+  show (∃ w ∈ StackPush.witnesses, (stackPushContract (abi.withConsts [])).pre w) ∧ _
+  rw [withConsts_nil]; exact StackPush.witnessOk
+
+theorem stackPop_verified :
+    Verified target stackPop (stackPopApi.contract (target.abi.withConsts []) 0) := by
+  show Verified target stackPop (stackPopContract (abi.withConsts []))
+  rw [withConsts_nil]; exact StackPop.verified
+
+theorem stackPop_witnessOk :
+    (∃ w ∈ StackPop.witnesses, (stackPopApi.contract (target.abi.withConsts []) 0).pre w) ∧
+    ∀ o ∈ stackPop.outcomes, ∃ w ∈ StackPop.witnesses,
+      (stackPopApi.contract (target.abi.withConsts []) 0).pre w ∧ Visits target.isa stackPop w o.1 o.2 := by
+  show (∃ w ∈ StackPop.witnesses, (stackPopContract (abi.withConsts [])).pre w) ∧ _
+  rw [withConsts_nil]; exact StackPop.witnessOk
 
 end VG.Proof.Slab.X86_64
