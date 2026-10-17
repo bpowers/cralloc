@@ -13,7 +13,10 @@ reference, and accessed only atomically while the reference is used.
 returns, which is `Space::process_page()`. The process page is page-aligned
 (`plans_keep_their_parts_apart` in `space::verify`), so aligned to 8. `current` calls it only
 after reading the `READY` status bit with acquire ordering, and `prepare` sets `READY` (release,
-in a `fetch_or`) only after `Space::commit` of that page succeeded. Committed memory of a live
+in a `fetch_or`) only after `Space::commit` of that page succeeded. The `READY` bit and the page
+belong to the same heap because of `Cache::new`'s contract: a depot is only ever used with the
+one `Space` whose magazine area it carves, so the bit `current` reads was set by a `prepare`
+that committed this space's process page, not another's. Committed memory of a live
 reservation stays writable until unmapped, and the process page is never unmapped or purged, so
 the reference may live as long as the reservation, which the caller's borrow of the `Space`
 bounds. Nothing else lives on the page: magazines, metadata and objects are elsewhere in the
