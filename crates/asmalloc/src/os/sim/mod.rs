@@ -267,22 +267,35 @@ impl<S: Shape> SimOs<S> {
 
     /// Whether every page touching `start..start + len` is reserved, has been purged since it
     /// was last committed, and still reads as zero, so is not resident: a write after the purge
-    /// would have faulted it back. Call it while nothing writes the range.
-    pub fn is_purged(&self, start: NonNull<u8>, len: usize) -> bool {
+    /// would have faulted it back.
+    ///
+    /// # Safety
+    ///
+    /// Nothing writes those pages during the call, and every byte written to them since they
+    /// were last purged was initialized: it reads their contents, and a stored value with
+    /// padding or `MaybeUninit` leaves bytes no read may inspect.
+    pub unsafe fn is_purged(&self, start: NonNull<u8>, len: usize) -> bool {
         self.covering(start, len).is_some_and(|(first, count)| {
             self.pages.all(first, count, RESERVED | PURGED)
-                && (first..first + count).all(|index| self.page_reads_zero(index))
+                // SAFETY: the caller's conditions, for each page in turn.
+                && (first..first + count).all(|index| unsafe { self.page_reads_zero(index) })
         })
     }
 
     /// Bytes the heap would have resident: committed pages holding a nonzero byte. A lower
-    /// bound, since a page written only with zeros counts as not resident. Call it while
-    /// nothing writes the memory; it reads every committed page.
-    pub fn resident_bytes(&self) -> usize {
+    /// bound, since a page written only with zeros counts as not resident.
+    ///
+    /// # Safety
+    ///
+    /// Nothing writes the memory during the call, and every byte of a committed page is
+    /// initialized: it reads them all, and a stored value with padding or `MaybeUninit` leaves
+    /// bytes no read may inspect.
+    pub unsafe fn resident_bytes(&self) -> usize {
         let page = S::GEOMETRY.page_size();
         let resident = (0..self.pages.len())
             .filter(|&index| self.pages.get(index) & (RESERVED | WRITABLE) == RESERVED | WRITABLE)
-            // SAFETY: the page is inside `memory`, and the caller writes nothing meanwhile.
+            // SAFETY: the page is inside `memory` and open, and the caller promises it is
+            // initialized and not written meanwhile.
             .filter(|&index| !unsafe { self.memory.is_zero(index << self.page_shift(), page) })
             .count();
         resident * page
@@ -323,14 +336,18 @@ impl<S: Shape> SimOs<S> {
     }
 
     /// Whether page `index` reads as zero. A closed page of guarded memory is zero (an access
-    /// would have faulted) and is not read. Call it while nothing writes the page.
-    fn page_reads_zero(&self, index: usize) -> bool {
+    /// would have faulted) and is not read.
+    ///
+    /// # Safety
+    ///
+    /// Nothing writes the page during the call, and its bytes are initialized.
+    unsafe fn page_reads_zero(&self, index: usize) -> bool {
         if self.memory.guarded() && self.pages.get(index) & WRITABLE == 0 {
             return true;
         }
         let page = S::GEOMETRY.page_size();
         // SAFETY: the page is inside `memory` (it has a state) and accessible (open, or the
-        // memory is not guarded), and the caller writes nothing meanwhile.
+        // memory is not guarded); the caller promises it is initialized and not written.
         unsafe { self.memory.is_zero(index << self.page_shift(), page) }
     }
 
@@ -343,7 +360,9 @@ impl<S: Shape> SimOs<S> {
         let page = S::GEOMETRY.page_size();
         // SAFETY: the page is inside `memory` (it has a state). It is not committed, so no
         // correct caller writes it, and a buggy one is what this looks for: `purge` and `unmap`
-        // exclude concurrent access by contract, and `commit` holds the page in `CHECKING`.
+        // exclude concurrent access by contract, and `commit` holds the page in `CHECKING`. Its
+        // bytes are initialized: the memory starts zeroed, and every way a page stops being
+        // committed zeroes it.
         let clean = unsafe { self.memory.is_zero(index << self.page_shift(), page) };
         assert!(
             clean,
@@ -629,7 +648,8 @@ mod tests {
         let os = Sim::with_capacity(region());
         let base = os.reserve(region(), region()).unwrap();
         let p = base.as_ptr();
-        // SAFETY: each call's range is whole reserved pages, and nothing else touches them.
+        // SAFETY: each call's range is whole reserved pages, nothing else touches them, and
+        // they are written only with bytes.
         unsafe {
             os.commit(base, 2 * page()).unwrap();
             assert!(os.is_writable(base, 2 * page()));
@@ -861,18 +881,20 @@ mod tests {
             base.as_ptr().write(1);
             base.as_ptr().add(page()).write(1);
         }
-        assert_eq!(os.resident_bytes(), 2 * page());
-        // SAFETY: as above.
-        unsafe { os.purge(base, page()).unwrap() };
-        assert!(os.is_purged(base, page()));
-        assert_eq!(os.resident_bytes(), page());
-        // SAFETY: still committed.
-        unsafe { base.as_ptr().write(3) };
-        assert!(
-            !os.is_purged(base, page()),
-            "a write faults the page back in"
-        );
-        assert_eq!(os.resident_bytes(), 2 * page());
+        // SAFETY: whole reserved pages; this thread alone writes them, and only with bytes,
+        // as the queries need.
+        unsafe {
+            assert_eq!(os.resident_bytes(), 2 * page());
+            os.purge(base, page()).unwrap();
+            assert!(os.is_purged(base, page()));
+            assert_eq!(os.resident_bytes(), page());
+            base.as_ptr().write(3);
+            assert!(
+                !os.is_purged(base, page()),
+                "a write faults the page back in"
+            );
+            assert_eq!(os.resident_bytes(), 2 * page());
+        }
     }
 
     /// Review R1: a page marked to be wiped on fork can still be committed (the marks once
