@@ -45,7 +45,9 @@ Modelling choices:
   RIP-relative operand, resolved by the linker) puts in a register, or that
   address plus a constant; `movGot` reads the address from the symbol's slot in
   the global offset table, for a symbol of another shared object (glibc's
-  `__rseq_offset`). No
+  `__rseq_offset`), and `movSym` reads the 8 bytes at the symbol's address
+  directly, as an executable may for such a symbol (a copy relocation puts
+  the variable in the executable). No
   instruction changes `syms`: a static's address is fixed for the run of
   the program.
 * A compile-time constant the code names (a `const` operand: an immediate,
@@ -171,6 +173,9 @@ inductive Instr
   RIP-relative memory operand): the address of the symbol `name`, read from
   its slot in the global offset table. -/
   | movGot (dst : Reg) (name : String)
+  /-- `mov r64, QWORD PTR [rip + name]` (REX.W + 8B /r, with a RIP-relative
+  memory operand): the 8 bytes at the address of the symbol `name`. -/
+  | movSym (dst : Reg) (name : String)
   /-- `lea r64, [rip + 3f]` (REX.W + 8D /r, with a RIP-relative memory
   operand): the address of the routine's restartable-sequence descriptor,
   `State.csDesc`, which the printer labels `3` (`Printer.rseqLines`). -/
@@ -283,6 +288,14 @@ def exec : Instr → State → Option State
   -- read-only, so the load reads `S` and never faults: `DEST := S`. No flags
   -- are affected.
   | .movGot d name, s => some (s.setReg d (s.syms name))
+  -- `movSym`: "MOV" as for `movGot`, its RIP-relative source's `disp32`
+  -- written by the linker so that it addresses the symbol itself
+  -- (`R_X86_64_PC32`, as for `leaSym`): `DEST := SRC`, the 8 bytes at `S`,
+  -- a load that faults outside the permitted regions as any other does.
+  -- In an executable, a symbol another shared object defines is copied
+  -- into the executable (a copy relocation) before any code of the program
+  -- runs, and `S` is the copy's address. No flags are affected.
+  | .movSym d name, s => (s.load64 (s.syms name)).map (s.setReg d ·)
   -- `leaRseqCs`: "LEA" as for `leaSym`, of the local label the descriptor
   -- has (`Printer.rseqLines`), which the assembler resolves: `DEST :=` its
   -- address.
@@ -397,7 +410,7 @@ two, `rax` and `rdx`, `mulx` two of its choosing, and stores none. -/
 def Instr.dst : Instr → Option Reg
   | .mov d _ | .alu _ d _ | .inc d | .dec d | .mov32 d _ | .alu32 _ d _ | .shift32 _ d _ | .bswap32 d
   | .rorx32 d .. | .andn32 d .. | .rorx d .. | .andn d .. | .movzx8 d _ | .bswap d | .shift _ d _
-  | .shiftCl _ d | .shiftx _ d .. | .movImm64 d _ | .leaSym d .. | .movGot d _ | .leaRseqCs d | .lea d _ | .adcx d _ | .adox d _
+  | .shiftCl _ d | .shiftx _ d .. | .movImm64 d _ | .leaSym d .. | .movGot d _ | .movSym d _ | .leaRseqCs d | .lea d _ | .adcx d _ | .adox d _
   | .cmov _ d _ | .pop d _ | .imul d _ => some d
   | .store .. | .store32 .. | .store8 .. | .mul _ | .mulx .. | .push _ | .alloc _ | .free _ => none
 
@@ -416,6 +429,7 @@ def Instr.events (i : Instr) (s s' : State) : List Event :=
   | .mov _ (.mem m) | .alu _ _ (.mem m) | .mulx _ _ (.mem m) | .adcx _ (.mem m) | .adox _ (.mem m)
   | .cmov _ _ (.mem m) => rd m 8
   | .mov32 _ (.mem m) | .alu32 _ _ (.mem m) => rd m 4
+  | .movSym _ name => [⟨s.syms name, 8, false, (s.mem.read (s.syms name) 8).toNat⟩]
   | .movzx8 _ m => rd m 1
   | .store m _ => wr m 8
   | .store32 m _ => wr m 4

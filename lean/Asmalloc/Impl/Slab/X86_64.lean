@@ -165,4 +165,28 @@ def currentCpu : Prog isa := .block [
   .mov .rax (.mem { base := .rax }),
   .mov32 .rax (.mem { base := .rax, disp := 4, seg := some .fs })]
 
+/-! ## In an executable
+
+An executable may read `__rseq_offset` directly (`movSym`, one load) rather
+than through its GOT slot (`movGot` and a load): the linker copies the
+variable into the executable before any code of the program runs. A shared
+library cannot, so the GOT form is the default and this the cargo feature
+`executable`'s. The routines are the same but for that. -/
+
+/-- Arming with `__rseq_offset` read directly. -/
+def armDirect : List Instr := [
+  .movSym .r10 "__rseq_offset",
+  .leaRseqCs .r11,
+  .store { base := .r10, disp := 8, seg := some .fs } .r11]
+
+/-- A sequence armed with `armDirect`. -/
+def direct : Prog isa → Prog isa
+  | .rseq _ body => .rseq armDirect body
+  | c => c
+
+/-- `current_cpu()`, reading `__rseq_offset` directly. -/
+def currentCpuDirect : Prog isa := .block [
+  .movSym .rax "__rseq_offset",
+  .mov32 .rax (.mem { base := .rax, disp := 4, seg := some .fs })]
+
 end VG.Impl.Slab.X86_64

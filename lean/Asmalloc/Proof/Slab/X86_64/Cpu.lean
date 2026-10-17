@@ -2,6 +2,7 @@ module
 
 public import Asmalloc.Proof.Slab.X86_64.Witness
 public import Asmalloc.Proof.Slab.X86_64.Run
+public import Asmalloc.Proof.Framework.Arm
 
 /-!
 # The CPU number on x86-64
@@ -112,6 +113,28 @@ theorem post : (cpuContract A).post s (σ3 s) := by
   simp only [BitVec.toNat_setWidth, BitVec.toNat_ofNat, Spec.Slab.Ctx.cpu, view_cpuField hA,
     mem_of (c := cpuView A) hA, cpu32]
 
+/-- Reading `__rseq_offset` directly: the same end state. -/
+theorem exec_bodyD (hs : (cpuContract A).pre s) :
+    execBlock isa [.movSym .rax RS, .mov32 .rax (.mem cpuOp)] s = some (σ3 s) := by
+  have hrd := rd_of hA hs
+  have h1 : exec (.movSym .rax RS) s = some (σ2 s) := by
+    have hin : InRegions (s.rd ++ s.wr) (s.syms RS) 8 := inRd (r := ⟨s.syms RS, 8⟩) (by rw [hrd]; simp)
+    simp only [exec, State.load64, hin, ↓reduceIte, Option.map_some, σ2, σ1, setReg_setReg_same]
+    rfl
+  have h2 : exec (.mov .rax (.mem { base := .rax })) (σ1 s) = some (σ2 s) := by
+    have hin : InRegions ((σ1 s).rd ++ (σ1 s).wr) ((σ1 s).ea { base := .rax }) 8 := by
+      rw [Access.ea_base, σ1, RegUpd.gpr_setReg_self, RegUpd.rd_setReg, RegUpd.wr_setReg]
+      exact inRd (r := ⟨s.syms RS, 8⟩) (by rw [hrd]; simp)
+    rw [exec_load _ hin, Access.ea_base, σ1, RegUpd.gpr_setReg_self, RegUpd.mem_setReg]; rfl
+  have h3 := exec_body hA hs
+  rw [body, execBlock_cons_some rfl, execBlock_cons_some h2] at h3
+  rw [execBlock_cons_some h1]
+  exact h3
+
+theorem same_direct (hs : (cpuContract A).pre s) :
+    execBlock isa [.movSym .rax RS, .mov32 .rax (.mem cpuOp)] s = execBlock isa body s := by
+  rw [exec_bodyD hA hs, exec_body hA hs]
+
 end Run
 
 theorem rseqOk {T : Target} {k : Contract T.isa} {c : Prog T.isa} {s : T.isa.State}
@@ -188,5 +211,28 @@ theorem verified : Verified target currentCpu (cpuContract abi) :=
 theorem verified_inline : Verified inlineTarget currentCpu (cpuContract inlineAbi) :=
   ⟨fun _ hs => .inl (correct_inline hs), fun _ _ => rseqOk (by rw [code_eq]; intro _ _ h; cases h),
     ⟨wit, pre_wit_inline⟩, fun o ho => by rw [code_eq] at ho; cases ho⟩
+
+/-! ## Reading `__rseq_offset` directly -/
+
+theorem codeD_eq : currentCpuDirect = .block [.movSym .rax RS, .mov32 .rax (.mem cpuOp)] := rfl
+
+theorem verifiedD : Verified target currentCpuDirect (cpuContract abi) := by
+  rw [codeD_eq]; exact Verified.of_block verified fun s hs => same_direct x86_abi hs
+
+theorem verifiedD_inline : Verified inlineTarget currentCpuDirect (cpuContract inlineAbi) := by
+  rw [codeD_eq]; exact Verified.of_block verified_inline fun s hs => same_direct x86_inline hs
+
+theorem clobbersOkD {s : State} (hs : (cpuContract inlineAbi).pre s) :
+    (∀ s', Exec isa currentCpuDirect s s' → preservedExcept ([] ++ ["rax"]) s s') ∧
+    (∀ t s', ExecExit isa currentCpuDirect s t s' → preservedExcept [] s s') ∧
+    (∀ p ∈ currentCpuDirect.abortStates isa s, preservedExcept [] s p) := by
+  rw [codeD_eq]
+  refine ⟨fun s' he => ?_, (fun t s' he => by cases he), fun p hp => by simp [Code.abortStates] at hp⟩
+  cases he with
+  | block h =>
+    rw [exec_bodyD x86_inline hs] at h
+    cases h
+    intro r hr
+    exact gpr_σ3 r (by rintro rfl; simp [Reg.name] at hr)
 
 end VG.Proof.Slab.X86_64.Cpu
