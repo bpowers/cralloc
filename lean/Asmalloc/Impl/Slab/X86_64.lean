@@ -152,4 +152,15 @@ def stackPop : Prog isa := .rseq arm (
   .instr (.mov .rcx (.mem { base := .rax })),
   .instr (.store slabWord .rcx)])
 
+/-! ## The CPU number
+
+Not a restartable sequence: `__rseq_offset` through its GOT slot, then the
+rseq area's `cpu_id` through `fs`, zero-extended into `rax`. -/
+
+/-- `current_cpu()`. -/
+def currentCpu : Prog isa := .block [
+  .movGot .rax "__rseq_offset",
+  .mov .rax (.mem { base := .rax }),
+  .mov32 .rax (.mem { base := .rax, disp := 4, seg := some .fs })]
+
 end VG.Impl.Slab.X86_64

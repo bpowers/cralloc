@@ -7,8 +7,8 @@ public import Asmalloc.Proof.Framework.Registration
 
 The pop and push inline (`x86_64_inline`), an `asm!` block of 13 fused
 micro-ops, and out of line (`x86_64`), a naked function that tail-calls its
-slow path; and the slow path's store-if-equal and spare-stack push and pop,
-out of line. -/
+slow path; the slow path's store-if-equal and spare-stack push and pop,
+out of line; and the CPU number, both ways. -/
 
 @[expose] public section
 
@@ -55,6 +55,17 @@ def artifacts : List Artifact := [
     code := stackPop
     verified := stackPop_verified
     witnesses := StackPop.witnesses
-    witnessOk := stackPop_witnessOk }]
+    witnessOk := stackPop_witnessOk },
+  currentCpuApi.artifact VG.X86_64.target {
+    code := currentCpu
+    verified := currentCpu_verified
+    witnesses := [Cpu.wit]
+    witnessOk := currentCpu_witnessOk },
+  currentCpuApi.artifact VG.X86_64.inlineTarget {
+    code := currentCpu
+    verified := currentCpuInline_verified
+    clobbersOk := currentCpuInline_clobbersOk
+    witnesses := [Cpu.wit]
+    witnessOk := currentCpuInline_witnessOk }]
 
 end VG.Artifacts.Slab.X86_64

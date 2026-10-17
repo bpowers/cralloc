@@ -175,3 +175,23 @@ pub(crate) unsafe extern "sysv64" fn slab_stack_pop(offset: usize) -> usize {
         SLABS = sym crate::front::SLABS,
     )
 }
+
+/// Returns the calling thread's CPU number as the slab routines read it: its rseq area's `cpu_id`, zero-extended. A number not below `SLAB_COUNT` has no slab (an unregistered thread's reads as one). Not a restartable sequence: the thread may move to another CPU before the caller uses the answer.
+///
+/// Contract: `VG.Spec.Slab.cpuContract`.
+///
+/// # Safety
+///
+/// * glibc must have registered the calling thread's rseq area, as it does before the thread can run code that allocates.
+/// * Neither `__rseq_offset` nor the thread's `cpu_id` may overlap the stack the call uses (the return address on the stack, or, inline, the 128 bytes below the stack pointer and the 8 bytes at it) or wrap around the end of the address space.
+#[unsafe(naked)]
+pub(crate) unsafe extern "sysv64" fn current_cpu() -> u32 {
+    core::arch::naked_asm!(
+        r"mov rax, QWORD PTR [rip + {__rseq_offset}@GOTPCREL]
+mov rax, QWORD PTR [rax]
+mov eax, DWORD PTR fs:[rax+4]
+ret
+.p2align 6",
+        __rseq_offset = sym crate::front::__rseq_offset,
+    )
+}

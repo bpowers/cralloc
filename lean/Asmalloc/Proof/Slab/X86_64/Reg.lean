@@ -7,6 +7,7 @@ public import Asmalloc.Proof.Slab.X86_64.PushTableWit
 public import Asmalloc.Proof.Slab.X86_64.Cas
 public import Asmalloc.Proof.Slab.X86_64.StackPush
 public import Asmalloc.Proof.Slab.X86_64.StackPop
+public import Asmalloc.Proof.Slab.X86_64.Cpu
 public import Asmalloc.TCB.Registration
 
 /-!
@@ -136,5 +137,46 @@ theorem stackPop_witnessOk :
       (stackPopApi.contract (target.abi.withConsts []) 0).pre w ∧ Visits target.isa stackPop w o.1 o.2 := by
   show (∃ w ∈ StackPop.witnesses, (stackPopContract (abi.withConsts [])).pre w) ∧ _
   rw [withConsts_nil]; exact StackPop.witnessOk
+
+theorem currentCpu_verified :
+    Verified target currentCpu (currentCpuApi.contract (target.abi.withConsts []) 0) := by
+  show Verified target currentCpu (cpuContract (abi.withConsts []))
+  rw [withConsts_nil]; exact Cpu.verified
+
+theorem currentCpu_witnessOk :
+    (∃ w ∈ [Cpu.wit], (currentCpuApi.contract (target.abi.withConsts []) 0).pre w) ∧
+    ∀ o ∈ currentCpu.outcomes, ∃ w ∈ [Cpu.wit],
+      (currentCpuApi.contract (target.abi.withConsts []) 0).pre w ∧
+        Visits target.isa currentCpu w o.1 o.2 := by
+  show (∃ w ∈ [Cpu.wit], (cpuContract (abi.withConsts [])).pre w) ∧ _
+  rw [withConsts_nil]
+  exact ⟨⟨_, List.mem_singleton_self _, Cpu.pre_wit_abi⟩, fun o ho => by
+    rw [Cpu.code_eq] at ho; cases ho⟩
+
+theorem currentCpuInline_verified :
+    Verified inlineTarget currentCpu (currentCpuApi.contract (inlineTarget.abi.withConsts []) 0) := by
+  show Verified inlineTarget currentCpu (cpuContract (inlineAbi.withConsts []))
+  rw [withConsts_nil_inline]; exact Cpu.verified_inline
+
+theorem currentCpuInline_witnessOk :
+    (∃ w ∈ [Cpu.wit], (currentCpuApi.contract (inlineTarget.abi.withConsts []) 0).pre w) ∧
+    ∀ o ∈ currentCpu.outcomes, ∃ w ∈ [Cpu.wit],
+      (currentCpuApi.contract (inlineTarget.abi.withConsts []) 0).pre w ∧
+        Visits inlineTarget.isa currentCpu w o.1 o.2 := by
+  show (∃ w ∈ [Cpu.wit], (cpuContract (inlineAbi.withConsts [])).pre w) ∧ _
+  rw [withConsts_nil_inline]
+  exact ⟨⟨_, List.mem_singleton_self _, Cpu.pre_wit_inline⟩, fun o ho => by
+    rw [Cpu.code_eq] at ho; cases ho⟩
+
+theorem currentCpuInline_clobbersOk : inlineTarget.inline = true → ∀ s,
+    (currentCpuApi.contract (inlineTarget.abi.withConsts []) 0).pre s →
+      (∀ s', Exec inlineTarget.isa currentCpu s s' →
+        inlineTarget.preservedExcept ([] ++
+          (if currentCpuApi.sig.ret.isSome then [inlineTarget.retReg] else [])) s s') ∧
+      (∀ t s', ExecExit inlineTarget.isa currentCpu s t s' → inlineTarget.preservedExcept [] s s') ∧
+      (∀ p ∈ currentCpu.abortStates inlineTarget.isa s, inlineTarget.preservedExcept [] s p) :=
+  fun _ s hs => by
+    have hs' : (cpuContract inlineAbi).pre s := by rw [← withConsts_nil_inline]; exact hs
+    exact Cpu.clobbersOk hs'
 
 end VG.Proof.Slab.X86_64

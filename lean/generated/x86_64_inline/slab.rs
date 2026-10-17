@@ -144,3 +144,27 @@ pub(crate) unsafe fn slab_push<const CLASS: usize, const MASK: u32>(p: usize) ->
     }
     true
 }
+
+/// Returns the calling thread's CPU number as the slab routines read it: its rseq area's `cpu_id`, zero-extended. A number not below `SLAB_COUNT` has no slab (an unregistered thread's reads as one). Not a restartable sequence: the thread may move to another CPU before the caller uses the answer.
+///
+/// Contract: `VG.Spec.Slab.cpuContract`.
+///
+/// # Safety
+///
+/// * glibc must have registered the calling thread's rseq area, as it does before the thread can run code that allocates.
+/// * Neither `__rseq_offset` nor the thread's `cpu_id` may overlap the stack the call uses (the return address on the stack, or, inline, the 128 bytes below the stack pointer and the 8 bytes at it) or wrap around the end of the address space.
+#[inline(always)]
+pub(crate) unsafe fn current_cpu() -> u32 {
+    let ret: u32;
+    unsafe {
+        core::arch::asm!(
+            r"mov rax, QWORD PTR [rip + {__rseq_offset}@GOTPCREL]
+mov rax, QWORD PTR [rax]
+mov eax, DWORD PTR fs:[rax+4]",
+            lateout("rax") ret,
+            __rseq_offset = sym crate::front::__rseq_offset,
+            options(nostack),
+        );
+    }
+    ret
+}
