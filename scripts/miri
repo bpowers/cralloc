@@ -3,10 +3,17 @@
 # On demand, not in the gate: it takes a few minutes. Tests too slow for Miri are marked
 # `#[cfg_attr(miri, ignore)]`; tests of the real kernel are not built under Miri.
 #
+# The workspace's cargo runner (scripts/run-capped) would take the place of Miri's own runner
+# and try to execute Miri's artefacts, so this command puts Miri's runner back; the cap below
+# covers the whole run instead.
+#
 # Usage: scripts/miri [cargo test arguments...], e.g. `scripts/miri -- os::sim`.
 set -euo pipefail
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$here/.."
 export MIRIFLAGS="${MIRIFLAGS:--Zmiri-strict-provenance}"
+# The environment outranks .cargo/config.toml; point it back at Miri's own runner.
+CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUNNER="$(rustup which cargo-miri --toolchain nightly) runner"
+export CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUNNER
 exec "$here/memlimit" -m "${MIRI_MEM:-8G}" -t "${MIRI_TIMEOUT:-30m}" -- \
   cargo +nightly miri test -p asmalloc "$@"
