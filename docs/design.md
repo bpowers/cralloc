@@ -350,7 +350,7 @@ emit one that breaks them:
   word in place with a read-modify-write instruction, because a drainer may exchange the
   word between the read and the commit (see "Idle caches");
 - an inlined routine is at most 13 micro-ops, one more than the processor delivers at full
-  speed;
+  speed. Inlined allocation costs its caller one more, a fused test for a miss;
 - an out-of-line routine starts on a 64-byte boundary, and its hot path fits in 128 bytes
   and in 24 micro-ops, which is what the processor delivers in the four cycles a call and
   return take regardless;
