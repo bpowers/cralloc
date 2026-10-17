@@ -102,5 +102,12 @@ attempt that commits is to that CPU's slab. Tests abort every routine before eac
 with and without a migration and a nested call, and check that nothing visible changed
 (`front::twin::tests`).
 
+An attempt that a fence aborts must also store nothing after the fence returns: the drainer
+then owns the magazine the hot word named. A twin cannot be stopped between a step's check and
+its access, so it tells the machine when its magazine access is over (`Machine::accessed`) and
+when its commit is (`Machine::committed`), and a machine whose threads run freely holds its
+fence back in between (`os::sim::cpus`).
+
 **Not covered.** Whether the simulated machine keeps its contract (aborting on a change of CPU,
-and a fence aborting sequences in flight) is a property of the test machines, not of this file.
+a fence aborting sequences in flight, and no access by an aborted sequence once the fence has
+returned) is a property of the test machines, not of this file.

@@ -43,29 +43,48 @@ __attribute__((destructor)) static void bench_probe_report(void) {
   int (*je_mallctl)(const char *, void *, size_t *, void *, size_t) =
       (int (*)(const char *, void *, size_t *, void *, size_t))dlsym(RTLD_DEFAULT, "mallctl");
 
-  const char *allocator = "glibc";
-  if (tc_percpu != NULL) allocator = "tcmalloc";
-  else if (mi_version != NULL) allocator = "mimalloc";
-  else if (je_mallctl != NULL) allocator = "jemalloc";
-
-  const char *mode = "";
-  if (tc_percpu != NULL) mode = tc_percpu() ? "per-cpu" : "per-thread";
-
   char library[PATH_MAX] = "unknown";
   Dl_info info;
   struct link_map *map = NULL;
   void *malloc_fn = dlsym(RTLD_DEFAULT, "malloc");
+  bool in_executable = false;
   if (malloc_fn != NULL && dladdr1(malloc_fn, &info, (void **)&map, RTLD_DL_LINKMAP) != 0) {
     // The main program's link map has an empty name.
     if (map != NULL && map->l_name[0] == '\0') {
+      in_executable = true;
       strcpy(library, "executable");
     } else if (info.dli_fname != NULL && realpath(info.dli_fname, library) == NULL) {
       snprintf(library, sizeof library, "%s", info.dli_fname);
     }
   }
 
+  // asmalloc is recognised by a symbol of its own in the object that serves malloc, not by a
+  // global lookup: asmalloc_version if the library exports it, else, for libraries from
+  // before it did, the unwinding stub only asmalloc-preload defines.
+  const char *(*asm_version)(void) = NULL;
+  bool asm_lib = false;
+  if (!in_executable && map != NULL) {
+    void *h = dlopen(map->l_name, RTLD_LAZY | RTLD_NOLOAD);
+    if (h != NULL) {
+      asm_version = (const char *(*)(void))dlsym(h, "asmalloc_version");
+      asm_lib = asm_version != NULL || dlsym(h, "asmalloc_preload_no_unwinding") != NULL;
+      dlclose(h);
+    }
+  }
+
+  const char *allocator = "glibc";
+  if (asm_lib) allocator = "asmalloc";
+  else if (tc_percpu != NULL) allocator = "tcmalloc";
+  else if (mi_version != NULL) allocator = "mimalloc";
+  else if (je_mallctl != NULL) allocator = "jemalloc";
+
+  const char *mode = "";
+  if (tc_percpu != NULL) mode = tc_percpu() ? "per-cpu" : "per-thread";
+
   char version[64] = "";
-  if (strcmp(allocator, "jemalloc") == 0) {
+  if (asm_version != NULL) {
+    snprintf(version, sizeof version, "%s", asm_version());
+  } else if (strcmp(allocator, "jemalloc") == 0) {
     const char *v = NULL;
     size_t len = sizeof v;
     if (je_mallctl("version", &v, &len, NULL, 0) == 0 && v != NULL) snprintf(version, sizeof version, "%s", v);

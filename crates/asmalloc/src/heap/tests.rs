@@ -346,7 +346,10 @@ fn tagged_churn<H: GlobalAlloc + Sync>(heap: &H, threads: usize, rounds: usize) 
                     x ^= x << 13;
                     x ^= x >> 7;
                     x ^= x << 17;
-                    let size = if (x >> 30).is_multiple_of(16)
+                    // One block in 32 is big. At one in 16, about one run in 350 on a busy
+                    // machine filled all 244 regions of the simulated heap, a third of them
+                    // with blocks over 40 KiB at four to six a region, and an allocation failed.
+                    let size = if (x >> 30).is_multiple_of(32)
                         && std::env::var_os("SMALL_ONLY").is_none()
                     {
                         (x as usize >> 8) % (64 << 10) + 8
@@ -400,10 +403,13 @@ fn tagged_churn<H: GlobalAlloc + Sync>(heap: &H, threads: usize, rounds: usize) 
     }
 }
 
-/// Fails in about one run in eight, and never with drains off (`NO_DRAIN=1`): a block gets two
-/// owners. The other switches (`NO_PURGE`, `NO_CPU`) help bisect it.
+/// This caught the simulator's fence returning while a twin stood between its `Access` check and
+/// its store (`os::sim::cpus`): the store landed in a magazine a drain had passed on, and a block
+/// got two owners. It showed most with more threads than cores. The test forces no drain: it
+/// leans on the heartbeat's idle check draining often, so if drains become rare it needs a way
+/// to ask for them. The switches (`NO_DRAIN`, `NO_PURGE`, `NO_CPU`) turn parts of the heap off
+/// to bisect a failure.
 #[test]
-#[ignore = "a block gets two owners in about one run in eight while drains run on the simulated heap; open"]
 fn blocks_have_one_owner_while_threads_churn_and_drains_run() {
     let rounds = if cfg!(miri) { 1 } else { 30 };
     for _ in 0..rounds {

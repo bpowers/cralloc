@@ -43,7 +43,12 @@ other promises:
   range (`admit`), never beyond it. A partial unmap releases only the pages it acts on and marks
   the remainder as a reservation of its own, before releasing, as for a head.
 - `fence` aborts every twin sequence in flight on its CPU and waits out a committing one
-  (`cpus.rs`), so it returns only after each has completed or been aborted.
+  (`cpus.rs`), so it returns only after each has completed or been aborted. It also waits out
+  a magazine access in progress (from a passed `Access` step to `Machine::accessed`) before it
+  aborts that sequence, so an aborted sequence makes no access after the fence returns, as a
+  real one executes no further instruction. Tests: `os::sim::cpus::tests::
+  a_fence_waits_for_an_access_in_progress_and_then_aborts_the_sequence` and `front::twin::tests::
+  an_aborted_push_does_not_write_the_magazine_after_the_fence_returns`.
 - `abort` panics, so it does not return.
 - `ticks` reads a clock that only a test moves; the trait asks nothing of it.
 
@@ -76,4 +81,6 @@ writes".
 
 **Review.** 2026-10-17, fresh adversarial reviewer: SIM-OS-01 and SIM-OS-02 accepted after the
 fixes of its first round. Since then the simulator gained partial faults, fences that abort
-twins, a whole fork, and the checks of SIM-OS-04; those parts need the reviewer's check.
+twins, a whole fork, and the checks of SIM-OS-04; those parts need the reviewer's check. So
+does the fence's wait for an access in progress, added after a free-running aborted push was
+found storing into a magazine a drain had already passed on.

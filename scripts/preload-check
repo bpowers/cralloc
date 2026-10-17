@@ -88,7 +88,7 @@ expect() {
   fi
 }
 
-cc -O2 -o "$bin/interposed" "$programs/interposed.c" || exit 1
+cc -O2 -o "$bin/interposed" "$programs/interposed.c" -ldl || exit 1
 cc -O2 -o "$bin/foreign" "$programs/foreign.c" || exit 1
 cc -O2 -pthread -o "$bin/threads" "$programs/threads.c" || exit 1
 cc -O2 -pthread -o "$bin/forks" "$programs/forks.c" || exit 1
@@ -97,7 +97,7 @@ cc -O2 -pthread -o "$bin/dl" "$programs/dl.c" -ldl || exit 1
 cc -O2 -shared -fPIC -o "$bin/libdlib.so" "$programs/dlib.c" || exit 1
 g++ -O2 -pthread -std=c++20 -o "$bin/cxx" "$programs/cxx.cpp" || exit 1
 
-if [ "$(LD_PRELOAD="$lib" "$bin/interposed")" != asmalloc ]; then
+if [[ "$(LD_PRELOAD="$lib" "$bin/interposed")" != "asmalloc "* ]]; then
   echo "FAIL  the library does not serve malloc in a preloaded program"
   exit 1
 fi

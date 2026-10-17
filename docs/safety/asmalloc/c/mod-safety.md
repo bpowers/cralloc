@@ -88,7 +88,9 @@ them (the list and the census behind it are in the macro's documentation and in 
 crate's ledger). Replacing a subset would let glibc serve a block from its own heap that
 asmalloc is then asked to free, or the reverse. glibc supports replacing its allocator by
 interposition and calls `malloc` and the rest through the interposable symbols itself (glibc
-manual, "Replacing malloc"). A program must invoke the macro at most once, or enable the `c-abi`
+manual, "Replacing malloc"). The macro also defines `asmalloc_version`, a name no C library or other allocator defines; it
+returns a pointer to a static NUL-terminated string, valid for the life of the program. A
+program must invoke the macro at most once, or enable the `c-abi`
 feature and not invoke it, since two definitions of one symbol fail to link; and it must not
 also link another allocator that defines these names (the design's non-goal: one instance per
 process).

@@ -47,7 +47,7 @@ use crate::heap::{Found, process};
 use crate::os::Os;
 use crate::os::linux::LinuxOs;
 use core::alloc::Layout;
-use core::ffi::{c_int, c_void};
+use core::ffi::{CStr, c_char, c_int, c_void};
 use core::ptr::{self, NonNull};
 
 /// The page size, for `valloc` and `pvalloc`.
@@ -268,6 +268,20 @@ pub unsafe extern "C" fn malloc_usable_size(ptr: *mut c_void) -> usize {
     }
 }
 
+/// The crate's version, as a C string.
+const VERSION: &CStr =
+    match CStr::from_bytes_with_nul(concat!(env!("CARGO_PKG_VERSION"), "\0").as_bytes()) {
+        Ok(version) => version,
+        Err(_) => panic!("the crate version has an interior NUL"),
+    };
+
+/// asmalloc's own `const char *asmalloc_version(void)`: the crate version as a static,
+/// NUL-terminated string. Exported with the C interface, so a program (or a benchmark probe)
+/// can tell that asmalloc serves its `malloc`, and which version.
+pub extern "C" fn asmalloc_version() -> *const c_char {
+    VERSION.as_ptr()
+}
+
 /// glibc's `malloc_trim`: returns the wholly free pages the back end holds to the OS. The
 /// padding argument has no meaning here. Returns 1 if any memory was released, else 0.
 pub extern "C" fn malloc_trim(_pad: usize) -> c_int {
@@ -285,7 +299,8 @@ pub extern "C" fn malloc_trim(_pad: usize) -> c_int {
 /// the obsolete `cfree`. Otherwise glibc would serve one of them from its own heap, or be handed
 /// a block of asmalloc's, and either is a crash. `mallinfo`, `mallinfo2`, `mallopt`,
 /// `malloc_stats` and `malloc_info` take no block and are left to glibc, where they describe
-/// glibc's own, unused heap.
+/// glibc's own, unused heap. It also exports `asmalloc_version`, which tells a program (or a
+/// benchmark probe) that asmalloc serves its `malloc`, and which version.
 #[macro_export]
 macro_rules! export_c_abi {
     () => {
@@ -381,6 +396,11 @@ macro_rules! export_c_abi {
             #[unsafe(no_mangle)]
             unsafe extern "C" fn malloc_trim(pad: usize) -> c_int {
                 $crate::c::malloc_trim(pad)
+            }
+
+            #[unsafe(no_mangle)]
+            extern "C" fn asmalloc_version() -> *const ::core::ffi::c_char {
+                $crate::c::asmalloc_version()
             }
         };
     };

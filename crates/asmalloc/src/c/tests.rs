@@ -239,3 +239,11 @@ fn memalign_reads_alignments_as_glibc_does() {
 fn the_page_is_four_kibibytes() {
     assert_eq!(PAGE, 4096);
 }
+
+#[test]
+fn the_version_is_the_crates() {
+    // SAFETY: the pointer is to a static NUL-terminated string.
+    let version = unsafe { core::ffi::CStr::from_ptr(asmalloc_version()) };
+    assert_eq!(version.to_str(), Ok(env!("CARGO_PKG_VERSION")));
+    assert_eq!(asmalloc_version(), asmalloc_version());
+}

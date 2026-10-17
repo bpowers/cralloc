@@ -28,7 +28,6 @@ fn the_simulated_heap_serves_every_profile() {
 }
 
 #[test]
-#[ignore = "a block gets two owners in about one run in eight while drains run on the simulated heap; open"]
 fn the_simulated_heap_frees_on_other_threads_with_miri_sizes() {
     let s = ViaGlobalAlloc(SimAsmalloc);
     let p = Profile::MIXED.with_migrate(5).capped(4096, 4096, 1 << 20);
@@ -65,7 +64,6 @@ unsafe impl core::alloc::GlobalAlloc for Fresh {
 }
 
 #[test]
-#[ignore = "a block gets two owners in about one run in eight while drains run on the simulated heap; open"]
 fn fresh_simulated_heaps_serve_threads_that_hand_blocks_over() {
     for seed in 0..40 {
         let heap = Fresh(Box::leak(Box::new(asmalloc::SimHeap::new())));
@@ -82,7 +80,6 @@ fn fresh_simulated_heaps_serve_threads_that_hand_blocks_over() {
 }
 
 #[test]
-#[ignore = "a block gets two owners in about one run in eight while drains run on the simulated heap; open"]
 fn the_simulated_heap_frees_on_other_threads() {
     let s = ViaGlobalAlloc(SimAsmalloc);
     for profile in [Profile::MIXED.with_migrate(5), Profile::SMALL_FIXED] {
