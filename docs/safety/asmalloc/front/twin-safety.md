@@ -37,6 +37,16 @@ of slab fields are:
 - the drain, which stores its marker, zero, or (in back-out) a value it exchanged out of the same
   field, with markers mapped to zero.
 
+Spare-stack links (slot 0 of a magazine on a spare stack) are written only by the stack push
+that put the magazine there, and by whoever holds the magazine's handle: the depot stacks write
+slot 0 through `Magazine::link`, which is crate-private, and `Magazine::set_object` refuses slot 0
+and the last slot. A handle to a magazine on a stack cannot be had outside the crate: the lookups
+that make a handle from an address or a number (`Area::magazine`, `by_id`, `loaded`) are
+crate-private, and the public ways to get one, `Area::create` and a stack pop, give a magazine
+nothing else refers to; handles are neither `Clone` nor `Copy`. Inside the crate, a handle to a
+magazine is made only by the thread that took it off a stack or out of a slab word, which it then
+owns (SLOW-01, SPARE-01, the drain's step 4).
+
 A `Magazine` handle exists only for an offset `magazine::admits` accepted: past the generation
 page, aligned to its size and inside the committed bytes (`depot::verify::
 an_admitted_magazine_lies_inside_the_committed_area`). The magazine area itself is aligned to

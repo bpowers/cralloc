@@ -12,7 +12,9 @@
 //!
 //! [`Magazine`] is the handle the slow paths hold. One is only ever made for an address that is
 //! inside the committed part of the area and aligned to its size, checked when it is made, so
-//! every slot access through it is in bounds whatever a slab word or a stale link says. Every
+//! every slot access through it is in bounds whatever a slab word or a stale link says. Outside
+//! the crate a handle can only be had uniquely, from [`Area::create`] or a stack pop; the
+//! lookups that turn an address or a number into a handle are the crate's own. Every
 //! access to a slot is atomic. The ledger for the unsafe block is
 //! `docs/safety/asmalloc/depot/magazine-safety.md`.
 
@@ -143,10 +145,13 @@ impl Magazine<'_> {
         self.slot(index).load(Relaxed)
     }
 
-    /// Puts an object in slot `index`, `1..=capacity`.
+    /// Puts an object in slot `index`, `1..=capacity`. Any other index is refused, so that
+    /// no call can overwrite the link or the record, which stacks and the slow paths trust.
     pub fn set_object(&self, index: usize, object: NonNull<u8>) {
         debug_assert!((1..=self.size.capacity()).contains(&index));
-        self.slot(index).store(object.as_ptr(), Relaxed);
+        if (1..=self.size.capacity()).contains(&index) {
+            self.slot(index).store(object.as_ptr(), Relaxed);
+        }
     }
 
     /// The slab word that loads this magazine at `level`: the address of slot `level + 1`.
@@ -225,19 +230,19 @@ impl<'a, O: Os> Area<'a, O> {
     }
 
     /// The magazine of `size` whose slot 0 is at `address`, if one can be there.
-    pub fn magazine(&self, address: usize, size: MagazineSize) -> Option<Magazine<'a>> {
+    pub(crate) fn magazine(&self, address: usize, size: MagazineSize) -> Option<Magazine<'a>> {
         let offset = address.wrapping_sub(self.space.magazines().addr().get());
         self.magazine_at(offset, size)
     }
 
     /// The magazine with this number.
-    pub fn by_id(&self, id: MagazineId, size: MagazineSize) -> Option<Magazine<'a>> {
+    pub(crate) fn by_id(&self, id: MagazineId, size: MagazineSize) -> Option<Magazine<'a>> {
         self.magazine_at(id.offset(), size)
     }
 
     /// The magazine a slab word names, and the level the word gives it: the word is the
     /// address of slot `level + 1`.
-    pub fn loaded(&self, word: usize, size: MagazineSize) -> Option<(Magazine<'a>, usize)> {
+    pub(crate) fn loaded(&self, word: usize, size: MagazineSize) -> Option<(Magazine<'a>, usize)> {
         let slot = size.slot_of(word);
         let magazine = self.magazine(word - slot * SLOT_BYTES, size)?;
         (slot >= 1 && slot < size.slots()).then_some((magazine, slot - 1))
