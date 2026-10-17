@@ -21,10 +21,11 @@ exactly this. `Magazine` has no public constructor and its fields are private.
   under it was committed successfully (`Area::commit_to`, `Area::generation_page`), so it was
   committed when the handle was made and still is.
 - *Valid for the lifetime.* Committed memory of a live reservation stays readable and writable
-  until it is unmapped (the `Os` contract). The handle is made from a `Space` borrowed for `'a`,
-  which keeps the reservation's OS value alive, and nothing in the crate purges or unmaps the
-  magazine area. The returned reference borrows the handle, which cannot outlive the area it
-  came from in practice; even a stale handle points at mapped, writable memory.
+  until it is unmapped (the `Os` contract). A `Magazine<'a>` is made only by an `Area<'a, O>`,
+  which holds a `Space<'a, O>`, so the borrow checker keeps the handle from outliving the
+  `Space`, and so the OS value that owns the reservation (a `SpaceCell` unmaps only when dropped,
+  which needs `&mut` and so no live `Space`). Nothing in the crate purges or unmaps the magazine
+  area while a `Space` exists. The returned reference borrows the handle, so it lives no longer.
 - *Provenance.* `base` comes from `Space::magazines()` through `map_addr`, so it carries the
   reservation's provenance.
 - *Aligned.* The area is aligned to `Geometry::magazine_area_align`, at least the largest

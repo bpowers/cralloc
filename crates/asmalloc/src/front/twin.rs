@@ -190,7 +190,7 @@ impl<'a, M: Machine> Twin<'a, M> {
             return Ok(StackPush::Marker);
         }
         self.machine.step(Step::Access)?;
-        // SAFETY: TWIN-02.
+        // SAFETY: TWIN-02. `stack_push`'s caller promises `magazine` is a magazine it holds.
         unsafe { slot(magazine.as_ptr()) }.store(head, Relaxed);
         self.machine.step(Step::Commit)?;
         field.store(magazine.as_ptr(), Release);
@@ -251,11 +251,11 @@ unsafe impl<M: Machine> Routines for Twin<'_, M> {
         self.sequence(|| self.try_push(class, object))
     }
 
-    fn store_if_equal(&self, field: Field, expected: *mut u8, new: *mut u8) -> StoreIfEqual {
+    unsafe fn store_if_equal(&self, field: Field, expected: *mut u8, new: *mut u8) -> StoreIfEqual {
         self.sequence(|| self.try_store_if_equal(field, expected, new))
     }
 
-    fn stack_push(&self, field: Field, magazine: NonNull<u8>) -> StackPush {
+    unsafe fn stack_push(&self, field: Field, magazine: NonNull<u8>) -> StackPush {
         self.sequence(|| self.try_stack_push(field, magazine))
     }
 
@@ -266,6 +266,10 @@ unsafe impl<M: Machine> Routines for Twin<'_, M> {
 
 #[cfg(test)]
 mod tests {
+    // The tests call the unsafe routines only with null, a marker, or addresses of the test's
+    // own magazines, which are committed for the whole test: what their contracts ask.
+    #![allow(clippy::undocumented_unsafe_blocks)]
+
     use super::*;
     use crate::classes::{Class, MARKER, MARKER_SHIFT};
     use crate::front::slab::{Slab, Spare};
@@ -463,7 +467,7 @@ mod tests {
     fn every_routine(move_to: i32, handler: &dyn Fn(&World)) {
         let c = class();
         let full = Field::spare(c, Spare::Full);
-        let install = |w: &World, t: &dyn Routines| {
+        let install = |w: &World, t: &dyn Routines| unsafe {
             t.store_if_equal(Field::hot(c), w.slot(0, 2), w.slot(2, 1))
         };
         let steps = [
@@ -519,8 +523,9 @@ mod tests {
         let empty = Field::spare(c, Spare::Empty);
         // Magazine 2 is CPU 0's full spare in the populated world; pushing it on another
         // stack makes no sense to the allocator but exercises every step of the routine.
-        let push =
-            |w: &World, t: &dyn Routines| t.stack_push(empty, NonNull::new(w.slot(2, 0)).unwrap());
+        let push = |w: &World, t: &dyn Routines| unsafe {
+            t.stack_push(empty, NonNull::new(w.slot(2, 0)).unwrap())
+        };
         for move_to in [0, 1] {
             let steps = abort_everywhere(&|w, t| push(w, t), &|w, t| push(w, t), move_to, &|_| {});
             assert_eq!(steps, 4);
@@ -547,11 +552,11 @@ mod tests {
         // Store-if-equal compares the whole word.
         let full = world.slot(0, 3);
         assert_eq!(
-            cpu0.store_if_equal(Field::hot(c), ptr::null_mut(), ptr::null_mut()),
+            unsafe { cpu0.store_if_equal(Field::hot(c), ptr::null_mut(), ptr::null_mut()) },
             StoreIfEqual::Mismatch(full)
         );
         assert_eq!(
-            cpu0.store_if_equal(Field::hot(c), full, ptr::null_mut()),
+            unsafe { cpu0.store_if_equal(Field::hot(c), full, ptr::null_mut()) },
             StoreIfEqual::Stored
         );
         assert_eq!(hot0.load(Relaxed), ptr::null_mut());
@@ -564,7 +569,7 @@ mod tests {
         );
         assert_eq!(cpu1.stack_pop(spare), StackPop::Empty);
         assert_eq!(
-            cpu1.stack_push(spare, NonNull::new(magazine).unwrap()),
+            unsafe { cpu1.stack_push(spare, NonNull::new(magazine).unwrap()) },
             StackPush::Pushed
         );
         assert_eq!(world.field(1, spare).load(Relaxed), magazine);
@@ -575,7 +580,7 @@ mod tests {
         world.field(1, Field::hot(c)).store(marker, Relaxed);
         assert_eq!(cpu1.stack_pop(spare), StackPop::Empty);
         let other = NonNull::new(world.slot(2, 0)).unwrap();
-        assert_eq!(cpu1.stack_push(spare, other), StackPush::Marker);
+        assert_eq!(unsafe { cpu1.stack_push(spare, other) }, StackPush::Marker);
         assert_eq!(cpu1.pop(c), None);
         assert!(!cpu1.push(c, object(5)));
         assert_eq!(world.field(1, spare).load(Relaxed), marker);
@@ -593,12 +598,12 @@ mod tests {
             assert_eq!(twin.pop(c), None);
             assert!(!twin.push(c, object(5)));
             assert_eq!(
-                twin.store_if_equal(Field::hot(c), ptr::null_mut(), ptr::null_mut()),
+                unsafe { twin.store_if_equal(Field::hot(c), ptr::null_mut(), ptr::null_mut()) },
                 StoreIfEqual::NoCpu
             );
             let magazine = NonNull::new(world.slot(2, 0)).unwrap();
             assert_eq!(
-                twin.stack_push(Field::spare(c, Spare::Empty), magazine),
+                unsafe { twin.stack_push(Field::spare(c, Spare::Empty), magazine) },
                 StackPush::NoCpu
             );
             assert_eq!(

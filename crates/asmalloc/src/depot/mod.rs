@@ -187,7 +187,7 @@ impl<'a, O: Os, R: Routines, S: Source> Cache<'a, O, R, S> {
 
     /// Sends a magazine this thread holds to the depot: to its class's stack if it has
     /// objects, else to its size's empty stack.
-    fn to_depot(&self, class: SmallClass, magazine: Magazine) {
+    fn to_depot(&self, class: SmallClass, magazine: Magazine<'_>) {
         if magazine.level() > 0 {
             self.depot.full(class).push(self.area, magazine);
         } else {

@@ -62,7 +62,7 @@ impl Stack {
 
     /// Pushes a magazine this thread holds; its recorded level counts toward the stack's
     /// objects. Afterwards the stack owns it.
-    pub fn push<O: Os>(&self, area: Area<'_, O>, magazine: Magazine) {
+    pub fn push<O: Os>(&self, area: Area<'_, O>, magazine: Magazine<'_>) {
         let level = magazine.level() as u32;
         let mut head = Packed::from_word(self.head.load(Acquire));
         loop {
@@ -93,7 +93,7 @@ impl Stack {
     }
 
     /// Pops a magazine of `size`, which this thread then holds.
-    pub fn pop<O: Os>(&self, area: Area<'_, O>, size: MagazineSize) -> Option<Magazine> {
+    pub fn pop<'a, O: Os>(&self, area: Area<'a, O>, size: MagazineSize) -> Option<Magazine<'a>> {
         let mut head = Packed::from_word(self.head.load(Acquire));
         loop {
             let top = MagazineId::new(head.number)?;
@@ -131,11 +131,11 @@ impl Stack {
     /// Every magazine on the stack, top first, without taking any. For audits of a quiescent
     /// heap; panics on a loop.
     #[cfg(test)]
-    pub(crate) fn magazines<O: Os>(
+    pub(crate) fn magazines<'a, O: Os>(
         &self,
-        area: Area<'_, O>,
+        area: Area<'a, O>,
         size: MagazineSize,
-    ) -> std::vec::Vec<Magazine> {
+    ) -> std::vec::Vec<Magazine<'a>> {
         let mut found = std::vec::Vec::new();
         let mut number = Packed::from_word(self.head.load(Relaxed)).number;
         while let Some(id) = MagazineId::new(number) {

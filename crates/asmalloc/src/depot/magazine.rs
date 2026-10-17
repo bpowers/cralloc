@@ -21,6 +21,7 @@ use crate::classes::{MagazineSize, SLOT_BYTES};
 use crate::front::sync::AtomicPtr;
 use crate::os::Os;
 use crate::space::Space;
+use core::marker::PhantomData;
 use core::num::NonZeroU32;
 use core::ptr::{self, NonNull};
 use core::sync::atomic::Ordering::{AcqRel, Acquire, Relaxed, Release};
@@ -59,12 +60,13 @@ impl MagazineId {
 }
 
 /// A magazine this thread holds: not loaded in any slab, on no stack. See the module
-/// documentation.
+/// documentation. It borrows the reservation it lies in, so it cannot outlive it.
 #[derive(Debug, PartialEq, Eq)]
-pub struct Magazine {
+pub struct Magazine<'a> {
     base: NonNull<u8>,
     size: MagazineSize,
     id: MagazineId,
+    area: PhantomData<&'a ()>,
 }
 
 /// What the last slot of an unloaded magazine records.
@@ -76,7 +78,7 @@ pub struct Record {
     pub depth: u32,
 }
 
-impl Magazine {
+impl Magazine<'_> {
     /// The number.
     #[inline]
     pub fn id(&self) -> MagazineId {
@@ -210,7 +212,7 @@ impl<'a, O: Os> Area<'a, O> {
 
     /// The magazine of `size` at `offset`, if one can be there: past the generation page,
     /// aligned to its size, and inside the committed part.
-    fn magazine_at(&self, offset: usize, size: MagazineSize) -> Option<Magazine> {
+    fn magazine_at(&self, offset: usize, size: MagazineSize) -> Option<Magazine<'a>> {
         let committed = self.depot.committed.load(Acquire);
         let fits = admits(offset, size, Self::start(), committed);
         let id = MagazineId::new(u32::try_from(offset / UNIT).ok()?)?;
@@ -218,23 +220,24 @@ impl<'a, O: Os> Area<'a, O> {
             base: self.at(offset),
             size,
             id,
+            area: PhantomData,
         })
     }
 
     /// The magazine of `size` whose slot 0 is at `address`, if one can be there.
-    pub fn magazine(&self, address: usize, size: MagazineSize) -> Option<Magazine> {
+    pub fn magazine(&self, address: usize, size: MagazineSize) -> Option<Magazine<'a>> {
         let offset = address.wrapping_sub(self.space.magazines().addr().get());
         self.magazine_at(offset, size)
     }
 
     /// The magazine with this number.
-    pub fn by_id(&self, id: MagazineId, size: MagazineSize) -> Option<Magazine> {
+    pub fn by_id(&self, id: MagazineId, size: MagazineSize) -> Option<Magazine<'a>> {
         self.magazine_at(id.offset(), size)
     }
 
     /// The magazine a slab word names, and the level the word gives it: the word is the
     /// address of slot `level + 1`.
-    pub fn loaded(&self, word: usize, size: MagazineSize) -> Option<(Magazine, usize)> {
+    pub fn loaded(&self, word: usize, size: MagazineSize) -> Option<(Magazine<'a>, usize)> {
         let slot = size.slot_of(word);
         let magazine = self.magazine(word - slot * SLOT_BYTES, size)?;
         (slot >= 1 && slot < size.slots()).then_some((magazine, slot - 1))
@@ -279,7 +282,7 @@ impl<'a, O: Os> Area<'a, O> {
 
     /// A new, empty magazine of `size`, or `None` if the area is used up or cannot be made
     /// writable. Its memory is fresh, so it reads as an empty magazine.
-    pub fn create(&self, size: MagazineSize) -> Option<Magazine> {
+    pub fn create(&self, size: MagazineSize) -> Option<Magazine<'a>> {
         let bytes = size.bytes();
         let mut carved = self.depot.carved.load(Acquire);
         let start = loop {

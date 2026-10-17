@@ -20,15 +20,20 @@ Committed magazine memory stays mapped and writable for the life of the reservat
 contract; nothing in the crate purges or unmaps the magazine area), and every access to a
 magazine slot anywhere in the crate is atomic.
 
-**Why (S) holds.** Writers of slab fields are:
+**Why (S) holds.** Outside the crate, nothing can write a slab field: `Slab::field` is
+crate-private, and the only public ways in are the routines. Of those, pop and push keep (S)
+by themselves (below); store-if-equal and stack push are `unsafe fn`s whose contracts require
+exactly the values (S) allows, so a caller that breaks (S) has broken an unsafe contract. Writers
+of slab fields are:
 
 - the twins' (and routines') commits: pop stores `w - 8` only when `w & mask != 0`, so `s >= 2`
   and the new slot is `s - 1 >= 1`; push stores `w + 8` only when `(w + 8) & mask != 0`, so
   `s <= n - 2` and the new slot is at most `n - 1`. `classes::verify` proves both tests for every
   size, address and marker. The stack routines store a magazine address the slow path holds
   (below) or the link they read, which (S) covers;
-- store-if-equal, whose `new` is always `Magazine::word(level)` with `level <= capacity`, so
-  slot `level + 1` in `1..=n - 1` of a `Magazine` handle;
+- store-if-equal, whose contract requires `new` to keep (S). The crate's only callers (SLOW-01)
+  pass `Magazine::word(level)` with `level <= capacity`, so slot `level + 1` in `1..=n - 1` of
+  a `Magazine` handle;
 - the drain, which stores its marker, zero, or (in back-out) a value it exchanged out of the same
   field, with markers mapped to zero.
 
@@ -58,9 +63,10 @@ reservation's base pointer (`Area::at`), so it is valid for the whole reservatio
 
 ## TWIN-02: `slot(magazine)` in `try_stack_push`
 
-**Proof.** `magazine` is the slot-0 address of a magazine the calling slow path holds
-(`Magazine::base` of a handle), committed by the admission check above. Slot 0 is inside it
-and 8-aligned.
+**Proof.** `try_stack_push` is reached only from `stack_push`, an `unsafe fn` whose contract
+says `magazine` is the slot-0 address of a magazine of the field's class's size, in committed
+magazine memory, that the caller holds. Slot 0 is inside it and 8-aligned. The crate's only
+caller (SPARE-01) passes `Magazine::base` of a handle it holds.
 
 ## TWIN-03: `slot(head)` in `try_stack_pop`
 

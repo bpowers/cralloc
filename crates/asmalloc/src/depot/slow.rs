@@ -32,11 +32,11 @@ use core::ptr::NonNull;
 use core::sync::atomic::Ordering::Acquire;
 
 /// What a slab word read without protection holds.
-enum Seen {
+enum Seen<'a> {
     /// No magazine.
     Zero,
     /// A magazine, at this level.
-    Loaded(Magazine, usize),
+    Loaded(Magazine<'a>, usize),
     /// This process's marker: a drain is under way. Never stored over.
     Live,
     /// Another generation's marker: absent.
@@ -44,9 +44,9 @@ enum Seen {
 }
 
 /// Where a magazine for the slow path came from, or why there is none.
-enum Obtained {
+enum Obtained<'a> {
     /// A magazine this thread now holds, suitable for the request.
-    Magazine(Magazine),
+    Magazine(Magazine<'a>),
     /// An empty magazine was had but the source has no objects: the allocation fails.
     OutOfMemory,
     /// No magazine can be had at all: serve the request from the source directly.
@@ -56,7 +56,7 @@ enum Obtained {
 /// How many pointers a fill or a launder moves through the stack at a time.
 pub(super) const CHUNK: usize = 64;
 
-impl<O: Os, R: Routines, S: Source> Cache<'_, O, R, S> {
+impl<'a, O: Os, R: Routines, S: Source> Cache<'a, O, R, S> {
     /// Whether a word is a marker that a slow path must not store over: this process's, or
     /// any marker if there is no generation yet (none can be drained without one).
     pub(super) fn is_live(&self, word: *mut u8) -> bool {
@@ -67,7 +67,7 @@ impl<O: Os, R: Routines, S: Source> Cache<'_, O, R, S> {
             }
     }
 
-    fn classify(&self, word: *mut u8, class: SmallClass) -> Seen {
+    fn classify(&self, word: *mut u8, class: SmallClass) -> Seen<'a> {
         if word.is_null() {
             Seen::Zero
         } else if is_marker(word.addr()) {
@@ -87,8 +87,8 @@ impl<O: Os, R: Routines, S: Source> Cache<'_, O, R, S> {
     }
 
     /// An empty magazine for `class`: from the CPU's spares, the depot, or newly made.
-    fn obtain_empty(&self, class: SmallClass) -> Option<Magazine> {
-        if let Some(magazine) = self.spare_pop(class, Spare::Empty) {
+    fn obtain_empty(&self, class: SmallClass, stale: &mut bool) -> Option<Magazine<'a>> {
+        if let Some(magazine) = self.spare_pop(class, Spare::Empty, stale) {
             if magazine.level() == 0 {
                 return Some(magazine);
             }
@@ -106,8 +106,8 @@ impl<O: Os, R: Routines, S: Source> Cache<'_, O, R, S> {
 
     /// A magazine with objects of `class`: from the CPU's spares, the depot, or by filling an
     /// empty one from the source.
-    fn obtain_full(&self, class: SmallClass, stale: &mut bool) -> Obtained {
-        if let Some(magazine) = self.spare_pop(class, Spare::Full) {
+    fn obtain_full(&self, class: SmallClass, stale: &mut bool) -> Obtained<'a> {
+        if let Some(magazine) = self.spare_pop(class, Spare::Full, stale) {
             if magazine.level() > 0 {
                 return Obtained::Magazine(magazine);
             }
@@ -116,7 +116,7 @@ impl<O: Os, R: Routines, S: Source> Cache<'_, O, R, S> {
         if let Some(magazine) = self.depot.full(class).pop(self.area, class.magazine()) {
             return Obtained::Magazine(magazine);
         }
-        let Some(magazine) = self.obtain_empty(class) else {
+        let Some(magazine) = self.obtain_empty(class, stale) else {
             return Obtained::NoMagazine;
         };
         if self.fill(class, &magazine) == 0 {
@@ -213,10 +213,12 @@ impl<O: Os, R: Routines, S: Source> Cache<'_, O, R, S> {
             if let Seen::Live = seen {
                 return self.serve_alloc(class, held);
             }
-            match self
-                .routines
-                .store_if_equal(field, word, held.word(held.level()))
-            {
+            // SAFETY: SLOW-01.
+            let installed = unsafe {
+                self.routines
+                    .store_if_equal(field, word, held.word(held.level()))
+            };
+            match installed {
                 StoreIfEqual::Stored => {
                     if let Seen::Loaded(old, _) = seen {
                         old.set_level(0);
@@ -271,13 +273,15 @@ impl<O: Os, R: Routines, S: Source> Cache<'_, O, R, S> {
                 Seen::Stale => chores.stale = true,
                 _ => {}
             }
-            let Some(held) = self.obtain_empty(class) else {
+            let Some(held) = self.obtain_empty(class, &mut chores.stale) else {
                 return self.source.free_one(class, object);
             };
             if let Seen::Live = seen {
                 return self.serve_free(class, held, object);
             }
-            match self.routines.store_if_equal(field, word, held.word(0)) {
+            // SAFETY: SLOW-01.
+            let installed = unsafe { self.routines.store_if_equal(field, word, held.word(0)) };
+            match installed {
                 StoreIfEqual::Stored => {
                     if let Seen::Loaded(old, level) = seen {
                         old.set_level(level);

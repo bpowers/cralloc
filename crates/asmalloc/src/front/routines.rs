@@ -89,13 +89,27 @@ pub unsafe trait Routines {
     /// Store-if-equal, the conditional install. With `w = S[field]`: fail with `NoCpu` if the
     /// CPU number is out of range, or with `Mismatch(w)` if `w != expected` (compared as
     /// addresses); otherwise commit `S[field] = new` and return `Stored`.
-    fn store_if_equal(&self, field: Field, expected: *mut u8, new: *mut u8) -> StoreIfEqual;
+    ///
+    /// # Safety
+    ///
+    /// `new` keeps the slab invariant for `field`: for a hot word, zero, a marker, or the
+    /// address of slot `s`, `1 <= s <= n - 1`, of a magazine of the class's size in committed
+    /// magazine memory that the caller holds, with slots `1..s` holding its objects; for a spare
+    /// head, zero, a marker, or the slot-0 address of such a magazine whose link keeps the
+    /// invariant. The routines that later read the field dereference it.
+    unsafe fn store_if_equal(&self, field: Field, expected: *mut u8, new: *mut u8) -> StoreIfEqual;
 
     /// Stack push. With `h = S[field]`: fail with `NoCpu` if the CPU number is out of range,
     /// or with `Marker` if `h` is a marker ([`crate::classes::is_marker`]); otherwise write
     /// `M[magazine] = h` (the magazine's link, slot 0, which only the caller can see until the
     /// commit), commit `S[field] = magazine`, and return `Pushed`.
-    fn stack_push(&self, field: Field, magazine: NonNull<u8>) -> StackPush;
+    ///
+    /// # Safety
+    ///
+    /// `magazine` is the slot-0 address of a magazine of the size of `field`'s class, in
+    /// committed magazine memory, that the caller holds: the routine writes its link, and the
+    /// stack pop that later reads the head dereferences it.
+    unsafe fn stack_push(&self, field: Field, magazine: NonNull<u8>) -> StackPush;
 
     /// Stack pop. With `h = S[field]`: fail with `NoCpu` if the CPU number is out of range, or
     /// with `Empty` if `h` is zero or a marker; otherwise read `n = M[h]` (the link, inside the

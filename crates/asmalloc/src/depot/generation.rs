@@ -8,8 +8,8 @@
 //! markers as another generation's, and needs no repair pass (`tla/Drain.tla`, protocol
 //! "gen").
 //!
-//! A generation is kept in marker form, `(random << MARKER_SHIFT) | MARKER`, so the same word
-//! is the claim and the marker. A child that drew its parent's number would treat the parent's
+//! A generation is kept in marker form, the random number's bits above [`MARKER_SHIFT`] with
+//! [`MARKER`] below, so the same word is the claim and the marker. A child that drew its parent's number would treat the parent's
 //! abandoned claim and markers as live: that slab would stay on the slow path and never be
 //! drained, and nothing would be duplicated.
 //!
@@ -36,10 +36,12 @@ const DRAINS: u64 = 2;
 pub struct Generation(NonZeroU64);
 
 impl Generation {
-    /// The generation for a random number.
+    /// The generation for a random number: its high bits, above the marker's low bits. The
+    /// high bits are where a multiplicative mix, like the Linux fallback's, puts its entropy.
     pub const fn from_random(random: u64) -> Generation {
+        let low = (1u64 << MARKER_SHIFT) - 1;
         // A marker has its lowest bit set, so it is never zero and the fallback never happens.
-        match NonZeroU64::new(random << MARKER_SHIFT | MARKER as u64) {
+        match NonZeroU64::new(random & !low | MARKER as u64) {
             Some(word) => Generation(word),
             None => Generation(NonZeroU64::MIN),
         }

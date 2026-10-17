@@ -9,8 +9,8 @@
 //!    aborted. If the fence fails, put each old value back with a compare-and-swap against the
 //!    marker (a marker comes back as zero), release the claim, and stop.
 //! 4. Read each field again. If it still holds the marker, nothing can commit to it any more and
-//!    the drainer owns the old value: it stores zero and sends whatever magazines the old value
-//!    names to the depot. If it holds anything else, a sequence that started before step 2
+//!    the drainer owns the old value: it clears the marker (with a compare-and-swap, see below)
+//!    and sends whatever magazines the old value names to the depot. If it holds anything else, a sequence that started before step 2
 //!    committed, the old value still belongs to that CPU, and the drainer takes nothing and
 //!    writes nothing.
 //! 5. Release the claim with a compare-and-swap from this generation, since a forked child may
@@ -31,7 +31,7 @@ use crate::classes::{SMALL_COUNT, SmallClass, is_marker};
 use crate::front::{Cpu, Field, Routines, Spare};
 use crate::os::Os;
 use core::ptr;
-use core::sync::atomic::Ordering::{AcqRel, Acquire, Relaxed, Release};
+use core::sync::atomic::Ordering::{AcqRel, Acquire, Relaxed};
 
 /// How a drain ended.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -84,7 +84,8 @@ impl<O: Os, R: Routines, S: Source> Cache<'_, O, R, S> {
         let mut old = [[ptr::null_mut::<u8>(); 3]; SMALL_COUNT];
         for class in SmallClass::all() {
             for (k, kind) in KINDS.into_iter().enumerate() {
-                old[class.ordinal()][k] = slab.field(field(class, kind)).swap(marker, AcqRel);
+                old[class.ordinal() % SMALL_COUNT][k] =
+                    slab.field(field(class, kind)).swap(marker, AcqRel);
             }
         }
 
@@ -92,7 +93,7 @@ impl<O: Os, R: Routines, S: Source> Cache<'_, O, R, S> {
         if self.os().fence(cpu.get()).is_err() {
             for class in SmallClass::all() {
                 for (k, kind) in KINDS.into_iter().enumerate() {
-                    let was = old[class.ordinal()][k];
+                    let was = old[class.ordinal() % SMALL_COUNT][k];
                     let restore = if is_marker(was.addr()) {
                         ptr::null_mut()
                     } else {
@@ -116,8 +117,13 @@ impl<O: Os, R: Routines, S: Source> Cache<'_, O, R, S> {
                 if !generation.is_mine(current.load(Acquire)) {
                     continue;
                 }
-                current.store(ptr::null_mut(), Release);
-                let was = old[class.ordinal()][k];
+                // The marker was still there after the fence, so the old value is this
+                // drain's. Clearing it takes a compare-and-swap: in the parent nothing can
+                // replace the marker now, but in a child forked from a signal handler during
+                // this drain the marker is another generation's, which a slow path may already
+                // have installed over, and that magazine must not be overwritten.
+                let _ = current.compare_exchange(marker, ptr::null_mut(), AcqRel, Relaxed);
+                let was = old[class.ordinal() % SMALL_COUNT][k];
                 if was.is_null() || is_marker(was.addr()) {
                     continue;
                 }
@@ -157,7 +163,7 @@ impl<O: Os, R: Routines, S: Source> Cache<'_, O, R, S> {
     fn take_chain(&self, class: SmallClass, head: usize) {
         let mut next = head;
         while next != 0 {
-            let magazine: Magazine = match self.area.magazine(next, class.magazine()) {
+            let magazine: Magazine<'_> = match self.area.magazine(next, class.magazine()) {
                 Some(magazine) => magazine,
                 None => self
                     .os()

@@ -52,16 +52,28 @@ pub(super) enum Head {
     Marker(*mut u8),
 }
 
-impl<O: Os, R: Routines, S: Source> Cache<'_, O, R, S> {
-    /// Pops a spare of `kind` for `class` from the current CPU's stack.
-    pub(super) fn spare_pop(&self, class: SmallClass, kind: Spare) -> Option<Magazine> {
+impl<'a, O: Os, R: Routines, S: Source> Cache<'a, O, R, S> {
+    /// Pops a spare of `kind` for `class` from the current CPU's stack. A stack that turns out
+    /// to hold another generation's marker is reported, so that the heartbeat drains the slab.
+    pub(super) fn spare_pop(
+        &self,
+        class: SmallClass,
+        kind: Spare,
+        stale: &mut bool,
+    ) -> Option<Magazine<'a>> {
         match self.routines.stack_pop(Field::spare(class, kind)) {
             StackPop::Popped(head) => Some(self.magazine_or_abort(head.addr().get(), class)),
-            StackPop::Empty | StackPop::NoCpu => None,
+            StackPop::Empty => {
+                if let Some(Head::Marker(marker)) = self.spare_head(class, kind) {
+                    *stale |= !self.is_live(marker);
+                }
+                None
+            }
+            StackPop::NoCpu => None,
         }
     }
 
-    fn magazine_or_abort(&self, address: usize, class: SmallClass) -> Magazine {
+    fn magazine_or_abort(&self, address: usize, class: SmallClass) -> Magazine<'a> {
         match self.area.magazine(address, class.magazine()) {
             Some(magazine) => magazine,
             None => self
@@ -95,9 +107,9 @@ impl<O: Os, R: Routines, S: Source> Cache<'_, O, R, S> {
         &self,
         class: SmallClass,
         kind: Spare,
-        magazine: Magazine,
+        magazine: Magazine<'a>,
         stale: &mut bool,
-    ) -> Result<(), Magazine> {
+    ) -> Result<(), Magazine<'a>> {
         let limit = spare_limit(self.tuning, class, kind) as u32;
         let depth = match self.spare_head(class, kind) {
             None => return Err(magazine),
@@ -115,10 +127,12 @@ impl<O: Os, R: Routines, S: Source> Cache<'_, O, R, S> {
             level: magazine.level(),
             depth,
         });
-        match self
-            .routines
-            .stack_push(Field::spare(class, kind), magazine.base())
-        {
+        // SAFETY: SPARE-01.
+        let pushed = unsafe {
+            self.routines
+                .stack_push(Field::spare(class, kind), magazine.base())
+        };
+        match pushed {
             StackPush::Pushed => Ok(()),
             StackPush::Marker | StackPush::NoCpu => Err(magazine),
         }
@@ -130,7 +144,7 @@ impl<O: Os, R: Routines, S: Source> Cache<'_, O, R, S> {
         &self,
         class: SmallClass,
         kind: Spare,
-        magazine: Magazine,
+        magazine: Magazine<'a>,
         stale: &mut bool,
     ) {
         if let Err(magazine) = self.spare_push(class, kind, magazine, stale) {

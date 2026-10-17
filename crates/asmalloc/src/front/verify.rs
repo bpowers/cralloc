@@ -140,11 +140,15 @@ fn store_if_equal_follows_its_specification() {
     let word = slab0(&slabs).field(field);
     word.store(ptr::without_provenance_mut(current), Relaxed);
     let machine = machine();
-    let outcome = Twin::new(&slabs, &machine).store_if_equal(
-        field,
-        ptr::without_provenance_mut(expected),
-        ptr::without_provenance_mut(new),
-    );
+    // SAFETY: the harness runs no routine after this one, so nothing dereferences `new`;
+    // its arbitrary value only exercises the comparison.
+    let outcome = unsafe {
+        Twin::new(&slabs, &machine).store_if_equal(
+            field,
+            ptr::without_provenance_mut(expected),
+            ptr::without_provenance_mut(new),
+        )
+    };
     if current == expected {
         assert!(outcome == StoreIfEqual::Stored && word.load(Relaxed).addr() == new);
     } else {
@@ -179,7 +183,8 @@ fn the_stack_routines_follow_their_specifications() {
     let twin = Twin::new(&slabs, &machine);
     if kani::any() {
         let magazine = NonNull::new(slot_address(&pushed, 0)).unwrap();
-        let outcome = twin.stack_push(field, magazine);
+        // SAFETY: `pushed` is a magazine of the harness's own, alive for the whole harness.
+        let outcome = unsafe { twin.stack_push(field, magazine) };
         if is_marker(head.addr()) {
             assert!(outcome == StackPush::Marker && word.load(Relaxed) == head);
         } else {

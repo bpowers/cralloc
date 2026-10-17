@@ -282,12 +282,16 @@ fn exchanges_keep_one_owner_under_every_schedule(bounds: Bounds) {
 
 /// A drain of CPU 0 races a thread allocating and freeing there (`Drain_claim`, protocol
 /// "gen"): whatever a sequence in flight commits wins, and the drain takes exactly the rest.
-fn a_drain_and_a_mutator_keep_one_owner_under_every_schedule(bounds: Bounds, ops: &[Op]) {
+fn a_drain_and_a_mutator_keep_one_owner_under_every_schedule(
+    bounds: Bounds,
+    ops: &[Op],
+    migrations: usize,
+) {
     let found = explore(
         bounds,
         2,
         || {
-            let world = World::new(6, 0);
+            let world = World::new(6, migrations);
             world.populate();
             world
         },
@@ -362,8 +366,10 @@ fn a_drain_that_backs_out_keeps_one_owner_under_every_schedule(bounds: Bounds, o
 }
 
 /// A fork at any step of a drain racing a mutator, the forking thread being either one
-/// (`Drain_gen_any`, `Fork_gen_any`). Afterwards the child allocates, frees and drains both
-/// CPUs: nothing is in two places, and nothing the parent left blocks it.
+/// (`Drain_gen_any`, `Fork_gen_any`). The fork comes from a signal handler that allocates and
+/// frees in the child before the interrupted thread resumes, so a surviving drainer meets
+/// the child's installs over its now-stale markers. Afterwards the child allocates, frees and
+/// drains both CPUs: nothing is in two places, and nothing the parent left blocks it.
 fn a_fork_at_any_step_duplicates_nothing(bounds: Bounds, ops: &[Op]) {
     let found = explore(
         bounds,
@@ -382,8 +388,16 @@ fn a_fork_at_any_step_duplicates_nothing(bounds: Bounds, ops: &[Op]) {
                 cache.drain(world.rig.slabs().cpu(0).unwrap());
             }
         },
-        // SAFETY: at a fork the checker has stopped every other thread.
-        |world| unsafe { world.rig.os().sim.wipe_for_fork() },
+        |world| {
+            // SAFETY: at a fork the checker has stopped every other thread.
+            unsafe { world.rig.os().sim.wipe_for_fork() };
+            // The fork came from a signal handler, which goes on in the child before the
+            // interrupted code resumes: it allocates and frees on the CPU being drained, over
+            // whatever the parent's drain left there.
+            let child = world.machine(THREADS - 1, 0);
+            world.alloc(&child);
+            world.free(&child);
+        },
         |world, forked| {
             if forked {
                 let child = world.machine(0, 0);
@@ -465,7 +479,7 @@ fn the_check_os_fence_aborts_the_sequence_in_flight() {
 
 /// The scenarios within bounds small enough for the merge gate, and within the larger bounds
 /// they were checked with, which run on demand: `cargo test -p asmalloc -- --ignored interleave`
-/// (about a minute). Only the larger bounds reach the schedules in which a sequence commits
+/// (a few minutes). Only the larger bounds reach the schedules in which a sequence commits
 /// over a drainer's marker (two preemptions) or a fork takes a drainer mid-drain (one
 /// preemption and a fork); deliberately broken drains, back-outs and claim checks pass the
 /// quick runs and fail the full ones.
@@ -490,15 +504,18 @@ mod run {
         super::a_drain_and_a_mutator_keep_one_owner_under_every_schedule(
             Bounds::preemptions(1),
             MUTATE,
+            0,
         );
     }
 
     #[test]
     #[ignore = "minutes; run on demand"]
     fn a_drain_and_a_mutator_keep_one_owner_under_every_schedule_fully() {
+        // The mutator may also move to the other CPU once, mid-drain.
         super::a_drain_and_a_mutator_keep_one_owner_under_every_schedule(
             Bounds::preemptions(2),
             MUTATE,
+            1,
         );
     }
 
@@ -553,6 +570,6 @@ mod run {
     #[test]
     #[ignore = "minutes; run on demand"]
     fn depot_stacks_keep_one_owner_under_every_schedule_fully() {
-        super::depot_stacks_keep_one_owner_under_every_schedule(Bounds::preemptions(2));
+        super::depot_stacks_keep_one_owner_under_every_schedule(Bounds::preemptions(3));
     }
 }
