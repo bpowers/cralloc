@@ -95,28 +95,38 @@ memory-safety matter: a child that drew its parent's generation would treat the 
 abandoned drain claim and markers as live, which leaves one CPU's cache undrained and on the
 slow path, and duplicates nothing.
 
-## KERNEL-06: `abort`
+## KERNEL-06: `abort`, `unblock_sigabrt` and `raise_sigabrt`
 
-**Blocks.** rt_sigaction and rt_sigprocmask; then getpid, gettid, tgkill and exit_group through
-`int_call`.
+**Blocks.** rt_sigprocmask in `unblock_sigabrt`; getpid, gettid and tgkill in `raise_sigabrt`;
+rt_sigaction and exit_group in `abort`.
+
+**Order.** The first thread to abort sets `ABORTING`, unblocks SIGABRT and raises it with the
+program's disposition in place, as glibc's `abort` does, so a crash reporter's handler runs.
+The heap is valid at that point: the allocator refused to go on, it did not break. If the
+handler returns, or ignores the signal, or calls back into `abort` (the flag is set, so the
+nested call skips straight on), `abort` restores the default action, unblocks and raises again,
+and ends with exit_group if even that returns.
 
 **Proof.**
 
+- rt_sigprocmask(SIG_UNBLOCK, `&set`, null, 8) reads one signal set from a live local.
 - rt_sigaction(SIGABRT, `&default`, null, 8) reads one `KernelSigaction` from a live local.
   The layout is the kernel's x86-64 `struct sigaction`: handler, flags, restorer, mask, which
-  differs from glibc's. The size argument 8 is the kernel's `sigset_t`. The old-action pointer
-  is null, so nothing is written back.
-- rt_sigprocmask(SIG_UNBLOCK, `&set`, null, 8) reads one signal set from a live local.
+  differs from glibc's. The size argument 8 is the kernel's `sigset_t`. The old-action and
+  old-set pointers are null, so nothing is written back.
 - The pointers come from shared references and the kernel only reads them.
-- getpid and gettid take nothing. tgkill(pid, tid, SIGABRT) with the default disposition
-  restored and the signal unblocked ends the process with a core dump. exit_group(127) ends it
-  if anything before failed, so the function does not return, as `-> !` requires.
+- getpid and gettid take nothing. tgkill(pid, tid, SIGABRT) runs the disposition in force: the
+  program's handler the first time, the default (end the process with a core dump) the second.
+  exit_group(127) ends the process if both raises returned, so the function does not return, as
+  `-> !` requires.
 - Changing the process's SIGABRT disposition and mask is this function's to do, because the
-  process is ending. Restoring the default action on purpose skips any user handler, since a
-  handler that allocated would re-enter a heap the allocator has just refused to continue with.
+  process is ending. A handler that allocates re-enters a heap that is still consistent; at
+  worst it aborts again, which the flag turns into the default action.
+- `ABORTING` is one static atomic, all-zero valid; it holds no allocator state.
 
 **`int_call` itself.** It forwards to `syscall` with three integer arguments. Its callers are
-exactly the four calls above, none of which takes a pointer.
+getpid, gettid, tgkill and exit_group here and getpid in `random`, none of which takes a
+pointer.
 
 ## KERNEL-07: `unsafe impl Os for LinuxOs`
 
@@ -140,11 +150,10 @@ single call:
 - `glibc_registers_rseq`.
 - `rseq_fences_aim_at_one_cpu_after_registering`, `random_numbers_differ` and
   `a_page_can_be_marked_to_be_wiped_on_fork`.
-- `abort_ends_the_process_with_sigabrt`: a child process, checking the signal and the message.
+- `abort_ends_the_process_with_sigabrt` and
+  `abort_runs_the_programs_handler_then_ends_the_process_anyway`: child processes, checking
+  the signal, the message and that a returning handler ran.
 
-**Review.** 2026-10-17, fresh adversarial reviewer:
-
-- Accepted: KERNEL-01 (with the wording fix now made), KERNEL-02 to KERNEL-06.
-- KERNEL-07's rseq bullet was not accepted, because registration is per thread. It and the
-  "interchangeable values" bullet are rewritten above and await the same reviewer's check.
-- The buffer was shrunk and is now iterated by reference, so it is no longer copied.
+**Review.** 2026-10-17, fresh adversarial reviewer: KERNEL-01 to KERNEL-07 accepted, after
+the fixes of its first round. KERNEL-06 changed since (the handler now runs first) and needs
+the reviewer's check again.

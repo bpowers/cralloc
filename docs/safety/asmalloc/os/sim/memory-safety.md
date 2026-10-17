@@ -1,14 +1,16 @@
 # Safety ledger: `crates/asmalloc/src/os/sim/memory.rs`
 
-The simulated OS's host allocation. Test infrastructure, but the allocator's proofs and Miri
-runs rely on it, so it is held to the same rule.
+The simulated OSes' host allocation, shared by `SimOs` and `ProofOs`. Test infrastructure, but
+the allocator's proofs and Miri runs rely on it, so it is held to the same rule.
 
 **Machine checks for every entry below.**
 
-- Kani `os::sim::verify_slow::the_simulator_keeps_the_zero_promises` runs allocation, zeroing
-  and free on the `Tiny` shape for every byte offset and value. Kani checks every access.
-- Miri with `-Zmiri-strict-provenance` runs all the simulator and `Space` unit tests on the
-  `Standard` shape, including eight threads reserving at once.
+- Kani `os::sim::verify::a_tiny_heap_starts_and_its_memory_works` (in the gate) runs allocation,
+  zeroing and free through `ProofOs` for every byte offset of a page, and
+  `os::sim::verify_slow::the_simulator_keeps_the_zero_promises` does the same through `SimOs`.
+  Kani checks every access.
+- Miri with `-Zmiri-strict-provenance` (`scripts/miri`) runs all the simulator and `Space` unit
+  tests on the `Standard` shape, including threads reserving at once.
 
 The pen-and-paper part is the generalization to every shape and capacity.
 
@@ -16,9 +18,9 @@ The pen-and-paper part is the generalization to every shape and capacity.
 
 **Proof.** `Memory` is a `NonNull<u8>` and a `Layout`. It owns its allocation and holds no
 references, no thread-affine resources and no interior mutability. Sharing it exposes the base
-address, offset arithmetic, and the unsafe `zero`, whose contract puts synchronization on the
-caller. Moving it moves ownership of the allocation, which the global allocator frees from any
-thread.
+address, offset arithmetic, and the unsafe `zero` and `is_zero`, whose contracts put
+synchronization on the caller. Moving it moves ownership of the allocation, which the global
+allocator frees from any thread.
 
 ## SIM-MEMORY-02: `alloc_zeroed` in `Memory::new`
 
@@ -36,18 +38,32 @@ reads or writes those bytes during the call.
 **Proof.** `base.as_ptr().add(offset)` stays within the allocation because
 `offset <= self.len()`, and writing `len` bytes from there stays within it because
 `len <= self.len() - offset`. `base` came from the allocator, so it carries provenance for all
-of it. `u8` needs no alignment and every value is valid. The callers, `SimOs::purge` and
-`SimOs::unmap`, establish the bound with `checked_range`, which panics unless the range is
-inside the memory. They establish exclusivity from their own `Os` contracts (SIM-OS-02).
+of it. `u8` needs no alignment and every value is valid. The callers establish the bound by
+checking the range first: `SimOs::checked_range`, `ProofOs::checked` and the recorded wipe
+range. They establish exclusivity from their own `Os` contracts (SIM-OS-02, PROOF-01).
 
 ## SIM-MEMORY-04: `dealloc` in `Drop for Memory`
 
 **Proof.** `base` and `layout` are exactly what `alloc_zeroed` returned and was given, and drop
-runs once. Every `Space` borrows the `SimOs` it came from (and `SpaceCell` owns it), so no
-`Space` and no safe call through one exists after the drop. Raw pointers copied out of a `Space`
-may outlive it, but dereferencing them is unsafe, and the `Os` contract makes reservations valid
-only until the value that made them is dropped.
+runs once. Every `Space` borrows the OS it came from (and `SpaceCell` owns it), so no `Space`
+and no safe call through one exists after the drop. Raw pointers copied out of a `Space` may
+outlive it, but dereferencing them is unsafe, and the `Os` contract makes reservations valid only
+until the value that made them is dropped.
 
-**Review.** 2026-10-17, fresh adversarial reviewer: SIM-MEMORY-01 to 03 accepted. SIM-MEMORY-04
-was not, because a `Space` could then outlive its `SimOs`; that is fixed by the borrow above,
-which awaits the same reviewer's check.
+## SIM-MEMORY-05: `from_raw_parts` in `Memory::is_zero`
+
+**Preconditions** (the function's `# Safety`). `offset + len <= self.len()`, and no thread
+writes those bytes during the call.
+
+**Proof.** The slice lies within the allocation for the same reason as in SIM-MEMORY-03, it is
+initialized (the allocation was zeroed and is only ever written with bytes), and `u8` needs no
+alignment. Readers may share it; the caller rules out writers for the slice's lifetime, which
+ends with the call. The callers:
+
+- `check_untouched` reads pages that are not committed, which no correct caller writes.
+  Catching a buggy writer is the point; a write racing the check would be the bug the check
+  exists to find, in test code.
+- `is_purged` and `resident_bytes` are test queries documented "call while nothing writes".
+
+**Review.** 2026-10-17, fresh adversarial reviewer: SIM-MEMORY-01 to 04 accepted. SIM-MEMORY-05
+is new and needs the reviewer's check.

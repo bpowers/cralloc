@@ -41,6 +41,6 @@ So an unregistered thread never reaches a slab whatever these facts say.
 **Machine checks.** `os::linux::kernel::tests::glibc_registers_rseq` reads both values on the
 reference platform.
 
-**Review.** 2026-10-17, fresh adversarial reviewer: points 1 and 2 accepted. Point 3 was not:
-it claimed registration was the same for every thread. It is corrected above, and the
-correction awaits the same reviewer's check.
+**Review.** 2026-10-17, fresh adversarial reviewer: points 1 to 3 accepted, point 3 after its
+correction. The entry has since been revised for indexing by CPU number (the concurrency-ID
+facts are gone) and needs the reviewer's check again.
