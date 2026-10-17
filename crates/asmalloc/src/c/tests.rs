@@ -247,3 +247,53 @@ fn the_version_is_the_crates() {
     assert_eq!(version.to_str(), Ok(env!("CARGO_PKG_VERSION")));
     assert_eq!(asmalloc_version(), asmalloc_version());
 }
+
+#[test]
+fn operator_new_serves_every_form_with_its_alignment() {
+    for size in [0, 1, 16, 24, 100, 40 << 10, 3 << 20] {
+        for p in [cxx::operator_new(size), cxx::operator_new_nothrow(size)] {
+            assert!(!p.is_null());
+            assert!(usable(p) >= size);
+            if size >= 16 {
+                assert_eq!(p.addr() % 16, 0);
+            }
+            // SAFETY: a live block, given up once.
+            unsafe { cxx::operator_delete_sized(p, size) };
+        }
+        for align in [1, 64, 4096, 1 << 21] {
+            let p = cxx::operator_new_aligned(size, align);
+            let q = cxx::operator_new_aligned_nothrow(size, align);
+            assert_eq!(p.addr() % align, 0);
+            assert_eq!(q.addr() % align, 0);
+            // SAFETY: live blocks, each given up once.
+            unsafe {
+                cxx::operator_delete_sized_aligned(p, size, align);
+                cxx::operator_delete(q);
+            }
+        }
+    }
+}
+
+#[test]
+fn nothrow_new_fails_with_null_when_no_handler_is_installed() {
+    // A Rust test binary has no C++ runtime, so there is no new-handler to run.
+    assert!(cxx::operator_new_nothrow(usize::MAX / 4).is_null());
+    assert!(cxx::operator_new_aligned_nothrow(usize::MAX / 4, 64).is_null());
+    // An alignment that is not a power of two is not served.
+    assert!(cxx::operator_new_aligned_nothrow(16, 48).is_null());
+}
+
+#[test]
+fn a_sized_delete_with_the_wrong_size_frees_the_right_block() {
+    let mut seen = Vec::new();
+    for _ in 0..64 {
+        let p = cxx::operator_new(100);
+        // SAFETY: `p` is live and given up once; the size is deliberately wrong.
+        unsafe { cxx::operator_delete_sized(p, 1 << 20) };
+        let q = cxx::operator_new(100);
+        seen.push(q == p);
+        // SAFETY: as above, with a wrong size and alignment.
+        unsafe { cxx::operator_delete_sized_aligned(q, 8, 4096) };
+    }
+    assert!(seen.iter().filter(|&&same| same).count() > 32, "{seen:?}");
+}

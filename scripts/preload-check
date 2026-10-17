@@ -96,6 +96,29 @@ cc -O2 -pthread -o "$bin/signals" "$programs/signals.c" || exit 1
 cc -O2 -pthread -o "$bin/dl" "$programs/dl.c" -ldl || exit 1
 cc -O2 -shared -fPIC -o "$bin/libdlib.so" "$programs/dlib.c" || exit 1
 g++ -O2 -pthread -std=c++20 -o "$bin/cxx" "$programs/cxx.cpp" || exit 1
+g++ -O2 -pthread -std=c++20 -o "$bin/cxx-containers" "$programs/cxx_containers.cpp" || exit 1
+g++ -O2 -std=c++20 -o "$bin/cxx-operators" "$programs/cxx_operators.cpp" || exit 1
+
+# bindings NAME CMD...: every C++ allocation operator the program calls binds to the library
+# (the dynamic loader's own report, LD_DEBUG=bindings), not to the C++ runtime's definitions.
+bindings() {
+  local name="$1"
+  shift
+  wanted "$name" || return 0
+  MEMLIMIT_QUIET=1 "$here/memlimit" -m "$mem" -t 5m -- \
+    env LD_PRELOAD="$lib" LD_DEBUG=bindings "$@" >/dev/null 2>"$work/$name.bindings"
+  local ours others
+  # The 20 replaceable forms, each bound at least once, and no operator bound anywhere else.
+  ours=$(grep -F "to $lib " "$work/$name.bindings" | grep -oE "symbol \`_Z(nw|na|dl|da)[^']*'" |
+    sort -u | wc -l)
+  others=$(grep -E "symbol \`_Z(nw|na|dl|da)" "$work/$name.bindings" | grep -vcF "to $lib ")
+  if [ "$ours" -eq 20 ] && [ "$others" -eq 0 ]; then
+    printf 'PASS  %-24s all 20 operators bind to the library\n' "$name"
+  else
+    printf 'FAIL  %-24s %s operators bind to the library, %s bindings elsewhere\n' "$name" "$ours" "$others"
+    failed+=("$name")
+  fi
+}
 
 if [[ "$(LD_PRELOAD="$lib" "$bin/interposed")" != "asmalloc "* ]]; then
   echo "FAIL  the library does not serve malloc in a preloaded program"
@@ -132,6 +155,12 @@ check git-repack bash -c '
 check xz-threads bash -c 'xz -T8 -6 -c "$1" | tee "$2/xz-$MODE" | sha256sum; xz -T8 -dc "$2/xz-$MODE" | sha256sum; rm -f "$2/xz-$MODE"' _ "$data" "$work"
 check zstd-threads bash -c 'zstd -q -T8 -15 -c "$1" | tee "$2/zst-$MODE" | sha256sum; zstd -q -T8 -dc "$2/zst-$MODE" | sha256sum; rm -f "$2/zst-$MODE"' _ "$data" "$work"
 check cxx "$bin/cxx"
+check cxx-containers "$bin/cxx-containers"
+check cxx-operators "$bin/cxx-operators"
+bindings cxx-bindings "$bin/cxx-operators"
+# asmalloc cannot throw std::bad_alloc: a throwing new that fails ends the process, where
+# libstdc++'s own operator throws (see asmalloc::c::cxx).
+expect cxx-new-fails 134 "$bin/cxx-operators" throw
 check threads "$bin/threads" 20 16 20000
 check threads-exit "$bin/threads" exit
 check forks "$bin/forks" 8 40
