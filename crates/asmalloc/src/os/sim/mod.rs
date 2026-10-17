@@ -875,6 +875,83 @@ mod tests {
         assert_eq!(os.resident_bytes(), 2 * page());
     }
 
+    /// Review R1: a page marked to be wiped on fork can still be committed (the marks once
+    /// shared a bit with a commit in progress, and the commit never returned).
+    #[test]
+    fn a_page_marked_to_be_wiped_can_be_committed() {
+        let os = Sim::with_capacity(region());
+        let base = os.reserve(page(), page()).unwrap();
+        // SAFETY: whole reserved pages that nothing else uses.
+        unsafe {
+            os.wipe_on_fork(base, page()).unwrap();
+            os.commit(base, page()).unwrap();
+        }
+        assert!(os.is_writable(base, page()));
+    }
+
+    /// Review R2: committing a marked page again keeps the mark, as on Linux.
+    #[test]
+    fn a_second_commit_keeps_the_wipe_mark() {
+        let os = Sim::with_capacity(region());
+        let base = os.reserve(page(), page()).unwrap();
+        // SAFETY: whole reserved pages that nothing else uses.
+        unsafe {
+            os.commit(base, page()).unwrap();
+            os.wipe_on_fork(base, page()).unwrap();
+            os.commit(base, page()).unwrap();
+            base.as_ptr().write(7);
+            os.fork(0);
+            assert_eq!(
+                base.as_ptr().read(),
+                0,
+                "the child reads a marked page as zero"
+            );
+        }
+    }
+
+    /// Review R7: a drain in miniature on free-running threads. If the drainer still finds its
+    /// marker after the fence, no twin may have committed over it.
+    #[test]
+    fn no_twin_commits_over_a_marker_the_fence_left_in_place() {
+        use crate::os::{Machine, Step};
+        use core::sync::atomic::AtomicUsize;
+        const OLD: usize = 0x1000;
+        let marker = crate::classes::MARKER;
+        let os = SimOs::<Tiny>::new();
+        os.register_fence().unwrap();
+        let slab = AtomicUsize::new(OLD);
+        let (owned, committed) = thread::scope(|scope| {
+            let drainer = scope.spawn(|| {
+                let old = slab.swap(marker, Ordering::AcqRel);
+                os.fence(0).unwrap();
+                old == OLD && slab.load(Ordering::Acquire) == marker
+            });
+            let twin = scope.spawn(|| {
+                let t = os.thread(0);
+                loop {
+                    if t.step(Step::ReadCpu).is_err() || t.step(Step::Load).is_err() {
+                        continue;
+                    }
+                    let word = slab.load(Ordering::Acquire);
+                    if word == marker {
+                        return false;
+                    }
+                    if t.step(Step::Commit).is_err() {
+                        continue;
+                    }
+                    slab.store(word + 8, Ordering::Release);
+                    t.committed();
+                    return true;
+                }
+            });
+            (drainer.join().unwrap(), twin.join().unwrap())
+        });
+        assert!(
+            !(owned && committed),
+            "the drainer owned the word and a twin committed over it"
+        );
+    }
+
     #[test]
     fn the_rseq_registration_can_be_changed() {
         let os = Sim::new();
