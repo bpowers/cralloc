@@ -71,14 +71,30 @@ pub(crate) const fn lowest(word: u64, n: u32) -> u64 {
     if n >= word.count_ones() {
         return word;
     }
-    // Clearing the lowest set bit `n` times leaves exactly the bits not taken.
-    let mut rest = word;
-    let mut taken = 0;
-    while taken < n {
-        rest &= rest - 1;
-        taken += 1;
+    if n == 0 {
+        return 0;
     }
-    word & !rest
+    // Find the largest `keep` whose low `keep` bits hold fewer than `n` set bits, by binary
+    // search: six steps whatever `n` is. The `n`-th set bit is then bit `keep`.
+    let mut keep = 0;
+    let mut step = BITS / 2;
+    while step > 0 {
+        if (word & low(keep + step)).count_ones() < n {
+            keep += step;
+        }
+        step /= 2;
+    }
+    word & low(keep + 1)
+}
+
+/// The low `bits` bits of a word, `bits <= 64`.
+#[inline(always)]
+const fn low(bits: u32) -> u64 {
+    if bits >= BITS {
+        u64::MAX
+    } else {
+        (1 << bits) - 1
+    }
 }
 
 /// The bits `first..=last` of a word. `first <= last < 64`.

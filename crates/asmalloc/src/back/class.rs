@@ -3,11 +3,12 @@
 //!
 //! A class's regions are found through its summary tree, which visits them in address order. New
 //! slots are carved from one region at a time, the class's carving region. When it is exhausted,
-//! the thread that notices takes the lowest unassigned region with a compare-and-swap on the
-//! region table, prepares it (commits its fixed metadata and gives it its huge-page advice), and
-//! publishes it with a compare-and-swap on the class's carving word. If another thread published
-//! first, the loser undoes its preparation and gives its region back with a compare-and-swap; no
-//! other thread has learned of it, because nothing names a region until it is published.
+//! the thread that notices picks the lowest unassigned region, commits its fixed metadata (so
+//! that the region never carries a class tag without a readable header), takes it with a
+//! compare-and-swap on the region table, gives it its huge-page advice, and publishes it with a
+//! compare-and-swap on the class's carving word. If another thread published first, the loser
+//! zeroes what it wrote and gives its region back with a compare-and-swap; no other thread has
+//! named it, because nothing points into a region until it has been carved from.
 
 use super::host::ClassHost;
 use super::layout::{Grow, Hints};
@@ -241,27 +242,31 @@ impl<'a, O: Os> Back<'a, O> {
         // A class that has filled a region before has carved far past the huge-page threshold,
         // so its new region uses huge pages from the start.
         let huge = seen != 0;
+        let layout = host.layout();
+        let (start, end) = layout.fixed_commit();
         for region in plan.regions() {
             if host.class.carving.load(SeqCst) != seen {
                 return true;
             }
-            if self.state.table.get(region) != RegionTag::Unassigned
-                || self
-                    .state
-                    .table
-                    .replace(region, RegionTag::Unassigned, RegionTag::Class(class))
-                    .is_err()
+            if self.state.table.get(region) != RegionTag::Unassigned {
+                continue;
+            }
+            // Commit the fixed metadata before the region can carry this class's tag, so that
+            // whoever learns the tag (a free of any pointer into the region) can read the header.
+            // Committing is idempotent, so doing it for a region another thread then takes
+            // costs only commit charge.
+            if !host.commit_meta(region, start, end - start) {
+                return false;
+            }
+            if self
+                .state
+                .table
+                .replace(region, RegionTag::Unassigned, RegionTag::Class(class))
+                .is_err()
             {
                 continue;
             }
-            if !self.prepare(host, region, huge) {
-                let _ = self.state.table.replace(
-                    region,
-                    RegionTag::Class(class),
-                    RegionTag::Unassigned,
-                );
-                return false;
-            }
+            self.prepare(host, region, huge);
             let published = region.index() as u32 + 1;
             if host
                 .class
@@ -281,15 +286,11 @@ impl<'a, O: Os> Back<'a, O> {
         false
     }
 
-    /// Readies a region this thread has just taken from the table: commits its fixed metadata,
-    /// and advises the region for or against huge pages, recording a huge-page part from the
-    /// start if `huge`.
-    fn prepare(&self, host: &ClassHost<'a, O>, region: RegionId, huge: bool) -> bool {
+    /// Readies a region this thread has just taken from the table, whose fixed metadata is
+    /// committed: advises the region for or against huge pages, recording a huge-page part from
+    /// the start if `huge`.
+    fn prepare(&self, host: &ClassHost<'a, O>, region: RegionId, huge: bool) {
         let layout = host.layout();
-        let (start, end) = layout.fixed_commit();
-        if !host.commit_meta(region, start, end - start) {
-            return false;
-        }
         let pages = layout.region_pages() as usize;
         let advice = if huge {
             let hints = Hints {
@@ -303,7 +304,6 @@ impl<'a, O: Os> Back<'a, O> {
             HugePages::Avoid
         };
         host.advise(region, 0, pages * layout.page_size(), advice);
-        true
     }
 
     /// Undoes `prepare`'s writes, so that the region's metadata is all zero again.

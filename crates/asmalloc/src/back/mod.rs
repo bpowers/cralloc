@@ -47,6 +47,10 @@ mod models;
 mod testhost;
 #[cfg(test)]
 mod tests;
+#[cfg(kani)]
+mod verify;
+#[cfg(kani)]
+mod verify_slow;
 
 use self::host::{ClassHost, ClassState};
 use self::layout::Layout;
