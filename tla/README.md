@@ -45,8 +45,9 @@ TLC_PREFIX="taskset -c 11,26,27" TLC_WORKERS=3 tla/check
 
 `models.sh` lists every check as `run SPEC CONFIG EXPECTATION`. `check` fails if any result
 differs from its expectation, and prints the number of distinct states and the time for
-each. The whole run takes about a quarter of an hour on three cores; the two largest drain
-configurations take most of it.
+each. The whole run takes about a quarter of an hour on three cores, most of it in
+`Exchange` and the four largest drain configurations. `SLOW=1 tla/check` adds
+`Drain_gen_any_full`, which takes about ten minutes more.
 
 ## The models
 
@@ -78,6 +79,10 @@ bounds, most of them within twenty steps.
 What small bounds cannot show is a flaw that needs four or more distinct views of one word
 at once, or a counter overflow; `Depot_wrap` covers the latter by shrinking the counter.
 
+The drain configurations with a fork split the roles between threads to stay small.
+`Drain_gen_any` has two threads; a three-thread version was explored to 22 million states
+without a violation and not run to completion.
+
 `Drain.tla` keeps no cid for a thread outside a sequence. A sequence starts on any cid that
 no sequence in flight is using, and the OS may abort any sequence at any time. This is the
 same set of behaviours as explicit preemption and resumption, with far fewer states;
@@ -95,7 +100,8 @@ Each has a configuration that reproduces it. Run `tla/check -v NAME` for the tra
 2. **The child's sweep races new drains** (`Drain_sweep`). The sweeping thread has not
    reached a slab yet; another thread claims that slab and exchanges its word; the sweep
    then clears the live marker and the flag; the drainer re-reads zero and drops the
-   magazine it displaced. A longer trace clears a live flag and reproduces finding 1.
+   magazine it displaced. A longer trace clears a live flag and reproduces finding 1
+   (`Drain_sweep_dup`).
    Smallest change: no drain starts until the sweep has finished (`Drain_sweep_hold`).
 
 3. **Fork from a signal handler that interrupted a drain** (`Drain_sweep_hold_any`). The
@@ -115,7 +121,9 @@ Each has a configuration that reproduces it. Run `tla/check -v NAME` for the tra
    (`Drain_gen_any_loss`), which is a bounded leak in a case that needs `fork` inside a
    handler and a second thread draining the same slab in the child.
    A slab left with stale markers stays on the slowest path until some drain visits it, so
-   a slow path that meets a stale marker should drain that slab.
+   a slow path that meets a stale marker should drain that slab. The model lets a drain
+   start on any slab at any time and does not model that trigger, nor the two-word
+   generation update.
 
 4. **A summary bit left clear in a forked child** (`Summary_crash`, `Fork_summary`). A
    thread sets a word's bits and the fork takes it before it sets the summary bit (or
@@ -134,8 +142,8 @@ Each has a configuration that reproduces it. Run `tla/check -v NAME` for the tra
    scraps and wins the compare-and-swap, and the first unmaps: the heap is small for the
    life of the process. Or the second gets nothing and fails its first allocation while a
    heap is about to be published. This needs `RLIMIT_AS`, or eight threads making their
-   first call at once. No one-instruction fix is known; a racer whose reservation is short
-   or fails can at least read the heap word again before publishing or failing.
+   first call at once. No fix is proposed or checked here. Reading the heap word again
+   after a short or failed reservation would narrow the window without closing it.
 
 `Fork.tla` checks the rest of what a child inherits. With the forking thread outside the
 allocator, what the child cannot reach is exactly what the other threads held privately:

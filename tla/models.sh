@@ -1,4 +1,5 @@
 # One line per check: run SPEC CONFIG EXPECTATION. Sourced by ./check.
+# SLOW=1 adds the checks that take more than a few minutes.
 
 # 1. Restartable sequences and cids
 run Rseq Rseq            ok
@@ -23,6 +24,8 @@ run Drain Drain_sweep_hold_any  violates NoDouble
 run Drain Drain_gen             ok
 run Drain Drain_gen_any         ok
 run Drain Drain_gen_any_loss    violates NoLoss
+# Both threads in every role: about 33 million states and ten minutes.
+if [ -n "${SLOW:-}" ]; then run Drain Drain_gen_any_full ok; fi
 
 # 4. Depot stacks
 run Depot Depot        ok
