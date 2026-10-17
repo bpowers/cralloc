@@ -52,6 +52,8 @@ static inline void setup_tables(struct front_data *d, uintptr_t base, unsigned s
     uint8_t *size_d = (uint8_t *)slabs + OFF_SIZE_D;
     *(uint64_t *)d->shift = shift;
     *(uint64_t *)d->baseidx = base >> shift;
+    *(uint64_t *)d->shift2 = shift;
+    *(uint64_t *)d->baseidx2 = base >> shift;
     *(int64_t *)d->rseq_off = __rseq_offset;
     *(uintptr_t *)d->regbias = (uintptr_t)region - (base >> shift);
     for (unsigned r = 0; r < 4096; r++) {
@@ -77,6 +79,8 @@ static inline void setup_tables(struct front_data *d, uintptr_t base, unsigned s
     for (unsigned n = 0; n <= 1024; n++) size_d[n] = (uint8_t)class_of_c(n);
     uint8_t *size_l = (uint8_t *)slabs + OFF_SIZE_L;
     for (unsigned i = 0; i <= MAX_SMALL_SIZE / 8; i++) size_l[i] = (uint8_t)class_of_c(8 * (size_t)i);
+    uint8_t *size_x = (uint8_t *)slabs + OFF_SIZE_X;
+    for (unsigned i = 0; i <= 8192; i++) size_x[i] = i <= MAX_SMALL_SIZE / 8 ? (uint8_t)class_of_c(8 * (size_t)i) : 0;
     __atomic_store_n((uint64_t *)d->space, (uint64_t)base | shift, __ATOMIC_RELEASE);
 }
 
