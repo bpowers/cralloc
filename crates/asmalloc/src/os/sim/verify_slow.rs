@@ -3,8 +3,9 @@
 //! contents, purge zeroes exactly its range, and an unmapped range comes back zero.
 //!
 //! The simulator has one region of memory and the ranges are two pages, so the loops over pages
-//! stay short enough for CBMC. It still takes about a minute, so it is not in the merge gate;
-//! run it with `scripts/kani-all verify_slow`.
+//! stay short enough for CBMC. Under Kani the simulator has two simulated threads, so the
+//! constructor adds no long loop either. It still takes about a minute, so it is not in the
+//! merge gate; run it with `scripts/kani-all verify_slow`.
 
 use super::*;
 

@@ -65,5 +65,9 @@ ends with the call. The callers:
   exists to find, in test code.
 - `is_purged` and `resident_bytes` are test queries documented "call while nothing writes".
 
+Machine checks: Miri over the simulator's unit tests, which run all three callers. Kani does not
+reach this block: `check_untouched` is skipped under Kani, because word reads of memory a
+harness wrote at a symbolic byte offset cost CBMC minutes.
+
 **Review.** 2026-10-17, fresh adversarial reviewer: SIM-MEMORY-01 to 04 accepted. SIM-MEMORY-05
 is new and needs the reviewer's check.

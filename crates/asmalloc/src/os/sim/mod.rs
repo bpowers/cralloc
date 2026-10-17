@@ -309,6 +309,11 @@ impl<S: Shape> SimOs<S> {
     /// the allocator wrote memory it had not committed, which Linux would have refused with a
     /// fault. Checked when such a page is committed, purged or unmapped.
     fn check_untouched(&self, call: Call, first: usize, count: usize) {
+        // A test aid, not part of the `Os` contract, and word reads of memory a harness wrote at
+        // a symbolic byte cost CBMC minutes; Kani proofs of the heap use `ProofOs` anyway.
+        if cfg!(kani) {
+            return;
+        }
         let page = S::GEOMETRY.page_size();
         for index in first..first + count {
             if self.pages.get(index) & WRITABLE == 0 {

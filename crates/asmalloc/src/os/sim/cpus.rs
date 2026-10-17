@@ -18,7 +18,7 @@ use crate::os::machine::{Aborted, Machine, Step};
 use core::sync::atomic::{AtomicI32, AtomicU8, Ordering};
 
 /// The number of simulated threads a [`super::SimOs`] has.
-pub const SIM_THREADS: usize = 64;
+pub const SIM_THREADS: usize = if cfg!(kani) { 2 } else { 64 };
 
 const IDLE: u8 = 0;
 const RUNNING: u8 = 1;
