@@ -1,14 +1,22 @@
 # The allocators the runner compares. Adding one is one more entry here, plus, for native
 # Rust runs, a cargo feature in alloc/ (see alloc/src/lib.rs).
 #
+# Each entry is what users of that allocator get: in native runs, the build its usual Rust
+# crate makes; in preload runs, the shared library a C program would load.
+#
 #   name     label in results and reports
 #   feature  bench-alloc cargo feature for native Rust builds; "" means Rust's System
 #            allocator (glibc). Without it the allocator is not run natively.
-#   preload  library for LD_PRELOAD runs, relative to this directory; "" means none (glibc).
+#   preload  library for LD_PRELOAD runs; "" means none (glibc). "{baselines}/" is the
+#            shared baselines directory (bench/baselines/out of the main checkout, or
+#            BENCH_BASELINES); other relative paths are relative to this directory.
 #            Without it the allocator is not run in preload mode.
 #   env      environment for every run of this allocator
-#   expect   what the process must report about itself (allocator, and mode where the
-#            allocator picks one at run time); a run that disagrees is marked invalid
+#   expect   what the process must report about itself; a run that disagrees is marked
+#            invalid. `allocator` is the family, `mode` a mode the allocator picks at run
+#            time, and `library` where a native run's allocator code must be: "executable"
+#            when it is linked in, or a shared library's file name. A preload run must
+#            always report the preloaded library itself.
 #   same_as  makes this entry a control: an exact copy of the named allocator under another
 #            label, run as if it were a different allocator. Its results must match.
 
@@ -16,24 +24,26 @@
 name = "glibc"
 feature = ""
 preload = ""
-expect = { allocator = "glibc" }
+expect = { allocator = "glibc", library = "libc.so.6" }
 
 [[allocator]]
 name = "mimalloc"
 feature = "mi"
-preload = "baselines/out/mimalloc/libmimalloc.so"
-expect = { allocator = "mimalloc" }
+preload = "{baselines}/mimalloc/libmimalloc.so"
+expect = { allocator = "mimalloc", library = "executable" }
 
 [[allocator]]
 name = "mimalloc-sized"
 feature = "mi-sized"
-expect = { allocator = "mimalloc-sized" }
+expect = { allocator = "mimalloc-sized", library = "executable" }
 
+# Native: tikv-jemallocator's own static build, as a Rust service gets it. Preload: the
+# distribution's shared library.
 [[allocator]]
 name = "jemalloc"
 feature = "je"
-preload = "baselines/out/jemalloc/libjemalloc.so"
-expect = { allocator = "jemalloc" }
+preload = "{baselines}/jemalloc/libjemalloc.so"
+expect = { allocator = "jemalloc", library = "executable" }
 
 # google/tcmalloc registers its own rseq area, which glibc 2.35 and later have already
 # registered, so it silently runs with per-thread caches unless glibc's registration is
@@ -41,15 +51,15 @@ expect = { allocator = "jemalloc" }
 [[allocator]]
 name = "tcmalloc-percpu"
 feature = "tc"
-preload = "baselines/out/tcmalloc/libtcmalloc.so"
+preload = "{baselines}/tcmalloc/libtcmalloc.so"
 env = { GLIBC_TUNABLES = "glibc.pthread.rseq=0" }
-expect = { allocator = "tcmalloc", mode = "per-cpu" }
+expect = { allocator = "tcmalloc", mode = "per-cpu", library = "executable" }
 
 [[allocator]]
 name = "tcmalloc-thread"
 feature = "tc"
-preload = "baselines/out/tcmalloc/libtcmalloc.so"
-expect = { allocator = "tcmalloc", mode = "per-thread" }
+preload = "{baselines}/tcmalloc/libtcmalloc.so"
+expect = { allocator = "tcmalloc", mode = "per-thread", library = "executable" }
 
 [[allocator]]
 name = "mimalloc-ctl"

@@ -97,6 +97,8 @@ impl Report {
             "params": self.params,
             "allocator": d.allocator,
             "mode": d.mode,
+            "library": d.library,
+            "version": d.version,
             "glibc_rseq_size": d.glibc_rseq_size,
             "vm_hwm": crate::mem::vm_hwm(0),
             "phases": self.phases,

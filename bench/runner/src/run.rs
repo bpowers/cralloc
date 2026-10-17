@@ -1,5 +1,6 @@
 //! A measurement session: rounds of every job under every allocator, in a fresh random order
 //! each round, one fresh process per run, one JSON line per run.
+use crate::cap::{self, Group, Scope};
 use crate::config::Allocator;
 use crate::launch::{Child, Exit, MemSample, ProcStat, Sampler, Spec};
 use crate::suite::{Job, Metric, Mode, Program};
@@ -15,7 +16,12 @@ use std::time::{Duration, Instant, SystemTime};
 
 pub struct Options {
     pub bench_dir: PathBuf,
+    pub baselines: PathBuf,
     pub out: PathBuf,
+    /// The session's capped scope; every process the session starts runs in a group of it.
+    pub scope: Scope,
+    /// Each measured process's memory cap.
+    pub mem_cap: u64,
     pub rounds: usize,
     pub seed: u64,
     /// CPUs the runner and its samplers use; kept out of every job.
@@ -59,21 +65,14 @@ fn rust_bin(bench_dir: &Path, build: &str, bin: &str) -> PathBuf {
     bench_dir.join("target").join(build).join("release").join(bin)
 }
 
-fn cbench_dir(bench_dir: &Path) -> PathBuf {
-    bench_dir.join("baselines/out/cbench")
-}
-
-fn probe_lib(bench_dir: &Path) -> PathBuf {
-    bench_dir.join("baselines/out/probe/libbenchprobe.so")
-}
-
 /// The command line and environment for one run.
 fn command(job: &Job, a: &Allocator, o: &Options, scratch: &Path) -> (Vec<String>, Vec<(String, String)>) {
-    let cb = cbench_dir(&o.bench_dir).display().to_string();
+    let cbench = o.baselines.join("cbench");
+    let cb = cbench.display().to_string();
     let program = match (&job.program, job.mode) {
         (Program::Rust(b), Mode::Native) => rust_bin(&o.bench_dir, &a.build_name().unwrap(), b),
         (Program::Rust(b), Mode::Preload) => rust_bin(&o.bench_dir, "glibc", b),
-        (Program::C(p), _) => cbench_dir(&o.bench_dir).join(p),
+        (Program::C(p), _) => cbench.join(p),
     };
     let mut argv = vec![program.display().to_string()];
     argv.extend(job.args.iter().map(|s| s.replace("{cbench}", &cb)));
@@ -81,7 +80,7 @@ fn command(job: &Job, a: &Allocator, o: &Options, scratch: &Path) -> (Vec<String
     env.extend(a.env.iter().map(|(k, v)| (k.clone(), v.clone())));
     env.push(("BENCH_CPUS".into(), bench_harness::Cpus(job.cpus.clone()).to_list()));
     if job.mode == Mode::Preload {
-        let probe = probe_lib(&o.bench_dir).display().to_string();
+        let probe = o.baselines.join("probe/libbenchprobe.so").display().to_string();
         let lib = a.preload.clone().unwrap_or_default();
         let pre = if lib.is_empty() { probe } else { format!("{lib}:{probe}") };
         env.push(("LD_PRELOAD".into(), pre));
@@ -116,29 +115,52 @@ struct Outcome {
     error: Option<String>,
 }
 
+impl Outcome {
+    /// A run that could not be started.
+    fn not_started(error: String) -> Outcome {
+        Outcome {
+            exit: Exit::default(),
+            timed_out: false,
+            counters: Sample::default(),
+            memory: vec![],
+            result: None,
+            stdout_tail: vec![],
+            driver: None,
+            window: None,
+            error: Some(error),
+        }
+    }
+}
+
+/// The cgroups of one run: the measured process's, and the driver's if the job has one.
+struct Groups {
+    run: Group,
+    driver: Option<Group>,
+}
+
+impl Groups {
+    fn create(job: &Job, o: &Options, seq: usize) -> std::io::Result<Groups> {
+        let run = o.scope.group(&format!("run-{seq}"), o.mem_cap)?;
+        let driver = match job.driver {
+            Some(_) => Some(o.scope.group(&format!("driver-{seq}"), cap::DRIVER)?),
+            None => None,
+        };
+        Ok(Groups { run, driver })
+    }
+}
+
 fn parse_result(line: &str) -> Option<Value> {
     line.strip_prefix("BENCH_RESULT ").and_then(|j| serde_json::from_str(j).ok())
 }
 
 /// Runs the measured process (and its driver, if any) to completion.
-fn execute(job: &Job, argv: &[String], env: &[(String, String)], scratch: &Path, o: &Options) -> Outcome {
+fn execute(job: &Job, argv: &[String], env: &[(String, String)], scratch: &Path, o: &Options, g: &Groups) -> Outcome {
     let timeout = Duration::from_secs(job.timeout_s);
-    let spec = Spec { argv, env, cpus: &job.cpus, stderr: &scratch.join("stderr.txt"), count: true };
+    let procs = g.run.procs();
+    let spec = Spec { argv, env, cpus: &job.cpus, stderr: &scratch.join("stderr.txt"), count: true, cgroup: &procs };
     let child = match Child::spawn(&spec) {
         Ok(c) => c,
-        Err(e) => {
-            return Outcome {
-                exit: Exit::default(),
-                timed_out: false,
-                counters: Sample::default(),
-                memory: vec![],
-                result: None,
-                stdout_tail: vec![],
-                driver: None,
-                window: None,
-                error: Some(format!("spawn {}: {e}", argv[0])),
-            };
-        }
+        Err(e) => return Outcome::not_started(format!("spawn {}: {e}", argv[0])),
     };
     let sampler = Sampler::start(
         child.pid,
@@ -180,12 +202,14 @@ fn execute(job: &Job, argv: &[String], env: &[(String, String)], scratch: &Path,
                 dargv.extend(d.args.iter().map(|s| s.replace("{addr}", &addr)));
                 let mut denv: Vec<(String, String)> = std::env::vars().filter(|(k, _)| !scrubbed(k)).collect();
                 denv.push(("BENCH_CPUS".into(), bench_harness::Cpus(d.cpus.clone()).to_list()));
+                let dprocs = g.driver.as_ref().expect("a job with a driver has a driver cgroup").procs();
                 let dspec = Spec {
                     argv: &dargv,
                     env: &denv,
                     cpus: &d.cpus,
                     stderr: &scratch.join("driver-stderr.txt"),
                     count: false,
+                    cgroup: &dprocs,
                 };
                 match Child::spawn(&dspec) {
                     Err(e) => error = Some(format!("spawn driver: {e}")),
@@ -344,7 +368,14 @@ fn run_one(job: &Job, a: &Allocator, cx: &Context) -> Value {
     let load = sys::loadavg();
     let t0 = CpuTimes::read();
     let started = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap().as_secs_f64();
-    let out = execute(job, &argv, &env, &scratch, cx.o);
+    // Nothing starts without its cgroup, so nothing runs uncapped.
+    let (out, usage, driver_usage) = match Groups::create(job, cx.o, cx.seq) {
+        Ok(g) => {
+            let out = execute(job, &argv, &env, &scratch, cx.o, &g);
+            (out, Some(g.run.usage()), g.driver.as_ref().map(Group::usage))
+        }
+        Err(e) => (Outcome::not_started(format!("creating the run's cgroup: {e}")), None, None),
+    };
     let busy = CpuTimes::read().busy_since(&t0);
 
     // What the process says it ran with: its own report when native, the probe when
@@ -355,11 +386,19 @@ fn run_one(job: &Job, a: &Allocator, cx: &Context) -> Value {
             .ok()
             .and_then(|s| serde_json::from_str::<Value>(&s).ok()),
     };
-    let reported = self_report
-        .as_ref()
-        .map(|r| (r["allocator"].as_str().unwrap_or("").to_string(), r["mode"].as_str().unwrap_or("").to_string()));
+    let reported = self_report.as_ref().map(|r| {
+        let s = |k: &str| r[k].as_str().unwrap_or("").to_string();
+        (s("allocator"), s("mode"), s("library"))
+    });
     let reported_peak = self_report.as_ref().and_then(|r| r["vm_hwm"].as_u64());
     let mut problems = Vec::new();
+    // The cap's verdict first: a process killed at its cap also fails every check below.
+    if let Some(p) = usage.and_then(|u| u.problem("the measured process")) {
+        problems.push(p);
+    }
+    if let Some(p) = driver_usage.and_then(|u| u.problem("the driver")) {
+        problems.push(p);
+    }
     if let Some(e) = &out.error {
         problems.push(e.clone());
     }
@@ -373,7 +412,10 @@ fn run_one(job: &Job, a: &Allocator, cx: &Context) -> Value {
     }
     match &reported {
         None => problems.push("no allocator report".into()),
-        Some((alloc, mode)) => {
+        Some((alloc, mode, library)) => {
+            if let Some(p) = library_problem(job.mode, a, library) {
+                problems.push(p);
+            }
             if let Some(e) = &a.expect.allocator
                 && e != alloc
             {
@@ -447,7 +489,9 @@ fn run_one(job: &Job, a: &Allocator, cx: &Context) -> Value {
         "started": started,
         "valid": problems.is_empty(),
         "problems": problems,
-        "reported": reported.map(|(a, m)| json!({ "allocator": a, "mode": m })),
+        "reported": self_report.as_ref().map(|r| json!({
+            "allocator": r["allocator"], "mode": r["mode"], "library": r["library"], "version": r["version"],
+        })),
         "primary": primary,
         "extra": extra,
         "multiplexed": multiplexed,
@@ -459,6 +503,8 @@ fn run_one(job: &Job, a: &Allocator, cx: &Context) -> Value {
             "minflt": out.exit.minflt, "majflt": out.exit.majflt, "nvcsw": out.exit.nvcsw, "nivcsw": out.exit.nivcsw,
         },
         "memory": memory_json(&out.memory, reported_peak, cx.o),
+        "cgroup": usage.map(|u| u.to_json()),
+        "driver_cgroup": driver_usage.map(|u| u.to_json()),
         "workload": out.result,
         "driver": out.driver,
         "window": out.window,
@@ -474,6 +520,21 @@ fn run_one(job: &Job, a: &Allocator, cx: &Context) -> Value {
         },
         "stderr_tail": stderr_tail,
     })
+}
+
+/// Whether the process's allocator code came from where the entry says it must: for a
+/// preload run, the preloaded library itself; otherwise `expect.library`, if the entry gives
+/// one ("executable", or a shared library's file name).
+fn library_problem(mode: Mode, a: &Allocator, reported: &str) -> Option<String> {
+    if mode == Mode::Preload
+        && let Some(lib) = a.preload.as_deref().filter(|l| !l.is_empty())
+    {
+        let want = std::fs::canonicalize(lib).map(|p| p.display().to_string()).unwrap_or_else(|_| lib.to_string());
+        return (reported != want).then(|| format!("preloaded {want}, but malloc was served from {reported:?}"));
+    }
+    let want = a.expect.library.as_deref()?;
+    let ok = reported == want || (want != "executable" && Path::new(reported).file_name().is_some_and(|n| n == want));
+    (!ok).then(|| format!("expected the allocator in {want}, process reported it in {reported:?}"))
 }
 
 /// Waits until the machine is quiet enough, or gives up: nothing else on the measurement
@@ -510,7 +571,7 @@ fn gate(o: &Options, cpus: &CpuSets) -> Value {
 }
 
 fn header(o: &Options, allocs: &[Allocator], jobs: &[Job], session: &str) -> Value {
-    let manifests: serde_json::Map<String, Value> = std::fs::read_dir(o.bench_dir.join("baselines/out/manifest"))
+    let manifests: serde_json::Map<String, Value> = std::fs::read_dir(o.baselines.join("manifest"))
         .map(|d| {
             d.filter_map(|e| e.ok())
                 .filter(|e| e.path().extension().is_some_and(|x| x == "txt"))
@@ -549,9 +610,14 @@ fn header(o: &Options, allocs: &[Allocator], jobs: &[Job], session: &str) -> Val
         "sample_ms": o.sample_ms,
         "rollup_ms": o.rollup_ms,
         "max_busy": o.max_busy,
+        "mem_cap": o.mem_cap,
+        "driver_mem_cap": cap::DRIVER,
+        "scope": { "unit": o.scope.unit, "mem_cap": o.scope.cap },
+        "baselines": o.baselines,
         "allocators": allocs.iter().map(|a| json!({
             "name": a.name, "feature": a.feature, "preload": a.preload, "env": a.env,
-            "expect": { "allocator": a.expect.allocator, "mode": a.expect.mode }, "control_of": a.control_of,
+            "expect": { "allocator": a.expect.allocator, "mode": a.expect.mode, "library": a.expect.library },
+            "control_of": a.control_of,
         })).collect::<Vec<_>>(),
         "jobs": jobs.iter().map(|j| json!({ "id": j.id, "group": j.group, "mode": j.mode.name() })).collect::<Vec<_>>(),
         "manifests": manifests,

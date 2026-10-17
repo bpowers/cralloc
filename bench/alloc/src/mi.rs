@@ -12,6 +12,18 @@ unsafe extern "C" {
     fn mi_free(p: *mut c_void);
     #[cfg(feature = "mi-sized")]
     fn mi_free_size_aligned(p: *mut c_void, size: usize, align: usize);
+    fn mi_version() -> std::ffi::c_int;
+}
+
+pub const NAME: &str = if cfg!(feature = "mi-sized") { "mimalloc-sized" } else { "mimalloc" };
+
+pub fn entry() -> *const c_void {
+    mi_malloc_aligned as *const c_void
+}
+
+pub fn version() -> String {
+    // SAFETY: a query with no preconditions.
+    unsafe { mi_version() }.to_string()
 }
 
 pub struct Mimalloc;
