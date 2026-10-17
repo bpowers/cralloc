@@ -4,7 +4,8 @@
 //! documents its contract. Components depend downward only, and everything rests on three
 //! foundations: [`classes`] (size classes and magazine shapes, pure arithmetic), [`space`] (where
 //! regions, metadata and magazines live in the reserved address space) and [`os`] (what the
-//! allocator asks of the operating system, real or simulated).
+//! allocator asks of the operating system, real or simulated). [`back`] keeps the class regions
+//! and their free bitmaps, and moves memory to and from the OS.
 
 #![no_std]
 #![deny(unsafe_op_in_unsafe_fn)]
@@ -19,6 +20,7 @@ extern crate alloc;
 #[cfg(test)]
 extern crate std;
 
+pub mod back;
 pub mod classes;
 pub mod depot;
 pub mod front;

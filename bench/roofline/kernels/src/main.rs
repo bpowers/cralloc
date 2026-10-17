@@ -5,8 +5,10 @@
 //! runs every kernel whose name starts with one of the prefixes (all of them with no argument)
 //! and prints cycles, instructions, retired uops and store-to-load forwards per operation.
 //! RF_CPU picks the CPU to pin to (default 2), RF_ITERS the iteration count (default 40M).
+//! `roofline-kernels routines ...` measures the proved slab routines instead (see routines.rs).
 mod kernels;
 mod layout;
+mod routines;
 use kernels::*;
 use std::time::Instant;
 
@@ -406,6 +408,19 @@ fn main() {
     let stlf = Counter::new(4, 0x35);
 
     let iters: u64 = std::env::var("RF_ITERS").ok().and_then(|s| s.parse().ok()).unwrap_or(40_000_000);
+    if filter == "routines" {
+        let ctx = routines::Ctx {
+            cycles,
+            instrs,
+            uops,
+            mags: map_aligned(4096, 4096),
+            arena: env.arena,
+            arr: env.arr,
+            rseq,
+            iters,
+        };
+        return routines::main(&ctx, &args[2..]);
+    }
     println!("{:<14} {:>8} {:>8} {:>8} {:>8} {:>8}  {}", "kernel", "cyc/op", "ins/op", "uops/op", "stlf/op", "ns/op", "what");
     let mut all = specs();
     for (name, f, note) in layout::specs() {
