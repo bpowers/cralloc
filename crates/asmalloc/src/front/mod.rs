@@ -245,7 +245,10 @@ mod tests {
         assert_eq!(MASKS[0], 0);
     }
 
+    // The static's 32 MiB of atomics exceed what Miri can track; under Miri the twins run on
+    // small slab arrays instead.
     #[test]
+    #[cfg_attr(miri, ignore)]
     fn the_static_slabs_are_one_per_cpu_number_and_the_masks_follow() {
         let slabs = SLABS.slabs();
         assert_eq!(slabs.len(), SLAB_COUNT);
@@ -267,6 +270,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore)]
     fn publishing_writes_every_small_mask_once_and_nothing_else() {
         publish_masks();
         publish_masks();
