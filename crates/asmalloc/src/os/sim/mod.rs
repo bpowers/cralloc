@@ -45,7 +45,7 @@ pub use proof::{PROOF_THREADS, ProofOs};
 use self::cpus::Cpus;
 use self::faults::Injector;
 use self::memory::Memory;
-use self::pages::{HUGE, NO_HUGE, PURGED, Pages, RESERVED, START, WIPE, WRITABLE};
+use self::pages::{CHECKING, HUGE, NO_HUGE, PURGED, Pages, RESERVED, START, WIPE, WRITABLE};
 use super::{HugePages, Os, OsError, RseqArea};
 use crate::classes::MagazineSize;
 use crate::space::Geometry;
@@ -307,25 +307,35 @@ impl<S: Shape> SimOs<S> {
 
     /// Panics if a page of `first..first + count` that is not committed holds a nonzero byte:
     /// the allocator wrote memory it had not committed, which Linux would have refused with a
-    /// fault. Checked when such a page is committed, purged or unmapped.
+    /// fault. Checked here when such a page is purged or unmapped; `commit` checks each page it
+    /// is first to commit.
     fn check_untouched(&self, call: Call, first: usize, count: usize) {
         // A test aid, not part of the `Os` contract, and word reads of memory a harness wrote at
         // a symbolic byte cost CBMC minutes; Kani proofs of the heap use `ProofOs` anyway.
         if cfg!(kani) {
             return;
         }
-        let page = S::GEOMETRY.page_size();
         for index in first..first + count {
             if self.pages.get(index) & WRITABLE == 0 {
-                // SAFETY: the page is inside `memory` (it has a state). It is not committed, so
-                // no correct caller writes it, and a buggy one is what this looks for.
-                let clean = unsafe { self.memory.is_zero(index << self.page_shift(), page) };
-                assert!(
-                    clean,
-                    "simulated {call:?}: page {index} was written before it was committed"
-                );
+                self.check_page(call, index);
             }
         }
+    }
+
+    /// Panics if page `index`, which is not committed, holds a nonzero byte.
+    fn check_page(&self, call: Call, index: usize) {
+        if cfg!(kani) {
+            return;
+        }
+        let page = S::GEOMETRY.page_size();
+        // SAFETY: the page is inside `memory` (it has a state). It is not committed, so no
+        // correct caller writes it, and a buggy one is what this looks for: `purge` and `unmap`
+        // exclude concurrent access by contract, and `commit` holds the page in `CHECKING`.
+        let clean = unsafe { self.memory.is_zero(index << self.page_shift(), page) };
+        assert!(
+            clean,
+            "simulated {call:?}: page {index} was written before it was committed"
+        );
     }
 
     /// Counts a call on `count` pages and applies its fault plan: how many pages the call acts
@@ -455,9 +465,15 @@ unsafe impl<S: Shape> Os for SimOs<S> {
 
     unsafe fn commit(&self, start: NonNull<u8>, len: usize) -> Result<(), OsError> {
         let (first, count) = self.checked_range(Call::Commit, start, len);
-        self.check_untouched(Call::Commit, first, count);
         let (applied, result) = self.admit(Call::Commit, count);
-        self.pages.update(first, applied, WRITABLE, PURGED);
+        for index in first..first + applied {
+            // Overlapping commits may race; only the first checks a page, and it holds the page
+            // in `CHECKING` until it is writable, so no correct caller writes it meanwhile.
+            if self.pages.begin_commit(index) {
+                self.check_page(Call::Commit, index);
+            }
+            self.pages.update(index, 1, WRITABLE, PURGED | CHECKING);
+        }
         result
     }
 

@@ -69,8 +69,9 @@ Zeroing a reserved page keeps invariant Z, which concerns unreserved pages only.
 
 **Proof.** Each page index is below the number of pages (it comes from a checked range or from
 iterating the page states), so the page lies inside the memory. The no-writer condition is
-discussed under SIM-MEMORY-05: uncommitted pages have no correct writer, and the two queries are
-documented as "call while nothing writes".
+discussed under SIM-MEMORY-05: uncommitted pages have no correct writer while checked
+(`commit` holds them in `CHECKING`), and the two queries are documented as "call while nothing
+writes".
 
 **Review.** 2026-10-17, fresh adversarial reviewer: SIM-OS-01 and SIM-OS-02 accepted after the
 fixes of its first round. Since then the simulator gained partial faults, fences that abort

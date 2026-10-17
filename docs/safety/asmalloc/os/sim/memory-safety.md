@@ -60,14 +60,18 @@ initialized (the allocation was zeroed and is only ever written with bytes), and
 alignment. Readers may share it; the caller rules out writers for the slice's lifetime, which
 ends with the call. The callers:
 
-- `check_untouched` reads pages that are not committed, which no correct caller writes.
-  Catching a buggy writer is the point; a write racing the check would be the bug the check
-  exists to find, in test code.
+- `check_page` reads one page that is not committed, which no correct caller writes; catching
+  a buggy writer is the point. Being uncommitted when the check began is not enough, because a
+  racing `commit` of the same page could make it writable and let its caller write while the
+  check reads (Miri found exactly that in a depot test). So `purge` and `unmap` check only under
+  their contracts, which exclude concurrent access, and `commit` checks a page only after
+  claiming it with `CHECKING` (`Pages::begin_commit`): a racing commit waits for the claim to
+  end, and the page becomes writable only when the check is done.
 - `is_purged` and `resident_bytes` are test queries documented "call while nothing writes".
 
-Machine checks: Miri over the simulator's unit tests, which run all three callers. Kani does not
-reach this block: `check_untouched` is skipped under Kani, because word reads of memory a
-harness wrote at a symbolic byte offset cost CBMC minutes.
+Machine checks: Miri over the simulator's unit tests and the depot's threaded tests, which run
+all three callers. Kani does not reach this block: the check is skipped under Kani, because word
+reads of memory a harness wrote at a symbolic byte offset cost CBMC minutes.
 
 **Review.** 2026-10-17, fresh adversarial reviewer: SIM-MEMORY-01 to 04 accepted. SIM-MEMORY-05
 is new and needs the reviewer's check.
