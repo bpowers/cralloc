@@ -6,7 +6,7 @@ public import Asmalloc.Proof.Slab.X86_64.Mid
 # The out-of-line routines' slab word and mask on x86-64
 
 `lea r9, [rip + SLABS]`, `lea r9, [r9 + rdi*8]`, `mov rcx, [r9 + r8]` and
-`lea r11, [rip + MAG_MASKS]`: the class's word in the cid's slab, the class
+`lea r11, [rip + MAG_MASKS]`: the class's word in the CPU's slab, the class
 being in `rdi`, and its mask, `[r11 + rdi*4]`.
 -/
 
@@ -85,17 +85,17 @@ theorem σ5t_r8 : (σ5t s).gpr .r8 = sh s := by
     gpr_σ3_r8]
 
 /-- `[r9 + r8]`, in any state where they hold the class's word in slab 0 and
-the cid's slab's offset. -/
+the CPU's slab's offset. -/
 theorem slabWord_ea_t (σ : State) (h9 : σ.gpr .r9 = r9t s) (h8 : σ.gpr .r8 = sh s) :
     σ.ea slabWord = wat s := by
   rw [slabWord, Access.ea_of_seg_none rfl, Access.offset_index, h9, h8]
   simp only [BitVec.ofInt_ofNat, BitVec.mul_one, BitVec.add_zero]
   rfl
 
-/-- The slab word's address is the class's for the cid, an out-of-line
+/-- The slab word's address is the class's for the CPU, an out-of-line
 routine being given its class in `rdi`. -/
 theorem wat_eq (hA : c.A = abi) (hcls : c.cls s = (s.gpr .rdi).toNat) : wat s = c.word s := by
-  rw [Spec.Slab.Ctx.word, wordAddr, sym_of hA, cid_of hA, wat, r9t, sh_eq, cid32, hcls]
+  rw [Spec.Slab.Ctx.word, wordAddr, sym_of hA, cpu_of hA, wat, r9t, sh_eq, cpu32, hcls]
   apply BitVec.eq_of_toNat_eq
   simp only [BitVec.toNat_add, BitVec.toNat_mul, BitVec.toNat_ofNat, SLABS, toNat_eight]
   omega

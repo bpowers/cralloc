@@ -11,7 +11,7 @@ public import Asmalloc.Proof.Framework.Offset
 /-!
 # The routines' common steps on x86-64
 
-The arm, and the cid's load, compare and shift: every routine starts with
+The arm, and the CPU's load, compare and shift: every routine starts with
 them. Each step is `exec i σ = some σ'` for named states, so that the folds
 over a sequence's body (`Proof/Framework/Body.lean`) unfold by rewriting.
 -/
@@ -218,56 +218,56 @@ theorem events_arm (h : Facts c s) :
 
 end Arm
 
-/-! ## The cid -/
+/-! ## The CPU number -/
 
-/-- The cid, as the routine reads it. -/
-def cid32 (s : State) : BitVec 32 := s.mem.readW (area s + 24) 32
+/-- The CPU number, as the routine reads it. -/
+def cpu32 (s : State) : BitVec 32 := s.mem.readW (area s + 4) 32
 
-/-- After loading the cid. -/
-def σ1 (s : State) : State := (σA s).setReg32 .r8 (cid32 s)
+/-- After loading the CPU. -/
+def σ1 (s : State) : State := (σA s).setReg32 .r8 (cpu32 s)
 
 /-- After comparing it with `SLAB_COUNT`. -/
 def σ2 (s : State) : State :=
-  arithFlags (σ1 s) (cid32 s - 8192) (decide ((cid32 s).toNat < (8192 : BitVec 32).toNat))
-    (subOverflow (cid32 s) 8192 (cid32 s - 8192))
+  arithFlags (σ1 s) (cpu32 s - 8192) (decide ((cpu32 s).toNat < (8192 : BitVec 32).toNat))
+    (subOverflow (cpu32 s) 8192 (cpu32 s - 8192))
 
-/-- After the shift: `r8` is the cid's slab's offset in `SLABS`. -/
+/-- After the shift: `r8` is the CPU's slab's offset in `SLABS`. -/
 def σ3 (s : State) : State := shl12 (σ2 s) .r8
 
-/-- The cid's slab's offset. -/
-def sh (s : State) : BitVec 64 := (cid32 s).setWidth 64 <<< 12
+/-- The CPU's slab's offset. -/
+def sh (s : State) : BitVec 64 := (cpu32 s).setWidth 64 <<< 12
 
-theorem cidOp_ea (s : State) :
-    (σA s).ea { base := .rdx, disp := 24, seg := some .fs } = area s + 24 := by
-  rw [show (24 : Int) = ((24 : Nat) : Int) from rfl, ea_fs_rdx]
+theorem cpuOp_ea (s : State) :
+    (σA s).ea { base := .rdx, disp := 4, seg := some .fs } = area s + 4 := by
+  rw [show (4 : Int) = ((4 : Nat) : Int) from rfl, ea_fs_rdx]
   show s.fsBase + (armReg s).gpr .rdx + _ = _
   rw [armReg_rdx]; rfl
 
-/-- The cid field and `rseq_cs` are apart. -/
-theorem cid_cs_disjoint (s : State) : Region.Disjoint ⟨area s + 24, 32 / 8⟩ ⟨area s + 8, 8⟩ :=
-  Offset.disjoint (area s) (d := 24) (n := 4) (e := 8) (k := 8) (by omega) (by omega) (by omega)
+/-- `cpu_id` and `rseq_cs` are apart. -/
+theorem cpu_cs_disjoint (s : State) : Region.Disjoint ⟨area s + 4, 32 / 8⟩ ⟨area s + 8, 8⟩ :=
+  Offset.disjoint (area s) (d := 4) (n := 4) (e := 8) (k := 8) (by omega) (by omega) (by omega)
 
-section Cid
+section Cpu
 
 variable {c : Spec.Slab.Ctx isa} {s : State}
 
-theorem exec_cid (h : Facts c s) :
-    exec (.mov32 .r8 (.mem { base := .rdx, disp := 24, seg := some .fs })) (σA s) = some (σ1 s) := by
-  have hin : InRegions ((σA s).rd ++ (σA s).wr) ((σA s).ea { base := .rdx, disp := 24, seg := some .fs }) 4 := by
-    rw [cidOp_ea, σA_rd, σA_wr]; exact inRd (r := ⟨area s + 24, 4⟩) h.cidF
-  have hm : (σA s).mem.readW (area s + 24) 32 = cid32 s := by
-    rw [σA_mem, m1, readW_writeW_disj (cid_cs_disjoint s) (by decide)]
+theorem exec_cpu (h : Facts c s) :
+    exec (.mov32 .r8 (.mem { base := .rdx, disp := 4, seg := some .fs })) (σA s) = some (σ1 s) := by
+  have hin : InRegions ((σA s).rd ++ (σA s).wr) ((σA s).ea { base := .rdx, disp := 4, seg := some .fs }) 4 := by
+    rw [cpuOp_ea, σA_rd, σA_wr]; exact inRd (r := ⟨area s + 4, 4⟩) h.cpuF
+  have hm : (σA s).mem.readW (area s + 4) 32 = cpu32 s := by
+    rw [σA_mem, m1, readW_writeW_disj (cpu_cs_disjoint s) (by decide)]
     rfl
-  rw [exec_load32 _ hin, cidOp_ea, hm]
+  rw [exec_load32 _ hin, cpuOp_ea, hm]
   rfl
 
-theorem gpr_σ1_r8 : (σ1 s).gpr .r8 = (cid32 s).setWidth 64 := by
+theorem gpr_σ1_r8 : (σ1 s).gpr .r8 = (cpu32 s).setWidth 64 := by
   simp [σ1, State.setReg32, RegUpd.gpr_setReg_self]
 
 theorem exec_cmp : exec (.alu32 .cmp .r8 (.imm 8192)) (σ1 s) = some (σ2 s) := by
   rw [exec_cmp32_imm, gpr_σ1_r8, RegUpd.setWidth_setWidth_32]; rfl
 
-theorem eval_cid : eval .ae (σ2 s) = some (!decide ((cid32 s).toNat < 8192)) := rfl
+theorem eval_cpu : eval .ae (σ2 s) = some (!decide ((cpu32 s).toNat < 8192)) := rfl
 
 theorem exec_shl_r8 : exec (.shift .shl .r8 12) (σ2 s) = some (σ3 s) := exec_shl _ _
 
@@ -280,15 +280,15 @@ theorem σ3_wr : (σ3 s).wr = s.wr := rfl
 theorem gpr_σ3_r8 : (σ3 s).gpr .r8 = sh s := by
   simp only [σ3, shl12, RegUpd.gpr_setReg_self, σ2, RegUpd.gpr_arithFlags, gpr_σ1_r8]; rfl
 
-/-- The cid's slab's offset, as a number. -/
-theorem sh_eq : sh s = BitVec.ofNat 64 ((cid32 s).toNat * SLAB_BYTES) := by
+/-- The CPU's slab's offset, as a number. -/
+theorem sh_eq : sh s = BitVec.ofNat 64 ((cpu32 s).toNat * SLAB_BYTES) := by
   apply BitVec.eq_of_toNat_eq
-  have := (cid32 s).isLt
+  have := (cpu32 s).isLt
   simp only [sh, BitVec.toNat_shiftLeft, BitVec.toNat_setWidth, Nat.shiftLeft_eq, BitVec.toNat_ofNat,
     SLAB_BYTES, SLAB_SHIFT]
-  rw [Nat.mod_eq_of_lt (show (cid32 s).toNat < 2 ^ 64 by omega),
-    Nat.mod_eq_of_lt (show (cid32 s).toNat * 2 ^ 12 < 2 ^ 64 by omega)]
+  rw [Nat.mod_eq_of_lt (show (cpu32 s).toNat < 2 ^ 64 by omega),
+    Nat.mod_eq_of_lt (show (cpu32 s).toNat * 2 ^ 12 < 2 ^ 64 by omega)]
 
-end Cid
+end Cpu
 
 end VG.Proof.Slab.X86_64

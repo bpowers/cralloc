@@ -6,7 +6,7 @@ public import Asmalloc.Proof.Slab.X86_64.Run
 # The inline routines' slab word on x86-64
 
 `lea r9, [rip + SLABS + coff]` and `mov rcx, [r9 + r8]`: the class's word in
-the cid's slab, the class's offset `coff` being a constant.
+the CPU's slab, the class's offset `coff` being a constant.
 -/
 
 @[expose] public section
@@ -44,7 +44,7 @@ theorem exec_r9i : exec (.leaSym .r9 "SLABS" 0 (some "coff")) (σ3 s) = some (σ
   rfl
 
 /-- `[r9 + r8]`, in any state where they hold the class's word in slab 0 and
-the cid's slab's offset. -/
+the CPU's slab's offset. -/
 theorem slabWord_ea_of (σ : State) (h9 : σ.gpr .r9 = r9i s) (h8 : σ.gpr .r8 = sh s) :
     σ.ea slabWord = wai s := by
   rw [slabWord, Access.ea_of_seg_none rfl, Access.offset_index, h9, h8]
@@ -64,11 +64,11 @@ theorem slabWord_ea_i : (σ4i s).ea slabWord = wai s := by
   simp only [σ4i, RegUpd.gpr_setReg_self, BitVec.ofInt_ofNat, BitVec.mul_one, BitVec.add_zero]
   rw [RegUpd.gpr_setReg_of_ne _ _ (by decide), gpr_σ3_r8]; rfl
 
-/-- The slab word's address is the class's for the cid, an inline routine
+/-- The slab word's address is the class's for the CPU, an inline routine
 being given its class's offset. -/
 theorem wai_eq (hA : c.A = abi) (hcoff : (s.params "coff").toNat = 8 * c.cls s) :
     wai s = c.word s := by
-  rw [Spec.Slab.Ctx.word, wordAddr, sym_of hA, cid_of hA, wai, r9i, sh_eq, cid32]
+  rw [Spec.Slab.Ctx.word, wordAddr, sym_of hA, cpu_of hA, wai, r9i, sh_eq, cpu32]
   apply BitVec.eq_of_toNat_eq
   simp only [BitVec.toNat_add, BitVec.toNat_ofNat, hcoff, SLABS]
   omega

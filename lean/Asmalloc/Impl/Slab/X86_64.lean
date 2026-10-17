@@ -5,7 +5,7 @@ public import Asmalloc.TCB.X86_64.Isa
 /-! # The front end's pop and push on x86-64
 
 The listing of docs/design.md, "Front end: magazines under rseq". Every
-routine arms its sequence, then reads the cid and leaves for the slow path
+routine arms its sequence, then reads the CPU number and leaves for the slow path
 if it has no slab:
 
 ```
@@ -13,7 +13,7 @@ if it has no slab:
     mov   rdx, QWORD PTR [rdx]          ; the rseq area's offset from fs
     lea   r10, [rip + 3f]               ; the descriptor
     mov   QWORD PTR fs:[rdx+8], r10     ; arm
-6:  mov   r8d, DWORD PTR fs:[rdx+24]    ; mm_cid
+6:  mov   r8d, DWORD PTR fs:[rdx+4]    ; cpu_id
     cmp   r8d, 8192
     jae   slow
     shl   r8, 12
@@ -39,9 +39,9 @@ def arm : List Instr := [
   .leaRseqCs .r10,
   .store { base := .rdx, disp := 8, seg := some .fs } .r10]
 
-/-- The cid into `r8`, and the exit for one without a slab. -/
-def cidSteps (cold : List Instr) (ext : Option String) : List (Step Instr Cond) := [
-  .instr (.mov32 .r8 (.mem { base := .rdx, disp := 24, seg := some .fs })),
+/-- The CPU number into `r8`, and the exit for one without a slab. -/
+def cpuSteps (cold : List Instr) (ext : Option String) : List (Step Instr Cond) := [
+  .instr (.mov32 .r8 (.mem { base := .rdx, disp := 4, seg := some .fs })),
   .instr (.alu32 .cmp .r8 (.imm 8192)),
   .exit .ae cold ext,
   .instr (.shift .shl .r8 12)]
@@ -82,26 +82,26 @@ def zero : List Instr := [.mov32 .rax (.imm 0)]
 
 /-- `slab_pop` inline: 13 fused micro-ops. -/
 def popInline : Prog isa := .rseq arm (
-  cidSteps zero none ++ wordInline ++ [
+  cpuSteps zero none ++ wordInline ++ [
   .instr (.alu32 .test .rcx (.immP "mask")),
   .exit .e zero none] ++ popTail)
 
 /-- `slab_push` inline of `p` in `rdi`: 13 fused micro-ops. -/
 def pushInline : Prog isa := .rseq arm (
-  cidSteps [] (some "miss") ++ wordInline ++ [
+  cpuSteps [] (some "miss") ++ wordInline ++ [
   .instr (.lea .rax { base := .rcx, disp := 8 }),
   .instr (.alu32 .test .rax (.immP "mask")),
   .exit .e [] (some "miss")] ++ pushTail .rdi)
 
 /-- `slab_pop` out of line, of the class in `rdi`. -/
 def popTable : Prog isa := .rseq arm (
-  cidSteps [] (some "slow") ++ wordTable ++ [
+  cpuSteps [] (some "slow") ++ wordTable ++ [
   .instr (.alu32 .test .rcx maskEntry),
   .exit .e [] (some "slow")] ++ popTail)
 
 /-- `slab_push` out of line, of `p` in `rsi` to the class in `rdi`. -/
 def pushTable : Prog isa := .rseq arm (
-  cidSteps [] (some "slow") ++ wordTable ++ [
+  cpuSteps [] (some "slow") ++ wordTable ++ [
   .instr (.lea .rax { base := .rcx, disp := 8 }),
   .instr (.alu32 .test .rax maskEntry),
   .exit .e [] (some "slow")] ++ pushTail .rsi)

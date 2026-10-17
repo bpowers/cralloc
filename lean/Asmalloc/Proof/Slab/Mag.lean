@@ -132,8 +132,40 @@ theorem le_toNat_of_isSlot {n : Nat} {w : BitVec 64} (h : IsSlot n w) : 8 * slot
 theorem ne_zero_of_isSlot {n : Nat} {w : BitVec 64} (h : IsSlot n w) : w.toNat ≠ 0 := by
   have := le_toNat_of_isSlot h; have := h.2; omega
 
-theorem ne_marker_of_isSlot {n : Nat} {w : BitVec 64} (h : IsSlot n w) : w.toNat ≠ MARKER := by
-  have := le_toNat_of_isSlot h; have := h.2; simp only [MARKER]; omega
+/-- A slot address has its lowest bit clear: it is not a marker. -/
+theorem even_of_isSlot {n : Nat} {w : BitVec 64} (h : IsSlot n w) : ¬ w.toNat % 2 = 1 := by
+  have := h.1; omega
+
+/-- A marker's offset in a magazine of an allowed size is 1: its slot-number
+bits are clear. -/
+theorem marker_mod {n : Nat} {w : BitVec 64} (h : IsMarker w) (hd : 8 * n ∣ 2 ^ MARKER_SHIFT) :
+    w.toNat % (8 * n) = 1 := by
+  have := Nat.mod_mod_of_dvd w.toNat hd
+  rw [IsMarker] at h
+  rw [← this, h]
+  have : 2 ≤ 8 * n := by
+    rcases Nat.eq_zero_or_pos n with rfl | hn
+    · simp [MARKER_SHIFT, MAG_LOG_MAX] at hd
+    · omega
+  exact Nat.mod_eq_of_lt this
+
+/-- A magazine of an allowed size divides a marker's low bits. -/
+theorem dvd_marker {k : Nat} (hk' : k ≤ 16) : 8 * 2 ^ k ∣ 2 ^ MARKER_SHIFT := by
+  rw [eight_mul_two_pow]; exact Nat.pow_dvd_pow 2 (by simp [MARKER_SHIFT, MAG_LOG_MAX]; omega)
+
+theorem marker_lt {w : BitVec 64} (h : IsMarker w) : w.toNat + 2 ^ MARKER_SHIFT ≤ 2 ^ 64 + 1 := by
+  rw [IsMarker] at h
+  have hw := w.isLt
+  have := Nat.div_add_mod w.toNat (2 ^ MARKER_SHIFT)
+  have hq : w.toNat / 2 ^ MARKER_SHIFT < 2 ^ (64 - MARKER_SHIFT) := by
+    rw [Nat.div_lt_iff_lt_mul (Nat.two_pow_pos _), ← Nat.pow_add]
+    simp only [MARKER_SHIFT, MAG_LOG_MAX] at *; exact hw
+  have : 2 ^ MARKER_SHIFT * (w.toNat / 2 ^ MARKER_SHIFT + 1) ≤ 2 ^ 64 := by
+    have := Nat.mul_le_mul_left (2 ^ MARKER_SHIFT) (show w.toNat / 2 ^ MARKER_SHIFT + 1 ≤ 2 ^ (64 - MARKER_SHIFT) by omega)
+    rw [← Nat.pow_add] at this
+    simpa [MARKER_SHIFT, MAG_LOG_MAX] using this
+  rw [Nat.mul_add, Nat.mul_one] at this
+  omega
 
 /-- The base plus `8 j`, as an offset from the word. -/
 theorem magBase_add {n : Nat} {w : BitVec 64} (j : Nat) :
@@ -224,7 +256,7 @@ def items (n : Nat) (m : Mem) (w : BitVec 64) : List (BitVec 64) :=
 
 theorem ofWord_slot {n : Nat} {m : Mem} {w : BitVec 64} (h : IsSlot n w) :
     Mag.ofWord n m w = .stack (magBase n w) (items n m w) := by
-  simp [Mag.ofWord, ne_zero_of_isSlot h, ne_marker_of_isSlot h, items]
+  simp [Mag.ofWord, ne_zero_of_isSlot h, even_of_isSlot h, items]
 
 /-- The slot below the word is its top pointer's. -/
 theorem magBase_add_top {n : Nat} {w : BitVec 64} (h : IsSlot n w) (h1 : 1 ≤ slot n w) :
@@ -243,17 +275,20 @@ theorem ofWord_zero {n : Nat} {m : Mem} {w : BitVec 64} (h : w.toNat = 0) :
     Mag.ofWord n m w = .absent := by
   simp [Mag.ofWord, h]
 
-theorem ofWord_marker {n : Nat} {m : Mem} {w : BitVec 64} (h : w.toNat = MARKER) :
+theorem ofWord_marker {n : Nat} {m : Mem} {w : BitVec 64} (h : IsMarker w) :
     Mag.ofWord n m w = .marker := by
-  simp [Mag.ofWord, h, MARKER]
+  have h2 : w.toNat % 2 = 1 := by
+    have := Nat.mod_mod_of_dvd w.toNat (Nat.pow_dvd_pow 2 (show 1 ≤ MARKER_SHIFT by decide))
+    rw [IsMarker] at h; rw [h] at this; simpa using this.symm
+  have h0 : w.toNat ≠ 0 := by intro h'; rw [h'] at h2; simp at h2
+  simp [Mag.ofWord, h0, h2]
 
-theorem pop_eq_none_iff {n : Nat} {m : Mem} {w : BitVec 64} (h : WordOk n w) :
-    (Mag.ofWord n m w).pop = none ↔ w.toNat % (8 * n) < 16 := by
+theorem pop_eq_none_iff {n : Nat} {m : Mem} {w : BitVec 64} (hd : 8 * n ∣ 2 ^ MARKER_SHIFT)
+    (h : WordOk n w) : (Mag.ofWord n m w).pop = none ↔ w.toNat % (8 * n) < 16 := by
   rcases h with h | h | h
   · rw [ofWord_zero h, h]; simp [Mag.pop]
-  · rw [ofWord_marker h, h]
-    simp only [Mag.pop, MARKER, true_iff]
-    exact Nat.lt_of_le_of_lt (Nat.mod_le 1 _) (by decide)
+  · rw [ofWord_marker h, marker_mod h hd]
+    simp only [Mag.pop, true_iff]; decide
   · rw [ofWord_slot h, mod_eq_of_isSlot h]
     simp only [Mag.pop, Option.map_eq_none_iff, List.getLast?_eq_none_iff, items,
       List.map_eq_nil_iff, List.range_eq_nil]
@@ -278,14 +313,14 @@ theorem items_dropLast {n : Nat} {m : Mem} {w : BitVec 64} (h2 : 2 ≤ slot n w)
 
 /-- A pop that takes a pointer: the pointer in the slot below the word, and
 the rest of the magazine. -/
-theorem pop_of_test {n : Nat} {m : Mem} {w : BitVec 64} (h : WordOk n w)
-    (ht : ¬ w.toNat % (8 * n) < 16) :
+theorem pop_of_test {n : Nat} {m : Mem} {w : BitVec 64} (hd : 8 * n ∣ 2 ^ MARKER_SHIFT)
+    (h : WordOk n w) (ht : ¬ w.toNat % (8 * n) < 16) :
     IsSlot n w ∧ 2 ≤ slot n w ∧
       (Mag.ofWord n m w).pop = some (m.readW (w - 8) 64, .stack (magBase n w) (items n m w).dropLast) := by
   have h' : IsSlot n w := by
     rcases h with h | h | h
     · rw [h] at ht; exact absurd (by simp) ht
-    · rw [h] at ht; exact absurd (Nat.lt_of_le_of_lt (Nat.mod_le 1 _) (by decide)) ht
+    · rw [marker_mod h hd] at ht; exact absurd (by decide) ht
     · exact h
   have h2 : 2 ≤ slot n w := by rw [mod_eq_of_isSlot h'] at ht; omega
   refine ⟨h', h2, ?_⟩
@@ -317,9 +352,17 @@ theorem push_eq_none_iff {n : Nat} {m : Mem} {w : BitVec 64} (x : BitVec 64) (k 
   · rw [ofWord_zero h, add8_toNat_mod, h]
     simp only [Mag.push, true_iff]
     exact Nat.lt_of_le_of_lt (Nat.mod_le _ _) (by decide)
-  · rw [ofWord_marker h, add8_toNat_mod, h]
-    simp only [Mag.push, MARKER, true_iff]
-    exact Nat.lt_of_le_of_lt (Nat.mod_le _ _) (by decide)
+  · rw [ofWord_marker h, add8_toNat_mod]
+    simp only [Mag.push, true_iff]
+    have hd := dvd_marker hk'
+    rw [← hn] at hd
+    have hm := marker_mod h hd
+    have := marker_lt h
+    rw [Nat.mod_eq_of_lt (a := w.toNat + 8) (b := 2 ^ 64)
+      (by simp only [MARKER_SHIFT, MAG_LOG_MAX] at this; omega)]
+    have h64 := Nat.div_add_mod w.toNat (8 * n)
+    have : w.toNat + 8 = 8 * n * (w.toNat / (8 * n)) + 9 := by omega
+    rw [this, Nat.mul_add_mod, Nat.mod_eq_of_lt (by omega)]; omega
   · rw [ofWord_slot h]
     simp only [Mag.push, items, List.length_map, List.length_range]
     have hs := slot_lt n w (by omega)

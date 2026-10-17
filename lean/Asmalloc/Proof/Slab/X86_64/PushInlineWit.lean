@@ -6,7 +6,7 @@ public import Asmalloc.Proof.Slab.X86_64.PopInlineWit
 /-!
 # The inline push's witnesses
 
-The inline pop's three states (`PopInline.w0`, `w1`, `w2`): a cid without a
+The inline pop's three states (`PopInline.w0`, `w1`, `w2`): a CPU number without a
 slab, an empty slab word, and a magazine of 4 slots holding one pointer,
 which has a slot to spare.
 -/
@@ -17,7 +17,7 @@ namespace VG.Proof.Slab.X86_64.PushInline
 
 open VG.X86_64 VG.Spec.Slab VG.Impl.Slab.X86_64 VG.Proof.Slab.X86_64
 
-theorem pre_wit (s : State) (hm : ∃ cid word rd wr, s = PopInline.wit cid word rd wr)
+theorem pre_wit (s : State) (hm : ∃ cpu word rd wr, s = PopInline.wit cpu word rd wr)
     (hrd : s.rd = Ctx.ro cx s) (hwr : s.wr = Ctx.rw cx s)
     (hnw : ((cx.regions s).all fun x => decide (x.1.base.toNat + x.1.len ≤ 2 ^ 64)) = true)
     (hp : Sig.pairsSep (cx.regions s) = true)
@@ -32,8 +32,8 @@ theorem pre_wit (s : State) (hm : ∃ cid word rd wr, s = PopInline.wit cid word
   rw [hslots, mem_of (c := cx) rfl, sym_of (c := cx) rfl, hcls, hsyms]
   rcases Nat.eq_zero_or_pos i with rfl | h
   · exact h0
-  · obtain ⟨cid, word, rd, wr, rfl⟩ := hm
-    rw [PopInline.wit_zero cid word rd wr h hi]
+  · obtain ⟨cpu, word, rd, wr, rfl⟩ := hm
+    rw [PopInline.wit_zero cpu word rd wr h hi]
     exact .inl rfl
 
 theorem pre_w0 : (pushInlineContract abi).pre PopInline.w0 :=

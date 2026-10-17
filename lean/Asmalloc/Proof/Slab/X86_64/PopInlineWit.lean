@@ -7,7 +7,7 @@ public import Asmalloc.Proof.Slab.X86_64.Witness
 # The inline pop's witnesses
 
 Three concrete states satisfying the precondition, one for each way out: a
-cid without a slab, an empty slab word, and a magazine of 4 slots holding
+CPU number without a slab, an empty slab word, and a magazine of 4 slots holding
 one pointer.
 -/
 
@@ -18,16 +18,16 @@ namespace VG.Proof.Slab.X86_64.PopInline
 open VG.X86_64 VG.Spec.Slab VG.Impl.Slab.X86_64 VG.Proof.Slab.X86_64
 
 /-- A thread whose rseq area is at `0x10100` (glibc's offset `0x100` from an
-FS base of `0x10000`), whose cid is `cid`, with `SLABS` at `0x1000000` and its
+FS base of `0x10000`), whose CPU number is `cpu`, with `SLABS` at `0x1000000` and its
 class 1's word in slab 0 `word`, of magazines of 4 slots (mask 16); slot 1 of
 the magazine at `0x4000` holds `0x5000`. -/
-def wit (cid word : BitVec 64) (rd wr : List Region) : State where
+def wit (cpu word : BitVec 64) (rd wr : List Region) : State where
   gpr r := if r = .rsp then 0x7000000 else 0
   cf := none
   zf := none
   sf := none
   of := none
-  mem := mkMem [(0x2000, 0x100), (0x10118, cid), (0x1000008, word), (0x4008, 0x5000)]
+  mem := mkMem [(0x2000, 0x100), (0x10104, cpu), (0x1000008, word), (0x4008, 0x5000)]
   rd := rd
   wr := wr
   syms n := if n = "__rseq_offset" then 0x2000 else if n = "SLABS" then 0x1000000 else 0
@@ -35,9 +35,9 @@ def wit (cid word : BitVec 64) (rd wr : List Region) : State where
   params n := if n = "coff" then 8 else if n = "mask" then 16 else 0
   csDesc := 0x9000
 
-def roW : List Region := [⟨0x2000, 8⟩, ⟨0x10118, 4⟩]
+def roW : List Region := [⟨0x2000, 8⟩, ⟨0x10104, 4⟩]
 
-/-- No slab: cid 8192. -/
+/-- No slab: CPU 8192. -/
 def w0 : State := wit 8192 0 roW [⟨0x10108, 8⟩]
 /-- An empty slab word. -/
 def w1 : State := wit 0 0 roW [⟨0x10108, 8⟩, ⟨0x1000008, 8⟩]
@@ -47,8 +47,8 @@ def w2 : State := wit 0 0x4010 roW [⟨0x10108, 8⟩, ⟨0x1000008, 8⟩, ⟨0x4
 theorem slabs_toNat : (0x1000000 : BitVec 64).toNat = 0x1000000 := rfl
 
 /-- Every slab word of class 1 but slab 0's is zero. -/
-theorem wit_zero (cid word : BitVec 64) (rd wr : List Region) {i : Nat} (h0 : 0 < i)
-    (hi : i < SLAB_COUNT) : (wit cid word rd wr).mem.readW (wordAddr 0x1000000 i 1) 64 = 0 := by
+theorem wit_zero (cpu word : BitVec 64) (rd wr : List Region) {i : Nat} (h0 : 0 < i)
+    (hi : i < SLAB_COUNT) : (wit cpu word rd wr).mem.readW (wordAddr 0x1000000 i 1) 64 = 0 := by
   simp only [SLAB_COUNT] at hi
   have ha : (wordAddr 0x1000000 i 1).toNat = 0x1000000 + i * 4096 + 8 := by
     simp only [wordAddr, SLAB_BYTES, SLAB_SHIFT]
@@ -62,7 +62,7 @@ theorem wit_zero (cid word : BitVec 64) (rd wr : List Region) {i : Nat} (h0 : 0 
     rcases hbv with rfl | rfl | rfl | rfl <;> simp <;> omega
   · rw [ha]; omega
 
-theorem pre_wit (s : State) (hm : ∃ cid word rd wr, s = wit cid word rd wr)
+theorem pre_wit (s : State) (hm : ∃ cpu word rd wr, s = wit cpu word rd wr)
     (hrd : s.rd = Ctx.ro cx s) (hwr : s.wr = Ctx.rw cx s)
     (hnw : ((cx.regions s).all fun x => decide (x.1.base.toNat + x.1.len ≤ 2 ^ 64)) = true)
     (hp : Sig.pairsSep (cx.regions s) = true)
@@ -77,8 +77,8 @@ theorem pre_wit (s : State) (hm : ∃ cid word rd wr, s = wit cid word rd wr)
   rw [hslots, mem_of (c := cx) rfl, sym_of (c := cx) rfl, hcls, hsyms]
   rcases Nat.eq_zero_or_pos i with rfl | h
   · exact h0
-  · obtain ⟨cid, word, rd, wr, rfl⟩ := hm
-    rw [wit_zero cid word rd wr h hi]
+  · obtain ⟨cpu, word, rd, wr, rfl⟩ := hm
+    rw [wit_zero cpu word rd wr h hi]
     exact .inl rfl
 
 theorem pre_w0 : (popInlineContract abi).pre w0 :=

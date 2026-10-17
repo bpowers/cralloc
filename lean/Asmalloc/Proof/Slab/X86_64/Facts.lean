@@ -44,7 +44,7 @@ variable {f : Form} {sig : Sig} (s : State)
 
 end View
 
-/-- The routine's view of the thread's rseq area, its fields and the cid, on
+/-- The routine's view of the thread's rseq area, its fields and the CPU, on
 x86-64. -/
 def area (s : State) : Addr := s.fsBase + s.mem.readW (s.syms RS) 64
 
@@ -54,9 +54,9 @@ variable {f : Form} {sig : Sig} (s : State)
 
 theorem view_area : (⟨abi, f, sig⟩ : Spec.Slab.Ctx isa).area s = area s := rfl
 theorem view_csField : (⟨abi, f, sig⟩ : Spec.Slab.Ctx isa).csField s = ⟨area s + 8, 8⟩ := rfl
-theorem view_cidField : (⟨abi, f, sig⟩ : Spec.Slab.Ctx isa).cidField s = ⟨area s + 24, 4⟩ := rfl
-theorem view_cid :
-    (⟨abi, f, sig⟩ : Spec.Slab.Ctx isa).cid s = (s.mem.readW (area s + 24) 32).toNat := rfl
+theorem view_cpuField : (⟨abi, f, sig⟩ : Spec.Slab.Ctx isa).cpuField s = ⟨area s + 4, 4⟩ := rfl
+theorem view_cpu :
+    (⟨abi, f, sig⟩ : Spec.Slab.Ctx isa).cpu s = (s.mem.readW (area s + 4) 32).toNat := rfl
 
 end Fields
 
@@ -76,10 +76,10 @@ theorem area_of : c.area s = area s := by
   simp only [Spec.Slab.Ctx.area, tp_of hA, sym_of hA, mem_of hA]; rfl
 theorem csField_of : c.csField s = ⟨area s + 8, 8⟩ := by
   simp only [Spec.Slab.Ctx.csField, area_of hA]; rfl
-theorem cidField_of : c.cidField s = ⟨area s + 24, 4⟩ := by
-  simp only [Spec.Slab.Ctx.cidField, area_of hA]; rfl
-theorem cid_of : c.cid s = (s.mem.readW (area s + 24) 32).toNat := by
-  simp only [Spec.Slab.Ctx.cid, cidField_of hA, mem_of hA]
+theorem cpuField_of : c.cpuField s = ⟨area s + 4, 4⟩ := by
+  simp only [Spec.Slab.Ctx.cpuField, area_of hA]; rfl
+theorem cpu_of : c.cpu s = (s.mem.readW (area s + 4) 32).toNat := by
+  simp only [Spec.Slab.Ctx.cpu, cpuField_of hA, mem_of hA]
 
 end ViewOf
 
@@ -88,7 +88,7 @@ end ViewOf
 /-- What a routine `c` may rely on in its entry state `s`. -/
 structure Facts (c : Spec.Slab.Ctx isa) (s : State) : Prop where
   rsVar : ⟨s.syms RS, 8⟩ ∈ s.rd
-  cidF : (⟨area s + 24, 4⟩ : Region) ∈ s.rd
+  cpuF : (⟨area s + 4, 4⟩ : Region) ∈ s.rd
   cs : (⟨area s + 8, 8⟩ : Region) ∈ s.wr
   mask : c.form = .table → ⟨c.maskAddr s, 4⟩ ∈ s.rd
   word : c.InRange s → ⟨c.word s, 8⟩ ∈ s.wr
@@ -111,7 +111,7 @@ structure Facts (c : Spec.Slab.Ctx isa) (s : State) : Prop where
 
 /-- The regions of a routine, in its three cases. -/
 theorem regions_eq (c : Spec.Slab.Ctx isa) (hA : c.A = abi) (s : State) :
-    c.regions s = [(⟨s.syms RS, 8⟩, false), (⟨area s + 24, 4⟩, false), (⟨area s + 8, 8⟩, true)] ++
+    c.regions s = [(⟨s.syms RS, 8⟩, false), (⟨area s + 4, 4⟩, false), (⟨area s + 8, 8⟩, true)] ++
       (match c.form with | .table => [(⟨c.maskAddr s, 4⟩, false)] | .inline => []) ++
       (if c.InRange s then
         (⟨c.word s, 8⟩, true) :: (if IsSlot (c.slots s) (c.w s) then [(c.magRegion s, true)] else [])
@@ -136,7 +136,7 @@ theorem facts_of_world {c : Spec.Slab.Ctx isa} (hA : c.A = abi) {s : State}
     and_true, true_and] at hrd hwr hnw hdj hres <;>
   exact {
     rsVar := by rw [hrd]; simp
-    cidF := by rw [hrd]; simp
+    cpuF := by rw [hrd]; simp
     cs := by rw [hwr]; simp
     mask := by intro h; rw [hf] at h; first | (rw [hrd]; simp; done) | cases h
     word := by intro h; first | exact absurd h hi | (rw [hwr]; simp)
