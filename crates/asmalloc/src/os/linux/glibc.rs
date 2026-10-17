@@ -13,7 +13,9 @@ use crate::os::RseqArea;
 // glibc writes them only during start-up, before any Rust code can read them, so reading them as
 // immutable statics is sound.
 unsafe extern "C" {
-    safe static __rseq_offset: isize;
+    /// The thread's rseq area as an offset from the thread pointer. The generated routines
+    /// name it as `front::__rseq_offset`.
+    pub(crate) safe static __rseq_offset: isize;
     safe static __rseq_size: u32;
 }
 
