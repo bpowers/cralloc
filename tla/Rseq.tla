@@ -10,6 +10,11 @@
    magazine comes from, where a retired one goes) is one atomic step on a pool
    here; Exchange.tla and Depot.tla model those parts.
 
+   BadCid = TRUE lets the OS hand a thread a cid that is out of range, which
+   any number of threads may hold at once. A routine compares the cid with
+   the slab count first and, if it is out of range, leaves for the slow path,
+   which serves the call from the back end and touches no slab.
+
    Restart = FALSE lets a stopped thread carry on where it was, and
    Exclusive = FALSE lets two running threads share a cid. Each breaks the
    invariant, which shows the model depends on exactly the two OS guarantees
@@ -23,7 +28,8 @@ CONSTANTS
     NObjs,
     Slots,      \* slots per magazine: slot 0 is the link, the last is unused
     Restart,
-    Exclusive
+    Exclusive,
+    BadCid
 
 Cids == 1..NCids
 Mags == 1..NMags
@@ -41,6 +47,7 @@ VARIABLES
     slab,   \* slab[c]: the slab word of cid c (one class)
     slot,   \* slot[m][i]: the memory of magazine m's object slots
     pool,   \* unloaded magazines nobody holds, as words
+    back,   \* objects free in the back end
     user,   \* user[t]: objects the program holds through thread t
     pc,
     rc,     \* register: the cid the sequence read
@@ -49,7 +56,7 @@ VARIABLES
     obj,    \* the object being freed, or 0
     hw      \* the magazine the slow path holds privately, as a word
 
-vars == <<cid, slab, slot, pool, user, pc, rc, rw, ro, obj, hw>>
+vars == <<cid, slab, slot, pool, back, user, pc, rc, rw, ro, obj, hw>>
 
 Init ==
     /\ cid = [t \in Threads |-> 0]
@@ -59,6 +66,7 @@ Init ==
     /\ slot = [m \in Mags |-> [i \in 1..Cap |->
                   IF (m - 1) * Cap + i <= NObjs THEN (m - 1) * Cap + i ELSE 0]]
     /\ pool = {Word(m, 1 + Cardinality({o \in Objs : (o - 1) \div Cap + 1 = m})) : m \in Mags}
+    /\ back = {}
     /\ user = [t \in Threads |-> {}]
     /\ pc = [t \in Threads |-> "idle"]
     /\ rc = [t \in Threads |-> 0]
@@ -81,7 +89,7 @@ ClearRegs(t) ==
 StartAlloc(t) ==
     /\ pc[t] = "idle"
     /\ Goto(t, "pop_cid")
-    /\ UNCHANGED <<cid, slab, slot, pool, user, rc, rw, ro, obj, hw>>
+    /\ UNCHANGED <<cid, slab, slot, pool, back, user, rc, rw, ro, obj, hw>>
 
 StartFree(t) ==
     /\ pc[t] = "idle"
@@ -89,16 +97,19 @@ StartFree(t) ==
         /\ obj' = [obj EXCEPT ![t] = o]
         /\ user' = [user EXCEPT ![t] = @ \ {o}]
     /\ Goto(t, "push_cid")
-    /\ UNCHANGED <<cid, slab, slot, pool, rc, rw, ro, hw>>
+    /\ UNCHANGED <<cid, slab, slot, pool, back, rc, rw, ro, hw>>
 
 ----------------------------------------------------------------------------
 (* The routines. Each label is one instruction that touches memory. *)
 
+\* Read the cid and compare it with the slab count. Out of range: pop and
+\* push leave for the back end; install gives its magazine back first.
 ReadCid(t, from, to) ==
     /\ pc[t] = from
-    /\ rc' = [rc EXCEPT ![t] = cid[t]]
-    /\ Goto(t, to)
-    /\ UNCHANGED <<cid, slab, slot, pool, user, rw, ro, obj, hw>>
+    /\ IF cid[t] \in Cids
+       THEN rc' = [rc EXCEPT ![t] = cid[t]] /\ Goto(t, to)
+       ELSE UNCHANGED rc /\ Goto(t, IF from = "ins_cid" THEN "put_back" ELSE "direct")
+    /\ UNCHANGED <<cid, slab, slot, pool, back, user, rw, ro, obj, hw>>
 
 PopLoad(t) ==
     /\ pc[t] = "pop_load"
@@ -108,20 +119,20 @@ PopLoad(t) ==
         ELSE /\ Goto(t, "pop_read")
              /\ rw' = [rw EXCEPT ![t] = w]
              /\ UNCHANGED <<rc, ro>>
-    /\ UNCHANGED <<cid, slab, slot, pool, user, obj, hw>>
+    /\ UNCHANGED <<cid, slab, slot, pool, back, user, obj, hw>>
 
 PopRead(t) ==
     /\ pc[t] = "pop_read"
     /\ ro' = [ro EXCEPT ![t] = slot[rw[t].m][rw[t].s - 1]]
     /\ Goto(t, "pop_commit")
-    /\ UNCHANGED <<cid, slab, slot, pool, user, rc, rw, obj, hw>>
+    /\ UNCHANGED <<cid, slab, slot, pool, back, user, rc, rw, obj, hw>>
 
 PopCommit(t) ==
     /\ pc[t] = "pop_commit"
     /\ slab' = [slab EXCEPT ![rc[t]] = Word(rw[t].m, rw[t].s - 1)]
     /\ user' = [user EXCEPT ![t] = @ \cup {ro[t]}]
     /\ Goto(t, "idle") /\ ClearRegs(t)
-    /\ UNCHANGED <<cid, slot, pool, obj, hw>>
+    /\ UNCHANGED <<cid, slot, pool, back, obj, hw>>
 
 PushLoad(t) ==
     /\ pc[t] = "push_load"
@@ -131,7 +142,7 @@ PushLoad(t) ==
         ELSE /\ Goto(t, "push_store")
              /\ rw' = [rw EXCEPT ![t] = w]
              /\ UNCHANGED <<rc, ro>>
-    /\ UNCHANGED <<cid, slab, slot, pool, user, obj, hw>>
+    /\ UNCHANGED <<cid, slab, slot, pool, back, user, obj, hw>>
 
 \* The store into the free slot happens before the commit. The slab invariant
 \* says nothing about slots at or above the word, so this is invisible.
@@ -139,14 +150,14 @@ PushStore(t) ==
     /\ pc[t] = "push_store"
     /\ slot' = [slot EXCEPT ![rw[t].m][rw[t].s] = obj[t]]
     /\ Goto(t, "push_commit")
-    /\ UNCHANGED <<cid, slab, pool, user, rc, rw, ro, obj, hw>>
+    /\ UNCHANGED <<cid, slab, pool, back, user, rc, rw, ro, obj, hw>>
 
 PushCommit(t) ==
     /\ pc[t] = "push_commit"
     /\ slab' = [slab EXCEPT ![rc[t]] = Word(rw[t].m, rw[t].s + 1)]
     /\ obj' = [obj EXCEPT ![t] = 0]
     /\ Goto(t, "idle") /\ ClearRegs(t)
-    /\ UNCHANGED <<cid, slot, pool, user, hw>>
+    /\ UNCHANGED <<cid, slot, pool, back, user, hw>>
 
 Allocating(t) == obj[t] = 0
 Retry(t) == IF Allocating(t) THEN "pop_cid" ELSE "push_cid"
@@ -162,14 +173,14 @@ InsLoad(t) ==
              /\ rw' = [rw EXCEPT ![t] = w]
              /\ UNCHANGED <<rc, ro>>
         ELSE /\ Goto(t, "put_back") /\ ClearRegs(t)
-    /\ UNCHANGED <<cid, slab, slot, pool, user, obj, hw>>
+    /\ UNCHANGED <<cid, slab, slot, pool, back, user, obj, hw>>
 
 InsCommit(t) ==
     /\ pc[t] = "ins_commit"
     /\ slab' = [slab EXCEPT ![rc[t]] = hw[t]]
     /\ hw' = [hw EXCEPT ![t] = rw[t]]
     /\ Goto(t, "retire") /\ ClearRegs(t)
-    /\ UNCHANGED <<cid, slot, pool, user, obj>>
+    /\ UNCHANGED <<cid, slot, pool, back, user, obj>>
 
 ----------------------------------------------------------------------------
 (* The rest of the slow path, abstracted to atomic steps on a pool. *)
@@ -187,7 +198,7 @@ Get(t) ==
           /\ \E w \in pool : ~IsFull(w) /\ hw' = [hw EXCEPT ![t] = w] /\ pool' = pool \ {w}
           /\ Goto(t, "ins_cid")
           /\ UNCHANGED user
-    /\ UNCHANGED <<cid, slab, slot, rc, rw, ro, obj>>
+    /\ UNCHANGED <<cid, slab, slot, back, rc, rw, ro, obj>>
 
 \* Retire the magazine the install displaced, or put back the one it could
 \* not install, then retry the request.
@@ -196,7 +207,22 @@ Return(t) ==
     /\ pool' = IF hw[t] = Zero THEN pool ELSE pool \cup {hw[t]}
     /\ hw' = [hw EXCEPT ![t] = Zero]
     /\ Goto(t, Retry(t))
-    /\ UNCHANGED <<cid, slab, slot, user, rc, rw, ro, obj>>
+    /\ UNCHANGED <<cid, slab, slot, back, user, rc, rw, ro, obj>>
+
+\* With no usable cid, serve the call from the back end.
+Direct(t) ==
+    /\ pc[t] = "direct"
+    /\ IF Allocating(t)
+       THEN IF back = {} THEN UNCHANGED <<back, user, obj>>
+            ELSE \E o \in back :
+                    /\ back' = back \ {o}
+                    /\ user' = [user EXCEPT ![t] = @ \cup {o}]
+                    /\ UNCHANGED obj
+       ELSE /\ back' = back \cup {obj[t]}
+            /\ obj' = [obj EXCEPT ![t] = 0]
+            /\ UNCHANGED user
+    /\ Goto(t, "idle")
+    /\ UNCHANGED <<cid, slab, slot, pool, rc, rw, ro, hw>>
 
 ----------------------------------------------------------------------------
 (* The OS *)
@@ -216,14 +242,14 @@ Preempt(t) ==
     /\ IF Restart /\ SeqStart(pc[t]) # pc[t]
        THEN Goto(t, SeqStart(pc[t])) /\ ClearRegs(t)
        ELSE UNCHANGED <<pc, rc, rw, ro>>
-    /\ UNCHANGED <<slab, slot, pool, user, obj, hw>>
+    /\ UNCHANGED <<slab, slot, pool, back, user, obj, hw>>
 
 Resume(t) ==
     /\ ~Running(t)
-    /\ \E c \in Cids :
-        /\ Exclusive => \A u \in Threads : cid[u] # c
+    /\ \E c \in Cids \cup (IF BadCid THEN {NCids + 1} ELSE {}) :
+        /\ (Exclusive /\ c \in Cids) => \A u \in Threads : cid[u] # c
         /\ cid' = [cid EXCEPT ![t] = c]
-    /\ UNCHANGED <<slab, slot, pool, user, pc, rc, rw, ro, obj, hw>>
+    /\ UNCHANGED <<slab, slot, pool, back, user, pc, rc, rw, ro, obj, hw>>
 
 Step(t) ==
     /\ Running(t)
@@ -231,7 +257,7 @@ Step(t) ==
        \/ ReadCid(t, "pop_cid", "pop_load") \/ PopLoad(t) \/ PopRead(t) \/ PopCommit(t)
        \/ ReadCid(t, "push_cid", "push_load") \/ PushLoad(t) \/ PushStore(t) \/ PushCommit(t)
        \/ ReadCid(t, "ins_cid", "ins_load") \/ InsLoad(t) \/ InsCommit(t)
-       \/ Get(t) \/ Return(t)
+       \/ Get(t) \/ Return(t) \/ Direct(t)
 
 Next == \E t \in Threads : Step(t) \/ Preempt(t) \/ Resume(t)
 
@@ -250,11 +276,12 @@ OwnedWords == {<<"slab", c, slab[c]>> : c \in Cids}
          \cup {<<"pool", 0, w>> : w \in pool}
 
 Places(o) == {p \in OwnedWords : o \in Below(p[3])}
+        \cup (IF o \in back THEN {<<"back">>} ELSE {})
         \cup {<<"user", t>> : t \in {u \in Threads : o \in user[u]}}
         \cup {<<"freeing", t>> : t \in {u \in Threads : obj[u] = o}}
 
 CidsDistinct ==
-    Exclusive => \A t, u \in Threads : t # u /\ Running(t) => cid[t] # cid[u]
+    Exclusive => \A t, u \in Threads : t # u /\ cid[t] \in Cids => cid[t] # cid[u]
 
 \* The slab invariant from "Front end", extended to every place a magazine
 \* can be: each word is zero or names slot s of a magazine nothing else refers
@@ -266,6 +293,10 @@ SlabInvariant ==
             /\ p[3].s \in 1..(Slots - 1)
             /\ 0 \notin Below(p[3])
             /\ Cardinality(Below(p[3])) = p[3].s - 1
+
+\* A sequence that got past the range check holds an in-range cid, so a
+\* thread with no valid cid never reads or writes a slab.
+InRange == \A t \in Threads : SeqStart(pc[t]) # pc[t] => rc[t] \in Cids
 
 \* No object is in two places and none is lost.
 Conservation == \A o \in Objs : Cardinality(Places(o)) = 1
