@@ -28,6 +28,12 @@ process light.
   run on demand.
 - The machine is shared. Stop only processes you started, by process ID; never kill by
   name (`pkill`, `killall`), since another teammate may be running the same tool.
+- Everything that runs the allocator runs under a memory cap. An uncapped test once took
+  57 GiB and the machine with it. `cargo test`, `cargo run` and `cargo bench` are capped by
+  the workspace's cargo runner (`scripts/run-capped`: 4 GiB unless `ASMALLOC_TEST_MEM` says
+  otherwise). Anything started another way, such as a benchmark runner, a fuzzer, a preload
+  run or a probe built with `rustc`, goes through `scripts/memlimit`. Never set a cap above
+  16 GiB, and run one memory-heavy job at a time.
 - Stay inside your component's directory. Do not edit shared files (the workspace manifest,
   this file, `README.md`, `docs/design.md`) unless that is your task. If you need a change in
   another component, tell the lead.

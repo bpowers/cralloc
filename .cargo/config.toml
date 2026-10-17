@@ -1,0 +1,5 @@
+# Every binary cargo runs for this workspace (tests, examples, benchmarks, `cargo run`) goes
+# through a memory cap. An allocator under test that runs away must fail on its own; an
+# uncapped test once took 57 GiB and the whole machine with it.
+[target.x86_64-unknown-linux-gnu]
+runner = "scripts/run-capped"
