@@ -329,8 +329,11 @@ fn large_frees_find_the_class_from_the_address() {
         let p = heap.alloc(l);
         let q = heap.realloc(p, l, 100 << 10);
         assert!(!q.is_null());
-        let roomy = heap.usable(q).unwrap();
-        assert!(roomy >= HEADROOM * (100 << 10), "{roomy}");
+        let slot = heap.heap.back().unwrap().usable_size(q).unwrap();
+        assert!(slot >= HEADROOM * (100 << 10), "{slot}");
+        // What the caller may use is what it asked for, to a page, not the headroom.
+        let page = heap.heap.back().unwrap().space().plan().geometry().page_size();
+        assert_eq!(heap.usable(q), Some((100usize << 10).next_multiple_of(page)));
         heap.dealloc(q, layout(100 << 10, 8));
     }
     assert!(!Class::of_size(40 << 10).unwrap().is_small());
@@ -385,7 +388,8 @@ mod process {
         unsafe {
             let p = Asmalloc.alloc_zeroed(l);
             assert!(!p.is_null());
-            assert_eq!(Asmalloc::usable_size(p), Some(8 << 30));
+            // Two regions, of which the caller asked for five gibibytes.
+            assert_eq!(Asmalloc::usable_size(p), Some(5 << 30));
             assert_eq!(p.add((5 << 30) - 1).read(), 0);
             Asmalloc.dealloc(p, l);
         }

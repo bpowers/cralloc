@@ -21,7 +21,7 @@ use core::sync::atomic::{AtomicBool, AtomicPtr, Ordering};
 
 /// A heap over a [`SimOs`], with its own slabs, run with twins. See the module documentation.
 pub struct SimHeap<S: Shape = Standard> {
-    heap: Heap<SimOs<S>>,
+    pub(super) heap: Heap<SimOs<S>>,
     slabs: Box<Slabs<[Slab; SIM_THREADS]>>,
     leases: [AtomicBool; SIM_THREADS],
 }

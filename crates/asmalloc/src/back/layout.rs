@@ -12,6 +12,8 @@
 //! ...                         clean bitmap: one bit per page, set means purged and untouched
 //! ...                         zero bitmap, large classes only: one bit per slot, set means
 //!                             free and known to read as zero
+//! ...                         sizes, large classes only: one word per slot, the size its
+//!                             owner last asked for (`size.rs`)
 //! ```
 //!
 //! The leaf bitmap comes first so that it can be committed a page at a time as the region grows,
@@ -50,6 +52,8 @@ pub(crate) struct Layout {
     clean_count: u32,
     /// Word offset of the zero bitmap, or 0 if the class has none (small classes).
     zero: u32,
+    /// Word offset of the sizes, or 0 if the class has none (small classes).
+    sizes: u32,
     total: u32,
     page_shift: u8,
     huge_shift: u8,
@@ -159,12 +163,12 @@ impl Layout {
         let clean = next;
         let clean_count = pages.div_ceil(BITS);
         next += clean_count;
-        let zero = if class.is_small() {
-            0
+        let (zero, sizes) = if class.is_small() {
+            (0, 0)
         } else {
             let at = next;
-            next += count[0];
-            at
+            next += count[0] + slots;
+            (at, at + count[0])
         };
         if next as usize * WORD_BYTES > plan.metadata_size() {
             return None;
@@ -180,6 +184,7 @@ impl Layout {
             clean,
             clean_count,
             zero,
+            sizes,
             total: next,
             page_shift: page_shift as u8,
             huge_shift: geometry.huge_page_size().trailing_zeros() as u8,
@@ -256,6 +261,16 @@ impl Layout {
             None
         } else {
             Some(self.zero + index)
+        }
+    }
+
+    /// Word offset of the size word of slot `index`, if the class records sizes.
+    #[inline(always)]
+    pub(crate) const fn size_word(&self, index: u32) -> Option<u32> {
+        if self.sizes == 0 || index >= self.slots {
+            None
+        } else {
+            Some(self.sizes + index)
         }
     }
 

@@ -18,6 +18,8 @@
 //!   allocation says whether the slot is known to read as zero.
 //! - [`Back::alloc_run`] and [`Back::free_run`] serve objects bigger than a region as runs of
 //!   whole regions. [`Back::lookup`] and [`Back::usable_size`] find what an address is.
+//! - [`Back::record_size`] and [`Back::recorded_size`] keep the size a large object's owner
+//!   last asked for, which its block may far exceed (`size`).
 //! - [`Back::heartbeat`] does one bounded step of purging when retained memory is over the cap,
 //!   and [`Back::trim`] returns everything it can.
 //!
@@ -36,6 +38,7 @@ pub mod policy;
 mod purge;
 mod region;
 mod run;
+mod size;
 mod tree;
 mod word;
 
@@ -56,7 +59,7 @@ use self::host::{ClassHost, ClassState};
 use self::layout::Layout;
 use crate::classes::{COUNT, Class};
 use crate::os::{Os, OsError};
-use crate::space::{RegionTable, Space, SpaceCell};
+use crate::space::{MAX_REGIONS, RegionTable, Space, SpaceCell};
 use core::fmt;
 use core::ptr::NonNull;
 use core::sync::atomic::{AtomicU32, AtomicUsize};
@@ -74,6 +77,8 @@ pub struct State<O: Os> {
     retained: AtomicUsize,
     /// Where the next purge step looks: see `purge`.
     purge_at: AtomicU32,
+    /// The size recorded for each run, by its head region (`size`).
+    run_sizes: [AtomicUsize; MAX_REGIONS],
     /// Bytes purged since the current pass over all regions began, plus one for each purge the
     /// OS refused: zero at the end of a pass means what is left is fragmentation.
     pass_progress: AtomicUsize,
@@ -87,6 +92,7 @@ impl<O: Os> State<O> {
             table: RegionTable::new(),
             classes: [const { ClassState::new() }; COUNT],
             retained: AtomicUsize::new(0),
+            run_sizes: [const { AtomicUsize::new(0) }; MAX_REGIONS],
             purge_at: AtomicU32::new(0),
             pass_progress: AtomicUsize::new(0),
         }

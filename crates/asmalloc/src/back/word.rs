@@ -41,6 +41,13 @@ impl Atomic {
     pub(crate) const fn zero() -> Atomic {
         Atomic(AtomicU64::new(0))
     }
+
+    /// Replaces the value. Only for words one owner writes, such as a slot's recorded size;
+    /// the protocols' words change by read-modify-write.
+    #[inline(always)]
+    pub(crate) fn store(&self, value: u64) {
+        self.0.store(value, SeqCst)
+    }
 }
 
 impl Word for Atomic {

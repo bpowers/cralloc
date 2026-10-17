@@ -57,6 +57,8 @@ pub(crate) struct Heap<O: Os> {
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct Grant {
     pub(crate) ptr: NonNull<u8>,
+    // Only `Allocator` returns it.
+    #[cfg_attr(not(feature = "allocator-api"), allow(dead_code))]
     pub(crate) len: usize,
 }
 
@@ -121,10 +123,19 @@ impl<O: Os> Heap<O> {
             .is_some_and(|back| back.space().locate(ptr).is_some())
     }
 
-    /// The usable size of the block starting at `ptr`: its whole slot or run. `None` if no slot
-    /// or run starts there.
+    /// The bytes the caller may use of the block starting at `ptr`: the class size of a small
+    /// one; for a large one, the size last asked for rounded up to a page, never more than its
+    /// slot or run, which may be far bigger. `None` if no slot or run starts there.
     pub(crate) fn usable_size(&self, ptr: *const u8) -> Option<usize> {
-        self.back()?.usable_size(ptr)
+        let back = self.back()?;
+        let block = back.usable_size(ptr)?;
+        Some(match back.recorded_size(ptr) {
+            Some(size) => {
+                let page = back.space().plan().geometry().page_size();
+                size.next_multiple_of(page).min(block)
+            }
+            None => block,
+        })
     }
 
     /// Allocates a block for `layout`; null if there is no memory.

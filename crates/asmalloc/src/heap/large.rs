@@ -14,6 +14,10 @@
 //!
 //! Fresh slots and runs read as zero; the back end says when a reused large slot is known to,
 //! so zeroed allocation clears only what it must.
+//!
+//! Every allocation and in-place resize of a large object records the size asked for
+//! (`Back::record_size`). What the caller may use is that size rounded up to a page, so a block
+//! with headroom never reports, or makes anyone touch, the room it has not been asked for.
 
 use super::{Grant, Heap, Zero, small};
 use crate::classes::Class;
@@ -63,7 +67,8 @@ impl<O: Os> Heap<O> {
         match place(layout, back.space().plan()) {
             Place::Slot(class) => {
                 let block = back.alloc(class)?;
-                let len = class.size();
+                back.record_size(block.ptr, layout.size());
+                let len = self.usable_size(block.ptr.as_ptr()).unwrap_or(layout.size());
                 let clear = match zero {
                     _ if block.zeroed => 0,
                     Zero::No => 0,
@@ -80,7 +85,8 @@ impl<O: Os> Heap<O> {
             // A run is always fresh or purged memory, so it reads as zero.
             Place::Run { size, align } => {
                 let ptr = back.alloc_run(size, align)?;
-                let len = back.usable_size(ptr.as_ptr()).unwrap_or(size);
+                back.record_size(ptr, layout.size());
+                let len = self.usable_size(ptr.as_ptr()).unwrap_or(layout.size());
                 Some(Grant { ptr, len })
             }
         }
@@ -97,12 +103,12 @@ impl<O: Os> Heap<O> {
     }
 
     /// The bytes the block at `ptr`, described by `layout`, occupies: its class for a small
-    /// layout, else its slot or run. Aborts if no large block starts there.
+    /// layout, else its whole slot or run. Aborts if no large block starts there.
     fn block_len(&self, ptr: NonNull<u8>, layout: Layout) -> usize {
         if let Some(class) = small(layout) {
             return class.size();
         }
-        match self.usable_size(ptr.as_ptr()) {
+        match self.back().and_then(|back| back.usable_size(ptr.as_ptr())) {
             Some(len) => len,
             None => self
                 .os()
@@ -138,7 +144,10 @@ impl<O: Os> Heap<O> {
             }
         };
         if in_place {
-            return Some(Grant { ptr, len });
+            if small(old).is_some() {
+                return Some(Grant { ptr, len });
+            }
+            return Some(self.resize_large_in_place(ptr, new, zero));
         }
         // Growing a large object out of its block: take headroom. A zeroed grow takes none, so
         // that it never clears room nobody asked for.
@@ -152,6 +161,15 @@ impl<O: Os> Heap<O> {
                 .and_then(|layout| self.alloc_grant(routines, layout, Zero::No))
                 .or_else(|| self.alloc_grant(routines, new, fill))?
         };
+        // A block with headroom records the size asked for, not the room it was given.
+        let grant = match self.back() {
+            Some(back) if small(new).is_none() => {
+                back.record_size(grant.ptr, new.size());
+                let len = self.usable_size(grant.ptr.as_ptr()).unwrap_or(new.size());
+                Grant { len, ..grant }
+            }
+            _ => grant,
+        };
         // SAFETY: HEAP-04.
         unsafe {
             ptr.as_ptr()
@@ -159,6 +177,21 @@ impl<O: Os> Heap<O> {
             self.dealloc(routines, ptr.as_ptr(), old);
         }
         Some(grant)
+    }
+
+    /// Records a large block's new size after an in-place resize, clearing what it gains if
+    /// `zero`, and returns what the caller may use now.
+    fn resize_large_in_place(&self, ptr: NonNull<u8>, new: Layout, zero: bool) -> Grant {
+        let before = self.usable_size(ptr.as_ptr()).unwrap_or(0);
+        if let Some(back) = self.back() {
+            back.record_size(ptr, new.size());
+        }
+        let len = self.usable_size(ptr.as_ptr()).unwrap_or(new.size());
+        if zero && len > before {
+            // SAFETY: HEAP-05.
+            unsafe { ptr.as_ptr().add(before).write_bytes(0, len - before) };
+        }
+        Grant { ptr, len }
     }
 }
 
@@ -183,7 +216,7 @@ mod tests {
         assert_eq!(
             place(layout((1 << 32) + 1, 8), plan),
             Place::Run {
-                size: (1 << 32) + 1,
+                size: (1 << 32) + 8,
                 align: 8
             }
         );
