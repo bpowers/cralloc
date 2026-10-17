@@ -104,9 +104,12 @@ scripts/        The checks: imports, registration files, the audit's negative te
    `Artifact`, which cannot be built without the proof. Registration files
    only bind: no theorems and no tactic proofs but the defaults
    (`scripts/check_registrations.py`).
-5. **Emit**: `Emit.lean` audits every artifact (only the standard axioms;
-   the compiled code it runs is what the kernel checked; `VG.Spec` names come
-   from `Spec/`) and renders each as a Rust naked function.
+5. **Emit**: `Emit.lean` imports the registration files into its own
+   process, audits the lists they define (only the standard axioms, found by
+   walking the declarations; the compiled code it runs is what the kernel
+   checked; `VG.Spec` names come from `Spec/`), and evaluates and renders
+   those same lists. Nothing it audits or emits is elaborated in a file that
+   imports them, so their syntax cannot change it.
 
 The self-test (`Spec/Selftest*`, `Impl/Selftest/`, `Proof/Selftest/`,
 `Artifacts/Selftest/`) is a worked example of every step.
@@ -123,9 +126,13 @@ Everything in `Impl/` and `Proof/` is checked by Lean and need not be read.
 ## Rules
 
 * No `sorry`, `admit`, `native_decide`, `bv_decide` or new `axiom` in
-  anything an artifact depends on. `lake build` treats warnings as errors and
-  the emitter's audit rejects any axiom beyond Lean's standard three;
-  `scripts/audit_negative.py` checks that the audit still does.
+  anything an artifact depends on. `lake build` treats warnings as errors,
+  the emitter's audit rejects any axiom beyond Lean's standard three, and
+  `leanchecker` replays every module through the kernel, which rejects a
+  declaration elaborated without it (`debug.skipKernelTC`).
+  `scripts/audit_negative.py` checks each of these against forgeries.
+* No initializers (`initialize`, `@[init]`) under `Asmalloc/`: the emitter
+  imports the registration files and must run none of their code.
 * Never set `maxHeartbeats` or another resource limit: a proof that hits one
   is too slow, so make it faster.
 * Changes to `TCB/` or `Spec/` are trust changes: keep them small, commit them

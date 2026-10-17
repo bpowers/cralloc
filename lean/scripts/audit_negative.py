@@ -25,6 +25,17 @@ It also runs every audit command in a scratch module, outside the tree,
 and checks that each refuses to run there (Lean reports each command's error
 and goes on to the next).
 
+And it replaces the self-test's proof by each of two forgeries a review
+found (`scripts/witnesses/`), and checks that the check rejects each:
+
+* `skip_kernel`: a theorem of `False` elaborated with
+  `debug.skipKernelTC`, which the kernel never sees, so no axiom appears;
+  replaying the module through the kernel (`leanchecker`) must reject it.
+* `audit_macro_hijack`: an axiom, and a `macro_rules` that rewrites
+  `#assert_standard_axioms` into nothing in any file importing it; the
+  emitter audits in its own process (`Emit.lean`), so it must still report
+  the axiom.
+
 Run it from anywhere after `lake build`: it rebuilds the few modules of the
 self-test that the edits change, and the next `lake build` rebuilds them from
 the restored files.
@@ -163,14 +174,13 @@ def emit_check(edits: dict, added: pathlib.Path) -> str | None:
     return None if r.returncode == 0 else r.stdout + r.stderr
 
 
-# The audit's error: the axioms it found, as a Lean list.
-REJECTED = re.compile(r"depends on non-standard axioms: \[([^\]]*)\]")
+# The audit's error: one line per axiom it found (`Emit.lean`, `audit`).
+REJECTED = re.compile(r"^non-standard axiom: (\S+)$", re.M)
 
 
 def rejected(out: str | None) -> bool:
     """Whether the audit rejected both axioms (`out`, from `emit_check`)."""
-    found = REJECTED.search(out or "")
-    axioms = {a.strip() for a in found.group(1).split(",")} if found else set()
+    axioms = set(REJECTED.findall(out or ""))
     ok = True
     for axiom, how in ((AXIOM, "in a module"), (PRIVATE_AXIOM, "behind a private import")):
         if axiom in axioms:
@@ -182,6 +192,34 @@ def rejected(out: str | None) -> bool:
     if not ok:
         print(out or "", file=sys.stderr)
     return ok
+
+
+WITNESSES = LEAN / "scripts" / "witnesses"
+
+
+def forged(witness: str, cmd: list[str], expect: str) -> bool:
+    """Replaces the self-test's proof by `witness`, builds it, runs `cmd`,
+    restores the proof, and whether `cmd` failed saying `expect`."""
+    with tempfile.TemporaryDirectory() as tmp:
+        copy = pathlib.Path(tmp) / PROOF.name
+        shutil.copy2(PROOF, copy)
+        try:
+            PROOF.write_text((WITNESSES / f"{witness}.lean.txt").read_text())
+            b = subprocess.run(["lake", "build", "--log-level=warning",
+                                "+Asmalloc.Artifacts.Selftest.X86_64"],
+                               cwd=LEAN, capture_output=True, text=True)
+            if b.returncode != 0:
+                print(f"the forgery {witness} does not build:\n{b.stdout}{b.stderr}", file=sys.stderr)
+                return False
+            r = subprocess.run(cmd, cwd=LEAN, capture_output=True, text=True)
+        finally:
+            shutil.copy2(copy, PROOF)
+    out = r.stdout + r.stderr
+    if r.returncode != 0 and expect in out:
+        print(f"the check rejects the forgery {witness}")
+        return True
+    print(f"the check does not reject the forgery {witness}:\n{out}", file=sys.stderr)
+    return False
 
 
 def main() -> int:
@@ -196,11 +234,15 @@ def main() -> int:
         print("the audits refuse to run in a module")
     out = emit_check({MODULE: inject_module(MODULE.read_text()),
                       PROOF: inject_private_import(PROOF.read_text())}, PRIVATE)
+    kernel = forged("skip_kernel", ["lake", "env", "leanchecker", "Asmalloc.Proof.Selftest.X86_64"],
+                    "leanchecker found a problem")
+    hijack = forged("audit_macro_hijack", ["lake", "env", "lean", "--run", "Emit.lean", "--check"],
+                    "non-standard axiom: VG.Proof.Selftest.X86_64.vg_helper")
     if (subprocess.run(["git", "diff", "--quiet", "--", str(MODULE), str(PROOF)]).returncode != 0
             or PRIVATE.exists()):
         print(f"{MODULE} or {PROOF} was not restored, or {PRIVATE} not deleted", file=sys.stderr)
         return 1
-    return 0 if rejected(out) and refused else 1
+    return 0 if rejected(out) and refused and kernel and hijack else 1
 
 
 if __name__ == "__main__":
