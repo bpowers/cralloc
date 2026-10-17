@@ -35,6 +35,7 @@
 //! generated C routines to replace; their slow paths (`slow.rs`) complete any call. The ledger
 //! is under `docs/safety/asmalloc/c/`.
 
+pub mod cxx;
 mod errno;
 mod seam;
 mod slow;
@@ -83,9 +84,9 @@ pub unsafe extern "C" fn free(ptr: *mut c_void) {
 ///
 /// As for [`free`].
 #[inline]
-pub unsafe extern "C" fn free_sized(ptr: *mut c_void, _size: usize) {
+pub unsafe extern "C" fn free_sized(ptr: *mut c_void, size: usize) {
     // SAFETY: the caller's promise.
-    unsafe { seam::free(ptr) }
+    unsafe { seam::free_sized(ptr, size) }
 }
 
 /// C23's `free_aligned_sized`. Neither the alignment nor the size is trusted.
@@ -94,9 +95,9 @@ pub unsafe extern "C" fn free_sized(ptr: *mut c_void, _size: usize) {
 ///
 /// As for [`free`].
 #[inline]
-pub unsafe extern "C" fn free_aligned_sized(ptr: *mut c_void, _align: usize, _size: usize) {
+pub unsafe extern "C" fn free_aligned_sized(ptr: *mut c_void, align: usize, size: usize) {
     // SAFETY: the caller's promise.
-    unsafe { seam::free(ptr) }
+    unsafe { seam::free_aligned_sized(ptr, align, size) }
 }
 
 /// The obsolete `cfree`, which glibc still exports for old binaries: [`free`].

@@ -25,6 +25,9 @@ bytes that the caller owns; a block the caller owns is one no other code accesse
 caller today is `seam::calloc` (SEAM-03); a generated `c_calloc` routine that jumps here must
 meet the same contract, which its specification will state.
 
+`free_sized_slow` and `free_aligned_sized_slow` each call `free_slow(ptr)` with their own
+contract, which is `free_slow`'s (the size and alignment are not used).
+
 ## SLOW-03: `seam::free_small(class, object)` in `free_slow`
 
 **Precondition** (SEAM-01). `object` starts a slot of `class` that the heap handed out, owned by

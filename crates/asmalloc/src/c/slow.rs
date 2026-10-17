@@ -5,7 +5,9 @@
 //! that misses can leave for one with a `jmp` and its argument registers intact
 //! (`docs/research/zen5-roofline.md` section 14): `malloc_slow(size)` for any size, `free_slow(ptr)`
 //! for any pointer, `calloc_slow(total)` for any total (`usize::MAX` for one that overflowed),
-//! and `calloc_zero(block, total)` after a routine popped a block. The ledger entry is
+//! and `calloc_zero(block, total)` after a routine popped a block; and for the sized frees,
+//! `free_sized_slow(ptr, size)` and `free_aligned_sized_slow(ptr, align, size)`, which complete
+//! one whatever the size says. The ledger entry is
 //! `docs/safety/asmalloc/c/slow-safety.md`.
 
 use super::{errno, seam};
@@ -90,4 +92,34 @@ pub(crate) unsafe extern "C" fn free_slow(ptr: *mut c_void) {
         Some(Found::Large { .. }) => process::free_large(object),
         None => process::abort("free of a pointer that is not a block of asmalloc's heap"),
     }
+}
+
+/// Completes a sized free, `free_sized(ptr, size)` or C++'s sized `delete`: the size is a
+/// prediction a routine may have acted on, and this frees exactly what `free_slow(ptr)` would.
+///
+/// # Safety
+///
+/// As for [`free_slow`]. A wrong `size` is safe.
+#[cold]
+#[inline(never)]
+pub(crate) unsafe extern "C" fn free_sized_slow(ptr: *mut c_void, _size: usize) {
+    // SAFETY: the caller's promise.
+    unsafe { free_slow(ptr) }
+}
+
+/// Completes `free_aligned_sized(ptr, align, size)` or C++'s sized aligned `delete`, as
+/// [`free_sized_slow`].
+///
+/// # Safety
+///
+/// As for [`free_slow`]. A wrong `align` or `size` is safe.
+#[cold]
+#[inline(never)]
+pub(crate) unsafe extern "C" fn free_aligned_sized_slow(
+    ptr: *mut c_void,
+    _align: usize,
+    _size: usize,
+) {
+    // SAFETY: the caller's promise.
+    unsafe { free_slow(ptr) }
 }

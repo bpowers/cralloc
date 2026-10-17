@@ -24,6 +24,10 @@ executable = []
 # unifies features across a workspace and this one would also replace `malloc` in every test
 # binary built alongside it.
 c-abi = []
+# Export the C++ allocation operators (`operator new` and `delete` in every replaceable form)
+# under their mangled names, as `asmalloc::export_cxx_abi!` does. Separate from `c-abi` because
+# a C++ program may define these operators itself.
+cxx-abi = []
 # The `Allocator` trait for `Asmalloc` (and `SimHeap`). The trait is stable from Rust 1.100, so
 # until then this needs a nightly toolchain.
 allocator-api = []
