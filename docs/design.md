@@ -477,20 +477,25 @@ it means the new size is still large and fits the slot. Anything else moves the 
 - **`GlobalAlloc`** for `#[global_allocator]`. `dealloc` of a small object is the free
   routine and nothing else.
 - **`Allocator`**, on Rust versions that have it, through a zero-sized handle. All handles
-  share the one heap. `allocate` returns the full class size.
+  share the one heap. `allocate` returns the full class size. A zero-size request gets a
+  dangling, aligned pointer and no block.
 - **C ABI**: `malloc`, `calloc`, `realloc`, `free`, the aligned-allocation family,
   `malloc_usable_size`, `malloc_trim` and the sized frees. These are exported when a cargo
   feature asks for them, and always by the `LD_PRELOAD` library. `free(p)` reads the class
   from the address table and joins the same path as a Rust free. A pointer outside the heap
-  is a caller's bug and aborts the process.
+  is a caller's bug and aborts the process. The sized frees also take the class from the
+  address, since a wrong size from C would otherwise corrupt the heap. `malloc_usable_size`
+  reports the whole slot, all of which the caller may use. `realloc(p, 0)` frees `p` and
+  returns null, as glibc does. This layer sets `errno` through the C library's own
+  accessor; it is the only part of asmalloc that refers to a C library.
 
 The recommended build is `lto = "fat"`. Thin LTO also inlines the fast path into dependency
 crates, but it silently stops doing so when the crate that declares `#[global_allocator]`
 contains a private `#[used]` static or module-level assembly; declaring the allocator in a
 small crate of its own avoids that.
 
-C may free anything Rust allocated. Memory obtained from the C entry points must be
-released through them, which Rust's own rules already require: its class may differ from
+C may free, resize or measure anything Rust allocated. Memory obtained from the C entry
+points must be released through them, which Rust's own rules already require: its class may differ from
 the one a Rust `Layout` of the same size implies.
 
 ### Process lifecycle

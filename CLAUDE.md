@@ -59,6 +59,8 @@ process light.
   source file without `.rs`. An entry gives the preconditions, the invariants that make them
   hold, and a proof on paper, and is reviewed adversarially by a fresh agent that did not
   write the code. Changing the block means updating the entry and getting it reviewed again.
+  This rule covers the allocator and the preload library. Test, fuzz and benchmark crates
+  keep `unsafe` small and commented but need no ledger.
 - The concurrency rules in the design hold everywhere: no locks, no thread-local state,
   shared state changes by one atomic instruction or one rseq commit, and all-zero is a valid
   state.
