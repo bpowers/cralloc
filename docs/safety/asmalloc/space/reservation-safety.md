@@ -6,29 +6,32 @@ Kani does not cover these blocks. It does cover the address arithmetic they depe
 
 **The `Space` invariant.** The `plan.size()` bytes at `base` are one reservation that `os` (the
 value the `Space` borrows) returned and that has not been unmapped, and `base` is aligned to the
-region size.
+plan's region size, which is the size the reservation got (regions shrink, keeping their number,
+when the OS refuses the largest).
 
 Two places construct a `Space`:
 
-- `Space::reserve(os)` builds one from the pointer `os.reserve(plan.size(), region_size)`
-  returned. By the `Os` contract, that is a live reservation of that length and alignment.
+- `Space::reserve(os)` builds one from the pointer `os.reserve(plan.size(), plan.region_size())`
+  returned, for the plan of the region size it was asking for. By the `Os` contract, that is a
+  live reservation of that length and alignment.
 - `SpaceCell::decode` rebuilds one from the cell's word, borrowing the cell's own OS.
   - Only `SpaceCell::get_or_reserve` writes the word, and only with `encode` of a `Space` that
     `Space::reserve(&self.os)` returned.
-  - `encode` stores `pack(base, objects)`, and `decode` reads `unpack(word)`. Kani's
-    `published_words_round_trip_*` proves `unpack(pack(base, objects)) == (base, objects)` for
-    every region-aligned non-zero base and valid count. So `decode` gives back the base and plan
-    that were stored.
+  - `encode` stores `pack(base, region_shift)`, and `decode` reads `unpack(word)` and rebuilds
+    the plan from the geometry and the shift. Kani's `published_words_round_trip_*` proves
+    `unpack(pack(base, shift)) == (base, shift)` for every region-aligned non-zero base and every
+    shift a plan can have. So `decode` gives back the base and plan that were stored.
 
 The borrow ties every `Space` to an OS value that is still alive. The `Os` contract keeps a
 reservation valid until it is unmapped or that value is dropped, so liveness reduces to "not
 unmapped". The invariant ends only through the unsafe `Space::unmap`, whose callers promise that
 no copy is used afterwards and that it is not a published space.
 
-## RESERVATION-01: `os.commit` in `Space::commit`, and `os.advise_huge` in `Space::advise_huge`
+## RESERVATION-01: the range calls in `commit`, `advise_huge` and `wipe_on_fork`
 
-**Preconditions of `Os::commit` and `Os::advise_huge`.** The range is page-aligned, a whole
-number of pages, not empty, and inside one live reservation made by the same `Os` value.
+**Preconditions of `Os::commit`, `Os::advise_huge` and `Os::wipe_on_fork`.** The range is
+page-aligned, a whole number of pages, not empty, and inside one live reservation made by the
+same `Os` value. None of the three changes contents in this process.
 
 **Proof.** `check` returned, so `is_callable_range` held:
 
@@ -50,8 +53,8 @@ thread touches the range during the call, nothing in it is needed) are this func
 ## RESERVATION-03: `os.unmap` in `Space::unmap`
 
 **Proof.** The range is the whole reservation, `base` and `plan.size()`. The size is the end of
-the magazine area, which starts page-aligned and is whole pages
-(`plans_keep_objects_metadata_and_magazines_apart`). So the range is whole pages and not empty.
+the process page, which starts page-aligned and is one page (`plans_keep_their_parts_apart`).
+So the range is whole pages and not empty.
 It is live by the invariant, and the caller promises nothing uses it afterwards, which is the
 `Os::unmap` condition.
 
@@ -71,6 +74,17 @@ yet; fields drop after `drop` returns). Nothing uses it again, which meets RESER
 precondition. A cell in a static is never dropped. This is the one place a published space is
 unmapped, and `Space::unmap`'s documentation says so.
 
+## Pointers a `Space` hands out (no unsafe blocks)
+
+`region`, `slot`, `metadata`, `magazines`, `process_page` and `pointer` compute pointers with
+`map_addr` from `base`, so each carries the reservation's provenance; forming them is safe.
+`region` and `metadata` abort unless the id is an object region, `slot` aborts unless the slot
+lies wholly inside its region (`Plan::slot_fits`, proved against the slot arithmetic by
+`slots_lie_inside_their_region_and_are_aligned_*`), and `pointer` returns `None` outside the
+reservation. So every pointer is inside the reservation, at the place its name says. Whether
+the memory there may be read or written (committed, owned by the caller) is the obligation of
+whoever dereferences it, in their own ledger.
+
 **Machine checks.** The `Space` unit tests, natively and under Miri with strict provenance
 (`scripts/miri`):
 
@@ -83,8 +97,7 @@ unmapped, and `Space::unmap`'s documentation says so.
 
 On the real kernel, `os::linux::kernel::tests::the_design_reservation_is_available`.
 
-**Review.** 2026-10-17, fresh adversarial reviewer: RESERVATION-01 to 03 accepted as
-range-check proofs. The invariant section was not accepted: a `Space` could outlive its
-`SimOs`, and the Kani claim named `decode(encode)` where only `pack`/`unpack` is proved. Both are
-fixed above (the `Space` now borrows its OS, and the cell owns its OS and alone writes the
-word). The fix and RESERVATION-04 are new and await the same reviewer's check.
+**Review.** 2026-10-17, fresh adversarial reviewer: the invariant section and RESERVATION-01
+to 05 accepted. Since then the published word holds the region shift instead of the object
+count, the layout gained the process page, and the pointer helpers check their bounds; those
+changes need the reviewer's check.

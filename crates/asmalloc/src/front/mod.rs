@@ -25,7 +25,7 @@ mod verify;
 
 pub use routines::{NO_CPU, Routines, StackPop, StackPush, StoreIfEqual};
 pub use slab::{Cpu, Field, SLAB_BYTES, SLAB_COUNT, SLAB_SHIFT, Slab, Slabs, Spare};
-pub use twin::{Aborted, Machine, Pinned, Step, Twin};
+pub use twin::Twin;
 
 use crate::classes::{MagazineSize, SMALL_COUNT, SmallClass};
 

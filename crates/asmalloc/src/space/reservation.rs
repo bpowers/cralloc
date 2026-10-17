@@ -8,8 +8,21 @@
 //! [`SpaceCell`] owns an OS value and publishes one `Space` over it in a single word, the way
 //! start-up needs: two threads may race to reserve, one compare-and-swap picks the winner, and
 //! the loser unmaps its own.
+//!
+//! # Start-up under a tight address-space limit
+//!
+//! The race has two windows that a lock would close and the design does not allow a lock for.
+//!
+//! - Between one thread's reservation and its compare-and-swap, the address space it holds is
+//!   not available to a second thread starting at the same moment. Under a limit with room for
+//!   only one reservation, the second shrinks its regions to the floor and then fails, or wins
+//!   with a smaller reservation if the first has not published yet. The failure is an `Err` from
+//!   [`SpaceCell::get_or_reserve`] (a null return to the caller); it is never memory unsafety.
+//!   A later call finds the published space.
+//! - A fork in that window gives the child a copy of a reservation that no published word names.
+//!   It is never used and costs the child address space only.
 
-use super::{Geometry, Location, Plan, RegionId};
+use super::{Location, Plan, RegionId};
 use crate::classes::Class;
 use crate::os::{HugePages, Os, OsError};
 use core::fmt;
@@ -20,9 +33,10 @@ use core::sync::atomic::{AtomicPtr, Ordering};
 /// A live reservation obtained from `os`.
 ///
 /// Invariant: the `plan.size()` bytes at `base` are one reservation that `os` returned and that
-/// has not been unmapped, and `base` is aligned to the region size. Only [`Space::reserve`] and
-/// [`SpaceCell`] make one, and only the unsafe [`Space::unmap`] ends it. The borrow of `os`
-/// keeps the OS value, and so the memory, alive for as long as the `Space` exists.
+/// has not been unmapped, and `base` is aligned to the plan's region size. Only
+/// [`Space::reserve`] and [`SpaceCell`] make one, and only the unsafe [`Space::unmap`] and the
+/// cell's drop end it. The borrow of `os` keeps the OS value, and so the memory, alive for as
+/// long as the `Space` exists.
 pub struct Space<'os, O: Os> {
     base: NonNull<u8>,
     plan: Plan,
@@ -49,35 +63,32 @@ impl<O: Os> fmt::Debug for Space<'_, O> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Space")
             .field("base", &self.base)
-            .field("objects", &self.plan.objects())
+            .field("region_shift", &self.plan.region_shift())
             .finish()
     }
 }
 
 impl<'os, O: Os> Space<'os, O> {
-    /// Reserves the largest plan the OS allows: the geometry's maximum, else half as many object
-    /// regions, and so on down to one. The design asks for "as much as the process is allowed";
-    /// halving finds that within a dozen calls.
+    /// Reserves the largest plan the OS allows: regions of the geometry's largest size, else
+    /// half that, and so on down to the floor, with the same number of regions each time. The
+    /// error is the OS's answer at the floor: below it the heap cannot start.
     pub fn reserve(os: &'os O) -> Result<Space<'os, O>, OsError> {
         Space::reserve_unless(os, || false)
     }
 
-    /// As [`Space::reserve`], but gives up with `ENOMEM` before each smaller attempt if
-    /// `stop()` says the reservation is no longer wanted.
+    /// As [`Space::reserve`], but gives up before each smaller attempt if `stop()` says the
+    /// reservation is no longer wanted.
     fn reserve_unless(os: &'os O, stop: impl Fn() -> bool) -> Result<Space<'os, O>, OsError> {
         let geometry = O::GEOMETRY;
-        let mut objects = geometry.max_objects();
+        let mut shift = geometry.max_region_shift();
         loop {
-            let Some(plan) = geometry.plan(objects) else {
+            let Some(plan) = geometry.plan(shift) else {
                 return Err(OsError::EINVAL);
             };
-            match os.reserve(plan.size(), geometry.region_size()) {
-                Ok(base) => {
-                    debug_assert!(base.addr().get() & (geometry.region_size() - 1) == 0);
-                    return Ok(Space { base, plan, os });
-                }
-                Err(error) if objects == 1 || stop() => return Err(error),
-                Err(_) => objects /= 2,
+            match os.reserve(plan.size(), plan.region_size()) {
+                Ok(base) => return Ok(Space { base, plan, os }),
+                Err(error) if shift == geometry.min_region_shift() || stop() => return Err(error),
+                Err(_) => shift -= 1,
             }
         }
     }
@@ -94,7 +105,7 @@ impl<'os, O: Os> Space<'os, O> {
         self.base
     }
 
-    /// The layout.
+    /// The layout, including the region size this reservation got.
     #[inline(always)]
     pub fn plan(&self) -> Plan {
         self.plan
@@ -114,38 +125,62 @@ impl<'os, O: Os> Space<'os, O> {
             .locate(ptr.addr().wrapping_sub(self.base.addr().get()))
     }
 
-    /// The first byte of an object region. `region` must be one of this plan's object regions,
-    /// as [`Plan::region`] and [`Plan::locate`] make; otherwise the pointer is outside them.
+    /// The pointer for an address inside the reservation, with the reservation's provenance, or
+    /// `None` outside it. This is how an address a routine returns as an integer becomes a
+    /// pointer again without an integer-to-pointer cast.
+    #[inline(always)]
+    pub fn pointer(&self, address: usize) -> Option<NonNull<u8>> {
+        let offset = address.wrapping_sub(self.base.addr().get());
+        if offset < self.plan.size() {
+            Some(self.at(offset))
+        } else {
+            None
+        }
+    }
+
+    /// The first byte of an object region. Every `RegionId` is an object region of every plan of
+    /// the geometry (see [`RegionId`]); one that is not aborts.
     #[inline(always)]
     pub fn region(&self, region: RegionId) -> NonNull<u8> {
-        debug_assert!(region.index() < self.plan.objects());
+        self.check_region(region);
         self.at(self.plan.region_offset(region))
     }
 
-    /// Slot `index` of `class` in `region`. The slot must fit in the region (see
-    /// [`Plan::slot_at`] and [`Geometry::slots_per_region`]); otherwise the pointer is outside
-    /// it.
+    /// Slot `index` of `class` in `region`. Aborts unless the slot lies wholly inside the region
+    /// ([`Plan::slot_fits`]), so the pointer is always one of the region's slots.
     #[inline(always)]
     pub fn slot(&self, region: RegionId, class: Class, index: u32) -> NonNull<u8> {
-        debug_assert!(region.index() < self.plan.objects());
-        debug_assert!(
-            class.slot_offset(index) + class.size() <= self.plan.geometry().region_size()
-        );
+        self.check_region(region);
+        if !self.plan.slot_fits(class, index) {
+            self.os.abort("a slot index outside its region");
+        }
         self.at(self.plan.slot_offset(region, class, index))
     }
 
-    /// A region's metadata block, [`Geometry::metadata_size`] bytes. `region` must be one of
-    /// this plan's object regions.
+    /// A region's metadata block, [`Plan::metadata_size`] bytes.
     #[inline(always)]
     pub fn metadata(&self, region: RegionId) -> NonNull<u8> {
-        debug_assert!(region.index() < self.plan.objects());
+        self.check_region(region);
         self.at(self.plan.metadata_offset(region))
     }
 
-    /// The magazine area, [`Geometry::magazine_area_size`] bytes.
+    /// The magazine area, [`Plan::magazine_area_size`] bytes, aligned to the region size.
     #[inline(always)]
     pub fn magazines(&self) -> NonNull<u8> {
         self.at(self.plan.magazines_offset())
+    }
+
+    /// The process page, one page that a child forked after [`Os::wipe_on_fork`] marked it reads
+    /// as zero.
+    #[inline(always)]
+    pub fn process_page(&self) -> NonNull<u8> {
+        self.at(self.plan.process_page_offset())
+    }
+
+    fn check_region(&self, region: RegionId) {
+        if region.index() >= self.plan.objects() {
+            self.os.abort("a region id outside the heap");
+        }
     }
 
     /// Whether `start..start + len` is a range the OS calls accept: inside this reservation,
@@ -188,6 +223,14 @@ impl<'os, O: Os> Space<'os, O> {
         unsafe { self.os.advise_huge(start, len, advice) }
     }
 
+    /// Marks a range of the reservation to read as zero in a forked child. Aborts if the range
+    /// is not one [`Space::is_callable_range`] accepts.
+    pub fn wipe_on_fork(&self, start: NonNull<u8>, len: usize) -> Result<(), OsError> {
+        self.check(start, len);
+        // SAFETY: as in `commit`; the call changes nothing in this process.
+        unsafe { self.os.wipe_on_fork(start, len) }
+    }
+
     /// Returns a range's memory to the OS; it reads as zero afterwards. Aborts if the range is
     /// not one [`Space::is_callable_range`] accepts.
     ///
@@ -218,10 +261,10 @@ impl<'os, O: Os> Space<'os, O> {
 
 /// An OS value and the one [`Space`] published over it, or none yet.
 ///
-/// The space is one atomic word: the base address with the number of object regions in its low
-/// bits, which are free because the base is region-aligned and the count is less than the region
-/// size. Zero means nothing is published. Only this cell writes the word, and only with a
-/// reservation of its own OS, which lives as long as the cell.
+/// The space is one atomic word: the base address with the region shift in its low six bits,
+/// which are free because the base is aligned to a region of at least 2 KiB. Zero means nothing
+/// is published. Only this cell writes the word, and only with a reservation of its own OS, which
+/// lives as long as the cell.
 pub struct SpaceCell<O: Os> {
     os: O,
     word: AtomicPtr<u8>,
@@ -250,13 +293,14 @@ impl<O: Os> SpaceCell<O> {
     }
 
     /// The published space, reserving and publishing one first if there is none. If another
-    /// thread publishes first, this one unmaps its own reservation and returns the winner.
+    /// thread publishes first, this one unmaps its own reservation and returns the winner. See
+    /// the module documentation for what a tight address-space limit does to the race.
     pub fn get_or_reserve(&self) -> Result<Space<'_, O>, OsError> {
         if let Some(space) = self.get() {
             return Ok(space);
         }
-        // Many threads may race here, each reserving up to the whole geometry. Once one has
-        // published, the others stop shrinking their attempts, and a failure is no failure.
+        // Many threads may race here, each reserving the whole heap. Once one has published, the
+        // others stop shrinking their attempts, and a failure is no failure.
         let mine = match Space::reserve_unless(&self.os, || self.is_published()) {
             Ok(mine) => mine,
             Err(error) => return self.get().ok_or(error),
@@ -292,14 +336,13 @@ impl<O: Os> SpaceCell<O> {
     /// The space a non-null word stands for. Only `get_or_reserve` stores words, and only
     /// `encode` of a reservation of `self.os`.
     fn decode(&self, word: NonNull<u8>) -> Space<'_, O> {
-        let geometry = O::GEOMETRY;
-        let (_, objects) = unpack(geometry, word.addr().get());
-        // Clearing the count leaves the base, which is not zero. `unwrap_or` keeps this total
+        let (_, shift) = unpack(word.addr().get());
+        // Clearing the shift leaves the base, which is not zero. `unwrap_or` keeps this total
         // for a word no `encode` made, which cannot be stored.
-        let base = word.map_addr(|w| NonZeroUsize::new(unpack(geometry, w.get()).0).unwrap_or(w));
+        let base = word.map_addr(|w| NonZeroUsize::new(unpack(w.get()).0).unwrap_or(w));
         Space {
             base,
-            plan: Plan::new(geometry, objects as u16),
+            plan: Plan::new(O::GEOMETRY, shift as u8),
             os: &self.os,
         }
     }
@@ -320,21 +363,23 @@ impl<O: Os> Drop for SpaceCell<O> {
     }
 }
 
-/// The published word for a space: `base | objects`.
+/// The published word for a space: `base | region_shift`.
 fn encode<O: Os>(space: Space<'_, O>) -> *mut u8 {
-    let objects = space.plan.objects();
-    space.base.as_ptr().map_addr(|base| pack(base, objects))
+    let shift = space.plan.region_shift() as usize;
+    space.base.as_ptr().map_addr(|base| pack(base, shift))
 }
 
-/// A region-aligned base address and an object-region count as one word.
-pub(super) const fn pack(base: usize, objects: usize) -> usize {
-    base | objects
+/// The bits of a published word that hold the region shift.
+const SHIFT_BITS: usize = 63;
+
+/// A base address aligned to at least 64 bytes and a region shift below 64, as one word.
+pub(super) const fn pack(base: usize, region_shift: usize) -> usize {
+    base | region_shift
 }
 
-/// The base address and object-region count in a word `pack` made.
-pub(super) const fn unpack(geometry: Geometry, word: usize) -> (usize, usize) {
-    let mask = geometry.region_size() - 1;
-    (word & !mask, word & mask)
+/// The base address and region shift in a word `pack` made.
+pub(super) const fn unpack(word: usize) -> (usize, usize) {
+    (word & !SHIFT_BITS, word & SHIFT_BITS)
 }
 
 #[cfg(test)]
@@ -346,25 +391,42 @@ mod tests {
 
     type Sim = SimOs<Standard>;
 
+    fn largest() -> Plan {
+        Sim::GEOMETRY.largest_plan()
+    }
+
     #[test]
     fn a_reservation_takes_the_largest_plan() {
         let os = Sim::new();
         let space = Space::reserve(&os).unwrap();
-        assert_eq!(space.plan().objects(), Sim::GEOMETRY.max_objects());
-        assert_eq!(space.base().addr().get() % Sim::GEOMETRY.region_size(), 0);
+        assert_eq!(space.plan(), largest());
+        assert_eq!(space.base().addr().get() % largest().region_size(), 0);
         // SAFETY: nothing else uses the reservation.
         unsafe { space.unmap().unwrap() };
         assert_eq!(os.reserved_bytes(), 0);
     }
 
     #[test]
-    fn a_reservation_halves_until_the_os_agrees() {
-        // Room for a quarter of the largest plan, so the first two attempts fail.
-        let geometry = Sim::GEOMETRY;
-        let quarter = geometry.plan(geometry.max_objects() / 4).unwrap();
-        let os = Sim::with_capacity(quarter.size().next_multiple_of(geometry.region_size()));
+    fn a_reservation_shrinks_its_regions_until_the_os_agrees() {
+        // Room for regions a quarter of the largest size, so the first two attempts fail.
+        use crate::os::sim::{Native, Shape};
+        let g = Native::GEOMETRY;
+        let quarter = g.plan(g.max_region_shift() - 2).unwrap();
+        let region = g.largest_plan().region_size();
+        let os = SimOs::<Native>::with_capacity(quarter.size().next_multiple_of(region));
         let space = Space::reserve(&os).unwrap();
-        assert_eq!(space.plan().objects(), geometry.max_objects() / 4);
+        assert_eq!(space.plan(), quarter);
+        assert_eq!(space.plan().objects(), g.max_objects());
+    }
+
+    #[test]
+    fn below_the_floor_the_reservation_fails() {
+        let os = Sim::new();
+        os.set_faults(Call::Reserve, Faults::ALWAYS);
+        assert_eq!(Space::reserve(&os), Err(OsError::ENOMEM));
+        let g = Sim::GEOMETRY;
+        let attempts = g.max_region_shift() - g.min_region_shift() + 1;
+        assert_eq!(os.calls(Call::Reserve), attempts as u64);
     }
 
     #[test]
@@ -392,8 +454,25 @@ mod tests {
             space.magazines().addr().get(),
             base + plan.magazines_offset()
         );
+        assert_eq!(
+            space.process_page().addr().get(),
+            base + plan.process_page_offset()
+        );
         assert_eq!(space.locate(space.metadata(region).as_ptr()), None);
         assert_eq!(space.locate(ptr::null()), None);
+        assert_eq!(space.pointer(slot.addr().get()), Some(slot));
+        assert_eq!(space.pointer(base + plan.size()), None);
+        assert_eq!(space.pointer(base.wrapping_sub(1)), None);
+    }
+
+    #[test]
+    #[should_panic(expected = "slot index outside its region")]
+    fn a_slot_outside_its_region_aborts() {
+        let os = Sim::new();
+        let space = Space::reserve(&os).unwrap();
+        let region = space.plan().region(0).unwrap();
+        let class = Class::of_size(8).unwrap();
+        let _ = space.slot(region, class, u32::MAX);
     }
 
     #[test]
@@ -412,6 +491,22 @@ mod tests {
         assert_eq!(unsafe { region.as_ptr().add(page + 3).read() }, 0);
         space.advise_huge(region, page, HugePages::Prefer).unwrap();
         assert_eq!(os.huge_pages(region), Some(HugePages::Prefer));
+    }
+
+    #[test]
+    fn the_process_page_is_wiped_by_a_fork() {
+        let os = Sim::new();
+        let space = Space::reserve(&os).unwrap();
+        let page = space.process_page();
+        let size = Sim::GEOMETRY.page_size();
+        space.commit(page, size).unwrap();
+        space.wipe_on_fork(page, size).unwrap();
+        // SAFETY: committed, and nothing else uses it.
+        unsafe { page.as_ptr().write(5) };
+        // SAFETY: no other thread touches the page.
+        unsafe { os.fork(0) };
+        // SAFETY: still committed.
+        assert_eq!(unsafe { page.as_ptr().read() }, 0);
     }
 
     #[test]
@@ -449,18 +544,39 @@ mod tests {
 
     #[test]
     fn the_cell_publishes_one_space() {
-        let cell = SpaceCell::new(Sim::with_capacity(2 * Sim::GEOMETRY.max_reservation()));
+        let cell = SpaceCell::new(Sim::with_capacity(
+            2 * largest().size().next_multiple_of(1 << 16),
+        ));
         assert_eq!(cell.get(), None);
         let first = cell.get_or_reserve().unwrap();
         assert_eq!(cell.get(), Some(first));
         assert_eq!(cell.get_or_reserve(), Ok(first));
+        assert_eq!(first.plan(), largest());
         assert_eq!(cell.os().reserved_bytes(), first.plan().size());
     }
 
     #[test]
+    fn the_published_word_keeps_a_shrunken_region_size() {
+        let g = Sim::GEOMETRY;
+        let floor = g.smallest_plan();
+        let cell = SpaceCell::new(Sim::with_capacity(
+            floor.size().next_multiple_of(largest().region_size()),
+        ));
+        let space = cell.get_or_reserve().unwrap();
+        assert_eq!(space.plan(), floor);
+        assert_eq!(
+            cell.get().unwrap().plan().region_shift(),
+            g.min_region_shift()
+        );
+    }
+
+    #[test]
     fn racing_threads_publish_one_space_and_losers_unmap() {
-        // Room for every thread's reservation at once, so each reserves the largest plan.
-        let cell = SpaceCell::new(Sim::with_capacity(4 * Sim::GEOMETRY.max_reservation()));
+        // Room for twice the threads' reservations: racing first-fit claims can push one another
+        // past free space while a partial claim is being rolled back. The tiny shape keeps the
+        // losers' unmaps, which check every uncommitted page, cheap under Miri.
+        use crate::os::sim::{Tiny, capacity_for};
+        let cell = SpaceCell::new(SimOs::<Tiny>::with_capacity(8 * capacity_for::<Tiny>()));
         let bases: Vec<usize> = thread::scope(|scope| {
             let handles: Vec<_> = (0..4)
                 .map(|_| scope.spawn(|| cell.get_or_reserve().unwrap().base().addr().get()))

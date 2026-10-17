@@ -19,73 +19,10 @@ use super::routines::{Routines, StackPop, StackPush, StoreIfEqual};
 use super::slab::{Cpu, Field, Slabs};
 use super::sync::quiet;
 use crate::classes::{SLOT_BYTES, SmallClass, is_marker};
+use crate::os::{Aborted, Machine, Step};
 use core::ptr::NonNull;
 use core::sync::atomic::AtomicPtr;
 use core::sync::atomic::Ordering::{Acquire, Relaxed, Release};
-
-/// A step of a routine, before which the OS may interrupt it.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum Step {
-    /// Reading the CPU number: the first step of every sequence.
-    ReadCpu,
-    /// Loading the slab field.
-    Load,
-    /// Reading or writing the magazine: the object slot for pop and push, the link for the
-    /// stacks.
-    Access,
-    /// The committing store.
-    Commit,
-}
-
-/// The OS interrupted the sequence before the step: it starts again from the top.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub struct Aborted;
-
-/// The simulated processor a twin runs on.
-pub trait Machine {
-    /// The `cpu_id` field of the thread's rseq area: a CPU number, or negative without a
-    /// registration.
-    fn cpu_id(&self) -> i32;
-
-    /// Called before each step of a sequence. `Err` means the OS stopped the thread (preempted,
-    /// migrated or signalled it, or a fence hit its CPU) since the sequence began, so the
-    /// sequence restarts. A machine that moves the thread to another CPU does so here, so the
-    /// restart reads the new number.
-    fn step(&self, step: Step) -> Result<(), Aborted>;
-
-    /// Called after a sequence's committing store. A simulator whose threads really run in
-    /// parallel uses it to know when a sequence that passed its last step is done, so that a
-    /// fence can wait for it.
-    fn committed(&self) {}
-}
-
-impl<M: Machine + ?Sized> Machine for &M {
-    fn cpu_id(&self) -> i32 {
-        (**self).cpu_id()
-    }
-
-    fn step(&self, step: Step) -> Result<(), Aborted> {
-        (**self).step(step)
-    }
-
-    fn committed(&self) {
-        (**self).committed()
-    }
-}
-
-/// A thread that stays on one CPU and is never interrupted.
-#[derive(Clone, Copy, Debug)]
-pub struct Pinned(pub i32);
-
-impl Machine for Pinned {
-    fn cpu_id(&self) -> i32 {
-        self.0
-    }
-
-    fn step(&self, _: Step) -> Result<(), Aborted> {
-        Ok(())
-    }
-}
 
 /// The routines as Rust, on `slabs`, for a thread on `machine`.
 pub struct Twin<'a, M> {
@@ -273,6 +210,7 @@ mod tests {
     use super::*;
     use crate::classes::{Class, MARKER, MARKER_SHIFT};
     use crate::front::slab::{Slab, Spare};
+    use crate::os::Pinned;
     use core::cell::Cell;
     use core::ptr;
     use std::boxed::Box;

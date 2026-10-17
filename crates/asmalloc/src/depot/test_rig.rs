@@ -2,11 +2,12 @@
 //! and a census that checks the TLA+ models' invariants on a quiescent heap.
 
 use super::{Cache, Depot, Magazine, Source, Tuning};
-use crate::classes::{SmallClass, is_marker};
+use crate::classes::{MagazineSize, SmallClass, is_marker};
 use crate::front::check::switch_point;
-use crate::front::{Aborted, Field, Machine, Slab, Slabs, Spare, Step, Twin};
+use crate::front::{Field, Slab, Slabs, Spare, Twin};
 use crate::os::Os;
 use crate::os::sim::{Shape, SimOs};
+use crate::os::{Aborted, Machine, Step};
 use crate::space::{Geometry, SpaceCell};
 use core::cell::Cell;
 use core::ptr::{self, NonNull};
@@ -18,12 +19,12 @@ use std::sync::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::vec::Vec;
 
-/// A heap of 128 KiB: 64-byte pages, 4 KiB regions, a 32 KiB magazine area. Small enough to
-/// make afresh for every execution the interleaving checker runs.
+/// A heap of 128 KiB: 64-byte pages, 4 KiB regions, a 32 KiB magazine area (eight regions).
+/// Small enough to make afresh for every execution the interleaving checker runs.
 pub(crate) enum Small {}
 
 impl Shape for Small {
-    const GEOMETRY: Geometry = Geometry::new(6, 8, 12, 32, 15);
+    const GEOMETRY: Geometry = Geometry::new(6, 8, 12, 12, 32, 8, MagazineSize::MAX);
 }
 
 /// The class with the smallest magazines (4 slots, 2 objects), which keeps every scenario
@@ -250,7 +251,7 @@ impl<O: Os, const N: usize> Rig<O, N> {
     /// Every magazine is in exactly one place and every object in exactly one place, and each
     /// stack holds what its name says. Unless `lossy` (after a fork), nothing is missing.
     pub(crate) fn census(&self, user: &[NonNull<u8>], lossy: bool) -> Census {
-        let cache = self.cache(crate::front::Pinned(-1));
+        let cache = self.cache(crate::os::Pinned(-1));
         let area = cache.area();
         let mut census = Census::default();
         let mut magazines = BTreeMap::new();

@@ -13,8 +13,8 @@
 //! abandoned claim and markers as live: that slab would stay on the slow path and never be
 //! drained, and nothing would be duplicated.
 //!
-//! The page is the first page of the magazine area for now. The ledger for the unsafe block is
-//! `docs/safety/asmalloc/depot/generation-safety.md`.
+//! The page is the reservation's process page (`Plan::process_page_offset`). The ledger for the
+//! unsafe block is `docs/safety/asmalloc/depot/generation-safety.md`.
 
 use super::magazine::Area;
 use super::{Cache, Depot, Source};
@@ -82,16 +82,15 @@ pub(super) fn prepare<O: Os>(depot: &Depot, area: Area<'_, O>) -> bool {
     if depot.status.load(Acquire) & READY != 0 {
         return true;
     }
-    let Some(page) = area.generation_page() else {
-        return false;
-    };
+    let page = area.generation_page();
     let space = area.space();
     let len = O::GEOMETRY.page_size();
+    if space.commit(page, len).is_err() {
+        return false;
+    }
     // Drains need both: without the wipe a child would take its parent's abandoned claims for
     // live ones, and without the fence a drain cannot know that no sequence is in flight.
-    // `Space` has no wrapper for this call yet; the foundation's will replace the block.
-    // SAFETY: GENERATION-02.
-    let wiped = unsafe { space.os().wipe_on_fork(page, len) }.is_ok();
+    let wiped = space.wipe_on_fork(page, len).is_ok();
     let fenced = wiped && space.os().register_fence().is_ok();
     let status = READY | if fenced { DRAINS } else { 0 };
     depot.status.fetch_or(status, AcqRel);
@@ -109,7 +108,7 @@ pub(super) fn current<O: Os>(depot: &Depot, area: Area<'_, O>) -> Option<Generat
     if depot.status.load(Acquire) & READY == 0 {
         return None;
     }
-    let word = word(area.generation_page()?);
+    let word = word(area.generation_page());
     if let Some(generation) = Generation::from_word(word.load(Acquire)) {
         return Some(generation);
     }

@@ -220,6 +220,24 @@ fn zero_and_every_marker_fail_both_tests() {
     assert!(!is_marker(slot_address));
 }
 
+/// A `Marker` built from any generation is a marker word, reads back as itself and as the
+/// generation's low bits, and fails both slot tests for every magazine the generated routines
+/// accept, `4` to `2^16` slots (`MAG_LOG_MIN` and `MAG_LOG_MAX` in `lean/generated`), not only
+/// the sizes this crate makes.
+#[kani::proof]
+fn every_marker_round_trips_and_fails_every_routine_mask() {
+    let generation: u64 = kani::any();
+    let marker = Marker::new(generation);
+    assert!(is_marker(marker.word()));
+    assert!(Marker::from_word(marker.word()) == Some(marker));
+    assert!(marker.generation() == generation & ((1 << (64 - MARKER_SHIFT)) - 1));
+    let log: u32 = kani::any();
+    kani::assume((2..=16).contains(&log));
+    let mask = (SLOT_BYTES << log) - 2 * SLOT_BYTES;
+    assert!(marker.word() & mask == 0);
+    assert!(marker.word().wrapping_add(SLOT_BYTES) & mask == 0);
+}
+
 /// Small classes are exactly those up to `MAX_SMALL_SIZE`, and each one's magazine keeps within
 /// the budget unless it is the smallest magazine.
 #[kani::proof]

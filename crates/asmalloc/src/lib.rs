@@ -24,5 +24,7 @@ pub mod back;
 pub mod classes;
 pub mod depot;
 pub mod front;
+#[cfg(test)]
+pub(crate) mod generated;
 pub mod os;
 pub mod space;

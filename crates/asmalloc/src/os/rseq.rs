@@ -64,6 +64,13 @@ impl RseqArea {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::generated::lean_constant;
+
+    #[test]
+    fn the_offsets_match_the_routines() {
+        assert_eq!(CPU_ID as u64, lean_constant("RSEQ_CPU_ID"));
+        assert_eq!(RSEQ_CS as u64, lean_constant("RSEQ_CS"));
+    }
 
     #[test]
     fn a_zero_size_means_no_registration() {

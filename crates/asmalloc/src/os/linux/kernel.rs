@@ -9,6 +9,12 @@ use super::syscall::{Reg, int, nr, result, syscall};
 use crate::os::{HugePages, Os, OsError, RseqArea};
 use crate::space::Geometry;
 use core::ptr::{self, NonNull};
+use core::sync::atomic::{AtomicBool, Ordering};
+
+/// Whether a thread of this process has begun aborting. One process-wide flag, all-zero valid,
+/// so that a SIGABRT handler that ends up in `abort` again goes straight to the default action
+/// instead of raising into itself.
+static ABORTING: AtomicBool = AtomicBool::new(false);
 
 const PROT_NONE: usize = 0;
 const PROT_READ: usize = 1;
@@ -142,6 +148,36 @@ fn write_stderr(mut bytes: &[u8]) {
 unsafe fn int_call(number: usize, a: usize, b: usize, c: usize) -> usize {
     // SAFETY: passed through from the caller.
     unsafe { syscall(number, [int(a), int(b), int(c), int(0), int(0), int(0)]) }.addr()
+}
+
+fn unblock_sigabrt() {
+    let set: u64 = 1 << (SIGABRT - 1);
+    let set: Reg = ptr::from_ref(&set).cast_mut().cast();
+    // SAFETY: rt_sigprocmask reads one signal set from `set`, a live local, and writes nothing
+    // back (the old-set pointer is null). Unblocking SIGABRT while aborting is ours to do.
+    unsafe {
+        syscall(
+            nr::RT_SIGPROCMASK,
+            [
+                int(SIG_UNBLOCK),
+                set,
+                ptr::null_mut(),
+                int(SIGSET_SIZE),
+                int(0),
+                int(0),
+            ],
+        );
+    }
+}
+
+fn raise_sigabrt() {
+    // SAFETY: getpid and gettid take nothing; tgkill sends SIGABRT to this thread, which runs
+    // the disposition the process chose or ends it. Raising it is `abort`'s purpose.
+    unsafe {
+        let pid = int_call(nr::GETPID, 0, 0, 0);
+        let tid = int_call(nr::GETTID, 0, 0, 0);
+        int_call(nr::TGKILL, pid, tid, SIGABRT);
+    }
 }
 
 // SAFETY: each promise of `Os`, against the kernel's documented behaviour (mmap(2), mprotect(2),
@@ -281,21 +317,25 @@ unsafe impl Os for LinuxOs {
         write_stderr(b"asmalloc: ");
         write_stderr(message.as_bytes());
         write_stderr(b"\n");
-        // Restore the default action before raising: a handler could allocate, and the heap is
-        // in a state we refuse to continue from. The default action ends the process with a
-        // core dump.
+        // First as glibc's abort does: raise SIGABRT with the program's handler in place, so a
+        // crash reporter sees it. The heap is still valid; it refused to go on, it is not
+        // broken. If the handler returns, or calls back in here (by allocating into the failure
+        // that brought us here), restore the default action and raise again, which ends the
+        // process with a core dump.
+        if !ABORTING.swap(true, Ordering::AcqRel) {
+            unblock_sigabrt();
+            raise_sigabrt();
+        }
         let default = KernelSigaction {
             handler: SIG_DFL,
             flags: 0,
             restorer: 0,
             mask: 0,
         };
-        let unblock: u64 = 1 << (SIGABRT - 1);
         let action: Reg = ptr::from_ref(&default).cast_mut().cast();
-        let set: Reg = ptr::from_ref(&unblock).cast_mut().cast();
-        // SAFETY: rt_sigaction reads one `KernelSigaction` from `action` and rt_sigprocmask one
-        // signal set from `set`, both live locals; neither writes back (old pointers are null).
-        // The process is ending, so changing its SIGABRT disposition and mask is ours to do.
+        // SAFETY: rt_sigaction reads one `KernelSigaction` from `action`, a live local, and
+        // writes nothing back (the old-action pointer is null). The process is ending, so
+        // changing its SIGABRT disposition is ours to do.
         unsafe {
             let args = [
                 int(SIGABRT),
@@ -306,26 +346,13 @@ unsafe impl Os for LinuxOs {
                 int(0),
             ];
             syscall(nr::RT_SIGACTION, args);
-            let args = [
-                int(SIG_UNBLOCK),
-                set,
-                ptr::null_mut(),
-                int(SIGSET_SIZE),
-                int(0),
-                int(0),
-            ];
-            syscall(nr::RT_SIGPROCMASK, args);
         }
-        // SAFETY: getpid and gettid take nothing; tgkill sends SIGABRT to this thread, which
-        // ends the process; exit_group ends it if anything above failed. Ending the process is
-        // this function's purpose.
-        unsafe {
-            let pid = int_call(nr::GETPID, 0, 0, 0);
-            let tid = int_call(nr::GETTID, 0, 0, 0);
-            int_call(nr::TGKILL, pid, tid, SIGABRT);
-            loop {
-                int_call(nr::EXIT_GROUP, 127, 0, 0);
-            }
+        unblock_sigabrt();
+        raise_sigabrt();
+        loop {
+            // SAFETY: exit_group takes an integer and ends the process, which is this
+            // function's purpose; it is reached only if the signal did not end it.
+            unsafe { int_call(nr::EXIT_GROUP, 127, 0, 0) };
         }
     }
 }
@@ -417,19 +444,34 @@ mod tests {
 
     const CHILD: &str = "ASMALLOC_ABORT_CHILD";
 
-    /// Run on its own by `abort_ends_the_process_with_sigabrt`; does nothing otherwise.
-    #[test]
-    fn abort_child() {
-        if std::env::var_os(CHILD).is_some() {
-            LinuxOs.abort("test abort");
-        }
+    // The test's own way to install a handler: glibc's `signal`, which the test binary links.
+    unsafe extern "C" {
+        fn signal(signal: i32, handler: extern "C" fn(i32)) -> usize;
     }
 
+    extern "C" fn returning_handler(_: i32) {
+        write_stderr(b"handler ran\n");
+    }
+
+    /// Run on its own by `abort_ends_the_process_with_sigabrt`; does nothing otherwise. With
+    /// the variable set to `handler`, it first installs a SIGABRT handler that returns.
     #[test]
-    fn abort_ends_the_process_with_sigabrt() {
+    fn abort_child() {
+        let Some(mode) = std::env::var_os(CHILD) else {
+            return;
+        };
+        if mode == "handler" {
+            // SAFETY: installs a handler that only writes to standard error, which is
+            // async-signal-safe.
+            unsafe { signal(SIGABRT as i32, returning_handler) };
+        }
+        LinuxOs.abort("test abort");
+    }
+
+    fn run_abort_child(mode: &str) -> std::process::Output {
         let exe = std::env::current_exe().unwrap();
         // `ulimit -c 0` keeps the expected crash from leaving a core dump behind.
-        let output = Command::new("sh")
+        Command::new("sh")
             .arg("-c")
             .arg("ulimit -c 0; exec \"$0\" \"$@\"")
             .arg(exe)
@@ -438,11 +480,25 @@ mod tests {
                 "os::linux::kernel::tests::abort_child",
                 "--nocapture",
             ])
-            .env(CHILD, "1")
+            .env(CHILD, mode)
             .output()
-            .unwrap();
+            .unwrap()
+    }
+
+    #[test]
+    fn abort_ends_the_process_with_sigabrt() {
+        let output = run_abort_child("plain");
         assert_eq!(output.status.signal(), Some(SIGABRT as i32), "{output:?}");
         let stderr = String::from_utf8_lossy(&output.stderr);
         assert!(stderr.contains("asmalloc: test abort\n"), "{stderr}");
+    }
+
+    #[test]
+    fn abort_runs_the_programs_handler_then_ends_the_process_anyway() {
+        let output = run_abort_child("handler");
+        assert_eq!(output.status.signal(), Some(SIGABRT as i32), "{output:?}");
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(stderr.contains("asmalloc: test abort\n"), "{stderr}");
+        assert!(stderr.contains("handler ran\n"), "{stderr}");
     }
 }
