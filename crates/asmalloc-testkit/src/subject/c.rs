@@ -60,6 +60,36 @@ pub trait CAbi: Sync {
     /// Whether C23's `free_sized` and `free_aligned_sized` are available.
     fn has_sized_free(&self) -> bool;
 
+    /// Whether `reallocarray` is available.
+    fn has_reallocarray(&self) -> bool;
+
+    /// Whether `memalign`, `valloc` and `pvalloc` are available.
+    fn has_obsolete(&self) -> bool;
+
+    /// `None` when the implementation has no `reallocarray`.
+    ///
+    /// # Safety
+    /// As glibc's `reallocarray`.
+    unsafe fn reallocarray(&self, p: *mut c_void, n: usize, size: usize) -> Option<*mut c_void>;
+
+    /// `None` when the implementation lacks the obsolete aligned functions.
+    ///
+    /// # Safety
+    /// As glibc's `memalign`.
+    unsafe fn memalign(&self, align: usize, size: usize) -> Option<*mut c_void>;
+
+    /// `None` when the implementation lacks the obsolete aligned functions.
+    ///
+    /// # Safety
+    /// As glibc's `valloc`.
+    unsafe fn valloc(&self, size: usize) -> Option<*mut c_void>;
+
+    /// `None` when the implementation lacks the obsolete aligned functions.
+    ///
+    /// # Safety
+    /// As glibc's `pvalloc`.
+    unsafe fn pvalloc(&self, size: usize) -> Option<*mut c_void>;
+
     /// # Safety
     /// As C23's `free_sized`; [`has_sized_free`](Self::has_sized_free) is true.
     unsafe fn free_sized(&self, p: *mut c_void, size: usize);
@@ -104,6 +134,10 @@ pub struct CFns {
     pub malloc_usable_size: Option<unsafe extern "C" fn(*mut c_void) -> usize>,
     /// `free_sized` and `free_aligned_sized`, if provided.
     pub sized_free: Option<SizedFree>,
+    /// `reallocarray`, if provided.
+    pub reallocarray: Option<unsafe extern "C" fn(*mut c_void, usize, usize) -> *mut c_void>,
+    /// `memalign`, `valloc` and `pvalloc`, if provided.
+    pub obsolete: Option<Obsolete>,
     /// Where the calling thread's `errno` lives (glibc's `__errno_location`). errno belongs to
     /// the C library, so an allocator that sets it must use the same location.
     pub errno_location: unsafe extern "C" fn() -> *mut c_int,
@@ -116,6 +150,17 @@ pub struct SizedFree {
     pub free_sized: unsafe extern "C" fn(*mut c_void, usize),
     /// `free_aligned_sized`.
     pub free_aligned_sized: unsafe extern "C" fn(*mut c_void, usize, usize),
+}
+
+/// The obsolete aligned allocation functions glibc still exports.
+#[derive(Clone, Copy, Debug)]
+pub struct Obsolete {
+    /// `memalign`.
+    pub memalign: unsafe extern "C" fn(usize, usize) -> *mut c_void,
+    /// `valloc`.
+    pub valloc: unsafe extern "C" fn(usize) -> *mut c_void,
+    /// `pvalloc`.
+    pub pvalloc: unsafe extern "C" fn(usize) -> *mut c_void,
 }
 
 mod libc {
@@ -133,6 +178,14 @@ mod libc {
         pub fn free_sized(p: *mut c_void, size: usize);
         #[cfg(not(miri))]
         pub fn free_aligned_sized(p: *mut c_void, align: usize, size: usize);
+        #[cfg(not(miri))]
+        pub fn reallocarray(p: *mut c_void, n: usize, size: usize) -> *mut c_void;
+        #[cfg(not(miri))]
+        pub fn memalign(align: usize, size: usize) -> *mut c_void;
+        #[cfg(not(miri))]
+        pub fn valloc(size: usize) -> *mut c_void;
+        #[cfg(not(miri))]
+        pub fn pvalloc(size: usize) -> *mut c_void;
         pub fn __errno_location() -> *mut c_int;
     }
 }
@@ -166,6 +219,18 @@ impl CFns {
         }),
         #[cfg(miri)]
         sized_free: None,
+        #[cfg(not(miri))]
+        reallocarray: Some(libc::reallocarray),
+        #[cfg(miri)]
+        reallocarray: None,
+        #[cfg(not(miri))]
+        obsolete: Some(Obsolete {
+            memalign: libc::memalign,
+            valloc: libc::valloc,
+            pvalloc: libc::pvalloc,
+        }),
+        #[cfg(miri)]
+        obsolete: None,
         errno_location: libc::__errno_location,
     };
 
@@ -243,6 +308,34 @@ impl CAbi for CFns {
 
     fn has_sized_free(&self) -> bool {
         self.sized_free.is_some()
+    }
+
+    fn has_reallocarray(&self) -> bool {
+        self.reallocarray.is_some()
+    }
+
+    fn has_obsolete(&self) -> bool {
+        self.obsolete.is_some()
+    }
+
+    unsafe fn reallocarray(&self, p: *mut c_void, n: usize, size: usize) -> Option<*mut c_void> {
+        // SAFETY: same contract.
+        self.reallocarray.map(|f| unsafe { f(p, n, size) })
+    }
+
+    unsafe fn memalign(&self, align: usize, size: usize) -> Option<*mut c_void> {
+        // SAFETY: same contract.
+        self.obsolete.map(|f| unsafe { (f.memalign)(align, size) })
+    }
+
+    unsafe fn valloc(&self, size: usize) -> Option<*mut c_void> {
+        // SAFETY: same contract.
+        self.obsolete.map(|f| unsafe { (f.valloc)(size) })
+    }
+
+    unsafe fn pvalloc(&self, size: usize) -> Option<*mut c_void> {
+        // SAFETY: same contract.
+        self.obsolete.map(|f| unsafe { (f.pvalloc)(size) })
     }
 
     unsafe fn free_sized(&self, p: *mut c_void, size: usize) {

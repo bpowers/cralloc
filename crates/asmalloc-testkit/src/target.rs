@@ -5,10 +5,10 @@
 //! under Miri, which cannot run assembly or make system calls, a heap over the simulated OS run
 //! with twins (`SimAsmalloc`). The kit's own bookkeeping stays on the system allocator.
 //!
-//! The C functions are still the C library's until asmalloc's C layer exists. Then [`c_fns`]
-//! should return them, exported under prefixed names: an unprefixed `malloc` would replace the
-//! C library's for the whole test process, and the kit's own bookkeeping would then run on the
-//! allocator it is judging.
+//! The C functions are asmalloc's (`asmalloc::c`), called by their Rust paths: exported as
+//! `malloc` they would replace the C library's for the whole test process, and the kit's own
+//! bookkeeping would then run on the allocator it is judging. errno is the C library's, which
+//! is where asmalloc sets it. Under Miri, which has no asmalloc C layer to run, they are Miri's.
 
 #[cfg(not(miri))]
 pub use asmalloc::Asmalloc as Global;
@@ -18,6 +18,34 @@ pub use asmalloc::SimAsmalloc as Global;
 use crate::subject::{CFns, ViaC, ViaGlobalAlloc};
 
 /// The C functions under test.
+#[cfg(not(miri))]
+pub fn c_fns() -> CFns {
+    use asmalloc::c;
+    CFns {
+        name: "asmalloc",
+        malloc: c::malloc,
+        calloc: c::calloc,
+        realloc: c::realloc,
+        free: c::free,
+        posix_memalign: c::posix_memalign,
+        aligned_alloc: c::aligned_alloc,
+        malloc_usable_size: Some(c::malloc_usable_size),
+        sized_free: Some(crate::subject::SizedFree {
+            free_sized: c::free_sized,
+            free_aligned_sized: c::free_aligned_sized,
+        }),
+        reallocarray: Some(c::reallocarray),
+        obsolete: Some(crate::subject::Obsolete {
+            memalign: c::memalign,
+            valloc: c::valloc,
+            pvalloc: c::pvalloc,
+        }),
+        errno_location: CFns::LIBC.errno_location,
+    }
+}
+
+/// The C functions under test: under Miri, Miri's own.
+#[cfg(miri)]
 pub fn c_fns() -> CFns {
     CFns::LIBC
 }

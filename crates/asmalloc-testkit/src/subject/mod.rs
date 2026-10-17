@@ -26,7 +26,7 @@ use core::ptr::NonNull;
 
 #[cfg(feature = "allocator-api")]
 pub use allocator::ViaAllocator;
-pub use c::{CAbi, CFns, MAX_ALIGN, SizedFree, ViaC, c_default_align};
+pub use c::{CAbi, CFns, MAX_ALIGN, Obsolete, SizedFree, ViaC, c_default_align};
 pub use global::ViaGlobalAlloc;
 
 /// A request for a block.
