@@ -5,11 +5,25 @@
 //! Linux does wherever the allocator could tell the difference: reserved memory reads as zero,
 //! commit keeps contents, purge zeroes, and unmapped memory comes back zero when reserved again.
 //! It is stricter than Linux where that catches bugs: a call on memory that is not reserved, or
-//! on a range that is not whole pages, panics. Memory is ordinary memory, so a write to a page
-//! that was never committed cannot fault, but it is caught: such a page must still be zero when
-//! it is committed, purged or unmapped, or the call panics. [`SimOs::is_writable`] lets a test
-//! check a block before writing, [`SimOs::resident_bytes`] measures what the heap keeps
-//! resident, and [`SimOs::is_purged`] turns false once purged memory is written again.
+//! on a range that is not whole pages, panics. [`SimOs::is_writable`] lets a test check a block
+//! before writing, [`SimOs::resident_bytes`] measures what the heap keeps resident, and
+//! [`SimOs::is_purged`] turns false once purged memory is written again.
+//!
+//! Natively, a shape whose pages are whole host pages gets *guarded* memory: uncommitted pages
+//! are inaccessible, so touching one faults at once, as on Linux. Otherwise the memory is
+//! ordinary, and a write to an uncommitted page is caught only later: such a page must still be
+//! zero when it is committed or purged, or the call panics.
+//!
+//! Known limits of the unguarded simulators (every shape under Miri, [`Tiny`] natively, and
+//! [`ProofOs`] everywhere), which accept what Linux would refuse:
+//!
+//! - a read of memory that was never committed;
+//! - a write to it that is undone before the page is committed, purged or unmapped;
+//! - use of a page whose commit failed;
+//! - use of memory after it is unmapped.
+//!
+//! Tests of those bugs run natively on a guarded shape. Simulated threads that share a CPU need
+//! a cooperative scheduler; see [`SimOs::thread`].
 //!
 //! What a test controls:
 //!
@@ -198,6 +212,10 @@ impl<S: Shape> SimOs<S> {
 
     /// Simulated thread `index`, below [`SIM_THREADS`], to run twins on. Thread `i` starts on
     /// CPU `i`; [`Os::fence`] aborts the sequences in flight on the CPU it names.
+    ///
+    /// Threads on different CPUs may run free on OS threads. Threads that share a CPU must be
+    /// switched cooperatively, from one OS thread: run free, two of them can both commit, which
+    /// one real CPU never allows.
     pub fn thread(&self, index: usize) -> SimThread<'_> {
         self.cpus.thread(index)
     }
