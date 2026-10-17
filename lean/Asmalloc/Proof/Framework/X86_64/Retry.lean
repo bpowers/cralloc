@@ -112,4 +112,44 @@ theorem restarts_inline_run {c : Prog isa} {k : Contract isa} (h : Verified inli
   · exact .inr ⟨t, s'', he, preservedExcept_trans hpe ((hcl s' hs').2.1 t s'' he),
       by rw [show s''.gpr .rsp = s'.gpr .rsp from ha, hsp], hx⟩
 
+/-! ## As `Artifact.restartsOk` states it -/
+
+/-- Arguments in the argument registers, which `s'` holds as `s` does. -/
+theorem argsKept_of {sig : Sig} (hlen : (sig.words 64).length ≤ 6) {s s' : State}
+    (h : ∀ r ∈ argRegs.take (sig.words 64).length, s'.gpr r = s.gpr r) : ArgsKept abi sig s s' := by
+  intro vals hv
+  have hl : ((sig.words 64).map (·.bits 64)).length ≤ argRegs.length := by
+    simpa [argRegs] using hlen
+  have ha : abi.args ((sig.words 64).map (·.bits 64)) =
+      some fun s => (argRegs.take ((sig.words 64).map (·.bits 64)).length).map s.gpr := by
+    simp only [abi, hl, ↓reduceIte]
+  have hv' : abi.args ((sig.words 64).map (·.bits 64)) = some vals := hv
+  rw [ha] at hv'
+  cases hv'
+  exact List.map_congr_left fun r hr => h r (by simpa using hr)
+
+/-- `Artifact.restartsOk` out of line, from what `restarts_target` needs. -/
+theorem restartsOk_target {c : Prog isa} {k : Contract isa} {sig : Sig} {cl : List String}
+    (h : Verified target c k) (hlen : (sig.words 64).length ≤ 6)
+    (hargs : ∀ s, k.pre s → ∀ p ∈ c.abortStates isa s, ∀ r ∈ argRegs.take (sig.words 64).length,
+      p.gpr r = s.gpr r)
+    (hret : ∀ p p', k.env p p' → p'.mem.readW (p.gpr .rsp) 64 = p.mem.readW (p.gpr .rsp) 64) :
+    ∀ s s', k.pre s → Restarts target c k s s' →
+      target.abiPreserved s s' ∧ ArgsKept target.abi sig s s' ∧
+      (target.inline = true → target.preservedExcept cl s s') := fun s s' hs hr =>
+  have ⟨hab, hrs⟩ := restarts_target h hargs hret hs hr
+  ⟨hab, argsKept_of hlen hrs, fun h' => absurd h' (by decide)⟩
+
+/-- `Artifact.restartsOk` inline, from what `restarts_inline` needs: the
+argument registers are none of the clobbers. -/
+theorem restartsOk_inline {c : Prog isa} {k : Contract isa} {sig : Sig} {cl : List String}
+    (h : Verified inlineTarget c k) (hlen : (sig.words 64).length ≤ 6)
+    (hcl : ∀ s, k.pre s → ∀ p ∈ c.abortStates isa s, preservedExcept cl s p)
+    (hargs : ∀ r ∈ argRegs.take (sig.words 64).length, r.name ∉ cl) :
+    ∀ s s', k.pre s → Restarts inlineTarget c k s s' →
+      inlineTarget.abiPreserved s s' ∧ ArgsKept inlineTarget.abi sig s s' ∧
+      (inlineTarget.inline = true → inlineTarget.preservedExcept cl s s') := fun s s' hs hr =>
+  have ⟨hpe, hsp⟩ := restarts_inline h hcl hs hr
+  ⟨hsp, (argsKept_of hlen fun r hr => hpe r (hargs r hr) : ArgsKept abi sig s s'), fun _ => hpe⟩
+
 end VG.X86_64

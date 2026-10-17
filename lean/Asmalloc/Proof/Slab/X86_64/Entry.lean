@@ -119,4 +119,85 @@ theorem stackPop_run {s s' : State} (hs : (stackPopContract abi).pre s)
       simpa using this)
     (fun _ _ he => env_ret StackPop.hX (by decide) he) hs hr
 
+/-! ## As each artifact states it (`Artifact.restartsOk`) -/
+
+theorem popInline_restartsOk : ∀ s s', (popInlineContract inlineAbi).pre s →
+    Restarts inlineTarget popInline (popInlineContract inlineAbi) s s' →
+      inlineTarget.abiPreserved s s' ∧ ArgsKept inlineTarget.abi popInlineSig s s' ∧
+      (inlineTarget.inline = true → inlineTarget.preservedExcept PopInline.clobbers s s') :=
+  restartsOk_inline (sig := popInlineSig) PopInline.verified
+  (by decide) (fun _ hs => (PopInline.clobbersOk hs).2.2) (by decide)
+
+theorem pushInline_restartsOk : ∀ s s', (pushInlineContract inlineAbi).pre s →
+    Restarts inlineTarget pushInline (pushInlineContract inlineAbi) s s' →
+      inlineTarget.abiPreserved s s' ∧ ArgsKept inlineTarget.abi pushInlineSig s s' ∧
+      (inlineTarget.inline = true → inlineTarget.preservedExcept PushInline.clobbers s s') :=
+  restartsOk_inline (sig := pushInlineSig) PushInline.verified
+  (by decide) (fun _ hs => (PushInline.clobbersOk hs).2.2) (by decide)
+
+theorem popTable_restartsOk : ∀ s s', (popContract abi).pre s →
+    Restarts target popTable (popContract abi) s s' →
+      target.abiPreserved s s' ∧ ArgsKept target.abi popSig s s' ∧
+      (target.inline = true → target.preservedExcept [] s s') :=
+  restartsOk_target (sig := popSig) PopTable.verified (by decide)
+    (fun s hs p hp r hr => by
+      have h := ((abort_iff PopTable.cx PopTable.hv s p).mp (PopTable.verified.abortOk hs hp).2.2.1).1
+      have hr' : r ∈ [Reg.rdi] := hr
+      simp only [List.cons.injEq, and_true] at h
+      simp only [List.mem_cons, List.not_mem_nil, or_false] at hr'
+      rcases hr' with rfl <;> simp_all)
+    (fun _ _ he => env_ret PopTable.hX (by decide) he)
+
+theorem pushTable_restartsOk : ∀ s s', (pushContract abi).pre s →
+    Restarts target pushTable (pushContract abi) s s' →
+      target.abiPreserved s s' ∧ ArgsKept target.abi pushSig s s' ∧
+      (target.inline = true → target.preservedExcept [] s s') :=
+  restartsOk_target (sig := pushSig) PushTable.verified (by decide)
+    (fun s hs p hp r hr => by
+      have h := ((abort_iff PushTable.cx PushTable.hv s p).mp (PushTable.verified.abortOk hs hp).2.2.1).1
+      have hr' : r ∈ [Reg.rdi, Reg.rsi] := hr
+      simp only [List.cons.injEq, and_true] at h
+      simp only [List.mem_cons, List.not_mem_nil, or_false] at hr'
+      rcases hr' with rfl | rfl <;> simp_all)
+    (fun _ _ he => env_ret PushTable.hX (by decide) he)
+
+theorem cas_restartsOk : ∀ s s', (casContract abi).pre s →
+    Restarts target cas (casContract abi) s s' →
+      target.abiPreserved s s' ∧ ArgsKept target.abi casSig s s' ∧
+      (target.inline = true → target.preservedExcept [] s s') :=
+  restartsOk_target (sig := casSig) Cas.verified (by decide)
+    (fun s hs p hp r hr => by
+      have h := ((abort_iff Cas.cx Cas.hv s p).mp (Cas.verified.abortOk hs hp).2.2.1).1
+      have hr' : r ∈ [Reg.rdi, Reg.rsi, Reg.rdx] := hr
+      simp only [List.cons.injEq, and_true] at h
+      simp only [List.mem_cons, List.not_mem_nil, or_false] at hr'
+      rcases hr' with rfl | rfl | rfl <;> simp_all)
+    (fun _ _ he => env_ret Cas.hX (by decide) he)
+
+theorem stackPush_restartsOk : ∀ s s', (stackPushContract abi).pre s →
+    Restarts target stackPush (stackPushContract abi) s s' →
+      target.abiPreserved s s' ∧ ArgsKept target.abi stackPushSig s s' ∧
+      (target.inline = true → target.preservedExcept [] s s') :=
+  restartsOk_target (sig := stackPushSig) StackPush.verified (by decide)
+    (fun s hs p hp r hr => by
+      have h := ((abort_iff StackPush.cx StackPush.hv s p).mp (StackPush.verified.abortOk hs hp).2.2.1).1
+      have hr' : r ∈ [Reg.rdi, Reg.rsi] := hr
+      simp only [List.cons.injEq, and_true] at h
+      simp only [List.mem_cons, List.not_mem_nil, or_false] at hr'
+      rcases hr' with rfl | rfl <;> simp_all)
+    (fun _ _ he => env_ret StackPush.hX (by decide) he)
+
+theorem stackPop_restartsOk : ∀ s s', (stackPopContract abi).pre s →
+    Restarts target stackPop (stackPopContract abi) s s' →
+      target.abiPreserved s s' ∧ ArgsKept target.abi stackPopSig s s' ∧
+      (target.inline = true → target.preservedExcept [] s s') :=
+  restartsOk_target (sig := stackPopSig) StackPop.verified (by decide)
+    (fun s hs p hp r hr => by
+      have h := ((abort_iff StackPop.cx StackPop.hv s p).mp (StackPop.verified.abortOk hs hp).2.2.1).1
+      have hr' : r ∈ [Reg.rdi] := hr
+      simp only [List.cons.injEq, and_true] at h
+      simp only [List.mem_cons, List.not_mem_nil, or_false] at hr'
+      rcases hr' with rfl <;> simp_all)
+    (fun _ _ he => env_ret StackPop.hX (by decide) he)
+
 end VG.Proof.Slab.X86_64
