@@ -20,6 +20,7 @@ L3; override with the environment variables below.
 | `inline/` | Whether the allocator fast path is inlined at different kinds of call site, per cargo profile. | `./check.py [variant ...]` |
 | `oscost/` | Cost of mmap, page faults, the madvise family, mprotect, guard pages and zeroing. | `cargo run --release` |
 | `xcore/` | Cost of moving a cache line between cores. | `cargo run --release` |
+| `toolchain/` | The relocation a direct load of glibc's `__rseq_offset` gets, in an executable and a shared library, and the code rustc generates around an `asm!` block that calls. | `./check.sh` |
 
 ## kernels
 
@@ -42,6 +43,32 @@ at build time by `gen_layout.py`, which needs `python3`). The kernel sources in
 and the fastest of the rest is printed. The rseq kernels count aborts and say so on stderr.
 Raw events 0xC1 (retired uops) and 0x35 (store-to-load forwards) are AMD-specific; on other
 CPUs those two columns are meaningless.
+
+### The proved slab routines
+
+`gen_routines.py` (run at build time) emits hand-written copies of the routines in
+`lean/generated/`, instruction for instruction, and variants that each change one thing: their
+placement in a cache line, their encoding (short jumps, registers, address arithmetic, where the
+mask table sits), the CPU-number test, how `__rseq_offset` is read, per-class entries, and an
+inline pop that calls its slow path. The script's docstring names every variant.
+
+```
+./target/release/roofline-kernels routines sizes                 # bytes and fused uops of each
+RF_ITERS=10000000 ./target/release/roofline-kernels routines sweep gen,sj   # entry offset 0..63
+./target/release/roofline-kernels routines place gen@0/0,gen@e/e  # chosen pop/push offsets
+./target/release/roofline-kernels routines inline                # inline forms
+python3 analyze_sweep.py SWEEP_OUTPUT                            # slow offsets vs. layout
+```
+
+A sweep moves one routine through every offset with the other at offset 0, in a pair loop and a
+batch loop of direct calls. `e` places a routine so that its hot path ends on a line boundary.
+Items are run in `RF_ROUNDS` interleaved rounds (default 3); each cell is the fastest
+repetition, and `+x` how much slower the slowest round's best was. The run ends by printing how
+busy `RF_WATCH` (default 3,18,19) was.
+
+`rust-alloc/run_slab.sh` builds a stand-in allocator around the same sequences (`src/slab.rs`,
+cargo features `slab`, `slab_direct`, `slab_call`, `slab_nonnull`, `slab_ool`, `slab_pc`) under
+fat LTO and runs the single-thread workloads; `RF_CPU=3` keeps it off a CPU a sweep is using.
 
 ## rust-alloc
 

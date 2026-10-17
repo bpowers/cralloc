@@ -14,6 +14,13 @@ mi_sized = ["mi"]       # mimalloc with sized free
 je = []                 # system libjemalloc, called as `tikv-jemallocator` does
 floor_tls = []          # floor: free-list heads in thread-local statics
 floor_heap = []         # floor: free-list heads behind a thread-local pointer
+# A stand-in around the proved slab routines (src/slab.rs); the others refine `slab`.
+slab = []               # inline pop and push, as generated
+slab_direct = ["slab"]  # ... reading __rseq_offset with one rip-relative load
+slab_call = ["slab"]    # ... the pop calls its slow path from inside the asm block
+slab_nonnull = ["slab"] # ... and promises the compiler a non-null result
+slab_ool = ["slab"]     # out-of-line routines, as generated
+slab_pc = ["slab"]      # out of line, one entry per class
 
 [profile.release]
 opt-level = 3
