@@ -15,7 +15,7 @@ use super::*;
 #[kani::unwind(34)]
 fn the_simulator_keeps_the_zero_promises() {
     let geometry = Tiny::GEOMETRY;
-    let os = SimOs::<Tiny>::with_capacity(geometry.region_size());
+    let os = SimOs::<Tiny>::with_capacity(geometry.largest_plan().region_size());
     let page = geometry.page_size();
 
     let base = os.reserve(2 * page, page).unwrap();

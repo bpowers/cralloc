@@ -29,6 +29,7 @@ use self::faults::Injector;
 use self::memory::Memory;
 use self::pages::{HUGE, NO_HUGE, PURGED, Pages, RESERVED, START, WIPE, WRITABLE};
 use super::{HugePages, Os, OsError, RseqArea};
+use crate::classes::MagazineSize;
 use crate::space::Geometry;
 use core::fmt;
 use core::marker::PhantomData;
@@ -41,19 +42,33 @@ pub trait Shape: 'static {
     const GEOMETRY: Geometry;
 }
 
-/// The shape for tests and fuzzing: 1 KiB pages, 8 KiB huge pages, 64 KiB regions, 16 MiB in
-/// all, with 232 object regions (enough for every class) and a 1 MiB magazine area.
+/// The shape for tests, Miri and fuzzing: 1 KiB pages, 8 KiB huge pages, regions of 64 KiB
+/// (32 KiB at the floor), 232 object regions (enough for every class), 16 magazine regions,
+/// about 16 MiB in all.
 ///
 /// The page size is deliberately not 4 KiB, so that code which assumes 4 KiB pages instead of
-/// asking the geometry fails here.
+/// asking the geometry fails here. Large classes above 64 KiB do not fit a region; use
+/// [`Native`] to test large classes with many slots.
 pub enum Standard {}
 
 impl Shape for Standard {
-    const GEOMETRY: Geometry = Geometry::new(10, 13, 16, 256, 20);
+    const GEOMETRY: Geometry = Geometry::new(10, 13, 16, 15, 256, 16, MagazineSize::MAX);
 }
 
-/// The shape for Kani: 64-byte pages, 256-byte huge pages, 2 KiB regions, 8 KiB in all, with two
-/// object regions and a 2 KiB magazine area.
+/// The shape for native tests of large classes: 4 KiB pages, 64 KiB huge pages, regions of
+/// 1 MiB (128 KiB at the floor), 247 object regions, about 256 MiB of address space.
+///
+/// The host commits the simulated memory lazily, so the size costs nothing until it is touched;
+/// it is too large for Miri.
+pub enum Native {}
+
+impl Shape for Native {
+    const GEOMETRY: Geometry = Geometry::new(12, 16, 20, 17, 256, 1, MagazineSize::MAX);
+}
+
+/// The shape for Kani: 64-byte pages, 256-byte huge pages, 2 KiB regions, two object regions,
+/// one magazine region, 8 KiB in all, and magazines capped at the smallest size, so that 64 of
+/// them fit and magazine exchange can be exercised.
 ///
 /// Kani's cost grows with every byte of simulated memory (zeroing 32 KiB already takes it half
 /// a gigabyte), so this shape is as small as the geometry rules allow. Its regions hold only the
@@ -61,7 +76,14 @@ impl Shape for Standard {
 pub enum Tiny {}
 
 impl Shape for Tiny {
-    const GEOMETRY: Geometry = Geometry::new(6, 8, 11, 4, 11);
+    const GEOMETRY: Geometry = Geometry::new(6, 8, 11, 11, 4, 1, MagazineSize::MIN);
+}
+
+/// Bytes of simulated memory that hold one reservation of a shape's largest plan, rounded up to
+/// the largest region size.
+pub const fn capacity_for<S: Shape>() -> usize {
+    let plan = S::GEOMETRY.largest_plan();
+    plan.size().next_multiple_of(plan.region_size())
 }
 
 /// What glibc reports on the reference host: the area 320 bytes below the thread pointer, with
@@ -86,20 +108,21 @@ pub struct SimOs<S: Shape = Standard> {
 impl<S: Shape> SimOs<S> {
     /// A simulated OS with room for one reservation of the largest plan.
     pub fn new() -> SimOs<S> {
-        SimOs::with_capacity(S::GEOMETRY.max_reservation())
+        SimOs::with_capacity(capacity_for::<S>())
     }
 
-    /// A simulated OS with `bytes` of memory, a non-zero multiple of the region size. Room for
-    /// two largest plans lets a test race two reservations; less makes [`crate::space::Space`]
-    /// settle for a smaller plan.
+    /// A simulated OS with `bytes` of memory, a non-zero multiple of the largest region size.
+    /// Room for two largest plans lets a test race two reservations; less makes
+    /// [`crate::space::Space`] settle for smaller regions.
     pub fn with_capacity(bytes: usize) -> SimOs<S> {
-        let geometry = S::GEOMETRY;
+        let region = S::GEOMETRY.largest_plan().region_size();
         assert!(
-            bytes > 0 && bytes.is_multiple_of(geometry.region_size()),
-            "simulated memory must be a non-zero number of regions"
+            bytes > 0 && bytes.is_multiple_of(region),
+            "simulated memory must be a non-zero number of the largest regions"
         );
+        let geometry = S::GEOMETRY;
         SimOs {
-            memory: Memory::new(bytes, geometry.region_size()),
+            memory: Memory::new(bytes, region),
             pages: Pages::new(bytes / geometry.page_size()),
             faults: Injector::new(),
             rseq: AtomicU64::new(encode_rseq(DEFAULT_RSEQ)),
@@ -430,7 +453,7 @@ mod tests {
     }
 
     fn region() -> usize {
-        Sim::GEOMETRY.region_size()
+        Sim::GEOMETRY.largest_plan().region_size()
     }
 
     #[test]

@@ -1,7 +1,8 @@
-//! The static shape of the heap: page, huge-page and region sizes, and how many regions.
+//! The static shape of the heap: page and huge-page sizes, the range of region sizes, how many
+//! regions, and the largest magazine.
 
 use super::Plan;
-use crate::classes::{Class, MAX_SMALL_SIZE, MagazineSize};
+use crate::classes::{MagazineSize, SmallClass};
 
 /// The length of the class-of-region table, and so the most regions any geometry may have.
 pub const MAX_REGIONS: usize = 4096;
@@ -17,55 +18,72 @@ pub const METADATA_SHIFT: u32 = 5;
 
 /// The shape of a heap.
 ///
-/// The design's shape is [`Geometry::DESIGN`]: 4 KiB pages, 2 MiB huge pages, 4 GiB regions, at
-/// most 4096 of them, and 4 GiB of magazines. The simulated OS uses smaller ones so that a heap
-/// fits in ordinary memory, and in a Kani harness. Every quantity is a power of two, so the
-/// arithmetic on addresses is shifts and masks, and a geometry that is a constant folds away.
+/// The design's shape is [`Geometry::DESIGN`]: 4 KiB pages, 2 MiB huge pages, at most 4096
+/// regions of 4 GiB. The region size is not fixed: when the process cannot have that much
+/// address space, [`crate::space::Space::reserve`] halves the region size, keeping the number of
+/// regions, down to the geometry's floor. The size a reservation got is part of its [`Plan`].
+/// The simulated OS uses smaller shapes so that a heap fits in ordinary memory, and in a Kani
+/// harness. Every quantity is a power of two, so the arithmetic on addresses is shifts and
+/// masks.
 ///
-/// A geometry whose regions are smaller than [`MAX_SMALL_SIZE`] hosts only the classes that fit
-/// in a region ([`Geometry::fits_region`]). That is allowed for proofs, which need heaps of a
-/// few kilobytes; [`Geometry::hosts_every_small_class`] says whether a geometry is of that kind.
+/// A plan whose regions are smaller than a class hosts that class only as runs of regions
+/// ([`Plan::fits_region`]); a plan whose regions are smaller than the largest small class hosts
+/// only the small classes that fit ([`Plan::hosts_every_small_class`]). The second is allowed for
+/// proofs, which need heaps of a few kilobytes.
 ///
 /// The constructor checks what the rest of the crate relies on:
 ///
 /// - regions are at most 4 GiB, so an offset within one is a `u32`;
-/// - pages are at least 64 bytes; pages divide huge pages, huge pages divide regions, and pages
-///   divide metadata blocks and the magazine area, so every one of them can be committed and
-///   purged on its own;
-/// - the magazine area holds at least one of the largest magazines;
-/// - a reservation with one object region fits in the maximum, and the number of object regions
-///   is less than the region size, so a region-aligned base and the count share one word.
+/// - pages are at least 64 bytes; pages divide huge pages, huge pages divide regions at every
+///   size the geometry allows, and pages divide metadata blocks, so every one of them can be
+///   committed and purged on its own;
+/// - the magazine area, a whole number of regions, holds at least one of the largest magazines
+///   even at the smallest region size;
+/// - at least one object region fits next to the magazines and metadata, and the whole
+///   reservation spans at most `max_regions` regions, so every address in it has an entry in the
+///   class-of-region table.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct Geometry {
     page_shift: u8,
     huge_page_shift: u8,
-    region_shift: u8,
-    magazine_shift: u8,
+    max_region_shift: u8,
+    min_region_shift: u8,
     max_regions: u16,
+    magazine_regions: u16,
     max_objects: u16,
+    max_magazine: MagazineSize,
 }
 
 impl Geometry {
-    /// The design's geometry.
-    pub const DESIGN: Geometry = Geometry::new(12, 21, 32, MAX_REGIONS, 32);
+    /// The design's geometry: 4 KiB pages, 2 MiB huge pages, regions of 4 GiB down to 2 MiB,
+    /// at most 4096 regions, one region of magazines, and magazines up to the largest size.
+    ///
+    /// The floor is one huge page per region: there the 3970 object regions and their metadata
+    /// span about 8 GiB.
+    pub const DESIGN: Geometry = Geometry::new(12, 21, 32, 21, MAX_REGIONS, 1, MagazineSize::MAX);
 
     /// A geometry with pages of `2^page_shift` bytes, huge pages of `2^huge_page_shift`, regions
-    /// of `2^region_shift`, at most `max_regions` regions in all, and a magazine area of
-    /// `2^magazine_shift` bytes. Panics, at compile time in a constant, if the shape breaks a
-    /// rule in the type's documentation.
+    /// of `2^max_region_shift` down to `2^min_region_shift`, at most `max_regions` regions in
+    /// all, `magazine_regions` of them for magazines, and magazines of at most `max_magazine`.
+    /// Panics, at compile time in a constant, if the shape breaks a rule in the type's
+    /// documentation.
     pub const fn new(
         page_shift: u32,
         huge_page_shift: u32,
-        region_shift: u32,
+        max_region_shift: u32,
+        min_region_shift: u32,
         max_regions: usize,
-        magazine_shift: u32,
+        magazine_regions: usize,
+        max_magazine: MagazineSize,
     ) -> Geometry {
         match Geometry::try_new(
             page_shift,
             huge_page_shift,
-            region_shift,
+            max_region_shift,
+            min_region_shift,
             max_regions,
-            magazine_shift,
+            magazine_regions,
+            max_magazine,
         ) {
             Some(geometry) => geometry,
             None => panic!("invalid heap geometry"),
@@ -76,49 +94,43 @@ impl Geometry {
     pub const fn try_new(
         page_shift: u32,
         huge_page_shift: u32,
-        region_shift: u32,
+        max_region_shift: u32,
+        min_region_shift: u32,
         max_regions: usize,
-        magazine_shift: u32,
+        magazine_regions: usize,
+        max_magazine: MagazineSize,
     ) -> Option<Geometry> {
         // The order matters: the first tests bound the shifts so the later ones cannot overflow.
-        let valid = region_shift <= 32
-            && magazine_shift <= 40
-            && page_shift <= huge_page_shift
-            && huge_page_shift <= region_shift
+        let valid = max_region_shift <= 32
             && page_shift >= 6
-            && page_shift + METADATA_SHIFT <= region_shift
-            && page_shift <= magazine_shift
-            && magazine_shift >= MagazineSize::MAX.bytes().trailing_zeros()
-            && max_regions >= 1
-            && max_regions <= MAX_REGIONS;
+            && page_shift <= huge_page_shift
+            && huge_page_shift <= min_region_shift
+            && min_region_shift <= max_region_shift
+            && page_shift + METADATA_SHIFT <= min_region_shift
+            && magazine_regions >= 1
+            && max_regions <= MAX_REGIONS
+            && max_regions > magazine_regions
+            && (magazine_regions << min_region_shift) >= max_magazine.bytes();
         if !valid {
             return None;
         }
-        let mut geometry = Geometry {
+        // Object regions `k`, magazine regions `m`, `k` metadata blocks of 1/32 region and one
+        // page, which is at most another 1/32 region, must span at most `max_regions` regions:
+        // `32 (k + m) + k + 1 <= 32 max_regions`.
+        let objects = (32 * (max_regions - magazine_regions) - 1) / 33;
+        if objects == 0 {
+            return None;
+        }
+        Some(Geometry {
             page_shift: page_shift as u8,
             huge_page_shift: huge_page_shift as u8,
-            region_shift: region_shift as u8,
-            magazine_shift: magazine_shift as u8,
+            max_region_shift: max_region_shift as u8,
+            min_region_shift: min_region_shift as u8,
             max_regions: max_regions as u16,
-            max_objects: 0,
-        };
-        // Ignoring the alignment of the magazine area, `k` object regions need
-        // `k * (region + metadata) + magazines` bytes. The alignment adds less than one
-        // metadata-plus-region, so the estimate is at most one too many.
-        let per_region = geometry.region_size() + geometry.metadata_size();
-        let limit = geometry.max_reservation();
-        if limit < per_region + geometry.magazine_area_size() {
-            return None;
-        }
-        let mut objects = (limit - geometry.magazine_area_size()) / per_region;
-        if geometry.reservation_len(objects) > limit {
-            objects -= 1;
-        }
-        if objects == 0 || objects >= geometry.region_size() {
-            return None;
-        }
-        geometry.max_objects = objects as u16;
-        Some(geometry)
+            magazine_regions: magazine_regions as u16,
+            max_objects: objects as u16,
+            max_magazine,
+        })
     }
 
     /// Bytes per page: the unit of commit and purge.
@@ -133,16 +145,16 @@ impl Geometry {
         1 << self.huge_page_shift
     }
 
-    /// `log2` of the region size: the shift that turns a heap offset into a region number.
+    /// `log2` of the largest region size, which a reservation gets when the OS allows it.
     #[inline(always)]
-    pub const fn region_shift(self) -> u32 {
-        self.region_shift as u32
+    pub const fn max_region_shift(self) -> u32 {
+        self.max_region_shift as u32
     }
 
-    /// Bytes per region. Regions are aligned to their size.
+    /// `log2` of the smallest region size. Below it the heap cannot start.
     #[inline(always)]
-    pub const fn region_size(self) -> usize {
-        1 << self.region_shift
+    pub const fn min_region_shift(self) -> u32 {
+        self.min_region_shift as u32
     }
 
     /// The most regions a reservation may span, metadata and magazines included.
@@ -151,168 +163,138 @@ impl Geometry {
         self.max_regions as usize
     }
 
-    /// The largest reservation: `max_regions` regions.
-    #[inline(always)]
-    pub const fn max_reservation(self) -> usize {
-        self.max_regions() << self.region_shift
-    }
-
-    /// The most object regions a reservation can have.
+    /// The number of object regions every plan has, whatever its region size.
     #[inline(always)]
     pub const fn max_objects(self) -> usize {
         self.max_objects as usize
     }
 
-    /// Bytes of metadata per object region: `region_size >> METADATA_SHIFT`. A multiple of the
-    /// page size.
+    /// The number of regions the magazine area takes.
     #[inline(always)]
-    pub const fn metadata_size(self) -> usize {
-        1 << self.metadata_shift()
+    pub const fn magazine_regions(self) -> usize {
+        self.magazine_regions as usize
     }
 
-    /// `log2` of [`Geometry::metadata_size`].
+    /// The largest magazine this heap uses. The design's allows every size; the simulator's tiny
+    /// shape caps it so that many magazines fit in its small magazine area.
     #[inline(always)]
-    pub const fn metadata_shift(self) -> u32 {
-        self.region_shift() - METADATA_SHIFT
+    pub const fn max_magazine(self) -> MagazineSize {
+        self.max_magazine
     }
 
-    /// Bytes in the magazine area.
+    /// The magazine size of a small class in this heap: the class's own, capped by
+    /// [`Geometry::max_magazine`].
     #[inline(always)]
-    pub const fn magazine_area_size(self) -> usize {
-        1 << self.magazine_shift
-    }
-
-    /// The alignment of the magazine area: a page, or the largest magazine if that is bigger, so
-    /// that every magazine can be aligned to its size and the area committed by pages.
-    #[inline(always)]
-    pub const fn magazine_area_align(self) -> usize {
-        let largest = MagazineSize::MAX.bytes();
-        if largest > self.page_size() {
-            largest
+    pub const fn magazine(self, class: SmallClass) -> MagazineSize {
+        let own = class.magazine();
+        if own.slots() > self.max_magazine.slots() {
+            self.max_magazine
         } else {
-            self.page_size()
+            own
         }
     }
 
-    /// The layout of a reservation with `objects` object regions, if the geometry allows that
-    /// many.
+    /// The layout with regions of `2^region_shift` bytes, if the geometry allows that size.
     #[inline]
-    pub const fn plan(self, objects: usize) -> Option<Plan> {
-        if objects >= 1 && objects <= self.max_objects() {
-            Some(Plan::new(self, objects as u16))
+    pub const fn plan(self, region_shift: u32) -> Option<Plan> {
+        if region_shift >= self.min_region_shift() && region_shift <= self.max_region_shift() {
+            Some(Plan::new(self, region_shift as u8))
         } else {
             None
         }
     }
 
-    /// The plan with the most object regions.
+    /// The layout with the largest regions.
     #[inline]
     pub const fn largest_plan(self) -> Plan {
-        Plan::new(self, self.max_objects)
+        Plan::new(self, self.max_region_shift)
     }
 
-    /// The bytes a reservation with `objects` object regions spans. Used before a `Plan` exists,
-    /// to size the largest one.
-    pub(super) const fn reservation_len(self, objects: usize) -> usize {
-        let metadata_end = (objects << self.region_shift) + (objects << self.metadata_shift());
-        let align = self.magazine_area_align();
-        let magazines = (metadata_end + align - 1) & !(align - 1);
-        magazines + self.magazine_area_size()
-    }
-
-    /// Whether every small class has a slot in a region, as in the design's geometry and the
-    /// simulator's standard one.
-    #[inline(always)]
-    pub const fn hosts_every_small_class(self) -> bool {
-        self.region_size() >= MAX_SMALL_SIZE
-    }
-
-    /// Whether a slot of this class fits in a region. Large classes that do not are served as
-    /// runs of whole regions; in the design's geometry every class fits.
-    ///
-    /// Alignment by construction stops at the region size: a run of regions is only
-    /// region-aligned by default. A request whose alignment exceeds the region size (above
-    /// 4 GiB in the design's geometry, above 64 KiB in the simulator's standard one) must have
-    /// its run's first region chosen so that the run start is aligned.
-    #[inline(always)]
-    pub const fn fits_region(self, class: Class) -> bool {
-        class.size() <= self.region_size()
-    }
-
-    /// The number of slots of a class in one region, zero if it does not fit. This divides; it
-    /// is meant for constants and setup, not per-object paths.
+    /// The layout with the smallest regions.
     #[inline]
-    pub const fn slots_per_region(self, class: Class) -> u32 {
-        (self.region_size() / class.size()) as u32
+    pub const fn smallest_plan(self) -> Plan {
+        Plan::new(self, self.min_region_shift)
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::classes::Class;
 
     #[test]
     fn the_design_geometry_matches_the_design() {
         let g = Geometry::DESIGN;
         assert_eq!(g.page_size(), 4096);
         assert_eq!(g.huge_page_size(), 2 << 20);
-        assert_eq!(g.region_size(), 4 << 30);
-        assert_eq!(g.max_reservation(), 16 << 40);
-        assert_eq!(g.metadata_size(), 128 << 20);
-        assert_eq!(g.magazine_area_size(), 4 << 30);
         assert_eq!(g.max_objects(), 3970);
-        assert!(g.reservation_len(3970) <= g.max_reservation());
-        assert!(g.reservation_len(3971) > g.max_reservation());
-        assert_eq!(g.slots_per_region(Class::SMALLEST), 1 << 29);
-        assert!(Class::all().all(|c| g.fits_region(c)));
-        assert!(g.hosts_every_small_class());
+        let plan = g.largest_plan();
+        assert_eq!(plan.region_size(), 4 << 30);
+        assert_eq!(plan.metadata_size(), 128 << 20);
+        assert_eq!(plan.magazine_area_size(), 4 << 30);
+        assert!(plan.size() <= 16 << 40);
+        assert_eq!(plan.slots_per_region(Class::SMALLEST), 1 << 29);
+        assert!(Class::all().all(|c| plan.fits_region(c)));
+        assert!(plan.hosts_every_small_class());
+        let floor = g.smallest_plan();
+        assert_eq!(floor.region_size(), 2 << 20);
+        assert!(floor.size() < 9 << 30);
+        assert!(floor.hosts_every_small_class());
     }
 
     #[test]
-    fn slots_per_region_counts_the_slots_that_fit_in_every_used_geometry() {
-        use crate::os::sim::{Shape, Standard, Tiny};
-        for g in [Geometry::DESIGN, Standard::GEOMETRY, Tiny::GEOMETRY] {
-            for class in Class::all() {
-                let slots = g.slots_per_region(class) as usize;
-                assert!(slots * class.size() <= g.region_size());
-                assert!((slots + 1) * class.size() > g.region_size());
-                assert_eq!(g.fits_region(class), slots >= 1);
-            }
+    fn the_cap_limits_magazines() {
+        let capped = Geometry::new(6, 8, 11, 11, 4, 1, MagazineSize::MIN);
+        for small in SmallClass::all() {
+            assert_eq!(capped.magazine(small), MagazineSize::MIN);
+            assert_eq!(Geometry::DESIGN.magazine(small), small.magazine());
         }
     }
 
     #[test]
     fn bad_shapes_are_refused() {
-        assert!(Geometry::try_new(12, 21, 32, 4096, 32).is_some());
-        // Huge pages bigger than regions.
-        assert!(Geometry::try_new(12, 33, 32, 4096, 32).is_none());
+        let max = MagazineSize::MAX;
+        assert!(Geometry::try_new(12, 21, 32, 21, 4096, 1, max).is_some());
+        // Huge pages bigger than the smallest region.
+        assert!(Geometry::try_new(12, 22, 32, 21, 4096, 1, max).is_none());
         // Regions bigger than 4 GiB.
-        assert!(Geometry::try_new(12, 21, 33, 2048, 32).is_none());
+        assert!(Geometry::try_new(12, 21, 33, 21, 2048, 1, max).is_none());
+        // A floor above the largest size.
+        assert!(Geometry::try_new(12, 21, 30, 31, 4096, 1, max).is_none());
         // Pages smaller than 64 bytes.
-        assert!(Geometry::try_new(5, 5, 11, 16, 11).is_none());
-        // Metadata blocks smaller than a page.
-        assert!(Geometry::try_new(12, 14, 16, 16, 20).is_none());
+        assert!(Geometry::try_new(5, 5, 11, 11, 16, 1, max).is_none());
+        // Metadata blocks smaller than a page at the floor.
+        assert!(Geometry::try_new(12, 14, 20, 16, 16, 1, max).is_none());
         // More regions than the class table has entries.
-        assert!(Geometry::try_new(12, 21, 32, 4097, 32).is_none());
-        // No room for one object region next to the magazines.
-        assert!(Geometry::try_new(12, 21, 32, 1, 32).is_none());
-        // A magazine area smaller than the largest magazine.
-        assert!(Geometry::try_new(10, 12, 15, 4, 10).is_none());
+        assert!(Geometry::try_new(12, 21, 32, 21, 4097, 1, max).is_none());
+        // No room for an object region next to the magazines.
+        assert!(Geometry::try_new(12, 21, 32, 21, 1, 1, max).is_none());
+        // The smallest valid region (2 KiB) already holds the largest magazine (2 KiB), so the
+        // rule that the magazine area hold one cannot fail today; it guards larger magazines.
+        assert!(Geometry::try_new(6, 8, 11, 11, 4, 1, max).is_some());
     }
 
     #[test]
-    fn every_valid_small_shape_sizes_its_largest_plan_exactly() {
+    fn every_valid_small_shape_spans_at_most_its_regions_at_every_size() {
         for page in 6..=12 {
-            for region in page + METADATA_SHIFT..=20 {
-                for regions in [1, 2, 3, 4, 7, 64, 256] {
-                    for magazines in page.max(11)..=region + 2 {
-                        let Some(g) = Geometry::try_new(page, page, region, regions, magazines)
-                        else {
+            for floor in page + METADATA_SHIFT..=18 {
+                for regions in [2, 3, 4, 7, 64, 256] {
+                    for magazines in [1, 2, 16] {
+                        let Some(g) = Geometry::try_new(
+                            page,
+                            page,
+                            floor + 2,
+                            floor,
+                            regions,
+                            magazines,
+                            MagazineSize::MIN,
+                        ) else {
                             continue;
                         };
-                        let max = g.max_objects();
-                        assert!(g.reservation_len(max) <= g.max_reservation(), "{g:?}");
-                        assert!(g.reservation_len(max + 1) > g.max_reservation(), "{g:?}");
+                        for shift in floor..=floor + 2 {
+                            let plan = g.plan(shift).unwrap();
+                            assert!(plan.size() <= regions << shift, "{g:?} {shift}");
+                        }
                     }
                 }
             }
