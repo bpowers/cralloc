@@ -109,6 +109,7 @@ def Instr.asm : Instr → List String
   | .leaSym d name off offP =>
     [s!"lea {d.name}, [rip + {name}{symOffset off}{(offP.map (" + {" ++ · ++ "}")).getD ""}]"]
   | .movGot d name => [s!"mov {d.name}, QWORD PTR [rip + {name}@GOTPCREL]"]
+  | .leaRseqCs d => [s!"lea {d.name}, [rip + 3f]"]
   | .lea d m => [s!"lea {d.name}, {m.addr}"]
   | .mul r => [s!"mul {r.name}"]
   | .imul d r => [s!"imul {d.name}, {r.name}"]
@@ -148,7 +149,7 @@ def Instr.memOps : Instr → List MemOp
   | .cmov _ _ s => s.memOps
   | .store m _ | .store32 m _ | .movzx8 _ m | .store8 m _ | .lea _ m => [m]
   | .inc _ | .dec _ | .shift32 .. | .bswap32 _ | .rorx32 .. | .andn32 .. | .rorx .. | .andn .. | .bswap _
-  | .shift .. | .shiftCl .. | .shiftx .. | .movImm64 .. | .leaSym .. | .movGot .. | .mul _ | .imul ..
+  | .shift .. | .shiftCl .. | .shiftx .. | .movImm64 .. | .leaSym .. | .movGot .. | .leaRseqCs _ | .mul _ | .imul ..
   | .push _ | .pop .. | .alloc _ | .free _ => []
 
 /-- The lines of an instruction, as `TCB/Rust.lean` writes them: those of
@@ -179,6 +180,14 @@ def printer : Printer isa where
   relative to them is fixed by the function alone: a change to other code
   cannot move them, and with them its performance. -/
   funcAlign := [".p2align 6"]
+  /- glibc registers its threads' rseq areas with the signature `0x53053053`
+  on x86 (`RSEQ_SIG`, sysdeps/unix/sysv/linux/x86/bits/rseq.h), which the
+  kernel requires in the four bytes before an abort handler. The three bytes
+  before it make the seven decode as `ud1 edi, DWORD PTR [rip + 0x53053053]`
+  (`0F B9 /r`, SDM Vol. 2 "UD"), as the kernel's selftests do, so that a
+  disassembler stays in step and a stray jump into them traps. -/
+  rseqSig := some [".byte 0x0f, 0xb9, 0x3d", ".long 0x53053053"]
+  plainStore | .store .. => true | _ => false
   unencodable i := match i with
     -- `lea` computes an offset, which a segment does not change (`State.offset`);
     -- one written on it is a mistake.

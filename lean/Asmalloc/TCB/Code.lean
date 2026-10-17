@@ -49,6 +49,24 @@ access a frame only while it lies at or above the stack pointer (memory
 below the stack pointer may be overwritten at any time, e.g. by a signal
 handler). Push and pop instructions fault outside a frame (`ISA.exec`).
 
+## Restartable sequences
+
+`rseq arm body` is a Linux restartable sequence. `arm` runs first and
+points the thread's `rseq_cs` field at the sequence's descriptor (which
+`Verified` checks: `Target.arms`); `body` is the sequence itself, from its
+start to just past its last step, the commit. If the thread is preempted,
+migrated or signalled with its instruction pointer inside `body`, the
+operating system aborts the sequence: the thread resumes at the abort
+handler, which jumps back to `arm`. `body` may leave early by an exit
+(`Step.exit`): to code after the sequence, or to an external target, such
+as a slow path that is a function of its own (`ExecExit`).
+
+`Exec` describes the run that is not aborted, which the operating system
+guarantees nothing else interferes with. Where an abort may happen, before
+each step of `body`, is `Code.abortStates` (`TCB/Artifact.lean`); what
+`Verified` requires there, and how a run with any number of aborts follows,
+is in `TCB/Artifact.lean` and `Proof/Framework/Rseq.lean`.
+
 ## Semantics and safety
 
 `Exec M c s s'` means: running `c` from `s` terminates in `s'` without
@@ -102,6 +120,20 @@ structure ISA where
   instead. -/
   requires : Instr → List String
 
+/-- A step of the body of a restartable sequence (`Code.rseq`). -/
+inductive Step (I C : Type) where
+  | instr (i : I)
+  /-- If `c` holds, leave the sequence: run the instructions `cold` (laid
+  out of line), then continue after the sequence (`ext = none`), or jump to
+  the external target `ext` (`some t`), code outside the routine that the
+  model does not run. -/
+  | exit (c : C) (cold : List I) (ext : Option String)
+
+/-- The instructions of a step, those it runs out of line included. -/
+def Step.instrs {I C : Type} : Step I C → List I
+  | .instr i => [i]
+  | .exit _ cold _ => cold
+
 /-- Structured code. -/
 inductive Code (I C : Type) where
   | block (is : List I)
@@ -114,6 +146,13 @@ inductive Code (I C : Type) where
   | call (name : String) (body : Code I C)
   /-- `push; body; pop`: a stack frame around `body`. -/
   | frame (push : I) (body : Code I C) (pop : I)
+  /-- A restartable sequence (Linux `rseq`): `arm` tells the operating
+  system which sequence the thread is in, and `body` is the sequence, whose
+  last step commits. The operating system may abort the sequence before any
+  step of `body`; it then resumes the thread at `arm`. Its semantics
+  (`Exec`) is the run that is not aborted; `Verified` adds what must hold
+  wherever it may be (`Code.abortStates`). -/
+  | rseq (arm : List I) (body : List (Step I C))
 
 /-- `if c then t else e`, with `t` laid out after the function's return
 (cold): `Code.ite c (.seq (.seq (.block []) (.block [])) t) e`. It is an
@@ -132,6 +171,7 @@ def Code.all {I C : Type} (p : I → Bool) : Code I C → Bool
   | .loop b _ => b.all p
   | .call _ b => b.all p
   | .frame i b j => p i && b.all p && p j
+  | .rseq arm body => arm.all p && body.all fun st => st.instrs.all p
 
 /-- The features that the instructions of `c`, and of the functions it
 calls, require (`ISA.requires`), with repetitions. -/
@@ -142,6 +182,7 @@ def Code.requires {I C : Type} (req : I → List String) : Code I C → List Str
   | .loop b _ => b.requires req
   | .call _ b => b.requires req
   | .frame i b j => req i ++ b.requires req ++ req j
+  | .rseq arm body => arm.flatMap req ++ body.flatMap fun st => st.instrs.flatMap req
 
 /-- The calls in `c`, and in the functions it calls: each function's name
 and code. -/
@@ -152,6 +193,7 @@ def Code.calls {I C : Type} : Code I C → List (String × Code I C)
   | .loop b _ => b.calls
   | .call n b => (n, b) :: b.calls
   | .frame _ b _ => b.calls
+  | .rseq .. => []
 
 variable (M : ISA)
 
@@ -164,6 +206,30 @@ def execBlock : List M.Instr → M.State → Option M.State
     match M.exec i s with
     | none => none
     | some s₁ => execBlock is s₁
+
+/-- How the body of a restartable sequence ends: after its last step, or by
+an exit that continues after the sequence (`done`), or by an exit to the
+external target `t` (`exit`). -/
+inductive Out (S : Type) where
+  | done (s : S)
+  | exit (t : String) (s : S)
+
+/-- Run the body of a restartable sequence, not aborted; `none` if it
+faults. -/
+def runBody : List (Step M.Instr M.Cond) → M.State → Option (Out M.State)
+  | [], s => some (.done s)
+  | .instr i :: rest, s =>
+    match M.exec i s with
+    | none => none
+    | some s₁ => runBody rest s₁
+  | .exit c cold ext :: rest, s =>
+    match M.eval c s with
+    | none => none
+    | some false => runBody rest s
+    | some true =>
+      match execBlock M cold s with
+      | none => none
+      | some s₁ => some (match ext with | none => .done s₁ | some t => .exit t s₁)
 
 /-- Big-step semantics: terminating, non-faulting executions. -/
 inductive Exec : Prog M → M.State → M.State → Prop
@@ -181,5 +247,26 @@ inductive Exec : Prog M → M.State → M.State → Prop
   | frame {i j body s s₁ s₂ s'} :
       M.push i s = some s₁ → Exec body s₁ s₂ → M.pop j s₁ s₂ = some s' →
       Exec (.frame i body j) s s'
+  | rseq {arm body s s₁ s'} :
+      execBlock M arm s = some s₁ → runBody M body s₁ = some (.done s') →
+      Exec (.rseq arm body) s s'
+
+/-- Executions that end by jumping to an external target (`Step.exit` with
+`some t`): running `c` from `s` reaches the jump to `t` in `s'` without
+faulting. An exit inside a call or a frame has no such execution (it would
+leave the stack as the call or frame left it), so code with one cannot be
+verified. -/
+inductive ExecExit : Prog M → M.State → String → M.State → Prop
+  | seqL {c₁ c₂ s t s'} : ExecExit c₁ s t s' → ExecExit (.seq c₁ c₂) s t s'
+  | seqR {c₁ c₂ s s₁ t s'} : Exec M c₁ s s₁ → ExecExit c₂ s₁ t s' → ExecExit (.seq c₁ c₂) s t s'
+  | iteT {c th el s t s'} : M.eval c s = some true → ExecExit th s t s' → ExecExit (.ite c th el) s t s'
+  | iteF {c th el s t s'} : M.eval c s = some false → ExecExit el s t s' → ExecExit (.ite c th el) s t s'
+  | loopBody {body c s t s'} : ExecExit body s t s' → ExecExit (.loop body c) s t s'
+  | loopNext {body c s s₁ t s'} :
+      Exec M body s s₁ → M.eval c s₁ = some true → ExecExit (.loop body c) s₁ t s' →
+      ExecExit (.loop body c) s t s'
+  | rseq {arm body s s₁ t s'} :
+      execBlock M arm s = some s₁ → runBody M body s₁ = some (.exit t s') →
+      ExecExit (.rseq arm body) s t s'
 
 end VG

@@ -45,6 +45,30 @@ same, at the same addresses, whatever `t` is. The cold code comes before the
 `funcAlign` directives. The printer keys on exactly that shape: a `then`
 branch `.seq (.seq (.block []) (.block [])) t` is reserved for cold branches.
 
+A restartable sequence (`Code.rseq arm body`) is printed with fixed labels,
+which the emitter allows only once per function (`Rust.checkRseq`):
+
+```
+5:  arm                       restart point: the abort handler jumps here
+6:  body                      start of the sequence (start_ip)
+7:                            just past the commit
+    .pushsection __rseq_cs, "aw"
+    .balign 32
+3:  .long 0, 0                the descriptor, struct rseq_cs: version, flags,
+    .quad 6b, 7b - 6b, 4f     start_ip, post_commit_offset, abort_ip
+    .popsection
+    .pushsection .text.unlikely, "ax"
+    <rseqSig>                 ends with the 4-byte signature before abort_ip
+4:  jmp 5b                    the abort handler
+    <exits' code>             out of line (`lowerBody`)
+    .popsection
+```
+
+So the abort handler lies outside the sequence, after the signature, and
+the arming code (x86-64's `leaRseqCs`, `lea r, [rip + 3f]`) names this
+descriptor. The descriptor holds absolute addresses, which the dynamic
+linker relocates, so its section is writable.
+
 Together with each ISA's instruction printer this is part of the trusted
 base; it is small enough to check by inspection and is covered by the golden
 tests in `AsmallocTest/Print.lean`.
@@ -101,11 +125,49 @@ structure Printer (M : ISA) where
   start (see the module docs). They come after its return, so any padding
   they insert is never executed. -/
   funcAlign : List String := []
+  /-- The lines just before a restartable sequence's abort handler, which
+  must end with the signature the C library registers its area with; `none`
+  on a target that cannot print a restartable sequence (`Rust.checkRseq`). -/
+  rseqSig : Option (List String) := none
+  /-- Whether an instruction is a plain store of a register, which is what
+  a restartable sequence's commit must be (`Rust.checkRseq`). -/
+  plainStore : M.Instr → Bool := fun _ => false
 
 variable {M : ISA} (P : Printer M)
 
 /-- The number of the `n`-th label of a function. -/
 def labelNum (n : Nat) : String := s!"2{n}"
+
+/-- The lines of a restartable sequence's body, and of its exits' code out
+of line, using labels `labelNum n`: an exit straight to an external target
+branches to it; any other branches to a label of its own, whose code ends
+with a jump to the end of the sequence (label `7`) or to its external
+target. -/
+def Printer.lowerBody : List (Step M.Instr M.Cond) → Nat → List Line × List Line × Nat
+  | [], n => ([], [], n)
+  | .instr i :: rest, n =>
+    let (l, k, n) := lowerBody rest n
+    (P.instr i ++ l, k, n)
+  | .exit c [] (some t) :: rest, n =>
+    let (l, k, n) := lowerBody rest n
+    (.ops [.text (P.branch c ""), .ref t] :: l, k, n)
+  | .exit c cold ext :: rest, n =>
+    let lab := labelNum n
+    let (l, k, n) := lowerBody rest (n + 1)
+    let back : Line := match ext with
+      | none => .text (P.jump "7b")
+      | some t => .ops [.text (P.jump ""), .ref t]
+    (.text (P.branch c (lab ++ "f")) :: l,
+      [.text (lab ++ ":")] ++ cold.flatMap P.instr ++ [back] ++ k, n)
+
+/-- The lines of the restartable sequence `rseq arm body` (see the module
+docs), given its body's lines and its exits' code (`lowerBody`). -/
+def Printer.rseqLines (arm : List M.Instr) (body cold : List Line) : List Line :=
+  [.text "5:"] ++ arm.flatMap P.instr ++ [.text "6:"] ++ body ++ [.text "7:"] ++
+  ([".pushsection __rseq_cs, \"aw\"", ".balign 32", "3:", ".long 0, 0",
+    ".quad 6b, 7b - 6b, 4f", ".popsection", ".pushsection .text.unlikely, \"ax\""] ++
+    P.rseqSig.getD [] ++ ["4:", P.jump "5b"]).map .text ++
+  cold ++ [.text ".popsection"]
 
 /-- Lower code to lines of assembly, using labels `labelNum n`: the lines in
 place, the lines of its cold branches (`Code.iteCold`), placed after the
@@ -138,6 +200,9 @@ def Printer.lower : Code M.Instr M.Cond → Nat → List Line × List Line × Na
   | .frame i body j, n =>
     let (lb, kb, n) := lower body n
     (P.instr i ++ lb ++ P.instr j, kb, n)
+  | .rseq arm body, n =>
+    let (lb, kb, n) := P.lowerBody body n
+    (P.rseqLines arm lb kb, [], n)
 
 /-- The complete body of a function: the lowered code, the return, and the
 cold branches' code after it. -/

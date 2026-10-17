@@ -237,6 +237,8 @@ def ownRequires {I C : Type} (req : I → List String) : List String → Code I 
   | acc, .loop b _ => ownRequires req acc b
   | acc, .call _ _ => acc
   | acc, .frame i b j => add (ownRequires req (add acc (req i)) b) (req j)
+  | acc, .rseq arm body =>
+    (arm ++ body.flatMap Step.instrs).foldl (fun acc i => add acc (req i)) acc
 where
   add (acc fs : List String) : List String :=
     fs.foldl (fun acc f => if acc.contains f then acc else acc ++ [f]) acc
@@ -261,6 +263,7 @@ def ownFirstSome? {I C : Type} (f : I → Option String) : Code I C → Option S
   | .loop b _ => ownFirstSome? f b
   | .call _ _ => none
   | .frame i b j => f i <|> ownFirstSome? f b <|> f j
+  | .rseq arm body => (arm ++ body.flatMap Step.instrs).findSome? f
 
 /-- A `some` of `f` over the instructions of `c`, and of the functions it
 calls, if there is one: the first of those of `c` outside its calls
@@ -463,6 +466,44 @@ def checkNames (a : Artifact) : Except String Unit := do
   unless rustIdent a.module && a.module != "mod" do
     throw s!"{a.target.name}: {a.name}'s module `{a.module}` is not a Rust identifier (or is `mod`)"
 
+/-- Whether `c`, or the code of a function it calls, has a restartable
+sequence. -/
+def hasRseq {I C : Type} : Code I C → Bool
+  | .block _ => false
+  | .seq a b => hasRseq a || hasRseq b
+  | .ite _ t e => hasRseq t || hasRseq e
+  | .loop b _ => hasRseq b
+  | .call _ b => hasRseq b
+  | .frame _ b _ => hasRseq b
+  | .rseq .. => true
+
+/-- The code of `p`'s artifact has a restartable sequence only as the whole
+of its code (`Code.rseq arm body`): the printer gives every sequence the
+same labels and its abort handler restarts it at its arm
+(`Printer.rseqLines`), which is then the function's first instruction, as
+`Code.abortStates` assumes. Then the target can print a sequence
+(`Printer.rseqSig`), the arm is not empty (`Verified` checks that its last
+instruction arms the sequence), and the body ends with its commit, a plain
+store (`Printer.plainStore`): a store of a value the code computed, never a
+read-modify-write of memory another thread may have changed meanwhile. -/
+def checkRseq (p : Prepared) : Except String Unit := do
+  let a := p.art
+  let P := a.target.printer
+  match a.code with
+  | .rseq arm body =>
+    unless P.rseqSig.isSome do
+      throw s!"{a.target.name}: {a.name} has a restartable sequence, which its target cannot print"
+    if arm.isEmpty then
+      throw s!"{a.target.name}: {a.name}'s restartable sequence has no arming code"
+    match body.getLast? with
+    | some (.instr i) =>
+      unless P.plainStore i do
+        throw s!"{a.target.name}: {a.name}'s restartable sequence does not commit with a plain store"
+    | _ => throw s!"{a.target.name}: {a.name}'s restartable sequence does not end with its commit"
+  | c =>
+    if hasRseq c then
+      throw s!"{a.target.name}: {a.name} has a restartable sequence that is not the whole of its code"
+
 /-- No two artifacts of a target have the same name. -/
 def checkUnique (as : List Artifact) : Except String Unit :=
   as.forM fun a =>
@@ -645,7 +686,8 @@ an `Api` with a contract (`checkApi`), its name or module is not a Rust
 identifier (`checkNames`), two artifacts of a target have the
 same name (`checkUnique`), a call is not of the code it runs (`checkCalls`),
 its tables of constants are not as `checkConsts` requires, its code names
-an operand it does not declare (`checkOperands`), an artifact's
+an operand it does not declare (`checkOperands`), a restartable sequence is
+not as `checkRseq` requires, an artifact's
 features are not those its code requires (`checkFeatures`), its code has an
 instruction its target's printer cannot encode (`checkEncodable`), or its
 doc has no `# Safety` section at its end for what `fullDoc` adds to it
@@ -666,6 +708,7 @@ def files (as : List Artifact) : Except String (List (String × String)) := do
   forMPar ps (checkCalls ps)
   forMPar ps (checkConsts ps)
   forMPar ps checkOperands
+  forMPar ps checkRseq
   forMPar ps checkFeatures
   forMPar ps checkEncodable
   forMPar as checkLayout

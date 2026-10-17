@@ -114,6 +114,27 @@ def stPar : State := { stSym with params := fun n =>
 #guard (exec (.cmov .e .rax (.immP "mask")) stPar).isNone
 -- The GOT slot of a symbol holds its address; nothing is read from the regions.
 #guard (exec (.movGot .rdx "T") stPar).map (·.gpr .rdx) == some 0x1000
+-- The descriptor's address is the state's.
+#guard (exec (.leaRseqCs .r10) { st with csDesc := 0x4000 }).map (·.gpr .r10) == some 0x4000
+
+/-! ## The body of a restartable sequence
+
+An exit whose condition holds runs its code and continues after the
+sequence, or ends at its external target; one whose condition does not hold
+falls through; one on an undefined flag faults. -/
+
+def body : List (Step Instr Cond) :=
+  [.instr (.mov .rax (.imm 1)), .exit .e [.mov .rax (.imm 2)] none, .exit .b [] (some "slow"),
+    .instr (.mov .rax (.imm 3))]
+
+/-- What a run of `body` ends with: whether it exited to `slow`, and `rax`. -/
+def outcome (s : State) : Option (Bool × BitVec 64) :=
+  (runBody isa body s).map fun | .done s => (false, s.gpr .rax) | .exit _ s => (true, s.gpr .rax)
+
+#guard outcome { st with zf := some true } == some (false, 2)
+#guard outcome { st with zf := some false, cf := some true } == some (true, 1)
+#guard outcome { st with zf := some false, cf := some false } == some (false, 3)
+#guard outcome { st with zf := none } == none
 
 /-! ## `inc`, `dec` and `test` with an immediate
 

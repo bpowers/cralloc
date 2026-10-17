@@ -326,6 +326,62 @@ instructions. -/
 #guard text (printer.function (.frame (.alloc 64) (.block []) (.free 64) : Prog X86_64.isa)) ==
   ["lea rsp, [rsp-64]", "lea rsp, [rsp+64]", "ret"]
 
+/-! ## Restartable sequences
+
+The arm at label 5, the sequence from 6 to 7, the descriptor at 3 in its own
+section, and out of line the signature, the abort handler at 4 jumping back
+to the arm, and each exit's code. An exit straight to an external target
+branches to it. -/
+
+def rseqSample : Prog isa := .rseq
+  [.movGot .rdx "rs", .mov .rdx (.mem { base := .rdx }), .leaRseqCs .r10,
+    .store { base := .rdx, disp := 8, seg := some .fs } .r10]
+  [.instr (.mov32 .r8 (.mem { base := .rdx, disp := 24, seg := some .fs })),
+    .instr (.alu32 .cmp .r8 (.imm 8192)),
+    .exit .ae [] (some "slow"),
+    .instr (.mov .rcx (.mem { base := .r9, index := some .r8 })),
+    .exit .e [.mov32 .rax (.imm 0)] none,
+    .exit .b [] none,
+    .instr (.store { base := .r9, index := some .r8 } .rcx)]
+
+#guard text (printer.function rseqSample) == [
+  "5:",
+  "mov rdx, QWORD PTR [rip + <rs>@GOTPCREL]",
+  "mov rdx, QWORD PTR [rdx]",
+  "lea r10, [rip + 3f]",
+  "mov QWORD PTR fs:[rdx+8], r10",
+  "6:",
+  "mov r8d, DWORD PTR fs:[rdx+24]",
+  "cmp r8d, 8192",
+  "jae <slow>",
+  "mov rcx, QWORD PTR [r9+r8*1]",
+  "je 20f",
+  "jb 21f",
+  "mov QWORD PTR [r9+r8*1], rcx",
+  "7:",
+  ".pushsection __rseq_cs, \"aw\"",
+  ".balign 32",
+  "3:",
+  ".long 0, 0",
+  ".quad 6b, 7b - 6b, 4f",
+  ".popsection",
+  ".pushsection .text.unlikely, \"ax\"",
+  ".byte 0x0f, 0xb9, 0x3d",
+  ".long 0x53053053",
+  "4:",
+  "jmp 5b",
+  "20:",
+  "mov eax, 0",
+  "jmp 7b",
+  "21:",
+  "jmp 7b",
+  ".popsection",
+  "ret"
+]
+
+-- The line of an exit to an external target refers to it as an operand.
+#guard (printer.function rseqSample).flatMap Line.refs == ["rs", "slow"]
+
 /-! ## CPU features
 
 `Code.requires` collects what every instruction needs, through calls and

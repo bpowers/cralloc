@@ -171,6 +171,10 @@ inductive Instr
   RIP-relative memory operand): the address of the symbol `name`, read from
   its slot in the global offset table. -/
   | movGot (dst : Reg) (name : String)
+  /-- `lea r64, [rip + 3f]` (REX.W + 8D /r, with a RIP-relative memory
+  operand): the address of the routine's restartable-sequence descriptor,
+  `State.csDesc`, which the printer labels `3` (`Printer.rseqLines`). -/
+  | leaRseqCs (dst : Reg)
   /-- `lea r64, [base + index * scale + disp]` (REX.W + 8D /r): the operand's
   offset (`State.offset`), computed without accessing memory. The operand
   names no segment (the printer refuses one). -/
@@ -279,6 +283,10 @@ def exec : Instr → State → Option State
   -- read-only, so the load reads `S` and never faults: `DEST := S`. No flags
   -- are affected.
   | .movGot d name, s => some (s.setReg d (s.syms name))
+  -- `leaRseqCs`: "LEA" as for `leaSym`, of the local label the descriptor
+  -- has (`Printer.rseqLines`), which the assembler resolves: `DEST :=` its
+  -- address.
+  | .leaRseqCs d, s => some (s.setReg d s.csDesc)
   -- `lea`: SDM Vol. 2, "LEA—Load Effective Address", `LEA r64, m` (`REX.W + 8D
   -- /r`), with a 64-bit operand size and address size: "Computes the
   -- effective address of the second operand (the source operand) and stores
@@ -389,7 +397,7 @@ two, `rax` and `rdx`, `mulx` two of its choosing, and stores none. -/
 def Instr.dst : Instr → Option Reg
   | .mov d _ | .alu _ d _ | .inc d | .dec d | .mov32 d _ | .alu32 _ d _ | .shift32 _ d _ | .bswap32 d
   | .rorx32 d .. | .andn32 d .. | .rorx d .. | .andn d .. | .movzx8 d _ | .bswap d | .shift _ d _
-  | .shiftCl _ d | .shiftx _ d .. | .movImm64 d _ | .leaSym d .. | .movGot d _ | .lea d _ | .adcx d _ | .adox d _
+  | .shiftCl _ d | .shiftx _ d .. | .movImm64 d _ | .leaSym d .. | .movGot d _ | .leaRseqCs d | .lea d _ | .adcx d _ | .adox d _
   | .cmov _ d _ | .pop d _ | .imul d _ => some d
   | .store .. | .store32 .. | .store8 .. | .mul _ | .mulx .. | .push _ | .alloc _ | .free _ => none
 
