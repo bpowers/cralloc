@@ -1,0 +1,17 @@
+[package]
+name = "asmalloc-testkit"
+version = "0.0.0"
+edition.workspace = true
+license.workspace = true
+publish = false
+description = "Shadow-model tester, mutant allocators and C-ABI conformance cases for asmalloc"
+
+[features]
+# The `Allocator` trait is stable from Rust 1.100. Turn this on with a toolchain that has it
+# (nightly today): it adds the `Allocator` adapter and its tests.
+allocator-api = []
+
+[dependencies]
+
+[lints]
+workspace = true
