@@ -37,14 +37,14 @@ variable {c : Spec.Slab.Ctx isa} {s : State}
 theorem gpr_σ3_rdi : (σ3 s).gpr .rdi = s.gpr .rdi := by
   simp only [σ3, shl12, RegUpd.gpr_setReg_of_ne _ _ (show ¬ Reg.rdi = .r8 by decide),
     RegUpd.gpr_setFlags, σ2, RegUpd.gpr_arithFlags, σ1, State.setReg32, σA, armReg, armB, armA,
-    RegUpd.gpr_setReg_of_ne _ _ (show ¬ Reg.rdi = .r10 by decide),
-    RegUpd.gpr_setReg_of_ne _ _ (show ¬ Reg.rdi = .rdx by decide)]
+    RegUpd.gpr_setReg_of_ne _ _ (show ¬ Reg.rdi = .r11 by decide),
+    RegUpd.gpr_setReg_of_ne _ _ (show ¬ Reg.rdi = .r10 by decide)]
 
 theorem gpr_σ3_rsi : (σ3 s).gpr .rsi = s.gpr .rsi := by
   simp only [σ3, shl12, RegUpd.gpr_setReg_of_ne _ _ (show ¬ Reg.rsi = .r8 by decide),
     RegUpd.gpr_setFlags, σ2, RegUpd.gpr_arithFlags, σ1, State.setReg32, σA, armReg, armB, armA,
-    RegUpd.gpr_setReg_of_ne _ _ (show ¬ Reg.rsi = .r10 by decide),
-    RegUpd.gpr_setReg_of_ne _ _ (show ¬ Reg.rsi = .rdx by decide)]
+    RegUpd.gpr_setReg_of_ne _ _ (show ¬ Reg.rsi = .r11 by decide),
+    RegUpd.gpr_setReg_of_ne _ _ (show ¬ Reg.rsi = .r10 by decide)]
 
 theorem σ4t_rdi : (σ4t s).gpr .rdi = s.gpr .rdi := by
   rw [σ4t, RegUpd.gpr_setReg_of_ne _ _ (by decide), gpr_σ3_rdi]
@@ -94,14 +94,14 @@ theorem slabWord_ea_t (σ : State) (h9 : σ.gpr .r9 = r9t s) (h8 : σ.gpr .r8 = 
 
 /-- The slab word's address is the class's for the CPU, an out-of-line
 routine being given its class in `rdi`. -/
-theorem wat_eq (hA : c.A = abi) (hcls : c.cls s = (s.gpr .rdi).toNat) : wat s = c.word s := by
+theorem wat_eq (hA : X86 c.A) (hcls : c.cls s = (s.gpr .rdi).toNat) : wat s = c.word s := by
   rw [Spec.Slab.Ctx.word, wordAddr, sym_of hA, cpu_of hA, wat, r9t, sh_eq, cpu32, hcls]
   apply BitVec.eq_of_toNat_eq
   simp only [BitVec.toNat_add, BitVec.toNat_mul, BitVec.toNat_ofNat, SLABS, toNat_eight]
   omega
 
 /-- The mask's address is the routine's. -/
-theorem maskA_eq (hA : c.A = abi) (hcls : c.cls s = (s.gpr .rdi).toNat) : maskA s = c.maskAddr s := by
+theorem maskA_eq (hA : X86 c.A) (hcls : c.cls s = (s.gpr .rdi).toNat) : maskA s = c.maskAddr s := by
   rw [Spec.Slab.Ctx.maskAddr, sym_of hA, hcls, maskA]
   apply BitVec.eq_of_toNat_eq
   simp only [BitVec.toNat_add, BitVec.toNat_mul, BitVec.toNat_ofNat, MAG_MASKS,

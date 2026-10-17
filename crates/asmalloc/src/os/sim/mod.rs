@@ -418,8 +418,7 @@ fn decode_rseq(word: u64) -> Option<RseqArea> {
 //   touching anything if it does not: outside this value's memory, not whole reserved pages,
 //   or spanning two reservations.
 // - The only restartable sequences are twins on simulated threads. `fence` aborts every one in
-//   flight on its CPU before returning; under cooperative scheduling that is all of them (see
-//   `cpus.rs` for the one window real threads leave).
+//   flight on its CPU and waits out any that is committing (see `cpus.rs`).
 // - `wipe_on_fork` only records; nothing forks the simulator, so the promise is about what
 //   `wipe_for_fork` shows a test, and it zeroes exactly the marked pages.
 // - `abort` panics, so it does not return.

@@ -9,11 +9,11 @@ routine arms its sequence, then reads the CPU number and leaves for the slow pat
 if it has no slab:
 
 ```
-    mov   rdx, QWORD PTR [rip + __rseq_offset@GOTPCREL]
-    mov   rdx, QWORD PTR [rdx]          ; the rseq area's offset from fs
-    lea   r10, [rip + 3f]               ; the descriptor
-    mov   QWORD PTR fs:[rdx+8], r10     ; arm
-6:  mov   r8d, DWORD PTR fs:[rdx+4]    ; cpu_id
+    mov   r10, QWORD PTR [rip + __rseq_offset@GOTPCREL]
+    mov   r10, QWORD PTR [r10]          ; the rseq area's offset from fs
+    lea   r11, [rip + 3f]               ; the descriptor
+    mov   QWORD PTR fs:[r10+8], r11     ; arm
+6:  mov   r8d, DWORD PTR fs:[r10+4]    ; cpu_id
     cmp   r8d, 8192
     jae   slow
     shl   r8, 12
@@ -31,17 +31,18 @@ namespace VG.Impl.Slab.X86_64
 
 open VG.X86_64
 
-/-- Arming: `rdx` holds the rseq area's offset from the FS base, and
+/-- Arming, in `r10` and `r11` so that the third argument's register, `rdx`,
+is free: `r10` holds the rseq area's offset from the FS base, and
 `rseq_cs` the descriptor's address. -/
 def arm : List Instr := [
-  .movGot .rdx "__rseq_offset",
-  .mov .rdx (.mem { base := .rdx }),
-  .leaRseqCs .r10,
-  .store { base := .rdx, disp := 8, seg := some .fs } .r10]
+  .movGot .r10 "__rseq_offset",
+  .mov .r10 (.mem { base := .r10 }),
+  .leaRseqCs .r11,
+  .store { base := .r10, disp := 8, seg := some .fs } .r11]
 
 /-- The CPU number into `r8`, and the exit for one without a slab. -/
 def cpuSteps (cold : List Instr) (ext : Option String) : List (Step Instr Cond) := [
-  .instr (.mov32 .r8 (.mem { base := .rdx, disp := 4, seg := some .fs })),
+  .instr (.mov32 .r8 (.mem { base := .r10, disp := 4, seg := some .fs })),
   .instr (.alu32 .cmp .r8 (.imm 8192)),
   .exit .ae cold ext,
   .instr (.shift .shl .r8 12)]
@@ -105,5 +106,50 @@ def pushTable : Prog isa := .rseq arm (
   .instr (.lea .rax { base := .rcx, disp := 8 }),
   .instr (.alu32 .test .rax maskEntry),
   .exit .e [] (some "slow")] ++ pushTail .rsi)
+
+/-! ## The slow path's routines
+
+Out of line, each on the word at the byte offset in `rdi`, rounded down to a
+word of the slab (`and r9d, 4088`), so that any offset is safe; `rax` is the
+word read, or `NO_CPU` (2) without a slab. -/
+
+/-- The word at the offset in `rdi`, into `rax`; `[r9 + r8]` addresses it. -/
+def offsetWord : List (Step Instr Cond) := [
+  .instr (.mov32 .r9 (.reg .rdi)),
+  .instr (.alu32 .and .r9 (.imm 4088)),
+  .instr (.alu .add .r8 (.reg .r9)),
+  .instr (.leaSym .r9 "SLABS"),
+  .instr (.mov .rax (.mem slabWord))]
+
+/-- No slab: return 2. -/
+def noCpu : List Instr := [.mov32 .rax (.imm 2)]
+
+/-- `slab_cas(offset, expected, new)`: store `new` (`rdx`) if the word is
+`expected` (`rsi`); return the word. -/
+def cas : Prog isa := .rseq arm (
+  cpuSteps noCpu none ++ offsetWord ++ [
+  .instr (.alu .cmp .rax (.reg .rsi)),
+  .exit .ne [] none,
+  .instr (.store slabWord .rdx)])
+
+/-- `slab_stack_push(offset, magazine)`: unless the head is a marker, link
+it from the magazine (`rsi`) and commit the magazine; return the head. -/
+def stackPush : Prog isa := .rseq arm (
+  cpuSteps noCpu none ++ offsetWord ++ [
+  .instr (.alu32 .test .rax (.imm 1)),
+  .exit .ne [] none,
+  .instr (.store { base := .rsi } .rax),
+  .instr (.store slabWord .rsi)])
+
+/-- `slab_stack_pop(offset)`: unless the head is a marker or zero, commit
+its link; return the head. -/
+def stackPop : Prog isa := .rseq arm (
+  cpuSteps noCpu none ++ offsetWord ++ [
+  .instr (.alu32 .test .rax (.imm 1)),
+  .exit .ne [] none,
+  .instr (.alu .test .rax (.reg .rax)),
+  .exit .e [] none,
+  .instr (.mov .rcx (.mem { base := .rax })),
+  .instr (.store slabWord .rcx)])
 
 end VG.Impl.Slab.X86_64

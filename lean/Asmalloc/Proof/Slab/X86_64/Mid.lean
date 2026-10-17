@@ -58,18 +58,18 @@ theorem shl12 (h : Mid rs s m p) {r : Reg} (hr : r ∈ rs) : Mid rs s m (VG.Proo
 
 end Mid
 
-/-- The scratch registers of the inline routines, and of the out-of-line
-ones. -/
-def scratchI : List Reg := [.rax, .rcx, .rdx, .r8, .r9, .r10]
-def scratchT : List Reg := [.rax, .rcx, .rdx, .r8, .r9, .r10, .r11]
+/-- The scratch registers of the routines, inline (`scratchI`) and out of
+line (`scratchT`): the same six. -/
+def scratchI : List Reg := [.rax, .rcx, .r8, .r9, .r10, .r11]
+abbrev scratchT : List Reg := scratchI
 
 section
 
 variable {rs : List Reg} {c : Spec.Slab.Ctx isa} {s p : State} {m : Mem}
 
-theorem mid_σA (hrdx : .rdx ∈ rs) (hr10 : .r10 ∈ rs) : Mid rs s (m1 s) (σA s) :=
-  ((((Mid.mk rfl rfl rfl rfl rfl rfl rfl fun _ _ => rfl : Mid rs s s.mem s).setReg hrdx _).setReg
-    hrdx _).setReg hr10 _).withMem _
+theorem mid_σA (hb : .r10 ∈ rs) (hd : .r11 ∈ rs) : Mid rs s (m1 s) (σA s) :=
+  ((((Mid.mk rfl rfl rfl rfl rfl rfl rfl fun _ _ => rfl : Mid rs s s.mem s).setReg hb _).setReg
+    hb _).setReg hd _).withMem _
 
 theorem mid_σ1 (h8 : .r8 ∈ rs) (hA : Mid rs s (m1 s) (σA s)) : Mid rs s (m1 s) (σ1 s) :=
   hA.setReg32 h8 _
@@ -81,7 +81,7 @@ theorem mid_σ3 (h8 : .r8 ∈ rs) (h2 : Mid rs s (m1 s) (σ2 s)) : Mid rs s (m1 
 /-- `rseq_cs` still holds the descriptor, in memory `m` that differs from
 memory on entry in `rseq_cs` and in regions `xs` apart from `rseq_cs` and
 `__rseq_offset`. -/
-theorem armed_of_mid (h : Facts c s) {xs : List Region} (hm : Frame (⟨area s + 8, 8⟩ :: xs) s.mem m)
+theorem armed_of_mid (h : ArmOk s) {xs : List Region} (hm : Frame (⟨area s + 8, 8⟩ :: xs) s.mem m)
     (hcs : m.readW (area s + 8) 64 = s.csDesc)
     (hx : ∀ x ∈ xs, Region.Disjoint ⟨s.syms RS, 8⟩ x) (hp : Mid rs s m p) : armed p := by
   have ho : m.readW (s.syms RS) 64 = o s := by
@@ -133,5 +133,99 @@ theorem preservedExcept_of_mid {names : List String} (hn : ∀ r ∈ rs, r.name 
   hp.gpr r fun h => hr (hn r h)
 
 end
+
+/-! ## A retry's precondition
+
+Wherever the routine may be aborted it has kept the invariant, having
+written only harmless regions (`inv_frame`); where the thread resumes, the
+addresses are the entry state's (`Same`): the abort keeps the registers, the
+symbols, the constants and the FS base (`rely`), and `env` keeps
+`__rseq_offset`. So the precondition holds there (`retry_pre`). -/
+
+section Retry
+
+variable {c : Spec.Slab.Ctx isa}
+
+/-- An argument, read in a state whose argument registers are another's. -/
+theorem arg_eq (hA : X86 c.A) (hlen : (c.sig.words 64).length ≤ 6) {p s : State}
+    (h : ∀ r ∈ argRegs.take (c.sig.words 64).length, p.gpr r = s.gpr r) (i : Nat) :
+    c.arg p i = c.arg s i := by
+  have hl : ((c.sig.words 64).map (·.bits 64)).length ≤ argRegs.length := by
+    simpa [argRegs] using hlen
+  have hargs : abi.args ((c.sig.words 64).map (·.bits 64)) =
+      some fun s => (argRegs.take ((c.sig.words 64).map (·.bits 64)).length).map s.gpr := by
+    simp only [abi, hl, ↓reduceIte]
+  simp only [Spec.Slab.Ctx.arg, hA.ptrBits, hA.args, hargs]
+  congr 1
+  exact List.map_congr_left fun r hr => h r (by simpa using hr)
+
+/-- A state with the entry state's symbols, FS base, constants, argument
+registers, stack pointer and `__rseq_offset` has its addresses. -/
+theorem same_of (hA : X86 c.A) (hlen : (c.sig.words 64).length ≤ 6) {s p : State}
+    (hsyms : p.syms = s.syms) (hfs : p.fsBase = s.fsBase) (hpar : p.params = s.params)
+    (hargs : ∀ r ∈ argRegs.take (c.sig.words 64).length, p.gpr r = s.gpr r)
+    (hrsp : p.gpr .rsp = s.gpr .rsp)
+    (hrs : ∀ x, (⟨s.syms RS, 8⟩ : Region).Contains x 1 → p.mem x = s.mem x) : Same c s p where
+  sym n := by rw [sym_of hA, sym_of hA, hsyms]
+  tp := by rw [tp_of hA, tp_of hA, hfs]
+  param n := by rw [param_of hA, param_of hA, hpar]
+  arg := arg_eq hA hlen hargs
+  res := hA.reserved s p hrsp
+  rsVar x hx := by rw [mem_of hA, mem_of hA]; exact hrs x (by rwa [rsVar_of hA] at hx)
+
+/-- Where the routine may be aborted, in a state `p` reached from `s` with
+memory `m` changed only in harmless regions `W`, it has kept the invariant,
+and every state the thread may resume in satisfies the precondition. -/
+theorem retry (hA : X86 c.A) {post : State → State → Prop}
+    {exit : String → State → State → Prop} {abort : State → State → Prop}
+    {trace : State → List Event → Prop} {vals : State → List (BitVec 64)}
+    (hv : c.A.args ((c.sig.words c.A.ptrBits).map (·.bits c.A.ptrBits)) = some vals)
+    (hb : ∀ x, Sig.bufs c.sig.params (vals x) = [])
+    (ha : ∀ x, c.A.argArea ((c.sig.words c.A.ptrBits).map (·.bits c.A.ptrBits)) x = [])
+    (hlen : (c.sig.words 64).length ≤ 6) {rs : List Reg} {s p : State} {m : Mem}
+    {W : List Region} (hs : c.pre s) (hm : Mid rs s m p)
+    (hrs : ∀ r ∈ argRegs.take (c.sig.words 64).length, r ∉ rs) (hsp : Reg.rsp ∉ rs)
+    (hfr : Frame W s.mem m) (hW : ∀ w ∈ W, Harmless c s w) :
+    c.inv p ∧ ∀ p', rely p p' → (contract c post exit abort trace).env p p' →
+      (contract c post exit abort trace).pre p' := by
+  obtain ⟨htp, hsym, hargs, hl, hinv⟩ := hs
+  have hrsv : ∀ x, (⟨s.syms RS, 8⟩ : Region).Contains x 1 → p.mem x = s.mem x := fun x hx => by
+    rw [hm.mem]
+    exact hfr x fun w hw hc => (hW w hw).2.1 x hc (by rwa [rsVar_of hA])
+  have hsame : Same c s p := same_of hA hlen hm.syms hm.fsBase hm.params
+    (fun r hr => hm.gpr r (hrs r hr)) (hm.gpr .rsp hsp) hrsv
+  have hfr' : Frame W (c.mem s) (c.mem p) := by rw [mem_of hA, mem_of hA, hm.mem]; exact hfr
+  have hip := inv_frame hsame hfr' hW (cls_lt hargs) hinv
+  refine ⟨hip, fun p' hr he => ?_⟩
+  obtain ⟨hg, -, -, -, -, hfs, hsy, hpar, -, -⟩ := hr
+  have hkept := he.2.2.1 (c.rsVar p) (List.mem_cons_self ..)
+  have hsame' : Same c s p' := same_of hA hlen (hsy.trans hm.syms) (hfs.trans hm.fsBase)
+    (hpar.trans hm.params) (fun r hr => by rw [hg]; exact hm.gpr r (hrs r hr))
+    (by rw [hg]; exact hm.gpr .rsp hsp) fun x hx => by
+      have h1 := hkept x (by rwa [hsame.rsVar_eq, rsVar_of hA])
+      rw [mem_of hA, mem_of hA] at h1
+      rw [h1]; exact hrsv x hx
+  have hl6 : ((c.sig.words 64).map (·.bits 64)).length ≤ argRegs.length := by
+    simpa [argRegs] using hlen
+  have hwf : c.A.wf ((c.sig.words c.A.ptrBits).map (·.bits c.A.ptrBits)) 0 p' := by
+    rw [hA.wf, hA.ptrBits]; simp only [abi, hl6, ↓reduceIte]
+  exact retry_pre c hv (hb p') (ha p') hA.ptrBits hwf ⟨htp, hsym, hargs, hl, hinv⟩ hsame' hip he
+
+/-- `rseq_cs`, which the arm writes, is harmless. -/
+theorem harmless_cs1 (hA : X86 c.A) {s : State} (hs : c.pre s) :
+    ∀ w ∈ [(⟨area s + 8, 8⟩ : Region)], Harmless c s w := by
+  intro w hw
+  rw [List.mem_singleton.mp hw, ← csField_of hA]
+  exact harmless_cs hs.2.2.2.1
+
+/-- `rseq_cs` and another harmless region. -/
+theorem harmless_cs2 (hA : X86 c.A) {s : State} (hs : c.pre s) {r : Region} (hr : Harmless c s r) :
+    ∀ w ∈ [(⟨area s + 8, 8⟩ : Region), r], Harmless c s w := by
+  intro w hw
+  rcases List.mem_cons.mp hw with rfl | hw
+  · rw [← csField_of hA]; exact harmless_cs hs.2.2.2.1
+  · rw [List.mem_singleton.mp hw]; exact hr
+
+end Retry
 
 end VG.Proof.Slab.X86_64

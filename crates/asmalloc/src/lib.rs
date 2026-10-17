@@ -20,6 +20,8 @@ extern crate alloc;
 extern crate std;
 
 pub mod classes;
+pub mod depot;
+pub mod front;
 #[cfg(test)]
 pub(crate) mod generated;
 pub mod os;

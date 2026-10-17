@@ -4,8 +4,9 @@
 //! sequence state. A twin running on a [`SimThread`] calls [`Machine::step`] before each step:
 //! `ReadCpu` begins a sequence, and any later step fails with [`Aborted`] if the sequence was
 //! interrupted since. Interruptions come from the test ([`SimThread::abort`],
-//! [`SimThread::abort_at`]), from moving the thread ([`SimThread::set_cpu`]), and from a fence on
-//! its CPU ([`Cpus::fence`], which the simulator's `Os::fence` calls).
+//! [`SimThread::abort_at`]), from moving the thread ([`SimThread::set_cpu`]), from a fence on
+//! its CPU ([`Cpus::fence`], which the simulator's `Os::fence` calls), and from another thread
+//! starting a sequence on the same CPU, which it can only do if this one was preempted.
 //!
 //! A sequence that passes its `Commit` step is committing until the twin calls
 //! [`Machine::committed`] after its store. A fence does not interrupt a committing sequence (the
@@ -89,6 +90,7 @@ impl<const N: usize> Cpus<N> {
     pub(super) fn thread(&self, index: usize) -> SimThread<'_> {
         SimThread {
             state: &self.threads[index],
+            threads: &self.threads,
             index,
         }
     }
@@ -120,6 +122,7 @@ impl<const N: usize> Cpus<N> {
 #[derive(Clone, Copy)]
 pub struct SimThread<'a> {
     state: &'a ThreadState,
+    threads: &'a [ThreadState],
     index: usize,
 }
 
@@ -179,6 +182,14 @@ impl Machine for SimThread<'_> {
         }
         match step {
             Step::ReadCpu => {
+                // One CPU runs one thread at a time: if another thread is in a sequence on
+                // this CPU, it was preempted for this one to start.
+                let cpu = state.cpu.load(Ordering::Acquire);
+                for (index, other) in self.threads.iter().enumerate() {
+                    if index != self.index && other.cpu.load(Ordering::Acquire) == cpu {
+                        other.interrupt();
+                    }
+                }
                 state.sequence.store(RUNNING, Ordering::Release);
                 Ok(())
             }
@@ -286,15 +297,13 @@ mod tests {
     #[test]
     fn a_fence_aborts_only_sequences_on_its_cpu() {
         let cpus = Cpus::<4>::new();
-        let (a, b, c) = (cpus.thread(0), cpus.thread(1), cpus.thread(2));
-        b.set_cpu(0);
-        for thread in [&a, &b, &c] {
+        let (a, b) = (cpus.thread(0), cpus.thread(1));
+        for thread in [&a, &b] {
             thread.step(Step::ReadCpu).unwrap();
         }
-        assert_eq!(cpus.fence(0), 2);
+        assert_eq!(cpus.fence(0), 1);
         assert_eq!(a.step(Step::Load), Err(Aborted));
-        assert_eq!(b.step(Step::Load), Err(Aborted));
-        assert_eq!(c.step(Step::Load), Ok(()));
+        assert_eq!(b.step(Step::Load), Ok(()));
         assert_eq!(cpus.fence(0), 0, "nothing is in flight there now");
     }
 
@@ -308,6 +317,19 @@ mod tests {
         assert_eq!(thread.cpu_id(), 3);
         thread.set_cpu(-1);
         assert_eq!(thread.cpu_id(), -1);
+    }
+
+    #[test]
+    fn starting_a_sequence_preempts_the_one_in_flight_on_the_same_cpu() {
+        let cpus = Cpus::<4>::new();
+        let (a, b, c) = (cpus.thread(0), cpus.thread(1), cpus.thread(2));
+        b.set_cpu(0);
+        a.step(Step::ReadCpu).unwrap();
+        c.step(Step::ReadCpu).unwrap();
+        b.step(Step::ReadCpu).unwrap();
+        assert_eq!(a.step(Step::Load), Err(Aborted), "b took a's CPU");
+        assert_eq!(c.step(Step::Load), Ok(()), "c is on another CPU");
+        assert_eq!(b.step(Step::Load), Ok(()));
     }
 
     #[test]

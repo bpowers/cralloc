@@ -26,6 +26,8 @@ process light.
 - The gate is formatting, lints, unit tests and the quick proofs, about a minute in total.
   Run it before asking for a merge. Never add a slow step to it. Benchmarks and long proofs
   run on demand.
+- The machine is shared. Stop only processes you started, by process ID; never kill by
+  name (`pkill`, `killall`), since another teammate may be running the same tool.
 - Stay inside your component's directory. Do not edit shared files (the workspace manifest,
   this file, `README.md`, `docs/design.md`) unless that is your task. If you need a change in
   another component, tell the lead.

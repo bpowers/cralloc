@@ -351,7 +351,7 @@ emit one that breaks them:
   word between the read and the commit (see "Idle caches");
 - an inlined routine is at most 13 micro-ops, one more than the processor delivers at full
   speed;
-- an out-of-line routine starts on a 64-byte boundary, and its hot path fits in that line
+- an out-of-line routine starts on a 64-byte boundary, and its hot path fits in 128 bytes
   and in 24 micro-ops, which is what the processor delivers in the four cycles a call and
   return take regardless;
 - the slow path is out of line.
@@ -647,8 +647,10 @@ specification can see, and the registers the restart needs are intact. It reads 
 only the thread's rseq area, the slab array and the magazine the slab word names. It
 clobbers only the registers it declares.
 
-The proofs assume the slab invariant given under "Front end". It is stated once, in Lean,
-and the Rust constants and a debug validator are generated from that statement.
+The proofs assume the slab invariant given under "Front end", at entry and again at every
+retry, and leave it to the Rust slow paths to maintain. It is stated once, in Lean. The Rust
+constants are generated from that statement, and the front end's debug validator is tested
+against vectors evaluated from it.
 
 The framework's own trusted core is the instruction semantics, the rseq interruption model,
 the printer, and the meaning of Rust's `asm!` operands. Changes to it are reviewed

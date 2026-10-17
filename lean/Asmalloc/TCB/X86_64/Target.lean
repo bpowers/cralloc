@@ -156,7 +156,19 @@ the block does not declare as an output, to hold at its end what it held at
 its start (the Rust Reference, "Inline assembly", "Rules for inline
 assembly"), and the direction flag to be clear at both, which no modelled
 instruction changes. The block may not touch the stack below the stack
-pointer, which no region a contract grants contains. -/
+pointer: the compiler may keep values in the 128 bytes there (the red zone,
+System V AMD64 psABI §3.2.2) across the block, so `inlineAbi` reserves them,
+and no region a contract grants overlaps them. -/
+
+/-- The calling convention as an inline function sees it: `abi`, but the
+memory no region overlaps is also the red zone below the stack pointer. -/
+def inlineAbi : Abi isa :=
+  { abi with
+    reserved n s := ⟨s.gpr .rsp - 128, 128⟩ :: abi.reserved n s
+    reservedDoc n := some (if n = 0 then
+      "the 128 bytes of stack below the stack pointer (the red zone) or the 8 bytes at it" else
+      s!"the 128 bytes of stack below the stack pointer (the red zone), the 8 bytes at it, \
+        or the {n} bytes of stack below it") }
 
 /-- Every register but those named in `rs` holds in `s'` what it held in
 `s`. -/
@@ -182,10 +194,12 @@ abbrev target : Target where
   rely := rely
 
 /-- The inline target: the same model, printer and argument registers, with
-the obligations of `asm!` in place of a call's (see above). -/
+the obligations of `asm!` in place of a call's and the red zone reserved
+(see above). -/
 abbrev inlineTarget : Target :=
   { target with
     name := "x86_64_inline"
+    abi := inlineAbi
     abiPreserved := fun s s' => s'.gpr .rsp = s.gpr .rsp
     inline := true
     argRegs := argRegs.map Reg.name

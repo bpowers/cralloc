@@ -357,7 +357,7 @@ def rseqSample : Prog isa := .rseq
   "jae <slow>",
   "mov rcx, QWORD PTR [r9+r8*1]",
   "je 20f",
-  "jb 21f",
+  "jb 7f",
   "mov QWORD PTR [r9+r8*1], rcx",
   "7:",
   ".pushsection __rseq_cs, \"aw\"",
@@ -373,8 +373,6 @@ def rseqSample : Prog isa := .rseq
   "jmp 5b",
   "20:",
   "mov eax, 0",
-  "jmp 7b",
-  "21:",
   "jmp 7b",
   ".popsection",
   "ret"
@@ -470,6 +468,16 @@ def safeDoc : String := "Does things.\n\n# Safety\n\n* `p` must be valid."
   safeDoc ++ "\n* The CPU must support the `bmi2` and `adx` target features."
 #guard Rust.featureDoc safeDoc ["bmi2", "adx", "bmi1"] ==
   safeDoc ++ "\n* The CPU must support the `bmi2`, `adx` and `bmi1` target features."
+
+-- The micro-op limit: a hot path within it, one over it, and code whose hot
+-- path is not counted, which a target with a limit refuses.
+#guard (Rust.uopCheck printer false "f" rseqSample).toBool
+#guard err (Rust.uopCheck { printer with uopLimit := some 10 } false "f" rseqSample) ==
+  some "f's hot path has 11 fused micro-ops, more than 10"
+#guard err (Rust.uopCheck printer false "f" (.loop (.block []) .e)) ==
+  some "f is neither a block nor a restartable sequence, so its hot path's fused micro-ops \
+    cannot be counted against the limit of 24"
+#guard (Rust.uopCheck { printer with uopLimit := none } false "f" (.loop (.block []) .e)).toBool
 
 #guard Rust.featuresConst "vg_f" [] == ""
 #guard Rust.featuresConst "vg_mul_bmi2" ["bmi2", "adx"] ==
