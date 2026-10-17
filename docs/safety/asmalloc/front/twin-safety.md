@@ -46,6 +46,10 @@ heap's. Inside the crate a handle is made only by the thread that took the magaz
 out of a slab word, or out of the area, with the size of the stack or class it came from, and
 that thread then owns it (SLOW-01, SPARE-01, the drain's step 4).
 
+The slow paths that write a slab array all hold the one depot and space that array is used
+with (`Cache::new`'s contract, CACHE-01 in `depot/magazine-safety.md`), so every magazine a slab
+word or link names is in that space's area, and admitted by that depot's committed mark.
+
 A `Magazine` handle exists only for an offset `magazine::admits` accepted: past the generation
 page, aligned to its size and inside the committed bytes (`depot::verify::
 an_admitted_magazine_lies_inside_the_committed_area`). The magazine area itself is aligned to

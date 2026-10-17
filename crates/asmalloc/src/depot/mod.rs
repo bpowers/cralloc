@@ -144,12 +144,24 @@ pub struct Cache<'a, O: Os, R: Routines, S: Source> {
 
 impl<'a, O: Os, R: Routines, S: Source> Cache<'a, O, R, S> {
     /// The view of the heap at `space`.
-    pub fn new(depot: &'a Depot, space: Space<'a, O>, routines: R, source: &'a S) -> Self {
-        Cache::with_tuning(depot, space, routines, source, Tuning::DEFAULT)
+    ///
+    /// # Safety
+    ///
+    /// For as long as any of them is used, `depot` is only ever used with this `space` (its
+    /// counters describe that space's magazine area, which it alone carves), and the slab array
+    /// of `routines` only with this depot and space (its words name that area's magazines).
+    /// The heap's one static depot, slab array and published space meet this by construction.
+    pub unsafe fn new(depot: &'a Depot, space: Space<'a, O>, routines: R, source: &'a S) -> Self {
+        // SAFETY: the caller's promise, passed on.
+        unsafe { Cache::with_tuning(depot, space, routines, source, Tuning::DEFAULT) }
     }
 
     /// The view with limits other than the allocator's.
-    pub fn with_tuning(
+    ///
+    /// # Safety
+    ///
+    /// As for [`Cache::new`].
+    pub unsafe fn with_tuning(
         depot: &'a Depot,
         space: Space<'a, O>,
         routines: R,

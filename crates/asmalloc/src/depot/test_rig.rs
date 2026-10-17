@@ -234,13 +234,16 @@ impl<O: Os, const N: usize> Rig<O, N> {
     /// The caches as a thread on `machine` sees them.
     pub(crate) fn cache<M: Machine>(&self, machine: M) -> Cache<'_, O, Twin<'_, M>, TestSource> {
         let space = self.cell.get().expect("reserved in `new`");
-        Cache::with_tuning(
-            &self.depot,
-            space,
-            Twin::new(self.slabs(), machine),
-            &self.source,
-            self.tuning,
-        )
+        // SAFETY: a rig's depot and slabs are used only with the rig's one published space.
+        unsafe {
+            Cache::with_tuning(
+                &self.depot,
+                space,
+                Twin::new(self.slabs(), machine),
+                &self.source,
+                self.tuning,
+            )
+        }
     }
 
     /// Checks the heap, with `user` the objects the program holds, and returns what it found.
