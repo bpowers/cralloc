@@ -33,17 +33,19 @@ theorem Verified.restart_pre {T : Target} {c : Prog T.isa} {k : Contract T.isa}
     have hok := h.2.1 s hs
     unfold RseqOk at hok
     split at hok
-    · exact (hok.2 p hp).2.2 p' hrely henv
+    · exact (hok.2 p hp).2.2.2 p' hrely henv
     · simp [Code.abortStates] at hp
 
 /-- A verified routine, aborted any finite number of times, meets its
 contract: its last attempt starts in a state `s'` satisfying the
 precondition and runs to completion without faulting, meeting the
-postcondition and the calling convention's obligations relative to `s'`.
+postcondition and the calling convention's obligations relative to `s'`, or
+jumps to an external target meeting the contract's `exit`.
 Every aborted attempt meets the contract's `abort` (`RseqOk`). -/
 theorem Verified.restarts {T : Target} {c : Prog T.isa} {k : Contract T.isa}
     (h : Verified T c k) {s s' : T.isa.State} (hs : k.pre s) (hr : Restarts T c k s s') :
-    k.pre s' ∧ ∃ s'', Exec T.isa c s' s'' ∧ T.abiPreserved s' s'' ∧ k.post s' s'' :=
+    k.pre s' ∧ ((∃ s'', Exec T.isa c s' s'' ∧ T.abiPreserved s' s'' ∧ k.post s' s'') ∨
+      (∃ t s'', ExecExit T.isa c s' t s'' ∧ T.abiPreserved s' s'' ∧ k.exit t s' s'')) :=
   have hs' := h.restart_pre hs hr
   ⟨hs', h.1 s' hs'⟩
 

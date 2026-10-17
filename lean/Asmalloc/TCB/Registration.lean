@@ -56,8 +56,8 @@ structure Registration (api : Api) (target : Target) where
   verified : Verified target code contract
   ofApi : contract = api.contract (target.abi.withConsts consts) stack := by exact rfl
   /-- `Artifact.ofSig`. -/
-  ofSig : ∃ pre post,
-      contract = api.sig.contract (target.abi.withConsts consts) pre post api.writeArgs stack := by
+  ofSig : ∃ pre post x,
+      contract = api.sig.contract (target.abi.withConsts consts) pre post api.writeArgs stack x := by
     of_sig
   /-- `Artifact.spSafe`. -/
   spSafe : code.all (fun i => !target.isa.writesSp i) = true := by sp_safe

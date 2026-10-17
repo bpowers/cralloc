@@ -128,8 +128,8 @@ def Sig.preE {M : ISA} (A : Abi M) (sig : Sig) (pre : Curry (sig.words A.ptrBits
 
 theorem Sig.contract_pre_iff {M : ISA} {A : Abi M} {sig : Sig}
     {pre : Curry (sig.words A.ptrBits) (Mem → Prop)} {post : sig.Post A.ptrBits} {writeArgs : Bool}
-    {stack : Nat} {s : M.State} :
-    (sig.contract A pre post writeArgs stack).pre s ↔ Sig.preE A sig pre writeArgs stack s := by
+    {stack : Nat} {x : Sig.Extra M} {s : M.State} :
+    (sig.contract A pre post writeArgs stack x).pre s ↔ Sig.preE A sig pre writeArgs stack s := by
   simp only [Sig.contract, Sig.preE]
   generalize A.args ((sig.words A.ptrBits).map (·.bits A.ptrBits)) = o
   cases o with

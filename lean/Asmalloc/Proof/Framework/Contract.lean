@@ -47,12 +47,14 @@ since a retry must meet `k'`'s precondition: `hr`, for code with no
 sequence, is proved by default. -/
 theorem Verified.of_implies {T : Target} {c : Prog T.isa} {k k' : Contract T.isa}
     (h : Verified T c k) (hk : k.Implies k')
+    (hx : ∀ t s s', k'.pre s → k.exit t s s' → k'.exit t s s')
     (hr : ∀ s, k'.pre s → RseqOk T c k' s := by exact fun _ _ => trivial)
     (hw : c.outcomes = [] := by exact rfl) : Verified T c k' := by
   obtain ⟨hc, -, -⟩ := h
   refine ⟨fun s hs => ?_, hr, hk.sat, fun o ho => by rw [hw] at ho; cases ho⟩
-  obtain ⟨s', he, ha, hp⟩ := hc s (hk.pre s hs)
-  exact ⟨s', he, ha, hk.post s s' hs hp⟩
+  rcases hc s (hk.pre s hs) with ⟨s', he, ha, hp⟩ | ⟨t, s', he, ha, hx'⟩
+  · exact .inl ⟨s', he, ha, hk.post s s' hs hp⟩
+  · exact .inr ⟨t, s', he, ha, hx t s s' hs hx'⟩
 
 /-- Code without a restartable sequence has nothing to check where one
 could be aborted. -/
@@ -75,7 +77,7 @@ theorem Verified.of_correct {T : Target} {c : Prog T.isa} {k k' : Contract T.isa
     Verified T c k' := by
   refine ⟨fun s hs => ?_, hr, hk.sat, fun o ho => by rw [hw] at ho; cases ho⟩
   obtain ⟨s', he, ha, hp⟩ := hc s (hk.pre s hs)
-  exact ⟨s', he, ha, hk.post s s' hs hp⟩
+  exact .inl ⟨s', he, ha, hk.post s s' hs hp⟩
 
 theorem Region.disjoint_comm {a b : Region} : a.Disjoint b ↔ b.Disjoint a :=
   ⟨Region.Disjoint.symm, Region.Disjoint.symm⟩
@@ -164,9 +166,9 @@ def Sig.wfPre {M : ISA} (A : Abi M) (sig : Sig) (pre : Curry (sig.words A.ptrBit
 
 theorem Sig.contract_pre_of_check {M : ISA} {A : Abi M} {sig : Sig}
     {pre : Curry (sig.words A.ptrBits) (Mem → Prop)} {post : sig.Post A.ptrBits} {writeArgs : Bool}
-    {stack : Nat} {s : M.State}
+    {stack : Nat} {x : Sig.Extra M} {s : M.State}
     (hc : Sig.check A sig writeArgs stack s = true) (h : Sig.wfPre A sig pre stack s) :
-    (sig.contract A pre post writeArgs stack).pre s := by
+    (sig.contract A pre post writeArgs stack x).pre s := by
   simp only [Sig.check] at hc
   simp only [Sig.wfPre] at h
   simp only [Sig.contract]

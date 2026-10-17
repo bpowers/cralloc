@@ -483,9 +483,12 @@ same labels and its abort handler restarts it at its arm
 (`Printer.rseqLines`), which is then the function's first instruction, as
 `Code.abortStates` assumes. Then the target can print a sequence
 (`Printer.rseqSig`), the arm is not empty (`Verified` checks that its last
-instruction arms the sequence), and the body ends with its commit, a plain
+instruction arms the sequence), the body ends with its commit, a plain
 store (`Printer.plainStore`): a store of a value the code computed, never a
-read-modify-write of memory another thread may have changed meanwhile. -/
+read-modify-write of memory another thread may have changed meanwhile; and
+each external exit jumps to a function the artifact declares (a `sym`
+operand), which it tail-calls with its arguments as they arrived
+(`Sig.contract`'s `exit`). -/
 def checkRseq (p : Prepared) : Except String Unit := do
   let a := p.art
   let P := a.target.printer
@@ -500,6 +503,11 @@ def checkRseq (p : Prepared) : Except String Unit := do
       unless P.plainStore i do
         throw s!"{a.target.name}: {a.name}'s restartable sequence does not commit with a plain store"
     | _ => throw s!"{a.target.name}: {a.name}'s restartable sequence does not end with its commit"
+    for st in body do
+      if let .exit _ _ (some t) := st then
+        unless a.operands.lookup t matches some (.sym _) do
+          throw s!"{a.target.name}: {a.name} exits to `{t}`, which is not a function it declares \
+            (`Operand.sym`)"
   | c =>
     if hasRseq c then
       throw s!"{a.target.name}: {a.name} has a restartable sequence that is not the whole of its code"

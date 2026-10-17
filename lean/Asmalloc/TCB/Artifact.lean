@@ -16,7 +16,9 @@ verified. Every function the generated Rust contains is an `Artifact`, and an
    `k.pre`, `c` terminates without faulting (so every memory access stays in
    the regions the state permits) in a state related to the initial one by
    `k.post` *and* by the target's calling-convention obligations
-   `T.abiPreserved` (callee-saved registers, stack pointer, return address).
+   `T.abiPreserved` (callee-saved registers, stack pointer, return address);
+   or it jumps to an external target `t` (`ExecExit`) in a state related to
+   the initial one by `k.exit t` and `T.abiPreserved`.
 2. **Restartable sequences.** Wherever the operating system may abort a
    restartable sequence of `c`, the sequence is armed and the contract's
    `abort` holds (`RseqOk`).
@@ -83,11 +85,27 @@ structure Contract (M : ISA) where
   sequence may be aborted (`Code.abortStates`): typically, that nothing any
   other code can see has changed since entry. -/
   abort : M.State → M.State → Prop := fun _ _ => True
+  /-- What must hold of the entry state and the state a run ends in when it
+  jumps to the external target `t` (`ExecExit`); nothing can, by default, so
+  code with an exit to `t` cannot be verified unless the contract says what
+  the jump leaves for `t`. -/
+  exit : String → M.State → M.State → Prop := fun _ _ _ => False
   /-- What other threads, and the operating system, may change while a
   restartable sequence is aborted: `env p p'` relates the state the sequence
   was aborted in to one the thread may resume in (with `Target.rely`).
   Typically, memory outside the structures other threads share is unchanged,
   and the invariant they keep still holds. -/
+  env : M.State → M.State → Prop := fun _ _ => True
+
+/-- What a contract built with `Sig.contract` states beyond what its
+signature and its postcondition on the arguments say: a postcondition on the
+entry and exit states (`post`); what an exit to each external target leaves
+(`exit`, on top of the arguments, which `Sig.contract` requires to be where
+they were); and the contract's `abort` and `env`. -/
+structure Sig.Extra (M : ISA) where
+  post : M.State → M.State → Prop := fun _ _ => True
+  exit : String → M.State → M.State → Prop := fun _ _ _ => False
+  abort : M.State → M.State → Prop := fun _ _ => True
   env : M.State → M.State → Prop := fun _ _ => True
 
 /-- The contract of a function with signature `sig` under the calling
@@ -99,10 +117,14 @@ callee; otherwise it may only read them. `stack` is the number of bytes of
 stack below the stack pointer that the function's calls and frames use
 (return addresses, arguments and saved registers), which no buffer
 overlaps. A calling convention that does not model the arguments (`A.args`
-is `none`) gives an unsatisfiable precondition, which `Verified` rejects. -/
+is `none`) gives an unsatisfiable precondition, which `Verified` rejects.
+`x` adds what the signature cannot say (`Sig.Extra`); an exit leaves the
+arguments where they arrived, for its target, a function of the same
+signature, to find them. -/
 def Sig.contract {M : ISA} (A : Abi M) (sig : Sig)
     (pre : Curry (sig.words A.ptrBits) (Mem → Prop) := Curry.const (fun _ => True) _)
-    (post : sig.Post A.ptrBits) (writeArgs : Bool := false) (stack : Nat := 0) : Contract M :=
+    (post : sig.Post A.ptrBits) (writeArgs : Bool := false) (stack : Nat := 0)
+    (x : Sig.Extra M := {}) : Contract M :=
   let ws := sig.words A.ptrBits
   let widths := ws.map (·.bits A.ptrBits)
   { pre s := match A.args widths with
@@ -119,7 +141,13 @@ def Sig.contract {M : ISA} (A : Abi M) (sig : Sig)
     post s s' := match A.args widths with
       | none => False
       | some vals => Curry.apply ws post (vals s) (A.mem s) (A.mem s')
-          ((A.ret s').setWidth _) }
+          ((A.ret s').setWidth _) ∧ x.post s s'
+    -- An exit is a tail call of its target, which takes the same arguments.
+    exit t s s' := match A.args widths with
+      | none => False
+      | some vals => vals s' = vals s ∧ x.exit t s s'
+    abort := x.abort
+    env := x.env }
 
 /-! ## Documenting the obligations `Sig.contract` implies
 
@@ -236,7 +264,9 @@ instruction of its arm points the thread's `rseq_cs` at its descriptor
 (`Target.arms`), whatever it pointed at before, so no sequence another one
 started (in a signal handler, say) can be armed when this one starts; and in
 every state `p` in which it may be aborted (`Code.abortStates`), `rseq_cs`
-still points at it (`Target.armed`), the contract's `abort` holds, and every
+still points at it (`Target.armed`), the calling convention's obligations
+hold relative to entry (so a retry's compose with them), the contract's
+`abort` holds, and every
 state the thread may resume in after the abort (`Target.rely`,
 `Contract.env`) satisfies the precondition. The abort handler jumps back to
 the arm, the function's first instruction (`Rust.checkRseq`), so that is a
@@ -247,7 +277,7 @@ def RseqOk (T : Target) (c : Prog T.isa) (k : Contract T.isa) (s : T.isa.State) 
   match c with
   | .rseq arm _ =>
     (∃ i a, arm.getLast? = some i ∧ execBlock T.isa arm.dropLast s = some a ∧ T.arms i a) ∧
-    ∀ p ∈ c.abortStates T.isa s, T.armed p ∧ k.abort s p ∧
+    ∀ p ∈ c.abortStates T.isa s, T.armed p ∧ T.abiPreserved s p ∧ k.abort s p ∧
       ∀ p', T.rely p p' → k.env p p' → k.pre p'
   | _ => True
 
@@ -323,7 +353,8 @@ inductive Visits (M : ISA) : Prog M → M.State → Nat → Bool → Prop
 
 /-- The proof obligation for emitting `c` on target `T` with contract `k`. -/
 def Verified (T : Target) (c : Prog T.isa) (k : Contract T.isa) : Prop :=
-  (∀ s, k.pre s → ∃ s', Exec T.isa c s s' ∧ T.abiPreserved s s' ∧ k.post s s') ∧
+  (∀ s, k.pre s → (∃ s', Exec T.isa c s s' ∧ T.abiPreserved s s' ∧ k.post s s') ∨
+    (∃ t s', ExecExit T.isa c s t s' ∧ T.abiPreserved s s' ∧ k.exit t s s')) ∧
   (∀ s, k.pre s → RseqOk T c k s) ∧
   (∃ s, k.pre s) ∧ (∀ o ∈ c.outcomes, ∃ s, k.pre s ∧ Visits T.isa c s o.1 o.2)
 
@@ -435,9 +466,9 @@ structure Artifact where
   arguments and writes the return value where the calling convention places
   them for `sig`, and requires what `Sig.layoutDoc` documents of where the
   buffers are. -/
-  ofSig : ∃ pre post,
-      contract = sig.contract (target.abi.withConsts consts) pre post writeArgs stack := by
-    exact ⟨_, _, rfl⟩
+  ofSig : ∃ pre post x,
+      contract = sig.contract (target.abi.withConsts consts) pre post writeArgs stack x := by
+    exact ⟨_, _, _, rfl⟩
   /-- The contract of the function on every target, which an artifact made
   from an `Api` takes from it with its `name` and `sig` (`Api.contracts`).
   The emitter refuses an artifact without one (`Rust.checkApi`). -/
