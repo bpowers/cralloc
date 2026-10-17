@@ -61,6 +61,17 @@ theorem store8_eq {v : Byte} (h : InRegions s.wr a 1) :
     s.store8 a v = some { s with mem := s.mem.writeW a v } := by
   simp [State.store8, h]
 
+/-- A 32-bit load into a register: the four bytes, zero-extended (`mov32`,
+SDM Vol. 1 §3.4.1.1). -/
+theorem exec_mov32_mem {d : Reg} {m : MemOp} (h : InRegions (s.rd ++ s.wr) (s.ea m) 4) :
+    exec (.mov32 d (.mem m)) s = some (s.setReg32 d (s.mem.readW (s.ea m) 32)) := by
+  simp [exec, readSrc32, load32_eq h]
+
+/-- A 32-bit value zero-extended to 64 bits is below `2³²`. -/
+theorem toNat_setWidth_32_lt (v : BitVec 32) : (v.setWidth 64).toNat < 2 ^ 32 := by
+  rw [BitVec.toNat_setWidth, Nat.mod_eq_of_lt (Nat.lt_trans v.isLt (by decide))]
+  exact v.isLt
+
 /-- A writable access is readable. -/
 theorem rd_wr_of_wr {n : Nat} (h : InRegions s.wr a n) : InRegions (s.rd ++ s.wr) a n :=
   InRegions.append_right h

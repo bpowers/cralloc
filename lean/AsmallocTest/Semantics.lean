@@ -56,6 +56,20 @@ def fsIdx : MemOp := { base := .rdx, index := some .rcx, scale := 8, disp := 24,
 
 #guard (exec (.mov .rax (.mem fsIdx)) stIdx).map (·.gpr .rax) == some 0xCFCECDCCCBCAC9C8
 
+/-! ## 32-bit loads zero-extend
+
+`r8` starts as all ones; a 32-bit load leaves the four bytes in its low half
+and zero in its high half. -/
+
+-- `fs:[rdx+24]` is `0x6ED8` to `0x6EDB`.
+#guard (exec (.mov32 .r8 (.mem { base := .rdx, disp := 24, seg := some .fs })) st).map (·.gpr .r8) ==
+  some 0x00000000DBDAD9D8
+-- A 32-bit register move clears the high half too.
+#guard (exec (.mov32 .r8 (.reg .r8)) st).map (·.gpr .r8) == some 0x00000000FFFFFFFF
+-- The last four bytes of the block, and one past them.
+#guard (exec (.mov32 .r8 (.mem { base := .rdx, disp := 28, seg := some .fs })) st).isSome
+#guard (exec (.mov32 .r8 (.mem { base := .rdx, disp := 29, seg := some .fs })) st).isNone
+
 /-! ## `lea` -/
 
 /-- The flags of a state, to check that an instruction keeps them. -/
