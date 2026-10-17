@@ -28,6 +28,9 @@ pub struct Spec<'a> {
     pub stderr: &'a Path,
     /// Attach process-wide counters.
     pub count: bool,
+    /// The `cgroup.procs` file of the cgroup the child must run in. It is moved there before
+    /// it execs, so everything the program does is charged to that cgroup and capped by it.
+    pub cgroup: &'a Path,
 }
 
 pub struct Child {
@@ -96,15 +99,22 @@ impl Child {
             }
         }
         drop((out_w, sync_r, err_w, stderr));
+        let kill = || {
+            // SAFETY: kill and reap our own child, which is still waiting to exec.
+            unsafe {
+                libc::kill(pid, libc::SIGKILL);
+                libc::waitpid(pid, std::ptr::null_mut(), 0);
+            }
+        };
+        if let Err(e) = std::fs::write(spec.cgroup, pid.to_string()) {
+            kill();
+            return Err(io::Error::other(format!("moving the child into {}: {e}", spec.cgroup.display())));
+        }
         let counters = if spec.count {
             match Counters::open(PROCESS_EVENTS, Target::ChildBeforeExec(pid)) {
                 Ok(c) => Some(c),
                 Err(e) => {
-                    // SAFETY: kill and reap our own child.
-                    unsafe {
-                        libc::kill(pid, libc::SIGKILL);
-                        libc::waitpid(pid, std::ptr::null_mut(), 0);
-                    }
+                    kill();
                     return Err(io::Error::other(format!("perf_event_open on child: {e}")));
                 }
             }

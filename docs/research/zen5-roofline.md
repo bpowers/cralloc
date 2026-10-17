@@ -24,6 +24,7 @@ Contents
 11. Design rules that follow
 12. Caveats
 13. The proved routines: encoding and placement
+14. The C entry points
 
 ## 1. Summary
 
@@ -693,3 +694,314 @@ Measured and inferred as stated above.
   direct calls gave 8.00 every time.
 - Section 9 and rule 7 offer calling the slow path from inside the `asm!` block as the way to
   drop the pop's extra test. In Rust the test stays, because the caller makes it.
+
+## 14. The C entry points
+
+Measured 2026-10-17 with `bench/roofline/centry` (its `gen.py` docstring names every variant).
+The question: what `malloc(size)` and `free(ptr)` cost when the size class must be found at run
+time, how callers reach them, and which routines the generator should emit for them.
+
+Method. `gen.py` emits candidate routines in hand-written assembly. Each is a real restartable
+sequence on glibc's registered area, with the generated pop or push as its back half, and with
+slow paths that trap. Each routine is assembled twice: into a shared library (`L_`), and into the
+driver executable (`X_`) for direct calls. The driver's loop kernels call them in three ways:
+directly, through the PLT, and with `call [GOT]` (gcc's `-fno-plt`). Loops: pair (`malloc(32)`
+then free), mixed (64 sizes from 1 to 512, cycled), and bursts of 8 and 32. A second build links
+the IBT PLT (`endbr64` stubs). Pinned to CPU 13, with its sibling 29 at 0 percent busy in every
+run quoted. Each cell is the best of 3 repetitions over 2 or 3 interleaved rounds, 10 million
+operations. Round-to-round spread was 0.00 to 0.05 in pair and burst cells unless noted. For
+the incumbents, a preloadable stand-in allocator (`standin.c`) exports the chosen routines as
+`malloc`, `free` and `calloc`, with single-threaded C slow paths. Plain C loops (`cloop.c`, gcc
+16.2 `-O2 -fPIE -pie -z now`) run it next to glibc 2.43, jemalloc 5.3.0, mimalloc 3.5.3 and
+tcmalloc, all preloaded, in interleaved processes. The incumbents are bench-prep's builds in
+`bench/baselines/out`.
+
+The floor through calls is 4 cycles per call, as in section 5, so 8.00 per pair direct. Every
+cycle above that has a cause given here, or is marked unexplained.
+
+### Reaching the library
+
+Pair of empty functions (`mov rax, rdi; ret` and `ret`), cycles per pair, and retired ops:
+
+| Call | Cycles | Ops |
+|---|---:|---:|
+| `call sym`, direct | 8.00 | 9 |
+| `call reg`, target loaded from the GOT just before | 9.00 | 11 |
+| `call reg`, target hoisted out of the loop | 9.00 | 9 |
+| `call sym@PLT` (stub `jmp [GOT]`) | 10.00 | 11 |
+| the same through the IBT PLT (`endbr64; jmp [GOT]`) | 10.00 | 13 |
+| `call [GOT]` (`-fno-plt`) | 10.00 | 17 |
+
+The PLT costs exactly one cycle per call (the stub is one more taken branch to fetch); the
+IBT stub's `endbr64` costs nothing more. `call [mem]` retires 5 ops where `call sym` retires
+1. Empty, it costs the same as the PLT. With a real callee it costs much more:
+
+| Callees | Direct | PLT | `call [GOT]` | `call reg` |
+|---|---:|---:|---:|---:|
+| empty | 8.00 | 10.00 | 10.00 | 9.00 |
+| a counter in memory, loaded, incremented and stored, in each callee | 8.00 | 10.00 | 16.01 | 9.00 |
+| the same, twice in each callee | 8.00 | 10.00 | 18.01 | 9.00 |
+| a magazine pop and push, no rseq | 8.00 | 10.00 | 16.06 | |
+| per-class rseq pop and push (Rust's routines) | 8.00 | 10.00 | 16.11 | 9.00 |
+| the C malloc and free below | 8.00 | 10.00 | 26 to 33 | 9.00 |
+
+Every store-to-load hop that crosses a `call [mem]` costs 7 cycles; a hop inside one call is
+still free (the second row adds a hop inside each callee and only one cycle per call
+appears). So `call [mem]` defeats the zero-latency forwarding of section 4 across the call.
+Callees with long ALU chains, load chains, late store addresses, `fs:` loads or stores, or up to
+20 uops showed nothing. Inference: `call [mem]` is microcoded on Zen 5, and microcode ends memory
+renaming. The C routines suffer most, because their state is in memory twice (slab word and
+slot) and free's word address hangs off the pointer the previous pop loaded. Who calls this
+way: gcc `-fno-plt`, and rustc, which emits `call [GOT]` for calls into other shared objects by
+default (seen in its output). So a Rust program on the System allocator with our library preloaded
+pays this, and so does tcmalloc's shared library, which reaches its thread-locals through TLSDESC
+`call [rax]` twice per malloc (below).
+
+Own data inside the shared library: hidden symbols reached with `lea` cost nothing over the
+executable's copy. Reaching the same data through the GOT adds one load per symbol (1 to 2 uops)
+and measured the same in pairs and bursts (8.00/10.00). In the mixed loop it measured 0.8 cycles
+better direct and 3.3 worse through the PLT; that is within the build-to-build spread of that
+loop (below). `__rseq_offset`, a libc symbol, must go through the GOT in a shared library (section
+13): two loads. A copy in our own data saves one uop and measured the same (8.00/10.00 pairs,
+within noise in bursts). It would also need initialising before the first call, and a zero copy
+makes the arm store to the TCB's `dtv` field, so it is not worth having.
+
+### Load latency by addressing mode
+
+The mixed loop below turned on this, so it was measured directly: a chase through zeroed memory,
+cycles per load.
+
+| Address | `mov r64` | `movzx` byte |
+|---|---:|---:|
+| `[base]`, `[base + disp8]`, `[base + disp32]` | 4 | |
+| `[base + index]` | 4 | 4 |
+| `[base + index + disp]`, disp8 or disp32 | 5 | 5 |
+| `[base + index*8]`, with or without disp | 5 | |
+
+Section 4's "with an index register 5.0" was a scaled index. An unscaled index without
+displacement is as fast as a plain base.
+
+### malloc: size to class
+
+All variants have the same back half: `r9 = SLABS + 8 * class` (the class's word in slab 0),
+then the generated pop with the mask read at a fixed displacement from r9. That is the shape the
+pop and push are being changed to. The tables sit at fixed offsets below `SLABS` unless noted.
+The miss branches go to `malloc_slow(size)` with `rdi` intact. Free is the recommended one below.
+
+| Variant | Sizes | Bytes / uops | Pair direct / PLT | Burst 32 direct / PLT | Mixed direct |
+|---|---|---:|---:|---:|---:|
+| byte table at `(n + 7) >> 3`, 4097 entries (`mLj`) | 0 to 32 KiB | 101 / 19 | 8.00 / 10.00 | 8.31 / 10.07 | 21.9 |
+| the same table, 129 entries (`mSj`) | 0 to 1 KiB | 101 / 19 | 8.00 / 10.00 | 8.32 / 10.07 | 21.9 |
+| byte table indexed by `n`, 1025 entries (`mDj`) | 0 to 1 KiB | 95 / 17 | 8.00 / 10.00 | 8.13 / 10.07 | 23.2 to 23.8 |
+| entries hold `SLABS + 8 * class` itself, 8 bytes each (`mQj`) | 0 to 1 KiB | 92 / 18 | 8.00 / 10.00 | 8.28 / 10.07 | 22.1 |
+| packed entries: class offset and mask from one index (`mP`) | 0 to 1 KiB | 112 / 21 | 8.00 / 10.00 | 8.85 / 10.07 | 23.2 |
+| tcmalloc's two ranges, `cmova` (`mTj`) | 0 to 32 KiB | 120 / 23 | 8.55 / 10.00 | 8.96 / 10.07 | 21.1 |
+| computed: round to C's rule, `bsr`, shifts (`mK`) | 0 to 32 KiB | 151 / 32 | 9.69 / 11.00 | 10.88 / 11.54 | 21.2 |
+| tables as separate symbols, each with its own `lea` (`mA`) | 0 to 1 KiB | 119 / 21 | 9.00 / 11.00 with its free | | 21.5 |
+| Rust's `extern "C" fn malloc`: lookup, then `jmp` to the generic pop (`mR`) | 0 to 1 KiB | 37 + 89 / 6 + 16 | 10.00 / 12.00 with its free | 10.07 / 13.97 | 20.9 |
+
+- The byte table at `(n + 7) >> 3` covering every small size is the best shape. It needs no
+  second range and no computed class. C's 16-byte rule is built into the table: indexes 2k-1
+  and 2k map to the same 16-byte multiple. It measured 8.00/10.00 at every size from 0 to 32768.
+  4097 bytes is 64 lines, but only the lines of the sizes a program uses are touched.
+- A table that yields the register value directly saves a uop and buys no cycle. Its 8-byte
+  entries make it 8 times larger. A packed size-to-mask table buys nothing either: the mask load
+  is off the critical path, since its branch is predicted. The fixed-displacement mask load is
+  right for C.
+- Two-range and computed classes cost uops, and that shows in direct calls and bursts. The
+  direct-indexed table saves the shift but loses about 1.5 cycles in the mixed loop, unexplained
+  (its table load is the 5-cycle form, but that load is not on the loop-carried path).
+- The Rust structure (a): the extra `jmp` puts the hot path in two routines, at 2 cycles per pair
+  and 4 per burst-of-32 element through the PLT. It is the best in the mixed loop by about 1.
+- Cycles above the floor for a direct pair follow section 13's rules exactly: more than 128
+  bytes (`mT` at 132, `fB` at 131) or more than 24 uops (`fA` at 25) costs a cycle. Through the
+  PLT a call has a 5-cycle budget, and the 23-uop routines measured at the floor there; the
+  byte and uop limits still decide the direct-call cells.
+
+### free: address to class
+
+The region index is `(p >> s) - (base >> s)` from the one published word `base | s`. A single
+unsigned compare against 4096 then rejects null, pointers below the heap and pointers above it.
+The class byte comes from the region table. Every byte that is not a small class (0, large
+classes, run head and tail) has a zero mask in a 256-entry mask table. So the push's own mask
+test sends those to the slow path, with no separate small-class test.
+
+| Variant | Bytes / uops | Pair direct / PLT | Burst 32 direct | Mixed direct |
+|---|---:|---:|---:|---:|
+| `shrx` twice from the published word, region table by its own `lea` read as `[rcx + rax]` (`fUj`) | 115 / 22 | 8.00 / 10.00 | 8.31 | 21.9 |
+| the same with `test rdi, rdi; jz ret` first (`fUjn`) | 120 / 23 | 8.00 / 10.00 | | |
+| region table read slab-relative as `[r9 + rax - 12288]` (`fS`) | 125 / 21 | 8.00 / 10.00 | 8.21 | 23.1 |
+| the same with an explicit small-class test (`fSx`) | 137 / 23 | 9.00 / 11.00 | 9.07 | 22.9 |
+| explicit test and separate tables (`fA`) | 143 / 25 | 9.00 / 11.00 | 9.30 | 21.5 |
+| `shr r, cl` in place of `shrx` (no BMI2) (`fC`) | 124 / 22 | 8.00 / 10.00 | 8.33 | 23.2 |
+| shift and `base >> s` as two statics, `sub` from memory (`fW`) | 123 / 20 | 8.00 / 10.00 | 8.30 | 25.1 |
+| region byte through a pointer biased by `base >> s` (`fVj`) | 119 / 23 | 9.07 / 10.01 | | 22.6 |
+| class as a scaled index, `[r8 + rdx*8]` (`fY`) | 125 / 21 | 8.00 / 10.00 | | 23.4 |
+| Rust's `extern "C" fn free`, then `jmp` to the generic push (`fR`) | 58 + 88 / 11 + 16 | 10.00 / 12.00 with `mR` | | 20.9 |
+
+- Folding the small-class test into the mask table is what lets the free fit: an explicit test
+  is 2 uops and 12 bytes, and pushes the routine past 128 bytes or 24 uops.
+- The two statics (`fW`) look cheaper (one uop fewer). But the shift and `base >> s` sat at page
+  offsets 8 and 16, the same as the slab words of classes 1 and 2, and the pair cost 9.1 at
+  sizes up to 16 and 8.00 above (inference: 4K aliasing). The published word, at page offset 0,
+  has no such case: the w2 free measured 8.00 at every size.
+- `shr r, cl` costs a uop and no cycle, so BMI2 is not needed for speed.
+- free(NULL): with the explicit null test it costs only the call (4.00 direct, 5.00 PLT).
+  Without it, the null pointer fails the range check and reaches the slow path through the
+  short-jump stub, at 5.00/6.00. With a direct long jump it is 4.00/5.00.
+- The biased pointer takes the subtraction off the path to the region load, but cost uops and
+  measured no better. The scaled-index word address trades a `lea` for a 5-cycle load: no gain.
+
+### What the missing size costs
+
+| Free | Pair direct / PLT | Burst 32 direct | Mixed direct / PLT | `call [GOT]` pair |
+|---|---:|---:|---:|---:|
+| C free, class from the address (`fUj`) | 8.00 / 10.00 | 8.31 | 21.9 / 23.6 | 26 to 27 |
+| the same pop, free told the size (Rust's `dealloc`, `fZ`) | 8.00 / 10.00 | | 9.6 / 10.1 | |
+| Rust's per-class pop and push | 8.00 / 10.00 | 8.07 | | 16.11 |
+| Rust's generic pop and push, class in `edi` | 8.00 / 10.00 | 8.07 | | 16.10 |
+
+In pairs and bursts the size costs nothing: the call is the cost. In a tight loop of mixed sizes
+it costs about 12 cycles a pair. In that loop the next malloc's slab-word load is held behind the
+free's commit store: `ls_bad_status2.stli_other` fires 0.5 to 1 times per pair, with no
+mispredicts or resyncs. And that store's address comes at the end of a chain from the pointer:
+word load (4), slot load (4), shift and subtract (2), region table (4), `lea` (1). One size class
+runs at the floor (8.00). Two classes alternating already cost 17.8 to 20.7. A free whose class
+comes from the size has an early store address, and the same loop costs 9.6. Inference: the
+memory-dependence predictor learns the true same-class dependence and then makes every pop wait
+for the youngest push. The shapes differ by up to 2 cycles here. The 5-cycle region load
+explains 1 to 1.5 of that; the rest is unexplained. The mixed cells also moved by up to 0.8 cycles
+between builds of identical code, so sub-cycle differences there are not findings.
+
+### calloc and realloc
+
+| C loop, PLT | `calloc(1, 16)` | `calloc(1, 64)` | `calloc(1, 256)` | realloc in place (60 to 61) |
+|---|---:|---:|---:|---:|
+| glibc | 13.1 | 12.6 to 14.0 | 17.0 | 17.0 |
+| mimalloc | 14.1 | 14.5 | 20.1 to 20.3 | 25.4 to 26.4 |
+| jemalloc | 21.1 | 20.7 to 22.2 | 23.8 | 60.2 |
+| ours: generated calloc (product, pop, `jmp` to a zeroing tail) | 11.0 | 13.0 | 16.8 | |
+| ours: C calloc calling the malloc routine directly, 16-byte stores | 15.0 | 16.0 | 21.0 | |
+| the same with `rep stosb` | 17.6 | 17.8 | 50.1 | |
+| the same calling `malloc` and `memset` through the PLT | 21.0 | 22.0 | 23.0 | |
+| ours: realloc in C (size and region lookups, no rseq) | | | | 16.0 to 18.0 |
+
+A calloc routine pays: the internal call costs 4 cycles, and without it we beat glibc. It fits
+only with the 1025-byte direct size table (116 bytes, 23 uops). With the shifted index it is 25
+uops, and with two ranges 29 uops and 145 bytes, 1 to 1.4 cycles slower. So it serves sizes up to
+1 KiB and sends larger ones to its slow path, where zeroing dominates. `rep stosb` is slow for
+small blocks on this core (50 cycles at 256 bytes). realloc needs no routine: the in-place case is
+two table lookups and a compare, with no per-CPU state. The 2-cycle spread between our builds of
+identical realloc code is layout.
+
+### Against the incumbents
+
+C loops through the PLT, cycles per allocate and free (per element for bursts), best of three
+interleaved rounds:
+
+| | Pair 32 B | Pair 256 B | Burst 8 | Burst 32 | Burst 100 (64 B) | Mixed 1 to 512 B | `-fno-plt` pair | `-fno-plt` burst 32 |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| ours (`mLj`, `fUjn`, generated calloc) | 10.00 | 10.00 | 10.25 to 10.88 | 10.07 to 11.00 | 10.82 to 11.70 | 20.6 to 22.4 | 25.6 to 25.8 | 16.1 to 16.6 |
+| ours, Rust-structured (`mR`, `fR`) | 12.00 | 12.00 | 12.25 | 13.94 to 13.97 | 12.82 to 12.92 | 19.7 to 20.1 | 25.1 to 26.1 | 16.1 to 16.7 |
+| glibc 2.43 | 12.00 | 12.00 | 12.26 | 35.6 to 36.5 | 46.8 to 48.0 | 14.5 to 15.1 | 22.4 | 41.1 to 42.1 |
+| mimalloc 3.5.3 | 11.3 to 12.2 | 12.8 to 14.0 | 11.7 to 11.8 | 11.5 to 12.7 | 12.2 to 13.3 | 18.7 to 19.0 | 16.1 to 16.2 | 16.7 |
+| jemalloc 5.3.0 | 14.1 | 14.5 | 13.4 | 13.2 to 13.4 | 14.1 to 14.2 | 31.6 | 39.7 | 17.7 |
+| tcmalloc, per-CPU (glibc rseq off) | 41 to 43 | 41 | 25 to 26 | 30 | 28 to 29 | 31 to 34 | 39 | 31 |
+| tcmalloc, per-thread | 56 to 57 | | 66 to 67 | 68 to 69 | 67 to 68 | 59 | 60 | 70 |
+
+The IBT build measured the same as the PLT within these ranges. Ranges are over two sessions of
+the comparison (stand-in builds differing only in the free's null test and the calloc).
+
+- Through the PLT we are at the floor of two PLT calls, 10.00, for every pair and within 0.1 to
+  1.0 of it in bursts. That is 2 cycles under glibc and mimalloc in pairs and 1 to 2 under
+  mimalloc in bursts, the best of the incumbents there. glibc's tcache holds 7 objects per class,
+  so its bursts of 32 and more fall to its arenas.
+- Mixed sizes: we lose to glibc by 6 to 8 and to mimalloc by 1 to 3. glibc's pop gets the
+  pointer with one dependent load (the tcache head), where a magazine needs two (word, then
+  slot). That is about 4 cycles of the chain above, paid in this loop only.
+- `call [GOT]`: we lose the pair to mimalloc by 9.5 and to glibc by 3.4, for the reason in the
+  first subsection. In bursts the hops are not on a loop-carried path, and we are the fastest.
+- tcmalloc as built here is not its per-CPU design at its best: its shared library reaches
+  `__rseq_abi` and the sampler through TLSDESC calls (`call [rax]`) on every malloc, and
+  executes 107 to 280 instructions a pair.
+- In burst loops through the PLT, two builds of identical routines and kernels differed by a
+  cycle per element (10.07 against 11.23). The slow one showed branch-predictor redirects and op
+  cache misses at about one per 32 operations; the IBT build of the same objects did not. This is
+  op-cache placement of caller, PLT stubs and routines, which the routines do not control.
+
+### Recommendations for the generator
+
+The pop and push (back half) as being changed: `r9 = SLABS + 8 * class` in, mask at a fixed
+displacement from r9. The C entries add a front half in the same routine; a separate front half
+that jumps to the shared routine costs 2 cycles a pair through the PLT. Labels, the descriptor
+and the abort handler as in `lean/generated`; `8:` stubs follow the `ret`. All registers but
+`rdi` and `rsi` are clobbered (`rax rcx rdx r8 r9 r10 r11`, flags). Entry 64-byte aligned.
+
+1. `c_malloc(size: rdi) -> rax` (`mLj`): 101 bytes, 19 fused uops to the `ret`. A miss
+   tail-calls `malloc_slow(size)` with `rdi` intact (above 32 KiB, no CPU number, no magazine,
+   empty magazine).
+
+   ```asm
+       cmp   rdi, 32768
+       ja    8f
+       lea   r9, [rip + SLABS]
+       lea   eax, [rdi + 7]
+       shr   eax, 3
+       movzx edx, byte ptr [r9 + rax + SIZE_OFF]  ; C class of every size, 4097 bytes
+       lea   r9, [r9 + rdx*8]                     ; the class's word in slab 0
+   5:  ...the pop, with the class register r9 and its fixed-displacement mask...
+       ret
+   8:  jmp   malloc_slow
+   ```
+
+   The table is constant and must be valid from load time. Index 0 (size 0) holds class 1. Before
+   start-up, a zero mask sends every call to the slow path.
+2. `c_free(ptr: rdi)` (`fUjn`): 120 bytes, 23 uops. Null returns at once. Anything outside the
+   heap, unassigned, large or part of a run tail-calls `free_slow(ptr)` with `rdi` intact.
+
+   ```asm
+       test  rdi, rdi
+       jz    9f
+       mov   rcx, [rip + HEAP_WORD]                ; base | shift, 0 before start-up
+       shrx  rax, rdi, rcx
+       shrx  rcx, rcx, rcx
+       sub   rax, rcx
+       cmp   rax, 4096                             ; null, below and above the heap
+       jae   8f
+       lea   rcx, [rip + REGION_TABLE]
+       movzx edx, byte ptr [rcx + rax]             ; no displacement: a 4-cycle load
+       lea   r9, [rip + SLABS]
+       lea   r9, [r9 + rdx*8]
+   5:  ...the push...
+   9:  ret
+   8:  jmp   free_slow
+   ```
+
+   With the heap word zero, the index is the pointer itself, which is 4096 or more, so an
+   unpublished heap also takes the slow path. Without BMI2, `mov rax, rdi; shr rax, cl; shr
+   rcx, cl` is one more uop (24, at the limit) and measured the same.
+3. The mask table has 256 entries of 8 bytes (2 KiB), one per possible region byte, zero for
+   every byte that is not a small class. This replaces a separate small-class test. The 45 to
+   256 entries are the price.
+4. `c_calloc(n: rdi, size: rsi) -> rax`: `mov rax, rdi; mul rsi; jo` to a stub that calls
+   `calloc_slow(SIZE_MAX)`; `mov rdi, rax`; then the malloc front half with the 1025-byte table
+   indexed by the size itself, for sizes up to 1024 (above, `calloc_slow(total)`); the pop; then
+   `mov rsi, rdi; mov rdi, rax; jmp calloc_zero` (a Rust function zeroing `rsi` bytes and
+   returning the block). 116 bytes, 23 uops (`cD`).
+5. No routine for realloc, `malloc_usable_size` or Rust's run-time sizes. Rust computes the
+   class with the same `(n + 7) >> 3` byte lookup (its own table: no 16-byte rule, alignment
+   applied first) and calls the class-register routine. Generic routines measured at the floor.
+6. Placement: the 128-byte and 24-uop limits of section 13 hold for these routines and decide
+   them. Keep the published heap word off the page offsets of the slab hot words (8 to 360).
+   Anything read on every free that shares a page offset with a slab word of a hot class costs a
+   cycle.
+
+### Caveats
+
+- One process size and one CPU, single-threaded. The stand-in's slow paths are not the
+  allocator's, so the comparison covers fast paths only. Incumbents ran in their production
+  builds, ours as a stand-in.
+- The mixed loop is a worst case: allocation directly after a free of another class, with
+  nothing in between. Its cells move by up to a cycle with layout.
+- The `call [mem]` explanation and the 4K-aliasing reading of the two-statics free are inferences
+  from the measurements listed.

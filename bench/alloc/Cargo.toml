@@ -7,10 +7,17 @@ publish.workspace = true
 links = "benchalloc"
 
 # Pick at most one. With none, the binary uses Rust's System allocator (glibc).
-# Each feature calls the allocator the way its usual Rust wrapper crate does; see src/lib.rs.
-# To add an allocator: a feature here, a module in src/, and an entry in ../allocators.toml.
+# Each feature gives the binary the allocator the way a Rust program usually gets it; see
+# src/lib.rs. To add an allocator: a feature here, a module in src/ (unless its crate
+# already provides the GlobalAlloc), and an entry in ../allocators.toml.
 [features]
 mi = []        # mimalloc, as the `mimalloc` crate calls it (unsized mi_free)
 mi-sized = []  # the same, freeing with mi_free_size_aligned
-je = []        # system libjemalloc, as `tikv-jemallocator` calls it (sized sdallocx)
-tc = []        # google/tcmalloc, as `tcmalloc-better` calls it (sized delete)
+# tikv-jemallocator itself, default features: its static, prefixed jemalloc build, which is
+# what a Rust service that depends on it gets.
+je = ["dep:tikv-jemallocator"]
+tc = []       # google/tcmalloc, as `tcmalloc-better` calls it (sized delete)
+
+[dependencies]
+libc.workspace = true
+tikv-jemallocator = { version = "0.6", optional = true }

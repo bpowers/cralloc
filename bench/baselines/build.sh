@@ -4,25 +4,27 @@
 #   bench/baselines/build.sh [component ...]
 #
 # Components: mimalloc tcmalloc jemalloc cbench probe (default: all). Output goes to
-# bench/baselines/out (BENCH_BASELINES overrides it), which is gitignored; a component's
+# bench/baselines/out of the main checkout, so that every worktree shares one set and removing
+# a worktree loses nothing; BENCH_BASELINES overrides it. It is gitignored. A component's
 # directory is deleted before it is rebuilt. Sources are read from third_party/ in the main
 # checkout and never written: tcmalloc is copied out before bazel sees it, because bazel
 # writes a lock file and symlinks into the tree it builds.
+#
+# A build holds out/.lock exclusively, and a benchmark session holds it shared, so the
+# libraries cannot change under a running session.
 #
 # Builds are confined to BENCH_BUILD_CPUS (default 4-7,20-23) so they stay off the CPUs
 # that measurements use. out/manifest/ records versions, commits and flags.
 set -euo pipefail
 
 here=$(cd "$(dirname "$0")" && pwd)
-out=${BENCH_BASELINES:-$here/out}
+# The main checkout: the parent of the git directory every worktree shares.
+main=$(dirname "$(git -C "$here" rev-parse --path-format=absolute --git-common-dir)")
+out=${BENCH_BASELINES:-$main/bench/baselines/out}
 cpus=${BENCH_BUILD_CPUS:-4-7,20-23}
 jobs=8
 bazel=${BAZEL:-$HOME/bin/bazel}
-if [ -z "${THIRD_PARTY:-}" ]; then
-  common=$(git -C "$here" rev-parse --path-format=absolute --git-common-dir)
-  THIRD_PARTY=$(dirname "$common")/third_party
-fi
-tp=$THIRD_PARTY
+tp=${THIRD_PARTY:-$main/third_party}
 [ -d "$tp/mimalloc" ] || { echo "no third_party checkouts at $tp (set THIRD_PARTY)" >&2; exit 1; }
 
 components=("$@")
@@ -30,6 +32,8 @@ components=("$@")
 
 run() { taskset -c "$cpus" "$@"; }
 mkdir -p "$out/manifest"
+exec 9>"$out/.lock"
+flock -n 9 || { echo "$out is in use by another build or a benchmark session" >&2; exit 1; }
 manifest() { cat > "$out/manifest/$1.txt"; }
 head_of() { git -C "$tp/$1" rev-parse HEAD; }
 describe_of() { git -C "$tp/$1" describe --tags --always 2>/dev/null || true; }
@@ -63,7 +67,9 @@ EOF
 }
 
 build_jemalloc() {
-  # jemalloc is the distribution package; nothing to build. Record what it is.
+  # The distribution package, for LD_PRELOAD runs: what a C program gets from jemalloc on
+  # this system. Nothing to build; record what it is. Native Rust runs use the static build
+  # that tikv-jemallocator compiles (bench/alloc), which cargo builds and records.
   local lib=/usr/lib64/libjemalloc.so.2
   [ -e "$lib" ] || { echo "missing $lib (install jemalloc-devel)" >&2; exit 1; }
   rm -rf "$out/jemalloc"; mkdir -p "$out/jemalloc"

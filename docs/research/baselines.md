@@ -27,6 +27,7 @@ Contents
 8. Memory
 9. What contradicts the design's assumptions
 10. Caveats
+11. Changes to the suite after this session
 
 ## 1. Summary
 
@@ -302,11 +303,65 @@ Peak resident set, MiB, medians of 10, on the jobs that use more than a few MiB:
   within 2%); several multithreaded rows are not, and rayon with 8 threads ranks nothing.
 - Wall-time rankings of multithreaded jobs depend on frequency, which boost and the other
   load changed; the per-allocation cycle counts are in the detail tables.
-- jemalloc is Fedora's shared library with profiling compiled in, called through the PLT,
-  not `tikv-jemallocator`'s static build; expect its fast paths to be slightly slower than a
-  Rust user's.
+- jemalloc in native runs is Fedora's shared library, not `tikv-jemallocator`'s static
+  build, which is what Rust services use and what the suite now measures. The two differ by
+  more than expected on one-way cross-thread jobs; see section 11.
 - tcmalloc is built with bazel's `-c opt` (`-O2`, frame pointers kept); mimalloc with `-O3`.
 - Peak memory on small jobs is mostly fixed footprint.
 - The RPC client is the bottleneck, so the RPC jobs rank server CPU per request, not
   throughput or latency.
 - One machine, one kernel; the huge-page results depend on THP being in `madvise` mode.
+
+## 11. Changes to the suite after this session
+
+Measured 2026-10-17, 15:15 to 15:45, on the same machine, again shared with other work
+(one or two CPUs' worth of load outside the measurement CPUs; single-threaded jobs on CPU 2,
+which a teammate may also have used). Quick suite (`benchrun run --suite quick`).
+
+**Native jemalloc is now `tikv-jemallocator` itself.** The `je` feature makes it the global
+allocator unchanged, with default features, so the build is what a service depending on it
+gets: tikv-jemalloc-sys 0.6.1 (jemalloc `5.3.0-1-ge13ca993`), static, symbols prefixed
+`_rjem_` (C code keeps glibc's malloc), `--disable-stats`, no profiling, background-thread
+support compiled in but off, compiled with cc's flags for the release profile (`-O3`, frame
+pointers kept). Fedora's library (`5.3.0-14.fc44`) is `-O2` with the distribution's
+hardening flags, profiling and statistics compiled in, shared, and replaces malloc for the
+whole process. It stays the jemalloc used for LD_PRELOAD runs. Run-time options are
+identical apart from profiling, which is off in both.
+
+Five interleaved rounds, tikv build against Fedora's library called the same way (median
+cost, tikv relative to Fedora; spreads under 1.5%):
+
+| Job | tikv vs Fedora |
+|---|---:|
+| pipeline, 2 threads, small, one L3 | +181% (27.8 against 9.9 ns/alloc) |
+| 3 producers, 1 consumer | +104% (27.0 against 13.2 ns/alloc) |
+| exchange, 2 threads, across L3s | −2.1% |
+| rayon stages, 4 threads | −4.3% |
+| tokio spawn, RPC log ingest | 0.1% |
+| churn 1k, churn 1M, BTreeMap, Vec growth, JSON | −1.0% to −4.0% |
+
+The two large differences are one effect. A thread whose first call into jemalloc is a free
+gets only minimal thread state, and with it no thread cache, until it allocates; each of its
+frees then locks an arena bin (`arena_dalloc_small`, with mutex lock and unlock about 20% of
+the profile). The pipeline's last stage and the mpmc consumers only free. With Fedora's
+library, glibc and std allocate on every new thread through jemalloc, so those threads have a
+cache; with the prefixed build those allocations go to glibc. Allocating one object on each
+thread before the work makes the tikv build 7.4 ns/alloc on the pipeline and 10.0 on mpmc,
+slightly faster than Fedora's (7.8 and 10.3). So, on the jobs where every thread
+allocates, the tikv build is 1 to 4% faster than the numbers in sections 3 to 8; on jobs
+with free-only threads it is two to three times slower. Whether free-only threads are a
+fair shape is a choice the suite has to make (a thread that only drops what it receives does
+occur in real services, but most also allocate).
+
+**Every run is under a memory cap.** `benchrun run` runs in a systemd scope of its own and
+each measured process in a capped cgroup of it (`bench/README.md`, Memory cap). To check
+that the cap does not change what is measured, four pairs of quick-suite sessions with
+glibc, mimalloc, jemalloc and per-CPU tcmalloc, alternating the previous runner (no cap) and
+the new one (cap), the same allocator order within a pair: the median paired cost ratio,
+capped over uncapped, is −0.85% (95% interval −1.30% to −0.39%, 224 pairs), against −1.18%
+between consecutive uncapped sessions (the drift from one session to the next). The
+tightest job, churn with 1k live objects, differs by −0.07% (−0.37% to +0.30%). The cap
+costs nothing measurable. Memory-bound single-threaded jobs drifted by up to three times over
+the half hour in both arms alike (jemalloc churn 1M from 372 to 124 cycles/op) with no load on
+their own CPU or its sibling; interleaving cancels such drift, but single sessions on a
+shared machine cannot be trusted for these jobs.
