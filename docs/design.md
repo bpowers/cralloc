@@ -12,11 +12,10 @@ Three ideas define it.
    every allocation and free are written in assembly. Each sequence is the fastest of several
    candidates measured on real hardware. It is generated from Lean and proved correct, even
    when the OS interrupts it at any instruction.
-2. **Caches that need no atomics and no locks.** The common path pops or pushes a pointer in
-   a cache that no other running thread can be using, inside a Linux restartable sequence,
-   and commits with a single store. There is at most one such cache per CPU, so we call them
-   per-CPU caches. The slow paths are lock-free: every change to shared state is a single
-   instruction.
+2. **Per-CPU caches with no atomics and no locks.** The common path pops or pushes a pointer
+   in a cache that belongs to the CPU the thread is running on, inside a Linux restartable
+   sequence, and commits with a single store. The slow paths are lock-free: every change to
+   shared state is a single instruction.
 3. **Metadata never lives in freed memory.** A small object's size class comes from its
    `Layout` in Rust and from its address in C; a large object's always comes from its
    address. Free memory is tracked in bitmaps stored elsewhere. Freeing a small object
@@ -95,20 +94,23 @@ restart from a known point if the thread is preempted, migrated or sent a signal
 run finishes. glibc registers an rseq area for every thread and publishes its location
 (`__rseq_offset`, `__rseq_size`).
 
-The OS also writes a **concurrency ID** (`mm_cid`, "cid" below) into that area. Cids are
-small integers, each less than the number of CPUs, with one exception: current kernels can
-briefly show a thread an out-of-range value after a failed `execve`. Two threads of a
-process never run with the same in-range cid at the same instant, and a thread's cid changes
-only at an event that also restarts its sequence. `docs/research/linux-rseq-contract.md`
-checks these claims against the kernel and glibc sources. While a process has no more threads than CPUs, each thread keeps its
-own cid; beyond that, cids follow CPUs.
+The OS also writes the number of the CPU the thread is running on into that area, and
+changes it only at an event that also restarts the thread's sequence. A thread with no
+registration reads a negative number there.
 
-Together these give mutual exclusion for free. If a sequence reads its cid, works on data
-that belongs to that cid, and makes its only visible change with its last instruction, then
-no other thread running the same kind of sequence can observe or disturb it: any thread that
-could run with the same cid can do so only after this one has been stopped, and a stopped
-sequence is restarted, not resumed. A cache indexed by cid behaves as a thread cache when the process is not
-oversubscribed and as a per-CPU cache when it is, and there are never more caches than CPUs.
+Together these give mutual exclusion for free. If a sequence reads its CPU number, works on
+data that belongs to that CPU, and makes its only visible change with its last instruction,
+then no other thread running the same kind of sequence can observe or disturb it: another
+thread can run on that CPU only after this one has been stopped, and a stopped sequence is
+restarted, not resumed. `docs/research/linux-rseq-contract.md` checks these claims against
+the kernel and glibc sources.
+
+The area also carries a concurrency ID, a compact numbering of a process's running threads
+that would give each thread its own cache while threads are fewer than CPUs. asmalloc
+indexes by CPU number instead, for three reasons. It is in every kernel that has rseq. A
+thread without a registration reads zero as its concurrency ID, which is also a valid one,
+so telling the two apart would cost extra instructions on every call. And current kernels
+can briefly show a thread a garbage concurrency ID after a failed `execve`.
 
 ### What the hardware says
 
@@ -168,9 +170,10 @@ less.
 6. **Pure Rust plus proved assembly.** No C. The allocator is `no_std` and never allocates,
    panics, unwinds or prints while serving a request.
 7. **One platform, done fully.** asmalloc is developed and measured on x86-64, Linux 7.2,
-   glibc 2.43 and Rust 1.99. The fast path needs a registered rseq area that includes a
-   concurrency ID. Where there is none, as under valgrind, asmalloc still works, slowly (see
-   "Process lifecycle"). It never hands a request to another allocator.
+   glibc 2.43 and Rust 1.99. The fast path needs the calling thread to have a registered
+   rseq area, which Linux has offered since 4.18. A thread without one, as under valgrind,
+   still works, slowly (see "Process lifecycle"). asmalloc never hands a request to another
+   allocator.
 
 ## Non-Goals
 
@@ -200,7 +203,7 @@ less.
 - **Class**: a size class. Small classes are cached in magazines; large classes are not.
 - **Region**: 4 GiB of address space that holds objects of exactly one class.
 - **Magazine**: a small aligned array of pointers to free objects of one class.
-- **Slab**: the per-cid block of state that names the magazine loaded for each small class.
+- **Slab**: the per-CPU block of state that names the magazine loaded for each small class.
 - **Depot**: shared stacks of full and empty magazines.
 - **Routine**: one of the assembly sequences generated from Lean.
 - **Twin**: a Rust function with the same specification as a routine, used where assembly
@@ -212,9 +215,11 @@ less.
 
 ### Address space
 
-At first use asmalloc reserves 16 TiB of address space, inaccessible and uncommitted, or as
-much as the process is allowed if that is less. Most of it is divided into 4096 regions of
-4 GiB. A region is assigned to a class on demand and holds only objects of that class, at
+At first use asmalloc reserves 16 TiB of address space, inaccessible and uncommitted. About
+3970 regions of 4 GiB hold objects and the rest holds metadata. If the process's
+address-space limit does not allow that, the number of regions is halved until the
+reservation fits; with less than about 12 GiB the allocator cannot start. A region is
+assigned to a class on demand and holds only objects of that class, at
 `region_base + index * class_size`. A 4096-byte table records the class of each region.
 
 Every pointer therefore has two properties that hold without per-object metadata:
@@ -259,25 +264,28 @@ The C entry points apply C's rule: a block of 16 bytes or more is 16-byte aligne
 `malloc(24)` returns a 32-byte block where Rust's `Layout` of size 24 and alignment 8 gets a
 24-byte one.
 
-Classes up to a few tens of kilobytes are **small**: they are cached in magazines, and Rust
+Classes up to 32 KiB are **small**: they are cached in magazines, and Rust
 computes their class from the layout. Everything above is **large**: uncached, with the
 class always read from the address, because a large object may sit in a slot bigger than it
 asked for (see "Large objects").
 
 ### Front end: magazines under rseq
 
-Each cid has a slab. Its hot part is an array with one 8-byte word per small class; a
-colder part holds the cid's spare magazines and counters. The slabs are a static array with
-an entry for every valid cid (8192 on x86-64), so the address of a slab word is the cid
-shifted and added to a link-time constant, with no pointer to load. Untouched slabs cost no
-memory. A routine compares the cid with the array length and takes the slow path if it is
-out of range, so its memory safety does not depend on what the OS writes there.
+Each CPU has a slab. Its hot part is an array with one 8-byte word per small class; a
+colder part holds the CPU's spare magazines and counters. The slabs are a static array with
+an entry for every CPU number the OS can produce (8192 on x86-64), so the address of a slab
+word is the CPU number shifted and added to a link-time constant, with no pointer to load.
+Untouched slabs cost no memory. A routine compares the CPU number with the array length and
+takes the slow path if it is out of range. That one compare keeps a thread with no rseq
+registration, which reads a negative number, away from every slab, and it means memory
+safety does not depend on what the OS writes there.
 
 A **magazine** is a block of 8-byte slots, a power of two in size and aligned to its size.
-Slot 0 is a link word used by the depot, the last slot is unused, and the slots between hold
-pointers to free objects. Magazines are numbered blocks in one array in the metadata area;
-they are created by advancing a counter and are never unmapped. Their size falls as the
-class size rises, so no magazine holds more than a few hundred kilobytes of objects.
+Slot 0 is a link word used by the depot, the last slot holds the fill level while the
+magazine is not loaded, and the slots between hold pointers to free objects. Magazines are
+numbered blocks in one array in the metadata area; they are created by advancing a counter
+and are never unmapped. Their size falls as the class size rises, from 256 slots to 4, so no
+magazine holds more than about 128 KiB of objects.
 
 The slab word for a class is the address of the next free slot in the loaded magazine.
 Because a magazine is aligned to its size, the low bits of that address are the slot
@@ -291,11 +299,11 @@ number, and the bounds checks need no other state. For a magazine of `n` slots t
 
 A word of zero fails both tests. A slab that has never been written, which is all zero
 bytes, therefore behaves as a slab with no magazines, and nothing needs initializing before
-the first call. The low three bits of a word are zero for any slot address; the value 1 is
-reserved as a marker (see "Idle caches").
+the first call. The low three bits of a word are zero for any slot address; a word with its
+lowest bit set is a marker (see "Idle caches").
 
-The routines rely on one invariant, which the slow paths maintain. For every cid and small
-class, the slab word is zero, the marker, or the address of slot `s` of a magazine of that
+The routines rely on one invariant, which the slow paths maintain. For every CPU and small
+class, the slab word is zero, a marker, or the address of slot `s` of a magazine of that
 class that nothing else refers to, with slots 1 to `s - 1` holding pointers to distinct free
 objects of that class that appear nowhere else.
 
@@ -308,8 +316,8 @@ instructions are chosen by measurement and may change):
     lea   r10, [rip + descriptor]
     mov   fs:[rdx + 8], r10           ; arm: tell the OS which sequence we are in
 start:
-    mov   r8d, fs:[rdx + 24]          ; cid
-    cmp   r8d, SLAB_COUNT             ; out of range: no cache for this call
+    mov   r8d, fs:[rdx + 4]           ; CPU number
+    cmp   r8d, SLAB_COUNT             ; out of range, or no registration
     jae   slow
     shl   r8, SLAB_SHIFT
     lea   r9, [rip + SLABS + CLASS*8]
@@ -355,23 +363,24 @@ callers whose layout is not constant.
 When the fast path fails, the slow path replaces the loaded magazine instead of refilling
 it. For an allocation it:
 
-1. obtains a full magazine: from the cid's spares, else from the depot, else by filling an
+1. obtains a full magazine: from the CPU's spares, else from the depot, else by filling an
    empty one from the back end;
-2. installs it with a routine that stores the new word only if the current word shows no
-   magazine or an empty one, and returns the old word;
-3. retires the old magazine, now private to this thread, to the cid's spares or the depot,
+2. installs it with a routine that stores the new word only if the slab word is still what
+   the slow path read there: zero, an empty magazine, or a marker left by another process
+   generation. The routine returns the old word;
+3. retires the old magazine, now private to this thread, to the CPU's spares or the depot,
    and retries the allocation.
 
 If the install fails because another thread got there first, or because this thread moved
-to a cid that already has a magazine, the slow path puts its magazine back and retries. If
-it fails because the word is the marker, the slow path serves the request from the magazine
-it is holding and sends that magazine to the depot, so it never waits. The free side is
-symmetric with an empty magazine.
+to a CPU that already has a magazine, the slow path puts its magazine back and retries. If
+it fails because the word is a live marker, or because the thread has no valid CPU number,
+the slow path serves the request from the magazine it is holding and sends that magazine to
+the depot, so it never waits. The free side is symmetric with an empty magazine.
 
-Each cid keeps a few spare full and empty magazines per class, in stacks whose heads live
+Each CPU keeps a few spare full and empty magazines per class, in stacks whose heads live
 in the cold part of the slab and are updated by single-store routines. A thread that
 oscillates around a magazine boundary swaps locally without touching shared state. The
-spares of one cid are limited by a byte budget.
+spares of one CPU are limited by a byte budget.
 
 Every step is one commit. Between steps all shared state is valid and whatever the thread
 holds is private to it. This is what makes the slow path safe to interrupt with a signal
@@ -407,8 +416,10 @@ been touched.
   with one atomic OR. If a bit was already set, the object was freed twice and the process
   aborts.
 - **Summary bits are hints.** They may be set when nothing below is free, and they never
-  stay clear when something is. A free into an empty word sets the word's bits and then its
-  summary bit. Whoever empties a word clears the summary bit and then reads the word again.
+  stay clear when something is. A free sets the word's bits and then sets every summary bit
+  above it that it finds clear. Whoever empties a word clears the summary bit and then reads
+  the word again. A free does not assume that the first free into an empty word set the
+  summary bit, because that thread may have vanished in a fork before it could.
 
 The order of preference in a fill is the fragmentation policy: reuse free objects before
 carving fresh memory, and take the lowest address first. Live data packs toward the start of
@@ -431,10 +442,11 @@ heartbeat.
 A huge-page fault delivers 512 pages for about a fifth of the per-page price of small
 faults, and a page returned too early is faulted straight back. Four rules follow.
 
-- **Purge late and from the top.** Purging claims the bits of a fully free range exactly as
-  an allocation would, returns the pages with `madvise(MADV_DONTNEED)`, and releases the
-  bits. Nothing else can allocate the range while it is claimed, so no lock is needed.
-  Purging starts at the high end of a region and is rate limited.
+- **Purge late and from the top.** Purging claims the bits of every object that overlaps a
+  range of pages, exactly as an allocation would. If all of them were free it returns the
+  pages with `madvise(MADV_DONTNEED)`. Either way it then releases the bits. Nothing else
+  can allocate the range while it is claimed, so no lock is needed. Purging starts at the
+  high end of a region and is rate limited.
 - **Retained memory is capped.** The back end counts the free memory it holds that is still
   resident, updating the count once per laundered magazine and per large free. When the
   count passes a cap, the call that pushed it there purges wholly free pages until it is
@@ -452,7 +464,8 @@ faults, and a page returned too early is faulted straight back. Four rules follo
 
 Memory at or above the watermark is zero, and so is purged memory. For large classes a
 second bitmap records which free objects are still zero, so zeroed allocation skips the
-`memset` when it can. Small classes do not track this; zeroing a small object costs less
+`memset` when it can. Purging sets those bits for objects wholly inside the purged range,
+before it releases their free bits. Small classes do not track this; zeroing a small object costs less
 than the bookkeeping.
 
 ### Large objects
@@ -500,49 +513,52 @@ the one a Rust `Layout` of the same size implies.
 
 ### Process lifecycle
 
-- **Start.** The static slabs are zero, so the first call takes the slow path. It checks
-  whether the thread has an rseq registration that includes a cid (glibc's `__rseq_size`
-  covers the field, and the area's CPU number is not negative), reserves address space, and
-  publishes the heap with one compare-and-swap. Two threads may race to do this; the
-  loser unmaps its reservation.
-- **Without rseq.** If there is no such registration (valgrind, a C library setting that
-  disables it, an old OS), asmalloc never loads a magazine. The fast path still runs, reads
-  a cid of zero and a slab word of zero, and fails every time, so it is harmless. The slow
-  path then serves small objects the way it always serves large ones, straight from the
-  region bitmaps with atomic instructions. This is the same code, so it adds no second
-  implementation, and it costs tens of cycles per call instead of a few.
+- **Start.** The static slabs are zero, so the first call takes the slow path, which
+  reserves address space and publishes the heap with one compare-and-swap. Two threads may
+  race to do this; the loser unmaps its reservation. Under a tight address-space limit that
+  race can leave the smaller of two reservations in place.
+- **Without rseq.** A thread with no rseq registration reads a negative CPU number, so every
+  routine sends it to the slow path and it never touches a slab. That covers a whole process
+  under valgrind or with the C library's registration turned off, and a single thread whose
+  registration a sandbox refused. The slow path then serves small objects the way it always
+  serves large ones, straight from the region bitmaps with atomic instructions. This is the
+  same code, so it adds no second implementation, and it costs tens of cycles per call
+  instead of a few.
 - **Under Miri.** Our own tests run the allocator under Miri with the twins and the
   simulated OS. A downstream program run under Miri gets Miri's built-in allocator, so that
   Miri can check each of that program's blocks individually.
 - **Threads.** A thread has no allocator state. Starting and exiting need no code, and
-  objects cached under a cid stay with the cid.
-- **Idle caches.** Memory can sit in the slab of a cid that no thread is using. Each slab
-  has an activity counter, and a heartbeat that finds one unchanged for long enough drains
-  that slab:
-  1. claim the slab with a compare-and-swap on its drain flag; if another thread holds the
-     claim, stop;
-  2. exchange each class's slab word and each spare-stack head with the marker, one atomic
-     instruction each, keeping the old values;
-  3. ask the OS to restart every sequence in flight in the process (`membarrier`). If the
-     call fails, put each old value back with a compare-and-swap against the marker,
-     release the claim and stop;
-  4. read each word again. If it is still the marker, no thread can commit to it, and the
+  objects cached under a CPU stay with that CPU.
+- **Idle caches.** Memory can sit in the slab of a CPU the process no longer runs on. Each
+  slab has an activity counter, and a heartbeat that finds one unchanged for long enough
+  drains that slab. Every process has a **generation**, a random number; a marker is a
+  generation with its lowest bit set.
+  1. Claim the slab by writing this generation into its drain flag with a compare-and-swap.
+     If the flag already holds this generation, another thread is draining; stop.
+  2. Exchange each class's slab word and each spare-stack head with this generation's
+     marker, one atomic instruction each, keeping the old values.
+  3. Ask the OS to restart every sequence in flight on that CPU (`membarrier`). If the call
+     fails, put each old value back with a compare-and-swap against the marker, release the
+     claim and stop.
+  4. Read each word again. If it is still the marker, no thread can commit to it, and the
      drainer owns the old value: it stores zero and, if the old value named a magazine,
      sends it to the depot. If it is anything else, a sequence that started before step 2
-     committed, the old value still belongs to that cid, and the drainer takes nothing and
-     writes nothing;
-  5. release the claim.
+     committed, the old value still belongs to that CPU, and the drainer takes nothing and
+     writes nothing.
+  5. Release the claim.
 
-  Routines treat the marker as "no magazine" or "empty stack" and never store over it, so
-  only a commit from a sequence already in flight can replace it, and step 3 ends all of
-  those. The claim means a slab has one drainer at a time, so a marker a drainer finds in
-  step 4 is its own. This is the only time one cid's slab is written from another. Start-up
-  registers for the `membarrier` command; where the OS refuses, draining is off.
+  The routines on the fast path treat any marker as "no magazine" or "empty stack" and never
+  store over one. So only a commit from a sequence already in flight can replace a marker,
+  and step 3 ends all of those. The claim means a slab has one drainer at a time, so a
+  marker a drainer finds in step 4 is its own. This is the only time one CPU's slab is
+  written from another. Start-up registers for the `membarrier` command; where the OS
+  refuses, draining is off.
 - **Fork.** The child gets a copy of a heap in which every shared structure is valid at
   every instant. Objects that another thread held privately at the moment of the fork are
   lost to the child: a small, bounded leak. A drain that was under way leaves a claim and
-  markers with no drainer. One page of the heap is marked to be wiped on fork, so the
-  child's first slow path sees that it is a new process and clears them.
+  markers with no drainer. The generation lives on a page that is wiped on fork, and the
+  child's first slow path draws a new one, so the child sees the parent's claims and markers
+  as belonging to another generation and treats them as absent.
 - **Signals.** A handler may allocate and free. A signal aborts any sequence in flight, and
   the slow paths hold nothing that a nested call could trip over.
 
@@ -603,11 +619,11 @@ tests where a test can reach it.
 
 - A thread that is preempted, migrated or signalled inside a registered sequence resumes at
   the sequence's abort handler.
-- Two threads of a process never run with the same cid below 8192 at once, and a thread's
-  cid changes only at an event that aborts its sequence. Nothing is assumed about values of
-  8192 or more.
-- `membarrier` with the rseq command returns only after every sequence then in flight in
-  the process has completed or been aborted.
+- The CPU number in a thread's rseq area is the CPU it is running on, changes only at an
+  event that aborts its sequence, and is negative while the thread has no registration.
+  Nothing else is assumed about its value.
+- `membarrier` with the rseq command returns only after every sequence then in flight on
+  the named CPU has completed or been aborted.
 - glibc registers a thread's rseq area before the thread can call the allocator.
 - Nothing with the privilege to do so places a probe inside a sequence, which would let
   the thread return to it without an abort.
@@ -646,18 +662,18 @@ specification.
 - **Interruption at every instruction.** For each routine and each instruction boundary, a
   hardware breakpoint delivers a signal there, which makes the OS abort the sequence. The
   test checks that nothing was committed and that the retry succeeds, then repeats with a
-  handler that itself allocates on the same cid.
+  handler that itself allocates on the same CPU.
 - **Model-based testing.** A shadow model tracks every live block and checks alignment,
   overlap, usable size, zero fill and content preservation across `realloc`. It runs
   single-threaded, multithreaded with blocks handed between threads, and under a
   deterministic scheduler in which the test input chooses which simulated thread runs on
-  which simulated cid and where a twin is interrupted. Deliberately broken allocators keep
+  which simulated CPU and where a twin is interrupted. Deliberately broken allocators keep
   the model honest.
 - **Fuzzing** drives the same model from raw input.
 - **Fault injection** in the simulated OS. A failure to obtain memory must surface as a null
   return and nothing worse; a failure to release memory must be survivable.
-- **Oversubscription and migration stress** on the real OS, to exercise the cid guarantees
-  the design trusts.
+- **Oversubscription and migration stress** on the real OS, to exercise the guarantees the
+  design trusts.
 - **Real programs** run with the preload library, and the C entry points run a conformance
   suite.
 
