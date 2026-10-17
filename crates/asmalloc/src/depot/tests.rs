@@ -21,6 +21,10 @@ use std::vec::Vec;
 
 type TestRig = Rig<SimOs<Small>, 2>;
 
+/// The interrupt points a test tries: every one natively, a spread of them under Miri, which
+/// runs each workload thousands of times slower.
+const STRIDE: usize = if cfg!(miri) { 37 } else { 1 };
+
 fn rig(count: usize, tuning: Tuning) -> TestRig {
     Rig::new(&[tiny_class()], count, tuning)
 }
@@ -89,7 +93,7 @@ fn a_workload_keeps_every_magazine_and_object_in_one_place() {
 #[test]
 fn a_signal_handler_may_allocate_at_every_step() {
     let mut fired = 0;
-    for at in 0.. {
+    for at in (0..).step_by(STRIDE) {
         let rig = rig(12, TIGHT);
         let machine = SimCpu::new(0);
         let user = RefCell::new(Vec::new());
@@ -109,12 +113,15 @@ fn a_signal_handler_may_allocate_at_every_step() {
         }
         fired += 1;
     }
-    assert!(fired > 100, "the workload has {fired} switch points");
+    assert!(
+        fired * STRIDE > 100,
+        "the workload has {fired} switch points"
+    );
 }
 
 #[test]
 fn an_interrupt_that_migrates_at_every_step_loses_nothing() {
-    for at in 0.. {
+    for at in (0..).step_by(STRIDE) {
         let rig = rig(12, TIGHT);
         let machine = SimCpu::new(0);
         let user = RefCell::new(Vec::new());
@@ -129,7 +136,7 @@ fn an_interrupt_that_migrates_at_every_step_loses_nothing() {
 
 #[test]
 fn losing_the_cpu_registration_at_every_step_loses_nothing() {
-    for at in 0.. {
+    for at in (0..).step_by(STRIDE) {
         let rig = rig(12, TIGHT);
         let machine = SimCpu::new(0);
         let user = RefCell::new(Vec::new());
@@ -220,7 +227,7 @@ fn fork_at(at: usize, survives: bool) -> bool {
 fn a_fork_the_thread_survives_at_every_step_leaves_a_clean_child() {
     let mut at = 0;
     while fork_at(at, true) {
-        at += 1;
+        at += STRIDE;
     }
     assert!(at > 100);
 }
@@ -229,7 +236,7 @@ fn a_fork_the_thread_survives_at_every_step_leaves_a_clean_child() {
 fn a_fork_the_thread_does_not_survive_at_every_step_duplicates_nothing() {
     let mut at = 0;
     while fork_at(at, false) {
-        at += 1;
+        at += STRIDE;
     }
     assert!(at > 100);
 }
@@ -385,4 +392,48 @@ fn every_class_works() {
         cache.free(class, object);
     }
     rig.census(&[], false);
+}
+
+/// Three real threads, on CPU 0, CPU 1 and no CPU, allocate and free objects that cross between
+/// them, so that the slow paths, spares and depot stacks run in parallel; under Miri this checks
+/// them for data races. Drains are off: the simulated fence does not wait for a twin running
+/// on another thread.
+#[test]
+fn threads_that_trade_objects_in_parallel_lose_nothing() {
+    let rig = rig(16, TIGHT);
+    rig.os().set_faults(Call::WipeOnFork, Faults::ALWAYS);
+    let traded = std::sync::Mutex::new(Vec::<usize>::new());
+    let rounds = if cfg!(miri) { 3 } else { 200 };
+    std::thread::scope(|scope| {
+        for cpu in [0, 1, -1] {
+            let (rig, traded) = (&rig, &traded);
+            scope.spawn(move || {
+                let machine = SimCpu::new(cpu);
+                let cache = rig.cache(&machine);
+                let class = tiny_class();
+                for _ in 0..rounds {
+                    for _ in 0..2 {
+                        if let Some(object) = cache.alloc(class) {
+                            traded.lock().unwrap().push(object.addr().get());
+                        }
+                    }
+                    for _ in 0..2 {
+                        let taken = traded.lock().unwrap().pop();
+                        if let Some(address) = taken {
+                            let object =
+                                NonNull::new(core::ptr::without_provenance_mut(address)).unwrap();
+                            cache.free(class, object);
+                        }
+                    }
+                }
+            });
+        }
+    });
+    let user: Vec<_> = traded
+        .into_inner()
+        .unwrap()
+        .into_iter()
+        .map(|a| NonNull::new(core::ptr::without_provenance_mut(a)).unwrap())
+        .collect();
+    rig.census(&user, false);
 }

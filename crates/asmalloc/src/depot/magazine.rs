@@ -154,6 +154,22 @@ impl Magazine {
     }
 }
 
+/// Whether a magazine of `size` can be at `offset` in an area whose magazines start at `start`
+/// and whose first `committed` bytes are writable: past the start, aligned to its size, and
+/// wholly inside the committed part. Every magazine handle is made only for an offset this
+/// admits, which is what makes its slot accesses safe (`verify.rs` proves it for all inputs).
+pub(super) const fn admits(
+    offset: usize,
+    size: MagazineSize,
+    start: usize,
+    committed: usize,
+) -> bool {
+    offset >= start
+        && offset.is_multiple_of(size.bytes())
+        && offset <= committed
+        && size.bytes() <= committed - offset
+}
+
 /// The magazine area of a heap, with the depot's counters for it.
 pub struct Area<'a, O: Os> {
     space: Space<'a, O>,
@@ -196,10 +212,7 @@ impl<'a, O: Os> Area<'a, O> {
     /// aligned to its size, and inside the committed part.
     fn magazine_at(&self, offset: usize, size: MagazineSize) -> Option<Magazine> {
         let committed = self.depot.committed.load(Acquire);
-        let fits = offset >= Self::start()
-            && offset.is_multiple_of(size.bytes())
-            && offset <= committed
-            && size.bytes() <= committed - offset;
+        let fits = admits(offset, size, Self::start(), committed);
         let id = MagazineId::new(u32::try_from(offset / UNIT).ok()?)?;
         fits.then(|| Magazine {
             base: self.at(offset),

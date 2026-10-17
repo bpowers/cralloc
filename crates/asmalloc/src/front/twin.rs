@@ -285,20 +285,31 @@ mod tests {
 
     struct World {
         slabs: Box<Slabs<[Slab; 2]>>,
-        magazines: Box<[Magazine; 4]>,
+        // A shared reference, not a box: slab words keep pointers into the magazines, and a
+        // fresh reborrow through a box would invalidate them.
+        magazines: &'static [Magazine; 4],
     }
 
     fn object(n: usize) -> NonNull<u8> {
         NonNull::new(ptr::without_provenance_mut(0x10_000 + 64 * n)).unwrap()
     }
 
+    impl Drop for World {
+        fn drop(&mut self) {
+            let magazines = ptr::from_ref(self.magazines).cast_mut();
+            // SAFETY: `magazines` came from `Box::leak` in `new`, and the world, the only
+            // holder of pointers into it, is going away.
+            drop(unsafe { Box::from_raw(magazines) });
+        }
+    }
+
     impl World {
         fn new() -> World {
             World {
                 slabs: Box::new(Slabs::new()),
-                magazines: Box::new(core::array::from_fn(|_| {
+                magazines: Box::leak(Box::new(core::array::from_fn(|_| {
                     Magazine(core::array::from_fn(|_| AtomicPtr::new(ptr::null_mut())))
-                })),
+                }))),
             }
         }
 
@@ -311,9 +322,13 @@ mod tests {
             quiet(self.slabs().slab(cpu).field(field))
         }
 
-        /// The address of slot `slot` of magazine `m`.
+        /// The address of slot `slot` of magazine `m`, with provenance for all the magazines,
+        /// as a pointer into the reservation has in the allocator.
         fn slot(&self, m: usize, slot: usize) -> *mut u8 {
-            ptr::from_ref(&self.magazines[m].0[slot]).cast_mut().cast()
+            ptr::from_ref(self.magazines)
+                .cast_mut()
+                .cast::<u8>()
+                .wrapping_add((4 * m + slot) * 8)
         }
 
         fn every_word(&self) -> impl Iterator<Item = &AtomicPtr<u8>> {

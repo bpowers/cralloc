@@ -38,9 +38,10 @@ pub struct Generation(NonZeroU64);
 impl Generation {
     /// The generation for a random number.
     pub const fn from_random(random: u64) -> Generation {
+        // A marker has its lowest bit set, so it is never zero and the fallback never happens.
         match NonZeroU64::new(random << MARKER_SHIFT | MARKER as u64) {
             Some(word) => Generation(word),
-            None => panic!("a marker is never zero"),
+            None => Generation(NonZeroU64::MIN),
         }
     }
 
