@@ -19,6 +19,8 @@ open VG.X86_64 VG.Spec.Slab VG.Impl.Slab.X86_64 VG.Proof.Slab.X86_64
 
 abbrev cx : Spec.Slab.Ctx isa := ⟨abi, .table, popSig⟩
 
+theorem hX : X86 cx.A := x86_abi
+
 def body : List (Step Instr Cond) := [
   .instr (.mov32 .r8 (.mem { base := .r10, disp := 4, seg := some .fs })),
   .instr (.alu32 .cmp .r8 (.imm 8192)),
@@ -62,16 +64,16 @@ structure Pre (s : State) (k : Nat) : Prop where
 theorem cls_eq (s : State) : cx.cls s = (s.gpr .rdi).toNat := rfl
 
 theorem pre_of {s : State} (h : Facts cx s) : ∃ k, Pre s k := by
-  obtain ⟨-, -, -, ⟨k, hk, hk', hm⟩, hinv⟩ := h.pre
-  have hma : maskA s = cx.maskAddr s := maskA_eq rfl (cls_eq s)
+  obtain ⟨-, -, -, -, ⟨k, hk, hk', hm⟩, hinv⟩ := h.pre
+  have hma : maskA s = cx.maskAddr s := maskA_eq hX (cls_eq s)
   have hmask : cx.mask s = (mk s).toNat := by
     show (s.mem.readW (cx.maskAddr s) 32).toNat = _; rw [← hma]; rfl
   have hslots : cx.slots s = 2 ^ k := by
     rw [Spec.Slab.Ctx.slots, hm]; exact slotsOf_magMask k hk
-  have hw : wat s = cx.word s := wat_eq rfl (cls_eq s)
-  have hwv : cx.w s = wvt s := by simp only [Spec.Slab.Ctx.w, view_mem, wvt, hw]
+  have hw : wat s = cx.word s := wat_eq hX (cls_eq s)
+  have hwv : cx.w s = wvt s := by simp only [Spec.Slab.Ctx.w, mem_of (c := cx) hX, wvt, hw]
   refine ⟨k, h, hk, hk', by rw [← hmask]; exact hm, hslots, hw, hma, hwv, fun hi => ?_⟩
-  have := hinv (cx.cpu s) hi
+  have := (hinv (cx.cpu s) hi).1
   rw [← hslots, ← hwv]
   exact this
 
@@ -156,7 +158,7 @@ theorem exec_commit (hp : Pre s k) (hi : cx.InRange s) :
   rfl
 
 theorem inRange_iff : cx.InRange s ↔ (cpu32 s).toNat < 8192 := by
-  simp only [Spec.Slab.Ctx.InRange, cpu_of (c := cx) rfl, cpu32, SLAB_COUNT]
+  simp only [Spec.Slab.Ctx.InRange, cpu_of (c := cx) hX, cpu32, SLAB_COUNT]
 
 theorem eval_cpu_true (hi : ¬ cx.InRange s) : eval .ae (σ2 s) = some true := by
   rw [eval_cpu, inRange_iff] at *; simp [hi]
@@ -337,7 +339,7 @@ theorem hv : cx.A.args ((cx.sig.words cx.A.ptrBits).map (·.bits cx.A.ptrBits)) 
 
 theorem facts_of_pre (hs : (popContract abi).pre s) : Facts cx s := by
   have := (pre_iff cx (s := s) hv rfl rfl).mp hs
-  exact facts_of_world rfl (.inr rfl) this.2.1 this.2.2
+  exact facts_of_world hX (.inr rfl) this.2.1 this.2.2
 
 /-- The calling convention's obligations, in memory changed only in regions
 apart from the return address. -/
@@ -353,9 +355,9 @@ theorem popped (hp : Pre s k) (hi : cx.InRange s) (ht : ¬ tst s = 0) :
   rw [magRegion_eq hp] at hcm hwm
   refine ⟨.stack (magBase (2 ^ k) (wvt s)) (items (2 ^ k) s.mem (wvt s)).dropLast, ?_, ?_, ?_, ?_⟩
   · simp only [Spec.Slab.Ctx.popResult, hi, ↓reduceIte, Spec.Slab.Ctx.mag, hp.slots,
-      mem_of (c := cx) rfl, hp.w]
+      mem_of (c := cx) hX, hp.w]
     exact hpop
-  · rw [csField_of (c := cx) rfl, ← hp.word]
+  · rw [csField_of (c := cx) hX, ← hp.word]
     exact frame_two s.mem _ _ _ _
   · show (mEnd s).readW (cx.word s) 64 = _
     rw [mEnd, ← hp.word, Mem.readW_writeW_self64, hp.w]
@@ -372,7 +374,7 @@ theorem ret_σ11 : (σ11 s).gpr .rax = x s := by
     RegUpd.gpr_setReg_self]
 
 theorem unchanged_cs : Unchanged [cx.csField s] (cx.mem s) (m1 s) := by
-  rw [csField_of (c := cx) rfl, mem_of (c := cx) rfl]; exact frame_m1
+  rw [csField_of (c := cx) hX, mem_of (c := cx) hX]; exact frame_m1
 
 theorem missed_C (hi : ¬ cx.InRange s) : cx.PopMissed s (σ2 s) := by
   refine ⟨?_, unchanged_cs⟩
@@ -381,7 +383,7 @@ theorem missed_C (hi : ¬ cx.InRange s) : cx.PopMissed s (σ2 s) := by
 theorem missed_T (hp : Pre s k) (hi : cx.InRange s) (ht : tst s = 0) : cx.PopMissed s (σ8 s) := by
   refine ⟨?_, unchanged_cs⟩
   simp only [Spec.Slab.Ctx.popResult, hi, ↓reduceIte, Spec.Slab.Ctx.mag, hp.slots,
-    mem_of (c := cx) rfl, hp.w]
+    mem_of (c := cx) hX, hp.w]
   exact (pop_eq_none_iff (dvd_marker hp.hk') (hp.ok hi)).mpr ((test_iff32 hp.hk hp.hk' (wvt s) (mk s) hp.mask).mp ht)
 
 theorem post_eq (s' : State) : (popContract abi).post s s' ↔
@@ -415,17 +417,16 @@ theorem correct (hs : (popContract abi).pre s) :
 /-! ### Where it may be aborted -/
 
 theorem abort_eq (p : State) : (popContract abi).abort s p ↔ [p.gpr .rdi] = [s.gpr .rdi] ∧
-    Unchanged [cx.csField s] (cx.mem s) p.mem :=
+    (Unchanged [cx.csField s] (cx.mem s) p.mem ∧ cx.inv p) :=
   abort_iff cx hv s p
 
 theorem abortOk (hp : Pre s k) {p : State} (hm : Mid scratchT s (m1 s) p) :
     armed p ∧ target.abiPreserved s p ∧ (popContract abi).abort s p ∧
       ∀ p', target.rely p p' → (popContract abi).env p p' → (popContract abi).pre p' := by
-  refine ⟨armed_of_mid hp.facts.toArm (xs := []) frame_m1 m1_cs (by simp) hm, abi_m1 hp hm, ?_,
-    fun p' hr he =>
-      retry rfl hv (fun _ => rfl) (fun _ => rfl) (by decide) hp.facts.pre hm (by decide) hr he⟩
-  refine (abort_eq p).mpr ⟨by rw [hm.gpr _ (by decide)], ?_⟩
-  rw [hm.mem]; exact unchanged_cs
+  obtain ⟨hip, hre⟩ := retry hX hv (post := fun s s' => _) (fun _ => rfl) (fun _ => rfl) (by decide)
+    hp.facts.pre hm (by decide) (by decide) frame_m1 (harmless_cs1 hX hp.facts.pre)
+  refine ⟨armed_of_mid hp.facts.toArm (xs := []) frame_m1 m1_cs (by simp) hm, abi_m1 hp hm, ?_, hre⟩
+  refine (abort_eq p).mpr ⟨by rw [hm.gpr _ (by decide)], by rw [hm.mem]; exact unchanged_cs, hip⟩
 
 /-! ### Its accesses -/
 
@@ -453,8 +454,8 @@ theorem trace_ok (hs : (popContract abi).pre s) :
   show cx.PopTrace s (Code.events isa (.rseq arm body) s)
   simp only [Code.events, execBlock_arm h.toArm, events_arm h.toArm]
   refine ⟨(o s).toNat, s.csDesc.toNat, (cpu32 s).toNat, (wvt s).toNat, (mk s).toNat, (x s).toNat, ?_⟩
-  simp only [Spec.Slab.Ctx.headTrace, Spec.Slab.Ctx.rd, Spec.Slab.Ctx.wr, tp_of (c := cx) rfl,
-    sym_of (c := cx) rfl, test_eq, ofNat_toNat64, addr8, addr4, rsName, maskAddr_eq hp]
+  simp only [Spec.Slab.Ctx.headTrace, Spec.Slab.Ctx.rd, Spec.Slab.Ctx.wr, tp_of (c := cx) hX,
+    sym_of (c := cx) hX, test_eq, ofNat_toNat64, addr8, addr4, rsName, maskAddr_eq hp]
   by_cases hi : cx.InRange s
   · have hi' : (cpu32 s).toNat < SLAB_COUNT := (inRange_iff.mp hi)
     rw [wordAddr_eq hp]

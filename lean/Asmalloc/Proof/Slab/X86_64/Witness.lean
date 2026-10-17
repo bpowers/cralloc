@@ -58,9 +58,6 @@ theorem mkMem_slab_zero {ws : List (Addr × BitVec 64)} (hws : ∀ bv ∈ ws, bv
   · intro bv hbv; have := hws bv hbv; rw [ha]; omega
   · rw [ha]; omega
 
-theorem stackOk_zero {m : Mem} {rs : List Region} : StackOk m 0 rs :=
-  .inr ⟨[], .nil, by simp⟩
-
 instance (n : Nat) (w : BitVec 64) : Decidable (WordOk n w) := by unfold WordOk; infer_instance
 
 theorem res_of_sep {l : List (Region × Bool)} {r : Region}
@@ -75,21 +72,50 @@ theorem nowrap_of_check {l : List (Region × Bool)}
   exact h
 
 /-- The regions of a concrete state are the routine's, by evaluation. -/
-theorem world_of_check {c : Spec.Slab.Ctx isa} (hA : c.A = abi) {s : State}
+theorem world_of_check {c : Spec.Slab.Ctx isa} (hA : X86 c.A) {s : State}
     (hrd : s.rd = Ctx.ro c s) (hwr : s.wr = Ctx.rw c s)
     (hnw : ((c.regions s).all fun x => decide (x.1.base.toNat + x.1.len ≤ 2 ^ 64)) = true)
     (hp : Sig.pairsSep (c.regions s) = true)
-    (hres : ((c.regions s).all fun x => Region.sep x.1 ⟨s.gpr .rsp, 8⟩) = true) :
+    (hres : ((c.regions s).all fun x => (c.A.reserved 0 s).all fun q => Region.sep x.1 q) = true) :
     Ctx.World c s where
-  rd := by rw [hA]; exact hrd
-  wr := by rw [hA]; exact hwr
-  nowrap := by rw [hA]; exact nowrap_of_check hnw
+  rd := by rw [hA.rd]; exact hrd
+  wr := by rw [hA.wr]; exact hwr
+  nowrap := by rw [hA.ptrBits]; exact nowrap_of_check hnw
   disj := Sig.pairwise_of_pairsSep hp
   res := by
-    rw [hA]
-    intro x hx r hr
-    simp only [abi_reserved, List.mem_singleton] at hr
-    subst hr
-    exact res_of_sep hres x hx
+    intro x hx q hq
+    simp only [List.all_eq_true] at hres
+    exact Region.disjoint_of_sep (hres x hx q hq)
+
+/-- The layout's facts (`Ctx.Layout`), with disjointness decided by
+`Region.sep`, for the kernel to evaluate on a concrete state. -/
+def layoutCheck (c : Spec.Slab.Ctx isa) (s : State) : Bool :=
+  decide ((c.slabs s).base.toNat + (c.slabs s).len ≤ 2 ^ 64) &&
+  ((c.A.reserved 0 s).all fun q => Region.sep (c.slabs s) q) &&
+  ((c.fixed s).all fun x => decide (x.1.base.toNat + x.1.len ≤ 2 ^ 64)) &&
+  Sig.pairsSep (c.fixed s) &&
+  ((c.fixed s).all fun x => Region.sep x.1 (c.slabs s)) &&
+  ((c.fixed s).all fun x => (c.A.reserved 0 s).all fun q => Region.sep x.1 q)
+
+theorem layout_of_check {c : Spec.Slab.Ctx isa} (hA : X86 c.A) {s : State}
+    (h : layoutCheck c s = true) : c.Layout s := by
+  simp only [layoutCheck, Bool.and_eq_true, List.all_eq_true, decide_eq_true_eq] at h
+  obtain ⟨⟨⟨⟨⟨h1, h2⟩, h3⟩, h4⟩, h5⟩, h6⟩ := h
+  exact ⟨by rw [hA.ptrBits]; exact h1, fun q hq => Region.disjoint_of_sep (h2 q hq),
+    by rw [hA.ptrBits]; exact h3, Sig.pairwise_of_pairsSep h4,
+    fun x hx => Region.disjoint_of_sep (h5 x hx),
+    fun x hx q hq => Region.disjoint_of_sep (h6 x hx q hq)⟩
+
+/-- That a region lies `Apart`, decided by `Region.sep`. -/
+def apartCheck (c : Spec.Slab.Ctx isa) (s : State) (r : Region) : Bool :=
+  decide (r.base.toNat + r.len ≤ 2 ^ 64) && Region.sep r (c.slabs s) &&
+  ((c.fixed s).all fun x => Region.sep r x.1) && ((c.A.reserved 0 s).all fun q => Region.sep r q)
+
+theorem apart_of_check {c : Spec.Slab.Ctx isa} (hA : X86 c.A) {s : State} {r : Region}
+    (h : apartCheck c s r = true) : c.Apart s r := by
+  simp only [apartCheck, Bool.and_eq_true, List.all_eq_true, decide_eq_true_eq] at h
+  obtain ⟨⟨⟨h1, h2⟩, h3⟩, h4⟩ := h
+  exact ⟨by rw [hA.ptrBits]; exact h1, Region.disjoint_of_sep h2,
+    fun x hx => Region.disjoint_of_sep (h3 x hx), fun q hq => Region.disjoint_of_sep (h4 q hq)⟩
 
 end VG.Proof.Slab.X86_64

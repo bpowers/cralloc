@@ -94,14 +94,14 @@ theorem slabWord_ea_t (σ : State) (h9 : σ.gpr .r9 = r9t s) (h8 : σ.gpr .r8 = 
 
 /-- The slab word's address is the class's for the CPU, an out-of-line
 routine being given its class in `rdi`. -/
-theorem wat_eq (hA : c.A = abi) (hcls : c.cls s = (s.gpr .rdi).toNat) : wat s = c.word s := by
+theorem wat_eq (hA : X86 c.A) (hcls : c.cls s = (s.gpr .rdi).toNat) : wat s = c.word s := by
   rw [Spec.Slab.Ctx.word, wordAddr, sym_of hA, cpu_of hA, wat, r9t, sh_eq, cpu32, hcls]
   apply BitVec.eq_of_toNat_eq
   simp only [BitVec.toNat_add, BitVec.toNat_mul, BitVec.toNat_ofNat, SLABS, toNat_eight]
   omega
 
 /-- The mask's address is the routine's. -/
-theorem maskA_eq (hA : c.A = abi) (hcls : c.cls s = (s.gpr .rdi).toNat) : maskA s = c.maskAddr s := by
+theorem maskA_eq (hA : X86 c.A) (hcls : c.cls s = (s.gpr .rdi).toNat) : maskA s = c.maskAddr s := by
   rw [Spec.Slab.Ctx.maskAddr, sym_of hA, hcls, maskA]
   apply BitVec.eq_of_toNat_eq
   simp only [BitVec.toNat_add, BitVec.toNat_mul, BitVec.toNat_ofNat, MAG_MASKS,

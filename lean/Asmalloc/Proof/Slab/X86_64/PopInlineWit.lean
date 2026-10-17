@@ -66,36 +66,41 @@ theorem pre_wit (s : State) (hm : ∃ cpu word rd wr, s = wit cpu word rd wr)
     (hrd : s.rd = Ctx.ro cx s) (hwr : s.wr = Ctx.rw cx s)
     (hnw : ((cx.regions s).all fun x => decide (x.1.base.toNat + x.1.len ≤ 2 ^ 64)) = true)
     (hp : Sig.pairsSep (cx.regions s) = true)
-    (hres : ((cx.regions s).all fun x => Region.sep x.1 ⟨s.gpr .rsp, 8⟩) = true)
+    (hres : ((cx.regions s).all fun x => (cx.A.reserved 0 s).all fun q => Region.sep x.1 q) = true)
+    (hl : layoutCheck cx s = true)
     (hcoff : (s.params "coff").toNat = 8 * cx.cls s) (hcls : cx.cls s = 1)
     (hmask : cx.mask s = magMask (2 ^ 2)) (hslots : cx.slots s = 4)
     (hsyms : s.syms SLABS = 0x1000000)
-    (h0 : WordOk 4 (s.mem.readW (wordAddr 0x1000000 0 1) 64)) :
-    (popInlineContract abi).pre s := by
-  refine (pre_iff cx (s := s) hv rfl rfl).mpr ⟨trivial, world_of_check rfl hrd hwr hnw hp hres,
+    (h0 : cx.SlotOk s (s.mem.readW (wordAddr 0x1000000 0 1) 64)) :
+    (popInlineContract inlineAbi).pre s := by
+  refine (pre_iff cx (s := s) hv rfl rfl).mpr ⟨trivial, world_of_check hX hrd hwr hnw hp hres,
     rfl, rfl, ⟨rfl, hcoff, by rw [hcls]; decide, ⟨2, by decide, by decide, hmask⟩⟩,
-    fun i hi => ?_⟩
-  rw [hslots, mem_of (c := cx) rfl, sym_of (c := cx) rfl, hcls, hsyms]
+    layout_of_check hX hl, fun i hi => ?_⟩
+  simp only [Spec.Slab.Ctx.wordOf]
+  rw [mem_of (c := cx) hX, sym_of (c := cx) hX, hcls, hsyms]
   rcases Nat.eq_zero_or_pos i with rfl | h
   · exact h0
   · obtain ⟨cpu, word, rd, wr, rfl⟩ := hm
     rw [wit_zero cpu word rd wr h hi]
-    exact .inl rfl
+    exact ⟨.inl rfl, fun hs => absurd hs.2 (by simp [slot])⟩
 
-theorem pre_w0 : (popInlineContract abi).pre w0 :=
+theorem pre_w0 : (popInlineContract inlineAbi).pre w0 :=
   pre_wit w0 ⟨_, _, _, _, rfl⟩ (by decide +kernel) (by decide +kernel) (by decide +kernel)
     (by decide +kernel) (by decide +kernel) (by decide +kernel) (by decide +kernel) (by decide +kernel)
     (by decide +kernel) (by decide +kernel) (by decide +kernel)
+    ⟨by decide +kernel, fun hs => absurd hs (by decide +kernel)⟩
 
-theorem pre_w1 : (popInlineContract abi).pre w1 :=
+theorem pre_w1 : (popInlineContract inlineAbi).pre w1 :=
   pre_wit w1 ⟨_, _, _, _, rfl⟩ (by decide +kernel) (by decide +kernel) (by decide +kernel)
     (by decide +kernel) (by decide +kernel) (by decide +kernel) (by decide +kernel) (by decide +kernel)
     (by decide +kernel) (by decide +kernel) (by decide +kernel)
+    ⟨by decide +kernel, fun hs => absurd hs (by decide +kernel)⟩
 
-theorem pre_w2 : (popInlineContract abi).pre w2 :=
+theorem pre_w2 : (popInlineContract inlineAbi).pre w2 :=
   pre_wit w2 ⟨_, _, _, _, rfl⟩ (by decide +kernel) (by decide +kernel) (by decide +kernel)
     (by decide +kernel) (by decide +kernel) (by decide +kernel) (by decide +kernel) (by decide +kernel)
     (by decide +kernel) (by decide +kernel) (by decide +kernel)
+    ⟨by decide +kernel, fun _ => apart_of_check hX (by decide +kernel)⟩
 
 /-! ## The three ways out, each taken -/
 
@@ -121,8 +126,8 @@ theorem visits_w2 : Visits isa popInline w2 2 true := by
 /-- The witnesses. -/
 def witnesses : List State := [w0, w1, w2]
 
-theorem witnessOk : (∃ w ∈ witnesses, (popInlineContract abi).pre w) ∧
-    ∀ o ∈ popInline.outcomes, ∃ w ∈ witnesses, (popInlineContract abi).pre w ∧
+theorem witnessOk : (∃ w ∈ witnesses, (popInlineContract inlineAbi).pre w) ∧
+    ∀ o ∈ popInline.outcomes, ∃ w ∈ witnesses, (popInlineContract inlineAbi).pre w ∧
       Visits isa popInline w o.1 o.2 := by
   refine ⟨⟨w0, by simp [witnesses], pre_w0⟩, fun o ho => ?_⟩
   rw [outcomes_eq] at ho
@@ -132,7 +137,7 @@ theorem witnessOk : (∃ w ∈ witnesses, (popInlineContract abi).pre w) ∧
   · exact ⟨w1, by simp [witnesses], pre_w1, visits_w1⟩
   · exact ⟨w2, by simp [witnesses], pre_w2, visits_w2⟩
 
-theorem verified : Verified inlineTarget popInline (popInlineContract abi) :=
+theorem verified : Verified inlineTarget popInline (popInlineContract inlineAbi) :=
   ⟨fun _ hs => correct hs, fun _ hs => rseqOk hs, ⟨w0, pre_w0⟩, fun o ho => by
     obtain ⟨w, -, hw, hv⟩ := witnessOk.2 o ho
     exact ⟨w, hw, hv⟩⟩

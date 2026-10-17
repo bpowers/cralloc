@@ -22,56 +22,59 @@ open VG.X86_64 VG.Spec.Slab
 /-- The name `glibc`'s offset has in the code and in the model. -/
 abbrev RS : String := "__rseq_offset"
 
-/-! ## The view through x86-64's calling convention -/
+/-! ## The view through x86-64's calling conventions
 
-section View
+`abi`, and the inline target's `inlineAbi`, which reserves the red zone too:
+the routines' contracts see the state through either alike, but for the
+memory each reserves. -/
 
-variable {f : Form} {sig : Sig} (s : State)
+/-- A calling convention that sees an x86-64 state as `abi` does, reserving
+at least the return address's slot, and the same memory in two states with
+the same stack pointer. -/
+structure X86 (A : Abi isa) : Prop where
+  ptrBits : A.ptrBits = 64
+  args : A.args = abi.args
+  argArea : A.argArea = abi.argArea
+  wf : A.wf = abi.wf
+  mem : ∀ s, A.mem s = s.mem
+  rd : ∀ s, A.rd s = s.rd
+  wr : ∀ s, A.wr s = s.wr
+  ret : ∀ s, A.ret s = s.gpr .rax
+  tp : A.tp = some fun s => s.fsBase
+  sym : A.sym = some fun s => s.syms
+  param : A.param = some fun s => s.params
+  retSlot : ∀ s, (⟨s.gpr .rsp, 8⟩ : Region) ∈ A.reserved 0 s
+  reserved : ∀ s s', s'.gpr .rsp = s.gpr .rsp → A.reserved 0 s' = A.reserved 0 s
 
-@[simp] theorem view_A : (⟨abi, f, sig⟩ : Spec.Slab.Ctx isa).A = abi := rfl
-@[simp] theorem view_form : (⟨abi, f, sig⟩ : Spec.Slab.Ctx isa).form = f := rfl
-@[simp] theorem view_tp : (⟨abi, f, sig⟩ : Spec.Slab.Ctx isa).tp s = s.fsBase := rfl
-@[simp] theorem view_sym (n : String) : (⟨abi, f, sig⟩ : Spec.Slab.Ctx isa).sym s n = s.syms n := rfl
-@[simp] theorem view_param (n : String) :
-    (⟨abi, f, sig⟩ : Spec.Slab.Ctx isa).param s n = s.params n := rfl
-@[simp] theorem view_mem : (⟨abi, f, sig⟩ : Spec.Slab.Ctx isa).mem s = s.mem := rfl
-@[simp] theorem abi_mem : abi.mem s = s.mem := rfl
-@[simp] theorem abi_rd : abi.rd s = s.rd := rfl
-@[simp] theorem abi_wr : abi.wr s = s.wr := rfl
-@[simp] theorem abi_ret : abi.ret s = s.gpr .rax := rfl
-@[simp] theorem abi_reserved : abi.reserved 0 s = [⟨s.gpr .rsp, 8⟩] := rfl
-@[simp] theorem abi_ptrBits : abi.ptrBits = 64 := rfl
+theorem x86_abi : X86 abi :=
+  ⟨rfl, rfl, rfl, rfl, fun _ => rfl, fun _ => rfl, fun _ => rfl, fun _ => rfl, rfl, rfl, rfl,
+    fun _ => List.mem_singleton_self _, fun s s' h => by simp [abi, stackBelow, h]⟩
 
-end View
+theorem x86_inline : X86 inlineAbi :=
+  ⟨rfl, rfl, rfl, rfl, fun _ => rfl, fun _ => rfl, fun _ => rfl, fun _ => rfl, rfl, rfl, rfl,
+    fun _ => List.mem_cons_of_mem _ (List.mem_singleton_self _),
+    fun s s' h => by simp [inlineAbi, abi, stackBelow, h]⟩
+
+@[simp] theorem abi_reserved (s : State) : abi.reserved 0 s = [⟨s.gpr .rsp, 8⟩] := rfl
+@[simp] theorem inlineAbi_reserved (s : State) :
+    inlineAbi.reserved 0 s = [⟨s.gpr .rsp - 128, 128⟩, ⟨s.gpr .rsp, 8⟩] := rfl
 
 /-- The routine's view of the thread's rseq area, its fields and the CPU, on
 x86-64. -/
 def area (s : State) : Addr := s.fsBase + s.mem.readW (s.syms RS) 64
 
-section Fields
-
-variable {f : Form} {sig : Sig} (s : State)
-
-theorem view_area : (⟨abi, f, sig⟩ : Spec.Slab.Ctx isa).area s = area s := rfl
-theorem view_csField : (⟨abi, f, sig⟩ : Spec.Slab.Ctx isa).csField s = ⟨area s + 8, 8⟩ := rfl
-theorem view_cpuField : (⟨abi, f, sig⟩ : Spec.Slab.Ctx isa).cpuField s = ⟨area s + 4, 4⟩ := rfl
-theorem view_cpu :
-    (⟨abi, f, sig⟩ : Spec.Slab.Ctx isa).cpu s = (s.mem.readW (area s + 4) 32).toNat := rfl
-
-end Fields
-
 /-! ## The view of any routine on x86-64 -/
 
 section ViewOf
 
-variable {c : Spec.Slab.Ctx isa} (hA : c.A = abi) (s : State)
+variable {c : Spec.Slab.Ctx isa} (hA : X86 c.A) (s : State)
 include hA
 
-theorem tp_of : c.tp s = s.fsBase := by simp only [Spec.Slab.Ctx.tp, hA]; rfl
-theorem sym_of (n : String) : c.sym s n = s.syms n := by simp only [Spec.Slab.Ctx.sym, hA]; rfl
+theorem tp_of : c.tp s = s.fsBase := by simp only [Spec.Slab.Ctx.tp, hA.tp]
+theorem sym_of (n : String) : c.sym s n = s.syms n := by simp only [Spec.Slab.Ctx.sym, hA.sym]
 theorem param_of (n : String) : c.param s n = s.params n := by
-  simp only [Spec.Slab.Ctx.param, hA]; rfl
-theorem mem_of : c.mem s = s.mem := by simp only [Spec.Slab.Ctx.mem, hA]; rfl
+  simp only [Spec.Slab.Ctx.param, hA.param]
+theorem mem_of : c.mem s = s.mem := by simp only [Spec.Slab.Ctx.mem, hA.mem]
 theorem area_of : c.area s = area s := by
   simp only [Spec.Slab.Ctx.area, tp_of hA, sym_of hA, mem_of hA]; rfl
 theorem csField_of : c.csField s = ⟨area s + 8, 8⟩ := by
@@ -80,6 +83,8 @@ theorem cpuField_of : c.cpuField s = ⟨area s + 4, 4⟩ := by
   simp only [Spec.Slab.Ctx.cpuField, area_of hA]; rfl
 theorem cpu_of : c.cpu s = (s.mem.readW (area s + 4) 32).toNat := by
   simp only [Spec.Slab.Ctx.cpu, cpuField_of hA, mem_of hA]
+theorem rsVar_of : c.rsVar s = ⟨s.syms RS, 8⟩ := by
+  simp only [Spec.Slab.Ctx.rsVar, sym_of hA]; rfl
 
 end ViewOf
 
@@ -119,7 +124,7 @@ structure Facts (c : Spec.Slab.Ctx isa) (s : State) : Prop where
   pre : c.pre s
 
 /-- The regions of a routine, in its three cases. -/
-theorem regions_eq (c : Spec.Slab.Ctx isa) (hA : c.A = abi)
+theorem regions_eq (c : Spec.Slab.Ctx isa) (hA : X86 c.A)
     (hslot : c.form = .inline ∨ c.form = .table) (s : State) :
     c.regions s = [(⟨s.syms RS, 8⟩, false), (⟨area s + 4, 4⟩, false), (⟨area s + 8, 8⟩, true)] ++
       (match c.form with | .table => [(⟨c.maskAddr s, 4⟩, false)] | _ => []) ++
@@ -127,16 +132,18 @@ theorem regions_eq (c : Spec.Slab.Ctx isa) (hA : c.A = abi)
         (⟨c.word s, 8⟩, true) :: (if IsSlot (c.slots s) (c.w s) then [(c.magRegion s, true)] else [])
       else []) := by
   obtain ⟨A, f, sig⟩ := c
-  cases hA
-  rcases hslot with h | h <;> cases h <;> rfl
+  rcases hslot with h | h <;> cases h <;>
+    simp only [Spec.Slab.Ctx.regions, Spec.Slab.Ctx.fixed, Spec.Slab.Ctx.more, rsVar_of hA,
+      cpuField_of hA, csField_of hA, Spec.Slab.Ctx.maskEntry, List.append_assoc] <;> rfl
 
-theorem facts_of_world {c : Spec.Slab.Ctx isa} (hA : c.A = abi)
+theorem facts_of_world {c : Spec.Slab.Ctx isa} (hA : X86 c.A)
     (hslot : c.form = .inline ∨ c.form = .table) {s : State}
     (hw : c.World s) (hp : c.pre s) : Facts c s := by
   obtain ⟨hrd, hwr, hnw, hdj, hres⟩ := hw
+  have hres := fun x hx => hres x hx _ (hA.retSlot s)
   have hreg := regions_eq c hA hslot s
-  simp only [Spec.Slab.Ctx.ro, Spec.Slab.Ctx.rw, hreg, hA, abi_rd, abi_wr] at hrd hwr
-  simp only [hreg, hA, abi_reserved, abi_ptrBits] at hnw hdj hres
+  simp only [Spec.Slab.Ctx.ro, Spec.Slab.Ctx.rw, hreg, hA.rd, hA.wr] at hrd hwr
+  simp only [hreg, hA.ptrBits] at hnw hdj hres
   rcases hslot with hf | hf <;>
   by_cases hi : c.InRange s <;> by_cases hs : IsSlot (c.slots s) (c.w s) <;>
   simp only [hf, hi, hs, ↓reduceIte, List.append_nil, List.cons_append, List.nil_append,

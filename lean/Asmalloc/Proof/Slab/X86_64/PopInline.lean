@@ -19,7 +19,9 @@ namespace VG.Proof.Slab.X86_64.PopInline
 open VG.X86_64 VG.Spec.Slab VG.Impl.Slab.X86_64 VG.Proof.Slab.X86_64
 
 /-- The routine as the contract sees it. -/
-abbrev cx : Spec.Slab.Ctx isa := ⟨abi, .inline, popInlineSig⟩
+abbrev cx : Spec.Slab.Ctx isa := ⟨inlineAbi, .inline, popInlineSig⟩
+
+theorem hX : X86 cx.A := x86_inline
 
 def body : List (Step Instr Cond) := [
   .instr (.mov32 .r8 (.mem { base := .r10, disp := 4, seg := some .fs })),
@@ -67,14 +69,14 @@ structure Pre (s : State) (k : Nat) : Prop where
   ok : cx.InRange s → WordOk (2 ^ k) (wvi s)
 
 theorem pre_of {s : State} (h : Facts cx s) : ∃ k, Pre s k := by
-  obtain ⟨-, -, ⟨-, hcoff, -, ⟨k, hk, hk', hm⟩⟩, hinv⟩ := h.pre
+  obtain ⟨-, -, ⟨-, hcoff, -, ⟨k, hk, hk', hm⟩⟩, -, hinv⟩ := h.pre
   have hmask : cx.mask s = (s.params "mask").toNat := rfl
   have hslots : cx.slots s = 2 ^ k := by
     rw [Spec.Slab.Ctx.slots, hm]; exact slotsOf_magMask k hk
-  have hw : wai s = cx.word s := wai_eq rfl hcoff
-  have hwv : cx.w s = wvi s := by simp only [Spec.Slab.Ctx.w, view_mem, wvi, hw]
+  have hw : wai s = cx.word s := wai_eq hX hcoff
+  have hwv : cx.w s = wvi s := by simp only [Spec.Slab.Ctx.w, mem_of (c := cx) hX, wvi, hw]
   refine ⟨k, h, hk, hk', by rw [← hmask]; exact hm, hslots, hw, hwv, fun hi => ?_⟩
-  have := hinv (cx.cpu s) hi
+  have := (hinv (cx.cpu s) hi).1
   rw [← hslots, ← hwv]
   exact this
 
@@ -156,7 +158,7 @@ theorem exec_commit (hp : Pre s k) (hi : cx.InRange s) :
 /-! ## The cpu's test -/
 
 theorem inRange_iff : cx.InRange s ↔ (cpu32 s).toNat < 8192 := by
-  simp only [Spec.Slab.Ctx.InRange, cpu_of (c := cx) rfl, cpu32, SLAB_COUNT]
+  simp only [Spec.Slab.Ctx.InRange, cpu_of (c := cx) hX, cpu32, SLAB_COUNT]
 
 theorem eval_cpu_true (hi : ¬ cx.InRange s) : eval .ae (σ2 s) = some true := by
   rw [eval_cpu, inRange_iff] at *; simp [hi]
@@ -332,9 +334,9 @@ variable {s : State} {k : Nat}
 theorem hv : cx.A.args ((cx.sig.words cx.A.ptrBits).map (·.bits cx.A.ptrBits)) =
     some (fun _ => []) := rfl
 
-theorem facts_of_pre (hs : (popInlineContract abi).pre s) : Facts cx s := by
+theorem facts_of_pre (hs : (popInlineContract inlineAbi).pre s) : Facts cx s := by
   have := (pre_iff cx (s := s) hv rfl rfl).mp hs
-  exact facts_of_world rfl (.inl rfl) this.2.1 this.2.2
+  exact facts_of_world hX (.inl rfl) this.2.1 this.2.2
 
 theorem ofNat_toNat64 (v : BitVec 64) : BitVec.ofNat 64 v.toNat = v := by
   rw [BitVec.ofNat_toNat, BitVec.setWidth_eq]
@@ -349,9 +351,9 @@ theorem popped (hp : Pre s k) (hi : cx.InRange s) (ht : ¬ tst s = 0) :
   have hwm := hp.facts.word_mag hi hsl
   rw [hmag] at hcm hwm
   refine ⟨.stack (magBase (2 ^ k) (wvi s)) (items (2 ^ k) s.mem (wvi s)).dropLast, ?_, ?_, ?_, ?_⟩
-  · simp only [Spec.Slab.Ctx.popResult, hi, ↓reduceIte, Spec.Slab.Ctx.mag, hp.slots, mem_of (c := cx) rfl, hp.w]
+  · simp only [Spec.Slab.Ctx.popResult, hi, ↓reduceIte, Spec.Slab.Ctx.mag, hp.slots, mem_of (c := cx) hX, hp.w]
     exact hpop
-  · rw [csField_of (c := cx) rfl, ← hp.word]
+  · rw [csField_of (c := cx) hX, ← hp.word]
     exact frame_two s.mem _ _ _ _
   · show (mEnd s).readW (cx.word s) 64 = _
     rw [mEnd, ← hp.word, Mem.readW_writeW_self64, hp.w]
@@ -372,7 +374,7 @@ theorem ret_zero (σ : State) : (σ.setReg32 .rax 0).gpr .rax = 0 := by
 
 /-- A miss changes only `rseq_cs`. -/
 theorem unchanged_cs : Unchanged [cx.csField s] (cx.mem s) (m1 s) := by
-  rw [csField_of (c := cx) rfl, mem_of (c := cx) rfl]; exact frame_m1
+  rw [csField_of (c := cx) hX, mem_of (c := cx) hX]; exact frame_m1
 
 theorem missed_C (hi : ¬ cx.InRange s) : cx.PopMissed s (σC s) := by
   refine ⟨?_, unchanged_cs⟩
@@ -380,18 +382,18 @@ theorem missed_C (hi : ¬ cx.InRange s) : cx.PopMissed s (σC s) := by
 
 theorem missed_T (hp : Pre s k) (hi : cx.InRange s) (ht : tst s = 0) : cx.PopMissed s (σT s) := by
   refine ⟨?_, unchanged_cs⟩
-  simp only [Spec.Slab.Ctx.popResult, hi, ↓reduceIte, Spec.Slab.Ctx.mag, hp.slots, mem_of (c := cx) rfl, hp.w]
+  simp only [Spec.Slab.Ctx.popResult, hi, ↓reduceIte, Spec.Slab.Ctx.mag, hp.slots, mem_of (c := cx) hX, hp.w]
   exact (pop_eq_none_iff (dvd_marker hp.hk') (hp.ok hi)).mpr ((test_iff hp.hk hp.hk' (wvi s) (s.params "mask") hp.mask).mp ht)
 
-theorem post_eq (s' : State) : (popInlineContract abi).post s s' ↔
+theorem post_eq (s' : State) : (popInlineContract inlineAbi).post s s' ↔
     ((∃ v, cx.Popped s s' v ∧ s'.gpr .rax = v) ∨ (cx.PopMissed s s' ∧ s'.gpr .rax = 0)) :=
   post_iff cx hv s s'
 
-theorem correct (hs : (popInlineContract abi).pre s) :
+theorem correct (hs : (popInlineContract inlineAbi).pre s) :
     (∃ s', Exec isa popInline s s' ∧ inlineTarget.abiPreserved s s' ∧
-      (popInlineContract abi).post s s') ∨
+      (popInlineContract inlineAbi).post s s') ∨
     (∃ t s', ExecExit isa popInline s t s' ∧ inlineTarget.abiPreserved s s' ∧
-      (popInlineContract abi).exit t s s') := by
+      (popInlineContract inlineAbi).exit t s s') := by
   have h := facts_of_pre hs
   obtain ⟨k, hp⟩ := pre_of h
   refine .inl ?_
@@ -408,13 +410,13 @@ theorem correct (hs : (popInlineContract abi).pre s) :
 /-! ### Where it may be aborted -/
 
 theorem abortOk (h : Facts cx s) {p : State} (hm : Mid scratchI s (m1 s) p) :
-    armed p ∧ inlineTarget.abiPreserved s p ∧ (popInlineContract abi).abort s p ∧
-      ∀ p', inlineTarget.rely p p' → (popInlineContract abi).env p p' →
-        (popInlineContract abi).pre p' := by
-  refine ⟨armed_of_mid h.toArm (xs := []) frame_m1 m1_cs (by simp) hm, inline_abi hm, ?_,
-    fun p' hr he =>
-      retry rfl hv (fun _ => rfl) (fun _ => rfl) (by decide) h.pre hm (by decide) hr he⟩
-  refine (abort_iff cx hv s p).mpr ⟨rfl, ?_⟩
+    armed p ∧ inlineTarget.abiPreserved s p ∧ (popInlineContract inlineAbi).abort s p ∧
+      ∀ p', inlineTarget.rely p p' → (popInlineContract inlineAbi).env p p' →
+        (popInlineContract inlineAbi).pre p' := by
+  obtain ⟨hip, hre⟩ := retry hX hv (post := fun s s' => _) (fun _ => rfl) (fun _ => rfl) (by decide)
+    h.pre hm (by decide) (by decide) frame_m1 (harmless_cs1 hX h.pre)
+  refine ⟨armed_of_mid h.toArm (xs := []) frame_m1 m1_cs (by simp) hm, inline_abi hm, ?_, hre⟩
+  refine (abort_iff cx hv s p).mpr ⟨rfl, ?_, hip⟩
   show Unchanged [cx.csField s] (cx.mem s) p.mem
   rw [hm.mem]; exact unchanged_cs
 
@@ -429,17 +431,17 @@ theorem wordAddr_eq (hp : Pre s k) :
   rw [hp.word]; rfl
 
 theorem test_eq : BitVec.ofNat 32 (wvi s).toNat &&& BitVec.ofNat 32 (cx.testMask s 0) = tst s := by
-  simp only [Spec.Slab.Ctx.testMask, param_of (c := cx) rfl, BitVec.ofNat_toNat, tst]; rfl
+  simp only [Spec.Slab.Ctx.testMask, param_of (c := cx) hX, BitVec.ofNat_toNat, tst]; rfl
 
-theorem trace_ok (hs : (popInlineContract abi).pre s) :
-    (popInlineContract abi).trace s (Code.events isa popInline s) := by
+theorem trace_ok (hs : (popInlineContract inlineAbi).pre s) :
+    (popInlineContract inlineAbi).trace s (Code.events isa popInline s) := by
   have h := facts_of_pre hs
   obtain ⟨k, hp⟩ := pre_of h
   show cx.PopTrace s (Code.events isa (.rseq arm body) s)
   simp only [Code.events, execBlock_arm h.toArm, events_arm h.toArm]
   refine ⟨(o s).toNat, s.csDesc.toNat, (cpu32 s).toNat, (wvi s).toNat, 0, (x s).toNat, ?_⟩
-  simp only [Spec.Slab.Ctx.headTrace, Spec.Slab.Ctx.rd, Spec.Slab.Ctx.wr, tp_of (c := cx) rfl,
-    sym_of (c := cx) rfl, test_eq, ofNat_toNat64, addr8, addr4, rsName]
+  simp only [Spec.Slab.Ctx.headTrace, Spec.Slab.Ctx.rd, Spec.Slab.Ctx.wr, tp_of (c := cx) hX,
+    sym_of (c := cx) hX, test_eq, ofNat_toNat64, addr8, addr4, rsName]
   by_cases hi : cx.InRange s
   · have hi' : (cpu32 s).toNat < SLAB_COUNT := (inRange_iff.mp hi)
     rw [wordAddr_eq hp]
@@ -449,8 +451,8 @@ theorem trace_ok (hs : (popInlineContract abi).pre s) :
   · have hi' : ¬ (cpu32 s).toNat < SLAB_COUNT := fun h' => hi (inRange_iff.mpr h')
     rw [events_C hp hi]; simp [hi']
 
-theorem rseqOk (hs : (popInlineContract abi).pre s) :
-    RseqOk inlineTarget popInline (popInlineContract abi) s := by
+theorem rseqOk (hs : (popInlineContract inlineAbi).pre s) :
+    RseqOk inlineTarget popInline (popInlineContract inlineAbi) s := by
   have h := facts_of_pre hs
   obtain ⟨k, hp⟩ := pre_of h
   have ht := trace_ok hs
@@ -482,7 +484,7 @@ def clobbers : List String := ["rax", "rcx", "r8", "r9", "r10", "r11"]
 
 theorem names : ∀ r ∈ scratchI, r.name ∈ clobbers := by decide
 
-theorem clobbersOk (hs : (popInlineContract abi).pre s) :
+theorem clobbersOk (hs : (popInlineContract inlineAbi).pre s) :
     (∀ s', Exec isa popInline s s' →
       preservedExcept (clobbers ++ (if popInlineSig.ret.isSome then ["rax"] else [])) s s') ∧
     (∀ t s', ExecExit isa popInline s t s' → preservedExcept clobbers s s') ∧

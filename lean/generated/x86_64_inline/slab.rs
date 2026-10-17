@@ -87,9 +87,9 @@ pub(crate) const WORD_BYTES: usize = 8;
 /// # Safety
 ///
 /// * glibc must have registered the calling thread's rseq area, as it does before the thread can run code that allocates.
-/// * `CLASS` must be below 512, and `MASK` the mask `8 * n - 16` of the class's magazines, of `n = 2^k` slots for 2 ≤ k ≤ 16.
-/// * In each of the 8192 slabs of `SLABS`, the class's slab word must be 0, a marker (a word whose low 19 bits are 1), or the address of a slot other than slot 0 of a magazine of the class (`8 * n` bytes, aligned to `8 * n`).
-/// * The thread's `rseq_cs`, the class's slab word for its CPU, and the magazine it names must not overlap each other, `__rseq_offset`, the thread's `cpu_id`, the mask's entry in `MAG_MASKS`, or the return address on the stack; none may wrap around the end of the address space (`VG.Spec.Slab.Ctx.regions`).
+/// * `CLASS` must be below 512, and `MASK` the mask `8 * n - 16` of that class's magazines, of `n = 2^k` slots for 2 ≤ k ≤ 16.
+/// * None of `SLABS`, the thread's `rseq_cs` and `cpu_id` and `__rseq_offset` may overlap the 128 bytes of stack below the stack pointer (the red zone) or the 8 bytes at it or wrap around the end of the address space, nor overlap another of them, but where both are only read (`cpu_id` and `__rseq_offset`) (`VG.Spec.Slab.Ctx.Layout`).
+/// * In each of the 8192 slabs of `SLABS`, the class's slab word must be 0, a marker (a word whose low 19 bits are 1), or the address of a slot other than slot 0 of a magazine of the class (`8 * n` bytes, aligned to `8 * n`), whose pointers are not 0 (a pop returns 0 for none) and which does not overlap `SLABS`, the thread's `rseq_cs` and `cpu_id`, `__rseq_offset` or the 128 bytes of stack below the stack pointer (the red zone) or the 8 bytes at it, nor wrap around the end of the address space. Every thread and the drainer must keep this from when the function is called until it returns: the function may be aborted and restarted on any CPU in between (`VG.Spec.Slab.Ctx.inv`).
 #[inline(always)]
 pub(crate) unsafe fn slab_pop<const CLASS: usize, const MASK: u32>() -> usize {
     let ret: usize;
@@ -119,9 +119,9 @@ pub(crate) unsafe fn slab_pop<const CLASS: usize, const MASK: u32>() -> usize {
 /// # Safety
 ///
 /// * glibc must have registered the calling thread's rseq area, as it does before the thread can run code that allocates.
-/// * `CLASS` must be below 512, and `MASK` the mask `8 * n - 16` of the class's magazines, of `n = 2^k` slots for 2 ≤ k ≤ 16.
-/// * In each of the 8192 slabs of `SLABS`, the class's slab word must be 0, a marker (a word whose low 19 bits are 1), or the address of a slot other than slot 0 of a magazine of the class (`8 * n` bytes, aligned to `8 * n`).
-/// * The thread's `rseq_cs`, the class's slab word for its CPU, and the magazine it names must not overlap each other, `__rseq_offset`, the thread's `cpu_id`, the mask's entry in `MAG_MASKS`, or the return address on the stack; none may wrap around the end of the address space (`VG.Spec.Slab.Ctx.regions`).
+/// * `CLASS` must be below 512, and `MASK` the mask `8 * n - 16` of that class's magazines, of `n = 2^k` slots for 2 ≤ k ≤ 16.
+/// * None of `SLABS`, the thread's `rseq_cs` and `cpu_id` and `__rseq_offset` may overlap the 128 bytes of stack below the stack pointer (the red zone) or the 8 bytes at it or wrap around the end of the address space, nor overlap another of them, but where both are only read (`cpu_id` and `__rseq_offset`) (`VG.Spec.Slab.Ctx.Layout`).
+/// * In each of the 8192 slabs of `SLABS`, the class's slab word must be 0, a marker (a word whose low 19 bits are 1), or the address of a slot other than slot 0 of a magazine of the class (`8 * n` bytes, aligned to `8 * n`), whose pointers are not 0 (a pop returns 0 for none) and which does not overlap `SLABS`, the thread's `rseq_cs` and `cpu_id`, `__rseq_offset` or the 128 bytes of stack below the stack pointer (the red zone) or the 8 bytes at it, nor wrap around the end of the address space. Every thread and the drainer must keep this from when the function is called until it returns: the function may be aborted and restarted on any CPU in between (`VG.Spec.Slab.Ctx.inv`).
 #[inline(always)]
 pub(crate) unsafe fn slab_push<const CLASS: usize, const MASK: u32>(p: usize) -> bool {
     unsafe {

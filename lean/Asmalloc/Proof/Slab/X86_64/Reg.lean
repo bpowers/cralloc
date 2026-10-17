@@ -20,16 +20,17 @@ namespace VG.Proof.Slab.X86_64
 open VG.X86_64 VG.Spec.Slab VG.Impl.Slab.X86_64
 
 theorem withConsts_nil : abi.withConsts [] = abi := rfl
+theorem withConsts_nil_inline : inlineAbi.withConsts [] = inlineAbi := rfl
 
 theorem popInline_verified :
     Verified inlineTarget popInline (popInlineApi.contract (inlineTarget.abi.withConsts []) 0) := by
-  show Verified inlineTarget popInline (popInlineContract (abi.withConsts []))
-  rw [withConsts_nil]; exact PopInline.verified
+  show Verified inlineTarget popInline (popInlineContract (inlineAbi.withConsts []))
+  rw [withConsts_nil_inline]; exact PopInline.verified
 
 theorem pushInline_verified :
     Verified inlineTarget pushInline (pushInlineApi.contract (inlineTarget.abi.withConsts []) 0) := by
-  show Verified inlineTarget pushInline (pushInlineContract (abi.withConsts []))
-  rw [withConsts_nil]; exact PushInline.verified
+  show Verified inlineTarget pushInline (pushInlineContract (inlineAbi.withConsts []))
+  rw [withConsts_nil_inline]; exact PushInline.verified
 
 theorem popTable_verified :
     Verified target popTable (popApi.contract (target.abi.withConsts []) 0) := by
@@ -46,16 +47,16 @@ theorem popInline_witnessOk :
     ∀ o ∈ popInline.outcomes, ∃ w ∈ PopInline.witnesses,
       (popInlineApi.contract (inlineTarget.abi.withConsts []) 0).pre w ∧
         Visits inlineTarget.isa popInline w o.1 o.2 := by
-  show (∃ w ∈ PopInline.witnesses, (popInlineContract (abi.withConsts [])).pre w) ∧ _
-  rw [withConsts_nil]; exact PopInline.witnessOk
+  show (∃ w ∈ PopInline.witnesses, (popInlineContract (inlineAbi.withConsts [])).pre w) ∧ _
+  rw [withConsts_nil_inline]; exact PopInline.witnessOk
 
 theorem pushInline_witnessOk :
     (∃ w ∈ PushInline.witnesses, (pushInlineApi.contract (inlineTarget.abi.withConsts []) 0).pre w) ∧
     ∀ o ∈ pushInline.outcomes, ∃ w ∈ PushInline.witnesses,
       (pushInlineApi.contract (inlineTarget.abi.withConsts []) 0).pre w ∧
         Visits inlineTarget.isa pushInline w o.1 o.2 := by
-  show (∃ w ∈ PushInline.witnesses, (pushInlineContract (abi.withConsts [])).pre w) ∧ _
-  rw [withConsts_nil]; exact PushInline.witnessOk
+  show (∃ w ∈ PushInline.witnesses, (pushInlineContract (inlineAbi.withConsts [])).pre w) ∧ _
+  rw [withConsts_nil_inline]; exact PushInline.witnessOk
 
 theorem popTable_witnessOk :
     (∃ w ∈ PopTable.witnesses, (popApi.contract (target.abi.withConsts []) 0).pre w) ∧
@@ -80,8 +81,8 @@ theorem popInline_clobbersOk : inlineTarget.inline = true → ∀ s,
         inlineTarget.preservedExcept PopInline.clobbers s s') ∧
       (∀ p ∈ popInline.abortStates inlineTarget.isa s,
         inlineTarget.preservedExcept PopInline.clobbers s p) := fun _ s hs => by
-  have hs' : (popInlineContract abi).pre s := by
-    rw [← withConsts_nil]; exact hs
+  have hs' : (popInlineContract inlineAbi).pre s := by
+    rw [← withConsts_nil_inline]; exact hs
   exact PopInline.clobbersOk hs'
 
 theorem pushInline_clobbersOk : inlineTarget.inline = true → ∀ s,
@@ -93,8 +94,8 @@ theorem pushInline_clobbersOk : inlineTarget.inline = true → ∀ s,
         inlineTarget.preservedExcept PushInline.clobbers s s') ∧
       (∀ p ∈ pushInline.abortStates inlineTarget.isa s,
         inlineTarget.preservedExcept PushInline.clobbers s p) := fun _ s hs => by
-  have hs' : (pushInlineContract abi).pre s := by
-    rw [← withConsts_nil]; exact hs
+  have hs' : (pushInlineContract inlineAbi).pre s := by
+    rw [← withConsts_nil_inline]; exact hs
   exact PushInline.clobbersOk hs'
 
 end VG.Proof.Slab.X86_64
