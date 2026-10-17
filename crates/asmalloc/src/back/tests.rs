@@ -79,10 +79,10 @@ fn fill_hands_out_distinct_aligned_writable_slots_in_address_order() {
     assert_eq!(back.lookup(slots[0].wrapping_add(1)), None);
 }
 
-/// With 8-byte slots the leaf bitmap of a region fills a page of its own, ahead of the page the
+/// With 8-byte slots the leaf bitmap of a region fills pages of its own, ahead of the page the
 /// header shares with the summary, so it is committed only as carves need it. Freeing slots
-/// writes it; the simulator fails the test if a page was written before it was committed (at
-/// the next commit, purge or unmap of that page, at the latest when the heap is dropped).
+/// writes it; the simulator's memory is inaccessible until committed, so a write the carve did
+/// not commit for kills the test.
 #[test]
 fn the_leaf_bitmap_is_committed_before_it_is_written() {
     let state = state::<Standard>();
@@ -90,13 +90,6 @@ fn the_leaf_bitmap_is_committed_before_it_is_written() {
     let class = small(8);
     let mut slots = fill(&back, class, 3000);
     assert_eq!(slots.len(), 3000);
-    let region = back.space().locate(slots[0]).unwrap().region;
-    let meta = back.space().metadata(region);
-    let page = Standard::GEOMETRY.page_size();
-    assert!(
-        state.os().is_writable(meta, page),
-        "the leaf bitmap's first page"
-    );
     back.launder(class, &mut slots);
     assert_eq!(fill(&back, class, 3000).len(), 3000);
     back.trim();
@@ -183,10 +176,11 @@ fn freeing_a_foreign_pointer_aborts() {
 fn regions_are_assigned_as_a_class_grows() {
     let state = state::<Standard>();
     let back = state.get_or_reserve().unwrap();
-    // 8 KiB slots, eight to a 64 KiB region.
+    // 8 KiB slots: enough for two full regions and a few in a third.
     let class = small(8 << 10);
-    let slots = fill(&back, class, 20);
-    assert_eq!(slots.len(), 20);
+    let per = back.space().plan().slots_per_region(class.class()) as usize;
+    let slots = fill(&back, class, 2 * per + 4);
+    assert_eq!(slots.len(), 2 * per + 4);
     let regions: BTreeSet<usize> = slots
         .iter()
         .map(|&p| back.space().locate(p).unwrap().region.index())
@@ -239,21 +233,21 @@ fn large_slots_say_when_they_are_zero() {
     let state = state::<Native>();
     let back = state.get_or_reserve().unwrap();
     let class = large(64 << 10);
-    let Block { ptr, zeroed } = back.alloc(class).unwrap();
+    let Block { ptr, zeroed } = back.alloc(class, class.size()).unwrap();
     assert!(zeroed && painted(ptr.as_ptr(), class.size(), 0));
     paint(ptr.as_ptr(), class.size(), 7);
     back.free(ptr, class);
     assert_eq!(back.retained(), class.size());
-    let again = back.alloc(class).unwrap();
+    let again = back.alloc(class, class.size()).unwrap();
     assert_eq!(again.ptr, ptr);
     assert!(!again.zeroed);
     assert!(painted(ptr.as_ptr(), class.size(), 7));
     // A second slot, so the first is not the region's top: purging works from any page.
-    let other = back.alloc(class).unwrap();
+    let other = back.alloc(class, class.size()).unwrap();
     back.free(again.ptr, class);
     assert!(back.trim() >= class.size());
     assert_eq!(back.retained(), 0);
-    let purged = back.alloc(class).unwrap();
+    let purged = back.alloc(class, class.size()).unwrap();
     assert_eq!(purged.ptr, ptr);
     assert!(purged.zeroed && painted(ptr.as_ptr(), class.size(), 0));
     back.free_by_address(purged.ptr);
@@ -273,7 +267,9 @@ fn large_slots_past_the_cap_are_purged_and_come_back_zeroed() {
     let class = large(64 << 10);
     let cap = retained_cap(Native::GEOMETRY);
     let n = 3 * cap / class.size();
-    let blocks: Vec<Block> = (0..n).map(|_| back.alloc(class).unwrap()).collect();
+    let blocks: Vec<Block> = (0..n)
+        .map(|_| back.alloc(class, class.size()).unwrap())
+        .collect();
     assert!(blocks.iter().all(|b| b.zeroed));
     for b in &blocks {
         paint(b.ptr.as_ptr(), class.size(), 0x5a);
@@ -287,7 +283,9 @@ fn large_slots_past_the_cap_are_purged_and_come_back_zeroed() {
     let returned = before - os.resident_bytes();
     assert!(returned >= (n * class.size()).saturating_sub(cap) - class.size());
     let mut zeroed = 0;
-    let again: Vec<Block> = (0..n).map(|_| back.alloc(class).unwrap()).collect();
+    let again: Vec<Block> = (0..n)
+        .map(|_| back.alloc(class, class.size()).unwrap())
+        .collect();
     for b in &again {
         if b.zeroed {
             zeroed += 1;
@@ -312,6 +310,59 @@ fn large_slots_past_the_cap_are_purged_and_come_back_zeroed() {
     );
 }
 
+/// A large object's size is recorded when it is allocated and resized, and its usable size is
+/// that rounded up to a page, never the whole slot; a small object's is its class size.
+#[test]
+#[cfg_attr(miri, ignore)]
+fn large_objects_report_their_recorded_size() {
+    let state = state::<Native>();
+    let back = state.get_or_reserve().unwrap();
+    let page = Native::GEOMETRY.page_size();
+    let class = large(64 << 10);
+    let block = back.alloc(class, 50_000).unwrap();
+    let p = block.ptr.as_ptr();
+    assert_eq!(back.size(p), Some(50_000));
+    assert_eq!(
+        back.usable_size(p),
+        Some(50_000usize.next_multiple_of(page))
+    );
+    back.resize(block.ptr, 60_001);
+    assert_eq!(back.size(p), Some(60_001));
+    assert_eq!(
+        back.usable_size(p),
+        Some(60_001usize.next_multiple_of(page))
+    );
+    back.resize(block.ptr, class.size());
+    assert_eq!(back.usable_size(p), Some(class.size()));
+    back.free(block.ptr, class);
+    let again = back.alloc(class, 10).unwrap();
+    assert_eq!(again.ptr, block.ptr);
+    assert_eq!(
+        back.usable_size(p),
+        Some(page),
+        "the new size, not the old one"
+    );
+    let region = back.space().plan().region_size();
+    let run = back.alloc_run(2 * region + 5, 8).unwrap();
+    assert_eq!(back.size(run.as_ptr()), Some(2 * region + 5));
+    back.resize(run, 3 * region);
+    assert_eq!(back.usable_size(run.as_ptr()), Some(3 * region));
+    let small_slot = fill(&back, small(48), 1)[0];
+    assert_eq!(back.usable_size(small_slot), Some(48));
+    back.resize(core::ptr::NonNull::new(small_slot).unwrap(), 10);
+    assert_eq!(back.size(small_slot), Some(48));
+}
+
+#[test]
+#[should_panic(expected = "beyond the object's slot")]
+fn a_resize_past_the_slot_aborts() {
+    let state = state::<Native>();
+    let back = state.get_or_reserve().unwrap();
+    let class = large(64 << 10);
+    let block = back.alloc(class, 1).unwrap();
+    back.resize(block.ptr, class.size() + 1);
+}
+
 #[test]
 fn runs_hold_objects_bigger_than_a_region() {
     let state = state::<Standard>();
@@ -319,7 +370,9 @@ fn runs_hold_objects_bigger_than_a_region() {
     let region = back.space().plan().region_size();
     let ptr = back.alloc_run(3 * region + 1, 8).unwrap();
     assert_eq!(back.lookup(ptr.as_ptr()), Some(Kind::Run(4)));
-    assert_eq!(back.usable_size(ptr.as_ptr()), Some(4 * region));
+    assert_eq!(back.size(ptr.as_ptr()), Some(3 * region + 1));
+    let page = back.space().plan().geometry().page_size();
+    assert_eq!(back.usable_size(ptr.as_ptr()), Some(3 * region + page));
     assert!(state.os().is_writable(ptr, 4 * region));
     assert!(painted(ptr.as_ptr(), 4 * region, 0));
     paint(ptr.as_ptr(), 4 * region, 3);
@@ -356,13 +409,14 @@ fn freeing_a_run_tail_aborts() {
 fn the_heap_runs_out_and_recovers() {
     let state = state::<Standard>();
     let back = state.get_or_reserve().unwrap();
-    // 32 KiB slots, two to a region.
+    // 32 KiB slots, in every object region.
     let class = small(32 << 10);
-    let all = 2 * back.space().plan().objects();
+    let plan = back.space().plan();
+    let all = plan.slots_per_region(class.class()) as usize * plan.objects();
     let mut slots = fill(&back, class, all + 5);
     assert_eq!(slots.len(), all);
     assert!(fill(&back, class, 1).is_empty());
-    assert!(back.alloc(class.class()).is_none());
+    assert!(back.alloc(class.class(), 1).is_none());
     assert!(back.alloc_run(1, 8).is_none());
     let mut some = slots.split_off(all - 3);
     back.launder(class, &mut some);
@@ -376,7 +430,7 @@ fn a_refused_commit_gives_null_and_nothing_else() {
     let class = small(128);
     state.os().set_faults(Call::Commit, Faults::ALWAYS);
     assert!(fill(&back, class, 10).is_empty());
-    assert!(back.alloc(large(64 << 10)).is_none());
+    assert!(back.alloc(large(64 << 10), 1).is_none());
     assert!(back.alloc_run(1, 8).is_none());
     state.os().set_faults(Call::Commit, Faults::NONE);
     let slots = fill(&back, class, 10);
@@ -462,7 +516,7 @@ fn heartbeats_keep_purging_while_over_the_cap() {
     // Large slots, one to a region; free them one at a time so that the frees after the one
     // that crosses the cap do not purge, then let heartbeats finish.
     let blocks: Vec<Block> = (0..3 * cap / class.size())
-        .map(|_| back.alloc(class).unwrap())
+        .map(|_| back.alloc(class, class.size()).unwrap())
         .collect();
     for block in &blocks {
         paint(block.ptr.as_ptr(), class.size(), 1);
@@ -568,7 +622,7 @@ fn shadow_run<S: Shape>(seed: u64, steps: usize, faults: bool) {
             }
             3 if !larges.is_empty() => {
                 let class = larges[rng.below(larges.len())];
-                if let Some(block) = back.alloc(class) {
+                if let Some(block) = back.alloc(class, class.size()) {
                     if block.zeroed {
                         assert!(painted(block.ptr.as_ptr(), class.size(), 0), "{class:?}");
                     }
@@ -694,7 +748,7 @@ fn threads_never_share_a_slot() {
                         assert!(held.lock().unwrap().insert(p.addr()), "a slot held twice");
                         paint(p, class.size(), stamp);
                     }
-                    let block = back.alloc(big);
+                    let block = back.alloc(big, big.size());
                     if let Some(b) = block {
                         assert!(held.lock().unwrap().insert(b.ptr.addr().get()));
                         paint(b.ptr.as_ptr(), big.size(), stamp);

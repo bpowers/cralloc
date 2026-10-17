@@ -15,11 +15,10 @@
 //!   the depot calls to fill and empty magazines.
 //! - [`Back::alloc`] and [`Back::free`] serve one slot of any class straight from the bitmaps:
 //!   always for large classes, and for small ones when a thread has no per-CPU cache. A large
-//!   allocation says whether the slot is known to read as zero.
+//!   allocation says whether the slot is known to read as zero, and records the object's size,
+//!   one word per slot out of band; [`Back::resize`] updates it and [`Back::size`] reads it.
 //! - [`Back::alloc_run`] and [`Back::free_run`] serve objects bigger than a region as runs of
 //!   whole regions. [`Back::lookup`] and [`Back::usable_size`] find what an address is.
-//! - [`Back::record_size`] and [`Back::recorded_size`] keep the size a large object's owner
-//!   last asked for, which its block may far exceed (`size`).
 //! - [`Back::heartbeat`] does one bounded step of purging when retained memory is over the cap,
 //!   and [`Back::trim`] returns everything it can.
 //!
@@ -38,7 +37,6 @@ pub mod policy;
 mod purge;
 mod region;
 mod run;
-mod size;
 mod tree;
 mod word;
 
@@ -77,11 +75,12 @@ pub struct State<O: Os> {
     retained: AtomicUsize,
     /// Where the next purge step looks: see `purge`.
     purge_at: AtomicU32,
-    /// The size recorded for each run, by its head region (`size`).
-    run_sizes: [AtomicUsize; MAX_REGIONS],
     /// Bytes purged since the current pass over all regions began, plus one for each purge the
     /// OS refused: zero at the end of a pass means what is left is fragmentation.
     pass_progress: AtomicUsize,
+    /// The current size of each run, at its head region's index. Out of the regions'
+    /// metadata, which must stay all zero for a region that may later go to a class.
+    run_sizes: [AtomicUsize; MAX_REGIONS],
 }
 
 impl<O: Os> State<O> {
@@ -92,9 +91,9 @@ impl<O: Os> State<O> {
             table: RegionTable::new(),
             classes: [const { ClassState::new() }; COUNT],
             retained: AtomicUsize::new(0),
-            run_sizes: [const { AtomicUsize::new(0) }; MAX_REGIONS],
             purge_at: AtomicU32::new(0),
             pass_progress: AtomicUsize::new(0),
+            run_sizes: [const { AtomicUsize::new(0) }; MAX_REGIONS],
         }
     }
 

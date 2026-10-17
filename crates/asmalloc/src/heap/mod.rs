@@ -124,18 +124,11 @@ impl<O: Os> Heap<O> {
     }
 
     /// The bytes the caller may use of the block starting at `ptr`: the class size of a small
-    /// one; for a large one, the size last asked for rounded up to a page, never more than its
-    /// slot or run, which may be far bigger. `None` if no slot or run starts there.
+    /// one; for a large one, the size last asked for rounded up to a page, never the whole slot
+    /// or run, which may be far bigger (`Back::usable_size`). `None` if no slot or run starts
+    /// there.
     pub(crate) fn usable_size(&self, ptr: *const u8) -> Option<usize> {
-        let back = self.back()?;
-        let block = back.usable_size(ptr)?;
-        Some(match back.recorded_size(ptr) {
-            Some(size) => {
-                let page = back.space().plan().geometry().page_size();
-                size.next_multiple_of(page).min(block)
-            }
-            None => block,
-        })
+        self.back()?.usable_size(ptr)
     }
 
     /// Allocates a block for `layout`; null if there is no memory.

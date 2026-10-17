@@ -74,7 +74,8 @@ fn headers_round_trip() {
 /// Every class that fits a region of a plan has a layout, and the layout fits in the
 /// region's metadata block: the leaf bitmap at offset zero covers every slot, each summary level
 /// has a bit for every word below and ends in one top word, the sections do not overlap, the
-/// clean bitmap covers every page, large classes have a zero bitmap covering every slot, and the
+/// clean bitmap covers every page, large classes have a zero bitmap and a size word for every
+/// slot, and the
 /// part committed at assignment covers everything after the leaf bitmap.
 pub(super) fn layouts_fit(plan: Plan) {
     let class = any_class();
@@ -111,8 +112,10 @@ pub(super) fn layouts_fit(plan: Plan) {
         Some(at) => {
             assert!(!class.is_small() && at == end);
             end += layout.leaf_words();
+            assert!(layout.size_word(0) == Some(end));
+            end += slots;
         }
-        None => assert!(class.is_small()),
+        None => assert!(class.is_small() && layout.size_word(0).is_none()),
     }
     assert!(end == layout.total_words());
     let (start, stop) = layout.fixed_commit();

@@ -45,7 +45,7 @@ impl<O: Os> Source for BackSource<'_, O> {
     }
 
     fn alloc_one(&self, class: SmallClass) -> Option<NonNull<u8>> {
-        self.0.alloc(class.class()).map(|block| block.ptr)
+        self.0.alloc(class.class(), class.size()).map(|block| block.ptr)
     }
 
     fn free_one(&self, class: SmallClass, object: NonNull<u8>) {

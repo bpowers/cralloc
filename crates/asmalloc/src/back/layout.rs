@@ -12,8 +12,8 @@
 //! ...                         clean bitmap: one bit per page, set means purged and untouched
 //! ...                         zero bitmap, large classes only: one bit per slot, set means
 //!                             free and known to read as zero
-//! ...                         sizes, large classes only: one word per slot, the size its
-//!                             owner last asked for (`size.rs`)
+//! ...                         sizes, large classes only: one word per slot, the size the
+//!                             object in it was last allocated or resized to
 //! ```
 //!
 //! The leaf bitmap comes first so that it can be committed a page at a time as the region grows,
@@ -52,7 +52,7 @@ pub(crate) struct Layout {
     clean_count: u32,
     /// Word offset of the zero bitmap, or 0 if the class has none (small classes).
     zero: u32,
-    /// Word offset of the sizes, or 0 if the class has none (small classes).
+    /// Word offset of the per-slot sizes, or 0 if the class has none (small classes).
     sizes: u32,
     total: u32,
     page_shift: u8,
@@ -166,9 +166,10 @@ impl Layout {
         let (zero, sizes) = if class.is_small() {
             (0, 0)
         } else {
-            let at = next;
-            next += count[0] + slots;
-            (at, at + count[0])
+            let zero = next;
+            let sizes = zero + count[0];
+            next = sizes + slots;
+            (zero, sizes)
         };
         if next as usize * WORD_BYTES > plan.metadata_size() {
             return None;
@@ -254,6 +255,16 @@ impl Layout {
         self.clean_count
     }
 
+    /// Word offset of the size word of slot `slot`, if the class records sizes (large classes).
+    #[inline(always)]
+    pub(crate) const fn size_word(&self, slot: u32) -> Option<u32> {
+        if self.sizes == 0 {
+            None
+        } else {
+            Some(self.sizes + slot)
+        }
+    }
+
     /// Word offset of zero-bitmap word `index`, if the class has a zero bitmap.
     #[inline(always)]
     pub(crate) const fn zero_word(&self, index: u32) -> Option<u32> {
@@ -261,16 +272,6 @@ impl Layout {
             None
         } else {
             Some(self.zero + index)
-        }
-    }
-
-    /// Word offset of the size word of slot `index`, if the class records sizes.
-    #[inline(always)]
-    pub(crate) const fn size_word(&self, index: u32) -> Option<u32> {
-        if self.sizes == 0 || index >= self.slots {
-            None
-        } else {
-            Some(self.sizes + index)
         }
     }
 
@@ -633,8 +634,8 @@ mod tests {
         let g = Standard::GEOMETRY.largest_plan();
         let layout = Layout::new(g, Class::SMALLEST).unwrap();
         assert_eq!(layout.leaf_commit(0), 0);
-        // One 1 KiB page holds 128 eight-byte slots: two leaf words, rounded to a page.
-        assert_eq!(layout.leaf_commit(1), 1024);
+        // One page of eight-byte slots needs a few leaf words, rounded up to a page.
+        assert_eq!(layout.leaf_commit(1), Standard::GEOMETRY.page_size());
         let all = layout.leaf_commit(layout.region_pages());
         assert!(all >= layout.leaf_words() as usize * WORD_BYTES);
         let (start, end) = layout.fixed_commit();

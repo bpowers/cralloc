@@ -16,10 +16,11 @@
 //! so zeroed allocation clears only what it must.
 //!
 //! Every allocation and in-place resize of a large object records the size asked for
-//! (`Back::record_size`). What the caller may use is that size rounded up to a page, so a block
+//! (`Back::alloc`, `Back::alloc_run`, `Back::resize`). What the caller may use is that size rounded up to a page, so a block
 //! with headroom never reports, or makes anyone touch, the room it has not been asked for.
 
 use super::{Grant, Heap, Zero, small};
+use crate::back::Kind;
 use crate::classes::Class;
 use crate::front::Routines;
 use crate::os::Os;
@@ -66,8 +67,7 @@ impl<O: Os> Heap<O> {
         let back = self.start()?;
         match place(layout, back.space().plan()) {
             Place::Slot(class) => {
-                let block = back.alloc(class)?;
-                back.record_size(block.ptr, layout.size());
+                let block = back.alloc(class, layout.size())?;
                 let len = self
                     .usable_size(block.ptr.as_ptr())
                     .unwrap_or(layout.size());
@@ -87,7 +87,6 @@ impl<O: Os> Heap<O> {
             // A run is always fresh or purged memory, so it reads as zero.
             Place::Run { size, align } => {
                 let ptr = back.alloc_run(size, align)?;
-                back.record_size(ptr, layout.size());
                 let len = self.usable_size(ptr.as_ptr()).unwrap_or(layout.size());
                 Some(Grant { ptr, len })
             }
@@ -110,7 +109,11 @@ impl<O: Os> Heap<O> {
         if let Some(class) = small(layout) {
             return class.size();
         }
-        match self.back().and_then(|back| back.usable_size(ptr.as_ptr())) {
+        let whole = self.back().and_then(|back| match back.lookup(ptr.as_ptr())? {
+            Kind::Slot(class) => Some(class.size()),
+            Kind::Run(regions) => Some(regions << back.space().plan().region_shift()),
+        });
+        match whole {
             Some(len) => len,
             None => self
                 .os()
@@ -166,7 +169,7 @@ impl<O: Os> Heap<O> {
         // A block with headroom records the size asked for, not the room it was given.
         let grant = match self.back() {
             Some(back) if small(new).is_none() => {
-                back.record_size(grant.ptr, new.size());
+                back.resize(grant.ptr, new.size());
                 let len = self.usable_size(grant.ptr.as_ptr()).unwrap_or(new.size());
                 Grant { len, ..grant }
             }
@@ -186,7 +189,7 @@ impl<O: Os> Heap<O> {
     fn resize_large_in_place(&self, ptr: NonNull<u8>, new: Layout, zero: bool) -> Grant {
         let before = self.usable_size(ptr.as_ptr()).unwrap_or(0);
         if let Some(back) = self.back() {
-            back.record_size(ptr, new.size());
+            back.resize(ptr, new.size());
         }
         let len = self.usable_size(ptr.as_ptr()).unwrap_or(new.size());
         if zero && len > before {

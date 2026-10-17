@@ -11,3 +11,5 @@ mod syscall;
 
 pub(crate) use glibc::__rseq_offset;
 pub use kernel::LinuxOs;
+#[cfg(any(test, feature = "sim"))]
+pub(crate) use kernel::protect_none;

@@ -346,7 +346,12 @@ fn large_frees_find_the_class_from_the_address() {
         let p = heap.alloc(l);
         let q = heap.realloc(p, l, 100 << 10);
         assert!(!q.is_null());
-        let slot = heap.heap.back().unwrap().usable_size(q).unwrap();
+        let slot = match heap.heap.back().unwrap().lookup(q).unwrap() {
+            crate::back::Kind::Slot(class) => class.size(),
+            crate::back::Kind::Run(regions) => {
+                regions << heap.heap.back().unwrap().space().plan().region_shift()
+            }
+        };
         assert!(slot >= HEADROOM * (100 << 10), "{slot}");
         // What the caller may use is what it asked for, to a page, not the headroom.
         let page = heap

@@ -153,28 +153,82 @@ impl<'a, O: Os> Back<'a, O> {
     }
 
     /// Allocates one slot of `class` straight from the bitmaps: a freed slot if the class has
-    /// one, lowest address first, else a carved one. `None` if the heap is out of address space,
-    /// the OS refused memory, or a slot of the class does not fit in a region (use
-    /// [`Back::alloc_run`]).
-    pub fn alloc(&self, class: Class) -> Option<Block> {
+    /// one, lowest address first, else a carved one. For a large class, records `size` as the
+    /// object's current size (see [`Back::size`]); it must be at most the class size, or the
+    /// process aborts. Small classes record nothing and ignore `size`. `None` if the heap is out
+    /// of address space, the OS refused memory, or a slot of the class does not fit in a region
+    /// (use [`Back::alloc_run`]).
+    pub fn alloc(&self, class: Class, size: usize) -> Option<Block> {
+        if size > class.size() {
+            self.abort("an allocation larger than its class");
+        }
         let host = self.host(class)?;
-        if let Some(taken) = tree::claim(&host, 1) {
+        let (region, slot, zeroed) = if let Some(taken) = tree::claim(&host, 1) {
             let settled = region::settle(&host, taken.region, taken.word, taken.bits);
             self.unretain(settled.resident);
             let slot = taken.word * BITS + taken.bits.trailing_zeros();
-            return Some(Block {
-                ptr: self.space.slot(taken.region, class, slot),
-                zeroed: settled.zeroed != 0,
-            });
+            (taken.region, slot, settled.zeroed != 0)
+        } else {
+            let (region, first, _) = self.carve(&host, class, 1)?;
+            (region, first, true)
+        };
+        if let Some(at) = host.layout().size_word(slot) {
+            host.meta(region, at).store(size as u64);
         }
-        let (region, first, _) = self.carve(&host, class, 1)?;
         Some(Block {
-            ptr: self.space.slot(region, class, first),
-            zeroed: true,
+            ptr: self.space.slot(region, class, slot),
+            zeroed,
         })
     }
 
-    /// Frees one slot of `class` to its bitmap. Aborts as [`Back::launder`] does.
+    /// Records `size` as the current size of the large object or run starting at `ptr`, after
+    /// the caller resized it in place. Aborts if `ptr` is not the start of a handed-out large
+    /// slot or a run, or if `size` exceeds the slot or run. Small slots record no size, so for
+    /// them this does nothing.
+    pub fn resize(&self, ptr: NonNull<u8>, size: usize) {
+        match self.lookup(ptr.as_ptr()) {
+            Some(Kind::Slot(class)) if class.is_small() => {}
+            Some(Kind::Slot(class)) => {
+                let Some(host) = self.host(class) else {
+                    self.abort("a resize in a class that has no regions");
+                };
+                let (region, slot) = self.validate(&host, ptr.as_ptr(), class, &mut None);
+                if size > class.size() {
+                    self.abort("a resize beyond the object's slot");
+                }
+                if let Some(at) = host.layout().size_word(slot) {
+                    host.meta(region, at).store(size as u64);
+                }
+            }
+            Some(Kind::Run(regions)) => {
+                if size > regions << self.space.plan().region_shift() {
+                    self.abort("a resize beyond the object's run");
+                }
+                self.set_run_size(ptr, size);
+            }
+            None => self.abort("a resize of a pointer that is not the start of a heap object"),
+        }
+    }
+
+    /// The current size of the object starting at `ptr`: the recorded size of a large object or
+    /// run (what it was last allocated or resized to), the class size of a small one. `None` if
+    /// `ptr` is not the start of a slot or run. Only meaningful for an object the caller holds.
+    pub fn size(&self, ptr: *const u8) -> Option<usize> {
+        match self.lookup(ptr)? {
+            Kind::Slot(class) if class.is_small() => Some(class.size()),
+            Kind::Slot(class) => {
+                let host = self.host(class)?;
+                let location = self.space.locate(ptr)?;
+                let slot = self.space.plan().slot_at(location, class)?;
+                let at = host.layout().size_word(slot)?;
+                Some(host.meta(location.region, at).load() as usize)
+            }
+            Kind::Run(_) => Some(self.run_size(ptr)),
+        }
+    }
+
+    /// Frees one slot of `class` to its bitmap. Aborts as [`Back::launder`] does. A large slot's
+    /// recorded size is left as it was; the next allocation of the slot writes it.
     pub fn free(&self, ptr: NonNull<u8>, class: Class) {
         self.release_all(class, &mut [ptr.as_ptr()]);
     }
@@ -205,11 +259,15 @@ impl<'a, O: Os> Back<'a, O> {
         }
     }
 
-    /// The usable size of the object starting at `ptr`: the whole slot or run.
+    /// The usable size of the object starting at `ptr`, for `malloc_usable_size`: the class
+    /// size of a small slot; for a large slot or a run, its recorded size rounded up to a page,
+    /// never the whole slot, so a caller that fills what it may use touches about what it asked
+    /// for.
     pub fn usable_size(&self, ptr: *const u8) -> Option<usize> {
+        let size = self.size(ptr)?;
         match self.lookup(ptr)? {
-            Kind::Slot(class) => Some(class.size()),
-            Kind::Run(regions) => Some(regions << self.space.plan().region_shift()),
+            Kind::Slot(class) if class.is_small() => Some(size),
+            _ => Some(size.next_multiple_of(self.space.plan().geometry().page_size())),
         }
     }
 

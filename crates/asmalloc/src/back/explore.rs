@@ -293,6 +293,11 @@ impl Word for TWord {
         }
         result
     }
+
+    fn store(&self, value: u64) {
+        step();
+        self.value.store(value, SeqCst);
+    }
 }
 
 impl TestWord for TWord {

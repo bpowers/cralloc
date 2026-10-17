@@ -22,7 +22,10 @@ path that moved; on the in-place path and on failure the caller keeps the block.
 **Preconditions.** `[ptr + before, ptr + len)` is valid for writes and nobody else uses it.
 
 **Proof.** The block is the caller's live large block (`resize`'s contract), resized in place
-because the new size fits its slot or run. `len` is `usable_size` after the new size was
-recorded: the new size rounded up to a page, capped at the slot or run length, so the range
-lies in the block, which is committed whole (a carved slot's pages, or a committed run).
-`before < len`.
+because the new size fits its slot or run. `len` is `Back::usable_size` after
+`Back::resize` recorded the new size: the new size rounded up to a page. The new size fits the
+slot or run (the in-place test), and a large slot's size and a run's length are multiples of
+the page size (large classes are `q << e` with `2^e` at least 8 KiB, pages are at most 4 KiB in
+every geometry that hosts a large class's slot, and runs are whole regions), so the rounded
+size does too, and the range lies in the block, which is committed whole (a carved slot's
+pages, or a committed run). `before < len`.
