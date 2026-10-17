@@ -5,7 +5,10 @@
 //! foundations: [`classes`] (size classes and magazine shapes, pure arithmetic), [`space`] (where
 //! regions, metadata and magazines live in the reserved address space) and [`os`] (what the
 //! allocator asks of the operating system, real or simulated). [`back`] keeps the class regions
-//! and their free bitmaps, and moves memory to and from the OS.
+//! and their free bitmaps, and moves memory to and from the OS; [`depot`] exchanges magazines;
+//! [`front`] holds the per-CPU slabs and the routines. The heap joins them into one allocator
+//! behind `Asmalloc`, the handle a program installs with `#[global_allocator]`, and behind
+//! `SimAsmalloc` and `SimHeap` (feature `sim`), the same heap over the simulated OS with twins.
 
 #![no_std]
 #![deny(unsafe_op_in_unsafe_fn)]
