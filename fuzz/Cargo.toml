@@ -1,0 +1,40 @@
+[package]
+name = "asmalloc-fuzz"
+version = "0.0.0"
+edition = "2024"
+license = "Apache-2.0 OR BSD-3-Clause"
+publish = false
+description = "cargo-fuzz targets that drive the testkit's model from raw bytes"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+# Fuzzing needs nightly anyway, and nightly has the `Allocator` trait.
+asmalloc-testkit = { path = "../crates/asmalloc-testkit", features = ["allocator-api"] }
+
+[[bin]]
+name = "model"
+path = "fuzz_targets/model.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "model_c"
+path = "fuzz_targets/model_c.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "model_allocator"
+path = "fuzz_targets/model_allocator.rs"
+test = false
+doc = false
+bench = false
+
+# Not a member of the root workspace: it needs nightly and libfuzzer-sys, which must not slow
+# down or destabilise the merge gate.
+[workspace]

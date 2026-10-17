@@ -240,14 +240,19 @@ const REALLOC: u32 = 4;
 /// C's natural alignment.
 ///
 /// The usable size is `malloc_usable_size`, and the model writes and checks all of it, so an
-/// implementation that over-reports usable bytes is caught as an overlap.
+/// implementation that over-reports usable bytes is caught as an overlap. The exception is a
+/// zero-size request, whose result C forbids accessing whatever `malloc_usable_size` says
+/// (AddressSanitizer reports one usable byte and poisons it).
 #[derive(Clone, Copy, Debug)]
 pub struct ViaC<C>(pub C);
 
 impl<C: CAbi> ViaC<C> {
     /// # Safety
-    /// `p` is a live block of this implementation.
+    /// `p` is a live block of this implementation, allocated for `size` bytes.
     unsafe fn usable(&self, p: NonNull<u8>, size: usize) -> usize {
+        if size == 0 {
+            return 0;
+        }
         // SAFETY: caller contract.
         unsafe { self.0.malloc_usable_size(p.as_ptr().cast()) }.unwrap_or(size)
     }
@@ -367,6 +372,9 @@ impl<C: CAbi> Subject for ViaC<C> {
     }
 
     unsafe fn usable_size(&self, block: Held) -> Option<usize> {
+        if block.size == 0 {
+            return None;
+        }
         // SAFETY: the block is live (caller contract).
         unsafe { self.0.malloc_usable_size(block.ptr.as_ptr().cast()) }
     }
