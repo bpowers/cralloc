@@ -1,0 +1,162 @@
+#!/usr/bin/env bash
+# Runs real programs with the LD_PRELOAD library and compares each one's output and exit status
+# with a run of the same program without it. On demand only; not part of the gate.
+#
+# Usage: scripts/preload-check [name...]   (names as printed, or globs; default all)
+#   PRELOAD_CHECK_MEM   memory cap per run, default 4G (never above 16G)
+#   PRELOAD_CHECK_KEEP  set to keep the work directory
+#   PRELOAD_CHECK_GIT   repository for the git checks, default this one; a larger one (a
+#                       checkout under third_party/, say) works git harder
+#
+# Every run goes through scripts/memlimit, one at a time. A difference, a crash or a timeout is
+# a FAIL; the outputs of a failed check are kept in the work directory, which is printed.
+set -uo pipefail
+here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+root="$(cd "$here/.." && pwd)"
+mem="${PRELOAD_CHECK_MEM:-4G}"
+programs="$root/crates/asmalloc-preload/tests/programs"
+repo="${PRELOAD_CHECK_GIT:-$root}"
+
+cargo build --quiet --release -p asmalloc-preload --manifest-path "$root/Cargo.toml" || exit 1
+lib="$root/target/release/libasmalloc_preload.so"
+work="$(mktemp -d "${TMPDIR:-/tmp}/preload-check.XXXXXX")"
+bin="$work/bin"
+mkdir -p "$bin"
+failed=()
+selected=("$@")
+
+wanted() {
+  [ ${#selected[@]} -eq 0 ] && return 0
+  local s
+  # shellcheck disable=SC2053 # a name may be a glob
+  for s in "${selected[@]}"; do [[ "$1" == $s ]] && return 0; done
+  return 1
+}
+
+# run MODE OUT CMD...: one capped run, plain or preloaded; stdout to OUT, stderr to OUT.err,
+# the exit status appended to OUT.
+run() {
+  local mode="$1" out="$2"
+  shift 2
+  local status
+  if [ "$mode" = preload ]; then
+    MEMLIMIT_QUIET=1 "$here/memlimit" -m "$mem" -t 20m -- \
+      env LD_PRELOAD="$lib" "$@" >"$out" 2>"$out.err"
+  else
+    MEMLIMIT_QUIET=1 "$here/memlimit" -m "$mem" -t 20m -- \
+      env -u LD_PRELOAD "$@" >"$out" 2>"$out.err"
+  fi
+  status=$?
+  echo "exit status $status" >>"$out"
+}
+
+# check NAME CMD...: the program must print the same and exit the same with and without the
+# library. CMD may use $MODE (plain or preload) to keep its scratch files apart.
+check() {
+  local name="$1"
+  shift
+  wanted "$name" || return 0
+  local start=$SECONDS
+  export MODE=plain
+  run plain "$work/$name.plain" "$@"
+  export MODE=preload
+  run preload "$work/$name.preload" "$@"
+  if cmp -s "$work/$name.plain" "$work/$name.preload"; then
+    printf 'PASS  %-24s %4ss  %s\n' "$name" $((SECONDS - start)) "$(tail -1 "$work/$name.preload")"
+  else
+    printf 'FAIL  %-24s outputs differ:\n' "$name"
+    diff "$work/$name.plain" "$work/$name.preload" | head -20 | sed 's/^/      /'
+    tail -5 "$work/$name.preload.err" | sed 's/^/      stderr: /'
+    failed+=("$name")
+  fi
+}
+
+# expect NAME STATUS CMD...: the program, preloaded only, must exit with STATUS.
+expect() {
+  local name="$1" want="$2"
+  shift 2
+  wanted "$name" || return 0
+  run preload "$work/$name.preload" "$@"
+  local got
+  got="$(tail -1 "$work/$name.preload")"
+  if [ "$got" = "exit status $want" ]; then
+    printf 'PASS  %-24s %s\n' "$name" "$got"
+  else
+    printf 'FAIL  %-24s %s, wanted %s\n' "$name" "$got" "$want"
+    tail -5 "$work/$name.preload.err" | sed 's/^/      stderr: /'
+    failed+=("$name")
+  fi
+}
+
+cc -O2 -o "$bin/interposed" "$programs/interposed.c" || exit 1
+cc -O2 -o "$bin/foreign" "$programs/foreign.c" || exit 1
+cc -O2 -pthread -o "$bin/threads" "$programs/threads.c" || exit 1
+cc -O2 -pthread -o "$bin/forks" "$programs/forks.c" || exit 1
+cc -O2 -pthread -o "$bin/signals" "$programs/signals.c" || exit 1
+cc -O2 -pthread -o "$bin/dl" "$programs/dl.c" -ldl || exit 1
+cc -O2 -shared -fPIC -o "$bin/libdlib.so" "$programs/dlib.c" || exit 1
+g++ -O2 -pthread -std=c++20 -o "$bin/cxx" "$programs/cxx.cpp" || exit 1
+
+if [ "$(LD_PRELOAD="$lib" "$bin/interposed")" != asmalloc ]; then
+  echo "FAIL  the library does not serve malloc in a preloaded program"
+  exit 1
+fi
+echo "work directory: $work"
+
+# Data for the compressors: binaries (compressible, varied) and text.
+data="$work/data"
+{ cat /usr/bin/bash /usr/bin/python3* /usr/lib64/libc.so.6 2>/dev/null; seq 1 3000000; } >"$data"
+
+export LC_ALL=C
+
+check shell-pipeline bash -c '
+  seq 1 300000 | awk "{ print \$1 % 977, \$1 }" | sort -k1,1n -k2,2n | uniq -c -w4 | sort -rn | head -3
+  find /usr/include -type f -name "*.h" | sort | xargs cat | wc -lc
+  find /usr/include -type f | sort | xargs sha256sum | sha256sum
+  ls -lR /usr/share/doc 2>/dev/null | sha256sum
+  grep -rh "#include" /usr/include/linux 2>/dev/null | sort | uniq -c | sort -rn | head -3
+  tr a-z A-Z </usr/include/stdio.h | rev | sort -u | md5sum
+  printf "%s\n" {1..20000} | paste -sd" " | wc -c
+'
+check coreutils-sort bash -c 'sort --parallel=8 -S 64M "$1" | sha256sum; sort -n --parallel=8 "$1" | uniq -c | sort -rn | head -3' _ "$data"
+check python-threads python3 "$programs/py_threads.py"
+check git-log git -C "$repo" log --stat --format="%H %an %s" -n 2000
+check git-objects bash -c 'git -C "$1" rev-list --all --objects | sort | sha256sum; git -C "$1" grep -c -e fn -e int | sort | sha256sum' _ "$repo"
+check git-repack bash -c '
+  dir="$1/clone-$MODE"; rm -rf "$dir"
+  git clone -q --no-local "$2" "$dir" &&
+  git -C "$dir" repack -adfq --threads=8 --window=50 &&
+  git -C "$dir" fsck --strict --no-progress 2>&1 &&
+  git -C "$dir" status --porcelain && git -C "$dir" rev-list --all --objects | sort | sha256sum
+  rm -rf "$dir"' _ "$work" "$repo"
+check xz-threads bash -c 'xz -T8 -6 -c "$1" | tee "$2/xz-$MODE" | sha256sum; xz -T8 -dc "$2/xz-$MODE" | sha256sum; rm -f "$2/xz-$MODE"' _ "$data" "$work"
+check zstd-threads bash -c 'zstd -q -T8 -15 -c "$1" | tee "$2/zst-$MODE" | sha256sum; zstd -q -T8 -dc "$2/zst-$MODE" | sha256sum; rm -f "$2/zst-$MODE"' _ "$data" "$work"
+check cxx "$bin/cxx"
+check threads "$bin/threads" 20 16 20000
+check threads-exit "$bin/threads" exit
+check forks "$bin/forks" 8 40
+check dlopen "$bin/dl" "$bin/libdlib.so" 200
+check perl perl -e 'my %h; for my $i (1..300000) { push @{$h{$i % 1000}}, "x" x ($i % 97) } my $n = 0; $n += length(join "", @{$h{$_}}) for keys %h; print "$n\n"'
+check cargo-build bash -c '
+  dir="$1/crate-$MODE"; rm -rf "$dir"; mkdir -p "$dir/src"
+  printf "[package]\nname = \"tiny\"\nversion = \"0.1.0\"\nedition = \"2024\"\n" >"$dir/Cargo.toml"
+  printf "use std::collections::BTreeMap;\nfn main() {\n    let mut m = BTreeMap::new();\n    for i in 0..100_000u64 { *m.entry(i %% 1000).or_insert(0u64) += i; }\n    let s: Vec<String> = (0..2000).map(|i| format!(\"{i:x}\")).collect();\n    println!(\"{} {}\", m.values().sum::<u64>(), s.join(\"\").len());\n}\n" >"$dir/src/main.rs"
+  cargo build -q --release --offline --manifest-path "$dir/Cargo.toml" --target-dir "$dir/target" &&
+  "$dir/target/release/tiny"
+  rm -rf "$dir"' _ "$work"
+# Without rseq every thread takes the slow path (design: "Without rseq").
+check no-rseq-threads env GLIBC_TUNABLES=glibc.pthread.rseq=0 "$bin/threads" 5 16 20000
+check no-rseq-forks env GLIBC_TUNABLES=glibc.pthread.rseq=0 "$bin/forks" 4 20
+check no-rseq-python env GLIBC_TUNABLES=glibc.pthread.rseq=0 python3 "$programs/py_threads.py"
+expect signals 0 "$bin/signals"
+# SIGABRT: 128 + 6.
+expect foreign-pointer 134 "$bin/foreign"
+expect interior-pointer 134 "$bin/foreign" interior
+
+if [ ${#failed[@]} -eq 0 ]; then
+  [ -n "${PRELOAD_CHECK_KEEP:-}" ] || rm -rf "$work"
+  echo "preload-check: all passed"
+else
+  echo "preload-check: failed: ${failed[*]} (outputs in $work)"
+  exit 1
+fi

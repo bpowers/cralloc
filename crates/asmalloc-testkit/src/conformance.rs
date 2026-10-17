@@ -74,6 +74,30 @@ pub enum Call {
         /// Size argument.
         size: usize,
     },
+    /// `reallocarray` of a filled `malloc(from)` block to `n * size` bytes.
+    ReallocArray {
+        /// Size of the original block.
+        from: usize,
+        /// Element count.
+        n: usize,
+        /// Element size.
+        size: usize,
+    },
+    /// `malloc` of the first size, then `realloc` to each of the others in turn, checking at
+    /// every step that the bytes both sizes cover were carried over and that the block is
+    /// aligned and as usable as asked.
+    ReallocChain(&'static [usize]),
+    /// `memalign(align, size)`.
+    Memalign {
+        /// Alignment argument.
+        align: usize,
+        /// Size argument.
+        size: usize,
+    },
+    /// `valloc(size)`.
+    Valloc(usize),
+    /// `pvalloc(size)`: page-aligned, and usable to the end of its last page.
+    Pvalloc(usize),
 }
 
 /// What the call must do.
@@ -130,6 +154,99 @@ const fn case(name: &'static str, call: Call, expect: Expect) -> Case {
 }
 
 const BLOCK: Expect = Expect::Block { align: 0 };
+const PAGE_ALIGNED: Expect = Expect::Block { align: PAGE };
+
+/// The page size on x86-64 Linux, which `valloc` and `pvalloc` align to.
+const PAGE: usize = 4096;
+
+/// Sizes that cross every kind of boundary: 8-byte classes, the 16-byte rule, class steps, the
+/// end of the small classes, large slots, and back down.
+const ACROSS_CLASSES: &[usize] = &[
+    1,
+    8,
+    9,
+    16,
+    17,
+    24,
+    25,
+    64,
+    65,
+    100,
+    1000,
+    4096,
+    4097,
+    32 << 10,
+    (32 << 10) + 1,
+    40 << 10,
+    1 << 20,
+    (1 << 20) + 1,
+    4 << 20,
+    100 << 10,
+    32 << 10,
+    40 << 10,
+    7,
+    1 << 20,
+    16,
+];
+
+/// Doubling from 8 bytes to 64 MiB, as a growing buffer does.
+const DOUBLING: &[usize] = &[
+    8,
+    16,
+    32,
+    64,
+    128,
+    256,
+    512,
+    1 << 10,
+    2 << 10,
+    4 << 10,
+    8 << 10,
+    16 << 10,
+    32 << 10,
+    64 << 10,
+    128 << 10,
+    256 << 10,
+    512 << 10,
+    1 << 20,
+    2 << 20,
+    4 << 20,
+    8 << 20,
+    16 << 20,
+    32 << 20,
+    64 << 20,
+];
+
+/// Shrinking from 64 MiB to 8 bytes, out of the large classes.
+const SHRINKING: &[usize] = &[
+    64 << 20,
+    16 << 20,
+    4 << 20,
+    1 << 20,
+    256 << 10,
+    64 << 10,
+    32 << 10,
+    8 << 10,
+    1 << 10,
+    100,
+    8,
+];
+
+/// Growth a little at a time across the end of the small classes and through large slots.
+const CREEPING: &[usize] = &[
+    30 << 10,
+    31 << 10,
+    32 << 10,
+    33 << 10,
+    34 << 10,
+    40 << 10,
+    41 << 10,
+    60 << 10,
+    100 << 10,
+    150 << 10,
+    160 << 10,
+    161 << 10,
+];
 const NO_MEMORY: Expect = Expect::Null { errno: ENOMEM };
 const BAD_ALIGN: Expect = Expect::Null { errno: EINVAL };
 
@@ -503,6 +620,143 @@ pub const CASES: &[Case] = &[
         Expect::Returns,
     ),
     case(
+        "realloc across every kind of class boundary keeps its bytes",
+        Call::ReallocChain(ACROSS_CLASSES),
+        BLOCK,
+    ),
+    case(
+        "realloc doubling from 8 bytes to 64 MiB keeps its bytes",
+        Call::ReallocChain(DOUBLING),
+        BLOCK,
+    ),
+    case(
+        "realloc shrinking from 64 MiB to 8 bytes keeps its bytes",
+        Call::ReallocChain(SHRINKING),
+        BLOCK,
+    ),
+    case(
+        "realloc creeping across the large boundary keeps its bytes",
+        Call::ReallocChain(CREEPING),
+        BLOCK,
+    ),
+    case(
+        "reallocarray 64 to 3 x 100 keeps 64",
+        Call::ReallocArray {
+            from: 64,
+            n: 3,
+            size: 100,
+        },
+        BLOCK,
+    ),
+    case(
+        "reallocarray 64 to 1 Mi x 2 keeps 64",
+        Call::ReallocArray {
+            from: 64,
+            n: 1 << 20,
+            size: 2,
+        },
+        BLOCK,
+    ),
+    case(
+        "reallocarray(p, SIZE_MAX, 2) overflows to ENOMEM and keeps p",
+        Call::ReallocArray {
+            from: 64,
+            n: SIZE_MAX,
+            size: 2,
+        },
+        NO_MEMORY,
+    ),
+    case(
+        "reallocarray(p, 2^32, 2^32) overflows to ENOMEM and keeps p",
+        Call::ReallocArray {
+            from: 64,
+            n: 1 << 32,
+            size: 1 << 32,
+        },
+        NO_MEMORY,
+    ),
+    case(
+        "reallocarray(p, 0, 8) frees or returns a unique pointer",
+        Call::ReallocArray {
+            from: 64,
+            n: 0,
+            size: 8,
+        },
+        Expect::NullOrUnique,
+    ),
+    case("memalign(8, 1)", ma(8, 1), Expect::Block { align: 8 }),
+    case("memalign(16, 1)", ma(16, 1), Expect::Block { align: 16 }),
+    case(
+        "memalign(64, 100)",
+        ma(64, 100),
+        Expect::Block { align: 64 },
+    ),
+    case(
+        "memalign(4096, 4097)",
+        ma(4096, 4097),
+        Expect::Block { align: 4096 },
+    ),
+    case(
+        "memalign(64 KiB, 1)",
+        ma(1 << 16, 1),
+        Expect::Block { align: 1 << 16 },
+    ),
+    case(
+        "memalign(2 MiB, 3 MiB)",
+        ma(1 << 21, 3 << 20),
+        Expect::Block { align: 1 << 21 },
+    ),
+    case("memalign(0, 100) is malloc(100)", ma(0, 100), BLOCK),
+    case(
+        "memalign(48, 100) rounds the alignment up to 64",
+        ma(48, 100),
+        Expect::Block { align: 64 },
+    ),
+    case(
+        "memalign(64, 0) is null or unique",
+        ma(64, 0),
+        Expect::NullOrUnique,
+    ),
+    case(
+        "memalign(64, SIZE_MAX) is ENOMEM",
+        ma(64, SIZE_MAX),
+        NO_MEMORY,
+    ),
+    case(
+        "memalign(SIZE_MAX, 1) is EINVAL",
+        ma(SIZE_MAX, 1),
+        BAD_ALIGN,
+    ),
+    case("valloc(1)", Call::Valloc(1), PAGE_ALIGNED),
+    case("valloc(5000)", Call::Valloc(5000), PAGE_ALIGNED),
+    case("valloc(1 MiB)", Call::Valloc(1 << 20), PAGE_ALIGNED),
+    case(
+        "valloc(0) is null or unique",
+        Call::Valloc(0),
+        Expect::NullOrUnique,
+    ),
+    case(
+        "valloc(SIZE_MAX) is ENOMEM",
+        Call::Valloc(SIZE_MAX),
+        NO_MEMORY,
+    ),
+    case("pvalloc(1) is a whole page", Call::Pvalloc(1), PAGE_ALIGNED),
+    case(
+        "pvalloc(4097) is two whole pages",
+        Call::Pvalloc(4097),
+        PAGE_ALIGNED,
+    ),
+    case(
+        "pvalloc(100 KB) is whole pages",
+        Call::Pvalloc(100_000),
+        PAGE_ALIGNED,
+    ),
+    case(
+        "pvalloc(SIZE_MAX) is ENOMEM",
+        Call::Pvalloc(SIZE_MAX),
+        NO_MEMORY,
+    ),
+    case(
         "free_aligned_sized of aligned_alloc(4096, 8192)",
         Call::FreeAlignedSized {
             align: 4096,
@@ -518,6 +772,10 @@ const fn pm(align: usize, size: usize) -> Call {
 
 const fn aa(align: usize, size: usize) -> Call {
     Call::AlignedAlloc { align, size }
+}
+
+const fn ma(align: usize, size: usize) -> Call {
+    Call::Memalign { align, size }
 }
 
 /// Run every case; returns each case with its verdict.
@@ -698,8 +956,125 @@ impl<C: CAbi + ?Sized> Runner<'_, C> {
                         ..Made::new(p, size, c.errno())
                     }
                 }
+                Call::ReallocArray { from, n, size } => {
+                    let old = c.malloc(from);
+                    if old.is_null() {
+                        return Err(format!("malloc({from}) failed"));
+                    }
+                    self.fill(old, from, SEED);
+                    c.set_errno(ERRNO_SENTINEL);
+                    let p = c.reallocarray(old, n, size).ok_or("no reallocarray")?;
+                    let errno = c.errno();
+                    match n.checked_mul(size) {
+                        Some(to) if !p.is_null() || to == 0 => Made {
+                            carried: Some((SEED, from, from.min(to))),
+                            ..Made::new(p, to, errno)
+                        },
+                        _ => Made {
+                            original: Some((old, SEED, from)),
+                            ..Made::new(p, n.wrapping_mul(size), errno)
+                        },
+                    }
+                }
+                Call::ReallocChain(sizes) => self.realloc_chain(sizes)?,
+                Call::Memalign { align, size } => {
+                    c.set_errno(ERRNO_SENTINEL);
+                    let p = c.memalign(align, size).ok_or("no memalign")?;
+                    Made {
+                        // glibc's reading: no constraint for 0, else the next power of two.
+                        align: align.max(1).checked_next_power_of_two().unwrap_or(1),
+                        ..Made::new(p, size, c.errno())
+                    }
+                }
+                Call::Valloc(size) => {
+                    c.set_errno(ERRNO_SENTINEL);
+                    let p = c.valloc(size).ok_or("no valloc")?;
+                    Made {
+                        align: PAGE,
+                        ..Made::new(p, size, c.errno())
+                    }
+                }
+                Call::Pvalloc(size) => {
+                    c.set_errno(ERRNO_SENTINEL);
+                    let p = c.pvalloc(size).ok_or("no pvalloc")?;
+                    // The whole of the last page is the caller's.
+                    let pages = size.checked_next_multiple_of(PAGE).unwrap_or(size);
+                    Made {
+                        align: PAGE,
+                        ..Made::new(p, pages, c.errno())
+                    }
+                }
                 other => return Err(format!("{other:?} does not allocate")),
             })
+        }
+    }
+
+    /// The [`Call::ReallocChain`] walk; returns the last block, with what it must carry.
+    ///
+    /// # Safety
+    /// Calls the C functions; the caller frees what is returned.
+    unsafe fn realloc_chain(&self, sizes: &[usize]) -> Result<Made, String> {
+        let c = self.c;
+        let Some((&first, rest)) = sizes.split_first() else {
+            return Err("an empty chain".into());
+        };
+        // SAFETY (block): every block is filled within its size and freed on failure; the last
+        // goes back to the caller.
+        unsafe {
+            let mut p = c.malloc(first);
+            if p.is_null() {
+                return Err(format!("malloc({first}) failed"));
+            }
+            let mut seed = SEED;
+            let mut len = first;
+            self.fill(p, len, seed);
+            for (step, &next) in rest.iter().enumerate() {
+                let q = c.realloc(p, next);
+                if q.is_null() {
+                    c.free(p);
+                    return Err(format!("realloc from {len} to {next} failed"));
+                }
+                let required = c_default_align(next);
+                let problem = if !q.addr().is_multiple_of(required) {
+                    Some(format!(
+                        "realloc to {next} gave {q:p}, not {required}-aligned"
+                    ))
+                } else if !self.holds(q, len, len.min(next), Contents::Pattern(seed)) {
+                    Some(format!("realloc from {len} to {next} lost bytes"))
+                } else {
+                    match c.malloc_usable_size(q) {
+                        Some(usable) if usable < next => {
+                            Some(format!("realloc to {next} has usable size {usable}"))
+                        }
+                        _ => None,
+                    }
+                };
+                if let Some(problem) = problem {
+                    c.free(q);
+                    return Err(problem);
+                }
+                seed = SEED ^ (step as u64 + 2);
+                self.fill(q, next, seed);
+                p = q;
+                len = next;
+            }
+            Ok(Made {
+                carried: Some((seed, len, len)),
+                ..Made::new(p, len, 0)
+            })
+        }
+    }
+
+    /// The function a case needs that the implementation lacks, if any.
+    fn missing(&self, call: Call) -> Option<&'static str> {
+        match call {
+            Call::ReallocArray { .. } if !self.c.has_reallocarray() => Some("no reallocarray"),
+            Call::Memalign { .. } | Call::Valloc(_) | Call::Pvalloc(_)
+                if !self.c.has_obsolete() =>
+            {
+                Some("no memalign, valloc and pvalloc")
+            }
+            _ => None,
         }
     }
 
@@ -758,6 +1133,9 @@ impl<C: CAbi + ?Sized> Runner<'_, C> {
     /// Calls the C functions.
     unsafe fn run(&self, case: &Case) -> Result<Verdict, String> {
         let c = self.c;
+        if let Some(why) = self.missing(case.call) {
+            return Ok(Verdict::Skip(why));
+        }
         // SAFETY (block): each arm makes calls with arguments their contracts allow and frees
         // what it made.
         unsafe {

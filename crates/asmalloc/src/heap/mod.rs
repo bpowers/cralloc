@@ -17,6 +17,7 @@
 //!   straight from the back end (`depot::slow`).
 //! - **Large objects** (`large.rs`) skip the caches and take their class from the address.
 
+mod address;
 mod large;
 mod source;
 
@@ -37,6 +38,10 @@ pub(crate) use global::{pop_slow, push_slow};
 pub use miri::Asmalloc;
 #[cfg(any(test, feature = "sim"))]
 pub use sim::{SimAsmalloc, SimHeap};
+
+pub(crate) use address::Found;
+#[cfg(all(target_os = "linux", target_arch = "x86_64", not(miri), not(kani)))]
+pub(crate) use address::process;
 
 use self::source::BackSource;
 use crate::back::{Back, State};

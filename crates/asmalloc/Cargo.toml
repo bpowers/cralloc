@@ -18,6 +18,12 @@ sim = []
 # into an executable (the linker gives it its own copy of the variable); a shared library that
 # enables it fails to link.
 executable = []
+# Export the C interface (`malloc`, `free` and the rest of `asmalloc::c`) under its C names
+# from this crate, so that a program linking it gets asmalloc as its C allocator too. The
+# preload library does not use this: it invokes `asmalloc::export_c_abi!` itself, because cargo
+# unifies features across a workspace and this one would also replace `malloc` in every test
+# binary built alongside it.
+c-abi = []
 # The `Allocator` trait for `Asmalloc` (and `SimHeap`). The trait is stable from Rust 1.100, so
 # until then this needs a nightly toolchain.
 allocator-api = []

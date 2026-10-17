@@ -8,24 +8,35 @@ use asmalloc_testkit::conformance::{CASES, Verdict, run_all, run_case};
 use asmalloc_testkit::subject::CFns;
 use asmalloc_testkit::target;
 
-#[test]
-fn the_c_functions_meet_every_conformance_case() {
-    let results = run_all(&target::c_fns());
+fn assert_all_pass(fns: &CFns) {
+    let results = run_all(fns);
     let mut failures = Vec::new();
     for (case, verdict) in &results {
         match verdict {
             Verdict::Pass => {}
-            Verdict::Skip(why) => eprintln!("skipped {}: {why}", case.name),
+            Verdict::Skip(why) => failures.push(format!("{}: skipped, {why}", case.name)),
             Verdict::Fail(how) => failures.push(format!("{}: {how}", case.name)),
         }
     }
     assert!(
         failures.is_empty(),
-        "{} of {} cases failed:\n{}",
+        "{}: {} of {} cases failed:\n{}",
+        fns.name,
         failures.len(),
         results.len(),
         failures.join("\n")
     );
+}
+
+#[test]
+fn the_c_functions_meet_every_conformance_case() {
+    assert_all_pass(&target::c_fns());
+}
+
+/// The cases are what the standards require, so the C library meets them too.
+#[test]
+fn the_c_library_meets_every_conformance_case() {
+    assert_all_pass(&CFns::LIBC);
 }
 
 // Broken implementations, each wrong in one way, to show the cases notice.
