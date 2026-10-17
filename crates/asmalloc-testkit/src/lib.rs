@@ -39,7 +39,7 @@ pub mod target;
 #[cfg(all(target_os = "linux", not(miri)))]
 mod sys;
 
-pub use driver::{Config, ForkPlan, Handoff, check, minimize, replay, run, run_bytes};
+pub use driver::{Config, ForkPlan, Handoff, check, generate, minimize, replay, run, run_bytes};
 pub use failure::{Failure, FailureKind, Trace};
 pub use model::Stats;
 pub use op::{BlockId, Op, Script};

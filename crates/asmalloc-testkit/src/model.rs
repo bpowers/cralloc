@@ -28,8 +28,11 @@ use crate::pattern::{self, Contents};
 use crate::shadow::Shadow;
 use crate::subject::{Grant, Held, Refused, Request, Subject};
 
-/// Blocks taken from the mailroom by one receive.
+/// Blocks taken from the mailroom by one receive, at most.
 const MAX_RECEIVE: usize = 8;
+/// Bytes past which a receive takes no further block, so a receiver near its budget does not
+/// take eight large blocks at once.
+const MAX_RECEIVE_BYTES: usize = 1 << 20;
 
 /// A live block and what the model wrote into it.
 #[derive(Debug)]
@@ -624,7 +627,7 @@ impl<'e, S: Subject + ?Sized> Model<'e, S> {
             return Ok(Effect::None);
         };
         let mut adopted = Vec::new();
-        for block in mail.collect(self.worker, from as usize, MAX_RECEIVE) {
+        for block in mail.collect(self.worker, from as usize, MAX_RECEIVE, MAX_RECEIVE_BYTES) {
             self.verify(Some(op), &block, "when received")?;
             adopted.push(self.insert(block));
         }

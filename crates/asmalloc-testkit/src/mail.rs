@@ -24,19 +24,42 @@ pub enum Handoff {
 /// Blocks a mailbox holds before a send bounces.
 pub const MAILBOX_CAPACITY: usize = 1024;
 
+#[derive(Debug, Default)]
+struct Mailbox {
+    blocks: VecDeque<Live>,
+    /// Requested bytes of the blocks held.
+    bytes: usize,
+}
+
+impl Mailbox {
+    fn pop(&mut self, newest_first: bool) -> Option<Live> {
+        let b = if newest_first {
+            self.blocks.pop_back()
+        } else {
+            self.blocks.pop_front()
+        }?;
+        self.bytes -= b.held.size;
+        Some(b)
+    }
+}
+
 /// One mailbox (or deque, for [`Handoff::Steal`]) per worker.
 #[derive(Debug)]
 pub struct Mailroom {
-    boxes: Box<[Mutex<VecDeque<Live>>]>,
+    boxes: Box<[Mutex<Mailbox>]>,
     handoff: Handoff,
+    byte_capacity: usize,
 }
 
 impl Mailroom {
-    /// Mailboxes for `workers` workers.
-    pub fn new(workers: usize, handoff: Handoff) -> Self {
+    /// Mailboxes for `workers` workers, each holding at most [`MAILBOX_CAPACITY`] blocks and,
+    /// beyond its first block, `byte_capacity` requested bytes. Blocks in a mailbox are live
+    /// memory that no worker's budget counts, so the cap keeps the run's memory bounded.
+    pub fn new(workers: usize, handoff: Handoff, byte_capacity: usize) -> Self {
         Mailroom {
-            boxes: (0..workers).map(|_| Mutex::new(VecDeque::new())).collect(),
+            boxes: (0..workers).map(|_| Mutex::default()).collect(),
             handoff,
+            byte_capacity,
         }
     }
 
@@ -45,7 +68,7 @@ impl Mailroom {
         self.handoff
     }
 
-    fn lock(&self, i: usize) -> MutexGuard<'_, VecDeque<Live>> {
+    fn lock(&self, i: usize) -> MutexGuard<'_, Mailbox> {
         self.boxes[i].lock().unwrap_or_else(PoisonError::into_inner)
     }
 
@@ -55,47 +78,40 @@ impl Mailroom {
             return Err(block);
         }
         let mut b = self.lock(to);
-        if b.len() >= MAILBOX_CAPACITY {
+        let full = b.blocks.len() >= MAILBOX_CAPACITY
+            || (!b.blocks.is_empty() && b.bytes + block.held.size > self.byte_capacity);
+        if full {
             return Err(block);
         }
-        b.push_back(block);
+        b.bytes += block.held.size;
+        b.blocks.push_back(block);
         Ok(())
     }
 
-    /// Up to `max` blocks for worker `me`. For [`Handoff::Steal`], its own newest blocks, or if
-    /// it has none, the oldest of worker `from`'s; otherwise the oldest in its own mailbox.
-    pub fn collect(&self, me: usize, from: usize, max: usize) -> Vec<Live> {
+    /// Blocks for worker `me`: at least one if any is available, and then more until `limit`
+    /// blocks or `limit_bytes` requested bytes are taken. For [`Handoff::Steal`], its own newest
+    /// blocks, or if it has none, the oldest of worker `from`'s; otherwise the oldest in its own
+    /// mailbox.
+    pub fn collect(&self, me: usize, from: usize, limit: usize, limit_bytes: usize) -> Vec<Live> {
         let mut out = Vec::new();
         if me >= self.boxes.len() {
             return out;
         }
-        if self.handoff == Handoff::Steal {
-            let mut own = self.lock(me);
-            while out.len() < max {
-                match own.pop_back() {
-                    Some(b) => out.push(b),
-                    None => break,
-                }
+        let take = |mailbox: &mut Mailbox, out: &mut Vec<Live>, newest_first: bool| {
+            let mut bytes = 0;
+            while out.len() < limit && (out.is_empty() || bytes < limit_bytes) {
+                let Some(b) = mailbox.pop(newest_first) else {
+                    break;
+                };
+                bytes += b.held.size;
+                out.push(b);
             }
-            drop(own);
-            let victim = from % self.boxes.len();
-            if out.is_empty() && victim != me {
-                let mut theirs = self.lock(victim);
-                while out.len() < max {
-                    match theirs.pop_front() {
-                        Some(b) => out.push(b),
-                        None => break,
-                    }
-                }
-            }
-        } else {
-            let mut own = self.lock(me);
-            while out.len() < max {
-                match own.pop_front() {
-                    Some(b) => out.push(b),
-                    None => break,
-                }
-            }
+        };
+        let steal = self.handoff == Handoff::Steal;
+        take(&mut self.lock(me), &mut out, steal);
+        let victim = from % self.boxes.len();
+        if steal && out.is_empty() && victim != me {
+            take(&mut self.lock(victim), &mut out, false);
         }
         out
     }
@@ -103,7 +119,7 @@ impl Mailroom {
     /// Everything still in any mailbox.
     pub fn drain_all(&self) -> Vec<Live> {
         (0..self.boxes.len())
-            .flat_map(|i| std::mem::take(&mut *self.lock(i)))
+            .flat_map(|i| std::mem::take(&mut *self.lock(i)).blocks)
             .collect()
     }
 }

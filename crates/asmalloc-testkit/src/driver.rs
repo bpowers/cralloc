@@ -26,7 +26,7 @@ use crate::model::{Effect, Model, Stats};
 use crate::op::{Op, Script};
 use crate::profile::Profile;
 use crate::shadow::Shadow;
-use crate::subject::Subject;
+use crate::subject::{Subject, ZeroSize};
 
 /// A seeded run.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -165,6 +165,27 @@ struct Worker<'e, S: ?Sized> {
     fork: Option<(ForkPlan, Config)>,
 }
 
+/// The mailboxes of a run of `cfg`, each holding up to one worker's share of the budget.
+fn mailroom(cfg: &Config) -> Mailroom {
+    Mailroom::new(
+        cfg.workers,
+        cfg.handoff,
+        cfg.profile.max_live_bytes / cfg.workers,
+    )
+}
+
+/// Worker `w`'s generator and entropy in a run of `cfg` whose block names start at `id_space`.
+fn stream_of(cfg: &Config, zero: ZeroSize, w: usize, id_space: u64) -> (Generator, Rng) {
+    let generator = Generator::new(
+        cfg.profile,
+        zero,
+        id_space | ((w as u64) << 40) | 1,
+        cfg.profile.max_live_bytes / cfg.workers,
+        exchange(cfg, w),
+    );
+    (generator, Rng::new(mix64(cfg.seed) ^ mix64(w as u64 + 1)))
+}
+
 impl<'e, S: Subject + ?Sized> Worker<'e, S> {
     fn generated(
         subject: &'e S,
@@ -174,15 +195,8 @@ impl<'e, S: Subject + ?Sized> Worker<'e, S> {
         w: usize,
         id_space: u64,
     ) -> Self {
-        let budget = cfg.profile.max_live_bytes / cfg.workers;
-        let generator = Generator::new(
-            cfg.profile,
-            subject.zero_size(),
-            id_space | ((w as u64 + 1) << 40),
-            budget,
-            exchange(cfg, w),
-        );
-        let entropy = AnyEntropy::Rng(Rng::new(mix64(cfg.seed) ^ mix64(w as u64 + 1)));
+        let (generator, rng) = stream_of(cfg, subject.zero_size(), w, id_space);
+        let entropy = AnyEntropy::Rng(rng);
         Worker {
             model: Model::new(subject, shadow, Some(mail), w),
             source: Source::Generated { generator, entropy },
@@ -376,7 +390,7 @@ fn assert_all_released(shadow: &Shadow) {
 pub fn run<S: Subject + ?Sized>(subject: &S, cfg: &Config) -> Result<Stats, Failure> {
     assert!(cfg.workers >= 1, "a run needs a worker");
     let shadow = Shadow::new();
-    let mail = Mailroom::new(cfg.workers, cfg.handoff);
+    let mail = mailroom(cfg);
     let mut workers: Vec<_> = (0..cfg.workers)
         .map(|w| Worker::generated(subject, &shadow, &mail, cfg, w, 0))
         .collect();
@@ -400,6 +414,20 @@ pub fn run<S: Subject + ?Sized>(subject: &S, cfg: &Config) -> Result<Stats, Fail
     result
 }
 
+/// The script a single-worker run of `profile` from `seed` draws for a subject that allows the
+/// zero sizes in `zero`, without running it. Replaying it does what [`run`] does, except that
+/// nothing feeds back: a zero-size allocation that returns null still has its later operations
+/// in the script, and replay skips them. This is how a seeded stream becomes a regression
+/// test.
+pub fn generate(profile: Profile, zero: ZeroSize, seed: u64, ops: usize) -> Script {
+    let (mut generator, mut rng) = stream_of(&Config::single(profile, seed, ops), zero, 0, 0);
+    Script(
+        (0..ops)
+            .map_while(|_| generator.next_op(&mut rng))
+            .collect(),
+    )
+}
+
 /// [`run`], panicking with the failure report.
 pub fn check<S: Subject + ?Sized>(subject: &S, cfg: &Config) -> Stats {
     run(subject, cfg).unwrap_or_else(|f| panic!("{f}"))
@@ -413,11 +441,11 @@ pub fn run_bytes<S: Subject + ?Sized>(
     data: &[u8],
 ) -> Result<Stats, Failure> {
     let shadow = Shadow::new();
-    let mail = Mailroom::new(1, Handoff::None);
+    let mail = Mailroom::new(1, Handoff::None, usize::MAX);
     let generator = Generator::new(
         profile,
         subject.zero_size(),
-        1 << 40,
+        1,
         profile.max_live_bytes,
         None,
     );
@@ -442,7 +470,7 @@ pub fn run_bytes<S: Subject + ?Sized>(
 /// Execute `script` exactly, then free what it left live.
 pub fn replay<S: Subject + ?Sized>(subject: &S, script: &Script) -> Result<Stats, Failure> {
     let shadow = Shadow::new();
-    let mail = Mailroom::new(1, Handoff::None);
+    let mail = Mailroom::new(1, Handoff::None, usize::MAX);
     let worker = Worker {
         model: Model::new(subject, &shadow, Some(&mail), 0),
         source: Source::Script(script.0.clone().into_iter()),
@@ -594,7 +622,7 @@ fn run_child<S: Subject + ?Sized>(w: &mut Worker<'_, S>, cfg: &Config) -> Result
         .model
         .shadow()
         .copy_after_fork(|owner| !own.contains(&owner));
-    let mail = Mailroom::new(cfg.workers, cfg.handoff);
+    let mail = mailroom(cfg);
     let mut workers: Vec<_> = (0..cfg.workers)
         .map(|i| Worker::generated(subject, &shadow, &mail, cfg, i, CHILD_IDS))
         .collect();

@@ -266,6 +266,11 @@ impl Generator {
                 k[i] = 0;
             }
         }
+        // Received blocks count against this worker's budget, so a consumer over it frees
+        // before it takes more; its producers' sends bounce meanwhile.
+        if self.live_bytes >= self.budget {
+            k[RECV] = 0;
+        }
         if k.iter().all(|&x| x == 0) {
             k[ALLOC] = 1;
         }

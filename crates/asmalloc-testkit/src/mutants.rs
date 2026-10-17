@@ -78,8 +78,10 @@ impl Kind {
     /// The failure kinds the model may report for this mutant.
     pub fn caught_as(self) -> &'static [FailureKind] {
         match self {
+            // The memory handed out wrongly can go to a resize of the very block it belongs
+            // to, which then comes back with its contents gone rather than overlapping.
             Kind::Overlapping | Kind::DoubleHandout | Kind::PrematureReuse => {
-                &[FailureKind::Overlap]
+                &[FailureKind::Overlap, FailureKind::LostContents]
             }
             Kind::Misaligned => &[FailureKind::Misaligned],
             // The overlap is caught when the next block is placed, unless a free in between
@@ -87,7 +89,13 @@ impl Kind {
             Kind::Short => &[FailureKind::Overlap, FailureKind::Corrupted],
             Kind::NoZeroFill => &[FailureKind::NotZeroed],
             Kind::LosesContents => &[FailureKind::LostContents],
-            Kind::Scribbler => &[FailureKind::Corrupted],
+            // On another thread the write can land between an allocation and its zero check,
+            // or during a resize, which the model reports as such.
+            Kind::Scribbler => &[
+                FailureKind::Corrupted,
+                FailureKind::NotZeroed,
+                FailureKind::LostContents,
+            ],
         }
     }
 
