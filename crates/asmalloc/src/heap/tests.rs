@@ -302,6 +302,15 @@ fn a_simulated_heap_serves_threads() {
 }
 
 #[test]
+fn threads_that_start_a_fresh_heap_together_agree_on_it() {
+    let rounds = if cfg!(miri) { 1 } else { 200 };
+    for _ in 0..rounds {
+        let heap = SimHeap::<Shape>::new();
+        threads(&heap, if cfg!(miri) { 20 } else { 300 });
+    }
+}
+
+#[test]
 fn a_thread_without_a_lease_is_served_by_the_back_end() {
     let heap = SimHeap::<Shape>::new();
     // Bounded, so that a lease that is handed out twice fails here instead of growing forever.
