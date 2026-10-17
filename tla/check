@@ -40,7 +40,7 @@ failed=0
 run() {
     local spec="$1" cfg="$2"; shift 2
     local expect="$*"
-    case "$spec $cfg" in *"$filter"*) ;; *) return ;; esac
+    case "$spec $cfg " in *"$filter"*) ;; *) return ;; esac
     local out="$tmp/$cfg.out"
     local start=$SECONDS
     $prefix "${tlc[@]}" -workers "$workers" -metadir "$tmp/$cfg.states" \
