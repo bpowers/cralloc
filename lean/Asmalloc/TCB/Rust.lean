@@ -645,6 +645,32 @@ def tableName (n : String) : Bool :=
   | [] => false
   | c :: cs => ('A' ≤ c && c ≤ 'Z') && cs.all fun c => ('A' ≤ c && c ≤ 'Z') || c.isDigit || c == '_'
 
+/-- The constants of the artifacts `as` (`Artifact.rustConsts`), by name,
+each once, in order of their names. -/
+def rustConstsOf (as : List Artifact) : List (String × IntTy × Nat) :=
+  let all := as.flatMap (·.rustConsts)
+  ((dedup (all.map (·.1))).mergeSort (· ≤ ·)).filterMap fun n => all.find? (·.1 == n)
+
+/-- A constant's name is a Rust constant's, its value fits its type, and the
+artifacts of a module that give a constant of that name give the same type
+and value. -/
+def checkRustConsts (as : List Artifact) (a : Artifact) : Except String Unit := do
+  for (n, ty, v) in a.rustConsts do
+    unless tableName n do
+      throw s!"{a.target.name}: {a.name}'s constant {n} is not named as a Rust constant"
+    unless v < 2 ^ ty.bits a.target.abi.ptrBits do
+      throw s!"{a.target.name}: {a.name}'s constant {n} does not fit in a {ty.rust}"
+    for b in as do
+      if b.target.name == a.target.name && b.module == a.module then
+        for (m, ty', v') in b.rustConsts do
+          if m == n && (ty' != ty || v' != v) then
+            throw s!"{a.target.name}: {a.name} and {b.name} give the constant {n} different values"
+
+/-- The constants of a module's artifacts, as Rust. -/
+def rustConstsText (cs : List (String × IntTy × Nat)) : String :=
+  String.join (cs.map fun (n, ty, v) =>
+    s!"\n/// From the specification (`Api.rustConsts`).\npub(crate) const {n}: {ty.rust} = {v};\n")
+
 /-- Tables of the same name in `cs` and `ds` have the same words. -/
 def consistent (cs ds : List (String × List (BitVec 64))) : Bool :=
   cs.all fun (n, ws) => ds.all fun (m, vs) => m != n || vs == ws
@@ -803,6 +829,7 @@ def render (ps : List Prepared) (moduleOf : Artifact → String → String) : Li
       (s!"{t}/{m}.rs",
         header ++ s!"//! Verified `{m}` functions for `{t}`.\n" ++
         "#![allow(dead_code)]\n" ++
+        rustConstsText (rustConstsOf ((arts.filter (·.art.module == m)).map (·.art))) ++
         String.join ((arts.filter (·.art.module == m)).map fun p =>
           "\n" ++ (if p.art.target.inline then inlineFunction p.art (inlineLines p.art)
             else function.functionOf p.art p.lines (moduleOf p.art))))).map Task.get)
@@ -844,6 +871,7 @@ def files (as : List Artifact) : Except String (List (String × String)) := do
   forMPar as checkLayout
   forMPar as checkInline
   forMPar as checkUops
+  forMPar as (checkRustConsts as)
   return render ps fun a n => ((callee as a n).map (·.module)).getD ""
 
 end VG.Rust

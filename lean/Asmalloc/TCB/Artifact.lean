@@ -488,6 +488,11 @@ structure Api where
   them between `<` and `>` (`const CLASS: usize`), which its `const`
   operands may use; none if empty. -/
   generics : String := ""
+  /-- Constants of its specification that Rust code using it needs (a slab's
+  size, say), each a name, an unsigned integer type and a value: the emitter
+  writes them into the function's module, so that the Rust and the Lean
+  agree by construction. -/
+  rustConsts : List (String × IntTy × Nat) := []
 
 /-- The documentation of `api` on a target: its summary, then the paragraphs
 `notes`, then its `# Safety` section. -/
@@ -523,6 +528,8 @@ structure Artifact where
   operands : List (String × Operand) := []
   /-- `Api.generics`. -/
   generics : String := ""
+  /-- `Api.rustConsts`. -/
+  rustConsts : List (String × IntTy × Nat) := []
   code : Prog target.isa
   contract : Contract target.isa
   verified : Verified target code contract
