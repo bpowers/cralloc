@@ -221,7 +221,10 @@ impl<'e, S: Subject + ?Sized> Worker<'e, S> {
 fn exchange(cfg: &Config, w: usize) -> Option<Exchange> {
     let workers = cfg.workers as u32;
     let me = w as u32;
-    let weight = cfg.profile.weights.free.max(2);
+    // Hand-offs compete with frees; batch profiles free only in their drain phase, so for
+    // them half the allocation weight stands in.
+    let w = cfg.profile.weights;
+    let weight = w.free.max(w.alloc / 2).max(2);
     let x = |send, recv, target, alloc_percent, free_percent| {
         Some(Exchange {
             workers,
