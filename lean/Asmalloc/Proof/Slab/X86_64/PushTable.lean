@@ -352,4 +352,230 @@ theorem mσ12 : Mid scratchT s (mEnd s) (σ12 s) := mσ11.withMem _
 
 end Mids
 
+/-! ## The contract -/
+
+section Contract
+
+variable {s : State} {k : Nat}
+
+theorem hv : cx.A.args ((cx.sig.words cx.A.ptrBits).map (·.bits cx.A.ptrBits)) =
+    some (fun s => [s.gpr .rdi, s.gpr .rsi]) := rfl
+
+theorem arg1 : cx.arg s 1 = x s := rfl
+
+/-- The calling convention's obligations, in memory changed only in regions
+apart from the return address. -/
+theorem abi_m1 (hp : Pre s k) {p : State} (hm : Mid scratchT s (m1 s) p) : abiPreserved s p :=
+  abiPreserved_of_mid frame_m1 (by simpa using hp.facts.ret_cs) (by decide) hm
+
+theorem facts_of_pre (hs : (pushContract abi).pre s) : Facts cx s := by
+  have := (pre_iff cx (s := s) hv rfl rfl).mp hs
+  exact facts_of_world rfl this.2.1 this.2.2
+
+/-- Item `i` of the magazine is apart from `rseq_cs`, the slab word, and the
+free slot. -/
+theorem item_disjoint (hp : Pre s k) (hi : cx.InRange s) (hs : IsSlot (2 ^ k) (wvt s)) {i : Nat}
+    (hil : i < slot (2 ^ k) (wvt s) - 1) :
+    Region.Disjoint ⟨magBase (2 ^ k) (wvt s) + BitVec.ofNat 64 (8 * (i + 1)), 8⟩ ⟨area s + 8, 8⟩ ∧
+    Region.Disjoint ⟨magBase (2 ^ k) (wvt s) + BitVec.ofNat 64 (8 * (i + 1)), 8⟩ ⟨wat s, 8⟩ ∧
+    Region.Disjoint ⟨magBase (2 ^ k) (wvt s) + BitVec.ofNat 64 (8 * (i + 1)), 8⟩ ⟨wvt s, 8⟩ := by
+  have hsl : IsSlot (cx.slots s) (cx.w s) := by rw [hp.slots, hp.w]; exact hs
+  have hlt := slot_lt (2 ^ k) (wvt s) (Nat.two_pow_pos k)
+  have hsub := sub_item (n := 2 ^ k) (w := wvt s) (i := i) (by omega)
+  have hcm := hp.facts.cs_mag hi hsl
+  have hwm := hp.facts.word_mag hi hsl
+  rw [magRegion_eq hp] at hcm hwm
+  have hn : 8 * 2 ^ k ≤ 2 ^ 19 := by
+    have := Nat.pow_le_pow_right (n := 2) (by decide) hp.hk'
+    omega
+  refine ⟨hcm.symm.sub_left hsub, by rw [hp.word]; exact hwm.symm.sub_left hsub, ?_⟩
+  have hw := magBase_add_slot hs
+  have := Offset.disjoint (magBase (2 ^ k) (wvt s)) (d := 8 * (i + 1)) (n := 8)
+    (e := 8 * slot (2 ^ k) (wvt s)) (k := 8) (by omega) (by omega) (by omega)
+  rwa [hw] at this
+
+theorem pushed (hp : Pre s k) (hi : cx.InRange s) (ht : ¬ tst s = 0) :
+    cx.Pushed s (cx.arg s 1) (σ12 s) := by
+  obtain ⟨hs, hlt, hpush⟩ := hit hp hi ht
+  have hf := slotFacts hp hi ht
+  refine ⟨.stack (magBase (2 ^ k) (wvt s)) (items (2 ^ k) s.mem (wvt s) ++ [x s]), ?_, ?_, ?_, ?_⟩
+  · simp only [Spec.Slab.Ctx.pushResult, hi, ↓reduceIte, Spec.Slab.Ctx.mag, hp.slots,
+      mem_of (c := cx) rfl, hp.w, arg1]
+    exact hpush
+  · rw [csField_of (c := cx) rfl, ← hp.word, hp.w]
+    show Frame _ s.mem (mEnd s)
+    exact (frame_three s.mem _ _ _ _ _ _).mono (by simp)
+  · show (mEnd s).readW (cx.word s) 64 = _
+    rw [mEnd, ← hp.word, Mem.readW_writeW_self64, hp.w]
+  · show Mag.ofWord (cx.slots s) (mEnd s) (cx.w s + 8) = _
+    rw [hp.slots, hp.w]
+    refine ofWord_add8 k hp.hk' rfl hs hlt (x s) ?_ fun i hil => ?_
+    · rw [mEnd, readW64_writeW_disj hf.word, mSlot, Mem.readW_writeW_self64]
+    · obtain ⟨h1, h2, h3⟩ := item_disjoint hp hi hs hil
+      rw [mEnd, readW64_writeW_disj h2, mSlot, readW64_writeW_disj h3, m1, readW64_writeW_disj h1]
+
+theorem unchanged_cs : Unchanged [cx.csField s] (cx.mem s) (m1 s) := by
+  rw [csField_of (c := cx) rfl, mem_of (c := cx) rfl]; exact frame_m1
+
+theorem missed_C (hi : ¬ cx.InRange s) : cx.PushMissed s (cx.arg s 1) (σ2 s) := by
+  refine ⟨?_, unchanged_cs⟩
+  simp only [Spec.Slab.Ctx.pushResult, hi, ↓reduceIte]
+
+theorem missed_T (hp : Pre s k) (hi : cx.InRange s) (ht : tst s = 0) :
+    cx.PushMissed s (cx.arg s 1) (σ9 s) := by
+  refine ⟨?_, unchanged_cs⟩
+  simp only [Spec.Slab.Ctx.pushResult, hi, ↓reduceIte, Spec.Slab.Ctx.mag, hp.slots,
+    mem_of (c := cx) rfl, hp.w]
+  exact (push_eq_none_iff _ k rfl hp.hk hp.hk' (hp.ok hi)).mpr
+    ((test_iff32 hp.hk hp.hk' (wvt s + 8) (mk s) hp.mask).mp ht)
+
+theorem post_eq (s' : State) : (pushContract abi).post s s' ↔ cx.Pushed s (cx.arg s 1) s' :=
+  post_iff cx hv s s'
+
+theorem exit_eq (t : String) (s' : State) : (pushContract abi).exit t s s' ↔
+    [s'.gpr .rdi, s'.gpr .rsi] = [s.gpr .rdi, s.gpr .rsi] ∧ (t = SLOW ∧ cx.PushMissed s (cx.arg s 1) s') :=
+  exit_iff cx hv t s s'
+
+theorem correct (hs : (pushContract abi).pre s) :
+    (∃ s', Exec isa pushTable s s' ∧ target.abiPreserved s s' ∧
+      (pushContract abi).post s s') ∨
+    (∃ t s', ExecExit isa pushTable s t s' ∧ target.abiPreserved s s' ∧
+      (pushContract abi).exit t s s') := by
+  have h := facts_of_pre hs
+  obtain ⟨k, hp⟩ := pre_of h
+  rw [code_eq]
+  by_cases hi : cx.InRange s
+  · by_cases ht : tst s = 0
+    · exact .inr ⟨"slow", σ9 s, .rseq (execBlock_arm h) (runBody_T hp hi ht), abi_m1 hp mσ9,
+        (exit_eq _ _).mpr ⟨by rw [mσ9.gpr .rdi (by decide), mσ9.gpr .rsi (by decide)], rfl, missed_T hp hi ht⟩⟩
+    · have hf := slotFacts hp hi ht
+      have hw := hp.facts.ret_word hi
+      rw [← hp.word] at hw
+      exact .inl ⟨σ12 s, .rseq (execBlock_arm h) (runBody_P hp hi ht),
+        abiPreserved_of_mid (frame_three s.mem _ _ _ _ _ _)
+          (by simpa using ⟨hp.facts.ret_cs, hf.ret, hw⟩) (by decide) mσ12,
+        (post_eq _).mpr (pushed hp hi ht)⟩
+  · exact .inr ⟨"slow", σ2 s, .rseq (execBlock_arm h) (runBody_C hp hi), abi_m1 hp mσ2,
+      (exit_eq _ _).mpr ⟨by rw [mσ2.gpr .rdi (by decide), mσ2.gpr .rsi (by decide)], rfl, missed_C hi⟩⟩
+
+/-! ### Where it may be aborted -/
+
+/-- Before the free slot is written, the magazine is as on entry. -/
+theorem mag_m1 (hp : Pre s k) (hi : cx.InRange s) :
+    Mag.ofWord (cx.slots s) (m1 s) (cx.w s) = cx.mag s := by
+  simp only [Spec.Slab.Ctx.mag, mem_of (c := cx) rfl, hp.slots, hp.w]
+  rcases hp.ok hi with h0 | h1 | hs
+  · rw [ofWord_zero h0, ofWord_zero h0]
+  · rw [ofWord_marker h1, ofWord_marker h1]
+  · exact ofWord_congr fun i hil => by
+      rw [m1, readW64_writeW_disj (item_disjoint hp hi hs hil).1]
+
+/-- After it is, too: the free slot is above the pointers. -/
+theorem mag_slot (hp : Pre s k) (hi : cx.InRange s) (ht : ¬ tst s = 0) :
+    Mag.ofWord (cx.slots s) (mSlot s) (cx.w s) = cx.mag s := by
+  obtain ⟨hs, -, -⟩ := hit hp hi ht
+  simp only [Spec.Slab.Ctx.mag, mem_of (c := cx) rfl, hp.slots, hp.w]
+  exact ofWord_congr fun i hil => by
+    obtain ⟨h1, -, h3⟩ := item_disjoint hp hi hs hil
+    rw [mSlot, readW64_writeW_disj h3, m1, readW64_writeW_disj h1]
+
+theorem abort_eq (p : State) : (pushContract abi).abort s p ↔ [p.gpr .rdi, p.gpr .rsi] = [s.gpr .rdi, s.gpr .rsi] ∧
+    (Unchanged [cx.csField s, ⟨cx.w s, 8⟩] (cx.mem s) p.mem ∧
+      (cx.InRange s → Mag.ofWord (cx.slots s) p.mem (cx.w s) = cx.mag s)) :=
+  abort_iff cx hv s p
+
+theorem abortOk1 (hp : Pre s k) {p : State} (hm : Mid scratchT s (m1 s) p) :
+    armed p ∧ target.abiPreserved s p ∧ (pushContract abi).abort s p ∧
+      ∀ p', target.rely p p' → (pushContract abi).env p p' →
+        (pushContract abi).pre p' := by
+  refine ⟨armed_of_mid hp.facts (xs := []) frame_m1 m1_cs (by simp) hm, abi_m1 hp hm, ?_,
+    fun p' _ he => (env_eq cx p p').mp he⟩
+  refine (abort_eq p).mpr ⟨by rw [hm.gpr .rdi (by decide), hm.gpr .rsi (by decide)], ?_, fun hi => by rw [hm.mem]; exact mag_m1 hp hi⟩
+  rw [hm.mem, csField_of (c := cx) rfl, mem_of (c := cx) rfl]
+  exact frame_m1.mono (by simp)
+
+theorem abortOk2 (hp : Pre s k) (hi : cx.InRange s) (ht : ¬ tst s = 0) :
+    armed (σ11 s) ∧ target.abiPreserved s (σ11 s) ∧ (pushContract abi).abort s (σ11 s) ∧
+      ∀ p', target.rely (σ11 s) p' → (pushContract abi).env (σ11 s) p' →
+        (pushContract abi).pre p' := by
+  have hf := slotFacts hp hi ht
+  have hfr : Frame [⟨area s + 8, 8⟩, ⟨wvt s, 8⟩] s.mem (mSlot s) := frame_two _ _ _ _ _
+  have hcs : (mSlot s).readW (area s + 8) 64 = s.csDesc := by
+    rw [mSlot, readW64_writeW_disj hf.cs.symm, m1_cs]
+  refine ⟨armed_of_mid hp.facts (xs := [⟨wvt s, 8⟩]) hfr hcs (by simpa using hf.rsVar) mσ11,
+    abiPreserved_of_mid hfr (by simpa using ⟨hp.facts.ret_cs, hf.ret⟩) (by decide) mσ11, ?_, fun p' _ he => (env_eq cx _ p').mp he⟩
+  refine (abort_eq _).mpr ⟨by rw [mσ11.gpr .rdi (by decide), mσ11.gpr .rsi (by decide)], ?_, fun _ => mag_slot hp hi ht⟩
+  rw [mσ11.mem, csField_of (c := cx) rfl, mem_of (c := cx) rfl, hp.w]
+  exact hfr
+
+/-! ### Its accesses -/
+
+theorem addr8 : s.fsBase + o s + BitVec.ofNat 64 RSEQ_CS = area s + 8 := rfl
+theorem addr4 : s.fsBase + o s + BitVec.ofNat 64 RSEQ_CPU_ID = area s + 4 := rfl
+theorem rsName : RSEQ_OFFSET = RS := rfl
+
+theorem ofNat_toNat64 (v : BitVec 64) : BitVec.ofNat 64 v.toNat = v := by
+  rw [BitVec.ofNat_toNat, BitVec.setWidth_eq]
+
+theorem maskAddr_eq (hp : Pre s k) : cx.maskAddr s = maskA s := hp.maskA.symm
+
+theorem wordAddr_eq (hp : Pre s k) :
+    wordAddr (s.syms SLABS) (cpu32 s).toNat (cx.cls s) = wat s := by
+  rw [hp.word]; rfl
+
+theorem test_eq : BitVec.ofNat 32 ((wvt s).toNat + 8) &&& BitVec.ofNat 32 (cx.testMask s (mk s).toNat) =
+    tst s := by
+  have : BitVec.ofNat 32 ((wvt s).toNat + 8) = (wvt s + 8).setWidth 32 := by
+    apply BitVec.eq_of_toNat_eq
+    rw [BitVec.toNat_ofNat, BitVec.toNat_setWidth, add8_toNat_mod,
+      Nat.mod_mod_of_dvd _ (by decide : 2 ^ 32 ∣ 2 ^ 64)]
+  simp only [Spec.Slab.Ctx.testMask, BitVec.ofNat_toNat, tst, this]; rfl
+
+theorem trace_ok (hs : (pushContract abi).pre s) :
+    (pushContract abi).trace s (Code.events isa pushTable s) := by
+  have h := facts_of_pre hs
+  obtain ⟨k, hp⟩ := pre_of h
+  show cx.PushTrace s (cx.arg s 1) (Code.events isa (.rseq arm body) s)
+  simp only [Code.events, execBlock_arm h, events_arm h]
+  refine ⟨(o s).toNat, s.csDesc.toNat, (cpu32 s).toNat, (wvt s).toNat, (mk s).toNat, ?_⟩
+  simp only [Spec.Slab.Ctx.headTrace, Spec.Slab.Ctx.rd, Spec.Slab.Ctx.wr, tp_of (c := cx) rfl,
+    sym_of (c := cx) rfl, test_eq, ofNat_toNat64, addr8, addr4, rsName, arg1, maskAddr_eq hp]
+  by_cases hi : cx.InRange s
+  · have hi' : (cpu32 s).toNat < SLAB_COUNT := (inRange_iff.mp hi)
+    rw [wordAddr_eq hp]
+    by_cases ht : tst s = 0
+    · rw [events_T hp hi ht]; simp [hi', ht]
+    · rw [events_P hp hi ht]; simpa [hi'] using ht
+  · have hi' : ¬ (cpu32 s).toNat < SLAB_COUNT := fun h' => hi (inRange_iff.mpr h')
+    rw [events_C hp hi]; simp [hi']
+
+theorem rseqOk (hs : (pushContract abi).pre s) :
+    RseqOk target pushTable (pushContract abi) s := by
+  have h := facts_of_pre hs
+  obtain ⟨k, hp⟩ := pre_of h
+  have ht := trace_ok hs
+  rw [code_eq] at ht ⊢
+  unfold RseqOk
+  refine ⟨ht, ⟨_, _, rfl, execBlock_dropLast_arm h, arms_arm⟩, ?_⟩
+  have mA : Mid scratchT s (m1 s) (σA s) := mid_σA (by decide) (by decide)
+  have m1' : Mid scratchT s (m1 s) (σ1 s) := mid_σ1 (by decide) mA
+  simp only [Code.abortStates, execBlock_arm h]
+  by_cases hi : cx.InRange s
+  · by_cases ht : tst s = 0
+    · rw [prefixes_T hp hi ht]
+      simp only [List.forall_mem_cons, List.not_mem_nil, false_implies, implies_true, and_true]
+      exact ⟨abortOk1 hp mA, abortOk1 hp m1', abortOk1 hp mσ2, abortOk1 hp mσ2, abortOk1 hp mσ3,
+        abortOk1 hp mσ4t, abortOk1 hp mσ5t, abortOk1 hp mσ6t, abortOk1 hp mσ7, abortOk1 hp mσ8,
+        abortOk1 hp mσ9⟩
+    · rw [prefixes_P hp hi ht]
+      simp only [List.forall_mem_cons, List.not_mem_nil, false_implies, implies_true, and_true]
+      exact ⟨abortOk1 hp mA, abortOk1 hp m1', abortOk1 hp mσ2, abortOk1 hp mσ2, abortOk1 hp mσ3,
+        abortOk1 hp mσ4t, abortOk1 hp mσ5t, abortOk1 hp mσ6t, abortOk1 hp mσ7, abortOk1 hp mσ8,
+        abortOk1 hp mσ9, abortOk1 hp mσ9, abortOk2 hp hi ht⟩
+  · rw [prefixes_C hp hi]
+    simp only [List.forall_mem_cons, List.not_mem_nil, false_implies, implies_true, and_true]
+    exact ⟨abortOk1 hp mA, abortOk1 hp m1', abortOk1 hp mσ2⟩
+
+end Contract
+
 end VG.Proof.Slab.X86_64.PushTable

@@ -468,6 +468,18 @@ def safety (cls size : String) : List String := [
     `MAG_MASKS`, or the return address on the stack; none may wrap around the end of the \
     address space (`VG.Spec.Slab.Ctx.regions`)."]
 
+/-- The layout the routines are proved for, for the Rust around them: the
+slabs, the classes, the markers, the fields of `struct rseq` they use, and
+the mask of each allowed magazine size (`MAG_MASK_<slots>`). -/
+def rustConsts : List (String × IntTy × Nat) :=
+  [("SLAB_SHIFT", .u32, SLAB_SHIFT), ("SLAB_BYTES", .usize, SLAB_BYTES),
+    ("SLAB_COUNT", .usize, SLAB_COUNT), ("CLASS_LIMIT", .usize, CLASS_LIMIT),
+    ("WORD_BYTES", .usize, 8), ("MARKER_SHIFT", .u32, MARKER_SHIFT),
+    ("RSEQ_CS", .usize, RSEQ_CS), ("RSEQ_CPU_ID", .usize, RSEQ_CPU_ID),
+    ("MAG_LOG_MIN", .u32, MAG_LOG_MIN), ("MAG_LOG_MAX", .u32, MAG_LOG_MAX)] ++
+  (List.range (MAG_LOG_MAX - MAG_LOG_MIN + 1)).map fun i =>
+    (s!"MAG_MASK_{2 ^ (MAG_LOG_MIN + i)}", .u32, magMask (2 ^ (MAG_LOG_MIN + i)))
+
 def popInlineApi : Api where
   module := "slab"
   name := "slab_pop"
@@ -480,6 +492,7 @@ def popInlineApi : Api where
   operands := [(RSEQ_OFFSET, .sym (path RSEQ_OFFSET)), (SLABS, .sym (path SLABS)),
     (COFF, .const "CLASS * 8"), (MASK, .const "MASK")]
   generics := "const CLASS: usize, const MASK: u32"
+  rustConsts := rustConsts
 
 def pushInlineApi : Api where
   module := "slab"
@@ -494,6 +507,7 @@ def pushInlineApi : Api where
   operands := [(RSEQ_OFFSET, .sym (path RSEQ_OFFSET)), (SLABS, .sym (path SLABS)),
     (COFF, .const "CLASS * 8"), (MASK, .const "MASK")]
   generics := "const CLASS: usize, const MASK: u32"
+  rustConsts := rustConsts
 
 def popApi : Api where
   module := "slab"
@@ -507,6 +521,7 @@ def popApi : Api where
   safety := safety "`class`" "`MAG_MASKS[class]`"
   operands := [(RSEQ_OFFSET, .sym (path RSEQ_OFFSET)), (SLABS, .sym (path SLABS)),
     (MAG_MASKS, .sym (path MAG_MASKS)), (SLOW, .sym (path "pop_slow"))]
+  rustConsts := rustConsts
 
 def pushApi : Api where
   module := "slab"
@@ -520,5 +535,6 @@ def pushApi : Api where
   safety := safety "`class`" "`MAG_MASKS[class]`"
   operands := [(RSEQ_OFFSET, .sym (path RSEQ_OFFSET)), (SLABS, .sym (path SLABS)),
     (MAG_MASKS, .sym (path MAG_MASKS)), (SLOW, .sym (path "push_slow"))]
+  rustConsts := rustConsts
 
 end VG.Spec.Slab

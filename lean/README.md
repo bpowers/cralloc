@@ -114,6 +114,16 @@ scripts/        The checks: imports, registration files, the audit's negative te
 The self-test (`Spec/Selftest*`, `Impl/Selftest/`, `Proof/Selftest/`,
 `Artifacts/Selftest/`) is a worked example of every step.
 
+The front end's pop and push (`Spec/Slab.lean`, `Impl/Slab/`,
+`Proof/Slab/`, `Artifacts/Slab/`) are restartable sequences, each emitted
+inline (`generated/x86_64_inline/slab.rs`, an `asm!` block in an
+`#[inline(always)]` function) and out of line (`generated/x86_64/slab.rs`, a
+naked function). Their modules also carry the layout constants the proofs
+assume (`Spec.Slab.rustConsts`). The Rust crate must provide what their
+`# Safety` sections and `Spec.Slab.path` name: `front::SLABS`,
+`front::MAG_MASKS`, `front::pop_slow`, `front::push_slow` and glibc's
+`__rseq_offset` as `front::__rseq_offset`.
+
 ## What you need to trust
 
 * `TCB/`: in particular the ISA model, which must match the Intel SDM, and
