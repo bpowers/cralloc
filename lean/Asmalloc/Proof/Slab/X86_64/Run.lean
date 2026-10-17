@@ -128,9 +128,9 @@ theorem area_eq (s : State) : area s = s.fsBase + o s := rfl
 def m1 (s : State) : Mem := s.mem.writeW (area s + 8) s.csDesc
 
 /-- The registers after each of the arm's first three instructions. -/
-def armA (s : State) : State := s.setReg .rdx (s.syms RS)
-def armB (s : State) : State := (armA s).setReg .rdx (o s)
-def armReg (s : State) : State := (armB s).setReg .r10 s.csDesc
+def armA (s : State) : State := s.setReg .r10 (s.syms RS)
+def armB (s : State) : State := (armA s).setReg .r10 (o s)
+def armReg (s : State) : State := (armB s).setReg .r11 s.csDesc
 
 /-- The state after the arm, where the sequence starts. -/
 def σA (s : State) : State := { armReg s with mem := m1 s }
@@ -146,9 +146,9 @@ theorem inRdWr {s : State} {r : Region} (h : r ∈ s.wr) : InRegions (s.rd ++ s.
 
 theorem csDesc_setReg (s : State) (r : Reg) (v : BitVec 64) : (s.setReg r v).csDesc = s.csDesc := rfl
 
-/-- `fs:[rdx + d]`. -/
-theorem ea_fs_rdx (σ : State) (d : Nat) :
-    σ.ea { base := .rdx, disp := (d : Int), seg := some .fs } = σ.fsBase + σ.gpr .rdx + BitVec.ofNat 64 d := by
+/-- `fs:[r10 + d]`. -/
+theorem ea_fs_r10 (σ : State) (d : Nat) :
+    σ.ea { base := .r10, disp := (d : Int), seg := some .fs } = σ.fsBase + σ.gpr .r10 + BitVec.ofNat 64 d := by
   rw [Access.ea_fs_base_disp, BitVec.ofInt_natCast, BitVec.add_assoc]
 
 section Arm
@@ -158,61 +158,61 @@ variable {c : Spec.Slab.Ctx isa} {s : State}
 theorem armReg_rd : (armReg s).rd = s.rd := rfl
 theorem armReg_wr : (armReg s).wr = s.wr := rfl
 theorem armReg_mem : (armReg s).mem = s.mem := rfl
-theorem armReg_r10 : (armReg s).gpr .r10 = s.csDesc := RegUpd.gpr_setReg_self _ _ _
+theorem armReg_desc : (armReg s).gpr .r11 = s.csDesc := RegUpd.gpr_setReg_self _ _ _
 theorem σA_rd : (σA s).rd = s.rd := rfl
 theorem σA_wr : (σA s).wr = s.wr := rfl
 theorem σA_mem : (σA s).mem = m1 s := rfl
 
 theorem gpr_armReg (r : Reg) : (armReg s).gpr r =
-    if r = .r10 then s.csDesc else if r = .rdx then o s else s.gpr r := by
+    if r = .r11 then s.csDesc else if r = .r10 then o s else s.gpr r := by
   simp only [armReg, armB, armA, RegUpd.gpr_setReg]
-  by_cases h : r = .r10 <;> by_cases h' : r = .rdx <;> simp [h, h']
+  by_cases h : r = .r11 <;> by_cases h' : r = .r10 <;> simp [h, h']
 
-theorem armReg_rdx : (armReg s).gpr .rdx = o s := by simp [gpr_armReg]
+theorem armReg_base : (armReg s).gpr .r10 = o s := by simp [gpr_armReg]
 
-theorem csOp_ea : (armReg s).ea { base := .rdx, disp := 8, seg := some .fs } = area s + 8 := by
-  rw [show (8 : Int) = ((8 : Nat) : Int) from rfl, ea_fs_rdx, armReg_rdx]; rfl
+theorem csOp_ea : (armReg s).ea { base := .r10, disp := 8, seg := some .fs } = area s + 8 := by
+  rw [show (8 : Int) = ((8 : Nat) : Int) from rfl, ea_fs_r10, armReg_base]; rfl
 
-theorem exec_arm1 : exec (.movGot .rdx RS) s = some (armA s) := rfl
+theorem exec_arm1 : exec (.movGot .r10 RS) s = some (armA s) := rfl
 
-theorem exec_arm2 (h : Facts c s) :
-    exec (.mov .rdx (.mem { base := .rdx })) (armA s) = some (armB s) := by
-  have h1 : InRegions ((armA s).rd ++ (armA s).wr) ((armA s).ea { base := .rdx }) 8 := by
+theorem exec_arm2 (h : ArmOk s) :
+    exec (.mov .r10 (.mem { base := .r10 })) (armA s) = some (armB s) := by
+  have h1 : InRegions ((armA s).rd ++ (armA s).wr) ((armA s).ea { base := .r10 }) 8 := by
     rw [Access.ea_base, armA, RegUpd.gpr_setReg_self, RegUpd.rd_setReg, RegUpd.wr_setReg]
     exact inRd (r := ⟨s.syms RS, 8⟩) h.rsVar
   rw [exec_load _ h1, Access.ea_base, armA, RegUpd.gpr_setReg_self, RegUpd.mem_setReg]
   rfl
 
-theorem exec_arm3 : exec (.leaRseqCs .r10) (armB s) = some (armReg s) := rfl
+theorem exec_arm3 : exec (.leaRseqCs .r11) (armB s) = some (armReg s) := rfl
 
-theorem exec_arm4 (h : Facts c s) :
-    exec (.store { base := .rdx, disp := 8, seg := some .fs } .r10) (armReg s) = some (σA s) := by
-  have h2 : InRegions (armReg s).wr ((armReg s).ea { base := .rdx, disp := 8, seg := some .fs }) 8 := by
+theorem exec_arm4 (h : ArmOk s) :
+    exec (.store { base := .r10, disp := 8, seg := some .fs } .r11) (armReg s) = some (σA s) := by
+  have h2 : InRegions (armReg s).wr ((armReg s).ea { base := .r10, disp := 8, seg := some .fs }) 8 := by
     rw [csOp_ea, armReg_wr]; exact inWr (r := ⟨area s + 8, 8⟩) h.cs
-  rw [exec_store (r := .r10) _ h2, csOp_ea, armReg_mem, armReg_r10]
+  rw [exec_store (r := .r11) _ h2, csOp_ea, armReg_mem, armReg_desc]
   rfl
 
-theorem execBlock_dropLast_arm (h : Facts c s) : execBlock isa arm.dropLast s = some (armReg s) := by
-  rw [show arm.dropLast = [.movGot .rdx RS, .mov .rdx (.mem { base := .rdx }), .leaRseqCs .r10] from rfl,
+theorem execBlock_dropLast_arm (h : ArmOk s) : execBlock isa arm.dropLast s = some (armReg s) := by
+  rw [show arm.dropLast = [.movGot .r10 RS, .mov .r10 (.mem { base := .r10 }), .leaRseqCs .r11] from rfl,
     execBlock_cons_some exec_arm1, execBlock_cons_some (exec_arm2 h),
     execBlock_cons_some exec_arm3, execBlock_nil']
 
-theorem execBlock_arm (h : Facts c s) : execBlock isa arm s = some (σA s) := by
+theorem execBlock_arm (h : ArmOk s) : execBlock isa arm s = some (σA s) := by
   rw [arm, execBlock_cons_some exec_arm1, execBlock_cons_some (exec_arm2 h),
     execBlock_cons_some exec_arm3, execBlock_cons_some (exec_arm4 h), execBlock_nil']
 
 /-- The arm's last instruction points `rseq_cs` at the descriptor. -/
-theorem arms_arm : arms (.store { base := .rdx, disp := 8, seg := some .fs } .r10) (armReg s) :=
-  ⟨by rw [csOp_ea]; rfl, armReg_r10⟩
+theorem arms_arm : arms (.store { base := .r10, disp := 8, seg := some .fs } .r11) (armReg s) :=
+  ⟨by rw [csOp_ea]; rfl, armReg_desc⟩
 
-theorem events_arm (h : Facts c s) :
+theorem events_arm (h : ArmOk s) :
     blockEvents isa arm s =
       [⟨s.syms RS, 8, false, (o s).toNat⟩, ⟨area s + 8, 8, true, s.csDesc.toNat⟩] := by
   rw [arm, blockEvents_cons_some exec_arm1, blockEvents_cons_some (exec_arm2 h),
     blockEvents_cons_some exec_arm3, blockEvents_cons_some (exec_arm4 h), blockEvents_nil']
   simp only [Instr.events, List.nil_append, List.append_nil, List.cons_append, Access.ea_base,
     csOp_ea, toNat_read8]
-  rw [show (armA s).gpr .rdx = s.syms RS from RegUpd.gpr_setReg_self _ _ _,
+  rw [show (armA s).gpr .r10 = s.syms RS from RegUpd.gpr_setReg_self _ _ _,
     show (armA s).mem = s.mem from rfl, σA_mem, m1, Mem.readW_writeW_self64]
   rfl
 
@@ -238,10 +238,10 @@ def σ3 (s : State) : State := shl12 (σ2 s) .r8
 def sh (s : State) : BitVec 64 := (cpu32 s).setWidth 64 <<< 12
 
 theorem cpuOp_ea (s : State) :
-    (σA s).ea { base := .rdx, disp := 4, seg := some .fs } = area s + 4 := by
-  rw [show (4 : Int) = ((4 : Nat) : Int) from rfl, ea_fs_rdx]
-  show s.fsBase + (armReg s).gpr .rdx + _ = _
-  rw [armReg_rdx]; rfl
+    (σA s).ea { base := .r10, disp := 4, seg := some .fs } = area s + 4 := by
+  rw [show (4 : Int) = ((4 : Nat) : Int) from rfl, ea_fs_r10]
+  show s.fsBase + (armReg s).gpr .r10 + _ = _
+  rw [armReg_base]; rfl
 
 /-- `cpu_id` and `rseq_cs` are apart. -/
 theorem cpu_cs_disjoint (s : State) : Region.Disjoint ⟨area s + 4, 32 / 8⟩ ⟨area s + 8, 8⟩ :=
@@ -251,9 +251,9 @@ section Cpu
 
 variable {c : Spec.Slab.Ctx isa} {s : State}
 
-theorem exec_cpu (h : Facts c s) :
-    exec (.mov32 .r8 (.mem { base := .rdx, disp := 4, seg := some .fs })) (σA s) = some (σ1 s) := by
-  have hin : InRegions ((σA s).rd ++ (σA s).wr) ((σA s).ea { base := .rdx, disp := 4, seg := some .fs }) 4 := by
+theorem exec_cpu (h : ArmOk s) :
+    exec (.mov32 .r8 (.mem { base := .r10, disp := 4, seg := some .fs })) (σA s) = some (σ1 s) := by
+  have hin : InRegions ((σA s).rd ++ (σA s).wr) ((σA s).ea { base := .r10, disp := 4, seg := some .fs }) 4 := by
     rw [cpuOp_ea, σA_rd, σA_wr]; exact inRd (r := ⟨area s + 4, 4⟩) h.cpuF
   have hm : (σA s).mem.readW (area s + 4) 32 = cpu32 s := by
     rw [σA_mem, m1, readW_writeW_disj (cpu_cs_disjoint s) (by decide)]

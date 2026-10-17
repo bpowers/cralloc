@@ -66,7 +66,7 @@ theorem slabWord_ea_i : (σ4i s).ea slabWord = wai s := by
 
 /-- The slab word's address is the class's for the CPU, an inline routine
 being given its class's offset. -/
-theorem wai_eq (hA : c.A = abi) (hcoff : (s.params "coff").toNat = 8 * c.cls s) :
+theorem wai_eq (hA : X86 c.A) (hcoff : (s.params "coff").toNat = 8 * c.cls s) :
     wai s = c.word s := by
   rw [Spec.Slab.Ctx.word, wordAddr, sym_of hA, cpu_of hA, wai, r9i, sh_eq, cpu32]
   apply BitVec.eq_of_toNat_eq

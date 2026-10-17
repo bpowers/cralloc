@@ -18,10 +18,12 @@ namespace VG.Proof.Slab.X86_64.PushInline
 
 open VG.X86_64 VG.Spec.Slab VG.Impl.Slab.X86_64 VG.Proof.Slab.X86_64
 
-abbrev cx : Spec.Slab.Ctx isa := ⟨abi, .inline, pushInlineSig⟩
+abbrev cx : Spec.Slab.Ctx isa := ⟨inlineAbi, .inline, pushInlineSig⟩
+
+theorem hX : X86 cx.A := x86_inline
 
 def body : List (Step Instr Cond) := [
-  .instr (.mov32 .r8 (.mem { base := .rdx, disp := 4, seg := some .fs })),
+  .instr (.mov32 .r8 (.mem { base := .r10, disp := 4, seg := some .fs })),
   .instr (.alu32 .cmp .r8 (.imm 8192)),
   .exit .ae [] (some "miss"),
   .instr (.shift .shl .r8 12),
@@ -61,14 +63,14 @@ structure Pre (s : State) (k : Nat) : Prop where
   ok : cx.InRange s → WordOk (2 ^ k) (wvi s)
 
 theorem pre_of {s : State} (h : Facts cx s) : ∃ k, Pre s k := by
-  obtain ⟨-, -, ⟨-, hcoff⟩, -, ⟨k, hk, hk', hm⟩, hinv⟩ := h.pre
+  obtain ⟨-, -, ⟨-, hcoff, -, ⟨k, hk, hk', hm⟩⟩, -, hinv⟩ := h.pre
   have hmask : cx.mask s = (s.params "mask").toNat := rfl
   have hslots : cx.slots s = 2 ^ k := by
     rw [Spec.Slab.Ctx.slots, hm]; exact slotsOf_magMask k hk
-  have hw : wai s = cx.word s := wai_eq rfl hcoff
-  have hwv : cx.w s = wvi s := by simp only [Spec.Slab.Ctx.w, view_mem, wvi, hw]
+  have hw : wai s = cx.word s := wai_eq hX hcoff
+  have hwv : cx.w s = wvi s := by simp only [Spec.Slab.Ctx.w, mem_of (c := cx) hX, wvi, hw]
   refine ⟨k, h, hk, hk', by rw [← hmask]; exact hm, hslots, hw, hwv, fun hi => ?_⟩
-  have := hinv (cx.cpu s) hi
+  have := (hinv (cx.cpu s) hi).1
   rw [← hslots, ← hwv]
   exact this
 
@@ -101,8 +103,8 @@ theorem σ7_rdi : (σ7 s).gpr .rdi = x s := by
     RegUpd.gpr_setReg_of_ne _ _ (show ¬ Reg.rdi = .r9 by decide)]
   simp only [σ3, shl12, RegUpd.gpr_setReg_of_ne _ _ (show ¬ Reg.rdi = .r8 by decide),
     RegUpd.gpr_setFlags, σ2, RegUpd.gpr_arithFlags, σ1, State.setReg32, σA, armReg, armB, armA,
-    RegUpd.gpr_setReg_of_ne _ _ (show ¬ Reg.rdi = .r10 by decide),
-    RegUpd.gpr_setReg_of_ne _ _ (show ¬ Reg.rdi = .rdx by decide)]
+    RegUpd.gpr_setReg_of_ne _ _ (show ¬ Reg.rdi = .r11 by decide),
+    RegUpd.gpr_setReg_of_ne _ _ (show ¬ Reg.rdi = .r10 by decide)]
   rfl
 
 /-- What a push that passes the test finds. -/
@@ -172,7 +174,7 @@ theorem exec_commit (hp : Pre s k) (hi : cx.InRange s) :
   rfl
 
 theorem inRange_iff : cx.InRange s ↔ (cpu32 s).toNat < 8192 := by
-  simp only [Spec.Slab.Ctx.InRange, cpu_of (c := cx) rfl, cpu32, SLAB_COUNT]
+  simp only [Spec.Slab.Ctx.InRange, cpu_of (c := cx) hX, cpu32, SLAB_COUNT]
 
 theorem eval_cpu_true (hi : ¬ cx.InRange s) : eval .ae (σ2 s) = some true := by
   rw [eval_cpu, inRange_iff] at *; simp [hi]
@@ -196,29 +198,29 @@ variable {s : State} {k : Nat}
 
 theorem runBody_C (hp : Pre s k) (hi : ¬ cx.InRange s) :
     runBody isa body (σA s) = some (.exit "miss" (σ2 s)) := by
-  rw [body, runBody_instr (exec_cpu hp.facts), runBody_instr exec_cmp,
+  rw [body, runBody_instr (exec_cpu hp.facts.toArm), runBody_instr exec_cmp,
     runBody_take (eval_cpu_true hi) execBlock_nil']
 
 theorem prefixes_C (hp : Pre s k) (hi : ¬ cx.InRange s) :
     bodyPrefixes isa body (σA s) = [σA s, σ1 s, σ2 s] := by
-  rw [body, bodyPrefixes_instr (exec_cpu hp.facts), bodyPrefixes_instr exec_cmp,
+  rw [body, bodyPrefixes_instr (exec_cpu hp.facts.toArm), bodyPrefixes_instr exec_cmp,
     bodyPrefixes_take (eval_cpu_true hi)]
 
 theorem end_C (hp : Pre s k) (hi : ¬ cx.InRange s) : bodyEnd isa body (σA s) = some 2 := by
-  rw [body, bodyEnd_instr (exec_cpu hp.facts), bodyEnd_instr exec_cmp,
+  rw [body, bodyEnd_instr (exec_cpu hp.facts.toArm), bodyEnd_instr exec_cmp,
     bodyEnd_take (eval_cpu_true hi)]
   rfl
 
 theorem runBody_T (hp : Pre s k) (hi : cx.InRange s) (ht : tst s = 0) :
     runBody isa body (σA s) = some (.exit "miss" (σ7 s)) := by
-  rw [body, runBody_instr (exec_cpu hp.facts), runBody_instr exec_cmp,
+  rw [body, runBody_instr (exec_cpu hp.facts.toArm), runBody_instr exec_cmp,
     runBody_skip (eval_cpu_false hi), runBody_instr exec_shl_r8, runBody_instr exec_r9i,
     runBody_instr (exec_wordi hp.facts hi hp.word), runBody_instr exec_add8,
     runBody_instr exec_test, runBody_take (eval_test_true ht) execBlock_nil']
 
 theorem prefixes_T (hp : Pre s k) (hi : cx.InRange s) (ht : tst s = 0) :
     bodyPrefixes isa body (σA s) = [σA s, σ1 s, σ2 s, σ2 s, σ3 s, σ4i s, σ5i s, σ6 s, σ7 s] := by
-  rw [body, bodyPrefixes_instr (exec_cpu hp.facts), bodyPrefixes_instr exec_cmp,
+  rw [body, bodyPrefixes_instr (exec_cpu hp.facts.toArm), bodyPrefixes_instr exec_cmp,
     bodyPrefixes_skip (eval_cpu_false hi), bodyPrefixes_instr exec_shl_r8,
     bodyPrefixes_instr exec_r9i, bodyPrefixes_instr (exec_wordi hp.facts hi hp.word),
     bodyPrefixes_instr exec_add8, bodyPrefixes_instr exec_test,
@@ -226,7 +228,7 @@ theorem prefixes_T (hp : Pre s k) (hi : cx.InRange s) (ht : tst s = 0) :
 
 theorem end_T (hp : Pre s k) (hi : cx.InRange s) (ht : tst s = 0) :
     bodyEnd isa body (σA s) = some 8 := by
-  rw [body, bodyEnd_instr (exec_cpu hp.facts), bodyEnd_instr exec_cmp,
+  rw [body, bodyEnd_instr (exec_cpu hp.facts.toArm), bodyEnd_instr exec_cmp,
     bodyEnd_skip (eval_cpu_false hi), bodyEnd_instr exec_shl_r8, bodyEnd_instr exec_r9i,
     bodyEnd_instr (exec_wordi hp.facts hi hp.word), bodyEnd_instr exec_add8,
     bodyEnd_instr exec_test, bodyEnd_take (eval_test_true ht)]
@@ -234,7 +236,7 @@ theorem end_T (hp : Pre s k) (hi : cx.InRange s) (ht : tst s = 0) :
 
 theorem runBody_P (hp : Pre s k) (hi : cx.InRange s) (ht : ¬ tst s = 0) :
     runBody isa body (σA s) = some (.done (σ10 s)) := by
-  rw [body, runBody_instr (exec_cpu hp.facts), runBody_instr exec_cmp,
+  rw [body, runBody_instr (exec_cpu hp.facts.toArm), runBody_instr exec_cmp,
     runBody_skip (eval_cpu_false hi), runBody_instr exec_shl_r8, runBody_instr exec_r9i,
     runBody_instr (exec_wordi hp.facts hi hp.word), runBody_instr exec_add8,
     runBody_instr exec_test, runBody_skip (eval_test_false ht),
@@ -243,7 +245,7 @@ theorem runBody_P (hp : Pre s k) (hi : cx.InRange s) (ht : ¬ tst s = 0) :
 theorem prefixes_P (hp : Pre s k) (hi : cx.InRange s) (ht : ¬ tst s = 0) :
     bodyPrefixes isa body (σA s) =
       [σA s, σ1 s, σ2 s, σ2 s, σ3 s, σ4i s, σ5i s, σ6 s, σ7 s, σ7 s, σ9 s] := by
-  rw [body, bodyPrefixes_instr (exec_cpu hp.facts), bodyPrefixes_instr exec_cmp,
+  rw [body, bodyPrefixes_instr (exec_cpu hp.facts.toArm), bodyPrefixes_instr exec_cmp,
     bodyPrefixes_skip (eval_cpu_false hi), bodyPrefixes_instr exec_shl_r8,
     bodyPrefixes_instr exec_r9i, bodyPrefixes_instr (exec_wordi hp.facts hi hp.word),
     bodyPrefixes_instr exec_add8, bodyPrefixes_instr exec_test,
@@ -252,7 +254,7 @@ theorem prefixes_P (hp : Pre s k) (hi : cx.InRange s) (ht : ¬ tst s = 0) :
 
 theorem end_P (hp : Pre s k) (hi : cx.InRange s) (ht : ¬ tst s = 0) :
     bodyEnd isa body (σA s) = some 11 := by
-  rw [body, bodyEnd_instr (exec_cpu hp.facts), bodyEnd_instr exec_cmp,
+  rw [body, bodyEnd_instr (exec_cpu hp.facts.toArm), bodyEnd_instr exec_cmp,
     bodyEnd_skip (eval_cpu_false hi), bodyEnd_instr exec_shl_r8, bodyEnd_instr exec_r9i,
     bodyEnd_instr (exec_wordi hp.facts hi hp.word), bodyEnd_instr exec_add8,
     bodyEnd_instr exec_test, bodyEnd_skip (eval_test_false ht),
@@ -262,7 +264,7 @@ theorem end_P (hp : Pre s k) (hi : cx.InRange s) (ht : ¬ tst s = 0) :
 /-! ### Memory accesses -/
 
 theorem ev_cpu :
-    Instr.events (.mov32 .r8 (.mem { base := .rdx, disp := 4, seg := some .fs })) (σA s) (σ1 s) =
+    Instr.events (.mov32 .r8 (.mem { base := .r10, disp := 4, seg := some .fs })) (σA s) (σ1 s) =
       [⟨area s + 4, 4, false, (cpu32 s).toNat⟩] := by
   simp only [Instr.events, cpuOp_ea, σA_mem, toNat_read4, m1]
   rw [readW_writeW_disj (cpu_cs_disjoint s) (by decide)]; rfl
@@ -284,14 +286,14 @@ theorem ev_commit :
 
 theorem events_C (hp : Pre s k) (hi : ¬ cx.InRange s) :
     bodyEvents isa body (σA s) = [⟨area s + 4, 4, false, (cpu32 s).toNat⟩] := by
-  rw [body, bodyEvents_instr (exec_cpu hp.facts), bodyEvents_instr exec_cmp,
+  rw [body, bodyEvents_instr (exec_cpu hp.facts.toArm), bodyEvents_instr exec_cmp,
     bodyEvents_take (eval_cpu_true hi)]
   simp only [isa, ev_cpu]; rfl
 
 theorem events_T (hp : Pre s k) (hi : cx.InRange s) (ht : tst s = 0) :
     bodyEvents isa body (σA s) =
       [⟨area s + 4, 4, false, (cpu32 s).toNat⟩, ⟨wai s, 8, false, (wvi s).toNat⟩] := by
-  rw [body, bodyEvents_instr (exec_cpu hp.facts), bodyEvents_instr exec_cmp,
+  rw [body, bodyEvents_instr (exec_cpu hp.facts.toArm), bodyEvents_instr exec_cmp,
     bodyEvents_skip (eval_cpu_false hi), bodyEvents_instr exec_shl_r8, bodyEvents_instr exec_r9i,
     bodyEvents_instr (exec_wordi hp.facts hi hp.word), bodyEvents_instr exec_add8,
     bodyEvents_instr exec_test, bodyEvents_take (eval_test_true ht)]
@@ -301,7 +303,7 @@ theorem events_P (hp : Pre s k) (hi : cx.InRange s) (ht : ¬ tst s = 0) :
     bodyEvents isa body (σA s) =
       [⟨area s + 4, 4, false, (cpu32 s).toNat⟩, ⟨wai s, 8, false, (wvi s).toNat⟩,
         ⟨wvi s, 8, true, (x s).toNat⟩, ⟨wai s, 8, true, (wvi s + 8).toNat⟩] := by
-  rw [body, bodyEvents_instr (exec_cpu hp.facts), bodyEvents_instr exec_cmp,
+  rw [body, bodyEvents_instr (exec_cpu hp.facts.toArm), bodyEvents_instr exec_cmp,
     bodyEvents_skip (eval_cpu_false hi), bodyEvents_instr exec_shl_r8, bodyEvents_instr exec_r9i,
     bodyEvents_instr (exec_wordi hp.facts hi hp.word), bodyEvents_instr exec_add8,
     bodyEvents_instr exec_test, bodyEvents_skip (eval_test_false ht),
@@ -339,9 +341,9 @@ theorem hv : cx.A.args ((cx.sig.words cx.A.ptrBits).map (·.bits cx.A.ptrBits)) 
 
 theorem arg0 : cx.arg s 0 = x s := rfl
 
-theorem facts_of_pre (hs : (pushInlineContract abi).pre s) : Facts cx s := by
+theorem facts_of_pre (hs : (pushInlineContract inlineAbi).pre s) : Facts cx s := by
   have := (pre_iff cx (s := s) hv rfl rfl).mp hs
-  exact facts_of_world rfl this.2.1 this.2.2
+  exact facts_of_world hX (.inl rfl) this.2.1 this.2.2
 
 /-- Item `i` of the magazine is apart from `rseq_cs`, the slab word, and the
 free slot. -/
@@ -371,9 +373,9 @@ theorem pushed (hp : Pre s k) (hi : cx.InRange s) (ht : ¬ tst s = 0) :
   have hf := slotFacts hp hi ht
   refine ⟨.stack (magBase (2 ^ k) (wvi s)) (items (2 ^ k) s.mem (wvi s) ++ [x s]), ?_, ?_, ?_, ?_⟩
   · simp only [Spec.Slab.Ctx.pushResult, hi, ↓reduceIte, Spec.Slab.Ctx.mag, hp.slots,
-      mem_of (c := cx) rfl, hp.w, arg0]
+      mem_of (c := cx) hX, hp.w, arg0]
     exact hpush
-  · rw [csField_of (c := cx) rfl, ← hp.word, hp.w]
+  · rw [csField_of (c := cx) hX, ← hp.word, hp.w]
     show Frame _ s.mem (mEnd s)
     exact (frame_three s.mem _ _ _ _ _ _).mono (by simp)
   · show (mEnd s).readW (cx.word s) 64 = _
@@ -386,7 +388,7 @@ theorem pushed (hp : Pre s k) (hi : cx.InRange s) (ht : ¬ tst s = 0) :
       rw [mEnd, readW64_writeW_disj h2, mSlot, readW64_writeW_disj h3, m1, readW64_writeW_disj h1]
 
 theorem unchanged_cs : Unchanged [cx.csField s] (cx.mem s) (m1 s) := by
-  rw [csField_of (c := cx) rfl, mem_of (c := cx) rfl]; exact frame_m1
+  rw [csField_of (c := cx) hX, mem_of (c := cx) hX]; exact frame_m1
 
 theorem missed_C (hi : ¬ cx.InRange s) : cx.PushMissed s (cx.arg s 0) (σ2 s) := by
   refine ⟨?_, unchanged_cs⟩
@@ -396,32 +398,32 @@ theorem missed_T (hp : Pre s k) (hi : cx.InRange s) (ht : tst s = 0) :
     cx.PushMissed s (cx.arg s 0) (σ7 s) := by
   refine ⟨?_, unchanged_cs⟩
   simp only [Spec.Slab.Ctx.pushResult, hi, ↓reduceIte, Spec.Slab.Ctx.mag, hp.slots,
-    mem_of (c := cx) rfl, hp.w]
+    mem_of (c := cx) hX, hp.w]
   exact (push_eq_none_iff _ k rfl hp.hk hp.hk' (hp.ok hi)).mpr
     ((test_iff hp.hk hp.hk' (wvi s + 8) (s.params "mask") hp.mask).mp ht)
 
-theorem post_eq (s' : State) : (pushInlineContract abi).post s s' ↔ cx.Pushed s (cx.arg s 0) s' :=
+theorem post_eq (s' : State) : (pushInlineContract inlineAbi).post s s' ↔ cx.Pushed s (cx.arg s 0) s' :=
   post_iff cx hv s s'
 
-theorem exit_eq (t : String) (s' : State) : (pushInlineContract abi).exit t s s' ↔
+theorem exit_eq (t : String) (s' : State) : (pushInlineContract inlineAbi).exit t s s' ↔
     [s'.gpr .rdi] = [s.gpr .rdi] ∧ (t = MISS ∧ cx.PushMissed s (cx.arg s 0) s') :=
   exit_iff cx hv t s s'
 
-theorem correct (hs : (pushInlineContract abi).pre s) :
+theorem correct (hs : (pushInlineContract inlineAbi).pre s) :
     (∃ s', Exec isa pushInline s s' ∧ inlineTarget.abiPreserved s s' ∧
-      (pushInlineContract abi).post s s') ∨
+      (pushInlineContract inlineAbi).post s s') ∨
     (∃ t s', ExecExit isa pushInline s t s' ∧ inlineTarget.abiPreserved s s' ∧
-      (pushInlineContract abi).exit t s s') := by
+      (pushInlineContract inlineAbi).exit t s s') := by
   have h := facts_of_pre hs
   obtain ⟨k, hp⟩ := pre_of h
   rw [code_eq]
   by_cases hi : cx.InRange s
   · by_cases ht : tst s = 0
-    · exact .inr ⟨"miss", σ7 s, .rseq (execBlock_arm h) (runBody_T hp hi ht), inline_abi mσ7,
+    · exact .inr ⟨"miss", σ7 s, .rseq (execBlock_arm h.toArm) (runBody_T hp hi ht), inline_abi mσ7,
         (exit_eq _ _).mpr ⟨by rw [mσ7.gpr _ (by decide)], rfl, missed_T hp hi ht⟩⟩
-    · exact .inl ⟨σ10 s, .rseq (execBlock_arm h) (runBody_P hp hi ht), inline_abi mσ10,
+    · exact .inl ⟨σ10 s, .rseq (execBlock_arm h.toArm) (runBody_P hp hi ht), inline_abi mσ10,
         (post_eq _).mpr (pushed hp hi ht)⟩
-  · exact .inr ⟨"miss", σ2 s, .rseq (execBlock_arm h) (runBody_C hp hi), inline_abi mσ2,
+  · exact .inr ⟨"miss", σ2 s, .rseq (execBlock_arm h.toArm) (runBody_C hp hi), inline_abi mσ2,
       (exit_eq _ _).mpr ⟨by rw [mσ2.gpr _ (by decide)], rfl, missed_C hi⟩⟩
 
 /-! ### Where it may be aborted -/
@@ -429,7 +431,7 @@ theorem correct (hs : (pushInlineContract abi).pre s) :
 /-- Before the free slot is written, the magazine is as on entry. -/
 theorem mag_m1 (hp : Pre s k) (hi : cx.InRange s) :
     Mag.ofWord (cx.slots s) (m1 s) (cx.w s) = cx.mag s := by
-  simp only [Spec.Slab.Ctx.mag, mem_of (c := cx) rfl, hp.slots, hp.w]
+  simp only [Spec.Slab.Ctx.mag, mem_of (c := cx) hX, hp.slots, hp.w]
   rcases hp.ok hi with h0 | h1 | hs
   · rw [ofWord_zero h0, ofWord_zero h0]
   · rw [ofWord_marker h1, ofWord_marker h1]
@@ -440,38 +442,51 @@ theorem mag_m1 (hp : Pre s k) (hi : cx.InRange s) :
 theorem mag_slot (hp : Pre s k) (hi : cx.InRange s) (ht : ¬ tst s = 0) :
     Mag.ofWord (cx.slots s) (mSlot s) (cx.w s) = cx.mag s := by
   obtain ⟨hs, -, -⟩ := hit hp hi ht
-  simp only [Spec.Slab.Ctx.mag, mem_of (c := cx) rfl, hp.slots, hp.w]
+  simp only [Spec.Slab.Ctx.mag, mem_of (c := cx) hX, hp.slots, hp.w]
   exact ofWord_congr fun i hil => by
     obtain ⟨h1, -, h3⟩ := item_disjoint hp hi hs hil
     rw [mSlot, readW64_writeW_disj h3, m1, readW64_writeW_disj h1]
 
-theorem abort_eq (p : State) : (pushInlineContract abi).abort s p ↔ [p.gpr .rdi] = [s.gpr .rdi] ∧
-    (Unchanged [cx.csField s, ⟨cx.w s, 8⟩] (cx.mem s) p.mem ∧
-      (cx.InRange s → Mag.ofWord (cx.slots s) p.mem (cx.w s) = cx.mag s)) :=
+theorem abort_eq (p : State) : (pushInlineContract inlineAbi).abort s p ↔ [p.gpr .rdi] = [s.gpr .rdi] ∧
+    ((Unchanged [cx.csField s, ⟨cx.w s, 8⟩] (cx.mem s) p.mem ∧
+      (cx.InRange s → Mag.ofWord (cx.slots s) p.mem (cx.w s) = cx.mag s)) ∧ cx.inv p) :=
   abort_iff cx hv s p
 
+/-- The magazine lies apart, by the invariant. -/
+theorem mag_apart (hp : Pre s k) (hi : cx.InRange s) (hs : IsSlot (2 ^ k) (wvi s)) :
+    cx.Apart s ⟨magBase (2 ^ k) (wvi s), 8 * 2 ^ k⟩ := by
+  have := (hp.facts.pre.2.2.2.2 (cx.cpu s) hi).2
+  rw [wordOf_cpu, hp.slots, hp.w] at this
+  exact this hs
+
 theorem abortOk1 (hp : Pre s k) {p : State} (hm : Mid scratchI s (m1 s) p) :
-    armed p ∧ inlineTarget.abiPreserved s p ∧ (pushInlineContract abi).abort s p ∧
-      ∀ p', inlineTarget.rely p p' → (pushInlineContract abi).env p p' →
-        (pushInlineContract abi).pre p' := by
-  refine ⟨armed_of_mid hp.facts (xs := []) frame_m1 m1_cs (by simp) hm, inline_abi hm, ?_,
-    fun p' _ he => (env_eq cx p p').mp he⟩
-  refine (abort_eq p).mpr ⟨by rw [hm.gpr _ (by decide)], ?_, fun hi => by rw [hm.mem]; exact mag_m1 hp hi⟩
-  rw [hm.mem, csField_of (c := cx) rfl, mem_of (c := cx) rfl]
+    armed p ∧ inlineTarget.abiPreserved s p ∧ (pushInlineContract inlineAbi).abort s p ∧
+      ∀ p', inlineTarget.rely p p' → (pushInlineContract inlineAbi).env p p' →
+        (pushInlineContract inlineAbi).pre p' := by
+  obtain ⟨hip, hre⟩ := retry hX hv (post := fun s s' => _) (fun _ => rfl) (fun _ => rfl) (by decide)
+    hp.facts.pre hm (by decide) (by decide) frame_m1 (harmless_cs1 hX hp.facts.pre)
+  refine ⟨armed_of_mid hp.facts.toArm (xs := []) frame_m1 m1_cs (by simp) hm, inline_abi hm, ?_, hre⟩
+  refine (abort_eq p).mpr ⟨by rw [hm.gpr _ (by decide)], ⟨?_, fun hi => by rw [hm.mem]; exact mag_m1 hp hi⟩,
+    hip⟩
+  rw [hm.mem, csField_of (c := cx) hX, mem_of (c := cx) hX]
   exact frame_m1.mono (by simp)
 
 theorem abortOk2 (hp : Pre s k) (hi : cx.InRange s) (ht : ¬ tst s = 0) :
-    armed (σ9 s) ∧ inlineTarget.abiPreserved s (σ9 s) ∧ (pushInlineContract abi).abort s (σ9 s) ∧
-      ∀ p', inlineTarget.rely (σ9 s) p' → (pushInlineContract abi).env (σ9 s) p' →
-        (pushInlineContract abi).pre p' := by
+    armed (σ9 s) ∧ inlineTarget.abiPreserved s (σ9 s) ∧ (pushInlineContract inlineAbi).abort s (σ9 s) ∧
+      ∀ p', inlineTarget.rely (σ9 s) p' → (pushInlineContract inlineAbi).env (σ9 s) p' →
+        (pushInlineContract inlineAbi).pre p' := by
   have hf := slotFacts hp hi ht
   have hfr : Frame [⟨area s + 8, 8⟩, ⟨wvi s, 8⟩] s.mem (mSlot s) := frame_two _ _ _ _ _
   have hcs : (mSlot s).readW (area s + 8) 64 = s.csDesc := by
     rw [mSlot, readW64_writeW_disj hf.cs.symm, m1_cs]
-  refine ⟨armed_of_mid hp.facts (xs := [⟨wvi s, 8⟩]) hfr hcs (by simpa using hf.rsVar) mσ9,
-    inline_abi mσ9, ?_, fun p' _ he => (env_eq cx _ p').mp he⟩
-  refine (abort_eq _).mpr ⟨by rw [mσ9.gpr _ (by decide)], ?_, fun _ => mag_slot hp hi ht⟩
-  rw [mσ9.mem, csField_of (c := cx) rfl, mem_of (c := cx) rfl, hp.w]
+  have hW := harmless_cs2 hX hp.facts.pre (harmless_mag (.inl rfl)
+    (mag_apart hp hi (hit hp hi ht).1) (sub_of_contains hf.inMag))
+  obtain ⟨hip, hre⟩ := retry hX hv (post := fun s s' => _) (fun _ => rfl) (fun _ => rfl) (by decide)
+    hp.facts.pre mσ9 (by decide) (by decide) hfr hW
+  refine ⟨armed_of_mid hp.facts.toArm (xs := [⟨wvi s, 8⟩]) hfr hcs (by simpa using hf.rsVar) mσ9,
+    inline_abi mσ9, ?_, hre⟩
+  refine (abort_eq _).mpr ⟨by rw [mσ9.gpr _ (by decide)], ⟨?_, fun _ => mag_slot hp hi ht⟩, hip⟩
+  rw [mσ9.mem, csField_of (c := cx) hX, mem_of (c := cx) hX, hp.w]
   exact hfr
 
 /-! ### Its accesses -/
@@ -492,17 +507,17 @@ theorem test_eq : BitVec.ofNat 32 ((wvi s).toNat + 8) &&& BitVec.ofNat 32 (cx.te
     apply BitVec.eq_of_toNat_eq
     rw [BitVec.toNat_ofNat, BitVec.toNat_setWidth, add8_toNat_mod,
       Nat.mod_mod_of_dvd _ (by decide : 2 ^ 32 ∣ 2 ^ 64)]
-  simp only [Spec.Slab.Ctx.testMask, param_of (c := cx) rfl, BitVec.ofNat_toNat, tst, this]; rfl
+  simp only [Spec.Slab.Ctx.testMask, param_of (c := cx) hX, BitVec.ofNat_toNat, tst, this]; rfl
 
-theorem trace_ok (hs : (pushInlineContract abi).pre s) :
-    (pushInlineContract abi).trace s (Code.events isa pushInline s) := by
+theorem trace_ok (hs : (pushInlineContract inlineAbi).pre s) :
+    (pushInlineContract inlineAbi).trace s (Code.events isa pushInline s) := by
   have h := facts_of_pre hs
   obtain ⟨k, hp⟩ := pre_of h
   show cx.PushTrace s (cx.arg s 0) (Code.events isa (.rseq arm body) s)
-  simp only [Code.events, execBlock_arm h, events_arm h]
+  simp only [Code.events, execBlock_arm h.toArm, events_arm h.toArm]
   refine ⟨(o s).toNat, s.csDesc.toNat, (cpu32 s).toNat, (wvi s).toNat, 0, ?_⟩
-  simp only [Spec.Slab.Ctx.headTrace, Spec.Slab.Ctx.rd, Spec.Slab.Ctx.wr, tp_of (c := cx) rfl,
-    sym_of (c := cx) rfl, test_eq, ofNat_toNat64, addr8, addr4, rsName, arg0]
+  simp only [Spec.Slab.Ctx.headTrace, Spec.Slab.Ctx.rd, Spec.Slab.Ctx.wr, tp_of (c := cx) hX,
+    sym_of (c := cx) hX, test_eq, ofNat_toNat64, addr8, addr4, rsName, arg0]
   by_cases hi : cx.InRange s
   · have hi' : (cpu32 s).toNat < SLAB_COUNT := (inRange_iff.mp hi)
     rw [wordAddr_eq hp]
@@ -512,17 +527,17 @@ theorem trace_ok (hs : (pushInlineContract abi).pre s) :
   · have hi' : ¬ (cpu32 s).toNat < SLAB_COUNT := fun h' => hi (inRange_iff.mpr h')
     rw [events_C hp hi]; simp [hi']
 
-theorem rseqOk (hs : (pushInlineContract abi).pre s) :
-    RseqOk inlineTarget pushInline (pushInlineContract abi) s := by
+theorem rseqOk (hs : (pushInlineContract inlineAbi).pre s) :
+    RseqOk inlineTarget pushInline (pushInlineContract inlineAbi) s := by
   have h := facts_of_pre hs
   obtain ⟨k, hp⟩ := pre_of h
   have ht := trace_ok hs
   rw [code_eq] at ht ⊢
   unfold RseqOk
-  refine ⟨ht, ⟨_, _, rfl, execBlock_dropLast_arm h, arms_arm⟩, ?_⟩
+  refine ⟨ht, ⟨_, _, rfl, execBlock_dropLast_arm h.toArm, arms_arm⟩, ?_⟩
   have mA : Mid scratchI s (m1 s) (σA s) := mid_σA (by decide) (by decide)
   have m1' : Mid scratchI s (m1 s) (σ1 s) := mid_σ1 (by decide) mA
-  simp only [Code.abortStates, execBlock_arm h]
+  simp only [Code.abortStates, execBlock_arm h.toArm]
   by_cases hi : cx.InRange s
   · by_cases ht : tst s = 0
     · rw [prefixes_T hp hi ht]
@@ -540,11 +555,11 @@ theorem rseqOk (hs : (pushInlineContract abi).pre s) :
 
 /-! ### The registers `asm!` must find kept -/
 
-def clobbers : List String := ["rax", "rcx", "rdx", "r8", "r9", "r10"]
+def clobbers : List String := ["rax", "rcx", "r8", "r9", "r10", "r11"]
 
 theorem names : ∀ r ∈ scratchI, r.name ∈ clobbers := by decide
 
-theorem clobbersOk (hs : (pushInlineContract abi).pre s) :
+theorem clobbersOk (hs : (pushInlineContract inlineAbi).pre s) :
     (∀ s', Exec isa pushInline s s' →
       preservedExcept (clobbers ++ (if pushInlineSig.ret.isSome then ["rax"] else [])) s s') ∧
     (∀ t s', ExecExit isa pushInline s t s' → preservedExcept clobbers s s') ∧
@@ -559,7 +574,7 @@ theorem clobbersOk (hs : (pushInlineContract abi).pre s) :
   refine ⟨fun s' he => ?_, fun t s' he => ?_, fun p hpm => ?_⟩
   · cases he with
     | rseq ha hb =>
-      rw [execBlock_arm h] at ha; cases ha
+      rw [execBlock_arm h.toArm] at ha; cases ha
       by_cases hi : cx.InRange s
       · by_cases ht : tst s = 0
         · rw [runBody_T hp hi ht] at hb; cases hb
@@ -567,13 +582,13 @@ theorem clobbersOk (hs : (pushInlineContract abi).pre s) :
       · rw [runBody_C hp hi] at hb; cases hb
   · cases he with
     | rseq ha hb =>
-      rw [execBlock_arm h] at ha; cases ha
+      rw [execBlock_arm h.toArm] at ha; cases ha
       by_cases hi : cx.InRange s
       · by_cases ht : tst s = 0
         · rw [runBody_T hp hi ht] at hb; cases hb; exact preservedExcept_of_mid names mσ7
         · rw [runBody_P hp hi ht] at hb; cases hb
       · rw [runBody_C hp hi] at hb; cases hb; exact preservedExcept_of_mid names mσ2
-  · simp only [Code.abortStates, execBlock_arm h] at hpm
+  · simp only [Code.abortStates, execBlock_arm h.toArm] at hpm
     by_cases hi : cx.InRange s
     · by_cases ht : tst s = 0
       · rw [prefixes_T hp hi ht] at hpm

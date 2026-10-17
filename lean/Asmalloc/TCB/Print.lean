@@ -145,10 +145,10 @@ variable {M : ISA} (P : Printer M)
 def labelNum (n : Nat) : String := s!"2{n}"
 
 /-- The lines of a restartable sequence's body, and of its exits' code out
-of line, using labels `labelNum n`: an exit straight to an external target
-branches to it; any other branches to a label of its own, whose code ends
-with a jump to the end of the sequence (label `7`) or to its external
-target. -/
+of line, using labels `labelNum n`: an exit with no code of its own
+branches straight to its external target, or to the end of the sequence
+(label `7`); any other branches to a label of its own, whose code ends with
+a jump to the end of the sequence or to its external target. -/
 def Printer.lowerBody : List (Step M.Instr M.Cond) → Nat → List Line × List Line × Nat
   | [], n => ([], [], n)
   | .instr i :: rest, n =>
@@ -157,6 +157,9 @@ def Printer.lowerBody : List (Step M.Instr M.Cond) → Nat → List Line × List
   | .exit c [] (some t) :: rest, n =>
     let (l, k, n) := lowerBody rest n
     (.ops [.text (P.branch c ""), .ref t] :: l, k, n)
+  | .exit c [] none :: rest, n =>
+    let (l, k, n) := lowerBody rest n
+    (.text (P.branch c "7f") :: l, k, n)
   | .exit c cold ext :: rest, n =>
     let lab := labelNum n
     let (l, k, n) := lowerBody rest (n + 1)
