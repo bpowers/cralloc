@@ -1,0 +1,75 @@
+#!/usr/bin/env bash
+# Run a command under a hard memory cap and a wall-clock timeout.
+#
+# Why: CBMC (Kani's back end) and a few other tools use unbounded memory on hard inputs. An
+# uncapped run can take the whole machine down, and other people's work with it. A cgroup cap
+# turns that into one failed command.
+#
+# Usage: scripts/memlimit [-m MEM] [-t TIMEOUT] -- command args...
+#   MEM      systemd size, default 6G (env MEMLIMIT_MEM). Swap is pinned to 0.
+#   TIMEOUT  GNU timeout duration, default 30m (env MEMLIMIT_TIMEOUT).
+# Exit status: the command's, 124 on timeout, or 137 when the kernel OOM-kills it.
+# Set MEMLIMIT_QUIET=1 to skip the line reporting peak memory.
+set -euo pipefail
+
+MEM="${MEMLIMIT_MEM:-6G}"
+TIMEOUT="${MEMLIMIT_TIMEOUT:-30m}"
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -m) MEM="$2"; shift 2 ;;
+    -t) TIMEOUT="$2"; shift 2 ;;
+    --) shift; break ;;
+    -*) echo "memlimit: unknown option $1" >&2; exit 2 ;;
+    *) break ;;
+  esac
+done
+[ $# -gt 0 ] || { echo "usage: scripts/memlimit [-m MEM] [-t TIMEOUT] -- command args..." >&2; exit 2; }
+
+# systemd size suffixes to bytes, for the prlimit fallback only.
+to_bytes() {
+  local v="$1" n="${1%[KMGT]}"
+  case "${v: -1}" in
+    K) echo $((n * 1024)) ;;
+    M) echo $((n * 1024 * 1024)) ;;
+    G) echo $((n * 1024 * 1024 * 1024)) ;;
+    T) echo $((n * 1024 * 1024 * 1024 * 1024)) ;;
+    *) echo "$v" ;;
+  esac
+}
+
+# A user scope enforces MemoryMax only if the memory controller is delegated to the user's
+# systemd instance; without it the property is accepted and silently ignored.
+uid="$(id -u)"
+controllers="/sys/fs/cgroup/user.slice/user-$uid.slice/user@$uid.service/cgroup.controllers"
+if command -v systemd-run >/dev/null 2>&1 \
+   && grep -qw memory "$controllers" 2>/dev/null \
+   && systemd-run --user --scope -q -p MemoryMax=64M -- true >/dev/null 2>&1; then
+  # A transient scope puts the command and all its children in one cgroup. MemoryMax is a hard
+  # cap enforced by the OOM killer inside that cgroup, and MemorySwapMax=0 stops it spilling
+  # into swap first. The scope gets a known name so its accounting line ("memory peak") can be
+  # read back from the journal: /usr/bin/time around this script would measure only the
+  # systemd client, not the command.
+  unit="memlimit-$$-$(date +%s%N)"
+  set +e
+  systemd-run --user --scope -q --unit="$unit" \
+    -p MemoryMax="$MEM" -p MemorySwapMax=0 \
+    -- timeout --signal=TERM --kill-after=30s "$TIMEOUT" "$@"
+  status=$?
+  set -e
+  if [ -z "${MEMLIMIT_QUIET:-}" ]; then
+    # Give journald a moment to record the scope's exit accounting. grep exits 1 while the line
+    # is not there yet, which must not trip errexit or pipefail.
+    line=""
+    for _ in 1 2 3 4 5; do
+      line=$(journalctl --user -q --no-pager -o cat -u "$unit.scope" 2>/dev/null \
+             | { grep -E 'memory peak|oom-kill' || true; } | tail -2 | tr '\n' ' ')
+      [ -n "$line" ] && break
+      sleep 0.2
+    done
+    echo "memlimit: cap=$MEM exit=$status ${line:-(no accounting line in journal)}" >&2
+  fi
+  exit "$status"
+else
+  echo "memlimit: systemd-run unavailable; falling back to prlimit --as (weaker)" >&2
+  exec prlimit --as="$(to_bytes "$MEM")" -- timeout --signal=TERM --kill-after=30s "$TIMEOUT" "$@"
+fi
