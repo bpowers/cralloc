@@ -4,21 +4,14 @@
 use super::policy::retained_cap;
 use super::{Back, Block, Kind, State};
 use crate::classes::{Class, SmallClass};
-use crate::os::sim::{Call, Faults, Shape, SimOs, Standard};
+use crate::os::sim::{Call, Faults, Native, Shape, SimOs, Standard};
 use crate::os::{HugePages, Os};
-use crate::space::{Geometry, RegionTag};
+use crate::space::RegionTag;
 use std::boxed::Box;
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Mutex;
 use std::thread;
 use std::vec::Vec;
-
-/// 4 KiB pages, 64 KiB huge pages and 1 MiB regions, so large classes have several slots.
-enum Wide {}
-
-impl Shape for Wide {
-    const GEOMETRY: Geometry = Geometry::new(12, 16, 20, 32, 20);
-}
 
 type Sim<S = Standard> = SimOs<S>;
 
@@ -200,10 +193,10 @@ fn regions_are_assigned_as_a_class_grows() {
 #[test]
 #[cfg_attr(miri, ignore)]
 fn a_region_switches_to_huge_pages_past_the_threshold() {
-    let state = state::<Wide>();
+    let state = state::<Native>();
     let back = state.get_or_reserve().unwrap();
     let class = small(64);
-    let huge = Wide::GEOMETRY.huge_page_size();
+    let huge = Native::GEOMETRY.huge_page_size();
     // Six huge pages' worth of 64-byte slots, a magazine at a time: the first commit after the
     // region passes four huge pages switches it.
     let mut slots = Vec::new();
@@ -213,14 +206,14 @@ fn a_region_switches_to_huge_pages_past_the_threshold() {
     let region = back.space().locate(slots[0]).unwrap().region;
     let base = back.space().region(region);
     assert_eq!(state.os().huge_pages(base), Some(HugePages::Avoid));
-    let end = base.map_addr(|a| a.saturating_add(Wide::GEOMETRY.region_size() - 1));
+    let end = base.map_addr(|a| a.saturating_add(back.space().plan().region_size() - 1));
     assert_eq!(state.os().huge_pages(end), Some(HugePages::Prefer));
 }
 
 #[test]
 #[cfg_attr(miri, ignore)]
 fn large_slots_say_when_they_are_zero() {
-    let state = state::<Wide>();
+    let state = state::<Native>();
     let back = state.get_or_reserve().unwrap();
     let class = large(64 << 10);
     let Block { ptr, zeroed } = back.alloc(class).unwrap();
@@ -248,7 +241,7 @@ fn large_slots_say_when_they_are_zero() {
 fn runs_hold_objects_bigger_than_a_region() {
     let state = state::<Standard>();
     let back = state.get_or_reserve().unwrap();
-    let region = Standard::GEOMETRY.region_size();
+    let region = back.space().plan().region_size();
     let ptr = back.alloc_run(3 * region + 1, 8).unwrap();
     assert_eq!(back.lookup(ptr.as_ptr()), Some(Kind::Run(4)));
     assert_eq!(back.usable_size(ptr.as_ptr()), Some(4 * region));
@@ -279,7 +272,7 @@ fn runs_hold_objects_bigger_than_a_region() {
 fn freeing_a_run_tail_aborts() {
     let state = state::<Standard>();
     let back = state.get_or_reserve().unwrap();
-    let region = Standard::GEOMETRY.region_size();
+    let region = back.space().plan().region_size();
     let ptr = back.alloc_run(2 * region, 8).unwrap();
     back.free_run(ptr.map_addr(|a| a.saturating_add(region)));
 }
@@ -447,12 +440,12 @@ fn shadow_run<S: Shape>(seed: u64, steps: usize, faults: bool) {
         .map(small)
         .collect();
     let larges: Vec<Class> = Class::all()
-        .filter(|&c| !c.is_small() && back.space().plan().geometry().fits_region(c))
+        .filter(|&c| !c.is_small() && back.space().plan().fits_region(c))
         .take(4)
         .collect();
     let mut live: BTreeMap<usize, Live> = BTreeMap::new();
     let mut byte = 0u8;
-    let region = back.space().plan().geometry().region_size();
+    let region = back.space().plan().region_size();
     let add = |live: &mut BTreeMap<usize, Live>, ptr: *mut u8, entry: Live| {
         assert_eq!(ptr, entry.ptr);
         let start = ptr.addr();
@@ -478,6 +471,8 @@ fn shadow_run<S: Shape>(seed: u64, steps: usize, faults: bool) {
                 _ => Faults {
                     pass: rng.below(3) as u32,
                     fail: rng.below(5) as u32,
+                    // A failing call may first act on half its range, as Linux allows.
+                    partial: rng.below(2) == 0,
                 },
             };
             os.set_faults(call, plan);
@@ -593,7 +588,7 @@ fn random_operations_survive_os_failures() {
 #[cfg_attr(miri, ignore)]
 fn random_operations_with_several_large_slots_per_region() {
     for seed in 0..4 {
-        shadow_run::<Wide>(0x5851_f42d_4c95_7f2d ^ seed, 1500, seed % 2 == 1);
+        shadow_run::<Native>(0x5851_f42d_4c95_7f2d ^ seed, 1500, seed % 2 == 1);
     }
 }
 

@@ -209,7 +209,7 @@ impl<'a, O: Os> Back<'a, O> {
     pub fn usable_size(&self, ptr: *const u8) -> Option<usize> {
         match self.lookup(ptr)? {
             Kind::Slot(class) => Some(class.size()),
-            Kind::Run(regions) => Some(regions << self.space.plan().geometry().region_shift()),
+            Kind::Run(regions) => Some(regions << self.space.plan().region_shift()),
         }
     }
 
