@@ -18,7 +18,8 @@ use crate::classes::Class;
 /// A region number: less than [`MAX_REGIONS`], so it indexes the class-of-region table.
 ///
 /// Only [`Plan::region`], [`Plan::regions`] and [`Plan::locate`] make one, so outside this module
-/// a `RegionId` is always one of its plan's object regions.
+/// a `RegionId` is always an object region of some plan. Nothing ties it to that plan: a process
+/// has one plan, and `Space`'s methods check in debug builds that an id is one of theirs.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
 pub struct RegionId(u16);
 

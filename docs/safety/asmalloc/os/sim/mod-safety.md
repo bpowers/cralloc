@@ -34,6 +34,10 @@ other promises:
   - It contains a page that is not reserved.
   - It spans two reservations. The first page of each reservation carries `START`. `unmap`
     moves `START` to the remaining tail when it removes a reservation's head, as munmap does.
+    It decides this before releasing its range, with a compare-and-swap that requires the page
+    still to be reserved, so a concurrent reserve or unmap cannot be confused with the tail.
+    This is a correctness matter for tests, not memory safety: a wrong flag can only make a
+    later check panic, or leave a page unclaimable.
 - Commit keeps contents (it only sets flags). Purge zeroes exactly its range. An injected
   failure returns before any effect.
 - `abort` panics, so it does not return.

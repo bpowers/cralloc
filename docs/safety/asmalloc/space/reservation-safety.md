@@ -62,6 +62,15 @@ learned its address, and `mine` is a local of this call that is not used again. 
 RESERVATION-03's precondition. A failed unmap leaves an unused reservation behind, which costs
 address space only.
 
+## RESERVATION-05: `space.unmap()` in `Drop for SpaceCell`
+
+**Proof.** `drop` has `&mut self`, so no `Space` borrowed from the cell is alive. None can be
+made afterwards, because the cell is going away. The reservation is the cell's own published
+space, decoded as in the invariant section, so it is live (the cell's OS has not been dropped
+yet; fields drop after `drop` returns). Nothing uses it again, which meets RESERVATION-03's
+precondition. A cell in a static is never dropped. This is the one place a published space is
+unmapped, and `Space::unmap`'s documentation says so.
+
 **Machine checks.** The `Space` unit tests, natively and under Miri with strict provenance
 (`scripts/miri`):
 

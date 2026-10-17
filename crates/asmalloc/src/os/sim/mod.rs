@@ -320,15 +320,19 @@ unsafe impl<S: Shape> Os for SimOs<S> {
         self.faults.enter(Call::Unmap)?;
         // SAFETY: `checked_range` put the range inside `memory`, and the caller promises that
         // nothing touches it once the call begins. Zeroing keeps unreserved memory zero.
+        // What remains of a reservation after its head is unmapped is a reservation of its own,
+        // as munmap leaves it. This is decided while the range is still reserved: then a
+        // reserved page right after it without `START` can only be this reservation's tail,
+        // never a reservation another thread is making. Doing it after the release would race
+        // with such a thread.
+        let next = first + count;
+        if next < self.pages.len() {
+            self.pages.mark_start(next);
+        }
+        // SAFETY: `checked_range` put the range inside `memory`, and the caller promises that
+        // nothing touches it once the call begins. Zeroing keeps unreserved memory zero.
         unsafe { self.memory.zero(self.memory.offset_of(start), len) };
         self.pages.release(first, count);
-        // What remains of a reservation after its head is unmapped is a reservation of its own,
-        // as munmap leaves it. The page after the range already starts one if it is reserved
-        // and belongs to another.
-        let next = first + count;
-        if next < self.pages.len() && self.pages.get(next) & RESERVED != 0 {
-            self.pages.update(next, 1, START, 0);
-        }
         Ok(())
     }
 

@@ -93,6 +93,21 @@ impl Pages {
             .all(|state| state.load(Ordering::Acquire) & mask == mask)
     }
 
+    /// Marks `page` as the first of a reservation if it is reserved and not already marked.
+    /// A compare-and-swap that requires `RESERVED`, so a page another thread releases
+    /// meanwhile stays free rather than gaining a stray `START`.
+    pub(super) fn mark_start(&self, page: usize) {
+        let state = &self.states[page];
+        let mut old = state.load(Ordering::Acquire);
+        while old & RESERVED != 0 && old & START == 0 {
+            match state.compare_exchange_weak(old, old | START, Ordering::AcqRel, Ordering::Acquire)
+            {
+                Ok(_) => return,
+                Err(now) => old = now,
+            }
+        }
+    }
+
     /// Whether some page of `first..first + count` has any bit of `mask`.
     pub(super) fn any(&self, first: usize, count: usize, mask: u8) -> bool {
         self.states[first..first + count]

@@ -83,7 +83,7 @@ pub enum HugePages {
 /// - `advise_huge` changes neither contents nor permissions.
 /// - A failed call may have taken effect on part of its range, but never beyond it.
 /// - A reservation's memory stays valid until it is unmapped or the value that made it is
-///   dropped, whichever is first.
+///   dropped, whichever is first. Moving the value moves none of its reservations.
 /// - `fence` returns only after every restartable sequence that was in flight in the process
 ///   when it was called has completed or been aborted.
 /// - `rseq` never overstates the process's registration: if it reports a concurrency ID, the

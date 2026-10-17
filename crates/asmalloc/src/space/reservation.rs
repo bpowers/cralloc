@@ -59,6 +59,12 @@ impl<'os, O: Os> Space<'os, O> {
     /// regions, and so on down to one. The design asks for "as much as the process is allowed";
     /// halving finds that within a dozen calls.
     pub fn reserve(os: &'os O) -> Result<Space<'os, O>, OsError> {
+        Space::reserve_unless(os, || false)
+    }
+
+    /// As [`Space::reserve`], but gives up with `ENOMEM` before each smaller attempt if
+    /// `stop()` says the reservation is no longer wanted.
+    fn reserve_unless(os: &'os O, stop: impl Fn() -> bool) -> Result<Space<'os, O>, OsError> {
         let geometry = O::GEOMETRY;
         let mut objects = geometry.max_objects();
         loop {
@@ -70,7 +76,7 @@ impl<'os, O: Os> Space<'os, O> {
                     debug_assert!(base.addr().get() & (geometry.region_size() - 1) == 0);
                     return Ok(Space { base, plan, os });
                 }
-                Err(error) if objects == 1 => return Err(error),
+                Err(error) if objects == 1 || stop() => return Err(error),
                 Err(_) => objects /= 2,
             }
         }
@@ -200,7 +206,8 @@ impl<'os, O: Os> Space<'os, O> {
     /// # Safety
     ///
     /// Nothing reads or writes the reservation, and no copy of this `Space` is used, after the
-    /// call begins. In particular it must not be a space a [`SpaceCell`] has published.
+    /// call begins. In particular it must not be a space a [`SpaceCell`] has published; the
+    /// cell unmaps that one itself when it is dropped.
     pub unsafe fn unmap(self) -> Result<(), OsError> {
         // SAFETY: the whole reservation is a page-aligned, non-empty range of itself (the plan's
         // size is a whole number of pages), live by the invariant; the caller promises that
@@ -248,7 +255,12 @@ impl<O: Os> SpaceCell<O> {
         if let Some(space) = self.get() {
             return Ok(space);
         }
-        let mine = Space::reserve(&self.os)?;
+        // Many threads may race here, each reserving up to the whole geometry. Once one has
+        // published, the others stop shrinking their attempts, and a failure is no failure.
+        let mine = match Space::reserve_unless(&self.os, || self.is_published()) {
+            Ok(mine) => mine,
+            Err(error) => return self.get().ok_or(error),
+        };
         let word = encode(mine);
         loop {
             match self.word.compare_exchange(
@@ -273,6 +285,10 @@ impl<O: Os> SpaceCell<O> {
         }
     }
 
+    fn is_published(&self) -> bool {
+        !self.word.load(Ordering::Acquire).is_null()
+    }
+
     /// The space a non-null word stands for. Only `get_or_reserve` stores words, and only
     /// `encode` of a reservation of `self.os`.
     fn decode(&self, word: NonNull<u8>) -> Space<'_, O> {
@@ -285,6 +301,21 @@ impl<O: Os> SpaceCell<O> {
             base,
             plan: Plan::new(geometry, objects as u16),
             os: &self.os,
+        }
+    }
+}
+
+impl<O: Os> Drop for SpaceCell<O> {
+    /// Unmaps the published space, so a cell made and dropped (in a test, say) does not leak
+    /// it. A cell in a static is never dropped.
+    fn drop(&mut self) {
+        if let Some(word) = NonNull::new(*self.word.get_mut()) {
+            let space = self.decode(word);
+            // SAFETY: `&mut self` means no `Space` borrowed from this cell is alive, and none
+            // can be made after the drop, so nothing uses the reservation again. It is this
+            // cell's own published space, which the unmap contract allows only here, where
+            // the cell itself is going away.
+            let _ = unsafe { space.unmap() };
         }
     }
 }
