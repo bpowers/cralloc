@@ -38,6 +38,12 @@ pub trait Machine {
     /// sequence restarts. A machine that moves the thread to another CPU does so here, so the
     /// restart reads the new number.
     fn step(&self, step: Step) -> Result<(), Aborted>;
+
+    /// Called right after the committing store, which ends the sequence. A fence on the
+    /// thread's CPU may be waiting for it: between a successful `Commit` step and this call the
+    /// sequence is still in flight, as the real routine's last instruction is. Every twin must
+    /// call it after its store, and nothing else in between.
+    fn committed(&self) {}
 }
 
 impl<M: Machine + ?Sized> Machine for &M {
@@ -47,6 +53,10 @@ impl<M: Machine + ?Sized> Machine for &M {
 
     fn step(&self, step: Step) -> Result<(), Aborted> {
         (**self).step(step)
+    }
+
+    fn committed(&self) {
+        (**self).committed()
     }
 }
 

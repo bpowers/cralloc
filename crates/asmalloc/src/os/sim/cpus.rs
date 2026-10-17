@@ -7,11 +7,12 @@
 //! [`SimThread::abort_at`]), from moving the thread ([`SimThread::set_cpu`]), and from a fence on
 //! its CPU ([`Cpus::fence`], which the simulator's `Os::fence` calls).
 //!
-//! This is exact for threads scheduled cooperatively, the way a deterministic scheduler runs
-//! them: one OS thread, switching only inside `step`, so a twin's committing store follows its
-//! `Commit` step with no switch between. With real threads, a fence can return while a twin that
-//! has already passed its `Commit` step is still storing; the trait has no call after the store
-//! to wait for.
+//! A sequence that passes its `Commit` step is committing until the twin calls
+//! [`Machine::committed`] after its store. A fence does not interrupt a committing sequence (the
+//! store is the routine's last instruction, past the point of abort); it waits for it to finish,
+//! so `fence` returns only after every sequence on its CPU has completed or been aborted, with
+//! real threads as well as cooperatively scheduled ones. A twin must not yield to a scheduler
+//! between `Commit` and `committed`, or a fence from the same OS thread would wait forever.
 
 use crate::os::machine::{Aborted, Machine, Step};
 use core::sync::atomic::{AtomicI32, AtomicU8, Ordering};
@@ -22,7 +23,8 @@ pub const SIM_THREADS: usize = 64;
 const IDLE: u8 = 0;
 const RUNNING: u8 = 1;
 const ABORTED: u8 = 2;
-const GONE: u8 = 3;
+const COMMITTING: u8 = 3;
+const GONE: u8 = 4;
 
 /// No abort is scheduled.
 const NO_STEP: u8 = 0;
@@ -52,11 +54,22 @@ impl ThreadState {
         }
     }
 
-    /// Interrupts the thread's sequence, if it is in one.
+    /// Interrupts the thread's sequence, if it is in one, and returns whether it was. A
+    /// sequence that is committing cannot be interrupted any more; this waits for it to end, as
+    /// a fence waits for a routine's last instruction.
     fn interrupt(&self) -> bool {
-        self.sequence
-            .compare_exchange(RUNNING, ABORTED, Ordering::AcqRel, Ordering::Acquire)
-            .is_ok()
+        loop {
+            match self.sequence.compare_exchange(
+                RUNNING,
+                ABORTED,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            ) {
+                Ok(_) => return true,
+                Err(COMMITTING) => core::hint::spin_loop(),
+                Err(_) => return false,
+            }
+        }
     }
 }
 
@@ -170,7 +183,11 @@ impl Machine for SimThread<'_> {
                 Ok(())
             }
             _ => {
-                let next = if step == Step::Commit { IDLE } else { RUNNING };
+                let next = if step == Step::Commit {
+                    COMMITTING
+                } else {
+                    RUNNING
+                };
                 match state.sequence.compare_exchange(
                     RUNNING,
                     next,
@@ -186,6 +203,17 @@ impl Machine for SimThread<'_> {
             }
         }
     }
+
+    fn committed(&self) {
+        // Only a committing sequence ends here; anything else (a twin that called this without
+        // committing) is left as it is.
+        let _ = self.state.sequence.compare_exchange(
+            COMMITTING,
+            IDLE,
+            Ordering::AcqRel,
+            Ordering::Acquire,
+        );
+    }
 }
 
 #[cfg(test)]
@@ -196,7 +224,39 @@ mod tests {
         thread.step(Step::ReadCpu)?;
         thread.step(Step::Load)?;
         thread.step(Step::Access)?;
-        thread.step(Step::Commit)
+        thread.step(Step::Commit)?;
+        thread.committed();
+        Ok(())
+    }
+
+    #[test]
+    fn a_fence_waits_for_a_committing_sequence_and_does_not_abort_it() {
+        use std::sync::atomic::AtomicBool;
+        use std::thread;
+        let cpus = Cpus::<4>::new();
+        let twin = cpus.thread(0);
+        twin.step(Step::ReadCpu).unwrap();
+        twin.step(Step::Commit).unwrap();
+        let fenced = AtomicBool::new(false);
+        thread::scope(|scope| {
+            let fence = scope.spawn(|| {
+                let aborted = cpus.fence(0);
+                fenced.store(true, Ordering::Release);
+                aborted
+            });
+            thread::sleep(std::time::Duration::from_millis(20));
+            assert!(
+                !fenced.load(Ordering::Acquire),
+                "the fence waits for the store"
+            );
+            twin.committed();
+            assert_eq!(
+                fence.join().unwrap(),
+                0,
+                "a committing sequence is not aborted"
+            );
+        });
+        assert!(!twin.in_sequence());
     }
 
     #[test]
