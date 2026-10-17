@@ -568,8 +568,8 @@ mod tests {
     }
 
     /// A drain in miniature against a push on a free-running thread. Once the fence has
-    /// returned with the marker in place, the drainer owns the magazine, and the aborted push
-    /// must not write to it: with the push stopped between its check and its store, the fence
+    /// returned, the drainer owns the magazine if the marker is still in place, and the aborted
+    /// push must not write to it: with the push stopped between its check and its store, the fence
     /// has to wait for the store. When it did not, the store landed in a magazine the drainer
     /// had already passed on, over an object another thread had pushed there, and the retried
     /// push cached the first object a second time: one block, two owners.
@@ -616,8 +616,19 @@ mod tests {
             world.slot(0, 2).addr(),
             "the drainer displaced the loaded magazine"
         );
-        assert_eq!(world.field(0, Field::hot(c)).load(Relaxed).addr(), marker);
-        assert!(!pushed, "the push was aborted and its retry met the marker");
+        // Once the access is over the fence races the commit. If the fence wins, the push is
+        // aborted and its retry meets the marker; if the commit wins, the word is the push's
+        // and the drainer takes nothing. Either way the slot was written before the fence
+        // returned and not after.
+        let hot = world.field(0, Field::hot(c)).load(Relaxed).addr();
+        if pushed {
+            assert_eq!(hot, world.slot(0, 3).addr(), "the push committed");
+        } else {
+            assert_eq!(
+                hot, marker,
+                "the push was aborted and its retry met the marker"
+            );
+        }
         assert_eq!(
             free_slot.load(Relaxed).addr(),
             at_return,
