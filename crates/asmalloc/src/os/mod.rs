@@ -6,8 +6,9 @@
 //! talks to the OS.
 //!
 //! The interface is what the design needs and no more: reserve address space, make parts of it
-//! writable, return pages, steer transparent huge pages, unmap, fence restartable sequences,
-//! report the rseq registration, and abort. Each implementation also fixes the [`Geometry`] the
+//! writable, return pages, steer transparent huge pages, mark a page to be wiped in forked
+//! children, unmap, fence the restartable sequences of one CPU, report the rseq registration,
+//! draw a random number, and abort. Each implementation also fixes the [`Geometry`] the
 //! heap is laid out with, so the simulated OS can use a scaled-down heap.
 //!
 //! Ranges passed to the memory calls are page-aligned, a whole number of pages long, not empty,
@@ -81,14 +82,15 @@ pub enum HugePages {
 ///   contents are unchanged.
 /// - After `purge` succeeds the range reads as zero and stays writable if it was.
 /// - `advise_huge` changes neither contents nor permissions.
+/// - After `wipe_on_fork` succeeds, a child forked later reads the range as zero; the calling
+///   process's contents and permissions are unchanged.
 /// - A failed call may have taken effect on part of its range, but never beyond it.
 /// - A reservation's memory stays valid until it is unmapped or the value that made it is
 ///   dropped, whichever is first. Moving the value moves none of its reservations.
-/// - `fence` returns only after every restartable sequence that was in flight in the process
-///   when it was called has completed or been aborted.
-/// - `rseq` never overstates the process's registration: if it reports a concurrency ID, the
-///   kernel maintains `mm_cid` in every registered area. It does not promise that the calling
-///   thread is registered; see [`Os::rseq`].
+/// - `fence(cpu)` returns `Ok` only after every restartable sequence of the process that was in
+///   flight on CPU `cpu` when it was called has completed or been aborted.
+/// - `rseq` reports the process's registration as the C library made it. It does not promise
+///   that the calling thread is registered; see [`Os::rseq`].
 /// - `abort` does not return.
 /// - Every method may be called from any thread at any time, including from a signal handler,
 ///   and none of them allocates.
@@ -128,6 +130,14 @@ pub unsafe trait Os: Sync {
         advice: HugePages,
     ) -> Result<(), OsError>;
 
+    /// Marks a range so that a child forked afterwards reads it as zero (`MADV_WIPEONFORK`).
+    /// The process generation lives on such a page.
+    ///
+    /// # Safety
+    ///
+    /// The range follows the rules in the module documentation.
+    unsafe fn wipe_on_fork(&self, start: NonNull<u8>, len: usize) -> Result<(), OsError>;
+
     /// Unmaps a range. A later `reserve` may return it again.
     ///
     /// # Safety
@@ -139,9 +149,11 @@ pub unsafe trait Os: Sync {
     /// Registers the process for [`Os::fence`]. Call once, before the first fence.
     fn register_fence(&self) -> Result<(), OsError>;
 
-    /// Restarts every restartable sequence in flight in the process
-    /// (`MEMBARRIER_CMD_PRIVATE_EXPEDITED_RSEQ`). Fails unless [`Os::register_fence`] succeeded.
-    fn fence(&self) -> Result<(), OsError>;
+    /// Restarts every restartable sequence of the process in flight on CPU `cpu`
+    /// (`MEMBARRIER_CMD_PRIVATE_EXPEDITED_RSEQ` with `MEMBARRIER_CMD_FLAG_CPU`). A CPU that is
+    /// offline or does not exist has no sequence in flight, so fencing it succeeds at once.
+    /// Fails unless [`Os::register_fence`] succeeded, and may fail for want of memory.
+    fn fence(&self, cpu: u32) -> Result<(), OsError>;
 
     /// Where the rseq area is and how much of it the kernel maintains, or `None` if the process
     /// has no registration.
@@ -152,6 +164,11 @@ pub unsafe trait Os: Sync {
     /// same. Code that relies on a thread being registered must check the thread's own `cpu_id`
     /// (`rseq::CPU_ID`) is not negative. Meant for start-up: on Linux each call is a system call.
     fn rseq(&self) -> Option<RseqArea>;
+
+    /// A random number. It names a process generation, so it should differ from the parent's
+    /// with overwhelming probability; it need not be fit for cryptography. Never fails: if the
+    /// OS has no randomness to give, it returns something that varies with time and address.
+    fn random(&self) -> u64;
 
     /// Writes `message` to standard error and ends the process abnormally.
     fn abort(&self, message: &str) -> !;

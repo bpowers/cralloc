@@ -31,20 +31,15 @@ code can read it.
    which `registration()` passes to `RseqArea::new`. The values describe the process, not a
    thread.
 
-**What this does not cover.** Two correctness facts that the fast paths rely on for memory
-safety are left to other code.
+**What this does not cover.** Whether the calling thread is registered. glibc registers each
+thread as it starts. If a later registration fails, for example under a seccomp filter
+installed after start-up, that thread's `cpu_id` is -2 while `__rseq_size` is unchanged. The
+caches are indexed by `cpu_id`, which every registration has, and every routine compares it
+with the slab count (unsigned, so a negative value is out of range) before touching a slab.
+So an unregistered thread never reaches a slab whatever these facts say.
 
-- *Whether the registration includes a concurrency ID.* glibc 2.35 to 2.39 report a size of 32
-  on every kernel, which overstates it on kernels before 6.3. So `LinuxOs::rseq` caps the size by
-  the kernel's own `AT_RSEQ_FEATURE_SIZE`; see KERNEL-05 in `kernel-safety.md`.
-- *Whether the calling thread is registered.* glibc registers each thread as it starts. If a
-  later registration fails, for example under a seccomp filter installed after start-up, that
-  thread's `cpu_id` is -2 while `__rseq_size` is unchanged. The front end must check the
-  thread's own `cpu_id` (offset 4) is not negative before trusting its cid. This is stated on
-  `Os::rseq` and `os::rseq::CPU_ID`, and remains an obligation of the front end's ledger.
-
-**Machine checks.** `os::linux::kernel::tests::glibc_registers_rseq_with_a_concurrency_id`
-reads both values on the reference platform.
+**Machine checks.** `os::linux::kernel::tests::glibc_registers_rseq` reads both values on the
+reference platform.
 
 **Review.** 2026-10-17, fresh adversarial reviewer: points 1 and 2 accepted. Point 3 was not:
 it claimed registration was the same for every thread. It is corrected above, and the
