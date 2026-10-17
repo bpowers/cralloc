@@ -1,0 +1,56 @@
+# The allocators the runner compares. Adding one is one more entry here, plus, for native
+# Rust runs, a cargo feature in alloc/ (see alloc/src/lib.rs).
+#
+#   name     label in results and reports
+#   feature  bench-alloc cargo feature for native Rust builds; "" means Rust's System
+#            allocator (glibc). Without it the allocator is not run natively.
+#   preload  library for LD_PRELOAD runs, relative to this directory; "" means none (glibc).
+#            Without it the allocator is not run in preload mode.
+#   env      environment for every run of this allocator
+#   expect   what the process must report about itself (allocator, and mode where the
+#            allocator picks one at run time); a run that disagrees is marked invalid
+#   same_as  makes this entry a control: an exact copy of the named allocator under another
+#            label, run as if it were a different allocator. Its results must match.
+
+[[allocator]]
+name = "glibc"
+feature = ""
+preload = ""
+expect = { allocator = "glibc" }
+
+[[allocator]]
+name = "mimalloc"
+feature = "mi"
+preload = "baselines/out/mimalloc/libmimalloc.so"
+expect = { allocator = "mimalloc" }
+
+[[allocator]]
+name = "mimalloc-sized"
+feature = "mi-sized"
+expect = { allocator = "mimalloc-sized" }
+
+[[allocator]]
+name = "jemalloc"
+feature = "je"
+preload = "baselines/out/jemalloc/libjemalloc.so"
+expect = { allocator = "jemalloc" }
+
+# google/tcmalloc registers its own rseq area, which glibc 2.35 and later have already
+# registered, so it silently runs with per-thread caches unless glibc's registration is
+# turned off. Both modes are measured, and each run must report the mode it was in.
+[[allocator]]
+name = "tcmalloc-percpu"
+feature = "tc"
+preload = "baselines/out/tcmalloc/libtcmalloc.so"
+env = { GLIBC_TUNABLES = "glibc.pthread.rseq=0" }
+expect = { allocator = "tcmalloc", mode = "per-cpu" }
+
+[[allocator]]
+name = "tcmalloc-thread"
+feature = "tc"
+preload = "baselines/out/tcmalloc/libtcmalloc.so"
+expect = { allocator = "tcmalloc", mode = "per-thread" }
+
+[[allocator]]
+name = "mimalloc-ctl"
+same_as = "mimalloc"
