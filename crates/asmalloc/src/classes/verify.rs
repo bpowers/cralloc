@@ -206,12 +206,18 @@ fn the_slot_tests_mean_empty_and_full() {
     assert!(magazine.free_slow(word) == (slot == 0 || slot == magazine.slots() - 1));
 }
 
-/// A never-written slab word and the drain marker send both operations to the slow path.
+/// A never-written slab word and every marker send both operations to the slow path, and no
+/// slot address of any magazine is a marker.
 #[kani::proof]
-fn zero_and_the_marker_fail_both_tests() {
+fn zero_and_every_marker_fail_both_tests() {
     let magazine = any_magazine();
     assert!(magazine.alloc_slow(0) && magazine.free_slow(0));
-    assert!(magazine.alloc_slow(MARKER) && magazine.free_slow(MARKER));
+    let marker: usize = kani::any();
+    kani::assume(is_marker(marker));
+    assert!(magazine.alloc_slow(marker) && magazine.free_slow(marker));
+    let slot_address: usize = kani::any();
+    kani::assume(slot_address % SLOT_BYTES == 0);
+    assert!(!is_marker(slot_address));
 }
 
 /// Small classes are exactly those up to `MAX_SMALL_SIZE`, and each one's magazine keeps within

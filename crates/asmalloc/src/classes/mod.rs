@@ -33,7 +33,7 @@ mod verify;
 mod verify_slow;
 
 pub use divisor::Divisor;
-pub use magazine::{MAGAZINE_BUDGET, MARKER, MagazineSize, SLOT_BYTES};
+pub use magazine::{MAGAZINE_BUDGET, MARKER, MARKER_SHIFT, MagazineSize, SLOT_BYTES, is_marker};
 pub use small::SmallClass;
 
 use core::alloc::Layout;

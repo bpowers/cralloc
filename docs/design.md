@@ -218,16 +218,17 @@ less.
 ### Address space
 
 At first use asmalloc reserves 16 TiB of address space, inaccessible and uncommitted. About
-3970 regions of 4 GiB hold objects and the rest holds metadata. If the process's
-address-space limit does not allow that, the number of regions is halved until the
-reservation fits; with less than about 12 GiB the allocator cannot start. A region is
+3970 regions of 4 GiB hold objects and the rest holds metadata. If the process cannot have
+that much address space, as under an address-space limit or valgrind, the region size is
+halved until the reservation fits, so the number of regions stays the same; below a floor
+of a few megabytes per region the allocator cannot start. A region is
 assigned to a class on demand and holds only objects of that class, at
 `region_base + index * class_size`. A 4096-byte table records the class of each region.
 
 Every pointer therefore has two properties that hold without per-object metadata:
 
-- its class is `class_of[(ptr - heap_base) >> 32]`, one load from a table that fits in the
-  L1 cache;
+- its class is `class_of[(ptr - heap_base) >> region_shift]`, one load from a table that
+  fits in the L1 cache;
 - its index within the region is `(ptr - region_base) / class_size`.
 
 The Rust entry points do not need even that for small objects: they compute the class from
@@ -254,11 +255,11 @@ A request is first rounded up to a multiple of its alignment. Classes are every 
 8 bytes up to 64, then four per doubling. The class of a request is the smallest class at
 least as large as the rounded size.
 
-Alignment needs no further work. Regions are aligned to 4 GiB and objects sit at multiples
-of the class size, so an object is aligned to the largest power of two that divides its
+Alignment needs no further work. Regions are aligned to their size and objects sit at
+multiples of the class size, so an object is aligned to the largest power of two that divides its
 class size. With four classes per doubling, the class chosen for a size that is a multiple
-of `A` is itself a multiple of `A`. Every alignment up to 4 GiB is satisfied with no
-over-allocation and no interior pointers. This property, and the `Allocator` requirement
+of `A` is itself a multiple of `A`. Every alignment up to the region size is satisfied with
+no over-allocation and no interior pointers. This property, and the `Allocator` requirement
 that every size from the request to the class size maps to the same class, are proved for
 all inputs with Kani.
 
@@ -350,7 +351,7 @@ emit one that breaks them:
   word between the read and the commit (see "Idle caches");
 - an inlined routine is at most 13 micro-ops, one more than the processor delivers at full
   speed;
-- an out-of-line routine starts on a 64-byte boundary, and its hot path fits in that line
+- an out-of-line routine starts on a 64-byte boundary, and its hot path fits in 128 bytes
   and in 24 micro-ops, which is what the processor delivers in the four cycles a call and
   return take regardless;
 - the slow path is out of line.
@@ -646,8 +647,10 @@ specification can see, and the registers the restart needs are intact. It reads 
 only the thread's rseq area, the slab array and the magazine the slab word names. It
 clobbers only the registers it declares.
 
-The proofs assume the slab invariant given under "Front end". It is stated once, in Lean,
-and the Rust constants and a debug validator are generated from that statement.
+The proofs assume the slab invariant given under "Front end", at entry and again at every
+retry, and leave it to the Rust slow paths to maintain. It is stated once, in Lean. The Rust
+constants are generated from that statement, and the front end's debug validator is tested
+against vectors evaluated from it.
 
 The framework's own trusted core is the instruction semantics, the rseq interruption model,
 the printer, and the meaning of Rust's `asm!` operands. Changes to it are reviewed
