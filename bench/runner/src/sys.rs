@@ -10,7 +10,10 @@ impl CpuTimes {
         let text = std::fs::read_to_string("/proc/stat").unwrap_or_default();
         let mut v = Vec::new();
         for line in text.lines() {
-            let Some(rest) = line.strip_prefix("cpu") else { continue };
+            // Per-CPU lines only: the aggregate line is "cpu  <user> ...", with no number.
+            let Some(rest) = line.strip_prefix("cpu").filter(|r| r.starts_with(|c: char| c.is_ascii_digit())) else {
+                continue;
+            };
             let mut it = rest.split_whitespace();
             let Some(id) = it.next().and_then(|s| s.parse::<usize>().ok()) else { continue };
             let f: Vec<u64> = it.filter_map(|s| s.parse().ok()).collect();

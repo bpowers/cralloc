@@ -38,6 +38,18 @@ pub fn ratio_ci(a: &[f64], b: &[f64], seed: u64) -> (f64, f64) {
     (quantile(&ratios, 0.025), quantile(&ratios, 0.975))
 }
 
+/// A 95% percentile-bootstrap interval for the median of `v` (NaN with fewer than three).
+pub fn median_ci(v: &[f64], seed: u64) -> (f64, f64) {
+    if v.len() < 3 {
+        return (f64::NAN, f64::NAN);
+    }
+    let mut rng = Rng::new(seed);
+    let meds: Vec<f64> = (0..2000)
+        .map(|_| median(&(0..v.len()).map(|_| v[rng.below(v.len() as u64) as usize]).collect::<Vec<f64>>()))
+        .collect();
+    (quantile(&meds, 0.025), quantile(&meds, 0.975))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

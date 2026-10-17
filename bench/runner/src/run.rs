@@ -4,6 +4,7 @@ use crate::config::Allocator;
 use crate::launch::{Child, Exit, MemSample, ProcStat, Sampler, Spec};
 use crate::suite::{Job, Metric, Mode, Program};
 use crate::sys::{self, CpuTimes};
+use bench_harness::mem::Rollup;
 use bench_harness::perf::Sample;
 use bench_harness::rng::Rng;
 use serde_json::{Value, json};
@@ -20,6 +21,8 @@ pub struct Options {
     /// CPUs the runner and its samplers use; kept out of every job.
     pub runner_cpus: Vec<usize>,
     pub sample_ms: u64,
+    /// How often to read the full smaps_rollup (huge pages, PSS).
+    pub rollup_ms: u64,
     /// Wait before each job until no more than this many CPUs' worth of other work is
     /// running outside the measurement CPUs and their siblings...
     pub max_busy: f64,
@@ -137,17 +140,24 @@ fn execute(job: &Job, argv: &[String], env: &[(String, String)], scratch: &Path,
             };
         }
     };
-    let sampler = Sampler::start(child.pid, child.started, Duration::from_millis(o.sample_ms));
+    let sampler = Sampler::start(
+        child.pid,
+        child.started,
+        Duration::from_millis(o.sample_ms),
+        Duration::from_millis(o.rollup_ms),
+    );
     let deadline = child.started + timeout;
     let mut result = None;
     let mut tail = Vec::new();
     let mut error = None;
     let mut driver_result = None;
     let mut window = None;
+    // The last 200 lines: results are printed at the end.
     let keep = |line: String, tail: &mut Vec<String>| {
-        if tail.len() < 200 {
-            tail.push(line);
+        if tail.len() == 200 {
+            tail.remove(0);
         }
+        tail.push(line);
     };
 
     if let Some(d) = &job.driver {
@@ -265,9 +275,14 @@ fn parse_after(lines: &[String], key: &str) -> Option<f64> {
 /// `reported_peak` is the VmHWM the process reported at its exit, from its result line or
 /// the preload probe; without it the peak is the last VmHWM the sampler saw, which can miss
 /// the final interval.
-fn memory_json(samples: &[MemSample], reported_peak: Option<u64>, interval_ms: u64) -> Value {
+fn memory_json(samples: &[MemSample], reported_peak: Option<u64>, o: &Options) -> Value {
     let n = samples.len();
     let max = |f: fn(&MemSample) -> u64| samples.iter().map(f).max().unwrap_or(0);
+    let rollups: Vec<Rollup> = samples.iter().filter_map(|s| s.rollup).collect();
+    let rmax = |f: fn(&Rollup) -> u64| rollups.iter().map(f).max().unwrap_or(0);
+    let rmean = |f: fn(&Rollup) -> u64| {
+        if rollups.is_empty() { 0.0 } else { rollups.iter().map(f).sum::<u64>() as f64 / rollups.len() as f64 }
+    };
     let (peak, peak_source) = match reported_peak {
         Some(p) if p > 0 => (p, "process"),
         _ => (max(|s| s.hwm), "sampler"),
@@ -276,21 +291,28 @@ fn memory_json(samples: &[MemSample], reported_peak: Option<u64>, interval_ms: u
         |f: fn(&MemSample) -> u64| if n == 0 { 0.0 } else { samples.iter().map(f).sum::<u64>() as f64 / n as f64 };
     // Keep at most 240 points of the series, evenly spaced, in KiB.
     let step = n.div_ceil(240).max(1);
+    // Huge-page use is known only at rollup samples; carry the last one forward.
+    let mut huge = 0;
     let series: Vec<Value> = samples
         .iter()
+        .map(|s| {
+            huge = s.rollup.map_or(huge, |r| r.anon_huge);
+            json!([(s.t_ms * 10.0).round() / 10.0, s.rss / 1024, huge / 1024])
+        })
         .step_by(step)
-        .map(|s| json!([(s.t_ms * 10.0).round() / 10.0, s.mem.rss / 1024, s.mem.anon_huge / 1024]))
         .collect();
     json!({
         "samples": n,
-        "interval_ms": interval_ms,
+        "interval_ms": o.sample_ms,
+        "rollups": rollups.len(),
+        "rollup_ms": o.rollup_ms,
         "rss_peak": peak,
         "rss_peak_source": peak_source,
-        "rss_sampled_peak": max(|s| s.mem.rss),
-        "rss_mean": mean(|s| s.mem.rss),
-        "pss_peak": max(|s| s.mem.pss),
-        "anon_huge_peak": max(|s| s.mem.anon_huge),
-        "anon_huge_mean": mean(|s| s.mem.anon_huge),
+        "rss_sampled_peak": max(|s| s.rss),
+        "rss_mean": mean(|s| s.rss),
+        "pss_peak": rmax(|r| r.pss),
+        "anon_huge_peak": rmax(|r| r.anon_huge),
+        "anon_huge_mean": rmean(|r| r.anon_huge),
         "series_kib": series,
     })
 }
@@ -301,8 +323,17 @@ struct Context<'a> {
     round: usize,
     seq: usize,
     gate: Value,
-    sibling_cpus: BTreeSet<usize>,
-    other_cpus: BTreeSet<usize>,
+    cpus: &'a CpuSets,
+}
+
+/// The machine's CPUs as the runner sees them.
+struct CpuSets {
+    /// Every CPU a job may use.
+    meas: BTreeSet<usize>,
+    /// Their SMT siblings, which must stay idle.
+    siblings: BTreeSet<usize>,
+    /// Everything else but the runner's own CPUs.
+    others: BTreeSet<usize>,
 }
 
 fn run_one(job: &Job, a: &Allocator, cx: &Context) -> Value {
@@ -389,6 +420,11 @@ fn run_one(job: &Job, a: &Allocator, cx: &Context) -> Value {
             .result
             .as_ref()
             .is_some_and(|r| r["phases"].as_object().is_some_and(|p| p.values().any(|ph| ph["multiplexed"] == true)));
+    // A multiplexed hardware counter is an estimate (the count is not scaled), so the run
+    // cannot be ranked by cycles; it usually means another perf user shared the core.
+    if multiplexed {
+        problems.push("hardware counters were multiplexed".into());
+    }
     let stderr_tail = std::fs::read_to_string(scratch.join("stderr.txt"))
         .map(|s| s.lines().rev().take(5).collect::<Vec<_>>().into_iter().rev().collect::<Vec<_>>().join("\n"))
         .unwrap_or_default();
@@ -418,38 +454,52 @@ fn run_one(job: &Job, a: &Allocator, cx: &Context) -> Value {
             "utime_ns": out.exit.utime_ns, "stime_ns": out.exit.stime_ns, "maxrss": out.exit.maxrss,
             "minflt": out.exit.minflt, "majflt": out.exit.majflt, "nvcsw": out.exit.nvcsw, "nivcsw": out.exit.nivcsw,
         },
-        "memory": memory_json(&out.memory, reported_peak, cx.o.sample_ms),
+        "memory": memory_json(&out.memory, reported_peak, cx.o),
         "workload": out.result,
         "driver": out.driver,
         "window": out.window,
         "interference": {
             "loadavg_before": load,
-            "siblings_busy": sys::busy_sum(&busy, &cx.sibling_cpus),
-            "others_busy": sys::busy_sum(&busy, &cx.other_cpus),
+            "siblings_busy": sys::busy_sum(&busy, &cx.cpus.siblings),
+            "others_busy": sys::busy_sum(&busy, &cx.cpus.others),
+            // Work on this job's CPUs that was not this job's: busy time there minus the
+            // process's own CPU time, both over its lifetime. Jiffies, so coarse.
+            "foreign_on_job_cpus": sys::busy_sum(&busy, &job.cpus.iter().copied().collect())
+                - (out.exit.utime_ns + out.exit.stime_ns) as f64 / out.exit.wall_ns.max(1) as f64,
             "gate": cx.gate,
         },
         "stderr_tail": stderr_tail,
     })
 }
 
-/// Waits until the machine outside the measurement CPUs is quiet enough, or gives up.
-fn gate(o: &Options, others: &BTreeSet<usize>, siblings: &BTreeSet<usize>) -> Value {
+/// Waits until the machine is quiet enough, or gives up: nothing else on the measurement
+/// CPUs or their siblings (other processes are not confined and may land there), and no
+/// more than `max_busy` CPUs' worth of work elsewhere.
+fn gate(o: &Options, cpus: &CpuSets) -> Value {
     let t0 = Instant::now();
     loop {
         let a = CpuTimes::read();
         std::thread::sleep(Duration::from_secs(1));
         let busy = CpuTimes::read().busy_since(&a);
-        let (ob, sb) = (sys::busy_sum(&busy, others), sys::busy_sum(&busy, siblings));
+        let (ob, sb, mb) = (
+            sys::busy_sum(&busy, &cpus.others),
+            sys::busy_sum(&busy, &cpus.siblings),
+            sys::busy_sum(&busy, &cpus.meas),
+        );
         let waited = t0.elapsed();
-        let quiet = ob <= o.max_busy && sb <= 0.25;
+        let quiet = ob <= o.max_busy && sb <= 0.25 && mb <= 0.25;
         if quiet || waited >= o.gate_wait {
             if !quiet {
                 eprintln!(
-                    "  gate: still busy after {:.0} s (others {ob:.2} CPUs, siblings {sb:.2}); running anyway",
+                    "  gate: still busy after {:.0} s (others {ob:.2} CPUs, siblings {sb:.2}, measurement CPUs {mb:.2}); \
+                     running anyway",
                     waited.as_secs_f64()
                 );
             }
-            return json!({ "waited_s": waited.as_secs_f64(), "others_busy": ob, "siblings_busy": sb, "quiet": quiet });
+            return json!({
+                "waited_s": waited.as_secs_f64(), "others_busy": ob, "siblings_busy": sb, "measurement_busy": mb,
+                "quiet": quiet,
+            });
         }
         std::thread::sleep(Duration::from_secs(4));
     }
@@ -493,6 +543,7 @@ fn header(o: &Options, allocs: &[Allocator], jobs: &[Job], session: &str) -> Val
         "l3_domains": [sys::l3_domain(crate::suite::L3A[0]), sys::l3_domain(crate::suite::L3B[0])],
         "runner_cpus": o.runner_cpus,
         "sample_ms": o.sample_ms,
+        "rollup_ms": o.rollup_ms,
         "max_busy": o.max_busy,
         "allocators": allocs.iter().map(|a| json!({
             "name": a.name, "feature": a.feature, "preload": a.preload, "env": a.env,
@@ -513,13 +564,13 @@ pub fn session(o: &Options, allocs: &[Allocator], jobs: &[Job]) -> std::io::Resu
         format!("{}-{:x}", SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap().as_secs(), o.seed);
     writeln!(out, "{}", header(o, allocs, jobs, &session))?;
     let meas: BTreeSet<usize> = crate::suite::measurement_cpus().into_iter().collect();
-    let sibling_cpus: BTreeSet<usize> =
-        meas.iter().flat_map(|&c| sys::siblings(c)).filter(|c| !meas.contains(c)).collect();
+    let siblings: BTreeSet<usize> = meas.iter().flat_map(|&c| sys::siblings(c)).filter(|c| !meas.contains(c)).collect();
     let runner: BTreeSet<usize> = o.runner_cpus.iter().flat_map(|&c| sys::siblings(c)).collect();
-    let other_cpus: BTreeSet<usize> = sys::online_cpus()
+    let others: BTreeSet<usize> = sys::online_cpus()
         .into_iter()
-        .filter(|c| !meas.contains(c) && !sibling_cpus.contains(c) && !runner.contains(c))
+        .filter(|c| !meas.contains(c) && !siblings.contains(c) && !runner.contains(c))
         .collect();
+    let cpus = CpuSets { meas, siblings, others };
     let mut rng = Rng::new(o.seed);
     let total: usize =
         jobs.iter().map(|j| allocs.iter().filter(|a| runs_under(j, a)).count()).sum::<usize>() * o.rounds;
@@ -531,17 +582,9 @@ pub fn session(o: &Options, allocs: &[Allocator], jobs: &[Job]) -> std::io::Resu
             for i in (1..order.len()).rev() {
                 order.swap(i, rng.below(i as u64 + 1) as usize);
             }
-            let g = gate(o, &other_cpus, &sibling_cpus);
+            let g = gate(o, &cpus);
             for a in order {
-                let cx = Context {
-                    o,
-                    session: session.clone(),
-                    round,
-                    seq,
-                    gate: g.clone(),
-                    sibling_cpus: sibling_cpus.clone(),
-                    other_cpus: other_cpus.clone(),
-                };
+                let cx = Context { o, session: session.clone(), round, seq, gate: g.clone(), cpus: &cpus };
                 let rec = run_one(job, a, &cx);
                 writeln!(out, "{rec}")?;
                 out.flush()?;

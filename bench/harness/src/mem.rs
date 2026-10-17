@@ -55,9 +55,16 @@ pub fn vm_hwm(pid: i32) -> Option<u64> {
 
 /// This process's resident set in bytes, from `/proc/self/statm`. Cheap.
 pub fn rss_now() -> u64 {
-    let text = std::fs::read_to_string("/proc/self/statm").unwrap_or_default();
-    let pages: u64 = text.split_whitespace().nth(1).and_then(|s| s.parse().ok()).unwrap_or(0);
-    pages * 4096
+    rss_of(0).unwrap_or(0)
+}
+
+/// A process's resident set in bytes from `/proc/<pid>/statm` (`pid` 0: this process). It
+/// reads the kernel's counters and does not walk the page tables.
+pub fn rss_of(pid: i32) -> Option<u64> {
+    let path = if pid == 0 { "/proc/self/statm".to_string() } else { format!("/proc/{pid}/statm") };
+    let text = std::fs::read_to_string(path).ok()?;
+    let pages: u64 = text.split_whitespace().nth(1)?.parse().ok()?;
+    Some(pages * 4096)
 }
 
 #[cfg(test)]

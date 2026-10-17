@@ -10,7 +10,8 @@
 //!
 //! Hand-offs go in batches of 32 through queues that never allocate, so their cost is small
 //! and the same for every allocator. Threads spin while they wait, on CPUs of their own.
-//! Each run does a short unmeasured warm-up, then the measured run.
+//! Each thread first runs a tenth of the work unmeasured, then, after all have, the measured
+//! run.
 //!
 //! Parameters: `threads` (or `producers` and `consumers`), `objects` per stage or per
 //! producer set (default 10M), `sizes` (see `SizeMix`), `inflight` (queue capacity in objects
@@ -19,6 +20,7 @@ use crate::obj::{Obj, consume, make};
 use bench_harness::report::{Measure, Phase};
 use bench_harness::{Args, Better, Counters, Cpus, Report, Rng, SizeMix};
 use crossbeam_queue::ArrayQueue;
+use std::sync::Barrier;
 use std::sync::atomic::{AtomicBool, AtomicPtr, AtomicUsize, Ordering::*};
 
 const BATCH: usize = 32;
@@ -82,34 +84,38 @@ impl Ring {
     }
 }
 
-/// Runs `body(i)` on `n` threads, thread `i` pinned to `cpus.nth(i)`, and measures from the
-/// moment all of them are ready until the last one finishes.
-fn run_threads(cpus: &Cpus, n: usize, counters: Option<&Counters>, body: impl Fn(usize) + Sync) -> Option<Phase> {
-    let ready = AtomicUsize::new(0);
+/// The warm-up runs this fraction of the measured work, on the same threads, so that
+/// per-thread caches it fills are still there when measurement starts.
+const WARMUP_DIVISOR: usize = 10;
+
+/// Runs `body(i, phase)` on `n` threads, thread `i` pinned to `cpus.nth(i)`: first phase 0,
+/// the warm-up, then, once every thread has finished it, phase 1, which is measured from
+/// the moment all threads are released until the last one finishes.
+fn run_threads(cpus: &Cpus, n: usize, counters: &Counters, body: impl Fn(usize, usize) + Sync) -> Phase {
+    let warmed = Barrier::new(n + 1);
     let go = AtomicBool::new(false);
     std::thread::scope(|s| {
         let handles: Vec<_> = (0..n)
             .map(|i| {
-                let (ready, go, body) = (&ready, &go, &body);
+                let (warmed, go, body) = (&warmed, &go, &body);
                 s.spawn(move || {
                     cpus.pin(i);
-                    ready.fetch_add(1, AcqRel);
+                    body(i, 0);
+                    warmed.wait();
                     while !go.load(Acquire) {
                         std::hint::spin_loop();
                     }
-                    body(i);
+                    body(i, 1);
                 })
             })
             .collect();
-        while ready.load(Acquire) < n {
-            std::thread::yield_now();
-        }
-        let m = counters.map(Measure::start);
+        warmed.wait();
+        let m = Measure::start(counters);
         go.store(true, Release);
         for h in handles {
             h.join().unwrap();
         }
-        m.map(Measure::stop)
+        m.stop()
     })
 }
 
@@ -122,27 +128,35 @@ fn round_to_batch(n: u64) -> usize {
     (n as usize / BATCH).max(1) * BATCH
 }
 
+/// Work per phase: a tenth for the warm-up, all of it for the measurement.
+fn per_phase(n: usize) -> [usize; 2] {
+    [round_to_batch((n / WARMUP_DIVISOR) as u64), n]
+}
+
 fn finish(name: &str, args: &Args, phase: &Phase, allocations: usize, threads: usize) {
-    let mut r = Report::new(name, args);
-    r.param("threads", threads as u64)
+    let cycles = phase.counters.get("cycles").expect("the cycles counter could not be read");
+    Report::new(name, args)
+        .param("threads", threads as u64)
         .phase("run", phase)
         .metric("allocations", allocations as u64)
+        // Cycles over all threads, spinning included; frequency-independent, unlike the
+        // wall-time ranking.
+        .metric("cycles_per_alloc", cycles as f64 / allocations as f64)
         .primary("ns/alloc", phase.wall_ns as f64 / allocations as f64, Better::Lower)
         .emit();
 }
 
-/// One run of the chain; returns the measured phase if `counters` is given.
-fn pipeline_run(
-    cpus: &Cpus,
-    stages: usize,
-    n: usize,
-    mix: SizeMix,
-    inflight: usize,
-    counters: Option<&Counters>,
-) -> Option<Phase> {
-    let rings: Vec<Ring> = (0..stages - 1).map(|_| Ring::new(inflight)).collect();
-    run_threads(cpus, stages, counters, |i| {
-        let mut rng = Rng::new(i as u64 + 1);
+pub fn pipeline(args: &Args) {
+    let cpus = Cpus::from_env();
+    let stages = args.usize("threads", 2);
+    assert!(stages >= 2, "a pipeline needs at least two stages");
+    let n = per_phase(round_to_batch(args.num("objects", 10_000_000)));
+    let (mix, inflight) = (size_mix(args), args.usize("inflight", 4096));
+    let counters = Counters::region();
+    let rings: [Vec<Ring>; 2] = std::array::from_fn(|_| (0..stages - 1).map(|_| Ring::new(inflight)).collect());
+    let phase = run_threads(&cpus, stages, &counters, |i, ph| {
+        let (rings, n) = (&rings[ph], n[ph]);
+        let mut rng = Rng::new((ph * 1000 + i) as u64 + 1);
         let input = i.checked_sub(1).map(|j| &rings[j]);
         let output = rings.get(i);
         let mut batch = [Obj::NULL; BATCH];
@@ -176,32 +190,22 @@ fn pipeline_run(
                 head = r.push(head, &batch[..take]);
             }
         }
-    })
+    });
+    finish("pipeline", args, &phase, n[1] * (stages - 1), stages);
 }
 
-pub fn pipeline(args: &Args) {
+pub fn exchange(args: &Args) {
     let cpus = Cpus::from_env();
-    let stages = args.usize("threads", 2);
-    assert!(stages >= 2, "a pipeline needs at least two stages");
-    let n = round_to_batch(args.num("objects", 10_000_000));
+    let k = args.usize("threads", 2);
+    assert!(k >= 2, "an exchange needs at least two threads");
+    // `objects` is the total; each thread allocates its share.
+    let n = per_phase(round_to_batch(args.num("objects", 10_000_000) / k as u64));
     let (mix, inflight) = (size_mix(args), args.usize("inflight", 4096));
     let counters = Counters::region();
-    pipeline_run(&cpus, stages, n / 10, mix, inflight, None);
-    let phase = pipeline_run(&cpus, stages, n, mix, inflight, Some(&counters)).unwrap();
-    finish("pipeline", args, &phase, n * (stages - 1), stages);
-}
-
-fn exchange_run(
-    cpus: &Cpus,
-    k: usize,
-    n: usize,
-    mix: SizeMix,
-    inflight: usize,
-    counters: Option<&Counters>,
-) -> Option<Phase> {
-    let rings: Vec<Ring> = (0..k).map(|_| Ring::new(inflight)).collect();
-    run_threads(cpus, k, counters, |i| {
-        let mut rng = Rng::new(i as u64 + 1);
+    let rings: [Vec<Ring>; 2] = std::array::from_fn(|_| (0..k).map(|_| Ring::new(inflight)).collect());
+    let phase = run_threads(&cpus, k, &counters, |i, ph| {
+        let (rings, n) = (&rings[ph], n[ph]);
+        let mut rng = Rng::new((ph * 1000 + i) as u64 + 1);
         let (out, inp) = (&rings[i], &rings[(i + k - 1) % k]);
         let mut batch = [Obj::NULL; BATCH];
         let (mut head, mut tail) = (0usize, 0usize);
@@ -228,37 +232,26 @@ fn exchange_run(
                 std::hint::spin_loop();
             }
         }
-    })
+    });
+    finish("exchange", args, &phase, n[1] * k, k);
 }
 
-pub fn exchange(args: &Args) {
+pub fn mpmc(args: &Args) {
     let cpus = Cpus::from_env();
-    let k = args.usize("threads", 2);
-    assert!(k >= 2, "an exchange needs at least two threads");
-    // `objects` is the total; each thread allocates its share.
-    let n = round_to_batch(args.num("objects", 10_000_000) / k as u64);
+    let (p, c) = (args.usize("producers", 2), args.usize("consumers", 2));
+    assert!(p >= 1 && c >= 1);
+    // `objects` is the total; each producer makes its share.
+    let per = round_to_batch(args.num("objects", 10_000_000) / p as u64);
+    let batches = per_phase(per).map(|n| n / BATCH);
     let (mix, inflight) = (size_mix(args), args.usize("inflight", 4096));
     let counters = Counters::region();
-    exchange_run(&cpus, k, n / 10, mix, inflight, None);
-    let phase = exchange_run(&cpus, k, n, mix, inflight, Some(&counters)).unwrap();
-    finish("exchange", args, &phase, n * k, k);
-}
-
-fn mpmc_run(
-    cpus: &Cpus,
-    p: usize,
-    c: usize,
-    batches: usize,
-    mix: SizeMix,
-    inflight: usize,
-    counters: Option<&Counters>,
-) -> Option<Phase> {
-    let q: ArrayQueue<[Obj; BATCH]> = ArrayQueue::new((inflight / BATCH).max(2));
-    let done = AtomicUsize::new(0);
-    let total = batches * p;
-    run_threads(cpus, p + c, counters, |i| {
+    let queues: [ArrayQueue<[Obj; BATCH]>; 2] = std::array::from_fn(|_| ArrayQueue::new((inflight / BATCH).max(2)));
+    let done = [AtomicUsize::new(0), AtomicUsize::new(0)];
+    let phase = run_threads(&cpus, p + c, &counters, |i, ph| {
+        let (q, done, batches) = (&queues[ph], &done[ph], batches[ph]);
+        let total = batches * p;
         if i < p {
-            let mut rng = Rng::new(i as u64 + 1);
+            let mut rng = Rng::new((ph * 1000 + i) as u64 + 1);
             for _ in 0..batches {
                 let mut b = [Obj::NULL; BATCH];
                 for slot in b.iter_mut() {
@@ -284,18 +277,6 @@ fn mpmc_run(
                 }
             }
         }
-    })
-}
-
-pub fn mpmc(args: &Args) {
-    let cpus = Cpus::from_env();
-    let (p, c) = (args.usize("producers", 2), args.usize("consumers", 2));
-    assert!(p >= 1 && c >= 1);
-    // `objects` is the total; each producer makes its share.
-    let batches = round_to_batch(args.num("objects", 10_000_000) / p as u64) / BATCH;
-    let (mix, inflight) = (size_mix(args), args.usize("inflight", 4096));
-    let counters = Counters::region();
-    mpmc_run(&cpus, p, c, (batches / 10).max(1), mix, inflight, None);
-    let phase = mpmc_run(&cpus, p, c, batches, mix, inflight, Some(&counters)).unwrap();
-    finish("mpmc", args, &phase, batches * BATCH * p, p + c);
+    });
+    finish("mpmc", args, &phase, batches[1] * BATCH * p, p + c);
 }

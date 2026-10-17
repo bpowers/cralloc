@@ -1,6 +1,6 @@
 //! Turns result files into tables: per workload, each allocator's median and spread, its
 //! memory, the fastest and the smallest, and whether the control came out null.
-use crate::stats::{half_iqr_rel, median, ratio_ci};
+use crate::stats::{half_iqr_rel, median, median_ci, ratio_ci};
 use serde_json::Value;
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -13,10 +13,14 @@ pub struct Options {
     pub detail: bool,
     /// Only workloads whose id contains this.
     pub filter: Option<String>,
+    /// Leave out runs during which the machine was measurably busy around them.
+    pub quiet_only: bool,
 }
 
 #[derive(Clone, Debug)]
 struct Run {
+    /// Session and round: runs with the same key ran back to back, so they pair.
+    round: String,
     alloc: String,
     control_of: Option<String>,
     value: f64,
@@ -33,7 +37,15 @@ struct Group {
     higher_better: bool,
     runs: Vec<Run>,
     invalid: Vec<(String, String)>,
+    /// Valid runs left out because the machine was busy around them (`quiet_only`).
+    busy: usize,
 }
+
+/// With `quiet_only`, a run is left out if its CPUs' SMT siblings were this busy (CPUs'
+/// worth) while it ran...
+const QUIET_SIBLINGS: f64 = 0.25;
+/// ...or if this much work that was not its own ran on its CPUs.
+const QUIET_FOREIGN: f64 = 0.3;
 
 /// Per-allocator summary of one workload.
 struct Line {
@@ -74,7 +86,7 @@ fn pct(r: f64) -> String {
     format!("{:+.1}%", (r - 1.0) * 100.0)
 }
 
-fn load(files: &[PathBuf]) -> (Vec<String>, Vec<String>, BTreeMap<String, Group>) {
+fn load(files: &[PathBuf], quiet_only: bool) -> (Vec<String>, Vec<String>, BTreeMap<String, Group>) {
     let mut order = Vec::new();
     let mut alloc_order: Vec<String> = Vec::new();
     let mut groups: BTreeMap<String, Group> = BTreeMap::new();
@@ -104,6 +116,13 @@ fn load(files: &[PathBuf]) -> (Vec<String>, Vec<String>, BTreeMap<String, Group>
                 g.invalid.push((alloc, v["problems"].to_string()));
                 continue;
             }
+            let inter = &v["interference"];
+            let busy = inter["siblings_busy"].as_f64().unwrap_or(0.0) > QUIET_SIBLINGS
+                || inter["foreign_on_job_cpus"].as_f64().unwrap_or(0.0) > QUIET_FOREIGN;
+            if quiet_only && busy {
+                g.busy += 1;
+                continue;
+            }
             let p = &v["primary"];
             g.metric = p["name"].as_str().unwrap_or("").to_string();
             g.higher_better = p["better"] == "higher";
@@ -114,7 +133,7 @@ fn load(files: &[PathBuf]) -> (Vec<String>, Vec<String>, BTreeMap<String, Group>
             if let Some(c) = v["workload"]["metrics"]["cross_free_share"].as_f64() {
                 extra.insert("cross_free_share".into(), c);
             }
-            for k in ["rss_dropped", "rss_idle", "rss_live", "live_bytes"] {
+            for k in ["rss_dropped", "rss_idle", "rss_live", "live_bytes", "cycles_per_alloc"] {
                 if let Some(x) = v["workload"]["metrics"][k].as_f64() {
                     extra.insert(k.into(), x);
                 }
@@ -124,6 +143,7 @@ fn load(files: &[PathBuf]) -> (Vec<String>, Vec<String>, BTreeMap<String, Group>
             }
             let m = &v["memory"];
             g.runs.push(Run {
+                round: format!("{}/{}", v["session"].as_str().unwrap_or(""), v["round"]),
                 alloc,
                 control_of: v["control_of"].as_str().map(String::from),
                 value: p["value"].as_f64().unwrap_or(f64::NAN),
@@ -205,15 +225,20 @@ fn margin(second: &Option<RunnerUp>) -> String {
     match second {
         None => "-".into(),
         Some((s, r, (lo, _))) => {
-            // With too few runs for an interval (NaN), no tie is claimed either way.
-            let tie = if *lo <= 1.0 { " (tie)" } else { "" };
+            let tie = if lo.is_nan() {
+                " (n<3)"
+            } else if *lo <= 1.0 {
+                " (tie)"
+            } else {
+                ""
+            };
             format!("{} vs {}{tie}", pct(*r).trim_start_matches('+'), s.alloc)
         }
     }
 }
 
 pub fn report(o: &Options) {
-    let (order, alloc_order, groups) = load(&o.files);
+    let (order, alloc_order, groups) = load(&o.files, o.quiet_only);
     let mut controls: Vec<(String, f64, (f64, f64))> = Vec::new();
     println!("| Workload | Metric | Fastest | Margin | Least peak RSS | Margin | Control |");
     println!("|---|---|---|---|---|---|---|");
@@ -233,9 +258,16 @@ pub fn report(o: &Options) {
             let Some(orig) = g.runs.iter().find(|r| r.alloc == l.alloc).and_then(|r| r.control_of.clone()) else {
                 continue;
             };
-            if let Some(ol) = ls.iter().find(|x| x.alloc == orig) {
-                let r = l.med / ol.med;
-                let ci = ratio_ci(&l.values, &ol.values, 7 + i as u64);
+            if ls.iter().any(|x| x.alloc == orig) {
+                // Pair each control run with its original's run from the same round, so that
+                // drift between rounds cancels.
+                let by_round = |name: &str| -> BTreeMap<&str, f64> {
+                    g.runs.iter().filter(|r| r.alloc == name).map(|r| (r.round.as_str(), r.value)).collect()
+                };
+                let (ctl, orig_runs) = (by_round(&l.alloc), by_round(&orig));
+                let ratios: Vec<f64> = ctl.iter().filter_map(|(k, c)| orig_runs.get(k).map(|o| c / o)).collect();
+                let r = median(&ratios);
+                let ci = median_ci(&ratios, 7 + i as u64);
                 control = if ci.0.is_nan() { pct(r) } else { format!("{} [{}, {}]", pct(r), pct(ci.0), pct(ci.1)) };
                 controls.push((key.clone(), r, ci));
             }
@@ -302,7 +334,8 @@ pub fn report(o: &Options) {
     }
     let invalid: usize = groups.values().map(|g| g.invalid.len()).sum();
     let valid: usize = groups.values().map(|g| g.runs.len()).sum();
-    println!("\n{valid} valid runs, {invalid} invalid.");
+    let busy: usize = groups.values().map(|g| g.busy).sum();
+    println!("\n{valid} valid runs used, {busy} valid runs left out as busy, {invalid} invalid.");
     if !controls.is_empty() {
         let with_ci = controls.iter().filter(|(_, _, (lo, _))| !lo.is_nan()).count();
         let off: Vec<&(String, f64, (f64, f64))> =
@@ -315,6 +348,7 @@ pub fn report(o: &Options) {
             off.len(),
             worst * 100.0
         );
+        println!("  By chance alone about {:.1} of {with_ci} intervals would exclude zero.", 0.05 * with_ci as f64);
         for (k, r, ci) in off {
             println!("  {k}: {} [{}, {}]", pct(*r), pct(ci.0), pct(ci.1));
         }

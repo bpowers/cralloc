@@ -4,7 +4,7 @@
 //!   benchrun run    [--suite quick|full] [--rounds N] [--only TEXT] [--allocators a,b]
 //!                   [--out FILE] [--seed N] [--max-busy CPUS] [--gate-wait SECONDS]
 //!                   [--runner-cpus LIST] [--sample-ms N]
-//!   benchrun report FILE... [--detail] [--ref NAME] [--only TEXT]
+//!   benchrun report FILE... [--detail] [--ref NAME] [--only TEXT] [--quiet-only]
 //!   benchrun list   [--suite quick|full]
 //!
 //! See bench/README.md.
@@ -38,7 +38,7 @@ impl Flags {
             if let Some(name) = a.strip_prefix("--") {
                 if let Some((k, v)) = name.split_once('=') {
                     named.push((k.to_string(), Some(v.to_string())));
-                } else if it.peek().is_some_and(|n| !n.starts_with("--")) && !matches!(name, "detail") {
+                } else if it.peek().is_some_and(|n| !n.starts_with("--")) && !matches!(name, "detail" | "quiet-only") {
                     named.push((name.to_string(), it.next()));
                 } else {
                     named.push((name.to_string(), None));
@@ -164,6 +164,7 @@ fn main() {
                 seed,
                 runner_cpus,
                 sample_ms: f.num("sample-ms", 50),
+                rollup_ms: f.num("rollup-ms", 1000),
                 max_busy: f.num("max-busy", 1.0),
                 gate_wait: Duration::from_secs(f.num("gate-wait", 900)),
                 suite,
@@ -181,6 +182,7 @@ fn main() {
                 reference: f.get("ref").unwrap_or("mimalloc").to_string(),
                 detail: f.has("detail"),
                 filter: f.get("only").map(String::from),
+                quiet_only: f.has("quiet-only"),
             });
         }
         _ => die("usage: benchrun <build|run|report|list> [options]; see bench/README.md"),

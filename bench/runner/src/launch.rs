@@ -8,6 +8,7 @@
 //! `inherit`, every thread it creates. This is how `perf stat` does it.
 use bench_harness::mem::Rollup;
 use bench_harness::perf::{Counters, PROCESS_EVENTS, Sample, Target};
+use std::cell::Cell;
 use std::ffi::CString;
 use std::fs::File;
 use std::io::{self, BufRead, BufReader};
@@ -34,6 +35,8 @@ pub struct Child {
     pidfd: OwnedFd,
     pub counters: Option<Counters>,
     pub started: Instant,
+    /// When `wait_exit` first saw the process gone: the end of its wall time.
+    exited: Cell<Option<Instant>>,
     /// Lines of stdout with the time they arrived. Disconnects at EOF.
     pub lines: Receiver<(Instant, String)>,
 }
@@ -79,6 +82,8 @@ impl Child {
         if pid == 0 {
             unsafe {
                 libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL);
+                // Rust ignores SIGPIPE in its own processes; give the child the default back.
+                libc::signal(libc::SIGPIPE, libc::SIG_DFL);
                 libc::sched_setaffinity(0, std::mem::size_of::<libc::cpu_set_t>(), &set);
                 libc::dup2(out_w.as_raw_fd(), 1);
                 libc::dup2(stderr.as_raw_fd(), 2);
@@ -120,7 +125,13 @@ impl Child {
         // SAFETY: pidfd_open on our own, unreaped child.
         let pidfd = unsafe { libc::syscall(libc::SYS_pidfd_open, pid, 0) };
         if pidfd < 0 {
-            return Err(io::Error::last_os_error());
+            let e = io::Error::last_os_error();
+            // SAFETY: kill and reap our own child, which has already exec'd.
+            unsafe {
+                libc::kill(pid, libc::SIGKILL);
+                libc::waitpid(pid, std::ptr::null_mut(), 0);
+            }
+            return Err(e);
         }
         let pidfd = unsafe { OwnedFd::from_raw_fd(pidfd as i32) };
         let (tx, rx) = channel();
@@ -133,7 +144,7 @@ impl Child {
                 }
             }
         });
-        Ok(Child { pid, pidfd, counters, started, lines: rx })
+        Ok(Child { pid, pidfd, counters, started, exited: Cell::new(None), lines: rx })
     }
 
     /// Waits until the process has exited (it stays unreaped), or `timeout` passes.
@@ -145,6 +156,9 @@ impl Child {
             // SAFETY: one valid pollfd.
             let r = unsafe { libc::poll(&mut p, 1, left.as_millis().min(i32::MAX as u128) as i32) };
             if r > 0 {
+                if self.exited.get().is_none() {
+                    self.exited.set(Some(Instant::now()));
+                }
                 return true;
             }
             if r == 0 || left.is_zero() {
@@ -169,7 +183,8 @@ impl Child {
         // SAFETY: rusage is plain data; wait4 on our own child.
         let mut ru: libc::rusage = unsafe { std::mem::zeroed() };
         unsafe { libc::wait4(self.pid, &mut status, 0, &mut ru) };
-        let wall_ns = self.started.elapsed().as_nanos() as u64;
+        let end = self.exited.get().unwrap_or_else(Instant::now);
+        let wall_ns = end.duration_since(self.started).as_nanos() as u64;
         let tv = |t: libc::timeval| t.tv_sec as u64 * 1_000_000_000 + t.tv_usec as u64 * 1000;
         Exit {
             code: libc::WIFEXITED(status).then(|| libc::WEXITSTATUS(status)),
@@ -191,7 +206,7 @@ impl Child {
 pub struct Exit {
     pub code: Option<i32>,
     pub signal: Option<i32>,
-    /// From the moment the child was released to exec until it was reaped.
+    /// From the moment the child was released to exec until it was seen to exit.
     pub wall_ns: u64,
     pub utime_ns: u64,
     pub stime_ns: u64,
@@ -210,34 +225,44 @@ impl Exit {
     }
 }
 
-/// One reading of /proc/<pid>/smaps_rollup, with the peak so far from /proc/<pid>/status.
+/// One memory sample: the resident set and its peak so far, from `statm` and `status`,
+/// which are cheap, and every so often the full `smaps_rollup`.
 #[derive(Clone, Copy, Debug)]
 pub struct MemSample {
     pub t_ms: f64,
-    pub mem: Rollup,
+    pub rss: u64,
     pub hwm: u64,
+    pub rollup: Option<Rollup>,
 }
 
 /// Samples a process's memory on a thread of its own until stopped.
+///
+/// `smaps_rollup` walks the page tables under the process's `mmap_lock`, which for a
+/// large heap takes milliseconds and delays the process's own `munmap` and `mprotect`. So
+/// it is read only every `rollup_every`; the frequent samples read counters only.
 pub struct Sampler {
     stop: Arc<AtomicBool>,
     handle: std::thread::JoinHandle<Vec<MemSample>>,
 }
 
 impl Sampler {
-    pub fn start(pid: i32, since: Instant, interval: Duration) -> Sampler {
+    pub fn start(pid: i32, since: Instant, interval: Duration, rollup_every: Duration) -> Sampler {
         let stop = Arc::new(AtomicBool::new(false));
         let s = stop.clone();
         let handle = std::thread::spawn(move || {
             let mut v = Vec::new();
+            let mut next_rollup = Instant::now();
             while !s.load(Ordering::Acquire) {
-                if let Some(mem) = Rollup::read(pid)
-                    && mem.rss > 0
-                {
+                let rss = bench_harness::mem::rss_of(pid).unwrap_or(0);
+                if rss > 0 {
+                    let rollup = if Instant::now() >= next_rollup { Rollup::read(pid) } else { None };
+                    if rollup.is_some() {
+                        next_rollup = Instant::now() + rollup_every;
+                    }
                     let hwm = bench_harness::mem::vm_hwm(pid).unwrap_or(0);
-                    v.push(MemSample { t_ms: since.elapsed().as_secs_f64() * 1e3, mem, hwm });
+                    v.push(MemSample { t_ms: since.elapsed().as_secs_f64() * 1e3, rss, hwm, rollup });
                 }
-                std::thread::sleep(interval);
+                std::thread::park_timeout(interval);
             }
             v
         });
@@ -246,6 +271,7 @@ impl Sampler {
 
     pub fn stop(self) -> Vec<MemSample> {
         self.stop.store(true, Ordering::Release);
+        self.handle.thread().unpark();
         self.handle.join().unwrap_or_default()
     }
 }

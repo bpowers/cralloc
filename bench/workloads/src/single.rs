@@ -26,7 +26,7 @@ fn pin_main() -> Cpus {
 }
 
 fn cycles(p: &Phase) -> f64 {
-    p.counters.get("cycles").unwrap_or(0) as f64
+    p.counters.get("cycles").expect("the cycles counter could not be read") as f64
 }
 
 /// Adds `b`'s counters and time into `a`.

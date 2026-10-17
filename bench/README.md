@@ -61,23 +61,30 @@ gate below. Builds run on `BENCH_BUILD_CPUS` (default `4-7,20-23`).
   (`perf_event_open` with `inherit`). The runner also counts the whole process from its
   first instruction (counters attached between `fork` and `execve`, as `perf stat` does),
   and for a server, over the window the driver marks. A run whose hardware counters were
-  multiplexed is flagged.
-- **Memory.** The runner samples `/proc/<pid>/smaps_rollup` every 50 ms (resident,
-  proportional, anonymous and huge-page-backed memory) and `VmHWM`. The peak resident set
-  comes from the process itself at exit (the result line, or the preload probe), because
-  `ru_maxrss` of a forked child includes the parent's memory at the fork.
+  multiplexed is invalid: the counts are not scaled, so it would look fast.
+- **Memory.** The runner samples the resident set and `VmHWM` every 50 ms from
+  `/proc/<pid>/statm` and `status`, which read counters, and `/proc/<pid>/smaps_rollup`
+  (proportional and huge-page-backed memory) once a second, because it walks the page tables
+  under the process's `mmap_lock`. The peak resident set comes from the process itself at
+  exit (the result line, or the preload probe), because `ru_maxrss` of a forked child
+  includes the parent's memory at the fork.
 - **Checks.** Each run must report the allocator, and for tcmalloc the mode, it was meant to
   run with; native runs report from inside, preloaded ones through `baselines/probe.c`.
   Runs that disagree, fail, or time out are recorded as invalid and left out of reports.
-- **Control.** `mimalloc-ctl` is mimalloc under a second name, run as if it were another
-  allocator. The report compares it with mimalloc on every job; a difference whose 95%
-  bootstrap interval excludes zero means the setup, not the allocator, moved the result.
-- **Quiet gate.** Before each job the runner measures, over one second, how busy the CPUs
-  outside the measurement set and its siblings are. It waits (re-checking every five
-  seconds) while more than `--max-busy` CPUs' worth (default 1.0) is running, or the
-  siblings are busy, for at most `--gate-wait` seconds (default 900), then runs anyway and
-  records what it saw. Every run records the load on the siblings and on the other CPUs
-  while it ran.
+- **Control.** `mimalloc-ctl` is mimalloc under a second name and from its own build
+  directory, run as if it were another allocator. The report compares it with mimalloc on
+  every job, pairing runs from the same round, with a 95% bootstrap interval of the median
+  ratio. A difference beyond the chance rate means the setup, not the allocator, moved the
+  result. It does not test effects that differ by allocator entry, such as the length of the
+  environment (`GLIBC_TUNABLES`, `LD_PRELOAD`), which shifts the initial stack.
+- **Quiet gate.** Before each job the runner measures, over one second, how busy the
+  measurement CPUs, their siblings and the other CPUs are; other processes are not confined,
+  so they may land on measurement CPUs too. It waits (re-checking every five seconds) while
+  anything runs on the measurement CPUs or siblings, or more than `--max-busy` CPUs' worth
+  (default 1.0) runs elsewhere, for at most `--gate-wait` seconds (default 900), then runs
+  anyway and records what it saw. Every run records the load on the siblings, on the other
+  CPUs, and the work on its own CPUs that was not its own; `report --quiet-only` leaves out
+  runs where the last two were high.
 - **Ranking.** Each job has one primary metric (named in the report with its unit; lower is
   better except rates). The report gives medians, half the interquartile range as a
   percentage, the fastest and the smallest (peak resident set) allocator, the runner-up

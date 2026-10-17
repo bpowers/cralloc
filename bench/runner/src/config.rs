@@ -43,12 +43,17 @@ pub struct Allocator {
     pub expect: Expect,
     /// For a control entry, the allocator it copies.
     pub control_of: Option<String>,
+    /// Appended to the native build directory name. A control gets its own build of the
+    /// same source, so that it also tests that two builds of one allocator measure alike.
+    pub build_suffix: String,
 }
 
 impl Allocator {
     /// The build directory name for native binaries with this allocator.
     pub fn build_name(&self) -> Option<String> {
-        self.feature.as_ref().map(|f| if f.is_empty() { "glibc".to_string() } else { f.clone() })
+        self.feature
+            .as_ref()
+            .map(|f| format!("{}{}", if f.is_empty() { "glibc" } else { f.as_str() }, self.build_suffix))
     }
 }
 
@@ -67,7 +72,12 @@ pub fn load(bench_dir: &Path) -> Result<Vec<Allocator>, String> {
                     .iter()
                     .find(|a| &a.name == orig)
                     .ok_or_else(|| format!("{}: same_as {orig} must name an earlier entry", e.name))?;
-                Allocator { name: e.name.clone(), control_of: Some(orig.clone()), ..base.clone() }
+                Allocator {
+                    name: e.name.clone(),
+                    control_of: Some(orig.clone()),
+                    build_suffix: "-ctl".into(),
+                    ..base.clone()
+                }
             }
             None => Allocator {
                 name: e.name.clone(),
@@ -79,6 +89,7 @@ pub fn load(bench_dir: &Path) -> Result<Vec<Allocator>, String> {
                 env: e.env.clone(),
                 expect: e.expect.clone(),
                 control_of: None,
+                build_suffix: String::new(),
             },
         };
         out.push(a);

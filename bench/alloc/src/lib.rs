@@ -13,6 +13,12 @@
 //! | `je` | `tikv-jemallocator` 0.6 | `sdallocx` |
 //! | `tc` | `tcmalloc-better` 0.1.19 | `TCMallocInternalDeleteSizedAligned` |
 //!
+//! The calls match the crates; the libraries differ for jemalloc. `je` links the
+//! distribution's shared libjemalloc 5.3.0 (built with profiling support compiled in, called
+//! through the PLT, and replacing `malloc` for the whole process), where
+//! `tikv-jemallocator` links its own static, prefixed build without profiling. Expect that to
+//! cost jemalloc a little on fast paths.
+//!
 //! `mimalloc` and `tikv-jemallocator` also route `realloc` and `alloc_zeroed` to the
 //! allocator's own functions. `tcmalloc-better` uses the generic fallbacks (allocate, copy,
 //! free; allocate, memset); the `tc` wrapper keeps the memset but resizes in place when the

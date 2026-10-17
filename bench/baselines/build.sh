@@ -77,25 +77,28 @@ build_jemalloc() {
 }
 
 build_mimalloc() {
-  # Two builds of the same source. The static archive without override is what the
-  # `mimalloc` crate links: Rust calls mi_* by name and C malloc stays glibc's. The shared
-  # library with override is the LD_PRELOAD form.
+  # Two builds of the same source. For Rust, a static archive compiled the way the
+  # `libmimalloc-sys` crate compiles it: the single translation unit src/static.c (so the
+  # fast path is inlined across mimalloc's own files), its defines, no override, so Rust
+  # calls mi_* by name and C malloc stays glibc's. For LD_PRELOAD, the shared library with
+  # override that mimalloc's own cmake build produces.
   rm -rf "$out/mimalloc"; mkdir -p "$out/mimalloc"
-  local common=(-DCMAKE_BUILD_TYPE=Release -DMI_BUILD_TESTS=OFF -DMI_BUILD_OBJECT=OFF)
-  local static=(-DMI_OVERRIDE=OFF -DMI_BUILD_SHARED=OFF -DMI_BUILD_STATIC=ON)
-  local shared=(-DMI_OVERRIDE=ON -DMI_BUILD_SHARED=ON -DMI_BUILD_STATIC=OFF)
-  run cmake -S "$tp/mimalloc" -B "$out/mimalloc/build-static" "${common[@]}" "${static[@]}" > "$out/mimalloc/cmake-static.log"
-  run cmake --build "$out/mimalloc/build-static" -j "$jobs" -- VERBOSE=1 > "$out/mimalloc/build-static.log"
-  run cmake -S "$tp/mimalloc" -B "$out/mimalloc/build-shared" "${common[@]}" "${shared[@]}" > "$out/mimalloc/cmake-shared.log"
+  local static=(-O3 -fPIC -ffunction-sections -fdata-sections -std=gnu11 -DMI_DEBUG=0 -DMI_BUILD_RELEASE
+                -DNDEBUG -ftls-model=initial-exec -Wno-error=date-time
+                -I "$tp/mimalloc/include" -I "$tp/mimalloc/src")
+  run cc "${static[@]}" -c "$tp/mimalloc/src/static.c" -o "$out/mimalloc/static.o"
+  ar rcs "$out/mimalloc/libmimalloc.a" "$out/mimalloc/static.o"
+  local shared=(-DCMAKE_BUILD_TYPE=Release -DMI_BUILD_TESTS=OFF -DMI_BUILD_OBJECT=OFF
+                -DMI_OVERRIDE=ON -DMI_BUILD_SHARED=ON -DMI_BUILD_STATIC=OFF)
+  run cmake -S "$tp/mimalloc" -B "$out/mimalloc/build-shared" "${shared[@]}" > "$out/mimalloc/cmake-shared.log"
   run cmake --build "$out/mimalloc/build-shared" -j "$jobs" -- VERBOSE=1 > "$out/mimalloc/build-shared.log"
-  cp "$out/mimalloc/build-static/libmimalloc.a" "$out/mimalloc/"
   cp -L "$out/mimalloc/build-shared/libmimalloc.so" "$out/mimalloc/"
   manifest mimalloc <<EOF
 source: third_party/mimalloc $(describe_of mimalloc) $(head_of mimalloc) ($(dirty_of mimalloc))
 version: $(sed -n 's/#define MI_MALLOC_VERSION *\([0-9]*\).*/\1/p' "$tp/mimalloc/include/mimalloc.h")
-static (Rust #[global_allocator]): cmake ${common[*]} ${static[*]}
-shared (LD_PRELOAD): cmake ${common[*]} ${shared[*]}
-compile line (static): $(grep -m1 -o '[^ ]*cc .*-c [^ ]*static.c' "$out/mimalloc/build-static.log" || grep -m1 ' -c ' "$out/mimalloc/build-static.log")
+static (Rust #[global_allocator]), as libmimalloc-sys 0.1.49 builds it: cc ${static[*]} -c src/static.c
+shared (LD_PRELOAD): cmake ${shared[*]}
+compile line (shared): $(grep -m1 ' -c .*alloc\.c' "$out/mimalloc/build-shared.log")
 EOF
 }
 
