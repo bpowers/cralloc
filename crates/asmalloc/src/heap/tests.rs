@@ -344,9 +344,9 @@ fn growth_in_small_steps_stays_in_the_room_a_move_gave() {
     // SAFETY: valid layouts; the block is freed once with the layout it has.
     unsafe {
         let mut p = heap.alloc(layout(size, 8));
-        // Outgrow the slot once, into a block with headroom.
-        p = heap.realloc(p, layout(size, 8), 100 << 10);
-        size = 100 << 10;
+        // Outgrow the slot once, into a block with headroom (which fits a region of every shape).
+        p = heap.realloc(p, layout(size, 8), 50 << 10);
+        size = 50 << 10;
         for _ in 0..16 {
             let q = heap.realloc(p, layout(size, 8), size + page);
             assert_eq!(q, p, "growth within the headroom stays put at {size}");
@@ -396,7 +396,7 @@ fn large_frees_find_the_class_from_the_address() {
     // SAFETY: valid layouts; each block is freed once with the layout it has.
     unsafe {
         let p = heap.alloc(l);
-        let q = heap.realloc(p, l, 100 << 10);
+        let q = heap.realloc(p, l, 50 << 10);
         assert!(!q.is_null());
         let slot = match heap.heap.back().unwrap().lookup(q).unwrap() {
             crate::back::Kind::Slot(class) => class.size(),
@@ -404,7 +404,7 @@ fn large_frees_find_the_class_from_the_address() {
                 regions << heap.heap.back().unwrap().space().plan().region_shift()
             }
         };
-        assert!(slot >= HEADROOM * (100 << 10), "{slot}");
+        assert!(slot >= HEADROOM * (50 << 10), "{slot}");
         // What the caller may use is what it asked for, to a page, not the headroom.
         let page = heap
             .heap
@@ -414,11 +414,8 @@ fn large_frees_find_the_class_from_the_address() {
             .plan()
             .geometry()
             .page_size();
-        assert_eq!(
-            heap.usable(q),
-            Some((100usize << 10).next_multiple_of(page))
-        );
-        heap.dealloc(q, layout(100 << 10, 8));
+        assert_eq!(heap.usable(q), Some((50usize << 10).next_multiple_of(page)));
+        heap.dealloc(q, layout(50 << 10, 8));
     }
     assert!(!Class::of_size(40 << 10).unwrap().is_small());
 }
