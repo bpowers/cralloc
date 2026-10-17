@@ -70,21 +70,19 @@ unchanged (the region's base plus the offset). The range checks are `Space::purg
 aborts on a range outside the reservation or not whole pages. The caller's obligations are
 discharged at the call site, BACK-REGION-01.
 
-**Machine checks.** `SimOs` cannot yet tell committed memory from uncommitted, so the commit
-claim (step 3) is checked on the protocols' test host instead: `TestHost` records which pages
-of each metadata block have been committed, and its `meta` fails on any other word. It commits
-the fixed part as `assign` does and leaf pages only through `commit_meta`, so every scenario in
-`back::models` (explored under many interleavings) checks that no protocol touches an
-uncommitted word. `carving_commits_the_leaf_bitmap_it_needs` fails if a carve skips the leaf
-commit. `assign`'s commit before tagging is production code outside the test host; it is
-covered by the argument above and by the `SimOs` tests, which run every other access path
-natively and under Miri with strict provenance, with fault injection and with four threads.
-Bounds are checked on the test host by vector indexing. Kani proves the layout's sections fit
-the block (`layouts_fit_*`) and the leaf commit covers the carved slots
-(`leaf_commits_cover_the_committed_slots`); a Kani run of the protocols themselves on a small
-heap did not finish within the cap, so the access paths are tested, not proved.
+**Machine checks.** The simulator records which pages are committed, and fails a commit,
+purge or unmap of a page that was written before it was committed. The back end's `SimOs`
+tests (`back::tests`) run every access path on it, natively and under Miri with strict
+provenance, with fault injection (including calls that fail partway) and with four threads.
+`the_leaf_bitmap_is_committed_before_it_is_written` fails if a carve skips the leaf commit
+(checked by deleting it). The protocol scenarios in `back::models` run on a test host that does
+not track commits; they check the protocols, not this entry. Kani proves the layout's sections
+fit the block (`layouts_fit_*`) and the leaf commit covers the carved slots
+(`leaf_commits_cover_the_committed_slots`); a Kani run of the protocols on a heap does not fit
+the memory cap, so the access paths are tested, not proved.
 
 **Review.** 2026-10-17, fresh adversarial reviewer: the argument was accepted; the machine
-checks were found to overstate (no test could see an uncommitted access). Fixed above with the
-test host's commit tracking, which a deleted leaf commit now fails. The same reviewer checked the
-fix and accepted it.
+checks were found to overstate (no test could see an uncommitted access). Fixed with commit
+tracking, first in the test host and now in the simulator itself, which a deleted leaf commit
+fails. The same reviewer checked the first fix and accepted it; the move to the simulator's
+check has not been reviewed.

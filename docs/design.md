@@ -491,6 +491,11 @@ that doubles repeatedly is copied a few times in total, not once per doubling. T
 space this spends is plentiful, and the physical memory is only what the program touches.
 An object larger than a region takes a run of whole regions.
 
+The current size of each large object is recorded out of band, one word per slot, written
+only when the object is allocated or resized. C's `realloc` needs it to know how much to
+copy, and the usable size must not be the whole slot: a caller that fills what it is told it
+may use would touch many times what it asked for.
+
 A Rust resize stays in place only when the caller's next `dealloc` will still find the right
 class. For a small object that means the new size maps to the same class. For a large object
 it means the new size is still large and fits the slot. Anything else moves the object.
@@ -508,7 +513,8 @@ it means the new size is still large and fits the slot. Anything else moves the 
   from the address table and joins the same path as a Rust free. A pointer outside the heap
   is a caller's bug and aborts the process. The sized frees also take the class from the
   address, since a wrong size from C would otherwise corrupt the heap. `malloc_usable_size`
-  reports the whole slot, all of which the caller may use. `realloc(p, 0)` frees `p` and
+  reports the class size of a small object and, for a large one, its recorded size rounded
+  up to a page. `realloc(p, 0)` frees `p` and
   returns null, as glibc does. This layer sets `errno` through the C library's own
   accessor; it is the only part of asmalloc that refers to a C library.
 

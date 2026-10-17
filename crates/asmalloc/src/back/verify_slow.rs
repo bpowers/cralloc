@@ -2,17 +2,18 @@
 //! leaf-commit arithmetic (they divide by symbolic class sizes), and `lowest`. Run with
 //! `scripts/kani-all back::verify_slow`.
 //!
-//! Runs of operations on a small heap are not here: a harness of two symbolic operations on one
-//! region of eight slots ran past twelve minutes under the 6 GiB cap, because Kani cannot bound
-//! the summary walks' loops. Those runs are checked instead by the interleaving explorer
-//! (`back::models`) and the shadow-model tests (`back::tests`).
+//! Which slots a unit touches, and which lie wholly inside it, is proved for every class and
+//! position on the tiny heap's regions. For the larger geometries CBMC does not finish the
+//! 64-bit multiply in `Divisor::divide` within the hour; there it rests on `touching` being
+//! `(start / size, (end - 1) / size)` by definition, `Divisor::divide` being proved exact for
+//! every input (`classes::verify`, `classes::verify_slow`), and the unit test
+//! `layout::tests::purge_passes_tile_the_carved_pages`.
 //!
-//! Which slots a unit touches, and which lie wholly inside it, is not proved here: CBMC does not
-//! finish the 64-bit multiply in `Divisor::divide` for a symbolic class within the hour.
-//! `touching` is `(start / size, (end - 1) / size)` by definition, with `Divisor::divide` proved
-//! exact for every input in `classes::verify` and `classes::verify_slow`; the unit test
-//! `layout::tests::purge_passes_tile_the_carved_pages` checks both against the definitions for
-//! every class, many watermarks and huge-page boundaries, in three geometries.
+//! Runs of operations on a heap are not here. A harness running the real back end on
+//! `ProofOs<Tiny>` (fill, launder, fill, with two slots) exceeds the 6 GiB cap within two
+//! minutes: the protocols' retry loops nest (a search restarts around a descent, a clear and a
+//! walk up), and Kani unrolls each to the bound. Those runs are checked by the interleaving
+//! explorer (`back::models`) and the shadow-model tests (`back::tests`).
 
 use super::layout::{Layout, Step, WORD_BYTES, slots_in_region};
 use super::verify::{any_class, any_plan_of, any_used_plan, layouts_fit};
@@ -147,4 +148,42 @@ fn lowest_takes_the_lowest_set_bits() {
         let below = u64::MAX >> (63 - top);
         assert!(word & below == taken);
     }
+}
+
+/// The slots a unit touches are exactly those overlapping its pages, and those `inside` reports
+/// are exactly those wholly within them, for every class, watermark, cursor and huge-page part
+/// of the tiny heap's regions.
+#[kani::proof]
+#[kani::unwind(6)]
+fn units_touch_exactly_their_slots_on_the_tiny_heap() {
+    use crate::os::sim::{Shape, Tiny};
+    let plan = Tiny::GEOMETRY.largest_plan();
+    let class = any_class();
+    let Some(layout) = Layout::new(plan, class) else {
+        return;
+    };
+    let carved: u32 = kani::any();
+    kani::assume(carved <= layout.slots());
+    let huge: u32 = kani::any();
+    let huge_from = if kani::any() {
+        kani::assume(huge < layout.region_pages() && huge % layout.huge_pages() == 0);
+        Some(huge)
+    } else {
+        None
+    };
+    let cursor: u32 = kani::any();
+    let Step::Unit(unit) = layout.unit_below(carved, huge_from, cursor) else {
+        return;
+    };
+    let (first, last) = layout.touching(unit);
+    let page = layout.page_size();
+    let (start, end) = (unit.start as usize * page, unit.end as usize * page);
+    assert!(last < carved);
+    assert!(layout.slot_bytes(first) <= start && layout.slot_bytes(first + 1) > start);
+    assert!(layout.slot_bytes(last) < end && layout.slot_bytes(last + 1) >= end);
+    let (lo, hi) = layout.inside(unit);
+    let slot: u32 = kani::any();
+    kani::assume(first <= slot && slot <= last);
+    let wholly = layout.slot_bytes(slot) >= start && layout.slot_bytes(slot + 1) <= end;
+    assert!(wholly == (lo <= slot && slot < hi));
 }

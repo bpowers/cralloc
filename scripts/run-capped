@@ -1,0 +1,13 @@
+#!/usr/bin/env bash
+# cargo's runner for this workspace: run one test, example or benchmark binary under a hard
+# memory cap and a timeout.
+#
+# Why: the code under test is an allocator. A bug in it, or in a test, can commit memory
+# without bound, and the kernel's global OOM killer then takes other people's work with it.
+#
+# The cap is ASMALLOC_TEST_MEM (default 4G) and the timeout ASMALLOC_TEST_TIMEOUT (default
+# 30m). Raise them for one command when a test really needs more; never remove them.
+set -euo pipefail
+dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+MEMLIMIT_QUIET=1 exec "$dir/memlimit" \
+  -m "${ASMALLOC_TEST_MEM:-4G}" -t "${ASMALLOC_TEST_TIMEOUT:-30m}" -- "$@"
