@@ -94,6 +94,27 @@ def stSym : State := { st with syms := fun n => if n = "T" then 0x1000 else 0 }
 #guard (exec (.leaSym .r9 "T" (-8)) stSym).map (·.gpr .r9) == some 0xFF8
 #guard (exec (.leaSym .r9 "T" 24) stSym).map flags == some (flags st)
 
+/-! ## Compile-time constants and the global offset table -/
+
+/-- `stSym` with the constants `off = 0x30` and `mask = 0x1_0000_01f0` (whose
+low 32 bits are `0x1f0`). -/
+def stPar : State := { stSym with params := fun n =>
+  if n = "off" then 0x30 else if n = "mask" then 0x1000001f0 else 0 }
+
+-- A symbol plus a literal and a constant offset.
+#guard (exec (.leaSym .r9 "T" 8 (some "off")) stPar).map (·.gpr .r9) == some 0x1038
+-- An immediate from a constant: its low 32 bits, as an immediate is.
+#guard (exec (.alu32 .test .rcx (.immP "mask")) (stPar.setReg .rcx 0x10008)).map flags ==
+  some [some false, some true, some false, some false]
+#guard (exec (.mov32 .rax (.immP "mask")) stPar).map (·.gpr .rax) == some 0x1f0
+-- A 64-bit operation sign-extends the 32-bit immediate.
+#guard (exec (.mov .rax (.immP "mask")) { stPar with params := fun _ => 0x80000000 }).map
+  (·.gpr .rax) == some 0xffffffff80000000
+-- Instructions without an immediate form refuse one.
+#guard (exec (.cmov .e .rax (.immP "mask")) stPar).isNone
+-- The GOT slot of a symbol holds its address; nothing is read from the regions.
+#guard (exec (.movGot .rdx "T") stPar).map (·.gpr .rdx) == some 0x1000
+
 /-! ## `inc`, `dec` and `test` with an immediate
 
 `flags` lists CF, ZF, SF and OF. `inc` and `dec` keep CF (set in `st`) and

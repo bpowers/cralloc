@@ -64,12 +64,16 @@ Its name cannot be a table's (`tableName`).
 
 The code forms a table's address, or an address at a constant offset from
 it, from the static's symbol (a `sym` operand), on x86-64 by `lea` of the
-RIP-relative operand `[rip + <sym> + <off>]` (`SymPart.ripRel`). The linker
-resolves it to the static's address plus the offset, which
+RIP-relative operand `[rip + <sym> + <off>]`. The linker resolves it to the
+static's address plus the offset, which
 the model gives (`State.syms`, fixed for the run as a static's address is)
 and at which the contract (`Abi.withConsts`) says the memory holds the table,
 readable and apart from every writable region: a `static` is a distinct
 immutable object.
+
+Any other symbol or compile-time constant the code names (`Piece.ref`) is
+an operand its `Api` declares (`Operand`): `<name> = sym <path>` or
+`<name> = const <expr>` (`operandText`, `checkOperands`).
 
 An artifact whose code needs CPU features beyond the target's baseline
 (`Artifact.features`) also gets a last `# Safety` item saying the CPU must
@@ -140,12 +144,12 @@ def dedup (as : List String) : List String :=
   as.foldl (init := []) fun acc a => if acc.contains a then acc else acc ++ [a]
 
 /-- The text of one line of the `naked_asm!` template (`escapeBraces`): a
-call names its function, and a static's address its static, as the operand
-of the same name. -/
+call names its function, and a reference to an operand (`Piece.ref`) the
+operand, by the same name. -/
 def lineText (call : String) : Line → String
   | .text l => escapeBraces l
   | .call n => escapeBraces call ++ " {" ++ n ++ "}"
-  | .sym s (.ripRel off) n => escapeBraces s ++ "[rip + {" ++ n ++ "}" ++ symOffset off ++ "]"
+  | .ops ps => String.join (ps.map fun | .text s => escapeBraces s | .ref n => "{" ++ n ++ "}")
 
 /-- One line of the `naked_asm!` template as an argument of its own. -/
 def line (call : String) (l : Line) : String :=
@@ -320,6 +324,16 @@ def checkLayout (a : Artifact) : Except String Unit := do
     throw s!"{a.target.name}: {a.name} has buffers but its doc does not end with its \
       `# Safety` section"
 
+/-- The declaration of the operand `n` that `a`'s code names: a table of
+constants, which the emitter writes (`tablesFile`), or an operand of
+`Artifact.operands` (`checkOperands` checks it is one of them). -/
+def operandText (a : Artifact) (n : String) : String :=
+  if (a.consts.map (·.1)).contains n then s!"sym super::consts::{n}" else
+  match a.operands.lookup n with
+  | some (.sym p) => s!"sym {p}"
+  | some (.const e) => s!"const {e}"
+  | none => ""
+
 /-- One artifact as a Rust naked function; `moduleOf` gives the module of
 each function it calls. The printer's `funcAlign` comes last, after the
 return (`Printer.function`) and any directives that follow it. -/
@@ -331,7 +345,7 @@ where
   functionOf (a : Artifact) (lines : List Line) (moduleOf : String → String) : String :=
   let body := lines ++ a.target.printer.funcAlign.map .text
   let callees := dedup (body.filterMap fun | .call n => some n | _ => none)
-  let syms := dedup (body.filterMap fun | .sym _ _ n => some n | _ => none)
+  let refs := dedup (body.flatMap Line.refs)
   featuresConst a.name a.features ++
   docComment "" (fullDoc a) ++
   "#[unsafe(naked)]\n" ++
@@ -339,7 +353,7 @@ where
   "    core::arch::naked_asm!(\n" ++
   template a.target.printer.call body ++
   String.join (callees.map fun n => s!"        {n} = sym super::{moduleOf n}::{n},\n") ++
-  String.join (syms.map fun n => s!"        {n} = sym super::consts::{n},\n") ++
+  String.join (refs.map fun n => s!"        {n} = {operandText a n},\n") ++
   "    )\n" ++
   "}\n"
 
@@ -490,11 +504,28 @@ def checkConsts (ps : List Prepared) (p : Prepared) : Except String Unit := do
       throw s!"{a.target.name}: {a.name} and {q.art.name} give a table of constants different words"
   if (ps.any fun q => q.art.target.name == a.target.name && q.art.module == "consts") then
     throw s!"{a.target.name}: an artifact's module is `consts`, the module of the tables of constants"
-  let used := p.lines.filterMap fun | .sym _ _ n => some n | _ => none
-  for n in used do
-    unless (ts.map (·.1)).contains n do
-      throw s!"{a.target.name}: {a.name} names the table {n}, which it does not have \
-        (`Artifact.consts`)"
+
+/-- Every operand `p`'s code names (`Line.refs`) is one of its tables of
+constants or of its declared operands (`Artifact.operands`), and none is
+both; each declared operand has a distinct name, which is a Rust identifier
+(the name of an `asm!` operand) and not one the emitter declares itself. -/
+def checkOperands (p : Prepared) : Except String Unit := do
+  let a := p.art
+  let tables := a.consts.map (·.1)
+  let names := a.operands.map (·.1)
+  unless (dedup names).length == names.length do
+    throw s!"{a.target.name}: {a.name} declares two operands of the same name"
+  for n in names do
+    unless rustIdent n do
+      throw s!"{a.target.name}: {a.name}'s operand `{n}` is not a Rust identifier"
+    if tables.contains n then
+      throw s!"{a.target.name}: {a.name}'s operand `{n}` is also a table of constants"
+    if (a.code.calls.map (·.1)).contains n then
+      throw s!"{a.target.name}: {a.name}'s operand `{n}` is also a function it calls"
+  for n in dedup (p.lines.flatMap Line.refs) do
+    unless tables.contains n || names.contains n do
+      throw s!"{a.target.name}: {a.name} names `{n}`, which is neither a table of constants \
+        (`Artifact.consts`) nor an operand (`Artifact.operands`)"
 
 /-- The tables of constants of the artifacts `arts`, by name, each once. -/
 def tables (arts : List Artifact) : List (String × List (BitVec 64)) :=
@@ -613,7 +644,8 @@ contents: `mod.rs`, and for each target `<target>/mod.rs` and one
 an `Api` with a contract (`checkApi`), its name or module is not a Rust
 identifier (`checkNames`), two artifacts of a target have the
 same name (`checkUnique`), a call is not of the code it runs (`checkCalls`),
-its tables of constants are not as `checkConsts` requires, an artifact's
+its tables of constants are not as `checkConsts` requires, its code names
+an operand it does not declare (`checkOperands`), an artifact's
 features are not those its code requires (`checkFeatures`), its code has an
 instruction its target's printer cannot encode (`checkEncodable`), or its
 doc has no `# Safety` section at its end for what `fullDoc` adds to it
@@ -633,6 +665,7 @@ def files (as : List Artifact) : Except String (List (String × String)) := do
   let ps := prepareAll as
   forMPar ps (checkCalls ps)
   forMPar ps (checkConsts ps)
+  forMPar ps checkOperands
   forMPar ps checkFeatures
   forMPar ps checkEncodable
   forMPar as checkLayout

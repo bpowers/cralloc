@@ -39,6 +39,7 @@ theorem addrs_ok (s : State) :
     RegUpd.gpr_arithFlags, RegUpd.syms_setReg, RegUpd.syms_arithFlags, RegUpd.zf_setReg,
     RegUpd.zf_arithFlags, RegUpd.mem_setReg, RegUpd.mem_arithFlags, Option.some.injEq,
     exists_eq_left', reduceCtorEq, ite_true, ite_false, Access.add_ofInt_neg_lit,
-    BitVec.ofInt_ofNat, BitVec.ofNat_eq_ofNat, and_self]
+    BitVec.ofInt_ofNat, BitVec.ofNat_eq_ofNat, Option.map_none, Option.getD_none, BitVec.add_zero,
+    and_self]
 
 end VG.Proof.Examples.X86_64.Lea

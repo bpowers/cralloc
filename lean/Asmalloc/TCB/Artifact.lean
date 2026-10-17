@@ -189,6 +189,21 @@ bytes of stack below the stack pointer (`Sig.contract`'s `stack`; a contract
 that does not depend on it is the one with `stack` 0). -/
 abbrev Contracts : Type 1 := {M : ISA} → Abi M → Nat → Contract M
 
+/-- An operand of a function's assembly that its code names (`Piece.ref`),
+other than its tables of constants and the functions it calls, which the
+emitter declares itself:
+
+* `sym path`: the Rust `static` or function at `path`, a `sym` operand. The
+  model gives its address by the operand's name (on x86-64, `State.syms`).
+* `const expr`: the Rust constant expression `expr`, a `const` operand,
+  which may use the function's const generic parameters. The model gives its
+  value by the operand's name (on x86-64, `State.params`), and the contract
+  states what it may be. -/
+inductive Operand
+  | sym (path : String)
+  | const (expr : String)
+  deriving DecidableEq, Repr
+
 /-- What a function is on every target: its Rust module, name and signature,
 whether its contract lets it overwrite its arguments in memory
 (`Sig.contract`'s `writeArgs`), its contract on every target (`contracts`),
@@ -216,6 +231,8 @@ structure Api where
   `Sig.layoutDoc` give (what memory each buffer must be valid for, and where
   it may be). -/
   safety : List String
+  /-- The operands its code names, by name (`Operand`). -/
+  operands : List (String × Operand) := []
 
 /-- The documentation of `api` on a target: its summary, then the paragraphs
 `notes`, then its `# Safety` section. -/
@@ -247,6 +264,8 @@ structure Artifact where
   (`Rust.checkConsts`). So `contract` is one for the calling convention
   `target.abi.withConsts consts` (`Abi.withConsts`). -/
   consts : List (String × List (BitVec 64)) := []
+  /-- The other operands its code names (`Operand`), from its `Api`. -/
+  operands : List (String × Operand) := []
   code : Prog target.isa
   contract : Contract target.isa
   verified : Verified target code contract

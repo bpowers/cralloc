@@ -12,9 +12,9 @@ conditional branches:
 * `loop body c` ⟶  `Ltop: body; b<c> Ltop`
 * `call name body` ⟶  `<call> name` (the call instruction of the function
   `name`, which is emitted separately: see `VG.Rust.files`)
-* an instruction naming a `static` (`Printer.symLines`) ⟶ a line with a
-  RIP-relative operand of its address (`Line.sym`), which `VG.Rust.files`
-  writes with the static's symbol
+* an instruction naming a symbol or a compile-time parameter ⟶ a line that
+  refers to it as an operand of the `asm!` block (`Line.ops`, `Piece.ref`),
+  which `VG.Rust.files` declares (`sym` or `const`)
 * `frame push body pop` ⟶  `push; body; pop`
 
 Structured-control-flow labels are numeric local labels (`N:`, referenced
@@ -54,29 +54,35 @@ tests in `AsmallocTest/Print.lean`.
 
 namespace VG
 
-/-- The part of a `static`'s address a line names: the address plus `off`
-as a RIP-relative memory operand, `[rip + <sym> + off]` (x86-64's `lea`). -/
-inductive SymPart
-  | ripRel (off : Int)
-  deriving DecidableEq, Repr
-
 /-- The text of a constant added to a symbol in an operand: nothing for 0,
 ` + k` or ` - k` otherwise. -/
 def symOffset (off : Int) : String :=
   if off = 0 then "" else if off > 0 then s!" + {off}" else s!" - {-off}"
 
+/-- Part of a line of assembly: text, or a reference to an operand of the
+`asm!` block by its name (a symbol, a compile-time constant, or a label),
+which the template writes as `{name}`. -/
+inductive Piece
+  | text (s : String)
+  | ref (name : String)
+  deriving DecidableEq, Repr
+
 /-- A line of assembly: text, a call instruction of the function it names,
-or text followed by a RIP-relative operand of the address of the `static` it
-names. -/
+or text with references to operands (`Piece`). -/
 inductive Line
   | text (s : String)
   | call (name : String)
-  | sym (s : String) (part : SymPart) (name : String)
+  | ops (ps : List Piece)
   deriving DecidableEq, Repr
 
+/-- The operands a line refers to (`Piece.ref`). -/
+def Line.refs : Line → List String
+  | .ops ps => ps.filterMap fun | .ref n => some n | .text _ => none
+  | _ => []
+
 structure Printer (M : ISA) where
-  /-- Assembly text for one instruction (may be several lines). -/
-  instr : M.Instr → List String
+  /-- The lines of one instruction. -/
+  instr : M.Instr → List Line
   /-- Conditional branch to a label, taken when the condition is true. -/
   branch : M.Cond → String → String
   /-- Unconditional branch to a label. -/
@@ -86,9 +92,6 @@ structure Printer (M : ISA) where
   /-- The mnemonic of the call instruction whose operand is a function's
   symbol (`ISA.call`), e.g. `call`. -/
   call : String
-  /-- The lines of an instruction that names a `static` (`Line.sym`); `none`
-  for the others, whose lines are `instr`'s text. -/
-  symLines : M.Instr → Option (List Line) := fun _ => none
   /-- Why the assembler cannot encode an instruction as the model describes
   it (e.g. an x86-64 displacement too wide for its field, which some
   assemblers silently truncate), or `none` if it can. The emitter refuses
@@ -108,7 +111,7 @@ def labelNum (n : Nat) : String := s!"2{n}"
 place, the lines of its cold branches (`Code.iteCold`), placed after the
 function's return, and the next unused label number. -/
 def Printer.lower : Code M.Instr M.Cond → Nat → List Line × List Line × Nat
-  | .block is, n => (is.flatMap fun i => (P.symLines i).getD ((P.instr i).map .text), [], n)
+  | .block is, n => (is.flatMap P.instr, [], n)
   | .seq c₁ c₂, n =>
     let (l₁, k₁, n) := lower c₁ n
     let (l₂, k₂, n) := lower c₂ n
@@ -134,8 +137,7 @@ def Printer.lower : Code M.Instr M.Cond → Nat → List Line × List Line × Na
   | .call name _, n => ([.call name], [], n)
   | .frame i body j, n =>
     let (lb, kb, n) := lower body n
-    ((P.symLines i).getD ((P.instr i).map .text) ++ lb ++
-      (P.symLines j).getD ((P.instr j).map .text), kb, n)
+    (P.instr i ++ lb ++ P.instr j, kb, n)
 
 /-- The complete body of a function: the lowered code, the return, and the
 cold branches' code after it. -/

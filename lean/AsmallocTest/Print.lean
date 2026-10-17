@@ -16,7 +16,7 @@ def text (ls : List Line) : List String :=
   ls.map fun
     | .text s => s
     | .call n => s!"<call {n}>"
-    | .sym s (.ripRel off) n => s!"{s}<riprel {n}{symOffset off}>"
+    | .ops ps => String.join (ps.map fun | .text s => s | .ref n => s!"<{n}>")
 
 open X86_64
 
@@ -240,13 +240,13 @@ def sample64 : Prog isa := .block [
 -- the same text, for reading.
 #guard text (printer.function (.block [.leaSym .r9 "VG_TABLE", .leaSym .r9 "VG_TABLE" 24,
     .leaSym .rax "VG_TABLE" (-8)] : Prog isa)) ==
-  ["lea r9, <riprel VG_TABLE>", "lea r9, <riprel VG_TABLE + 24>", "lea rax, <riprel VG_TABLE - 8>",
+  ["lea r9, [rip + <VG_TABLE>]", "lea r9, [rip + <VG_TABLE> + 24]", "lea rax, [rip + <VG_TABLE> - 8]",
     "ret"]
-#guard Rust.line printer.call (.sym "lea r9, " (.ripRel 0) "VG_TABLE") ==
+#guard Rust.line printer.call (.ops [.text "lea r9, [rip + ", .ref "VG_TABLE", .text "]"]) ==
   "        r\"lea r9, [rip + {VG_TABLE}]\",\n"
-#guard Rust.line printer.call (.sym "lea r9, " (.ripRel 24) "VG_TABLE") ==
+#guard Rust.line printer.call (.ops [.text "lea r9, [rip + ", .ref "VG_TABLE", .text " + 24]"]) ==
   "        r\"lea r9, [rip + {VG_TABLE} + 24]\",\n"
-#guard Rust.line printer.call (.sym "lea r9, " (.ripRel (-8)) "VG_TABLE") ==
+#guard Rust.line printer.call (.ops [.text "lea r9, [rip + ", .ref "VG_TABLE", .text " - 8]"]) ==
   "        r\"lea r9, [rip + {VG_TABLE} - 8]\",\n"
 #guard Instr.asm (.leaSym .r9 "VG_TABLE") == ["lea r9, [rip + VG_TABLE]"]
 #guard Instr.asm (.leaSym .r9 "VG_TABLE" 24) == ["lea r9, [rip + VG_TABLE + 24]"]
@@ -255,6 +255,17 @@ def sample64 : Prog isa := .block [
 #guard printer.unencodable (.leaSym .r9 "VG_TABLE" (-2 ^ 31)) == none
 #guard printer.unencodable (.leaSym .r9 "VG_TABLE" (2 ^ 31)) ==
   some "the offset 2147483648 from VG_TABLE does not fit in 32 bits"
+
+-- A compile-time constant as an immediate or a symbol's offset, and a GOT
+-- load: each refers to the operand by name.
+#guard text (printer.function (.block [.alu32 .test .rcx (.immP "mask"),
+    .leaSym .r9 "SLABS" 8 (some "off"), .movGot .rdx "rs", .mov .rax (.imm 1)] : Prog isa)) ==
+  ["test ecx, <mask>", "lea r9, [rip + <SLABS> + 8 + <off>]",
+    "mov rdx, QWORD PTR [rip + <rs>@GOTPCREL]", "mov rax, 1", "ret"]
+#guard Rust.line printer.call (.ops [.text "test ecx, ", .ref "mask"]) ==
+  "        r\"test ecx, {mask}\",\n"
+#guard (printer.function (.block [.alu32 .test .rcx (.immP "mask")] : Prog isa)).flatMap Line.refs ==
+  ["mask"]
 
 -- `lea` of a memory operand: its address, with no size.
 #guard text (printer.function (.block [.lea .rcx { base := .rcx, disp := -8 },
@@ -294,7 +305,7 @@ def callSample : Prog X86_64.isa :=
 
 -- The lines are one string literal, separated by newlines (as `naked_asm!`
 -- joins its arguments); calls and statics are named as operands.
-#guard Rust.template "call" [.text "mov rax, rbx", .call "vg_f", .sym "lea rcx, " (.ripRel 0) "VG_T",
+#guard Rust.template "call" [.text "mov rax, rbx", .call "vg_f", .ops [.text "lea rcx, [rip + ", .ref "VG_T", .text "]"],
     .text "ret", .text ".p2align 6"] ==
   "        r\"mov rax, rbx\ncall {vg_f}\nlea rcx, [rip + {VG_T}]\nret\n.p2align 6\",\n"
 #guard Rust.template "call" [] == ""

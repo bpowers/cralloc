@@ -22,6 +22,10 @@ inductive Src
   | reg (r : Reg)
   /-- A 32-bit immediate, sign-extended to 64 bits. -/
   | imm (v : BitVec 32)
+  /-- A 32-bit immediate given by the compile-time constant `name` (a `const`
+  operand): the low 32 bits of `State.params name`, used as `imm` is. The
+  assembler rejects a value the instruction's 32-bit field cannot hold. -/
+  | immP (name : String)
   | mem (m : MemOp)
   deriving DecidableEq, Repr
 
@@ -50,6 +54,7 @@ def ShiftxOp.var : ShiftxOp → VarShiftOp
 def readSrc (s : State) : Src → Option (BitVec 64)
   | .reg r => some (s.gpr r)
   | .imm v => some (v.signExtend 64)
+  | .immP n => some (((s.params n).setWidth 32).signExtend 64)
   | .mem m => s.load64 (s.ea m)
 
 /-- Read a 32-bit source operand: the low 32 bits of a register, the
@@ -57,6 +62,7 @@ immediate itself, or 4 bytes of memory. -/
 def readSrc32 (s : State) : Src → Option (BitVec 32)
   | .reg r => some ((s.gpr r).setWidth 32)
   | .imm v => some v
+  | .immP n => some ((s.params n).setWidth 32)
   | .mem m => s.load32 (s.ea m)
 
 /-- Flags after the result `r` of an arithmetic or logic operation with carry
@@ -342,7 +348,7 @@ it will contain the high half of the multiplication result." An immediate
 source does not exist: it faults. -/
 def execMulx (hi lo : Reg) (src : Src) (s : State) : Option State :=
   match src with
-  | .imm _ => none
+  | .imm _ | .immP _ => none
   | _ => (readSrc s src).map fun b =>
     let p := (s.gpr .rdx).toNat * b.toNat
     (s.setReg lo (BitVec.ofNat 64 p)).setReg hi (BitVec.ofNat 64 (p / 2 ^ 64))
@@ -355,7 +361,7 @@ modelled.) It faults if CF is undefined, as `adc` does, and on an immediate
 source, which does not exist. -/
 def execAdcx (dst : Reg) (src : Src) (s : State) : Option State :=
   match src with
-  | .imm _ => none
+  | .imm _ | .immP _ => none
   | _ => (readSrc s src).bind fun b => s.cf.map fun c =>
     let a := s.gpr dst
     let r := a + b + (BitVec.ofBool c).setWidth 64
@@ -369,7 +375,7 @@ not modelled.) It faults if OF is undefined, and on an immediate source,
 which does not exist. -/
 def execAdox (dst : Reg) (src : Src) (s : State) : Option State :=
   match src with
-  | .imm _ => none
+  | .imm _ | .immP _ => none
   | _ => (readSrc s src).bind fun b => s.of.map fun o =>
     let a := s.gpr dst
     let r := a + b + (BitVec.ofBool o).setWidth 64

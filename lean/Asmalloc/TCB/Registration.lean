@@ -75,6 +75,7 @@ def Api.artifact (api : Api) (target : Target) (r : Registration api target) : A
   sig := api.sig
   doc := api.doc r.notes
   consts := r.consts
+  operands := api.operands
   code := r.code
   contract := r.contract
   verified := r.verified
