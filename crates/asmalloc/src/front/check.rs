@@ -65,7 +65,7 @@ impl Bounds {
 }
 
 /// What a search found.
-#[derive(Debug)]
+#[derive(Clone, Copy, Debug)]
 pub(crate) struct Report {
     /// Executions run.
     pub(crate) executions: usize,

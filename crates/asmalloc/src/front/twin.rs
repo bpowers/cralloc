@@ -52,6 +52,11 @@ pub trait Machine {
     /// sequence restarts. A machine that moves the thread to another CPU does so here, so the
     /// restart reads the new number.
     fn step(&self, step: Step) -> Result<(), Aborted>;
+
+    /// Called after a sequence's committing store. A simulator whose threads really run in
+    /// parallel uses it to know when a sequence that passed its last step is done, so that a
+    /// fence can wait for it.
+    fn committed(&self) {}
 }
 
 impl<M: Machine + ?Sized> Machine for &M {
@@ -61,6 +66,10 @@ impl<M: Machine + ?Sized> Machine for &M {
 
     fn step(&self, step: Step) -> Result<(), Aborted> {
         (**self).step(step)
+    }
+
+    fn committed(&self) {
+        (**self).committed()
     }
 }
 
@@ -126,6 +135,7 @@ impl<'a, M: Machine> Twin<'a, M> {
         let object = unsafe { slot(top) }.load(Relaxed);
         self.machine.step(Step::Commit)?;
         field.store(top, Release);
+        self.machine.committed();
         Ok(NonNull::new(object))
     }
 
@@ -144,6 +154,7 @@ impl<'a, M: Machine> Twin<'a, M> {
         unsafe { slot(word) }.store(object.as_ptr(), Relaxed);
         self.machine.step(Step::Commit)?;
         field.store(word.wrapping_byte_add(SLOT_BYTES), Release);
+        self.machine.committed();
         Ok(true)
     }
 
@@ -164,6 +175,7 @@ impl<'a, M: Machine> Twin<'a, M> {
         }
         self.machine.step(Step::Commit)?;
         field.store(new, Release);
+        self.machine.committed();
         Ok(StoreIfEqual::Stored)
     }
 
@@ -182,6 +194,7 @@ impl<'a, M: Machine> Twin<'a, M> {
         unsafe { slot(magazine.as_ptr()) }.store(head, Relaxed);
         self.machine.step(Step::Commit)?;
         field.store(magazine.as_ptr(), Release);
+        self.machine.committed();
         Ok(StackPush::Pushed)
     }
 
@@ -200,6 +213,7 @@ impl<'a, M: Machine> Twin<'a, M> {
         let next = unsafe { slot(head) }.load(Relaxed);
         self.machine.step(Step::Commit)?;
         field.store(next, Release);
+        self.machine.committed();
         Ok(StackPop::Popped(magazine))
     }
 }
