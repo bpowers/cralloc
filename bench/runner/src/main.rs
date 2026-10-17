@@ -101,11 +101,28 @@ fn build(f: &Flags, p: &Paths) {
     let _lock = paths::lock_baselines(&p.baselines).unwrap_or_else(|e| die(&e));
     let cpus = std::env::var("BENCH_BUILD_CPUS").unwrap_or_else(|_| "4-7,20-23".into());
     let mut names: Vec<(String, String)> = vec![("glibc".into(), String::new())];
+    let mut preload_packages: Vec<String> = Vec::new();
     for a in allocators(f, p) {
         if let (Some(b), Some(feat)) = (a.build_name(), a.feature.clone())
             && !names.iter().any(|(n, _)| *n == b)
         {
             names.push((b, feat));
+        }
+        if let Some(pkg) = a.preload_build.clone()
+            && !preload_packages.contains(&pkg)
+        {
+            preload_packages.push(pkg);
+        }
+    }
+    for pkg in preload_packages {
+        eprintln!("== building preload library {pkg}");
+        let st = Command::new("taskset")
+            .args(["-c", &cpus, "cargo", "build", "--release", "-p", &pkg, "--manifest-path"])
+            .arg(dir.join("../Cargo.toml"))
+            .status()
+            .unwrap_or_else(|e| die(&format!("cargo: {e}")));
+        if !st.success() {
+            die(&format!("build of {pkg} failed"));
         }
     }
     for (name, feat) in names {
