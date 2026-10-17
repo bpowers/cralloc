@@ -572,10 +572,11 @@ mod tests {
 
     #[test]
     fn racing_threads_publish_one_space_and_losers_unmap() {
-        // Room for every thread's reservation at once, so each reserves the largest plan.
-        let cell = SpaceCell::new(Sim::with_capacity(
-            4 * largest().size().next_multiple_of(1 << 16),
-        ));
+        // Room for twice the threads' reservations: racing first-fit claims can push one another
+        // past free space while a partial claim is being rolled back. The tiny shape keeps the
+        // losers' unmaps, which check every uncommitted page, cheap under Miri.
+        use crate::os::sim::{Tiny, capacity_for};
+        let cell = SpaceCell::new(SimOs::<Tiny>::with_capacity(8 * capacity_for::<Tiny>()));
         let bases: Vec<usize> = thread::scope(|scope| {
             let handles: Vec<_> = (0..4)
                 .map(|_| scope.spawn(|| cell.get_or_reserve().unwrap().base().addr().get()))
