@@ -503,6 +503,16 @@ def Api.doc (api : Api) (notes : List String := []) : String :=
   api.summary ++ String.join (notes.map ("\n\n" ++ ·)) ++ "\n\n# Safety\n\n" ++
     "\n".intercalate (api.safety.map ("* " ++ ·))
 
+/-- `s'` holds the arguments of a function of signature `sig` that `s`
+holds, where the calling convention `A` passes them. -/
+def ArgsKept {M : ISA} (A : Abi M) (sig : Sig) (s s' : M.State) : Prop :=
+  ∀ vals, A.args ((sig.words A.ptrBits).map (·.bits A.ptrBits)) = some vals → vals s' = vals s
+
+/-- Proves `Artifact.restartsOk` for code without a restartable sequence, by
+default (`Proof/Framework/Registration.lean`; how it is proven is not
+trusted). -/
+syntax (name := restartsOkTac) "restarts_ok" : tactic
+
 /-- A verified function, ready to be emitted into the Rust crate. -/
 structure Artifact where
   target : Target
@@ -571,6 +581,12 @@ structure Artifact where
   function's `# Safety` section, which `doc` must end with when this is not
   empty. -/
   features : List String := []
+  /-- The cargo feature of the Rust crate that selects this function, if one
+  does: `some (f, true)` if it is compiled only with the feature `f`,
+  `some (f, false)` only without it. Two artifacts of a target may have the
+  same name only as such a pair, of the same signature (`Rust.checkUnique`),
+  so exactly one of them is compiled. -/
+  cargoFeature : Option (String × Bool) := none
   /-- On an inline target, the registers the code may change, by name, which
   the emitter declares as `asm!` outputs (`out(<reg>) _`, or `inout` for an
   argument's); the register the result is in is one besides. -/
@@ -587,6 +603,17 @@ structure Artifact where
       (∀ t s', ExecExit target.isa code s t s' → target.preservedExcept clobbers s s') ∧
       (∀ p ∈ code.abortStates target.isa s, target.preservedExcept clobbers s p) := by
     exact fun h => nomatch h
+  /-- A restartable sequence, aborted any number of times (`Restarts`),
+  starts its last attempt with the arguments as they arrived and with what the
+  calling convention (`Target.abiPreserved`; inline, `asm!`, which also has
+  every register but the clobbers kept) has it keep as on entry, so that the
+  last attempt's return meets those obligations relative to the caller's
+  entry, not only to the attempt's start (`Verified.restarts`). Code
+  without a sequence is never aborted: its runs start at entry. -/
+  restartsOk : ∀ s s', contract.pre s → Restarts target code contract s s' →
+      target.abiPreserved s s' ∧ ArgsKept target.abi sig s s' ∧
+      (target.inline = true → target.preservedExcept clobbers s s') := by
+    restarts_ok
   /-- States satisfying the precondition, one taking each way the code can
   branch (`Code.outcomes`): data, so each is a concrete state the emitter
   can evaluate. -/

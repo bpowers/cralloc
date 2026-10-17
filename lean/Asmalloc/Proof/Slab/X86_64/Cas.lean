@@ -377,20 +377,34 @@ theorem pre_w (s : State) (hrd : s.rd = cx.ro s) (hwr : s.wr = cx.rw s)
     (hnw : ((cx.regions s).all fun x => decide (x.1.base.toNat + x.1.len ≤ 2 ^ 64)) = true)
     (hp : Sig.pairsSep (cx.regions s) = true)
     (hres : ((cx.regions s).all fun x => (cx.A.reserved 0 s).all fun q => Region.sep x.1 q) = true)
-    (hl : layoutCheck cx s = true) :
-    (casContract abi).pre s :=
-  (pre_iff cx (s := s) hv rfl rfl).mpr ⟨trivial, world_of_check hX hrd hwr hnw hp hres,
-    rfl, rfl, trivial, layout_of_check hX hl, trivial⟩
+    (hl : layoutCheck cx s = true) (hm : ∃ cpu word e x wr, s = wit cpu word e x wr)
+    (hcls : cx.cls s = 1) (hsyms : s.syms SLABS = 0x1000000)
+    (h0 : (s.mem.readW (wordAddr 0x1000000 0 1) 64).toNat ≠ NO_CPU) :
+    (casContract abi).pre s := by
+  refine (pre_iff cx (s := s) hv rfl rfl).mpr ⟨trivial, world_of_check hX hrd hwr hnw hp hres,
+    rfl, rfl, trivial, layout_of_check hX hl, fun i hi => ?_⟩
+  simp only [Spec.Slab.Ctx.wordOf]
+  rw [mem_of (c := cx) hX, sym_of (c := cx) hX, hcls, hsyms]
+  rcases Nat.eq_zero_or_pos i with rfl | hpos
+  · exact h0
+  · obtain ⟨cpu, word, e, x, wr, rfl⟩ := hm
+    rw [show (wit cpu word e x wr).mem = mkMem _ from rfl,
+      mkMem_slab_zero (by intro bv hbv; simp at hbv; rcases hbv with rfl | rfl | rfl <;> simp)
+        hpos hi]
+    decide
 
 theorem pre_w0 : (casContract abi).pre w0 :=
   pre_w _ (by decide +kernel) (by decide +kernel) (by decide +kernel) (by decide +kernel)
-    (by decide +kernel) (by decide +kernel)
+    (by decide +kernel) (by decide +kernel) ⟨_, _, _, _, _, rfl⟩ (by decide +kernel) (by decide +kernel)
+    (by decide +kernel)
 theorem pre_w1 : (casContract abi).pre w1 :=
   pre_w _ (by decide +kernel) (by decide +kernel) (by decide +kernel) (by decide +kernel)
-    (by decide +kernel) (by decide +kernel)
+    (by decide +kernel) (by decide +kernel) ⟨_, _, _, _, _, rfl⟩ (by decide +kernel) (by decide +kernel)
+    (by decide +kernel)
 theorem pre_w2 : (casContract abi).pre w2 :=
   pre_w _ (by decide +kernel) (by decide +kernel) (by decide +kernel) (by decide +kernel)
-    (by decide +kernel) (by decide +kernel)
+    (by decide +kernel) (by decide +kernel) ⟨_, _, _, _, _, rfl⟩ (by decide +kernel) (by decide +kernel)
+    (by decide +kernel)
 
 theorem outcomes_eq : cas.outcomes = [(0, true), (1, true), (2, true)] := rfl
 

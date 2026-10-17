@@ -20,16 +20,29 @@ theorem pre_w (s : State) (hm : ∃ cpu word rd wr, s = PopTable.witT cpu word r
     (hcls : cx.cls s = 1) (hmask : cx.mask s = magMask (2 ^ 2)) (hslots : cx.slots s = 4)
     (hsyms : s.syms SLABS = 0x1000000) (h0 : cx.SlotOk s (s.mem.readW (wordAddr 0x1000000 0 1) 64)) :
     (pushContract abi).pre s := by
+  have hzero : ∀ i, 0 < i → i < SLAB_COUNT → cx.wordOf s i = 0 := by
+    intro i h hi
+    obtain ⟨cpu, word, rd, wr, rfl⟩ := hm
+    simp only [Spec.Slab.Ctx.wordOf]
+    rw [mem_of (c := cx) hX, sym_of (c := cx) hX, hcls, hsyms]
+    exact PopTable.witT_zero cpu word rd wr h hi
+  have hslot : ∀ i < SLAB_COUNT, cx.SlotOk s (cx.wordOf s i) := by
+    intro i hi
+    rcases Nat.eq_zero_or_pos i with rfl | h
+    · simp only [Spec.Slab.Ctx.wordOf]
+      rw [mem_of (c := cx) hX, sym_of (c := cx) hX, hcls, hsyms]
+      exact h0
+    · rw [hzero i h hi]; exact ⟨.inl rfl, fun hs => absurd hs.2 (by simp [slot])⟩
+  have hex : cx.Exclusive s := by
+    have hn : ∀ k, 0 < k → k < SLAB_COUNT → ¬ IsSlot (cx.slots s) (cx.wordOf s k) :=
+      fun k h hk hs => by rw [hzero k h hk] at hs; exact absurd hs.2 (by simp [slot])
+    intro i hi j hj hij hsi hsj
+    rcases Nat.eq_zero_or_pos i with rfl | h
+    · exact absurd hsj (hn j (by omega) hj)
+    · exact absurd hsi (hn i h hi)
   refine (pre_iff cx (s := s) hv rfl rfl).mpr ⟨trivial, world_of_check hX hrd hwr hnw hp hres,
     rfl, rfl, show cx.cls s < CLASS_LIMIT by rw [hcls]; decide, layout_of_check hX hl,
-    ⟨2, by decide, by decide, hmask⟩, fun i hi => ?_⟩
-  simp only [Spec.Slab.Ctx.wordOf]
-  rw [mem_of (c := cx) hX, sym_of (c := cx) hX, hcls, hsyms]
-  rcases Nat.eq_zero_or_pos i with rfl | h
-  · exact h0
-  · obtain ⟨cpu, word, rd, wr, rfl⟩ := hm
-    rw [PopTable.witT_zero cpu word rd wr h hi]
-    exact ⟨.inl rfl, fun hs => absurd hs.2 (by simp [slot])⟩
+    ⟨2, by decide, by decide, hmask⟩, hslot, hex⟩
 
 theorem pre_w0 : (pushContract abi).pre PopTable.w0 :=
   pre_w _ ⟨_, _, _, _, rfl⟩ (by decide +kernel) (by decide +kernel) (by decide +kernel)

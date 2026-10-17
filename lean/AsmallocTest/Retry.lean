@@ -23,7 +23,31 @@ def sBad : State :=
 theorem bad_rejected : ¬ (pushInlineContract inlineAbi).pre sBad := by
   intro h
   obtain ⟨-, -, -, -, -, -, hinv⟩ := (pre_iff PushInline.cx (s := sBad) PushInline.hv rfl rfl).mp h
-  have hap := (hinv 0 (by decide)).2 (by decide +kernel)
+  have hap := (hinv.1 0 (by decide)).2 (by decide +kernel)
   exact hap.2.1 0x1001000 (by decide +kernel) (by decide +kernel)
+
+/-- CPU 0's word names slot 1, and CPU 1's slot 2, of the same magazine: a
+push on CPU 0 aborted before its commit would change CPU 1's magazine. Each
+slab's magazine is now its own (`Ctx.Exclusive`). -/
+def sShare : State where
+  gpr r := if r = .rsp then 0x7000000 else if r = .rdi then 0x6000 else 0
+  cf := none
+  zf := none
+  sf := none
+  of := none
+  mem := mkMem [(0x2000, 0x100), (0x10104, 0), (0x1000008, 0x4008), (0x1001008, 0x4010),
+    (0x4008, 0x5000)]
+  rd := PopInline.roW
+  wr := [⟨0x10108, 8⟩, ⟨0x1000008, 8⟩, ⟨0x4000, 32⟩]
+  syms n := if n = "__rseq_offset" then 0x2000 else if n = "SLABS" then 0x1000000 else 0
+  fsBase := 0x10000
+  params n := if n = "coff" then 8 else if n = "mask" then 16 else 0
+  csDesc := 0x9000
+
+theorem share_rejected : ¬ (pushInlineContract inlineAbi).pre sShare := by
+  intro h
+  obtain ⟨-, -, -, -, -, -, -, hex⟩ := (pre_iff PushInline.cx (s := sShare) PushInline.hv rfl rfl).mp h
+  exact hex 0 (by decide) 1 (by decide) (by decide) (by decide +kernel) (by decide +kernel) 0x4000
+    (by decide +kernel) (by decide +kernel)
 
 end VG.Test.Retry

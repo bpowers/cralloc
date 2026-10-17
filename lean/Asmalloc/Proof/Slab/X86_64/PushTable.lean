@@ -75,7 +75,7 @@ theorem pre_of {s : State} (h : Facts cx s) : ∃ k, Pre s k := by
   have hw : wat s = cx.word s := wat_eq hX (cls_eq s)
   have hwv : cx.w s = wvt s := by simp only [Spec.Slab.Ctx.w, mem_of (c := cx) hX, wvt, hw]
   refine ⟨k, h, hk, hk', by rw [← hmask]; exact hm, hslots, hw, hma, hwv, fun hi => ?_⟩
-  have := (hinv (cx.cpu s) hi).1
+  have := (hinv.1 (cx.cpu s) hi).1
   rw [← hslots, ← hwv]
   exact this
 
@@ -481,15 +481,52 @@ theorem mag_slot (hp : Pre s k) (hi : cx.InRange s) (ht : ¬ tst s = 0) :
     obtain ⟨h1, -, h3⟩ := item_disjoint hp hi hs hil
     rw [mSlot, readW64_writeW_disj h3, m1, readW64_writeW_disj h1]
 
+/-- Before the free slot is written, every slab's magazine is as on entry. -/
+theorem mags_m1 (hp : Pre s k) : ∀ i < SLAB_COUNT,
+    Mag.ofWord (cx.slots s) (m1 s) (cx.wordOf s i) = Mag.ofWord (cx.slots s) (cx.mem s) (cx.wordOf s i) := by
+  intro i hi
+  have hok := hp.facts.pre.2.2.2.2.2.1 i hi
+  rw [mem_of (c := cx) hX]
+  refine ofWord_frame (by rw [hp.slots]; exact Nat.two_pow_pos k) frame_m1 hok.1 fun hs r hr => ?_
+  rw [List.mem_singleton.mp hr, ← csField_of (c := cx) hX]
+  exact (hok.2 hs).2.2.1 (cx.csField s, true) cs_mem_fixed
+
+/-- After it is, too: the free slot is above the routine's slab's pointers,
+and in no other slab's magazine (`Exclusive`). -/
+theorem mags_slot (hp : Pre s k) (hi : cx.InRange s) (ht : ¬ tst s = 0) : ∀ i < SLAB_COUNT,
+    Mag.ofWord (cx.slots s) (mSlot s) (cx.wordOf s i) =
+      Mag.ofWord (cx.slots s) (cx.mem s) (cx.wordOf s i) := by
+  intro i hi'
+  by_cases hc : i = cx.cpu s
+  · subst hc
+    rw [wordOf_cpu]
+    exact mag_slot hp hi ht
+  · have hok := hp.facts.pre.2.2.2.2.2.1 i hi'
+    have hf := slotFacts hp hi ht
+    obtain ⟨hs0, -, -⟩ := hit hp hi ht
+    have hsc : IsSlot (cx.slots s) (cx.wordOf s (cx.cpu s)) := by
+      rw [wordOf_cpu, hp.slots, hp.w]; exact hs0
+    rw [mem_of (c := cx) hX]
+    refine ofWord_frame (by rw [hp.slots]; exact Nat.two_pow_pos k) (frame_two _ _ _ _ _) hok.1
+      fun hs r hr => ?_
+    rcases List.mem_cons.mp hr with rfl | hr
+    · rw [← csField_of (c := cx) hX]; exact (hok.2 hs).2.2.1 (cx.csField s, true) cs_mem_fixed
+    · rw [List.mem_singleton.mp hr]
+      have hex := hp.facts.pre.2.2.2.2.2.2 i hi' (cx.cpu s) hi hc hs hsc
+      rw [wordOf_cpu, hp.slots, hp.w] at hex
+      rw [hp.slots]
+      exact hex.sub_right (sub_of_contains hf.inMag)
+
 theorem abort_eq (p : State) : (pushContract abi).abort s p ↔ [p.gpr .rdi, p.gpr .rsi] = [s.gpr .rdi, s.gpr .rsi] ∧
     ((Unchanged [cx.csField s, ⟨cx.w s, 8⟩] (cx.mem s) p.mem ∧
-      (cx.InRange s → Mag.ofWord (cx.slots s) p.mem (cx.w s) = cx.mag s)) ∧ cx.inv p) :=
+      ∀ i < SLAB_COUNT, Mag.ofWord (cx.slots s) p.mem (cx.wordOf s i) =
+        Mag.ofWord (cx.slots s) (cx.mem s) (cx.wordOf s i)) ∧ cx.inv p) :=
   abort_iff cx hv s p
 
 /-- The magazine lies apart, by the invariant. -/
 theorem mag_apart (hp : Pre s k) (hi : cx.InRange s) (hs : IsSlot (2 ^ k) (wvt s)) :
     cx.Apart s ⟨magBase (2 ^ k) (wvt s), 8 * 2 ^ k⟩ := by
-  have := (hp.facts.pre.2.2.2.2.2 (cx.cpu s) hi).2
+  have := (hp.facts.pre.2.2.2.2.2.1 (cx.cpu s) hi).2
   rw [wordOf_cpu, hp.slots, hp.w] at this
   exact this hs
 
@@ -501,7 +538,7 @@ theorem abortOk1 (hp : Pre s k) {p : State} (hm : Mid scratchT s (m1 s) p) :
     hp.facts.pre hm (by decide) (by decide) frame_m1 (harmless_cs1 hX hp.facts.pre)
   refine ⟨armed_of_mid hp.facts.toArm (xs := []) frame_m1 m1_cs (by simp) hm, abi_m1 hp hm, ?_, hre⟩
   refine (abort_eq p).mpr ⟨by rw [hm.gpr .rdi (by decide), hm.gpr .rsi (by decide)],
-    ⟨?_, fun hi => by rw [hm.mem]; exact mag_m1 hp hi⟩, hip⟩
+    ⟨?_, fun i hi => by rw [hm.mem]; exact mags_m1 hp i hi⟩, hip⟩
   rw [hm.mem, csField_of (c := cx) hX, mem_of (c := cx) hX]
   exact frame_m1.mono (by simp)
 
@@ -520,7 +557,7 @@ theorem abortOk2 (hp : Pre s k) (hi : cx.InRange s) (ht : ¬ tst s = 0) :
   refine ⟨armed_of_mid hp.facts.toArm (xs := [⟨wvt s, 8⟩]) hfr hcs (by simpa using hf.rsVar) mσ11,
     abiPreserved_of_mid hfr (by simpa using ⟨hp.facts.ret_cs, hf.ret⟩) (by decide) mσ11, ?_, hre⟩
   refine (abort_eq _).mpr ⟨by rw [mσ11.gpr .rdi (by decide), mσ11.gpr .rsi (by decide)],
-    ⟨?_, fun _ => mag_slot hp hi ht⟩, hip⟩
+    ⟨?_, mags_slot hp hi ht⟩, hip⟩
   rw [mσ11.mem, csField_of (c := cx) hX, mem_of (c := cx) hX, hp.w]
   exact hfr
 

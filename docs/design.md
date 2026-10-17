@@ -123,7 +123,7 @@ shaped the design:
 | Operation | Cost |
 |---|---|
 | allocate then free one object, inlined, thread-local cache | 2.0 to 2.4 cycles |
-| allocate then free, inlined, per-CPU cache under rseq | 4.0 cycles |
+| allocate then free, inlined, per-CPU cache under rseq | 4.2 to 5.3 cycles |
 | allocate then free through two out-of-line calls, either kind of cache | 8.0 cycles: a call and return takes 4 whatever the body |
 | allocate then free with mimalloc v3, and with glibc, through `GlobalAlloc` | 10 to 17, and 11 to 26 cycles |
 | delay from a store to a load of the same 32- or 64-bit location through a base register | 0 cycles |
@@ -137,16 +137,16 @@ Four conclusions follow.
 - The fast path is nearly free. One page fault costs as much as several hundred allocate and
   free pairs. The design effort belongs in not faulting, not moving cache lines between
   cores, and not executing an atomic instruction per object.
-- A per-CPU cache costs about two cycles more than a thread-local one when inlined and
+- A per-CPU cache costs two to three cycles more than a thread-local one when inlined and
   nothing when called. That buys caches bounded by the CPU count, no per-thread state to
   create or tear down, and frees that are local on every thread.
 - Inlining matters more than any other fast-path choice, and it needs LTO.
 - The last cycle or two depend on instruction selection and layout that a compiler does not
   control. Narrow loads and absolute addressing lose zero-delay forwarding. The processor
   delivers a straight-line run of up to 12 micro-ops at full speed and about half speed
-  beyond that, and a run that crosses a 64-byte line near its end pays a cycle. Assembly
-  lets us choose the instructions and count the micro-ops, and for out-of-line code fix the
-  alignment too.
+  beyond that, and a routine that leaves only its last few instructions in a second 64-byte
+  line pays a cycle. Assembly lets us choose the instructions and count the micro-ops, and
+  for out-of-line code fix the size and alignment too.
 
 ## Goals
 
@@ -334,6 +334,10 @@ start:
 end:
 ```
 
+An executable can read `__rseq_offset` with one load instead of two, because the linker
+gives it its own copy of the variable; that saves a cycle per pair, and a cargo feature
+selects it. A shared library must go through the indirection shown.
+
 If the thread is preempted, migrated or signalled anywhere between `start` and `end`, the OS
 resumes it at an abort handler that jumps back to the arming store. Nothing before the last
 instruction changes shared state, so an aborted run leaves no trace. Free is the mirror
@@ -350,10 +354,12 @@ emit one that breaks them:
   word in place with a read-modify-write instruction, because a drainer may exchange the
   word between the read and the commit (see "Idle caches");
 - an inlined routine is at most 13 micro-ops, one more than the processor delivers at full
-  speed;
-- an out-of-line routine starts on a 64-byte boundary, and its hot path fits in 128 bytes
-  and in 24 micro-ops, which is what the processor delivers in the four cycles a call and
-  return take regardless;
+  speed. Inlined allocation costs its caller one more, a fused test for a miss;
+- an out-of-line routine starts on a 64-byte boundary, and its hot path fits in 24
+  micro-ops, which is what the processor delivers in the four cycles a call and return take
+  regardless. Its hot path is at most 64 bytes, or between 76 and 128: crossing into a
+  second line is free unless only the last few instructions do, and a third line costs a
+  cycle;
 - the slow path is out of line.
 
 Each routine is generated in two forms. The inlined form is an `asm!` block in an

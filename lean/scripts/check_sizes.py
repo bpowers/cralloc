@@ -3,8 +3,10 @@
 writes, by assembling it. Exits non-zero on violations, naming each.
 
 The design's rule for a routine emitted as a naked function
-(docs/design.md, "Front end"): it starts on a 64-byte boundary, and its hot
-path fits in two 64-byte lines, 128 bytes. The micro-op half of the rule is
+(docs/design.md, "Front end"; docs/research/zen5-roofline.md, section 13):
+it starts on a 64-byte boundary, and its hot path is at most 64 bytes, or
+from 76 to 128: one line crossing costs nothing unless only the last few
+instructions spill into the second line, which 65 to 75 bytes would do. The micro-op half of the rule is
 `Rust.checkUops`, in Lean; bytes depend on the assembler's encodings, so
 they are measured here, on the assembled output.
 
@@ -29,10 +31,12 @@ import tempfile
 LEAN = pathlib.Path(__file__).resolve().parent.parent
 
 MAX_BYTES = 128
+ONE_LINE = 64
+SPILL_END = 75
 ALIGN = 64
 
 NAKED = re.compile(
-    r'#\[unsafe\(naked\)\]\s*pub\(crate\) unsafe extern "[^"]*" fn (\w+)'
+    r'(?:#\[cfg\(([^\n]*)\)\]\n)?#\[unsafe\(naked\)\]\s*pub\(crate\) unsafe extern "[^"]*" fn (\w+)'
     r'.*?core::arch::naked_asm!\(\s*(r#*"|")', re.S)
 
 
@@ -77,11 +81,11 @@ def template_asm(template: str, operands: list[str]) -> str:
 def functions(path: pathlib.Path):
     text = path.read_text()
     for m in NAKED.finditer(text):
-        name, opener = m.group(1), m.group(2)
+        cfg, name, opener = m.group(1), m.group(2), m.group(3)
         template, end = rust_string(text, m.end(), opener)
         close = text.index("\n    )", end)
         operands = re.findall(r"(\w+)\s*=\s*sym\b", text[end:close])
-        yield name, template_asm(template, operands)
+        yield name, cfg, template_asm(template, operands)
 
 
 def measure(mc: str, name: str, asm: str, tmp: pathlib.Path) -> tuple[int, int]:
@@ -127,9 +131,9 @@ def main() -> int:
     with tempfile.TemporaryDirectory() as d:
         tmp = pathlib.Path(d)
         for path in sorted(gen.glob("*/*.rs")):
-            for name, asm in functions(path):
+            for name, cfg, asm in functions(path):
                 count += 1
-                where = f"{path.relative_to(gen)}: {name}"
+                where = f"{path.relative_to(gen)}: {name}" + (f" [{cfg}]" if cfg else "")
                 try:
                     size, align = measure(mc, name, asm, tmp)
                 except (ValueError, subprocess.CalledProcessError) as e:
@@ -139,6 +143,9 @@ def main() -> int:
                 print(f"{where}: {size} bytes, aligned to {align}")
                 if size > MAX_BYTES:
                     bad.append(f"{where} is {size} bytes, more than {MAX_BYTES}")
+                elif ONE_LINE < size <= SPILL_END:
+                    bad.append(f"{where} is {size} bytes: past one line by too little "
+                               f"({ONE_LINE + 1} to {SPILL_END})")
                 if align < ALIGN:
                     bad.append(f"{where} starts aligned to {align} bytes, not {ALIGN}")
     if count == 0:

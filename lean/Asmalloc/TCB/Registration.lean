@@ -8,8 +8,8 @@ public import Asmalloc.TCB.Artifact
 **Trusted.** A registration file makes each function's `Artifact` from its
 `Api` with `Api.artifact`, stating only what the implementation chooses: the
 target, the code and its proof, the stack it uses, the constant tables it
-reads, the CPU features it needs, and any notes on it and the suffix of its
-name. Everything else comes from the `Api` (`Spec/`): the Rust module, name,
+reads, the CPU features it needs, the cargo feature that selects it, and any
+notes on it and the suffix of its name. Everything else comes from the `Api` (`Spec/`): the Rust module, name,
 signature and documentation, `writeArgs`, and the contract on the target,
 which the proof is of. So of a registration, a reviewer reads `suffix`,
 `notes` and `features` (which the emitter checks against the code); the
@@ -64,6 +64,8 @@ structure Registration (api : Api) (target : Target) where
   spSafe : code.all (fun i => !target.isa.writesSp i) = true := by sp_safe
   /-- `Artifact.features`. -/
   features : List String := []
+  /-- `Artifact.cargoFeature`. -/
+  cargoFeature : Option (String × Bool) := none
   /-- `Artifact.clobbers`. -/
   clobbers : List String := []
   /-- `Artifact.clobbersOk`. -/
@@ -73,6 +75,11 @@ structure Registration (api : Api) (target : Target) where
       (∀ t s', ExecExit target.isa code s t s' → target.preservedExcept clobbers s s') ∧
       (∀ p ∈ code.abortStates target.isa s, target.preservedExcept clobbers s p) := by
     exact fun h => nomatch h
+  /-- `Artifact.restartsOk`. -/
+  restartsOk : ∀ s s', contract.pre s → Restarts target code contract s s' →
+      target.abiPreserved s s' ∧ ArgsKept target.abi api.sig s s' ∧
+      (target.inline = true → target.preservedExcept clobbers s s') := by
+    restarts_ok
   /-- `Artifact.witnesses`. -/
   witnesses : List target.isa.State
   /-- `Artifact.witnessOk`. -/
@@ -106,9 +113,11 @@ def Api.artifact (api : Api) (target : Target) (r : Registration api target) : A
     cases api.contracts <;> exact (by trivial)
   spSafe := r.spSafe
   features := r.features
+  cargoFeature := r.cargoFeature
   witnesses := r.witnesses
   witnessOk := r.witnessOk
   clobbers := r.clobbers
   clobbersOk := r.clobbersOk
+  restartsOk := r.restartsOk
 
 end VG

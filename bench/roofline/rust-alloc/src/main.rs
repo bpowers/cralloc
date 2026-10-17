@@ -9,6 +9,8 @@
 //! (default 32) is the burst size and RF_PAIRS (default 3) the number of pairs in `x_cross_pairs`.
 #[cfg(any(feature = "floor_tls", feature = "floor_heap"))]
 mod floors;
+#[cfg(feature = "slab")]
+mod slab;
 
 #[allow(unused_imports)]
 use std::alloc::{alloc, dealloc, GlobalAlloc, Layout};
@@ -96,6 +98,9 @@ static A: je::Je = je::Je;
 #[cfg(any(feature = "floor_tls", feature = "floor_heap"))]
 #[global_allocator]
 static A: floors::Floor = floors::Floor;
+#[cfg(feature = "slab")]
+#[global_allocator]
+static A: slab::Slab = slab::Slab;
 
 extern "C" {
     fn syscall(num: i64, ...) -> i64;

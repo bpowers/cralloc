@@ -73,7 +73,7 @@ theorem pre_of {s : State} (h : Facts cx s) : ∃ k, Pre s k := by
   have hw : wat s = cx.word s := wat_eq hX (cls_eq s)
   have hwv : cx.w s = wvt s := by simp only [Spec.Slab.Ctx.w, mem_of (c := cx) hX, wvt, hw]
   refine ⟨k, h, hk, hk', by rw [← hmask]; exact hm, hslots, hw, hma, hwv, fun hi => ?_⟩
-  have := (hinv (cx.cpu s) hi).1
+  have := (hinv.1 (cx.cpu s) hi).1
   rw [← hslots, ← hwv]
   exact this
 
