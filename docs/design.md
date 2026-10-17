@@ -19,9 +19,9 @@ Three ideas define it.
    instruction.
 3. **Metadata never lives in freed memory.** A small object's size class comes from its
    `Layout` in Rust and from its address in C; a large object's always comes from its
-   address. Free memory is tracked in bitmaps stored elsewhere. A free writes only to the
-   caller's own cache, so it touches neither the object nor shared metadata, and it costs the
-   same on any thread.
+   address. Free memory is tracked in bitmaps stored elsewhere. Freeing a small object
+   writes only to the caller's own cache, so it touches neither the object nor shared
+   metadata, and it costs the same on any thread.
 
 The allocator has three tiers. Each is reached only when the one above runs dry or fills up,
 and each handles objects in larger batches than the one above.
@@ -99,9 +99,9 @@ own cid; beyond that, cids follow CPUs.
 
 Together these give mutual exclusion for free. If a sequence reads its cid, works on data
 that belongs to that cid, and makes its only visible change with its last instruction, then
-no other thread can observe or disturb it: any thread that could run with the same cid can
-do so only after this one has been stopped, and a stopped sequence is restarted, not
-resumed. A cache indexed by cid behaves as a thread cache when the process is not
+no other thread running the same kind of sequence can observe or disturb it: any thread that
+could run with the same cid can do so only after this one has been stopped, and a stopped
+sequence is restarted, not resumed. A cache indexed by cid behaves as a thread cache when the process is not
 oversubscribed and as a per-CPU cache when it is, and there are never more caches than CPUs.
 
 ### What the hardware says
@@ -149,7 +149,8 @@ less.
    with mimalloc on single-threaded ones.
 2. **Memory.** No more resident memory than mimalloc, the incumbent to beat on memory, on
    the same workload. Low fragmentation from segregated size classes and from preferring
-   partly used memory over fresh memory. Free memory above a fixed cap goes back to the OS.
+   partly used memory over fresh memory. Wholly free pages beyond a cap go back to the OS,
+   and the memory parked in caches is bounded.
 3. **One heap, three interfaces.** `GlobalAlloc`, `Allocator` and the C ABI share one heap,
    and C code can free what Rust allocated.
 4. **Verified.** The assembly is proved against a machine model. Size-class and layout
@@ -421,10 +422,14 @@ faults, and a page returned too early is faulted straight back. Four rules follo
   an allocation would, returns the pages with `madvise(MADV_DONTNEED)`, and releases the
   bits. Nothing else can allocate the range while it is claimed, so no lock is needed.
   Purging starts at the high end of a region and is rate limited.
-- **Retained memory is capped.** Free memory that has not been purged counts against a cap.
-  A free that pushes the total over the cap purges the excess before returning, large
-  objects first. A program that frees a great deal and then goes quiet keeps at most the
-  cap; `malloc_trim` and its Rust equivalent release the rest.
+- **Retained memory is capped.** The back end counts the free memory it holds that is still
+  resident, updating the count once per laundered magazine and per large free. When the
+  count passes a cap, the call that pushed it there purges wholly free pages until it is
+  back under, large objects first. Two things lie outside the cap and are bounded
+  separately: free objects on pages that also hold live ones, which is fragmentation, and
+  objects parked in magazines, spares and the depot, which the spare budgets and depot
+  targets limit. A program that frees a great deal and then goes quiet keeps at most the
+  cap plus those; `malloc_trim` and its Rust equivalent release what can be released.
 - **Small pages while a class is small, huge pages once it is large.** A region starts
   marked against transparent huge pages, so a lightly used class costs only the 4 KiB pages
   it touches. Once a class has carved more than a threshold, the rest of its region is
@@ -450,8 +455,9 @@ that doubles repeatedly is copied a few times in total, not once per doubling. T
 space this spends is plentiful, and the physical memory is only what the program touches.
 An object larger than a region takes a run of whole regions.
 
-A resize never crosses between small and large in place. A small object's class is a
-function of its layout, so shrinking a large object to a small size moves it.
+A Rust resize stays in place only when the caller's next `dealloc` will still find the right
+class. For a small object that means the new size maps to the same class. For a large object
+it means the new size is still large and fits the slot. Anything else moves the object.
 
 ### Interfaces
 
@@ -488,21 +494,29 @@ the one a Rust `Layout` of the same size implies.
   objects cached under a cid stay with the cid.
 - **Idle caches.** Memory can sit in the slab of a cid that no thread is using. Each slab
   has an activity counter, and a heartbeat that finds one unchanged for long enough drains
-  that slab, one word at a time:
-  1. exchange the word with the marker in one atomic instruction; if the old value was the
-     marker, another thread is draining and this one stops;
-  2. ask the OS to restart every sequence in flight in the process (`membarrier`);
-  3. read the word again. If it is still the marker, no thread can commit to it, so the
-     drainer owns the old value: it stores zero and sends the magazine to the depot. If it
-     is anything else, a sequence that started before step 1 committed, the old value still
-     belongs to that cid, and the drainer takes nothing and writes nothing.
+  that slab:
+  1. claim the slab with a compare-and-swap on its drain flag; if another thread holds the
+     claim, stop;
+  2. exchange each class's slab word and each spare-stack head with the marker, one atomic
+     instruction each, keeping the old values;
+  3. ask the OS to restart every sequence in flight in the process (`membarrier`);
+  4. read each word again. If it is still the marker, no thread can commit to it, and the
+     drainer owns the old value: it stores zero and, if the old value named a magazine,
+     sends it to the depot. If it is anything else, a sequence that started before step 2
+     committed, the old value still belongs to that cid, and the drainer takes nothing and
+     writes nothing;
+  5. release the claim.
 
-  Routines treat the marker as "no magazine" and never store over it, so only a commit from
-  a sequence already in flight can replace it, and step 2 ends all of those. This is the
-  only time one cid's slab is written from another.
+  Routines treat the marker as "no magazine" or "empty stack" and never store over it, so
+  only a commit from a sequence already in flight can replace it, and step 3 ends all of
+  those. The claim means a slab has one drainer at a time, so a marker a drainer finds in
+  step 4 is its own. This is the only time one cid's slab is written from another. Start-up
+  registers for the `membarrier` command; where the OS refuses, draining is off.
 - **Fork.** The child gets a copy of a heap in which every shared structure is valid at
   every instant. Objects that another thread held privately at the moment of the fork are
-  lost to the child: a small, bounded leak.
+  lost to the child: a small, bounded leak. A drain that was under way leaves a claim and
+  markers with no drainer. One page of the heap is marked to be wiped on fork, so the
+  child's first slow path sees that it is a new process and clears them.
 - **Signals.** A handler may allocate and free. A signal aborts any sequence in flight, and
   the slow paths hold nothing that a nested call could trip over.
 
@@ -511,7 +525,7 @@ the one a Rust `Layout` of the same size implies.
 These hold everywhere, and the proofs and tests lean on them.
 
 1. A slab changes only through an rseq routine that commits with one store, or through the
-   drain steps above.
+   drain steps under "Idle caches".
 2. Other shared state changes only through single atomic instructions.
 3. No locks, no waiting, no thread-local state.
 4. Between any two instructions of any slow path, shared state is valid and anything
