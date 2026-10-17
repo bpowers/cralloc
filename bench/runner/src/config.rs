@@ -27,6 +27,7 @@ struct Entry {
     #[serde(default)]
     expect: Expect,
     same_as: Option<String>,
+    preload_build: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -52,6 +53,9 @@ pub struct Allocator {
     /// Appended to the native build directory name. A control gets its own build of the
     /// same source, so that it also tests that two builds of one allocator measure alike.
     pub build_suffix: String,
+    /// A package of the repository's root workspace that `benchrun build` builds in release
+    /// mode to make the preload library (asmalloc's, which lives in this checkout).
+    pub preload_build: Option<String>,
 }
 
 impl Allocator {
@@ -97,6 +101,7 @@ pub fn load(bench_dir: &Path, baselines: &Path) -> Result<Vec<Allocator>, String
                 expect: e.expect.clone(),
                 control_of: None,
                 build_suffix: String::new(),
+                preload_build: e.preload_build.clone(),
             },
         };
         out.push(a);
