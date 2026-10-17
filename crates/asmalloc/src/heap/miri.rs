@@ -46,7 +46,10 @@ unsafe impl GlobalAlloc for Asmalloc {
 #[cfg(feature = "allocator-api")]
 // SAFETY: MIRI-02.
 unsafe impl core::alloc::Allocator for Asmalloc {
-    fn allocate(&self, layout: Layout) -> Result<core::ptr::NonNull<[u8]>, core::alloc::AllocError> {
+    fn allocate(
+        &self,
+        layout: Layout,
+    ) -> Result<core::ptr::NonNull<[u8]>, core::alloc::AllocError> {
         let ptr = if layout.size() == 0 {
             core::ptr::NonNull::new(core::ptr::without_provenance_mut::<u8>(layout.align()))
         } else {

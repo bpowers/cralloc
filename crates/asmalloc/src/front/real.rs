@@ -157,17 +157,17 @@ mod tests {
 
     #[test]
     fn this_thread_reads_a_cpu_with_a_slab() {
-        let cpu = Real.cpu().expect("glibc registered rseq and the CPU has a slab");
+        let cpu = Real
+            .cpu()
+            .expect("glibc registered rseq and the CPU has a slab");
         assert!(cpu.index() < Real.slabs().len());
     }
 
     #[test]
     fn the_selftest_routine_runs() {
         // SAFETY: the self-test has no safety requirements.
-        assert_eq!(
-            unsafe { super::super::generated::x86_64::selftest::vg_selftest_add(2, 3) },
-            5
-        );
+        let sum = unsafe { super::super::generated::x86_64::selftest::vg_selftest_add(2, 3) };
+        assert_eq!(sum, 5);
     }
 
     #[test]

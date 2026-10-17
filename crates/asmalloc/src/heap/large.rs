@@ -68,7 +68,9 @@ impl<O: Os> Heap<O> {
             Place::Slot(class) => {
                 let block = back.alloc(class)?;
                 back.record_size(block.ptr, layout.size());
-                let len = self.usable_size(block.ptr.as_ptr()).unwrap_or(layout.size());
+                let len = self
+                    .usable_size(block.ptr.as_ptr())
+                    .unwrap_or(layout.size());
                 let clear = match zero {
                     _ if block.zeroed => 0,
                     Zero::No => 0,
@@ -209,10 +211,7 @@ mod tests {
         let plan = Geometry::DESIGN.largest_plan();
         let big = Class::of_size(40 << 10).unwrap();
         assert_eq!(place(layout(40 << 10, 8), plan), Place::Slot(big));
-        assert_eq!(
-            place(layout(1 << 32, 8), plan),
-            Place::Slot(Class::LARGEST)
-        );
+        assert_eq!(place(layout(1 << 32, 8), plan), Place::Slot(Class::LARGEST));
         assert_eq!(
             place(layout((1 << 32) + 1, 8), plan),
             Place::Run {

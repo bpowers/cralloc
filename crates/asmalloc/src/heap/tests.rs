@@ -64,7 +64,13 @@ unsafe fn holds(p: *const u8, len: usize, seed: u8) -> bool {
 fn every_class<H: Inspect>(heap: &H, rounds: usize) {
     let mut sizes: Vec<(usize, usize)> = SmallClass::all()
         .map(|c| (c.size(), 8))
-        .chain([(1, 1), (24, 8), (100, 64), (3000, 1024), (MAX_SMALL_SIZE + 1, 8)])
+        .chain([
+            (1, 1),
+            (24, 8),
+            (100, 64),
+            (3000, 1024),
+            (MAX_SMALL_SIZE + 1, 8),
+        ])
         .collect();
     sizes.extend([(40 << 10, 16), (60 << 10, 4096), (200 << 10, 8)]);
     for round in 0..rounds {
@@ -87,8 +93,15 @@ fn every_class<H: Inspect>(heap: &H, rounds: usize) {
             .map(|&(p, l)| (p.addr(), p.addr() + l.size()))
             .collect();
         ranges.sort_unstable();
-        assert!(ranges.windows(2).all(|w| w[0].1 <= w[1].0), "blocks overlap");
-        for i in (0..live.len()).rev().step_by(2).chain((0..live.len()).step_by(2)) {
+        assert!(
+            ranges.windows(2).all(|w| w[0].1 <= w[1].0),
+            "blocks overlap"
+        );
+        for i in (0..live.len())
+            .rev()
+            .step_by(2)
+            .chain((0..live.len()).step_by(2))
+        {
             let (p, l) = live[i];
             if p.is_null() {
                 continue;
@@ -284,7 +297,11 @@ fn a_thread_without_a_lease_is_served_by_the_back_end() {
     let leases: Vec<_> = core::iter::from_fn(|| heap.lease())
         .take(SIM_THREADS + 1)
         .collect();
-    assert_eq!(leases.len(), SIM_THREADS, "every simulated thread is leased once");
+    assert_eq!(
+        leases.len(),
+        SIM_THREADS,
+        "every simulated thread is leased once"
+    );
     assert!(heap.lease().is_none());
     bursts(&heap, 64, 300, 2);
     every_class(&heap, 1);
@@ -332,8 +349,18 @@ fn large_frees_find_the_class_from_the_address() {
         let slot = heap.heap.back().unwrap().usable_size(q).unwrap();
         assert!(slot >= HEADROOM * (100 << 10), "{slot}");
         // What the caller may use is what it asked for, to a page, not the headroom.
-        let page = heap.heap.back().unwrap().space().plan().geometry().page_size();
-        assert_eq!(heap.usable(q), Some((100usize << 10).next_multiple_of(page)));
+        let page = heap
+            .heap
+            .back()
+            .unwrap()
+            .space()
+            .plan()
+            .geometry()
+            .page_size();
+        assert_eq!(
+            heap.usable(q),
+            Some((100usize << 10).next_multiple_of(page))
+        );
         heap.dealloc(q, layout(100 << 10, 8));
     }
     assert!(!Class::of_size(40 << 10).unwrap().is_small());

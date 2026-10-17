@@ -39,11 +39,11 @@ pub use slab::{Cpu, Field, SLAB_BYTES, SLAB_COUNT, SLAB_SHIFT, Slab, Slabs, Spar
 pub use twin::Twin;
 
 #[cfg(all(target_os = "linux", target_arch = "x86_64", not(miri), not(kani)))]
-pub use real::Real;
-#[cfg(all(target_os = "linux", target_arch = "x86_64", not(miri), not(kani)))]
 pub(crate) use crate::heap::{pop_slow, push_slow};
 #[cfg(all(target_os = "linux", target_arch = "x86_64", not(miri), not(kani)))]
 pub(crate) use crate::os::linux::__rseq_offset;
+#[cfg(all(target_os = "linux", target_arch = "x86_64", not(miri), not(kani)))]
+pub use real::Real;
 
 use crate::classes::{MagazineSize, SMALL_COUNT, SmallClass};
 

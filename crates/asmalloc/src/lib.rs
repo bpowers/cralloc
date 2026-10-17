@@ -11,6 +11,9 @@
 #![deny(unsafe_op_in_unsafe_fn)]
 #![deny(clippy::undocumented_unsafe_blocks)]
 #![warn(missing_docs)]
+// The `Allocator` trait is stable from 1.100, above the version the crate otherwise needs; the
+// feature that implements it is for toolchains that have it.
+#![cfg_attr(feature = "allocator-api", allow(clippy::incompatible_msrv))]
 
 #[cfg(not(target_pointer_width = "64"))]
 compile_error!("asmalloc supports 64-bit targets only");
