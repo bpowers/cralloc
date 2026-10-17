@@ -96,9 +96,11 @@ run finishes. glibc registers an rseq area for every thread and publishes its lo
 (`__rseq_offset`, `__rseq_size`).
 
 The OS also writes a **concurrency ID** (`mm_cid`, "cid" below) into that area. Cids are
-small integers, each less than the number of CPUs. Two threads of a process never run with
-the same cid at the same instant, and a thread's cid changes only at an event that also
-restarts its sequence. While a process has no more threads than CPUs, each thread keeps its
+small integers, each less than the number of CPUs, with one exception: current kernels can
+briefly show a thread an out-of-range value after a failed `execve`. Two threads of a
+process never run with the same in-range cid at the same instant, and a thread's cid changes
+only at an event that also restarts its sequence. `docs/research/linux-rseq-contract.md`
+checks these claims against the kernel and glibc sources. While a process has no more threads than CPUs, each thread keeps its
 own cid; beyond that, cids follow CPUs.
 
 Together these give mutual exclusion for free. If a sequence reads its cid, works on data
@@ -266,9 +268,10 @@ asked for (see "Large objects").
 
 Each cid has a slab. Its hot part is an array with one 8-byte word per small class; a
 colder part holds the cid's spare magazines and counters. The slabs are a static array with
-an entry for every cid the OS can produce (8192 on x86-64), so the address of a slab word
-is the cid shifted and added to a link-time constant, with nothing to load and nothing to
-bounds-check. Untouched slabs cost no memory.
+an entry for every valid cid (8192 on x86-64), so the address of a slab word is the cid
+shifted and added to a link-time constant, with no pointer to load. Untouched slabs cost no
+memory. A routine compares the cid with the array length and takes the slow path if it is
+out of range, so its memory safety does not depend on what the OS writes there.
 
 A **magazine** is a block of 8-byte slots, a power of two in size and aligned to its size.
 Slot 0 is a link word used by the depot, the last slot is unused, and the slots between hold
@@ -306,6 +309,8 @@ instructions are chosen by measurement and may change):
     mov   fs:[rdx + 8], r10           ; arm: tell the OS which sequence we are in
 start:
     mov   r8d, fs:[rdx + 24]          ; cid
+    cmp   r8d, SLAB_COUNT             ; out of range: no cache for this call
+    jae   slow
     shl   r8, SLAB_SHIFT
     lea   r9, [rip + SLABS + CLASS*8]
     mov   rcx, [r9 + r8]              ; next free slot of the loaded magazine
@@ -329,7 +334,11 @@ emit one that breaks them:
 - state that the fast path both writes and reads is 64 bits wide and addressed through a
   base register;
 - a compare and its branch are adjacent, so they fuse into one micro-op;
-- an inlined routine is at most 12 micro-ops;
+- the commit stores a value computed from the word the routine read. It never updates the
+  word in place with a read-modify-write instruction, because a drainer may exchange the
+  word between the read and the commit (see "Idle caches");
+- an inlined routine is at most 13 micro-ops, one more than the processor delivers at full
+  speed;
 - an out-of-line routine starts on a 64-byte boundary, and its hot path fits in that line
   and in 24 micro-ops, which is what the processor delivers in the four cycles a call and
   return take regardless;
@@ -487,8 +496,9 @@ the one a Rust `Layout` of the same size implies.
 ### Process lifecycle
 
 - **Start.** The static slabs are zero, so the first call takes the slow path. It checks
-  whether the thread has an rseq registration that includes a cid, reserves address space,
-  and publishes the heap with one compare-and-swap. Two threads may race to do this; the
+  whether the thread has an rseq registration that includes a cid (glibc's `__rseq_size`
+  covers the field, and the area's CPU number is not negative), reserves address space, and
+  publishes the heap with one compare-and-swap. Two threads may race to do this; the
   loser unmaps its reservation.
 - **Without rseq.** If there is no such registration (valgrind, a C library setting that
   disables it, an old OS), asmalloc never loads a magazine. The fast path still runs, reads
@@ -508,7 +518,9 @@ the one a Rust `Layout` of the same size implies.
      claim, stop;
   2. exchange each class's slab word and each spare-stack head with the marker, one atomic
      instruction each, keeping the old values;
-  3. ask the OS to restart every sequence in flight in the process (`membarrier`);
+  3. ask the OS to restart every sequence in flight in the process (`membarrier`). If the
+     call fails, put each old value back with a compare-and-swap against the marker,
+     release the claim and stop;
   4. read each word again. If it is still the marker, no thread can commit to it, and the
      drainer owns the old value: it stores zero and, if the old value named a magazine,
      sends it to the depot. If it is anything else, a sequence that started before step 2
@@ -586,11 +598,14 @@ tests where a test can reach it.
 
 - A thread that is preempted, migrated or signalled inside a registered sequence resumes at
   the sequence's abort handler.
-- Two threads of a process never run with the same cid at once, and a thread's cid changes
-  only at an event that aborts its sequence. Cids are below 8192.
+- Two threads of a process never run with the same cid below 8192 at once, and a thread's
+  cid changes only at an event that aborts its sequence. Nothing is assumed about values of
+  8192 or more.
 - `membarrier` with the rseq command returns only after every sequence then in flight in
   the process has completed or been aborted.
 - glibc registers a thread's rseq area before the thread can call the allocator.
+- Nothing with the privilege to do so places a probe inside a sequence, which would let
+  the thread return to it without an abort.
 - Fresh anonymous memory, and memory after `MADV_DONTNEED`, reads as zero.
 - The instruction model, the Rust compiler and assembler, and Lean's kernel.
 
