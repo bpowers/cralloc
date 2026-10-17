@@ -28,8 +28,9 @@ nothing accesses that memory in a way that conflicts with a shared reference.
 
 1. *In bounds.* `at = metadata(region) + 8 * word`. Callers pass only word numbers that the
    layout names: `tree_word(level, index)` with `index` below that level's count,
-   `grow_word`, `hints_word`, `clean_word(w)` with `w` below the clean count, and `zero_word(w)`
-   with `w` below the leaf count. Kani's `layouts_fit_the_used_geometries` and
+   `grow_word`, `hints_word`, `clean_word(w)` with `w` below the clean count, `zero_word(w)`
+   with `w` below the leaf count, and `size_word(slot)` with `slot` below the slot count (a
+   slot `Plan::slot_at` accepted). Kani's `layouts_fit_the_used_geometries` and
    `layouts_fit_every_geometry` prove that all of these sections lie inside
    `total_words * 8 <= metadata_size`. The indexes are below their counts because each comes
    from a slot below the region's slot count (leaf and zero words: `slot / 64`; clean words: a

@@ -12,6 +12,8 @@
 //! ...                         clean bitmap: one bit per page, set means purged and untouched
 //! ...                         zero bitmap, large classes only: one bit per slot, set means
 //!                             free and known to read as zero
+//! ...                         sizes, large classes only: one word per slot, the size the
+//!                             object in it was last allocated or resized to
 //! ```
 //!
 //! The leaf bitmap comes first so that it can be committed a page at a time as the region grows,
@@ -50,6 +52,8 @@ pub(crate) struct Layout {
     clean_count: u32,
     /// Word offset of the zero bitmap, or 0 if the class has none (small classes).
     zero: u32,
+    /// Word offset of the per-slot sizes, or 0 if the class has none (small classes).
+    sizes: u32,
     total: u32,
     page_shift: u8,
     huge_shift: u8,
@@ -159,12 +163,13 @@ impl Layout {
         let clean = next;
         let clean_count = pages.div_ceil(BITS);
         next += clean_count;
-        let zero = if class.is_small() {
-            0
+        let (zero, sizes) = if class.is_small() {
+            (0, 0)
         } else {
-            let at = next;
-            next += count[0];
-            at
+            let zero = next;
+            let sizes = zero + count[0];
+            next = sizes + slots;
+            (zero, sizes)
         };
         if next as usize * WORD_BYTES > plan.metadata_size() {
             return None;
@@ -180,6 +185,7 @@ impl Layout {
             clean,
             clean_count,
             zero,
+            sizes,
             total: next,
             page_shift: page_shift as u8,
             huge_shift: geometry.huge_page_size().trailing_zeros() as u8,
@@ -247,6 +253,16 @@ impl Layout {
     #[inline(always)]
     pub(crate) const fn clean_words(&self) -> u32 {
         self.clean_count
+    }
+
+    /// Word offset of the size word of slot `slot`, if the class records sizes (large classes).
+    #[inline(always)]
+    pub(crate) const fn size_word(&self, slot: u32) -> Option<u32> {
+        if self.sizes == 0 {
+            None
+        } else {
+            Some(self.sizes + slot)
+        }
     }
 
     /// Word offset of zero-bitmap word `index`, if the class has a zero bitmap.

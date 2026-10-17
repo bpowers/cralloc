@@ -359,11 +359,15 @@ fn carving_threads_get_disjoint_slots() {
     });
 }
 
-/// `carving_threads_get_disjoint_slots` under every schedule: about a minute.
+/// `carving_threads_get_disjoint_slots` under every schedule: a few million of them, a few
+/// minutes in a debug build.
 #[test]
-#[ignore = "slow: about a minute; run with --ignored"]
+#[ignore = "slow: a few minutes; run with --ignored"]
 fn carving_every_schedule() {
-    carving(Config::ALL);
+    carving(Config {
+        limit: 20_000_000,
+        ..Config::ALL
+    });
 }
 
 fn carving(config: Config) {
