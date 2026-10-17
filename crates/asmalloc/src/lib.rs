@@ -26,5 +26,11 @@ pub mod depot;
 pub mod front;
 #[cfg(test)]
 pub(crate) mod generated;
+mod heap;
 pub mod os;
 pub mod space;
+
+#[cfg(any(miri, all(target_os = "linux", target_arch = "x86_64", not(kani))))]
+pub use heap::Asmalloc;
+#[cfg(any(test, feature = "sim"))]
+pub use heap::{SimAsmalloc, SimHeap};

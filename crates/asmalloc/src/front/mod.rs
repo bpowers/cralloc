@@ -7,15 +7,26 @@
 //! so nothing needs initializing before the first call.
 //!
 //! Only the [`Routines`] write a slab, each with one restartable sequence that commits with a
-//! single store, and the drain (`depot::drain`). The routines are assembly generated from Lean;
-//! [`Twin`] implements the same specifications in Rust for every environment where assembly
-//! cannot run, over a simulated processor ([`Machine`]) that tests control.
+//! single store, and the drain (`depot::drain`). The routines are assembly generated from Lean
+//! into `generated/` and wrapped as [`Real`]; [`Twin`] implements the same specifications in
+//! Rust for every environment where assembly cannot run (Miri, Kani and the simulated-OS
+//! tests), over a simulated processor (`os::Machine`) that tests control. Which one a heap uses
+//! is chosen where the heap is made, by build configuration.
 //!
 //! The layout constants here must equal those the Lean specification gives the generated code
 //! (`generated/*/slab.rs`); a test compares them.
 
 #[cfg(test)]
 pub(crate) mod check;
+// The generated routines and their wrapper, wherever assembly can run. The generated code names
+// its surroundings by path, so they are provided here: `SLABS`, `MAG_MASKS`, `__rseq_offset`,
+// `pop_slow` and `push_slow`. The last two are the heap's slow paths, which sit above this
+// module; only the generated code's tail jumps reach them through these names.
+#[cfg(all(target_os = "linux", target_arch = "x86_64", not(miri), not(kani)))]
+#[allow(clippy::undocumented_unsafe_blocks)]
+mod generated;
+#[cfg(all(target_os = "linux", target_arch = "x86_64", not(miri), not(kani)))]
+mod real;
 mod routines;
 mod slab;
 pub(crate) mod sync;
@@ -27,6 +38,13 @@ pub use routines::{NO_CPU, Routines, StackPop, StackPush, StoreIfEqual};
 pub use slab::{Cpu, Field, SLAB_BYTES, SLAB_COUNT, SLAB_SHIFT, Slab, Slabs, Spare};
 pub use twin::Twin;
 
+#[cfg(all(target_os = "linux", target_arch = "x86_64", not(miri), not(kani)))]
+pub use real::Real;
+#[cfg(all(target_os = "linux", target_arch = "x86_64", not(miri), not(kani)))]
+pub(crate) use crate::heap::{pop_slow, push_slow};
+#[cfg(all(target_os = "linux", target_arch = "x86_64", not(miri), not(kani)))]
+pub(crate) use crate::os::linux::__rseq_offset;
+
 use crate::classes::{MagazineSize, SMALL_COUNT, SmallClass};
 
 /// The slabs, one per CPU number. Zero-initialized: untouched slabs cost no memory.
@@ -35,7 +53,10 @@ pub static SLABS: Slabs<[Slab; SLAB_COUNT]> = Slabs::new();
 /// The slot mask of each small class's magazines, indexed by class index, for the out-of-line
 /// routines, which take the class in a register. Index 0 is no class; it holds the smallest
 /// magazine's mask so that every entry is a valid mask.
-pub static MAG_MASKS: [u32; SMALL_COUNT + 1] = {
+pub static MAG_MASKS: [u32; SMALL_COUNT + 1] = MASKS;
+
+/// [`MAG_MASKS`] as a constant, for the inlined routines, which take the mask as one.
+pub const MASKS: [u32; SMALL_COUNT + 1] = {
     let mut masks = [MagazineSize::MIN.mask() as u32; SMALL_COUNT + 1];
     let mut ordinal = 0;
     while ordinal < SMALL_COUNT {
