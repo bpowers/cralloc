@@ -78,8 +78,8 @@ build_jemalloc() {
 
 build_mimalloc() {
   # Two builds of the same source. For Rust, a static archive compiled the way the
-  # `libmimalloc-sys` crate compiles it: the single translation unit src/static.c (so the
-  # fast path is inlined across mimalloc's own files), its defines, no override, so Rust
+  # `libmimalloc-sys` crate compiles it: the single translation unit src/static.c, its
+  # defines, no override, so Rust
   # calls mi_* by name and C malloc stays glibc's. For LD_PRELOAD, the shared library with
   # override that mimalloc's own cmake build produces.
   rm -rf "$out/mimalloc"; mkdir -p "$out/mimalloc"

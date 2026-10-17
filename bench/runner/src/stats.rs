@@ -23,21 +23,6 @@ pub fn half_iqr_rel(v: &[f64]) -> f64 {
     (quantile(v, 0.75) - quantile(v, 0.25)) / 2.0 / median(v).abs()
 }
 
-/// A 95% percentile-bootstrap interval for median(a) / median(b). NaN with fewer than three
-/// values on either side, where an interval means nothing.
-pub fn ratio_ci(a: &[f64], b: &[f64], seed: u64) -> (f64, f64) {
-    if a.len() < 3 || b.len() < 3 {
-        return (f64::NAN, f64::NAN);
-    }
-    let mut rng = Rng::new(seed);
-    let mut draw = |v: &[f64]| -> f64 {
-        let s: Vec<f64> = (0..v.len()).map(|_| v[rng.below(v.len() as u64) as usize]).collect();
-        median(&s)
-    };
-    let ratios: Vec<f64> = (0..2000).map(|_| draw(a) / draw(b)).collect();
-    (quantile(&ratios, 0.025), quantile(&ratios, 0.975))
-}
-
 /// A 95% percentile-bootstrap interval for the median of `v` (NaN with fewer than three).
 pub fn median_ci(v: &[f64], seed: u64) -> (f64, f64) {
     if v.len() < 3 {
@@ -59,8 +44,7 @@ mod tests {
         assert_eq!(median(&[3.0, 1.0, 2.0]), 2.0);
         assert_eq!(median(&[1.0, 2.0, 3.0, 4.0]), 2.5);
         assert_eq!(quantile(&[1.0, 2.0, 3.0, 4.0, 5.0], 0.25), 2.0);
-        let (lo, hi) = ratio_ci(&[1.0; 8], &[1.0; 8], 1);
-        assert_eq!((lo, hi), (1.0, 1.0));
-        assert!(ratio_ci(&[1.0, 2.0], &[1.0; 8], 1).0.is_nan());
+        assert_eq!(median_ci(&[1.0; 8], 1), (1.0, 1.0));
+        assert!(median_ci(&[1.0, 2.0], 1).0.is_nan());
     }
 }

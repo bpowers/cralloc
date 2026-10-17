@@ -88,7 +88,8 @@ gate below. Builds run on `BENCH_BUILD_CPUS` (default `4-7,20-23`).
 - **Ranking.** Each job has one primary metric (named in the report with its unit; lower is
   better except rates). The report gives medians, half the interquartile range as a
   percentage, the fastest and the smallest (peak resident set) allocator, the runner-up
-  margin, and "tie" when the bootstrap interval of the margin includes zero.
+  margin, and "tie" when the 95% bootstrap interval of the margin, taken over per-round
+  ratios, includes zero.
 
 Output is JSON lines: a `session` record (machine, settings, allocators, the baseline
 manifests) followed by one `run` record per process.

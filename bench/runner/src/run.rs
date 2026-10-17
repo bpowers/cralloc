@@ -389,8 +389,12 @@ fn run_one(job: &Job, a: &Allocator, cx: &Context) -> Value {
     let mut extra = serde_json::Map::new();
     if server && let (Some(w), Some(d)) = (&out.window, &out.driver) {
         let requests = d["metrics"]["requests"].as_f64().unwrap_or(0.0);
-        if requests > 0.0 {
-            extra.insert("server_cycles_per_req".into(), (w["cycles"].as_f64().unwrap_or(0.0) / requests).into());
+        // A missing count leaves the metric out, which makes the run invalid, rather than
+        // reading as zero cycles.
+        if requests > 0.0
+            && let Some(cycles) = w["cycles"].as_f64()
+        {
+            extra.insert("server_cycles_per_req".into(), (cycles / requests).into());
             extra.insert(
                 "server_instructions_per_req".into(),
                 (w["instructions"].as_f64().unwrap_or(0.0) / requests).into(),

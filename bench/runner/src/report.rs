@@ -1,6 +1,6 @@
 //! Turns result files into tables: per workload, each allocator's median and spread, its
 //! memory, the fastest and the smallest, and whether the control came out null.
-use crate::stats::{half_iqr_rel, median, median_ci, ratio_ci};
+use crate::stats::{half_iqr_rel, median, median_ci};
 use serde_json::Value;
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -51,6 +51,8 @@ const QUIET_FOREIGN: f64 = 0.3;
 struct Line {
     alloc: String,
     n: usize,
+    /// The round of each value, for pairing with another allocator's runs.
+    rounds: Vec<String>,
     values: Vec<f64>,
     med: f64,
     spread: f64,
@@ -176,6 +178,7 @@ fn lines_of(g: &Group, alloc_order: &[String]) -> Vec<Line> {
         out.push(Line {
             alloc: a.clone(),
             n: rs.len(),
+            rounds: rs.iter().map(|r| r.round.clone()).collect(),
             med: median(&values),
             spread: half_iqr_rel(&values),
             values,
@@ -210,13 +213,16 @@ fn best<'a>(
     let second = v.get(1).map(|s| {
         let (bv, bs) = key(first);
         let (sv, ss) = key(s);
-        if higher {
-            let (lo, hi) = ratio_ci(bs, ss, seed);
-            (*s, bv / sv, (lo, hi))
-        } else {
-            let (lo, hi) = ratio_ci(ss, bs, seed);
-            (*s, sv / bv, (lo, hi))
-        }
+        // How much worse the runner-up is, round by round, so that drift between rounds
+        // cancels; the interval is over those per-round ratios.
+        let worse = |b: f64, s: f64| if higher { b / s } else { s / b };
+        let paired: Vec<f64> = s
+            .rounds
+            .iter()
+            .zip(ss)
+            .filter_map(|(r, &sx)| first.rounds.iter().position(|fr| fr == r).map(|i| worse(bs[i], sx)))
+            .collect();
+        (*s, worse(bv, sv), median_ci(&paired, seed))
     });
     Some((first, second))
 }
