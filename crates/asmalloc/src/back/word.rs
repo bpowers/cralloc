@@ -29,6 +29,8 @@ pub(crate) trait Word: Sync {
     /// Replaces `current` with `new`, returning the old value on success and the value found on
     /// failure. A failure changes nothing.
     fn compare_exchange(&self, current: u64, new: u64) -> Result<u64, u64>;
+    /// Writes the word. Only for words a single owner writes, such as a slot's size.
+    fn store(&self, value: u64);
 }
 
 /// The production word: an `AtomicU64` that offers only the sequentially consistent operations
@@ -62,6 +64,11 @@ impl Word for Atomic {
     #[inline(always)]
     fn compare_exchange(&self, current: u64, new: u64) -> Result<u64, u64> {
         self.0.compare_exchange(current, new, SeqCst, SeqCst)
+    }
+
+    #[inline(always)]
+    fn store(&self, value: u64) {
+        self.0.store(value, SeqCst)
     }
 }
 
