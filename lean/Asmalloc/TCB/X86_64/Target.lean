@@ -94,6 +94,8 @@ def abi : Abi isa where
   reservedDoc n := some (if n = 0 then "the return address on the stack" else
     s!"the return address on the stack or the {n} bytes of stack below it")
   sym := some fun s name => s.syms name
+  tp := some fun s => s.fsBase
+  param := some fun s name => s.params name
 
 /-! ## Restartable sequences
 
@@ -134,12 +136,14 @@ abort path; docs/research/linux-rseq-contract.md, "Aborts"): the thread
 resumes with the registers and flags it was interrupted with, and its FS
 base. If a signal handler ran first, `sigreturn` restores them from the
 signal frame, which the handler leaves alone. The program's symbols,
-constants and descriptor, and the thread's permissions, are the same. The
-memory may differ; the contract's `env` says how. -/
+constants and descriptor are the same. The memory may differ; the
+contract's `env` says how. So may the thread's permissions: they are what
+the contract's precondition makes of the state the thread resumes in (a
+retry may find a different magazine, say, after a migration). -/
 def rely (p p' : State) : Prop :=
   p'.gpr = p.gpr ∧ p'.cf = p.cf ∧ p'.zf = p.zf ∧ p'.sf = p.sf ∧ p'.of = p.of ∧
   p'.fsBase = p.fsBase ∧ p'.syms = p.syms ∧ p'.params = p.params ∧ p'.csDesc = p.csDesc ∧
-  p'.unknowns = p.unknowns ∧ p'.rd = p.rd ∧ p'.wr = p.wr
+  p'.unknowns = p.unknowns
 
 abbrev target : Target where
   name := "x86_64"

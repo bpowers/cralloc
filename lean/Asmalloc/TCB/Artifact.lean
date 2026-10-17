@@ -462,13 +462,15 @@ structure Artifact where
   writeArgs : Bool := false
   stack : Nat := 0
   /-- `contract` is one that `Sig.contract` derives from `sig` for the
-  target's calling convention, `writeArgs` and `stack`: so it reads the
+  target's calling convention, with any memory beyond the buffers
+  (`Abi.withExtra`), `writeArgs` and `stack`: so it reads the
   arguments and writes the return value where the calling convention places
   them for `sig`, and requires what `Sig.layoutDoc` documents of where the
   buffers are. -/
-  ofSig : ∃ pre post x,
-      contract = sig.contract (target.abi.withConsts consts) pre post writeArgs stack x := by
-    exact ⟨_, _, _, rfl⟩
+  ofSig : ∃ ext pre post x,
+      contract = sig.contract ((target.abi.withConsts consts).withExtra ext) pre post writeArgs
+        stack x := by
+    exact ⟨none, _, _, _, rfl⟩
   /-- The contract of the function on every target, which an artifact made
   from an `Api` takes from it with its `name` and `sig` (`Api.contracts`).
   The emitter refuses an artifact without one (`Rust.checkApi`). -/
