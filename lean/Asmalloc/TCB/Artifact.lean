@@ -104,8 +104,11 @@ structure Contract (M : ISA) where
   /-- What must hold of the entry state and the memory accesses of a run of
   a restartable sequence (`Code.events`): typically, which locations it
   reads and writes and how the values it writes follow from those it reads,
-  so that what other threads may do between them can be reasoned about. -/
-  trace : M.State → List Event → Prop := fun _ _ => True
+  so that what other threads may do between them can be reasoned about.
+  Nothing does, by default, so code with a sequence cannot be verified
+  unless the contract states its accesses; code without one never runs
+  into this (`RseqOk`). -/
+  trace : M.State → List Event → Prop := fun _ _ => False
   /-- What must hold of the entry state and the state a run ends in when it
   jumps to the external target `t` (`ExecExit`); nothing can, by default, so
   code with an exit to `t` cannot be verified unless the contract says what
@@ -133,7 +136,7 @@ structure Sig.Extra (M : ISA) where
   exit : String → M.State → M.State → Prop := fun _ _ _ => False
   abort : M.State → M.State → Prop := fun _ _ => True
   env : M.State → M.State → Prop := fun _ _ => True
-  trace : M.State → List Event → Prop := fun _ _ => True
+  trace : M.State → List Event → Prop := fun _ _ => False
 
 /-- The contract of a function with signature `sig` under the calling
 convention `A`: the obligations the signature implies (see `TCB/Sig.lean`),
