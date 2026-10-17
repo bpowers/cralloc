@@ -19,12 +19,12 @@
 //! unit are safe because each purge is a claim (`region::purge_unit`).
 //!
 //! **Fragmentation is outside the cap.** Free slots on pages that also hold live ones cannot be
-//! purged, yet they are counted. When a whole pass over every region purges nothing, what is
-//! left in the count is of that kind, and the pass resets the count to zero, so a fragmented
-//! heap does not purge on every call.
+//! purged, yet they are counted. When a whole pass over every region purges nothing and has no
+//! purge refused by the OS, what is left in the count is of that kind, and the pass subtracts
+//! it, so a fragmented heap does not purge on every call.
 //!
 //! **Trim** purges every unit of every region, ignoring the cap, the budgets and the cursors,
-//! and then resets the count.
+//! and then subtracts what the count held when it began.
 
 use super::Back;
 use super::layout::{Hints, Step};
@@ -93,6 +93,7 @@ impl<O: Os> Back<'_, O> {
     /// cached in magazines are not in the bitmaps; launder them first. Returns the bytes
     /// purged that had been resident.
     pub fn trim(&self) -> usize {
+        let counted = self.retained();
         let mut purged = 0;
         for pass in [Pass::Large, Pass::Small] {
             let plan = self.space.plan();
@@ -102,7 +103,9 @@ impl<O: Os> Back<'_, O> {
                 }
             }
         }
-        self.state.retained.store(0, Relaxed);
+        // What was counted when the trim began and is still resident is fragmentation; frees
+        // counted since stay counted.
+        self.unretain(counted.saturating_sub(purged));
         purged
     }
 
@@ -139,7 +142,7 @@ impl<O: Os> Back<'_, O> {
             None => (0, 1, true),
         };
         if purged > 0 {
-            self.state.pass_purged.fetch_add(purged, Relaxed);
+            self.state.pass_progress.fetch_add(purged, Relaxed);
         }
         if done {
             let moved = if index > 0 {
@@ -155,10 +158,11 @@ impl<O: Os> Back<'_, O> {
                 .compare_exchange(seen, moved, Relaxed, Relaxed)
                 .is_ok()
                 && moved == 0
-                && self.state.pass_purged.swap(0, Relaxed) == 0
+                && self.state.pass_progress.swap(0, Relaxed) == 0
             {
-                // A whole pass purged nothing: what the count still holds is fragmentation.
-                self.state.retained.store(0, Relaxed);
+                // A whole pass purged nothing, and the OS refused nothing: what the count held
+                // is fragmentation. Frees counted since this load stay counted.
+                self.unretain(self.retained());
             }
         }
         read.max(1)
@@ -220,8 +224,14 @@ impl<O: Os> Back<'_, O> {
                 Step::Unit(unit) => {
                     let (outcome, words) = region::purge_unit(&host, region, unit);
                     read += words;
-                    if let Purge::Done(bytes) = outcome {
-                        purged += bytes;
+                    match outcome {
+                        Purge::Done(bytes) => purged += bytes,
+                        // A refusal is not fragmentation: keep this pass from resetting the
+                        // count, so the cap still applies once the OS relents.
+                        Purge::Failed => {
+                            self.state.pass_progress.fetch_add(1, Relaxed);
+                        }
+                        Purge::Clean | Purge::Busy => {}
                     }
                     unit.start
                 }

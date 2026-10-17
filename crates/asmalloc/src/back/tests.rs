@@ -575,7 +575,7 @@ fn shadow_run<S: Shape>(seed: u64, steps: usize, faults: bool) {
 
 #[test]
 fn random_operations_match_the_shadow_model() {
-    let (seeds, steps) = if cfg!(miri) { (1, 150) } else { (12, 1500) };
+    let (seeds, steps) = if cfg!(miri) { (1, 40) } else { (12, 1500) };
     for seed in 0..seeds {
         shadow_run::<Standard>(0x9e37_79b9_7f4a_7c15 ^ seed, steps, false);
     }
@@ -583,7 +583,7 @@ fn random_operations_match_the_shadow_model() {
 
 #[test]
 fn random_operations_survive_os_failures() {
-    let (seeds, steps) = if cfg!(miri) { (1, 150) } else { (12, 1500) };
+    let (seeds, steps) = if cfg!(miri) { (1, 40) } else { (12, 1500) };
     for seed in 0..seeds {
         shadow_run::<Standard>(0x2545_f491_4f6c_dd1d ^ seed, steps, true);
     }

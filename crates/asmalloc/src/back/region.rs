@@ -117,7 +117,10 @@ fn switch_to_huge<H: Host>(host: &H, region: RegionId, now: Grow) -> Option<u32>
         return None;
     }
     let pages = layout.region_pages();
-    let at = layout.huge_ceil(now.committed);
+    // From the latest commit, not the caller's possibly stale one: the huge-page part must start
+    // above every page that small-page purges may have worked on.
+    let latest = Grow::unpack(host.meta(region, layout.grow_word()).load()).committed;
+    let at = layout.huge_ceil(latest.max(now.committed));
     if at >= pages {
         return None;
     }
@@ -168,18 +171,25 @@ pub(crate) fn settle<H: Host>(host: &H, region: RegionId, index: u32, bits: u64)
         }
         None => 0,
     };
-    let first = index * BITS + bits.trailing_zeros();
-    let last = index * BITS + (BITS - 1 - bits.leading_zeros());
+    // Clear the clean bits of the pages each run of consecutive claimed slots touches, and no
+    // others: pages between runs may belong to slots another thread holds, a purge among them.
     let page = layout.page_size();
     let shift = layout.page_shift();
-    let start = (layout.slot_bytes(first) >> shift) as u32;
-    let end = layout.slot_bytes(last + 1).div_ceil(page) as u32;
     let mut cleaned = 0usize;
-    for w in start / BITS..=(end - 1) / BITS {
-        let mask = bits_in_word(w, start, end - 1);
-        let clean = host.meta(region, layout.clean_word(w));
-        if clean.load() & mask != 0 {
-            cleaned += (clean.fetch_and(!mask) & mask).count_ones() as usize;
+    let mut rest = bits;
+    while rest != 0 {
+        let low = rest.trailing_zeros();
+        let run = (!(rest >> low)).trailing_zeros();
+        rest &= !super::word::span(low, low + run - 1);
+        let (first, last) = (index * BITS + low, index * BITS + low + run - 1);
+        let start = (layout.slot_bytes(first) >> shift) as u32;
+        let end = layout.slot_bytes(last + 1).div_ceil(page) as u32;
+        for w in start / BITS..=(end - 1) / BITS {
+            let mask = bits_in_word(w, start, end - 1);
+            let clean = host.meta(region, layout.clean_word(w));
+            if clean.load() & mask != 0 {
+                cleaned += (clean.fetch_and(!mask) & mask).count_ones() as usize;
+            }
         }
     }
     let claimed = bits.count_ones() as usize * layout.size();

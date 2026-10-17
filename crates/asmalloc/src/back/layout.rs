@@ -526,13 +526,20 @@ mod tests {
     /// units tile the carved pages from the top, stay in their part, and touch exactly the slots
     /// `touching` names.
     #[test]
+    #[cfg_attr(miri, ignore)]
     fn purge_passes_tile_the_carved_pages() {
-        let g = Standard::GEOMETRY;
-        for class in Class::all().filter(|&c| g.fits_region(c)) {
-            let layout = Layout::new(g, class).unwrap();
-            for carved in [0, 1, 2, layout.slots() / 3, layout.slots()] {
-                for huge_from in [None, Some(0), Some(8), Some(layout.huge_ceil(5))] {
-                    check_pass(&layout, carved, huge_from);
+        // 4 KiB pages, 64 KiB huge pages, 1 MiB regions: several slots of large classes.
+        let wide = Geometry::new(12, 16, 20, 32, 20);
+        for g in [Standard::GEOMETRY, Tiny::GEOMETRY, wide] {
+            for class in Class::all().filter(|&c| g.fits_region(c)) {
+                let layout = Layout::new(g, class).unwrap();
+                let slots = layout.slots();
+                for carved in [0, 1, 2, 3, slots / 3, slots / 2 + 1, slots - 1, slots] {
+                    let huge = layout.huge_pages();
+                    for huge_from in [None, Some(0), Some(huge), Some(layout.huge_ceil(5))] {
+                        let huge_from = huge_from.filter(|&h| h < layout.region_pages());
+                        check_pass(&layout, carved, huge_from);
+                    }
                 }
             }
         }

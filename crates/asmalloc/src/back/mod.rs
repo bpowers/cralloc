@@ -74,8 +74,9 @@ pub struct State<O: Os> {
     retained: AtomicUsize,
     /// Where the next purge step looks: see `purge`.
     purge_at: AtomicU32,
-    /// Bytes purged since the current pass over all regions began.
-    pass_purged: AtomicUsize,
+    /// Bytes purged since the current pass over all regions began, plus one for each purge the
+    /// OS refused: zero at the end of a pass means what is left is fragmentation.
+    pass_progress: AtomicUsize,
 }
 
 impl<O: Os> State<O> {
@@ -87,7 +88,7 @@ impl<O: Os> State<O> {
             classes: [const { ClassState::new() }; COUNT],
             retained: AtomicUsize::new(0),
             purge_at: AtomicU32::new(0),
-            pass_purged: AtomicUsize::new(0),
+            pass_progress: AtomicUsize::new(0),
         }
     }
 

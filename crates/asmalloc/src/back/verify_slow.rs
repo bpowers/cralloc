@@ -1,6 +1,13 @@
-//! Kani proofs too slow for the merge gate: the layout for every geometry, the slot arithmetic of
-//! purge units (it divides by symbolic class sizes), and runs of operations on a small heap. Run
-//! with `scripts/kani-all back::verify_slow`.
+//! Kani proofs too slow for the merge gate: the layout for every geometry, purge-unit and
+//! leaf-commit arithmetic (they divide by symbolic class sizes), `lowest`, and runs of
+//! operations on a small heap. Run with `scripts/kani-all back::verify_slow`.
+//!
+//! Which slots a unit touches, and which lie wholly inside it, is not proved here: CBMC does not
+//! finish the 64-bit multiply in `Divisor::divide` for a symbolic class within the hour.
+//! `touching` is `(start / size, (end - 1) / size)` by definition, with `Divisor::divide` proved
+//! exact for every input in `classes::verify` and `classes::verify_slow`; the unit test
+//! `layout::tests::purge_passes_tile_the_carved_pages` checks both against the definitions for
+//! every class, many watermarks and huge-page boundaries, in three geometries.
 
 use super::layout::{Layout, Step, WORD_BYTES, slots_in_region};
 use super::region::{self, Purge};
@@ -37,36 +44,6 @@ fn slot_counts_are_the_quotient() {
     let geometry = any_geometry();
     let class = any_class();
     assert!(slots_in_region(geometry, class) == geometry.slots_per_region(class));
-}
-
-/// The slots a unit touches are exactly those overlapping its pages, and those `inside` reports
-/// are exactly those wholly within them.
-#[kani::proof]
-#[kani::unwind(6)]
-#[kani::solver(kissat)]
-fn units_touch_exactly_their_slots() {
-    let geometry = any_used_geometry();
-    let class = any_class();
-    let Some(layout) = Layout::new(geometry, class) else {
-        return;
-    };
-    let carved: u32 = kani::any();
-    kani::assume(carved <= layout.slots());
-    let cursor: u32 = kani::any();
-    let Step::Unit(unit) = layout.unit_below(carved, None, cursor) else {
-        return;
-    };
-    let (first, last) = layout.touching(unit);
-    let page = layout.page_size();
-    let (start, end) = (unit.start as usize * page, unit.end as usize * page);
-    assert!(last < carved);
-    assert!(layout.slot_bytes(first) <= start && layout.slot_bytes(first + 1) > start);
-    assert!(layout.slot_bytes(last) < end && layout.slot_bytes(last + 1) >= end);
-    let (lo, hi) = layout.inside(unit);
-    let slot: u32 = kani::any();
-    kani::assume(first <= slot && slot <= last);
-    let wholly = layout.slot_bytes(slot) >= start && layout.slot_bytes(slot + 1) <= end;
-    assert!(wholly == (lo <= slot && slot < hi));
 }
 
 /// Three operations, each any of claim, release and purge with any arguments, on one region of

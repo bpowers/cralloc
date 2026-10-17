@@ -35,4 +35,4 @@ are never reused, so the promise that unassigned regions read as zero still hold
 `freeing_a_run_tail_aborts` and the shadow-model runs (`random_operations_*`), natively and
 under Miri; fault injection makes purges fail in `random_operations_survive_os_failures`.
 
-**Review.** Awaiting a fresh adversarial reviewer.
+**Review.** 2026-10-17, fresh adversarial reviewer: accepted.

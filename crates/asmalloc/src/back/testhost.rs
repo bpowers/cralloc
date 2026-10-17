@@ -44,6 +44,10 @@ pub(crate) struct TestHost<W> {
     dirty: Box<[AtomicU64]>,
     /// Pages committed per region.
     committed: Box<[AtomicUsize]>,
+    /// Per region, which pages of the metadata block are committed. `meta` fails on a word in
+    /// any other page, which checks BACK-HOST-01's claim that the protocols touch only committed
+    /// metadata.
+    meta_committed: Vec<Box<[AtomicBool]>>,
     /// Make the next OS calls fail.
     pub(crate) fail_commit: AtomicBool,
     pub(crate) fail_purge: AtomicBool,
@@ -68,7 +72,7 @@ impl<W: TestWord> TestHost<W> {
                     .collect()
             })
             .collect();
-        TestHost {
+        let host = TestHost {
             layout,
             plan,
             meta,
@@ -78,9 +82,28 @@ impl<W: TestWord> TestHost<W> {
                 .map(|_| AtomicU64::new(0))
                 .collect(),
             committed: (0..regions).map(|_| AtomicUsize::new(0)).collect(),
+            meta_committed: (0..regions)
+                .map(|_| {
+                    let pages = layout.fixed_commit().1.div_ceil(layout.page_size());
+                    (0..pages).map(|_| AtomicBool::new(false)).collect()
+                })
+                .collect(),
             fail_commit: AtomicBool::new(false),
             fail_purge: AtomicBool::new(false),
             purges: AtomicUsize::new(0),
+        };
+        // As `assign` does before it tags a region.
+        let (start, end) = layout.fixed_commit();
+        for r in 0..regions {
+            host.mark_meta(r, start, end - start);
+        }
+        host
+    }
+
+    fn mark_meta(&self, region: usize, offset: usize, len: usize) {
+        let page = self.layout.page_size();
+        for p in offset / page..(offset + len) / page {
+            self.meta_committed[region][p].store(true, SeqCst);
         }
     }
 
@@ -182,6 +205,7 @@ impl<W: TestWord> TestHost<W> {
             carved: count,
             committed: pages,
         };
+        self.mark_meta(region.index(), 0, self.layout.leaf_commit(pages));
         self.meta(region, self.layout.grow_word())
             .fetch_or(grow.pack());
         self.committed[region.index()].store(pages as usize, SeqCst);
@@ -200,6 +224,12 @@ impl<W: TestWord> Host for TestHost<W> {
     }
 
     fn meta(&self, region: RegionId, word: u32) -> &W {
+        let page = word as usize * super::layout::WORD_BYTES / self.layout.page_size();
+        assert!(
+            self.meta_committed[region.index()][page].load(SeqCst),
+            "metadata word {word} of region {} is not committed",
+            region.index()
+        );
         &self.meta[region.index()][word as usize]
     }
 
@@ -221,10 +251,14 @@ impl<W: TestWord> Host for TestHost<W> {
         true
     }
 
-    fn commit_meta(&self, _: RegionId, offset: usize, len: usize) -> bool {
+    fn commit_meta(&self, region: RegionId, offset: usize, len: usize) -> bool {
         let page = self.layout.page_size();
         assert!(offset.is_multiple_of(page) && len.is_multiple_of(page) && len > 0);
-        !self.fail_commit.load(SeqCst)
+        if self.fail_commit.load(SeqCst) {
+            return false;
+        }
+        self.mark_meta(region.index(), offset, len);
+        true
     }
 
     fn advise(&self, _: RegionId, offset: usize, len: usize, _: HugePages) {

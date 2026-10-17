@@ -70,10 +70,19 @@ unchanged (the region's base plus the offset). The range checks are `Space::purg
 aborts on a range outside the reservation or not whole pages. The caller's obligations are
 discharged at the call site, BACK-REGION-01.
 
-**Machine checks.** The back end's unit tests over `SimOs` (`back::tests`), natively and under
-Miri with strict provenance (`scripts/miri -- back::`), exercise every metadata access path,
-including fault injection and four threads at once. The protocol code behind the word numbers
-runs under Kani on `TestHost` (`short_runs_keep_the_bitmap_and_its_summary_consistent`), which
-bounds-checks every index into a vector of the same layout.
+**Machine checks.** `SimOs` cannot yet tell committed memory from uncommitted, so the commit
+claim (step 3) is checked on the protocols' test host instead: `TestHost` records which pages
+of each metadata block have been committed, and its `meta` fails on any other word. It commits
+the fixed part as `assign` does and leaf pages only through `commit_meta`, so every scenario in
+`back::models` (explored under many interleavings) and the Kani run
+`short_runs_keep_the_bitmap_and_its_summary_consistent` check that no protocol touches an
+uncommitted word. `carving_commits_the_leaf_bitmap_it_needs` fails if a carve skips the leaf
+commit. `assign`'s commit before tagging is production code outside the test host; it is
+covered by the argument above and by the `SimOs` tests, which run every other access path
+natively and under Miri with strict provenance, with fault injection and with four threads.
+Bounds are checked on the test host by vector indexing, and by Kani in the same run.
 
-**Review.** Awaiting a fresh adversarial reviewer.
+**Review.** 2026-10-17, fresh adversarial reviewer: the argument was accepted; the machine
+checks were found to overstate (no test could see an uncommitted access). Fixed above with the
+test host's commit tracking, which a deleted leaf commit now fails. The fix awaits the same
+reviewer's check.

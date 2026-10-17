@@ -398,10 +398,12 @@ fn purge_pass(host: &Host8) -> usize {
     let region = host.region_at(0);
     let layout = *host.layout();
     let carved = super::layout::Grow::unpack(host.meta(region, layout.grow_word()).load()).carved;
+    let huge_from =
+        super::layout::Hints::unpack(host.meta(region, layout.hints_word()).load()).huge_from;
     let mut cursor = 0;
     let mut purged = 0;
     loop {
-        let next = match layout.unit_below(carved, None, cursor) {
+        let next = match layout.unit_below(carved, huge_from, cursor) {
             Step::Done => 0,
             Step::Skip(page) => page,
             Step::Unit(unit) => {
@@ -481,8 +483,42 @@ fn zero_bits_sound(host: &Host8) {
     }
 }
 
+/// What one thread of a purge scenario does.
+#[derive(Clone, Copy, Debug)]
+enum Role {
+    /// A top-down purge pass over the carved part of the region.
+    Purge,
+    /// Allocate a slot, check a zeroed answer, write it, free it.
+    Program,
+    /// Free the slots the program held at the start, then act as `Program`.
+    FreeHeld,
+    /// Carve two more slots, write them and free them: a carve racing a purge.
+    Carve,
+}
+
 fn purge_scenario(geometry: Geometry, size: usize, slots: u32, held: &[u32], bound: usize) {
-    let all: BTreeSet<u32> = (0..slots).collect();
+    purge_roles(
+        geometry,
+        size,
+        slots,
+        held,
+        bound,
+        false,
+        [Role::Purge, Role::Program, Role::FreeHeld],
+    );
+}
+
+/// A purge scenario with the given thread roles; with `huge`, the whole region is its
+/// huge-page part, so purges work in whole huge pages.
+fn purge_roles(
+    geometry: Geometry,
+    size: usize,
+    slots: u32,
+    held: &[u32],
+    bound: usize,
+    huge: bool,
+    roles: [Role; 3],
+) {
     let held: Vec<u32> = held.to_vec();
     explore(
         Config {
@@ -490,26 +526,103 @@ fn purge_scenario(geometry: Geometry, size: usize, slots: u32, held: &[u32], bou
             ..Config::ALL
         },
         3,
-        || purge_setup(geometry, size, slots, &held),
-        |host, me| match me {
-            0 => {
+        || {
+            let host = purge_setup(geometry, size, slots, &held);
+            if huge {
+                let hints = super::layout::Hints {
+                    huge_from: Some(0),
+                    cursor: 0,
+                };
+                let region = host.region_at(0);
+                host.meta(region, host.layout().hints_word())
+                    .fetch_or(hints.pack());
+            }
+            host
+        },
+        |host, me| match roles[me] {
+            Role::Purge => {
                 purge_pass(host);
             }
-            1 => program(host),
-            _ => {
+            Role::Program => program(host),
+            Role::FreeHeld => {
                 for &slot in &held {
                     free_now(host, host.region_at(0), slot);
                 }
                 program(host);
             }
+            Role::Carve => {
+                let region = host.region_at(0);
+                if let Carve::Got { first, count } = region::carve(host, region, 2) {
+                    for slot in first..first + count {
+                        assert!(host.is_zero(region, slot), "a carved slot reads non-zero");
+                        host.write(region, slot);
+                        free_now(host, region, slot);
+                    }
+                }
+            }
         },
         |host, _| {
             let region = host.region_at(0);
+            let layout = *host.layout();
+            let carved =
+                super::layout::Grow::unpack(host.meta(region, layout.grow_word()).load()).carved;
+            let mut expected: BTreeSet<u32> = (0..carved).collect();
+            if !roles.iter().any(|r| matches!(r, Role::FreeHeld)) {
+                for slot in &held {
+                    expected.remove(slot);
+                }
+            }
             let free: BTreeSet<u32> = host.free_slots(region).into_iter().collect();
-            assert_eq!(free, all, "a slot was lost or invented");
+            assert_eq!(free, expected, "a slot was lost or invented");
             assert!(host.all_visible());
             zero_bits_sound(host);
         },
+    );
+}
+
+/// The huge-page part: 32-byte slots on 64-byte pages, purged in whole 256-byte huge pages.
+#[test]
+#[cfg_attr(miri, ignore)]
+fn purge_in_huge_pages() {
+    purge_roles(
+        Tiny::GEOMETRY,
+        32,
+        16,
+        &[3],
+        2,
+        true,
+        [Role::Purge, Role::Program, Role::FreeHeld],
+    );
+}
+
+/// Two purgers over the same units, against a program.
+#[test]
+#[cfg_attr(miri, ignore)]
+fn two_purgers_on_the_same_units() {
+    purge_roles(
+        Tiny::GEOMETRY,
+        48,
+        4,
+        &[1],
+        2,
+        false,
+        [Role::Purge, Role::Purge, Role::FreeHeld],
+    );
+}
+
+/// A carve racing a purge: the purge reads the watermark once and must never return a page a
+/// carve hands out. The carver checks that its slots read as zero.
+#[test]
+#[cfg_attr(miri, ignore)]
+fn a_carve_racing_a_purge() {
+    purge_roles(
+        Tiny::GEOMETRY,
+        48,
+        3,
+        &[],
+        3,
+        false,
+        [Role::Purge, Role::Carve, Role::Program],
     );
 }
 
@@ -561,4 +674,26 @@ fn purge_sets_zero_bits_only_inside() {
     zero_bits_sound(&host);
     assert!(host.is_zero(region, 0) && host.is_zero(region, 1));
     assert!(!host.is_zero(region, 2));
+}
+
+/// Carving commits the leaf bitmap the new slots need: with 8-byte slots in a 64 KiB region the
+/// leaf bitmap fills a page of its own before the header's page, and the test host fails any
+/// access to a metadata word that is not committed.
+#[test]
+fn carving_commits_the_leaf_bitmap_it_needs() {
+    let host = Host8::new(Standard::GEOMETRY, class(8), 1);
+    let region = host.region_at(0);
+    assert!(host.layout().fixed_commit().0 >= Standard::GEOMETRY.page_size());
+    let mut carved = Vec::new();
+    while let Carve::Got { first, count } = region::carve(&host, region, 200) {
+        carved.extend(first..first + count);
+        if carved.len() > 1000 {
+            break;
+        }
+    }
+    for &slot in &carved {
+        free_now(&host, region, slot);
+    }
+    assert_eq!(claim(&host, 64).len(), 64);
+    assert!(host.all_visible());
 }
