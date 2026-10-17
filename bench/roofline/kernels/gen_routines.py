@@ -341,6 +341,86 @@ INLINE = {
     "icd": (V(direct=True), True),
 }
 inline_uops = {}
+
+
+# Class-independent inline forms: the caller passes the address of the class's word in slab 0 in
+# `rdi` (`lea rdi, [rip + SLABS + class*8]`, which a constant class folds to), and the mask comes
+# from a table of 8-byte entries 2048 bytes below the slabs, at `[rdi - 2048]`; push takes p in
+# rsi. Flags: `direct` reads __rseq_offset directly; `hoist` puts the caller's `lea` before the
+# loop (what LLVM does with a constant class in a loop), else it runs every iteration; `mreg`
+# loads the mask into a register before testing it.
+WORD_DISP = -2048
+
+
+def word_mask_test(w32, mreg, disp=WORD_DISP):
+    if mreg == "imm":
+        return [f"test {w32}, {MASK}"]
+    if mreg in ("top", "arg"):
+        return [f"test {w32}, r9d"]
+    if mreg:
+        return [f"mov r9d, dword ptr [rdi {WORD_DISP}]", f"test {w32}, r9d"]
+    return [f"test {w32}, dword ptr [rdi {disp}]"]
+
+
+def word_pop(v: V, mreg, disp=WORD_DISP):
+    r = regs(V(), push=False)
+    body = ([f"mov r9d, dword ptr [rdi {WORD_DISP}]"] if mreg == "top" else []) + arm(v, r, "20f")
+    body += ["shl r8, 12", "mov rcx, qword ptr [rdi + r8]"] + word_mask_test("ecx", mreg, disp) + [
+        "je 21f", "mov rax, qword ptr [rcx - 8]", "lea rcx, [rcx - 8]", "mov qword ptr [rdi + r8], rcx"]
+    body += descriptor()
+    body += ['.pushsection .text.unlikely, "ax"', "20:", "mov eax, 0", "jmp 7b", "21:", "mov eax, 0",
+             "jmp 7b", ".popsection"]
+    return body
+
+
+def word_push(v: V, mreg, miss, disp=WORD_DISP):
+    r = regs(V(), push=True)
+    body = ([f"mov r9d, dword ptr [rdi {WORD_DISP}]"] if mreg == "top" else []) + arm(v, r, miss)
+    body += ["shl r8, 12", "mov rcx, qword ptr [rdi + r8]", "lea rax, [rcx + 8]"] + word_mask_test("eax", mreg, disp) + [
+        f"je {miss}", "mov qword ptr [rcx], rsi", "mov qword ptr [rdi + r8], rax"]
+    return body + descriptor()
+
+
+WORD = {
+    "wlea": (V(), False, False),
+    "wleab": (V(), False, False),  # identical copy: the noise floor
+    "whoist": (V(), True, False),
+    "wmreg": (V(), False, True),
+    "wimm": (V(), False, "imm"),
+    "wtop": (V(), False, "top"),
+    "wdimm": (V(direct=True), False, "imm"),
+    "wdtop": (V(direct=True), False, "top"),
+    "wd4k": (V(direct=True), False, False, -4096),
+    "wd6k": (V(direct=True), False, False, -6144),
+    "w6k": (V(), False, False, -6144),
+    "wreg": (V(), False, "arg"),
+    "wregh": (V(), True, "arg"),
+    "wdreg": (V(direct=True), False, "arg"),
+    "wdregh": (V(direct=True), True, "arg"),
+    "wdlea": (V(direct=True), False, False),
+    "wdhoist": (V(direct=True), True, False),
+}
+WLEA = f"lea rdi, [rip + rk_slabs + {COFF}]"
+for name, (v, hoist, mreg, *dd) in WORD.items():
+    disp = dd[0] if dd else WORD_DISP
+    setup = [WLEA] + ([f"mov r9d, {MASK}"] if mreg == "arg" else [])
+    pre = [] if not hoist else setup
+    each = [] if hoist else setup
+    pop = word_pop(v, mreg, disp)
+    test = ["test rax, rax", f"jz gp_{name}_trap"]
+    inline_uops[name] = (fused_uops(each + pop[:pop.index("7:")] + test),
+                         fused_uops(word_push(v, mreg, "x", disp)[:word_push(v, mreg, "x", disp).index("7:")]))
+    kernel(f"gp_{name}", pre + [".balign 64", f"gp_{name}_top:"] + each + pop + test +
+           ["mov rsi, rax"] + each + word_push(v, mreg, f"gp_{name}_trap", disp) +
+           ["dec r13", f"jnz gp_{name}_top"], 1, f"inline pair: {name}", NOMETA)
+    kernel(f"gb_{name}", pre + [".balign 64", f"gb_{name}_top:", "xor r14d, r14d", ".balign 32", f"gb_{name}_a:"]
+           + each + word_pop(v, mreg, disp) + ["test rax, rax", f"jz gb_{name}_trap",
+           "mov qword ptr [rbx + r14*8], rax", "inc r14", "cmp r14, 32", f"jne gb_{name}_a",
+           "xor r14d, r14d", ".balign 32", f"gb_{name}_f:"] + each +
+           ["mov rsi, qword ptr [rbx + r14*8]"] + word_push(v, mreg, f"gb_{name}_trap", disp) +
+           ["inc r14", "cmp r14, 32", f"jne gb_{name}_f", "dec r13", f"jnz gb_{name}_top"],
+           32, f"inline batch: {name}", NOMETA)
+
 for name, (v, call) in INLINE.items():
     pop = inline_pop(v, call)
     push = inline_push(v, f"gp_{name}_trap")
