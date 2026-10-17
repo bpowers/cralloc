@@ -90,7 +90,7 @@ pub(crate) const WORD_BYTES: usize = 8;
 #[unsafe(naked)]
 pub(crate) unsafe extern "sysv64" fn slab_pop(class: usize) -> usize {
     core::arch::naked_asm!(
-        "5:\nmov rdx, QWORD PTR [rip + {__rseq_offset}@GOTPCREL]\nmov rdx, QWORD PTR [rdx]\nlea r10, [rip + 3f]\nmov QWORD PTR fs:[rdx+8], r10\n6:\nmov r8d, DWORD PTR fs:[rdx+4]\ncmp r8d, 8192\njae {slow}\nshl r8, 12\nlea r9, [rip + {SLABS}]\nlea r9, [r9+rdi*8]\nmov rcx, QWORD PTR [r9+r8*1]\nlea r11, [rip + {MAG_MASKS}]\ntest ecx, DWORD PTR [r11+rdi*4]\nje {slow}\nmov rax, QWORD PTR [rcx-8]\nlea rcx, [rcx-8]\nmov QWORD PTR [r9+r8*1], rcx\n7:\n.pushsection __rseq_cs, \"aw\"\n.balign 32\n3:\n.long 0, 0\n.quad 6b, 7b - 6b, 4f\n.popsection\n.pushsection .text.unlikely, \"ax\"\n.byte 0x0f, 0xb9, 0x3d\n.long 0x53053053\n4:\njmp 5b\n.popsection\nret\n.p2align 6",
+        "5:\nmov r10, QWORD PTR [rip + {__rseq_offset}@GOTPCREL]\nmov r10, QWORD PTR [r10]\nlea r11, [rip + 3f]\nmov QWORD PTR fs:[r10+8], r11\n6:\nmov r8d, DWORD PTR fs:[r10+4]\ncmp r8d, 8192\njae {slow}\nshl r8, 12\nlea r9, [rip + {SLABS}]\nlea r9, [r9+rdi*8]\nmov rcx, QWORD PTR [r9+r8*1]\nlea r11, [rip + {MAG_MASKS}]\ntest ecx, DWORD PTR [r11+rdi*4]\nje {slow}\nmov rax, QWORD PTR [rcx-8]\nlea rcx, [rcx-8]\nmov QWORD PTR [r9+r8*1], rcx\n7:\n.pushsection __rseq_cs, \"aw\"\n.balign 32\n3:\n.long 0, 0\n.quad 6b, 7b - 6b, 4f\n.popsection\n.pushsection .text.unlikely, \"ax\"\n.byte 0x0f, 0xb9, 0x3d\n.long 0x53053053\n4:\njmp 5b\n.popsection\nret\n.p2align 6",
         __rseq_offset = sym crate::front::__rseq_offset,
         slow = sym crate::front::pop_slow,
         SLABS = sym crate::front::SLABS,
@@ -111,7 +111,7 @@ pub(crate) unsafe extern "sysv64" fn slab_pop(class: usize) -> usize {
 #[unsafe(naked)]
 pub(crate) unsafe extern "sysv64" fn slab_push(class: usize, p: usize) {
     core::arch::naked_asm!(
-        "5:\nmov rdx, QWORD PTR [rip + {__rseq_offset}@GOTPCREL]\nmov rdx, QWORD PTR [rdx]\nlea r10, [rip + 3f]\nmov QWORD PTR fs:[rdx+8], r10\n6:\nmov r8d, DWORD PTR fs:[rdx+4]\ncmp r8d, 8192\njae {slow}\nshl r8, 12\nlea r9, [rip + {SLABS}]\nlea r9, [r9+rdi*8]\nmov rcx, QWORD PTR [r9+r8*1]\nlea r11, [rip + {MAG_MASKS}]\nlea rax, [rcx+8]\ntest eax, DWORD PTR [r11+rdi*4]\nje {slow}\nmov QWORD PTR [rcx], rsi\nmov QWORD PTR [r9+r8*1], rax\n7:\n.pushsection __rseq_cs, \"aw\"\n.balign 32\n3:\n.long 0, 0\n.quad 6b, 7b - 6b, 4f\n.popsection\n.pushsection .text.unlikely, \"ax\"\n.byte 0x0f, 0xb9, 0x3d\n.long 0x53053053\n4:\njmp 5b\n.popsection\nret\n.p2align 6",
+        "5:\nmov r10, QWORD PTR [rip + {__rseq_offset}@GOTPCREL]\nmov r10, QWORD PTR [r10]\nlea r11, [rip + 3f]\nmov QWORD PTR fs:[r10+8], r11\n6:\nmov r8d, DWORD PTR fs:[r10+4]\ncmp r8d, 8192\njae {slow}\nshl r8, 12\nlea r9, [rip + {SLABS}]\nlea r9, [r9+rdi*8]\nmov rcx, QWORD PTR [r9+r8*1]\nlea r11, [rip + {MAG_MASKS}]\nlea rax, [rcx+8]\ntest eax, DWORD PTR [r11+rdi*4]\nje {slow}\nmov QWORD PTR [rcx], rsi\nmov QWORD PTR [r9+r8*1], rax\n7:\n.pushsection __rseq_cs, \"aw\"\n.balign 32\n3:\n.long 0, 0\n.quad 6b, 7b - 6b, 4f\n.popsection\n.pushsection .text.unlikely, \"ax\"\n.byte 0x0f, 0xb9, 0x3d\n.long 0x53053053\n4:\njmp 5b\n.popsection\nret\n.p2align 6",
         __rseq_offset = sym crate::front::__rseq_offset,
         slow = sym crate::front::push_slow,
         SLABS = sym crate::front::SLABS,

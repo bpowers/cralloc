@@ -37,14 +37,14 @@ variable {c : Spec.Slab.Ctx isa} {s : State}
 theorem gpr_σ3_rdi : (σ3 s).gpr .rdi = s.gpr .rdi := by
   simp only [σ3, shl12, RegUpd.gpr_setReg_of_ne _ _ (show ¬ Reg.rdi = .r8 by decide),
     RegUpd.gpr_setFlags, σ2, RegUpd.gpr_arithFlags, σ1, State.setReg32, σA, armReg, armB, armA,
-    RegUpd.gpr_setReg_of_ne _ _ (show ¬ Reg.rdi = .r10 by decide),
-    RegUpd.gpr_setReg_of_ne _ _ (show ¬ Reg.rdi = .rdx by decide)]
+    RegUpd.gpr_setReg_of_ne _ _ (show ¬ Reg.rdi = .r11 by decide),
+    RegUpd.gpr_setReg_of_ne _ _ (show ¬ Reg.rdi = .r10 by decide)]
 
 theorem gpr_σ3_rsi : (σ3 s).gpr .rsi = s.gpr .rsi := by
   simp only [σ3, shl12, RegUpd.gpr_setReg_of_ne _ _ (show ¬ Reg.rsi = .r8 by decide),
     RegUpd.gpr_setFlags, σ2, RegUpd.gpr_arithFlags, σ1, State.setReg32, σA, armReg, armB, armA,
-    RegUpd.gpr_setReg_of_ne _ _ (show ¬ Reg.rsi = .r10 by decide),
-    RegUpd.gpr_setReg_of_ne _ _ (show ¬ Reg.rsi = .rdx by decide)]
+    RegUpd.gpr_setReg_of_ne _ _ (show ¬ Reg.rsi = .r11 by decide),
+    RegUpd.gpr_setReg_of_ne _ _ (show ¬ Reg.rsi = .r10 by decide)]
 
 theorem σ4t_rdi : (σ4t s).gpr .rdi = s.gpr .rdi := by
   rw [σ4t, RegUpd.gpr_setReg_of_ne _ _ (by decide), gpr_σ3_rdi]

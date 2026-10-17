@@ -9,11 +9,11 @@ routine arms its sequence, then reads the CPU number and leaves for the slow pat
 if it has no slab:
 
 ```
-    mov   rdx, QWORD PTR [rip + __rseq_offset@GOTPCREL]
-    mov   rdx, QWORD PTR [rdx]          ; the rseq area's offset from fs
-    lea   r10, [rip + 3f]               ; the descriptor
-    mov   QWORD PTR fs:[rdx+8], r10     ; arm
-6:  mov   r8d, DWORD PTR fs:[rdx+4]    ; cpu_id
+    mov   r10, QWORD PTR [rip + __rseq_offset@GOTPCREL]
+    mov   r10, QWORD PTR [r10]          ; the rseq area's offset from fs
+    lea   r11, [rip + 3f]               ; the descriptor
+    mov   QWORD PTR fs:[r10+8], r11     ; arm
+6:  mov   r8d, DWORD PTR fs:[r10+4]    ; cpu_id
     cmp   r8d, 8192
     jae   slow
     shl   r8, 12
@@ -31,17 +31,18 @@ namespace VG.Impl.Slab.X86_64
 
 open VG.X86_64
 
-/-- Arming: `rdx` holds the rseq area's offset from the FS base, and
+/-- Arming, in `r10` and `r11` so that the third argument's register, `rdx`,
+is free: `r10` holds the rseq area's offset from the FS base, and
 `rseq_cs` the descriptor's address. -/
 def arm : List Instr := [
-  .movGot .rdx "__rseq_offset",
-  .mov .rdx (.mem { base := .rdx }),
-  .leaRseqCs .r10,
-  .store { base := .rdx, disp := 8, seg := some .fs } .r10]
+  .movGot .r10 "__rseq_offset",
+  .mov .r10 (.mem { base := .r10 }),
+  .leaRseqCs .r11,
+  .store { base := .r10, disp := 8, seg := some .fs } .r11]
 
 /-- The CPU number into `r8`, and the exit for one without a slab. -/
 def cpuSteps (cold : List Instr) (ext : Option String) : List (Step Instr Cond) := [
-  .instr (.mov32 .r8 (.mem { base := .rdx, disp := 4, seg := some .fs })),
+  .instr (.mov32 .r8 (.mem { base := .r10, disp := 4, seg := some .fs })),
   .instr (.alu32 .cmp .r8 (.imm 8192)),
   .exit .ae cold ext,
   .instr (.shift .shl .r8 12)]

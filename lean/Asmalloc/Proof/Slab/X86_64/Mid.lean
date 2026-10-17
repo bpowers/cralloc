@@ -58,18 +58,18 @@ theorem shl12 (h : Mid rs s m p) {r : Reg} (hr : r ∈ rs) : Mid rs s m (VG.Proo
 
 end Mid
 
-/-- The scratch registers of the inline routines, and of the out-of-line
-ones. -/
-def scratchI : List Reg := [.rax, .rcx, .rdx, .r8, .r9, .r10]
-def scratchT : List Reg := [.rax, .rcx, .rdx, .r8, .r9, .r10, .r11]
+/-- The scratch registers of the routines, inline (`scratchI`) and out of
+line (`scratchT`): the same six. -/
+def scratchI : List Reg := [.rax, .rcx, .r8, .r9, .r10, .r11]
+abbrev scratchT : List Reg := scratchI
 
 section
 
 variable {rs : List Reg} {c : Spec.Slab.Ctx isa} {s p : State} {m : Mem}
 
-theorem mid_σA (hrdx : .rdx ∈ rs) (hr10 : .r10 ∈ rs) : Mid rs s (m1 s) (σA s) :=
-  ((((Mid.mk rfl rfl rfl rfl rfl rfl rfl fun _ _ => rfl : Mid rs s s.mem s).setReg hrdx _).setReg
-    hrdx _).setReg hr10 _).withMem _
+theorem mid_σA (hb : .r10 ∈ rs) (hd : .r11 ∈ rs) : Mid rs s (m1 s) (σA s) :=
+  ((((Mid.mk rfl rfl rfl rfl rfl rfl rfl fun _ _ => rfl : Mid rs s s.mem s).setReg hb _).setReg
+    hb _).setReg hd _).withMem _
 
 theorem mid_σ1 (h8 : .r8 ∈ rs) (hA : Mid rs s (m1 s) (σA s)) : Mid rs s (m1 s) (σ1 s) :=
   hA.setReg32 h8 _

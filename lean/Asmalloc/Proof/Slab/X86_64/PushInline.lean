@@ -21,7 +21,7 @@ open VG.X86_64 VG.Spec.Slab VG.Impl.Slab.X86_64 VG.Proof.Slab.X86_64
 abbrev cx : Spec.Slab.Ctx isa := ⟨abi, .inline, pushInlineSig⟩
 
 def body : List (Step Instr Cond) := [
-  .instr (.mov32 .r8 (.mem { base := .rdx, disp := 4, seg := some .fs })),
+  .instr (.mov32 .r8 (.mem { base := .r10, disp := 4, seg := some .fs })),
   .instr (.alu32 .cmp .r8 (.imm 8192)),
   .exit .ae [] (some "miss"),
   .instr (.shift .shl .r8 12),
@@ -101,8 +101,8 @@ theorem σ7_rdi : (σ7 s).gpr .rdi = x s := by
     RegUpd.gpr_setReg_of_ne _ _ (show ¬ Reg.rdi = .r9 by decide)]
   simp only [σ3, shl12, RegUpd.gpr_setReg_of_ne _ _ (show ¬ Reg.rdi = .r8 by decide),
     RegUpd.gpr_setFlags, σ2, RegUpd.gpr_arithFlags, σ1, State.setReg32, σA, armReg, armB, armA,
-    RegUpd.gpr_setReg_of_ne _ _ (show ¬ Reg.rdi = .r10 by decide),
-    RegUpd.gpr_setReg_of_ne _ _ (show ¬ Reg.rdi = .rdx by decide)]
+    RegUpd.gpr_setReg_of_ne _ _ (show ¬ Reg.rdi = .r11 by decide),
+    RegUpd.gpr_setReg_of_ne _ _ (show ¬ Reg.rdi = .r10 by decide)]
   rfl
 
 /-- What a push that passes the test finds. -/
@@ -262,7 +262,7 @@ theorem end_P (hp : Pre s k) (hi : cx.InRange s) (ht : ¬ tst s = 0) :
 /-! ### Memory accesses -/
 
 theorem ev_cpu :
-    Instr.events (.mov32 .r8 (.mem { base := .rdx, disp := 4, seg := some .fs })) (σA s) (σ1 s) =
+    Instr.events (.mov32 .r8 (.mem { base := .r10, disp := 4, seg := some .fs })) (σA s) (σ1 s) =
       [⟨area s + 4, 4, false, (cpu32 s).toNat⟩] := by
   simp only [Instr.events, cpuOp_ea, σA_mem, toNat_read4, m1]
   rw [readW_writeW_disj (cpu_cs_disjoint s) (by decide)]; rfl
@@ -540,7 +540,7 @@ theorem rseqOk (hs : (pushInlineContract abi).pre s) :
 
 /-! ### The registers `asm!` must find kept -/
 
-def clobbers : List String := ["rax", "rcx", "rdx", "r8", "r9", "r10"]
+def clobbers : List String := ["rax", "rcx", "r8", "r9", "r10", "r11"]
 
 theorem names : ∀ r ∈ scratchI, r.name ∈ clobbers := by decide
 

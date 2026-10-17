@@ -20,7 +20,7 @@ open VG.X86_64 VG.Spec.Slab VG.Impl.Slab.X86_64 VG.Proof.Slab.X86_64
 abbrev cx : Spec.Slab.Ctx isa := ⟨abi, .table, pushSig⟩
 
 def body : List (Step Instr Cond) := [
-  .instr (.mov32 .r8 (.mem { base := .rdx, disp := 4, seg := some .fs })),
+  .instr (.mov32 .r8 (.mem { base := .r10, disp := 4, seg := some .fs })),
   .instr (.alu32 .cmp .r8 (.imm 8192)),
   .exit .ae [] (some "slow"),
   .instr (.shift .shl .r8 12),
@@ -275,7 +275,7 @@ theorem end_P (hp : Pre s k) (hi : cx.InRange s) (ht : ¬ tst s = 0) :
 /-! ### Memory accesses -/
 
 theorem ev_cpu :
-    Instr.events (.mov32 .r8 (.mem { base := .rdx, disp := 4, seg := some .fs })) (σA s) (σ1 s) =
+    Instr.events (.mov32 .r8 (.mem { base := .r10, disp := 4, seg := some .fs })) (σA s) (σ1 s) =
       [⟨area s + 4, 4, false, (cpu32 s).toNat⟩] := by
   simp only [Instr.events, cpuOp_ea, σA_mem, toNat_read4, m1]
   rw [readW_writeW_disj (cpu_cs_disjoint s) (by decide)]; rfl
