@@ -206,7 +206,7 @@ impl MagazineSize {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::generated::lean_constant;
+    use crate::generated::{lean_constant, lean_definition};
 
     #[test]
     fn the_masks_and_marker_match_the_routines() {
@@ -219,6 +219,32 @@ mod tests {
         assert_eq!(MARKER_SHIFT as u64, lean_constant("MARKER_SHIFT"));
         assert_eq!(SLOT_BYTES as u64, lean_constant("WORD_BYTES"));
         assert!((crate::classes::SMALL_COUNT as u64) < lean_constant("CLASS_LIMIT"));
+    }
+
+    /// `is_marker` and `Marker` transcribe Lean's `IsMarker` and `MARKER_SHIFT`; this fails if
+    /// either definition changes in Lean, so the transcription is revisited with it.
+    #[test]
+    fn markers_match_the_specification() {
+        assert_eq!(
+            lean_definition("IsMarker"),
+            "def IsMarker (w : BitVec 64) : Prop := w.toNat % 2 ^ MARKER_SHIFT = 1"
+        );
+        assert_eq!(
+            lean_definition("MARKER_SHIFT"),
+            "def MARKER_SHIFT : Nat := MAG_LOG_MAX + 3"
+        );
+        assert_eq!(MARKER_SHIFT as u64, lean_constant("MAG_LOG_MAX") + 3);
+        assert_eq!(MARKER_SHIFT as u64, lean_constant("MARKER_SHIFT"));
+        let is_marker_in_lean = |w: usize| w % (1 << MARKER_SHIFT) == 1;
+        let low = (1usize << MARKER_SHIFT) - 1;
+        for high in [0, 1, 0xdead_beef, usize::MAX >> MARKER_SHIFT] {
+            for low_bits in [0, 1, 2, 3, 8, 9, low - 1, low] {
+                let word = high << MARKER_SHIFT | low_bits;
+                assert_eq!(is_marker(word), is_marker_in_lean(word), "{word:#x}");
+                assert_eq!(Marker::from_word(word).is_some(), is_marker_in_lean(word));
+            }
+            assert!(is_marker_in_lean(Marker::new(high as u64).word()));
+        }
     }
 
     #[test]
