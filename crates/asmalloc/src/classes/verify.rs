@@ -222,7 +222,7 @@ fn zero_and_every_marker_fail_both_tests() {
 
 /// A `Marker` built from any generation is a marker word, reads back as itself and as the
 /// generation's low bits, and fails both slot tests for every magazine the generated routines
-/// accept, `4` to `2^16` slots (`MAG_LOG_MIN` and `MAG_LOG_MAX` in `lean/generated`), not only
+/// accept, `4` to `2^16` slots (`MAG_LOG_MIN` and `MAG_LOG_MAX` in `front/generated`), not only
 /// the sizes this crate makes.
 #[kani::proof]
 fn every_marker_round_trips_and_fails_every_routine_mask() {
