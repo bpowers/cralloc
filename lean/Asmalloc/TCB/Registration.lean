@@ -63,6 +63,11 @@ structure Registration (api : Api) (target : Target) where
   spSafe : code.all (fun i => !target.isa.writesSp i) = true := by sp_safe
   /-- `Artifact.features`. -/
   features : List String := []
+  /-- `Artifact.witnesses`. -/
+  witnesses : List target.isa.State
+  /-- `Artifact.witnessOk`. -/
+  witnessOk : (∃ w ∈ witnesses, contract.pre w) ∧
+    ∀ o ∈ code.outcomes, ∃ w ∈ witnesses, contract.pre w ∧ Visits target.isa code w o.1 o.2
 
 /-- The artifact of the implementation `r` of `api` on `target`: its module,
 signature and `writeArgs` are `api`'s, its name `api`'s followed by
@@ -89,5 +94,7 @@ def Api.artifact (api : Api) (target : Target) (r : Registration api target) : A
     cases api.contracts <;> exact (by trivial)
   spSafe := r.spSafe
   features := r.features
+  witnesses := r.witnesses
+  witnessOk := r.witnessOk
 
 end VG

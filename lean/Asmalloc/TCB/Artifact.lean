@@ -20,9 +20,13 @@ verified. Every function the generated Rust contains is an `Artifact`, and an
 2. **Restartable sequences.** Wherever the operating system may abort a
    restartable sequence of `c`, the sequence is armed and the contract's
    `abort` holds (`RseqOk`).
-3. **Non-vacuity.** Some state satisfies `k.pre`. This is only a sanity
-   check against an accidentally contradictory precondition; it does not
-   replace reviewing the contract.
+3. **Non-vacuity.** Some state satisfies `k.pre`, and for each way `c` can
+   branch (`Code.outcomes`: each `ite` both ways, and each exit and the
+   commit of a restartable sequence) some state satisfying `k.pre` takes it
+   (`Visits`), so no part of the code is verified only vacuously. The
+   artifact gives these states as data (`Artifact.witnesses`), so each is a
+   concrete state. This guards against an accidentally contradictory or
+   narrow precondition; it does not replace reviewing the contract.
 
 What a reviewer must read for each artifact is therefore: the ISA model and
 ABI of its target (`TCB/<arch>/`), its contract (in `Spec/`), and its Rust
@@ -247,11 +251,81 @@ def RseqOk (T : Target) (c : Prog T.isa) (k : Contract T.isa) (s : T.isa.State) 
       ∀ p', T.rely p p' → k.env p p' → k.pre p'
   | _ => True
 
+/-! ## Branch sites
+
+So that no part of a function is verified only vacuously, each way its code
+can branch must be taken by some state satisfying the precondition. The
+*sites* of `c` are its `ite`s, and for a restartable sequence each of its
+exits and its commit, numbered in the order they are written (a called
+function's are its own). `Code.outcomes` lists what must be witnessed: each
+`ite` both ways, and each exit and commit of a sequence taken. -/
+
+/-- Whether a step of a sequence's body is an exit. -/
+def Step.isExit {I C : Type} : Step I C → Bool
+  | .exit .. => true
+  | .instr _ => false
+
+/-- The number of branch sites of `c`. -/
+def Code.sites {I C : Type} : Code I C → Nat
+  | .block _ => 0
+  | .seq a b => a.sites + b.sites
+  | .ite _ t e => 1 + t.sites + e.sites
+  | .loop b _ => b.sites
+  | .call .. => 0
+  | .frame _ b _ => b.sites
+  | .rseq _ body => body.countP Step.isExit + 1
+
+/-- The site, the way taken, that each state satisfying the precondition
+must reach for some witness. -/
+def Code.outcomes {I C : Type} : Code I C → List (Nat × Bool)
+  | .block _ => []
+  | .seq a b => a.outcomes ++ b.outcomes.map fun (i, d) => (a.sites + i, d)
+  | .ite _ t e => [(0, true), (0, false)] ++ t.outcomes.map (fun (i, d) => (1 + i, d)) ++
+      e.outcomes.map fun (i, d) => (1 + t.sites + i, d)
+  | .loop b _ => b.outcomes
+  | .call .. => []
+  | .frame _ b _ => b.outcomes
+  | .rseq _ body => (List.range (body.countP Step.isExit + 1)).map (·, true)
+
+/-- Where the body of a restartable sequence ends, run from `s` and not
+aborted: the index of the exit it takes, or its length if it reaches its
+commit and completes it; `none` if a step faults or reads an undefined
+flag. -/
+def bodyEnd (M : ISA) : List (Step M.Instr M.Cond) → M.State → Option Nat
+  | [], _ => some 0
+  | .instr i :: rest, s => match M.exec i s with
+    | some s₁ => (bodyEnd M rest s₁).map (· + 1)
+    | none => none
+  | .exit c _ _ :: rest, s => match M.eval c s with
+    | some false => (bodyEnd M rest s).map (· + 1)
+    | some true => some 0
+    | none => none
+
+/-- A run of `c` from `s` takes the site `i` the way `d`: an `ite` with its
+condition `d`; a sequence's exit or commit (`d` true), the site of the exit
+it takes or of its commit (`bodyEnd`: the exits before it, `Code.sites`). -/
+inductive Visits (M : ISA) : Prog M → M.State → Nat → Bool → Prop
+  | seqL {c₁ c₂ s i d} : Visits M c₁ s i d → Visits M (.seq c₁ c₂) s i d
+  | seqR {c₁ c₂ s s₁ i d} : Exec M c₁ s s₁ → Visits M c₂ s₁ i d →
+      Visits M (.seq c₁ c₂) s (c₁.sites + i) d
+  | ite {c t e s d} : M.eval c s = some d → Visits M (.ite c t e) s 0 d
+  | iteT {c t e s i d} : M.eval c s = some true → Visits M t s i d →
+      Visits M (.ite c t e) s (1 + i) d
+  | iteF {c t e s i d} : M.eval c s = some false → Visits M e s i d →
+      Visits M (.ite c t e) s (1 + t.sites + i) d
+  | loopBody {b c s i d} : Visits M b s i d → Visits M (.loop b c) s i d
+  | loopNext {b c s s₁ i d} : Exec M b s s₁ → M.eval c s₁ = some true →
+      Visits M (.loop b c) s₁ i d → Visits M (.loop b c) s i d
+  | frame {p b q s s₁ i d} : M.push p s = some s₁ → Visits M b s₁ i d →
+      Visits M (.frame p b q) s i d
+  | rseq {arm body s s₁ j} : execBlock M arm s = some s₁ → bodyEnd M body s₁ = some j →
+      Visits M (.rseq arm body) s ((body.take j).countP Step.isExit) true
+
 /-- The proof obligation for emitting `c` on target `T` with contract `k`. -/
 def Verified (T : Target) (c : Prog T.isa) (k : Contract T.isa) : Prop :=
   (∀ s, k.pre s → ∃ s', Exec T.isa c s s' ∧ T.abiPreserved s s' ∧ k.post s s') ∧
   (∀ s, k.pre s → RseqOk T c k s) ∧
-  (∃ s, k.pre s)
+  (∃ s, k.pre s) ∧ (∀ o ∈ c.outcomes, ∃ s, k.pre s ∧ Visits T.isa c s o.1 o.2)
 
 /-- The states a run of the routine `c` from `s` may start its last attempt
 in, aborted any finite number of times: `s`, or a state the thread may
@@ -386,5 +460,13 @@ structure Artifact where
   function's `# Safety` section, which `doc` must end with when this is not
   empty. -/
   features : List String := []
+  /-- States satisfying the precondition, one taking each way the code can
+  branch (`Code.outcomes`): data, so each is a concrete state the emitter
+  can evaluate. -/
+  witnesses : List target.isa.State
+  /-- Some witness satisfies the precondition, and each outcome has one that
+  takes it. -/
+  witnessOk : (∃ w ∈ witnesses, contract.pre w) ∧
+    ∀ o ∈ code.outcomes, ∃ w ∈ witnesses, contract.pre w ∧ Visits target.isa code w o.1 o.2
 
 end VG

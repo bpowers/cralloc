@@ -47,9 +47,10 @@ since a retry must meet `k'`'s precondition: `hr`, for code with no
 sequence, is proved by default. -/
 theorem Verified.of_implies {T : Target} {c : Prog T.isa} {k k' : Contract T.isa}
     (h : Verified T c k) (hk : k.Implies k')
-    (hr : ∀ s, k'.pre s → RseqOk T c k' s := by exact fun _ _ => trivial) : Verified T c k' := by
+    (hr : ∀ s, k'.pre s → RseqOk T c k' s := by exact fun _ _ => trivial)
+    (hw : c.outcomes = [] := by exact rfl) : Verified T c k' := by
   obtain ⟨hc, -, -⟩ := h
-  refine ⟨fun s hs => ?_, hr, hk.sat⟩
+  refine ⟨fun s hs => ?_, hr, hk.sat, fun o ho => by rw [hw] at ho; cases ho⟩
   obtain ⟨s', he, ha, hp⟩ := hc s (hk.pre s hs)
   exact ⟨s', he, ha, hk.post s s' hs hp⟩
 
@@ -63,14 +64,16 @@ theorem RseqOk.of_ne {T : Target} {c : Prog T.isa} {k : Contract T.isa} {s : T.i
 
 /-- `Verified` from the correctness of `c` under a contract `k` that `k'`
 implies: the proof of a function against a contract of its own, moved to its
-shared contract. `hr`, for code with no restartable sequence, is proved by
-default. -/
+shared contract. `hr` and `hw` are proved by default for code with no
+restartable sequence and no branch, which has no outcome to witness beyond
+the satisfiability that `Contract.Implies` includes. -/
 theorem Verified.of_correct {T : Target} {c : Prog T.isa} {k k' : Contract T.isa}
     (hc : ∀ s, k.pre s → ∃ s', Exec T.isa c s s' ∧ T.abiPreserved s s' ∧ k.post s s')
     (hk : k.Implies k')
-    (hr : ∀ s, k'.pre s → RseqOk T c k' s := by exact fun _ _ => trivial) :
+    (hr : ∀ s, k'.pre s → RseqOk T c k' s := by exact fun _ _ => trivial)
+    (hw : c.outcomes = [] := by exact rfl) :
     Verified T c k' := by
-  refine ⟨fun s hs => ?_, hr, hk.sat⟩
+  refine ⟨fun s hs => ?_, hr, hk.sat, fun o ho => by rw [hw] at ho; cases ho⟩
   obtain ⟨s', he, ha, hp⟩ := hc s (hk.pre s hs)
   exact ⟨s', he, ha, hk.post s s' hs hp⟩
 
