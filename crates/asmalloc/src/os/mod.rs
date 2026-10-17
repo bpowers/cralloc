@@ -8,7 +8,7 @@
 //! The interface is what the design needs and no more: reserve address space, make parts of it
 //! writable, return pages, steer transparent huge pages, mark a page to be wiped in forked
 //! children, unmap, fence the restartable sequences of one CPU, report the rseq registration,
-//! draw a random number, and abort. Each implementation also fixes the [`Geometry`] the
+//! draw a random number, read a clock, and abort. Each implementation also fixes the [`Geometry`] the
 //! heap is laid out with, so the simulated OS can use a scaled-down heap.
 //!
 //! Ranges passed to the memory calls are page-aligned, a whole number of pages long, not empty,
@@ -171,6 +171,14 @@ pub unsafe trait Os: Sync {
     /// with overwhelming probability; it need not be fit for cryptography. Never fails: if the
     /// OS has no randomness to give, it returns something that varies with time and address.
     fn random(&self) -> u64;
+
+    /// A count that rises with wall-clock time, read without a system call: the CPU's
+    /// timestamp counter on Linux, a clock the test advances in the simulators. Its rate is not
+    /// known (on x86-64 it is somewhere between 1 and 6 GHz), and nothing promises that two
+    /// CPUs agree or that it never goes back. It paces the idle check and nothing else, so no
+    /// promise of this trait's safety contract depends on it: a wrong count only makes a drain
+    /// come sooner or later.
+    fn ticks(&self) -> u64;
 
     /// Writes `message` to standard error and ends the process abnormally.
     fn abort(&self, message: &str) -> !;

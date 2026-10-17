@@ -113,11 +113,13 @@ impl Slab {
         })
     }
 
-    /// Counts one slow-path entry on this slab's CPU. A hint for the idle check, so a lost
-    /// increment does no harm.
+    /// Counts one slow-path entry on this slab's CPU, and returns the new count. A hint for
+    /// the idle check, so a lost increment does no harm.
     #[inline]
-    pub fn note_activity(&self) {
-        self.activity.fetch_add(1, Ordering::Relaxed);
+    pub fn note_activity(&self) -> u64 {
+        self.activity
+            .fetch_add(1, Ordering::Relaxed)
+            .wrapping_add(1)
     }
 
     /// The activity counter.
@@ -126,7 +128,8 @@ impl Slab {
         self.activity.load(Ordering::Relaxed)
     }
 
-    /// What the idle check last recorded of the activity counter.
+    /// The idle check's sighting of the activity counter: the value it last saw and when
+    /// (`depot::heartbeat`).
     #[inline]
     pub(crate) fn seen(&self) -> &AtomicU64 {
         &self.seen
