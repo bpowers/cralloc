@@ -5,7 +5,7 @@
 //! up to a multiple of its alignment and served by the smallest class at least that large.
 //!
 //! Every class size is `q << e` with `q` one of 1, 3, 5 or 7 and `e >= 3`. The Kani harnesses in
-//! `verify.rs` prove, for every input:
+//! `verify.rs` (in the merge gate) and `verify_slow.rs` (on demand) prove, for every input:
 //!
 //! - **Alignment by construction.** If a size is a multiple of a power of two, so is its class.
 //!   Regions are aligned to their size and slots sit at multiples of the class size, so a slot

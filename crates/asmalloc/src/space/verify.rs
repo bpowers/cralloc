@@ -95,6 +95,12 @@ pub(super) fn locate_inverts_region_offsets(geometry: Geometry) {
             assert!(location.region.index() < plan.objects());
             assert!((location.offset as usize) < geometry.region_size());
             assert!(plan.region_offset(location.region) + location.offset as usize == delta);
+            // Whatever `slot_at` accepts is the start of a whole slot inside the region.
+            let class = any_class();
+            if let Some(index) = plan.slot_at(location, class) {
+                assert!(class.slot_offset(index) == location.offset as usize);
+                assert!(location.offset as usize + class.size() <= geometry.region_size());
+            }
         }
     }
 }

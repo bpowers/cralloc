@@ -19,21 +19,37 @@ root="$(cd "$here/.." && pwd)"
 cd "$root"
 pattern="${1:-}"
 
-# Prints "package<TAB>module::path::harness" for every harness.
+# Prints "package<TAB>module::path::harness" for every harness. Fails if a proof attribute has no
+# function after it, or a harness lives outside a verify.rs or verify_slow.rs file, rather than
+# silently skipping it.
 list() {
-  local file pkg rel module name
+  local file pkg rel module attrs names
   while IFS= read -r file; do
+    case "$file" in
+      */verify.rs|*/verify_slow.rs) ;;
+      *) echo "kani-all: $file has a harness outside verify.rs or verify_slow.rs" >&2; return 1 ;;
+    esac
     pkg="${file#crates/}"; pkg="${pkg%%/*}"
     rel="${file#crates/$pkg/src/}"; rel="${rel%.rs}"; rel="${rel%/mod}"
     module="${rel//\//::}"
-    grep -A6 '#\[kani::proof\]' "$file" | grep -oE '^\s*(pub(\([a-z]+\))? )?fn [a-z_0-9]+' \
-      | sed -E 's/.*fn //' | sort -u | while IFS= read -r name; do
-        printf '%s\t%s::%s\n' "$pkg" "$module" "$name"
-      done
-  done < <(grep -rl '#\[kani::proof\]' crates/*/src --include='*.rs' | sort)
+    attrs=$(grep -cE '#\[.*kani::proof' "$file")
+    # The first function after each proof attribute, however many lines of comments and
+    # attributes come between.
+    names=$(awk '/#\[.*kani::proof/ { want = 1; next }
+                 want && match($0, /fn [A-Za-z_0-9]+/) {
+                   print substr($0, RSTART + 3, RLENGTH - 3); want = 0 }' "$file")
+    if [ "$(printf '%s\n' "$names" | grep -c .)" -ne "$attrs" ]; then
+      echo "kani-all: $file has $attrs proof attributes but a different number of harnesses" >&2
+      return 1
+    fi
+    printf '%s\n' "$names" | while IFS= read -r name; do
+      printf '%s\t%s::%s\n' "$pkg" "$module" "$name"
+    done
+  done < <(grep -rlE '#\[.*kani::proof' crates/*/src --include='*.rs' | sort)
 }
 
-mapfile -t harnesses < <(list | grep -F -- "$pattern")
+all=$(list) || exit 2
+mapfile -t harnesses < <(printf '%s\n' "$all" | grep -F -- "$pattern")
 [ "${#harnesses[@]}" -gt 0 ] || { echo "kani-all: no harnesses match '$pattern'" >&2; exit 2; }
 failed=0
 for entry in "${harnesses[@]}"; do

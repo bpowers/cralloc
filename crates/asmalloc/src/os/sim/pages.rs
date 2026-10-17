@@ -15,6 +15,9 @@ pub(super) const PURGED: u8 = 1 << 2;
 pub(super) const HUGE: u8 = 1 << 3;
 /// Advised against huge pages.
 pub(super) const NO_HUGE: u8 = 1 << 4;
+/// The first page of a reservation, so that a range spanning two reservations can be told
+/// from one inside a single reservation.
+pub(super) const START: u8 = 1 << 5;
 
 /// Per-page state, one atomic byte per page, so concurrent calls on different pages never
 /// interfere and the simulator needs no lock.
@@ -31,6 +34,10 @@ impl Pages {
         }
     }
 
+    pub(super) fn len(&self) -> usize {
+        self.states.len()
+    }
+
     pub(super) fn get(&self, page: usize) -> u8 {
         self.states[page].load(Ordering::Acquire)
     }
@@ -40,8 +47,13 @@ impl Pages {
     /// one is taken, so racing reservations never overlap.
     pub(super) fn claim(&self, first: usize, count: usize) -> bool {
         for page in first..first + count {
+            let state = if page == first {
+                RESERVED | START
+            } else {
+                RESERVED
+            };
             let claimed = self.states[page]
-                .compare_exchange(0, RESERVED, Ordering::AcqRel, Ordering::Acquire)
+                .compare_exchange(0, state, Ordering::AcqRel, Ordering::Acquire)
                 .is_ok();
             if !claimed {
                 self.release(first, page - first);
@@ -79,6 +91,13 @@ impl Pages {
         self.states[first..first + count]
             .iter()
             .all(|state| state.load(Ordering::Acquire) & mask == mask)
+    }
+
+    /// Whether some page of `first..first + count` has any bit of `mask`.
+    pub(super) fn any(&self, first: usize, count: usize, mask: u8) -> bool {
+        self.states[first..first + count]
+            .iter()
+            .any(|state| state.load(Ordering::Acquire) & mask != 0)
     }
 
     /// The number of pages with all the bits of `mask`.

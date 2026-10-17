@@ -8,7 +8,8 @@
 
 /// Offset of `cpu_id_start` in the rseq area.
 pub const CPU_ID_START: usize = 0;
-/// Offset of `cpu_id`.
+/// Offset of `cpu_id`. It is -1 before the thread registers and -2 if its registration failed,
+/// so a thread is registered exactly when this field is not negative.
 pub const CPU_ID: usize = 4;
 /// Offset of `rseq_cs`, the pointer to the descriptor of the sequence in flight.
 pub const RSEQ_CS: usize = 8;

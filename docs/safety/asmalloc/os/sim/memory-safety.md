@@ -43,8 +43,11 @@ inside the memory. They establish exclusivity from their own `Os` contracts (SIM
 ## SIM-MEMORY-04: `dealloc` in `Drop for Memory`
 
 **Proof.** `base` and `layout` are exactly what `alloc_zeroed` returned and was given, and drop
-runs once. Raw pointers the simulator handed out may outlive it, but dereferencing them is
-unsafe and requires a live reservation. Every safe path into the memory (`Space::commit` and
-the rest) borrows the `SimOs` for the call, so it cannot run after the drop.
+runs once. Every `Space` borrows the `SimOs` it came from (and `SpaceCell` owns it), so no
+`Space` and no safe call through one exists after the drop. Raw pointers copied out of a `Space`
+may outlive it, but dereferencing them is unsafe, and the `Os` contract makes reservations valid
+only until the value that made them is dropped.
 
-**Review.** Pending: needs an adversarial review by a fresh agent.
+**Review.** 2026-10-17, fresh adversarial reviewer: SIM-MEMORY-01 to 03 accepted. SIM-MEMORY-04
+was not, because a `Space` could then outlive its `SimOs`; that is fixed by the borrow above,
+which awaits the same reviewer's check.

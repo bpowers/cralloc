@@ -28,15 +28,24 @@ code can read it.
    forever, which is what an immutable `static` requires.
 3. *Meaning.* `__rseq_size` is zero when glibc did not register (valgrind,
    `glibc.pthread.rseq=0`, a kernel without rseq). Otherwise it is the registered feature size,
-   which `registration()` passes to `RseqArea::new`. glibc registers every thread the same way,
-   so the values hold for all threads.
+   which `registration()` passes to `RseqArea::new`. The values describe the process, not a
+   thread.
 
-**What this does not cover.** Whether the registration includes a concurrency ID is a
-correctness fact the fast paths rely on for memory safety. glibc 2.35 to 2.39 report a size of
-32 on every kernel, which overstates it on kernels before 6.3. `LinuxOs::rseq` therefore caps the
-size by the kernel's own `AT_RSEQ_FEATURE_SIZE`; see KERNEL-05 in `kernel-safety.md`.
+**What this does not cover.** Two correctness facts that the fast paths rely on for memory
+safety are left to other code.
+
+- *Whether the registration includes a concurrency ID.* glibc 2.35 to 2.39 report a size of 32
+  on every kernel, which overstates it on kernels before 6.3. So `LinuxOs::rseq` caps the size by
+  the kernel's own `AT_RSEQ_FEATURE_SIZE`; see KERNEL-05 in `kernel-safety.md`.
+- *Whether the calling thread is registered.* glibc registers each thread as it starts. If a
+  later registration fails, for example under a seccomp filter installed after start-up, that
+  thread's `cpu_id` is -2 while `__rseq_size` is unchanged. The front end must check the
+  thread's own `cpu_id` (offset 4) is not negative before trusting its cid. This is stated on
+  `Os::rseq` and `os::rseq::CPU_ID`, and remains an obligation of the front end's ledger.
 
 **Machine checks.** `os::linux::kernel::tests::glibc_registers_rseq_with_a_concurrency_id`
 reads both values on the reference platform.
 
-**Review.** Pending: needs an adversarial review by a fresh agent.
+**Review.** 2026-10-17, fresh adversarial reviewer: points 1 and 2 accepted. Point 3 was not:
+it claimed registration was the same for every thread. It is corrected above, and the
+correction awaits the same reviewer's check.

@@ -17,9 +17,9 @@ membarrier(2), prctl(2), rt_sigaction(2), sigprocmask(2), tgkill(2), write(2)) a
 call is one the calling `Os` method's contract permits on `start..start + len`.
 
 **Proof.** The three calls take an address, a length and one integer, which is what is passed.
-None reads or writes user memory through its arguments. What they change, protections, page
-contents and mappings, is covered by the caller's contract (KERNEL-03), which this function
-forwards unchanged.
+None reads or writes user memory through its arguments. What they do to the range itself is
+covered by the caller's contract (KERNEL-03), which this function forwards unchanged:
+mprotect changes protection, madvise may zero contents, munmap removes the mapping.
 
 ## KERNEL-02: `membarrier`
 
@@ -78,7 +78,7 @@ or a zero count ends the loop, so the loop cannot run forever on a broken descri
 
 **Proof.** `PR_GET_AUXV` (Linux 6.4) copies at most `len` bytes of the auxiliary vector to
 `buffer`, returns the vector's full size, and requires the last two arguments to be zero. The
-buffer is a local `[[u64; 2]; 64]` of exactly `len` bytes, exclusively borrowed, so the write is
+buffer is a local `[[u64; 2]; 40]` of exactly `len` bytes, exclusively borrowed, so the write is
 in bounds and aliases nothing. On older kernels the call fails with EINVAL and touches nothing.
 
 **Why it exists (a correctness obligation that memory safety depends on).** The fast paths are
@@ -119,10 +119,16 @@ The comment above the impl maps each promise of the `Os` trait to the kernel beh
 provides it, and KERNEL-01 to KERNEL-06 cover the individual calls. The promises not covered by a
 single call:
 
-- *Interchangeable values.* `LinuxOs` is zero-sized, and every value is the same process's OS.
+- *Valid until unmapped or dropped.* Reservations are mappings of the process. Dropping a
+  `LinuxOs`, which is zero-sized, changes nothing.
 - *Reserved memory reads as zero.* Fresh private anonymous memory is zero-filled on first touch.
+- *`rseq` never overstates.* glibc's size, capped by the kernel's (KERNEL-05). It describes the
+  process; whether the calling thread is registered is for the caller to check through its own
+  `cpu_id` (GLIBC-01).
 - *Any thread, signal handlers, no allocation.* Every method is a fixed sequence of system calls
-  and arithmetic on locals, all async-signal-safe.
+  and arithmetic on locals, all async-signal-safe. The largest stack frame is
+  `kernel_rseq_feature_size`'s 640-byte buffer, called only from `rseq`, which is meant for
+  start-up.
 
 **Machine checks.** The tests in `kernel.rs`:
 
@@ -134,4 +140,9 @@ single call:
 - `rseq_fences_work_after_registering`.
 - `abort_ends_the_process_with_sigabrt`: a child process, checking the signal and the message.
 
-**Review.** Pending: needs an adversarial review by a fresh agent.
+**Review.** 2026-10-17, fresh adversarial reviewer:
+
+- Accepted: KERNEL-01 (with the wording fix now made), KERNEL-02 to KERNEL-06.
+- KERNEL-07's rseq bullet was not accepted, because registration is per thread. It and the
+  "interchangeable values" bullet are rewritten above and await the same reviewer's check.
+- The buffer was shrunk and is now iterated by reference, so it is no longer copied.

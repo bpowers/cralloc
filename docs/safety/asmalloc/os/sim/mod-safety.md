@@ -1,7 +1,8 @@
 # Safety ledger: `crates/asmalloc/src/os/sim/mod.rs`
 
 The simulated OS's `Os` implementation. Machine checks are as for `memory-safety.md`: the slow
-Kani harness on the `Tiny` shape, and Miri over the unit tests on the `Standard` shape.
+Kani harness on the `Tiny` shape, and Miri over the unit tests on the `Standard` shape
+(`scripts/miri`).
 
 ## SIM-OS-01: `unsafe impl<S: Shape> Os for SimOs<S>`
 
@@ -25,12 +26,16 @@ other promises:
 
 - Reservations are aligned: candidate offsets step through aligned addresses.
 - Reservations are disjoint from each other: per-page claims. They are disjoint from every
-  other allocation: they lie inside `memory`, which this value owns.
+  other allocation: they lie inside `memory`, which this value owns until it is dropped.
+- *Valid until unmapped or dropped*: the memory is freed only in `Drop`.
+- *A range in one live reservation of this value.* `checked_range` panics before touching
+  anything otherwise:
+  - The range is outside this value's memory.
+  - It contains a page that is not reserved.
+  - It spans two reservations. The first page of each reservation carries `START`. `unmap`
+    moves `START` to the remaining tail when it removes a reservation's head, as munmap does.
 - Commit keeps contents (it only sets flags). Purge zeroes exactly its range. An injected
   failure returns before any effect.
-- Values are not interchangeable, so the trait's alternative applies. A range from another
-  value's memory lies outside this value's allocation, because allocations are disjoint, so
-  `checked_range` panics before touching anything.
 - `abort` panics, so it does not return.
 
 ## SIM-OS-02: `self.memory.zero(...)` in `purge` and `unmap`
@@ -43,4 +48,8 @@ inside the memory; otherwise it panicked. The `purge` contract says no thread re
 the range during the call. The `unmap` contract says nothing touches it after the call begins.
 So the write races with nothing.
 
-**Review.** Pending: needs an adversarial review by a fresh agent.
+**Review.** 2026-10-17, fresh adversarial reviewer: SIM-OS-02 accepted. SIM-OS-01 was not: a
+`Space` could outlive its `SimOs`, and with address reuse a stale range could pass the check;
+also a range spanning two adjacent reservations was accepted. Both are fixed: a `Space` now
+borrows its OS, so it cannot outlive it, and the `START` flag detects spanning ranges. The fixes
+await the same reviewer's check.

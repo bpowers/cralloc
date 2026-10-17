@@ -229,6 +229,11 @@ impl Geometry {
 
     /// Whether a slot of this class fits in a region. Large classes that do not are served as
     /// runs of whole regions; in the design's geometry every class fits.
+    ///
+    /// Alignment by construction stops at the region size: a run of regions is only
+    /// region-aligned by default. A request whose alignment exceeds the region size (above
+    /// 4 GiB in the design's geometry, above 64 KiB in the simulator's standard one) must have
+    /// its run's first region chosen so that the run start is aligned.
     #[inline(always)]
     pub const fn fits_region(self, class: Class) -> bool {
         class.size() <= self.region_size()

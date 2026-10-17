@@ -17,15 +17,15 @@ use crate::classes::Class;
 
 /// A region number: less than [`MAX_REGIONS`], so it indexes the class-of-region table.
 ///
-/// A plan's object regions are `0..objects`; [`Plan::region`] and [`Plan::locate`] produce only
-/// those.
+/// Only [`Plan::region`], [`Plan::regions`] and [`Plan::locate`] make one, so outside this module
+/// a `RegionId` is always one of its plan's object regions.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
 pub struct RegionId(u16);
 
 impl RegionId {
     /// The region with this number, if it is below [`MAX_REGIONS`].
     #[inline(always)]
-    pub const fn new(index: usize) -> Option<RegionId> {
+    pub(super) const fn new(index: usize) -> Option<RegionId> {
         if index < MAX_REGIONS {
             Some(RegionId(index as u16))
         } else {
@@ -50,17 +50,12 @@ pub struct Location {
 }
 
 impl Location {
-    /// The index of the slot of `class` that holds this byte. No divide instruction.
+    /// The index of the slot-sized piece of the region that holds this byte, counting from the
+    /// region's base in steps of `class`'s size. No divide instruction. The piece may be the
+    /// unused tail of the region; [`Plan::slot_at`] checks for that.
     #[inline(always)]
     pub const fn slot(self, class: Class) -> u32 {
         class.divisor().divide(self.offset)
-    }
-
-    /// Whether this is the first byte of a slot of `class`, as every pointer the allocator hands
-    /// out is.
-    #[inline(always)]
-    pub const fn is_slot_start(self, class: Class) -> bool {
-        class.slot_offset(self.slot(class)) == self.offset as usize
     }
 }
 
@@ -163,6 +158,21 @@ impl Plan {
             None
         }
     }
+
+    /// The index of the slot of `class` that starts exactly at `location`, if there is one: the
+    /// offset is a multiple of the class size and the whole slot fits in the region. This is the
+    /// check a pointer from outside (C `free`, a checked build) must pass before it is trusted.
+    #[inline(always)]
+    pub const fn slot_at(self, location: Location, class: Class) -> Option<u32> {
+        let index = location.slot(class);
+        let start = class.slot_offset(index);
+        if start == location.offset as usize && start + class.size() <= self.geometry.region_size()
+        {
+            Some(index)
+        } else {
+            None
+        }
+    }
 }
 
 #[cfg(test)]
@@ -211,10 +221,24 @@ mod tests {
                 let location = plan.locate(plan.slot_offset(region, class, index)).unwrap();
                 assert_eq!(location.region, region);
                 assert_eq!(location.slot(class), index, "{class:?}");
-                assert!(location.is_slot_start(class));
+                assert_eq!(plan.slot_at(location, class), Some(index));
             }
             let inside = plan.locate(plan.slot_offset(region, class, 0) + 1).unwrap();
-            assert!(!inside.is_slot_start(class));
+            assert_eq!(plan.slot_at(inside, class), None);
         }
+    }
+
+    #[test]
+    fn the_unused_tail_of_a_region_is_no_slot() {
+        // A 4 GiB region holds 178956970 slots of 24 bytes, ending 16 bytes short of the end; an
+        // offset 16 bytes from the end is a multiple of 24 but not a slot.
+        let plan = Geometry::DESIGN.plan(1).unwrap();
+        let class = Class::of_size(24).unwrap();
+        let tail = plan.locate((1 << 32) - 16).unwrap();
+        assert_eq!(tail.slot(class), 178_956_970);
+        assert_eq!(Geometry::DESIGN.slots_per_region(class), 178_956_970);
+        assert_eq!(plan.slot_at(tail, class), None);
+        let last = plan.locate((1 << 32) - 40).unwrap();
+        assert_eq!(plan.slot_at(last, class), Some(178_956_969));
     }
 }

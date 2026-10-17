@@ -26,7 +26,7 @@ pub use faults::{Call, Faults};
 
 use self::faults::Injector;
 use self::memory::Memory;
-use self::pages::{HUGE, NO_HUGE, PURGED, Pages, RESERVED, WRITABLE};
+use self::pages::{HUGE, NO_HUGE, PURGED, Pages, RESERVED, START, WRITABLE};
 use super::{HugePages, Os, OsError, RseqArea};
 use crate::space::Geometry;
 use core::fmt;
@@ -198,6 +198,10 @@ impl<S: Shape> SimOs<S> {
             self.pages.all(first, count, RESERVED),
             "simulated {call:?} on memory that is not reserved: {start:?} + {len:#x}"
         );
+        assert!(
+            !self.pages.any(first + 1, count - 1, START),
+            "simulated {call:?} on a range spanning two reservations: {start:?} + {len:#x}"
+        );
         (first, count)
     }
 }
@@ -243,8 +247,9 @@ fn decode_rseq(word: u64) -> Option<RseqArea> {
 // - The memory is always readable and writable, so `commit` needs only to record it, and
 //   changes no contents. `purge` zeroes its range. `advise_huge` only records.
 // - An injected failure changes nothing.
-// - Values are not interchangeable, but `checked_range` detects a range of another value's
-//   memory and panics before touching anything.
+// - A range must lie in one live reservation of this value. `checked_range` panics before
+//   touching anything if it does not: outside this value's memory, not whole reserved pages,
+//   or spanning two reservations.
 // - There are no restartable sequences, so `fence` trivially waits for all of them.
 // - `abort` panics, so it does not return.
 // - All state is atomic, so any thread may call at any time; nothing here allocates after
@@ -317,6 +322,13 @@ unsafe impl<S: Shape> Os for SimOs<S> {
         // nothing touches it once the call begins. Zeroing keeps unreserved memory zero.
         unsafe { self.memory.zero(self.memory.offset_of(start), len) };
         self.pages.release(first, count);
+        // What remains of a reservation after its head is unmapped is a reservation of its own,
+        // as munmap leaves it. The page after the range already starts one if it is reserved
+        // and belongs to another.
+        let next = first + count;
+        if next < self.pages.len() && self.pages.get(next) & RESERVED != 0 {
+            self.pages.update(next, 1, START, 0);
+        }
         Ok(())
     }
 
@@ -492,6 +504,32 @@ mod tests {
         let base = os.reserve(page(), region()).unwrap();
         // SAFETY: deliberately breaks the contract; the simulator detects it before acting.
         unsafe { os.commit(base, 2 * page()).unwrap() };
+    }
+
+    #[test]
+    #[should_panic(expected = "spanning two reservations")]
+    fn a_call_spanning_two_reservations_panics() {
+        let os = Sim::with_capacity(region());
+        let a = os.reserve(page(), page()).unwrap();
+        let b = os.reserve(page(), page()).unwrap();
+        assert_eq!(b.addr().get(), a.addr().get() + page());
+        // SAFETY: deliberately breaks the contract; the simulator detects it before acting.
+        unsafe { os.commit(a, 2 * page()).unwrap() };
+    }
+
+    #[test]
+    fn the_tail_of_a_partly_unmapped_reservation_stands_alone() {
+        let os = Sim::with_capacity(region());
+        let a = os.reserve(3 * page(), page()).unwrap();
+        let tail = a.map_addr(|x| x.saturating_add(page()));
+        // SAFETY: whole reserved pages that nothing uses.
+        unsafe {
+            os.unmap(a, page()).unwrap();
+            os.commit(tail, 2 * page()).unwrap();
+        }
+        let b = os.reserve(page(), page()).unwrap();
+        assert_eq!(b, a, "the unmapped head is free again");
+        assert!(os.is_writable(tail, 2 * page()));
     }
 
     #[test]

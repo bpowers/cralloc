@@ -62,7 +62,9 @@ unsafe fn range_call(
     len: usize,
     arg: usize,
 ) -> Result<(), OsError> {
-    // SAFETY: passed through from the caller; these calls read and write no user memory.
+    // SAFETY: passed through from the caller. The calls read and write no user memory through
+    // their arguments; what they do to the range itself (madvise may zero it) is what the
+    // caller's contract permits.
     result(unsafe {
         syscall(
             number,
@@ -128,7 +130,10 @@ unsafe fn int_call(number: usize, a: usize, b: usize, c: usize) -> usize {
 /// `PR_GET_AUXV` exists from Linux 6.4; where it fails, or the entry is missing, this answers the
 /// original size, which turns the fast paths off on 6.3 rather than risk them anywhere.
 fn kernel_rseq_feature_size() -> u32 {
-    let mut auxv = [[0u64; 2]; 64];
+    // Linux 7.2 puts 22 entries in the vector on the reference host, `AT_RSEQ_FEATURE_SIZE`
+    // among the last. A truncated copy only loses the answer, which errs toward the original
+    // size. Iterating by reference keeps the 640-byte buffer from being copied.
+    let mut auxv = [[0u64; 2]; 40];
     let buffer: Reg = auxv.as_mut_ptr().cast();
     let len = size_of_val(&auxv);
     // SAFETY: prctl(PR_GET_AUXV) writes at most `len` bytes of the auxiliary vector into
@@ -143,7 +148,7 @@ fn kernel_rseq_feature_size() -> u32 {
     if copied.is_err() {
         return ORIGINAL_RSEQ_FEATURE_SIZE;
     }
-    for [kind, value] in auxv {
+    for &[kind, value] in auxv.iter() {
         match kind {
             AT_NULL => break,
             AT_RSEQ_FEATURE_SIZE => {
@@ -166,13 +171,13 @@ fn kernel_rseq_feature_size() -> u32 {
 //   `advise_huge` is MADV_HUGEPAGE or MADV_NOHUGEPAGE, which change neither.
 // - A failed call reports `-errno`; mprotect and madvise may have acted on part of the range,
 //   never beyond it.
-// - Every `LinuxOs` is the same process's OS, so values are interchangeable.
+// - Reservations are mappings of the process, valid until unmapped; dropping a `LinuxOs`
+//   changes nothing.
 // - `fence` is MEMBARRIER_CMD_PRIVATE_EXPEDITED_RSEQ, which returns after every thread of the
 //   process has been interrupted out of any rseq critical section; it fails with EPERM unless
 //   the process registered.
-// - `rseq` reads glibc's registration, which is per process and so the same for every thread,
-//   and caps its size by the kernel's feature size, so it never reports a concurrency ID the
-//   kernel does not maintain.
+// - `rseq` reads glibc's process-wide registration facts and caps the size by the kernel's
+//   feature size, so it never reports a concurrency ID the kernel does not maintain.
 // - `abort` ends with exit_group if the signal did not end the process first, so it does not
 //   return.
 // - None of the calls allocates or depends on thread state, so any thread may make them,
@@ -362,7 +367,7 @@ mod tests {
         let space = Space::reserve(&LinuxOs).unwrap();
         assert_eq!(space.plan().objects(), Geometry::DESIGN.max_objects());
         // SAFETY: the space was never published and nothing uses it.
-        unsafe { space.unmap(&LinuxOs).unwrap() };
+        unsafe { space.unmap().unwrap() };
     }
 
     #[test]

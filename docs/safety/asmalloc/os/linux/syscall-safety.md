@@ -51,4 +51,5 @@ instruction, and the compiler's model of what it does.
 `std::process::id`) and `results_decode_errors`. Every `LinuxOs` test in `kernel.rs` goes
 through this block.
 
-**Review.** Pending: needs an adversarial review by a fresh agent.
+**Review.** 2026-10-17, fresh adversarial reviewer: accepted (register convention, clobbers,
+`preserves_flags`, `nostack` and the red zone, memory, pointer-typed registers).

@@ -11,8 +11,8 @@
 //! heap is laid out with, so the simulated OS can use a scaled-down heap.
 //!
 //! Ranges passed to the memory calls are page-aligned, a whole number of pages long, not empty,
-//! and inside one live reservation from the same `Os`. [`crate::space::Space`] checks this and
-//! wraps the calls, so most code never calls them directly.
+//! and inside one live reservation made by the same `Os` value. [`crate::space::Space`] checks
+//! this and wraps the calls, so most code never calls them directly.
 
 #[cfg(all(target_os = "linux", target_arch = "x86_64", not(kani)))]
 pub mod linux;
@@ -82,11 +82,13 @@ pub enum HugePages {
 /// - After `purge` succeeds the range reads as zero and stays writable if it was.
 /// - `advise_huge` changes neither contents nor permissions.
 /// - A failed call may have taken effect on part of its range, but never beyond it.
-/// - Values of the type are interchangeable: a range reserved through one value may be passed
-///   to another, or the other detects it and aborts or panics without touching memory.
+/// - A reservation's memory stays valid until it is unmapped or the value that made it is
+///   dropped, whichever is first.
 /// - `fence` returns only after every restartable sequence that was in flight in the process
 ///   when it was called has completed or been aborted.
-/// - `rseq` reports the calling thread's registration truthfully.
+/// - `rseq` never overstates the process's registration: if it reports a concurrency ID, the
+///   kernel maintains `mm_cid` in every registered area. It does not promise that the calling
+///   thread is registered; see [`Os::rseq`].
 /// - `abort` does not return.
 /// - Every method may be called from any thread at any time, including from a signal handler,
 ///   and none of them allocates.
@@ -141,7 +143,14 @@ pub unsafe trait Os: Sync {
     /// (`MEMBARRIER_CMD_PRIVATE_EXPEDITED_RSEQ`). Fails unless [`Os::register_fence`] succeeded.
     fn fence(&self) -> Result<(), OsError>;
 
-    /// The calling thread's rseq registration, or `None` if it has none.
+    /// Where the rseq area is and how much of it the kernel maintains, or `None` if the process
+    /// has no registration.
+    ///
+    /// This describes the process, not the calling thread. glibc registers each thread as it
+    /// starts, and a registration that fails later (for example under a seccomp filter installed
+    /// after start-up) leaves that thread's `cpu_id` field at -2 while these facts stay the
+    /// same. Code that relies on a thread being registered must check the thread's own `cpu_id`
+    /// (`rseq::CPU_ID`) is not negative. Meant for start-up: on Linux each call is a system call.
     fn rseq(&self) -> Option<RseqArea>;
 
     /// Writes `message` to standard error and ends the process abnormally.

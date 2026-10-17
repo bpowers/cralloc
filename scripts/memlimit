@@ -37,7 +37,12 @@ to_bytes() {
   esac
 }
 
+# A user scope enforces MemoryMax only if the memory controller is delegated to the user's
+# systemd instance; without it the property is accepted and silently ignored.
+uid="$(id -u)"
+controllers="/sys/fs/cgroup/user.slice/user-$uid.slice/user@$uid.service/cgroup.controllers"
 if command -v systemd-run >/dev/null 2>&1 \
+   && grep -qw memory "$controllers" 2>/dev/null \
    && systemd-run --user --scope -q -p MemoryMax=64M -- true >/dev/null 2>&1; then
   # A transient scope puts the command and all its children in one cgroup. MemoryMax is a hard
   # cap enforced by the OOM killer inside that cgroup, and MemorySwapMax=0 stops it spilling

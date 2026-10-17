@@ -17,9 +17,9 @@ unsafe extern "C" {
     safe static __rseq_size: u32;
 }
 
-/// glibc's rseq registration for the calling thread, or `None` if there is none (valgrind,
-/// `glibc.pthread.rseq=0`, or a kernel without rseq). glibc registers every thread the same
-/// way, so the answer is the same on every thread.
+/// glibc's rseq registration facts, or `None` if the process has none (valgrind,
+/// `glibc.pthread.rseq=0`, or a kernel without rseq). They describe the process: a thread whose
+/// own registration failed after start-up still sees them, with its `cpu_id` field at -2.
 pub(super) fn registration() -> Option<RseqArea> {
     RseqArea::new(__rseq_offset, __rseq_size)
 }

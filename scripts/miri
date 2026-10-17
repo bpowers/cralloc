@@ -1,0 +1,12 @@
+#!/usr/bin/env bash
+# Run the allocator's unit tests under Miri with strict provenance, as the safety ledger cites.
+# On demand, not in the gate: it takes a few minutes. Tests too slow for Miri are marked
+# `#[cfg_attr(miri, ignore)]`; tests of the real kernel are not built under Miri.
+#
+# Usage: scripts/miri [cargo test arguments...], e.g. `scripts/miri -- os::sim`.
+set -euo pipefail
+here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+cd "$here/.."
+export MIRIFLAGS="${MIRIFLAGS:--Zmiri-strict-provenance}"
+exec "$here/memlimit" -m "${MIRI_MEM:-8G}" -t "${MIRI_TIMEOUT:-30m}" -- \
+  cargo +nightly miri test -p asmalloc "$@"
