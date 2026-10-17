@@ -685,25 +685,3 @@ fn purge_sets_zero_bits_only_inside() {
     assert!(host.is_zero(region, 0) && host.is_zero(region, 1));
     assert!(!host.is_zero(region, 2));
 }
-
-/// Carving commits the leaf bitmap the new slots need: with 8-byte slots in a 64 KiB region the
-/// leaf bitmap fills a page of its own before the header's page, and the test host fails any
-/// access to a metadata word that is not committed.
-#[test]
-fn carving_commits_the_leaf_bitmap_it_needs() {
-    let host = Host8::new(standard(), class(8), 1);
-    let region = host.region_at(0);
-    assert!(host.layout().fixed_commit().0 >= Standard::GEOMETRY.page_size());
-    let mut carved = Vec::new();
-    while let Carve::Got { first, count } = region::carve(&host, region, 200) {
-        carved.extend(first..first + count);
-        if carved.len() > 1000 {
-            break;
-        }
-    }
-    for &slot in &carved {
-        free_now(&host, region, slot);
-    }
-    assert_eq!(claim(&host, 64).len(), 64);
-    assert!(host.all_visible());
-}

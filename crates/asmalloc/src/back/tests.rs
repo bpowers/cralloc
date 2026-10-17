@@ -79,6 +79,29 @@ fn fill_hands_out_distinct_aligned_writable_slots_in_address_order() {
     assert_eq!(back.lookup(slots[0].wrapping_add(1)), None);
 }
 
+/// With 8-byte slots the leaf bitmap of a region fills a page of its own, ahead of the page the
+/// header shares with the summary, so it is committed only as carves need it. Freeing slots
+/// writes it; the simulator fails the test if a page was written before it was committed (at
+/// the next commit, purge or unmap of that page, at the latest when the heap is dropped).
+#[test]
+fn the_leaf_bitmap_is_committed_before_it_is_written() {
+    let state = state::<Standard>();
+    let back = state.get_or_reserve().unwrap();
+    let class = small(8);
+    let mut slots = fill(&back, class, 3000);
+    assert_eq!(slots.len(), 3000);
+    let region = back.space().locate(slots[0]).unwrap().region;
+    let meta = back.space().metadata(region);
+    let page = Standard::GEOMETRY.page_size();
+    assert!(
+        state.os().is_writable(meta, page),
+        "the leaf bitmap's first page"
+    );
+    back.launder(class, &mut slots);
+    assert_eq!(fill(&back, class, 3000).len(), 3000);
+    back.trim();
+}
+
 #[test]
 fn launder_then_fill_reuses_the_lowest_free_slots_first() {
     let state = state::<Standard>();
@@ -235,6 +258,58 @@ fn large_slots_say_when_they_are_zero() {
     assert!(purged.zeroed && painted(ptr.as_ptr(), class.size(), 0));
     back.free_by_address(purged.ptr);
     back.free_by_address(other.ptr);
+}
+
+/// Several large slots to a region (the native shape's 1 MiB regions hold sixteen 64 KiB
+/// slots): freeing them past the cap purges them, top down, until the count is under it; the
+/// pages leave the resident set; and the purged slots come back zeroed, with their zero bits
+/// set and cleared exactly once.
+#[test]
+#[cfg_attr(miri, ignore)]
+fn large_slots_past_the_cap_are_purged_and_come_back_zeroed() {
+    let state = state::<Native>();
+    let back = state.get_or_reserve().unwrap();
+    let os = state.os();
+    let class = large(64 << 10);
+    let cap = retained_cap(Native::GEOMETRY);
+    let n = 3 * cap / class.size();
+    let blocks: Vec<Block> = (0..n).map(|_| back.alloc(class).unwrap()).collect();
+    assert!(blocks.iter().all(|b| b.zeroed));
+    for b in &blocks {
+        paint(b.ptr.as_ptr(), class.size(), 0x5a);
+    }
+    let before = os.resident_bytes();
+    assert!(before >= n * class.size());
+    for b in &blocks {
+        back.free(b.ptr, class);
+    }
+    assert!(back.retained() <= cap, "{} > {cap}", back.retained());
+    let returned = before - os.resident_bytes();
+    assert!(returned >= (n * class.size()).saturating_sub(cap) - class.size());
+    let mut zeroed = 0;
+    let again: Vec<Block> = (0..n).map(|_| back.alloc(class).unwrap()).collect();
+    for b in &again {
+        if b.zeroed {
+            zeroed += 1;
+            assert!(painted(b.ptr.as_ptr(), class.size(), 0));
+        } else {
+            assert!(painted(b.ptr.as_ptr(), class.size(), 0x5a));
+        }
+    }
+    assert_eq!(
+        zeroed * class.size(),
+        returned.next_multiple_of(class.size())
+    );
+    for b in again {
+        back.free(b.ptr, class);
+    }
+    back.trim();
+    assert_eq!(back.retained(), 0);
+    assert!(
+        os.resident_bytes() < before / 8,
+        "trim leaves {} resident",
+        os.resident_bytes()
+    );
 }
 
 #[test]

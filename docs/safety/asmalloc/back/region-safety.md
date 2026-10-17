@@ -17,8 +17,10 @@ the pages stay below it, and no carve can hand out a slot that touches them. The
 1. *Every slot that touches the range is held by this thread.* `touching(unit)` gives slots
    `first..=last`, defined as `(start / size, (end - 1) / size)`; `Divisor::divide` is proved
    exact for every input (`classes::verify`, `classes::verify_slow`), so these are exactly the
-   slots that overlap the pages. The unit test `purge_passes_tile_the_carved_pages` checks it
-   against direct arithmetic for every class in three geometries, huge-page parts included.
+   slots that overlap the pages. Kani proves it outright on the tiny heap's regions
+   (`units_touch_exactly_their_slots_on_the_tiny_heap`, every class, watermark, cursor and
+   huge-page part), and the unit test `purge_passes_tile_the_carved_pages` checks it against
+   direct arithmetic in the standard and native geometries, huge-page parts included.
    Before the call, `purge_unit` claimed every one of them with `claim_exact`, word by word,
    each a compare-and-swap that succeeds only if all the word's bits for those slots are set
    (free) and clears them. If any claim failed it released what it
