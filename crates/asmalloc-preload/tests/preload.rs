@@ -54,7 +54,7 @@ fn program(name: &str) -> PathBuf {
     // Each test compiles into its own file, so tests running at once do not race on one.
     let exe = dir.join(format!("{name}-{:?}", std::thread::current().id()));
     let status = Command::new("cc")
-        .args(["-O2", "-pthread", "-o"])
+        .args(["-O2", "-pthread", "-ldl", "-o"])
         .arg(&exe)
         .arg(&source)
         .status()
@@ -93,7 +93,10 @@ fn same_with_and_without(make: impl Fn() -> Command) -> String {
 fn the_library_serves_malloc() {
     let exe = program("interposed");
     let out = run(true, &mut Command::new(&exe));
-    assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), "asmalloc");
+    assert_eq!(
+        String::from_utf8_lossy(&out.stdout).trim(),
+        format!("asmalloc {}", env!("CARGO_PKG_VERSION"))
+    );
     let out = run(false, &mut Command::new(&exe));
     assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), "other");
 }
