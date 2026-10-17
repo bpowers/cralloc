@@ -69,6 +69,22 @@ structure Target where
   /-- Whether the thread's restartable-sequence field points at the routine's
   descriptor in a state, as it must wherever the sequence may be aborted. -/
   armed : isa.State → Prop := fun _ => False
+  /-- Whether the target's functions are emitted inline: as an
+  `#[inline(always)]` function whose body is one `asm!` block, rather than a
+  naked function. Then `abiPreserved` is what `asm!` demands of the stack
+  (`options(nostack)`), and an artifact proves every register it does not
+  declare is preserved (`Artifact.clobbersOk`). -/
+  inline : Bool := false
+  /-- The names of the registers an inline function's arguments are passed
+  in, in order (`asm!`'s explicit register operands), and of the one its
+  result is returned in. -/
+  argRegs : List String := []
+  retReg : String := ""
+  /-- The registers an inline function's `asm!` block may name. -/
+  regs : List String := []
+  /-- `preservedExcept rs s s'`: every register not named in `rs` holds in
+  `s'` what it held in `s`. -/
+  preservedExcept : List String → isa.State → isa.State → Prop := fun _ _ _ => False
   /-- What an abort keeps: `rely p p'` when the thread, aborted in the state
   `p`, may resume at the abort handler in the state `p'`. The memory other
   threads may change meanwhile is the contract's (`Contract.env`). -/
@@ -459,6 +475,10 @@ structure Api where
   safety : List String
   /-- The operands its code names, by name (`Operand`). -/
   operands : List (String × Operand) := []
+  /-- The const generic parameters of an inline function, as Rust writes
+  them between `<` and `>` (`const CLASS: usize`), which its `const`
+  operands may use; none if empty. -/
+  generics : String := ""
 
 /-- The documentation of `api` on a target: its summary, then the paragraphs
 `notes`, then its `# Safety` section. -/
@@ -492,6 +512,8 @@ structure Artifact where
   consts : List (String × List (BitVec 64)) := []
   /-- The other operands its code names (`Operand`), from its `Api`. -/
   operands : List (String × Operand) := []
+  /-- `Api.generics`. -/
+  generics : String := ""
   code : Prog target.isa
   contract : Contract target.isa
   verified : Verified target code contract
@@ -530,6 +552,18 @@ structure Artifact where
   function's `# Safety` section, which `doc` must end with when this is not
   empty. -/
   features : List String := []
+  /-- On an inline target, the registers the code may change, by name, which
+  the emitter declares as `asm!` outputs (`out(<reg>) _`, or `inout` for an
+  argument's); the register the result is in is one besides. -/
+  clobbers : List String := []
+  /-- On an inline target, every run that completes or exits changes no
+  register but the clobbers and the result's: `asm!` requires every other
+  register to hold, when the block ends, what it held when it began. -/
+  clobbersOk : target.inline = true → ∀ s, contract.pre s →
+      (∀ s', Exec target.isa code s s' →
+        target.preservedExcept (clobbers ++ (if sig.ret.isSome then [target.retReg] else [])) s s') ∧
+      (∀ t s', ExecExit target.isa code s t s' → target.preservedExcept clobbers s s') := by
+    exact fun h => nomatch h
   /-- States satisfying the precondition, one taking each way the code can
   branch (`Code.outcomes`): data, so each is a concrete state the emitter
   can evaluate. -/

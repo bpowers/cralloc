@@ -145,6 +145,29 @@ def rely (p p' : State) : Prop :=
   p'.fsBase = p.fsBase ∧ p'.syms = p.syms ∧ p'.params = p.params ∧ p'.csDesc = p.csDesc ∧
   p'.unknowns = p.unknowns
 
+/-! ## Inline functions
+
+`inlineTarget` emits functions inline (`Target.inline`): an
+`#[inline(always)]` Rust function whose body is one `asm!` block with
+`options(nostack)`. The arguments are in the System V argument registers,
+named as explicit register operands, so `abi` describes where they are; the
+result is in `rax`. `asm!` requires the stack pointer, and every register
+the block does not declare as an output, to hold at its end what it held at
+its start (the Rust Reference, "Inline assembly", "Rules for inline
+assembly"), and the direction flag to be clear at both, which no modelled
+instruction changes. The block may not touch the stack below the stack
+pointer, which no region a contract grants contains. -/
+
+/-- Every register but those named in `rs` holds in `s'` what it held in
+`s`. -/
+def preservedExcept (rs : List String) (s s' : State) : Prop :=
+  ∀ r : Reg, r.name ∉ rs → s'.gpr r = s.gpr r
+
+/-- The registers an `asm!` block may declare as clobbers: all but the
+stack pointer. -/
+def clobberable : List Reg := [.rax, .rcx, .rdx, .rbx, .rbp, .rsi, .rdi,
+  .r8, .r9, .r10, .r11, .r12, .r13, .r14, .r15]
+
 abbrev target : Target where
   name := "x86_64"
   isa := isa
@@ -157,5 +180,17 @@ abbrev target : Target where
   arms := arms
   armed := armed
   rely := rely
+
+/-- The inline target: the same model, printer and argument registers, with
+the obligations of `asm!` in place of a call's (see above). -/
+abbrev inlineTarget : Target :=
+  { target with
+    name := "x86_64_inline"
+    abiPreserved := fun s s' => s'.gpr .rsp = s.gpr .rsp
+    inline := true
+    argRegs := argRegs.map Reg.name
+    retReg := "rax"
+    regs := clobberable.map Reg.name
+    preservedExcept := preservedExcept }
 
 end VG.X86_64

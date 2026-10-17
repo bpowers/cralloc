@@ -64,6 +64,14 @@ structure Registration (api : Api) (target : Target) where
   spSafe : code.all (fun i => !target.isa.writesSp i) = true := by sp_safe
   /-- `Artifact.features`. -/
   features : List String := []
+  /-- `Artifact.clobbers`. -/
+  clobbers : List String := []
+  /-- `Artifact.clobbersOk`. -/
+  clobbersOk : target.inline = true → ∀ s, contract.pre s →
+      (∀ s', Exec target.isa code s s' →
+        target.preservedExcept (clobbers ++ (if api.sig.ret.isSome then [target.retReg] else [])) s s') ∧
+      (∀ t s', ExecExit target.isa code s t s' → target.preservedExcept clobbers s s') := by
+    exact fun h => nomatch h
   /-- `Artifact.witnesses`. -/
   witnesses : List target.isa.State
   /-- `Artifact.witnessOk`. -/
@@ -82,6 +90,7 @@ def Api.artifact (api : Api) (target : Target) (r : Registration api target) : A
   doc := api.doc r.notes
   consts := r.consts
   operands := api.operands
+  generics := api.generics
   code := r.code
   contract := r.contract
   verified := r.verified
@@ -97,5 +106,7 @@ def Api.artifact (api : Api) (target : Target) (r : Registration api target) : A
   features := r.features
   witnesses := r.witnesses
   witnessOk := r.witnessOk
+  clobbers := r.clobbers
+  clobbersOk := r.clobbersOk
 
 end VG
