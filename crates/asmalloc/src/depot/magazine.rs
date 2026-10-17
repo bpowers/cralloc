@@ -33,7 +33,7 @@ use core::sync::atomic::Ordering::{AcqRel, Acquire, Relaxed, Release};
 const COMMIT_AHEAD: usize = 64 << 10;
 
 /// The unit of magazine numbers: the smallest magazine.
-const UNIT: usize = MagazineSize::MIN.bytes();
+pub(crate) const UNIT: usize = MagazineSize::MIN.bytes();
 
 /// A magazine's number: its offset in the magazine area in units of the smallest magazine.
 /// Never zero, because the first unit is not used.

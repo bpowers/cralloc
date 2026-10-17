@@ -19,6 +19,9 @@ mi-crate = ["dep:mimalloc"]
 # asmalloc itself. `executable` reads glibc's __rseq_offset with one direct load, which is
 # right for the workload binaries, which are executables.
 asmalloc = ["dep:asmalloc", "asmalloc/executable"]
+# asmalloc with a sampler thread that breaks its resident memory down by use (src/memstat.rs).
+# Not an allocator of its own: build.rs does not count it. For docs/research/memory.md.
+asmalloc-memstat = ["asmalloc"]
 # tikv-jemallocator itself, default features: its static, prefixed jemalloc build, which is
 # what a Rust service that depends on it gets.
 je = ["dep:tikv-jemallocator"]

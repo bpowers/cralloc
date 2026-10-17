@@ -32,6 +32,7 @@
 
 mod class;
 mod host;
+mod inspect;
 mod layout;
 pub mod policy;
 mod purge;

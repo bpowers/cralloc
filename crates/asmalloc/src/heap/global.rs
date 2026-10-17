@@ -8,7 +8,7 @@
 
 use super::Heap;
 use crate::classes::{Class, SmallClass};
-use crate::front::Real;
+use crate::front::{Real, Routines};
 use crate::os::Os;
 use crate::os::linux::LinuxOs;
 use core::alloc::{GlobalAlloc, Layout};
@@ -42,6 +42,12 @@ impl Asmalloc {
     /// `None` if no slot or run of the heap starts at `ptr`.
     pub fn usable_size(ptr: *const u8) -> Option<usize> {
         HEAP.usable_size(ptr)
+    }
+
+    /// Walks the heap for `visitor`: every region, free run and cached object. Read-only; a
+    /// racy snapshot when other threads are allocating. See [`crate::stats`].
+    pub fn inspect(visitor: &mut impl crate::stats::Visitor) {
+        HEAP.inspect(Real.slabs(), visitor);
     }
 
     /// Pops an object of `class` with the out-of-line routine (for callers that cannot inline,
