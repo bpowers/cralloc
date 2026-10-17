@@ -52,6 +52,10 @@ impl Machine for CheckCpu<'_> {
         self.thread.step(step)
     }
 
+    fn accessed(&self) {
+        self.thread.accessed();
+    }
+
     fn committed(&self) {
         self.thread.committed();
     }

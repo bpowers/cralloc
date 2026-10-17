@@ -2,7 +2,8 @@
 //! instrumented heap, use instead of the process's heap.
 //!
 //! The twins run on the simulator's threads (`SimOs::thread`), each on a CPU of its own, whose
-//! sequences the simulator's fence aborts as the kernel's would. A real thread borrows one of
+//! sequences the simulator's fence aborts as the kernel's would: once it returns, a sequence it
+//! aborted writes nothing more. A real thread borrows one of
 //! them for the length of one call (a *lease*, claimed with a compare-and-swap) and gives it back
 //! at the end, so no simulated thread is ever used by two real threads at once, and the twins'
 //! sequences on one CPU never interleave. A real thread that finds every simulated one taken
@@ -45,6 +46,12 @@ impl Machine for Processor<'_> {
         match self {
             Processor::Thread(thread) => thread.step(step),
             Processor::Unregistered => Ok(()),
+        }
+    }
+
+    fn accessed(&self) {
+        if let Processor::Thread(thread) = self {
+            thread.accessed();
         }
     }
 

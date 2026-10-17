@@ -12,7 +12,9 @@
 //! what the routines' plain `mov`s are on x86-64. A twin's memory accesses are not switch
 //! points for the interleaving checker (`sync::quiet`): `Machine::step` is the only place a
 //! twin can be interrupted, as the step before an instruction is the only place a sequence can
-//! be, so nothing can slip in between a step's check and its access. The ledger for the unsafe blocks here is
+//! be, so nothing can slip in between a step's check and its access. On threads that run freely
+//! the machine keeps a fence out of that gap instead, which is why a twin tells it when its
+//! magazine access and its commit are done (`Machine::accessed`, `Machine::committed`). The ledger for the unsafe blocks here is
 //! `docs/safety/asmalloc/front/twin-safety.md`.
 
 use super::routines::{Routines, StackPop, StackPush, StoreIfEqual};
@@ -70,6 +72,7 @@ impl<'a, M: Machine> Twin<'a, M> {
         let top = word.wrapping_byte_sub(SLOT_BYTES);
         // SAFETY: TWIN-01.
         let object = unsafe { slot(top) }.load(Relaxed);
+        self.machine.accessed();
         self.machine.step(Step::Commit)?;
         field.store(top, Release);
         self.machine.committed();
@@ -89,6 +92,7 @@ impl<'a, M: Machine> Twin<'a, M> {
         self.machine.step(Step::Access)?;
         // SAFETY: TWIN-01.
         unsafe { slot(word) }.store(object.as_ptr(), Relaxed);
+        self.machine.accessed();
         self.machine.step(Step::Commit)?;
         field.store(word.wrapping_byte_add(SLOT_BYTES), Release);
         self.machine.committed();
@@ -129,6 +133,7 @@ impl<'a, M: Machine> Twin<'a, M> {
         self.machine.step(Step::Access)?;
         // SAFETY: TWIN-02. `stack_push`'s caller promises `magazine` is a magazine it holds.
         unsafe { slot(magazine.as_ptr()) }.store(head, Relaxed);
+        self.machine.accessed();
         self.machine.step(Step::Commit)?;
         field.store(magazine.as_ptr(), Release);
         self.machine.committed();
@@ -148,6 +153,7 @@ impl<'a, M: Machine> Twin<'a, M> {
         self.machine.step(Step::Access)?;
         // SAFETY: TWIN-03.
         let next = unsafe { slot(head) }.load(Relaxed);
+        self.machine.accessed();
         self.machine.step(Step::Commit)?;
         field.store(next, Release);
         self.machine.committed();
@@ -213,6 +219,7 @@ mod tests {
     use crate::os::Pinned;
     use core::cell::Cell;
     use core::ptr;
+    use core::sync::atomic::AtomicBool;
     use std::boxed::Box;
     use std::vec::Vec;
 
@@ -523,6 +530,104 @@ mod tests {
         assert!(!cpu1.push(c, object(5)));
         assert_eq!(world.field(1, spare).load(Relaxed), marker);
         assert_eq!(world.field(1, Field::hot(c)).load(Relaxed), marker);
+    }
+
+    /// A simulated thread whose first push stops between the `Access` check and the store until
+    /// a fence has returned, or for long enough to show that none will.
+    struct Stall<'a> {
+        thread: crate::os::sim::SimThread<'a>,
+        at_access: &'a AtomicBool,
+        fenced: &'a AtomicBool,
+        stalled: Cell<bool>,
+    }
+
+    impl Machine for Stall<'_> {
+        fn cpu_id(&self) -> i32 {
+            self.thread.cpu_id()
+        }
+
+        fn step(&self, step: Step) -> Result<(), Aborted> {
+            self.thread.step(step)?;
+            if step == Step::Access && !self.stalled.replace(true) {
+                self.at_access.store(true, Release);
+                let give_up = std::time::Instant::now() + std::time::Duration::from_millis(50);
+                while !self.fenced.load(Acquire) && std::time::Instant::now() < give_up {
+                    std::thread::yield_now();
+                }
+            }
+            Ok(())
+        }
+
+        fn accessed(&self) {
+            self.thread.accessed();
+        }
+
+        fn committed(&self) {
+            self.thread.committed();
+        }
+    }
+
+    /// A drain in miniature against a push on a free-running thread. Once the fence has
+    /// returned with the marker in place, the drainer owns the magazine, and the aborted push
+    /// must not write to it: with the push stopped between its check and its store, the fence
+    /// has to wait for the store. When it did not, the store landed in a magazine the drainer
+    /// had already passed on, over an object another thread had pushed there, and the retried
+    /// push cached the first object a second time: one block, two owners.
+    #[test]
+    fn an_aborted_push_does_not_write_the_magazine_after_the_fence_returns() {
+        use crate::os::Os;
+        use crate::os::sim::{SimOs, Tiny};
+        let c = class();
+        let world = World::populated();
+        let os = SimOs::<Tiny>::new();
+        os.register_fence().unwrap();
+        // An address, so that the threads can share it.
+        let marker = 0x77 << MARKER_SHIFT | MARKER;
+        let (at_access, fenced) = (AtomicBool::new(false), AtomicBool::new(false));
+        let free_slot = &world.magazines[0].0[2];
+        let (pushed, old, at_return) = std::thread::scope(|scope| {
+            let push = scope.spawn(|| {
+                let stall = Stall {
+                    thread: os.thread(0),
+                    at_access: &at_access,
+                    fenced: &fenced,
+                    stalled: Cell::new(false),
+                };
+                Twin::new(world.slabs(), &stall).push(c, object(9))
+            });
+            let drain = scope.spawn(|| {
+                while !at_access.load(Acquire) {
+                    std::thread::yield_now();
+                }
+                let hot = world.field(0, Field::hot(c));
+                let old = hot
+                    .swap(ptr::without_provenance_mut(marker), Relaxed)
+                    .addr();
+                os.fence(0).unwrap();
+                let at_return = free_slot.load(Relaxed).addr();
+                fenced.store(true, Release);
+                (old, at_return)
+            });
+            let (old, at_return) = drain.join().unwrap();
+            (push.join().unwrap(), old, at_return)
+        });
+        assert_eq!(
+            old,
+            world.slot(0, 2).addr(),
+            "the drainer displaced the loaded magazine"
+        );
+        assert_eq!(world.field(0, Field::hot(c)).load(Relaxed).addr(), marker);
+        assert!(!pushed, "the push was aborted and its retry met the marker");
+        assert_eq!(
+            free_slot.load(Relaxed).addr(),
+            at_return,
+            "the aborted push wrote the magazine after the fence returned"
+        );
+        assert_eq!(
+            at_return,
+            object(9).as_ptr().addr(),
+            "the store came before the fence"
+        );
     }
 
     #[test]
