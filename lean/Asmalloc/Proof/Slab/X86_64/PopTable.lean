@@ -1,14 +1,16 @@
 module
 
-public import Asmalloc.Proof.Slab.X86_64.Table
+public import Asmalloc.Proof.Slab.X86_64.Word
 
 /-!
 # The out-of-line pop on x86-64
 
-`slab_pop` (`Impl.Slab.X86_64.popTable`), of the class in `rdi`, against
-`Spec.Slab.popContract`: its three ways out (no slab for the CPU and nothing
-to pop, both a tail call of the slow path; the commit), and in each its run,
-where it may be aborted, and its memory accesses.
+`slab_pop` (`Impl.Slab.X86_64.popTable`), of the class whose word in slab 0
+is at `rdi`, against `Spec.Slab.popContract`: its three ways out (no slab
+for the CPU and nothing to pop, both a tail call of the slow path; the
+commit), and in each its run, where it may be aborted, and its memory
+accesses. The mask comes from the table below the slabs and may be zero, in
+which case there is never anything to pop.
 -/
 
 @[expose] public section
@@ -26,135 +28,144 @@ def body : List (Step Instr Cond) := [
   .instr (.alu32 .cmp .r8 (.imm 8192)),
   .exit .ae [] (some "slow"),
   .instr (.shift .shl .r8 12),
-  .instr (.leaSym .r9 "SLABS"),
-  .instr (.lea .r9 { base := .r9, index := some .rdi, scale := 8 }),
-  .instr (.mov .rcx (.mem slabWord)),
-  .instr (.leaSym .r11 "MAG_MASKS"),
-  .instr (.alu32 .test .rcx maskEntry),
+  .instr (.mov .rcx (.mem (wordAt .rdi))),
+  .instr (.alu32 .test .rcx (maskAt .rdi)),
   .exit .e [] (some "slow"),
-  .instr (.mov .rax (.mem { base := .rcx, disp := -8 })),
   .instr (.lea .rcx { base := .rcx, disp := -8 }),
-  .instr (.store slabWord .rcx)]
+  .instr (.mov .rax (.mem { base := .rcx })),
+  .instr (.store (wordAt .rdi) .rcx)]
 
 theorem code_eq : popTable = .rseq arm body := rfl
 
 /-! ## The states -/
 
-def tst (s : State) : BitVec 32 := (wvt s).setWidth 32 &&& mk s
-def σ8 (s : State) : State := arithFlags (σ7t s) (tst s) false false
-def x (s : State) : BitVec 64 := s.mem.readW (wvt s - 8) 64
-def σ9 (s : State) : State := (σ8 s).setReg .rax (x s)
-def σ10 (s : State) : State := (σ9 s).setReg .rcx (wvt s - 8)
-def mEnd (s : State) : Mem := (m1 s).writeW (wat s) (wvt s - 8)
-def σ11 (s : State) : State := { σ10 s with mem := mEnd s }
+def tst (s : State) : BitVec 32 := (wv s).setWidth 32 &&& mk s
+def σ5 (s : State) : State := arithFlags (σ4 s) (tst s) false false
+def σ6 (s : State) : State := (σ5 s).setReg .rcx (wv s - 8)
+def x (s : State) : BitVec 64 := s.mem.readW (wv s - 8) 64
+def σ7 (s : State) : State := (σ6 s).setReg .rax (x s)
+def mEnd (s : State) : Mem := (m1 s).writeW (wa s) (wv s - 8)
+def σ8 (s : State) : State := { σ7 s with mem := mEnd s }
 
 /-! ## What the precondition gives -/
 
-structure Pre (s : State) (k : Nat) : Prop where
-  facts : Facts cx s
+/-- What a nonzero mask makes of the magazines: `2 ^ k` slots. -/
+structure Sized (s : State) (k : Nat) : Prop where
   hk : 2 ≤ k
   hk' : k ≤ 16
   mask : (mk s).toNat = magMask (2 ^ k)
   slots : cx.slots s = 2 ^ k
-  word : wat s = cx.word s
+  ok : cx.InRange s → WordOk (2 ^ k) (wv s)
+
+structure Pre (s : State) : Prop where
+  facts : Facts cx s
+  word : wa s = cx.word s
   maskA : maskA s = cx.maskAddr s
-  w : cx.w s = wvt s
-  ok : cx.InRange s → WordOk (2 ^ k) (wvt s)
+  w : cx.w s = wv s
+  mask : cx.mask s = (mk s).toNat
+  sized : cx.mask s ≠ 0 → ∃ k, Sized s k
 
-theorem cls_eq (s : State) : cx.cls s = (s.gpr .rdi).toNat := rfl
+theorem arg0 (s : State) : cx.arg s 0 = s.gpr .rdi := rfl
 
-theorem pre_of {s : State} (h : Facts cx s) : ∃ k, Pre s k := by
-  obtain ⟨-, -, -, -, ⟨k, hk, hk', hm⟩, hinv⟩ := h.pre
-  have hma : maskA s = cx.maskAddr s := maskA_eq hX (cls_eq s)
+theorem pre_of {s : State} (h : Facts cx s) : Pre s := by
+  obtain ⟨-, -, ⟨hoff, -⟩, -, ⟨hmok, hinv, -⟩⟩ := h.pre
+  have hma : maskA s = cx.maskAddr s := maskA_eq (arg0 s)
   have hmask : cx.mask s = (mk s).toNat := by
     show (s.mem.readW (cx.maskAddr s) 32).toNat = _; rw [← hma]; rfl
+  have hw : wa s = cx.word s := wa_eq hX (arg0 s) hoff
+  have hwv : cx.w s = wv s := by simp only [Spec.Slab.Ctx.w, mem_of (c := cx) hX, wv, hw]
+  refine ⟨h, hw, hma, hwv, hmask, fun hz => ?_⟩
+  obtain ⟨k, hk, hk', hm⟩ := hmok.resolve_left hz
   have hslots : cx.slots s = 2 ^ k := by
     rw [Spec.Slab.Ctx.slots, hm]; exact slotsOf_magMask k hk
-  have hw : wat s = cx.word s := wat_eq hX (cls_eq s)
-  have hwv : cx.w s = wvt s := by simp only [Spec.Slab.Ctx.w, mem_of (c := cx) hX, wvt, hw]
-  refine ⟨k, h, hk, hk', by rw [← hmask]; exact hm, hslots, hw, hma, hwv, fun hi => ?_⟩
-  have := (hinv.1 (cx.cpu s) hi).1
+  refine ⟨k, hk, hk', by rw [← hmask]; exact hm, hslots, fun hi => ?_⟩
+  have := (hinv hz (cx.cpu s) hi).1
   rw [← hslots, ← hwv]
   exact this
+
+/-- A zero mask: one-slot magazines. -/
+theorem slots_zero {s : State} (hz : cx.mask s = 0) : cx.slots s = 1 := by
+  rw [Spec.Slab.Ctx.slots, hz]; rfl
 
 /-! ## The steps after the slab word -/
 
 section Steps
 
-variable {s : State} {k : Nat}
+variable {s : State}
 
-theorem exec_test (hp : Pre s k) : exec (.alu32 .test .rcx maskEntry) (σ7t s) = some (σ8 s) := by
-  have hin := inMask hp.facts rfl hp.maskA (σ7t s) σ7t_rd σ7t_wr
-  rw [← maskEntry_ea (σ7t s) σ7t_r11 σ7t_rdi] at hin
-  rw [maskEntry, exec_test32_mem _ hin, maskEntry_ea _ σ7t_r11 σ7t_rdi, σ7t_mem,
-    m1_mask hp.facts rfl hp.maskA, σ7t_rcx]
-  rfl
+theorem exec_test (hp : Pre s) : exec (.alu32 .test .rcx (maskAt .rdi)) (σ4 s) = some (σ5 s) := by
+  rw [exec_test_mask hp.facts rfl hp.maskA .rcx σ4_rd σ4_wr σ4_mem σ4_rdi, σ4_rcx]; rfl
 
-theorem eval_test : eval .e (σ8 s) = some (tst s == 0) := rfl
+theorem eval_test : eval .e (σ5 s) = some (tst s == 0) := rfl
+
+/-- A test that passes was of a nonzero mask. -/
+theorem sized_of_test (hp : Pre s) (ht : ¬ tst s = 0) : ∃ k, Sized s k := by
+  refine hp.sized fun hz => ht ?_
+  rw [hp.mask] at hz
+  have : mk s = 0 := BitVec.eq_of_toNat_eq (by rw [hz]; rfl)
+  rw [tst, this]; exact BitVec.and_zero
 
 /-- What a pop that passes the test pops. -/
-theorem hit (hp : Pre s k) (hi : cx.InRange s) (ht : ¬ tst s = 0) :
-    IsSlot (2 ^ k) (wvt s) ∧ 2 ≤ slot (2 ^ k) (wvt s) ∧
-      (Mag.ofWord (2 ^ k) s.mem (wvt s)).pop =
-        some (x s, .stack (magBase (2 ^ k) (wvt s)) (items (2 ^ k) s.mem (wvt s)).dropLast) := by
-  have hm : ¬ (wvt s).toNat % (8 * 2 ^ k) < 16 := fun h' =>
-    ht ((test_iff32 hp.hk hp.hk' (wvt s) (mk s) hp.mask).mpr h')
-  exact pop_of_test (dvd_marker hp.hk') (hp.ok hi) hm
+theorem hit {k : Nat} (_hp : Pre s) (hk : Sized s k) (hi : cx.InRange s) (ht : ¬ tst s = 0) :
+    IsSlot (2 ^ k) (wv s) ∧ 2 ≤ slot (2 ^ k) (wv s) ∧
+      (Mag.ofWord (2 ^ k) s.mem (wv s)).pop =
+        some (x s, .stack (magBase (2 ^ k) (wv s)) (items (2 ^ k) s.mem (wv s)).dropLast) := by
+  have hm : ¬ (wv s).toNat % (8 * 2 ^ k) < 16 := fun h' =>
+    ht ((test_iff32 hk.hk hk.hk' (wv s) (mk s) hk.mask).mpr h')
+  exact pop_of_test (dvd_marker hk.hk') (hk.ok hi) hm
 
-theorem magRegion_eq (hp : Pre s k) : cx.magRegion s = ⟨magBase (2 ^ k) (wvt s), 8 * 2 ^ k⟩ := by
-  simp only [Spec.Slab.Ctx.magRegion, hp.slots, hp.w]
+theorem magRegion_eq {k : Nat} (hp : Pre s) (hk : Sized s k) :
+    cx.magRegion s = ⟨magBase (2 ^ k) (wv s), 8 * 2 ^ k⟩ := by
+  simp only [Spec.Slab.Ctx.magRegion, hk.slots, hp.w]
 
-theorem σ8_rd : (σ8 s).rd = s.rd := rfl
-theorem σ8_wr : (σ8 s).wr = s.wr := rfl
-theorem σ8_mem : (σ8 s).mem = m1 s := rfl
-theorem σ8_rcx : (σ8 s).gpr .rcx = wvt s := by rw [σ8, RegUpd.gpr_arithFlags, σ7t_rcx]
+theorem σ5_rd : (σ5 s).rd = s.rd := rfl
+theorem σ5_wr : (σ5 s).wr = s.wr := rfl
+theorem σ5_mem : (σ5 s).mem = m1 s := rfl
+theorem σ5_rcx : (σ5 s).gpr .rcx = wv s := by rw [σ5, RegUpd.gpr_arithFlags, σ4_rcx]
 
-theorem below_ea (σ : State) (h : σ.gpr .rcx = wvt s) :
-    σ.ea { base := .rcx, disp := -8 } = wvt s - 8 := by
-  rw [Access.ea_base_disp, Access.add_ofInt_neg_lit, h]; rfl
+theorem exec_lea8 : exec (.lea .rcx { base := .rcx, disp := -8 }) (σ5 s) = some (σ6 s) := by
+  rw [exec_lea, Access.offset_base_disp, Access.add_ofInt_neg_lit, σ5_rcx]; rfl
 
-theorem below_facts (hp : Pre s k) (hi : cx.InRange s) (ht : ¬ tst s = 0) :
-    InRegions (s.rd ++ s.wr) (wvt s - 8) 8 ∧ Region.Disjoint ⟨wvt s - 8, 8⟩ ⟨area s + 8, 8⟩ := by
-  obtain ⟨hs, h2, -⟩ := hit hp hi ht
-  have hsl : IsSlot (cx.slots s) (cx.w s) := by rw [hp.slots, hp.w]; exact hs
+theorem σ6_rcx : (σ6 s).gpr .rcx = wv s - 8 := RegUpd.gpr_setReg_self _ _ _
+theorem σ6_rd : (σ6 s).rd = s.rd := rfl
+theorem σ6_wr : (σ6 s).wr = s.wr := rfl
+theorem σ6_mem : (σ6 s).mem = m1 s := rfl
+
+theorem below_facts {k : Nat} (hp : Pre s) (hk : Sized s k) (hi : cx.InRange s) (ht : ¬ tst s = 0) :
+    InRegions (s.rd ++ s.wr) (wv s - 8) 8 ∧ Region.Disjoint ⟨wv s - 8, 8⟩ ⟨area s + 8, 8⟩ := by
+  obtain ⟨hs, h2, -⟩ := hit hp hk hi ht
+  have hsl : IsSlot (cx.slots s) (cx.w s) := by rw [hk.slots, hp.w]; exact hs
   have hmag := hp.facts.mag hi hsl
   have hcm := hp.facts.cs_mag hi hsl
-  rw [magRegion_eq hp] at hmag hcm
+  rw [magRegion_eq hp hk] at hmag hcm
   have hc := contains_below hs h2 (slot_lt _ _ (Nat.two_pow_pos k))
   exact ⟨(InRegions.of_mem hmag hc).append_right, hcm.symm.sub_left (sub_of_contains hc)⟩
 
-theorem exec_x (hp : Pre s k) (hi : cx.InRange s) (ht : ¬ tst s = 0) :
-    exec (.mov .rax (.mem { base := .rcx, disp := -8 })) (σ8 s) = some (σ9 s) := by
-  obtain ⟨hin, hdj⟩ := below_facts hp hi ht
-  have hin' : InRegions ((σ8 s).rd ++ (σ8 s).wr) ((σ8 s).ea { base := .rcx, disp := -8 }) 8 := by
-    rw [below_ea _ σ8_rcx, σ8_rd, σ8_wr]; exact hin
-  rw [exec_load _ hin', below_ea _ σ8_rcx, σ8_mem, m1, readW64_writeW_disj hdj]
+theorem exec_x {k : Nat} (hp : Pre s) (hk : Sized s k) (hi : cx.InRange s) (ht : ¬ tst s = 0) :
+    exec (.mov .rax (.mem { base := .rcx })) (σ6 s) = some (σ7 s) := by
+  obtain ⟨hin, hdj⟩ := below_facts hp hk hi ht
+  have hin' : InRegions ((σ6 s).rd ++ (σ6 s).wr) ((σ6 s).ea { base := .rcx }) 8 := by
+    rw [Access.ea_base, σ6_rcx, σ6_rd, σ6_wr]; exact hin
+  rw [exec_load _ hin', Access.ea_base, σ6_rcx, σ6_mem, m1, readW64_writeW_disj hdj]
   rfl
 
-theorem σ9_rcx : (σ9 s).gpr .rcx = wvt s := by
-  rw [σ9, RegUpd.gpr_setReg_of_ne _ _ (by decide), σ8_rcx]
+theorem σ7_rdi : (σ7 s).gpr .rdi = s.gpr .rdi := by
+  simp only [σ7, σ6, σ5, RegUpd.gpr_setReg_of_ne _ _ (show ¬ Reg.rdi = .rcx by decide),
+    RegUpd.gpr_setReg_of_ne _ _ (show ¬ Reg.rdi = .rax by decide), RegUpd.gpr_arithFlags, σ4_rdi]
+theorem σ7_r8 : (σ7 s).gpr .r8 = sh s := by
+  simp only [σ7, σ6, σ5, RegUpd.gpr_setReg_of_ne _ _ (show ¬ Reg.r8 = .rcx by decide),
+    RegUpd.gpr_setReg_of_ne _ _ (show ¬ Reg.r8 = .rax by decide), RegUpd.gpr_arithFlags, σ4_r8]
+theorem σ7_rcx : (σ7 s).gpr .rcx = wv s - 8 := by
+  rw [σ7, RegUpd.gpr_setReg_of_ne _ _ (by decide), σ6_rcx]
+theorem σ7_mem : (σ7 s).mem = m1 s := rfl
+theorem σ7_wr : (σ7 s).wr = s.wr := rfl
 
-theorem exec_lea8 : exec (.lea .rcx { base := .rcx, disp := -8 }) (σ9 s) = some (σ10 s) := by
-  rw [exec_lea, Access.offset_base_disp, Access.add_ofInt_neg_lit, σ9_rcx]; rfl
-
-theorem σ10_r9 : (σ10 s).gpr .r9 = r9t s := by
-  simp only [σ10, σ9, σ8, σ7t, σ6t, RegUpd.gpr_setReg_of_ne _ _ (show ¬ Reg.r9 = .rcx by decide),
-    RegUpd.gpr_setReg_of_ne _ _ (show ¬ Reg.r9 = .rax by decide),
-    RegUpd.gpr_setReg_of_ne _ _ (show ¬ Reg.r9 = .r11 by decide), RegUpd.gpr_arithFlags, σ5t_r9]
-theorem σ10_r8 : (σ10 s).gpr .r8 = sh s := by
-  simp only [σ10, σ9, σ8, σ7t, σ6t, RegUpd.gpr_setReg_of_ne _ _ (show ¬ Reg.r8 = .rcx by decide),
-    RegUpd.gpr_setReg_of_ne _ _ (show ¬ Reg.r8 = .rax by decide),
-    RegUpd.gpr_setReg_of_ne _ _ (show ¬ Reg.r8 = .r11 by decide), RegUpd.gpr_arithFlags, σ5t_r8]
-theorem σ10_rcx : (σ10 s).gpr .rcx = wvt s - 8 := RegUpd.gpr_setReg_self _ _ _
-theorem σ10_mem : (σ10 s).mem = m1 s := rfl
-theorem σ10_wr : (σ10 s).wr = s.wr := rfl
-
-theorem exec_commit (hp : Pre s k) (hi : cx.InRange s) :
-    exec (.store slabWord .rcx) (σ10 s) = some (σ11 s) := by
-  have hin : InRegions (σ10 s).wr ((σ10 s).ea slabWord) 8 := by
-    rw [slabWord_ea_t _ σ10_r9 σ10_r8, σ10_wr, hp.word]
+theorem exec_commit (hp : Pre s) (hi : cx.InRange s) :
+    exec (.store (wordAt .rdi) .rcx) (σ7 s) = some (σ8 s) := by
+  have hin : InRegions (σ7 s).wr ((σ7 s).ea (wordAt .rdi)) 8 := by
+    rw [wordAt_ea _ σ7_rdi σ7_r8, σ7_wr, hp.word]
     exact inWr (r := ⟨cx.word s, 8⟩) (hp.facts.word hi)
-  rw [exec_store _ hin, slabWord_ea_t _ σ10_r9 σ10_r8, σ10_rcx, σ10_mem]
+  rw [exec_store _ hin, wordAt_ea _ σ7_rdi σ7_r8, σ7_rcx, σ7_mem]
   rfl
 
 theorem inRange_iff : cx.InRange s ↔ (cpu32 s).toNat < 8192 := by
@@ -166,10 +177,10 @@ theorem eval_cpu_true (hi : ¬ cx.InRange s) : eval .ae (σ2 s) = some true := b
 theorem eval_cpu_false (hi : cx.InRange s) : eval .ae (σ2 s) = some false := by
   rw [eval_cpu, inRange_iff] at *; simp [hi]
 
-theorem eval_test_true (ht : tst s = 0) : eval .e (σ8 s) = some true := by
+theorem eval_test_true (ht : tst s = 0) : eval .e (σ5 s) = some true := by
   rw [eval_test, ht]; rfl
 
-theorem eval_test_false (ht : ¬ tst s = 0) : eval .e (σ8 s) = some false := by
+theorem eval_test_false (ht : ¬ tst s = 0) : eval .e (σ5 s) = some false := by
   rw [eval_test]; simpa using ht
 
 end Steps
@@ -180,71 +191,67 @@ section Cases
 
 variable {s : State} {k : Nat}
 
-theorem runBody_C (hp : Pre s k) (hi : ¬ cx.InRange s) :
+theorem runBody_C (hp : Pre s) (hi : ¬ cx.InRange s) :
     runBody isa body (σA s) = some (.exit "slow" (σ2 s)) := by
   rw [body, runBody_instr (exec_cpu hp.facts.toArm), runBody_instr exec_cmp,
     runBody_take (eval_cpu_true hi) execBlock_nil']
 
-theorem prefixes_C (hp : Pre s k) (hi : ¬ cx.InRange s) :
+theorem prefixes_C (hp : Pre s) (hi : ¬ cx.InRange s) :
     bodyPrefixes isa body (σA s) = [σA s, σ1 s, σ2 s] := by
   rw [body, bodyPrefixes_instr (exec_cpu hp.facts.toArm), bodyPrefixes_instr exec_cmp,
     bodyPrefixes_take (eval_cpu_true hi)]
 
-theorem end_C (hp : Pre s k) (hi : ¬ cx.InRange s) : bodyEnd isa body (σA s) = some 2 := by
+theorem end_C (hp : Pre s) (hi : ¬ cx.InRange s) : bodyEnd isa body (σA s) = some 2 := by
   rw [body, bodyEnd_instr (exec_cpu hp.facts.toArm), bodyEnd_instr exec_cmp,
     bodyEnd_take (eval_cpu_true hi)]
   rfl
 
-theorem runBody_T (hp : Pre s k) (hi : cx.InRange s) (ht : tst s = 0) :
-    runBody isa body (σA s) = some (.exit "slow" (σ8 s)) := by
+theorem runBody_T (hp : Pre s) (hi : cx.InRange s) (ht : tst s = 0) :
+    runBody isa body (σA s) = some (.exit "slow" (σ5 s)) := by
   rw [body, runBody_instr (exec_cpu hp.facts.toArm), runBody_instr exec_cmp,
-    runBody_skip (eval_cpu_false hi), runBody_instr exec_shl_r8, runBody_instr exec_r9t,
-    runBody_instr exec_r9idx, runBody_instr (exec_wordt hp.facts hi hp.word), runBody_instr exec_r11,
-    runBody_instr (exec_test hp), runBody_take (eval_test_true ht) execBlock_nil']
+    runBody_skip (eval_cpu_false hi), runBody_instr exec_shl_r8,
+    runBody_instr (exec_wordAt hp.facts hi hp.word), runBody_instr (exec_test hp),
+    runBody_take (eval_test_true ht) execBlock_nil']
 
-theorem prefixes_T (hp : Pre s k) (hi : cx.InRange s) (ht : tst s = 0) :
-    bodyPrefixes isa body (σA s) =
-      [σA s, σ1 s, σ2 s, σ2 s, σ3 s, σ4t s, σ5t s, σ6t s, σ7t s, σ8 s] := by
+theorem prefixes_T (hp : Pre s) (hi : cx.InRange s) (ht : tst s = 0) :
+    bodyPrefixes isa body (σA s) = [σA s, σ1 s, σ2 s, σ2 s, σ3 s, σ4 s, σ5 s] := by
   rw [body, bodyPrefixes_instr (exec_cpu hp.facts.toArm), bodyPrefixes_instr exec_cmp,
     bodyPrefixes_skip (eval_cpu_false hi), bodyPrefixes_instr exec_shl_r8,
-    bodyPrefixes_instr exec_r9t, bodyPrefixes_instr exec_r9idx,
-    bodyPrefixes_instr (exec_wordt hp.facts hi hp.word), bodyPrefixes_instr exec_r11,
-    bodyPrefixes_instr (exec_test hp), bodyPrefixes_take (eval_test_true ht)]
+    bodyPrefixes_instr (exec_wordAt hp.facts hi hp.word), bodyPrefixes_instr (exec_test hp),
+    bodyPrefixes_take (eval_test_true ht)]
 
-theorem end_T (hp : Pre s k) (hi : cx.InRange s) (ht : tst s = 0) :
-    bodyEnd isa body (σA s) = some 9 := by
+theorem end_T (hp : Pre s) (hi : cx.InRange s) (ht : tst s = 0) :
+    bodyEnd isa body (σA s) = some 6 := by
   rw [body, bodyEnd_instr (exec_cpu hp.facts.toArm), bodyEnd_instr exec_cmp,
-    bodyEnd_skip (eval_cpu_false hi), bodyEnd_instr exec_shl_r8, bodyEnd_instr exec_r9t,
-    bodyEnd_instr exec_r9idx, bodyEnd_instr (exec_wordt hp.facts hi hp.word), bodyEnd_instr exec_r11,
-    bodyEnd_instr (exec_test hp), bodyEnd_take (eval_test_true ht)]
+    bodyEnd_skip (eval_cpu_false hi), bodyEnd_instr exec_shl_r8,
+    bodyEnd_instr (exec_wordAt hp.facts hi hp.word), bodyEnd_instr (exec_test hp),
+    bodyEnd_take (eval_test_true ht)]
   rfl
 
-theorem runBody_P (hp : Pre s k) (hi : cx.InRange s) (ht : ¬ tst s = 0) :
-    runBody isa body (σA s) = some (.done (σ11 s)) := by
+theorem runBody_P (hp : Pre s) (hk : Sized s k) (hi : cx.InRange s) (ht : ¬ tst s = 0) :
+    runBody isa body (σA s) = some (.done (σ8 s)) := by
   rw [body, runBody_instr (exec_cpu hp.facts.toArm), runBody_instr exec_cmp,
-    runBody_skip (eval_cpu_false hi), runBody_instr exec_shl_r8, runBody_instr exec_r9t,
-    runBody_instr exec_r9idx, runBody_instr (exec_wordt hp.facts hi hp.word), runBody_instr exec_r11,
-    runBody_instr (exec_test hp), runBody_skip (eval_test_false ht), runBody_instr (exec_x hp hi ht),
-    runBody_instr exec_lea8, runBody_instr (exec_commit hp hi), runBody_nil']
+    runBody_skip (eval_cpu_false hi), runBody_instr exec_shl_r8,
+    runBody_instr (exec_wordAt hp.facts hi hp.word), runBody_instr (exec_test hp),
+    runBody_skip (eval_test_false ht), runBody_instr exec_lea8,
+    runBody_instr (exec_x hp hk hi ht), runBody_instr (exec_commit hp hi), runBody_nil']
 
-theorem prefixes_P (hp : Pre s k) (hi : cx.InRange s) (ht : ¬ tst s = 0) :
+theorem prefixes_P (hp : Pre s) (hk : Sized s k) (hi : cx.InRange s) (ht : ¬ tst s = 0) :
     bodyPrefixes isa body (σA s) =
-      [σA s, σ1 s, σ2 s, σ2 s, σ3 s, σ4t s, σ5t s, σ6t s, σ7t s, σ8 s, σ8 s, σ9 s, σ10 s] := by
+      [σA s, σ1 s, σ2 s, σ2 s, σ3 s, σ4 s, σ5 s, σ5 s, σ6 s, σ7 s] := by
   rw [body, bodyPrefixes_instr (exec_cpu hp.facts.toArm), bodyPrefixes_instr exec_cmp,
     bodyPrefixes_skip (eval_cpu_false hi), bodyPrefixes_instr exec_shl_r8,
-    bodyPrefixes_instr exec_r9t, bodyPrefixes_instr exec_r9idx,
-    bodyPrefixes_instr (exec_wordt hp.facts hi hp.word), bodyPrefixes_instr exec_r11,
-    bodyPrefixes_instr (exec_test hp), bodyPrefixes_skip (eval_test_false ht),
-    bodyPrefixes_instr (exec_x hp hi ht), bodyPrefixes_instr exec_lea8,
-    bodyPrefixes_last (exec_commit hp hi)]
+    bodyPrefixes_instr (exec_wordAt hp.facts hi hp.word), bodyPrefixes_instr (exec_test hp),
+    bodyPrefixes_skip (eval_test_false ht), bodyPrefixes_instr exec_lea8,
+    bodyPrefixes_instr (exec_x hp hk hi ht), bodyPrefixes_last (exec_commit hp hi)]
 
-theorem end_P (hp : Pre s k) (hi : cx.InRange s) (ht : ¬ tst s = 0) :
-    bodyEnd isa body (σA s) = some 13 := by
+theorem end_P (hp : Pre s) (hk : Sized s k) (hi : cx.InRange s) (ht : ¬ tst s = 0) :
+    bodyEnd isa body (σA s) = some 10 := by
   rw [body, bodyEnd_instr (exec_cpu hp.facts.toArm), bodyEnd_instr exec_cmp,
-    bodyEnd_skip (eval_cpu_false hi), bodyEnd_instr exec_shl_r8, bodyEnd_instr exec_r9t,
-    bodyEnd_instr exec_r9idx, bodyEnd_instr (exec_wordt hp.facts hi hp.word), bodyEnd_instr exec_r11,
-    bodyEnd_instr (exec_test hp), bodyEnd_skip (eval_test_false ht), bodyEnd_instr (exec_x hp hi ht),
-    bodyEnd_instr exec_lea8, bodyEnd_instr (exec_commit hp hi), bodyEnd_nil']
+    bodyEnd_skip (eval_cpu_false hi), bodyEnd_instr exec_shl_r8,
+    bodyEnd_instr (exec_wordAt hp.facts hi hp.word), bodyEnd_instr (exec_test hp),
+    bodyEnd_skip (eval_test_false ht), bodyEnd_instr exec_lea8,
+    bodyEnd_instr (exec_x hp hk hi ht), bodyEnd_instr (exec_commit hp hi), bodyEnd_nil']
   rfl
 
 /-! ### Memory accesses -/
@@ -255,56 +262,49 @@ theorem ev_cpu :
   simp only [Instr.events, cpuOp_ea, σA_mem, toNat_read4, m1]
   rw [readW_writeW_disj (cpu_cs_disjoint s) (by decide)]; rfl
 
-theorem ev_word (hp : Pre s k) (hi : cx.InRange s) :
-    Instr.events (.mov .rcx (.mem slabWord)) (σ5t s) (σ6t s) = [⟨wat s, 8, false, (wvt s).toNat⟩] := by
-  simp only [Instr.events, slabWord_ea_t _ σ5t_r9 σ5t_r8, σ5t_mem, toNat_read8, m1]
-  rw [readW64_writeW_disj (by rw [hp.word]; exact (hp.facts.cs_word hi).symm)]; rfl
+theorem ev_mask (hp : Pre s) :
+    Instr.events (.alu32 .test .rcx (maskAt .rdi)) (σ4 s) (σ5 s) = [⟨maskA s, 4, false, (mk s).toNat⟩] :=
+  ev_test_mask hp.facts rfl hp.maskA .rcx σ4_mem σ4_rdi
 
-theorem ev_mask (hp : Pre s k) :
-    Instr.events (.alu32 .test .rcx maskEntry) (σ7t s) (σ8 s) = [⟨maskA s, 4, false, (mk s).toNat⟩] := by
-  simp only [Instr.events, maskEntry, maskEntry_ea _ σ7t_r11 σ7t_rdi, σ7t_mem, toNat_read4,
-    m1_mask hp.facts rfl hp.maskA]
-
-theorem ev_x (hp : Pre s k) (hi : cx.InRange s) (ht : ¬ tst s = 0) :
-    Instr.events (.mov .rax (.mem { base := .rcx, disp := -8 })) (σ8 s) (σ9 s) =
-      [⟨wvt s - 8, 8, false, (x s).toNat⟩] := by
-  obtain ⟨-, hdj⟩ := below_facts hp hi ht
-  simp only [Instr.events, below_ea _ σ8_rcx, σ8_mem, toNat_read8, m1]
+theorem ev_x (hp : Pre s) (hk : Sized s k) (hi : cx.InRange s) (ht : ¬ tst s = 0) :
+    Instr.events (.mov .rax (.mem { base := .rcx })) (σ6 s) (σ7 s) =
+      [⟨wv s - 8, 8, false, (x s).toNat⟩] := by
+  obtain ⟨-, hdj⟩ := below_facts hp hk hi ht
+  simp only [Instr.events, Access.ea_base, σ6_rcx, σ6_mem, toNat_read8, m1]
   rw [readW64_writeW_disj hdj]; rfl
 
 theorem ev_commit :
-    Instr.events (.store slabWord .rcx) (σ10 s) (σ11 s) = [⟨wat s, 8, true, (wvt s - 8).toNat⟩] := by
-  simp only [Instr.events, slabWord_ea_t _ σ10_r9 σ10_r8, toNat_read8]
-  rw [show (σ11 s).mem = mEnd s from rfl, mEnd, Mem.readW_writeW_self64]
+    Instr.events (.store (wordAt .rdi) .rcx) (σ7 s) (σ8 s) = [⟨wa s, 8, true, (wv s - 8).toNat⟩] := by
+  simp only [Instr.events, wordAt_ea _ σ7_rdi σ7_r8, toNat_read8]
+  rw [show (σ8 s).mem = mEnd s from rfl, mEnd, Mem.readW_writeW_self64]
 
-theorem events_C (hp : Pre s k) (hi : ¬ cx.InRange s) :
+theorem events_C (hp : Pre s) (hi : ¬ cx.InRange s) :
     bodyEvents isa body (σA s) = [⟨area s + 4, 4, false, (cpu32 s).toNat⟩] := by
   rw [body, bodyEvents_instr (exec_cpu hp.facts.toArm), bodyEvents_instr exec_cmp,
     bodyEvents_take (eval_cpu_true hi)]
   simp only [isa, ev_cpu]; rfl
 
-theorem events_T (hp : Pre s k) (hi : cx.InRange s) (ht : tst s = 0) :
+theorem events_T (hp : Pre s) (hi : cx.InRange s) (ht : tst s = 0) :
     bodyEvents isa body (σA s) =
-      [⟨area s + 4, 4, false, (cpu32 s).toNat⟩, ⟨wat s, 8, false, (wvt s).toNat⟩,
+      [⟨area s + 4, 4, false, (cpu32 s).toNat⟩, ⟨wa s, 8, false, (wv s).toNat⟩,
         ⟨maskA s, 4, false, (mk s).toNat⟩] := by
   rw [body, bodyEvents_instr (exec_cpu hp.facts.toArm), bodyEvents_instr exec_cmp,
-    bodyEvents_skip (eval_cpu_false hi), bodyEvents_instr exec_shl_r8, bodyEvents_instr exec_r9t,
-    bodyEvents_instr exec_r9idx, bodyEvents_instr (exec_wordt hp.facts hi hp.word),
-    bodyEvents_instr exec_r11, bodyEvents_instr (exec_test hp), bodyEvents_take (eval_test_true ht)]
-  simp only [isa, ev_cpu, ev_word hp hi, ev_mask hp]; rfl
+    bodyEvents_skip (eval_cpu_false hi), bodyEvents_instr exec_shl_r8,
+    bodyEvents_instr (exec_wordAt hp.facts hi hp.word), bodyEvents_instr (exec_test hp),
+    bodyEvents_take (eval_test_true ht)]
+  simp only [isa, ev_cpu, ev_wordAt hp.facts hi hp.word, ev_mask hp]; rfl
 
-theorem events_P (hp : Pre s k) (hi : cx.InRange s) (ht : ¬ tst s = 0) :
+theorem events_P (hp : Pre s) (hk : Sized s k) (hi : cx.InRange s) (ht : ¬ tst s = 0) :
     bodyEvents isa body (σA s) =
-      [⟨area s + 4, 4, false, (cpu32 s).toNat⟩, ⟨wat s, 8, false, (wvt s).toNat⟩,
-        ⟨maskA s, 4, false, (mk s).toNat⟩, ⟨wvt s - 8, 8, false, (x s).toNat⟩,
-        ⟨wat s, 8, true, (wvt s - 8).toNat⟩] := by
+      [⟨area s + 4, 4, false, (cpu32 s).toNat⟩, ⟨wa s, 8, false, (wv s).toNat⟩,
+        ⟨maskA s, 4, false, (mk s).toNat⟩, ⟨wv s - 8, 8, false, (x s).toNat⟩,
+        ⟨wa s, 8, true, (wv s - 8).toNat⟩] := by
   rw [body, bodyEvents_instr (exec_cpu hp.facts.toArm), bodyEvents_instr exec_cmp,
-    bodyEvents_skip (eval_cpu_false hi), bodyEvents_instr exec_shl_r8, bodyEvents_instr exec_r9t,
-    bodyEvents_instr exec_r9idx, bodyEvents_instr (exec_wordt hp.facts hi hp.word),
-    bodyEvents_instr exec_r11, bodyEvents_instr (exec_test hp), bodyEvents_skip (eval_test_false ht),
-    bodyEvents_instr (exec_x hp hi ht), bodyEvents_instr exec_lea8,
-    bodyEvents_instr (exec_commit hp hi), bodyEvents_nil']
-  simp only [ev_cpu, ev_word hp hi, ev_mask hp, ev_x hp hi ht, ev_commit]; rfl
+    bodyEvents_skip (eval_cpu_false hi), bodyEvents_instr exec_shl_r8,
+    bodyEvents_instr (exec_wordAt hp.facts hi hp.word), bodyEvents_instr (exec_test hp),
+    bodyEvents_skip (eval_test_false ht), bodyEvents_instr exec_lea8,
+    bodyEvents_instr (exec_x hp hk hi ht), bodyEvents_instr (exec_commit hp hi), bodyEvents_nil']
+  simp only [ev_cpu, ev_wordAt hp.facts hi hp.word, ev_mask hp, ev_x hp hk hi ht, ev_commit]; rfl
 
 end Cases
 
@@ -314,17 +314,14 @@ section Mids
 
 variable {s : State}
 
-theorem mσ2 : Mid scratchT s (m1 s) (σ2 s) :=
+theorem mσ2 : Mid scratchI s (m1 s) (σ2 s) :=
   mid_σ2 (mid_σ1 (by decide) (mid_σA (by decide) (by decide)))
-theorem mσ3 : Mid scratchT s (m1 s) (σ3 s) := mid_σ3 (by decide) mσ2
-theorem mσ4t : Mid scratchT s (m1 s) (σ4t s) := (mσ7t mσ3 (by decide) (by decide) (by decide)).1
-theorem mσ5t : Mid scratchT s (m1 s) (σ5t s) := (mσ7t mσ3 (by decide) (by decide) (by decide)).2.1
-theorem mσ6t : Mid scratchT s (m1 s) (σ6t s) := (mσ7t mσ3 (by decide) (by decide) (by decide)).2.2.1
-theorem mσ7 : Mid scratchT s (m1 s) (σ7t s) := (mσ7t mσ3 (by decide) (by decide) (by decide)).2.2.2
-theorem mσ8 : Mid scratchT s (m1 s) (σ8 s) := mσ7.arithFlags _ _ _
-theorem mσ9 : Mid scratchT s (m1 s) (σ9 s) := mσ8.setReg (by decide) _
-theorem mσ10 : Mid scratchT s (m1 s) (σ10 s) := mσ9.setReg (by decide) _
-theorem mσ11 : Mid scratchT s (mEnd s) (σ11 s) := mσ10.withMem _
+theorem mσ3 : Mid scratchI s (m1 s) (σ3 s) := mid_σ3 (by decide) mσ2
+theorem mσ4' : Mid scratchI s (m1 s) (σ4 s) := mσ4 mσ3 (by decide)
+theorem mσ5 : Mid scratchI s (m1 s) (σ5 s) := mσ4'.arithFlags _ _ _
+theorem mσ6 : Mid scratchI s (m1 s) (σ6 s) := mσ5.setReg (by decide) _
+theorem mσ7 : Mid scratchI s (m1 s) (σ7 s) := mσ6.setReg (by decide) _
+theorem mσ8 : Mid scratchI s (mEnd s) (σ8 s) := mσ7.withMem _
 
 end Mids
 
@@ -343,18 +340,18 @@ theorem facts_of_pre (hs : (popContract abi).pre s) : Facts cx s := by
 
 /-- The calling convention's obligations, in memory changed only in regions
 apart from the return address. -/
-theorem abi_m1 (hp : Pre s k) {p : State} (hm : Mid scratchT s (m1 s) p) : abiPreserved s p :=
+theorem abi_m1 (hp : Pre s) {p : State} (hm : Mid scratchI s (m1 s) p) : abiPreserved s p :=
   abiPreserved_of_mid frame_m1 (by simpa using hp.facts.ret_cs) (by decide) hm
 
-theorem popped (hp : Pre s k) (hi : cx.InRange s) (ht : ¬ tst s = 0) :
-    cx.Popped s (σ11 s) (x s) := by
-  obtain ⟨hs, h2, hpop⟩ := hit hp hi ht
-  have hsl : IsSlot (cx.slots s) (cx.w s) := by rw [hp.slots, hp.w]; exact hs
+theorem popped (hp : Pre s) (hk : Sized s k) (hi : cx.InRange s) (ht : ¬ tst s = 0) :
+    cx.Popped s (σ8 s) (x s) := by
+  obtain ⟨hs, h2, hpop⟩ := hit hp hk hi ht
+  have hsl : IsSlot (cx.slots s) (cx.w s) := by rw [hk.slots, hp.w]; exact hs
   have hcm := hp.facts.cs_mag hi hsl
   have hwm := hp.facts.word_mag hi hsl
-  rw [magRegion_eq hp] at hcm hwm
-  refine ⟨.stack (magBase (2 ^ k) (wvt s)) (items (2 ^ k) s.mem (wvt s)).dropLast, ?_, ?_, ?_, ?_⟩
-  · simp only [Spec.Slab.Ctx.popResult, hi, ↓reduceIte, Spec.Slab.Ctx.mag, hp.slots,
+  rw [magRegion_eq hp hk] at hcm hwm
+  refine ⟨.stack (magBase (2 ^ k) (wv s)) (items (2 ^ k) s.mem (wv s)).dropLast, ?_, ?_, ?_, ?_⟩
+  · simp only [Spec.Slab.Ctx.popResult, hi, ↓reduceIte, Spec.Slab.Ctx.mag, hk.slots,
       mem_of (c := cx) hX, hp.w]
     exact hpop
   · rw [csField_of (c := cx) hX, ← hp.word]
@@ -362,16 +359,15 @@ theorem popped (hp : Pre s k) (hi : cx.InRange s) (ht : ¬ tst s = 0) :
   · show (mEnd s).readW (cx.word s) 64 = _
     rw [mEnd, ← hp.word, Mem.readW_writeW_self64, hp.w]
   · show Mag.ofWord (cx.slots s) (mEnd s) (cx.w s - 8) = _
-    rw [hp.slots, hp.w]
+    rw [hk.slots, hp.w]
     refine ofWord_sub8 (Nat.two_pow_pos k) hs h2 fun i hi' => ?_
-    have hsub := sub_item (n := 2 ^ k) (w := wvt s) (i := i)
-      (by have := slot_lt (2 ^ k) (wvt s) (Nat.two_pow_pos k); omega)
+    have hsub := sub_item (n := 2 ^ k) (w := wv s) (i := i)
+      (by have := slot_lt (2 ^ k) (wv s) (Nat.two_pow_pos k); omega)
     rw [mEnd, readW64_writeW_disj (by rw [hp.word]; exact (hwm.symm.sub_left hsub)), m1,
       readW64_writeW_disj (hcm.symm.sub_left hsub)]
 
-theorem ret_σ11 : (σ11 s).gpr .rax = x s := by
-  simp only [σ11, σ10, RegUpd.gpr_setReg_of_ne _ _ (show ¬ Reg.rax = .rcx by decide), σ9,
-    RegUpd.gpr_setReg_self]
+theorem ret_σ8 : (σ8 s).gpr .rax = x s := by
+  simp only [σ8, σ7, RegUpd.gpr_setReg_self]
 
 theorem unchanged_cs : Unchanged [cx.csField s] (cx.mem s) (m1 s) := by
   rw [csField_of (c := cx) hX, mem_of (c := cx) hX]; exact frame_m1
@@ -380,11 +376,15 @@ theorem missed_C (hi : ¬ cx.InRange s) : cx.PopMissed s (σ2 s) := by
   refine ⟨?_, unchanged_cs⟩
   simp only [Spec.Slab.Ctx.popResult, hi, ↓reduceIte]
 
-theorem missed_T (hp : Pre s k) (hi : cx.InRange s) (ht : tst s = 0) : cx.PopMissed s (σ8 s) := by
+theorem missed_T (hp : Pre s) (hi : cx.InRange s) (ht : tst s = 0) : cx.PopMissed s (σ5 s) := by
   refine ⟨?_, unchanged_cs⟩
-  simp only [Spec.Slab.Ctx.popResult, hi, ↓reduceIte, Spec.Slab.Ctx.mag, hp.slots,
-    mem_of (c := cx) hX, hp.w]
-  exact (pop_eq_none_iff (dvd_marker hp.hk') (hp.ok hi)).mpr ((test_iff32 hp.hk hp.hk' (wvt s) (mk s) hp.mask).mp ht)
+  simp only [Spec.Slab.Ctx.popResult, hi, ↓reduceIte, Spec.Slab.Ctx.mag]
+  by_cases hz : cx.mask s = 0
+  · rw [slots_zero hz]; exact pop_one _ _
+  · obtain ⟨k, hk⟩ := hp.sized hz
+    rw [hk.slots, mem_of (c := cx) hX, hp.w]
+    exact (pop_eq_none_iff (dvd_marker hk.hk') (hk.ok hi)).mpr
+      ((test_iff32 hk.hk hk.hk' (wv s) (mk s) hk.mask).mp ht)
 
 theorem post_eq (s' : State) : (popContract abi).post s s' ↔
     ∃ v, cx.Popped s s' v ∧ s'.gpr .rax = v :=
@@ -399,18 +399,19 @@ theorem correct (hs : (popContract abi).pre s) :
     (∃ t s', ExecExit isa popTable s t s' ∧ target.abiPreserved s s' ∧
       (popContract abi).exit t s s') := by
   have h := facts_of_pre hs
-  obtain ⟨k, hp⟩ := pre_of h
+  have hp := pre_of h
   rw [code_eq]
   by_cases hi : cx.InRange s
   · by_cases ht : tst s = 0
-    · exact .inr ⟨"slow", σ8 s, .rseq (execBlock_arm h.toArm) (runBody_T hp hi ht), abi_m1 hp mσ8,
-        (exit_eq _ _).mpr ⟨by rw [mσ8.gpr _ (by decide)], rfl, missed_T hp hi ht⟩⟩
-    · have hw := hp.facts.ret_word hi
+    · exact .inr ⟨"slow", σ5 s, .rseq (execBlock_arm h.toArm) (runBody_T hp hi ht), abi_m1 hp mσ5,
+        (exit_eq _ _).mpr ⟨by rw [mσ5.gpr _ (by decide)], rfl, missed_T hp hi ht⟩⟩
+    · obtain ⟨k, hk⟩ := sized_of_test hp ht
+      have hw := hp.facts.ret_word hi
       rw [← hp.word] at hw
-      exact .inl ⟨σ11 s, .rseq (execBlock_arm h.toArm) (runBody_P hp hi ht),
+      exact .inl ⟨σ8 s, .rseq (execBlock_arm h.toArm) (runBody_P hp hk hi ht),
         abiPreserved_of_mid (frame_two s.mem _ _ _ _) (by simpa using ⟨hp.facts.ret_cs, hw⟩)
-          (by decide) mσ11,
-        (post_eq _).mpr ⟨x s, popped hp hi ht, ret_σ11⟩⟩
+          (by decide) mσ8,
+        (post_eq _).mpr ⟨x s, popped hp hk hi ht, ret_σ8⟩⟩
   · exact .inr ⟨"slow", σ2 s, .rseq (execBlock_arm h.toArm) (runBody_C hp hi), abi_m1 hp mσ2,
       (exit_eq _ _).mpr ⟨by rw [mσ2.gpr _ (by decide)], rfl, missed_C hi⟩⟩
 
@@ -420,7 +421,7 @@ theorem abort_eq (p : State) : (popContract abi).abort s p ↔ [p.gpr .rdi] = [s
     (Unchanged [cx.csField s] (cx.mem s) p.mem ∧ cx.inv p) :=
   abort_iff cx hv s p
 
-theorem abortOk (hp : Pre s k) {p : State} (hm : Mid scratchT s (m1 s) p) :
+theorem abortOk (hp : Pre s) {p : State} (hm : Mid scratchI s (m1 s) p) :
     armed p ∧ target.abiPreserved s p ∧ (popContract abi).abort s p ∧
       ∀ p', target.rely p p' → (popContract abi).env p p' → (popContract abi).pre p' := by
   obtain ⟨hip, hre⟩ := retry hX hv (post := fun s s' => _) (fun _ => rfl) (fun _ => rfl) (by decide)
@@ -437,23 +438,23 @@ theorem rsName : RSEQ_OFFSET = RS := rfl
 theorem ofNat_toNat64 (v : BitVec 64) : BitVec.ofNat 64 v.toNat = v := by
   rw [BitVec.ofNat_toNat, BitVec.setWidth_eq]
 
-theorem wordAddr_eq (hp : Pre s k) :
-    wordAddr (s.syms SLABS) (cpu32 s).toNat (cx.cls s) = wat s := by
+theorem wordAddr_eq (hp : Pre s) :
+    wordAddr (s.syms SLABS) (cpu32 s).toNat (cx.cls s) = wa s := by
   rw [hp.word]; rfl
 
-theorem maskAddr_eq (hp : Pre s k) : cx.maskAddr s = maskA s := hp.maskA.symm
+theorem maskAddr_eq (hp : Pre s) : cx.maskAddr s = maskA s := hp.maskA.symm
 
-theorem test_eq : BitVec.ofNat 32 (wvt s).toNat &&& BitVec.ofNat 32 (cx.testMask s (mk s).toNat) =
+theorem test_eq : BitVec.ofNat 32 (wv s).toNat &&& BitVec.ofNat 32 (cx.testMask s (mk s).toNat) =
     tst s := by
   simp only [Spec.Slab.Ctx.testMask, BitVec.ofNat_toNat, tst]; rfl
 
 theorem trace_ok (hs : (popContract abi).pre s) :
     (popContract abi).trace s (Code.events isa popTable s) := by
   have h := facts_of_pre hs
-  obtain ⟨k, hp⟩ := pre_of h
+  have hp := pre_of h
   show cx.PopTrace s (Code.events isa (.rseq arm body) s)
   simp only [Code.events, execBlock_arm h.toArm, events_arm h.toArm]
-  refine ⟨(o s).toNat, s.csDesc.toNat, (cpu32 s).toNat, (wvt s).toNat, (mk s).toNat, (x s).toNat, ?_⟩
+  refine ⟨(o s).toNat, s.csDesc.toNat, (cpu32 s).toNat, (wv s).toNat, (mk s).toNat, (x s).toNat, ?_⟩
   simp only [Spec.Slab.Ctx.headTrace, Spec.Slab.Ctx.rd, Spec.Slab.Ctx.wr, tp_of (c := cx) hX,
     sym_of (c := cx) hX, test_eq, ofNat_toNat64, addr8, addr4, rsName, maskAddr_eq hp]
   by_cases hi : cx.InRange s
@@ -461,31 +462,32 @@ theorem trace_ok (hs : (popContract abi).pre s) :
     rw [wordAddr_eq hp]
     by_cases ht : tst s = 0
     · rw [events_T hp hi ht]; simp [hi', ht]
-    · rw [events_P hp hi ht]; simpa [hi'] using ht
+    · obtain ⟨k, hk⟩ := sized_of_test hp ht
+      rw [events_P hp hk hi ht]; simpa [hi'] using ht
   · have hi' : ¬ (cpu32 s).toNat < SLAB_COUNT := fun h' => hi (inRange_iff.mpr h')
     rw [events_C hp hi]; simp [hi']
 
 theorem rseqOk (hs : (popContract abi).pre s) : RseqOk target popTable (popContract abi) s := by
   have h := facts_of_pre hs
-  obtain ⟨k, hp⟩ := pre_of h
+  have hp := pre_of h
   have ht := trace_ok hs
   rw [code_eq] at ht ⊢
   unfold RseqOk
   refine ⟨ht, ⟨_, _, rfl, execBlock_dropLast_arm h.toArm, arms_arm⟩, ?_⟩
-  have mA : Mid scratchT s (m1 s) (σA s) := mid_σA (by decide) (by decide)
-  have m1' : Mid scratchT s (m1 s) (σ1 s) := mid_σ1 (by decide) mA
+  have mA : Mid scratchI s (m1 s) (σA s) := mid_σA (by decide) (by decide)
+  have m1' : Mid scratchI s (m1 s) (σ1 s) := mid_σ1 (by decide) mA
   simp only [Code.abortStates, execBlock_arm h.toArm]
   by_cases hi : cx.InRange s
   · by_cases ht : tst s = 0
     · rw [prefixes_T hp hi ht]
       simp only [List.forall_mem_cons, List.not_mem_nil, false_implies, implies_true, and_true]
       exact ⟨abortOk hp mA, abortOk hp m1', abortOk hp mσ2, abortOk hp mσ2, abortOk hp mσ3,
-        abortOk hp mσ4t, abortOk hp mσ5t, abortOk hp mσ6t, abortOk hp mσ7, abortOk hp mσ8⟩
-    · rw [prefixes_P hp hi ht]
+        abortOk hp mσ4', abortOk hp mσ5⟩
+    · obtain ⟨k, hk⟩ := sized_of_test hp ht
+      rw [prefixes_P hp hk hi ht]
       simp only [List.forall_mem_cons, List.not_mem_nil, false_implies, implies_true, and_true]
       exact ⟨abortOk hp mA, abortOk hp m1', abortOk hp mσ2, abortOk hp mσ2, abortOk hp mσ3,
-        abortOk hp mσ4t, abortOk hp mσ5t, abortOk hp mσ6t, abortOk hp mσ7, abortOk hp mσ8,
-        abortOk hp mσ8, abortOk hp mσ9, abortOk hp mσ10⟩
+        abortOk hp mσ4', abortOk hp mσ5, abortOk hp mσ5, abortOk hp mσ6, abortOk hp mσ7⟩
   · rw [prefixes_C hp hi]
     simp only [List.forall_mem_cons, List.not_mem_nil, false_implies, implies_true, and_true]
     exact ⟨abortOk hp mA, abortOk hp m1', abortOk hp mσ2⟩

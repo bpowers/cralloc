@@ -43,6 +43,23 @@ theorem mkMem_readW_above {ws : List (Addr × BitVec 64)} {a : Addr}
         Nat.mod_eq_of_lt (a := a.toNat + i) (by omega)]
       omega
 
+/-- A word apart from every word of `mkMem ws`, below or above it, reads as
+zero. -/
+theorem mkMem_readW_clear {ws : List (Addr × BitVec 64)} {a : Addr}
+    (h : ∀ bv ∈ ws, bv.1.toNat + 8 ≤ a.toNat ∨ (a.toNat + 8 ≤ bv.1.toNat ∧ bv.1.toNat + 8 ≤ 2 ^ 64))
+    (ha : a.toNat + 8 ≤ 2 ^ 64) :
+    (mkMem ws).readW a 64 = 0 := by
+  unfold Mem.readW
+  rw [Mem.read_eq_of_bytes (v := 0) fun i hi => ?_]
+  · rfl
+  · rw [mkMem_apply_none fun bv hbv => ?_]
+    · simp
+    · have := h bv hbv
+      have hb := bv.1.isLt
+      rw [BitVec.toNat_sub, BitVec.toNat_add, BitVec.toNat_ofNat, Nat.mod_eq_of_lt (a := i) (by omega),
+        Nat.mod_eq_of_lt (a := a.toNat + i) (by omega)]
+      omega
+
 /-- Slab `i`'s word of class 1, for `i ≥ 1`, in a memory of words at or below
 slab 0's of `SLABS` at `0x1000000`, is zero. -/
 theorem mkMem_slab_zero {ws : List (Addr × BitVec 64)} (hws : ∀ bv ∈ ws, bv.1.toNat ≤ 0x1000008)

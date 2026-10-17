@@ -60,6 +60,12 @@ pub(crate) const MAG_MASK_8192: u32 = 65520;
 pub(crate) const MARKER_SHIFT: u32 = 19;
 
 /// From the specification (`Api.rustConsts`).
+pub(crate) const MASK_COUNT: usize = 256;
+
+/// From the specification (`Api.rustConsts`).
+pub(crate) const MASK_DISP: usize = 33556480;
+
+/// From the specification (`Api.rustConsts`).
 pub(crate) const NO_CPU: usize = 2;
 
 /// From the specification (`Api.rustConsts`).
@@ -81,33 +87,31 @@ pub(crate) const SLAB_SHIFT: u32 = 12;
 pub(crate) const WORD_BYTES: usize = 8;
 
 #[cfg(not(feature = "executable"))]
-/// Pops a pointer from the magazine of class `CLASS` of the calling thread's CPU, or returns 0 if the CPU number has no slab or the magazine none to give.
+/// Pops a pointer from the magazine of the calling thread's CPU of the class whose word in slab 0 is at `word`, or returns 0 if the CPU number has no slab or the magazine none to give.
 ///
 /// Contract: `VG.Spec.Slab.popInlineContract`.
 ///
 /// # Safety
 ///
 /// * glibc must have registered the calling thread's rseq area, as it does before the thread can run code that allocates.
-/// * `CLASS` must be below 512, and `MASK` the mask `8 * n - 16` of that class's magazines, of `n = 2^k` slots for 2 ≤ k ≤ 16.
+/// * `word` must be `SLABS + 8 * class` for a class below 512: the address of the class's slab word in slab 0. `mask` must be the mask `8 * n - 16` of the class's magazines, of `n = 2^k` slots for 2 ≤ k ≤ 16.
 /// * None of `SLABS`, the thread's `rseq_cs` and `cpu_id` and `__rseq_offset` may overlap the 128 bytes of stack below the stack pointer (the red zone) or the 8 bytes at it or wrap around the end of the address space, nor overlap another of them, but where both are only read (`cpu_id` and `__rseq_offset`) (`VG.Spec.Slab.Ctx.Layout`).
-/// * In each of the 8192 slabs of `SLABS`, the class's slab word must be 0, a marker (a word whose low 19 bits are 1), or the address of a slot other than slot 0 of a magazine of the class (`8 * n` bytes, aligned to `8 * n`), whose pointers are not 0 (a pop returns 0 for none) and which does not overlap `SLABS`, the thread's `rseq_cs` and `cpu_id`, `__rseq_offset` or the 128 bytes of stack below the stack pointer (the red zone) or the 8 bytes at it, the magazine another slab's word of the class names, nor wrap around the end of the address space. Every thread and the drainer must keep this from when the function is called until it returns: the function may be aborted and restarted on any CPU in between (`VG.Spec.Slab.Ctx.inv`).
+/// * in each of the 8192 slabs of `SLABS`, the class's slab word must be 0, a marker (a word whose low 19 bits are 1), or the address of a slot other than slot 0 of a magazine of the class (`8 * n` bytes, aligned to `8 * n`), whose pointers are not 0 (a pop returns 0 for none) and which does not overlap `SLABS`, the thread's `rseq_cs` and `cpu_id`, `__rseq_offset` or the 128 bytes of stack below the stack pointer (the red zone) or the 8 bytes at it, the magazine another slab's word of the class names, nor wrap around the end of the address space. Every thread and the drainer must keep this from when the function is called until it returns: the function may be aborted and restarted on any CPU in between (`VG.Spec.Slab.Ctx.inv`).
 #[cfg(not(feature = "executable"))]
 #[inline(always)]
-pub(crate) unsafe fn slab_pop<const CLASS: usize, const MASK: u32>() -> usize {
+pub(crate) unsafe fn slab_pop(word: usize, mask: usize) -> usize {
     let ret: usize;
     unsafe {
         core::arch::asm!(
-            "5:\nmov r10, QWORD PTR [rip + {__rseq_offset}@GOTPCREL]\nmov r10, QWORD PTR [r10]\nlea r11, [rip + 3f]\nmov QWORD PTR fs:[r10+8], r11\n6:\nmov r8d, DWORD PTR fs:[r10+4]\ncmp r8d, 8192\njae 20f\nshl r8, 12\nlea r9, [rip + {SLABS} + {coff}]\nmov rcx, QWORD PTR [r9+r8*1]\ntest ecx, {mask}\nje 21f\nmov rax, QWORD PTR [rcx-8]\nlea rcx, [rcx-8]\nmov QWORD PTR [r9+r8*1], rcx\n7:\n.pushsection __rseq_cs, \"aw\"\n.balign 32\n3:\n.long 0, 0\n.quad 6b, 7b - 6b, 4f\n.popsection\n.pushsection .text.unlikely, \"ax\"\n.byte 0x0f, 0xb9, 0x3d\n.long 0x53053053\n4:\njmp 5b\n20:\nmov eax, 0\njmp 7b\n21:\nmov eax, 0\njmp 7b\n.popsection",
+            "5:\nmov r10, QWORD PTR [rip + {__rseq_offset}@GOTPCREL]\nmov r10, QWORD PTR [r10]\nlea r11, [rip + 3f]\nmov QWORD PTR fs:[r10+8], r11\n6:\nmov r8d, DWORD PTR fs:[r10+4]\ncmp r8d, 8192\njae 20f\nshl r8, 12\nmov rcx, QWORD PTR [rdi+r8*1]\ntest ecx, esi\nje 21f\nmov rax, QWORD PTR [rcx-8]\nlea rcx, [rcx-8]\nmov QWORD PTR [rdi+r8*1], rcx\n7:\n.pushsection __rseq_cs, \"aw\"\n.balign 32\n3:\n.long 0, 0\n.quad 6b, 7b - 6b, 4f\n.popsection\n.pushsection .text.unlikely, \"ax\"\n.byte 0x0f, 0xb9, 0x3d\n.long 0x53053053\n4:\njmp 5b\n20:\nmov eax, 0\njmp 7b\n21:\nmov eax, 0\njmp 7b\n.popsection",
+            in("rdi") word,
+            in("rsi") mask,
             lateout("rax") ret,
             out("rcx") _,
             out("r8") _,
-            out("r9") _,
             out("r10") _,
             out("r11") _,
             __rseq_offset = sym crate::front::__rseq_offset,
-            SLABS = sym crate::front::SLABS,
-            coff = const CLASS * 8,
-            mask = const MASK,
             options(nostack),
         );
     }
@@ -115,33 +119,31 @@ pub(crate) unsafe fn slab_pop<const CLASS: usize, const MASK: u32>() -> usize {
 }
 
 #[cfg(feature = "executable")]
-/// Pops a pointer from the magazine of class `CLASS` of the calling thread's CPU, or returns 0 if the CPU number has no slab or the magazine none to give.
+/// Pops a pointer from the magazine of the calling thread's CPU of the class whose word in slab 0 is at `word`, or returns 0 if the CPU number has no slab or the magazine none to give.
 ///
 /// Contract: `VG.Spec.Slab.popInlineContract`.
 ///
 /// # Safety
 ///
 /// * glibc must have registered the calling thread's rseq area, as it does before the thread can run code that allocates.
-/// * `CLASS` must be below 512, and `MASK` the mask `8 * n - 16` of that class's magazines, of `n = 2^k` slots for 2 ≤ k ≤ 16.
+/// * `word` must be `SLABS + 8 * class` for a class below 512: the address of the class's slab word in slab 0. `mask` must be the mask `8 * n - 16` of the class's magazines, of `n = 2^k` slots for 2 ≤ k ≤ 16.
 /// * None of `SLABS`, the thread's `rseq_cs` and `cpu_id` and `__rseq_offset` may overlap the 128 bytes of stack below the stack pointer (the red zone) or the 8 bytes at it or wrap around the end of the address space, nor overlap another of them, but where both are only read (`cpu_id` and `__rseq_offset`) (`VG.Spec.Slab.Ctx.Layout`).
-/// * In each of the 8192 slabs of `SLABS`, the class's slab word must be 0, a marker (a word whose low 19 bits are 1), or the address of a slot other than slot 0 of a magazine of the class (`8 * n` bytes, aligned to `8 * n`), whose pointers are not 0 (a pop returns 0 for none) and which does not overlap `SLABS`, the thread's `rseq_cs` and `cpu_id`, `__rseq_offset` or the 128 bytes of stack below the stack pointer (the red zone) or the 8 bytes at it, the magazine another slab's word of the class names, nor wrap around the end of the address space. Every thread and the drainer must keep this from when the function is called until it returns: the function may be aborted and restarted on any CPU in between (`VG.Spec.Slab.Ctx.inv`).
+/// * in each of the 8192 slabs of `SLABS`, the class's slab word must be 0, a marker (a word whose low 19 bits are 1), or the address of a slot other than slot 0 of a magazine of the class (`8 * n` bytes, aligned to `8 * n`), whose pointers are not 0 (a pop returns 0 for none) and which does not overlap `SLABS`, the thread's `rseq_cs` and `cpu_id`, `__rseq_offset` or the 128 bytes of stack below the stack pointer (the red zone) or the 8 bytes at it, the magazine another slab's word of the class names, nor wrap around the end of the address space. Every thread and the drainer must keep this from when the function is called until it returns: the function may be aborted and restarted on any CPU in between (`VG.Spec.Slab.Ctx.inv`).
 #[cfg(feature = "executable")]
 #[inline(always)]
-pub(crate) unsafe fn slab_pop<const CLASS: usize, const MASK: u32>() -> usize {
+pub(crate) unsafe fn slab_pop(word: usize, mask: usize) -> usize {
     let ret: usize;
     unsafe {
         core::arch::asm!(
-            "5:\nmov r10, QWORD PTR [rip + {__rseq_offset}]\nlea r11, [rip + 3f]\nmov QWORD PTR fs:[r10+8], r11\n6:\nmov r8d, DWORD PTR fs:[r10+4]\ncmp r8d, 8192\njae 20f\nshl r8, 12\nlea r9, [rip + {SLABS} + {coff}]\nmov rcx, QWORD PTR [r9+r8*1]\ntest ecx, {mask}\nje 21f\nmov rax, QWORD PTR [rcx-8]\nlea rcx, [rcx-8]\nmov QWORD PTR [r9+r8*1], rcx\n7:\n.pushsection __rseq_cs, \"aw\"\n.balign 32\n3:\n.long 0, 0\n.quad 6b, 7b - 6b, 4f\n.popsection\n.pushsection .text.unlikely, \"ax\"\n.byte 0x0f, 0xb9, 0x3d\n.long 0x53053053\n4:\njmp 5b\n20:\nmov eax, 0\njmp 7b\n21:\nmov eax, 0\njmp 7b\n.popsection",
+            "5:\nmov r10, QWORD PTR [rip + {__rseq_offset}]\nlea r11, [rip + 3f]\nmov QWORD PTR fs:[r10+8], r11\n6:\nmov r8d, DWORD PTR fs:[r10+4]\ncmp r8d, 8192\njae 20f\nshl r8, 12\nmov rcx, QWORD PTR [rdi+r8*1]\ntest ecx, esi\nje 21f\nmov rax, QWORD PTR [rcx-8]\nlea rcx, [rcx-8]\nmov QWORD PTR [rdi+r8*1], rcx\n7:\n.pushsection __rseq_cs, \"aw\"\n.balign 32\n3:\n.long 0, 0\n.quad 6b, 7b - 6b, 4f\n.popsection\n.pushsection .text.unlikely, \"ax\"\n.byte 0x0f, 0xb9, 0x3d\n.long 0x53053053\n4:\njmp 5b\n20:\nmov eax, 0\njmp 7b\n21:\nmov eax, 0\njmp 7b\n.popsection",
+            in("rdi") word,
+            in("rsi") mask,
             lateout("rax") ret,
             out("rcx") _,
             out("r8") _,
-            out("r9") _,
             out("r10") _,
             out("r11") _,
             __rseq_offset = sym crate::front::__rseq_offset,
-            SLABS = sym crate::front::SLABS,
-            coff = const CLASS * 8,
-            mask = const MASK,
             options(nostack),
         );
     }
@@ -149,33 +151,31 @@ pub(crate) unsafe fn slab_pop<const CLASS: usize, const MASK: u32>() -> usize {
 }
 
 #[cfg(not(feature = "executable"))]
-/// Pushes `p` on the magazine of class `CLASS` of the calling thread's CPU and returns `true`, or returns `false` if the CPU number has no slab or the magazine no free slot to spare.
+/// Pushes `p` on the magazine of the calling thread's CPU of the class whose word in slab 0 is at `word` and returns `true`, or returns `false` if the CPU number has no slab or the magazine no free slot to spare.
 ///
 /// Contract: `VG.Spec.Slab.pushInlineContract`.
 ///
 /// # Safety
 ///
 /// * glibc must have registered the calling thread's rseq area, as it does before the thread can run code that allocates.
-/// * `CLASS` must be below 512, and `MASK` the mask `8 * n - 16` of that class's magazines, of `n = 2^k` slots for 2 ≤ k ≤ 16.
+/// * `word` must be `SLABS + 8 * class` for a class below 512: the address of the class's slab word in slab 0. `mask` must be the mask `8 * n - 16` of the class's magazines, of `n = 2^k` slots for 2 ≤ k ≤ 16.
 /// * None of `SLABS`, the thread's `rseq_cs` and `cpu_id` and `__rseq_offset` may overlap the 128 bytes of stack below the stack pointer (the red zone) or the 8 bytes at it or wrap around the end of the address space, nor overlap another of them, but where both are only read (`cpu_id` and `__rseq_offset`) (`VG.Spec.Slab.Ctx.Layout`).
-/// * In each of the 8192 slabs of `SLABS`, the class's slab word must be 0, a marker (a word whose low 19 bits are 1), or the address of a slot other than slot 0 of a magazine of the class (`8 * n` bytes, aligned to `8 * n`), whose pointers are not 0 (a pop returns 0 for none) and which does not overlap `SLABS`, the thread's `rseq_cs` and `cpu_id`, `__rseq_offset` or the 128 bytes of stack below the stack pointer (the red zone) or the 8 bytes at it, the magazine another slab's word of the class names, nor wrap around the end of the address space. Every thread and the drainer must keep this from when the function is called until it returns: the function may be aborted and restarted on any CPU in between (`VG.Spec.Slab.Ctx.inv`).
+/// * in each of the 8192 slabs of `SLABS`, the class's slab word must be 0, a marker (a word whose low 19 bits are 1), or the address of a slot other than slot 0 of a magazine of the class (`8 * n` bytes, aligned to `8 * n`), whose pointers are not 0 (a pop returns 0 for none) and which does not overlap `SLABS`, the thread's `rseq_cs` and `cpu_id`, `__rseq_offset` or the 128 bytes of stack below the stack pointer (the red zone) or the 8 bytes at it, the magazine another slab's word of the class names, nor wrap around the end of the address space. Every thread and the drainer must keep this from when the function is called until it returns: the function may be aborted and restarted on any CPU in between (`VG.Spec.Slab.Ctx.inv`).
 #[cfg(not(feature = "executable"))]
 #[inline(always)]
-pub(crate) unsafe fn slab_push<const CLASS: usize, const MASK: u32>(p: usize) -> bool {
+pub(crate) unsafe fn slab_push(word: usize, mask: usize, p: usize) -> bool {
     unsafe {
         core::arch::asm!(
-            "5:\nmov r10, QWORD PTR [rip + {__rseq_offset}@GOTPCREL]\nmov r10, QWORD PTR [r10]\nlea r11, [rip + 3f]\nmov QWORD PTR fs:[r10+8], r11\n6:\nmov r8d, DWORD PTR fs:[r10+4]\ncmp r8d, 8192\njae {miss}\nshl r8, 12\nlea r9, [rip + {SLABS} + {coff}]\nmov rcx, QWORD PTR [r9+r8*1]\nlea rax, [rcx+8]\ntest eax, {mask}\nje {miss}\nmov QWORD PTR [rcx], rdi\nmov QWORD PTR [r9+r8*1], rax\n7:\n.pushsection __rseq_cs, \"aw\"\n.balign 32\n3:\n.long 0, 0\n.quad 6b, 7b - 6b, 4f\n.popsection\n.pushsection .text.unlikely, \"ax\"\n.byte 0x0f, 0xb9, 0x3d\n.long 0x53053053\n4:\njmp 5b\n.popsection",
-            in("rdi") p,
+            "5:\nmov r10, QWORD PTR [rip + {__rseq_offset}@GOTPCREL]\nmov r10, QWORD PTR [r10]\nlea r11, [rip + 3f]\nmov QWORD PTR fs:[r10+8], r11\n6:\nmov r8d, DWORD PTR fs:[r10+4]\ncmp r8d, 8192\njae {miss}\nshl r8, 12\nmov rcx, QWORD PTR [rdi+r8*1]\nlea rax, [rcx+8]\ntest eax, esi\nje {miss}\nmov QWORD PTR [rcx], rdx\nmov QWORD PTR [rdi+r8*1], rax\n7:\n.pushsection __rseq_cs, \"aw\"\n.balign 32\n3:\n.long 0, 0\n.quad 6b, 7b - 6b, 4f\n.popsection\n.pushsection .text.unlikely, \"ax\"\n.byte 0x0f, 0xb9, 0x3d\n.long 0x53053053\n4:\njmp 5b\n.popsection",
+            in("rdi") word,
+            in("rsi") mask,
+            in("rdx") p,
             out("rax") _,
             out("rcx") _,
             out("r8") _,
-            out("r9") _,
             out("r10") _,
             out("r11") _,
             __rseq_offset = sym crate::front::__rseq_offset,
-            SLABS = sym crate::front::SLABS,
-            coff = const CLASS * 8,
-            mask = const MASK,
             miss = label { return false },
             options(nostack),
         );
@@ -184,33 +184,31 @@ pub(crate) unsafe fn slab_push<const CLASS: usize, const MASK: u32>(p: usize) ->
 }
 
 #[cfg(feature = "executable")]
-/// Pushes `p` on the magazine of class `CLASS` of the calling thread's CPU and returns `true`, or returns `false` if the CPU number has no slab or the magazine no free slot to spare.
+/// Pushes `p` on the magazine of the calling thread's CPU of the class whose word in slab 0 is at `word` and returns `true`, or returns `false` if the CPU number has no slab or the magazine no free slot to spare.
 ///
 /// Contract: `VG.Spec.Slab.pushInlineContract`.
 ///
 /// # Safety
 ///
 /// * glibc must have registered the calling thread's rseq area, as it does before the thread can run code that allocates.
-/// * `CLASS` must be below 512, and `MASK` the mask `8 * n - 16` of that class's magazines, of `n = 2^k` slots for 2 ≤ k ≤ 16.
+/// * `word` must be `SLABS + 8 * class` for a class below 512: the address of the class's slab word in slab 0. `mask` must be the mask `8 * n - 16` of the class's magazines, of `n = 2^k` slots for 2 ≤ k ≤ 16.
 /// * None of `SLABS`, the thread's `rseq_cs` and `cpu_id` and `__rseq_offset` may overlap the 128 bytes of stack below the stack pointer (the red zone) or the 8 bytes at it or wrap around the end of the address space, nor overlap another of them, but where both are only read (`cpu_id` and `__rseq_offset`) (`VG.Spec.Slab.Ctx.Layout`).
-/// * In each of the 8192 slabs of `SLABS`, the class's slab word must be 0, a marker (a word whose low 19 bits are 1), or the address of a slot other than slot 0 of a magazine of the class (`8 * n` bytes, aligned to `8 * n`), whose pointers are not 0 (a pop returns 0 for none) and which does not overlap `SLABS`, the thread's `rseq_cs` and `cpu_id`, `__rseq_offset` or the 128 bytes of stack below the stack pointer (the red zone) or the 8 bytes at it, the magazine another slab's word of the class names, nor wrap around the end of the address space. Every thread and the drainer must keep this from when the function is called until it returns: the function may be aborted and restarted on any CPU in between (`VG.Spec.Slab.Ctx.inv`).
+/// * in each of the 8192 slabs of `SLABS`, the class's slab word must be 0, a marker (a word whose low 19 bits are 1), or the address of a slot other than slot 0 of a magazine of the class (`8 * n` bytes, aligned to `8 * n`), whose pointers are not 0 (a pop returns 0 for none) and which does not overlap `SLABS`, the thread's `rseq_cs` and `cpu_id`, `__rseq_offset` or the 128 bytes of stack below the stack pointer (the red zone) or the 8 bytes at it, the magazine another slab's word of the class names, nor wrap around the end of the address space. Every thread and the drainer must keep this from when the function is called until it returns: the function may be aborted and restarted on any CPU in between (`VG.Spec.Slab.Ctx.inv`).
 #[cfg(feature = "executable")]
 #[inline(always)]
-pub(crate) unsafe fn slab_push<const CLASS: usize, const MASK: u32>(p: usize) -> bool {
+pub(crate) unsafe fn slab_push(word: usize, mask: usize, p: usize) -> bool {
     unsafe {
         core::arch::asm!(
-            "5:\nmov r10, QWORD PTR [rip + {__rseq_offset}]\nlea r11, [rip + 3f]\nmov QWORD PTR fs:[r10+8], r11\n6:\nmov r8d, DWORD PTR fs:[r10+4]\ncmp r8d, 8192\njae {miss}\nshl r8, 12\nlea r9, [rip + {SLABS} + {coff}]\nmov rcx, QWORD PTR [r9+r8*1]\nlea rax, [rcx+8]\ntest eax, {mask}\nje {miss}\nmov QWORD PTR [rcx], rdi\nmov QWORD PTR [r9+r8*1], rax\n7:\n.pushsection __rseq_cs, \"aw\"\n.balign 32\n3:\n.long 0, 0\n.quad 6b, 7b - 6b, 4f\n.popsection\n.pushsection .text.unlikely, \"ax\"\n.byte 0x0f, 0xb9, 0x3d\n.long 0x53053053\n4:\njmp 5b\n.popsection",
-            in("rdi") p,
+            "5:\nmov r10, QWORD PTR [rip + {__rseq_offset}]\nlea r11, [rip + 3f]\nmov QWORD PTR fs:[r10+8], r11\n6:\nmov r8d, DWORD PTR fs:[r10+4]\ncmp r8d, 8192\njae {miss}\nshl r8, 12\nmov rcx, QWORD PTR [rdi+r8*1]\nlea rax, [rcx+8]\ntest eax, esi\nje {miss}\nmov QWORD PTR [rcx], rdx\nmov QWORD PTR [rdi+r8*1], rax\n7:\n.pushsection __rseq_cs, \"aw\"\n.balign 32\n3:\n.long 0, 0\n.quad 6b, 7b - 6b, 4f\n.popsection\n.pushsection .text.unlikely, \"ax\"\n.byte 0x0f, 0xb9, 0x3d\n.long 0x53053053\n4:\njmp 5b\n.popsection",
+            in("rdi") word,
+            in("rsi") mask,
+            in("rdx") p,
             out("rax") _,
             out("rcx") _,
             out("r8") _,
-            out("r9") _,
             out("r10") _,
             out("r11") _,
             __rseq_offset = sym crate::front::__rseq_offset,
-            SLABS = sym crate::front::SLABS,
-            coff = const CLASS * 8,
-            mask = const MASK,
             miss = label { return false },
             options(nostack),
         );

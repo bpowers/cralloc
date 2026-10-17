@@ -85,6 +85,9 @@ pub struct Slab {
 }
 
 impl Slab {
+    /// The bytes at the start of a slab that hold its fields; the rest of its page is unused.
+    pub(crate) const USED_BYTES: usize = core::mem::offset_of!(Slab, claim) + 8;
+
     /// A slab with nothing in it.
     #[allow(clippy::new_without_default)]
     pub const fn new() -> Slab {

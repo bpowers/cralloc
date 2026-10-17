@@ -92,7 +92,9 @@ theorem slotsOf_magMask (k : Nat) (hk : 2 ≤ k) : slotsOf (magMask (2 ^ k)) = 2
   have : 4 ≤ 2 ^ k := by
     calc 4 = 2 ^ 2 := rfl
       _ ≤ 2 ^ k := Nat.pow_le_pow_right (by decide) hk
-  simp only [slotsOf, magMask]
+  have hne : magMask (2 ^ k) ≠ 0 := by simp only [magMask]; omega
+  simp only [slotsOf, hne, ite_false]
+  simp only [magMask]
   omega
 
 /-- The magazine's bytes divide `2 ^ 64`. -/
@@ -506,6 +508,35 @@ theorem contains_at {n : Nat} {w : BitVec 64} (h : IsSlot n w) (hs : slot n w + 
   rw [Offset.sub_sub_eq, BitVec.sub_self, BitVec.zero_add, BitVec.toNat_ofNat]
   have := w.isLt
   omega
+
+/-! ## A zero mask
+
+`slotsOf 0 = 1`: a one-slot magazine, which holds no pointer and has no free
+slot to spare, so a routine given a zero mask, which always misses, meets
+its specification. -/
+
+theorem slot_one (w : BitVec 64) : slot 1 w = 0 := by
+  simp only [slot]; omega
+
+theorem pop_one (m : Mem) (w : BitVec 64) : (Mag.ofWord 1 m w).pop = none := by
+  simp only [Mag.ofWord, slot_one]
+  split
+  · rfl
+  · split <;> rfl
+
+/-- A one-slot magazine is the same in any memory: it has no pointers to
+read. -/
+theorem ofWord_one_congr (m m' : Mem) (w : BitVec 64) : Mag.ofWord 1 m w = Mag.ofWord 1 m' w := by
+  simp only [Mag.ofWord, slot_one]
+  rfl
+
+theorem push_one (m : Mem) (w x : BitVec 64) : (Mag.ofWord 1 m w).push 1 x = none := by
+  simp only [Mag.ofWord, slot_one]
+  split
+  · rfl
+  · split
+    · rfl
+    · simp [Mag.push]
 
 /-- The slot of item `i`, below the last slot. -/
 theorem sub_item {n : Nat} {w : BitVec 64} {i : Nat} (hi : i + 2 ≤ n) :

@@ -17,6 +17,7 @@ theorem pre_w (s : State) (hm : ∃ cpu word rd wr, s = PopTable.witT cpu word r
     (hp : Sig.pairsSep (cx.regions s) = true)
     (hres : ((cx.regions s).all fun x => (cx.A.reserved 0 s).all fun q => Region.sep x.1 q) = true)
     (hl : layoutCheck cx s = true)
+    (hoff : (cx.arg s 0 - cx.sym s SLABS).toNat = 8 * cx.cls s)
     (hcls : cx.cls s = 1) (hmask : cx.mask s = magMask (2 ^ 2)) (hslots : cx.slots s = 4)
     (hsyms : s.syms SLABS = 0x1000000) (h0 : cx.SlotOk s (s.mem.readW (wordAddr 0x1000000 0 1) 64)) :
     (pushContract abi).pre s := by
@@ -41,45 +42,46 @@ theorem pre_w (s : State) (hm : ∃ cpu word rd wr, s = PopTable.witT cpu word r
     · exact absurd hsj (hn j (by omega) hj)
     · exact absurd hsi (hn i h hi)
   refine (pre_iff cx (s := s) hv rfl rfl).mpr ⟨trivial, world_of_check hX hrd hwr hnw hp hres,
-    rfl, rfl, show cx.cls s < CLASS_LIMIT by rw [hcls]; decide, layout_of_check hX hl,
-    ⟨2, by decide, by decide, hmask⟩, hslot, hex⟩
+    rfl, rfl, ⟨hoff, by rw [hcls]; decide⟩, layout_of_check hX hl,
+    .inr ⟨2, by decide, by decide, hmask⟩, fun _ => hslot, hex⟩
 
 theorem pre_w0 : (pushContract abi).pre PopTable.w0 :=
   pre_w _ ⟨_, _, _, _, rfl⟩ (by decide +kernel) (by decide +kernel) (by decide +kernel)
     (by decide +kernel) (by decide +kernel) (by decide +kernel) (by decide +kernel) (by decide +kernel)
-    (by decide +kernel) (by decide +kernel)
+    (by decide +kernel) (by decide +kernel) (by decide +kernel)
     ⟨by decide +kernel, fun hs => absurd hs (by decide +kernel)⟩
 
 theorem pre_w1 : (pushContract abi).pre PopTable.w1 :=
   pre_w _ ⟨_, _, _, _, rfl⟩ (by decide +kernel) (by decide +kernel) (by decide +kernel)
     (by decide +kernel) (by decide +kernel) (by decide +kernel) (by decide +kernel) (by decide +kernel)
-    (by decide +kernel) (by decide +kernel)
+    (by decide +kernel) (by decide +kernel) (by decide +kernel)
     ⟨by decide +kernel, fun hs => absurd hs (by decide +kernel)⟩
 
 theorem pre_w2 : (pushContract abi).pre PopTable.w2 :=
   pre_w _ ⟨_, _, _, _, rfl⟩ (by decide +kernel) (by decide +kernel) (by decide +kernel)
     (by decide +kernel) (by decide +kernel) (by decide +kernel) (by decide +kernel) (by decide +kernel)
-    (by decide +kernel) (by decide +kernel)
+    (by decide +kernel) (by decide +kernel) (by decide +kernel)
     ⟨by decide +kernel, fun _ => apart_of_check hX (by decide +kernel)⟩
 
 theorem outcomes_eq : pushTable.outcomes = [(0, true), (1, true), (2, true)] := rfl
 
 theorem visits_w0 : Visits isa pushTable PopTable.w0 0 true := by
-  obtain ⟨k, hp⟩ := pre_of (facts_of_pre pre_w0)
+  have hp := pre_of (facts_of_pre pre_w0)
   have hi : ¬ cx.InRange PopTable.w0 := by decide +kernel
   exact Visits.rseq (execBlock_arm hp.facts.toArm) (end_C hp hi)
 
 theorem visits_w1 : Visits isa pushTable PopTable.w1 1 true := by
-  obtain ⟨k, hp⟩ := pre_of (facts_of_pre pre_w1)
+  have hp := pre_of (facts_of_pre pre_w1)
   have hi : cx.InRange PopTable.w1 := by decide +kernel
   have ht : tst PopTable.w1 = 0 := by decide +kernel
   exact Visits.rseq (execBlock_arm hp.facts.toArm) (end_T hp hi ht)
 
 theorem visits_w2 : Visits isa pushTable PopTable.w2 2 true := by
-  obtain ⟨k, hp⟩ := pre_of (facts_of_pre pre_w2)
+  have hp := pre_of (facts_of_pre pre_w2)
   have hi : cx.InRange PopTable.w2 := by decide +kernel
   have ht : ¬ tst PopTable.w2 = 0 := by decide +kernel
-  exact Visits.rseq (execBlock_arm hp.facts.toArm) (end_P hp hi ht)
+  obtain ⟨k, hk⟩ := sized_of_test hp ht
+  exact Visits.rseq (execBlock_arm hp.facts.toArm) (end_P hp hk hi ht)
 
 def witnesses : List State := [PopTable.w0, PopTable.w1, PopTable.w2]
 

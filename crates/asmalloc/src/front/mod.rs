@@ -19,7 +19,7 @@
 #[cfg(test)]
 pub(crate) mod check;
 // The generated routines and their wrapper, wherever assembly can run. The generated code names
-// its surroundings by path, so they are provided here: `SLABS`, `MAG_MASKS`, `__rseq_offset`,
+// its surroundings by path, so they are provided here: `SLABS`, `__rseq_offset`,
 // `pop_slow` and `push_slow`. The last two are the heap's slow paths, which sit above this
 // module; only the generated code's tail jumps reach them through these names.
 #[cfg(all(target_os = "linux", target_arch = "x86_64", not(miri), not(kani)))]
@@ -45,23 +45,106 @@ pub(crate) use crate::os::linux::__rseq_offset;
 #[cfg(all(target_os = "linux", target_arch = "x86_64", not(miri), not(kani)))]
 pub(crate) use real::Real;
 
-use crate::classes::{MagazineSize, SMALL_COUNT, SmallClass};
+use crate::classes::{SMALL_COUNT, SmallClass};
+use core::mem::offset_of;
+use core::sync::atomic::{AtomicU64, Ordering};
 
-/// The slabs, one per CPU number. Zero-initialized: untouched slabs cost no memory.
+/// The number of entries in the masks' table: one per value of a class byte, so that a class
+/// read from the region table indexes it whatever it is, and finds zero, which sends the
+/// out-of-line routines to their slow paths, for every byte that is not a small class.
+pub const MASK_COUNT: usize = 256;
+
+/// Where the masks' table starts within its page: past every field of a slab, so that no entry
+/// shares a page offset with a slab word (a load at the page offset of a store in flight waits
+/// for it: `docs/research/zen5-roofline.md`, section 14).
+const MASK_PAGE_OFFSET: usize = 2048;
+
+/// The slabs, one per CPU number, and after them the out-of-line routines' masks.
+///
+/// A routine is given the address of its class's word in slab 0; the out-of-line ones read the
+/// class's mask at a fixed distance from it, `MASK_DISP`, which the routines were proved for.
+/// One static keeps that distance fixed by construction. Everything is zero at load: an
+/// untouched slab costs no memory, and a zero mask sends every out-of-line pop and push to its
+/// slow path, which writes the masks ([`publish_masks`]).
+#[repr(C, align(4096))]
+pub(crate) struct Front {
+    slabs: Slabs<[Slab; SLAB_COUNT]>,
+    _gap: [u8; MASK_PAGE_OFFSET],
+    masks: [AtomicU64; MASK_COUNT],
+}
+
+impl Front {
+    const fn new() -> Front {
+        Front {
+            slabs: Slabs::new(),
+            _gap: [0; MASK_PAGE_OFFSET],
+            masks: [const { AtomicU64::new(0) }; MASK_COUNT],
+        }
+    }
+
+    /// The slabs.
+    #[inline(always)]
+    pub(crate) fn slabs(&self) -> &Slabs {
+        &self.slabs
+    }
+
+    /// The address of a class's hot word in slab 0, which the routines take.
+    #[inline(always)]
+    pub(crate) fn word(&self, class: SmallClass) -> usize {
+        core::ptr::from_ref(&self.slabs).addr() + Field::hot(class).offset()
+    }
+
+    /// The class whose hot word in slab 0 is at `word`, if it is one: what an out-of-line
+    /// routine's slow path is given.
+    pub(crate) fn class_of_word(&self, word: usize) -> Option<SmallClass> {
+        let offset = word.checked_sub(core::ptr::from_ref(&self.slabs).addr())?;
+        if offset % 8 != 0 {
+            return None;
+        }
+        u8::try_from(offset / 8)
+            .ok()
+            .and_then(crate::classes::Class::from_index)
+            .and_then(crate::classes::Class::small)
+    }
+}
+
+/// The distance from a class's word in slab 0 to its mask, by the layout of [`Front`].
+#[cfg_attr(any(miri, kani), allow(dead_code))]
+pub(crate) const MASK_DISP: usize = offset_of!(Front, masks) - offset_of!(Front, slabs);
+
+// The layout is the one the routines were proved for.
+#[cfg(all(target_os = "linux", target_arch = "x86_64", not(miri), not(kani)))]
+const _: () = {
+    use generated::x86_64::slab as proved;
+    assert!(MASK_DISP == proved::MASK_DISP);
+    assert!(MASK_COUNT == proved::MASK_COUNT);
+    assert!(SLAB_COUNT == proved::SLAB_COUNT && SLAB_BYTES == proved::SLAB_BYTES);
+};
+
+const _: () = {
+    assert!(offset_of!(Front, slabs) == 0);
+    assert!(offset_of!(Front, masks) % SLAB_BYTES == MASK_PAGE_OFFSET);
+    assert!(MASK_PAGE_OFFSET + MASK_COUNT * 8 <= SLAB_BYTES);
+    // No mask shares a page offset with any field of a slab.
+    assert!(Slab::USED_BYTES <= MASK_PAGE_OFFSET);
+    assert!(SMALL_COUNT < MASK_COUNT);
+};
+
+/// The slabs, and the out-of-line routines' masks after them. The generated routines name it
+/// as `front::SLABS`, whose address is the first slab's.
 // Crate-private: a twin or a routine wrapper made outside the crate could write these slabs
 // without restarting, behind the heap's back.
 // Only the generated routines use it, which Miri and Kani do not build.
 #[cfg_attr(any(miri, kani), allow(dead_code))]
-pub(crate) static SLABS: Slabs<[Slab; SLAB_COUNT]> = Slabs::new();
+pub(crate) static SLABS: Front = Front::new();
 
-/// The slot mask of each small class's magazines, indexed by class index, for the out-of-line
-/// routines, which take the class in a register. Index 0 is no class; it holds the smallest
-/// magazine's mask so that every entry is a valid mask.
-pub static MAG_MASKS: [u32; SMALL_COUNT + 1] = MASKS;
+/// The slot mask of each small class's magazines, indexed by class index; zero for every other
+/// byte. The inlined routines are given their class's mask from here, so a constant class
+/// folds it to a constant; the out-of-line routines read the copy in [`SLABS`].
+pub static MASKS: [u32; MASK_COUNT] = MASK_TABLE;
 
-/// [`MAG_MASKS`] as a constant, for the inlined routines, which take the mask as one.
-pub const MASKS: [u32; SMALL_COUNT + 1] = {
-    let mut masks = [MagazineSize::MIN.mask() as u32; SMALL_COUNT + 1];
+const MASK_TABLE: [u32; MASK_COUNT] = {
+    let mut masks = [0; MASK_COUNT];
     let mut ordinal = 0;
     while ordinal < SMALL_COUNT {
         if let Some(class) = SmallClass::from_ordinal(ordinal) {
@@ -72,10 +155,30 @@ pub const MASKS: [u32; SMALL_COUNT + 1] = {
     masks
 };
 
+/// The mask of a class's magazines.
+#[inline(always)]
+pub(crate) fn mask(class: SmallClass) -> u32 {
+    MASKS[class.class().index() as usize]
+}
+
+/// Writes the masks the out-of-line routines read, if they have not been. Every thread writes
+/// the same values, so a race is harmless; until a class's entry is written its routines miss
+/// and land in a slow path, which calls this.
+#[cfg_attr(any(miri, kani), allow(dead_code))]
+pub(crate) fn publish_masks() {
+    let last = &SLABS.masks[SMALL_COUNT];
+    if last.load(Ordering::Relaxed) != 0 {
+        return;
+    }
+    for (entry, &mask) in SLABS.masks.iter().zip(MASK_TABLE.iter()) {
+        entry.store(mask as u64, Ordering::Relaxed);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::classes::{MARKER_SHIFT, SLOT_BYTES};
+    use crate::classes::{MARKER_SHIFT, MagazineSize, SLOT_BYTES};
     use crate::os::rseq;
     use std::string::String;
     use std::vec::Vec;
@@ -118,6 +221,8 @@ mod tests {
             }
             assert_eq!(get("RSEQ_CPU_ID"), rseq::CPU_ID as u64);
             assert_eq!(get("RSEQ_CS"), rseq::RSEQ_CS as u64);
+            assert_eq!(get("MASK_DISP"), MASK_DISP as u64);
+            assert_eq!(get("MASK_COUNT"), MASK_COUNT as u64);
             // Every small class's hot word is within the words the routines may address, and
             // every magazine size is one they accept, with the mask they expect.
             assert!((SMALL_COUNT as u64) < get("CLASS_LIMIT"));
@@ -131,21 +236,42 @@ mod tests {
     }
 
     #[test]
-    fn the_mask_table_holds_each_class_mask_at_its_index() {
+    fn the_mask_table_holds_each_class_mask_at_its_index_and_zero_elsewhere() {
         for class in SmallClass::all() {
-            assert_eq!(
-                MAG_MASKS[class.class().index() as usize] as usize,
-                class.magazine().mask()
-            );
+            assert_eq!(mask(class) as usize, class.magazine().mask());
         }
-        assert_eq!(MAG_MASKS.len(), SMALL_COUNT + 1);
+        let small = SmallClass::all().count();
+        assert_eq!(MASKS.iter().filter(|&&m| m != 0).count(), small);
+        assert_eq!(MASKS[0], 0);
     }
 
     #[test]
-    fn the_static_slabs_are_one_per_cpu_number() {
-        let slabs: &Slabs = &SLABS;
+    fn the_static_slabs_are_one_per_cpu_number_and_the_masks_follow() {
+        let slabs = SLABS.slabs();
         assert_eq!(slabs.len(), SLAB_COUNT);
-        assert_eq!(size_of_val(&SLABS), SLAB_COUNT << SLAB_SHIFT);
-        assert_eq!(core::ptr::from_ref(&SLABS).addr() % SLAB_BYTES, 0);
+        assert_eq!(size_of_val(&SLABS.slabs), SLAB_COUNT << SLAB_SHIFT);
+        let base = core::ptr::from_ref(&SLABS).addr();
+        assert_eq!(base % SLAB_BYTES, 0);
+        assert_eq!(core::ptr::from_ref(slabs).addr(), base);
+        for class in SmallClass::all() {
+            let word = SLABS.word(class);
+            assert_eq!(SLABS.class_of_word(word), Some(class));
+            let entry = core::ptr::from_ref(&SLABS.masks[class.class().index() as usize]).addr();
+            assert_eq!(entry, word + MASK_DISP);
+            // Not at a slab word's page offset.
+            assert!(entry % SLAB_BYTES >= Slab::USED_BYTES);
+        }
+        assert_eq!(SLABS.class_of_word(base), None);
+        assert_eq!(SLABS.class_of_word(base + 4), None);
+        assert_eq!(SLABS.class_of_word(base + 8 * (SMALL_COUNT + 1)), None);
+    }
+
+    #[test]
+    fn publishing_writes_every_small_mask_once_and_nothing_else() {
+        publish_masks();
+        publish_masks();
+        for (i, entry) in SLABS.masks.iter().enumerate() {
+            assert_eq!(entry.load(Ordering::Relaxed), MASKS[i] as u64);
+        }
     }
 }

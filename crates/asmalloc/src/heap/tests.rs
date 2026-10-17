@@ -683,6 +683,24 @@ mod process {
     }
 
     #[test]
+    fn the_out_of_line_routines_serve_every_class() {
+        // Their masks start at zero, which sends them to the slow paths, which write them.
+        for class in SmallClass::all() {
+            let held: Vec<*mut u8> = (0..2 * class.magazine().slots())
+                .map(|_| Asmalloc::alloc_small(class))
+                .collect();
+            for &p in &held {
+                assert!(!p.is_null());
+                assert_eq!(Asmalloc::usable_size(p), Some(class.size()));
+            }
+            for p in held {
+                // SAFETY: each block came from `alloc_small` of this class and is freed once.
+                unsafe { Asmalloc::free_small(class, core::ptr::NonNull::new(p).unwrap()) };
+            }
+        }
+    }
+
+    #[test]
     fn pointers_outside_the_heap_are_not_in_it() {
         let local = 0u8;
         assert!(!Asmalloc::contains(&local));

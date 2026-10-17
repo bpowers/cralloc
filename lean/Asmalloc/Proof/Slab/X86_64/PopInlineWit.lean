@@ -19,10 +19,11 @@ open VG.X86_64 VG.Spec.Slab VG.Impl.Slab.X86_64 VG.Proof.Slab.X86_64
 
 /-- A thread whose rseq area is at `0x10100` (glibc's offset `0x100` from an
 FS base of `0x10000`), whose CPU number is `cpu`, with `SLABS` at `0x1000000` and its
-class 1's word in slab 0 `word`, of magazines of 4 slots (mask 16); slot 1 of
+class 1's word in slab 0 `word`, whose address is in `rdi`, of magazines of 4 slots
+(mask 16, in `rsi`); slot 1 of
 the magazine at `0x4000` holds `0x5000`. -/
 def wit (cpu word : BitVec 64) (rd wr : List Region) : State where
-  gpr r := if r = .rsp then 0x7000000 else 0
+  gpr r := if r = .rsp then 0x7000000 else if r = .rdi then 0x1000008 else if r = .rsi then 16 else 0
   cf := none
   zf := none
   sf := none
@@ -32,7 +33,7 @@ def wit (cpu word : BitVec 64) (rd wr : List Region) : State where
   wr := wr
   syms n := if n = "__rseq_offset" then 0x2000 else if n = "SLABS" then 0x1000000 else 0
   fsBase := 0x10000
-  params n := if n = "coff" then 8 else if n = "mask" then 16 else 0
+  params _ := 0
   csDesc := 0x9000
 
 def roW : List Region := [⟨0x2000, 8⟩, ⟨0x10104, 4⟩]
@@ -68,7 +69,7 @@ theorem pre_wit (s : State) (hm : ∃ cpu word rd wr, s = wit cpu word rd wr)
     (hp : Sig.pairsSep (cx.regions s) = true)
     (hres : ((cx.regions s).all fun x => (cx.A.reserved 0 s).all fun q => Region.sep x.1 q) = true)
     (hl : layoutCheck cx s = true)
-    (hcoff : (s.params "coff").toNat = 8 * cx.cls s) (hcls : cx.cls s = 1)
+    (hoff : (cx.arg s 0 - cx.sym s SLABS).toNat = 8 * cx.cls s) (hcls : cx.cls s = 1)
     (hmask : cx.mask s = magMask (2 ^ 2)) (hslots : cx.slots s = 4)
     (hsyms : s.syms SLABS = 0x1000000)
     (h0 : cx.SlotOk s (s.mem.readW (wordAddr 0x1000000 0 1) 64)) :
@@ -94,7 +95,7 @@ theorem pre_wit (s : State) (hm : ∃ cpu word rd wr, s = wit cpu word rd wr)
     · exact absurd hsj (hn j (by omega) hj)
     · exact absurd hsi (hn i h hi)
   refine (pre_iff cx (s := s) hv rfl rfl).mpr ⟨trivial, world_of_check hX hrd hwr hnw hp hres,
-    rfl, rfl, ⟨rfl, hcoff, by rw [hcls]; decide, ⟨2, by decide, by decide, hmask⟩⟩,
+    rfl, rfl, ⟨hoff, by rw [hcls]; decide, ⟨2, by decide, by decide, hmask⟩⟩,
     layout_of_check hX hl, hslot, hex⟩
 
 theorem pre_w0 : (popInlineContract inlineAbi).pre w0 :=
