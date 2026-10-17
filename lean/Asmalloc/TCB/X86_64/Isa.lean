@@ -39,7 +39,8 @@ Modelling choices:
   which nothing constrains (see `TCB/Code.lean`).
 * A `static` the code reads (`Artifact.consts`) is at the address
   `State.syms name`, where `name` is its name, which `leaSym` (`lea` of a
-  RIP-relative operand, resolved by the linker) puts in a register. No
+  RIP-relative operand, resolved by the linker) puts in a register, or that
+  address plus a constant. No
   instruction changes `syms`: a static's address is fixed for the run of
   the program.
 * `push` and `pop` (of 64-bit registers other than `rsp`) only occur as the
@@ -145,9 +146,14 @@ inductive Instr
   /-- `movabs r64, imm64`: `MOV r64, imm64` (REX.W + B8+rd io), a full 64-bit
   immediate. -/
   | movImm64 (dst : Reg) (v : BitVec 64)
-  /-- `lea r64, [rip + name]` (REX.W + 8D /r, with a RIP-relative memory
-  operand): the address of the `static` `name`, `State.syms name`. -/
-  | leaSym (dst : Reg) (name : String)
+  /-- `lea r64, [rip + name + off]` (REX.W + 8D /r, with a RIP-relative
+  memory operand): the address of the `static` `name`, `State.syms name`,
+  plus `off`. -/
+  | leaSym (dst : Reg) (name : String) (off : Int := 0)
+  /-- `lea r64, [base + index * scale + disp]` (REX.W + 8D /r): the operand's
+  offset (`State.offset`), computed without accessing memory. The operand
+  names no segment (the printer refuses one). -/
+  | lea (dst : Reg) (src : MemOp)
   /-- `mul r64` (REX.W + F7 /4): the unsigned product `RDX:RAX := RAX * r64`. -/
   | mul (src : Reg)
   /-- `imul r64, r64` (`REX.W 0F AF /r`): the low 64 bits of the product
@@ -232,10 +238,19 @@ def exec : Instr → State → Option State
   -- 64-bit mode is `RIP + disp32`, Table 2-7: "An effective address is
   -- formed by adding displacement to the 64-bit RIP of the next
   -- instruction"), its `disp32` written by the linker so that the sum is the
-  -- static's address `S` (`S + A - P`, with the addend `A = -4`: System V
-  -- AMD64 psABI §4.4, "Relocation Types", `R_X86_64_PC32`): `DEST := S`. A
-  -- static beyond `disp32`'s range (±2 GB) does not link.
-  | .leaSym d name, s => some (s.setReg d (s.syms name))
+  -- static's address `S` plus the constant `off` of the operand (`S + A - P`,
+  -- with the addend `A = off - 4`: System V AMD64 psABI §4.4, "Relocation
+  -- Types", `R_X86_64_PC32`): `DEST := S + off`. A sum beyond `disp32`'s
+  -- range (±2 GB from the instruction) does not link.
+  | .leaSym d name off, s => some (s.setReg d (s.syms name + BitVec.ofInt 64 off))
+  -- `lea`: SDM Vol. 2, "LEA—Load Effective Address", `LEA r64, m` (`REX.W + 8D
+  -- /r`), with a 64-bit operand size and address size: "Computes the
+  -- effective address of the second operand (the source operand) and stores
+  -- it in the first operand", where "the source operand is a memory address
+  -- (offset part)"; `IF OperandSize = 64 and AddressSize = 64 THEN DEST :=
+  -- EffectiveAddress(SRC)`, its offset `base + index * scale + disp` modulo
+  -- 2⁶⁴ (`State.offset`); "Flags Affected: None"; it accesses no memory.
+  | .lea d m, s => some (s.setReg d (s.offset m))
   | .mul r, s => some (execMul r s)
   | .imul d r, s => some (execImul d r s)
   | .mulx hi lo src, s => execMulx hi lo src s
@@ -338,7 +353,7 @@ two, `rax` and `rdx`, `mulx` two of its choosing, and stores none. -/
 def Instr.dst : Instr → Option Reg
   | .mov d _ | .alu _ d _ | .mov32 d _ | .alu32 _ d _ | .shift32 _ d _ | .bswap32 d
   | .rorx32 d .. | .andn32 d .. | .rorx d .. | .andn d .. | .movzx8 d _ | .bswap d | .shift _ d _
-  | .shiftCl _ d | .shiftx _ d .. | .movImm64 d _ | .leaSym d _ | .adcx d _ | .adox d _
+  | .shiftCl _ d | .shiftx _ d .. | .movImm64 d _ | .leaSym d .. | .lea d _ | .adcx d _ | .adox d _
   | .cmov _ d _ | .pop d _ | .imul d _ => some d
   | .store .. | .store32 .. | .store8 .. | .mul _ | .mulx .. | .push _ | .alloc _ | .free _ => none
 

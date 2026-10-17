@@ -54,11 +54,16 @@ tests in `AsmallocTest/Print.lean`.
 
 namespace VG
 
-/-- The part of a `static`'s address a line names: the whole address as a
-RIP-relative memory operand, `[rip + <sym>]` (x86-64's `lea`). -/
+/-- The part of a `static`'s address a line names: the address plus `off`
+as a RIP-relative memory operand, `[rip + <sym> + off]` (x86-64's `lea`). -/
 inductive SymPart
-  | ripRel
+  | ripRel (off : Int)
   deriving DecidableEq, Repr
+
+/-- The text of a constant added to a symbol in an operand: nothing for 0,
+` + k` or ` - k` otherwise. -/
+def symOffset (off : Int) : String :=
+  if off = 0 then "" else if off > 0 then s!" + {off}" else s!" - {-off}"
 
 /-- A line of assembly: text, a call instruction of the function it names,
 or text followed by a RIP-relative operand of the address of the `static` it

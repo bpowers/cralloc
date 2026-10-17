@@ -102,6 +102,26 @@ theorem ea_fs_index (b i : Reg) (k : Nat) (d : Int) :
       s.fsBase + (s.gpr b + s.gpr i * BitVec.ofNat 64 k + BitVec.ofInt 64 d) :=
   rfl
 
+/-! ## Offsets of memory operands, which `lea` computes -/
+
+/-- `[base + disp]` -/
+theorem offset_base_disp (b : Reg) (d : Int) :
+    s.offset { base := b, disp := d } = s.gpr b + BitVec.ofInt 64 d := rfl
+
+/-- `[base + index * scale + disp]` -/
+theorem offset_index (b i : Reg) (k : Nat) (d : Int) :
+    s.offset { base := b, index := some i, scale := k, disp := d } =
+      s.gpr b + s.gpr i * BitVec.ofNat 64 k + BitVec.ofInt 64 d := rfl
+
+/-- A literal displacement `-k` subtracts `k`. With `BitVec.ofInt_ofNat`,
+which turns a literal displacement `k` into `BitVec.ofNat 64 k`, and
+`BitVec.ofNat_eq_ofNat`, this is what `simp` needs of the displacements of
+literal operands. -/
+theorem add_ofInt_neg_lit (x : Addr) (k : Nat) :
+    x + BitVec.ofInt 64 (-(no_index (OfNat.ofNat k : Int))) = x - BitVec.ofNat 64 k := by
+  rw [BitVec.ofInt_neg, BitVec.sub_eq_add_neg]
+  rfl
+
 /-! ## The state after a store
 
 A store's state is `{ s with mem := … }`, whose other fields `simp` reads by

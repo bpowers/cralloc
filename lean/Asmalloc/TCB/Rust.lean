@@ -62,9 +62,10 @@ cache line, so that where a table's entries fall in cache lines depends
 only on the table, not on the size of whatever the linker puts before it.
 Its name cannot be a table's (`tableName`).
 
-The code forms a table's address from the static's symbol (a `sym`
-operand), on x86-64 by `lea` of the RIP-relative operand `[rip + <sym>]`
-(`SymPart.ripRel`). The linker resolves it to the static's address, which
+The code forms a table's address, or an address at a constant offset from
+it, from the static's symbol (a `sym` operand), on x86-64 by `lea` of the
+RIP-relative operand `[rip + <sym> + <off>]` (`SymPart.ripRel`). The linker
+resolves it to the static's address plus the offset, which
 the model gives (`State.syms`, fixed for the run as a static's address is)
 and at which the contract (`Abi.withConsts`) says the memory holds the table,
 readable and apart from every writable region: a `static` is a distinct
@@ -144,7 +145,7 @@ of the same name. -/
 def lineText (call : String) : Line → String
   | .text l => escapeBraces l
   | .call n => escapeBraces call ++ " {" ++ n ++ "}"
-  | .sym s .ripRel n => escapeBraces s ++ "[rip + {" ++ n ++ "}]"
+  | .sym s (.ripRel off) n => escapeBraces s ++ "[rip + {" ++ n ++ "}" ++ symOffset off ++ "]"
 
 /-- One line of the `naked_asm!` template as an argument of its own. -/
 def line (call : String) (l : Line) : String :=

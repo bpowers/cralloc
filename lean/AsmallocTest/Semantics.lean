@@ -56,4 +56,28 @@ def fsIdx : MemOp := { base := .rdx, index := some .rcx, scale := 8, disp := 24,
 
 #guard (exec (.mov .rax (.mem fsIdx)) stIdx).map (·.gpr .rax) == some 0xCFCECDCCCBCAC9C8
 
+/-! ## `lea` -/
+
+/-- The flags of a state, to check that an instruction keeps them. -/
+def flags (s : State) : List (Option Bool) := [s.cf, s.zf, s.sf, s.of]
+
+-- The offset, modulo 2⁶⁴, with no memory access (the address is outside
+-- every region) and the flags unchanged.
+#guard match exec (.lea .rax { base := .rdx, disp := 8 }) st with
+  | none => false
+  | some s => s.gpr .rax == BitVec.ofInt 64 (-312) && flags s == flags st
+-- Base, index times scale, and a negative displacement: `-320 + (-2) * 8 - 8`.
+#guard (exec (.lea .rcx { base := .rdx, index := some .rcx, scale := 8, disp := -8 }) stIdx).map
+  (·.gpr .rcx) == some (BitVec.ofInt 64 (-344))
+-- Wrapping: `(2⁶⁴ - 1) + 1 = 0`.
+#guard (exec (.lea .rax { base := .rax, disp := 1 }) st).map (·.gpr .rax) == some 0
+
+/-- `st` with a static `T` at `0x1000`. -/
+def stSym : State := { st with syms := fun n => if n = "T" then 0x1000 else 0 }
+
+#guard (exec (.leaSym .r9 "T") stSym).map (·.gpr .r9) == some 0x1000
+#guard (exec (.leaSym .r9 "T" 24) stSym).map (·.gpr .r9) == some 0x1018
+#guard (exec (.leaSym .r9 "T" (-8)) stSym).map (·.gpr .r9) == some 0xFF8
+#guard (exec (.leaSym .r9 "T" 24) stSym).map flags == some (flags st)
+
 end VG.Test.Semantics
