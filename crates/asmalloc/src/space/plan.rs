@@ -265,15 +265,15 @@ mod tests {
     #[test]
     fn the_largest_design_plan_fits_in_sixteen_tebibytes() {
         let plan = Geometry::DESIGN.largest_plan();
-        assert_eq!(plan.objects(), 3970);
-        assert_eq!(plan.objects_end(), 3970 << 32);
-        assert_eq!(plan.magazines_offset(), 3970 << 32);
-        assert_eq!(plan.metadata_offset(plan.region(0).unwrap()), 3971 << 32);
-        assert_eq!(plan.metadata_end(), (3971 << 32) + 3970 * (128 << 20));
+        assert_eq!(plan.objects(), 3940);
+        assert_eq!(plan.objects_end(), 3940 << 32);
+        assert_eq!(plan.magazines_offset(), 3940 << 32);
+        assert_eq!(plan.metadata_offset(plan.region(0).unwrap()), 3972 << 32);
+        assert_eq!(plan.metadata_end(), (3972 << 32) + 3940 * (128 << 20));
         assert_eq!(plan.process_page_offset(), plan.metadata_end());
         assert_eq!(plan.size(), plan.metadata_end() + 4096);
         assert!(plan.size() <= 16 << 40);
-        assert_eq!(plan.regions().count(), 3970);
+        assert_eq!(plan.regions().count(), 3940);
     }
 
     #[test]

@@ -22,7 +22,21 @@ pub(super) const START: u8 = 1 << 5;
 /// writable yet, so no correct caller touches it while this is set.
 pub(super) const CHECKING: u8 = 1 << 6;
 /// Marked to read as zero in a forked child.
-pub(super) const WIPE: u8 = 1 << 6;
+pub(super) const WIPE: u8 = 1 << 7;
+
+// Every flag is its own bit: two sharing one made a wipe mark look like a commit in progress.
+const _: () = {
+    let flags = [
+        RESERVED, WRITABLE, PURGED, HUGE, NO_HUGE, START, CHECKING, WIPE,
+    ];
+    let mut seen = 0u8;
+    let mut i = 0;
+    while i < flags.len() {
+        assert!(flags[i].count_ones() == 1 && seen & flags[i] == 0);
+        seen |= flags[i];
+        i += 1;
+    }
+};
 
 /// Per-page state, one atomic byte per page, so concurrent calls on different pages never
 /// interfere and the simulator needs no lock.

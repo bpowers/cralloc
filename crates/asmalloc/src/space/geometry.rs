@@ -56,11 +56,16 @@ pub struct Geometry {
 
 impl Geometry {
     /// The design's geometry: 4 KiB pages, 2 MiB huge pages, regions of 4 GiB down to 2 MiB,
-    /// at most 4096 regions, one region of magazines, and magazines up to the largest size.
+    /// at most 4096 regions, 32 regions of magazines, and magazines up to the largest size.
     ///
-    /// The floor is one huge page per region: there the 3970 object regions and their metadata
+    /// The floor is one huge page per region: there the 3940 object regions and their metadata
     /// span about 8 GiB.
-    pub const DESIGN: Geometry = Geometry::new(12, 21, 32, 21, MAX_REGIONS, 1, MagazineSize::MAX);
+    ///
+    /// The magazine area shrinks with the regions, so it is sized for the floor: 32 regions are
+    /// 64 MiB there (128 GiB at the top, more than any process will use). When it is used up,
+    /// the slow path finds no magazine to make and serves the request from the back end
+    /// directly, so running out costs speed, never an allocation.
+    pub const DESIGN: Geometry = Geometry::new(12, 21, 32, 21, MAX_REGIONS, 32, MagazineSize::MAX);
 
     /// A geometry with pages of `2^page_shift` bytes, huge pages of `2^huge_page_shift`, regions
     /// of `2^max_region_shift` down to `2^min_region_shift`, at most `max_regions` regions in
@@ -227,11 +232,11 @@ mod tests {
         let g = Geometry::DESIGN;
         assert_eq!(g.page_size(), 4096);
         assert_eq!(g.huge_page_size(), 2 << 20);
-        assert_eq!(g.max_objects(), 3970);
+        assert_eq!(g.max_objects(), 3940);
         let plan = g.largest_plan();
         assert_eq!(plan.region_size(), 4 << 30);
         assert_eq!(plan.metadata_size(), 128 << 20);
-        assert_eq!(plan.magazine_area_size(), 4 << 30);
+        assert_eq!(plan.magazine_area_size(), 128 << 30);
         assert!(plan.size() <= 16 << 40);
         assert_eq!(plan.slots_per_region(Class::SMALLEST), 1 << 29);
         assert!(Class::all().all(|c| plan.fits_region(c)));
@@ -239,6 +244,10 @@ mod tests {
         let floor = g.smallest_plan();
         assert_eq!(floor.region_size(), 2 << 20);
         assert!(floor.size() < 9 << 30);
+        assert!(
+            floor.magazine_area_size() >= 64 << 20,
+            "magazines at the floor"
+        );
         assert!(floor.hosts_every_small_class());
     }
 

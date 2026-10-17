@@ -1,7 +1,7 @@
 //! The address space: where regions, their metadata and the magazines live.
 //!
 //! At first use the allocator reserves one range of address space: 16 TiB in the design's
-//! [`Geometry`]. Most of it is 3970 object regions of 4 GiB, each assigned to one class on demand
+//! [`Geometry`]. Most of it is 3940 object regions of 4 GiB, each assigned to one class on demand
 //! and holding slots of that class at `region_base + index * class_size`. Above the object
 //! regions sit the magazine area, one metadata block per region and the process page ([`Plan`]).
 //! Memory that holds objects never holds allocator state. If the process cannot have that much

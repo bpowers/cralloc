@@ -8,6 +8,12 @@
 //! its CPU ([`Cpus::fence`], which the simulator's `Os::fence` calls), and from another thread
 //! starting a sequence on the same CPU, which it can only do if this one was preempted.
 //!
+//! Threads that share a simulated CPU need a cooperative scheduler (one OS thread, switching
+//! inside `step`), as the interleaving checkers have. Two free-running OS threads on one
+//! simulated CPU can both pass their `Commit` steps and both commit, losing an update, where
+//! one real CPU runs one sequence at a time. Free-running threads on different CPUs are
+//! modelled faithfully, fences included.
+//!
 //! A sequence that passes its `Commit` step is committing until the twin calls
 //! [`Machine::committed`] after its store. A fence does not interrupt a committing sequence (the
 //! store is the routine's last instruction, past the point of abort); it waits for it to finish,
@@ -59,16 +65,33 @@ impl ThreadState {
     /// sequence that is committing cannot be interrupted any more; this waits for it to end, as
     /// a fence waits for a routine's last instruction.
     fn interrupt(&self) -> bool {
+        self.barrier(true)
+    }
+
+    /// A successful read-modify-write of the state, whether or not it changes it: the write
+    /// orders this call against the thread's next `ReadCpu` (itself a swap) and hands that
+    /// sequence everything the caller stored before, as the kernel's barrier does. With `abort`
+    /// it also interrupts a running sequence, waiting out a committing one; it returns whether
+    /// it interrupted one.
+    fn barrier(&self, abort: bool) -> bool {
+        let mut old = self.sequence.load(Ordering::Acquire);
         loop {
-            match self.sequence.compare_exchange(
-                RUNNING,
-                ABORTED,
-                Ordering::AcqRel,
-                Ordering::Acquire,
-            ) {
-                Ok(_) => return true,
-                Err(COMMITTING) => core::hint::spin_loop(),
-                Err(_) => return false,
+            if abort && old == COMMITTING {
+                core::hint::spin_loop();
+                old = self.sequence.load(Ordering::Acquire);
+                continue;
+            }
+            let new = if abort && old == RUNNING {
+                ABORTED
+            } else {
+                old
+            };
+            match self
+                .sequence
+                .compare_exchange(old, new, Ordering::AcqRel, Ordering::Acquire)
+            {
+                Ok(_) => return abort && old == RUNNING,
+                Err(now) => old = now,
             }
         }
     }
@@ -96,11 +119,14 @@ impl<const N: usize> Cpus<N> {
     }
 
     /// Aborts every sequence in flight on `cpu` and returns how many there were.
+    /// Every thread, on the CPU or not, gets a read-modify-write of its state, so that a
+    /// sequence it starts later sees everything stored before the fence; without that, a free-
+    /// running thread's twin could read a slab word older than a drainer's marker and commit
+    /// over it.
     pub(super) fn fence(&self, cpu: u32) -> usize {
         self.threads
             .iter()
-            .filter(|thread| thread.cpu.load(Ordering::Acquire) == cpu as i32)
-            .filter(|thread| thread.interrupt())
+            .filter(|thread| thread.barrier(thread.cpu.load(Ordering::Acquire) == cpu as i32))
             .count()
     }
 
@@ -182,6 +208,8 @@ impl Machine for SimThread<'_> {
         }
         match step {
             Step::ReadCpu => {
+                // A swap, so that it reads what the last fence of this thread wrote.
+                state.sequence.swap(RUNNING, Ordering::AcqRel);
                 // One CPU runs one thread at a time: if another thread is in a sequence on
                 // this CPU, it was preempted for this one to start.
                 let cpu = state.cpu.load(Ordering::Acquire);
@@ -190,7 +218,6 @@ impl Machine for SimThread<'_> {
                         other.interrupt();
                     }
                 }
-                state.sequence.store(RUNNING, Ordering::Release);
                 Ok(())
             }
             _ => {

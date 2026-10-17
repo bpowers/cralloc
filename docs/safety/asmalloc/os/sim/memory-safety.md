@@ -52,22 +52,32 @@ until the value that made them is dropped.
 
 ## SIM-MEMORY-05: `from_raw_parts` in `Memory::is_zero`
 
-**Preconditions** (the function's `# Safety`). `offset + len <= self.len()`, and no thread
-writes those bytes during the call.
+**Preconditions** (the function's `# Safety`). `offset + len <= self.len()`, the range is
+accessible, every byte in it is initialized, and no thread writes those bytes during the call.
 
-**Proof.** The slice lies within the allocation for the same reason as in SIM-MEMORY-03, it is
-initialized (the allocation was zeroed and is only ever written with bytes), and `u8` needs no
-alignment. Readers may share it; the caller rules out writers for the slice's lifetime, which
-ends with the call. The callers:
+**Proof.** The slice of `u64` lies within the allocation for the same reason as in
+SIM-MEMORY-03. It is aligned: the base is aligned to the shape's largest region, and callers
+pass whole pages, so the offset and length are multiples of 8 (the function checks this in
+debug builds). Its bytes are initialized by the caller's promise, and every bit pattern is a
+valid `u64`. Readers may share it; the caller rules out writers for the slice's lifetime, which
+ends with the call.
+
+The simulator cannot know on its own that the bytes are initialized: the heap, or a test, may
+store a value with padding or `MaybeUninit` fields into committed memory, and reading those
+bytes is undefined (Miri reports it). So each caller states why its pages hold only
+initialized bytes:
 
 - `check_page` reads one page that is not committed, which no correct caller writes; catching
-  a buggy writer is the point. Being uncommitted when the check began is not enough, because a
+  a buggy writer is the point. Its bytes are initialized because the memory starts zeroed and
+  every way a page stops being committed (`purge`, `unmap`) zeroes it. Being uncommitted when the check began is not enough, because a
   racing `commit` of the same page could make it writable and let its caller write while the
   check reads (Miri found exactly that in a depot test). So `purge` and `unmap` check only under
   their contracts, which exclude concurrent access, and `commit` checks a page only after
   claiming it with `CHECKING` (`Pages::begin_commit`): a racing commit waits for the claim to
   end, and the page becomes writable only when the check is done.
-- `is_purged` and `resident_bytes` are test queries documented "call while nothing writes".
+- `is_purged` and `resident_bytes` read pages the heap has written, so they are `unsafe` and
+  pass both conditions on to their callers: nothing writes the pages during the call, and every
+  byte written to them (since the purge, for `is_purged`) was initialized.
 
 Machine checks: Miri over the simulator's unit tests and the depot's threaded tests, which run
 all three callers. Kani does not reach this block: the check is skipped under Kani, because word

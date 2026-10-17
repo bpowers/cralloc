@@ -274,13 +274,16 @@ fn large_slots_past_the_cap_are_purged_and_come_back_zeroed() {
     for b in &blocks {
         paint(b.ptr.as_ptr(), class.size(), 0x5a);
     }
-    let before = os.resident_bytes();
+    // SAFETY: no other thread runs, and the back end and this test store only integers, so
+    // every byte is initialized.
+    let resident = || unsafe { os.resident_bytes() };
+    let before = resident();
     assert!(before >= n * class.size());
     for b in &blocks {
         back.free(b.ptr, class);
     }
     assert!(back.retained() <= cap, "{} > {cap}", back.retained());
-    let returned = before - os.resident_bytes();
+    let returned = before - resident();
     assert!(returned >= (n * class.size()).saturating_sub(cap) - class.size());
     let mut zeroed = 0;
     let again: Vec<Block> = (0..n)
@@ -303,11 +306,8 @@ fn large_slots_past_the_cap_are_purged_and_come_back_zeroed() {
     }
     back.trim();
     assert_eq!(back.retained(), 0);
-    assert!(
-        os.resident_bytes() < before / 8,
-        "trim leaves {} resident",
-        os.resident_bytes()
-    );
+    let after = resident();
+    assert!(after < before / 8, "trim leaves {after} resident");
 }
 
 /// A large object's size is recorded when it is allocated and resized, and its usable size is
@@ -500,11 +500,13 @@ fn passing_the_cap_purges_back_under_it() {
     assert!(back.retained() <= cap, "{} > {cap}", back.retained());
     // The purged pages are the top ones: the lowest slots are still resident.
     let low = fill(&back, class, 1)[0];
-    assert!(
-        !state
+    // SAFETY: no other thread runs, and the back end and this test store only integers.
+    let purged = unsafe {
+        state
             .os()
             .is_purged(core::ptr::NonNull::new(low).unwrap(), 1024)
-    );
+    };
+    assert!(!purged);
 }
 
 #[test]

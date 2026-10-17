@@ -10,7 +10,7 @@
 //! single store, and the drain (`depot::drain`). The routines are assembly generated from Lean
 //! into `generated/` and wrapped as `Real`; [`Twin`] implements the same specifications in
 //! Rust for every environment where assembly cannot run (Miri, Kani and the simulated-OS
-//! tests), over a simulated processor (`os::Machine`) that tests control. Which one a heap uses
+//! tests), over a simulated processor ([`Machine`](crate::os::Machine)) that tests control. Which one a heap uses
 //! is chosen where the heap is made, by build configuration.
 //!
 //! The layout constants here must equal those the Lean specification gives the generated code
