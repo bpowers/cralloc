@@ -21,6 +21,8 @@ The tactics `TCB/Registration.lean` declares for the default proofs of a
   `Sig.contract`, and then `⟨none, _, _, _, rfl⟩` (or with the extra memory
   found by unification), whose unification does not always
   find the arguments of `Sig.contract` itself.
+* `restarts_ok` proves `restartsOk` for code without a restartable
+  sequence: its only `Restarts` is from its entry to itself.
 * `sp_safe` proves `spSafe`, `code.all (fun i => !T.isa.writesSp i) = true`,
   by `Code.all_of_allInstrs (by decide +kernel)`. Code that depends on a
   variable of an enumeration (`Bool`, an `inductive` of constructors without
@@ -82,5 +84,16 @@ elab_rules : tactic
         evalTactic (← `(tactic| sp_safe))
     else
       evalTactic (← `(tactic| exact Code.all_of_allInstrs (by decide +kernel)))
+
+/-- `restarts_ok`: code without a restartable sequence has no abort state,
+so its only `Restarts` is from its entry to itself. -/
+macro_rules
+  | `(tactic| restarts_ok) => `(tactic| (
+      intro s s' _ h
+      cases h with
+      | refl =>
+        refine ⟨by first | exact ⟨fun _ _ => rfl, rfl⟩ | rfl, fun _ _ => rfl, ?_⟩
+        first | (intro _ _ _; rfl) | (intro h'; exact absurd h' (by decide))
+      | abort hp => exact absurd hp List.not_mem_nil))
 
 end VG.RegistrationTactics

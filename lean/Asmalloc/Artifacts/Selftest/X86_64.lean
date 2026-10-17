@@ -1,7 +1,7 @@
 module
 
 public import Asmalloc.Proof.Selftest.X86_64
-public import Asmalloc.Proof.Framework.Semantics
+public import Asmalloc.Proof.Framework.Registration
 
 /-! # The pipeline self-test on x86-64
 

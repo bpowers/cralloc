@@ -134,6 +134,20 @@ theorem preservedExcept_of_mid {names : List String} (hn : ∀ r ∈ rs, r.name 
 
 end
 
+/-- The magazine a word the invariant allows names is the same in memory
+changed only in regions apart from the magazine. -/
+theorem ofWord_frame {n : Nat} {m m' : Mem} {w : BitVec 64} {W : List Region} (hn : 0 < n)
+    (hfr : Frame W m m') (hw : WordOk n w)
+    (hd : IsSlot n w → ∀ r ∈ W, Region.Disjoint ⟨magBase n w, 8 * n⟩ r) :
+    Mag.ofWord n m' w = Mag.ofWord n m w := by
+  rcases hw with h0 | hm | hs
+  · rw [ofWord_zero h0, ofWord_zero h0]
+  · rw [ofWord_marker hm, ofWord_marker hm]
+  · refine ofWord_congr fun i hi => hfr.readW (r := ⟨magBase n w + BitVec.ofNat 64 (8 * (i + 1)), 8⟩)
+      (Region.contains_self _ _) (fun r hr => (hd hs r hr).sub_left (sub_item ?_)) (by decide)
+    have := slot_lt n w hn
+    omega
+
 /-! ## A retry's precondition
 
 Wherever the routine may be aborted it has kept the invariant, having

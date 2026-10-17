@@ -73,6 +73,11 @@ structure Registration (api : Api) (target : Target) where
       (∀ t s', ExecExit target.isa code s t s' → target.preservedExcept clobbers s s') ∧
       (∀ p ∈ code.abortStates target.isa s, target.preservedExcept clobbers s p) := by
     exact fun h => nomatch h
+  /-- `Artifact.restartsOk`. -/
+  restartsOk : ∀ s s', contract.pre s → Restarts target code contract s s' →
+      target.abiPreserved s s' ∧ ArgsKept target.abi api.sig s s' ∧
+      (target.inline = true → target.preservedExcept clobbers s s') := by
+    restarts_ok
   /-- `Artifact.witnesses`. -/
   witnesses : List target.isa.State
   /-- `Artifact.witnessOk`. -/
@@ -110,5 +115,6 @@ def Api.artifact (api : Api) (target : Target) (r : Registration api target) : A
   witnessOk := r.witnessOk
   clobbers := r.clobbers
   clobbersOk := r.clobbersOk
+  restartsOk := r.restartsOk
 
 end VG

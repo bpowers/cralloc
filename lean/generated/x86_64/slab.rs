@@ -89,7 +89,7 @@ pub(crate) const WORD_BYTES: usize = 8;
 /// * glibc must have registered the calling thread's rseq area, as it does before the thread can run code that allocates.
 /// * `class` must be below 512, and `MAG_MASKS[class]` the mask `8 * n - 16` of that class's magazines, of `n = 2^k` slots for 2 ≤ k ≤ 16.
 /// * None of `SLABS`, the thread's `rseq_cs` and `cpu_id`, `__rseq_offset` and the mask's entry `MAG_MASKS[class]` may overlap the return address on the stack or wrap around the end of the address space, nor overlap another of them, but where both are only read (`cpu_id`, `__rseq_offset` and the mask's entry `MAG_MASKS[class]`) (`VG.Spec.Slab.Ctx.Layout`).
-/// * In each of the 8192 slabs of `SLABS`, the class's slab word must be 0, a marker (a word whose low 19 bits are 1), or the address of a slot other than slot 0 of a magazine of the class (`8 * n` bytes, aligned to `8 * n`), whose pointers are not 0 (a pop returns 0 for none) and which does not overlap `SLABS`, the thread's `rseq_cs` and `cpu_id`, `__rseq_offset`, the mask's entry `MAG_MASKS[class]` or the return address on the stack, nor wrap around the end of the address space. Every thread and the drainer must keep this from when the function is called until it returns: the function may be aborted and restarted on any CPU in between (`VG.Spec.Slab.Ctx.inv`).
+/// * In each of the 8192 slabs of `SLABS`, the class's slab word must be 0, a marker (a word whose low 19 bits are 1), or the address of a slot other than slot 0 of a magazine of the class (`8 * n` bytes, aligned to `8 * n`), whose pointers are not 0 (a pop returns 0 for none) and which does not overlap `SLABS`, the thread's `rseq_cs` and `cpu_id`, `__rseq_offset`, the mask's entry `MAG_MASKS[class]` or the return address on the stack, the magazine another slab's word of the class names, nor wrap around the end of the address space. Every thread and the drainer must keep this from when the function is called until it returns: the function may be aborted and restarted on any CPU in between (`VG.Spec.Slab.Ctx.inv`).
 #[unsafe(naked)]
 pub(crate) unsafe extern "sysv64" fn slab_pop(class: usize) -> usize {
     core::arch::naked_asm!(
@@ -110,7 +110,7 @@ pub(crate) unsafe extern "sysv64" fn slab_pop(class: usize) -> usize {
 /// * glibc must have registered the calling thread's rseq area, as it does before the thread can run code that allocates.
 /// * `class` must be below 512, and `MAG_MASKS[class]` the mask `8 * n - 16` of that class's magazines, of `n = 2^k` slots for 2 ≤ k ≤ 16.
 /// * None of `SLABS`, the thread's `rseq_cs` and `cpu_id`, `__rseq_offset` and the mask's entry `MAG_MASKS[class]` may overlap the return address on the stack or wrap around the end of the address space, nor overlap another of them, but where both are only read (`cpu_id`, `__rseq_offset` and the mask's entry `MAG_MASKS[class]`) (`VG.Spec.Slab.Ctx.Layout`).
-/// * In each of the 8192 slabs of `SLABS`, the class's slab word must be 0, a marker (a word whose low 19 bits are 1), or the address of a slot other than slot 0 of a magazine of the class (`8 * n` bytes, aligned to `8 * n`), whose pointers are not 0 (a pop returns 0 for none) and which does not overlap `SLABS`, the thread's `rseq_cs` and `cpu_id`, `__rseq_offset`, the mask's entry `MAG_MASKS[class]` or the return address on the stack, nor wrap around the end of the address space. Every thread and the drainer must keep this from when the function is called until it returns: the function may be aborted and restarted on any CPU in between (`VG.Spec.Slab.Ctx.inv`).
+/// * In each of the 8192 slabs of `SLABS`, the class's slab word must be 0, a marker (a word whose low 19 bits are 1), or the address of a slot other than slot 0 of a magazine of the class (`8 * n` bytes, aligned to `8 * n`), whose pointers are not 0 (a pop returns 0 for none) and which does not overlap `SLABS`, the thread's `rseq_cs` and `cpu_id`, `__rseq_offset`, the mask's entry `MAG_MASKS[class]` or the return address on the stack, the magazine another slab's word of the class names, nor wrap around the end of the address space. Every thread and the drainer must keep this from when the function is called until it returns: the function may be aborted and restarted on any CPU in between (`VG.Spec.Slab.Ctx.inv`).
 #[unsafe(naked)]
 pub(crate) unsafe extern "sysv64" fn slab_push(class: usize, p: usize) {
     core::arch::naked_asm!(
@@ -130,6 +130,7 @@ pub(crate) unsafe extern "sysv64" fn slab_push(class: usize, p: usize) {
 ///
 /// * glibc must have registered the calling thread's rseq area, as it does before the thread can run code that allocates.
 /// * None of `SLABS`, the thread's `rseq_cs` and `cpu_id` and `__rseq_offset` may overlap the return address on the stack or wrap around the end of the address space, nor overlap another of them, but where both are only read (`cpu_id` and `__rseq_offset`) (`VG.Spec.Slab.Ctx.Layout`).
+/// * In each of the 8192 slabs of `SLABS`, the word at `offset` (rounded down to a multiple of 8, within the slab) must not be `NO_CPU` (2), which the function returns when the CPU number has no slab; no slab word or head is (each is 0, a marker or a multiple of 8). Every thread and the drainer must keep this from when the function is called until it returns: the function may be aborted and restarted on any CPU in between (`VG.Spec.Slab.Ctx.inv`).
 #[unsafe(naked)]
 pub(crate) unsafe extern "sysv64" fn slab_cas(offset: usize, expected: usize, new: usize) -> usize {
     core::arch::naked_asm!(
@@ -173,5 +174,25 @@ pub(crate) unsafe extern "sysv64" fn slab_stack_pop(offset: usize) -> usize {
         "5:\nmov r10, QWORD PTR [rip + {__rseq_offset}@GOTPCREL]\nmov r10, QWORD PTR [r10]\nlea r11, [rip + 3f]\nmov QWORD PTR fs:[r10+8], r11\n6:\nmov r8d, DWORD PTR fs:[r10+4]\ncmp r8d, 8192\njae 20f\nshl r8, 12\nmov r9d, edi\nand r9d, 4088\nadd r8, r9\nlea r9, [rip + {SLABS}]\nmov rax, QWORD PTR [r9+r8*1]\ntest eax, 1\njne 7f\ntest rax, rax\nje 7f\nmov rcx, QWORD PTR [rax]\nmov QWORD PTR [r9+r8*1], rcx\n7:\n.pushsection __rseq_cs, \"aw\"\n.balign 32\n3:\n.long 0, 0\n.quad 6b, 7b - 6b, 4f\n.popsection\n.pushsection .text.unlikely, \"ax\"\n.byte 0x0f, 0xb9, 0x3d\n.long 0x53053053\n4:\njmp 5b\n20:\nmov eax, 2\njmp 7b\n.popsection\nret\n.p2align 6",
         __rseq_offset = sym crate::front::__rseq_offset,
         SLABS = sym crate::front::SLABS,
+    )
+}
+
+/// Returns the calling thread's CPU number as the slab routines read it: its rseq area's `cpu_id`, zero-extended. A number not below `SLAB_COUNT` has no slab (an unregistered thread's reads as one). Not a restartable sequence: the thread may move to another CPU before the caller uses the answer.
+///
+/// Contract: `VG.Spec.Slab.cpuContract`.
+///
+/// # Safety
+///
+/// * glibc must have registered the calling thread's rseq area, as it does before the thread can run code that allocates.
+/// * Neither `__rseq_offset` nor the thread's `cpu_id` may overlap the stack the call uses (the return address on the stack, or, inline, the 128 bytes below the stack pointer and the 8 bytes at it) or wrap around the end of the address space.
+#[unsafe(naked)]
+pub(crate) unsafe extern "sysv64" fn current_cpu() -> u32 {
+    core::arch::naked_asm!(
+        r"mov rax, QWORD PTR [rip + {__rseq_offset}@GOTPCREL]
+mov rax, QWORD PTR [rax]
+mov eax, DWORD PTR fs:[rax+4]
+ret
+.p2align 6",
+        __rseq_offset = sym crate::front::__rseq_offset,
     )
 }

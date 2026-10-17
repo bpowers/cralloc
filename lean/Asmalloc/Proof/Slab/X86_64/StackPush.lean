@@ -358,10 +358,26 @@ theorem correct (hs : (stackPushContract abi).pre s) :
 
 /-! ### Where it may be aborted -/
 
+/-- Every slab's stack, in memory changed only apart from its link slots:
+in `rseq_cs` and the pushed magazine's link slot. -/
+theorem chain_any (hp : Pre s) {i : Nat} (hi : i < SLAB_COUNT) {m : Mem}
+    (hm : ∀ x, Region.Disjoint ⟨x, 8⟩ ⟨area s + 8, 8⟩ → Region.Disjoint ⟨x, 8⟩ ⟨g s, 8⟩ →
+      m.readW x 64 = s.mem.readW x 64)
+    {l : List Addr} (hc : Chain s.mem (cx.wordOf s i) l) : Chain m (cx.wordOf s i) l := by
+  have hst : StackOk s.mem (cx.wordOf s i) (cx.Apart s) := by
+    have := hp.facts.pre.2.2.2.2 i hi
+    rwa [mem_of (c := cx) hX] at this
+  have hd := stackOk_chain hst hc
+  refine chain_frame hc fun x hx => hm x ?_ ?_
+  · rw [← csField_of (c := cx) hX]; exact (hd x hx).2.2.1 (cx.csField s, true) cs_mem_fixed
+  · have := (hd x hx).2.2.1 (cx.link s, true) (link_mem_fixed rfl)
+    rwa [link_eq] at this
+
 theorem abort_eq (p : State) : (stackPushContract abi).abort s p ↔
     [p.gpr .rdi, p.gpr .rsi] = [s.gpr .rdi, s.gpr .rsi] ∧
       ((Unchanged [cx.csField s, cx.link s] (cx.mem s) p.mem ∧
-        (cx.InRange s → ∀ l, Chain (cx.mem s) (cx.w s) l → Chain p.mem (cx.w s) l)) ∧ cx.inv p) :=
+        ∀ i < SLAB_COUNT, ∀ l, Chain (cx.mem s) (cx.wordOf s i) l → Chain p.mem (cx.wordOf s i) l) ∧
+        cx.inv p) :=
   abort_iff cx hv s p
 
 theorem abortOk1 (hp : Pre s) {p : State} (hm : Mid scratchT s (m1 s) p) :
@@ -371,12 +387,12 @@ theorem abortOk1 (hp : Pre s) {p : State} (hm : Mid scratchT s (m1 s) p) :
     hp.facts.pre hm (by decide) (by decide) frame_m1 (harmless_cs1 hX hp.facts.pre)
   refine ⟨armed_of_mid hp.facts.toArm (xs := []) frame_m1 m1_cs (by simp) hm, abi_m1 hp hm, ?_, hre⟩
   refine (abort_eq p).mpr ⟨by rw [hm.gpr .rdi (by decide), hm.gpr .rsi (by decide)], ⟨?_,
-    fun hi l hc => ?_⟩, hip⟩
+    fun i hi l hc => ?_⟩, hip⟩
   · rw [hm.mem, csField_of (c := cx) hX, mem_of (c := cx) hX]
     exact frame_m1.mono (by simp)
-  · rw [hm.mem, hp.w]
-    rw [mem_of (c := cx) hX, hp.w] at hc
-    exact chain_of hp hi (fun x _ hcs _ => by rw [m1, readW64_writeW_disj hcs]) hc
+  · rw [hm.mem]
+    rw [mem_of (c := cx) hX] at hc
+    exact chain_any hp hi (fun x hcs _ => by rw [m1, readW64_writeW_disj hcs]) hc
 
 theorem abortOk2 (hp : Pre s) (hi : cx.InRange s) :
     armed (σ11 s) ∧ target.abiPreserved s (σ11 s) ∧ (stackPushContract abi).abort s (σ11 s) ∧
@@ -393,11 +409,11 @@ theorem abortOk2 (hp : Pre s) (hi : cx.InRange s) :
   refine ⟨armed_of_mid hp.facts.toArm (xs := [⟨g s, 8⟩]) hfr hcs (by simpa using hl.rsVar) mσ11,
     abiPreserved_of_mid hfr (by simpa using ⟨hp.facts.ret_cs, hl.ret⟩) (by decide) mσ11, ?_, hre⟩
   refine (abort_eq _).mpr ⟨by rw [mσ11.gpr .rdi (by decide), mσ11.gpr .rsi (by decide)], ⟨?_,
-    fun _ l hc => ?_⟩, hip⟩
+    fun i hi' l hc => ?_⟩, hip⟩
   · rw [mσ11.mem, csField_of (c := cx) hX, mem_of (c := cx) hX, link_eq]; exact hfr
-  · rw [mσ11.mem, hp.w]
-    rw [mem_of (c := cx) hX, hp.w] at hc
-    exact chain_of hp hi (fun x _ hcs hg => by
+  · rw [mσ11.mem]
+    rw [mem_of (c := cx) hX] at hc
+    exact chain_any hp hi' (fun x hcs hg => by
       rw [mSlot, readW64_writeW_disj hg, m1, readW64_writeW_disj hcs]) hc
 
 /-! ### Its accesses -/
