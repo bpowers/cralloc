@@ -81,7 +81,7 @@ theorem mid_σ3 (h8 : .r8 ∈ rs) (h2 : Mid rs s (m1 s) (σ2 s)) : Mid rs s (m1 
 /-- `rseq_cs` still holds the descriptor, in memory `m` that differs from
 memory on entry in `rseq_cs` and in regions `xs` apart from `rseq_cs` and
 `__rseq_offset`. -/
-theorem armed_of_mid (h : Facts c s) {xs : List Region} (hm : Frame (⟨area s + 8, 8⟩ :: xs) s.mem m)
+theorem armed_of_mid (h : ArmOk s) {xs : List Region} (hm : Frame (⟨area s + 8, 8⟩ :: xs) s.mem m)
     (hcs : m.readW (area s + 8) 64 = s.csDesc)
     (hx : ∀ x ∈ xs, Region.Disjoint ⟨s.syms RS, 8⟩ x) (hp : Mid rs s m p) : armed p := by
   have ho : m.readW (s.syms RS) 64 = o s := by

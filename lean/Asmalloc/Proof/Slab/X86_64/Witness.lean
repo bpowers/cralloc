@@ -43,6 +43,24 @@ theorem mkMem_readW_above {ws : List (Addr × BitVec 64)} {a : Addr}
         Nat.mod_eq_of_lt (a := a.toNat + i) (by omega)]
       omega
 
+/-- Slab `i`'s word of class 1, for `i ≥ 1`, in a memory of words at or below
+slab 0's of `SLABS` at `0x1000000`, is zero. -/
+theorem mkMem_slab_zero {ws : List (Addr × BitVec 64)} (hws : ∀ bv ∈ ws, bv.1.toNat ≤ 0x1000008)
+    {i : Nat} (h0 : 0 < i) (hi : i < SLAB_COUNT) :
+    (mkMem ws).readW (wordAddr 0x1000000 i 1) 64 = 0 := by
+  simp only [SLAB_COUNT] at hi
+  have ha : (wordAddr 0x1000000 i 1).toNat = 0x1000000 + i * 4096 + 8 := by
+    simp only [wordAddr, SLAB_BYTES, SLAB_SHIFT]
+    rw [BitVec.toNat_add, show (0x1000000 : BitVec 64).toNat = 0x1000000 from rfl, BitVec.toNat_ofNat,
+      Nat.mod_eq_of_lt (by omega), Nat.mod_eq_of_lt (by omega)]
+    omega
+  apply mkMem_readW_above
+  · intro bv hbv; have := hws bv hbv; rw [ha]; omega
+  · rw [ha]; omega
+
+theorem stackOk_zero {m : Mem} {rs : List Region} : StackOk m 0 rs :=
+  .inr ⟨[], .nil, by simp⟩
+
 instance (n : Nat) (w : BitVec 64) : Decidable (WordOk n w) := by unfold WordOk; infer_instance
 
 theorem res_of_sep {l : List (Region × Bool)} {r : Region}

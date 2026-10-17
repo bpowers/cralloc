@@ -85,6 +85,15 @@ end ViewOf
 
 /-! ## The facts -/
 
+/-- What every routine's arm and CPU load rely on: the rseq area's
+variable, `cpu_id` (read) and `rseq_cs` (written), the last two apart from
+the first. -/
+structure ArmOk (s : State) : Prop where
+  rsVar : ⟨s.syms RS, 8⟩ ∈ s.rd
+  cpuF : (⟨area s + 4, 4⟩ : Region) ∈ s.rd
+  cs : (⟨area s + 8, 8⟩ : Region) ∈ s.wr
+  cs_rsVar : Region.Disjoint ⟨area s + 8, 8⟩ ⟨s.syms RS, 8⟩
+
 /-- What a routine `c` may rely on in its entry state `s`. -/
 structure Facts (c : Spec.Slab.Ctx isa) (s : State) : Prop where
   rsVar : ⟨s.syms RS, 8⟩ ∈ s.rd
@@ -156,5 +165,8 @@ theorem facts_of_world {c : Spec.Slab.Ctx isa} (hA : c.A = abi)
     ret_mag := by intro h h'; first | exact absurd h hi | exact absurd h' hs | simp_all
     mag_nowrap := by intro h h'; first | exact absurd h hi | exact absurd h' hs | simp_all
     pre := hp }
+
+theorem Facts.toArm {c : Spec.Slab.Ctx isa} {s : State} (h : Facts c s) : ArmOk s :=
+  ⟨h.rsVar, h.cpuF, h.cs, h.cs_rsVar⟩
 
 end VG.Proof.Slab.X86_64

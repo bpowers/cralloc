@@ -104,19 +104,19 @@ theorem outcomes_eq : popInline.outcomes = [(0, true), (1, true), (2, true)] := 
 theorem visits_w0 : Visits isa popInline w0 0 true := by
   obtain ⟨k, hp⟩ := pre_of (facts_of_pre pre_w0)
   have hi : ¬ cx.InRange w0 := by decide +kernel
-  exact Visits.rseq (execBlock_arm hp.facts) (end_C hp hi)
+  exact Visits.rseq (execBlock_arm hp.facts.toArm) (end_C hp hi)
 
 theorem visits_w1 : Visits isa popInline w1 1 true := by
   obtain ⟨k, hp⟩ := pre_of (facts_of_pre pre_w1)
   have hi : cx.InRange w1 := by decide +kernel
   have ht : tst w1 = 0 := by decide +kernel
-  exact Visits.rseq (execBlock_arm hp.facts) (end_T hp hi ht)
+  exact Visits.rseq (execBlock_arm hp.facts.toArm) (end_T hp hi ht)
 
 theorem visits_w2 : Visits isa popInline w2 2 true := by
   obtain ⟨k, hp⟩ := pre_of (facts_of_pre pre_w2)
   have hi : cx.InRange w2 := by decide +kernel
   have ht : ¬ tst w2 = 0 := by decide +kernel
-  exact Visits.rseq (execBlock_arm hp.facts) (end_P hp hi ht)
+  exact Visits.rseq (execBlock_arm hp.facts.toArm) (end_P hp hi ht)
 
 /-- The witnesses. -/
 def witnesses : List State := [w0, w1, w2]

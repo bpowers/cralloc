@@ -180,22 +180,22 @@ variable {s : State} {k : Nat}
 
 theorem runBody_C (hp : Pre s k) (hi : ¬ cx.InRange s) :
     runBody isa body (σA s) = some (.exit "slow" (σ2 s)) := by
-  rw [body, runBody_instr (exec_cpu hp.facts), runBody_instr exec_cmp,
+  rw [body, runBody_instr (exec_cpu hp.facts.toArm), runBody_instr exec_cmp,
     runBody_take (eval_cpu_true hi) execBlock_nil']
 
 theorem prefixes_C (hp : Pre s k) (hi : ¬ cx.InRange s) :
     bodyPrefixes isa body (σA s) = [σA s, σ1 s, σ2 s] := by
-  rw [body, bodyPrefixes_instr (exec_cpu hp.facts), bodyPrefixes_instr exec_cmp,
+  rw [body, bodyPrefixes_instr (exec_cpu hp.facts.toArm), bodyPrefixes_instr exec_cmp,
     bodyPrefixes_take (eval_cpu_true hi)]
 
 theorem end_C (hp : Pre s k) (hi : ¬ cx.InRange s) : bodyEnd isa body (σA s) = some 2 := by
-  rw [body, bodyEnd_instr (exec_cpu hp.facts), bodyEnd_instr exec_cmp,
+  rw [body, bodyEnd_instr (exec_cpu hp.facts.toArm), bodyEnd_instr exec_cmp,
     bodyEnd_take (eval_cpu_true hi)]
   rfl
 
 theorem runBody_T (hp : Pre s k) (hi : cx.InRange s) (ht : tst s = 0) :
     runBody isa body (σA s) = some (.exit "slow" (σ8 s)) := by
-  rw [body, runBody_instr (exec_cpu hp.facts), runBody_instr exec_cmp,
+  rw [body, runBody_instr (exec_cpu hp.facts.toArm), runBody_instr exec_cmp,
     runBody_skip (eval_cpu_false hi), runBody_instr exec_shl_r8, runBody_instr exec_r9t,
     runBody_instr exec_r9idx, runBody_instr (exec_wordt hp.facts hi hp.word), runBody_instr exec_r11,
     runBody_instr (exec_test hp), runBody_take (eval_test_true ht) execBlock_nil']
@@ -203,7 +203,7 @@ theorem runBody_T (hp : Pre s k) (hi : cx.InRange s) (ht : tst s = 0) :
 theorem prefixes_T (hp : Pre s k) (hi : cx.InRange s) (ht : tst s = 0) :
     bodyPrefixes isa body (σA s) =
       [σA s, σ1 s, σ2 s, σ2 s, σ3 s, σ4t s, σ5t s, σ6t s, σ7t s, σ8 s] := by
-  rw [body, bodyPrefixes_instr (exec_cpu hp.facts), bodyPrefixes_instr exec_cmp,
+  rw [body, bodyPrefixes_instr (exec_cpu hp.facts.toArm), bodyPrefixes_instr exec_cmp,
     bodyPrefixes_skip (eval_cpu_false hi), bodyPrefixes_instr exec_shl_r8,
     bodyPrefixes_instr exec_r9t, bodyPrefixes_instr exec_r9idx,
     bodyPrefixes_instr (exec_wordt hp.facts hi hp.word), bodyPrefixes_instr exec_r11,
@@ -211,7 +211,7 @@ theorem prefixes_T (hp : Pre s k) (hi : cx.InRange s) (ht : tst s = 0) :
 
 theorem end_T (hp : Pre s k) (hi : cx.InRange s) (ht : tst s = 0) :
     bodyEnd isa body (σA s) = some 9 := by
-  rw [body, bodyEnd_instr (exec_cpu hp.facts), bodyEnd_instr exec_cmp,
+  rw [body, bodyEnd_instr (exec_cpu hp.facts.toArm), bodyEnd_instr exec_cmp,
     bodyEnd_skip (eval_cpu_false hi), bodyEnd_instr exec_shl_r8, bodyEnd_instr exec_r9t,
     bodyEnd_instr exec_r9idx, bodyEnd_instr (exec_wordt hp.facts hi hp.word), bodyEnd_instr exec_r11,
     bodyEnd_instr (exec_test hp), bodyEnd_take (eval_test_true ht)]
@@ -219,7 +219,7 @@ theorem end_T (hp : Pre s k) (hi : cx.InRange s) (ht : tst s = 0) :
 
 theorem runBody_P (hp : Pre s k) (hi : cx.InRange s) (ht : ¬ tst s = 0) :
     runBody isa body (σA s) = some (.done (σ11 s)) := by
-  rw [body, runBody_instr (exec_cpu hp.facts), runBody_instr exec_cmp,
+  rw [body, runBody_instr (exec_cpu hp.facts.toArm), runBody_instr exec_cmp,
     runBody_skip (eval_cpu_false hi), runBody_instr exec_shl_r8, runBody_instr exec_r9t,
     runBody_instr exec_r9idx, runBody_instr (exec_wordt hp.facts hi hp.word), runBody_instr exec_r11,
     runBody_instr (exec_test hp), runBody_skip (eval_test_false ht), runBody_instr (exec_x hp hi ht),
@@ -228,7 +228,7 @@ theorem runBody_P (hp : Pre s k) (hi : cx.InRange s) (ht : ¬ tst s = 0) :
 theorem prefixes_P (hp : Pre s k) (hi : cx.InRange s) (ht : ¬ tst s = 0) :
     bodyPrefixes isa body (σA s) =
       [σA s, σ1 s, σ2 s, σ2 s, σ3 s, σ4t s, σ5t s, σ6t s, σ7t s, σ8 s, σ8 s, σ9 s, σ10 s] := by
-  rw [body, bodyPrefixes_instr (exec_cpu hp.facts), bodyPrefixes_instr exec_cmp,
+  rw [body, bodyPrefixes_instr (exec_cpu hp.facts.toArm), bodyPrefixes_instr exec_cmp,
     bodyPrefixes_skip (eval_cpu_false hi), bodyPrefixes_instr exec_shl_r8,
     bodyPrefixes_instr exec_r9t, bodyPrefixes_instr exec_r9idx,
     bodyPrefixes_instr (exec_wordt hp.facts hi hp.word), bodyPrefixes_instr exec_r11,
@@ -238,7 +238,7 @@ theorem prefixes_P (hp : Pre s k) (hi : cx.InRange s) (ht : ¬ tst s = 0) :
 
 theorem end_P (hp : Pre s k) (hi : cx.InRange s) (ht : ¬ tst s = 0) :
     bodyEnd isa body (σA s) = some 13 := by
-  rw [body, bodyEnd_instr (exec_cpu hp.facts), bodyEnd_instr exec_cmp,
+  rw [body, bodyEnd_instr (exec_cpu hp.facts.toArm), bodyEnd_instr exec_cmp,
     bodyEnd_skip (eval_cpu_false hi), bodyEnd_instr exec_shl_r8, bodyEnd_instr exec_r9t,
     bodyEnd_instr exec_r9idx, bodyEnd_instr (exec_wordt hp.facts hi hp.word), bodyEnd_instr exec_r11,
     bodyEnd_instr (exec_test hp), bodyEnd_skip (eval_test_false ht), bodyEnd_instr (exec_x hp hi ht),
@@ -277,7 +277,7 @@ theorem ev_commit :
 
 theorem events_C (hp : Pre s k) (hi : ¬ cx.InRange s) :
     bodyEvents isa body (σA s) = [⟨area s + 4, 4, false, (cpu32 s).toNat⟩] := by
-  rw [body, bodyEvents_instr (exec_cpu hp.facts), bodyEvents_instr exec_cmp,
+  rw [body, bodyEvents_instr (exec_cpu hp.facts.toArm), bodyEvents_instr exec_cmp,
     bodyEvents_take (eval_cpu_true hi)]
   simp only [isa, ev_cpu]; rfl
 
@@ -285,7 +285,7 @@ theorem events_T (hp : Pre s k) (hi : cx.InRange s) (ht : tst s = 0) :
     bodyEvents isa body (σA s) =
       [⟨area s + 4, 4, false, (cpu32 s).toNat⟩, ⟨wat s, 8, false, (wvt s).toNat⟩,
         ⟨maskA s, 4, false, (mk s).toNat⟩] := by
-  rw [body, bodyEvents_instr (exec_cpu hp.facts), bodyEvents_instr exec_cmp,
+  rw [body, bodyEvents_instr (exec_cpu hp.facts.toArm), bodyEvents_instr exec_cmp,
     bodyEvents_skip (eval_cpu_false hi), bodyEvents_instr exec_shl_r8, bodyEvents_instr exec_r9t,
     bodyEvents_instr exec_r9idx, bodyEvents_instr (exec_wordt hp.facts hi hp.word),
     bodyEvents_instr exec_r11, bodyEvents_instr (exec_test hp), bodyEvents_take (eval_test_true ht)]
@@ -296,7 +296,7 @@ theorem events_P (hp : Pre s k) (hi : cx.InRange s) (ht : ¬ tst s = 0) :
       [⟨area s + 4, 4, false, (cpu32 s).toNat⟩, ⟨wat s, 8, false, (wvt s).toNat⟩,
         ⟨maskA s, 4, false, (mk s).toNat⟩, ⟨wvt s - 8, 8, false, (x s).toNat⟩,
         ⟨wat s, 8, true, (wvt s - 8).toNat⟩] := by
-  rw [body, bodyEvents_instr (exec_cpu hp.facts), bodyEvents_instr exec_cmp,
+  rw [body, bodyEvents_instr (exec_cpu hp.facts.toArm), bodyEvents_instr exec_cmp,
     bodyEvents_skip (eval_cpu_false hi), bodyEvents_instr exec_shl_r8, bodyEvents_instr exec_r9t,
     bodyEvents_instr exec_r9idx, bodyEvents_instr (exec_wordt hp.facts hi hp.word),
     bodyEvents_instr exec_r11, bodyEvents_instr (exec_test hp), bodyEvents_skip (eval_test_false ht),
@@ -401,15 +401,15 @@ theorem correct (hs : (popContract abi).pre s) :
   rw [code_eq]
   by_cases hi : cx.InRange s
   · by_cases ht : tst s = 0
-    · exact .inr ⟨"slow", σ8 s, .rseq (execBlock_arm h) (runBody_T hp hi ht), abi_m1 hp mσ8,
+    · exact .inr ⟨"slow", σ8 s, .rseq (execBlock_arm h.toArm) (runBody_T hp hi ht), abi_m1 hp mσ8,
         (exit_eq _ _).mpr ⟨by rw [mσ8.gpr _ (by decide)], rfl, missed_T hp hi ht⟩⟩
     · have hw := hp.facts.ret_word hi
       rw [← hp.word] at hw
-      exact .inl ⟨σ11 s, .rseq (execBlock_arm h) (runBody_P hp hi ht),
+      exact .inl ⟨σ11 s, .rseq (execBlock_arm h.toArm) (runBody_P hp hi ht),
         abiPreserved_of_mid (frame_two s.mem _ _ _ _) (by simpa using ⟨hp.facts.ret_cs, hw⟩)
           (by decide) mσ11,
         (post_eq _).mpr ⟨x s, popped hp hi ht, ret_σ11⟩⟩
-  · exact .inr ⟨"slow", σ2 s, .rseq (execBlock_arm h) (runBody_C hp hi), abi_m1 hp mσ2,
+  · exact .inr ⟨"slow", σ2 s, .rseq (execBlock_arm h.toArm) (runBody_C hp hi), abi_m1 hp mσ2,
       (exit_eq _ _).mpr ⟨by rw [mσ2.gpr _ (by decide)], rfl, missed_C hi⟩⟩
 
 /-! ### Where it may be aborted -/
@@ -421,7 +421,7 @@ theorem abort_eq (p : State) : (popContract abi).abort s p ↔ [p.gpr .rdi] = [s
 theorem abortOk (hp : Pre s k) {p : State} (hm : Mid scratchT s (m1 s) p) :
     armed p ∧ target.abiPreserved s p ∧ (popContract abi).abort s p ∧
       ∀ p', target.rely p p' → (popContract abi).env p p' → (popContract abi).pre p' := by
-  refine ⟨armed_of_mid hp.facts (xs := []) frame_m1 m1_cs (by simp) hm, abi_m1 hp hm, ?_,
+  refine ⟨armed_of_mid hp.facts.toArm (xs := []) frame_m1 m1_cs (by simp) hm, abi_m1 hp hm, ?_,
     fun p' hr he =>
       retry rfl hv (fun _ => rfl) (fun _ => rfl) (by decide) hp.facts.pre hm (by decide) hr he⟩
   refine (abort_eq p).mpr ⟨by rw [hm.gpr _ (by decide)], ?_⟩
@@ -451,7 +451,7 @@ theorem trace_ok (hs : (popContract abi).pre s) :
   have h := facts_of_pre hs
   obtain ⟨k, hp⟩ := pre_of h
   show cx.PopTrace s (Code.events isa (.rseq arm body) s)
-  simp only [Code.events, execBlock_arm h, events_arm h]
+  simp only [Code.events, execBlock_arm h.toArm, events_arm h.toArm]
   refine ⟨(o s).toNat, s.csDesc.toNat, (cpu32 s).toNat, (wvt s).toNat, (mk s).toNat, (x s).toNat, ?_⟩
   simp only [Spec.Slab.Ctx.headTrace, Spec.Slab.Ctx.rd, Spec.Slab.Ctx.wr, tp_of (c := cx) rfl,
     sym_of (c := cx) rfl, test_eq, ofNat_toNat64, addr8, addr4, rsName, maskAddr_eq hp]
@@ -470,10 +470,10 @@ theorem rseqOk (hs : (popContract abi).pre s) : RseqOk target popTable (popContr
   have ht := trace_ok hs
   rw [code_eq] at ht ⊢
   unfold RseqOk
-  refine ⟨ht, ⟨_, _, rfl, execBlock_dropLast_arm h, arms_arm⟩, ?_⟩
+  refine ⟨ht, ⟨_, _, rfl, execBlock_dropLast_arm h.toArm, arms_arm⟩, ?_⟩
   have mA : Mid scratchT s (m1 s) (σA s) := mid_σA (by decide) (by decide)
   have m1' : Mid scratchT s (m1 s) (σ1 s) := mid_σ1 (by decide) mA
-  simp only [Code.abortStates, execBlock_arm h]
+  simp only [Code.abortStates, execBlock_arm h.toArm]
   by_cases hi : cx.InRange s
   · by_cases ht : tst s = 0
     · rw [prefixes_T hp hi ht]

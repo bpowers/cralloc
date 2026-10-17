@@ -175,7 +175,7 @@ theorem csOp_ea : (armReg s).ea { base := .r10, disp := 8, seg := some .fs } = a
 
 theorem exec_arm1 : exec (.movGot .r10 RS) s = some (armA s) := rfl
 
-theorem exec_arm2 (h : Facts c s) :
+theorem exec_arm2 (h : ArmOk s) :
     exec (.mov .r10 (.mem { base := .r10 })) (armA s) = some (armB s) := by
   have h1 : InRegions ((armA s).rd ++ (armA s).wr) ((armA s).ea { base := .r10 }) 8 := by
     rw [Access.ea_base, armA, RegUpd.gpr_setReg_self, RegUpd.rd_setReg, RegUpd.wr_setReg]
@@ -185,19 +185,19 @@ theorem exec_arm2 (h : Facts c s) :
 
 theorem exec_arm3 : exec (.leaRseqCs .r11) (armB s) = some (armReg s) := rfl
 
-theorem exec_arm4 (h : Facts c s) :
+theorem exec_arm4 (h : ArmOk s) :
     exec (.store { base := .r10, disp := 8, seg := some .fs } .r11) (armReg s) = some (σA s) := by
   have h2 : InRegions (armReg s).wr ((armReg s).ea { base := .r10, disp := 8, seg := some .fs }) 8 := by
     rw [csOp_ea, armReg_wr]; exact inWr (r := ⟨area s + 8, 8⟩) h.cs
   rw [exec_store (r := .r11) _ h2, csOp_ea, armReg_mem, armReg_desc]
   rfl
 
-theorem execBlock_dropLast_arm (h : Facts c s) : execBlock isa arm.dropLast s = some (armReg s) := by
+theorem execBlock_dropLast_arm (h : ArmOk s) : execBlock isa arm.dropLast s = some (armReg s) := by
   rw [show arm.dropLast = [.movGot .r10 RS, .mov .r10 (.mem { base := .r10 }), .leaRseqCs .r11] from rfl,
     execBlock_cons_some exec_arm1, execBlock_cons_some (exec_arm2 h),
     execBlock_cons_some exec_arm3, execBlock_nil']
 
-theorem execBlock_arm (h : Facts c s) : execBlock isa arm s = some (σA s) := by
+theorem execBlock_arm (h : ArmOk s) : execBlock isa arm s = some (σA s) := by
   rw [arm, execBlock_cons_some exec_arm1, execBlock_cons_some (exec_arm2 h),
     execBlock_cons_some exec_arm3, execBlock_cons_some (exec_arm4 h), execBlock_nil']
 
@@ -205,7 +205,7 @@ theorem execBlock_arm (h : Facts c s) : execBlock isa arm s = some (σA s) := by
 theorem arms_arm : arms (.store { base := .r10, disp := 8, seg := some .fs } .r11) (armReg s) :=
   ⟨by rw [csOp_ea]; rfl, armReg_desc⟩
 
-theorem events_arm (h : Facts c s) :
+theorem events_arm (h : ArmOk s) :
     blockEvents isa arm s =
       [⟨s.syms RS, 8, false, (o s).toNat⟩, ⟨area s + 8, 8, true, s.csDesc.toNat⟩] := by
   rw [arm, blockEvents_cons_some exec_arm1, blockEvents_cons_some (exec_arm2 h),
@@ -251,7 +251,7 @@ section Cpu
 
 variable {c : Spec.Slab.Ctx isa} {s : State}
 
-theorem exec_cpu (h : Facts c s) :
+theorem exec_cpu (h : ArmOk s) :
     exec (.mov32 .r8 (.mem { base := .r10, disp := 4, seg := some .fs })) (σA s) = some (σ1 s) := by
   have hin : InRegions ((σA s).rd ++ (σA s).wr) ((σA s).ea { base := .r10, disp := 4, seg := some .fs }) 4 := by
     rw [cpuOp_ea, σA_rd, σA_wr]; exact inRd (r := ⟨area s + 4, 4⟩) h.cpuF
