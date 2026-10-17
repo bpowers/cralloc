@@ -119,11 +119,16 @@ structure Contract (M : ISA) where
   env : M.State → M.State → Prop := fun _ _ => True
 
 /-- What a contract built with `Sig.contract` states beyond what its
-signature and its postcondition on the arguments say: a postcondition on the
-entry and exit states (`post`); what an exit to each external target leaves
-(`exit`, on top of the arguments, which `Sig.contract` requires to be where
-they were); and the contract's `abort`, `env` and `trace`. -/
+signature and its pre- and postcondition on the arguments say: a
+precondition on the entry state (`pre`), for what the signature does not
+describe (the symbols, the thread pointer and the compile-time constants the
+code names, and memory beyond the buffers); a postcondition on the entry and
+exit states (`post`); what an exit to each external target leaves (`exit`,
+on top of the arguments, which `Sig.contract` requires to be where they
+were); and the contract's `abort` (on top of the arguments, likewise),
+`env` and `trace`. -/
 structure Sig.Extra (M : ISA) where
+  pre : M.State → Prop := fun _ => True
   post : M.State → M.State → Prop := fun _ _ => True
   exit : String → M.State → M.State → Prop := fun _ _ _ => False
   abort : M.State → M.State → Prop := fun _ _ => True
@@ -142,7 +147,8 @@ overlaps. A calling convention that does not model the arguments (`A.args`
 is `none`) gives an unsatisfiable precondition, which `Verified` rejects.
 `x` adds what the signature cannot say (`Sig.Extra`); an exit leaves the
 arguments where they arrived, for its target, a function of the same
-signature, to find them. -/
+signature, to find them, and so does the code wherever a restartable
+sequence may be aborted, for the retry to find them. -/
 def Sig.contract {M : ISA} (A : Abi M) (sig : Sig)
     (pre : Curry (sig.words A.ptrBits) (Mem → Prop) := Curry.const (fun _ => True) _)
     (post : sig.Post A.ptrBits) (writeArgs : Bool := false) (stack : Nat := 0)
@@ -159,7 +165,7 @@ def Sig.contract {M : ISA} (A : Abi M) (sig : Sig)
         all.Pairwise (fun a b => (a.2 || b.2) → a.1.Disjoint b.1) ∧
         (∀ r ∈ A.reserved stack s, ∀ a ∈ all, r.Disjoint a.1) ∧
         (∀ a ∈ bufs, a.1.base.toNat + a.1.len ≤ 2 ^ A.ptrBits) ∧
-        Curry.apply ws pre (vals s) (A.mem s)
+        Curry.apply ws pre (vals s) (A.mem s) ∧ x.pre s
     post s s' := match A.args widths with
       | none => False
       | some vals => Curry.apply ws post (vals s) (A.mem s) (A.mem s')
@@ -168,7 +174,10 @@ def Sig.contract {M : ISA} (A : Abi M) (sig : Sig)
     exit t s s' := match A.args widths with
       | none => False
       | some vals => vals s' = vals s ∧ x.exit t s s'
-    abort := x.abort
+    -- A retry starts over from the arguments as they arrived.
+    abort s p := match A.args widths with
+      | none => False
+      | some vals => vals p = vals s ∧ x.abort s p
     env := x.env
     trace := x.trace }
 
@@ -558,11 +567,15 @@ structure Artifact where
   clobbers : List String := []
   /-- On an inline target, every run that completes or exits changes no
   register but the clobbers and the result's: `asm!` requires every other
-  register to hold, when the block ends, what it held when it began. -/
+  register to hold, when the block ends, what it held when it began. Nor
+  does it change one before any point a restartable sequence may be aborted
+  at (`Code.abortStates`), so that the retry, from the registers the abort
+  left, ends with them as they were when the block began. -/
   clobbersOk : target.inline = true → ∀ s, contract.pre s →
       (∀ s', Exec target.isa code s s' →
         target.preservedExcept (clobbers ++ (if sig.ret.isSome then [target.retReg] else [])) s s') ∧
-      (∀ t s', ExecExit target.isa code s t s' → target.preservedExcept clobbers s s') := by
+      (∀ t s', ExecExit target.isa code s t s' → target.preservedExcept clobbers s s') ∧
+      (∀ p ∈ code.abortStates target.isa s, target.preservedExcept clobbers s p) := by
     exact fun h => nomatch h
   /-- States satisfying the precondition, one taking each way the code can
   branch (`Code.outcomes`): data, so each is a concrete state the emitter

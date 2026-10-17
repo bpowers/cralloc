@@ -158,16 +158,17 @@ def Sig.check {M : ISA} (A : Abi M) (sig : Sig) (writeArgs : Bool) (stack : Nat)
 /-- The rest of the precondition of `sig.contract A pre post writeArgs stack`
 at `s`: `A.wf` and `pre`. -/
 def Sig.wfPre {M : ISA} (A : Abi M) (sig : Sig) (pre : Curry (sig.words A.ptrBits) (Mem → Prop))
-    (stack : Nat) (s : M.State) : Prop :=
+    (stack : Nat) (x : Sig.Extra M) (s : M.State) : Prop :=
   let widths := (sig.words A.ptrBits).map (·.bits A.ptrBits)
   match A.args widths with
   | none => False
-  | some vals => A.wf widths stack s ∧ Curry.apply (sig.words A.ptrBits) pre (vals s) (A.mem s)
+  | some vals =>
+    A.wf widths stack s ∧ Curry.apply (sig.words A.ptrBits) pre (vals s) (A.mem s) ∧ x.pre s
 
 theorem Sig.contract_pre_of_check {M : ISA} {A : Abi M} {sig : Sig}
     {pre : Curry (sig.words A.ptrBits) (Mem → Prop)} {post : sig.Post A.ptrBits} {writeArgs : Bool}
     {stack : Nat} {x : Sig.Extra M} {s : M.State}
-    (hc : Sig.check A sig writeArgs stack s = true) (h : Sig.wfPre A sig pre stack s) :
+    (hc : Sig.check A sig writeArgs stack s = true) (h : Sig.wfPre A sig pre stack x s) :
     (sig.contract A pre post writeArgs stack x).pre s := by
   simp only [Sig.check] at hc
   simp only [Sig.wfPre] at h

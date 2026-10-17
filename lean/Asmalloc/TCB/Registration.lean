@@ -70,7 +70,8 @@ structure Registration (api : Api) (target : Target) where
   clobbersOk : target.inline = true → ∀ s, contract.pre s →
       (∀ s', Exec target.isa code s s' →
         target.preservedExcept (clobbers ++ (if api.sig.ret.isSome then [target.retReg] else [])) s s') ∧
-      (∀ t s', ExecExit target.isa code s t s' → target.preservedExcept clobbers s s') := by
+      (∀ t s', ExecExit target.isa code s t s' → target.preservedExcept clobbers s s') ∧
+      (∀ p ∈ code.abortStates target.isa s, target.preservedExcept clobbers s p) := by
     exact fun h => nomatch h
   /-- `Artifact.witnesses`. -/
   witnesses : List target.isa.State

@@ -383,7 +383,7 @@ def contractIff? (t : Expr) : MetaM (Option (Option (Expr × Expr))) := do
     let some a ← contractArgs? t.appFn!.appArg! | return none
     let s := t.appArg!
     return some (some (mkAppN (mkConst `VG.Sig.contract_pre_iff) (a.push s),
-      mkAppN (mkConst `VG.Sig.preE) #[a[0]!, a[1]!, a[2]!, a[3]!, a[5]!, a[6]!, s]))
+      mkAppN (mkConst `VG.Sig.preE) #[a[0]!, a[1]!, a[2]!, a[3]!, a[5]!, a[6]!, a[7]!, s]))
   if t.isAppOfArity `VG.Contract.post 4 then
     if (← contractArgs? t.appFn!.appFn!.appArg!).isSome then return some none
   return none
