@@ -18,6 +18,9 @@ sim = []
 # into an executable (the linker gives it its own copy of the variable); a shared library that
 # enables it fails to link.
 executable = []
+# The `Allocator` trait for `Asmalloc` (and `SimHeap`). The trait is stable from Rust 1.100, so
+# until then this needs a nightly toolchain.
+allocator-api = []
 
 [dependencies]
 

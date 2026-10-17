@@ -98,6 +98,9 @@ static A: je::Je = je::Je;
 #[cfg(any(feature = "floor_tls", feature = "floor_heap"))]
 #[global_allocator]
 static A: floors::Floor = floors::Floor;
+#[cfg(feature = "asm")]
+#[global_allocator]
+static A: asmalloc::Asmalloc = asmalloc::Asmalloc;
 #[cfg(feature = "slab")]
 #[global_allocator]
 static A: slab::Slab = slab::Slab;

@@ -13,14 +13,14 @@ open VG.Emit
 
 #guard listOf "Asmalloc.Artifacts.Selftest.X86_64" == "VG.Artifacts.Selftest.X86_64.artifacts"
 
--- The output directory is `generated` unless one is named; anything else is
--- a usage error.
+-- The output directory is the allocator crate's `src/front/generated` unless
+-- one is named; anything else is a usage error.
 /-- `parseArgs`, with the directory as a string. -/
 def parsed (args : List String) : Option (Bool × String) :=
   (parseArgs args).map fun (c, d) => (c, d.toString)
 
-#guard parsed [] == some (false, "generated")
-#guard parsed ["--check"] == some (true, "generated")
+#guard parsed [] == some (false, "../crates/asmalloc/src/front/generated")
+#guard parsed ["--check"] == some (true, "../crates/asmalloc/src/front/generated")
 #guard parsed ["../crates/asmalloc/src/asm"] == some (false, "../crates/asmalloc/src/asm")
 #guard parsed ["--check", "out"] == some (true, "out")
 #guard parseArgs ["out", "--check"] == none

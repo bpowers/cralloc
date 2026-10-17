@@ -673,6 +673,17 @@ impl<S: Subject> Subject for NoZeroFill<S> {
         };
         // SAFETY: same contract.
         let g = unsafe { self.base.alloc(plain) }?;
+        if let Some(g) = &g
+            && req.zeroed
+            && req.size > 0
+        {
+            // The byte a reused block would still hold had the bug skipped clearing it. Written
+            // here so the bug shows whatever the allocator's history: an allocator that hands
+            // out fresh memory, which reads as zero, would otherwise hide it, and a replay of a
+            // caught script would not fail again.
+            // SAFETY: the block is live and at least `req.size` long.
+            unsafe { g.ptr.as_ptr().add(req.size - 1).write(0xa5) };
+        }
         Ok(g.map(|g| Grant {
             zeroed: if req.zeroed {
                 req.size.min(g.usable)

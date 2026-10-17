@@ -53,8 +53,9 @@ def listOf (mod : String) : String :=
 def usage : String := "usage: lake env lean --run Emit.lean [--check] [DIR]"
 
 /-- The directory the generated files go to, relative to `lean/`, unless
-the command line names another. -/
-def defaultDir : FilePath := "generated"
+the command line names another: the allocator crate's front end, which
+compiles them. It must hold only generated files (`sync`). -/
+def defaultDir : FilePath := ".." / "crates" / "asmalloc" / "src" / "front" / "generated"
 
 /-- `[--check] [DIR]`: whether to check rather than write, and the
 directory (by default `defaultDir`). -/

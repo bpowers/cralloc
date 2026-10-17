@@ -9,9 +9,11 @@ description = "Shadow-model tester, mutant allocators and C-ABI conformance case
 [features]
 # The `Allocator` trait is stable from Rust 1.100. Turn this on with a toolchain that has it
 # (nightly today): it adds the `Allocator` adapter and its tests.
-allocator-api = []
+allocator-api = ["asmalloc/allocator-api"]
 
 [dependencies]
+# `sim` brings the simulated heap the kit judges under Miri.
+asmalloc = { path = "../asmalloc", features = ["sim"] }
 
 [lints]
 workspace = true

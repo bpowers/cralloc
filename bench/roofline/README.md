@@ -90,7 +90,8 @@ MI_LIB_DIR=/tmp/mi ./run.sh x_        # only the cross-thread workloads
 ```
 
 `run.sh` builds one binary per allocator (cargo feature `mi`, `mi_sized`, `je`, `floor_tls`,
-`floor_heap`, or none for glibc) and profile, then runs them. mimalloc and jemalloc are called
+`floor_heap`, `asm` for asmalloc, `asm_exe` for asmalloc with its `executable` feature, or none
+for glibc) and profile, then runs them. mimalloc and jemalloc are called
 the way the `mimalloc` and `tikv-jemallocator` crates call them. Without `MI_LIB_DIR` the
 mimalloc variants are skipped.
 

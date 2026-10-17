@@ -23,7 +23,7 @@ use crate::classes::{SmallClass, is_marker};
 use core::ptr::NonNull;
 
 /// What the generated routines return when the thread's CPU number has no slab
-/// (`NO_CPU` in `lean/generated`). No slab word or head is ever 2: a slot address is a multiple
+/// (`NO_CPU` in `front/generated`). No slab word or head is ever 2: a slot address is a multiple
 /// of 8 and a marker has its lowest bit set.
 pub const NO_CPU: usize = 2;
 
