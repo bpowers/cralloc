@@ -21,7 +21,8 @@
 //! - `realloc(p, 0)` frees `p` and returns null, as glibc's does. `realloc` keeps a small block
 //!   in place when the new size has the same class, and a large one when the new size is still
 //!   large, fits the slot or run and, shrinking, keeps a quarter of it; a large block that
-//!   grows out of its slot moves to one with headroom.
+//!   grows out of its slot moves to one with headroom. A block that moves keeps every byte its
+//!   usable size covered, up to the new size, as glibc's does.
 //! - `malloc_usable_size` is the class size of a small block, and the size last asked for,
 //!   rounded up to a page, of a large one.
 //! - `calloc` checks the product for overflow and does not clear memory the back end knows is
@@ -149,7 +150,9 @@ pub unsafe extern "C" fn realloc(ptr: *mut c_void, size: usize) -> *mut c_void {
             if process::resize_in_place_by_address(old, used, size) {
                 return ptr;
             }
-            used
+            // Everything `malloc_usable_size` reported, not just the size asked for: programs
+            // write into that room (redis's strings do) and glibc's `realloc` keeps it.
+            process::usable_size(old.as_ptr()).unwrap_or(used)
         }
     };
     let new = match next.and_then(Class::small) {

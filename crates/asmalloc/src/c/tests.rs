@@ -124,6 +124,31 @@ fn realloc_stays_in_place_when_the_class_allows() {
 }
 
 #[test]
+fn realloc_keeps_every_usable_byte_when_it_moves() {
+    // Programs write up to `malloc_usable_size` (redis sizes its strings by it), so a move must
+    // carry that much, not just the size last asked for.
+    for size in [100, 5000, 40_000, 100_000, 300_000, 1_000_000, 5 << 20] {
+        let p = malloc(size).cast::<u8>();
+        let n = usable(p.cast());
+        assert!(n >= size);
+        // SAFETY: `p` is live with `n` usable bytes; `q` is live with at least `4 * n`, and each
+        // block is given up once.
+        unsafe {
+            p.write_bytes(0xab, n);
+            let q = realloc(p.cast(), 4 * n).cast::<u8>();
+            assert!(!q.is_null());
+            let kept = core::slice::from_raw_parts(q, n);
+            assert!(
+                kept.iter().all(|&b| b == 0xab),
+                "malloc({size}): usable {n}, lost from {:?}",
+                kept.iter().position(|&b| b != 0xab)
+            );
+            release(q.cast());
+        }
+    }
+}
+
+#[test]
 fn the_sized_frees_take_the_class_from_the_address() {
     // A wrong size or alignment from C must not send a block to the wrong class: the freed
     // block is the one the next allocation of its own class gets.
