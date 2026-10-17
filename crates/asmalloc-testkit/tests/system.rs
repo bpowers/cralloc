@@ -56,7 +56,7 @@ fn global_alloc_frees_on_other_threads() {
 #[test]
 fn c_abi_frees_on_other_threads() {
     every_handoff(&target::c_abi(), Profile::MIXED.with_migrate(5));
-    every_handoff(&target::c_abi(), Profile::CHURN);
+    every_handoff(&target::c_abi(), Profile::FIFO_BATCHES);
 }
 
 #[test]

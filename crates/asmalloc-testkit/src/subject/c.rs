@@ -138,9 +138,19 @@ mod libc {
 }
 
 impl CFns {
-    /// The C library this process links (glibc 2.43 or later). Miri provides all but the sized
-    /// frees.
+    /// The C library this process links (glibc 2.43 or later). Under Miri, Miri's functions,
+    /// which lack the sized frees and need [`LIBC_C11`](Self::LIBC_C11)'s `aligned_alloc`.
+    #[cfg(not(miri))]
+    pub const LIBC: CFns = CFns::LIBC_EXACT;
+
+    /// The C library this process links. Miri provides all but the sized frees.
+    #[cfg(miri)]
     pub const LIBC: CFns = CFns {
+        sized_free: None,
+        ..CFns::LIBC_C11
+    };
+
+    const LIBC_EXACT: CFns = CFns {
         name: "libc",
         malloc: libc::malloc,
         calloc: libc::calloc,
@@ -158,6 +168,37 @@ impl CFns {
         sized_free: None,
         errno_location: libc::__errno_location,
     };
+
+    /// [`LIBC`](Self::LIBC) with `aligned_alloc` sizes rounded up to a multiple of the
+    /// alignment, in the matching sized free too. C11 required that; C17 dropped it, but Miri's
+    /// and AddressSanitizer's `aligned_alloc` still refuse other sizes. The conformance cases
+    /// check the C17 rule against the real table.
+    pub const LIBC_C11: CFns = CFns {
+        name: "libc (C11 aligned_alloc)",
+        aligned_alloc: aligned_alloc_c11,
+        sized_free: match CFns::LIBC_EXACT.sized_free {
+            Some(s) => Some(SizedFree {
+                free_aligned_sized: free_aligned_sized_c11,
+                ..s
+            }),
+            None => None,
+        },
+        ..CFns::LIBC_EXACT
+    };
+}
+
+unsafe extern "C" fn aligned_alloc_c11(align: usize, size: usize) -> *mut c_void {
+    // SAFETY: same contract; the rounded size is the one the block is freed with.
+    unsafe { libc::aligned_alloc(align, size.next_multiple_of(align.max(1))) }
+}
+
+unsafe extern "C" fn free_aligned_sized_c11(p: *mut c_void, align: usize, size: usize) {
+    let f = CFns::LIBC_EXACT
+        .sized_free
+        .expect("installed only when present")
+        .free_aligned_sized;
+    // SAFETY: same contract, with the size `aligned_alloc_c11` allocated.
+    unsafe { f(p, align, size.next_multiple_of(align.max(1))) }
 }
 
 impl CAbi for CFns {
@@ -292,6 +333,7 @@ impl<C: CAbi> Subject for ViaC<C> {
         ZeroSize {
             alloc: true,
             resize: false,
+            distinct: true,
         }
     }
 

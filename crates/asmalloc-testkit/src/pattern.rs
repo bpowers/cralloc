@@ -129,7 +129,14 @@ pub unsafe fn check(
     for_each_span(len, lo, hi, |a, b| {
         // SAFETY: `a..b` lies inside `lo..hi`, which the caller vouches for.
         unsafe { check_range(p, a, b, contents) }
-    })
+    })?;
+    // Every byte of a zero range is known, so its end is checked too even when sampling would
+    // skip it: an implementation that zeroes only whole pages of a large block is caught.
+    if contents == Contents::Zero && hi > lo {
+        // SAFETY: inside `lo..hi`.
+        unsafe { check_range(p, lo.max(hi.saturating_sub(8)), hi, contents) }?;
+    }
+    Ok(())
 }
 
 /// # Safety
@@ -314,5 +321,12 @@ mod tests {
             (m.offset, m.expected, m.found),
             (DENSE_PREFIX + STRIDE + 2, 0, 1)
         );
+        // The end of a zero range short of the block is checked though no sample falls there.
+        let mut buf = vec![0u8; len];
+        let end = DENSE_PREFIX + 100;
+        buf[end - 1] = 7;
+        // SAFETY: as above.
+        let m = unsafe { check(buf.as_ptr(), len, 0, end, Contents::Zero) }.unwrap_err();
+        assert_eq!(m.offset, end - 1);
     }
 }

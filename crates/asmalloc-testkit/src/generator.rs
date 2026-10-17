@@ -463,11 +463,9 @@ mod tests {
     const ANY_ZERO: ZeroSize = ZeroSize {
         alloc: true,
         resize: true,
+        distinct: false,
     };
-    const NO_ZERO: ZeroSize = ZeroSize {
-        alloc: false,
-        resize: false,
-    };
+    const NO_ZERO: ZeroSize = ZeroSize::NONE;
 
     /// `n` operations natively, a tenth of them under Miri.
     fn stream(profile: Profile, zero: ZeroSize, seed: u64, n: usize) -> Vec<Op> {
@@ -510,7 +508,8 @@ mod tests {
     #[test]
     fn every_profile_names_only_live_blocks_and_respects_the_budget() {
         for profile in Profile::ALL {
-            let ops = stream(profile, NO_ZERO, 3, 5000);
+            // Enough that churn passes its thousand-block target even under Miri.
+            let ops = stream(profile, NO_ZERO, 3, 20_000);
             check_consistent(profile, &ops);
             assert!(
                 ops.iter().any(|o| matches!(o, Op::Free { .. })),

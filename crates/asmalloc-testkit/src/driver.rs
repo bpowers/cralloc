@@ -340,19 +340,21 @@ fn drive<'e, S: Subject + ?Sized>(
 ) -> Result<Stats, Failure> {
     let n = workers.len();
     let shared = Shared::default();
-    thread::scope(|scope| {
-        for w in workers {
-            let shared = &shared;
-            scope.spawn(move || segment(scope, w, shared));
-        }
-    });
+    let ran = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        thread::scope(|scope| {
+            for w in workers {
+                let shared = &shared;
+                scope.spawn(move || segment(scope, w, shared));
+            }
+        })
+    }));
     let Shared {
         failure,
         stats,
         children,
         ..
     } = shared;
-    // Every child is waited for, even after a failure, so none outlives the run.
+    // Every child is waited for, even after a failure or a panic, so none outlives the run.
     let mut child_failure = None;
     for c in children
         .into_inner()
@@ -361,6 +363,9 @@ fn drive<'e, S: Subject + ?Sized>(
         if let Err(f) = c.wait(subject.name()) {
             child_failure.get_or_insert(f);
         }
+    }
+    if let Err(panic) = ran {
+        std::panic::resume_unwind(panic);
     }
     if let Some(f) = failure.into_inner().unwrap_or_else(PoisonError::into_inner) {
         return Err(f);
@@ -635,7 +640,12 @@ fn run_child<S: Subject + ?Sized>(w: &mut Worker<'_, S>, cfg: &Config) -> Result
     use std::collections::HashSet;
 
     let subject = w.model.subject();
-    let inherited = w.model.take_blocks();
+    // The forking worker's blocks, and those other workers had posted and not yet collected:
+    // freeing memory another thread allocated before the fork is part of what is tested.
+    let mut inherited = w.model.take_blocks();
+    if let Some(parent_mail) = w.model.mail() {
+        inherited.extend(parent_mail.take_after_fork());
+    }
     let own: HashSet<_> = inherited.iter().map(|b| b.id).collect();
     let shadow = w
         .model

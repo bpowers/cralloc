@@ -25,13 +25,13 @@ fn layout(size: usize, align: usize) -> Layout {
     Layout::from_size_align(size, align).expect("the model only builds valid layouts")
 }
 
-fn grant(slice: NonNull<[u8]>, align: usize, zeroed_from: Option<usize>) -> Grant {
+fn grant(slice: NonNull<[u8]>, align: usize, all_zero: bool) -> Grant {
     let usable = slice.len();
     Grant {
         ptr: slice.cast(),
         usable,
         align,
-        zeroed: if zeroed_from == Some(0) { usable } else { 0 },
+        zeroed: if all_zero { usable } else { 0 },
         tag: 0,
     }
 }
@@ -45,6 +45,7 @@ impl<A: Allocator + Sync> Subject for ViaAllocator<A> {
         ZeroSize {
             alloc: true,
             resize: true,
+            distinct: false,
         }
     }
 
@@ -56,7 +57,7 @@ impl<A: Allocator + Sync> Subject for ViaAllocator<A> {
             self.0.allocate(l)
         }
         .map_err(|_| Refused)?;
-        Ok(Some(grant(slice, req.align, req.zeroed.then_some(0))))
+        Ok(Some(grant(slice, req.align, req.zeroed)))
     }
 
     unsafe fn free(&self, block: Held, variant: u32) {
@@ -85,9 +86,11 @@ impl<A: Allocator + Sync> Subject for ViaAllocator<A> {
                 }
             }
             .map_err(|_| Refused)?;
-            let zeroed_from = req.zeroed.then_some(old_size);
+            // Bytes from `old_size` to the old block's length may be kept or zeroed; only those
+            // past the old length must be zero.
+            let zeroed_from = req.zeroed.then_some(block.usable);
             Ok(Resized {
-                grant: grant(slice, req.align, zeroed_from),
+                grant: grant(slice, req.align, false),
                 preserved: old_size,
                 zeroed_from,
             })
@@ -97,7 +100,7 @@ impl<A: Allocator + Sync> Subject for ViaAllocator<A> {
             // SAFETY: the block is live and `old` fits it; `new` is no larger than `old`.
             let slice = unsafe { self.0.shrink(block.ptr, old, new) }.map_err(|_| Refused)?;
             Ok(Resized {
-                grant: grant(slice, req.align, None),
+                grant: grant(slice, req.align, false),
                 preserved: req.size,
                 zeroed_from: None,
             })

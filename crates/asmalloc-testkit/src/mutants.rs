@@ -384,20 +384,15 @@ fn grant_of(h: &Held) -> Grant {
     }
 }
 
-/// Hand out an existing inner block again: zero it if asked, so the only bug is the reuse.
-///
-/// # Safety
-/// `block` is a booked inner block the caller keeps allocated; `req.size <= block.usable`.
-unsafe fn reissue(block: &Held, req: &Request) -> Grant {
-    if req.zeroed {
-        // SAFETY: caller contract.
-        unsafe { block.ptr.as_ptr().write_bytes(0, req.size) };
-    }
+/// Hand out an existing inner block again. A zeroed request gets no zero-fill promise: zeroing
+/// would write into memory its rightful owner may be using on another thread, a race that
+/// would end the run under Miri before the model sees the reuse.
+fn reissue(block: &Held, req: &Request) -> Grant {
     Grant {
         ptr: block.ptr,
         usable: block.usable,
         align: req.align,
-        zeroed: if req.zeroed { req.size } else { 0 },
+        zeroed: 0,
         tag: block.tag,
     }
 }
@@ -471,16 +466,11 @@ impl<S: Subject> Overlapping<S> {
         let ptr = book.inner[&base].held.ptr;
         book.hand_out(base, at);
         drop(book);
-        let ptr = ptr.with_addr(core::num::NonZeroUsize::new(at).expect("inside a block"));
-        if req.zeroed {
-            // SAFETY: the range lies inside a block the book keeps allocated.
-            unsafe { ptr.as_ptr().write_bytes(0, req.size) };
-        }
         Some(Grant {
-            ptr,
+            ptr: ptr.with_addr(core::num::NonZeroUsize::new(at).expect("inside a block")),
             usable: req.size,
             align: req.align,
-            zeroed: if req.zeroed { req.size } else { 0 },
+            zeroed: 0,
             tag: 0,
         })
     }
@@ -620,15 +610,11 @@ impl<S: Subject> Short<S> {
         drop(arena);
         let ptr = chunk.with_addr(core::num::NonZeroUsize::new(start).expect("inside the chunk"));
         self.base.book().hand_out(chunk.addr().get(), start);
-        if req.zeroed {
-            // SAFETY: inside the chunk, which the arena keeps allocated.
-            unsafe { ptr.as_ptr().write_bytes(0, req.size) };
-        }
         Ok(Some(Grant {
             ptr,
             usable: req.size,
             align: req.align,
-            zeroed: if req.zeroed { req.size } else { 0 },
+            zeroed: 0,
             tag: 0,
         }))
     }
@@ -792,8 +778,7 @@ impl<S: Subject> Subject for DoubleHandout<S> {
             let held = b.held;
             book.hand_out(base, base);
             drop((book, lists));
-            // SAFETY: a booked block, kept allocated by this handout, that fits.
-            return Ok(Some(unsafe { reissue(&held, &req) }));
+            return Ok(Some(reissue(&held, &req)));
         }
         drop((book, lists));
         // SAFETY: same contract.
@@ -926,8 +911,7 @@ impl<S: Subject> Subject for PrematureReuse<S> {
                 let held = b.held;
                 book.hand_out(base, base);
                 drop((book, pool));
-                // SAFETY: a booked block, kept allocated by this handout, that fits.
-                return Ok(Some(unsafe { reissue(&held, &req) }));
+                return Ok(Some(reissue(&held, &req)));
             }
         }
         // SAFETY: same contract.

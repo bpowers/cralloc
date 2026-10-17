@@ -116,6 +116,22 @@ impl Mailroom {
         out
     }
 
+    /// In a child process after `fork`, everything in the mailboxes whose lock is free. A box
+    /// locked at the fork belonged to a thread that does not exist here, so it is skipped
+    /// rather than waited for.
+    pub fn take_after_fork(&self) -> Vec<Live> {
+        let mut out = Vec::new();
+        for b in self.boxes.iter() {
+            let mut guard = match b.try_lock() {
+                Ok(g) => g,
+                Err(std::sync::TryLockError::Poisoned(p)) => p.into_inner(),
+                Err(std::sync::TryLockError::WouldBlock) => continue,
+            };
+            out.extend(std::mem::take(&mut *guard).blocks);
+        }
+        out
+    }
+
     /// Everything still in any mailbox.
     pub fn drain_all(&self) -> Vec<Live> {
         (0..self.boxes.len())

@@ -13,8 +13,12 @@
 //! into `[start, end)` is the last one starting below `end`: one ordered lookup per shard.
 //!
 //! The model claims a block after the allocator returns it and releases it before handing it
-//! back, so the index never holds a block the allocator considers free, and a lock taken here
-//! never orders an allocator call in one thread before one in another.
+//! back, so the index never holds a block the allocator considers free. The shard locks still
+//! order things: two threads that touch the same shard get a happens-before edge between the
+//! allocator calls around those touches, and each lock is a fence. Sharding makes that rare,
+//! not absent, so a race checker (Miri, ThreadSanitizer) can miss an allocator race on memory
+//! two threads used in turn. An index built on relaxed atomic read-modify-writes would conflict
+//! without ordering; it is not built yet.
 
 use std::collections::BTreeMap;
 use std::sync::{Mutex, MutexGuard, PoisonError};

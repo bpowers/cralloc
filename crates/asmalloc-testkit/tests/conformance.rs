@@ -10,7 +10,7 @@ use asmalloc_testkit::target;
 
 #[test]
 fn the_c_functions_meet_every_conformance_case() {
-    let results = run_all(&target::C_ABI);
+    let results = run_all(&target::c_fns());
     let mut failures = Vec::new();
     for (case, verdict) in &results {
         match verdict {

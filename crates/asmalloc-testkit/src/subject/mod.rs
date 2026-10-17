@@ -112,13 +112,26 @@ pub struct Resized {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Refused;
 
-/// Which operations may ask for zero bytes.
+/// Which operations may ask for zero bytes, and what a zero-size block is.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ZeroSize {
     /// `alloc` with size zero is allowed.
     pub alloc: bool,
     /// `resize` to size zero is allowed.
     pub resize: bool,
+    /// A non-null block for zero bytes is a distinct object (C's `malloc(0)`), so the model
+    /// records its first byte in the overlap index, without reading or writing it. `Allocator`
+    /// may return one dangling pointer for every zero-size layout, so it says no.
+    pub distinct: bool,
+}
+
+impl ZeroSize {
+    /// No zero-size requests.
+    pub const NONE: ZeroSize = ZeroSize {
+        alloc: false,
+        resize: false,
+        distinct: false,
+    };
 }
 
 /// An allocator interface the model can drive.

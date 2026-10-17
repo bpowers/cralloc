@@ -16,6 +16,20 @@
 //! - [`mutants`]: allocators broken on purpose, to show the model catches each kind of bug.
 //! - [`conformance`]: edge cases of the C functions, as data.
 //! - [`target`]: the allocator the suite judges.
+//!
+//! # Running
+//!
+//! ```sh
+//! cargo test -p asmalloc-testkit                                    # the suite, a few seconds
+//! cargo +nightly test -p asmalloc-testkit --features allocator-api  # plus the Allocator trait
+//! ASMALLOC_TESTKIT_SCALE=20 cargo test -p asmalloc-testkit --release  # longer runs
+//! MIRIFLAGS=-Zmiri-strict-provenance cargo +nightly miri test -p asmalloc-testkit --lib --test system
+//! MIRIFLAGS=-Zmiri-ignore-leaks cargo +nightly miri test -p asmalloc-testkit --test mutants
+//! ```
+//!
+//! Mutant runs abandon the blocks they hold when the model catches the bug, since freeing into
+//! a broken allocator could crash the test, so Miri's leak check is off for them. The fuzz
+//! targets are in `fuzz/` (see its README).
 
 // A `Failure` is a few hundred bytes and travels only on the path that ends a run, so boxing it
 // would add noise to every signature for no gain.

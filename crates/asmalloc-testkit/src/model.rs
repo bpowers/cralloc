@@ -175,6 +175,11 @@ impl<'e, S: Subject + ?Sized> Model<'e, S> {
         self.shadow
     }
 
+    /// The shared mailboxes.
+    pub fn mail(&self) -> Option<&'e Mailroom> {
+        self.mail
+    }
+
     /// Blocks this worker owns.
     pub fn live_blocks(&self) -> usize {
         self.live.len()
@@ -383,20 +388,28 @@ impl<'e, S: Subject + ?Sized> Model<'e, S> {
         Ok(())
     }
 
-    /// Record a block's usable extent in the shadow, or report what it overlaps.
+    /// Bytes of a block recorded in the shadow: its usable extent, or one byte for a distinct
+    /// zero-size block, which is never read or written.
+    fn extent(&self, h: &Held) -> usize {
+        if h.usable == 0 && h.size == 0 && self.subject.zero_size().distinct {
+            1
+        } else {
+            h.usable
+        }
+    }
+
+    /// Record a block's extent in the shadow, or report what it overlaps.
     fn claim(&self, op: Option<&Op>, id: BlockId, h: &Held) -> Result<(), Failure> {
-        if h.usable == 0 {
+        let extent = self.extent(h);
+        if extent == 0 {
             return Ok(());
         }
         let start = h.addr();
-        let Some(end) = start.checked_add(h.usable) else {
+        let Some(end) = start.checked_add(extent) else {
             return Err(self.fail(
                 FailureKind::Overlap,
                 op,
-                format!(
-                    "block {id} at {start:#x} of {} bytes wraps the address space",
-                    h.usable
-                ),
+                format!("block {id} at {start:#x} of {extent} bytes wraps the address space"),
             ));
         };
         self.shadow.claim(start, end, id).map_err(|other| {
@@ -419,8 +432,9 @@ impl<'e, S: Subject + ?Sized> Model<'e, S> {
 
     fn unclaim(&self, block: &Live) {
         let h = &block.held;
-        if h.usable > 0 {
-            self.shadow.release(h.addr(), h.addr() + h.usable, block.id);
+        let extent = self.extent(h);
+        if extent > 0 {
+            self.shadow.release(h.addr(), h.addr() + extent, block.id);
         }
     }
 

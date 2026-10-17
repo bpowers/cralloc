@@ -444,6 +444,11 @@ pub const CASES: &[Case] = &[
         NO_MEMORY,
     ),
     case(
+        "aligned_alloc(64, 0) is null or unique",
+        aa(64, 0),
+        Expect::NullOrUnique,
+    ),
+    case(
         "malloc_usable_size(NULL) is 0",
         Call::UsableSizeOfNull,
         Expect::Value(0),
@@ -457,6 +462,11 @@ pub const CASES: &[Case] = &[
     case(
         "free_aligned_sized(NULL, 64, 0) does nothing",
         Call::FreeAlignedSizedNull,
+        Expect::Returns,
+    ),
+    case(
+        "free_sized of malloc(0)",
+        Call::FreeSized(0),
         Expect::Returns,
     ),
     case(
@@ -662,6 +672,9 @@ impl<C: CAbi + ?Sized> Runner<'_, C> {
                     c.set_errno(ERRNO_SENTINEL);
                     let rc = c.posix_memalign(&mut out, align, size);
                     let errno = c.errno();
+                    if rc == 0 && out == sentinel() {
+                        return Err("returned 0 without setting the pointer".into());
+                    }
                     if rc == 0 {
                         Made {
                             align,
@@ -834,10 +847,12 @@ impl<C: CAbi + ?Sized> Runner<'_, C> {
                         Call::FreeAlignedSizedNull => c.free_aligned_sized(ptr::null_mut(), 64, 0),
                         Call::FreeSized(n) => {
                             let p = c.malloc(n);
-                            if p.is_null() {
+                            if p.is_null() && n > 0 {
                                 return Err(format!("malloc({n}) failed"));
                             }
-                            self.fill(p, n, SEED);
+                            if !p.is_null() {
+                                self.fill(p, n, SEED);
+                            }
                             c.free_sized(p, n);
                         }
                         Call::FreeSizedCalloc(n, m) => {

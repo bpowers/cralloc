@@ -20,10 +20,7 @@ impl<G: GlobalAlloc + Sync> Subject for ViaGlobalAlloc<G> {
     }
 
     fn zero_size(&self) -> ZeroSize {
-        ZeroSize {
-            alloc: false,
-            resize: false,
-        }
+        ZeroSize::NONE
     }
 
     unsafe fn alloc(&self, req: Request) -> Result<Option<Grant>, Refused> {
