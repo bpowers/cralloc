@@ -305,9 +305,178 @@ fn a_simulated_heap_serves_threads() {
 fn threads_that_start_a_fresh_heap_together_agree_on_it() {
     let rounds = if cfg!(miri) { 1 } else { 200 };
     for _ in 0..rounds {
-        let heap = SimHeap::<Shape>::new();
+        let heap = SimHeap::<crate::os::sim::Standard>::new();
         threads(&heap, if cfg!(miri) { 20 } else { 300 });
     }
+}
+
+#[test]
+fn the_first_allocations_of_a_fresh_heap_from_several_threads_succeed() {
+    let rounds = if cfg!(miri) { 1 } else { 300 };
+    for _ in 0..rounds {
+        let heap = SimHeap::<crate::os::sim::Standard>::new();
+        thread::scope(|scope| {
+            for t in 0..4 {
+                let heap = &heap;
+                scope.spawn(move || {
+                    let l = layout(1 + t, 2);
+                    // SAFETY: a valid layout; freed once.
+                    unsafe {
+                        let p = heap.alloc_zeroed(l);
+                        assert!(!p.is_null(), "thread {t}'s first allocation failed");
+                        heap.dealloc(p, l);
+                    }
+                });
+            }
+        });
+    }
+}
+
+/// Every live block holds its owner's tag, checked before it is freed: two owners of one block
+/// show as a wrong tag.
+fn tagged_churn<H: GlobalAlloc + Sync>(heap: &H, threads: usize, rounds: usize) {
+    let pool = std::sync::Mutex::new(Vec::<Sent>::new());
+    thread::scope(|scope| {
+        for t in 0..threads {
+            let pool = &pool;
+            scope.spawn(move || {
+                let mut live: Vec<(*mut u8, Layout, usize)> = Vec::new();
+                let mut x = 0x9e37_79b9_7f4a_7c15u64 ^ t as u64;
+                for i in 0..rounds {
+                    x ^= x << 13;
+                    x ^= x >> 7;
+                    x ^= x << 17;
+                    let size = if (x >> 30).is_multiple_of(16)
+                        && std::env::var_os("SMALL_ONLY").is_none()
+                    {
+                        (x as usize >> 8) % (64 << 10) + 8
+                    } else {
+                        8 + (x as usize % 12) * 8
+                    };
+                    let l = layout(size, 8);
+                    if live.len() < 400 && !(x >> 40).is_multiple_of(3) {
+                        // SAFETY: a valid layout.
+                        let p = unsafe { heap.alloc(l) };
+                        assert!(!p.is_null());
+                        let tag = t << 32 | i;
+                        // SAFETY: live, at least 8 bytes.
+                        unsafe { p.cast::<usize>().write(tag) };
+                        live.push((p, l, tag));
+                    } else if (x >> 50).is_multiple_of(4) && !live.is_empty() {
+                        // Hand a block to whichever thread takes it next; its tag goes along
+                        // as the block's size field.
+                        let (p, l, tag) = live.swap_remove((x >> 20) as usize % live.len());
+                        // SAFETY: still ours; the tag is in its first word.
+                        assert_eq!(unsafe { p.cast::<usize>().read() }, tag);
+                        pool.lock().unwrap().push(Sent(p, l.size()));
+                    } else if (x >> 50) % 4 == 1
+                        && let Some(Sent(p, size)) = pool.lock().unwrap().pop()
+                    {
+                        // SAFETY: given up by its sender; its tag is in its first word.
+                        let tag = unsafe { p.cast::<usize>().read() };
+                        live.push((p, layout(size, 8), tag));
+                    } else if !live.is_empty() {
+                        let (p, l, tag) = live.swap_remove((x >> 20) as usize % live.len());
+                        // SAFETY: still ours; freed once with its layout.
+                        unsafe {
+                            assert_eq!(p.cast::<usize>().read(), tag, "a block had two owners");
+                            heap.dealloc(p, l);
+                        }
+                    }
+                }
+                for (p, l, tag) in live {
+                    // SAFETY: as above.
+                    unsafe {
+                        assert_eq!(p.cast::<usize>().read(), tag, "a block had two owners");
+                        heap.dealloc(p, l);
+                    }
+                }
+            });
+        }
+    });
+    for Sent(p, size) in pool.into_inner().unwrap() {
+        // SAFETY: given up by its sender, never taken.
+        unsafe { heap.dealloc(p, layout(size, 8)) };
+    }
+}
+
+/// Fails in about one run in eight, and never with drains off (`NO_DRAIN=1`): a block gets two
+/// owners. The other switches (`NO_PURGE`, `NO_CPU`) help bisect it.
+#[test]
+#[ignore = "a block gets two owners in about one run in eight while drains run on the simulated heap; open"]
+fn blocks_have_one_owner_while_threads_churn_and_drains_run() {
+    let rounds = if cfg!(miri) { 1 } else { 30 };
+    for _ in 0..rounds {
+        let heap = SimHeap::<crate::os::sim::Standard>::new();
+        if std::env::var_os("NO_DRAIN").is_some() {
+            heap.os().set_faults(Call::RegisterFence, Faults::ALWAYS);
+        }
+        if std::env::var_os("NO_PURGE").is_some() {
+            heap.os().set_faults(Call::Purge, Faults::ALWAYS);
+        }
+        let held: Vec<_> = if std::env::var_os("NO_CPU").is_some() {
+            (0..SIM_THREADS).filter_map(|_| heap.lease()).collect()
+        } else {
+            Vec::new()
+        };
+        tagged_churn(
+            &heap,
+            if cfg!(miri) { 3 } else { 10 },
+            if cfg!(miri) { 200 } else { 50_000 },
+        );
+        drop(held);
+    }
+}
+
+#[test]
+fn back_end_slots_have_one_owner_while_threads_churn() {
+    let heap = SimHeap::<crate::os::sim::Standard>::new();
+    let l = layout(8, 8);
+    // SAFETY: a valid layout; starts the heap.
+    unsafe { heap.dealloc(heap.alloc(l), l) };
+    let classes: Vec<Class> = (1..=12).map(|w| Class::of_size(8 * w).unwrap()).collect();
+    let pool = std::sync::Mutex::new(Vec::<Sent>::new());
+    thread::scope(|scope| {
+        for t in 0..10usize {
+            let (pool, classes, heap) = (&pool, &classes, &heap);
+            scope.spawn(move || {
+                let back = heap.heap.back().unwrap();
+                let mut live: Vec<(*mut u8, Class, usize)> = Vec::new();
+                let mut x = 0x9e37_79b9_7f4a_7c15u64 ^ t as u64;
+                for i in 0..400_000usize {
+                    x ^= x << 13;
+                    x ^= x >> 7;
+                    x ^= x << 17;
+                    let class = classes[x as usize % classes.len()];
+                    let pick = (x >> 50) % 4;
+                    if live.len() < 400 && !(x >> 40).is_multiple_of(3) {
+                        let p = back.alloc(class, class.size()).unwrap().ptr.as_ptr();
+                        let tag = t << 32 | i;
+                        // SAFETY: a slot this thread now holds.
+                        unsafe { p.cast::<usize>().write(tag) };
+                        live.push((p, class, tag));
+                    } else if pick == 0 && !live.is_empty() {
+                        let (p, class, _) = live.swap_remove((x >> 20) as usize % live.len());
+                        pool.lock().unwrap().push(Sent(p, class.size()));
+                    } else if pick == 1
+                        && let Some(Sent(p, size)) = pool.lock().unwrap().pop()
+                    {
+                        // SAFETY: given up by its sender.
+                        let tag = unsafe { p.cast::<usize>().read() };
+                        live.push((p, Class::of_size(size).unwrap(), tag));
+                    } else if !live.is_empty() {
+                        let (p, class, tag) = live.swap_remove((x >> 20) as usize % live.len());
+                        // SAFETY: still ours.
+                        assert_eq!(unsafe { p.cast::<usize>().read() }, tag, "two owners");
+                        back.free(core::ptr::NonNull::new(p).unwrap(), class);
+                        if std::env::var_os("HEARTBEAT").is_some() {
+                            back.heartbeat();
+                        }
+                    }
+                }
+            });
+        }
+    });
 }
 
 #[test]

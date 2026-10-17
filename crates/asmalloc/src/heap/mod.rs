@@ -108,7 +108,7 @@ impl<O: Os> Heap<O> {
     fn start(&self) -> Option<Back<'_, O>> {
         let back = match self.back.get() {
             Some(back) => back,
-            None => self.back.get_or_reserve().ok()?,
+            None => self.reserve()?,
         };
         // The generated routines hand object addresses over as integers. Exposing the
         // reservation's provenance gives every object address one to take back. Every slow
@@ -116,6 +116,25 @@ impl<O: Os> Heap<O> {
         // some exposure it is ordered after.
         let _ = back.space().base().expose_provenance();
         Some(back)
+    }
+
+    /// Reserves the heap's address space, or finds the reservation another thread made.
+    ///
+    /// Threads that start the heap together each reserve, and one publishes. Where the OS has
+    /// room for only one reservation, the others fail, and they may fail before the winner has
+    /// published, which would turn a race into an out-of-memory error. So a failure is retried
+    /// a few times, each looking for the winner's reservation first. The bound keeps start-up
+    /// from waiting on a thread that never publishes (one that stopped in a fork, say); past it
+    /// the request fails as out of memory, which is all a real shortage can do.
+    #[cold]
+    fn reserve(&self) -> Option<Back<'_, O>> {
+        const ATTEMPTS: usize = 4;
+        for _ in 0..ATTEMPTS {
+            if let Ok(back) = self.back.get_or_reserve() {
+                return Some(back);
+            }
+        }
+        self.back.get()
     }
 
     /// Whether `ptr` lies in the heap's object regions. A block of this heap does; so may an

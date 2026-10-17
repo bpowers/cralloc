@@ -114,9 +114,13 @@ impl Drop for Lease<'_> {
 }
 
 impl<S: Shape> SimHeap<S> {
-    /// A heap over a fresh simulated OS, not yet started.
+    /// A heap over a fresh simulated OS, not yet started. The OS has room for two
+    /// reservations of the largest plan, as Linux has room for many: threads that start the
+    /// heap together each reserve before one publishes, and with room for only one the others
+    /// would find nothing and fail their first allocation.
     pub fn new() -> SimHeap<S> {
-        SimHeap::with_os(SimOs::new())
+        let os = SimOs::with_capacity(2 * crate::os::sim::capacity_for::<S>());
+        SimHeap::with_os(os)
     }
 
     /// A heap over `os`, not yet started.
