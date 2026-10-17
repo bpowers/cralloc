@@ -1,0 +1,80 @@
+#!/usr/bin/env bash
+# Run every TLA+ model and fail if any result differs from what is recorded here.
+#
+#   tla/check            run everything
+#   tla/check Depot      run only the lines whose spec or config name matches
+#   tla/check -v Depot   the same, and print TLC's output (use it to read a trace)
+#
+# A line "ok" must model-check clean. A line "violates X" is a recorded
+# counterexample: TLC must report that X is violated, which shows both that the
+# flaw is real and that the model can see it.
+#
+# TLC_PREFIX is put before each TLC run (for example "taskset -c 11,26,27") and
+# TLC_WORKERS caps its worker threads.
+
+set -u
+cd "$(dirname "$0")"
+
+verbose=0
+if [ "${1:-}" = "-v" ]; then verbose=1; shift; fi
+filter="${1:-}"
+workers="${TLC_WORKERS:-3}"
+prefix="${TLC_PREFIX:-}"
+
+jar="${TLA2TOOLS:-$PWD/tla2tools.jar}"
+if [ ! -f "$jar" ]; then
+    echo "no $jar: see README.md, \"Getting the tools\"" >&2
+    exit 2
+fi
+if command -v java >/dev/null 2>&1; then
+    java=(java)
+elif command -v nix >/dev/null 2>&1; then
+    java=(nix shell nixpkgs#jdk_headless -c java)
+else
+    echo "no java and no nix: see README.md, \"Getting the tools\"" >&2
+    exit 2
+fi
+tlc=("${java[@]}" -XX:+UseParallelGC -cp "$jar" tlc2.TLC)
+
+tmp="$(mktemp -d)"
+trap 'rm -rf "$tmp"' EXIT
+failed=0
+
+# run SPEC CONFIG EXPECTATION...
+run() {
+    local spec="$1" cfg="$2"; shift 2
+    local expect="$*"
+    case "$spec $cfg " in *"$filter"*) ;; *) return ;; esac
+    local out="$tmp/$cfg.out"
+    local start=$SECONDS
+    $prefix "${tlc[@]}" -workers "$workers" -noGenerateSpecTE -metadir "$tmp/$cfg.states" \
+        -config "$cfg.cfg" "$spec.tla" >"$out" 2>&1
+    local secs=$((SECONDS - start))
+    [ "$verbose" = 1 ] && cat "$out"
+
+    local got
+    if grep -q "No error has been found" "$out"; then
+        got="ok"
+    elif grep -q "Invariant .* is violated" "$out"; then
+        got="violates $(sed -n 's/.*Invariant \(.*\) is violated.*/\1/p' "$out" | head -1)"
+    elif grep -q "Temporal properties were violated" "$out"; then
+        got="violates liveness"
+    elif grep -q "Deadlock reached" "$out"; then
+        got="violates deadlock"
+    else
+        got="error"
+    fi
+    local states
+    states="$(sed -n 's/.* \([0-9,]*\) distinct states found.*/\1/p' "$out" | tail -1)"
+    if [ "$got" = "$expect" ]; then
+        printf 'pass  %-22s %-34s %12s states %4ss\n' "$cfg" "$expect" "${states:-?}" "$secs"
+    else
+        printf 'FAIL  %-22s expected "%s", got "%s"\n' "$cfg" "$expect" "$got"
+        [ "$verbose" = 1 ] || tail -40 "$out"
+        failed=1
+    fi
+}
+
+. ./models.sh
+
+exit $failed
