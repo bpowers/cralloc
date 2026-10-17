@@ -39,6 +39,13 @@ pub trait Machine {
     /// restart reads the new number.
     fn step(&self, step: Step) -> Result<(), Aborted>;
 
+    /// Called right after the magazine access that follows a successful `Access` step. An
+    /// aborted sequence executes nothing more, so a fence must not return between the step's
+    /// check and the access: a machine whose threads run freely makes its fence wait from the
+    /// step until this call. Every twin must call it after its access, and nothing else in
+    /// between.
+    fn accessed(&self) {}
+
     /// Called right after the committing store, which ends the sequence. A fence on the
     /// thread's CPU may be waiting for it: between a successful `Commit` step and this call the
     /// sequence is still in flight, as the real routine's last instruction is. Every twin must
@@ -53,6 +60,10 @@ impl<M: Machine + ?Sized> Machine for &M {
 
     fn step(&self, step: Step) -> Result<(), Aborted> {
         (**self).step(step)
+    }
+
+    fn accessed(&self) {
+        (**self).accessed()
     }
 
     fn committed(&self) {
