@@ -20,5 +20,6 @@ extern crate alloc;
 extern crate std;
 
 pub mod classes;
+pub mod front;
 pub mod os;
 pub mod space;
