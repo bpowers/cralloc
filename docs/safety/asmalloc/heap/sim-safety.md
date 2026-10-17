@@ -9,7 +9,9 @@ simulated thread (a lease) for the length of one call.
 method, so each obligation is TWIN-04's (`front/twin-safety.md`), for the machine
 `Processor`. `Processor` is a `SimThread` (whose `Machine` contract the simulator keeps:
 it aborts a sequence when its CPU changes, when a fence hits its CPU, or when another
-simulated thread starts a sequence on its CPU) or an unregistered thread (`cpu_id` -2), which
+simulated thread starts a sequence on its CPU; and its fence returns only once no sequence it
+aborted can still write a magazine or commit, which matters here because the real threads run
+freely) or an unregistered thread (`cpu_id` -2), which
 touches no slab. A lease gives a simulated thread to one real thread at a time (the flag is
 claimed by compare-and-swap and released only by the `Lease` that claimed it), so one simulated
 thread never runs two sequences at once.

@@ -20,6 +20,14 @@
 //! so `fence` returns only after every sequence on its CPU has completed or been aborted, with
 //! real threads as well as cooperatively scheduled ones. A twin must not yield to a scheduler
 //! between `Commit` and `committed`, or a fence from the same OS thread would wait forever.
+//!
+//! The same holds for the magazine access: a sequence that passes its `Access` step is accessing
+//! until the twin calls [`Machine::accessed`]. A real sequence that a fence aborts executes no
+//! further instruction, but a free-running twin that has passed the check cannot be stopped
+//! before its access. So the fence waits for the access to end and aborts the sequence then:
+//! the access lands before the fence returns, as if the fence had arrived one instruction
+//! later, and never after it. Without that wait an aborted push could store its object into a
+//! magazine the drainer had already taken and passed on.
 
 use crate::os::machine::{Aborted, Machine, Step};
 use core::sync::atomic::{AtomicI32, AtomicU8, Ordering};
@@ -32,6 +40,7 @@ const RUNNING: u8 = 1;
 const ABORTED: u8 = 2;
 const COMMITTING: u8 = 3;
 const GONE: u8 = 4;
+const ACCESSING: u8 = 5;
 
 /// No abort is scheduled.
 const NO_STEP: u8 = 0;
@@ -63,7 +72,8 @@ impl ThreadState {
 
     /// Interrupts the thread's sequence, if it is in one, and returns whether it was. A
     /// sequence that is committing cannot be interrupted any more; this waits for it to end, as
-    /// a fence waits for a routine's last instruction.
+    /// a fence waits for a routine's last instruction. One in the middle of its magazine access
+    /// is interrupted once the access is over.
     fn interrupt(&self) -> bool {
         self.barrier(true)
     }
@@ -71,12 +81,12 @@ impl ThreadState {
     /// A successful read-modify-write of the state, whether or not it changes it: the write
     /// orders this call against the thread's next `ReadCpu` (itself a swap) and hands that
     /// sequence everything the caller stored before, as the kernel's barrier does. With `abort`
-    /// it also interrupts a running sequence, waiting out a committing one; it returns whether
-    /// it interrupted one.
+    /// it also interrupts a running sequence, waiting out a committing one and an access in
+    /// progress; it returns whether it interrupted one.
     fn barrier(&self, abort: bool) -> bool {
         let mut old = self.sequence.load(Ordering::Acquire);
         loop {
-            if abort && old == COMMITTING {
+            if abort && (old == COMMITTING || old == ACCESSING) {
                 core::hint::spin_loop();
                 old = self.sequence.load(Ordering::Acquire);
                 continue;
@@ -221,10 +231,10 @@ impl Machine for SimThread<'_> {
                 Ok(())
             }
             _ => {
-                let next = if step == Step::Commit {
-                    COMMITTING
-                } else {
-                    RUNNING
+                let next = match step {
+                    Step::Commit => COMMITTING,
+                    Step::Access => ACCESSING,
+                    _ => RUNNING,
                 };
                 match state.sequence.compare_exchange(
                     RUNNING,
@@ -233,13 +243,29 @@ impl Machine for SimThread<'_> {
                     Ordering::Acquire,
                 ) {
                     Ok(_) => Ok(()),
-                    Err(_) => {
+                    Err(now) => {
+                        // A fence would wait for ever on an access that is never ended.
+                        assert!(
+                            now != ACCESSING,
+                            "a twin took a step without ending its access (`Machine::accessed`)"
+                        );
                         state.sequence.store(IDLE, Ordering::Release);
                         Err(Aborted)
                     }
                 }
             }
         }
+    }
+
+    fn accessed(&self) {
+        // Only an access in progress ends here. Nothing else changes the state meanwhile: a
+        // fence waits, and only this thread runs the sequence.
+        let _ = self.state.sequence.compare_exchange(
+            ACCESSING,
+            RUNNING,
+            Ordering::AcqRel,
+            Ordering::Acquire,
+        );
     }
 
     fn committed(&self) {
@@ -262,9 +288,52 @@ mod tests {
         thread.step(Step::ReadCpu)?;
         thread.step(Step::Load)?;
         thread.step(Step::Access)?;
+        thread.accessed();
         thread.step(Step::Commit)?;
         thread.committed();
         Ok(())
+    }
+
+    /// What the owner test in `heap::tests` caught as a block with two owners: a fence returned
+    /// while a twin stood between its `Access` check and its store, the drainer took the
+    /// magazine and passed it on, and the store then landed in it.
+    #[test]
+    fn a_fence_waits_for_an_access_in_progress_and_then_aborts_the_sequence() {
+        use std::sync::atomic::AtomicBool;
+        use std::thread;
+        let cpus = Cpus::<4>::new();
+        let twin = cpus.thread(0);
+        twin.step(Step::ReadCpu).unwrap();
+        twin.step(Step::Load).unwrap();
+        twin.step(Step::Access).unwrap();
+        let fenced = AtomicBool::new(false);
+        thread::scope(|scope| {
+            let fence = scope.spawn(|| {
+                let aborted = cpus.fence(0);
+                fenced.store(true, Ordering::Release);
+                aborted
+            });
+            thread::sleep(std::time::Duration::from_millis(20));
+            assert!(
+                !fenced.load(Ordering::Acquire),
+                "the fence waits for the access"
+            );
+            twin.accessed();
+            assert_eq!(fence.join().unwrap(), 1, "and then aborts the sequence");
+        });
+        assert_eq!(twin.step(Step::Commit), Err(Aborted));
+        assert_eq!(run(&twin), Ok(()), "the restart succeeds");
+    }
+
+    #[test]
+    fn a_sequence_between_its_access_and_its_commit_can_be_aborted() {
+        let cpus = Cpus::<4>::new();
+        let twin = cpus.thread(0);
+        twin.step(Step::ReadCpu).unwrap();
+        twin.step(Step::Access).unwrap();
+        twin.accessed();
+        assert_eq!(cpus.fence(0), 1);
+        assert_eq!(twin.step(Step::Commit), Err(Aborted));
     }
 
     #[test]
