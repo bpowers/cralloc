@@ -27,9 +27,9 @@ this heap; plus each method's own contract, passed on from the caller's.
 so code outside it can neither run routines nor build a twin on these slabs. Inside the crate,
 nothing writes `SLABS` except `Real`'s routines and the slow paths and drain of a `Cache`, and
 the only `Cache`s made with `Real` are `HEAP`'s (`Heap::alloc_slow`, `Heap::free_slow`). `HEAP`
-is the only `Heap` ever run with `Real`. The callers' contracts (`GlobalAlloc`, `Allocator`) are what the heap's methods
-ask: a valid layout, and for frees and resizes a block this heap returned with a layout that
-fits it. `pop_slow` and `push_slow` are entered from the routines (GLOBAL-04).
+is the only `Heap` ever run with `Real`. The callers' contracts (`GlobalAlloc`,
+`Allocator`) are what the heap's methods ask: a valid layout, and for frees and resizes a
+block this heap returned with a layout that fits it. `pop_slow` and `push_slow` are entered from the routines (GLOBAL-04).
 
 ## GLOBAL-03: `unsafe impl Allocator for Asmalloc`
 

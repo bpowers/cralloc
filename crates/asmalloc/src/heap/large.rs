@@ -1,25 +1,27 @@
 //! Large objects, and resizing any object (design: "Large objects").
 //!
 //! A large object has no magazine. It is a slot of its class taken straight from the region
-//! bitmaps, or, when its class does not fit in a region (or its alignment is larger than a
-//! region), a run of whole regions. Its class always comes from its address, because it may sit
-//! in a slot bigger than its layout says.
+//! bitmaps, or, when its class does not fit in a region (or its alignment is larger than a region),
+//! a run of whole regions. Its class always comes from its address, because it may sit in a slot
+//! bigger than its layout says.
 //!
-//! A resize stays in place only when the caller's next free will still find the right class:
-//! for a small object, when the new layout has the same class; for a large one, when the new
-//! layout is still large and fits the slot or run, and (a decision beyond the design) is at
-//! least a [`HEADROOM`]th of it, so that a big buffer shrunk to a sliver does not keep its
+//! A resize stays in place only when the caller's next free will still find the right class: for a
+//! small object, when the new layout has the same class; for a large one, when the new layout is
+//! still large and fits the slot or run, and, when it shrinks (a decision beyond the design), keeps
+//! at least a [`HEADROOM`]th of it, so that a big buffer shrunk to a sliver does not keep its
 //! pages. Anything else moves the object. An object that outgrows its block moves to one with
 //! [`HEADROOM`] times the room it asked for, so a buffer that doubles is copied every other
-//! doubling, not at each one; but not past a region, since a run commits all its memory at once. Small objects get no
-//! headroom: their class comes from the layout, so their slot must be exactly their class.
+//! doubling, not at each one; but not past a region, since a run commits all its memory at once.
+//! Small objects get no headroom: their class comes from the layout, so their slot must be exactly
+//! their class.
 //!
-//! Fresh slots and runs read as zero; the back end says when a reused large slot is known to,
-//! so zeroed allocation clears only what it must.
+//! Fresh slots and runs read as zero; the back end says when a reused large slot is known to, so
+//! zeroed allocation clears only what it must.
 //!
 //! Every allocation and in-place resize of a large object records the size asked for
-//! (`Back::alloc`, `Back::alloc_run`, `Back::resize`). What the caller may use is that size rounded up to a page, so a block
-//! with headroom never reports, or makes anyone touch, the room it has not been asked for.
+//! (`Back::alloc`, `Back::alloc_run`, `Back::resize`). What the caller may use is that size rounded
+//! up to a page, so a block with headroom never reports, or makes anyone touch, the room it has not
+//! been asked for.
 
 use super::{Grant, Heap, Zero, small};
 use crate::back::Kind;
@@ -153,7 +155,7 @@ impl<O: Os> Heap<O> {
                 let needed = new.size().next_multiple_of(new.align());
                 next.is_none_or(|c| !c.is_small())
                     && needed <= len
-                    && needed >= len / HEADROOM
+                    && (new.size() >= old.size() || needed >= len / HEADROOM)
                     && ptr.addr().get() & (new.align() - 1) == 0
             }
         };

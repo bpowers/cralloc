@@ -322,6 +322,31 @@ fn a_large_shrink_stays_in_place_unless_it_leaves_most_of_the_block() {
 }
 
 #[test]
+fn growth_in_small_steps_stays_in_the_room_a_move_gave() {
+    let heap = SimHeap::<Shape>::new();
+    let page = 4 << 10;
+    let mut size = 40 << 10;
+    // SAFETY: valid layouts; the block is freed once with the layout it has.
+    unsafe {
+        let mut p = heap.alloc(layout(size, 8));
+        // Outgrow the slot once, into a block with headroom.
+        p = heap.realloc(p, layout(size, 8), 100 << 10);
+        size = 100 << 10;
+        for _ in 0..16 {
+            let q = heap.realloc(p, layout(size, 8), size + page);
+            assert_eq!(q, p, "growth within the headroom stays put at {size}");
+            size += page;
+        }
+        // An over-aligned layout grows in place too.
+        let small = layout(8, 64 << 10);
+        let a = heap.alloc(small);
+        assert_eq!(heap.realloc(a, small, 16), a);
+        heap.dealloc(a, layout(16, 64 << 10));
+        heap.dealloc(p, layout(size, 8));
+    }
+}
+
+#[test]
 fn a_failed_lease_releases_nothing() {
     let heap = SimHeap::<Shape>::new();
     let held: Vec<_> = (0..SIM_THREADS).filter_map(|_| heap.lease()).collect();
