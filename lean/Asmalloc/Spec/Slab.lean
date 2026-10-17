@@ -186,6 +186,32 @@ def Mag.push (n : Nat) (x : BitVec 64) : Mag → Option Mag
   | .stack b items => if items.length + 2 < n then some (.stack b (items ++ [x])) else Option.none
   | _ => Option.none
 
+/-! ## Spare stacks
+
+A slab's cold part holds the heads of stacks of spare magazines. A head is
+zero (an empty stack), a marker, or the address of the top magazine, whose
+link slot (its slot 0) holds the next head. A magazine on a spare stack is
+reachable from nowhere else, so its link slots lie apart from everything a
+routine writes (`StackOk`). -/
+
+/-- The magazines of a stack whose head is `h`, in memory `m`, top first:
+each a nonzero multiple of 8 whose link slot holds the next head, the last
+next head zero. -/
+inductive Chain (m : Mem) : BitVec 64 → List Addr → Prop
+  | nil : Chain m 0 []
+  | cons {h : BitVec 64} {l : List Addr} : h.toNat ≠ 0 → h.toNat % 8 = 0 →
+      Chain m (m.readW h 64) l → Chain m h (h :: l)
+
+/-- A stack head: a marker, or the head of a stack whose magazines' link
+slots lie apart from the regions `rs`. -/
+def StackOk (m : Mem) (h : BitVec 64) (rs : List Region) : Prop :=
+  IsMarker h ∨ ∃ l, Chain m h l ∧ ∀ x ∈ l, ∀ r ∈ rs, Region.Disjoint ⟨x, 8⟩ r
+
+/-- What the slow path's routines return when the thread has no valid CPU
+number: no slab word or stack head is ever 2 (it is neither zero, a marker
+nor a multiple of 8). -/
+def NO_CPU : Nat := 2
+
 /-- Memory `m'` is `m` but in the regions `rs`. -/
 def Unchanged (rs : List Region) (m m' : Mem) : Prop :=
   ∀ x, (∀ r ∈ rs, ¬ r.Contains x 1) → m' x = m x
@@ -197,13 +223,23 @@ target: the thread pointer, the symbols' addresses and the constants
 (`Abi.tp`, `Abi.sym`, `Abi.param`; zero on a target without them, whose
 contract the precondition then makes unsatisfiable). -/
 
-/-- How a routine is given its class and its mask. -/
+/-- Which routine, and how it is given its word in a slab. -/
 inductive Form
-  /-- As constants: the class's offset in a slab (`COFF`) and the mask
-  (`MASK`). -/
+  /-- A pop or push of a pointer, given the class's offset in a slab
+  (`COFF`) and the mask (`MASK`) as constants. -/
   | inline
-  /-- The class as the first argument; the mask from `MAG_MASKS`. -/
+  /-- A pop or push of a pointer, given the class as the first argument and
+  the mask in `MAG_MASKS`. -/
   | table
+  /-- The slow path's store-if-equal of the word at the byte offset in the
+  first argument (`cls`). -/
+  | cas
+  /-- Push the magazine in the second argument on the stack whose head is
+  the word at the byte offset in the first argument. -/
+  | stackPush
+  /-- Pop the top magazine off the stack whose head is the word at the byte
+  offset in the first argument. -/
+  | stackPop
   deriving DecidableEq, Repr
 
 /-- A routine: its calling convention, form and signature. -/
@@ -233,10 +269,13 @@ def csField : Region := ⟨c.area s + BitVec.ofNat 64 RSEQ_CS, 8⟩
 def cpuField : Region := ⟨c.area s + BitVec.ofNat 64 RSEQ_CPU_ID, 4⟩
 def cpu : Nat := ((c.mem s).readW (c.cpuField s).base 32).toNat
 
-/-- The routine's class. -/
+/-- The routine's class: the index of its word in a slab. The slow path's
+routines take a byte offset, of which they use the word it falls in, so
+that any offset names a word of the slab. -/
 def cls : Nat := match c.form with
   | .inline => (c.param s COFF).toNat / 8
   | .table => (c.arg s 0).toNat
+  | .cas | .stackPush | .stackPop => (c.arg s 0).toNat % SLAB_BYTES / 8
 
 /-- Where the out-of-line routine reads its class's mask. -/
 def maskAddr : Addr := c.sym s MAG_MASKS + BitVec.ofNat 64 (4 * c.cls s)
@@ -245,6 +284,7 @@ def maskAddr : Addr := c.sym s MAG_MASKS + BitVec.ofNat 64 (4 * c.cls s)
 def mask : Nat := match c.form with
   | .inline => (c.param s MASK).toNat
   | .table => ((c.mem s).readW (c.maskAddr s) 32).toNat
+  | .cas | .stackPush | .stackPop => 0
 def slots : Nat := slotsOf (c.mask s)
 
 /-- The address of the slab word, and the word, of the class for the
@@ -263,28 +303,76 @@ def mag : Mag := Mag.ofWord (c.slots s) (c.mem s) (c.w s)
 /-- The magazine's region, if the word names one. -/
 def magRegion : Region := ⟨magBase (c.slots s) (c.w s), 8 * c.slots s⟩
 
+/-- The link slot of the magazine a stack push pushes. -/
+def link : Region := ⟨c.arg s 1, 8⟩
+
+/-- What a routine may touch beyond its word, if its CPU number has a slab:
+a pop's or push's magazine, if the word names one (written); a stack push's
+magazine's link slot (written); a stack pop's top magazine's link slot, if
+the head names one (read). -/
+def more : List (Region × Bool) := match c.form with
+  | .inline | .table => if IsSlot (c.slots s) (c.w s) then [(c.magRegion s, true)] else []
+  | .cas => []
+  | .stackPush => [(c.link s, true)]
+  | .stackPop => if (c.w s).toNat ≠ 0 ∧ (c.w s).toNat % 2 = 0 then [(⟨c.w s, 8⟩, false)] else []
+
 /-- **The memory a routine may access**, and whether it may write it: the
 variable `__rseq_offset` and `cpu_id`, `rseq_cs`, the mask's table
-entry (out of line), and, if the CPU number has a slab, the slab word and the
-magazine it names. A function of the state, so recomputed on a retry. -/
+entry (`table`), and, if the CPU number has a slab, the word and what `more`
+names. A function of the state, so recomputed on a retry. -/
 def regions : List (Region × Bool) :=
   [(⟨c.sym s RSEQ_OFFSET, 8⟩, false), (c.cpuField s, false), (c.csField s, true)] ++
-  (match c.form with | .table => [(⟨c.maskAddr s, 4⟩, false)] | .inline => []) ++
-  (if c.InRange s then
-    (⟨c.word s, 8⟩, true) :: (if IsSlot (c.slots s) (c.w s) then [(c.magRegion s, true)] else [])
-  else [])
+  (match c.form with | .table => [(⟨c.maskAddr s, 4⟩, false)] | _ => []) ++
+  (if c.InRange s then (⟨c.word s, 8⟩, true) :: c.more s else [])
+
+/-- The regions a routine may read but not write, and those it may write. -/
+def ro : List Region := ((c.regions s).filter (!·.2)).map (·.1)
+def rw : List Region := ((c.regions s).filter (·.2)).map (·.1)
+
+/-- The world a routine runs in, as far as it is not the routine's own
+registers: the state's regions are the routine's (`regions`), which do not
+wrap around, overlap where one is written, or overlap the return address. -/
+structure World : Prop where
+  rd : c.A.rd s = c.ro s
+  wr : c.A.wr s = c.rw s
+  nowrap : ∀ x ∈ c.regions s, x.1.base.toNat + x.1.len ≤ 2 ^ c.A.ptrBits
+  disj : (c.regions s).Pairwise (fun a b => (a.2 || b.2) → a.1.Disjoint b.1)
+  res : ∀ x ∈ c.regions s, ∀ r ∈ c.A.reserved 0 s, x.1.Disjoint r
+
+/-- What the routine's arguments and constants must be, which its registers
+hold: a pop's or push's class has a slab word and, inline, its offset is a
+multiple of 8 and its mask an allowed one; a stack push's magazine is a
+nonzero multiple of 8. -/
+def argsOk : Prop := match c.form with
+  | .inline => c.A.param.isSome ∧ (c.param s COFF).toNat = 8 * c.cls s ∧ c.cls s < CLASS_LIMIT ∧
+      MaskOk (c.mask s)
+  | .table => c.cls s < CLASS_LIMIT
+  | .cas | .stackPop => True
+  | .stackPush => (c.arg s 1).toNat ≠ 0 ∧ (c.arg s 1).toNat % 8 = 0
+
+/-- The invariant the routine relies on, of memory: for a pop or push, that
+of the class's word in every slab (and, out of line, that its mask in
+`MAG_MASKS` is an allowed one); for a stack push or pop, that each slab's
+head at the offset is a marker or heads a stack whose link slots lie apart
+from that head, `rseq_cs` and (a push's) the pushed magazine's link slot.
+A store-if-equal relies on none. -/
+def inv : Prop := match c.form with
+  | .inline => ∀ i < SLAB_COUNT,
+      WordOk (c.slots s) ((c.mem s).readW (wordAddr (c.sym s SLABS) i (c.cls s)) 64)
+  | .table => MaskOk (c.mask s) ∧ ∀ i < SLAB_COUNT,
+      WordOk (c.slots s) ((c.mem s).readW (wordAddr (c.sym s SLABS) i (c.cls s)) 64)
+  | .cas => True
+  | .stackPush => ∀ i < SLAB_COUNT,
+      StackOk (c.mem s) ((c.mem s).readW (wordAddr (c.sym s SLABS) i (c.cls s)) 64)
+        [⟨wordAddr (c.sym s SLABS) i (c.cls s), 8⟩, c.csField s, c.link s]
+  | .stackPop => ∀ i < SLAB_COUNT,
+      StackOk (c.mem s) ((c.mem s).readW (wordAddr (c.sym s SLABS) i (c.cls s)) 64)
+        [⟨wordAddr (c.sym s SLABS) i (c.cls s), 8⟩, c.csField s]
 
 /-- The precondition beyond the signature's: the target names the thread
-pointer and symbols (and, inline, constants: the class's offset a multiple
-of 8); the class has a slab word; its mask is that of an allowed magazine
-size; and the invariant holds of the class's word in every slab. -/
-def pre : Prop :=
-  c.A.tp.isSome ∧ c.A.sym.isSome ∧
-  (match c.form with
-    | .inline => c.A.param.isSome ∧ (c.param s COFF).toNat = 8 * c.cls s
-    | .table => True) ∧
-  c.cls s < CLASS_LIMIT ∧ MaskOk (c.mask s) ∧
-  ∀ i < SLAB_COUNT, WordOk (c.slots s) ((c.mem s).readW (wordAddr (c.sym s SLABS) i (c.cls s)) 64)
+pointer and symbols, the arguments are as `argsOk` requires, and the
+invariant holds. -/
+def pre : Prop := c.A.tp.isSome ∧ c.A.sym.isSome ∧ c.argsOk s ∧ c.inv s
 
 /-! ### Pop -/
 
@@ -347,13 +435,13 @@ def headTrace (o d i w k : Nat) : List Event :=
     rd (a + BitVec.ofNat 64 RSEQ_CPU_ID) 4 i] ++
   if i < SLAB_COUNT then
     rd (wordAddr (c.sym s SLABS) i (c.cls s)) 8 w ::
-      (match c.form with | .table => [rd (c.maskAddr s) 4 k] | .inline => [])
+      (match c.form with | .table => [rd (c.maskAddr s) 4 k] | _ => [])
   else []
 
 /-- The mask a routine tests with, given the table entry it read. -/
 def testMask (k : Nat) : Nat := match c.form with
   | .inline => (c.param s MASK).toNat
-  | .table => k
+  | _ => k
 
 /-- The accesses of a pop. -/
 def PopTrace (evs : List Event) : Prop :=
@@ -369,6 +457,35 @@ def PushTrace (x : BitVec 64) (evs : List Event) : Prop :=
       [wr (BitVec.ofNat 64 w) 8 x.toNat, wr (wordAddr (c.sym s SLABS) i (c.cls s)) 8 (BitVec.ofNat 64 w + 8).toNat]
     else []
 
+/-! ### The slow path's
+
+Each reads the CPU number and, if it has a slab, the word once (`w`). Then
+a store-if-equal stores its third argument if `w` is its second; a stack
+push, unless `w` is a marker, stores `w` in the magazine's link slot, which
+nothing else can see, and commits the magazine's address; a stack pop,
+unless `w` is zero or a marker, reads the link slot of the magazine `w`
+names, the head it read once, and commits what it holds. -/
+
+/-- The accesses of a store-if-equal of `x` if the word is `e`. -/
+def CasTrace (e x : BitVec 64) (evs : List Event) : Prop :=
+  ∃ o d i w : Nat, evs = c.headTrace s o d i w 0 ++
+    if i < SLAB_COUNT ∧ w = e.toNat then [wr (wordAddr (c.sym s SLABS) i (c.cls s)) 8 x.toNat]
+    else []
+
+/-- The accesses of a stack push of the magazine `g`. -/
+def StackPushTrace (g : BitVec 64) (evs : List Event) : Prop :=
+  ∃ o d i w : Nat, evs = c.headTrace s o d i w 0 ++
+    if i < SLAB_COUNT ∧ w % 2 = 0 then
+      [wr g 8 w, wr (wordAddr (c.sym s SLABS) i (c.cls s)) 8 g.toNat]
+    else []
+
+/-- The accesses of a stack pop: the link read is at the head read. -/
+def StackPopTrace (evs : List Event) : Prop :=
+  ∃ o d i w v : Nat, evs = c.headTrace s o d i w 0 ++
+    if i < SLAB_COUNT ∧ w ≠ 0 ∧ w % 2 = 0 then
+      [rd (BitVec.ofNat 64 w) 8 v, wr (wordAddr (c.sym s SLABS) i (c.cls s)) 8 v]
+    else []
+
 end Ctx
 
 /-! ## The contracts -/
@@ -376,15 +493,30 @@ end Ctx
 /-- The contract of a routine `c` with the postcondition `post`, what it may
 leave at its slow path's exit (`exit`), at an abort (`abort`), and its
 accesses (`trace`): its signature's, its memory `Ctx.regions`, and the
-precondition `Ctx.pre`, which every retry starts in again (`env`). -/
+precondition `Ctx.pre`.
+
+A retry starts where the thread resumes after an abort (`env`). There the
+calling convention's facts hold (`Abi.wf`), the regions are the routine's
+again, recomputed from memory then (`Ctx.World`), and the invariant holds
+(`Ctx.inv`), which every thread and the drainer keep. That is all `env`
+assumes: the rest of the precondition, about the routine's arguments and
+constants (`Ctx.argsOk`), holds because the routine keeps its arguments
+wherever it may be aborted (`Sig.contract`'s `abort`), and the abort keeps
+its registers and constants (`Target.rely`). -/
 def contract {M : ISA} (c : Ctx M) (post : M.State → M.State → Prop)
     (exit : String → M.State → M.State → Prop) (abort : M.State → M.State → Prop)
     (trace : M.State → List Event → Prop) : Contract M :=
   let A := c.A.withExtra (some c.regions)
   let post' := Curry.const (fun _ _ _ => True) _
-  let x : Sig.Extra M := { pre := c.pre, post, exit, abort, trace }
-  c.sig.contract A (post := post') (x := { x with
-    env := fun _ p' => (c.sig.contract A (post := post') (x := x)).pre p' })
+  let x : Sig.Extra M := {
+    pre := c.pre
+    post := post
+    exit := exit
+    abort := abort
+    trace := trace
+    env := fun _ p' => c.A.wf ((c.sig.words c.A.ptrBits).map (·.bits c.A.ptrBits)) 0 p' ∧
+      c.World p' ∧ c.inv p' }
+  c.sig.contract A (post := post') (x := x)
 
 /-- `slab_pop` inline: `fn<const CLASS: usize, const MASK: u32>() -> usize`. -/
 def popInlineSig : Sig where
@@ -448,6 +580,79 @@ def pushContract {M : ISA} (A : Abi M) : Contract M :=
       (c.InRange s → Mag.ofWord (c.slots s) (A.mem p) (c.w s) = c.mag s))
     (trace := fun s => c.PushTrace s (c.arg s 1))
 
+/-! ### The slow path's routines
+
+Out of line only. Each takes a byte offset in a slab, of which it uses the
+word it falls in (`Ctx.cls`), and returns `NO_CPU` if the thread's CPU
+number has no slab, having changed nothing but `rseq_cs`. -/
+
+/-- `slab_cas`: `fn(offset: usize, expected: usize, new: usize) -> usize`. -/
+def casSig : Sig where
+  params := [("offset", .int .usize), ("expected", .int .usize), ("new", .int .usize)]
+  ret := some .usize
+
+/-- `slab_stack_push`: `fn(offset: usize, magazine: usize) -> usize`. -/
+def stackPushSig : Sig where
+  params := [("offset", .int .usize), ("magazine", .int .usize)]
+  ret := some .usize
+
+/-- `slab_stack_pop`: `fn(offset: usize) -> usize`. -/
+def stackPopSig : Sig where
+  params := [("offset", .int .usize)]
+  ret := some .usize
+
+/-- No slab for the CPU number: `NO_CPU`, and only `rseq_cs` changed. -/
+def NoCpu {M : ISA} (c : Ctx M) (s s' : M.State) : Prop :=
+  ¬ c.InRange s ∧ c.A.ret s' = BitVec.ofNat 64 NO_CPU ∧
+    Unchanged [c.csField s] (c.mem s) (c.A.mem s')
+
+/-- Store-if-equal: returns the word it read, which it replaces with `new`
+if it was `expected`; otherwise it changes nothing but `rseq_cs`. -/
+def casContract {M : ISA} (A : Abi M) : Contract M :=
+  let c : Ctx M := ⟨A, .cas, casSig⟩
+  contract c
+    (post := fun s s' => NoCpu c s s' ∨ (c.InRange s ∧ A.ret s' = c.w s ∧
+      ((c.w s = c.arg s 1 ∧ Unchanged [c.csField s, ⟨c.word s, 8⟩] (c.mem s) (A.mem s') ∧
+          (A.mem s').readW (c.word s) 64 = c.arg s 2) ∨
+        (c.w s ≠ c.arg s 1 ∧ Unchanged [c.csField s] (c.mem s) (A.mem s')))))
+    (exit := fun _ _ _ => False)
+    (abort := fun s p => Unchanged [c.csField s] (c.mem s) (A.mem p))
+    (trace := fun s => c.CasTrace s (c.arg s 1) (c.arg s 2))
+
+/-- Stack push of `magazine`: returns the head it read; if that is a marker,
+changes nothing but `rseq_cs`; otherwise the magazine's link slot holds
+that head and the head is the magazine: the stack is the magazine on top of
+what it was. -/
+def stackPushContract {M : ISA} (A : Abi M) : Contract M :=
+  let c : Ctx M := ⟨A, .stackPush, stackPushSig⟩
+  contract c
+    (post := fun s s' => NoCpu c s s' ∨ (c.InRange s ∧ A.ret s' = c.w s ∧
+      (((c.w s).toNat % 2 = 1 ∧ Unchanged [c.csField s] (c.mem s) (A.mem s')) ∨
+        ((c.w s).toNat % 2 = 0 ∧
+          Unchanged [c.csField s, ⟨c.word s, 8⟩, c.link s] (c.mem s) (A.mem s') ∧
+          (A.mem s').readW (c.word s) 64 = c.arg s 1 ∧
+          ∀ l, Chain (c.mem s) (c.w s) l → Chain (A.mem s') (c.arg s 1) (c.arg s 1 :: l)))))
+    (exit := fun _ _ _ => False)
+    (abort := fun s p => Unchanged [c.csField s, c.link s] (c.mem s) (A.mem p) ∧
+      (c.InRange s → ∀ l, Chain (c.mem s) (c.w s) l → Chain (A.mem p) (c.w s) l))
+    (trace := fun s => c.StackPushTrace s (c.arg s 1))
+
+/-- Stack pop: returns the head it read; if that is zero (empty) or a
+marker, changes nothing but `rseq_cs`; otherwise the head is what the top
+magazine's link slot held: the stack is the rest. -/
+def stackPopContract {M : ISA} (A : Abi M) : Contract M :=
+  let c : Ctx M := ⟨A, .stackPop, stackPopSig⟩
+  contract c
+    (post := fun s s' => NoCpu c s s' ∨ (c.InRange s ∧ A.ret s' = c.w s ∧
+      ((((c.w s).toNat = 0 ∨ (c.w s).toNat % 2 = 1) ∧ Unchanged [c.csField s] (c.mem s) (A.mem s')) ∨
+        ((c.w s).toNat ≠ 0 ∧ (c.w s).toNat % 2 = 0 ∧
+          Unchanged [c.csField s, ⟨c.word s, 8⟩] (c.mem s) (A.mem s') ∧
+          (A.mem s').readW (c.word s) 64 = (c.mem s).readW (c.w s) 64 ∧
+          ∀ l, Chain (c.mem s) (c.w s) l → Chain (A.mem s') ((c.mem s).readW (c.w s) 64) l.tail))))
+    (exit := fun _ _ _ => False)
+    (abort := fun s p => Unchanged [c.csField s] (c.mem s) (A.mem p))
+    (trace := c.StackPopTrace)
+
 /-! ## The functions
 
 Their documentation states what `Ctx.pre` and `Ctx.regions` require of the
@@ -468,6 +673,26 @@ def safety (cls size : String) : List String := [
     `MAG_MASKS`, or the return address on the stack; none may wrap around the end of the \
     address space (`VG.Spec.Slab.Ctx.regions`)."]
 
+/-- What the slow path's routines require of the thread and the slab, and,
+for a stack's, of the stacks. -/
+def slowSafety (stack : Bool) (push : Bool) : List String :=
+  ["glibc must have registered the calling thread's rseq area, as it does before the thread \
+    can run code that allocates.",
+    "The thread's `rseq_cs` and the slab word at `offset` (rounded down to a multiple of 8, \
+      within the slab) for its CPU must not overlap each other, `__rseq_offset` or the \
+      thread's `cpu_id`" ++ (if push then ", nor overlap the link slot `magazine[0]`" else "") ++
+      ", nor the return address on the stack; none may wrap around the end of the address space \
+      (`VG.Spec.Slab.Ctx.regions`)."] ++
+  (if stack then
+    [s!"In each of the {SLAB_COUNT} slabs of `SLABS`, the head at `offset` must be a marker \
+      (a word whose low {MARKER_SHIFT} bits are 1) or head a stack of magazines: 0, or the \
+      address, a nonzero multiple of 8, of a magazine whose link slot holds the next head. \
+      No link slot of those stacks may overlap its head, the thread's `rseq_cs`" ++
+      (if push then " or `magazine[0]`" else "") ++ " (`VG.Spec.Slab.Ctx.inv`)."]
+  else []) ++
+  (if push then ["`magazine` must be a nonzero multiple of 8, and the magazine must be the \
+    caller's: on no stack."] else [])
+
 /-- The layout the routines are proved for, for the Rust around them: the
 slabs, the classes, the markers, the fields of `struct rseq` they use, and
 the mask of each allowed magazine size (`MAG_MASK_<slots>`). -/
@@ -476,7 +701,8 @@ def rustConsts : List (String × IntTy × Nat) :=
     ("SLAB_COUNT", .usize, SLAB_COUNT), ("CLASS_LIMIT", .usize, CLASS_LIMIT),
     ("WORD_BYTES", .usize, 8), ("MARKER_SHIFT", .u32, MARKER_SHIFT),
     ("RSEQ_CS", .usize, RSEQ_CS), ("RSEQ_CPU_ID", .usize, RSEQ_CPU_ID),
-    ("MAG_LOG_MIN", .u32, MAG_LOG_MIN), ("MAG_LOG_MAX", .u32, MAG_LOG_MAX)] ++
+    ("MAG_LOG_MIN", .u32, MAG_LOG_MIN), ("MAG_LOG_MAX", .u32, MAG_LOG_MAX),
+    ("NO_CPU", .usize, NO_CPU)] ++
   (List.range (MAG_LOG_MAX - MAG_LOG_MIN + 1)).map fun i =>
     (s!"MAG_MASK_{2 ^ (MAG_LOG_MIN + i)}", .u32, magMask (2 ^ (MAG_LOG_MIN + i)))
 
@@ -535,6 +761,45 @@ def pushApi : Api where
   safety := safety "`class`" "`MAG_MASKS[class]`"
   operands := [(RSEQ_OFFSET, .sym (path RSEQ_OFFSET)), (SLABS, .sym (path SLABS)),
     (MAG_MASKS, .sym (path MAG_MASKS)), (SLOW, .sym (path "push_slow"))]
+  rustConsts := rustConsts
+
+def casApi : Api where
+  module := "slab"
+  name := "slab_cas"
+  sig := casSig
+  contracts := some fun A _ => casContract A
+  summary := "Stores `new` in the calling thread's CPU's slab word at `offset` if it holds \
+    `expected`, and returns the word it read there; returns `NO_CPU` (2) if the CPU number \
+    has no slab.\n\n\
+    Contract: `VG.Spec.Slab.casContract`."
+  safety := slowSafety false false
+  operands := [(RSEQ_OFFSET, .sym (path RSEQ_OFFSET)), (SLABS, .sym (path SLABS))]
+  rustConsts := rustConsts
+
+def stackPushApi : Api where
+  module := "slab"
+  name := "slab_stack_push"
+  sig := stackPushSig
+  contracts := some fun A _ => stackPushContract A
+  summary := "Pushes `magazine` on the calling thread's CPU's stack whose head is at `offset`, \
+    unless the head is a marker, and returns the head it read; returns `NO_CPU` (2) if the \
+    CPU number has no slab.\n\n\
+    Contract: `VG.Spec.Slab.stackPushContract`."
+  safety := slowSafety true true
+  operands := [(RSEQ_OFFSET, .sym (path RSEQ_OFFSET)), (SLABS, .sym (path SLABS))]
+  rustConsts := rustConsts
+
+def stackPopApi : Api where
+  module := "slab"
+  name := "slab_stack_pop"
+  sig := stackPopSig
+  contracts := some fun A _ => stackPopContract A
+  summary := "Pops the top magazine off the calling thread's CPU's stack whose head is at \
+    `offset`, unless the stack is empty (0) or the head a marker, and returns the head it \
+    read; returns `NO_CPU` (2) if the CPU number has no slab.\n\n\
+    Contract: `VG.Spec.Slab.stackPopContract`."
+  safety := slowSafety true false
+  operands := [(RSEQ_OFFSET, .sym (path RSEQ_OFFSET)), (SLABS, .sym (path SLABS))]
   rustConsts := rustConsts
 
 end VG.Spec.Slab
