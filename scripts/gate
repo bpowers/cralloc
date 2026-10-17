@@ -17,9 +17,12 @@ step() {
 step format
 cargo fmt --all --check
 step lints
-cargo clippy --workspace --all-targets --all-features -- -D warnings
+# Not --all-features: some crates have features that need nightly (the testkit's
+# `allocator-api`). The allocator's `sim` feature is linted on its own.
+cargo clippy --workspace --all-targets -- -D warnings
+cargo clippy -p asmalloc --all-targets --features sim -- -D warnings
 step tests
-cargo test --workspace --all-features --quiet
+cargo test --workspace --quiet
 step "quick proofs"
 # Kani is verbose; show its summary, or everything if it fails.
 if ! proofs=$(MEMLIMIT_QUIET=1 KANI_TIMEOUT="${KANI_TIMEOUT:-5m}" \
