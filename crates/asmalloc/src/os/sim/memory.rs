@@ -64,6 +64,22 @@ impl Memory {
     }
 }
 
+impl Memory {
+    /// Whether the `len` bytes at `offset` are all zero.
+    ///
+    /// # Safety
+    ///
+    /// `offset + len <= self.len()`, and no thread writes those bytes during the call.
+    pub(super) unsafe fn is_zero(&self, offset: usize, len: usize) -> bool {
+        debug_assert!(offset <= self.len() && len <= self.len() - offset);
+        // SAFETY: the range is inside the allocation (caller), which is initialized (it was
+        // allocated zeroed and only ever written with bytes), `base` has provenance for all of
+        // it, and nothing writes it while the shared slice lives (caller).
+        let bytes = unsafe { core::slice::from_raw_parts(self.base.as_ptr().add(offset), len) };
+        bytes.iter().all(|&byte| byte == 0)
+    }
+}
+
 impl Drop for Memory {
     fn drop(&mut self) {
         // SAFETY: `base` came from `alloc_zeroed` with this exact layout and is freed only here.

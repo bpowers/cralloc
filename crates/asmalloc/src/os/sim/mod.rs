@@ -5,8 +5,11 @@
 //! Linux does wherever the allocator could tell the difference: reserved memory reads as zero,
 //! commit keeps contents, purge zeroes, and unmapped memory comes back zero when reserved again.
 //! It is stricter than Linux where that catches bugs: a call on memory that is not reserved, or
-//! on a range that is not whole pages, panics. It cannot stop the allocator from writing memory
-//! it never committed; tests check for that with [`SimOs::is_writable`].
+//! on a range that is not whole pages, panics. Memory is ordinary memory, so a write to a page
+//! that was never committed cannot fault, but it is caught: such a page must still be zero when
+//! it is committed, purged or unmapped, or the call panics. [`SimOs::is_writable`] lets a test
+//! check a block before writing, [`SimOs::resident_bytes`] measures what the heap keeps
+//! resident, and [`SimOs::is_purged`] turns false once purged memory is written again.
 //!
 //! What a test controls:
 //!
@@ -255,10 +258,31 @@ impl<S: Shape> SimOs<S> {
         self.covering_all(start, len, RESERVED | WRITABLE)
     }
 
-    /// Whether every page touching `start..start + len` is reserved and has been purged since it
-    /// was last committed.
+    /// Whether every page touching `start..start + len` is reserved, has been purged since it
+    /// was last committed, and still reads as zero, so is not resident: a write after the purge
+    /// would have faulted it back. Call it while nothing writes the range.
     pub fn is_purged(&self, start: NonNull<u8>, len: usize) -> bool {
-        self.covering_all(start, len, RESERVED | PURGED)
+        self.covering(start, len).is_some_and(|(first, count)| {
+            self.pages.all(first, count, RESERVED | PURGED)
+                // SAFETY: the pages are inside `memory`, and the caller writes nothing meanwhile.
+                && unsafe {
+                    self.memory
+                        .is_zero(first << self.page_shift(), count << self.page_shift())
+                }
+        })
+    }
+
+    /// Bytes the heap would have resident: committed pages holding a nonzero byte. A lower
+    /// bound, since a page written only with zeros counts as not resident. Call it while
+    /// nothing writes the memory; it reads every committed page.
+    pub fn resident_bytes(&self) -> usize {
+        let page = S::GEOMETRY.page_size();
+        let resident = (0..self.pages.len())
+            .filter(|&index| self.pages.get(index) & (RESERVED | WRITABLE) == RESERVED | WRITABLE)
+            // SAFETY: the page is inside `memory`, and the caller writes nothing meanwhile.
+            .filter(|&index| !unsafe { self.memory.is_zero(index << self.page_shift(), page) })
+            .count();
+        resident * page
     }
 
     /// The huge-page advice last given for the page holding `at`, if any.
@@ -275,6 +299,34 @@ impl<S: Shape> SimOs<S> {
     /// Bytes currently committed.
     pub fn writable_bytes(&self) -> usize {
         self.pages.count(RESERVED | WRITABLE) << self.page_shift()
+    }
+
+    /// Panics if a page of `first..first + count` that is not committed holds a nonzero byte:
+    /// the allocator wrote memory it had not committed, which Linux would have refused with a
+    /// fault. Checked when such a page is committed, purged or unmapped.
+    fn check_untouched(&self, call: Call, first: usize, count: usize) {
+        let page = S::GEOMETRY.page_size();
+        for index in first..first + count {
+            if self.pages.get(index) & WRITABLE == 0 {
+                // SAFETY: the page is inside `memory` (it has a state). It is not committed, so
+                // no correct caller writes it, and a buggy one is what this looks for.
+                let clean = unsafe { self.memory.is_zero(index << self.page_shift(), page) };
+                assert!(
+                    clean,
+                    "simulated {call:?}: page {index} was written before it was committed"
+                );
+            }
+        }
+    }
+
+    /// Counts a call on `count` pages and applies its fault plan: how many pages the call acts
+    /// on (all, half for a partial failure, none for a whole one) and its result.
+    fn admit(&self, call: Call, count: usize) -> (usize, Result<(), OsError>) {
+        match self.faults.enter_range(call) {
+            Ok(()) => (count, Ok(())),
+            Err(failure) if failure.partial => (count / 2, Err(failure.error)),
+            Err(failure) => (0, Err(failure.error)),
+        }
     }
 
     /// The first page and page count of a range a memory call was given, which the `Os`
@@ -342,7 +394,8 @@ fn decode_rseq(word: u64) -> Option<RseqArea> {
 //   claim's acquire pairs with. So reserved memory reads as zero.
 // - The memory is always readable and writable, so `commit` needs only to record it, and
 //   changes no contents. `purge` zeroes its range. `advise_huge` only records.
-// - An injected failure changes nothing.
+// - An injected failure changes nothing, or with `Faults::partially` acts on the first half of
+//   its range, never beyond it.
 // - A range must lie in one live reservation of this value. `checked_range` panics before
 //   touching anything if it does not: outside this value's memory, not whole reserved pages,
 //   or spanning two reservations.
@@ -385,19 +438,24 @@ unsafe impl<S: Shape> Os for SimOs<S> {
 
     unsafe fn commit(&self, start: NonNull<u8>, len: usize) -> Result<(), OsError> {
         let (first, count) = self.checked_range(Call::Commit, start, len);
-        self.faults.enter(Call::Commit)?;
-        self.pages.update(first, count, WRITABLE, PURGED);
-        Ok(())
+        self.check_untouched(Call::Commit, first, count);
+        let (applied, result) = self.admit(Call::Commit, count);
+        self.pages.update(first, applied, WRITABLE, PURGED);
+        result
     }
 
     unsafe fn purge(&self, start: NonNull<u8>, len: usize) -> Result<(), OsError> {
         let (first, count) = self.checked_range(Call::Purge, start, len);
-        self.faults.enter(Call::Purge)?;
+        self.check_untouched(Call::Purge, first, count);
+        let (applied, result) = self.admit(Call::Purge, count);
         // SAFETY: `checked_range` put the range inside `memory`, and the caller promises that
         // no thread touches it during the call.
-        unsafe { self.memory.zero(self.memory.offset_of(start), len) };
-        self.pages.update(first, count, PURGED, 0);
-        Ok(())
+        unsafe {
+            self.memory
+                .zero(first << self.page_shift(), applied << self.page_shift())
+        };
+        self.pages.update(first, applied, PURGED, 0);
+        result
     }
 
     unsafe fn advise_huge(
@@ -407,40 +465,45 @@ unsafe impl<S: Shape> Os for SimOs<S> {
         advice: HugePages,
     ) -> Result<(), OsError> {
         let (first, count) = self.checked_range(Call::AdviseHuge, start, len);
-        self.faults.enter(Call::AdviseHuge)?;
+        let (applied, result) = self.admit(Call::AdviseHuge, count);
         match advice {
-            HugePages::Prefer => self.pages.update(first, count, HUGE, NO_HUGE),
-            HugePages::Avoid => self.pages.update(first, count, NO_HUGE, HUGE),
+            HugePages::Prefer => self.pages.update(first, applied, HUGE, NO_HUGE),
+            HugePages::Avoid => self.pages.update(first, applied, NO_HUGE, HUGE),
         }
-        Ok(())
+        result
     }
 
     unsafe fn wipe_on_fork(&self, start: NonNull<u8>, len: usize) -> Result<(), OsError> {
         let (first, count) = self.checked_range(Call::WipeOnFork, start, len);
-        self.faults.enter(Call::WipeOnFork)?;
-        self.pages.update(first, count, WIPE, 0);
-        Ok(())
+        let (applied, result) = self.admit(Call::WipeOnFork, count);
+        self.pages.update(first, applied, WIPE, 0);
+        result
     }
 
     unsafe fn unmap(&self, start: NonNull<u8>, len: usize) -> Result<(), OsError> {
         let (first, count) = self.checked_range(Call::Unmap, start, len);
-        self.faults.enter(Call::Unmap)?;
-        // SAFETY: `checked_range` put the range inside `memory`, and the caller promises that
-        // nothing touches it once the call begins. Zeroing keeps unreserved memory zero.
+        self.check_untouched(Call::Unmap, first, count);
+        let (applied, result) = self.admit(Call::Unmap, count);
+        if applied == 0 {
+            return result;
+        }
         // What remains of a reservation after its head is unmapped is a reservation of its own,
         // as munmap leaves it. This is decided while the range is still reserved: then a
-        // reserved page right after it without `START` can only be this reservation's tail,
-        // never a reservation another thread is making. Doing it after the release would race
-        // with such a thread.
-        let next = first + count;
+        // reserved page right after the unmapped part without `START` can only be this
+        // reservation's tail, never a reservation another thread is making. Doing it after the
+        // release would race with such a thread.
+        let next = first + applied;
         if next < self.pages.len() {
             self.pages.mark_start(next);
         }
         // SAFETY: `checked_range` put the range inside `memory`, and the caller promises that
         // nothing touches it once the call begins. Zeroing keeps unreserved memory zero.
-        unsafe { self.memory.zero(self.memory.offset_of(start), len) };
-        self.pages.release(first, count);
-        Ok(())
+        unsafe {
+            self.memory
+                .zero(first << self.page_shift(), applied << self.page_shift())
+        };
+        self.pages.release(first, applied);
+        result
     }
 
     fn register_fence(&self) -> Result<(), OsError> {
@@ -646,6 +709,67 @@ mod tests {
         assert_eq!(survivor.step(Step::ReadCpu), Ok(()));
         let lost = std::panic::catch_unwind(|| os.thread(0).cpu_id());
         assert!(lost.is_err());
+    }
+
+    #[test]
+    #[should_panic(expected = "written before it was committed")]
+    fn writing_before_committing_is_caught_at_commit() {
+        let os = Sim::with_capacity(region());
+        let base = os.reserve(page(), region()).unwrap();
+        // SAFETY: deliberately breaks the rule; on Linux this write would fault.
+        unsafe {
+            base.as_ptr().write(7);
+            os.commit(base, page()).unwrap();
+        }
+    }
+
+    #[test]
+    fn a_partial_fault_acts_on_half_the_range() {
+        let os = Sim::with_capacity(region());
+        let base = os.reserve(4 * page(), region()).unwrap();
+        let third = base.map_addr(|a| a.saturating_add(2 * page()));
+        os.set_faults(Call::Commit, Faults::once_after(0).partially());
+        // SAFETY: whole reserved pages that nothing else uses.
+        unsafe {
+            assert_eq!(os.commit(base, 4 * page()), Err(OsError::ENOMEM));
+        }
+        assert!(os.is_writable(base, 2 * page()));
+        assert!(!os.is_writable(third, page()));
+        assert_eq!(os.faults(Call::Commit), Faults::NONE.partially());
+        // SAFETY: as above.
+        unsafe {
+            os.set_faults(Call::Unmap, Faults::once_after(0).partially());
+            assert!(os.unmap(base, 4 * page()).is_err());
+        }
+        assert!(!os.is_reserved(base, page()));
+        assert!(os.is_reserved(third, 2 * page()));
+        // The remaining half is a reservation of its own.
+        // SAFETY: as above.
+        unsafe { os.commit(third, 2 * page()).unwrap() };
+    }
+
+    #[test]
+    fn purged_memory_stops_counting_as_purged_once_written() {
+        let os = Sim::with_capacity(region());
+        let base = os.reserve(2 * page(), region()).unwrap();
+        // SAFETY: whole reserved pages that nothing else uses.
+        unsafe {
+            os.commit(base, 2 * page()).unwrap();
+            base.as_ptr().write(1);
+            base.as_ptr().add(page()).write(1);
+        }
+        assert_eq!(os.resident_bytes(), 2 * page());
+        // SAFETY: as above.
+        unsafe { os.purge(base, page()).unwrap() };
+        assert!(os.is_purged(base, page()));
+        assert_eq!(os.resident_bytes(), page());
+        // SAFETY: still committed.
+        unsafe { base.as_ptr().write(3) };
+        assert!(
+            !os.is_purged(base, page()),
+            "a write faults the page back in"
+        );
+        assert_eq!(os.resident_bytes(), 2 * page());
     }
 
     #[test]
