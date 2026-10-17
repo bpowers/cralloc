@@ -32,6 +32,7 @@ structure Contract.Implies {M : ISA} (k k' : Contract M) : Prop where
   pre : ∀ s, k'.pre s → k.pre s
   post : ∀ s s', k'.pre s → k.post s s' → k'.post s s'
   sat : ∃ s, k'.pre s
+  abort : ∀ s p, k'.pre s → k.abort s p → k'.abort s p := by intros; trivial
 
 /-- `k` is satisfiable if a contract it implies is. -/
 theorem Contract.Implies.sat_left {M : ISA} {k k' : Contract M} (h : k.Implies k') : ∃ s, k.pre s :=
@@ -39,22 +40,41 @@ theorem Contract.Implies.sat_left {M : ISA} {k k' : Contract M} (h : k.Implies k
 
 /-- A satisfiable contract implies itself. -/
 theorem Contract.Implies.refl {M : ISA} {k : Contract M} (h : ∃ s, k.pre s) : k.Implies k :=
-  ⟨fun _ h => h, fun _ _ _ h => h, h⟩
+  ⟨fun _ h => h, fun _ _ _ h => h, h, fun _ _ _ h => h⟩
+
+theorem RseqOk.of_implies {T : Target} {c : Prog T.isa} {k k' : Contract T.isa} {s : T.isa.State}
+    (h : RseqOk T c k s) (hk : k.Implies k') (hs : k'.pre s) : RseqOk T c k' s := by
+  unfold RseqOk at h ⊢
+  split
+  · rename_i arm body
+    exact ⟨h.1, fun p hp => ⟨(h.2 p hp).1, hk.abort s p hs (h.2 p hp).2⟩⟩
+  · trivial
 
 theorem Verified.of_implies {T : Target} {c : Prog T.isa} {k k' : Contract T.isa}
     (h : Verified T c k) (hk : k.Implies k') : Verified T c k' := by
-  obtain ⟨hc, -⟩ := h
-  refine ⟨fun s hs => ?_, hk.sat⟩
+  obtain ⟨hc, hr, -⟩ := h
+  refine ⟨fun s hs => ?_, fun s hs => (hr s (hk.pre s hs)).of_implies hk hs, hk.sat⟩
   obtain ⟨s', he, ha, hp⟩ := hc s (hk.pre s hs)
   exact ⟨s', he, ha, hk.post s s' hs hp⟩
 
+/-- Code without a restartable sequence has nothing to check where one
+could be aborted. -/
+theorem RseqOk.of_ne {T : Target} {c : Prog T.isa} {k : Contract T.isa} {s : T.isa.State}
+    (h : ∀ arm body, c ≠ .rseq arm body) : RseqOk T c k s := by
+  unfold RseqOk; split
+  · exact absurd rfl (h _ _)
+  · trivial
+
 /-- `Verified` from the correctness of `c` under a contract `k` that `k'`
 implies: the proof of a function against a contract of its own, moved to its
-shared contract. -/
+shared contract. `hr`, for code with no restartable sequence, is proved by
+default. -/
 theorem Verified.of_correct {T : Target} {c : Prog T.isa} {k k' : Contract T.isa}
     (hc : ∀ s, k.pre s → ∃ s', Exec T.isa c s s' ∧ T.abiPreserved s s' ∧ k.post s s')
-    (hk : k.Implies k') : Verified T c k' := by
-  refine ⟨fun s hs => ?_, hk.sat⟩
+    (hk : k.Implies k')
+    (hr : ∀ s, k'.pre s → RseqOk T c k' s := by exact fun _ _ => trivial) :
+    Verified T c k' := by
+  refine ⟨fun s hs => ?_, hr, hk.sat⟩
   obtain ⟨s', he, ha, hp⟩ := hc s (hk.pre s hs)
   exact ⟨s', he, ha, hk.post s s' hs hp⟩
 

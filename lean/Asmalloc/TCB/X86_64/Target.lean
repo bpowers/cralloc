@@ -95,6 +95,38 @@ def abi : Abi isa where
     s!"the return address on the stack or the {n} bytes of stack below it")
   sym := some fun s name => s.syms name
 
+/-! ## Restartable sequences
+
+glibc registers a `struct rseq` for every thread at the thread pointer plus
+the value of its variable `__rseq_offset` (glibc manual, "Restartable
+Sequences": "the offset of the area relative to the thread pointer"); on
+x86-64 the thread pointer is the FS segment's base (System V AMD64 psABI,
+"Thread-Local Storage"). The field `rseq_cs`, the address of the
+descriptor of the sequence the thread is in, is at offset 8, `cpu_id` at 4
+and `mm_cid` at 24 (`include/uapi/linux/rseq.h`, `struct rseq`). The model
+reads `__rseq_offset` as the symbol of that name (`State.syms`).
+-/
+
+/-- The name of glibc's variable holding the rseq area's offset from the
+thread pointer. -/
+def rseqOffsetSym : String := "__rseq_offset"
+
+/-- The address of the thread's rseq area. -/
+def rseqArea (s : State) : Addr := s.fsBase + s.mem.readW (s.syms rseqOffsetSym) 64
+
+/-- The address of the area's `rseq_cs` field. -/
+def rseqCsAddr (s : State) : Addr := rseqArea s + 8
+
+/-- `rseq_cs` points at the routine's descriptor. -/
+def armed (s : State) : Prop := s.mem.readW (rseqCsAddr s) 64 = s.csDesc
+
+/-- The instruction, run in `a`, stores the descriptor's address into
+`rseq_cs`: a 64-bit store of a register holding it, to the field's address.
+(It then also changes nothing else, `store`.) -/
+def arms : Instr → State → Prop
+  | .store m r, a => a.ea m = rseqCsAddr a ∧ a.gpr r = a.csDesc
+  | _, _ => False
+
 abbrev target : Target where
   name := "x86_64"
   isa := isa
@@ -104,5 +136,7 @@ abbrev target : Target where
   rustCfg := "all(target_arch = \"x86_64\", target_pointer_width = \"64\")"
   rustAbi := "sysv64"
   abi := abi
+  arms := arms
+  armed := armed
 
 end VG.X86_64

@@ -17,7 +17,10 @@ verified. Every function the generated Rust contains is an `Artifact`, and an
    the regions the state permits) in a state related to the initial one by
    `k.post` *and* by the target's calling-convention obligations
    `T.abiPreserved` (callee-saved registers, stack pointer, return address).
-2. **Non-vacuity.** Some state satisfies `k.pre`. This is only a sanity
+2. **Restartable sequences.** Wherever the operating system may abort a
+   restartable sequence of `c`, the sequence is armed and the contract's
+   `abort` holds (`RseqOk`).
+3. **Non-vacuity.** Some state satisfies `k.pre`. This is only a sanity
    check against an accidentally contradictory precondition; it does not
    replace reviewing the contract.
 
@@ -52,6 +55,14 @@ structure Target where
   rustAbi : String
   /-- The calling convention that `rustAbi` stands for. -/
   abi : Abi isa
+  /-- Whether the instruction `i`, run in the state `a`, points the thread's
+  restartable-sequence field (`rseq_cs`) at the routine's descriptor, as the
+  last instruction of a sequence's arm must (`RseqOk`); never, on a target
+  without restartable sequences. -/
+  arms : isa.Instr → isa.State → Prop := fun _ _ => False
+  /-- Whether the thread's restartable-sequence field points at the routine's
+  descriptor in a state, as it must wherever the sequence may be aborted. -/
+  armed : isa.State → Prop := fun _ => False
 
 /-- The specification of one function. -/
 structure Contract (M : ISA) where
@@ -60,6 +71,10 @@ structure Contract (M : ISA) where
   pre : M.State → Prop
   /-- Postcondition relating the entry state to the exit state. -/
   post : M.State → M.State → Prop
+  /-- What must hold, of the entry state and a state in which a restartable
+  sequence may be aborted (`Code.abortStates`): typically, that nothing any
+  other code can see has changed since entry. -/
+  abort : M.State → M.State → Prop := fun _ _ => True
 
 /-- The contract of a function with signature `sig` under the calling
 convention `A`: the obligations the signature implies (see `TCB/Sig.lean`),
@@ -178,9 +193,48 @@ def Sig.layoutNote {M : ISA} (A : Abi M) (sig : Sig) (writeArgs : Bool) : List S
       [s!"The function may overwrite {d}, as the calling convention lets it."] else []
   | _ => []
 
+/-- The states before each step of a restartable sequence's body, run from
+`s` and not aborted, while it is inside the sequence: from before its first
+step to before its commit, its last, and not after an exit is taken (which
+leaves the sequence) or after a step faults. These are the states in which
+the operating system may abort the sequence. -/
+def bodyPrefixes (M : ISA) : List (Step M.Instr M.Cond) → M.State → List M.State
+  | [], _ => []
+  | .instr i :: rest, s => s :: (match M.exec i s with
+    | some s₁ => bodyPrefixes M rest s₁
+    | none => [])
+  | .exit c _ _ :: rest, s => s :: (match M.eval c s with
+    | some false => bodyPrefixes M rest s
+    | _ => [])
+
+/-- The states, of a run of `c` from `s`, in which a restartable sequence may
+be aborted: for `rseq arm body`, those of its body after `arm`
+(`bodyPrefixes`). The emitter allows a sequence only as the whole of a
+function's code (`Rust.checkRseq`), so there are no others. -/
+def Code.abortStates (M : ISA) : Prog M → M.State → List M.State
+  | .rseq arm body, s => match execBlock M arm s with
+    | some s₁ => bodyPrefixes M body s₁
+    | none => []
+  | _, _ => []
+
+/-- What a restartable sequence `c` must satisfy, run from `s`: the last
+instruction of its arm points the thread's `rseq_cs` at its descriptor
+(`Target.arms`), whatever it pointed at before, so no sequence another one
+started (in a signal handler, say) can be armed when this one starts; and in
+every state in which it may be aborted (`Code.abortStates`), `rseq_cs` still
+points at it (`Target.armed`) and the contract's `abort` holds. True of code
+without a sequence. -/
+def RseqOk (T : Target) (c : Prog T.isa) (k : Contract T.isa) (s : T.isa.State) : Prop :=
+  match c with
+  | .rseq arm _ =>
+    (∃ i a, arm.getLast? = some i ∧ execBlock T.isa arm.dropLast s = some a ∧ T.arms i a) ∧
+    ∀ p ∈ c.abortStates T.isa s, T.armed p ∧ k.abort s p
+  | _ => True
+
 /-- The proof obligation for emitting `c` on target `T` with contract `k`. -/
 def Verified (T : Target) (c : Prog T.isa) (k : Contract T.isa) : Prop :=
   (∀ s, k.pre s → ∃ s', Exec T.isa c s s' ∧ T.abiPreserved s s' ∧ k.post s s') ∧
+  (∀ s, k.pre s → RseqOk T c k s) ∧
   (∃ s, k.pre s)
 
 /-- A function's contract on every target: the contract under the calling

@@ -1,4 +1,4 @@
-import Asmalloc.TCB.X86_64.Isa
+import Asmalloc.TCB.X86_64.Target
 
 /-!
 # Tests of the x86-64 semantics on concrete states
@@ -135,6 +135,20 @@ def outcome (s : State) : Option (Bool × BitVec 64) :=
 #guard outcome { st with zf := some false, cf := some true } == some (true, 1)
 #guard outcome { st with zf := some false, cf := some false } == some (false, 3)
 #guard outcome { st with zf := none } == none
+
+/-- `rax` in each state in which the body may be aborted: before each step,
+until an exit is taken, up to and including before its last step. -/
+def aborts (s : State) : List (BitVec 64) := (bodyPrefixes isa body s).map (·.gpr .rax)
+
+#guard aborts { st with zf := some true } == [-1, 1]
+#guard aborts { st with zf := some false, cf := some true } == [-1, 1, 1]
+#guard aborts { st with zf := some false, cf := some false } == [-1, 1, 1, 1]
+-- A fault ends the run, and with it the states.
+#guard aborts { st with zf := none } == [-1, 1]
+-- Nowhere after the arm faults.
+#guard (Code.abortStates isa (.rseq [.mov .rax (.mem { base := .rax })] body) st).isEmpty
+#guard (Code.abortStates isa (.rseq [.mov .rax (.imm 7)] body) { st with zf := some true }).map
+  (·.gpr .rax) == [7, 1]
 
 /-! ## `inc`, `dec` and `test` with an immediate
 
