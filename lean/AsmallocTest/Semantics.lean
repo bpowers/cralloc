@@ -1,0 +1,139 @@
+import Asmalloc.TCB.X86_64.Isa
+
+/-!
+# Tests of the x86-64 semantics on concrete states
+
+The model is part of the TCB and transcribes the Intel SDM by hand; these
+tests evaluate instructions on concrete states and compare the results with
+values worked out from the SDM, so that a change to the semantics shows up
+here.
+-/
+
+namespace VG.Test.Semantics
+
+open X86_64
+
+/-- A thread block of 32 bytes at `fsBase - 320` (where glibc's rseq area
+is in one binary), writable; each byte of memory holds the low byte of its
+address; `rdx` holds the block's offset from the FS base, `r10` a word to
+store, and the other registers all ones. -/
+def st : State where
+  gpr r := match r with
+    | .rdx => BitVec.ofInt 64 (-320)
+    | .r10 => 0x1122334455667788
+    | _ => -1
+  cf := some true
+  zf := some false
+  sf := some false
+  of := some false
+  mem a := a.setWidth 8
+  rd := []
+  wr := [⟨0x7000 - 320, 32⟩]
+  fsBase := 0x7000
+
+/-! ## FS-relative memory operands -/
+
+-- `fs:[rdx+8]` is the byte `0x7000 - 320 + 8 = 0x6EC8` and the seven after it.
+#guard (exec (.mov .rax (.mem { base := .rdx, disp := 8, seg := some .fs })) st).map (·.gpr .rax) ==
+  some 0xCFCECDCCCBCAC9C8
+-- Without the segment, the same operand is the address `-312`, outside every region.
+#guard (exec (.mov .rax (.mem { base := .rdx, disp := 8 })) st).isNone
+-- Past the end of the block: the access faults.
+#guard (exec (.mov .rax (.mem { base := .rdx, disp := 25, seg := some .fs })) st).isNone
+#guard (exec (.mov .rax (.mem { base := .rdx, disp := 24, seg := some .fs })) st).isSome
+-- A store writes the eight bytes, little-endian, and changes neither the
+-- registers, the flags nor the segment base.
+#guard match exec (.store { base := .rdx, disp := 8, seg := some .fs } .r10) st with
+  | none => false
+  | some s => s.mem.readW 0x6EC8 64 == 0x1122334455667788 && s.mem 0x6EC7 == 0xC7 &&
+      s.mem 0x6ED0 == 0xD0 && s.fsBase == 0x7000 && s.gpr .rax == -1 && s.cf == some true
+/-- `st` with `rcx = -2`. -/
+def stIdx : State := st.setReg .rcx (-2)
+
+-- An index register (negative, times 8) and a displacement, FS-relative:
+-- `-320 - 16 + 24 = -312`, the same word as `fs:[rdx+8]`.
+def fsIdx : MemOp := { base := .rdx, index := some .rcx, scale := 8, disp := 24, seg := some .fs }
+
+#guard (exec (.mov .rax (.mem fsIdx)) stIdx).map (·.gpr .rax) == some 0xCFCECDCCCBCAC9C8
+
+/-! ## 32-bit loads zero-extend
+
+`r8` starts as all ones; a 32-bit load leaves the four bytes in its low half
+and zero in its high half. -/
+
+-- `fs:[rdx+24]` is `0x6ED8` to `0x6EDB`.
+#guard (exec (.mov32 .r8 (.mem { base := .rdx, disp := 24, seg := some .fs })) st).map (·.gpr .r8) ==
+  some 0x00000000DBDAD9D8
+-- A 32-bit register move clears the high half too.
+#guard (exec (.mov32 .r8 (.reg .r8)) st).map (·.gpr .r8) == some 0x00000000FFFFFFFF
+-- The last four bytes of the block, and one past them.
+#guard (exec (.mov32 .r8 (.mem { base := .rdx, disp := 28, seg := some .fs })) st).isSome
+#guard (exec (.mov32 .r8 (.mem { base := .rdx, disp := 29, seg := some .fs })) st).isNone
+
+/-! ## `lea` -/
+
+/-- The flags of a state, to check that an instruction keeps them. -/
+def flags (s : State) : List (Option Bool) := [s.cf, s.zf, s.sf, s.of]
+
+-- The offset, modulo 2⁶⁴, with no memory access (the address is outside
+-- every region) and the flags unchanged.
+#guard match exec (.lea .rax { base := .rdx, disp := 8 }) st with
+  | none => false
+  | some s => s.gpr .rax == BitVec.ofInt 64 (-312) && flags s == flags st
+-- Base, index times scale, and a negative displacement: `-320 + (-2) * 8 - 8`.
+#guard (exec (.lea .rcx { base := .rdx, index := some .rcx, scale := 8, disp := -8 }) stIdx).map
+  (·.gpr .rcx) == some (BitVec.ofInt 64 (-344))
+-- Wrapping: `(2⁶⁴ - 1) + 1 = 0`.
+#guard (exec (.lea .rax { base := .rax, disp := 1 }) st).map (·.gpr .rax) == some 0
+
+/-- `st` with a static `T` at `0x1000`. -/
+def stSym : State := { st with syms := fun n => if n = "T" then 0x1000 else 0 }
+
+#guard (exec (.leaSym .r9 "T") stSym).map (·.gpr .r9) == some 0x1000
+#guard (exec (.leaSym .r9 "T" 24) stSym).map (·.gpr .r9) == some 0x1018
+#guard (exec (.leaSym .r9 "T" (-8)) stSym).map (·.gpr .r9) == some 0xFF8
+#guard (exec (.leaSym .r9 "T" 24) stSym).map flags == some (flags st)
+
+/-! ## `inc`, `dec` and `test` with an immediate
+
+`flags` lists CF, ZF, SF and OF. `inc` and `dec` keep CF (set in `st`) and
+set the others by the result; `test` clears CF and OF and writes no
+register. -/
+
+/-- `st` with `rax = v`. -/
+def withRax (v : BitVec 64) : State := st.setReg .rax v
+
+-- -1 + 1 = 0.
+#guard (exec (.inc .rax) st).map (fun s => (s.gpr .rax, flags s)) ==
+  some (0, [some true, some true, some false, some false])
+-- 2⁶³ - 1 + 1 overflows to -2⁶³.
+#guard (exec (.inc .rax) (withRax 0x7fffffffffffffff)).map (fun s => (s.gpr .rax, flags s)) ==
+  some (0x8000000000000000, [some true, some false, some true, some true])
+-- 0 - 1 = -1, without overflow.
+#guard (exec (.dec .rax) (withRax 0)).map (fun s => (s.gpr .rax, flags s)) ==
+  some (-1, [some true, some false, some true, some false])
+-- -2⁶³ - 1 overflows to 2⁶³ - 1.
+#guard (exec (.dec .rax) (withRax 0x8000000000000000)).map (fun s => (s.gpr .rax, flags s)) ==
+  some (0x7fffffffffffffff, [some true, some false, some false, some true])
+-- 1 - 1 = 0.
+#guard (exec (.dec .rax) (withRax 1)).map (fun s => (s.gpr .rax, flags s)) ==
+  some (0, [some true, some true, some false, some false])
+
+/-- `st` with `rcx = v`. -/
+def withRcx (v : BitVec 64) : State := st.setReg .rcx v
+
+-- The low 32 bits of `rcx` against `0x1f0`: some bit in common, then none.
+#guard (exec (.alu32 .test .rcx (.imm 0x1f0)) st).map (fun s => (s.gpr .rcx, flags s)) ==
+  some (-1, [some false, some false, some false, some false])
+#guard (exec (.alu32 .test .rcx (.imm 0x1f0)) (withRcx 0xffffffff00010008)).map flags ==
+  some [some false, some true, some false, some false]
+-- The 32-bit form's sign is bit 31 of the result.
+#guard (exec (.alu32 .test .rcx (.imm 0x80000000)) st).map flags ==
+  some [some false, some false, some true, some false]
+-- The 64-bit form sign-extends its immediate: `0xfffffff0` tests bits 63:4.
+#guard (exec (.alu .test .rax (.imm 0xfffffff0)) (withRax 0x8000000000000005)).map flags ==
+  some [some false, some false, some true, some false]
+#guard (exec (.alu .test .rax (.imm 0xfffffff0)) (withRax 0xf)).map flags ==
+  some [some false, some true, some false, some false]
+
+end VG.Test.Semantics
