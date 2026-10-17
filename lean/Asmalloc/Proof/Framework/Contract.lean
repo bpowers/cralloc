@@ -32,7 +32,6 @@ structure Contract.Implies {M : ISA} (k k' : Contract M) : Prop where
   pre : ∀ s, k'.pre s → k.pre s
   post : ∀ s s', k'.pre s → k.post s s' → k'.post s s'
   sat : ∃ s, k'.pre s
-  abort : ∀ s p, k'.pre s → k.abort s p → k'.abort s p := by intros; trivial
 
 /-- `k` is satisfiable if a contract it implies is. -/
 theorem Contract.Implies.sat_left {M : ISA} {k k' : Contract M} (h : k.Implies k') : ∃ s, k.pre s :=
@@ -40,20 +39,17 @@ theorem Contract.Implies.sat_left {M : ISA} {k k' : Contract M} (h : k.Implies k
 
 /-- A satisfiable contract implies itself. -/
 theorem Contract.Implies.refl {M : ISA} {k : Contract M} (h : ∃ s, k.pre s) : k.Implies k :=
-  ⟨fun _ h => h, fun _ _ _ h => h, h, fun _ _ _ h => h⟩
+  ⟨fun _ h => h, fun _ _ _ h => h, h⟩
 
-theorem RseqOk.of_implies {T : Target} {c : Prog T.isa} {k k' : Contract T.isa} {s : T.isa.State}
-    (h : RseqOk T c k s) (hk : k.Implies k') (hs : k'.pre s) : RseqOk T c k' s := by
-  unfold RseqOk at h ⊢
-  split
-  · rename_i arm body
-    exact ⟨h.1, fun p hp => ⟨(h.2 p hp).1, hk.abort s p hs (h.2 p hp).2⟩⟩
-  · trivial
-
+/-- `Verified` under a contract `k'` that asks no more than `k`. What a
+restartable sequence must satisfy (`RseqOk`) does not follow from `k`'s,
+since a retry must meet `k'`'s precondition: `hr`, for code with no
+sequence, is proved by default. -/
 theorem Verified.of_implies {T : Target} {c : Prog T.isa} {k k' : Contract T.isa}
-    (h : Verified T c k) (hk : k.Implies k') : Verified T c k' := by
-  obtain ⟨hc, hr, -⟩ := h
-  refine ⟨fun s hs => ?_, fun s hs => (hr s (hk.pre s hs)).of_implies hk hs, hk.sat⟩
+    (h : Verified T c k) (hk : k.Implies k')
+    (hr : ∀ s, k'.pre s → RseqOk T c k' s := by exact fun _ _ => trivial) : Verified T c k' := by
+  obtain ⟨hc, -, -⟩ := h
+  refine ⟨fun s hs => ?_, hr, hk.sat⟩
   obtain ⟨s', he, ha, hp⟩ := hc s (hk.pre s hs)
   exact ⟨s', he, ha, hk.post s s' hs hp⟩
 

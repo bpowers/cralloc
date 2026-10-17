@@ -63,6 +63,10 @@ structure Target where
   /-- Whether the thread's restartable-sequence field points at the routine's
   descriptor in a state, as it must wherever the sequence may be aborted. -/
   armed : isa.State → Prop := fun _ => False
+  /-- What an abort keeps: `rely p p'` when the thread, aborted in the state
+  `p`, may resume at the abort handler in the state `p'`. The memory other
+  threads may change meanwhile is the contract's (`Contract.env`). -/
+  rely : isa.State → isa.State → Prop := fun _ _ => False
 
 /-- The specification of one function. -/
 structure Contract (M : ISA) where
@@ -75,6 +79,12 @@ structure Contract (M : ISA) where
   sequence may be aborted (`Code.abortStates`): typically, that nothing any
   other code can see has changed since entry. -/
   abort : M.State → M.State → Prop := fun _ _ => True
+  /-- What other threads, and the operating system, may change while a
+  restartable sequence is aborted: `env p p'` relates the state the sequence
+  was aborted in to one the thread may resume in (with `Target.rely`).
+  Typically, memory outside the structures other threads share is unchanged,
+  and the invariant they keep still holds. -/
+  env : M.State → M.State → Prop := fun _ _ => True
 
 /-- The contract of a function with signature `sig` under the calling
 convention `A`: the obligations the signature implies (see `TCB/Sig.lean`),
@@ -221,14 +231,20 @@ def Code.abortStates (M : ISA) : Prog M → M.State → List M.State
 instruction of its arm points the thread's `rseq_cs` at its descriptor
 (`Target.arms`), whatever it pointed at before, so no sequence another one
 started (in a signal handler, say) can be armed when this one starts; and in
-every state in which it may be aborted (`Code.abortStates`), `rseq_cs` still
-points at it (`Target.armed`) and the contract's `abort` holds. True of code
-without a sequence. -/
+every state `p` in which it may be aborted (`Code.abortStates`), `rseq_cs`
+still points at it (`Target.armed`), the contract's `abort` holds, and every
+state the thread may resume in after the abort (`Target.rely`,
+`Contract.env`) satisfies the precondition. The abort handler jumps back to
+the arm, the function's first instruction (`Rust.checkRseq`), so that is a
+run of the function from the new state: a retry, which the first conjunct
+of `Verified` covers (`Restarts`, `Verified.restarts`). True of code without
+a sequence. -/
 def RseqOk (T : Target) (c : Prog T.isa) (k : Contract T.isa) (s : T.isa.State) : Prop :=
   match c with
   | .rseq arm _ =>
     (∃ i a, arm.getLast? = some i ∧ execBlock T.isa arm.dropLast s = some a ∧ T.arms i a) ∧
-    ∀ p ∈ c.abortStates T.isa s, T.armed p ∧ k.abort s p
+    ∀ p ∈ c.abortStates T.isa s, T.armed p ∧ k.abort s p ∧
+      ∀ p', T.rely p p' → k.env p p' → k.pre p'
   | _ => True
 
 /-- The proof obligation for emitting `c` on target `T` with contract `k`. -/
@@ -236,6 +252,20 @@ def Verified (T : Target) (c : Prog T.isa) (k : Contract T.isa) : Prop :=
   (∀ s, k.pre s → ∃ s', Exec T.isa c s s' ∧ T.abiPreserved s s' ∧ k.post s s') ∧
   (∀ s, k.pre s → RseqOk T c k s) ∧
   (∃ s, k.pre s)
+
+/-- The states a run of the routine `c` from `s` may start its last attempt
+in, aborted any finite number of times: `s`, or a state the thread may
+resume in after an abort (`Target.rely`, `Contract.env`) of an attempt
+started in one of these. This, with the run from that state that is not
+aborted (`Exec`), is what a routine does; `Verified.restarts`
+(`Proof/Framework/Rseq.lean`) shows that every such run meets the contract.
+That the thread is not aborted forever, so that some attempt completes, is
+assumed (the scheduler is fair), not proved. -/
+inductive Restarts (T : Target) (c : Prog T.isa) (k : Contract T.isa) :
+    T.isa.State → T.isa.State → Prop
+  | refl (s : T.isa.State) : Restarts T c k s s
+  | abort {s p p' s' : T.isa.State} : p ∈ c.abortStates T.isa s → T.rely p p' → k.env p p' →
+      Restarts T c k p' s' → Restarts T c k s s'
 
 /-- A function's contract on every target: the contract under the calling
 convention `A`, for an implementation whose calls and frames use `stack`

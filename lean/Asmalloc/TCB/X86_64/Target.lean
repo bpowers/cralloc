@@ -127,6 +127,20 @@ def arms : Instr → State → Prop
   | .store m r, a => a.ea m = rseqCsAddr a ∧ a.gpr r = a.csDesc
   | _, _ => False
 
+/-- What an abort keeps (`Target.rely`). The kernel aborts a sequence on its
+way back to user mode, by setting the saved instruction pointer to the abort
+handler and changing nothing else the thread saved (`rseq_entry.h`, the
+abort path; docs/research/linux-rseq-contract.md, "Aborts"): the thread
+resumes with the registers and flags it was interrupted with, and its FS
+base. If a signal handler ran first, `sigreturn` restores them from the
+signal frame, which the handler leaves alone. The program's symbols,
+constants and descriptor, and the thread's permissions, are the same. The
+memory may differ; the contract's `env` says how. -/
+def rely (p p' : State) : Prop :=
+  p'.gpr = p.gpr ∧ p'.cf = p.cf ∧ p'.zf = p.zf ∧ p'.sf = p.sf ∧ p'.of = p.of ∧
+  p'.fsBase = p.fsBase ∧ p'.syms = p.syms ∧ p'.params = p.params ∧ p'.csDesc = p.csDesc ∧
+  p'.unknowns = p.unknowns ∧ p'.rd = p.rd ∧ p'.wr = p.wr
+
 abbrev target : Target where
   name := "x86_64"
   isa := isa
@@ -138,5 +152,6 @@ abbrev target : Target where
   abi := abi
   arms := arms
   armed := armed
+  rely := rely
 
 end VG.X86_64
