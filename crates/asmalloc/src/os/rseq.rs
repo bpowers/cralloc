@@ -5,6 +5,10 @@
 //! bytes of the area the kernel maintains, or zero when there is no registration. The field
 //! offsets below are the kernel's `struct rseq` (`include/uapi/linux/rseq.h`), which the routines
 //! address directly.
+//!
+//! The caches are indexed by the CPU number in `cpu_id`, which every registration has, so the
+//! only fact the allocator needs about the area is whether there is one. The concurrency ID
+//! (`mm_cid`) is not used: see "What Linux provides" in the design.
 
 /// Offset of `cpu_id_start` in the rseq area.
 pub const CPU_ID_START: usize = 0;
@@ -17,8 +21,12 @@ pub const RSEQ_CS: usize = 8;
 pub const FLAGS: usize = 16;
 /// Offset of `node_id`.
 pub const NODE_ID: usize = 20;
-/// Offset of `mm_cid`, the concurrency ID.
-pub const MM_CID: usize = 24;
+
+/// The bytes of `struct rseq` in the first kernel with rseq (Linux 4.18). Every registration
+/// has at least these, so every registration has `cpu_id`.
+pub const ORIGINAL_SIZE: u32 = 20;
+
+const _: () = assert!(CPU_ID + 4 <= ORIGINAL_SIZE as usize);
 
 /// The 32-bit signature glibc registers on x86-64 (`RSEQ_SIG`). The kernel requires the four
 /// bytes before every abort handler to equal it, so the routines must emit the same value.
@@ -51,13 +59,6 @@ impl RseqArea {
     pub const fn size(self) -> u32 {
         self.size
     }
-
-    /// Whether the kernel maintains `mm_cid`, which the fast paths need. A false yes would let
-    /// two threads share a slab, so [`super::linux::LinuxOs`] caps glibc's size by the kernel's
-    /// own feature size before reporting it.
-    pub const fn has_cid(self) -> bool {
-        self.size as usize >= MM_CID + 4
-    }
 }
 
 #[cfg(test)]
@@ -65,11 +66,9 @@ mod tests {
     use super::*;
 
     #[test]
-    fn the_cid_needs_the_first_twenty_eight_bytes() {
+    fn a_zero_size_means_no_registration() {
         assert_eq!(RseqArea::new(-192, 0), None);
-        assert!(!RseqArea::new(-192, 20).unwrap().has_cid());
-        assert!(RseqArea::new(-192, 28).unwrap().has_cid());
-        assert!(RseqArea::new(-192, 33).unwrap().has_cid());
-        assert_eq!(RseqArea::new(-192, 33).unwrap().offset(), -192);
+        let area = RseqArea::new(-192, 33).unwrap();
+        assert_eq!((area.offset(), area.size()), (-192, 33));
     }
 }

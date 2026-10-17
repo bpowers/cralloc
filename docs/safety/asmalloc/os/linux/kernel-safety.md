@@ -6,8 +6,8 @@ kernel's contract for the call is met and that the call changes only what the ca
 Neither Kani nor Miri can run this file; the unit tests in it run every call on the real kernel.
 
 References are to the Linux man pages (mmap(2), mprotect(2), madvise(2), munmap(2),
-membarrier(2), prctl(2), rt_sigaction(2), sigprocmask(2), tgkill(2), write(2)) and to
-`include/uapi/linux/{mman,membarrier,prctl,auxvec}.h`.
+membarrier(2), getrandom(2), rt_sigaction(2), sigprocmask(2), tgkill(2), write(2)) and to
+`include/uapi/linux/{mman,membarrier,random}.h`.
 
 ## KERNEL-01: `range_call`
 
@@ -23,14 +23,17 @@ mprotect changes protection, madvise may zero contents, munmap removes the mappi
 
 ## KERNEL-02: `membarrier`
 
-**Block.** `syscall(MEMBARRIER, [command, 0, 0, 0, 0, 0])`.
+**Block.** `syscall(MEMBARRIER, [command, flags, cpu, 0, 0, 0])`.
 
-**Proof.** membarrier takes a command, flags (0) and a CPU id (unused for these commands), and
-no pointers. `REGISTER_PRIVATE_EXPEDITED_RSEQ` only records the registration. Afterwards
-`PRIVATE_EXPEDITED_RSEQ` interrupts every running thread of the process, so that any rseq
-critical section in flight is aborted, and returns when that is done. An abort is something
-every sequence must already tolerate, since preemption causes one at any instruction. No memory
-changes.
+**Proof.** membarrier takes a command, flags and a CPU id, and no pointers.
+`REGISTER_PRIVATE_EXPEDITED_RSEQ` (flags 0) only records the registration. Afterwards
+`PRIVATE_EXPEDITED_RSEQ` with `MEMBARRIER_CMD_FLAG_CPU` interrupts the thread of the process
+running on CPU `cpu`, if there is one, so that any rseq critical section in flight there is
+aborted, and returns when that is done; a CPU that is offline or out of range has nothing to
+interrupt and the call returns 0 (`kernel/sched/membarrier.c`, `membarrier_private_expedited`).
+A thread of the process preempted inside a sequence on that CPU was preempted by an interrupt,
+so its abort is already pending. An abort is something every sequence must already tolerate,
+since preemption causes one at any instruction. No memory changes.
 
 ## KERNEL-03: the memory calls in `reserve`, `commit`, `purge`, `advise_huge`, `unmap`
 
@@ -58,6 +61,10 @@ nothing in it is needed, so zeroing it cannot break any Rust value or reference.
 **`advise_huge`: madvise `MADV_HUGEPAGE` or `MADV_NOHUGEPAGE`.** These change only how the
 kernel backs the range, never its contents or protection.
 
+**`wipe_on_fork`: madvise `MADV_WIPEONFORK`** (Linux 4.14). It sets a flag on the private
+anonymous mapping so that a child's copy reads as zero; the calling process's contents and
+protection are unchanged. On an older kernel it fails with EINVAL and changes nothing.
+
 **`unmap`: munmap.** The caller guarantees nothing uses the range afterwards.
 
 **Partial failure.** mprotect and madvise can fail after acting on part of the range (ENOMEM
@@ -72,23 +79,21 @@ the duration of the call. The pointer comes from a shared reference and the kern
 it. A short write advances the slice by the count returned, capped at its length, and any error
 or a zero count ends the loop, so the loop cannot run forever on a broken descriptor.
 
-## KERNEL-05: `kernel_rseq_feature_size`
+## KERNEL-05: `getrandom`, and getpid in `random`
 
-**Block.** `syscall(PRCTL, [PR_GET_AUXV, buffer, len, 0, 0, 0])`.
+**Blocks.** `syscall(GETRANDOM, [&mut value, 8, GRND_INSECURE, 0, 0, 0])` in `getrandom`, and
+`int_call(GETPID, 0, 0, 0)` in `random`.
 
-**Proof.** `PR_GET_AUXV` (Linux 6.4) copies at most `len` bytes of the auxiliary vector to
-`buffer`, returns the vector's full size, and requires the last two arguments to be zero. The
-buffer is a local `[[u64; 2]; 40]` of exactly `len` bytes, exclusively borrowed, so the write is
-in bounds and aliases nothing. On older kernels the call fails with EINVAL and touches nothing.
+**Proof.** getrandom(2) writes at most its length argument, 8, to the buffer, which is a live,
+exclusively borrowed local `u64` of 8 bytes, and changes nothing else. `GRND_INSECURE` (Linux
+5.6) means it never blocks; on an older kernel it fails with EINVAL and writes nothing. The
+value is used only if the call reports all 8 bytes written, and any bit pattern is a valid
+`u64`. getpid takes nothing and changes nothing.
 
-**Why it exists (a correctness obligation that memory safety depends on).** The fast paths are
-safe only if no two threads run with the same concurrency ID. glibc 2.35 to 2.39 report
-`__rseq_size = 32` on any kernel. On a kernel before 6.3 the `mm_cid` field is then never
-written, every thread reads zero, and all would share one slab. Capping glibc's size by the
-kernel's `AT_RSEQ_FEATURE_SIZE` makes `has_cid` true only when the kernel maintains the field.
-Every failure mode (no `PR_GET_AUXV`, no entry, a truncated copy, an out-of-range value) yields
-20, the size before `mm_cid` existed. So an error can only switch the fast paths off, never on.
-The cost is that on Linux 6.3 exactly, the fast paths are off.
+**What the value is for.** The process generation (`depot::generation`). Its quality is not a
+memory-safety matter: a child that drew its parent's generation would treat the parent's
+abandoned drain claim and markers as live, which leaves one CPU's cache undrained and on the
+slow path, and duplicates nothing.
 
 ## KERNEL-06: `abort`
 
@@ -122,22 +127,19 @@ single call:
 - *Valid until unmapped or dropped.* Reservations are mappings of the process. Dropping a
   `LinuxOs`, which is zero-sized, changes nothing.
 - *Reserved memory reads as zero.* Fresh private anonymous memory is zero-filled on first touch.
-- *`rseq` never overstates.* glibc's size, capped by the kernel's (KERNEL-05). It describes the
-  process; whether the calling thread is registered is for the caller to check through its own
-  `cpu_id` (GLIBC-01).
+- *`rseq` reports glibc's registration.* It describes the process; whether the calling thread
+  is registered is for the caller to check through its own `cpu_id` (GLIBC-01).
 - *Any thread, signal handlers, no allocation.* Every method is a fixed sequence of system calls
-  and arithmetic on locals, all async-signal-safe. The largest stack frame is
-  `kernel_rseq_feature_size`'s 640-byte buffer, called only from `rseq`, which is meant for
-  start-up.
+  and arithmetic on locals, all async-signal-safe.
 
 **Machine checks.** The tests in `kernel.rs`:
 
 - `reserve_commit_purge_and_unmap`: alignment, zero-fill, purge zeroes, unmap.
 - `bad_arguments_are_errors_not_calls`.
 - `the_design_reservation_is_available`: a 16 TiB reservation.
-- `glibc_registers_rseq_with_a_concurrency_id` and
-  `the_kernel_reports_a_feature_size_with_a_concurrency_id`.
-- `rseq_fences_work_after_registering`.
+- `glibc_registers_rseq`.
+- `rseq_fences_aim_at_one_cpu_after_registering`, `random_numbers_differ` and
+  `a_page_can_be_marked_to_be_wiped_on_fork`.
 - `abort_ends_the_process_with_sigabrt`: a child process, checking the signal and the message.
 
 **Review.** 2026-10-17, fresh adversarial reviewer:

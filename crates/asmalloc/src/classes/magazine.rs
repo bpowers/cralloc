@@ -11,8 +11,9 @@
 //! - Free goes to the slow path when `(word + 8) & mask` is zero: slot 0 or `n - 1`, meaning no
 //!   magazine or a full one.
 //!
-//! A zero word, which is what a never-written slab holds, fails both, and so does [`MARKER`].
-//! `verify.rs` proves all of this for every magazine size and every magazine address.
+//! A zero word, which is what a never-written slab holds, fails both, and so does every marker
+//! (a word whose low [`MARKER_SHIFT`] bits are exactly 1; see [`is_marker`]). `verify.rs` proves
+//! all of this for every magazine size, every magazine address and every marker.
 
 /// Bytes per magazine slot: one pointer.
 pub const SLOT_BYTES: usize = 8;
@@ -26,9 +27,27 @@ pub const SLOT_BYTES: usize = 8;
 /// cost of exchanging magazines, two atomic instructions each.
 pub const MAGAZINE_BUDGET: usize = 128 << 10;
 
-/// The slab word that marks a class's slot as being drained by another thread (see "Idle
-/// caches" in the design). No slot address has low bits `001`, so it is never a real word.
+/// The low bits of a marker: a marker is `(generation << MARKER_SHIFT) | MARKER`.
+///
+/// A marker stands in a slab word or a spare-stack head while another thread drains it (see
+/// "Idle caches" in the design). No slot address has its lowest bit set, so a marker is never a
+/// real word. The generation sits above every slot-number bit of every magazine the routines
+/// accept (up to `2^16` slots, `2^19` bytes), so a marker fails both slot tests whatever the
+/// generation. Setting only the lowest bit would not do: a marker with a slot-number bit set
+/// passes the allocation test.
 pub const MARKER: usize = 1;
+
+/// The number of low bits that are exactly [`MARKER`] in every marker. The routines generated
+/// from Lean use the same value (`MARKER_SHIFT` in `lean/generated`).
+pub const MARKER_SHIFT: u32 = 19;
+
+/// Whether a slab word or stack head is a marker.
+#[inline(always)]
+pub const fn is_marker(word: usize) -> bool {
+    word & ((1 << MARKER_SHIFT) - 1) == MARKER
+}
+
+const _: () = assert!(MagazineSize::MAX.bytes() <= 1 << MARKER_SHIFT);
 
 const MIN_LOG2: u8 = 2;
 const MAX_LOG2: u8 = 8;
@@ -173,7 +192,12 @@ mod tests {
                     assert_eq!(size.free_slow(word), slot == 0 || slot == n - 1);
                 }
             }
-            for word in [0, MARKER] {
+            for word in [
+                0,
+                MARKER,
+                0x1234_5678 << MARKER_SHIFT | MARKER,
+                usize::MAX << 19 | 1,
+            ] {
                 assert!(
                     size.alloc_slow(word) && size.free_slow(word),
                     "{size:?} {word}"

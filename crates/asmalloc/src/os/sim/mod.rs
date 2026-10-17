@@ -9,8 +9,9 @@
 //! it never committed; tests check for that with [`SimOs::is_writable`].
 //!
 //! Any call can be made to fail on demand ([`SimOs::set_faults`]), the rseq registration it
-//! reports can be changed ([`SimOs::set_rseq`]), and `abort` panics so that a test can observe
-//! it. The heap's geometry comes from a [`Shape`]: [`Standard`] for tests and fuzzing, [`Tiny`]
+//! reports can be changed ([`SimOs::set_rseq`]), the pages marked to be wiped on fork can be
+//! wiped as a fork would ([`SimOs::wipe_for_fork`]), and `abort` panics so that a test can
+//! observe it. Random numbers come from a seeded generator, so a test is repeatable. The heap's geometry comes from a [`Shape`]: [`Standard`] for tests and fuzzing, [`Tiny`]
 //! for Kani harnesses. Other crates may define their own.
 //!
 //! The simulator takes no locks: every piece of state is an atomic, and racing reservations
@@ -26,7 +27,7 @@ pub use faults::{Call, Faults};
 
 use self::faults::Injector;
 use self::memory::Memory;
-use self::pages::{HUGE, NO_HUGE, PURGED, Pages, RESERVED, START, WRITABLE};
+use self::pages::{HUGE, NO_HUGE, PURGED, Pages, RESERVED, START, WIPE, WRITABLE};
 use super::{HugePages, Os, OsError, RseqArea};
 use crate::space::Geometry;
 use core::fmt;
@@ -64,8 +65,11 @@ impl Shape for Tiny {
 }
 
 /// What glibc reports on the reference host: the area 320 bytes below the thread pointer, with
-/// the full 33-byte feature set, so a concurrency ID.
+/// the full 33-byte feature set.
 const DEFAULT_RSEQ: Option<RseqArea> = RseqArea::new(-320, 33);
+
+/// The random generator's step (splitmix64's increment: the odd number nearest `2^64 / phi`).
+const GAMMA: u64 = 0x9e37_79b9_7f4a_7c15;
 
 /// A simulated OS. See the module documentation.
 pub struct SimOs<S: Shape = Standard> {
@@ -74,6 +78,8 @@ pub struct SimOs<S: Shape = Standard> {
     faults: Injector,
     rseq: AtomicU64,
     fence_registered: AtomicBool,
+    last_fence: AtomicU64,
+    random: AtomicU64,
     shape: PhantomData<fn() -> S>,
 }
 
@@ -98,6 +104,8 @@ impl<S: Shape> SimOs<S> {
             faults: Injector::new(),
             rseq: AtomicU64::new(encode_rseq(DEFAULT_RSEQ)),
             fence_registered: AtomicBool::new(false),
+            last_fence: AtomicU64::new(0),
+            random: AtomicU64::new(0),
             shape: PhantomData,
         }
     }
@@ -127,6 +135,34 @@ impl<S: Shape> SimOs<S> {
     /// Whether [`Os::register_fence`] has succeeded.
     pub fn fence_registered(&self) -> bool {
         self.fence_registered.load(Ordering::Acquire)
+    }
+
+    /// The CPU the last successful [`Os::fence`] was aimed at, if there was one.
+    pub fn last_fence(&self) -> Option<u32> {
+        match self.last_fence.load(Ordering::Acquire) {
+            0 => None,
+            cpu => Some((cpu - 1) as u32),
+        }
+    }
+
+    /// Restarts the random generator from `seed`, so that a test draws a known sequence.
+    pub fn set_random_seed(&self, seed: u64) {
+        self.random.store(seed, Ordering::Release);
+    }
+
+    /// Zeroes every page marked by [`Os::wipe_on_fork`], as the child of a fork would see them.
+    /// A test that simulates a fork calls this at the instant of the fork.
+    ///
+    /// # Safety
+    ///
+    /// No thread reads or writes a marked page during the call.
+    pub unsafe fn wipe_for_fork(&self) {
+        let page = S::GEOMETRY.page_size();
+        for index in self.pages.with(RESERVED | WIPE) {
+            // SAFETY: the page is inside `memory` (it has a state), and the caller promises
+            // that nothing touches it meanwhile.
+            unsafe { self.memory.zero(index << self.page_shift(), page) };
+        }
     }
 
     fn page_shift(&self) -> u32 {
@@ -251,6 +287,8 @@ fn decode_rseq(word: u64) -> Option<RseqArea> {
 //   touching anything if it does not: outside this value's memory, not whole reserved pages,
 //   or spanning two reservations.
 // - There are no restartable sequences, so `fence` trivially waits for all of them.
+// - `wipe_on_fork` only records; nothing forks the simulator, so the promise is about what
+//   `wipe_for_fork` shows a test, and it zeroes exactly the marked pages.
 // - `abort` panics, so it does not return.
 // - All state is atomic, so any thread may call at any time; nothing here allocates after
 //   construction except the formatting of a panic message.
@@ -315,6 +353,13 @@ unsafe impl<S: Shape> Os for SimOs<S> {
         Ok(())
     }
 
+    unsafe fn wipe_on_fork(&self, start: NonNull<u8>, len: usize) -> Result<(), OsError> {
+        let (first, count) = self.checked_range(Call::WipeOnFork, start, len);
+        self.faults.enter(Call::WipeOnFork)?;
+        self.pages.update(first, count, WIPE, 0);
+        Ok(())
+    }
+
     unsafe fn unmap(&self, start: NonNull<u8>, len: usize) -> Result<(), OsError> {
         let (first, count) = self.checked_range(Call::Unmap, start, len);
         self.faults.enter(Call::Unmap)?;
@@ -342,9 +387,10 @@ unsafe impl<S: Shape> Os for SimOs<S> {
         Ok(())
     }
 
-    fn fence(&self) -> Result<(), OsError> {
+    fn fence(&self, cpu: u32) -> Result<(), OsError> {
         self.faults.enter(Call::Fence)?;
         if self.fence_registered() {
+            self.last_fence.store(cpu as u64 + 1, Ordering::Release);
             Ok(())
         } else {
             Err(OsError::EPERM)
@@ -353,6 +399,17 @@ unsafe impl<S: Shape> Os for SimOs<S> {
 
     fn rseq(&self) -> Option<RseqArea> {
         decode_rseq(self.rseq.load(Ordering::Acquire))
+    }
+
+    fn random(&self) -> u64 {
+        // splitmix64: each call takes the next point of a Weyl sequence and scrambles it.
+        let mut z = self
+            .random
+            .fetch_add(GAMMA, Ordering::AcqRel)
+            .wrapping_add(GAMMA);
+        z = (z ^ (z >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+        z = (z ^ (z >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
+        z ^ (z >> 31)
     }
 
     fn abort(&self, message: &str) -> ! {
@@ -474,25 +531,56 @@ mod tests {
     #[test]
     fn fences_need_registration() {
         let os = Sim::new();
-        assert_eq!(os.fence(), Err(OsError::EPERM));
+        assert_eq!(os.fence(3), Err(OsError::EPERM));
         os.set_faults(Call::RegisterFence, Faults::once_after(0));
         assert_eq!(os.register_fence(), Err(OsError::EINVAL));
         assert!(!os.fence_registered());
         os.register_fence().unwrap();
-        assert_eq!(os.fence(), Ok(()));
+        assert_eq!(os.last_fence(), None);
+        assert_eq!(os.fence(3), Ok(()));
+        assert_eq!(os.last_fence(), Some(3));
         assert_eq!(os.calls(Call::Fence), 2);
     }
 
     #[test]
     fn the_rseq_registration_can_be_changed() {
         let os = Sim::new();
-        assert!(os.rseq().unwrap().has_cid());
+        assert_eq!(os.rseq(), DEFAULT_RSEQ);
         os.set_rseq(None);
         assert_eq!(os.rseq(), None);
         let legacy = RseqArea::new(-4096, 20);
         os.set_rseq(legacy);
         assert_eq!(os.rseq(), legacy);
-        assert!(!os.rseq().unwrap().has_cid());
+    }
+
+    #[test]
+    fn marked_pages_are_wiped_as_a_fork_would() {
+        let os = Sim::with_capacity(region());
+        let base = os.reserve(2 * page(), region()).unwrap();
+        let second = base.map_addr(|a| a.saturating_add(page()));
+        // SAFETY: whole reserved pages that nothing else uses.
+        unsafe {
+            os.commit(base, 2 * page()).unwrap();
+            os.wipe_on_fork(second, page()).unwrap();
+            base.as_ptr().write(1);
+            second.as_ptr().write(2);
+            os.wipe_for_fork();
+            assert_eq!(base.as_ptr().read(), 1);
+            assert_eq!(second.as_ptr().read(), 0);
+        }
+    }
+
+    #[test]
+    fn random_numbers_follow_the_seed() {
+        let os = Sim::new();
+        let first: Vec<u64> = (0..4).map(|_| os.random()).collect();
+        os.set_random_seed(0);
+        let again: Vec<u64> = (0..4).map(|_| os.random()).collect();
+        assert_eq!(first, again);
+        let mut distinct = first.clone();
+        distinct.sort_unstable();
+        distinct.dedup();
+        assert_eq!(distinct.len(), 4);
     }
 
     #[test]
