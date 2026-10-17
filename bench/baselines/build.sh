@@ -116,8 +116,14 @@ build_tcmalloc() {
   mkdir -p "$ws/bench_shim"
   cp "$here/tcmalloc-shim/BUILD.bazel" "$ws/bench_shim/BUILD.bazel"
   local root=$out/tcmalloc/bazel-root
+  # Initial-exec TLS, as preloaded allocators are built (mimalloc's and jemalloc's shared
+  # builds use it for their thread-locals). Without it, -fPIC with this GCC's default
+  # -mtls-dialect=gnu2 reaches every thread-local through a TLS descriptor call, an indirect
+  # call through memory that on Zen 5 defeats zero-latency store forwarding: 41 to 57 cycles
+  # per malloc and free pair (docs/research/zen5-roofline.md section 14). Static links relax
+  # either model to local-exec, so this changes only the shared library.
   local flags=(-c opt --symlink_prefix=/ --jobs="$jobs" --local_resources=cpu="$jobs"
-               --experimental_cc_static_library)
+               --experimental_cc_static_library --copt=-ftls-model=initial-exec)
   (cd "$ws" && run "$bazel" --output_user_root="$root" build "${flags[@]}" \
       //bench_shim:libtcmalloc.so //bench_shim:tcmalloc_static) 2>&1 | tee "$out/tcmalloc/build.log" | tail -5
   local bin

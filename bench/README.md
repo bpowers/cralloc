@@ -76,7 +76,7 @@ cannot be rebuilt under a session.
   first instruction (counters attached between `fork` and `execve`, as `perf stat` does),
   and for a server, over the window the driver marks. A run whose hardware counters were
   multiplexed is invalid: the counts are not scaled, so it would look fast.
-- **Memory.** Each run records its cgroup's `memory.peak`: everything charged to it, which
+- **Memory.** Each run records its cgroup's `memory.peak`, which ranks memory: everything charged to it, which
   excludes file pages already cached by an earlier run (the binary, shared libraries) and
   includes page tables. The runner samples the resident set and `VmHWM` every 50 ms from
   `/proc/<pid>/statm` and `status`, which read counters, and `/proc/<pid>/smaps_rollup`
@@ -117,6 +117,28 @@ cannot be rebuilt under a session.
   percentage, the fastest and the smallest (peak resident set) allocator, the runner-up
   margin, and "tie" when the 95% bootstrap interval of the margin, taken over per-round
   ratios, includes zero.
+
+- **Consumers.** Cross-thread jobs whose consumers only free come in two forms, named in the
+  job id: `all-alloc`, where every thread allocates once before the work, as a service's
+  threads do (the primary form), and `free-only`, where consumers never allocate, as a
+  dedicated drop thread. jemalloc gives a free-only thread no thread cache, which makes it two
+  to three times slower there.
+
+Choices that can favour one allocator, not yet tested either way; read the numbers with them:
+
+- Transparent huge pages are as the machine has them (`madvise` mode on the reference
+  machine). Only mimalloc asks for huge pages, which decides the build-and-drop jobs; a
+  session with THP `always` would show the other side.
+- Single-threaded build jobs measure every repetition from a cold process, so allocators that
+  keep freed memory gain over those that return it; jemalloc's time-based purging never fires
+  in runs this short.
+- Wall-time metrics of the C programs include process start-up, which grows with the size of
+  the preloaded library; a few percent on the shortest (cache-scratch 8).
+- The sampler reads `smaps_rollup` once a second, which holds the process's `mmap_lock`
+  during a page-table walk and slightly delays allocators that `munmap` or `mremap` often
+  (`--rollup-ms` changes the interval).
+- CPUs 4-7, where builds run, share an L3 with measurement CPUs 0-3; memory-bound jobs have
+  drifted by up to three times on a busy machine without any load on their own CPU.
 
 Output is JSON lines: a `session` record (machine, settings, allocators, the baseline
 manifests) followed by one `run` record per process.

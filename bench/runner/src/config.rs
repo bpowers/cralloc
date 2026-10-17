@@ -11,6 +11,9 @@ pub struct Expect {
     /// Where a native run's allocator code must be: "executable", or the file name of a
     /// shared library. A preload run must report the preloaded library itself.
     pub library: Option<String>,
+    /// The version the allocator must report at run time, where two builds of one
+    /// allocator differ in version (third_party's mimalloc and the `mimalloc` crate's).
+    pub version: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize)]

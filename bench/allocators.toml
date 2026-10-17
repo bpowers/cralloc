@@ -16,7 +16,8 @@
 #            invalid. `allocator` is the family, `mode` a mode the allocator picks at run
 #            time, and `library` where a native run's allocator code must be: "executable"
 #            when it is linked in, or a shared library's file name. A preload run must
-#            always report the preloaded library itself.
+#            always report the preloaded library itself. `version`, checked in native runs,
+#            tells apart two builds of one allocator that differ in version.
 #   same_as  makes this entry a control: an exact copy of the named allocator under another
 #            label, run as if it were a different allocator. Its results must match.
 
@@ -26,16 +27,30 @@ feature = ""
 preload = ""
 expect = { allocator = "glibc", library = "libc.so.6" }
 
+# Native: third_party's mimalloc (the newest release, the harder bar), built as
+# libmimalloc-sys builds its bundled copy and called as the `mimalloc` crate calls it.
 [[allocator]]
 name = "mimalloc"
 feature = "mi"
 preload = "{baselines}/mimalloc/libmimalloc.so"
-expect = { allocator = "mimalloc", library = "executable" }
+expect = { allocator = "mimalloc", library = "executable", version = "30503" }
 
 [[allocator]]
 name = "mimalloc-sized"
 feature = "mi-sized"
-expect = { allocator = "mimalloc-sized", library = "executable" }
+expect = { allocator = "mimalloc-sized", library = "executable", version = "30503" }
+
+# The `mimalloc` crate exactly as a Rust program gets it, with the older mimalloc it bundles.
+[[allocator]]
+name = "mimalloc-crate"
+feature = "mi-crate"
+expect = { allocator = "mimalloc", library = "executable", version = "30302" }
+
+# asmalloc as the global allocator. Its run-time check is that a fresh Box lies in its heap.
+[[allocator]]
+name = "asmalloc"
+feature = "asmalloc"
+expect = { allocator = "asmalloc", library = "executable" }
 
 # Native: tikv-jemallocator's own static build, as a Rust service gets it. Preload: the
 # distribution's shared library.
