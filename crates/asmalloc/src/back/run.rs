@@ -12,6 +12,9 @@
 //! run's memory. Unassigned regions always read as zero (never touched, or purged when their
 //! last run was freed), so a run is always zeroed.
 //!
+//! A run's current size is recorded in the back end's state, one word per region, at its
+//! head's index: written when the run is allocated or resized, read by `Back::size`.
+//!
 //! **Free** purges the run's memory, which restores the zero promise, and then gives the
 //! regions back, tails last first and the head last. If the OS refuses the purge, the run stays
 //! assigned and is never reused: a leak of address space, not corruption.
@@ -20,6 +23,8 @@ use super::{Back, Kind};
 use crate::os::{HugePages, Os};
 use crate::space::{RegionId, RegionTag};
 use core::ptr::NonNull;
+use core::sync::atomic::AtomicUsize;
+use core::sync::atomic::Ordering::SeqCst;
 
 impl<O: Os> Back<'_, O> {
     /// Allocates a run of whole regions holding at least `size` bytes, aligned to `align` (a
@@ -50,6 +55,7 @@ impl<O: Os> Back<'_, O> {
                 return None;
             }
             let _ = self.space.advise_huge(start, len, HugePages::Prefer);
+            self.set_run_size(start, size);
             return Some(start);
         }
         None
@@ -69,6 +75,23 @@ impl<O: Os> Back<'_, O> {
             return;
         }
         self.unclaim_run(first, regions, regions);
+    }
+
+    /// Records the current size of the run starting at `ptr`, a run head.
+    pub(super) fn set_run_size(&self, ptr: NonNull<u8>, size: usize) {
+        if let Some(word) = self.run_size_word(ptr.as_ptr()) {
+            word.store(size, SeqCst);
+        }
+    }
+
+    /// The recorded size of the run starting at `ptr`, a run head.
+    pub(super) fn run_size(&self, ptr: *const u8) -> usize {
+        self.run_size_word(ptr).map_or(0, |word| word.load(SeqCst))
+    }
+
+    fn run_size_word(&self, ptr: *const u8) -> Option<&AtomicUsize> {
+        let location = self.space.locate(ptr)?;
+        self.state.run_sizes.get(location.region.index())
     }
 
     /// The number of regions in the run whose head is `head`.
