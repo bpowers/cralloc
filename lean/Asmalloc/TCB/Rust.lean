@@ -419,7 +419,8 @@ def inlineFunction (a : Artifact) (lines : List Line) : String :=
   let ins := args.map fun (r, n) =>
     if a.clobbers.contains r then s!"inout(\"{r}\") {n} => _" else s!"in(\"{r}\") {n}"
   let outs := (if ret.isSome then [s!"lateout(\"{T.retReg}\") ret"] else []) ++
-    (a.clobbers.filter fun c => !(args.map (·.1)).contains c && c != T.retReg).map
+    -- The result register is an output of its own only if there is a result.
+    (a.clobbers.filter fun c => !(args.map (·.1)).contains c && (ret.isNone || c != T.retReg)).map
       fun c => s!"out(\"{c}\") _"
   let gen := if a.generics.isEmpty then "" else s!"<{a.generics}>"
   featuresConst a.name a.features ++
@@ -429,7 +430,7 @@ def inlineFunction (a : Artifact) (lines : List Line) : String :=
   (match ret with | some ty => s!"    let ret: {ty.rust};\n" | none => "") ++
   "    unsafe {\n" ++
   "        core::arch::asm!(\n" ++
-  template a.target.printer.call lines ++
+  "    " ++ template a.target.printer.call lines ++
   String.join ((ins ++ outs).map fun o => s!"            {o},\n") ++
   String.join (refs.map fun n => s!"            {n} = {operandText a n},\n") ++
   String.join (exits.map fun n => s!"            {n} = label \{ return false },\n") ++
