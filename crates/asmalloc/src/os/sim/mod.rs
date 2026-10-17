@@ -34,6 +34,8 @@
 //! - A fork happens in place ([`SimOs::fork`]), or only its wiping of marked pages
 //!   ([`SimOs::wipe_for_fork`]).
 //! - Random numbers come from a seeded generator, so a test is repeatable.
+//! - The clock [`Os::ticks`] reads stands still until the test advances it
+//!   ([`SimOs::advance_clock`]), so tests of idleness need no sleeping.
 //! - `abort` panics, so a test can observe it.
 //!
 //! The heap's geometry comes from a [`Shape`]: [`Standard`] for tests, Miri and fuzzing,
@@ -136,6 +138,7 @@ pub struct SimOs<S: Shape = Standard> {
     fence_registered: AtomicBool,
     last_fence: AtomicU64,
     random: AtomicU64,
+    clock: AtomicU64,
     cpus: Cpus<SIM_THREADS>,
     shape: PhantomData<fn() -> S>,
 }
@@ -165,9 +168,16 @@ impl<S: Shape> SimOs<S> {
             fence_registered: AtomicBool::new(false),
             last_fence: AtomicU64::new(0),
             random: AtomicU64::new(0),
+            clock: AtomicU64::new(0),
             cpus: Cpus::new(),
             shape: PhantomData,
         }
+    }
+
+    /// Moves the clock that [`Os::ticks`] reads forward by `ticks`. It starts at zero and moves
+    /// only when a test moves it.
+    pub fn advance_clock(&self, ticks: u64) {
+        self.clock.fetch_add(ticks, Ordering::AcqRel);
     }
 
     /// Sets when `call` fails from now on.
@@ -482,6 +492,7 @@ fn decode_rseq(word: u64) -> Option<RseqArea> {
 // - `wipe_on_fork` only records; nothing forks the simulator, so the promise is about what
 //   `wipe_for_fork` shows a test, and it zeroes exactly the marked pages.
 // - `abort` panics, so it does not return.
+// - `ticks` reads a clock that only a test moves; the trait asks nothing of it.
 // - All state is atomic, so any thread may call at any time; nothing here allocates after
 //   construction except the formatting of a panic message.
 unsafe impl<S: Shape> Os for SimOs<S> {
@@ -618,6 +629,10 @@ unsafe impl<S: Shape> Os for SimOs<S> {
 
     fn random(&self) -> u64 {
         splitmix(&self.random)
+    }
+
+    fn ticks(&self) -> u64 {
+        self.clock.load(Ordering::Acquire)
     }
 
     fn abort(&self, message: &str) -> ! {
@@ -1031,6 +1046,16 @@ mod tests {
         distinct.sort_unstable();
         distinct.dedup();
         assert_eq!(distinct.len(), 4);
+    }
+
+    #[test]
+    fn the_clock_moves_only_when_advanced() {
+        let os = Sim::new();
+        assert_eq!(os.ticks(), 0);
+        assert_eq!(os.ticks(), 0);
+        os.advance_clock(5);
+        os.advance_clock(7);
+        assert_eq!(os.ticks(), 12);
     }
 
     #[test]

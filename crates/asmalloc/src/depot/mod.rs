@@ -42,6 +42,7 @@ mod verify;
 
 pub use drain::Drained;
 pub use generation::Generation;
+pub use heartbeat::{IDLE_TICKS, LOOK_EVERY};
 pub(crate) use magazine::{Area, Magazine};
 pub use source::Source;
 pub use spare::{MAX_SPARES, SPARE_BUDGET, spare_limit};
@@ -57,8 +58,8 @@ use crate::space::Space;
 /// back to the source, by default.
 pub const DEPOT_TARGET: usize = 256 << 10;
 
-/// The limits on memory parked in caches. Constants in the allocator; tests change them to
-/// reach every path with small magazines.
+/// The limits on memory parked in caches, and how often the idle check looks. Constants in the
+/// allocator; tests change them to reach every path with small magazines and few slow paths.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct Tuning {
     /// Bytes of objects one CPU may keep in spare magazines, over all classes.
@@ -67,6 +68,8 @@ pub struct Tuning {
     pub max_spares: usize,
     /// Bytes of objects a class's depot stack holds before the heartbeat launders.
     pub depot_target: usize,
+    /// How many of its own slow paths a CPU makes between looks for an idle slab.
+    pub look_every: u64,
 }
 
 impl Tuning {
@@ -75,6 +78,7 @@ impl Tuning {
         spare_budget: SPARE_BUDGET,
         max_spares: MAX_SPARES,
         depot_target: DEPOT_TARGET,
+        look_every: LOOK_EVERY,
     };
 }
 
@@ -91,8 +95,6 @@ pub struct Depot {
     committed: AtomicUsize,
     /// What start-up has done (`generation.rs`).
     status: AtomicU64,
-    /// The next CPU the idle check looks at.
-    cursor: AtomicUsize,
     /// One more than the largest CPU number a slow path has run on.
     cpus: AtomicUsize,
     /// Magazines made, for audits.
@@ -110,7 +112,6 @@ impl Depot {
             carved: AtomicUsize::new(0),
             committed: AtomicUsize::new(0),
             status: AtomicU64::new(0),
-            cursor: AtomicUsize::new(0),
             cpus: AtomicUsize::new(0),
             #[cfg(test)]
             created: std::sync::atomic::AtomicUsize::new(0),

@@ -230,6 +230,7 @@ fn park() -> ! {
 //   returns after the thread of the process running on that CPU, if any, has been interrupted
 //   out of any rseq critical section; it fails with EPERM unless the process registered.
 // - `rseq` reads glibc's process-wide registration facts.
+// - `ticks` is the timestamp counter, which the trait asks nothing of.
 // - `abort` ends with exit_group if the signal did not end the process first, so it does not
 //   return.
 // - None of the calls allocates or depends on thread state, so any thread may make them,
@@ -342,6 +343,11 @@ unsafe impl Os for LinuxOs {
         let pid = unsafe { int_call(nr::GETPID, 0, 0, 0) };
         let mixed = ptr::from_ref(&local).addr() as u64 ^ (pid as u64).rotate_left(32);
         mixed.wrapping_mul(0x9e37_79b9_7f4a_7c15)
+    }
+
+    fn ticks(&self) -> u64 {
+        // SAFETY: KERNEL-09.
+        unsafe { core::arch::x86_64::_rdtsc() }
     }
 
     fn abort(&self, message: &str) -> ! {
@@ -457,6 +463,13 @@ mod tests {
         LinuxOs.fence(0).unwrap();
         // A CPU number no machine has: nothing can be in flight there.
         LinuxOs.fence(8191).unwrap();
+    }
+
+    #[test]
+    fn ticks_rise() {
+        let first = LinuxOs.ticks();
+        std::thread::sleep(std::time::Duration::from_millis(1));
+        assert!(LinuxOs.ticks() > first);
     }
 
     #[test]

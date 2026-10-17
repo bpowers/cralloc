@@ -45,6 +45,7 @@ other promises:
 - `fence` aborts every twin sequence in flight on its CPU and waits out a committing one
   (`cpus.rs`), so it returns only after each has completed or been aborted.
 - `abort` panics, so it does not return.
+- `ticks` reads a clock that only a test moves; the trait asks nothing of it.
 
 ## SIM-OS-02: `self.memory.zero(...)` in `purge` and `unmap`
 
