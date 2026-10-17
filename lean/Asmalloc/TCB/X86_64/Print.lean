@@ -198,6 +198,11 @@ def printer : Printer isa where
   during the four cycles a call and return take (docs/research/zen5-roofline.md,
   section 6): 24 fused micro-ops. -/
   uopLimit := some 24
+  /- A branch to an external symbol is the 6-byte `jcc rel32`; to a stub
+  after the return it is the 2-byte `jcc rel8`. The stubs keep the routines'
+  hot paths within the bytes section 13 of docs/research/zen5-roofline.md
+  allows, where the measured cost of the extra jump on a miss is nil. -/
+  stubExits := true
   unencodable i := match i with
     -- `lea` computes an offset, which a segment does not change (`State.offset`);
     -- one written on it is a mistake.
