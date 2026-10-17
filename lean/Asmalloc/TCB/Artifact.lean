@@ -581,6 +581,12 @@ structure Artifact where
   function's `# Safety` section, which `doc` must end with when this is not
   empty. -/
   features : List String := []
+  /-- The cargo feature of the Rust crate that selects this function, if one
+  does: `some (f, true)` if it is compiled only with the feature `f`,
+  `some (f, false)` only without it. Two artifacts of a target may have the
+  same name only as such a pair, of the same signature (`Rust.checkUnique`),
+  so exactly one of them is compiled. -/
+  cargoFeature : Option (String × Bool) := none
   /-- On an inline target, the registers the code may change, by name, which
   the emitter declares as `asm!` outputs (`out(<reg>) _`, or `inout` for an
   argument's); the register the result is in is one besides. -/

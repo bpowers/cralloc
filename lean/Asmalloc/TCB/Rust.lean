@@ -177,6 +177,13 @@ def featureDoc (doc : String) : List String → String
   | fs => doc ++ s!"\n* The CPU must support the {codeList fs} target \
     feature{if fs.length == 1 then "" else "s"}."
 
+/-- The `cfg` attribute that compiles a function only under its cargo
+feature (`Artifact.cargoFeature`), if it has one. -/
+def cargoCfg : Option (String × Bool) → String
+  | none => ""
+  | some (f, true) => s!"#[cfg(feature = \"{escape f}\")]\n"
+  | some (f, false) => s!"#[cfg(not(feature = \"{escape f}\"))]\n"
+
 /-- The constant of the CPU features `fs` that the function `name`
 requires; nothing if there are none. -/
 def featuresConst (name : String) : List String → String
@@ -349,8 +356,9 @@ where
   let body := lines ++ a.target.printer.funcAlign.map .text
   let callees := dedup (body.filterMap fun | .call n => some n | _ => none)
   let refs := dedup (body.flatMap Line.refs)
-  featuresConst a.name a.features ++
+  cargoCfg a.cargoFeature ++ featuresConst a.name a.features ++
   docComment "" (fullDoc a) ++
+  cargoCfg a.cargoFeature ++
   "#[unsafe(naked)]\n" ++
   s!"pub(crate) unsafe extern \"{a.target.rustAbi}\" fn {a.name}{a.sig.rust} " ++ "{\n" ++
   "    core::arch::naked_asm!(\n" ++
@@ -423,8 +431,9 @@ def inlineFunction (a : Artifact) (lines : List Line) : String :=
     (a.clobbers.filter fun c => !(args.map (·.1)).contains c && (ret.isNone || c != T.retReg)).map
       fun c => s!"out(\"{c}\") _"
   let gen := if a.generics.isEmpty then "" else s!"<{a.generics}>"
-  featuresConst a.name a.features ++
+  cargoCfg a.cargoFeature ++ featuresConst a.name a.features ++
   docComment "" (fullDoc a) ++
+  cargoCfg a.cargoFeature ++
   "#[inline(always)]\n" ++
   s!"pub(crate) unsafe fn {a.name}{gen}{sig} " ++ "{\n" ++
   (match ret with | some ty => s!"    let ret: {ty.rust};\n" | none => "") ++
@@ -642,11 +651,24 @@ def checkRseq (p : Prepared) : Except String Unit := do
     if hasRseq c then
       throw s!"{a.target.name}: {a.name} has a restartable sequence that is not the whole of its code"
 
-/-- No two artifacts of a target have the same name. -/
+/-- No two artifacts of a target have the same name, but a pair selected by
+a cargo feature, one compiled with it and one without, of the same
+signature and generic parameters (`Artifact.cargoFeature`): exactly one of
+each name is compiled. -/
 def checkUnique (as : List Artifact) : Except String Unit :=
-  as.forM fun a =>
-    unless (as.filter fun b => b.target.name == a.target.name && b.name == a.name).length == 1 do
-      throw s!"{a.target.name}: {a.name} is defined more than once"
+  as.forM fun a => do
+    match as.filter fun b => b.target.name == a.target.name && b.name == a.name with
+    | [_] => pure ()
+    | [b, c] =>
+      match b.cargoFeature, c.cargoFeature with
+      | some (f, x), some (g, y) =>
+        unless f == g && x != y && b.sig == c.sig && b.generics == c.generics do
+          throw s!"{a.target.name}: {a.name} is defined twice, but not as one function with \
+            and one without a cargo feature, of the same signature"
+      | _, _ =>
+        throw s!"{a.target.name}: {a.name} is defined twice, but not as one function with and \
+          one without a cargo feature"
+    | _ => throw s!"{a.target.name}: {a.name} is defined more than once"
 
 /-- A table's name is a Rust constant's: an uppercase ASCII letter, then
 uppercase ASCII letters, digits and underscores. -/
