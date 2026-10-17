@@ -142,7 +142,8 @@ mod tests {
     #[test]
     fn below_and_range_stay_in_bounds() {
         let mut r = Rng::new(7);
-        for _ in 0..10_000 {
+        let n = if cfg!(miri) { 1000 } else { 10_000 };
+        for _ in 0..n {
             assert!(r.below(3).unwrap() < 3);
             assert!((10..=12).contains(&r.range(10, 12).unwrap()));
             assert_eq!(r.range(5, 5).unwrap(), 5);
@@ -155,7 +156,8 @@ mod tests {
     fn weighted_never_picks_zero_weight_and_hits_every_positive_weight() {
         let mut r = Rng::new(1);
         let mut hits = [0usize; 4];
-        for _ in 0..20_000 {
+        let n = if cfg!(miri) { 2000 } else { 20_000 };
+        for _ in 0..n {
             hits[r.weighted(&[1, 0, 3, 4]).unwrap()] += 1;
         }
         assert_eq!(hits[1], 0);

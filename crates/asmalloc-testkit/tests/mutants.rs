@@ -150,3 +150,10 @@ fn caught_failures_minimize_to_scripts_that_replay_to_the_same_failure() {
         );
     }
 }
+
+#[test]
+#[should_panic(expected = "minimized to 2 ops")]
+fn check_minimized_reports_the_shortest_replayable_script() {
+    let cfg = Config::single(fit(Profile::SMALL_FIXED), 1, 50);
+    asmalloc_testkit::check_minimized(|| Kind::Short.wrap(target::global_alloc()), &cfg);
+}

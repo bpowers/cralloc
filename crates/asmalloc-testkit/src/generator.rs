@@ -469,7 +469,9 @@ mod tests {
         resize: false,
     };
 
+    /// `n` operations natively, a tenth of them under Miri.
     fn stream(profile: Profile, zero: ZeroSize, seed: u64, n: usize) -> Vec<Op> {
+        let n = if cfg!(miri) { n / 10 } else { n };
         let mut g = Generator::new(profile, zero, 1, profile.max_live_bytes, None);
         let mut r = Rng::new(seed);
         (0..n).map(|_| g.next_op(&mut r).unwrap()).collect()
@@ -560,7 +562,8 @@ mod tests {
         let mut g = Generator::new(Profile::MIXED, NO_ZERO, 1, 1 << 30, Some(x));
         let mut r = Rng::new(4);
         let mut seen = [0; 4];
-        for _ in 0..5000 {
+        let n = if cfg!(miri) { 500 } else { 5000 };
+        for _ in 0..n {
             match g.next_op(&mut r).unwrap() {
                 Op::Send { to, .. } => {
                     seen[to as usize] += 1;

@@ -571,9 +571,8 @@ unsafe impl Send for Arena {}
 
 impl<S: Subject> Short<S> {
     const KIND: Kind = Kind::Short;
+    /// Blocks never cross the end of a chunk; they are short because each overlaps the next.
     const CHUNK: usize = 256 * 1024;
-    /// Room past the chunk's end, so the last block's overrun stays in owned memory.
-    const SLACK: usize = 4096;
     const SMALL: usize = 2048;
     const SHORTFALL: usize = 8;
 
@@ -595,7 +594,7 @@ impl<S: Subject> Short<S> {
         let mut start = arena.cursor.next_multiple_of(align);
         if arena.chunk.is_none() || start + req.size > arena.end {
             let chunk_req = Request {
-                size: Self::CHUNK + Self::SLACK,
+                size: Self::CHUNK,
                 align: 4096,
                 zeroed: false,
                 variant: 0,

@@ -7,13 +7,14 @@ mod common;
 use asmalloc_testkit::entropy::Rng;
 use asmalloc_testkit::subject::Subject;
 use asmalloc_testkit::{Config, Handoff, Profile, Script, check, generate, replay, run, run_bytes};
-use asmalloc_testkit::{Stats, target};
+use asmalloc_testkit::{Stats, check_minimized, target};
 use common::{balanced, fit, ops, ops_for, profiles, workers};
 
-fn every_profile(subject: &dyn Subject) {
+/// A failure here panics with a minimized script that replays it.
+fn every_profile<S: Subject>(make: impl Fn() -> S) {
     for p in profiles() {
         for seed in 1..=2 {
-            let stats = check(&subject, &Config::single(p, seed, ops_for(&p)));
+            let stats = check_minimized(&make, &Config::single(p, seed, ops_for(&p)));
             balanced(&stats, p.name);
             assert_eq!(stats.ops, ops_for(&p), "{}", p.name);
         }
@@ -22,12 +23,12 @@ fn every_profile(subject: &dyn Subject) {
 
 #[test]
 fn global_alloc_serves_every_profile() {
-    every_profile(&target::global_alloc());
+    every_profile(target::global_alloc);
 }
 
 #[test]
 fn c_abi_serves_every_profile() {
-    every_profile(&target::c_abi());
+    every_profile(target::c_abi);
 }
 
 fn every_handoff(subject: &dyn Subject, profile: Profile) -> Vec<Stats> {

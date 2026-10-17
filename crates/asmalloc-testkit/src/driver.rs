@@ -433,6 +433,25 @@ pub fn check<S: Subject + ?Sized>(subject: &S, cfg: &Config) -> Stats {
     run(subject, cfg).unwrap_or_else(|f| panic!("{f}"))
 }
 
+/// [`run`] against a fresh subject from `make`, panicking with the failure report and, for a
+/// single-worker run, the shortest script found that replays to the same failure.
+pub fn check_minimized<S: Subject, F: Fn() -> S>(make: F, cfg: &Config) -> Stats {
+    let f = match run(&make(), cfg) {
+        Ok(stats) => return stats,
+        Err(f) => f,
+    };
+    match &f.trace {
+        Some(Trace::Complete(script)) => {
+            let small = minimize(&make, script, f.kind);
+            panic!(
+                "{f}\n  minimized to {} ops: \"{small}\"\n  replay with driver::replay",
+                small.0.len()
+            )
+        }
+        _ => panic!("{f}"),
+    }
+}
+
 /// One worker driven by `data`: every decision reads four bytes, and the run ends when the
 /// bytes do. This is the fuzzing entry point.
 pub fn run_bytes<S: Subject + ?Sized>(
