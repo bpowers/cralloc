@@ -2,8 +2,17 @@
 
 Date: 2026-10-16. Host: Ryzen 9950X (32 CPUs), Linux 7.2.9-201.fc44, glibc 2.43, Rust 1.99.1.
 
-asmalloc's fast path pops and pushes pointers in a cache chosen by the thread's concurrency
-ID (`mm_cid`, "cid"), inside a restartable sequence, with no atomics. `docs/design.md` lists
+**Status, 2026-10-17.** This note audits an earlier design that indexed the caches by
+concurrency ID. The design now indexes them by CPU
+number (`cpu_id`, rseq offset 4, bounds-checked against the slab count) and drains a cache
+with a membarrier fence aimed at one CPU (`MEMBARRIER_CMD_PRIVATE_EXPEDITED_RSEQ` with
+`MEMBARRIER_CMD_FLAG_CPU`). The concurrency-ID findings (items 1a to 1c, 6, and section 1 of
+the evidence) are kept as a record of that design and do not describe the current one. The
+findings on aborts, membarrier, glibc's registration and fork (items 2 to 5) still apply,
+except that the per-CPU form of the membarrier command was not part of this audit.
+
+The audited design's fast path pops and pushes pointers in a cache chosen by the thread's
+concurrency ID (`mm_cid`, "cid"), inside a restartable sequence, with no atomics. `docs/design.md` lists
 what that trusts under "What is trusted". This note checks each item against the source of
 the kernel and C library the host runs, and then tries to break it on the host.
 
