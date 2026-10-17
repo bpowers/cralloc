@@ -203,6 +203,12 @@ def sampleFs : Prog isa := .block [
     (.ite .e (.seq (.block []) (.block [.mov .rax (.imm 1)])) (.block [.mov .rax (.imm 2)]) : Prog isa)) ==
   ["je 20f", "mov rax, 2", "jmp 21f", "20:", "mov rax, 1", "21:", "ret"]
 
+-- `inc`, `dec`, and `test` with an immediate in both widths (the 64-bit
+-- immediate is 32 bits, sign-extended, printed as its signed value).
+#guard text (printer.function (.block [.inc .rax, .dec .r9, .alu32 .test .rcx (.imm 0x1f0),
+    .alu .test .rax (.imm 0xfffffff0), .alu32 .test .r8 (.imm 0xfffffff0)] : Prog isa)) ==
+  ["inc rax", "dec r9", "test ecx, 496", "test rax, -16", "test r8d, -16", "ret"]
+
 /-- The 64-bit shifts and `movabs`, including an immediate ≥ 2⁶³. -/
 def sample64 : Prog isa := .block [
   .shift .ror .rax 28,

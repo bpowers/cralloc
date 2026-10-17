@@ -100,15 +100,22 @@ inductive Instr
   | mov (dst : Reg) (src : Src)
   /-- `mov QWORD PTR [dst], src` -/
   | store (dst : MemOp) (src : Reg)
-  /-- Two-operand ALU instruction `op dst, src` (64-bit). -/
+  /-- Two-operand ALU instruction `op dst, src` (64-bit). With `test` and an
+  immediate, `TEST r/m64, imm32` (`REX.W + F7 /0 id`), the immediate
+  sign-extended. -/
   | alu (op : AluOp) (dst : Reg) (src : Src)
+  /-- `inc r64` (`REX.W + FF /0`): `dst := dst + 1`, CF unchanged (`execInc`). -/
+  | inc (dst : Reg)
+  /-- `dec r64` (`REX.W + FF /1`): `dst := dst - 1`, CF unchanged (`execDec`). -/
+  | dec (dst : Reg)
   /-- `mov r32, src` (32-bit; `DWORD PTR` for a memory source). An immediate
   is used as is. The result is zero-extended into the 64-bit register. -/
   | mov32 (dst : Reg) (src : Src)
   /-- `mov DWORD PTR [dst], r32` -/
   | store32 (dst : MemOp) (src : Reg)
   /-- Two-operand ALU instruction `op r32, src` (32-bit; `DWORD PTR` for a
-  memory source). An immediate is used as is. -/
+  memory source). An immediate is used as is: with `test`, `TEST r/m32,
+  imm32` (`F7 /0 id`). -/
   | alu32 (op : AluOp) (dst : Reg) (src : Src)
   /-- `op r32, count` (32-bit) with an immediate count. Only counts `1 ≤ count ≤ 31`
   are modelled; any other count faults. -/
@@ -214,6 +221,8 @@ def exec : Instr → State → Option State
   | .mov d src, s => (readSrc s src).map fun v => s.setReg d v
   | .store m r, s => s.store64 (s.ea m) (s.gpr r)
   | .alu op d src, s => execAlu op d src s
+  | .inc d, s => some (execInc d s)
+  | .dec d, s => some (execDec d s)
   | .mov32 d src, s => (readSrc32 s src).map fun v => s.setReg32 d v
   | .store32 m r, s => s.store32 (s.ea m) ((s.gpr r).setWidth 32)
   | .alu32 op d src, s => execAlu32 op d src s
@@ -351,7 +360,7 @@ def pop : Instr → State → State → Option State
 one (the pop of a frame also moves `rsp`, as the push does): `mul` writes
 two, `rax` and `rdx`, `mulx` two of its choosing, and stores none. -/
 def Instr.dst : Instr → Option Reg
-  | .mov d _ | .alu _ d _ | .mov32 d _ | .alu32 _ d _ | .shift32 _ d _ | .bswap32 d
+  | .mov d _ | .alu _ d _ | .inc d | .dec d | .mov32 d _ | .alu32 _ d _ | .shift32 _ d _ | .bswap32 d
   | .rorx32 d .. | .andn32 d .. | .rorx d .. | .andn d .. | .movzx8 d _ | .bswap d | .shift _ d _
   | .shiftCl _ d | .shiftx _ d .. | .movImm64 d _ | .leaSym d .. | .lea d _ | .adcx d _ | .adox d _
   | .cmov _ d _ | .pop d _ | .imul d _ => some d

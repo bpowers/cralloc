@@ -7,7 +7,7 @@ public import Asmalloc.TCB.X86_64.State
 
 **Trusted.** The semantics of the general-purpose (integer) instructions of
 the x86-64 model in `TCB/X86_64/Isa.lean`: source operands, the ALU
-operations and their flags, shifts (by an immediate, by CL, and BMI2's
+operations and their flags, `inc` and `dec`, shifts (by an immediate, by CL, and BMI2's
 `shlx` and `shrx`), rotates (including BMI2's `rorx`), BMI1's
 `andn`, byte swaps, `mul`, `imul`, BMI2's `mulx` and ADX's `adcx` and `adox`.
 (`cmovcc`, which reads the flags through a branch condition, is in
@@ -91,6 +91,26 @@ def execAlu (op : AluOp) (dst : Reg) (src : Src) (s : State) : Option State :=
   | .or => let r := a ||| b; some ((arithFlags s r false false).setReg dst r)
   | .xor => let r := a ^^^ b; some ((arithFlags s r false false).setReg dst r)
   | .test => let r := a &&& b; some (arithFlags s r false false)
+
+/-- SDM Vol. 2, "INC—Increment by 1", `INC r/m64` (`REX.W + FF /0`) with a
+register operand: `DEST := DEST + 1;` "The CF flag is not affected. The OF,
+SF, ZF, AF, and PF flags are set according to the result." OF is the signed
+overflow of the addition, as for ADD (`addOverflow`): set only from
+`2⁶³ - 1`. (AF and PF are not modelled.) -/
+def execInc (dst : Reg) (s : State) : State :=
+  let a := s.gpr dst
+  let r := a + 1
+  (s.setFlags s.cf (some (addOverflow a 1 r)) (some (r == 0)) (some r.msb)).setReg dst r
+
+/-- SDM Vol. 2, "DEC—Decrement by 1", `DEC r/m64` (`REX.W + FF /1`) with a
+register operand: `DEST := DEST – 1;` "The CF flag is not affected. The OF,
+SF, ZF, AF, and PF flags are set according to the result." OF is the signed
+overflow of the subtraction, as for SUB (`subOverflow`): set only from
+`-2⁶³`. (AF and PF are not modelled.) -/
+def execDec (dst : Reg) (s : State) : State :=
+  let a := s.gpr dst
+  let r := a - 1
+  (s.setFlags s.cf (some (subOverflow a 1 r)) (some (r == 0)) (some r.msb)).setReg dst r
 
 /-- The 32-bit forms of `execAlu`: the same operations on the low 32 bits,
 with the flags computed from the 32-bit result. CMP and TEST write no

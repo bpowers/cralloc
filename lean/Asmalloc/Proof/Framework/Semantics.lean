@@ -111,6 +111,13 @@ theorem ite {c : M.Cond} {th el : Prog M} {s : M.State} {Q : M.State → Prop} (
   · obtain ⟨s', h1, h2⟩ := he rfl; exact ⟨_, .iteF hc h1, h2⟩
   · obtain ⟨s', h1, h2⟩ := ht rfl; exact ⟨_, .iteT hc h1, h2⟩
 
+/-- `ite` with its `then` branch out of line (`Code.iteCold`): the same rule,
+past the two empty blocks that mark the branch. -/
+theorem iteCold {c : M.Cond} {th el : Prog M} {s : M.State} {Q : M.State → Prop} (b : Bool)
+    (hc : M.eval c s = some b) (ht : b = true → WP M th s Q) (he : b = false → WP M el s Q) :
+    WP M (Code.iteCold c th el) s Q :=
+  ite b hc (fun h => seq (seq (block_nil (block_nil (ht h))))) he
+
 /-- The loop rule: an invariant indexed by a natural-number measure that
 decreases on every iteration that loops back. -/
 theorem loop {body : Prog M} {c : M.Cond} {Q : M.State → Prop}

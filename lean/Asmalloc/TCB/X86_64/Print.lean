@@ -85,6 +85,8 @@ def Instr.asm : Instr → List String
   | .mov d s => [s!"mov {d.name}, {s.str}"]
   | .store m r => [s!"mov {m.str}, {r.name}"]
   | .alu op d s => [s!"{op.name} {d.name}, {s.str}"]
+  | .inc d => [s!"inc {d.name}"]
+  | .dec d => [s!"dec {d.name}"]
   | .mov32 d s => [s!"mov {d.name32}, {s.str32}"]
   | .store32 m r => [s!"mov {m.str32}, {r.name32}"]
   | .alu32 op d s => [s!"{op.name} {d.name32}, {s.str32}"]
@@ -136,7 +138,7 @@ def Instr.memOps : Instr → List MemOp
   | .mov _ s | .alu _ _ s | .mov32 _ s | .alu32 _ _ s | .mulx _ _ s | .adcx _ s | .adox _ s
   | .cmov _ _ s => s.memOps
   | .store m _ | .store32 m _ | .movzx8 _ m | .store8 m _ | .lea _ m => [m]
-  | .shift32 .. | .bswap32 _ | .rorx32 .. | .andn32 .. | .rorx .. | .andn .. | .bswap _
+  | .inc _ | .dec _ | .shift32 .. | .bswap32 _ | .rorx32 .. | .andn32 .. | .rorx .. | .andn .. | .bswap _
   | .shift .. | .shiftCl .. | .shiftx .. | .movImm64 .. | .leaSym .. | .mul _ | .imul ..
   | .push _ | .pop .. | .alloc _ | .free _ => []
 

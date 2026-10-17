@@ -80,4 +80,46 @@ def stSym : State := { st with syms := fun n => if n = "T" then 0x1000 else 0 }
 #guard (exec (.leaSym .r9 "T" (-8)) stSym).map (·.gpr .r9) == some 0xFF8
 #guard (exec (.leaSym .r9 "T" 24) stSym).map flags == some (flags st)
 
+/-! ## `inc`, `dec` and `test` with an immediate
+
+`flags` lists CF, ZF, SF and OF. `inc` and `dec` keep CF (set in `st`) and
+set the others by the result; `test` clears CF and OF and writes no
+register. -/
+
+/-- `st` with `rax = v`. -/
+def withRax (v : BitVec 64) : State := st.setReg .rax v
+
+-- -1 + 1 = 0.
+#guard (exec (.inc .rax) st).map (fun s => (s.gpr .rax, flags s)) ==
+  some (0, [some true, some true, some false, some false])
+-- 2⁶³ - 1 + 1 overflows to -2⁶³.
+#guard (exec (.inc .rax) (withRax 0x7fffffffffffffff)).map (fun s => (s.gpr .rax, flags s)) ==
+  some (0x8000000000000000, [some true, some false, some true, some true])
+-- 0 - 1 = -1, without overflow.
+#guard (exec (.dec .rax) (withRax 0)).map (fun s => (s.gpr .rax, flags s)) ==
+  some (-1, [some true, some false, some true, some false])
+-- -2⁶³ - 1 overflows to 2⁶³ - 1.
+#guard (exec (.dec .rax) (withRax 0x8000000000000000)).map (fun s => (s.gpr .rax, flags s)) ==
+  some (0x7fffffffffffffff, [some true, some false, some false, some true])
+-- 1 - 1 = 0.
+#guard (exec (.dec .rax) (withRax 1)).map (fun s => (s.gpr .rax, flags s)) ==
+  some (0, [some true, some true, some false, some false])
+
+/-- `st` with `rcx = v`. -/
+def withRcx (v : BitVec 64) : State := st.setReg .rcx v
+
+-- The low 32 bits of `rcx` against `0x1f0`: some bit in common, then none.
+#guard (exec (.alu32 .test .rcx (.imm 0x1f0)) st).map (fun s => (s.gpr .rcx, flags s)) ==
+  some (-1, [some false, some false, some false, some false])
+#guard (exec (.alu32 .test .rcx (.imm 0x1f0)) (withRcx 0xffffffff00010008)).map flags ==
+  some [some false, some true, some false, some false]
+-- The 32-bit form's sign is bit 31 of the result.
+#guard (exec (.alu32 .test .rcx (.imm 0x80000000)) st).map flags ==
+  some [some false, some false, some true, some false]
+-- The 64-bit form sign-extends its immediate: `0xfffffff0` tests bits 63:4.
+#guard (exec (.alu .test .rax (.imm 0xfffffff0)) (withRax 0x8000000000000005)).map flags ==
+  some [some false, some false, some true, some false]
+#guard (exec (.alu .test .rax (.imm 0xfffffff0)) (withRax 0xf)).map flags ==
+  some [some false, some true, some false, some false]
+
 end VG.Test.Semantics
