@@ -54,10 +54,11 @@ size class on free without looking anything up, and when the layout is a compile
 constant, as it is for `Box<T>` and most collection nodes, so is the size class.
 
 Rust reaches the global allocator through four symbols (`__rust_alloc` and friends) defined
-in the crate that declares `#[global_allocator]`. Code in other crates calls them across a
-crate boundary, so the allocator's fast path is inlined into those callers only when the
-program is built with link-time optimization (LTO). A library cannot turn LTO on for its
-users; it can only recommend it.
+in the crate that declares `#[global_allocator]`. Code in that crate gets the allocator's
+fast path inlined. Code in other crates and in the standard library calls the symbols
+across a crate boundary, and without link-time optimization (LTO) also calls an empty
+marker function on every allocation, which costs more than the fast path itself. A library
+cannot turn LTO on for its users; it can only recommend it.
 
 The `Allocator` trait, stable from Rust 1.100, returns the usable length of each block and
 lets `deallocate` be called with any size from the requested length to the returned one.
@@ -81,8 +82,11 @@ The size-class function must therefore give the same class for every size in tha
 
 Work-stealing runtimes free on a different thread from the one that allocated as a matter of
 course. In the Rust services that motivated this project, jemalloc beat a mimalloc-shaped
-allocator, and the cross-thread free path is the likely cause.
-`docs/research/zen5-roofline.md` measures that path for each allocator.
+allocator, and the cross-thread free path is the likely cause. Our own measurement
+(`docs/research/zen5-roofline.md`) agrees in part: mimalloc keeps up when objects flow one
+way between two cores that share an L3 cache, and takes 1.5 to 2.7 times as long as jemalloc
+when two threads exchange objects or sit in different L3 domains. Both are several times
+slower than the cheapest code that can do the same job.
 
 ### What Linux provides
 
@@ -117,7 +121,7 @@ shaped the design:
 | allocate then free through two out-of-line calls, either kind of cache | 8.0 cycles: a call and return takes 4 whatever the body |
 | allocate then free with mimalloc v3, and with glibc, through `GlobalAlloc` | 10 to 17, and 11 to 26 cycles |
 | delay from a store to a load of the same 32- or 64-bit location through a base register | 0 cycles |
-| the same delay through an absolute address (what `thread_local!` compiles to), or with a zero-extending 8- or 16-bit load | 7 cycles |
+| the same delay through an absolute address (what `thread_local!` compiles to), or with a zero-extending 8- or 16-bit load | 5 to 7 cycles |
 | one uncontended atomic read-modify-write | 20 cycles |
 | a cache line handed from one core to another | 21 ns within an L3 domain, 79 ns across |
 | first touch of a 4 KiB page; the same amount of memory inside a 2 MiB huge page | 566 ns; 119 ns |
@@ -470,6 +474,11 @@ it means the new size is still large and fits the slot. Anything else moves the 
   feature asks for them, and always by the `LD_PRELOAD` library. `free(p)` reads the class
   from the address table and joins the same path as a Rust free. A pointer outside the heap
   is a caller's bug and aborts the process.
+
+The recommended build is `lto = "fat"`. Thin LTO also inlines the fast path into dependency
+crates, but it silently stops doing so when the crate that declares `#[global_allocator]`
+contains a private `#[used]` static or module-level assembly; declaring the allocator in a
+small crate of its own avoids that.
 
 C may free anything Rust allocated. Memory obtained from the C entry points must be
 released through them, which Rust's own rules already require: its class may differ from

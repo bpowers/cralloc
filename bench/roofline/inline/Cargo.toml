@@ -1,0 +1,33 @@
+# Inlining study: when does the allocator fast path get inlined at an allocation site?
+# See README.md in the parent directory and check.py.
+[workspace]
+members = ["fastalloc", "dep", "galloc", "app"]
+resolver = "2"
+
+[profile.release]
+opt-level = 3
+debug = 1
+panic = "abort"
+
+# cargo's default release profile already runs thin LTO across one crate's own codegen
+# units ("thin-local"); `off` disables even that.
+[profile.off]
+inherits = "release"
+lto = "off"
+
+[profile.cgu1]
+inherits = "release"
+codegen-units = 1
+
+[profile.thin]
+inherits = "release"
+lto = "thin"
+
+[profile.thin1]
+inherits = "release"
+lto = "thin"
+codegen-units = 1
+
+[profile.fat]
+inherits = "release"
+lto = "fat"

@@ -1,0 +1,11 @@
+[package]
+name = "galloc"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+fastalloc = { path = "../fastalloc" }
+
+[features]
+asm = ["fastalloc/asm"]

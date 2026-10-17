@@ -1,0 +1,9 @@
+[package]
+name = "fastalloc"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[features]
+# Fast path is an `asm!` block shaped like an rseq critical section instead of plain Rust.
+asm = []

@@ -1,0 +1,19 @@
+[package]
+name = "app"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+fastalloc = { path = "../fastalloc" }
+dep = { path = "../dep" }
+galloc = { path = "../galloc", optional = true }
+
+[features]
+asm = ["fastalloc/asm", "galloc?/asm"]
+# The binary crate keeps a private `#[used]` static (as ctor/inventory-style crates do).
+used = []
+# The binary crate has module-level assembly that defines a local symbol.
+modasm = []
+# The allocator is declared in the separate `galloc` crate instead of in this one.
+sep = ["dep:galloc"]
