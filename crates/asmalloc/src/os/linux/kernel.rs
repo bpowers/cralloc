@@ -466,17 +466,41 @@ mod tests {
         assert_ne!(a, b);
     }
 
+    /// The behaviour the simulator models (review R2): a mark survives a second commit, and a
+    /// page can be marked before it is first committed.
     #[test]
-    fn a_page_can_be_marked_to_be_wiped_on_fork() {
+    fn marked_pages_read_as_zero_in_a_forked_child() {
+        unsafe extern "C" {
+            fn fork() -> i32;
+            fn waitpid(pid: i32, status: *mut i32, options: i32) -> i32;
+            fn _exit(code: i32) -> !;
+        }
         let os = LinuxOs;
-        let base = os.reserve(PAGE, PAGE).unwrap();
-        // SAFETY: one whole page of a fresh reservation that nothing else uses.
+        let base = os.reserve(2 * PAGE, PAGE).unwrap();
+        let second = base.map_addr(|a| a.saturating_add(PAGE));
+        // SAFETY: whole pages of a fresh reservation that nothing else uses. The child only
+        // reads two bytes and exits, which is safe after fork in a threaded process.
         unsafe {
             os.commit(base, PAGE).unwrap();
             os.wipe_on_fork(base, PAGE).unwrap();
+            os.commit(base, PAGE).unwrap();
+            os.wipe_on_fork(second, PAGE).unwrap();
+            os.commit(second, PAGE).unwrap();
             base.as_ptr().write(7);
+            second.as_ptr().write(9);
+            let pid = fork();
+            if pid == 0 {
+                _exit(i32::from(base.as_ptr().read()) | i32::from(second.as_ptr().read()) << 4);
+            }
+            let mut status = 0;
+            assert_eq!(waitpid(pid, &mut status, 0), pid);
+            assert_eq!(
+                (status >> 8) & 0xff,
+                0,
+                "both pages read as zero in the child"
+            );
             assert_eq!(base.as_ptr().read(), 7, "the parent keeps its contents");
-            os.unmap(base, PAGE).unwrap();
+            os.unmap(base, 2 * PAGE).unwrap();
         }
     }
 
