@@ -81,11 +81,13 @@ The size-class function must therefore give the same class for every size in tha
 
 Work-stealing runtimes free on a different thread from the one that allocated as a matter of
 course. In the Rust services that motivated this project, jemalloc beat a mimalloc-shaped
-allocator, and the cross-thread free path is the likely cause. Our own measurement
-(`docs/research/zen5-roofline.md`) agrees in part: mimalloc keeps up when objects flow one
-way between two cores that share an L3 cache, and takes 1.5 to 2.7 times as long as jemalloc
-when two threads exchange objects or sit in different L3 domains. Both are several times
-slower than the cheapest code that can do the same job.
+allocator, and the cross-thread free path is the likely cause. Our own measurements
+(`docs/research/zen5-roofline.md`, `docs/research/baselines.md`) agree: when objects cross
+threads mimalloc takes 1.5 to 2.7 times as long as jemalloc in all but the shortest one-way
+bursts, and both are several times slower than the cheapest code that can do the same job.
+The same baselines show where each incumbent is strong: mimalloc on building and dropping
+large structures, because it faults in huge pages; jemalloc on memory use and on churn;
+per-CPU tcmalloc on large objects that cross threads.
 
 ### What Linux provides
 
@@ -155,8 +157,8 @@ less.
    workload. Faster than mimalloc, tcmalloc and jemalloc on multithreaded Rust workloads,
    especially those that free on a different thread from the one that allocated, and on par
    with mimalloc on single-threaded ones.
-2. **Memory.** No more resident memory than mimalloc, the incumbent to beat on memory, on
-   the same workload. Low fragmentation from segregated size classes and from preferring
+2. **Memory.** No more resident memory than the leanest incumbent on the same workload,
+   which our baselines show is usually jemalloc. Low fragmentation from segregated size classes and from preferring
    partly used memory over fresh memory. Wholly free pages beyond a cap go back to the OS,
    and the memory parked in caches is bounded.
 3. **One heap, three interfaces.** `GlobalAlloc`, `Allocator` and the C ABI share one heap,
@@ -299,8 +301,9 @@ number, and the bounds checks need no other state. For a magazine of `n` slots t
 
 A word of zero fails both tests. A slab that has never been written, which is all zero
 bytes, therefore behaves as a slab with no magazines, and nothing needs initializing before
-the first call. The low three bits of a word are zero for any slot address; a word with its
-lowest bit set is a marker (see "Idle caches").
+the first call. A slot address has its low three bits clear. A **marker** is a word whose low
+19 bits are exactly 1, which leaves every slot-number bit clear, so a marker also fails both
+tests (see "Idle caches").
 
 The routines rely on one invariant, which the slow paths maintain. For every CPU and small
 class, the slab word is zero, a marker, or the address of slot `s` of a magazine of that
@@ -531,8 +534,8 @@ the one a Rust `Layout` of the same size implies.
   objects cached under a CPU stay with that CPU.
 - **Idle caches.** Memory can sit in the slab of a CPU the process no longer runs on. Each
   slab has an activity counter, and a heartbeat that finds one unchanged for long enough
-  drains that slab. Every process has a **generation**, a random number; a marker is a
-  generation with its lowest bit set.
+  drains that slab. Every process has a **generation**, a random number; its marker is the
+  generation shifted above the low 19 bits, with the lowest bit set.
   1. Claim the slab by writing this generation into its drain flag with a compare-and-swap.
      If the flag already holds this generation, another thread is draining; stop.
   2. Exchange each class's slab word and each spare-stack head with this generation's

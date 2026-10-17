@@ -1,0 +1,19 @@
+# Copied by bench/baselines/build.sh into a copy of the tcmalloc tree as bench_shim/.
+#
+# //tcmalloc is a static library with alwayslink, meant to be linked into a C++ binary.
+# These two targets turn it into what the benchmarks need: one shared object with every
+# dependency inside it, for LD_PRELOAD, and one static archive with every dependency
+# inside it, for a Rust #[global_allocator] (as the tcmalloc-better crate links it).
+
+load("@rules_cc//cc:defs.bzl", "cc_binary")
+
+cc_binary(
+    name = "libtcmalloc.so",
+    linkshared = True,
+    deps = ["//tcmalloc"],
+)
+
+cc_static_library(
+    name = "tcmalloc_static",
+    deps = ["//tcmalloc"],
+)
