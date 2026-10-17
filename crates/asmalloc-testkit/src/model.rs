@@ -13,8 +13,10 @@
 //! - the usable size the interface reports for a live block does not change;
 //! - the allocator serves every request inside the live-byte budget.
 //!
-//! The model writes and checks the whole usable extent, not just the request, so an
-//! allocator that over-reports its usable size is caught too.
+//! The model writes and checks the usable extent, not just the request, so an allocator that
+//! over-reports its usable size is caught too; but never more than [`MAX_SLACK`] bytes past the
+//! request, since an allocator may legitimately report a huge block (a large slot, a run of
+//! regions) and filling it would commit memory the test never asked for.
 //!
 //! A model is driven one operation at a time ([`Model::execute`]), which is what a
 //! deterministic scheduler over simulated threads needs as well as the thread drivers here.
@@ -34,6 +36,15 @@ const MAX_RECEIVE: usize = 8;
 /// take eight large blocks at once.
 const MAX_RECEIVE_BYTES: usize = 1 << 20;
 
+/// Bytes past the request that the model writes and checks at most.
+pub const MAX_SLACK: usize = 64 << 10;
+
+/// The bytes of a block the model touches: its usable extent, capped at [`MAX_SLACK`] past the
+/// request.
+fn reach(size: usize, usable: usize) -> usize {
+    usable.min(size.saturating_add(MAX_SLACK))
+}
+
 /// A live block and what the model wrote into it.
 #[derive(Debug)]
 pub struct Live {
@@ -41,7 +52,7 @@ pub struct Live {
     pub id: BlockId,
     /// The block as the subject described it.
     pub held: Held,
-    /// Seed of the pattern over the whole usable extent.
+    /// Seed of the pattern over the block's reach.
     pub seed: u64,
 }
 
@@ -307,17 +318,11 @@ impl<'e, S: Subject + ?Sized> Model<'e, S> {
     /// Check a block's contents and reported usable size.
     fn verify(&self, op: Option<&Op>, block: &Live, when: &str) -> Result<(), Failure> {
         let h = &block.held;
+        let len = reach(h.size, h.usable);
         // SAFETY: the block is live and owned by this worker, and the model wrote every byte of
-        // its usable extent.
-        let r = unsafe {
-            pattern::check(
-                h.ptr.as_ptr(),
-                h.usable,
-                0,
-                h.usable,
-                Contents::Pattern(block.seed),
-            )
-        };
+        // its reach.
+        let r =
+            unsafe { pattern::check(h.ptr.as_ptr(), len, 0, len, Contents::Pattern(block.seed)) };
         if let Err(m) = r {
             return Err(self.fail(
                 FailureKind::Corrupted,
@@ -444,16 +449,18 @@ impl<'e, S: Subject + ?Sized> Model<'e, S> {
         op: &Op,
         what: &str,
         g: &Grant,
+        size: usize,
         from: usize,
         to: usize,
     ) -> Result<(), Failure> {
-        let to = to.min(g.usable);
+        let len = reach(size, g.usable);
+        let to = to.min(len);
         if from >= to {
             return Ok(());
         }
         // SAFETY: the interface promised these bytes zero, which initializes them, and they lie
         // inside the usable extent.
-        let r = unsafe { pattern::check(g.ptr.as_ptr(), g.usable, from, to, Contents::Zero) };
+        let r = unsafe { pattern::check(g.ptr.as_ptr(), len, from, to, Contents::Zero) };
         r.map_err(|m| {
             self.fail(
                 FailureKind::NotZeroed,
@@ -471,9 +478,11 @@ impl<'e, S: Subject + ?Sized> Model<'e, S> {
     /// Write a fresh pattern over a block and return its seed.
     fn fill(&mut self, h: &Held) -> u64 {
         self.serial += 1;
-        let seed = pattern::seed(h.addr(), h.usable, self.serial);
-        // SAFETY: the block is live and owned by this worker, with `usable` writable bytes.
-        unsafe { pattern::fill(h.ptr.as_ptr(), h.usable, seed) };
+        let len = reach(h.size, h.usable);
+        let seed = pattern::seed(h.addr(), len, self.serial);
+        // SAFETY: the block is live and owned by this worker, with `usable` writable bytes, of
+        // which `len` is a prefix.
+        unsafe { pattern::fill(h.ptr.as_ptr(), len, seed) };
         seed
     }
 
@@ -509,7 +518,7 @@ impl<'e, S: Subject + ?Sized> Model<'e, S> {
         self.check_grant(op, what, &grant, req.size, req.align)?;
         let held = Held::new(&grant, req.size);
         self.claim(Some(op), id, &held)?;
-        self.check_zero(op, what, &grant, 0, grant.zeroed)?;
+        self.check_zero(op, what, &grant, req.size, 0, grant.zeroed)?;
         if grant.zeroed > 0 {
             self.stats.zeroed_allocs += 1;
         } else {
@@ -568,12 +577,13 @@ impl<'e, S: Subject + ?Sized> Model<'e, S> {
         self.check_grant(op, "resize", &g, req.size, 1)?;
         let held = Held::new(&g, req.size);
         self.claim(Some(op), id, &held)?;
-        let keep = resized.preserved.min(old.held.usable).min(g.usable);
+        let old_len = reach(old.held.size, old.held.usable);
+        let keep = resized.preserved.min(old_len).min(g.usable);
         // SAFETY: the interface promised to carry over `keep` bytes, which initializes them.
         let r = unsafe {
             pattern::check(
                 g.ptr.as_ptr(),
-                old.held.usable,
+                old_len,
                 0,
                 keep,
                 Contents::Pattern(old.seed),
@@ -597,7 +607,7 @@ impl<'e, S: Subject + ?Sized> Model<'e, S> {
             ));
         }
         if let Some(from) = resized.zeroed_from {
-            self.check_zero(op, "zeroed resize", &g, from, g.usable)?;
+            self.check_zero(op, "zeroed resize", &g, req.size, from, g.usable)?;
         }
         let seed = self.fill(&held);
         self.insert(Live { id, held, seed });
