@@ -16,7 +16,7 @@ imports, besides the axiom audit (`TCB/Axioms.lean`):
   So nothing of this project they depend on, transitively, may carry
   `implemented_by`, `extern` or `export`, which substitute other code for a
   definition (or give one to a constant the kernel knows nothing of); what
-  Lean and Mathlib implement so is trusted, as Lean is. And no module of this
+  Lean implements so is trusted, as Lean is. And no module of this
   project (`Asmalloc` or a module under it) may declare a `csimp`
   theorem (or axiom), which the compiler rewrites by in whatever it compiles
   later, or an `init`/`builtin_init` (`initialize`), which runs when the

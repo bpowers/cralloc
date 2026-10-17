@@ -11,26 +11,25 @@ not a module. It adds `axiom vg_bad : False` and a theorem proven from it to a
 module that an artifact depends on (`Spec/Selftest.lean`), and adds a module
 with another such axiom, `Proof/Selftest/AuditPrivate.lean`, which the
 self-test's proof imports with a plain `import`. It proves `add_correct` from
-both theorems, and checks that `EmitOne.lean --check Selftest.X86_64` fails
-with the audit's `depends on non-standard axioms: [...]`, listing both
+both theorems, and checks that `Emit.lean --check` fails with the audit's
+`depends on non-standard axioms: [...]`, listing both
 `VG.Spec.Selftest.vg_bad` and `VG.Proof.Selftest.AuditPrivate.vg_bad`: the
 audit lists every axiom it finds, so one build checks both ways of hiding one.
 
 It edits the files in place, after copying them to a temporary directory,
 and restores them from there (and deletes the module it added) whatever
-happens, then checks with `git diff` and `git status` that the tree is as it
-was: the axiom never reaches the tree that is committed.
+happens, then checks with `git diff` that the tree is as it was: the axiom
+never reaches the tree that is committed.
 
 It also runs every audit command in a scratch module, outside the tree,
-while the self-test builds, and checks that each refuses to run there (Lean
-reports each command's error and goes on to the next).
+and checks that each refuses to run there (Lean reports each command's error
+and goes on to the next).
 
-Run it from the repository root after a full build (CI runs it
-last in the job that assembles the build, after that build is saved): it
-rebuilds the few modules of the self-test that the edits change, and leaves
-them built from the edited files.
+Run it from anywhere after `lake build`: it rebuilds the few modules of the
+self-test that the edits change, and the next `lake build` rebuilds them from
+the restored files.
 
-  audit_negative.py
+  scripts/audit_negative.py
 """
 
 import pathlib
@@ -40,15 +39,14 @@ import subprocess
 import sys
 import tempfile
 
-LEAN = pathlib.Path("lean")
+LEAN = pathlib.Path(__file__).resolve().parent.parent
 # A module (`Spec/` is converted), and a file whose proof the artifact uses.
 MODULE = LEAN / "Asmalloc" / "Spec" / "Selftest.lean"
 PROOF = LEAN / "Asmalloc" / "Proof" / "Selftest" / "X86_64.lean"
-TARGET = "Selftest.X86_64"
 AXIOM = "VG.Spec.Selftest.vg_bad"
 
 INJECTED = """
-/-- Not in the tree: `ci/audit_negative.py` adds it to check the audit. -/
+/-- Not in the tree: `scripts/audit_negative.py` adds it to check the audit. -/
 axiom vg_bad : False
 
 theorem vg_bad_thm : False := vg_bad
@@ -63,7 +61,7 @@ PRIVATE_MODULE = "Asmalloc.Proof.Selftest.AuditPrivate"
 PRIVATE_AXIOM = "VG.Proof.Selftest.AuditPrivate.vg_bad"
 PRIVATE_TEXT = """module
 
-/-! Not in the tree: `ci/audit_negative.py` adds it to check the audit. -/
+/-! Not in the tree: `scripts/audit_negative.py` adds it to check the audit. -/
 
 public section
 
@@ -102,6 +100,9 @@ def inject_proof(text: str, proof: str) -> str:
     return text[:body] + f":=\n  {proof}.elim" + text[end:]
 
 
+IMPORT_LINE = re.compile(r"^(public\s+)?(meta\s+)?import\s")
+
+
 def inject_private_import(text: str) -> str:
     """`text` (a module) with a plain `import` of the module with the axiom,
     after its last import, and `add_correct` proven from both axioms'
@@ -113,64 +114,52 @@ def inject_private_import(text: str) -> str:
     return inject_proof("\n".join(lines), f"({both} : False ∧ False).2")
 
 
-IMPORT_LINE = re.compile(r"^(public\s+)?(meta\s+)?import\s")
-
-
 # Each audit command, and an argument to give it in the scratch module.
 AUDITS = [("#assert_standard_axioms", "VG.standardAxioms"),
           ("#assert_no_compiler_overrides", "VG.standardAxioms"),
           ("#assert_spec_origin", "")]
 
 
-def start_audits_in_module(tmp: str) -> subprocess.Popen:
-    """Starts elaborating a scratch module (in `tmp`) that runs every audit
-    command; `audits_refused` reads the result."""
+def audits_refused(tmp: str) -> bool:
+    """Whether each audit command fails in a scratch module (in `tmp`),
+    saying why."""
     f = pathlib.Path(tmp) / "Audit.lean"
     f.write_text("module\n\nimport Asmalloc.TCB.Audit\nimport Asmalloc.TCB.Axioms\n\n"
                  + "".join(f"{cmd} {arg}\n".replace(" \n", "\n") for cmd, arg in AUDITS))
-    return subprocess.Popen(["lake", "env", "lean", str(f)], cwd=LEAN, text=True,
-                            stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
-
-
-def audits_refused(proc: subprocess.Popen) -> bool:
-    """Whether each audit command failed in the module `proc` elaborated,
-    saying why."""
-    out = proc.communicate()[0]
+    r = subprocess.run(["lake", "env", "lean", str(f)], cwd=LEAN, text=True,
+                       stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
     ok = True
     for cmd, _ in AUDITS:
-        if proc.returncode == 0 or f"{cmd} must run in a file that is not a module" not in out:
+        if r.returncode == 0 or f"{cmd} must run in a file that is not a module" not in r.stdout:
             print(f"{cmd} ran in a module", file=sys.stderr)
             ok = False
     if not ok:
-        print(out, file=sys.stderr)
+        print(r.stdout, file=sys.stderr)
     return ok
 
 
-def emit_check(edits: dict, added: pathlib.Path | None = None) -> str | None:
+def emit_check(edits: dict, added: pathlib.Path) -> str | None:
     """Writes `edits` (file: new text) and `added` (with `PRIVATE_TEXT`), runs
-    `EmitOne.lean --check` on the self-test, restores the files and deletes
-    `added` (and its build), and returns the output if it failed, else
-    `None`."""
+    `Emit.lean --check`, restores the files and deletes `added` (and its
+    build), and returns the output if it failed, else `None`."""
     with tempfile.TemporaryDirectory() as tmp:
         saved = {p: pathlib.Path(tmp) / p.name for p in edits}
         for p, copy in saved.items():
             shutil.copy2(p, copy)
         try:
-            if added is not None:
-                added.write_text(PRIVATE_TEXT)
+            added.write_text(PRIVATE_TEXT)
             for p, text in edits.items():
                 p.write_text(text)
-            r = subprocess.run(["lake", "env", "lean", "--run", "EmitOne.lean", "--check", TARGET],
+            r = subprocess.run(["lake", "env", "lean", "--run", "Emit.lean", "--check"],
                                cwd=LEAN, capture_output=True, text=True)
         finally:
             for p, copy in saved.items():
                 shutil.copy2(copy, p)
-            if added is not None:
-                added.unlink(missing_ok=True)
-                build = LEAN / ".lake" / "build"
-                for d in ("lib/lean", "ir"):
-                    for f in (build / d).glob(f"{added.relative_to(LEAN).with_suffix('')}.*"):
-                        f.unlink()
+            added.unlink(missing_ok=True)
+            build = LEAN / ".lake" / "build"
+            for d in ("lib/lean", "ir"):
+                for f in (build / d).glob(f"{added.relative_to(LEAN).with_suffix('')}.*"):
+                    f.unlink()
     return None if r.returncode == 0 else r.stdout + r.stderr
 
 
@@ -187,7 +176,7 @@ def rejected(out: str | None) -> bool:
         if axiom in axioms:
             print(f"the audit rejects an axiom {how}: `{axiom}`")
         else:
-            print(f"EmitOne.lean --check {TARGET} did not reject `{axiom}`: "
+            print(f"Emit.lean --check did not reject `{axiom}`: "
                   f"the axiom audit no longer sees an axiom {how}", file=sys.stderr)
             ok = False
     if not ok:
@@ -202,14 +191,11 @@ def main() -> int:
     if PRIVATE.exists():
         raise SystemExit(f"{PRIVATE} exists: the test adds it")
     with tempfile.TemporaryDirectory() as tmp:
-        audits = start_audits_in_module(tmp)
-        try:
-            out = emit_check({MODULE: inject_module(MODULE.read_text()),
-                              PROOF: inject_private_import(PROOF.read_text())}, PRIVATE)
-        finally:
-            refused = audits_refused(audits)
+        refused = audits_refused(tmp)
     if refused:
         print("the audits refuse to run in a module")
+    out = emit_check({MODULE: inject_module(MODULE.read_text()),
+                      PROOF: inject_private_import(PROOF.read_text())}, PRIVATE)
     if (subprocess.run(["git", "diff", "--quiet", "--", str(MODULE), str(PROOF)]).returncode != 0
             or PRIVATE.exists()):
         print(f"{MODULE} or {PROOF} was not restored, or {PRIVATE} not deleted", file=sys.stderr)

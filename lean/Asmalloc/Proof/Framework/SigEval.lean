@@ -38,8 +38,7 @@ open Lean Meta
 
 /-- The types whose closed terms `sigReduce` evaluates. -/
 def dataTypes : List Name :=
-  [``List, ``Prod, ``Option, ``Bool, ``Nat, `VG.ArgWord, `VG.Param, `VG.IntTy, `VG.Elem, `VG.Sig,
-    `VG.Arm.Loc]
+  [``List, ``Prod, ``Option, ``Bool, ``Nat, `VG.ArgWord, `VG.Param, `VG.IntTy, `VG.Elem, `VG.Sig]
 
 /-- The binary operations on `Nat` that `sigReduce` evaluates on numerals. -/
 def natOps : List (Name × (Nat → Nat → Nat)) :=
@@ -208,14 +207,12 @@ end
 /-- The definitions `sigReduce` always unfolds: those of `Sig.contract` and of
 the lists it computes with. -/
 def defaultUnfold : List Name :=
-  [`VG.Sig.contract, `VG.Sig.words, `VG.Param.words, `VG.Param.pubs, `VG.Sig.bufs,
-    `VG.Sig.lists, `VG.Sig.descs, `VG.Sig.descRegion,
-    `VG.Sig.retBits, `VG.ArgWord.bits, `VG.ArgWord.ofRaw, `VG.IntTy.bits, `VG.Elem.size,
+  [`VG.Sig.contract, `VG.Sig.words, `VG.Param.words, `VG.Sig.bufs, `VG.Sig.retBits, `VG.ArgWord.bits, `VG.ArgWord.ofRaw, `VG.IntTy.bits, `VG.Elem.size,
     `VG.stackBelow, `VG.Curry.apply, `VG.Curry.const, `VG.Sig.wfPre, ``List.map, ``List.filter,
     ``List.flatMap, ``List.flatten, ``List.append, ``List.zip, ``List.zipWith, ``List.sum,
     ``List.foldr, ``List.foldl, ``List.all, ``List.any, ``List.length, ``List.take, ``List.drop,
     ``List.head?, ``List.headD, ``List.tail, ``List.filterMap, `VG.Sig.conj, `VG.Sig.pairFacts,
-    `VG.Sig.pubFacts, `VG.Sig.preE, `VG.Sig.pubE,
+    `VG.Sig.preE,
     ``and, ``or, ``not,
     ``cond]
 
@@ -307,10 +304,10 @@ elab "sig_apply_check" : tactic => liftMetaTactic fun g => g.withContext do
   let s := t.appArg!
   let mut k := t.appFn!.appArg!
   for _ in [0:32] do
-    if k.isAppOfArity `VG.Sig.contract 8 then break
+    if k.isAppOfArity `VG.Sig.contract 7 then break
     let some k' ← unfoldDefinition? k | break
     k := k'.headBeta
-  unless k.isAppOfArity `VG.Sig.contract 8 do
+  unless k.isAppOfArity `VG.Sig.contract 7 do
     throwError "sig_apply_check: not a contract built with `Sig.contract`"
   let f := mkAppN (mkConst `VG.Sig.contract_pre_of_check) (k.getAppArgs.push s)
   let .forallE _ hcTy (.forallE _ hTy _ _) _ ← whnfR (← inferType f)
@@ -372,14 +369,14 @@ elab "sig_and_intros" : tactic => do
 def contractArgs? (k : Expr) : MetaM (Option (Array Expr)) := do
   let mut k := k
   for _ in [0:32] do
-    if k.isAppOfArity `VG.Sig.contract 8 then return some k.getAppArgs
+    if k.isAppOfArity `VG.Sig.contract 7 then return some k.getAppArgs
     let some k' ← unfoldDefinition? k | return none
     k := k'.headBeta
   return none
 
-/-- For `t` the precondition or public data of a contract built with
-`Sig.contract`: the proof of `t ↔ t'` (`VG.Sig.contract_pre_iff`,
-`VG.Sig.contract_pub_iff`) and `t'`. `some none` for its postcondition. -/
+/-- For `t` the precondition of a contract built with `Sig.contract`: the
+proof of `t ↔ t'` (`VG.Sig.contract_pre_iff`) and `t'`. `some none` for its
+postcondition. -/
 def contractIff? (t : Expr) : MetaM (Option (Option (Expr × Expr))) := do
   let t ← instantiateMVars t
   if t.isAppOfArity `VG.Contract.pre 3 then
@@ -387,21 +384,15 @@ def contractIff? (t : Expr) : MetaM (Option (Option (Expr × Expr))) := do
     let s := t.appArg!
     return some (some (mkAppN (mkConst `VG.Sig.contract_pre_iff) (a.push s),
       mkAppN (mkConst `VG.Sig.preE) #[a[0]!, a[1]!, a[2]!, a[3]!, a[5]!, a[6]!, s]))
-  if t.isAppOfArity `VG.Contract.pub 4 then
-    let some a ← contractArgs? t.appFn!.appFn!.appArg! | return none
-    let s₁ := t.appFn!.appArg!
-    let s₂ := t.appArg!
-    return some (some (mkAppN (mkConst `VG.Sig.contract_pub_iff) ((a.push s₁).push s₂),
-      mkAppN (mkConst `VG.Sig.pubE) #[a[0]!, a[1]!, a[2]!, a[7]!, s₁, s₂]))
   if t.isAppOfArity `VG.Contract.post 4 then
     if (← contractArgs? t.appFn!.appFn!.appArg!).isSome then return some none
   return none
 
 open Elab Tactic in
-/-- `sig_iff (at h)?` restates the precondition or public data of a contract
-built with `Sig.contract` (the goal or `h`) with its facts about lists as
-`Sig.conj`s, which `sig_reduce` evaluates (`Sig.preE`, `Sig.pubE`); does
-nothing to its postcondition, and fails on anything else. -/
+/-- `sig_iff (at h)?` restates the precondition of a contract built with
+`Sig.contract` (the goal or `h`) with its facts about lists as `Sig.conj`s,
+which `sig_reduce` evaluates (`Sig.preE`); does nothing to its
+postcondition, and fails on anything else. -/
 elab "sig_iff" loc:(Lean.Parser.Tactic.location)? : tactic => do
   let loc := expandOptLocation (mkOptionalNode loc)
   withLocation loc

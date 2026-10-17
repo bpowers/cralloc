@@ -23,11 +23,10 @@ open X86_64 in
 /-- The x86-64 contract the proof is written against (the artifact's is the
 shared contract of `Spec/`, which implies it), for
 `vg_selftest_add(a: u64, b: u64) -> u64`: returns
-`add a b` and does not modify memory. Both arguments are secret. -/
+`add a b` and does not modify memory. -/
 def addX86_64 : Contract X86_64.isa where
   pre _ := True
   post s s' := s'.gpr .rax = add (s.gpr .rdi) (s.gpr .rsi) ∧ s'.mem = s.mem
-  pub _ _ := True
 
 end VG.Proof.Selftest
 
@@ -36,19 +35,12 @@ namespace VG.Proof.Selftest.X86_64
 open VG.X86_64
 
 theorem add_correct (s : State) (_ : Proof.Selftest.addX86_64.pre s) :
-    ∃ t s', Exec isa Impl.Selftest.X86_64.add s t s' ∧ abiPreserved s s' ∧
+    ∃ s', Exec isa Impl.Selftest.X86_64.add s s' ∧ abiPreserved s s' ∧
       Proof.Selftest.addX86_64.post s s' := by
-  refine ⟨[], _, .block rfl, ?_, ?_, ?_⟩
+  refine ⟨_, .block rfl, ?_, ?_, ?_⟩
   · simp [abiPreserved, calleeSaved, State.setReg, arithFlags, State.setFlags]
   · simp [State.setReg, arithFlags, State.setFlags, Spec.Selftest.add]
   · rfl
-
-theorem add_ct : ConstantTime isa Proof.Selftest.addX86_64.pre Proof.Selftest.addX86_64.pub
-    Impl.Selftest.X86_64.add := by
-  refine ConstantTime.of_silent fun s t s' _ h => ?_
-  rw [Impl.Selftest.X86_64.add, Exec.block_iff] at h
-  cases h
-  rfl
 
 /-- A state satisfying the precondition. -/
 def sat : State where
@@ -63,7 +55,7 @@ def sat : State where
 
 theorem add_verified :
     Verified X86_64.target Impl.Selftest.X86_64.add (Spec.Selftest.addContract X86_64.abi) :=
-  Verified.of_correct add_correct add_ct (by
+  Verified.of_correct add_correct (by
     sig_implies [Spec.Selftest.addContract, Spec.Selftest.addSig, Proof.Selftest.addX86_64,
       X86_64.abi, X86_64.argRegs] [sat] using sat)
 

@@ -14,9 +14,9 @@ convention.
 
 namespace VG.Spec.Selftest
 
-/-- `vg_selftest_add(a: u64, b: u64) -> u64`. Both arguments are secret. -/
+/-- `vg_selftest_add(a: u64, b: u64) -> u64`. -/
 def addSig : Sig where
-  params := [("a", .int .u64 false), ("b", .int .u64 false)]
+  params := [("a", .int .u64), ("b", .int .u64)]
   ret := some .u64
 
 /-- Returns `add a b` and does not modify memory. -/

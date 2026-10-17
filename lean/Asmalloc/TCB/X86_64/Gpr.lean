@@ -36,10 +36,8 @@ inductive ShiftOp | ror | shr | shl
 inductive VarShiftOp | shl | shr | sar
   deriving DecidableEq, Repr
 
-/-- BMI2's shifts by a count in a register that do not affect the flags.
-`sarx` is left out: Intel's list of instructions with data operand
-independent timing (see `TCB/X86_64/Isa.lean`) lists `SHLX` and `SHRX` but
-not `SARX`. -/
+/-- BMI2's shifts by a count in a register that do not affect the flags
+(`sarx` is not modelled). -/
 inductive ShiftxOp | shlx | shrx
   deriving DecidableEq, Repr
 
@@ -61,10 +59,6 @@ def readSrc32 (s : State) : Src → Option (BitVec 32)
   | .imm v => some v
   | .mem m => s.load32 (s.ea m)
 
-def srcAddrs (s : State) : Src → List Addr
-  | .mem m => [s.ea m]
-  | _ => []
-
 /-- Flags after the result `r` of an arithmetic or logic operation with carry
 `c` and signed overflow `o`: ZF and SF are computed from `r`. -/
 def arithFlags {w : Nat} (s : State) (r : BitVec w) (c o : Bool) : State :=
@@ -79,29 +73,6 @@ def subOverflow {w : Nat} (a b r : BitVec w) : Bool := a.msb != b.msb && r.msb !
 OR, XOR, TEST clear CF and OF and set ZF/SF by the result. -/
 def execAlu (op : AluOp) (dst : Reg) (src : Src) (s : State) : Option State :=
   (readSrc s src).bind fun b =>
-  let a := s.gpr dst
-  match op with
-  | .add => let r := a + b
-    some ((arithFlags s r (2 ^ 64 ≤ a.toNat + b.toNat) (addOverflow a b r)).setReg dst r)
-  | .adc => s.cf.map fun c =>
-    let r := a + b + (BitVec.ofBool c).setWidth 64
-    (arithFlags s r (2 ^ 64 ≤ a.toNat + b.toNat + c.toNat) (addOverflow a b r)).setReg dst r
-  | .sub => let r := a - b
-    some ((arithFlags s r (a.toNat < b.toNat) (subOverflow a b r)).setReg dst r)
-  | .sbb => s.cf.map fun c =>
-    let r := a - b - (BitVec.ofBool c).setWidth 64
-    (arithFlags s r (a.toNat < b.toNat + c.toNat) (subOverflow a b r)).setReg dst r
-  | .cmp => let r := a - b
-    some (arithFlags s r (a.toNat < b.toNat) (subOverflow a b r))
-  | .and => let r := a &&& b; some ((arithFlags s r false false).setReg dst r)
-  | .or => let r := a ||| b; some ((arithFlags s r false false).setReg dst r)
-  | .xor => let r := a ^^^ b; some ((arithFlags s r false false).setReg dst r)
-  | .test => let r := a &&& b; some (arithFlags s r false false)
-
-/-- `execAlu` with the source operand's value `b` given: the operation on
-`dst` and `b`, as `execAlu` computes it once it has read its source
-(`aluTbl`, whose source is a word of a table of constants). -/
-def execAluW (op : AluOp) (dst : Reg) (b : BitVec 64) (s : State) : Option State :=
   let a := s.gpr dst
   match op with
   | .add => let r := a + b

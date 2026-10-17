@@ -23,14 +23,10 @@ semantics is that of the call instruction (`ISA.call`), then `body`, then the
 function's return instruction (`ISA.ret`). The emitter checks that the
 function it calls by that name is exactly `body` (`VG.Rust.files`).
 
-A call instruction stores a return address (in memory or in a register),
-which is where the code of the caller is loaded: the model does not know it.
-On the ARM targets, a veneer that the linker may put between the call
-instruction and the function (to reach it, or to switch between ARM and
-Thumb code) may also change the intra-procedure-call scratch registers. So
-the machine state supplies the values the model does not know, for all the
-calls to come, and a contract never constrains them, so that a proof covers
-every value.
+A call instruction stores a return address, which is where the code of the
+caller is loaded: the model does not know it. So the machine state supplies
+the values the model does not know, for all the calls to come, and a
+contract never constrains them, so that a proof covers every value.
 The return instruction faults in the model unless it returns to that
 address. The stack pointer is only changed by calls and returns and by
 frames (`ISA.writesSp`, `Artifact.spSafe`), which are nested, so that the
@@ -53,29 +49,18 @@ access a frame only while it lies at or above the stack pointer (memory
 below the stack pointer may be overwritten at any time, e.g. by a signal
 handler). Push and pop instructions fault outside a frame (`ISA.exec`).
 
-## Semantics, safety and leakage
+## Semantics and safety
 
-`Exec M c s t s'` means: running `c` from `s` terminates in `s'` without
-faulting, producing the leakage trace `t`. An instruction faults (`exec`
-returns `none`) on any memory access outside the regions the state permits,
-and on reading an undefined flag; so a proof of `∃ t s', Exec M c s t s' ∧ …`
-establishes termination, memory safety and functional correctness at once.
-
-The leakage trace records every memory address accessed and every branch
-decision: the standard constant-time leakage model. Instructions whose timing
-depends on their operand values (e.g. division) must not be part of any ISA
-model.
+`Exec M c s s'` means: running `c` from `s` terminates in `s'` without
+faulting. An instruction faults (`exec` returns `none`) on any memory access
+outside the regions the state permits, and on reading an undefined flag; so
+a proof of `∃ s', Exec M c s s' ∧ …` establishes termination, memory safety
+and functional correctness at once.
 -/
 
 @[expose] public section
 
 namespace VG
-
-/-- One observation of the constant-time attacker. -/
-inductive Leak where
-  | addr (a : Addr)
-  | branch (taken : Bool)
-  deriving DecidableEq, Repr
 
 /-- The interface between an architecture model and the generic framework. -/
 structure ISA where
@@ -84,25 +69,18 @@ structure ISA where
   Cond : Type
   /-- Semantics of a straight-line instruction; `none` means the machine faults. -/
   exec : Instr → State → Option State
-  /-- The addresses of the memory accessed by an instruction. -/
-  addrs : Instr → State → List Addr
   /-- Evaluate a branch condition; `none` if it depends on an undefined flag. -/
   eval : Cond → State → Option Bool
   /-- Semantics of a call instruction, up to the transfer of control to the
-  called function: storing the return address, moving the stack pointer if
-  it is stored in memory, and what a linker veneer may do. The values the
-  model does not know are the next of the state's. `none` if it faults. -/
+  called function: storing the return address and moving the stack pointer.
+  The values the model does not know are the next of the state's. `none` if
+  it faults. -/
   call : State → Option State
-  /-- The addresses of the memory a call instruction accesses. -/
-  callAddrs : State → List Addr
   /-- Semantics of the return instruction of a called function, in the state
   `s₂`, given the state `s₁` in which the function was entered (just after
   the call instruction): `none` unless it returns to the return address that
   the call instruction stored. -/
   ret : State → State → Option State
-  /-- The addresses of the memory a return instruction accesses, in the state
-  it is executed in. -/
-  retAddrs : State → List Addr
   /-- Whether an instruction may write the stack pointer (other than as the
   push or pop of a frame). -/
   writesSp : Instr → Bool
@@ -117,11 +95,11 @@ structure ISA where
   frame, moving the stack pointer back up and removing the region. -/
   pop : Instr → State → State → Option State
   /-- The CPU features beyond the target's baseline ISA that an instruction
-  needs, by their Rust `target_feature` names (e.g. `sha`), as the vendor
-  manual lists them for it (the Intel SDM's "CPUID Feature Flag"; the Arm
-  ARM's `FEAT_*`). On a CPU without them the instruction is undefined
-  (#UD), which `exec` does not model: `Artifact.features` makes their
-  presence the caller's obligation instead. -/
+  needs, by their Rust `target_feature` names (e.g. `bmi2`), as the vendor
+  manual lists them for it (the Intel SDM's "CPUID Feature Flag"). On a CPU
+  without them the instruction is undefined (#UD), which `exec` does not
+  model: `Artifact.features` makes their presence the caller's obligation
+  instead. -/
   requires : Instr → List String
 
 /-- Structured code. -/
@@ -139,11 +117,10 @@ inductive Code (I C : Type) where
 
 /-- `if c then t else e`, with `t` laid out after the function's return
 (cold): `Code.ite c (.seq (.seq (.block []) (.block [])) t) e`. It is an
-`ite`, whose `then` branch runs two empty blocks (which do nothing and leak
-nothing) before `t`, so its semantics are `ite`'s by construction; the two
-empty blocks are only the mark by which the printer (`Printer.lower`) places
-`t` out of line, so that the code around the `ite` keeps its addresses
-whatever `t`'s size. -/
+`ite`, whose `then` branch runs two empty blocks (which do nothing) before
+`t`, so its semantics are `ite`'s by construction; the two empty blocks are
+only the mark by which the printer (`Printer.lower`) places `t` out of line,
+so that the code around the `ite` keeps its addresses whatever `t`'s size. -/
 def Code.iteCold {I C : Type} (c : C) (t e : Code I C) : Code I C :=
   .ite c (.seq (.seq (.block []) (.block [])) t) e
 
@@ -181,40 +158,28 @@ variable (M : ISA)
 abbrev Prog := Code M.Instr M.Cond
 
 /-- Run a straight-line block. -/
-def execBlock : List M.Instr → M.State → Option (M.State × List Leak)
-  | [], s => some (s, [])
+def execBlock : List M.Instr → M.State → Option M.State
+  | [], s => some s
   | i :: is, s =>
     match M.exec i s with
     | none => none
-    | some s₁ => (execBlock is s₁).map fun p => (p.1, (M.addrs i s).map Leak.addr ++ p.2)
+    | some s₁ => execBlock is s₁
 
-/-- Big-step semantics: terminating, non-faulting executions with their leakage traces. -/
-inductive Exec : Prog M → M.State → List Leak → M.State → Prop
-  | block {is s s' t} : execBlock M is s = some (s', t) → Exec (.block is) s t s'
-  | seq {c₁ c₂ s₁ s₂ s₃ t₁ t₂} :
-      Exec c₁ s₁ t₁ s₂ → Exec c₂ s₂ t₂ s₃ → Exec (.seq c₁ c₂) s₁ (t₁ ++ t₂) s₃
-  | iteT {c th el s s' t} :
-      M.eval c s = some true → Exec th s t s' → Exec (.ite c th el) s (.branch true :: t) s'
-  | iteF {c th el s s' t} :
-      M.eval c s = some false → Exec el s t s' → Exec (.ite c th el) s (.branch false :: t) s'
-  | loopExit {body c s s' t} :
-      Exec body s t s' → M.eval c s' = some false →
-      Exec (.loop body c) s (t ++ [.branch false]) s'
-  | loopNext {body c s s' s'' t t'} :
-      Exec body s t s' → M.eval c s' = some true → Exec (.loop body c) s' t' s'' →
-      Exec (.loop body c) s (t ++ .branch true :: t') s''
-  | call {name body s s₁ s₂ s' t} :
-      M.call s = some s₁ → Exec body s₁ t s₂ → M.ret s₁ s₂ = some s' →
-      Exec (.call name body) s ((M.callAddrs s).map .addr ++ t ++ (M.retAddrs s₂).map .addr) s'
-  | frame {i j body s s₁ s₂ s' t} :
-      M.push i s = some s₁ → Exec body s₁ t s₂ → M.pop j s₁ s₂ = some s' →
-      Exec (.frame i body j) s ((M.addrs i s).map .addr ++ t ++ (M.addrs j s₂).map .addr) s'
-
-/-- `c` is constant-time with respect to `Pub` ("the two initial states agree
-on all public data") under the precondition `Pre`: any two terminating runs
-from states that agree on public data produce identical leakage traces. -/
-def ConstantTime (Pre : M.State → Prop) (Pub : M.State → M.State → Prop) (c : Prog M) : Prop :=
-  ∀ s₁ s₂ t₁ t₂ s₁' s₂', Pre s₁ → Pre s₂ → Pub s₁ s₂ →
-    Exec M c s₁ t₁ s₁' → Exec M c s₂ t₂ s₂' → t₁ = t₂
+/-- Big-step semantics: terminating, non-faulting executions. -/
+inductive Exec : Prog M → M.State → M.State → Prop
+  | block {is s s'} : execBlock M is s = some s' → Exec (.block is) s s'
+  | seq {c₁ c₂ s₁ s₂ s₃} : Exec c₁ s₁ s₂ → Exec c₂ s₂ s₃ → Exec (.seq c₁ c₂) s₁ s₃
+  | iteT {c th el s s'} : M.eval c s = some true → Exec th s s' → Exec (.ite c th el) s s'
+  | iteF {c th el s s'} : M.eval c s = some false → Exec el s s' → Exec (.ite c th el) s s'
+  | loopExit {body c s s'} :
+      Exec body s s' → M.eval c s' = some false → Exec (.loop body c) s s'
+  | loopNext {body c s s' s''} :
+      Exec body s s' → M.eval c s' = some true → Exec (.loop body c) s' s'' →
+      Exec (.loop body c) s s''
+  | call {name body s s₁ s₂ s'} :
+      M.call s = some s₁ → Exec body s₁ s₂ → M.ret s₁ s₂ = some s' → Exec (.call name body) s s'
+  | frame {i j body s s₁ s₂ s'} :
+      M.push i s = some s₁ → Exec body s₁ s₂ → M.pop j s₁ s₂ = some s' →
+      Exec (.frame i body j) s s'
 
 end VG

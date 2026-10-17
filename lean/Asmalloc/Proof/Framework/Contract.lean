@@ -1,21 +1,20 @@
 module
 
-public import Mathlib.Tactic.CasesM
 public import Lean.Meta.Eqns
 public meta import Lean.Meta.Eqns
+public meta import Lean.Elab.Command
 public import Asmalloc.Proof.Framework.Mem
 public import Asmalloc.Proof.Framework.Sig
 
 /-!
 # Moving a proof from one contract to a stronger one
 
-A proof may be written against a contract of its own (which its verified
-callers may also use with `WP.call`), with its facts spelled out for the
-target; the artifact is emitted with the shared contract of `Spec/`, built
-with `Sig.contract`. `Contract.Implies k k'` says that `k'` asks no more of
-the code than `k` does, so a proof of `Verified T c k` gives `Verified T c k'`
-(`Verified.of_implies`), and the correctness and constant time of `c` under
-`k` give `Verified T c k'` (`Verified.of_correct`).
+A proof may be written against a contract of its own, with its facts spelled
+out for the target; the artifact is emitted with the shared contract of
+`Spec/`, built with `Sig.contract`. `Contract.Implies k k'` says that `k'`
+asks no more of the code than `k` does, so a proof of `Verified T c k` gives
+`Verified T c k'` (`Verified.of_implies`), and the correctness of `c` under
+`k` gives `Verified T c k'` (`Verified.of_correct`).
 
 `sig_implies` proves `Contract.Implies k k'` cheaply, with the tactics of
 `Proof/Framework/Sig.lean`: prefer it to `contract_implies`, which searches
@@ -27,12 +26,11 @@ with `simp_all`.
 namespace VG
 
 /-- `k'` is at least as strong as `k` for its callers: its precondition implies
-that of `k`, the postcondition of `k` implies that of `k'`, public data under
-`k'` is public under `k`, and `k'` is satisfiable. -/
+that of `k`, the postcondition of `k` implies that of `k'`, and `k'` is
+satisfiable. -/
 structure Contract.Implies {M : ISA} (k k' : Contract M) : Prop where
   pre : ∀ s, k'.pre s → k.pre s
   post : ∀ s s', k'.pre s → k.post s s' → k'.post s s'
-  pub : ∀ s₁ s₂, k'.pre s₁ → k'.pre s₂ → k'.pub s₁ s₂ → k.pub s₁ s₂
   sat : ∃ s, k'.pre s
 
 /-- `k` is satisfiable if a contract it implies is. -/
@@ -41,26 +39,24 @@ theorem Contract.Implies.sat_left {M : ISA} {k k' : Contract M} (h : k.Implies k
 
 /-- A satisfiable contract implies itself. -/
 theorem Contract.Implies.refl {M : ISA} {k : Contract M} (h : ∃ s, k.pre s) : k.Implies k :=
-  ⟨fun _ h => h, fun _ _ _ h => h, fun _ _ _ _ h => h, h⟩
+  ⟨fun _ h => h, fun _ _ _ h => h, h⟩
 
 theorem Verified.of_implies {T : Target} {c : Prog T.isa} {k k' : Contract T.isa}
     (h : Verified T c k) (hk : k.Implies k') : Verified T c k' := by
-  obtain ⟨hc, hct, -⟩ := h
-  refine ⟨fun s hs => ?_, fun s₁ s₂ t₁ t₂ s₁' s₂' h₁ h₂ hp e₁ e₂ => ?_, hk.sat⟩
-  · obtain ⟨t, s', he, ha, hp⟩ := hc s (hk.pre s hs)
-    exact ⟨t, s', he, ha, hk.post s s' hs hp⟩
-  · exact hct s₁ s₂ t₁ t₂ s₁' s₂' (hk.pre _ h₁) (hk.pre _ h₂) (hk.pub _ _ h₁ h₂ hp) e₁ e₂
+  obtain ⟨hc, -⟩ := h
+  refine ⟨fun s hs => ?_, hk.sat⟩
+  obtain ⟨s', he, ha, hp⟩ := hc s (hk.pre s hs)
+  exact ⟨s', he, ha, hk.post s s' hs hp⟩
 
-/-- `Verified` from the correctness and constant time of `c` under a contract
-`k` that `k'` implies: the proofs of a function against the contract its
-verified callers use, moved to its shared contract. -/
+/-- `Verified` from the correctness of `c` under a contract `k` that `k'`
+implies: the proof of a function against a contract of its own, moved to its
+shared contract. -/
 theorem Verified.of_correct {T : Target} {c : Prog T.isa} {k k' : Contract T.isa}
-    (hc : ∀ s, k.pre s → ∃ t s', Exec T.isa c s t s' ∧ T.abiPreserved s s' ∧ k.post s s')
-    (hct : ConstantTime T.isa k.pre k.pub c) (hk : k.Implies k') : Verified T c k' := by
-  refine ⟨fun s hs => ?_, fun s₁ s₂ t₁ t₂ s₁' s₂' h₁ h₂ hp e₁ e₂ => ?_, hk.sat⟩
-  · obtain ⟨t, s', he, ha, hp⟩ := hc s (hk.pre s hs)
-    exact ⟨t, s', he, ha, hk.post s s' hs hp⟩
-  · exact hct s₁ s₂ t₁ t₂ s₁' s₂' (hk.pre _ h₁) (hk.pre _ h₂) (hk.pub _ _ h₁ h₂ hp) e₁ e₂
+    (hc : ∀ s, k.pre s → ∃ s', Exec T.isa c s s' ∧ T.abiPreserved s s' ∧ k.post s s')
+    (hk : k.Implies k') : Verified T c k' := by
+  refine ⟨fun s hs => ?_, hk.sat⟩
+  obtain ⟨s', he, ha, hp⟩ := hc s (hk.pre s hs)
+  exact ⟨s', he, ha, hk.post s s' hs hp⟩
 
 theorem Region.disjoint_comm {a b : Region} : a.Disjoint b ↔ b.Disjoint a :=
   ⟨Region.Disjoint.symm, Region.Disjoint.symm⟩
@@ -84,8 +80,8 @@ elab "realize_eqns " ids:ident* : command => liftTermElabM do
     discard <| getEqnsFor? n
     discard <| getUnfoldEqnFor? n (nonRec := true)
 
-realize_eqns Sig.bufs Sig.lists Sig.descs Curry.apply Curry.const Elem.size ArgWord.ofRaw Sig.contract Sig.words
-  Param.words Param.pubs ArgWord.bits IntTy.bits Sig.retBits stackBelow Sig.conj
+realize_eqns Sig.bufs Curry.apply Curry.const Elem.size ArgWord.ofRaw Sig.contract Sig.words
+  Param.words ArgWord.bits IntTy.bits Sig.retBits stackBelow Sig.conj
 
 /-- Two regions that do not wrap around the end of the address space, one
 entirely below the other: a check that `decide` evaluates on concrete regions. -/
@@ -130,8 +126,7 @@ def Sig.check {M : ISA} (A : Abi M) (sig : Sig) (writeArgs : Bool) (stack : Nat)
   match A.args widths with
   | none => false
   | some vals =>
-    let bufs := Sig.bufs sig.params (vals s) ++
-      (Sig.lists A.ptrBits (A.mem s) sig.params (vals s)).map fun r => (r, false)
+    let bufs := Sig.bufs sig.params (vals s)
     let all : List (Region × Bool) :=
       bufs ++ (A.argArea widths s).map fun (r, w) => (r, w && writeArgs)
     decide (A.rd s = (all.filter (!·.2)).map (·.1)) &&
@@ -150,9 +145,9 @@ def Sig.wfPre {M : ISA} (A : Abi M) (sig : Sig) (pre : Curry (sig.words A.ptrBit
 
 theorem Sig.contract_pre_of_check {M : ISA} {A : Abi M} {sig : Sig}
     {pre : Curry (sig.words A.ptrBits) (Mem → Prop)} {post : sig.Post A.ptrBits} {writeArgs : Bool}
-    {stack : Nat} {leak : Option (Curry (sig.words A.ptrBits) (Mem → List Nat))} {s : M.State}
+    {stack : Nat} {s : M.State}
     (hc : Sig.check A sig writeArgs stack s = true) (h : Sig.wfPre A sig pre stack s) :
-    (sig.contract A pre post writeArgs stack leak).pre s := by
+    (sig.contract A pre post writeArgs stack).pre s := by
   simp only [Sig.check] at hc
   simp only [Sig.wfPre] at h
   simp only [Sig.contract]
@@ -219,23 +214,6 @@ macro_rules
         | exact h
         | simpa [Nat.mul_comm] using h))
 
-/-- Proves `∀ s₁ s₂, k'.pre s₁ → k'.pre s₂ → k'.pub s₁ s₂ → k.pub s₁ s₂`, for
-`k'` built with `Sig.contract`. -/
-syntax "implies_pub " "[" Lean.Parser.Tactic.simpLemma,* "]" : tactic
-macro_rules
-  | `(tactic| implies_pub [$ls,*]) => `(tactic| (
-      intro s₁ s₂ _ _ h
-      sig_pub [$ls,*] at h
-      sig_split h
-      sig_reduce [$ls,*]
-      sig_simp [$ls,*] [Nat.forall_lt_succ_right, Nat.not_lt_zero, false_imp_iff, forall_const,
-        true_and]
-      sig_and_intros
-      sig_close
-      all_goals first
-        | with_reducible assumption
-        | simp_all))
-
 /-- Proves `∃ s, k'.pre s` with the witness `w`, for `k'` built with `Sig.contract`
 (`ws` unfolds `w`, if `sig_sat_check` fails). -/
 syntax "implies_sat " "[" Lean.Parser.Tactic.simpLemma,* "]" " [" Lean.Parser.Tactic.simpLemma,* "]"
@@ -263,7 +241,6 @@ macro_rules
   | `(tactic| contract_implies [$ls,*] [$ws,*] using $w) => `(tactic| exact
       { pre := by implies_pre [$ls,*]
         post := by implies_post [$ls,*]
-        pub := by implies_pub [$ls,*]
         sat := by implies_sat [$ls,*] [$ws,*] using $w })
 
 /-! ## Cheap implications
@@ -272,11 +249,10 @@ macro_rules
 `Sig.contract` and `k` (unfolded by `ls`: both contracts, the signature and
 the calling convention) a contract whose precondition is a conjunction of facts
 that each follow from one of `k'`'s (as `sig_pre` evaluates it) by
-`assumption`, by symmetry of `Region.Disjoint` or by `omega`, whose
-postcondition is `k'`'s as `sig_post` evaluates it, and whose public data
-are equalities among `k'`'s. `w` is a state satisfying
-`k'.pre`, and `ws` unfolds what `k'.pre` needs to evaluate on it. Unlike
-`contract_implies`, nothing searches over all hypotheses with `simp`. -/
+`assumption`, by symmetry of `Region.Disjoint` or by `omega`, and whose
+postcondition is `k'`'s as `sig_post` evaluates it. `w` is a state
+satisfying `k'.pre`, and `ws` unfolds what `k'.pre` needs to evaluate on it.
+Unlike `contract_implies`, nothing searches over all hypotheses with `simp`. -/
 
 /-- Proves `∀ s, k'.pre s → k.pre s` (see `sig_implies`). -/
 syntax "sig_implies_pre " "[" Lean.Parser.Tactic.simpLemma,* "]" : tactic
@@ -309,21 +285,6 @@ macro_rules
       -- A postcondition may restate a hypothesis of the precondition.
       first | exact h | exact fun _ => h))
 
-/-- Proves `∀ s₁ s₂, k'.pre s₁ → k'.pre s₂ → k'.pub s₁ s₂ → k.pub s₁ s₂` (see
-`sig_implies`). -/
-syntax "sig_implies_pub " "[" Lean.Parser.Tactic.simpLemma,* "]" : tactic
-macro_rules
-  | `(tactic| sig_implies_pub [$ls,*]) => `(tactic| (
-      intro s₁ s₂ _ _ h
-      sig_pub [$ls,*] at h
-      sig_split h
-      sig_reduce [$ls,*]
-      sig_simp [$ls,*] [Nat.forall_lt_succ_right, Nat.not_lt_zero, false_imp_iff, forall_const,
-        true_and]
-      sig_and_intros
-      sig_close
-      all_goals with_reducible assumption))
-
 /-- Proves `∃ s, k'.pre s` with the witness `w` (see `sig_sat_check`; `ws`
 unfolds `w` if that fails). -/
 syntax "sig_implies_sat " "[" Lean.Parser.Tactic.simpLemma,* "]" " [" Lean.Parser.Tactic.simpLemma,* "]"
@@ -350,7 +311,6 @@ macro_rules
   | `(tactic| sig_implies [$ls,*] [$ws,*] using $w) => `(tactic| exact
       { pre := by sig_implies_pre [$ls,*]
         post := by sig_implies_post [$ls,*]
-        pub := by sig_implies_pub [$ls,*]
         sat := by sig_implies_sat [$ls,*] [$ws,*] using $w })
 
 end VG

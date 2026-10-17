@@ -3,7 +3,11 @@ module
 public import Asmalloc.Proof.Selftest.X86_64
 public import Asmalloc.Proof.Framework.Semantics
 
-/-! # The pipeline self-test on x86-64 -/
+/-! # The pipeline self-test on x86-64
+
+Built from the `Api` directly rather than with `Api.artifact`, whose
+documentation always has a `# Safety` section: this function has nothing to
+put in one. -/
 
 @[expose] public section
 

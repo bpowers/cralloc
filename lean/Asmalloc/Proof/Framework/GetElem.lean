@@ -2,8 +2,6 @@ module
 
 public import Asmalloc.Proof.Framework.PowLit
 public meta import Asmalloc.Proof.Framework.PowLit
-public import Asmalloc.Proof.Framework.InstancePriority
-public meta import Asmalloc.Proof.Framework.InstancePriority
 public import Asmalloc.Proof.Framework.Omega
 public meta import Asmalloc.Proof.Framework.Omega
 

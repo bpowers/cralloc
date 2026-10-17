@@ -7,7 +7,7 @@ public import Asmalloc.TCB.Sig
 # Targets, contracts and verified artifacts
 
 **Trusted.** This file defines what it *means* for an emitted function to be
-verified. Every function the Rust crate contains is an `Artifact`, and an
+verified. Every function the generated Rust contains is an `Artifact`, and an
 `Artifact` cannot be constructed without a proof of `Verified`.
 
 `Verified T c k` says, for the machine code `c` on target `T` and contract `k`:
@@ -17,12 +17,7 @@ verified. Every function the Rust crate contains is an `Artifact`, and an
    the regions the state permits) in a state related to the initial one by
    `k.post` *and* by the target's calling-convention obligations
    `T.abiPreserved` (callee-saved registers, stack pointer, return address).
-2. **Constant time.** Any two runs from `k.pre`-states that agree on public
-   data (`k.pub`) have identical leakage traces (addresses and branches).
-   Public data is the pointers, lengths and public integer arguments, plus
-   anything the contract declares the function may leak (`Sig.contract`'s
-   `leak`): the traces may depend on that, and on nothing else secret.
-3. **Non-vacuity.** Some state satisfies `k.pre`. This is only a sanity
+2. **Non-vacuity.** Some state satisfies `k.pre`. This is only a sanity
    check against an accidentally contradictory precondition; it does not
    replace reviewing the contract.
 
@@ -65,9 +60,6 @@ structure Contract (M : ISA) where
   pre : M.State → Prop
   /-- Postcondition relating the entry state to the exit state. -/
   post : M.State → M.State → Prop
-  /-- When two entry states agree on everything public (e.g. lengths and
-  pointers, but not keys or plaintexts). -/
-  pub : M.State → M.State → Prop
 
 /-- The contract of a function with signature `sig` under the calling
 convention `A`: the obligations the signature implies (see `TCB/Sig.lean`),
@@ -78,36 +70,16 @@ callee; otherwise it may only read them. `stack` is the number of bytes of
 stack below the stack pointer that the function's calls and frames use
 (return addresses, arguments and saved registers), which no buffer
 overlaps. A calling convention that does not model the arguments (`A.args`
-is `none`) gives an unsatisfiable precondition, which `Verified` rejects.
-Only the bits of a public argument's own width are public: a 32-bit argument
-in a 64-bit register leaves the upper half unspecified (whatever the caller
-left there, which may be secret), so two runs need not agree on it.
-
-A list of slices (`Param.slices`) adds read-only memory that depends on the
-memory on entry: its descriptors, and the slices they list (`Sig.lists`),
-which may overlap each other and the other read-only buffers, but no
-writable buffer (a `&[&[T]]` and a `&mut` are distinct Rust objects). What
-its descriptors say is public (`Sig.descs`): two runs agree on their bytes.
-
-`leak`, if given, declares what the function may leak beyond its public
-arguments: a list of numbers computed from the arguments and the memory on
-entry (e.g. the sequence of table indices an algorithm reads, when the
-algorithm itself makes them depend on secrets). It is added to the public
-data, so two runs need identical leakage traces only if they agree on it:
-the function may reveal it through its timing, and nothing else secret.
-Every contract without `leak` is constant time in the usual sense. -/
+is `none`) gives an unsatisfiable precondition, which `Verified` rejects. -/
 def Sig.contract {M : ISA} (A : Abi M) (sig : Sig)
     (pre : Curry (sig.words A.ptrBits) (Mem → Prop) := Curry.const (fun _ => True) _)
-    (post : sig.Post A.ptrBits) (writeArgs : Bool := false) (stack : Nat := 0)
-    (leak : Option (Curry (sig.words A.ptrBits) (Mem → List Nat)) := none) : Contract M :=
+    (post : sig.Post A.ptrBits) (writeArgs : Bool := false) (stack : Nat := 0) : Contract M :=
   let ws := sig.words A.ptrBits
   let widths := ws.map (·.bits A.ptrBits)
-  let pubs := sig.params.flatMap (·.2.pubs)
   { pre s := match A.args widths with
       | none => False
       | some vals =>
-        let bufs := Sig.bufs sig.params (vals s) ++
-          (Sig.lists A.ptrBits (A.mem s) sig.params (vals s)).map fun r => (r, false)
+        let bufs := Sig.bufs sig.params (vals s)
         let all := bufs ++ (A.argArea widths s).map fun (r, w) => (r, w && writeArgs)
         A.wf widths stack s ∧
         A.rd s = (all.filter (!·.2)).map (·.1) ∧ A.wr s = (all.filter (·.2)).map (·.1) ∧
@@ -118,19 +90,7 @@ def Sig.contract {M : ISA} (A : Abi M) (sig : Sig)
     post s s' := match A.args widths with
       | none => False
       | some vals => Curry.apply ws post (vals s) (A.mem s) (A.mem s')
-          ((A.ret s').setWidth _)
-    pub s₁ s₂ := match A.args widths with
-      | none => False
-      | some vals =>
-        (match leak with
-          | none => A.pub s₁ s₂
-          | some f => A.pub s₁ s₂ ∧
-            Curry.apply ws f (vals s₁) (A.mem s₁) = Curry.apply ws f (vals s₂) (A.mem s₂)) ∧
-        (∀ i, pubs.getD i false = true →
-          ((vals s₁).getD i 0).setWidth (widths.getD i 64) =
-            ((vals s₂).getD i 0).setWidth (widths.getD i 64)) ∧
-        ∀ r ∈ Sig.descs A.ptrBits sig.params (vals s₁), ∀ i < r.len,
-          A.mem s₁ (r.base + BitVec.ofNat 64 i) = A.mem s₂ (r.base + BitVec.ofNat 64 i) }
+          ((A.ret s').setWidth _) }
 
 /-! ## Documenting the obligations `Sig.contract` implies
 
@@ -144,25 +104,21 @@ calling convention names its argument area and reserved memory
 -/
 
 /-- The buffers of the parameters `ps` as the documentation names them, and
-whether each is writable: those of `Sig.bufs`, in the same order, each list
-of slices followed by the slices it lists (`Sig.lists`). -/
+whether each is writable: those of `Sig.bufs`, in the same order. -/
 def Sig.bufNames : List (String × Param) → List (String × Bool)
   | [] => []
   | (_, .int ..) :: ps => Sig.bufNames ps
   | (n, .array w ..) :: ps => (s!"`{n}`", w) :: Sig.bufNames ps
   | (n, .slice w ..) :: ps => (s!"`{n}`", w) :: Sig.bufNames ps
-  | (n, .slices ..) :: ps => (s!"`{n}`", false) :: (s!"the slices `{n}` lists", false) :: Sig.bufNames ps
 
 /-- The size in bytes of the buffer a parameter stands for, as the
 documentation states it: that of `Sig.bufs`, a number for an array and
-`` `len` `` or `` `k * len` `` for a slice of `len` elements of `k` bytes, and
-`` `2 * size_of::<usize>() * count` `` for the descriptors of a list of `count` slices;
+`` `len` `` or `` `k * len` `` for a slice of `len` elements of `k` bytes;
 `none` for an integer. -/
 def Param.sizeDoc : Param → Option String
   | .int .. => none
   | .array _ e n => some s!"{n * e.size}"
   | .slice _ e len => some (if e.size = 1 then s!"`{len}`" else s!"`{e.size} * {len}`")
-  | .slices _ count => some s!"`2 * size_of::<usize>() * {count}`"
 
 /-- The `# Safety` items stating the memory each buffer of `sig` must be
 valid for, in order: the region `Sig.contract` lets the function read
@@ -173,11 +129,7 @@ def Sig.validDoc (sig : Sig) : List String :=
     let access := match p with
       | .array true .. | .slice true .. => "reads and writes"
       | _ => "reads"
-    let listed := match p with
-      | .slices e _ => if e.size = 1 then s!", and each slice it lists for reads of its length in \
-          bytes" else s!", and each slice it lists for reads of {e.size} times its length in bytes"
-      | _ => ""
-    p.sizeDoc.map fun size => s!"`{n}` must be valid for {access} of {size} bytes{listed}."
+    p.sizeDoc.map fun size => s!"`{n}` must be valid for {access} of {size} bytes."
 
 /-- `xs` as an English list joined by `conj`: "a", "a or b", "a, b or c". -/
 def englishList (conj : String) : List String → String
@@ -187,7 +139,7 @@ def englishList (conj : String) : List String → String
   | x :: xs => s!"{x}, " ++ englishList conj xs
 
 /-- The `# Safety` items stating what the contracts `sig.contract A _ _
-writeArgs stack _` require of where the buffers are: that a writable buffer
+writeArgs stack` require of where the buffers are: that a writable buffer
 overlaps no other buffer, nor the arguments in memory (`A.argArea`); that no
 buffer overlaps the arguments in memory if the function may write them, nor
 the memory `A.reserved stack` (the return address, and the stack that the
@@ -219,7 +171,7 @@ def Sig.layoutDoc {M : ISA} (A : Abi M) (sig : Sig) (writeArgs : Bool) (stack : 
     | _ => [s!"None of {englishList "and" all} may {tail} (no Rust object does)."]
 
 /-- A paragraph saying that the function may overwrite its arguments in
-memory, if the contracts `sig.contract A _ _ writeArgs _ _` let it. -/
+memory, if the contracts `sig.contract A _ _ writeArgs _` let it. -/
 def Sig.layoutNote {M : ISA} (A : Abi M) (sig : Sig) (writeArgs : Bool) : List String :=
   match A.argAreaDoc ((sig.words A.ptrBits).map (·.bits A.ptrBits)) with
   | some (d, true) => if writeArgs then
@@ -228,8 +180,7 @@ def Sig.layoutNote {M : ISA} (A : Abi M) (sig : Sig) (writeArgs : Bool) : List S
 
 /-- The proof obligation for emitting `c` on target `T` with contract `k`. -/
 def Verified (T : Target) (c : Prog T.isa) (k : Contract T.isa) : Prop :=
-  (∀ s, k.pre s → ∃ t s', Exec T.isa c s t s' ∧ T.abiPreserved s s' ∧ k.post s s') ∧
-  ConstantTime T.isa k.pre k.pub c ∧
+  (∀ s, k.pre s → ∃ s', Exec T.isa c s s' ∧ T.abiPreserved s s' ∧ k.post s s') ∧
   (∃ s, k.pre s)
 
 /-- A function's contract on every target: the contract under the calling
@@ -242,8 +193,8 @@ abbrev Contracts : Type 1 := {M : ISA} → Abi M → Nat → Contract M
 whether its contract lets it overwrite its arguments in memory
 (`Sig.contract`'s `writeArgs`), its contract on every target (`contracts`),
 and its documentation. A registration file makes an `Artifact` of it on each
-target (`{ api with target := …, doc := api.doc, … }`), adding any notes on
-the implementation; the emitter adds the obligations the signature implies
+target (`Api.artifact`, `TCB/Registration.lean`), adding any notes on the
+implementation; the emitter adds the obligations the signature implies
 (`Sig.validDoc`, and `Sig.layoutDoc`, which depends on the target).
 
 The `Artifact` takes `contracts` from the `Api` with its name and signature,
@@ -275,8 +226,8 @@ def Api.doc (api : Api) (notes : List String := []) : String :=
 /-- A verified function, ready to be emitted into the Rust crate. -/
 structure Artifact where
   target : Target
-  /-- The Rust module the function is emitted into, `src/asm/<target>/<module>.rs`
-  (e.g. `sha256`). -/
+  /-- The Rust module the function is emitted into, `<target>/<module>.rs`
+  (e.g. `selftest`). -/
   module : String
   /-- The Rust function name. Must be unique within the target. -/
   name : String
@@ -286,20 +237,15 @@ structure Artifact where
   /-- Documentation for the generated Rust function. With what the emitter
   adds to it (`Sig.layoutNote`, `Sig.validDoc` and `Sig.layoutDoc`, which
   need it to end with its `# Safety` section if they add anything, and not
-  to state what they do), it must state every
-  requirement of `contract.pre` that the caller is responsible for, and
-  anything the contract declares the function may leak (`Sig.contract`'s
-  `leak`). -/
+  to state what they do), it must state every requirement of `contract.pre`
+  that the caller is responsible for. -/
   doc : String
   /-- Tables of 64-bit constants the code reads, by name: the emitter writes
   each as a `static` of that name, from which the code forms the table's
-  address (`Abi.sym`; on AArch64 and ARMv7, `adrSym`; on x86-64, `leaSym`), and
-  checks that every artifact of the target with a table of that name gives
-  the same words (`Rust.checkConsts`). So `contract` is one for the calling convention
-  `target.abi.withConsts consts` (`Abi.withConsts`). A table an instruction
-  carries (x86-64's `aluTbl`, `Printer.tables`) is written and checked the
-  same way without being listed here: the model reads its words from the
-  instruction, not from memory the contract describes. -/
+  address (`Abi.sym`; on x86-64, `leaSym`), and checks that every artifact of
+  the target with a table of that name gives the same words
+  (`Rust.checkConsts`). So `contract` is one for the calling convention
+  `target.abi.withConsts consts` (`Abi.withConsts`). -/
   consts : List (String × List (BitVec 64)) := []
   code : Prog target.isa
   contract : Contract target.isa
@@ -312,13 +258,12 @@ structure Artifact where
   arguments and writes the return value where the calling convention places
   them for `sig`, and requires what `Sig.layoutDoc` documents of where the
   buffers are. -/
-  ofSig : ∃ pre post leak,
-      contract = sig.contract (target.abi.withConsts consts) pre post writeArgs stack leak := by
-    exact ⟨_, _, _, rfl⟩
+  ofSig : ∃ pre post,
+      contract = sig.contract (target.abi.withConsts consts) pre post writeArgs stack := by
+    exact ⟨_, _, rfl⟩
   /-- The contract of the function on every target, which an artifact made
-  from an `Api` (`{ api with … }`) takes from it with its `name` and `sig`
-  (`Api.contracts`). The emitter refuses an artifact without one
-  (`Rust.checkApi`). -/
+  from an `Api` takes from it with its `name` and `sig` (`Api.contracts`).
+  The emitter refuses an artifact without one (`Rust.checkApi`). -/
   contracts : Option Contracts := none
   /-- `contract` is `contracts` on the target, for `stack`: an artifact made
   from an `Api` is proven against the contract `Spec/` gives the function,
@@ -338,19 +283,5 @@ structure Artifact where
   function's `# Safety` section, which `doc` must end with when this is not
   empty. -/
   features : List String := []
-  /-- How much of some writable array parameters the function writes, in
-  bytes: for each `(name, n)`, it changes no byte of the buffer of the
-  parameter `name` at offset `n` or beyond (`writtenOk`). The emitter checks
-  that each names a writable array parameter, once, with `n` at most its size
-  (`Rust.checkWritten`), exports `n` as the constant
-  `<NAME>_<PARAM>_WRITTEN` (`Rust.writtenConsts`) and documents it, so that a
-  caller that must destroy what the function wrote there need destroy only
-  the first `n` bytes. -/
-  written : List (String × Nat) := []
-  /-- Every run from a state satisfying `contract.pre` changes no byte of
-  those buffers beyond their bounds (`Sig.writtenWithin`). -/
-  writtenOk : ∀ s t s', contract.pre s → Exec target.isa code s t s' →
-      Sig.writtenWithin (target.abi.withConsts consts) sig written s s' := by
-    exact fun _ _ _ _ _ => True.intro
 
 end VG

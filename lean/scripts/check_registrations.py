@@ -1,27 +1,24 @@
 #!/usr/bin/env python3
-"""Checks that the files reviewed by hand only bind (CLAUDE.md, "Adding a
-primitive", step 4). Exits non-zero on violations, naming each.
+"""Checks that the registration files, which are reviewed by hand, only
+bind. Exits non-zero on violations, naming each.
 
-Registration files (`Artifacts/`, `Generic/`) and variant files
-(`Variants/`) under lean/Asmalloc/ state what an implementation
+Registration files (`Asmalloc/Artifacts/`) state what an implementation
 chooses and bind proofs made under `Proof/`:
 
   * no theorems or lemmas;
   * no tactic proofs (`by …`) but the defaults of `Registration`
-    (`by sp_safe`, `by of_sig`), which a builder of artifacts may also give
-    its own arguments: a side condition a registration would decide is an
-    `autoParam` of the lemma that needs it, or the algorithm's proofs state
-    the instance as a theorem.
+    (`by sp_safe`, `by of_sig`): a side condition a registration would
+    decide is an `autoParam` of the lemma that needs it, or the routine's
+    proofs state the instance as a theorem.
 """
 
 import pathlib
 import re
 import sys
 
-ROOT = pathlib.Path(__file__).resolve().parent.parent
-LEAN = ROOT / "lean"
+LEAN = pathlib.Path(__file__).resolve().parent.parent
 
-DIRS = ["Artifacts", "Generic", "Variants"]
+DIRS = ["Artifacts"]
 
 # The tactics a registration may run: `Registration`'s defaults.
 DEFAULTS = {"sp_safe", "of_sig"}
@@ -70,8 +67,8 @@ def code_only(text: str) -> str:
 
 
 def problems(lean: pathlib.Path) -> list[str]:
-    """What is wrong under `lean` (the directory with `Asmalloc/`), one
-    line each."""
+    """What is wrong under `lean` (the directory with `Asmalloc/`), one line
+    each."""
     out = []
     for d in DIRS:
         for f in sorted((lean / "Asmalloc" / d).rglob("*.lean")):
@@ -80,20 +77,22 @@ def problems(lean: pathlib.Path) -> list[str]:
             line = lambda i: code.count("\n", 0, i) + 1
             for m in THEOREM.finditer(code):
                 out.append(f"lean/{rel}:{line(m.start())}: a {m.group(1)} in a file reviewed by hand; "
-                           "prove it under `Proof/` (CLAUDE.md, \"Adding a primitive\")")
+                           "prove it under `Proof/`")
             for m in BY.finditer(code):
                 if m.group(1).rstrip(")") in DEFAULTS:
                     continue
                 out.append(f"lean/{rel}:{line(m.start())}: a tactic proof in a file reviewed by hand; "
                            "make the side condition an `autoParam` of the lemma, or prove the "
-                           "instance under `Proof/` (CLAUDE.md, \"Adding a primitive\")")
+                           "instance under `Proof/`")
     return out
 
 
 def main() -> int:
     ps = problems(LEAN)
     for p in ps:
-        print(p)
+        print(p, file=sys.stderr)
+    if not ps:
+        print("Registration files OK")
     return 1 if ps else 0
 
 

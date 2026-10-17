@@ -1,9 +1,5 @@
 module
 
-public import Batteries.Tactic.Init
-public import Batteries.Tactic.PermuteGoals
-public import Batteries.Tactic.SeqFocus
-public import Batteries.Data.List.Basic
 public import Asmalloc.TCB.Mem
 public import Asmalloc.Proof.Framework.AddrArith
 public import Asmalloc.Proof.Framework.GetElem
@@ -15,7 +11,7 @@ public import Asmalloc.Proof.Framework.RegionsSub
 
 @[expose] public section
 
--- `rw` closes goals `a ≤ a`, as it does with Mathlib's `le_refl`.
+-- `rw` closes goals `a ≤ a`.
 attribute [refl] Nat.le_refl
 
 namespace VG
@@ -167,38 +163,15 @@ theorem Region.sub_prefix {base : Addr} {len len' : Nat} (h : len ≤ len') :
     Region.Sub ⟨base, len⟩ ⟨base, len'⟩ := fun a ha => by
   simp only [Region.Contains] at *; omega
 
-/-- `r'` extends `r`: the same base, at least as long. -/
-def Region.Prefix (r r' : Region) : Prop := r.base = r'.base ∧ r.len ≤ r'.len
-
 /-- `Region.sub_prefix` for literal lengths (`Nat.ble` evaluates them). -/
 theorem Region.sub_of_ble {a : Addr} {m n : Nat} (h : Nat.ble m n = true) :
     Region.Sub ⟨a, m⟩ ⟨a, n⟩ :=
   Region.sub_prefix (Nat.le_of_ble_eq_true h)
 
-/-- A region extends a shorter one at the same base (`Nat.ble` evaluates
-literal lengths). -/
-theorem Region.prefix_of_ble {a : Addr} {m n : Nat} (h : Nat.ble m n = true) :
-    Region.Prefix ⟨a, m⟩ ⟨a, n⟩ :=
-  ⟨rfl, Nat.le_of_ble_eq_true h⟩
-
 /-- A bound on the end of a region bounds the end of a shorter one. -/
 theorem Region.end_le_of_ble {x m n b : Nat} (hmn : Nat.ble m n = true) (h : x + n ≤ b) :
     x + m ≤ b :=
   Nat.le_trans (Nat.add_le_add_left (Nat.le_of_ble_eq_true hmn) _) h
-
-/-- Every access that the regions `rs` permit, regions extending them permit. -/
-theorem InRegions.of_prefix {rs rs' : List Region} (h : List.Forall₂ Region.Prefix rs rs')
-    {a : Addr} {n : Nat} (ha : InRegions rs a n) : InRegions rs' a n := by
-  induction h with
-  | nil => obtain ⟨_, hr, -⟩ := ha; cases hr
-  | @cons r r' _ _ hp _ ih =>
-    obtain ⟨q, hq, hc⟩ := ha
-    rcases List.mem_cons.mp hq with rfl | hq
-    · obtain ⟨hb, hl⟩ := hp
-      refine ⟨r', List.mem_cons_self .., ?_⟩
-      simp only [Region.Contains, ← hb] at hc ⊢; omega
-    · obtain ⟨q', hq', hc'⟩ := ih ⟨q, hq, hc⟩
-      exact ⟨q', List.mem_cons_of_mem _ hq', hc'⟩
 
 theorem Region.contains_self (a : Addr) (n : Nat) : (⟨a, n⟩ : Region).Contains a n := by
   simp [Region.Contains]

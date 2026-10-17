@@ -5,8 +5,8 @@ public import Asmalloc.Proof.Framework.Semantics
 /-!
 # Running straight-line blocks symbolically
 
-`runBlock` is the state part of `execBlock`; `WP.of_runBlock` reduces a
-weakest precondition of a block to `∃ s', runBlock M is s = some s' ∧ Q s'`,
+`runBlock` is `execBlock` stated with `Option.bind`; `WP.of_runBlock` reduces
+a weakest precondition of a block to `∃ s', runBlock M is s = some s' ∧ Q s'`,
 which `simp` can evaluate one instruction at a time.
 -/
 
@@ -18,28 +18,25 @@ variable {M : ISA}
 
 theorem WP.block_nil_iff {s : M.State} {Q : M.State → Prop} : WP M (.block []) s Q ↔ Q s := by
   constructor
-  · rintro ⟨t, s', h, hq⟩
+  · rintro ⟨s', h, hq⟩
     rw [Exec.block_iff] at h
-    simp only [execBlock, Option.some.injEq, Prod.mk.injEq] at h
-    exact h.1 ▸ hq
+    cases h
+    exact hq
   · exact WP.block_nil
 
 theorem WP.block_cons_iff {i : M.Instr} {is : List M.Instr} {s : M.State} {Q : M.State → Prop} :
     WP M (.block (i :: is)) s Q ↔ ∃ s', M.exec i s = some s' ∧ WP M (.block is) s' Q := by
   constructor
-  · rintro ⟨t, s', h, hq⟩
+  · rintro ⟨s', h, hq⟩
     rw [Exec.block_iff] at h
     simp only [execBlock] at h
     split at h
     · cases h
     · rename_i s₁ he
-      simp only [Option.map_eq_some_iff, Prod.exists] at h
-      obtain ⟨s₂, t₂, h, he'⟩ := h
-      simp only [Prod.mk.injEq] at he'
-      exact ⟨s₁, he, t₂, s₂, .block h, he'.1 ▸ hq⟩
-  · rintro ⟨s₁, he, t, s', h, hq⟩
+      exact ⟨s₁, he, s', .block h, hq⟩
+  · rintro ⟨s₁, he, s', h, hq⟩
     rw [Exec.block_iff] at h
-    exact ⟨(M.addrs i s).map Leak.addr ++ t, s', .block (by simp [execBlock, he, h]), hq⟩
+    exact ⟨s', .block (by simp [execBlock, he, h]), hq⟩
 
 theorem WP.block_append_iff {l₁ l₂ : List M.Instr} {s : M.State} {Q : M.State → Prop} :
     WP M (.block (l₁ ++ l₂)) s Q ↔ WP M (.block l₁) s (fun s' => WP M (.block l₂) s' Q) := by
@@ -66,22 +63,27 @@ def runStep (M : ISA) (o : Option M.State) (is : List M.Instr) : Option M.State 
 @[congr] theorem runStep_congr {o o' : Option M.State} (h : o = o') (is : List M.Instr) :
     runStep M o is = runStep M o' is := h ▸ rfl
 
+theorem execBlock_eq_runBlock (is : List M.Instr) (s : M.State) :
+    execBlock M is s = runBlock M is s := by
+  induction is generalizing s with
+  | nil => rfl
+  | cons i is ih =>
+    simp only [execBlock, runBlock]
+    cases M.exec i s with
+    | none => rfl
+    | some s₁ => exact ih s₁
+
 theorem WP.of_runBlock {is : List M.Instr} {s : M.State} {Q : M.State → Prop}
     (h : ∃ s', runBlock M is s = some s' ∧ Q s') : WP M (.block is) s Q := by
-  induction is generalizing s with
-  | nil => obtain ⟨s', h, hq⟩ := h; cases h; exact WP.block_nil hq
-  | cons i is ih =>
-    obtain ⟨s', h, hq⟩ := h
-    simp only [runBlock, Option.bind_eq_some_iff] at h
-    obtain ⟨s₁, h₁, h₂⟩ := h
-    exact WP.block_cons_iff.mpr ⟨s₁, h₁, ih ⟨s', h₂, hq⟩⟩
+  obtain ⟨s', h, hq⟩ := h
+  exact ⟨s', .block (by rw [execBlock_eq_runBlock]; exact h), hq⟩
 
 theorem WP.seq_iff {c₁ c₂ : Prog M} {s : M.State} {Q : M.State → Prop} :
     WP M (.seq c₁ c₂) s Q ↔ WP M c₁ s (fun s' => WP M c₂ s' Q) := by
   constructor
-  · rintro ⟨t, s', h, hq⟩
+  · rintro ⟨s', h, hq⟩
     cases h with
-    | seq h₁ h₂ => exact ⟨_, _, h₁, _, _, h₂, hq⟩
+    | seq h₁ h₂ => exact ⟨_, h₁, _, h₂, hq⟩
   · exact WP.seq
 
 end VG

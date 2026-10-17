@@ -14,22 +14,15 @@ callee-saved. The return address is at `[rsp]` on entry; the printer ends
 every function with `ret`, so `abiPreserved` demands that `rsp` and the
 return-address slot are unchanged on exit.
 
-The SSE registers `xmm0`–`xmm15` are all caller-saved (System V AMD64
-psABI §3.2.1, Figure 3.4: "No" under "callee-saved"; also on Windows, whose
-own convention the functions do not use), and so are the upper halves of
-the `ymm` registers that contain them and `zmm16`–`zmm31` (the psABI makes
-no vector register callee-saved), so `abiPreserved` says nothing about them.
-
-The control bits of MXCSR (15:6; bits 5:0 are the status flags, SDM Vol. 1
-§10.2.3) are callee-saved: "The control bits of the MXCSR register are
-callee-saved (preserved across calls), while the status bits are
-caller-saved (not preserved)" (System V AMD64 psABI §3.4.1, "Special
-Registers").
+The vector registers, the x87 state and MXCSR are not modelled, and no
+modelled instruction reads or writes them (`TCB/X86_64/Isa.lean`), so a
+function keeps whatever its caller left in them, as the convention requires
+of the callee-saved parts (System V AMD64 psABI §3.2.1 and §3.4.1: MXCSR's
+control bits and the x87 control word).
 
 Not modelled: the direction flag (no modelled instruction changes it; it is
-clear on entry and exit), the x87 control word (never modified), and the
-red zone: a contract that grants write access below `rsp` must keep it within
-the 128-byte red zone.
+clear on entry and exit) and the red zone: a contract that grants write
+access below `rsp` must keep it within the 128-byte red zone.
 -/
 
 @[expose] public section
@@ -41,8 +34,7 @@ def calleeSaved : List Reg := [.rbx, .rbp, .rsp, .r12, .r13, .r14, .r15]
 /-- Calling-convention obligations on return. -/
 def abiPreserved (s s' : State) : Prop :=
   (∀ r ∈ calleeSaved, s'.gpr r = s.gpr r) ∧
-  s'.mem.readW (s.gpr .rsp) 64 = s.mem.readW (s.gpr .rsp) 64 ∧
-  s'.mxcsr.extractLsb' 6 10 = s.mxcsr.extractLsb' 6 10
+  s'.mem.readW (s.gpr .rsp) 64 = s.mem.readW (s.gpr .rsp) 64
 
 /-- System V argument registers, in order. -/
 def argRegs : List Reg := [.rdi, .rsi, .rdx, .rcx, .r8, .r9]
@@ -93,7 +85,6 @@ def abi : Abi isa where
       | 0 => True
       | n => n ≤ (s.gpr .rsp).toNat) ∧
       (s.gpr .rsp).toNat + 8 * (ws.length - argRegs.length + 1) ≤ 2 ^ 64
-  pub s₁ s₂ := s₁.gpr .rsp = s₂.gpr .rsp
   mem s := s.mem
   rd s := s.rd
   wr s := s.wr
@@ -109,13 +100,8 @@ abbrev target : Target where
   isa := isa
   printer := printer
   abiPreserved := abiPreserved
-  -- x32 targets (`x86_64-unknown-linux-gnux32`) have 32-bit pointers. The
-  -- model's baseline includes SSE2 (see `Instr.requires`), which
-  -- `x86_64-unknown-none` and `x86_64-unknown-uefi` turn off; there the Rust
-  -- caller would also not save the SSE registers, of which UEFI's convention
-  -- (the Microsoft x64 one) makes `xmm6`–`xmm15` callee-saved.
-  rustCfg := "all(target_arch = \"x86_64\", target_pointer_width = \"64\", \
-    target_feature = \"sse2\")"
+  -- x32 targets (`x86_64-unknown-linux-gnux32`) have 32-bit pointers.
+  rustCfg := "all(target_arch = \"x86_64\", target_pointer_width = \"64\")"
   rustAbi := "sysv64"
   abi := abi
 

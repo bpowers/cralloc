@@ -9,11 +9,6 @@ place of what the kernel checked, wherever it is among what its roots use
 definition declared outside `Spec/` (here, in this module).
 -/
 
--- `#guard_msgs` compares every message of its command, which would include
--- the lakefile's profile of it (`ci/lean_profile.py`), different on every
--- machine.
-set_option profiler false
-
 namespace VG.Test.Audit
 
 def two : Nat := 2
