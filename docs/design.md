@@ -301,8 +301,9 @@ number, and the bounds checks need no other state. For a magazine of `n` slots t
 
 A word of zero fails both tests. A slab that has never been written, which is all zero
 bytes, therefore behaves as a slab with no magazines, and nothing needs initializing before
-the first call. The low three bits of a word are zero for any slot address; a word with its
-lowest bit set is a marker (see "Idle caches").
+the first call. A slot address has its low three bits clear. A **marker** is a word whose low
+19 bits are exactly 1, which leaves every slot-number bit clear, so a marker also fails both
+tests (see "Idle caches").
 
 The routines rely on one invariant, which the slow paths maintain. For every CPU and small
 class, the slab word is zero, a marker, or the address of slot `s` of a magazine of that
@@ -533,8 +534,8 @@ the one a Rust `Layout` of the same size implies.
   objects cached under a CPU stay with that CPU.
 - **Idle caches.** Memory can sit in the slab of a CPU the process no longer runs on. Each
   slab has an activity counter, and a heartbeat that finds one unchanged for long enough
-  drains that slab. Every process has a **generation**, a random number; a marker is a
-  generation with its lowest bit set.
+  drains that slab. Every process has a **generation**, a random number; its marker is the
+  generation shifted above the low 19 bits, with the lowest bit set.
   1. Claim the slab by writing this generation into its drain flag with a compare-and-swap.
      If the flag already holds this generation, another thread is draining; stop.
   2. Exchange each class's slab word and each spare-stack head with this generation's
