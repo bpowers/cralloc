@@ -1,0 +1,16 @@
+[package]
+name = "bench-alloc"
+version = "0.0.0"
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+links = "benchalloc"
+
+# Pick at most one. With none, the binary uses Rust's System allocator (glibc).
+# Each feature calls the allocator the way its usual Rust wrapper crate does; see src/lib.rs.
+# To add an allocator: a feature here, a module in src/, and an entry in ../allocators.toml.
+[features]
+mi = []        # mimalloc, as the `mimalloc` crate calls it (unsized mi_free)
+mi-sized = []  # the same, freeing with mi_free_size_aligned
+je = []        # system libjemalloc, as `tikv-jemallocator` calls it (sized sdallocx)
+tc = []        # google/tcmalloc, as `tcmalloc-better` calls it (sized delete)
