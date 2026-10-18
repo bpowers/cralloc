@@ -19,9 +19,14 @@
 //!   purges the whole slot and takes the advice back, or, within the budget for kept grown
 //!   blocks, releases it resident with its advice, which the next claim takes back
 //!   (`Back::alloc_at`). The huge pages already faulted stay, and that tenant's flag is clear,
-//!   so a shrink of it in place is not trimmed to whole huge pages and may split one: the
-//!   kernel then returns the part, a cost in time, not memory. A purge of a free slot needs no
-//!   rule of its own: it returns the slot's pages whole.
+//!   so a shrink of it in place is not trimmed to whole huge pages and may purge part of one.
+//!   That costs memory, not only time: a partly unmapped huge page stays charged to the cgroup
+//!   whole until the kernel splits it, which it leaves to memory pressure
+//!   (`crates/asmalloc-preload/tests/programs/thp_partial.c`: purging half of each huge page of
+//!   64 MiB halved RSS, 67 to 35 MiB, but took the charge only to 56). It is bounded at under
+//!   two huge pages a shrink, the huge pages at the shrink's two ends, and `mark_clean` marks
+//!   those pages clean, so the retained count does not see them. A purge of a free slot needs
+//!   no rule of its own: it returns the slot's pages whole.
 //! - **Clean bits** say a page has not been written since it was carved or last purged. Only a
 //!   purge and the first claim of a carved slot set them (`mark_fresh`, for the pages past its
 //!   block); a claim and anything that widens a held block clear them under what it may write
