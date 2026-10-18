@@ -589,7 +589,10 @@ at once from holding twice their size.
   family, `malloc_usable_size`, `malloc_trim` and the sized frees: every function glibc
   exports that takes or returns a block. `free(p)` reads the class from the address table
   and joins the same path as a Rust free. A pointer outside the heap is a caller's bug and
-  aborts the process. `malloc_usable_size` reports the class size of a small object and,
+  aborts the process. A pointer into the middle of a small object is the same bug, but the
+  fast path does not look for it: finding a slot's start takes a multiplication per free.
+  Such a pointer is caught only if it reaches the bitmaps before it is handed out again.
+  `malloc_usable_size` reports the class size of a small object and,
   for a large one, its recorded size rounded up to a page. Callers write into the room
   they are told they have, so a `realloc` that moves a block copies that much and `calloc`
   zeroes that much.
