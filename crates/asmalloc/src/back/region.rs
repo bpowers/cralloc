@@ -342,10 +342,19 @@ pub(crate) unsafe fn purge_held<H: Host>(host: &H, region: RegionId, slot: u32) 
     true
 }
 
+/// Whether slots of this layout are charged by their tenants' extents: only slots of at least a
+/// huge page. A smaller slot is charged whole, which over-counts by at most its size, and its
+/// free then reads no size word and writes no clean bit: the large-object pipeline, whose
+/// 4-256 KiB blocks cross between CPUs, was 6% slower for those.
+const fn tells_tails(layout: &Layout) -> bool {
+    layout.size() >= layout.page_size() * layout.huge_pages() as usize
+}
+
 /// The page, counted from the region's start, past the last that a tenant of large slot `slot`
 /// with `size` bytes could have written: its size from the slot's stagger (a block starts at
 /// the slot's start or there), rounded up to a page, or to a huge page if `huge`, since an
-/// advised range faults a huge page at a time; within the slot's pages, `unit`.
+/// advised range faults a huge page at a time; within the slot's pages, `unit`. The end of the
+/// slot unless that leaves at least half of it past the extent.
 const fn extent_of(layout: &Layout, slot: u32, unit: Unit, size: usize, huge: bool) -> u32 {
     let page = layout.page_size();
     let written = layout.slot_bytes(slot) + layout.stagger(slot) + size;
@@ -356,9 +365,22 @@ const fn extent_of(layout: &Layout, slot: u32, unit: Unit, size: usize, huge: bo
         end as u32
     };
     let end = if huge { layout.huge_ceil(end) } else { end };
-    if end < unit.start {
+    if !tells_tails(layout) {
+        return unit.end;
+    }
+    let end = if end < unit.start {
         unit.start
     } else if end > unit.end {
+        unit.end
+    } else {
+        end
+    };
+    // Only a tail of at least half the slot is told apart. A smaller one is the class's own
+    // rounding (classes are a quarter apart) and the stagger's page, and marking it would
+    // write shared metadata on most frees and claims of blocks that cross between CPUs: the
+    // large-object pipeline was 12% slower for it. A block that moved in with headroom fills
+    // a fifth to a quarter of its slot, so its tail is always told apart.
+    if (unit.end - end) * 2 < unit.end - unit.start {
         unit.end
     } else {
         end
@@ -403,6 +425,9 @@ const fn pages(w: u32, from: u32, to: u32) -> u64 {
 /// all of it goes back. No zero bit is set here, so a claim never takes these pages for zero.
 pub(crate) fn charge_resident<H: Host>(host: &H, region: RegionId, slot: u32) -> usize {
     let layout = host.layout();
+    if !tells_tails(layout) {
+        return layout.size();
+    }
     let (Some(unit), Some(now)) = (layout.slot_unit(slot), recorded(host, region, slot)) else {
         return layout.size();
     };
@@ -429,6 +454,10 @@ pub(crate) fn charge_resident<H: Host>(host: &H, region: RegionId, slot: u32) ->
 /// calls it.
 pub(crate) fn cover<H: Host>(host: &H, region: RegionId, slot: u32) {
     let layout = host.layout();
+    if !tells_tails(layout) {
+        // Its claim cleared every clean bit of the slot, and nothing has set one since.
+        return;
+    }
     let (Some(unit), Some(now)) = (layout.slot_unit(slot), recorded(host, region, slot)) else {
         return;
     };
@@ -449,6 +478,9 @@ pub(crate) fn cover<H: Host>(host: &H, region: RegionId, slot: u32) {
 /// for deciding whether to keep it. For the slot's holder.
 pub(crate) fn charge<H: Host>(host: &H, region: RegionId, slot: u32) -> usize {
     let layout = host.layout();
+    if !tells_tails(layout) {
+        return layout.size();
+    }
     match (layout.slot_unit(slot), recorded(host, region, slot)) {
         (Some(unit), Some(now)) => {
             let end = extent_of(layout, slot, unit, now.size, now.huge);

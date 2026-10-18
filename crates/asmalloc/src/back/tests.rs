@@ -1667,8 +1667,9 @@ fn grown_blocks_are_kept_within_their_budget() {
     let huge = Native::GEOMETRY.huge_page_size();
     let page = Native::GEOMETRY.page_size();
     let budget = kept_grown(Native::GEOMETRY);
-    let (old_class, new_class) = (large(96 << 10), large(256 << 10));
-    assert!(old_class.size() + new_class.size() <= budget);
+    // Slots more than twice what their blocks write, so that each is charged its block.
+    let (old_class, new_class) = (large(192 << 10), large(512 << 10));
+    assert!((96 << 10) + (192 << 10) <= budget);
     let purges = || os.calls(Call::Purge);
     let before = purges();
     // A block that grows by moving: the slot it leaves is kept, data and all.
@@ -1745,7 +1746,13 @@ fn charge_of<O: Os>(back: &Back<'_, O>, class: Class, ptr: NonNull<u8>, size: us
         layout.page_size()
     };
     let end = (start + layout.stagger(index) + size).next_multiple_of(unit);
-    (end - start).min(class.size())
+    let charge = (end - start).min(class.size());
+    // A tail under half the slot is not told apart.
+    if (class.size() - charge) * 2 < class.size() {
+        class.size()
+    } else {
+        charge
+    }
 }
 
 /// A large slot released resident is charged what its last tenant could have written, and a
@@ -1810,7 +1817,11 @@ fn a_large_slot_is_charged_what_its_tenant_could_write() {
         // The advised case's move kept the slot it came from, which is charged too.
         let base = back.retained();
         let charge = charge_of(&back, class, ptr, size);
-        assert!(charge < class.size() || case == "whole", "{case}");
+        // The advised block's huge pages fill half its slot or more, by its stagger.
+        if case != "advised" {
+            let told = matches!(case, "headroom" | "staggered" | "shrunk");
+            assert_eq!(charge < class.size(), told, "{case}");
+        }
         back.free(ptr, class);
         assert_eq!(back.retained(), base + charge, "{case}");
         if claim {
