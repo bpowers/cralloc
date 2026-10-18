@@ -1794,6 +1794,33 @@ putting a large class's header back in its block; putting a large class's leaf b
 next to its summary and zero bitmap; and both together, which came to +3.5%. Its cause is not
 found.
 
+*Found, the same day, by attribution.* `callgrind` on `largepair` (single-threaded, the same
+large allocate and free sequence; 200k operations) at `3882aee` and `1868dd0`: 3550 against
+3677 instructions per operation, all of the difference in `Back::alloc_at` (+55 per call),
+`tree::release_one` (+9) and `Heap::free_large` (+6). Per instruction, `alloc_at` executed
+19 more stack stores and 18 more loads per call: the layout memo returned a layout from two
+places, the unpacked words and the cold call that works one out, so `alloc_at` built the
+class's host twice and copied it; and `Back::grow` had come to be inlined whole, adding spills.
+`release_one`'s extra nine are the host's block cache, which a free used to fill by reading the
+header and now fills in `release_one`. AMD IBS op sampling with data addresses (five runs a
+build, about 18,000 user samples each) put the extra L1 misses of the pipeline in the large
+classes' metadata blocks: 31 misses in 45 accesses on the page holding the zero bitmap and
+the start of the sizes, which with the header moved out and the leaf bitmap after the sizes
+were no longer near the summary. None of the extra misses were on lines both threads write.
+
+Fixed (`dc2c720`): the cold call only fills the memo and the layout is always unpacked from
+it; paying the growth debt is a cold call of its own; and a large class's block, which every
+large allocation and free touches anyway, starts with its header (on its own line), then the
+summary, leaf and zero bitmaps, then the clean bitmap and sizes, and is committed whole at
+assignment. Small classes keep the layout that saves their pages. `perf stat`, five
+interleaved rounds under the lock, medians:
+
+| Job | `3882aee` | `1868dd0` | fixed |
+|---|---:|---:|---:|
+| pipeline t2, large objects (ns/alloc) | 72.61 | 76.61 | 72.28 |
+| largepair (ns/op) | 75.36 | 80.65 | 74.86 |
+| largepair, instructions | 6.061 G | 6.333 G | 6.061 G |
+
 ### What is left, and proposals
 
 At the tip, against jemalloc:
