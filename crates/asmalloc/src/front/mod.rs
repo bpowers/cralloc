@@ -191,17 +191,16 @@ const _: () = {
     assert!(spec::MIRROR_COUNT == 1 && size_of::<[AtomicU64; 2]>() == spec::MIRROR_BYTES);
     assert!(REGION_DISP == spec::REGION_DISP && REGION_COUNT == spec::REGION_COUNT);
     // Every small class's hot word is one the routines may address.
-    assert!(SMALL_COUNT < spec::CLASS_LIMIT);
+    assert!(Slab::HOT_BYTES / 8 <= spec::CLASS_LIMIT);
 };
 
 const _: () = {
     assert!(offset_of!(Front, slabs) == 0);
     // What the C frees read on every call is off the page offsets of the slab words the fast
-    // paths write (the spare heads, which only slow paths write, may share them).
-    assert!(
-        SHIFT_DISP % SLAB_BYTES >= Slab::HOT_BYTES
-            && (BASE_DISP + 8) % SLAB_BYTES <= MASK_PAGE_OFFSET
-    );
+    // paths write: at bytes 0 to 15 of a 32-byte chunk, where no hot word is (`slab`; the
+    // spare heads, which only slow paths write, may share them).
+    assert!(SHIFT_DISP.is_multiple_of(32) && BASE_DISP + 8 <= SHIFT_DISP + 16);
+    assert!((BASE_DISP + 8) % SLAB_BYTES <= MASK_PAGE_OFFSET);
     assert!(
         REGION_DISP % SLAB_BYTES == REGION_PAGE_OFFSET && REGION_PAGE_OFFSET >= Slab::USED_BYTES
     );
@@ -210,7 +209,7 @@ const _: () = {
     assert!(MASK_PAGE_OFFSET + MASK_COUNT * 8 <= SLAB_BYTES);
     // No mask shares a page offset with any field of a slab.
     assert!(Slab::USED_BYTES <= MASK_PAGE_OFFSET);
-    assert!(SMALL_COUNT < MASK_COUNT);
+    assert!(Slab::HOT_BYTES / 8 <= MASK_COUNT);
 };
 
 /// The slabs, and after them what the routines read at fixed distances from them. The generated
@@ -248,16 +247,39 @@ pub(crate) fn mask(class: SmallClass) -> u32 {
     MASKS[class.class().index() as usize]
 }
 
+/// The masks the generated C routines read, as [`SLABS`] holds them: indexed by the position of
+/// the class's hot word (`Field::index`), which is what the C size tables and the region table
+/// give, so each entry is `MASK_DISP` bytes above its word; zero at every other position.
+const WORD_MASK_TABLE: [u32; MASK_COUNT] = {
+    let mut masks = [0; MASK_COUNT];
+    let mut ordinal = 0;
+    while ordinal < SMALL_COUNT {
+        if let Some(class) = SmallClass::from_ordinal(ordinal) {
+            masks[Field::hot(class).index()] = class.magazine().mask() as u32;
+        }
+        ordinal += 1;
+    }
+    masks
+};
+
+/// The last position with a mask, which [`publish_masks`] writes last and so checks first.
+const LAST_MASKED: usize = {
+    let mut last = MASK_COUNT - 1;
+    while WORD_MASK_TABLE[last] == 0 {
+        last -= 1;
+    }
+    last
+};
+
 /// Writes the masks the generated C routines read, if they have not been. Every thread writes
 /// the same values, so a race is harmless; until a class's entry is written its routines miss
 /// and land in a slow path, which calls this.
 #[cfg_attr(any(miri, kani), allow(dead_code))]
 pub(crate) fn publish_masks() {
-    let last = &SLABS.masks[SMALL_COUNT];
-    if last.load(Ordering::Relaxed) != 0 {
+    if SLABS.masks[LAST_MASKED].load(Ordering::Relaxed) != 0 {
         return;
     }
-    for (entry, &mask) in SLABS.masks.iter().zip(MASK_TABLE.iter()) {
+    for (entry, &mask) in SLABS.masks.iter().zip(WORD_MASK_TABLE.iter()) {
         entry.store(mask as u64, Ordering::Relaxed);
     }
 }
@@ -289,7 +311,7 @@ mod tests {
         assert_eq!(core::ptr::from_ref(slabs).addr(), base);
         for class in SmallClass::all() {
             let word = SLABS.word(class);
-            let entry = core::ptr::from_ref(&SLABS.masks[class.class().index() as usize]).addr();
+            let entry = core::ptr::from_ref(&SLABS.masks[Field::hot(class).index()]).addr();
             assert_eq!(entry, word + MASK_DISP);
             // Not at a slab word's page offset.
             assert!(entry % SLAB_BYTES >= Slab::USED_BYTES);
@@ -302,7 +324,7 @@ mod tests {
         publish_masks();
         publish_masks();
         for (i, entry) in SLABS.masks.iter().enumerate() {
-            assert_eq!(entry.load(Ordering::Relaxed), MASKS[i] as u64);
+            assert_eq!(entry.load(Ordering::Relaxed), WORD_MASK_TABLE[i] as u64);
         }
     }
 }

@@ -43,17 +43,17 @@ pub(crate) const RETIRED: i32 = -2;
 /// `cpu_id` before the thread has tried: -1, as the generated area starts.
 pub(crate) const UNREGISTERED: u32 = spec::RSEQ_CPU_ID_UNREGISTERED;
 
-// The area is placed in its page clear of every slab word a routine writes, and of the words
-// the C routines read at page offsets from 1024 up. A load of `cpu_id` at the page offset of a
-// slab word stored just before waits for that store as if it were the same location, which
-// costs a pair two cycles (docs/research/musl-and-static.md). The thread pointer is aligned to
-// the area's section, a page, so the offset holds in every thread.
+// The area's page offset is pinned, the same in every thread (the thread pointer is aligned to
+// the area's section, a page). It is 32-byte aligned, as every registered area is, so `cpu_id`
+// and `rseq_cs` are at bytes 4 to 15 of a 32-byte chunk, where no slab hot word is (`slab`): a
+// load of `cpu_id` at the page offset of a hot word stored just before would wait for that
+// store, two cycles a pair (docs/research/musl-and-static.md). It is also below the words the C
+// routines read at page offsets from 1024 up.
 const _: () = {
-    use super::Slab;
     let start = spec::RSEQ_AREA_PAGE_OFFSET;
     let end = start + spec::RSEQ_AREA_LEN;
     assert!(spec::RSEQ_AREA_ALIGN == spec::SLAB_BYTES);
-    assert!(start >= Slab::HOT_BYTES && end <= 1024);
+    assert!(start.is_multiple_of(32) && end <= 1024);
     assert!(
         spec::RSEQ_CPU_ID + 4 <= spec::RSEQ_AREA_LEN && spec::RSEQ_CS + 8 <= spec::RSEQ_AREA_LEN
     );
