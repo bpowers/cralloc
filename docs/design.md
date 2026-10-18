@@ -367,15 +367,17 @@ emit one that breaks them:
   cycle;
 - the slow path is out of line.
 
-Each routine is generated in two forms. The inlined form is an `asm!` block in an
-`#[inline]` function that takes the word's address and the mask in registers. It becomes part
-of `__rust_alloc` in the user's binary and, with LTO, of its callers, whether their layouts are
-constant or not. The out-of-line form takes the word's address in a register and reads the mask
-from a table placed after the slabs at a fixed distance from the word, one entry per possible
-class byte. The table is zero until the first slow path writes it, and a zero mask fails both
-tests, so it needs no initialization check, and every byte that is not a small class sends a
-free by address to the slow path. The C entry points use it, ending their own routines with
-the same steps.
+The pop and the push are used in two settings. For Rust they are `asm!` blocks in
+`#[inline]` functions that take the word's address and the mask in registers. They become
+part of `__rust_alloc` in the user's binary and, with LTO, of its callers, whether their
+layouts are constant or not. For C they are the last steps of the entry routines for
+`malloc`, `calloc`, `free` and the sized free, which are out of line and exported as the C
+symbols themselves. An entry routine first turns its argument into the word's address: a
+size through a byte table of classes, a pointer through the region table. It reads the mask
+from a table placed after the slabs at a fixed distance from the word, one entry per
+possible class byte. That table is zero until the first slow path writes it, and a zero mask
+fails both tests, so it needs no initialization check, and every byte that is not a small
+class sends a free by address to the slow path.
 
 ### Slow path: exchanging magazines
 
