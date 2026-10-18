@@ -1117,3 +1117,293 @@ fn threads_never_share_a_slot() {
         });
     });
 }
+
+/// Evidence for the adversarial review of the memory-return machinery. Each test fails on the
+/// code as reviewed and is ignored so the gate passes; run one with
+/// `cargo test -p asmalloc --lib back::tests::review -- --ignored <name>`.
+mod review {
+    use super::super::layout::Grow;
+    use super::super::tree::Host;
+    use super::super::word::Word;
+    use super::*;
+    use crate::classes::MagazineSize;
+    use crate::space::Geometry;
+
+    /// 4 KiB pages, 256 KiB huge pages, 4 MiB regions: a huge page of 8-byte slots is 512 leaf
+    /// words, more than a heartbeat's purge budget, as it is in the design's geometry for every
+    /// class up to 128 bytes. The other shapes' huge pages are too small to show that.
+    enum Wide {}
+
+    impl Shape for Wide {
+        const GEOMETRY: Geometry = Geometry::new(12, 18, 22, 22, 16, 1, MagazineSize::MAX);
+    }
+
+    fn carved<O: Os>(back: &Back<'_, O>, class: Class, at: *mut u8) -> u32 {
+        let host = back.host(class).unwrap();
+        let region = back.space().locate(at).unwrap().region;
+        Grow::unpack(host.meta(region, host.layout().grow_word()).load()).carved
+    }
+
+    /// Finding decay-walk-wedge. `purge_region` calls `top_up` whenever a region's cursor is
+    /// zero and charges the words it read against the step's budget before the first unit. If
+    /// the watermark's huge page has a live slot more than a budget's worth of leaf words above
+    /// the page's start, `top_up` alone spends the budget, the loop breaks before any unit, the
+    /// cursor stays zero, and the next heartbeat does the same. The walk never leaves the
+    /// region: the pass never ends, and nothing in that region or any region below it is
+    /// returned by the clock.
+    #[test]
+    #[ignore = "finding: decay-walk-wedge"]
+    fn a_live_slot_high_in_the_watermark_page_wedges_the_decay_walk() {
+        let state = state::<Wide>();
+        let back = state.get_or_reserve().unwrap();
+        let os = state.os();
+        let huge = Wide::GEOMETRY.huge_page_size();
+        // Region 0: a class that is wholly free, which the clock should return.
+        let low = small(1024);
+        let mut victims = fill(&back, low, 512);
+        for &p in &victims {
+            paint(p, 1024, 7);
+        }
+        // Region 1: 8-byte slots, into the huge-page part and three quarters of the way up a
+        // huge page. Everything is freed but the last slot carved.
+        let class = small(8);
+        let mut slots = Vec::new();
+        while slots.len() < (6 * huge + 3 * huge / 4) / 8 {
+            slots.extend(fill(&back, class, 64));
+        }
+        for &p in &slots {
+            paint(p, 8, 9);
+        }
+        // (With the live slot under a budget's worth of words from the page's start, say
+        // `slots.remove(slots.len() - 20000)`, the pass ends and this test passes.)
+        let live = slots.pop().unwrap();
+        let region = back.space().locate(live).unwrap().region;
+        let end = back
+            .space()
+            .region(region)
+            .map_addr(|a| a.saturating_add(Wide::GEOMETRY.largest_plan().region_size() - 1));
+        assert_eq!(os.huge_pages(end), Some(HugePages::Prefer));
+        for chunk in slots.chunks_mut(64) {
+            back.launder(class, chunk);
+        }
+        back.launder(low, &mut victims);
+        assert!(back.retained_small() < retained_cap(Wide::GEOMETRY));
+        for _ in 0..10 {
+            os.advance_clock(DECAY_TICKS);
+            beat(&back);
+        }
+        let laps = state.laps.load(core::sync::atomic::Ordering::Relaxed);
+        let at = state.purge_at.load(core::sync::atomic::Ordering::Relaxed);
+        assert!(
+            !pass_under_way(&state) && os.calls(Call::Purge) > 0,
+            "after ten intervals of {BEATS} heartbeats the pass is still under way: \
+             {laps} laps, walk at region {at}, {} purges, {} bytes retained",
+            os.calls(Call::Purge),
+            back.retained()
+        );
+    }
+
+    /// Finding count-drifts-up. `fill` subtracts what its claims found resident before it adds
+    /// what they revived, and the subtraction stops at zero. A fill from a purged page with the
+    /// count near zero loses the subtraction and keeps the addition: bytes are counted as
+    /// retained though every slot is in the program's hands. The same loss happens across
+    /// threads when a claim's `unretain` runs between a free's `release` and its `retain`
+    /// (`class.rs`, `release_all`): there the lost amount is a whole large slot.
+    #[test]
+    #[ignore = "finding: count-drifts-up"]
+    fn a_fill_from_purged_memory_leaves_bytes_counted_that_are_not_free() {
+        let state = state::<Standard>();
+        let back = state.get_or_reserve().unwrap();
+        let class = small(16);
+        let page = Standard::GEOMETRY.page_size();
+        let mut slots = fill(&back, class, page / 16);
+        back.launder(class, &mut slots);
+        assert_eq!(back.trim(), page);
+        assert_eq!(back.retained(), 0);
+        let again = fill(&back, class, page / 16);
+        assert_eq!(again, slots);
+        assert_eq!(
+            back.retained(),
+            0,
+            "the program holds every slot, yet bytes are counted as free and resident"
+        );
+    }
+
+    /// Finding count-drifts-up, across threads, for the large-class count. A race, so it is
+    /// evidence when it fails and none when it passes: two threads allocate and free slots of
+    /// one large class that is bigger than the large cap. Each free purges its own slot, so
+    /// with nothing allocated the count should be zero. When one thread's claim lowers the
+    /// count between the other's `release` and `retain`, the subtraction is lost at zero and
+    /// the addition stays; the freeing thread then finds its slot taken and cannot purge it.
+    /// The count is left over the cap with nothing free, and from then on every large free
+    /// purges its slot.
+    #[test]
+    #[ignore = "finding: count-drifts-up"]
+    fn racing_large_frees_leave_the_large_count_over_its_cap_with_nothing_free() {
+        let state = state::<Native>();
+        state.get_or_reserve().unwrap();
+        let state = &*state;
+        let class = large(512 << 10);
+        assert!(class.size() > large_retained_cap(Native::GEOMETRY));
+        thread::scope(|scope| {
+            // More threads than CPUs, so that some are preempted between the two steps.
+            for _ in 0..64 {
+                scope.spawn(move || {
+                    let back = state.get().unwrap();
+                    for _ in 0..20_000 {
+                        let a = back.alloc(class, class.size()).unwrap();
+                        let b = back.alloc(class, class.size()).unwrap();
+                        back.free(a.ptr, class);
+                        back.free(b.ptr, class);
+                    }
+                });
+            }
+        });
+        let back = state.get().unwrap();
+        back.trim();
+        assert_eq!(
+            back.retained_large(),
+            0,
+            "every slot is free and purged, yet the count says this much is resident"
+        );
+    }
+
+    /// Finding cap-has-no-hysteresis. `cap_fires` looks only at the two ends of one launder's
+    /// own addition, so a count that hovers at the cap (or at any re-arm step) fires on every
+    /// launder that crosses upward: here each one walks the whole fragmented heap for nothing.
+    #[test]
+    #[ignore = "finding: cap-has-no-hysteresis"]
+    fn a_count_hovering_at_the_cap_walks_the_heap_on_every_launder() {
+        let state = state::<Standard>();
+        let back = state.get_or_reserve().unwrap();
+        let os = state.os();
+        let cap = retained_cap(Standard::GEOMETRY);
+        let class = small(1024);
+        let per_page = Standard::GEOMETRY.page_size() / 1024;
+        let slots = fill(&back, class, 2 * cap / 1024);
+        // One slot of every page stays live, so nothing can be purged.
+        let (_live, mut storm): (Vec<*mut u8>, Vec<*mut u8>) = slots
+            .iter()
+            .partition(|p| (p.addr() / 1024).is_multiple_of(per_page));
+        let mut extra = storm.split_off(cap / 1024 - 32);
+        extra.truncate(64);
+        for chunk in storm.chunks_mut(64) {
+            back.launder(class, chunk);
+        }
+        assert_eq!(back.retained_small(), cap - 32 * 1024);
+        let laps = || state.laps.load(core::sync::atomic::Ordering::Relaxed);
+        let before = laps();
+        // The program frees 64 slots and takes 64 back, over and over, so the count moves
+        // between 32 KiB under the cap and 32 KiB over it.
+        for _ in 0..50 {
+            back.launder(class, &mut extra);
+            assert!(back.retained_small() > cap);
+            extra = fill(&back, class, 64);
+            assert!(back.retained_small() <= cap);
+        }
+        assert_eq!(os.calls(Call::Purge), 0, "nothing was purgeable");
+        assert!(
+            laps() - before <= 2,
+            "50 launders across the cap walked the heap {} times",
+            laps() - before
+        );
+    }
+
+    /// Finding clock-back-stops-decay. `decay_look` reads a clock behind the last pass's end as
+    /// "not yet", with no limit: after the counter goes back (resume from suspend resets the
+    /// timestamp counter on most machines; a restored checkpoint) nothing decays until the
+    /// counter has caught up with where it was, however long that is.
+    #[test]
+    #[ignore = "finding: clock-back-stops-decay"]
+    fn a_clock_that_went_back_stops_decay_until_it_catches_up() {
+        let state = state::<Standard>();
+        let back = state.get_or_reserve().unwrap();
+        let os = state.os();
+        let class = small(1024);
+        let total = retained_cap(Standard::GEOMETRY) / 2;
+        let mut slots = fill(&back, class, total / 1024);
+        for &p in &slots {
+            paint(p, 1024, 5);
+        }
+        back.launder(class, &mut slots);
+        os.advance_clock(100 * DECAY_TICKS);
+        beat(&back);
+        assert!(!pass_under_way(&state));
+        let left = back.retained();
+        assert!(left > 0 && left < total);
+        // The counter goes back by fifty intervals.
+        os.advance_clock(0u64.wrapping_sub(50 * DECAY_TICKS));
+        for _ in 0..20 {
+            os.advance_clock(DECAY_TICKS);
+            beat(&back);
+        }
+        assert!(
+            back.retained() < left,
+            "twenty intervals after the clock went back, nothing has decayed"
+        );
+    }
+
+    /// Finding decay-overshoots-goal. A pass's goal is checked only between steps, and a step
+    /// is bounded in words of bitmap, not bytes. A word covers 64 slots, so one step of 256
+    /// words in a region of large slots covers far more than a quarter of what is retained:
+    /// in the design's geometry 16 MiB of 1 KiB slots, 512 MiB of 32 KiB ones. The first pass
+    /// returns everything, where the design says up to a quarter.
+    #[test]
+    #[ignore = "finding: decay-overshoots-goal"]
+    fn a_decay_pass_over_big_slots_returns_everything_at_once() {
+        let state = state::<Wide>();
+        let back = state.get_or_reserve().unwrap();
+        let os = state.os();
+        let class = small(32 << 10);
+        let total = 3 << 20;
+        let mut slots = fill(&back, class, total / class.size());
+        for &p in &slots {
+            paint(p, class.size(), 5);
+        }
+        back.launder(class, &mut slots);
+        assert_eq!(back.retained(), total);
+        assert!(total < retained_cap(Wide::GEOMETRY));
+        os.advance_clock(DECAY_TICKS);
+        beat(&back);
+        assert!(!pass_under_way(&state));
+        let left = back.retained();
+        assert!(
+            left >= total / 2,
+            "one pass returned {} of {total} bytes",
+            total - left
+        );
+    }
+
+    /// Finding top-up-creeps. For a class whose size does not divide a huge page, `top_up`
+    /// carves through the slot that straddles the page's end, which leaves the watermark just
+    /// inside the next huge page with one free slot below it. The next pass over the region
+    /// takes that for a watermark page worth purging and carves all of it too, though it was
+    /// never touched, and so on until a huge-page boundary that the size divides.
+    #[test]
+    #[ignore = "finding: top-up-creeps"]
+    fn topping_up_a_straddled_huge_page_carves_untouched_ones_on_later_passes() {
+        let state = state::<Native>();
+        let back = state.get_or_reserve().unwrap();
+        let class = small(48);
+        let huge = Native::GEOMETRY.huge_page_size();
+        let mut slots = Vec::new();
+        while slots.len() < (6 * huge + huge / 2) / 48 {
+            slots.extend(fill(&back, class, 64));
+        }
+        let top = slots[slots.len() - 1];
+        for chunk in slots.chunks_mut(64) {
+            back.launder(class, chunk);
+        }
+        back.trim();
+        let first = carved(&back, class.class(), top);
+        back.trim();
+        back.trim();
+        let third = carved(&back, class.class(), top);
+        assert_eq!(
+            first,
+            third,
+            "an idle region's watermark moved {} bytes over two more passes",
+            (third - first) as usize * 48
+        );
+    }
+}
