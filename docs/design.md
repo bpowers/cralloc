@@ -437,16 +437,24 @@ been touched.
 - **Filling a magazine** searches the class's regions in address order. In each, it walks
   the summary tree to the lowest bitmap word with free objects and claims bits from it with
   one compare-and-swap. The objects of one word are adjacent in memory, so a refilled
-  magazine is spatially dense. If no region of the class has a free object, the fill carves
-  from the last region's watermark with one atomic add, and when that region is exhausted it
-  assigns a new one to the class.
+  magazine is spatially dense. A fill goes on from the word it last claimed from, without
+  walking down from the top again. When it meets another fill at a word (the word changed
+  under it, or was emptied before it arrived), it moves on past that group of 64 words, so
+  fills of one class on different CPUs part after a few collisions instead of contending
+  for every word; they stay near the bottom of the heap. If no region of the class has a
+  free object, which only a search from the top may conclude, the fill carves from the last
+  region's watermark with one atomic add, and when that region is exhausted it assigns a
+  new one to the class.
 - **Laundering a magazine** groups its pointers by bitmap word and sets each word's bits
   with one atomic OR. If a bit was already set, the object was freed twice and the process
   aborts.
 - **Summary bits are hints.** They may be set when nothing below is free, and they never
   stay clear when something is. A free sets the word's bits and then sets every summary bit
-  above it that it finds clear. Whoever empties a word clears the summary bit and then reads
-  the word again. A free does not assume that the first free into an empty word set the
+  above it that it finds clear. Whoever empties a word clears its summary bit, at once or
+  together with the others it emptied under the same summary word, and then reads each word
+  again and sets back the bit of any that is no longer empty. A fill that finds a word empty
+  under a set bit leaves the bit to whoever emptied it; a search from the top clears what it
+  finds empty. A free does not assume that the first free into an empty word set the
   summary bit, because that thread may have vanished in a fork before it could.
 
 The order of preference in a fill is the fragmentation policy: reuse free objects before
