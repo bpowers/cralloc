@@ -23,9 +23,9 @@
 //!   "Interfaces").
 //! - `realloc(p, 0)` frees `p` and returns null, as glibc's does. `realloc` keeps a small block
 //!   in place when the new size has the same class, and a large one when the new size is still
-//!   large, fits the slot or run and, shrinking, keeps an eighth of it; a large block that
-//!   grows out of its slot moves to one with headroom. A block that moves keeps every byte its
-//!   usable size covered, up to the new size, as glibc's does.
+//!   large, fits the slot or run and, shrinking, keeps enough of it (`heap::large`); a large
+//!   block that grows out of its slot moves to one with headroom. A block that moves keeps
+//!   every byte its usable size covered, up to the new size, as glibc's does.
 //! - `malloc_usable_size` is the class size of a small block, and the size last asked for,
 //!   rounded up to a page, of a large one.
 //! - `calloc` makes all of the block's usable size read as zero, as glibc's does, checks the

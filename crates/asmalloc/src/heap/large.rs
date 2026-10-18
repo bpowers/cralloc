@@ -10,8 +10,9 @@
 //! still large and fits the slot or run, and, when it shrinks, keeps at least a
 //! [`SHRINK_MOVES_BELOW`]th of it, so that a big buffer shrunk to a sliver does not hold its
 //! slot. Anything else moves the object. An object that outgrows its block moves to one with
-//! [`HEADROOM`] times the room it asked for, so a buffer that doubles is copied every other
-//! doubling, not at each one; but not past a region, since a run commits all its memory at once.
+//! [`HEADROOM`] times the room it asked for, so a buffer that doubles is copied once in every
+//! five doublings, not at each one; but not past a region, since a run commits all its memory at
+//! once ([`growth_rooms`]). When that slot cannot be had, it takes less headroom, then none.
 //! Small objects get no headroom: their class comes from the layout, so their slot must be exactly
 //! their class.
 //!
@@ -36,20 +37,60 @@ use crate::space::Plan;
 use core::alloc::Layout;
 use core::ptr::NonNull;
 
-/// How many times the room it asked for an object gets when it outgrows its block: it then
-/// fills between a fifth and a quarter of its new slot (a class is less than a quarter above
-/// the size it was chosen for).
-pub(crate) const HEADROOM: usize = 4;
+/// How many times the room it asked for an object gets when it outgrows its block. A buffer
+/// that doubles is then copied once in every five doublings (the class above sixteen times the
+/// size, with the stagger's room, is twenty times it, which holds four doublings), and copies
+/// about a fifth of its final size on average over final sizes, against a third at four times;
+/// that copy was half of the time of a buffer grown to 4 MiB and freed, over and over. The room
+/// costs no memory, since the slot is charged, kept and purged by the pages that are not clean
+/// and a move copies dense pieces whole, but it does cost address space and, under strict
+/// overcommit, commit charge, both in proportion to the factor, where the copying saved falls
+/// only with its logarithm: 32 would copy a sixth instead of a fifth for twice the room
+/// (`docs/research/memory.md`, "Headroom for growing blocks").
+pub(crate) const HEADROOM: usize = 16;
+
+/// The headroom a growing block falls back to when no slot with [`HEADROOM`] times its room can
+/// be had (the reservation's regions are all assigned, or the OS refused to commit the slot),
+/// before it takes a block of its size: the headroom an earlier rule gave every growing block,
+/// so that nothing that rule could serve fails for want of the larger slot.
+const FALLBACK_HEADROOM: usize = 4;
 
 /// A large object that shrinks to under this fraction of its slot or run moves: a region has
 /// few slots of a large class, and one should not be held by an object a small fraction of its
 /// size.
-pub(crate) const SHRINK_MOVES_BELOW: usize = 8;
+pub(crate) const SHRINK_MOVES_BELOW: usize = shrink_moves_below(HEADROOM);
 
-// The two rules must leave a gap: a block that moved in with headroom and then shrinks back to
-// the size it had before must stay, or a block resized back and forth across a class boundary
-// is copied at every call. It fills more than 1 / (HEADROOM * 5 / 4) of its slot.
+/// The shrink threshold for a headroom factor: twice it. A block that moved in with headroom
+/// fills more than `1 / (headroom * 5 / 4)` of its slot (a class is less than a quarter above the
+/// size it was chosen for), and a block that shrinks back to the size it had before the move
+/// must stay, or a block resized back and forth across a class boundary is copied at every
+/// call; twice the factor leaves that gap with room to spare.
+const fn shrink_moves_below(headroom: usize) -> usize {
+    2 * headroom
+}
+
 const _: () = assert!(4 * SHRINK_MOVES_BELOW > 5 * HEADROOM);
+const _: () = assert!(HEADROOM >= FALLBACK_HEADROOM);
+
+/// The rooms to try, most first, for a block growing out of its slot to `size` bytes, in a heap
+/// whose regions are `region` bytes: [`HEADROOM`] times the size, then [`FALLBACK_HEADROOM`]
+/// times. Each is at most a region, since a run commits all its memory at once: a block whose
+/// headroom would pass a region takes a slot of a whole region instead. A room no larger than
+/// the size is no room, and is left out; with none left the caller takes a block of the size.
+pub(crate) fn growth_rooms(size: usize, region: usize) -> impl Iterator<Item = usize> {
+    rooms(size, region, HEADROOM)
+}
+
+fn rooms(size: usize, region: usize, headroom: usize) -> impl Iterator<Item = usize> {
+    let room = move |factor: usize| {
+        size.checked_mul(factor)
+            .map(|room| room.min(region))
+            .filter(|&room| room > size)
+    };
+    let first = room(headroom);
+    let second = room(FALLBACK_HEADROOM).filter(move |&r| Some(r) != first);
+    first.into_iter().chain(second)
+}
 
 /// Whether a large block of `len` bytes stays in place when it shrinks to `size` bytes.
 pub(crate) const fn stays_after_shrink(size: usize, len: usize) -> bool {
@@ -85,12 +126,6 @@ fn place(layout: Layout, plan: Plan) -> Place {
             align: layout.align(),
         },
     }
-}
-
-/// The layout with headroom for an object that grows to `layout`, if it can be described.
-fn with_headroom(layout: Layout) -> Option<Layout> {
-    let size = layout.size().checked_mul(HEADROOM)?;
-    Layout::from_size_align(size, layout.align()).ok()
 }
 
 impl<O: Os> Heap<O> {
@@ -287,15 +322,14 @@ impl<O: Os, R: Routines + Copy> Bound<'_, O, R> {
         let region = heap
             .back()
             .map_or(0, |back| back.space().plan().region_size());
-        let roomy = (!zero && new.size() > len && small(new).is_none())
-            .then(|| with_headroom(new))
-            .flatten()
-            .filter(|layout| layout.size() <= region);
+        let roomy = !zero && new.size() > len && small(new).is_none();
         // A zeroed grow clears only what lies past the bytes it keeps, and only when the new
         // block is not known to read as zero.
         // A block with headroom records the size asked for, not the room it was given.
-        let grant = roomy
-            .and_then(|layout| self.alloc_large_slow_using(layout, new.size(), Zero::No))
+        let grant = growth_rooms(new.size(), region)
+            .filter(|_| roomy)
+            .filter_map(|room| Layout::from_size_align(room, new.align()).ok())
+            .find_map(|layout| self.alloc_large_slow_using(layout, new.size(), Zero::No))
             .or_else(|| self.alloc_grant(new, Zero::No))?;
         let kept = old.size().min(new.size());
         // SAFETY: HEAP-04.
@@ -366,8 +400,47 @@ mod tests {
     }
 
     #[test]
-    fn headroom_multiplies_the_size_and_keeps_the_alignment() {
-        assert_eq!(with_headroom(layout(100, 16)), Some(layout(400, 16)));
-        assert_eq!(with_headroom(layout(usize::MAX / 2, 1)), None);
+    fn growth_takes_headroom_then_less_then_none_and_never_past_a_region() {
+        let region = 1 << 32;
+        let rooms = |size| growth_rooms(size, region).collect::<std::vec::Vec<_>>();
+        // The fallback is left out where it is the same room.
+        let both = [HEADROOM << 20, FALLBACK_HEADROOM << 20];
+        assert_eq!(
+            rooms(1 << 20),
+            both[..if HEADROOM == FALLBACK_HEADROOM { 1 } else { 2 }]
+        );
+        // Past a region, a whole one, and the fallback's room if it is less.
+        assert_eq!(rooms(1 << 30)[0], region);
+        assert_eq!(rooms(1 << 31), [region]);
+        assert_eq!(rooms(region), []);
+        assert_eq!(rooms(usize::MAX / 2), []);
+    }
+
+    /// The settling property, for every factor the experiment tried and for the fallback: a
+    /// block that fills its slot, outgrows it by a byte and moves into a slot with headroom, and
+    /// is then cut back to the size it had, stays in place, so a block resized back and forth
+    /// across a class boundary is copied once, not at every call. The worst case is a slot with
+    /// no stagger, whose whole size counts against the shrink.
+    #[test]
+    fn a_block_that_moved_in_with_headroom_stays_when_it_shrinks_back() {
+        let plan = Geometry::DESIGN.largest_plan();
+        let region = plan.region_size();
+        for factor in [4, 8, HEADROOM, 32] {
+            let below = shrink_moves_below(factor);
+            for class in Class::all().filter(|&c| !c.is_small() && plan.fits_region(c)) {
+                let size = class.size();
+                for room in rooms(size + 1, region, factor) {
+                    let Place::Slot(slot) = place(layout(room, 16), plan) else {
+                        panic!("a room of at most a region is a slot: {room}");
+                    };
+                    assert!(slot.size() > size);
+                    assert!(
+                        size >= slot.size() / below,
+                        "factor {factor}: {size} moved to {} and would move back",
+                        slot.size()
+                    );
+                }
+            }
+        }
     }
 }
