@@ -12,7 +12,7 @@
 
 use super::host::ClassHost;
 use super::layout::{Grow, Hints};
-use super::policy::wants_huge;
+use super::policy::{large_retained_cap, wants_huge};
 use super::region::{self, Carve};
 use super::tree::{self, Host};
 use super::word::{BITS, Word, position};
@@ -84,11 +84,12 @@ impl<'a, O: Os> Back<'a, O> {
     /// the start of a slot of `class` that has been handed out, or if a slot is already free or
     /// appears twice: those are double frees or frees of foreign pointers.
     pub fn launder(&self, class: SmallClass, objects: &mut [*mut u8]) {
-        self.release_all(class.class(), objects);
+        self.release_all(class.class(), objects, true);
     }
 
-    /// `launder` for any class.
-    fn release_all(&self, class: Class, objects: &mut [*mut u8]) {
+    /// `launder` for any class. With `count`, the slots are added to the retained count; a
+    /// caller that has just returned their pages to the OS says no.
+    fn release_all(&self, class: Class, objects: &mut [*mut u8], count: bool) {
         if objects.is_empty() {
             return;
         }
@@ -120,7 +121,34 @@ impl<'a, O: Os> Back<'a, O> {
         if let Some((r, w, bits)) = pending {
             tree::release(&host, r, w, bits);
         }
-        self.retain(class, objects.len().saturating_mul(class.size()));
+        if count {
+            self.retain(class, objects.len().saturating_mul(class.size()));
+        }
+    }
+
+    /// For a large slot the program is freeing and still holds: if keeping it resident would
+    /// take the large classes' retained count over its cap, returns its pages to the OS first
+    /// and says so. Aborts as `launder` does, and if the slot is free already.
+    fn purge_before_release(&self, ptr: NonNull<u8>, class: Class) -> bool {
+        let cap = large_retained_cap(self.space.plan().geometry());
+        if self.retained_large().saturating_add(class.size()) <= cap {
+            return false;
+        }
+        let Some(host) = self.host(class) else {
+            self.abort("free of a pointer into a class that has no regions");
+        };
+        let (region, slot) = self.validate(&host, ptr.as_ptr(), class, &mut None);
+        let (word, bit) = position(slot);
+        // The slot's bit is clear while the program holds it. If it is set, this is a second
+        // free of a free slot, which the release below would also catch; catching it here
+        // keeps the purge away from a slot an allocation may be about to claim.
+        if tree::word(&host, tree::Node::leaf(region, word)).load() & (1u64 << bit) != 0 {
+            self.abort("double free: a large object was freed while it was free");
+        }
+        // SAFETY: BACK-CLASS-01 in docs/safety/asmalloc/back/class-safety.md. The program is
+        // freeing the slot and has not been given it back, its bit was clear a moment ago,
+        // and the slot is below the watermark (`validate`).
+        unsafe { region::purge_held(&host, region, slot) }
     }
 
     /// The region and slot of a pointer the caller says is a handed-out slot of `class`, or an
@@ -239,19 +267,15 @@ impl<'a, O: Os> Back<'a, O> {
     /// Frees one slot of `class` to its bitmap. Aborts as [`Back::launder`] does. A large slot's
     /// recorded size is left as it was; the next allocation of the slot writes it.
     ///
-    /// A free of a large slot that leaves the large classes' retained count over its cap
-    /// returns that slot's pages to the OS before it returns (`purge`).
+    /// A free of a large slot that would take the large classes' retained count over its cap
+    /// returns that slot's pages to the OS first, while the caller still holds the slot, and
+    /// then releases it uncounted (`purge`).
     pub fn free(&self, ptr: NonNull<u8>, class: Class) {
-        self.release_all(class, &mut [ptr.as_ptr()]);
         if class.is_small() {
-            return;
+            return self.release_all(class, &mut [ptr.as_ptr()], true);
         }
-        if self.large_over_cap()
-            && let Some(location) = self.space.locate(ptr.as_ptr())
-            && let Some(slot) = self.space.plan().slot_at(location, class)
-        {
-            self.purge_slot(class, location.region, slot);
-        }
+        let purged = self.purge_before_release(ptr, class);
+        self.release_all(class, &mut [ptr.as_ptr()], !purged);
         // A large free is a slow path with no depot behind it, so it beats the heart itself:
         // a program that only moves large blocks still gets its decay.
         self.heartbeat();
