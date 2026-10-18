@@ -77,12 +77,14 @@ at a NUL-terminated string that stays valid and unchanged while it is read.
 - I2. `getenv` returns null or a pointer into the environment: a NUL-terminated string that
   stays valid until the environment is changed (`setenv`, `putenv`, `unsetenv`, or a write to
   `environ`). Neither C library allocates in `getenv`.
-- I3. The constructor runs when the loader loads the library. Loaded by `LD_PRELOAD`, that is
-  before `main` and before any thread of the program's own exists, so nothing can change the
-  environment during the call. The library is not meant to be loaded by `dlopen` (it would not
-  take over `malloc` there); a program that did so while another of its threads changed the
-  environment would break C's rule that `getenv` must not race a change, as with any library's
-  constructor that reads the environment.
+- I3. Precondition, C's own rule for `getenv`: nothing changes the environment while the
+  call runs and its result is read. The constructor runs when the loader loads the library,
+  before `main`. Loaded by `LD_PRELOAD`, the only threads that can exist then are ones the
+  constructors of libraries initialized before this one started, which is rare and which
+  would have to change the environment at that moment to break the rule. Loaded by `dlopen`
+  (not the library's use; it would not take over `malloc` there), the program's other
+  threads must not change the environment meanwhile, as for any library constructor that
+  reads it.
 
 **Proof.** By I1 the argument is valid. By I2 and I3 a non-null result is a NUL-terminated
 string that does not change before `to_bytes` has read it and the comparison is done; the

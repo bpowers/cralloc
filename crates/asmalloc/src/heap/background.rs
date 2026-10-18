@@ -15,7 +15,9 @@ use std::io;
 use std::thread;
 
 /// The ID of the process that started the thread; zero if none has. A forked child inherits
-/// its parent's, which is not its own, so it can start one of its own.
+/// its parent's, which is not its own, so it can start one of its own. A child that has its
+/// parent's ID all the same (PID 1 of a new PID namespace forked by PID 1 of another, or a
+/// reused ID) is taken for the parent, and its call starts nothing.
 static STARTED: AtomicU32 = AtomicU32::new(0);
 
 impl Asmalloc {

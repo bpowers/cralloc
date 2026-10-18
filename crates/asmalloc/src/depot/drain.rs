@@ -132,11 +132,17 @@ impl<O: Os, R: Routines, S: Source> Cache<'_, O, R, S> {
             return Drained::BackedOut;
         }
 
-        // Step 4.
+        // Step 4, in two passes: every field is settled and its marker cleared first, so that
+        // the CPU's fast paths have the whole slab back before the slow work of disposing of
+        // what was taken (a launder, for `Disposal::Launder`). A field still marked would send
+        // every call of its class there to a slow path meanwhile.
         for class in SmallClass::all() {
             for (k, kind) in KINDS.into_iter().enumerate() {
                 let current = slab.field(field(class, kind));
+                let was = &mut old[class.ordinal() % SMALL_COUNT][k];
                 if !generation.is_mine(current.load(Acquire)) {
+                    // A sequence in flight committed: the old value is still the CPU's.
+                    *was = ptr::null_mut();
                     continue;
                 }
                 // The marker was still there after the fence, so the old value is this
@@ -145,6 +151,10 @@ impl<O: Os, R: Routines, S: Source> Cache<'_, O, R, S> {
                 // this drain the marker is another generation's, which a slow path may already
                 // have installed over, and that magazine must not be overwritten.
                 let _ = current.compare_exchange(marker, ptr::null_mut(), AcqRel, Relaxed);
+            }
+        }
+        for class in SmallClass::all() {
+            for (k, kind) in KINDS.into_iter().enumerate() {
                 let was = old[class.ordinal() % SMALL_COUNT][k];
                 if was.is_null() || is_marker(was.addr()) {
                     continue;

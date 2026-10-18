@@ -9,7 +9,13 @@
 //! the program's, with its TLS and rseq registration, and with every signal blocked in it
 //! (the C library keeps its own internal signals, which `sigfillset` leaves out): the
 //! program's handlers never run on it, and process-directed signals go to the program's own
-//! threads. The thread is never joined and never exits. A fork's child does not have it.
+//! threads. The thread is never joined and never exits.
+//!
+//! Two consequences to know. A fork's child does not have the thread, and nothing starts one
+//! there: a daemon that forks to detach, or a server that does its work in forked children,
+//! gets no background maintenance in them. And the process is multithreaded from before
+//! `main`, as are its descendants, which inherit the variable with `LD_PRELOAD`; that makes
+//! `unshare(CLONE_NEWUSER)` fail, so `unshare -U`, bubblewrap and the like do not work with it.
 //!
 //! These are the library's only references to the C library besides the allocator's
 //! `__errno_location` (`asmalloc::c`). The ledger is
