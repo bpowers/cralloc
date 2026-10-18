@@ -1476,6 +1476,82 @@ peaks at 1.3 MiB against 3.5 (64 and 256 MiB: 1.5 and 3.1 against 1.6 and 2.9; r
 after the grow 2 MiB in every case). The sparse worst cases are unchanged (2.3 and 32.2 MiB
 resident).
 
+### Grown blocks kept up to a budget
+
+2026-10-18, later, at main `630883b`. The loop above, one buffer grown to 4 MiB and freed
+over and over, ran at twice the incumbents' time because both of our rules returned its
+memory every repetition: the move returned the slot it outgrew, and the free of the grown
+block, which has huge-page advice, returned that too. Both are right for a block grown once
+and wrong for one grown again and again, and the two cases differ in how much is at stake: a
+few MiB in the loop, a hundred in the 64-vector job.
+
+Now retained large-slot memory is counted apart from small again (the decay and the cap use
+the sum), and a move or the free of an advised block purges only if keeping the slot would
+take that count past a budget (`policy::KEPT_GROWN_HUGE_PAGES`). Otherwise the slot is
+released as a plain free leaves it: resident, counted, advice in place. An allocation that
+lands on an advised free slot already took the advice back; a grown move into it advises it
+again (`region::advise_grown`), which is two `madvise` calls a repetition in the loop. A
+plain free still never purges.
+
+This is not a level on frees. A purge here is charged only to a block the program copied or
+wrote in full to reach its size, so it costs at most about what the program already spent on
+it, and never falls on a block that was allocated, barely touched and freed.
+
+**The loops.** One `Vec<u64>` grown from empty to the size by pushing, then dropped, repeated
+(`vecgrow vecs=1`); `perf stat` on CPU 2, five interleaved runs, medians; thousands of cycles
+and page faults per repetition, cgroup peak MiB. Budgets of 8, 16 and 32 MiB:
+
+| To | main | 8 MiB | 16 MiB | 32 MiB | glibc | jemalloc | mimalloc crate |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| 1 MiB, kcycles | 430 | 291 | 290 | 290 | 270 | 404 | 463 |
+| 1 MiB, faults | 64.1 | 0.2 | 0.2 | 0.2 | 0.2 | 0.1 | 0.0 |
+| 1 MiB, peak | 10.9 | 10.9 | 10.9 | 10.9 | 10.1 | 10.5 | 21.2 |
+| 4 MiB, kcycles | 2,733 | 1,459 | 1,443 | 1,258 | 1,079 | 1,822 | 1,868 |
+| 4 MiB, faults | 578 | 3.3 | 3.3 | 0.8 | 2.1 | 2.0 | 0.1 |
+| 4 MiB, peak | 13.8 | 16.1 | 16.0 | 15.9 | 13.1 | 16.4 | 27.1 |
+| 64 MiB, kcycles | 30,164 | 26,938 | 27,082 | 29,176 | 68,691 | 121,066 | 44,030 |
+| 64 MiB, faults | 622 | 73 | 73 | 53 | 16,388 | 30,775 | 4.6 |
+| 64 MiB, peak | 73.8 | 76.1 | 76.1 | 92.1 | 73.4 | 80.7 | 147.3 |
+
+At 8 and 16 MiB the 4 MiB loop still returns one slot a repetition: the slot the buffer last
+moved into is 20 MiB (four times the room, plus the stagger's), though only 4 MiB of it was
+written, and the count charges a slot its whole size, as it does for every free. That slot
+costs the 3.3 huge-page faults and 13% kernel time left; at 32 MiB it is kept, and the loop is
+within 17% of glibc. The 1 MiB loop is within 8% of glibc at every budget; the 64 MiB one was
+already ahead of all three and stays so.
+
+**The rest** (`benchrun`, five interleaved rounds, medians):
+
+| Job | main | 8 MiB | 16 MiB | 32 MiB | glibc | jemalloc | mimalloc crate |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| vecgrow 64x4Mi, cycles/element | 8.99 | 8.97 | 8.94 | 8.82 | 18.48 | 10.69 | 43.78 |
+| the same, peak MiB | 263.3 | 269.8 | 276.4 | 287.6 | 269.2 | 307.1 | 289.1 |
+| vecgrow 1x256Mi, cycles/element | 4.95 | 4.60 | 4.60 | 4.84 | 9.03 | 16.87 | 5.33 |
+| the same, peak MiB | 257.7 | 259.9 | 259.9 | 276.0 | 257.0 | 264.4 | 523.5 |
+| the same, faults | 3,200 | 1,472 | 1,472 | 1,448 | 262,166 | 517,967 | 267 |
+| largepair, ns | 69.9 | 69.8 | 69.9 | 69.8 | 8.1 | 135.8 | 106.9 |
+| large pipeline, ns/alloc | 67.1 | 67.3 | 67.7 | 67.4 | 334.6 | 302.5 | 40.6 |
+| map hash 1M, cycles/entry | 574 | 565 | 568 | 570 | 1,108 | 633 | 441 |
+| the same, peak MiB | 204.4 | 204.4 | 204.3 | 204.4 | 208.1 | 183.7 | 260.8 |
+| mstress 8 (preload), s | 0.343 | 0.338 | 0.314 | 0.326 | 0.390 | 0.509 | |
+| the same, peak MiB | 135.3 | 135.7 | 138.1 | 135.3 | 276.3 | 140.2 | |
+
+The 64 vectors keep up to the budget of their outgrown slots, which is all of the rise in
+their peak. One vector to 256 MiB faults half as often (time: paired by round, -1%, within noise). mstress varied
+by a fifth between rounds and is noise here; nothing else moved. `sparse_realloc.c` and the
+sparse worst cases are unchanged (16 MiB budget: resident 2 MiB after every grow; 2.3 and
+32.2 MiB).
+
+**Chosen: 16 MiB.** 32 MiB would cover the 4 MiB loop's last slot, but adds 11 MiB to the
+64-vector peak and 16 to the 256 MiB one, for one loop shape.
+
+**After the peak.** One `Vec<u64>` grown to 256 MiB and dropped, then a 64 KiB allocation
+and free every millisecond (a scratch program, resident MiB from `/proc/self/statm`): main
+2.7 at the drop and after; 16 MiB budget 4.9 at the drop, 2.9 by 500 ms, 2.7 after. The
+256 MiB block's 1 GiB slot is far past the budget and goes back at its free; what is kept is
+its outgrown slots below, and the clock returns them within the first interval. The same
+with a 4 MiB vector: 4.7 at the drop, 2.7 by 500 ms.
+
 ## Reproducing
 
 ```

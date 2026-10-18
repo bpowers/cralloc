@@ -10,9 +10,14 @@ the watermark.
 **Where it is called.** `free_slot`, the free of one large slot, calls `purge_before_release`
 before it releases the slot's bit, and it purges only when the slot is advised for huge pages
 because its object grew there (its size word's flag, `Recorded::huge`, which only the slot's
-holder reads or writes). An earlier form also purged when keeping the slot would take a
-large-class retained count over its cap; that rule is gone, and dropping it narrows when the
-block runs without changing what holds when it does. The advice is taken back after the purge
+holder reads or writes) and keeping it would take retained large-slot memory past the budget
+for kept grown blocks (`keeps_grown`, which reads a count and nothing of the slot). An earlier
+form also purged when keeping any slot would take a large-class retained count over its cap,
+and a later one purged every advised slot; each change only narrows or widens when the block
+runs, without changing what holds when it does. A kept advised slot is released with its
+advice and flag; the next allocation of it takes them back (`alloc_at`), and only the holder
+of a slot reads the flag, so a free slot that is advised changes no other path: the purge walk
+purges free slots by their pages and never reads it, and `purge_part` acts on held slots. The advice is taken back after the purge
 (`region::unadvise`), which changes no contents. `free_slot` is private and called by
 `Back::free` and `Back::free_by_address` for a large class, both crate-private
 (`pub(crate)`), with the region and slot that `slot_in` found for the pointer: `Back::free`
@@ -144,6 +149,11 @@ either range, and that if it says `zeroed` the `len` bytes at `to` read as zero.
 callers are the moving paths of `Bound::resize` (HEAP-04, which passes the allocation's own
 report) and C's `realloc` (MOD-01, which passes `false`), and both hold both blocks.
 
+Within the budget for kept grown blocks (`keeps_grown`, true only for a slot) the move
+returns nothing of `from` (steps 4 and 5 do not run) and releases the slot as a plain free
+does, counted and resident; the copies of steps 0 to 3 are the same, and keeping both copies
+resident is a matter of memory, not of safety.
+
 0. *The windows.* Every block, whatever its length, is copied by `copy_window` over
    consecutive, disjoint ranges `start..end` of block offsets that together are `0..len`, in
    increasing order, each inside one piece; a window is at most `WINDOW` pages of `from`'s
@@ -213,6 +223,7 @@ The double-free cases are those of BACK-CLASS-01, with the copy added to the win
 into a clean, a dirty and a staggered dirty destination),
 `a_hole_is_copied_when_the_destinations_purge_fails`,
 `a_staggered_block_moves_and_returns_its_whole_slot`,
+`grown_blocks_are_kept_within_their_budget`,
 `a_zeroed_grow_into_a_dirty_slot_reads_as_zero_past_what_it_kept`,
 `an_advised_slot_is_purged_only_in_whole_huge_pages` (a block that does not start on a
 piece boundary); the heap's and the C layer's `realloc` tests move large blocks through it
