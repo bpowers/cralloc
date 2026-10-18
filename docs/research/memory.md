@@ -822,6 +822,77 @@ So 64 KiB is the one setting at or under jemalloc's memory on the mixed pipeline
 that is measurable on that job (still 30% faster than jemalloc there) and not resolvable on
 any other.
 
+## The background thread
+
+2026-10-18, on the branch that adds `maintain` and the opt-in thread that calls it twice a
+second (`Asmalloc::start_background` behind the `background` feature; `ASMALLOC_BACKGROUND`
+for the preload library). Same machine; it was shared, with CPUs 0 to 3 busy throughout and
+a load average of 15 to 20, and the runs were pinned to idle cores (8, 9 and 10).
+
+**Which run has no slow path.** The after-peak run with its light work in bursts over twelve
+sizes (`after=burst after_sizes=small`, section 2) no longer stays off the slow paths: the
+age limit takes each class's magazine once an interval, and each take's refill is a slow path
+whose heartbeat takes the next, so the heartbeats never stop. Without the thread it is at 4.5
+MiB at 12 s, jemalloc 4.6 (one run each). The run with no slow path is the same light work one
+object at a time (`after=pairs after_sizes=small`): two million allocations a second that
+never leave the loaded magazines.
+
+Anonymous resident MiB, `quiet live=2M sizes=small secs=16 after=pairs after_sizes=small`,
+median of three interleaved runs. With the thread on, the runs differ by where the first
+drain falls against the thread's half-second sleep, about half a second: at 2 s they read 68,
+95 and 95 MiB (Rust) and 91, 70 and 70 (preload); from 14 s on they agree within 1 MiB. With
+it off, and for jemalloc, they agree within 0.1 MiB.
+
+| | freed | 2 s | 4 s | 6 s | 8 s | 12 s | 16 s |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| asmalloc, Rust, thread off | 162 | 162 | 162 | 162 | 162 | 162 | 162 |
+| asmalloc, Rust, thread on | 166 | 95 | 53 | 30 | 17 | 5.9 | 1.1 |
+| jemalloc, Rust | 187 | 187 | 187 | 187 | 187 | 187 | 187 |
+| asmalloc, preload, thread off | 177 | 177 | 177 | 177 | 177 | 177 | 177 |
+| asmalloc, preload, thread on | 177 | 70 | 39 | 23 | 13 | 3.9 | 1.0 |
+| jemalloc, preload | 188 | 188 | 188 | 188 | 188 | 188 | 188 |
+
+The peak is 216 to 219 MiB for all. jemalloc's decay is driven by its own allocation events,
+and one-at-a-time reuse of its thread cache raises none, so it keeps everything too. With the
+thread, the first call that finds the slab quiet for an interval drains it; the clocked purge
+then takes the retained memory down to the 64 MiB cap in one pass and by a quarter an
+interval after that, which is the curve above.
+
+A drain from `maintain` launders what it takes. Parking it in the depot instead, as the
+heartbeat's idle check does, leaves the simulated version of this run at 73% of its quiet
+memory after fourteen intervals (`maintain_brings_a_quiet_heap_down_to_what_collect_leaves`
+fails that way): the slab, busy on its fast paths, pops its own magazines back from the depot
+at once, and the scattered objects in them pin their pages.
+
+**Cost to busy programs.** Ten interleaved runs each, order alternating, pipeline on CPUs 8
+and 9, churn on CPU 10, long enough for seven calls of `maintain` during the measured phase:
+
+| | thread off | thread on |
+|---|---:|---:|
+| pipeline, 2 threads, mixed sizes, 300M objects: ns per allocation, median (range) | 12.17 (12.10 to 12.22) | 12.10 (12.00 to 12.20) |
+| the same, instructions | 77.377 G | 77.392 G |
+| churn, 100k live, mixed sizes, 200M operations: cycles per operation | 88.78 (88.50 to 89.15) | 88.66 (88.47 to 89.09) |
+| the same, instructions | 48.464 G | 48.471 G |
+
+No difference beyond the noise; the instructions differ by 0.02%. In a busy process every
+slab's counter moves between calls, so a call drains nothing and only records sightings.
+
+**Cost when idle.** The thread's time on CPU from `/proc/<pid>/task/<tid>/schedstat`:
+
+| Process | Window | On CPU | Calls | Per call |
+|---|---:|---:|---:|---:|
+| Rust, allocates almost nothing, sleeps | 60 s | 4.2 ms | 120 | 35 us |
+| `sleep` under the preload library | 60 s | 4.5 ms | 122 | 37 us |
+| Rust, after freeing 220 MiB, from 1 s | 60 s | 43 ms | 127 | 340 us |
+| the same, from 20 s, everything returned | 40 s | 18 ms | 82 | 224 us |
+
+With nothing to do a wakeup costs about 35 us, most of it the sleep and the wakeup
+themselves. After the burst, a profile of the thread is 90% the purge walk: the retained
+count stays above zero (free slots on units the walk cannot return whole), so each
+interval's pass walks the bitmaps once round without meeting its goal, which is the clocked
+purge's rule for a fragmented heap. That is 0.05% of a CPU for a heap of two million small
+objects, and it grows with the bitmaps.
+
 ## Reproducing
 
 ```
@@ -832,4 +903,8 @@ bench/probes/memory/worst.sh $W asmalloc,je,mi
 # The prototype builds (`lean`, `age-thpoff`) need the review branch and its x-* features.
 bench/probes/memory/memrun.sh $W base-ms 0,1,2,3,8,9,10,11 phase touch threads=8 secs=8 sizes=s64
 python3 bench/probes/memory/summ.py -c -s bench/target/memory-out/phase.base-ms.memstat
+# The background thread: off, on, and jemalloc, natively and preloaded.
+bench/probes/memory/build.sh $W/bench asmalloc bg=asmalloc-background je sys=
+cargo build --release -p asmalloc-preload
+bench/probes/memory/background.sh $W 8 3
 ```
