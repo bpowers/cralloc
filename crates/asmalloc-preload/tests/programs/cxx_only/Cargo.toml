@@ -1,0 +1,18 @@
+# A shared library that exports asmalloc's C++ operators without its C functions, which the
+# macro's documentation says not to do, for the test in tests/preload.rs of what then happens.
+# Outside the workspace: the test builds it on its own.
+[package]
+name = "cxx-only"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[lib]
+crate-type = ["cdylib"]
+test = false
+doctest = false
+
+[dependencies]
+asmalloc = { path = "../../../../asmalloc" }
+
+[workspace]

@@ -148,7 +148,7 @@ impl Source for TestSource {
         self.give(class, object);
     }
 
-    fn purge_step(&self) {
+    fn purge_step(&self, _: &dyn Fn() -> u64) {
         self.purges.fetch_add(1, Ordering::Relaxed);
     }
 }

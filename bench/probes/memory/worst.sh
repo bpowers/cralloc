@@ -8,7 +8,7 @@ here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 root="$1"; builds="$2"; shift 2
 [ $# -gt 0 ] || set -- burst-idle phase cpus-few-classes classes-few-cpus threads-few-cpus sparse tiny
 eight=0,1,2,3,8,9,10,11
-run() { EVERY=16 bash "$here/memrun.sh" "$root" "$builds" "$@" 2>&1 | grep -v ' start \| end '; }
+run() { EVERY="${EVERY:-8}" bash "$here/memrun.sh" "$root" "$builds" "$@" 2>&1 | grep -v ' start \| end '; }
 for case in "$@"; do
   echo "#### $case"
   case "$case" in

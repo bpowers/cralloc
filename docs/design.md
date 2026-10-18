@@ -517,12 +517,17 @@ for ever. Five rules follow.
   - One retiring full magazine in every few is laundered instead of kept, so objects in
     steady circulation are gradually replaced by the lowest free ones.
 - **Huge pages only where objects are dense.** A region starts marked against transparent
-  huge pages, so a lightly used class costs only the 4 KiB pages it touches. Once a class
-  of small objects has carved a large amount, the rest of its region is marked for huge
-  pages and further growth faults 2 MiB at a time. Classes of larger objects never are: a
-  large block is often touched sparsely, and with huge pages each page touched would cost
-  2 MiB.
-- **Never split a huge page.** In the huge-page part of a region, purging works only in
+  huge pages, so a lightly used class costs only the 4 KiB pages it touches. Two things
+  count as evidence of dense use. A class of small objects that has carved enough for one
+  huge page to be a small fraction of it has the rest of its region marked for huge pages,
+  and further growth faults 2 MiB at a time. A large block that grows, by doubling or less
+  and past the size of a huge page, is being appended to, so its slot is marked for as
+  long as the block holds it; its free returns the slot whole and takes the mark back. A
+  large block allocated at its size in one call gets no huge pages: it is often touched
+  sparsely, each page touched would cost 2 MiB, and the kernel later fills in any marked
+  range that is touched at all.
+- **Never split a huge page.** Returning part of a huge page frees nothing until the kernel
+  splits it later, so in the huge-page part of a region, purging works only in
   whole 2 MiB units. That includes the unit holding the watermark, whose upper part was
   made resident by the fault and never allocated: a purge first carves the rest of that
   unit and frees it, counting it as retained, so the whole unit is ordinary free memory
@@ -562,27 +567,37 @@ it means the new size is still large and fits the slot. Anything else moves the 
 
 Shrinking gives memory back. A large object that shrinks in place returns the whole pages
 past its new size at once: nothing else can use them while it holds the slot, so otherwise
-they would stay resident until it is freed. One that shrinks to under a quarter of its slot
+they would stay resident until it is freed. One that shrinks to under an eighth of its slot
 moves instead, because a region has few slots of a large class, and a slot should not be
-held by an object a small fraction of its size.
+held by an object a small fraction of its size. The threshold sits well below the quarter
+of a slot that headroom gives a block when it moves in, so a block resized back and forth
+across a class boundary settles in one slot instead of being copied on every call.
 
 When a large object has to move, the copy goes in pieces and returns the old block's pages
 behind it, so the two copies are never both resident. The old block would be purged at its
 free anyway; this only does it sooner, and it keeps a program that grows several big buffers
-at once from holding twice their size.
+at once from holding twice their size. The copy skips source pages that are all zero and
+leaves the destination's pages untouched there, so a block the program wrote sparsely stays
+sparse. Moving the pages with `mremap` instead would copy nothing, but it splits the heap's
+mapping in ways that take several more rules to undo, and it adds nothing to the memory
+saved; we copy.
 
 ### Interfaces
 
 - **`GlobalAlloc`** for `#[global_allocator]`. `dealloc` of a small object is the free
   routine and nothing else.
 - **`Allocator`**, on Rust versions that have it, through a zero-sized handle. All handles
-  share the one heap. `allocate` returns the full class size. A zero-size request gets a
+  share the one heap. `allocate` returns the full class size of a small block and the
+  usable size of a large one. A zero-size request gets a
   dangling, aligned pointer and no block.
 - **C ABI**: `malloc`, `calloc`, `realloc`, `reallocarray`, `free`, the aligned-allocation
   family, `malloc_usable_size`, `malloc_trim` and the sized frees: every function glibc
   exports that takes or returns a block. `free(p)` reads the class from the address table
   and joins the same path as a Rust free. A pointer outside the heap is a caller's bug and
-  aborts the process. `malloc_usable_size` reports the class size of a small object and,
+  aborts the process. A pointer into the middle of a small object is the same bug, but the
+  fast path does not look for it: finding a slot's start takes a multiplication per free.
+  Such a pointer is caught only if it reaches the bitmaps before it is handed out again.
+  `malloc_usable_size` reports the class size of a small object and,
   for a large one, its recorded size rounded up to a page. Callers write into the room
   they are told they have, so a `realloc` that moves a block copies that much and `calloc`
   zeroes that much.
@@ -593,6 +608,18 @@ at once from holding twice their size.
   returns null and a throwing form raises `std::bad_alloc`. An exception cannot unwind
   through the allocator's Rust frames, so the throwing forms are generated routines that on
   failure jump to the C++ runtime's own throw function with nothing of ours on the stack.
+  A program may replace only the basic `operator new` and `operator delete`, as the
+  standard allows, and its blocks then reach our other `delete` forms. Those blocks can
+  lie inside our heap without being ours to free: a replacement that adds a header calls
+  our `malloc` and returns a pointer into the middle of the block. So we do what the C++
+  runtime's defaults do. If the first basic `operator delete` in the process is not ours,
+  every other `delete` form forwards every pointer to it, and likewise our nothrow `new`
+  forms hand off when the basic `new` is replaced. The generated `delete` routines get
+  this for nothing: they read the heap's position from a word of their own, which the
+  slow path fills in only once it has found that the basic `delete` is ours, and while
+  that word is zero every pointer takes the slow path. A program may also replace `malloc`
+  itself; then a `delete` that is handed a pointer outside the heap passes it to the
+  program's `free`, and aborts only if `free` is ours too.
 - **A size from C or C++ is a prediction, never trusted.** A sized free or delete may use
   the size to find the class early, but the class from the address is the truth, and a
   wrong size (a derived object deleted through a base pointer, say) behaves exactly like a
@@ -620,9 +647,19 @@ the one a Rust `Layout` of the same size implies.
 ### Process lifecycle
 
 - **Start.** The static slabs are zero, so the first call takes the slow path, which
-  reserves address space and publishes the heap with one compare-and-swap. Two threads may
-  race to do this; the loser unmaps its reservation. Under a tight address-space limit that
-  race can leave the smaller of two reservations in place.
+  reserves address space and publishes the heap with one compare-and-swap. Threads may race
+  to do this; the losers unmap their reservations. Several full reservations do not fit in
+  the address space at once, so a thread whose reservation fails while another is in flight
+  must not conclude that address space is short: it looks for the published heap and tries
+  again at the same size, and only a failure with no other reserver in flight, or after a
+  bounded number of tries, makes it settle for a smaller heap or report failure. A count of
+  reservers in flight, kept in one word, tells it which case it is in.
+- **Unloading.** A shared object that contains the allocator must not be unloaded. A
+  thread's rseq area goes on naming a sequence inside it after the last call returns, and
+  the kernel reads that the next time the thread is preempted, so unloading kills the
+  process. The preload library is linked so that it cannot be unloaded. Anyone else who
+  builds the allocator into a shared object links it the same way; we do not guard against
+  it at run time.
 - **Without rseq.** A thread with no rseq registration reads a negative CPU number, so every
   routine sends it to the slow path and it never touches a slab. That covers a whole process
   under valgrind or with the C library's registration turned off, and a single thread whose
@@ -680,7 +717,9 @@ These hold everywhere, and the proofs and tests lean on them.
 1. A slab changes only through an rseq routine that commits with one store, or through the
    drain steps under "Idle caches".
 2. Other shared state changes only through single atomic instructions.
-3. No locks, no waiting, no thread-local state.
+3. No locks, no waiting, no thread-local state. The one exception is in the C++ layer,
+   which asks the loader which `operator new` and `delete` the process uses, once per
+   family and on a failing `new`; that lookup can wait on the loader's lock.
 4. Between any two instructions of any slow path, shared state is valid and anything
    unreachable from it is owned by exactly one thread.
 5. All-zero is a valid state for every structure.

@@ -36,8 +36,11 @@ ONE_LINE = 64
 SPILL_END = 75
 ALIGN = 64
 
+# A crate function, or a copy exported as a C symbol inside a generated macro
+# (`Rust.exportsFile`), which the same rules apply to.
 NAKED = re.compile(
-    r'(?:#\[cfg\(([^\n]*)\)\]\n)?#\[unsafe\(naked\)\]\s*pub\(crate\) unsafe extern "[^"]*" fn (\w+)'
+    r'(?:#\[cfg\(([^\n]*)\)\]\n)?[ \t]*#\[unsafe\(naked\)\]\s*(?:#\[unsafe\(no_mangle\)\]\s*)?'
+    r'(?:pub\(crate\) )?unsafe extern "[^"]*" fn (\w+)'
     r'.*?core::arch::naked_asm!\(\s*(r#*"|")', re.S)
 
 
@@ -84,7 +87,7 @@ def functions(path: pathlib.Path):
     for m in NAKED.finditer(text):
         cfg, name, opener = m.group(1), m.group(2), m.group(3)
         template, end = rust_string(text, m.end(), opener)
-        close = text.index("\n    )", end)
+        close = re.compile(r"\n[ \t]*\)").search(text, end).start()
         operands = re.findall(r"(\w+)\s*=\s*sym\b", text[end:close])
         yield name, cfg, template_asm(template, operands)
 

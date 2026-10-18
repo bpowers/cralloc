@@ -9,8 +9,13 @@ the watermark.
 
 **Where it is called.** `Back::free` of a large class calls `purge_before_release` before it
 releases the slot's bit, when keeping the slot resident would take the large classes'
-retained count over its cap. `Back::free` is reached from `Heap::free_large` and the C
-`free`, for a pointer the program is giving up.
+retained count over its cap, or when the slot is advised for huge pages because its object
+grew there (its size word's flag, `Recorded::huge`, which only the slot's holder reads or
+writes). Which of the two reasons applies changes nothing below: the same thread holds the
+same slot. The advice is taken back after the purge (`region::unadvise`), which changes no
+contents. `Back::free` is crate-private (`pub(crate)`), so these are its only callers, and
+it is reached from `Heap::free_large`, the C `free` and the depot's `free_one` (a thread with
+no CPU giving up a small block), each for a pointer the program is giving up.
 
 **Proof.**
 
@@ -83,8 +88,11 @@ thread but the first. That is policy, not safety.
 range during the call, and nothing in it is needed after. For `Space::purge`: no thread reads
 or writes the range during the call and nothing in it is needed.
 
-**Proof.** `resize_in_place` is called by the heap for a live large block that its owner is
-resizing (`Heap::resize_large_in_place`, `Heap::resize_in_place_by_address`), so the owner
+**Proof.** `resize_in_place` is an `unsafe fn` whose contract is that `ptr` is a live large
+block the caller owns, unused during the call, and that the caller gives up every byte past
+`size`. Its callers are the heap's for a block its owner is resizing
+(`Heap::resize_large_in_place`, `Heap::resize_in_place_by_address`, both `unsafe fn`s with the
+same promise, from `Heap::resize` and C's `realloc`), so the owner
 holds the slot or run for the whole call and is not using the block meanwhile: a resize has
 the block exclusively, as `realloc` and `Allocator::shrink` require. The range is
 `from..from + len` with `from = size` rounded up to a page and the end the old recorded size
@@ -126,9 +134,14 @@ paths of `Heap::resize` (HEAP-04) and C's `realloc` (MOD-01), which hold both bl
    both ranges. The bytes read have not been returned: a part of `from` goes back only after
    the piece that covers it has been copied, and the range past `len` goes back only after
    the last copy.
-2. *The purges.* Each range is either a whole piece already copied (`done..done + step`,
-   with `step` a piece, which is a page multiple, at an offset that is a multiple of the
-   piece) or, once, everything from the last whole piece to the end of the slot or run. All
+2. *The purges.* Pieces end at multiples of the piece in the address space. Each range is
+   either a part already copied that ends at such a multiple (`done..boundary`, where
+   `done` is zero or the previous multiple, so both ends are page-aligned: the block starts
+   on a page and the piece is a page multiple) or, once, everything from the last multiple
+   at or below `from + len` (or from the start, if there is none) to the end of the slot or
+   run. Every byte before that start has been copied. In a slot advised for huge pages
+   `purge_part` may trim a range inward to whole huge pages (BACK-REGION-03), which only
+   returns less. All
    lie inside `from`'s slot or run, whose start is page-aligned, and the caller holds it and
    has given it up, as in BACK-CLASS-01. The slot's bit is checked to be clear before
    anything is purged, so a block that is already free aborts instead.
@@ -141,5 +154,8 @@ paths of `Heap::resize` (HEAP-04) and C's `realloc` (MOD-01), which hold both bl
 The double-free cases are those of BACK-CLASS-01, with the copy added to the window.
 
 **Tests.** `a_moving_large_block_releases_its_old_pages_behind_the_copy`,
-`a_moving_run_releases_its_old_pages_behind_the_copy`; the heap's and the C layer's
-`realloc` tests move large blocks through it with contents checked. Awaiting review.
+`a_moving_run_releases_its_old_pages_behind_the_copy`,
+`an_advised_slot_is_purged_only_in_whole_huge_pages` (a block that does not start on a
+piece boundary); the heap's and the C layer's `realloc` tests move large blocks through it
+with contents checked. Pieces on address boundaries and the trimming in `purge_part`:
+awaiting review.

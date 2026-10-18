@@ -155,10 +155,12 @@ fn a_process_without_rseq_is_served() {
 }
 
 #[test]
-fn a_pointer_that_is_not_a_block_aborts() {
+fn a_pointer_that_is_not_a_block_the_slow_path_checks_aborts() {
     use std::os::unix::process::ExitStatusExt;
     let exe = program("foreign.c");
-    for args in [&[][..], &["interior"][..]] {
+    // Outside the heap, and into the middle of a large block: both reach the slow path, which
+    // checks. A pointer into the middle of a small block is not promised to abort.
+    for args in [&[] as &[&str], &["interior"]] {
         let out = run(true, Command::new(&exe).args(args));
         assert_eq!(out.status.signal(), Some(6), "{:?}", out.status);
         assert!(
@@ -218,6 +220,106 @@ fn every_cxx_operator_form_meets_its_cases_and_binds_where_it_should() {
     }
     assert_eq!(ours.len(), 16, "{ours:?}");
     assert_eq!(runtime.len(), 4, "{runtime:?}");
+}
+
+/// Builds the crate in `tests/programs/<dir>`, a shared library outside the workspace, and
+/// returns the build's status and where the library is.
+fn build_library(dir: &str, name: &str) -> (std::process::ExitStatus, PathBuf) {
+    let target = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join(format!("{dir}-build"));
+    let cargo = std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
+    let output = Command::new(cargo)
+        .args(["build", "--quiet", "--manifest-path"])
+        .arg(
+            Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("tests/programs")
+                .join(dir)
+                .join("Cargo.toml"),
+        )
+        .arg("--target-dir")
+        .arg(&target)
+        .output()
+        .expect("cargo runs");
+    (output.status, target.join(format!("debug/lib{name}.so")))
+}
+
+/// A shared object that holds the allocator must never be unloaded: a thread's `rseq_cs` goes
+/// on naming a descriptor inside it, and the kernel reads that at the thread's next
+/// preemption. The library is linked `-z nodelete` for that (`build.rs`).
+#[test]
+fn the_library_is_marked_never_to_be_unloaded() {
+    let out = Command::new("readelf")
+        .arg("-d")
+        .arg(library())
+        .output()
+        .expect("readelf runs");
+    let dynamic = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        dynamic
+            .lines()
+            .any(|l| l.contains("(FLAGS_1)") && l.contains("NODELETE")),
+        "{dynamic}"
+    );
+}
+
+/// A C++ program with a malloc of its own. Under the library its `delete` is ours and its
+/// throwing `new` is libstdc++'s, which calls the program's malloc: our `delete` hands a
+/// pointer outside the heap to the program's `free`.
+#[test]
+fn a_cxx_program_with_its_own_malloc_runs() {
+    let exe = program("own_malloc.cpp");
+    let out = same_with_and_without(|| Command::new(&exe));
+    assert_eq!(out.trim(), "99500");
+}
+
+/// `own_new.cpp` in `mode`, with and without the library: its replaced `new` and `delete` see
+/// every block.
+fn own_new_runs(mode: &str) {
+    let exe = program("own_new.cpp");
+    let out = same_with_and_without(|| {
+        let mut c = Command::new(&exe);
+        c.arg(mode);
+        c
+    });
+    assert_eq!(out.trim(), format!("{mode}: live 0"));
+}
+
+/// A program that replaces `operator new(size_t)` and calls the nothrow form, which the
+/// library exports: ours must hand off to the C++ runtime's, which calls the program's, or the
+/// program's `delete` is given a block its `new` never made.
+#[test]
+fn a_cxx_program_with_its_own_operator_new_gets_it_from_nothrow_new() {
+    own_new_runs("nothrow");
+}
+
+/// A program that replaces only `operator new(size_t)` and `operator delete(void*)`, which
+/// the standard says is enough. Its blocks sit inside our heap (its `new` is our `malloc` plus
+/// a header), so every `delete` form of ours must forward every pointer to the program's.
+#[test]
+fn a_cxx_program_with_its_own_operator_new_runs() {
+    for mode in ["array", "sized", "matching", "empty"] {
+        own_new_runs(mode);
+    }
+}
+
+/// The C++ export is documented as needing the C export. Nothing enforces it: the crate
+/// builds, and at run time a block from libstdc++'s `new` (glibc's malloc) reaches our
+/// `delete`, which aborts; one from our nothrow `new` reaches glibc's `free`. The build should
+/// fail instead.
+#[test]
+fn the_cxx_export_without_the_c_export_does_not_build() {
+    let (status, library) = build_library("cxx_only", "cxx_only");
+    if status.success() {
+        let exe = program("cxx.cpp");
+        let out = Command::new(&exe)
+            .env("LD_PRELOAD", &library)
+            .output()
+            .expect("the program starts");
+        panic!(
+            "the crate built; a C++ program run with it: {:?}\n{}",
+            out.status,
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
 }
 
 #[test]

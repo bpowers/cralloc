@@ -7,7 +7,7 @@
 //! different range panics), the fault plans, the simulated threads and a clock that moves only
 //! when the harness moves it. Its memory is that of one reservation of the shape's largest plan.
 //!
-//! What it gives up: it does not record which pages are committed, purged or advised, so it
+//! What it gives up: it does not record which pages are committed, purged, populated or advised, so it
 //! cannot catch a write to uncommitted memory, and it unmaps only whole reservations. Tests that
 //! need those use `SimOs`; proofs about the heap's logic use this.
 
@@ -132,7 +132,7 @@ impl<S: Shape> fmt::Debug for ProofOs<S> {
 //   largest region size, which is the most any plan asks for, and it carries the allocation's
 //   provenance. Memory outside a reservation is zero: the allocation starts zeroed, and `unmap`
 //   zeroes the reservation before releasing it.
-// - `commit` and `advise_huge` change nothing; `purge` zeroes (the first half of) its range;
+// - `commit`, `populate` and `advise_huge` change nothing; `purge` zeroes (the first half of) its range;
 //   `wipe_on_fork` only records. A failed call has acted on no more than its range.
 // - A range must lie in the reservation; `checked` panics before touching anything otherwise.
 // - `fence` aborts every twin sequence in flight on its CPU, waiting out committing ones.
@@ -177,6 +177,11 @@ unsafe impl<S: Shape> Os for ProofOs<S> {
         // caller promises no thread touches it during the call.
         unsafe { self.memory.zero(offset, zeroed) };
         result
+    }
+
+    unsafe fn populate(&self, start: NonNull<u8>, len: usize) -> Result<(), OsError> {
+        self.checked(Call::Populate, start, len);
+        self.faults.enter(Call::Populate)
     }
 
     unsafe fn advise_huge(

@@ -40,6 +40,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "bench-backend"
+version = "0.0.0"
+dependencies = [
+ "asmalloc",
+ "bench-harness",
+]
+
+[[package]]
 name = "bench-harness"
 version = "0.0.0"
 dependencies = [

@@ -1,7 +1,7 @@
 //! The protocols' `Host` over the real heap: one class's tree words in the back end's state, its
 //! regions' metadata in the reservation, and the OS calls through `Space`.
 
-use super::layout::{Layout, WORD_BYTES};
+use super::layout::{Layout, Memo, WORD_BYTES};
 use super::tree::Host;
 use super::word::Atomic;
 use crate::os::{HugePages, Os};
@@ -21,6 +21,8 @@ pub(crate) struct ClassState {
     pub(crate) words: [Atomic; CLASS_WORDS],
     /// The region carves come from, plus one; zero for none yet.
     pub(crate) carving: AtomicU32,
+    /// The class's layout, once worked out.
+    pub(crate) layout: Memo,
 }
 
 impl ClassState {
@@ -29,6 +31,7 @@ impl ClassState {
             top: Atomic::zero(),
             words: [const { Atomic::zero() }; CLASS_WORDS],
             carving: AtomicU32::new(0),
+            layout: Memo::new(),
         }
     }
 }
@@ -104,10 +107,14 @@ impl<O: Os> Host for ClassHost<'_, O> {
         self.space.commit(self.meta_at(region, offset), len).is_ok()
     }
 
-    fn advise(&self, region: RegionId, offset: usize, len: usize, advice: HugePages) {
-        let _ = self
-            .space
-            .advise_huge(self.region_at(region, offset), len, advice);
+    fn advise(&self, region: RegionId, offset: usize, len: usize, advice: HugePages) -> bool {
+        self.space
+            .advise_huge(self.region_at(region, offset), len, advice)
+            .is_ok()
+    }
+
+    fn populate(&self, region: RegionId, offset: usize, len: usize) {
+        let _ = self.space.populate(self.region_at(region, offset), len);
     }
 
     unsafe fn purge(&self, region: RegionId, offset: usize, len: usize) -> bool {

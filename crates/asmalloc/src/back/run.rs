@@ -59,13 +59,17 @@ impl<O: Os> Back<'_, O> {
             // an earlier use.
             let _ = self.space.advise_huge(start, len, HugePages::Avoid);
             self.set_run_size(start, size);
+            // A run is a large allocation, a slow path of its own, as `Back::alloc` says.
+            self.heartbeat();
             return Some(start);
         }
         None
     }
 
-    /// Frees the run starting at `ptr`. Aborts if `ptr` is not the start of a run.
-    pub fn free_run(&self, ptr: NonNull<u8>) {
+    /// Frees the run starting at `ptr`, and runs a heartbeat as any large free does. Aborts if
+    /// `ptr` is not the start of a run. Crate-private, because the purge rests on the caller
+    /// owning the run and giving it up (BACK-RUN-01).
+    pub(crate) fn free_run(&self, ptr: NonNull<u8>) {
         let Some(Kind::Run(regions)) = self.lookup(ptr.as_ptr()) else {
             self.abort("free of a pointer that is not the start of a run");
         };
@@ -74,10 +78,10 @@ impl<O: Os> Back<'_, O> {
         // SAFETY: BACK-RUN-01 in docs/safety/asmalloc/back/run-safety.md. The caller owns the
         // run and is freeing it, so nothing uses its memory, and the range is whole regions of
         // the reservation.
-        if unsafe { self.space.purge(ptr, regions << shift) }.is_err() {
-            return;
+        if unsafe { self.space.purge(ptr, regions << shift) }.is_ok() {
+            self.unclaim_run(first, regions, regions);
         }
-        self.unclaim_run(first, regions, regions);
+        self.heartbeat();
     }
 
     /// Records the current size of the run starting at `ptr`, a run head.

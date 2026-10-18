@@ -138,7 +138,8 @@ theorem same_direct (hs : (cpuContract A).pre s) :
 end Run
 
 theorem rseqOk {T : Target} {k : Contract T.isa} {c : Prog T.isa} {s : T.isa.State}
-    (h : ∀ arm body, c ≠ .rseq arm body) : RseqOk T c k s := RseqOk.of_ne h
+    (h : ∀ arm body, c ≠ .rseq arm body) (h' : ∀ arm body c₂, c ≠ .seq (.rseq arm body) c₂) :
+    RseqOk T c k s := RseqOk.of_ne h h'
 
 /-! ## Out of line -/
 
@@ -205,11 +206,13 @@ theorem pre_wit_inline : (cpuContract inlineAbi).pre wit :=
   pre_wit x86_inline (by decide +kernel) (by decide +kernel) (by decide +kernel)
 
 theorem verified : Verified target currentCpu (cpuContract abi) :=
-  ⟨fun _ hs => .inl (correct hs), fun _ _ => rseqOk (by rw [code_eq]; intro _ _ h; cases h),
+  ⟨fun _ hs => .inl (correct hs), fun _ _ => rseqOk (by rw [code_eq]; intro _ _ h; cases h)
+    (by rw [code_eq]; intro _ _ _ h; cases h),
     ⟨wit, pre_wit_abi⟩, fun o ho => by rw [code_eq] at ho; cases ho⟩
 
 theorem verified_inline : Verified inlineTarget currentCpu (cpuContract inlineAbi) :=
-  ⟨fun _ hs => .inl (correct_inline hs), fun _ _ => rseqOk (by rw [code_eq]; intro _ _ h; cases h),
+  ⟨fun _ hs => .inl (correct_inline hs), fun _ _ => rseqOk (by rw [code_eq]; intro _ _ h; cases h)
+    (by rw [code_eq]; intro _ _ _ h; cases h),
     ⟨wit, pre_wit_inline⟩, fun o ho => by rw [code_eq] at ho; cases ho⟩
 
 /-! ## Reading `__rseq_offset` directly -/

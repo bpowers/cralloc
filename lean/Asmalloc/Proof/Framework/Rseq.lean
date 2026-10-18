@@ -34,7 +34,14 @@ theorem Verified.restart_pre {T : Target} {c : Prog T.isa} {k : Contract T.isa}
     unfold RseqOk at hok
     split at hok
     · exact (hok.2.2 p hp).2.2.2 p' hrely henv
-    · simp [Code.abortStates] at hp
+    · exact (hok.2.2 p hp).2.2.2 p' hrely henv
+    · rename_i h1 h2
+      exfalso
+      unfold Code.abortStates at hp
+      split at hp
+      · exact h1 _ _ rfl
+      · exact h2 _ _ _ rfl
+      · simp at hp
 
 /-- A verified routine, aborted any finite number of times, meets its
 contract: its last attempt starts in a state `s'` satisfying the
@@ -58,7 +65,14 @@ theorem Verified.abortOk {T : Target} {c : Prog T.isa} {k : Contract T.isa}
   unfold RseqOk at hok
   split at hok
   · exact hok.2.2 p hp
-  · simp [Code.abortStates] at hp
+  · exact hok.2.2 p hp
+  · rename_i h1 h2
+    exfalso
+    unfold Code.abortStates at hp
+    split at hp
+    · exact h1 _ _ rfl
+    · exact h2 _ _ _ rfl
+    · simp at hp
 
 /-- What every abort keeps relates the caller's entry state to the state
 the last attempt starts in: a relation `R` of an entry state and a later
