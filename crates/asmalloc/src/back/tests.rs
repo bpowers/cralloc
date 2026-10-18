@@ -1439,7 +1439,11 @@ mod review {
         back.launder(class, &mut slots);
         os.advance_clock(7 * DECAY_TICKS);
         let started = (7 * DECAY_TICKS) | 1;
-        assert_ne!(Pass::tag_of(started), 0, "the all-zero pass word is not this pass's");
+        assert_ne!(
+            Pass::tag_of(started),
+            0,
+            "the all-zero pass word is not this pass's"
+        );
         state.decay.store(started, Relaxed);
         for _ in 0..50 {
             os.advance_clock(DECAY_TICKS);
