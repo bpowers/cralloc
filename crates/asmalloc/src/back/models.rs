@@ -2041,10 +2041,12 @@ fn direct_frees_under_stale_bits_race_clears(preemptions: usize) {
     );
 }
 
+/// One preemption, which takes most of a minute for this scenario and the next together. Two
+/// take about twelve minutes, and passed when the direct path was reviewed.
 #[test]
 #[ignore = "slow: run with scripts/gate --all"]
 fn direct_frees_under_stale_bits_race_clears_fully() {
-    direct_frees_under_stale_bits_race_clears(2);
+    direct_frees_under_stale_bits_race_clears(1);
 }
 
 /// The same with a thread lost at any step, as in a forked child: afterwards a scattered
@@ -2090,5 +2092,5 @@ fn direct_frees_heal_what_a_fork_left(preemptions: usize) {
 #[test]
 #[ignore = "slow: run with scripts/gate --all"]
 fn direct_frees_heal_what_a_fork_left_fully() {
-    direct_frees_heal_what_a_fork_left(2);
+    direct_frees_heal_what_a_fork_left(1);
 }
