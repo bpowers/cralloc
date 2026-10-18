@@ -240,7 +240,7 @@ impl<'a, O: Os> Area<'a, O> {
     /// The magazine of `size` at `offset`, if one can be there: past the first unit,
     /// aligned to its size, and inside the committed part.
     fn magazine_at(&self, offset: usize, size: MagazineSize) -> Option<Magazine<'a>> {
-        let committed = self.depot.committed.load(Acquire);
+        let committed = self.depot.growth.committed.load(Acquire);
         let fits = admits(offset, size, Self::start(), committed);
         let id = MagazineId::new(u32::try_from(offset / UNIT).ok()?)?;
         fits.then(|| Magazine {
@@ -274,7 +274,7 @@ impl<'a, O: Os> Area<'a, O> {
     fn commit_to(&self, end: usize) -> bool {
         let page = O::GEOMETRY.page_size();
         loop {
-            let committed = self.depot.committed.load(Acquire);
+            let committed = self.depot.growth.committed.load(Acquire);
             if committed >= end {
                 return true;
             }
@@ -288,7 +288,7 @@ impl<'a, O: Os> Area<'a, O> {
             }
             // Racing committers may cover the same pages; making them writable twice is
             // harmless, and the mark only moves up, after the memory under it is writable.
-            self.depot.committed.fetch_max(target, AcqRel);
+            self.depot.growth.committed.fetch_max(target, AcqRel);
         }
     }
 
@@ -307,13 +307,13 @@ impl<'a, O: Os> Area<'a, O> {
     /// writable. Its memory is fresh, so it reads as an empty magazine.
     pub(crate) fn create(&self, size: MagazineSize) -> Option<Magazine<'a>> {
         let bytes = size.bytes();
-        let mut carved = self.depot.carved.load(Acquire);
+        let mut carved = self.depot.growth.carved.load(Acquire);
         let start = loop {
             let start = (Self::start() + carved).next_multiple_of(bytes);
             if start + bytes > self.end() {
                 return None;
             }
-            match self.depot.carved.compare_exchange(
+            match self.depot.growth.carved.compare_exchange(
                 carved,
                 start + bytes - Self::start(),
                 AcqRel,

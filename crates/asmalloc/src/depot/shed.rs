@@ -164,7 +164,7 @@ impl<O: Os, R: Routines, S: Source> Cache<'_, O, R, S> {
     /// which can only make the stack shed less.
     pub(super) fn note_depth(&self, class: SmallClass, clock: &Clock<'_, O>) {
         let ordinal = class.ordinal() % SMALL_COUNT;
-        if Water(self.depot.water[ordinal].load(Relaxed)).seen() {
+        if Water(self.depot.water(ordinal).load(Relaxed)).seen() {
             self.update_water(class, None, 0);
         } else {
             self.look_at_depth(class, clock.now());
@@ -175,7 +175,7 @@ impl<O: Os, R: Routines, S: Source> Cache<'_, O, R, S> {
     /// `interval` says one has begun; returns the new word.
     fn update_water(&self, class: SmallClass, interval: Option<u64>, paid: u32) -> Water {
         let ordinal = class.ordinal() % SMALL_COUNT;
-        let word = &self.depot.water[ordinal];
+        let word = &self.depot.water(ordinal);
         let mut seen = word.load(Relaxed);
         loop {
             let depth = self.depot.full(class).objects(self.area, class.magazine());
@@ -217,7 +217,7 @@ impl<O: Os, R: Routines, S: Source> Cache<'_, O, R, S> {
             self.depot.owing.fetch_and(!(1u64 << ordinal), SeqCst);
             return;
         };
-        let owed = Water(self.depot.water[ordinal as usize].load(Relaxed)).owed();
+        let owed = Water(self.depot.water(ordinal as usize).load(Relaxed)).owed();
         let paid = if owed == 0 {
             0
         } else {
@@ -239,7 +239,7 @@ impl<O: Os, R: Routines, S: Source> Cache<'_, O, R, S> {
         for class in SmallClass::all() {
             let ordinal = class.ordinal() % SMALL_COUNT;
             let bit = 1u64 << ordinal;
-            let owed = Water(self.depot.water[ordinal].load(Relaxed)).owed();
+            let owed = Water(self.depot.water(ordinal).load(Relaxed)).owed();
             for _ in 0..=owed {
                 if self.depot.owing.load(Relaxed) & bit == 0 {
                     break;
@@ -256,7 +256,7 @@ impl<O: Os, R: Routines, S: Source> Cache<'_, O, R, S> {
     fn settle(&self, ordinal: usize) {
         let bit = 1u64 << ordinal;
         self.depot.owing.fetch_and(!bit, SeqCst);
-        if Water(self.depot.water[ordinal].load(SeqCst)).owed() > 0 {
+        if Water(self.depot.water(ordinal).load(SeqCst)).owed() > 0 {
             self.depot.owing.fetch_or(bit, SeqCst);
         }
     }

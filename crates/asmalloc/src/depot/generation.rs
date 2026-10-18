@@ -79,7 +79,7 @@ fn word<'a>(page: NonNull<u8>) -> &'a AtomicU64 {
 /// Readies the magazine area and the drain, once per process; later calls return at once.
 /// `false` if the generation page cannot be committed, in which case no magazine can be made.
 pub(super) fn prepare<O: Os>(depot: &Depot, area: Area<'_, O>) -> bool {
-    if depot.status.load(Acquire) & READY != 0 {
+    if depot.shared.status.load(Acquire) & READY != 0 {
         return true;
     }
     let page = area.generation_page();
@@ -93,19 +93,19 @@ pub(super) fn prepare<O: Os>(depot: &Depot, area: Area<'_, O>) -> bool {
     let wiped = space.wipe_on_fork(page, len).is_ok();
     let fenced = wiped && space.os().register_fence().is_ok();
     let status = READY | if fenced { DRAINS } else { 0 };
-    depot.status.fetch_or(status, AcqRel);
+    depot.shared.status.fetch_or(status, AcqRel);
     true
 }
 
 /// Whether drains may run.
 pub(super) fn drains_enabled(depot: &Depot) -> bool {
-    depot.status.load(Acquire) & DRAINS != 0
+    depot.shared.status.load(Acquire) & DRAINS != 0
 }
 
 /// This process's generation, drawing one if there is none yet. `None` until [`prepare`] has
 /// succeeded.
 pub(super) fn current<O: Os>(depot: &Depot, area: Area<'_, O>) -> Option<Generation> {
-    if depot.status.load(Acquire) & READY == 0 {
+    if depot.shared.status.load(Acquire) & READY == 0 {
         return None;
     }
     let word = word(area.generation_page());

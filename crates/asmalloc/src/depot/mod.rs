@@ -70,6 +70,7 @@ pub(crate) use stack::Stack;
 use crate::classes::{MagazineSize, SMALL_COUNT, SmallClass};
 use crate::front::sync::{AtomicU64, AtomicUsize};
 use crate::front::{Cpu, Routines, Slab};
+use crate::lined::{LINE, Lined};
 use crate::os::Os;
 use crate::space::Space;
 
@@ -117,42 +118,76 @@ impl Tuning {
 
 /// The depot and the rest of the middle tier's shared state. One per heap, static in the
 /// allocator; the all-zero value is valid: empty stacks, no magazines made, nothing prepared.
+///
+/// Every group of words is on lines of its own (`crate::lined`): a class's full stack with its
+/// water mark, which its pushes, pops and sheds write; each size's empty stack; the magazine
+/// area's growth; the start-up status and the CPU count, which every slow path reads and almost
+/// nothing writes; and the set of owing classes. Packed together, the stack heads of eight
+/// classes shared a line, and two CPUs exchanging magazines of different classes took it from
+/// each other on every push and pop.
 pub struct Depot {
-    /// Per small class, by ordinal: magazines with objects in them.
-    full: [Stack; SMALL_COUNT],
+    /// Per small class, by ordinal.
+    classes: [Lined<ClassDepot>; SMALL_COUNT],
     /// Per magazine size, by ordinal: empty magazines.
-    empty: [Stack; MagazineSize::COUNT],
-    /// Bytes of the magazine area handed out after its first unit.
-    carved: AtomicUsize,
-    /// Bytes of the magazine area known to be writable, from its start.
-    committed: AtomicUsize,
-    /// What start-up has done (`generation.rs`).
-    status: AtomicU64,
-    /// One more than the largest CPU number a slow path has run on.
-    cpus: AtomicUsize,
-    /// Per small class, by ordinal: how low its stack has been this interval, and what the
-    /// last interval left it owing (`shed.rs`).
-    water: [AtomicU64; SMALL_COUNT],
+    empty: [Lined<Stack>; MagazineSize::COUNT],
+    growth: Lined<Growth>,
+    shared: Lined<Shared>,
     /// The classes whose stacks owe magazines to the source, one bit per ordinal (`shed.rs`).
-    owing: AtomicU64,
+    owing: Lined<AtomicU64>,
     /// Magazines made, for audits.
     #[cfg(test)]
     created: std::sync::atomic::AtomicUsize,
 }
+
+/// One class's part of the depot.
+struct ClassDepot {
+    /// Magazines with objects in them.
+    full: Stack,
+    /// How low the stack has been this interval, and what the last interval left it owing
+    /// (`shed.rs`).
+    water: AtomicU64,
+}
+
+/// The magazine area's growth.
+struct Growth {
+    /// Bytes of the magazine area handed out after its first unit.
+    carved: AtomicUsize,
+    /// Bytes of the magazine area known to be writable, from its start.
+    committed: AtomicUsize,
+}
+
+/// What every slow path reads and almost nothing writes.
+struct Shared {
+    /// What start-up has done (`generation.rs`).
+    status: AtomicU64,
+    /// One more than the largest CPU number a slow path has run on.
+    cpus: AtomicUsize,
+}
+
+#[cfg(not(test))]
+const _: () = assert!(size_of::<Depot>() == LINE * (SMALL_COUNT + MagazineSize::COUNT + 3));
 
 impl Depot {
     /// The empty depot.
     #[allow(clippy::new_without_default)]
     pub const fn new() -> Depot {
         Depot {
-            full: [const { Stack::new() }; SMALL_COUNT],
-            empty: [const { Stack::new() }; MagazineSize::COUNT],
-            carved: AtomicUsize::new(0),
-            committed: AtomicUsize::new(0),
-            status: AtomicU64::new(0),
-            cpus: AtomicUsize::new(0),
-            water: [const { AtomicU64::new(0) }; SMALL_COUNT],
-            owing: AtomicU64::new(0),
+            classes: [const {
+                Lined::new(ClassDepot {
+                    full: Stack::new(),
+                    water: AtomicU64::new(0),
+                })
+            }; SMALL_COUNT],
+            empty: [const { Lined::new(Stack::new()) }; MagazineSize::COUNT],
+            growth: Lined::new(Growth {
+                carved: AtomicUsize::new(0),
+                committed: AtomicUsize::new(0),
+            }),
+            shared: Lined::new(Shared {
+                status: AtomicU64::new(0),
+                cpus: AtomicUsize::new(0),
+            }),
+            owing: Lined::new(AtomicU64::new(0)),
             #[cfg(test)]
             created: std::sync::atomic::AtomicUsize::new(0),
         }
@@ -160,7 +195,12 @@ impl Depot {
 
     /// The stack of magazines with objects of `class`.
     pub(crate) fn full(&self, class: SmallClass) -> &Stack {
-        &self.full[class.ordinal() % SMALL_COUNT]
+        &self.classes[class.ordinal() % SMALL_COUNT].full
+    }
+
+    /// The water mark of the class of ordinal `ordinal` (`shed.rs`).
+    pub(crate) fn water(&self, ordinal: usize) -> &AtomicU64 {
+        &self.classes[ordinal % SMALL_COUNT].water
     }
 
     /// The stack of empty magazines of `size`.

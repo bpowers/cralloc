@@ -37,7 +37,11 @@ impl<O: Os, R: Routines, S: Source> Cache<'_, O, R, S> {
         if let Some(cpu) = me {
             self.empty_own(cpu);
         }
-        let count = self.depot.cpus.load(core::sync::atomic::Ordering::Acquire);
+        let count = self
+            .depot
+            .shared
+            .cpus
+            .load(core::sync::atomic::Ordering::Acquire);
         for index in 0..count {
             if let Some(cpu) = self.routines.slabs().cpu(index as i32)
                 && Some(cpu) != me

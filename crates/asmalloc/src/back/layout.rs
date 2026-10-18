@@ -6,8 +6,8 @@
 //!
 //! ```text
 //! word 0                      leaf bitmap: one bit per slot, set means free
-//! leaf_words                  header: Grow (watermark, committed pages)
-//! leaf_words + 1              header: Hints (start of the huge-page part, purge cursor)
+//! header                      Grow (watermark, committed pages)
+//! header + 1                  Hints (start of the huge-page part, purge cursor)
 //! ...                         summary levels 1 to height, each a word per 64 words below
 //! ...                         clean bitmap: one bit per page, set means purged and untouched
 //! ...                         zero bitmap, large classes only: one bit per slot, set means
@@ -21,6 +21,11 @@
 //! starting at the block's first byte; everything after it is committed when the region is
 //! assigned. All zero means nothing is free, nothing is carved, nothing is committed, the region
 //! has no huge-page part and no purge is under way.
+//!
+//! The header is a cache line of its own, the first after the leaf bitmap, wherever the block
+//! has room for the padding (every geometry but the smallest simulated ones): every free reads
+//! the watermark, and claims and releases write the leaf and summary words on either side
+//! (`crate::lined`).
 
 use super::policy::{STAGGER_SLOTS, STAGGER_STEP};
 use super::word::BITS;
@@ -37,6 +42,9 @@ pub(crate) const WORD_BYTES: usize = 8;
 
 /// Header words after the leaf bitmap.
 const HEADER_WORDS: u32 = 2;
+
+/// Words in a cache line.
+const LINE_WORDS: u32 = (crate::lined::LINE / WORD_BYTES) as u32;
 
 /// The metadata layout and slot arithmetic of one class in one geometry.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -60,10 +68,13 @@ pub(crate) struct Layout {
     total: u32,
     page_shift: u8,
     huge_shift: u8,
+    /// Words of padding between the leaf bitmap and the header, which put the header on a
+    /// line of its own; zero where the block has no room for them.
+    header_pad: u8,
 }
 
 /// Words a [`Layout`] packs into for [`Memo`]: everything but the size and its divisor, which
-/// come from the class, as seventeen 32-bit fields and three bytes.
+/// come from the class, as seventeen 32-bit fields and four bytes.
 const PACKED_WORDS: usize = 9;
 
 /// Set in the last packed word: the words hold a layout.
@@ -219,6 +230,18 @@ impl Layout {
     /// The layout of `class` in a reservation laid out as `plan`, or `None` if a slot does not
     /// fit in a region or the metadata does not fit in the region's block.
     pub(crate) const fn new(plan: Plan, class: Class) -> Option<Layout> {
+        let slots = slots_in_region(plan, class);
+        let leaf = slots.div_ceil(BITS);
+        let pad = leaf.next_multiple_of(LINE_WORDS) - leaf;
+        // The header and the summary levels after it each start a line, if the block has room.
+        match Layout::with_pad(plan, class, pad as u8, LINE_WORDS - HEADER_WORDS) {
+            Some(layout) => Some(layout),
+            None => Layout::with_pad(plan, class, 0, 0),
+        }
+    }
+
+    /// The layout with `pad` words before the header and `after` words after it.
+    const fn with_pad(plan: Plan, class: Class, pad: u8, after: u32) -> Option<Layout> {
         let geometry = plan.geometry();
         let slots = slots_in_region(plan, class);
         if slots == 0 {
@@ -227,7 +250,7 @@ impl Layout {
         let mut offset = [0u32; MAX_LEVELS];
         let mut count = [0u32; MAX_LEVELS];
         count[0] = slots.div_ceil(BITS);
-        let mut next = count[0] + HEADER_WORDS;
+        let mut next = count[0] + pad as u32 + HEADER_WORDS + after;
         let mut level = 0;
         while count[level] > 1 {
             level += 1;
@@ -269,6 +292,7 @@ impl Layout {
             total: next,
             page_shift: page_shift as u8,
             huge_shift: geometry.huge_page_size().trailing_zeros() as u8,
+            header_pad: pad,
         })
     }
 
@@ -307,6 +331,7 @@ impl Layout {
                 | (self.height as u64) << 32
                 | (self.page_shift as u64) << 40
                 | (self.huge_shift as u64) << 48
+                | (self.header_pad as u64) << 56
                 | PACKED,
         ]
     }
@@ -331,6 +356,7 @@ impl Layout {
             total: lo(8),
             page_shift: (w[8] >> 40) as u8,
             huge_shift: (w[8] >> 48) as u8,
+            header_pad: (w[8] >> 56) as u8 & 0x7f,
         }
     }
 
@@ -374,13 +400,13 @@ impl Layout {
     /// Word offset of the `Grow` header word.
     #[inline(always)]
     pub(crate) const fn grow_word(&self) -> u32 {
-        self.count[0]
+        self.count[0] + self.header_pad as u32
     }
 
     /// Word offset of the `Hints` header word.
     #[inline(always)]
     pub(crate) const fn hints_word(&self) -> u32 {
-        self.count[0] + 1
+        self.grow_word() + 1
     }
 
     /// Word offset of clean-bitmap word `index`.
@@ -698,6 +724,26 @@ mod tests {
             [1 << 23, 1 << 17, 1 << 11, 1 << 5, 1]
         );
         assert_eq!(layout.clean_words(), (1 << 20) / 64);
+    }
+
+    /// In the design's geometry every class has room for its header on a line of its own,
+    /// away from the leaf and summary words that claims and releases write.
+    #[test]
+    fn the_design_header_has_a_line_of_its_own_in_every_class() {
+        let plan = Geometry::DESIGN.largest_plan();
+        for class in Class::all() {
+            let Some(layout) = Layout::new(plan, class) else {
+                continue;
+            };
+            assert_eq!(layout.grow_word() % LINE_WORDS, 0, "{class:?}");
+            assert!(layout.grow_word() >= layout.leaf_words(), "{class:?}");
+            let after = if layout.height() >= 1 {
+                layout.tree_word(1, 0)
+            } else {
+                layout.clean_word(0)
+            };
+            assert_eq!(after, layout.grow_word() + LINE_WORDS, "{class:?}");
+        }
     }
 
     #[test]
