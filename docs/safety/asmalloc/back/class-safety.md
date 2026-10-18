@@ -17,7 +17,14 @@ and a later one purged every advised slot; each change only narrows or widens wh
 runs, without changing what holds when it does. A kept advised slot is released with its
 advice and flag; the next allocation of it takes them back (`alloc_at`), and only the holder
 of a slot reads the flag, so a free slot that is advised changes no other path: the purge walk
-purges free slots by their pages and never reads it, and `purge_part` acts on held slots. The advice is taken back after the purge
+purges free slots by their pages and never reads it, and `purge_part` acts on held slots.
+
+A slot released resident is charged what its last tenant could have written
+(`region::charge_resident`): the holder marks the slot's pages past that extent clean before it
+releases the bit, as the rule for clean bits requires. Clean bits only steer the count and the
+purge walk; no zero bit is set, so a claim never reports these pages as zero, even when an
+earlier, larger tenant left them resident
+(`a_small_tenant_after_a_large_one_is_under_counted_but_never_zero`). The advice is taken back after the purge
 (`region::unadvise`), which changes no contents. `free_slot` is private and called by
 `Back::free` and `Back::free_by_address` for a large class, both crate-private
 (`pub(crate)`), with the region and slot that `slot_in` found for the pointer: `Back::free`

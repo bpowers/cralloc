@@ -350,11 +350,15 @@ impl<'a, O: Os> Back<'a, O> {
     /// the heart for a large free, as it does for a large allocation (`Cache::lone_heartbeat`).
     fn free_slot(&self, host: &ClassHost<'a, O>, class: Class, region: RegionId, slot: u32) {
         let purged = self.purge_before_release(host, region, slot, class);
+        // Charged while still held: the clean bits it writes are this slot's.
+        let charge = if purged {
+            0
+        } else {
+            region::charge_resident(host, region, slot)
+        };
         let (word, bit) = position(slot);
         tree::release_one(host, region, word, 1 << bit);
-        if !purged {
-            self.retain(class, class.size());
-        }
+        self.retain(class, charge);
     }
 
     /// The region and slot of a pointer the caller says is a handed-out slot of `class`, or an
@@ -721,7 +725,9 @@ impl<'a, O: Os> Back<'a, O> {
                 };
                 if keep {
                     // As a plain free leaves it: resident, counted, advice and all.
-                    self.release_all(class, &[from.as_ptr()], true);
+                    let charge = region::charge_resident(&host, region, index);
+                    self.release_all(class, &[from.as_ptr()], false);
+                    self.retain(class, charge);
                     self.heartbeat();
                     return;
                 }

@@ -342,6 +342,57 @@ pub(crate) unsafe fn purge_held<H: Host>(host: &H, region: RegionId, slot: u32) 
     true
 }
 
+/// For the holder of large slot `slot`, about to release it resident: marks clean the slot's
+/// pages past what its last tenant could have written, and returns the bytes of the slot to
+/// count as retained, which are the rest. What the tenant could have written is its recorded
+/// size from the slot's stagger (a block starts at the slot's start or there), rounded up to a
+/// page, or to a huge page if the slot is advised, since an advised range faults a huge page
+/// at a time; at most the slot.
+///
+/// This is the one place the retained count learns a large slot's charge: a claim subtracts
+/// the slot's bytes less its clean pages, and a purge the pages it newly cleans, so the add
+/// and the two subtracts agree page for page (`settle`, `purge_unit`). A slot that moved in
+/// with room to grow is charged what its block can have touched, not four times as much.
+///
+/// The tail past the extent is not resident when the slot was claimed clean, or when a shrink
+/// in place returned it. The one case where it is resident is a tenant following a larger one
+/// in a slot that was kept resident: then the count is under by the difference, a known
+/// under-count. The purge walk still returns those pages: its unit reaches back to the start of
+/// the slot (`Layout::unit_below`), the extent's pages are not clean, so the unit is not
+/// skipped, and all of it goes back. No zero bit is set here, so a claim never takes these
+/// pages for zero.
+pub(crate) fn charge_resident<H: Host>(host: &H, region: RegionId, slot: u32) -> usize {
+    let layout = host.layout();
+    let size = layout.size();
+    let (Some(unit), Some(now)) = (layout.slot_unit(slot), recorded(host, region, slot)) else {
+        return size;
+    };
+    let page = layout.page_size();
+    let written = layout.slot_bytes(slot) + layout.stagger(slot) + now.size;
+    let end = written.div_ceil(page).min(unit.end as usize) as u32;
+    let end = if now.huge { layout.huge_ceil(end) } else { end };
+    let end = end.clamp(unit.start, unit.end);
+    // Counted over the whole slot, as the claim counts: a page found clean already would be
+    // subtracted there too.
+    let mut clean = 0usize;
+    for w in unit.start / BITS..=(unit.end - 1) / BITS {
+        let all = bits_in_word(w, unit.start, unit.end - 1);
+        let word = host.meta(region, layout.clean_word(w));
+        let tail = if end < unit.end {
+            bits_in_word(w, end, unit.end - 1)
+        } else {
+            0
+        };
+        let now = if tail != 0 {
+            word.fetch_or(tail) | tail
+        } else {
+            word.load()
+        };
+        clean += (now & all).count_ones() as usize;
+    }
+    size.saturating_sub(clean * page)
+}
+
 /// Records that every whole page inside slot `slot` has just been returned to the OS, for the
 /// thread that holds the slot and returned them: sets the pages' clean bits and, if they are
 /// all of the slot, its zero bit. Those bits are written only by the holder of every slot
