@@ -113,3 +113,25 @@ program must invoke the macro at most once, or enable the `c-abi`
 feature and not invoke it, since two definitions of one symbol fail to link; and it must not
 also link another allocator that defines these names (the design's non-goal: one instance per
 process).
+
+## C-EXPORT-02: the generated routines `export_c_abi!` and `export_cxx_abi!` define
+
+`$crate::asmalloc_exports_c_x86_64!()` defines `malloc`, `free` and `free_sized`, and
+`$crate::asmalloc_exports_cxx_x86_64!()` defines `_ZdlPv`, `_ZdaPv`, `_ZdlPvm` and `_ZdaPvm`,
+each a `#[unsafe(no_mangle)]` naked function whose body is a generated routine's code
+(`c_malloc`, `c_free`, `c_free_sized`, `c_delete`, `c_delete_sized`), written by the Lean
+emitter and checked against it (`Rust.exportsFile`).
+
+**Obligations.** As C-EXPORT-01 for each symbol: its ABI is the C declaration's, it keeps the
+C contract, and it replaces nothing the program relies on; and the routine's own obligations
+hold whoever calls it.
+
+**Proof.** The routines take their arguments in `rdi` and `rsi` and return in `rax` (System V,
+which is C's on x86-64 Linux), and keep the callee-saved registers (proved). The routine's
+obligations are discharged in `routines-safety.md` for any thread of the process, so for a C
+caller as for Rust; a C caller of `free(p)`, `free_sized(p, n)` or a `delete` has made the free's
+promise. The copies name the crate's statics and slow paths through `$crate`, so they are the
+same memory and functions as the routines in the crate. The rest of C-EXPORT-01 (what the
+symbols replace) is unchanged. `export_cxx_abi!` names a marker only `export_c_abi!` defines,
+so the C++ deletes cannot be exported without the C allocator whose blocks they free.
+

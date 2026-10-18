@@ -287,9 +287,14 @@ def bodyPrefixes (M : ISA) : List (Step M.Instr M.Cond) → M.State → List M.S
 /-- The states, of a run of `c` from `s`, in which a restartable sequence may
 be aborted: for `rseq arm body`, those of its body after `arm`
 (`bodyPrefixes`). The emitter allows a sequence only as the whole of a
-function's code (`Rust.checkRseq`), so there are no others. -/
+function's code, or followed by a `jump` (`Rust.checkRseq`), so there are no
+others. -/
 def Code.abortStates (M : ISA) : Prog M → M.State → List M.State
   | .rseq arm body, s => match execBlock M arm s with
+    | some s₁ => bodyPrefixes M body s₁
+    | none => []
+  -- The code after the commit is outside the sequence: never aborted.
+  | .seq (.rseq arm body) _, s => match execBlock M arm s with
     | some s₁ => bodyPrefixes M body s₁
     | none => []
   | _, _ => []
@@ -320,6 +325,9 @@ def Code.events (M : ISA) : Prog M → M.State → List Event
   | .rseq arm body, s => blockEvents M arm s ++ match execBlock M arm s with
     | some s₁ => bodyEvents M body s₁
     | none => []
+  | .seq (.rseq arm body) _, s => blockEvents M arm s ++ match execBlock M arm s with
+    | some s₁ => bodyEvents M body s₁
+    | none => []
   | _, _ => []
 
 /-- What a restartable sequence `c` must satisfy, run from `s`: the last
@@ -336,10 +344,16 @@ state the thread may resume in after the abort (`Target.rely`,
 the arm, the function's first instruction (`Rust.checkRseq`), so that is a
 run of the function from the new state: a retry, which the first conjunct
 of `Verified` covers (`Restarts`, `Verified.restarts`). True of code without
-a sequence. -/
+a sequence. A sequence followed by code (a `jump`) is checked the same way:
+the code after it runs outside the sequence and is never aborted. -/
 def RseqOk (T : Target) (c : Prog T.isa) (k : Contract T.isa) (s : T.isa.State) : Prop :=
   match c with
   | .rseq arm _ =>
+    k.trace s (c.events T.isa s) ∧
+    (∃ i a, arm.getLast? = some i ∧ execBlock T.isa arm.dropLast s = some a ∧ T.arms i a) ∧
+    ∀ p ∈ c.abortStates T.isa s, T.armed p ∧ T.abiPreserved s p ∧ k.abort s p ∧
+      ∀ p', T.rely p p' → k.env p p' → k.pre p'
+  | .seq (.rseq arm _) _ =>
     k.trace s (c.events T.isa s) ∧
     (∃ i a, arm.getLast? = some i ∧ execBlock T.isa arm.dropLast s = some a ∧ T.arms i a) ∧
     ∀ p ∈ c.abortStates T.isa s, T.armed p ∧ T.abiPreserved s p ∧ k.abort s p ∧
@@ -369,6 +383,7 @@ def Code.sites {I C : Type} : Code I C → Nat
   | .call .. => 0
   | .frame _ b _ => b.sites
   | .rseq _ body => body.countP Step.isExit + 1
+  | .jump .. => 0
 
 /-- The site, the way taken, that each state satisfying the precondition
 must reach for some witness. -/
@@ -381,6 +396,7 @@ def Code.outcomes {I C : Type} : Code I C → List (Nat × Bool)
   | .call .. => []
   | .frame _ b _ => b.outcomes
   | .rseq _ body => (List.range (body.countP Step.isExit + 1)).map (·, true)
+  | .jump .. => []
 
 /-- Where the body of a restartable sequence ends, run from `s` and not
 aborted: the index of the exit it takes, or its length if it reaches its

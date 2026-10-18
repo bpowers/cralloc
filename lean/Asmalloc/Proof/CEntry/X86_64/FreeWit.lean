@@ -7,8 +7,8 @@ public import Asmalloc.Proof.CEntry.X86_64.Witness
 /-!
 # The frees' witnesses
 
-The memory of the pop's witnesses (`Malloc.witM`), with the published shift
-12 and base index `0x6000` at `0x3000400`, so that the pointer `0x6000123`
+The memory of the pop's witnesses (`Malloc.witM`), with the shift 12 and
+base index `0x6000` in both mirrors, at `0x3000400` and `0x3000410`, so that the pointer `0x6000123`
 is in region 0, whose byte in the region table at `0x3001800` is the class
 1; and `C_SIZED_SIZES` at `0x8000000`, its table 2048 bytes in, predicting
 the class 1 for the size 8. The magazine at `0x4000` has 4 slots; a word of
@@ -24,7 +24,8 @@ open VG.X86_64 VG.Spec.Slab VG.Spec.CEntry VG.Impl.Slab.X86_64 VG.Impl.CEntry.X8
 
 def wsOf (cpu word : BitVec 64) : List (Addr × BitVec 64) :=
   [(0x2000, 0x100), (0x10104, cpu), (0x1000008, word), (0x4008, 0x5000), (0x3000808, 16),
-    (0x3000400, 12), (0x3000408, 0x6000), (0x3001800, 1), (0x8000808, 1)]
+    (0x3000400, 12), (0x3000408, 0x6000), (0x3000410, 12), (0x3000418, 0x6000), (0x3001800, 1),
+    (0x8000808, 1)]
 
 def witF (cpu ptr size word : BitVec 64) (rd wr : List Region) : State where
   gpr r := if r = .rsp then 0x7000000 else if r = .rdi then ptr else if r = .rsi then size else 0
@@ -41,7 +42,8 @@ def witF (cpu ptr size word : BitVec 64) (rd wr : List Region) : State where
   csDesc := 0x9000
 
 def addrs : List Addr :=
-  [0x2000, 0x10104, 0x1000008, 0x4008, 0x3000808, 0x3000400, 0x3000408, 0x3001800, 0x8000808]
+  [0x2000, 0x10104, 0x1000008, 0x4008, 0x3000808, 0x3000400, 0x3000408, 0x3000410, 0x3000418,
+    0x3001800, 0x8000808]
 
 theorem mem_addrs {cpu word : BitVec 64} {bv : Addr × BitVec 64} (h : bv ∈ wsOf cpu word) :
     bv.1 ∈ addrs := by
@@ -50,10 +52,10 @@ theorem mem_addrs {cpu word : BitVec 64} {bv : Addr × BitVec 64} (h : bv ∈ ws
 
 theorem addrs_toNat : ∀ a ∈ addrs, a.toNat = 0x2000 ∨ a.toNat = 0x10104 ∨ a.toNat = 0x1000008 ∨
     a.toNat = 0x4008 ∨ a.toNat = 0x3000808 ∨ a.toNat = 0x3000400 ∨ a.toNat = 0x3000408 ∨
-    a.toNat = 0x3001800 ∨ a.toNat = 0x8000808 := by
+    a.toNat = 0x3000410 ∨ a.toNat = 0x3000418 ∨ a.toNat = 0x3001800 ∨ a.toNat = 0x8000808 := by
   intro a ha
   simp only [addrs, List.mem_cons, List.not_mem_nil, or_false] at ha
-  rcases ha with rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl
+  rcases ha with rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl
   · exact .inl rfl
   · exact .inr (.inl rfl)
   · exact .inr (.inr (.inl rfl))
@@ -62,7 +64,9 @@ theorem addrs_toNat : ∀ a ∈ addrs, a.toNat = 0x2000 ∨ a.toNat = 0x10104 �
   · exact .inr (.inr (.inr (.inr (.inr (.inl rfl)))))
   · exact .inr (.inr (.inr (.inr (.inr (.inr (.inl rfl))))))
   · exact .inr (.inr (.inr (.inr (.inr (.inr (.inr (.inl rfl)))))))
-  · exact .inr (.inr (.inr (.inr (.inr (.inr (.inr (.inr rfl)))))))
+  · exact .inr (.inr (.inr (.inr (.inr (.inr (.inr (.inr (.inl rfl))))))))
+  · exact .inr (.inr (.inr (.inr (.inr (.inr (.inr (.inr (.inr (.inl rfl)))))))))
+  · exact .inr (.inr (.inr (.inr (.inr (.inr (.inr (.inr (.inr (.inr rfl)))))))))
 
 section
 
@@ -86,7 +90,7 @@ theorem masks_zero (cpu ptr size word : BitVec 64) (rd wr : List Region) :
   · intro bv hbv
     rw [ha]
     have := bv.1.isLt
-    rcases addrs_toNat _ (mem_addrs hbv) with h | h | h | h | h | h | h | h | h <;> rw [h] <;> omega
+    rcases addrs_toNat _ (mem_addrs hbv) with h | h | h | h | h | h | h | h | h | h | h <;> rw [h] <;> omega
 
 theorem words_zero (cpu ptr size word : BitVec 64) (rd wr : List Region) {i : Nat} (h0 : 0 < i)
     (hi : i < SLAB_COUNT) : c.wordOf (witF cpu ptr size word rd wr) 1 i = 0 := by
@@ -102,10 +106,13 @@ theorem words_zero (cpu ptr size word : BitVec 64) (rd wr : List Region) {i : Na
   apply mkMem_readW_clear
   · intro bv hbv
     rw [ha]
-    rcases addrs_toNat _ (mem_addrs hbv) with h | h | h | h | h | h | h | h | h <;> rw [h] <;> omega
+    rcases addrs_toNat _ (mem_addrs hbv) with h | h | h | h | h | h | h | h | h | h | h <;> rw [h] <;> omega
   · rw [ha]; omega
 
 end
+
+/-- The mirror's words in the witnesses' memory. -/
+def pubAt (m : Mirror) : Region := ⟨0x3000400 + BitVec.ofNat 64 (16 * m.index), 16⟩
 
 /-! ## `c_free` -/
 
@@ -113,108 +120,108 @@ namespace F
 
 open Free
 
-def roF : List Region := [⟨0x2000, 8⟩, ⟨0x10104, 4⟩, ⟨0x3000800, 2048⟩, ⟨0x3000400, 16⟩, ⟨0x3001800, 4096⟩]
+def roF (m : Mirror) : List Region := [⟨0x2000, 8⟩, ⟨0x10104, 4⟩, ⟨0x3000800, 2048⟩, pubAt m, ⟨0x3001800, 4096⟩]
 
-def w0 : State := witF 8192 0x6000123 0 0 roF [⟨0x10108, 8⟩]
-def w1 : State := witF 0 0 0 0 roF [⟨0x10108, 8⟩]
-def w2 : State := witF 0 0x7fff00000000 0 0 roF [⟨0x10108, 8⟩]
-def w3 : State := witF 0 0x6000123 0 0 roF [⟨0x10108, 8⟩, ⟨0x1000008, 8⟩]
-def w4 : State := witF 0 0x6000123 0 0x4008 roF [⟨0x10108, 8⟩, ⟨0x1000008, 8⟩, ⟨0x4000, 32⟩]
+def w0 (m : Mirror) : State := witF 8192 0x6000123 0 0 (roF m) [⟨0x10108, 8⟩]
+def w1 (m : Mirror) : State := witF 0 0 0 0 (roF m) [⟨0x10108, 8⟩]
+def w2 (m : Mirror) : State := witF 0 0x7fff00000000 0 0 (roF m) [⟨0x10108, 8⟩]
+def w3 (m : Mirror) : State := witF 0 0x6000123 0 0 (roF m) [⟨0x10108, 8⟩, ⟨0x1000008, 8⟩]
+def w4 (m : Mirror) : State := witF 0 0x6000123 0 0x4008 (roF m) [⟨0x10108, 8⟩, ⟨0x1000008, 8⟩, ⟨0x4000, 32⟩]
 
-theorem pre_w (s : State) (hm : ∃ cpu ptr size word rd wr, s = witF cpu ptr size word rd wr)
-    (hrd : s.rd = cx.ro s) (hwr : s.wr = cx.rw s)
-    (hnw : ((cx.regions s).all fun x => decide (x.1.base.toNat + x.1.len ≤ 2 ^ 64)) = true)
-    (hp : Sig.pairsSep (cx.regions s) = true)
-    (hres : ((cx.regions s).all fun x => (cx.A.reserved 0 s).all fun q => Region.sep x.1 q) = true)
-    (hl : layoutCheck cx s = true) (hmask : cx.maskOf s 1 = magMask (2 ^ 2))
-    (h0 : cx.SlotOk s 1 (cx.wordOf s 1 0)) :
-    (freeContract abi).pre s := by
+theorem pre_w (m : Mirror) (s : State) (hm : ∃ cpu ptr size word rd wr, s = witF cpu ptr size word rd wr)
+    (hrd : s.rd = (cx m).ro s) (hwr : s.wr = (cx m).rw s)
+    (hnw : (((cx m).regions s).all fun x => decide (x.1.base.toNat + x.1.len ≤ 2 ^ 64)) = true)
+    (hp : Sig.pairsSep ((cx m).regions s) = true)
+    (hres : (((cx m).regions s).all fun x => ((cx m).A.reserved 0 s).all fun q => Region.sep x.1 q) = true)
+    (hl : layoutCheck (cx m) s = true) (hmask : (cx m).maskOf s 1 = magMask (2 ^ 2))
+    (h0 : (cx m).SlotOk s 1 ((cx m).wordOf s 1 0)) :
+    (freeContract abi m).pre s := by
   obtain ⟨cpu, ptr, size, word, rd, wr, rfl⟩ := hm
-  refine (pre_iff cx hv rfl rfl).mpr ⟨trivial, world_of_check hX hrd hwr hnw hp hres,
+  refine (pre_iff (cx m) hv rfl rfl).mpr ⟨trivial, world_of_check hX hrd hwr hnw hp hres,
     rfl, rfl, layout_of_check hX hl, inv_one (masks_zero hX _ _ _ _ _ _) ⟨2, by decide, by decide, hmask⟩
       (fun i h hi => words_zero hX _ _ _ _ _ _ h hi) h0⟩
 
-theorem pre_w0 : (freeContract abi).pre w0 :=
-  pre_w _ ⟨_, _, _, _, _, _, rfl⟩ (by decide +kernel) (by decide +kernel) (by decide +kernel)
-    (by decide +kernel) (by decide +kernel) (by decide +kernel) (by decide +kernel)
-    ⟨by decide +kernel, fun hs => absurd hs (by decide +kernel)⟩
+theorem pre_w0 (m : Mirror) : (freeContract abi m).pre (w0 m) :=
+  pre_w m _ ⟨_, _, _, _, _, _, rfl⟩ (by cases m <;> decide +kernel) (by cases m <;> decide +kernel) (by cases m <;> decide +kernel)
+    (by cases m <;> decide +kernel) (by cases m <;> decide +kernel) (by cases m <;> decide +kernel) (by cases m <;> decide +kernel)
+    ⟨by cases m <;> decide +kernel, fun hs => absurd hs (by cases m <;> decide +kernel)⟩
 
-theorem pre_w1 : (freeContract abi).pre w1 :=
-  pre_w _ ⟨_, _, _, _, _, _, rfl⟩ (by decide +kernel) (by decide +kernel) (by decide +kernel)
-    (by decide +kernel) (by decide +kernel) (by decide +kernel) (by decide +kernel)
-    ⟨by decide +kernel, fun hs => absurd hs (by decide +kernel)⟩
+theorem pre_w1 (m : Mirror) : (freeContract abi m).pre (w1 m) :=
+  pre_w m _ ⟨_, _, _, _, _, _, rfl⟩ (by cases m <;> decide +kernel) (by cases m <;> decide +kernel) (by cases m <;> decide +kernel)
+    (by cases m <;> decide +kernel) (by cases m <;> decide +kernel) (by cases m <;> decide +kernel) (by cases m <;> decide +kernel)
+    ⟨by cases m <;> decide +kernel, fun hs => absurd hs (by cases m <;> decide +kernel)⟩
 
-theorem pre_w2 : (freeContract abi).pre w2 :=
-  pre_w _ ⟨_, _, _, _, _, _, rfl⟩ (by decide +kernel) (by decide +kernel) (by decide +kernel)
-    (by decide +kernel) (by decide +kernel) (by decide +kernel) (by decide +kernel)
-    ⟨by decide +kernel, fun hs => absurd hs (by decide +kernel)⟩
+theorem pre_w2 (m : Mirror) : (freeContract abi m).pre (w2 m) :=
+  pre_w m _ ⟨_, _, _, _, _, _, rfl⟩ (by cases m <;> decide +kernel) (by cases m <;> decide +kernel) (by cases m <;> decide +kernel)
+    (by cases m <;> decide +kernel) (by cases m <;> decide +kernel) (by cases m <;> decide +kernel) (by cases m <;> decide +kernel)
+    ⟨by cases m <;> decide +kernel, fun hs => absurd hs (by cases m <;> decide +kernel)⟩
 
-theorem pre_w3 : (freeContract abi).pre w3 :=
-  pre_w _ ⟨_, _, _, _, _, _, rfl⟩ (by decide +kernel) (by decide +kernel) (by decide +kernel)
-    (by decide +kernel) (by decide +kernel) (by decide +kernel) (by decide +kernel)
-    ⟨by decide +kernel, fun hs => absurd hs (by decide +kernel)⟩
+theorem pre_w3 (m : Mirror) : (freeContract abi m).pre (w3 m) :=
+  pre_w m _ ⟨_, _, _, _, _, _, rfl⟩ (by cases m <;> decide +kernel) (by cases m <;> decide +kernel) (by cases m <;> decide +kernel)
+    (by cases m <;> decide +kernel) (by cases m <;> decide +kernel) (by cases m <;> decide +kernel) (by cases m <;> decide +kernel)
+    ⟨by cases m <;> decide +kernel, fun hs => absurd hs (by cases m <;> decide +kernel)⟩
 
-theorem pre_w4 : (freeContract abi).pre w4 :=
-  pre_w _ ⟨_, _, _, _, _, _, rfl⟩ (by decide +kernel) (by decide +kernel) (by decide +kernel)
-    (by decide +kernel) (by decide +kernel) (by decide +kernel) (by decide +kernel)
-    ⟨by decide +kernel, fun _ => apart_of_check hX (by decide +kernel)⟩
+theorem pre_w4 (m : Mirror) : (freeContract abi m).pre (w4 m) :=
+  pre_w m _ ⟨_, _, _, _, _, _, rfl⟩ (by cases m <;> decide +kernel) (by cases m <;> decide +kernel) (by cases m <;> decide +kernel)
+    (by cases m <;> decide +kernel) (by cases m <;> decide +kernel) (by cases m <;> decide +kernel) (by cases m <;> decide +kernel)
+    ⟨by cases m <;> decide +kernel, fun _ => apart_of_check hX (by cases m <;> decide +kernel)⟩
 
-theorem outcomes_eq : cFree.outcomes = [(0, true), (1, true), (2, true), (3, true), (4, true)] := rfl
+theorem outcomes_eq (m : Mirror) : (cFree m).outcomes = [(0, true), (1, true), (2, true), (3, true), (4, true)] := rfl
 
-theorem visits_w0 : Visits isa cFree w0 0 true := by
-  have hp := pre_of pre_w0
-  exact Visits.rseq (execBlock_arm hp.arm) (end_C hp (by decide +kernel))
+theorem visits_w0 (m : Mirror) : Visits isa (cFree m) (w0 m) 0 true := by
+  have hp := pre_of (pre_w0 m)
+  exact Visits.rseq (execBlock_arm hp.arm) (end_C hp (by cases m <;> decide +kernel))
 
-theorem visits_w1 : Visits isa cFree w1 1 true := by
-  have hp := pre_of pre_w1
-  exact Visits.rseq (execBlock_arm hp.arm) (end_N hp (by decide +kernel) (by decide +kernel))
+theorem visits_w1 (m : Mirror) : Visits isa (cFree m) (w1 m) 1 true := by
+  have hp := pre_of (pre_w1 m)
+  exact Visits.rseq (execBlock_arm hp.arm) (end_N hp (by cases m <;> decide +kernel) (by cases m <;> decide +kernel))
 
-theorem visits_w2 : Visits isa cFree w2 2 true := by
-  have hp := pre_of pre_w2
+theorem visits_w2 (m : Mirror) : Visits isa (cFree m) (w2 m) 2 true := by
+  have hp := pre_of (pre_w2 m)
   exact Visits.rseq (execBlock_arm hp.arm)
-    (end_S hp (by decide +kernel) (by decide +kernel) (by decide +kernel))
+    (end_S hp (by cases m <;> decide +kernel) (by cases m <;> decide +kernel) (by cases m <;> decide +kernel))
 
-theorem visits_w3 : Visits isa cFree w3 3 true := by
-  have hp := pre_of pre_w3
-  have hi : cx.InRange w3 := by decide +kernel
-  have h0 : ¬ (ptr w3).toNat = 0 := by decide +kernel
-  have hix : (cx.regionIndex w3).toNat < REGION_COUNT := by decide +kernel
+theorem visits_w3 (m : Mirror) : Visits isa (cFree m) (w3 m) 3 true := by
+  have hp := pre_of (pre_w3 m)
+  have hi : (cx m).InRange (w3 m) := by cases m <;> decide +kernel
+  have h0 : ¬ (ptr (w3 m)).toNat = 0 := by cases m <;> decide +kernel
+  have hix : ((cx m).regionIndex (w3 m)).toNat < REGION_COUNT := by cases m <;> decide +kernel
   have hb := backFacts hX hp.world hp.pre (cls_eq hp h0 hix) hi
-  have ho := pushOk hX (ready (s := w3)) hb hi
-  have ht : Tail.qtst .r9 (h5 w3) = 0 := by decide +kernel
+  have ho := pushOk hX (ready (m := m) (s := (w3 m))) hb hi
+  have ht : Tail.qtst .r9 (h5 m (w3 m)) = 0 := by cases m <;> decide +kernel
   have he := end_front hp hi h0 hix
   rw [Tail.endPush_miss ho _ ht] at he
   exact Visits.rseq (execBlock_arm hp.arm) he
 
-theorem visits_w4 : Visits isa cFree w4 4 true := by
-  have hp := pre_of pre_w4
-  have hi : cx.InRange w4 := by decide +kernel
-  have h0 : ¬ (ptr w4).toNat = 0 := by decide +kernel
-  have hix : (cx.regionIndex w4).toNat < REGION_COUNT := by decide +kernel
+theorem visits_w4 (m : Mirror) : Visits isa (cFree m) (w4 m) 4 true := by
+  have hp := pre_of (pre_w4 m)
+  have hi : (cx m).InRange (w4 m) := by cases m <;> decide +kernel
+  have h0 : ¬ (ptr (w4 m)).toNat = 0 := by cases m <;> decide +kernel
+  have hix : ((cx m).regionIndex (w4 m)).toNat < REGION_COUNT := by cases m <;> decide +kernel
   have hb := backFacts hX hp.world hp.pre (cls_eq hp h0 hix) hi
-  have ho := pushOk hX (ready (s := w4)) hb hi
-  have ht : ¬ Tail.qtst .r9 (h5 w4) = 0 := by decide +kernel
+  have ho := pushOk hX (ready (m := m) (s := (w4 m))) hb hi
+  have ht : ¬ Tail.qtst .r9 (h5 m (w4 m)) = 0 := by cases m <;> decide +kernel
   have he := end_front hp hi h0 hix
   rw [Tail.endPush_hit ho _ ht] at he
   exact Visits.rseq (execBlock_arm hp.arm) he
 
-def witnesses : List State := [w0, w1, w2, w3, w4]
+def witnesses (m : Mirror) : List State := [(w0 m), (w1 m), (w2 m), (w3 m), (w4 m)]
 
-theorem witnessOk : (∃ w ∈ witnesses, (freeContract abi).pre w) ∧
-    ∀ o ∈ cFree.outcomes, ∃ w ∈ witnesses, (freeContract abi).pre w ∧ Visits isa cFree w o.1 o.2 := by
-  refine ⟨⟨w0, by simp [witnesses], pre_w0⟩, fun o ho => ?_⟩
+theorem witnessOk (m : Mirror) : (∃ w ∈ (witnesses m), (freeContract abi m).pre w) ∧
+    ∀ o ∈ (cFree m).outcomes, ∃ w ∈ (witnesses m), (freeContract abi m).pre w ∧ Visits isa (cFree m) w o.1 o.2 := by
+  refine ⟨⟨(w0 m), by simp [witnesses], (pre_w0 m)⟩, fun o ho => ?_⟩
   rw [outcomes_eq] at ho
   simp only [List.mem_cons, List.not_mem_nil, or_false] at ho
   rcases ho with rfl | rfl | rfl | rfl | rfl
-  · exact ⟨w0, by simp [witnesses], pre_w0, visits_w0⟩
-  · exact ⟨w1, by simp [witnesses], pre_w1, visits_w1⟩
-  · exact ⟨w2, by simp [witnesses], pre_w2, visits_w2⟩
-  · exact ⟨w3, by simp [witnesses], pre_w3, visits_w3⟩
-  · exact ⟨w4, by simp [witnesses], pre_w4, visits_w4⟩
+  · exact ⟨(w0 m), by simp [witnesses], (pre_w0 m), (visits_w0 m)⟩
+  · exact ⟨(w1 m), by simp [witnesses], (pre_w1 m), (visits_w1 m)⟩
+  · exact ⟨(w2 m), by simp [witnesses], (pre_w2 m), (visits_w2 m)⟩
+  · exact ⟨(w3 m), by simp [witnesses], (pre_w3 m), (visits_w3 m)⟩
+  · exact ⟨(w4 m), by simp [witnesses], (pre_w4 m), (visits_w4 m)⟩
 
-theorem verified : Verified target cFree (freeContract abi) :=
-  ⟨fun _ hs => correct hs, fun _ hs => rseqOk hs, ⟨_, pre_w0⟩, fun o ho => by
-    obtain ⟨w, -, hw, hv⟩ := witnessOk.2 o ho
+theorem verified (m : Mirror) : Verified target (cFree m) (freeContract abi m) :=
+  ⟨fun _ hs => correct hs, fun _ hs => rseqOk hs, ⟨_, (pre_w0 m)⟩, fun o ho => by
+    obtain ⟨w, -, hw, hv⟩ := (witnessOk m).2 o ho
     exact ⟨w, hw, hv⟩⟩
 
 end F
@@ -225,110 +232,110 @@ namespace S
 
 open FreeSized
 
-def roS : List Region := [⟨0x2000, 8⟩, ⟨0x10104, 4⟩, ⟨0x3000800, 2048⟩, ⟨0x8000800, 65536⟩,
-  ⟨0x3000400, 16⟩, ⟨0x3001800, 4096⟩]
+def roS (m : Mirror) : List Region := [⟨0x2000, 8⟩, ⟨0x10104, 4⟩, ⟨0x3000800, 2048⟩, ⟨0x8000800, 65536⟩,
+  pubAt m, ⟨0x3001800, 4096⟩]
 
-def w0 : State := witF 8192 0x6000123 8 0 roS [⟨0x10108, 8⟩]
-def w1 : State := witF 0 0x7fff00000000 8 0 roS [⟨0x10108, 8⟩]
-def w2 : State := witF 0 0x6000123 16 0 roS [⟨0x10108, 8⟩]
-def w3 : State := witF 0 0x6000123 8 0 roS [⟨0x10108, 8⟩, ⟨0x1000008, 8⟩]
-def w4 : State := witF 0 0x6000123 8 0x4008 roS [⟨0x10108, 8⟩, ⟨0x1000008, 8⟩, ⟨0x4000, 32⟩]
+def w0 (m : Mirror) : State := witF 8192 0x6000123 8 0 (roS m) [⟨0x10108, 8⟩]
+def w1 (m : Mirror) : State := witF 0 0x7fff00000000 8 0 (roS m) [⟨0x10108, 8⟩]
+def w2 (m : Mirror) : State := witF 0 0x6000123 16 0 (roS m) [⟨0x10108, 8⟩]
+def w3 (m : Mirror) : State := witF 0 0x6000123 8 0 (roS m) [⟨0x10108, 8⟩, ⟨0x1000008, 8⟩]
+def w4 (m : Mirror) : State := witF 0 0x6000123 8 0x4008 (roS m) [⟨0x10108, 8⟩, ⟨0x1000008, 8⟩, ⟨0x4000, 32⟩]
 
-theorem pre_w (s : State) (hm : ∃ cpu ptr size word rd wr, s = witF cpu ptr size word rd wr)
-    (hrd : s.rd = cx.ro s) (hwr : s.wr = cx.rw s)
-    (hnw : ((cx.regions s).all fun x => decide (x.1.base.toNat + x.1.len ≤ 2 ^ 64)) = true)
-    (hp : Sig.pairsSep (cx.regions s) = true)
-    (hres : ((cx.regions s).all fun x => (cx.A.reserved 0 s).all fun q => Region.sep x.1 q) = true)
-    (hl : layoutCheck cx s = true) (hmask : cx.maskOf s 1 = magMask (2 ^ 2))
-    (h0 : cx.SlotOk s 1 (cx.wordOf s 1 0)) :
-    (freeSizedContract abi).pre s := by
+theorem pre_w (m : Mirror) (s : State) (hm : ∃ cpu ptr size word rd wr, s = witF cpu ptr size word rd wr)
+    (hrd : s.rd = (cx m).ro s) (hwr : s.wr = (cx m).rw s)
+    (hnw : (((cx m).regions s).all fun x => decide (x.1.base.toNat + x.1.len ≤ 2 ^ 64)) = true)
+    (hp : Sig.pairsSep ((cx m).regions s) = true)
+    (hres : (((cx m).regions s).all fun x => ((cx m).A.reserved 0 s).all fun q => Region.sep x.1 q) = true)
+    (hl : layoutCheck (cx m) s = true) (hmask : (cx m).maskOf s 1 = magMask (2 ^ 2))
+    (h0 : (cx m).SlotOk s 1 ((cx m).wordOf s 1 0)) :
+    (freeSizedContract abi m).pre s := by
   obtain ⟨cpu, ptr, size, word, rd, wr, rfl⟩ := hm
-  refine (pre_iff cx hv rfl rfl).mpr ⟨trivial, world_of_check hX hrd hwr hnw hp hres,
+  refine (pre_iff (cx m) hv rfl rfl).mpr ⟨trivial, world_of_check hX hrd hwr hnw hp hres,
     rfl, rfl, layout_of_check hX hl, inv_one (masks_zero hX _ _ _ _ _ _) ⟨2, by decide, by decide, hmask⟩
       (fun i h hi => words_zero hX _ _ _ _ _ _ h hi) h0⟩
 
-theorem pre_w0 : (freeSizedContract abi).pre w0 :=
-  pre_w _ ⟨_, _, _, _, _, _, rfl⟩ (by decide +kernel) (by decide +kernel) (by decide +kernel)
-    (by decide +kernel) (by decide +kernel) (by decide +kernel) (by decide +kernel)
-    ⟨by decide +kernel, fun hs => absurd hs (by decide +kernel)⟩
+theorem pre_w0 (m : Mirror) : (freeSizedContract abi m).pre (w0 m) :=
+  pre_w m _ ⟨_, _, _, _, _, _, rfl⟩ (by cases m <;> decide +kernel) (by cases m <;> decide +kernel) (by cases m <;> decide +kernel)
+    (by cases m <;> decide +kernel) (by cases m <;> decide +kernel) (by cases m <;> decide +kernel) (by cases m <;> decide +kernel)
+    ⟨by cases m <;> decide +kernel, fun hs => absurd hs (by cases m <;> decide +kernel)⟩
 
-theorem pre_w1 : (freeSizedContract abi).pre w1 :=
-  pre_w _ ⟨_, _, _, _, _, _, rfl⟩ (by decide +kernel) (by decide +kernel) (by decide +kernel)
-    (by decide +kernel) (by decide +kernel) (by decide +kernel) (by decide +kernel)
-    ⟨by decide +kernel, fun hs => absurd hs (by decide +kernel)⟩
+theorem pre_w1 (m : Mirror) : (freeSizedContract abi m).pre (w1 m) :=
+  pre_w m _ ⟨_, _, _, _, _, _, rfl⟩ (by cases m <;> decide +kernel) (by cases m <;> decide +kernel) (by cases m <;> decide +kernel)
+    (by cases m <;> decide +kernel) (by cases m <;> decide +kernel) (by cases m <;> decide +kernel) (by cases m <;> decide +kernel)
+    ⟨by cases m <;> decide +kernel, fun hs => absurd hs (by cases m <;> decide +kernel)⟩
 
-theorem pre_w2 : (freeSizedContract abi).pre w2 :=
-  pre_w _ ⟨_, _, _, _, _, _, rfl⟩ (by decide +kernel) (by decide +kernel) (by decide +kernel)
-    (by decide +kernel) (by decide +kernel) (by decide +kernel) (by decide +kernel)
-    ⟨by decide +kernel, fun hs => absurd hs (by decide +kernel)⟩
+theorem pre_w2 (m : Mirror) : (freeSizedContract abi m).pre (w2 m) :=
+  pre_w m _ ⟨_, _, _, _, _, _, rfl⟩ (by cases m <;> decide +kernel) (by cases m <;> decide +kernel) (by cases m <;> decide +kernel)
+    (by cases m <;> decide +kernel) (by cases m <;> decide +kernel) (by cases m <;> decide +kernel) (by cases m <;> decide +kernel)
+    ⟨by cases m <;> decide +kernel, fun hs => absurd hs (by cases m <;> decide +kernel)⟩
 
-theorem pre_w3 : (freeSizedContract abi).pre w3 :=
-  pre_w _ ⟨_, _, _, _, _, _, rfl⟩ (by decide +kernel) (by decide +kernel) (by decide +kernel)
-    (by decide +kernel) (by decide +kernel) (by decide +kernel) (by decide +kernel)
-    ⟨by decide +kernel, fun hs => absurd hs (by decide +kernel)⟩
+theorem pre_w3 (m : Mirror) : (freeSizedContract abi m).pre (w3 m) :=
+  pre_w m _ ⟨_, _, _, _, _, _, rfl⟩ (by cases m <;> decide +kernel) (by cases m <;> decide +kernel) (by cases m <;> decide +kernel)
+    (by cases m <;> decide +kernel) (by cases m <;> decide +kernel) (by cases m <;> decide +kernel) (by cases m <;> decide +kernel)
+    ⟨by cases m <;> decide +kernel, fun hs => absurd hs (by cases m <;> decide +kernel)⟩
 
-theorem pre_w4 : (freeSizedContract abi).pre w4 :=
-  pre_w _ ⟨_, _, _, _, _, _, rfl⟩ (by decide +kernel) (by decide +kernel) (by decide +kernel)
-    (by decide +kernel) (by decide +kernel) (by decide +kernel) (by decide +kernel)
-    ⟨by decide +kernel, fun _ => apart_of_check hX (by decide +kernel)⟩
+theorem pre_w4 (m : Mirror) : (freeSizedContract abi m).pre (w4 m) :=
+  pre_w m _ ⟨_, _, _, _, _, _, rfl⟩ (by cases m <;> decide +kernel) (by cases m <;> decide +kernel) (by cases m <;> decide +kernel)
+    (by cases m <;> decide +kernel) (by cases m <;> decide +kernel) (by cases m <;> decide +kernel) (by cases m <;> decide +kernel)
+    ⟨by cases m <;> decide +kernel, fun _ => apart_of_check hX (by cases m <;> decide +kernel)⟩
 
-theorem outcomes_eq : cFreeSized.outcomes = [(0, true), (1, true), (2, true), (3, true), (4, true)] := rfl
+theorem outcomes_eq (m : Mirror) : (cFreeSized m).outcomes = [(0, true), (1, true), (2, true), (3, true), (4, true)] := rfl
 
-theorem visits_w0 : Visits isa cFreeSized w0 0 true := by
-  have hp := pre_of pre_w0
-  exact Visits.rseq (execBlock_arm hp.arm) (end_C hp (by decide +kernel))
+theorem visits_w0 (m : Mirror) : Visits isa (cFreeSized m) (w0 m) 0 true := by
+  have hp := pre_of (pre_w0 m)
+  exact Visits.rseq (execBlock_arm hp.arm) (end_C hp (by cases m <;> decide +kernel))
 
-theorem visits_w1 : Visits isa cFreeSized w1 1 true := by
-  have hp := pre_of pre_w1
-  exact Visits.rseq (execBlock_arm hp.arm) (end_S hp (by decide +kernel) (by decide +kernel))
+theorem visits_w1 (m : Mirror) : Visits isa (cFreeSized m) (w1 m) 1 true := by
+  have hp := pre_of (pre_w1 m)
+  exact Visits.rseq (execBlock_arm hp.arm) (end_S hp (by cases m <;> decide +kernel) (by cases m <;> decide +kernel))
 
-theorem visits_w2 : Visits isa cFreeSized w2 2 true := by
-  have hp := pre_of pre_w2
+theorem visits_w2 (m : Mirror) : Visits isa (cFreeSized m) (w2 m) 2 true := by
+  have hp := pre_of (pre_w2 m)
   exact Visits.rseq (execBlock_arm hp.arm)
-    (end_M hp (by decide +kernel) (by decide +kernel) (by decide +kernel))
+    (end_M hp (by cases m <;> decide +kernel) (by cases m <;> decide +kernel) (by cases m <;> decide +kernel))
 
-theorem visits_w3 : Visits isa cFreeSized w3 3 true := by
-  have hp := pre_of pre_w3
-  have hi : cx.InRange w3 := by decide +kernel
-  have hix : (cx.regionIndex w3).toNat < REGION_COUNT := by decide +kernel
-  have hm : pb w3 = rb w3 := by decide +kernel
+theorem visits_w3 (m : Mirror) : Visits isa (cFreeSized m) (w3 m) 3 true := by
+  have hp := pre_of (pre_w3 m)
+  have hi : (cx m).InRange (w3 m) := by cases m <;> decide +kernel
+  have hix : ((cx m).regionIndex (w3 m)).toNat < REGION_COUNT := by cases m <;> decide +kernel
+  have hm : pb (w3 m) = rb m (w3 m) := by cases m <;> decide +kernel
   have hb := backFacts hX hp.world hp.pre (cls_eq hp hix hm) hi
-  have ho := pushOk hX (ready (s := w3)) hb hi
-  have ht : Tail.qtst .r9 (k7 w3) = 0 := by decide +kernel
+  have ho := pushOk hX (ready (m := m) (s := (w3 m))) hb hi
+  have ht : Tail.qtst .r9 (k7 m (w3 m)) = 0 := by cases m <;> decide +kernel
   have he := end_front hp hi hix hm
   rw [Tail.endPush_miss ho _ ht] at he
   exact Visits.rseq (execBlock_arm hp.arm) he
 
-theorem visits_w4 : Visits isa cFreeSized w4 4 true := by
-  have hp := pre_of pre_w4
-  have hi : cx.InRange w4 := by decide +kernel
-  have hix : (cx.regionIndex w4).toNat < REGION_COUNT := by decide +kernel
-  have hm : pb w4 = rb w4 := by decide +kernel
+theorem visits_w4 (m : Mirror) : Visits isa (cFreeSized m) (w4 m) 4 true := by
+  have hp := pre_of (pre_w4 m)
+  have hi : (cx m).InRange (w4 m) := by cases m <;> decide +kernel
+  have hix : ((cx m).regionIndex (w4 m)).toNat < REGION_COUNT := by cases m <;> decide +kernel
+  have hm : pb (w4 m) = rb m (w4 m) := by cases m <;> decide +kernel
   have hb := backFacts hX hp.world hp.pre (cls_eq hp hix hm) hi
-  have ho := pushOk hX (ready (s := w4)) hb hi
-  have ht : ¬ Tail.qtst .r9 (k7 w4) = 0 := by decide +kernel
+  have ho := pushOk hX (ready (m := m) (s := (w4 m))) hb hi
+  have ht : ¬ Tail.qtst .r9 (k7 m (w4 m)) = 0 := by cases m <;> decide +kernel
   have he := end_front hp hi hix hm
   rw [Tail.endPush_hit ho _ ht] at he
   exact Visits.rseq (execBlock_arm hp.arm) he
 
-def witnesses : List State := [w0, w1, w2, w3, w4]
+def witnesses (m : Mirror) : List State := [(w0 m), (w1 m), (w2 m), (w3 m), (w4 m)]
 
-theorem witnessOk : (∃ w ∈ witnesses, (freeSizedContract abi).pre w) ∧
-    ∀ o ∈ cFreeSized.outcomes, ∃ w ∈ witnesses, (freeSizedContract abi).pre w ∧
-      Visits isa cFreeSized w o.1 o.2 := by
-  refine ⟨⟨w0, by simp [witnesses], pre_w0⟩, fun o ho => ?_⟩
+theorem witnessOk (m : Mirror) : (∃ w ∈ (witnesses m), (freeSizedContract abi m).pre w) ∧
+    ∀ o ∈ (cFreeSized m).outcomes, ∃ w ∈ (witnesses m), (freeSizedContract abi m).pre w ∧
+      Visits isa (cFreeSized m) w o.1 o.2 := by
+  refine ⟨⟨(w0 m), by simp [witnesses], (pre_w0 m)⟩, fun o ho => ?_⟩
   rw [outcomes_eq] at ho
   simp only [List.mem_cons, List.not_mem_nil, or_false] at ho
   rcases ho with rfl | rfl | rfl | rfl | rfl
-  · exact ⟨w0, by simp [witnesses], pre_w0, visits_w0⟩
-  · exact ⟨w1, by simp [witnesses], pre_w1, visits_w1⟩
-  · exact ⟨w2, by simp [witnesses], pre_w2, visits_w2⟩
-  · exact ⟨w3, by simp [witnesses], pre_w3, visits_w3⟩
-  · exact ⟨w4, by simp [witnesses], pre_w4, visits_w4⟩
+  · exact ⟨(w0 m), by simp [witnesses], (pre_w0 m), (visits_w0 m)⟩
+  · exact ⟨(w1 m), by simp [witnesses], (pre_w1 m), (visits_w1 m)⟩
+  · exact ⟨(w2 m), by simp [witnesses], (pre_w2 m), (visits_w2 m)⟩
+  · exact ⟨(w3 m), by simp [witnesses], (pre_w3 m), (visits_w3 m)⟩
+  · exact ⟨(w4 m), by simp [witnesses], (pre_w4 m), (visits_w4 m)⟩
 
-theorem verified : Verified target cFreeSized (freeSizedContract abi) :=
-  ⟨fun _ hs => correct hs, fun _ hs => rseqOk hs, ⟨_, pre_w0⟩, fun o ho => by
-    obtain ⟨w, -, hw, hv⟩ := witnessOk.2 o ho
+theorem verified (m : Mirror) : Verified target (cFreeSized m) (freeSizedContract abi m) :=
+  ⟨fun _ hs => correct hs, fun _ hs => rseqOk hs, ⟨_, (pre_w0 m)⟩, fun o ho => by
+    obtain ⟨w, -, hw, hv⟩ := (witnessOk m).2 o ho
     exact ⟨w, hw, hv⟩⟩
 
 end S

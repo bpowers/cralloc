@@ -21,7 +21,7 @@ namespace VG.Proof.CEntry.X86_64.Malloc
 open VG.X86_64 VG.Spec.Slab VG.Spec.CEntry VG.Impl.Slab.X86_64 VG.Impl.CEntry.X86_64
   VG.Proof.Slab.X86_64 VG.Proof.CEntry VG.Proof.Slab
 
-abbrev cx : Spec.CEntry.Ctx isa := ⟨abi, .malloc, mallocSig⟩
+abbrev cx : Spec.CEntry.Ctx isa := ⟨abi, .malloc, mallocSig, .c⟩
 
 theorem hX : X86 cx.A := x86_abi
 

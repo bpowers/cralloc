@@ -154,30 +154,22 @@ fn a_process_without_rseq_is_served() {
     assert!(out.contains("bad 0"), "{out}");
 }
 
-/// An interior pointer of a block, in a region whose class the C frees' copy of the region
-/// table names, reaches the generated `free`'s fast path, which checks the region and not the
-/// slot boundary (docs/research/zen5-roofline.md, section 14), so it is cached as a block.
 #[test]
-#[ignore = "decision for the lead: the generated free does not check slot boundaries"]
-fn an_interior_pointer_aborts() {
+fn a_pointer_that_is_not_a_block_the_slow_path_checks_aborts() {
     use std::os::unix::process::ExitStatusExt;
     let exe = program("foreign.c");
-    let out = run(true, Command::new(&exe).arg("interior"));
-    assert_eq!(out.status.signal(), Some(6), "{:?}", out.status);
-}
-
-#[test]
-fn a_pointer_outside_the_heap_aborts() {
-    use std::os::unix::process::ExitStatusExt;
-    let exe = program("foreign.c");
-    let out = run(true, &mut Command::new(&exe));
-    assert_eq!(out.status.signal(), Some(6), "{:?}", out.status);
-    assert!(
-        String::from_utf8_lossy(&out.stderr).contains("not a block of asmalloc's heap"),
-        "{}",
-        String::from_utf8_lossy(&out.stderr)
-    );
-    assert!(out.stdout.is_empty());
+    // Outside the heap, and into the middle of a large block: both reach the slow path, which
+    // checks. A pointer into the middle of a small block is not promised to abort.
+    for args in [&[] as &[&str], &["interior"]] {
+        let out = run(true, Command::new(&exe).args(args));
+        assert_eq!(out.status.signal(), Some(6), "{:?}", out.status);
+        assert!(
+            String::from_utf8_lossy(&out.stderr).contains("not a block of asmalloc's heap"),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert!(out.stdout.is_empty());
+    }
 }
 
 /// The four throwing forms of `new`, which the C++ runtime keeps so that it can throw

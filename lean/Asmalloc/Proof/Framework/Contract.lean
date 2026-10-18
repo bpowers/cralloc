@@ -59,9 +59,11 @@ theorem Verified.of_implies {T : Target} {c : Prog T.isa} {k k' : Contract T.isa
 /-- Code without a restartable sequence has nothing to check where one
 could be aborted. -/
 theorem RseqOk.of_ne {T : Target} {c : Prog T.isa} {k : Contract T.isa} {s : T.isa.State}
-    (h : ∀ arm body, c ≠ .rseq arm body) : RseqOk T c k s := by
+    (h : ∀ arm body, c ≠ .rseq arm body) (h' : ∀ arm body c₂, c ≠ .seq (.rseq arm body) c₂) :
+    RseqOk T c k s := by
   unfold RseqOk; split
   · exact absurd rfl (h _ _)
+  · exact absurd rfl (h' _ _ _)
   · trivial
 
 /-- `Verified` from the correctness of `c` under a contract `k` that `k'`
