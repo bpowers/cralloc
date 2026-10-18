@@ -1412,7 +1412,9 @@ libstdc++'s, which call our `malloc` and `free` through libstdc++'s PLT. `cxxloo
 `::operator new(n)` and `::operator delete(p, n)` as new and delete expressions do (the sized
 form gcc emits for a complete type), and the unsized form as `upair`. `compare.sh` runs it with
 `RF_PROG=cxxloop`. "asm + C++" adds a release build of
-`crates/asmalloc-preload/tests/programs/cxx_exports`, given as `ASMALLOC_CXX_LIB`. That library
+`crates/asmalloc-preload/tests/programs/cxx_exports`, given as `ASMALLOC_CXX_LIB` (that library
+and the C++ operator layer were deleted after this measurement; the last commit that had them is
+58bf936). That library
 exports our deletes and nothrow `new`, but not the throwing `new`, which still comes from
 libstdc++. Pinned to CPU 12, sibling 28 idle over the run, best of 3 interleaved rounds. Cycles
 per new and delete:

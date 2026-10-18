@@ -132,11 +132,11 @@ def cCalloc : Prog isa :=
 /-- `c_malloc(size)`. -/
 def cMalloc : Prog isa := .rseq arm (cpuSteps [] slow ++ mallocFront ++ popSteps .r9 [] slow)
 
-/-- `c_free(ptr)`, and the plain `delete` forms, by their mirrors. -/
+/-- `c_free(ptr)`, reading mirror `m`. -/
 def cFree (m : Mirror) : Prog isa :=
   .rseq arm (cpuSteps [] slow ++ freeFront m ++ pushSteps .r9 .rdi [] slow)
 
-/-- `c_free_sized(ptr, size)`, and the sized `delete` forms. -/
+/-- `c_free_sized(ptr, size)`, reading mirror `m`. -/
 def cFreeSized (m : Mirror) : Prog isa :=
   .rseq arm (cpuSteps [] slow ++ freeSizedFront m ++ pushSteps .r9 .rdi [] slow)
 
