@@ -725,7 +725,7 @@ fn growth_over_a_fragmented_heap_walks_once_a_step() {
     unsafe { back.launder(class, &freed) };
     assert!(back.retained() > cap);
     // The walk starts at the top, so one circuit of it is one lap.
-    let laps = || state.laps.load(core::sync::atomic::Ordering::Relaxed);
+    let laps = || state.walk.laps.load(core::sync::atomic::Ordering::Relaxed);
     let other = small(512);
     for _ in 0..8 {
         let before = laps();
@@ -896,7 +896,7 @@ fn a_fragmented_heap_costs_one_lap_an_interval() {
     // SAFETY: the test holds these slots, or passes a bad one to see the abort.
     unsafe { back.launder(class, &freed) };
     let retained = back.retained();
-    let laps = || state.laps.load(core::sync::atomic::Ordering::Relaxed);
+    let laps = || state.walk.laps.load(core::sync::atomic::Ordering::Relaxed);
     for _ in 0..3 {
         os.advance_clock(DECAY_TICKS);
         let before = laps();
@@ -2121,8 +2121,11 @@ mod review {
             os.advance_clock(DECAY_TICKS);
             beat(&back);
         }
-        let laps = state.laps.load(core::sync::atomic::Ordering::Relaxed);
-        let at = state.purge_at.load(core::sync::atomic::Ordering::Relaxed);
+        let laps = state.walk.laps.load(core::sync::atomic::Ordering::Relaxed);
+        let at = state
+            .walk
+            .purge_at
+            .load(core::sync::atomic::Ordering::Relaxed);
         assert!(
             !pass_under_way(&state) && os.calls(Call::Purge) > 0,
             "after ten intervals of {BEATS} heartbeats the pass is still under way: \
@@ -2215,7 +2218,7 @@ mod review {
             unsafe { back.launder(class, chunk) };
         }
         assert_eq!(back.retained(), cap - 32 * 1024);
-        let laps = || state.laps.load(core::sync::atomic::Ordering::Relaxed);
+        let laps = || state.walk.laps.load(core::sync::atomic::Ordering::Relaxed);
         let before = laps();
         // The program frees 64 slots and takes 64 back, over and over, so the count moves
         // between 32 KiB under the cap and 32 KiB over it.
@@ -2326,7 +2329,7 @@ mod review {
             lap: 0,
             pages: 0,
         };
-        state.pass.store(stale.pack(), Relaxed);
+        state.walk.pass.store(stale.pack(), Relaxed);
         state.decay.store(started, Relaxed);
         beat(&back);
         assert_eq!(
@@ -2338,10 +2341,10 @@ mod review {
         // The starter publishes; the pass now runs and ends.
         let goal = Pass {
             tag: Pass::tag_of(started),
-            lap: state.laps.load(Relaxed) as u16,
+            lap: state.walk.laps.load(Relaxed) as u16,
             pages: 16,
         };
-        state.pass.store(goal.pack(), Relaxed);
+        state.walk.pass.store(goal.pack(), Relaxed);
         beat(&back);
         assert!(!pass_under_way(&state));
         assert_eq!(state.os().calls(Call::Purge), 16);
@@ -2409,7 +2412,7 @@ mod review {
         for &p in &slots {
             paint(p, 1024, 5);
         }
-        state.purge_at.store(1, Relaxed);
+        state.walk.purge_at.store(1, Relaxed);
         for chunk in slots.chunks_mut(64) {
             // SAFETY: the test holds these slots, or passes a bad one to see the abort.
             unsafe { back.launder(class, chunk) };

@@ -61,6 +61,7 @@ mod verify_slow;
 
 use self::host::{ClassHost, ClassState};
 use crate::classes::{COUNT, Class};
+use crate::lined::{LINE, Lined};
 use crate::os::{Os, OsError};
 use crate::space::{MAX_REGIONS, RegionTable, Space, SpaceCell};
 use core::fmt;
@@ -72,44 +73,71 @@ use core::sync::atomic::{AtomicIsize, AtomicU32, AtomicU64, AtomicUsize};
 /// Meant to live in a static: [`State::new`] is `const`, and apart from the OS value the state
 /// starts as all zero. The state owns the [`SpaceCell`] that publishes the heap's reservation, so
 /// it can only ever describe that one reservation.
+///
+/// Every group of words is on lines of its own (`crate::lined`). The reservation and the
+/// region table are read on every operation and written rarely; the retained count is written
+/// by every free and claim; the decay word is read by every heartbeat; the walk's words are
+/// written by its steps.
 pub struct State<O: Os> {
-    cell: SpaceCell<O>,
-    table: RegionTable,
+    cell: Lined<SpaceCell<O>>,
+    table: Lined<RegionTable>,
     classes: [ClassState; COUNT],
     /// Bytes of free slots in the bitmaps believed to be resident. Signed: a subtraction may
     /// run ahead of the addition it answers; read as zero when negative.
-    retained: AtomicIsize,
+    retained: Lined<AtomicIsize>,
     /// Bytes carved since a grower last checked the cap (`purge`).
-    growth: AtomicUsize,
-    /// Where the next purge step looks: see `purge`.
+    growth: Lined<AtomicUsize>,
+    /// The clocked pass: when the last one ended, or when the one under way began with the
+    /// low bit set.
+    decay: Lined<AtomicU64>,
+    /// The purge walk's position, its laps and the pass under way, which its steps write.
+    walk: Lined<Walk>,
+    /// The current size of each run, at its head region's index. Out of the regions'
+    /// metadata, which must stay all zero for a region that may later go to a class.
+    run_sizes: Lined<[AtomicUsize; MAX_REGIONS]>,
+}
+
+/// What the steps of the purge walk share (`purge`).
+struct Walk {
+    /// Where the next purge step looks.
     purge_at: AtomicU32,
     /// How many times the purge walk has gone round the heap.
     laps: AtomicU32,
-    /// The clocked pass: when the last one ended, or when the one under way began with the
-    /// low bit set.
-    decay: AtomicU64,
     /// The pass under way: its tag, the lap it began in and what it may still purge
     /// (`purge::Pass`).
     pass: AtomicU64,
-    /// The current size of each run, at its head region's index. Out of the regions'
-    /// metadata, which must stay all zero for a region that may later go to a class.
-    run_sizes: [AtomicUsize; MAX_REGIONS],
 }
+
+#[cfg(all(target_os = "linux", target_arch = "x86_64", not(kani)))]
+const _: () = {
+    use crate::lined::lines;
+    use core::mem::size_of;
+    let groups = lines(size_of::<SpaceCell<crate::os::linux::LinuxOs>>())
+        + lines(size_of::<RegionTable>())
+        + 4
+        + lines(size_of::<[AtomicUsize; MAX_REGIONS]>());
+    assert!(
+        size_of::<State<crate::os::linux::LinuxOs>>()
+            == size_of::<[ClassState; COUNT]>() + LINE * groups
+    );
+};
 
 impl<O: Os> State<O> {
     /// A back end over `os` with no heap reserved yet.
     pub const fn new(os: O) -> State<O> {
         State {
-            cell: SpaceCell::new(os),
-            table: RegionTable::new(),
+            cell: Lined::new(SpaceCell::new(os)),
+            table: Lined::new(RegionTable::new()),
             classes: [const { ClassState::new() }; COUNT],
-            retained: AtomicIsize::new(0),
-            growth: AtomicUsize::new(0),
-            purge_at: AtomicU32::new(0),
-            laps: AtomicU32::new(0),
-            decay: AtomicU64::new(0),
-            pass: AtomicU64::new(0),
-            run_sizes: [const { AtomicUsize::new(0) }; MAX_REGIONS],
+            retained: Lined::new(AtomicIsize::new(0)),
+            growth: Lined::new(AtomicUsize::new(0)),
+            decay: Lined::new(AtomicU64::new(0)),
+            walk: Lined::new(Walk {
+                purge_at: AtomicU32::new(0),
+                laps: AtomicU32::new(0),
+                pass: AtomicU64::new(0),
+            }),
+            run_sizes: Lined::new([const { AtomicUsize::new(0) }; MAX_REGIONS]),
         }
     }
 

@@ -255,8 +255,8 @@ impl<O: Os, R: Routines, S: Source> Cache<'_, O, R, S> {
     pub(super) fn heartbeat(&self, served: Option<SmallClass>, chores: Chores) {
         let clock = Clock::new(self.os());
         let activity = chores.cpu.map(|cpu| {
-            if self.depot.cpus.load(Relaxed) <= cpu.index() {
-                self.depot.cpus.fetch_max(cpu.index() + 1, Relaxed);
+            if self.depot.shared.cpus.load(Relaxed) <= cpu.index() {
+                self.depot.shared.cpus.fetch_max(cpu.index() + 1, Relaxed);
             }
             self.slab(cpu).note_activity()
         });
@@ -316,7 +316,7 @@ impl<O: Os, R: Routines, S: Source> Cache<'_, O, R, S> {
     fn idle_check(&self, me: Cpu, activity: u64, now: u64) {
         let every = self.tuning.look_every.max(1);
         // At least `me + 1`: this thread raised it to that before.
-        let count = self.depot.cpus.load(Relaxed);
+        let count = self.depot.shared.cpus.load(Relaxed);
         if count < 2 {
             return;
         }
