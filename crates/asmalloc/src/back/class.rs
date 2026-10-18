@@ -10,7 +10,7 @@
 //! zeroes what it wrote and gives its region back with a compare-and-swap; no other thread has
 //! named it, because nothing points into a region until it has been carved from.
 
-use super::group::{Group, Open};
+use super::group::{Gather, Run};
 use super::host::ClassHost;
 use super::layout::{Grow, Hints, Layout, Recorded};
 use super::policy::{move_piece, wants_huge};
@@ -253,11 +253,12 @@ impl<'a, O: Os> Back<'a, O> {
     }
 
     /// Returns free slots of `class` to their bitmaps, grouped by bitmap word as they come
-    /// (`group`), with one atomic OR per group and one walk up the summary tree for the batch.
+    /// (`group`), with one atomic OR per word and one walk up the summary tree for the batch.
     /// Aborts the process if a pointer is not the start of a slot of `class` that has been
-    /// handed out, if a slot is already free, or if a slot appears twice within a part (up to 64
-    /// pointers, fewer when they are scattered; see `group`): those are double frees or frees
-    /// of foreign pointers.
+    /// handed out, if a slot is already free, or if a slot appears twice in the batch (in a
+    /// batch of more than 254 distinct words, twice on either side of a flush of the map is
+    /// caught as already free; see `group`): those are double frees or frees of foreign
+    /// pointers.
     ///
     /// # Safety
     ///
@@ -281,63 +282,12 @@ impl<'a, O: Os> Back<'a, O> {
         let mut met = checker.meet(first.address());
         let mut fast = checker.fast(met);
         let mut release = tree::Release::new(&host, met.region);
-        let mut group = Group::new();
-        let mut at = 0;
-        while let Some(object) = objects.get(at) {
-            at += 1;
-            let slot = checker.slot(object.address(), &mut fast, &mut met);
-            let mut held = Open::slot(met.region.index(), slot);
-            // How many slots the held word has taken. A slot taken twice sets its bit once,
-            // so the count and the bits disagree; the group checks that when the word leaves
-            // the caller's hands, rather than this testing each bit as it is set.
-            let mut taken = 1u32;
-            let (mut first, mut span) = fast.word(held, met);
-            loop {
-                // Slots of the held word, one after another: the shape of a dense magazine.
-                // Ends at the first slot of another word, or one the fast check fails.
-                // The loop a dense launder spends its time in, at about eleven micro-ops: one
-                // compare covers the slot check, the watermark and the word, and the count
-                // comes from the position rather than an increment.
-                let start = at;
-                let mut ended = None;
-                while let Some(object) = objects.get(at) {
-                    at += 1;
-                    let k = fast.slot(object.address());
-                    if k.wrapping_sub(first) < span {
-                        held.bits |= 1 << (k % BITS as u64);
-                        continue;
-                    }
-                    ended = Some((object, k));
-                    break;
-                }
-                taken += (at - start - ended.is_some() as usize) as u32;
-                let Some((object, k)) = ended else {
-                    break;
-                };
-                let slot = if k < fast.limit {
-                    k as u32
-                } else {
-                    let slot = checker.slot_slowly(object.address(), &mut fast, &mut met);
-                    (first, span) = fast.word(held, met);
-                    slot
-                };
-                let next = Open::slot(met.region.index(), slot);
-                if next.key == held.key {
-                    held.add(&release, next.bits);
-                    taken += 1;
-                    continue;
-                }
-                let before = held.key;
-                held = group.switch(&mut release, held, taken, next);
-                if held.key != before {
-                    taken = 1;
-                    (first, span) = fast.word(held, met);
-                }
-                if group.is_full() {
-                    break;
-                }
-            }
-            group.finish(&mut release, held, taken);
+        // A map sized to the batch: a magazine of a large class holds a few objects, and
+        // zeroing a map for a whole magazine of small ones would cost it more than its ORs.
+        if objects.len() < 32 {
+            release_words::<O, P, 32, 64>(&checker, &mut met, &mut fast, &mut release, objects);
+        } else {
+            release_words::<O, P, 256, 128>(&checker, &mut met, &mut fast, &mut release, objects);
         }
         release.finish();
         if count {
@@ -1035,19 +985,9 @@ impl<'c, 'a, O: Os> Checker<'c, 'a, O> {
         }
     }
 
-    /// The slot `object` starts, as [`Checker::check`] finds it, but by the fast check when
-    /// that passes. `fast` and `met` follow the region `object` lies in.
-    #[inline(always)]
-    fn slot(&self, object: *const u8, fast: &mut Fast, met: &mut Met) -> u32 {
-        let k = fast.slot(object);
-        if k < fast.limit {
-            return k as u32;
-        }
-        self.slot_slowly(object, fast, met)
-    }
-
-    /// [`Checker::slot`] when the fast check fails: a pointer in another region, a large
-    /// block that starts at its slot's stagger, or one that aborts.
+    /// The slot `object` starts, as [`Checker::check`] finds it, for a launder whose fast
+    /// check failed: a pointer in another region, a large block that starts at its slot's
+    /// stagger, or one that aborts. `fast` and `met` follow the region `object` lies in.
     #[inline(never)]
     fn slot_slowly(&self, object: *const u8, fast: &mut Fast, met: &mut Met) -> u32 {
         let before = met.region;
@@ -1071,6 +1011,129 @@ impl<'c, 'a, O: Os> Checker<'c, 'a, O> {
         let grow = self.host.meta(region, self.layout.grow_word());
         let limit = Grow::unpack(grow.load()).carved.min(self.layout.slots());
         Met { region, limit }
+    }
+}
+
+/// Gathers `objects` into `Words` by bitmap word and ORs them into `release`: see
+/// `group`. `met` and `fast` are the region the batch met first and its check, which follow
+/// the pointers from region to region.
+#[inline(always)]
+fn release_words<'h, O: Os, P: SlotPointer, const ROOM: usize, const SPAN: usize>(
+    checker: &Checker<'_, '_, O>,
+    met: &mut Met,
+    fast: &mut Fast,
+    release: &mut tree::Release<'h, ClassHost<'_, O>>,
+    objects: &[P],
+) {
+    let Some(object) = objects.first() else {
+        return;
+    };
+    let slot = slot_of(checker, object, met, fast);
+    let key = (met.region.index() as u64) << 32 | (slot / BITS) as u64;
+    let mut gather = Gather::<ROOM, SPAN>::new(key);
+    // The run in hand.
+    let mut held = Run {
+        key,
+        bits: 1 << (slot % BITS),
+        taken: 1,
+    };
+    // The run's word's slots that the fast check passes: `k` is one when `k - first`,
+    // wrapping, is below `span`.
+    let (mut first, mut span) = fast.word(key, *met);
+    // Runs of one slot in a row: a scattered batch, which the loop below would take a run at
+    // a time, entering and leaving its dense loop for every slot.
+    let mut singles = 0;
+    let mut at = 1;
+    loop {
+        // Slots of the run's word, one after another: the shape of a dense magazine. Ends at
+        // the first slot of another word, or one the fast check fails. The loop a dense
+        // launder spends its time in, at about eleven micro-ops: one compare covers the slot
+        // check, the watermark and the word, and the count comes from the position rather
+        // than an increment.
+        let start = at;
+        let mut bits = held.bits;
+        let mut ended = None;
+        while let Some(object) = objects.get(at) {
+            at += 1;
+            let k = fast.slot(object.address());
+            if k.wrapping_sub(first) < span {
+                bits |= 1 << (k % BITS as u64);
+                continue;
+            }
+            ended = Some((object, k));
+            break;
+        }
+        held.bits = bits;
+        held.taken += (at - start - ended.is_some() as usize) as u32;
+        let Some((object, k)) = ended else {
+            break;
+        };
+        let slot = if k < fast.limit {
+            k as u32
+        } else {
+            checker.slot_slowly(object.address(), fast, met)
+        };
+        let key = (met.region.index() as u64) << 32 | (slot / BITS) as u64;
+        let bit = 1u64 << (slot % BITS);
+        if key == held.key {
+            // Only a slot the fast check refused, such as a staggered large block, comes back
+            // to the run's word here.
+            if held.bits & bit != 0 {
+                release.abort("double free: an object was freed twice in one batch");
+            }
+            held.bits |= bit;
+            held.taken += 1;
+        } else {
+            singles = if held.taken == 1 { singles + 1 } else { 0 };
+            gather.end(release, held);
+            held = Run {
+                key,
+                bits: bit,
+                taken: 1,
+            };
+            if singles >= SCATTERED {
+                break;
+            }
+        }
+        (first, span) = fast.word(held.key, *met);
+    }
+    gather.end(release, held);
+    // The rest of a batch of single slots, a slot at a time, with no runs: into the map alone
+    // if they are scattered, else as runs end.
+    if let Some(rest) = objects.get(at..).filter(|rest| !rest.is_empty()) {
+        if gather.scatter(release) {
+            for object in rest {
+                let slot = slot_of(checker, object, met, fast);
+                let key = (met.region.index() as u64) << 32 | (slot / BITS) as u64;
+                gather.scattered(release, key, 1 << (slot % BITS));
+            }
+        } else {
+            for object in rest {
+                let slot = slot_of(checker, object, met, fast);
+                let key = (met.region.index() as u64) << 32 | (slot / BITS) as u64;
+                gather.end_one(release, key, 1 << (slot % BITS));
+            }
+        }
+    }
+    gather.finish(release);
+}
+
+/// Runs of one slot in a row after which a launder takes the rest of its batch as scattered.
+const SCATTERED: u32 = 8;
+
+/// The slot `object` starts: by the fast check if it passes, else by the full one.
+#[inline(always)]
+fn slot_of<O: Os, P: SlotPointer>(
+    checker: &Checker<'_, '_, O>,
+    object: &P,
+    met: &mut Met,
+    fast: &mut Fast,
+) -> u32 {
+    let k = fast.slot(object.address());
+    if k < fast.limit {
+        k as u32
+    } else {
+        checker.slot_slowly(object.address(), fast, met)
     }
 }
 
@@ -1103,14 +1166,14 @@ impl Fast {
         n.wrapping_mul(self.inverse).rotate_right(self.shift)
     }
 
-    /// The slots of `held`'s word that this check passes, as `first` and a count: `k` is one
-    /// of them when `k - first`, wrapping, is below the count. None if the word is not in
-    /// `met`, the region this check covers. A held word's slots were checked, so `first` is
-    /// below the limit.
+    /// The slots of word `key` (`region << 32 | word`) that this check passes, as `first` and
+    /// a count: `k` is one of them when `k - first`, wrapping, is below the count. None if the
+    /// word is not in `met`, the region this check covers. The word has a slot that passed the
+    /// full check, so `first` is below the limit.
     #[inline(always)]
-    fn word(&self, held: Open, met: Met) -> (u64, u64) {
-        if held.key >> 32 == met.region.index() as u64 {
-            let first = (held.key as u32 as u64) * BITS as u64;
+    fn word(&self, key: u64, met: Met) -> (u64, u64) {
+        if key >> 32 == met.region.index() as u64 {
+            let first = (key as u32 as u64) * BITS as u64;
             (first, (BITS as u64).min(self.limit - first))
         } else {
             (0, 0)

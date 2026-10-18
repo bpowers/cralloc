@@ -92,7 +92,7 @@ fn main() {
                     counters.enable();
                     for _ in 0..rounds {
                         let a = ticks();
-                        assert_eq!(back.fill(class, &mut magazine), batch, "a fill came up short");
+                        assert_eq!(back.fill(class, &mut magazine[..]), batch, "a fill came up short");
                         let b = ticks();
                         magazine.reverse();
                         // SAFETY: this thread was just given these slots and uses none of them.

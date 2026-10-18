@@ -20,6 +20,8 @@
 //!   magazines of a parsed and dropped JSON document look like.
 //! - `block`: shuffled within each 256 objects, a magazine's worth.
 //! - `scatter`: shuffled across the whole pool, as a `BTreeMap` dropped in key order frees.
+//! - `spread`: shuffled across the whole pool, then each 254 sorted: scattered slots that a
+//!   magazine holds in address order.
 //! - `stride`: consecutive objects 64 words apart, so every object of a batch is in a word and
 //!   a summary word of its own: the worst case for grouping.
 //!
@@ -147,6 +149,10 @@ fn order(name: &str, pool: &[*mut u8], rng: &mut Rng) -> Vec<*mut u8> {
         }
         "block" => v.chunks_mut(256).for_each(|block| shuffle(block, rng)),
         "scatter" => shuffle(&mut v, rng),
+        "spread" => {
+            shuffle(&mut v, rng);
+            v.chunks_mut(254).for_each(|magazine| magazine.sort());
+        }
         "stride" => {
             // Bit within the word slowest, summary word fastest.
             let mut keyed: Vec<((usize, usize, usize), *mut u8)> =
