@@ -58,7 +58,6 @@ mod verify;
 mod verify_slow;
 
 use self::host::{ClassHost, ClassState};
-use self::layout::Layout;
 use crate::classes::{COUNT, Class};
 use crate::os::{Os, OsError};
 use crate::space::{MAX_REGIONS, RegionTable, Space, SpaceCell};
@@ -201,8 +200,8 @@ impl<'a, O: Os> Back<'a, O> {
     /// The protocols' view of one class, if a slot of it fits in a region.
     #[inline]
     fn host(&self, class: Class) -> Option<ClassHost<'a, O>> {
-        let layout = Layout::new(self.space.plan(), class)?;
         let state = self.state.classes.get(class.index() as usize - 1)?;
+        let layout = state.layout.layout(self.space.plan(), class)?;
         Some(ClassHost {
             space: self.space,
             class: state,
