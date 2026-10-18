@@ -2,6 +2,12 @@
 //! Verified functions for `x86_64`.
 
 #[rustfmt::skip]
+pub(crate) mod centry;
+
+#[rustfmt::skip]
+pub(crate) mod exports;
+
+#[rustfmt::skip]
 pub(crate) mod selftest;
 
 #[rustfmt::skip]

@@ -20,6 +20,9 @@
 #            tells apart two builds of one allocator that differ in version.
 #   preload_build  a package of the repository's root workspace that `benchrun build` builds
 #            in release mode first, for a preload library that lives in this checkout
+#   build    the native build directory under target/, for variants of one feature built by
+#            hand with different allocator build-time knobs (ASMALLOC_<NAME>=...); benchrun
+#            build leaves such entries alone
 #   same_as  makes this entry a control: an exact copy of the named allocator under another
 #            label, run as if it were a different allocator. Its results must match.
 

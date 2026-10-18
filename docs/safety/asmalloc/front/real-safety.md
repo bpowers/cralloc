@@ -9,11 +9,10 @@ below are those sections, discharged once here for every call in the file.
 
 - (R) glibc set `__rseq_offset` for the calling thread's rseq area.
 - (W) Pop and push: `word` is `SLABS + 8 * class`, the address of the class's word in slab 0,
-  for a class below 512 (inline) or 256 (out of line).
-- (C) Inline, the `mask` argument is `8n - 16` for the class's magazines of `n = 2^k` slots,
-  `2 <= k <= 16`. Out of line, the low 32 bits of the entry `MASK_DISP` bytes above `word` are
-  zero or that mask, and stay so while the routine may run.
-- (L) `SLABS`, the thread's `rseq_cs` and `cpu_id`, `__rseq_offset` and the mask entry do not
+  for a class below 512.
+- (C) The `mask` argument is `8n - 16` for the class's magazines of `n = 2^k` slots,
+  `2 <= k <= 16`.
+- (L) `SLABS`, the thread's `rseq_cs` and `cpu_id` and `__rseq_offset` do not
   overlap each other (where one is written), the stack the routine uses, or the end of the
   address space.
 - (S) In every slab, the class's hot word is zero, a marker, or a slot `s >= 1` of a magazine of
@@ -27,27 +26,27 @@ below are those sections, discharged once here for every call in the file.
 - (R): glibc 2.35 and later set `__rseq_offset` before any user code runs, for every thread,
   whether or not registration succeeded (`docs/research/linux-rseq-contract.md`, "What the
   fields read"); an unregistered thread reads `cpu_id = -2`, which the routines' unsigned
-  compare sends to the miss path. The declaration is GLIBC-01 (`os/linux/glibc-safety.md`).
+  compare sends to the miss path. The declaration is FRONT-01 (`front/mod-safety.md`).
 - (W): every word address comes from `Front::word(class)` for a `SmallClass`: the address of
   `SLABS`'s first slab plus `Field::hot(class).offset()`, which is 8 times the class index, 1 to
   `SMALL_COUNT` (44). `SLABS` is the `Front` static, whose slabs are at offset 0 (a compile-time
   assertion), so its symbol, which the specification calls `SLABS`, is the first slab's address.
-- (C): inline, the mask is `front::mask(class)`, entry `class` of `front::MASKS`, built from
+- (C): the mask is `front::mask(class)`, entry `class` of `front::MASKS`, built from
   `SmallClass::magazine().mask()`; `MagazineSize` keeps `n` a power of two from 4 to 256, so
-  `k` is 2 to 8. Out of line, the entry is `Front::masks[class]`: compile-time assertions put
-  it exactly `MASK_DISP` (the generated constant) above the class's word. It is zero until
-  `publish_masks` stores `MASKS[class]` there, and nothing stores anything else, so it is
-  always zero or the class's mask; a zero mask makes the routine miss (proved). `front::tests`
-  pins the generated constants to the crate's.
-- (L): the mask table is inside `SLABS` but past every slab (`MASK_DISP` is the slabs' size plus
-  2048, assertion in `front`), so it does not overlap them; `__rseq_offset` is glibc's, and the
+  `k` is 2 to 8. A test checks each size's mask against the one the routines were proved for
+  (`crate::spec`, which the Lean emitter writes).
+- (L): `__rseq_offset` is glibc's, and the
   rseq area is in glibc's thread control block; the stack is the thread's own. None of them is
   at the top of the address space (user space ends far below it on x86-64).
 - (S): the slab invariant of `front/twin-safety.md`, which every writer of a slab keeps:
   the routines themselves (proved in Lean), the slow paths through `store_if_equal` and
-  `stack_push` (SLOW-01, SPARE-01), and the drain. `Real` changes nothing about that argument:
-  it is the same specification with the same writers. `SLABS` and `Real` are private to the
-  crate, so no code outside it can write these slabs, with a twin or otherwise.
+  `stack_push` (DEPOT-SLOW-01, SPARE-01), and the drain. `Real` changes nothing about that argument:
+  it is the same specification with the same writers. `Real` is private to the crate, and
+  `SLABS` is public only so that the C routines the export macros define in another crate can
+  name its address: its type, `Front`, has no public field or method, so no code outside the
+  crate can write these slabs, with a twin or otherwise. The C entry points' routines, which
+  also write them, are proved in Lean to the same invariant for every class byte
+  (`c/routines-safety.md`).
 
 ## REAL-01: the inlined routines (`slab_pop`, `slab_push`, `current_cpu`)
 
@@ -57,18 +56,12 @@ below are those sections, discharged once here for every call in the file.
 
 ## REAL-02: the out-of-line routines
 
-`slab_pop` and `slab_push` (in `pop_out_of_line`, `push_out_of_line`), `slab_cas`
-(`store_if_equal`), `slab_stack_push` and `slab_stack_pop`.
+`slab_cas` (`store_if_equal`), `slab_stack_push` and `slab_stack_pop`.
 
-**Proof.** (R), (L) and (S) as above. For pop and push, (W) and (C) with the word from
-`Front::word` for a `SmallClass` and the mask from the table after the slabs. On a miss,
-including every call before the masks are published, they tail-jump to `front::pop_slow` and
-`front::push_slow` with their own arguments; those are the heap's slow paths (GLOBAL-04).
-`push_out_of_line`'s caller promises the object is a block of the class it owns (its
-`# Safety`), so the push hands the heap a valid free. `store_if_equal` and `stack_push` are
-`unsafe fn`s of `Routines` whose callers promise the new word keeps (S) and that they hold the
-magazine (SLOW-01, SPARE-01); `Magazine::base` is non-zero and aligned to the magazine's size,
-at least 32. The offsets come from `Field`, always a slot of the slab.
+**Proof.** (R), (L) and (S) as above. `store_if_equal` and `stack_push` are `unsafe fn`s of
+`Routines` whose callers promise the new word keeps (S) and that they hold the magazine
+(DEPOT-SLOW-01, SPARE-01); `Magazine::base` is non-zero and aligned to the magazine's size, at least
+32. The offsets come from `Field`, always a slot of the slab.
 
 ## REAL-03: `unsafe impl Routines for Real`
 

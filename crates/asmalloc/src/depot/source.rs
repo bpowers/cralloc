@@ -28,6 +28,8 @@ pub trait Source {
     /// Takes back one object of `class`, from a thread that cannot use a magazine.
     fn free_one(&self, class: SmallClass, object: NonNull<u8>);
 
-    /// One bounded step of returning free memory to the OS, as the heartbeat paces it.
-    fn purge_step(&self);
+    /// One bounded step of returning free memory to the OS, as the heartbeat paces it. `now`
+    /// reads the heartbeat's clock ([`crate::os::Os::ticks`]), the same value for the whole
+    /// heartbeat; the source calls it only if a decision needs the time.
+    fn purge_step(&self, now: &dyn Fn() -> u64);
 }

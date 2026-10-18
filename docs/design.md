@@ -232,10 +232,9 @@ Every pointer therefore has two properties that hold without per-object metadata
 - its index within the region is `(ptr - region_base) / class_size`.
 
 The Rust entry points do not need even that for small objects: they compute the class from
-the `Layout`. The table serves the C entry points, large objects, and a checked build that
-verifies the caller's `Layout` against the address. The scheme also removes external
-fragmentation between classes, because any free slot in a region fits any request for its
-class.
+the `Layout`. The table serves the C entry points and large objects. The scheme also removes
+external fragmentation between classes, because any free slot in a region fits any request
+for its class.
 
 The price is that objects of different classes never share a page. A program that uses many
 classes lightly has one partly used page per class, and each hot class needs its own TLB
@@ -289,7 +288,7 @@ Slot 0 is a link word used by the depot, the last slot holds the fill level whil
 magazine is not loaded, and the slots between hold pointers to free objects. Magazines are
 numbered blocks in one array in the metadata area; they are created by advancing a counter
 and are never unmapped. Their size falls as the class size rises, from 256 slots to 4, so no
-magazine holds more than about 128 KiB of objects.
+magazine holds more than about 64 KiB of objects.
 
 The slab word for a class is the address of the next free slot in the loaded magazine.
 Because a magazine is aligned to its size, the low bits of that address are the slot
@@ -368,15 +367,17 @@ emit one that breaks them:
   cycle;
 - the slow path is out of line.
 
-Each routine is generated in two forms. The inlined form is an `asm!` block in an
-`#[inline]` function that takes the word's address and the mask in registers. It becomes part
-of `__rust_alloc` in the user's binary and, with LTO, of its callers, whether their layouts are
-constant or not. The out-of-line form takes the word's address in a register and reads the mask
-from a table placed after the slabs at a fixed distance from the word, one entry per possible
-class byte. The table is zero until the first slow path writes it, and a zero mask fails both
-tests, so it needs no initialization check, and every byte that is not a small class sends a
-free by address to the slow path. The C entry points use it, ending their own routines with
-the same steps.
+The pop and the push are used in two settings. For Rust they are `asm!` blocks in
+`#[inline]` functions that take the word's address and the mask in registers. They become
+part of `__rust_alloc` in the user's binary and, with LTO, of its callers, whether their
+layouts are constant or not. For C they are the last steps of the entry routines for
+`malloc`, `calloc`, `free` and the sized free, which are out of line and exported as the C
+symbols themselves. An entry routine first turns its argument into the word's address: a
+size through a byte table of classes, a pointer through the region table. It reads the mask
+from a table placed after the slabs at a fixed distance from the word, one entry per
+possible class byte. That table is zero until the first slow path writes it, and a zero mask
+fails both tests, so it needs no initialization check, and every byte that is not a small
+class sends a free by address to the slow path.
 
 ### Slow path: exchanging magazines
 
@@ -448,11 +449,12 @@ each region and the high end drains, which is where purging starts.
 
 ### Heartbeat
 
-Every entry to a slow path does a bounded amount of maintenance before it returns: at most
-one magazine laundered, one step of purging, one look at a class of its own slab, and one
-look for an idle cache. A large allocation or free counts as a slow path. There is no
-background thread and no timer. The work is done in units small enough that no single call
-pays much. This is mimalloc's pacing applied to a per-CPU design.
+Every entry to a slow path does a bounded amount of maintenance before it returns: one step
+of purging, one look at a class of its own slab, one look for an idle cache, and at most one
+magazine laundered for each rule that launders. A large allocation or free counts as a slow
+path. By default there is no background thread and no timer. The work is done in units
+small enough that no single call pays much. This is mimalloc's pacing applied to a per-CPU
+design.
 
 How often a slow path runs depends on how hard the process allocates, so anything that
 should happen at a rate in time reads the CPU's cycle counter, which costs no system call,
@@ -466,6 +468,16 @@ stays inside its magazines has no heartbeat at all. It keeps what it held when i
 quiet: the free memory not yet purged, its parked objects, and the pages those pin. That
 lasts until a slow path runs or the program calls `collect`.
 
+A program that cannot accept that asks for a background thread. The thread is opt-in, so
+that the default stays free of hidden threads, and it buys nothing on the fast path, which
+stays as it is. Once an interval it calls `maintain`, which does for the whole heap what the
+heartbeats of an interval would have done: the idle check on every slab, each depot stack's
+shedding, and the clocked purge. It is an ordinary thread of the process, started by the
+layer that has a thread library to start it with: a function behind a cargo feature for a
+Rust program, an environment variable for the preload library. A program with an idle hook
+of its own can call `maintain` from there and needs no thread. The child of a fork does not
+inherit the thread.
+
 Objects mostly circulate through magazines and the depot without touching the bitmaps. They
 reach the bitmaps when a class's depot stack is over its target, and through the rules under
 "Returning memory" that keep parked objects from pinning the heap.
@@ -475,7 +487,25 @@ reach the bitmaps when a class's depot stack is over its target, and through the
 A huge-page fault delivers 512 pages for about a fifth of the per-page price of small
 faults, and a page returned too early is faulted straight back. Against that, memory the
 program has stopped using must go back to the OS within seconds, or a process keeps its peak
-for ever. Five rules follow.
+for ever. Memory the program is not using sits in one of the places below, and each has a
+rule that returns it (`docs/research/memory.md` has the measurements behind them).
+
+| What holds the memory | What returns it | When |
+|---|---|---|
+| Free slots in the bitmaps, on pages with nothing live on them | The clocked purge | Once an interval: up to a quarter of the retained memory, from the top of the heap down |
+| The same, when frees of small objects come in a burst | The cap on retained memory: the call that passes it purges toward it | At that call, within a bound on its work |
+| A freed large slot, once the large classes' smaller cap is reached | The free itself | Before it releases the slot |
+| The tail of a large block that shrinks in place; the old copy of one that moves | The resize (see "Large objects") | At once |
+| Objects in a magazine that stays loaded | A slow path of the same CPU launders it | Once it has been loaded for an interval |
+| Objects in a CPU's full spares | That CPU's sweep launders one magazine and sends the rest to the depot | Once an interval |
+| Objects in a depot stack | A heartbeat launders a magazine | While the stack is over its target, and for the depth it did not need during an interval |
+| Objects in steady circulation | The free that retires a full magazine launders it instead | One retirement in every few |
+| The slab of a CPU the process no longer runs on | The idle drain sends its magazines to the depot (see "Process lifecycle") | After an interval with no slow path there |
+| The part of a huge page above a region's watermark, made resident by the fault and never allocated | The purge carves it and frees it, so that the page can go whole | When the purge reaches that page |
+| Free slots on pages that also hold live objects | Nothing: that is fragmentation, and it stays counted | Never |
+| All of the above, without waiting for the clock | `collect`, and `malloc_trim` in C | When the program calls it |
+
+Five rules stand behind the table.
 
 - **Purge late and from the top.** Purging claims the bits of every object that overlaps a
   range of pages, exactly as an allocation would. If all of them were free it returns the
@@ -487,37 +517,46 @@ for ever. Five rules follow.
   is gone within several intervals.
 - **Retained memory is counted and capped.** The back end keeps an estimate of the free
   memory it holds that is still resident. Frees and laundered magazines raise it; only
-  reuse and purging lower it. It is never reset on the grounds that a pass found nothing
-  to purge: in a storm of frees every page still has a live neighbour for a moment, and a
-  count that forgets those bytes stops bounding anything. The call that pushes the count
-  past a cap purges toward it, within a bound on its own work, and the clocked pass does
-  the rest. Free objects on pages that also hold live ones cannot be purged; that is
-  fragmentation, and it stays counted. Freed large slots have a separate and much smaller
-  cap, checked at the free: a freed large slot can serve only its own class, and one call
-  returns it. Objects parked in magazines, spares and the depot are not free and are not
-  in the count; the next rule handles them.
+  reuse and purging lower it, and it is never reset. The call that pushes the count past a
+  cap purges toward it, within a bound on its own work, and the clocked pass does the rest.
+  Free objects on pages that also hold live ones cannot be purged; that is fragmentation,
+  and it stays counted. Freed large slots have a separate and much smaller cap, checked at
+  the free: a freed large slot can serve only its own class, and one call returns it.
+  Objects parked in magazines, spares and the depot are not free and are not in the count;
+  the next rule handles them.
 - **Parked objects do not pin the heap.** An object parked in a magazine holds its page as
   surely as a live one, and parked objects are a random sample of wherever the heap has
-  been. Three rules keep them moving back to the bitmaps, where the next fill takes the
+  been. Four rules keep them moving back to the bitmaps, where the next fill takes the
   lowest free addresses instead.
   - A magazine does not stay loaded for more than an interval. A slow path looks at one
     class of its own slab in turn. If the magazine loaded there has been loaded for an
     interval, the slow path takes it with the routine that replaces a magazine and launders
-    it, with that class's spares. This needs no fence, because the slab is the thread's
-    own. A class in use pays one refill per interval. A class that fell out of use on a CPU
-    that is still busy is emptied, which the idle check, being per slab, cannot do.
+    it. This needs no fence, because the slab is the thread's own. A class in use pays one
+    refill per interval. A class that fell out of use on a CPU that is still busy is
+    emptied, which the idle check, being per slab, cannot do.
+  - Full spares do not stay either. Once an interval each CPU sweeps its own slab, a class
+    per heartbeat, taking that class's whole stack of full spares in one step, laundering
+    one and sending the rest to the depot. Spares need their own rule: on a CPU that only
+    frees a class, the loaded magazine is always fresh and nothing ever pops a full spare.
   - A depot stack sheds what it did not need. The depth a class's stack never fell below
     during an interval is laundered, one magazine per heartbeat, whichever class the slow
     path was serving.
   - One retiring full magazine in every few is laundered instead of kept, so objects in
     steady circulation are gradually replaced by the lowest free ones.
 - **Huge pages only where objects are dense.** A region starts marked against transparent
-  huge pages, so a lightly used class costs only the 4 KiB pages it touches. Once a class
-  of small objects has carved a large amount, the rest of its region is marked for huge
-  pages and further growth faults 2 MiB at a time. Classes of larger objects never are: a
-  large block is often touched sparsely, and with huge pages each page touched would cost
-  2 MiB.
-- **Never split a huge page.** In the huge-page part of a region, purging works only in
+  huge pages, so a lightly used class costs only the 4 KiB pages it touches. Two things
+  count as evidence of dense use. A class of small objects that has carved enough for one
+  huge page to be a small fraction of it has the rest of its region marked for huge pages,
+  and further growth faults 2 MiB at a time. A large block that grows, by doubling or less
+  and past the size of a huge page, with the last piece it wrote at least half full of
+  data, is being appended to. The part of its slot up to the size it asked for is marked
+  for as long as the block holds it; its free returns the slot whole and takes the mark
+  back. A
+  large block allocated at its size in one call gets no huge pages: it is often touched
+  sparsely, each page touched would cost 2 MiB, and the kernel later fills in any marked
+  range that is touched at all.
+- **Never split a huge page.** Returning part of a huge page frees nothing until the kernel
+  splits it later, so in the huge-page part of a region, purging works only in
   whole 2 MiB units. That includes the unit holding the watermark, whose upper part was
   made resident by the fault and never allocated: a purge first carves the rest of that
   unit and frees it, counting it as retained, so the whole unit is ordinary free memory
@@ -546,6 +585,14 @@ that doubles repeatedly is copied a few times in total, not once per doubling. T
 space this spends is plentiful, and the physical memory is only what the program touches.
 An object larger than a region takes a run of whole regions.
 
+A large object does not start at the start of its slot. Slots of a class are all aligned
+alike, so objects that began there would put their cache lines in the same sets, and a
+program that walks many such buffers together would miss the cache on every access. An
+object whose alignment is at most a cache line starts a multiple of 64 bytes into its slot,
+chosen by the slot's index, and is given a page more room so that any such start fits.
+Nothing is stored: a block starts at its slot's start or at that offset, and any other
+pointer into the slot is not a block.
+
 The current size of each large object is recorded out of band, one word per slot, written
 only when the object is allocated or resized. C's `realloc` needs it to know how much to
 copy, and the usable size must not be the whole slot: a caller that fills what it is told it
@@ -557,46 +604,64 @@ it means the new size is still large and fits the slot. Anything else moves the 
 
 Shrinking gives memory back. A large object that shrinks in place returns the whole pages
 past its new size at once: nothing else can use them while it holds the slot, so otherwise
-they would stay resident until it is freed. One that shrinks to under a quarter of its slot
+they would stay resident until it is freed. One that shrinks to under an eighth of its slot
 moves instead, because a region has few slots of a large class, and a slot should not be
-held by an object a small fraction of its size.
+held by an object a small fraction of its size. The threshold sits well below the quarter
+of a slot that headroom gives a block when it moves in, so a block resized back and forth
+across a class boundary settles in one slot instead of being copied on every call.
+
+When a large object has to move, the copy goes in pieces and returns the old block's pages
+behind it, so the two copies are never both resident. The old block would be purged at its
+free anyway; this only does it sooner, and it keeps a program that grows several big buffers
+at once from holding twice their size. The copy skips source pages that are all zero and
+leaves the destination's pages untouched there, so a block the program wrote sparsely stays
+sparse. Moving the pages with `mremap` instead would copy nothing, but it splits the heap's
+mapping in ways that take several more rules to undo, and it adds nothing to the memory
+saved; we copy.
 
 ### Interfaces
 
 - **`GlobalAlloc`** for `#[global_allocator]`. `dealloc` of a small object is the free
   routine and nothing else.
 - **`Allocator`**, on Rust versions that have it, through a zero-sized handle. All handles
-  share the one heap. `allocate` returns the full class size. A zero-size request gets a
+  share the one heap. `allocate` returns the full class size of a small block and the
+  usable size of a large one. A zero-size request gets a
   dangling, aligned pointer and no block.
 - **C ABI**: `malloc`, `calloc`, `realloc`, `reallocarray`, `free`, the aligned-allocation
   family, `malloc_usable_size`, `malloc_trim` and the sized frees: every function glibc
   exports that takes or returns a block. `free(p)` reads the class from the address table
   and joins the same path as a Rust free. A pointer outside the heap is a caller's bug and
-  aborts the process. `malloc_usable_size` reports the class size of a small object and,
-  for a large one, its recorded size rounded up to a page. Callers write into the room
+  aborts the process. A pointer into the middle of a small object is the same bug, but the
+  fast path does not look for it: finding a slot's start takes a multiplication per free.
+  Such a pointer is caught only if it reaches the bitmaps before it is handed out again.
+  `malloc_usable_size` reports the class size of a small object and,
+  for a large one, its recorded size extended to the end of the page it ends in. Callers write into the room
   they are told they have, so a `realloc` that moves a block copies that much and `calloc`
   zeroes that much.
   `realloc(p, 0)` frees `p` and returns null, as glibc does.
-- **C++**: the replaceable forms of `operator new` and `operator delete`, so that C++
-  allocates without a detour through `malloc` and sized deletes arrive with their size. A
-  failing `new` runs the installed new-handler until none is left; then a nothrow form
-  returns null and a throwing form raises `std::bad_alloc`. An exception cannot unwind
-  through the allocator's Rust frames, so the throwing forms are generated routines that on
-  failure jump to the C++ runtime's own throw function with nothing of ours on the stack.
-- **A size from C or C++ is a prediction, never trusted.** A sized free or delete may use
-  the size to find the class early, but the class from the address is the truth, and a
-  wrong size (a derived object deleted through a base pointer, say) behaves exactly like a
-  free with no size.
-
-A macro exports the C names, and another the C++ names, from the crate that invokes it; a
-cargo feature does the same, and the `LD_PRELOAD` library always exports both. A feature
-alone would not do: cargo unifies features across a workspace, and every test binary would
-then replace `malloc`. The C layer sets `errno` through the C library's accessor and finds
-the new-handler and the throw function by symbol lookup; these are the only parts of
-asmalloc that refer to a C library or a C++ runtime.
+- **C++ operators are not exported.** A C++ program's `operator new` and `operator delete`
+  stay its C++ runtime's, which calls our `malloc` and `free`; that is correct in every
+  arrangement of libraries. Exporting the operators is sound only if we export all of them:
+  with our `delete` forms but another library's `new`, as when a garbage collector's or an
+  engine's C++ library defines the operators, blocks reach us that are not ours. And we
+  cannot export all of them: a throwing `new` that fails must raise `std::bad_alloc`, and an
+  exception cannot unwind through the allocator's Rust frames. The price is a call layer for
+  C++ and the size that sized deletes carry; `docs/research/zen5-roofline.md`, section 14,
+  "C++ new and delete without our operators", measures it. An implementation of every form
+  but the throwing ones was built and then removed; the last commit that has it is
+  `58bf936`, under `crates/asmalloc/src/c/`.
+- **A size from C is a prediction, never trusted.** A sized free may use the size to find
+  the class early, but the class from the address is the truth, and a wrong size behaves
+  exactly like a free with no size.
 - **`collect`**, a Rust function and what `malloc_trim` calls: return everything that can be
   returned now (see "Returning memory"). `inspect` reports where the heap's memory is,
   without changing it.
+
+A macro exports the C names from the crate that invokes it; a cargo feature does the same,
+and the `LD_PRELOAD` library always exports them. A feature alone would not do: cargo
+unifies features across a workspace, and every test binary would then replace `malloc`. The
+C layer sets `errno` through the C library's accessor; that and glibc's `__rseq_offset` are
+asmalloc's only references to a C library.
 
 The recommended build is `lto = "fat"`. Thin LTO also inlines the fast path into dependency
 crates, but it silently stops doing so when the crate that declares `#[global_allocator]`
@@ -610,9 +675,19 @@ the one a Rust `Layout` of the same size implies.
 ### Process lifecycle
 
 - **Start.** The static slabs are zero, so the first call takes the slow path, which
-  reserves address space and publishes the heap with one compare-and-swap. Two threads may
-  race to do this; the loser unmaps its reservation. Under a tight address-space limit that
-  race can leave the smaller of two reservations in place.
+  reserves address space and publishes the heap with one compare-and-swap. Threads may race
+  to do this; the losers unmap their reservations. Only a few full reservations fit in the
+  address space at once, so a reservation that fails while another thread's is in flight
+  says nothing about how much the process may have: the thread looks for the published heap
+  and tries again at the same size. A failure with no other reserver in flight, or a bounded
+  number of failed tries, makes it settle for smaller regions or report failure. One word
+  counts the reservers in flight.
+- **Unloading.** A shared object that contains the allocator must not be unloaded. A
+  thread's rseq area goes on naming a sequence inside it after the last call returns, and
+  the kernel reads that the next time the thread is preempted, so unloading kills the
+  process. The preload library is linked so that it cannot be unloaded. Anyone else who
+  builds the allocator into a shared object links it the same way; we do not guard against
+  it at run time.
 - **Without rseq.** A thread with no rseq registration reads a negative CPU number, so every
   routine sends it to the slow path and it never touches a slab. That covers a whole process
   under valgrind or with the C library's registration turned off, and a single thread whose
@@ -620,9 +695,10 @@ the one a Rust `Layout` of the same size implies.
   serves large ones, straight from the region bitmaps with atomic instructions. This is the
   same code, so it adds no second implementation, and it costs tens of cycles per call
   instead of a few.
-- **Under Miri.** Our own tests run the allocator under Miri with the twins and the
-  simulated OS. A downstream program run under Miri gets Miri's built-in allocator, so that
-  Miri can check each of that program's blocks individually.
+- **Under Miri.** Miri runs neither assembly nor system calls, so the allocator's handle does
+  not exist there. A program that is checked with Miri declares its global allocator only
+  when not under Miri and keeps Miri's own, which checks each of its blocks individually.
+  Our own tests run the allocator under Miri with the twins and the simulated OS.
 - **Threads.** A thread has no allocator state. Starting and exiting need no code, and
   objects cached under a CPU stay with that CPU.
 - **Idle caches.** Memory can sit in the slab of a CPU the process no longer runs on. Each
@@ -693,7 +769,7 @@ These hold everywhere, and the proofs and tests lean on them.
 Components depend downward only: the interfaces on the front end and large objects, those on
 the depot and back end, everything on size classes and the OS interface. The OS interface is
 a trait with a Linux implementation built on raw system calls and a simulated implementation
-for tests and proofs.
+for tests.
 
 ## Testing and Verification
 
@@ -702,10 +778,16 @@ for tests and proofs.
 | Layer | Method | Strength |
 |---|---|---|
 | Assembly routines | Lean, against a model of the instructions and of rseq | Every input, every interruption point |
-| Size classes, alignment, slot masks, bitmap word operations, address arithmetic | Kani | Every input |
-| Lock-free protocols: magazine exchange, drain, depot stacks, summary bits, purge, start-up | A TLA+ model of each, including the OS's aborts and fences, checked exhaustively with TLC; loom on the Rust that implements them | Every interleaving of the model |
-| Back-end and slow-path Rust | Kani on bounded heaps over the simulated OS; model-based tests; Miri | Bounded, plus heavy testing |
+| Size classes, alignment, slot masks, bitmap word operations, address and layout arithmetic, packed words, the decisions of the clocked rules | Kani | Every input |
+| The twins | Kani, against the routines' specifications | Every state of one small slab, with an interruption before any one step |
+| The lock-free protocols as designed: the routines, magazine exchange, drain, depot stacks, summary bits, purge, start-up, fork | A TLA+ model of each, in which the OS aborts, moves, fences and forks threads, checked exhaustively with TLC | Every interleaving of the model, within small bounds |
+| The Rust that implements those protocols | Schedule explorers in the test code, which run it unchanged under every schedule within a bound | Bounded schedules, on small heaps |
+| The allocator as a whole | Model-based tests, Miri, fuzzing, and real programs under the preload library | Testing |
 | `unsafe` blocks none of the above reaches | Safety ledger | Written proof, adversarially reviewed |
+
+No proof covers a run of operations on a whole heap. Bounded model checking does not get
+through the back end's nested retry loops, so that ground is held by the explorers and the
+model-based tests.
 
 The property all of this serves: every operation behaves as one atomic step of an abstract
 allocator whose state is the set of live blocks. A returned block is aligned, at least as
@@ -728,6 +810,8 @@ tests where a test can reach it.
 - glibc registers a thread's rseq area before the thread can call the allocator.
 - Nothing with the privilege to do so places a probe inside a sequence, which would let
   the thread return to it without an abort.
+- Of a thread's attempts at a sequence, one is at last left to finish. Only termination
+  rests on this.
 - Fresh anonymous memory, and memory after `MADV_DONTNEED`, reads as zero.
 - The instruction model, the Rust compiler and assembler, and Lean's kernel.
 
@@ -735,8 +819,10 @@ tests where a test can reach it.
 
 All assembly is generated from Lean; none is written by hand. A routine is a Lean term with
 a specification and a proof, and the generator prints it as Rust source that is checked in.
-A check fails if the checked-in assembly differs from what Lean generates, or if any proof
-uses an axiom beyond the standard ones.
+A check fails if the checked-in assembly differs from what Lean generates, if any proof
+uses an axiom beyond the standard ones or does not replay through Lean's kernel, or if an
+out-of-line routine, once assembled, breaks the size and alignment rules given under "Front
+end". The check is itself tested against forged proofs.
 
 For each routine we prove four things. Run to completion, it performs its specified step on
 the slab. Stopped before any instruction, including the last, it has changed nothing the
@@ -744,50 +830,138 @@ specification can see, and the registers the restart needs are intact. It reads 
 only the thread's rseq area, the slab array and the magazine the slab word names. It
 clobbers only the registers it declares.
 
-The proofs assume the slab invariant given under "Front end", at entry and again at every
-retry, and leave it to the Rust slow paths to maintain. It is stated once, in Lean. The Rust
-constants are generated from that statement, and the front end's debug validator is tested
-against vectors evaluated from it.
+The proofs assume, at entry and again at every retry, the part of the slab invariant given
+under "Front end" that a routine can see: its class's word is zero, a marker, or a slot
+address of a magazine of the class's size, and that magazine lies apart from the slabs, the
+thread's rseq area and the stack. That nothing else refers to the magazine, and that its
+pointers are distinct free objects, no routine relies on; the Rust slow paths keep the
+whole invariant. It is stated once, in Lean. The layout constants the proofs assume are
+emitted with the routines, and the Rust code is held to them.
 
 The framework's own trusted core is the instruction semantics, the rseq interruption model,
-the printer, and the meaning of Rust's `asm!` operands. Changes to it are reviewed
-separately from changes to routines.
+the printer, the meaning of Rust's `asm!` operands, and each routine's stated contract.
+Changes to these are reviewed separately from changes to routines.
+
+### Models of the protocols
+
+Each protocol that involves more than one thread has a TLA+ model in which the OS is an
+actor: it stops, moves and restarts threads, runs signal handlers, fences, forks, and hands
+out address space. TLC checks every interleaving of a few threads over a few magazines and
+objects, which is as many actors as the flaws these protocols can have need.
+A configuration that is expected to fail is kept as a test: it shows that the model can see
+a flaw, and that the rule which removes it is needed.
+
+### Kani
+
+Kani proves, for every input, the arithmetic that everything else stands on.
+
+- The class function: the smallest class that fits, monotone, the same class for every size
+  `Allocator` may pass back, alignment by construction, and C's 16-byte rule. Division by a
+  class size without a divide. The two slot tests, which zero and every marker fail.
+- The address space: the parts of a reservation fit and lie apart, the region and slot
+  found for a pointer invert the slot's address, and slots lie inside their region and are
+  aligned.
+- The back end: the bitmap word operations, the metadata layout of every class, and, on the
+  smallest geometry, exactly which slots a unit of pages touches.
+- Every word that packs fields (a stack head, a slab word, a region's headers, the published
+  heap) round-trips, every generation's marker is one the routines reject, and a magazine
+  address the depot accepts lies inside committed magazine memory.
+- The decisions of the clocked rules, as functions of the clock and the counts they read:
+  when a purge pass starts and how much it may take, when the cap acts, when a magazine has
+  been loaded too long, what a depot stack owes, when an idle slab is drained.
+- The twins (below).
+
+The harnesses that finish in a few seconds run in the merge gate, over the geometries in
+use. The rest run on demand: every geometry the constructor accepts, and the exactness of
+the multiplication behind the division.
 
 ### Twins
 
-Kani, Miri and loom cannot execute assembly. Each routine has a Rust twin with the same
-specification, selected by build configuration. Differential tests compare routine and twin
-over all small slab states, and compare both against vectors evaluated from the Lean
-specification.
+Kani, Miri and the schedule explorers cannot execute assembly. Each routine has a Rust twin
+written to the same specification and selected by build configuration. A twin runs on a
+simulated processor that the test controls: it says which CPU number the thread reads, and
+it may interrupt the twin before any step, after which the twin starts again from the top as
+the routine would. Kani checks each twin against its specification on every state of a small
+slab (a word that is zero, any marker, or any slot of a magazine), with an interruption
+before any one step.
+
+A test compares each twin with its routine directly: it runs one and then the other from
+the same scripted states of a slab and its magazines, and requires the same result and the
+same memory afterwards. The routine is proved against the
+specification in Lean, the twin is checked against the same specification restated in Rust,
+and the heap's tests run the same bodies on the process's heap, with the routines, and on a
+simulated heap, with the twins.
 
 ### Tests
 
-- **Interruption at every instruction.** For each routine and each instruction boundary, a
-  hardware breakpoint delivers a signal there, which makes the OS abort the sequence. The
-  test checks that nothing was committed and that the retry succeeds, then repeats with a
-  handler that itself allocates on the same CPU.
-- **Model-based testing.** A shadow model tracks every live block and checks alignment,
-  overlap, usable size, zero fill and content preservation across `realloc`. It runs
-  single-threaded, multithreaded with blocks handed between threads, and under a
-  deterministic scheduler in which the test input chooses which simulated thread runs on
-  which simulated CPU and where a twin is interrupted. Deliberately broken allocators keep
-  the model honest.
-- **Fuzzing** drives the same model from raw input.
-- **Fault injection** in the simulated OS. A failure to obtain memory must surface as a null
-  return and nothing worse; a failure to release memory must be survivable.
-- **Oversubscription and migration stress** on the real OS, to exercise the guarantees the
-  design trusts.
-- **Real programs** run with the preload library, and the C entry points run a conformance
-  suite.
+- **Schedule exploration.** Explorers in the test code run the production code of a
+  protocol, in the back end or the middle tier, on a few threads of which exactly one runs
+  at a time. They switch threads only before an atomic operation and search, depth first,
+  every schedule within a bound on preemptions. A schedule may also fork at any step, after
+  which every thread but one is gone, and in the middle tier it may move a thread to another
+  CPU or abort its sequence. The scenarios follow the TLA+ models and are checked for their
+  properties. In the back end: no slot is handed out twice or lost, no free slot stays
+  invisible, the first free after a fork heals what the fork broke, no purge returns the
+  memory of a slot it does not hold, and a slot said to be zero is. In the middle tier:
+  every magazine and every object has exactly one owner, no call waits, no marker or claim
+  outlives its drain, and a fork duplicates nothing.
+- **Interruption at every step.** Tests interrupt each twin before each of its steps in
+  turn, alone, with a move to another CPU, and with a nested call that pops and pushes, and
+  check that the interruption leaves no trace. The slow paths are interrupted at each of
+  their steps in the same way: by a signal handler that allocates, by a migration, and by a
+  fork that the thread does or does not survive. On the real routines, a mode of the soak
+  harness (below) puts a hardware breakpoint on an instruction of one of the library's
+  sequences; the trap makes the OS abort the sequence there, and its handler allocates and
+  frees before the sequence restarts.
+- **Model-based testing.** The test kit drives an allocator through streams of operations
+  and checks every result against a shadow model of the live blocks: alignment, no overlap,
+  usable size, zero fill, contents carried across a resize, and no write by the allocator
+  into live memory. One model judges `GlobalAlloc`, `Allocator` and the C functions, on the
+  process's heap and on a simulated heap: on one thread, on many with blocks handed between
+  them, with threads that exit holding blocks, and in the child of a fork taken while other
+  threads allocate. A failing stream is minimized to a script that replays. Allocators
+  broken on purpose, one for each kind of bug the model claims to catch, keep the model
+  honest: each must be caught through every interface. The back end has a model-based test
+  of its own, over its slots and bitmaps.
+- **Fault injection.** The simulated OS fails any call on demand, wholly or after acting on
+  half of its range. A failure to obtain memory must surface as a null return and nothing
+  worse; a failure to release memory must be survivable. Its memory is guarded where the
+  host allows, so that touching memory the allocator has not committed faults as it would
+  on Linux.
+- **Miri** runs the allocator's own tests and the test kit's model on a simulated heap with
+  the twins, under strict provenance.
+- **Fuzzing** drives the same model from raw input, with a target for each interface.
+- **The C functions** meet a table of edge cases. The C library is run against the same
+  table, and broken implementations show that the cases bite.
+- **Real programs** run with the preload library and must print and exit as they do without
+  it: small C and C++ programs in the test suite, and on demand shell pipelines, git,
+  compressors, interpreters and a cargo build. The library is checked to export no C++
+  operator and to be marked against unloading. A soak runs a stress harness that checks the
+  contents of every block, in modes that are hard on a per-CPU allocator: churn, hand-off
+  between threads, fork, storms of short-lived threads, resizes, huge blocks, signals whose
+  handlers allocate, idleness, trimming, and the breakpoints above. It runs them again on
+  two CPUs with many threads, without rseq, and against a debug build, and it builds and
+  tests several large programs with and without the library.
+- **Probes** are small programs that check one assumption each about the kernel, glibc or
+  the compiler, the ones under "What is trusted" among them: that a sequence can be aborted
+  before any of its instructions, that no sequence commits after `membarrier` returns, and
+  what a thread's rseq area holds from its first moment to its last.
+
+The merge gate is deliberately small: formatting, lints, the tests and Kani harnesses that
+take a few seconds, and a check that the generated assembly is what the generator last
+wrote. The longer explorations and stress tests, the slow harnesses, the Lean check, TLC,
+Miri, fuzzing, the preload checks and the benchmarks run on demand.
 
 ### Safety ledger
 
-An `unsafe` block is covered by a machine-checked proof where one is practical. Where it is
-not, the block has an entry in `docs/safety/<crate>/<file>-safety.md`, named after the source
-file without its `.rs`. An entry states the block's preconditions, the invariants that make
-them hold, and a proof on paper. A fresh agent that did not write the code reviews each
-entry adversarially. Changing the block means updating the entry and having it reviewed
-again.
+An `unsafe` block in code that ships is covered by a machine-checked proof where one is
+practical. Where it is not, the block has an entry in `docs/safety/<crate>/<file>-safety.md`,
+named after the source file without its `.rs`. An entry states the block's preconditions,
+the invariants that make them hold, and a proof on paper. A fresh agent that did not write
+the code reviews entries adversarially and records the commit it reviewed. A script in the
+merge gate checks that every safety comment names an entry and every entry is named, and
+lists the entries changed since their review; that list is cleared before a release. The
+simulator, the twins and other test scaffolding are outside the ledger.
 
 ### Performance
 
@@ -806,6 +980,3 @@ Performance claims rest on three kinds of measurement.
 
 Comparisons interleave the allocators, pin threads, repeat across process launches, and
 include a run of one allocator against itself to expose a broken setup.
-
-The merge gate is deliberately small: formatting, lints, unit tests and the quick proofs.
-Long proofs and benchmarks run on demand.

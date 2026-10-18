@@ -40,7 +40,8 @@ Contents
 - One uncontended atomic read-modify-write costs 20 cycles. Handing a cache line to another
   core costs 16 to 22 ns inside one L3 and 76 to 79 ns across L3s.
 - A first-touch page fault costs 535 to 566 ns per 4 KiB page: as much as 750 inlined pairs.
-  Inside a 2 MiB transparent huge page it is 117 to 119 ns per 4 KiB.
+  Inside a 2 MiB transparent huge page it is 117 to 214 ns per 4 KiB, bound by zeroing.
+  `MADV_POPULATE_WRITE` saves only the exception, a fifth to a quarter (section 7).
 - The front end sets a cliff by instruction count, not by alignment. A straight-line run of up
   to 12 fused uops flows at full speed; 13 to 24 takes 3 cycles; 25 or more takes 5.
 - Without link-time optimization, rustc inlines the fast path only in the crate that declares
@@ -261,9 +262,281 @@ is about 4.6 times cheaper per byte.
 Fresh memory at 4 KiB granularity costs 0.13 to 0.14 ns per byte: about 8.6 ns, or 49 cycles,
 for each new 64-byte object. That is more than ten times the fast path.
 
+### Making memory resident: faults, populate and huge pages
+
+Measured 2026-10-17 with `bench/roofline/oscost`'s `faults` binary (`cargo build --release`,
+then `RF_CPUS=13 target/release/faults single|threads|advice|split|khuge`), under
+`scripts/memlimit`. Every variant writes one byte to every page of a fresh 64 MiB mapping, so
+all end with the same memory resident; variants run interleaved in a new order each round,
+pinned to CPU 13 with its sibling 29 idle, and each figure is the median of 3 to 9 rounds,
+from per-thread counters. Two sessions; ranges are the two medians. The machine was shared:
+CPUs 0 to 7 and their siblings were mostly busy with other work, CPUs 8 to 15 mostly idle.
+
+| One thread | ns per 4 KiB | kernel cycles per 4 KiB |
+|---|---:|---:|
+| Demand fault: write each page | 523 to 582 | 2,310 to 2,530 |
+| `MADV_POPULATE_WRITE` 1 page at a time, then write | 524 to 549 | 2,610 to 2,710 |
+| populate 4 pages at a time | 441 to 486 | 2,220 to 2,440 |
+| populate 16 pages | 418 to 457 | 2,130 to 2,330 |
+| populate 64 pages | 395 to 440 | 2,060 to 2,260 |
+| populate 512 or 4096 pages | 409 to 464 | 2,120 to 2,360 |
+| Huge-page fault (`MADV_HUGEPAGE`), free 2 MiB blocks available | 151 to 214 | 730 to 1,050 |
+| Huge-page fault, no free 2 MiB block (below) | 660 to 780, single runs 130 to 2,000 | |
+| Write to a page already resident | 8 to 9 | 1 |
+
+- **Populate saves the exception and nothing else.** Of a 4 KiB fault's 520 to 580 ns,
+  populating saves 105 to 140 ns, a fifth to a quarter, and 16 pages a call already save all
+  of it. A populate runs the same fault handler once per page from inside the kernel
+  (`faultin_page_range`, `handle_mm_fault`): it skips the exception entry and the VMA lookup
+  (in the demand-fault profile `asm_exc_page_fault` 7%, `mas_walk` 11%, `lock_vma_under_rcu`
+  4%), and still allocates, zeroes, locks the page table and adds the page to the LRU for each
+  page. In its profile the page-table lock is 28% and clearing the page 9%. Built into the
+  allocator as populate-ahead for dense classes, it cut faults three to five times on the
+  workloads and kernel time by under a tenth, for about 1 MiB at each peak
+  (`memory.md`), and was removed.
+- **A huge page is bound by zeroing.** Clearing is 85% of its profile; 151 ns per 4 KiB is
+  about 27 GB/s, which is what one core writes to DRAM. So 4 KiB pages cost about 400 ns of
+  bookkeeping per page on top of the zeroing that every way of getting fresh memory pays.
+- **Huge pages need free 2 MiB blocks.** THP defrag is `madvise` here, so a fault in an
+  advised range with no free 2 MiB block compacts memory in the faulting thread and falls back
+  to 4 KiB if that fails. Late in the session page cache filled most of memory and
+  `/proc/buddyinfo` showed no free block of order 9; huge-page faults then cost 660 to 780 ns
+  per 4 KiB (more than a demand fault) and one in five fell back. mimalloc's Vec growth went
+  from 5.8 to 28 cycles an element in that state, asmalloc's with huge pages for grown
+  blocks from 4.1 to a median of 9.6 (3.6 to 21.6 over five runs), against 10.3 with none.
+
+With several threads at once, each on its own mapping (CPUs 13, 24, 25, 26, one L3; builds
+started on CPUs 4 to 7 during the 4-thread row):
+
+| ns per 4 KiB | 1 thread | 2 threads | 4 threads |
+|---|---:|---:|---:|
+| demand fault | 539 | 604 | 761 |
+| populate 64 pages | 425 | 492 | 700 |
+| huge-page fault | 151 | 290 | 581 |
+
+Faults scale reasonably: the page-table locks are per table and the page allocator's lists
+are per CPU. Huge pages scale worst because they are bound by bandwidth: the four threads
+together zero about 28 GB/s, which is roughly what one Zen 5 core complex can write. At four
+threads a huge page is only 1.3 times cheaper than a 4 KiB fault.
+
+**Advice around a slot** (`faults advice`): 4000 cycles over a committed region advised
+against huge pages, with 4 KiB pages resident in every other 16 MiB slot, of advising one
+slot's whole huge pages for huge pages, filling it, purging it and taking the advice back, up
+to five slots advised at once, half of them starting off a huge-page boundary.
+`MADV_HUGEPAGE` cost 0.95 us and `MADV_NOHUGEPAGE` 1.29 us; filling cost 61 us per 2 MiB and
+`MADV_DONTNEED` 2 us per 2 MiB. `/proc/self/maps` had 31 lines before, at most 41, and 31
+after: the kernel merges the mapping back completely. In asmalloc itself, 2000 vectors grown
+to 2 to 32 MiB with up to five alive left 6 more lines than before, all from regions assigned
+and commits extended during the run, none from advice.
+
+**Purging part of a huge page returns nothing** (`faults split`): 256 MiB faulted as huge
+pages, then the first half of each purged with `MADV_DONTNEED` (7.6 us a call): the resident
+set fell to 130 MiB but the cgroup stayed charged 257 MiB, and still was two seconds later.
+The kernel only queues the page to be split later, under memory pressure. Purging the second
+halves returned it all; purging whole huge pages returns them at once, 2.8 us per 2 MiB.
+
+**khugepaged collapses sparse memory** (`faults khuge`): 64 MiB with one page written per
+2 MiB, then advised for huge pages, became 64 MiB resident within 40 seconds
+(`max_ptes_none` is 511, the default). Advice must never cover memory used sparsely, even
+memory that was faulted in 4 KiB pages before the advice.
+
+Multi-size THP (16 KiB to 1 MiB folios, which would fault 4 to 256 pages at a time without
+the 2 MiB granularity) is off on this machine at every size, and an unprivileged process
+cannot turn it on.
+
+### Moving a large block: `mremap` against copying (2026-10-17)
+
+The question: a large block that outgrows its slot is copied, which makes a sparsely written
+block fully resident and is slow; glibc moves such blocks with `mremap`. Can asmalloc move
+pages with `mremap(old, len, len, MREMAP_MAYMOVE | MREMAP_FIXED | MREMAP_DONTUNMAP, new)` and
+later put a fresh `mmap(MAP_FIXED)` over the destination ("heal") so that the heap's mappings
+merge again?
+
+**Answer.** It works, with a stricter recipe than first proposed, and it is fast. But a copy
+that skips all-zero source pages gets all of the memory benefit with no new mechanism.
+Remapping buys speed only: 1.6 to 2.9 times the reallocs per second on blocks of tens of
+megabytes and up.
+
+Method. Programs in `bench/roofline/oscost/src/bin/` (`remap_heal`, `remap_cost`, `remap_model`;
+deleted once the design chose to copy, last present at commit 666f143) build a heap like the
+allocator's: one `PROT_NONE`, `MAP_NORESERVE` reservation, regions advised `MADV_NOHUGEPAGE` and
+made writable from their start. All ran under `scripts/memlimit` with 8 GiB or less, pinned to
+CPU 13 (second thread on CPU 12). Those two cores and their siblings were idle when sampled; the
+machine's load average was 12 to 17 from other work, and repeats of the workload model differ by
+up to 15%. Times are the fastest of 3 to 40 repeats. Kernel behaviour was checked against the
+v7.2 sources (`mm/mremap.c`, `mm/vma.c`, `mm/mmap.c`, `mm/madvise.c`, `mm/util.c`).
+
+#### What the kernel does
+
+- **The move.** The destination's pages in the moved range are freed and replaced; the rest
+  of the destination slot keeps its old bytes. The source stays mapped, is not split, and
+  reads as zero, so it can be recorded as zero. Resident memory does not rise. The moved
+  range arrives as a mapping of its own that cannot merge with its neighbours: two more
+  mappings per moved-in block, never more.
+- **What blocks the merge.** The moved pages keep their original file offset, and the moved
+  mapping carries the source region's `anon_vma`. `MADV_DONTNEED` does not help. A fresh
+  `mmap` merges only once it has the neighbours' protection, `MAP_NORESERVE` and the
+  `MADV_NOHUGEPAGE` advice; `PROT_NONE` then `mprotect` also works. The wipe-on-fork page is
+  not in an object region and plays no part. The source needs no fresh `mmap` unless it was
+  itself moved into.
+- **The heal does not always return the count to where it was.** A healed range that is
+  written while it has a moved-in mapping on both sides gets an `anon_vma` of its own, and
+  the split between it and the region's mapping is then permanent. With whole-slot heals,
+  random cycles settled at 57 to 69 mappings against a baseline of 13 (bounded by the number
+  of slots, not creeping). Three rules make the return exact, 13 after every round of 28,000
+  moves: heal exactly the moved-in range; never remap the last page of a destination slot,
+  so every slot keeps a page of the region's own mapping; write one page of a region before
+  the first move into it.
+- **A block that grows in place after arriving lies in two mappings.** Linux 7.2 will move
+  several mappings in one call, but not atomically: four below `vm.max_map_count`, a block in
+  three mappings came back `ENOMEM` with two pieces moved, the third not, and the third's
+  destination unmapped. A call on one mapping is refused cleanly within three of the limit.
+  So a move must be one call on a range known to be one mapping. The kernel can be asked:
+  `mremap(p, len, len + 4096, 0)` fails with `EFAULT` if the range crosses a mapping and
+  `ENOMEM` if it does not, changing nothing (it must not be used on a range that ends where
+  unmapped space begins, where it succeeds and grows the mapping). The program can split a
+  block's mapping itself with `madvise` or `mlock`, so this cannot be known without asking.
+- **A refused move can leave the destination unmapped.** The kernel unmaps the destination
+  first. A failure after that (commit charge under strict overcommit, or no kernel memory)
+  returns `ENOMEM` with the source intact and a hole where the destination was. Shown with an
+  accounted mapping larger than RAM. The hole has to be mapped again before anything else
+  lands in it.
+- **`mlock`.** The move clears `VM_LOCKED` on the whole source mapping, not just the moved
+  range. In a process that called `mlockall`, one move would unlock a region. `MADV_COLD` on
+  one source page fails with `EINVAL` if the mapping is locked, which is a cheap test.
+- **Fork.** Parent and child each keep a correct view when the other moves the block. In
+  the parent, heals still merge. In a forked child they never merge with inherited mappings
+  (the kernel refuses to merge with a mapping copied by fork), so a child settles at up to
+  two extra mappings for each slot it has moved into: 490 against 13 with 288 slots, stable
+  over 5 rounds. In a child, blocks also lie in several mappings without having been moved.
+  Growing an inherited region by `mprotect` in a child, which the allocator already does,
+  costs one extra mapping per region, not one per step.
+- **Huge pages.** With both ends aligned to 2 MiB, huge pages move whole. Otherwise they are
+  split. A destination holding huge pages is simply replaced.
+- **Memory cap.** A 505 MiB block moves under a 512 MiB cgroup cap; a copy needs room for
+  one piece. An unaligned move allocates page tables (about 1 MiB per 512 MiB), and at the
+  very edge of the cap that is an OOM kill, as any page fault would be.
+- **Overcommit** (from the source). In modes 0 and 1 the heap is `VM_NORESERVE` and a move
+  charges nothing. In mode 2 the kernel ignores `MAP_NORESERVE`, writable parts are
+  accounted, and the move charges the full length after uncharging the destination: no net
+  change, but it can fail, leaving the hole above.
+- **Mapping count.** Up to two extra mappings per live moved-in block. The default
+  `vm.max_map_count` is 65530 (1048576 on this machine), and the allocator's own `mprotect`
+  needs headroom, so the number of live moved-in blocks needs a cap in the low thousands.
+
+#### Cost
+
+Microseconds, fastest of the repeats. "Copy" is the present move: 2 MiB pieces, the source's
+pages returned behind each. "Sparse copy" is the same, skipping source pages that are all
+zero. Dense means every page written; sparse means one byte per MiB.
+
+| Block | `mremap`, ends at 2 MiB | `mremap`, ends at different offsets | Copy, destination not resident | Copy, destination resident | Sparse copy |
+|---|---:|---:|---:|---:|---:|
+| 64 KiB dense | 1.5 | 1.5 | 5.9 | 0.4 | 5.9 |
+| 256 KiB dense | 1.8 | 1.8 | 21 | 1.6 | 21 |
+| 1 MiB dense | 3.0 | 3.0 | 90 | 13 | 90 |
+| 16 MiB dense | 10 | 31 | 2,100 | 1,100 | 2,300 |
+| 256 MiB dense | 32 | 390 | 43,000 | 26,000 | 46,000 |
+| 1 GiB dense | 94 | 1,500 | 177,000 | | 186,000 |
+| 4 GiB dense | 180 | 6,100 | 681,000 | | 696,000 |
+| 1 MiB sparse | 1.9 | 2.0 | 128 | 47 | 49 |
+| 256 MiB sparse | 29 | 131 | 48,000 | 23,000 | 13,600 |
+| 4 GiB sparse | 176 | 2,400 | 775,000 | | 217,000 |
+
+- Around the `mremap`: the one-mapping probe 0.1 to 2, the lock probe 0.6 to 4, and at free
+  the fresh `mmap` and advice 0.8 to 15 on top of the purge any freed block may pay.
+- With both ends on a 1 GiB boundary the kernel moves whole upper-level tables: 11 for
+  1 GiB or 3 GiB. Ends at the same odd offset cost the same as aligned ends. Classes of
+  8 MiB and up are multiples of 2 MiB, so only blocks under 8 MiB move page by page.
+- A destination with resident pages costs the `mremap` their release under the lock: 38 ms
+  for 1 GiB. Purge it first.
+- Resident after moving a 256 MiB sparse block: 1 MiB by `mremap`, 256 by copy, 1 by sparse
+  copy. The sparse copy pays a read fault per untouched source page, 0.19 us, which maps the
+  shared zero page and adds no resident memory.
+- **Crossover.** Against a destination whose pages are not resident, `mremap` wins at every
+  large size. Against a resident one (a retained slot), the copy wins up to about 256 KiB.
+  The workload below is insensitive to the threshold from 64 KiB to 16 MiB.
+
+**What it does to other threads.** A second thread's longest pause during one move, middle
+of 7 to 25 repeats:
+
+| Second thread | `mremap` 64 MiB unaligned | `mremap` 1 GiB aligned | `mremap` 1 GiB unaligned | Copy, 1 GiB |
+|---|---:|---:|---:|---:|
+| Computing only (sees the TLB shootdowns) | 1.3 us | 2.6 us | 2.9 us | 5.3 us |
+| Page faults in a mapping of its own | 2.6 us | 10 us | 5.7 us | 18 us |
+| Page faults in the source's region | 114 us | 100 us | 1,550 us | 13 us |
+| Page faults in the destination's region | 113 us | 100 us | 1,530 us | 12 us |
+| `mmap` and `munmap` | 157 us | 396 us | 2,090 us | 760 us |
+
+A thread that faults in either region, or needs the address-space lock, waits for the whole
+call: about 0.1 ms per GiB aligned, 1.5 ms per GiB page by page (which the class sizes limit
+to blocks under 8 MiB, about 12 us). Other threads are not held. The copy never holds anyone
+for long. The `mmap` row is noisy in every column.
+
+#### The soak's realloc workload
+
+`remap_model` replays the soak's `realloc` mode (growth chains to a random top and back
+down, written and checked as the soak does) against a model of the large-object rules, one
+thread. Three runs at 256 MiB; ranges are the runs.
+
+| Way of moving | Reallocs per second, blocks to 256 MiB | Peak resident | Reallocs per second, to 1 GiB | Peak resident |
+|---|---:|---:|---:|---:|
+| glibc | 2,460 to 2,490 | 65 MiB | 2,170 | 69 MiB |
+| copy (now) | 1,260 to 1,280 | 136 MiB | 480 | 506 MiB |
+| sparse copy | 1,220 to 1,380 | 72 MiB | 810 | 77 MiB |
+| one `mremap`, sparse copy for the rest | 1,820 to 2,120 | 71 MiB | 1,420 | 75 MiB |
+
+With blocks to 16 MiB all four are within 10% (4,440 to 5,000 per second, 18 to 27 MiB).
+The model reproduces the soak's shape (glibc 1.9 times the copy's rate and half its peak),
+not its numbers.
+
+#### What follows
+
+1. **Sparse copy fixes the memory problem by itself**: peak within 12% of glibc's, against
+   2 to 7 times. It needs the destination to read as zero (purge it first unless the back
+   end already knows it is zero) and no other state, no new system call and no new failure
+   path. It does not speed up dense blocks.
+2. **Remapping adds only speed**, 1.6 times at 256 MiB and 2.9 times at 1 GiB over the copy,
+   and still short of glibc. Its price in mechanism: three new OS calls and their simulated
+   model (mappings, not just pages), a word per large slot, a cap on live moved-in blocks,
+   and these rules, each of which the experiments showed is needed:
+   - one `mremap` per move, of the largest piece of the block that the probe says is one
+     mapping; sparse copy for the rest, after the `mremap`, so a refusal leaves the source
+     whole;
+   - never the last page of the destination slot; a region written once before its first
+     move in;
+   - purge a destination that is not known zero before the call;
+   - skip the remap if the lock probe fails;
+   - on refusal, map the destination range again; if that fails too, never use the slot;
+   - at free, purge, then a fresh `mmap` and advice over exactly the moved-in range;
+   - no guarantee in a forked child, where the probe will often say no and heals do not
+     merge.
+
+### Large blocks at the same offset in the caches (2026-10-17)
+
+Large slots are spaced by their class size, often a power of two, so buffers that start at
+slot starts share their low address bits, and the same offset in each falls in the same
+cache set. A stand-alone probe: 64 buffers of 4 MiB at 16 MiB-aligned addresses, memory
+pre-faulted, written round-robin one `u64` at a time as 64 growing vectors are, against the
+same buffers each moved by a different multiple of 64 bytes within a page. Pinned to CPU 13,
+three interleaved runs:
+
+| | ns per element | L2 requests from L1D | of them L2 hits |
+|---|---:|---:|---:|
+| at slot starts | 7.86 to 7.95 | 2.05e9, one per store | 2.04e9 |
+| staggered | 0.74 to 0.80 | 2.1e7, one per line | 0.7e7 to 0.9e7 |
+
+At slot starts every store misses the 12-way L1: 64 streams map to one set. With large
+blocks staggered by their slot's index (`policy::STAGGER_STEP`), the workload suite's 64
+vectors grown to 4 MiB took 12.0 cycles an element against 40.9 (jemalloc 14.5, which
+offsets large extents for the same reason; mimalloc 40.0), at the same peak, 271 MiB. A
+loop `a[i] = b[i] + c[i]` over three vectors of 4 or 16 MiB was the same for every
+allocator: three streams fit the L1's ways.
+
 ## 8. Moving cache lines between cores
 
-Wall-clock, single run each in two sessions.
+Wall-clock, single run each in two sessions, with `bench/roofline/xcore` (last present at
+commit 666f143).
 
 | | SMT sibling | Same L3 | Other L3 |
 |---|---:|---:|---:|
@@ -317,7 +590,8 @@ path is opaque to that folding.
 
 `__rust_alloc` and its siblings are generated in the crate that declares `#[global_allocator]`.
 Whether a call site gets the fast path inlined depends on whether the optimizer can see that
-crate from the call site. The experiment (`bench/roofline/inline`) has an allocator crate with
+crate from the call site. The experiment (`bench/roofline/inline`, superseded by
+`bench/roofline/fastpath` and last present at commit 666f143) has an allocator crate with
 `#[inline]` fast paths, a dependency crate, and a binary crate that declares the allocator and
 is large enough to be split into two codegen units.
 
@@ -1099,6 +1373,107 @@ and the abort handler as in `lean/generated`; `8:` stubs follow the `ret`. All r
    them. Keep the published heap word off the page offsets of the slab hot words (8 to 360).
    Anything read on every free that shares a page offset with a slab word of a hot class costs a
    cycle.
+
+### The generated routines in the real library (2026-10-17)
+
+The routines the Lean emitter now generates for `malloc`, `calloc`, `free`, `free_sized` and the
+`delete` forms, measured in the real library, not the stand-in. `compare.sh` ran the C loops
+(`cloop.c`) with `libasmalloc_preload.so` preloaded through the PLT, the IBT PLT and `call
+[GOT]`. A fourth build links the same crate as a static library (`static/`), so the loops call
+the routines directly. Pinned to CPU 12. The machine was shared with a soak and proof jobs, and
+CPU 12's sibling, 28, was about 10 percent busy over the run. Each cell is the best of 3
+interleaved rounds. Some rounds of ours and of the incumbents were up to 10 cycles slower; the
+best rounds repeated to within 0.05 in pairs.
+
+| C loop | static (direct) | PLT | IBT PLT | `call [GOT]` | stand-in, PLT | glibc, PLT | mimalloc, PLT |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| pair 32 B | 8.03 | 10.00 | 10.00 | 28.20 | 10.00 | 12.00 | 12.24 |
+| pair 256 B | 8.03 | 10.00 | 10.00 | 28.20 | 10.00 | 12.00 | 14.25 |
+| burst 8 | 8.88 | 10.26 | 10.25 | 16.17 | 10.50 | 12.26 | 11.77 |
+| burst 32 | 8.87 | 11.19 | 10.07 | 16.54 | 10.43 | 37.07 | 11.52 |
+| burst 100 (64 B) | 9.33 | 10.83 | 10.83 | 16.77 | 10.96 | 47.81 | 12.31 |
+| mixed 1 to 512 B | 21.06 | 23.61 | 22.67 | 25.92 | 22.48 | 14.23 | 19.02 |
+
+jemalloc measured 13.4 to 14.6 and per-CPU tcmalloc 14.0 to 15.2 in the same PLT cells, and both
+were over 30 in mixed.
+
+- Both targets are met in pairs: 8.03 direct (the floor is 8.00) and 10.00 through the PLT.
+  That is 2 cycles under glibc, and 2.2 to 4.3 under mimalloc.
+- Burst 32 through the PLT is 1.1 slower than the IBT build of the same library. The stand-in
+  showed the same split (above, against the incumbents): op-cache placement of the caller,
+  stubs and routines, which the routines do not control.
+- Mixed is about a cycle over the stand-in through the PLT. Our free reads the shift and `base
+  >> s` as two words (the `fW` shape, 25.1 against `fUj`'s 21.9 in the free table above), not
+  the one packed word.
+- `call [GOT]`: the pair is 28.2, 2.4 over the stand-in's 25.8. A stand-in whose pop alone
+  is changed to our generated order, `lea rcx, [rcx - 8]; mov rax, [rcx]`, in place of `mov
+  rax, [rcx - 8]; lea rcx, [rcx - 8]`, measured 27.6 to 28.4 against 26.4 to 27.0 for the
+  original, interleaved on the loaded machine. So about 1.3 cycles of the gap is that order: the
+  popped pointer waits for the `lea`, and that pointer leads to the free's slab-word address,
+  where `call [mem]` has disabled memory renaming (first subsection). Direct and PLT calls hide it.
+  The order comes from the shared Lean pop steps. This is inference from one interleaved
+  comparison.
+
+Re-measured the same evening after the C layer's Rust fast path and the out-of-line pop and push
+were deleted, which moved the routines in the library. Same method, but the machine was
+heavily loaded (load average 80; CPU 28 stayed idle). Pair 8.06 direct and 10.03 through the
+PLT, burst 32 8.80 direct and 10.45 through the PLT (1.1 better than above, which supports
+reading the earlier 11.19 as placement), mixed 22.7 and 23.7, `call [GOT]` pair 28.1.
+
+calloc, PLT, cycles per `calloc(1, n)` and free:
+
+| n | 16 | 32 | 64 | 128 | 256 |
+|---|---:|---:|---:|---:|---:|
+| ours | 11.05 | 12.08 | 12.28 | 12.40 | 13.54 |
+| stand-in (`cD`, 16-byte stores up to 512) | 11.01 | 12.02 | 13.01 | | 16.85 |
+| glibc | 14.04 | 13.07 | 14.03 | | 17.13 |
+| mimalloc | 14.14 | 14.25 | 15.48 | | 20.62 |
+
+The routine is 110 bytes and 22 uops. It tail-calls a Rust zeroing tail, which zeroes the
+block's whole class, as `malloc_usable_size` reports it. It does that with its own 16-byte stores
+up to 32 bytes and with glibc's `memset` above that. The tail started as one `memset` for every
+size, which cost a cycle over the stand-in at 16 and 32 bytes (a call through the GOT and
+glibc's dispatch). Then 16-byte stores up to 512 bytes, as the stand-in uses, which were 1 to 8
+cycles slower than `memset` from 64 bytes up (21.4 against 13.5 at 256). Only the 32-byte
+threshold was faster than both at every size.
+
+### C++ new and delete without our operators (2026-10-17)
+
+The preload library exports no C++ operators. So a C++ program's `new` and `delete` run
+libstdc++'s, which call our `malloc` and `free` through libstdc++'s PLT. `cxxloop.cpp` calls
+`::operator new(n)` and `::operator delete(p, n)` as new and delete expressions do (the sized
+form gcc emits for a complete type), and the unsized form as `upair`. `compare.sh` runs it with
+`RF_PROG=cxxloop`. "asm + C++" adds a release build of
+`crates/asmalloc-preload/tests/programs/cxx_exports`, given as `ASMALLOC_CXX_LIB` (that library
+and the C++ operator layer were deleted after this measurement; the last commit that had them is
+58bf936). That library
+exports our deletes and nothrow `new`, but not the throwing `new`, which still comes from
+libstdc++. Pinned to CPU 12, sibling 28 idle over the run, best of 3 interleaved rounds. Cycles
+per new and delete:
+
+| | asm, no C++ | asm + C++ | mimalloc | tcmalloc per-CPU | jemalloc | glibc |
+|---|---:|---:|---:|---:|---:|---:|
+| pair 32 B, sized, PLT | 17.0 | 15.0 | 15.2 | 13.0 | 20.1 | 20.0 |
+| pair 256 B, sized, PLT | 17.0 | 15.0 | 17.0 | 13.2 | 20.9 | 20.0 |
+| pair 32 B, unsized, PLT | 16.0 | 15.0 | 12.3 | 13.0 | 19.1 | 19.0 |
+| burst 32, PLT | 19.2 | 16.1 | 15.5 | 13.4 | 22.3 | 44.2 |
+| burst 100 (64 B), PLT | 17.9 | 15.9 | 14.7 | 14.4 | 21.2 | 53.4 |
+| mixed 1 to 512 B, sized, PLT | 18.3 | 15.0 | 17.5 | 13.4 | 31.2 | 20.0 |
+| pair 32 B, sized, `call [GOT]` | 29.3 | 16.5 | 16.2 | 17.4 | 38.8 | 23.3 |
+| burst 32, `call [GOT]` | 20.4 | 18.8 | 19.5 | 18.1 | 23.3 | 45.5 |
+
+Per-thread tcmalloc measured 45 to 62.
+
+- Without the export we beat glibc and jemalloc in every loop. Through the PLT we trail
+  mimalloc by 2 to 4 cycles and per-CPU tcmalloc by 4 to 6. Under `call [GOT]` we trail both
+  by about 12 in pairs.
+- Exporting the deletes buys 1 to 3 cycles through the PLT and 13 in the `call [GOT]` pair.
+- Even then, the throwing `new` goes through libstdc++'s wrapper (its new-handler loop) and
+  then our `malloc` through its PLT. That leaves 15.0 against tcmalloc's 13.0, which exports
+  `new` itself.
+- Estimate, not measured: a full export, with a generated throwing `new` (c_malloc's code
+  leaving for a slow path that runs the new-handler and throws), would put the C++ pair near
+  our C pair, 10 to 11 cycles through the PLT. That would be ahead of every incumbent.
 
 ### Caveats
 

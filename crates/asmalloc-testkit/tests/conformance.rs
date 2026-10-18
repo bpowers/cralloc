@@ -33,6 +33,13 @@ fn the_c_functions_meet_every_conformance_case() {
     assert_all_pass(&target::c_fns());
 }
 
+/// The same cases against the slow paths alone, which complete whatever the generated routines
+/// miss.
+#[test]
+fn the_c_slow_paths_meet_every_conformance_case() {
+    assert_all_pass(&target::c_fns_slow());
+}
+
 /// The cases are what the standards require, so the C library meets them too.
 #[test]
 fn the_c_library_meets_every_conformance_case() {

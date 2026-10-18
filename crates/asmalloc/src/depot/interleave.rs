@@ -14,8 +14,9 @@
 //! `membarrier` do. A thread may also migrate at the start of any sequence, a bounded number of
 //! times per execution. The census of `test_rig.rs` checks the invariants after every execution.
 
+use super::heartbeat::Clock;
 use super::test_rig::{Rig, Small, TIGHT, tiny_class};
-use super::{Drained, Source};
+use super::{Drained, IDLE_TICKS, Source};
 use crate::front::check::{Bounds, Report, choose, explore, switch_point};
 use crate::os::sim::{Call, Faults, SimOs, SimThread};
 use crate::os::{Aborted, Machine, Os, Step};
@@ -314,6 +315,90 @@ fn a_fork_at_any_step_duplicates_nothing(bounds: Bounds, ops: &[Op]) {
     assert!(found.forks > 0);
 }
 
+/// A world in which CPU 0's loaded magazine and spares are an interval old, so that the age
+/// limit's look takes them.
+fn aged_world(migrations: usize) -> World {
+    let world = World::new(6, migrations);
+    world.populate();
+    let machine = world.machine(THREADS - 1, 0);
+    let cache = world.rig.cache(&machine);
+    let cpu = world.rig.slabs().cpu(0).unwrap();
+    // Stamps the loaded magazine now, if its install did not.
+    cache.age_look(cpu, tiny_class(), &Clock::new(world.rig.os()));
+    world.rig.os().advance_clock(2 * IDLE_TICKS);
+    world
+}
+
+/// The age limit at CPU 0, from a thread that started there: a look that takes the loaded
+/// magazine, and a sweep's take of the full spare stack. Counts the takes that happened in
+/// `taken`, so a scenario can check that some schedule took something.
+fn age_looks(world: &World, machine: &CheckCpu<'_>, taken: &AtomicUsize) {
+    let cache = world.rig.cache(machine);
+    let cpu = world.rig.slabs().cpu(0).unwrap();
+    let hot = cache.age_look(cpu, tiny_class(), &Clock::new(world.rig.os()));
+    let spares = cache.take_spares(cpu, tiny_class());
+    taken.fetch_add(usize::from(hot) + usize::from(spares), Ordering::SeqCst);
+}
+
+/// The age limit takes CPU 0's magazine and a spare while a mutator allocates and frees there
+/// (`age.rs`). With `migrations`, either thread may move to the other CPU at the start of a
+/// sequence: the taker between reading CPU 0's word and its store-if-equal, which then runs on
+/// CPU 1, the mutator so that its installs land on either.
+fn an_age_take_and_a_mutator_keep_one_owner_under_every_schedule(
+    bounds: Bounds,
+    migrations: usize,
+) {
+    let taken = AtomicUsize::new(0);
+    let found = explore(
+        bounds,
+        2,
+        || aged_world(migrations),
+        |world, me| {
+            let machine = world.machine(me, 0);
+            if me == 0 {
+                world.run(&machine, MUTATE);
+            } else {
+                age_looks(world, &machine, &taken);
+            }
+        },
+        |_| {},
+        |world, _| world.check(false),
+    );
+    report("age take", found);
+    assert!(
+        taken.load(Ordering::SeqCst) > 0,
+        "no schedule took anything"
+    );
+}
+
+/// The age limit's take races a drain of the same slab from the other CPU: the take's commit
+/// and the drain's markers meet as a slow path's install and a drain do (`Drain_claim`).
+fn an_age_take_and_a_drain_keep_one_owner_under_every_schedule(bounds: Bounds) {
+    let taken = AtomicUsize::new(0);
+    let found = explore(
+        bounds,
+        2,
+        || aged_world(0),
+        |world, me| {
+            if me == 0 {
+                age_looks(world, &world.machine(me, 0), &taken);
+            } else {
+                let machine = world.machine(me, 1);
+                let cache = world.rig.cache(&machine);
+                let cpu = world.rig.slabs().cpu(0).unwrap();
+                assert_ne!(cache.drain(cpu), Drained::BackedOut);
+            }
+        },
+        |_| {},
+        |world, _| world.check(false),
+    );
+    report("age take and drain", found);
+    assert!(
+        taken.load(Ordering::SeqCst) > 0,
+        "no schedule took anything"
+    );
+}
+
 /// Two threads push and pop one depot stack directly, with a third holding magazines it
 /// pushes back (`Depot.tla`): the version counter keeps every magazine with one owner.
 fn depot_stacks_keep_one_owner_under_every_schedule(bounds: Bounds) {
@@ -389,7 +474,7 @@ mod run {
     }
 
     #[test]
-    #[ignore = "minutes; run on demand"]
+    #[ignore = "slow: run with scripts/gate --all"]
     fn exchanges_keep_one_owner_under_every_schedule_fully() {
         super::exchanges_keep_one_owner_under_every_schedule(Bounds::preemptions(2));
     }
@@ -405,7 +490,7 @@ mod run {
     }
 
     #[test]
-    #[ignore = "minutes; run on demand"]
+    #[ignore = "slow: run with scripts/gate --all"]
     fn a_drain_and_a_mutator_keep_one_owner_under_every_schedule_fully() {
         // The mutator may also move to the other CPU once, mid-drain.
         super::a_drain_and_a_mutator_keep_one_owner_under_every_schedule(
@@ -422,7 +507,7 @@ mod run {
     }
 
     #[test]
-    #[ignore = "minutes; run on demand"]
+    #[ignore = "slow: run with scripts/gate --all"]
     fn two_drains_and_a_mutator_keep_one_owner_under_every_schedule_fully() {
         super::two_drains_and_a_mutator_keep_one_owner_under_every_schedule(Bounds::preemptions(1));
     }
@@ -437,7 +522,7 @@ mod run {
     }
 
     #[test]
-    #[ignore = "minutes; run on demand"]
+    #[ignore = "slow: run with scripts/gate --all"]
     fn a_drain_that_backs_out_keeps_one_owner_under_every_schedule_fully() {
         super::a_drain_that_backs_out_keeps_one_owner_under_every_schedule(
             Bounds::preemptions(2),
@@ -452,9 +537,39 @@ mod run {
     }
 
     #[test]
-    #[ignore = "minutes; run on demand"]
+    #[ignore = "slow: run with scripts/gate --all"]
     fn a_fork_at_any_step_duplicates_nothing_fully() {
         super::a_fork_at_any_step_duplicates_nothing(Bounds::preemptions(1).with_fork(), MUTATE);
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn an_age_take_and_a_mutator_keep_one_owner_under_every_schedule_quickly() {
+        super::an_age_take_and_a_mutator_keep_one_owner_under_every_schedule(
+            Bounds::preemptions(1),
+            1,
+        );
+    }
+
+    #[test]
+    #[ignore = "slow: run with scripts/gate --all"]
+    fn an_age_take_and_a_mutator_keep_one_owner_under_every_schedule_fully() {
+        super::an_age_take_and_a_mutator_keep_one_owner_under_every_schedule(
+            Bounds::preemptions(2),
+            2,
+        );
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn an_age_take_and_a_drain_keep_one_owner_under_every_schedule_quickly() {
+        super::an_age_take_and_a_drain_keep_one_owner_under_every_schedule(Bounds::preemptions(1));
+    }
+
+    #[test]
+    #[ignore = "slow: run with scripts/gate --all"]
+    fn an_age_take_and_a_drain_keep_one_owner_under_every_schedule_fully() {
+        super::an_age_take_and_a_drain_keep_one_owner_under_every_schedule(Bounds::preemptions(2));
     }
 
     #[test]
@@ -464,7 +579,7 @@ mod run {
     }
 
     #[test]
-    #[ignore = "minutes; run on demand"]
+    #[ignore = "slow: run with scripts/gate --all"]
     fn depot_stacks_keep_one_owner_under_every_schedule_fully() {
         super::depot_stacks_keep_one_owner_under_every_schedule(Bounds::preemptions(3));
     }

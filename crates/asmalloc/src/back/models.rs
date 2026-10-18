@@ -18,6 +18,8 @@
 //!
 //! Two-thread scenarios explore every schedule. Three-thread scenarios, and the purge
 //! scenarios, whose operations take a dozen steps each, bound preemptions to two or three.
+//! Those bounds take seconds a scenario, so they run in the `_fully` tests, on demand
+//! (`scripts/gate --all`); the merge gate runs each scenario one preemption lower.
 
 use super::explore::{Config, Outcome, TWord, explore};
 use super::layout::{Step, Unit};
@@ -143,9 +145,9 @@ fn run(host: &Host8, op: Op) -> Vec<(RegionId, u32)> {
     }
 }
 
-/// Runs two single operations against each other under every schedule, from
+/// Runs two single operations against each other under the schedules `config` allows, from
 /// `summary_setup`, and checks `Partition` and `Visible`.
-fn summary_pair(a: Op, b: Op) -> usize {
+fn summary_pair(config: Config, a: Op, b: Op) -> usize {
     let ops = [a, b];
     let freed: Vec<u64> = ops
         .iter()
@@ -155,7 +157,7 @@ fn summary_pair(a: Op, b: Op) -> usize {
         })
         .collect();
     explore(
-        Config::ALL,
+        config,
         2,
         || (summary_setup(), Mutex::new(Vec::new())),
         |(host, kept), me| {
@@ -172,13 +174,11 @@ fn summary_pair(a: Op, b: Op) -> usize {
     .schedules
 }
 
-/// `Summary.cfg` and `Summary_heal.cfg`, two threads, every schedule: each pair of single
-/// operations that can meet on a word. A claim that empties a word races a free into it (the
-/// clear-then-reread against the healing walk), two claims contend for one word, and frees race
-/// into an empty word and an empty region.
-#[test]
-#[cfg_attr(miri, ignore)]
-fn summary_pairs_every_schedule() {
+/// `Summary.cfg` and `Summary_heal.cfg`, two threads: each pair of single operations that can
+/// meet on a word. A claim that empties a word races a free into it (the clear-then-reread
+/// against the healing walk), two claims contend for one word, and frees race into an empty
+/// word and an empty region. Every schedule in the full run, two preemptions in the quick one.
+fn summary_pairs(config: Config, at_least: usize) {
     let pairs = [
         (Op::Claim(2), Op::Free(2)),
         (Op::ClaimRelease(2), Op::Free(3)),
@@ -191,18 +191,34 @@ fn summary_pairs_every_schedule() {
     ];
     let mut schedules = 0;
     for (a, b) in pairs {
-        schedules += summary_pair(a, b);
+        schedules += summary_pair(config, a, b);
     }
-    assert!(schedules > 1000, "{schedules}");
+    assert!(schedules > at_least, "{schedules}");
 }
 
-/// Longer sequences on two threads, preemptions bounded to three.
 #[test]
 #[cfg_attr(miri, ignore)]
-fn summary_two_threads_bounded() {
+fn summary_pairs_quickly() {
+    summary_pairs(
+        Config {
+            preemptions: Some(2),
+            ..Config::ALL
+        },
+        500,
+    );
+}
+
+#[test]
+#[ignore = "slow: run with scripts/gate --all"]
+fn summary_pairs_every_schedule() {
+    summary_pairs(Config::ALL, 1000);
+}
+
+/// Longer sequences on two threads, preemptions bounded to three (two in the quick run).
+fn summary_two_threads_bounded(preemptions: usize) {
     explore(
         Config {
-            preemptions: Some(3),
+            preemptions: Some(preemptions),
             ..Config::ALL
         },
         2,
@@ -223,13 +239,23 @@ fn summary_two_threads_bounded() {
     );
 }
 
-/// `Summary_heal.cfg`: three threads, preemptions bounded to two.
 #[test]
 #[cfg_attr(miri, ignore)]
-fn summary_three_threads_bounded() {
+fn summary_two_threads_bounded_quickly() {
+    summary_two_threads_bounded(2);
+}
+
+#[test]
+#[ignore = "slow: run with scripts/gate --all"]
+fn summary_two_threads_bounded_fully() {
+    summary_two_threads_bounded(3);
+}
+
+/// `Summary_heal.cfg`: three threads, preemptions bounded to two (one in the quick run).
+fn summary_three_threads_bounded(preemptions: usize) {
     explore(
         Config {
-            preemptions: Some(2),
+            preemptions: Some(preemptions),
             ..Config::ALL
         },
         3,
@@ -255,15 +281,25 @@ fn summary_three_threads_bounded() {
     );
 }
 
-/// `Summary_heal_deep.cfg`: a region with two summary levels (8-byte slots in a 64 KiB region:
-/// 128 leaf words, two words above them, one top word). Slots in leaf words 0 and 64 sit under
-/// different level-1 words. Preemptions bounded to three.
 #[test]
 #[cfg_attr(miri, ignore)]
-fn summary_deep_bounded() {
+fn summary_three_threads_bounded_quickly() {
+    summary_three_threads_bounded(1);
+}
+
+#[test]
+#[ignore = "slow: run with scripts/gate --all"]
+fn summary_three_threads_bounded_fully() {
+    summary_three_threads_bounded(2);
+}
+
+/// `Summary_heal_deep.cfg`: a region with two summary levels (8-byte slots in a 64 KiB region:
+/// 128 leaf words, two words above them, one top word). Slots in leaf words 0 and 64 sit under
+/// different level-1 words. Preemptions bounded to three (two in the quick run).
+fn summary_deep_bounded(preemptions: usize) {
     explore(
         Config {
-            preemptions: Some(3),
+            preemptions: Some(preemptions),
             ..Config::ALL
         },
         2,
@@ -296,16 +332,158 @@ fn summary_deep_bounded() {
     );
 }
 
+#[test]
+#[cfg_attr(miri, ignore)]
+fn summary_deep_bounded_quickly() {
+    summary_deep_bounded(2);
+}
+
+#[test]
+#[ignore = "slow: run with scripts/gate --all"]
+fn summary_deep_bounded_fully() {
+    summary_deep_bounded(3);
+}
+
+/// The deep host of `summary_deep_bounded`: 8-byte slots in a 64 KiB region, two summary
+/// levels, slots 0 and `64 * 64` free.
+fn deep_setup() -> Host8 {
+    let host = Host8::new(standard(), class(8), 1);
+    assert_eq!(host.layout().height(), 2);
+    let r0 = host.region_at(0);
+    host.carve_all(r0, host.layout().slots());
+    free_now(&host, r0, 0);
+    free_now(&host, r0, 64 * 64);
+    host
+}
+
+/// Frees `slots` of region 0 as one batch: one OR per slot, one walk up for all.
+fn free_batch(host: &Host8, slots: &[u32]) {
+    let r0 = host.region_at(0);
+    let mut release = tree::Release::new(host, r0);
+    for &slot in slots {
+        release.leaf(r0, slot / BITS, 1 << (slot % BITS));
+    }
+    release.finish();
+}
+
+/// Claims `times` times through one cursor, as a fill does, keeping what it gets.
+fn claim_run(host: &Host8, times: usize) -> Vec<(RegionId, u32)> {
+    let mut cursor = None;
+    let mut out = Vec::new();
+    for _ in 0..times {
+        let Some(taken) = tree::claim_next(host, 1, &mut cursor) else {
+            break;
+        };
+        out.push((
+            taken.region,
+            taken.word * BITS + taken.bits.trailing_zeros(),
+        ));
+    }
+    out
+}
+
+/// A batch of releases under three summary words, whose walk is shared and deferred, races a
+/// run of claims through a cursor and a claim from the top. Every slot ends up free once and
+/// every word visible (`Partition`, `Visible`). Preemptions bounded to two (one in the quick
+/// run).
+fn a_batch_release_races_claims_through_a_cursor(preemptions: usize) {
+    let freed = [64 + 1, 64 * 65 + 2, 64 * 2 + 3, 64 + 4];
+    explore(
+        Config {
+            preemptions: Some(preemptions),
+            ..Config::ALL
+        },
+        3,
+        || (deep_setup(), Mutex::new(Vec::new())),
+        |(host, kept), me| {
+            let got = match me {
+                0 => {
+                    free_batch(host, &freed);
+                    Vec::new()
+                }
+                1 => claim_run(host, 3),
+                _ => claim(host, 1),
+            };
+            kept.lock().unwrap().extend(got);
+        },
+        |(host, kept), outcome| {
+            assert!(outcome.killed.is_empty());
+            let kept = kept.lock().unwrap().clone();
+            let distinct: BTreeSet<_> = kept.iter().copied().collect();
+            assert_eq!(distinct.len(), kept.len(), "a slot claimed twice");
+            release_all(host, &kept);
+            let mut expected: BTreeSet<u64> = [0, 64 * 64].into_iter().collect();
+            expected.extend(freed.iter().map(|&s| s as u64));
+            assert_eq!(free_set(host, 1), expected);
+            assert!(host.all_visible(), "a free word is invisible");
+        },
+    );
+}
+
+#[test]
+#[cfg_attr(miri, ignore)]
+fn a_batch_release_races_claims_through_a_cursor_quickly() {
+    a_batch_release_races_claims_through_a_cursor(1);
+}
+
+#[test]
+#[ignore = "slow: run with scripts/gate --all"]
+fn a_batch_release_races_claims_through_a_cursor_fully() {
+    a_batch_release_races_claims_through_a_cursor(2);
+}
+
+/// A run of claims through a cursor while another thread frees below and above it: nothing is
+/// handed out twice or lost, and every word stays visible. Preemptions bounded to three (two in
+/// the quick run).
+fn a_cursor_run_races_frees_below_and_above_it(preemptions: usize) {
+    explore(
+        Config {
+            preemptions: Some(preemptions),
+            ..Config::ALL
+        },
+        2,
+        || (deep_setup(), Mutex::new(Vec::new())),
+        |(host, kept), me| {
+            if me == 0 {
+                let got = claim_run(host, 3);
+                kept.lock().unwrap().extend(got);
+            } else {
+                free_now(host, host.region_at(0), 1);
+                free_now(host, host.region_at(0), 64 * 70);
+            }
+        },
+        |(host, kept), outcome| {
+            assert!(outcome.killed.is_empty());
+            let kept = kept.lock().unwrap().clone();
+            release_all(host, &kept);
+            let expected: BTreeSet<u64> = [0, 1, 64 * 64, 64 * 70].into_iter().collect();
+            assert_eq!(free_set(host, 1), expected);
+            assert!(host.all_visible(), "a free word is invisible");
+        },
+    );
+}
+
+#[test]
+#[cfg_attr(miri, ignore)]
+fn a_cursor_run_races_frees_below_and_above_it_quickly() {
+    a_cursor_run_races_frees_below_and_above_it(2);
+}
+
+#[test]
+#[ignore = "slow: run with scripts/gate --all"]
+fn a_cursor_run_races_frees_below_and_above_it_fully() {
+    a_cursor_run_races_frees_below_and_above_it(3);
+}
+
 /// `Summary_heal_crash.cfg`: as `summary_three_threads_bounded`, but threads 1 and 2 may vanish
 /// at any step, as in a forked child. What a vanished thread held is lost; nothing is ever
 /// handed out twice; and once the survivor is done, a free into any word makes that word
 /// reachable (the healing free), even where a vanished thread left a summary bit clear.
-#[test]
-#[cfg_attr(miri, ignore)]
-fn summary_crash_then_heal() {
+/// Preemptions bounded to two (one in the quick run).
+fn summary_crash_then_heal(preemptions: usize) {
     explore(
         Config {
-            preemptions: Some(2),
+            preemptions: Some(preemptions),
             crash: true,
             ..Config::ALL
         },
@@ -347,6 +525,18 @@ fn summary_crash_then_heal() {
     );
 }
 
+#[test]
+#[cfg_attr(miri, ignore)]
+fn summary_crash_then_heal_quickly() {
+    summary_crash_then_heal(1);
+}
+
+#[test]
+#[ignore = "slow: run with scripts/gate --all"]
+fn summary_crash_then_heal_fully() {
+    summary_crash_then_heal(2);
+}
+
 /// The carve protocol, which no TLA+ model covers: two threads carve from a region of eight
 /// slots while committing as they go, and each slot is handed out exactly once. Preemptions
 /// bounded to three; `carving_every_schedule` explores all 1.5 million schedules on demand.
@@ -362,7 +552,7 @@ fn carving_threads_get_disjoint_slots() {
 /// `carving_threads_get_disjoint_slots` under every schedule: a few million of them, a few
 /// minutes in a debug build.
 #[test]
-#[ignore = "slow: a few minutes; run with --ignored"]
+#[ignore = "slow: run with scripts/gate --all"]
 fn carving_every_schedule() {
     carving(Config {
         limit: 20_000_000,
@@ -595,80 +785,150 @@ fn purge_roles(
 }
 
 /// The huge-page part: 32-byte slots on 64-byte pages, purged in whole 256-byte huge pages.
-#[test]
-#[cfg_attr(miri, ignore)]
-fn purge_in_huge_pages() {
+fn purge_in_huge_pages(bound: usize) {
     purge_roles(
         tiny(),
         32,
         16,
         &[3],
-        2,
+        bound,
         true,
         [Role::Purge, Role::Program, Role::FreeHeld],
     );
 }
 
-/// Two purgers over the same units, against a program.
 #[test]
 #[cfg_attr(miri, ignore)]
-fn two_purgers_on_the_same_units() {
+fn purge_in_huge_pages_quickly() {
+    purge_in_huge_pages(1);
+}
+
+#[test]
+#[ignore = "slow: run with scripts/gate --all"]
+fn purge_in_huge_pages_fully() {
+    purge_in_huge_pages(2);
+}
+
+/// Two purgers over the same units, against a program.
+fn two_purgers_on_the_same_units(bound: usize) {
     purge_roles(
         tiny(),
         48,
         4,
         &[1],
-        2,
+        bound,
         false,
         [Role::Purge, Role::Purge, Role::FreeHeld],
     );
 }
 
-/// A carve racing a purge: the purge reads the watermark once and must never return a page a
-/// carve hands out. The carver checks that its slots read as zero.
 #[test]
 #[cfg_attr(miri, ignore)]
-fn a_carve_racing_a_purge() {
+fn two_purgers_on_the_same_units_quickly() {
+    two_purgers_on_the_same_units(1);
+}
+
+#[test]
+#[ignore = "slow: run with scripts/gate --all"]
+fn two_purgers_on_the_same_units_fully() {
+    two_purgers_on_the_same_units(2);
+}
+
+/// A carve racing a purge: the purge reads the watermark once and must never return a page a
+/// carve hands out. The carver checks that its slots read as zero.
+fn a_carve_racing_a_purge(bound: usize) {
     purge_roles(
         tiny(),
         48,
         3,
         &[],
-        3,
+        bound,
         false,
         [Role::Purge, Role::Carve, Role::Program],
     );
 }
 
-/// `Purge.cfg`: two 32-byte slots to a 64-byte page.
 #[test]
 #[cfg_attr(miri, ignore)]
-fn purge_aligned_slots() {
-    purge_scenario(tiny(), 32, 4, &[1], 2);
+fn a_carve_racing_a_purge_quickly() {
+    a_carve_racing_a_purge(2);
+}
+
+#[test]
+#[ignore = "slow: run with scripts/gate --all"]
+fn a_carve_racing_a_purge_fully() {
+    a_carve_racing_a_purge(3);
+}
+
+/// `Purge.cfg`: two 32-byte slots to a 64-byte page.
+fn purge_aligned_slots(bound: usize) {
+    purge_scenario(tiny(), 32, 4, &[1], bound);
+}
+
+#[test]
+#[cfg_attr(miri, ignore)]
+fn purge_aligned_slots_quickly() {
+    purge_aligned_slots(1);
+}
+
+#[test]
+#[ignore = "slow: run with scripts/gate --all"]
+fn purge_aligned_slots_fully() {
+    purge_aligned_slots(2);
 }
 
 /// `Purge_straddle.cfg`: 48-byte slots on 64-byte pages, so slot 1 straddles pages 0 and 1.
+fn purge_straddling_slots(bound: usize) {
+    purge_scenario(tiny(), 48, 3, &[1], bound);
+}
+
 #[test]
 #[cfg_attr(miri, ignore)]
-fn purge_straddling_slots() {
-    purge_scenario(tiny(), 48, 3, &[1], 2);
+fn purge_straddling_slots_quickly() {
+    purge_straddling_slots(1);
+}
+
+#[test]
+#[ignore = "slow: run with scripts/gate --all"]
+fn purge_straddling_slots_fully() {
+    purge_straddling_slots(2);
 }
 
 /// `Purge_big.cfg` with the zero bitmap: 64 KiB slots, two 32 KiB pages each, a large class.
-#[test]
-#[cfg_attr(miri, ignore)]
-fn purge_big_slots_and_zero_bits() {
+fn purge_big_slots_and_zero_bits(bound: usize) {
     let host = Host8::new(big_plan(), class(64 << 10), 1);
     assert!(host.layout().zero_word(0).is_some());
-    purge_scenario(big_plan(), 64 << 10, 2, &[0], 2);
+    purge_scenario(big_plan(), 64 << 10, 2, &[0], bound);
+}
+
+#[test]
+#[cfg_attr(miri, ignore)]
+fn purge_big_slots_and_zero_bits_quickly() {
+    purge_big_slots_and_zero_bits(1);
+}
+
+#[test]
+#[ignore = "slow: run with scripts/gate --all"]
+fn purge_big_slots_and_zero_bits_fully() {
+    purge_big_slots_and_zero_bits(2);
 }
 
 /// A large class whose slots straddle pages (48 KiB slots on 32 KiB pages): zero bits are set
 /// only for slots wholly inside a purged unit.
+fn purge_big_straddling_slots_and_zero_bits(bound: usize) {
+    purge_scenario(big_plan(), 48 << 10, 3, &[2], bound);
+}
+
 #[test]
 #[cfg_attr(miri, ignore)]
-fn purge_big_straddling_slots_and_zero_bits() {
-    purge_scenario(big_plan(), 48 << 10, 3, &[2], 2);
+fn purge_big_straddling_slots_and_zero_bits_quickly() {
+    purge_big_straddling_slots_and_zero_bits(1);
+}
+
+#[test]
+#[ignore = "slow: run with scripts/gate --all"]
+fn purge_big_straddling_slots_and_zero_bits_fully() {
+    purge_big_straddling_slots_and_zero_bits(2);
 }
 
 /// A purge alone, 48 KiB slots on 32 KiB pages with slot 2 held: the top unit (page 3) touches

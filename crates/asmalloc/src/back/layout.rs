@@ -13,7 +13,8 @@
 //! ...                         zero bitmap, large classes only: one bit per slot, set means
 //!                             free and known to read as zero
 //! ...                         sizes, large classes only: one word per slot, the size the
-//!                             object in it was last allocated or resized to
+//!                             object in it was last allocated or resized to, and whether
+//!                             the slot is advised for huge pages (`Recorded`)
 //! ```
 //!
 //! The leaf bitmap comes first so that it can be committed a page at a time as the region grows,
@@ -21,9 +22,11 @@
 //! assigned. All zero means nothing is free, nothing is carved, nothing is committed, the region
 //! has no huge-page part and no purge is under way.
 
+use super::policy::{STAGGER_SLOTS, STAGGER_STEP};
 use super::word::BITS;
 use crate::classes::{Class, Divisor};
 use crate::space::Plan;
+use core::sync::atomic::{AtomicU64, Ordering};
 
 /// The most levels a region's bit tree has, leaf included: a 4 GiB region of 8-byte slots has
 /// 2^23 leaf words, then 2^17, 2^11, 2^5 and 1.
@@ -57,6 +60,55 @@ pub(crate) struct Layout {
     total: u32,
     page_shift: u8,
     huge_shift: u8,
+}
+
+/// Words a [`Layout`] packs into for [`Memo`]: everything but the size and its divisor, which
+/// come from the class, as seventeen 32-bit fields and three bytes.
+const PACKED_WORDS: usize = 9;
+
+/// Set in the last packed word: the words hold a layout.
+const PACKED: u64 = 1 << 63;
+
+/// One class's layout, worked out once for a heap and kept, since a launder or a fill needs it
+/// on every call and working it out costs more than the call's work on a word of slots.
+///
+/// All zero means nothing kept. The layout depends only on the class and the reservation's
+/// plan, which never changes for the heap, so every thread that works it out writes the same
+/// words: concurrent writers agree, and a reader that sees the last word (written last, with
+/// release ordering, and holding [`PACKED`]) sees the rest. A child forked at any point sees
+/// either the whole layout or no mark, and works it out again.
+pub(crate) struct Memo {
+    words: [AtomicU64; PACKED_WORDS],
+}
+
+impl Memo {
+    pub(crate) const fn new() -> Memo {
+        Memo {
+            words: [const { AtomicU64::new(0) }; PACKED_WORDS],
+        }
+    }
+
+    /// The layout of `class` in `plan`, from the memo if it holds one, else worked out and
+    /// kept. `plan` must be the same for every call on one memo.
+    #[inline]
+    pub(crate) fn layout(&self, plan: Plan, class: Class) -> Option<Layout> {
+        let last = self.words[PACKED_WORDS - 1].load(Ordering::Acquire);
+        if last & PACKED != 0 {
+            let mut words = [0; PACKED_WORDS];
+            for (word, kept) in words.iter_mut().zip(&self.words) {
+                *word = kept.load(Ordering::Relaxed);
+            }
+            words[PACKED_WORDS - 1] = last;
+            return Some(Layout::unpack(words, class));
+        }
+        let layout = Layout::new(plan, class)?;
+        let words = layout.pack();
+        for (kept, &word) in self.words.iter().zip(&words).take(PACKED_WORDS - 1) {
+            kept.store(word, Ordering::Relaxed);
+        }
+        self.words[PACKED_WORDS - 1].store(words[PACKED_WORDS - 1], Ordering::Release);
+        Some(layout)
+    }
 }
 
 /// Where a region is in its growth: how many slots are carved (the watermark) and how many pages
@@ -113,6 +165,34 @@ impl Hints {
             None => 0,
         };
         huge as u64 | (self.cursor as u64) << 32
+    }
+}
+
+/// What a large slot's size word holds: the size of the object in it, and whether the slot's
+/// whole huge pages are advised for huge pages because the object grew there. One word,
+/// written only by whoever holds the slot. A size is at most a region, 4 GiB, so the flag
+/// takes the top bit.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) struct Recorded {
+    pub(crate) size: usize,
+    pub(crate) huge: bool,
+}
+
+impl Recorded {
+    const HUGE: u64 = 1 << 63;
+
+    #[inline(always)]
+    pub(crate) const fn unpack(word: u64) -> Recorded {
+        Recorded {
+            size: (word & !Recorded::HUGE) as usize,
+            huge: word & Recorded::HUGE != 0,
+        }
+    }
+
+    #[inline(always)]
+    pub(crate) const fn pack(self) -> u64 {
+        let flag = if self.huge { Recorded::HUGE } else { 0 };
+        self.size as u64 | flag
     }
 }
 
@@ -190,6 +270,68 @@ impl Layout {
             page_shift: page_shift as u8,
             huge_shift: geometry.huge_page_size().trailing_zeros() as u8,
         })
+    }
+
+    /// The layout as [`PACKED_WORDS`] words, the last marked [`PACKED`].
+    fn pack(&self) -> [u64; PACKED_WORDS] {
+        let f = [
+            self.slots,
+            self.offset[0],
+            self.offset[1],
+            self.offset[2],
+            self.offset[3],
+            self.offset[4],
+            self.count[0],
+            self.count[1],
+            self.count[2],
+            self.count[3],
+            self.count[4],
+            self.pages,
+            self.clean,
+            self.clean_count,
+            self.zero,
+            self.sizes,
+            self.total,
+        ];
+        let pair = |a: u32, b: u32| a as u64 | (b as u64) << 32;
+        [
+            pair(f[0], f[1]),
+            pair(f[2], f[3]),
+            pair(f[4], f[5]),
+            pair(f[6], f[7]),
+            pair(f[8], f[9]),
+            pair(f[10], f[11]),
+            pair(f[12], f[13]),
+            pair(f[14], f[15]),
+            f[16] as u64
+                | (self.height as u64) << 32
+                | (self.page_shift as u64) << 40
+                | (self.huge_shift as u64) << 48
+                | PACKED,
+        ]
+    }
+
+    /// The layout `pack` made for `class`.
+    #[inline(always)]
+    fn unpack(w: [u64; PACKED_WORDS], class: Class) -> Layout {
+        let lo = |i: usize| w[i] as u32;
+        let hi = |i: usize| (w[i] >> 32) as u32;
+        Layout {
+            size: class.size(),
+            divisor: class.divisor(),
+            slots: lo(0),
+            height: (w[8] >> 32) as u8,
+            offset: [hi(0), lo(1), hi(1), lo(2), hi(2)],
+            count: [lo(3), hi(3), lo(4), hi(4), lo(5)],
+            pages: hi(5),
+            clean: lo(6),
+            clean_count: hi(6),
+            zero: lo(7),
+            sizes: hi(7),
+            total: lo(8),
+            page_shift: (w[8] >> 40) as u8,
+            huge_shift: (w[8] >> 48) as u8,
+        }
     }
 
     /// The slot size in bytes.
@@ -410,6 +552,51 @@ impl Layout {
         }
     }
 
+    /// How far past its slot's start a block in slot `slot` starts when it is staggered: a
+    /// multiple of `policy::STAGGER_STEP` that depends only on the slot's index, so that it is
+    /// never stored and a free recomputes it. Zero for small classes, which are never
+    /// staggered. A block of a large class starts either here or at the slot's start; which
+    /// one the address says.
+    #[inline(always)]
+    pub(crate) const fn stagger(&self, slot: u32) -> usize {
+        if self.sizes == 0 {
+            0
+        } else {
+            (slot as usize % STAGGER_SLOTS) * STAGGER_STEP
+        }
+    }
+
+    /// The slot a block starting at byte `offset` of the region is in, and how far into the
+    /// slot it starts, if `offset` is a block's start: the slot's start, or its stagger. The
+    /// one place a pointer becomes a slot. The slot may be past the region's last one; callers
+    /// check it against the watermark or the slot count.
+    #[inline(always)]
+    pub(crate) const fn block_at(&self, offset: usize) -> Option<(u32, usize)> {
+        let slot = self.slot_at(offset);
+        let into = offset - self.slot_bytes(slot);
+        if into == 0 || into == self.stagger(slot) {
+            Some((slot, into))
+        } else {
+            None
+        }
+    }
+
+    /// The whole huge pages inside slot `slot`, as a unit, if there are any: the part of a
+    /// slot that huge-page advice may cover without making a huge page straddle into the
+    /// slots beside it.
+    #[inline]
+    pub(crate) const fn huge_interior(&self, slot: u32) -> Option<Unit> {
+        let page = self.page_size();
+        let start = self.huge_ceil(self.slot_bytes(slot).div_ceil(page) as u32);
+        let end =
+            ((self.slot_bytes(slot + 1) >> self.page_shift) as u32) & !(self.huge_pages() - 1);
+        if start < end {
+            Some(Unit { start, end })
+        } else {
+            None
+        }
+    }
+
     /// The slots a unit touches: `first..=last`.
     #[inline]
     pub(crate) const fn touching(&self, unit: Unit) -> (u32, u32) {
@@ -541,6 +728,21 @@ mod tests {
     }
 
     #[test]
+    fn layouts_pack_and_come_back_from_the_memo() {
+        for plan in plans() {
+            for class in Class::all() {
+                let Some(layout) = Layout::new(plan, class) else {
+                    continue;
+                };
+                assert_eq!(Layout::unpack(layout.pack(), class), layout, "{class:?}");
+                let memo = Memo::new();
+                assert_eq!(memo.layout(plan, class), Some(layout));
+                assert_eq!(memo.layout(plan, class), Some(layout), "kept");
+            }
+        }
+    }
+
+    #[test]
     fn headers_round_trip() {
         let grow = Grow {
             carved: 12345,
@@ -568,6 +770,35 @@ mod tests {
                 cursor: 0
             }
         );
+        for huge in [false, true] {
+            let recorded = Recorded {
+                size: 1 << 32,
+                huge,
+            };
+            assert_eq!(Recorded::unpack(recorded.pack()), recorded);
+        }
+        assert_eq!(Recorded::unpack(4096).size, 4096);
+    }
+
+    #[test]
+    fn a_slots_huge_interior_is_its_whole_huge_pages() {
+        let plan = Geometry::DESIGN.largest_plan();
+        let huge = Geometry::DESIGN.huge_page_size();
+        let page = Geometry::DESIGN.page_size();
+        for class in Class::all().filter(|c| !c.is_small() && plan.fits_region(*c)) {
+            let layout = Layout::new(plan, class).unwrap();
+            for slot in [0, 1, 2, 3, layout.slots() - 1] {
+                let (start, end) = (layout.slot_bytes(slot), layout.slot_bytes(slot + 1));
+                match layout.huge_interior(slot) {
+                    Some(unit) => {
+                        let (a, b) = (unit.start as usize * page, unit.end as usize * page);
+                        assert!(a >= start && b <= end && a % huge == 0 && b % huge == 0);
+                        assert!(a - start < huge && end - b < huge, "{class:?} {slot}");
+                    }
+                    None => assert!(start.next_multiple_of(huge) + huge > end, "{class:?}"),
+                }
+            }
+        }
     }
 
     /// Walks every top-down pass over a region of the standard geometry and checks that the

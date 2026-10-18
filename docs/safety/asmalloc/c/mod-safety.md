@@ -1,7 +1,7 @@
 # Safety ledger: `crates/asmalloc/src/c/mod.rs`
 
 The C functions, and the `export_c_abi!` macro that exports them. F1 and F2 are stated in
-`seam-safety.md`.
+`slow-safety.md`.
 
 ## MOD-01: the copy and the free in `realloc`
 
@@ -9,6 +9,10 @@ The C functions, and the `export_c_abi!` macro that exports them. F1 and F2 are 
 old.as_ptr().copy_to_nonoverlapping(new, kept.min(size));
 free(ptr);
 ```
+
+When the old block is large the two steps are one call, `process::move_large(old, to, n)`,
+which copies the same `n` bytes in pieces, returns the old block's pages behind the copy and
+frees it (BACK-CLASS-03 in `back/class-safety.md`). Its contract is the preconditions below.
 
 **Preconditions.** `old` is readable for `n = kept.min(size)` bytes and `new` writable for
 `n`; the two ranges do not overlap; `free(ptr)`'s contract holds (a block of the heap that the
@@ -34,8 +38,9 @@ caller owns and gives up).
   (`back/region.rs`, `carve`), `alloc_run` commits the whole run before returning it, and
   nothing makes committed memory inaccessible again (a purge is `MADV_DONTNEED`, which keeps
   the protection).
-- `new` is non-null and was just allocated for this call: by `seam::alloc_small(class)` with
-  `class` the small class of `Class::of_c(size)`, so at least `size` bytes; or by
+- `new` is non-null and was just allocated for this call: by `malloc(size)` when
+  `Class::of_c(size)` is small, a block of that class (`routines-safety.md`), so at least
+  `size` bytes; or by
   `process::alloc_large_grown(size)` or `process::alloc_large(size, ..)`, both at least `size`
   bytes (a slot of a class at least the rounded size, or a run of at least `size`).
 
@@ -55,12 +60,22 @@ succeeds, so the caller gives `ptr` up, and it is a block of the heap it owns by
 caller provides. The write happens only after the allocation succeeded, so on failure `*out`
 is untouched, as POSIX requires.
 
+## MOD-04: `process::resize_in_place_by_address(old, used, size)` in `realloc`
+
+**Precondition.** `old` is a live large block of the heap that the caller owns and is resizing.
+
+**Proof.** `realloc`'s contract: `ptr` is a block of the heap the caller owns. `find` returned
+`Large`, so it is a large slot or run of the heap, live by that contract. `realloc` is resizing
+it to `size`: if the call keeps it in place, the caller gives up what lies past `size`, which
+C's `realloc` allows (the bytes past the new size are no longer the program's).
+
 ## MOD-03: the pass-through calls
 
-`free`, `free_sized`, `free_aligned_sized` and `cfree` call `seam::free(ptr)`; `realloc` calls
-`free(ptr)` for a zero size; `reallocarray` calls `realloc(ptr, total)`.
+`free`, `free_aligned_sized` and `cfree` call `routines::free(ptr)`, and `free_sized` calls
+`routines::free_sized(ptr, size)`; `realloc` calls `free(ptr)` for a zero size; `reallocarray`
+calls `realloc(ptr, total)`.
 
-**Preconditions.** The callee's contract: `seam::free` and `free` take null or a block of the
+**Preconditions.** The callee's contract: the routines and `free` take null or a block of the
 heap the caller owns and gives up; `realloc` takes null or a block the caller owns.
 
 **Proof.** Each caller's own contract is the callee's, passed on unchanged: the sized frees and
@@ -100,3 +115,23 @@ program must invoke the macro at most once, or enable the `c-abi`
 feature and not invoke it, since two definitions of one symbol fail to link; and it must not
 also link another allocator that defines these names (the design's non-goal: one instance per
 process).
+
+## C-EXPORT-02: the generated routines `export_c_abi!` defines
+
+`$crate::asmalloc_exports_c_x86_64!()` defines `malloc`, `calloc`, `free` and `free_sized`,
+each a `#[unsafe(no_mangle)]` naked function whose body is a generated routine's code
+(`c_malloc`, `c_calloc`, `c_free`, `c_free_sized`), written by the Lean
+emitter and checked against it (`Rust.exportsFile`).
+
+**Obligations.** As C-EXPORT-01 for each symbol: its ABI is the C declaration's, it keeps the
+C contract, and it replaces nothing the program relies on; and the routine's own obligations
+hold whoever calls it.
+
+**Proof.** The routines take their arguments in `rdi` and `rsi` and return in `rax` (System V,
+which is C's on x86-64 Linux), and keep the callee-saved registers (proved). The routine's
+obligations are discharged in `routines-safety.md` for any thread of the process, so for a C
+caller as for Rust; a C caller of `free(p)` or `free_sized(p, n)` has made the free's
+promise. The copies name the crate's statics and slow paths through `$crate`, so they are the
+same memory and functions as the routines in the crate. The rest of C-EXPORT-01 (what the
+symbols replace) is unchanged.
+

@@ -103,20 +103,23 @@ Each has a configuration that reproduces it. Run `tla/check -v NAME` for the tra
    magazine it displaced. A longer trace clears a live flag and reproduces finding 1
    (`Drain_sweep_dup`).
    Smallest change: no drain starts until the sweep has finished (`Drain_sweep_hold`).
+   Superseded by the fix to finding 3, which has no sweep.
 
 3. **Fork from a signal handler that interrupted a drain** (`Drain_sweep_hold_any`). The
    forking thread is the drainer, so its claim and markers are live in the child. The sweep
    cannot tell them from a dead thread's and clears the flag; a second drainer claims the
    slab, and finding 1 follows: a magazine is taken at a stale fill level. Holding drains
    back does not help.
-   Proposed change (`Drain_gen`, `Drain_gen_any`): the flag and the marker carry the
+   The fix, now built (`Drain_gen`, `Drain_gen_any`): the flag and the marker carry the
    process's fork generation. A claim or marker of an older generation counts as absent: a
    drain may claim over it, and an exchange that returns it has displaced nothing. A
    drainer accepts only a marker of its own generation at step 4, and releases its claim
    with a compare-and-swap. There is no sweep. The generation comes from the wiped page:
    a slow path that reads it as zero adds one to a counter kept in ordinary memory and
    installs the result in the wiped page with a compare-and-swap, so every process has a
-   generation greater than any ancestor's. Nothing is ever duplicated. In the case of this
+   generation greater than any ancestor's. Nothing is ever duplicated. (As built, the
+   generation is a random number the child draws instead, which differs from every
+   ancestor's with overwhelming probability; see "Fork" in the design.) In the case of this
    finding the forking thread may still lose the magazines it had displaced
    (`Drain_gen_any_loss`), which is a bounded leak in a case that needs `fork` inside a
    handler and a second thread draining the same slab in the child.
@@ -131,7 +134,7 @@ Each has a configuration that reproduces it. Run `tla/check -v NAME` for the tra
    empty, so no later free into it is a "first free", and nothing sets the bit: the word's
    objects, and under a higher-level bit a whole subtree, stay invisible to every search.
    The design's claim that the child's shared structures are valid does not hold for this
-   hint. Proposed change (`Summary_heal*`): after its OR, a free reads the summary bit at
+   hint. The fix, now built (`Summary_heal*`): after its OR, a free reads the summary bit at
    each level on the way up and sets any it finds clear, not only when its word was empty.
    That costs a load per level and repairs the path the next time anything is freed into
    the word. It does not make the objects visible before then.

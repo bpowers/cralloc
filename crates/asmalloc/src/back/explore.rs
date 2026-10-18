@@ -408,9 +408,6 @@ pub(crate) fn explore<S: Sync>(
         }
         // The next schedule: the deepest choice with an untried option, advanced.
         let Some(depth) = trace.iter().rposition(|&(n, pick)| pick + 1 < n) else {
-            if std::env::var_os("EXPLORE_STATS").is_some() {
-                std::eprintln!("explored {schedules} schedules");
-            }
             return Stats { schedules };
         };
         prefix = trace[..depth].iter().map(|&(_, pick)| pick).collect();

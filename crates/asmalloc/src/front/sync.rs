@@ -135,6 +135,11 @@ mod checked {
                     switch_point();
                     self.0.fetch_or(value, order)
                 }
+
+                pub(crate) fn fetch_and(&self, value: $int, order: Ordering) -> $int {
+                    switch_point();
+                    self.0.fetch_and(value, order)
+                }
             }
         };
     }

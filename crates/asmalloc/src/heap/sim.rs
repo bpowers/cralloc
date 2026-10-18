@@ -123,13 +123,11 @@ impl Drop for Lease<'_> {
 }
 
 impl<S: Shape> SimHeap<S> {
-    /// A heap over a fresh simulated OS, not yet started. The OS has room for two
-    /// reservations of the largest plan, as Linux has room for many: threads that start the
-    /// heap together each reserve before one publishes, and with room for only one the others
-    /// would find nothing and fail their first allocation.
+    /// A heap over a fresh simulated OS, not yet started. The OS has room for one reservation
+    /// of the largest plan, so threads that start the heap together race for it as they do for
+    /// the few that fit in a real address space (`SpaceCell::get_or_reserve`).
     pub fn new() -> SimHeap<S> {
-        let os = SimOs::with_capacity(2 * crate::os::sim::capacity_for::<S>());
-        SimHeap::with_os(os)
+        SimHeap::with_os(SimOs::new())
     }
 
     /// A heap over `os`, not yet started.
@@ -154,6 +152,19 @@ impl<S: Shape> SimHeap<S> {
     /// The bytes the block starting at `ptr` may use, if a slot or run starts there.
     pub fn usable_size(&self, ptr: *const u8) -> Option<usize> {
         self.heap.usable_size(ptr)
+    }
+
+    /// Walks the heap for `visitor`, as `Asmalloc::inspect` does the process's heap.
+    pub fn inspect(&self, visitor: &mut impl crate::stats::Visitor) {
+        self.heap.inspect(&*self.slabs, visitor);
+    }
+
+    /// Returns everything the heap can return now, as `Asmalloc::collect` does for the
+    /// process's heap, on a leased simulated thread. Returns the bytes purged that the heap
+    /// believed resident.
+    pub fn collect(&self) -> usize {
+        // SAFETY: SIM-03.
+        self.with(|heap, routines| unsafe { heap.collect(routines) })
     }
 
     /// Borrows a simulated thread that no other call is using, starting the search at one
@@ -189,6 +200,27 @@ impl<S: Shape> SimHeap<S> {
             let cache = unsafe { Cache::new(&heap.depot, back.space(), routines, &source) };
             Some(cache.drain(cpu))
         })
+    }
+
+    /// Grows the block at `ptr` from `old` to `new` with the bytes past `old` reading as zero,
+    /// as `Allocator::grow_zeroed` does, for tests on stable Rust. Returns the block and the
+    /// length the caller may use, or `None` if there was no memory.
+    ///
+    /// # Safety
+    ///
+    /// As for `GlobalAlloc::realloc` with `ptr` and `old`; `new` is at least as large.
+    #[cfg(test)]
+    pub(crate) unsafe fn grow_zeroed_for_test(
+        &self,
+        ptr: *mut u8,
+        old: Layout,
+        new: Layout,
+    ) -> Option<(*mut u8, usize)> {
+        let ptr = NonNull::new(ptr)?;
+        // SAFETY: SIM-03, and the caller's promise.
+        let grant =
+            self.with(|heap, routines| unsafe { heap.resize(routines, ptr, old, new, true) })?;
+        Some((grant.ptr.as_ptr(), grant.len))
     }
 
     /// Runs `f` with the heap and the twins of a leased simulated thread.

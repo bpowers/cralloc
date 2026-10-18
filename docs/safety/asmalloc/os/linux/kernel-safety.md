@@ -96,45 +96,51 @@ memory-safety matter: a child that drew its parent's generation would treat the 
 abandoned drain claim and markers as live, which leaves one CPU's cache undrained and on the
 slow path, and duplicates nothing.
 
-## KERNEL-06: `abort`, `unblock_sigabrt` and `raise_sigabrt`
+## KERNEL-06: `abort` and the calls it makes
 
-**Blocks.** rt_sigprocmask in `unblock_sigabrt`; gettid in `thread_id`; getpid and tgkill in
-`raise_sigabrt`; pause in `park`; rt_sigaction and exit_group in `abort`.
+**Blocks.** getpid, gettid and tgkill in `raise_sigabrt`; rt_sigaction in `default_sigabrt`;
+rt_sigprocmask in `unblock_sigabrt`; exit_group in `abort`.
 
-**Order.** The first thread to abort stores its thread ID in `ABORTING` by compare-and-swap from
-zero, unblocks SIGABRT and raises it with the program's disposition in place, as glibc's
-`abort` does, so a crash reporter's handler runs. The heap is valid at that point: the
-allocator refused to go on, it did not break. If the handler returns, or ignores the signal, or
-calls back into `abort` on the same thread (the stored ID is its own, so the nested call skips
-straight on), `abort` restores the default action, unblocks and raises again, and ends with
-exit_group if even that returns.
+**Order.** `abort` writes its message, then raises SIGABRT on the calling thread with the
+program's disposition in place, as glibc's `abort` does, so a crash reporter's handler runs.
+The heap is valid at that point: the allocator refused to go on, it did not break. If the
+raise returns (the handler returned, the signal is ignored, or it is blocked), `abort` resets
+SIGABRT to the default action, unblocks it, and raises again, which ends the process with a
+core dump. If even that returns, exit_group(127) ends the process, so the function does not
+return, as `-> !` requires.
 
-Any other thread that aborts meanwhile finds another ID stored and parks in a pause loop. It
-must not go on to reset the disposition: that would end the process while the first thread's
-handler is still writing its report. Parking takes no lock; the process ends when the first
-thread finishes. If a handler never returns to `abort` (it longjmps away), the parked threads
-wait forever, as they would on glibc's abort lock.
+**The first raise does not unblock SIGABRT.** Inside the program's own SIGABRT handler the
+signal is blocked (unless the handler was installed with `SA_NODEFER`), so an abort from there,
+by a handler that allocates into the failure that brought it here, leaves its first raise
+pending; the reset and the unblock then deliver it with the default action. The handler is not
+run again, and nothing recurses. A thread that blocked SIGABRT for some other reason skips the
+program's handler the same way.
 
-**Proof.**
+**Two threads at once.** Each runs the handler on its own thread. The first whose handler
+returns resets the disposition and ends the process, possibly before the other's handler has
+finished its report. That is accepted: it costs at most part of a crash report, and it needs no
+shared state and no waiting. glibc 2.43's `abort` behaves the same way in this respect: the
+first thread to finish its handler ends the process under every other thread's
+(`stdlib/abort.c`).
 
-- rt_sigprocmask(SIG_UNBLOCK, `&set`, null, 8) reads one signal set from a live local.
+**Rules.** No shared state, no lock, no wait, no allocation.
+
+**Proof of the blocks.**
+
+- getpid and gettid take nothing. tgkill(pid, tid, SIGABRT) with this thread's IDs runs the
+  disposition in force on this thread: the program's handler the first time, the default (end
+  the process with a core dump) the second.
 - rt_sigaction(SIGABRT, `&default`, null, 8) reads one `KernelSigaction` from a live local.
   The layout is the kernel's x86-64 `struct sigaction`: handler, flags, restorer, mask, which
-  differs from glibc's. The size argument 8 is the kernel's `sigset_t`. The old-action and
-  old-set pointers are null, so nothing is written back.
-- The pointers come from shared references and the kernel only reads them.
-- pause takes nothing and only sleeps until a signal is handled. Thread IDs are positive and
-  below 2^22, so the cast to `u32` keeps them and zero never names a thread.
-- getpid and gettid take nothing. tgkill(pid, tid, SIGABRT) runs the disposition in force: the
-  program's handler the first time, the default (end the process with a core dump) the second.
-  exit_group(127) ends the process if both raises returned, so the function does not return, as
-  `-> !` requires.
-- Changing the process's SIGABRT disposition and mask is this function's to do, because the
-  process is ending. A handler that allocates re-enters a heap that is still consistent; at
-  worst it aborts again, which the flag turns into the default action.
-- `ABORTING` is one static atomic, all-zero valid; it holds no allocator state.
-
-**Review.** The thread-ID handoff and `park` are new and need a fresh reviewer's check.
+  differs from glibc's. The size argument 8 is the kernel's `sigset_t`. The old-action pointer
+  is null, so nothing is written back. Resetting a handled signal to its default does not
+  discard a pending one.
+- rt_sigprocmask(SIG_UNBLOCK, `&set`, null, 8) reads one signal set from a live local and
+  writes nothing back.
+- exit_group(127) takes an integer and ends the process.
+- Changing the process's SIGABRT disposition and the thread's mask is this function's to do,
+  because the process is ending. A handler that allocates re-enters a heap that is still
+  consistent; at worst it aborts again, which the paragraph above turns into the default action.
 
 **`int_call` itself.** It forwards to `syscall` with three integer arguments. Its callers are
 getpid, gettid, tgkill and exit_group here and getpid in `random`, none of which takes a
@@ -162,16 +168,40 @@ memory exists to expose (SIM-MEMORY-06). Its one caller is `Memory::close`.
 target feature has to be checked first.
 
 **Proof.** `rdtsc` reads no memory, writes no memory, and writes only `edx` and `eax`, which the
-intrinsic returns as one `u64`; the compiler knows this, as it does for any intrinsic. In user
-mode it faults only if the kernel set `CR4.TSD`, which Linux does only for a thread that asked
-with `prctl(PR_SET_TSC, PR_TSC_SIGSEGV)`. Such a thread gets SIGSEGV on the instruction: the
-process stops, which is no memory-safety violation, and a program that forbids itself the
-counter has opted out of anything that reads it.
+intrinsic returns as one `u64`; the compiler knows this, as it does for any intrinsic.
 
-**What the value is for.** The idle check's pacing (`depot::heartbeat`), and nothing else. The
-`Os` trait makes no promise about it, so no safety argument rests on it: a counter that runs at
-an unexpected rate, differs between CPUs, or goes back makes a drain come earlier or later, and
-a drain is safe at any time (the drain protocol, `depot/drain.rs`).
+**When it faults.** In user mode only if `CR4.TSD` is set. Linux sets it while a thread with
+`TIF_NOTSC` runs (`disable_TSC` sets both, and the context switch toggles `CR4.TSD` when the
+flag differs between threads; `arch/x86/kernel/process.c`). Two things set `TIF_NOTSC`:
+`prctl(PR_SET_TSC, PR_TSC_SIGSEGV)` (`set_tsc_mode`), and entering strict seccomp
+(`seccomp_set_mode_strict` in `kernel/seccomp.c` calls `disable_TSC`). Seccomp filter mode
+does not: a filter sees system calls, not instructions. The thread gets SIGSEGV on the
+instruction. Unhandled, the process stops, which is no memory-safety violation. A strict
+seccomp thread is killed anyway by its first system call other than read, write, exit and
+sigreturn, which the allocator's slow paths make.
+
+**When it traps and is emulated.** Then it returns a value, slowly, and nothing else changes:
+
+- Record-and-replay tools (rr) set `PR_TSC_SIGSEGV` on the traced program and emulate and
+  record each read in the tracer, so every read costs a signal and a ptrace round trip.
+- A hypervisor may intercept the instruction (RDTSC exiting), making each read a VM exit; KVM
+  does not by default. In an AMD SEV-ES or SEV-SNP guest an intercepted read raises #VC, which
+  the guest kernel serves through the hypervisor (`vc_handle_rdtsc` in
+  `arch/x86/coco/sev/vc-handle.c`), unless the guest uses Secure TSC.
+
+Under either, every slow path pays a trap or two (see below). That is a cost, not a safety
+matter. Checked against the Linux source at 7.3-rc7 (`arch/x86/kernel/process.c`,
+`kernel/seccomp.c`, `arch/x86/coco/sev/vc-handle.c`), read 2026-10-17. That rr traps the
+counter this way comes from the kernel discussions of `PR_SET_TSC` and its arm64 port, not
+from a measurement here.
+
+**What the value is for.** Pacing what happens once an interval: the idle check's drains
+(`depot::heartbeat`, when a heartbeat looks at a slab) and the back end's clocked purge
+(`back::purge`, read by every back-end heartbeat). The `Os` trait makes no promise about it,
+so no safety argument rests on it: a counter that runs at an unexpected rate, differs between
+CPUs, or goes back makes a drain or a purge pass come earlier or later, and both are safe at
+any time (the drain protocol, `depot/drain.rs`; a purge claims the bits of what it returns,
+`back/region.rs`).
 
 ## KERNEL-07: `unsafe impl Os for LinuxOs`
 
@@ -182,8 +212,6 @@ single call:
 - *Valid until unmapped or dropped.* Reservations are mappings of the process. Dropping a
   `LinuxOs`, which is zero-sized, changes nothing.
 - *Reserved memory reads as zero.* Fresh private anonymous memory is zero-filled on first touch.
-- *`rseq` reports glibc's registration.* It describes the process; whether the calling thread
-  is registered is for the caller to check through its own `cpu_id` (GLIBC-01).
 - *Any thread, signal handlers, no allocation.* Every method is a fixed sequence of system calls
   and arithmetic on locals, all async-signal-safe.
 
@@ -192,13 +220,16 @@ single call:
 - `reserve_commit_purge_and_unmap`: alignment, zero-fill, purge zeroes, unmap.
 - `bad_arguments_are_errors_not_calls`.
 - `the_design_reservation_is_available`: a 16 TiB reservation.
-- `glibc_registers_rseq`.
 - `rseq_fences_aim_at_one_cpu_after_registering`, `ticks_rise`, `random_numbers_differ` and
-  `a_page_can_be_marked_to_be_wiped_on_fork`.
-- `abort_ends_the_process_with_sigabrt` and
-  `abort_runs_the_programs_handler_then_ends_the_process_anyway`: child processes, checking
-  the signal, the message and that a returning handler ran.
+  `marked_pages_read_as_zero_in_a_forked_child`.
+- `abort_ends_the_process_with_sigabrt`,
+  `abort_runs_the_programs_handler_then_ends_the_process_anyway` and
+  `an_abort_inside_the_handler_ends_the_process`: child processes, checking the signal, the
+  message, that a returning handler ran, and that a handler that aborts runs once.
 
 **Review.** 2026-10-17, fresh adversarial reviewer: KERNEL-01 to KERNEL-07 accepted, after
-the fixes of its first round. KERNEL-06 changed since (the handler now runs first) and needs
-the reviewer's check again. KERNEL-09 is new and needs a fresh reviewer's check.
+the fixes of its first round. Its second round found that a child forked mid-abort parked for
+ever, that a waiting thread could hang the process, and that the glibc comparison and
+KERNEL-09 were wrong or stale; KERNEL-09 was rewritten for those and needs the same reviewer's
+check. KERNEL-06 was since rewritten for a simpler `abort` with no shared state, and needs a
+fresh review.

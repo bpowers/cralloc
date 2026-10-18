@@ -104,18 +104,14 @@ structure Facts (c : Spec.Slab.Ctx isa) (s : State) : Prop where
   rsVar : ⟨s.syms RS, 8⟩ ∈ s.rd
   cpuF : (⟨area s + 4, 4⟩ : Region) ∈ s.rd
   cs : (⟨area s + 8, 8⟩ : Region) ∈ s.wr
-  mask : c.form = .table → ⟨c.maskAddr s, 4⟩ ∈ s.rd
   word : c.InRange s → ⟨c.word s, 8⟩ ∈ s.wr
   mag : c.InRange s → IsSlot (c.slots s) (c.w s) → c.magRegion s ∈ s.wr
   cs_rsVar : Region.Disjoint ⟨area s + 8, 8⟩ ⟨s.syms RS, 8⟩
-  cs_mask : c.form = .table → Region.Disjoint ⟨area s + 8, 8⟩ ⟨c.maskAddr s, 4⟩
   cs_word : c.InRange s → Region.Disjoint ⟨area s + 8, 8⟩ ⟨c.word s, 8⟩
   cs_mag : c.InRange s → IsSlot (c.slots s) (c.w s) → Region.Disjoint ⟨area s + 8, 8⟩ (c.magRegion s)
   word_mag : c.InRange s → IsSlot (c.slots s) (c.w s) → Region.Disjoint ⟨c.word s, 8⟩ (c.magRegion s)
   rsVar_mag : c.InRange s → IsSlot (c.slots s) (c.w s) →
     Region.Disjoint ⟨s.syms RS, 8⟩ (c.magRegion s)
-  mask_mag : c.form = .table → c.InRange s → IsSlot (c.slots s) (c.w s) →
-    Region.Disjoint ⟨c.maskAddr s, 4⟩ (c.magRegion s)
   ret_cs : Region.Disjoint ⟨area s + 8, 8⟩ ⟨s.gpr .rsp, 8⟩
   ret_word : c.InRange s → Region.Disjoint ⟨c.word s, 8⟩ ⟨s.gpr .rsp, 8⟩
   ret_mag : c.InRange s → IsSlot (c.slots s) (c.w s) → Region.Disjoint (c.magRegion s) ⟨s.gpr .rsp, 8⟩
@@ -123,30 +119,29 @@ structure Facts (c : Spec.Slab.Ctx isa) (s : State) : Prop where
     (c.magRegion s).base.toNat + (c.magRegion s).len ≤ 2 ^ 64
   pre : c.pre s
 
-/-- The regions of a routine, in its three cases. -/
+/-- The regions of a pop or push. -/
 theorem regions_eq (c : Spec.Slab.Ctx isa) (hA : X86 c.A)
-    (hslot : c.form = .inline ∨ c.form = .table) (s : State) :
+    (hslot : c.form = .inline) (s : State) :
     c.regions s = [(⟨s.syms RS, 8⟩, false), (⟨area s + 4, 4⟩, false), (⟨area s + 8, 8⟩, true)] ++
-      (match c.form with | .table => [(⟨c.maskAddr s, 4⟩, false)] | _ => []) ++
       (if c.InRange s then
         (⟨c.word s, 8⟩, true) :: (if IsSlot (c.slots s) (c.w s) then [(c.magRegion s, true)] else [])
       else []) := by
   obtain ⟨A, f, sig⟩ := c
-  rcases hslot with h | h <;> cases h <;>
-    simp only [Spec.Slab.Ctx.regions, Spec.Slab.Ctx.fixed, Spec.Slab.Ctx.more, rsVar_of hA,
-      cpuField_of hA, csField_of hA, Spec.Slab.Ctx.maskEntry, List.append_assoc] <;> rfl
+  cases hslot
+  simp only [Spec.Slab.Ctx.regions, Spec.Slab.Ctx.fixed, Spec.Slab.Ctx.more, rsVar_of hA,
+    cpuField_of hA, csField_of hA, List.append_assoc]
+  rfl
 
 theorem facts_of_world {c : Spec.Slab.Ctx isa} (hA : X86 c.A)
-    (hslot : c.form = .inline ∨ c.form = .table) {s : State}
+    (hslot : c.form = .inline) {s : State}
     (hw : c.World s) (hp : c.pre s) : Facts c s := by
   obtain ⟨hrd, hwr, hnw, hdj, hres⟩ := hw
   have hres := fun x hx => hres x hx _ (hA.retSlot s)
   have hreg := regions_eq c hA hslot s
   simp only [Spec.Slab.Ctx.ro, Spec.Slab.Ctx.rw, hreg, hA.rd, hA.wr] at hrd hwr
   simp only [hreg, hA.ptrBits] at hnw hdj hres
-  rcases hslot with hf | hf <;>
   by_cases hi : c.InRange s <;> by_cases hs : IsSlot (c.slots s) (c.w s) <;>
-  simp only [hf, hi, hs, ↓reduceIte, List.append_nil, List.cons_append, List.nil_append,
+  simp only [hi, hs, ↓reduceIte, List.append_nil, List.cons_append, List.nil_append,
     List.filter_cons, List.filter_nil, Bool.not_true, Bool.not_false, List.map_cons,
     List.map_nil, List.pairwise_cons, List.mem_cons, List.mem_nil_iff, List.Pairwise.nil,
     forall_eq_or_imp, forall_eq, or_false, Bool.true_or,
@@ -156,17 +151,13 @@ theorem facts_of_world {c : Spec.Slab.Ctx isa} (hA : X86 c.A)
     rsVar := by rw [hrd]; simp
     cpuF := by rw [hrd]; simp
     cs := by rw [hwr]; simp
-    mask := by intro h; rw [hf] at h; first | (rw [hrd]; simp; done) | cases h
     word := by intro h; first | exact absurd h hi | (rw [hwr]; simp)
     mag := by intro h h'; first | exact absurd h hi | exact absurd h' hs | (rw [hwr]; simp)
     cs_rsVar := Region.Disjoint.symm (by simp_all)
-    cs_mask := by intro h; rw [hf] at h; first | (simp_all; done) | cases h
     cs_word := by intro h; first | exact absurd h hi | simp_all
     cs_mag := by intro h h'; first | exact absurd h hi | exact absurd h' hs | simp_all
     word_mag := by intro h h'; first | exact absurd h hi | exact absurd h' hs | simp_all
     rsVar_mag := by intro h h'; first | exact absurd h hi | exact absurd h' hs | simp_all
-    mask_mag := by
-      intro h h' h''; rw [hf] at h; first | exact absurd h' hi | exact absurd h'' hs | (simp_all; done) | cases h
     ret_cs := by simp_all
     ret_word := by intro h; first | exact absurd h hi | simp_all
     ret_mag := by intro h h'; first | exact absurd h hi | exact absurd h' hs | simp_all

@@ -301,18 +301,29 @@ fn a_simulated_heap_serves_threads() {
     threads(&heap, if cfg!(miri) { 40 } else { 4000 });
 }
 
-#[test]
-fn threads_that_start_a_fresh_heap_together_agree_on_it() {
-    let rounds = if cfg!(miri) { 1 } else { 200 };
+fn threads_that_start_a_fresh_heap_together_agree_on_it(rounds: usize) {
+    // The simulated OS has room for one heap, so every thread but the winner sees its
+    // reservation fail while the winner's is in flight; none of them may settle for less.
+    let largest = <crate::os::sim::Standard as crate::os::sim::Shape>::GEOMETRY.largest_plan();
     for _ in 0..rounds {
         let heap = SimHeap::<crate::os::sim::Standard>::new();
         threads(&heap, if cfg!(miri) { 20 } else { 300 });
+        assert_eq!(heap.heap.back().unwrap().space().plan(), largest);
     }
 }
 
 #[test]
-fn the_first_allocations_of_a_fresh_heap_from_several_threads_succeed() {
-    let rounds = if cfg!(miri) { 1 } else { 300 };
+fn threads_that_start_a_fresh_heap_together_agree_on_it_quickly() {
+    threads_that_start_a_fresh_heap_together_agree_on_it(if cfg!(miri) { 1 } else { 20 });
+}
+
+#[test]
+#[ignore = "slow: run with scripts/gate --all"]
+fn threads_that_start_a_fresh_heap_together_agree_on_it_fully() {
+    threads_that_start_a_fresh_heap_together_agree_on_it(200);
+}
+
+fn the_first_allocations_of_a_fresh_heap_from_several_threads_succeed(rounds: usize) {
     for _ in 0..rounds {
         let heap = SimHeap::<crate::os::sim::Standard>::new();
         thread::scope(|scope| {
@@ -330,6 +341,21 @@ fn the_first_allocations_of_a_fresh_heap_from_several_threads_succeed() {
             }
         });
     }
+}
+
+#[test]
+fn the_first_allocations_of_a_fresh_heap_from_several_threads_succeed_quickly() {
+    the_first_allocations_of_a_fresh_heap_from_several_threads_succeed(if cfg!(miri) {
+        1
+    } else {
+        30
+    });
+}
+
+#[test]
+#[ignore = "slow: run with scripts/gate --all"]
+fn the_first_allocations_of_a_fresh_heap_from_several_threads_succeed_fully() {
+    the_first_allocations_of_a_fresh_heap_from_several_threads_succeed(300);
 }
 
 /// Every live block holds its owner's tag, checked before it is freed: two owners of one block
@@ -465,9 +491,7 @@ fn with_drains_running<S: crate::os::sim::Shape, T>(
 /// its store (`os::sim::cpus`): the store landed in a magazine a drain had passed on, and a block
 /// got two owners. It showed most with more threads than cores. The switches (`NO_DRAIN`, `NO_PURGE`, `NO_CPU`) turn parts of the heap off
 /// to bisect a failure.
-#[test]
-fn blocks_have_one_owner_while_threads_churn_and_drains_run() {
-    let rounds = if cfg!(miri) { 1 } else { 30 };
+fn blocks_have_one_owner_while_threads_churn_and_drains_run(rounds: usize) {
     for _ in 0..rounds {
         let heap = SimHeap::<crate::os::sim::Standard>::new();
         if std::env::var_os("NO_DRAIN").is_some() {
@@ -491,6 +515,17 @@ fn blocks_have_one_owner_while_threads_churn_and_drains_run() {
         });
         drop(held);
     }
+}
+
+#[test]
+fn blocks_have_one_owner_while_threads_churn_and_drains_run_quickly() {
+    blocks_have_one_owner_while_threads_churn_and_drains_run(if cfg!(miri) { 1 } else { 3 });
+}
+
+#[test]
+#[ignore = "slow: run with scripts/gate --all"]
+fn blocks_have_one_owner_while_threads_churn_and_drains_run_fully() {
+    blocks_have_one_owner_while_threads_churn_and_drains_run(30);
 }
 
 #[test]
@@ -565,17 +600,48 @@ fn a_thread_without_a_lease_is_served_by_the_back_end() {
 }
 
 #[test]
-fn a_large_shrink_stays_in_place_unless_it_leaves_most_of_the_block() {
+fn a_large_shrink_stays_in_place_unless_it_leaves_under_an_eighth_of_the_block() {
     let heap = SimHeap::<Shape>::new();
     let l = layout(200 << 10, 8);
     // SAFETY: valid layouts; each block is freed once with the layout it has.
     unsafe {
         let p = heap.alloc(l);
         let q = heap.realloc(p, l, 120 << 10);
-        assert_eq!(q, p, "a shrink to more than a quarter of the slot stays");
+        assert_eq!(q, p, "a shrink to more than an eighth of the slot stays");
         let r = heap.realloc(q, layout(120 << 10, 8), 40 << 10);
-        assert_ne!(r, q, "a shrink to less than a quarter of the slot moves");
+        assert_eq!(r, q, "a shrink to more than an eighth of the slot stays");
         heap.dealloc(r, layout(40 << 10, 8));
+        // Regions of the native shape hold a megabyte slot, whose eighth is a large size.
+        if !cfg!(miri) {
+            let l = layout(1 << 20, 8);
+            let p = heap.alloc(l);
+            let q = heap.realloc(p, l, 100 << 10);
+            assert_ne!(q, p, "a shrink to less than an eighth of the slot moves");
+            heap.dealloc(q, layout(100 << 10, 8));
+        }
+    }
+}
+
+/// A zeroed grow into a slot an earlier block left dirty: the kept bytes arrive, and the rest
+/// reads as zero, though the move skipped the old block's zero pages and allocated unzeroed.
+#[test]
+fn a_zeroed_grow_into_a_dirty_slot_reads_as_zero_past_what_it_kept() {
+    let heap = SimHeap::<Shape>::new();
+    // Under the large cap of the simulated shape, so the freed slot stays resident and dirty.
+    let (small, big) = (layout(80 << 10, 8), layout(200 << 10, 8));
+    // SAFETY: valid layouts; each block is freed once with the layout it has.
+    unsafe {
+        let dirty = heap.alloc(big);
+        dirty.write_bytes(0xaa, big.size());
+        heap.dealloc(dirty, big);
+        let p = heap.alloc(small);
+        // Half of it written, the other half left as zero pages the move will skip.
+        fill(p, small.size() / 2, 7);
+        let (q, len) = heap.grow_zeroed_for_test(p, small, big).unwrap();
+        assert_eq!(q, dirty, "the grow reuses the dirty slot");
+        assert!(holds(q, small.size() / 2, 7));
+        assert!((small.size() / 2..len).all(|i| q.add(i).read() == 0));
+        heap.dealloc(q, big);
     }
 }
 
@@ -663,6 +729,121 @@ fn large_frees_find_the_class_from_the_address() {
     assert!(!Class::of_size(40 << 10).unwrap().is_small());
 }
 
+/// Where a heap's parked objects are, by `inspect`.
+#[derive(Default, Debug)]
+struct Parked {
+    /// In loaded magazines and spares.
+    on_cpus: usize,
+    /// In the depot.
+    in_depot: usize,
+}
+
+impl crate::stats::Visitor for Parked {
+    fn cached(&mut self, place: crate::stats::Place, _: SmallClass, _: *const u8) {
+        match place {
+            crate::stats::Place::Depot => self.in_depot += 1,
+            _ => self.on_cpus += 1,
+        }
+    }
+}
+
+fn parked<S: crate::os::sim::Shape>(heap: &SimHeap<S>) -> Parked {
+    let mut seen = Parked::default();
+    heap.inspect(&mut seen);
+    seen
+}
+
+/// Allocates and frees `count` small objects of mixed sizes on each of `threads` threads, which
+/// leaves objects parked on several CPUs and in the depot.
+fn park<H: GlobalAlloc + Sync>(heap: &H, threads: usize, count: usize) {
+    thread::scope(|scope| {
+        for t in 0..threads {
+            scope.spawn(move || {
+                let blocks: Vec<_> = (0..count)
+                    .map(|i| {
+                        let l = layout(8 + (i * 7 + t) % 600, 8);
+                        // SAFETY: a valid layout.
+                        let p = unsafe { heap.alloc(l) };
+                        assert!(!p.is_null());
+                        (p, l)
+                    })
+                    .collect();
+                for (p, l) in blocks {
+                    // SAFETY: allocated above with this layout, freed once.
+                    unsafe { heap.dealloc(p, l) };
+                }
+            });
+        }
+    });
+}
+
+#[test]
+fn collect_leaves_nothing_parked_and_returns_the_free_pages() {
+    let heap = SimHeap::<Shape>::new();
+    park(&heap, 4, if cfg!(miri) { 300 } else { 3000 });
+    let before = parked(&heap);
+    assert!(before.on_cpus > 0 && before.in_depot > 0, "{before:?}");
+    let purged = heap.collect();
+    let after = parked(&heap);
+    assert_eq!((after.on_cpus, after.in_depot), (0, 0), "{after:?}");
+    assert!(purged > 0, "nothing was purged");
+    // The heap goes on serving.
+    park(&heap, 2, 100);
+}
+
+#[test]
+fn large_allocations_and_frees_run_the_heartbeat() {
+    let heap = SimHeap::<Shape>::new();
+    let small = layout(64, 8);
+    // SAFETY: valid layouts; each block is freed once.
+    unsafe {
+        let blocks: Vec<_> = (0..100).map(|_| heap.alloc(small)).collect();
+        for p in blocks {
+            heap.dealloc(p, small);
+        }
+    }
+    assert!(parked(&heap).on_cpus > 0);
+    // Only large blocks from here: their heartbeats stamp the loaded magazines, then take
+    // them once they have been loaded for an interval, and the spares of classes left with
+    // none loaded, a class at a time.
+    let large = layout(64 << 10, 8);
+    for _ in 0..3 {
+        for _ in 0..400 {
+            // SAFETY: as above.
+            unsafe { heap.dealloc(heap.alloc(large), large) };
+        }
+        heap.os().advance_clock(crate::depot::IDLE_TICKS);
+    }
+    assert_eq!(parked(&heap).on_cpus, 0, "{:?}", parked(&heap));
+}
+
+/// As `blocks_have_one_owner_while_threads_churn_and_drains_run`, with the clock moving an
+/// interval every few milliseconds, so that the age limit's takes, the depot's sheds and the
+/// idle check's drains all run among the churn.
+#[test]
+fn blocks_have_one_owner_while_threads_churn_and_the_clock_runs() {
+    let rounds = if cfg!(miri) { 1 } else { 4 };
+    for _ in 0..rounds {
+        let heap = SimHeap::<crate::os::sim::Standard>::new();
+        let done = std::sync::atomic::AtomicBool::new(false);
+        thread::scope(|scope| {
+            scope.spawn(|| {
+                while !done.load(std::sync::atomic::Ordering::Relaxed) {
+                    heap.os().advance_clock(crate::depot::IDLE_TICKS / 4);
+                    thread::sleep(std::time::Duration::from_millis(1));
+                }
+            });
+            tagged_churn(
+                &heap,
+                if cfg!(miri) { 3 } else { 10 },
+                0,
+                if cfg!(miri) { 200 } else { 50_000 },
+            );
+            done.store(true, std::sync::atomic::Ordering::Relaxed);
+        });
+    }
+}
+
 #[cfg(all(target_os = "linux", target_arch = "x86_64", not(miri)))]
 mod process {
     use super::*;
@@ -705,6 +886,16 @@ mod process {
         threads(&Asmalloc, 20_000);
     }
 
+    /// Collect drains the process heap's slabs with real fences while other tests use it; the
+    /// heap must go on serving everyone.
+    #[test]
+    fn the_process_heap_collects_and_goes_on() {
+        bursts(&Asmalloc, 64, 600, 4);
+        let _ = Asmalloc::collect();
+        every_class(&Asmalloc, 1);
+        let _ = Asmalloc::collect();
+    }
+
     #[test]
     fn objects_larger_than_a_region_take_runs() {
         let l = layout(5 << 30, 8);
@@ -719,49 +910,21 @@ mod process {
         }
     }
 
+    /// The design: what a large block may use is the size asked for, to a page, never the
+    /// room it sits in, so that a caller that fills what it is told it may use touches about
+    /// what it asked for. A layout aligned beyond a region takes a run, which records the size
+    /// asked for, not the size rounded up to the alignment (8 GiB for these eight bytes).
     #[test]
-    fn the_out_of_line_routines_reach_the_slow_paths() {
-        let class = Class::of_size(96).unwrap().small().unwrap();
-        let mut held = Vec::new();
-        for round in 0..20 {
-            for _ in 0..700 {
-                let p = Asmalloc::alloc_small(class);
-                assert!(!p.is_null());
-                assert_eq!(Asmalloc::usable_size(p), Some(96));
-                held.push(p);
-            }
-            for p in held.drain(..) {
-                // SAFETY: each block came from `alloc_small` of this class and is freed once.
-                unsafe { Asmalloc::free_small(class, core::ptr::NonNull::new(p).unwrap()) };
-            }
-            let _ = round;
-        }
-        // A block from the inlined routines frees through the out-of-line ones, and back.
-        let l = layout(96, 8);
-        // SAFETY: as above.
+    fn an_over_aligned_run_reports_what_was_asked_for() {
+        let l = layout(8, 1 << 33);
+        // SAFETY: a valid layout; the block is freed once.
         unsafe {
             let p = Asmalloc.alloc(l);
-            Asmalloc::free_small(class, core::ptr::NonNull::new(p).unwrap());
-            let q = Asmalloc::alloc_small(class);
-            Asmalloc.dealloc(q, l);
-        }
-    }
-
-    #[test]
-    fn the_out_of_line_routines_serve_every_class() {
-        // Their masks start at zero, which sends them to the slow paths, which write them.
-        for class in SmallClass::all() {
-            let held: Vec<*mut u8> = (0..2 * class.magazine().slots())
-                .map(|_| Asmalloc::alloc_small(class))
-                .collect();
-            for &p in &held {
-                assert!(!p.is_null());
-                assert_eq!(Asmalloc::usable_size(p), Some(class.size()));
-            }
-            for p in held {
-                // SAFETY: each block came from `alloc_small` of this class and is freed once.
-                unsafe { Asmalloc::free_small(class, core::ptr::NonNull::new(p).unwrap()) };
-            }
+            assert!(!p.is_null());
+            assert_eq!(p.addr() % (1 << 33), 0);
+            let usable = Asmalloc::usable_size(p);
+            Asmalloc.dealloc(p, l);
+            assert_eq!(usable, Some(4096));
         }
     }
 

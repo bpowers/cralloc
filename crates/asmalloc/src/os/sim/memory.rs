@@ -1,11 +1,11 @@
-//! The simulated OSes' memory: one zeroed range that reservations are carved from.
+//! The simulated OS's memory: one zeroed range that reservations are carved from.
 //!
 //! Natively, on Linux, the memory a `SimOs` asks for is *guarded*: a real reservation from
 //! [`LinuxOs`], inaccessible until the simulator commits it, so a read or write of memory the
 //! allocator never committed faults, as it would in a real process. A write that the program later
 //! undoes (a bitmap bit set and cleared again) leaves no trace in the contents, so only a fault
-//! catches it. Under Miri and Kani, which cannot change page protections, and for `ProofOs`,
-//! the memory is an ordinary zeroed allocation, and the simulator checks contents instead.
+//! catches it. Under Miri and Kani, which cannot change page protections, the memory is an
+//! ordinary zeroed allocation, and the simulator checks contents instead.
 
 #[cfg(all(target_os = "linux", target_arch = "x86_64", not(miri), not(kani)))]
 use crate::os::Os;

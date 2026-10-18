@@ -19,7 +19,10 @@
 //! - **No valid CPU number.** The routines miss for a thread whose CPU number has no slab (one
 //!   without an rseq registration reads a negative number), and the slow path then serves it
 //!   straight from the back end (`depot::slow`).
-//! - **Large objects** (`large.rs`) skip the caches and take their class from the address.
+//! - **Large objects** (`large.rs`) skip the caches and take their class from the address. A
+//!   large allocation or free counts as a slow path and runs a heartbeat.
+//! - **`collect`** returns everything that can be returned now: the depot's sweep of every
+//!   slab and stack (`Cache::collect`), then the back end's purge of what is free.
 
 mod address;
 mod large;
@@ -29,17 +32,13 @@ mod source;
 mod allocator;
 #[cfg(all(target_os = "linux", target_arch = "x86_64", not(miri), not(kani)))]
 mod global;
-#[cfg(miri)]
-mod miri;
 #[cfg(any(test, feature = "sim"))]
 mod sim;
 
 #[cfg(all(target_os = "linux", target_arch = "x86_64", not(miri), not(kani)))]
 pub use global::Asmalloc;
 #[cfg(all(target_os = "linux", target_arch = "x86_64", not(miri), not(kani)))]
-pub(crate) use global::{pop_slow, push_slow};
-#[cfg(miri)]
-pub use miri::Asmalloc;
+pub(crate) use global::{c_alloc_small, c_free_small};
 #[cfg(any(test, feature = "sim"))]
 pub use sim::{SimAsmalloc, SimHeap};
 
@@ -62,13 +61,15 @@ pub(crate) struct Heap<O: Os> {
     depot: Depot,
 }
 
-/// A block, and the bytes of it the caller may use: the whole slot or run.
+/// A block, and the bytes of it the caller may use: its usable size (`Heap::usable_size`).
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct Grant {
     pub(crate) ptr: NonNull<u8>,
     // Only `Allocator` returns it.
     #[cfg_attr(not(feature = "allocator-api"), allow(dead_code))]
     pub(crate) len: usize,
+    /// All `len` bytes are known to read as zero: fresh or purged memory, or cleared.
+    pub(crate) zeroed: bool,
 }
 
 /// Which bytes of a new block must read as zero.
@@ -127,23 +128,12 @@ impl<O: Os> Heap<O> {
         Some(back)
     }
 
-    /// Reserves the heap's address space, or finds the reservation another thread made.
-    ///
-    /// Threads that start the heap together each reserve, and one publishes. Where the OS has
-    /// room for only one reservation, the others fail, and they may fail before the winner has
-    /// published, which would turn a race into an out-of-memory error. So a failure is retried
-    /// a few times, each looking for the winner's reservation first. The bound keeps start-up
-    /// from waiting on a thread that never publishes (one that stopped in a fork, say); past it
-    /// the request fails as out of memory, which is all a real shortage can do.
+    /// Reserves the heap's address space, or finds the reservation another thread made. Threads
+    /// that start the heap together each reserve, and one publishes; `SpaceCell` keeps a
+    /// failure caused by the others' reservations from shrinking the heap or failing the call.
     #[cold]
     fn reserve(&self) -> Option<Back<'_, O>> {
-        const ATTEMPTS: usize = 4;
-        for _ in 0..ATTEMPTS {
-            if let Ok(back) = self.back.get_or_reserve() {
-                return Some(back);
-            }
-        }
-        self.back.get()
+        self.back.get_or_reserve().ok()
     }
 
     /// Whether `ptr` lies in the heap's object regions. A block of this heap does; so may an
@@ -216,8 +206,8 @@ impl<O: Os> Heap<O> {
         match small(layout) {
             // SAFETY: passed through from the caller.
             Some(class) => unsafe { self.alloc_small(routines, class) },
-            None => self
-                .alloc_large(layout, Zero::No)
+            // SAFETY: passed through from the caller.
+            None => unsafe { self.alloc_large_slow(routines, layout, Zero::No) }
                 .map_or(ptr::null_mut(), |grant| grant.ptr.as_ptr()),
         }
     }
@@ -259,7 +249,8 @@ impl<O: Os> Heap<O> {
         match small(layout) {
             // SAFETY: passed through from the caller.
             Some(class) => unsafe { self.grant_small(routines, class, layout, zero) },
-            None => self.alloc_large(layout, zero),
+            // SAFETY: passed through from the caller.
+            None => unsafe { self.alloc_large_slow(routines, layout, zero) },
         }
     }
 
@@ -286,7 +277,11 @@ impl<O: Os> Heap<O> {
         };
         // SAFETY: HEAP-03. Small slots are never known to be zero, so they are always cleared.
         unsafe { ptr.as_ptr().write_bytes(0, zeroed) };
-        Some(Grant { ptr, len })
+        Some(Grant {
+            ptr,
+            len,
+            zeroed: zero == Zero::Whole,
+        })
     }
 
     /// Frees a block.
@@ -347,7 +342,8 @@ impl<O: Os> Heap<O> {
         match small(layout) {
             // SAFETY: passed through from the caller.
             Some(class) => unsafe { self.free_small(routines, class, object) },
-            None => self.free_large(object),
+            // SAFETY: passed through from the caller.
+            None => unsafe { self.free_large_slow(routines, object) },
         }
     }
 
@@ -395,6 +391,44 @@ impl<O: Os> Heap<O> {
         // SAFETY: HEAP-02.
         let cache = unsafe { Cache::new(&self.depot, back.space(), routines, &source) };
         cache.free_slow(class, object);
+    }
+
+    /// The heartbeat of a slow path that served no small class: a large allocation or free.
+    ///
+    /// # Safety
+    ///
+    /// As for [`Heap::alloc`].
+    #[cold]
+    #[inline(never)]
+    pub(crate) unsafe fn heartbeat<R: Routines + Copy>(&self, routines: R) {
+        let Some(back) = self.back() else {
+            return;
+        };
+        let _ = back.space().base().expose_provenance();
+        let source = BackSource(back);
+        // SAFETY: HEAP-02.
+        let cache = unsafe { Cache::new(&self.depot, back.space(), routines, &source) };
+        cache.maintain();
+    }
+
+    /// Returns everything that can be returned now: drains every slab a slow path has used
+    /// (the caller's own through its routines), launders every depot stack, then purges every
+    /// wholly free page. Returns the bytes purged that had been resident, as the back end
+    /// counts them. Nothing before the heap has started.
+    ///
+    /// # Safety
+    ///
+    /// As for [`Heap::alloc`].
+    pub(crate) unsafe fn collect<R: Routines + Copy>(&self, routines: R) -> usize {
+        let Some(back) = self.back() else {
+            return 0;
+        };
+        let _ = back.space().base().expose_provenance();
+        let source = BackSource(back);
+        // SAFETY: HEAP-02.
+        let cache = unsafe { Cache::new(&self.depot, back.space(), routines, &source) };
+        cache.collect();
+        back.trim()
     }
 }
 

@@ -54,19 +54,72 @@ pub const PURGE_STEP_WORDS: usize = 256;
 pub const PURGE_CAP_WORDS: usize = 1 << 14;
 
 /// A region of a class that gets huge pages marks the rest of itself for them once it has
-/// carved more than this many huge pages: 32, or 64 MiB. The first touch of a huge page makes
+/// carved more than this many huge pages: 8, or 16 MiB. The first touch of a huge page makes
 /// all of it resident, so the page at the watermark costs up to one huge page that the
-/// program never asked for; after 64 MiB that is at most 3% of the class. (At 8 MiB it was up
-/// to a quarter, and was the whole of the gap to jemalloc on mid-sized heaps.) A simulated
-/// heap whose regions are smaller than four times this uses a quarter of a region instead.
-pub const HUGE_AFTER_HUGE_PAGES: usize = 32;
+/// program never asked for: at most an eighth of the class. Measured against 64 MiB, after
+/// the rules that move parked objects back to the bitmaps: JSON spends half as long in the
+/// kernel (2.4 against 4.5 cycles a byte) for 1.1 MiB more at its peak; 1M-object churn and
+/// the burst-then-idle test peak 1.7 and 7 MiB higher (0.7% and 3%); memory after a peak is
+/// unchanged. 8 MiB saves a little more time and takes churn 3 MiB over jemalloc
+/// (`docs/research/zen5-roofline.md`, section 7). A simulated heap whose regions are smaller
+/// than four times this uses a quarter of a region instead.
+pub const HUGE_AFTER_HUGE_PAGES: usize = 8;
 
-/// Only classes with at least this many slots to a page get huge pages: 4, so classes up to
-/// 1 KiB. Small objects are dense in their pages, so a huge page holds what the program
+/// Only classes with at least this many slots to a page get huge pages: 4, so classes up
+/// to 1 KiB. Small objects are dense in their pages, so a huge page holds what the program
 /// uses. A block of a page or more is often touched in part, and with huge pages every part
 /// touched would cost 2 MiB: 256 blocks of 1 MiB with one page written each were 246 MiB
 /// resident.
 pub const HUGE_MIN_SLOTS_PER_PAGE: usize = 4;
+
+/// A large block that grows to at least this many huge pages, by moving or in place, gets huge
+/// pages up to its new size, if the last piece the program wrote holds data in at least half
+/// its pages: those of its slot's whole huge pages are advised for them
+/// (`region::advise_grown`) until the slot is freed, when they are purged and the advice is
+/// taken back. 1, or 2 MiB. Growth by appending is the evidence of dense use, and the bytes
+/// written last are checked to be dense; the advice never covers the slot's room past the size
+/// asked for, so it runs at most one growth step ahead of what has been shown. A block
+/// allocated at its size in one call has shown neither, and with huge pages each part touched
+/// would cost 2 MiB. The soak's growing buffers, written a stripe a megabyte past 64 MiB,
+/// were 1013 MiB resident with the whole slot advised at each growth, and 271 without.
+///
+/// Half, because a block that holds data in at least half its pages costs at most twice what
+/// it touches when huge pages back it; below that the cost can approach 512 times. One huge
+/// page, because a smaller block has no whole huge page to advise, and from one up the advice
+/// makes resident at most one huge page that the program did not write.
+pub const GROWN_HUGE_MIN_HUGE_PAGES: usize = 1;
+
+/// ...and only if it at most doubles at once: a doubling is the signature of appending. A
+/// larger jump is a one-off reserve that says nothing about how densely the buffer will be
+/// used, and khugepaged would make every huge page it touches resident whole
+/// (`docs/research/zen5-roofline.md`, section 7): a buffer written 1 MiB densely, grown to
+/// 4 MiB and then written sparsely kept all 4 MiB resident.
+pub const GROWN_HUGE_MAX_FACTOR: usize = 2;
+
+/// A large block whose alignment allows it starts this many bytes past its slot's start for
+/// each step of its slot's index, over `STAGGER_SLOTS` slots: 64, a cache line, so that the
+/// same offset in large blocks of one class falls in different cache sets. Slots are spaced by
+/// their class size, often a power of two, and buffers walked together at slot starts compete
+/// for one set of every cache level: 64 buffers of 4 MiB written round-robin took 7.9 ns an
+/// element at slot starts and 0.79 staggered (`docs/research/zen5-roofline.md`, section 7).
+pub const STAGGER_STEP: usize = 64;
+
+/// The number of distinct staggers: 64, so they span a page, 4 KiB, which is every set of the
+/// L1 and 64 sets apart in the L2. The heap gives a large request this much more room, so that
+/// any stagger fits; the room costs address space, and at most one more page of memory.
+pub const STAGGER_SLOTS: usize = 64;
+
+/// The room a staggered block needs beyond its size: `STAGGER_STEP * STAGGER_SLOTS`, 4 KiB.
+pub const STAGGER_ROOM: usize = STAGGER_STEP * STAGGER_SLOTS;
+
+/// A large block that moves is copied in pieces of this many huge pages, and the pages of the
+/// old block behind each piece go back to the OS before the next is copied: 1, or 2 MiB. So a
+/// moving block has both copies resident for at most one piece, where a single copy had them
+/// for its whole size (four threads growing buffers to 256 MiB peaked at three times glibc,
+/// which moves by remapping). A piece costs one `madvise` on top of its copy; 2 MiB copies in
+/// about a hundred microseconds, so the call is a few percent, and a smaller piece would buy
+/// little memory for more calls. A block of at most one piece is copied whole.
+pub const MOVE_PIECE_HUGE_PAGES: usize = 1;
 
 /// In the small-page part of a region, each commit makes this many pages writable beyond what
 /// the carve that asked for it needs: 16, or 64 KiB. `mprotect` costs about a microsecond, so
@@ -81,6 +134,12 @@ pub const COMMIT_AHEAD_HUGE_PAGES: usize = 1;
 #[inline(always)]
 pub const fn retained_cap(geometry: Geometry) -> usize {
     RETAINED_CAP_HUGE_PAGES * geometry.huge_page_size()
+}
+
+/// The piece a moving large block is copied in, in bytes, for a geometry.
+#[inline(always)]
+pub const fn move_piece(geometry: Geometry) -> usize {
+    MOVE_PIECE_HUGE_PAGES * geometry.huge_page_size()
 }
 
 /// The retained-memory cap of large classes in bytes for a geometry.
@@ -115,4 +174,13 @@ pub const fn huge_after(region_huge_pages: usize) -> usize {
 #[inline(always)]
 pub const fn wants_huge(size: usize, page: usize) -> bool {
     size * HUGE_MIN_SLOTS_PER_PAGE <= page
+}
+
+/// Whether a large block growing from `old` to `new` bytes gets huge pages, where huge pages
+/// are `huge` bytes.
+#[inline(always)]
+pub const fn grown_huge(old: usize, new: usize, huge: usize) -> bool {
+    new > old
+        && new >= GROWN_HUGE_MIN_HUGE_PAGES * huge
+        && old.saturating_mul(GROWN_HUGE_MAX_FACTOR) >= new
 }

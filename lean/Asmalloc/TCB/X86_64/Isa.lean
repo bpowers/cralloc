@@ -149,6 +149,13 @@ inductive Instr
   | movzx8 (dst : Reg) (src : MemOp)
   /-- `mov BYTE PTR [dst], r8`: the low byte of `src`. -/
   | store8 (dst : MemOp) (src : Reg)
+  /-- `movzx r32, r16` (`0F B7 /r` with a register operand): the low 16 bits
+  of `src`, zero-extended into the 64-bit register. -/
+  | movzx16 (dst src : Reg)
+  /-- `cmp r8, BYTE PTR [src]` (`3A /r`): the low byte of `dst` compared
+  with the byte at `src`, setting the flags as `cmp` does on 8-bit operands
+  (`execCmp8`). -/
+  | cmp8 (dst : Reg) (src : MemOp)
   /-- `bswap r64` -/
   | bswap (dst : Reg)
   /-- `op r64, count` (64-bit) with an immediate count. Only counts `1 ≤ count ≤ 63`
@@ -235,11 +242,23 @@ def Instr.requires : Instr → List String
   | .andn32 .. | .andn .. => ["bmi1"]
   | _ => []
 
+/-- SDM Vol. 2, "CMP—Compare Two Operands", `CMP r8, r/m8` (`3A /r`):
+`temp := SRC1 − SignExtend(SRC2); ModifyStatusFlags;` "The CF, OF, SF, ZF,
+AF, and PF flags are set according to the result" of the 8-bit
+subtraction `a − b`, as for the wider forms (`execAlu`'s `cmp`): CF is the
+borrow, OF the signed overflow. No register is written. (AF and PF are not
+modelled.) -/
+def execCmp8 (a b : BitVec 8) (s : State) : State :=
+  arithFlags s (a - b) (a.toNat < b.toNat) (subOverflow a b (a - b))
+
 /-- Semantics of an instruction. The byte forms: SDM Vol. 2, "MOVZX":
 `DEST := ZeroExtend(SRC)` (with a 32-bit destination, zero-extended to 64
 bits, SDM Vol. 1 §3.4.1.1), and "MOV": `DEST := SRC`, where the source of a
 byte store is the register's low byte (AL, CL, DL, BL, SPL, BPL, SIL, DIL,
-R8B–R15B; SDM Vol. 1 §3.4.1.1). Neither affects the flags. -/
+R8B–R15B; SDM Vol. 1 §3.4.1.1). Neither affects the flags. The 16-bit zero extension: SDM Vol. 2,
+"MOVZX", `MOVZX r32, r/m16` (`0F B7 /r`), `DEST := ZeroExtend(SRC)` with a
+16-bit source register's low 16 bits, zero-extended to 64 bits (SDM Vol. 1
+§3.4.1.1); it affects no flags. -/
 def exec : Instr → State → Option State
   | .mov d src, s => (readSrc s src).map fun v => s.setReg d v
   | .store m r, s => s.store64 (s.ea m) (s.gpr r)
@@ -257,6 +276,8 @@ def exec : Instr → State → Option State
   | .andn d a b, s => some (execAndn d a b s)
   | .movzx8 d m, s => (s.load8 (s.ea m)).map fun v => s.setReg d (v.setWidth 64)
   | .store8 m r, s => s.store8 (s.ea m) ((s.gpr r).setWidth 8)
+  | .movzx16 d r, s => some (s.setReg d ((s.gpr r).setWidth 16 |>.setWidth 64))
+  | .cmp8 d m, s => (s.load8 (s.ea m)).map fun b => execCmp8 ((s.gpr d).setWidth 8) b s
   | .bswap d, s => some (s.setReg d (bswap64 (s.gpr d)))
   | .shift op d n, s => execShift op d n s
   | .shiftCl op d, s => some (execShiftCl op d s)
@@ -409,14 +430,14 @@ one (the pop of a frame also moves `rsp`, as the push does): `mul` writes
 two, `rax` and `rdx`, `mulx` two of its choosing, and stores none. -/
 def Instr.dst : Instr → Option Reg
   | .mov d _ | .alu _ d _ | .inc d | .dec d | .mov32 d _ | .alu32 _ d _ | .shift32 _ d _ | .bswap32 d
-  | .rorx32 d .. | .andn32 d .. | .rorx d .. | .andn d .. | .movzx8 d _ | .bswap d | .shift _ d _
+  | .rorx32 d .. | .andn32 d .. | .rorx d .. | .andn d .. | .movzx8 d _ | .movzx16 d _ | .bswap d | .shift _ d _
   | .shiftCl _ d | .shiftx _ d .. | .movImm64 d _ | .leaSym d .. | .movGot d _ | .movSym d _ | .leaRseqCs d | .lea d _ | .adcx d _ | .adox d _
   | .cmov _ d _ | .pop d _ | .imul d _ => some d
-  | .store .. | .store32 .. | .store8 .. | .mul _ | .mulx .. | .push _ | .alloc _ | .free _ => none
+  | .store .. | .store32 .. | .store8 .. | .cmp8 .. | .mul _ | .mulx .. | .push _ | .alloc _ | .free _ => none
 
 /-- The memory accesses of an instruction run from `s` to `s'` (`Event`):
 a load of the bytes of its memory source (8 for a 64-bit operand, 4 for a
-32-bit one, 1 for `movzx8`), with the value `s` holds there; a store of the
+32-bit one, 1 for `movzx8` and `cmp8`), with the value `s` holds there; a store of the
 bytes of its memory destination, with the value `s'` holds there. Each such
 instruction makes exactly one access (SDM Vol. 2, each instruction's
 "Operation"). The pushes, pops, calls and returns of frames and calls are
@@ -430,7 +451,7 @@ def Instr.events (i : Instr) (s s' : State) : List Event :=
   | .cmov _ _ (.mem m) => rd m 8
   | .mov32 _ (.mem m) | .alu32 _ _ (.mem m) => rd m 4
   | .movSym _ name => [⟨s.syms name, 8, false, (s.mem.read (s.syms name) 8).toNat⟩]
-  | .movzx8 _ m => rd m 1
+  | .movzx8 _ m | .cmp8 _ m => rd m 1
   | .store m _ => wr m 8
   | .store32 m _ => wr m 4
   | .store8 m _ => wr m 1

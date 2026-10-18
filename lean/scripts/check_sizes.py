@@ -36,8 +36,11 @@ ONE_LINE = 64
 SPILL_END = 75
 ALIGN = 64
 
+# A crate function, or a copy exported as a C symbol inside a generated macro
+# (`Rust.exportsFile`), which the same rules apply to.
 NAKED = re.compile(
-    r'(?:#\[cfg\(([^\n]*)\)\]\n)?#\[unsafe\(naked\)\]\s*pub\(crate\) unsafe extern "[^"]*" fn (\w+)'
+    r'(?:#\[cfg\(([^\n]*)\)\]\n)?[ \t]*#\[unsafe\(naked\)\]\s*(?:#\[unsafe\(no_mangle\)\]\s*)?'
+    r'(?:pub\(crate\) )?unsafe extern "[^"]*" fn (\w+)'
     r'.*?core::arch::naked_asm!\(\s*(r#*"|")', re.S)
 
 
@@ -84,23 +87,33 @@ def functions(path: pathlib.Path):
     for m in NAKED.finditer(text):
         cfg, name, opener = m.group(1), m.group(2), m.group(3)
         template, end = rust_string(text, m.end(), opener)
-        close = text.index("\n    )", end)
+        close = re.compile(r"\n[ \t]*\)").search(text, end).start()
         operands = re.findall(r"(\w+)\s*=\s*sym\b", text[end:close])
         yield name, cfg, template_asm(template, operands)
 
 
 def measure(mc: str, name: str, asm: str, tmp: pathlib.Path) -> tuple[int, int]:
     """The bytes of `name`'s hot path, from its entry to the end of its
-    return, and the alignment of its section. What follows the return before
+    return (or its tail call), and the alignment of its section. What follows the return before
     the alignment directive (stubs that jump to a slow path,
     `Printer.stubExits`) runs only on a miss."""
     lines = asm.rstrip("\n").split("\n")
     if not lines[-1].strip().startswith((".p2align", ".balign", ".align")):
         raise ValueError("does not end with an alignment directive")
-    rets = [i for i, l in enumerate(lines) if l.strip() == "ret"]
-    if not rets:
+    # The hot path ends at its return, or at the tail call that replaces it (a jump to an
+    # operand, `Code.jump`), whichever comes first outside a pushed section.
+    ends, depth = [], 0
+    for i, l in enumerate(lines):
+        t = l.strip()
+        if t.startswith(".pushsection"):
+            depth += 1
+        elif t.startswith(".popsection"):
+            depth -= 1
+        elif depth == 0 and (t == "ret" or t.startswith("jmp vg_op_")):
+            ends.append(i)
+    if not ends:
         raise ValueError("has no return")
-    end = rets[0] + 1
+    end = ends[0] + 1
     body = "\n".join(lines[:end] + [f"{name}_end:"] + lines[end:-1])
     src = (f'.intel_syntax noprefix\n.section .text.{name},"ax",@progbits\n'
            f"{name}:\n{body}\n{lines[-1]}\n")

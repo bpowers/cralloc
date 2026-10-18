@@ -1,0 +1,209 @@
+# shellcheck shell=bash
+# The real-software part of scripts/preload-soak (--suites), sourced from it: git, redis,
+# CPython, SQLite, fmt and nlohmann/json, each fetched into $src, built twice (plain, and with
+# make, the compiler and the linker preloaded), and tested twice (plain binaries plain, the
+# preloaded build preloaded). A suite passes when both test runs give the same per-test
+# results; the suites' own failures under this machine's environment are then the same both
+# ways. The build comparison is printed for information: object files can differ by embedded
+# paths (each build has its own directory).
+#
+# Uses from preload-soak: $here, $lib, $src, $work, wanted, failed.
+
+suite_mem="${SOAK_SUITE_MEM:-12G}"
+jobs="$(nproc)"
+mkdir -p "$src"
+redis_tmp="$(mktemp -d /tmp/asmalloc-rt.XXXXXX)" # redis's unix sockets need a short path
+
+# capped MODE CMD...: one capped run, preloaded if MODE is preload.
+capped() {
+  local mode="$1"
+  shift
+  if [ "$mode" = preload ]; then
+    "$here/memlimit" -m "$suite_mem" -t 120m -- env LD_PRELOAD="$lib" "$@"
+  else
+    "$here/memlimit" -m "$suite_mem" -t 120m -- env -u LD_PRELOAD "$@"
+  fi
+}
+
+# fetch NAME URL: downloads and unpacks a source tarball once, into $src/NAME/source.
+fetch() {
+  local name="$1" url="$2" dir="$src/$1"
+  [ -d "$dir/source" ] && return 0
+  mkdir -p "$dir/unpack"
+  curl -sfL -o "$dir/archive" "$url" || { echo "FAIL  fetching $name from $url"; return 1; }
+  case "$url" in
+    *.zip) (cd "$dir/unpack" && unzip -q ../archive) ;;
+    *) tar xzf "$dir/archive" -C "$dir/unpack" ;;
+  esac
+  mv "$(find "$dir/unpack" -mindepth 1 -maxdepth 1 -type d | head -1)" "$dir/source"
+}
+
+# fresh NAME: plain and preload copies of the source.
+fresh() {
+  local m
+  for m in plain preload; do
+    rm -rf "${src:?}/$1/$m"
+    cp -a "$src/$1/source" "$src/$1/$m"
+  done
+}
+
+# objects NAME: how many object files differ between the two builds, debug info stripped.
+objects() {
+  local a="$src/$1/plain" b="$src/$1/preload" n=0 d=0 f
+  while IFS= read -r f; do
+    n=$((n + 1))
+    objcopy --strip-debug "$a/$f" "$work/a.o" 2>/dev/null
+    objcopy --strip-debug "$b/$f" "$work/b.o" 2>/dev/null
+    cmp -s "$work/a.o" "$work/b.o" || d=$((d + 1))
+  done < <(cd "$a" && find . -name '*.o' | sort)
+  echo "objects: $n, $d differ"
+}
+
+# judge NAME: compares $work/NAME.plain.sum with $work/NAME.preload.sum.
+judge() {
+  local name="$1" start="$2"
+  if [ -s "$work/$name.plain.sum" ] && cmp -s "$work/$name.plain.sum" "$work/$name.preload.sum"; then
+    printf 'PASS  %-34s %5ss  %s; %s\n' "suite-$name" $((SECONDS - start)) \
+      "$(tail -1 "$work/$name.preload.sum")" "$(cat "$work/$name.objects")"
+  else
+    printf 'FAIL  %-34s results differ (or are empty):\n' "suite-$name"
+    diff "$work/$name.plain.sum" "$work/$name.preload.sum" | head -20 | sed 's/^/      /'
+    failed+=("suite-$name")
+  fi
+}
+
+suite_tcl() {
+  [ -x "$src/tcl86/bin/tclsh8.6" ] && return 0
+  fetch tcl https://prdownloads.sourceforge.net/tcl/tcl8.6.16-src.tar.gz || return 1
+  (cd "$src/tcl/source/unix" && capped plain sh -c \
+    "./configure -q --prefix='$src/tcl86' && make -s -j$jobs && make -s install") \
+    >"$work/tcl.log" 2>&1
+}
+
+suite_git() {
+  local start=$SECONDS m opts="NO_CURL=1 NO_OPENSSL=1 NO_GETTEXT=1 NO_TCLTK=1 NO_PYTHON=1 NO_EXPAT=1"
+  fetch git "https://mirrors.edge.kernel.org/pub/software/scm/git/git-2.56.0.tar.gz" || return
+  fresh git
+  for m in plain preload; do
+    # shellcheck disable=SC2086 # the options are words
+    capped $m make -C "$src/git/$m" -j"$jobs" $opts >"$work/git.$m.build" 2>&1
+  done
+  objects git >"$work/git.objects"
+  for m in plain preload; do
+    # shellcheck disable=SC2086
+    capped $m make -C "$src/git/$m/t" -j"$jobs" -k $opts DEFAULT_TEST_TARGET=test \
+      >"$work/git.$m.log" 2>&1
+    (cd "$src/git/$m/t/test-results" && for f in *.counts; do
+      echo "$f $(grep -E '^(success|failed|broken|fixed)' "$f" | tr '\n' ' ')"
+    done
+      cat ./*.counts | awk '/^total/{t+=$2}/^failed/{f+=$2}END{print t " tests, " f " failed"}') \
+      >"$work/git.$m.sum"
+  done
+  judge git $start
+}
+
+suite_redis() {
+  local start=$SECONDS m
+  suite_tcl || return
+  fetch redis https://github.com/redis/redis/archive/refs/tags/7.4.2.tar.gz || return
+  fresh redis
+  for m in plain preload; do
+    capped $m make -C "$src/redis/$m" -j"$jobs" MALLOC=libc BUILD_TLS=no \
+      >"$work/redis.$m.build" 2>&1
+    # The harness asks for exactly Tcl 8.5 or later 8.x, and puts sockets under the tree.
+    mkdir -p "$redis_tmp/$m"
+    sed -i "s|^set ::tmproot .*|set ::tmproot \"$redis_tmp/$m\"|" \
+      "$src/redis/$m/tests/support/tmpfile.tcl"
+  done
+  objects redis >"$work/redis.objects"
+  for m in plain preload; do
+    (cd "$src/redis/$m" && PATH="$src/tcl86/bin:$PATH" capped $m \
+      ./runtest --clients "$jobs" --timeout 1200) >"$work/redis.$m.log" 2>&1
+    { grep -E '^\[(err|exception|timeout)\]' "$work/redis.$m.log" | sort -u
+      echo "$(grep -c '\[ok\]' "$work/redis.$m.log" | awk '{print ($1 > 3000) ? "over 3000" : "under 3000"}') tests passed"
+    } >"$work/redis.$m.sum"
+  done
+  judge redis $start
+}
+
+suite_cpython() {
+  local start=$SECONDS m
+  fetch cpython https://github.com/python/cpython/archive/refs/tags/v3.14.0.tar.gz || return
+  fresh cpython
+  for m in plain preload; do
+    (cd "$src/cpython/$m" && capped $m sh -c "./configure -q && make -j$jobs") \
+      >"$work/cpython.$m.build" 2>&1
+  done
+  objects cpython >"$work/cpython.objects"
+  for m in plain preload; do
+    # Every object from the C allocator, not from pymalloc's arenas.
+    (cd "$src/cpython/$m" && PYTHONMALLOC=malloc capped $m ./python -m test -j"$jobs" \
+      --timeout 1200 -u all,-largefile,-network,-urlfetch,-gui,-audio) \
+      >"$work/cpython.$m.log" 2>&1
+    (cd "$src/cpython/$m" && PYTHONMALLOC=malloc capped $m ./python -m test -M 3G \
+      test_bigmem test_bigaddrspace test_hashlib test_zlib test_lzma test_bz2 test_mmap) \
+      >"$work/cpython.$m.bigmem.log" 2>&1
+    { sed -n '/tests\? failed:/,/^$/p' "$work/cpython.$m.log"
+      grep -h '^Result:' "$work/cpython.$m.log" "$work/cpython.$m.bigmem.log"
+      grep -h '^Total tests:' "$work/cpython.$m.log" | sed 's/ skipped=.*//'
+    } >"$work/cpython.$m.sum"
+  done
+  judge cpython $start
+}
+
+suite_sqlite() {
+  local start=$SECONDS m
+  suite_tcl || return
+  fetch sqlite https://www.sqlite.org/2025/sqlite-src-3490100.zip || return
+  fresh sqlite
+  for m in plain preload; do
+    (cd "$src/sqlite/$m" && capped $m sh -c "./configure --with-tcl='$src/tcl86/lib' \
+      >/dev/null && make -j$jobs testfixture fuzzcheck sessionfuzz") >"$work/sqlite.$m.build" 2>&1
+  done
+  objects sqlite >"$work/sqlite.objects"
+  for m in plain preload; do
+    (cd "$src/sqlite/$m" && LD_LIBRARY_PATH="$src/tcl86/lib" capped $m make fuzztest &&
+      LD_LIBRARY_PATH="$src/tcl86/lib" capped $m make testrunner) >"$work/sqlite.$m.log" 2>&1
+    # dbstatus.test checks memory use computed from glibc's usable sizes; it is reported but
+    # left out of the comparison.
+    { grep -E '^FAILED:' "$work/sqlite.$m.log" | grep -v dbstatus.test
+      grep -oE '[0-9]+ errors out of [0-9]+ tests' "$work/sqlite.$m.log" | sed -n 1p
+      grep -oE '[0-9]+ cases, [0-9]+ crashes' "$work/sqlite.$m.log"
+    } >"$work/sqlite.$m.sum"
+    grep -q 'FAILED: test/dbstatus.test' "$work/sqlite.$m.log" &&
+      echo "      sqlite $m: dbstatus.test failed (expects glibc's usable sizes)"
+  done
+  judge sqlite $start
+}
+
+# suite_cmake NAME URL CMAKE-OPTIONS...: a C++ project with a ctest suite.
+suite_cmake() {
+  local name="$1" url="$2" start=$SECONDS m
+  shift 2
+  fetch "$name" "$url" || return
+  for m in plain preload; do
+    rm -rf "${src:?}/$name/$m"
+    mkdir -p "$src/$name/$m"
+    (cd "$src/$name/$m" && capped $m sh -c "cmake -G Ninja -DCMAKE_BUILD_TYPE=Release $* \
+      '$src/$name/source' >/dev/null && ninja -j$jobs") >"$work/$name.$m.build" 2>&1
+  done
+  objects "$name" >"$work/$name.objects"
+  for m in plain preload; do
+    (cd "$src/$name/$m" && capped $m ctest -j"$jobs" --timeout 1200) >"$work/$name.$m.log" 2>&1
+    grep -E 'Test +#' "$work/$name.$m.log" |
+      sed -E 's/^ *[0-9]+\/[0-9]+ +//; s/ +[0-9.]+ sec$//; s/\.\.\.+/ /; s/  +/ /g' | sort \
+      >"$work/$name.$m.sum"
+    grep -E 'tests passed' "$work/$name.$m.log" >>"$work/$name.$m.sum"
+  done
+  judge "$name" $start
+}
+
+wanted suite-git && suite_git
+wanted suite-redis && suite_redis
+wanted suite-cpython && suite_cpython
+wanted suite-sqlite && suite_sqlite
+wanted suite-fmt && suite_cmake fmt https://github.com/fmtlib/fmt/archive/refs/tags/11.2.0.tar.gz \
+  -DFMT_TEST=ON
+wanted suite-json && suite_cmake json \
+  https://github.com/nlohmann/json/archive/refs/tags/v3.12.0.tar.gz -DJSON_BuildTests=ON
+rm -rf "$redis_tmp"

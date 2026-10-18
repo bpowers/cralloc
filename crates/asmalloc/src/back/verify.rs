@@ -126,12 +126,6 @@ pub(super) fn layouts_fit(plan: Plan) {
     assert!(layout.region_pages() as usize * page == plan.region_size());
 }
 
-#[kani::proof]
-#[kani::unwind(6)]
-fn layouts_fit_the_used_geometries() {
-    layouts_fit(any_used_plan());
-}
-
 /// The decay word: a pass under way is stepped whatever the clock says. Otherwise a pass
 /// starts exactly when the clock is an interval or more past the word's time; a clock behind
 /// the word re-stamps it with the time now, after which a pass starts one interval later; and
@@ -171,6 +165,10 @@ fn a_decay_pass_starts_only_after_an_interval() {
 /// re-arm step above its mark, and always purges when it is both. So a count that moves less
 /// than a step around the cap purges once, and a count held over the cap purges once for
 /// every step it grows.
+///
+/// This is the decision alone. `Back::retain` reads the mark and writes it in separate steps,
+/// so two launders can race: both may purge, or one may lower a mark the other just raised.
+/// Either costs one bounded purge more or one later; the review found no worse outcome.
 #[kani::proof]
 fn the_cap_fires_only_a_step_above_its_mark() {
     use super::policy::CAP_REARM;

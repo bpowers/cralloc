@@ -63,11 +63,6 @@ impl Mailroom {
         }
     }
 
-    /// The hand-off pattern.
-    pub fn handoff(&self) -> Handoff {
-        self.handoff
-    }
-
     fn lock(&self, i: usize) -> MutexGuard<'_, Mailbox> {
         self.boxes[i].lock().unwrap_or_else(PoisonError::into_inner)
     }

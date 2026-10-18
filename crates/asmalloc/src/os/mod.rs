@@ -7,9 +7,9 @@
 //!
 //! The interface is what the design needs and no more: reserve address space, make parts of it
 //! writable, return pages, steer transparent huge pages, mark a page to be wiped in forked
-//! children, unmap, fence the restartable sequences of one CPU, report the rseq registration,
-//! draw a random number, read a clock, and abort. Each implementation also fixes the [`Geometry`] the
-//! heap is laid out with, so the simulated OS can use a scaled-down heap.
+//! children, unmap, fence the restartable sequences of one CPU, draw a random number, read a
+//! clock, and abort. Each implementation also fixes the [`Geometry`] the heap is laid out with,
+//! so the simulated OS can use a scaled-down heap.
 //!
 //! Ranges passed to the memory calls are page-aligned, a whole number of pages long, not empty,
 //! and inside one live reservation made by the same `Os` value. [`crate::space::Space`] checks
@@ -18,12 +18,10 @@
 #[cfg(all(target_os = "linux", target_arch = "x86_64", not(kani)))]
 pub mod linux;
 pub mod machine;
-pub mod rseq;
 #[cfg(any(test, kani, feature = "sim"))]
 pub mod sim;
 
 pub use machine::{Aborted, Machine, Pinned, Step};
-pub use rseq::RseqArea;
 
 use crate::space::Geometry;
 use core::fmt;
@@ -91,8 +89,6 @@ pub enum HugePages {
 ///   dropped, whichever is first. Moving the value moves none of its reservations.
 /// - `fence(cpu)` returns `Ok` only after every restartable sequence of the process that was in
 ///   flight on CPU `cpu` when it was called has completed or been aborted.
-/// - `rseq` reports the process's registration as the C library made it. It does not promise
-///   that the calling thread is registered; see [`Os::rseq`].
 /// - `abort` does not return.
 /// - Every method may be called from any thread at any time, including from a signal handler,
 ///   and none of them allocates.
@@ -157,16 +153,6 @@ pub unsafe trait Os: Sync {
     /// Fails unless [`Os::register_fence`] succeeded, and may fail for want of memory.
     fn fence(&self, cpu: u32) -> Result<(), OsError>;
 
-    /// Where the rseq area is and how much of it the kernel maintains, or `None` if the process
-    /// has no registration.
-    ///
-    /// This describes the process, not the calling thread. glibc registers each thread as it
-    /// starts, and a registration that fails later (for example under a seccomp filter installed
-    /// after start-up) leaves that thread's `cpu_id` field at -2 while these facts stay the
-    /// same. Code that relies on a thread being registered must check the thread's own `cpu_id`
-    /// (`rseq::CPU_ID`) is not negative. Meant for start-up: on Linux each call is a system call.
-    fn rseq(&self) -> Option<RseqArea>;
-
     /// A random number. It names a process generation, so it should differ from the parent's
     /// with overwhelming probability; it need not be fit for cryptography. Never fails: if the
     /// OS has no randomness to give, it returns something that varies with time and address.
@@ -175,9 +161,10 @@ pub unsafe trait Os: Sync {
     /// A count that rises with wall-clock time, read without a system call: the CPU's
     /// timestamp counter on Linux, a clock the test advances in the simulators. Its rate is not
     /// known (on x86-64 it is somewhere between 1 and 6 GHz), and nothing promises that two
-    /// CPUs agree or that it never goes back. It paces the idle check and nothing else, so no
-    /// promise of this trait's safety contract depends on it: a wrong count only makes a drain
-    /// come sooner or later.
+    /// CPUs agree or that it never goes back. It paces what happens once an interval: the idle
+    /// check's drains and the back end's clocked purge, both read on slow paths. No promise of
+    /// this trait's safety contract depends on it: a wrong count only makes a drain or a purge
+    /// pass come sooner or later, and both are safe at any time.
     fn ticks(&self) -> u64;
 
     /// Writes `message` to standard error and ends the process abnormally.

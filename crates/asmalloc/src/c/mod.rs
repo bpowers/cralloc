@@ -15,33 +15,39 @@
 //!   Any alignment the family asks for is met by the class alone (no padding, no interior
 //!   pointer), up to the region size, and by a run of regions beyond it.
 //! - `free`, `realloc`, `malloc_usable_size` and the sized frees find the block's class from
-//!   its address. The sized frees ignore the size and alignment they are given: a wrong one
-//!   from C would otherwise corrupt the heap. A pointer that is not the start of a block of the
-//!   heap aborts the process.
+//!   its address. The sized frees use the size only as a prediction that the address must
+//!   confirm: a wrong one frees exactly what `free` would. A pointer outside the heap, or into
+//!   the middle of a large block or a run, aborts the process. A pointer into the middle of a
+//!   small block is the caller's bug that the fast path does not look for: it is caught only if
+//!   it reaches the back end's bitmaps before it is handed out again (docs/design.md,
+//!   "Interfaces").
 //! - `realloc(p, 0)` frees `p` and returns null, as glibc's does. `realloc` keeps a small block
 //!   in place when the new size has the same class, and a large one when the new size is still
-//!   large, fits the slot or run and, shrinking, keeps a quarter of it; a large block that
+//!   large, fits the slot or run and, shrinking, keeps an eighth of it; a large block that
 //!   grows out of its slot moves to one with headroom. A block that moves keeps every byte its
 //!   usable size covered, up to the new size, as glibc's does.
 //! - `malloc_usable_size` is the class size of a small block, and the size last asked for,
 //!   rounded up to a page, of a large one.
 //! - `calloc` makes all of the block's usable size read as zero, as glibc's does, checks the
 //!   product for overflow, and does not clear memory the back end knows is zero.
-//!   `malloc_trim` returns wholly free pages that the back end holds; it does not empty the
-//!   magazines.
+//! - `malloc_trim` is `collect`: it empties the magazines and the depot back to the bitmaps and
+//!   returns every wholly free page.
 //! - A failure returns null (or an error number from `posix_memalign`) and sets `errno` through
 //!   the C library's own accessor (`errno.rs`). `free` and a successful call leave it alone.
 //!   Nothing here hands a request to another allocator.
 //!
-//! The fast path for `malloc`, `free` and `calloc` sits behind one seam (`seam.rs`) for the
-//! generated C routines to replace; their slow paths (`slow.rs`) complete any call. The ledger
-//! is under `docs/safety/asmalloc/c/`.
+//! `malloc`, `calloc`, `free` and `free_sized` are the routines generated from Lean
+//! (`routines.rs`), whose misses complete in the slow paths (`slow.rs`), which also serve every
+//! other function here. The ledger is under `docs/safety/asmalloc/c/`.
 
-pub mod cxx;
 mod errno;
-mod seam;
-mod slow;
-mod table;
+mod mirror;
+#[doc(hidden)]
+pub mod routines;
+#[doc(hidden)]
+pub mod slow;
+#[doc(hidden)]
+pub mod table;
 
 use self::errno::{EINVAL, ENOMEM};
 use self::slow::{allocate, or_enomem};
@@ -59,13 +65,13 @@ const PAGE: usize = <LinuxOs as Os>::GEOMETRY.page_size();
 /// C's `malloc`.
 #[inline]
 pub extern "C" fn malloc(size: usize) -> *mut c_void {
-    seam::malloc(size)
+    routines::malloc(size)
 }
 
 /// C's `calloc`.
 #[inline]
 pub extern "C" fn calloc(n: usize, size: usize) -> *mut c_void {
-    seam::calloc(n, size)
+    routines::calloc(n, size)
 }
 
 /// C's `free`.
@@ -77,7 +83,7 @@ pub extern "C" fn calloc(n: usize, size: usize) -> *mut c_void {
 #[inline]
 pub unsafe extern "C" fn free(ptr: *mut c_void) {
     // SAFETY: the caller's promise.
-    unsafe { seam::free(ptr) }
+    unsafe { routines::free(ptr) }
 }
 
 /// C23's `free_sized`. The size is not trusted: the class comes from the address.
@@ -88,18 +94,18 @@ pub unsafe extern "C" fn free(ptr: *mut c_void) {
 #[inline]
 pub unsafe extern "C" fn free_sized(ptr: *mut c_void, size: usize) {
     // SAFETY: the caller's promise.
-    unsafe { seam::free_sized(ptr, size) }
+    unsafe { routines::free_sized(ptr, size) }
 }
 
-/// C23's `free_aligned_sized`. Neither the alignment nor the size is trusted.
+/// C23's `free_aligned_sized`: [`free`], since neither the alignment nor the size is trusted.
 ///
 /// # Safety
 ///
 /// As for [`free`].
 #[inline]
-pub unsafe extern "C" fn free_aligned_sized(ptr: *mut c_void, align: usize, size: usize) {
+pub unsafe extern "C" fn free_aligned_sized(ptr: *mut c_void, _align: usize, _size: usize) {
     // SAFETY: the caller's promise.
-    unsafe { seam::free_aligned_sized(ptr, align, size) }
+    unsafe { routines::free(ptr) }
 }
 
 /// The obsolete `cfree`, which glibc still exports for old binaries: [`free`].
@@ -110,7 +116,7 @@ pub unsafe extern "C" fn free_aligned_sized(ptr: *mut c_void, align: usize, size
 #[inline]
 pub unsafe extern "C" fn cfree(ptr: *mut c_void) {
     // SAFETY: the caller's promise.
-    unsafe { seam::free(ptr) }
+    unsafe { routines::free(ptr) }
 }
 
 /// The block at `ptr`, or an abort naming `call` if no block of the heap starts there.
@@ -149,7 +155,8 @@ pub unsafe extern "C" fn realloc(ptr: *mut c_void, size: usize) -> *mut c_void {
         Found::Small(class) if next == Some(class.class()) => return ptr,
         Found::Small(class) => class.size(),
         Found::Large { size: used } => {
-            if process::resize_in_place_by_address(old, used, size) {
+            // SAFETY: MOD-04.
+            if unsafe { process::resize_in_place_by_address(old, used, size) } {
                 return ptr;
             }
             // Everything `malloc_usable_size` reported, not just the size asked for: programs
@@ -158,7 +165,7 @@ pub unsafe extern "C" fn realloc(ptr: *mut c_void, size: usize) -> *mut c_void {
         }
     };
     let new = match next.and_then(Class::small) {
-        Some(class) => seam::alloc_small(class),
+        Some(_) => malloc(size).cast(),
         None if size > kept => process::alloc_large_grown(size),
         None => process::alloc_large(size, C_ALIGN, false),
     };
@@ -166,10 +173,18 @@ pub unsafe extern "C" fn realloc(ptr: *mut c_void, size: usize) -> *mut c_void {
         errno::set(ENOMEM);
         return ptr::null_mut();
     }
+    let (n, to) = (kept.min(size), NonNull::new(new));
     // SAFETY: MOD-01.
     unsafe {
-        old.as_ptr().copy_to_nonoverlapping(new, kept.min(size));
-        free(ptr);
+        match (found, to) {
+            // A large block is copied in pieces, its old pages returned behind the copy, and
+            // freed, all by the back end.
+            (Found::Large { .. }, Some(to)) => process::move_large(old, to, n),
+            _ => {
+                old.as_ptr().copy_to_nonoverlapping(new, n);
+                free(ptr);
+            }
+        }
     }
     new.cast()
 }
@@ -287,16 +302,19 @@ pub extern "C" fn asmalloc_version() -> *const c_char {
     VERSION.as_ptr()
 }
 
-/// glibc's `malloc_trim`: returns the wholly free pages the back end holds to the OS. The
-/// padding argument has no meaning here. Returns 1 if any memory was released, else 0.
+/// glibc's `malloc_trim`: sends every parked object back to the bitmaps and returns the wholly
+/// free pages to the OS (`collect`). The padding argument has no meaning here. Returns 1 if any
+/// memory was released, else 0.
 pub extern "C" fn malloc_trim(_pad: usize) -> c_int {
-    c_int::from(process::trim())
+    c_int::from(process::collect() > 0)
 }
 
 /// Exports the C interface under its C names (`malloc`, `free` and the rest) from the crate
 /// that invokes it, for a program or shared library that wants asmalloc as its C allocator.
-/// Invoke it once per program, at the item level. Each export is a call of the function of the
-/// same name in [`asmalloc::c`](self), which inlines into it.
+/// Invoke it once per program, at the item level. `malloc`, `free` and `free_sized` are the
+/// generated routines themselves (`front/generated/x86_64/exports.rs`, a copy of each under its C
+/// name), so a call reaches the routine with no jump in between; every other export is a call of
+/// the function of the same name in [`asmalloc::c`](self), which inlines into it.
 ///
 /// Besides the C standard's functions and POSIX's `posix_memalign`, it exports every other
 /// allocation function glibc 2.43 exports that takes or returns a block: `reallocarray`,
@@ -309,18 +327,12 @@ pub extern "C" fn malloc_trim(_pad: usize) -> c_int {
 #[macro_export]
 macro_rules! export_c_abi {
     () => {
+        // `malloc`, `calloc`, `free` and `free_sized`: the generated routines, defined in this
+        // crate.
+        $crate::asmalloc_exports_c_x86_64!();
+
         const _: () = {
             use ::core::ffi::{c_int, c_void};
-
-            #[unsafe(no_mangle)]
-            unsafe extern "C" fn malloc(size: usize) -> *mut c_void {
-                $crate::c::malloc(size)
-            }
-
-            #[unsafe(no_mangle)]
-            unsafe extern "C" fn calloc(n: usize, size: usize) -> *mut c_void {
-                $crate::c::calloc(n, size)
-            }
 
             #[unsafe(no_mangle)]
             unsafe extern "C" fn realloc(ptr: *mut c_void, size: usize) -> *mut c_void {
@@ -339,21 +351,9 @@ macro_rules! export_c_abi {
             }
 
             #[unsafe(no_mangle)]
-            unsafe extern "C" fn free(ptr: *mut c_void) {
-                // SAFETY: C-EXPORT-01.
-                unsafe { $crate::c::free(ptr) }
-            }
-
-            #[unsafe(no_mangle)]
             unsafe extern "C" fn cfree(ptr: *mut c_void) {
                 // SAFETY: C-EXPORT-01.
                 unsafe { $crate::c::cfree(ptr) }
-            }
-
-            #[unsafe(no_mangle)]
-            unsafe extern "C" fn free_sized(ptr: *mut c_void, size: usize) {
-                // SAFETY: C-EXPORT-01.
-                unsafe { $crate::c::free_sized(ptr, size) }
             }
 
             #[unsafe(no_mangle)]

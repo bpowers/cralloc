@@ -1,26 +1,30 @@
-//! Quick checks that the built library serves real programs: interposition, a shell pipeline,
-//! threads, forks from threads, a process without rseq, and the abort on a foreign pointer.
-//! `scripts/preload-check` runs the long list of real programs on demand.
+//! The preload library serving the small programs in `tests/programs/`: interposition, a
+//! shell pipeline, threads, forks from threads, signals, `dlopen`, C++ through its runtime, a
+//! process without rseq, and the abort on a foreign pointer. The `_fully` tests, ignored, run
+//! the heaviest programs longer. `scripts/preload-check` runs real software on demand, and
+//! these tests with it, against the release build.
 //!
-//! The tests run the programs in `tests/programs/`, compiled with the system C compiler, with
-//! the library cargo built for this test run preloaded. They run under the test runner's memory
-//! cap like every test.
+//! The programs are compiled with the system C and C++ compilers, once per test run, and run
+//! with the library cargo built for this test run preloaded. They run under the test runner's
+//! memory cap like every test.
 
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
-use std::sync::OnceLock;
+use std::sync::{Arc, Mutex, OnceLock};
 
-/// The library, built once per test run.
+/// The library, built once per test run, in the profile this test was built in.
 ///
 /// Cargo does not build a `cdylib` for integration tests, and a test build would make it
-/// unwind, which a `no_std` library cannot. So the test builds it with the dev profile, into a
-/// target directory of its own, so that it never waits on the build lock of the cargo that is
-/// running the tests.
+/// unwind, which a `no_std` library cannot. So the test builds it itself, into a target
+/// directory of its own, so that it never waits on the build lock of the cargo that is running
+/// the tests.
 fn library() -> PathBuf {
     static LIB: OnceLock<PathBuf> = OnceLock::new();
     LIB.get_or_init(|| {
         let target = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("preload-build");
         let cargo = std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
+        let release = !cfg!(debug_assertions);
         let status = Command::new(cargo)
             .args([
                 "build",
@@ -32,55 +36,86 @@ fn library() -> PathBuf {
             .arg(Path::new(env!("CARGO_MANIFEST_DIR")).join("Cargo.toml"))
             .arg("--target-dir")
             .arg(&target)
+            .args(release.then_some("--release"))
             .status()
             .expect("cargo runs");
         assert!(status.success(), "building the preload library");
-        target.join("debug/libasmalloc_preload.so")
+        let profile = if release { "release" } else { "debug" };
+        target.join(profile).join("libasmalloc_preload.so")
     })
     .clone()
 }
 
-/// Compiles `tests/programs/<file>` (C, or C++ for `.cpp`) and returns the executable.
-fn program(file: &str) -> PathBuf {
-    static DIR: OnceLock<PathBuf> = OnceLock::new();
-    let dir = DIR.get_or_init(|| {
+/// Compiles `tests/programs/<file>` (C, or C++ for `.cpp`) once per test run, into an
+/// executable, or with `shared` into `lib<name>.so`, linked against `link`, and returns it.
+/// Tests that need the same program wait for one compile.
+fn compile(file: &'static str, shared: bool, link: &[PathBuf]) -> PathBuf {
+    static BUILT: Mutex<BTreeMap<&str, Arc<OnceLock<PathBuf>>>> = Mutex::new(BTreeMap::new());
+    let once = BUILT
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .entry(file)
+        .or_default()
+        .clone();
+    once.get_or_init(|| {
         let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("preload-programs");
         std::fs::create_dir_all(&dir).expect("a scratch directory");
-        dir
-    });
-    let source = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("tests/programs")
-        .join(file);
-    // Each test compiles into its own file, so tests running at once do not race on one.
-    let exe = dir.join(format!("{file}-{:?}", std::thread::current().id()));
-    let (compiler, standard) = if file.ends_with(".cpp") {
-        ("c++", "-std=c++20")
-    } else {
-        ("cc", "-std=gnu17")
-    };
-    let status = Command::new(compiler)
-        .args(["-O2", standard, "-pthread", "-o"])
-        .arg(&exe)
-        .arg(&source)
-        .arg("-ldl")
-        .status()
-        .expect("a C and C++ compiler (cc, c++) is installed");
-    assert!(status.success(), "compiling {}", source.display());
-    exe
+        let source = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/programs")
+            .join(file);
+        let stem = file.rsplit_once('.').map_or(file, |(stem, _)| stem);
+        let out = dir.join(if shared {
+            format!("lib{stem}.so")
+        } else {
+            stem.to_owned()
+        });
+        let (compiler, standard) = if file.ends_with(".cpp") {
+            ("c++", "-std=c++20")
+        } else {
+            ("cc", "-std=gnu17")
+        };
+        // Into a file of this process's own, then renamed, so that a test run elsewhere in
+        // this checkout never runs a half-written program.
+        let partial = out.with_extension(format!("{}.partial", std::process::id()));
+        let status = Command::new(compiler)
+            .args(["-O2", standard, "-pthread"])
+            .args(shared.then_some(["-shared", "-fPIC"]).into_iter().flatten())
+            .arg("-o")
+            .arg(&partial)
+            .arg(&source)
+            .args(link)
+            .arg("-ldl")
+            .status()
+            .expect("a C and C++ compiler (cc, c++) is installed");
+        assert!(status.success(), "compiling {}", source.display());
+        std::fs::rename(&partial, &out).expect("renaming the compiled program");
+        out
+    })
+    .clone()
+}
+
+/// The executable for `tests/programs/<file>`.
+fn program(file: &'static str) -> PathBuf {
+    compile(file, false, &[])
 }
 
 fn run(preload: bool, command: &mut Command) -> Output {
-    if preload {
-        command.env("LD_PRELOAD", library());
-    } else {
-        command.env_remove("LD_PRELOAD");
-    }
+    run_with(preload.then(library).as_deref(), command)
+}
+
+/// Runs `command` with `lib` preloaded, or nothing.
+fn run_with(lib: Option<&Path>, command: &mut Command) -> Output {
+    match lib {
+        Some(lib) => command.env("LD_PRELOAD", lib),
+        None => command.env_remove("LD_PRELOAD"),
+    };
     command.output().expect("the program starts")
 }
 
+/// The program's output, after checking it is the same with the library preloaded as without.
 fn same_with_and_without(make: impl Fn() -> Command) -> String {
-    let plain = run(false, &mut make());
-    let preloaded = run(true, &mut make());
+    let plain = run_with(None, &mut make());
+    let preloaded = run_with(Some(&library()), &mut make());
     assert!(
         preloaded.status.success(),
         "preloaded run failed: {:?}\n{}",
@@ -136,10 +171,10 @@ fn threads_fork_while_others_allocate() {
     let exe = program("forks.c");
     let out = same_with_and_without(|| {
         let mut c = Command::new(&exe);
-        c.args(["4", "5"]);
+        c.args(["8", "40"]);
         c
     });
-    assert_eq!(out.trim(), "forks 20 of 20 children ok");
+    assert_eq!(out.trim(), "forks 320 of 320 children ok");
 }
 
 #[test]
@@ -155,10 +190,12 @@ fn a_process_without_rseq_is_served() {
 }
 
 #[test]
-fn a_pointer_that_is_not_a_block_aborts() {
+fn a_pointer_that_is_not_a_block_the_slow_path_checks_aborts() {
     use std::os::unix::process::ExitStatusExt;
     let exe = program("foreign.c");
-    for args in [&[][..], &["interior"][..]] {
+    // Outside the heap, and into the middle of a large block: both reach the slow path, which
+    // checks. A pointer into the middle of a small block is not promised to abort.
+    for args in [&[] as &[&str], &["interior"]] {
         let out = run(true, Command::new(&exe).args(args));
         assert_eq!(out.status.signal(), Some(6), "{:?}", out.status);
         assert!(
@@ -170,17 +207,38 @@ fn a_pointer_that_is_not_a_block_aborts() {
     }
 }
 
-/// The four throwing forms of `new`, which the C++ runtime keeps so that it can throw
-/// `std::bad_alloc`; the library exports the other 16 forms.
-const THROWING_NEW: [&str; 4] = [
-    "_Znwm",
-    "_Znam",
-    "_ZnwmSt11align_val_t",
-    "_ZnamSt11align_val_t",
-];
+/// Where the dynamic loader bound each C++ allocation operator `exe` calls with `lib`
+/// preloaded, by its own report: (operator, whether it bound to `lib`), each once.
+fn operator_bindings(lib: &Path, exe: &Path) -> std::collections::BTreeMap<String, bool> {
+    let traced = run_with(Some(lib), Command::new(exe).env("LD_DEBUG", "bindings"));
+    let report = String::from_utf8_lossy(&traced.stderr);
+    let to_lib = format!("to {} ", lib.display());
+    let mut bound = std::collections::BTreeMap::new();
+    for line in report.lines() {
+        let Some(at) = line.find("symbol `") else {
+            continue;
+        };
+        let name = &line[at + "symbol `".len()..];
+        let name = &name[..name.find('\'').unwrap_or(name.len())];
+        if ["_Znw", "_Zna", "_Zdl", "_Zda"]
+            .iter()
+            .any(|p| name.starts_with(p))
+        {
+            assert!(
+                line.contains(&to_lib) || line.contains("libstdc++.so"),
+                "{line}"
+            );
+            bound.insert(name.to_owned(), line.contains(&to_lib));
+        }
+    }
+    bound
+}
 
+/// The library exports no C++ operator (design: "Interfaces", C++): exporting some of them
+/// without the throwing `new` forms is unsound when another library defines them. So every
+/// operator a C++ program calls is the C++ runtime's, which calls the library's `malloc`.
 #[test]
-fn every_cxx_operator_form_meets_its_cases_and_binds_where_it_should() {
+fn every_cxx_operator_form_meets_its_cases_and_binds_to_the_cxx_runtime() {
     let exe = program("cxx_operators.cpp");
     let out = same_with_and_without(|| Command::new(&exe));
     assert!(!out.contains("FAIL"), "{out}");
@@ -189,35 +247,87 @@ fn every_cxx_operator_form_meets_its_cases_and_binds_where_it_should() {
         9,
         "{out}"
     );
-    // The dynamic loader's own report of where each operator the program calls was bound.
-    let lib = library();
-    let traced = run(true, Command::new(&exe).env("LD_DEBUG", "bindings"));
-    let report = String::from_utf8_lossy(&traced.stderr);
-    let to_lib = format!("to {} ", lib.display());
-    let mut ours = std::collections::BTreeSet::new();
-    let mut runtime = std::collections::BTreeSet::new();
-    for line in report.lines() {
-        let Some(at) = line.find("symbol `") else {
-            continue;
-        };
-        let name = &line[at + "symbol `".len()..];
-        let name = &name[..name.find('\'').unwrap_or(name.len())];
-        if !["_Znw", "_Zna", "_Zdl", "_Zda"]
-            .iter()
-            .any(|p| name.starts_with(p))
-        {
-            continue;
-        }
-        if THROWING_NEW.contains(&name) {
-            assert!(line.contains("libstdc++.so"), "{line}");
-            runtime.insert(name.to_owned());
-        } else {
-            assert!(line.contains(&to_lib), "{line}");
-            ours.insert(name.to_owned());
-        }
+    let bound = operator_bindings(&library(), &exe);
+    assert_eq!(bound.len(), 20, "{bound:?}");
+    assert!(bound.values().all(|&ours| !ours), "{bound:?}");
+    let out = Command::new("nm")
+        .args(["-D", "--defined-only"])
+        .arg(library())
+        .output()
+        .expect("nm runs");
+    let exports = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        !exports
+            .lines()
+            .any(|l| l.contains(" _Zn") || l.contains(" _Zd")),
+        "{exports}"
+    );
+}
+
+#[test]
+fn the_library_is_marked_never_to_be_unloaded() {
+    let out = Command::new("readelf")
+        .arg("-d")
+        .arg(library())
+        .output()
+        .expect("readelf runs");
+    let dynamic = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        dynamic
+            .lines()
+            .any(|l| l.contains("(FLAGS_1)") && l.contains("NODELETE")),
+        "{dynamic}"
+    );
+}
+
+/// A C++ program with a malloc of its own. Its `new` and `delete` are the C++ runtime's, on
+/// its `malloc`, under the preload library.
+#[test]
+fn a_cxx_program_with_its_own_malloc_runs() {
+    let exe = program("own_malloc.cpp");
+    let out = same_with_and_without(|| Command::new(&exe));
+    assert_eq!(out.trim(), "99500");
+}
+
+/// A program that replaces only `operator new(size_t)` and `operator delete(void*)`, which the
+/// standard says is enough. Its blocks sit inside our heap (its `new` is our `malloc` plus a
+/// header). Under the preload library every other form is the C++ runtime's, which forwards to
+/// the program's.
+#[test]
+fn a_cxx_program_with_its_own_operator_new_runs() {
+    let exe = program("own_new.cpp");
+    for mode in ["array", "sized", "matching", "empty", "nothrow"] {
+        let out = same_with_and_without(|| {
+            let mut c = Command::new(&exe);
+            c.arg(mode);
+            c
+        });
+        assert_eq!(out.trim(), format!("{mode}: live 0"));
     }
-    assert_eq!(ours.len(), 16, "{ours:?}");
-    assert_eq!(runtime.len(), 4, "{runtime:?}");
+}
+
+/// A program that replaces all four basic operators and tells scalar blocks from array blocks
+/// (a checker for `new`/`delete[]` mismatches does). The standard's defaults send the array
+/// forms to `operator new[]` and `operator delete[]`. With no operator exported, the program
+/// gets the runtime's defaults.
+#[test]
+fn a_program_with_its_own_array_operators_gets_them_from_the_array_forms() {
+    let exe = program("tagged_new.cpp");
+    let out = same_with_and_without(|| Command::new(&exe));
+    assert_eq!(out.trim(), "mismatches 0");
+}
+
+/// The operators are replaced by a shared library the program links (as `libtcmalloc.so` and
+/// Boehm GC's `libgccpp` do), not by the program itself. The preloaded library comes before it
+/// in the search order, so if the preload exported `operator delete` but not the throwing
+/// `operator new`, the program's `new` would be the library's and its `delete` ours, which is
+/// why the preload library exports no C++ operator.
+#[test]
+fn a_program_linked_to_a_library_that_replaces_the_operators_runs() {
+    let library = compile("lib_new.cpp", true, &[]);
+    let exe = compile("use_lib_new.cpp", false, &[library]);
+    let out = same_with_and_without(|| Command::new(&exe));
+    assert_eq!(out.trim(), "99500");
 }
 
 #[test]
@@ -229,4 +339,99 @@ fn a_throwing_new_that_fails_throws_a_catchable_bad_alloc() {
         c
     });
     assert_eq!(out.trim(), "caught bad_alloc");
+}
+
+/// libstdc++'s nothrow `new` returns null when the new-handler throws, with or without the
+/// library.
+#[test]
+fn a_nothrow_new_whose_handler_throws_returns_null() {
+    let exe = program("cxx_operators.cpp");
+    let out = same_with_and_without(|| {
+        let mut c = Command::new(&exe);
+        c.arg("throwing-handler");
+        c
+    });
+    assert_eq!(out.trim(), "nothrow new returned null");
+}
+
+#[test]
+fn cxx_programs_print_the_same() {
+    for file in ["cxx.cpp", "cxx_containers.cpp"] {
+        let exe = program(file);
+        same_with_and_without(|| Command::new(&exe));
+    }
+}
+
+/// Exit handlers and stdio teardown run while other threads still allocate.
+#[test]
+fn a_process_exits_while_threads_allocate() {
+    let exe = program("threads.c");
+    let out = same_with_and_without(|| {
+        let mut c = Command::new(&exe);
+        c.arg("exit");
+        c
+    });
+    assert!(out.contains("exit while allocating"), "{out}");
+}
+
+#[test]
+fn a_process_without_rseq_forks_from_threads() {
+    let exe = program("forks.c");
+    let out = same_with_and_without(|| {
+        let mut c = Command::new(&exe);
+        c.args(["4", "20"])
+            .env("GLIBC_TUNABLES", "glibc.pthread.rseq=0");
+        c
+    });
+    assert_eq!(out.trim(), "forks 80 of 80 children ok");
+}
+
+/// Signal handlers that allocate, interrupting threads that allocate (design: "Signals"). C
+/// does not allow this, so only the preloaded run is checked.
+#[test]
+fn signal_handlers_allocate_while_threads_do() {
+    let out = run(true, &mut Command::new(program("signals.c")));
+    assert!(
+        out.status.success(),
+        "{:?}\n{}",
+        out.status,
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+#[test]
+fn a_library_opened_and_closed_repeatedly_allocates() {
+    let exe = program("dl.c");
+    let library = compile("dlib.c", true, &[]);
+    let out = same_with_and_without(|| {
+        let mut c = Command::new(&exe);
+        c.arg(&library).arg("200");
+        c
+    });
+    assert!(out.starts_with("dlopen rounds 200 "), "{out}");
+}
+
+#[test]
+#[ignore = "slow: run with scripts/gate --all"]
+fn threads_hand_blocks_to_each_other_fully() {
+    let exe = program("threads.c");
+    let out = same_with_and_without(|| {
+        let mut c = Command::new(&exe);
+        c.args(["20", "16", "20000"]);
+        c
+    });
+    assert!(out.contains("bad 0"), "{out}");
+}
+
+#[test]
+#[ignore = "slow: run with scripts/gate --all"]
+fn a_process_without_rseq_is_served_fully() {
+    let exe = program("threads.c");
+    let out = same_with_and_without(|| {
+        let mut c = Command::new(&exe);
+        c.args(["5", "16", "20000"])
+            .env("GLIBC_TUNABLES", "glibc.pthread.rseq=0");
+        c
+    });
+    assert!(out.contains("bad 0"), "{out}");
 }

@@ -34,12 +34,16 @@ pub(crate) fn tiny_class() -> SmallClass {
 }
 
 /// Limits under which every path is reachable with the tiny class: spares on both stacks, a
-/// depot target of one magazine, and a look for an idle slab on every slow path.
+/// depot target of one magazine, a look for an idle slab on every slow path, every rule that
+/// returns parked objects on, and every other retiring full magazine refreshed.
 pub(crate) const TIGHT: Tuning = Tuning {
     spare_budget: usize::MAX / 2,
     max_spares: 1,
     depot_target: 2 * (32 << 10),
     look_every: 1,
+    refresh_every: 2,
+    age_limit: true,
+    shed_unused: true,
 };
 
 /// A fake object: an address that is never dereferenced.
@@ -144,7 +148,7 @@ impl Source for TestSource {
         self.give(class, object);
     }
 
-    fn purge_step(&self) {
+    fn purge_step(&self, _: &dyn Fn() -> u64) {
         self.purges.fetch_add(1, Ordering::Relaxed);
     }
 }

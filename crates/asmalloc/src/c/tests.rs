@@ -53,11 +53,18 @@ fn small_blocks_use_their_whole_c_class() {
     }
 }
 
+/// Whether a large block of `size` bytes at `p` reports as usable what it asked for, to the
+/// end of the page it ends in: a large block may start a stagger into its first page.
+fn reports(p: *mut c_void, size: usize) -> bool {
+    let n = usable(p);
+    n >= size && n < size + PAGE && (p.addr() + n).is_multiple_of(PAGE)
+}
+
 #[test]
 fn large_blocks_report_what_was_asked_for_rounded_to_a_page() {
     for size in [(32 << 10) + 1, 40 << 10, 100_000, 3 << 20] {
         let p = malloc(size);
-        assert_eq!(usable(p), size.next_multiple_of(PAGE), "malloc({size})");
+        assert!(reports(p, size), "malloc({size})");
         release(p);
     }
     // An aligned request in a large slot reports its size, not the slot.
@@ -104,17 +111,17 @@ fn realloc_stays_in_place_when_the_class_allows() {
         let q = realloc(p, 33);
         assert_ne!(q, p);
         free(q);
-        // A large block grows within its slot and shrinks to a quarter of it in place.
+        // A large block grows within its slot and shrinks in place.
         let big = malloc(40 << 10);
         assert_eq!(realloc(big, 39 << 10), big);
         assert_eq!(realloc(big, 40 << 10), big);
-        assert_eq!(usable(big), 40 << 10);
+        assert!(reports(big, 40 << 10));
         // Growing out of the slot moves to one with headroom: the next steps stay.
         let grown = realloc(big, 100 << 10);
         assert_ne!(grown, big);
-        assert_eq!(usable(grown), 100 << 10);
+        assert!(reports(grown, 100 << 10));
         assert_eq!(realloc(grown, 300 << 10), grown);
-        assert_eq!(usable(grown), 300 << 10);
+        assert!(reports(grown, 300 << 10));
         // Shrinking to a small size moves into a small class.
         let small = realloc(grown, 100);
         assert_ne!(small, grown);
@@ -201,6 +208,41 @@ fn calloc_zeroes_reused_small_and_large_blocks() {
     }
 }
 
+/// A large block cut down by `realloc` stays where it is and gives its tail back: grown again
+/// in place, the kept part still holds its bytes and the rest reads as zero, which it would
+/// not if the pages had stayed. A later `realloc` that moves it copies all of that.
+#[test]
+fn realloc_shrinking_a_large_block_returns_its_tail() {
+    let (big, small) = (4 << 20, (3 << 19) + 1);
+    // SAFETY: each block is live with the size used where it is read or written, and given up
+    // once.
+    unsafe {
+        let p = malloc(big).cast::<u8>();
+        p.write_bytes(0xab, big);
+        let q = realloc(p.cast(), small).cast::<u8>();
+        assert_eq!(
+            q, p,
+            "a shrink to over an eighth of the slot stays in place"
+        );
+        let kept = usable(q.cast());
+        assert!(kept >= small && kept < small + 4096);
+        let r = realloc(q.cast(), big).cast::<u8>();
+        assert_eq!(r, p, "it grows back within its slot");
+        let bytes = core::slice::from_raw_parts(r, big);
+        assert!(bytes[..kept].iter().all(|&b| b == 0xab));
+        assert!(
+            bytes[kept..].iter().all(|&b| b == 0),
+            "the tail kept its old pages"
+        );
+        let moved = realloc(r.cast(), 8 * big).cast::<u8>();
+        assert_ne!(moved, r);
+        let bytes = core::slice::from_raw_parts(moved, big);
+        assert!(bytes[..kept].iter().all(|&b| b == 0xab));
+        assert!(bytes[kept..].iter().all(|&b| b == 0));
+        free(moved.cast());
+    }
+}
+
 #[test]
 fn malloc_trim_returns_memory_after_a_peak() {
     let blocks: Vec<_> = (0..64).map(|_| malloc(1 << 20)).collect();
@@ -273,67 +315,26 @@ fn the_version_is_the_crates() {
     assert_eq!(asmalloc_version(), asmalloc_version());
 }
 
+/// A megabyte is a class. One byte more outgrows the slot and moves to a slot with four times
+/// the room; cut back to a megabyte, the block still fills a fifth of that slot, more than the
+/// eighth under which a shrink moves, so it stays, and so does every later step.
 #[test]
-fn operator_new_serves_every_form_with_its_alignment() {
-    for size in [0, 1, 16, 24, 100, 40 << 10, 3 << 20] {
-        for p in [cxx::operator_new(size), cxx::operator_new_nothrow(size)] {
-            assert!(!p.is_null());
-            assert!(usable(p) >= size);
-            if size >= 16 {
-                assert_eq!(p.addr() % 16, 0);
-            }
-            // SAFETY: a live block, given up once.
-            unsafe { cxx::operator_delete_sized(p, size) };
-        }
-        for align in [1, 64, 4096, 1 << 21] {
-            let p = cxx::operator_new_aligned(size, align);
-            let q = cxx::operator_new_aligned_nothrow(size, align);
-            assert_eq!(p.addr() % align, 0);
-            assert_eq!(q.addr() % align, 0);
-            // SAFETY: live blocks, each given up once.
-            unsafe {
-                cxx::operator_delete_sized_aligned(p, size, align);
-                cxx::operator_delete(q);
+fn a_block_resized_back_and_forth_across_a_class_boundary_settles() {
+    let size = 1 << 20;
+    let mut moves = 0;
+    // SAFETY: the block is live where it is resized and given up once.
+    unsafe {
+        let mut p = malloc(size);
+        for _ in 0..10 {
+            for next in [size + 1, size] {
+                let q = realloc(p, next);
+                moves += usize::from(q != p);
+                p = q;
             }
         }
+        free(p);
     }
-}
-
-#[test]
-fn nothrow_new_fails_with_null_when_no_handler_is_installed() {
-    // A Rust test binary has no C++ runtime, so there is no new-handler to run.
-    assert!(cxx::operator_new_nothrow(usize::MAX / 4).is_null());
-    assert!(cxx::operator_new_aligned_nothrow(usize::MAX / 4, 64).is_null());
-    // An alignment that is not a power of two is not served.
-    assert!(cxx::operator_new_aligned_nothrow(16, 48).is_null());
-}
-
-#[test]
-fn a_sized_delete_with_the_wrong_size_frees_the_right_block() {
-    let mut seen = Vec::new();
-    for _ in 0..64 {
-        let p = cxx::operator_new(100);
-        // SAFETY: `p` is live and given up once; the size is deliberately wrong.
-        unsafe { cxx::operator_delete_sized(p, 1 << 20) };
-        let q = cxx::operator_new(100);
-        seen.push(q == p);
-        // SAFETY: as above, with a wrong size and alignment.
-        unsafe { cxx::operator_delete_sized_aligned(q, 8, 4096) };
-    }
-    assert!(seen.iter().filter(|&&same| same).count() > 32, "{seen:?}");
-}
-
-#[test]
-fn the_throwing_forms_slow_paths_return_null_for_the_routine_to_throw() {
-    // Not exported; what the generated routine will call. With no C++ runtime in a Rust test
-    // binary there is no new-handler, so the loop ends at once.
-    assert!(cxx::operator_new(usize::MAX / 4).is_null());
-    assert!(cxx::operator_new_aligned(usize::MAX / 4, 64).is_null());
-    assert!(cxx::operator_new_aligned(16, 48).is_null());
-    let p = cxx::operator_new_aligned(100, 4096);
-    assert_eq!(p.addr() % 4096, 0);
-    // SAFETY: a live block, given up once.
-    unsafe { cxx::operator_delete(p) };
+    assert!(moves <= 2, "{moves} of 20 calls moved the megabyte");
 }
 
 #[test]
@@ -357,5 +358,104 @@ fn calloc_zeroes_all_it_reports_usable() {
             );
             release(p);
         }
+    }
+}
+
+/// The generated routines, which the export macros bind `malloc`, `free` and `free_sized` to.
+mod generated {
+    use super::super::routines;
+    use super::*;
+
+    #[test]
+    fn they_serve_every_c_class_and_large_blocks() {
+        for size in [0, 1, 8, 9, 24, 100, 4097, 32 << 10, (32 << 10) + 1, 100_000] {
+            let p = routines::malloc(size);
+            assert!(
+                !p.is_null() && Asmalloc::contains(p.cast()),
+                "malloc({size})"
+            );
+            assert!(usable(p) >= size);
+            if size >= 16 {
+                assert_eq!(p.addr() % 16, 0, "malloc({size})");
+            }
+            // SAFETY: a live block, given up once.
+            unsafe { routines::free(p) };
+        }
+        // SAFETY: null is always freeable.
+        unsafe {
+            routines::free(ptr::null_mut());
+            routines::free_sized(ptr::null_mut(), 16);
+        }
+    }
+
+    #[test]
+    fn they_pair_with_the_slow_paths_both_ways() {
+        let a = routines::malloc(200);
+        let b = slow::malloc_slow(200);
+        // SAFETY: live blocks, each given up once, by the other path.
+        unsafe {
+            slow::free_slow(a);
+            routines::free(b);
+        }
+        let c = routines::malloc(3000);
+        // SAFETY: as above, with the size it was allocated with.
+        unsafe { routines::free_sized(c, 3000) };
+    }
+
+    /// Two magazines' worth of every small class, so that each class's routines miss into the
+    /// heap's slow paths (which write the masks the routines read) and then hit.
+    #[test]
+    fn they_serve_every_small_class_through_their_slow_paths() {
+        for class in crate::classes::SmallClass::all() {
+            let size = class.size();
+            if table::malloc_class(size) != Some(class) {
+                continue;
+            }
+            let held: Vec<*mut c_void> = (0..2 * class.magazine().slots())
+                .map(|_| routines::malloc(size))
+                .collect();
+            for &p in &held {
+                assert!(!p.is_null());
+                assert_eq!(usable(p), size);
+            }
+            for p in held {
+                // SAFETY: each block is live and given up once.
+                unsafe { routines::free_sized(p, size) };
+            }
+        }
+    }
+
+    #[test]
+    fn a_wrong_size_frees_what_free_would() {
+        // Warm the class so that the next allocation is served from the magazine.
+        let p = routines::malloc(48);
+        let class = usable(p);
+        // SAFETY: a live block, given up once, with a size of another class.
+        unsafe { routines::free_sized(p, 16) };
+        let q = routines::malloc(48);
+        assert_eq!(usable(q), class);
+        // SAFETY: as above, with a size above every small class.
+        unsafe { routines::free_sized(q, 1 << 20) };
+        let r = routines::malloc(48);
+        assert_eq!(usable(r), class);
+        // SAFETY: as above, with its own size.
+        unsafe { routines::free_sized(r, 48) };
+    }
+
+    #[test]
+    fn a_freed_block_is_the_next_one_handed_out_on_the_same_cpu() {
+        // On one CPU the magazine is a stack. A thread may migrate between the calls, so the
+        // test asks only that it happens most of the time.
+        let mut same = 0;
+        for _ in 0..1000 {
+            let p = routines::malloc(64);
+            // SAFETY: a live block, given up once.
+            unsafe { routines::free(p) };
+            let q = routines::malloc(64);
+            same += usize::from(p == q);
+            // SAFETY: a live block, given up once.
+            unsafe { routines::free_sized(q, 64) };
+        }
+        assert!(same > 900, "{same}");
     }
 }

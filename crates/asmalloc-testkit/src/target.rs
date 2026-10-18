@@ -44,6 +44,24 @@ pub fn c_fns() -> CFns {
     }
 }
 
+/// The C functions under test with `malloc`, `calloc`, `free` and the sized frees their slow
+/// paths alone (`asmalloc::c::slow`), the Rust path that completes every call the generated
+/// routines miss; the rest as in [`c_fns`], whose `malloc` and friends are the routines.
+#[cfg(not(miri))]
+pub fn c_fns_slow() -> CFns {
+    use asmalloc::c;
+    CFns {
+        name: "asmalloc (slow paths)",
+        malloc: c::slow::malloc_slow,
+        calloc: c::slow::calloc_slow_args,
+        free: c::slow::free_slow,
+        sized_free: Some(crate::subject::SizedFree {
+            free_sized: c::slow::free_sized_slow,
+            free_aligned_sized: c::slow::free_aligned_sized_slow,
+        }),
+        ..c_fns()
+    }
+}
 /// The C functions under test: under Miri, Miri's own.
 #[cfg(miri)]
 pub fn c_fns() -> CFns {

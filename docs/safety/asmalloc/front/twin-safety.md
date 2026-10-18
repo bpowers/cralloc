@@ -31,7 +31,7 @@ of slab fields are:
   `s <= n - 2` and the new slot is at most `n - 1`. `classes::verify` proves both tests for every
   size, address and marker. The stack routines store a magazine address the slow path holds
   (below) or the link they read, which (S) covers;
-- store-if-equal, whose contract requires `new` to keep (S). The crate's only callers (SLOW-01)
+- store-if-equal, whose contract requires `new` to keep (S). The crate's only callers (DEPOT-SLOW-01)
   pass `Magazine::word(level)` with `level <= capacity`, so slot `level + 1` in `1..=n - 1` of
   a `Magazine` handle;
 - the drain, which stores its marker, zero, or (in back-out) a value it exchanged out of the same
@@ -44,7 +44,7 @@ Magazines, the magazine area and the depot stacks are crate-private, so outside 
 handle can be had at all, and no stack can be given a magazine of the wrong size or another
 heap's. Inside the crate a handle is made only by the thread that took the magazine off a stack,
 out of a slab word, or out of the area, with the size of the stack or class it came from, and
-that thread then owns it (SLOW-01, SPARE-01, the drain's step 4).
+that thread then owns it (DEPOT-SLOW-01, SPARE-01, the drain's step 4).
 
 The slow paths that write a slab array all hold the one depot and space that array is used
 with (`Cache::new`'s contract, CACHE-01 in `depot/magazine-safety.md`), so every magazine a slab

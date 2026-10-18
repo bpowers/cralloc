@@ -332,7 +332,7 @@ theorem arg2 : cx.arg s 2 = x s := rfl
 
 theorem facts_of_pre (hs : (pushInlineContract inlineAbi).pre s) : Facts cx s := by
   have := (pre_iff cx (s := s) hv rfl rfl).mp hs
-  exact facts_of_world hX (.inl rfl) this.2.1 this.2.2
+  exact facts_of_world hX rfl this.2.1 this.2.2
 
 /-- Item `i` of the magazine is apart from `rseq_cs`, the slab word, and the
 free slot. -/
@@ -510,7 +510,7 @@ theorem abortOk2 (hp : Pre s k) (hi : cx.InRange s) (ht : ¬ tst s = 0) :
   have hfr : Frame [⟨area s + 8, 8⟩, ⟨wv s, 8⟩] s.mem (mSlot s) := frame_two _ _ _ _ _
   have hcs : (mSlot s).readW (area s + 8) 64 = s.csDesc := by
     rw [mSlot, readW64_writeW_disj hf.cs.symm, m1_cs]
-  have hW := harmless_cs2 hX hp.facts.pre (harmless_mag (.inl rfl)
+  have hW := harmless_cs2 hX hp.facts.pre (harmless_mag rfl
     (mag_apart hp hi (hit hp hi ht).1) (sub_of_contains hf.inMag))
   obtain ⟨hip, hre⟩ := retry hX hv (post := fun s s' => _) (fun _ => rfl) (fun _ => rfl) (by decide)
     hp.facts.pre mσ9 (by decide) (by decide) hfr hW
@@ -534,7 +534,7 @@ theorem wordAddr_eq (hp : Pre s k) :
     wordAddr (s.syms SLABS) (cpu32 s).toNat (cx.cls s) = wa s := by
   rw [hp.word]; rfl
 
-theorem test_eq : BitVec.ofNat 32 ((wv s).toNat + 8) &&& BitVec.ofNat 32 (cx.testMask s 0) = tst s := by
+theorem test_eq : BitVec.ofNat 32 ((wv s).toNat + 8) &&& BitVec.ofNat 32 (cx.testMask s) = tst s := by
   have : BitVec.ofNat 32 ((wv s).toNat + 8) = (wv s + 8).setWidth 32 := by
     apply BitVec.eq_of_toNat_eq
     rw [BitVec.toNat_ofNat, BitVec.toNat_setWidth, add8_toNat_mod,
@@ -547,7 +547,7 @@ theorem trace_ok (hs : (pushInlineContract inlineAbi).pre s) :
   obtain ⟨k, hp⟩ := pre_of h
   show cx.PushTrace s (cx.arg s 2) (Code.events isa (.rseq arm body) s)
   simp only [Code.events, execBlock_arm h.toArm, events_arm h.toArm]
-  refine ⟨(o s).toNat, s.csDesc.toNat, (cpu32 s).toNat, (wv s).toNat, 0, ?_⟩
+  refine ⟨(o s).toNat, s.csDesc.toNat, (cpu32 s).toNat, (wv s).toNat, ?_⟩
   simp only [Spec.Slab.Ctx.headTrace, Spec.Slab.Ctx.rd, Spec.Slab.Ctx.wr, tp_of (c := cx) hX,
     sym_of (c := cx) hX, test_eq, ofNat_toNat64, addr8, addr4, rsName, arg2]
   by_cases hi : cx.InRange s

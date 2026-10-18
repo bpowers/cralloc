@@ -9,6 +9,14 @@
 //! [`front`] holds the per-CPU slabs and the routines. The heap joins them into one allocator
 //! behind `Asmalloc`, the handle a program installs with `#[global_allocator]`, and behind
 //! `SimAsmalloc` and `SimHeap` (feature `sim`), the same heap over the simulated OS with twins.
+//!
+//! `Asmalloc` does not exist under Miri, which cannot run its routines or system calls: a
+//! program checked under Miri puts `#[cfg(not(miri))]` on its `#[global_allocator]` and gets
+//! Miri's own allocator.
+//!
+//! A shared object that contains the allocator must be linked `-z nodelete`, as the preload
+//! library is: unloading one kills the process, because a thread's restartable-sequence area
+//! goes on naming code inside it.
 
 #![no_std]
 #![deny(unsafe_op_in_unsafe_fn)]
@@ -32,14 +40,17 @@ pub mod c;
 pub mod classes;
 pub mod depot;
 pub mod front;
-#[cfg(test)]
-pub(crate) mod generated;
 mod heap;
 pub mod os;
 pub mod space;
+/// The constants of the specification the routines were proved against, as the Lean emitter
+/// writes them, for every target: the layout the Rust side builds from or asserts against.
+#[path = "front/generated/constants.rs"]
+#[rustfmt::skip]
+pub(crate) mod spec;
 pub mod stats;
 
-#[cfg(any(miri, all(target_os = "linux", target_arch = "x86_64", not(kani))))]
+#[cfg(all(target_os = "linux", target_arch = "x86_64", not(miri), not(kani)))]
 pub use heap::Asmalloc;
 #[cfg(any(test, feature = "sim"))]
 pub use heap::{SimAsmalloc, SimHeap};

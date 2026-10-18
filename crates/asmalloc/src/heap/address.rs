@@ -9,13 +9,13 @@
 //! The in-place and headroom rules for large blocks are the ones `large.rs` applies to Rust
 //! resizes, restated for a block described by its address: a block stays put when the new size
 //! is still large, fits the slot or run, and, when it shrinks, keeps at least a
-//! [`HEADROOM`]th of it; a block that outgrows its slot moves to one with [`HEADROOM`] times
-//! the room, but not past a region.
+//! [`SHRINK_MOVES_BELOW`](super::large::SHRINK_MOVES_BELOW)th of it; a block that outgrows its
+//! slot moves to one with [`HEADROOM`] times the room, but not past a region.
 //!
-//! Small blocks are not served here: the C layer allocates and frees them with the
-//! out-of-line routines (`Asmalloc::alloc_small`, `Asmalloc::free_small`).
+//! Small blocks are not served here: the C layer allocates and frees them with the generated C
+//! routines and, when those miss, the heap's slow paths (`c_alloc_small`, `c_free_small`).
 
-use super::large::HEADROOM;
+use super::large::{HEADROOM, stays_after_shrink};
 use super::{Heap, Zero};
 use crate::back::Kind;
 use crate::classes::{C_ALIGN, Class, SmallClass};
@@ -99,7 +99,11 @@ impl<O: Os> Heap<O> {
     /// Resizes the large block at `ptr`, which holds `old` bytes in use, to `new` bytes in
     /// place if the rules in the module documentation allow it, and says whether it did. A
     /// block that stays records `new` as its size.
-    pub(crate) fn resize_in_place_by_address(
+    ///
+    /// # Safety
+    ///
+    /// `ptr` is a live large block of this heap that the caller owns and is resizing.
+    pub(crate) unsafe fn resize_in_place_by_address(
         &self,
         ptr: NonNull<u8>,
         old: usize,
@@ -109,29 +113,26 @@ impl<O: Os> Heap<O> {
             return false;
         };
         let room = match back.lookup(ptr.as_ptr()) {
-            Some(Kind::Slot(class)) if !class.is_small() => class.size(),
-            Some(Kind::Run(regions)) => regions << back.space().plan().region_shift(),
-            _ => return false,
+            Some(Kind::Slot(class)) if class.is_small() => return false,
+            Some(_) => back.room(ptr.as_ptr()).unwrap_or(0),
+            None => return false,
         };
-        let fits = is_large(new) && new <= room && (new >= old || new >= room / HEADROOM);
+        let fits = is_large(new) && new <= room && (new >= old || stays_after_shrink(new, room));
         if fits {
-            back.resize(ptr, new);
+            // SAFETY: the caller's promise; a resize gives up what lies past the new size.
+            unsafe { back.resize_in_place(ptr, new) };
         }
         fits
     }
-
-    /// Returns the wholly free pages the back end holds to the OS; says whether any were
-    /// resident. Objects cached in magazines and the depot stay where they are.
-    pub(crate) fn trim(&self) -> bool {
-        self.back().is_some_and(|back| back.trim() > 0)
-    }
 }
 
-/// The process's heap, for the C layer: the operations above on the one static heap.
+/// The process's heap, for the C layer: the operations above on the one static heap. A large
+/// allocation or free here is a slow path, and runs a heartbeat as the Rust ones do.
 #[cfg(all(target_os = "linux", target_arch = "x86_64", not(miri), not(kani)))]
 pub(crate) mod process {
-    use super::super::global::HEAP;
+    use super::super::global::{HEAP, large_heartbeat};
     use super::Found;
+    use crate::Asmalloc;
     use crate::os::Os;
     use core::ptr::{self, NonNull};
 
@@ -145,28 +146,57 @@ pub(crate) mod process {
     /// memory.
     #[cold]
     pub(crate) fn alloc_large(size: usize, align: usize, zero: bool) -> *mut u8 {
-        HEAP.alloc_large_aligned(size, align, zero)
-            .map_or(ptr::null_mut(), NonNull::as_ptr)
+        let block = HEAP.alloc_large_aligned(size, align, zero);
+        large_heartbeat();
+        block.map_or(ptr::null_mut(), NonNull::as_ptr)
     }
 
     /// A large block for an object growing to `size` bytes, with headroom; null if there is
     /// no memory.
     #[cold]
     pub(crate) fn alloc_large_grown(size: usize) -> *mut u8 {
-        HEAP.alloc_large_grown(size)
-            .map_or(ptr::null_mut(), NonNull::as_ptr)
+        let block = HEAP.alloc_large_grown(size);
+        large_heartbeat();
+        block.map_or(ptr::null_mut(), NonNull::as_ptr)
     }
 
     /// Frees the large block at `ptr`, finding its class or run from the address. Aborts if no
     /// large block starts there, or if it is free.
     #[cold]
     pub(crate) fn free_large(ptr: NonNull<u8>) {
-        HEAP.free_large(ptr)
+        HEAP.free_large(ptr);
+        large_heartbeat();
+    }
+
+    /// Moves `len` bytes of the large block at `from` to `to` and frees `from`, a piece at a
+    /// time with the old pages returned behind the copy (`Back::move_large`).
+    ///
+    /// # Safety
+    ///
+    /// As for `Back::move_large`: `from` is a large block of the heap that the caller owns
+    /// and gives up, readable for `len` bytes; `to` is writable for `len` bytes and does not
+    /// overlap it.
+    #[cold]
+    pub(crate) unsafe fn move_large(from: NonNull<u8>, to: NonNull<u8>, len: usize) {
+        match HEAP.back() {
+            // SAFETY: the caller's promise, passed on.
+            Some(back) => unsafe { back.move_large(from, to, len, false) },
+            None => HEAP.os().abort("a move of a block when no heap exists"),
+        }
     }
 
     /// See `Heap::resize_in_place_by_address`.
-    pub(crate) fn resize_in_place_by_address(ptr: NonNull<u8>, old: usize, new: usize) -> bool {
-        HEAP.resize_in_place_by_address(ptr, old, new)
+    ///
+    /// # Safety
+    ///
+    /// As for `Heap::resize_in_place_by_address`.
+    pub(crate) unsafe fn resize_in_place_by_address(
+        ptr: NonNull<u8>,
+        old: usize,
+        new: usize,
+    ) -> bool {
+        // SAFETY: the caller's promise, passed on.
+        unsafe { HEAP.resize_in_place_by_address(ptr, old, new) }
     }
 
     /// The bytes the block at `ptr` may use, if a block starts there.
@@ -174,9 +204,20 @@ pub(crate) mod process {
         HEAP.usable_size(ptr)
     }
 
-    /// See `Heap::trim`.
-    pub(crate) fn trim() -> bool {
-        HEAP.trim()
+    /// See `Asmalloc::collect`.
+    pub(crate) fn collect() -> usize {
+        Asmalloc::collect()
+    }
+
+    /// The published heap's base address and region shift, once it has started: what the C
+    /// layer copies beside the slabs for the C frees (`c::mirror`).
+    pub(crate) fn layout() -> Option<(usize, u32)> {
+        HEAP.back().map(|back| {
+            (
+                back.space().base().addr().get(),
+                back.space().plan().region_shift(),
+            )
+        })
     }
 
     /// Ends the process with `message`.
@@ -231,26 +272,23 @@ mod tests {
     fn large_blocks_resize_in_place_within_their_room() {
         let heap = SimHeap::<crate::os::sim::Standard>::new();
         let big = heap.heap.alloc_large_aligned(40 << 10, 16, false).unwrap();
-        // The slot is the 40 KiB class: growth past it moves, a shrink to a quarter stays.
-        assert!(
-            !heap
-                .heap
-                .resize_in_place_by_address(big, 40 << 10, 41 << 10)
-        );
-        assert!(
-            heap.heap
-                .resize_in_place_by_address(big, 40 << 10, 33 << 10)
-        );
+        let resize = |old, new| {
+            // SAFETY: the test holds the block and uses none of it meanwhile.
+            unsafe { heap.heap.resize_in_place_by_address(big, old, new) }
+        };
+        // Growth past the room from the block to its slot's end moves; within it, and a shrink
+        // to an eighth, stays.
+        let room = heap.heap.back().unwrap().room(big.as_ptr()).unwrap();
+        assert!(room >= 40 << 10);
+        assert!(!resize(40 << 10, room + 1));
+        assert!(resize(40 << 10, room));
+        assert!(resize(room, 33 << 10));
         assert_eq!(
             heap.heap.find(big.as_ptr()),
             Some(Found::Large { size: 33 << 10 })
         );
         // A size with a small class never stays in a large slot.
-        assert!(
-            !heap
-                .heap
-                .resize_in_place_by_address(big, 33 << 10, 32 << 10)
-        );
+        assert!(!resize(33 << 10, 32 << 10));
         heap.heap.free_large(big);
     }
 
@@ -263,10 +301,11 @@ mod tests {
             Some(Found::Large { size: 40 << 10 })
         );
         // Room for four times as much: growth to 150 KiB stays.
-        assert!(
+        // SAFETY: the test holds the block and uses none of it meanwhile.
+        assert!(unsafe {
             heap.heap
                 .resize_in_place_by_address(grown, 40 << 10, 150 << 10)
-        );
+        });
         heap.heap.free_large(grown);
     }
 

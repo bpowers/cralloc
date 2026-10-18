@@ -4,14 +4,12 @@
 //! [`Routines`] and nothing more. Pop and push are the inlined forms. They name no class: each
 //! is given the address of its class's word in slab 0 and the class's mask, which a class known
 //! at compile time folds to an address and a constant, and a class known only at run time
-//! computes with an add and a table load. The out-of-line forms, which take the word's address
-//! in a register, read the mask from the table after the slabs and tail-call `pop_slow` and
-//! `push_slow` on a miss, are for callers that want one call per operation (the C entry
-//! points); the store-if-equal and stack routines exist only out of line.
+//! computes with an add and a table load. The store-if-equal and stack routines exist only out
+//! of line.
 //!
-//! The generated code names its surroundings by path: `front::SLABS`, `front::__rseq_offset`,
-//! `front::pop_slow` and `front::push_slow` (see `super`). The ledger for the unsafe blocks
-//! here is `docs/safety/asmalloc/front/real-safety.md`.
+//! The generated code names its surroundings by path: `front::SLABS` and
+//! `front::__rseq_offset` (see `super`). The ledger for the unsafe blocks here is
+//! `docs/safety/asmalloc/front/real-safety.md`.
 //!
 //! Object pointers cross the assembly as integers. A pushed pointer's provenance is exposed, and
 //! a popped address takes the exposed provenance back; the heap exposes its reservation's
@@ -29,30 +27,6 @@ use core::ptr::{self, NonNull};
 /// only the process heap may run them, since they write the one slab array it owns.
 #[derive(Clone, Copy, Debug, Default)]
 pub(crate) struct Real;
-
-impl Real {
-    /// Pops an object of `class` with the out-of-line routine, which on a miss continues in the
-    /// heap's slow path (`pop_slow`). Null if the heap has no memory.
-    #[inline]
-    pub(crate) fn pop_out_of_line(self, class: SmallClass) -> *mut u8 {
-        // SAFETY: REAL-02.
-        let address = unsafe { outline::slab_pop(SLABS.word(class)) };
-        ptr::with_exposed_provenance_mut(address)
-    }
-
-    /// Pushes an object of `class` with the out-of-line routine, which on a miss continues in
-    /// the heap's slow path (`push_slow`).
-    ///
-    /// # Safety
-    ///
-    /// `object` is a block of `class` that the heap handed out and the caller owns; it gives
-    /// it up.
-    #[inline]
-    pub(crate) unsafe fn push_out_of_line(self, class: SmallClass, object: NonNull<u8>) {
-        // SAFETY: REAL-02.
-        unsafe { outline::slab_push(SLABS.word(class), object.as_ptr().expose_provenance()) }
-    }
-}
 
 // SAFETY: REAL-03. Each method is one generated routine whose Lean contract is the method's
 // specification, decoded by the `from_raw` functions the trait module provides.

@@ -27,6 +27,13 @@ def Reg.name32 : Reg → String
   | .r8 => "r8d" | .r9 => "r9d" | .r10 => "r10d" | .r11 => "r11d"
   | .r12 => "r12d" | .r13 => "r13d" | .r14 => "r14d" | .r15 => "r15d"
 
+/-- The 16-bit name of a register (its low 16 bits). -/
+def Reg.name16 : Reg → String
+  | .rax => "ax" | .rcx => "cx" | .rdx => "dx" | .rbx => "bx"
+  | .rsp => "sp" | .rbp => "bp" | .rsi => "si" | .rdi => "di"
+  | .r8 => "r8w" | .r9 => "r9w" | .r10 => "r10w" | .r11 => "r11w"
+  | .r12 => "r12w" | .r13 => "r13w" | .r14 => "r14w" | .r15 => "r15w"
+
 /-- The 8-bit name of a register (its low byte). -/
 def Reg.name8 : Reg → String
   | .rax => "al" | .rcx => "cl" | .rdx => "dl" | .rbx => "bl"
@@ -100,6 +107,8 @@ def Instr.asm : Instr → List String
   | .andn d a b => [s!"andn {d.name}, {a.name}, {b.name}"]
   | .movzx8 d m => [s!"movzx {d.name32}, {m.str8}"]
   | .store8 m r => [s!"mov {m.str8}, {r.name8}"]
+  | .movzx16 d r => [s!"movzx {d.name32}, {r.name16}"]
+  | .cmp8 d m => [s!"cmp {d.name8}, {m.str8}"]
   | .bswap d => [s!"bswap {d.name}"]
   | .shift op d n => [s!"{op.name} {d.name}, {n}"]
   | .shiftCl op d => [s!"{op.name} {d.name}, cl"]
@@ -148,8 +157,8 @@ def Src.memOps : Src → List MemOp
 def Instr.memOps : Instr → List MemOp
   | .mov _ s | .alu _ _ s | .mov32 _ s | .alu32 _ _ s | .mulx _ _ s | .adcx _ s | .adox _ s
   | .cmov _ _ s => s.memOps
-  | .store m _ | .store32 m _ | .movzx8 _ m | .store8 m _ | .lea _ m => [m]
-  | .inc _ | .dec _ | .shift32 .. | .bswap32 _ | .rorx32 .. | .andn32 .. | .rorx .. | .andn .. | .bswap _
+  | .store m _ | .store32 m _ | .movzx8 _ m | .store8 m _ | .cmp8 _ m | .lea _ m => [m]
+  | .inc _ | .dec _ | .movzx16 .. | .shift32 .. | .bswap32 _ | .rorx32 .. | .andn32 .. | .rorx .. | .andn .. | .bswap _
   | .shift .. | .shiftCl .. | .shiftx .. | .movImm64 .. | .leaSym .. | .movGot .. | .movSym .. | .leaRseqCs _ | .mul _ | .imul ..
   | .push _ | .pop .. | .alloc _ | .free _ => []
 
@@ -193,7 +202,9 @@ def printer : Printer isa where
   /- A compare or a test and the conditional branch after it decode as one
   macro-op (AMD Software Optimization Guide for Zen 5, 58455, "Branch
   Fusion"; Intel's "macro-fusion"). -/
-  fuses | .alu .cmp .. | .alu .test .. | .alu32 .cmp .. | .alu32 .test .. => true | _ => false
+  fuses
+    | .alu .cmp .. | .alu .test .. | .alu32 .cmp .. | .alu32 .test .. | .cmp8 .. => true
+    | _ => false
   /- An out-of-line routine's hot path fits in what the processor delivers
   during the four cycles a call and return take (docs/research/zen5-roofline.md,
   section 6): 24 fused micro-ops. -/

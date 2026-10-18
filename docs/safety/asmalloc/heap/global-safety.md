@@ -26,10 +26,13 @@ this heap; plus each method's own contract, passed on from the caller's.
 **Proof.** `Real::slabs()` is `front::SLABS`. Both `Real` and `SLABS` are private to the crate,
 so code outside it can neither run routines nor build a twin on these slabs. Inside the crate,
 nothing writes `SLABS` except `Real`'s routines and the slow paths and drain of a `Cache`, and
-the only `Cache`s made with `Real` are `HEAP`'s (`Heap::alloc_slow`, `Heap::free_slow`). `HEAP`
+the only `Cache`s made with `Real` are `HEAP`'s (`Heap::alloc_slow`, `Heap::free_slow`,
+`Heap::heartbeat` and `Heap::collect`, the last two reached through `large_heartbeat` and
+`Asmalloc::collect`, which take no arguments and so ask nothing of their callers). `HEAP`
 is the only `Heap` ever run with `Real`. The callers' contracts (`GlobalAlloc`,
 `Allocator`) are what the heap's methods ask: a valid layout, and for frees and resizes a
-block this heap returned with a layout that fits it. `pop_slow` and `push_slow` are entered from the routines (GLOBAL-04).
+block this heap returned with a layout that fits it. `c_alloc_small` and `c_free_small` are the
+C slow paths' (GLOBAL-04).
 
 ## GLOBAL-03: `unsafe impl Allocator for Asmalloc`
 
@@ -40,22 +43,28 @@ fits; grow and shrink keep contents and leave the old block alone on error.
 **Proof.** As GLOBAL-01, with: the returned length is the class size for a small block, by the
 fit rule every size from the request to it has the same class (`classes::verify`), so a
 deallocation with any fitting size finds the class; for a large block the length is
-`usable_size`, at most the slot or run, and the class comes from the address. Zero-size
+`usable_size`, at most the slot or run, and the class comes from the address. That last needs
+`dealloc` to treat every fitting layout of a large block as large, or a large slot would be
+pushed into a magazine. It does: a block is large because its layout's class is not small
+(`small(layout)` is `None`: `Heap::alloc_other`, `Heap::resize`), a fitting layout has the
+same alignment and a size at least the one requested, and the class of a layout is monotone in
+its size (the size is rounded up to a multiple of the alignment and the class is the smallest
+at least that, both non-decreasing; `classes::verify`). So a fitting layout's class is at least
+the requested one's, above every small class or none at all, and `dealloc` takes the large
+path, which finds the slot or run from the address. Zero-size
 layouts get a dangling, aligned pointer and are never freed (`heap/allocator.rs`). Every handle
 reaches `HEAP`, so blocks may move between handles.
 
-## GLOBAL-04: `free_slow` from `push_slow`, and `alloc_slow` from `pop_slow`
+## GLOBAL-04: `alloc_slow` in `c_alloc_small`, and `free_slow` in `c_free_small`
 
-**Preconditions.** As for `Heap::free_slow` and `Heap::alloc_slow`.
+**Preconditions.** As for `Heap::alloc_slow` and `Heap::free_slow`: H (GLOBAL-02), and for a
+free, an object of `class` this heap handed out, which the caller owns and gives up.
 
-**Proof.** Both are `unsafe fn`s whose contract is that they are reached only as the tail of
-the out-of-line routines; the crate never calls them, and only the generated routines name
-them (`sym`). They run only as the tail of the out-of-line routines, whose callers
-(`Asmalloc::alloc_small`, `Asmalloc::free_small`) pass the address of a small class's word in
-slab 0 (`Front::word`) and, for a push, an object of that class they own (`free_small`'s
-contract). The class is recovered from the address and checked (`Front::class_of_word` gives a
-class only for the word of a small class; `small_class` aborts otherwise), and the object
-address is non-null-checked. `small_class` also writes the masks the out-of-line routines read
-(`publish_masks`): plain atomic stores of constants, which a race repeats harmlessly. The thread's
-`rseq_cs` still names the routine's descriptor, but the instruction pointer has left the
+**Proof.** H as GLOBAL-02. `c_free_small`'s own contract is the object's, word for word; its
+one caller, `c::slow::free_slow`, discharges it (SLOW-03 in `c/slow-safety.md`). Both run the
+heap's slow paths directly, without a pop or push in front: their callers reach them after a
+generated C routine missed, and `Cache::alloc_slow` and `Cache::free_slow` begin with the pop or
+push themselves. Both also write the masks the generated C routines read (`publish_masks`):
+plain atomic stores of constants, which a race repeats harmlessly. A C routine that missed left
+the thread's `rseq_cs` naming its descriptor, but the instruction pointer has left the
 sequence, so an interruption only clears it, and every routine the slow path runs arms its own.

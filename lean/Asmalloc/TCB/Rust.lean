@@ -246,6 +246,7 @@ def ownRequires {I C : Type} (req : I → List String) : List String → Code I 
   | acc, .frame i b j => add (ownRequires req (add acc (req i)) b) (req j)
   | acc, .rseq arm body =>
     (arm ++ body.flatMap Step.instrs).foldl (fun acc i => add acc (req i)) acc
+  | acc, .jump is _ => is.foldl (fun acc i => add acc (req i)) acc
 where
   add (acc fs : List String) : List String :=
     fs.foldl (fun acc f => if acc.contains f then acc else acc ++ [f]) acc
@@ -271,6 +272,7 @@ def ownFirstSome? {I C : Type} (f : I → Option String) : Code I C → Option S
   | .call _ _ => none
   | .frame i b j => f i <|> ownFirstSome? f b <|> f j
   | .rseq arm body => (arm ++ body.flatMap Step.instrs).findSome? f
+  | .jump is _ => is.findSome? f
 
 /-- A `some` of `f` over the instructions of `c`, and of the functions it
 calls, if there is one: the first of those of `c` outside its calls
@@ -371,6 +373,8 @@ where
 /-- The external targets the code exits to (`Step.exit`), each once. -/
 def exitNames {I C : Type} : Code I C → List String
   | .rseq _ body => dedup (body.filterMap fun | .exit _ _ (some t) => some t | _ => none)
+  | .seq (.rseq _ body) (.jump _ t) =>
+    dedup (body.filterMap (fun | .exit _ _ (some t) => some t | _ => none) ++ [t])
   | _ => []
 
 /-- The Rust names of the machine-level arguments of `sig`, in order: each
@@ -452,7 +456,7 @@ def inlineFunction (a : Artifact) (lines : List Line) : String :=
 /-- Whether code calls a function or has a frame, which an inline function,
 whose `asm!` block may not touch the stack, cannot. -/
 def usesStack {I C : Type} : Code I C → Bool
-  | .block _ | .rseq .. => false
+  | .block _ | .rseq .. | .jump .. => false
   | .seq a b => usesStack a || usesStack b
   | .ite _ t e => usesStack t || usesStack e
   | .loop b _ => usesStack b
@@ -602,6 +606,109 @@ def checkNames (a : Artifact) : Except String Unit := do
   unless rustIdent a.module && a.module != "mod" do
     throw s!"{a.target.name}: {a.name}'s module `{a.module}` is not a Rust identifier (or is `mod`)"
 
+/-! ## Exports
+
+An artifact may also be defined as C symbols (`Artifact.exports`): for
+each `(group, symbol)` the emitter writes a copy of the function, the same
+code under the name `symbol`, into the macro of `group` on its target,
+`asmalloc_exports_<group>_<target>!` (`exportsFile`):
+
+```rust
+#[doc(hidden)]
+#[macro_export]
+macro_rules! asmalloc_exports_<group>_<target> {
+    () => {
+        #[unsafe(naked)]
+        #[unsafe(no_mangle)]
+        unsafe extern "<abi>" fn <symbol><sig> {
+            ::core::arch::naked_asm!(
+                r"<line>…",
+                <name> = sym $crate::<path>, …
+            )
+        }
+        …
+    };
+}
+```
+
+A crate defines the symbols by invoking the macro, so a crate that links the
+one with the artifacts but does not invoke it (a test binary) does not get
+them. The copy's operands name the same items as the function's, through
+`$crate`, which is the crate the macro is defined in wherever it is
+expanded; so `checkExports` allows exports only of code whose operands are
+all paths into that crate (`crate::…`), that calls no function and reads no
+table of constants (which `function` names relative to its own module), and
+that no cargo feature selects (a `cfg` in an expansion would read the
+features of the crate that invokes it). The copy is the printed code
+`function` emits, and the symbol the only difference. -/
+
+/-- The operand declaration `operandText` gives, with a path into the crate
+(`crate::…`) made one through `$crate`, for a macro. -/
+def macroOperand (text : String) : String :=
+  match text.splitOn "sym crate::" with
+  | ["", rest] => "sym $crate::" ++ rest
+  | _ => text
+
+/-- A copy of `a`, whose printed code is `lines`, defined as the C symbol
+`sym` (see above). -/
+def exportFunction (a : Artifact) (lines : List Line) (sym : String) : String :=
+  let body := lines ++ a.target.printer.funcAlign.map .text
+  let refs := dedup (body.flatMap Line.refs)
+  "        #[unsafe(naked)]\n" ++
+  "        #[unsafe(no_mangle)]\n" ++
+  s!"        unsafe extern \"{a.target.rustAbi}\" fn {sym}{a.sig.rust} " ++ "{\n" ++
+  "            ::core::arch::naked_asm!(\n" ++
+  String.join ((template a.target.printer.call body).splitOn "\n" |>.filter (!·.isEmpty) |>.map
+    fun l => "        " ++ l ++ "\n") ++
+  String.join (refs.map fun n => s!"                {n} = {macroOperand (operandText a n)},\n") ++
+  "            )\n" ++
+  "        }\n"
+
+/-- The groups of exports of the artifacts `ps`, each once, in order. -/
+def exportGroups (ps : List Prepared) : List String :=
+  (dedup (ps.flatMap fun p => p.art.exports.map (·.1))).mergeSort (· ≤ ·)
+
+/-- The module of a target's exports, `exports.rs`: one macro per group of
+exports, defining the copies of the artifacts `ps` exported in it, in order
+of their symbols. -/
+def exportsFile (t : String) (ps : List Prepared) : String :=
+  let copies := ps.flatMap fun p => p.art.exports.map fun (g, sym) => (g, sym, p)
+  header ++ s!"//! The C symbols of the verified functions for `{t}` (`Artifact.exports`).\n" ++
+  String.join ((exportGroups ps).map fun g =>
+    let mine := (copies.filter (·.1 == g)).mergeSort (fun a b => a.2.1 ≤ b.2.1)
+    s!"\n/// Defines the `{g}` exports of the verified functions for `{t}` as C symbols, \
+      each a copy of the function it is the export of (`Artifact.exports`).\n" ++
+    "#[doc(hidden)]\n#[macro_export]\n" ++
+    s!"macro_rules! asmalloc_exports_{g}_{t} " ++ "{\n    () => {\n" ++
+    "\n".intercalate (mine.map fun (_, sym, p) => exportFunction p.art p.lines sym) ++
+    "    };\n}\n")
+
+/-- `p`'s exports are as the module docs require: each group and symbol a
+Rust identifier, no symbol exported twice on the target (by `ps`), and the
+artifact one whose code a macro can copy: out of line, selected by no cargo
+feature, calling no function, reading no table of constants, and naming
+only operands that are paths into the crate. -/
+def checkExports (ps : List Prepared) (p : Prepared) : Except String Unit := do
+  let a := p.art
+  if a.exports.isEmpty then return
+  let n := s!"{a.target.name}: {a.name}"
+  if a.target.inline then throw s!"{n} is inline but has exports"
+  if a.cargoFeature.isSome then throw s!"{n} is selected by a cargo feature but has exports"
+  unless a.code.calls.isEmpty do throw s!"{n} calls a function but has exports"
+  unless a.consts.isEmpty do throw s!"{n} reads tables of constants but has exports"
+  for (_, op) in a.operands do
+    match op with
+    | .sym path => unless path.startsWith "crate::" do
+        throw s!"{n} has exports but names `{path}`, which is not a path into the crate"
+    | .const _ => throw s!"{n} has exports but names a constant expression"
+  for (g, sym) in a.exports do
+    unless rustIdent g && rustIdent sym do
+      throw s!"{n}'s export `{sym}` of group `{g}` is not named by Rust identifiers"
+    let all := ps.flatMap fun q =>
+      if q.art.target.name == a.target.name then q.art.exports.map (·.2) else []
+    unless (all.filter (· == sym)).length == 1 do
+      throw s!"{a.target.name}: the symbol `{sym}` is exported more than once"
+
 /-- Whether `c`, or the code of a function it calls, has a restartable
 sequence. -/
 def hasRseq {I C : Type} : Code I C → Bool
@@ -612,9 +719,22 @@ def hasRseq {I C : Type} : Code I C → Bool
   | .call _ b => hasRseq b
   | .frame _ b _ => hasRseq b
   | .rseq .. => true
+  | .jump .. => false
+
+/-- Whether `c`, or the code of a function it calls, has a `jump`. -/
+def hasJump {I C : Type} : Code I C → Bool
+  | .block _ | .rseq .. => false
+  | .seq a b => hasJump a || hasJump b
+  | .ite _ t e => hasJump t || hasJump e
+  | .loop b _ => hasJump b
+  | .call _ b => hasJump b
+  | .frame _ b _ => hasJump b
+  | .jump .. => true
 
 /-- The code of `p`'s artifact has a restartable sequence only as the whole
-of its code (`Code.rseq arm body`): the printer gives every sequence the
+of its code (`Code.rseq arm body`), or followed by a `jump` (`.seq (.rseq arm
+body) (.jump is t)`), the only place a `jump` may be, to a function it
+declares, and not inline: the printer gives every sequence the
 same labels and its abort handler restarts it at its arm
 (`Printer.rseqLines`), which is then the function's first instruction, as
 `Code.abortStates` assumes. Then the target can print a sequence
@@ -628,7 +748,18 @@ operand), which it tail-calls with its arguments as they arrived
 def checkRseq (p : Prepared) : Except String Unit := do
   let a := p.art
   let P := a.target.printer
-  match a.code with
+  let (seqCode, tail) : Prog a.target.isa × Option String := match a.code with
+    | .seq (.rseq arm body) (.jump _ t) => (.rseq arm body, some t)
+    | c => (c, none)
+  if let some t := tail then
+    if a.target.inline then
+      throw s!"{a.target.name}: {a.name} is inline but ends with a jump"
+    unless a.operands.lookup t matches some (.sym _) do
+      throw s!"{a.target.name}: {a.name} jumps to `{t}`, which is not a function it declares \
+        (`Operand.sym`)"
+  else if hasJump a.code then
+    throw s!"{a.target.name}: {a.name} has a jump that does not follow a restartable sequence"
+  match seqCode with
   | .rseq arm body =>
     unless P.rseqSig.isSome do
       throw s!"{a.target.name}: {a.name} has a restartable sequence, which its target cannot print"
@@ -683,22 +814,23 @@ def rustConstsOf (as : List Artifact) : List (String × IntTy × Nat) :=
   let all := as.flatMap (·.rustConsts)
   ((dedup (all.map (·.1))).mergeSort (· ≤ ·)).filterMap fun n => all.find? (·.1 == n)
 
-/-- A constant's name is a Rust constant's, its value fits its type, and the
-artifacts of a module that give a constant of that name give the same type
-and value. -/
+/-- A constant's name is a Rust constant's, its value fits its type in
+64 bits and on its target, and every artifact, of any target, that gives a
+constant of that name gives the same type and value: they are emitted once,
+for every target (`constsFile`). -/
 def checkRustConsts (as : List Artifact) (a : Artifact) : Except String Unit := do
   for (n, ty, v) in a.rustConsts do
     unless tableName n do
       throw s!"{a.target.name}: {a.name}'s constant {n} is not named as a Rust constant"
-    unless v < 2 ^ ty.bits a.target.abi.ptrBits do
+    unless v < 2 ^ ty.bits a.target.abi.ptrBits && v < 2 ^ ty.bits 64 do
       throw s!"{a.target.name}: {a.name}'s constant {n} does not fit in a {ty.rust}"
     for b in as do
-      if b.target.name == a.target.name && b.module == a.module then
-        for (m, ty', v') in b.rustConsts do
-          if m == n && (ty' != ty || v' != v) then
-            throw s!"{a.target.name}: {a.name} and {b.name} give the constant {n} different values"
+      for (m, ty', v') in b.rustConsts do
+        if m == n && (ty' != ty || v' != v) then
+          throw s!"{a.target.name}: {a.name} and {b.target.name}: {b.name} give the constant {n} \
+            different values"
 
-/-- The constants of a module's artifacts, as Rust. -/
+/-- Constants, as Rust. -/
 def rustConstsText (cs : List (String × IntTy × Nat)) : String :=
   String.join (cs.map fun (n, ty, v) =>
     s!"\n/// From the specification (`Api.rustConsts`).\npub(crate) const {n}: {ty.rust} = {v};\n")
@@ -731,6 +863,8 @@ def checkConsts (ps : List Prepared) (p : Prepared) : Except String Unit := do
       throw s!"{a.target.name}: {a.name} and {q.art.name} give a table of constants different words"
   if (ps.any fun q => q.art.target.name == a.target.name && q.art.module == "consts") then
     throw s!"{a.target.name}: an artifact's module is `consts`, the module of the tables of constants"
+  if (ps.any fun q => q.art.target.name == a.target.name && q.art.module == "exports") then
+    throw s!"{a.target.name}: an artifact's module is `exports`, the module of the exports"
 
 /-- Every operand `p`'s code names (`Line.refs`) is one of its tables of
 constants or of its declared operands (`Artifact.operands`), and none is
@@ -829,6 +963,17 @@ def targetsOf (as : List Artifact) : List (String × String) :=
   (distinct as (·.target.name)).map fun t =>
     (t, ((as.find? (·.target.name == t)).map (·.target.rustCfg)).getD "")
 
+/-- The constants of every artifact (`Api.rustConsts`), one file for every
+target: no assembly, so it builds wherever the crate does (under Miri and
+Kani too). The crate declares it itself (`front::constants`). -/
+def constsFile (as : List Artifact) : String :=
+  header ++
+  "//! The specification's constants (`Api.rustConsts`), the same for every target: what the\n" ++
+  "//! verified functions were proved for, and what the Rust side builds its layout from or\n" ++
+  "//! asserts against.\n" ++
+  "#![allow(dead_code)]\n" ++
+  rustConstsText (rustConstsOf as)
+
 /-- The root module, `mod.rs`: a `mod` declaration of each target of `ts`
 (its name and Rust `cfg`), in order of their names. -/
 def rootFile (ts : List (String × String)) : String :=
@@ -852,24 +997,27 @@ def render (ps : List Prepared) (moduleOf : Artifact → String → String) : Li
     -- In order of their names, wherever their artifacts come in the list.
     let modules := (distinct (arts.map (·.art)) (·.module)).mergeSort (· ≤ ·)
     let ts := tables (arts.map (·.art))
-    let mods := if ts.isEmpty then modules else (modules ++ ["consts"]).mergeSort (· ≤ ·)
+    let exported := arts.filter (!·.art.exports.isEmpty)
+    let extra := (if ts.isEmpty then [] else ["consts"]) ++ (if exported.isEmpty then [] else ["exports"])
+    let mods := (modules ++ extra).mergeSort (· ≤ ·)
     (s!"{t}/mod.rs", header ++ s!"//! Verified functions for `{t}`.\n" ++
       modDecls mods (fun _ => none)) ::
     (if ts.isEmpty then [] else [(s!"{t}/consts.rs", tablesFile t ts)]) ++
+    (if exported.isEmpty then [] else [(s!"{t}/exports.rs", exportsFile t exported)]) ++
     -- Each module's file on a task of its own.
     ((modules.map fun m => Task.spawn fun _ =>
       (s!"{t}/{m}.rs",
         header ++ s!"//! Verified `{m}` functions for `{t}`.\n" ++
         "#![allow(dead_code)]\n" ++
-        rustConstsText (rustConstsOf ((arts.filter (·.art.module == m)).map (·.art))) ++
         String.join ((arts.filter (·.art.module == m)).map fun p =>
           "\n" ++ (if p.art.target.inline then inlineFunction p.art (inlineLines p.art)
             else function.functionOf p.art p.lines (moduleOf p.art))))).map Task.get)
   -- Each target's files on a task of their own.
-  ("mod.rs", root) :: ((targets.map fun t => Task.spawn fun _ => perTarget t).map Task.get).flatten
+  ("mod.rs", root) :: ("constants.rs", constsFile as) ::
+    ((targets.map fun t => Task.spawn fun _ => perTarget t).map Task.get).flatten
 
 /-- The generated files, as paths relative to the output directory and their
-contents: `mod.rs`, and for each target `<target>/mod.rs` and one
+contents: `mod.rs`, `constants.rs` (`constsFile`), and for each target `<target>/mod.rs` and one
 `<target>/<module>.rs` per module; an error if an artifact is not made from
 an `Api` with a contract (`checkApi`), its name or module is not a Rust
 identifier (`checkNames`), two artifacts of a target have the
@@ -904,6 +1052,7 @@ def files (as : List Artifact) : Except String (List (String × String)) := do
   forMPar as checkInline
   forMPar as checkUops
   forMPar as (checkRustConsts as)
+  forMPar ps (checkExports ps)
   return render ps fun a n => ((callee as a n).map (·.module)).getD ""
 
 end VG.Rust
