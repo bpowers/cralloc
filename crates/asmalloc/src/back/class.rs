@@ -10,7 +10,7 @@
 //! zeroes what it wrote and gives its region back with a compare-and-swap; no other thread has
 //! named it, because nothing points into a region until it has been carved from.
 
-use super::group::{Direct, Gather, Run};
+use super::group::{Gather, JUDGE, Run};
 use super::host::ClassHost;
 use super::layout::{Grow, Hints, Layout, Recorded};
 use super::policy::{kept_grown, move_piece, wants_huge};
@@ -255,7 +255,7 @@ impl<'a, O: Os> Back<'a, O> {
     /// (`group`), with one atomic OR per word, or per slot once a batch is judged scattered,
     /// and one walk up the summary tree for the batch. Aborts the process if a pointer is not
     /// the start of a slot of `class` that has been handed out, if a slot is already free, or
-    /// if a slot appears twice in the batch (a scattered one, or one of more than 254 distinct
+    /// if a slot appears twice in the batch (a scattered one, or one of more than 63 distinct
     /// words, catches it by the second OR, unless another thread claimed the slot between the
     /// two; see `group`): those are double frees or frees of foreign pointers.
     ///
@@ -293,10 +293,13 @@ impl<'a, O: Os> Back<'a, O> {
         let mut release = tree::Release::new(&host, met.region);
         // A map sized to the batch: a magazine of a large class holds a few objects, and
         // zeroing a map for a whole magazine of small ones would cost it more than its ORs.
+        // No bigger than 64 words even for a large magazine: the map serves batches that are
+        // neither in the window nor scattered, whose words are fewer, a full map only costs a
+        // flush, and the launder runs on whatever stack is freeing.
         if objects.len() < 32 {
             release_words::<O, P, 32, 64>(&checker, &mut met, &mut fast, &mut release, objects);
         } else {
-            release_words::<O, P, 256, 128>(&checker, &mut met, &mut fast, &mut release, objects);
+            release_words::<O, P, 64, 128>(&checker, &mut met, &mut fast, &mut release, objects);
         }
         release.finish();
         if count {
@@ -1330,8 +1333,7 @@ fn release_words<'h, O: Os, P: SlotPointer, const ROOM: usize, const SPAN: usize
     // they are scattered, else gathered as runs end.
     if let Some(rest) = objects.get(at..).filter(|rest| !rest.is_empty()) {
         if gather.scattered() {
-            let mut direct = Direct::new();
-            gather.drain(release, &mut direct);
+            let direct = gather.go_direct(release);
             // The leaf words below the watermark of the region the slots are in, so that each
             // slot finds its word with an index.
             let leaves_of = |release: &tree::Release<'h, _>, met: &Met| {
@@ -1341,14 +1343,34 @@ fn release_words<'h, O: Os, P: SlotPointer, const ROOM: usize, const SPAN: usize
                 )
             };
             let (mut region, mut leaves) = leaves_of(release, met);
-            for object in rest {
+            let (first, rest) = rest.split_at(rest.len().min(JUDGE));
+            for object in first {
                 let slot = slot_of(checker, object, met, fast);
                 if met.region != region {
                     (region, leaves) = leaves_of(release, met);
                 }
                 direct.free_slot(release, leaves, region, slot);
             }
-            direct.finish(release);
+            if direct.wide() {
+                let mut levels = release.summary_levels(region);
+                direct.pay_by_walking(release, &levels);
+                for object in rest {
+                    let slot = slot_of(checker, object, met, fast);
+                    if met.region != region {
+                        (region, leaves) = leaves_of(release, met);
+                        levels = release.summary_levels(region);
+                    }
+                    direct.free_slot_wide(release, leaves, &levels, slot);
+                }
+            } else {
+                for object in rest {
+                    let slot = slot_of(checker, object, met, fast);
+                    if met.region != region {
+                        (region, leaves) = leaves_of(release, met);
+                    }
+                    direct.free_slot(release, leaves, region, slot);
+                }
+            }
         } else {
             for object in rest {
                 let slot = slot_of(checker, object, met, fast);

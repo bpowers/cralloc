@@ -36,11 +36,13 @@
    bit set and owe nothing, under any number of summary words, as a large
    class's claim does: the bit is cleared by the next search that finds the
    word empty.
-   Look = TRUE makes a free whose OR found its word empty read the summary
-   bit before setting it, as a free into a word that was not empty does
-   (Heal), instead of setting it without looking: a launder of scattered
-   slots, which mostly finds the bit set by its neighbours, then makes a
-   plain load where it would make a locked OR. *)
+   Look = TRUE lets each free whose OR found its word empty choose to read the
+   summary bit before setting it, as a free into a word that was not empty
+   does (Heal), instead of setting it without looking: a launder of scattered
+   slots, which mostly finds the bit set by its neighbours, then makes a plain
+   load where it would make a locked OR. The choice is per free because the
+   code mixes them on one tree: scattered launders look, grouped launders and
+   single frees do not. *)
 EXTENDS Naturals, FiniteSets, TLC
 
 CONSTANTS Threads, B, Top, Reread, Heal, Crash, Run, Keep, Look
@@ -110,7 +112,8 @@ FreeOr(t) ==
         /\ bits' = [bits EXCEPT ![0][T.i] = old \cup T.set]
         /\ touched' = IF crashed THEN touched \cup {T.i} ELSE touched
         /\ IF old = {} \/ Heal
-           THEN Set(t, [Idle EXCEPT !.pc = "up", !.i = T.i, !.must = (old = {} /\ ~Look)])
+           THEN \E look \in IF Look THEN {TRUE, FALSE} ELSE {FALSE} :
+                    Set(t, [Idle EXCEPT !.pc = "up", !.i = T.i, !.must = (old = {} /\ ~look)])
            ELSE Set(t, Idle)
     /\ UNCHANGED <<live, held, crashed, gone>>
 

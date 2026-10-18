@@ -22,6 +22,8 @@
 //! - `scatter`: shuffled across the whole pool, as a `BTreeMap` dropped in key order frees.
 //! - `spread`: shuffled across the whole pool, then each 254 sorted: scattered slots that a
 //!   magazine holds in address order.
+//! - `headtail`: ascending, with each magazine's first 24 slots swapped with slots anywhere in
+//!   the pool: a batch judged scattered whose tail is dense.
 //! - `stride`: consecutive objects 64 words apart, so every object of a batch is in a word and
 //!   a summary word of its own: the worst case for grouping.
 //!
@@ -249,6 +251,16 @@ fn order(name: &str, pool: &[*mut u8], rng: &mut Rng) -> Vec<*mut u8> {
         "spread" => {
             shuffle(&mut v, rng);
             v.chunks_mut(254).for_each(|magazine| magazine.sort());
+        }
+        "headtail" => {
+            // Each magazine's first 24 slots swapped with slots anywhere in the pool: a
+            // scattered head, judged scattered, then a mostly dense tail.
+            let n = v.len();
+            for start in (0..n).step_by(254) {
+                for i in start..(start + 24).min(n) {
+                    v.swap(i, rng.below(n as u64) as usize);
+                }
+            }
         }
         "stride" => {
             // Bit within the word slowest, summary word fastest.
