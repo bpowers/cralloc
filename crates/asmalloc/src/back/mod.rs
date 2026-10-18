@@ -31,6 +31,7 @@
 //! in `policy`.
 
 mod class;
+mod group;
 mod host;
 mod inspect;
 mod layout;

@@ -89,9 +89,9 @@ fn the_leaf_bitmap_is_committed_before_it_is_written() {
     let state = state::<Standard>();
     let back = state.get_or_reserve().unwrap();
     let class = small(8);
-    let mut slots = fill(&back, class, 3000);
+    let slots = fill(&back, class, 3000);
     assert_eq!(slots.len(), 3000);
-    back.launder(class, &mut slots);
+    back.launder(class, &slots);
     assert_eq!(fill(&back, class, 3000).len(), 3000);
     back.trim();
 }
@@ -102,8 +102,8 @@ fn launder_then_fill_reuses_the_lowest_free_slots_first() {
     let back = state.get_or_reserve().unwrap();
     let class = small(64);
     let slots = fill(&back, class, 200);
-    let mut freed: Vec<*mut u8> = slots[10..60].iter().rev().copied().collect();
-    back.launder(class, &mut freed);
+    let freed: Vec<*mut u8> = slots[10..60].iter().rev().copied().collect();
+    back.launder(class, &freed);
     assert_eq!(back.retained(), 50 * 64);
     let again = fill(&back, class, 20);
     assert_eq!(again, slots[10..30].to_vec());
@@ -121,8 +121,8 @@ fn a_double_free_aborts() {
     let back = state.get_or_reserve().unwrap();
     let class = small(16);
     let slots = fill(&back, class, 4);
-    back.launder(class, &mut [slots[1]]);
-    back.launder(class, &mut [slots[1]]);
+    back.launder(class, &[slots[1]]);
+    back.launder(class, &[slots[1]]);
 }
 
 #[test]
@@ -132,7 +132,7 @@ fn a_slot_twice_in_one_batch_aborts() {
     let back = state.get_or_reserve().unwrap();
     let class = small(16);
     let slots = fill(&back, class, 4);
-    back.launder(class, &mut [slots[1], slots[2], slots[1]]);
+    back.launder(class, &[slots[1], slots[2], slots[1]]);
 }
 
 #[test]
@@ -142,7 +142,7 @@ fn freeing_an_interior_pointer_aborts() {
     let back = state.get_or_reserve().unwrap();
     let class = small(32);
     let slots = fill(&back, class, 4);
-    back.launder(class, &mut [slots[1].wrapping_add(8)]);
+    back.launder(class, &[slots[1].wrapping_add(8)]);
 }
 
 #[test]
@@ -151,7 +151,7 @@ fn freeing_with_the_wrong_class_aborts() {
     let state = state::<Standard>();
     let back = state.get_or_reserve().unwrap();
     let slots = fill(&back, small(32), 4);
-    back.launder(small(64), &mut [slots[0]]);
+    back.launder(small(64), &[slots[0]]);
 }
 
 #[test]
@@ -161,7 +161,7 @@ fn freeing_an_uncarved_slot_aborts() {
     let back = state.get_or_reserve().unwrap();
     let class = small(32);
     let slots = fill(&back, class, 4);
-    back.launder(class, &mut [slots[3].wrapping_add(32)]);
+    back.launder(class, &[slots[3].wrapping_add(32)]);
 }
 
 #[test]
@@ -170,7 +170,7 @@ fn freeing_a_foreign_pointer_aborts() {
     let state = state::<Standard>();
     let back = state.get_or_reserve().unwrap();
     let mut local = 0u8;
-    back.launder(small(8), &mut [&raw mut local]);
+    back.launder(small(8), &[&raw mut local]);
 }
 
 #[test]
@@ -424,8 +424,8 @@ fn the_heap_runs_out_and_recovers() {
     assert!(fill(&back, class, 1).is_empty());
     assert!(back.alloc(class.class(), 1).is_none());
     assert!(back.alloc_run(1, 8).is_none());
-    let mut some = slots.split_off(all - 3);
-    back.launder(class, &mut some);
+    let some = slots.split_off(all - 3);
+    back.launder(class, &some);
     assert_eq!(fill(&back, class, 5).len(), 3);
 }
 
@@ -476,7 +476,7 @@ fn a_refused_purge_is_skipped_and_retried() {
         paint(p, 1024, 9);
     }
     let keep = slots.split_off(64);
-    back.launder(class, &mut slots);
+    back.launder(class, &slots);
     state.os().set_faults(Call::Purge, Faults::ALWAYS);
     assert_eq!(back.trim(), 0);
     state.os().set_faults(Call::Purge, Faults::NONE);
@@ -498,10 +498,10 @@ fn passing_the_cap_purges_back_under_it() {
     let cap = retained_cap(Standard::GEOMETRY);
     let class = small(1024);
     let n = 2 * cap / 1024;
-    let mut slots = fill(&back, class, n);
+    let slots = fill(&back, class, n);
     assert_eq!(slots.len(), n);
     let before = state.os().calls(Call::Purge);
-    back.launder(class, &mut slots);
+    back.launder(class, &slots);
     assert!(state.os().calls(Call::Purge) > before);
     assert!(back.retained() <= cap, "{} > {cap}", back.retained());
     // The purged pages are the top ones: the lowest slots are still resident.
@@ -594,12 +594,12 @@ fn free_memory_decays_by_quarters_from_the_top() {
     let os = state.os();
     let class = small(1024);
     let total = retained_cap(Standard::GEOMETRY) / 2;
-    let mut slots = fill(&back, class, total / 1024);
+    let slots = fill(&back, class, total / 1024);
     for &p in &slots {
         paint(p, 1024, 5);
     }
     let (lowest, highest) = (slots[0], slots[slots.len() - 1]);
-    back.launder(class, &mut slots);
+    back.launder(class, &slots);
     assert_eq!(back.retained(), total);
     let purges = os.calls(Call::Purge);
     beat(&back);
@@ -642,8 +642,8 @@ fn reuse_lowers_the_count_and_reviving_a_page_raises_it() {
     let back = state.get_or_reserve().unwrap();
     let class = small(1024);
     let page = Standard::GEOMETRY.page_size();
-    let mut slots = fill(&back, class, 64);
-    back.launder(class, &mut slots);
+    let slots = fill(&back, class, 64);
+    back.launder(class, &slots);
     assert_eq!(back.retained(), 64 * 1024);
     let again = fill(&back, class, 16);
     assert_eq!(back.retained(), 48 * 1024);
@@ -652,8 +652,8 @@ fn reuse_lowers_the_count_and_reviving_a_page_raises_it() {
     // One slot of a purged page: the page's other slots are free and resident again.
     let one = fill(&back, class, 1);
     assert_eq!(back.retained(), page - 1024);
-    let mut all: Vec<*mut u8> = again.into_iter().chain(one).collect();
-    back.launder(class, &mut all);
+    let all: Vec<*mut u8> = again.into_iter().chain(one).collect();
+    back.launder(class, &all);
     assert_eq!(back.retained(), page + 16 * 1024);
 }
 
@@ -668,10 +668,10 @@ fn a_fragmented_heap_costs_one_lap_an_interval() {
     let class = small(1024);
     let per_page = Standard::GEOMETRY.page_size() / 1024;
     let slots = fill(&back, class, 1024);
-    let (_live, mut freed): (Vec<*mut u8>, Vec<*mut u8>) = slots
+    let (_live, freed): (Vec<*mut u8>, Vec<*mut u8>) = slots
         .iter()
         .partition(|p| (p.addr() / 1024).is_multiple_of(per_page));
-    back.launder(class, &mut freed);
+    back.launder(class, &freed);
     let retained = back.retained();
     let laps = || state.laps.load(core::sync::atomic::Ordering::Relaxed);
     for _ in 0..3 {
@@ -1008,8 +1008,8 @@ fn shadow_run<S: Shape>(seed: u64, steps: usize, faults: bool) {
                 }
                 match class {
                     Some(c) if c.is_small() => {
-                        let mut batch = batch;
-                        back.launder(c.small().unwrap(), &mut batch);
+                        let batch = batch;
+                        back.launder(c.small().unwrap(), &batch);
                     }
                     _ => {
                         for p in batch {
@@ -1082,7 +1082,7 @@ fn threads_never_share_a_slot() {
                 let stamp = t + 1;
                 for _ in 0..300 {
                     let class = classes[rng.below(classes.len())];
-                    let mut got = fill(&back, class, 1 + rng.below(60));
+                    let got = fill(&back, class, 1 + rng.below(60));
                     for &p in &got {
                         assert!(held.lock().unwrap().insert(p.addr()), "a slot held twice");
                         paint(p, class.size(), stamp);
@@ -1100,7 +1100,7 @@ fn threads_never_share_a_slot() {
                         );
                         held.lock().unwrap().remove(&p.addr());
                     }
-                    back.launder(class, &mut got);
+                    back.launder(class, &got);
                     if let Some(b) = block {
                         assert!(painted(b.ptr.as_ptr(), big.size(), stamp));
                         held.lock().unwrap().remove(&b.ptr.addr().get());
@@ -1339,7 +1339,7 @@ mod review {
         let huge = Wide::GEOMETRY.huge_page_size();
         // Region 0: a class that is wholly free, which the clock should return.
         let low = small(1024);
-        let mut victims = fill(&back, low, 512);
+        let victims = fill(&back, low, 512);
         for &p in &victims {
             paint(p, 1024, 7);
         }
@@ -1365,7 +1365,7 @@ mod review {
         for chunk in slots.chunks_mut(64) {
             back.launder(class, chunk);
         }
-        back.launder(low, &mut victims);
+        back.launder(low, &victims);
         assert!(back.retained_small() < retained_cap(Wide::GEOMETRY));
         for _ in 0..10 {
             os.advance_clock(DECAY_TICKS);
@@ -1394,8 +1394,8 @@ mod review {
         let back = state.get_or_reserve().unwrap();
         let class = small(16);
         let page = Standard::GEOMETRY.page_size();
-        let mut slots = fill(&back, class, page / 16);
-        back.launder(class, &mut slots);
+        let slots = fill(&back, class, page / 16);
+        back.launder(class, &slots);
         assert_eq!(back.trim(), page);
         assert_eq!(back.retained(), 0);
         let again = fill(&back, class, page / 16);
@@ -1472,7 +1472,7 @@ mod review {
         // The program frees 64 slots and takes 64 back, over and over, so the count moves
         // between 32 KiB under the cap and 32 KiB over it.
         for _ in 0..50 {
-            back.launder(class, &mut extra);
+            back.launder(class, &extra);
             assert!(back.retained_small() > cap);
             extra = fill(&back, class, 64);
             assert!(back.retained_small() <= cap);
@@ -1496,11 +1496,11 @@ mod review {
         let os = state.os();
         let class = small(1024);
         let total = retained_cap(Standard::GEOMETRY) / 2;
-        let mut slots = fill(&back, class, total / 1024);
+        let slots = fill(&back, class, total / 1024);
         for &p in &slots {
             paint(p, 1024, 5);
         }
-        back.launder(class, &mut slots);
+        back.launder(class, &slots);
         os.advance_clock(100 * DECAY_TICKS);
         beat(&back);
         assert!(!pass_under_way(&state));
@@ -1530,11 +1530,11 @@ mod review {
         let os = state.os();
         let class = small(32 << 10);
         let total = 3 << 20;
-        let mut slots = fill(&back, class, total / class.size());
+        let slots = fill(&back, class, total / class.size());
         for &p in &slots {
             paint(p, class.size(), 5);
         }
-        back.launder(class, &mut slots);
+        back.launder(class, &slots);
         assert_eq!(back.retained(), total);
         assert!(total < retained_cap(Wide::GEOMETRY));
         os.advance_clock(DECAY_TICKS);
@@ -1559,11 +1559,11 @@ mod review {
         let state = state::<Standard>();
         let back = state.get_or_reserve().unwrap();
         let class = small(1024);
-        let mut slots = fill(&back, class, 256);
+        let slots = fill(&back, class, 256);
         for &p in &slots {
             paint(p, 1024, 5);
         }
-        back.launder(class, &mut slots);
+        back.launder(class, &slots);
         // The pass began just now: one that stays unpublished for an interval is another
         // matter (`a_pass_whose_starter_vanished_before_publishing_ends_some_day`).
         state.os().advance_clock(7 * DECAY_TICKS);
@@ -1610,11 +1610,11 @@ mod review {
         let back = state.get_or_reserve().unwrap();
         let os = state.os();
         let class = small(1024);
-        let mut slots = fill(&back, class, 256);
+        let slots = fill(&back, class, 256);
         for &p in &slots {
             paint(p, 1024, 5);
         }
-        back.launder(class, &mut slots);
+        back.launder(class, &slots);
         os.advance_clock(7 * DECAY_TICKS);
         let started = (7 * DECAY_TICKS) | 1;
         assert_ne!(

@@ -1,8 +1,7 @@
 //! The depot's [`Source`] over the back end.
 //!
 //! The depot moves pointers in `Option<NonNull<u8>>` slices; the back end fills and launders
-//! `*mut u8` slices, which it sorts in place. A small stack buffer converts between them, a
-//! chunk at a time.
+//! `*mut u8` slices. A small stack buffer converts between them, a chunk at a time.
 
 use crate::back::Back;
 use crate::classes::SmallClass;
@@ -40,7 +39,7 @@ impl<O: Os> Source for BackSource<'_, O> {
             for (slot, object) in buffer.iter_mut().zip(part) {
                 *slot = object.as_ptr();
             }
-            self.0.launder(class, &mut buffer[..part.len()]);
+            self.0.launder(class, &buffer[..part.len()]);
         }
     }
 
