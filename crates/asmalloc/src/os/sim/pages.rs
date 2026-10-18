@@ -1,35 +1,39 @@
-//! What the simulated OS knows about each page: reserved, writable, purged, huge-page advice.
+//! What the simulated OS knows about each page: reserved, writable, purged, populated,
+//! huge-page advice.
 
 use crate::os::HugePages;
 use alloc::boxed::Box;
 use alloc::vec::Vec;
-use core::sync::atomic::{AtomicU8, Ordering};
+use core::sync::atomic::{AtomicU16, Ordering};
 
 /// The page belongs to a reservation.
-pub(super) const RESERVED: u8 = 1 << 0;
+pub(super) const RESERVED: u16 = 1 << 0;
 /// The page has been committed since it was reserved.
-pub(super) const WRITABLE: u8 = 1 << 1;
+pub(super) const WRITABLE: u16 = 1 << 1;
 /// The page has been purged since it was last committed.
-pub(super) const PURGED: u8 = 1 << 2;
+pub(super) const PURGED: u16 = 1 << 2;
 /// Advised for huge pages.
-pub(super) const HUGE: u8 = 1 << 3;
+pub(super) const HUGE: u16 = 1 << 3;
 /// Advised against huge pages.
-pub(super) const NO_HUGE: u8 = 1 << 4;
+pub(super) const NO_HUGE: u16 = 1 << 4;
 /// The first page of a reservation, so that a range spanning two reservations can be told
 /// from one inside a single reservation.
-pub(super) const START: u8 = 1 << 5;
+pub(super) const START: u16 = 1 << 5;
 /// A commit is checking that the page was not written before it was committed. The page is not
 /// writable yet, so no correct caller touches it while this is set.
-pub(super) const CHECKING: u8 = 1 << 6;
+pub(super) const CHECKING: u16 = 1 << 6;
 /// Marked to read as zero in a forked child.
-pub(super) const WIPE: u8 = 1 << 7;
+pub(super) const WIPE: u16 = 1 << 7;
+/// Made resident by a populate since it was last purged, so it counts as resident even while
+/// it reads as zero.
+pub(super) const POPULATED: u16 = 1 << 8;
 
 // Every flag is its own bit: two sharing one made a wipe mark look like a commit in progress.
 const _: () = {
     let flags = [
-        RESERVED, WRITABLE, PURGED, HUGE, NO_HUGE, START, CHECKING, WIPE,
+        RESERVED, WRITABLE, PURGED, HUGE, NO_HUGE, START, CHECKING, WIPE, POPULATED,
     ];
-    let mut seen = 0u8;
+    let mut seen = 0u16;
     let mut i = 0;
     while i < flags.len() {
         assert!(flags[i].count_ones() == 1 && seen & flags[i] == 0);
@@ -38,16 +42,16 @@ const _: () = {
     }
 };
 
-/// Per-page state, one atomic byte per page, so concurrent calls on different pages never
+/// Per-page state, one atomic word per page, so concurrent calls on different pages never
 /// interfere and the simulator needs no lock.
 pub(super) struct Pages {
-    states: Box<[AtomicU8]>,
+    states: Box<[AtomicU16]>,
 }
 
 impl Pages {
     pub(super) fn new(count: usize) -> Pages {
         let mut states = Vec::with_capacity(count);
-        states.resize_with(count, || AtomicU8::new(0));
+        states.resize_with(count, || AtomicU16::new(0));
         Pages {
             states: states.into_boxed_slice(),
         }
@@ -57,7 +61,7 @@ impl Pages {
         self.states.len()
     }
 
-    pub(super) fn get(&self, page: usize) -> u8 {
+    pub(super) fn get(&self, page: usize) -> u16 {
         self.states[page].load(Ordering::Acquire)
     }
 
@@ -91,7 +95,7 @@ impl Pages {
     }
 
     /// Sets `set` and clears `clear` on every page of `first..first + count`.
-    pub(super) fn update(&self, first: usize, count: usize, set: u8, clear: u8) {
+    pub(super) fn update(&self, first: usize, count: usize, set: u16, clear: u16) {
         for state in &self.states[first..first + count] {
             let mut old = state.load(Ordering::Relaxed);
             while let Err(now) = state.compare_exchange_weak(
@@ -106,7 +110,7 @@ impl Pages {
     }
 
     /// Whether every page of `first..first + count` has all the bits of `mask`.
-    pub(super) fn all(&self, first: usize, count: usize, mask: u8) -> bool {
+    pub(super) fn all(&self, first: usize, count: usize, mask: u16) -> bool {
         self.states[first..first + count]
             .iter()
             .all(|state| state.load(Ordering::Acquire) & mask == mask)
@@ -152,19 +156,19 @@ impl Pages {
     }
 
     /// Whether some page of `first..first + count` has any bit of `mask`.
-    pub(super) fn any(&self, first: usize, count: usize, mask: u8) -> bool {
+    pub(super) fn any(&self, first: usize, count: usize, mask: u16) -> bool {
         self.states[first..first + count]
             .iter()
             .any(|state| state.load(Ordering::Acquire) & mask != 0)
     }
 
     /// The pages, in order, with all the bits of `mask`.
-    pub(super) fn with(&self, mask: u8) -> impl Iterator<Item = usize> + '_ {
+    pub(super) fn with(&self, mask: u16) -> impl Iterator<Item = usize> + '_ {
         (0..self.states.len()).filter(move |&page| self.get(page) & mask == mask)
     }
 
     /// The number of pages with all the bits of `mask`.
-    pub(super) fn count(&self, mask: u8) -> usize {
+    pub(super) fn count(&self, mask: u16) -> usize {
         self.states
             .iter()
             .filter(|state| state.load(Ordering::Acquire) & mask == mask)
@@ -173,7 +177,7 @@ impl Pages {
 }
 
 /// The huge-page advice a page state records.
-pub(super) fn advice(state: u8) -> Option<HugePages> {
+pub(super) fn advice(state: u16) -> Option<HugePages> {
     if state & HUGE != 0 {
         Some(HugePages::Prefer)
     } else if state & NO_HUGE != 0 {

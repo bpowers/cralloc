@@ -35,6 +35,7 @@ const MADV_DONTNEED: usize = 4;
 const MADV_HUGEPAGE: usize = 14;
 const MADV_NOHUGEPAGE: usize = 15;
 const MADV_WIPEONFORK: usize = 18;
+const MADV_POPULATE_WRITE: usize = 23;
 const MEMBARRIER_CMD_PRIVATE_EXPEDITED_RSEQ: usize = 1 << 7;
 const MEMBARRIER_CMD_REGISTER_PRIVATE_EXPEDITED_RSEQ: usize = 1 << 8;
 const MEMBARRIER_CMD_FLAG_CPU: usize = 1;
@@ -337,7 +338,10 @@ fn sleep_step() {
 //   over-reservation and trim make the start aligned, and only the unused ends are unmapped.
 // - `commit` is mprotect to read and write, which keeps contents. `purge` is MADV_DONTNEED,
 //   after which private anonymous memory reads as zero and stays mapped with its protection.
-//   `advise_huge` is MADV_HUGEPAGE or MADV_NOHUGEPAGE, which change neither. `wipe_on_fork` is
+//   `populate` is MADV_POPULATE_WRITE, which faults pages in as a write would without
+//   writing them, so it changes neither contents nor protection (on memory that is not
+//   writable it fails). `advise_huge` is MADV_HUGEPAGE or MADV_NOHUGEPAGE, which change
+//   neither. `wipe_on_fork` is
 //   MADV_WIPEONFORK, which changes nothing in this process and makes a child's copy of the
 //   range read as zero.
 // - A failed call reports `-errno`; mprotect and madvise may have acted on part of the range,
@@ -405,6 +409,12 @@ unsafe impl Os for LinuxOs {
         // SAFETY: the caller passes whole pages of a live reservation that nothing uses during
         // the call and whose contents nothing needs, so zeroing them breaks nothing.
         unsafe { range_call(nr::MADVISE, start, len, MADV_DONTNEED) }
+    }
+
+    unsafe fn populate(&self, start: NonNull<u8>, len: usize) -> Result<(), OsError> {
+        // SAFETY: the caller passes whole pages of a live reservation; populating faults in
+        // pages as a write would, without writing, so it changes no contents or permissions.
+        unsafe { range_call(nr::MADVISE, start, len, MADV_POPULATE_WRITE) }
     }
 
     unsafe fn advise_huge(
@@ -542,6 +552,12 @@ mod tests {
             os.commit(base, 2 * PAGE).unwrap();
             assert_eq!(p.add(PAGE + 1).read(), 0);
             p.add(PAGE + 1).write(42);
+            os.populate(base, 2 * PAGE).unwrap();
+            assert_eq!(p.add(PAGE + 1).read(), 42, "populating keeps contents");
+            assert!(
+                os.populate(base, 3 * PAGE).is_err(),
+                "memory that is not writable is refused"
+            );
             os.advise_huge(base, 2 * PAGE, HugePages::Avoid).unwrap();
             os.purge(base, 2 * PAGE).unwrap();
             assert_eq!(p.add(PAGE + 1).read(), 0);

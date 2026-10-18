@@ -64,9 +64,13 @@ pub(crate) trait Host {
     /// multiples.
     fn commit_meta(&self, region: RegionId, offset: usize, len: usize) -> bool;
 
-    /// Advises for or against huge pages over part of a region. Failure is ignored: it is
-    /// advice.
-    fn advise(&self, region: RegionId, offset: usize, len: usize, advice: HugePages);
+    /// Advises for or against huge pages over part of a region. `false` if the OS refused;
+    /// callers that do not care may ignore it, since it is advice.
+    fn advise(&self, region: RegionId, offset: usize, len: usize, advice: HugePages) -> bool;
+
+    /// Makes `len` committed bytes at `offset` in a region resident ahead of use, without
+    /// changing them. Failure only means the pages fault in later, one at a time.
+    fn populate(&self, region: RegionId, offset: usize, len: usize);
 
     /// Returns part of a region to the OS; it reads as zero afterwards.
     ///

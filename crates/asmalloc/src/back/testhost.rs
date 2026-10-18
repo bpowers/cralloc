@@ -232,9 +232,16 @@ impl<W: TestWord> Host for TestHost<W> {
         !self.fail_commit.load(SeqCst)
     }
 
-    fn advise(&self, _: RegionId, offset: usize, len: usize, _: HugePages) {
+    fn advise(&self, _: RegionId, offset: usize, len: usize, _: HugePages) -> bool {
         let page = self.layout.page_size();
         assert!(offset.is_multiple_of(page) && len.is_multiple_of(page) && len > 0);
+        true
+    }
+
+    fn populate(&self, region: RegionId, offset: usize, len: usize) {
+        let page = self.layout.page_size();
+        assert!(offset.is_multiple_of(page) && len.is_multiple_of(page) && len > 0);
+        assert!((offset + len) / page <= self.committed[region.index()].load(SeqCst));
     }
 
     unsafe fn purge(&self, region: RegionId, offset: usize, len: usize) -> bool {
