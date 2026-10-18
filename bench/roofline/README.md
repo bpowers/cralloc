@@ -47,10 +47,11 @@ CPUs those two columns are meaningless.
 ### The proved slab routines
 
 `gen_routines.py` (run at build time) emits hand-written copies of the routines in
-`lean/generated/`, instruction for instruction, and variants that each change one thing: their
-placement in a cache line, their encoding (short jumps, registers, address arithmetic, where the
-mask table sits), the CPU-number test, how `__rseq_offset` is read, per-class entries, and an
-inline pop that calls its slow path. The script's docstring names every variant.
+`crates/asmalloc/src/front/generated/`, instruction for instruction, and variants that each
+change one thing: their placement in a cache line, their encoding (short jumps, registers,
+address arithmetic, where the mask table sits), the CPU-number test, how `__rseq_offset` is
+read, per-class entries, and an inline pop that calls its slow path. The script's docstring
+names every variant.
 
 ```
 ./target/release/roofline-kernels routines sizes                 # bytes and fused uops of each

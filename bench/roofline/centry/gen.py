@@ -10,8 +10,8 @@ standin_*.S (the routines a preloadable stand-in allocator exports as malloc, fr
 see standin.c).
 
 Every routine runs a real restartable sequence against glibc's registered rseq area, like the
-routines in lean/generated/. The slow paths are traps (free(NULL) returns), so a kernel that
-leaves the fast path fails loudly instead of measuring something else.
+routines in crates/asmalloc/src/front/generated/. The slow paths are traps (free(NULL) returns),
+so a kernel that leaves the fast path fails loudly instead of measuring something else.
 
 Malloc variants take the size in rdi and return the object in rax. Free variants take the pointer
 in rdi. Both keep rdi intact on the way to the slow path, which receives the C arguments. Flags:
@@ -50,7 +50,7 @@ in rdi. Both keep rdi intact on the way to the slow path, which receives the C a
   null    free: `test rdi, rdi; jz ret` first
 
 Also generated: calloc routines (cD, cS, cT: the product, a malloc body, then a jump to a zeroing
-tail), the Rust comparisons (generic and per-class pop and push as lean/generated has them, and
+tail), the Rust comparisons (generic and per-class pop and push as front/generated has them, and
 fZ, a free told the size), probes (x*, y*: what slows `call [mem]`), free(NULL) loops (kn_*) and
 load-latency chases by addressing mode (kl_*). Kernel names: kp_ pair, km_ mixed sizes, kb8_ and
 kb32_ bursts, then malloc_free_call, the call d direct, p PLT, g `call [GOT]`, r `call reg` after
@@ -454,7 +454,7 @@ def free_rust(P, f: F):
 
 
 def pop_gen(P):
-    """lean/generated/x86_64/slab.rs `slab_pop`, instruction for instruction (class in edi)."""
+    """front/generated/x86_64/slab.rs `slab_pop`, instruction for instruction (class in edi)."""
     L = arm(P, "got", "h", f"{P}pop_slow")
     L += [f"lea r9, [rip + {P}slabs]", "lea r9, [r9 + rdi*8]", "mov rcx, qword ptr [r9 + r8]",
           f"lea r11, [rip + {P}masks4]", "test ecx, dword ptr [r11 + rdi*4]", f"je {P}pop_slow",
@@ -471,7 +471,7 @@ def push_gen(P):
 
 
 def pop_class(P):
-    """The inline pop of lean/generated/x86_64_inline with a ret: the Rust free of a constant class."""
+    """The inline pop of front/generated/x86_64_inline with a ret: the Rust free of a constant class."""
     L = arm(P, "got", "h", f"{P}pop_slow")
     L += [f"lea r9, [rip + {P}slabs + {CLASS * 8}]", "mov rcx, qword ptr [r9 + r8]", f"test ecx, {MASK}",
           f"je {P}pop_slow", "mov rax, qword ptr [rcx - 8]", "lea rcx, [rcx - 8]", "mov qword ptr [r9 + r8], rcx"]
