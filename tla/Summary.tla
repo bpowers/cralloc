@@ -31,10 +31,14 @@
        atomic AND, then read each of those words again: a word no longer
        empty has its bit set back by a walk up, and if the AND emptied the
        summary word and every word read empty, the thread clears the summary
-       word's own bit, as a single clear would. *)
+       word's own bit, as a single clear would.
+   Keep = TRUE lets a thread that empties a level-0 word leave its summary
+   bit set and owe nothing, under any number of summary words, as a large
+   class's claim does: the bit is cleared by the next search that finds the
+   word empty. *)
 EXTENDS Naturals, FiniteSets, TLC
 
-CONSTANTS Threads, B, Top, Reread, Heal, Crash, Run
+CONSTANTS Threads, B, Top, Reread, Heal, Crash, Run, Keep
 
 Bits == 0..(B - 1)
 
@@ -153,8 +157,8 @@ SearchRead(t) ==
     /\ UNCHANGED <<bits, live, held, crashed, gone, touched>>
 
 \* Take some of the bits read, with one compare-and-swap. A thread that empties
-\* the word clears its bit now or, with Run, holds the clear: in a batch of
-\* words under one summary word.
+\* the word clears its bit now or, with Keep, never; or, with Run, holds the
+\* clear: in a batch of words under one summary word.
 SearchCas(t) ==
     /\ th[t].pc = "s_cas"
     /\ LET T == th[t] IN
@@ -164,6 +168,7 @@ SearchCas(t) ==
                 /\ live' = live \cup ObjsOf(T.i, S)
                 /\ IF S = T.set
                    THEN \/ Set(t, [T EXCEPT !.pc = "clr", !.set = {}]) /\ UNCHANGED held
+                        \/ Keep /\ Set(t, Idle) /\ UNCHANGED held
                         \/ /\ Run /\ Top > 0
                            /\ \A j \in held[t] : Parent(j) = Parent(T.i)
                            /\ held' = [held EXCEPT ![t] = @ \cup {T.i}]
