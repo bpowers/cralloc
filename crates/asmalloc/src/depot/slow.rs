@@ -63,12 +63,14 @@ enum Obtained<'a> {
 pub(super) const CHUNK: usize = 64;
 
 /// One full magazine in this many that a CPU's frees retire is laundered instead of kept, by
-/// default. Each costs one launder now and one fill later, a few atomic instructions per 64
-/// objects, so one in eight adds an eighth of a launder and a fill to each such exchange. An
-/// object in circulation survives `k` retirements with probability `(7/8)^k`, so half are
-/// replaced by the lowest free ones within six and nineteen in twenty within 23: fast next to
-/// the interval at any rate of exchange that matters, and cheap enough to leave on.
-pub const REFRESH_EVERY: u64 = 8;
+/// default. Each costs a launder now and a fill later, and in a fragmented heap the fill's
+/// search of the bitmaps dominates. One in 32 kept nearly all of one in eight's effect on
+/// what stays resident after a peak, for about a third of its instructions on slow-path-heavy
+/// workloads (`docs/research/memory.md`, "The parked-object rules, built"). An object in
+/// circulation survives `k` retirements with probability `(31/32)^k`: half are replaced within
+/// 22 and nineteen in twenty within 95, still fast next to the interval for any class that
+/// exchanges often enough for its pages to matter.
+pub const REFRESH_EVERY: u64 = 32;
 
 impl<'a, O: Os, R: Routines, S: Source> Cache<'a, O, R, S> {
     /// Whether a word is a marker that a slow path must not store over: this process's, or
