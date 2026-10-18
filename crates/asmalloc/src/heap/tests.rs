@@ -627,7 +627,7 @@ fn a_large_shrink_stays_in_place_unless_it_leaves_under_an_eighth_of_the_block()
 #[test]
 fn a_zeroed_grow_into_a_dirty_slot_reads_as_zero_past_what_it_kept() {
     let heap = SimHeap::<Shape>::new();
-    // Under the large cap of the simulated shape, so the freed slot stays resident and dirty.
+    // Not grown, so not advised for huge pages: the freed slot stays resident and dirty.
     let (small, big) = (layout(80 << 10, 8), layout(200 << 10, 8));
     // SAFETY: valid layouts; each block is freed once with the layout it has.
     unsafe {
@@ -916,11 +916,14 @@ fn maintain_brings_a_quiet_heap_down_to_what_collect_leaves() {
     let maintained = resident(&heap);
     heap.collect();
     let collected = resident(&heap);
-    // Two intervals before the purge has what was parked (a look, then the drain and shed),
-    // one pass down to the cap, then a quarter of the rest each interval.
+    // Two intervals before the purge has what was parked (a look, then the drain and shed).
+    // Frees do not purge, so what the drain launders past the cap waits for the passes that
+    // follow, which take it down to the cap; then a quarter of the rest each interval. Two
+    // intervals are allowed for reaching the cap, since a pass ends after one lap whatever
+    // parked objects still pin.
     let geometry = <Shape as crate::os::sim::Shape>::GEOMETRY;
     let cap = crate::back::policy::retained_cap(geometry);
-    let left = cap as f64 * 0.75f64.powi(intervals - 3);
+    let left = cap as f64 * 0.75f64.powi(intervals - 5);
     let slack = 2 * geometry.huge_page_size();
     std::eprintln!("quiet {quiet} maintained {maintained} collected {collected} bound {left}");
     assert!(

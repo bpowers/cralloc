@@ -13,7 +13,7 @@
 use super::group::{self, Group, Open};
 use super::host::ClassHost;
 use super::layout::{Grow, Hints, Layout, Recorded};
-use super::policy::{large_retained_cap, move_piece, wants_huge};
+use super::policy::{move_piece, wants_huge};
 use super::region::{self, Carve};
 use super::tree::{self, Host};
 use super::word::{BITS, Word, position};
@@ -82,7 +82,7 @@ impl<'a, O: Os> Back<'a, O> {
             return 0;
         };
         let mut got = 0;
-        let (mut resident, mut revived) = (0, 0);
+        let (mut resident, mut revived, mut fresh) = (0, 0, 0);
         let mut cursor = None;
         while got < out.len() {
             let want = (out.len() - got).min(BITS as usize) as u32;
@@ -92,6 +92,7 @@ impl<'a, O: Os> Back<'a, O> {
             let settled = region::settle(&host, taken.region, taken.word, taken.bits);
             resident += settled.resident;
             revived += settled.revived;
+            fresh += settled.fresh;
             let base = taken.word * BITS;
             let high = base + (BITS - 1 - taken.bits.leading_zeros());
             let mut bits = taken.bits;
@@ -102,8 +103,8 @@ impl<'a, O: Os> Back<'a, O> {
             });
             got = self.put(host.layout(), out, got, taken.region, high, slots);
         }
-        self.unretain(class.class(), resident);
-        self.revive(class.class(), revived);
+        self.unretain(resident);
+        self.retain(revived);
         while got < out.len() {
             let want = (out.len() - got).min(u32::MAX as usize) as u32;
             let Some((region, first, count)) = self.carve(&host, class.class(), want) else {
@@ -111,7 +112,9 @@ impl<'a, O: Os> Back<'a, O> {
             };
             let high = first + count - 1;
             got = self.put(host.layout(), out, got, region, high, first..first + count);
+            fresh += host.layout().slot_bytes(count);
         }
+        self.grow(fresh);
         got
     }
 
@@ -195,27 +198,19 @@ impl<'a, O: Os> Back<'a, O> {
         }
         release.finish();
         if count {
-            self.retain(class, objects.len().saturating_mul(class.size()));
+            self.retain(objects.len().saturating_mul(class.size()));
         }
     }
 
-    /// For a large slot the program is freeing and still holds: if keeping it resident would
-    /// take the large classes' retained count over its cap, returns its pages to the OS first
+    /// For a large slot the program is freeing and still holds: if it is advised for huge
+    /// pages because its object grew, returns its pages to the OS first, takes the advice back
     /// and says so. Aborts as `launder` does, and if the slot is free already.
     ///
-    /// The count is read here and raised later, by the release, so the cap is per thread:
-    /// threads freeing at the same moment can each see room and together pass the cap by one
-    /// slot for every thread but the first. The next free sees the true count.
-    ///
-    /// A slot advised for huge pages because its object grew is always purged here, and its
-    /// advice taken back, so that no free slot is advised: the next block in it may be used
-    /// sparsely, and a partial purge of a huge page would return nothing.
+    /// No free slot is advised: the next block in it may be used sparsely, and a partial purge
+    /// of a huge page would return nothing. Any other freed slot stays resident (`purge`).
     fn purge_before_release(&self, ptr: NonNull<u8>, class: Class) -> bool {
-        let geometry = self.space.plan().geometry();
-        let over =
-            self.retained_large().saturating_add(class.size()) > large_retained_cap(geometry);
         // Only a slot that holds a whole huge page can have been advised.
-        if !over && class.size() < geometry.huge_page_size() {
+        if class.size() < self.space.plan().geometry().huge_page_size() {
             return false;
         }
         let Some(host) = self.host(class) else {
@@ -229,8 +224,7 @@ impl<'a, O: Os> Back<'a, O> {
         if tree::word(&host, tree::Node::leaf(region, word)).load() & (1u64 << bit) != 0 {
             self.abort("double free: a large object was freed while it was free");
         }
-        let huge = region::recorded(&host, region, slot).is_some_and(|r| r.huge);
-        if !over && !huge {
+        if !region::recorded(&host, region, slot).is_some_and(|r| r.huge) {
             return false;
         }
         // SAFETY: BACK-CLASS-01 in docs/safety/asmalloc/back/class-safety.md. The program is
@@ -290,16 +284,23 @@ impl<'a, O: Os> Back<'a, O> {
             self.abort("an allocation larger than its class");
         }
         let host = self.host(class)?;
-        let (region, slot, zeroed) = if let Some(taken) = tree::claim(&host, 1) {
+        let (region, slot, zeroed, fresh) = if let Some(taken) = tree::claim(&host, 1) {
             let settled = region::settle(&host, taken.region, taken.word, taken.bits);
-            self.unretain(class, settled.resident);
-            self.revive(class, settled.revived);
+            self.unretain(settled.resident);
+            self.retain(settled.revived);
             let slot = taken.word * BITS + taken.bits.trailing_zeros();
-            (taken.region, slot, settled.zeroed != 0)
+            (taken.region, slot, settled.zeroed != 0, settled.fresh)
         } else {
             let (region, first, _) = self.carve(&host, class, 1)?;
-            (region, first, true)
+            (region, first, true, class.size())
         };
+        // A large block makes resident at most what it asked for (one with headroom asks for
+        // the room it may grow into), however big its slot.
+        self.grow(if class.is_small() {
+            fresh
+        } else {
+            fresh.min(size)
+        });
         if let Some(before) = region::recorded(&host, region, slot) {
             region::record(&host, region, slot, Recorded { size, ..before });
             // The last free could not take the slot's huge-page advice back; try again, so
@@ -441,8 +442,8 @@ impl<'a, O: Os> Back<'a, O> {
     /// is not the start of a handed-out large slot or a run.
     ///
     /// When every page of a slot went back this way, the slot is released as purged memory:
-    /// zero, clean and not counted as retained, exactly as a free over the large cap leaves
-    /// it, so the free neither purges nor counts those pages again.
+    /// zero, clean and not counted as retained, exactly as the free of a slot advised for huge
+    /// pages leaves it, so the free neither purges nor counts those pages again.
     ///
     /// The piecewise copy skips source pages that are all zero, so a block written sparsely
     /// stays sparse: reading an untouched page maps the kernel's shared zero page and costs no
@@ -660,9 +661,9 @@ impl<'a, O: Os> Back<'a, O> {
     /// Frees one slot of `class` to its bitmap. Aborts as [`Back::launder`] does. A large slot's
     /// recorded size is left as it was; the next allocation of the slot writes it.
     ///
-    /// A free of a large slot that would take the large classes' retained count over its cap
-    /// returns that slot's pages to the OS first, while the caller still holds the slot, and
-    /// then releases it uncounted (`purge`).
+    /// A free of a large slot advised for huge pages returns that slot's pages to the OS first,
+    /// while the caller still holds the slot, and then releases it uncounted
+    /// (`purge_before_release`). Any other freed slot stays resident and counted as retained.
     ///
     /// Crate-private, because the purge rests on the caller owning the slot and giving it up
     /// (BACK-CLASS-01): every caller in the crate frees a block its own caller gave up.

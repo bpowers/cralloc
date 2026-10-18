@@ -1,18 +1,18 @@
-//! Retained memory, its caps, the clocked decay pass and the purge walk.
+//! Retained memory, its cap, the clocked decay pass and the purge walk.
 //!
 //! **Retained memory** is the back end's estimate of the bytes of free slots in its bitmaps
-//! that are resident, kept as two counts: small classes and large ones. A launder or a free
-//! raises a count by what it returned. Only two things lower it: reuse (a claim subtracts what
-//! it took, less what the clean bits say was not resident) and purging (the pages returned
-//! that were not already clean). A claim that makes a purged page resident again adds back the
-//! rest of that page.
+//! that are resident, small and large classes in one count. A launder or a free raises it by
+//! what it returned. Only two things lower it: reuse (a claim subtracts what it took, less
+//! what the clean bits say was not resident) and purging (the pages returned that were not
+//! already clean). A claim that makes a purged page resident again adds back the rest of that
+//! page.
 //!
-//! The counts are signed and changed by plain atomic adds and subtracts, and read as zero when
+//! The count is signed and changed by plain atomic adds and subtracts, and read as zero when
 //! negative. A subtraction can run before the addition it answers (a claim takes a slot between
 //! another thread's release of it and that thread's add); a count that stopped at zero would
 //! lose the subtraction and keep the addition, and drift upward for ever.
 //!
-//! The counts are never reset. Free slots on pages that also hold live ones cannot be purged
+//! The count is never reset. Free slots on pages that also hold live ones cannot be purged
 //! and stay counted for as long as they are free. An earlier version set the count to zero
 //! when a whole pass purged nothing, taking what was left for fragmentation. That is wrong in
 //! a storm of frees: every page still has a live neighbour while a pass runs, the pages
@@ -21,9 +21,9 @@
 //!
 //! **Decay** (`decay_step`, one call per heartbeat). Once an interval of the clock
 //! (`policy::DECAY_TICKS`) a pass starts at the top of the heap with a goal: a quarter of the
-//! retained counts (`policy::decay_goal`), or everything above the small-class cap if that is
-//! more. Each heartbeat then does one bounded step of the walk until the goal is met or the
-//! walk has gone once round. The goal is in bytes and the walk stops within one unit of it,
+//! retained count (`policy::decay_goal`), or everything above the cap if that is more. Each
+//! heartbeat then does one bounded step of the walk until the goal is met or the walk has gone
+//! once round. The goal is in bytes and the walk stops within one unit of it,
 //! whatever the slot size. Fills take the lowest addresses, so what is being reused sits at
 //! the bottom and the top-down pass mostly leaves it alone; what stays free is returned over
 //! several intervals. A heap whose free memory is all fragmentation costs one walk of its
@@ -39,19 +39,19 @@
 //! stepper acts only on a pass word whose tag matches the decay word it read, so it never
 //! steps a new pass with the last one's goal, and ends only the pass it saw.
 //!
-//! **The caps** act at the free, for bursts inside an interval.
-//!
-//! - Small classes (`policy::retained_cap`): a launder purges toward the cap, within
-//!   `policy::PURGE_CAP_WORDS` of bitmap and one circuit of the heap from where the walk
-//!   stands, when it leaves the count over the cap
-//!   and at least `cap / policy::CAP_REARM` above the mark. After a purge that could not get
-//!   under the cap, the mark is the lowest the count has been since, so a count that
-//!   fragmentation holds at or over the cap acts once and then only after that much more is
-//!   freed. After a purge that returned memory and got under, the next launder past the cap
-//!   acts again (`mark_after`).
-//! - Large classes (`policy::large_retained_cap`): a free that would take the count over the
-//!   cap returns the slot's pages to the OS before it releases the slot (`Back::free`). The
-//!   freeing thread still holds the slot, so this needs no claim and no search.
+//! **The cap** (`policy::retained_cap`) is enforced when the heap grows, never when it frees.
+//! A free cannot tell memory that is idle from memory about to be reused, and purging there
+//! faulted reused memory straight back. Growth is memory a fill or a large allocation makes
+//! resident that was not: slots carved past a watermark, and purged pages a claim takes
+//! (`region::Settled::fresh`). It goes on a debt (`Back::grow`). When the debt reaches a step
+//! (`policy::growth_step`), the grower takes it and, if retained memory is over the cap,
+//! purges up to the smaller of the two (`policy::growth_goal`), within
+//! `policy::PURGE_CAP_WORDS` of bitmap and one circuit of the heap from where the walk stands.
+//! The debt is cleared whatever the walk returned, so a heap whose free memory is all
+//! fragmentation pays one bounded walk per step of growth. A program that frees and reuses
+//! the same classes never grows and never purges on its own traffic; one that frees class X
+//! and then grows class Y purges X as Y grows, so resident memory stays within the cap of what
+//! is live.
 //!
 //! **The walk** goes over the regions from the highest address down, skipping regions whose
 //! class summary bit says nothing in them is free. Within a region it walks units of pages
@@ -65,12 +65,13 @@
 //! lap. All of these are hints: two purgers on the same unit are safe because each purge is a
 //! claim (`region::purge_unit`), and a lost update only moves a purge earlier or later.
 //!
-//! **Trim** purges every unit of every region, ignoring the caps, the clock and the cursors.
+//! **Trim** purges every unit of every region, ignoring the cap, the clock and the cursors.
 
 use super::Back;
 use super::layout::{Hints, Step};
 use super::policy::{
-    CAP_REARM, DECAY_TICKS, PURGE_CAP_WORDS, PURGE_STEP_WORDS, decay_goal, retained_cap,
+    DECAY_TICKS, PURGE_CAP_WORDS, PURGE_STEP_WORDS, decay_goal, growth_goal, growth_step,
+    retained_cap,
 };
 use super::region::{self, Purge};
 use super::tree::Host;
@@ -149,119 +150,66 @@ impl Pass {
     }
 }
 
-/// Whether a launder that leaves the small-class count at `new` should purge: the count is
-/// over the cap and has risen a re-arm step above `mark`, the lowest it has been since the cap
-/// last acted.
-pub(crate) const fn cap_fires(mark: usize, new: usize, cap: usize) -> bool {
-    let low = if mark < new { mark } else { new };
-    new > cap && new - low >= cap / CAP_REARM
-}
-
-/// The cap's mark after a purge for the cap that purged `purged` bytes and left the
-/// small-class count at `left`. A purge that got the count under the cap shows the cap is
-/// working: the mark goes a step below the count, so the next launder past the cap acts again.
-/// Otherwise (what is left is fragmentation, or beyond the bound) the mark is the count, and
-/// the next purge waits for a step above it. A count under the cap after a purge that returned
-/// nothing was lowered by someone else, a fill on another thread, and says nothing about
-/// whether purging works, so it does not re-arm: if it did, every launder that took the count
-/// back over would walk the heap again for nothing.
-pub(crate) const fn mark_after(left: usize, cap: usize, purged: usize) -> usize {
-    if purged != 0 && left <= cap {
-        left.saturating_sub(cap / CAP_REARM)
-    } else {
-        left
-    }
-}
-
 /// A count read for use: zero when a subtraction has run ahead of its addition.
 fn clamped(count: &AtomicIsize) -> usize {
     count.load(Relaxed).max(0) as usize
 }
 
 impl<O: Os> Back<'_, O> {
-    fn count(&self, class: Class) -> &AtomicIsize {
-        if class.is_small() {
-            &self.state.retained_small
-        } else {
-            &self.state.retained_large
+    /// Bytes of free slots in the bitmaps that are believed to be resident, small and large
+    /// classes together: what decays, and what the cap limits.
+    #[inline]
+    pub fn retained(&self) -> usize {
+        clamped(&self.state.retained)
+    }
+
+    /// Counts `bytes` of free slots as retained: slots freed to the bitmaps, or free slots
+    /// that became resident by something other than a free. Never purges (see the module
+    /// documentation).
+    pub(super) fn retain(&self, bytes: usize) {
+        if bytes != 0 {
+            self.state.retained.fetch_add(bytes as isize, Relaxed);
         }
     }
 
-    /// Bytes of free slots in the bitmaps that are believed to be resident, small and large
-    /// classes together: what decays.
-    #[inline]
-    pub fn retained(&self) -> usize {
-        self.retained_small().saturating_add(self.retained_large())
+    /// Subtracts `bytes` of slots, claimed while resident or purged, from the count.
+    pub(super) fn unretain(&self, bytes: usize) {
+        if bytes != 0 {
+            self.state.retained.fetch_sub(bytes as isize, Relaxed);
+        }
     }
 
-    /// The part of [`Back::retained`] in small classes, which the small-class cap limits.
-    #[inline]
-    pub fn retained_small(&self) -> usize {
-        clamped(&self.state.retained_small)
-    }
-
-    /// The part of [`Back::retained`] in large classes, which the large-class cap limits.
-    #[inline]
-    pub fn retained_large(&self) -> usize {
-        clamped(&self.state.retained_large)
-    }
-
-    /// Counts `bytes` of slots of `class` freed to the bitmaps as retained. For a small class,
-    /// purges toward the cap if the count is now over it and a step above the mark. A large
-    /// class's cap is `Back::free`'s business, which acts before the slot is released.
-    pub(super) fn retain(&self, class: Class, bytes: usize) {
-        let old = self.count(class).fetch_add(bytes as isize, Relaxed).max(0) as usize;
-        if !class.is_small() {
+    /// Charges `bytes` of fresh memory, which a fill or a large allocation has just taken, to
+    /// the growth debt; once the debt is a step, takes it and purges as much, or what is over
+    /// the cap if that is less. The caller holds its slots by now, so the walk cannot take
+    /// them.
+    ///
+    /// The add and the take are separate atomic steps, so two growers may both see a step:
+    /// the first takes it, and the second takes what accrued since, under a step, and does
+    /// nothing. The few bytes it drops cost one purge later.
+    pub(super) fn grow(&self, bytes: usize) {
+        if bytes == 0 {
             return;
         }
         let state = self.state;
-        let cap = retained_cap(self.space.plan().geometry());
-        let mut mark = state.cap_mark.load(Relaxed);
-        if old < mark {
-            state.cap_mark.store(old, Relaxed);
-            mark = old;
-        }
-        let new = old.saturating_add(bytes);
-        if !cap_fires(mark, new, cap) {
+        let geometry = self.space.plan().geometry();
+        let step = growth_step(geometry);
+        let debt = state.growth.fetch_add(bytes, Relaxed).wrapping_add(bytes);
+        if debt < step {
             return;
         }
-        // Raise the mark first, so that launders racing this one do not all purge. The mark
-        // is read and written in separate steps here and above, so racing launders can both
-        // purge, or one can lower the mark the other just raised; either costs one bounded
-        // purge more or one later, never a count that goes unwatched.
-        state.cap_mark.store(new, Relaxed);
+        let debt = state.growth.swap(0, Relaxed);
+        let goal = growth_goal(debt, self.retained(), retained_cap(geometry), step);
         // One circuit of the heap from wherever the shared walk stands, counted in regions
         // finished: the lap count says nothing here, since the walk may stand one region from
-        // the bottom with everything this launder freed above it.
+        // the bottom with everything purgeable above it.
         let regions = self.space.plan().objects();
         let (mut spent, mut finished, mut purged) = (0, 0, 0);
-        loop {
-            let over = self.retained_small().saturating_sub(cap);
-            if over == 0 || spent >= PURGE_CAP_WORDS || finished >= regions {
-                break;
-            }
-            let (read, bytes, done) = self.purge_step(PURGE_CAP_WORDS - spent, over);
+        while purged < goal && spent < PURGE_CAP_WORDS && finished < regions {
+            let (read, bytes, done) = self.purge_step(PURGE_CAP_WORDS - spent, goal - purged);
             spent += read;
             purged += bytes;
             finished += usize::from(done);
-        }
-        let mark = mark_after(self.retained_small(), cap, purged);
-        state.cap_mark.store(mark, Relaxed);
-    }
-
-    /// Counts `bytes` of free slots of `class` as retained without acting on a cap: free
-    /// memory that became resident by something other than a free.
-    pub(super) fn revive(&self, class: Class, bytes: usize) {
-        if bytes != 0 {
-            self.count(class).fetch_add(bytes as isize, Relaxed);
-        }
-    }
-
-    /// Subtracts `bytes` of slots of `class`, claimed while resident or purged, from the
-    /// count.
-    pub(super) fn unretain(&self, class: Class, bytes: usize) {
-        if bytes != 0 {
-            self.count(class).fetch_sub(bytes as isize, Relaxed);
         }
     }
 
@@ -315,8 +263,7 @@ impl<O: Os> Back<'_, O> {
                 return None;
             }
             Decay::Start(word) => {
-                let small = self.retained_small();
-                let retained = small.saturating_add(self.retained_large());
+                let retained = self.retained();
                 if retained == 0 {
                     return None;
                 }
@@ -327,7 +274,7 @@ impl<O: Os> Back<'_, O> {
                 {
                     return None;
                 }
-                let over = small.saturating_sub(retained_cap(geometry));
+                let over = retained.saturating_sub(retained_cap(geometry));
                 let goal = decay_goal(geometry, retained).max(over);
                 // From the top. The pass word is written last and once: until then no
                 // stepper finds its tag and none acts.
@@ -495,7 +442,7 @@ impl<O: Os> Back<'_, O> {
             // At the top of the region: bring the watermark up to the end of its huge page,
             // if that page could then be purged whole.
             let (bytes, words) = region::top_up(&host, region);
-            self.revive(class, bytes);
+            self.retain(bytes);
             read += words;
         }
         let mut first = true;
@@ -532,7 +479,7 @@ impl<O: Os> Back<'_, O> {
             }
             cursor = next;
         };
-        self.unretain(class, purged);
+        self.unretain(purged);
         (purged, read, done)
     }
 }

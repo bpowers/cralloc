@@ -180,6 +180,10 @@ pub(crate) struct Settled {
     /// pages it touched. They were taken out of the retained count when the pages were purged
     /// and are resident once the claimed slots are written.
     pub(crate) revived: usize,
+    /// Bytes of purged pages the claim touches: the claimed slots' share and `revived`
+    /// together. All of it becomes resident as the claimed slots are written, so it is
+    /// growth, which the retained cap charges (`purge`).
+    pub(crate) fresh: usize,
 }
 
 /// After claiming `bits` of leaf word `index`: tests and clears their zero bits, and clears the
@@ -238,6 +242,7 @@ pub(crate) fn settle<H: Host>(host: &H, region: RegionId, index: u32, bits: u64)
         zeroed,
         resident: claimed.saturating_sub(cleaned * page),
         revived: (cleaned * page).saturating_sub(claimed),
+        fresh: cleaned * page,
     }
 }
 

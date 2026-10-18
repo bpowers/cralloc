@@ -7,25 +7,20 @@
 
 use crate::space::Geometry;
 
-/// The cap on retained memory of small classes, in huge pages: 32, or 64 MiB. Retained memory
-/// is free memory in the bitmaps that is believed resident. The cap is the pressure valve for
-/// a burst of frees inside one decay interval; the clocked pass is what returns memory in the
-/// ordinary case, so the cap can be generous, and a generous cap keeps a program that frees
-/// and reallocates tens of megabytes from faulting them back each time.
+/// The cap on retained memory, small and large classes together, in huge pages: 32, or
+/// 64 MiB. Retained memory is free memory in the bitmaps that is believed resident. The cap
+/// is enforced when the heap grows, never when it frees: a level cannot tell memory that is
+/// idle from memory about to be reused, and purging on frees faulted reused memory straight
+/// back (`docs/research/memory.md`). Address space is segregated by class, so free memory of
+/// one class serves another only through the kernel; the cap bounds what a phase change can
+/// leave resident above what is live. The clocked pass returns memory in the ordinary case.
 pub const RETAINED_CAP_HUGE_PAGES: usize = 32;
 
-/// While the small-class count stays over its cap (fragmentation can keep it there), a free
-/// tries again each time the count has grown by another `cap / CAP_REARM`: 4, so every 16 MiB
-/// of further frees. Without this the cap would act once and never again; with a smaller step
-/// a fragmented heap would pay a bounded walk too often.
-pub const CAP_REARM: usize = 4;
-
-/// The cap on retained memory of large classes, in huge pages: 4, or 8 MiB. A freed large
-/// slot can serve only its own class, so keeping many of them resident buys little, and a
-/// buffer that grows by moving leaves a trail of them: with 64 MiB a 64 MiB vector peaked
-/// 11 MiB over jemalloc, with 8 MiB it peaked under. Past the cap, a free purges the slot it
-/// frees, which is one system call and no search.
-pub const LARGE_RETAINED_CAP_HUGE_PAGES: usize = 4;
+/// Growth is charged against the cap in steps of this many huge pages: 1, or 2 MiB. Each step
+/// of fresh memory, while retained memory is over the cap, pays for at most one bounded purge
+/// walk, so a heap whose free memory is all fragmentation pays one walk per step of growth.
+/// A step costs at least a huge-page fault or 512 small ones, which dwarfs the walk.
+pub const GROWTH_STEP_HUGE_PAGES: usize = 1;
 
 /// The decay interval in ticks of [`crate::os::Os::ticks`]: 2^32, about a second of the cycle
 /// counter at a few gigahertz, the same as the idle check's. A pass over the heap starts at
@@ -48,9 +43,9 @@ pub const DECAY_FLOOR_HUGE_PAGES: usize = 1;
 /// huge-page unit of small slots may read more.
 pub const PURGE_STEP_WORDS: usize = 256;
 
-/// How much bitmap the free that pushes the small-class count past its cap (or past the next
-/// re-arm step) may read while it purges toward the cap, in words: 16384, 128 KiB. The bound
-/// keeps one call from paying for a whole heap; the clocked pass finishes the job.
+/// How much bitmap a step of growth over the cap may read while it purges, in words: 16384,
+/// 128 KiB. The bound keeps one call from paying for a whole heap; the clocked pass and later
+/// steps finish the job.
 pub const PURGE_CAP_WORDS: usize = 1 << 14;
 
 /// A region of a class that gets huge pages marks the rest of itself for them once it has
@@ -130,22 +125,35 @@ pub const COMMIT_AHEAD_PAGES: usize = 16;
 /// the carve needs: 1, or 2 MiB, so growth faults a huge page at a time.
 pub const COMMIT_AHEAD_HUGE_PAGES: usize = 1;
 
-/// The retained-memory cap of small classes in bytes for a geometry.
+/// The retained-memory cap in bytes for a geometry.
 #[inline(always)]
 pub const fn retained_cap(geometry: Geometry) -> usize {
     RETAINED_CAP_HUGE_PAGES * geometry.huge_page_size()
+}
+
+/// The growth step in bytes for a geometry.
+#[inline(always)]
+pub const fn growth_step(geometry: Geometry) -> usize {
+    GROWTH_STEP_HUGE_PAGES * geometry.huge_page_size()
+}
+
+/// How much a grower that has just taken a growth debt of `debt` bytes purges, with
+/// `retained` bytes retained against a cap of `cap`: nothing until the debt is a whole `step`
+/// (a racer that took only the crumbs another left does nothing), and then as much as it
+/// grew, but no more than is over the cap.
+#[inline(always)]
+pub const fn growth_goal(debt: usize, retained: usize, cap: usize, step: usize) -> usize {
+    if debt < step {
+        return 0;
+    }
+    let over = retained.saturating_sub(cap);
+    if debt < over { debt } else { over }
 }
 
 /// The piece a moving large block is copied in, in bytes, for a geometry.
 #[inline(always)]
 pub const fn move_piece(geometry: Geometry) -> usize {
     MOVE_PIECE_HUGE_PAGES * geometry.huge_page_size()
-}
-
-/// The retained-memory cap of large classes in bytes for a geometry.
-#[inline(always)]
-pub const fn large_retained_cap(geometry: Geometry) -> usize {
-    LARGE_RETAINED_CAP_HUGE_PAGES * geometry.huge_page_size()
 }
 
 /// The most a decay pass may purge when the retained count is `retained` bytes: a quarter of
