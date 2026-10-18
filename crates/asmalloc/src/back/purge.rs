@@ -167,22 +167,39 @@ impl<O: Os> Back<'_, O> {
     /// classes together: what decays, and what the cap limits.
     #[inline]
     pub fn retained(&self) -> usize {
-        clamped(&self.state.retained)
+        let retained = &self.state.retained;
+        clamped(&retained.small).saturating_add(clamped(&retained.large))
     }
 
-    /// Counts `bytes` of free slots as retained: slots freed to the bitmaps, or free slots
-    /// that became resident by something other than a free. Never purges (see the module
-    /// documentation).
-    pub(super) fn retain(&self, bytes: usize) {
-        if bytes != 0 {
-            self.state.retained.fetch_add(bytes as isize, Relaxed);
+    /// The part of [`Back::retained`] in large classes.
+    #[inline]
+    pub fn retained_large(&self) -> usize {
+        clamped(&self.state.retained.large)
+    }
+
+    /// The count of `class`'s kind.
+    fn count(&self, class: Class) -> &AtomicIsize {
+        if class.is_small() {
+            &self.state.retained.small
+        } else {
+            &self.state.retained.large
         }
     }
 
-    /// Subtracts `bytes` of slots, claimed while resident or purged, from the count.
-    pub(super) fn unretain(&self, bytes: usize) {
+    /// Counts `bytes` of free slots of `class` as retained: slots freed to the bitmaps, or
+    /// free slots that became resident by something other than a free. Never purges (see the
+    /// module documentation).
+    pub(super) fn retain(&self, class: Class, bytes: usize) {
         if bytes != 0 {
-            self.state.retained.fetch_sub(bytes as isize, Relaxed);
+            self.count(class).fetch_add(bytes as isize, Relaxed);
+        }
+    }
+
+    /// Subtracts `bytes` of slots of `class`, claimed while resident or purged, from the
+    /// count.
+    pub(super) fn unretain(&self, class: Class, bytes: usize) {
+        if bytes != 0 {
+            self.count(class).fetch_sub(bytes as isize, Relaxed);
         }
     }
 
@@ -193,18 +210,31 @@ impl<O: Os> Back<'_, O> {
     /// The add and the take are separate atomic steps, so two growers may both see a step:
     /// the first takes it, and the second takes what accrued since, under a step, and does
     /// nothing. The few bytes it drops cost one purge later.
+    #[inline]
     pub(super) fn grow(&self, bytes: usize) {
         if bytes == 0 {
             return;
         }
-        let state = self.state;
-        let geometry = self.space.plan().geometry();
-        let step = growth_step(geometry);
-        let debt = state.growth.fetch_add(bytes, Relaxed).wrapping_add(bytes);
-        if debt < step {
-            return;
+        let step = growth_step(self.space.plan().geometry());
+        let debt = self
+            .state
+            .growth
+            .fetch_add(bytes, Relaxed)
+            .wrapping_add(bytes);
+        if debt >= step {
+            self.pay_growth(step);
         }
-        let debt = state.growth.swap(0, Relaxed);
+    }
+
+    /// Takes the growth debt and purges toward it: `grow`'s rare part. Out of line, because
+    /// inlined into `alloc_at` it made the compiler keep the class's layout on the stack, and
+    /// every large allocation paid 19 more stores and 18 more loads for it (4% on a pipeline
+    /// of large objects; `docs/research/memory.md`, "Small heaps").
+    #[cold]
+    #[inline(never)]
+    fn pay_growth(&self, step: usize) {
+        let geometry = self.space.plan().geometry();
+        let debt = self.state.growth.swap(0, Relaxed);
         let goal = growth_goal(debt, self.retained(), retained_cap(geometry), step);
         // One circuit of the heap from wherever the shared walk stands, counted in regions
         // finished: the lap count says nothing here, since the walk may stand one region from
@@ -438,8 +468,8 @@ impl<O: Os> Back<'_, O> {
             return (0, 1, true);
         };
         let layout = *host.layout();
-        let hints = host.meta(region, layout.hints_word());
-        let grow = host.meta(region, layout.grow_word());
+        let hints = host.hints(region);
+        let grow = host.grow(region);
         let mut cursor = if resume {
             Hints::unpack(hints.load()).cursor
         } else {
@@ -450,7 +480,7 @@ impl<O: Os> Back<'_, O> {
             // At the top of the region: bring the watermark up to the end of its huge page,
             // if that page could then be purged whole.
             let (bytes, words) = region::top_up(&host, region);
-            self.retain(bytes);
+            self.retain(class, bytes);
             read += words;
         }
         let mut first = true;
@@ -487,7 +517,7 @@ impl<O: Os> Back<'_, O> {
             }
             cursor = next;
         };
-        self.unretain(purged);
+        self.unretain(class, purged);
         (purged, read, done)
     }
 }

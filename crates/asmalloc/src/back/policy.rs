@@ -116,6 +116,25 @@ pub const STAGGER_ROOM: usize = STAGGER_STEP * STAGGER_SLOTS;
 /// little memory for more calls. A block of at most one piece is copied whole.
 pub const MOVE_PIECE_HUGE_PAGES: usize = 1;
 
+/// The most retained large-slot memory a grown block's slot may join instead of going back to
+/// the OS: 8 huge pages, or 16 MiB. A block that moves leaves behind the slot it outgrew, and
+/// a block advised for huge pages because it grew is freed whole; both used to be purged at
+/// once, which is right for a block grown once and wrong for a buffer grown and freed again
+/// and again, which then faulted all of its memory back on every repetition. Up to this much
+/// they are kept, resident and counted, for the next growth to land on; past it they go back.
+///
+/// This is not a level on frees, which may not purge (`purge`): a plain free never purges,
+/// whatever the count. A purge here is charged only to a block the program copied or wrote
+/// in full to reach its size, so it costs at most about what the program already spent on
+/// that block, and never falls on one that was allocated, barely touched and freed.
+pub const KEPT_GROWN_HUGE_PAGES: usize = 8;
+
+/// The budget of [`KEPT_GROWN_HUGE_PAGES`] in bytes for a geometry.
+#[inline(always)]
+pub const fn kept_grown(geometry: Geometry) -> usize {
+    KEPT_GROWN_HUGE_PAGES * geometry.huge_page_size()
+}
+
 /// In the small-page part of a region, each commit makes this many pages writable beyond what
 /// the carve that asked for it needs: 16, or 64 KiB. `mprotect` costs about a microsecond, so
 /// this makes it rare without charging much address space against strict overcommit.

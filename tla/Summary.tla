@@ -35,10 +35,15 @@
    Keep = TRUE lets a thread that empties a level-0 word leave its summary
    bit set and owe nothing, under any number of summary words, as a large
    class's claim does: the bit is cleared by the next search that finds the
-   word empty. *)
+   word empty.
+   Look = TRUE makes a free whose OR found its word empty read the summary
+   bit before setting it, as a free into a word that was not empty does
+   (Heal), instead of setting it without looking: a launder of scattered
+   slots, which mostly finds the bit set by its neighbours, then makes a
+   plain load where it would make a locked OR. *)
 EXTENDS Naturals, FiniteSets, TLC
 
-CONSTANTS Threads, B, Top, Reread, Heal, Crash, Run, Keep
+CONSTANTS Threads, B, Top, Reread, Heal, Crash, Run, Keep, Look
 
 Bits == 0..(B - 1)
 
@@ -105,7 +110,7 @@ FreeOr(t) ==
         /\ bits' = [bits EXCEPT ![0][T.i] = old \cup T.set]
         /\ touched' = IF crashed THEN touched \cup {T.i} ELSE touched
         /\ IF old = {} \/ Heal
-           THEN Set(t, [Idle EXCEPT !.pc = "up", !.i = T.i, !.must = (old = {})])
+           THEN Set(t, [Idle EXCEPT !.pc = "up", !.i = T.i, !.must = (old = {} /\ ~Look)])
            ELSE Set(t, Idle)
     /\ UNCHANGED <<live, held, crashed, gone>>
 

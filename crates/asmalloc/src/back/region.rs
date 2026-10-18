@@ -15,9 +15,18 @@
 //!   its whole huge pages advised for huge pages, and its size word records that
 //!   (`Recorded::huge`). Only the slot's holder reads or writes the flag. While it is set, a
 //!   partial purge of the slot rounds inward to whole huge pages, since purging part of a huge
-//!   page returns nothing to the OS until the kernel gets round to splitting it; and the free
-//!   purges the whole slot and takes the advice back, so a free slot is never advised and a
-//!   purge of a free slot needs no rule of its own.
+//!   page returns nothing to the OS until the kernel gets round to splitting it. The free either
+//!   purges the whole slot and takes the advice back, or, within the budget for kept grown
+//!   blocks, releases it resident with its advice, which the next claim takes back
+//!   (`Back::alloc_at`). The huge pages already faulted stay, and that tenant's flag is clear,
+//!   so a shrink of it in place is not trimmed to whole huge pages and may split one: the
+//!   kernel then returns the part, a cost in time, not memory. A purge of a free slot needs no
+//!   rule of its own: it returns the slot's pages whole.
+//! - **Clean bits** say a page has not been written since it was carved or last purged. Only a
+//!   purge and the first claim of a carved slot set them (`mark_fresh`, for the pages past its
+//!   block); a claim and anything that widens a held block clear them under what it may write
+//!   (`settle_slot`, `cover`). The retained count of a free large slot is its pages that are
+//!   not clean (`charge`).
 //! - **Settling** after a claim: an allocation tests and clears the slot's zero bit (large
 //!   classes), and clears the clean bits of the pages its slots touch, and counts how much of
 //!   what it took was resident.
@@ -50,7 +59,7 @@ pub(crate) enum Carve {
 /// Carves up to `n` slots, at least one, from a region's watermark. `n` must not be zero.
 pub(crate) fn carve<H: Host>(host: &H, region: RegionId, n: u32) -> Carve {
     let layout = host.layout();
-    let grow = host.meta(region, layout.grow_word());
+    let grow = host.grow(region);
     let mut seen = grow.load();
     loop {
         let now = Grow::unpack(seen);
@@ -141,7 +150,7 @@ fn huge_threshold(layout: &Layout) -> Option<u32> {
 /// purges work on lies above the threshold either, since nothing was committed there.
 fn switch_to_huge<H: Host>(host: &H, region: RegionId, need: u32) -> Option<u32> {
     let layout = host.layout();
-    let hints = host.meta(region, layout.hints_word());
+    let hints = host.hints(region);
     let mut seen = hints.load();
     if let Some(from) = Hints::unpack(seen).huge_from {
         return Some(from);
@@ -259,10 +268,10 @@ pub(crate) fn settle<H: Host>(host: &H, region: RegionId, index: u32, bits: u64)
 /// releases. If the page is not purged after all, the slots are ordinary free slots.
 pub(crate) fn top_up<H: Host>(host: &H, region: RegionId) -> (usize, usize) {
     let layout = host.layout();
-    let Some(huge) = Hints::unpack(host.meta(region, layout.hints_word()).load()).huge_from else {
+    let Some(huge) = Hints::unpack(host.hints(region).load()).huge_from else {
         return (0, 0);
     };
-    let now = Grow::unpack(host.meta(region, layout.grow_word()).load());
+    let now = Grow::unpack(host.grow(region).load());
     if now.carved == 0 || now.carved >= layout.slots() {
         return (0, 1);
     }
@@ -325,7 +334,7 @@ pub(crate) unsafe fn purge_held<H: Host>(host: &H, region: RegionId, slot: u32) 
     let Some(unit) = layout.slot_unit(slot) else {
         return false;
     };
-    let hints = Hints::unpack(host.meta(region, layout.hints_word()).load());
+    let hints = Hints::unpack(host.hints(region).load());
     if hints.huge_from.is_some_and(|from| unit.end > from) {
         return false;
     }
@@ -340,6 +349,171 @@ pub(crate) unsafe fn purge_held<H: Host>(host: &H, region: RegionId, slot: u32) 
     }
     mark_purged(host, region, slot);
     true
+}
+
+/// The page, counted from the region's start, past the last that a tenant of large slot `slot`
+/// with `size` bytes may write: its size from the slot's stagger (a block starts at the slot's
+/// start or there), rounded up to a page, or to a huge page if `huge`, since an advised range
+/// faults a huge page at a time; within the slot's pages, `unit`.
+const fn extent_of(layout: &Layout, slot: u32, unit: Unit, size: usize, huge: bool) -> u32 {
+    let page = layout.page_size();
+    let written = layout.slot_bytes(slot) + layout.stagger(slot) + size;
+    let end = written.div_ceil(page);
+    let end = if end > unit.end as usize {
+        unit.end
+    } else {
+        end as u32
+    };
+    let end = if huge { layout.huge_ceil(end) } else { end };
+    if end < unit.start {
+        unit.start
+    } else if end > unit.end {
+        unit.end
+    } else {
+        end
+    }
+}
+
+/// The bits of clean word `w` for pages `from..to`, none if the range misses the word.
+#[inline(always)]
+const fn pages(w: u32, from: u32, to: u32) -> u64 {
+    let base = w * BITS;
+    let lo = from.saturating_sub(base);
+    let hi = to.saturating_sub(base);
+    let hi = if hi > BITS { BITS } else { hi };
+    if hi <= lo {
+        0
+    } else {
+        (u64::MAX >> (BITS - (hi - lo))) << lo
+    }
+}
+
+/// The bytes of large slot `slot` to count as retained when it is free: its pages whose clean
+/// bit is clear. A clean bit is true: it says the page has not been written since it was
+/// carved or last purged, so the pages that are not clean are what may be resident. The free,
+/// the decision to keep a grown slot, and the claim (`settle_slot`, which counts the same way
+/// before it clears anything) all use this count, and a purge subtracts the pages it newly
+/// cleans, so the retained count is the free slots' pages that are not clean, exactly.
+///
+/// It reads the slot's clean words and writes nothing. A word with no bit set is 64 pages, a
+/// word with every bit set none; only a mixed word needs a count.
+pub(crate) fn charge<H: Host>(host: &H, region: RegionId, slot: u32) -> usize {
+    let layout = host.layout();
+    let Some(unit) = layout.slot_unit(slot) else {
+        return layout.size();
+    };
+    let mut clean = 0usize;
+    for w in unit.start / BITS..=(unit.end - 1) / BITS {
+        let mask = pages(w, unit.start, unit.end);
+        let seen = host.meta(region, layout.clean_word(w)).load() & mask;
+        clean += match seen {
+            0 => 0,
+            _ if seen == mask => mask.count_ones() as usize,
+            _ => seen.count_ones() as usize,
+        };
+    }
+    layout.size() - clean * layout.page_size()
+}
+
+/// For the thread that has just carved large slot `slot` for a block of `size` bytes: marks the
+/// slot's pages past what the block may write (`extent_of`) clean. They have never been
+/// written: a carved slot's pages are fresh. This is the one place a clean bit is set without
+/// a purge, and a slot is carved once. A block that moved in with room to grow is then
+/// charged, when it is freed, what it can have touched, not four or five times as much.
+pub(crate) fn mark_fresh<H: Host>(host: &H, region: RegionId, slot: u32, size: usize) {
+    let layout = host.layout();
+    let Some(unit) = layout.slot_unit(slot) else {
+        return;
+    };
+    let end = extent_of(layout, slot, unit, size, false);
+    if end >= unit.end {
+        return;
+    }
+    for w in end / BITS..=(unit.end - 1) / BITS {
+        host.meta(region, layout.clean_word(w))
+            .fetch_or(pages(w, end, unit.end));
+    }
+}
+
+/// For the holder of large slot `slot`, which has just returned the `len` bytes at `from` bytes
+/// into it, whole pages, to the OS in full (`purge_part` said so): marks those pages clean.
+pub(crate) fn mark_clean<H: Host>(host: &H, region: RegionId, slot: u32, from: usize, len: usize) {
+    let layout = host.layout();
+    let shift = layout.page_shift();
+    let offset = layout.slot_bytes(slot) + from;
+    let (first, end) = ((offset >> shift) as u32, ((offset + len) >> shift) as u32);
+    if first >= end {
+        return;
+    }
+    for w in first / BITS..=(end - 1) / BITS {
+        host.meta(region, layout.clean_word(w))
+            .fetch_or(pages(w, first, end));
+    }
+}
+
+/// For the holder of large slot `slot`, after a change that may widen what its tenant can
+/// write (`extent_of`): a larger recorded size, or huge-page advice, which rounds it up to
+/// huge pages. Clears the clean bits of the pages inside the new extent, writing only words
+/// that change, so that no clean bit stands over a page the tenant may write. With the claim,
+/// which clears them up to the size it was claimed for (`settle_slot`), this keeps every clean
+/// bit of a held slot true. Only a resize, a grown move or a claim of a slot that kept its
+/// advice calls it.
+pub(crate) fn cover<H: Host>(host: &H, region: RegionId, slot: u32) {
+    let layout = host.layout();
+    let (Some(unit), Some(now)) = (layout.slot_unit(slot), recorded(host, region, slot)) else {
+        return;
+    };
+    let end = extent_of(layout, slot, unit, now.size, now.huge);
+    if end <= unit.start {
+        return;
+    }
+    for w in unit.start / BITS..=(end - 1) / BITS {
+        let inside = pages(w, unit.start, end);
+        let word = host.meta(region, layout.clean_word(w));
+        if word.load() & inside != 0 {
+            word.fetch_and(!inside);
+        }
+    }
+}
+
+/// `settle` for one large slot, just claimed for a block of `size` bytes: tests and clears its
+/// zero bit, and clears the clean bits of the pages the block may write (`extent_of`),
+/// writing only words that change; the pages past them stay clean, which is true as long as
+/// nothing writes them. Its `resident` is the slot's pages that were not clean, counted as
+/// `charge` counts them, which is what the free or purge that left it counted; a claim of one
+/// large slot revives no other slot's pages, since a large slot is whole pages.
+pub(crate) fn settle_slot<H: Host>(host: &H, region: RegionId, slot: u32, size: usize) -> Settled {
+    let layout = host.layout();
+    let bit = 1u64 << (slot % BITS);
+    let zeroed = match layout.zero_word(slot / BITS) {
+        Some(at) => {
+            let zero = host.meta(region, at);
+            if zero.load() & bit != 0 {
+                zero.fetch_and(!bit) & bit
+            } else {
+                0
+            }
+        }
+        None => 0,
+    };
+    let resident = charge(host, region, slot);
+    if let Some(unit) = layout.slot_unit(slot) {
+        let end = extent_of(layout, slot, unit, size, false);
+        if end > unit.start {
+            for w in unit.start / BITS..=(end - 1) / BITS {
+                let inside = pages(w, unit.start, end);
+                let word = host.meta(region, layout.clean_word(w));
+                if word.load() & inside != 0 {
+                    word.fetch_and(!inside);
+                }
+            }
+        }
+    }
+    Settled {
+        zeroed,
+        resident,
+        revived: 0,
+    }
 }
 
 /// Records that every whole page inside slot `slot` has just been returned to the OS, for the
@@ -482,7 +656,7 @@ pub(crate) unsafe fn purge_part<H: Host>(
     let shift = layout.page_shift();
     let offset = layout.slot_bytes(slot) + from;
     let (mut first, mut end) = ((offset >> shift) as u32, ((offset + len) >> shift) as u32);
-    let hints = Hints::unpack(host.meta(region, layout.hints_word()).load());
+    let hints = Hints::unpack(host.hints(region).load());
     if from + len > layout.size() || hints.huge_from.is_some_and(|huge| end > huge) {
         return false;
     }

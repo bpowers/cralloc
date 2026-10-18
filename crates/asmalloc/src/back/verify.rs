@@ -95,11 +95,13 @@ fn headers_round_trip() {
 }
 
 /// Every class that fits a region of a plan has a layout, and the layout fits in the
-/// region's metadata block: the leaf bitmap at offset zero covers every slot, each summary level
-/// has a bit for every word below and ends in one top word, the sections do not overlap, the
-/// clean bitmap covers every page, large classes have a zero bitmap and a size word for every
-/// slot, and the
-/// part committed at assignment covers everything after the leaf bitmap.
+/// region's metadata block. A small class's block: the summary levels from word zero, top
+/// first, each with a bit for every word below and ending in one top word; the clean bitmap,
+/// covering every page; the leaf bitmap, covering every slot, last and less than a page after
+/// the rest; committed at assignment up to the leaf bitmap. A large class's block: its header
+/// (two words, `header_word` zero) alone on a line where the block has room; the summary
+/// levels; the leaf, zero and clean bitmaps; a size word for every slot; committed whole at
+/// assignment. The sections do not overlap.
 pub(super) fn layouts_fit(plan: Plan) {
     let class = any_class();
     let slots = slots_in_region(plan, class);
@@ -109,60 +111,74 @@ pub(super) fn layouts_fit(plan: Plan) {
         return;
     }
     let layout = layout.unwrap();
+    let page = plan.geometry().page_size();
+    let line = (crate::lined::LINE / WORD_BYTES) as u32;
     assert!(layout.slots() == slots);
     assert!(layout.total_words() as usize * WORD_BYTES <= plan.metadata_size());
+    assert!(layout.block_bytes() <= plan.metadata_size());
+    assert!(layout.region_pages() as usize * page == plan.region_size());
     assert!(layout.leaf_words() * BITS >= slots && (layout.leaf_words() - 1) * BITS < slots);
-    assert!(layout.tree_word(0, 0) == 0);
-    // The header is the first whole cache line after the leaf bitmap, alone on it, or, where
-    // the block has no room for that, straight after the leaf bitmap.
-    let line = (crate::lined::LINE / WORD_BYTES) as u32;
-    assert!(layout.hints_word() == layout.grow_word() + 1);
-    let after = if layout.height() >= 1 {
-        layout.tree_word(1, 0)
-    } else {
-        layout.clean_word(0)
+    // A large class's header first.
+    let mut end = match layout.header_word() {
+        Some(at) => {
+            assert!(!class.is_small() && at == 0);
+            let first = if layout.height() >= 1 {
+                layout.tree_word(layout.height(), 0)
+            } else {
+                layout.tree_word(0, 0)
+            };
+            assert!(first == line || first == 2);
+            first
+        }
+        None => {
+            assert!(class.is_small());
+            0
+        }
     };
-    let mut end = if after == layout.hints_word() + 1 {
-        assert!(layout.grow_word() == layout.leaf_words());
-        after
-    } else {
-        assert!(layout.grow_word() % line == 0);
-        assert!(layout.grow_word() >= layout.leaf_words());
-        assert!(layout.grow_word() < layout.leaf_words() + line);
-        assert!(after == layout.grow_word() + line);
-        after
-    };
+    // The summary levels from the top down.
     let height = layout.height() as usize;
     assert!(height < MAX_LEVELS);
     assert!(layout.level_words(layout.height()) == 1);
-    let mut level = 1;
-    while level <= height {
+    let mut level = height;
+    while level >= 1 {
         let below = layout.level_words(level as u8 - 1);
         let words = layout.level_words(level as u8);
         assert!(words * BITS >= below && (words - 1) * BITS < below);
         assert!(layout.tree_word(level as u8, 0) == end);
         end += words;
-        level += 1;
+        level -= 1;
     }
-    assert!(layout.clean_word(0) == end);
-    assert!(layout.clean_words() * BITS >= layout.region_pages());
-    end += layout.clean_words();
-    match layout.zero_word(0) {
-        Some(at) => {
-            assert!(!class.is_small() && at == end);
-            end += layout.leaf_words();
-            assert!(layout.size_word(0) == Some(end));
-            end += slots;
-        }
-        None => assert!(class.is_small() && layout.size_word(0).is_none()),
-    }
-    assert!(end == layout.total_words());
     let (start, stop) = layout.fixed_commit();
-    let page = plan.geometry().page_size();
-    assert!(start % page == 0 && stop % page == 0);
-    assert!(start <= layout.grow_word() as usize * WORD_BYTES);
-    assert!(stop >= end as usize * WORD_BYTES && stop <= plan.metadata_size());
-    assert!(layout.region_pages() as usize * page == plan.region_size());
+    assert!(start == 0 && stop % page == 0);
+    if class.is_small() {
+        assert!(layout.zero_word(0).is_none() && layout.size_word(0).is_none());
+        assert!(layout.clean_word(0) == end);
+        assert!(layout.clean_words() * BITS >= layout.region_pages());
+        end += layout.clean_words();
+        // Then the leaf bitmap, last, starting at most a page after the rest.
+        let leaf = layout.tree_word(0, 0);
+        assert!(leaf >= end && ((leaf - end) as usize) * WORD_BYTES < page);
+        assert!(leaf + layout.leaf_words() == layout.total_words());
+        // Committed at assignment: everything before the leaf bitmap, as whole pages; the leaf
+        // bitmap's first commit starts in the page it starts in.
+        assert!(stop >= end as usize * WORD_BYTES && stop < (leaf as usize) * WORD_BYTES + page);
+        assert!(layout.leaf_commit(0) <= leaf as usize * WORD_BYTES);
+        assert!(layout.leaf_commit(0) + page > leaf as usize * WORD_BYTES);
+    } else {
+        assert!(layout.tree_word(0, 0) == end);
+        end += layout.leaf_words();
+        assert!(layout.zero_word(0) == Some(end));
+        end += layout.leaf_words();
+        assert!(layout.clean_word(0) == end);
+        assert!(layout.clean_words() * BITS >= layout.region_pages());
+        end += layout.clean_words();
+        assert!(layout.size_word(0) == Some(end));
+        end += slots;
+        assert!(end == layout.total_words());
+        // Committed whole at assignment, so no carve commits more.
+        assert!(stop == layout.block_bytes() && stop >= end as usize * WORD_BYTES);
+        assert!(layout.leaf_commit(0) == stop);
+    }
 }
 
 /// The decay word: a pass under way is stepped whatever the clock says. Otherwise a pass

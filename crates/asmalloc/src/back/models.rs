@@ -22,7 +22,7 @@
 //! (`scripts/gate --all`); the merge gate runs each scenario one preemption lower.
 
 use super::explore::{Config, Outcome, TWord, explore};
-use super::group::Gather;
+use super::group::{Direct, Gather};
 use super::layout::{Step, Unit};
 use super::region::{self, Carve, Purge};
 use super::testhost::TestHost;
@@ -1386,6 +1386,133 @@ fn merged_debts_race_claims_on_one_word_regions_fully() {
     merged_debts_race_claims_on_one_word_regions(2);
 }
 
+/// Frees `slots` as a scattered launder does: each with its own OR, owing its summary bit
+/// with the bit read before it is set (`Look`), the debts merged per summary word (`Direct`).
+fn free_direct(host: &Host8, slots: &[(RegionId, u32)]) {
+    let Some(&(region, _)) = slots.first() else {
+        return;
+    };
+    let mut release = tree::Release::new(host, region);
+    let mut direct = Direct::new();
+    for &(region, slot) in slots {
+        let leaves = release.leaves(region, slot / BITS + 1);
+        direct.free_slot(&mut release, leaves, region, slot);
+    }
+    direct.finish(&mut release);
+    release.finish();
+}
+
+/// `Summary_look_deep.cfg`: a scattered launder on two regions of two summary levels, into
+/// words that were empty (so with `must` the summary bits would be set unread) under two
+/// summary words of one region and one of the other, races a run of claims and a claim from
+/// the top. Preemptions bounded to two (one in the quick run).
+fn direct_frees_race_claims_on_deep_trees(preemptions: usize) {
+    explore(
+        Config {
+            preemptions: Some(preemptions),
+            ..Config::ALL
+        },
+        3,
+        || {
+            let host = Host8::new(standard(), class(8), 2);
+            assert_eq!(host.layout().height(), 2);
+            for r in 0..2 {
+                host.carve_all(host.region_at(r), host.layout().slots());
+            }
+            free_now(&host, host.region_at(0), 0);
+            free_now(&host, host.region_at(0), 64 * 64);
+            (host, Mutex::new(Vec::new()))
+        },
+        |(host, kept), me| {
+            let (r0, r1) = (host.region_at(0), host.region_at(1));
+            let got = match me {
+                0 => {
+                    let slots = [(r0, 65), (r1, 3), (r0, 64 * 64 + 2), (r0, 1), (r1, 64 + 3)];
+                    free_direct(host, &slots);
+                    Vec::new()
+                }
+                1 => claim_run_of(host, 3, 1),
+                _ => claim(host, 1),
+            };
+            kept.lock().unwrap().extend(got);
+        },
+        |(host, kept), outcome| {
+            assert!(outcome.killed.is_empty());
+            let first = host.global(host.region_at(1), 0);
+            let expected = [0, 1, 65, 64 * 64, 64 * 64 + 2, first + 3, first + 67];
+            run_check(host, 2, kept, &expected);
+        },
+    );
+}
+
+#[test]
+#[cfg_attr(miri, ignore)]
+fn direct_frees_race_claims_on_deep_trees_quickly() {
+    direct_frees_race_claims_on_deep_trees(1);
+}
+
+#[test]
+#[ignore = "slow: run with scripts/gate --all"]
+fn direct_frees_race_claims_on_deep_trees_fully() {
+    direct_frees_race_claims_on_deep_trees(2);
+}
+
+/// `Summary_look_crash.cfg`, on two summary levels: a scattered launder, a claimer and a run of
+/// claims may vanish at any step, as in a forked child. Afterwards a single free into each
+/// word makes it reachable, and claims find every free slot. Preemptions bounded to two (one
+/// in the quick run).
+fn direct_frees_lost_at_any_step(preemptions: usize) {
+    explore(
+        Config {
+            preemptions: Some(preemptions),
+            crash: true,
+            ..Config::ALL
+        },
+        3,
+        || {
+            let host = deep_run_setup();
+            (host, Mutex::new(Vec::new()))
+        },
+        |(host, kept), me| {
+            let r0 = host.region_at(0);
+            let got = match me {
+                0 => {
+                    free_direct(host, &[(r0, 65), (r0, 64 * 64 + 1), (r0, 1)]);
+                    Vec::new()
+                }
+                1 => claim_run_of(host, 2, 1),
+                _ => claim(host, 1),
+            };
+            kept.lock().unwrap().extend(got);
+        },
+        |(host, kept), _| {
+            let kept: Vec<_> = kept.lock().unwrap().clone();
+            let distinct: BTreeSet<_> = kept.iter().copied().collect();
+            assert_eq!(distinct.len(), kept.len(), "a slot claimed twice");
+            let r0 = host.region_at(0);
+            for w in [0, 1, 64] {
+                free_one(host, r0, w * BITS + 3);
+                assert!(
+                    host.path_set(Node::leaf(r0, w)),
+                    "word {w} stays invisible after a free into it"
+                );
+            }
+        },
+    );
+}
+
+#[test]
+#[cfg_attr(miri, ignore)]
+fn direct_frees_lost_at_any_step_quickly() {
+    direct_frees_lost_at_any_step(1);
+}
+
+#[test]
+#[ignore = "slow: run with scripts/gate --all"]
+fn direct_frees_lost_at_any_step_fully() {
+    direct_frees_lost_at_any_step(2);
+}
+
 /// `Summary_heal_crash.cfg`: as `summary_three_threads_bounded`, but threads 1 and 2 may vanish
 /// at any step, as in a forked child. What a vanished thread held is lost; nothing is ever
 /// handed out twice; and once the survivor is done, a free into any word makes that word
@@ -1500,7 +1627,7 @@ fn carving(config: Config) {
             assert_eq!(slots, (0..8).collect::<Vec<u32>>());
             let region = host.region_at(0);
             assert!(host.free_slots(region).is_empty(), "carving frees nothing");
-            let header = host.meta(region, host.layout().grow_word()).load();
+            let header = host.grow(region).load();
             let grow = super::layout::Grow::unpack(header);
             assert_eq!(grow.carved, 8);
             assert!(grow.committed as usize * geometry.geometry().page_size() >= 8 * 256);
@@ -1512,9 +1639,8 @@ fn carving(config: Config) {
 fn purge_pass(host: &Host8) -> usize {
     let region = host.region_at(0);
     let layout = *host.layout();
-    let carved = super::layout::Grow::unpack(host.meta(region, layout.grow_word()).load()).carved;
-    let huge_from =
-        super::layout::Hints::unpack(host.meta(region, layout.hints_word()).load()).huge_from;
+    let carved = super::layout::Grow::unpack(host.grow(region).load()).carved;
+    let huge_from = super::layout::Hints::unpack(host.hints(region).load()).huge_from;
     let mut cursor = 0;
     let mut purged = 0;
     loop {
@@ -1649,8 +1775,7 @@ fn purge_roles(
                     cursor: 0,
                 };
                 let region = host.region_at(0);
-                host.meta(region, host.layout().hints_word())
-                    .fetch_or(hints.pack());
+                host.hints(region).fetch_or(hints.pack());
             }
             host
         },
@@ -1678,9 +1803,7 @@ fn purge_roles(
         },
         |host, _| {
             let region = host.region_at(0);
-            let layout = *host.layout();
-            let carved =
-                super::layout::Grow::unpack(host.meta(region, layout.grow_word()).load()).carved;
+            let carved = super::layout::Grow::unpack(host.grow(region).load()).carved;
             let mut expected: BTreeSet<u32> = (0..carved).collect();
             if !roles.iter().any(|r| matches!(r, Role::FreeHeld)) {
                 for slot in &held {
@@ -1859,4 +1982,115 @@ fn purge_sets_zero_bits_only_inside() {
     zero_bits_sound(&host);
     assert!(host.is_zero(region, 0) && host.is_zero(region, 1));
     assert!(!host.is_zero(region, 2));
+}
+
+/// Two regions of two summary levels in which words 1 and 64 of region 0 and word 0 of region
+/// 1 are empty under summary bits set at every level, as claims that keep the bits leave
+/// them, and nothing is free. The slots the claims took (64 and `64 * 64` of region 0, 0 of
+/// region 1) are the program's.
+fn stale_bits_setup() -> Host8 {
+    let host = Host8::new(standard(), class(8), 2);
+    assert_eq!(host.layout().height(), 2);
+    for r in 0..2 {
+        host.carve_all(host.region_at(r), host.layout().slots());
+    }
+    let (r0, r1) = (host.region_at(0), host.region_at(1));
+    // Highest first: a search stops at the lowest word with a free slot, so it never reaches
+    // the bits already left over the empty words above, which it would clear.
+    for (region, slot) in [(r1, 0), (r0, 64 * 64), (r0, 64)] {
+        free_now(&host, region, slot);
+        assert_eq!(claim_with(&host, 1, true), [(region, slot)]);
+    }
+    assert!(free_set(&host, 2).is_empty());
+    for (region, word) in [(r0, 1), (r0, 64), (r1, 0)] {
+        assert!(host.path_set(Node::leaf(region, word)));
+    }
+    host
+}
+
+/// Review of the direct path (`Look` against clears that go up the tree). A scattered launder
+/// frees into words that are empty under set summary bits, so at every level it reads a bit
+/// that is set and writes nothing, while searches from the top find those words empty, clear
+/// their bits level by level, and read each word again. `Summary_look_deep.cfg` with the
+/// stale bits of `Summary_keep_deep.cfg`, on the production code.
+fn direct_frees_under_stale_bits_race_clears(preemptions: usize) {
+    explore(
+        Config {
+            preemptions: Some(preemptions),
+            ..Config::ALL
+        },
+        3,
+        || (stale_bits_setup(), Mutex::new(Vec::new())),
+        |(host, kept), me| {
+            let (r0, r1) = (host.region_at(0), host.region_at(1));
+            let got = match me {
+                0 => {
+                    free_direct(host, &[(r0, 64), (r1, 0), (r0, 64 * 64), (r0, 65)]);
+                    Vec::new()
+                }
+                1 => claim(host, 1),
+                _ => claim_run_of(host, 2, 1),
+            };
+            kept.lock().unwrap().extend(got);
+        },
+        |(host, kept), outcome| {
+            assert!(outcome.killed.is_empty());
+            let first = host.global(host.region_at(1), 0);
+            run_check(host, 2, kept, &[64, 65, 64 * 64, first]);
+        },
+    );
+}
+
+/// One preemption, which takes most of a minute for this scenario and the next together. Two
+/// take about twelve minutes, and passed when the direct path was reviewed.
+#[test]
+#[ignore = "slow: run with scripts/gate --all"]
+fn direct_frees_under_stale_bits_race_clears_fully() {
+    direct_frees_under_stale_bits_race_clears(1);
+}
+
+/// The same with a thread lost at any step, as in a forked child: afterwards a scattered
+/// launder into each word, which is the direct path's own healing walk (a look at each level,
+/// a write only where the bit is clear), makes the word reachable.
+fn direct_frees_heal_what_a_fork_left(preemptions: usize) {
+    explore(
+        Config {
+            preemptions: Some(preemptions),
+            crash: true,
+            ..Config::ALL
+        },
+        3,
+        || (stale_bits_setup(), Mutex::new(Vec::new())),
+        |(host, kept), me| {
+            let (r0, r1) = (host.region_at(0), host.region_at(1));
+            let got = match me {
+                0 => claim(host, 1),
+                1 => {
+                    free_direct(host, &[(r0, 64), (r1, 0), (r0, 64 * 64), (r0, 65)]);
+                    Vec::new()
+                }
+                _ => claim_run_of(host, 2, 1),
+            };
+            kept.lock().unwrap().extend(got);
+        },
+        |(host, kept), _| {
+            let kept: Vec<_> = kept.lock().unwrap().clone();
+            let distinct: BTreeSet<_> = kept.iter().copied().collect();
+            assert_eq!(distinct.len(), kept.len(), "a slot claimed twice");
+            let (r0, r1) = (host.region_at(0), host.region_at(1));
+            free_direct(host, &[(r0, 64 + 7), (r1, 7), (r0, 64 * 64 + 7)]);
+            for (region, word) in [(r0, 1), (r1, 0), (r0, 64)] {
+                assert!(
+                    host.path_set(Node::leaf(region, word)),
+                    "word {word} stays invisible after a scattered launder into it"
+                );
+            }
+        },
+    );
+}
+
+#[test]
+#[ignore = "slow: run with scripts/gate --all"]
+fn direct_frees_heal_what_a_fork_left_fully() {
+    direct_frees_heal_what_a_fork_left(1);
 }

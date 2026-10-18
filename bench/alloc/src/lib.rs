@@ -55,6 +55,8 @@ use asm as chosen;
 static GLOBAL: asmalloc::Asmalloc = asmalloc::Asmalloc;
 #[cfg(feature = "asmalloc-memstat")]
 mod memstat;
+#[cfg(feature = "memacct")]
+mod memacct;
 
 #[cfg(feature = "je")]
 mod je;

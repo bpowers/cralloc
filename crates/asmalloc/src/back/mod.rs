@@ -22,7 +22,8 @@
 //! - [`Back::heartbeat`] does one bounded step of the clocked pass that returns free memory to
 //!   the OS, and [`Back::trim`] returns everything it can. Fills and large allocations that
 //!   carve purge toward the retained cap (`purge`); a free purges nothing but a
-//!   large slot advised for huge pages.
+//!   large slot advised for huge pages, and that only past the budget for kept grown blocks
+//!   (`policy::KEPT_GROWN_HUGE_PAGES`).
 //!
 //! Every change to shared state is one atomic instruction, and all-zero state means an empty
 //! heap: no regions, nothing free, nothing carved. The protocols follow the TLA+ models in
@@ -59,7 +60,7 @@ mod verify;
 #[cfg(kani)]
 mod verify_slow;
 
-use self::host::{ClassHost, ClassState};
+use self::host::{ClassHost, ClassState, Headers, RegionHeader};
 use crate::classes::{COUNT, Class};
 use crate::lined::{LINE, Lined};
 use crate::os::{Os, OsError};
@@ -82,9 +83,8 @@ pub struct State<O: Os> {
     cell: Lined<SpaceCell<O>>,
     table: Lined<RegionTable>,
     classes: [ClassState; COUNT],
-    /// Bytes of free slots in the bitmaps believed to be resident. Signed: a subtraction may
-    /// run ahead of the addition it answers; read as zero when negative.
-    retained: Lined<AtomicIsize>,
+    /// Bytes of free slots in the bitmaps believed to be resident (`purge`).
+    retained: Lined<Retained>,
     /// Bytes carved since a grower last checked the cap (`purge`).
     growth: Lined<AtomicUsize>,
     /// The clocked pass: when the last one ended, or when the one under way began with the
@@ -95,6 +95,18 @@ pub struct State<O: Os> {
     /// The current size of each run, at its head region's index. Out of the regions'
     /// metadata, which must stay all zero for a region that may later go to a class.
     run_sizes: Lined<[AtomicUsize; MAX_REGIONS]>,
+    /// Each region's header (`host::RegionHeader`). Out of the regions' metadata
+    /// blocks, so that a small class whose slots never reach the bitmaps never touches its block.
+    headers: Lined<Headers>,
+}
+
+/// Bytes of free slots in the bitmaps believed to be resident, for small classes and large
+/// ones. Signed: a subtraction may run ahead of the addition it answers; read as zero when
+/// negative. The decay and the cap act on the sum; the large count alone decides whether a
+/// grown block is kept (`policy::kept_grown`).
+struct Retained {
+    small: AtomicIsize,
+    large: AtomicIsize,
 }
 
 /// What the steps of the purge walk share (`purge`).
@@ -115,7 +127,8 @@ const _: () = {
     let groups = lines(size_of::<SpaceCell<crate::os::linux::LinuxOs>>())
         + lines(size_of::<RegionTable>())
         + 4
-        + lines(size_of::<[AtomicUsize; MAX_REGIONS]>());
+        + lines(size_of::<[AtomicUsize; MAX_REGIONS]>())
+        + lines(size_of::<[[u64; 2]; MAX_REGIONS]>());
     assert!(
         size_of::<State<crate::os::linux::LinuxOs>>()
             == size_of::<[ClassState; COUNT]>() + LINE * groups
@@ -129,7 +142,10 @@ impl<O: Os> State<O> {
             cell: Lined::new(SpaceCell::new(os)),
             table: Lined::new(RegionTable::new()),
             classes: [const { ClassState::new() }; COUNT],
-            retained: Lined::new(AtomicIsize::new(0)),
+            retained: Lined::new(Retained {
+                small: AtomicIsize::new(0),
+                large: AtomicIsize::new(0),
+            }),
             growth: Lined::new(AtomicUsize::new(0)),
             decay: Lined::new(AtomicU64::new(0)),
             walk: Lined::new(Walk {
@@ -138,6 +154,7 @@ impl<O: Os> State<O> {
                 pass: AtomicU64::new(0),
             }),
             run_sizes: Lined::new([const { AtomicUsize::new(0) }; MAX_REGIONS]),
+            headers: Lined::new([const { RegionHeader::new() }; MAX_REGIONS]),
         }
     }
 
@@ -232,7 +249,12 @@ impl<'a, O: Os> Back<'a, O> {
     fn host(&self, class: Class) -> Option<ClassHost<'a, O>> {
         let state = self.state.classes.get(class.index() as usize - 1)?;
         let layout = state.layout.layout(self.space.plan(), class)?;
-        Some(ClassHost::new(self.space, state, layout))
+        Some(ClassHost::new(
+            self.space,
+            state,
+            &self.state.headers,
+            layout,
+        ))
     }
 
     fn abort(&self, message: &str) -> ! {
