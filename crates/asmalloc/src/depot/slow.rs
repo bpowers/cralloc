@@ -235,7 +235,6 @@ impl<'a, O: Os, R: Routines, S: Source> Cache<'a, O, R, S> {
             if let Seen::Live = seen {
                 return self.serve_alloc(class, held);
             }
-            let id = held.id();
             // SAFETY: SLOW-01.
             let installed = unsafe {
                 self.routines
@@ -243,7 +242,7 @@ impl<'a, O: Os, R: Routines, S: Source> Cache<'a, O, R, S> {
             };
             match installed {
                 StoreIfEqual::Stored => {
-                    chores.installed = Some(id);
+                    chores.installed = true;
                     if let Seen::Loaded(old, _) = seen {
                         old.set_level(0);
                         self.retire(class, Spare::Empty, old, &mut chores.stale);
@@ -303,12 +302,11 @@ impl<'a, O: Os, R: Routines, S: Source> Cache<'a, O, R, S> {
             if let Seen::Live = seen {
                 return self.serve_free(class, held, object);
             }
-            let id = held.id();
             // SAFETY: SLOW-01.
             let installed = unsafe { self.routines.store_if_equal(field, word, held.word(0)) };
             match installed {
                 StoreIfEqual::Stored => {
-                    chores.installed = Some(id);
+                    chores.installed = true;
                     if let Seen::Loaded(old, level) = seen {
                         old.set_level(level);
                         if self.refreshes(cpu) {

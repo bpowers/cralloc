@@ -3,14 +3,15 @@
 //! A large allocation or free counts as a slow path ([`Cache::maintain`]; the back end takes
 //! its purge step itself). There is no background thread and no timer, so maintenance happens
 //! at a rate set by allocation activity, in units small enough that no single call pays much.
-//! The clock is read once per heartbeat.
+//! The clock is read at most once per heartbeat, and only when a decision needs it.
 //!
 //! - **Launder over target.** If the depot stack of the class just served holds more than its
 //!   target, one magazine is popped and its objects go back to the source; the empty magazine
 //!   goes to the empty stack.
-//! - **Shed what was not needed** (`shed.rs`). A look at the depth of the stack the slow path
-//!   popped from, and on every [`LOOK_EVERY`]th slow path of a CPU a look at another class's
-//!   stack, the classes in turn; then at most one magazine laundered from a stack that owes.
+//! - **Shed what was not needed** (`shed.rs`). A note of the depth of the stack the slow path
+//!   popped from, and on every [`LOOK_EVERY`]th slow path of a CPU a look at one class's stack,
+//!   the classes in turn, which starts its new interval; then at most one magazine laundered
+//!   from a stack that owes.
 //! - **Age limit** (`age.rs`). A look at one class of the CPU's own slab, the classes in turn,
 //!   which takes and launders the magazine loaded there if it has been loaded for an interval,
 //!   or launders one full spare of a class with nothing loaded.
@@ -53,11 +54,11 @@
 //! looks that both decide to drain are stopped by the sighting's compare-and-swap and, behind
 //! it, by the drain's own claim.
 
-use super::magazine::MagazineId;
 use super::{Cache, Drained, Source, generation};
 use crate::classes::{SMALL_COUNT, SmallClass};
 use crate::front::{Cpu, Routines};
 use crate::os::Os;
+use core::cell::Cell;
 use core::sync::atomic::Ordering::Relaxed;
 
 /// `log2` of [`IDLE_TICKS`].
@@ -153,6 +154,36 @@ impl Sighting {
     }
 }
 
+/// The clock, read at most once per heartbeat and only when a decision needs it: an idle
+/// check, a look at a depot stack for a new interval, or an age look that finds a magazine
+/// loaded. Reading the timestamp counter on every heartbeat cost a two-thread pipeline about
+/// 3% of its time.
+pub(super) struct Clock<'a, O: Os> {
+    os: &'a O,
+    now: Cell<Option<u64>>,
+}
+
+impl<'a, O: Os> Clock<'a, O> {
+    pub(super) fn new(os: &'a O) -> Self {
+        Clock {
+            os,
+            now: Cell::new(None),
+        }
+    }
+
+    /// The time, the same for the rest of the heartbeat once read.
+    pub(super) fn now(&self) -> u64 {
+        match self.now.get() {
+            Some(now) => now,
+            None => {
+                let now = self.os.ticks();
+                self.now.set(Some(now));
+                now
+            }
+        }
+    }
+}
+
 /// The small class with ordinal `n` modulo the class count: how a CPU's looks go round the
 /// classes, one class for each count of its activity.
 fn nth_class(n: u64) -> Option<SmallClass> {
@@ -166,8 +197,8 @@ pub(super) struct Chores {
     pub(super) cpu: Option<Cpu>,
     /// It met another generation's marker on that CPU's slab.
     pub(super) stale: bool,
-    /// The magazine it installed in that CPU's slab, if it installed one.
-    pub(super) installed: Option<MagazineId>,
+    /// It installed a magazine for the class it served in that CPU's slab.
+    pub(super) installed: bool,
     /// It popped a magazine from the depot stack of the class it served.
     pub(super) popped: bool,
     /// Its purge step is already taken.
@@ -189,37 +220,35 @@ impl<O: Os, R: Routines, S: Source> Cache<'_, O, R, S> {
 
     /// One heartbeat, after a slow path that served `served`, if it served a small class.
     pub(super) fn heartbeat(&self, served: Option<SmallClass>, chores: Chores) {
-        let now = self.os().ticks();
+        let clock = Clock::new(self.os());
         let activity = chores.cpu.map(|cpu| {
             if self.depot.cpus.load(Relaxed) <= cpu.index() {
                 self.depot.cpus.fetch_max(cpu.index() + 1, Relaxed);
             }
             self.slab(cpu).note_activity()
         });
-        if let (Some(cpu), Some(class), Some(id)) = (chores.cpu, served, chores.installed) {
-            self.stamp(cpu, class, id, now);
+        if let (Some(cpu), Some(class), true) = (chores.cpu, served, chores.installed) {
+            self.unstamp(cpu, class);
         }
         if let Some(class) = served {
             if self.tuning.shed_unused && chores.popped {
-                self.look_at_depth(class, now);
+                self.note_depth(class, &clock);
             }
-            self.launder(class, now);
+            self.launder(class, &clock);
         }
         let every = self.tuning.look_every.max(1);
+        let looking = activity.filter(|activity| activity.is_multiple_of(every));
         if self.tuning.shed_unused {
-            if let Some(activity) = activity
-                && activity.is_multiple_of(every)
-                && let Some(class) = nth_class(activity / every)
-            {
-                self.look_at_depth(class, now);
+            if let Some(class) = looking.and_then(|activity| nth_class(activity / every)) {
+                self.look_at_depth(class, clock.now());
             }
-            self.shed(activity.unwrap_or(0), now);
+            self.shed(activity.unwrap_or(0));
         }
         if self.tuning.age_limit
             && let (Some(cpu), Some(activity)) = (chores.cpu, activity)
             && let Some(class) = nth_class(activity)
         {
-            self.age_look(cpu, class, now);
+            self.age_look(cpu, class, &clock);
         }
         if !chores.purged {
             self.source.purge_step();
@@ -227,34 +256,31 @@ impl<O: Os, R: Routines, S: Source> Cache<'_, O, R, S> {
         if !generation::drains_enabled(self.depot) {
             return;
         }
-        match (chores.cpu, activity) {
+        match (chores.cpu, looking) {
             (Some(cpu), _) if chores.stale => {
                 self.drain(cpu);
             }
-            (Some(cpu), Some(activity)) => self.idle_check(cpu, activity, now),
+            (Some(cpu), Some(activity)) => self.idle_check(cpu, activity, clock.now()),
             _ => {}
         }
     }
 
     /// Launders one magazine of `class` if its depot stack is over its target.
-    fn launder(&self, class: SmallClass, now: u64) {
+    fn launder(&self, class: SmallClass, clock: &Clock<'_, O>) {
         let target = self.tuning.depot_target / class.size();
         let stack = self.depot.full(class);
         if (stack.objects(self.area, class.magazine()) as usize) <= target {
             return;
         }
         if self.launder_one(class).is_some() && self.tuning.shed_unused {
-            self.look_at_depth(class, now);
+            self.note_depth(class, clock);
         }
     }
 
-    /// On every `look_every`-th slow path of CPU `me`, whose counter now reads `activity`,
-    /// looks at one other CPU's slab and records or drains it (see the module documentation).
+    /// On the `look_every`-th slow path of CPU `me`, whose counter now reads `activity`, looks
+    /// at one other CPU's slab and records or drains it (see the module documentation).
     fn idle_check(&self, me: Cpu, activity: u64, now: u64) {
         let every = self.tuning.look_every.max(1);
-        if !activity.is_multiple_of(every) {
-            return;
-        }
         // At least `me + 1`: this thread raised it to that before.
         let count = self.depot.cpus.load(Relaxed);
         if count < 2 {

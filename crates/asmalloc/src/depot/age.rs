@@ -13,12 +13,16 @@
 //! look. A loaded magazine with no objects pins nothing and is left alone.
 //!
 //! **Stamps.** One word per class in the cold part of the slab, a [`Stamp`], says which magazine
-//! was loaded there and when. The slow path that installs a magazine writes one in its
-//! heartbeat, and a look that finds a magazine its stamp does not name writes a fresh one, so a
-//! magazine loaded without a stamp (by a thread that moved to another CPU before its heartbeat,
-//! or by a slow path a signal cut short) ages from the first look that sees it. Zero is no
-//! stamp, so the all-zero slab is valid. Each write is a single store; a lost or misplaced one
-//! moves a take earlier or later and does nothing else.
+//! is loaded there and since when. The slow path that installs a magazine clears it in its
+//! heartbeat, and a look that finds a magazine its stamp does not name (none, after a clear)
+//! writes a fresh one, so a magazine ages from the first look that sees it loaded: on a busy
+//! CPU microseconds after its install. Installing writes no time, because reading the clock on
+//! every slow path is measurably slow (`heartbeat::Clock`); the clear matters because a
+//! magazine taken back often returns from the empty stack with the same number, and must not
+//! inherit its old stamp. Zero is no stamp, so the all-zero slab is valid. Each write is a
+//! single store; a lost or misplaced one (a thread that moved to another CPU before its
+//! heartbeat, a slow path a signal cut short) moves a take earlier or later and does nothing
+//! else.
 //!
 //! **No fence.** The slab is the thread's own, so the drain's protocol is not needed: the
 //! routine's commit is the take's only write to the slab, and it happens only if the word is
@@ -43,7 +47,7 @@
 //!
 //! The ledger for the unsafe block is `docs/safety/asmalloc/depot/age-safety.md`.
 
-use super::heartbeat::{IDLE_UNITS, TICK_SHIFT};
+use super::heartbeat::{Clock, IDLE_UNITS, TICK_SHIFT};
 use super::magazine::{Magazine, MagazineId};
 use super::{Cache, Source};
 use crate::classes::{SmallClass, is_marker};
@@ -105,11 +109,10 @@ pub(super) struct Loaded<'a> {
 }
 
 impl<'a, O: Os, R: Routines, S: Source> Cache<'a, O, R, S> {
-    /// Records on `cpu`'s slab that magazine `id` was loaded for `class` at `now`.
-    pub(super) fn stamp(&self, cpu: Cpu, class: SmallClass, id: MagazineId, now: u64) {
-        self.slab(cpu)
-            .stamp(class)
-            .store(Stamp::new(id, now).0, Relaxed);
+    /// Clears the stamp of `class` on `cpu`'s slab, where a slow path has just loaded a
+    /// magazine.
+    pub(super) fn unstamp(&self, cpu: Cpu, class: SmallClass) {
+        self.slab(cpu).stamp(class).store(0, Relaxed);
     }
 
     /// The magazine `cpu`'s hot word for `class` names, read without protection: `None` if
@@ -150,9 +153,10 @@ impl<'a, O: Os, R: Routines, S: Source> Cache<'a, O, R, S> {
         true
     }
 
-    /// The age limit's look at `class` on `cpu`'s slab, the CPU the slow path ran on, at `now`
-    /// (see the module documentation). Launders at most one magazine.
-    pub(super) fn age_look(&self, cpu: Cpu, class: SmallClass, now: u64) {
+    /// The age limit's look at `class` on `cpu`'s slab, the CPU the slow path ran on (see the
+    /// module documentation). Reads the clock only if a magazine is loaded there. Launders at
+    /// most one magazine.
+    pub(super) fn age_look(&self, cpu: Cpu, class: SmallClass, clock: &Clock<'_, O>) {
         let slab = self.slab(cpu);
         let Some(seen) = self.hot_magazine(cpu, class) else {
             if slab.field(Field::hot(class)).load(Relaxed).is_null() {
@@ -161,7 +165,7 @@ impl<'a, O: Os, R: Routines, S: Source> Cache<'a, O, R, S> {
             return;
         };
         let stamp = slab.stamp(class);
-        match Stamp(stamp.load(Relaxed)).age(seen.magazine.id(), now) {
+        match Stamp(stamp.load(Relaxed)).age(seen.magazine.id(), clock.now()) {
             Age::Unstamped(fresh) => {
                 stamp.store(fresh.0, Relaxed);
                 return;

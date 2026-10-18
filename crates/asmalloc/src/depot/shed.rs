@@ -19,12 +19,14 @@
 //! magazine, which costs a refill sooner.
 //!
 //! **Where depth is seen.** Only pops lower a stack, and every pop of a class's stack is followed
-//! by a look at its depth: the slow path that took a magazine from it looks in its heartbeat, and
-//! the launders look as they pop. A look at the stack of a class no slow path is serving, the
-//! classes in turn, every [`Tuning::look_every`](super::Tuning) heartbeats of a CPU, starts its
-//! interval when nothing else would. A look reads the stack's head and its top magazine's link
-//! and writes the water word only when the depth is a new low, the interval has changed, or a
-//! shed paid something, so a pop costs no shared write beyond its own in the common case.
+//! by a note of its depth: the slow path that took a magazine from it notes it in its heartbeat,
+//! and the launders note it as they pop. A note reads no clock, so it counts toward the interval
+//! the word is in. Intervals begin at looks: every [`Tuning::look_every`](super::Tuning)
+//! heartbeats a CPU looks at one class's stack, the classes in turn, with the clock it reads
+//! for the idle check, and a look in a new interval starts it and sets the debt. A note or look
+//! reads the stack's head and its top magazine's link, and writes the water word only when the
+//! depth is a new low, the interval has changed, or a shed paid something, so a pop costs no
+//! shared write beyond its own in the common case.
 //!
 //! **Hints.** The water word and the set of classes that owe ([`Depot`](super::Depot)'s
 //! `owing`) change by single atomic instructions and never touch the stack head, so they add
@@ -33,7 +35,7 @@
 //! a stack shed a magazine early or late, more or less, and never anything worse: shedding is a
 //! launder, which is safe at any time.
 
-use super::heartbeat::IDLE_SHIFT;
+use super::heartbeat::{Clock, IDLE_SHIFT};
 use super::{Cache, Source};
 use crate::classes::{SMALL_COUNT, SmallClass};
 use crate::front::Routines;
@@ -77,6 +79,11 @@ impl Water {
         )
     }
 
+    /// Whether a look has started the word.
+    pub(super) fn seen(self) -> bool {
+        self.0 & SEEN != 0
+    }
+
     /// The lowest depth seen this interval.
     pub(super) fn low(self) -> u32 {
         (self.0 as u32) & COUNT_MAX
@@ -109,6 +116,15 @@ impl Water {
         Water::pack(depth, self.low().min(depth), interval)
     }
 
+    /// What a note of the depth `depth` within the word's own interval makes of it: a new low,
+    /// if it is one. A word no look has written stays so, for the first look to start.
+    pub(super) fn lower(self, depth: u32) -> Water {
+        if self.0 & SEEN == 0 {
+            return self;
+        }
+        Water::pack(self.low().min(depth), self.owed(), self.interval())
+    }
+
     /// The word after a shed laundered `objects`.
     pub(super) fn paid(self, objects: u32) -> Water {
         if self.0 & SEEN == 0 {
@@ -126,18 +142,35 @@ impl<O: Os, R: Routines, S: Source> Cache<'_, O, R, S> {
     /// Looks at the depth of `class`'s stack at `now`: a new low, or the start of a new
     /// interval and what the stack owes for the last one.
     pub(super) fn look_at_depth(&self, class: SmallClass, now: u64) {
-        self.update_water(class, now, 0);
+        self.update_water(class, Some(interval(now)), 0);
     }
 
-    /// Pays `paid` objects off `class`'s debt, then looks at its depth; returns the new word.
-    fn update_water(&self, class: SmallClass, now: u64, paid: u32) -> Water {
+    /// Notes the depth of `class`'s stack after a pop, as a new low if it is one. Reads the
+    /// clock only for a word no look has started yet, once per class: otherwise a pop noted in
+    /// an interval that has ended but not yet been started anew counts toward the old one,
+    /// which can only make the stack shed less.
+    pub(super) fn note_depth(&self, class: SmallClass, clock: &Clock<'_, O>) {
+        let ordinal = class.ordinal() % SMALL_COUNT;
+        if Water(self.depot.water[ordinal].load(Relaxed)).seen() {
+            self.update_water(class, None, 0);
+        } else {
+            self.look_at_depth(class, clock.now());
+        }
+    }
+
+    /// Pays `paid` objects off `class`'s debt, then notes its depth, starting a new interval if
+    /// `interval` says one has begun; returns the new word.
+    fn update_water(&self, class: SmallClass, interval: Option<u64>, paid: u32) -> Water {
         let ordinal = class.ordinal() % SMALL_COUNT;
         let word = &self.depot.water[ordinal];
-        let interval = interval(now);
         let mut seen = word.load(Relaxed);
         loop {
             let depth = self.depot.full(class).objects(self.area, class.magazine());
-            let next = Water(seen).paid(paid).look(depth, interval);
+            let paid_off = Water(seen).paid(paid);
+            let next = match interval {
+                Some(interval) => paid_off.look(depth, interval),
+                None => paid_off.lower(depth),
+            };
             if next.0 == seen {
                 return next;
             }
@@ -159,7 +192,7 @@ impl<O: Os, R: Routines, S: Source> Cache<'_, O, R, S> {
 
     /// Launders one magazine from a stack that owes, if any does: the first owing class at or
     /// after ordinal `turn` (mod the class count), so that CPUs spread over the classes.
-    pub(super) fn shed(&self, turn: u64, now: u64) {
+    pub(super) fn shed(&self, turn: u64) {
         let owing = self.depot.owing.load(Relaxed);
         if owing == 0 {
             return;
@@ -179,7 +212,7 @@ impl<O: Os, R: Routines, S: Source> Cache<'_, O, R, S> {
             self.launder_one(class)
                 .map_or(u32::MAX, |level| level as u32)
         };
-        if self.update_water(class, now, paid).owed() == 0 {
+        if self.update_water(class, None, paid).owed() == 0 {
             self.settle(ordinal as usize);
         }
     }

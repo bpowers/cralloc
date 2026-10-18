@@ -126,6 +126,10 @@ fn a_low_water_mark_owes_at_most_what_was_never_used() {
         assert!(next.owed() <= water.low());
     }
     assert!(Water(0).look(depth, interval).owed() == 0);
+    // A note without the clock never changes the debt, and never raises the mark.
+    let noted = water.lower(depth);
+    assert!(noted.owed() == water.owed());
+    assert!(noted.low() <= water.low());
     let paid: u32 = kani::any();
     assert!(water.paid(paid).owed() <= water.owed());
 }

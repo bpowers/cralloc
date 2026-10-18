@@ -678,13 +678,16 @@ fn large_allocations_and_frees_run_the_heartbeat() {
         }
     }
     assert!(parked(&heap).on_cpus > 0);
-    heap.os().advance_clock(2 * crate::depot::IDLE_TICKS);
-    // Only large blocks from here: their heartbeats take the magazines that have been loaded
-    // for an interval, and the spares of classes left with none loaded, a class at a time.
+    // Only large blocks from here: their heartbeats stamp the loaded magazines, then take
+    // them once they have been loaded for an interval, and the spares of classes left with
+    // none loaded, a class at a time.
     let large = layout(64 << 10, 8);
-    for _ in 0..400 {
-        // SAFETY: as above.
-        unsafe { heap.dealloc(heap.alloc(large), large) };
+    for _ in 0..3 {
+        for _ in 0..400 {
+            // SAFETY: as above.
+            unsafe { heap.dealloc(heap.alloc(large), large) };
+        }
+        heap.os().advance_clock(crate::depot::IDLE_TICKS);
     }
     assert_eq!(parked(&heap).on_cpus, 0, "{:?}", parked(&heap));
 }

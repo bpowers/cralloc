@@ -14,6 +14,7 @@
 //! `membarrier` do. A thread may also migrate at the start of any sequence, a bounded number of
 //! times per execution. The census of `test_rig.rs` checks the invariants after every execution.
 
+use super::heartbeat::Clock;
 use super::test_rig::{Rig, Small, TIGHT, tiny_class};
 use super::{Drained, IDLE_TICKS, Source};
 use crate::front::check::{Bounds, Report, choose, explore, switch_point};
@@ -323,7 +324,7 @@ fn aged_world(migrations: usize) -> World {
     let cache = world.rig.cache(&machine);
     let cpu = world.rig.slabs().cpu(0).unwrap();
     // Stamps the loaded magazine now, if its install did not.
-    cache.age_look(cpu, tiny_class(), world.rig.os().ticks());
+    cache.age_look(cpu, tiny_class(), &Clock::new(world.rig.os()));
     world.rig.os().advance_clock(2 * IDLE_TICKS);
     world
 }
@@ -334,7 +335,7 @@ fn age_looks(world: &World, machine: &CheckCpu<'_>) {
     let cache = world.rig.cache(machine);
     let cpu = world.rig.slabs().cpu(0).unwrap();
     for _ in 0..2 {
-        cache.age_look(cpu, tiny_class(), world.rig.os().ticks());
+        cache.age_look(cpu, tiny_class(), &Clock::new(world.rig.os()));
     }
 }
 
