@@ -13,7 +13,7 @@ use crate::os::HugePages;
 use crate::space::{Plan, RegionId};
 use alloc::boxed::Box;
 use alloc::vec::Vec;
-use core::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering::SeqCst};
+use core::sync::atomic::{AtomicU64, AtomicUsize, Ordering::SeqCst};
 
 /// A word type the test host can make, with a hook the host calls when it purges.
 pub(crate) trait TestWord: Word + Sized {
@@ -46,10 +46,6 @@ pub(crate) struct TestHost<W> {
     dirty: Box<[AtomicU64]>,
     /// Pages committed per region.
     committed: Box<[AtomicUsize]>,
-    /// Make the next OS calls fail.
-    pub(crate) fail_commit: AtomicBool,
-    pub(crate) fail_purge: AtomicBool,
-    pub(crate) purges: AtomicUsize,
 }
 
 impl<W: TestWord> TestHost<W> {
@@ -79,9 +75,6 @@ impl<W: TestWord> TestHost<W> {
                 .map(|_| AtomicU64::new(0))
                 .collect(),
             committed: (0..regions).map(|_| AtomicUsize::new(0)).collect(),
-            fail_commit: AtomicBool::new(false),
-            fail_purge: AtomicBool::new(false),
-            purges: AtomicUsize::new(0),
         }
     }
 
@@ -219,9 +212,6 @@ impl<W: TestWord> Host for TestHost<W> {
     fn commit(&self, region: RegionId, offset: usize, len: usize) -> bool {
         let page = self.layout.page_size();
         assert!(offset.is_multiple_of(page) && len.is_multiple_of(page) && len > 0);
-        if self.fail_commit.load(SeqCst) {
-            return false;
-        }
         self.committed[region.index()].fetch_max((offset + len) / page, SeqCst);
         true
     }
@@ -229,7 +219,7 @@ impl<W: TestWord> Host for TestHost<W> {
     fn commit_meta(&self, _: RegionId, offset: usize, len: usize) -> bool {
         let page = self.layout.page_size();
         assert!(offset.is_multiple_of(page) && len.is_multiple_of(page) && len > 0);
-        !self.fail_commit.load(SeqCst)
+        true
     }
 
     fn advise(&self, _: RegionId, offset: usize, len: usize, _: HugePages) -> bool {
@@ -247,10 +237,6 @@ impl<W: TestWord> Host for TestHost<W> {
         let first = self.layout.slot_at(offset);
         let last = self.layout.slot_at(offset + len - 1);
         W::purging(self.global(region, first), self.global(region, last));
-        if self.fail_purge.load(SeqCst) {
-            return false;
-        }
-        self.purges.fetch_add(1, SeqCst);
         for slot in first..=last {
             let (from, _) = self.pages_of(slot);
             let mut mask = 0u64;

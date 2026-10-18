@@ -474,7 +474,7 @@ mod run {
     }
 
     #[test]
-    #[ignore = "minutes; run on demand"]
+    #[ignore = "slow: run with scripts/gate --all"]
     fn exchanges_keep_one_owner_under_every_schedule_fully() {
         super::exchanges_keep_one_owner_under_every_schedule(Bounds::preemptions(2));
     }
@@ -490,7 +490,7 @@ mod run {
     }
 
     #[test]
-    #[ignore = "minutes; run on demand"]
+    #[ignore = "slow: run with scripts/gate --all"]
     fn a_drain_and_a_mutator_keep_one_owner_under_every_schedule_fully() {
         // The mutator may also move to the other CPU once, mid-drain.
         super::a_drain_and_a_mutator_keep_one_owner_under_every_schedule(
@@ -507,7 +507,7 @@ mod run {
     }
 
     #[test]
-    #[ignore = "minutes; run on demand"]
+    #[ignore = "slow: run with scripts/gate --all"]
     fn two_drains_and_a_mutator_keep_one_owner_under_every_schedule_fully() {
         super::two_drains_and_a_mutator_keep_one_owner_under_every_schedule(Bounds::preemptions(1));
     }
@@ -522,7 +522,7 @@ mod run {
     }
 
     #[test]
-    #[ignore = "minutes; run on demand"]
+    #[ignore = "slow: run with scripts/gate --all"]
     fn a_drain_that_backs_out_keeps_one_owner_under_every_schedule_fully() {
         super::a_drain_that_backs_out_keeps_one_owner_under_every_schedule(
             Bounds::preemptions(2),
@@ -537,7 +537,7 @@ mod run {
     }
 
     #[test]
-    #[ignore = "minutes; run on demand"]
+    #[ignore = "slow: run with scripts/gate --all"]
     fn a_fork_at_any_step_duplicates_nothing_fully() {
         super::a_fork_at_any_step_duplicates_nothing(Bounds::preemptions(1).with_fork(), MUTATE);
     }
@@ -552,7 +552,7 @@ mod run {
     }
 
     #[test]
-    #[ignore = "minutes; run on demand"]
+    #[ignore = "slow: run with scripts/gate --all"]
     fn an_age_take_and_a_mutator_keep_one_owner_under_every_schedule_fully() {
         super::an_age_take_and_a_mutator_keep_one_owner_under_every_schedule(
             Bounds::preemptions(2),
@@ -567,7 +567,7 @@ mod run {
     }
 
     #[test]
-    #[ignore = "minutes; run on demand"]
+    #[ignore = "slow: run with scripts/gate --all"]
     fn an_age_take_and_a_drain_keep_one_owner_under_every_schedule_fully() {
         super::an_age_take_and_a_drain_keep_one_owner_under_every_schedule(Bounds::preemptions(2));
     }
@@ -579,7 +579,7 @@ mod run {
     }
 
     #[test]
-    #[ignore = "minutes; run on demand"]
+    #[ignore = "slow: run with scripts/gate --all"]
     fn depot_stacks_keep_one_owner_under_every_schedule_fully() {
         super::depot_stacks_keep_one_owner_under_every_schedule(Bounds::preemptions(3));
     }

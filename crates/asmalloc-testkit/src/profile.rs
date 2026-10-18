@@ -248,11 +248,6 @@ impl Profile {
         Profile::FIFO_BATCHES,
     ];
 
-    /// The preset with this name.
-    pub fn named(name: &str) -> Option<Profile> {
-        Profile::ALL.into_iter().find(|p| p.name == name)
-    }
-
     /// This profile with sizes, alignments and live bytes capped, for fuzzing and Miri.
     pub const fn capped(self, max_size: usize, max_align: usize, max_live_bytes: usize) -> Self {
         Profile {
@@ -303,7 +298,7 @@ mod tests {
     fn presets_are_valid_and_named_uniquely() {
         for p in Profile::ALL {
             p.validate();
-            assert_eq!(Profile::named(p.name), Some(p));
+            assert_eq!(Profile::ALL.iter().filter(|q| q.name == p.name).count(), 1);
         }
     }
 }

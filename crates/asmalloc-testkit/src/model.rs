@@ -191,11 +191,6 @@ impl<'e, S: Subject + ?Sized> Model<'e, S> {
         self.mail
     }
 
-    /// Blocks this worker owns.
-    pub fn live_blocks(&self) -> usize {
-        self.live.len()
-    }
-
     /// Count a fork this worker made.
     pub fn note_fork(&mut self) {
         self.stats.forks += 1;

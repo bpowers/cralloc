@@ -32,8 +32,6 @@ mod source;
 mod allocator;
 #[cfg(all(target_os = "linux", target_arch = "x86_64", not(miri), not(kani)))]
 mod global;
-#[cfg(miri)]
-mod miri;
 #[cfg(any(test, feature = "sim"))]
 mod sim;
 
@@ -41,8 +39,6 @@ mod sim;
 pub use global::Asmalloc;
 #[cfg(all(target_os = "linux", target_arch = "x86_64", not(miri), not(kani)))]
 pub(crate) use global::{c_alloc_small, c_free_small};
-#[cfg(miri)]
-pub use miri::Asmalloc;
 #[cfg(any(test, feature = "sim"))]
 pub use sim::{SimAsmalloc, SimHeap};
 

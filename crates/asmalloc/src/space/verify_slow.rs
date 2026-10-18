@@ -1,5 +1,6 @@
 //! The address-space properties of `verify.rs` for every geometry `Geometry::try_new` accepts,
-//! and the slot count, which divides. Too slow for the merge gate; run on demand with
+//! the slot count, which divides, and the two properties that take several seconds even on the
+//! geometries in use. Too slow for the merge gate; run on demand with
 //! `scripts/kani-all verify_slow`.
 
 use super::Geometry;
@@ -20,6 +21,16 @@ fn any_geometry() -> Geometry {
     );
     kani::assume(geometry.is_some());
     geometry.unwrap()
+}
+
+#[kani::proof]
+fn locate_inverts_region_offsets_in_used_geometries() {
+    locate_inverts_region_offsets(any_used_geometry());
+}
+
+#[kani::proof]
+fn slots_lie_inside_their_region_and_are_aligned_in_used_geometries() {
+    slots_lie_inside_their_region_and_are_aligned(any_used_geometry());
 }
 
 #[kani::proof]

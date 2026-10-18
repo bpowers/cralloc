@@ -1,14 +1,12 @@
 # Safety ledger: `crates/asmalloc/src/os/sim/memory.rs`
 
-The simulated OSes' host allocation, shared by `SimOs` and `ProofOs`. Test infrastructure, but
+The simulated OS's host allocation. Test infrastructure, but
 the allocator's proofs and Miri runs rely on it, so it is held to the same rule.
 
 **Machine checks for every entry below.**
 
-- Kani `os::sim::verify::a_tiny_heap_starts_and_its_memory_works` (in the gate) runs allocation,
-  zeroing and free through `ProofOs` for every byte offset of a page, and
-  `os::sim::verify_slow::the_simulator_keeps_the_zero_promises` does the same through `SimOs`.
-  Kani checks every access.
+- Kani `os::sim::verify_slow::the_simulator_keeps_the_zero_promises` runs allocation, zeroing
+  and free through `SimOs` for every byte offset of two pages. Kani checks every access.
 - Miri with `-Zmiri-strict-provenance` (`scripts/miri`) runs all the simulator and `Space` unit
   tests on the `Standard` shape, including threads reserving at once.
 
@@ -39,8 +37,8 @@ reads or writes those bytes during the call.
 `offset <= self.len()`, and writing `len` bytes from there stays within it because
 `len <= self.len() - offset`. `base` came from the allocator, so it carries provenance for all
 of it. `u8` needs no alignment and every value is valid. The callers establish the bound by
-checking the range first: `SimOs::checked_range`, `ProofOs::checked` and the recorded wipe
-range. They establish exclusivity from their own `Os` contracts (SIM-OS-02, PROOF-01).
+checking the range first: `SimOs::checked_range` and the recorded wipe range. They establish
+exclusivity from `SimOs`'s `Os` contract (SIM-OS-02).
 
 ## SIM-MEMORY-04: `dealloc` in `Drop for Memory`
 

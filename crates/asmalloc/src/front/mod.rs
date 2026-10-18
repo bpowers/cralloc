@@ -36,13 +36,15 @@ pub(crate) mod sync;
 mod twin;
 #[cfg(kani)]
 mod verify;
+#[cfg(kani)]
+mod verify_slow;
 
 pub use routines::{NO_CPU, Routines, StackPop, StackPush, StoreIfEqual};
 pub use slab::{Cpu, Field, SLAB_BYTES, SLAB_COUNT, SLAB_SHIFT, Slab, Slabs, Spare};
 pub use twin::Twin;
 
-// SAFETY: FRONT-01. glibc declares `extern const ptrdiff_t __rseq_offset;` (`sys/rseq.h`), as
-// `os::linux` also declares it; the exported C routines name it through this public path.
+// SAFETY: FRONT-01. glibc declares `extern const ptrdiff_t __rseq_offset;` (`sys/rseq.h`); the
+// exported C routines name it through this public path.
 #[cfg(all(target_os = "linux", target_arch = "x86_64", not(miri), not(kani)))]
 unsafe extern "C" {
     /// glibc's offset of the thread's rseq area from the thread pointer, which the generated

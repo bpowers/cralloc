@@ -1143,28 +1143,58 @@ fn shadow_run<S: Shape>(seed: u64, steps: usize, faults: bool) {
     }
 }
 
-#[test]
-fn random_operations_match_the_shadow_model() {
-    let (seeds, steps) = if cfg!(miri) { (1, 40) } else { (12, 1500) };
+fn random_operations_match_the_shadow_model(seeds: u64) {
+    let steps = if cfg!(miri) { 40 } else { 1500 };
     for seed in 0..seeds {
         shadow_run::<Standard>(0x9e37_79b9_7f4a_7c15 ^ seed, steps, false);
     }
 }
 
 #[test]
-fn random_operations_survive_os_failures() {
-    let (seeds, steps) = if cfg!(miri) { (1, 40) } else { (12, 1500) };
+fn random_operations_match_the_shadow_model_quickly() {
+    random_operations_match_the_shadow_model(if cfg!(miri) { 1 } else { 3 });
+}
+
+#[test]
+#[ignore = "slow: run with scripts/gate --all"]
+fn random_operations_match_the_shadow_model_fully() {
+    random_operations_match_the_shadow_model(12);
+}
+
+fn random_operations_survive_os_failures(seeds: u64) {
+    let steps = if cfg!(miri) { 40 } else { 1500 };
     for seed in 0..seeds {
         shadow_run::<Standard>(0x2545_f491_4f6c_dd1d ^ seed, steps, true);
     }
 }
 
 #[test]
-#[cfg_attr(miri, ignore)]
-fn random_operations_with_several_large_slots_per_region() {
-    for seed in 0..4 {
+fn random_operations_survive_os_failures_quickly() {
+    random_operations_survive_os_failures(if cfg!(miri) { 1 } else { 3 });
+}
+
+#[test]
+#[ignore = "slow: run with scripts/gate --all"]
+fn random_operations_survive_os_failures_fully() {
+    random_operations_survive_os_failures(12);
+}
+
+fn random_operations_with_several_large_slots_per_region(seeds: u64) {
+    for seed in 0..seeds {
         shadow_run::<Native>(0x5851_f42d_4c95_7f2d ^ seed, 1500, seed % 2 == 1);
     }
+}
+
+#[test]
+#[cfg_attr(miri, ignore)]
+fn random_operations_with_several_large_slots_per_region_quickly() {
+    random_operations_with_several_large_slots_per_region(2);
+}
+
+#[test]
+#[ignore = "slow: run with scripts/gate --all"]
+fn random_operations_with_several_large_slots_per_region_fully() {
+    random_operations_with_several_large_slots_per_region(4);
 }
 
 /// Threads fill, launder, allocate and free at once while another trims and beats the heart.
@@ -2318,10 +2348,8 @@ mod review {
     /// once every thread has finished, no free slot sits under a clear summary bit. Threads
     /// fill and launder scattered batches; at the end a fill of as many slots as were ever
     /// handed out must get exactly those back, carving nothing new.
-    #[test]
-    #[cfg_attr(miri, ignore)]
-    fn after_racing_launders_and_fills_every_free_slot_is_found() {
-        for seed in 0..20u64 {
+    fn after_racing_launders_and_fills_every_free_slot_is_found(seeds: u64) {
+        for seed in 0..seeds {
             let state = state::<Standard>();
             state.get_or_reserve().unwrap();
             let state = &*state;
@@ -2360,6 +2388,18 @@ mod review {
                 .collect();
             assert_eq!(all, seen, "seed {seed}: a free slot was not found");
         }
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn after_racing_launders_and_fills_every_free_slot_is_found_quickly() {
+        after_racing_launders_and_fills_every_free_slot_is_found(4);
+    }
+
+    #[test]
+    #[ignore = "slow: run with scripts/gate --all"]
+    fn after_racing_launders_and_fills_every_free_slot_is_found_fully() {
+        after_racing_launders_and_fills_every_free_slot_is_found(20);
     }
 
     /// The same batches with one slot repeated anywhere later in the batch: with no other

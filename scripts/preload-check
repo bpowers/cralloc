@@ -1,8 +1,11 @@
 #!/usr/bin/env bash
-# Runs real programs with the LD_PRELOAD library and compares each one's output and exit status
-# with a run of the same program without it. On demand only; not part of the gate.
+# Runs real software with the LD_PRELOAD library and compares each one's output and exit status
+# with a run of the same program without it, after the gate's preload test
+# (crates/asmalloc-preload/tests/preload.rs, which runs the small programs of its own) against
+# the release build, slow cases included. On demand only; not part of the gate.
 #
-# Usage: scripts/preload-check [name...]   (names as printed, or globs; default all)
+# Usage: scripts/preload-check [name...]   (names as printed, or globs; default all; the gate
+#                                           test runs only when no name is given)
 #   PRELOAD_CHECK_MEM   memory cap per run, default 4G (never above 16G)
 #   PRELOAD_CHECK_KEEP  set to keep the work directory
 #   PRELOAD_CHECK_GIT   repository for the git checks, default this one; a larger one (a
@@ -71,60 +74,8 @@ check() {
   fi
 }
 
-# expect NAME STATUS CMD...: the program, preloaded only, must exit with STATUS.
-expect() {
-  local name="$1" want="$2"
-  shift 2
-  wanted "$name" || return 0
-  run preload "$work/$name.preload" "$@"
-  local got
-  got="$(tail -1 "$work/$name.preload")"
-  if [ "$got" = "exit status $want" ]; then
-    printf 'PASS  %-24s %s\n' "$name" "$got"
-  else
-    printf 'FAIL  %-24s %s, wanted %s\n' "$name" "$got" "$want"
-    tail -5 "$work/$name.preload.err" | sed 's/^/      stderr: /'
-    failed+=("$name")
-  fi
-}
-
+# Only to make sure the checks below run with the library in place.
 cc -O2 -o "$bin/interposed" "$programs/interposed.c" -ldl || exit 1
-cc -O2 -o "$bin/foreign" "$programs/foreign.c" || exit 1
-cc -O2 -pthread -o "$bin/threads" "$programs/threads.c" || exit 1
-cc -O2 -pthread -o "$bin/forks" "$programs/forks.c" || exit 1
-cc -O2 -pthread -o "$bin/signals" "$programs/signals.c" || exit 1
-cc -O2 -pthread -o "$bin/dl" "$programs/dl.c" -ldl || exit 1
-cc -O2 -shared -fPIC -o "$bin/libdlib.so" "$programs/dlib.c" || exit 1
-g++ -O2 -pthread -std=c++20 -o "$bin/cxx" "$programs/cxx.cpp" || exit 1
-g++ -O2 -pthread -std=c++20 -o "$bin/cxx-containers" "$programs/cxx_containers.cpp" || exit 1
-g++ -O2 -std=c++20 -o "$bin/cxx-operators" "$programs/cxx_operators.cpp" || exit 1
-g++ -O2 -std=c++20 -o "$bin/own-malloc" "$programs/own_malloc.cpp" || exit 1
-g++ -O2 -std=c++20 -o "$bin/own-new" "$programs/own_new.cpp" || exit 1
-g++ -O2 -std=c++20 -o "$bin/tagged-new" "$programs/tagged_new.cpp" || exit 1
-g++ -O2 -std=c++20 -shared -fPIC -o "$bin/liblib_new.so" "$programs/lib_new.cpp" || exit 1
-g++ -O2 -std=c++20 -o "$bin/use-lib-new" "$programs/use_lib_new.cpp" "$bin/liblib_new.so" || exit 1
-
-# bindings NAME CMD...: where the dynamic loader bound each C++ allocation operator the program
-# calls (its own report, LD_DEBUG=bindings). The library exports none (docs/design.md,
-# "Interfaces", C++), so every one must bind to the C++ runtime, which calls our malloc.
-bindings() {
-  local name="$1"
-  shift
-  wanted "$name" || return 0
-  MEMLIMIT_QUIET=1 "$here/memlimit" -m "$mem" -t 5m -- \
-    env LD_PRELOAD="$lib" LD_DEBUG=bindings "$@" >/dev/null 2>"$work/$name.bindings"
-  local ops='symbol `_Z(nw|na|dl|da)'
-  local runtime stray
-  runtime=$(grep -F "to /lib64/libstdc++.so.6 " "$work/$name.bindings" | grep -oE "$ops[^']*'" |
-    sort -u | wc -l)
-  stray=$(grep -E "$ops" "$work/$name.bindings" | grep -vcF "to /lib64/libstdc++.so.6 ")
-  if [ "$runtime" -eq 20 ] && [ "$stray" -eq 0 ]; then
-    printf 'PASS  %-24s all 20 operators bind to libstdc++\n' "$name"
-  else
-    printf 'FAIL  %-24s %s operators to libstdc++, %s elsewhere\n' "$name" "$runtime" "$stray"
-    failed+=("$name")
-  fi
-}
 
 if [[ "$(LD_PRELOAD="$lib" "$bin/interposed")" != "asmalloc "* ]]; then
   echo "FAIL  the library does not serve malloc in a preloaded program"
@@ -160,25 +111,6 @@ check git-repack bash -c '
   rm -rf "$dir"' _ "$work" "$repo"
 check xz-threads bash -c 'xz -T8 -6 -c "$1" | tee "$2/xz-$MODE" | sha256sum; xz -T8 -dc "$2/xz-$MODE" | sha256sum; rm -f "$2/xz-$MODE"' _ "$data" "$work"
 check zstd-threads bash -c 'zstd -q -T8 -15 -c "$1" | tee "$2/zst-$MODE" | sha256sum; zstd -q -T8 -dc "$2/zst-$MODE" | sha256sum; rm -f "$2/zst-$MODE"' _ "$data" "$work"
-check cxx "$bin/cxx"
-check cxx-containers "$bin/cxx-containers"
-check cxx-operators "$bin/cxx-operators"
-bindings cxx-bindings "$bin/cxx-operators"
-# A throwing new that fails throws std::bad_alloc, caught, with or without the library.
-check cxx-new-fails "$bin/cxx-operators" throw
-# A new-handler that throws from a nothrow new: libstdc++'s nothrow new returns null.
-check cxx-throwing-handler "$bin/cxx-operators" throwing-handler
-check cxx-own-malloc "$bin/own-malloc"
-for mode in array sized matching empty nothrow; do
-  check "cxx-own-new-$mode" "$bin/own-new" "$mode"
-done
-check cxx-own-array-operators "$bin/tagged-new"
-# A shared library that defines the C++ operators, as Boehm GC's libgccpp does.
-check cxx-library-operators "$bin/use-lib-new"
-check threads "$bin/threads" 20 16 20000
-check threads-exit "$bin/threads" exit
-check forks "$bin/forks" 8 40
-check dlopen "$bin/dl" "$bin/libdlib.so" 200
 check perl perl -e 'my %h; for my $i (1..300000) { push @{$h{$i % 1000}}, "x" x ($i % 97) } my $n = 0; $n += length(join "", @{$h{$_}}) for keys %h; print "$n\n"'
 check cargo-build bash -c '
   dir="$1/crate-$MODE"; rm -rf "$dir"; mkdir -p "$dir/src"
@@ -188,13 +120,19 @@ check cargo-build bash -c '
   "$dir/target/release/tiny"
   rm -rf "$dir"' _ "$work"
 # Without rseq every thread takes the slow path (design: "Without rseq").
-check no-rseq-threads env GLIBC_TUNABLES=glibc.pthread.rseq=0 "$bin/threads" 5 16 20000
-check no-rseq-forks env GLIBC_TUNABLES=glibc.pthread.rseq=0 "$bin/forks" 4 20
 check no-rseq-python env GLIBC_TUNABLES=glibc.pthread.rseq=0 python3 "$programs/py_threads.py"
-expect signals 0 "$bin/signals"
-# SIGABRT: 128 + 6.
-expect foreign-pointer 134 "$bin/foreign"
-expect interior-pointer 134 "$bin/foreign" interior
+
+if [ ${#selected[@]} -eq 0 ]; then
+  start=$SECONDS
+  if cargo test --quiet --release -p asmalloc-preload --test preload \
+       --manifest-path "$root/Cargo.toml" -- --include-ignored >"$work/preload-test" 2>&1; then
+    printf 'PASS  %-24s %4ss\n' preload-test $((SECONDS - start))
+  else
+    printf 'FAIL  %-24s\n' preload-test
+    tail -30 "$work/preload-test" | sed 's/^/      /'
+    failed+=(preload-test)
+  fi
+fi
 
 if [ ${#failed[@]} -eq 0 ]; then
   [ -n "${PRELOAD_CHECK_KEEP:-}" ] || rm -rf "$work"

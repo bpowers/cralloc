@@ -3,7 +3,8 @@
 //! Each property is a function of the geometry and holds for every region size it allows. The
 //! harnesses here run it on the geometries in use (the design's and the simulator's three), which
 //! are constants and so verify in seconds; `verify_slow.rs` runs the same properties on every
-//! geometry `Geometry::try_new` accepts.
+//! geometry `Geometry::try_new` accepts, and the two that take several seconds even on the
+//! geometries in use.
 
 use super::reservation::{pack, unpack};
 use super::*;
@@ -11,7 +12,7 @@ use crate::classes::{COUNT, Class};
 use crate::os::sim::{Native, Shape, Standard, Tiny};
 
 /// One of the geometries in use.
-fn any_used_geometry() -> Geometry {
+pub(super) fn any_used_geometry() -> Geometry {
     match kani::any::<u8>() {
         0 => Geometry::DESIGN,
         1 => Standard::GEOMETRY,
@@ -165,16 +166,6 @@ fn every_used_plan_fits_its_regions() {
 #[kani::proof]
 fn used_plans_keep_their_parts_apart() {
     plans_keep_their_parts_apart(any_used_geometry());
-}
-
-#[kani::proof]
-fn locate_inverts_region_offsets_in_used_geometries() {
-    locate_inverts_region_offsets(any_used_geometry());
-}
-
-#[kani::proof]
-fn slots_lie_inside_their_region_and_are_aligned_in_used_geometries() {
-    slots_lie_inside_their_region_and_are_aligned(any_used_geometry());
 }
 
 #[kani::proof]

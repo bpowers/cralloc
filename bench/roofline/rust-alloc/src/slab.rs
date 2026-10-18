@@ -1,7 +1,7 @@
 //! A stand-in allocator around the proved slab routines, to see what they cost once rustc has
 //! inlined them (or called them) at real allocation sites. The fast paths are the sequences in
-//! `lean/generated/` (inline: `x86_64_inline/slab.rs`, out of line: `x86_64/slab.rs`), copied
-//! instruction for instruction, or the variant a feature names:
+//! `crates/asmalloc/src/front/generated/` (inline: `x86_64_inline/slab.rs`, out of line:
+//! `x86_64/slab.rs`), copied instruction for instruction, or the variant a feature names:
 //!
 //!   slab           inline pop and push, as generated
 //!   slab_direct    the same, reading glibc's `__rseq_offset` with one rip-relative load
