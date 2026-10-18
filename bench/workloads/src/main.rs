@@ -6,6 +6,7 @@
 //! Every workload prints one `BENCH_RESULT` line (see bench-harness). Threads are pinned to
 //! the CPUs in `BENCH_CPUS`, in order. Sizes and choices come from seeded generators, so each
 //! allocator serves the same sequence of requests.
+mod mem;
 mod obj;
 mod single;
 mod steal;
@@ -26,6 +27,11 @@ fn main() {
         "tree" => single::tree(&args),
         "vecgrow" => single::vecgrow(&args),
         "json" => single::json(&args),
+        // Memory shapes for docs/research/memory.md; not part of any suite.
+        "quiet" => mem::quiet(&args),
+        "touch" => mem::touch(&args),
+        "sparse" => mem::sparse(&args),
+        "tiny" => mem::tiny(&args),
         _ => {
             eprintln!(
                 "usage: workload <pipeline|exchange|mpmc|forkjoin|spawn|churn|map|tree|vecgrow|json> [key=value ...]"

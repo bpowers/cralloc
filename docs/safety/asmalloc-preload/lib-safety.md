@@ -21,10 +21,12 @@ What the preload setting adds:
   siblings are glibc's internal aliases; no binary or library on the reference host imports
   them (census of `/usr/bin`, `/usr/lib64` and `/usr/libexec`), and glibc's own code calls the
   interposable names.
-- **C++.** The library also exports the 20 replaceable C++ allocation operators
-  (`asmalloc::export_cxx_abi!`, CXX-EXPORT-01 in `docs/safety/asmalloc/c/cxx-safety.md`),
-  which is all of what libstdc++ defines, so no `new` is served by one implementation and its
-  `delete` by the other. The library has no dependency on a C++ runtime; it finds the
+- **C++.** The library also exports 16 of the 20 replaceable C++ allocation operators: the
+  nothrow `new` forms and every `delete` (`asmalloc::export_cxx_abi!`, CXX-EXPORT-01 in
+  `docs/safety/asmalloc/c/cxx-safety.md`). libstdc++ keeps the four throwing forms of `new`,
+  which allocate with the library's `malloc` and `aligned_alloc` and can throw
+  `std::bad_alloc`, so every block either `new` returns is asmalloc's, and the library's
+  `delete` frees it. The library has no dependency on a C++ runtime; it finds the
   new-handler with `dlsym` when an allocation fails, and loads into programs that have none.
 - **Before the library can be called.** The dynamic loader uses its own minimal allocator until
   it has relocated every object, the preload library included, and only then switches to the

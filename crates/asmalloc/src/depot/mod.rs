@@ -26,6 +26,7 @@
 mod drain;
 mod generation;
 mod heartbeat;
+mod inspect;
 #[cfg(test)]
 mod interleave;
 mod magazine;
@@ -43,7 +44,8 @@ mod verify;
 pub use drain::Drained;
 pub use generation::Generation;
 pub use heartbeat::{IDLE_TICKS, LOOK_EVERY};
-pub(crate) use magazine::{Area, Magazine};
+pub use inspect::inspect;
+pub(crate) use magazine::{Area, Magazine, UNIT};
 pub use source::Source;
 pub use spare::{MAX_SPARES, SPARE_BUDGET, spare_limit};
 pub(crate) use stack::Stack;

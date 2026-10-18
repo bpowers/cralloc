@@ -20,10 +20,16 @@ caller owns and gives up).
   fails, the caller gives it up. Here `ptr` is not null (`old`).
 - `kept` is what the old block holds. For `Found::Small(class)`, `class.size()`: by F1 and F2
   the block is a whole slot of `class`, all of it the block's and committed. For
-  `Found::Large { size: used }`, `used`, the size the back end recorded when the block was
-  last allocated or resized (`Back::alloc`, `Back::alloc_run`, `Back::resize`). It is within
-  the slot or run: `Back::alloc` and `Back::resize` abort on a size larger than the slot or
-  run, and `alloc_run` records the size it was asked to hold. All of the slot or run is
+  `Found::Large { size: used }`, the block's usable size, `process::usable_size(old)`: `used`,
+  the size the back end recorded when the block was last allocated or resized
+  (`Back::alloc`, `Back::alloc_run`, `Back::resize`), rounded up to a page (or `used` itself
+  if no block were found, which cannot happen for the address `find` just found). It is
+  within the slot or run: `used` is (`Back::alloc` and `Back::resize` abort on a size larger
+  than the slot or run, and `alloc_run` records the size it was asked to hold), and the slot
+  or run is a whole number of pages (every class above the small ones is a quarter step of a
+  power of two of at least 32 KiB, so a multiple of 8 KiB; a run is whole regions), so
+  rounding `used` up to a page stays inside it. This is the same bound GLOBAL-03 relies on
+  for the length `Allocator` returns. All of the slot or run is
   committed: a carve hands out a slot only after the pages up to the slot's end are writable
   (`back/region.rs`, `carve`), `alloc_run` commits the whole run before returning it, and
   nothing makes committed memory inaccessible again (a purge is `MADV_DONTNEED`, which keeps

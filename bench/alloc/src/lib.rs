@@ -53,6 +53,8 @@ use asm as chosen;
 #[cfg(feature = "asmalloc")]
 #[global_allocator]
 static GLOBAL: asmalloc::Asmalloc = asmalloc::Asmalloc;
+#[cfg(feature = "asmalloc-memstat")]
+mod memstat;
 
 #[cfg(feature = "je")]
 mod je;

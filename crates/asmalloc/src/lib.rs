@@ -37,6 +37,7 @@ pub(crate) mod generated;
 mod heap;
 pub mod os;
 pub mod space;
+pub mod stats;
 
 #[cfg(any(miri, all(target_os = "linux", target_arch = "x86_64", not(kani))))]
 pub use heap::Asmalloc;
