@@ -21,6 +21,7 @@ use super::{Back, Block, Kind};
 use crate::classes::{Class, SmallClass};
 use crate::os::{HugePages, Os};
 use crate::space::{RegionId, RegionTag};
+use core::num::NonZeroUsize;
 use core::ptr::NonNull;
 use core::sync::atomic::Ordering::SeqCst;
 
@@ -254,6 +255,18 @@ impl<'a, O: Os> Back<'a, O> {
         (met.region, slot)
     }
 
+    /// How far into slot `slot` of `class` in `region` the block at `object` starts: zero, or
+    /// the slot's stagger. `object` is one `validate` accepted for that slot.
+    fn offset_in_slot(
+        &self,
+        region: RegionId,
+        class: Class,
+        slot: u32,
+        object: *const u8,
+    ) -> usize {
+        object.addr() - self.space.slot(region, class, slot).addr().get()
+    }
+
     /// Allocates one slot of `class` straight from the bitmaps: a freed slot if the class has
     /// one, lowest address first, else a carved one. For a large class, records `size` as the
     /// object's current size (see [`Back::size`]); it must be at most the class size, or the
@@ -261,6 +274,18 @@ impl<'a, O: Os> Back<'a, O> {
     /// of address space, the OS refused memory, or a slot of the class does not fit in a region
     /// (use [`Back::alloc_run`]).
     pub fn alloc(&self, class: Class, size: usize) -> Option<Block> {
+        self.alloc_at(class, size, false)
+    }
+
+    /// [`Back::alloc`] for a large block whose alignment is at most `policy::STAGGER_STEP`: it
+    /// starts at its slot's stagger (`Layout::stagger`) if the object fits there, so that large
+    /// blocks of a class do not all start at the same offset in the caches. A small class is
+    /// never staggered.
+    pub fn alloc_staggered(&self, class: Class, size: usize) -> Option<Block> {
+        self.alloc_at(class, size, true)
+    }
+
+    fn alloc_at(&self, class: Class, size: usize, stagger: bool) -> Option<Block> {
         if size > class.size() {
             self.abort("an allocation larger than its class");
         }
@@ -285,8 +310,15 @@ impl<'a, O: Os> Back<'a, O> {
             // As for a large free: see `Back::free`.
             self.heartbeat();
         }
+        let into = host.layout().stagger(slot);
+        let into = if stagger && size + into <= class.size() {
+            into
+        } else {
+            0
+        };
+        let start = self.space.slot(region, class, slot);
         Some(Block {
-            ptr: self.space.slot(region, class, slot),
+            ptr: start.map_addr(|a| a.saturating_add(into)),
             zeroed,
         })
     }
@@ -303,7 +335,8 @@ impl<'a, O: Os> Back<'a, O> {
                     self.abort("a resize in a class that has no regions");
                 };
                 let (region, slot) = self.validate(&host, ptr.as_ptr(), class);
-                if size > class.size() {
+                let into = self.offset_in_slot(region, class, slot, ptr.as_ptr());
+                if size + into > class.size() {
                     self.abort("a resize beyond the object's slot");
                 }
                 if let Some(before) = region::recorded(&host, region, slot) {
@@ -345,9 +378,11 @@ impl<'a, O: Os> Back<'a, O> {
     /// up every byte past `size`.
     pub unsafe fn resize_in_place(&self, ptr: NonNull<u8>, size: usize) {
         let page = self.space.plan().geometry().page_size();
-        let tail = |old: usize, limit: usize| {
-            let from = size.next_multiple_of(page);
-            let to = old.next_multiple_of(page).min(limit);
+        // The whole pages between the new end and the old one, counted from the start of the
+        // slot or run, which the block starts `into` bytes past.
+        let tail = |old: usize, limit: usize, into: usize| {
+            let from = (into + size).next_multiple_of(page);
+            let to = (into + old).next_multiple_of(page).min(limit);
             (from < to).then(|| (from, to - from))
         };
         match self.lookup(ptr.as_ptr()) {
@@ -357,7 +392,8 @@ impl<'a, O: Os> Back<'a, O> {
                     self.abort("a resize in a class that has no regions");
                 };
                 let (region, slot) = self.validate(&host, ptr.as_ptr(), class);
-                if size > class.size() {
+                let into = self.offset_in_slot(region, class, slot, ptr.as_ptr());
+                if size + into > class.size() {
                     self.abort("a resize beyond the object's slot");
                 }
                 let Some(before) = region::recorded(&host, region, slot) else {
@@ -371,8 +407,8 @@ impl<'a, O: Os> Back<'a, O> {
                 // SAFETY: BACK-CLASS-02: the caller owns the block and does not use it during
                 // the resize; `last..old` lies inside its first `old` bytes.
                 let dense = || unsafe { mostly_data(written.as_ptr(), old - last, page) };
-                region::advise_grown(&host, region, slot, old, size, dense);
-                if let Some((from, len)) = tail(old, class.size()) {
+                region::advise_grown(&host, region, slot, into, old, size, dense);
+                if let Some((from, len)) = tail(old, class.size(), into) {
                     // SAFETY: BACK-CLASS-02 in docs/safety/asmalloc/back/class-safety.md. The
                     // caller owns the object in this slot and has just given up everything
                     // past `from`, which lies inside the slot.
@@ -386,7 +422,7 @@ impl<'a, O: Os> Back<'a, O> {
                 }
                 let old = self.run_size(ptr.as_ptr());
                 self.set_run_size(ptr, size);
-                if let Some((from, len)) = tail(old, whole) {
+                if let Some((from, len)) = tail(old, whole, 0) {
                     let start = ptr.map_addr(|a| a.saturating_add(from));
                     // SAFETY: BACK-CLASS-02. The caller owns the run and has just given up
                     // everything past `from`, which lies inside the run's regions.
@@ -455,7 +491,9 @@ impl<'a, O: Os> Back<'a, O> {
         }
         // What `from` may have resident: its whole slot or run. Past the bytes copied that
         // is the rest of the old object and whatever an earlier owner of the slot left.
-        let (whole, host) = match (slot, kind) {
+        // Ranges below are counted from the start of `from`'s slot or run, which `from` is `into`
+        // bytes past.
+        let (whole, into, host) = match (slot, kind) {
             (Some(class), _) => {
                 let Some(host) = self.host(class) else {
                     self.abort("a move in a class that has no regions");
@@ -465,12 +503,15 @@ impl<'a, O: Os> Back<'a, O> {
                 if tree::word(&host, tree::Node::leaf(region, word)).load() & (1u64 << bit) != 0 {
                     self.abort("a move of a large object that is free");
                 }
-                (class.size(), Some((host, region, index)))
+                let into = self.offset_in_slot(region, class, index, from.as_ptr());
+                (class.size(), into, Some((host, region, index)))
             }
-            (None, Some(Kind::Run(regions))) => (regions << self.space.plan().region_shift(), None),
+            (None, Some(Kind::Run(regions))) => {
+                (regions << self.space.plan().region_shift(), 0, None)
+            }
             _ => return,
         };
-        // Returns `from`'s pages in `start..end`, both piece or page boundaries.
+        // Returns the slot's or run's pages in `start..end`, both page boundaries.
         let give_back = |start: usize, end: usize| -> bool {
             if start >= end {
                 return true;
@@ -482,6 +523,7 @@ impl<'a, O: Os> Back<'a, O> {
                     region::purge_part(host, *region, *index, start, end - start)
                 },
                 None => {
+                    // A run's block starts at the run.
                     let at = from.map_addr(|a| a.saturating_add(start));
                     // SAFETY: BACK-CLASS-03, likewise for a run the caller owns.
                     unsafe { self.space.purge(at, end - start) }.is_ok()
@@ -490,11 +532,15 @@ impl<'a, O: Os> Back<'a, O> {
         };
         let page = self.space.plan().geometry().page_size();
         if !zeroed {
-            // `to` starts on a page and holds `len` bytes rounded up to a page (large slots and
-            // runs are whole pages), so the range is whole pages of the caller's block.
-            // SAFETY: BACK-CLASS-03: the caller owns `to`, nothing else uses it, and its
-            // contents are not needed.
-            let _ = unsafe { self.space.purge(to, len.next_multiple_of(page)) };
+            // The pages that `to`'s `len` bytes touch. `to` holds more than a piece, so it is a
+            // large slot or a run, which are whole pages; a staggered block starts less than a
+            // page into its slot, so the first page is the slot's own, and its end fits the
+            // slot, so the last page is too.
+            let first = to.map_addr(|a| NonZeroUsize::new(a.get() & !(page - 1)).unwrap_or(a));
+            let end = (to.addr().get() + len).next_multiple_of(page);
+            // SAFETY: BACK-CLASS-03: the caller owns `to`'s slot or run, nothing else uses it,
+            // and its contents are not needed.
+            let _ = unsafe { self.space.purge(first, end - first.addr().get()) };
         }
         // Pieces end at multiples of the piece in the address space, not in the block, so that
         // a piece that goes back is whole huge pages wherever the block has them: purging
@@ -506,7 +552,8 @@ impl<'a, O: Os> Back<'a, O> {
             let step = (boundary - done).min(len - done);
             let mut at = done;
             while at < done + step {
-                let n = page.min(done + step - at);
+                // To the next page of the address space, so a skipped run is a source page.
+                let n = ((base + at + 1).next_multiple_of(page) - base - at).min(done + step - at);
                 // SAFETY: BACK-CLASS-03: `at + n <= len`, inside both ranges, which do not
                 // overlap; the bytes of `from` read here have not been returned. A page left
                 // uncopied is all zero, and `to` reads as zero there.
@@ -520,12 +567,12 @@ impl<'a, O: Os> Back<'a, O> {
             }
             // Only pieces that reach a boundary go back here: the last may end inside a page.
             if done + step == boundary {
-                all &= give_back(done, boundary);
+                all &= give_back((into + done) & !(page - 1), into + boundary);
             }
             done += step;
             observe();
         }
-        let last = ((base + len) & !(piece - 1)).saturating_sub(base);
+        let last = ((base + len) & !(piece - 1)).saturating_sub(base - into);
         all &= give_back(last, whole);
         match host {
             Some((host, region, index)) => {
@@ -563,6 +610,7 @@ impl<'a, O: Os> Back<'a, O> {
             return;
         };
         let (region, index) = self.validate(&host, to.as_ptr(), class);
+        let into = self.offset_in_slot(region, class, index, to.as_ptr());
         let page = self.space.plan().geometry().page_size();
         let piece = move_piece(self.space.plan().geometry());
         // What the program wrote last: the last piece of what moves.
@@ -570,7 +618,7 @@ impl<'a, O: Os> Back<'a, O> {
         // SAFETY: BACK-CLASS-04, for pages of the `len` readable bytes at `from`.
         let dense = || unsafe { mostly_data(from.as_ptr().add(last), len - last, page) };
         if let Some(now) = region::recorded(&host, region, index) {
-            region::advise_grown(&host, region, index, len, now.size, dense);
+            region::advise_grown(&host, region, index, into, len, now.size, dense);
         }
     }
 
@@ -583,10 +631,25 @@ impl<'a, O: Os> Back<'a, O> {
             Kind::Slot(class) => {
                 let host = self.host(class)?;
                 let location = self.space.locate(ptr)?;
-                let slot = self.space.plan().slot_at(location, class)?;
+                let (slot, _) = host.layout().block_at(location.offset as usize)?;
                 Some(region::recorded(&host, location.region, slot)?.size)
             }
             Kind::Run(_) => Some(self.run_size(ptr)),
+        }
+    }
+
+    /// The bytes from `ptr` to the end of the slot or run it is the start of: what the block
+    /// may grow to in place. A staggered block has its stagger less than its slot. `None` if
+    /// `ptr` is not the start of a block.
+    pub fn room(&self, ptr: *const u8) -> Option<usize> {
+        match self.lookup(ptr)? {
+            Kind::Slot(class) => {
+                let host = self.host(class)?;
+                let location = self.space.locate(ptr)?;
+                let (_, into) = host.layout().block_at(location.offset as usize)?;
+                Some(class.size() - into)
+            }
+            Kind::Run(regions) => Some(regions << self.space.plan().region_shift()),
         }
     }
 
@@ -627,8 +690,9 @@ impl<'a, O: Os> Back<'a, O> {
         let location = self.space.locate(ptr)?;
         match self.state.table.get(location.region) {
             RegionTag::Class(class) => {
-                self.space.plan().slot_at(location, class)?;
-                Some(Kind::Slot(class))
+                let host = self.host(class)?;
+                let (slot, _) = host.layout().block_at(location.offset as usize)?;
+                (slot < host.layout().slots()).then_some(Kind::Slot(class))
             }
             RegionTag::RunHead if location.offset == 0 => {
                 Some(Kind::Run(self.run_length(location.region)))
@@ -643,9 +707,15 @@ impl<'a, O: Os> Back<'a, O> {
     /// for.
     pub fn usable_size(&self, ptr: *const u8) -> Option<usize> {
         let size = self.size(ptr)?;
+        let page = self.space.plan().geometry().page_size();
         match self.lookup(ptr)? {
             Kind::Slot(class) if class.is_small() => Some(size),
-            _ => Some(size.next_multiple_of(self.space.plan().geometry().page_size())),
+            // To the end of the page the object ends in, which for a staggered block is not a
+            // multiple of a page from its start.
+            _ => {
+                let into = ptr.addr() & (page - 1);
+                Some((into + size).next_multiple_of(page) - into)
+            }
         }
     }
 
@@ -798,11 +868,10 @@ impl<'c, 'a, O: Os> Checker<'c, 'a, O> {
             *met = self.meet(object);
         }
         let offset = delta & ((1 << self.region_shift) - 1);
-        let slot = self.layout.slot_at(offset);
-        if self.layout.slot_bytes(slot) != offset {
+        let Some((slot, _)) = self.layout.block_at(offset) else {
             self.back
                 .abort("free of a pointer that is not the start of a slot");
-        }
+        };
         if slot >= met.limit {
             self.back.abort("free of a slot that was never handed out");
         }

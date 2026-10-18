@@ -1,7 +1,10 @@
 //! The back end over the simulated OS: unit tests, fault injection, a shadow-model property test
 //! and a threaded stress test.
 
-use super::policy::{CAP_REARM, DECAY_TICKS, large_retained_cap, move_piece, retained_cap};
+use super::policy::{
+    CAP_REARM, DECAY_TICKS, STAGGER_ROOM, STAGGER_STEP, large_retained_cap, move_piece,
+    retained_cap,
+};
 use super::{Back, Block, Kind, State};
 use crate::classes::{Class, SmallClass};
 use crate::os::sim::{Call, Faults, Native, Shape, SimOs, Standard};
@@ -1414,10 +1417,10 @@ fn a_block_that_grows_gets_huge_pages_until_it_is_freed() {
     };
     let dense = grow(80 << 10, 160 << 10);
     let at = |offset: usize| os.huge_pages(dense.map_addr(|a| a.saturating_add(offset)));
-    // Up to the new size rounded up to a huge page, and not the room past it.
+    // The whole huge pages the new size covers, and not the rest or the room past it.
     assert_eq!(at(0), Some(HugePages::Prefer));
-    assert_eq!(at(3 * huge - 1), Some(HugePages::Prefer));
-    assert_eq!(at(3 * huge), Some(HugePages::Avoid));
+    assert_eq!(at(2 * huge - 1), Some(HugePages::Prefer));
+    assert_eq!(at(2 * huge), Some(HugePages::Avoid));
     // Growing on in place, densely, extends it.
     pattern(dense.as_ptr(), 160 << 10);
     // SAFETY: the test holds the block and uses none of it during the call.
@@ -1662,6 +1665,127 @@ fn a_sparse_block_stays_sparse_when_it_moves() {
         let expected = len / piece + usize::from(!zeroed);
         assert_eq!(os.calls(Call::Purge) as usize, purges + expected);
         back.free(new.ptr, new_class);
+    }
+}
+
+/// Large blocks of one class start at their slots' staggers: different multiples of a cache
+/// line, within a page. Everything that maps a pointer back to its slot agrees: lookup, size,
+/// usable size, room, resize, and the free, which aborts on any other offset into the slot.
+#[test]
+#[cfg_attr(miri, ignore)]
+fn staggered_blocks_start_at_different_cache_lines_and_free_by_address() {
+    let state = state::<Native>();
+    let back = state.get_or_reserve().unwrap();
+    let page = Native::GEOMETRY.page_size();
+    let class = large(64 << 10);
+    let size = class.size() - STAGGER_ROOM;
+    let blocks: Vec<_> = (0..8)
+        .map(|_| back.alloc_staggered(class, size).unwrap().ptr)
+        .collect();
+    let mut offsets: Vec<usize> = blocks.iter().map(|b| b.addr().get() % page).collect();
+    assert!(offsets.iter().all(|o| o % STAGGER_STEP == 0));
+    offsets.sort_unstable();
+    offsets.dedup();
+    assert_eq!(offsets.len(), blocks.len(), "each slot its own stagger");
+    for &b in &blocks {
+        let into = b.addr().get() % page;
+        assert_eq!(back.lookup(b.as_ptr()), Some(Kind::Slot(class)));
+        assert_eq!(back.size(b.as_ptr()), Some(size));
+        assert_eq!(back.room(b.as_ptr()), Some(class.size() - into));
+        let usable = back.usable_size(b.as_ptr()).unwrap();
+        assert!(usable >= size && into + usable <= class.size());
+        assert_eq!((b.addr().get() + usable) % page, 0, "to a page boundary");
+        paint(b.as_ptr(), usable, 0x3c);
+    }
+    // Shrunk in place, the tail goes back from the page the new end is in.
+    let b = blocks[3];
+    let into = b.addr().get() % page;
+    // SAFETY: the test holds the block and uses none of it during the call.
+    unsafe { back.resize_in_place(b, page) };
+    let end = (into + page).next_multiple_of(page) - into;
+    assert!(painted(b.as_ptr(), end, 0x3c));
+    let tail = b.map_addr(|a| a.saturating_add(end));
+    // SAFETY: no other thread runs, and the back end and this test store only integers.
+    unsafe { assert!(state.os().is_purged(tail, class.size() - into - end)) };
+    for &b in &blocks {
+        back.free_by_address(b);
+    }
+    // A slot handed out unstaggered still frees from its start.
+    let plain = back.alloc(class, class.size()).unwrap().ptr;
+    assert_eq!(back.room(plain.as_ptr()), Some(class.size()));
+    back.free_by_address(plain);
+}
+
+#[test]
+#[should_panic(expected = "not the start")]
+fn a_pointer_between_a_slot_and_its_stagger_is_not_a_block() {
+    let state = state::<Native>();
+    let back = state.get_or_reserve().unwrap();
+    let class = large(64 << 10);
+    let _first = back.alloc_staggered(class, 1 << 10).unwrap().ptr;
+    // The second slot's stagger is one step; half a step is no block's start.
+    let second = back.alloc_staggered(class, 1 << 10).unwrap().ptr;
+    assert_eq!(
+        second.addr().get() % Native::GEOMETRY.page_size(),
+        STAGGER_STEP
+    );
+    let between = second.map_addr(|a| a.saturating_add(STAGGER_STEP / 2));
+    let between =
+        between.map_addr(|a| core::num::NonZeroUsize::new(a.get() - STAGGER_STEP).unwrap());
+    back.free_by_address(between);
+}
+
+/// A staggered block moving to another staggered block, densely and sparsely: the contents
+/// arrive, and every page of the old slot goes back, so it is handed out again as zero.
+#[test]
+#[cfg_attr(miri, ignore)]
+fn a_staggered_block_moves_and_returns_its_whole_slot() {
+    let state = state::<Native>();
+    let back = state.get_or_reserve().unwrap();
+    let os = state.os();
+    let (old_class, new_class) = (large(512 << 10), large(1 << 20));
+    for sparse in [false, true] {
+        // Take a slot first, so the next ones are staggered.
+        let skip = back.alloc_staggered(old_class, 1 << 10).unwrap().ptr;
+        let len = old_class.size() - STAGGER_ROOM;
+        let old = back.alloc_staggered(old_class, len).unwrap().ptr;
+        assert_ne!(old.addr().get() % Native::GEOMETRY.page_size(), 0);
+        if sparse {
+            for o in (0..len).step_by(5 * 4096) {
+                // SAFETY: inside the block.
+                unsafe { old.as_ptr().add(o).write(7) };
+            }
+        } else {
+            pattern(old.as_ptr(), len);
+        }
+        let new = back.alloc_staggered(new_class, len).unwrap();
+        // SAFETY: both are live blocks that nothing else uses; `new` reads as zero if said.
+        unsafe { back.move_large(old, new.ptr, len, new.zeroed) };
+        if sparse {
+            // SAFETY: inside the block.
+            let bytes = unsafe { core::slice::from_raw_parts(new.ptr.as_ptr(), len) };
+            assert!(
+                bytes
+                    .iter()
+                    .enumerate()
+                    .all(|(o, &b)| b == if o % (5 * 4096) == 0 { 7 } else { 0 })
+            );
+        } else {
+            assert!(patterned(new.ptr.as_ptr(), len));
+        }
+        let slot = back.space().slot(
+            back.space().locate(old.as_ptr()).unwrap().region,
+            old_class,
+            back.space().locate(old.as_ptr()).unwrap().slot(old_class),
+        );
+        // SAFETY: as above.
+        unsafe { assert!(os.is_purged(slot, old_class.size())) };
+        let again = back.alloc(old_class, old_class.size()).unwrap();
+        assert_eq!(again.ptr, slot);
+        assert!(again.zeroed && painted(slot.as_ptr(), old_class.size(), 0));
+        back.free(again.ptr, old_class);
+        back.free_by_address(new.ptr);
+        back.free_by_address(skip);
     }
 }
 

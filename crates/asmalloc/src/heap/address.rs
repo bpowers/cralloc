@@ -113,9 +113,9 @@ impl<O: Os> Heap<O> {
             return false;
         };
         let room = match back.lookup(ptr.as_ptr()) {
-            Some(Kind::Slot(class)) if !class.is_small() => class.size(),
-            Some(Kind::Run(regions)) => regions << back.space().plan().region_shift(),
-            _ => return false,
+            Some(Kind::Slot(class)) if class.is_small() => return false,
+            Some(_) => back.room(ptr.as_ptr()).unwrap_or(0),
+            None => return false,
         };
         let fits = is_large(new) && new <= room && (new >= old || stays_after_shrink(new, room));
         if fits {
@@ -276,9 +276,13 @@ mod tests {
             // SAFETY: the test holds the block and uses none of it meanwhile.
             unsafe { heap.heap.resize_in_place_by_address(big, old, new) }
         };
-        // The slot is the 40 KiB class: growth past it moves, a shrink to an eighth stays.
-        assert!(!resize(40 << 10, 41 << 10));
-        assert!(resize(40 << 10, 33 << 10));
+        // Growth past the room from the block to its slot's end moves; within it, and a shrink
+        // to an eighth, stays.
+        let room = heap.heap.back().unwrap().room(big.as_ptr()).unwrap();
+        assert!(room >= 40 << 10);
+        assert!(!resize(40 << 10, room + 1));
+        assert!(resize(40 << 10, room));
+        assert!(resize(room, 33 << 10));
         assert_eq!(
             heap.heap.find(big.as_ptr()),
             Some(Found::Large { size: 33 << 10 })

@@ -512,6 +512,27 @@ not its numbers.
    - no guarantee in a forked child, where the probe will often say no and heals do not
      merge.
 
+### Large blocks at the same offset in the caches (2026-10-17)
+
+Large slots are spaced by their class size, often a power of two, so buffers that start at
+slot starts share their low address bits, and the same offset in each falls in the same
+cache set. A stand-alone probe: 64 buffers of 4 MiB at 16 MiB-aligned addresses, memory
+pre-faulted, written round-robin one `u64` at a time as 64 growing vectors are, against the
+same buffers each moved by a different multiple of 64 bytes within a page. Pinned to CPU 13,
+three interleaved runs:
+
+| | ns per element | L2 requests from L1D | of them L2 hits |
+|---|---:|---:|---:|
+| at slot starts | 7.86 to 7.95 | 2.05e9, one per store | 2.04e9 |
+| staggered | 0.74 to 0.80 | 2.1e7, one per line | 0.7e7 to 0.9e7 |
+
+At slot starts every store misses the 12-way L1: 64 streams map to one set. With large
+blocks staggered by their slot's index (`policy::STAGGER_STEP`), the workload suite's 64
+vectors grown to 4 MiB took 12.0 cycles an element against 40.9 (jemalloc 14.5, which
+offsets large extents for the same reason; mimalloc 40.0), at the same peak, 271 MiB. A
+loop `a[i] = b[i] + c[i]` over three vectors of 4 or 16 MiB was the same for every
+allocator: three streams fit the L1's ways.
+
 ## 8. Moving cache lines between cores
 
 Wall-clock, single run each in two sessions.

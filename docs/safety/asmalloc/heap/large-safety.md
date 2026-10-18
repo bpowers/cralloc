@@ -38,14 +38,16 @@ and the copy (or `move_large`) wrote only `[0, kept)` of it, before the clearing
 
 **Proof.** The block is the caller's live large block (`resize`'s contract), resized in place
 because the new size fits its slot or run. `len` is `Back::usable_size` after
-`Back::resize_in_place` recorded the new size: the new size rounded up to a page. The write
+`Back::resize_in_place` recorded the new size: the bytes from the block's start to the end
+of the page the new size ends in. The write
 happens only when `len > before`, a grow, and `resize_in_place` purges only when the block
 shrinks (the pages between the new usable size and the old one), so a grow purges nothing and
 `[ptr + before, ptr + len)` is still committed, and owned only by the caller, when it is
 written. (A purge would not make the write unsound anyway: purged memory stays writable and
-reads as zero.) The new size fits the
-slot or run (the in-place test), and a large slot's size and a run's length are multiples of
-the page size (large classes are `q << e` with `2^e` at least 8 KiB, pages are at most 4 KiB in
+reads as zero.) The block starts at its slot's start or its stagger, and the stagger plus the
+new size fits the slot (the in-place test compares against `Back::room`, the bytes from the
+block to the slot's end), and a large slot's size and a run's length are
+multiples of the page size (large classes are `q << e` with `2^e` at least 8 KiB, pages are at most 4 KiB in
 every geometry that hosts a large class's slot, and runs are whole regions), so the rounded
 size does too, and the range lies in the block, which is committed whole (a carved slot's
 pages, or a committed run). `before < len`.

@@ -22,6 +22,7 @@
 //! assigned. All zero means nothing is free, nothing is carved, nothing is committed, the region
 //! has no huge-page part and no purge is under way.
 
+use super::policy::{STAGGER_SLOTS, STAGGER_STEP};
 use super::word::BITS;
 use crate::classes::{Class, Divisor};
 use crate::space::Plan;
@@ -546,6 +547,35 @@ impl Layout {
         let end = (self.slot_bytes(slot + 1) >> self.page_shift) as u32;
         if start < end {
             Some(Unit { start, end })
+        } else {
+            None
+        }
+    }
+
+    /// How far past its slot's start a block in slot `slot` starts when it is staggered: a
+    /// multiple of `policy::STAGGER_STEP` that depends only on the slot's index, so that it is
+    /// never stored and a free recomputes it. Zero for small classes, which are never
+    /// staggered. A block of a large class starts either here or at the slot's start; which
+    /// one the address says.
+    #[inline(always)]
+    pub(crate) const fn stagger(&self, slot: u32) -> usize {
+        if self.sizes == 0 {
+            0
+        } else {
+            (slot as usize % STAGGER_SLOTS) * STAGGER_STEP
+        }
+    }
+
+    /// The slot a block starting at byte `offset` of the region is in, and how far into the
+    /// slot it starts, if `offset` is a block's start: the slot's start, or its stagger. The
+    /// one place a pointer becomes a slot. The slot may be past the region's last one; callers
+    /// check it against the watermark or the slot count.
+    #[inline(always)]
+    pub(crate) const fn block_at(&self, offset: usize) -> Option<(u32, usize)> {
+        let slot = self.slot_at(offset);
+        let into = offset - self.slot_bytes(slot);
+        if into == 0 || into == self.stagger(slot) {
+            Some((slot, into))
         } else {
             None
         }
