@@ -490,7 +490,11 @@ fn depot_stacks_keep_one_owner_under_every_schedule(bounds: Bounds) {
                 let object = world.rig.source.alloc_one(class).unwrap();
                 magazine.set_object(1, object);
                 magazine.set_level(1);
-                world.rig.depot.full(class).push(cache.area(), magazine);
+                world
+                    .rig
+                    .depot
+                    .full(super::Domain::ZERO, class)
+                    .push(cache.area(), magazine);
             }
             world
         },
@@ -498,7 +502,7 @@ fn depot_stacks_keep_one_owner_under_every_schedule(bounds: Bounds) {
             let machine = world.machine(me, 0);
             let cache = world.rig.cache(&machine);
             let class = tiny_class();
-            let stack = world.rig.depot.full(class);
+            let stack = world.rig.depot.full(super::Domain::ZERO, class);
             // Thread 1 pops two and pushes the first back before the second: the ABA a
             // stale head would miss. Thread 0 pops one and pushes it back.
             let first = stack.pop(cache.area(), class.magazine());

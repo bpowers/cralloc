@@ -435,3 +435,124 @@ is its locked OR and the work that random words cost besides. What is left again
 the drop (180M cycles: one locked OR a scattered slot against mimalloc's plain pushes onto a
 page's list) and the build (226M, at the same instructions). JSON is level with mimalloc
 within the noise of these runs.
+
+# A depot per cache domain (2026-10-18)
+
+With one depot shared by every CPU, magazines that one L3 freed were popped by the other, and
+each slot of the magazine and most of the objects it named were then a fill from the other
+L3. This section measures that, and the depot that keeps magazines in the L3 that freed them.
+"before" is main at 69bcd42; "after" is the change at f023136.
+
+## Method
+
+C programs preloaded, each with the same thread count in two placements: eight CPUs of one L3
+(0-7) and four on each (0-3 and 8-11, the suite's placement). Each run under the shared
+measurement lock, the libraries interleaved and rotated every round, medians. Cache fills from
+the other L3 are `ls_dmnd_fills_from_sys.near_cache` per operation (437M mallocs for sh8bench,
+6.75M for mstress, the reported rate times 3 s for larson and xmalloc-test). Suite jobs: the
+runner, one round per invocation under the lock, the two builds alternating, five rounds,
+medians and cgroup peaks. Builds and proofs by others ran on CPUs 12-15 and 28-31, which share
+an L3 with 8-11.
+
+## The cost of one depot
+
+Before the change, on main b784f1a, five rounds:
+
+| Program | Allocator | One L3 | Two L3s | Two / one | Fills from the other L3 per op |
+|---|---|---:|---:|---:|---:|
+| sh8bench, s | asmalloc | 0.345 | 0.756 | 2.19 | 0.137 |
+| | mimalloc | 0.218 | 0.242 | 1.11 | 0.016 |
+| | jemalloc | 0.486 | 0.599 | 1.23 | 0.002 |
+| | tcmalloc per-CPU | 0.723 | 2.017 | 2.79 | 0.326 |
+| larson, Mops/s | asmalloc | 584 | 395 | 0.68 | 0.077 |
+| | mimalloc | 668 | 489 | 0.73 | 0.050 |
+| xmalloc-test, M frees/s | asmalloc | 1074 | 373 | 0.35 | 0.271 |
+| | mimalloc | 355 | 297 | 0.84 | 0.228 |
+| | tcmalloc per-CPU | 509 | 188 | 0.37 | 0.275 |
+| mstress, s | asmalloc | 0.277 | 0.290 | 1.05 | 0.63 |
+
+Where the other L3's fills land, asmalloc on 0-3 and 8-11: in `malloc`, popping the slots of a
+magazine the other L3 wrote (29% for sh8bench, 46% for xmalloc-test); in the program, touching
+objects the other L3 freed (36%, 32%); in the depot's stack push and pop (15%, 10%). Putting
+each stack head on its own line (a151233) changed nothing measurable: 0.752 against 0.727 s
+for sh8bench, within the spread. About 81% of sh8bench's mallocs are served from magazines
+that came through the depot, and the depot's traffic per malloc is the same in both
+placements: about half of it crosses.
+
+## The change
+
+Full and empty stacks per cache domain, up to 64, found once at start-up from sysfs. A slow
+path uses its CPU's domain; one whose stack of a class is empty takes from another domain's
+stack only when that holds at least the take threshold, else fills from the bitmaps. A class's
+target is shared among the domains whose stacks of it hold anything.
+
+**The take threshold.** Measured at the whole target, half and a quarter (ns per allocation,
+lower is better; the x2 to x4 jobs are independent pipelines placed in both L3s):
+
+| Job | before | whole | half | quarter |
+|---|---:|---:|---:|---:|
+| pipeline t2 split all-alloc | 12.22-12.46 | 13.39-13.60 | 12.80 | 12.38 |
+| pipeline t2 split free-only | 12.25-12.47 | 13.45-13.58 | 12.94 | 12.43 |
+| exchange t2 split | 14.44-14.66 | 15.68-15.69 | 14.24 | 14.55 |
+| pipeline t2 x2 split | 11.63-11.70 | 4.87-4.91 | 4.87 | 8.00 |
+| pipeline t2 x3 both | 9.78-9.90 | 5.51-5.58 | 5.67 | 6.71 |
+| mpmc p4 c4 both | 5.70-6.00 | 5.01-5.19 | 5.71 | 5.57 |
+
+The whole target sends half of a split pipeline's flow through the bitmaps; a quarter lets the
+independent pipelines take each other's magazines whenever a stack holds a little. Half keeps
+both: the default. On xmalloc-test the threshold made no measurable difference.
+
+## After
+
+C programs, before and after, seven rounds:
+
+| Program | Placement | before | after |
+|---|---|---:|---:|
+| sh8bench, s | one L3 | 0.339 | 0.337 |
+| | two L3s | 0.720 | 0.606 |
+| larson, Mops/s | one L3 | 585 | 588 |
+| | two L3s | 402 | 411 |
+| mstress, s | one L3 | 0.261 | 0.258 |
+| | two L3s | 0.275 | 0.270 |
+| xmalloc-test, M frees/s | one L3 | 1077 | 1058 |
+| | two L3s, slow runs | 377-390 | 399-441 |
+| | two L3s, fast runs | 732-741 | 725-756 |
+
+xmalloc-test on two L3s is bimodal for every library, by where the scheduler puts each pair of
+threads: about half the runs of each library land near 735 and half near 390, so its median
+says nothing; the table gives the two groups. Fills from the other L3 per op fell by 40% for
+sh8bench (0.113 to 0.068) and 17% for mstress. Peak resident memory of the C programs did not
+move beyond the run-to-run spread.
+
+Suite jobs, ns per allocation (ns per task for spawn), medians of five, and cgroup peak MiB:
+
+| Job | before | after | peak before | peak after |
+|---|---:|---:|---:|---:|
+| pipeline t2 x2 split | 11.16 | 4.78 | 3.5 | 3.9 |
+| pipeline t2 x3 both | 9.53 | 5.54 | 4.9 | 5.1 |
+| pipeline t2 x4 both | 10.23 | 5.60 | 5.8 | 6.3 |
+| exchange t8 both | 3.27 | 2.96 | 6.6 | 7.3 |
+| mpmc p4 c4 both | 5.03 | 4.87 | 5.6 | 6.4 |
+| exchange t2 split | 14.11 | 13.81 | 2.5 | 3.0 |
+| pipeline t2 split all-alloc | 11.57 | 11.84 | 2.2 | 3.0 |
+| pipeline t2 split free-only | 11.59 | 11.79 | 2.5 | 3.2 |
+| pipeline t8 both | 4.36 | 4.38 | 7.2 | 8.0 |
+| forkjoin t8 both | 3.92 | 3.93 | 17.3 | 17.6 |
+| spawn t8 both | 262.3 | 259.8 | 4.9 | 4.9 |
+| pipeline t2 local | 3.80 | 3.85 | 2.2 | 2.5 |
+| exchange t2 local | 4.27 | 4.35 | 2.5 | 2.2 |
+| mpmc p1 c3 local free-only | 5.26 | 5.40 | 3.4 | 3.5 |
+| churn live=100k, native | 47.46 | 47.55 | 12.2 | 12.2 |
+
+The independent pipelines in two L3s are 1.7 to 2.3 times faster, ahead of jemalloc's 8.01
+for x2 split in the session where we trailed it by 35%. The split pipeline, where the shared
+depot is why we lead (jemalloc 18.35), gives up 2%. Jobs in one L3 moved by -1 to +3%, within
+the spread of the earlier run of the same comparison (-1 to +2%).
+
+**Parked memory.** Jobs that use both L3s peak 0.3 to 0.8 MiB higher. Sharing a class's target
+among its domains did not change that; it comes from the take threshold: a domain's frees wait
+in its stack up to the threshold before the other domain takes them, and meanwhile the other
+fills from the bitmaps, carving new slots for each class in use. Single-L3 jobs and the
+memory worst cases (`bench/probes/memory/worst.sh`: phase change, many CPUs and few classes,
+many threads on few CPUs) end where they did; the many-CPUs case peaked at 6.1 to 7.0 MiB
+against 4.5 to 5.7.

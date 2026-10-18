@@ -82,6 +82,8 @@ pub(super) fn prepare<O: Os>(depot: &Depot, area: Area<'_, O>) -> bool {
     if depot.shared.status.load(Acquire) & READY != 0 {
         return true;
     }
+    // Before anything else a first slow path does, and only here: see `domain`.
+    depot.topology.discover(area.space().os());
     let page = area.generation_page();
     let space = area.space();
     let len = O::GEOMETRY.page_size();

@@ -60,6 +60,16 @@ impl fmt::Debug for OsError {
     }
 }
 
+/// A list of CPUs the kernel publishes, which [`Os::topology`] reads.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Topology {
+    /// The CPUs that are online (`/sys/devices/system/cpu/online`).
+    Online,
+    /// The CPUs that share CPU `n`'s L3 cache
+    /// (`/sys/devices/system/cpu/cpuN/cache/index3/shared_cpu_list`).
+    SharedL3(u32),
+}
+
 /// Transparent-huge-page advice for a range.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum HugePages {
@@ -166,6 +176,13 @@ pub unsafe trait Os: Sync {
     /// this trait's safety contract depends on it: a wrong count only makes a drain or a purge
     /// pass come sooner or later, and both are safe at any time.
     fn ticks(&self) -> u64;
+
+    /// Reads the CPU list `which` into `buf` as the kernel prints it (`0-7,16-23` and a
+    /// newline) and returns its length, or `None` if it cannot be read whole: no such list, a
+    /// refused call, or more than `buf` holds. Called only from the first slow path of the
+    /// process (`depot::domain`). No promise of this trait's safety contract depends on what
+    /// it returns: a wrong list only puts magazines in the wrong cache domain's stacks.
+    fn topology(&self, which: Topology, buf: &mut [u8]) -> Option<usize>;
 
     /// Writes `message` to standard error and ends the process abnormally.
     fn abort(&self, message: &str) -> !;

@@ -1,0 +1,301 @@
+//! Cache domains: which CPUs share a last-level cache, so that the depot can keep the magazines
+//! one domain frees for that domain's allocations.
+//!
+//! A magazine that one L3 filled and another pops costs the popping CPU a fill from the other
+//! L3 for each line of the magazine and, mostly, for each object it names: with one depot
+//! shared by two L3s, sh8bench took 2.2 times as long and xmalloc-test ran at a third of its
+//! speed (`docs/research/launder-and-fill.md`, "A depot per cache domain"). So the depot has
+//! stacks per domain (`super::Depot`), and a slow path uses its CPU's.
+//!
+//! **Finding them.** Once, from the process's first slow path (`generation::prepare`), and
+//! never lazily: a slow path that first opens a file after the program has entered a seccomp
+//! sandbox could kill the process. The kernel's list of online CPUs gives the CPUs to cover;
+//! the lowest one not yet covered reads the list of CPUs sharing its L3 (`Os::topology`), and
+//! every CPU in it gets the next domain number. So there is one read per L3, not per CPU. Any
+//! failure (no file, no L3, a refused call, text that does not parse, a CPU missing from its
+//! own list) leaves one domain. Domain numbers fold modulo [`MAX_DOMAINS`] on machines with
+//! more L3s; folded domains share stacks and work as one.
+//!
+//! **The table.** One byte per CPU number, the CPU's domain. All zero is valid: every CPU in
+//! domain 0. The table is read only after the count is published (`Topology`), and a CPU the
+//! table does not name, such as one brought online later, is in domain 0. One thread fills it,
+//! the one that claims the work with a compare-and-swap; the others carry on in domain 0 until
+//! it publishes, and never wait. A forked child inherits the table as it was; if the fork cut
+//! the work off, the claim is never released and the child keeps one domain, which is correct
+//! and only slower.
+
+use crate::front::SLAB_COUNT;
+use crate::os::{Os, Topology};
+use core::sync::atomic::Ordering::{AcqRel, Acquire, Relaxed, Release};
+use core::sync::atomic::{AtomicU8, AtomicU64};
+
+/// The most domains the depot keeps apart; machines with more fold them together.
+pub const MAX_DOMAINS: usize = 64;
+
+/// The bytes of one topology list read: room for any list a machine of [`SLAB_COUNT`] CPUs
+/// prints in ranges, and for every CPU of a 64-CPU L3 listed one by one.
+const LIST_BYTES: usize = 512;
+
+/// A cache domain's number, below [`MAX_DOMAINS`].
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub struct Domain(u8);
+
+impl Domain {
+    /// The domain every CPU is in until the topology is known, and when it cannot be.
+    pub const ZERO: Domain = Domain(0);
+
+    /// Domain number `n`, folded below [`MAX_DOMAINS`].
+    pub const fn folded(n: usize) -> Domain {
+        Domain((n % MAX_DOMAINS) as u8)
+    }
+
+    /// The number, below [`MAX_DOMAINS`].
+    pub const fn index(self) -> usize {
+        self.0 as usize % MAX_DOMAINS
+    }
+}
+
+/// Where the discovery is: nothing done ([`Topology::NONE`]), claimed and under way, or
+/// published with its count of domains.
+const CLAIMED: u64 = 1;
+/// A published count `n` is stored as `n + PUBLISHED`.
+const PUBLISHED: u64 = 2;
+
+/// The CPU table and the state of its discovery.
+pub(crate) struct Domains {
+    state: AtomicU64,
+    of_cpu: [AtomicU8; SLAB_COUNT],
+}
+
+impl Domains {
+    /// No discovery yet: one domain.
+    pub(crate) const fn new() -> Domains {
+        Domains {
+            state: AtomicU64::new(0),
+            of_cpu: [const { AtomicU8::new(0) }; SLAB_COUNT],
+        }
+    }
+
+    /// How many domains the depot uses: 1 until a discovery that found more is published.
+    pub(crate) fn count(&self) -> usize {
+        match self.state.load(Acquire) {
+            n if n > PUBLISHED => (n - PUBLISHED) as usize,
+            _ => 1,
+        }
+    }
+
+    /// The domain of CPU number `cpu`, or domain 0 if there is no CPU or one domain.
+    pub(crate) fn of(&self, cpu: Option<usize>) -> Domain {
+        let Some(cpu) = cpu else {
+            return Domain::ZERO;
+        };
+        if self.state.load(Acquire) <= PUBLISHED + 1 {
+            return Domain::ZERO;
+        }
+        match self.of_cpu.get(cpu) {
+            Some(byte) => Domain::folded(byte.load(Relaxed) as usize),
+            None => Domain::ZERO,
+        }
+    }
+
+    /// Finds the domains if no thread has started to: see the module documentation.
+    pub(crate) fn discover<O: Os>(&self, os: &O) {
+        if self.state.load(Relaxed) != 0
+            || self
+                .state
+                .compare_exchange(0, CLAIMED, AcqRel, Relaxed)
+                .is_err()
+        {
+            return;
+        }
+        let count = self.fill(os).unwrap_or(1);
+        self.state.store(count as u64 + PUBLISHED, Release);
+    }
+
+    /// Fills the table from the OS's lists and returns the number of domains, at most
+    /// [`MAX_DOMAINS`]; `None` if anything fails, when the table is not to be read.
+    fn fill<O: Os>(&self, os: &O) -> Option<usize> {
+        let mut online = [0u8; LIST_BYTES];
+        let len = os.topology(Topology::Online, &mut online)?;
+        let online = online.get(..len)?;
+        let mut covered = [0u64; SLAB_COUNT / 64];
+        let mut next = 0usize;
+        let mut ok = true;
+        let parsed = each_cpu(online, |cpu| {
+            if !ok || cpu >= SLAB_COUNT || covered[cpu / 64] & (1 << (cpu % 64)) != 0 {
+                return;
+            }
+            let domain = Domain::folded(next);
+            next += 1;
+            let mut list = [0u8; LIST_BYTES];
+            let Some(len) = os.topology(Topology::SharedL3(cpu as u32), &mut list) else {
+                ok = false;
+                return;
+            };
+            let mut found_self = false;
+            let shared = each_cpu(list.get(..len).unwrap_or(&[]), |other| {
+                if other == cpu {
+                    found_self = true;
+                }
+                if other < SLAB_COUNT {
+                    covered[other / 64] |= 1 << (other % 64);
+                    self.of_cpu[other].store(domain.0, Relaxed);
+                }
+            });
+            ok &= shared && found_self;
+        });
+        (parsed && ok && next > 0).then_some(next.min(MAX_DOMAINS))
+    }
+}
+
+/// Calls `f` with each CPU number of a list as the kernel prints CPU lists (`0-3,8,10-11`,
+/// then a newline). Whether the text was such a list; `f` may have been called for a prefix
+/// of a list that was not.
+pub(crate) fn each_cpu(text: &[u8], mut f: impl FnMut(usize)) -> bool {
+    let text = match text.split_last() {
+        Some((b'\n', rest)) => rest,
+        _ => text,
+    };
+    if text.is_empty() {
+        return false;
+    }
+    for part in text.split(|&b| b == b',') {
+        let (first, last) = match part.iter().position(|&b| b == b'-') {
+            Some(dash) => (number(&part[..dash]), number(&part[dash + 1..])),
+            None => (number(part), number(part)),
+        };
+        let (Some(first), Some(last)) = (first, last) else {
+            return false;
+        };
+        if first > last {
+            return false;
+        }
+        // Past the slab count no CPU has a slab; stop there rather than count up to a huge
+        // number a broken file might hold.
+        for cpu in first..=last.min(SLAB_COUNT) {
+            f(cpu);
+        }
+    }
+    true
+}
+
+/// A decimal number of up to six digits.
+fn number(digits: &[u8]) -> Option<usize> {
+    if digits.is_empty() || digits.len() > 6 {
+        return None;
+    }
+    digits.iter().try_fold(0usize, |n, &d| {
+        d.is_ascii_digit().then(|| n * 10 + (d - b'0') as usize)
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::vec::Vec;
+
+    fn cpus(text: &str) -> Option<Vec<usize>> {
+        let mut out = Vec::new();
+        each_cpu(text.as_bytes(), |c| out.push(c)).then_some(out)
+    }
+
+    /// The domains found under `topology`: their count, and the domain of each simulated CPU.
+    fn found(topology: crate::os::sim::SimTopology) -> (usize, Vec<usize>) {
+        let os: crate::os::sim::SimOs = crate::os::sim::SimOs::new();
+        os.set_topology(topology);
+        let domains = Domains::new();
+        assert_eq!(domains.count(), 1, "one domain before discovery");
+        domains.discover(&os);
+        let of = (0..crate::os::sim::SIM_THREADS)
+            .map(|cpu| domains.of(Some(cpu)).index())
+            .collect();
+        (domains.count(), of)
+    }
+
+    #[test]
+    fn discovery_gives_each_l3_a_domain_in_order_of_its_lowest_cpu() {
+        use crate::os::sim::SimTopology::*;
+        let (count, of) = found(Blocks(8));
+        assert_eq!(count, 8);
+        assert!((0..64).all(|cpu| of[cpu] == cpu / 8));
+        let (count, of) = found(Stripes(2));
+        assert_eq!(count, 2);
+        assert!((0..64).all(|cpu| of[cpu] == cpu % 2));
+        // Every CPU its own L3: as many domains as the table keeps apart.
+        let (count, of) = found(Blocks(1));
+        assert_eq!(count, MAX_DOMAINS);
+        assert!((0..64).all(|cpu| of[cpu] == cpu));
+        // One L3 for all.
+        let (count, of) = found(Blocks(64));
+        assert_eq!(count, 1);
+        assert!(of.iter().all(|&d| d == 0));
+    }
+
+    #[test]
+    fn any_failure_leaves_one_domain() {
+        use crate::os::sim::SimTopology::*;
+        for topology in [Missing, NoL3, Garbage] {
+            let (count, of) = found(topology);
+            assert_eq!(count, 1, "{topology:?}");
+            assert!(of.iter().all(|&d| d == 0), "{topology:?}");
+        }
+    }
+
+    #[test]
+    fn a_cpu_without_a_slab_or_a_thread_without_a_cpu_is_in_domain_zero() {
+        let os: crate::os::sim::SimOs = crate::os::sim::SimOs::new();
+        os.set_topology(crate::os::sim::SimTopology::Blocks(4));
+        let domains = Domains::new();
+        domains.discover(&os);
+        assert_eq!(domains.of(None), Domain::ZERO);
+        assert_eq!(domains.of(Some(SLAB_COUNT + 5)), Domain::ZERO);
+        assert_eq!(domains.of(Some(5)), Domain::folded(1));
+        // A second discovery changes nothing.
+        os.set_topology(crate::os::sim::SimTopology::Blocks(1));
+        domains.discover(&os);
+        assert_eq!(domains.count(), 16);
+    }
+
+    #[test]
+    fn domain_numbers_fold_beyond_the_most_kept_apart() {
+        assert_eq!(Domain::folded(MAX_DOMAINS), Domain::ZERO);
+        assert_eq!(Domain::folded(MAX_DOMAINS + 3).index(), 3);
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn this_machine_has_a_topology_the_discovery_reads() {
+        use crate::os::linux::LinuxOs;
+        let domains = Domains::new();
+        domains.discover(&LinuxOs);
+        // The distinct L3 lists of the online CPUs, read with the standard library.
+        let mut lists = std::collections::BTreeSet::new();
+        let online = std::fs::read_to_string("/sys/devices/system/cpu/online").unwrap_or_default();
+        each_cpu(online.as_bytes(), |cpu| {
+            let path =
+                std::format!("/sys/devices/system/cpu/cpu{cpu}/cache/index3/shared_cpu_list");
+            if let Ok(list) = std::fs::read_to_string(path) {
+                lists.insert(list);
+            }
+        });
+        let expected = lists.len().clamp(1, MAX_DOMAINS);
+        assert_eq!(domains.count(), expected);
+        // CPU 0 is always in domain 0.
+        assert_eq!(domains.of(Some(0)), Domain::ZERO);
+    }
+
+    #[test]
+    fn lists_parse_as_the_kernel_prints_them() {
+        assert_eq!(
+            cpus("0-3,8,10-11\n"),
+            Some(std::vec![0, 1, 2, 3, 8, 10, 11])
+        );
+        assert_eq!(cpus("5"), Some(std::vec![5]));
+        assert_eq!(cpus("0,2,4\n"), Some(std::vec![0, 2, 4]));
+        for bad in [
+            "", "\n", "x", "1-", "-1", "3-1", "1,,2", "1 2", "1234567", "0-3,a",
+        ] {
+            assert_eq!(cpus(bad), None, "{bad:?}");
+        }
+    }
+}
