@@ -18,6 +18,8 @@
 
 #[cfg(test)]
 pub(crate) mod check;
+#[cfg(all(test, target_os = "linux", target_arch = "x86_64", not(miri)))]
+mod differential;
 // The generated routines and their wrapper, wherever assembly can run. The generated code names
 // its surroundings by path, so they are provided here: `SLABS` and `__rseq_offset`.
 #[cfg(all(target_os = "linux", target_arch = "x86_64", not(miri), not(kani)))]

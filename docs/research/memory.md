@@ -617,7 +617,10 @@ case seen, plus a sweep step's pushes of a spare stack to the depot.
 2026-10-17, on main with the parked-object rules (8e3c0c4) and the branch that adds huge
 pages for large blocks that grow (`back/region.rs`, `advise_grown`), populate-ahead for dense
 classes, and a build-time override for both and for the huge-page threshold
-(`ASMALLOC_<NAME>` in `back/policy.rs`). The kernel primitives behind it are in
+(`ASMALLOC_<NAME>` in `back/policy.rs`). Since then populate-ahead and the overrides have
+been removed, and a grown block counts as dense only if it at most doubles at once (it was
+four times when these runs were made; Vec growth doubles, so its figures are the same).
+The kernel primitives behind it are in
 `zen5-roofline.md`, section 7. Workloads are the quick suite's single-threaded jobs, each
 build interleaved in a new order each round, the process confined and pinned to CPU 13
 (`taskset`; its CCD was idle apart from short bursts), in a cgroup of its own under
@@ -695,7 +698,8 @@ jemalloc: JSON 89.0, BTreeMap 25.9, churn 110.4 (after freeing 112.9), burst 218
   rounded up to a huge page: 64 buffers written 1 MiB densely, grown to 4 MiB by `realloc`
   and then written one byte every 64 KiB were 160 MiB resident with huge pages for grown
   blocks and 77 without (a scratch probe; the THP allocations partly failed in a first run,
-  which then showed 78). A buffer grown more than four times at once gets no huge pages.
+  which then showed 78). That run grew by four times at once; under the rule as built, which
+  allows at most a doubling, such a buffer gets no huge pages.
   The sparse tests of section 5 are unchanged (1.3 and 16.4 MiB), since a block allocated
   at its size never gets them.
 - The soak's `bigmem` through the preload library, three interleaved runs, seconds and peak
@@ -707,6 +711,30 @@ jemalloc: JSON 89.0, BTreeMap 25.9, churn 110.4 (after freeing 112.9), burst 218
   how close a run comes depends on how far the threads' growth overlaps, which the faster
   build makes more likely. The first "on" run of each of the first two modes took 5.4 and
   7.0 s: huge-page faults compacting memory (roofline note, section 7).
+
+### Moves that keep sparse blocks sparse, and the density test
+
+2026-10-17, later. A move now skips source pages that are all zero, and a grown block gets
+huge pages only when the last 2 MiB the program wrote hold data in at least half their
+pages, and then only up to the size asked for. Through the preload library, pinned, capped,
+one run each unless a range is given; "main" is main before these changes.
+
+`crates/asmalloc-preload/tests/programs/sparse_realloc.c` (malloc N, one byte a MiB, realloc
+to 4N), resident MiB after the grow and cgroup peak:
+
+| N | main | now | glibc |
+|---|---:|---:|---:|
+| 16 MiB | 17, peak 19 | 2, peak 3 | 1, peak 1 |
+| 64 MiB | 65, peak 67 | 2, peak 2 | 2, peak 1 |
+| 256 MiB | 257, peak 259 | 2, peak 3 | 2, peak 2 |
+
+The soak's `realloc secs=60 threads=4 maxsize=268435456 budget=1024`, peak of its scope,
+two runs each: main 1.0 GiB; with the sparse copy alone 896 to 1013 MiB; with the density
+test as well 430 to 454 MiB; with no huge pages for grown blocks 267 to 283 MiB; glibc 310 to
+345 MiB. Its blocks double but are written a stripe a MiB past 64 MiB, and huge pages on
+the whole slot made them resident in full; what is left over glibc is the one growth step
+the rule lets the advice run ahead, per thread. Vec growth keeps its gain (4.3 cycles an
+element against 11 without huge pages for grown blocks), and `bigmem` is unchanged.
 
 ## Measured and argued
 

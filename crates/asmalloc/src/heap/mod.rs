@@ -72,6 +72,8 @@ pub(crate) struct Grant {
     // Only `Allocator` returns it.
     #[cfg_attr(not(feature = "allocator-api"), allow(dead_code))]
     pub(crate) len: usize,
+    /// All `len` bytes are known to read as zero: fresh or purged memory, or cleared.
+    pub(crate) zeroed: bool,
 }
 
 /// Which bytes of a new block must read as zero.
@@ -279,7 +281,11 @@ impl<O: Os> Heap<O> {
         };
         // SAFETY: HEAP-03. Small slots are never known to be zero, so they are always cleared.
         unsafe { ptr.as_ptr().write_bytes(0, zeroed) };
-        Some(Grant { ptr, len })
+        Some(Grant {
+            ptr,
+            len,
+            zeroed: zero == Zero::Whole,
+        })
     }
 
     /// Frees a block.
