@@ -14,7 +14,7 @@ exactly this. `Magazine` has no public constructor and its fields are private.
 
 **The binding.** An `Area` pairs a `Space` with the `Depot` whose `carved` and `committed`
 counters describe that space's magazine area. It is made only by `Cache::with_tuning`, whose
-contract (CACHE-01 below) is that the depot is only ever used with that space. Without it, one
+contract (CACHE-01, `depot/mod-safety.md`) is that the depot is only ever used with that space. Without it, one
 depot's committed mark could admit uncommitted memory of another space, or two depots could
 carve the same magazines.
 
@@ -44,11 +44,5 @@ carve the same magazines.
 What a slot holds is not a memory-safety matter here: the middle tier never dereferences an
 object pointer, and a wrong link or level is caught by `admits` the next time it is used as an
 address, which makes the code abort rather than reach outside the area.
-
-## CACHE-01: `Cache::with_tuning` in `Cache::new` (`crates/asmalloc/src/depot/mod.rs`)
-
-**Proof.** `Cache::new` has the same contract as `Cache::with_tuning` and passes its caller's
-promise on unchanged. The contract itself is what MAGAZINE-01 (the committed mark describes this
-space) and TWIN-01 to TWIN-03 (slab words and spare links name this area's magazines) rely on.
 
 Reviewed: f41dbf9

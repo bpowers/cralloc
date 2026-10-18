@@ -49,7 +49,7 @@ pub(super) mod nr {
 #[inline(always)]
 pub(super) unsafe fn syscall(number: usize, args: [Reg; 6]) -> Reg {
     let ret: Reg;
-    // SAFETY: this block is the system-call instruction and nothing else. The register
+    // SAFETY: SYSCALL-01. this block is the system-call instruction and nothing else. The register
     // assignment is the x86-64 Linux convention (number and result in rax, arguments in rdi,
     // rsi, rdx, r10, r8, r9). The instruction overwrites rcx (return address) and r11 (saved
     // flags), declared as clobbers; it does not touch the user stack (`nostack`) and the return
