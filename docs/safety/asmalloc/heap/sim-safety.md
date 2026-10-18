@@ -29,6 +29,16 @@ same heap.
 **Proof.** `SimRoutines::slabs` is `self.slabs`, a box the `SimHeap` owns and never hands out,
 paired with `self.heap` for the life of the value. The other preconditions are the callers'.
 
+## SIM-05: `Cache::new` in `SimHeap::drain`
+
+**Precondition** (`Cache::new`): the depot is used only with this space, and the routines' slab
+array only with this depot and space.
+
+**Proof.** As HEAP-02 (`heap/mod-safety.md`) with SIM-03's (H): `heap.depot` and `back.space()`
+are the two halves of the one `Heap` this `SimHeap` owns, and the routines are twins on
+`self.slabs`, which is paired with that heap for the life of the value. The drain it then runs
+is the one the heartbeat runs, on a CPU number the slab array admits.
+
 ## SIM-04: `Box::from_raw(mine)` and `&*current` in `SimAsmalloc::heap`
 
 **Proof.** `mine` came from `Box::into_raw` just above and, when the compare-and-swap fails,

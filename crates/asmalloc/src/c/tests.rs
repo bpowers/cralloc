@@ -201,6 +201,41 @@ fn calloc_zeroes_reused_small_and_large_blocks() {
     }
 }
 
+/// A large block cut down by `realloc` stays where it is and gives its tail back: grown again
+/// in place, the kept part still holds its bytes and the rest reads as zero, which it would
+/// not if the pages had stayed. A later `realloc` that moves it copies all of that.
+#[test]
+fn realloc_shrinking_a_large_block_returns_its_tail() {
+    let (big, small) = (4 << 20, (3 << 19) + 1);
+    // SAFETY: each block is live with the size used where it is read or written, and given up
+    // once.
+    unsafe {
+        let p = malloc(big).cast::<u8>();
+        p.write_bytes(0xab, big);
+        let q = realloc(p.cast(), small).cast::<u8>();
+        assert_eq!(
+            q, p,
+            "a shrink to over a quarter of the slot stays in place"
+        );
+        let kept = usable(q.cast());
+        assert!(kept >= small && kept < small + 4096);
+        let r = realloc(q.cast(), big).cast::<u8>();
+        assert_eq!(r, p, "it grows back within its slot");
+        let bytes = core::slice::from_raw_parts(r, big);
+        assert!(bytes[..kept].iter().all(|&b| b == 0xab));
+        assert!(
+            bytes[kept..].iter().all(|&b| b == 0),
+            "the tail kept its old pages"
+        );
+        let moved = realloc(r.cast(), 8 * big).cast::<u8>();
+        assert_ne!(moved, r);
+        let bytes = core::slice::from_raw_parts(moved, big);
+        assert!(bytes[..kept].iter().all(|&b| b == 0xab));
+        assert!(bytes[kept..].iter().all(|&b| b == 0));
+        free(moved.cast());
+    }
+}
+
 #[test]
 fn malloc_trim_returns_memory_after_a_peak() {
     let blocks: Vec<_> = (0..64).map(|_| malloc(1 << 20)).collect();

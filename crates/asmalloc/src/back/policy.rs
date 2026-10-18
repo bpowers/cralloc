@@ -68,6 +68,15 @@ pub const HUGE_AFTER_HUGE_PAGES: usize = 32;
 /// resident.
 pub const HUGE_MIN_SLOTS_PER_PAGE: usize = 4;
 
+/// A large block that moves is copied in pieces of this many huge pages, and the pages of the
+/// old block behind each piece go back to the OS before the next is copied: 1, or 2 MiB. So a
+/// moving block has both copies resident for at most one piece, where a single copy had them
+/// for its whole size (four threads growing buffers to 256 MiB peaked at three times glibc,
+/// which moves by remapping). A piece costs one `madvise` on top of its copy; 2 MiB copies in
+/// about a hundred microseconds, so the call is a few percent, and a smaller piece would buy
+/// little memory for more calls. A block of at most one piece is copied whole.
+pub const MOVE_PIECE_HUGE_PAGES: usize = 1;
+
 /// In the small-page part of a region, each commit makes this many pages writable beyond what
 /// the carve that asked for it needs: 16, or 64 KiB. `mprotect` costs about a microsecond, so
 /// this makes it rare without charging much address space against strict overcommit.
@@ -81,6 +90,12 @@ pub const COMMIT_AHEAD_HUGE_PAGES: usize = 1;
 #[inline(always)]
 pub const fn retained_cap(geometry: Geometry) -> usize {
     RETAINED_CAP_HUGE_PAGES * geometry.huge_page_size()
+}
+
+/// The piece a moving large block is copied in, in bytes, for a geometry.
+#[inline(always)]
+pub const fn move_piece(geometry: Geometry) -> usize {
+    MOVE_PIECE_HUGE_PAGES * geometry.huge_page_size()
 }
 
 /// The retained-memory cap of large classes in bytes for a geometry.

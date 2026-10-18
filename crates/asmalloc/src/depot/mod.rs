@@ -13,16 +13,26 @@
 //!
 //! The depot ([`Depot`]) holds, per class, a stack of magazines with objects in them and, per
 //! magazine size, a stack of empty ones (`stack.rs`). Each slow path then does a bounded amount
-//! of maintenance, the heartbeat (`heartbeat.rs`): at most one magazine laundered back to the
-//! source when the class's depot stack is over its target, one purge step, and one look for an
-//! idle cache, which it drains (`drain.rs`) under a claim that carries the process generation
+//! of maintenance, the heartbeat (`heartbeat.rs`): a magazine laundered back to the source when
+//! the class's depot stack is over its target, one purge step, and one look for an idle cache,
+//! which it drains (`drain.rs`) under a claim that carries the process generation
 //! (`generation.rs`).
+//!
+//! Objects parked in magazines pin the pages they lie on, so three rules keep them moving back
+//! to the source, where fills take the lowest free addresses: a magazine loaded for an
+//! interval is taken back from its slab (`age.rs`); a depot stack sheds the depth it did not
+//! need during an interval (`shed.rs`); and one retiring full magazine in [`REFRESH_EVERY`] is
+//! laundered instead of kept (`slow.rs`). A heartbeat launders at most one magazine for each
+//! rule. [`Cache::collect`] does all of it at once, without waiting for the clock
+//! (`collect.rs`).
 //!
 //! The protocols follow the TLA+ models in `tla/`: `Exchange.tla` for the slow path,
 //! `Depot.tla` for the stacks, `Drain.tla` (protocol "gen") for the drain and `Fork.tla` for
 //! what a forked child inherits. `interleave.rs` checks the Rust against the models' properties
 //! under every schedule within small bounds.
 
+mod age;
+mod collect;
 mod drain;
 mod generation;
 mod heartbeat;
@@ -30,6 +40,9 @@ mod inspect;
 #[cfg(test)]
 mod interleave;
 mod magazine;
+#[cfg(test)]
+mod rules;
+mod shed;
 mod slow;
 mod source;
 mod spare;
@@ -46,6 +59,7 @@ pub use generation::Generation;
 pub use heartbeat::{IDLE_TICKS, LOOK_EVERY};
 pub use inspect::inspect;
 pub(crate) use magazine::{Area, Magazine, UNIT};
+pub use slow::REFRESH_EVERY;
 pub use source::Source;
 pub use spare::{MAX_SPARES, SPARE_BUDGET, spare_limit};
 pub(crate) use stack::Stack;
@@ -55,13 +69,16 @@ use crate::front::sync::{AtomicU64, AtomicUsize};
 use crate::front::{Cpu, Routines, Slab};
 use crate::os::Os;
 use crate::space::Space;
+use core::ptr::NonNull;
 
 /// The bytes of objects a class's depot stack holds before the heartbeat launders magazines
 /// back to the source, by default.
 pub const DEPOT_TARGET: usize = 256 << 10;
 
-/// The limits on memory parked in caches, and how often the idle check looks. Constants in the
-/// allocator; tests change them to reach every path with small magazines and few slow paths.
+/// The limits on memory parked in caches, how often the heartbeat looks around, and which of
+/// the rules that return parked objects are on. Constants in the allocator; tests change them
+/// to reach every path with small magazines and few slow paths, and to show what each rule
+/// does by turning it off.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct Tuning {
     /// Bytes of objects one CPU may keep in spare magazines, over all classes.
@@ -70,8 +87,16 @@ pub struct Tuning {
     pub max_spares: usize,
     /// Bytes of objects a class's depot stack holds before the heartbeat launders.
     pub depot_target: usize,
-    /// How many of its own slow paths a CPU makes between looks for an idle slab.
+    /// How many of its own slow paths a CPU makes between looks for an idle slab, and between
+    /// looks at a depot stack that no slow path is serving.
     pub look_every: u64,
+    /// One retiring full magazine in this many is laundered (`slow.rs`); zero for none.
+    pub refresh_every: u64,
+    /// Whether a slow path takes back a magazine its CPU has had loaded for an interval
+    /// (`age.rs`).
+    pub age_limit: bool,
+    /// Whether depot stacks shed the depth they did not need during an interval (`shed.rs`).
+    pub shed_unused: bool,
 }
 
 impl Tuning {
@@ -81,6 +106,9 @@ impl Tuning {
         max_spares: MAX_SPARES,
         depot_target: DEPOT_TARGET,
         look_every: LOOK_EVERY,
+        refresh_every: REFRESH_EVERY,
+        age_limit: true,
+        shed_unused: true,
     };
 }
 
@@ -99,6 +127,11 @@ pub struct Depot {
     status: AtomicU64,
     /// One more than the largest CPU number a slow path has run on.
     cpus: AtomicUsize,
+    /// Per small class, by ordinal: how low its stack has been this interval, and what the
+    /// last interval left it owing (`shed.rs`).
+    water: [AtomicU64; SMALL_COUNT],
+    /// The classes whose stacks owe magazines to the source, one bit per ordinal (`shed.rs`).
+    owing: AtomicU64,
     /// Magazines made, for audits.
     #[cfg(test)]
     created: std::sync::atomic::AtomicUsize,
@@ -115,6 +148,8 @@ impl Depot {
             committed: AtomicUsize::new(0),
             status: AtomicU64::new(0),
             cpus: AtomicUsize::new(0),
+            water: [const { AtomicU64::new(0) }; SMALL_COUNT],
+            owing: AtomicU64::new(0),
             #[cfg(test)]
             created: std::sync::atomic::AtomicUsize::new(0),
         }
@@ -207,5 +242,36 @@ impl<'a, O: Os, R: Routines, S: Source> Cache<'a, O, R, S> {
         } else {
             self.depot.empty(magazine.size()).push(self.area, magazine);
         }
+    }
+
+    /// Returns the objects of a magazine this thread holds to the source, a chunk at a time,
+    /// and records it empty. Returns how many there were.
+    fn launder_held(&self, class: SmallClass, magazine: &Magazine<'_>) -> usize {
+        let level = magazine.level();
+        let mut buffer = [NonNull::dangling(); slow::CHUNK];
+        let mut done = 0;
+        while done < level {
+            let count = (level - done).min(slow::CHUNK);
+            for (i, slot) in buffer[..count].iter_mut().enumerate() {
+                match NonNull::new(magazine.object(done + i + 1)) {
+                    Some(object) => *slot = object,
+                    None => self.os().abort("a magazine holds a null object"),
+                }
+            }
+            self.source.take_back(class, &buffer[..count]);
+            done += count;
+        }
+        magazine.set_level(0);
+        level
+    }
+
+    /// Pops one magazine of `class` from its depot stack and launders it; the empty magazine
+    /// goes to the empty stack. Returns how many objects it held, or `None` if the stack was
+    /// empty.
+    fn launder_one(&self, class: SmallClass) -> Option<usize> {
+        let magazine = self.depot.full(class).pop(self.area, class.magazine())?;
+        let level = self.launder_held(class, &magazine);
+        self.to_depot(class, magazine);
+        Some(level)
     }
 }

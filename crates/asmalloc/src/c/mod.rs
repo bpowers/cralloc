@@ -27,8 +27,8 @@
 //!   rounded up to a page, of a large one.
 //! - `calloc` makes all of the block's usable size read as zero, as glibc's does, checks the
 //!   product for overflow, and does not clear memory the back end knows is zero.
-//!   `malloc_trim` returns wholly free pages that the back end holds; it does not empty the
-//!   magazines.
+//! - `malloc_trim` is `collect`: it empties the magazines and the depot back to the bitmaps and
+//!   returns every wholly free page.
 //! - A failure returns null (or an error number from `posix_memalign`) and sets `errno` through
 //!   the C library's own accessor (`errno.rs`). `free` and a successful call leave it alone.
 //!   Nothing here hands a request to another allocator.
@@ -166,10 +166,18 @@ pub unsafe extern "C" fn realloc(ptr: *mut c_void, size: usize) -> *mut c_void {
         errno::set(ENOMEM);
         return ptr::null_mut();
     }
+    let (n, to) = (kept.min(size), NonNull::new(new));
     // SAFETY: MOD-01.
     unsafe {
-        old.as_ptr().copy_to_nonoverlapping(new, kept.min(size));
-        free(ptr);
+        match (found, to) {
+            // A large block is copied in pieces, its old pages returned behind the copy, and
+            // freed, all by the back end.
+            (Found::Large { .. }, Some(to)) => process::move_large(old, to, n),
+            _ => {
+                old.as_ptr().copy_to_nonoverlapping(new, n);
+                free(ptr);
+            }
+        }
     }
     new.cast()
 }
@@ -287,10 +295,11 @@ pub extern "C" fn asmalloc_version() -> *const c_char {
     VERSION.as_ptr()
 }
 
-/// glibc's `malloc_trim`: returns the wholly free pages the back end holds to the OS. The
-/// padding argument has no meaning here. Returns 1 if any memory was released, else 0.
+/// glibc's `malloc_trim`: sends every parked object back to the bitmaps and returns the wholly
+/// free pages to the OS (`collect`). The padding argument has no meaning here. Returns 1 if any
+/// memory was released, else 0.
 pub extern "C" fn malloc_trim(_pad: usize) -> c_int {
-    c_int::from(process::trim())
+    c_int::from(process::collect() > 0)
 }
 
 /// Exports the C interface under its C names (`malloc`, `free` and the rest) from the crate

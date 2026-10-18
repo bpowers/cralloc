@@ -11,7 +11,9 @@
 //!
 //! The ledger for the unsafe blocks here is `docs/safety/asmalloc/heap/sim-safety.md`.
 
+use super::source::BackSource;
 use super::{Heap, Zero};
+use crate::depot::{Cache, Drained};
 use crate::front::{Cpu, Field, Routines, Slab, Slabs, StackPop, StackPush, StoreIfEqual, Twin};
 use crate::os::sim::{SIM_THREADS, Shape, SimOs, SimThread, Standard};
 use crate::os::{Aborted, Machine, Step};
@@ -154,6 +156,19 @@ impl<S: Shape> SimHeap<S> {
         self.heap.usable_size(ptr)
     }
 
+    /// Walks the heap for `visitor`, as `Asmalloc::inspect` does the process's heap.
+    pub fn inspect(&self, visitor: &mut impl crate::stats::Visitor) {
+        self.heap.inspect(&*self.slabs, visitor);
+    }
+
+    /// Returns everything the heap can return now, as `Asmalloc::collect` does for the
+    /// process's heap, on a leased simulated thread. Returns the bytes purged that the heap
+    /// believed resident.
+    pub fn collect(&self) -> usize {
+        // SAFETY: SIM-03.
+        self.with(|heap, routines| unsafe { heap.collect(routines) })
+    }
+
     /// Borrows a simulated thread that no other call is using, starting the search at one
     /// picked from the caller's stack address, so that concurrent callers spread out.
     pub(super) fn lease(&self) -> Option<Lease<'_>> {
@@ -169,6 +184,24 @@ impl<S: Shape> SimHeap<S> {
                     .is_ok()
                     .then(|| Lease { taken, index })
             })
+    }
+
+    /// Drains the slab of simulated CPU `cpu` now, as the heartbeat's idle check would once the
+    /// slab had been quiet for an interval, and says how the drain ended. `None` if the heap
+    /// has not started or there is no such CPU.
+    ///
+    /// A drain is safe at any moment, so a test that wants drains to race the threads using a
+    /// slab asks for them here, where the idle check, paced by the clock and by how often slow
+    /// paths look, would give it a handful.
+    pub fn drain(&self, cpu: usize) -> Option<Drained> {
+        self.with(|heap, routines| {
+            let back = heap.back()?;
+            let cpu = routines.slabs().cpu(i32::try_from(cpu).ok()?)?;
+            let source = BackSource(back);
+            // SAFETY: SIM-05.
+            let cache = unsafe { Cache::new(&heap.depot, back.space(), routines, &source) };
+            Some(cache.drain(cpu))
+        })
     }
 
     /// Runs `f` with the heap and the twins of a leased simulated thread.

@@ -334,12 +334,18 @@ fn the_first_allocations_of_a_fresh_heap_from_several_threads_succeed() {
 
 /// Every live block holds its owner's tag, checked before it is freed: two owners of one block
 /// show as a wrong tag.
-fn tagged_churn<H: GlobalAlloc + Sync>(heap: &H, threads: usize, rounds: usize) {
+///
+/// The first `quiet` threads stay on the fast paths: one size, and a live set that hovers within
+/// one magazine. Their slabs take no slow path, so the idle check, which the other threads' slow
+/// paths run, finds them unchanged and drains them while they are in use.
+fn tagged_churn<H: GlobalAlloc + Sync>(heap: &H, threads: usize, quiet: usize, rounds: usize) {
     let pool = std::sync::Mutex::new(Vec::<Sent>::new());
     thread::scope(|scope| {
         for t in 0..threads {
             let pool = &pool;
             scope.spawn(move || {
+                let quiet = t < quiet;
+                let most = if quiet { 100 } else { 400 };
                 let mut live: Vec<(*mut u8, Layout, usize)> = Vec::new();
                 let mut x = 0x9e37_79b9_7f4a_7c15u64 ^ t as u64;
                 for i in 0..rounds {
@@ -349,7 +355,9 @@ fn tagged_churn<H: GlobalAlloc + Sync>(heap: &H, threads: usize, rounds: usize) 
                     // One block in 32 is big. At one in 16, about one run in 350 on a busy
                     // machine filled all 244 regions of the simulated heap, a third of them
                     // with blocks over 40 KiB at four to six a region, and an allocation failed.
-                    let size = if (x >> 30).is_multiple_of(32)
+                    let size = if quiet {
+                        64
+                    } else if (x >> 30).is_multiple_of(32)
                         && std::env::var_os("SMALL_ONLY").is_none()
                     {
                         (x as usize >> 8) % (64 << 10) + 8
@@ -357,7 +365,7 @@ fn tagged_churn<H: GlobalAlloc + Sync>(heap: &H, threads: usize, rounds: usize) 
                         8 + (x as usize % 12) * 8
                     };
                     let l = layout(size, 8);
-                    if live.len() < 400 && !(x >> 40).is_multiple_of(3) {
+                    if live.len() < most && !(x >> 40).is_multiple_of(3) {
                         // SAFETY: a valid layout.
                         let p = unsafe { heap.alloc(l) };
                         assert!(!p.is_null());
@@ -365,14 +373,15 @@ fn tagged_churn<H: GlobalAlloc + Sync>(heap: &H, threads: usize, rounds: usize) 
                         // SAFETY: live, at least 8 bytes.
                         unsafe { p.cast::<usize>().write(tag) };
                         live.push((p, l, tag));
-                    } else if (x >> 50).is_multiple_of(4) && !live.is_empty() {
+                    } else if !quiet && (x >> 50).is_multiple_of(4) && !live.is_empty() {
                         // Hand a block to whichever thread takes it next; its tag goes along
                         // as the block's size field.
                         let (p, l, tag) = live.swap_remove((x >> 20) as usize % live.len());
                         // SAFETY: still ours; the tag is in its first word.
                         assert_eq!(unsafe { p.cast::<usize>().read() }, tag);
                         pool.lock().unwrap().push(Sent(p, l.size()));
-                    } else if (x >> 50) % 4 == 1
+                    } else if !quiet
+                        && (x >> 50) % 4 == 1
                         && let Some(Sent(p, size)) = pool.lock().unwrap().pop()
                     {
                         // SAFETY: given up by its sender; its tag is in its first word.
@@ -403,11 +412,58 @@ fn tagged_churn<H: GlobalAlloc + Sync>(heap: &H, threads: usize, rounds: usize) 
     }
 }
 
+/// Runs `body` while another thread drains the heap's slabs, in two ways.
+///
+/// It moves the clock, which stands still unless a test moves it: a slab is drained by the idle
+/// check only when its activity counter has stood still for an interval of the clock. That
+/// exercises the heartbeat's own path, but rarely: a slab is looked at once in many slow
+/// paths, and one that takes slow paths itself is never found quiet (about a dozen drains in
+/// five million operations, none in a short round).
+///
+/// So it also asks for a drain of each slab in turn, whatever the slab is doing, a few
+/// thousand times a second. A drain is safe at any moment, and these are the ones that race
+/// the routines of the threads using the slab.
+fn with_drains_running<S: crate::os::sim::Shape, T>(
+    heap: &SimHeap<S>,
+    body: impl FnOnce() -> T,
+) -> T {
+    use core::sync::atomic::{AtomicBool, Ordering};
+    /// Stops the drainer when the body ends, by a panic too, or the scope would never end.
+    struct Stop<'a>(&'a AtomicBool);
+    impl Drop for Stop<'_> {
+        fn drop(&mut self) {
+            self.0.store(true, Ordering::Release);
+        }
+    }
+    let stop = AtomicBool::new(false);
+    thread::scope(|scope| {
+        scope.spawn(|| {
+            let mut cpu = 0;
+            while !stop.load(Ordering::Acquire) {
+                heap.os().advance_clock(crate::depot::IDLE_TICKS / 4);
+                heap.drain(cpu);
+                cpu = (cpu + 1) % SIM_THREADS;
+                // Miri runs one thread at a time and a drain is some hundred atomic
+                // instructions, so there the drainer mostly yields.
+                if cfg!(miri) {
+                    for _ in 0..2000 {
+                        thread::yield_now();
+                    }
+                } else {
+                    for _ in 0..200 {
+                        core::hint::spin_loop();
+                    }
+                }
+            }
+        });
+        let _stop = Stop(&stop);
+        body()
+    })
+}
+
 /// This caught the simulator's fence returning while a twin stood between its `Access` check and
 /// its store (`os::sim::cpus`): the store landed in a magazine a drain had passed on, and a block
-/// got two owners. It showed most with more threads than cores. The test forces no drain: it
-/// leans on the heartbeat's idle check draining often, so if drains become rare it needs a way
-/// to ask for them. The switches (`NO_DRAIN`, `NO_PURGE`, `NO_CPU`) turn parts of the heap off
+/// got two owners. It showed most with more threads than cores. The switches (`NO_DRAIN`, `NO_PURGE`, `NO_CPU`) turn parts of the heap off
 /// to bisect a failure.
 #[test]
 fn blocks_have_one_owner_while_threads_churn_and_drains_run() {
@@ -425,11 +481,14 @@ fn blocks_have_one_owner_while_threads_churn_and_drains_run() {
         } else {
             Vec::new()
         };
-        tagged_churn(
-            &heap,
-            if cfg!(miri) { 3 } else { 10 },
-            if cfg!(miri) { 200 } else { 50_000 },
-        );
+        with_drains_running(&heap, || {
+            tagged_churn(
+                &heap,
+                if cfg!(miri) { 3 } else { 10 },
+                if cfg!(miri) { 1 } else { 5 },
+                if cfg!(miri) { 200 } else { 50_000 },
+            )
+        });
         drop(held);
     }
 }
@@ -604,6 +663,121 @@ fn large_frees_find_the_class_from_the_address() {
     assert!(!Class::of_size(40 << 10).unwrap().is_small());
 }
 
+/// Where a heap's parked objects are, by `inspect`.
+#[derive(Default, Debug)]
+struct Parked {
+    /// In loaded magazines and spares.
+    on_cpus: usize,
+    /// In the depot.
+    in_depot: usize,
+}
+
+impl crate::stats::Visitor for Parked {
+    fn cached(&mut self, place: crate::stats::Place, _: SmallClass, _: *const u8) {
+        match place {
+            crate::stats::Place::Depot => self.in_depot += 1,
+            _ => self.on_cpus += 1,
+        }
+    }
+}
+
+fn parked<S: crate::os::sim::Shape>(heap: &SimHeap<S>) -> Parked {
+    let mut seen = Parked::default();
+    heap.inspect(&mut seen);
+    seen
+}
+
+/// Allocates and frees `count` small objects of mixed sizes on each of `threads` threads, which
+/// leaves objects parked on several CPUs and in the depot.
+fn park<H: GlobalAlloc + Sync>(heap: &H, threads: usize, count: usize) {
+    thread::scope(|scope| {
+        for t in 0..threads {
+            scope.spawn(move || {
+                let blocks: Vec<_> = (0..count)
+                    .map(|i| {
+                        let l = layout(8 + (i * 7 + t) % 600, 8);
+                        // SAFETY: a valid layout.
+                        let p = unsafe { heap.alloc(l) };
+                        assert!(!p.is_null());
+                        (p, l)
+                    })
+                    .collect();
+                for (p, l) in blocks {
+                    // SAFETY: allocated above with this layout, freed once.
+                    unsafe { heap.dealloc(p, l) };
+                }
+            });
+        }
+    });
+}
+
+#[test]
+fn collect_leaves_nothing_parked_and_returns_the_free_pages() {
+    let heap = SimHeap::<Shape>::new();
+    park(&heap, 4, if cfg!(miri) { 300 } else { 3000 });
+    let before = parked(&heap);
+    assert!(before.on_cpus > 0 && before.in_depot > 0, "{before:?}");
+    let purged = heap.collect();
+    let after = parked(&heap);
+    assert_eq!((after.on_cpus, after.in_depot), (0, 0), "{after:?}");
+    assert!(purged > 0, "nothing was purged");
+    // The heap goes on serving.
+    park(&heap, 2, 100);
+}
+
+#[test]
+fn large_allocations_and_frees_run_the_heartbeat() {
+    let heap = SimHeap::<Shape>::new();
+    let small = layout(64, 8);
+    // SAFETY: valid layouts; each block is freed once.
+    unsafe {
+        let blocks: Vec<_> = (0..100).map(|_| heap.alloc(small)).collect();
+        for p in blocks {
+            heap.dealloc(p, small);
+        }
+    }
+    assert!(parked(&heap).on_cpus > 0);
+    // Only large blocks from here: their heartbeats stamp the loaded magazines, then take
+    // them once they have been loaded for an interval, and the spares of classes left with
+    // none loaded, a class at a time.
+    let large = layout(64 << 10, 8);
+    for _ in 0..3 {
+        for _ in 0..400 {
+            // SAFETY: as above.
+            unsafe { heap.dealloc(heap.alloc(large), large) };
+        }
+        heap.os().advance_clock(crate::depot::IDLE_TICKS);
+    }
+    assert_eq!(parked(&heap).on_cpus, 0, "{:?}", parked(&heap));
+}
+
+/// As `blocks_have_one_owner_while_threads_churn_and_drains_run`, with the clock moving an
+/// interval every few milliseconds, so that the age limit's takes, the depot's sheds and the
+/// idle check's drains all run among the churn.
+#[test]
+fn blocks_have_one_owner_while_threads_churn_and_the_clock_runs() {
+    let rounds = if cfg!(miri) { 1 } else { 4 };
+    for _ in 0..rounds {
+        let heap = SimHeap::<crate::os::sim::Standard>::new();
+        let done = std::sync::atomic::AtomicBool::new(false);
+        thread::scope(|scope| {
+            scope.spawn(|| {
+                while !done.load(std::sync::atomic::Ordering::Relaxed) {
+                    heap.os().advance_clock(crate::depot::IDLE_TICKS / 4);
+                    thread::sleep(std::time::Duration::from_millis(1));
+                }
+            });
+            tagged_churn(
+                &heap,
+                if cfg!(miri) { 3 } else { 10 },
+                0,
+                if cfg!(miri) { 200 } else { 50_000 },
+            );
+            done.store(true, std::sync::atomic::Ordering::Relaxed);
+        });
+    }
+}
+
 #[cfg(all(target_os = "linux", target_arch = "x86_64", not(miri)))]
 mod process {
     use super::*;
@@ -644,6 +818,16 @@ mod process {
     #[test]
     fn the_process_heap_serves_threads() {
         threads(&Asmalloc, 20_000);
+    }
+
+    /// Collect drains the process heap's slabs with real fences while other tests use it; the
+    /// heap must go on serving everyone.
+    #[test]
+    fn the_process_heap_collects_and_goes_on() {
+        bursts(&Asmalloc, 64, 600, 4);
+        let _ = Asmalloc::collect();
+        every_class(&Asmalloc, 1);
+        let _ = Asmalloc::collect();
     }
 
     #[test]

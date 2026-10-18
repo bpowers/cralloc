@@ -5,10 +5,13 @@
 //! address them as `SLABS + (cpu << SLAB_SHIFT) + 8 c`. Word 0 is never used, so that the class
 //! index needs no adjustment. The cold part follows on its own cache lines: the heads of the
 //! spare stacks (one stack of non-empty and one of empty magazines per class), the activity
-//! counter and the drain claim, and on a line of its own the idle check's last sighting.
+//! counter, the drain claim, the count of full magazines the CPU's frees have retired and where
+//! the age limit's sweep of the spare stacks is; then,
+//! on lines of their own that only this CPU's slow paths touch, per class a stamp of when the
+//! loaded magazine was loaded; and on a line of its own the idle check's last sighting.
 //!
 //! Every field is an atomic word and the all-zero slab is valid: no magazines, empty spare
-//! stacks, no activity and no claim.
+//! stacks, no activity, no claim, nothing retired, no sweep and no stamps.
 
 use super::sync::{AtomicPtr, AtomicU64};
 use crate::classes::{SMALL_COUNT, SmallClass};
@@ -33,6 +36,8 @@ const _: () = assert!(size_of::<Slab>() == SLAB_BYTES && align_of::<Slab>() == S
 const _: () = assert!(core::mem::offset_of!(Slab, activity) % 64 == 0);
 const _: () = assert!(core::mem::offset_of!(Slab, seen) % 64 == 0);
 const _: () = assert!(core::mem::offset_of!(Slab, seen) >= core::mem::offset_of!(Slab, claim) + 8);
+const _: () = assert!(core::mem::offset_of!(Slab, stamps) % 64 == 0);
+const _: () = assert!(core::mem::offset_of!(Slab, stamps) >= WORDS * 8);
 
 /// Which spare stack of a class.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -85,10 +90,23 @@ pub struct Slab {
     fields: [AtomicPtr<u8>; WORDS + 2 * HEADS],
     activity: AtomicU64,
     claim: AtomicU64,
+    retired: AtomicU64,
+    sweep: AtomicU64,
+    stamps: Stamps,
     /// On a line of its own: other CPUs' idle checks write it, and should not take the line
     /// that this CPU's slow paths count their activity in.
     seen: OwnLine,
 }
+
+/// Per class, indexed by class index like the hot words, when the magazine loaded there was
+/// loaded (`depot::age`). On lines of their own, away from the hot words the fast path loads
+/// and from the sighting other CPUs write. Only the class indexes in use have one, so that the
+/// slab's fields stay below the masks' page offset.
+#[repr(C, align(64))]
+struct Stamps([AtomicU64; STAMPS]);
+
+/// Stamps per slab: one for each class index up to the largest small class's.
+const STAMPS: usize = SMALL_COUNT + 1;
 
 /// A word alone on its cache line.
 #[repr(C, align(64))]
@@ -105,6 +123,9 @@ impl Slab {
             fields: [const { AtomicPtr::new(ptr::null_mut()) }; WORDS + 2 * HEADS],
             activity: AtomicU64::new(0),
             claim: AtomicU64::new(0),
+            retired: AtomicU64::new(0),
+            sweep: AtomicU64::new(0),
+            stamps: Stamps([const { AtomicU64::new(0) }; STAMPS]),
             seen: OwnLine(AtomicU64::new(0)),
         }
     }
@@ -152,6 +173,31 @@ impl Slab {
     #[inline]
     pub(crate) fn claim(&self) -> &AtomicU64 {
         &self.claim
+    }
+
+    /// Counts one full magazine retired by a free on this slab's CPU, and returns the new
+    /// count (`depot::slow`'s refresh). A hint, kept with a load and a store rather than a
+    /// read-modify-write: only this CPU's slow paths write it, and a count lost to a race (a
+    /// thread that migrated, a signal handler) only moves which magazine is refreshed.
+    #[inline]
+    pub(crate) fn count_retired(&self) -> u64 {
+        let count = self.retired.load(Ordering::Relaxed).wrapping_add(1);
+        self.retired.store(count, Ordering::Relaxed);
+        count
+    }
+
+    /// Where the age limit's sweep of this slab's spare stacks is, and when it began
+    /// (`depot::age`). A hint, written with single stores by this CPU's slow paths.
+    #[inline]
+    pub(crate) fn sweep(&self) -> &AtomicU64 {
+        &self.sweep
+    }
+
+    /// The stamp of the magazine loaded for `class` (`depot::age`): zero, or which magazine
+    /// was loaded and since when. A hint, written with single stores.
+    #[inline]
+    pub(crate) fn stamp(&self, class: SmallClass) -> &AtomicU64 {
+        &self.stamps.0[class.class().index() as usize % STAMPS]
     }
 }
 

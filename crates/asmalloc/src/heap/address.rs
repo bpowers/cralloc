@@ -115,23 +115,19 @@ impl<O: Os> Heap<O> {
         };
         let fits = is_large(new) && new <= room && (new >= old || new >= room / HEADROOM);
         if fits {
-            back.resize(ptr, new);
+            back.resize_in_place(ptr, new);
         }
         fits
     }
-
-    /// Returns the wholly free pages the back end holds to the OS; says whether any were
-    /// resident. Objects cached in magazines and the depot stay where they are.
-    pub(crate) fn trim(&self) -> bool {
-        self.back().is_some_and(|back| back.trim() > 0)
-    }
 }
 
-/// The process's heap, for the C layer: the operations above on the one static heap.
+/// The process's heap, for the C layer: the operations above on the one static heap. A large
+/// allocation or free here is a slow path, and runs a heartbeat as the Rust ones do.
 #[cfg(all(target_os = "linux", target_arch = "x86_64", not(miri), not(kani)))]
 pub(crate) mod process {
-    use super::super::global::HEAP;
+    use super::super::global::{HEAP, large_heartbeat};
     use super::Found;
+    use crate::Asmalloc;
     use crate::os::Os;
     use core::ptr::{self, NonNull};
 
@@ -145,23 +141,43 @@ pub(crate) mod process {
     /// memory.
     #[cold]
     pub(crate) fn alloc_large(size: usize, align: usize, zero: bool) -> *mut u8 {
-        HEAP.alloc_large_aligned(size, align, zero)
-            .map_or(ptr::null_mut(), NonNull::as_ptr)
+        let block = HEAP.alloc_large_aligned(size, align, zero);
+        large_heartbeat();
+        block.map_or(ptr::null_mut(), NonNull::as_ptr)
     }
 
     /// A large block for an object growing to `size` bytes, with headroom; null if there is
     /// no memory.
     #[cold]
     pub(crate) fn alloc_large_grown(size: usize) -> *mut u8 {
-        HEAP.alloc_large_grown(size)
-            .map_or(ptr::null_mut(), NonNull::as_ptr)
+        let block = HEAP.alloc_large_grown(size);
+        large_heartbeat();
+        block.map_or(ptr::null_mut(), NonNull::as_ptr)
     }
 
     /// Frees the large block at `ptr`, finding its class or run from the address. Aborts if no
     /// large block starts there, or if it is free.
     #[cold]
     pub(crate) fn free_large(ptr: NonNull<u8>) {
-        HEAP.free_large(ptr)
+        HEAP.free_large(ptr);
+        large_heartbeat();
+    }
+
+    /// Moves `len` bytes of the large block at `from` to `to` and frees `from`, a piece at a
+    /// time with the old pages returned behind the copy (`Back::move_large`).
+    ///
+    /// # Safety
+    ///
+    /// As for `Back::move_large`: `from` is a large block of the heap that the caller owns
+    /// and gives up, readable for `len` bytes; `to` is writable for `len` bytes and does not
+    /// overlap it.
+    #[cold]
+    pub(crate) unsafe fn move_large(from: NonNull<u8>, to: NonNull<u8>, len: usize) {
+        match HEAP.back() {
+            // SAFETY: the caller's promise, passed on.
+            Some(back) => unsafe { back.move_large(from, to, len) },
+            None => HEAP.os().abort("a move of a block when no heap exists"),
+        }
     }
 
     /// See `Heap::resize_in_place_by_address`.
@@ -174,9 +190,9 @@ pub(crate) mod process {
         HEAP.usable_size(ptr)
     }
 
-    /// See `Heap::trim`.
-    pub(crate) fn trim() -> bool {
-        HEAP.trim()
+    /// See `Asmalloc::collect`.
+    pub(crate) fn collect() -> usize {
+        Asmalloc::collect()
     }
 
     /// Ends the process with `message`.
