@@ -771,6 +771,11 @@ the depot and back end, everything on size classes and the OS interface. The OS 
 a trait with a Linux implementation built on raw system calls and a simulated implementation
 for tests.
 
+The crate's public API is small: the allocator's handle, the statistics it reports, `abort`,
+and the macro that exports the C names. The components are private. The test kit, the fuzz
+targets and the benchmarks reach them through a hidden cargo feature that is not part of the
+API.
+
 ## Testing and Verification
 
 ### What is proved, and how
