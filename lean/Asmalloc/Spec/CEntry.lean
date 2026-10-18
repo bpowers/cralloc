@@ -6,8 +6,8 @@ public import Asmalloc.Spec.Slab
 # The C entry points: `malloc`, `free` and the sized free
 
 **Trusted** (as every file in `Spec/`). The contracts of the routines that
-serve C's `malloc(size)`, `free(ptr)` and `free_sized(ptr, size)` (also
-C++'s `operator delete` forms), each one restartable sequence that finds the
+serve C's `malloc(size)`, `calloc(n, size)`, `free(ptr)` and `free_sized(ptr, size)`, each
+one restartable sequence that finds the
 class first and then pops or pushes as the out-of-line routines of
 `Spec/Slab.lean` do. See docs/design.md, "Interfaces", and
 docs/research/zen5-roofline.md, section 14.
@@ -47,15 +47,15 @@ state what they did in terms of the values they read.
 
 ## Mirrors
 
-The frees read the heap's shift and base index from a mirror of their own
-(`Mirror`): C's `free` and `free_sized` from one, C++'s `delete` forms (plain and
-array, sized or not) from another. All are zero until the Rust side
-publishes them, and a zero mirror sends every pointer to the slow path (the
-index is the pointer itself, which is far above `REGION_COUNT` for any
-address the heap can have). So the Rust side can keep a routine on its slow
-path for ever by never publishing its mirror, which it does when the program
-has replaced the C++ form the routine would otherwise bypass. The routines
-are proved safe whatever a mirror holds.
+The frees read the heap's shift and base index from a mirror (`Mirror`), a
+copy beside the slabs. It is zero until the Rust side publishes it, and a
+zero mirror sends every pointer to the slow path (the index is the pointer
+itself, which is far above `REGION_COUNT` for any address the heap can
+have). There is one mirror, C's. A family of frees that must stay on its
+slow path until the Rust side decides it may leave it (as C++'s `delete`
+forms must when a program replaces `operator new`) would get a mirror of its
+own, which the Rust side leaves zero. The routines are proved safe whatever
+a mirror holds.
 
 ## Restarts
 
@@ -88,20 +88,16 @@ def MIRROR_BYTES : Nat := 16
 inductive Mirror
   /-- C's `free` and `free_sized`. -/
   | c
-  /-- C++'s `operator delete` and `delete[]`, plain and sized. -/
-  | delete
   deriving DecidableEq, Repr
 
 def Mirror.index : Mirror → Nat
   | .c => 0
-  | .delete => 1
 
-def MIRROR_COUNT : Nat := 2
+def MIRROR_COUNT : Nat := 1
 
 /-- The functions a mirror serves, as the documentation names them. -/
 def Mirror.doc : Mirror → String
   | .c => "C's `free` and `free_sized`"
-  | .delete => "C++'s `operator delete` and `delete[]`"
 
 /-- The mirror's shift word, above `SLABS`; its base index word is 8 bytes on. -/
 def Mirror.disp (m : Mirror) : Nat := SHIFT_DISP + MIRROR_BYTES * m.index
@@ -580,7 +576,6 @@ def operands (table : Option String) (slow : String) : List (String × Operand) 
 def rustConsts : List (String × IntTy × Nat) :=
   [("SHIFT_DISP", .usize, SHIFT_DISP), ("BASE_DISP", .usize, BASE_DISP),
     ("MIRROR_BYTES", .usize, MIRROR_BYTES), ("MIRROR_COUNT", .usize, MIRROR_COUNT),
-    ("MIRROR_DELETE", .usize, Mirror.delete.index),
     ("REGION_DISP", .usize, REGION_DISP), ("REGION_COUNT", .usize, REGION_COUNT),
     ("TABLE_OFF", .usize, TABLE_OFF), ("MALLOC_MAX", .usize, MALLOC_MAX),
     ("MALLOC_LEN", .usize, MALLOC_LEN), ("SIZED_LEN", .usize, SIZED_LEN),
@@ -640,9 +635,6 @@ def freeSizedApiOf (name : String) (m : Mirror) (slow : String)
   rustConsts := rustConsts
   exports := exports
 
-/-- The `delete` family's slow paths. -/
-def cxxPath (n : String) : String := "crate::c::cxx::" ++ n
-
 /-- C's `free` and `free_sized`. -/
 def freeApi : Api := freeApiOf "c_free" .c (slowPath "free_slow") [("c", "free")]
 def freeSizedApi : Api :=
@@ -664,14 +656,5 @@ def callocApi : Api where
     [(ZERO, .sym (slowPath "calloc_zero_tail"))]
   rustConsts := rustConsts ++ [("CALLOC_MAX", .usize, CALLOC_MAX), ("CALLOC_LEN", .usize, CALLOC_LEN)]
   exports := [("c", "calloc")]
-
-/-- C++'s `operator delete` and `delete[]`, plain and sized: the frees' code with a mirror and
-slow paths of their own, so that when a program replaces the basic `operator delete` every
-pointer reaches it, as the standard's defaults forward them. -/
-def deleteApi : Api :=
-  freeApiOf "c_delete" .delete (cxxPath "operator_delete_slow") [("cxx", "_ZdlPv"), ("cxx", "_ZdaPv")]
-def deleteSizedApi : Api :=
-  freeSizedApiOf "c_delete_sized" .delete (cxxPath "operator_delete_sized_slow")
-    [("cxx", "_ZdlPvm"), ("cxx", "_ZdaPvm")]
 
 end VG.Spec.CEntry

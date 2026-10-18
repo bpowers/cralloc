@@ -1,5 +1,4 @@
-//! `errno`, through the C library's accessor. With the loader's lookups in `loader.rs`, these
-//! are the only references to a C library in asmalloc.
+//! `errno`, through the C library's accessor: the only reference to a C library in asmalloc.
 //!
 //! errno belongs to the C library: its location is a thread-local of glibc's, so the only way
 //! to set the value a C caller reads is glibc's own `__errno_location`. The `link` attribute

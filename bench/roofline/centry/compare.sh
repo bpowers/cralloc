@@ -9,7 +9,7 @@
 # as built (per-thread caches, because glibc owns the rseq area) and with glibc's rseq turned
 # off so that its per-CPU caches engage; the stand-ins need glibc's rseq and cannot run there.
 # asmalloc-cxx is the same with the C++ operators exported, ASMALLOC_CXX_LIB (a release build of
-# crates/asmalloc-preload/tests/programs/cxx_exports). asmalloc is the real library, ASMALLOC_LIB (default: this checkout's release build of
+# crates/asmalloc-preload/tests/programs/cxx_exports as of commit 58bf936, the last with them). asmalloc is the real library, ASMALLOC_LIB (default: this checkout's release build of
 # libasmalloc_preload.so). Builds: cloop-plt (PLT), cloop-ibt (IBT PLT, .plt.sec), cloop-noplt
 # (call through the GOT), and cloop-static, which links asmalloc in and calls its routines
 # directly; it runs only as asmalloc, with nothing preloaded.
