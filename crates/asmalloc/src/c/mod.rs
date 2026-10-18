@@ -166,10 +166,18 @@ pub unsafe extern "C" fn realloc(ptr: *mut c_void, size: usize) -> *mut c_void {
         errno::set(ENOMEM);
         return ptr::null_mut();
     }
+    let (n, to) = (kept.min(size), NonNull::new(new));
     // SAFETY: MOD-01.
     unsafe {
-        old.as_ptr().copy_to_nonoverlapping(new, kept.min(size));
-        free(ptr);
+        match (found, to) {
+            // A large block is copied in pieces, its old pages returned behind the copy, and
+            // freed, all by the back end.
+            (Found::Large { .. }, Some(to)) => process::move_large(old, to, n),
+            _ => {
+                old.as_ptr().copy_to_nonoverlapping(new, n);
+                free(ptr);
+            }
+        }
     }
     new.cast()
 }

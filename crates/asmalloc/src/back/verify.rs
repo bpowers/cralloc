@@ -171,6 +171,10 @@ fn a_decay_pass_starts_only_after_an_interval() {
 /// re-arm step above its mark, and always purges when it is both. So a count that moves less
 /// than a step around the cap purges once, and a count held over the cap purges once for
 /// every step it grows.
+///
+/// This is the decision alone. `Back::retain` reads the mark and writes it in separate steps,
+/// so two launders can race: both may purge, or one may lower a mark the other just raised.
+/// Either costs one bounded purge more or one later; the review found no worse outcome.
 #[kani::proof]
 fn the_cap_fires_only_a_step_above_its_mark() {
     use super::policy::CAP_REARM;

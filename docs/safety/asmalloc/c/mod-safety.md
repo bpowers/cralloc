@@ -10,6 +10,10 @@ old.as_ptr().copy_to_nonoverlapping(new, kept.min(size));
 free(ptr);
 ```
 
+When the old block is large the two steps are one call, `process::move_large(old, to, n)`,
+which copies the same `n` bytes in pieces, returns the old block's pages behind the copy and
+frees it (BACK-CLASS-03 in `back/class-safety.md`). Its contract is the preconditions below.
+
 **Preconditions.** `old` is readable for `n = kept.min(size)` bytes and `new` writable for
 `n`; the two ranges do not overlap; `free(ptr)`'s contract holds (a block of the heap that the
 caller owns and gives up).
