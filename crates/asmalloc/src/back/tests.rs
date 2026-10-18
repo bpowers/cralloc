@@ -162,6 +162,26 @@ fn a_slot_twice_across_a_reopened_word_aborts() {
     back.launder(class, &batch);
 }
 
+/// A scattered batch ends its part when the part's list of closed words fills. A different
+/// slot of a word closed in an earlier part is no double free; the same slot again is, caught
+/// by its word's OR.
+#[test]
+#[should_panic(expected = "double free: an object was freed while already free")]
+fn a_slot_twice_after_many_closed_words_aborts() {
+    let state = state::<Standard>();
+    let back = state.get_or_reserve().unwrap();
+    let class = small(16);
+    let slots = fill(&back, class, 64 * 40);
+    let words: Vec<*mut u8> = (0..30).map(|w| slots[w * 64]).collect();
+    let mut fine = words.clone();
+    fine.push(slots[1]);
+    back.launder(class, &fine);
+    assert_eq!(fill(&back, class, 31).len(), 31);
+    let mut twice = words;
+    twice.push(slots[0]);
+    back.launder(class, &twice);
+}
+
 /// Scattered frees, one slot to a word across several summary words, and frees that close and
 /// reopen words, all reach the bitmaps: a fill afterwards gets every slot back, lowest first.
 #[test]

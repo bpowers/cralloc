@@ -18,8 +18,11 @@
 //! word is open shows up in the open bits. A word that comes back after it was closed must also
 //! remember what its earlier ORs set, so every closed word goes in a list with its bits, and in
 //! a filter of one bit per word number modulo [`FILTER_BITS`]; a word that opens with its filter
-//! bit set gathers its earlier bits from the list. A scattered batch of 64 slots searches the
-//! list for about one slot in thirty.
+//! bit set gathers its earlier bits from the list. The list is made afresh for every launder and
+//! is short, [`LOG`] words, because clearing a list of 64 cost a dense launder a cycle a slot.
+//! So a part ends when its list is full as well as after [`MAX_SLOTS`] slots: a part of dense
+//! runs closes a few words in 64 slots, a scattered part one word a slot, and every part is
+//! checked whole.
 
 use super::tree::{Host, Release};
 use super::word::BITS;
@@ -27,11 +30,13 @@ use super::word::BITS;
 /// Words kept open at once: the caller's and `WAYS - 1` in the group.
 pub(crate) const WAYS: usize = 4;
 
-/// The most slots one group takes; a longer batch is grouped in parts, each checked for slots
-/// that appear twice on its own. This is the chunk the depot launders in, so a magazine's chunk
-/// is one part. The list of closed words holds at most this many, since each closed word had a
-/// slot of its own.
+/// The most slots one part takes; a longer batch is grouped in parts, each checked for slots
+/// that appear twice on its own. This is the chunk the depot launders in, so a chunk of dense
+/// runs is one part.
 pub(crate) const MAX_SLOTS: usize = 64;
+
+/// Closed words a part's list holds; a part ends when it is full.
+const LOG: usize = 16;
 
 /// Bits in the filter of closed words.
 const FILTER_BITS: usize = 1024;
@@ -86,7 +91,7 @@ pub(crate) struct Group {
     earlier: [u64; WAYS - 1],
     held_earlier: u64,
     /// Closed words by key, with the bits each OR set: `closed` of them.
-    log: [Open; MAX_SLOTS],
+    log: [Open; LOG],
     closed: usize,
     /// One bit per closed word's number modulo `FILTER_BITS`.
     filter: [u64; FILTER_BITS / 64],
@@ -100,7 +105,7 @@ impl Group {
             ways: [CLOSED; WAYS - 1],
             earlier: [0; WAYS - 1],
             held_earlier: 0,
-            log: [CLOSED; MAX_SLOTS],
+            log: [CLOSED; LOG],
             closed: 0,
             filter: [0; FILTER_BITS / 64],
         }
@@ -143,7 +148,7 @@ impl Group {
         let mut earlier = 0;
         let hash = key_hash(next.key);
         if self.filter[hash / 64] & (1 << (hash % 64)) != 0 {
-            let closed = self.closed.min(MAX_SLOTS);
+            let closed = self.closed.min(LOG);
             for word in &self.log[..closed] {
                 if word.key == next.key {
                     earlier |= word.bits;
@@ -162,6 +167,13 @@ impl Group {
             self.close(release, oldest, oldest_earlier);
         }
         next
+    }
+
+    /// Whether the part's list of closed words is full: the caller must finish the part before
+    /// it meets another slot.
+    #[inline(always)]
+    pub(crate) fn is_full(&self) -> bool {
+        self.closed >= LOG
     }
 
     /// Closes every open word, the caller's `held` among them, into `release`, and empties the

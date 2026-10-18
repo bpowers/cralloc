@@ -144,8 +144,9 @@ impl<'a, O: Os> Back<'a, O> {
     /// Returns free slots of `class` to their bitmaps, grouped by bitmap word as they come
     /// (`group`), with one atomic OR per group and one walk up the summary tree for the batch.
     /// Aborts the process if a pointer is not the start of a slot of `class` that has been
-    /// handed out, if a slot is already free, or if a slot appears twice within a part of 64
-    /// pointers (`group::MAX_SLOTS`): those are double frees or frees of foreign pointers.
+    /// handed out, if a slot is already free, or if a slot appears twice within a part (up to 64
+    /// pointers, fewer when they are scattered; see `group`): those are double frees or frees
+    /// of foreign pointers.
     pub fn launder<P: SlotPointer>(&self, class: SmallClass, objects: &[P]) {
         self.release_all(class.class(), objects, true);
     }
@@ -163,16 +164,24 @@ impl<'a, O: Os> Back<'a, O> {
         let mut met = checker.meet(first.address());
         let mut release = tree::Release::new(&host, met.region);
         let mut group = Group::new();
-        for part in objects.chunks(group::MAX_SLOTS) {
-            let slot = checker.check(part[0].address(), &mut met);
+        let mut rest = objects;
+        while let Some((&first, tail)) = rest.split_first() {
+            let slot = checker.check(first.address(), &mut met);
             let mut held = Open::slot(met.region.index(), slot);
-            for &object in &part[1..] {
+            let (part, after) = tail.split_at(tail.len().min(group::MAX_SLOTS - 1));
+            rest = after;
+            for (at, &object) in part.iter().enumerate() {
                 let slot = checker.check(object.address(), &mut met);
                 let next = Open::slot(met.region.index(), slot);
                 if next.key == held.key {
                     held.add(&release, next.bits);
                 } else {
                     held = group.switch(&mut release, held, next);
+                    if group.is_full() {
+                        // The part ends here; the rest of this chunk starts the next.
+                        rest = &tail[at + 1..];
+                        break;
+                    }
                 }
             }
             group.finish(&mut release, held);
