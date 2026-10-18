@@ -7,6 +7,7 @@ use super::word::Atomic;
 use crate::lined::{LINE, Lined, lines};
 use crate::os::{HugePages, Os};
 use crate::space::{MAX_REGIONS, RegionId, Space};
+use core::cell::Cell;
 use core::ptr::NonNull;
 use core::sync::atomic::AtomicU32;
 
@@ -61,22 +62,51 @@ impl ClassState {
 /// back end makes a `ClassHost` only for a class with a layout (`Back::host`), and names only
 /// regions it found through this class's summary tree, its carving word, or a region-table
 /// lookup that returned this class.
+///
+/// A `ClassHost` lives for one operation, on the stack of the thread doing it. It remembers the
+/// metadata block of the last region it was asked about (`block`), since an operation reaches
+/// many words of one region and working out a block's address costs more than using it.
 pub(crate) struct ClassHost<'a, O: Os> {
     pub(crate) space: Space<'a, O>,
     pub(crate) class: &'a ClassState,
     pub(crate) layout: Layout,
+    pub(crate) block: Cell<Option<(RegionId, NonNull<u8>)>>,
 }
 
-impl<O: Os> ClassHost<'_, O> {
+impl<'a, O: Os> ClassHost<'a, O> {
+    #[inline(always)]
+    pub(crate) fn new(space: Space<'a, O>, class: &'a ClassState, layout: Layout) -> Self {
+        ClassHost {
+            space,
+            class,
+            layout,
+            block: Cell::new(None),
+        }
+    }
+
     fn region_at(&self, region: RegionId, offset: usize) -> NonNull<u8> {
         self.space
             .region(region)
             .map_addr(|addr| addr.saturating_add(offset))
     }
 
+    /// The metadata block of `region`, as [`Space::metadata`] gives it: from the last one
+    /// worked out if it is this region's, so that the region is checked once per operation, not
+    /// once per word.
+    #[inline(always)]
+    fn block(&self, region: RegionId) -> NonNull<u8> {
+        if let Some((seen, block)) = self.block.get()
+            && seen == region
+        {
+            return block;
+        }
+        let block = self.space.metadata(region);
+        self.block.set(Some((region, block)));
+        block
+    }
+
     fn meta_at(&self, region: RegionId, offset: usize) -> NonNull<u8> {
-        self.space
-            .metadata(region)
+        self.block(region)
             .map_addr(|addr| addr.saturating_add(offset))
     }
 }

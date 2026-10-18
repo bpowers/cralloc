@@ -46,6 +46,9 @@ pub struct Space<'os, O: Os> {
     base: NonNull<u8>,
     plan: Plan,
     os: &'os O,
+    /// The first region's metadata block: worked out once, since every operation on the
+    /// bitmaps reaches its words through it.
+    metadata: NonNull<u8>,
 }
 
 impl<O: Os> Clone for Space<'_, O> {
@@ -74,6 +77,18 @@ impl<O: Os> fmt::Debug for Space<'_, O> {
 }
 
 impl<'os, O: Os> Space<'os, O> {
+    #[inline(always)]
+    fn new(base: NonNull<u8>, plan: Plan, os: &'os O) -> Space<'os, O> {
+        // Reservations lie far below the top of the address space, as in `at`.
+        let metadata = base.map_addr(|base| base.saturating_add(plan.metadata_start()));
+        Space {
+            base,
+            plan,
+            os,
+            metadata,
+        }
+    }
+
     /// Reserves the largest plan the OS allows: regions of the geometry's largest size, else
     /// half that, and so on down to the floor, with the same number of regions each time. The
     /// error is the OS's answer at the floor: below it the heap cannot start.
@@ -85,7 +100,7 @@ impl<'os, O: Os> Space<'os, O> {
                 return Err(OsError::EINVAL);
             };
             match os.reserve(plan.size(), plan.region_size()) {
-                Ok(base) => return Ok(Space { base, plan, os }),
+                Ok(base) => return Ok(Space::new(base, plan, os)),
                 Err(error) if shift == geometry.min_region_shift() => return Err(error),
                 Err(_) => shift -= 1,
             }
@@ -160,7 +175,8 @@ impl<'os, O: Os> Space<'os, O> {
     #[inline(always)]
     pub fn metadata(&self, region: RegionId) -> NonNull<u8> {
         self.check_region(region);
-        self.at(self.plan.metadata_offset(region))
+        let offset = region.index() << self.plan.metadata_shift();
+        self.metadata.map_addr(|start| start.saturating_add(offset))
     }
 
     /// The magazine area, [`Plan::magazine_area_size`] bytes, aligned to the region size.
@@ -323,11 +339,7 @@ impl<O: Os> SpaceCell<O> {
             self.reserving.fetch_add(1, Ordering::AcqRel);
             let error = match self.os.reserve(plan.size(), plan.region_size()) {
                 Ok(base) => {
-                    let space = self.publish(Space {
-                        base,
-                        plan,
-                        os: &self.os,
-                    });
+                    let space = self.publish(Space::new(base, plan, &self.os));
                     self.reserving.fetch_sub(1, Ordering::AcqRel);
                     return Ok(space);
                 }
@@ -398,11 +410,7 @@ impl<O: Os> SpaceCell<O> {
         // Clearing the shift leaves the base, which is not zero. `unwrap_or` keeps this total
         // for a word no `encode` made, which cannot be stored.
         let base = word.map_addr(|w| NonZeroUsize::new(unpack(w.get()).0).unwrap_or(w));
-        Space {
-            base,
-            plan: Plan::new(O::GEOMETRY, shift as u8),
-            os: &self.os,
-        }
+        Space::new(base, Plan::new(O::GEOMETRY, shift as u8), &self.os)
     }
 }
 

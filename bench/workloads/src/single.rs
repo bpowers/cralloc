@@ -3,6 +3,8 @@
 //!
 //! - `churn`: `live` objects; each step frees a random one and allocates a replacement of a
 //!   random size, `ops` times. From `live=100` (all in L1) to `live=10M` (DRAM).
+//! - `largepair`: allocate a block of each of `sizes` bytes, write its first word, free it;
+//!   `ops` times. The cost of one large allocation and free, with no other work.
 //! - `map`: build a `BTreeMap` or `HashMap` of `n` entries with `String` values, drop it;
 //!   `reps` times. Also reports how much memory is resident right after the last drop and
 //!   after `idle_ms` of idleness.
@@ -103,6 +105,40 @@ pub fn churn(args: &Args) {
         .metric("rss_live", rss_live)
         .metric("rss_freed", rss_freed)
         .primary("cycles/op", cycles(&run) / ops as f64, Better::Lower)
+        .emit();
+}
+
+pub fn largepair(args: &Args) {
+    pin_main();
+    let ops = args.num("ops", 2_000_000);
+    let sizes: Vec<usize> = args
+        .str("sizes", "65536,1048576")
+        .split(',')
+        .map(|s| s.parse().unwrap_or_else(|_| panic!("sizes={s} is not a list of byte counts")))
+        .collect();
+    let counters = Counters::region();
+    let lay = |n: usize| unsafe { Layout::from_size_align_unchecked(n, 8) };
+    let m = Measure::start(&counters);
+    let mut acc = 0u64;
+    for i in 0..ops {
+        for &n in &sizes {
+            // SAFETY: non-zero size; freed at once with the same layout, and the write is
+            // inside the block.
+            unsafe {
+                let p = alloc(lay(n));
+                p.cast::<u64>().write(i);
+                acc = acc.wrapping_add(black_box(p).cast::<u64>().read());
+                dealloc(p, lay(n));
+            }
+        }
+    }
+    let run = m.stop();
+    black_box(acc);
+    let pairs = ops * sizes.len() as u64;
+    Report::new("largepair", args)
+        .phase("run", &run)
+        .metric("pairs", pairs)
+        .primary("ns/pair", run.wall_ns as f64 / pairs as f64, Better::Lower)
         .emit();
 }
 

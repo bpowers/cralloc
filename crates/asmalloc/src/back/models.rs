@@ -61,9 +61,19 @@ fn free_now(host: &Host8, region: RegionId, slot: u32) {
     tree::release(host, region, slot / BITS, 1 << (slot % BITS));
 }
 
+/// Frees `slot` the way a single large free does (`tree::release_one`).
+fn free_one(host: &Host8, region: RegionId, slot: u32) {
+    tree::release_one(host, region, slot / BITS, 1 << (slot % BITS));
+}
+
 /// Claims up to `n` slots and returns them, with their region.
 fn claim(host: &Host8, n: u32) -> Vec<(RegionId, u32)> {
-    let Some(taken) = tree::claim(host, n) else {
+    claim_with(host, n, false)
+}
+
+/// [`claim`], leaving the summary bits of a word it empties set if `keep`.
+fn claim_with(host: &Host8, n: u32, keep: bool) -> Vec<(RegionId, u32)> {
+    let Some(taken) = tree::claim(host, n, keep) else {
         return Vec::new();
     };
     let mut out = Vec::new();
@@ -130,16 +140,27 @@ enum Op {
     Free(u32),
 }
 
-fn run(host: &Host8, op: Op) -> Vec<(RegionId, u32)> {
+/// Runs `op`. With `one`, claims are the large classes' (`keep`) and every free is a single
+/// free (`tree::release_one`).
+fn run(host: &Host8, op: Op, one: bool) -> Vec<(RegionId, u32)> {
+    let free = |region, slot| {
+        if one {
+            free_one(host, region, slot)
+        } else {
+            free_now(host, region, slot)
+        }
+    };
     match op {
         Op::ClaimRelease(n) => {
-            let got = claim(host, n);
-            release_all(host, &got);
+            let got = claim_with(host, n, one);
+            for &(region, slot) in &got {
+                free(region, slot);
+            }
             Vec::new()
         }
-        Op::Claim(n) => claim(host, n),
+        Op::Claim(n) => claim_with(host, n, one),
         Op::Free(slot) => {
-            free_now(host, host.region_at(0), slot);
+            free(host.region_at(0), slot);
             Vec::new()
         }
     }
@@ -147,7 +168,7 @@ fn run(host: &Host8, op: Op) -> Vec<(RegionId, u32)> {
 
 /// Runs two single operations against each other under the schedules `config` allows, from
 /// `summary_setup`, and checks `Partition` and `Visible`.
-fn summary_pair(config: Config, a: Op, b: Op) -> usize {
+fn summary_pair(config: Config, a: Op, b: Op, one: bool) -> usize {
     let ops = [a, b];
     let freed: Vec<u64> = ops
         .iter()
@@ -161,7 +182,7 @@ fn summary_pair(config: Config, a: Op, b: Op) -> usize {
         2,
         || (summary_setup(), Mutex::new(Vec::new())),
         |(host, kept), me| {
-            let got = run(host, ops[me]);
+            let got = run(host, ops[me], one);
             kept.lock().unwrap().extend(got);
         },
         |(host, kept), outcome| {
@@ -178,7 +199,7 @@ fn summary_pair(config: Config, a: Op, b: Op) -> usize {
 /// meet on a word. A claim that empties a word races a free into it (the clear-then-reread
 /// against the healing walk), two claims contend for one word, and frees race into an empty
 /// word and an empty region. Every schedule in the full run, two preemptions in the quick one.
-fn summary_pairs(config: Config, at_least: usize) {
+fn summary_pairs(config: Config, at_least: usize, one: bool) {
     let pairs = [
         (Op::Claim(2), Op::Free(2)),
         (Op::ClaimRelease(2), Op::Free(3)),
@@ -191,7 +212,7 @@ fn summary_pairs(config: Config, at_least: usize) {
     ];
     let mut schedules = 0;
     for (a, b) in pairs {
-        schedules += summary_pair(config, a, b);
+        schedules += summary_pair(config, a, b, one);
     }
     assert!(schedules > at_least, "{schedules}");
 }
@@ -205,13 +226,36 @@ fn summary_pairs_quickly() {
             ..Config::ALL
         },
         500,
+        false,
     );
 }
 
 #[test]
 #[ignore = "slow: run with scripts/gate --all"]
 fn summary_pairs_every_schedule() {
-    summary_pairs(Config::ALL, 1000);
+    summary_pairs(Config::ALL, 1000, false);
+}
+
+/// The same pairs as large classes run them: claims that leave the summary bits of a word they
+/// empty set, and single frees. A held clear is the model's (a thread may hold it for as long
+/// as it likes), so `Partition` and `Visible` hold as before.
+#[test]
+#[cfg_attr(miri, ignore)]
+fn summary_pairs_with_kept_bits_and_single_frees_quickly() {
+    summary_pairs(
+        Config {
+            preemptions: Some(2),
+            ..Config::ALL
+        },
+        500,
+        true,
+    );
+}
+
+#[test]
+#[ignore = "slow: run with scripts/gate --all"]
+fn summary_pairs_with_kept_bits_and_single_frees_every_schedule() {
+    summary_pairs(Config::ALL, 1000, true);
 }
 
 /// Longer sequences on two threads, preemptions bounded to three (two in the quick run).
@@ -1125,7 +1169,7 @@ fn purge_pass(host: &Host8) -> usize {
 /// An allocation as the back end does one: claim, then settle the zero and clean bits.
 /// Returns the slot and whether it was said to be zero.
 fn alloc_one(host: &Host8) -> Option<(RegionId, u32, bool)> {
-    let taken = tree::claim(host, 1)?;
+    let taken = tree::claim(host, 1, false)?;
     let settled = region::settle(host, taken.region, taken.word, taken.bits);
     let slot = taken.word * BITS + taken.bits.trailing_zeros();
     Some((taken.region, slot, settled.zeroed != 0))

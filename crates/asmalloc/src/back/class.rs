@@ -278,6 +278,16 @@ impl<'a, O: Os> Back<'a, O> {
         let Some(host) = self.host(class) else {
             self.abort("free of a pointer into a class that has no regions");
         };
+        if objects.len() == 1 {
+            // One slot needs none of a batch's grouping: one check, one OR, one walk up.
+            let (region, slot) = self.validate(&host, first.address(), class);
+            let (word, bit) = position(slot);
+            tree::release_one(&host, region, word, 1 << bit);
+            if count {
+                self.retain(class.size());
+            }
+            return;
+        }
         let checker = Checker::new(self, &host, class);
         let mut met = checker.meet(first.address());
         let mut fast = checker.fast(met);
@@ -301,45 +311,80 @@ impl<'a, O: Os> Back<'a, O> {
     ///
     /// No free slot is advised: the next block in it may be used sparsely, and a partial purge
     /// of a huge page would return nothing. Any other freed slot stays resident (`purge`).
-    fn purge_before_release(&self, ptr: NonNull<u8>, class: Class) -> bool {
+    fn purge_before_release(
+        &self,
+        host: &ClassHost<'a, O>,
+        region: RegionId,
+        slot: u32,
+        class: Class,
+    ) -> bool {
         // Only a slot that holds a whole huge page can have been advised.
         if class.size() < self.space.plan().geometry().huge_page_size() {
             return false;
         }
-        let Some(host) = self.host(class) else {
-            self.abort("free of a pointer into a class that has no regions");
-        };
-        let (region, slot) = self.validate(&host, ptr.as_ptr(), class);
         let (word, bit) = position(slot);
         // The slot's bit is clear while the program holds it. If it is set, this is a second
         // free of a free slot, which the release below would also catch; catching it here
         // keeps the purge away from a slot an allocation may be about to claim.
-        if tree::word(&host, tree::Node::leaf(region, word)).load() & (1u64 << bit) != 0 {
+        if tree::word(host, tree::Node::leaf(region, word)).load() & (1u64 << bit) != 0 {
             self.abort("double free: a large object was freed while it was free");
         }
-        if !region::recorded(&host, region, slot).is_some_and(|r| r.huge) {
+        if !region::recorded(host, region, slot).is_some_and(|r| r.huge) {
             return false;
         }
         // SAFETY: BACK-CLASS-01 in docs/safety/asmalloc/back/class-safety.md. The program is
         // freeing the slot and has not been given it back, its bit was clear a moment ago,
-        // and the slot is below the watermark (`validate`).
-        let purged = unsafe { region::purge_held(&host, region, slot) };
-        region::unadvise(&host, region, slot);
+        // and the slot is below the watermark (`slot_in`).
+        let purged = unsafe { region::purge_held(host, region, slot) };
+        region::unadvise(host, region, slot);
         purged
     }
 
+    /// Frees a large slot the caller holds and gives up, found and checked by `slot_in`:
+    /// returns its pages first if it is advised for huge pages (`purge_before_release`), then
+    /// releases it, and counts it as retained if it is still resident. The heap above beats
+    /// the heart for a large free, as it does for a large allocation (`Cache::lone_heartbeat`).
+    fn free_slot(&self, host: &ClassHost<'a, O>, class: Class, region: RegionId, slot: u32) {
+        let purged = self.purge_before_release(host, region, slot, class);
+        let (word, bit) = position(slot);
+        tree::release_one(host, region, word, 1 << bit);
+        if !purged {
+            self.retain(class.size());
+        }
+    }
+
     /// The region and slot of a pointer the caller says is a handed-out slot of `class`, or an
-    /// abort if it is not (see [`Checker::check`]).
+    /// abort if it is not: the checks [`Checker::check`] makes for a batch.
     fn validate(
         &self,
         host: &ClassHost<'a, O>,
         object: *const u8,
         class: Class,
     ) -> (RegionId, u32) {
-        let checker = Checker::new(self, host, class);
-        let mut met = checker.meet(object);
-        let slot = checker.check(object, &mut met);
-        (met.region, slot)
+        let Some(location) = self.space.locate(object) else {
+            self.abort("free of a pointer outside the heap");
+        };
+        if self.state.table.get(location.region) != RegionTag::Class(class) {
+            self.abort("free of a pointer with the wrong class");
+        }
+        let slot = self.slot_in(host, location.region, location.offset as usize);
+        (location.region, slot)
+    }
+
+    /// The slot that starts at `offset` into `region`, a region of `host`'s class, checked to
+    /// have been handed out: aborts if no slot or stagger starts there, or if the slot lies at
+    /// or above the watermark.
+    #[inline]
+    fn slot_in(&self, host: &ClassHost<'a, O>, region: RegionId, offset: usize) -> u32 {
+        let layout = host.layout();
+        let Some((slot, _)) = layout.block_at(offset) else {
+            self.abort("free of a pointer that is not the start of a slot");
+        };
+        let carved = Grow::unpack(host.meta(region, layout.grow_word()).load()).carved;
+        if slot >= carved.min(layout.slots()) {
+            self.abort("free of a slot that was never handed out");
+        }
+        slot
     }
 
     /// How far into slot `slot` of `class` in `region` the block at `object` starts: zero, or
@@ -377,7 +422,7 @@ impl<'a, O: Os> Back<'a, O> {
             self.abort("an allocation larger than its class");
         }
         let host = self.host(class)?;
-        let (region, slot, zeroed) = if let Some(taken) = tree::claim(&host, 1) {
+        let (region, slot, zeroed) = if let Some(taken) = tree::claim(&host, 1, !class.is_small()) {
             let settled = region::settle(&host, taken.region, taken.word, taken.bits);
             self.unretain(settled.resident);
             self.retain(settled.revived);
@@ -392,13 +437,11 @@ impl<'a, O: Os> Back<'a, O> {
         };
         if let Some(before) = region::recorded(&host, region, slot) {
             region::record(&host, region, slot, Recorded { size, ..before });
-            // The last free could not take the slot's huge-page advice back; try again, so
-            // that this block, which has not grown, does not get huge pages.
-            region::unadvise(&host, region, slot);
-        }
-        if !class.is_small() {
-            // As for a large free: see `Back::free`.
-            self.heartbeat();
+            if before.huge {
+                // The last free could not take the slot's huge-page advice back; try again,
+                // so that this block, which has not grown, does not get huge pages.
+                region::unadvise(&host, region, slot);
+            }
         }
         let into = host.layout().stagger(slot);
         let into = if stagger && size + into <= class.size() {
@@ -407,9 +450,15 @@ impl<'a, O: Os> Back<'a, O> {
             0
         };
         let start = self.space.slot(region, class, slot);
+        let len = if class.is_small() {
+            class.size()
+        } else {
+            usable(size, into, host.layout().page_size())
+        };
         Some(Block {
             ptr: start.map_addr(|a| a.saturating_add(into)),
             zeroed,
+            len,
         })
     }
 
@@ -760,21 +809,34 @@ impl<'a, O: Os> Back<'a, O> {
         if class.is_small() {
             return self.release_all(class, &[ptr.as_ptr()], true);
         }
-        let purged = self.purge_before_release(ptr, class);
-        self.release_all(class, &[ptr.as_ptr()], !purged);
-        // A large free is a slow path with no depot behind it, so it beats the heart itself:
-        // a program that only moves large blocks still gets its decay.
-        self.heartbeat();
+        let Some(host) = self.host(class) else {
+            self.abort("free of a pointer into a class that has no regions");
+        };
+        let (region, slot) = self.validate(&host, ptr.as_ptr(), class);
+        self.free_slot(&host, class, region, slot);
     }
 
     /// Frees whatever `ptr` is the start of: a slot, whose class the region table gives, or a
-    /// run. Aborts if it is neither. This is the C `free` of an uncached object. Crate-private
-    /// as [`Back::free`] is.
+    /// run. Aborts if it is neither. This is the C `free` of an uncached object, and the free of
+    /// every large block. Crate-private as [`Back::free`] is.
+    ///
+    /// The address is located and its slot checked once, here, rather than by a lookup and then
+    /// again by the free it chooses.
     pub(crate) fn free_by_address(&self, ptr: NonNull<u8>) {
-        match self.lookup(ptr.as_ptr()) {
-            Some(Kind::Slot(class)) => self.free(ptr, class),
-            Some(Kind::Run(_)) => self.free_run(ptr),
-            None => self.abort("free of a pointer that is not the start of a heap object"),
+        let Some(location) = self.space.locate(ptr.as_ptr()) else {
+            self.abort("free of a pointer that is not the start of a heap object");
+        };
+        match self.state.table.get(location.region) {
+            RegionTag::Class(class) if class.is_small() => self.free(ptr, class),
+            RegionTag::Class(class) => {
+                let Some(host) = self.host(class) else {
+                    self.abort("free of a pointer into a class that has no regions");
+                };
+                let slot = self.slot_in(&host, location.region, location.offset as usize);
+                self.free_slot(&host, class, location.region, slot);
+            }
+            RegionTag::RunHead if location.offset == 0 => self.free_run(ptr),
+            _ => self.abort("free of a pointer that is not the start of a heap object"),
         }
     }
 
@@ -804,12 +866,7 @@ impl<'a, O: Os> Back<'a, O> {
         let page = self.space.plan().geometry().page_size();
         match self.lookup(ptr)? {
             Kind::Slot(class) if class.is_small() => Some(size),
-            // To the end of the page the object ends in, which for a staggered block is not a
-            // multiple of a page from its start.
-            _ => {
-                let into = ptr.addr() & (page - 1);
-                Some((into + size).next_multiple_of(page) - into)
-            }
+            _ => Some(usable(size, ptr.addr() & (page - 1), page)),
         }
     }
 
@@ -1191,6 +1248,14 @@ pub(super) const fn odd_inverse(q: u64) -> u64 {
         i += 1;
     }
     x
+}
+
+/// The usable size of a large block of `size` bytes that starts `into` bytes past a page
+/// boundary: to the end of the page the object ends in, which for a staggered block is not a
+/// multiple of a page from its start, so a caller that fills what it may use touches about
+/// what it asked for.
+const fn usable(size: usize, into: usize, page: usize) -> usize {
+    (into + size).next_multiple_of(page) - into
 }
 
 /// Whether at least half the pages of the `len` bytes at `ptr` hold a byte that is not zero.

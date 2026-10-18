@@ -15,6 +15,15 @@
 //!   empty on the way has a stale summary bit: clear it (below) and start again. At a leaf word,
 //!   take bits with one compare-and-swap against the value read; if that fails, try again
 //!   against the value it found; if it took every bit, clear the word's summary bit.
+//! - **a claim that keeps the bits** ([`claim`] with `keep`, which every large class's
+//!   allocation is): as a claim, except that when it takes every bit of a word it does not
+//!   clear the word's summary bit. In the model that is a thread that holds its clear for as long
+//!   as it likes, as a thread lost in a fork holds it for ever, so `Partition` and `Visible`
+//!   hold as before; the bit is a hint over nothing free, and the next search that finds the
+//!   word empty clears it, as it clears any stale bit. The point is a class whose slots are taken
+//!   and freed one at a time: a claim that clears walks up clearing to the top, and the free
+//!   that follows walks up setting the same bits again. With the bits kept, the free finds them
+//!   set and writes nothing above the leaf.
 //! - **a run of claims** (a fill, [`claim_next`]) is the model's `Run`: it continues from where
 //!   its last claim was rather than from the top, moves past a group of 64 words where it meets
 //!   another claimer, leaves a word it finds empty to whoever emptied it, and clears the bits of
@@ -25,7 +34,8 @@
 //!   first. The walk always goes to the top (the healing free), so a summary bit left clear by a
 //!   thread that vanished in a fork is repaired by the next free below it. A batch of releases
 //!   ([`Release`]) shares one walk: each summary word is looked at once for all the bits it
-//!   owes.
+//!   owes. The release of one slot ([`release_one`]) is the same steps for one bit with no
+//!   batch's bookkeeping.
 //! - **clear**: whoever empties a word, or finds one empty under a set bit, clears the bit with
 //!   an atomic AND and reads the word again. If the word is no longer empty it sets the bit back
 //!   by walking up as a release does. Otherwise, if the AND emptied the summary word, that word
@@ -250,12 +260,18 @@ impl Spot {
 
 /// Claims up to `n` free slots, at least one, from the lowest leaf word of the class that has
 /// any, or returns `None` if the class has none free. `n` must not be zero.
-pub(crate) fn claim<H: Host>(host: &H, n: u32) -> Option<Taken> {
+///
+/// With `keep`, a claim that empties its word leaves the summary bits above it set: the
+/// model's clear, held for as long as the thread likes, as a thread lost in a fork holds it.
+/// The next search that finds the word empty clears them, as it clears any stale bit. A class
+/// whose slots are freed and taken one at a time, as large ones are, would otherwise clear the
+/// bits up to the top on every claim and set them again on every free.
+pub(crate) fn claim<H: Host>(host: &H, n: u32, keep: bool) -> Option<Taken> {
     loop {
         let leaf = from_top(host)?;
         match take(host, leaf, n) {
             Take::Took { bits, emptied, .. } => {
-                if emptied {
+                if emptied && !keep {
                     clear(host, leaf);
                 }
                 return Some(Taken {
@@ -618,6 +634,29 @@ pub(crate) fn release<H: Host>(host: &H, region: RegionId, index: u32, bits: u64
     let mut release = Release::new(host, region);
     release.leaf(region, index, bits);
     release.finish();
+}
+
+/// Frees the one slot `bit` of a leaf word: the model's release for one bit, with none of a
+/// batch's bookkeeping. One atomic OR, which aborts if the bit was set already (a double free),
+/// then the healing walk to the top: at each level, the OR alone if the word below was empty
+/// before this thread's write, else a look and an OR only if the bit is clear.
+pub(crate) fn release_one<H: Host>(host: &H, region: RegionId, index: u32, bit: u64) {
+    let mut spot = Spot::leaf(region, index);
+    let old = spot.word(host).fetch_or(bit);
+    if old & bit != 0 {
+        host.abort("double free: an object was freed while already free");
+    }
+    let mut must = old == 0;
+    let height = host.layout().height();
+    while let Some((above, bit)) = spot.parent(height) {
+        let word = above.word(host);
+        must = if must || word.load() & bit == 0 {
+            word.fetch_or(bit) == 0
+        } else {
+            false
+        };
+        spot = above;
+    }
 }
 
 /// Summary levels a walk up can owe a bit in: a region's levels above its leaf bitmap (at most
