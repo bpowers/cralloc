@@ -25,6 +25,7 @@ Contents
 12. Caveats
 13. The proved routines: encoding and placement
 14. The C entry points
+15. The slab word's chain and code placement
 
 ## 1. Summary
 
@@ -50,6 +51,9 @@ Contents
 - When threads free what other threads allocated, mimalloc costs 1.5 to 2 times jemalloc in a
   symmetric exchange, and 2 to 2.7 times in a pipeline that crosses L3s. A floor allocator does
   the symmetric exchange 3 to 4.5 times cheaper than jemalloc.
+- The store-to-load hop through the slab word is free wherever the code sits. What moves an
+  inlined fast path with its address is the caller's code: a straight run whose last line
+  holds only a short tail misses the op cache on every execution (section 15).
 
 ## 2. Machine and method
 
@@ -1484,3 +1488,167 @@ Per-thread tcmalloc measured 45 to 62.
   nothing in between. Its cells move by up to a cycle with layout.
 - The `call [mem]` explanation and the 4K-aliasing reading of the two-statics free are inferences
   from the measurements listed.
+
+## 15. The slab word's chain and code placement
+
+Measured 2026-10-18 at commit f636012 (the generated routines as they are there) with
+`bench/roofline/chain`. The question: the layout audit (`baselines.md` section 14) found the
+tree job's drop phase 7% slower when the workloads were built with `-align-loops=64`, and its
+profile put the cycles on the `lea` after the inlined free's load of the slab word, the load of
+the word the previous free stored. Is that store-to-load hop sensitive to where the code is?
+
+**Answer.** No. The hop is free at every placement measured. The tree's loss is the front end:
+at some placements the drop function's last straight run leaves a short tail in a new 64-byte
+line, and that tail misses the op cache on every execution. A miss costs one cycle when the
+tree is in L1 and 7 to 9 when the next node's load waits behind it. Code with no allocator in
+it does the same, and no change to the routine removes it.
+
+Method. The kernels take the routines' text from `crates/asmalloc/src/front/generated/` at
+build time, so they run exactly what the generator emits. Each form is assembled at 88
+placements, the same bytes each time: every offset 0 to 63 from a page boundary, 2048 to 2104
+in steps of 8, and 4032 to 4092 in steps of 4, which puts the code across a page boundary. For
+the inline forms the placement is the loop's top, for the drop its entry, for the C routines
+their entries. The fast paths run real restartable sequences on glibc's area; no run saw an
+abort. Pinned to CPU 2, each cell is the best of 3 repetitions over 2 or 3 interleaved rounds
+(placements in a new random order each round) of about 2 million operations. Rounds agreed to
+within 0.01 to 0.04 in almost every cell. Counters are plain user-mode counters, one event per
+counter, at most five at once so that none is multiplexed: no sampling, no groups.
+
+Cycles per operation:
+
+| Form | Fast | Slow |
+|---|---|---|
+| Inline free, 512 in a row (executable form, as the workloads build it) | 2.37 to 2.48 at all 88 | none |
+| The same, `__rseq_offset` through the GOT | 2.74 to 2.83 at all 88 | none |
+| Inline allocation, 512 in a row | 2.49 to 2.67 at all 88 | none |
+| Inline allocation, then free of the same object | 4.51 to 4.66 at all 88 | none |
+| The tree job's `drop_in_place::<Option<Box<Node>>>`, byte for byte, 511 nodes in L1 | 9.01 to 9.04 | 10.02 to 10.04 at 30 to 37 (also 2080 and 4064 to 4068: the same offsets in their lines) |
+| The same with the commit stored to the next slot: same bytes, no chain | 9.01 to 9.04 | 10.02 to 10.04 at 30 to 37 |
+| The same drop over 2 million nodes, one per line, shuffled (misses the caches, as the job does) | 145.8 to 148.4 | 153.6 to 155.1 at 30 to 37 |
+| `c_free`, 512 in a row | 4.54 to 4.66 at entries 0 to 8 | 5.07 to 5.10 at 9 to 63 |
+| `c_malloc`, 512 in a row | 4.08 to 4.09 at 0 to 25 | 5.08 to 5.09 at 26 to 63 |
+| `c_malloc`, then `c_free` | 8.10 to 8.19 at 0 to 8 | 9.07 at 9 to 25, 10.06 to 10.08 at 26 to 63 |
+
+- In the inline loops the load and the commit take every position in a line and in a 32-byte
+  window, each crosses a 64-byte boundary and a page boundary at some placement, and the free
+  still costs 2.4 cycles: the loop's uops, not the 5 to 7 cycles of an ordinary forward. So
+  the hop's speed does not depend on the position of the load or the store, on either of them
+  crossing a boundary, on the distance between them, on the alignment of the loop, or on their
+  low address bits.
+- The C routines follow section 13's rule: they slow down once their hot path (120 and 101
+  bytes) reaches a third line. The generator puts them on 64-byte boundaries, and in the
+  preload library `malloc`, `free`, `calloc`, `free_sized`, `c_free` and `c_malloc` were all
+  at offset 0, where they are fast.
+
+Counters for the drop with its tree in L1, per free:
+
+| Entry | Cycles | Op-cache misses | Forwards | Blocked loads (`stli`) | Resyncs | Flush-recovery stalls | Ops dispatched / retired | Cycles waiting on a load |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| 0 | 9.02 | 0.000 | 4.02 | 0.013 | 0 | 0 | 30.02 / 30.03 | 4.65 |
+| 30 | 10.03 | 2.00 | 3.99 | 0.040 | 0 | 0 | 30.02 / 30.03 | 5.24 |
+| 33 | 10.03 | 1.00 | 3.99 | 0.009 | 0 | 0 | 30.02 / 30.03 | 5.55 |
+| 38 | 9.04 | 0.000 | 4.03 | 0.000 | 0 | 0 | 30.02 / 30.03 | 4.56 |
+
+(Events: `op_cache_hit_miss.op_cache_miss`, `ls_stlf`, `ls_bad_status2.stli_other`,
+`bp_redirects.resync`, the `ex_flush_recovery` dispatch stall, `de_src_op_disp.all` against
+`ex_ret_ops`, and `ex_no_retire.load_not_complete`.) No op is dispatched and thrown away, so
+nothing is flushed: there is no memory-order machine clear and no mispredicted dependence. No
+load is held behind a store it cannot forward from, and the forward count does not change, so
+the hop is not waiting either. What changes is one op-cache miss per extra cycle. At entry 30
+the tail is the `ret` alone, which both paths through the function reach, so two misses per
+free; at 31 to 37 it is one to three instructions and only one of the two paths misses. The
+cycles waiting on a load rise by 0.6 to 0.9: the ops behind the bubble dispatch late, which is
+how a cycles profile came to blame the load.
+
+The copy with no chain is slow at the same offsets with the same misses, and has one forward
+fewer per free (3.0), so the chain plays no part. Over memory, each miss costs 7 to 9 cycles,
+because the bubble delays the next node's load.
+
+**The tail rule, with no allocator code.** Small functions called in a loop, the entry moved
+through 0 to 63:
+
+| Function | Slow entries, one cycle and one op-cache miss per call | The next line then holds |
+|---|---|---|
+| 13 independent 4-byte `lea`s and `ret` (53 bytes) | 12 to 15 | the `ret` alone |
+| `push rbx`, the 13 `lea`s, `pop rbx`, `ret` | 10 to 18 | 1 to 3 instructions, and perhaps one crossing |
+| `push`, `test`, `je` to the `pop`, the `lea`s, `pop`, `ret`; the `je` never taken | 6 to 18 | 1 to 4 |
+| the same, the `je` taken on every other call | 6 only | the `ret` alone |
+| 26 two-byte `mov`s and `ret` | 12 to 15 (7.05 against 6.05 beside them: the 25-uop cliff of section 6 plus one) | 1 or 2 |
+
+Every slow cell had exactly one miss per call, and every other cell none, with one exception:
+the `push`/`pop` function at entry 42 cost the cycle with no miss (unexplained). In every slow
+cell, the line before the boundary held more than 12 of the run's fused ops (counting an
+instruction that crosses the boundary in both lines), and the run ended one to four
+instructions into the next line. The drop fits: from the second call's return, its last run is
+16 fused ops (3 of the caller's to set up the arguments, 11 of the routine, `pop` and `ret`),
+and the slow entries are exactly those where 13 or more of them precede a line boundary with
+the rest after it. The condition is not sufficient: the two-byte function met it at entries 16
+to 19 and was fast. Inference, not confirmed: the op cache does not keep an entry for such a
+tail, so the decoders deliver it on every pass. AMD documents entries of up to six fused
+instructions but not when an entry is built.
+
+**In the job.** In the default build the drop function's entry is at offset 0 in its line; in
+the `loops64` build it is at 32, in the slow window. Rust functions are 16-byte aligned, so a
+function like this one is slow at one of the four places a link can put it. Medians of five
+interleaved runs of the jobs (asmalloc, CPU 2, Mcycles per phase):
+
+| Phase | Default | `loops64` | Change | Op-cache misses, default / `loops64` |
+|---|---:|---:|---:|---:|
+| tree depth=20, build | 286.1 | 288.1 | +0.7% | 6.2M / 5.5M |
+| tree, walk | 227.5 | 228.5 | +0.5% | 0.03M / 0.03M |
+| tree, drop | 419.8 | 456.4 | +8.7% | 4.1M / 6.3M |
+| BTreeMap 1M, build | 4,109 | 4,260 | +3.7% (runs spread 200 to 350) | 33.6M / 18.8M |
+| BTreeMap, drop | 569.1 | 560.6 | -1.5% | 27.3M / 22.3M |
+| json 32Mi, parse | 2,237 | 2,080 | -7.0% (serde_json's reload, `baselines.md` section 14) | 106M / 138M |
+| json, drop | 836.6 | 835.2 | -0.2% | 37.9M / 25.7M |
+
+The tree's drop gains 2.2 million misses over 21 million nodes, about one node in ten rather
+than every node as in the kernel (why is not known), and at 7 to 9 cycles a miss that accounts
+for its 36.6 million extra cycles. No other phase moved beyond its runs' spread.
+
+**What would fix it, and what was tried.**
+
+- Nothing in the routine decides it. The run that misses is the caller's, and the tail holds
+  the caller's `pop` and `ret` at some placements and the routine's stores at others. The same
+  cost appears with no allocator code at all. Moving the routine's instructions within itself
+  changes neither the run's length nor where the compiler puts it.
+- A taken `jmp` to the next instruction after the `shl` splits the run into two short ones
+  (`CHAIN_SPLIT`). It removes the misses and costs more than it saves. The drop is slow at
+  entries 28 to 47 instead of 30 to 37. The inline allocation chain costs 3.05 at 22 of 64
+  offsets, and the inline pair costs 4.89 to 5.05 against 4.51. `c_free` costs 5.07 at every
+  offset, and the C pair 10.06 nearly everywhere. Rejected.
+- Aligning the inline block (`.p2align` in the `asm!`) was not measured. It would execute up
+  to 63 bytes of padding on every free and only move the boundary into the caller's code after
+  the block.
+- Out of line, placement is ours to set, and the generator already sets the fast one.
+
+So the spread to expect from an inlined fast path is the caller's: 0 or 1 cycle per call with
+its data in L1 (9.0 against 10.0 for the drop, 11%), 0 or 7 to 9 when the caller is waiting on
+memory (5%), and 7 to 9% on the tree job's drop phase.
+
+**The incumbents.** mimalloc 3.5.3, from bench-prep's static object (`static.o`), with
+`mi_free`'s and `mi_malloc`'s sections set to byte alignment and linked after a pad, so that
+both sit at each offset 0 to 63 with their instructions unchanged
+(`chain/build-incumbent.sh`). A C loop reads the cycle counter with `rdpmc` around 256 frees in
+a row, 256 mallocs in a row, and 256 pairs; best of 4 rounds, two interleaved sessions:
+
+| | Fast | Slow |
+|---|---|---|
+| Free, 256 in a row | 4.38 to 4.53 at entries 9 to 48 | 5.27 to 5.40 at 0 to 8 and 49 to 63 (one session 6.3 at 56, 57, 61, 62) |
+| Malloc, 256 in a row | 4.26 to 5.49, no pattern by offset beyond the sessions' spread | |
+
+mimalloc's free moves by 0.9 cycles (20%) with its own address. Its 16-byte function
+alignment allows offset 0, a slow one. It had no op-cache misses (at most 0.04 per free), so
+it is a different front-end effect, not diagnosed. tcmalloc was not measured: its static
+library needs Abseil linked in. Placement moving a short hot routine by a cycle is common on
+this core; it is not something our instruction choice brings.
+
+### What this changes in earlier sections
+
+- Section 4: the zero-latency hop does not depend on where the load and the store are.
+- Sections 6 and 13: the "short tail" cost is op-cache misses on the tail, and it applies to
+  any straight run, an inlined fast path in its caller included, not only to out-of-line
+  routines.
+- `baselines.md` section 14 attributed the tree's drop to the free's load of the slab top. It
+  is the drop function's own last line; the job stays as it is, and its drop carries up to 9%
+  of layout.

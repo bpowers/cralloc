@@ -20,6 +20,7 @@ L3; override with the environment variables below.
 | `fastpath/` | A check that fails if asmalloc's own fast path stops inlining under fat LTO: the hot loop of each kind of call site must hold both rseq sequences and no call. Prints each loop's bytes. Seconds. | `taskset -c 4-7 ./check.py` |
 | `oscost/` | Cost of mmap, page faults, the madvise family, mprotect, guard pages and zeroing; and (`faults`) demand faults against populate stretches and huge pages, one to four threads, huge-page advice around a slot, partial purges of huge pages, khugepaged on sparse memory. | `cargo run --release`, `target/release/faults single\|threads\|advice\|split\|khuge` |
 | `centry/` | The C entry points: candidate `malloc`, `free` and `calloc` routines reached directly, through the PLT and through the GOT; a preloadable stand-in around the best of them, compared with glibc, jemalloc, mimalloc and tcmalloc from plain C loops. | `./build.sh`, then `./run.sh run PATTERN` and `./compare.sh` |
+| `chain/` | The slab word's store-to-load chain against code placement: the generated inline free and allocation, the tree job's drop, and `c_free`/`c_malloc`, each placed at every offset in a 64-byte line and across 4 KiB, read from the generated files; and mimalloc's free and malloc moved the same way. | `cargo run --release -- FORMS [PLACES]`; see below |
 | `toolchain/` | The relocation a direct load of glibc's `__rseq_offset` gets, in an executable and a shared library, and the code rustc generates around an `asm!` block that calls. | `./check.sh` |
 
 ## kernels
@@ -70,6 +71,21 @@ busy `RF_WATCH` (default 3,18,19) was.
 `rust-alloc/run_slab.sh` builds a stand-in allocator around the same sequences (`src/slab.rs`,
 cargo features `slab`, `slab_direct`, `slab_call`, `slab_nonnull`, `slab_ool`, `slab_pc`) under
 fat LTO and runs the single-thread workloads; `RF_CPU=3` keeps it off a CPU a sweep is using.
+
+## chain
+
+```
+cd chain
+taskset -c 12-15 nice cargo build --release
+RF_EVENTS=ocmiss,ldwait,stli ./target/release/roofline-chain td,if,cf 0-63   # under flock and memlimit
+./build-incumbent.sh OUT && ./run-incumbent.sh OUT 2                      # mimalloc, offsets 0 to 63
+```
+
+`gen.py`'s docstring names the forms. The kernels take the routines' text from
+`crates/asmalloc/src/front/generated/` at build time, so they always run what the generator emits.
+`RF_EVENTS` takes up to three events by name (the table in `src/main.rs`) or `name=0xCONFIG`, on
+plain counters; a multiplexed repetition is dropped. `RF_CPU` (2), `RF_OPS`, `RF_REPS`,
+`RF_ROUNDS` as for the kernels.
 
 ## centry
 
