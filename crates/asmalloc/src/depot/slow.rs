@@ -35,7 +35,7 @@ use crate::classes::{SmallClass, is_marker};
 use crate::front::{Cpu, Field, Routines, Spare, StoreIfEqual};
 use crate::os::Os;
 use core::ptr::NonNull;
-use core::sync::atomic::Ordering::Acquire;
+use core::sync::atomic::Ordering::{Acquire, Relaxed};
 
 /// What a slab word read without protection holds.
 enum Seen<'a> {
@@ -58,9 +58,6 @@ enum Obtained<'a> {
     /// No magazine can be had at all: serve the request from the source directly.
     NoMagazine,
 }
-
-/// How many pointers a fill or a launder moves through the stack at a time.
-pub(super) const CHUNK: usize = 64;
 
 /// One full magazine in this many that a CPU's frees retire is laundered instead of kept, by
 /// default. Each costs a launder now and a fill later, and in a fragmented heap the fill's
@@ -150,29 +147,19 @@ impl<'a, O: Os, R: Routines, S: Source> Cache<'a, O, R, S> {
         every != 0 && self.slab(cpu).count_retired().is_multiple_of(every)
     }
 
-    /// Fills an empty magazine this thread holds from the source; returns its new level.
+    /// Fills an empty magazine this thread holds from the source, in one call; returns its
+    /// new level. The source fills from the top (see [`Source::fill`]); a short fill, which
+    /// happens only when the heap is out of memory, is moved down to the bottom slots.
     fn fill(&self, class: SmallClass, magazine: &Magazine) -> usize {
-        let capacity = class.magazine().capacity();
-        let mut level = 0;
-        let mut buffer = [None; CHUNK];
-        while level < capacity {
-            let want = (capacity - level).min(CHUNK);
-            let got = self.source.fill(class, &mut buffer[..want]).min(want);
-            for object in buffer[..got].iter().flatten() {
-                magazine.set_object(capacity - level, *object);
-                level += 1;
-            }
-            if got < want {
-                break;
-            }
-        }
-        for slot in (level < capacity)
-            .then_some(1..=level)
-            .into_iter()
-            .flatten()
+        let slots = magazine.objects();
+        let capacity = slots.len();
+        let level = self.source.fill(class, slots).min(capacity);
+        if level < capacity
+            && let Some(filled) = slots.get(capacity - level..)
         {
-            if let Some(object) = NonNull::new(magazine.object(capacity - level + slot)) {
-                magazine.set_object(slot, object);
+            // Upwards: each slot is read before anything is written over it.
+            for (to, from) in slots.iter().zip(filled) {
+                to.store(from.load(Relaxed), Relaxed);
             }
         }
         magazine.set_level(level);

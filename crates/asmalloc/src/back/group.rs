@@ -20,20 +20,15 @@
 //! a filter of one bit per word number modulo [`FILTER_BITS`]; a word that opens with its filter
 //! bit set gathers its earlier bits from the list. The list is made afresh for every launder and
 //! is short, [`LOG`] words, because clearing a list of 64 cost a dense launder a cycle a slot.
-//! So a part ends when its list is full as well as after [`MAX_SLOTS`] slots: a part of dense
-//! runs closes a few words in 64 slots, a scattered part one word a slot, and every part is
-//! checked whole.
+//! So a part ends when its list is full: a part of dense runs closes a word in 64 slots and
+//! takes a whole magazine, a scattered part one word a slot, and every part is checked whole.
+//! The caller's word counts its slots instead of testing each bit ([`check_count`]).
 
 use super::tree::{Host, Release};
 use super::word::BITS;
 
 /// Words kept open at once: the caller's and `WAYS - 1` in the group.
 pub(crate) const WAYS: usize = 4;
-
-/// The most slots one part takes; a longer batch is grouped in parts, each checked for slots
-/// that appear twice on its own. This is the chunk the depot launders in, so a chunk of dense
-/// runs is one part.
-pub(crate) const MAX_SLOTS: usize = 64;
 
 /// Closed words a part's list holds; a part ends when it is full.
 const LOG: usize = 16;
@@ -76,6 +71,16 @@ impl Open {
 
 const TWICE: &str = "double free: an object was freed twice in one batch";
 
+/// Aborts unless `held` has a bit for each of the `taken` slots the caller gave it: a slot
+/// given twice sets one bit. A word that took one slot has one bit by construction, which
+/// spares a scattered launder the count: the target has no `popcnt` instruction.
+#[inline(always)]
+fn check_count<H: Host>(release: &Release<'_, H>, held: Open, taken: u32) {
+    if taken > 1 && held.bits.count_ones() != taken {
+        release.abort(TWICE);
+    }
+}
+
 /// No word.
 const CLOSED: Open = Open { key: NONE, bits: 0 };
 
@@ -111,11 +116,12 @@ impl Group {
         }
     }
 
-    /// The caller holds `held` open and has met `next`, one slot of another word. Returns the
-    /// word the caller holds now. If `next`'s word is open here its bit is added here and the
-    /// caller keeps `held`; otherwise `held` goes into the group, the oldest open word is
-    /// closed into `release`, and the caller holds `next`. Aborts if `next`'s slot is already
-    /// in the group.
+    /// The caller holds `held` open, having given it `taken` slots, and has met `next`, one
+    /// slot of another word. Returns the word the caller holds now. If `next`'s word is open
+    /// here its bit is added here and the caller keeps `held`; otherwise `held` goes into the
+    /// group, the oldest open word is closed into `release`, and the caller holds `next`, with
+    /// one slot. Aborts if `next`'s slot is already in the group, or if `held` leaves with
+    /// fewer bits than slots ([`check_count`]).
     ///
     /// Inlined, with the open word found by a mask rather than a branch per way, and updated in
     /// place: a magazine whose slots come back shuffled among a few words, or two runs
@@ -125,6 +131,7 @@ impl Group {
         &mut self,
         release: &mut Release<'_, H>,
         held: Open,
+        taken: u32,
         next: Open,
     ) -> Open {
         let mut found = 0u32;
@@ -132,7 +139,7 @@ impl Group {
             found |= ((self.ways[way].key == next.key) as u32) << way;
         }
         if found == 0 {
-            return self.open(release, held, next);
+            return self.open(release, held, taken, next);
         }
         let way = (found.trailing_zeros() as usize) % (WAYS - 1);
         if (self.ways[way].bits | self.earlier[way]) & next.bits != 0 {
@@ -144,7 +151,14 @@ impl Group {
 
     /// [`Group::switch`] for a `next` whose word is not open: opens it and closes the oldest.
     #[inline(never)]
-    fn open<H: Host>(&mut self, release: &mut Release<'_, H>, held: Open, next: Open) -> Open {
+    fn open<H: Host>(
+        &mut self,
+        release: &mut Release<'_, H>,
+        held: Open,
+        taken: u32,
+        next: Open,
+    ) -> Open {
+        check_count(release, held, taken);
         let mut earlier = 0;
         let hash = key_hash(next.key);
         if self.filter[hash / 64] & (1 << (hash % 64)) != 0 {
@@ -176,9 +190,10 @@ impl Group {
         self.closed >= LOG
     }
 
-    /// Closes every open word, the caller's `held` among them, into `release`, and empties the
-    /// group for another part.
-    pub(crate) fn finish<H: Host>(&mut self, release: &mut Release<'_, H>, held: Open) {
+    /// Closes every open word, the caller's `held` (given `taken` slots) among them, into
+    /// `release`, and empties the group for another part.
+    pub(crate) fn finish<H: Host>(&mut self, release: &mut Release<'_, H>, held: Open, taken: u32) {
+        check_count(release, held, taken);
         let held_earlier = core::mem::replace(&mut self.held_earlier, 0);
         self.close(release, held, held_earlier);
         for way in 0..WAYS - 1 {

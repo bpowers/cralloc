@@ -72,7 +72,6 @@ use crate::front::sync::{AtomicU64, AtomicUsize};
 use crate::front::{Cpu, Routines, Slab};
 use crate::os::Os;
 use crate::space::Space;
-use core::ptr::NonNull;
 
 /// The bytes of objects a class's depot stack holds before the heartbeat launders magazines
 /// back to the source, by default. Two magazine budgets, scaled with the budget when the
@@ -248,22 +247,12 @@ impl<'a, O: Os, R: Routines, S: Source> Cache<'a, O, R, S> {
         }
     }
 
-    /// Returns the objects of a magazine this thread holds to the source, a chunk at a time,
-    /// and records it empty. Returns how many there were.
+    /// Returns the objects of a magazine this thread holds to the source, in one call, and
+    /// records it empty. Returns how many there were.
     fn launder_held(&self, class: SmallClass, magazine: &Magazine<'_>) -> usize {
         let level = magazine.level();
-        let mut buffer = [NonNull::dangling(); slow::CHUNK];
-        let mut done = 0;
-        while done < level {
-            let count = (level - done).min(slow::CHUNK);
-            for (i, slot) in buffer[..count].iter_mut().enumerate() {
-                match NonNull::new(magazine.object(done + i + 1)) {
-                    Some(object) => *slot = object,
-                    None => self.os().abort("a magazine holds a null object"),
-                }
-            }
-            self.source.take_back(class, &buffer[..count]);
-            done += count;
+        if let Some(objects) = magazine.objects().get(..level) {
+            self.source.take_back(class, objects);
         }
         magazine.set_level(0);
         level

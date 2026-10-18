@@ -7,6 +7,7 @@
 
 use crate::classes::SmallClass;
 use core::ptr::NonNull;
+use core::sync::atomic::AtomicPtr;
 
 /// The back end, as the middle tier sees it.
 ///
@@ -14,12 +15,15 @@ use core::ptr::NonNull;
 /// that interrupted another call, and must not wait for another thread. Pointers handed out are
 /// free objects of the class asked for, each handed out once until it is taken back.
 pub trait Source {
-    /// Fills `out` from the front with free objects of `class`, up to its length, and returns
-    /// how many. Zero means there are none to be had.
-    fn fill(&self, class: SmallClass, out: &mut [Option<NonNull<u8>>]) -> usize;
+    /// Fills the object slots of a magazine this thread holds with free objects of `class`,
+    /// up to its capacity, and returns how many, `n`. The objects go in the last `n` slots,
+    /// lowest address last, so that the magazine, popped from the top, hands them out in
+    /// ascending address order. Zero means there are none to be had.
+    fn fill(&self, class: SmallClass, slots: &[AtomicPtr<u8>]) -> usize;
 
-    /// Takes back free objects of `class`, each one this source handed out.
-    fn take_back(&self, class: SmallClass, objects: &[NonNull<u8>]);
+    /// Takes back free objects of `class`, each one this source handed out, from the object
+    /// slots of a magazine this thread holds.
+    fn take_back(&self, class: SmallClass, objects: &[AtomicPtr<u8>]);
 
     /// One free object of `class`, for a thread that cannot use a magazine. `None` if there is
     /// none.

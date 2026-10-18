@@ -10,7 +10,7 @@
 //! zeroes what it wrote and gives its region back with a compare-and-swap; no other thread has
 //! named it, because nothing points into a region until it has been carved from.
 
-use super::group::{self, Group, Open};
+use super::group::{Group, Open};
 use super::host::ClassHost;
 use super::layout::{Grow, Hints, Layout, Recorded};
 use super::policy::{large_retained_cap, move_piece, wants_huge};
@@ -23,123 +23,229 @@ use crate::os::{HugePages, Os};
 use crate::space::{RegionId, RegionTag};
 use core::num::NonZeroUsize;
 use core::ptr::NonNull;
-use core::sync::atomic::Ordering::SeqCst;
+use core::sync::atomic::AtomicPtr;
+use core::sync::atomic::Ordering::{Relaxed, SeqCst};
 
-/// How a caller of [`Back::fill`] and [`Back::launder`] keeps slot pointers, so that the back
-/// end reads and writes the caller's own slices with no copy between: raw pointers, or the
-/// depot's `NonNull` and `Option<NonNull>`.
-pub trait SlotPointer: Copy {
-    /// The pointer to a slot, which is never null.
-    fn slot(slot: NonNull<u8>) -> Self;
-    /// The address the pointer holds; null for `None`.
-    fn address(self) -> *mut u8;
+/// How a caller of [`Back::launder`] keeps slot pointers, so that the back end reads the
+/// caller's own memory with no copy between: raw pointers, `NonNull`, or the atomic slots of
+/// the depot's magazines.
+pub trait SlotPointer {
+    /// The address the pointer holds.
+    fn address(&self) -> *mut u8;
 }
 
 impl SlotPointer for *mut u8 {
     #[inline(always)]
-    fn slot(slot: NonNull<u8>) -> Self {
-        slot.as_ptr()
-    }
-
-    #[inline(always)]
-    fn address(self) -> *mut u8 {
-        self
+    fn address(&self) -> *mut u8 {
+        *self
     }
 }
 
 impl SlotPointer for NonNull<u8> {
     #[inline(always)]
-    fn slot(slot: NonNull<u8>) -> Self {
-        slot
-    }
-
-    #[inline(always)]
-    fn address(self) -> *mut u8 {
+    fn address(&self) -> *mut u8 {
         self.as_ptr()
     }
 }
 
-impl SlotPointer for Option<NonNull<u8>> {
+impl SlotPointer for AtomicPtr<u8> {
+    /// A relaxed load: the slot belongs to the thread that launders it, and the load is a plain
+    /// `mov`.
     #[inline(always)]
-    fn slot(slot: NonNull<u8>) -> Self {
-        Some(slot)
+    fn address(&self) -> *mut u8 {
+        self.load(Relaxed)
+    }
+}
+
+/// Where [`Back::fill`] writes the pointers it hands out: numbered positions, written in
+/// ascending address order from position 0. How positions map to memory is the sink's.
+pub trait Sink {
+    /// The number of positions.
+    fn positions(&self) -> usize;
+
+    /// Writes the `count` pointers `first`, `first + stride`, ... at positions
+    /// `at..at + count`. Positions past the last are not written; the back end never asks for
+    /// them.
+    fn run(&mut self, at: usize, first: *mut u8, stride: usize, count: usize);
+
+    /// Writes one pointer at position `at`, if it is a position.
+    fn put(&mut self, at: usize, slot: *mut u8);
+}
+
+/// A slice of raw pointers, position `i` at index `i`: ascending addresses.
+impl Sink for [*mut u8] {
+    #[inline(always)]
+    fn positions(&self) -> usize {
+        <[*mut u8]>::len(self)
     }
 
     #[inline(always)]
-    fn address(self) -> *mut u8 {
-        self.map_or(core::ptr::null_mut(), NonNull::as_ptr)
+    fn run(&mut self, at: usize, first: *mut u8, stride: usize, count: usize) {
+        let Some(part) = self.get_mut(at..at.saturating_add(count)) else {
+            return;
+        };
+        let mut next = first;
+        for entry in part {
+            *entry = next;
+            next = next.wrapping_byte_add(stride);
+        }
+    }
+
+    #[inline(always)]
+    fn put(&mut self, at: usize, slot: *mut u8) {
+        if let Some(entry) = self.get_mut(at) {
+            *entry = slot;
+        }
+    }
+}
+
+/// The object slots of a magazine, filled from the top: position `i` is the `i`-th slot from
+/// the end, so the lowest address lands in the last slot, which is the first one popped, and a
+/// magazine hands its objects out in ascending address order. Walking memory upwards is what
+/// the hardware prefetchers follow; a magazine popped from its highest address first made a
+/// walk of a freshly built tree two and a half times slower (`docs/research/launder-and-fill.md`).
+pub struct Descending<'s>(pub &'s [AtomicPtr<u8>]);
+
+impl Sink for Descending<'_> {
+    #[inline(always)]
+    fn positions(&self) -> usize {
+        self.0.len()
+    }
+
+    #[inline(always)]
+    fn run(&mut self, at: usize, first: *mut u8, stride: usize, count: usize) {
+        let Some(end) = self.0.len().checked_sub(at) else {
+            return;
+        };
+        let Some(part) = end
+            .checked_sub(count)
+            .and_then(|start| self.0.get(start..end))
+        else {
+            return;
+        };
+        let mut next = first;
+        for slot in part.iter().rev() {
+            slot.store(next, Relaxed);
+            next = next.wrapping_byte_add(stride);
+        }
+    }
+
+    #[inline(always)]
+    fn put(&mut self, at: usize, slot: *mut u8) {
+        let index = self.0.len().checked_sub(at + 1);
+        if let Some(entry) = index.and_then(|i| self.0.get(i)) {
+            entry.store(slot, Relaxed);
+        }
     }
 }
 
 impl<'a, O: Os> Back<'a, O> {
-    /// Writes up to `out.len()` pointers to free slots of `class` into `out`, and returns how
-    /// many. Freed slots come first, lowest address first, then never-used ones carved from the
-    /// class's newest region. Fewer than asked means the heap is out of address space or the OS
-    /// refused memory; zero means not even one slot could be had. The pointers are written as
-    /// whatever the caller keeps them as: raw pointers, or the depot's `Option<NonNull<u8>>`.
-    pub fn fill<P: SlotPointer>(&self, class: SmallClass, out: &mut [P]) -> usize {
+    /// Writes up to `out.positions()` pointers to free slots of `class` into `out`, in ascending
+    /// address order from position 0, and returns how many. Freed slots come first, lowest
+    /// address first, then never-used ones carved from the class's newest region. Fewer than
+    /// asked means the heap is out of address space or the OS refused memory; zero means not
+    /// even one slot could be had.
+    pub fn fill<S: Sink + ?Sized>(&self, class: SmallClass, out: &mut S) -> usize {
         let Some(host) = self.host(class.class()) else {
             return 0;
         };
+        let len = out.positions();
         let mut got = 0;
         let (mut resident, mut revived) = (0, 0);
         let mut cursor = None;
-        while got < out.len() {
-            let want = (out.len() - got).min(BITS as usize) as u32;
+        while got < len {
+            let want = (len - got).min(BITS as usize) as u32;
             let Some(taken) = tree::claim_next(&host, want, &mut cursor) else {
                 break;
             };
             let settled = region::settle(&host, taken.region, taken.word, taken.bits);
             resident += settled.resident;
             revived += settled.revived;
-            let base = taken.word * BITS;
-            let high = base + (BITS - 1 - taken.bits.leading_zeros());
-            let mut bits = taken.bits;
-            let slots = core::iter::from_fn(|| {
-                let bit = (bits != 0).then(|| bits.trailing_zeros())?;
-                bits &= bits - 1;
-                Some(base + bit)
-            });
-            got = self.put(host.layout(), out, got, taken.region, high, slots);
+            got = self.put(
+                host.layout(),
+                out,
+                got,
+                taken.region,
+                taken.word,
+                taken.bits,
+            );
         }
         self.unretain(class.class(), resident);
         self.revive(class.class(), revived);
-        while got < out.len() {
-            let want = (out.len() - got).min(u32::MAX as usize) as u32;
+        while got < len {
+            let want = (len - got).min(u32::MAX as usize) as u32;
             let Some((region, first, count)) = self.carve(&host, class.class(), want) else {
                 break;
             };
-            let high = first + count - 1;
-            got = self.put(host.layout(), out, got, region, high, first..first + count);
+            got = self.put_run(host.layout(), out, got, region, first, count);
         }
         got
     }
 
-    /// Writes the addresses of `slots` of `region`, every one of them at most `high`, at
-    /// `out[at..]`, and returns the next position. `high` is checked to be one of the region's
-    /// slots, so every slot below it is too.
+    /// Writes the addresses of the slots of leaf word `word` of `region` whose bits are set in
+    /// `bits` at positions from `at`, a run of consecutive slots at a time, and returns the next
+    /// position.
     #[inline(always)]
-    fn put<P: SlotPointer>(
+    fn put<S: Sink + ?Sized>(
         &self,
         layout: &Layout,
-        out: &mut [P],
+        out: &mut S,
         mut at: usize,
         region: RegionId,
-        high: u32,
-        slots: impl Iterator<Item = u32>,
+        word: u32,
+        bits: u64,
     ) -> usize {
+        if bits == 0 {
+            return at;
+        }
+        let low = bits.trailing_zeros();
+        let run = bits >> low;
+        // Usually one run: a fill from whole words, or the rest of a word a fill began.
+        if run & run.wrapping_add(1) == 0 {
+            let count = BITS - run.leading_zeros();
+            return self.put_run(layout, out, at, region, word * BITS + low, count);
+        }
+        let high = word * BITS + (BITS - 1 - bits.leading_zeros());
         if high >= layout.slots() {
             self.abort("a slot index outside its region");
         }
-        let base = self.space.region(region);
-        for slot in slots {
-            if let Some(entry) = out.get_mut(at) {
-                let offset = layout.slot_bytes(slot);
-                *entry = P::slot(base.map_addr(|a| a.saturating_add(offset)));
-            }
+        let base = self.space.region(region).as_ptr();
+        let mut rest = bits;
+        while rest != 0 {
+            let slot = word * BITS + rest.trailing_zeros();
+            rest &= rest - 1;
+            out.put(at, base.wrapping_byte_add(layout.slot_bytes(slot)));
             at += 1;
         }
         at
+    }
+
+    /// Writes the addresses of slots `first..first + count` of `region` at positions from
+    /// `at`, and returns the next position. The last slot is checked to be one of the region's,
+    /// so every slot below it is too.
+    #[inline(always)]
+    fn put_run<S: Sink + ?Sized>(
+        &self,
+        layout: &Layout,
+        out: &mut S,
+        at: usize,
+        region: RegionId,
+        first: u32,
+        count: u32,
+    ) -> usize {
+        if count == 0 {
+            return at;
+        }
+        if first.saturating_add(count - 1) >= layout.slots() {
+            self.abort("a slot index outside its region");
+        }
+        let start = self
+            .space
+            .region(region)
+            .as_ptr()
+            .wrapping_byte_add(layout.slot_bytes(first));
+        out.run(at, start, layout.size(), count as usize);
+        at + count as usize
     }
 
     /// Returns free slots of `class` to their bitmaps, grouped by bitmap word as they come
@@ -161,7 +267,7 @@ impl<'a, O: Os> Back<'a, O> {
     /// `launder` for any class. With `count`, the slots are added to the retained count; a
     /// caller that has just returned their pages to the OS says no.
     fn release_all<P: SlotPointer>(&self, class: Class, objects: &[P], count: bool) {
-        let Some(&first) = objects.first() else {
+        let Some(first) = objects.first() else {
             return;
         };
         let Some(host) = self.host(class) else {
@@ -169,29 +275,65 @@ impl<'a, O: Os> Back<'a, O> {
         };
         let checker = Checker::new(self, &host, class);
         let mut met = checker.meet(first.address());
+        let mut fast = checker.fast(met);
         let mut release = tree::Release::new(&host, met.region);
         let mut group = Group::new();
-        let mut rest = objects;
-        while let Some((&first, tail)) = rest.split_first() {
-            let slot = checker.check(first.address(), &mut met);
+        let mut at = 0;
+        while let Some(object) = objects.get(at) {
+            at += 1;
+            let slot = checker.slot(object.address(), &mut fast, &mut met);
             let mut held = Open::slot(met.region.index(), slot);
-            let (part, after) = tail.split_at(tail.len().min(group::MAX_SLOTS - 1));
-            rest = after;
-            for (at, &object) in part.iter().enumerate() {
-                let slot = checker.check(object.address(), &mut met);
+            // How many slots the held word has taken. A slot taken twice sets its bit once,
+            // so the count and the bits disagree; the group checks that when the word leaves
+            // the caller's hands, rather than this testing each bit as it is set.
+            let mut taken = 1u32;
+            let (mut first, mut span) = fast.word(held, met);
+            loop {
+                // Slots of the held word, one after another: the shape of a dense magazine.
+                // Ends at the first slot of another word, or one the fast check fails.
+                // The loop a dense launder spends its time in, at about eleven micro-ops: one
+                // compare covers the slot check, the watermark and the word, and the count
+                // comes from the position rather than an increment.
+                let start = at;
+                let mut ended = None;
+                while let Some(object) = objects.get(at) {
+                    at += 1;
+                    let k = fast.slot(object.address());
+                    if k.wrapping_sub(first) < span {
+                        held.bits |= 1 << (k % BITS as u64);
+                        continue;
+                    }
+                    ended = Some((object, k));
+                    break;
+                }
+                taken += (at - start - ended.is_some() as usize) as u32;
+                let Some((object, k)) = ended else {
+                    break;
+                };
+                let slot = if k < fast.limit {
+                    k as u32
+                } else {
+                    let slot = checker.slot_slowly(object.address(), &mut fast, &mut met);
+                    (first, span) = fast.word(held, met);
+                    slot
+                };
                 let next = Open::slot(met.region.index(), slot);
                 if next.key == held.key {
                     held.add(&release, next.bits);
-                } else {
-                    held = group.switch(&mut release, held, next);
-                    if group.is_full() {
-                        // The part ends here; the rest of this chunk starts the next.
-                        rest = &tail[at + 1..];
-                        break;
-                    }
+                    taken += 1;
+                    continue;
+                }
+                let before = held.key;
+                held = group.switch(&mut release, held, taken, next);
+                if held.key != before {
+                    taken = 1;
+                    (first, span) = fast.word(held, met);
+                }
+                if group.is_full() {
+                    break;
                 }
             }
-            group.finish(&mut release, held);
+            group.finish(&mut release, held, taken);
         }
         release.finish();
         if count {
@@ -882,6 +1024,42 @@ impl<'c, 'a, O: Os> Checker<'c, 'a, O> {
         slot
     }
 
+    /// The fast check for the region `met`: see [`Fast`].
+    #[inline]
+    fn fast(&self, met: Met) -> Fast {
+        let size = self.class.size();
+        let shift = size.trailing_zeros();
+        Fast {
+            base: self.base + (met.region.index() << self.region_shift),
+            inverse: odd_inverse((size >> shift) as u64),
+            shift,
+            limit: met.limit as u64,
+        }
+    }
+
+    /// The slot `object` starts, as [`Checker::check`] finds it, but by the fast check when
+    /// that passes. `fast` and `met` follow the region `object` lies in.
+    #[inline(always)]
+    fn slot(&self, object: *const u8, fast: &mut Fast, met: &mut Met) -> u32 {
+        let k = fast.slot(object);
+        if k < fast.limit {
+            return k as u32;
+        }
+        self.slot_slowly(object, fast, met)
+    }
+
+    /// [`Checker::slot`] when the fast check fails: a pointer in another region, a large
+    /// block that starts at its slot's stagger, or one that aborts.
+    #[inline(never)]
+    fn slot_slowly(&self, object: *const u8, fast: &mut Fast, met: &mut Met) -> u32 {
+        let before = met.region;
+        let slot = self.check(object, met);
+        if met.region != before {
+            *fast = self.fast(*met);
+        }
+        slot
+    }
+
     /// The region `object` lies in, checked to be the class's, with its watermark.
     #[inline(never)]
     fn meet(&self, object: *const u8) -> Met {
@@ -896,6 +1074,62 @@ impl<'c, 'a, O: Os> Checker<'c, 'a, O> {
         let limit = Grow::unpack(grow.load()).carved.min(self.layout.slots());
         Met { region, limit }
     }
+}
+
+/// One region's slot check in a few instructions, for a launder's run of pointers.
+///
+/// A slot size is `q << shift` with `q` odd. For an offset `n` into the region (any 64-bit
+/// value: a pointer below the region wraps), `k = rotr(n * q⁻¹, shift)`, with `q⁻¹` the
+/// inverse of `q` modulo 2^64, is `n / size` when `size` divides `n`, and above
+/// `(2^64 - 1) / size` when it does not (Hacker's Delight, 10-17): the low `shift` bits of `n`
+/// rotate into the top of `k` unless they are zero, and multiplying by `q⁻¹` maps the multiples
+/// of `q` onto `0..=(2^w - 1) / q` and everything else above. A watermark is far below that
+/// bound, so `k < limit` alone says that `n` is the start of a slot below the watermark, which
+/// lies in this region: what [`Checker::check`] finds with a divide, a multiply back, a region
+/// compare and a watermark compare. Anything else, a staggered large block included, goes to
+/// the full check.
+#[derive(Clone, Copy, Debug)]
+pub(super) struct Fast {
+    pub(super) base: usize,
+    pub(super) inverse: u64,
+    pub(super) shift: u32,
+    pub(super) limit: u64,
+}
+
+impl Fast {
+    /// The slot `object` starts if the fast check passes for it (`< limit`); otherwise some
+    /// number at or above `limit`.
+    #[inline(always)]
+    pub(super) fn slot(&self, object: *const u8) -> u64 {
+        let n = object.addr().wrapping_sub(self.base) as u64;
+        n.wrapping_mul(self.inverse).rotate_right(self.shift)
+    }
+
+    /// The slots of `held`'s word that this check passes, as `first` and a count: `k` is one
+    /// of them when `k - first`, wrapping, is below the count. None if the word is not in
+    /// `met`, the region this check covers. A held word's slots were checked, so `first` is
+    /// below the limit.
+    #[inline(always)]
+    fn word(&self, held: Open, met: Met) -> (u64, u64) {
+        if held.key >> 32 == met.region.index() as u64 {
+            let first = (held.key as u32 as u64) * BITS as u64;
+            (first, (BITS as u64).min(self.limit - first))
+        } else {
+            (0, 0)
+        }
+    }
+}
+
+/// The inverse of odd `q` modulo 2^64, by Newton's iteration: each step doubles the number of
+/// correct low bits, and `q` itself is correct to three (`q * q ≡ 1 mod 8`).
+pub(super) const fn odd_inverse(q: u64) -> u64 {
+    let mut x = q;
+    let mut i = 0;
+    while i < 5 {
+        x = x.wrapping_mul(2u64.wrapping_sub(q.wrapping_mul(x)));
+        i += 1;
+    }
+    x
 }
 
 /// Whether at least half the pages of the `len` bytes at `ptr` hold a byte that is not zero.
@@ -939,4 +1173,65 @@ unsafe fn is_zero(ptr: *const u8, len: usize) -> bool {
     // only aligned, whole words in the middle part.
     let (head, words, tail) = unsafe { bytes.align_to::<u64>() };
     head.iter().all(|&b| b == 0) && words.iter().all(|&w| w == 0) && tail.iter().all(|&b| b == 0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Fast, odd_inverse};
+    use crate::classes::Class;
+
+    #[test]
+    fn odd_inverses_invert() {
+        for q in (1..200u64).step_by(2) {
+            assert_eq!(q.wrapping_mul(odd_inverse(q)), 1, "{q}");
+        }
+    }
+
+    /// The fast check passes exactly the slot starts below the limit, and gives their slot,
+    /// for every class: offsets near multiples of the size, inside and past the region, and
+    /// pointers below the region, which wrap.
+    #[test]
+    fn the_fast_check_passes_exactly_the_slot_starts_below_the_limit() {
+        let base = 0x7000_0000_0000usize;
+        for class in Class::all() {
+            let size = class.size() as i128;
+            let shift = class.size().trailing_zeros();
+            let slots = ((1u64 << 32) / class.size() as u64).max(1);
+            for limit in [0, 1, 7, slots / 2, slots] {
+                let fast = Fast {
+                    base,
+                    inverse: odd_inverse((class.size() >> shift) as u64),
+                    shift,
+                    limit,
+                };
+                let ks = [
+                    0,
+                    1,
+                    2,
+                    3,
+                    63,
+                    64,
+                    65,
+                    limit.saturating_sub(1),
+                    limit,
+                    slots,
+                    slots + 1,
+                ];
+                for k in ks {
+                    for delta in [-size, -9, -8, -1, 0, 1, 8, 64, size / 2, size + 8] {
+                        let offset = k as i128 * size + delta;
+                        let address = (base as i128 + offset) as usize;
+                        let object = core::ptr::without_provenance::<u8>(address);
+                        let pass =
+                            offset >= 0 && offset % size == 0 && ((offset / size) as u64) < limit;
+                        let got = fast.slot(object);
+                        assert_eq!(got < limit, pass, "{class:?} limit {limit} offset {offset}");
+                        if pass {
+                            assert_eq!(got as i128, offset / size);
+                        }
+                    }
+                }
+            }
+        }
+    }
 }
