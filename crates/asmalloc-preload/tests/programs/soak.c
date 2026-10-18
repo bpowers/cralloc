@@ -6,11 +6,12 @@
 // is already live, at the moment it does so.
 //
 // usage: soak MODE [key=value...]
-//   modes:   churn, prodcons, fork, threadstorm, realloc, huge, signal, idle, breakpoint
+//   modes:   churn, prodcons, fork, threadstorm, realloc, huge, signal, idle, breakpoint, trim
 //   keys:    threads, secs, seed, maxsize, live, xchg (percent of ops that hand a block to
 //            another thread), sigus (signal interval, microseconds), usable (fill up to
 //            malloc_usable_size, default 1), budget (MiB live across all threads, default
-//            256; each thread may hold at least one block of maxsize)
+//            256; each thread may hold at least one block of maxsize), trimus (the trim
+//            mode's interval, microseconds, default 2000)
 //
 // It prints one line that does not depend on scheduling ("soak MODE: ok"), so the output under
 // any allocator is the same, and counts on stderr. A failure prints "soak: FAIL ..." on stderr
@@ -663,6 +664,25 @@ static void run_threads(void *(*fn)(void *), int n) {
     unmap(t, sizeof(pthread_t) * (size_t)n);
 }
 
+// trim: workers churn while the main thread calls malloc_trim every `trimus` microseconds, so
+// an allocator that empties caches and returns memory there does it under live traffic.
+static long trim_us = 2000;
+static _Atomic long n_trim;
+
+static void run_trim(void) {
+    pthread_t *t = map(sizeof(pthread_t) * (size_t)nthreads);
+    for (long i = 0; i < nthreads; i++)
+        if (pthread_create(&t[i], NULL, churn_worker, (void *)(i + 1)))
+            die("pthread_create failed");
+    while (!done()) {
+        malloc_trim(0);
+        atomic_fetch_add(&n_trim, 1);
+        sleep_us(trim_us);
+    }
+    for (int i = 0; i < nthreads; i++) pthread_join(t[i], NULL);
+    unmap(t, sizeof(pthread_t) * (size_t)nthreads);
+}
+
 // Producers allocate and only hand off; consumers only verify and free.
 static _Atomic int producers_left;
 
@@ -1145,6 +1165,8 @@ static void parse(int argc, char **argv) {
             xchg_pct = atoi(v);
         else if (!strcmp(k, "sigus"))
             sig_us = atol(v);
+        else if (!strcmp(k, "trimus"))
+            trim_us = atol(v);
         else if (!strcmp(k, "budget"))
             budget_mb = strtoull(v, NULL, 0);
         else if (!strcmp(k, "usable"))
@@ -1186,6 +1208,8 @@ int main(int argc, char **argv) {
         run_signal();
     } else if (!strcmp(mode, "breakpoint")) {
         run_trap();
+    } else if (!strcmp(mode, "trim")) {
+        run_trim();
     } else if (!strcmp(mode, "idle")) {
         run_threads(idle_worker, nthreads);
     } else {
@@ -1194,9 +1218,9 @@ int main(int argc, char **argv) {
     xdrain(&r);
 
     say("soak %s: %.1fs alloc %ld free %ld realloc %ld look %ld xchg %ld fork %ld thread %ld "
-        "signal %ld trap %ld null %ld untracked %ld\n",
+        "signal %ld trap %ld trim %ld null %ld untracked %ld\n",
         mode, now() - start, n_alloc, n_free, n_realloc, n_verify, n_xchg, n_fork, n_thread,
-        n_signal, n_trap, n_null, table_dropped);
+        n_signal, n_trap, n_trim, n_null, table_dropped);
     if (n_alloc != n_free) die("%ld blocks allocated but %ld freed", n_alloc, n_free);
     printf("soak %s: ok\n", mode);
     return 0;
