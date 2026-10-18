@@ -4,8 +4,8 @@
 An entry is a heading in docs/safety/**/*-safety.md that starts with its ID, such as
 `## KERNEL-06: ...`. An ID is upper-case words joined by hyphens and a two-digit number.
 
-Fails if an ID cited in the code under crates/ names no entry. Prints, without failing for
-now, the entries no code cites, the IDs that two files define, and the ledger files with no
+Fails if an ID cited in the code under crates/ names no entry, or if two entries share an ID.
+Prints, without failing for now, the entries no code cites and the ledger files with no
 `Reviewed: <commit>` line.
 
 Usage: scripts/ledger-check
@@ -47,21 +47,23 @@ def main() -> int:
         print(f"ledger-check: {len(uncited)} entries no code cites:")
         for i in uncited:
             print(f"  {i} ({', '.join(map(rel, defined[i]))})")
-    twice = sorted(i for i, files in defined.items() if len(files) > 1)
-    if twice:
-        print("ledger-check: IDs defined in more than one file:")
-        for i in twice:
-            print(f"  {i} ({', '.join(map(rel, defined[i]))})")
     unreviewed = [p for p in ledgers if not REVIEWED.search(p.read_text())]
     if unreviewed:
         print(f"ledger-check: {len(unreviewed)} of {len(ledgers)} ledger files have no "
               "'Reviewed: <commit>' line")
+    failed = 0
+    twice = sorted(i for i, files in defined.items() if len(files) > 1)
+    if twice:
+        print("ledger-check: IDs defined more than once:")
+        for i in twice:
+            print(f"  {i} ({', '.join(map(rel, defined[i]))})")
+        failed = 1
     if unknown:
         print("ledger-check: cited IDs with no ledger entry:")
         for line in unknown:
             print(f"  {line}")
-        return 1
-    return 0
+        failed = 1
+    return failed
 
 
 if __name__ == "__main__":
