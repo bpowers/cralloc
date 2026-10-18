@@ -22,6 +22,7 @@
 //! (`scripts/gate --all`); the merge gate runs each scenario one preemption lower.
 
 use super::explore::{Config, Outcome, TWord, explore};
+use super::group::Gather;
 use super::layout::{Step, Unit};
 use super::region::{self, Carve, Purge};
 use super::testhost::TestHost;
@@ -1015,6 +1016,374 @@ fn a_deep_run_lost_at_any_step(preemptions: usize) {
 #[ignore = "slow: run with scripts/gate --all"]
 fn a_deep_run_lost_at_any_step_fully() {
     a_deep_run_lost_at_any_step(2);
+}
+
+/// Claims as a large class makes them, one slot at a time and keeping the summary bits of a
+/// word they empty, until a search from the top finds nothing: every slot they got.
+fn sweep_keeping_bits(host: &Host8) -> Vec<(RegionId, u32)> {
+    let mut out = Vec::new();
+    loop {
+        let got = claim_with(host, 1, true);
+        if got.is_empty() {
+            return out;
+        }
+        out.extend(got);
+    }
+}
+
+/// The check of the kept-bit scenarios: nothing was claimed twice; every word is visible
+/// before any release that would heal a lost bit; claims that keep bits then find every free
+/// slot before one reports none, however many bits are set over empty words; and with
+/// everything released by single frees, exactly `expected` is free.
+fn kept_check(host: &Host8, regions: usize, kept: &Mutex<Vec<(RegionId, u32)>>, expected: &[u64]) {
+    let kept = kept.lock().unwrap().clone();
+    let distinct: BTreeSet<_> = kept.iter().copied().collect();
+    assert_eq!(distinct.len(), kept.len(), "a slot claimed twice");
+    assert!(host.all_visible(), "a free word is invisible");
+    let free = free_set(host, regions);
+    let got = sweep_keeping_bits(host);
+    let found: BTreeSet<u64> = got.iter().map(|&(r, s)| host.global(r, s)).collect();
+    assert_eq!(found, free, "a claim missed a free slot");
+    assert_eq!(got.len(), free.len(), "a slot claimed twice");
+    for &(region, slot) in got.iter().chain(&kept) {
+        free_one(host, region, slot);
+    }
+    let expected: BTreeSet<u64> = expected.iter().copied().collect();
+    assert_eq!(free_set(host, regions), expected);
+    assert!(host.all_visible(), "a free word is invisible");
+}
+
+/// A class whose every word is empty under set summary bits, as claims that keep bits leave
+/// it: a claim clears them all and reports nothing free, and after one free anywhere the next
+/// claim finds that slot. On a tree of two summary levels and on regions of one word.
+#[test]
+fn a_claim_gets_past_every_kept_bit() {
+    let deep = deep_run_setup();
+    let flat = Host8::new(tiny(), class(256), 2);
+    assert_eq!(flat.layout().height(), 0);
+    for r in 0..2 {
+        flat.carve_all(flat.region_at(r), 8);
+        free_now(&flat, flat.region_at(r), 0);
+    }
+    for (host, regions, slot) in [(&deep, 1, 64 * 64 + 5), (&flat, 2, 5)] {
+        let all = sweep_keeping_bits(host);
+        assert_eq!(all.len(), 4 - regions);
+        assert!(free_set(host, regions).is_empty());
+        // The last claim of the sweep cleared every bit on its way to finding nothing.
+        assert_eq!(host.class_top().load(), 0);
+        // Keep the bits set over the empty words again, then free one slot under them.
+        for &(region, slot) in &all {
+            free_one(host, region, slot);
+        }
+        for _ in 0..all.len() {
+            assert_eq!(claim_with(host, 1, true).len(), 1);
+        }
+        assert_ne!(host.class_top().load(), 0);
+        let last = host.region_at(regions - 1);
+        free_one(host, last, slot);
+        assert_eq!(claim_with(host, 1, true), [(last, slot)]);
+        assert!(claim_with(host, 1, true).is_empty());
+    }
+}
+
+/// `Summary_keep_deep.cfg`: two summary levels, as a large class with many slots. Claims that
+/// keep the bits of the words they empty race single frees into those words and others.
+/// Preemptions bounded to two (one in the quick run).
+fn kept_bits_race_single_frees_on_a_deep_tree(preemptions: usize) {
+    explore(
+        Config {
+            preemptions: Some(preemptions),
+            ..Config::ALL
+        },
+        3,
+        || (deep_run_setup(), Mutex::new(Vec::new())),
+        |(host, kept), me| {
+            let r0 = host.region_at(0);
+            let got = match me {
+                0 => {
+                    let mut got = claim_with(host, 1, true);
+                    got.extend(claim_with(host, 1, true));
+                    got
+                }
+                1 => {
+                    free_one(host, r0, 1);
+                    free_one(host, r0, 64 * 64 + 1);
+                    Vec::new()
+                }
+                _ => {
+                    for (region, slot) in claim_with(host, 1, true) {
+                        free_one(host, region, slot);
+                    }
+                    Vec::new()
+                }
+            };
+            kept.lock().unwrap().extend(got);
+        },
+        |(host, kept), outcome| {
+            assert!(outcome.killed.is_empty());
+            kept_check(host, 1, kept, &[0, 1, 64, 64 * 64, 64 * 64 + 1]);
+        },
+    );
+}
+
+#[test]
+#[cfg_attr(miri, ignore)]
+fn kept_bits_race_single_frees_on_a_deep_tree_quickly() {
+    kept_bits_race_single_frees_on_a_deep_tree(1);
+}
+
+#[test]
+#[ignore = "slow: run with scripts/gate --all"]
+fn kept_bits_race_single_frees_on_a_deep_tree_fully() {
+    kept_bits_race_single_frees_on_a_deep_tree(2);
+}
+
+/// Regions of one word, as most large classes have, all of them empty under set bits at the
+/// start: single frees race claims that must get past the kept bits to find them. Preemptions
+/// bounded to two (one in the quick run).
+fn single_frees_under_kept_bits_of_one_word_regions(preemptions: usize) {
+    explore(
+        Config {
+            preemptions: Some(preemptions),
+            ..Config::ALL
+        },
+        3,
+        || {
+            let host = Host8::new(tiny(), class(256), 2);
+            for r in 0..2 {
+                host.carve_all(host.region_at(r), 8);
+                free_now(&host, host.region_at(r), 0);
+            }
+            assert_eq!(sweep_keeping_bits(&host).len(), 2);
+            for r in 0..2 {
+                free_one(&host, host.region_at(r), 0);
+                assert_eq!(claim_with(&host, 1, true).len(), 1);
+            }
+            (host, Mutex::new(Vec::new()))
+        },
+        |(host, kept), me| {
+            let got = match me {
+                0 => {
+                    free_one(host, host.region_at(1), 0);
+                    claim_with(host, 1, true)
+                }
+                1 => claim_with(host, 1, true),
+                _ => {
+                    free_one(host, host.region_at(0), 1);
+                    Vec::new()
+                }
+            };
+            kept.lock().unwrap().extend(got);
+        },
+        |(host, kept), outcome| {
+            assert!(outcome.killed.is_empty());
+            let last = host.global(host.region_at(1), 0);
+            kept_check(host, 2, kept, &[1, last]);
+        },
+    );
+}
+
+#[test]
+#[cfg_attr(miri, ignore)]
+fn single_frees_under_kept_bits_of_one_word_regions_quickly() {
+    single_frees_under_kept_bits_of_one_word_regions(1);
+}
+
+#[test]
+#[ignore = "slow: run with scripts/gate --all"]
+fn single_frees_under_kept_bits_of_one_word_regions_fully() {
+    single_frees_under_kept_bits_of_one_word_regions(2);
+}
+
+/// `Summary_keep_crash.cfg`, on two summary levels: a claimer or a single free may vanish at
+/// any step, as in a forked child. Afterwards a single free into each word makes the word reachable,
+/// and claims find every free slot. The second group starts empty, so a free into it sets a
+/// bit at each level, and one lost between two of them leaves the upper bit for the next free
+/// to set though the lower is set already. Preemptions bounded to two (one in the quick run).
+fn kept_bits_and_single_frees_lost_at_any_step(preemptions: usize) {
+    explore(
+        Config {
+            preemptions: Some(preemptions),
+            crash: true,
+            ..Config::ALL
+        },
+        3,
+        || {
+            let host = deep_run_setup();
+            assert!(tree::claim_exact(&host, host.region_at(0), 64, 1));
+            (host, Mutex::new(Vec::new()))
+        },
+        |(host, kept), me| {
+            let r0 = host.region_at(0);
+            let got = match me {
+                0 => {
+                    free_one(host, r0, 1);
+                    claim_with(host, 1, true)
+                }
+                1 => {
+                    let got = claim_with(host, 1, true);
+                    free_one(host, r0, 65);
+                    got
+                }
+                _ => {
+                    free_one(host, r0, 64 * 64 + 1);
+                    claim_with(host, 1, false)
+                }
+            };
+            kept.lock().unwrap().extend(got);
+        },
+        |(host, kept), _| {
+            let kept: Vec<_> = kept.lock().unwrap().clone();
+            let distinct: BTreeSet<_> = kept.iter().copied().collect();
+            assert_eq!(distinct.len(), kept.len(), "a slot claimed twice");
+            let r0 = host.region_at(0);
+            for w in [0, 1, 64] {
+                free_one(host, r0, w * BITS + 3);
+                assert!(
+                    host.path_set(Node::leaf(r0, w)),
+                    "word {w} stays invisible after a free into it"
+                );
+            }
+            let free = free_set(host, 1);
+            let got = sweep_keeping_bits(host);
+            let found: BTreeSet<u64> = got.iter().map(|&(_, s)| s as u64).collect();
+            assert_eq!(found, free, "a claim missed a free slot");
+        },
+    );
+}
+
+#[test]
+#[cfg_attr(miri, ignore)]
+fn kept_bits_and_single_frees_lost_at_any_step_quickly() {
+    kept_bits_and_single_frees_lost_at_any_step(1);
+}
+
+#[test]
+#[ignore = "slow: run with scripts/gate --all"]
+fn kept_bits_and_single_frees_lost_at_any_step_fully() {
+    kept_bits_and_single_frees_lost_at_any_step(2);
+}
+
+/// Frees `slots` as a launder does: gathered by word in a window of `SPAN` words and a map,
+/// then one OR per word and one debt per summary word (`Gather`, `Release::owe_leaves`).
+fn free_gathered<const SPAN: usize>(host: &Host8, slots: &[(RegionId, u32)]) {
+    let key = |region: RegionId, slot: u32| (region.index() as u64) << 32 | (slot / BITS) as u64;
+    let Some(&(region, slot)) = slots.first() else {
+        return;
+    };
+    let mut release = tree::Release::new(host, region);
+    let mut gather = Gather::<32, SPAN>::new(key(region, slot));
+    for &(region, slot) in slots {
+        gather.end_one(&mut release, key(region, slot), 1 << (slot % BITS));
+    }
+    gather.finish(&mut release);
+    release.finish();
+}
+
+/// A launder whose words owe merged debts, on two regions of two summary levels: two words in
+/// its window under one summary word, one in the map under another, and two in the map in the
+/// other region under one. It races a run of claims and a claim from the top. Preemptions
+/// bounded to two (one in the quick run).
+fn merged_debts_race_claims_on_deep_trees(preemptions: usize) {
+    explore(
+        Config {
+            preemptions: Some(preemptions),
+            ..Config::ALL
+        },
+        3,
+        || {
+            let host = Host8::new(standard(), class(8), 2);
+            assert_eq!(host.layout().height(), 2);
+            for r in 0..2 {
+                host.carve_all(host.region_at(r), host.layout().slots());
+            }
+            free_now(&host, host.region_at(0), 0);
+            free_now(&host, host.region_at(0), 64 * 64);
+            (host, Mutex::new(Vec::new()))
+        },
+        |(host, kept), me| {
+            let (r0, r1) = (host.region_at(0), host.region_at(1));
+            let got = match me {
+                0 => {
+                    let slots = [(r0, 65), (r0, 1), (r0, 64 * 64 + 2), (r1, 3), (r1, 64 + 3)];
+                    free_gathered::<64>(host, &slots);
+                    Vec::new()
+                }
+                1 => claim_run_of(host, 3, 1),
+                _ => claim(host, 1),
+            };
+            kept.lock().unwrap().extend(got);
+        },
+        |(host, kept), outcome| {
+            assert!(outcome.killed.is_empty());
+            let first = host.global(host.region_at(1), 0);
+            let expected = [0, 1, 65, 64 * 64, 64 * 64 + 2, first + 3, first + 67];
+            run_check(host, 2, kept, &expected);
+        },
+    );
+}
+
+#[test]
+#[cfg_attr(miri, ignore)]
+fn merged_debts_race_claims_on_deep_trees_quickly() {
+    merged_debts_race_claims_on_deep_trees(1);
+}
+
+#[test]
+#[ignore = "slow: run with scripts/gate --all"]
+fn merged_debts_race_claims_on_deep_trees_fully() {
+    merged_debts_race_claims_on_deep_trees(2);
+}
+
+/// A launder into regions of one word, whose bits are a class word's: the window holds one
+/// region's word and the map the other's, and their debts merge in the class word. It races a
+/// run of claims and a claim that keeps bits. Preemptions bounded to two (one in the quick
+/// run).
+fn merged_debts_race_claims_on_one_word_regions(preemptions: usize) {
+    explore(
+        Config {
+            preemptions: Some(preemptions),
+            ..Config::ALL
+        },
+        3,
+        || {
+            let host = Host8::new(tiny(), class(256), 2);
+            for r in 0..2 {
+                host.carve_all(host.region_at(r), 8);
+            }
+            free_now(&host, host.region_at(0), 0);
+            (host, Mutex::new(Vec::new()))
+        },
+        |(host, kept), me| {
+            let (r0, r1) = (host.region_at(0), host.region_at(1));
+            let got = match me {
+                0 => {
+                    free_gathered::<64>(host, &[(r1, 1), (r0, 1), (r1, 2)]);
+                    Vec::new()
+                }
+                1 => claim_run_of(host, 2, 1),
+                _ => claim_with(host, 1, true),
+            };
+            kept.lock().unwrap().extend(got);
+        },
+        |(host, kept), outcome| {
+            assert!(outcome.killed.is_empty());
+            let first = host.global(host.region_at(1), 0);
+            run_check(host, 2, kept, &[0, 1, first + 1, first + 2]);
+        },
+    );
+}
+
+#[test]
+#[cfg_attr(miri, ignore)]
+fn merged_debts_race_claims_on_one_word_regions_quickly() {
+    merged_debts_race_claims_on_one_word_regions(1);
+}
+
+#[test]
+#[ignore = "slow: run with scripts/gate --all"]
+fn merged_debts_race_claims_on_one_word_regions_fully() {
+    merged_debts_race_claims_on_one_word_regions(2);
 }
 
 /// `Summary_heal_crash.cfg`: as `summary_three_threads_bounded`, but threads 1 and 2 may vanish
