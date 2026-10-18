@@ -1343,6 +1343,37 @@ mod review {
         );
     }
 
+    /// Finding decay-overshoots-goal. A pass's goal is checked only between steps, and a step
+    /// is bounded in words of bitmap, not bytes. A word covers 64 slots, so one step of 256
+    /// words in a region of large slots covers far more than a quarter of what is retained:
+    /// in the design's geometry 16 MiB of 1 KiB slots, 512 MiB of 32 KiB ones. The first pass
+    /// returns everything, where the design says up to a quarter.
+    #[test]
+    #[ignore = "finding: decay-overshoots-goal"]
+    fn a_decay_pass_over_big_slots_returns_everything_at_once() {
+        let state = state::<Wide>();
+        let back = state.get_or_reserve().unwrap();
+        let os = state.os();
+        let class = small(32 << 10);
+        let total = 3 << 20;
+        let mut slots = fill(&back, class, total / class.size());
+        for &p in &slots {
+            paint(p, class.size(), 5);
+        }
+        back.launder(class, &mut slots);
+        assert_eq!(back.retained(), total);
+        assert!(total < retained_cap(Wide::GEOMETRY));
+        os.advance_clock(DECAY_TICKS);
+        beat(&back);
+        assert!(!pass_under_way(&state));
+        let left = back.retained();
+        assert!(
+            left >= total / 2,
+            "one pass returned {} of {total} bytes",
+            total - left
+        );
+    }
+
     /// Finding top-up-creeps. For a class whose size does not divide a huge page, `top_up`
     /// carves through the slot that straddles the page's end, which leaves the watermark just
     /// inside the next huge page with one free slot below it. The next pass over the region
