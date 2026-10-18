@@ -1485,6 +1485,28 @@ mod review {
         );
     }
 
+    /// Finding cap-rearms-after-a-fruitless-walk. A fill on another thread can take the count
+    /// under the cap while a cap purge walks the heap and finds nothing; the mark must not then
+    /// re-arm, or the next launder past the cap walks again. The race needs two threads at one
+    /// moment, so this checks the rule the purge applies.
+    #[test]
+    fn a_fruitless_purge_does_not_rearm_the_cap() {
+        use super::super::purge::{cap_fires, mark_after};
+        let cap = retained_cap(Standard::GEOMETRY);
+        // Nothing purged, the count fell under the cap meanwhile: the mark stays at the count,
+        // and a launder that takes the count a little over the cap does not purge.
+        let left = cap - 1024;
+        let mark = mark_after(left, cap, 0);
+        assert_eq!(mark, left);
+        assert!(!cap_fires(mark, cap + 1024, cap));
+        // A purge that returned bytes and got under the cap re-arms as before.
+        let mark = mark_after(left, cap, 4096);
+        assert!(mark < left);
+        assert!(cap_fires(mark, cap + 1024, cap));
+        // Over the cap, the mark is the count whatever was purged.
+        assert_eq!(mark_after(cap + 1, cap, 4096), cap + 1);
+    }
+
     /// Finding clock-back-stops-decay. `decay_look` reads a clock behind the last pass's end as
     /// "not yet", with no limit: after the counter goes back (resume from suspend resets the
     /// timestamp counter on most machines; a restored checkpoint) nothing decays until the

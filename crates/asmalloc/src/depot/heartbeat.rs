@@ -283,7 +283,7 @@ impl<O: Os, R: Routines, S: Source> Cache<'_, O, R, S> {
             let _ = self.age_look(cpu, class, &clock);
         }
         if !chores.purged {
-            self.source.purge_step();
+            self.source.purge_step(&|| clock.now());
         }
         if !generation::drains_enabled(self.depot) {
             return;

@@ -53,7 +53,7 @@ impl<O: Os> Source for BackSource<'_, O> {
         self.0.free(object, class.class());
     }
 
-    fn purge_step(&self) {
-        self.0.heartbeat();
+    fn purge_step(&self, now: &dyn Fn() -> u64) {
+        self.0.heartbeat_with(now);
     }
 }
