@@ -12,7 +12,7 @@
 
 use super::host::ClassHost;
 use super::layout::{Grow, Hints};
-use super::policy::{large_retained_cap, wants_huge};
+use super::policy::{large_retained_cap, move_piece, wants_huge};
 use super::region::{self, Carve};
 use super::tree::{self, Host};
 use super::word::{BITS, Word, position};
@@ -129,6 +129,10 @@ impl<'a, O: Os> Back<'a, O> {
     /// For a large slot the program is freeing and still holds: if keeping it resident would
     /// take the large classes' retained count over its cap, returns its pages to the OS first
     /// and says so. Aborts as `launder` does, and if the slot is free already.
+    ///
+    /// The count is read here and raised later, by the release, so the cap is per thread:
+    /// threads freeing at the same moment can each see room and together pass the cap by one
+    /// slot for every thread but the first. The next free sees the true count.
     fn purge_before_release(&self, ptr: NonNull<u8>, class: Class) -> bool {
         let cap = large_retained_cap(self.space.plan().geometry());
         if self.retained_large().saturating_add(class.size()) <= cap {
@@ -244,6 +248,181 @@ impl<'a, O: Os> Back<'a, O> {
                 self.set_run_size(ptr, size);
             }
             None => self.abort("a resize of a pointer that is not the start of a heap object"),
+        }
+    }
+
+    /// Records `size` as the current size of the large object or run starting at `ptr`, which
+    /// the caller is resizing in place, and, if that shrinks it, returns to the OS the whole
+    /// pages between its new usable size and its old one (the usable size is the recorded size
+    /// rounded up to a page, which is what the program may have written). Aborts as
+    /// [`Back::resize`] does. For a small slot this does nothing.
+    ///
+    /// The size is recorded first: only the owner asks for a live object's size, and the owner
+    /// is here. The pages were the live object's, so they were never in a retained count and
+    /// none changes; no bitmap changes either. If the object later grows back in place the
+    /// pages read as zero, which is as good as the stale bytes a grow may otherwise expose.
+    ///
+    /// There is no hysteresis: every shrink that crosses a page boundary is one system call,
+    /// so a program that shrinks a block a page at a time pays a call each time, as it does
+    /// with glibc's `realloc` above the `mmap` threshold. A shrink within a page makes none.
+    pub fn resize_in_place(&self, ptr: NonNull<u8>, size: usize) {
+        let page = self.space.plan().geometry().page_size();
+        let tail = |old: usize, limit: usize| {
+            let from = size.next_multiple_of(page);
+            let to = old.next_multiple_of(page).min(limit);
+            (from < to).then(|| (from, to - from))
+        };
+        match self.lookup(ptr.as_ptr()) {
+            Some(Kind::Slot(class)) if class.is_small() => {}
+            Some(Kind::Slot(class)) => {
+                let Some(host) = self.host(class) else {
+                    self.abort("a resize in a class that has no regions");
+                };
+                let (region, slot) = self.validate(&host, ptr.as_ptr(), class, &mut None);
+                if size > class.size() {
+                    self.abort("a resize beyond the object's slot");
+                }
+                let Some(at) = host.layout().size_word(slot) else {
+                    return;
+                };
+                let old = host.meta(region, at).load() as usize;
+                host.meta(region, at).store(size as u64);
+                if let Some((from, len)) = tail(old, class.size()) {
+                    // SAFETY: BACK-CLASS-02 in docs/safety/asmalloc/back/class-safety.md. The
+                    // caller owns the object in this slot and has just given up everything
+                    // past `from`, which lies inside the slot.
+                    let _ = unsafe { region::purge_part(&host, region, slot, from, len) };
+                }
+            }
+            Some(Kind::Run(regions)) => {
+                let whole = regions << self.space.plan().region_shift();
+                if size > whole {
+                    self.abort("a resize beyond the object's run");
+                }
+                let old = self.run_size(ptr.as_ptr());
+                self.set_run_size(ptr, size);
+                if let Some((from, len)) = tail(old, whole) {
+                    let start = ptr.map_addr(|a| a.saturating_add(from));
+                    // SAFETY: BACK-CLASS-02. The caller owns the run and has just given up
+                    // everything past `from`, which lies inside the run's regions.
+                    let _ = unsafe { self.space.purge(start, len) };
+                }
+            }
+            None => self.abort("a resize of a pointer that is not the start of a heap object"),
+        }
+    }
+
+    /// Moves the contents of the large object or run at `from` to `to` and frees `from`: copies
+    /// `len` bytes and gives the block up, as a copy followed by [`Back::free_by_address`]
+    /// would. A block of more than one piece (`policy::move_piece`) is copied a piece at a
+    /// time, and the whole pages of `from` behind each piece go back to the OS before the next
+    /// is copied, so the two copies are both resident for one piece at most. Aborts if `from`
+    /// is not the start of a handed-out large slot or a run.
+    ///
+    /// When every page of a slot went back this way, the slot is released as purged memory:
+    /// zero, clean and not counted as retained, exactly as a free over the large cap leaves
+    /// it, so the free neither purges nor counts those pages again.
+    ///
+    /// # Safety
+    ///
+    /// `from` is a large block of this heap that the caller owns and gives up, readable for
+    /// `len` bytes; `to` is writable for `len` bytes and does not overlap it; nothing else
+    /// reads or writes either range during the call.
+    pub unsafe fn move_large(&self, from: NonNull<u8>, to: NonNull<u8>, len: usize) {
+        // SAFETY: the caller's promise, passed on.
+        unsafe { self.move_large_with(from, to, len, || {}) }
+    }
+
+    /// [`Back::move_large`], calling `observe` after each piece is copied and the pages
+    /// behind it returned, so that a test can watch the move.
+    ///
+    /// # Safety
+    ///
+    /// As for [`Back::move_large`].
+    pub(crate) unsafe fn move_large_with(
+        &self,
+        from: NonNull<u8>,
+        to: NonNull<u8>,
+        len: usize,
+        mut observe: impl FnMut(),
+    ) {
+        let piece = move_piece(self.space.plan().geometry());
+        let kind = self.lookup(from.as_ptr());
+        let slot = match kind {
+            Some(Kind::Slot(class)) if !class.is_small() => Some(class),
+            Some(Kind::Run(_)) => None,
+            _ => self.abort("a move of a pointer that is not a large block of the heap"),
+        };
+        if len <= piece {
+            // SAFETY: BACK-CLASS-03: the caller's promise about the two ranges.
+            unsafe { from.as_ptr().copy_to_nonoverlapping(to.as_ptr(), len) };
+            return self.free_by_address(from);
+        }
+        // What `from` may have resident: its whole slot or run. Past the bytes copied that
+        // is the rest of the old object and whatever an earlier owner of the slot left.
+        let (whole, host) = match (slot, kind) {
+            (Some(class), _) => {
+                let Some(host) = self.host(class) else {
+                    self.abort("a move in a class that has no regions");
+                };
+                let (region, index) = self.validate(&host, from.as_ptr(), class, &mut None);
+                let (word, bit) = position(index);
+                if tree::word(&host, tree::Node::leaf(region, word)).load() & (1u64 << bit) != 0 {
+                    self.abort("a move of a large object that is free");
+                }
+                (class.size(), Some((host, region, index)))
+            }
+            (None, Some(Kind::Run(regions))) => (regions << self.space.plan().region_shift(), None),
+            _ => return,
+        };
+        // Returns `from`'s pages in `start..end`, both piece or page boundaries.
+        let give_back = |start: usize, end: usize| -> bool {
+            if start >= end {
+                return true;
+            }
+            match &host {
+                // SAFETY: BACK-CLASS-03: the caller holds the slot, and the range is inside it
+                // and is either copied already or past everything that is copied.
+                Some((host, region, index)) => unsafe {
+                    region::purge_part(host, *region, *index, start, end - start)
+                },
+                None => {
+                    let at = from.map_addr(|a| a.saturating_add(start));
+                    // SAFETY: BACK-CLASS-03, likewise for a run the caller owns.
+                    unsafe { self.space.purge(at, end - start) }.is_ok()
+                }
+            }
+        };
+        let (mut done, mut all) = (0, true);
+        while done < len {
+            let step = piece.min(len - done);
+            // SAFETY: BACK-CLASS-03: `done + step <= len`, inside both ranges, which do not
+            // overlap; the bytes of `from` read here have not been returned.
+            unsafe {
+                from.as_ptr()
+                    .add(done)
+                    .copy_to_nonoverlapping(to.as_ptr().add(done), step);
+            }
+            // Only whole pieces go back here: the last may end inside a page.
+            if step == piece {
+                all &= give_back(done, done + step);
+            }
+            done += step;
+            observe();
+        }
+        all &= give_back(len - len % piece, whole);
+        match host {
+            Some((host, region, index)) => {
+                let Some(class) = slot else {
+                    return;
+                };
+                if all {
+                    region::mark_purged(&host, region, index);
+                }
+                self.release_all(class, &mut [from.as_ptr()], !all);
+                self.heartbeat();
+            }
+            None => self.free_run(from),
         }
     }
 

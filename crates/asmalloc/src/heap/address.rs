@@ -115,7 +115,7 @@ impl<O: Os> Heap<O> {
         };
         let fits = is_large(new) && new <= room && (new >= old || new >= room / HEADROOM);
         if fits {
-            back.resize(ptr, new);
+            back.resize_in_place(ptr, new);
         }
         fits
     }
@@ -162,6 +162,23 @@ pub(crate) mod process {
     #[cold]
     pub(crate) fn free_large(ptr: NonNull<u8>) {
         HEAP.free_large(ptr)
+    }
+
+    /// Moves `len` bytes of the large block at `from` to `to` and frees `from`, a piece at a
+    /// time with the old pages returned behind the copy (`Back::move_large`).
+    ///
+    /// # Safety
+    ///
+    /// As for `Back::move_large`: `from` is a large block of the heap that the caller owns
+    /// and gives up, readable for `len` bytes; `to` is writable for `len` bytes and does not
+    /// overlap it.
+    #[cold]
+    pub(crate) unsafe fn move_large(from: NonNull<u8>, to: NonNull<u8>, len: usize) {
+        match HEAP.back() {
+            // SAFETY: the caller's promise, passed on.
+            Some(back) => unsafe { back.move_large(from, to, len) },
+            None => HEAP.os().abort("a move of a block when no heap exists"),
+        }
     }
 
     /// See `Heap::resize_in_place_by_address`.
