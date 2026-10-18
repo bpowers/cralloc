@@ -24,12 +24,59 @@ use crate::space::{RegionId, RegionTag};
 use core::ptr::NonNull;
 use core::sync::atomic::Ordering::SeqCst;
 
+/// How a caller of [`Back::fill`] and [`Back::launder`] keeps slot pointers, so that the back
+/// end reads and writes the caller's own slices with no copy between: raw pointers, or the
+/// depot's `NonNull` and `Option<NonNull>`.
+pub trait SlotPointer: Copy {
+    /// The pointer to a slot, which is never null.
+    fn slot(slot: NonNull<u8>) -> Self;
+    /// The address the pointer holds; null for `None`.
+    fn address(self) -> *mut u8;
+}
+
+impl SlotPointer for *mut u8 {
+    #[inline(always)]
+    fn slot(slot: NonNull<u8>) -> Self {
+        slot.as_ptr()
+    }
+
+    #[inline(always)]
+    fn address(self) -> *mut u8 {
+        self
+    }
+}
+
+impl SlotPointer for NonNull<u8> {
+    #[inline(always)]
+    fn slot(slot: NonNull<u8>) -> Self {
+        slot
+    }
+
+    #[inline(always)]
+    fn address(self) -> *mut u8 {
+        self.as_ptr()
+    }
+}
+
+impl SlotPointer for Option<NonNull<u8>> {
+    #[inline(always)]
+    fn slot(slot: NonNull<u8>) -> Self {
+        Some(slot)
+    }
+
+    #[inline(always)]
+    fn address(self) -> *mut u8 {
+        self.map_or(core::ptr::null_mut(), NonNull::as_ptr)
+    }
+}
+
 impl<'a, O: Os> Back<'a, O> {
     /// Writes up to `out.len()` pointers to free slots of `class` into `out`, and returns how
     /// many. Freed slots come first, lowest address first, then never-used ones carved from the
     /// class's newest region. Fewer than asked means the heap is out of address space or the OS
-    /// refused memory; zero means not even one slot could be had.
-    pub fn fill(&self, class: SmallClass, out: &mut [*mut u8]) -> usize {
+    /// refused memory; zero means not even one slot could be had. The pointers are written as
+    /// whatever the caller keeps them as: raw pointers, or the depot's `Option<NonNull<u8>>`.
+    pub fn fill<P: SlotPointer>(&self, class: SmallClass, out: &mut [P]) -> usize {
         let Some(host) = self.host(class.class()) else {
             return 0;
         };
@@ -71,10 +118,10 @@ impl<'a, O: Os> Back<'a, O> {
     /// `out[at..]`, and returns the next position. `high` is checked to be one of the region's
     /// slots, so every slot below it is too.
     #[inline(always)]
-    fn put(
+    fn put<P: SlotPointer>(
         &self,
         layout: &Layout,
-        out: &mut [*mut u8],
+        out: &mut [P],
         mut at: usize,
         region: RegionId,
         high: u32,
@@ -83,10 +130,11 @@ impl<'a, O: Os> Back<'a, O> {
         if high >= layout.slots() {
             self.abort("a slot index outside its region");
         }
-        let base = self.space.region(region).as_ptr();
+        let base = self.space.region(region);
         for slot in slots {
             if let Some(entry) = out.get_mut(at) {
-                *entry = base.wrapping_add(layout.slot_bytes(slot));
+                let offset = layout.slot_bytes(slot);
+                *entry = P::slot(base.map_addr(|a| a.saturating_add(offset)));
             }
             at += 1;
         }
@@ -98,13 +146,13 @@ impl<'a, O: Os> Back<'a, O> {
     /// Aborts the process if a pointer is not the start of a slot of `class` that has been
     /// handed out, if a slot is already free, or if a slot appears twice within a part of 64
     /// pointers (`group::MAX_SLOTS`): those are double frees or frees of foreign pointers.
-    pub fn launder(&self, class: SmallClass, objects: &[*mut u8]) {
+    pub fn launder<P: SlotPointer>(&self, class: SmallClass, objects: &[P]) {
         self.release_all(class.class(), objects, true);
     }
 
     /// `launder` for any class. With `count`, the slots are added to the retained count; a
     /// caller that has just returned their pages to the OS says no.
-    fn release_all(&self, class: Class, objects: &[*mut u8], count: bool) {
+    fn release_all<P: SlotPointer>(&self, class: Class, objects: &[P], count: bool) {
         let Some(&first) = objects.first() else {
             return;
         };
@@ -112,14 +160,14 @@ impl<'a, O: Os> Back<'a, O> {
             self.abort("free of a pointer into a class that has no regions");
         };
         let checker = Checker::new(self, &host, class);
-        let mut met = checker.meet(first);
+        let mut met = checker.meet(first.address());
         let mut release = tree::Release::new(&host, met.region);
         let mut group = Group::new();
         for part in objects.chunks(group::MAX_SLOTS) {
-            let slot = checker.check(part[0], &mut met);
+            let slot = checker.check(part[0].address(), &mut met);
             let mut held = Open::slot(met.region.index(), slot);
             for &object in &part[1..] {
-                let slot = checker.check(object, &mut met);
+                let slot = checker.check(object.address(), &mut met);
                 let next = Open::slot(met.region.index(), slot);
                 if next.key == held.key {
                     held.add(&release, next.bits);

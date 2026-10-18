@@ -31,6 +31,8 @@
 //! in `policy`.
 
 mod class;
+
+pub use class::SlotPointer;
 mod group;
 mod host;
 mod inspect;
