@@ -45,9 +45,9 @@ LD_PRELOAD=$PWD/target/release/libasmalloc_preload.so some-program
 
 Limits worth knowing:
 
-- x86-64 Linux with a glibc that registers restartable sequences for its threads (2.35 or
-  later). A thread without a registration, as under valgrind, is served correctly but
-  slowly.
+- x86-64 Linux with a glibc that registers restartable sequences for its threads. glibc has
+  done so since 2.35; asmalloc is developed and tested on Linux 7.2 and glibc 2.43. A
+  thread without a registration, as under valgrind, is served correctly but slowly.
 - A shared object that contains the allocator must be linked `-z nodelete`, as the preload
   library is: unloading it kills the process.
 - The heap reserves address space, not memory, and makes do with less under a limit. Under
