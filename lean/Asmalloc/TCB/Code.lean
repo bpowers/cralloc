@@ -69,6 +69,9 @@ is in `TCB/Artifact.lean` and `Proof/Framework/Rseq.lean`.
 
 ## Semantics and safety
 
+A `jump` never completes: its only run is the one that reaches the jump
+(`ExecExit.jump`).
+
 `Exec M c s s'` means: running `c` from `s` terminates in `s'` without
 faulting. An instruction faults (`exec` returns `none`) on any memory access
 outside the regions the state permits, and on reading an undefined flag; so
@@ -166,6 +169,13 @@ inductive Code (I C : Type) where
   (`Exec`) is the run that is not aborted; `Verified` adds what must hold
   wherever it may be (`Code.abortStates`). -/
   | rseq (arm : List I) (body : List (Step I C))
+  /-- Run the straight-line instructions `is`, then jump to the external
+  target `t`: a tail call of code outside the routine, which the model does
+  not run, with the registers as `is` leaves them. The emitter allows one
+  only right after a restartable sequence, `.seq (.rseq arm body) (.jump is
+  t)` (`Rust.checkRseq`): the code that runs after the commit, outside the
+  sequence, where it cannot be aborted. -/
+  | jump (is : List I) (t : String)
 
 /-- `if c then t else e`, with `t` laid out after the function's return
 (cold): `Code.ite c (.seq (.seq (.block []) (.block [])) t) e`. It is an
@@ -185,6 +195,7 @@ def Code.all {I C : Type} (p : I → Bool) : Code I C → Bool
   | .call _ b => b.all p
   | .frame i b j => p i && b.all p && p j
   | .rseq arm body => arm.all p && body.all fun st => st.instrs.all p
+  | .jump is _ => is.all p
 
 /-- The features that the instructions of `c`, and of the functions it
 calls, require (`ISA.requires`), with repetitions. -/
@@ -196,6 +207,7 @@ def Code.requires {I C : Type} (req : I → List String) : Code I C → List Str
   | .call _ b => b.requires req
   | .frame i b j => req i ++ b.requires req ++ req j
   | .rseq arm body => arm.flatMap req ++ body.flatMap fun st => st.instrs.flatMap req
+  | .jump is _ => is.flatMap req
 
 /-- The calls in `c`, and in the functions it calls: each function's name
 and code. -/
@@ -206,7 +218,7 @@ def Code.calls {I C : Type} : Code I C → List (String × Code I C)
   | .loop b _ => b.calls
   | .call n b => (n, b) :: b.calls
   | .frame _ b _ => b.calls
-  | .rseq .. => []
+  | .rseq .. | .jump .. => []
 
 variable (M : ISA)
 
@@ -281,5 +293,6 @@ inductive ExecExit : Prog M → M.State → String → M.State → Prop
   | rseq {arm body s s₁ t s'} :
       execBlock M arm s = some s₁ → runBody M body s₁ = some (.exit t s') →
       ExecExit (.rseq arm body) s t s'
+  | jump {is t s s'} : execBlock M is s = some s' → ExecExit (.jump is t) s t s'
 
 end VG

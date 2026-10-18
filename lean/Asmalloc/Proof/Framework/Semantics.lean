@@ -151,6 +151,7 @@ def instrs {I C : Type} : Code I C → List I
   | .call _ b => instrs b
   | .frame i b j => i :: instrs b ++ [j]
   | .rseq arm body => arm ++ body.flatMap Step.instrs
+  | .jump is _ => is
 
 /-- Whether code calls no function and has no frame: whether it runs only
 its own instructions, in the stack it was entered with. -/
@@ -161,7 +162,7 @@ def Code.noCalls {I C : Type} : Code I C → Bool
   | .loop b _ => b.noCalls
   | .call _ _ => false
   | .frame .. => false
-  | .rseq .. => true
+  | .rseq .. | .jump .. => true
 
 /-- `(instrs c).all p`, without building the list of instructions, which is
 much faster for the kernel to evaluate (`decide +kernel`). A block is walked
@@ -176,6 +177,7 @@ noncomputable def Code.allInstrs {I C : Type} (p : I → Bool) : Code I C → Bo
   | .call _ b => b.allInstrs p
   | .frame i b j => p i && b.allInstrs p && p j
   | .rseq arm body => (arm ++ body.flatMap Step.instrs).all p
+  | .jump is _ => is.all p
 
 theorem Code.allInstrs_eq {I C : Type} (p : I → Bool) (c : Code I C) :
     c.allInstrs p = (instrs c).all p := by
@@ -201,6 +203,7 @@ theorem Code.all_of_allInstrs {I C : Type} {p : I → Bool} {c : Code I C} (h : 
       List.all_eq_true] at h
     simp only [Code.all, Bool.and_eq_true, List.all_eq_true]
     exact h
+  | jump is t => simpa [Code.all, Code.allInstrs] using h
   | _ => simp_all [Code.all, Code.allInstrs]
 
 end VG
