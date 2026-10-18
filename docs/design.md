@@ -278,8 +278,9 @@ Each CPU has a slab. Its hot part is an array with one 8-byte word per small cla
 colder part holds the CPU's spare magazines and counters. The slabs are a static array with
 an entry for every CPU number the OS can produce (8192 on x86-64), so the address of a slab
 word is the CPU number shifted and added to the address of the class's word in slab 0, a
-link-time constant plus 8 times the class, with no pointer to load. Untouched slabs cost no memory. A routine compares the CPU number with the array length and
-takes the slow path if it is out of range. That one compare keeps a thread with no rseq
+link-time constant plus 8 times the class, with no pointer to load. Untouched slabs cost no
+memory. A routine compares the CPU number with the array length and takes the slow path if
+it is out of range. That one compare keeps a thread with no rseq
 registration, which reads a negative number, away from every slab, and it means memory
 safety does not depend on what the OS writes there.
 
