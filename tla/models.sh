@@ -40,6 +40,10 @@ run Summary Summary_crash       violates Healed
 run Summary Summary_heal        ok
 run Summary Summary_heal_deep   ok
 run Summary Summary_heal_crash  ok
+run Summary Summary_run         ok
+run Summary Summary_run_deep    ok
+run Summary Summary_run_crash   ok
+run Summary Summary_run_noreread violates Visible
 
 # 6. Purge as a claim
 run Purge Purge               ok

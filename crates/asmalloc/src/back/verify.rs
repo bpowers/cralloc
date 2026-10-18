@@ -51,6 +51,29 @@ fn word_bits_cover_exactly_their_range() {
     assert!((span(lo, hi) >> bit) & 1 == (lo <= bit && bit <= hi) as u64);
 }
 
+/// The arithmetic of a run of claims (`tree::claim_next`). Moving past a group lands on the
+/// first word of the next group of 64, always forward and never more than a group. A claim of
+/// `bits` from a word read as `seen` leaves exactly the other bits, and empties the word exactly
+/// when it took all of them; and a compare-and-swap that fails against a word some free has
+/// only added bits to is not counted as meeting another claimer.
+#[kani::proof]
+fn a_run_moves_one_group_on_and_claims_exactly() {
+    use super::tree::past_group;
+    let index: u32 = kani::any();
+    kani::assume(index < u32::MAX - BITS);
+    let next = past_group(index);
+    assert!(next > index && next - index <= BITS && next % BITS == 0);
+    assert!(next / BITS == index / BITS + 1);
+    let (seen, bits): (u64, u64) = (kani::any(), kani::any());
+    kani::assume(bits != 0 && bits & !seen == 0);
+    let left = seen & !bits;
+    assert!(left | bits == seen && left & bits == 0);
+    assert!((left == 0) == (bits == seen));
+    let freed: u64 = kani::any();
+    let now = seen | freed;
+    assert!(seen & !now == 0);
+}
+
 /// The header words round-trip, and all zero means nothing carved, nothing committed, no
 /// huge-page part and a purge cursor at the top.
 #[kani::proof]

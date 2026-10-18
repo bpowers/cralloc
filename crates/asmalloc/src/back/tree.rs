@@ -13,8 +13,12 @@
 //!
 //! - **claim**: walk down from the top through the lowest set bit of each word. A word found
 //!   empty on the way has a stale summary bit: clear it (below) and start again. At a leaf word,
-//!   take bits with one compare-and-swap against the value read; if that fails, start again; if
-//!   it took every bit, clear the word's summary bit.
+//!   take bits with one compare-and-swap against the value read; if that fails, try again
+//!   against the value it found; if it took every bit, clear the word's summary bit.
+//! - **a run of claims** (a fill, [`claim_next`]) is the model's `Run`: it continues from where
+//!   its last claim was rather than from the top, moves past a group of 64 words where it meets
+//!   another claimer, leaves a word it finds empty to whoever emptied it, and clears the bits of
+//!   the words it empties in one group with one atomic AND and a re-read of each.
 //! - **release**: set the bits with one atomic OR; a bit already set is a double free. Then walk
 //!   up: at each level read the summary bit and, if it is clear, set it with an atomic OR. After
 //!   an OR that found the summary word empty, the next level's bit is set without reading it
@@ -240,8 +244,34 @@ impl Spot {
 /// Claims up to `n` free slots, at least one, from the lowest leaf word of the class that has
 /// any, or returns `None` if the class has none free. `n` must not be zero.
 pub(crate) fn claim<H: Host>(host: &H, n: u32) -> Option<Taken> {
-    let height = host.layout().height();
     loop {
+        let leaf = from_top(host)?;
+        match take(host, leaf, n) {
+            Take::Took { bits, emptied, .. } => {
+                if emptied {
+                    clear(host, leaf);
+                }
+                return Some(Taken {
+                    region: leaf.region,
+                    word: leaf.index,
+                    bits,
+                });
+            }
+            Take::Empty { raced } => {
+                if !raced {
+                    clear(host, leaf);
+                }
+            }
+        }
+    }
+}
+
+/// The leaf word a search from the class's top word leads to, through the lowest set bit of
+/// each word, or `None` if the class has nothing free. A summary word found empty on the way
+/// has a stale bit: it is cleared, and the search starts again.
+fn from_top<H: Host>(host: &H) -> Option<Spot> {
+    let height = host.layout().height();
+    'search: loop {
         let top = host.class_top().load();
         if top == 0 {
             return None;
@@ -256,106 +286,302 @@ pub(crate) fn claim<H: Host>(host: &H, n: u32) -> Option<Taken> {
         else {
             host.abort("a class summary bit names a region outside the heap")
         };
-        let top = Spot {
+        let mut spot = Spot {
             region,
             level: height,
             index: 0,
         };
-        if let Some(taken) = descend(host, top, n) {
-            return Some(taken);
-        }
-    }
-}
-
-/// Walks down from `spot` through the lowest set bit of each word and claims up to `n` slots
-/// from the leaf word it reaches. `None` if a word on the way is empty (its stale summary bit
-/// is cleared) or the compare-and-swap fails: the caller searches again.
-#[inline]
-fn descend<H: Host>(host: &H, mut spot: Spot, n: u32) -> Option<Taken> {
-    loop {
-        let word = spot.word(host);
-        let seen = word.load();
-        if seen == 0 {
-            clear(host, spot);
-            return None;
-        }
-        if spot.level == 0 {
-            let bits = lowest(seen, n);
-            word.compare_exchange(seen, seen & !bits).ok()?;
-            if bits == seen {
+        while spot.level > 0 {
+            let seen = spot.word(host).load();
+            if seen == 0 {
                 clear(host, spot);
+                continue 'search;
             }
-            return Some(Taken {
-                region: spot.region,
-                word: spot.index,
-                bits,
-            });
+            spot = Spot {
+                level: spot.level - 1,
+                index: spot.index * BITS + seen.trailing_zeros(),
+                ..spot
+            };
         }
-        spot = Spot {
-            level: spot.level - 1,
-            index: spot.index * BITS + seen.trailing_zeros(),
-            ..spot
-        };
+        return Some(spot);
     }
 }
 
-/// Where a run of claims has got to: the leaf word it claimed from last. Only ever made by
-/// [`claim_next`] from its own claim, and kept for no longer than one fill.
+/// What [`take`] found at a leaf word.
+#[derive(Clone, Copy, Debug)]
+enum Take {
+    /// It took `bits`. `emptied`: they were all the word had, so the word's summary bit is
+    /// this thread's to clear. `raced`: another thread took bits of the word between this
+    /// thread's look and its claim.
+    Took {
+        bits: u64,
+        emptied: bool,
+        raced: bool,
+    },
+    /// The word was empty. `raced`: it was not when this thread first looked, so another
+    /// thread emptied it and will clear its summary bit.
+    Empty { raced: bool },
+}
+
+/// Takes the lowest `n` free bits of a leaf word, or as many as it has, with one
+/// compare-and-swap. A lost compare-and-swap does not end the attempt: it tries again
+/// against the value it found, so it fails only when the word is empty.
+///
+/// Each attempt is the model's claim, a look at the word and then a compare-and-swap against
+/// what was seen; the one that succeeds is a claim like any other.
+#[inline]
+fn take<H: Host>(host: &H, leaf: Spot, n: u32) -> Take {
+    let word = leaf.word(host);
+    let mut seen = word.load();
+    let mut raced = false;
+    loop {
+        if seen == 0 {
+            return Take::Empty { raced };
+        }
+        let bits = lowest(seen, n);
+        match word.compare_exchange(seen, seen & !bits) {
+            Ok(_) => {
+                return Take::Took {
+                    bits,
+                    emptied: bits == seen,
+                    raced,
+                };
+            }
+            // Bits that went are another claimer's doing; bits that came are a free's.
+            Err(now) => {
+                raced |= seen & !now != 0;
+                seen = now;
+            }
+        }
+    }
+}
+
+/// Where a run of claims has got to, and the summary bits it owes. Only ever made by
+/// [`claim_next`], and kept for no longer than one fill, which ends it with [`finish_run`].
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(crate) struct Cursor {
     region: RegionId,
-    word: u32,
+    /// The leaf word the next claim of the run looks at first.
+    next: u32,
+    /// The group the run is in: its level-1 summary word, which has a bit for each of 64 leaf
+    /// words.
+    group: u32,
+    /// The words of the group the run has emptied and whose summary bits it has not yet
+    /// cleared, as bits of the group's summary word.
+    emptied: u64,
 }
 
-/// [`claim`] for one of a run of claims, as a fill makes them. With a `cursor` from the run's
-/// last claim, the search starts there: that word if it has free slots left, else the lowest
-/// word above it in its region that the summary bits lead to, found by walking up only as far
-/// as a summary word with a set bit beyond the path. Only when that leads nowhere, or meets a
-/// stale bit or a lost race, does it search from the class's top word. Updates `cursor`.
-///
-/// The last claim took the lowest free slots there were, so the slots below the cursor were
-/// not free a moment ago, and the run still takes the lowest it can see. What it can miss is a
-/// slot freed below the cursor since, by another thread: the order of the two is a race either
-/// way, and the next fill starts from the top. Words found empty on the way are cleared as a
-/// claim from the top clears them, and the claim itself is the same compare-and-swap.
-pub(crate) fn claim_next<H: Host>(host: &H, n: u32, cursor: &mut Option<Cursor>) -> Option<Taken> {
-    let taken = match cursor.and_then(|at| claim_after(host, n, at)) {
-        Some(taken) => taken,
-        None => claim(host, n)?,
-    };
-    *cursor = Some(Cursor {
-        region: taken.region,
-        word: taken.word,
-    });
-    Some(taken)
-}
-
-/// The search of [`claim_next`] within the cursor's region: `None` if it leads nowhere there.
-fn claim_after<H: Host>(host: &H, n: u32, at: Cursor) -> Option<Taken> {
-    let height = host.layout().height();
-    let leaf = Spot::leaf(at.region, at.word);
-    if leaf.word(host).load() != 0 {
-        return descend(host, leaf, n);
-    }
-    let mut spot = leaf;
-    while spot.level < height {
-        let (index, bit) = (spot.index / BITS, spot.index % BITS);
-        let above = Spot {
-            level: spot.level + 1,
-            index,
-            ..spot
-        };
-        let beyond = above.word(host).load() & (u64::MAX << bit << 1);
-        if beyond != 0 {
-            let next = Spot {
-                index: index * BITS + beyond.trailing_zeros(),
-                ..spot
-            };
-            return descend(host, next, n);
+impl Cursor {
+    fn at(leaf: Spot) -> Cursor {
+        Cursor {
+            region: leaf.region,
+            next: leaf.index,
+            group: leaf.index / BITS,
+            emptied: 0,
         }
-        spot = above;
     }
-    None
+}
+
+/// [`claim`] for one of a run of claims, as a fill makes them. Updates `cursor`, which starts
+/// as `None`; a fill ends the run with [`finish_run`].
+///
+/// The first claim searches from the class's top word. Later ones continue from the cursor in
+/// its region: the word claimed from last if it has slots left, else the lowest word beyond it
+/// that the summary bits lead to, found by walking up only as far as a summary word with a set
+/// bit beyond the path. Only when the region has nothing more does the run search from the top
+/// again, so it returns `None` only when a search from the top finds nothing.
+///
+/// Fillers of one class all start at the lowest free word, and if they went on side by side
+/// they would meet at every word: each claim a contended compare-and-swap, each emptied word a
+/// contended clear of the summary word they share. So a run that meets another thread there
+/// (another claimer took bits of the word under it, or a word it was led to is empty) moves to
+/// the next group of 64 words, whose leaf words are cache lines of their own. After a few
+/// meetings each filler works alone, near the bottom of the heap still.
+///
+/// A run does not clear the summary bit of a word it finds empty: another thread emptied it and
+/// clears it, unless that thread was lost in a fork, and then the next search from the top
+/// clears it. And the bits of the words the run empties itself are cleared together, one
+/// atomic AND for each group the run leaves (`clear_group`), not one for each word.
+///
+/// The run takes the lowest slots it can see, except where it moved past another thread. What
+/// it can miss is a slot freed behind it since, by another thread, which is a race either way,
+/// and the next fill starts from the top.
+///
+/// Out of line: inlined into `Back::fill`, its state took registers from the fill's loop over
+/// the slots, which then reloaded two values from the stack for every slot.
+#[inline(never)]
+pub(crate) fn claim_next<H: Host>(host: &H, n: u32, cursor: &mut Option<Cursor>) -> Option<Taken> {
+    let mut run = *cursor;
+    loop {
+        let found = run.and_then(|at| seek(host, at.region, at.next));
+        let (leaf, at) = match (found, run) {
+            (Some(index), Some(at)) => {
+                let leaf = Spot::leaf(at.region, index);
+                if leaf.index / BITS == at.group {
+                    (leaf, at)
+                } else {
+                    clear_group(host, at);
+                    (leaf, Cursor::at(leaf))
+                }
+            }
+            _ => {
+                if let Some(at) = run.take() {
+                    clear_group(host, at);
+                }
+                *cursor = None;
+                let leaf = from_top(host)?;
+                (leaf, Cursor::at(leaf))
+            }
+        };
+        let from_top = run.is_none();
+        let (bits, emptied, raced) = match take(host, leaf, n) {
+            Take::Took {
+                bits,
+                emptied,
+                raced,
+            } => (bits, emptied, raced),
+            Take::Empty { raced } => {
+                // A search from the top that finds a word empty under its bit clears the bit,
+                // which is what removes a stale one; a run leaves it to the thread that
+                // emptied the word.
+                if from_top && !raced {
+                    clear(host, leaf);
+                }
+                run = Some(Cursor {
+                    next: past_group(leaf.index),
+                    ..at
+                });
+                continue;
+            }
+        };
+        let mut at = at;
+        if emptied {
+            if host.layout().height() == 0 {
+                // The word's summary bit is a class word's, shared with other regions.
+                clear(host, leaf);
+            } else {
+                at.emptied |= 1 << (leaf.index % BITS);
+            }
+        }
+        at.next = if raced {
+            past_group(leaf.index)
+        } else if emptied {
+            leaf.index + 1
+        } else {
+            leaf.index
+        };
+        *cursor = Some(at);
+        return Some(Taken {
+            region: leaf.region,
+            word: leaf.index,
+            bits,
+        });
+    }
+}
+
+/// Ends a run of claims: clears the summary bits it owes. A run that is never finished, as in
+/// a thread lost in a fork, leaves them set over empty words, which the protocol allows.
+pub(crate) fn finish_run<H: Host>(host: &H, cursor: Option<Cursor>) {
+    if let Some(at) = cursor {
+        clear_group(host, at);
+    }
+}
+
+/// The first leaf word of the group after the one `index` is in.
+#[inline(always)]
+pub(super) fn past_group(index: u32) -> u32 {
+    (index | (BITS - 1)) + 1
+}
+
+/// The lowest leaf word of `region` at or after word `first` that the summary bits lead to,
+/// or `None` if they lead to none. It reads and writes nothing else: a summary word found empty
+/// on the way down is passed over, as its stale bit is another thread's to clear.
+fn seek<H: Host>(host: &H, region: RegionId, first: u32) -> Option<u32> {
+    let layout = host.layout();
+    let height = layout.height();
+    // Looking for the lowest word of `level` at or after `index` whose bit is set.
+    let (mut level, mut index) = (0u8, first);
+    loop {
+        // Up, to the lowest summary word with a set bit at or after the path.
+        loop {
+            if level == height {
+                if index > 0 {
+                    return None;
+                }
+                break;
+            }
+            if index >= layout.level_words(level) {
+                level += 1;
+                index = layout.level_words(level);
+                continue;
+            }
+            let above = Spot {
+                region,
+                level: level + 1,
+                index: index / BITS,
+            };
+            let set = above.word(host).load() & (u64::MAX << (index % BITS));
+            if set != 0 {
+                index = above.index * BITS + set.trailing_zeros();
+                break;
+            }
+            level += 1;
+            index = above.index + 1;
+        }
+        // Down, through the lowest set bit of each word.
+        loop {
+            if level == 0 {
+                return Some(index);
+            }
+            let seen = Spot {
+                region,
+                level,
+                index,
+            }
+            .word(host)
+            .load();
+            if seen == 0 {
+                index += 1;
+                break;
+            }
+            level -= 1;
+            index = index * BITS + seen.trailing_zeros();
+        }
+    }
+}
+
+/// Clears the summary bits of the words a run emptied in its group, with one atomic AND of the
+/// group's summary word, then reads each of those words again, as a clear of one word does.
+/// A word that is not empty any more has its bit set back by a walk up, as a release makes one.
+/// If the AND emptied the summary word and every word read empty, the summary word is now one
+/// this thread emptied, and its own bit is cleared in turn.
+///
+/// This is the clears of the model made back to back, one for each word, which the model
+/// allows: a thread may hold an emptied word's clear for as long as it likes, and these clears
+/// are of distinct bits of one word, so one AND makes them all at one instant.
+fn clear_group<H: Host>(host: &H, at: Cursor) {
+    if at.emptied == 0 {
+        return;
+    }
+    let group = Spot {
+        region: at.region,
+        level: 1,
+        index: at.group,
+    };
+    let left = group.word(host).fetch_and(!at.emptied) & !at.emptied;
+    let mut all_empty = true;
+    let mut rest = at.emptied;
+    while rest != 0 {
+        let leaf = Spot::leaf(at.region, at.group * BITS + rest.trailing_zeros());
+        rest &= rest - 1;
+        if leaf.word(host).load() != 0 {
+            all_empty = false;
+            up(host, leaf, true);
+        }
+    }
+    if left == 0 && all_empty {
+        clear(host, group);
+    }
 }
 
 /// Claims exactly `bits` of a leaf word if every one of them is free, as a purge does. Returns

@@ -102,6 +102,7 @@ impl<'a, O: Os> Back<'a, O> {
             });
             got = self.put(host.layout(), out, got, taken.region, high, slots);
         }
+        tree::finish_run(&host, cursor);
         self.unretain(class.class(), resident);
         self.revive(class.class(), revived);
         while got < out.len() {

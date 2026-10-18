@@ -359,7 +359,6 @@ impl Layout {
     }
 
     /// Words in tree level `level`.
-    #[cfg(any(test, kani))]
     #[inline(always)]
     pub(crate) const fn level_words(&self, level: u8) -> u32 {
         self.count[level as usize % MAX_LEVELS]
