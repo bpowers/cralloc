@@ -85,9 +85,9 @@ const _: () = {
     let end = start + spec::RSEQ_AREA_LEN;
     assert!(spec::RSEQ_AREA_ALIGN == spec::SLAB_BYTES);
     assert!(start.is_multiple_of(32) && end <= 1024);
-    assert!(
-        spec::RSEQ_CPU_ID + 4 <= spec::RSEQ_AREA_LEN && spec::RSEQ_CS + 8 <= spec::RSEQ_AREA_LEN
-    );
+    // The bytes the kernel writes and the routines read, `cpu_id` and `rseq_cs`, are within
+    // bytes 0 to 15 of that chunk, where no hot word is.
+    assert!(spec::RSEQ_CPU_ID + 4 <= 16 && spec::RSEQ_CS + 8 <= 16);
 };
 
 /// The key whose destructor unregisters a thread's area, plus one; zero until made.
