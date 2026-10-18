@@ -184,6 +184,20 @@ impl<O: Os> Host for ClassHost<'_, O> {
     }
 
     #[inline(always)]
+    fn leaves(&self, region: RegionId, count: u32) -> &[Atomic] {
+        if count > self.layout.level_words(0) {
+            self.abort("more leaf words than a region has");
+        }
+        let first = self
+            .meta_at(region, self.layout.tree_word(0, 0) as usize * WORD_BYTES)
+            .cast::<Atomic>();
+        // SAFETY: BACK-HOST-03 in docs/safety/asmalloc/back/host-safety.md. The words are the
+        // first `count` of the region's leaf bitmap, which lies in its metadata block, and the
+        // caller knows each to be committed; they are only ever accessed atomically.
+        unsafe { core::slice::from_raw_parts(first.as_ptr(), count as usize) }
+    }
+
+    #[inline(always)]
     fn grow(&self, region: RegionId) -> &Atomic {
         &self.headers[region.index() % MAX_REGIONS].grow
     }

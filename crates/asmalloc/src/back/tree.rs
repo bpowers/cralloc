@@ -75,6 +75,11 @@ pub(crate) trait Host {
     /// a slot below the watermark.
     fn meta(&self, region: RegionId, word: u32) -> &Self::W;
 
+    /// Leaf words `0..count` of a region's bitmap, as [`Host::meta`] gives them one at a time.
+    /// The caller knows them all to be committed: `count` covers only slots below a watermark
+    /// it read for the region. Aborts if `count` is more than the region has.
+    fn leaves(&self, region: RegionId, count: u32) -> &[Self::W];
+
     /// A region's `Grow` word: its watermark and committed pages (`layout::Grow`).
     fn grow(&self, region: RegionId) -> &Self::W;
 
@@ -771,6 +776,30 @@ impl<'h, H: Host> Release<'h, H> {
         old == 0
     }
 
+    /// Leaf words `0..count` of `region`, for [`Release::leaf_bit_in`]: see [`Host::leaves`].
+    #[inline]
+    pub(crate) fn leaves(&self, region: RegionId, count: u32) -> &'h [H::W] {
+        self.host.leaves(region, count)
+    }
+
+    /// Frees the one slot `bit` of word `index` of `leaves`, a region's leaf words as
+    /// [`Release::leaves`] gave them, with one atomic OR, and aborts if it was free already: a
+    /// double free. Unlike [`Release::leaf_unowed`] it does not say whether the word was empty,
+    /// so the caller owes the summary bit with `must` false: it reads the bit before it sets
+    /// it, as a free into a word that was not empty does. That is `Look` in
+    /// `tla/Summary.tla`. Using only the OR's own bit lets it compile to one `lock bts`.
+    /// Aborts if `index` is not one of `leaves`.
+    #[inline(always)]
+    pub(crate) fn leaf_bit_in(&mut self, leaves: &[H::W], index: u32, bit: u64) {
+        let Some(word) = leaves.get(index as usize) else {
+            self.host.abort("a leaf word past the region's watermark");
+        };
+        if word.fetch_or(bit) & bit != 0 {
+            self.host
+                .abort("double free: an object was freed while already free");
+        }
+    }
+
     /// Owes the summary bits above leaf words of `region` that share one summary word, freed
     /// by [`Release::leaf_unowed`]: `words` has bit `w % 64` for each such word `w`, `index` is
     /// any of them, and `must` says whether any was empty before its OR. One debt for all of
@@ -783,6 +812,59 @@ impl<'h, H: Host> Release<'h, H> {
         // A region with one leaf word has its bit in a class word, whatever the word's number.
         let bits = if self.height == 0 { bit } else { words };
         self.owe_bits(above, bits, must);
+    }
+
+    /// [`Release::owe_leaves`], with the debt paid at once rather than held, for a caller
+    /// that has merged the debts of the words under each summary word itself: sets whatever of
+    /// the bits is clear, reading the word first unless `must`. Returns what the summary word
+    /// then owes the word above it, for the caller to merge with others' and hand to
+    /// [`Release::owe_upward`]; `None` if nothing is above.
+    #[inline(never)]
+    pub(crate) fn pay_leaves(
+        &mut self,
+        region: RegionId,
+        index: u32,
+        words: u64,
+        must: bool,
+    ) -> Option<Upward> {
+        if self.height >= 2 {
+            // Levels 1 and 2 are the region's own, which is every small class's tree: the
+            // general walk below, with its tests of where each level is, made plain. A widely
+            // scattered launder comes here for nearly every slot.
+            let summary = index / BITS;
+            let word = self
+                .host
+                .meta(region, self.host.layout().tree_word(1, summary));
+            let was_empty = set_missing(word, words, must);
+            let up = Spot {
+                region,
+                level: 2,
+                index: summary / BITS,
+            };
+            return Some(Upward {
+                key: up.key(self.height),
+                spot: up,
+                bits: 1 << (summary % BITS),
+                must: was_empty,
+            });
+        }
+        let (above, bit) = Spot::leaf(region, index).parent(self.height)?;
+        let bits = if self.height == 0 { bit } else { words };
+        let was_empty = self.set_missing(above, bits, must);
+        let (up, bit) = above.parent(self.height)?;
+        Some(Upward {
+            key: up.key(self.height),
+            spot: up,
+            bits: bit,
+            must: was_empty,
+        })
+    }
+
+    /// Owes what [`Release::pay_leaves`] returned, merged with other such debts to the same
+    /// word.
+    #[inline(never)]
+    pub(crate) fn owe_upward(&mut self, debt: Upward) {
+        self.owe_bits(debt.spot, debt.bits, debt.must);
     }
 
     /// Ends the process: the heap has been misused.
@@ -841,15 +923,46 @@ impl<'h, H: Host> Release<'h, H> {
     /// it in turn: the healing walk always goes to the top.
     fn pay(&mut self, at: usize, owed: Owed) {
         let spot = Spot::of_key(self.host, at as u8 + 1, owed.key, self.under);
-        let word = spot.word(self.host);
-        let was_empty = if owed.must != 0 {
-            word.fetch_or(owed.bits) == 0
-        } else {
-            let missing = owed.bits & !word.load();
-            missing != 0 && word.fetch_or(missing) == 0
-        };
+        self.settle(spot, owed.bits, owed.must != 0);
+    }
+
+    /// Sets whatever of `bits` in `spot`'s word is clear (all of them unread, with `must`),
+    /// and owes the bit above it in turn.
+    #[inline(always)]
+    fn settle(&mut self, spot: Spot, bits: u64, must: bool) {
+        let was_empty = self.set_missing(spot, bits, must);
         self.owe(spot, was_empty);
     }
+
+    /// Sets whatever of `bits` in `spot`'s word is clear (all of them unread, with `must`), and
+    /// says whether the word was empty before.
+    #[inline(always)]
+    fn set_missing(&mut self, spot: Spot, bits: u64, must: bool) -> bool {
+        set_missing(spot.word(self.host), bits, must)
+    }
+}
+
+/// Sets whatever of `bits` in summary word `word` is clear, or all of them unread with `must`,
+/// and says whether the word was empty before.
+#[inline(always)]
+fn set_missing<W: Word>(word: &W, bits: u64, must: bool) -> bool {
+    if must {
+        word.fetch_or(bits) == 0
+    } else {
+        let missing = bits & !word.load();
+        missing != 0 && word.fetch_or(missing) == 0
+    }
+}
+
+/// Summary bits a summary word owes the word above it, from [`Release::pay_leaves`]: `bits`
+/// of the word `spot`, set unread if `must`. Debts with the same `key` are to the same word
+/// and may be merged, their bits and their `must` ORed.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct Upward {
+    pub(crate) key: u64,
+    spot: Spot,
+    pub(crate) bits: u64,
+    pub(crate) must: bool,
 }
 
 /// Walks up from `spot`, whose word is not empty, making sure every summary bit on the way to

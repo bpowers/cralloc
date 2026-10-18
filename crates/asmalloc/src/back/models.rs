@@ -22,7 +22,7 @@
 //! (`scripts/gate --all`); the merge gate runs each scenario one preemption lower.
 
 use super::explore::{Config, Outcome, TWord, explore};
-use super::group::Gather;
+use super::group::{Direct, Gather};
 use super::layout::{Step, Unit};
 use super::region::{self, Carve, Purge};
 use super::testhost::TestHost;
@@ -1384,6 +1384,133 @@ fn merged_debts_race_claims_on_one_word_regions_quickly() {
 #[ignore = "slow: run with scripts/gate --all"]
 fn merged_debts_race_claims_on_one_word_regions_fully() {
     merged_debts_race_claims_on_one_word_regions(2);
+}
+
+/// Frees `slots` as a scattered launder does: each with its own OR, owing its summary bit
+/// with the bit read before it is set (`Look`), the debts merged per summary word (`Direct`).
+fn free_direct(host: &Host8, slots: &[(RegionId, u32)]) {
+    let Some(&(region, _)) = slots.first() else {
+        return;
+    };
+    let mut release = tree::Release::new(host, region);
+    let mut direct = Direct::new();
+    for &(region, slot) in slots {
+        let leaves = release.leaves(region, slot / BITS + 1);
+        direct.free_slot(&mut release, leaves, region, slot);
+    }
+    direct.finish(&mut release);
+    release.finish();
+}
+
+/// `Summary_look_deep.cfg`: a scattered launder on two regions of two summary levels, into
+/// words that were empty (so with `must` the summary bits would be set unread) under two
+/// summary words of one region and one of the other, races a run of claims and a claim from
+/// the top. Preemptions bounded to two (one in the quick run).
+fn direct_frees_race_claims_on_deep_trees(preemptions: usize) {
+    explore(
+        Config {
+            preemptions: Some(preemptions),
+            ..Config::ALL
+        },
+        3,
+        || {
+            let host = Host8::new(standard(), class(8), 2);
+            assert_eq!(host.layout().height(), 2);
+            for r in 0..2 {
+                host.carve_all(host.region_at(r), host.layout().slots());
+            }
+            free_now(&host, host.region_at(0), 0);
+            free_now(&host, host.region_at(0), 64 * 64);
+            (host, Mutex::new(Vec::new()))
+        },
+        |(host, kept), me| {
+            let (r0, r1) = (host.region_at(0), host.region_at(1));
+            let got = match me {
+                0 => {
+                    let slots = [(r0, 65), (r1, 3), (r0, 64 * 64 + 2), (r0, 1), (r1, 64 + 3)];
+                    free_direct(host, &slots);
+                    Vec::new()
+                }
+                1 => claim_run_of(host, 3, 1),
+                _ => claim(host, 1),
+            };
+            kept.lock().unwrap().extend(got);
+        },
+        |(host, kept), outcome| {
+            assert!(outcome.killed.is_empty());
+            let first = host.global(host.region_at(1), 0);
+            let expected = [0, 1, 65, 64 * 64, 64 * 64 + 2, first + 3, first + 67];
+            run_check(host, 2, kept, &expected);
+        },
+    );
+}
+
+#[test]
+#[cfg_attr(miri, ignore)]
+fn direct_frees_race_claims_on_deep_trees_quickly() {
+    direct_frees_race_claims_on_deep_trees(1);
+}
+
+#[test]
+#[ignore = "slow: run with scripts/gate --all"]
+fn direct_frees_race_claims_on_deep_trees_fully() {
+    direct_frees_race_claims_on_deep_trees(2);
+}
+
+/// `Summary_look_crash.cfg`, on two summary levels: a scattered launder, a claimer and a run of
+/// claims may vanish at any step, as in a forked child. Afterwards a single free into each
+/// word makes it reachable, and claims find every free slot. Preemptions bounded to two (one
+/// in the quick run).
+fn direct_frees_lost_at_any_step(preemptions: usize) {
+    explore(
+        Config {
+            preemptions: Some(preemptions),
+            crash: true,
+            ..Config::ALL
+        },
+        3,
+        || {
+            let host = deep_run_setup();
+            (host, Mutex::new(Vec::new()))
+        },
+        |(host, kept), me| {
+            let r0 = host.region_at(0);
+            let got = match me {
+                0 => {
+                    free_direct(host, &[(r0, 65), (r0, 64 * 64 + 1), (r0, 1)]);
+                    Vec::new()
+                }
+                1 => claim_run_of(host, 2, 1),
+                _ => claim(host, 1),
+            };
+            kept.lock().unwrap().extend(got);
+        },
+        |(host, kept), _| {
+            let kept: Vec<_> = kept.lock().unwrap().clone();
+            let distinct: BTreeSet<_> = kept.iter().copied().collect();
+            assert_eq!(distinct.len(), kept.len(), "a slot claimed twice");
+            let r0 = host.region_at(0);
+            for w in [0, 1, 64] {
+                free_one(host, r0, w * BITS + 3);
+                assert!(
+                    host.path_set(Node::leaf(r0, w)),
+                    "word {w} stays invisible after a free into it"
+                );
+            }
+        },
+    );
+}
+
+#[test]
+#[cfg_attr(miri, ignore)]
+fn direct_frees_lost_at_any_step_quickly() {
+    direct_frees_lost_at_any_step(1);
+}
+
+#[test]
+#[ignore = "slow: run with scripts/gate --all"]
+fn direct_frees_lost_at_any_step_fully() {
+    direct_frees_lost_at_any_step(2);
 }
 
 /// `Summary_heal_crash.cfg`: as `summary_three_threads_bounded`, but threads 1 and 2 may vanish
