@@ -452,9 +452,9 @@ each region and the high end drains, which is where purging starts.
 Every entry to a slow path does a bounded amount of maintenance before it returns: one step
 of purging, one look at a class of its own slab, one look for an idle cache, and at most one
 magazine laundered for each rule that launders. A large allocation or free counts as a slow
-path. There is no
-background thread and no timer. The work is done in units small enough that no single call
-pays much. This is mimalloc's pacing applied to a per-CPU design.
+path. By default there is no background thread and no timer. The work is done in units
+small enough that no single call pays much. This is mimalloc's pacing applied to a per-CPU
+design.
 
 How often a slow path runs depends on how hard the process allocates, so anything that
 should happen at a rate in time reads the CPU's cycle counter, which costs no system call,
@@ -467,6 +467,16 @@ for an interval, which sends that CPU to its slow path. Only a process in which 
 stays inside its magazines has no heartbeat at all. It keeps what it held when it went
 quiet: the free memory not yet purged, its parked objects, and the pages those pin. That
 lasts until a slow path runs or the program calls `collect`.
+
+A program that cannot accept that asks for a background thread. The thread is opt-in, so
+that the default stays free of hidden threads, and it buys nothing on the fast path, which
+stays as it is. Once an interval it calls `maintain`, which does for the whole heap what the
+heartbeats of an interval would have done: the idle check on every slab, each depot stack's
+shedding, and the clocked purge. It is an ordinary thread of the process, started by the
+layer that has a thread library to start it with: a function behind a cargo feature for a
+Rust program, an environment variable for the preload library. A program with an idle hook
+of its own can call `maintain` from there and needs no thread. The child of a fork does not
+inherit the thread.
 
 Objects mostly circulate through magazines and the depot without touching the bitmaps. They
 reach the bitmaps when a class's depot stack is over its target, and through the rules under
@@ -944,12 +954,14 @@ Miri, fuzzing, the preload checks and the benchmarks run on demand.
 
 ### Safety ledger
 
-An `unsafe` block is covered by a machine-checked proof where one is practical. Where it is
-not, the block has an entry in `docs/safety/<crate>/<file>-safety.md`, named after the source
-file without its `.rs`. An entry states the block's preconditions, the invariants that make
-them hold, and a proof on paper. A fresh agent that did not write the code reviews each
-entry adversarially. Changing the block means updating the entry and having it reviewed
-again.
+An `unsafe` block in code that ships is covered by a machine-checked proof where one is
+practical. Where it is not, the block has an entry in `docs/safety/<crate>/<file>-safety.md`,
+named after the source file without its `.rs`. An entry states the block's preconditions,
+the invariants that make them hold, and a proof on paper. A fresh agent that did not write
+the code reviews entries adversarially and records the commit it reviewed. A script in the
+merge gate checks that every safety comment names an entry and every entry is named, and
+lists the entries changed since their review; that list is cleared before a release. The
+simulator, the twins and other test scaffolding are outside the ledger.
 
 ### Performance
 
