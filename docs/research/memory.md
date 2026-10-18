@@ -987,6 +987,210 @@ MiB and is twice as high at 12 s. At 16 MiB the over-cap pass takes far more at 
 Ends of the worst cases, eight seconds after the event, before / after / cap 16: phase change
 7.5 / 6.8 / 6.0, many classes on 2 CPUs 1.2 / 1.2 / 1.2, 16 threads on 2 CPUs 1.6 / 1.5 / 1.4.
 
+## Build phases against mimalloc: huge pages and the threshold
+
+2026-10-18, at main `016877c`. The question: on single-threaded build-and-drop jobs asmalloc
+runs about mimalloc's instruction count in more cycles. Which memory effect is it?
+
+- **In the build phases it is huge pages and nothing else.** The extra cycles are 4 KiB page
+  faults and L1 dTLB misses on objects that sit on 4 KiB pages: the first 16 to 18 MiB of
+  each class, and all of every class that never carves 16 MiB. Cache fills from L2, L3 and
+  DRAM in the build phases are the same as mimalloc's or fewer. With transparent huge pages
+  disabled for every process, asmalloc's build phases are level with mimalloc's or faster on
+  all six jobs.
+- **Classes far apart cost nothing beyond their TLB entries.** With huge pages from a class's
+  first carve, every build phase is faster than mimalloc's (BTreeMap 3,687 against 3,799M
+  cycles). What separate regions cost is that each class needs TLB entries of its own,
+  which 4 KiB pages make expensive. Nothing points at the order or spacing of fills.
+- **Two of the four gaps are mostly in the drop, not the build.** Box tree at depth 18 and
+  JSON 8 MiB build or parse level with mimalloc; their deficit is the drop, which runs 1.5
+  times mimalloc's instructions because every object is laundered. BTreeMap's and HashMap's
+  drops are behind the same way (the scattered-launder section of `launder-and-fill.md`).
+- **Recommended: switch a class to huge pages after 4 MiB carved instead of 16, at exactly
+  that point.** Today the huge-page part starts at the first 2 MiB boundary above the
+  commit, so a threshold of N leaves up to N + 2 MiB on small pages. At 4 MiB: BTreeMap 1M
+  942 to 901 cycles/entry (mimalloc 859), tree 18 39.5 to 35.4 (33.8), JSON 8 MiB 16.97 to
+  16.05 (16.09), churn 1M 112.8 to 110.0. Memory: at most 6 MiB more at any peak measured
+  (churn 1M, 115.6 against 109.4; jemalloc 110.2), 1 to 2 MiB on the other heaps of 10 MiB
+  or more, unchanged on small heaps and the worst cases, and lower after a burst. 2 MiB buys
+  another 1 to 3% for up to 6 MiB more than 4 MiB costs (BTreeMap 200k 32.7 against 27.0).
+- **`MADV_COLLAPSE` is not worth adding.** Collapsing a class's carved small pages when it
+  switches at 16 MiB buys most of the 4 MiB threshold's gain on BTreeMap (943 to 911) but
+  little on JSON 8 MiB and nothing on tree 18, whose classes never reach 16 MiB; at 2 or
+  4 MiB it adds nothing over the exact switch. It costs 0.1 to 0.4 ms of synchronous kernel
+  work per 2 MiB in a slow path, and no memory, which is its one merit.
+- **HashMap's build gap is its large tables**, which no class threshold reaches: mimalloc
+  with THP off builds as slowly as asmalloc. Advising every large block of 2 MiB or more for
+  huge pages at allocation (an upper bound, not a proposal: it breaks the sparse-block rule)
+  makes the build level with mimalloc's (2,027 against 2,049M cycles) and the job 474
+  against 459 cycles/entry, the rest being the drop.
+
+### Method
+
+Each job's own phase counters (`bench/workloads`, which already reports build or parse,
+walk and drop), over every repetition of the job, from a workload run by hand: CPU 2,
+sibling idle, under `scripts/memlimit`, the configurations of a job interleaved in a fresh
+random order each round under the shared measurement lock, five rounds, medians. Other work
+ran on the second L3 throughout. Extra counters came from new `BENCH_EVENTS` support in the
+harness (user mode only, in place of user cycles; `bench/README.md`), one set per run: L1
+dTLB misses (`0xff45`) and page walks for 4 KiB and 2 MiB pages (`0x1045`, `0x4045`); L1
+fills from L2, from L3 and from DRAM (`0x0144`, `0x0244`, `0x4844`). Zen 5 has no event for
+page-walk cycles. Kernel cycles are cycles less user cycles. "THP off" is
+`bench/probes/memory/thp-off.py` (`PR_SET_THP_DISABLE` before `exec`), which disables huge
+pages even where a process advises them; mimalloc's huge-page memory went from 18 MiB to
+none under it, and jemalloc, which asks for none, did not move. Scratch builds, not merged,
+changed only `policy::HUGE_AFTER_HUGE_PAGES`, where the huge-page part starts, a
+`MADV_COLLAPSE` call at the switch, or advice for large blocks. No huge-page fault fell back
+to small pages during the sessions (`thp_fault_fallback` unchanged). Memory: cgroup peaks
+from `peaks.sh`, the worst cases and the after-peak curve from `memrun.sh`, two rounds,
+which agreed within 0.4 MiB; the eight-thread cases ran on CPUs 0 to 7.
+
+### Where the cycles are
+
+Millions over the job's phase, all repetitions (BTreeMap and HashMap 1M entries five times;
+tree 18 four times; JSON 8 MiB three times). "First carve" is huge pages from a class's
+first carve.
+
+| | asmalloc | mimalloc | asmalloc, THP off | mimalloc, THP off | first carve |
+|---|---:|---:|---:|---:|---:|
+| **BTreeMap build**, cycles | 4,036 | 3,799 | 4,110 | 4,153 | 3,687 |
+| instructions | 5,185 | 5,172 | 5,211 | 5,296 | 5,087 |
+| kernel cycles | 76 | 25 | 90 | 88 | 26 |
+| page faults (thousands) | 24.6 | 0.1 | 31.0 | 32.6 | 0.1 |
+| L1 dTLB misses | 34.6 | 0.0 | 36.8 | 33.4 | 0.3 |
+| page walks | 2.9 | 0.0 | 5.3 | 5.3 | 0.0 |
+| L1 fills from L2 / L3 / DRAM | 81 / 83 / 11.3 | 81 / 80 / 12.6 | 82 / 83 / 11.4 | 83 / 83 / 13.1 | 81 / 81 / 10.5 |
+| BTreeMap drop, cycles / instructions | 685 / 993 | 504 / 281 | 707 / 993 | 554 / 281 | 671 / 990 |
+| **HashMap build**, cycles | 2,452 | 2,061 | 2,471 | 2,424 | 2,401 |
+| kernel cycles | 161 | 47 | 161 | 190 | 123 |
+| page faults (thousands) | 60.4 | 0.2 | 60.4 | 74.6 | 42.5 |
+| L1 dTLB misses / page walks | 10.9 / 2.6 | 0.0 / 0.0 | 10.9 / 2.6 | 10.2 / 2.5 | 10.3 / 2.3 |
+| HashMap drop, cycles / instructions | 373 / 820 | 247 / 201 | 374 / 820 | 235 / 201 | 375 / 820 |
+| **Tree 18 build**, cycles | 33.5 | 34.4 | 34.5 | 42.4 | 28.1 |
+| kernel cycles / faults (thousands) | 5.9 / 3.1 | 1.6 / 0.0 | 6.8 / 3.1 | 7.6 / 4.1 | 2.2 / 0.0 |
+| walk | 11.4 | 11.7 | 12.3 | 14.7 | 10.3 |
+| drop, cycles / instructions | 34.5 / 121 | 24.9 / 83 | 34.6 / 121 | 28.0 / 83 | 33.1 / 120 |
+| **JSON 8 MiB parse**, cycles | 306 | 306 | 350 | 367 | 284 |
+| kernel cycles / faults (thousands) | 27 / 8.4 | 11 / 0.0 | 50 / 20.4 | 53 / 22.0 | 12 / 0.5 |
+| drop, cycles / instructions | 118 / 282 | 98 / 194 | 151 / 282 | 126 / 194 | 115 / 282 |
+
+- **BTreeMap.** The build is 237M cycles behind at equal instructions: 51M in the kernel
+  (24.6k faults against 0.1k), and the rest in user mode with 34.6M L1 dTLB misses and 2.9M
+  page walks against none, about 9 cycles a miss. IBS samples of the misses (in a build
+  with a 2 MiB threshold) put half of them in one class that spans 7 MiB, by its size the
+  internal nodes, which never reach 16 MiB and so lie entirely on 4 KiB pages under main,
+  and most of the rest in the small-page prefix of the leaf class. A lookup touches an internal node and a leaf on
+  pages far apart; with 4 KiB pages the 96-entry L1 dTLB cannot hold the path. The drop is
+  180M behind, at 3.5 times the instructions: one locked OR a scattered slot.
+- **HashMap.** The build is 391M behind: 114M in the kernel (60k faults against 0.2k) and
+  the rest with 10.9M dTLB misses and 2.6M walks, all on the large tables (thresholds move
+  none of it). mimalloc with THP off builds in 2,424M, level with asmalloc. The drop is 126M
+  behind, at four times the instructions: scattered launders of the values.
+- **Tree 18.** The build is level (33.5 against 34.4) despite 3k faults; the walk is level.
+  The gap, 3.9 cycles a node, is the drop: 34.5 against 24.9M cycles at 1.5 times the
+  instructions, every node laundered in dense magazines (about 4.6 cycles a node). The whole
+  tree is 12 MiB, under the threshold, which is why depth 20 (48 MiB) is level and depth 18
+  is not: with huge pages its build is faster than mimalloc's and makes up the drop.
+- **JSON 8 MiB.** The parse is level (306 both), with 16M more kernel cycles than mimalloc
+  offset by fewer user cycles. The gap is the drop, 20M cycles at 88M more instructions.
+- **THP off.** Every build phase of asmalloc is level with mimalloc's or faster (tree 20:
+  48.3 against 68.1 cycles/node overall), and mimalloc keeps its lead only through its
+  drops. jemalloc is unchanged by THP off, as it should be.
+
+### The threshold
+
+Exact switches (the huge-page part starts at the threshold) at 2, 4 and 8 MiB against main
+(16 MiB, with the part starting at the next 2 MiB boundary above the commit). Time, five
+interleaved rounds, medians; most rounds lay within 2% of their median, with single slow
+rounds up to 6% above it.
+
+| Job | main | exact 8 | exact 4 | exact 2 | first carve | mimalloc | jemalloc |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| BTreeMap 1M, cycles/entry | 942 | 917 | 901 | 890 | 871 | 859 | 989 |
+| HashMap 1M, cycles/entry | 563 | 561 | 563 | 563 | 555 | 462 | 634 |
+| tree 18, cycles/node | 39.5 | 36.7 | 35.4 | 34.5 | 34.1 | 33.8 | 65.1 |
+| tree 20, cycles/node | 44.0 | 41.4 | 40.7 | 40.4 | 39.8 | 43.7 | 100.5 |
+| JSON 8 MiB, cycles/byte | 16.97 | 16.64 | 16.05 | 15.62 | 15.55 | 16.09 | 23.42 |
+| JSON 32 MiB, cycles/byte | 16.25 | 16.31 | 15.92 | 15.88 | 16.11 | 16.54 | 23.43 |
+| churn 1M live, cycles/op | 112.8 | 111.9 | 110.0 | 108.1 | | 187.0 | 127.1 |
+| churn 1k live, cycles/op | 25.33 | 25.42 | 25.39 | 25.34 | | 45.79 | 36.57 |
+
+"First carve" is from a separate session of the same design, which had no churn jobs. Tree
+18 under main ranged from 38.0 to 39.9 across rounds, and main's median on it was 37.9 and
+39.5 in two sessions; its differences under about 4% are not resolved.
+
+Cgroup peak, MiB, two rounds (they agreed within 0.4 MiB), and anonymous resident memory 12
+seconds after freeing 218 MiB (`burst-idle`):
+
+| Job | main | exact 8 | exact 4 | exact 2 | first carve | jemalloc | mimalloc |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| churn 1M live | 109.4 | 112.9 | 115.6 | 118.0 | 133.0 | 110.2 | 116.9 |
+| churn 100k mixed | 33.9 | 33.7 | 33.8 | 33.7 | | 36.7 | |
+| BTreeMap 200k | 25.7 | 27.0 | 27.0 | 32.7 | 61.5 | 25.9 | 26.6 |
+| HashMap 200k | 32.4 | 32.5 | 32.5 | 38.1 | 68.6 | 34.7 | 36.6 |
+| tree 18 | 13.1 | 15.0 | 15.0 | 15.0 | 45.0 | 17.1 | 19.0 |
+| JSON 8 MiB | 90.0 | 90.0 | 91.7 | 91.8 | 123.0 | 89.0 | 96.6 |
+| pipeline, mixed sizes | 5.7 | 5.6 | 5.6 | 5.5 | 52.0 | 5.7 | 9.2 |
+| churn 1k live | 1.2 | 1.1 | 1.2 | 1.2 | 39.0 | 0.9 | 4.7 |
+| burst, peak | 218.3 | 222.2 | 224.9 | 226.4 | 236.7 | 218.6 | 227.0 |
+| burst, after 12 s | 4.9 | 4.0 | 3.6 | 3.4 | 17.1 | 4.5 | 16.2 |
+
+The other worst cases (`worst.sh`: phase change, few classes on many CPUs, many classes on
+few CPUs, 16 threads on 2 CPUs, sparse blocks, a tiny process) were within their run-to-run
+spread of main at exact 2 MiB, the most aggressive of the three.
+
+- **Huge pages from the first carve cost 2 MiB for every class touched**, since the first
+  touch of a class faults a whole huge page: a three-object process holds 20.7 MiB, churn
+  with 1k live objects 39 MiB. It is the fastest setting and not usable.
+- **What a threshold costs is the huge page at each watermark**, up to 2 MiB per class past
+  the threshold, and coarser purging there. Lower thresholds put more classes past it:
+  churn 1M has a dozen classes of 4 to 16 MiB, BTreeMap 200k several of 2 to 4 MiB.
+- **The after-peak curve improves** with a lower threshold: huge pages are purged whole, and
+  more of the heap is in them.
+- **4 MiB is the knee.** It keeps nearly all of the speed of 2 MiB, and its memory cost is
+  confined to heaps with many classes of a few MiB each, at most about 6% of the heap.
+
+### `MADV_COLLAPSE` when a class switches
+
+Built as: when a class switches, advise the whole region for huge pages and collapse every
+whole huge page of what it has carved, so the class is entirely on huge pages from then on.
+Time, from the first two sessions (main's column is the first's):
+
+| Job | main | collapse at 16 | exact 2 | collapse at 2 | collapse at 4 |
+|---|---:|---:|---:|---:|---:|
+| BTreeMap 1M, cycles/entry | 943 | 911 | 892 | 891 | 896 |
+| tree 18, cycles/node | 37.9 | 39.6 (never switches) | 34.7 | 35.5 | 36.9 |
+| JSON 8 MiB, cycles/byte | 16.83 | 16.64 | 15.69 | 16.15 | 16.43 |
+
+It buys back dTLB misses (BTreeMap at 2 MiB: 9.5M against 15.5M with the exact switch) and
+pays them in kernel time (60M against 40M cycles): 0.1 to 0.4 ms of synchronous work per
+2 MiB, in a slow path. At 16 MiB it is free in memory and worth 3% on BTreeMap and 1% on
+JSON; with a lower threshold it adds nothing. Not recommended.
+
+### HashMap
+
+hashbrown allocates each larger table fresh, at its size, so the tables never qualify as
+grown blocks, and a large block allocated at its size gets no huge pages by design (a
+sparsely used one would cost 2 MiB per page touched). As an upper bound only, every large
+block of 2 MiB or more advised at allocation (with the exact 2 MiB switch): build 2,027
+against mimalloc's 2,049M cycles, faults 8.8k against 47.7k, walks 0.1M against 2.4M,
+567 to 474 cycles/entry; peak resident set lower, 188 against 219 MiB, since a freed slot
+with huge pages is purged at its free. A rule that could earn this without the sparse risk needs
+evidence of density at allocation, which a fresh table does not give; one candidate, not
+built, is to learn it per class at the free (a `mincore` of a freed block of 2 MiB or more,
+or the dense check the grown rule already uses), so that later tables of a class that were
+dense get huge pages.
+
+### What is not explained
+
+- Why identical builds of main read 37.9 and 39.5 cycles a node on tree 18 in two sessions
+  an hour apart, with every other job steady. Occasional slow runs (up to 44.9) appear in
+  every configuration of this short job.
+- With the exact 2 MiB switch BTreeMap still takes 15.5M L1 dTLB misses, all on 4 KiB
+  pages (the 2 MiB prefixes and classes under 2 MiB), and builds 100M cycles slower than
+  with huge pages from the first carve. That is expected from the counts; it is noted
+  because a cheaper way to cover the prefix than collapsing it was not found.
+
 ## Reproducing
 
 ```
@@ -1004,4 +1208,11 @@ python3 bench/probes/memory/summ.py -c -s bench/target/memory-out/phase.base-ms.
 bench/probes/memory/build.sh $W/bench asmalloc bg=asmalloc-background je sys=
 cargo build --release -p asmalloc-preload
 bench/probes/memory/background.sh $W 8 3
+# Build phases against mimalloc: one job's phase counters by hand, with extra events, then
+# the same with huge pages disabled for the process. The threshold variants were scratch
+# builds (HUGE_AFTER_HUGE_PAGES changed, the huge-page part starting at the threshold).
+BENCH_CPUS=2 BENCH_EVENTS=dtlb_miss=0xff45,walk_4k=0x1045,walk_2m=0x4045 scripts/memlimit -m 4G -- \
+  taskset -c 2 bench/target/asmalloc/release/workload map kind=btree n=1M reps=5
+BENCH_CPUS=2 scripts/memlimit -m 4G -- taskset -c 2 \
+  python3 -I bench/probes/memory/thp-off.py bench/target/asmalloc/release/workload tree depth=18 reps=4
 ```
