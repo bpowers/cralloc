@@ -567,3 +567,43 @@ fn collect_and_maintain_reach_every_domain() {
         rig.census(&[], false);
     }
 }
+
+/// A class whose stacks hold objects in two domains shares its target between them: each
+/// stack's heartbeat launders it down to half the target, where a class in one domain keeps
+/// the whole.
+#[test]
+fn two_domains_in_use_share_a_class_target() {
+    let class = tiny(0);
+    let target = 12;
+    let tuning = Tuning {
+        max_spares: 0,
+        depot_target: target * class.size(),
+        take_across: usize::MAX / 2,
+        ..QUIET
+    };
+    let rig = two_domains(&[class], 128, tuning);
+    free_into_depot(&rig, 0, class, 30);
+    let alone = in_domain(&rig, 0, class);
+    assert!(
+        alone > target / 2 && alone <= target,
+        "one domain keeps its target: {alone}"
+    );
+    free_into_depot(&rig, 1, class, 30);
+    let second = in_domain(&rig, 1, class);
+    assert!(
+        second <= target / 2,
+        "the second domain keeps half: {second}"
+    );
+    // The first domain's next slow paths of the class lower it to its share too, a magazine
+    // a heartbeat.
+    for _ in 0..target {
+        free_into_depot(&rig, 0, class, 6);
+    }
+    let first = in_domain(&rig, 0, class);
+    assert!(
+        first <= target / 2 + 2,
+        "{alone} {second} then {first}, {}",
+        in_domain(&rig, 1, class)
+    );
+    rig.census(&[], false);
+}

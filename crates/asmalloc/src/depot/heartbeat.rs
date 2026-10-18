@@ -364,12 +364,29 @@ impl<O: Os, R: Routines, S: Source> Cache<'_, O, R, S> {
         }
     }
 
-    /// Launders one magazine of `class` if its depot stack in `domain` is over its target.
+    /// Launders one magazine of `class` if its depot stack in `domain` is over its target. The
+    /// target is the class's share of [`Tuning::depot_target`] among the domains whose stacks
+    /// of the class hold anything, so that a class in use in two domains parks no more in all
+    /// than it would in one. The other domains' stacks are read only when this one is over the
+    /// smallest share it can have, half the target with two domains in use.
     fn launder(&self, domain: Domain, class: SmallClass, clock: &Clock<'_, O>) {
         let target = self.tuning.depot_target / class.size();
-        let stack = self.depot.full(domain, class);
-        if (stack.objects(self.area, class.magazine()) as usize) <= target {
+        let size = class.magazine();
+        let depth = self.depot.full(domain, class).objects(self.area, size) as usize;
+        if depth <= target / self.depot.domain_count().min(2) {
             return;
+        }
+        if depth <= target {
+            let others = self
+                .depot
+                .all_domains()
+                .filter(|&other| {
+                    other != domain && self.depot.full(other, class).objects(self.area, size) > 0
+                })
+                .count();
+            if depth <= target / (others + 1) {
+                return;
+            }
         }
         if self.launder_one(domain, class).is_some() && self.tuning.shed_unused {
             self.note_depth(domain, class, clock);

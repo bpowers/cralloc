@@ -82,9 +82,13 @@ use crate::space::Space;
 pub const DEPOT_TARGET: usize = 128 << 10;
 
 /// The bytes of objects another cache domain's stack of a class must hold before a slow path
-/// takes from it, by default: its target, the depth at which its own heartbeats would launder
-/// to the source anyway, so that only a flow from that domain to this one is taken.
-pub const TAKE_ACROSS: usize = DEPOT_TARGET;
+/// takes from it, by default: half the target, the share of it each of two domains in use
+/// holds before its own heartbeats launder to the source anyway, so that a flow from that
+/// domain to this one is taken and a balanced domain is left alone. The whole target sent half
+/// of the flow of a pipeline split across two L3s through the bitmaps; a quarter let
+/// independent pipelines in two L3s take each other's magazines
+/// (`docs/research/launder-and-fill.md`, "A depot per cache domain").
+pub const TAKE_ACROSS: usize = DEPOT_TARGET / 2;
 
 /// The limits on memory parked in caches, how often the heartbeat looks around, and which of
 /// the rules that return parked objects are on. Constants in the allocator; tests change them
@@ -96,7 +100,8 @@ pub struct Tuning {
     pub spare_budget: usize,
     /// The most magazines one spare stack holds.
     pub max_spares: usize,
-    /// Bytes of objects a class's depot stack holds before the heartbeat launders.
+    /// Bytes of objects a class's depot stack holds before the heartbeat launders, shared among
+    /// the cache domains whose stacks of the class hold anything (`heartbeat.rs`).
     pub depot_target: usize,
     /// Bytes of objects a class's stack in another cache domain must hold before a slow path
     /// whose own domain's stack is empty takes from it (`slow.rs`).
