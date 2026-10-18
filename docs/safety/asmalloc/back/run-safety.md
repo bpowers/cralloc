@@ -37,3 +37,5 @@ are never reused, so the promise that unassigned regions read as zero still hold
 under Miri; fault injection makes purges fail in `random_operations_survive_os_failures`.
 
 **Review.** 2026-10-17, fresh adversarial reviewer: accepted.
+
+Reviewed: f41dbf9

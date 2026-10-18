@@ -108,3 +108,5 @@ On the real kernel, `os::linux::kernel::tests::the_design_reservation_is_availab
 to 05 accepted. Since then the published word holds the region shift instead of the object
 count, the layout gained the process page, and the pointer helpers check their bounds; those
 changes need the reviewer's check.
+
+Reviewed: f41dbf9

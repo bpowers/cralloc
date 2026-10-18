@@ -135,3 +135,5 @@ promise. The copies name the crate's statics and slow paths through `$crate`, so
 same memory and functions as the routines in the crate. The rest of C-EXPORT-01 (what the
 symbols replace) is unchanged.
 
+
+Reviewed: f41dbf9
