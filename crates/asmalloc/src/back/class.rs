@@ -43,12 +43,15 @@ impl<'a, O: Os> Back<'a, O> {
             let settled = region::settle(&host, taken.region, taken.word, taken.bits);
             resident += settled.resident;
             revived += settled.revived;
+            let base = taken.word * BITS;
+            let high = base + (BITS - 1 - taken.bits.leading_zeros());
             let mut bits = taken.bits;
-            while bits != 0 {
-                let slot = taken.word * BITS + bits.trailing_zeros();
+            let slots = core::iter::from_fn(|| {
+                let bit = (bits != 0).then(|| bits.trailing_zeros())?;
                 bits &= bits - 1;
-                got = self.put(out, got, taken.region, class.class(), slot);
-            }
+                Some(base + bit)
+            });
+            got = self.put(host.layout(), out, got, taken.region, high, slots);
         }
         self.unretain(class.class(), resident);
         self.revive(class.class(), revived);
@@ -57,27 +60,36 @@ impl<'a, O: Os> Back<'a, O> {
             let Some((region, first, count)) = self.carve(&host, class.class(), want) else {
                 break;
             };
-            for slot in first..first + count {
-                got = self.put(out, got, region, class.class(), slot);
-            }
+            let high = first + count - 1;
+            got = self.put(host.layout(), out, got, region, high, first..first + count);
         }
         got
     }
 
-    /// Writes slot `slot`'s address at `out[at]` and returns the next position.
+    /// Writes the addresses of `slots` of `region`, every one of them at most `high`, at
+    /// `out[at..]`, and returns the next position. `high` is checked to be one of the region's
+    /// slots, so every slot below it is too.
     #[inline(always)]
     fn put(
         &self,
+        layout: &Layout,
         out: &mut [*mut u8],
-        at: usize,
+        mut at: usize,
         region: RegionId,
-        class: Class,
-        slot: u32,
+        high: u32,
+        slots: impl Iterator<Item = u32>,
     ) -> usize {
-        if let Some(entry) = out.get_mut(at) {
-            *entry = self.space.slot(region, class, slot).as_ptr();
+        if high >= layout.slots() {
+            self.abort("a slot index outside its region");
         }
-        at + 1
+        let base = self.space.region(region).as_ptr();
+        for slot in slots {
+            if let Some(entry) = out.get_mut(at) {
+                *entry = base.wrapping_add(layout.slot_bytes(slot));
+            }
+            at += 1;
+        }
+        at
     }
 
     /// Returns free slots of `class` to their bitmaps, grouped by bitmap word as they come
