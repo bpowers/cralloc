@@ -1014,6 +1014,10 @@ runs about mimalloc's instruction count in more cycles. Which memory effect is i
   (churn 1M, 115.6 against 109.4; jemalloc 110.2), 1 to 2 MiB on the other heaps of 10 MiB
   or more, unchanged on small heaps and the worst cases, and lower after a burst. 2 MiB buys
   another 1 to 3% for up to 6 MiB more than 4 MiB costs (BTreeMap 200k 32.7 against 27.0).
+  Decided otherwise: the threshold stays at 16 MiB, where asmalloc is under jemalloc's memory
+  on churn and the small maps; 4 MiB would give that up and still leave BTreeMap behind
+  mimalloc, whose remaining lead there is the drop. The exact switch was built ("The switch
+  at the threshold, built", below).
 - **`MADV_COLLAPSE` is not worth adding.** Collapsing a class's carved small pages when it
   switches at 16 MiB buys most of the 4 MiB threshold's gain on BTreeMap (943 to 911) but
   little on JSON 8 MiB and nothing on tree 18, whose classes never reach 16 MiB; at 2 or
@@ -1180,6 +1184,33 @@ evidence of density at allocation, which a fresh table does not give; one candid
 built, is to learn it per class at the free (a `mincore` of a freed block of 2 MiB or more,
 or the dense check the grown rule already uses), so that later tables of a class that were
 dense get huge pages.
+
+### The switch at the threshold, built
+
+A region that will get huge pages now commits small pages only up to the threshold, and the
+first carve that needs memory past it switches the region, so the huge-page part starts at
+16 MiB exactly instead of at the next 2 MiB boundary above the last commit. "Before" is main
+at `a763ad7`, "after" the change; CPU 2, interleaved, medians. The machine was busier than in
+the sessions above (another job used about five CPUs of the same L3), so every figure is a
+few percent higher than in them.
+
+| Job | before | after | |
+|---|---:|---:|---|
+| BTreeMap 1M, cycles/entry | 973.4 | 967.6 | ten rounds, -0.4% |
+| JSON 32 MiB, cycles/byte | 17.10 | 17.05 | ten rounds, 0.0% |
+| churn 1M live, cycles/op | 126.2 | 125.1 | ten rounds, -0.5% |
+| tree 18, cycles/node | 38.18 | 37.88 | five rounds, -1.0% |
+| JSON 8 MiB, cycles/byte | 17.68 | 17.40 | five rounds, -1.6% |
+| BTreeMap build faults (thousands) | 24.6 | 24.0 | |
+| JSON 32 MiB parse faults (thousands) | 19.6 | 18.1 | |
+
+Memory, two rounds each, cgroup peak MiB before / after: churn 1M 109.4 / 109.4, BTreeMap
+200k 25.8 / 25.7, HashMap 200k 32.4 / 32.4, tree 18 13.2 / 13.1, JSON 8 MiB 90.0 / 90.1,
+churn 1k 1.1 / 1.2, mixed churn 33.9 / 33.8, mixed pipeline 5.6 / 5.7 (jemalloc 110.3, 25.9,
+34.8, 17.3, 88.9, 1.0, 36.8, 5.5). After freeing 218 MiB, anonymous resident MiB at 2, 4, 8
+and 12 s: before 78, 52.9, 17.5, 4.9; after 79, 54.1, 16.8, 4.8. It costs nothing measurable
+and saves a few faults; the jobs barely move because their classes that pass 16 MiB were
+already mostly on huge pages.
 
 ### What is not explained
 

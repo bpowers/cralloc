@@ -7,11 +7,10 @@
 //!   (and the leaf-bitmap words for the new slots), then publishes the new commit with a
 //!   compare-and-swap, and tries again.
 //! - **Huge pages.** A region starts advised against huge pages. Only classes of small, dense
-//!   slots ever leave that (`policy::wants_huge`). Once such a region has carved more than
-//!   `policy::huge_after` huge pages, the carve that notices marks everything from
-//!   the next huge-page boundary above the committed memory to the end of the region for huge
-//!   pages, records that boundary in the region's `Hints`, and later commits there are whole
-//!   huge pages.
+//!   slots ever leave that (`policy::wants_huge`). Such a region commits small pages only up
+//!   to `policy::huge_after` huge pages; the first carve that needs memory past them marks
+//!   everything from there to the end of the region for huge pages, records that boundary in
+//!   the region's `Hints`, and later commits there are whole huge pages.
 //! - **Huge pages for grown blocks.** A large slot whose object moves there densely, growing past a size, gets
 //!   its whole huge pages advised for huge pages, and its size word records that
 //!   (`Recorded::huge`). Only the slot's holder reads or writes the flag. While it is set, a
@@ -28,7 +27,7 @@
 //!   clean bits of its pages; then release the bits. The zero and clean bits are written only
 //!   while the purge holds the claim of every slot they describe.
 
-use super::layout::{Grow, Hints, Recorded, Unit};
+use super::layout::{Grow, Hints, Layout, Recorded, Unit};
 use super::policy::{
     COMMIT_AHEAD_HUGE_PAGES, COMMIT_AHEAD_PAGES, grown_huge, huge_after, wants_huge,
 };
@@ -89,7 +88,7 @@ pub(crate) fn carve<H: Host>(host: &H, region: RegionId, n: u32) -> Carve {
 fn commit_to<H: Host>(host: &H, region: RegionId, now: Grow, need: u32) -> Option<u32> {
     let layout = host.layout();
     let pages = layout.region_pages();
-    let huge = switch_to_huge(host, region, now);
+    let huge = switch_to_huge(host, region, need);
     let page = layout.page_size();
     let target = match huge {
         Some(from) if need > from => {
@@ -98,8 +97,9 @@ fn commit_to<H: Host>(host: &H, region: RegionId, now: Grow, need: u32) -> Optio
         _ => need + COMMIT_AHEAD_PAGES as u32,
     };
     // A small-page commit never runs into the huge-page part, whose pages are committed and
-    // faulted whole; that part starts at a huge-page boundary at or above the commit.
-    let target = match huge {
+    // faulted whole, nor, before the region has one, past the threshold where it will start.
+    let limit = huge.or_else(|| huge_threshold(layout));
+    let target = match limit {
         Some(from) if need <= from => target.min(from),
         _ => target,
     };
@@ -119,34 +119,38 @@ fn commit_to<H: Host>(host: &H, region: RegionId, now: Grow, need: u32) -> Optio
     Some(target)
 }
 
+/// The page at which a region of this layout's class switches to huge pages
+/// (`policy::huge_after`), a huge-page boundary; `None` if the class never gets them or the
+/// region ends there.
+fn huge_threshold(layout: &Layout) -> Option<u32> {
+    if !wants_huge(layout.size(), layout.page_size()) {
+        return None;
+    }
+    let region_huge_pages = layout.region_pages() / layout.huge_pages();
+    let threshold = huge_after(region_huge_pages as usize) as u32 * layout.huge_pages();
+    (threshold < layout.region_pages()).then_some(threshold)
+}
+
 /// The first page of the region's huge-page part, switching the region to huge pages first if
-/// it has carved past the threshold and has no huge-page part yet.
-fn switch_to_huge<H: Host>(host: &H, region: RegionId, now: Grow) -> Option<u32> {
+/// it has none yet and a carve needs memory up to page `need`, past the threshold.
+///
+/// Small-page commits stop at the threshold until then (`commit_to`), so the part starts at
+/// the threshold itself. Were they allowed past it, the part would start at the next huge-page
+/// boundary above the last of them, leaving up to one more huge page of the class on small
+/// pages (`docs/research/memory.md`, "Build phases against mimalloc"). Nothing small-page
+/// purges work on lies above the threshold either, since nothing was committed there.
+fn switch_to_huge<H: Host>(host: &H, region: RegionId, need: u32) -> Option<u32> {
     let layout = host.layout();
     let hints = host.meta(region, layout.hints_word());
     let mut seen = hints.load();
     if let Some(from) = Hints::unpack(seen).huge_from {
         return Some(from);
     }
-    if !wants_huge(layout.size(), layout.page_size()) {
-        return None;
-    }
-    let region_huge_pages = (layout.region_pages() / layout.huge_pages()) as usize;
-    let threshold = huge_after(region_huge_pages) * layout.huge_pages() as usize;
-    if (layout.slot_bytes(now.carved) >> layout.page_shift()) <= threshold {
+    let at = huge_threshold(layout)?;
+    if need <= at {
         return None;
     }
     let pages = layout.region_pages();
-    // From the latest commit, not the caller's possibly stale one, so the huge-page part starts
-    // above the pages small-page purges have worked on. A commit can still land between this
-    // load and the compare-and-swap below, and a purge that read no huge-page part can still
-    // return a small page above `at`. That costs at most a split huge page; it is advice, and
-    // safety never depends on it.
-    let latest = Grow::unpack(host.meta(region, layout.grow_word()).load()).committed;
-    let at = layout.huge_ceil(latest.max(now.committed));
-    if at >= pages {
-        return None;
-    }
     loop {
         let current = Hints::unpack(seen);
         if let Some(from) = current.huge_from {

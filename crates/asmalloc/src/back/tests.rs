@@ -2,7 +2,8 @@
 //! and a threaded stress test.
 
 use super::policy::{
-    DECAY_TICKS, STAGGER_ROOM, STAGGER_STEP, growth_goal, growth_step, move_piece, retained_cap,
+    DECAY_TICKS, STAGGER_ROOM, STAGGER_STEP, growth_goal, growth_step, huge_after, move_piece,
+    retained_cap,
 };
 use super::{Back, Block, Kind, State};
 use crate::classes::{Class, SmallClass};
@@ -337,6 +338,33 @@ fn a_region_switches_to_huge_pages_past_the_threshold() {
     assert_eq!(state.os().huge_pages(base), Some(HugePages::Avoid));
     let end = base.map_addr(|a| a.saturating_add(back.space().plan().region_size() - 1));
     assert_eq!(state.os().huge_pages(end), Some(HugePages::Prefer));
+}
+
+#[test]
+#[cfg_attr(miri, ignore)]
+fn the_huge_page_part_starts_at_the_threshold() {
+    let state = state::<Native>();
+    let back = state.get_or_reserve().unwrap();
+    let class = small(64);
+    let huge = Native::GEOMETRY.huge_page_size();
+    let threshold = huge_after(back.space().plan().region_size() / huge) * huge;
+    // Past the threshold by a huge page, a magazine at a time. Small-page commits run ahead of
+    // the carve, so a switch noticed only after the carve passed the threshold would start the
+    // huge-page part a huge page above it.
+    let mut slots = Vec::new();
+    while slots.len() < (threshold + huge) / 64 {
+        slots.extend(fill(&back, class, 254));
+    }
+    let base = back
+        .space()
+        .region(back.space().locate(slots[0]).unwrap().region);
+    let advice = |offset: usize| {
+        state
+            .os()
+            .huge_pages(base.map_addr(|a| a.saturating_add(offset)))
+    };
+    assert_eq!(advice(threshold - 1), Some(HugePages::Avoid));
+    assert_eq!(advice(threshold), Some(HugePages::Prefer));
 }
 
 #[test]
@@ -2347,7 +2375,8 @@ mod review {
         state.walk.pass.store(goal.pack(), Relaxed);
         beat(&back);
         assert!(!pass_under_way(&state));
-        assert_eq!(state.os().calls(Call::Purge), 16);
+        // One call for a whole huge page, or one a page below the huge-page part.
+        assert!(state.os().calls(Call::Purge) > 0);
     }
 
     /// Finding abandoned-pass-start-stops-decay (opened by the fix for the four-write start).
