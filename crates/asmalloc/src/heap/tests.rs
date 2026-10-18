@@ -334,12 +334,18 @@ fn the_first_allocations_of_a_fresh_heap_from_several_threads_succeed() {
 
 /// Every live block holds its owner's tag, checked before it is freed: two owners of one block
 /// show as a wrong tag.
-fn tagged_churn<H: GlobalAlloc + Sync>(heap: &H, threads: usize, rounds: usize) {
+///
+/// The first `quiet` threads stay on the fast paths: one size, and a live set that hovers within
+/// one magazine. Their slabs take no slow path, so the idle check, which the other threads' slow
+/// paths run, finds them unchanged and drains them while they are in use.
+fn tagged_churn<H: GlobalAlloc + Sync>(heap: &H, threads: usize, quiet: usize, rounds: usize) {
     let pool = std::sync::Mutex::new(Vec::<Sent>::new());
     thread::scope(|scope| {
         for t in 0..threads {
             let pool = &pool;
             scope.spawn(move || {
+                let quiet = t < quiet;
+                let most = if quiet { 100 } else { 400 };
                 let mut live: Vec<(*mut u8, Layout, usize)> = Vec::new();
                 let mut x = 0x9e37_79b9_7f4a_7c15u64 ^ t as u64;
                 for i in 0..rounds {
@@ -349,7 +355,9 @@ fn tagged_churn<H: GlobalAlloc + Sync>(heap: &H, threads: usize, rounds: usize) 
                     // One block in 32 is big. At one in 16, about one run in 350 on a busy
                     // machine filled all 244 regions of the simulated heap, a third of them
                     // with blocks over 40 KiB at four to six a region, and an allocation failed.
-                    let size = if (x >> 30).is_multiple_of(32)
+                    let size = if quiet {
+                        64
+                    } else if (x >> 30).is_multiple_of(32)
                         && std::env::var_os("SMALL_ONLY").is_none()
                     {
                         (x as usize >> 8) % (64 << 10) + 8
@@ -357,7 +365,7 @@ fn tagged_churn<H: GlobalAlloc + Sync>(heap: &H, threads: usize, rounds: usize) 
                         8 + (x as usize % 12) * 8
                     };
                     let l = layout(size, 8);
-                    if live.len() < 400 && !(x >> 40).is_multiple_of(3) {
+                    if live.len() < most && !(x >> 40).is_multiple_of(3) {
                         // SAFETY: a valid layout.
                         let p = unsafe { heap.alloc(l) };
                         assert!(!p.is_null());
@@ -365,14 +373,15 @@ fn tagged_churn<H: GlobalAlloc + Sync>(heap: &H, threads: usize, rounds: usize) 
                         // SAFETY: live, at least 8 bytes.
                         unsafe { p.cast::<usize>().write(tag) };
                         live.push((p, l, tag));
-                    } else if (x >> 50).is_multiple_of(4) && !live.is_empty() {
+                    } else if !quiet && (x >> 50).is_multiple_of(4) && !live.is_empty() {
                         // Hand a block to whichever thread takes it next; its tag goes along
                         // as the block's size field.
                         let (p, l, tag) = live.swap_remove((x >> 20) as usize % live.len());
                         // SAFETY: still ours; the tag is in its first word.
                         assert_eq!(unsafe { p.cast::<usize>().read() }, tag);
                         pool.lock().unwrap().push(Sent(p, l.size()));
-                    } else if (x >> 50) % 4 == 1
+                    } else if !quiet
+                        && (x >> 50) % 4 == 1
                         && let Some(Sent(p, size)) = pool.lock().unwrap().pop()
                     {
                         // SAFETY: given up by its sender; its tag is in its first word.
@@ -403,11 +412,58 @@ fn tagged_churn<H: GlobalAlloc + Sync>(heap: &H, threads: usize, rounds: usize) 
     }
 }
 
+/// Runs `body` while another thread drains the heap's slabs, in two ways.
+///
+/// It moves the clock, which stands still unless a test moves it: a slab is drained by the idle
+/// check only when its activity counter has stood still for an interval of the clock. That
+/// exercises the heartbeat's own path, but rarely: a slab is looked at once in many slow
+/// paths, and one that takes slow paths itself is never found quiet (about a dozen drains in
+/// five million operations, none in a short round).
+///
+/// So it also asks for a drain of each slab in turn, whatever the slab is doing, a few
+/// thousand times a second. A drain is safe at any moment, and these are the ones that race
+/// the routines of the threads using the slab.
+fn with_drains_running<S: crate::os::sim::Shape, T>(
+    heap: &SimHeap<S>,
+    body: impl FnOnce() -> T,
+) -> T {
+    use core::sync::atomic::{AtomicBool, Ordering};
+    /// Stops the drainer when the body ends, by a panic too, or the scope would never end.
+    struct Stop<'a>(&'a AtomicBool);
+    impl Drop for Stop<'_> {
+        fn drop(&mut self) {
+            self.0.store(true, Ordering::Release);
+        }
+    }
+    let stop = AtomicBool::new(false);
+    thread::scope(|scope| {
+        scope.spawn(|| {
+            let mut cpu = 0;
+            while !stop.load(Ordering::Acquire) {
+                heap.os().advance_clock(crate::depot::IDLE_TICKS / 4);
+                heap.drain(cpu);
+                cpu = (cpu + 1) % SIM_THREADS;
+                // Miri runs one thread at a time and a drain is some hundred atomic
+                // instructions, so there the drainer mostly yields.
+                if cfg!(miri) {
+                    for _ in 0..2000 {
+                        thread::yield_now();
+                    }
+                } else {
+                    for _ in 0..200 {
+                        core::hint::spin_loop();
+                    }
+                }
+            }
+        });
+        let _stop = Stop(&stop);
+        body()
+    })
+}
+
 /// This caught the simulator's fence returning while a twin stood between its `Access` check and
 /// its store (`os::sim::cpus`): the store landed in a magazine a drain had passed on, and a block
-/// got two owners. It showed most with more threads than cores. The test forces no drain: it
-/// leans on the heartbeat's idle check draining often, so if drains become rare it needs a way
-/// to ask for them. The switches (`NO_DRAIN`, `NO_PURGE`, `NO_CPU`) turn parts of the heap off
+/// got two owners. It showed most with more threads than cores. The switches (`NO_DRAIN`, `NO_PURGE`, `NO_CPU`) turn parts of the heap off
 /// to bisect a failure.
 #[test]
 fn blocks_have_one_owner_while_threads_churn_and_drains_run() {
@@ -425,11 +481,14 @@ fn blocks_have_one_owner_while_threads_churn_and_drains_run() {
         } else {
             Vec::new()
         };
-        tagged_churn(
-            &heap,
-            if cfg!(miri) { 3 } else { 10 },
-            if cfg!(miri) { 200 } else { 50_000 },
-        );
+        with_drains_running(&heap, || {
+            tagged_churn(
+                &heap,
+                if cfg!(miri) { 3 } else { 10 },
+                if cfg!(miri) { 1 } else { 5 },
+                if cfg!(miri) { 200 } else { 50_000 },
+            )
+        });
         drop(held);
     }
 }
@@ -711,6 +770,7 @@ fn blocks_have_one_owner_while_threads_churn_and_the_clock_runs() {
             tagged_churn(
                 &heap,
                 if cfg!(miri) { 3 } else { 10 },
+                0,
                 if cfg!(miri) { 200 } else { 50_000 },
             );
             done.store(true, std::sync::atomic::Ordering::Relaxed);
@@ -781,6 +841,26 @@ mod process {
             assert_eq!(Asmalloc::usable_size(p), Some(5 << 30));
             assert_eq!(p.add((5 << 30) - 1).read(), 0);
             Asmalloc.dealloc(p, l);
+        }
+    }
+
+    /// The design: what a large block may use is the size asked for, to a page, never the
+    /// room it sits in, so that a caller that fills what it is told it may use touches about
+    /// what it asked for. A layout aligned beyond a region takes a run, and the run records
+    /// the size rounded up to the alignment: eight bytes aligned to 8 GiB report 8 GiB
+    /// usable, all of it committed.
+    #[test]
+    #[ignore = "finding: an over-aligned run reports its alignment as its usable size"]
+    fn an_over_aligned_run_reports_what_was_asked_for() {
+        let l = layout(8, 1 << 33);
+        // SAFETY: a valid layout; the block is freed once.
+        unsafe {
+            let p = Asmalloc.alloc(l);
+            assert!(!p.is_null());
+            assert_eq!(p.addr() % (1 << 33), 0);
+            let usable = Asmalloc::usable_size(p);
+            Asmalloc.dealloc(p, l);
+            assert_eq!(usable, Some(4096));
         }
     }
 

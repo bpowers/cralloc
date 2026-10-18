@@ -37,7 +37,7 @@ A thread of the process preempted inside a sequence on that CPU was preempted by
 so its abort is already pending. An abort is something every sequence must already tolerate,
 since preemption causes one at any instruction. No memory changes.
 
-## KERNEL-03: the memory calls in `reserve`, `commit`, `purge`, `advise_huge`, `unmap`
+## KERNEL-03: the memory calls in `reserve`, `commit`, `purge`, `populate`, `advise_huge`, `unmap`
 
 **mmap in `reserve`.** Arguments: address null (the kernel chooses, so no existing mapping is
 replaced), `span` bytes, `PROT_NONE`, `MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE`, fd -1,
@@ -59,6 +59,13 @@ keeps contents, and nothing relies on the pages being inaccessible.
 **`purge`: madvise `MADV_DONTNEED`.** After it, a private anonymous range reads as zero and
 keeps its protection. The caller guarantees no thread touches the range during the call and
 nothing in it is needed, so zeroing it cannot break any Rust value or reference.
+
+**`populate`: madvise `MADV_POPULATE_WRITE`** (Linux 5.14). It faults the range in as writes
+would, through the same fault handler, but performs no access afterwards: a page already
+resident is left as it is, and a page that is not becomes a resident zero page, which is what
+it read as before. So contents and protection are unchanged. On memory that is not writable,
+or when memory runs out, it fails having populated at most a prefix; on an older kernel it
+fails with EINVAL and does nothing. No caller relies on it succeeding.
 
 **`advise_huge`: madvise `MADV_HUGEPAGE` or `MADV_NOHUGEPAGE`.** These change only how the
 kernel backs the range, never its contents or protection.

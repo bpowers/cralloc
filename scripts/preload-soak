@@ -1,0 +1,187 @@
+#!/usr/bin/env bash
+# Soaks the LD_PRELOAD library: long, checked stress runs and the test suites of real software,
+# each compared with the same run without the library. On demand only; never in the gate.
+#
+# Usage: scripts/preload-soak [--long] [--suites] [name...]   (names as printed, or globs)
+#   default    the stress harness (crates/asmalloc-preload/tests/programs/soak.c) in every
+#              mode, SOAK_SECS (30) each, plain and preloaded (the signal and breakpoint
+#              modes, which allocate in signal handlers, preloaded only); then on two CPUs
+#              with 64 threads, without rseq, and against a debug build of the library.
+#              About 20 minutes.
+#   --long     SOAK_SECS defaults to 600 and every stress run repeats for SOAK_SEEDS (3) seeds.
+#   --suites   also fetch git, redis, CPython, SQLite and Tcl 8.6 into SOAK_SRC, build each
+#              plain and with the compiler and linker preloaded (the objects must match), and
+#              run their test suites both ways (the results must match). Needs the network the
+#              first time, and about an hour.
+#
+#   SOAK_MEM    memory cap per run, default 4G (never above 16G); suites use 8G or 12G
+#   SOAK_SRC    where the suites' sources and builds go, default ${TMPDIR:-/tmp}/asmalloc-soak
+#   SOAK_KEEP   set to keep the work directory
+#
+# Run it under taskset: every run uses the CPUs this script is allowed, and the two-CPU runs
+# take the first two of them. Every run goes through scripts/memlimit, one at a time. The peak
+# memory of both runs of a comparison is printed, and a preloaded peak more than twice the
+# plain one (and 64 MiB above it) is flagged.
+#
+# Fetched sources are untrusted: they are built and run only under the memory cap.
+set -uo pipefail
+here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+root="$(cd "$here/.." && pwd)"
+long=0
+suites=0
+selected=()
+for a in "$@"; do
+  case "$a" in
+    --long) long=1 ;;
+    --suites) suites=1 ;;
+    *) selected+=("$a") ;;
+  esac
+done
+secs="${SOAK_SECS:-$([ $long = 1 ] && echo 600 || echo 30)}"
+seeds="${SOAK_SEEDS:-$([ $long = 1 ] && echo 3 || echo 1)}"
+mem="${SOAK_MEM:-4G}"
+src="${SOAK_SRC:-${TMPDIR:-/tmp}/asmalloc-soak}"
+
+cargo build --quiet --release -p asmalloc-preload --manifest-path "$root/Cargo.toml" || exit 1
+cargo build --quiet -p asmalloc-preload --manifest-path "$root/Cargo.toml" || exit 1
+lib="$root/target/release/libasmalloc_preload.so"
+dlib="$root/target/debug/libasmalloc_preload.so"
+work="$(mktemp -d "${TMPDIR:-/tmp}/preload-soak.XXXXXX")"
+mkdir -p "$work/bin"
+soak="$work/bin/soak"
+cc -O2 -g -pthread -o "$soak" "$root/crates/asmalloc-preload/tests/programs/soak.c" -ldl || exit 1
+# Instruction addresses for the breakpoint mode, which aborts sequences at chosen instructions.
+objdump -d --no-show-raw-insn "$lib" | grep -oE '^ +[0-9a-f]+:' | tr -d ' :' >"$work/insns"
+objdump -d --no-show-raw-insn "$dlib" | grep -oE '^ +[0-9a-f]+:' | tr -d ' :' >"$work/insns-debug"
+echo "work directory: $work"
+echo "asmalloc $(git -C "$root" rev-parse --short HEAD)$(git -C "$root" diff --quiet || echo +dirty)"
+
+mapfile -t cpus < <(taskset -pc $$ | sed 's/.*: //' | tr ',' '\n' |
+  awk -F- '{ if (NF == 2) for (i = $1; i <= $2; i++) print i; else print $1 }')
+two="${cpus[0]},${cpus[1]:-${cpus[0]}}"
+failed=()
+
+wanted() {
+  [ ${#selected[@]} -eq 0 ] && return 0
+  local s
+  # shellcheck disable=SC2053 # a name may be a glob
+  for s in "${selected[@]}"; do [[ "$1" == $s ]] && return 0; done
+  return 1
+}
+
+# run OUT CAP TIMEOUT CMD...: one capped run; stdout to OUT, stderr to OUT.err, the exit status
+# appended to OUT, and the cap tool's peak memory to OUT.peak (in MiB).
+run() {
+  local out="$1" cap="$2" limit="$3"
+  shift 3
+  "$here/memlimit" -m "$cap" -t "$limit" -- "$@" >"$out" 2>"$out.err"
+  echo "exit status $?" >>"$out"
+  grep -o 'memlimit:.*' "$out.err" | tail -1 >"$out.mem"
+  peak_of "$out.mem" >"$out.peak"
+}
+
+# The peak in MiB from a memlimit line ("... 1.2G memory peak").
+peak_of() {
+  grep -oE '[0-9.]+[KMGT]? memory peak' "$1" | awk '{
+    v = $1; u = substr(v, length(v)); n = v + 0
+    if (u == "K") n /= 1024; else if (u == "G") n *= 1024; else if (u == "T") n *= 1048576
+    else if (u != "M") n /= 1048576
+    printf "%d\n", n }'
+}
+
+peaks() {
+  local p q
+  p="$(cat "$1.peak" 2>/dev/null)"
+  q="$(cat "$2.peak" 2>/dev/null)"
+  printf 'peak %sM plain, %sM preloaded' "${p:-?}" "${q:-?}"
+  if [ -n "$p" ] && [ -n "$q" ] && [ "$q" -gt $((2 * p)) ] && [ "$q" -gt $((p + 64)) ]; then
+    printf '  MEMORY OUTLIER'
+  fi
+}
+
+# compare NAME CAP TIMEOUT CMD...: same output and exit status with and without the library.
+# CMD may use $MODE (plain or preload) to keep its files apart.
+compare() {
+  local name="$1" cap="$2" limit="$3"
+  shift 3
+  wanted "$name" || return 0
+  local start=$SECONDS
+  run "$work/$name.plain" "$cap" "$limit" env -u LD_PRELOAD MODE=plain "$@"
+  MODE=preload run "$work/$name.preload" "$cap" "$limit" \
+    env LD_PRELOAD="${PRELOAD_LIB:-$lib}" MODE=preload "$@"
+  if cmp -s "$work/$name.plain" "$work/$name.preload"; then
+    printf 'PASS  %-34s %5ss  %s\n' "$name" $((SECONDS - start)) \
+      "$(peaks "$work/$name.plain" "$work/$name.preload")"
+  else
+    printf 'FAIL  %-34s outputs differ:\n' "$name"
+    diff "$work/$name.plain" "$work/$name.preload" | head -20 | sed 's/^/      /'
+    grep -h 'FAIL' "$work/$name.preload.err" | head -3 | sed 's/^/      /'
+    failed+=("$name")
+  fi
+}
+
+# alone NAME CAP TIMEOUT CMD...: preloaded only, must exit 0 (for what only asmalloc supports).
+alone() {
+  local name="$1" cap="$2" limit="$3"
+  shift 3
+  wanted "$name" || return 0
+  local start=$SECONDS
+  run "$work/$name.preload" "$cap" "$limit" env LD_PRELOAD="${PRELOAD_LIB:-$lib}" "$@"
+  if [ "$(tail -1 "$work/$name.preload")" = "exit status 0" ]; then
+    printf 'PASS  %-34s %5ss  peak %sM\n' "$name" $((SECONDS - start)) \
+      "$(cat "$work/$name.preload.peak")"
+  else
+    printf 'FAIL  %-34s %s\n' "$name" "$(tail -1 "$work/$name.preload")"
+    grep -h 'FAIL' "$work/$name.preload.err" | head -3 | sed 's/^/      /'
+    failed+=("$name")
+  fi
+}
+
+limit="$((secs * 3 / 60 + 5))m"
+modes=(churn prodcons fork threadstorm realloc huge idle trim)
+for seed in $(seq 1 "$seeds"); do
+  for m in "${modes[@]}"; do
+    extra=()
+    case $m in
+      realloc) extra=(threads=4 maxsize=268435456 budget=1024) ;;
+      huge) extra=(threads=4 maxsize=1073741824 budget=2048) ;;
+      threadstorm) extra=(threads=64) ;;
+    esac
+    compare "soak-$m-s$seed" "$mem" "$limit" "$soak" "$m" secs="$secs" seed="$seed" "${extra[@]}"
+  done
+  alone "soak-signal-s$seed" "$mem" "$limit" "$soak" signal secs="$secs" seed="$seed"
+  alone "soak-breakpoint-s$seed" "$mem" "$limit" env SOAK_INSNS="$work/insns" \
+    "$soak" breakpoint secs="$secs" seed="$seed"
+  # Many threads on two CPUs: preempted and migrated inside sequences all the time.
+  for m in churn prodcons idle fork trim; do
+    compare "two-cpus-$m-s$seed" "$mem" "$limit" taskset -c "$two" \
+      "$soak" "$m" threads=64 live=500 secs="$secs" seed="$seed"
+  done
+  alone "two-cpus-signal-s$seed" "$mem" "$limit" taskset -c "$two" \
+    "$soak" signal threads=64 live=500 secs="$secs" seed="$seed"
+  alone "two-cpus-breakpoint-s$seed" "$mem" "$limit" env SOAK_INSNS="$work/insns" \
+    taskset -c "$two" "$soak" breakpoint threads=64 live=500 secs="$secs" seed="$seed"
+  # Without rseq every thread takes the slow path (design: "Without rseq").
+  for m in churn prodcons fork; do
+    compare "no-rseq-$m-s$seed" "$mem" "$limit" env GLIBC_TUNABLES=glibc.pthread.rseq=0 \
+      "$soak" "$m" secs="$secs" seed="$seed"
+  done
+  # The debug build: debug assertions on, no LTO, different code around the routines.
+  for m in churn idle signal breakpoint; do
+    PRELOAD_LIB="$dlib" alone "debug-$m-s$seed" "$mem" "$limit" env SOAK_INSNS="$work/insns-debug" \
+      "$soak" "$m" secs="$secs" seed="$seed"
+  done
+done
+
+if [ $suites = 1 ]; then
+  # shellcheck source=scripts/preload-soak-suites
+  . "$here/preload-soak-suites"
+fi
+
+if [ ${#failed[@]} -eq 0 ]; then
+  [ -n "${SOAK_KEEP:-}" ] || rm -rf "$work"
+  echo "preload-soak: all passed"
+else
+  echo "preload-soak: failed: ${failed[*]} (outputs in $work)"
+  exit 1
+fi

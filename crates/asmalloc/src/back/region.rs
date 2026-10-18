@@ -12,6 +12,19 @@
 //!   the next huge-page boundary above the committed memory to the end of the region for huge
 //!   pages, records that boundary in the region's `Hints`, and later commits there are whole
 //!   huge pages.
+//! - **Populating ahead.** In the small-page part of a region of a dense class that has carved
+//!   enough, a commit makes its new pages resident too, with one call, before the carve that
+//!   committed them publishes them (`policy::populate_ahead`). Nothing has been carved there
+//!   yet, so no purge can be at work on them, and a populate changes no contents, so racing
+//!   commits that both populate do no harm. A failed populate only leaves the pages to fault
+//!   in one at a time.
+//! - **Huge pages for grown blocks.** A large slot whose object grows densely past a size gets
+//!   its whole huge pages advised for huge pages, and its size word records that
+//!   (`Recorded::huge`). Only the slot's holder reads or writes the flag. While it is set, a
+//!   partial purge of the slot rounds inward to whole huge pages, since purging part of a huge
+//!   page returns nothing to the OS until the kernel gets round to splitting it; and the free
+//!   purges the whole slot and takes the advice back, so a free slot is never advised and a
+//!   purge of a free slot needs no rule of its own.
 //! - **Settling** after a claim: an allocation tests and clears the slot's zero bit (large
 //!   classes), and clears the clean bits of the pages its slots touch, and counts how much of
 //!   what it took was resident.
@@ -21,8 +34,10 @@
 //!   clean bits of its pages; then release the bits. The zero and clean bits are written only
 //!   while the purge holds the claim of every slot they describe.
 
-use super::layout::{Grow, Hints, Unit};
-use super::policy::{COMMIT_AHEAD_HUGE_PAGES, COMMIT_AHEAD_PAGES, huge_after, wants_huge};
+use super::layout::{Grow, Hints, Recorded, Unit};
+use super::policy::{
+    COMMIT_AHEAD_HUGE_PAGES, COMMIT_AHEAD_PAGES, grown_huge, huge_after, populate_ahead, wants_huge,
+};
 use super::tree::{self, Host};
 use super::word::{BITS, Word, bits_in_word};
 use crate::os::HugePages;
@@ -81,18 +96,31 @@ fn commit_to<H: Host>(host: &H, region: RegionId, now: Grow, need: u32) -> Optio
     let layout = host.layout();
     let pages = layout.region_pages();
     let huge = switch_to_huge(host, region, now);
-    let target = match huge {
-        Some(from) if need > from => {
-            layout.huge_ceil(need) + COMMIT_AHEAD_HUGE_PAGES as u32 * layout.huge_pages()
+    let page = layout.page_size();
+    let (target, ahead) = match huge {
+        Some(from) if need > from => (
+            layout.huge_ceil(need) + COMMIT_AHEAD_HUGE_PAGES as u32 * layout.huge_pages(),
+            0,
+        ),
+        _ => {
+            let ahead = populate_ahead(layout.size(), page, layout.slot_bytes(now.carved));
+            (need + ahead.max(COMMIT_AHEAD_PAGES) as u32, ahead)
         }
-        _ => need + COMMIT_AHEAD_PAGES as u32,
+    };
+    // A small-page commit never runs into the huge-page part, whose pages are committed and
+    // faulted whole; that part starts at a huge-page boundary at or above the commit.
+    let target = match huge {
+        Some(from) if need <= from => target.min(from),
+        _ => target,
     };
     let target = target.min(pages);
-    let page = layout.page_size();
     let start = now.committed as usize * page;
     let len = (target - now.committed) as usize * page;
     if !host.commit(region, start, len) {
         return None;
+    }
+    if ahead != 0 {
+        host.populate(region, start, len);
     }
     let (from, to) = (
         layout.leaf_commit(now.committed),
@@ -349,12 +377,81 @@ pub(crate) fn mark_purged<H: Host>(host: &H, region: RegionId, slot: u32) {
     }
 }
 
+/// What large slot `slot`'s size word holds, if the class records sizes. Only meaningful to
+/// the slot's holder.
+pub(crate) fn recorded<H: Host>(host: &H, region: RegionId, slot: u32) -> Option<Recorded> {
+    let at = host.layout().size_word(slot)?;
+    Some(Recorded::unpack(host.meta(region, at).load()))
+}
+
+/// Writes large slot `slot`'s size word, for the slot's holder. Does nothing for a class that
+/// records no sizes.
+pub(crate) fn record<H: Host>(host: &H, region: RegionId, slot: u32, recorded: Recorded) {
+    if let Some(at) = host.layout().size_word(slot) {
+        host.meta(region, at).store(recorded.pack());
+    }
+}
+
+/// For the holder of large slot `slot`, whose object has just grown from `old` to `new` bytes
+/// (moved there, or grown in place): advises the slot's whole huge pages for huge pages if
+/// the growth says the object is dense (`policy::grown_huge`) and the slot is not advised yet.
+///
+/// The flag is recorded before the advice, because a failed advice may have acted on part of
+/// the range, and the flag is what makes the free take it back. Advice changes no contents,
+/// and the range is inside the holder's slot, so nothing else is affected.
+pub(crate) fn advise_grown<H: Host>(host: &H, region: RegionId, slot: u32, old: usize, new: usize) {
+    let layout = host.layout();
+    let Some(now) = recorded(host, region, slot) else {
+        return;
+    };
+    let huge = layout.page_size() * layout.huge_pages() as usize;
+    if now.huge || !grown_huge(old, new, huge) {
+        return;
+    }
+    let Some(unit) = layout.huge_interior(slot) else {
+        return;
+    };
+    record(host, region, slot, Recorded { huge: true, ..now });
+    let page = layout.page_size();
+    let (offset, len) = (
+        unit.start as usize * page,
+        (unit.end - unit.start) as usize * page,
+    );
+    host.advise(region, offset, len, HugePages::Prefer);
+}
+
+/// For the holder of large slot `slot`: takes back the huge-page advice `advise_grown` gave
+/// it, if any, and clears the flag once the OS has accepted. A refusal keeps the flag, so the
+/// next holder tries again (`Back::alloc`).
+pub(crate) fn unadvise<H: Host>(host: &H, region: RegionId, slot: u32) {
+    let layout = host.layout();
+    let Some(now) = recorded(host, region, slot).filter(|r| r.huge) else {
+        return;
+    };
+    let undone = match layout.huge_interior(slot) {
+        Some(unit) => {
+            let page = layout.page_size();
+            let (offset, len) = (
+                unit.start as usize * page,
+                (unit.end - unit.start) as usize * page,
+            );
+            host.advise(region, offset, len, HugePages::Avoid)
+        }
+        None => true,
+    };
+    if undone {
+        record(host, region, slot, Recorded { huge: false, ..now });
+    }
+}
+
 /// Returns `len` bytes at `from` bytes into slot `slot` to the OS, for a caller that holds
 /// the slot and no longer needs them: the tail of an object that shrank in place, or the part
 /// of a moving object already copied. Both are page multiples and the range lies inside the
 /// slot. No bitmap changes: the slot stays allocated, and its clean and zero bits describe it
-/// only while it is free. `false`, and nothing done, in a huge-page part, which is purged only
-/// in whole huge pages, or if the OS refused.
+/// only while it is free. In a slot advised for huge pages the range is first trimmed to
+/// whole huge pages where it ends inside one. `false`, and nothing done, if nothing is left
+/// after trimming, in a huge-page part, which is purged only in whole huge pages, or if the
+/// OS refused.
 ///
 /// # Safety
 ///
@@ -368,14 +465,29 @@ pub(crate) unsafe fn purge_part<H: Host>(
     len: usize,
 ) -> bool {
     let layout = host.layout();
+    let shift = layout.page_shift();
     let offset = layout.slot_bytes(slot) + from;
-    let end = ((offset + len) >> layout.page_shift()) as u32;
+    let (mut first, mut end) = ((offset >> shift) as u32, ((offset + len) >> shift) as u32);
     let hints = Hints::unpack(host.meta(region, layout.hints_word()).load());
     if from + len > layout.size() || hints.huge_from.is_some_and(|huge| end > huge) {
         return false;
     }
-    // SAFETY: the caller's promise, for a range inside the slot.
-    unsafe { host.purge(region, offset, len) }
+    if recorded(host, region, slot).is_some_and(|r| r.huge)
+        && let Some(unit) = layout.huge_interior(slot)
+    {
+        if first > unit.start && first < unit.end {
+            first = layout.huge_ceil(first);
+        }
+        if end > unit.start && end < unit.end {
+            end &= !(layout.huge_pages() - 1);
+        }
+    }
+    if first >= end {
+        return false;
+    }
+    let page = layout.page_size();
+    // SAFETY: the caller's promise, for a range inside the slot: trimming only shrank it.
+    unsafe { host.purge(region, first as usize * page, (end - first) as usize * page) }
 }
 
 /// What purging one unit did.
@@ -459,5 +571,82 @@ fn all_clean<H: Host>(host: &H, region: RegionId, unit: Unit) -> bool {
 fn release_range<H: Host>(host: &H, region: RegionId, first: u32, last: u32, from: u32, to: u32) {
     for w in from..to {
         tree::release(host, region, w, bits_in_word(w, first, last));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::back::policy::{POPULATE_MAX_PAGES, POPULATE_SHIFT};
+    use crate::back::testhost::TestHost;
+    use crate::back::word::Atomic;
+    use crate::classes::{Class, MagazineSize};
+    use crate::space::{Geometry, Plan};
+    use core::sync::atomic::Ordering::SeqCst;
+
+    /// Design pages and huge pages in a region of 128 MiB, small enough for the test host and
+    /// big enough that populate-ahead starts well before the huge-page threshold.
+    fn plan() -> Plan {
+        Geometry::new(12, 21, 27, 27, 4, 1, MagazineSize::MAX).largest_plan()
+    }
+
+    /// Carves `bytes` of `size`-byte slots a magazine at a time; returns the most pages that
+    /// were populated and not yet carved at any point.
+    fn carve_up_to(host: &TestHost<Atomic>, region: RegionId, bytes: usize) -> usize {
+        let layout = *host.layout();
+        let mut most = 0;
+        while layout.slot_bytes(Grow::unpack(host.meta(region, layout.grow_word()).load()).carved)
+            < bytes
+        {
+            assert!(matches!(carve(host, region, 254), Carve::Got { .. }));
+            let carved = Grow::unpack(host.meta(region, layout.grow_word()).load()).carved;
+            let touched = layout.slot_bytes(carved).div_ceil(layout.page_size());
+            most = most.max(host.populated.load(SeqCst).saturating_sub(touched));
+        }
+        most
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn a_dense_class_populates_ahead_in_bounded_stretches() {
+        let class = Class::of_size(64).unwrap();
+        let host = TestHost::<Atomic>::new(plan(), class, 1);
+        let region = host.region_at(0);
+        let page = host.layout().page_size();
+        if POPULATE_MAX_PAGES < COMMIT_AHEAD_PAGES {
+            // Populate-ahead is off.
+            carve_up_to(&host, region, 48 << 20);
+            assert_eq!(host.populated.load(SeqCst), 0);
+            return;
+        }
+        // Nothing until a stretch would be a whole commit step.
+        let start = (COMMIT_AHEAD_PAGES * page) << POPULATE_SHIFT;
+        carve_up_to(&host, region, start - page);
+        assert_eq!(host.populated.load(SeqCst), 0);
+        let most = carve_up_to(&host, region, 12 << 20);
+        let populated = host.populated.load(SeqCst);
+        assert!(
+            populated * page > (11 << 20) - start,
+            "populated {populated} pages"
+        );
+        assert!(
+            most.saturating_sub(POPULATE_MAX_PAGES) == 0,
+            "{most} pages populated ahead of the watermark"
+        );
+        // Past the huge-page threshold, growth faults huge pages instead.
+        carve_up_to(&host, region, 40 << 20);
+        let after = host.populated.load(SeqCst);
+        carve_up_to(&host, region, 48 << 20);
+        assert_eq!(host.populated.load(SeqCst), after);
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn sparse_classes_never_populate() {
+        for size in [2048, 16 << 10, 64 << 10] {
+            let host = TestHost::<Atomic>::new(plan(), Class::of_size(size).unwrap(), 1);
+            carve_up_to(&host, host.region_at(0), 8 << 20);
+            assert_eq!(host.populated.load(SeqCst), 0, "{size}");
+        }
     }
 }

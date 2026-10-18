@@ -40,7 +40,8 @@ Contents
 - One uncontended atomic read-modify-write costs 20 cycles. Handing a cache line to another
   core costs 16 to 22 ns inside one L3 and 76 to 79 ns across L3s.
 - A first-touch page fault costs 535 to 566 ns per 4 KiB page: as much as 750 inlined pairs.
-  Inside a 2 MiB transparent huge page it is 117 to 119 ns per 4 KiB.
+  Inside a 2 MiB transparent huge page it is 117 to 214 ns per 4 KiB, bound by zeroing.
+  `MADV_POPULATE_WRITE` saves only the exception, a fifth to a quarter (section 7).
 - The front end sets a cliff by instruction count, not by alignment. A straight-line run of up
   to 12 fused uops flows at full speed; 13 to 24 takes 3 cycles; 25 or more takes 5.
 - Without link-time optimization, rustc inlines the fast path only in the crate that declares
@@ -260,6 +261,85 @@ is about 4.6 times cheaper per byte.
 
 Fresh memory at 4 KiB granularity costs 0.13 to 0.14 ns per byte: about 8.6 ns, or 49 cycles,
 for each new 64-byte object. That is more than ten times the fast path.
+
+### Making memory resident: faults, populate and huge pages
+
+Measured 2026-10-17 with `bench/roofline/oscost`'s `faults` binary (`cargo build --release`,
+then `RF_CPUS=13 target/release/faults single|threads|advice|split|khuge`), under
+`scripts/memlimit`. Every variant writes one byte to every page of a fresh 64 MiB mapping, so
+all end with the same memory resident; variants run interleaved in a new order each round,
+pinned to CPU 13 with its sibling 29 idle, and each figure is the median of 3 to 9 rounds,
+from per-thread counters. Two sessions; ranges are the two medians. The machine was shared:
+CPUs 0 to 7 and their siblings were mostly busy with other work, CPUs 8 to 15 mostly idle.
+
+| One thread | ns per 4 KiB | kernel cycles per 4 KiB |
+|---|---:|---:|
+| Demand fault: write each page | 523 to 582 | 2,310 to 2,530 |
+| `MADV_POPULATE_WRITE` 1 page at a time, then write | 524 to 549 | 2,610 to 2,710 |
+| populate 4 pages at a time | 441 to 486 | 2,220 to 2,440 |
+| populate 16 pages | 418 to 457 | 2,130 to 2,330 |
+| populate 64 pages | 395 to 440 | 2,060 to 2,260 |
+| populate 512 or 4096 pages | 409 to 464 | 2,120 to 2,360 |
+| Huge-page fault (`MADV_HUGEPAGE`), free 2 MiB blocks available | 151 to 214 | 730 to 1,050 |
+| Huge-page fault, no free 2 MiB block (below) | 660 to 780, single runs 130 to 2,000 | |
+| Write to a page already resident | 8 to 9 | 1 |
+
+- **Populate saves the exception and nothing else.** Of a 4 KiB fault's 520 to 580 ns,
+  populating saves 105 to 140 ns, a fifth to a quarter, and 16 pages a call already save all
+  of it. A populate runs the same fault handler once per page from inside the kernel
+  (`faultin_page_range`, `handle_mm_fault`): it skips the exception entry and the VMA lookup
+  (in the demand-fault profile `asm_exc_page_fault` 7%, `mas_walk` 11%, `lock_vma_under_rcu`
+  4%), and still allocates, zeroes, locks the page table and adds the page to the LRU for each
+  page. In its profile the page-table lock is 28% and clearing the page 9%.
+- **A huge page is bound by zeroing.** Clearing is 85% of its profile; 151 ns per 4 KiB is
+  about 27 GB/s, which is what one core writes to DRAM. So 4 KiB pages cost about 400 ns of
+  bookkeeping per page on top of the zeroing that every way of getting fresh memory pays.
+- **Huge pages need free 2 MiB blocks.** THP defrag is `madvise` here, so a fault in an
+  advised range with no free 2 MiB block compacts memory in the faulting thread and falls back
+  to 4 KiB if that fails. Late in the session page cache filled most of memory and
+  `/proc/buddyinfo` showed no free block of order 9; huge-page faults then cost 660 to 780 ns
+  per 4 KiB (more than a demand fault) and one in five fell back. mimalloc's Vec growth went
+  from 5.8 to 28 cycles an element in that state, asmalloc's with huge pages for grown
+  blocks from 4.1 to a median of 9.6 (3.6 to 21.6 over five runs), against 10.3 with none.
+
+With several threads at once, each on its own mapping (CPUs 13, 24, 25, 26, one L3; builds
+started on CPUs 4 to 7 during the 4-thread row):
+
+| ns per 4 KiB | 1 thread | 2 threads | 4 threads |
+|---|---:|---:|---:|
+| demand fault | 539 | 604 | 761 |
+| populate 64 pages | 425 | 492 | 700 |
+| huge-page fault | 151 | 290 | 581 |
+
+Faults scale reasonably: the page-table locks are per table and the page allocator's lists
+are per CPU. Huge pages scale worst because they are bound by bandwidth: the four threads
+together zero about 28 GB/s, which is roughly what one Zen 5 core complex can write. At four
+threads a huge page is only 1.3 times cheaper than a 4 KiB fault.
+
+**Advice around a slot** (`faults advice`): 4000 cycles over a committed region advised
+against huge pages, with 4 KiB pages resident in every other 16 MiB slot, of advising one
+slot's whole huge pages for huge pages, filling it, purging it and taking the advice back, up
+to five slots advised at once, half of them starting off a huge-page boundary.
+`MADV_HUGEPAGE` cost 0.95 us and `MADV_NOHUGEPAGE` 1.29 us; filling cost 61 us per 2 MiB and
+`MADV_DONTNEED` 2 us per 2 MiB. `/proc/self/maps` had 31 lines before, at most 41, and 31
+after: the kernel merges the mapping back completely. In asmalloc itself, 2000 vectors grown
+to 2 to 32 MiB with up to five alive left 6 more lines than before, all from regions assigned
+and commits extended during the run, none from advice.
+
+**Purging part of a huge page returns nothing** (`faults split`): 256 MiB faulted as huge
+pages, then the first half of each purged with `MADV_DONTNEED` (7.6 us a call): the resident
+set fell to 130 MiB but the cgroup stayed charged 257 MiB, and still was two seconds later.
+The kernel only queues the page to be split later, under memory pressure. Purging the second
+halves returned it all; purging whole huge pages returns them at once, 2.8 us per 2 MiB.
+
+**khugepaged collapses sparse memory** (`faults khuge`): 64 MiB with one page written per
+2 MiB, then advised for huge pages, became 64 MiB resident within 40 seconds
+(`max_ptes_none` is 511, the default). Advice must never cover memory used sparsely, even
+memory that was faulted in 4 KiB pages before the advice.
+
+Multi-size THP (16 KiB to 1 MiB folios, which would fault 4 to 256 pages at a time without
+the 2 MiB granularity) is off on this machine at every size, and an unprivileged process
+cannot turn it on.
 
 ## 8. Moving cache lines between cores
 

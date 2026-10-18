@@ -1211,21 +1211,27 @@ fn a_large_slot_that_shrinks_in_place_returns_its_tail() {
     back.resize_in_place(ptr, 5 * page + 100);
     back.resize_in_place(ptr, 5 * page + 7);
     assert_eq!(os.calls(Call::Purge), purges + 1);
-    // Grown back in place: the old bytes are gone, not stale.
+    // Grown back in place: the old bytes are gone, not stale. That is dense growth to a huge
+    // page (the slot is one simulated huge page), so the slot is now advised for them.
     back.resize_in_place(ptr, class.size());
     assert_eq!(back.usable_size(ptr.as_ptr()), Some(class.size()));
     assert_eq!(os.calls(Call::Purge), purges + 1);
     assert!(painted(ptr.as_ptr(), 6 * page, 0x6b));
     assert!(painted(tail.as_ptr(), class.size() - 6 * page, 0));
-    // Shrunk again after being written, then freed and reused: the counts stay in step.
+    assert_eq!(os.huge_pages(ptr), Some(HugePages::Prefer));
+    // Shrunk again after being written: the tail lies inside the huge page, which goes back
+    // only whole, at the free, with the advice.
     paint(ptr.as_ptr(), class.size(), 0x11);
     back.resize_in_place(ptr, 2 * page);
-    assert_eq!(os.calls(Call::Purge), purges + 2);
+    assert_eq!(os.calls(Call::Purge), purges + 1);
+    assert!(painted(ptr.as_ptr(), class.size(), 0x11));
     back.free(ptr, class);
-    assert_eq!(back.retained_large(), class.size());
+    assert_eq!(os.calls(Call::Purge), purges + 2);
+    assert_eq!(os.huge_pages(ptr), Some(HugePages::Avoid));
+    assert_eq!(back.retained_large(), 0);
     let again = back.alloc(class, class.size()).unwrap();
     assert_eq!(again.ptr, ptr);
-    assert!(!again.zeroed);
+    assert!(again.zeroed && painted(ptr.as_ptr(), class.size(), 0));
     assert_eq!(back.retained(), 0);
     back.free(again.ptr, class);
 }
@@ -1328,6 +1334,156 @@ fn a_moving_large_block_releases_its_old_pages_behind_the_copy() {
     assert!(patterned(new.as_ptr(), piece));
     assert_eq!(os.calls(Call::Purge), purges);
     assert_eq!(back.retained_large(), small_class.size());
+}
+
+/// A block that grows by moving, densely and past a huge page, gets huge pages in its new
+/// slot until it is freed; the free returns the whole slot and takes the advice back. A block
+/// that grows by much more at once, or is allocated at its size, gets none.
+#[test]
+#[cfg_attr(miri, ignore)]
+fn a_block_that_grows_gets_huge_pages_until_it_is_freed() {
+    let state = state::<Native>();
+    let back = state.get_or_reserve().unwrap();
+    let os = state.os();
+    let huge = Native::GEOMETRY.huge_page_size();
+    let (old_class, new_class) = (large(96 << 10), large(512 << 10));
+    let grow = |len: usize, size: usize| {
+        let old = back.alloc(old_class, len).unwrap().ptr;
+        pattern(old.as_ptr(), len);
+        // As the heap moves a block: a new slot with room, its size recorded, then the move.
+        let new = back.alloc(new_class, new_class.size()).unwrap().ptr;
+        back.resize(new, size);
+        // SAFETY: both are live blocks of these sizes that nothing else uses.
+        unsafe { back.move_large(old, new, len) };
+        assert!(patterned(new.as_ptr(), len));
+        new
+    };
+    let dense = grow(80 << 10, 160 << 10);
+    let end = dense.map_addr(|a| a.saturating_add(new_class.size() - 1));
+    assert_eq!(os.huge_pages(dense), Some(HugePages::Prefer));
+    assert_eq!(os.huge_pages(end), Some(HugePages::Prefer));
+    let purges = os.calls(Call::Purge);
+    back.free(dense, new_class);
+    assert_eq!(
+        os.calls(Call::Purge),
+        purges + 1,
+        "the whole slot goes back at the free"
+    );
+    assert_eq!(os.huge_pages(dense), Some(HugePages::Avoid));
+    assert_eq!(back.retained_large(), 0);
+    // Reused by a block that did not grow: no advice, and zero.
+    let again = back.alloc(new_class, new_class.size()).unwrap();
+    assert_eq!(again.ptr, dense);
+    assert!(again.zeroed);
+    back.free(again.ptr, new_class);
+    // Growing more than fourfold at once says nothing about density.
+    let far = grow(24 << 10, 400 << 10);
+    assert_eq!(os.huge_pages(far), Some(HugePages::Avoid));
+    back.free(far, new_class);
+    // Growing in place: advised once the block reaches a huge page, if it grew densely.
+    let block = back.alloc(new_class, huge / 2).unwrap().ptr;
+    assert_eq!(os.huge_pages(block), Some(HugePages::Avoid));
+    let advice = os.calls(Call::AdviseHuge);
+    back.resize_in_place(block, huge);
+    assert_eq!(os.huge_pages(block), Some(HugePages::Prefer));
+    back.resize_in_place(block, 2 * huge);
+    assert_eq!(
+        os.calls(Call::AdviseHuge),
+        advice + 1,
+        "a slot is advised once"
+    );
+    back.free(block, new_class);
+    assert_eq!(os.huge_pages(block), Some(HugePages::Avoid));
+}
+
+/// In a slot advised for huge pages, a shrink returns its tail only in whole huge pages, and a
+/// move returns the old block's pages piece by piece on huge-page boundaries even when the
+/// slot does not start on one.
+#[test]
+#[cfg_attr(miri, ignore)]
+fn an_advised_slot_is_purged_only_in_whole_huge_pages() {
+    let state = state::<Native>();
+    let back = state.get_or_reserve().unwrap();
+    let os = state.os();
+    let page = Native::GEOMETRY.page_size();
+    let huge = Native::GEOMETRY.huge_page_size();
+    // 160 KiB slots: slot 1 starts 32 KiB past a huge-page boundary and holds two whole huge
+    // pages, at 192 to 320 KiB of the region.
+    let class = large(160 << 10);
+    let first = back.alloc(class, page).unwrap().ptr;
+    let slot = back.alloc(class, huge / 2).unwrap().ptr;
+    assert_eq!(slot.addr().get() - first.addr().get(), class.size());
+    back.resize_in_place(slot, 2 * huge);
+    let interior = slot.map_addr(|a| a.saturating_add(huge / 2));
+    assert_eq!(os.huge_pages(interior), Some(HugePages::Prefer));
+    assert_eq!(
+        os.huge_pages(slot),
+        Some(HugePages::Avoid),
+        "only whole huge pages"
+    );
+    back.resize_in_place(slot, class.size());
+    paint(slot.as_ptr(), class.size(), 0x5a);
+    // A shrink to the middle of the first huge page keeps all of it; the rest goes back.
+    back.resize_in_place(slot, huge / 2 + 3 * page);
+    let past = interior.map_addr(|a| a.saturating_add(huge));
+    assert!(painted(slot.as_ptr(), huge / 2 + huge, 0x5a));
+    // SAFETY: no other thread runs, and the back end and this test store only integers.
+    unsafe { assert!(os.is_purged(past, class.size() - huge / 2 - huge)) };
+    // A move of it: every page of the old slot goes back, the contents arrive.
+    back.resize_in_place(slot, class.size());
+    pattern(slot.as_ptr(), class.size());
+    let to = back.alloc(large(512 << 10), 2 * class.size()).unwrap().ptr;
+    let (mut pieces, purges) = (0, os.calls(Call::Purge));
+    // SAFETY: both are live blocks that nothing else uses.
+    unsafe { back.move_large_with(slot, to, class.size(), || pieces += 1) };
+    assert!(patterned(to.as_ptr(), class.size()));
+    // To the first boundary, then the two huge pages, each returned as it is copied.
+    assert_eq!(pieces, 3);
+    assert_eq!(os.calls(Call::Purge), purges + 3);
+    // SAFETY: as above.
+    unsafe { assert!(os.is_purged(slot, class.size())) };
+    assert_eq!(os.huge_pages(interior), Some(HugePages::Avoid));
+    back.free(first, class);
+    back.free(to, large(512 << 10));
+}
+
+/// A refused or partial advice leaves a correct heap: the flag is kept until the advice is
+/// taken back, and the next holder of the slot tries again.
+#[test]
+#[cfg_attr(miri, ignore)]
+fn refused_huge_page_advice_is_retried_by_the_next_holder() {
+    let state = state::<Native>();
+    let back = state.get_or_reserve().unwrap();
+    let os = state.os();
+    let huge = Native::GEOMETRY.huge_page_size();
+    let class = large(256 << 10);
+    let block = back.alloc(class, huge / 2).unwrap().ptr;
+    os.set_faults(Call::AdviseHuge, Faults::ALWAYS.partially());
+    back.resize_in_place(block, 2 * huge);
+    pattern(block.as_ptr(), 2 * huge);
+    assert!(patterned(block.as_ptr(), 2 * huge));
+    // Half the range took the advice before the call failed.
+    assert_eq!(os.huge_pages(block), Some(HugePages::Prefer));
+    let calls = || os.calls(Call::AdviseHuge);
+    let before = calls();
+    back.free(block, class);
+    assert_eq!(calls(), before + 1, "the free tried to take it back");
+    // The next holder tries again, and so does its free, until the OS accepts.
+    let again = back.alloc(class, class.size()).unwrap();
+    assert_eq!(again.ptr, block);
+    assert!(again.zeroed && painted(block.as_ptr(), class.size(), 0));
+    assert_eq!(calls(), before + 2);
+    back.free(again.ptr, class);
+    assert_eq!(calls(), before + 3);
+    os.set_faults(Call::AdviseHuge, Faults::NONE);
+    let third = back.alloc(class, class.size()).unwrap();
+    assert_eq!(third.ptr, block);
+    assert_eq!(calls(), before + 4);
+    let last = block.map_addr(|a| a.saturating_add(class.size() - 1));
+    assert_eq!(os.huge_pages(block), Some(HugePages::Avoid));
+    assert_eq!(os.huge_pages(last), Some(HugePages::Avoid));
+    back.free(third.ptr, class);
+    assert_eq!(calls(), before + 4, "taken back for good");
 }
 
 /// The same for a run of regions moving to a larger run.

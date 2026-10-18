@@ -12,7 +12,7 @@
 
 use super::group::{self, Group, Open};
 use super::host::ClassHost;
-use super::layout::{Grow, Hints, Layout};
+use super::layout::{Grow, Hints, Layout, Recorded};
 use super::policy::{large_retained_cap, move_piece, wants_huge};
 use super::region::{self, Carve};
 use super::tree::{self, Host};
@@ -190,9 +190,16 @@ impl<'a, O: Os> Back<'a, O> {
     /// The count is read here and raised later, by the release, so the cap is per thread:
     /// threads freeing at the same moment can each see room and together pass the cap by one
     /// slot for every thread but the first. The next free sees the true count.
+    ///
+    /// A slot advised for huge pages because its object grew is always purged here, and its
+    /// advice taken back, so that no free slot is advised: the next block in it may be used
+    /// sparsely, and a partial purge of a huge page would return nothing.
     fn purge_before_release(&self, ptr: NonNull<u8>, class: Class) -> bool {
-        let cap = large_retained_cap(self.space.plan().geometry());
-        if self.retained_large().saturating_add(class.size()) <= cap {
+        let geometry = self.space.plan().geometry();
+        let over =
+            self.retained_large().saturating_add(class.size()) > large_retained_cap(geometry);
+        // Only a slot that holds a whole huge page can have been advised.
+        if !over && class.size() < geometry.huge_page_size() {
             return false;
         }
         let Some(host) = self.host(class) else {
@@ -206,10 +213,16 @@ impl<'a, O: Os> Back<'a, O> {
         if tree::word(&host, tree::Node::leaf(region, word)).load() & (1u64 << bit) != 0 {
             self.abort("double free: a large object was freed while it was free");
         }
+        let huge = region::recorded(&host, region, slot).is_some_and(|r| r.huge);
+        if !over && !huge {
+            return false;
+        }
         // SAFETY: BACK-CLASS-01 in docs/safety/asmalloc/back/class-safety.md. The program is
         // freeing the slot and has not been given it back, its bit was clear a moment ago,
         // and the slot is below the watermark (`validate`).
-        unsafe { region::purge_held(&host, region, slot) }
+        let purged = unsafe { region::purge_held(&host, region, slot) };
+        region::unadvise(&host, region, slot);
+        purged
     }
 
     /// The region and slot of a pointer the caller says is a handed-out slot of `class`, or an
@@ -247,8 +260,11 @@ impl<'a, O: Os> Back<'a, O> {
             let (region, first, _) = self.carve(&host, class, 1)?;
             (region, first, true)
         };
-        if let Some(at) = host.layout().size_word(slot) {
-            host.meta(region, at).store(size as u64);
+        if let Some(before) = region::recorded(&host, region, slot) {
+            region::record(&host, region, slot, Recorded { size, ..before });
+            // The last free could not take the slot's huge-page advice back; try again, so
+            // that this block, which has not grown, does not get huge pages.
+            region::unadvise(&host, region, slot);
         }
         if !class.is_small() {
             // As for a large free: see `Back::free`.
@@ -275,8 +291,8 @@ impl<'a, O: Os> Back<'a, O> {
                 if size > class.size() {
                     self.abort("a resize beyond the object's slot");
                 }
-                if let Some(at) = host.layout().size_word(slot) {
-                    host.meta(region, at).store(size as u64);
+                if let Some(before) = region::recorded(&host, region, slot) {
+                    region::record(&host, region, slot, Recorded { size, ..before });
                 }
             }
             Some(Kind::Run(regions)) => {
@@ -303,6 +319,10 @@ impl<'a, O: Os> Back<'a, O> {
     /// There is no hysteresis: every shrink that crosses a page boundary is one system call,
     /// so a program that shrinks a block a page at a time pays a call each time, as it does
     /// with glibc's `realloc` above the `mmap` threshold. A shrink within a page makes none.
+    /// In a slot advised for huge pages the tail is returned in whole huge pages only.
+    ///
+    /// A large object that grows in place densely past a size gets huge pages in its slot
+    /// (`region::advise_grown`).
     pub fn resize_in_place(&self, ptr: NonNull<u8>, size: usize) {
         let page = self.space.plan().geometry().page_size();
         let tail = |old: usize, limit: usize| {
@@ -320,11 +340,12 @@ impl<'a, O: Os> Back<'a, O> {
                 if size > class.size() {
                     self.abort("a resize beyond the object's slot");
                 }
-                let Some(at) = host.layout().size_word(slot) else {
+                let Some(before) = region::recorded(&host, region, slot) else {
                     return;
                 };
-                let old = host.meta(region, at).load() as usize;
-                host.meta(region, at).store(size as u64);
+                let old = before.size;
+                region::record(&host, region, slot, Recorded { size, ..before });
+                region::advise_grown(&host, region, slot, old, size);
                 if let Some((from, len)) = tail(old, class.size()) {
                     // SAFETY: BACK-CLASS-02 in docs/safety/asmalloc/back/class-safety.md. The
                     // caller owns the object in this slot and has just given up everything
@@ -391,6 +412,8 @@ impl<'a, O: Os> Back<'a, O> {
             Some(Kind::Run(_)) => None,
             _ => self.abort("a move of a pointer that is not a large block of the heap"),
         };
+        // Before the copy, so that the copy already faults huge pages.
+        self.grown_into(to, len);
         if len <= piece {
             // SAFETY: BACK-CLASS-03: the caller's promise about the two ranges.
             unsafe { from.as_ptr().copy_to_nonoverlapping(to.as_ptr(), len) };
@@ -431,9 +454,14 @@ impl<'a, O: Os> Back<'a, O> {
                 }
             }
         };
+        // Pieces end at multiples of the piece in the address space, not in the block, so that
+        // a piece that goes back is whole huge pages wherever the block has them: purging
+        // part of a huge page would return nothing.
+        let base = from.addr().get();
         let (mut done, mut all) = (0, true);
         while done < len {
-            let step = piece.min(len - done);
+            let boundary = (base + done + 1).next_multiple_of(piece) - base;
+            let step = (boundary - done).min(len - done);
             // SAFETY: BACK-CLASS-03: `done + step <= len`, inside both ranges, which do not
             // overlap; the bytes of `from` read here have not been returned.
             unsafe {
@@ -441,14 +469,15 @@ impl<'a, O: Os> Back<'a, O> {
                     .add(done)
                     .copy_to_nonoverlapping(to.as_ptr().add(done), step);
             }
-            // Only whole pieces go back here: the last may end inside a page.
-            if step == piece {
-                all &= give_back(done, done + step);
+            // Only pieces that reach a boundary go back here: the last may end inside a page.
+            if done + step == boundary {
+                all &= give_back(done, boundary);
             }
             done += step;
             observe();
         }
-        all &= give_back(len - len % piece, whole);
+        let last = ((base + len) & !(piece - 1)).saturating_sub(base);
+        all &= give_back(last, whole);
         match host {
             Some((host, region, index)) => {
                 let Some(class) = slot else {
@@ -457,10 +486,29 @@ impl<'a, O: Os> Back<'a, O> {
                 if all {
                     region::mark_purged(&host, region, index);
                 }
+                region::unadvise(&host, region, index);
                 self.release_all(class, &[from.as_ptr()], !all);
                 self.heartbeat();
             }
             None => self.free_run(from),
+        }
+    }
+
+    /// After the contents of a block of `len` bytes have moved into the block at `to`: if `to`
+    /// is a large slot whose object grew, it may get huge pages (`region::advise_grown`).
+    fn grown_into(&self, to: NonNull<u8>, len: usize) {
+        let Some(Kind::Slot(class)) = self.lookup(to.as_ptr()) else {
+            return;
+        };
+        if class.is_small() || class.size() < self.space.plan().geometry().huge_page_size() {
+            return;
+        }
+        let Some(host) = self.host(class) else {
+            return;
+        };
+        let (region, index) = self.validate(&host, to.as_ptr(), class);
+        if let Some(now) = region::recorded(&host, region, index) {
+            region::advise_grown(&host, region, index, len, now.size);
         }
     }
 
@@ -474,8 +522,7 @@ impl<'a, O: Os> Back<'a, O> {
                 let host = self.host(class)?;
                 let location = self.space.locate(ptr)?;
                 let slot = self.space.plan().slot_at(location, class)?;
-                let at = host.layout().size_word(slot)?;
-                Some(host.meta(location.region, at).load() as usize)
+                Some(region::recorded(&host, location.region, slot)?.size)
             }
             Kind::Run(_) => Some(self.run_size(ptr)),
         }
