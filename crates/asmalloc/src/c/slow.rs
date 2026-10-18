@@ -75,7 +75,7 @@ pub extern "C" fn calloc_slow_args(n: usize, size: usize) -> *mut c_void {
     calloc_slow(n.saturating_mul(size))
 }
 
-/// The generated `c_calloc`'s tail after its pop: zeroes `block` as [`calloc_zero`] does for
+/// The generated `c_calloc`'s tail after its pop: zeroes `block` as `zero_block` does for
 /// the total `n * size`, and returns it. The routine passes its own arguments through, and the
 /// block in the third argument's register.
 ///

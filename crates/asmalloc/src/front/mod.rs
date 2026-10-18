@@ -1,16 +1,16 @@
 //! The front end: per-CPU slabs of magazines, and the routines that work on them.
 //!
-//! Each CPU number has a [`Slab`] in the static `SLABS`. A slab's hot word for a small class
+//! Each CPU number has a `Slab` in the static `SLABS`. A slab's hot word for a small class
 //! is the address of the next free slot of the magazine loaded for that class, or zero, or a
 //! marker; its cold part holds the CPU's spare magazines and the counters the idle check and
 //! the drain use. The array is zero-initialized, and zero is a valid slab with no magazines,
 //! so nothing needs initializing before the first call.
 //!
-//! Only the [`Routines`] write a slab, each with one restartable sequence that commits with a
+//! Only the `Routines` write a slab, each with one restartable sequence that commits with a
 //! single store, and the drain (`depot::drain`). The routines are assembly generated from Lean
-//! into `generated/` and wrapped as `Real`; [`Twin`] implements the same specifications in
+//! into `generated/` and wrapped as `Real`; `Twin` implements the same specifications in
 //! Rust for every environment where assembly cannot run (Miri, Kani and the simulated-OS
-//! tests), over a simulated processor ([`Machine`](crate::os::Machine)) that tests control. Which one a heap uses
+//! tests), over a simulated processor (`os::Machine`) that tests control. Which one a heap uses
 //! is chosen where the heap is made, by build configuration.
 //!
 //! The layout constants here must equal those the Lean specification gives the generated code
@@ -39,8 +39,20 @@ mod verify;
 #[cfg(kani)]
 mod verify_slow;
 
+// The module is public only for `SLABS` and `__rseq_offset`, which the C routines that
+// `export_c_abi!` defines in another crate name; the rest is the crate's own unless the test
+// kit and the benchmarks ask for it (feature `internals`).
+#[cfg(not(feature = "internals"))]
+pub(crate) use routines::{NO_CPU, Routines, StackPop, StackPush, StoreIfEqual};
+#[cfg(feature = "internals")]
 pub use routines::{NO_CPU, Routines, StackPop, StackPush, StoreIfEqual};
+#[cfg(not(feature = "internals"))]
+pub(crate) use slab::{Cpu, Field, SLAB_BYTES, SLAB_COUNT, SLAB_SHIFT, Slab, Slabs, Spare};
+#[cfg(feature = "internals")]
 pub use slab::{Cpu, Field, SLAB_BYTES, SLAB_COUNT, SLAB_SHIFT, Slab, Slabs, Spare};
+#[cfg(not(feature = "internals"))]
+pub(crate) use twin::Twin;
+#[cfg(feature = "internals")]
 pub use twin::Twin;
 
 // SAFETY: FRONT-01. glibc declares `extern const ptrdiff_t __rseq_offset;` (`sys/rseq.h`); the
@@ -63,7 +75,7 @@ use core::sync::atomic::{AtomicU8, AtomicU64, Ordering};
 /// The number of entries in the masks' table: one per value of a class byte, so that a class
 /// read from the region table indexes it whatever it is, and finds zero, which sends the
 /// generated C routines to their slow paths, for every byte that is not a small class.
-pub const MASK_COUNT: usize = crate::spec::MASK_COUNT;
+pub(crate) const MASK_COUNT: usize = crate::spec::MASK_COUNT;
 
 /// Where the masks' table starts within its page: past every field of a slab, so that no entry
 /// shares a page offset with a slab word (a load at the page offset of a store in flight waits
@@ -78,7 +90,7 @@ const PUBLISHED_PAGE_OFFSET: usize = 1024;
 const REGION_PAGE_OFFSET: usize = 2048;
 
 /// The number of entries of the region table the C frees read: one per region.
-pub const REGION_COUNT: usize = crate::space::MAX_REGIONS;
+pub(crate) const REGION_COUNT: usize = crate::space::MAX_REGIONS;
 
 /// The slabs, one per CPU number, and after them what the C entry points read at fixed distances
 /// from a class's word in slab 0: the masks, the published heap words and the region table.
@@ -210,7 +222,7 @@ pub static SLABS: Front = Front::new();
 /// The slot mask of each small class's magazines, indexed by class index; zero for every other
 /// byte. The inlined routines are given their class's mask from here, so a constant class
 /// folds it to a constant; the generated C routines read the copy in [`SLABS`].
-pub static MASKS: [u32; MASK_COUNT] = MASK_TABLE;
+pub(crate) static MASKS: [u32; MASK_COUNT] = MASK_TABLE;
 
 const MASK_TABLE: [u32; MASK_COUNT] = {
     let mut masks = [0; MASK_COUNT];

@@ -13,11 +13,11 @@
 //!   reusing freed slots before carving new ones and lowest addresses first; [`Back::launder`]
 //!   returns a slice of them, with one atomic OR per bitmap word they touch. These are what
 //!   the depot calls to fill and empty magazines.
-//! - [`Back::alloc`] and [`Back::free`] serve one slot of any class straight from the bitmaps:
+//! - [`Back::alloc`] and `Back::free` serve one slot of any class straight from the bitmaps:
 //!   always for large classes, and for small ones when a thread has no per-CPU cache. A large
 //!   allocation says whether the slot is known to read as zero, and records the object's size,
 //!   one word per slot out of band; [`Back::resize`] updates it and [`Back::size`] reads it.
-//! - [`Back::alloc_run`] and [`Back::free_run`] serve objects bigger than a region as runs of
+//! - [`Back::alloc_run`] and `Back::free_run` serve objects bigger than a region as runs of
 //!   whole regions. [`Back::lookup`] and [`Back::usable_size`] find what an address is.
 //! - [`Back::heartbeat`] does one bounded step of the clocked pass that returns free memory to
 //!   the OS, and [`Back::trim`] returns everything it can.
