@@ -6,8 +6,11 @@
 #   default    the stress harness (crates/asmalloc-preload/tests/programs/soak.c) in every
 #              mode, SOAK_SECS (30) each, plain and preloaded (the signal and breakpoint
 #              modes, which allocate in signal handlers, preloaded only); then on two CPUs
-#              with 64 threads, without rseq, and against a debug build of the library.
-#              About 20 minutes.
+#              with 64 threads, without rseq, with the background maintenance thread, and
+#              against a debug build of the library;
+#              then the sweep, which aborts every instruction of every restartable sequence in
+#              the release library in turn (programs/sweep-unreached.txt lists the sequences
+#              it expects never to fire, and why). About 25 minutes.
 #   --long     SOAK_SECS defaults to 600 and every stress run repeats for SOAK_SEEDS (3) seeds.
 #   --suites   also fetch git, redis, CPython, SQLite and Tcl 8.6 into SOAK_SRC, build each
 #              plain and with the compiler and linker preloaded (the objects must match), and
@@ -53,6 +56,8 @@ cc -O2 -g -pthread -o "$soak" "$root/crates/asmalloc-preload/tests/programs/soak
 # Instruction addresses for the breakpoint mode, which aborts sequences at chosen instructions.
 objdump -d --no-show-raw-insn "$lib" | grep -oE '^ +[0-9a-f]+:' | tr -d ' :' >"$work/insns"
 objdump -d --no-show-raw-insn "$dlib" | grep -oE '^ +[0-9a-f]+:' | tr -d ' :' >"$work/insns-debug"
+# The sweep names sequences by the function that holds them.
+nm -C -S --defined-only "$lib" >"$work/funcs"
 echo "work directory: $work"
 echo "asmalloc $(git -C "$root" rev-parse --short HEAD)$(git -C "$root" diff --quiet || echo +dirty)"
 
@@ -166,12 +171,27 @@ for seed in $(seq 1 "$seeds"); do
     compare "no-rseq-$m-s$seed" "$mem" "$limit" env GLIBC_TUNABLES=glibc.pthread.rseq=0 \
       "$soak" "$m" secs="$secs" seed="$seed"
   done
+  # The background thread (ASMALLOC_BACKGROUND=1) drains and launders idle slabs from another
+  # thread while these run; then a burst, a full free and a quiet period in which resident
+  # memory must fall with nobody calling the allocator.
+  for m in churn prodcons; do
+    compare "background-$m-s$seed" "$mem" "$limit" env ASMALLOC_BACKGROUND=1 \
+      "$soak" "$m" secs="$secs" seed="$seed"
+  done
+  alone "background-quiet-s$seed" "$mem" "$limit" env ASMALLOC_BACKGROUND=1 SOAK_QUIET_CHECK=1 \
+    "$soak" quiet secs="$((secs / 3 + 1))" seed="$seed"
   # The debug build: debug assertions on, no LTO, different code around the routines.
   for m in churn idle signal breakpoint; do
     PRELOAD_LIB="$dlib" alone "debug-$m-s$seed" "$mem" "$limit" env SOAK_INSNS="$work/insns-debug" \
       "$soak" "$m" secs="$secs" seed="$seed"
   done
 done
+
+# Deterministic, so once: every instruction of every sequence, against the release library.
+alone sweep "$mem" 60m env SOAK_INSNS="$work/insns" SOAK_FUNCS="$work/funcs" \
+  SOAK_UNREACHED="$root/crates/asmalloc-preload/tests/programs/sweep-unreached.txt" \
+  taskset -c "${cpus[0]}" "$soak" sweep threads=1
+wanted sweep && grep -h 'soak sweep: [0-9]* of' "$work/sweep.preload.err" | sed 's/^/      /'
 
 if [ $suites = 1 ]; then
   # shellcheck source=scripts/preload-soak-suites

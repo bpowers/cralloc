@@ -7,7 +7,7 @@
 //
 // usage: soak MODE [key=value...]
 //   modes:   churn, prodcons, fork, threadstorm, realloc, huge, signal, idle, breakpoint, trim,
-//            sweep
+//            sweep, quiet
 //   keys:    threads, secs, seed, maxsize, live, xchg (percent of ops that hand a block to
 //            another thread), sigus (signal interval, microseconds), usable (fill up to
 //            malloc_usable_size, default 1), budget (MiB live across all threads, default
@@ -30,8 +30,12 @@
 // The sweep mode is the breakpoint mode made exhaustive and deterministic: one thread places
 // the breakpoint on each listed instruction of each sequence in turn (SOAK_INSNS is required)
 // and runs operations until it fires or `sweepops` operations pass, while `threads - 1` others
-// churn without breakpoints. It reports how many sequences and instructions fired, names each
-// sequence that never did, and fails if any did not.
+// churn without breakpoints. It reports how many sequences and instructions fired, and fails if
+// a sequence never fired, unless SOAK_UNREACHED lists it, and if a listed one did fire, so the
+// list cannot go stale. SOAK_FUNCS names the object's functions (`nm -C -S --defined-only`
+// output), so that sequences in local functions get names; SOAK_UNREACHED has one line per
+// sequence expected never to run: a substring of its function's name, optionally `#k` for the
+// k-th sequence of that function in address order (from 0), `|`, and the reason.
 //
 // The signal and breakpoint modes allocate in signal handlers, which C does not allow and
 // glibc's malloc does not support; they are for allocators that promise it (asmalloc's design:
@@ -705,6 +709,41 @@ static void run_trim(void) {
     unmap(t, sizeof(pthread_t) * (size_t)nthreads);
 }
 
+// quiet: workers churn for `secs`, free everything and exit; then the process makes no calls
+// for `quietms` milliseconds while resident memory is sampled. Memory is counted above what
+// was resident before the burst, and the live-block table is off so that the harness's own
+// memory stays out of it. With SOAK_QUIET_CHECK set it fails unless what the allocator held
+// just after the frees fell to `quietpct` percent, or 16 MiB: for an allocator that returns
+// memory without being called (asmalloc with ASMALLOC_BACKGROUND=1).
+static long quiet_ms = 3000, quiet_pct = 50;
+
+static long rss_mib(void) {
+    long pages = 0, rss = 0;
+    FILE *f = fopen("/proc/self/statm", "r");
+    if (f && fscanf(f, "%ld %ld", &pages, &rss) != 2) rss = 0;
+    if (f) fclose(f);
+    return rss * 4096 / (1 << 20);
+}
+
+static void run_quiet(void) {
+    table_on = 0;
+    long base = rss_mib();
+    run_threads(churn_worker, nthreads);
+    xdrain(&(Rng){1});
+    long after = rss_mib() - base, low = after;
+    for (long t = 0; t < quiet_ms; t += 100) {
+        sleep_us(100000);
+        long now_ = rss_mib() - base;
+        if (now_ < low) low = now_;
+    }
+    long end = rss_mib() - base;
+    say("soak quiet: %ld MiB resident before the burst; above that, %ld MiB after the frees and "
+        "%ld after %ld ms quiet (lowest %ld)\n",
+        base, after, end, quiet_ms, low);
+    if (getenv("SOAK_QUIET_CHECK") && end > 16 && end * 100 > after * quiet_pct)
+        die("resident memory stayed at %ld MiB of %ld after %ld ms quiet", end, after, quiet_ms);
+}
+
 // Producers allocate and only hand off; consumers only verify and free.
 static _Atomic int producers_left;
 
@@ -1154,11 +1193,89 @@ static void *trap_worker(void *arg) {
     return NULL;
 }
 
-// The exported function that holds `ip`, or "?" for a local one (look its offset up in the
-// object's symbol table).
+// The object's functions from SOAK_FUNCS, as offsets from its base, and the sequences the
+// sweep expects never to fire, from SOAK_UNREACHED.
+typedef struct {
+    uint64_t start, size;
+    char name[240];
+} Func;
+
+typedef struct {
+    char name[200], reason[200];
+    int ordinal;  // -1: every sequence of the function
+    int matched, fired;
+} Unreached;
+
+static Func *funcs;
+static size_t n_funcs;
+static Unreached unreached[32];
+static size_t n_unreached;
+
+static void load_funcs(void) {
+    const char *path = getenv("SOAK_FUNCS");
+    if (!path) return;
+    FILE *f = fopen(path, "r");
+    if (!f) die("cannot open SOAK_FUNCS file %s", path);
+    size_t cap = 1 << 15;
+    funcs = map(cap * sizeof *funcs);
+    char line[1024];
+    while (n_funcs < cap && fgets(line, sizeof line, f)) {
+        unsigned long long a, n;
+        char type;
+        int used = 0;
+        if (sscanf(line, "%llx %llx %c %n", &a, &n, &type, &used) < 3 || !used) continue;
+        if (type != 't' && type != 'T') continue;
+        Func *fn = &funcs[n_funcs++];
+        fn->start = a;
+        fn->size = n;
+        snprintf(fn->name, sizeof fn->name, "%s", line + used);
+        fn->name[strcspn(fn->name, "\n")] = 0;
+    }
+    fclose(f);
+}
+
+static void load_unreached(void) {
+    const char *path = getenv("SOAK_UNREACHED");
+    if (!path) return;
+    FILE *f = fopen(path, "r");
+    if (!f) die("cannot open SOAK_UNREACHED file %s", path);
+    char line[512];
+    while (n_unreached < 32 && fgets(line, sizeof line, f)) {
+        line[strcspn(line, "\n")] = 0;
+        char *bar = strchr(line, '|');
+        if (line[0] == '#' || !bar) continue;
+        *bar = 0;
+        Unreached *u = &unreached[n_unreached++];
+        u->ordinal = -1;
+        char *hash = strrchr(line, '#');
+        if (hash) {
+            *hash = 0;
+            u->ordinal = atoi(hash + 1);
+        }
+        snprintf(u->name, sizeof u->name, "%.199s", line);
+        snprintf(u->reason, sizeof u->reason, "%.199s", bar + 1);
+    }
+    fclose(f);
+}
+
+// The name of the function that holds `ip`: from SOAK_FUNCS, else the exported symbol, else
+// "?".
 static const char *symbol_of(uint64_t ip) {
+    uint64_t off = ip - object_base;
+    for (size_t i = 0; i < n_funcs; i++)
+        if (off - funcs[i].start < funcs[i].size) return funcs[i].name;
     Dl_info info;
     return dladdr((void *)ip, &info) && info.dli_sname ? info.dli_sname : "?";
+}
+
+// The entry for the sequence at `start` in the function `name`, which holds `rank` sequences
+// below it.
+static Unreached *listed_unreached(const char *name, int rank) {
+    for (size_t i = 0; i < n_unreached; i++)
+        if (strstr(name, unreached[i].name) &&
+            (unreached[i].ordinal < 0 || unreached[i].ordinal == rank))
+            return &unreached[i];
+    return NULL;
 }
 
 // sweep: every listed instruction in turn, on the main thread.
@@ -1177,6 +1294,8 @@ static void *sweep_background(void *arg) {
 
 static void run_sweep(void) {
     if (!n_insns) die("the sweep needs SOAK_INSNS and an asmalloc object with sequences");
+    load_funcs();
+    load_unreached();
     unsigned char *fired = map(n_insns);
     pthread_t *t = map(sizeof(pthread_t) * (size_t)nthreads);
     for (long i = 1; i < nthreads; i++)
@@ -1203,7 +1322,7 @@ static void run_sweep(void) {
     set_done(&s);
     atomic_store(&stop, 1);
     for (long i = 1; i < nthreads; i++) pthread_join(t[i], NULL);
-    size_t covered = 0, missed = 0;
+    size_t covered = 0, missed = 0, stale = 0, expected = 0;
     for (size_t q = 0; q < n_sequences; q++) {
         const RseqCs *cs = &sequences[q];
         size_t listed = 0, got = 0;
@@ -1212,21 +1331,39 @@ static void run_sweep(void) {
                 listed++;
                 got += fired[i];
             }
-        if (got) {
+        const char *name = symbol_of(cs->start_ip);
+        int rank = 0;
+        for (size_t o = 0; o < n_sequences; o++)
+            if (sequences[o].start_ip < cs->start_ip && symbol_of(sequences[o].start_ip) == name)
+                rank++;
+        Unreached *u = listed_unreached(name, rank);
+        say("soak sweep: sequence at +%#lx in %s#%d: %zu of %zu instructions fired%s%s\n",
+            (unsigned long)(cs->start_ip - object_base), name, rank, got, listed,
+            u ? "; listed as never running: " : "", u ? u->reason : "");
+        if (u) {
+            u->matched++;
+            expected++;
+            if (got) {
+                u->fired++;
+                stale++;
+            }
+        } else if (got) {
             covered++;
         } else {
-            say("soak sweep: sequence at +%#lx (%s, %zu instructions) never fired\n",
-                (unsigned long)(cs->start_ip - object_base), symbol_of(cs->start_ip), listed);
             missed++;
         }
-        if (listed && got < listed)
-            say("soak sweep: sequence at +%#lx (%s): %zu of %zu instructions fired\n",
-                (unsigned long)(cs->start_ip - object_base), symbol_of(cs->start_ip), got,
-                listed);
     }
-    say("soak sweep: %zu of %zu sequences and %ld of %zu instructions fired, in %ld operations\n",
-        covered, n_sequences, hit, n_insns, ops);
+    size_t unmatched = 0;
+    for (size_t i = 0; i < n_unreached; i++)
+        if (!unreached[i].matched && ++unmatched)
+            say("soak sweep: no sequence is in a function named like \"%s\"\n",
+                unreached[i].name);
+    say("soak sweep: %zu of %zu sequences and %ld of %zu instructions fired, in %ld operations; "
+        "%zu listed as never running\n",
+        covered + stale, n_sequences, hit, n_insns, ops, expected);
     if (missed) die("%zu sequences never fired", missed);
+    if (stale) die("%zu sequences listed as never running fired; update the list", stale);
+    if (unmatched) die("%zu entries of the never-running list match no sequence", unmatched);
 }
 
 static void run_trap(void) {
@@ -1278,6 +1415,10 @@ static void parse(int argc, char **argv) {
             sig_us = atol(v);
         else if (!strcmp(k, "sweepops"))
             sweep_ops = atol(v);
+        else if (!strcmp(k, "quietms"))
+            quiet_ms = atol(v);
+        else if (!strcmp(k, "quietpct"))
+            quiet_pct = atol(v);
         else if (!strcmp(k, "trimus"))
             trim_us = atol(v);
         else if (!strcmp(k, "budget"))
@@ -1321,6 +1462,8 @@ int main(int argc, char **argv) {
         run_signal();
     } else if (!strcmp(mode, "breakpoint") || !strcmp(mode, "sweep")) {
         run_trap();
+    } else if (!strcmp(mode, "quiet")) {
+        run_quiet();
     } else if (!strcmp(mode, "trim")) {
         run_trim();
     } else if (!strcmp(mode, "idle")) {

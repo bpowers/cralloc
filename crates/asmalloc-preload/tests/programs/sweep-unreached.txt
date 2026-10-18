@@ -1,0 +1,7 @@
+# Restartable sequences in the preload library that the soak's sweep expects never to fire,
+# one per line: a substring of the name of the function that holds it, optionally "#k" for the
+# k-th sequence of that function in address order (from 0), "|", and why. The sweep fails if
+# a listed sequence fires, or if an entry matches no sequence.
+centry::c_free_sized|the crate's internal instance; the library exports a separate free_sized and nothing calls this one
+centry::c_calloc|the crate's internal instance; the library exports a separate calloc and nothing calls this one
+::free_slow#0|the retry push in exchange_for_free succeeds only if the slab gained room between the fast path's miss and the retry
