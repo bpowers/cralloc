@@ -174,25 +174,27 @@ mod libc {
         pub fn posix_memalign(out: *mut *mut c_void, align: usize, size: usize) -> c_int;
         pub fn aligned_alloc(align: usize, size: usize) -> *mut c_void;
         pub fn malloc_usable_size(p: *mut c_void) -> usize;
-        #[cfg(not(miri))]
+        #[cfg(not(any(miri, target_env = "musl")))]
         pub fn free_sized(p: *mut c_void, size: usize);
-        #[cfg(not(miri))]
+        #[cfg(not(any(miri, target_env = "musl")))]
         pub fn free_aligned_sized(p: *mut c_void, align: usize, size: usize);
         #[cfg(not(miri))]
         pub fn reallocarray(p: *mut c_void, n: usize, size: usize) -> *mut c_void;
-        #[cfg(not(miri))]
+        #[cfg(not(any(miri, target_env = "musl")))]
         pub fn memalign(align: usize, size: usize) -> *mut c_void;
-        #[cfg(not(miri))]
+        #[cfg(not(any(miri, target_env = "musl")))]
         pub fn valloc(size: usize) -> *mut c_void;
-        #[cfg(not(miri))]
+        #[cfg(not(any(miri, target_env = "musl")))]
         pub fn pvalloc(size: usize) -> *mut c_void;
         pub fn __errno_location() -> *mut c_int;
     }
 }
 
 impl CFns {
-    /// The C library this process links (glibc 2.43 or later). Under Miri, Miri's functions,
-    /// which lack the sized frees and need [`LIBC_C11`](Self::LIBC_C11)'s `aligned_alloc`.
+    /// The C library this process links (glibc 2.43 or later, or musl, which has neither the
+    /// sized frees nor `pvalloc`, so the kit treats it as lacking them and the obsolete
+    /// group). Under Miri, Miri's functions, which lack the sized frees and need
+    /// [`LIBC_C11`](Self::LIBC_C11)'s `aligned_alloc`.
     #[cfg(not(miri))]
     pub const LIBC: CFns = CFns::LIBC_EXACT;
 
@@ -212,24 +214,24 @@ impl CFns {
         posix_memalign: libc::posix_memalign,
         aligned_alloc: libc::aligned_alloc,
         malloc_usable_size: Some(libc::malloc_usable_size),
-        #[cfg(not(miri))]
+        #[cfg(not(any(miri, target_env = "musl")))]
         sized_free: Some(SizedFree {
             free_sized: libc::free_sized,
             free_aligned_sized: libc::free_aligned_sized,
         }),
-        #[cfg(miri)]
+        #[cfg(any(miri, target_env = "musl"))]
         sized_free: None,
         #[cfg(not(miri))]
         reallocarray: Some(libc::reallocarray),
         #[cfg(miri)]
         reallocarray: None,
-        #[cfg(not(miri))]
+        #[cfg(not(any(miri, target_env = "musl")))]
         obsolete: Some(Obsolete {
             memalign: libc::memalign,
             valloc: libc::valloc,
             pvalloc: libc::pvalloc,
         }),
-        #[cfg(miri)]
+        #[cfg(any(miri, target_env = "musl"))]
         obsolete: None,
         errno_location: libc::__errno_location,
     };
