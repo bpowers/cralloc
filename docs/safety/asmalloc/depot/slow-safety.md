@@ -1,6 +1,6 @@
 # Safety ledger: `crates/asmalloc/src/depot/slow.rs`
 
-## SLOW-01: `store_if_equal` in `exchange_for_alloc` and `exchange_for_free`
+## DEPOT-SLOW-01: `store_if_equal` in `exchange_for_alloc` and `exchange_for_free`
 
 **Precondition** (`Routines::store_if_equal`). `new` keeps the slab invariant for the hot word
 of `class`: the address of slot `s`, `1 <= s <= n - 1`, of a magazine of the class's size in

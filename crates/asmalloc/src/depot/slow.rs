@@ -237,7 +237,7 @@ impl<'a, O: Os, R: Routines, S: Source> Cache<'a, O, R, S> {
             if let Seen::Live = seen {
                 return self.serve_alloc(class, held);
             }
-            // SAFETY: SLOW-01.
+            // SAFETY: DEPOT-SLOW-01.
             let installed = unsafe {
                 self.routines
                     .store_if_equal(field, word, held.word(held.level()))
@@ -304,7 +304,7 @@ impl<'a, O: Os, R: Routines, S: Source> Cache<'a, O, R, S> {
             if let Seen::Live = seen {
                 return self.serve_free(class, held, object);
             }
-            // SAFETY: SLOW-01.
+            // SAFETY: DEPOT-SLOW-01.
             let installed = unsafe { self.routines.store_if_equal(field, word, held.word(0)) };
             match installed {
                 StoreIfEqual::Stored => {

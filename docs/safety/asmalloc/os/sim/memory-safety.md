@@ -5,8 +5,6 @@ the allocator's proofs and Miri runs rely on it, so it is held to the same rule.
 
 **Machine checks for every entry below.**
 
-- Kani `os::sim::verify_slow::the_simulator_keeps_the_zero_promises` runs allocation, zeroing
-  and free through `SimOs` for every byte offset of two pages. Kani checks every access.
 - Miri with `-Zmiri-strict-provenance` (`scripts/miri`) runs all the simulator and `Space` unit
   tests on the `Standard` shape, including threads reserving at once.
 
