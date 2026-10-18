@@ -60,17 +60,35 @@ pub struct Allocator {
     /// The native build directory under target/, for variants of one feature built by hand
     /// (with different allocator build-time knobs); `benchrun build` does not make them.
     pub build: Option<String>,
+    /// A code-layout variant of the workload builds (`benchrun layout`, see `layout.rs`):
+    /// the same sources and work, placed at other addresses. `None` is the normal build.
+    pub layout: Option<String>,
 }
 
 impl Allocator {
     /// The build directory name for native binaries with this allocator.
     pub fn build_name(&self) -> Option<String> {
-        if let Some(b) = &self.build {
-            return Some(b.clone());
+        let base = match &self.build {
+            Some(b) => b.clone(),
+            None => {
+                let f = self.feature.as_ref()?;
+                format!("{}{}", if f.is_empty() { "glibc" } else { f.as_str() }, self.build_suffix)
+            }
+        };
+        Some(self.with_layout(base))
+    }
+
+    /// The build directory of the Rust programs a preload run starts: the glibc build, in
+    /// this entry's layout.
+    pub fn preload_build_name(&self) -> String {
+        self.with_layout("glibc".into())
+    }
+
+    fn with_layout(&self, base: String) -> String {
+        match &self.layout {
+            Some(l) => format!("{base}-layout-{l}"),
+            None => base,
         }
-        self.feature
-            .as_ref()
-            .map(|f| format!("{}{}", if f.is_empty() { "glibc" } else { f.as_str() }, self.build_suffix))
     }
 }
 
@@ -110,6 +128,7 @@ pub fn load(bench_dir: &Path, baselines: &Path) -> Result<Vec<Allocator>, String
                 build_suffix: String::new(),
                 preload_build: e.preload_build.clone(),
                 build: e.build.clone(),
+                layout: None,
             },
         };
         out.push(a);

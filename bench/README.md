@@ -30,6 +30,35 @@ contains it), `--allocators a,b`, `--rounds N`, `--out FILE`, `--seed N`, `--mem
 (below), and the quiet-machine gate below. Builds run on `BENCH_BUILD_CPUS` (default
 `4-7,20-23`).
 
+`--suite` also takes several suites joined by commas, `--only` several texts joined by
+commas, and `--group NAME` keeps one group's jobs (`benchrun list` prints the groups).
+
+**When a job moves after a change that should not have touched it**, check whether it is
+measuring where its code landed before looking for a cause in the allocator:
+
+```
+./target/release/benchrun layout --suite backend --only "vecgrow 1x4Mi"   # asmalloc, five rounds
+./target/release/benchrun layout --suite full --group single-thread --allocators asmalloc,jemalloc
+```
+
+`layout` builds the workloads again in several ways that place the same code at other
+addresses (`--layouts`, default `default,loops64,shuffle1,shuffle2`: the normal build; every
+loop aligned to 64 bytes; the linker's function order shuffled with seed 1, and with seed 2),
+runs the jobs under each, interleaved, as `run` interleaves allocators, and prints each
+layout's median against the default, the spread (largest median over smallest), the noise
+(the largest half-IQR of one layout's runs) and the spread of the process's instructions. It
+takes the shared measurement lock (`/tmp/asmalloc-measure.lock`) itself, for the
+measurement only, so do not wrap it in `flock`. `--no-build` reuses the variants built last
+time. A spread of more than about 3% beyond the noise, with instructions level, means the
+job's time depends on code placement; `perf annotate` of plain cycles samples
+(`perf record -e cycles:u`, not an event group) names the loop. `loops64` executes a little
+padding, so its instructions are up to 1 to 3% higher in loop-heavy jobs; the shuffles retire
+the same instructions.
+
+The variants move the allocator's code as well as the workload's, so a job that moves can be
+sensitive in either; the profile says which. They are for this check only: the suite measures
+the normal build, which is what ships.
+
 The baseline libraries and the raw results live in the main checkout, shared by every
 worktree: `bench/baselines/out` and `bench/results` there (the parent of
 `git rev-parse --git-common-dir`). `BENCH_BASELINES` and `BENCH_RESULTS` override them.

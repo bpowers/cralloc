@@ -59,6 +59,11 @@ pub struct Scope {
     pub cap: u64,
 }
 
+/// Whether this process is the runner re-executed inside its scope by [`enter`].
+pub fn in_scope() -> bool {
+    std::env::var_os(MARKER).is_some()
+}
+
 /// Returns the session's scope, re-executing this process inside a new one first if it is
 /// not in one. It never returns without a cap in force: if the scope cannot be made or
 /// checked, the error says why and the caller must stop.
