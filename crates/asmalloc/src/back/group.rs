@@ -29,11 +29,12 @@
 //! a claim made between the two ORs and hand the slot to two owners. A run counts its slots
 //! against its bits, and the window and the map hold every word the batch has met with all of
 //! its bits until the end, a word in one or the other but never both, so a slot met twice is
-//! caught when it comes the second time. The map holds `ROOM - 1` words, more than a magazine
-//! has slots; a longer batch flushes it when it fills. A slot that appears on both sides of a
-//! flush, or twice in a scattered batch, is caught by its second OR unless another thread
-//! claimed the slot in between: the same double free that goes unseen across two launders, and
-//! not worth a lookup for every scattered slot.
+//! caught when it comes the second time. The map holds `ROOM - 1` words, at most 63, and a batch
+//! that meets more flushes it when it fills: the map lives on the stack of whatever thread is
+//! freeing, which may be small. A slot that appears on both sides of a flush, or twice in a
+//! scattered batch, is caught by its second OR unless another thread claimed the slot in
+//! between: the same double free that goes unseen across two launders, and not worth a lookup
+//! for every scattered slot.
 
 use super::tree::{Host, Levels, Release, Upward};
 use super::word::BITS;
@@ -74,7 +75,16 @@ pub(crate) struct Gather<const ROOM: usize, const SPAN: usize> {
     /// a scattered batch is judged one before it has met more, and then needs no map at all.
     early: [(u64, u64); EARLY],
     early_count: usize,
-    words: Option<Words<ROOM>>,
+    spill: Spill<ROOM>,
+}
+
+/// Where a batch's words go beyond the window and the early words: the map, or, once the batch
+/// is judged scattered, the direct path. The two are never needed at once, and share one place
+/// on the stack of whatever thread is freeing, which may be small.
+enum Spill<const ROOM: usize> {
+    Nothing,
+    Map(Words<ROOM>),
+    Direct(Direct),
 }
 
 /// Words outside the window that [`Gather`] holds before it makes its map: as many as the
@@ -95,7 +105,7 @@ impl<const ROOM: usize, const SPAN: usize> Gather<ROOM, SPAN> {
             occupied: [0; 2],
             early: [(0, 0); EARLY],
             early_count: 0,
-            words: None,
+            spill: Spill::Nothing,
         }
     }
 
@@ -112,7 +122,11 @@ impl<const ROOM: usize, const SPAN: usize> Gather<ROOM, SPAN> {
     /// few shuffled words do, are not.
     #[inline(always)]
     pub(crate) fn scattered(&self) -> bool {
-        let mapped = self.early_count + self.words.as_ref().map_or(0, |words| words.count);
+        let mapped = self.early_count
+            + match &self.spill {
+                Spill::Map(words) => words.count,
+                _ => 0,
+            };
         let windowed = self
             .occupied
             .iter()
@@ -121,10 +135,18 @@ impl<const ROOM: usize, const SPAN: usize> Gather<ROOM, SPAN> {
         mapped > windowed
     }
 
-    /// Hands every word gathered so far to `direct`, which frees it at once and remembers its
-    /// slots, and leaves the window and the map empty: the rest of the batch goes to `direct`.
+    /// Turns the batch to the direct path: ORs the map's words, if there is a map, puts a
+    /// [`Direct`] in its place, hands it every word gathered in the window and the early words,
+    /// and returns it for the rest of the batch. [`Gather::finish`] pays its debts.
     #[inline(never)]
-    pub(crate) fn drain<H: Host>(&mut self, release: &mut Release<'_, H>, direct: &mut Direct) {
+    pub(crate) fn into_direct<H: Host>(&mut self, release: &mut Release<'_, H>) -> &mut Direct {
+        if let Spill::Map(words) = &mut self.spill {
+            words.flush(release);
+        }
+        self.spill = Spill::Direct(Direct::new());
+        let Spill::Direct(direct) = &mut self.spill else {
+            release.abort("a launder lost its direct path");
+        };
         if self.occupied != [0; 2] {
             let region = release.region((self.region >> 32) as usize);
             for half in 0..2 {
@@ -142,17 +164,7 @@ impl<const ROOM: usize, const SPAN: usize> Gather<ROOM, SPAN> {
             let region = release.region((key >> 32) as usize);
             direct.free(release, region, key as u32, bits);
         }
-        if let Some(words) = self.words.take() {
-            for (&key, &bits) in words
-                .keys
-                .iter()
-                .zip(&words.bits)
-                .take(words.count.min(ROOM - 1))
-            {
-                let region = release.region((key >> 32) as usize);
-                direct.free(release, region, key as u32, bits);
-            }
-        }
+        direct
     }
 
     /// [`Gather::end`] for bits `bits` of word `key` whose run is checked, or which is one
@@ -176,8 +188,10 @@ impl<const ROOM: usize, const SPAN: usize> Gather<ROOM, SPAN> {
     /// have room, else in the map.
     #[inline(never)]
     fn outside<H: Host>(&mut self, release: &mut Release<'_, H>, key: u64, bits: u64) {
-        if let Some(words) = self.words.as_mut() {
-            return words.add(release, key, bits);
+        match &mut self.spill {
+            Spill::Map(words) => return words.add(release, key, bits),
+            Spill::Direct(_) => release.abort("a gathered run after the direct path began"),
+            Spill::Nothing => {}
         }
         let count = self.early_count.min(EARLY);
         if let Some(early) = self.early[..count].iter_mut().find(|(k, _)| *k == key) {
@@ -192,7 +206,10 @@ impl<const ROOM: usize, const SPAN: usize> Gather<ROOM, SPAN> {
             self.early_count += 1;
             return;
         }
-        let words = self.words.insert(Words::new());
+        self.spill = Spill::Map(Words::new());
+        let Spill::Map(words) = &mut self.spill else {
+            release.abort("a launder lost its map");
+        };
         for &(key, bits) in &self.early {
             words.add(release, key, bits);
         }
@@ -201,7 +218,7 @@ impl<const ROOM: usize, const SPAN: usize> Gather<ROOM, SPAN> {
     }
 
     /// ORs every word gathered into `release`: the window's in address order, owing each of
-    /// its summary words one debt; then the map's.
+    /// its summary words one debt; then the map's. Or pays the direct path's debts.
     #[inline(never)]
     pub(crate) fn finish<H: Host>(&mut self, release: &mut Release<'_, H>) {
         if self.occupied != [0; 2] {
@@ -229,8 +246,10 @@ impl<const ROOM: usize, const SPAN: usize> Gather<ROOM, SPAN> {
             let must = release.leaf_unowed(region, index, bits);
             release.owe_leaves(region, index, 1 << (index % BITS), must);
         }
-        if let Some(words) = self.words.as_mut() {
-            words.flush(release);
+        match &mut self.spill {
+            Spill::Map(words) => words.flush(release),
+            Spill::Direct(direct) => direct.finish(release),
+            Spill::Nothing => {}
         }
     }
 }
@@ -464,6 +483,10 @@ impl Direct {
 /// Places in each of [`Debts`]'s tables.
 const DEBTS: usize = 64;
 
+/// Places in [`Debts`]'s table of what summary words owe the level above, which has 64 times
+/// fewer words than the summary level.
+const UPWARD: usize = 32;
+
 /// A key no summary word has: [`Debts`]'s keys are below 2^38.
 const NO_KEY: u64 = u64::MAX;
 
@@ -491,7 +514,7 @@ struct Debts {
     /// Places given to a summary word so far.
     taken: u32,
     /// Per place, what a word of the next level is owed.
-    upward: [Option<Upward>; DEBTS],
+    upward: [Option<Upward>; UPWARD],
 }
 
 impl Debts {
@@ -503,7 +526,7 @@ impl Debts {
             regions: [None; DEBTS],
             held: 0,
             taken: 0,
-            upward: [None; DEBTS],
+            upward: [None; UPWARD],
         }
     }
 
@@ -596,7 +619,7 @@ impl Debts {
     /// takes to `pay`.
     #[inline(always)]
     fn merge_upward(&mut self, debt: Upward, pay: impl FnOnce(Upward)) {
-        let place = &mut self.upward[debt.key as usize % DEBTS];
+        let place = &mut self.upward[debt.key as usize % UPWARD];
         match place {
             Some(held) if held.key == debt.key => {
                 held.bits |= debt.bits;

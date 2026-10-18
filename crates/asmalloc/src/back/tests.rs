@@ -172,10 +172,10 @@ fn a_slot_twice_across_a_reopened_word_aborts() {
     unsafe { back.launder(class, &batch) };
 }
 
-/// A scattered batch remembers every word it has met, however many: a different slot of a
-/// word met long before is no double free; the same slot again is.
+/// A batch over many words: a different slot of a word met long before is no double free; the
+/// same slot again is, caught by its second OR once the map has flushed its first.
 #[test]
-#[should_panic(expected = "freed twice in one batch")]
+#[should_panic(expected = "double free")]
 fn a_slot_twice_after_many_closed_words_aborts() {
     let state = state::<Standard>();
     let back = state.get_or_reserve().unwrap();

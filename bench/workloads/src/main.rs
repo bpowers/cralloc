@@ -9,6 +9,7 @@
 mod mem;
 mod obj;
 mod single;
+mod stack;
 mod steal;
 mod xthread;
 
@@ -34,6 +35,8 @@ fn main() {
         "touch" => mem::touch(&args),
         "sparse" => mem::sparse(&args),
         "tiny" => mem::tiny(&args),
+        // A probe of the slow paths' stack depth; not part of any suite.
+        "stack" => stack::stack(&args),
         _ => {
             eprintln!(
                 "usage: workload <pipeline|exchange|mpmc|forkjoin|spawn|churn|map|tree|vecgrow|json> [key=value ...]"
