@@ -9,6 +9,12 @@ use std::os::fd::{AsRawFd, FromRawFd};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Event {
+    /// A raw event of the core's PMU, in `perf_event_attr.config` encoding, under a name of
+    /// the caller's choosing (see [`extra_events`]).
+    Raw {
+        name: &'static str,
+        config: u64,
+    },
     /// Core cycles in user and kernel mode.
     Cycles,
     /// Core cycles in user mode only.
@@ -30,13 +36,16 @@ impl Event {
             Event::PageFaults => "page_faults",
             Event::TaskClock => "task_clock_ns",
             Event::ContextSwitches => "ctx_switches",
+            Event::Raw { name, .. } => name,
         }
     }
 
     fn type_config(self) -> (u32, u64) {
         const HARDWARE: u32 = 0;
         const SOFTWARE: u32 = 1;
+        const RAW: u32 = 4;
         match self {
+            Event::Raw { config, .. } => (RAW, config),
             Event::Cycles | Event::CyclesUser => (HARDWARE, 0),
             Event::Instructions => (HARDWARE, 1),
             Event::TaskClock => (SOFTWARE, 1),
@@ -46,7 +55,7 @@ impl Event {
     }
 
     fn is_hardware(self) -> bool {
-        self.type_config().0 == 0
+        matches!(self.type_config().0, 0 | 4)
     }
 }
 
@@ -60,6 +69,30 @@ pub const REGION_EVENTS: &[Event] = &[
     Event::TaskClock,
     Event::ContextSwitches,
 ];
+
+/// Extra raw events for the region counters, from `BENCH_EVENTS`: a comma-separated list of
+/// `name=config`, the config in hex as `perf_event_attr.config` takes it for the core's PMU
+/// (on AMD, `event | umask << 8`, with event bits 8 to 11 at bit 32). For example
+/// `BENCH_EVENTS=dtlb_walk_4k=0x1045,dtlb_walk_2m=0x4045` counts page walks by page size.
+/// They count user mode only.
+///
+/// The core has six counters and the NMI watchdog may hold one, so any extra event replaces
+/// the user-cycles counter to make room for three; a run whose counters were multiplexed
+/// says so in its result. For investigations: the runner never sets it.
+pub fn extra_events() -> Vec<Event> {
+    let Ok(list) = std::env::var("BENCH_EVENTS") else { return Vec::new() };
+    list.split(',')
+        .filter(|s| !s.is_empty())
+        .map(|item| {
+            let (name, config) =
+                item.split_once('=').unwrap_or_else(|| panic!("BENCH_EVENTS item {item:?} is not name=config"));
+            let hex = config.trim_start_matches("0x");
+            let config =
+                u64::from_str_radix(hex, 16).unwrap_or_else(|_| panic!("BENCH_EVENTS config {config:?} is not hex"));
+            Event::Raw { name: Box::leak(name.to_string().into_boxed_str()), config }
+        })
+        .collect()
+}
 
 /// What the runner counts for a whole process from outside.
 pub const PROCESS_EVENTS: &[Event] = &[Event::Cycles, Event::Instructions, Event::PageFaults, Event::TaskClock];
@@ -93,7 +126,9 @@ impl Counter {
         let exclude_hv = 1 << 6;
         let enable_on_exec = 1 << 12;
         let mut flags = disabled | inherit | exclude_hv;
-        if event == Event::CyclesUser {
+        // Raw events count user mode only, so that the program's own memory behaviour is
+        // apart from the kernel's page zeroing; kernel cycles show the latter.
+        if event == Event::CyclesUser || matches!(event, Event::Raw { .. }) {
             flags |= exclude_kernel;
         }
         let pid = match target {
@@ -139,9 +174,14 @@ impl Counters {
         events.iter().map(|&e| Counter::open(e, target)).collect::<io::Result<Vec<_>>>().map(Counters)
     }
 
-    /// The in-process region counters. Panics with the reason if they cannot be opened.
+    /// The in-process region counters, with any `BENCH_EVENTS` ([`extra_events`]). Panics
+    /// with the reason if they cannot be opened.
     pub fn region() -> Counters {
-        Counters::open(REGION_EVENTS, Target::Me).unwrap_or_else(|e| panic!("perf_event_open: {e}"))
+        let extra = extra_events();
+        let mut events: Vec<Event> =
+            REGION_EVENTS.iter().copied().filter(|&e| extra.is_empty() || e != Event::CyclesUser).collect();
+        events.extend(extra);
+        Counters::open(&events, Target::Me).unwrap_or_else(|e| panic!("perf_event_open: {e}"))
     }
 
     pub fn reset(&self) {

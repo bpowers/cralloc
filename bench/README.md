@@ -83,7 +83,11 @@ cannot be rebuilt under a session.
   (`perf_event_open` with `inherit`). The runner also counts the whole process from its
   first instruction (counters attached between `fork` and `execve`, as `perf stat` does),
   and for a server, over the window the driver marks. A run whose hardware counters were
-  multiplexed is invalid: the counts are not scaled, so it would look fast.
+  multiplexed is invalid: the counts are not scaled, so it would look fast. For
+  investigations, a workload run by hand with `BENCH_EVENTS=name=config,...` also counts up
+  to three raw PMU events per phase, in user mode, in place of user cycles (for example
+  `dtlb_miss=0xff45,walk_4k=0x1045,walk_2m=0x4045` on Zen 5; `perf list --details` gives the
+  codes).
 - **Memory.** Each run records its cgroup's `memory.peak`, which ranks memory: everything charged to it, which
   excludes file pages already cached by an earlier run (the binary, shared libraries) and
   includes page tables. The runner samples the resident set and `VmHWM` every 50 ms from
@@ -135,8 +139,10 @@ cannot be rebuilt under a session.
 Choices that can favour one allocator, not yet tested either way; read the numbers with them:
 
 - Transparent huge pages are as the machine has them (`madvise` mode on the reference
-  machine). Only mimalloc asks for huge pages, which decides the build-and-drop jobs; a
-  session with THP `always` would show the other side.
+  machine). mimalloc asks for huge pages for its whole heap and asmalloc for dense classes
+  past a threshold, which decides the build-and-drop jobs; a session with THP `always` would
+  show the other side. `probes/memory/thp-off.py COMMAND` runs a workload with THP disabled
+  for the process, which treats every allocator alike.
 - Single-threaded build jobs measure every repetition from a cold process, so allocators that
   keep freed memory gain over those that return it; jemalloc's time-based purging never fires
   in runs this short.

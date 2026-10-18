@@ -48,16 +48,16 @@ pub const PURGE_STEP_WORDS: usize = 256;
 /// steps finish the job.
 pub const PURGE_CAP_WORDS: usize = 1 << 14;
 
-/// A region of a class that gets huge pages marks the rest of itself for them once it has
-/// carved more than this many huge pages: 8, or 16 MiB. The first touch of a huge page makes
-/// all of it resident, so the page at the watermark costs up to one huge page that the
-/// program never asked for: at most an eighth of the class. Measured against 64 MiB, after
-/// the rules that move parked objects back to the bitmaps: JSON spends half as long in the
-/// kernel (2.4 against 4.5 cycles a byte) for 1.1 MiB more at its peak; 1M-object churn and
-/// the burst-then-idle test peak 1.7 and 7 MiB higher (0.7% and 3%); memory after a peak is
-/// unchanged. 8 MiB saves a little more time and takes churn 3 MiB over jemalloc
-/// (`docs/research/zen5-roofline.md`, section 7). A simulated heap whose regions are smaller
-/// than four times this uses a quarter of a region instead.
+/// A region of a class that gets huge pages keeps its first this many huge pages on small
+/// pages and marks the rest of itself for huge pages when a carve first needs memory past
+/// them: 8, or 16 MiB. The first touch of a huge page makes all of it resident, so the page at
+/// the watermark costs up to one huge page that the program never asked for: at most an
+/// eighth of the class. Below the threshold a class pays 4 KiB faults and dTLB misses, which
+/// are all of the build phases' gap to mimalloc (`docs/research/memory.md`, "Build phases
+/// against mimalloc"): 4 MiB would close much of it, but would take churn at 1M live objects
+/// 5% over jemalloc's memory and still leave BTreeMap behind mimalloc, whose remaining lead
+/// there is the drop. A simulated heap whose regions are smaller than four times this uses a
+/// quarter of a region instead, and at least one huge page.
 pub const HUGE_AFTER_HUGE_PAGES: usize = 8;
 
 /// Only classes with at least this many slots to a page get huge pages: 4, so classes up
@@ -170,7 +170,9 @@ pub const fn decay_goal(geometry: Geometry, retained: usize) -> usize {
 /// to huge pages.
 #[inline(always)]
 pub const fn huge_after(region_huge_pages: usize) -> usize {
+    // At least one, so that a class in a region of few huge pages still starts on small pages.
     let quarter = region_huge_pages / 4;
+    let quarter = if quarter == 0 { 1 } else { quarter };
     if quarter < HUGE_AFTER_HUGE_PAGES {
         quarter
     } else {

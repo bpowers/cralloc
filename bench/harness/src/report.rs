@@ -101,6 +101,9 @@ impl Report {
             "version": d.version,
             "glibc_rseq_size": d.glibc_rseq_size,
             "vm_hwm": crate::mem::vm_hwm(0),
+            // Huge-page-backed memory still mapped at the end, which shows whether an
+            // allocator got huge pages at all (and that a run with them disabled had none).
+            "anon_huge_end": crate::mem::Rollup::read(0).map(|r| r.anon_huge),
             "phases": self.phases,
             "metrics": self.metrics,
             "primary": self.primary,
