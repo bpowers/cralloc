@@ -12,5 +12,6 @@ name = "backbench"
 path = "src/main.rs"
 
 [dependencies]
-asmalloc = { path = "../../crates/asmalloc" }
+# `internals`: the back end itself is what this measures.
+asmalloc = { path = "../../crates/asmalloc", features = ["internals"] }
 bench-harness.workspace = true

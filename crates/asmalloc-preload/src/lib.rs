@@ -19,9 +19,6 @@
 #![deny(unsafe_op_in_unsafe_fn)]
 #![deny(clippy::undocumented_unsafe_blocks)]
 
-use asmalloc::os::Os;
-use asmalloc::os::linux::LinuxOs;
-
 // Only the C names. The C++ operators stay the C++ runtime's, which calls this `malloc` and
 // `free`: exporting some of them without the throwing `new` forms is unsound when another
 // library defines the operators (design: "Interfaces", C++).
@@ -36,7 +33,7 @@ static GLOBAL: asmalloc::Asmalloc = asmalloc::Asmalloc;
 #[cfg(not(test))]
 #[panic_handler]
 fn panic(_: &core::panic::PanicInfo) -> ! {
-    LinuxOs.abort("asmalloc-preload: panic")
+    asmalloc::abort("asmalloc-preload: panic")
 }
 
 /// What the unwinder would call as the personality routine of Rust frames.
@@ -51,5 +48,5 @@ fn panic(_: &core::panic::PanicInfo) -> ! {
 /// (`librustc_driver` does), and their panics would abort instead of unwinding.
 #[unsafe(no_mangle)]
 extern "C" fn asmalloc_preload_no_unwinding() -> ! {
-    LinuxOs.abort("asmalloc-preload: unwinding is not supported")
+    asmalloc::abort("asmalloc-preload: unwinding is not supported")
 }

@@ -42,8 +42,7 @@
 
 mod errno;
 mod mirror;
-#[doc(hidden)]
-pub mod routines;
+mod routines;
 #[doc(hidden)]
 pub mod slow;
 #[doc(hidden)]
@@ -314,7 +313,9 @@ pub extern "C" fn malloc_trim(_pad: usize) -> c_int {
 /// Invoke it once per program, at the item level. `malloc`, `free` and `free_sized` are the
 /// generated routines themselves (`front/generated/x86_64/exports.rs`, a copy of each under its C
 /// name), so a call reaches the routine with no jump in between; every other export is a call of
-/// the function of the same name in [`asmalloc::c`](self), which inlines into it.
+/// the function of the same name in the crate's hidden `c` module, which inlines into it. What
+/// the functions promise beyond C and POSIX is in that module's documentation and in
+/// `docs/design.md`, "Interfaces".
 ///
 /// Besides the C standard's functions and POSIX's `posix_memalign`, it exports every other
 /// allocation function glibc 2.43 exports that takes or returns a block: `reallocarray`,

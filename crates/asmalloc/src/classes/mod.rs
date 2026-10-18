@@ -84,7 +84,7 @@ const _: () = {
 
 /// A size class.
 ///
-/// The value is the class index, 1 to [`COUNT`], so a `Class` is always a real class and
+/// The value is the class index, 1 to `COUNT`, so a `Class` is always a real class and
 /// `Option<Class>` is one byte with `None` as zero. Classes order by size.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[repr(transparent)]
@@ -92,13 +92,13 @@ pub struct Class(NonZeroU8);
 
 impl Class {
     /// The smallest class, [`QUANTUM`] bytes.
-    pub const SMALLEST: Class = Class(NonZeroU8::MIN);
+    pub(crate) const SMALLEST: Class = Class(NonZeroU8::MIN);
 
     /// The largest class, [`MAX_SIZE`] bytes.
-    pub const LARGEST: Class = Class::from_index(COUNT as u8).unwrap();
+    pub(crate) const LARGEST: Class = Class::from_index(COUNT as u8).unwrap();
 
     /// The largest small class, [`MAX_SMALL_SIZE`] bytes.
-    pub const LARGEST_SMALL: Class = Class::from_index(SMALL_COUNT as u8).unwrap();
+    pub(crate) const LARGEST_SMALL: Class = Class::from_index(SMALL_COUNT as u8).unwrap();
 
     /// The class with this index, if there is one.
     #[inline(always)]
@@ -109,13 +109,13 @@ impl Class {
         }
     }
 
-    /// This class's index, 1 to [`COUNT`].
+    /// This class's index, 1 to `COUNT`.
     #[inline(always)]
     pub const fn index(self) -> u8 {
         self.0.get()
     }
 
-    /// The smallest class of at least `size` bytes, or `None` above [`MAX_SIZE`]. A size of zero
+    /// The smallest class of at least `size` bytes, or `None` above `MAX_SIZE`. A size of zero
     /// gets the smallest class.
     #[inline(always)]
     pub const fn of_size(size: usize) -> Option<Class> {
@@ -142,7 +142,7 @@ impl Class {
     /// The class for a Rust request: the size rounded up to the alignment, then classed.
     ///
     /// A zero size counts as one byte, so that a zero-size request with a large alignment still
-    /// gets an aligned slot. `None` means the rounded size is above [`MAX_SIZE`].
+    /// gets an aligned slot. `None` means the rounded size is above `MAX_SIZE`.
     #[inline(always)]
     pub const fn of_layout(layout: Layout) -> Option<Class> {
         Class::of_aligned(layout.size(), layout.align())
@@ -152,7 +152,7 @@ impl Class {
     /// bytes or more is [`C_ALIGN`]-aligned, as C requires. So `malloc(24)` gets a 32-byte class
     /// where a Rust `Layout` of size 24 and alignment 8 gets the 24-byte one.
     #[inline(always)]
-    pub const fn of_c(layout: Layout) -> Option<Class> {
+    pub(crate) const fn of_c(layout: Layout) -> Option<Class> {
         let align = if layout.size() >= C_ALIGN && layout.align() < C_ALIGN {
             C_ALIGN
         } else {
@@ -191,7 +191,7 @@ impl Class {
     /// The slot size as `odd << shift`, with `odd` one of 1, 3, 5 or 7 and `shift` at least 3:
     /// `(odd, shift)`.
     #[inline(always)]
-    pub const fn factors(self) -> (usize, u32) {
+    pub(crate) const fn factors(self) -> (usize, u32) {
         let size = self.size();
         let shift = size.trailing_zeros();
         (size >> shift, shift)
@@ -200,14 +200,15 @@ impl Class {
     /// The largest power of two that divides the slot size. Every slot of this class is aligned
     /// to it, or to the region size if that is smaller.
     #[inline(always)]
-    pub const fn align(self) -> usize {
+    #[cfg(any(test, kani))]
+    pub(crate) const fn align(self) -> usize {
         1 << self.factors().1
     }
 
     /// The offset of slot `index` from its region's base: `index * size`, computed as
     /// `(index * odd) << shift` so that the alignment is evident to a reader and to Kani.
     #[inline(always)]
-    pub const fn slot_offset(self, index: u32) -> usize {
+    pub(crate) const fn slot_offset(self, index: u32) -> usize {
         let (odd, shift) = self.factors();
         (index as usize * odd) << shift
     }
@@ -226,13 +227,14 @@ impl Class {
 
     /// Division by this class's size, for turning offsets into slot indexes.
     #[inline(always)]
-    pub const fn divisor(self) -> Divisor {
+    pub(crate) const fn divisor(self) -> Divisor {
         Divisor::of(self.size())
     }
 
     /// The next larger class, if there is one.
     #[inline]
-    pub const fn next(self) -> Option<Class> {
+    #[cfg(any(test, kani))]
+    pub(crate) const fn next(self) -> Option<Class> {
         Class::from_index(self.index() + 1)
     }
 

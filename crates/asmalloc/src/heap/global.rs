@@ -1,21 +1,27 @@
 //! The process's heap, and [`Asmalloc`], the handle Rust programs install as their allocator.
 //!
 //! One heap per process: [`HEAP`] over Linux, run with the generated routines on the static
-//! `front::SLABS`. All three are zero until the first slow path starts the heap, so the fast
-//! paths never check. This module also gives the C slow paths their way into the heap,
-//! [`c_alloc_small`] and [`c_free_small`]. The ledger for the unsafe blocks here is
+//! `front::SLABS` ([`process`]). All three are zero until the first slow path starts the heap,
+//! so the fast paths never check. This module also gives the C slow paths their way into the
+//! heap, [`c_alloc_small`] and [`c_free_small`]. The ledger for the unsafe blocks here is
 //! `docs/safety/asmalloc/heap/global-safety.md`.
 
-use super::Heap;
+use super::{Bound, Heap, Zero};
 use crate::classes::SmallClass;
-use crate::front::{Real, Routines, publish_masks};
+use crate::front::{Real, publish_masks};
 use crate::os::linux::LinuxOs;
 use core::alloc::{GlobalAlloc, Layout};
 use core::ptr::{self, NonNull};
 
-/// The heap. Its slab array is `front::SLABS`, which only [`Real`] writes, and nothing else
-/// uses that array, so the routines' slabs and this heap always go together (HEAP-02).
-pub(super) static HEAP: Heap<LinuxOs> = Heap::new(LinuxOs);
+/// The heap. Its slab array is `front::SLABS`, which only [`Real`] writes.
+static HEAP: Heap<LinuxOs> = Heap::new(LinuxOs);
+
+/// The process's heap with its routines: everything below runs on this.
+#[inline(always)]
+pub(super) fn process() -> Bound<'static, LinuxOs, Real> {
+    // SAFETY: HEAP-02, the process's heap.
+    unsafe { Bound::new(&HEAP, Real) }
+}
 
 /// asmalloc as Rust's allocator: a zero-sized handle to the process's one heap.
 ///
@@ -46,7 +52,7 @@ impl Asmalloc {
     /// Walks the heap for `visitor`: every region, free run and cached object. Read-only; a
     /// racy snapshot when other threads are allocating. See [`crate::stats`].
     pub fn inspect(visitor: &mut impl crate::stats::Visitor) {
-        HEAP.inspect(Real.slabs(), visitor);
+        process().inspect(visitor);
     }
 
     /// Returns everything the heap can return now, without waiting for its clock: empties the
@@ -56,30 +62,28 @@ impl Asmalloc {
     /// threads allocate it is a racy sweep, safe but incomplete. Returns the bytes returned to
     /// the OS that the heap believed resident. `malloc_trim` calls it.
     pub fn collect() -> usize {
-        // SAFETY: GLOBAL-02.
-        unsafe { HEAP.collect(Real) }
+        process().collect()
     }
 }
 
-// SAFETY: GLOBAL-01. Every method is the heap's, run with `Real` on `front::SLABS`.
+// SAFETY: GLOBAL-01. Every method is the process heap's.
 unsafe impl GlobalAlloc for Asmalloc {
     #[inline]
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
-        // SAFETY: GLOBAL-02.
-        unsafe { HEAP.alloc(Real, layout) }
+        process().alloc(layout)
     }
 
     #[inline]
     unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut u8 {
-        // SAFETY: GLOBAL-02.
-        unsafe { HEAP.alloc_grant(Real, layout, super::Zero::Requested) }
+        process()
+            .alloc_grant(layout, Zero::Requested)
             .map_or(ptr::null_mut(), |grant| grant.ptr.as_ptr())
     }
 
     #[inline]
     unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
-        // SAFETY: GLOBAL-02.
-        unsafe { HEAP.dealloc(Real, ptr, layout) }
+        // SAFETY: GLOBAL-05.
+        unsafe { process().dealloc(ptr, layout) }
     }
 
     unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
@@ -89,8 +93,8 @@ unsafe impl GlobalAlloc for Asmalloc {
         ) else {
             return ptr::null_mut();
         };
-        // SAFETY: GLOBAL-02.
-        unsafe { HEAP.resize(Real, block, layout, new, false) }
+        // SAFETY: GLOBAL-05; `new_size` is not zero, by `realloc`'s contract.
+        unsafe { process().resize(block, layout, new, false) }
             .map_or(ptr::null_mut(), |grant| grant.ptr.as_ptr())
     }
 }
@@ -100,20 +104,18 @@ unsafe impl GlobalAlloc for Asmalloc {
 unsafe impl core::alloc::Allocator for Asmalloc {
     #[inline]
     fn allocate(&self, layout: Layout) -> Result<NonNull<[u8]>, core::alloc::AllocError> {
-        // SAFETY: GLOBAL-02.
-        unsafe { HEAP.allocate(Real, layout, false) }
+        process().allocate(layout, false)
     }
 
     #[inline]
     fn allocate_zeroed(&self, layout: Layout) -> Result<NonNull<[u8]>, core::alloc::AllocError> {
-        // SAFETY: GLOBAL-02.
-        unsafe { HEAP.allocate(Real, layout, true) }
+        process().allocate(layout, true)
     }
 
     #[inline]
     unsafe fn deallocate(&self, ptr: NonNull<u8>, layout: Layout) {
-        // SAFETY: GLOBAL-02.
-        unsafe { HEAP.deallocate(Real, ptr, layout) }
+        // SAFETY: GLOBAL-05.
+        unsafe { process().deallocate(ptr, layout) }
     }
 
     unsafe fn grow(
@@ -122,8 +124,8 @@ unsafe impl core::alloc::Allocator for Asmalloc {
         old: Layout,
         new: Layout,
     ) -> Result<NonNull<[u8]>, core::alloc::AllocError> {
-        // SAFETY: GLOBAL-02.
-        unsafe { HEAP.grow(Real, ptr, old, new, false) }
+        // SAFETY: GLOBAL-05.
+        unsafe { process().grow(ptr, old, new, false) }
     }
 
     unsafe fn grow_zeroed(
@@ -132,8 +134,8 @@ unsafe impl core::alloc::Allocator for Asmalloc {
         old: Layout,
         new: Layout,
     ) -> Result<NonNull<[u8]>, core::alloc::AllocError> {
-        // SAFETY: GLOBAL-02.
-        unsafe { HEAP.grow(Real, ptr, old, new, true) }
+        // SAFETY: GLOBAL-05.
+        unsafe { process().grow(ptr, old, new, true) }
     }
 
     unsafe fn shrink(
@@ -142,17 +144,9 @@ unsafe impl core::alloc::Allocator for Asmalloc {
         old: Layout,
         new: Layout,
     ) -> Result<NonNull<[u8]>, core::alloc::AllocError> {
-        // SAFETY: GLOBAL-02.
-        unsafe { HEAP.shrink(Real, ptr, old, new) }
+        // SAFETY: GLOBAL-05.
+        unsafe { process().shrink(ptr, old, new) }
     }
-}
-
-/// The heartbeat of a large allocation or free that the C entry points made straight on the
-/// back end, which counts as a slow path as a Rust one does.
-#[cold]
-pub(crate) fn large_heartbeat() {
-    // SAFETY: GLOBAL-02.
-    unsafe { HEAP.heartbeat(Real) }
 }
 
 /// A small block of `class` for the C slow paths, from the heap's own slow path (which pops
@@ -162,8 +156,7 @@ pub(crate) fn large_heartbeat() {
 #[cold]
 pub(crate) fn c_alloc_small(class: SmallClass) -> *mut u8 {
     publish_masks();
-    // SAFETY: GLOBAL-02.
-    unsafe { HEAP.alloc_slow(Real, class) }
+    process().alloc_slow(class)
 }
 
 /// Frees a small block of `class` for the C slow paths, by the heap's own slow path (which
@@ -175,6 +168,6 @@ pub(crate) fn c_alloc_small(class: SmallClass) -> *mut u8 {
 #[cold]
 pub(crate) unsafe fn c_free_small(class: SmallClass, object: NonNull<u8>) {
     publish_masks();
-    // SAFETY: GLOBAL-02 and GLOBAL-04.
-    unsafe { HEAP.free_slow(Real, class, object) }
+    // SAFETY: GLOBAL-04.
+    unsafe { process().free_slow(class, object) }
 }
