@@ -36,7 +36,11 @@ else
 fi
 tlc=("${java[@]}" -XX:+UseParallelGC -cp "$jar" tlc2.TLC)
 
-tmp="$(mktemp -d)"
+# TLC's state files run to gigabytes, and /tmp is often a small tmpfs or under a quota: a
+# full one shows up as "Could not parse module" on every later configuration.
+scratch="${TMPDIR:-$(cd "$(dirname "$0")/.." && pwd)/target/tla}"
+mkdir -p "$scratch"
+tmp="$(mktemp -d -p "$scratch")"
 trap 'rm -rf "$tmp"' EXIT
 failed=0
 

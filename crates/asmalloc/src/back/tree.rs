@@ -23,7 +23,8 @@
 //!   word empty clears it, as it clears any stale bit. The point is a class whose slots are taken
 //!   and freed one at a time: a claim that clears walks up clearing to the top, and the free
 //!   that follows walks up setting the same bits again. With the bits kept, the free finds them
-//!   set and writes nothing above the leaf.
+//!   set: it found the leaf word empty, so it still makes one OR of the bit above it without
+//!   looking, and writes nothing above that.
 //! - **a run of claims** (a fill, [`claim_next`]) is the model's `Run`: it continues from where
 //!   its last claim was rather than from the top, moves past a group of 64 words where it meets
 //!   another claimer, leaves a word it finds empty to whoever emptied it, and clears the bits of
