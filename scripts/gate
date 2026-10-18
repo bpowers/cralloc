@@ -1,34 +1,112 @@
 #!/usr/bin/env bash
-# The merge gate: formatting, lints, unit tests and the quick Kani proofs, in about a minute.
-# Run it before asking for a merge.
+# The merge gate: formatting, the generated-code and ledger checks, lints, unit tests and the
+# quick Kani proofs. Run it before asking for a merge.
 #
-# Never add a slow step. The slow proofs (`scripts/kani-all verify_slow`, or all of them with
-# `scripts/kani-all`), Miri and benchmarks run on demand. A Kani harness belongs in the gate
-# when it lives in a `verify.rs` module and finishes in a few seconds; slower ones go in
-# `verify_slow.rs`.
+# Usage: scripts/gate [--all]
+#   --all  also run the ignored tests (the full bounds of the slow explorations and stress
+#          runs) and the slow Kani harnesses, each in its own capped scope
+#          (scripts/kani-all verify_slow). That takes many minutes; run it on demand.
+#
+# Never add a slow step to the default run. A test that takes more than about three seconds
+# is split into a `_quickly` test and an ignored `_fully` one, with
+# `#[ignore = "slow: run with scripts/gate --all"]` (depot/interleave.rs has examples). A Kani
+# harness belongs in a `verify.rs` module when it finishes in about a second, and in
+# `verify_slow.rs` otherwise. Miri and benchmarks run on demand.
+#
+# The tests and the proofs run at once. Each test binary runs under the workspace's 4 GiB cap
+# (scripts/run-capped) and Kani under its 6 GiB one (scripts/kani), so together they stay well
+# under the machine's 16 GiB limit for one job.
 set -euo pipefail
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$here/.."
 
+all=
+case "${1-}" in
+  "") ;;
+  --all) all=1 ;;
+  *) echo "usage: scripts/gate [--all]" >&2; exit 2 ;;
+esac
+
+out="$(mktemp -d)"
+trap 'rm -rf "$out"' EXIT
+
+# Runs a step in the foreground and prints how long it took.
 step() {
-  printf '\n== %s (%ss so far)\n' "$1" "$SECONDS"
+  local name="$1" start=$SECONDS
+  shift
+  "$@"
+  printf '== %-16s %4ss\n' "$name" "$((SECONDS - start))"
 }
 
-step format
-cargo fmt --all --check
-step lints
-# Not --all-features: some crates have features that need nightly (the testkit's
-# `allocator-api`). The allocator's `sim` feature is linted on its own.
-cargo clippy --workspace --all-targets -- -D warnings
-cargo clippy -p asmalloc --all-targets --features sim -- -D warnings
-step tests
-cargo test --workspace --quiet
-step "quick proofs"
-# Kani is verbose; show its summary, or everything if it fails.
-if ! proofs=$(MEMLIMIT_QUIET=1 KANI_TIMEOUT="${KANI_TIMEOUT:-5m}" \
-    "$here/kani" -p asmalloc --harness ::verify:: --output-format terse 2>&1); then
-  printf '%s\n' "$proofs"
-  exit 1
-fi
-printf '%s\n' "$proofs" | grep -E '^Complete' || true
+# Starts a step in the background, its output and its status and time kept under $out.
+start() {
+  local name="$1"
+  shift
+  (
+    begin=$SECONDS
+    set +e
+    "$@" > "$out/$name.log" 2>&1
+    echo "$? $((SECONDS - begin))" > "$out/$name.status"
+  ) &
+}
+
+# Waits for every background step, reports each, and prints the log of any that failed.
+finish() {
+  wait
+  local failed=0 name status took
+  for name in "$@"; do
+    read -r status took < "$out/$name.status"
+    if [ "$status" -eq 0 ]; then
+      printf '== %-16s %4ss\n' "$name" "$took"
+      summarize "$name"
+    else
+      printf '== %-16s %4ss  FAILED (exit %s)\n' "$name" "$took" "$status"
+      cat "$out/$name.log"
+      failed=1
+    fi
+  done
+  return "$failed"
+}
+
+summarize() {
+  case "$1" in
+    tests)
+      awk '/^test result:/ { p += $4; i += $8 } END { printf "   %d passed, %d ignored\n", p, i }' \
+        "$out/tests.log" ;;
+    proofs) grep -E '^Complete|^kani-all:' "$out/proofs.log" | sed 's/^/   /' || true ;;
+  esac
+}
+
+tests() {
+  if [ -n "$all" ]; then
+    # Not the doctests: an ignored doctest is an example that is not meant to run.
+    cargo test --workspace --quiet --lib --bins --tests -- --include-ignored &&
+      cargo test --workspace --quiet --doc
+  else
+    cargo test --workspace --quiet
+  fi
+}
+
+proofs() {
+  MEMLIMIT_QUIET=1 KANI_TIMEOUT="${KANI_TIMEOUT:-5m}" \
+    "$here/kani" -p asmalloc --harness ::verify:: --output-format terse || return
+  if [ -n "$all" ]; then
+    "$here/kani-all" verify_slow
+  fi
+}
+
+lints() {
+  # Not --all-features: some crates have features that need nightly (the testkit's
+  # `allocator-api`). The allocator's `sim` feature is linted on its own.
+  cargo clippy --workspace --all-targets --quiet -- -D warnings &&
+    cargo clippy -p asmalloc --all-targets --features sim --quiet -- -D warnings
+}
+
+step format cargo fmt --all --check
+step generated "$here/generated-check"
+step ledger "$here/ledger-check"
+step lints lints
+start tests tests
+start proofs proofs
+finish tests proofs
 printf '\ngate: passed in %ss\n' "$SECONDS"
