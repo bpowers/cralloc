@@ -865,7 +865,9 @@ the routine would. Kani checks each twin against its specification on every stat
 slab (a word that is zero, any marker, or any slot of a magazine), with an interruption
 before any one step.
 
-Nothing compares a twin with its routine directly. The routine is proved against the
+A test compares each twin with its routine directly: it runs one and then the other from
+the same scripted states of a slab and its magazines, and requires the same result and the
+same memory afterwards. The routine is proved against the
 specification in Lean, the twin is checked against the same specification restated in Rust,
 and the heap's tests run the same bodies on the process's heap, with the routines, and on a
 simulated heap, with the twins.
