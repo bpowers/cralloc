@@ -22,7 +22,7 @@ cargo build --release -p bench-runner
 ./target/release/benchrun report results/full-*.jsonl --detail
 ```
 
-The `backend` suite is five small jobs that each exposed a cost of asmalloc's back end
+The `backend` suite is seven small jobs that each exposed a cost of asmalloc's back end
 (`docs/research/baselines.md`, "Smoke set for the back end"); run it, against the
 incumbents, on every change to the back end. `benchrun list --suite full` prints the jobs.
 `run` takes `--only TEXT` (jobs whose id

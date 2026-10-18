@@ -529,7 +529,10 @@ Cgroup peak, each rule off against asmalloc as built (* = 95% interval excludes 
 section 9 except D, in about 35 seconds a round: two threads passing 300k objects of 4 to
 256 KiB (cause A for large blocks), two independent pipelines on different L3 domains (E), a
 Box tree of depth 18 built and dropped four times (B), JSON of 8 MiB parsed three times (A
-for small classes) and sh8bench preloaded (C). Run it with `--rounds 3` against the
+for small classes) and sh8bench preloaded (C). Two more were added later: one buffer grown
+by doubling to 4 MiB and freed, a thousand times, and the same to 1 MiB four thousand times,
+which time the large path's moves and kept slots (`memory.md`, "Grown blocks kept up to a
+budget"). Run it with `--rounds 3` against the
 incumbents on every change to the back end. One round on 2026-10-18, asmalloc against the
 best incumbent: 351 against 46 ns/alloc, 11.1 against 8.2 ns per chain, 128 against 34
 cycles/node, 23.5 against 17.5 cycles/byte, 1.36 against 0.39 s.
