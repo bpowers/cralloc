@@ -1,7 +1,7 @@
 # Safety ledger: `crates/asmalloc/src/c/mod.rs`
 
 The C functions, and the `export_c_abi!` macro that exports them. F1 and F2 are stated in
-`seam-safety.md`.
+`slow-safety.md`.
 
 ## MOD-01: the copy and the free in `realloc`
 
@@ -38,8 +38,9 @@ caller owns and gives up).
   (`back/region.rs`, `carve`), `alloc_run` commits the whole run before returning it, and
   nothing makes committed memory inaccessible again (a purge is `MADV_DONTNEED`, which keeps
   the protection).
-- `new` is non-null and was just allocated for this call: by `seam::alloc_small(class)` with
-  `class` the small class of `Class::of_c(size)`, so at least `size` bytes; or by
+- `new` is non-null and was just allocated for this call: by `malloc(size)` when
+  `Class::of_c(size)` is small, a block of that class (`routines-safety.md`), so at least
+  `size` bytes; or by
   `process::alloc_large_grown(size)` or `process::alloc_large(size, ..)`, both at least `size`
   bytes (a slot of a class at least the rounded size, or a run of at least `size`).
 
@@ -70,10 +71,11 @@ C's `realloc` allows (the bytes past the new size are no longer the program's).
 
 ## MOD-03: the pass-through calls
 
-`free`, `free_sized`, `free_aligned_sized` and `cfree` call `seam::free(ptr)`; `realloc` calls
-`free(ptr)` for a zero size; `reallocarray` calls `realloc(ptr, total)`.
+`free`, `free_aligned_sized` and `cfree` call `routines::free(ptr)`, and `free_sized` calls
+`routines::free_sized(ptr, size)`; `realloc` calls `free(ptr)` for a zero size; `reallocarray`
+calls `realloc(ptr, total)`.
 
-**Preconditions.** The callee's contract: `seam::free` and `free` take null or a block of the
+**Preconditions.** The callee's contract: the routines and `free` take null or a block of the
 heap the caller owns and gives up; `realloc` takes null or a block the caller owns.
 
 **Proof.** Each caller's own contract is the callee's, passed on unchanged: the sized frees and

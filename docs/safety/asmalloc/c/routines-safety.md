@@ -61,7 +61,7 @@ frees:
   has been handed out to C, and the back end never takes a region holding blocks from its
   class. By the free's contract the pointer is a block of the heap the caller owns and gives
   up; a block in a region of a small class is a slot of that class (F1, F2 in
-  `seam-safety.md`). So the push hands the heap a valid free of the right class. A zero byte, a
+  `slow-safety.md`). So the push hands the heap a valid free of the right class. A zero byte, a
   large class's or a run's has a zero mask, and the routine leaves for the slow path, which
   decides from the back end's own table. A pointer into the middle of a small block is outside
   the contract; the routine pushes it as a block of its region's class, and it is caught only
@@ -75,4 +75,6 @@ frees:
 **Proof.** The obligations hold as above for any calling thread of the process. `malloc` has no
 precondition of its own; `free` and `free_sized` pass on their callers' promise, `free`'s
 contract. Pointers cross the assembly as integers: `free` exposes the block's provenance and
-`malloc` takes the exposed provenance back, as REAL-03 argues for the out-of-line routines.
+`malloc` takes the exposed provenance back, as REAL-03 argues for the inline pop and push:
+every object address lies in the heap's reservation, whose provenance the heap exposes when it
+starts.

@@ -6,7 +6,7 @@ public import Asmalloc.Proof.Slab.X86_64.Tail
 /-!
 # The C routines' back half on x86-64
 
-Each C routine ends with the out-of-line pop's or push's steps on `r9`
+Each C routine ends with the pop's or push's steps on `r9`
 (`Proof/Slab/X86_64/Tail.lean`), from a state its front half reaches: one
 with memory as after the arm, the entry state's regions, and in `r9` the
 address of the word in slab 0 of the class `k` it found (`Ready`). From the

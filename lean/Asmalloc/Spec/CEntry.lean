@@ -8,8 +8,8 @@ public import Asmalloc.Spec.Slab
 **Trusted** (as every file in `Spec/`). The contracts of the routines that
 serve C's `malloc(size)`, `calloc(n, size)`, `free(ptr)` and `free_sized(ptr, size)`, each
 one restartable sequence that finds the
-class first and then pops or pushes as the out-of-line routines of
-`Spec/Slab.lean` do. See docs/design.md, "Interfaces", and
+class first and then pops or pushes as the routines of `Spec/Slab.lean` do,
+with the class's mask read from the table past the slabs. See docs/design.md, "Interfaces", and
 docs/research/zen5-roofline.md, section 14.
 
 ## What a routine reads to find the class
@@ -34,7 +34,7 @@ Rust side keeps, and is proved safe for every content of it:
 
 The class byte `k` found names the class's word in slab 0, `SLABS + 8 k`,
 and the class's mask, the low 32 bits of the entry `MASK_DISP` bytes above
-that word, as for the out-of-line pop and push. Any byte is a class here:
+that word. Any byte is a class here:
 the invariant (`Ctx.inv`) holds of every one of the `MASK_COUNT` entries,
 and the Rust side keeps every entry that is not a small class's at zero,
 which makes the routine miss.
@@ -309,8 +309,9 @@ def Exclusive (k : Nat) : Prop := ∀ i < SLAB_COUNT, ∀ j < SLAB_COUNT, i ≠ 
 
 /-- **The invariant**, of every class byte: its mask is zero or an allowed
 one, and if it is not zero every slab's word of the class is `SlotOk`; and
-each slab's magazine of the class is its own. It is the out-of-line
-routines' (`Spec.Slab.Ctx.inv`, `.table`) for every class at once. -/
+each slab's magazine of the class is its own: the pop's and push's
+(`Spec.Slab.Ctx.inv`) for every class at once, with a mask that may be
+zero. -/
 def inv : Prop := ∀ k < MASK_COUNT,
   (c.maskOf s k = 0 ∨ MaskOk (c.maskOf s k)) ∧
   (c.maskOf s k ≠ 0 → ∀ i < SLAB_COUNT, c.SlotOk s k (c.wordOf s k i)) ∧ c.Exclusive s k

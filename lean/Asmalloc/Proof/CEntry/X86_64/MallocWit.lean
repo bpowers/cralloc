@@ -6,7 +6,7 @@ public import Asmalloc.Proof.CEntry.X86_64.Witness
 /-!
 # `c_malloc`'s witnesses
 
-As the out-of-line pop's (`PopTable.witT`): the rseq area at `0x10100`
+The rseq area at `0x10100`
 (`__rseq_offset` at `0x2000` holding `0x100`, the FS base `0x10000`), the
 slabs at `0x1000000`, class 1's mask, 16 (magazines of 4 slots), in its
 entry `0x3000808`, and a magazine at `0x4000` whose slot 1 holds `0x5000`.

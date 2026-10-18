@@ -40,7 +40,7 @@ mod sim;
 #[cfg(all(target_os = "linux", target_arch = "x86_64", not(miri), not(kani)))]
 pub use global::Asmalloc;
 #[cfg(all(target_os = "linux", target_arch = "x86_64", not(miri), not(kani)))]
-pub(crate) use global::{pop_slow, push_slow};
+pub(crate) use global::{c_alloc_small, c_free_small};
 #[cfg(miri)]
 pub use miri::Asmalloc;
 #[cfg(any(test, feature = "sim"))]

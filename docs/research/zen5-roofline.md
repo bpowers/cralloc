@@ -1388,6 +1388,12 @@ were over 30 in mixed.
   The order comes from the shared Lean pop steps. This is inference from one interleaved
   comparison.
 
+Re-measured the same evening after the C layer's Rust fast path and the out-of-line pop and push
+were deleted, which moved the routines in the library. Same method, but the machine was
+heavily loaded (load average 80; CPU 28 stayed idle). Pair 8.06 direct and 10.03 through the
+PLT, burst 32 8.80 direct and 10.45 through the PLT (1.1 better than above, which supports
+reading the earlier 11.19 as placement), mixed 22.7 and 23.7, `call [GOT]` pair 28.1.
+
 calloc, PLT, cycles per `calloc(1, n)` and free:
 
 | n | 16 | 32 | 64 | 128 | 256 |
