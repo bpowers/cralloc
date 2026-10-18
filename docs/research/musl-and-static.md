@@ -143,8 +143,9 @@ From the adversarial review of the musl form (2026-10-18), all documented, none 
   delivered with the arm in place; if the handler allocates and that is the thread's first
   allocator call, it registers the thread, and the interrupted routine then reads a valid CPU
   number with `rseq_cs` naming the handler's last sequence and runs to its commit unprotected.
-  It takes a second event within about eight instructions to do harm. The review's tests show it
-  by single-stepping. No fix fits inside lazy registration; the design lists it under "What is
+  It takes a second event within about eight instructions to do harm. The review's ignored test
+  `limitation_a_handler_that_registers_a_thread_inside_its_first_sequence_unprotects_it`
+  (`front/area.rs`) shows it by single-stepping. No fix fits inside lazy registration; the design lists it under "What is
   trusted", and the routines' contracts require the registration state to hold for the whole call.
 - **First allocation after our destructor.** A thread whose first allocator call comes after our
   key's destructor can no longer run (another key's destructor in musl's last round, or later)

@@ -18,7 +18,9 @@
 //! be registered, or unregistered, for the whole call, and this breaks that; no fix fits inside
 //! lazy registration, so the design states it under "What is trusted". It needs a handler that
 //! allocates as the thread's first allocator call, at exactly that boundary, and then a second
-//! event within about eight instructions.
+//! event within about eight instructions. The ignored test
+//! `limitation_a_handler_that_registers_a_thread_inside_its_first_sequence_unprotects_it`
+//! below puts a thread there by single-stepping.
 //!
 //! `cpu_id` is also all the state the area has, so the thread keeps nothing else:
 //!
