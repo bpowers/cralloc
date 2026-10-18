@@ -987,6 +987,87 @@ MiB and is twice as high at 12 s. At 16 MiB the over-cap pass takes far more at 
 Ends of the worst cases, eight seconds after the event, before / after / cap 16: phase change
 7.5 / 6.8 / 6.0, many classes on 2 CPUs 1.2 / 1.2 / 1.2, 16 threads on 2 CPUs 1.6 / 1.5 / 1.4.
 
+## Lines between CPUs, and the cost of a large block
+
+2026-10-18, later. The large-object pipeline (two threads, 4-256 KiB objects) ran at
+119 ns/alloc once the cap stopped purging, all of it user time, against tcmalloc's 36 and
+mimalloc's 40. This section is what that time was made of and what was done about it.
+
+**Method.** Cache lines one core took from the other are `ls_dmnd_fills_from_sys.local_ccx`,
+counted with `perf stat` and sampled with `perf record` (IBS, and so `perf c2c`, is throttled
+to a handful of samples on this kernel); a sample lands one instruction past its cause, so
+each was read off the disassembly. Instructions per function are callgrind's (no rseq under
+valgrind, so its heartbeat figures are not the real ones) and `perf stat`'s. Times are
+`benchrun`, interleaved, five rounds, on the first L3 under the shared measurement lock, the
+machine otherwise busy with builds on the second; medians.
+
+**False sharing.** Six of every ten lines the producer's core took from the consumer's came
+from words that only shared a line by accident: each class's layout memo sat on a line with
+the next class's summary words, so every lookup of a layout missed after any large claim or
+free; the depot packed eight classes' stack heads to a line beside the start-up status and
+the CPU count; a region's watermark shared a line with summary words. `crate::lined` puts
+each group of shared words on lines of its own and asserts the statics' sizes in lines. Fills
+per allocation went from 6.4 to 5.6. The padding grows the depot from 800 bytes to 54 lines
+(3.4 KiB) and each class's state in the back end from 600 bytes to 12 lines (19 KiB more over
+112 classes), all of it zero, and untouched, until used.
+
+**What else the time was.** Removing levers one at a time in throwaway builds, fills per
+allocation and ns/alloc (three runs each): the heartbeat on every large operation, 5.5 and
+104; the retained count's atomic add on every large free and claim, 4.45 and 84 to 99;
+leaving a large class's summary bits set, no change; magazines of at least 8 slots for the
+4-32 KiB classes, 3.8 and 64 to 88. With all of them the job is at 65 to 88 ns, and the
+leaf-word compare-and-swap, which moves the line between cores on every allocation and free
+of a large object, is the largest cost left.
+
+**Not done: batching large objects across CPUs.** tcmalloc gets 36 ns because it caches
+objects up to 256 KiB per CPU and moves them between CPUs in batches through its transfer
+cache; our 32-256 KiB objects go to the bitmap one at a time on both sides. Making them
+magazine classes, or adding a per-CPU cache of large slots with a shared batch stack, would
+park hundreds of KiB per CPU per class, and the first moves the small/large boundary that the
+C tables, the generated routines, `realloc` and the stagger depend on. An object of that size
+costs microseconds to use, so 60-80 ns to allocate and free it is a percent or two of a real
+program's time; the benchmark shows more because it barely touches its objects.
+
+**Instructions for one large block.** A single-threaded loop that allocates, writes the first
+word of, and frees a 64 KiB and a 1 MiB block (`largepair`) took 3,400 instructions per
+allocation and free: the allocation looked its block up twice more to report its usable size;
+the free looked it up, checked it again through the batch checker, and released one bit
+through the batch machinery; both ran the depot's whole heartbeat and the back end's decay
+step; every large claim cleared the summary bits to the top and the next free set them back;
+and every metadata word was reached by checking the region and summing offsets afresh. Each
+is gone (`back/class.rs`, `tree::release_one`, `tree::claim` with `keep`, `LONE_EVERY`,
+`ClassHost::block`).
+
+| per allocation and free | ns | instructions |
+|---|---:|---:|
+| `largepair`, before | 178.8 | 6,825 per 2 pairs (3,412) |
+| `largepair`, after | 71.7 | 2,796 per 2 pairs (1,398) |
+| glibc | 8.1 | 555 (278) |
+| jemalloc | 133.9 | 6,830 (3,415) |
+| mimalloc | 92.4 | 3,604 (1,802) |
+| tcmalloc, per CPU | 61.2 | 2,025 (1,012) |
+
+| large pipeline, 2 threads, ns/alloc | before | after | jemalloc | mimalloc | tcmalloc |
+|---|---:|---:|---:|---:|---:|
+| `objects=1M` (full suite) | 99.9 | 69.0 | 311 | 45.1 | 41.9 |
+| the smoke set's | 100.0 | 69.5 | | | |
+
+Elsewhere, before and after: sh8bench 0.773 and 0.724 s; the tree 40.2 and 38.0 cycles a
+node; JSON 8 MiB 16.9 and 17.2 cycles a byte, the small pipeline 11.1 and 11.2 ns, mstress
+0.286 and 0.286 s, HashMap 575 and 571 cycles an entry, Vec growth 5.47 and 5.46 cycles an
+element: the same. In `backbench` fills from a fragmented heap are 8 to 13% faster and
+nothing is slower. Peaks, the after-peak curve and the worst cases of `worst.sh` are within a
+few tenths of a MiB of before.
+
+**Magazine floor for the 4-32 KiB classes** (asked, not changed). Today the classes from
+12 KiB to 32 KiB get the smallest magazine, 4 slots, 2 objects. A floor of 8 slots (6
+objects) changes those seven classes only, and lets each CPU park four more objects in each:
+48 KiB more for 12 KiB objects, up to 128 KiB for 32 KiB, 584 KiB more for a CPU loaded in all
+seven. Measured against the floor of 4: the large pipeline 85 to 75 ns/alloc; the mixed
+pipeline, the mixed exchange, mpmc and the mixed churn the same within 2%, and their peaks
+the same within 0.2 MiB; `worst.sh` the same, its phase change 0.9 MiB higher eight seconds
+after.
+
 ## Reproducing
 
 ```
