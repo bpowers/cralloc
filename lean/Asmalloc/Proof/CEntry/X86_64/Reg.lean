@@ -47,57 +47,59 @@ theorem cMalloc_restartsOk : ∀ s s', (mallocContract abi).pre s →
       rcases hr' with rfl <;> simp_all)
     (fun _ _ he => env_retC Malloc.hX he)
 
-theorem cFree_verified :
-    Verified target cFree (freeApi.contract (target.abi.withConsts []) 0) := by
-  show Verified target cFree (freeContract (abi.withConsts []))
-  rw [withConsts_nil]; exact FreeWit.F.verified
+/-! The frees, for each mirror (`Mirror`): C's, and the `delete` family's. -/
 
-theorem cFree_witnessOk :
-    (∃ w ∈ FreeWit.F.witnesses, (freeApi.contract (target.abi.withConsts []) 0).pre w) ∧
-    ∀ o ∈ cFree.outcomes, ∃ w ∈ FreeWit.F.witnesses,
-      (freeApi.contract (target.abi.withConsts []) 0).pre w ∧ Visits target.isa cFree w o.1 o.2 := by
-  show (∃ w ∈ FreeWit.F.witnesses, (freeContract (abi.withConsts [])).pre w) ∧ _
-  rw [withConsts_nil]; exact FreeWit.F.witnessOk
+theorem cFree_verified (m : Mirror) :
+    Verified target (cFree m) (freeContract (target.abi.withConsts []) m) := by
+  show Verified target (cFree m) (freeContract (abi.withConsts []) m)
+  rw [withConsts_nil]; exact FreeWit.F.verified m
 
-theorem cFree_restartsOk : ∀ s s', (freeContract abi).pre s →
-    Restarts target cFree (freeContract abi) s s' →
+theorem cFree_witnessOk (m : Mirror) :
+    (∃ w ∈ FreeWit.F.witnesses m, (freeContract (target.abi.withConsts []) m).pre w) ∧
+    ∀ o ∈ (cFree m).outcomes, ∃ w ∈ FreeWit.F.witnesses m,
+      (freeContract (target.abi.withConsts []) m).pre w ∧ Visits target.isa (cFree m) w o.1 o.2 := by
+  show (∃ w ∈ FreeWit.F.witnesses m, (freeContract (abi.withConsts []) m).pre w) ∧ _
+  rw [withConsts_nil]; exact FreeWit.F.witnessOk m
+
+theorem cFree_restartsOk (m : Mirror) : ∀ s s', (freeContract abi m).pre s →
+    Restarts target (cFree m) (freeContract abi m) s s' →
       target.abiPreserved s s' ∧ ArgsKept target.abi freeSig s s' ∧
       (target.inline = true → target.preservedExcept [] s s') :=
-  restartsOk_target (sig := freeSig) FreeWit.F.verified (by decide)
+  restartsOk_target (sig := freeSig) (FreeWit.F.verified m) (by decide)
     (fun s hs p hp r hr => by
-      have h := ((Proof.CEntry.abort_iff Free.cx Free.hv s p).mp
-        (FreeWit.F.verified.abortOk hs hp).2.2.1).1
+      have h := ((Proof.CEntry.abort_iff (Free.cx m) Free.hv s p).mp
+        ((FreeWit.F.verified m).abortOk hs hp).2.2.1).1
       have hr' : r ∈ [Reg.rdi] := hr
       simp only [List.cons.injEq, and_true] at h
       simp only [List.mem_cons, List.not_mem_nil, or_false] at hr'
       rcases hr' with rfl <;> simp_all)
-    (fun _ _ he => env_retC Free.hX he)
+    (fun _ _ he => env_retC (Free.hX (m := m)) he)
 
-theorem cFreeSized_verified :
-    Verified target cFreeSized (freeSizedApi.contract (target.abi.withConsts []) 0) := by
-  show Verified target cFreeSized (freeSizedContract (abi.withConsts []))
-  rw [withConsts_nil]; exact FreeWit.S.verified
+theorem cFreeSized_verified (m : Mirror) :
+    Verified target (cFreeSized m) (freeSizedContract (target.abi.withConsts []) m) := by
+  show Verified target (cFreeSized m) (freeSizedContract (abi.withConsts []) m)
+  rw [withConsts_nil]; exact FreeWit.S.verified m
 
-theorem cFreeSized_witnessOk :
-    (∃ w ∈ FreeWit.S.witnesses, (freeSizedApi.contract (target.abi.withConsts []) 0).pre w) ∧
-    ∀ o ∈ cFreeSized.outcomes, ∃ w ∈ FreeWit.S.witnesses,
-      (freeSizedApi.contract (target.abi.withConsts []) 0).pre w ∧
-        Visits target.isa cFreeSized w o.1 o.2 := by
-  show (∃ w ∈ FreeWit.S.witnesses, (freeSizedContract (abi.withConsts [])).pre w) ∧ _
-  rw [withConsts_nil]; exact FreeWit.S.witnessOk
+theorem cFreeSized_witnessOk (m : Mirror) :
+    (∃ w ∈ FreeWit.S.witnesses m, (freeSizedContract (target.abi.withConsts []) m).pre w) ∧
+    ∀ o ∈ (cFreeSized m).outcomes, ∃ w ∈ FreeWit.S.witnesses m,
+      (freeSizedContract (target.abi.withConsts []) m).pre w ∧
+        Visits target.isa (cFreeSized m) w o.1 o.2 := by
+  show (∃ w ∈ FreeWit.S.witnesses m, (freeSizedContract (abi.withConsts []) m).pre w) ∧ _
+  rw [withConsts_nil]; exact FreeWit.S.witnessOk m
 
-theorem cFreeSized_restartsOk : ∀ s s', (freeSizedContract abi).pre s →
-    Restarts target cFreeSized (freeSizedContract abi) s s' →
+theorem cFreeSized_restartsOk (m : Mirror) : ∀ s s', (freeSizedContract abi m).pre s →
+    Restarts target (cFreeSized m) (freeSizedContract abi m) s s' →
       target.abiPreserved s s' ∧ ArgsKept target.abi freeSizedSig s s' ∧
       (target.inline = true → target.preservedExcept [] s s') :=
-  restartsOk_target (sig := freeSizedSig) FreeWit.S.verified (by decide)
+  restartsOk_target (sig := freeSizedSig) (FreeWit.S.verified m) (by decide)
     (fun s hs p hp r hr => by
-      have h := ((Proof.CEntry.abort_iff FreeSized.cx FreeSized.hv s p).mp
-        (FreeWit.S.verified.abortOk hs hp).2.2.1).1
+      have h := ((Proof.CEntry.abort_iff (FreeSized.cx m) FreeSized.hv s p).mp
+        ((FreeWit.S.verified m).abortOk hs hp).2.2.1).1
       have hr' : r ∈ [Reg.rdi, Reg.rsi] := hr
       simp only [List.cons.injEq, and_true] at h
       simp only [List.mem_cons, List.not_mem_nil, or_false] at hr'
       rcases hr' with rfl | rfl <;> simp_all)
-    (fun _ _ he => env_retC FreeSized.hX he)
+    (fun _ _ he => env_retC (FreeSized.hX (m := m)) he)
 
 end VG.Proof.CEntry.X86_64

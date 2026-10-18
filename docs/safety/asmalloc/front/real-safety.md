@@ -46,8 +46,12 @@ below are those sections, discharged once here for every call in the file.
 - (S): the slab invariant of `front/twin-safety.md`, which every writer of a slab keeps:
   the routines themselves (proved in Lean), the slow paths through `store_if_equal` and
   `stack_push` (SLOW-01, SPARE-01), and the drain. `Real` changes nothing about that argument:
-  it is the same specification with the same writers. `SLABS` and `Real` are private to the
-  crate, so no code outside it can write these slabs, with a twin or otherwise.
+  it is the same specification with the same writers. `Real` is private to the crate, and
+  `SLABS` is public only so that the C routines the export macros define in another crate can
+  name its address: its type, `Front`, has no public field or method, so no code outside the
+  crate can write these slabs, with a twin or otherwise. The C entry points' routines, which
+  also write them, are proved in Lean to the same invariant for every class byte
+  (`c/routines-safety.md`).
 
 ## REAL-01: the inlined routines (`slab_pop`, `slab_push`, `current_cpu`)
 

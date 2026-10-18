@@ -15,9 +15,12 @@
 //!   Any alignment the family asks for is met by the class alone (no padding, no interior
 //!   pointer), up to the region size, and by a run of regions beyond it.
 //! - `free`, `realloc`, `malloc_usable_size` and the sized frees find the block's class from
-//!   its address. The sized frees ignore the size and alignment they are given: a wrong one
-//!   from C would otherwise corrupt the heap. A pointer that is not the start of a block of the
-//!   heap aborts the process.
+//!   its address. The sized frees use the size only as a prediction that the address must
+//!   confirm: a wrong one frees exactly what `free` would. A pointer outside the heap, or into
+//!   the middle of a large block or a run, aborts the process. A pointer into the middle of a
+//!   small block is the caller's bug that the fast path does not look for: it is caught only if
+//!   it reaches the back end's bitmaps before it is handed out again (docs/design.md,
+//!   "Interfaces").
 //! - `realloc(p, 0)` frees `p` and returns null, as glibc's does. `realloc` keeps a small block
 //!   in place when the new size has the same class, and a large one when the new size is still
 //!   large, fits the slot or run and, shrinking, keeps a quarter of it; a large block that

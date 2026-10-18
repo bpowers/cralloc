@@ -509,4 +509,11 @@ def safeDoc : String := "Does things.\n\n# Safety\n\n* `p` must be valid."
   "ret"
 ]
 
+-- A tail call after a sequence: its instructions, then a jump to the operand it names, in place
+-- of the return, which still follows (never reached).
+#guard (printer.lower (.jump [.mov .rdx (.reg .rax)] "zero") 0) ==
+  ([.text "mov rdx, rax", .ops [.text "jmp ", .ref "zero"]], [], 0)
+#guard printer.hotUops false (.seq (.rseq [.mov .rax (.reg .rdi)] [.instr (.store { base := .rdi } .rax)])
+  (.jump [.mov .rdx (.reg .rax)] "zero")) == some 4
+
 end VG.Test

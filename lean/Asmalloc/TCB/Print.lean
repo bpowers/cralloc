@@ -16,6 +16,7 @@ conditional branches:
   refers to it as an operand of the `asm!` block (`Line.ops`, `Piece.ref`),
   which `VG.Rust.files` declares (`sym` or `const`)
 * `frame push body pop` ⟶  `push; body; pop`
+* `jump is t` ⟶  `is; jmp t` (the emitter allows it only after a sequence)
 
 Structured-control-flow labels are numeric local labels (`N:`, referenced
 as `Nf` forward or `Nb` backward), the only kind Rust allows in inline
@@ -231,6 +232,7 @@ def Printer.lower : Code M.Instr M.Cond → Nat → List Line × List Line × Na
   | .rseq arm body, n =>
     let (lb, kb, st, n) := P.lowerBody body n
     (P.rseqLines arm lb kb, st, n)
+  | .jump is t, n => (is.flatMap P.instr ++ [.ops [.text (P.jump ""), .ref t]], [], n)
 
 /-- The fused micro-ops of a restartable sequence's body when no exit is
 taken: one per instruction and per exit, but an exit right after an
@@ -243,10 +245,14 @@ def Printer.stepUops : List (Step M.Instr M.Cond) → Nat
 /-- The fused micro-ops of a function's hot path, if the code has one the
 count is defined for: a block (every instruction), or a restartable
 sequence when no exit is taken (its arm and its body, `stepUops`); and the
-return, unless `inline`. Each instruction counts one. -/
+return, unless `inline`; or a sequence followed by a `jump`, whose
+instructions and jump replace the return. Each instruction counts one. -/
 def Printer.hotUops (inline : Bool) : Code M.Instr M.Cond → Option Nat
   | .block is => some (is.length + if inline then 0 else P.ret.length)
   | .rseq arm body => some (arm.length + P.stepUops body + if inline then 0 else P.ret.length)
+  -- A sequence that ends with a tail call: the instructions after the commit and the jump, in
+  -- place of the return.
+  | .seq (.rseq arm body) (.jump is _) => some (arm.length + P.stepUops body + is.length + 1)
   | _ => none
 
 /-- The complete body of a function: the lowered code, the return, and the
