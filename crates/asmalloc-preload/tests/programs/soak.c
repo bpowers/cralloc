@@ -6,7 +6,8 @@
 // is already live, at the moment it does so.
 //
 // usage: soak MODE [key=value...]
-//   modes:   churn, prodcons, fork, threadstorm, realloc, huge, signal, idle, breakpoint, trim
+//   modes:   churn, prodcons, fork, threadstorm, realloc, huge, signal, idle, breakpoint, trim,
+//            sweep
 //   keys:    threads, secs, seed, maxsize, live, xchg (percent of ops that hand a block to
 //            another thread), sigus (signal interval, microseconds), usable (fill up to
 //            malloc_usable_size, default 1), budget (MiB live across all threads, default
@@ -25,6 +26,12 @@
 // object's instruction addresses, one hex link-time address per line (from objdump); without
 // it the breakpoint goes on a random byte, which fires only when that byte starts an
 // instruction. Without such an object the mode does nothing.
+//
+// The sweep mode is the breakpoint mode made exhaustive and deterministic: one thread places
+// the breakpoint on each listed instruction of each sequence in turn (SOAK_INSNS is required)
+// and runs operations until it fires or `sweepops` operations pass, while `threads - 1` others
+// churn without breakpoints. It reports how many sequences and instructions fired, names each
+// sequence that never did, and fails if any did not.
 //
 // The signal and breakpoint modes allocate in signal handlers, which C does not allow and
 // glibc's malloc does not support; they are for allocators that promise it (asmalloc's design:
@@ -1076,30 +1083,27 @@ static int find_sequences(struct dl_phdr_info *info, size_t size, void *data) {
 
 static __thread int trap_fd = -1;
 static __thread Rec ring_trap[RING];
+static __thread long trap_hits;
 
 static void on_trap(int sig) {
     (void)sig;
     int saved = errno;
     if (trap_fd >= 0) ioctl(trap_fd, PERF_EVENT_IOC_DISABLE, 0);
     atomic_fetch_add_explicit(&n_trap, 1, memory_order_relaxed);
+    trap_hits++;
     errno = saved;
     // The handler allocates, so the interrupted sequence's restart finds a slab that moved.
     sig_body(ring_trap);
 }
 
-// Moves this thread's breakpoint to a random byte of a random sequence. Bytes that do not
-// start an instruction never fire, which only wastes the arming.
-static void arm(Rng *r) {
+static void disarm(void) {
     if (trap_fd >= 0) close(trap_fd);
     trap_fd = -1;
-    uint64_t at;
-    if (n_insns) {
-        at = insns[below(r, n_insns)];
-    } else {
-        const RseqCs *cs = &sequences[below(r, n_sequences)];
-        if (!cs->post_commit_offset) return;
-        at = cs->start_ip + below(r, cs->post_commit_offset);
-    }
+}
+
+// Puts this thread's breakpoint on the instruction at `at`.
+static void arm_at(uint64_t at) {
+    disarm();
     struct perf_event_attr a;
     memset(&a, 0, sizeof a);
     a.type = PERF_TYPE_BREAKPOINT;
@@ -1114,6 +1118,17 @@ static void arm(Rng *r) {
     a.bp_len = sizeof(long);
     trap_fd = (int)syscall(SYS_perf_event_open, &a, 0, -1, -1, 0);
     if (trap_fd < 0) die("perf_event_open for a breakpoint failed: %d", errno);
+}
+
+// Moves this thread's breakpoint to a random instruction of a random sequence, or without a
+// list to a random byte, which fires only when it starts an instruction.
+static void arm(Rng *r) {
+    if (n_insns) {
+        arm_at(insns[below(r, n_insns)]);
+        return;
+    }
+    const RseqCs *cs = &sequences[below(r, n_sequences)];
+    if (cs->post_commit_offset) arm_at(cs->start_ip + below(r, cs->post_commit_offset));
 }
 
 static void *trap_worker(void *arg) {
@@ -1137,9 +1152,81 @@ static void *trap_worker(void *arg) {
     return NULL;
 }
 
+// sweep: every listed instruction in turn, on the main thread.
+static long sweep_ops = 200000;
+
+static void *sweep_background(void *arg) {
+    Rng r = {mix64(seed0 ^ (uintptr_t)arg ^ 0xcccc)};
+    Set s;
+    set_init(&s, live_cap, per_thread_budget());
+    long ops = 0;
+    while (!(ops++ % 64 == 0 && atomic_load(&stop))) step(&r, &s, xchg_pct);
+    set_free_all(&r, &s);
+    set_done(&s);
+    return NULL;
+}
+
+static void run_sweep(void) {
+    if (!n_insns) die("the sweep needs SOAK_INSNS and an asmalloc object with sequences");
+    unsigned char *fired = map(n_insns);
+    pthread_t *t = map(sizeof(pthread_t) * (size_t)nthreads);
+    for (long i = 1; i < nthreads; i++)
+        if (pthread_create(&t[i], NULL, sweep_background, (void *)(i + 1)))
+            die("pthread_create failed");
+    sig_rng.s = mix64(seed0 ^ 0xdddd);
+    sig_ready = 1;
+    Rng r = {mix64(seed0 ^ 0xeeee)};
+    Set s;
+    set_init(&s, live_cap, per_thread_budget());
+    long hit = 0, ops = 0;
+    for (size_t i = 0; i < n_insns; i++) {
+        long before = trap_hits;
+        arm_at(insns[i]);
+        for (long k = 0; k < sweep_ops && trap_hits == before; k++, ops++) step(&r, &s, xchg_pct);
+        disarm();
+        fired[i] = trap_hits != before;
+        hit += fired[i];
+    }
+    sig_ready = 0;
+    for (int i = 0; i < RING; i++)
+        if (ring_trap[i].p) free_rec(&r, &ring_trap[i]);
+    set_free_all(&r, &s);
+    set_done(&s);
+    atomic_store(&stop, 1);
+    for (long i = 1; i < nthreads; i++) pthread_join(t[i], NULL);
+    size_t covered = 0, missed = 0;
+    for (size_t q = 0; q < n_sequences; q++) {
+        const RseqCs *cs = &sequences[q];
+        size_t listed = 0, got = 0;
+        for (size_t i = 0; i < n_insns; i++)
+            if (insns[i] - cs->start_ip < cs->post_commit_offset) {
+                listed++;
+                got += fired[i];
+            }
+        if (got) {
+            covered++;
+        } else {
+            Dl_info info;
+            const char *name = dladdr((void *)cs->start_ip, &info) && info.dli_sname
+                                   ? info.dli_sname
+                                   : "?";
+            say("soak sweep: sequence at %#lx (%s, %zu instructions) never fired\n",
+                (unsigned long)cs->start_ip, name, listed);
+            missed++;
+        }
+        if (listed && got < listed)
+            say("soak sweep: sequence at %#lx: %zu of %zu instructions fired\n",
+                (unsigned long)cs->start_ip, got, listed);
+    }
+    say("soak sweep: %zu of %zu sequences and %ld of %zu instructions fired, in %ld operations\n",
+        covered, n_sequences, hit, n_insns, ops);
+    if (missed) die("%zu sequences never fired", missed);
+}
+
 static void run_trap(void) {
     dl_iterate_phdr(find_sequences, NULL);
     if (!n_sequences) {
+        if (!strcmp(mode, "sweep")) die("no asmalloc object with restartable sequences to sweep");
         say("soak breakpoint: no asmalloc object with restartable sequences; nothing to do\n");
         return;
     }
@@ -1150,7 +1237,10 @@ static void run_trap(void) {
     memset(&sa, 0, sizeof sa);
     sa.sa_handler = on_trap;
     sigaction(SIGTRAP, &sa, NULL);
-    run_threads(trap_worker, nthreads);
+    if (!strcmp(mode, "sweep"))
+        run_sweep();
+    else
+        run_threads(trap_worker, nthreads);
 }
 
 // ---- main ----
@@ -1180,6 +1270,8 @@ static void parse(int argc, char **argv) {
             xchg_pct = atoi(v);
         else if (!strcmp(k, "sigus"))
             sig_us = atol(v);
+        else if (!strcmp(k, "sweepops"))
+            sweep_ops = atol(v);
         else if (!strcmp(k, "trimus"))
             trim_us = atol(v);
         else if (!strcmp(k, "budget"))
@@ -1221,7 +1313,7 @@ int main(int argc, char **argv) {
         run_threads(huge_worker, nthreads);
     } else if (!strcmp(mode, "signal")) {
         run_signal();
-    } else if (!strcmp(mode, "breakpoint")) {
+    } else if (!strcmp(mode, "breakpoint") || !strcmp(mode, "sweep")) {
         run_trap();
     } else if (!strcmp(mode, "trim")) {
         run_trim();
