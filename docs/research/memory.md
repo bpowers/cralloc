@@ -1606,6 +1606,14 @@ repetition (the claim takes back a kept slot's advice, the grown move gives it a
 its 1.6% kernel time; avoiding them would need the heap to tell the claim that the block is a
 growing move's destination, so they stay.
 
+A claim of a kept slot takes its advice back but not the huge pages already faulted, so that
+tenant's shrink in place is not trimmed to whole huge pages and may purge part of one; on
+Linux 7.2.9 a partly unmapped huge page stays charged whole to the cgroup until memory pressure
+splits it (`thp_partial.c`: purging half of each huge page of 64 MiB took RSS from 67 to 35 MiB
+but the charge only to 56, unchanged 2 s later). It is bounded at under two huge pages a
+shrink, and those pages are marked clean, so the retained count does not see them; the
+behaviour is left as it is.
+
 `benchrun`, five interleaved rounds, medians; the change is paired by round:
 
 | Job | main | after | change | glibc | jemalloc | mimalloc crate |

@@ -19,9 +19,14 @@
 //!   purges the whole slot and takes the advice back, or, within the budget for kept grown
 //!   blocks, releases it resident with its advice, which the next claim takes back
 //!   (`Back::alloc_at`). The huge pages already faulted stay, and that tenant's flag is clear,
-//!   so a shrink of it in place is not trimmed to whole huge pages and may split one: the
-//!   kernel then returns the part, a cost in time, not memory. A purge of a free slot needs no
-//!   rule of its own: it returns the slot's pages whole.
+//!   so a shrink of it in place is not trimmed to whole huge pages and may purge part of one.
+//!   That costs memory, not only time: a partly unmapped huge page stays charged to the cgroup
+//!   whole until the kernel splits it, which it leaves to memory pressure
+//!   (`crates/asmalloc-preload/tests/programs/thp_partial.c`: purging half of each huge page of
+//!   64 MiB halved RSS, 67 to 35 MiB, but took the charge only to 56). It is bounded at under
+//!   two huge pages a shrink, the huge pages at the shrink's two ends, and `mark_clean` marks
+//!   those pages clean, so the retained count does not see them. A purge of a free slot needs
+//!   no rule of its own: it returns the slot's pages whole.
 //! - **Clean bits** say a page has not been written since it was carved or last purged. Only a
 //!   purge and the first claim of a carved slot set them (`mark_fresh`, for the pages past its
 //!   block); a claim and anything that widens a held block clear them under what it may write
@@ -634,9 +639,11 @@ pub(crate) fn unadvise<H: Host>(host: &H, region: RegionId, slot: u32) {
 /// Returns `len` bytes at `from` bytes into slot `slot` to the OS, for a caller that holds
 /// the slot and no longer needs them: the tail of an object that shrank in place, or the part
 /// of a moving object already copied. Both are page multiples and the range lies inside the
-/// slot. No bitmap changes: the slot stays allocated, and its clean and zero bits describe it
-/// only while it is free. In a slot advised for huge pages the range is first trimmed to
-/// whole huge pages where it ends inside one. `true` only if the whole range went back:
+/// slot. It writes no bitmap: the slot stays allocated. A caller told that the whole range
+/// went back may mark its pages clean (`mark_clean`), which is then true of them; the zero
+/// bit describes a whole free slot, and only `mark_purged` sets it for a held one. In a slot
+/// advised for huge pages the range is first trimmed to whole huge pages where it ends inside
+/// one. `true` only if the whole range went back:
 /// `false` if trimming left part of it, or all, resident, in a huge-page part, which is purged
 /// only in whole huge pages (nothing is done), or if the OS refused. A caller that marks the
 /// slot zero afterwards relies on that.

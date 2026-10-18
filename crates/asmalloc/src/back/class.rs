@@ -488,6 +488,11 @@ impl<'a, O: Os> Back<'a, O> {
     /// the caller resized it in place. Aborts if `ptr` is not the start of a handed-out large
     /// slot or a run, or if `size` exceeds the slot or run. Small slots record no size, so for
     /// them this does nothing.
+    ///
+    /// The heap no longer calls it: it claims a block with headroom for the size it uses
+    /// (`Heap::alloc_large_using`) and resizes with [`Back::resize_in_place`]. The back end's
+    /// tests and the review's random runs use it to record a size apart from a claim, which is
+    /// a case the clean bits must survive (`region::cover` keeps them true).
     pub fn resize(&self, ptr: NonNull<u8>, size: usize) {
         match self.lookup(ptr.as_ptr()) {
             Some(Kind::Slot(class)) if class.is_small() => {}
@@ -523,8 +528,11 @@ impl<'a, O: Os> Back<'a, O> {
     ///
     /// The size is recorded first: only the owner asks for a live object's size, and the owner
     /// is here. The pages were the live object's, so they were never in a retained count and
-    /// none changes; no bitmap changes either. If the object later grows back in place the
-    /// pages read as zero, which is as good as the stale bytes a grow may otherwise expose.
+    /// none changes, and no leaf or zero bit changes. When the whole tail went back its pages
+    /// are marked clean (`region::mark_clean`), so the free that follows charges only what the
+    /// block kept; a grow in place clears them again (`region::cover`). If the object later
+    /// grows back in place the pages read as zero, which is as good as the stale bytes a grow
+    /// may otherwise expose.
     ///
     /// There is no hysteresis: every shrink that crosses a page boundary is one system call,
     /// so a program that shrinks a block a page at a time pays a call each time, as it does
@@ -880,6 +888,12 @@ impl<'a, O: Os> Back<'a, O> {
     /// is passed by one slot at most, the last one counted before the others took theirs back.
     fn keep_grown(&self, class: Class, charge: usize) -> bool {
         let budget = kept_grown(self.space.plan().geometry());
+        // A slot that alone is past the budget is refused without being counted, so that a
+        // large block's charge never sits in the count for a moment, where another keep or a
+        // decay pass starting then would see it.
+        if charge > budget {
+            return false;
+        }
         self.retain(class, charge);
         if self.retained_large() <= budget {
             return true;
