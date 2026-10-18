@@ -71,7 +71,7 @@ fn command(job: &Job, a: &Allocator, o: &Options, scratch: &Path) -> (Vec<String
     let cb = cbench.display().to_string();
     let program = match (&job.program, job.mode) {
         (Program::Rust(b), Mode::Native) => rust_bin(&o.bench_dir, &a.build_name().unwrap(), b),
-        (Program::Rust(b), Mode::Preload) => rust_bin(&o.bench_dir, "glibc", b),
+        (Program::Rust(b), Mode::Preload) => rust_bin(&o.bench_dir, &a.preload_build_name(), b),
         (Program::C(p), _) => cbench.join(p),
     };
     let mut argv = vec![program.display().to_string()];

@@ -1671,7 +1671,8 @@ So grow-loop numbers from different builds of the workloads cannot be compared, 
 workspace with `-C llvm-args=-align-loops=64` puts the loop in the same place in every
 build (asmalloc 1.24e9, jemalloc 1.32e9, the mimalloc crate 1.36e9, glibc 1.08e9 user cycles
 for the 4 MiB loop); it is not adopted here, since it moves every benchmark's code and so its
-baselines.
+baselines. Instead the job no longer pushes (`baselines.md`, section 14), and its numbers
+above are not comparable with later ones.
 
 ## Small heaps
 

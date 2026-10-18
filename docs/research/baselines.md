@@ -90,6 +90,12 @@ is 9.1%; 7 of 55 intervals exclude zero where chance predicts 2.8, all under 1% 
 with wide intervals (exchange of mixed sizes, the preloaded pipeline). Single-threaded
 differences of 1% and cross-thread differences of a few percent are resolved.
 
+**Code layout.** The control does not catch a job whose time depends on where its code
+landed, because every allocator's build places the workload's code somewhere else. When a job
+moves after a change that should not have touched it, `benchrun layout` (`bench/README.md`)
+runs it under builds that place the same code at other addresses; section 14 has the method
+and the jobs that are sensitive.
+
 ## 3. asmalloc against the best incumbent, per workload
 
 The best incumbent is the one with the lowest median cost; the gap is the median of
@@ -635,3 +641,102 @@ mode, five interleaved runs, medians, before and after:
 
 Every tcmalloc preload figure of the 2026-10-17 session was measured with the descriptor build and
 understates tcmalloc by about this much.
+
+## 14. Code layout and the single-threaded jobs
+
+2026-10-18, at `a2688b7` plus this change. The 4 MiB grow-and-free job ran 40% slower after
+an unrelated edit moved its push loop (`memory.md`, "The grow loop's 40%"), so every
+single-threaded job was checked for the same thing.
+
+**Method.** `benchrun layout` builds the workloads four ways that compile the same work to
+other addresses: the normal build; `-C llvm-args=-align-loops=64`; and lld's
+`--shuffle-sections` with seeds 1 and 2, which reorders every function (16-byte aligned, so
+each lands at another offset in its line; `grow_and_drop`, for one, is at offsets 32, 0, 0
+and 48 of its 64-byte line, and the tree's drop at 0, 32, 16 and 48). The variants run
+interleaved in random order, one fresh process each, single-threaded jobs on CPU 2, under
+the measurement lock; medians over rounds. Spread is the largest layout median over the
+smallest; noise is the largest half-IQR of one layout's runs. `loops64` retires up to 1 to 3%
+more instructions in loop-heavy jobs (its padding); the shuffles retire the same. The
+variants move the allocator's Rust code too, so a profile (`perf record -e cycles:u`,
+`perf annotate`) decides whose code a sensitivity is in.
+
+**The grow jobs.** Before, the 4 MiB loop (asmalloc, five rounds) spread 6.9%, and one build's
+runs ranged from 2.38 to 3.11 cycles/element. `vecgrow` now fills each vector by `resize` in
+steps of up to 4 KiB, each no larger than what the vector holds, so the vector reallocates at
+the same sizes as when pushing (checked for every length to 5,000 and for the suite's); the
+fill is a `memset` in libc, whose code no build moves, in an out-of-line `grow_and_drop`. A
+first version copied a chunk from the stack with `extend_from_slice`; its loads aliased the
+stores to the vector at 4 KiB strides, and the 1 MiB loop ran 0.445 or 0.472 cycles/element
+by where the stack began (environment padded with ASLR off), so it was dropped for the fill,
+which is flat across the same padding (0.415 to 0.431). Now 92 to 96% of the 4 MiB loop's
+cycles are libc's `memset` and `memmove`, and under 1% the workload's.
+
+Seven rounds, spread (noise) per allocator:
+
+| Job | asmalloc | jemalloc | mimalloc crate |
+|---|---:|---:|---:|
+| vecgrow 1x1Mi grow-and-free | 1.7% (0.9%) | 1.4% (1.3%) | 1.3% (0.8%) |
+| vecgrow 1x4Mi grow-and-free | 1.7% (4.3%) | 5.3% (2.8%); 15 rounds 4.0% (3.0%) | 1.7% (3.7%) |
+| vecgrow 1x256Mi | 0.8% (2.1%) | 1.6% (0.6%) | 0.3% (0.4%) |
+| vecgrow 64x4Mi | 0.8% (0.3%) | 0.6% (0.8%) | 0.1% (0.3%) |
+
+The 4 MiB job's noise is not layout. Each build's runs fall in two groups about 9% apart
+(asmalloc 0.627 or 0.684 cycles/element) in every layout, and with ASLR off and the stack
+fixed too, so it comes from the process's physical memory, not its addresses. jemalloc's
+`loops64` build spends its time in the same libc `memset` and `memmove` (96%) as its default
+build, whose code is at the same addresses in both; its 4 to 5% is that bimodality over few
+rounds, not a moved loop.
+
+**The rest, asmalloc** (five rounds; spread, noise, instructions):
+
+| Job | Spread | Noise | Instructions |
+|---|---:|---:|---:|
+| churn live=100 small | 0.6% | 0.6% | 0.01% |
+| churn live=1k small | 0.3% | 0.4% | 0.00% |
+| churn live=10k small | 0.6% | 0.7% | 0.01% |
+| churn live=100k small | 0.4% | 0.5% | 0.03% |
+| churn live=1M small | 1.2% | 1.2% | 0.11% |
+| churn live=10M small | 1.1% | 1.6% | 1.98% |
+| churn live=100k mixed | 0.5% | 0.1% | 0.03% |
+| churn live=100k small (preload) | 0.8% | 0.2% | 0.01% |
+| map btree 1M | 0.8% | 1.0% | 1.51% |
+| map hash 1M | 0.8% | 0.3% | 0.23% |
+| largepair 64Ki+1Mi | 0.9% | 1.6% | 0.55% |
+| json 8Mi | 2.9% | 0.8% | 0.75% |
+| **json 32Mi** | **3.5%** | 0.5% | 0.73% |
+| **json 32Mi (preload)** | **6.7%** | 0.8% | 0.99% |
+| **tree depth=18** | **5.1%; again 9.2%** | 2.8% | 0.14% |
+| **tree depth=20** | **3.3%; again 2.9%** | 1.3% | 0.14% |
+
+The C programs (cfrac, espresso, cache-scratch 1) are not built here and were not checked.
+
+- **json**: the parse phase moves (preloaded, the allocator is the shared library, which no
+  variant moves: 1,965 against 2,155 Mcycles), in serde_json's
+  `Value::deserialize`, half of whose time is one 16-byte reload of a `Value` from the stack
+  after the recursive call that wrote it. That is the parser the job exists to run; rewriting
+  it would make it another job, so it is left as it is, and json results compared across
+  builds of the workloads carry a few percent of layout.
+- **tree**, two places. The drop phase is 7% slower in `loops64` (404 against 432 Mcycles at
+  depth 20), at the `lea 0x8(%rcx)` that waits on the load of the per-CPU slab's top in
+  asmalloc's free fast path, inlined into the recursive drop: each free loads the top that
+  the previous free stored. That is the allocator's code and was not touched. The walk phase
+  (a recursive sum, workload code) is 5 to 7% slower in the default build than in the others.
+  A loop over an explicit stack instead put a store-to-load chain on every node and made the
+  walk twice as slow, so the recursion stays.
+
+**Grow-and-free under the new definition** (thousands of cycles a repetition, medians; 1 and
+4 MiB: `benchrun --suite backend`, seven rounds; 64 MiB: `vecgrow vecs=1 max=64Mi reps=40`
+by hand, seven interleaved runs):
+
+| To | asmalloc | glibc | jemalloc | mimalloc | mimalloc crate | tcmalloc per-CPU |
+|---|---:|---:|---:|---:|---:|---:|
+| 1 MiB | 55.4 | 32.7 | 41.3 | 113.8 | 108.8 | 108.4 |
+| 4 MiB | 334.6 | 169.7 | 395.2 | 440.2 | 430.7 | 434.1 |
+| 4 MiB, faults | 0.6 | 2.1 | 1.8 | 0.0 | 0.0 | 2.4 |
+| 64 MiB | 14,582 | 47,955 | 97,021 | 32,074 | 31,947 | 73,983 |
+| 64 MiB, faults | 69 | 16,386 | 30,771 | 1.8 | 1.8 | 17,105 |
+
+Without the push loop, the 1 and 4 MiB loops take a quarter to a sixth of what they did, and asmalloc
+is 1.7 to 2 times glibc there: about half of its cycles are `memmove` in its moves, while
+glibc's loop is 96% the fill itself, so it grows without copying. At 64 MiB asmalloc leads by
+2.2 times.
