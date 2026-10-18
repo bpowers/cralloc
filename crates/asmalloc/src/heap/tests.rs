@@ -565,17 +565,25 @@ fn a_thread_without_a_lease_is_served_by_the_back_end() {
 }
 
 #[test]
-fn a_large_shrink_stays_in_place_unless_it_leaves_most_of_the_block() {
+fn a_large_shrink_stays_in_place_unless_it_leaves_under_an_eighth_of_the_block() {
     let heap = SimHeap::<Shape>::new();
     let l = layout(200 << 10, 8);
     // SAFETY: valid layouts; each block is freed once with the layout it has.
     unsafe {
         let p = heap.alloc(l);
         let q = heap.realloc(p, l, 120 << 10);
-        assert_eq!(q, p, "a shrink to more than a quarter of the slot stays");
+        assert_eq!(q, p, "a shrink to more than an eighth of the slot stays");
         let r = heap.realloc(q, layout(120 << 10, 8), 40 << 10);
-        assert_ne!(r, q, "a shrink to less than a quarter of the slot moves");
+        assert_eq!(r, q, "a shrink to more than an eighth of the slot stays");
         heap.dealloc(r, layout(40 << 10, 8));
+        // Regions of the native shape hold a megabyte slot, whose eighth is a large size.
+        if !cfg!(miri) {
+            let l = layout(1 << 20, 8);
+            let p = heap.alloc(l);
+            let q = heap.realloc(p, l, 100 << 10);
+            assert_ne!(q, p, "a shrink to less than an eighth of the slot moves");
+            heap.dealloc(q, layout(100 << 10, 8));
+        }
     }
 }
 
@@ -846,11 +854,9 @@ mod process {
 
     /// The design: what a large block may use is the size asked for, to a page, never the
     /// room it sits in, so that a caller that fills what it is told it may use touches about
-    /// what it asked for. A layout aligned beyond a region takes a run, and the run records
-    /// the size rounded up to the alignment: eight bytes aligned to 8 GiB report 8 GiB
-    /// usable, all of it committed.
+    /// what it asked for. A layout aligned beyond a region takes a run, which records the size
+    /// asked for, not the size rounded up to the alignment (8 GiB for these eight bytes).
     #[test]
-    #[ignore = "finding: an over-aligned run reports its alignment as its usable size"]
     fn an_over_aligned_run_reports_what_was_asked_for() {
         let l = layout(8, 1 << 33);
         // SAFETY: a valid layout; the block is freed once.

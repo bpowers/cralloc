@@ -104,7 +104,7 @@ fn realloc_stays_in_place_when_the_class_allows() {
         let q = realloc(p, 33);
         assert_ne!(q, p);
         free(q);
-        // A large block grows within its slot and shrinks to a quarter of it in place.
+        // A large block grows within its slot and shrinks in place.
         let big = malloc(40 << 10);
         assert_eq!(realloc(big, 39 << 10), big);
         assert_eq!(realloc(big, 40 << 10), big);
@@ -215,7 +215,7 @@ fn realloc_shrinking_a_large_block_returns_its_tail() {
         let q = realloc(p.cast(), small).cast::<u8>();
         assert_eq!(
             q, p,
-            "a shrink to over a quarter of the slot stays in place"
+            "a shrink to over an eighth of the slot stays in place"
         );
         let kept = usable(q.cast());
         assert!(kept >= small && kept < small + 4096);
@@ -372,13 +372,9 @@ fn the_throwing_forms_slow_paths_return_null_for_the_routine_to_throw() {
 }
 
 /// A megabyte is a class. One byte more outgrows the slot and moves to a slot with four times
-/// the room; cut back to a megabyte, the block is under a quarter of that slot, so it moves
-/// again, to an exact slot, where the next extra byte moves it once more. Headroom gives a
-/// block a quarter of its slot at most and a shrink moves a block under a quarter, so the two
-/// rules meet with no gap between them, and a block resized back and forth across a class
-/// boundary is copied on every call.
+/// the room; cut back to a megabyte, the block still fills a fifth of that slot, more than the
+/// eighth under which a shrink moves, so it stays, and so does every later step.
 #[test]
-#[ignore = "finding: a block resized across a class boundary is copied at every call"]
 fn a_block_resized_back_and_forth_across_a_class_boundary_settles() {
     let size = 1 << 20;
     let mut moves = 0;

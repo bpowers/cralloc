@@ -9,13 +9,13 @@
 //! The in-place and headroom rules for large blocks are the ones `large.rs` applies to Rust
 //! resizes, restated for a block described by its address: a block stays put when the new size
 //! is still large, fits the slot or run, and, when it shrinks, keeps at least a
-//! [`HEADROOM`]th of it; a block that outgrows its slot moves to one with [`HEADROOM`] times
-//! the room, but not past a region.
+//! [`SHRINK_MOVES_BELOW`](super::large::SHRINK_MOVES_BELOW)th of it; a block that outgrows its
+//! slot moves to one with [`HEADROOM`] times the room, but not past a region.
 //!
 //! Small blocks are not served here: the C layer allocates and frees them with the
 //! out-of-line routines (`Asmalloc::alloc_small`, `Asmalloc::free_small`).
 
-use super::large::HEADROOM;
+use super::large::{HEADROOM, stays_after_shrink};
 use super::{Heap, Zero};
 use crate::back::Kind;
 use crate::classes::{C_ALIGN, Class, SmallClass};
@@ -113,7 +113,7 @@ impl<O: Os> Heap<O> {
             Some(Kind::Run(regions)) => regions << back.space().plan().region_shift(),
             _ => return false,
         };
-        let fits = is_large(new) && new <= room && (new >= old || new >= room / HEADROOM);
+        let fits = is_large(new) && new <= room && (new >= old || stays_after_shrink(new, room));
         if fits {
             back.resize_in_place(ptr, new);
         }
@@ -258,7 +258,7 @@ mod tests {
     fn large_blocks_resize_in_place_within_their_room() {
         let heap = SimHeap::<crate::os::sim::Standard>::new();
         let big = heap.heap.alloc_large_aligned(40 << 10, 16, false).unwrap();
-        // The slot is the 40 KiB class: growth past it moves, a shrink to a quarter stays.
+        // The slot is the 40 KiB class: growth past it moves, a shrink to an eighth stays.
         assert!(
             !heap
                 .heap
