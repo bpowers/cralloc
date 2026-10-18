@@ -47,6 +47,23 @@
 //! slab's activity counter shares a line with the sighting that other CPUs' looks read and
 //! write; the age limit's stamps are on lines only its own CPU uses.
 //!
+//! **A drain that finds the slab busy.** The look that marks a sighting drained is the only one
+//! that drains through it, since the mark is a compare-and-swap. So when that look's drain finds
+//! the claim held, the holder is not a look through this sighting: `collect`, a slow path
+//! draining another generation's markers on its own CPU, or a look that read the sighting before
+//! a change and marked it again. That holder may back out, or may have claimed the slab just
+//! before the parked magazines appeared. So the look records the slab as quiet from now, not
+//! drained: if it stays idle, the first look an interval later drains it, and if the holder did
+//! drain it, the cost is one more drain of an empty slab, at most once an interval. A slab that
+//! stays idle with magazines parked is therefore drained within about two intervals of the busy
+//! drain, whatever the holder did.
+//!
+//! **A clock that jumps.** Any clock read here may go back or leap forward: another CPU's
+//! counter, a resume from suspend, a restored checkpoint. A sighting behind the clock is
+//! recorded again from now, so it waits one interval more, never until the clock catches up; a
+//! clock that leaps forward drains early, once. The age limit's stamps and the depot's intervals
+//! follow the same rule (`age.rs`, `shed.rs`).
+//!
 //! **Hints.** The counter and the sighting are hints in the cold part of the slab, changed with
 //! single atomic instructions rather than routines; the all-zero slab has neither, and is never
 //! looked at. A lost update, a race between two looks, or a clock that is wrong, differs between
@@ -128,21 +145,30 @@ impl Sighting {
     /// clock at `now`.
     pub(super) fn look(self, activity: u64, now: u64) -> Look {
         let activity = activity & ACTIVITY_MASK;
-        let time = (now >> TICK_SHIFT) as u32;
         if self.0 & SEEN == 0 || self.activity() != activity {
-            return Look::Record(Sighting(
-                (time as u64) << TIME_SHIFT | activity << ACTIVITY_SHIFT | SEEN,
-            ));
+            return Look::Record(Sighting::at(activity, now));
         }
         if self.0 & DRAINED != 0 {
             return Look::Wait;
         }
-        // Signed, so a clock that went back (another CPU's, say) reads as "not yet".
+        let time = (now >> TICK_SHIFT) as u32;
         let quiet = time.wrapping_sub(self.time()) as i32;
+        // A clock behind the sighting went back (another CPU's, a resume from suspend, a
+        // restored checkpoint): count the quiet from now, so the drain waits one interval more
+        // instead of until the clock catches up.
+        if quiet < 0 {
+            return Look::Record(Sighting::at(activity, now));
+        }
         if quiet < IDLE_UNITS as i32 {
             return Look::Wait;
         }
         Look::Drain(Sighting(self.0 | DRAINED))
+    }
+
+    /// A sighting of the counter at `activity` made at `now`, not drained.
+    pub(super) fn at(activity: u64, now: u64) -> Sighting {
+        let time = (now >> TICK_SHIFT) as u32;
+        Sighting((time as u64) << TIME_SHIFT | (activity & ACTIVITY_MASK) << ACTIVITY_SHIFT | SEEN)
     }
 
     fn activity(self) -> u64 {
@@ -316,12 +342,18 @@ impl<O: Os, R: Routines, S: Source> Cache<'_, O, R, S> {
                 {
                     return;
                 }
-                // A drain that did not happen leaves the slab to be tried again; a busy one
-                // means another thread is draining it now.
-                if matches!(self.drain(cpu), Drained::BackedOut | Drained::Disabled) {
+                // A drain that did not happen leaves the slab to be tried again at once. A busy
+                // one leaves it to be tried an interval from now (see the module
+                // documentation).
+                let undo = match self.drain(cpu) {
+                    Drained::BackedOut | Drained::Disabled => Some(seen),
+                    Drained::Busy => Some(Sighting::at(activity, now).0),
+                    Drained::Done => None,
+                };
+                if let Some(undo) = undo {
                     let _ = slab
                         .seen()
-                        .compare_exchange(marked.0, seen, Relaxed, Relaxed);
+                        .compare_exchange(marked.0, undo, Relaxed, Relaxed);
                 }
             }
         }
@@ -357,12 +389,18 @@ mod tests {
     }
 
     #[test]
-    fn a_clock_that_goes_back_postpones_the_drain() {
-        let Look::Record(first) = Sighting(0).look(1, 5 * IDLE_TICKS) else {
+    fn a_clock_that_goes_back_delays_the_drain_by_one_interval() {
+        let Look::Record(first) = Sighting(0).look(1, 500 * IDLE_TICKS) else {
             panic!("a first look records");
         };
-        assert_eq!(first.look(1, 4 * IDLE_TICKS), Look::Wait);
-        assert_eq!(first.look(1, 0), Look::Wait);
+        // The clock goes back far: the sighting starts again from the clock's time now.
+        let back = 3 * IDLE_TICKS;
+        let Look::Record(again) = first.look(1, back) else {
+            panic!("a clock that went back records the slab again");
+        };
+        assert_eq!(again, Sighting::at(1, back));
+        assert_eq!(again.look(1, back + IDLE_TICKS - UNIT), Look::Wait);
+        assert!(matches!(again.look(1, back + IDLE_TICKS), Look::Drain(_)));
     }
 
     #[test]

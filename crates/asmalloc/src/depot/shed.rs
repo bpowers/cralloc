@@ -106,9 +106,14 @@ impl Water {
             return Water::pack(depth, 0, interval);
         }
         let ahead = interval.wrapping_sub(self.interval()) & INTERVAL_MASK;
-        // The same interval, or a clock that went back (another CPU's, say).
-        if ahead == 0 || ahead >= 1 << (INTERVAL_BITS - 1) {
+        if ahead == 0 {
             return Water::pack(self.low().min(depth), self.owed(), self.interval());
+        }
+        // A clock that went back (another CPU's, a resume from suspend): the interval goes on,
+        // but counted from the clock's time now, so the next one begins an interval from now
+        // instead of when the clock catches up.
+        if ahead >= 1 << (INTERVAL_BITS - 1) {
+            return Water::pack(self.low().min(depth), self.owed(), interval);
         }
         // Since the old mark was set the stack has not fallen below it, since every pop is
         // looked at, nor below its depth now. What was unpaid of the old debt lies in that
@@ -262,6 +267,11 @@ mod tests {
         assert_eq!(top.look(7, 0).owed(), 7);
         assert_eq!(owing.look(3, 1).owed(), 50);
         assert_eq!(owing.look(3, 1).low(), 3);
+        // After a clock that went back, the next interval begins one interval later.
+        let back = Water(0).look(9, 400).look(9, 401).look(5, 3);
+        assert_eq!((back.low(), back.owed()), (5, 9));
+        assert_eq!(back.look(5, 3).owed(), 9);
+        assert_eq!(back.look(6, 4).owed(), 5);
         // Counts saturate.
         let huge = Water(0).look(u32::MAX, 1);
         assert_eq!(huge.low(), COUNT_MAX);

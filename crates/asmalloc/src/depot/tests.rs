@@ -16,6 +16,7 @@ use crate::os::Os;
 use crate::os::sim::{Call, Faults, SimOs};
 use core::cell::RefCell;
 use core::ptr::NonNull;
+use core::sync::atomic::Ordering::Relaxed;
 use std::boxed::Box;
 use std::panic::{self, AssertUnwindSafe};
 use std::vec::Vec;
@@ -200,6 +201,59 @@ fn an_idle_cpu_is_drained_after_an_interval_and_again_only_after_use() {
     rig.os().advance_clock(IDLE_TICKS);
     heartbeats_on_cpu_1(&rig);
     assert_eq!(rig.os().calls(Call::Fence), 2);
+    assert!(cpu_0_is_empty(&rig));
+    rig.census(&user, false);
+}
+
+/// CPU 0 with magazines parked in its slab, then idle; the clock at `start`.
+fn an_idle_cpu_0(start: u64) -> (TestRig, Vec<NonNull<u8>>) {
+    let rig = rig(12, TIGHT);
+    let machine = SimCpu::new(0);
+    let cache = rig.cache(&machine);
+    let class = tiny_class();
+    let mut user: Vec<_> = (0..3).filter_map(|_| cache.alloc(class)).collect();
+    cache.free(class, user.pop().unwrap());
+    assert!(!cpu_0_is_empty(&rig));
+    rig.os().advance_clock(start);
+    (rig, user)
+}
+
+/// After the clock goes back (a resume, a restored checkpoint), an idle slab is drained one
+/// interval after the first look that sees the new time, not when the clock catches up.
+#[test]
+fn a_clock_that_goes_back_delays_a_drain_by_one_interval_only() {
+    let (rig, user) = an_idle_cpu_0(500 * IDLE_TICKS);
+    heartbeats_on_cpu_1(&rig);
+    rig.os().advance_clock(0u64.wrapping_sub(400 * IDLE_TICKS));
+    heartbeats_on_cpu_1(&rig);
+    assert_eq!(rig.os().calls(Call::Fence), 0);
+    rig.os().advance_clock(IDLE_TICKS);
+    heartbeats_on_cpu_1(&rig);
+    assert_eq!(rig.os().calls(Call::Fence), 1);
+    assert!(cpu_0_is_empty(&rig));
+    rig.census(&user, false);
+}
+
+/// A look whose drain finds the slab claimed by someone else (here a claim left as if by a
+/// `collect` that then backed out) tries again an interval later, so an idle slab with
+/// magazines parked is still drained.
+#[test]
+fn a_drain_that_finds_the_slab_busy_is_tried_again_an_interval_later() {
+    let (rig, user) = an_idle_cpu_0(7 * IDLE_TICKS);
+    let machine = SimCpu::new(1);
+    let cache = rig.cache(&machine);
+    let claim = rig.slabs().slab(cpu(&rig, 0)).claim();
+    heartbeats_on_cpu_1(&rig);
+    rig.os().advance_clock(IDLE_TICKS);
+    claim.store(cache.generation().unwrap().get(), Relaxed);
+    heartbeats_on_cpu_1(&rig);
+    assert!(!cpu_0_is_empty(&rig), "the busy drain took nothing");
+    // The other drainer gives up without draining.
+    claim.store(0, Relaxed);
+    heartbeats_on_cpu_1(&rig);
+    assert!(!cpu_0_is_empty(&rig), "the next try waits an interval");
+    rig.os().advance_clock(IDLE_TICKS);
+    heartbeats_on_cpu_1(&rig);
     assert!(cpu_0_is_empty(&rig));
     rig.census(&user, false);
 }

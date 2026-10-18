@@ -89,8 +89,12 @@ impl Stamp {
             return Age::Unstamped(Stamp::new(id, now));
         }
         let time = (now >> TICK_SHIFT) as u32;
-        // Signed, so that a clock that went back (another CPU's, say) reads as young.
         let loaded = time.wrapping_sub((self.0 >> 32) as u32) as i32;
+        // A clock behind the stamp went back: stamp the magazine again from now, so it waits
+        // one interval more instead of until the clock catches up.
+        if loaded < 0 {
+            return Age::Unstamped(Stamp::new(id, now));
+        }
         if loaded < IDLE_UNITS as i32 {
             Age::Young
         } else {
@@ -231,9 +235,14 @@ mod tests {
     }
 
     #[test]
-    fn a_clock_that_goes_back_keeps_a_magazine_young() {
-        let stamp = Stamp::new(id(1), 5 * IDLE_TICKS);
-        assert_eq!(stamp.age(id(1), 2 * IDLE_TICKS), Age::Young);
-        assert_eq!(stamp.age(id(1), 0), Age::Young);
+    fn a_clock_that_goes_back_restamps_the_magazine() {
+        let stamp = Stamp::new(id(1), 500 * IDLE_TICKS);
+        let back = 2 * IDLE_TICKS;
+        assert_eq!(
+            stamp.age(id(1), back),
+            Age::Unstamped(Stamp::new(id(1), back))
+        );
+        let again = Stamp::new(id(1), back);
+        assert_eq!(again.age(id(1), back + IDLE_TICKS), Age::Old);
     }
 }
