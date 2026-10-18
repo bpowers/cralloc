@@ -16,7 +16,7 @@ cannot free that, since it was never a block). The `GlobalAlloc` and `Allocator`
 pass the same promise down: `ptr` was returned by `alloc`/`allocate` (a zero-size `Allocator`
 block is never passed here; `Heap::deallocate` returns first).
 
-## HEAP-02: `Cache::new(&self.depot, back.space(), routines, &source)` in the slow paths
+## HEAP-02: `Cache::new(&self.depot, back.space(), routines, &source)` in the slow paths, the heartbeat of large operations and `collect`
 
 **Preconditions** (`Cache::new`). For as long as any of them is used, `depot` is used only
 with this `space`, and the slab array of `routines` only with this depot and space.

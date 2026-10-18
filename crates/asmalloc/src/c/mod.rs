@@ -298,7 +298,7 @@ pub extern "C" fn asmalloc_version() -> *const c_char {
 /// glibc's `malloc_trim`: returns the wholly free pages the back end holds to the OS. The
 /// padding argument has no meaning here. Returns 1 if any memory was released, else 0.
 pub extern "C" fn malloc_trim(_pad: usize) -> c_int {
-    c_int::from(process::trim())
+    c_int::from(process::collect() > 0)
 }
 
 /// Exports the C interface under its C names (`malloc`, `free` and the rest) from the crate
