@@ -9,8 +9,8 @@
 //! every input (`classes::verify`, `classes::verify_slow`), and the unit test
 //! `layout::tests::purge_passes_tile_the_carved_pages`.
 //!
-//! Runs of operations on a heap are not here. A harness running the real back end on
-//! `ProofOs<Tiny>` (fill, launder, fill, with two slots) exceeds the 6 GiB cap within two
+//! Runs of operations on a heap are not here. A harness running the real back end on a tiny
+//! simulated heap (fill, launder, fill, with two slots) exceeds the 6 GiB cap within two
 //! minutes: the protocols' retry loops nest (a search restarts around a descent, a clear and a
 //! walk up), and Kani unrolls each to the bound. Those runs are checked by the interleaving
 //! explorer (`back::models`) and the shadow-model tests (`back::tests`).
@@ -36,6 +36,13 @@ fn any_plan() -> Plan {
     );
     kani::assume(geometry.is_some());
     any_plan_of(geometry.unwrap())
+}
+
+/// Seconds rather than a fraction of one, so not in the merge gate.
+#[kani::proof]
+#[kani::unwind(6)]
+fn layouts_fit_the_used_geometries() {
+    layouts_fit(any_used_plan());
 }
 
 #[kani::proof]

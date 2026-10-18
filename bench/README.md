@@ -41,9 +41,12 @@ cannot be rebuilt under a session.
 | `baselines/` | `build.sh` rebuilds glibc's peers into the shared `baselines/out/` (gitignored) and records versions, commits and flags in `out/manifest/`. `probe.c` is a preloaded library that reports which allocator, mode and library a process ran with. |
 | `alloc/` | `bench-alloc`: the `#[global_allocator]`, chosen by cargo feature: the allocator's usual Rust crate itself (jemalloc), or the library called the way that crate calls it. |
 | `harness/` | `bench-harness`: pinning, in-process counters over a measured phase, seeded size distributions, the result line. |
+| `backend/` | `backbench`: asmalloc's back-end launder and fill on their own, per class and pointer order. |
 | `workloads/` | The `workload` binary: cross-thread, work-stealing and single-threaded workloads. |
 | `rpc/` | connect-rust's echo and log-ingest benchmarks as `rpc-server` (allocator under test) and `rpc-client` (fixed). See `rpc/README.md`. |
 | `runner/` | `benchrun`: builds, runs and reports. Jobs are defined in `runner/src/suite.rs`. |
+| `roofline/` | Fast-path microbenchmarks, each a cargo project of its own. See `roofline/README.md`. |
+| `probes/` | Standalone programs that each check one assumption about the kernel, glibc or Rust. See `probes/README.md`. |
 
 ## Adding an allocator
 
@@ -52,7 +55,8 @@ cannot be rebuilt under a session.
    in) and `version()`, plus a `GlobalAlloc` unless the allocator's crate provides one; the
    four lines in `alloc/src/lib.rs` that select the module and set `#[global_allocator]`;
    and a branch in `alloc/build.rs` only if it links a library from `baselines/out`. For
-   asmalloc the feature is a path dependency, `asmalloc = ["dep:asmalloc"]` with
+   asmalloc the feature is a path dependency,
+   `asmalloc = ["dep:asmalloc", "asmalloc/executable"]` with
    `asmalloc = { path = "../../crates/asmalloc", optional = true }`, as `je` is for
    `tikv-jemallocator`.
 2. Add an entry to `allocators.toml` with that `feature`, the `preload` library if it has

@@ -10,10 +10,11 @@ use asmalloc_testkit::{Config, Handoff, Profile, Script, check, generate, replay
 use asmalloc_testkit::{Stats, check_minimized, target};
 use common::{balanced, fit, ops, ops_for, profiles, workers};
 
-/// A failure here panics with a minimized script that replays it.
-fn every_profile<S: Subject>(make: impl Fn() -> S) {
+/// A failure here panics with a minimized script that replays it. The merge gate runs one seed;
+/// the `_fully` tests run two, on demand.
+fn every_profile<S: Subject>(make: impl Fn() -> S, seeds: u64) {
     for p in profiles() {
-        for seed in 1..=2 {
+        for seed in 1..=seeds {
             let stats = check_minimized(&make, &Config::single(p, seed, ops_for(&p)));
             balanced(&stats, p.name);
             assert_eq!(stats.ops, ops_for(&p), "{}", p.name);
@@ -22,13 +23,25 @@ fn every_profile<S: Subject>(make: impl Fn() -> S) {
 }
 
 #[test]
-fn global_alloc_serves_every_profile() {
-    every_profile(target::global_alloc);
+fn global_alloc_serves_every_profile_quickly() {
+    every_profile(target::global_alloc, 1);
 }
 
 #[test]
-fn c_abi_serves_every_profile() {
-    every_profile(target::c_abi);
+#[ignore = "slow: run with scripts/gate --all"]
+fn global_alloc_serves_every_profile_fully() {
+    every_profile(target::global_alloc, 2);
+}
+
+#[test]
+fn c_abi_serves_every_profile_quickly() {
+    every_profile(target::c_abi, 1);
+}
+
+#[test]
+#[ignore = "slow: run with scripts/gate --all"]
+fn c_abi_serves_every_profile_fully() {
+    every_profile(target::c_abi, 2);
 }
 
 fn every_handoff(subject: &dyn Subject, profile: Profile) -> Vec<Stats> {

@@ -16,10 +16,9 @@ every block still live.
 | `model_allocator` | the `Allocator` trait: zero sizes, frees and resizes with any size the block fits, alignment changes |
 
 The allocator is the testkit's `target` module, so pointing the testkit at an allocator points
-these targets at it too. Until asmalloc exists that is the system allocator, and a crash is a
-bug in the testkit. Setting `ASMALLOC_FUZZ_MUTANT` to a mutant's name (`overlapping`,
-`misaligned`, `short`, `no_zero_fill`, `loses_contents`, `double_handout`, `scribbler`,
-`premature_reuse`) wraps the allocator in that bug, which shows the fuzzer finds it.
+these targets at it too: asmalloc's process heap. Setting `ASMALLOC_FUZZ_MUTANT` to a mutant's
+name (`overlapping`, `misaligned`, `short`, `no_zero_fill`, `loses_contents`, `double_handout`,
+`scribbler`, `premature_reuse`) wraps the allocator in that bug, which shows the fuzzer finds it.
 
 cargo-fuzz builds with AddressSanitizer by default. That checks the testkit's own accesses
 (it found the model writing into a zero-size block), but it also replaces the C library's

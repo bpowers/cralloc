@@ -165,11 +165,6 @@ impl Generator {
         }
     }
 
-    /// Blocks the generator believes are live.
-    pub fn live_blocks(&self) -> usize {
-        self.live.len()
-    }
-
     /// The next operation, or `None` once the entropy runs dry.
     pub fn next_op<E: Entropy>(&mut self, e: &mut E) -> Option<Op> {
         self.last_sent = None;
@@ -568,9 +563,9 @@ mod tests {
                     seen[to as usize] += 1;
                     // Half the sends bounce, which must put the block back.
                     if seen[to as usize] % 2 == 0 {
-                        let before = g.live_blocks();
+                        let before = g.live.len();
                         g.observe(&Effect::Kept);
-                        assert_eq!(g.live_blocks(), before + 1);
+                        assert_eq!(g.live.len(), before + 1);
                     }
                 }
                 Op::Recv { from } => assert!(from < 4),
