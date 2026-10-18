@@ -1,12 +1,18 @@
 //! The heartbeat: the bounded maintenance every slow path does before it returns.
 //!
-//! At most one magazine laundered, one purge step asked of the source, and one look for an
-//! idle cache. There is no background thread and no timer, so maintenance happens at a rate
-//! set by allocation activity, in units small enough that no single call pays much.
+//! A large allocation or free counts as a slow path ([`Cache::maintain`]). There is no
+//! background thread and no timer, so maintenance happens at a rate set by allocation activity,
+//! in units small enough that no single call pays much. The clock is read once per heartbeat.
 //!
-//! - **Launder.** If the depot stack of the class just served holds more than its target, one
-//!   magazine is popped and its objects go back to the source; the empty magazine goes to the
-//!   empty stack.
+//! - **Launder over target.** If the depot stack of the class just served holds more than its
+//!   target, one magazine is popped and its objects go back to the source; the empty magazine
+//!   goes to the empty stack.
+//! - **Shed what was not needed** (`shed.rs`). A look at the depth of the stack the slow path
+//!   popped from, and on every [`LOOK_EVERY`]th slow path of a CPU a look at another class's
+//!   stack, the classes in turn; then at most one magazine laundered from a stack that owes.
+//! - **Age limit** (`age.rs`). A look at one class of the CPU's own slab, the classes in turn,
+//!   which takes and launders the magazine loaded there if it has been loaded for an interval,
+//!   or launders one full spare of a class with nothing loaded.
 //! - **Purge.** One [`Source::purge_step`].
 //! - **Idle check.** Each slow path on a CPU counts itself in that CPU's activity counter, and
 //!   every [`LOOK_EVERY`] of them it looks at one other CPU's slab, chosen from the count, so
@@ -23,12 +29,21 @@
 //! counter, so it looks idle and is drained once per interval; the drain costs it one refill,
 //! whose slow path moves the counter, and the next drain is at least an interval after that.
 //!
+//! **Bounded work.** Besides the exchange itself, one slow path launders at most four
+//! magazines: one in the exchange (the refresh, `slow.rs`) and one for each of the three rules
+//! here. A magazine holds at most 254 objects (and at most about 128 KiB of them), and a launder
+//! sorts them and sets one bitmap word per run of 64 neighbours with one atomic OR. Add one
+//! purge step, at most one drain of another slab (a bounded number of atomic instructions and
+//! one fence), and a fixed number of loads and single-word writes for the looks.
+//!
 //! **Shared writes.** A slow path that exchanges nothing with the depot writes, outside its own
 //! CPU's slab: nothing, on most entries; another slab's sighting, by compare-and-swap, on one
 //! entry in [`LOOK_EVERY`], and only if that slab's counter moved since its last sighting or it
-//! is drained; the depot's count of CPU numbers, once for each new highest CPU number. Laundering
-//! and purging write shared state only when there is something to give back. Its own slab's
-//! activity counter shares a line with the sighting that other CPUs' looks read and write.
+//! is drained; a depot stack's water word, only when a look finds a new low, a new interval or a
+//! paid debt; the depot's count of CPU numbers, once for each new highest CPU number.
+//! Laundering and purging write shared state only when there is something to give back. Its own
+//! slab's activity counter shares a line with the sighting that other CPUs' looks read and
+//! write; the age limit's stamps are on lines only its own CPU uses.
 //!
 //! **Hints.** The counter and the sighting are hints in the cold part of the slab, changed with
 //! single atomic instructions rather than routines; the all-zero slab has neither, and is never
@@ -37,24 +52,27 @@
 //! looks that both decide to drain are stopped by the sighting's compare-and-swap and, behind
 //! it, by the drain's own claim.
 
-use super::slow::CHUNK;
+use super::magazine::MagazineId;
 use super::{Cache, Drained, Source, generation};
-use crate::classes::SmallClass;
+use crate::classes::{SMALL_COUNT, SmallClass};
 use crate::front::{Cpu, Routines};
 use crate::os::Os;
-use core::ptr::NonNull;
 use core::sync::atomic::Ordering::Relaxed;
 
-/// How long a slab's activity counter must stand still before the idle check drains it, in
-/// ticks of [`Os::ticks`]: 2^32, about a second.
+/// `log2` of [`IDLE_TICKS`].
+pub(super) const IDLE_SHIFT: u32 = 32;
+
+/// The interval: how long a slab's activity counter must stand still before the idle check
+/// drains it, how long a magazine may stay loaded (`age.rs`), and the period over which a depot
+/// stack's low-water mark is kept (`shed.rs`), in ticks of [`Os::ticks`]: 2^32, about a second.
 ///
 /// On Linux the clock is the timestamp counter, whose rate the allocator cannot learn without
 /// a system call or the C library. It runs at a fixed rate near the processor's base clock: 1
 /// to 6 GHz on plausible x86-64 machines, so the interval is between 0.7 and 4.3 seconds, and
 /// about 1 to 2 seconds on current desktop and server parts (4.3 GHz on the reference
-/// machine). The interval only paces a hint, so that spread is acceptable; what matters is that
+/// machine). The interval only paces hints, so that spread is acceptable; what matters is that
 /// it is long next to the microseconds between heartbeats.
-pub const IDLE_TICKS: u64 = 1 << 32;
+pub const IDLE_TICKS: u64 = 1 << IDLE_SHIFT;
 
 /// How many of its own slow paths a CPU makes between looks at another CPU's slab, by default.
 /// A look reads that slab's cold line and the clock, and sometimes writes the line; doing it on
@@ -62,11 +80,11 @@ pub const IDLE_TICKS: u64 = 1 << 32;
 /// slab many times an interval while it allocates at any appreciable rate.
 pub const LOOK_EVERY: u64 = 16;
 
-/// The low bits of a tick count that a sighting drops: it keeps time in units of 2^20 ticks,
-/// a fraction of a millisecond.
-const TICK_SHIFT: u32 = 20;
+/// The low bits of a tick count that a sighting or a stamp drops: they keep time in units of
+/// 2^20 ticks, a fraction of a millisecond.
+pub(super) const TICK_SHIFT: u32 = 20;
 /// [`IDLE_TICKS`] in a sighting's units.
-const IDLE_UNITS: u32 = (IDLE_TICKS >> TICK_SHIFT) as u32;
+pub(super) const IDLE_UNITS: u32 = (IDLE_TICKS >> TICK_SHIFT) as u32;
 /// Bits of the activity counter a sighting keeps.
 const ACTIVITY_BITS: u32 = 30;
 const ACTIVITY_MASK: u64 = (1 << ACTIVITY_BITS) - 1;
@@ -134,6 +152,12 @@ impl Sighting {
     }
 }
 
+/// The small class with ordinal `n` modulo the class count: how a CPU's looks go round the
+/// classes, one class for each count of its activity.
+fn nth_class(n: u64) -> Option<SmallClass> {
+    SmallClass::from_ordinal((n % SMALL_COUNT as u64) as usize)
+}
+
 /// What a slow path noticed that its heartbeat should act on.
 #[derive(Default, Debug)]
 pub(super) struct Chores {
@@ -141,18 +165,57 @@ pub(super) struct Chores {
     pub(super) cpu: Option<Cpu>,
     /// It met another generation's marker on that CPU's slab.
     pub(super) stale: bool,
+    /// The magazine it installed in that CPU's slab, if it installed one.
+    pub(super) installed: Option<MagazineId>,
+    /// It popped a magazine from the depot stack of the class it served.
+    pub(super) popped: bool,
 }
 
 impl<O: Os, R: Routines, S: Source> Cache<'_, O, R, S> {
-    /// One heartbeat, after a slow path for `class`.
-    pub(super) fn heartbeat(&self, class: SmallClass, chores: Chores) {
+    /// The heartbeat of a slow path that served no small class: a large allocation or free,
+    /// which counts as a slow path of the CPU the thread is on.
+    pub fn maintain(&self) {
+        let chores = Chores {
+            cpu: self.routines.cpu(),
+            ..Chores::default()
+        };
+        self.heartbeat(None, chores);
+    }
+
+    /// One heartbeat, after a slow path that served `served`, if it served a small class.
+    pub(super) fn heartbeat(&self, served: Option<SmallClass>, chores: Chores) {
+        let now = self.os().ticks();
         let activity = chores.cpu.map(|cpu| {
             if self.depot.cpus.load(Relaxed) <= cpu.index() {
                 self.depot.cpus.fetch_max(cpu.index() + 1, Relaxed);
             }
             self.slab(cpu).note_activity()
         });
-        self.launder(class);
+        if let (Some(cpu), Some(class), Some(id)) = (chores.cpu, served, chores.installed) {
+            self.stamp(cpu, class, id, now);
+        }
+        if let Some(class) = served {
+            if self.tuning.shed_unused && chores.popped {
+                self.look_at_depth(class, now);
+            }
+            self.launder(class, now);
+        }
+        let every = self.tuning.look_every.max(1);
+        if self.tuning.shed_unused {
+            if let Some(activity) = activity
+                && activity.is_multiple_of(every)
+                && let Some(class) = nth_class(activity / every)
+            {
+                self.look_at_depth(class, now);
+            }
+            self.shed(activity.unwrap_or(0), now);
+        }
+        if self.tuning.age_limit
+            && let (Some(cpu), Some(activity)) = (chores.cpu, activity)
+            && let Some(class) = nth_class(activity)
+        {
+            self.age_look(cpu, class, now);
+        }
         self.source.purge_step();
         if !generation::drains_enabled(self.depot) {
             return;
@@ -161,42 +224,26 @@ impl<O: Os, R: Routines, S: Source> Cache<'_, O, R, S> {
             (Some(cpu), _) if chores.stale => {
                 self.drain(cpu);
             }
-            (Some(cpu), Some(activity)) => self.idle_check(cpu, activity),
+            (Some(cpu), Some(activity)) => self.idle_check(cpu, activity, now),
             _ => {}
         }
     }
 
     /// Launders one magazine of `class` if its depot stack is over its target.
-    fn launder(&self, class: SmallClass) {
+    fn launder(&self, class: SmallClass, now: u64) {
         let target = self.tuning.depot_target / class.size();
         let stack = self.depot.full(class);
         if (stack.objects(self.area, class.magazine()) as usize) <= target {
             return;
         }
-        let Some(magazine) = stack.pop(self.area, class.magazine()) else {
-            return;
-        };
-        let level = magazine.level();
-        let mut buffer = [NonNull::dangling(); CHUNK];
-        let mut done = 0;
-        while done < level {
-            let count = (level - done).min(CHUNK);
-            for (i, slot) in buffer[..count].iter_mut().enumerate() {
-                match NonNull::new(magazine.object(done + i + 1)) {
-                    Some(object) => *slot = object,
-                    None => self.os().abort("a magazine holds a null object"),
-                }
-            }
-            self.source.take_back(class, &buffer[..count]);
-            done += count;
+        if self.launder_one(class).is_some() && self.tuning.shed_unused {
+            self.look_at_depth(class, now);
         }
-        magazine.set_level(0);
-        self.to_depot(class, magazine);
     }
 
     /// On every `look_every`-th slow path of CPU `me`, whose counter now reads `activity`,
     /// looks at one other CPU's slab and records or drains it (see the module documentation).
-    fn idle_check(&self, me: Cpu, activity: u64) {
+    fn idle_check(&self, me: Cpu, activity: u64, now: u64) {
         let every = self.tuning.look_every.max(1);
         if !activity.is_multiple_of(every) {
             return;
@@ -221,7 +268,7 @@ impl<O: Os, R: Routines, S: Source> Cache<'_, O, R, S> {
         let seen = slab.seen().load(Relaxed);
         // A compare-and-swap, not a store, so that a look that read the sighting before
         // another look marked it drained cannot clear the mark.
-        match Sighting(seen).look(activity, self.os().ticks()) {
+        match Sighting(seen).look(activity, now) {
             Look::Wait => {}
             Look::Record(fresh) => {
                 let _ = slab

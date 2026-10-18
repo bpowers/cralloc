@@ -21,12 +21,18 @@
 //! is on now. That is safe: if the two words are equal, either both are zero or markers, or
 //! both name the same magazine, which then is on the current CPU, so the install displaces
 //! exactly what the slow path decided to displace.
+//!
+//! **Refresh.** One full magazine in [`REFRESH_EVERY`] that a free displaces is laundered and
+//! retired empty instead of going to the spares or the depot, so the objects in steady
+//! circulation are gradually replaced by the lowest free ones, and the pages their predecessors
+//! pinned can be purged. The count is the CPU's own, in the cold part of its slab
+//! ([`Slab::count_retired`](crate::front::Slab)).
 
 use super::heartbeat::Chores;
 use super::magazine::Magazine;
 use super::{Cache, Source};
 use crate::classes::{SmallClass, is_marker};
-use crate::front::{Field, Routines, Spare, StoreIfEqual};
+use crate::front::{Cpu, Field, Routines, Spare, StoreIfEqual};
 use crate::os::Os;
 use core::ptr::NonNull;
 use core::sync::atomic::Ordering::Acquire;
@@ -55,6 +61,14 @@ enum Obtained<'a> {
 
 /// How many pointers a fill or a launder moves through the stack at a time.
 pub(super) const CHUNK: usize = 64;
+
+/// One full magazine in this many that a CPU's frees retire is laundered instead of kept, by
+/// default. Each costs one launder now and one fill later, a few atomic instructions per 64
+/// objects, so one in eight adds an eighth of a launder and a fill to each such exchange. An
+/// object in circulation survives `k` retirements with probability `(7/8)^k`, so half are
+/// replaced by the lowest free ones within six and nineteen in twenty within 23: fast next to
+/// the interval at any rate of exchange that matters, and cheap enough to leave on.
+pub const REFRESH_EVERY: u64 = 8;
 
 impl<'a, O: Os, R: Routines, S: Source> Cache<'a, O, R, S> {
     /// Whether a word is a marker that a slow path must not store over: this process's, or
@@ -106,24 +120,32 @@ impl<'a, O: Os, R: Routines, S: Source> Cache<'a, O, R, S> {
 
     /// A magazine with objects of `class`: from the CPU's spares, the depot, or by filling an
     /// empty one from the source.
-    fn obtain_full(&self, class: SmallClass, stale: &mut bool) -> Obtained<'a> {
-        if let Some(magazine) = self.spare_pop(class, Spare::Full, stale) {
+    fn obtain_full(&self, class: SmallClass, chores: &mut Chores) -> Obtained<'a> {
+        if let Some(magazine) = self.spare_pop(class, Spare::Full, &mut chores.stale) {
             if magazine.level() > 0 {
                 return Obtained::Magazine(magazine);
             }
             self.to_depot(class, magazine);
         }
         if let Some(magazine) = self.depot.full(class).pop(self.area, class.magazine()) {
+            chores.popped = true;
             return Obtained::Magazine(magazine);
         }
-        let Some(magazine) = self.obtain_empty(class, stale) else {
+        let Some(magazine) = self.obtain_empty(class, &mut chores.stale) else {
             return Obtained::NoMagazine;
         };
         if self.fill(class, &magazine) == 0 {
-            self.retire(class, Spare::Empty, magazine, stale);
+            self.retire(class, Spare::Empty, magazine, &mut chores.stale);
             return Obtained::OutOfMemory;
         }
         Obtained::Magazine(magazine)
+    }
+
+    /// Whether the full magazine a free on `cpu` just displaced is the one in
+    /// `refresh_every` to launder.
+    fn refreshes(&self, cpu: Cpu) -> bool {
+        let every = self.tuning.refresh_every;
+        every != 0 && self.slab(cpu).count_retired().is_multiple_of(every)
     }
 
     /// Fills an empty magazine this thread holds from the source; returns its new level.
@@ -180,7 +202,7 @@ impl<'a, O: Os, R: Routines, S: Source> Cache<'a, O, R, S> {
     pub fn alloc_slow(&self, class: SmallClass) -> Option<NonNull<u8>> {
         let mut chores = Chores::default();
         let object = self.exchange_for_alloc(class, &mut chores);
-        self.heartbeat(class, chores);
+        self.heartbeat(Some(class), chores);
         object
     }
 
@@ -205,7 +227,7 @@ impl<'a, O: Os, R: Routines, S: Source> Cache<'a, O, R, S> {
                 Seen::Stale => chores.stale = true,
                 _ => {}
             }
-            let held = match self.obtain_full(class, &mut chores.stale) {
+            let held = match self.obtain_full(class, chores) {
                 Obtained::Magazine(magazine) => magazine,
                 Obtained::OutOfMemory => return None,
                 Obtained::NoMagazine => return self.source.alloc_one(class),
@@ -213,6 +235,7 @@ impl<'a, O: Os, R: Routines, S: Source> Cache<'a, O, R, S> {
             if let Seen::Live = seen {
                 return self.serve_alloc(class, held);
             }
+            let id = held.id();
             // SAFETY: SLOW-01.
             let installed = unsafe {
                 self.routines
@@ -220,6 +243,7 @@ impl<'a, O: Os, R: Routines, S: Source> Cache<'a, O, R, S> {
             };
             match installed {
                 StoreIfEqual::Stored => {
+                    chores.installed = Some(id);
                     if let Seen::Loaded(old, _) = seen {
                         old.set_level(0);
                         self.retire(class, Spare::Empty, old, &mut chores.stale);
@@ -248,7 +272,7 @@ impl<'a, O: Os, R: Routines, S: Source> Cache<'a, O, R, S> {
     pub fn free_slow(&self, class: SmallClass, object: NonNull<u8>) {
         let mut chores = Chores::default();
         self.exchange_for_free(class, object, &mut chores);
-        self.heartbeat(class, chores);
+        self.heartbeat(Some(class), chores);
     }
 
     fn exchange_for_free(&self, class: SmallClass, object: NonNull<u8>, chores: &mut Chores) {
@@ -279,13 +303,20 @@ impl<'a, O: Os, R: Routines, S: Source> Cache<'a, O, R, S> {
             if let Seen::Live = seen {
                 return self.serve_free(class, held, object);
             }
+            let id = held.id();
             // SAFETY: SLOW-01.
             let installed = unsafe { self.routines.store_if_equal(field, word, held.word(0)) };
             match installed {
                 StoreIfEqual::Stored => {
+                    chores.installed = Some(id);
                     if let Seen::Loaded(old, level) = seen {
                         old.set_level(level);
-                        self.retire(class, Spare::Full, old, &mut chores.stale);
+                        if self.refreshes(cpu) {
+                            self.launder_held(class, &old);
+                            self.retire(class, Spare::Empty, old, &mut chores.stale);
+                        } else {
+                            self.retire(class, Spare::Full, old, &mut chores.stale);
+                        }
                     }
                 }
                 StoreIfEqual::Mismatch(now) if self.is_live(now) => {

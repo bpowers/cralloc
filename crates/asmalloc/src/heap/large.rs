@@ -15,6 +15,10 @@
 //! Small objects get no headroom: their class comes from the layout, so their slot must be exactly
 //! their class.
 //!
+//! A large allocation or free is a slow path of its own and runs a heartbeat
+//! ([`Heap::heartbeat`]), so a program that allocates only large blocks still keeps the caches,
+//! the depot and the back end maintained.
+//!
 //! Fresh slots and runs read as zero; the back end says when a reused large slot is known to, so
 //! zeroed allocation clears only what it must.
 //!
@@ -105,6 +109,34 @@ impl<O: Os> Heap<O> {
             Some(back) => back.free_by_address(ptr),
             None => self.os().abort("free of a block when no heap exists"),
         }
+    }
+
+    /// [`Heap::alloc_large`] as the slow path it counts as: the block, then a heartbeat.
+    ///
+    /// # Safety
+    ///
+    /// As for [`Heap::alloc`].
+    pub(crate) unsafe fn alloc_large_slow<R: Routines + Copy>(
+        &self,
+        routines: R,
+        layout: Layout,
+        zero: Zero,
+    ) -> Option<Grant> {
+        let grant = self.alloc_large(layout, zero);
+        // SAFETY: passed through from the caller.
+        unsafe { self.heartbeat(routines) };
+        grant
+    }
+
+    /// [`Heap::free_large`] as the slow path it counts as: the free, then a heartbeat.
+    ///
+    /// # Safety
+    ///
+    /// As for [`Heap::alloc`].
+    pub(crate) unsafe fn free_large_slow<R: Routines + Copy>(&self, routines: R, ptr: NonNull<u8>) {
+        self.free_large(ptr);
+        // SAFETY: passed through from the caller.
+        unsafe { self.heartbeat(routines) };
     }
 
     /// The bytes the block at `ptr`, described by `layout`, occupies: its class for a small

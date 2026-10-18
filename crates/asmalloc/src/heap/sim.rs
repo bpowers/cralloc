@@ -154,6 +154,19 @@ impl<S: Shape> SimHeap<S> {
         self.heap.usable_size(ptr)
     }
 
+    /// Walks the heap for `visitor`, as `Asmalloc::inspect` does the process's heap.
+    pub fn inspect(&self, visitor: &mut impl crate::stats::Visitor) {
+        self.heap.inspect(&*self.slabs, visitor);
+    }
+
+    /// Returns everything the heap can return now, as `Asmalloc::collect` does for the
+    /// process's heap, on a leased simulated thread. Returns the bytes purged that the heap
+    /// believed resident.
+    pub fn collect(&self) -> usize {
+        // SAFETY: SIM-03.
+        self.with(|heap, routines| unsafe { heap.collect(routines) })
+    }
+
     /// Borrows a simulated thread that no other call is using, starting the search at one
     /// picked from the caller's stack address, so that concurrent callers spread out.
     pub(super) fn lease(&self) -> Option<Lease<'_>> {

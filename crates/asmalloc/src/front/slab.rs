@@ -5,10 +5,11 @@
 //! address them as `SLABS + (cpu << SLAB_SHIFT) + 8 c`. Word 0 is never used, so that the class
 //! index needs no adjustment. The cold part follows on its own cache lines: the heads of the
 //! spare stacks (one stack of non-empty and one of empty magazines per class), the activity
-//! counter, the idle check's last sighting of it, and the drain claim.
+//! counter, the idle check's last sighting of it, the drain claim, the count of full magazines
+//! the CPU's frees have retired, and per class a stamp of when the loaded magazine was loaded.
 //!
 //! Every field is an atomic word and the all-zero slab is valid: no magazines, empty spare
-//! stacks, no activity and no claim.
+//! stacks, no activity, no claim, nothing retired and no stamps.
 
 use super::sync::{AtomicPtr, AtomicU64};
 use crate::classes::{SMALL_COUNT, SmallClass};
@@ -74,6 +75,11 @@ impl Field {
     }
 }
 
+/// Per class, indexed like the hot words, when the magazine loaded there was loaded. On lines
+/// of their own: only this CPU's slow paths write them, and other CPUs never read them.
+#[repr(C, align(64))]
+struct Stamps([AtomicU64; WORDS]);
+
 /// One CPU's slab. See the module documentation.
 #[repr(C, align(4096))]
 pub struct Slab {
@@ -82,6 +88,8 @@ pub struct Slab {
     activity: AtomicU64,
     seen: AtomicU64,
     claim: AtomicU64,
+    retired: AtomicU64,
+    stamps: Stamps,
 }
 
 impl Slab {
@@ -93,6 +101,8 @@ impl Slab {
             activity: AtomicU64::new(0),
             seen: AtomicU64::new(0),
             claim: AtomicU64::new(0),
+            retired: AtomicU64::new(0),
+            stamps: Stamps([const { AtomicU64::new(0) }; WORDS]),
         }
     }
 
@@ -139,6 +149,24 @@ impl Slab {
     #[inline]
     pub(crate) fn claim(&self) -> &AtomicU64 {
         &self.claim
+    }
+
+    /// Counts one full magazine retired by a free on this slab's CPU, and returns the new
+    /// count (`depot::slow`'s refresh). A hint, kept with a load and a store rather than a
+    /// read-modify-write: only this CPU's slow paths write it, and a count lost to a race (a
+    /// thread that migrated, a signal handler) only moves which magazine is refreshed.
+    #[inline]
+    pub(crate) fn count_retired(&self) -> u64 {
+        let count = self.retired.load(Ordering::Relaxed).wrapping_add(1);
+        self.retired.store(count, Ordering::Relaxed);
+        count
+    }
+
+    /// The stamp of the magazine loaded for `class` (`depot::age`): zero, or which magazine
+    /// was loaded and when. A hint, written with single stores.
+    #[inline]
+    pub(crate) fn stamp(&self, class: SmallClass) -> &AtomicU64 {
+        &self.stamps.0[class.class().index() as usize % WORDS]
     }
 }
 
