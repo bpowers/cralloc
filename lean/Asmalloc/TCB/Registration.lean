@@ -100,6 +100,7 @@ def Api.artifact (api : Api) (target : Target) (r : Registration api target) : A
   operands := api.operands
   generics := api.generics
   rustConsts := api.rustConsts
+  exports := api.exports
   code := r.code
   contract := r.contract
   verified := r.verified

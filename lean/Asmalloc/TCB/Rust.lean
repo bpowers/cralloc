@@ -602,6 +602,109 @@ def checkNames (a : Artifact) : Except String Unit := do
   unless rustIdent a.module && a.module != "mod" do
     throw s!"{a.target.name}: {a.name}'s module `{a.module}` is not a Rust identifier (or is `mod`)"
 
+/-! ## Exports
+
+An artifact may also be defined as C symbols (`Artifact.exports`): for
+each `(group, symbol)` the emitter writes a copy of the function, the same
+code under the name `symbol`, into the macro of `group` on its target,
+`asmalloc_exports_<group>_<target>!` (`exportsFile`):
+
+```rust
+#[doc(hidden)]
+#[macro_export]
+macro_rules! asmalloc_exports_<group>_<target> {
+    () => {
+        #[unsafe(naked)]
+        #[unsafe(no_mangle)]
+        unsafe extern "<abi>" fn <symbol><sig> {
+            ::core::arch::naked_asm!(
+                r"<line>…",
+                <name> = sym $crate::<path>, …
+            )
+        }
+        …
+    };
+}
+```
+
+A crate defines the symbols by invoking the macro, so a crate that links the
+one with the artifacts but does not invoke it (a test binary) does not get
+them. The copy's operands name the same items as the function's, through
+`$crate`, which is the crate the macro is defined in wherever it is
+expanded; so `checkExports` allows exports only of code whose operands are
+all paths into that crate (`crate::…`), that calls no function and reads no
+table of constants (which `function` names relative to its own module), and
+that no cargo feature selects (a `cfg` in an expansion would read the
+features of the crate that invokes it). The copy is the printed code
+`function` emits, and the symbol the only difference. -/
+
+/-- The operand declaration `operandText` gives, with a path into the crate
+(`crate::…`) made one through `$crate`, for a macro. -/
+def macroOperand (text : String) : String :=
+  match text.splitOn "sym crate::" with
+  | ["", rest] => "sym $crate::" ++ rest
+  | _ => text
+
+/-- A copy of `a`, whose printed code is `lines`, defined as the C symbol
+`sym` (see above). -/
+def exportFunction (a : Artifact) (lines : List Line) (sym : String) : String :=
+  let body := lines ++ a.target.printer.funcAlign.map .text
+  let refs := dedup (body.flatMap Line.refs)
+  "        #[unsafe(naked)]\n" ++
+  "        #[unsafe(no_mangle)]\n" ++
+  s!"        unsafe extern \"{a.target.rustAbi}\" fn {sym}{a.sig.rust} " ++ "{\n" ++
+  "            ::core::arch::naked_asm!(\n" ++
+  String.join ((template a.target.printer.call body).splitOn "\n" |>.filter (!·.isEmpty) |>.map
+    fun l => "        " ++ l ++ "\n") ++
+  String.join (refs.map fun n => s!"                {n} = {macroOperand (operandText a n)},\n") ++
+  "            )\n" ++
+  "        }\n"
+
+/-- The groups of exports of the artifacts `ps`, each once, in order. -/
+def exportGroups (ps : List Prepared) : List String :=
+  (dedup (ps.flatMap fun p => p.art.exports.map (·.1))).mergeSort (· ≤ ·)
+
+/-- The module of a target's exports, `exports.rs`: one macro per group of
+exports, defining the copies of the artifacts `ps` exported in it, in order
+of their symbols. -/
+def exportsFile (t : String) (ps : List Prepared) : String :=
+  let copies := ps.flatMap fun p => p.art.exports.map fun (g, sym) => (g, sym, p)
+  header ++ s!"//! The C symbols of the verified functions for `{t}` (`Artifact.exports`).\n" ++
+  String.join ((exportGroups ps).map fun g =>
+    let mine := (copies.filter (·.1 == g)).mergeSort (fun a b => a.2.1 ≤ b.2.1)
+    s!"\n/// Defines the `{g}` exports of the verified functions for `{t}` as C symbols, \
+      each a copy of the function it is the export of (`Artifact.exports`).\n" ++
+    "#[doc(hidden)]\n#[macro_export]\n" ++
+    s!"macro_rules! asmalloc_exports_{g}_{t} " ++ "{\n    () => {\n" ++
+    "\n".intercalate (mine.map fun (_, sym, p) => exportFunction p.art p.lines sym) ++
+    "    };\n}\n")
+
+/-- `p`'s exports are as the module docs require: each group and symbol a
+Rust identifier, no symbol exported twice on the target (by `ps`), and the
+artifact one whose code a macro can copy: out of line, selected by no cargo
+feature, calling no function, reading no table of constants, and naming
+only operands that are paths into the crate. -/
+def checkExports (ps : List Prepared) (p : Prepared) : Except String Unit := do
+  let a := p.art
+  if a.exports.isEmpty then return
+  let n := s!"{a.target.name}: {a.name}"
+  if a.target.inline then throw s!"{n} is inline but has exports"
+  if a.cargoFeature.isSome then throw s!"{n} is selected by a cargo feature but has exports"
+  unless a.code.calls.isEmpty do throw s!"{n} calls a function but has exports"
+  unless a.consts.isEmpty do throw s!"{n} reads tables of constants but has exports"
+  for (_, op) in a.operands do
+    match op with
+    | .sym path => unless path.startsWith "crate::" do
+        throw s!"{n} has exports but names `{path}`, which is not a path into the crate"
+    | .const _ => throw s!"{n} has exports but names a constant expression"
+  for (g, sym) in a.exports do
+    unless rustIdent g && rustIdent sym do
+      throw s!"{n}'s export `{sym}` of group `{g}` is not named by Rust identifiers"
+    let all := ps.flatMap fun q =>
+      if q.art.target.name == a.target.name then q.art.exports.map (·.2) else []
+    unless (all.filter (· == sym)).length == 1 do
+      throw s!"{a.target.name}: the symbol `{sym}` is exported more than once"
+
 /-- Whether `c`, or the code of a function it calls, has a restartable
 sequence. -/
 def hasRseq {I C : Type} : Code I C → Bool
@@ -731,6 +834,8 @@ def checkConsts (ps : List Prepared) (p : Prepared) : Except String Unit := do
       throw s!"{a.target.name}: {a.name} and {q.art.name} give a table of constants different words"
   if (ps.any fun q => q.art.target.name == a.target.name && q.art.module == "consts") then
     throw s!"{a.target.name}: an artifact's module is `consts`, the module of the tables of constants"
+  if (ps.any fun q => q.art.target.name == a.target.name && q.art.module == "exports") then
+    throw s!"{a.target.name}: an artifact's module is `exports`, the module of the exports"
 
 /-- Every operand `p`'s code names (`Line.refs`) is one of its tables of
 constants or of its declared operands (`Artifact.operands`), and none is
@@ -852,10 +957,13 @@ def render (ps : List Prepared) (moduleOf : Artifact → String → String) : Li
     -- In order of their names, wherever their artifacts come in the list.
     let modules := (distinct (arts.map (·.art)) (·.module)).mergeSort (· ≤ ·)
     let ts := tables (arts.map (·.art))
-    let mods := if ts.isEmpty then modules else (modules ++ ["consts"]).mergeSort (· ≤ ·)
+    let exported := arts.filter (!·.art.exports.isEmpty)
+    let extra := (if ts.isEmpty then [] else ["consts"]) ++ (if exported.isEmpty then [] else ["exports"])
+    let mods := (modules ++ extra).mergeSort (· ≤ ·)
     (s!"{t}/mod.rs", header ++ s!"//! Verified functions for `{t}`.\n" ++
       modDecls mods (fun _ => none)) ::
     (if ts.isEmpty then [] else [(s!"{t}/consts.rs", tablesFile t ts)]) ++
+    (if exported.isEmpty then [] else [(s!"{t}/exports.rs", exportsFile t exported)]) ++
     -- Each module's file on a task of its own.
     ((modules.map fun m => Task.spawn fun _ =>
       (s!"{t}/{m}.rs",
@@ -904,6 +1012,7 @@ def files (as : List Artifact) : Except String (List (String × String)) := do
   forMPar as checkInline
   forMPar as checkUops
   forMPar as (checkRustConsts as)
+  forMPar ps (checkExports ps)
   return render ps fun a n => ((callee as a n).map (·.module)).getD ""
 
 end VG.Rust
