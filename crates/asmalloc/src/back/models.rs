@@ -1388,7 +1388,10 @@ fn merged_debts_race_claims_on_one_word_regions_fully() {
 
 /// Frees `slots` as a scattered launder does: each with its own OR, owing its summary bit
 /// with the bit read before it is set (`Look`), the debts merged per summary word (`Direct`).
-fn free_direct(host: &Host8, slots: &[(RegionId, u32)]) {
+///
+/// With `wide`, as a batch judged wide does: each slot's summary word paid at once, only what
+/// that owes the level above merged.
+fn free_direct(host: &Host8, slots: &[(RegionId, u32)], wide: bool) {
     let Some(&(region, _)) = slots.first() else {
         return;
     };
@@ -1396,7 +1399,12 @@ fn free_direct(host: &Host8, slots: &[(RegionId, u32)]) {
     let mut direct = Direct::new();
     for &(region, slot) in slots {
         let leaves = release.leaves(region, slot / BITS + 1);
-        direct.free_slot(&mut release, leaves, region, slot);
+        if wide {
+            let summaries = release.summaries(region);
+            direct.free_slot_wide(&mut release, leaves, summaries, region, slot);
+        } else {
+            direct.free_slot(&mut release, leaves, region, slot);
+        }
     }
     direct.finish(&mut release);
     release.finish();
@@ -1406,7 +1414,7 @@ fn free_direct(host: &Host8, slots: &[(RegionId, u32)]) {
 /// words that were empty (so with `must` the summary bits would be set unread) under two
 /// summary words of one region and one of the other, races a run of claims and a claim from
 /// the top. Preemptions bounded to two (one in the quick run).
-fn direct_frees_race_claims_on_deep_trees(preemptions: usize) {
+fn direct_frees_race_claims_on_deep_trees(preemptions: usize, wide: bool) {
     explore(
         Config {
             preemptions: Some(preemptions),
@@ -1428,7 +1436,7 @@ fn direct_frees_race_claims_on_deep_trees(preemptions: usize) {
             let got = match me {
                 0 => {
                     let slots = [(r0, 65), (r1, 3), (r0, 64 * 64 + 2), (r0, 1), (r1, 64 + 3)];
-                    free_direct(host, &slots);
+                    free_direct(host, &slots, wide);
                     Vec::new()
                 }
                 1 => claim_run_of(host, 3, 1),
@@ -1448,20 +1456,32 @@ fn direct_frees_race_claims_on_deep_trees(preemptions: usize) {
 #[test]
 #[cfg_attr(miri, ignore)]
 fn direct_frees_race_claims_on_deep_trees_quickly() {
-    direct_frees_race_claims_on_deep_trees(1);
+    direct_frees_race_claims_on_deep_trees(1, false);
+}
+
+#[test]
+#[cfg_attr(miri, ignore)]
+fn wide_direct_frees_race_claims_on_deep_trees_quickly() {
+    direct_frees_race_claims_on_deep_trees(1, true);
+}
+
+#[test]
+#[ignore = "slow: run with scripts/gate --all"]
+fn wide_direct_frees_race_claims_on_deep_trees_fully() {
+    direct_frees_race_claims_on_deep_trees(2, true);
 }
 
 #[test]
 #[ignore = "slow: run with scripts/gate --all"]
 fn direct_frees_race_claims_on_deep_trees_fully() {
-    direct_frees_race_claims_on_deep_trees(2);
+    direct_frees_race_claims_on_deep_trees(2, false);
 }
 
 /// `Summary_look_crash.cfg`, on two summary levels: a scattered launder, a claimer and a run of
 /// claims may vanish at any step, as in a forked child. Afterwards a single free into each
 /// word makes it reachable, and claims find every free slot. Preemptions bounded to two (one
 /// in the quick run).
-fn direct_frees_lost_at_any_step(preemptions: usize) {
+fn direct_frees_lost_at_any_step(preemptions: usize, wide: bool) {
     explore(
         Config {
             preemptions: Some(preemptions),
@@ -1477,7 +1497,7 @@ fn direct_frees_lost_at_any_step(preemptions: usize) {
             let r0 = host.region_at(0);
             let got = match me {
                 0 => {
-                    free_direct(host, &[(r0, 65), (r0, 64 * 64 + 1), (r0, 1)]);
+                    free_direct(host, &[(r0, 65), (r0, 64 * 64 + 1), (r0, 1)], wide);
                     Vec::new()
                 }
                 1 => claim_run_of(host, 2, 1),
@@ -1504,13 +1524,25 @@ fn direct_frees_lost_at_any_step(preemptions: usize) {
 #[test]
 #[cfg_attr(miri, ignore)]
 fn direct_frees_lost_at_any_step_quickly() {
-    direct_frees_lost_at_any_step(1);
+    direct_frees_lost_at_any_step(1, false);
+}
+
+#[test]
+#[cfg_attr(miri, ignore)]
+fn wide_direct_frees_lost_at_any_step_quickly() {
+    direct_frees_lost_at_any_step(1, true);
+}
+
+#[test]
+#[ignore = "slow: run with scripts/gate --all"]
+fn wide_direct_frees_lost_at_any_step_fully() {
+    direct_frees_lost_at_any_step(2, true);
 }
 
 #[test]
 #[ignore = "slow: run with scripts/gate --all"]
 fn direct_frees_lost_at_any_step_fully() {
-    direct_frees_lost_at_any_step(2);
+    direct_frees_lost_at_any_step(2, false);
 }
 
 /// `Summary_heal_crash.cfg`: as `summary_three_threads_bounded`, but threads 1 and 2 may vanish

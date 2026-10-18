@@ -1,7 +1,7 @@
 //! The protocols' `Host` over the real heap: one class's tree words in the back end's state, its
 //! regions' metadata in the reservation, and the OS calls through `Space`.
 
-use super::layout::{Layout, Memo, WORD_BYTES};
+use super::layout::{Layout, MAX_LEVELS, Memo, WORD_BYTES};
 use super::tree::Host;
 use super::word::Atomic;
 use crate::lined::{LINE, Lined, lines};
@@ -184,16 +184,19 @@ impl<O: Os> Host for ClassHost<'_, O> {
     }
 
     #[inline(always)]
-    fn leaves(&self, region: RegionId, count: u32) -> &[Atomic] {
-        if count > self.layout.level_words(0) {
-            self.abort("more leaf words than a region has");
+    fn tree_words(&self, region: RegionId, level: u8, count: u32) -> &[Atomic] {
+        if level as usize >= MAX_LEVELS || count > self.layout.level_words(level) {
+            self.abort("more words than a level of a region's tree has");
         }
         let first = self
-            .meta_at(region, self.layout.tree_word(0, 0) as usize * WORD_BYTES)
+            .meta_at(
+                region,
+                self.layout.tree_word(level, 0) as usize * WORD_BYTES,
+            )
             .cast::<Atomic>();
         // SAFETY: BACK-HOST-03 in docs/safety/asmalloc/back/host-safety.md. The words are the
-        // first `count` of the region's leaf bitmap, which lies in its metadata block, and the
-        // caller knows each to be committed; they are only ever accessed atomically.
+        // first `count` of one level of the region's tree, which lies in its metadata block,
+        // and the caller knows each to be committed; they are only ever accessed atomically.
         unsafe { core::slice::from_raw_parts(first.as_ptr(), count as usize) }
     }
 

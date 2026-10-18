@@ -278,6 +278,43 @@ fn a_scattered_batch_with_a_dense_tail_frees_every_slot() {
     assert_eq!(fill(&back, class, expected.len()), expected);
 }
 
+/// A scattered batch over far more summary words than it has slots is judged wide and pays
+/// each slot's summary word at once: every slot is freed once, a fill takes them back lowest
+/// first, and a slot given twice is caught by its second OR.
+#[test]
+fn a_wide_batch_frees_every_slot() {
+    let state = state::<Standard>();
+    let back = state.get_or_reserve().unwrap();
+    let class = small(8);
+    // 1024 summary words of 64 leaf words.
+    let mut slots = fill(&back, class, 64 * 64 * 1024);
+    slots.sort();
+    let batch: Vec<*mut u8> = (0..250)
+        .map(|i| slots[(i * 7919 % 1024) * 64 * 64 + i % 64])
+        .collect();
+    let mut expected = batch.clone();
+    expected.sort();
+    // SAFETY: the test holds these slots and gives them up.
+    unsafe { back.launder(class, &batch) };
+    assert_eq!(fill(&back, class, expected.len()), expected);
+}
+
+#[test]
+#[should_panic(expected = "double free: an object was freed while already free")]
+fn a_slot_twice_in_a_wide_batch_aborts() {
+    let state = state::<Standard>();
+    let back = state.get_or_reserve().unwrap();
+    let class = small(8);
+    let mut slots = fill(&back, class, 64 * 64 * 1024);
+    slots.sort();
+    let mut batch: Vec<*mut u8> = (0..200)
+        .map(|i| slots[(i * 7919 % 1024) * 64 * 64])
+        .collect();
+    batch.push(batch[150]);
+    // SAFETY: the test holds these slots, or passes a bad one to see the abort.
+    unsafe { back.launder(class, &batch) };
+}
+
 #[test]
 #[should_panic(expected = "not the start of a slot")]
 fn freeing_an_interior_pointer_aborts() {

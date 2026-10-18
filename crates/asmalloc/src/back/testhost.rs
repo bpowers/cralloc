@@ -194,8 +194,9 @@ impl<W: TestWord> Host for TestHost<W> {
         &self.layout
     }
 
-    fn leaves(&self, region: RegionId, count: u32) -> &[W] {
-        let first = self.layout.tree_word(0, 0) as usize;
+    fn tree_words(&self, region: RegionId, level: u8, count: u32) -> &[W] {
+        assert!(count <= self.layout.level_words(level));
+        let first = self.layout.tree_word(level, 0) as usize;
         &self.meta[region.index()][first..first + count as usize]
     }
 

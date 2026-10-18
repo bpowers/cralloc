@@ -358,9 +358,25 @@ impl<const ROOM: usize> Words<ROOM> {
 /// the summary word and setting only the bits it lacks (`Look` in `tla/Summary.tla`), which in
 /// a scattered batch, whose words share summary words with many others, is a plain load where
 /// setting the bits unread would be a locked OR.
+///
+/// **Wide batches.** Merging pays only while the batch's slots share summary words. A batch
+/// spread over more summary words than it has slots, as the slots of a class with a few
+/// million live objects are, shares almost none, and then the table costs a place taken and
+/// another's debt paid for every slot. So a batch whose first [`JUDGE`] slots ([`Direct::free_slot`])
+/// have nearly all taken places of their own is judged wide ([`Direct::wide`]), once, and each
+/// later slot pays its summary word at once ([`Direct::free_slot_wide`]), by looking (`Look`),
+/// merging only what that owes the level above, which has 64 times fewer words.
 pub(crate) struct Direct {
     debts: Debts,
 }
+
+/// Slots of a scattered batch after which it is judged wide or not.
+pub(crate) const JUDGE: usize = 64;
+/// Of those, places taken in the table above which the batch is wide: its slots fell in nearly
+/// as many summary words as there are slots, as they do when the summary words outnumber them
+/// several times. Slots that come back to summary words they met before, as strided or
+/// clustered ones do, take fewer.
+const WIDE: u32 = 56;
 
 impl Direct {
     #[inline(always)]
@@ -368,6 +384,13 @@ impl Direct {
         Direct {
             debts: Debts::new(),
         }
+    }
+
+    /// Whether the batch's slots so far, at least [`JUDGE`] of them, have nearly all fallen
+    /// under summary words of their own.
+    #[inline(always)]
+    pub(crate) fn wide(&self) -> bool {
+        self.debts.taken >= WIDE
     }
 
     /// Frees slot `slot` of `region`, whose leaf words up to the slot's at least are `leaves`
@@ -383,6 +406,24 @@ impl Direct {
         let word = slot / BITS;
         release.leaf_bit_in(leaves, word, 1 << (slot % BITS));
         self.debts.owe(release, region, word);
+    }
+
+    /// [`Direct::free_slot`] for a wide batch: pays the summary word's debt at once, its word
+    /// found in `summaries`, the region's level-1 words ([`Release::summaries`]).
+    #[inline(always)]
+    pub(crate) fn free_slot_wide<H: Host>(
+        &mut self,
+        release: &mut Release<'_, H>,
+        leaves: &[H::W],
+        summaries: &[H::W],
+        region: RegionId,
+        slot: u32,
+    ) {
+        let word = slot / BITS;
+        release.leaf_bit_in(leaves, word, 1 << (slot % BITS));
+        if let Some(up) = release.look_leaf(summaries, region, word) {
+            self.debts.owe_upward(release, up);
+        }
     }
 
     /// Frees the slots `bits` of leaf word `word` of `region` with one OR. Aborts if one of
@@ -432,6 +473,8 @@ struct Debts {
     regions: [Option<RegionId>; DEBTS],
     /// A bit per place that holds a debt.
     held: u64,
+    /// Places given to a summary word so far.
+    taken: u32,
     /// Per place, what a word of the next level is owed.
     upward: [Option<Upward>; DEBTS],
 }
@@ -444,6 +487,7 @@ impl Debts {
             words: [0; DEBTS],
             regions: [None; DEBTS],
             held: 0,
+            taken: 0,
             upward: [None; DEBTS],
         }
     }
@@ -475,6 +519,7 @@ impl Debts {
         self.keys[at] = key;
         self.regions[at] = Some(region);
         self.held |= 1 << at;
+        self.taken += 1;
     }
 
     /// Pays every debt: the summary words', then what they owe above, which goes to `release`.

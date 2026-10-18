@@ -10,7 +10,7 @@
 //! zeroes what it wrote and gives its region back with a compare-and-swap; no other thread has
 //! named it, because nothing points into a region until it has been carved from.
 
-use super::group::{Direct, Gather, Run};
+use super::group::{Direct, Gather, JUDGE, Run};
 use super::host::ClassHost;
 use super::layout::{Grow, Hints, Layout, Recorded};
 use super::policy::{kept_grown, move_piece, wants_huge};
@@ -1309,12 +1309,32 @@ fn release_words<'h, O: Os, P: SlotPointer, const ROOM: usize, const SPAN: usize
                 )
             };
             let (mut region, mut leaves) = leaves_of(release, met);
-            for object in rest {
+            let (first, rest) = rest.split_at(rest.len().min(JUDGE));
+            for object in first {
                 let slot = slot_of(checker, object, met, fast);
                 if met.region != region {
                     (region, leaves) = leaves_of(release, met);
                 }
                 direct.free_slot(release, leaves, region, slot);
+            }
+            if direct.wide() {
+                let mut summaries = release.summaries(region);
+                for object in rest {
+                    let slot = slot_of(checker, object, met, fast);
+                    if met.region != region {
+                        (region, leaves) = leaves_of(release, met);
+                        summaries = release.summaries(region);
+                    }
+                    direct.free_slot_wide(release, leaves, summaries, region, slot);
+                }
+            } else {
+                for object in rest {
+                    let slot = slot_of(checker, object, met, fast);
+                    if met.region != region {
+                        (region, leaves) = leaves_of(release, met);
+                    }
+                    direct.free_slot(release, leaves, region, slot);
+                }
             }
             direct.finish(release);
         } else {

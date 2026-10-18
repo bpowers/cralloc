@@ -75,10 +75,11 @@ pub(crate) trait Host {
     /// a slot below the watermark.
     fn meta(&self, region: RegionId, word: u32) -> &Self::W;
 
-    /// Leaf words `0..count` of a region's bitmap, as [`Host::meta`] gives them one at a time.
-    /// The caller knows them all to be committed: `count` covers only slots below a watermark
-    /// it read for the region. Aborts if `count` is more than the region has.
-    fn leaves(&self, region: RegionId, count: u32) -> &[Self::W];
+    /// Words `0..count` of level `level` of a region's tree (level 0 its leaf bitmap), as
+    /// [`Host::meta`] gives them one at a time. The caller knows them all to be committed: the
+    /// summary levels always are, and leaf words are when `count` covers only slots below a
+    /// watermark the caller read for the region. Aborts if the level has fewer than `count`.
+    fn tree_words(&self, region: RegionId, level: u8, count: u32) -> &[Self::W];
 
     /// A region's `Grow` word: its watermark and committed pages (`layout::Grow`).
     fn grow(&self, region: RegionId) -> &Self::W;
@@ -779,7 +780,50 @@ impl<'h, H: Host> Release<'h, H> {
     /// Leaf words `0..count` of `region`, for [`Release::leaf_bit_in`]: see [`Host::leaves`].
     #[inline]
     pub(crate) fn leaves(&self, region: RegionId, count: u32) -> &'h [H::W] {
-        self.host.leaves(region, count)
+        self.host.tree_words(region, 0, count)
+    }
+
+    /// The level-1 summary words of `region`, all of them, for [`Release::look_leaf`]; none if
+    /// the region's tree has no level 1 of its own.
+    #[inline]
+    pub(crate) fn summaries(&self, region: RegionId) -> &'h [H::W] {
+        if self.height == 0 {
+            return &[];
+        }
+        let words = self.host.layout().level_words(1);
+        self.host.tree_words(region, 1, words)
+    }
+
+    /// Pays at once what leaf word `index` of `region`, just freed into, owes its summary word:
+    /// reads the word in `summaries` ([`Release::summaries`]) and sets the bit if it is clear
+    /// (`Look`), as [`Release::pay_leaves`] does for one word. Returns what the summary word
+    /// then owes the word above it.
+    #[inline(always)]
+    pub(crate) fn look_leaf(
+        &mut self,
+        summaries: &[H::W],
+        region: RegionId,
+        index: u32,
+    ) -> Option<Upward> {
+        if self.height < 2 {
+            return self.pay_leaves(region, index, 1 << (index % BITS), false);
+        }
+        let summary = index / BITS;
+        let Some(word) = summaries.get(summary as usize) else {
+            self.host.abort("a summary word past the region's tree");
+        };
+        let was_empty = set_missing(word, 1 << (index % BITS), false);
+        let up = Spot {
+            region,
+            level: 2,
+            index: summary / BITS,
+        };
+        Some(Upward {
+            key: up.key(self.height),
+            spot: up,
+            bits: 1 << (summary % BITS),
+            must: was_empty,
+        })
     }
 
     /// Frees the one slot `bit` of word `index` of `leaves`, a region's leaf words as

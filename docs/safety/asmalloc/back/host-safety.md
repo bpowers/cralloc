@@ -74,31 +74,39 @@ nothing accesses that memory in a way that conflicts with a shared reference.
    are atomic operations; nothing writes this memory non-atomically. The OS zeroed it before
    the first commit, which is a valid `AtomicU64`.
 
-## BACK-HOST-03: `slice::from_raw_parts(first, count)` in `ClassHost::leaves`
+## BACK-HOST-03: `slice::from_raw_parts(first, count)` in `ClassHost::tree_words`
 
 **Preconditions of `slice::from_raw_parts`.** `first` is non-null and aligned for `Atomic`;
 the `count` words from it are one allocated object, each a live, initialized `Atomic`, for the
 lifetime of the slice (the borrow of `self`); `count * 8` is at most `isize::MAX`; and nothing
 accesses that memory in a way that conflicts with a shared reference.
 
-**Proof.** The slice is BACK-HOST-01's word references, made for words `tree_word(0, 0)` to
-`tree_word(0, count - 1)` at once, so each point of that proof applies to each word:
+**Proof.** The slice is BACK-HOST-01's word references, made for words `tree_word(level, 0)` to
+`tree_word(level, count - 1)` at once, so each point of that proof applies to each word:
 
-1. *In bounds, one object.* `first = metadata(region) + 8 * tree_word(0, 0)`, the start of the
-   leaf bitmap, and `count` is checked against `level_words(0)`, the bitmap's length, with an
-   abort before the slice is made. The bitmap lies inside the region's metadata block
-   (BACK-HOST-01, point 1), which is part of the one reservation mapping, so the words are
-   contiguous in one allocation and `count * 8` is far below `isize::MAX`. With `count` zero
-   the slice is empty, and `first` is still non-null and aligned.
+1. *In bounds, one object.* `first = metadata(region) + 8 * tree_word(level, 0)`, the start of
+   that level of the tree, and `level` is checked against `MAX_LEVELS` and `count` against
+   `level_words(level)`, the level's length, with an abort before the slice is made. Each level
+   lies inside the region's metadata block (BACK-HOST-01, point 1), which is part of the one
+   reservation mapping, so the words are contiguous in one allocation and `count * 8` is far
+   below `isize::MAX`. With `count` zero the slice is empty, and `first` is still non-null and
+   aligned.
 2. *Aligned.* As BACK-HOST-01, point 2.
-3. *Accessible.* The caller's promise, as `Host::leaves` states it: `count` covers only slots
-   below a watermark the caller read for this region. The one caller, a launder's scattered
-   path (`release_words` in `back/class.rs`), passes `limit.div_ceil(64)` with `limit` the
-   watermark `Checker::meet` read from the region's `Grow` word, at most the slot count. A
-   carve commits the leaf words of every slot below the new commit frontier before it publishes
-   it, the watermark never passes the frontier, and commit is never undone (BACK-HOST-01, point
-   3), so every word of the slice is committed. A slice reference asserts that its whole extent
-   is dereferenceable, which is why it may not reach past those words.
+3. *Accessible.* The caller's promise, as `Host::tree_words` states it.
+   - A summary level (`level >= 1`) is in the fixed part of the block, committed before the
+     region carries the class's tag (BACK-HOST-01, point 3). The caller,
+     `Release::summaries`, asks for level 1 only when the region's tree has one of its own
+     (height at least 1), so `level_words(1)` words of it exist in the layout.
+   - The leaf bitmap (`level == 0`): `count` covers only slots below a watermark the caller
+     read for this region. The one caller, a launder's scattered path (`release_words` in
+     `back/class.rs`, through `Release::leaves`), passes `limit.div_ceil(64)` with `limit` the
+     watermark `Checker::meet` read from the region's `Grow` word, at most the slot count. A
+     carve commits the leaf words of every slot below the new commit frontier before it
+     publishes it, the watermark never passes the frontier, and commit is never undone
+     (BACK-HOST-01, point 3), so every word of the slice is committed.
+
+   A slice reference asserts that its whole extent is dereferenceable, which is why it may not
+   reach past those words.
 4. *Live.* As BACK-HOST-01, point 4.
 5. *No conflicting access.* As BACK-HOST-01, point 5: every word is accessed only through
    `Atomic`'s atomic operations, by every thread.
