@@ -66,4 +66,4 @@ For both entries, what a slot holds is not a memory-safety matter: the middle ti
 object pointer, and a wrong link or level is caught by `admits` the next time it is used as an
 address, which makes the code abort rather than reach outside the area.
 
-Reviewed: f41dbf9
+Reviewed: c658347
