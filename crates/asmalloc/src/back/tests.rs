@@ -1415,6 +1415,79 @@ mod review {
         assert_eq!(state.os().calls(Call::Purge), 16);
     }
 
+    /// Finding abandoned-pass-start-stops-decay (opened by the fix for the four-write start).
+    /// The starter's compare-and-swap of the decay word and its store of the pass word are
+    /// two writes. A thread that vanishes between them (a fork abandons it there) leaves a
+    /// decay word that says a pass is under way and no pass word with its tag. Every stepper
+    /// then finds a tag that is not its own and returns, and nothing but a stepper ends a
+    /// pass or starts one: the child never decays again. The state is set up by hand, as in
+    /// `a_stepper_does_not_end_a_pass_whose_goal_is_not_published`, which asserts the first
+    /// half of this as intended; here the starter never comes back.
+    #[test]
+    #[ignore = "finding: abandoned-pass-start-stops-decay"]
+    fn a_pass_whose_starter_vanished_before_publishing_ends_some_day() {
+        use super::super::purge::Pass;
+        use core::sync::atomic::Ordering::Relaxed;
+        let state = state::<Standard>();
+        let back = state.get_or_reserve().unwrap();
+        let os = state.os();
+        let class = small(1024);
+        let mut slots = fill(&back, class, 256);
+        for &p in &slots {
+            paint(p, 1024, 5);
+        }
+        back.launder(class, &mut slots);
+        os.advance_clock(7 * DECAY_TICKS);
+        let started = (7 * DECAY_TICKS) | 1;
+        assert_ne!(Pass::tag_of(started), 0, "the all-zero pass word is not this pass's");
+        state.decay.store(started, Relaxed);
+        for _ in 0..50 {
+            os.advance_clock(DECAY_TICKS);
+            beat(&back);
+        }
+        assert!(
+            !pass_under_way(&state) && os.calls(Call::Purge) > 0,
+            "fifty intervals on, the abandoned pass is still under way and nothing has decayed: \
+             {} bytes retained",
+            back.retained()
+        );
+    }
+
+    /// Finding cap-purge-stops-at-the-lap-count (opened by the fix for the cap's hysteresis).
+    /// The cap's purge now stops when the lap count changes, and it starts wherever the shared
+    /// walk was left. If that is near the bottom, it looks at the few regions below, the lap
+    /// ends, and it stops without having seen the regions that hold the freed memory. The
+    /// mark is then set to the count, so the cap does not act again until a quarter-cap more
+    /// is freed. Here the walk was left at region 0 (set by hand; a decay pass that met its
+    /// goal there, or a cap purge that got under the cap there, leaves it so), and the
+    /// program frees more than the cap, all of it purgeable, in the regions above.
+    #[test]
+    #[ignore = "finding: cap-purge-stops-at-the-lap-count"]
+    fn the_cap_purges_wherever_the_walk_was_left() {
+        use core::sync::atomic::Ordering::Relaxed;
+        let state = state::<Standard>();
+        let back = state.get_or_reserve().unwrap();
+        let os = state.os();
+        let cap = retained_cap(Standard::GEOMETRY);
+        // Region 0 goes to a class that stays in use.
+        let _live = fill(&back, small(16), 8);
+        let class = small(1024);
+        let mut slots = fill(&back, class, cap / 1024 + 128);
+        for &p in &slots {
+            paint(p, 1024, 5);
+        }
+        state.purge_at.store(1, Relaxed);
+        for chunk in slots.chunks_mut(64) {
+            back.launder(class, chunk);
+        }
+        assert!(
+            os.calls(Call::Purge) > 0 && back.retained_small() <= cap,
+            "{} bytes are free and wholly purgeable, the cap is {cap}, and the cap's purge \
+             returned nothing",
+            back.retained_small()
+        );
+    }
+
     /// Finding top-up-creeps. For a class whose size does not divide a huge page, `top_up`
     /// carves through the slot that straddles the page's end, which leaves the watermark just
     /// inside the next huge page with one free slot below it. The next pass over the region
