@@ -11,7 +11,9 @@ the watermark.
 before it releases the slot's bit, and it purges only when the slot is advised for huge pages
 because its object grew there (its size word's flag, `Recorded::huge`, which only the slot's
 holder reads or writes) and keeping it would take retained large-slot memory past the budget
-for kept grown blocks (`keeps_grown`, which reads a count and nothing of the slot). An earlier
+for kept grown blocks (`keep_grown`, which adds the slot's charge to the count, compares, and
+takes it back if over; the charge, `region::charge`, reads only the slot's clean words, which
+only the slot's holder writes while it holds it). An earlier
 form also purged when keeping any slot would take a large-class retained count over its cap,
 and a later one purged every advised slot; each change only narrows or widens when the block
 runs, without changing what holds when it does. A kept advised slot is released with its
@@ -19,16 +21,17 @@ advice and flag; the next allocation of it takes them back (`alloc_at`), and onl
 of a slot reads the flag, so a free slot that is advised changes no other path: the purge walk
 purges free slots by their pages and never reads it, and `purge_part` acts on held slots.
 
-A slot released resident is charged what its last tenant could have written
-(`region::charge_resident`), when that leaves at least half of a slot of a huge page or more:
-the holder marks the slot's pages past that extent clean before it releases the bit, as the
-rule for clean bits requires (only the holder of every slot a bit describes writes it). The
-claim (`region::settle_slot`) clears the bits inside the new tenant's extent, and a change
-that widens a held slot's extent clears them up to the new one (`region::cover`). Clean bits
-only steer the retained count and the purge walk; no zero bit is set by any of this, and a
-claim takes a slot for zero only from its zero bit, which only a purge sets. So a claim never
-reports pages as zero that are not, even when an earlier, larger tenant left them resident
-(`a_small_tenant_after_a_large_one_is_under_counted_but_never_zero`). The advice is taken back after the purge
+A slot released resident is charged its pages whose clean bit is clear (`region::charge`);
+the free writes no clean bit. A clean bit says the page has not been written since it was
+carved or last purged: only a purge, a shrink's purge that went back whole
+(`region::mark_clean`) and the carve of a slot (`region::mark_fresh`, for the pages past its
+block, which nothing has written) set one, each by the slot's holder (only the holder of
+every slot a bit describes writes it); the claim (`region::settle_slot`) clears the bits under
+what the new tenant may write, and so does any change that widens it (`region::cover`).
+Clean bits only steer the retained count and the purge walk; no zero bit is set by any of
+this, and a claim takes a slot for zero only from its zero bit, which only a purge sets. So a
+claim never reports pages as zero that are not
+(`a_small_tenant_after_a_large_one_is_charged_what_is_resident`). The advice is taken back after the purge
 (`region::unadvise`), which changes no contents. `free_slot` is private and called by
 `Back::free` and `Back::free_by_address` for a large class, both crate-private
 (`pub(crate)`), with the region and slot that `slot_in` found for the pointer: `Back::free`
@@ -54,7 +57,7 @@ after `validate` has checked the pointer lies in a region tagged for the class, 
    inside the slot (`Layout::slot_unit`); a large slot is whole pages in every geometry in
    use (Kani, `a_large_slot_is_whole_pages`), so they are the slot and nothing else.
 4. *The zero and clean bits.* `purge_held` sets the slot's zero bit and its pages' clean
-   bits after the pages are returned and before `release_all` sets the free bit, which is the
+   bits after the pages are returned and before `release_one` sets the free bit, which is the
    rule those bitmaps have everywhere: written only while the writer holds every slot they
    describe. The next claim of the slot reads the zero bit after it has the free bit.
 
@@ -127,9 +130,14 @@ Nothing else can touch the range: for a slot, a purge walk must claim the slot f
 cannot while its bit is clear; a run's regions are tagged, so no class can be assigned them
 and no other run can claim them.
 
-No bitmap is written. The clean and zero bits of a live slot are stale until its next free
-and are not consulted while it is live; after the free they may say "resident" of pages that
-are not, which costs an over-count and a redundant `madvise`, never a wrong zero.
+No leaf or zero bit is written. When the purge of a slot's tail reports that the whole range
+went back (`purge_part` answers `true` only then), the holder marks those pages clean
+(`region::mark_clean`), so the free that follows charges only the pages kept; a later grow in
+place clears them again (`region::cover`). The holder of the slot is the only writer of the
+clean bits of pages inside it while it holds it. A clean bit never stands over a page that
+holds data: the pages were just returned, and the tenant may not write past its new size
+until a grow that clears them first. The zero bit is not touched, so nothing here can make a
+claim report memory zero.
 
 **What a later grow sees.** The pages read as zero. A grow in place exposes them as bytes
 past the old size, which `realloc` leaves indeterminate and the zeroing variants clear
@@ -160,9 +168,9 @@ either range, and that if it says `zeroed` the `len` bytes at `to` read as zero.
 callers are the moving paths of `Bound::resize` (HEAP-04, which passes the allocation's own
 report) and C's `realloc` (MOD-01, which passes `false`), and both hold both blocks.
 
-Within the budget for kept grown blocks (`keeps_grown`, true only for a slot) the move
-returns nothing of `from` (steps 4 and 5 do not run) and releases the slot as a plain free
-does, counted and resident; the copies of steps 0 to 3 are the same, and keeping both copies
+Within the budget for kept grown blocks (`keep_grown`, true only for a slot, which counts
+the slot's charge before the copy) the move returns nothing of `from` (steps 4 and 5 do not
+run) and releases the slot as a plain free does, resident and counted already; the copies of steps 0 to 3 are the same, and keeping both copies
 resident is a matter of memory, not of safety.
 
 0. *The windows.* Every block, whatever its length, is copied by `copy_window` over
@@ -220,8 +228,9 @@ resident is a matter of memory, not of safety.
    huge page; the argument does not depend on that.) If every purge succeeded, every page of
    the slot has gone back, and
    `mark_purged` and an uncounted release leave it exactly as `purge_held` does; if any did
-   not, the slot is released as resident and counted, with no zero or clean bit set, which
-   only over-counts the parts that did go back. A run is freed by `free_run`, which purges
+   not, the slot is released as resident and counted by its pages that are not clean
+   (`region::charge`), with no zero bit set and no clean bit written, which only over-counts
+   the parts that did go back. A run is freed by `free_run`, which purges
    all of it (again, for the pieces already returned; harmless) to restore its zero
    promise.
 
@@ -234,7 +243,7 @@ The double-free cases are those of BACK-CLASS-01, with the copy added to the win
 into a clean, a dirty and a staggered dirty destination),
 `a_hole_is_copied_when_the_destinations_purge_fails`,
 `a_staggered_block_moves_and_returns_its_whole_slot`,
-`grown_blocks_are_kept_within_their_budget`, `a_large_slot_is_charged_what_its_tenant_could_write`,
+`grown_blocks_are_kept_within_their_budget`, `a_large_slot_is_charged_its_pages_that_are_not_clean`,
 `a_zeroed_grow_into_a_dirty_slot_reads_as_zero_past_what_it_kept`,
 `an_advised_slot_is_purged_only_in_whole_huge_pages` (a block that does not start on a
 piece boundary); the heap's and the C layer's `realloc` tests move large blocks through it
