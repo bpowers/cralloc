@@ -20,7 +20,8 @@ What the preload setting adds:
   and reads or tunes only glibc's own heap, which then stays empty. `__libc_malloc` and its
   siblings are glibc's internal aliases; no binary or library on the reference host imports
   them (census of `/usr/bin`, `/usr/lib64` and `/usr/libexec`), and glibc's own code calls the
-  interposable names.
+  interposable names. For a static musl program, where no export list applies, the evidence
+  is the experiments in `docs/research/musl-and-static.md`.
 - **C++.** The library exports no C++ allocation operator (design: "Interfaces", C++), so
   every `operator new` and `delete` a program calls is its C++ runtime's or the program's own,
   and reaches the heap only through the C functions above: the runtime's `new` calls `malloc`

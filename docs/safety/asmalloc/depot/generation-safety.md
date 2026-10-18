@@ -27,8 +27,4 @@ stopped; a real fork wipes the child's copy, which no thread of the parent can t
 `AtomicU64` here is `front::sync::AtomicU64`, which is `core`'s type, or in this crate's tests a
 transparent wrapper of it, so the layout is that of a `u64` either way.
 
-**Review.** The page moved from the magazine area to the process page, and the raw
-`wipe_on_fork` call (formerly GENERATION-02) became the safe `Space::wipe_on_fork`. Needs the
-reviewer's check.
-
 Reviewed: f41dbf9

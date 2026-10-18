@@ -121,7 +121,7 @@ themselves; nothing records them as holding the old contents.
 
 **Tests.** `a_large_slot_that_shrinks_in_place_returns_its_tail`,
 `a_run_that_shrinks_in_place_returns_its_tail`, and through C
-`realloc_shrinking_a_large_block_returns_its_tail`. Awaiting review.
+`realloc_shrinking_a_large_block_returns_its_tail`.
 
 ## BACK-CLASS-03: the copies and purges in `move_large_with`
 
@@ -193,8 +193,7 @@ The double-free cases are those of BACK-CLASS-01, with the copy added to the win
 `a_zeroed_grow_into_a_dirty_slot_reads_as_zero_past_what_it_kept`,
 `an_advised_slot_is_purged_only_in_whole_huge_pages` (a block that does not start on a
 piece boundary); the heap's and the C layer's `realloc` tests move large blocks through it
-with contents checked. Pieces on address boundaries, the trimming in `purge_part`, and the
-zero-page skip with its destination purge: awaiting review.
+with contents checked.
 
 ## BACK-CLASS-04: `is_zero`, `mostly_data` and `grown_into`
 
@@ -215,4 +214,4 @@ returned; and `resize_in_place`, on the last piece of a growing block's first `o
 (BACK-CLASS-02). So the slice is valid for its lifetime, the call.
 Any bit pattern is a valid `u8` and a valid `u64`, and `align_to` places in its middle part
 only whole, aligned `u64`s within the slice. Reading a page that was never written maps the
-kernel's shared zero page; it changes no contents. Awaiting review.
+kernel's shared zero page; it changes no contents.

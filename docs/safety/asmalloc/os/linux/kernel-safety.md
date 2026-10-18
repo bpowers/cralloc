@@ -214,11 +214,4 @@ single call:
   `an_abort_inside_the_handler_ends_the_process`: child processes, checking the signal, the
   message, that a returning handler ran, and that a handler that aborts runs once.
 
-**Review.** 2026-10-17, fresh adversarial reviewer: KERNEL-01 to KERNEL-07 accepted, after
-the fixes of its first round. Its second round found that a child forked mid-abort parked for
-ever, that a waiting thread could hang the process, and that the glibc comparison and
-KERNEL-09 were wrong or stale; KERNEL-09 was rewritten for those and needs the same reviewer's
-check. KERNEL-06 was since rewritten for a simpler `abort` with no shared state, and needs a
-fresh review.
-
 Reviewed: f41dbf9
