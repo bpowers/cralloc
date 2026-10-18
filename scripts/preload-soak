@@ -6,7 +6,8 @@
 #   default    the stress harness (crates/asmalloc-preload/tests/programs/soak.c) in every
 #              mode, SOAK_SECS (30) each, plain and preloaded (the signal and breakpoint
 #              modes, which allocate in signal handlers, preloaded only); then on two CPUs
-#              with 64 threads, without rseq, and against a debug build of the library;
+#              with 64 threads, without rseq, with the background maintenance thread, and
+#              against a debug build of the library;
 #              then the sweep, which aborts every instruction of every restartable sequence in
 #              the release library in turn (programs/sweep-unreached.txt lists the sequences
 #              it expects never to fire, and why). About 25 minutes.
@@ -170,6 +171,15 @@ for seed in $(seq 1 "$seeds"); do
     compare "no-rseq-$m-s$seed" "$mem" "$limit" env GLIBC_TUNABLES=glibc.pthread.rseq=0 \
       "$soak" "$m" secs="$secs" seed="$seed"
   done
+  # The background thread (ASMALLOC_BACKGROUND=1) drains and launders idle slabs from another
+  # thread while these run; then a burst, a full free and a quiet period in which resident
+  # memory must fall with nobody calling the allocator.
+  for m in churn prodcons; do
+    compare "background-$m-s$seed" "$mem" "$limit" env ASMALLOC_BACKGROUND=1 \
+      "$soak" "$m" secs="$secs" seed="$seed"
+  done
+  alone "background-quiet-s$seed" "$mem" "$limit" env ASMALLOC_BACKGROUND=1 SOAK_QUIET_CHECK=1 \
+    "$soak" quiet secs="$((secs / 3 + 1))" seed="$seed"
   # The debug build: debug assertions on, no LTO, different code around the routines.
   for m in churn idle signal breakpoint; do
     PRELOAD_LIB="$dlib" alone "debug-$m-s$seed" "$mem" "$limit" env SOAK_INSNS="$work/insns-debug" \

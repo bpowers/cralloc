@@ -7,7 +7,7 @@
 //
 // usage: soak MODE [key=value...]
 //   modes:   churn, prodcons, fork, threadstorm, realloc, huge, signal, idle, breakpoint, trim,
-//            sweep
+//            sweep, quiet
 //   keys:    threads, secs, seed, maxsize, live, xchg (percent of ops that hand a block to
 //            another thread), sigus (signal interval, microseconds), usable (fill up to
 //            malloc_usable_size, default 1), budget (MiB live across all threads, default
@@ -709,6 +709,41 @@ static void run_trim(void) {
     unmap(t, sizeof(pthread_t) * (size_t)nthreads);
 }
 
+// quiet: workers churn for `secs`, free everything and exit; then the process makes no calls
+// for `quietms` milliseconds while resident memory is sampled. Memory is counted above what
+// was resident before the burst, and the live-block table is off so that the harness's own
+// memory stays out of it. With SOAK_QUIET_CHECK set it fails unless what the allocator held
+// just after the frees fell to `quietpct` percent, or 16 MiB: for an allocator that returns
+// memory without being called (asmalloc with ASMALLOC_BACKGROUND=1).
+static long quiet_ms = 3000, quiet_pct = 50;
+
+static long rss_mib(void) {
+    long pages = 0, rss = 0;
+    FILE *f = fopen("/proc/self/statm", "r");
+    if (f && fscanf(f, "%ld %ld", &pages, &rss) != 2) rss = 0;
+    if (f) fclose(f);
+    return rss * 4096 / (1 << 20);
+}
+
+static void run_quiet(void) {
+    table_on = 0;
+    long base = rss_mib();
+    run_threads(churn_worker, nthreads);
+    xdrain(&(Rng){1});
+    long after = rss_mib() - base, low = after;
+    for (long t = 0; t < quiet_ms; t += 100) {
+        sleep_us(100000);
+        long now_ = rss_mib() - base;
+        if (now_ < low) low = now_;
+    }
+    long end = rss_mib() - base;
+    say("soak quiet: %ld MiB resident before the burst; above that, %ld MiB after the frees and "
+        "%ld after %ld ms quiet (lowest %ld)\n",
+        base, after, end, quiet_ms, low);
+    if (getenv("SOAK_QUIET_CHECK") && end > 16 && end * 100 > after * quiet_pct)
+        die("resident memory stayed at %ld MiB of %ld after %ld ms quiet", end, after, quiet_ms);
+}
+
 // Producers allocate and only hand off; consumers only verify and free.
 static _Atomic int producers_left;
 
@@ -1380,6 +1415,10 @@ static void parse(int argc, char **argv) {
             sig_us = atol(v);
         else if (!strcmp(k, "sweepops"))
             sweep_ops = atol(v);
+        else if (!strcmp(k, "quietms"))
+            quiet_ms = atol(v);
+        else if (!strcmp(k, "quietpct"))
+            quiet_pct = atol(v);
         else if (!strcmp(k, "trimus"))
             trim_us = atol(v);
         else if (!strcmp(k, "budget"))
@@ -1423,6 +1462,8 @@ int main(int argc, char **argv) {
         run_signal();
     } else if (!strcmp(mode, "breakpoint") || !strcmp(mode, "sweep")) {
         run_trap();
+    } else if (!strcmp(mode, "quiet")) {
+        run_quiet();
     } else if (!strcmp(mode, "trim")) {
         run_trim();
     } else if (!strcmp(mode, "idle")) {
