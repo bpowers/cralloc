@@ -1348,6 +1348,63 @@ and the abort handler as in `lean/generated`; `8:` stubs follow the `ret`. All r
    Anything read on every free that shares a page offset with a slab word of a hot class costs a
    cycle.
 
+### The generated routines in the real library (2026-10-17)
+
+The routines the Lean emitter now generates for `malloc`, `calloc`, `free`, `free_sized` and the
+`delete` forms, measured in the real library, not the stand-in. `compare.sh` ran the C loops
+(`cloop.c`) with `libasmalloc_preload.so` preloaded through the PLT, the IBT PLT and `call
+[GOT]`. A fourth build links the same crate as a static library (`static/`), so the loops call
+the routines directly. Pinned to CPU 12. The machine was shared with a soak and proof jobs, and
+CPU 12's sibling, 28, was about 10 percent busy over the run. Each cell is the best of 3
+interleaved rounds. Some rounds of ours and of the incumbents were up to 10 cycles slower; the
+best rounds repeated to within 0.05 in pairs.
+
+| C loop | static (direct) | PLT | IBT PLT | `call [GOT]` | stand-in, PLT | glibc, PLT | mimalloc, PLT |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| pair 32 B | 8.03 | 10.00 | 10.00 | 28.20 | 10.00 | 12.00 | 12.24 |
+| pair 256 B | 8.03 | 10.00 | 10.00 | 28.20 | 10.00 | 12.00 | 14.25 |
+| burst 8 | 8.88 | 10.26 | 10.25 | 16.17 | 10.50 | 12.26 | 11.77 |
+| burst 32 | 8.87 | 11.19 | 10.07 | 16.54 | 10.43 | 37.07 | 11.52 |
+| burst 100 (64 B) | 9.33 | 10.83 | 10.83 | 16.77 | 10.96 | 47.81 | 12.31 |
+| mixed 1 to 512 B | 21.06 | 23.61 | 22.67 | 25.92 | 22.48 | 14.23 | 19.02 |
+
+jemalloc measured 13.4 to 14.6 and per-CPU tcmalloc 14.0 to 15.2 in the same PLT cells, and both
+were over 30 in mixed.
+
+- Both targets are met in pairs: 8.03 direct (the floor is 8.00) and 10.00 through the PLT.
+  That is 2 cycles under glibc, and 2.2 to 4.3 under mimalloc.
+- Burst 32 through the PLT is 1.1 slower than the IBT build of the same library. The stand-in
+  showed the same split (above, against the incumbents): op-cache placement of the caller,
+  stubs and routines, which the routines do not control.
+- Mixed is about a cycle over the stand-in through the PLT. Our free reads the shift and `base
+  >> s` as two words (the `fW` shape, 25.1 against `fUj`'s 21.9 in the free table above), not
+  the one packed word.
+- `call [GOT]`: the pair is 28.2, 2.4 over the stand-in's 25.8. A stand-in whose pop alone
+  is changed to our generated order, `lea rcx, [rcx - 8]; mov rax, [rcx]`, in place of `mov
+  rax, [rcx - 8]; lea rcx, [rcx - 8]`, measured 27.6 to 28.4 against 26.4 to 27.0 for the
+  original, interleaved on the loaded machine. So about 1.3 cycles of the gap is that order: the
+  popped pointer waits for the `lea`, and that pointer leads to the free's slab-word address,
+  where `call [mem]` has disabled memory renaming (first subsection). Direct and PLT calls hide it.
+  The order comes from the shared Lean pop steps. This is inference from one interleaved
+  comparison.
+
+calloc, PLT, cycles per `calloc(1, n)` and free:
+
+| n | 16 | 32 | 64 | 128 | 256 |
+|---|---:|---:|---:|---:|---:|
+| ours | 11.05 | 12.08 | 12.28 | 12.40 | 13.54 |
+| stand-in (`cD`, 16-byte stores up to 512) | 11.01 | 12.02 | 13.01 | | 16.85 |
+| glibc | 14.04 | 13.07 | 14.03 | | 17.13 |
+| mimalloc | 14.14 | 14.25 | 15.48 | | 20.62 |
+
+The routine is 110 bytes and 22 uops. It tail-calls a Rust zeroing tail, which zeroes the
+block's whole class, as `malloc_usable_size` reports it. It does that with its own 16-byte stores
+up to 32 bytes and with glibc's `memset` above that. The tail started as one `memset` for every
+size, which cost a cycle over the stand-in at 16 and 32 bytes (a call through the GOT and
+glibc's dispatch). Then 16-byte stores up to 512 bytes, as the stand-in uses, which were 1 to 8
+cycles slower than `memset` from 64 bytes up (21.4 against 13.5 at 256). Only the 32-byte
+threshold was faster than both at every size.
+
 ### Caveats
 
 - One process size and one CPU, single-threaded. The stand-in's slow paths are not the
