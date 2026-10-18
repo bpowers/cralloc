@@ -12,7 +12,7 @@
 //!   the next huge-page boundary above the committed memory to the end of the region for huge
 //!   pages, records that boundary in the region's `Hints`, and later commits there are whole
 //!   huge pages.
-//! - **Huge pages for grown blocks.** A large slot whose object grows densely past a size gets
+//! - **Huge pages for grown blocks.** A large slot whose object moves there densely, growing past a size, gets
 //!   its whole huge pages advised for huge pages, and its size word records that
 //!   (`Recorded::huge`). Only the slot's holder reads or writes the flag. While it is set, a
 //!   partial purge of the slot rounds inward to whole huge pages, since purging part of a huge
@@ -379,30 +379,47 @@ pub(crate) fn record<H: Host>(host: &H, region: RegionId, slot: u32, recorded: R
     }
 }
 
-/// For the holder of large slot `slot`, whose object has just grown from `old` to `new` bytes
-/// (moved there, or grown in place): advises the slot's whole huge pages for huge pages if
-/// the growth says the object is dense (`policy::grown_huge`) and the slot is not advised yet.
+/// For the holder of large slot `slot`, whose object is growing from `old` to `new` bytes, by
+/// moving there or in place: if the growth looks like appending (`policy::grown_huge`) and
+/// `dense` says the bytes the program wrote last hold data in most of their pages, advises
+/// the slot's whole huge pages up to the new size, rounded up to a huge page, for huge pages.
+/// Never the room past it, so the advice runs at most one growth step ahead of what the
+/// program has shown it writes densely. `dense` is asked last, because it reads memory.
 ///
 /// The flag is recorded before the advice, because a failed advice may have acted on part of
 /// the range, and the flag is what makes the free take it back. Advice changes no contents,
 /// and the range is inside the holder's slot, so nothing else is affected.
-pub(crate) fn advise_grown<H: Host>(host: &H, region: RegionId, slot: u32, old: usize, new: usize) {
+pub(crate) fn advise_grown<H: Host>(
+    host: &H,
+    region: RegionId,
+    slot: u32,
+    old: usize,
+    new: usize,
+    dense: impl FnOnce() -> bool,
+) {
     let layout = host.layout();
     let Some(now) = recorded(host, region, slot) else {
         return;
     };
-    let huge = layout.page_size() * layout.huge_pages() as usize;
-    if now.huge || !grown_huge(old, new, huge) {
+    let page = layout.page_size();
+    let huge = page * layout.huge_pages() as usize;
+    if !grown_huge(old, new, huge) {
         return;
     }
     let Some(unit) = layout.huge_interior(slot) else {
         return;
     };
+    let wanted = layout.huge_ceil((layout.slot_bytes(slot) + new).div_ceil(page) as u32);
+    let end = wanted.min(unit.end);
+    if end <= unit.start || !dense() {
+        return;
+    }
     record(host, region, slot, Recorded { huge: true, ..now });
-    let page = layout.page_size();
+    // From the start, though part may be advised already: advice on a range that has it is
+    // harmless, and the kernel merges the mapping back into one.
     let (offset, len) = (
         unit.start as usize * page,
-        (unit.end - unit.start) as usize * page,
+        (end - unit.start) as usize * page,
     );
     host.advise(region, offset, len, HugePages::Prefer);
 }
@@ -436,9 +453,10 @@ pub(crate) fn unadvise<H: Host>(host: &H, region: RegionId, slot: u32) {
 /// of a moving object already copied. Both are page multiples and the range lies inside the
 /// slot. No bitmap changes: the slot stays allocated, and its clean and zero bits describe it
 /// only while it is free. In a slot advised for huge pages the range is first trimmed to
-/// whole huge pages where it ends inside one. `false`, and nothing done, if nothing is left
-/// after trimming, in a huge-page part, which is purged only in whole huge pages, or if the
-/// OS refused.
+/// whole huge pages where it ends inside one. `true` only if the whole range went back:
+/// `false` if trimming left part of it, or all, resident, in a huge-page part, which is purged
+/// only in whole huge pages (nothing is done), or if the OS refused. A caller that marks the
+/// slot zero afterwards relies on that.
 ///
 /// # Safety
 ///
@@ -459,6 +477,7 @@ pub(crate) unsafe fn purge_part<H: Host>(
     if from + len > layout.size() || hints.huge_from.is_some_and(|huge| end > huge) {
         return false;
     }
+    let whole = (first, end);
     if recorded(host, region, slot).is_some_and(|r| r.huge)
         && let Some(unit) = layout.huge_interior(slot)
     {
@@ -474,7 +493,9 @@ pub(crate) unsafe fn purge_part<H: Host>(
     }
     let page = layout.page_size();
     // SAFETY: the caller's promise, for a range inside the slot: trimming only shrank it.
-    unsafe { host.purge(region, first as usize * page, (end - first) as usize * page) }
+    let purged =
+        unsafe { host.purge(region, first as usize * page, (end - first) as usize * page) };
+    purged && (first, end) == whole
 }
 
 /// What purging one unit did.

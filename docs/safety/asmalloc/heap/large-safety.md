@@ -6,7 +6,7 @@ HEAP-03 (the clear in `alloc_large`) is in `heap/mod-safety.md`.
 
 **Block.** `ptr.copy_to_nonoverlapping(grant.ptr, min(old.size(), new.size()))`, then
 `self.dealloc(routines, ptr, old)`; or, when the old block is large, the one call
-`back.move_large(ptr, grant.ptr, min(old.size(), new.size()))`, which copies the same bytes
+`back.move_large(ptr, grant.ptr, min(old.size(), new.size()), grant.zeroed)`, which copies the same bytes
 in pieces, returns the old block's pages behind the copy and frees it (BACK-CLASS-03 in
 `back/class-safety.md`). Its contract is the same three facts proved below: the old block is
 live, owned and long enough; the new one is writable for as much; they do not overlap.
@@ -20,6 +20,17 @@ owned by the caller, at least `old.size()` long. The new block was just allocate
 thread. Two live blocks of the heap are disjoint (the back end hands each slot or run to one
 owner), so the ranges do not overlap. The free happens once, after the copy, and only on the
 path that moved; on the in-place path and on failure the caller keeps the block.
+
+`move_large` is also told whether the new block reads as zero (`grant.zeroed`). That is true
+only when the back end said the slot was fresh or purged (`Block::zeroed`) or the block is a
+run, which is always fresh or purged; a wrong `true` would let a skipped zero page show the
+new block's old bytes, which is a wrong value, not a memory error, and `Grant::zeroed` is set
+nowhere else.
+
+**The clearing of a zeroed grow.** `grant.ptr.add(kept).write_bytes(0, grant.len - kept)`,
+when the grow must zero and the new block is not known to read as zero. `grant.len` is the
+new block's usable length, so `[kept, len)` is inside the block this thread was just given,
+and the copy (or `move_large`) wrote only `[0, kept)` of it, before the clearing.
 
 ## HEAP-05: `ptr.add(before).write_bytes(0, len - before)` in `resize_large_in_place`
 

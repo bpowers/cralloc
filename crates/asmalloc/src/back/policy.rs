@@ -73,12 +73,15 @@ pub const HUGE_AFTER_HUGE_PAGES: usize = 8;
 pub const HUGE_MIN_SLOTS_PER_PAGE: usize = 4;
 
 /// A large block that grows to at least this many huge pages, by moving or in place, gets huge
-/// pages: its slot's whole huge pages are advised for them (`region::advise_grown`) until the
-/// slot is freed, when they are purged and the advice is taken back. 1, or 2 MiB, so the most
-/// the advice can make resident that the program did not ask for is under half of what it
-/// did. Growth is the evidence of dense use: a copy fills the old size, and a growing buffer
-/// is being appended to. A block allocated at its size in one call may be a buffer used
-/// sparsely, and with huge pages each part touched would cost 2 MiB, so it never gets them.
+/// pages up to its new size, if the last piece the program wrote holds data in at least half
+/// its pages: those of its slot's whole huge pages are advised for them
+/// (`region::advise_grown`) until the slot is freed, when they are purged and the advice is
+/// taken back. 1, or 2 MiB. Growth by appending is the evidence of dense use, and the bytes
+/// written last are checked to be dense; the advice never covers the slot's room past the size
+/// asked for, so it runs at most one growth step ahead of what has been shown. A block
+/// allocated at its size in one call has shown neither, and with huge pages each part touched
+/// would cost 2 MiB. The soak's growing buffers, written a stripe a megabyte past 64 MiB,
+/// were 1013 MiB resident with the whole slot advised at each growth, and 271 without.
 pub const GROWN_HUGE_MIN_HUGE_PAGES: usize = 1;
 
 /// ...and only if it at most doubles at once: a doubling is the signature of appending. A
