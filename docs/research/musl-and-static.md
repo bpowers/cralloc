@@ -134,6 +134,31 @@ suite's `threads`, `forks` and `signals` programs print what they print under mu
 Under gdb, about 16% of `threads`' calls (2 waves, 4 threads) took the C slow path, the same as
 the statically linked glibc build, so the C routines' fast path runs there too.
 
+## Limits of registering lazily
+
+From the adversarial review of the musl form (2026-10-18), all documented, none fixed:
+
+- **A handler that registers a thread inside a routine.** A routine arms its sequence, then reads
+  `cpu_id`. On a thread at -1 the kernel aborts nothing, so a signal between the two is
+  delivered with the arm in place; if the handler allocates and that is the thread's first
+  allocator call, it registers the thread, and the interrupted routine then reads a valid CPU
+  number with `rseq_cs` naming the handler's last sequence and runs to its commit unprotected.
+  It takes a second event within about eight instructions to do harm. The review's ignored test
+  `limitation_a_handler_that_registers_a_thread_inside_its_first_sequence_unprotects_it`
+  (`front/area.rs`) shows it by single-stepping. No fix fits inside lazy registration; the design lists it under "What is
+  trusted", and the routines' contracts require the registration state to hold for the whole call.
+- **First allocation after our destructor.** A thread whose first allocator call comes after our
+  key's destructor can no longer run (another key's destructor in musl's last round, or later)
+  dies registered; a detached one can crash the process.
+- **Thread-local destructors run without rseq.** Destructors that run after ours, Rust's
+  thread-local destructors in practice, take the slow path, so a thread that exits holding many
+  blocks in thread-locals frees them more slowly than on glibc.
+- **Seccomp.** A filter that fails `arch_prctl(ARCH_GET_FS)` leaves the thread at -1, so every
+  slow path repeats the call; a filter that kills on `arch_prctl` or `rseq` kills the process at
+  the thread's first slow path. One that fails `rseq` is handled (the thread is retired).
+- **The key lock.** The first slow path of the process makes the key, and `pthread_key_create`
+  takes musl's key lock.
+
 ## A trap for tests: forking a threaded test process
 
 A child forked from the test harness while other test threads run may inherit a lock of std's

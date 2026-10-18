@@ -224,9 +224,10 @@ const _: () = {
 #[cfg_attr(any(miri, kani), allow(dead_code))]
 pub static SLABS: Front = Front::new();
 
-/// The slot mask of each small class's magazines, indexed by class index; zero for every other
-/// byte. The inlined routines are given their class's mask from here, so a constant class
-/// folds it to a constant; the generated C routines read the copy in [`SLABS`].
+/// The slot mask of each small class's magazines, indexed by the position of the class's hot word
+/// (`SmallClass::word`); zero for every other byte. The inlined routines are given their class's
+/// mask from here, so a constant class folds it to a constant; the generated C routines read the
+/// copy in [`SLABS`], at the same index, `MASK_DISP` bytes above the word.
 pub(crate) static MASKS: [u32; MASK_COUNT] = MASK_TABLE;
 
 const MASK_TABLE: [u32; MASK_COUNT] = {
@@ -234,7 +235,7 @@ const MASK_TABLE: [u32; MASK_COUNT] = {
     let mut ordinal = 0;
     while ordinal < SMALL_COUNT {
         if let Some(class) = SmallClass::from_ordinal(ordinal) {
-            masks[class.class().index() as usize] = class.magazine().mask() as u32;
+            masks[class.word()] = class.magazine().mask() as u32;
         }
         ordinal += 1;
     }
@@ -244,28 +245,13 @@ const MASK_TABLE: [u32; MASK_COUNT] = {
 /// The mask of a class's magazines.
 #[inline(always)]
 pub(crate) fn mask(class: SmallClass) -> u32 {
-    MASKS[class.class().index() as usize]
+    MASKS[class.word()]
 }
-
-/// The masks the generated C routines read, as [`SLABS`] holds them: indexed by the position of
-/// the class's hot word (`Field::index`), which is what the C size tables and the region table
-/// give, so each entry is `MASK_DISP` bytes above its word; zero at every other position.
-const WORD_MASK_TABLE: [u32; MASK_COUNT] = {
-    let mut masks = [0; MASK_COUNT];
-    let mut ordinal = 0;
-    while ordinal < SMALL_COUNT {
-        if let Some(class) = SmallClass::from_ordinal(ordinal) {
-            masks[Field::hot(class).index()] = class.magazine().mask() as u32;
-        }
-        ordinal += 1;
-    }
-    masks
-};
 
 /// The last position with a mask, which [`publish_masks`] writes last and so checks first.
 const LAST_MASKED: usize = {
     let mut last = MASK_COUNT - 1;
-    while WORD_MASK_TABLE[last] == 0 {
+    while MASK_TABLE[last] == 0 {
         last -= 1;
     }
     last
@@ -279,7 +265,7 @@ pub(crate) fn publish_masks() {
     if SLABS.masks[LAST_MASKED].load(Ordering::Relaxed) != 0 {
         return;
     }
-    for (entry, &mask) in SLABS.masks.iter().zip(WORD_MASK_TABLE.iter()) {
+    for (entry, &mask) in SLABS.masks.iter().zip(MASK_TABLE.iter()) {
         entry.store(mask as u64, Ordering::Relaxed);
     }
 }
@@ -289,7 +275,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn the_mask_table_holds_each_class_mask_at_its_index_and_zero_elsewhere() {
+    fn the_mask_table_holds_each_class_mask_at_its_words_position_and_zero_elsewhere() {
         for class in SmallClass::all() {
             assert_eq!(mask(class) as usize, class.magazine().mask());
         }
@@ -324,7 +310,7 @@ mod tests {
         publish_masks();
         publish_masks();
         for (i, entry) in SLABS.masks.iter().enumerate() {
-            assert_eq!(entry.load(Ordering::Relaxed), WORD_MASK_TABLE[i] as u64);
+            assert_eq!(entry.load(Ordering::Relaxed), MASK_TABLE[i] as u64);
         }
     }
 }

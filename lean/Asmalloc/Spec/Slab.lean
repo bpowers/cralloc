@@ -753,10 +753,13 @@ def keepDoc : String :=
 
 /-- The `# Safety` item every routine has about the thread's rseq area. -/
 def registeredDoc : String :=
-  "The calling thread's rseq area, at `__rseq_offset` from the thread pointer, must be \
-    registered with the kernel or read a negative CPU number: glibc registers its area before \
-    the thread can run code that allocates; on musl the area is the crate's own, which reads -1 \
-    until a slow path registers it."
+  "From when the function is called until it returns, the calling thread's rseq area, at \
+    `__rseq_offset` from the thread pointer, must be registered with the kernel, or read a \
+    negative CPU number and stay unregistered: glibc registers its area before the thread can \
+    run code that allocates. On musl the area is the crate's own, which reads -1 until a slow \
+    path registers it, so a signal handler that registers the thread during a call (by \
+    allocating for the first time between the function's arming store and its read of the CPU \
+    number) breaks this, and the function then runs unprotected."
 
 /-- What every pop and push requires of the thread and of the slabs; the
 mask is the argument `mask`. -/
