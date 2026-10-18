@@ -106,7 +106,8 @@ checks that `from + len` is within the slot's size, so the range is inside the s
 caller holds. When the slot is advised for huge pages it may then move the start up and the
 end down to huge-page boundaries inside the slot (`Layout::huge_interior`), and returns
 without a call if nothing is left: the range purged is a subrange of the one the caller gave
-up, so the precondition still holds for it. Its callers and why their ranges are given up are BACK-CLASS-02 (the tail of an
+up, so the precondition still holds for it. It returns `true` only when the range it was
+given went back whole, which BACK-CLASS-03 relies on before marking a slot zero. Its callers and why their ranges are given up are BACK-CLASS-02 (the tail of an
 object that shrank in place) and BACK-CLASS-03 (the part of a moving object already copied)
 in `class-safety.md`. Awaiting review.
 

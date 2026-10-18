@@ -202,6 +202,27 @@ impl<S: Shape> SimHeap<S> {
         })
     }
 
+    /// Grows the block at `ptr` from `old` to `new` with the bytes past `old` reading as zero,
+    /// as `Allocator::grow_zeroed` does, for tests on stable Rust. Returns the block and the
+    /// length the caller may use, or `None` if there was no memory.
+    ///
+    /// # Safety
+    ///
+    /// As for `GlobalAlloc::realloc` with `ptr` and `old`; `new` is at least as large.
+    #[cfg(test)]
+    pub(crate) unsafe fn grow_zeroed_for_test(
+        &self,
+        ptr: *mut u8,
+        old: Layout,
+        new: Layout,
+    ) -> Option<(*mut u8, usize)> {
+        let ptr = NonNull::new(ptr)?;
+        // SAFETY: SIM-03, and the caller's promise.
+        let grant =
+            self.with(|heap, routines| unsafe { heap.resize(routines, ptr, old, new, true) })?;
+        Some((grant.ptr.as_ptr(), grant.len))
+    }
+
     /// Runs `f` with the heap and the twins of a leased simulated thread.
     fn with<T>(&self, f: impl FnOnce(&Heap<SimOs<S>>, SimRoutines<'_>) -> T) -> T {
         let lease = self.lease();

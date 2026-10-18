@@ -334,9 +334,8 @@ impl<'a, O: Os> Back<'a, O> {
     /// There is no hysteresis: every shrink that crosses a page boundary is one system call,
     /// so a program that shrinks a block a page at a time pays a call each time, as it does
     /// with glibc's `realloc` above the `mmap` threshold. A shrink within a page makes none.
-    /// In a slot advised for huge pages the tail is returned in whole huge pages only.
-    ///
-    /// A large object that grows in place densely past a size gets huge pages in its slot
+    /// In a slot advised for huge pages the tail is returned in whole huge pages only. A block
+    /// that grows in place by appending densely has the advice extended to its new size
     /// (`region::advise_grown`).
     ///
     /// # Safety
@@ -366,7 +365,13 @@ impl<'a, O: Os> Back<'a, O> {
                 };
                 let old = before.size;
                 region::record(&host, region, slot, Recorded { size, ..before });
-                region::advise_grown(&host, region, slot, old, size);
+                let piece = move_piece(self.space.plan().geometry());
+                let last = old.saturating_sub(piece) & !(page - 1);
+                let written = ptr.map_addr(|a| a.saturating_add(last));
+                // SAFETY: BACK-CLASS-02: the caller owns the block and does not use it during
+                // the resize; `last..old` lies inside its first `old` bytes.
+                let dense = || unsafe { mostly_data(written.as_ptr(), old - last, page) };
+                region::advise_grown(&host, region, slot, old, size, dense);
                 if let Some((from, len)) = tail(old, class.size()) {
                     // SAFETY: BACK-CLASS-02 in docs/safety/asmalloc/back/class-safety.md. The
                     // caller owns the object in this slot and has just given up everything
@@ -403,14 +408,20 @@ impl<'a, O: Os> Back<'a, O> {
     /// zero, clean and not counted as retained, exactly as a free over the large cap leaves
     /// it, so the free neither purges nor counts those pages again.
     ///
+    /// The piecewise copy skips source pages that are all zero, so a block written sparsely
+    /// stays sparse: reading an untouched page maps the kernel's shared zero page and costs no
+    /// memory. A skipped page must read as zero at `to`, so unless the caller says `to` reads
+    /// as zero (`zeroed`), its pages are purged once before the copy.
+    ///
     /// # Safety
     ///
     /// `from` is a large block of this heap that the caller owns and gives up, readable for
-    /// `len` bytes; `to` is writable for `len` bytes and does not overlap it; nothing else
-    /// reads or writes either range during the call.
-    pub unsafe fn move_large(&self, from: NonNull<u8>, to: NonNull<u8>, len: usize) {
+    /// `len` bytes; `to` is a block of this heap the caller owns, writable for `len` bytes,
+    /// whose contents it does not need, and does not overlap `from`; nothing else reads or
+    /// writes either range during the call. If `zeroed`, the `len` bytes at `to` read as zero.
+    pub unsafe fn move_large(&self, from: NonNull<u8>, to: NonNull<u8>, len: usize, zeroed: bool) {
         // SAFETY: the caller's promise, passed on.
-        unsafe { self.move_large_with(from, to, len, || {}) }
+        unsafe { self.move_large_with(from, to, len, zeroed, || {}) }
     }
 
     /// [`Back::move_large`], calling `observe` after each piece is copied and the pages
@@ -424,6 +435,7 @@ impl<'a, O: Os> Back<'a, O> {
         from: NonNull<u8>,
         to: NonNull<u8>,
         len: usize,
+        zeroed: bool,
         mut observe: impl FnMut(),
     ) {
         let piece = move_piece(self.space.plan().geometry());
@@ -434,7 +446,8 @@ impl<'a, O: Os> Back<'a, O> {
             _ => self.abort("a move of a pointer that is not a large block of the heap"),
         };
         // Before the copy, so that the copy already faults huge pages.
-        self.grown_into(to, len);
+        // SAFETY: BACK-CLASS-03: `from` is readable for `len` bytes and nothing writes it.
+        unsafe { self.grown_into(from, to, len) };
         if len <= piece {
             // SAFETY: BACK-CLASS-03: the caller's promise about the two ranges.
             unsafe { from.as_ptr().copy_to_nonoverlapping(to.as_ptr(), len) };
@@ -475,6 +488,14 @@ impl<'a, O: Os> Back<'a, O> {
                 }
             }
         };
+        let page = self.space.plan().geometry().page_size();
+        if !zeroed {
+            // `to` starts on a page and holds `len` bytes rounded up to a page (large slots and
+            // runs are whole pages), so the range is whole pages of the caller's block.
+            // SAFETY: BACK-CLASS-03: the caller owns `to`, nothing else uses it, and its
+            // contents are not needed.
+            let _ = unsafe { self.space.purge(to, len.next_multiple_of(page)) };
+        }
         // Pieces end at multiples of the piece in the address space, not in the block, so that
         // a piece that goes back is whole huge pages wherever the block has them: purging
         // part of a huge page would return nothing.
@@ -483,12 +504,19 @@ impl<'a, O: Os> Back<'a, O> {
         while done < len {
             let boundary = (base + done + 1).next_multiple_of(piece) - base;
             let step = (boundary - done).min(len - done);
-            // SAFETY: BACK-CLASS-03: `done + step <= len`, inside both ranges, which do not
-            // overlap; the bytes of `from` read here have not been returned.
-            unsafe {
-                from.as_ptr()
-                    .add(done)
-                    .copy_to_nonoverlapping(to.as_ptr().add(done), step);
+            let mut at = done;
+            while at < done + step {
+                let n = page.min(done + step - at);
+                // SAFETY: BACK-CLASS-03: `at + n <= len`, inside both ranges, which do not
+                // overlap; the bytes of `from` read here have not been returned. A page left
+                // uncopied is all zero, and `to` reads as zero there.
+                unsafe {
+                    let src = from.as_ptr().add(at);
+                    if !is_zero(src, n) {
+                        src.copy_to_nonoverlapping(to.as_ptr().add(at), n);
+                    }
+                }
+                at += n;
             }
             // Only pieces that reach a boundary go back here: the last may end inside a page.
             if done + step == boundary {
@@ -515,9 +543,16 @@ impl<'a, O: Os> Back<'a, O> {
         }
     }
 
-    /// After the contents of a block of `len` bytes have moved into the block at `to`: if `to`
-    /// is a large slot whose object grew, it may get huge pages (`region::advise_grown`).
-    fn grown_into(&self, to: NonNull<u8>, len: usize) {
+    /// Before the `len` bytes at `from` move into the block at `to`: if `to` is a large slot
+    /// whose object grew, and the last piece of those bytes holds data in at least half its
+    /// pages, it gets huge pages up to its new size (`region::advise_grown`). Growth alone is
+    /// not enough: a buffer grown by doubling and written one stripe a megabyte became wholly
+    /// resident with them.
+    ///
+    /// # Safety
+    ///
+    /// The `len` bytes at `from` are readable, and nothing writes them during the call.
+    unsafe fn grown_into(&self, from: NonNull<u8>, to: NonNull<u8>, len: usize) {
         let Some(Kind::Slot(class)) = self.lookup(to.as_ptr()) else {
             return;
         };
@@ -528,8 +563,14 @@ impl<'a, O: Os> Back<'a, O> {
             return;
         };
         let (region, index) = self.validate(&host, to.as_ptr(), class);
+        let page = self.space.plan().geometry().page_size();
+        let piece = move_piece(self.space.plan().geometry());
+        // What the program wrote last: the last piece of what moves.
+        let last = len.saturating_sub(piece) & !(page - 1);
+        // SAFETY: BACK-CLASS-04, for pages of the `len` readable bytes at `from`.
+        let dense = || unsafe { mostly_data(from.as_ptr().add(last), len - last, page) };
         if let Some(now) = region::recorded(&host, region, index) {
-            region::advise_grown(&host, region, index, len, now.size);
+            region::advise_grown(&host, region, index, len, now.size, dense);
         }
     }
 
@@ -782,4 +823,47 @@ impl<'c, 'a, O: Os> Checker<'c, 'a, O> {
         let limit = Grow::unpack(grow.load()).carved.min(self.layout.slots());
         Met { region, limit }
     }
+}
+
+/// Whether at least half the pages of the `len` bytes at `ptr` hold a byte that is not zero.
+/// Stops as soon as the answer is known, so a dense block costs a word a page for half of it.
+///
+/// # Safety
+///
+/// As for `is_zero`.
+unsafe fn mostly_data(ptr: *const u8, len: usize, page: usize) -> bool {
+    let pages = len.div_ceil(page);
+    let (mut data, mut empty) = (0, 0);
+    let mut at = 0;
+    while at < len {
+        let n = page.min(len - at);
+        // SAFETY: BACK-CLASS-04: inside the caller's readable bytes.
+        if unsafe { is_zero(ptr.add(at), n) } {
+            empty += 1;
+            if empty * 2 > pages {
+                return false;
+            }
+        } else {
+            data += 1;
+            if data * 2 >= pages {
+                return true;
+            }
+        }
+        at += n;
+    }
+    false
+}
+
+/// Whether the `len` bytes at `ptr` are all zero, stopping at the first that is not.
+///
+/// # Safety
+///
+/// The bytes are readable and nothing writes them during the call.
+unsafe fn is_zero(ptr: *const u8, len: usize) -> bool {
+    // SAFETY: BACK-CLASS-04: the caller's promise; `u8` has no invalid values.
+    let bytes = unsafe { core::slice::from_raw_parts(ptr, len) };
+    // SAFETY: BACK-CLASS-04: every bit pattern is a valid `u64`, and `align_to` itself puts
+    // only aligned, whole words in the middle part.
+    let (head, words, tail) = unsafe { bytes.align_to::<u64>() };
+    head.iter().all(|&b| b == 0) && words.iter().all(|&w| w == 0) && tail.iter().all(|&b| b == 0)
 }

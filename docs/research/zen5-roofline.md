@@ -290,7 +290,10 @@ CPUs 0 to 7 and their siblings were mostly busy with other work, CPUs 8 to 15 mo
   (`faultin_page_range`, `handle_mm_fault`): it skips the exception entry and the VMA lookup
   (in the demand-fault profile `asm_exc_page_fault` 7%, `mas_walk` 11%, `lock_vma_under_rcu`
   4%), and still allocates, zeroes, locks the page table and adds the page to the LRU for each
-  page. In its profile the page-table lock is 28% and clearing the page 9%.
+  page. In its profile the page-table lock is 28% and clearing the page 9%. Built into the
+  allocator as populate-ahead for dense classes, it cut faults three to five times on the
+  workloads and kernel time by under a tenth, for about 1 MiB at each peak
+  (`memory.md`), and was removed.
 - **A huge page is bound by zeroing.** Clearing is 85% of its profile; 151 ns per 4 KiB is
   about 27 GB/s, which is what one core writes to DRAM. So 4 KiB pages cost about 400 ns of
   bookkeeping per page on top of the zeroing that every way of getting fresh memory pays.

@@ -109,13 +109,18 @@ impl<O: Os> Heap<O> {
                 Some(Grant {
                     ptr: block.ptr,
                     len,
+                    zeroed: block.zeroed || zero == Zero::Whole,
                 })
             }
             // A run is always fresh or purged memory, so it reads as zero.
             Place::Run { size, align } => {
                 let ptr = back.alloc_run(size, align)?;
                 let len = self.usable_size(ptr.as_ptr()).unwrap_or(layout.size());
-                Some(Grant { ptr, len })
+                Some(Grant {
+                    ptr,
+                    len,
+                    zeroed: true,
+                })
             }
         }
     }
@@ -210,7 +215,11 @@ impl<O: Os> Heap<O> {
         };
         if in_place {
             if small(old).is_some() {
-                return Some(Grant { ptr, len });
+                return Some(Grant {
+                    ptr,
+                    len,
+                    zeroed: false,
+                });
             }
             // SAFETY: the caller's promise for `ptr`, and `new` fits the block (`in_place`).
             return Some(unsafe { self.resize_large_in_place(ptr, new, zero) });
@@ -226,12 +235,13 @@ impl<O: Os> Heap<O> {
             .then(|| with_headroom(new))
             .flatten()
             .filter(|layout| layout.size() <= region);
-        let fill = if zero { Zero::Whole } else { Zero::No };
+        // A zeroed grow clears only what lies past the bytes it keeps, and only when the new
+        // block is not known to read as zero.
         // SAFETY: passed through from the caller.
         let grant = unsafe {
             roomy
                 .and_then(|layout| self.alloc_grant(routines, layout, Zero::No))
-                .or_else(|| self.alloc_grant(routines, new, fill))?
+                .or_else(|| self.alloc_grant(routines, new, Zero::No))?
         };
         // A block with headroom records the size asked for, not the room it was given.
         let grant = match self.back() {
@@ -248,12 +258,21 @@ impl<O: Os> Heap<O> {
             match self.back() {
                 // A large block is copied in pieces, its old pages returned behind the copy,
                 // and freed, all by the back end.
-                Some(back) if small(old).is_none() => back.move_large(ptr, grant.ptr, kept),
+                Some(back) if small(old).is_none() => {
+                    back.move_large(ptr, grant.ptr, kept, grant.zeroed)
+                }
                 _ => {
                     ptr.as_ptr()
                         .copy_to_nonoverlapping(grant.ptr.as_ptr(), kept);
                     self.dealloc(routines, ptr.as_ptr(), old);
                 }
+            }
+            if zero && !grant.zeroed && grant.len > kept {
+                grant
+                    .ptr
+                    .as_ptr()
+                    .add(kept)
+                    .write_bytes(0, grant.len - kept);
             }
         }
         Some(grant)
@@ -279,7 +298,11 @@ impl<O: Os> Heap<O> {
             // SAFETY: HEAP-05.
             unsafe { ptr.as_ptr().add(before).write_bytes(0, len - before) };
         }
-        Grant { ptr, len }
+        Grant {
+            ptr,
+            len,
+            zeroed: false,
+        }
     }
 }
 

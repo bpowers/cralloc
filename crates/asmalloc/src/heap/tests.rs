@@ -591,6 +591,29 @@ fn a_large_shrink_stays_in_place_unless_it_leaves_under_an_eighth_of_the_block()
     }
 }
 
+/// A zeroed grow into a slot an earlier block left dirty: the kept bytes arrive, and the rest
+/// reads as zero, though the move skipped the old block's zero pages and allocated unzeroed.
+#[test]
+fn a_zeroed_grow_into_a_dirty_slot_reads_as_zero_past_what_it_kept() {
+    let heap = SimHeap::<Shape>::new();
+    // Under the large cap of the simulated shape, so the freed slot stays resident and dirty.
+    let (small, big) = (layout(80 << 10, 8), layout(200 << 10, 8));
+    // SAFETY: valid layouts; each block is freed once with the layout it has.
+    unsafe {
+        let dirty = heap.alloc(big);
+        dirty.write_bytes(0xaa, big.size());
+        heap.dealloc(dirty, big);
+        let p = heap.alloc(small);
+        // Half of it written, the other half left as zero pages the move will skip.
+        fill(p, small.size() / 2, 7);
+        let (q, len) = heap.grow_zeroed_for_test(p, small, big).unwrap();
+        assert_eq!(q, dirty, "the grow reuses the dirty slot");
+        assert!(holds(q, small.size() / 2, 7));
+        assert!((small.size() / 2..len).all(|i| q.add(i).read() == 0));
+        heap.dealloc(q, big);
+    }
+}
+
 #[test]
 fn growth_in_small_steps_stays_in_the_room_a_move_gave() {
     let heap = SimHeap::<Shape>::new();

@@ -180,7 +180,7 @@ pub(crate) mod process {
     pub(crate) unsafe fn move_large(from: NonNull<u8>, to: NonNull<u8>, len: usize) {
         match HEAP.back() {
             // SAFETY: the caller's promise, passed on.
-            Some(back) => unsafe { back.move_large(from, to, len) },
+            Some(back) => unsafe { back.move_large(from, to, len, false) },
             None => HEAP.os().abort("a move of a block when no heap exists"),
         }
     }
