@@ -33,7 +33,7 @@ front   per-CPU magazines: arrays of free pointers, one per size class
         cost: a few instructions, one store to commit, no atomics
      |  magazine empty or full
      v
-middle  depot: stacks of whole magazines, shared by all CPUs
+middle  depot: stacks of whole magazines, one set per cache domain
         cost: two atomic instructions per magazine exchanged
      |  depot above or below its target
      v
@@ -208,7 +208,8 @@ less.
 - **Region**: 4 GiB of address space that holds objects of exactly one class.
 - **Magazine**: a small aligned array of pointers to free objects of one class.
 - **Slab**: the per-CPU block of state that names the magazine loaded for each small class.
-- **Depot**: shared stacks of full and empty magazines.
+- **Depot**: stacks of full and empty magazines, one set for each group of CPUs that share
+  a last-level cache.
 - **Routine**: one of the assembly sequences generated from Lean.
 - **Twin**: a Rust function with the same specification as a routine, used where assembly
   cannot run.
@@ -415,8 +416,12 @@ handler that allocates, and safe to abandon at any instruction in a forked child
 
 ### Depot
 
-The depot holds, per class, a stack of non-empty magazines, and per magazine size a stack of
-empty ones. A stack head is one 64-bit word: a 32-bit magazine number and a 32-bit version
+The depot holds, for each cache domain (the CPUs that share a last-level cache), per class a
+stack of non-empty magazines and per magazine size a stack of empty ones. A slow path uses
+the stacks of its CPU's domain. The domains are read once from sysfs, on the process's first
+slow path and never later, so that a program which has since entered a sandbox is not caught
+opening a file; where they cannot be read there is one domain. A stack head is one 64-bit
+word: a 32-bit magazine number and a 32-bit version
 counter, updated by compare-and-swap. Magazine memory is never unmapped, so reading a stale
 link is harmless, and the counter means a stale head is accepted only if exactly 2^32 pushes
 and pops intervene during one attempt.
@@ -424,8 +429,21 @@ and pops intervene during one attempt.
 Exchanging through the depot is how objects move between CPUs. A thread that only frees
 fills magazines and pushes them; a thread that only allocates pops them. The cost is two
 atomic instructions per magazine and no work per object, however frees and allocations are
-spread across threads. Each class has a target for the bytes held in its depot stack, and
-a stack gives up whatever it did not need during an interval (see "Returning memory").
+spread across threads.
+
+Magazines stay in the cache domain that freed them. An object's cache lines live where it
+was last used, and a magazine handed to a CPU under another last-level cache brings objects
+whose every first touch is a miss served from the other cache: with one set of stacks for
+the whole machine, two unrelated pairs of threads on different domains traded magazines
+through it and each ran at half speed. A slow path whose own stack is empty takes from
+another domain's stack only if that one holds at least half the class's target, which a
+flow of objects from one domain to another reaches and a domain in balance does not;
+otherwise it fills from the back end. So objects still cross domains without touching the
+bitmaps when the program really moves them across.
+
+Each class has a target for the bytes its depot stacks hold, shared among the domains whose
+stacks hold the class, and a stack gives up whatever it did not need during an interval (see
+"Returning memory").
 
 ### Back end: regions and bitmaps
 
@@ -522,7 +540,7 @@ rule that returns it (`docs/research/memory.md` has the measurements behind them
 | The tail of a large block that shrinks in place; the old copy of one that moves | The resize (see "Large objects") | At once |
 | Objects in a magazine that stays loaded | A slow path of the same CPU launders it | Once it has been loaded for an interval |
 | Objects in a CPU's full spares | That CPU's sweep launders one magazine and sends the rest to the depot | Once an interval |
-| Objects in a depot stack | A heartbeat launders a magazine | While the stack is over its target, and for the depth it did not need during an interval |
+| Objects in a depot stack | A heartbeat launders a magazine; a look at a class looks at its stack in every domain, so a domain that goes quiet sheds as a quiet class does | While the stack is over its target, and for the depth it did not need during an interval |
 | Objects in steady circulation | The free that retires a full magazine launders it instead | One retirement in every few |
 | The slab of a CPU the process no longer runs on | The idle drain sends its magazines to the depot (see "Process lifecycle") | After an interval with no slow path there |
 | The part of a huge page above a region's watermark, made resident by the fault and never allocated | The purge carves it and frees it, so that the page can go whole | When the purge reaches that page |
