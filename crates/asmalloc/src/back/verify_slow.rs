@@ -15,6 +15,7 @@
 //! walk up), and Kani unrolls each to the bound. Those runs are checked by the interleaving
 //! explorer (`back::models`) and the shadow-model tests (`back::tests`).
 
+use super::class::{Fast, odd_inverse};
 use super::layout::{Layout, Step, WORD_BYTES, slots_in_region};
 use super::verify::{any_class, any_plan_of, any_used_plan, layouts_fit};
 use super::word::{BITS, lowest};
@@ -221,4 +222,35 @@ fn units_touch_exactly_their_slots_on_the_tiny_heap() {
     kani::assume(first <= slot && slot <= last);
     let wholly = layout.slot_bytes(slot) >= start && layout.slot_bytes(slot + 1) <= end;
     assert!(wholly == (lo <= slot && slot < hi));
+}
+
+/// A launder's fast check (`class::Fast`), for every class and every pointer: it passes a
+/// pointer only if the pointer is the start of a slot below the limit, and gives that slot;
+/// and it passes every such start. The limit is any watermark a region of at most 4 GiB can
+/// have. A 64-bit multiply each way, so not in the gate.
+#[kani::proof]
+#[kani::solver(kissat)]
+fn the_fast_check_passes_exactly_the_slot_starts_below_the_limit() {
+    let class = any_class();
+    let size = class.size() as u64;
+    let shift = size.trailing_zeros();
+    let limit: u64 = kani::any();
+    kani::assume(limit <= (1u64 << 32) / size);
+    let base: usize = kani::any();
+    let fast = Fast {
+        base,
+        inverse: odd_inverse(size >> shift),
+        shift,
+        limit,
+    };
+    let offset: u64 = kani::any();
+    let object = core::ptr::without_provenance::<u8>(base.wrapping_add(offset as usize));
+    let k = fast.slot(object);
+    if k < limit {
+        assert!(k.wrapping_mul(size) == offset);
+    }
+    let slot: u64 = kani::any();
+    kani::assume(slot < limit);
+    let start = core::ptr::without_provenance::<u8>(base.wrapping_add((slot * size) as usize));
+    assert!(fast.slot(start) == slot);
 }

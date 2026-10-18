@@ -1089,18 +1089,18 @@ impl<'c, 'a, O: Os> Checker<'c, 'a, O> {
 /// compare and a watermark compare. Anything else, a staggered large block included, goes to
 /// the full check.
 #[derive(Clone, Copy, Debug)]
-struct Fast {
-    base: usize,
-    inverse: u64,
-    shift: u32,
-    limit: u64,
+pub(super) struct Fast {
+    pub(super) base: usize,
+    pub(super) inverse: u64,
+    pub(super) shift: u32,
+    pub(super) limit: u64,
 }
 
 impl Fast {
     /// The slot `object` starts if the fast check passes for it (`< limit`); otherwise some
     /// number at or above `limit`.
     #[inline(always)]
-    fn slot(&self, object: *const u8) -> u64 {
+    pub(super) fn slot(&self, object: *const u8) -> u64 {
         let n = object.addr().wrapping_sub(self.base) as u64;
         n.wrapping_mul(self.inverse).rotate_right(self.shift)
     }
@@ -1122,7 +1122,7 @@ impl Fast {
 
 /// The inverse of odd `q` modulo 2^64, by Newton's iteration: each step doubles the number of
 /// correct low bits, and `q` itself is correct to three (`q * q ≡ 1 mod 8`).
-const fn odd_inverse(q: u64) -> u64 {
+pub(super) const fn odd_inverse(q: u64) -> u64 {
     let mut x = q;
     let mut i = 0;
     while i < 5 {
