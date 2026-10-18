@@ -9,6 +9,10 @@
 //! [`front`] holds the per-CPU slabs and the routines. The heap joins them into one allocator
 //! behind `Asmalloc`, the handle a program installs with `#[global_allocator]`, and behind
 //! `SimAsmalloc` and `SimHeap` (feature `sim`), the same heap over the simulated OS with twins.
+//!
+//! A shared object that contains the allocator must be linked `-z nodelete`, as the preload
+//! library is: unloading one kills the process, because a thread's restartable-sequence area
+//! goes on naming code inside it.
 
 #![no_std]
 #![deny(unsafe_op_in_unsafe_fn)]

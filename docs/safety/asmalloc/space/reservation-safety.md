@@ -9,14 +9,16 @@ value the `Space` borrows) returned and that has not been unmapped, and `base` i
 plan's region size, which is the size the reservation got (regions shrink, keeping their number,
 when the OS refuses the largest).
 
-Two places construct a `Space`:
+Three places construct a `Space`:
 
-- `Space::reserve(os)` builds one from the pointer `os.reserve(plan.size(), plan.region_size())`
-  returned, for the plan of the region size it was asking for. By the `Os` contract, that is a
-  live reservation of that length and alignment.
+- `Space::reserve(os)` and `SpaceCell::get_or_reserve` each build one from the pointer
+  `os.reserve(plan.size(), plan.region_size())` returned (the cell's own OS for the cell), for
+  the plan of the region size it was asking for. By the `Os` contract, that is a live
+  reservation of that length and alignment. The cell's count of reservers in flight decides
+  only which size to ask for next; it plays no part in what a `Space` describes.
 - `SpaceCell::decode` rebuilds one from the cell's word, borrowing the cell's own OS.
-  - Only `SpaceCell::get_or_reserve` writes the word, and only with `encode` of a `Space` that
-    `Space::reserve(&self.os)` returned.
+  - Only `SpaceCell::publish`, called from `get_or_reserve`, writes the word, and only with
+    `encode` of the `Space` just built from the cell's own OS.
   - `encode` stores `pack(base, region_shift)`, and `decode` reads `unpack(word)` and rebuilds
     the plan from the geometry and the shift. Kani's `published_words_round_trip_*` proves
     `unpack(pack(base, shift)) == (base, shift)` for every region-aligned non-zero base and every
@@ -58,10 +60,11 @@ So the range is whole pages and not empty.
 It is live by the invariant, and the caller promises nothing uses it afterwards, which is the
 `Os::unmap` condition.
 
-## RESERVATION-04: `mine.unmap()` in `SpaceCell::get_or_reserve`
+## RESERVATION-04: `mine.unmap()` in `SpaceCell::publish`
 
 **Proof.** The compare-and-swap failed, so `mine`'s word was never stored. No other thread
-learned its address, and `mine` is a local of this call that is not used again. That meets
+learned its address, and `mine` was built by this call of `get_or_reserve`, which passed it
+here and does not use it again. That meets
 RESERVATION-03's precondition. A failed unmap leaves an unused reservation behind, which costs
 address space only.
 
@@ -93,7 +96,11 @@ whoever dereferences it, in their own ledger.
 - `the_cell_publishes_one_space`;
 - `racing_threads_publish_one_space_and_losers_unmap`, which checks that only the winner's
   reservation remains;
-- `a_failed_reservation_publishes_nothing`.
+- `a_failed_reservation_publishes_nothing`;
+- `a_failure_while_another_reserves_is_retried_at_the_same_size`,
+  `a_failure_with_no_other_reserver_halves_at_once`,
+  `a_stale_count_costs_bounded_patience_and_then_halves` and
+  `threads_racing_for_room_for_one_heap_all_get_the_largest`, for the count of reservers.
 
 On the real kernel, `os::linux::kernel::tests::the_design_reservation_is_available`.
 

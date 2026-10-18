@@ -59,6 +59,15 @@ succeeds, so the caller gives `ptr` up, and it is a block of the heap it owns by
 caller provides. The write happens only after the allocation succeeded, so on failure `*out`
 is untouched, as POSIX requires.
 
+## MOD-04: `process::resize_in_place_by_address(old, used, size)` in `realloc`
+
+**Precondition.** `old` is a live large block of the heap that the caller owns and is resizing.
+
+**Proof.** `realloc`'s contract: `ptr` is a block of the heap the caller owns. `find` returned
+`Large`, so it is a large slot or run of the heap, live by that contract. `realloc` is resizing
+it to `size`: if the call keeps it in place, the caller gives up what lies past `size`, which
+C's `realloc` allows (the bytes past the new size are no longer the program's).
+
 ## MOD-03: the pass-through calls
 
 `free`, `free_sized`, `free_aligned_sized` and `cfree` call `seam::free(ptr)`; `realloc` calls

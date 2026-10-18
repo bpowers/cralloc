@@ -147,7 +147,13 @@ impl<'a, O: Os> Back<'a, O> {
     /// handed out, if a slot is already free, or if a slot appears twice within a part (up to 64
     /// pointers, fewer when they are scattered; see `group`): those are double frees or frees
     /// of foreign pointers.
-    pub fn launder<P: SlotPointer>(&self, class: SmallClass, objects: &[P]) {
+    ///
+    /// # Safety
+    ///
+    /// Every pointer in `objects` that is a handed-out slot of `class` is one the caller owns
+    /// and gives up: a slot laundered while another still uses it is handed out again, and then
+    /// has two owners. (Anything else aborts, as above.)
+    pub unsafe fn launder<P: SlotPointer>(&self, class: SmallClass, objects: &[P]) {
         self.release_all(class.class(), objects, true);
     }
 
@@ -332,7 +338,13 @@ impl<'a, O: Os> Back<'a, O> {
     ///
     /// A large object that grows in place densely past a size gets huge pages in its slot
     /// (`region::advise_grown`).
-    pub fn resize_in_place(&self, ptr: NonNull<u8>, size: usize) {
+    ///
+    /// # Safety
+    ///
+    /// `ptr` is a live large block of this heap that the caller owns, and nothing reads or
+    /// writes it during the call; if `size` is smaller than its recorded size, the caller gives
+    /// up every byte past `size`.
+    pub unsafe fn resize_in_place(&self, ptr: NonNull<u8>, size: usize) {
         let page = self.space.plan().geometry().page_size();
         let tail = |old: usize, limit: usize| {
             let from = size.next_multiple_of(page);
@@ -543,7 +555,10 @@ impl<'a, O: Os> Back<'a, O> {
     /// A free of a large slot that would take the large classes' retained count over its cap
     /// returns that slot's pages to the OS first, while the caller still holds the slot, and
     /// then releases it uncounted (`purge`).
-    pub fn free(&self, ptr: NonNull<u8>, class: Class) {
+    ///
+    /// Crate-private, because the purge rests on the caller owning the slot and giving it up
+    /// (BACK-CLASS-01): every caller in the crate frees a block its own caller gave up.
+    pub(crate) fn free(&self, ptr: NonNull<u8>, class: Class) {
         if class.is_small() {
             return self.release_all(class, &[ptr.as_ptr()], true);
         }
@@ -555,8 +570,9 @@ impl<'a, O: Os> Back<'a, O> {
     }
 
     /// Frees whatever `ptr` is the start of: a slot, whose class the region table gives, or a
-    /// run. Aborts if it is neither. This is the C `free` of an uncached object.
-    pub fn free_by_address(&self, ptr: NonNull<u8>) {
+    /// run. Aborts if it is neither. This is the C `free` of an uncached object. Crate-private
+    /// as [`Back::free`] is.
+    pub(crate) fn free_by_address(&self, ptr: NonNull<u8>) {
         match self.lookup(ptr.as_ptr()) {
             Some(Kind::Slot(class)) => self.free(ptr, class),
             Some(Kind::Run(_)) => self.free_run(ptr),

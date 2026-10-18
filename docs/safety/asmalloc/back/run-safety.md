@@ -16,8 +16,9 @@ region always has its own head, unassigned or not, below it with only its own ta
 and the count of consecutive tails after a head stops at the next run's head or at a region
 that is not a tail. The regions counted are exactly the ones this run's allocation claimed.
 
-**Proof.** `free_run` is called by the owner of the run to free it: `Back::free_run`'s contract,
-and `free_by_address`'s, is that `ptr` is a live run the caller is giving up. By that contract
+**Proof.** `free_run` is called by the owner of the run to free it: `Back::free_run` and
+`free_by_address` are crate-private, and their callers (`Heap::free_large`, the C `free`,
+`move_large_with`) pass a live run the program, or the move, is giving up. By that contract
 the program no longer reads or writes it. The allocator keeps nothing in object memory, and no
 other thread can have been handed these regions, because they stay tagged until after the
 purge. So nothing touches the range during the call, and nothing in it is needed.

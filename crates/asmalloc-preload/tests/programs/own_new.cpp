@@ -4,7 +4,10 @@
 // so its blocks are not block starts of whatever serves malloc.
 //
 // argv[1] picks the pair: "nothrow" (nothrow new, plain delete), "sized" (plain new, sized
-// delete, through a container), "array" (new[], delete[]).
+// delete, through a container), "array" (new[], delete[]), "matching" (sized deletes of
+// buffers whose size and size plus the header round to the same class, so that a delete that
+// trusts the region table would take the program's block for one of its own), "empty" (new of
+// zero bytes, whose header-adjusted pointer is the start of the next 16-byte slot).
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -47,6 +50,19 @@ int main(int argc, char **argv) {
     } else if (!std::strcmp(mode, "array")) {
         int *a = opaque(new int[100]);
         delete[] a;
+    } else if (!std::strcmp(mode, "matching")) {
+        for (std::size_t size : {2600, 3200, 6000, 12000, 25000}) {
+            for (int i = 0; i < 300; i++) {
+                std::vector<char> buffer;
+                buffer.reserve(size);
+                opaque(buffer.data());
+            }
+        }
+    } else if (!std::strcmp(mode, "empty")) {
+        for (int i = 0; i < 300; i++) {
+            void *p = opaque(::operator new(0));
+            ::operator delete(p, std::size_t(0));
+        }
     } else {
         std::vector<std::string> strings(100, std::string(100, 'x'));
         opaque(strings.data());

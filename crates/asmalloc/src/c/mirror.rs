@@ -56,10 +56,6 @@ fn publish(mirror: Mirror) -> Option<(u64, usize)> {
 /// every pointer a `delete` form is given is one of our heap's or foreign, never one of a
 /// replacement allocator's built on ours); it is then harmless to call again. Before the heap
 /// starts it does nothing, and the next call publishes.
-#[allow(
-    dead_code,
-    reason = "the delete slow paths call it once they decide whose operator delete is basic"
-)]
 pub(super) fn publish_delete() {
     publish(Mirror::Delete);
 }
