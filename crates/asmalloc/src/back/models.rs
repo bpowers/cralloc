@@ -2057,7 +2057,7 @@ fn direct_frees_under_stale_bits_race_clears(preemptions: usize) {
             let (r0, r1) = (host.region_at(0), host.region_at(1));
             let got = match me {
                 0 => {
-                    free_direct(host, &[(r0, 64), (r1, 0), (r0, 64 * 64), (r0, 65)]);
+                    free_direct(host, &[(r0, 64), (r1, 0), (r0, 64 * 64), (r0, 65)], false);
                     Vec::new()
                 }
                 1 => claim(host, 1),
@@ -2098,7 +2098,7 @@ fn direct_frees_heal_what_a_fork_left(preemptions: usize) {
             let got = match me {
                 0 => claim(host, 1),
                 1 => {
-                    free_direct(host, &[(r0, 64), (r1, 0), (r0, 64 * 64), (r0, 65)]);
+                    free_direct(host, &[(r0, 64), (r1, 0), (r0, 64 * 64), (r0, 65)], false);
                     Vec::new()
                 }
                 _ => claim_run_of(host, 2, 1),
@@ -2110,7 +2110,7 @@ fn direct_frees_heal_what_a_fork_left(preemptions: usize) {
             let distinct: BTreeSet<_> = kept.iter().copied().collect();
             assert_eq!(distinct.len(), kept.len(), "a slot claimed twice");
             let (r0, r1) = (host.region_at(0), host.region_at(1));
-            free_direct(host, &[(r0, 64 + 7), (r1, 7), (r0, 64 * 64 + 7)]);
+            free_direct(host, &[(r0, 64 + 7), (r1, 7), (r0, 64 * 64 + 7)], false);
             for (region, word) in [(r0, 1), (r1, 0), (r0, 64)] {
                 assert!(
                     host.path_set(Node::leaf(region, word)),
