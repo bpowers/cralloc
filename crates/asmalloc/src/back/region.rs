@@ -599,14 +599,20 @@ mod tests {
         let host = TestHost::<Atomic>::new(plan(), class, 1);
         let region = host.region_at(0);
         let page = host.layout().page_size();
+        if POPULATE_MAX_PAGES < COMMIT_AHEAD_PAGES {
+            // Populate-ahead is off.
+            carve_up_to(&host, region, 48 << 20);
+            assert_eq!(host.populated.load(SeqCst), 0);
+            return;
+        }
         // Nothing until a stretch would be a whole commit step.
         let start = (COMMIT_AHEAD_PAGES * page) << POPULATE_SHIFT;
         carve_up_to(&host, region, start - page);
         assert_eq!(host.populated.load(SeqCst), 0);
-        let most = carve_up_to(&host, region, 16 << 20);
+        let most = carve_up_to(&host, region, 12 << 20);
         let populated = host.populated.load(SeqCst);
         assert!(
-            populated * page > (15 << 20) - start,
+            populated * page > (11 << 20) - start,
             "populated {populated} pages"
         );
         assert!(

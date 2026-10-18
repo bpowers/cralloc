@@ -75,12 +75,16 @@ const fn knob(value: Option<&str>, default: usize) -> usize {
 }
 
 /// A region of a class that gets huge pages marks the rest of itself for them once it has
-/// carved more than this many huge pages: 32, or 64 MiB. The first touch of a huge page makes
+/// carved more than this many huge pages: 8, or 16 MiB. The first touch of a huge page makes
 /// all of it resident, so the page at the watermark costs up to one huge page that the
-/// program never asked for; after 64 MiB that is at most 3% of the class. (At 8 MiB it was up
-/// to a quarter, and was the whole of the gap to jemalloc on mid-sized heaps.) A simulated
-/// heap whose regions are smaller than four times this uses a quarter of a region instead.
-pub const HUGE_AFTER_HUGE_PAGES: usize = knob(option_env!("ASMALLOC_HUGE_AFTER_HUGE_PAGES"), 32);
+/// program never asked for: at most an eighth of the class. Measured against 64 MiB, after
+/// the rules that move parked objects back to the bitmaps: JSON spends half as long in the
+/// kernel (2.4 against 4.5 cycles a byte) for 1.1 MiB more at its peak; 1M-object churn and
+/// the burst-then-idle test peak 1.7 and 7 MiB higher (0.7% and 3%); memory after a peak is
+/// unchanged. 8 MiB saves a little more time and takes churn 3 MiB over jemalloc
+/// (`docs/research/zen5-roofline.md`, section 7). A simulated heap whose regions are smaller
+/// than four times this uses a quarter of a region instead.
+pub const HUGE_AFTER_HUGE_PAGES: usize = knob(option_env!("ASMALLOC_HUGE_AFTER_HUGE_PAGES"), 8);
 
 /// Only classes with at least this many slots to a page get huge pages or populate-ahead: 4,
 /// so classes up to 1 KiB. Small objects are dense in their pages, so a huge page holds what the program
@@ -128,10 +132,13 @@ pub const COMMIT_AHEAD_PAGES: usize = 16;
 /// stretch per region: an eighth of what the class has carved, and never more than the cap.
 pub const POPULATE_SHIFT: u32 = 3;
 
-/// The longest populate stretch, in pages: 64, or 256 KiB. Populating 16 pages at once already
-/// saves most of what populating can (`docs/research/zen5-roofline.md`, section 7); longer
-/// stretches only add overshoot. Zero turns populate-ahead off.
-pub const POPULATE_MAX_PAGES: usize = knob(option_env!("ASMALLOC_POPULATE_MAX_PAGES"), 64);
+/// The longest populate stretch, in pages: 0, so populate-ahead is off. A populate still
+/// allocates, zeroes and maps each page one at a time and skips only the exception: 440 ns a
+/// page against 570 for a fault, where a huge page costs 150. On the workloads it cut faults
+/// by three to five times and kernel time by under a tenth, for about 1 MiB more at each peak
+/// (`docs/research/zen5-roofline.md`, section 7). 64 (256 KiB) is the value that was
+/// measured: populating 16 pages at once already saves all populating can.
+pub const POPULATE_MAX_PAGES: usize = knob(option_env!("ASMALLOC_POPULATE_MAX_PAGES"), 0);
 
 /// In the huge-page part, each commit makes writable whole huge pages, this many beyond what
 /// the carve needs: 1, or 2 MiB, so growth faults a huge page at a time.
