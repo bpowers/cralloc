@@ -1026,6 +1026,7 @@ typedef struct {
 
 static RseqCs *sequences;
 static size_t n_sequences;
+static uintptr_t object_base;
 static _Atomic long n_trap;
 // Run-time addresses of the instructions inside the sequences, if SOAK_INSNS gave them.
 static uint64_t *insns;
@@ -1075,6 +1076,7 @@ static int find_sequences(struct dl_phdr_info *info, size_t size, void *data) {
             // Mapped and relocated: the descriptors hold run-time addresses.
             sequences = (RseqCs *)(info->dlpi_addr + sh[i].sh_addr);
             n_sequences = sh[i].sh_size / sizeof(RseqCs);
+            object_base = info->dlpi_addr;
         }
     if (n_sequences) load_insns(info->dlpi_addr);
     close(fd);
@@ -1152,6 +1154,13 @@ static void *trap_worker(void *arg) {
     return NULL;
 }
 
+// The exported function that holds `ip`, or "?" for a local one (look its offset up in the
+// object's symbol table).
+static const char *symbol_of(uint64_t ip) {
+    Dl_info info;
+    return dladdr((void *)ip, &info) && info.dli_sname ? info.dli_sname : "?";
+}
+
 // sweep: every listed instruction in turn, on the main thread.
 static long sweep_ops = 200000;
 
@@ -1206,17 +1215,14 @@ static void run_sweep(void) {
         if (got) {
             covered++;
         } else {
-            Dl_info info;
-            const char *name = dladdr((void *)cs->start_ip, &info) && info.dli_sname
-                                   ? info.dli_sname
-                                   : "?";
-            say("soak sweep: sequence at %#lx (%s, %zu instructions) never fired\n",
-                (unsigned long)cs->start_ip, name, listed);
+            say("soak sweep: sequence at +%#lx (%s, %zu instructions) never fired\n",
+                (unsigned long)(cs->start_ip - object_base), symbol_of(cs->start_ip), listed);
             missed++;
         }
         if (listed && got < listed)
-            say("soak sweep: sequence at %#lx: %zu of %zu instructions fired\n",
-                (unsigned long)cs->start_ip, got, listed);
+            say("soak sweep: sequence at +%#lx (%s): %zu of %zu instructions fired\n",
+                (unsigned long)(cs->start_ip - object_base), symbol_of(cs->start_ip), got,
+                listed);
     }
     say("soak sweep: %zu of %zu sequences and %ld of %zu instructions fired, in %ld operations\n",
         covered, n_sequences, hit, n_insns, ops);
