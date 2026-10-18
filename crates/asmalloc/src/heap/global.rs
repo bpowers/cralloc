@@ -64,6 +64,28 @@ impl Asmalloc {
     pub fn collect() -> usize {
         process().collect()
     }
+
+    /// One round of the heap's clocked maintenance, which otherwise runs only on slow paths:
+    /// drains the magazines of every CPU that has taken no slow path for an interval (about a
+    /// second; one `membarrier` each), launders what the depot's stacks did not need during
+    /// the last interval, and takes the purge pass that is due to its end. It respects the
+    /// clock as the slow paths do, so calling it more often than about once a second does next
+    /// to nothing, and it is not [`Asmalloc::collect`], which empties every cache at once.
+    ///
+    /// A process whose threads all stay inside their loaded magazines never takes a slow
+    /// path, and keeps what it held when it went quiet until something calls this. The
+    /// `background` feature's [`Asmalloc::start_background`] calls it from a thread of its
+    /// own; a program with an idle hook can call it from there instead. It never waits, and
+    /// any thread may call it at any time.
+    pub fn maintain() {
+        process().maintain();
+    }
+
+    /// How long the background thread sleeps between calls of [`Asmalloc::maintain`]: under
+    /// the shortest interval the clock gives on a plausible machine (`depot::IDLE_TICKS`, 0.7 s
+    /// at 6 GHz), so that every interval gets a call.
+    #[doc(hidden)]
+    pub const MAINTAIN_EVERY: core::time::Duration = core::time::Duration::from_millis(500);
 }
 
 // SAFETY: GLOBAL-01. Every method is the process heap's.

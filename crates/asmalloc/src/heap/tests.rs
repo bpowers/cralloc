@@ -817,6 +817,119 @@ fn large_allocations_and_frees_run_the_heartbeat() {
     assert_eq!(parked(&heap).on_cpus, 0, "{:?}", parked(&heap));
 }
 
+/// The twelve sizes of a quiet program's light work.
+const LIGHT: [usize; 12] = [16, 24, 32, 40, 48, 64, 80, 96, 128, 160, 192, 256];
+
+/// What a quiet program does: a few objects of each of the light sizes, allocated and freed,
+/// which once the magazines are loaded never leaves them.
+fn light_work<H: GlobalAlloc>(heap: &H) {
+    for size in LIGHT {
+        let l = layout(size, 8);
+        // SAFETY: a valid layout; each block is freed once with it.
+        unsafe {
+            let held: Vec<_> = (0..4).map(|_| heap.alloc(l)).collect();
+            for p in held {
+                assert!(!p.is_null());
+                heap.dealloc(p, l);
+            }
+        }
+    }
+}
+
+/// Allocates `count` objects of the light sizes, writes them, and frees them in random order.
+fn burst<H: GlobalAlloc>(heap: &H, count: usize) {
+    let mut x = 0x2545_f491_4f6c_dd1du64;
+    let mut next = move || {
+        x ^= x << 13;
+        x ^= x >> 7;
+        x ^= x << 17;
+        x
+    };
+    let mut held: Vec<_> = (0..count)
+        .map(|_| {
+            let l = layout(LIGHT[next() as usize % LIGHT.len()], 8);
+            // SAFETY: a valid layout; the write stays inside the block.
+            let p = unsafe { heap.alloc(l) };
+            assert!(!p.is_null());
+            // SAFETY: as above.
+            unsafe { p.write_bytes(1, l.size()) };
+            (p, l)
+        })
+        .collect();
+    for i in (1..held.len()).rev() {
+        held.swap(i, next() as usize % (i + 1));
+    }
+    for (p, l) in held {
+        // SAFETY: allocated above with this layout, freed once.
+        unsafe { heap.dealloc(p, l) };
+    }
+}
+
+fn resident<S: crate::os::sim::Shape>(heap: &SimHeap<S>) -> usize {
+    // SAFETY: nothing else uses the heap during the call, and every byte the heap and the
+    // test wrote is initialized.
+    unsafe { heap.os().resident_bytes() }
+}
+
+/// The case `maintain` is for: a burst of frees, then light work that never leaves the loaded
+/// magazines, so that no slow path runs. Without `maintain` the heap keeps what it held. With
+/// it once an interval, the idle slab is drained and laundered, the depot sheds, and the
+/// clocked purge returns what is free from the top down, a quarter of what is retained an
+/// interval once under the cap: resident memory comes down to what `collect` leaves, within
+/// what that rate leaves after the intervals run. A second call in an interval does nothing.
+#[test]
+fn maintain_brings_a_quiet_heap_down_to_what_collect_leaves() {
+    let heap = SimHeap::<Shape>::new();
+    burst(&heap, if cfg!(miri) { 3000 } else { 100_000 });
+    light_work(&heap);
+    let quiet = resident(&heap);
+    let purges = heap.os().calls(Call::Purge);
+    for _ in 0..3 {
+        heap.os().advance_clock(crate::depot::IDLE_TICKS);
+        light_work(&heap);
+    }
+    assert_eq!(
+        heap.os().calls(Call::Purge),
+        purges,
+        "the light work took a slow path"
+    );
+    assert_eq!(resident(&heap), quiet);
+    let intervals = 14;
+    for _ in 0..intervals {
+        heap.os().advance_clock(crate::depot::IDLE_TICKS);
+        light_work(&heap);
+        heap.maintain();
+        let calls = (
+            heap.os().calls(Call::Purge),
+            heap.os().calls(Call::Fence),
+            resident(&heap),
+        );
+        heap.maintain();
+        let again = (
+            heap.os().calls(Call::Purge),
+            heap.os().calls(Call::Fence),
+            resident(&heap),
+        );
+        assert_eq!(again, calls, "a second call in an interval did something");
+    }
+    let maintained = resident(&heap);
+    heap.collect();
+    let collected = resident(&heap);
+    // Two intervals before the purge has what was parked (a look, then the drain and shed),
+    // one pass down to the cap, then a quarter of the rest each interval.
+    let geometry = <Shape as crate::os::sim::Shape>::GEOMETRY;
+    let cap = crate::back::policy::retained_cap(geometry);
+    let left = cap as f64 * 0.75f64.powi(intervals - 3);
+    let slack = 2 * geometry.huge_page_size();
+    std::eprintln!("quiet {quiet} maintained {maintained} collected {collected} bound {left}");
+    assert!(
+        maintained <= collected + left as usize + slack,
+        "after {intervals} intervals of maintain: {maintained} bytes resident, collect leaves \
+         {collected}, the clocked rules allow {left:.0} more"
+    );
+    assert!(quiet > 4 * maintained, "{quiet} {maintained}");
+}
+
 /// As `blocks_have_one_owner_while_threads_churn_and_drains_run`, with the clock moving an
 /// interval every few milliseconds, so that the age limit's takes, the depot's sheds and the
 /// idle check's drains all run among the churn.
@@ -894,6 +1007,32 @@ mod process {
         let _ = Asmalloc::collect();
         every_class(&Asmalloc, 1);
         let _ = Asmalloc::collect();
+    }
+
+    /// `maintain` on the process heap while other tests use it, and its thread: started
+    /// twice, it is one thread, which then maintains the heap under every test that follows.
+    #[test]
+    fn the_process_heap_maintains_and_its_thread_starts_once() {
+        bursts(&Asmalloc, 64, 600, 4);
+        Asmalloc::maintain();
+        Asmalloc::start_background().expect("a thread starts");
+        Asmalloc::start_background().expect("a second start is harmless");
+        let named = || {
+            std::fs::read_dir("/proc/self/task")
+                .unwrap()
+                .filter_map(|task| std::fs::read_to_string(task.ok()?.path().join("comm")).ok())
+                .filter(|name| name.trim() == "asmalloc")
+                .count()
+        };
+        // The new thread names itself once it runs.
+        let mut tries = 0;
+        while named() == 0 && tries < 200 {
+            thread::sleep(std::time::Duration::from_millis(5));
+            tries += 1;
+        }
+        assert_eq!(named(), 1);
+        every_class(&Asmalloc, 1);
+        Asmalloc::maintain();
     }
 
     #[test]

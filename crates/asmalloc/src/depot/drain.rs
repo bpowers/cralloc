@@ -24,6 +24,14 @@
 //!
 //! The drain is the only code that writes one CPU's slab from another, and it never waits: each
 //! step is a bounded number of atomic instructions or one system call.
+//!
+//! What it takes goes to the depot, where the heartbeat's idle check and `collect` want it: a
+//! slow path may launder only a few magazines, and `collect` launders the depot next. The
+//! background thread's `maintain` launders what it takes instead ([`Disposal::Launder`]),
+//! which is what the age limit would have done on that CPU's own slow paths: a slab busy only
+//! on its fast paths would otherwise pop its drained magazines straight back from the depot,
+//! and the objects in them, scattered wherever the heap once was, would pin their pages for
+//! ever.
 
 use super::magazine::Magazine;
 use super::{Cache, Source, generation};
@@ -47,6 +55,15 @@ pub enum Drained {
     Done,
 }
 
+/// What a drain does with the magazines it takes.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(super) enum Disposal {
+    /// Sends them to the depot as they are.
+    Park,
+    /// Returns their objects to the source and sends them to the depot empty.
+    Launder,
+}
+
 /// The fields of a class the drain exchanges, in the order it keeps their old values.
 const KINDS: [Option<Spare>; 3] = [None, Some(Spare::Full), Some(Spare::Empty)];
 
@@ -60,6 +77,11 @@ fn field(class: SmallClass, kind: Option<Spare>) -> Field {
 impl<O: Os, R: Routines, S: Source> Cache<'_, O, R, S> {
     /// Drains the slab of `cpu`, sending everything cached there to the depot.
     pub fn drain(&self, cpu: Cpu) -> Drained {
+        self.drain_with(cpu, Disposal::Park)
+    }
+
+    /// Drains the slab of `cpu`, disposing of what it takes as `disposal` says.
+    pub(super) fn drain_with(&self, cpu: Cpu, disposal: Disposal) -> Drained {
         if !generation::drains_enabled(self.depot) {
             return Drained::Disabled;
         }
@@ -128,8 +150,8 @@ impl<O: Os, R: Routines, S: Source> Cache<'_, O, R, S> {
                     continue;
                 }
                 match kind {
-                    None => self.take_loaded(class, was.addr()),
-                    Some(_) => self.take_chain(class, was.addr()),
+                    None => self.take_loaded(class, was.addr(), disposal),
+                    Some(_) => self.take_chain(class, was.addr(), disposal),
                 }
             }
         }
@@ -146,12 +168,20 @@ impl<O: Os, R: Routines, S: Source> Cache<'_, O, R, S> {
             .compare_exchange(generation, 0, AcqRel, Relaxed);
     }
 
-    /// Sends the magazine a hot word named to the depot, at the level the word gave it.
-    fn take_loaded(&self, class: SmallClass, word: usize) {
+    /// Disposes of a magazine the drain took.
+    fn dispose(&self, class: SmallClass, magazine: Magazine<'_>, disposal: Disposal) {
+        if disposal == Disposal::Launder {
+            self.launder_held(class, &magazine);
+        }
+        self.to_depot(class, magazine);
+    }
+
+    /// Disposes of the magazine a hot word named, at the level the word gave it.
+    fn take_loaded(&self, class: SmallClass, word: usize, disposal: Disposal) {
         match self.area.loaded(word, class.magazine()) {
             Some((magazine, level)) => {
                 magazine.set_level(level);
-                self.to_depot(class, magazine);
+                self.dispose(class, magazine, disposal);
             }
             None => self
                 .os()
@@ -159,8 +189,8 @@ impl<O: Os, R: Routines, S: Source> Cache<'_, O, R, S> {
         }
     }
 
-    /// Sends every magazine of a spare stack to the depot, each at its recorded level.
-    fn take_chain(&self, class: SmallClass, head: usize) {
+    /// Disposes of every magazine of a spare stack, each at its recorded level.
+    fn take_chain(&self, class: SmallClass, head: usize, disposal: Disposal) {
         let mut next = head;
         while next != 0 {
             let magazine: Magazine<'_> = match self.area.magazine(next, class.magazine()) {
@@ -172,7 +202,7 @@ impl<O: Os, R: Routines, S: Source> Cache<'_, O, R, S> {
             // The link must be read before the depot overwrites it.
             next = magazine.link().load(Acquire).addr();
             magazine.set_level(magazine.level());
-            self.to_depot(class, magazine);
+            self.dispose(class, magazine, disposal);
         }
     }
 }

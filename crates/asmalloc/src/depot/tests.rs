@@ -605,3 +605,233 @@ fn threads_that_trade_objects_in_parallel_lose_nothing() {
         .collect();
     rig.census(&user, false);
 }
+
+/// CPU 0 allocates and frees `count` objects of the tiny class and goes quiet, leaving objects
+/// in its loaded magazine, its spares and the depot.
+fn park_on_cpu_0(rig: &TestRig, count: usize) {
+    let machine = SimCpu::new(0);
+    let cache = rig.cache(&machine);
+    let class = tiny_class();
+    let held: Vec<_> = (0..count).filter_map(|_| cache.alloc(class)).collect();
+    assert_eq!(held.len(), count);
+    for object in held {
+        cache.free(class, object);
+    }
+    assert!(!cpu_0_is_empty(rig));
+}
+
+/// What `maintain` changes that a test can see: the fences made, the objects the source holds,
+/// and the hints the clocked rules keep (each slab's sighting, the depot's water words and its
+/// set of owing classes).
+#[derive(PartialEq, Eq, Debug)]
+struct Trace {
+    fences: u64,
+    held: Vec<usize>,
+    sightings: Vec<u64>,
+    water: Vec<u64>,
+    owing: u64,
+}
+
+fn trace(rig: &TestRig) -> Trace {
+    let mut held = rig.source.held();
+    held.sort_unstable();
+    Trace {
+        fences: rig.os().calls(Call::Fence),
+        held,
+        sightings: rig
+            .slabs()
+            .cpus()
+            .map(|cpu| rig.slabs().slab(cpu).seen().load(Relaxed))
+            .collect(),
+        water: rig.depot.water.iter().map(|w| w.load(Relaxed)).collect(),
+        owing: rig.depot.owing.load(Relaxed),
+    }
+}
+
+/// A quiet heap, with no slow path anywhere: `maintain` once an interval drains the idle slab
+/// (laundering what it takes) an interval after its first look, and the depot sheds what it held
+/// at the next look, so that everything parked is back in the source.
+#[test]
+fn maintain_returns_what_a_quiet_heap_parked() {
+    let rig = rig(12, TIGHT);
+    park_on_cpu_0(&rig, 8);
+    assert!(rig.source.held().len() < 12);
+    let steps = rig.source.purges();
+    let keeper = SimCpu::new(1);
+    let cache = rig.cache(&keeper);
+    cache.maintain();
+    assert_eq!(
+        rig.os().calls(Call::Fence),
+        0,
+        "the first look only records"
+    );
+    rig.os().advance_clock(IDLE_TICKS);
+    cache.maintain();
+    assert_eq!(rig.os().calls(Call::Fence), 1);
+    assert_eq!(rig.os().last_fence(), Some(0));
+    assert!(cpu_0_is_empty(&rig));
+    assert_eq!(rig.source.held().len(), 12, "{:?}", rig.census(&[], false));
+    // `maintain` is not a slow path of the CPU it runs on.
+    assert_eq!(rig.slabs().slab(cpu(&rig, 1)).activity(), 0);
+    let census = rig.census(&[], false);
+    assert_eq!((census.markers, census.claims), (0, 0));
+    assert_eq!(rig.source.passes(), 2, "each call asks for the purge pass");
+    assert_eq!(rig.source.purges(), steps, "and takes no heartbeat's step");
+}
+
+/// The clock paces `maintain` as it paces the heartbeats: a second call in the same interval
+/// finds nothing to do, whatever the first did.
+#[test]
+fn maintain_twice_in_an_interval_changes_nothing_the_second_time() {
+    let rig = rig(12, TIGHT);
+    park_on_cpu_0(&rig, 8);
+    let keeper = SimCpu::new(1);
+    let cache = rig.cache(&keeper);
+    let mut changed = 0;
+    for _ in 0..4 {
+        let before = trace(&rig);
+        cache.maintain();
+        let first = trace(&rig);
+        changed += usize::from(first != before);
+        cache.maintain();
+        assert_eq!(trace(&rig), first);
+        rig.os().advance_clock(IDLE_TICKS);
+        // The CPU is used again between intervals.
+        park_on_cpu_0(&rig, 3);
+    }
+    assert!(changed >= 3, "the first calls of an interval did something");
+    rig.census(&[], false);
+}
+
+/// `maintain`'s idle look sees a CPU that is busy only on fast paths stand still, as a
+/// heartbeat's does: it drains it, and its objects go back to the source, at most once an
+/// interval however often `maintain` runs.
+#[test]
+fn maintain_drains_a_cpu_busy_on_fast_paths_at_most_once_an_interval() {
+    let busy = Class::of_size(64).unwrap().small().unwrap();
+    let rig: TestRig = Rig::new(&[busy, tiny_class()], 1024, Tuning::DEFAULT);
+    let machine = SimCpu::new(0);
+    let cache = rig.cache(&machine);
+    let held = cache.alloc(busy).unwrap();
+    let keeper = rig.cache(SimCpu::new(1));
+    let slab = rig.slabs().slab(cpu(&rig, 0));
+    let mut drains = Vec::new();
+    let intervals = 10;
+    let steps_per_interval = 8;
+    for _ in 0..intervals * steps_per_interval {
+        rig.os().advance_clock(IDLE_TICKS / steps_per_interval);
+        for _ in 0..4 {
+            let object = cache.alloc(busy).unwrap();
+            cache.free(busy, object);
+        }
+        let fences = rig.os().calls(Call::Fence);
+        keeper.maintain();
+        keeper.maintain();
+        if rig.os().calls(Call::Fence) > fences {
+            assert_eq!(rig.os().last_fence(), Some(0));
+            assert!(cpu_0_is_empty(&rig));
+            // Laundered, not parked: everything but the block the program holds is back.
+            assert_eq!(rig.source.held().len(), 2 * 1024 - 1);
+            drains.push(rig.os().ticks());
+        }
+    }
+    assert_eq!(slab.activity(), 1 + drains.len() as u64);
+    assert!(drains.len() >= intervals as usize / 2 - 1, "{drains:?}");
+    for pair in drains.windows(2) {
+        assert!(
+            pair[1] - pair[0] >= IDLE_TICKS,
+            "drained twice in an interval: {drains:?}"
+        );
+    }
+    cache.free(busy, held);
+    rig.census(&[], false);
+}
+
+/// Without drains (no fence), `maintain` still sheds the depot and leaves every slab alone.
+#[test]
+fn maintain_without_drains_sheds_the_depot() {
+    let rig = rig(12, TIGHT);
+    rig.os().set_faults(Call::RegisterFence, Faults::ALWAYS);
+    park_on_cpu_0(&rig, 8);
+    let keeper = rig.cache(SimCpu::new(1));
+    let class = tiny_class();
+    let area = keeper.area();
+    assert!(rig.depot.full(class).objects(area, class.magazine()) > 0);
+    for _ in 0..3 {
+        keeper.maintain();
+        rig.os().advance_clock(IDLE_TICKS);
+    }
+    assert_eq!(rig.os().calls(Call::Fence), 0);
+    assert_eq!(rig.depot.full(class).objects(area, class.magazine()), 0);
+    assert!(!cpu_0_is_empty(&rig));
+    rig.census(&[], false);
+}
+
+/// Forks at switch point `at` of a `maintain` that drains an idle CPU and sheds the depot,
+/// from a thread that does or does not survive. The child goes on as in `fork_at`, then keeps
+/// maintaining: nothing is in two places, no marker or claim is left, and nothing the parent
+/// left blocks it.
+fn fork_in_maintain_at(at: usize, survives: bool) -> bool {
+    let rig = rig(12, TIGHT);
+    park_on_cpu_0(&rig, 8);
+    let keeper = SimCpu::new(1);
+    rig.cache(&keeper).maintain();
+    rig.os().advance_clock(IDLE_TICKS);
+    let fork = || {
+        // SAFETY: one thread, which is inside this call; nothing else touches the page.
+        unsafe { rig.os().wipe_for_fork() };
+        if !survives {
+            panic::resume_unwind(Box::new(Vanished));
+        }
+    };
+    let outcome = panic::catch_unwind(AssertUnwindSafe(|| {
+        interrupt_at(at, &fork, || rig.cache(&keeper).maintain()).1
+    }));
+    let hit = match outcome {
+        Ok(hit) => hit,
+        Err(payload) if payload.is::<Vanished>() => true,
+        Err(payload) => panic::resume_unwind(payload),
+    };
+    let child = SimCpu::new(0);
+    let cache = rig.cache(&child);
+    let class = tiny_class();
+    for n in [0, 1, 0] {
+        child.set_cpu(n);
+        let held: Vec<_> = (0..3).filter_map(|_| cache.alloc(class)).collect();
+        for object in held {
+            cache.free(class, object);
+        }
+    }
+    child.set_cpu(1);
+    for n in [0, 1] {
+        assert_ne!(cache.drain(cpu(&rig, n)), Drained::Busy);
+    }
+    for _ in 0..3 {
+        rig.os().advance_clock(IDLE_TICKS);
+        cache.maintain();
+    }
+    let census = rig.census(&[], !survives);
+    assert_eq!((census.markers, census.claims), (0, 0), "{census:?}");
+    if survives {
+        assert_eq!(census.lost_magazines + census.lost_objects, 0);
+    }
+    hit
+}
+
+#[test]
+fn a_fork_the_thread_survives_at_every_step_of_maintain_leaves_a_clean_child() {
+    let mut at = 0;
+    while fork_in_maintain_at(at, true) {
+        at += STRIDE;
+    }
+    assert!(at > 20, "maintain has {at} switch points");
+}
+
+#[test]
+fn a_fork_the_thread_does_not_survive_at_every_step_of_maintain_duplicates_nothing() {
+    let mut at = 0;
+    while fork_in_maintain_at(at, false) {
+        at += STRIDE;
+    }
+    assert!(at > 20, "maintain has {at} switch points");
+}

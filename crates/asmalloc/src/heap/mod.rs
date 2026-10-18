@@ -26,6 +26,10 @@
 //!   large allocation or free counts as a slow path and runs a heartbeat.
 //! - **`collect`** returns everything that can be returned now: the depot's sweep of every
 //!   slab and stack (`Cache::collect`), then the back end's purge of what is free.
+//! - **`maintain`** is one round of the clocked maintenance for the whole heap
+//!   (`Cache::maintain`, which ends with the back end's clocked purge pass): what the
+//!   heartbeats of an interval would have done, for a background thread (`background.rs`,
+//!   feature `background`) or a program's idle hook.
 
 mod address;
 mod large;
@@ -33,6 +37,15 @@ mod source;
 
 #[cfg(feature = "allocator-api")]
 mod allocator;
+// Also in the crate's own tests, so that the gate builds, lints and runs it.
+#[cfg(all(
+    any(test, feature = "background"),
+    target_os = "linux",
+    target_arch = "x86_64",
+    not(miri),
+    not(kani)
+))]
+mod background;
 #[cfg(all(target_os = "linux", target_arch = "x86_64", not(miri), not(kani)))]
 mod global;
 #[cfg(any(test, feature = "sim"))]
@@ -370,7 +383,7 @@ impl<'a, O: Os, R: Routines + Copy> Bound<'a, O, R> {
     #[inline(never)]
     pub(crate) fn heartbeat(self) {
         if let Some(back) = self.heap.started() {
-            self.cache(&back).maintain();
+            self.cache(&back).lone_heartbeat();
         }
     }
 
@@ -384,6 +397,16 @@ impl<'a, O: Os, R: Routines + Copy> Bound<'a, O, R> {
         };
         self.cache(&back).collect();
         back.trim()
+    }
+
+    /// One round of the clocked maintenance for the whole heap: the idle look at every slab
+    /// in use, every depot stack's shedding, and the clocked purge pass to its end. Respects
+    /// the clock, so a second call within an interval does next to nothing. Nothing before the
+    /// heap has started.
+    pub(crate) fn maintain(self) {
+        if let Some(back) = self.heap.started() {
+            self.cache(&back).maintain();
+        }
     }
 
     /// Drains the slab of CPU number `cpu` now, as the heartbeat's idle check would once it had

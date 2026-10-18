@@ -26,6 +26,19 @@
 //! that knows it is idle, and [`Asmalloc::inspect`] reports where the heap's memory is
 //! ([`stats`]).
 //!
+//! The heap's maintenance (returning idle memory, emptying idle caches) runs on its slow paths,
+//! so a program whose threads all stay inside their caches never runs it and keeps what it
+//! held when it went quiet. [`Asmalloc::maintain`] runs one round of it for the whole heap, for
+//! a program with an idle hook of its own. The `background` feature adds
+//! `Asmalloc::start_background`, which starts a thread that calls it about twice a second:
+//!
+//! ```ignore
+//! fn main() {
+//!     asmalloc::Asmalloc::start_background().expect("a thread for the allocator");
+//!     // ...
+//! }
+//! ```
+//!
 //! For the C `malloc` family, [`export_c_abi!`] exports it under its C names from the crate
 //! that invokes it (the `c-abi` feature does the same from this crate); the `asmalloc-preload`
 //! library does this for any dynamically linked program.
@@ -74,7 +87,7 @@ compile_error!("asmalloc supports 64-bit targets only");
 
 #[cfg(any(test, kani, feature = "sim"))]
 extern crate alloc;
-#[cfg(test)]
+#[cfg(any(test, feature = "background"))]
 extern crate std;
 
 #[cfg(feature = "internals")]

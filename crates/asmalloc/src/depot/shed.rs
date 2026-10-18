@@ -230,6 +230,26 @@ impl<O: Os, R: Routines, S: Source> Cache<'_, O, R, S> {
         }
     }
 
+    /// Pays every debt the stacks owe now, a magazine at a time, for `maintain`: what the
+    /// heartbeats of an interval would launder by [`Cache::shed`]. Each shed of an owing class
+    /// pays at least one object or ends the debt, so a class takes at most one shed more than
+    /// the objects it owed when its turn came; the bound only keeps a debt that a racing look
+    /// starts from extending the loop.
+    pub(super) fn shed_all(&self) {
+        for class in SmallClass::all() {
+            let ordinal = class.ordinal() % SMALL_COUNT;
+            let bit = 1u64 << ordinal;
+            let owed = Water(self.depot.water[ordinal].load(Relaxed)).owed();
+            for _ in 0..=owed {
+                if self.depot.owing.load(Relaxed) & bit == 0 {
+                    break;
+                }
+                // The first owing class at or after this one's ordinal is this one.
+                self.shed(ordinal as u64);
+            }
+        }
+    }
+
     /// Clears the owing bit of a class whose debt is paid. A look that made it owe again after
     /// the debt was read either set the bit after this clears it, or wrote its debt before the
     /// clear, in which case the read below sees it and the bit is set again.

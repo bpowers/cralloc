@@ -24,7 +24,9 @@
 //! need during an interval (`shed.rs`); and one retiring full magazine in [`REFRESH_EVERY`] is
 //! laundered instead of kept (`slow.rs`). A heartbeat launders at most one magazine for each
 //! rule. [`Cache::collect`] does all of it at once, without waiting for the clock
-//! (`collect.rs`).
+//! (`collect.rs`), and [`Cache::maintain`] does an interval's worth of it for every slab and
+//! stack at once, for a thread that keeps the clocked rules going when no slow path runs
+//! (`maintain.rs`).
 //!
 //! The protocols follow the TLA+ models in `tla/`: `Exchange.tla` for the slow path,
 //! `Depot.tla` for the stacks, `Drain.tla` (protocol "gen") for the drain and `Fork.tla` for
@@ -40,6 +42,7 @@ mod inspect;
 #[cfg(test)]
 mod interleave;
 mod magazine;
+mod maintain;
 #[cfg(test)]
 mod rules;
 mod shed;

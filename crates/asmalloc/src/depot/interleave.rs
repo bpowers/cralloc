@@ -315,6 +315,80 @@ fn a_fork_at_any_step_duplicates_nothing(bounds: Bounds, ops: &[Op]) {
     assert!(found.forks > 0);
 }
 
+/// A world that `maintain` has looked at once, an interval ago, with CPU 0 quiet since: the next
+/// `maintain` drains CPU 0 and launders what it takes, and sheds what the depot holds.
+fn quiet_world(migrations: usize) -> World {
+    let world = World::new(6, migrations);
+    world.populate();
+    let machine = world.machine(THREADS - 1, 1);
+    world.rig.cache(&machine).maintain();
+    world.rig.os().advance_clock(2 * IDLE_TICKS);
+    world
+}
+
+/// `maintain` from CPU 1 races a mutator on CPU 0, which may migrate (`maintain.rs`): its drain
+/// meets the mutator's sequences as any drain does, and its launders and sheds meet the
+/// mutator's exchanges with the depot.
+fn maintain_and_a_mutator_keep_one_owner_under_every_schedule(bounds: Bounds, migrations: usize) {
+    let found = explore(
+        bounds,
+        2,
+        || quiet_world(migrations),
+        |world, me| {
+            if me == 0 {
+                world.run(&world.machine(me, 0), MUTATE);
+            } else {
+                world.rig.cache(&world.machine(me, 1)).maintain();
+            }
+        },
+        |_| {},
+        |world, _| world.check(false),
+    );
+    report("maintain", found);
+}
+
+/// A fork at any step of `maintain` racing a mutator, either thread forking, as in
+/// `a_fork_at_any_step_duplicates_nothing`; the child then maintains as well.
+fn a_fork_at_any_step_of_maintain_duplicates_nothing(bounds: Bounds) {
+    let found = explore(
+        bounds,
+        2,
+        || quiet_world(0),
+        |world, me| {
+            if me == 0 {
+                world.run(&world.machine(me, 0), MUTATE);
+            } else {
+                world.rig.cache(&world.machine(me, 1)).maintain();
+            }
+        },
+        |world| {
+            // SAFETY: at a fork the checker has stopped every other thread.
+            unsafe { world.rig.os().wipe_for_fork() };
+            let child = world.machine(THREADS - 1, 0);
+            world.alloc(&child);
+            world.free(&child);
+        },
+        |world, forked| {
+            if forked {
+                let child = world.machine(0, 0);
+                for cpu in 0..CPUS {
+                    child.thread.set_cpu(cpu as i32);
+                    world.alloc(&child);
+                    world.free(&child);
+                }
+                let cache = world.rig.cache(&child);
+                for _ in 0..3 {
+                    world.rig.os().advance_clock(IDLE_TICKS);
+                    cache.maintain();
+                }
+            }
+            world.check(forked);
+        },
+    );
+    report("fork in maintain", found);
+    assert!(found.forks > 0);
+}
+
 /// A world in which CPU 0's loaded magazine and spares are an interval old, so that the age
 /// limit's look takes them.
 fn aged_world(migrations: usize) -> World {
@@ -540,6 +614,40 @@ mod run {
     #[ignore = "slow: run with scripts/gate --all"]
     fn a_fork_at_any_step_duplicates_nothing_fully() {
         super::a_fork_at_any_step_duplicates_nothing(Bounds::preemptions(1).with_fork(), MUTATE);
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn maintain_and_a_mutator_keep_one_owner_under_every_schedule_quickly() {
+        super::maintain_and_a_mutator_keep_one_owner_under_every_schedule(
+            Bounds::preemptions(1),
+            0,
+        );
+    }
+
+    #[test]
+    #[ignore = "slow: run with scripts/gate --all"]
+    fn maintain_and_a_mutator_keep_one_owner_under_every_schedule_fully() {
+        super::maintain_and_a_mutator_keep_one_owner_under_every_schedule(
+            Bounds::preemptions(2),
+            1,
+        );
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn a_fork_at_any_step_of_maintain_duplicates_nothing_quickly() {
+        super::a_fork_at_any_step_of_maintain_duplicates_nothing(
+            Bounds::preemptions(0).with_fork(),
+        );
+    }
+
+    #[test]
+    #[ignore = "slow: run with scripts/gate --all"]
+    fn a_fork_at_any_step_of_maintain_duplicates_nothing_fully() {
+        super::a_fork_at_any_step_of_maintain_duplicates_nothing(
+            Bounds::preemptions(1).with_fork(),
+        );
     }
 
     #[test]
