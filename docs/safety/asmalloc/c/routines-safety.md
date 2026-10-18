@@ -37,9 +37,11 @@ values they read).
   thread control block, which holds the rseq area, or the thread's stack. None is at the top of
   the address space.
 - (I): for a small class, (C) and (S) of `front/real-safety.md`: the mask entry is zero or the
-  class's, which `MagazineSize` keeps allowed, and the slab invariant holds of its words. For
-  any other byte the entry is zero: `publish_masks` writes `MASK_TABLE`, which is zero for every
-  index that is not a small class's (`front::tests`), and nothing else writes the table. A zero
+  class's, which `MagazineSize` keeps allowed, and the slab invariant holds of its words. The
+  byte of a small class is the position of its hot word (`Field::index`), not its class index;
+  the tables and the mirror hold that byte (`c::table::word_byte`). For any other byte the
+  entry is zero: `publish_masks` writes `WORD_MASK_TABLE`, which is zero for every position
+  that is not a small class's hot word (`front::tests`), and nothing else writes the table. A zero
   mask carries no obligation on the words.
 
 ## What the routines' results mean

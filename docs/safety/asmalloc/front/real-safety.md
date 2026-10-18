@@ -9,8 +9,8 @@ below are those sections, discharged once here for every call in the file.
 
 - (R) `__rseq_offset` locates the calling thread's rseq area, which is registered or reads a
   negative `cpu_id`.
-- (W) Pop and push: `word` is `SLABS + 8 * class`, the address of the class's word in slab 0,
-  for a class below 512.
+- (W) Pop and push: `word` is `SLABS + 8 * class`, the address of a word in slab 0 (the
+  specification's `class` is the word's position), for a position below 512.
 - (C) The `mask` argument is `8n - 16` for the class's magazines of `n = 2^k` slots,
   `2 <= k <= 16`.
 - (L) `SLABS`, the thread's `rseq_cs` and `cpu_id` and `__rseq_offset` do not
@@ -32,8 +32,10 @@ below are those sections, discharged once here for every call in the file.
   area reads -1 until `cpu` registers it (AREA-04), and -2 if refused or retired, both of which
   the unsigned compare sends to the miss path.
 - (W): every word address comes from `Front::word(class)` for a `SmallClass`: the address of
-  `SLABS`'s first slab plus `Field::hot(class).offset()`, which is 8 times the class index, 1 to
-  `SMALL_COUNT` (44). `SLABS` is the `Front` static, whose slabs are at offset 0 (a compile-time
+  `SLABS`'s first slab plus `Field::hot(class).offset()`, which is 8 times the class's word
+  position, `4 c + 2` for class index `c`: bytes 16 to 23 of chunk `c`, below 184
+  (`front/slab.rs`, with compile-time assertions), so a word of slab 0 below the
+  specification's 512. `SLABS` is the `Front` static, whose slabs are at offset 0 (a compile-time
   assertion), so its symbol, which the specification calls `SLABS`, is the first slab's address.
 - (C): the mask is `front::mask(class)`, entry `class` of `front::MASKS`, built from
   `SmallClass::magazine().mask()`; `MagazineSize` keeps `n` a power of two from 4 to 256, so
