@@ -28,6 +28,7 @@ struct Entry {
     expect: Expect,
     same_as: Option<String>,
     preload_build: Option<String>,
+    build: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -56,11 +57,17 @@ pub struct Allocator {
     /// A package of the repository's root workspace that `benchrun build` builds in release
     /// mode to make the preload library (asmalloc's, which lives in this checkout).
     pub preload_build: Option<String>,
+    /// The native build directory under target/, for variants of one feature built by hand
+    /// (with different allocator build-time knobs); `benchrun build` does not make them.
+    pub build: Option<String>,
 }
 
 impl Allocator {
     /// The build directory name for native binaries with this allocator.
     pub fn build_name(&self) -> Option<String> {
+        if let Some(b) = &self.build {
+            return Some(b.clone());
+        }
         self.feature
             .as_ref()
             .map(|f| format!("{}{}", if f.is_empty() { "glibc" } else { f.as_str() }, self.build_suffix))
@@ -102,6 +109,7 @@ pub fn load(bench_dir: &Path, baselines: &Path) -> Result<Vec<Allocator>, String
                 control_of: None,
                 build_suffix: String::new(),
                 preload_build: e.preload_build.clone(),
+                build: e.build.clone(),
             },
         };
         out.push(a);
