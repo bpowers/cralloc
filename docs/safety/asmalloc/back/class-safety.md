@@ -125,10 +125,11 @@ themselves; nothing records them as holding the old contents.
 
 ## BACK-CLASS-03: the copies and purges in `move_large_with`
 
-**Blocks.** `from.copy_to_nonoverlapping(to, ..)`, whole, or a page at a time within each
-piece, skipping pages of `from` that `is_zero` finds all zero; `Space::purge(to, ..)` once
-before a piecewise copy into a destination not known to be zero; `region::purge_part` or
-`Space::purge` on parts of `from`.
+**Blocks.** In `move_large_with`: `from.copy_to_nonoverlapping(to, ..)` for a block of one
+piece or less, the calls of `copy_window`, and `region::purge_part` or `Space::purge` on
+parts of `from`. In `copy_window`: `from.add(x).copy_to_nonoverlapping(to.add(x), ..)` for
+the runs it copies, `Space::purge` on whole pages of `to` under a window's zero pages, and
+`is_zero` on the window's pages of `from` (BACK-CLASS-04).
 
 **Preconditions.** As for `copy_nonoverlapping`, `purge_part`, `Space::purge` and `is_zero`
 (BACK-CLASS-04).
@@ -144,23 +145,39 @@ either range, and that if it says `zeroed` the `len` bytes at `to` read as zero.
 callers are the moving paths of `Bound::resize` (HEAP-04, which passes the allocation's own
 report) and C's `realloc` (MOD-01, which passes `false`), and both hold both blocks.
 
-0. *The destination purge.* When `zeroed` is false and the block is more than one piece,
-   the pages `to..to + len` touches are purged before anything is copied. `to` holds more
-   than a piece, so it is a large slot or a run, whole pages; it starts at most a stagger,
-   under a page, past its slot's first page, and `into + len` fits the slot, so the pages
-   are the caller's slot's own; nothing else uses it and its contents are not
-   needed, which is `Space::purge`'s precondition. If the purge succeeds the range reads as
-   zero. It can fail: `MADV_DONTNEED` returns `EINVAL` on locked memory, so in a process that
-   called `mlockall` it fails every time. The result is kept as `zero_to`: true if the caller
-   said `zeroed` or the purge succeeded, false otherwise.
-1. *The copies.* Each copies at most a page at offset `at` with `at + n <= len`, inside both
-   ranges, and the bytes read have not been returned: a part of `from` goes back only after
-   the piece that covers it has been copied, and the range past `len` goes back only after
-   the last copy. A page is skipped only when `zero_to` holds and every byte of it in `from`
-   is zero, and then `to` already reads as zero there, because the caller said so or because
-   step 0's purge succeeded. When the purge failed every page is copied, so no stale byte of
-   `to` survives (`a_block_moved_into_a_dirty_slot_arrives_whole_when_purges_fail`).
-2. *The purges.* Pieces end at multiples of the piece in the address space. Each range is
+0. *The windows.* A block of more than one piece is copied by `copy_window` over
+   consecutive, disjoint ranges `start..end` of block offsets that together are `0..len`, in
+   increasing order, each inside one piece; a window is at most `WINDOW` pages of `from`'s
+   address space, which its bitmap of zero pages has room for. So when a window runs, the
+   move has written nothing of `to` at or past `start`, and returned nothing of `from` at or
+   past `start` (step 4). Offsets below are block offsets, counted from `from` and from `to`
+   alike.
+1. *The zero test.* Each of the window's pages, `p..q` (the window's ends cut the first and
+   the last), lies inside `start..end`, so inside the `len` readable bytes of `from`, which
+   nothing writes (BACK-CLASS-04).
+2. *The destination purge.* Only in a window that has a zero page, and only when the caller
+   did not say `zeroed` and no purge of `to` has failed (`Dest::Dirty`). The range is the
+   whole pages of `to` inside `to + lo'..to + hi'`, where `lo'` is the start of the
+   window's first zero page and `hi'` the end of its last, so it lies inside
+   `to + start..to + end`: pages of the caller's block `to`, whose contents it does not need
+   and which the move has not written (step 0); nothing else uses them. That is
+   `Space::purge`'s precondition. The range is page-aligned by construction, and a whole
+   page inside `to`'s `len` bytes is a page of `to`'s slot or run. If the purge succeeds, the
+   range reads as zero. It can fail: `MADV_DONTNEED` returns `EINVAL` on locked memory, so in
+   a process that called `mlockall` it fails every time; then nothing is left out in this
+   window and the move makes no further purge of `to` (`Dest::Unpurgeable`).
+3. *The copies.* `clear` is the range of offsets at which `to` reads as zero and the move has
+   written nothing: `start..end` when the caller said `zeroed`, the purged range when step 2
+   succeeded, and empty otherwise. The window is copied as runs `next..s` between the parts
+   left out, then `next..end`. A part left out is a zero page's `p..q` cut to `clear`, so
+   every byte left out is zero in `from` and reads as zero in `to`. Parts left out are
+   disjoint and taken in increasing order, so the runs copied are disjoint, inside
+   `start..end`, and with them cover the window. Each copy is inside both blocks' `len`
+   bytes, which do not overlap, and reads bytes of `from` not yet returned. When `clear` is
+   empty, which is always so after a failed purge, every byte is copied, so no stale byte of
+   `to` survives (`a_block_moved_into_a_dirty_slot_arrives_whole_when_purges_fail`,
+   `a_hole_is_copied_when_the_destinations_purge_fails`).
+4. *The purges of `from`.* Pieces end at multiples of the piece in the address space. Each range is
    either a part already copied that ends at such a multiple (`into + done` rounded down to a
    page, to `into + boundary`: `done` is zero, which rounds down to the slot's start and so
    takes the stagger's padding, which holds nothing, or the previous multiple, which is
@@ -168,11 +185,11 @@ report) and C's `realloc` (MOD-01, which passes `false`), and both hold both blo
    from the slot's start, if there is none) to the end of the slot or run. Every byte of the
    block before that start has been copied. In a slot advised for huge pages
    `purge_part` may trim a range inward to whole huge pages (BACK-REGION-03), which only
-   returns less, and then reports `false`, so step 3 does not count the range as gone. All
+   returns less, and then reports `false`, so step 5 does not count the range as gone. All
    lie inside `from`'s slot or run, whose start is page-aligned, and the caller holds it and
    has given it up, as in BACK-CLASS-01. The slot's bit is checked to be clear before
    anything is purged, so a block that is already free aborts instead.
-3. *The release.* The slot is marked zero only if every `give_back` reported its whole
+5. *The release.* The slot is marked zero only if every `give_back` reported its whole
    range returned: `purge_part` answers `true` only when the OS accepted the range it was
    given, untrimmed (`a_trimmed_purge_of_an_advised_slot_says_it_kept_part`), and the
    ranges together are every page of the slot past the copy's start. So a slot marked zero
@@ -190,6 +207,10 @@ The double-free cases are those of BACK-CLASS-01, with the copy added to the win
 **Tests.** `a_moving_large_block_releases_its_old_pages_behind_the_copy`,
 `a_moving_run_releases_its_old_pages_behind_the_copy`,
 `a_sparse_block_stays_sparse_when_it_moves` (contents, residency, and a dirty destination),
+`a_dense_block_with_a_hole_moves_whole_and_keeps_the_hole` (a hole across a piece boundary,
+into a clean, a dirty and a staggered dirty destination),
+`a_hole_is_copied_when_the_destinations_purge_fails`,
+`a_staggered_block_moves_and_returns_its_whole_slot`,
 `a_zeroed_grow_into_a_dirty_slot_reads_as_zero_past_what_it_kept`,
 `an_advised_slot_is_purged_only_in_whole_huge_pages` (a block that does not start on a
 piece boundary); the heap's and the C layer's `realloc` tests move large blocks through it
@@ -199,7 +220,8 @@ with contents checked.
 
 **Blocks.** In `is_zero`, `core::slice::from_raw_parts(ptr, len)` and
 `bytes.align_to::<u64>()`; in `mostly_data`, `is_zero(ptr.add(at), n)`; in `grown_into`'s
-closure, `mostly_data(from, len, page)`; in `move_large_with`, the call of `grown_into`.
+closure, `mostly_data(from, len, page)`; in `move_large_with`, the call of `grown_into`;
+in `copy_window`, `is_zero(from.add(p), q - p)`.
 
 **Preconditions.** `ptr..ptr + len` is readable and not written during the call (the
 functions' `# Safety`); for `align_to`, that every bit pattern is valid for `u64`.
@@ -208,9 +230,9 @@ functions' `# Safety`); for `align_to`, that every bit pattern is valid for `u64
 with nothing else using `from` (BACK-CLASS-03): `grown_into` on the `len` bytes the caller
 promised readable, which hands them to `mostly_data` (only from the closure that
 `region::advise_grown` calls before it returns, so within `grown_into`'s call), which calls
-`is_zero` on consecutive pages with `at + n <= len`; the copy loop, which calls `is_zero`
-on a page of `from` at most `page` bytes long inside those bytes before that page is
-returned; and `resize_in_place`, on the last piece of a growing block's first `old` bytes
+`is_zero` on consecutive pages with `at + n <= len`; `copy_window`, which calls `is_zero`
+on each page `p..q` of its window, at most `page` bytes long and inside those bytes, before
+the window is copied and so before that page is returned (BACK-CLASS-03, step 1); and `resize_in_place`, on the last piece of a growing block's first `old` bytes
 (BACK-CLASS-02). So the slice is valid for its lifetime, the call.
 Any bit pattern is a valid `u8` and a valid `u64`, and `align_to` places in its middle part
 only whole, aligned `u64`s within the slice. Reading a page that was never written maps the

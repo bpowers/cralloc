@@ -1729,8 +1729,8 @@ fn refused_huge_page_advice_is_retried_by_the_next_holder() {
 
 /// A block written sparsely stays sparse when it moves: the copy skips its all-zero pages, so
 /// no more is resident after the move than before, plus a piece, and the contents arrive.
-/// Into a destination that is not known to be zero, the move first purges it once, so the
-/// skipped pages read as zero there too.
+/// Into a destination that is not known to be zero, the move first purges the part of it under
+/// each piece's zero pages, so the skipped pages read as zero there too.
 #[test]
 #[cfg_attr(miri, ignore)]
 fn a_sparse_block_stays_sparse_when_it_moves() {
@@ -1785,8 +1785,9 @@ fn a_sparse_block_stays_sparse_when_it_moves() {
             resident()
         );
         // One purge a piece, as for a dense block (the block fills its slot, so nothing is
-        // left after the last), and one of the destination when it was not known to be zero.
-        let expected = len / piece + usize::from(!zeroed);
+        // left after the last), and, when the destination was not known to be zero, one of
+        // its part under each piece's zero pages.
+        let expected = len / piece * (1 + usize::from(!zeroed));
         assert_eq!(os.calls(Call::Purge) as usize, purges + expected);
         back.free(new.ptr, new_class);
     }
@@ -1824,6 +1825,131 @@ fn a_block_moved_into_a_dirty_slot_arrives_whole_when_purges_fail() {
         stale, 0,
         "bytes of the destination's last owner in the moved block"
     );
+    back.free(new.ptr, new_class);
+}
+
+/// A block written densely but for a hole of zero pages across a piece boundary moves as one
+/// copy per dense piece and leaves the hole out. A destination not known to be zero is purged
+/// only under the hole, once in each piece the hole touches, and never where the block is
+/// dense; a staggered destination, whose pages do not line up with the source's, is purged in
+/// the whole pages under the hole and gets the zeros at its edges copied.
+#[test]
+#[cfg_attr(miri, ignore)]
+fn a_dense_block_with_a_hole_moves_whole_and_keeps_the_hole() {
+    let state = state::<Native>();
+    let back = state.get_or_reserve().unwrap();
+    let os = state.os();
+    let page = Native::GEOMETRY.page_size();
+    let piece = move_piece(Native::GEOMETRY);
+    // Two slots of the new class to a region, so the second is staggered.
+    let (old_class, new_class) = (large(256 << 10), large(512 << 10));
+    let len = old_class.size();
+    assert!(len >= 4 * piece);
+    // Three pages before the third piece and two after its start.
+    let hole = 2 * piece - 3 * page..2 * piece + 2 * page;
+    let arrived = |at: NonNull<u8>| {
+        // SAFETY: a live block the test owns.
+        let bytes = unsafe { core::slice::from_raw_parts(at.as_ptr(), len) };
+        bytes.iter().enumerate().all(|(o, &b)| {
+            if hole.contains(&o) {
+                b == 0
+            } else {
+                b == (o / 7 + o / 4096) as u8 | 1
+            }
+        })
+    };
+    for (dirty, staggered) in [(false, false), (true, false), (true, true)] {
+        let old = back.alloc(old_class, len).unwrap().ptr;
+        pattern(old.as_ptr(), len);
+        // SAFETY: inside the live block.
+        unsafe { old.as_ptr().add(hole.start).write_bytes(0, hole.len()) };
+        let skip = back.alloc(new_class, 1).unwrap().ptr;
+        let new = if staggered {
+            back.alloc_staggered(new_class, len).unwrap()
+        } else {
+            back.alloc(new_class, len).unwrap()
+        };
+        assert_eq!(new.ptr.addr().get() % page != 0, staggered);
+        assert!(dirty || new.zeroed);
+        if dirty {
+            let start = new
+                .ptr
+                .map_addr(|a| core::num::NonZeroUsize::new(a.get() & !(page - 1)).unwrap());
+            paint(start.as_ptr(), new_class.size(), 0x77);
+        }
+        let purges = os.calls(Call::Purge) as usize;
+        // SAFETY: both are live blocks that nothing else uses; `new` reads as zero unless
+        // painted.
+        unsafe { back.move_large(old, new.ptr, len, !dirty) };
+        assert!(arrived(new.ptr), "dirty {dirty} staggered {staggered}");
+        // One purge for each piece of the old block, one of the destination for each of the
+        // two pieces the hole touches, and none for the dense pieces.
+        assert_eq!(
+            os.calls(Call::Purge) as usize,
+            purges + len / piece + if dirty { 2 } else { 0 },
+            "dirty {dirty} staggered {staggered}"
+        );
+        if dirty {
+            // The whole destination pages under the hole went back and were not written.
+            let t = new.ptr.addr().get();
+            let lo = (t + hole.start).next_multiple_of(page);
+            let hi = (t + hole.end) & !(page - 1);
+            let under = new.ptr.map_addr(|a| a.saturating_add(lo - t));
+            // SAFETY: no other thread runs, and the back end and this test store only integers.
+            unsafe { assert!(os.is_purged(under, hi - lo)) };
+        }
+        back.free_by_address(new.ptr);
+        back.free_by_address(skip);
+    }
+}
+
+/// When the purge of a dirty destination under a hole fails, as every purge does on locked
+/// memory, the hole is copied instead, so none of the destination's old bytes survive; the
+/// move stops trying to purge the destination, and still returns the old block's pages.
+#[test]
+#[cfg_attr(miri, ignore)]
+fn a_hole_is_copied_when_the_destinations_purge_fails() {
+    let state = state::<Native>();
+    let back = state.get_or_reserve().unwrap();
+    let os = state.os();
+    let page = Native::GEOMETRY.page_size();
+    let piece = move_piece(Native::GEOMETRY);
+    let (old_class, new_class) = (large(512 << 10), large(1 << 20));
+    let len = old_class.size();
+    // A hole in the third piece and one in the fourth.
+    let holes = [
+        2 * piece + page..2 * piece + 4 * page,
+        3 * piece..3 * piece + 2 * page,
+    ];
+    let old = back.alloc(old_class, len).unwrap().ptr;
+    pattern(old.as_ptr(), len);
+    for hole in &holes {
+        // SAFETY: inside the live block.
+        unsafe { old.as_ptr().add(hole.start).write_bytes(0, hole.len()) };
+    }
+    let new = back.alloc(new_class, new_class.size()).unwrap();
+    paint(new.ptr.as_ptr(), new_class.size(), 0x77);
+    let purges = os.calls(Call::Purge) as usize;
+    // The first two pieces are dense and go back; the destination's purge under the first
+    // hole is the third call.
+    os.set_faults(Call::Purge, Faults::once_after(2));
+    // SAFETY: both are live blocks that nothing else uses; `new` is not said to be zero.
+    unsafe { back.move_large(old, new.ptr, len, false) };
+    os.set_faults(Call::Purge, Faults::NONE);
+    // SAFETY: a live block the test owns.
+    let bytes = unsafe { core::slice::from_raw_parts(new.ptr.as_ptr(), len) };
+    assert!(bytes.iter().enumerate().all(|(o, &b)| {
+        if holes.iter().any(|h| h.contains(&o)) {
+            b == 0
+        } else {
+            b == (o / 7 + o / 4096) as u8 | 1
+        }
+    }));
+    // Every piece went back, and one purge of the destination was tried.
+    assert_eq!(os.calls(Call::Purge) as usize, purges + len / piece + 1);
+    // SAFETY: no other thread runs, and the back end and this test store only integers.
+    unsafe { assert!(os.is_purged(old, len)) };
+    assert_eq!(back.retained(), 0);
     back.free(new.ptr, new_class);
 }
 

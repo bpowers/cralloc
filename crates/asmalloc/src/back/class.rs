@@ -21,7 +21,6 @@ use super::{Back, Block, Kind};
 use crate::classes::{Class, SmallClass};
 use crate::os::{HugePages, Os};
 use crate::space::{RegionId, RegionTag};
-use core::num::NonZeroUsize;
 use core::ptr::NonNull;
 use core::sync::atomic::AtomicPtr;
 use core::sync::atomic::Ordering::{Relaxed, SeqCst};
@@ -583,10 +582,12 @@ impl<'a, O: Os> Back<'a, O> {
     /// zero, clean and not counted as retained, exactly as the free of a slot advised for huge
     /// pages leaves it, so the free neither purges nor counts those pages again.
     ///
-    /// The piecewise copy skips source pages that are all zero, so a block written sparsely
-    /// stays sparse: reading an untouched page maps the kernel's shared zero page and costs no
-    /// memory. A skipped page must read as zero at `to`, so unless the caller says `to` reads
-    /// as zero (`zeroed`), its pages are purged once before the copy.
+    /// The piecewise copy leaves out source pages that are all zero, so a block written
+    /// sparsely stays sparse: reading an untouched page maps the kernel's shared zero page and
+    /// costs no memory. A page left out must read as zero at `to`, so unless the caller says
+    /// `to` reads as zero (`zeroed`), the part of `to` under the zero pages is purged first
+    /// (`copy_window`). A piece with no zero page, which is every piece of a dense block, is
+    /// one copy, and `to` is not purged.
     ///
     /// # Safety
     ///
@@ -670,21 +671,7 @@ impl<'a, O: Os> Back<'a, O> {
             }
         };
         let page = self.space.plan().geometry().page_size();
-        // Whether `to` reads as zero, so that the copy may skip the source's all-zero pages. A
-        // purge can fail (`MADV_DONTNEED` on locked memory always does), and then the old
-        // bytes stay and every page must be copied.
-        let mut zero_to = zeroed;
-        if !zeroed {
-            // The pages that `to`'s `len` bytes touch. `to` holds more than a piece, so it is a
-            // large slot or a run, which are whole pages; a staggered block starts less than a
-            // page into its slot, so the first page is the slot's own, and its end fits the
-            // slot, so the last page is too.
-            let first = to.map_addr(|a| NonZeroUsize::new(a.get() & !(page - 1)).unwrap_or(a));
-            let end = (to.addr().get() + len).next_multiple_of(page);
-            // SAFETY: BACK-CLASS-03: the caller owns `to`'s slot or run, nothing else uses it,
-            // and its contents are not needed.
-            zero_to = unsafe { self.space.purge(first, end - first.addr().get()) }.is_ok();
-        }
+        let mut dest = if zeroed { Dest::Zero } else { Dest::Dirty };
         // Pieces end at multiples of the piece in the address space, not in the block, so that
         // a piece that goes back is whole huge pages wherever the block has them: purging
         // part of a huge page would return nothing.
@@ -695,18 +682,12 @@ impl<'a, O: Os> Back<'a, O> {
             let step = (boundary - done).min(len - done);
             let mut at = done;
             while at < done + step {
-                // To the next page of the address space, so a skipped run is a source page.
-                let n = ((base + at + 1).next_multiple_of(page) - base - at).min(done + step - at);
-                // SAFETY: BACK-CLASS-03: `at + n <= len`, inside both ranges, which do not
-                // overlap; the bytes of `from` read here have not been returned. A page left
-                // uncopied is all zero, and `to` reads as zero there (`zero_to`).
-                unsafe {
-                    let src = from.as_ptr().add(at);
-                    if !zero_to || !is_zero(src, n) {
-                        src.copy_to_nonoverlapping(to.as_ptr().add(at), n);
-                    }
-                }
-                at += n;
+                let window = (base + at + 1).next_multiple_of(WINDOW * page) - base;
+                let end = window.min(done + step);
+                // SAFETY: BACK-CLASS-03: `at..end` lies inside the `len` bytes of both blocks,
+                // and no byte of `from` in it has been returned.
+                unsafe { self.copy_window(from, to, at, end, &mut dest) };
+                at = end;
             }
             // Only pieces that reach a boundary go back here: the last may end inside a page.
             if done + step == boundary {
@@ -731,6 +712,106 @@ impl<'a, O: Os> Back<'a, O> {
             }
             None => self.free_run(from),
         }
+    }
+
+    /// Copies bytes `start..end` of a block moving from `from` to `to`, where `start..end`
+    /// spans at most `WINDOW` pages of `from`'s address space, and leaves out the source's
+    /// all-zero pages wherever `to` reads as zero.
+    ///
+    /// The window's pages are tested first, so a window with no all-zero page, which is every
+    /// window of a block written densely, is one copy, and `to` is left as it is. When there
+    /// are such pages and `to` is not known to read as zero (`dest`), the whole pages of `to`
+    /// that lie under the span from the first of them to the last are purged once, and a zero
+    /// page is left out only where it lies in that purged span; the bytes past its edges are
+    /// copied, as zeros. The purge is of the span, not of each hole, so that a block with many
+    /// small holes costs one call a window, as the return of the old pages behind it does.
+    ///
+    /// # Safety
+    ///
+    /// `start..end` lies within the `len` bytes of a move (`move_large`'s promises); none of
+    /// `from`'s bytes in it has been returned, and nothing of `to` from `start` on has been
+    /// written by the move.
+    unsafe fn copy_window(
+        &self,
+        from: NonNull<u8>,
+        to: NonNull<u8>,
+        start: usize,
+        end: usize,
+        dest: &mut Dest,
+    ) {
+        let page = self.space.plan().geometry().page_size();
+        let base = from.addr().get();
+        let first = (base + start) & !(page - 1);
+        // The window's page `i` as offsets into the block: the first and the last may be
+        // part pages, cut by the window's ends.
+        let span = |i: usize| {
+            let p = (first + i * page).max(base + start) - base;
+            let q = (first + (i + 1) * page).min(base + end) - base;
+            (p, q)
+        };
+        let pages = (base + end - first).div_ceil(page);
+        let mut zero = [0u64; WINDOW / 64];
+        let mut holes: Option<(usize, usize)> = None;
+        for i in 0..pages {
+            let (p, q) = span(i);
+            // SAFETY: BACK-CLASS-04: `p..q` lies inside `start..end`, readable and unwritten.
+            if unsafe { is_zero(from.as_ptr().add(p), q - p) } {
+                zero[i / 64] |= 1 << (i % 64);
+                holes = Some((holes.map_or(i, |(a, _)| a), i));
+            }
+        }
+        // The offsets at which `to` reads as zero and the move has written nothing.
+        let clear = match (holes, *dest) {
+            (None, _) | (_, Dest::Unpurgeable) => 0..0,
+            (Some(_), Dest::Zero) => start..end,
+            (Some((a, b)), Dest::Dirty) => {
+                let t = to.addr().get();
+                let lo = (t + span(a).0).next_multiple_of(page);
+                let hi = (t + span(b).1) & !(page - 1);
+                if lo >= hi {
+                    0..0
+                } else {
+                    let at = to.map_addr(|x| x.saturating_add(lo - t));
+                    // SAFETY: BACK-CLASS-03: whole pages of `to` inside `start..end`, which
+                    // the caller owns, does not need, and the move has not written.
+                    let purged = unsafe { self.space.purge(at, hi - lo) };
+                    if purged.is_ok() {
+                        lo - t..hi - t
+                    } else {
+                        // On locked memory every purge fails; stop trying.
+                        *dest = Dest::Unpurgeable;
+                        0..0
+                    }
+                }
+            }
+        };
+        let copy = |x: usize, y: usize| {
+            if x < y {
+                // SAFETY: BACK-CLASS-03: `x..y` lies inside `start..end`.
+                unsafe {
+                    from.as_ptr()
+                        .add(x)
+                        .copy_to_nonoverlapping(to.as_ptr().add(x), y - x)
+                };
+            }
+        };
+        // The first byte neither copied nor left out.
+        let mut next = start;
+        if !clear.is_empty() {
+            for (w, &bits) in zero.iter().enumerate() {
+                let mut rest = bits;
+                while rest != 0 {
+                    let (p, q) = span(w * 64 + rest.trailing_zeros() as usize);
+                    rest &= rest - 1;
+                    let (s, e) = (p.max(clear.start), q.min(clear.end));
+                    if s < e {
+                        copy(next, s);
+                        next = e;
+                    }
+                }
+            }
+        }
+        copy(next, end);
     }
 
     /// Before the `len` bytes at `from` move into the block at `to`: if `to` is a large slot
@@ -1256,6 +1337,23 @@ pub(super) const fn odd_inverse(q: u64) -> u64 {
 /// what it asked for.
 const fn usable(size: usize, into: usize, page: usize) -> usize {
     (into + size).next_multiple_of(page) - into
+}
+
+/// The most pages of a moving block that one window of the copy tests before it copies: the
+/// pages of a huge page in the design's geometry, so that a piece is one window there.
+const WINDOW: usize = 512;
+
+/// What a move knows of its destination's contents, for leaving out the source's zero pages.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Dest {
+    /// It reads as zero: the caller said so.
+    Zero,
+    /// It may hold anything; the part under a window's holes is purged before they are left
+    /// out.
+    Dirty,
+    /// It may hold anything, and a purge of it failed, as every purge does on locked memory:
+    /// every byte is copied.
+    Unpurgeable,
 }
 
 /// Whether at least half the pages of the `len` bytes at `ptr` hold a byte that is not zero.
