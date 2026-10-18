@@ -27,7 +27,8 @@ nothing accesses that memory in a way that conflicts with a shared reference.
 **Proof.**
 
 1. *In bounds.* `at = metadata(region) + 8 * word`. Callers pass only word numbers that the
-   layout names: `tree_word(level, index)` with `index` below that level's count,
+   layout names: `tree_word(level, index)` with `index` below that level's count, for a
+   large class `header_word()` and the word after it (`grow` and `hints`, words 0 and 1),
    `clean_word(w)` with `w` below the clean count, `zero_word(w)`
    with `w` below the leaf count, and `size_word(slot)` with `slot` below the slot count (a
    slot `Plan::slot_at` accepted). The layout a host holds is the one worked out: a layout read
@@ -50,10 +51,10 @@ nothing accesses that memory in a way that conflicts with a shared reference.
 2. *Aligned.* The metadata block starts on a page boundary and the offset is a multiple of 8.
    `Atomic` is `#[repr(transparent)]` over `AtomicU64`, alignment 8.
 3. *Accessible.* The word is committed before any thread forms a reference to it:
-   - The fixed part (summary levels, clean and zero bitmaps, sizes) is committed by `assign`
-     before its compare-and-swap puts this class's tag on the region (`Layout::fixed_commit`
-     covers from the block's start to the start of the leaf bitmap, which comes last; proved in
-     `layouts_fit`). So any thread that learns the region through the table, the carving word or
+   - The fixed part is committed by `assign` before its compare-and-swap puts this class's
+     tag on the region: for a small class from the block's start to the start of the leaf
+     bitmap, which comes last; for a large class the whole block, header and leaf bitmap
+     included (`Layout::fixed_commit`, proved in `layouts_fit`). So any thread that learns the region through the table, the carving word or
      the summary tree finds it committed: the OS has finished the commit before that thread's
      acquire of the tag or word, and commit is never undone.
    - A leaf word is touched only for a slot below the watermark, or in a descent through set
