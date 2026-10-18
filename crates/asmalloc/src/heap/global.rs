@@ -74,7 +74,7 @@ impl Asmalloc {
     ///
     /// A process whose threads all stay inside their loaded magazines never takes a slow
     /// path, and keeps what it held when it went quiet until something calls this. The
-    /// `background` feature's [`Asmalloc::start_background`] calls it from a thread of its
+    /// `background` feature's `Asmalloc::start_background` calls it from a thread of its
     /// own; a program with an idle hook can call it from there instead. It never waits, and
     /// any thread may call it at any time.
     pub fn maintain() {

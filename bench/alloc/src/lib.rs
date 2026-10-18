@@ -81,6 +81,13 @@ use system as chosen;
 /// The allocator family this binary was built with.
 pub const NAME: &str = chosen::NAME;
 
+/// Starts what the allocator needs started before the workload runs: asmalloc's background
+/// thread, with the `asmalloc-background` feature. Nothing for any other build.
+pub fn init() {
+    #[cfg(feature = "asmalloc-background")]
+    asmalloc::Asmalloc::start_background().expect("asmalloc's background thread starts");
+}
+
 /// What the running process can tell about its allocator.
 #[derive(Clone, Debug)]
 pub struct Description {
