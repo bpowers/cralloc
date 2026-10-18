@@ -35,7 +35,7 @@
 //! magazines: one for each of the three rules here (the age limit's take or sweep counts as one)
 //! and one refresh in the exchange (`slow.rs`) for each install it makes, which is one unless
 //! the thread is moved to another CPU while it exchanges and installs again. A magazine holds at
-//! most 254 objects (and at most about 128 KiB of them), and a launder sets one bitmap word
+//! most 254 objects (and at most about 64 KiB of them), and a launder sets one bitmap word
 //! per group of neighbours with one atomic OR. A sweep step also pushes the rest of one spare
 //! stack, at most a few magazines, to the depot. Add one purge step, at most one drain
 //! (of another slab, or of the thread's own when it holds another generation's markers: a
