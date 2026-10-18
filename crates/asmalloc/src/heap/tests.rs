@@ -301,9 +301,7 @@ fn a_simulated_heap_serves_threads() {
     threads(&heap, if cfg!(miri) { 40 } else { 4000 });
 }
 
-#[test]
-fn threads_that_start_a_fresh_heap_together_agree_on_it() {
-    let rounds = if cfg!(miri) { 1 } else { 200 };
+fn threads_that_start_a_fresh_heap_together_agree_on_it(rounds: usize) {
     // The simulated OS has room for one heap, so every thread but the winner sees its
     // reservation fail while the winner's is in flight; none of them may settle for less.
     let largest = <crate::os::sim::Standard as crate::os::sim::Shape>::GEOMETRY.largest_plan();
@@ -315,8 +313,17 @@ fn threads_that_start_a_fresh_heap_together_agree_on_it() {
 }
 
 #[test]
-fn the_first_allocations_of_a_fresh_heap_from_several_threads_succeed() {
-    let rounds = if cfg!(miri) { 1 } else { 300 };
+fn threads_that_start_a_fresh_heap_together_agree_on_it_quickly() {
+    threads_that_start_a_fresh_heap_together_agree_on_it(if cfg!(miri) { 1 } else { 20 });
+}
+
+#[test]
+#[ignore = "slow: run with scripts/gate --all"]
+fn threads_that_start_a_fresh_heap_together_agree_on_it_fully() {
+    threads_that_start_a_fresh_heap_together_agree_on_it(200);
+}
+
+fn the_first_allocations_of_a_fresh_heap_from_several_threads_succeed(rounds: usize) {
     for _ in 0..rounds {
         let heap = SimHeap::<crate::os::sim::Standard>::new();
         thread::scope(|scope| {
@@ -334,6 +341,21 @@ fn the_first_allocations_of_a_fresh_heap_from_several_threads_succeed() {
             }
         });
     }
+}
+
+#[test]
+fn the_first_allocations_of_a_fresh_heap_from_several_threads_succeed_quickly() {
+    the_first_allocations_of_a_fresh_heap_from_several_threads_succeed(if cfg!(miri) {
+        1
+    } else {
+        30
+    });
+}
+
+#[test]
+#[ignore = "slow: run with scripts/gate --all"]
+fn the_first_allocations_of_a_fresh_heap_from_several_threads_succeed_fully() {
+    the_first_allocations_of_a_fresh_heap_from_several_threads_succeed(300);
 }
 
 /// Every live block holds its owner's tag, checked before it is freed: two owners of one block
@@ -469,9 +491,7 @@ fn with_drains_running<S: crate::os::sim::Shape, T>(
 /// its store (`os::sim::cpus`): the store landed in a magazine a drain had passed on, and a block
 /// got two owners. It showed most with more threads than cores. The switches (`NO_DRAIN`, `NO_PURGE`, `NO_CPU`) turn parts of the heap off
 /// to bisect a failure.
-#[test]
-fn blocks_have_one_owner_while_threads_churn_and_drains_run() {
-    let rounds = if cfg!(miri) { 1 } else { 30 };
+fn blocks_have_one_owner_while_threads_churn_and_drains_run(rounds: usize) {
     for _ in 0..rounds {
         let heap = SimHeap::<crate::os::sim::Standard>::new();
         if std::env::var_os("NO_DRAIN").is_some() {
@@ -495,6 +515,17 @@ fn blocks_have_one_owner_while_threads_churn_and_drains_run() {
         });
         drop(held);
     }
+}
+
+#[test]
+fn blocks_have_one_owner_while_threads_churn_and_drains_run_quickly() {
+    blocks_have_one_owner_while_threads_churn_and_drains_run(if cfg!(miri) { 1 } else { 3 });
+}
+
+#[test]
+#[ignore = "slow: run with scripts/gate --all"]
+fn blocks_have_one_owner_while_threads_churn_and_drains_run_fully() {
+    blocks_have_one_owner_while_threads_churn_and_drains_run(30);
 }
 
 #[test]
