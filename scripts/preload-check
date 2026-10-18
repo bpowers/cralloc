@@ -98,31 +98,30 @@ cc -O2 -shared -fPIC -o "$bin/libdlib.so" "$programs/dlib.c" || exit 1
 g++ -O2 -pthread -std=c++20 -o "$bin/cxx" "$programs/cxx.cpp" || exit 1
 g++ -O2 -pthread -std=c++20 -o "$bin/cxx-containers" "$programs/cxx_containers.cpp" || exit 1
 g++ -O2 -std=c++20 -o "$bin/cxx-operators" "$programs/cxx_operators.cpp" || exit 1
+g++ -O2 -std=c++20 -o "$bin/own-malloc" "$programs/own_malloc.cpp" || exit 1
+g++ -O2 -std=c++20 -o "$bin/own-new" "$programs/own_new.cpp" || exit 1
+g++ -O2 -std=c++20 -shared -fPIC -o "$bin/liboperators.so" "$programs/lib_operators.cpp" || exit 1
+g++ -O2 -std=c++20 -DPROGRAM -o "$bin/lib-operators" "$programs/lib_operators.cpp" \
+  -L"$bin" -loperators -Wl,-rpath,"$bin" || exit 1
 
 # bindings NAME CMD...: where the dynamic loader bound each C++ allocation operator the program
-# calls (its own report, LD_DEBUG=bindings). The four throwing forms of new must bind to the
-# C++ runtime, which can throw std::bad_alloc; the other 16 forms to the library.
+# calls (its own report, LD_DEBUG=bindings). The library exports none (docs/design.md,
+# "Interfaces", C++), so every one must bind to the C++ runtime, which calls our malloc.
 bindings() {
   local name="$1"
   shift
   wanted "$name" || return 0
   MEMLIMIT_QUIET=1 "$here/memlimit" -m "$mem" -t 5m -- \
     env LD_PRELOAD="$lib" LD_DEBUG=bindings "$@" >/dev/null 2>"$work/$name.bindings"
-  local throwing='symbol `_Zn[wa]m(St11align_val_t)?'"'"
   local ops='symbol `_Z(nw|na|dl|da)'
-  local ours runtime stray
-  ours=$(grep -F "to $lib " "$work/$name.bindings" | grep -oE "$ops[^']*'" | sort -u | wc -l)
-  runtime=$(grep -F "to /lib64/libstdc++.so.6 " "$work/$name.bindings" | grep -oE "$throwing" |
+  local runtime stray
+  runtime=$(grep -F "to /lib64/libstdc++.so.6 " "$work/$name.bindings" | grep -oE "$ops[^']*'" |
     sort -u | wc -l)
-  # Any other binding of an operator: a throwing form bound to us, or a form bound elsewhere.
-  stray=$(grep -E "$ops" "$work/$name.bindings" |
-    grep -vE "to $lib .*symbol \`_Z(nw|na)m(St11align_val_t)?RKSt9nothrow_t'|to $lib .*symbol \`_Zd[la]" |
-    grep -vcE "to /lib64/libstdc\+\+.so.6 .*$throwing")
-  if [ "$ours" -eq 16 ] && [ "$runtime" -eq 4 ] && [ "$stray" -eq 0 ]; then
-    printf 'PASS  %-24s 16 operators bind to the library, 4 throwing new to libstdc++\n' "$name"
+  stray=$(grep -E "$ops" "$work/$name.bindings" | grep -vcF "to /lib64/libstdc++.so.6 ")
+  if [ "$runtime" -eq 20 ] && [ "$stray" -eq 0 ]; then
+    printf 'PASS  %-24s all 20 operators bind to libstdc++\n' "$name"
   else
-    printf 'FAIL  %-24s %s to the library, %s throwing to libstdc++, %s stray\n' \
-      "$name" "$ours" "$runtime" "$stray"
+    printf 'FAIL  %-24s %s operators to libstdc++, %s elsewhere\n' "$name" "$runtime" "$stray"
     failed+=("$name")
   fi
 }
@@ -167,9 +166,14 @@ check cxx-operators "$bin/cxx-operators"
 bindings cxx-bindings "$bin/cxx-operators"
 # A throwing new that fails throws std::bad_alloc, caught, with or without the library.
 check cxx-new-fails "$bin/cxx-operators" throw
-# The one difference left: a new-handler that throws from a nothrow new, which is the library's,
-# ends the process, where libstdc++'s nothrow new returns null (see asmalloc::c::cxx).
-expect cxx-throwing-handler 134 "$bin/cxx-operators" throwing-handler
+# A new-handler that throws from a nothrow new: libstdc++'s nothrow new returns null.
+check cxx-throwing-handler "$bin/cxx-operators" throwing-handler
+check cxx-own-malloc "$bin/own-malloc"
+for mode in array sized matching empty nothrow; do
+  check "cxx-own-new-$mode" "$bin/own-new" "$mode"
+done
+# Boehm GC's libgccpp, in small: a shared library that defines the C++ operators.
+check cxx-library-operators "$bin/lib-operators"
 check threads "$bin/threads" 20 16 20000
 check threads-exit "$bin/threads" exit
 check forks "$bin/forks" 8 40

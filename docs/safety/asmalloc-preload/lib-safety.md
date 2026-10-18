@@ -21,16 +21,16 @@ What the preload setting adds:
   siblings are glibc's internal aliases; no binary or library on the reference host imports
   them (census of `/usr/bin`, `/usr/lib64` and `/usr/libexec`), and glibc's own code calls the
   interposable names.
-- **C++.** The library also exports 16 of the 20 replaceable C++ allocation operators: the
-  nothrow `new` forms and every `delete` (`asmalloc::export_cxx_abi!`, CXX-EXPORT-01 in
-  `docs/safety/asmalloc/c/cxx-safety.md`). libstdc++ keeps the four throwing forms of `new`,
-  which allocate with the library's `malloc` and `aligned_alloc` and can throw
-  `std::bad_alloc`, so every block either `new` returns is asmalloc's, and the library's
-  `delete` frees it. A program that replaces the basic `new` and `delete`, or `malloc`, keeps
-  them: the library's other forms forward to the program's as the standard's defaults would
-  (CXX-05 to CXX-07). The library has no dependency on a C++ runtime; it looks up the
-  new-handler and the program's replacements with `dlsym` when it first needs them, and loads
-  into programs that have none.
+- **C++.** The library exports no C++ allocation operator (design: "Interfaces", C++), so
+  every `operator new` and `delete` a program calls is its C++ runtime's or the program's own,
+  and reaches the heap only through the C functions above: the runtime's `new` calls `malloc`
+  and `aligned_alloc`, its `delete` calls `free`. That is sound in every arrangement of
+  libraries. Exporting only some operators is not: a library that defines them and is looked
+  up after the preload library (Boehm GC's `libgccpp`) would get the program's `new` and we its
+  `delete`, and blocks that are not ours would reach us. The operators asmalloc can export
+  (`export_cxx_abi!`, `docs/safety/asmalloc/c/cxx-safety.md`) wait until the throwing `new`
+  forms can be exported too. `nm -D` of the built library shows no `_Zn` or `_Zd` symbol
+  (`every_cxx_operator_form_meets_its_cases_and_binds_to_the_cxx_runtime`).
 - **Before the library can be called.** The dynamic loader uses its own minimal allocator until
   it has relocated every object, the preload library included, and only then switches to the
   interposed `malloc`; glibc has registered rseq for the main thread before that
@@ -52,13 +52,11 @@ What the preload setting adds:
   `dlopen` and `dlclose` of it can unmap it. Any other shared object that contains the
   allocator must be linked the same way; unloading one kills the process.
 - **Unwinding.** The library is built with `panic = "abort"`. A panic reaches the panic handler,
-  which ends the process through `Os::abort` (raw system calls, no allocation). The only
-  function the library calls that may throw is a C++ new-handler (CXX-04); that call is
-  `extern "C-unwind"`, so rustc gives it a landing pad, whose personality (PRELOAD-02) aborts.
-  Everything else it calls cannot throw: the system call instruction, glibc's
-  `__errno_location`, `dlsym` and `dladdr`, `std::get_new_handler` and the program's
-  replacement operators (all `noexcept`), the program's `free`, and the compiler's
-  `memcpy` and `memset`. So no exception ever unwinds out through the library's frames.
+  which ends the process through `Os::abort` (raw system calls, no allocation). Nothing the
+  library calls can throw: the system call instruction, glibc's `__errno_location`, and the
+  compiler's `memcpy` and `memset`. (The C++ layer's calls of a new-handler and of a program's
+  operators, CXX-04 to CXX-07, are not reachable: the library exports no C++ operator.) So no
+  exception ever unwinds out through the library's frames.
 
 ## PRELOAD-02: `#[unsafe(no_mangle)] extern "C" fn asmalloc_preload_no_unwinding`, and the binding of `rust_eh_personality` to it
 
@@ -73,7 +71,6 @@ library's dynamic symbol table (checked with `nm -D`). The unwind tables of the 
 `core` linked into the library name it, and they now resolve inside the library instead of
 failing the load. Another object that looks up `rust_eh_personality` dynamically
 (`librustc_driver` exports and imports its own) does not find this library's. The function is
-only reachable when an exception unwinds into the library's own frames, which happens in one
-case: a C++ new-handler that throws (PRELOAD-01). Then it aborts, which is the behaviour Rust
-defines for that call under `panic = "abort"`, and the heap is left as it was: the handler runs
-between attempts, when the allocator holds nothing.
+only reachable when an exception unwinds into the library's own frames, which nothing it calls
+can start (PRELOAD-01). If one did, it aborts, which is the behaviour Rust defines under
+`panic = "abort"`.

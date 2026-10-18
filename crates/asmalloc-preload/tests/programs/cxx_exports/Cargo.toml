@@ -1,0 +1,18 @@
+# A shared library that exports asmalloc's C functions and its C++ operators, which the preload
+# library no longer does, so that the C++ operators stay built and tested for when all of them
+# can be exported. Outside the workspace: tests/preload.rs builds it on its own.
+[package]
+name = "cxx-exports"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[lib]
+crate-type = ["cdylib"]
+test = false
+doctest = false
+
+[dependencies]
+asmalloc = { path = "../../../../asmalloc" }
+
+[workspace]

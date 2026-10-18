@@ -1,6 +1,9 @@
 //! The C++ allocation operators (C++17 [new.delete], as libstdc++'s and libc++'s `<new>`
 //! declare them) on the process's heap. [`export_cxx_abi!`](crate::export_cxx_abi) exports the
-//! nothrow forms of `new` and every form of `delete` under their mangled names.
+//! nothrow forms of `new` and every form of `delete` under their mangled names. Nothing exports
+//! them yet, the preload library included: exporting some forms without the throwing `new` is
+//! unsound when another library defines the operators (design: "Interfaces", C++). They stay
+//! built and tested (`tests/programs/cxx_exports` in the preload crate) for when it can.
 //!
 //! - **new** is `malloc`, or the aligned allocation for the `std::align_val_t` forms, with the
 //!   same classes and alignment. When it fails it runs the installed new-handler in a loop, as
@@ -346,6 +349,11 @@ pub unsafe extern "C" fn operator_delete_sized_aligned(
     unsafe { operator_delete_aligned(ptr, align) }
 }
 
+/// **Not for use yet.** Exporting some of the operators without the throwing `new` forms is
+/// unsound when another library defines the operators: its blocks then reach our `delete`
+/// (design: "Interfaces", C++). The macro is kept built and tested for when every form can
+/// be exported; the preload library exports none.
+///
 /// Exports C++ allocation operators under their mangled names (Itanium C++ ABI, x86-64:
 /// `size_t` is `m`) from the crate that invokes it, so that sized deletes reach asmalloc with
 /// their size and nothrow `new` skips a call layer.
@@ -364,6 +372,7 @@ pub unsafe extern "C" fn operator_delete_sized_aligned(
 /// (see the [module documentation](self)); they allocate through `malloc` and `aligned_alloc`,
 /// so their blocks are asmalloc's and the `delete` exported here frees them. The placement
 /// forms are inline and not replaceable.
+#[doc(hidden)]
 #[macro_export]
 macro_rules! export_cxx_abi {
     () => {

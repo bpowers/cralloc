@@ -5,6 +5,15 @@ operators, and the `export_cxx_abi!` macro. The lookups themselves are `loader.r
 (`loader-safety.md`, LOADER-01 and LOADER-02; they were CXX-01 and CXX-02 here, including the
 case of a failing nothrow `new`, whose new-handler lookup takes the loader's lock).
 
+**What is exported today: nothing.** The preload library does not invoke `export_cxx_abi!`,
+and the macro and the `cxx-abi` feature are marked not for use: exporting some operators
+without the throwing `new` forms is unsound when a library looked up after ours defines the
+operators (Boehm GC's `libgccpp`: the program's `new` binds to it and its `delete` to us, so
+blocks that are not ours reach our `delete`, which no rule here can recognise). The entries
+below hold for the code as built and tested (`crates/asmalloc-preload/tests/programs/cxx_exports`,
+a shared library that exports the C functions and these operators), for when every form can
+be exported.
+
 ## CXX-03: the transmute to `GetNewHandler`, and the call through it
 
 **Preconditions.** The non-null address `loader::first` returned is the entry of a function
@@ -116,8 +125,9 @@ mangles.
 `<new>` on x86-64 (`size_t` is `m`, `std::align_val_t` is `St11align_val_t`, `const
 std::nothrow_t &` is `RKSt9nothrow_t`): the four nothrow forms of `new` and the twelve of
 `delete`, checked against libstdc++'s exports (`nm -D /usr/lib64/libstdc++.so.6`). The loader
-binds each of them in a C++ program to the library, and the four throwing forms of `new` to
-libstdc++ (`LD_DEBUG=bindings`, tested in `crates/asmalloc-preload/tests/preload.rs`). Each
+binds each of them in a C++ program to a library that exports them, and the four throwing
+forms of `new` to libstdc++ (`LD_DEBUG=bindings`, tested with the `cxx_exports` library in
+`crates/asmalloc-preload/tests/preload.rs`). Each
 argument has the C++ parameter's representation: `std::size_t` and the `enum class
 std::align_val_t : std::size_t` are `usize`, a `const std::nothrow_t &` is a pointer, which is
 ignored. Each `new` form's contract is C++'s: no preconditions on the size; the alignment of an
@@ -131,16 +141,18 @@ correctly. None of the forwarding functions unwinds, so their non-unwinding ABI 
 **The four throwing forms stay the C++ runtime's.** They are not exported, because they must
 throw `std::bad_alloc` and a Rust frame here cannot let it pass (CXX-04). libstdc++'s
 `operator new(size)` loops on `malloc` and the new-handler and throws; its aligned form does
-the same with `aligned_alloc` (`libsupc++/new_op.cc`, `new_opa.cc`). Under the preload library,
-and in a program that exports the C interface, those are asmalloc's, so every block the C++
+the same with `aligned_alloc` (`libsupc++/new_op.cc`, `new_opa.cc`). In a program that exports
+the C interface, those are asmalloc's, so every block the C++
 runtime's `new` returns is a block of asmalloc's heap, and the `delete` here, which takes any
 block of the heap, frees it correctly. The pairing is tested for every throwing form with every
 matching `delete` form (`cxx_operators.cpp`). The macro refuses to build without the C
 interface, which would pair libstdc++'s `new` (from glibc's `malloc`) with asmalloc's `delete`.
 
-**A program that replaces operators.** A program, or a library loaded before ours, may define
+**A program that replaces operators.** A program, or a library looked up before ours, may define
 the basic `new` and `delete` itself, or its own `malloc`. Then the forms it did not define are
 still ours, and CXX-05 to CXX-07 make them behave as the standard's defaults: our nothrow `new`
 hands off to the runtime's, which calls the program's `new`; our `delete` forms forward every
 pointer to the program's basic `delete`; and with only `malloc` replaced, a `delete` of a block
-from the runtime's `new` goes to the program's `free`.
+from the runtime's `new` goes to the program's `free`. A library looked up after ours that
+defines the operators is the case these rules cannot cover, and the reason nothing exports
+them yet.
