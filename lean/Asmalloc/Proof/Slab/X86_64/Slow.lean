@@ -1,6 +1,6 @@
 module
 
-public import Asmalloc.Proof.Slab.X86_64.Table
+public import Asmalloc.Proof.Slab.X86_64.Word
 
 /-!
 # The slow path's routines on x86-64: their word
@@ -66,7 +66,7 @@ section
 variable {c : Spec.Slab.Ctx isa} {s : State}
 
 theorem exec_off1 : exec (.mov32 .r9 (.reg .rdi)) (σ3 s) = some (σ4o s) := by
-  simp only [exec, readSrc32, Option.map_some, gpr_σ3_rdi]; rfl
+  simp only [exec, readSrc32, Option.map_some, σ3_rdi]; rfl
 
 theorem σ4o_r9 : (σ4o s).gpr .r9 = ((s.gpr .rdi).setWidth 32).setWidth 64 := by
   simp [σ4o, State.setReg32, RegUpd.gpr_setReg_self]

@@ -51,8 +51,11 @@ reaches `HEAP`, so blocks may move between handles.
 **Proof.** Both are `unsafe fn`s whose contract is that they are reached only as the tail of
 the out-of-line routines; the crate never calls them, and only the generated routines name
 them (`sym`). They run only as the tail of the out-of-line routines, whose callers
-(`Asmalloc::alloc_small`, `Asmalloc::free_small`) pass a small class's index and, for a push,
-an object of that class they own (`free_small`'s contract). The index is checked again
-(`small_class` aborts otherwise) and the object address is non-null-checked. The thread's
+(`Asmalloc::alloc_small`, `Asmalloc::free_small`) pass the address of a small class's word in
+slab 0 (`Front::word`) and, for a push, an object of that class they own (`free_small`'s
+contract). The class is recovered from the address and checked (`Front::class_of_word` gives a
+class only for the word of a small class; `small_class` aborts otherwise), and the object
+address is non-null-checked. `small_class` also writes the masks the out-of-line routines read
+(`publish_masks`): plain atomic stores of constants, which a race repeats harmlessly. The thread's
 `rseq_cs` still names the routine's descriptor, but the instruction pointer has left the
 sequence, so an interruption only clears it, and every routine the slow path runs arms its own.

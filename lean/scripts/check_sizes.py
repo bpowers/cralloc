@@ -90,14 +90,20 @@ def functions(path: pathlib.Path):
 
 
 def measure(mc: str, name: str, asm: str, tmp: pathlib.Path) -> tuple[int, int]:
-    """The bytes of `name`'s code in place, up to its alignment directive,
-    and the alignment of its section."""
+    """The bytes of `name`'s hot path, from its entry to the end of its
+    return, and the alignment of its section. What follows the return before
+    the alignment directive (stubs that jump to a slow path,
+    `Printer.stubExits`) runs only on a miss."""
     lines = asm.rstrip("\n").split("\n")
     if not lines[-1].strip().startswith((".p2align", ".balign", ".align")):
         raise ValueError("does not end with an alignment directive")
-    body = "\n".join(lines[:-1])
+    rets = [i for i, l in enumerate(lines) if l.strip() == "ret"]
+    if not rets:
+        raise ValueError("has no return")
+    end = rets[0] + 1
+    body = "\n".join(lines[:end] + [f"{name}_end:"] + lines[end:-1])
     src = (f'.intel_syntax noprefix\n.section .text.{name},"ax",@progbits\n'
-           f"{name}:\n{body}\n{name}_end:\n{lines[-1]}\n")
+           f"{name}:\n{body}\n{lines[-1]}\n")
     s, o = tmp / f"{name}.s", tmp / f"{name}.o"
     s.write_text(src)
     subprocess.run([mc, "-triple=x86_64-unknown-linux-gnu", "-filetype=obj",

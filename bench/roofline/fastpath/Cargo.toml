@@ -1,0 +1,24 @@
+# Pins asmalloc's fast path inlined: a fat-LTO binary with allocation sites of each kind, whose
+# disassembly check.py inspects. See check.py.
+[package]
+name = "roofline-fastpath"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+# Stands alone: not a member of any workspace above it.
+[workspace]
+
+[features]
+# asmalloc's direct `__rseq_offset` load, for an executable.
+executable = ["asmalloc/executable"]
+
+[dependencies]
+asmalloc = { path = "../../../crates/asmalloc" }
+
+[profile.release]
+opt-level = 3
+debug = 1
+panic = "abort"
+lto = "fat"
+codegen-units = 1
