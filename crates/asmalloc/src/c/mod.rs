@@ -39,6 +39,7 @@
 
 pub mod cxx;
 mod errno;
+mod loader;
 mod mirror;
 #[doc(hidden)]
 pub mod routines;

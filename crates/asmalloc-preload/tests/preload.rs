@@ -250,66 +250,63 @@ fn build_library(dir: &str, name: &str) -> (std::process::ExitStatus, PathBuf) {
     (output.status, target.join(format!("debug/lib{name}.so")))
 }
 
-// The tests below are the review's findings: each states what should happen and fails today.
-// `cargo test -p asmalloc-preload -- --ignored` runs them.
-
-/// A shared library with asmalloc inside it (a Rust plugin whose global allocator is
-/// asmalloc) is loaded, called and unloaded by a host that keeps running. Today the host dies
-/// with SIGSEGV from the kernel: the thread's `rseq_cs` still names a descriptor in the
-/// unloaded library. With `GLIBC_TUNABLES=glibc.pthread.rseq=0` it survives, and its address
-/// space grows by the 16 TiB reservation at every load.
+/// A shared object that holds the allocator must never be unloaded: a thread's `rseq_cs` goes
+/// on naming a descriptor inside it, and the kernel reads that at the thread's next
+/// preemption. The library is linked `-z nodelete` for that (`build.rs`).
 #[test]
-#[ignore = "finding: unloading a library that contains the allocator kills the process"]
-fn a_library_with_the_allocator_can_be_unloaded() {
-    let (status, plugin) = build_library("unload", "unload_plugin");
-    assert!(status.success(), "building the plugin");
-    let host = program("unload_host.c");
-    let out = run(false, Command::new(&host).arg(&plugin).arg("3"));
+fn the_library_is_marked_never_to_be_unloaded() {
+    let out = Command::new("readelf")
+        .arg("-d")
+        .arg(library())
+        .output()
+        .expect("readelf runs");
+    let dynamic = String::from_utf8_lossy(&out.stdout);
     assert!(
-        out.status.success(),
-        "{:?}\n{}{}",
-        out.status,
-        String::from_utf8_lossy(&out.stdout),
-        String::from_utf8_lossy(&out.stderr)
+        dynamic
+            .lines()
+            .any(|l| l.contains("(FLAGS_1)") && l.contains("NODELETE")),
+        "{dynamic}"
     );
-    let stdout = String::from_utf8_lossy(&out.stdout);
-    assert!(stdout.ends_with("done\n"), "{stdout}");
-    // Three loads must not hold three reservations.
-    let last = stdout.lines().rev().nth(1).unwrap_or_default();
-    let gib: u64 = last
-        .split_whitespace()
-        .rev()
-        .nth(1)
-        .and_then(|n| n.parse().ok())
-        .unwrap_or(u64::MAX);
-    assert!(gib < 20 << 10, "{last}");
 }
 
-/// A C++ program with a malloc of its own runs under glibc, jemalloc and tcmalloc. Under the
-/// library its `delete` is ours and its throwing `new` is libstdc++'s, which calls the
-/// program's malloc, so the first `delete` aborts on a pointer that is not ours.
+/// A C++ program with a malloc of its own. Under the library its `delete` is ours and its
+/// throwing `new` is libstdc++'s, which calls the program's malloc: our `delete` hands a
+/// pointer outside the heap to the program's `free`.
 #[test]
-#[ignore = "finding: a C++ program with its own malloc aborts under the library"]
 fn a_cxx_program_with_its_own_malloc_runs() {
     let exe = program("own_malloc.cpp");
     let out = same_with_and_without(|| Command::new(&exe));
     assert_eq!(out.trim(), "99500");
 }
 
-/// A program that replaces only `operator new(size_t)` and `operator delete(void*)`, which
-/// the standard says is enough, runs under glibc and jemalloc. Under the library every other
-/// `delete` form is ours and never reaches the program's.
-#[test]
-#[ignore = "finding: a program that replaces the two basic C++ operators aborts under the library"]
-fn a_cxx_program_with_its_own_operator_new_runs() {
+/// `own_new.cpp` in `mode`, with and without the library: its replaced `new` and `delete` see
+/// every block.
+fn own_new_runs(mode: &str) {
     let exe = program("own_new.cpp");
-    for mode in ["array", "nothrow", "sized"] {
-        let out = same_with_and_without(|| {
-            let mut c = Command::new(&exe);
-            c.arg(mode);
-            c
-        });
-        assert_eq!(out.trim(), format!("{mode}: live 0"));
+    let out = same_with_and_without(|| {
+        let mut c = Command::new(&exe);
+        c.arg(mode);
+        c
+    });
+    assert_eq!(out.trim(), format!("{mode}: live 0"));
+}
+
+/// A program that replaces `operator new(size_t)` and calls the nothrow form, which the
+/// library exports: ours must hand off to the C++ runtime's, which calls the program's, or the
+/// program's `delete` is given a block its `new` never made.
+#[test]
+fn a_cxx_program_with_its_own_operator_new_gets_it_from_nothrow_new() {
+    own_new_runs("nothrow");
+}
+
+/// A program that replaces only `operator new(size_t)` and `operator delete(void*)`, which
+/// the standard says is enough. Its blocks sit inside our heap (its `new` is our `malloc` plus
+/// a header), so every `delete` form of ours must forward every pointer to the program's.
+#[test]
+#[ignore = "needs the generated delete routines to read a mirror of their own (lean-c)"]
+fn a_cxx_program_with_its_own_operator_new_runs() {
+    for mode in ["array", "sized", "matching", "empty"] {
+        own_new_runs(mode);
     }
 }
 
