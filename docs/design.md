@@ -649,12 +649,12 @@ the one a Rust `Layout` of the same size implies.
   again at the same size, and only a failure with no other reserver in flight, or after a
   bounded number of tries, makes it settle for a smaller heap or report failure. A count of
   reservers in flight, kept in one word, tells it which case it is in.
-- **Unloading.** A shared object that contains the allocator can never be unloaded. A
+- **Unloading.** A shared object that contains the allocator must not be unloaded. A
   thread's rseq area goes on naming a sequence inside it after the last call returns, and
-  the kernel reads that the next time the thread is preempted. So the allocator looks at
-  its own image when the heap starts: if it finds itself in a shared object that is not
-  marked against unloading, it pins the object through the loader. The preload library is
-  linked with that mark.
+  the kernel reads that the next time the thread is preempted, so unloading kills the
+  process. The preload library is linked so that it cannot be unloaded. Anyone else who
+  builds the allocator into a shared object links it the same way; we do not guard against
+  it at run time.
 - **Without rseq.** A thread with no rseq registration reads a negative CPU number, so every
   routine sends it to the slow path and it never touches a slab. That covers a whole process
   under valgrind or with the C library's registration turned off, and a single thread whose
