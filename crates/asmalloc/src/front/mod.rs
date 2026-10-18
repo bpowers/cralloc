@@ -36,6 +36,8 @@ pub(crate) mod sync;
 mod twin;
 #[cfg(kani)]
 mod verify;
+#[cfg(kani)]
+mod verify_slow;
 
 pub use routines::{NO_CPU, Routines, StackPop, StackPush, StoreIfEqual};
 pub use slab::{Cpu, Field, SLAB_BYTES, SLAB_COUNT, SLAB_SHIFT, Slab, Slabs, Spare};

@@ -126,12 +126,6 @@ pub(super) fn layouts_fit(plan: Plan) {
     assert!(layout.region_pages() as usize * page == plan.region_size());
 }
 
-#[kani::proof]
-#[kani::unwind(6)]
-fn layouts_fit_the_used_geometries() {
-    layouts_fit(any_used_plan());
-}
-
 /// The decay word: a pass under way is stepped whatever the clock says. Otherwise a pass
 /// starts exactly when the clock is an interval or more past the word's time; a clock behind
 /// the word re-stamps it with the time now, after which a pass starts one interval later; and

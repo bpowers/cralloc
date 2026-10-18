@@ -38,6 +38,13 @@ fn any_plan() -> Plan {
     any_plan_of(geometry.unwrap())
 }
 
+/// Seconds rather than a fraction of one, so not in the merge gate.
+#[kani::proof]
+#[kani::unwind(6)]
+fn layouts_fit_the_used_geometries() {
+    layouts_fit(any_used_plan());
+}
+
 #[kani::proof]
 #[kani::unwind(6)]
 fn layouts_fit_every_geometry() {
