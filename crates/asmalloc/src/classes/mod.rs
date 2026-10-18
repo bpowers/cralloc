@@ -37,6 +37,7 @@ pub use magazine::{
     MAGAZINE_BUDGET, MARKER, MARKER_SHIFT, MagazineSize, Marker, SLOT_BYTES, is_marker,
 };
 pub use small::SmallClass;
+pub(crate) use small::{WORD_START, WORD_STRIDE};
 
 use core::alloc::Layout;
 use core::fmt;

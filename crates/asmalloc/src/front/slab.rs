@@ -22,7 +22,7 @@
 //! stacks, no activity, no claim, nothing retired, no sweep and no stamps.
 
 use super::sync::{AtomicPtr, AtomicU64};
-use crate::classes::{SMALL_COUNT, SmallClass};
+use crate::classes::{SMALL_COUNT, SmallClass, WORD_START, WORD_STRIDE};
 use core::ptr;
 use core::sync::atomic::Ordering;
 
@@ -42,10 +42,11 @@ const CHUNKS: usize = (SMALL_COUNT + 1).next_multiple_of(2);
 const FIELDS: usize = 4 * CHUNKS;
 
 /// The position of class index `index`'s hot word among the slab's words: bytes 16 to 23 of
-/// chunk `index`.
+/// chunk `index`, as a [`SmallClass`] holds it.
 const fn hot_position(index: usize) -> usize {
-    4 * index + 2
+    WORD_STRIDE * index + WORD_START
 }
+const _: () = assert!(WORD_STRIDE == 4 && WORD_START == 2);
 
 const _: () = assert!(hot_position(SMALL_COUNT) < FIELDS && hot_position(1) == 6);
 // No hot word is at bytes 0 to 15 of a 32-byte chunk, where a 32-byte-aligned rseq area has its
@@ -83,7 +84,7 @@ impl Field {
     /// The hot word of a class: the address of the next free slot of its loaded magazine.
     #[inline(always)]
     pub const fn hot(class: SmallClass) -> Field {
-        Field(8 * hot_position(class.class().index() as usize) as u16)
+        Field(8 * class.word() as u16)
     }
 
     /// The head of one of a class's spare stacks.
@@ -93,7 +94,7 @@ impl Field {
             Spare::Full => 0,
             Spare::Empty => 1,
         };
-        Field(8 * (4 * class.class().index() as usize + within) as u16)
+        Field(8 * (class.word() - WORD_START + within) as u16)
     }
 
     /// The byte offset in the slab.

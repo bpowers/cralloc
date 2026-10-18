@@ -41,9 +41,9 @@ const fn class_index(size: usize) -> u8 {
 
 /// The position of `class`'s hot word in a slab, as a table byte.
 pub(crate) const fn word_byte(class: SmallClass) -> u8 {
-    let index = Field::hot(class).index();
-    assert!(index < 256);
-    index as u8
+    let word = class.word();
+    assert!(word < 256 && word == Field::hot(class).index());
+    word as u8
 }
 
 /// The small class whose hot word is at position `byte`, if any: the inverse of [`word_byte`].

@@ -37,7 +37,7 @@ below are those sections, discharged once here for every call in the file.
   (`front/slab.rs`, with compile-time assertions), so a word of slab 0 below the
   specification's 512. `SLABS` is the `Front` static, whose slabs are at offset 0 (a compile-time
   assertion), so its symbol, which the specification calls `SLABS`, is the first slab's address.
-- (C): the mask is `front::mask(class)`, entry `class` of `front::MASKS`, built from
+- (C): the mask is `front::mask(class)`, the entry of `front::MASKS` at the class's word position, built from
   `SmallClass::magazine().mask()`; `MagazineSize` keeps `n` a power of two from 4 to 256, so
   `k` is 2 to 8. A test checks each size's mask against the one the routines were proved for
   (`crate::spec`, which the Lean emitter writes).

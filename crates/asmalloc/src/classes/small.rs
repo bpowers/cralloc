@@ -2,11 +2,12 @@
 
 use super::{Class, MAX_SMALL_SIZE, MagazineSize, QUANTUM, SMALL_COUNT};
 use core::alloc::Layout;
+use core::num::NonZeroU8;
 
 /// The small class of every rounded size, by `(size - 1) / QUANTUM`: entry `j` is the class of
 /// `QUANTUM * (j + 1)` bytes, which serves every size from `QUANTUM * j + 1` up to that.
 static BY_SIZE: [SmallClass; MAX_SMALL_SIZE / QUANTUM] = {
-    let mut table = [SmallClass(Class::SMALLEST); MAX_SMALL_SIZE / QUANTUM];
+    let mut table = [SmallClass::of(Class::SMALLEST); MAX_SMALL_SIZE / QUANTUM];
     let mut j = 0;
     while j < table.len() {
         table[j] = match Class::of_size(QUANTUM * (j + 1)) {
@@ -24,10 +25,23 @@ static BY_SIZE: [SmallClass; MAX_SMALL_SIZE / QUANTUM] = {
 /// A class of at most `MAX_SMALL_SIZE` bytes.
 ///
 /// Small classes have a slab word and a magazine size. Their ordinal, `index - 1`, numbers them
-/// from zero for arrays with one entry per small class, such as the slab's hot words.
+/// from zero for arrays with one entry per small class.
+///
+/// It is held as the position of the class's hot word among a slab's words,
+/// `WORD_STRIDE * index + WORD_START` (`front::slab` lays the slab out so): the position is what
+/// the fast path needs, an address `SLABS + 8 * position` and the mask at the same position, so a
+/// class found at run time by [`of_nonzero_layout`](Self::of_nonzero_layout) gives the address
+/// with one scaled add, and the class index is a shift away, for the slow paths.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
 #[repr(transparent)]
-pub struct SmallClass(Class);
+pub struct SmallClass(NonZeroU8);
+
+/// A small class's hot word is at position `WORD_STRIDE * index + WORD_START` of its slab: one
+/// 32-byte chunk per class, the word at its bytes 16 to 23.
+pub(crate) const WORD_STRIDE: usize = 4;
+pub(crate) const WORD_START: usize = 2;
+const _: () = assert!(WORD_STRIDE.is_power_of_two() && WORD_START < WORD_STRIDE);
+const _: () = assert!(WORD_STRIDE * SMALL_COUNT + WORD_START <= u8::MAX as usize);
 
 /// The magazine size of each small class, by ordinal. A table, not the formula, because the
 /// formula divides by the class size.
@@ -47,10 +61,24 @@ impl SmallClass {
     #[inline(always)]
     pub(crate) const fn new(class: Class) -> Option<SmallClass> {
         if class.is_small() {
-            Some(SmallClass(class))
+            Some(SmallClass::of(class))
         } else {
             None
         }
+    }
+
+    /// `class`, which is small.
+    const fn of(class: Class) -> SmallClass {
+        match NonZeroU8::new((WORD_STRIDE * class.index() as usize + WORD_START) as u8) {
+            Some(word) => SmallClass(word),
+            None => panic!("a word position is never zero"),
+        }
+    }
+
+    /// The position of the class's hot word among a slab's words.
+    #[inline(always)]
+    pub(crate) const fn word(self) -> usize {
+        self.0.get() as usize
     }
 
     /// The small class with this ordinal, if there is one.
@@ -58,7 +86,7 @@ impl SmallClass {
     pub(crate) const fn from_ordinal(ordinal: usize) -> Option<SmallClass> {
         if ordinal < SMALL_COUNT {
             match Class::from_index(ordinal as u8 + 1) {
-                Some(class) => Some(SmallClass(class)),
+                Some(class) => Some(SmallClass::of(class)),
                 None => None,
             }
         } else {
@@ -87,19 +115,22 @@ impl SmallClass {
     /// The class.
     #[inline(always)]
     pub const fn class(self) -> Class {
-        self.0
+        match Class::from_index((self.word() / WORD_STRIDE) as u8) {
+            Some(class) => class,
+            None => Class::SMALLEST,
+        }
     }
 
     /// The position among the small classes, `0..SMALL_COUNT`.
     #[inline(always)]
     pub(crate) const fn ordinal(self) -> usize {
-        self.0.index() as usize - 1
+        self.word() / WORD_STRIDE - 1
     }
 
     /// The slot size in bytes.
     #[inline(always)]
     pub const fn size(self) -> usize {
-        self.0.size()
+        self.class().size()
     }
 
     /// The size of this class's magazines.
