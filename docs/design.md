@@ -159,8 +159,8 @@ less.
    with mimalloc on single-threaded ones.
 2. **Memory.** No more resident memory than the leanest incumbent on the same workload,
    which our baselines show is usually jemalloc. Low fragmentation from segregated size classes and from preferring
-   partly used memory over fresh memory. Wholly free pages beyond a cap go back to the OS,
-   and the memory parked in caches is bounded.
+   partly used memory over fresh memory. Memory the program has stopped using goes back to
+   the OS within seconds, and the memory parked in caches is bounded.
 3. **One heap, three interfaces.** `GlobalAlloc`, `Allocator` and the C ABI share one heap,
    and C code can free what Rust allocated.
 4. **Verified.** The assembly is proved against a machine model. Size-class and layout
@@ -515,9 +515,9 @@ rule that returns it (`docs/research/memory.md` has the measurements behind them
 
 | What holds the memory | What returns it | When |
 |---|---|---|
-| Free slots in the bitmaps, on pages with nothing live on them | The clocked purge | Once an interval: up to a quarter of the retained memory, from the top of the heap down |
-| The same, when frees of small objects come in a burst | The cap on retained memory: the call that passes it purges toward it | At that call, within a bound on its work |
-| A freed large slot, once the large classes' smaller cap is reached | The free itself | Before it releases the slot |
+| Free slots in the bitmaps, on pages with nothing live on them | The clocked purge | Once an interval: up to a quarter of the retained memory, or all of it above the cap, from the top of the heap down |
+| The same, while more than the cap is retained and the heap grows somewhere else | The carve that grows it returns as much as it takes | At that carve, within a bound on its work |
+| A freed large slot whose block had huge pages | The free itself | Before it releases the slot |
 | The tail of a large block that shrinks in place; the old copy of one that moves | The resize (see "Large objects") | At once |
 | Objects in a magazine that stays loaded | A slow path of the same CPU launders it | Once it has been loaded for an interval |
 | Objects in a CPU's full spares | That CPU's sweep launders one magazine and sends the rest to the depot | Once an interval |
@@ -538,15 +538,24 @@ Five rules stand behind the table.
   bounded steps spread over the heartbeats that follow. Fills take the lowest addresses, so
   what is being reused sits at the bottom and is mostly left alone, and what is not reused
   is gone within several intervals.
-- **Retained memory is counted and capped.** The back end keeps an estimate of the free
-  memory it holds that is still resident. Frees and laundered magazines raise it; only
-  reuse and purging lower it, and it is never reset. The call that pushes the count past a
-  cap purges toward it, within a bound on its own work, and the clocked pass does the rest.
-  Free objects on pages that also hold live ones cannot be purged; that is fragmentation,
-  and it stays counted. Freed large slots have a separate and much smaller cap, checked at
-  the free: a freed large slot can serve only its own class, and one call returns it.
-  Objects parked in magazines, spares and the depot are not free and are not in the count;
-  the next rule handles them.
+- **Retained memory is counted, and growth pays for it.** The back end keeps an estimate
+  of the free memory it holds that is still resident, small and large classes together.
+  Frees and laundered magazines raise it; only reuse and purging lower it, and it is never
+  reset. A free never returns memory because the count is high. A level cannot tell idle
+  memory from memory that is about to be reused, and a program that frees and reallocates
+  in the same classes would fault back whatever its frees returned; only the clock can tell
+  what is idle. What a level is good for is a bound. The address space is divided by class,
+  so memory freed in one class can serve another only by way of the OS, and a program that
+  frees a great deal of one size and then allocates as much of another would hold both. So
+  while the count is over a cap, growth is paid for: memory carved past a watermark is
+  matched by an equal purge of retained memory, a step at a time and within a bound on the
+  work. Taking back pages that a purge returned is reuse, not growth, and is not charged;
+  charging it sets the allocator purging what it is about to refill. That leaves a class
+  that the clock had emptied free to refill while another's freed memory is still
+  resident; the clocked pass returns everything above the cap, so that lasts about an
+  interval. Free objects on pages that also hold live ones cannot be purged; that is
+  fragmentation, and it stays counted. Objects parked in magazines, spares and the depot
+  are not free and are not in the count; the next rule handles them.
 - **Parked objects do not pin the heap.** An object parked in a magazine holds its page as
   surely as a live one, and parked objects are a random sample of wherever the heap has
   been. Four rules keep them moving back to the bitmaps, where the next fill takes the
@@ -634,9 +643,9 @@ of a slot that headroom gives a block when it moves in, so a block resized back 
 across a class boundary settles in one slot instead of being copied on every call.
 
 When a large object has to move, the copy goes in pieces and returns the old block's pages
-behind it, so the two copies are never both resident. The old block would be purged at its
-free anyway; this only does it sooner, and it keeps a program that grows several big buffers
-at once from holding twice their size. The copy skips source pages that are all zero and
+behind it, so the two copies are never both resident. The block has just been outgrown, so
+its slot is unlikely to be wanted again soon, and this keeps a program that grows several
+big buffers at once from holding twice their size. The copy skips source pages that are all zero and
 leaves the destination's pages untouched there, so a block the program wrote sparsely stays
 sparse. Moving the pages with `mremap` instead would copy nothing, but it splits the heap's
 mapping in ways that take several more rules to undo, and it adds nothing to the memory
