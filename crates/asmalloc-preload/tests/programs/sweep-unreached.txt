@@ -4,4 +4,4 @@
 # a listed sequence fires, or if an entry matches no sequence.
 centry::c_free_sized|the crate's internal instance; the library exports a separate free_sized and nothing calls this one
 centry::c_calloc|the crate's internal instance; the library exports a separate calloc and nothing calls this one
-Heap<asmalloc::os::linux::kernel::LinuxOs>>::free_slow#0|the retry push in exchange_for_free succeeds only if the slab gained room between the fast path's miss and the retry
+::free_slow#0|the retry push in exchange_for_free succeeds only if the slab gained room between the fast path's miss and the retry
