@@ -20,14 +20,15 @@
 //! All zero means nothing is free and no purge is under way.
 //!
 //! The order keeps what a class touches together, because each touched page of a block costs a
-//! page of memory and, at 4 GiB from the next class's block, often a page of page tables too:
+//! page of memory and, at 128 MiB from the next class's block, often a page of page tables too:
 //! a region whose slots reach the bitmaps touches the first page of the block (the small top
 //! levels, and for most classes the start of level 1), the start of level 1 for the smallest
 //! classes, and the first page of the leaf bitmap, which for every small class lies in the same
 //! 2 MiB as the rest, so one page of page tables serves them all (`docs/research/memory.md`,
 //! "Small heaps"). The region's header (`Grow`, `Hints`) is not in the block at all: it is in
-//! the back end's state, beside every other region's (`host::RegionHeader`), so that a class
-//! whose slots never reach the bitmaps never touches its block.
+//! the back end's state, beside every other region's (`host::RegionHeader`), so that a small
+//! class whose slots never reach the bitmaps never touches its block. A large class touches it
+//! on every allocation, to write the slot's size word.
 
 use super::policy::{STAGGER_SLOTS, STAGGER_STEP};
 use super::word::BITS;
@@ -65,7 +66,8 @@ pub(crate) struct Layout {
 }
 
 /// Words a [`Layout`] packs into for [`Memo`]: everything but the size and its divisor, which
-/// come from the class, as seventeen 32-bit fields and four bytes.
+/// come from the class, as seventeen 32-bit fields (two of them, the clean-bitmap count and the
+/// total, derivable and not read back) and three bytes.
 const PACKED_WORDS: usize = 9;
 
 /// Set in the last packed word: the words hold a layout.

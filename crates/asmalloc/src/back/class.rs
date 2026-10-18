@@ -4,7 +4,7 @@
 //! A class's regions are found through its summary tree, which visits them in address order. New
 //! slots are carved from one region at a time, the class's carving region. When it is exhausted,
 //! the thread that notices picks the lowest unassigned region, commits its fixed metadata (so
-//! that the region never carries a class tag without a readable header), takes it with a
+//! that the region never carries a class tag without readable summary words), takes it with a
 //! compare-and-swap on the region table, gives it its huge-page advice, and publishes it with a
 //! compare-and-swap on the class's carving word. If another thread published first, the loser
 //! zeroes what it wrote and gives its region back with a compare-and-swap; no other thread has
@@ -1048,7 +1048,8 @@ impl<'a, O: Os> Back<'a, O> {
                 continue;
             }
             // Commit the fixed metadata before the region can carry this class's tag, so that
-            // whoever learns the tag (a free of any pointer into the region) can read the header.
+            // whoever learns the tag (a free of any pointer into the region) can read its summary,
+            // clean and, for a large class, zero and size words.
             // Committing is idempotent, so doing it for a region another thread then takes
             // costs only commit charge.
             if !host.commit_meta(region, start, end - start) {

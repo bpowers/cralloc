@@ -1707,9 +1707,10 @@ What the table says, against the suspects:
 1. **Region headers out of the metadata blocks, leaf bitmap last** (`back/layout.rs`,
    `back/host.rs`). The `Grow` and `Hints` words of every region now sit side by side in the
    back end's state, 16 bytes each, four to a line, and a block runs top summary level first
-   and the leaf bitmap last, starting a page. A class whose frees never reach the bitmaps never
-   touches its block; one that does touches two or three pages, all in its first 2 MiB, under
-   one page of page tables. The generated routines read neither. Kani's layout harnesses and
+   and the leaf bitmap last, starting a page. A small class whose frees never reach the bitmaps
+   never touches its block; one that does touches two or three pages, all in its first 2 MiB,
+   under one page of page tables. (A large class writes its slot's size word in the block on
+   every allocation, so it touches its block as before.) The generated routines read neither. Kani's layout harnesses and
    the safety ledger entry BACK-HOST-01 are updated.
 2. **One spare magazine per stack** (`MAX_SPARES`, 4 to 1). One covers a thread oscillating at
    a magazine boundary; deeper stacks filled only on CPUs whose traffic goes one way.

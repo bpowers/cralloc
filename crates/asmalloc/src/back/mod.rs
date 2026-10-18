@@ -96,7 +96,7 @@ pub struct State<O: Os> {
     /// metadata, which must stay all zero for a region that may later go to a class.
     run_sizes: Lined<[AtomicUsize; MAX_REGIONS]>,
     /// Each region's header (`host::RegionHeader`). Out of the regions' metadata
-    /// blocks, so that a class whose slots never reach the bitmaps never touches its block.
+    /// blocks, so that a small class whose slots never reach the bitmaps never touches its block.
     headers: Lined<Headers>,
 }
 

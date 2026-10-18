@@ -36,10 +36,11 @@ pub(crate) struct ClassState {
 /// nothing committed, no huge-page part and no purge under way.
 ///
 /// The headers of all regions are in the back end's state, side by side, not in the regions'
-/// metadata blocks: every class carves and so writes its header, but only a class whose slots
-/// reach the bitmaps needs its block, and a block's first touched page costs a page of memory
-/// and, 4 GiB from the next class's, a page of page tables (`docs/research/memory.md`, "Small
-/// heaps").
+/// metadata blocks: every class carves and so writes its header, but a small class needs its
+/// block only once its slots reach the bitmaps (a large class writes its slots' size words
+/// there on every allocation), and a block's first touched page costs a page of memory and,
+/// 128 MiB from the next class's, often a page of page tables (`docs/research/memory.md`,
+/// "Small heaps").
 pub(crate) struct RegionHeader {
     pub(crate) grow: Atomic,
     pub(crate) hints: Atomic,
@@ -55,14 +56,21 @@ impl RegionHeader {
 }
 
 /// The headers of every region, by region number, four to a line: an exception to
-/// `crate::lined`'s rule, because neither word is written on a path that runs often. `Grow` is
-/// written only by a carve, and a carve that hands out fresh memory is followed by the faults
-/// on that memory, which cost far more than a line moving between cores (the other carve, the
-/// purge pass's top-up of the watermark's huge page, is clocked). `Hints` is written when a
-/// region is assigned, when it crosses the huge-page threshold, and by the clocked purge pass.
-/// No ordinary fill, launder or free writes either; a launder reads `Grow` once for each region
-/// a magazine's objects lie in. A line each would make the state 256 KiB, which the simulated
-/// heaps the tests build on their stacks cannot hold.
+/// `crate::lined`'s rule.
+///
+/// - `Grow` is written by the compare-and-swap in `region::carve`, which runs once per carving
+///   fill (twice when it also publishes a commit), once per first use of a large slot and per
+///   small allocation by a thread with no per-CPU cache (`Back::alloc`), and by `top_up` when
+///   the purge walk reaches a region's top.
+/// - `Hints` is written by `switch_to_huge` once per region, by `prepare` and `unprepare` at
+///   assignment, and by `set_cursor` once per unit the purge walk passes, from the clocked pass
+///   and from `Back::grow` when a carve pays a growth debt.
+///
+/// Sharing a line is acceptable because neither word is written in steady state: a carve is
+/// followed by faults on the memory it hands out and a purge walk by a system call per unit,
+/// and a carving fill already writes the shared growth word. Fills, launders and frees only
+/// read `Grow`. A line each would make the state 256 KiB, which the simulated heaps the tests
+/// build on their stacks cannot hold.
 pub(crate) type Headers = [RegionHeader; MAX_REGIONS];
 
 /// The class levels of a class's summary tree.

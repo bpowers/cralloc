@@ -83,8 +83,8 @@ fn fill_hands_out_distinct_aligned_writable_slots_in_address_order() {
     assert_eq!(back.lookup(slots[0].wrapping_add(1)), None);
 }
 
-/// With 8-byte slots the leaf bitmap of a region fills pages of its own, ahead of the page the
-/// header shares with the summary, so it is committed only as carves need it. Freeing slots
+/// With 8-byte slots the leaf bitmap of a region fills pages of its own, after the pages of the
+/// summary and clean bitmap, so it is committed only as carves need it. Freeing slots
 /// writes it; the simulator's memory is inaccessible until committed, so a write the carve did
 /// not commit for kills the test.
 #[test]
