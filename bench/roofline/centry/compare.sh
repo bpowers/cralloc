@@ -8,7 +8,10 @@
 # BASELINES (default: the main checkout's bench/baselines/out, read-only). tcmalloc runs twice:
 # as built (per-thread caches, because glibc owns the rseq area) and with glibc's rseq turned
 # off so that its per-CPU caches engage; the stand-ins need glibc's rseq and cannot run there.
-# Builds: cloop-plt (PLT), cloop-ibt (IBT PLT, .plt.sec), cloop-noplt (call through the GOT).
+# asmalloc is the real library, ASMALLOC_LIB (default: this checkout's release build of
+# libasmalloc_preload.so). Builds: cloop-plt (PLT), cloop-ibt (IBT PLT, .plt.sec), cloop-noplt
+# (call through the GOT), and cloop-static, which links asmalloc in and calls its routines
+# directly; it runs only as asmalloc, with nothing preloaded.
 set -euo pipefail
 here=$(cd "$(dirname "$0")" && pwd)
 out=$here/out
@@ -18,10 +21,12 @@ base=${BASELINES:-$(dirname "$common")/bench/baselines/out}
 forms=("$@")
 [ ${#forms[@]} -gt 0 ] || forms=(pair:32 burst:8:32 burst:32:32 mixed:1:512)
 rounds=${RF_ROUNDS:-3}
-builds=(${RF_BUILDS:-plt ibt noplt})
+builds=(${RF_BUILDS:-plt ibt noplt static})
+repo=$(git -C "$here" rev-parse --show-toplevel)
 
 declare -A lib=(
   [glibc]=""
+  [asmalloc]="${ASMALLOC_LIB:-$repo/target/release/libasmalloc_preload.so}"
   [asm-best]="$out/libstandin-best.so"
   [asm-rust]="$out/libstandin-rust.so"
   [asm-two]="$out/libstandin-two.so"
@@ -33,15 +38,18 @@ declare -A lib=(
   [tcmalloc]="$base/tcmalloc/libtcmalloc.so"
   [tcmalloc-percpu]="$base/tcmalloc/libtcmalloc.so"
 )
-order=(${RF_ALLOCS:-glibc asm-best asm-rust jemalloc mimalloc tcmalloc tcmalloc-percpu})
+order=(${RF_ALLOCS:-glibc asmalloc asm-best asm-rust jemalloc mimalloc tcmalloc tcmalloc-percpu})
 
 tmp=$(mktemp -d)
 trap 'rm -rf "$tmp"' EXIT
 for r in $(seq "$rounds"); do
   for b in "${builds[@]}"; do
     for a in "${order[@]}"; do
+      if [ "$b" = static ]; then
+        [ "$a" = asmalloc ] || continue
+      fi
       envs=()
-      [ -n "${lib[$a]}" ] && envs+=("LD_PRELOAD=${lib[$a]}")
+      [ -n "${lib[$a]}" ] && [ "$b" != static ] && envs+=("LD_PRELOAD=${lib[$a]}")
       [ "$a" = tcmalloc-percpu ] && envs+=("GLIBC_TUNABLES=glibc.pthread.rseq=0")
       MEMLIMIT_QUIET=1 "$memlimit" -m 4G -t 10m -- env "${envs[@]}" "$out/cloop-$b" "${forms[@]}" \
         | sed "s/^/$b $a /" >> "$tmp/r$r"

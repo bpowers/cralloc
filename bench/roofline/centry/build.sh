@@ -38,4 +38,8 @@ cflags=(-O2 -fPIE -pie -Wall -Wextra -Wl,-z,now)
 run cc "${cflags[@]}" -o "$out/cloop-plt" "$here/cloop.c"
 run cc "${cflags[@]}" -fcf-protection=full -Wl,-z,ibtplt -o "$out/cloop-ibt" "$here/cloop.c"
 run cc "${cflags[@]}" -fno-plt -o "$out/cloop-noplt" "$here/cloop.c"
+# The loops linked with asmalloc itself as a static library (static/), so that they call its
+# generated routines directly, as a statically linked program does.
+(cd "$here/static" && run cargo build --release -q)
+run cc "${cflags[@]}" -o "$out/cloop-static" "$here/cloop.c" "$here/static/target/release/libcentry_static.a"
 echo "built $out"

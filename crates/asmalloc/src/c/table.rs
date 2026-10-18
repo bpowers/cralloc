@@ -53,6 +53,23 @@ pub(crate) const C_CALLOC_CLASSES: [u8; CALLOC_TABLE_MAX + 1] = {
     table
 };
 
+/// `C_CALLOC_LENS[size]` is the size of the class of a `calloc` of `size` bytes in all, which
+/// it zeroes, for every size up to [`CALLOC_TABLE_MAX`].
+pub(crate) const C_CALLOC_LENS: [u16; CALLOC_TABLE_MAX + 1] = {
+    let mut table = [0u16; CALLOC_TABLE_MAX + 1];
+    let mut size = 0;
+    while size < table.len() {
+        let Some(class) = Class::from_index(C_CALLOC_CLASSES[size]) else {
+            panic!("a calloc table entry is not a class");
+        };
+        let len = class.size();
+        assert!(len <= u16::MAX as usize);
+        table[size] = len as u16;
+        size += 1;
+    }
+    table
+};
+
 /// The largest size the sized free's prediction covers by its table index: the low 16 bits of
 /// the size.
 pub(crate) const C_SIZED_LEN: usize = 1 << 16;
@@ -171,6 +188,9 @@ mod tests {
         }
         assert_eq!(calloc_class(CALLOC_TABLE_MAX + 1), None);
         assert_eq!(C_CALLOC_CLASSES.len(), 1025);
+        for (size, &len) in C_CALLOC_LENS.iter().enumerate() {
+            assert_eq!(usize::from(len), calloc_class(size).unwrap().size());
+        }
     }
 
     #[test]
