@@ -65,11 +65,12 @@ half done. The handler may itself allocate; the allocator holds nothing across t
 callee's contract, and each exported symbol is a sound definition of the C++ operator its name
 mangles.
 
-**Proof.** The names are the Itanium C++ ABI manglings of the 20 replaceable forms in `<new>`
-on x86-64 (`size_t` is `m`, `std::align_val_t` is `St11align_val_t`, `const std::nothrow_t &`
-is `RKSt9nothrow_t`), checked against the 20 libstdc++ 3.4 / CXXABI 1.3.11 exports
-(`nm -D /usr/lib64/libstdc++.so.6`), and the loader binds each of them in a C++ program to the
-library (`LD_DEBUG=bindings`, tested in `crates/asmalloc-preload/tests/preload.rs`). Each
+**Proof.** The names are the Itanium C++ ABI manglings of 16 of the 20 replaceable forms in
+`<new>` on x86-64 (`size_t` is `m`, `std::align_val_t` is `St11align_val_t`, `const
+std::nothrow_t &` is `RKSt9nothrow_t`): the four nothrow forms of `new` and the twelve of
+`delete`, checked against libstdc++'s exports (`nm -D /usr/lib64/libstdc++.so.6`). The loader
+binds each of them in a C++ program to the library, and the four throwing forms of `new` to
+libstdc++ (`LD_DEBUG=bindings`, tested in `crates/asmalloc-preload/tests/preload.rs`). Each
 argument has the C++ parameter's representation: `std::size_t` and the `enum class
 std::align_val_t : std::size_t` are `usize`, a `const std::nothrow_t &` is a pointer, which is
 ignored. Each `new` form's contract is C++'s: no preconditions on the size; the alignment of an
@@ -78,11 +79,21 @@ C++ contract is that the pointer is null or was returned by a matching `new` and
 a block of the heap the caller owns and gives up, which is the forwarded function's
 precondition. A sized form's size and an aligned form's alignment are, by C++'s rules, the
 values given at allocation; the functions do not depend on that, so a program that breaks the
-rule (a base pointer with no virtual destructor) still frees correctly. The throwing `new`
-forms never return null and never unwind: they return a block or abort. None of the
+rule (a base pointer with no virtual destructor) still frees correctly. None of the
 forwarding functions unwinds, so their non-unwinding ABI is right.
 
-As with the C names, the operators replace the C++ runtime's whole set, so that no block is
-allocated by one implementation and freed by the other. A program that defines its own global
+**The four throwing forms stay the C++ runtime's.** They are not exported, because they must
+throw `std::bad_alloc` and a Rust frame here cannot let it pass (CXX-04). libstdc++'s
+`operator new(size)` loops on `malloc` and the new-handler and throws; its aligned form does
+the same with `aligned_alloc` (`libsupc++/new_op.cc`, `new_opa.cc`). Under the preload library,
+and in a program that exports the C interface, those are asmalloc's, so every block the C++
+runtime's `new` returns is a block of asmalloc's heap, and the `delete` here, which takes any
+block of the heap, frees it correctly. The pairing is tested for every throwing form with every
+matching `delete` form (`cxx_operators.cpp`). A program that exports these operators without
+the C interface would pair libstdc++'s `new` (from glibc's `malloc`) with asmalloc's `delete`;
+the `cxx-abi` feature and `export_cxx_abi!` are meant to be used with the C interface, and
+their documentation says so.
+
+So no block is allocated by one implementation and freed by another. A program that defines its own global
 operators must not invoke the macro (or enable `cxx-abi`), which is why it is separate from
 `export_c_abi!`.

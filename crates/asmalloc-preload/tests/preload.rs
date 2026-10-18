@@ -170,14 +170,23 @@ fn a_pointer_that_is_not_a_block_aborts() {
     }
 }
 
+/// The four throwing forms of `new`, which the C++ runtime keeps so that it can throw
+/// `std::bad_alloc`; the library exports the other 16 forms.
+const THROWING_NEW: [&str; 4] = [
+    "_Znwm",
+    "_Znam",
+    "_ZnwmSt11align_val_t",
+    "_ZnamSt11align_val_t",
+];
+
 #[test]
-fn every_cxx_operator_form_meets_its_cases_and_binds_to_the_library() {
+fn every_cxx_operator_form_meets_its_cases_and_binds_where_it_should() {
     let exe = program("cxx_operators.cpp");
     let out = same_with_and_without(|| Command::new(&exe));
     assert!(!out.contains("FAIL"), "{out}");
     assert_eq!(
         out.lines().filter(|l| l.starts_with("ok ")).count(),
-        7,
+        9,
         "{out}"
     );
     // The dynamic loader's own report of where each operator the program calls was bound.
@@ -186,6 +195,7 @@ fn every_cxx_operator_form_meets_its_cases_and_binds_to_the_library() {
     let report = String::from_utf8_lossy(&traced.stderr);
     let to_lib = format!("to {} ", lib.display());
     let mut ours = std::collections::BTreeSet::new();
+    let mut runtime = std::collections::BTreeSet::new();
     for line in report.lines() {
         let Some(at) = line.find("symbol `") else {
             continue;
@@ -198,26 +208,25 @@ fn every_cxx_operator_form_meets_its_cases_and_binds_to_the_library() {
         {
             continue;
         }
-        assert!(line.contains(&to_lib), "{line}");
-        ours.insert(name.to_owned());
+        if THROWING_NEW.contains(&name) {
+            assert!(line.contains("libstdc++.so"), "{line}");
+            runtime.insert(name.to_owned());
+        } else {
+            assert!(line.contains(&to_lib), "{line}");
+            ours.insert(name.to_owned());
+        }
     }
-    assert_eq!(ours.len(), 20, "{ours:?}");
+    assert_eq!(ours.len(), 16, "{ours:?}");
+    assert_eq!(runtime.len(), 4, "{runtime:?}");
 }
 
 #[test]
-fn a_throwing_new_that_fails_ends_the_process() {
-    use std::os::unix::process::ExitStatusExt;
+fn a_throwing_new_that_fails_throws_a_catchable_bad_alloc() {
     let exe = program("cxx_operators.cpp");
-    let plain = run(false, Command::new(&exe).arg("throw"));
-    assert_eq!(
-        String::from_utf8_lossy(&plain.stdout).trim(),
-        "caught bad_alloc"
-    );
-    let preloaded = run(true, Command::new(&exe).arg("throw"));
-    assert_eq!(preloaded.status.signal(), Some(6), "{:?}", preloaded.status);
-    assert!(
-        String::from_utf8_lossy(&preloaded.stderr).contains("cannot throw std::bad_alloc"),
-        "{}",
-        String::from_utf8_lossy(&preloaded.stderr)
-    );
+    let out = same_with_and_without(|| {
+        let mut c = Command::new(&exe);
+        c.arg("throw");
+        c
+    });
+    assert_eq!(out.trim(), "caught bad_alloc");
 }

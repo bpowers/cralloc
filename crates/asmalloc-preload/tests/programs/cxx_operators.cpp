@@ -3,7 +3,7 @@
 // loop, nothrow failure. Each case prints "ok <name>" or "FAIL <name>: <why>", and the program
 // exits non-zero if any failed. Every case passes with libstdc++'s own operators too.
 //
-// usage: cxx_operators            the cases
+// usage: cxx_operators            the cases, the throwing failure included
 //        cxx_operators throw      a throwing new that fails, caught as std::bad_alloc
 //        cxx_operators throwing-handler
 //                                 a nothrow new whose new-handler throws std::bad_alloc
@@ -231,6 +231,84 @@ static void handler_that_helps() {
     std::free(reserve);
 }
 
+// Every throwing form, failing, throws std::bad_alloc that the caller can catch.
+static void throwing_failure() {
+    int caught = 0;
+    try {
+        (void)::operator new(huge);
+    } catch (const std::bad_alloc &) {
+        caught++;
+    }
+    try {
+        (void)::operator new[](huge);
+    } catch (const std::bad_alloc &) {
+        caught++;
+    }
+    try {
+        (void)::operator new(huge, std::align_val_t{64});
+    } catch (const std::bad_alloc &) {
+        caught++;
+    }
+    try {
+        (void)::operator new[](huge, std::align_val_t{4096});
+    } catch (const std::bad_alloc &) {
+        caught++;
+    }
+    try {
+        std::vector<char> v(huge);
+    } catch (const std::bad_alloc &) {
+        caught++;
+    } catch (const std::length_error &) {
+        caught++;
+    }
+    report(caught == 5, "a throwing new that fails throws a catchable std::bad_alloc",
+           std::to_string(caught) + " of 5 caught");
+}
+
+// Blocks from every throwing form freed by every matching delete form, many times over, with
+// their contents checked: the throwing new may be the C++ runtime's (calling malloc and
+// aligned_alloc) while delete is the allocator's.
+static void new_and_delete_pair_up() {
+    bool ok = true;
+    for (int i = 0; i < 20000 && ok; i++) {
+        std::size_t n = 2 + static_cast<std::size_t>(i * 131) % 70000;
+        std::size_t al = std::size_t(16) << (i % 9);
+        auto *a = static_cast<unsigned char *>(::operator new(n));
+        auto *b = static_cast<unsigned char *>(::operator new[](n));
+        auto *c = static_cast<unsigned char *>(::operator new(n, std::align_val_t{al}));
+        auto *d = static_cast<unsigned char *>(::operator new[](n, std::align_val_t{al}));
+        ok = ok && aligned(c, al) && aligned(d, al);
+        for (auto *p : {a, b, c, d}) {
+            p[0] = 1;
+            p[n - 1] = 2;
+            ok = ok && p[0] == 1 && p[n - 1] == 2;
+        }
+        switch (i % 3) {
+        case 0:
+            ::operator delete(a);
+            ::operator delete[](b);
+            ::operator delete(c, std::align_val_t{al});
+            ::operator delete[](d, std::align_val_t{al});
+            break;
+        case 1:
+            ::operator delete(a, n);
+            ::operator delete[](b, n);
+            ::operator delete(c, n, std::align_val_t{al});
+            ::operator delete[](d, n, std::align_val_t{al});
+            break;
+        default:
+            ::operator delete(a, std::nothrow);
+            ::operator delete[](b, std::nothrow);
+            ::operator delete(c, std::align_val_t{al}, std::nothrow);
+            ::operator delete[](d, std::align_val_t{al}, std::nothrow);
+        }
+    }
+    auto *objects = new std::string[100];
+    for (int i = 0; i < 100; i++) objects[i] = std::string(static_cast<std::size_t>(i) * 10, 'x');
+    delete[] objects;
+    report(ok, "every throwing new pairs with every matching delete", "a block misbehaved");
+}
+
 int main(int argc, char **argv) {
     if (argc > 1 && std::strcmp(argv[1], "throw") == 0) {
         try {
@@ -254,5 +332,7 @@ int main(int argc, char **argv) {
     nothrow_failure();
     handler_loop();
     handler_that_helps();
+    throwing_failure();
+    new_and_delete_pair_up();
     return failures != 0;
 }
