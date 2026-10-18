@@ -99,11 +99,6 @@ impl Kind {
         }
     }
 
-    /// Whether the bug shows only when blocks are freed on another thread.
-    pub fn needs_cross_thread_frees(self) -> bool {
-        self == Kind::DoubleHandout
-    }
-
     /// Whether the mutant reads memory it never initialized, which Miri reports as undefined
     /// behaviour before the model can.
     pub fn reads_uninit(self) -> bool {

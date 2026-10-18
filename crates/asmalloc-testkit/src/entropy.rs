@@ -90,11 +90,6 @@ impl<'a> ByteSource<'a> {
     pub const fn new(data: &'a [u8]) -> Self {
         ByteSource { data }
     }
-
-    /// Bytes not yet consumed.
-    pub fn remaining(&self) -> usize {
-        self.data.len()
-    }
 }
 
 impl Entropy for ByteSource<'_> {
@@ -169,7 +164,7 @@ mod tests {
         let mut s = ByteSource::new(&[1, 0, 0, 0, 2, 0, 0, 0, 9, 9]);
         assert_eq!(s.next_u32(), Some(1));
         assert_eq!(s.next_u32(), Some(2));
-        assert_eq!(s.remaining(), 2);
+        assert_eq!(s.data.len(), 2);
         assert_eq!(s.next_u32(), None);
         assert_eq!(s.below(10), None);
     }

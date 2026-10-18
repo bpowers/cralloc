@@ -201,11 +201,6 @@ impl<S: Shape> SimOs<S> {
         }
     }
 
-    /// Restarts the random generator from `seed`, so that a test draws a known sequence.
-    pub fn set_random_seed(&self, seed: u64) {
-        self.random.store(seed, Ordering::Release);
-    }
-
     /// Simulated thread `index`, below [`SIM_THREADS`], to run twins on. Thread `i` starts on
     /// CPU `i`; [`Os::fence`] aborts the sequences in flight on the CPU it names.
     ///
@@ -1047,13 +1042,9 @@ mod tests {
     }
 
     #[test]
-    fn random_numbers_follow_the_seed() {
+    fn random_numbers_differ() {
         let os = Sim::new();
-        let first: Vec<u64> = (0..4).map(|_| os.random()).collect();
-        os.set_random_seed(0);
-        let again: Vec<u64> = (0..4).map(|_| os.random()).collect();
-        assert_eq!(first, again);
-        let mut distinct = first.clone();
+        let mut distinct: Vec<u64> = (0..4).map(|_| os.random()).collect();
         distinct.sort_unstable();
         distinct.dedup();
         assert_eq!(distinct.len(), 4);
