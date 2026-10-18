@@ -53,3 +53,43 @@ pub fn balanced(stats: &Stats, what: &str) {
 pub fn workers() -> usize {
     if cfg!(miri) { 3 } else { 6 }
 }
+
+/// Runs `body` while another thread drains the simulated heap's slabs: it asks for a drain of
+/// each slab in turn, whatever the slab is doing, and moves the heap's clock so that the idle
+/// check drains too. The clock stands still unless a test moves it and the idle check finds few
+/// slabs quiet, so without this a run on the simulated heap sees no drain at all, and drains
+/// racing the threads that use a slab are what such a run is for.
+pub fn with_drains<T>(heap: &asmalloc::SimHeap, body: impl FnOnce() -> T) -> T {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    /// Stops the drainer when the body ends, by a panic too, or the scope would never end.
+    struct Stop<'a>(&'a AtomicBool);
+    impl Drop for Stop<'_> {
+        fn drop(&mut self) {
+            self.0.store(true, Ordering::Release);
+        }
+    }
+    let stop = AtomicBool::new(false);
+    std::thread::scope(|scope| {
+        scope.spawn(|| {
+            let mut cpu = 0;
+            while !stop.load(Ordering::Acquire) {
+                heap.os().advance_clock(asmalloc::depot::IDLE_TICKS / 4);
+                heap.drain(cpu);
+                cpu = (cpu + 1) % asmalloc::os::sim::SIM_THREADS;
+                // Miri runs one thread at a time and a drain is some hundred atomic
+                // instructions, so there the drainer mostly yields.
+                if cfg!(miri) {
+                    for _ in 0..2000 {
+                        std::thread::yield_now();
+                    }
+                } else {
+                    for _ in 0..200 {
+                        std::hint::spin_loop();
+                    }
+                }
+            }
+        });
+        let _stop = Stop(&stop);
+        body()
+    })
+}
