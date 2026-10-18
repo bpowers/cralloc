@@ -1,6 +1,6 @@
 # Safety ledger: `crates/asmalloc/src/front/mod.rs`
 
-## FRONT-01: the declaration of glibc's `__rseq_offset`
+## FRONT-01: the declaration of `__rseq_offset`: glibc's, or on musl the crate's own word
 
 ```rust
 unsafe extern "C" {
@@ -22,6 +22,16 @@ one writes the symbol while Rust may read it (a `safe` static is read without `u
    for dynamic programs, `__libc_setup_tls` for static ones. Afterwards it is in read-only
    (RELRO) memory. So from the first moment Rust code can run it holds one value for ever,
    which is what an immutable `static` requires.
+
+3. *On musl*, which has no `__rseq_offset`, the declaration links to `asmalloc_rseq_offset`
+   (`link_name`), a word the crate defines in the data generated from Lean
+   (`front/generated/x86_64/area.rs`): 8 bytes, 8-aligned, in `.data.rel.ro`, holding
+   `asmalloc_rseq_area@tpoff`, which the linker resolves to a constant in an executable (a
+   static or static-PIE musl executable has no dynamic relocation for it; a dynamic one would
+   have it applied before any code runs, and then made read-only). So the same type, every bit
+   pattern valid, and one value for ever. The name is the crate's own, so a C library that one
+   day defines `__rseq_offset` cannot be confused with it (the crate would then find that
+   library's registration in place and be refused, AREA-04, which is safe).
 
 It says nothing about whether the calling thread is registered. glibc registers each thread as
 it starts; if a registration fails later (a seccomp filter installed after start-up, say), that

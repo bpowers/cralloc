@@ -74,6 +74,7 @@ summarize() {
       awk '/^test result:/ { p += $4; i += $8 } END { printf "   %d passed, %d ignored\n", p, i }' \
         "$out/tests.log" ;;
     proofs) grep -E '^Complete|^kani-all:' "$out/proofs.log" | sed 's/^/   /' || true ;;
+    musl) grep -E '^musl: skipped|^test result:' "$out/musl.log" | sed 's/^/   /' || true ;;
   esac
 }
 
@@ -102,11 +103,25 @@ lints() {
     cargo clippy -p asmalloc --all-targets --features sim --quiet -- -D warnings
 }
 
+# The musl build: the allocator brings and registers its own rseq area there (front/area.rs).
+# Its tests build in a few seconds alongside the others. Skipped, saying so, where the target is
+# not installed.
+musl() {
+  if ! rustup target list --installed 2>/dev/null | grep -qx x86_64-unknown-linux-musl; then
+    echo "musl: skipped: the x86_64-unknown-linux-musl target is not installed" \
+      "(rustup target add x86_64-unknown-linux-musl)"
+    return 0
+  fi
+  cargo clippy -p asmalloc --all-targets --target x86_64-unknown-linux-musl --quiet -- -D warnings &&
+    cargo test -p asmalloc --lib --target x86_64-unknown-linux-musl --quiet front::
+}
+
 step format cargo fmt --all --check
 step generated "$here/generated-check"
 step ledger "$here/ledger-check"
 step lints lints
 start tests tests
 start proofs proofs
-finish tests proofs
+start musl musl
+finish tests proofs musl
 printf '\ngate: passed in %ss\n' "$SECONDS"

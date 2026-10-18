@@ -172,7 +172,7 @@ less.
 6. **Pure Rust plus proved assembly.** No C. The allocator is `no_std` and never allocates,
    panics, unwinds or prints while serving a request.
 7. **One platform, done fully.** asmalloc is developed and measured on x86-64, Linux 7.2,
-   glibc 2.43 and Rust 1.99. The fast path needs the calling thread to have a registered
+   Rust 1.99, and glibc 2.43, linked dynamically or statically, or musl. The fast path needs the calling thread to have a registered
    rseq area, which Linux has offered since 4.18. A thread without one, as under valgrind,
    still works, slowly (see "Process lifecycle"). asmalloc never hands a request to another
    allocator.
@@ -183,10 +183,12 @@ less.
   policy.
 - **Speed without rseq.** The mode that runs when rseq is missing exists for correctness
   under tools such as valgrind. It reuses the path large objects take and is not tuned.
-- **Other architectures, C libraries and operating systems.** aarch64 comes after x86-64 is
-  complete; its measurements and proofs must be redone. A C library that does not register
-  rseq, such as musl, needs asmalloc to register its own area. The design allows both; neither
-  is built.
+- **Other architectures and operating systems.** aarch64 comes after x86-64 is complete; its
+  measurements and proofs must be redone.
+- **A musl shared library.** On musl the allocator supplies its own rseq area (see "Process
+  lifecycle"), which it can do in an executable. A musl shared library or preload library is
+  not supported. Statically linked musl executables are tested; dynamically linked ones are
+  expected to work and are not tested.
 - **Hardened-allocator features.** No guard pages, quarantine or randomization. Two
   protections fall out of the design anyway: there is no metadata in freed memory to
   corrupt, and a double free is detected when the object returns to the back end.
@@ -661,7 +663,9 @@ A macro exports the C names from the crate that invokes it; a cargo feature does
 and the `LD_PRELOAD` library always exports them. A feature alone would not do: cargo
 unifies features across a workspace, and every test binary would then replace `malloc`. The
 C layer sets `errno` through the C library's accessor; that and glibc's `__rseq_offset` are
-asmalloc's only references to a C library.
+asmalloc's only references to a C library. On musl there
+is no `__rseq_offset` to refer to; the references are `errno`'s accessor and the three
+pthread key functions that run code at thread exit.
 
 The recommended build is `lto = "fat"`. Thin LTO also inlines the fast path into dependency
 crates, but it silently stops doing so when the crate that declares `#[global_allocator]`
@@ -700,7 +704,14 @@ the one a Rust `Layout` of the same size implies.
   when not under Miri and keeps Miri's own, which checks each of its blocks individually.
   Our own tests run the allocator under Miri with the twins and the simulated OS.
 - **Threads.** A thread has no allocator state. Starting and exiting need no code, and
-  objects cached under a CPU stay with that CPU.
+  objects cached under a CPU stay with that CPU. The one exception is the next item.
+- **Threads on musl.** musl registers no rseq area, so the allocator defines one per thread,
+  in thread-local data emitted with the routines, at a page offset chosen to stay clear of
+  the slab words. The area reads a negative CPU number until the thread's first slow path
+  registers it with the OS. musl frees a thread's storage before the thread is gone, and a
+  thread that dies with its area registered can take the process with it, so a pthread key's
+  destructor unregisters the area and marks it retired. A retired or refused area reads a
+  negative number for good, and the thread is served as any thread without rseq is.
 - **Idle caches.** Memory can sit in the slab of a CPU the process no longer runs on. Each
   slab has an activity counter that its slow paths advance, and a heartbeat that finds one
   unchanged for an interval of about a second drains that slab. The interval is wall-clock
@@ -746,7 +757,8 @@ These hold everywhere, and the proofs and tests lean on them.
 1. A slab changes only through an rseq routine that commits with one store, or through the
    drain steps under "Idle caches".
 2. Other shared state changes only through single atomic instructions.
-3. No locks, no waiting, no thread-local state.
+3. No locks, no waiting, no thread-local state. The rseq area that the OS's interface
+   requires of each thread is the one exception, and on musl it is ours.
 4. Between any two instructions of any slow path, shared state is valid and anything
    unreachable from it is owned by exactly one thread.
 5. All-zero is a valid state for every structure.
@@ -812,7 +824,9 @@ tests where a test can reach it.
   Nothing else is assumed about its value.
 - `membarrier` with the rseq command returns only after every sequence then in flight on
   the named CPU has completed or been aborted.
-- glibc registers a thread's rseq area before the thread can call the allocator.
+- glibc registers a thread's rseq area before the thread can call the allocator. On musl,
+  where the area is ours, it reads a negative CPU number until registered, and the OS
+  accepts one registration per thread.
 - Nothing with the privilege to do so places a probe inside a sequence, which would let
   the thread return to it without an abort.
 - Of a thread's attempts at a sequence, one is at last left to finish. Only termination

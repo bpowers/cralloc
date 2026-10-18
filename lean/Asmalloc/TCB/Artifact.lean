@@ -41,6 +41,32 @@ read.
 
 namespace VG
 
+/-- One condition of a Rust `cfg` predicate that selects an artifact
+(`Artifact.cfg`): a cargo feature of the crate (`feature = "f"`), or the
+target's environment, its C library (`target_env = "e"`). -/
+inductive CfgAtom
+  | feature (name : String)
+  | targetEnv (env : String)
+  deriving DecidableEq, Repr
+
+/-- An rseq area that the crate defines and registers itself, on a C library
+that registers none (musl). It is data, not code: nothing about it is
+proved. The routines read the area's offset from the thread pointer from a
+word, as they read glibc's `__rseq_offset`; the area's data defines that
+word, holding the offset as the linker computes it, so what the routines
+assume of the word holds by construction. Registering the area with the
+kernel is the crate's (Rust) business. -/
+structure OwnArea where
+  /-- Compiled only where any of these holds (as `Artifact.cfg`). -/
+  cfg : List CfgAtom
+  /-- The assembler lines that define the area and the word, emitted as one
+  `global_asm!` block in `<target>/area.rs`. -/
+  lines : List String
+  /-- The constants of its layout, emitted with the specification's
+  (`constants.rs`), for the crate to register the area with and assert
+  against. -/
+  consts : List (String × IntTy × Nat)
+
 /-- A code-generation target: an ISA model, its printer, and its calling convention. -/
 structure Target where
   /-- Short name; also the name of the generated Rust module (e.g. `x86_64`). -/
@@ -89,6 +115,9 @@ structure Target where
   `p`, may resume at the abort handler in the state `p'`. The memory other
   threads may change meanwhile is the contract's (`Contract.env`). -/
   rely : isa.State → isa.State → Prop := fun _ _ => False
+  /-- The rseq area the crate defines for a C library that registers none,
+  if the target has one (`OwnArea`). -/
+  ownArea : Option OwnArea := none
 
 /-- The specification of one function. -/
 structure Contract (M : ISA) where
@@ -604,12 +633,13 @@ structure Artifact where
   function's `# Safety` section, which `doc` must end with when this is not
   empty. -/
   features : List String := []
-  /-- The cargo feature of the Rust crate that selects this function, if one
-  does: `some (f, true)` if it is compiled only with the feature `f`,
-  `some (f, false)` only without it. Two artifacts of a target may have the
-  same name only as such a pair, of the same signature (`Rust.checkUnique`),
-  so exactly one of them is compiled. -/
-  cargoFeature : Option (String × Bool) := none
+  /-- The `cfg` predicate that selects this function, if one does:
+  `some (cs, true)` if it is compiled only where one of the conditions `cs`
+  holds (a cargo feature, a target environment), `some (cs, false)` only
+  where none does. Two artifacts of a target may have the same name only as
+  such a pair, of the same conditions and signature (`Rust.checkUnique`), so
+  exactly one of them is compiled. -/
+  cfg : Option (List CfgAtom × Bool) := none
   /-- On an inline target, the registers the code may change, by name, which
   the emitter declares as `asm!` outputs (`out(<reg>) _`, or `inout` for an
   argument's); the register the result is in is one besides. -/

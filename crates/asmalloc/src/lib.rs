@@ -20,7 +20,7 @@
 //! ```
 //!
 //! A binary can add the `executable` feature, which saves a load on the fast path and does not
-//! link into a shared library. The `allocator-api` feature implements the `Allocator` trait for
+//! link into a shared library; a musl build always reads the area's offset that way. The `allocator-api` feature implements the `Allocator` trait for
 //! [`Asmalloc`], on toolchains that have the trait (nightly, until it is stable).
 //! [`Asmalloc::collect`] returns to the OS everything the heap can give back now, for a program
 //! that knows it is idle, and [`Asmalloc::inspect`] reports where the heap's memory is
@@ -45,9 +45,13 @@
 //!
 //! Limits worth knowing:
 //!
-//! - x86-64 Linux with a glibc that registers restartable sequences for its threads (2.35 and
-//!   later). A thread without a registration, as under valgrind, is served correctly but
-//!   slowly.
+//! - x86-64 Linux, with glibc 2.35 or later (which registers restartable sequences for its
+//!   threads), dynamically or statically linked, or with musl in an executable: musl registers
+//!   none, so there the allocator registers its own area for each thread at its first slow path
+//!   and unregisters it as the thread exits. Statically linked musl executables are tested;
+//!   dynamically linked ones are expected to work and untested. A musl shared library, such as
+//!   a preload library, is not supported. A thread without a registration, as under valgrind
+//!   or a sandbox that refuses one, is served correctly but slowly.
 //! - A shared object that contains the allocator must be linked `-z nodelete`, as the preload
 //!   library is: unloading it kills the process, because a thread's restartable-sequence area
 //!   goes on naming code inside it.

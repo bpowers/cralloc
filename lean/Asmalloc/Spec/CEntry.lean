@@ -544,8 +544,7 @@ def tablePath (n : String) : String := "crate::c::table::" ++ n
 /-- What every C routine requires: of the thread, of where things are, and
 of the invariant. -/
 def safety (tables : List String) : List String :=
-  ["glibc must have registered the calling thread's rseq area, as it does before the thread \
-    can run code that allocates.",
+  [registeredDoc,
   s!"None of `SLABS` (the slabs, `{SLAB_COUNT} * {SLAB_BYTES}` bytes), the thread's `rseq_cs` \
     and `cpu_id`, `__rseq_offset`, the masks' table (2048 bytes {MASK_DISP} bytes above \
     `SLABS`), {englishList "and" tables} may overlap the return address on the stack or wrap \
