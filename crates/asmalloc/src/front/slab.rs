@@ -95,6 +95,9 @@ pub struct Slab {
 struct OwnLine(AtomicU64);
 
 impl Slab {
+    /// The bytes at the start of a slab that hold its hot words, which the fast paths write.
+    pub(crate) const HOT_BYTES: usize = 8 * WORDS;
+
     /// The bytes at the start of a slab that hold its fields; the rest of its page is unused.
     pub(crate) const USED_BYTES: usize = core::mem::offset_of!(Slab, seen) + size_of::<OwnLine>();
 

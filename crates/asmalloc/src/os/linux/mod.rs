@@ -9,9 +9,6 @@ mod glibc;
 mod kernel;
 mod syscall;
 
-// For the generated routines, which Miri does not build.
-#[cfg(not(miri))]
-pub(crate) use glibc::__rseq_offset;
 pub use kernel::LinuxOs;
 #[cfg(any(test, feature = "sim"))]
 pub(crate) use kernel::protect_none;

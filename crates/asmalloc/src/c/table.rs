@@ -53,6 +53,71 @@ pub(crate) const C_CALLOC_CLASSES: [u8; CALLOC_TABLE_MAX + 1] = {
     table
 };
 
+/// The largest size the sized free's prediction covers by its table index: the low 16 bits of
+/// the size.
+pub(crate) const C_SIZED_LEN: usize = 1 << 16;
+
+/// `C_SIZED_CLASSES[n]` is the class index of `malloc(n)` for every size up to [`C_TABLE_MAX`],
+/// and 0 (no class) above it: the class a sized free predicts from the low 16 bits of its size.
+/// A size of 2^16 or more predicts the class of its low 16 bits, which the region's class then
+/// refutes, so a wrong prediction costs the slow path and nothing else.
+pub(crate) const C_SIZED_CLASSES: [u8; C_SIZED_LEN] = {
+    let mut table = [0u8; C_SIZED_LEN];
+    let mut size = 0;
+    while size <= C_TABLE_MAX {
+        table[size] = C_SIZE_CLASSES[(size + 7) >> 3];
+        size += 1;
+    }
+    table
+};
+
+/// Where a table the C routines read starts within its static: 2048 bytes into a page, so that
+/// the bytes of the sizes programs use most have page offsets no slab word has (a load at the page
+/// offset of a store in flight waits for it: `docs/research/zen5-roofline.md`, section 14).
+pub(crate) const TABLE_OFF: usize = 2048;
+
+/// A table of class bytes `TABLE_OFF` bytes into a page-aligned static.
+#[doc(hidden)]
+#[repr(C, align(4096))]
+pub struct PlacedTable<const N: usize> {
+    _pad: [u8; TABLE_OFF],
+    bytes: [u8; N],
+}
+
+impl<const N: usize> PlacedTable<N> {
+    const fn new(bytes: [u8; N]) -> PlacedTable<N> {
+        PlacedTable {
+            _pad: [0; TABLE_OFF],
+            bytes,
+        }
+    }
+
+    /// The table.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(crate) fn bytes(&self) -> &[u8; N] {
+        &self.bytes
+    }
+}
+
+/// [`C_SIZE_CLASSES`] as `c_malloc` reads it (`C_SIZES` in the Lean specification). Public,
+/// hidden and immutable, so that the C routines the export macros define in another crate can
+/// name it.
+#[doc(hidden)]
+pub static C_SIZES: PlacedTable<{ C_TABLE_MAX / 8 + 1 }> = PlacedTable::new(C_SIZE_CLASSES);
+
+/// [`C_SIZED_CLASSES`] as `c_free_sized` reads it (`C_SIZED_SIZES`), as [`C_SIZES`].
+#[doc(hidden)]
+pub static C_SIZED_SIZES: PlacedTable<C_SIZED_LEN> = PlacedTable::new(C_SIZED_CLASSES);
+
+// The tables are where and how long the routines were proved to read them.
+const _: () = {
+    use crate::front::generated_centry as proved;
+    assert!(TABLE_OFF == proved::TABLE_OFF);
+    assert!(C_TABLE_MAX == proved::MALLOC_MAX && C_TABLE_MAX / 8 + 1 == proved::MALLOC_LEN);
+    assert!(C_SIZED_LEN == proved::SIZED_LEN);
+    assert!(core::mem::offset_of!(PlacedTable<1>, bytes) == TABLE_OFF);
+};
+
 /// The small class of `malloc(size)` from the table, or `None` above it.
 #[inline(always)]
 pub(crate) fn malloc_class(size: usize) -> Option<crate::classes::SmallClass> {
@@ -100,6 +165,18 @@ mod tests {
         }
         assert_eq!(calloc_class(CALLOC_TABLE_MAX + 1), None);
         assert_eq!(C_CALLOC_CLASSES.len(), 1025);
+    }
+
+    #[test]
+    fn the_sized_table_predicts_mallocs_class_and_nothing_above_it() {
+        for size in 0..C_SIZED_LEN {
+            let expected = if size <= C_TABLE_MAX { of_c(size).index() } else { 0 };
+            assert_eq!(C_SIZED_SIZES.bytes()[size], expected, "{size}");
+        }
+        assert_eq!(&C_SIZES.bytes()[..], &C_SIZE_CLASSES[..]);
+        let base = core::ptr::from_ref(&C_SIZES).addr();
+        assert_eq!(core::ptr::from_ref(C_SIZES.bytes()).addr(), base + TABLE_OFF);
+        assert_eq!(base % 4096, 0);
     }
 
     #[test]

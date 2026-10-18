@@ -44,6 +44,25 @@ pub fn c_fns() -> CFns {
     }
 }
 
+/// The C functions under test with `malloc`, `free` and `free_sized` the generated routines the
+/// export macros bind those names to (`asmalloc::c::routines`), each reached through a call;
+/// the rest as in [`c_fns`].
+#[cfg(not(miri))]
+pub fn c_fns_generated() -> CFns {
+    use asmalloc::c;
+    let rust = c_fns();
+    CFns {
+        name: "asmalloc (generated routines)",
+        malloc: c::routines::malloc,
+        free: c::routines::free,
+        sized_free: Some(crate::subject::SizedFree {
+            free_sized: c::routines::free_sized,
+            free_aligned_sized: c::free_aligned_sized,
+        }),
+        ..rust
+    }
+}
+
 /// The C functions under test: under Miri, Miri's own.
 #[cfg(miri)]
 pub fn c_fns() -> CFns {

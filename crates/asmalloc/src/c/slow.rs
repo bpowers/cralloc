@@ -1,5 +1,7 @@
 //! The slow paths of `malloc`, `free` and `calloc`, each of which completes its call from
-//! scratch, and the zeroing tail of `calloc`.
+//! scratch, and the zeroing tail of `calloc`. Public and hidden only so that the generated C
+//! routines the export macros define in another crate can name them; each is as safe to call as
+//! the C function it completes.
 //!
 //! They take the C function's own arguments and are `extern "C"`, so that a generated routine
 //! that misses can leave for one with a `jmp` and its argument registers intact
@@ -10,7 +12,7 @@
 //! one whatever the size says. The ledger entry is
 //! `docs/safety/asmalloc/c/slow-safety.md`.
 
-use super::{errno, seam, table};
+use super::{errno, mirror, seam, table};
 use crate::classes::Class;
 use crate::heap::{Found, process};
 use core::alloc::Layout;
@@ -29,9 +31,12 @@ pub(super) fn allocate(size: usize, align: usize, zero: bool) -> *mut u8 {
     match Class::of_c(layout).and_then(Class::small) {
         Some(class) => {
             let object = seam::alloc_small(class);
-            if zero && !object.is_null() {
-                // SAFETY: SLOW-01.
-                unsafe { object.write_bytes(0, class.size()) };
+            if !object.is_null() {
+                mirror::note(object, class);
+                if zero {
+                    // SAFETY: SLOW-01.
+                    unsafe { object.write_bytes(0, class.size()) };
+                }
             }
             object
         }
@@ -51,14 +56,14 @@ pub(super) fn or_enomem(p: *mut u8) -> *mut c_void {
 /// Completes `malloc(size)`.
 #[cold]
 #[inline(never)]
-pub(crate) extern "C" fn malloc_slow(size: usize) -> *mut c_void {
+pub extern "C" fn malloc_slow(size: usize) -> *mut c_void {
     or_enomem(allocate(size, 1, false))
 }
 
 /// Completes a `calloc` of `total` bytes in all.
 #[cold]
 #[inline(never)]
-pub(crate) extern "C" fn calloc_slow(total: usize) -> *mut c_void {
+pub extern "C" fn calloc_slow(total: usize) -> *mut c_void {
     or_enomem(allocate(total, 1, true))
 }
 
@@ -70,7 +75,7 @@ pub(crate) extern "C" fn calloc_slow(total: usize) -> *mut c_void {
 /// `block` is a slot of the C class of `total` bytes (`table::calloc_class`), or for a total
 /// that table does not cover a block of at least `total` bytes, that the caller owns.
 #[inline(never)]
-pub(crate) unsafe extern "C" fn calloc_zero(block: *mut c_void, total: usize) -> *mut c_void {
+pub unsafe extern "C" fn calloc_zero(block: *mut c_void, total: usize) -> *mut c_void {
     let len = table::calloc_class(total).map_or(total, |class| class.size());
     // SAFETY: SLOW-02.
     unsafe { block.cast::<u8>().write_bytes(0, len) };
@@ -85,7 +90,7 @@ pub(crate) unsafe extern "C" fn calloc_zero(block: *mut c_void, total: usize) ->
 /// `ptr` is null or a block of the heap that the caller owns and gives up.
 #[cold]
 #[inline(never)]
-pub(crate) unsafe extern "C" fn free_slow(ptr: *mut c_void) {
+pub unsafe extern "C" fn free_slow(ptr: *mut c_void) {
     let Some(object) = NonNull::new(ptr.cast::<u8>()) else {
         return;
     };
@@ -105,7 +110,7 @@ pub(crate) unsafe extern "C" fn free_slow(ptr: *mut c_void) {
 /// As for [`free_slow`]. A wrong `size` is safe.
 #[cold]
 #[inline(never)]
-pub(crate) unsafe extern "C" fn free_sized_slow(ptr: *mut c_void, _size: usize) {
+pub unsafe extern "C" fn free_sized_slow(ptr: *mut c_void, _size: usize) {
     // SAFETY: the caller's promise.
     unsafe { free_slow(ptr) }
 }
@@ -118,7 +123,7 @@ pub(crate) unsafe extern "C" fn free_sized_slow(ptr: *mut c_void, _size: usize) 
 /// As for [`free_slow`]. A wrong `align` or `size` is safe.
 #[cold]
 #[inline(never)]
-pub(crate) unsafe extern "C" fn free_aligned_sized_slow(
+pub unsafe extern "C" fn free_aligned_sized_slow(
     ptr: *mut c_void,
     _align: usize,
     _size: usize,

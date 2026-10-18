@@ -359,3 +359,76 @@ fn calloc_zeroes_all_it_reports_usable() {
         }
     }
 }
+
+/// The generated routines, which the export macros bind `malloc`, `free` and `free_sized` to.
+mod generated {
+    use super::super::routines;
+    use super::*;
+
+    #[test]
+    fn they_serve_every_c_class_and_large_blocks() {
+        for size in [0, 1, 8, 9, 24, 100, 4097, 32 << 10, (32 << 10) + 1, 100_000] {
+            let p = routines::malloc(size);
+            assert!(!p.is_null() && Asmalloc::contains(p.cast()), "malloc({size})");
+            assert!(usable(p) >= size);
+            if size >= 16 {
+                assert_eq!(p.addr() % 16, 0, "malloc({size})");
+            }
+            // SAFETY: a live block, given up once.
+            unsafe { routines::free(p) };
+        }
+        // SAFETY: null is always freeable.
+        unsafe {
+            routines::free(ptr::null_mut());
+            routines::free_sized(ptr::null_mut(), 16);
+        }
+    }
+
+    #[test]
+    fn they_pair_with_the_rust_functions_both_ways() {
+        let a = routines::malloc(200);
+        let b = malloc(200);
+        // SAFETY: live blocks, each given up once, by the other implementation.
+        unsafe {
+            free(a);
+            routines::free(b);
+        }
+        let c = routines::malloc(3000);
+        // SAFETY: as above, with the size it was allocated with.
+        unsafe { routines::free_sized(c, 3000) };
+    }
+
+    #[test]
+    fn a_wrong_size_frees_what_free_would() {
+        // Warm the class so that the next allocation is served from the magazine.
+        let p = routines::malloc(48);
+        let class = usable(p);
+        // SAFETY: a live block, given up once, with a size of another class.
+        unsafe { routines::free_sized(p, 16) };
+        let q = routines::malloc(48);
+        assert_eq!(usable(q), class);
+        // SAFETY: as above, with a size above every small class.
+        unsafe { routines::free_sized(q, 1 << 20) };
+        let r = routines::malloc(48);
+        assert_eq!(usable(r), class);
+        // SAFETY: as above, with its own size.
+        unsafe { routines::free_sized(r, 48) };
+    }
+
+    #[test]
+    fn a_freed_block_is_the_next_one_handed_out_on_the_same_cpu() {
+        // On one CPU the magazine is a stack. A thread may migrate between the calls, so the
+        // test asks only that it happens most of the time.
+        let mut same = 0;
+        for _ in 0..1000 {
+            let p = routines::malloc(64);
+            // SAFETY: a live block, given up once.
+            unsafe { routines::free(p) };
+            let q = routines::malloc(64);
+            same += usize::from(p == q);
+            // SAFETY: a live block, given up once.
+            unsafe { routines::free_sized(q, 64) };
+        }
+        assert!(same > 900, "{same}");
+    }
+}

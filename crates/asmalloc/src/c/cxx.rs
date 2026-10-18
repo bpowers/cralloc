@@ -204,6 +204,10 @@ pub unsafe extern "C" fn operator_delete_sized_aligned(
 #[macro_export]
 macro_rules! export_cxx_abi {
     () => {
+        // Plain and sized `delete` and `delete[]`: the generated `free` and `free_sized`
+        // routines under the C++ names, defined in this crate.
+        $crate::asmalloc_exports_cxx_x86_64!();
+
         // The C++ ABI's names are not snake case.
         #[allow(non_snake_case)]
         const _: () = {
@@ -239,26 +243,6 @@ macro_rules! export_cxx_abi {
             }
 
             // delete
-            #[unsafe(no_mangle)]
-            unsafe extern "C" fn _ZdlPv(ptr: *mut c_void) {
-                // SAFETY: CXX-EXPORT-01.
-                unsafe { cxx::operator_delete(ptr) }
-            }
-            #[unsafe(no_mangle)]
-            unsafe extern "C" fn _ZdaPv(ptr: *mut c_void) {
-                // SAFETY: CXX-EXPORT-01.
-                unsafe { cxx::operator_delete(ptr) }
-            }
-            #[unsafe(no_mangle)]
-            unsafe extern "C" fn _ZdlPvm(ptr: *mut c_void, size: usize) {
-                // SAFETY: CXX-EXPORT-01.
-                unsafe { cxx::operator_delete_sized(ptr, size) }
-            }
-            #[unsafe(no_mangle)]
-            unsafe extern "C" fn _ZdaPvm(ptr: *mut c_void, size: usize) {
-                // SAFETY: CXX-EXPORT-01.
-                unsafe { cxx::operator_delete_sized(ptr, size) }
-            }
             #[unsafe(no_mangle)]
             unsafe extern "C" fn _ZdlPvRKSt9nothrow_t(ptr: *mut c_void, _: *const c_void) {
                 // SAFETY: CXX-EXPORT-01.
