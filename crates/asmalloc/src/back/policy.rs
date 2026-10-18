@@ -199,10 +199,10 @@ pub const fn populate_ahead(size: usize, page: usize, carved: usize) -> usize {
         return 0;
     }
     let stretch = (carved >> POPULATE_SHIFT) / page;
-    let stretch = if stretch < POPULATE_MAX_PAGES {
-        stretch
-    } else {
+    let stretch = if POPULATE_MAX_PAGES < stretch {
         POPULATE_MAX_PAGES
+    } else {
+        stretch
     };
     if stretch < COMMIT_AHEAD_PAGES {
         0

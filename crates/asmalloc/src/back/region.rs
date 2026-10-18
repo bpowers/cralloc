@@ -616,7 +616,7 @@ mod tests {
             "populated {populated} pages"
         );
         assert!(
-            most <= POPULATE_MAX_PAGES,
+            most.saturating_sub(POPULATE_MAX_PAGES) == 0,
             "{most} pages populated ahead of the watermark"
         );
         // Past the huge-page threshold, growth faults huge pages instead.

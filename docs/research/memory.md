@@ -472,6 +472,93 @@ slow path launders at most four magazines beyond its exchange (heartbeat.rs, "Bo
 so the rules add at most about 4 us to one slow path on average and about 20 us in the worst
 case seen, plus a sweep step's pushes of a spare stack to the depot.
 
+## Faults against memory: huge pages for grown blocks, the threshold, populate-ahead
+
+2026-10-17, on main with the parked-object rules (8e3c0c4) and the branch that adds huge
+pages for large blocks that grow (`back/region.rs`, `advise_grown`), populate-ahead for dense
+classes, and a build-time override for both and for the huge-page threshold
+(`ASMALLOC_<NAME>` in `back/policy.rs`). The kernel primitives behind it are in
+`zen5-roofline.md`, section 7. Workloads are the quick suite's single-threaded jobs, each
+build interleaved in a new order each round, the process confined and pinned to CPU 13
+(`taskset`; its CCD was idle apart from short bursts), in a cgroup of its own under
+`scripts/memlimit`. Time is the job's metric with user and kernel cycles; peak is the
+cgroup's `memory.peak`.
+
+**Before and after**, ten rounds, medians. "main" is 8e3c0c4; "proposed" is huge pages for
+grown blocks, the small-class threshold at 16 MiB, populate-ahead off. Kernel is cycles per
+unit spent in the kernel; free 2 MiB blocks were available throughout (see the roofline note
+for what happens when they are not).
+
+| Job | | main | proposed | mimalloc | jemalloc |
+|---|---|---:|---:|---:|---:|
+| Vec growth to 64 MiB | cycles/element | 10.95 | **4.06** | 5.82 | 16.16 |
+| | kernel | 7.11 | 1.64 | 1.27 | 10.73 |
+| | faults | 41,609 | 1,245 | 73 | 63,291 |
+| | peak MiB | 67.7 | 65.6 | 138.9 | 72.2 |
+| JSON 8 MiB | cycles/byte | 29.84 | **25.79** | 16.91 | 25.64 |
+| | kernel | 4.45 | 2.39 | 0.83 | 3.65 |
+| | faults | 23,727 | 10,134 | 46 | 23,226 |
+| | peak MiB | 89.2 | 90.3 | 96.7 | 89.0 |
+| BTreeMap 200k | cycles/entry | 924 | 912 | 675 | 755 |
+| | kernel | 45.8 | 44.9 | 10.4 | 43.2 |
+| | peak MiB | 26.2 | 26.1 | 26.8 | 25.9 |
+| churn, 1M live | cycles/op | 197 | 199 | 302 | 213 |
+| | peak MiB | 108.0 | 109.7 | 116.9 | 110.4 |
+| Burst then light work | peak MiB | 213.3 | 218.3 | 227.2 | 218.5 |
+| | after 12 s | 4.3 to 6.1 | 4.6 | 16.2 | 4.5 |
+| 64 Vecs to 4 MiB (3 rounds) | cycles/element | 46.4 | 41.0 | 39.6 | 14.4 |
+| | peak MiB | 269.7 | 270.1 | 265.3 | 305.4 |
+
+- Vec growth is now faster than mimalloc at half its memory. What is left in the kernel is
+  zeroing, which every allocator pays.
+- On JSON and BTreeMap the gap to mimalloc is mostly not faults: asmalloc's user cycles are
+  23.4 and 867 against mimalloc's 16.1 and 665. In a profile of the BTreeMap job `release_all`
+  (launder) is 9.5% of asmalloc's user instructions and the depot and tree another 4%;
+  whole-process user instructions are 6.1e8 against mimalloc's 4.2e8 and jemalloc's 4.7e8. On
+  JSON, launder (`release_all`, its sort and `validate`) is about 9% of all cycles. The
+  BTreeMap's classes each stay under 8 MiB, so no threshold reaches them.
+- 64 Vecs: all three of asmalloc, mimalloc and jemalloc fault little relative to their time;
+  asmalloc and mimalloc spend 35 to 39 user cycles an element where jemalloc spends 7.
+  Inference, not checked: 64 buffers in power-of-two slots, written round-robin at the same
+  offset, alias in the caches.
+
+**The threshold and populate-ahead**, eight rounds, medians. The 64 MiB column is main;
+the others have huge pages for grown blocks too, which no block in these jobs qualifies for
+(main and the 64 MiB build with them took the same faults, 23,727 and 23,729 on JSON). Kernel cycles per unit (the times of these runs were too noisy to use; the
+kernel share was stable), cgroup peak, and for churn the resident set once everything is
+freed. "+pop" is populate-ahead with stretches of an eighth of what the class has carved, up
+to 64 pages. The burst row is the after-peak test above, one run each.
+
+| Threshold | 64 MiB | 64 +pop | 32 | 32 +pop | 16 | 16 +pop | 8 | 8 +pop |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| JSON kernel cycles/byte | 4.82 | 4.87 | 3.86 | 3.28 | 2.96 | 2.67 | 2.34 | 2.39 |
+| JSON faults | 23,700 | 4,600 | 14,200 | 3,000 | 10,100 | 3,000 | 8,100 | 3,000 |
+| JSON peak MiB | 89.2 | 89.8 | 90.3 | 90.8 | 90.4 | 90.8 | 90.5 | 90.8 |
+| BTreeMap kernel cycles/entry | 49 | 51 | 55 | 53 | 55 | 57 | 53 | 48 |
+| BTreeMap peak MiB | 26.1 | 26.9 | 25.9 | 26.9 | 25.9 | 27.0 | 26.1 | 26.9 |
+| churn 1M kernel cycles/op | 11.6 | 13.0 | 11.7 | 11.1 | 11.4 | 10.7 | 10.5 | 9.5 |
+| churn 1M peak MiB | 108.0 | 109.4 | 108.0 | 109.5 | 109.6 | 110.9 | 113.2 | 113.9 |
+| churn 1M after freeing all | 104.5 | 105.8 | 104.3 | 105.9 | 106.6 | 107.8 | 112.5 | 113.5 |
+| burst peak MiB | 213.5 | 215.5 | 214.5 | 216.5 | 218.3 | 220.0 | 222.1 | 223.1 |
+| burst after 12 s | 4.3 | 6.3 | 4.2 | 6.0 | 4.6 | 6.1 | 5.3 | 6.2 |
+
+jemalloc: JSON 89.0, BTreeMap 25.9, churn 110.4 (after freeing 112.9), burst 218.5 and 4.5.
+
+- With the parked-object rules a lower threshold no longer costs anything after the peak:
+  every build is at 4 to 6 MiB twelve seconds after the burst. What it costs is the huge page
+  above each watermark and the coarser purging at the peak: at 16 MiB, 1 MiB on JSON, 1.6 on
+  churn and 5 on the burst, all at or under jemalloc; at 8 MiB churn goes 3 MiB over it.
+- Populate-ahead cut faults three to five times and kernel time by at most a tenth, and
+  cost about 1 MiB at every peak and 1 to 2 MiB after the burst (the stretch above each
+  watermark, which is never purged). Off in the proposed policy.
+- A program that grows a buffer and then uses it sparsely pays for the size it grew to,
+  rounded up to a huge page: 64 buffers written 1 MiB densely, grown to 4 MiB by `realloc`
+  and then written one byte every 64 KiB were 160 MiB resident with huge pages for grown
+  blocks and 77 without (a scratch probe; the THP allocations partly failed in a first run,
+  which then showed 78). A buffer grown more than four times at once gets no huge pages.
+  The sparse tests of section 5 are unchanged (1.3 and 16.4 MiB), since a block allocated
+  at its size never gets them.
+
 ## Measured and argued
 
 Measured: every figure in a table; the cap's failure; pinning; the depot and the busy CPU
