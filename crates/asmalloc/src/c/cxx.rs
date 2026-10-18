@@ -195,6 +195,18 @@ pub unsafe extern "C" fn operator_delete_sized(ptr: *mut c_void, size: usize) {
     unsafe { seam::free_sized(ptr, size) }
 }
 
+/// `operator delete(ptr, std::align_val_t(align))`, its array form and their `std::nothrow`
+/// forms. The alignment is not trusted.
+///
+/// # Safety
+///
+/// As for [`operator_delete`]. A wrong `align` is safe.
+#[inline]
+pub unsafe extern "C" fn operator_delete_aligned(ptr: *mut c_void, align: usize) {
+    // SAFETY: the caller's promise.
+    unsafe { seam::free_aligned_sized(ptr, align, 0) }
+}
+
 /// `operator delete(ptr, size, std::align_val_t(align))` and its array form. Neither `size`
 /// nor `align` is trusted.
 ///
@@ -287,32 +299,32 @@ macro_rules! export_cxx_abi {
                 unsafe { cxx::operator_delete(ptr) }
             }
             #[unsafe(no_mangle)]
-            unsafe extern "C" fn _ZdlPvSt11align_val_t(ptr: *mut c_void, _: usize) {
+            unsafe extern "C" fn _ZdlPvSt11align_val_t(ptr: *mut c_void, align: usize) {
                 // SAFETY: CXX-EXPORT-01.
-                unsafe { cxx::operator_delete(ptr) }
+                unsafe { cxx::operator_delete_aligned(ptr, align) }
             }
             #[unsafe(no_mangle)]
-            unsafe extern "C" fn _ZdaPvSt11align_val_t(ptr: *mut c_void, _: usize) {
+            unsafe extern "C" fn _ZdaPvSt11align_val_t(ptr: *mut c_void, align: usize) {
                 // SAFETY: CXX-EXPORT-01.
-                unsafe { cxx::operator_delete(ptr) }
+                unsafe { cxx::operator_delete_aligned(ptr, align) }
             }
             #[unsafe(no_mangle)]
             unsafe extern "C" fn _ZdlPvSt11align_val_tRKSt9nothrow_t(
                 ptr: *mut c_void,
-                _: usize,
+                align: usize,
                 _: *const c_void,
             ) {
                 // SAFETY: CXX-EXPORT-01.
-                unsafe { cxx::operator_delete(ptr) }
+                unsafe { cxx::operator_delete_aligned(ptr, align) }
             }
             #[unsafe(no_mangle)]
             unsafe extern "C" fn _ZdaPvSt11align_val_tRKSt9nothrow_t(
                 ptr: *mut c_void,
-                _: usize,
+                align: usize,
                 _: *const c_void,
             ) {
                 // SAFETY: CXX-EXPORT-01.
-                unsafe { cxx::operator_delete(ptr) }
+                unsafe { cxx::operator_delete_aligned(ptr, align) }
             }
             #[unsafe(no_mangle)]
             unsafe extern "C" fn _ZdlPvmSt11align_val_t(
