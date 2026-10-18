@@ -634,7 +634,9 @@ static void step(Rng *r, Set *s, int xpct) {
 static double deadline;
 static _Atomic int stop;
 
-static int done(void) { return atomic_load_explicit(&stop, memory_order_relaxed) || now() > deadline; }
+static int done(void) {
+    return atomic_load_explicit(&stop, memory_order_relaxed) || now() > deadline;
+}
 
 static size_t per_thread_budget(void) {
     size_t b = (budget_mb << 20) / (size_t)nthreads;
