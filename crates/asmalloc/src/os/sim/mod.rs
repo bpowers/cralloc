@@ -47,8 +47,6 @@ mod cpus;
 mod faults;
 mod memory;
 mod pages;
-#[cfg(kani)]
-mod verify_slow;
 
 pub use cpus::{SIM_THREADS, SimThread};
 pub use faults::{Call, Faults};

@@ -3,3 +3,6 @@
 # uncapped test once took 57 GiB and the whole machine with it.
 [target.x86_64-unknown-linux-gnu]
 runner = "scripts/run-capped"
+
+[target.x86_64-unknown-linux-musl]
+runner = "scripts/run-capped"

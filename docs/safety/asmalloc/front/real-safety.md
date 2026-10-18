@@ -40,7 +40,7 @@ below are those sections, discharged once here for every call in the file.
   at the top of the address space (user space ends far below it on x86-64).
 - (S): the slab invariant of `front/twin-safety.md`, which every writer of a slab keeps:
   the routines themselves (proved in Lean), the slow paths through `store_if_equal` and
-  `stack_push` (SLOW-01, SPARE-01), and the drain. `Real` changes nothing about that argument:
+  `stack_push` (DEPOT-SLOW-01, SPARE-01), and the drain. `Real` changes nothing about that argument:
   it is the same specification with the same writers. `Real` is private to the crate, and
   `SLABS` is public only so that the C routines the export macros define in another crate can
   name its address: its type, `Front`, has no public field or method, so no code outside the
@@ -60,7 +60,7 @@ below are those sections, discharged once here for every call in the file.
 
 **Proof.** (R), (L) and (S) as above. `store_if_equal` and `stack_push` are `unsafe fn`s of
 `Routines` whose callers promise the new word keeps (S) and that they hold the magazine
-(SLOW-01, SPARE-01); `Magazine::base` is non-zero and aligned to the magazine's size, at least
+(DEPOT-SLOW-01, SPARE-01); `Magazine::base` is non-zero and aligned to the magazine's size, at least
 32. The offsets come from `Field`, always a slot of the slab.
 
 ## REAL-03: `unsafe impl Routines for Real`
