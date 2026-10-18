@@ -338,7 +338,8 @@ instructions. -/
 The arm at label 5, the sequence from 6 to 7, the descriptor at 3 in its own
 section, and out of line the signature, the abort handler at 4 jumping back
 to the arm, and each exit's code. An exit straight to an external target
-branches to it. -/
+branches to a stub after the return, which jumps to it; inline, where there
+is no return, it branches to it. -/
 
 def rseqSample : Prog isa := .rseq
   [.movGot .rdx "rs", .mov .rdx (.mem { base := .rdx }), .leaRseqCs .r10,
@@ -360,9 +361,9 @@ def rseqSample : Prog isa := .rseq
   "6:",
   "mov r8d, DWORD PTR fs:[rdx+24]",
   "cmp r8d, 8192",
-  "jae <slow>",
+  "jae 20f",
   "mov rcx, QWORD PTR [r9+r8*1]",
-  "je 20f",
+  "je 21f",
   "jb 7f",
   "mov QWORD PTR [r9+r8*1], rcx",
   "7:",
@@ -377,15 +378,23 @@ def rseqSample : Prog isa := .rseq
   ".long 0x53053053",
   "4:",
   "jmp 5b",
-  "20:",
+  "21:",
   "mov eax, 0",
   "jmp 7b",
   ".popsection",
-  "ret"
+  "ret",
+  "20:",
+  "jmp <slow>"
 ]
 
 -- The line of an exit to an external target refers to it as an operand.
 #guard (printer.function rseqSample).flatMap Line.refs == ["rs", "slow"]
+
+-- Without stubs, as inline: the branch goes to the target itself.
+#guard inlineTarget.printer.stubExits == false
+#guard ((text (Printer.lower { printer with stubExits := false } rseqSample 0).1).take 10).drop 8 ==
+  ["jae <slow>", "mov rcx, QWORD PTR [r9+r8*1]"]
+#guard (Printer.lower { printer with stubExits := false } rseqSample 0).2.1 == []
 
 -- Its hot path: the arm's 4, the load, the compare fused with its branch, the
 -- load, two branches after a load (not fused), the commit; and the return.

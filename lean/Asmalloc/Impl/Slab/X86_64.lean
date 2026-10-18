@@ -19,11 +19,14 @@ if it has no slab:
     shl   r8, 12
 ```
 
-then forms the slab word's address in `r9 + r8`, reads the word into `rcx`,
-tests it with the mask and pops (`rax := [rcx - 8]`, commit `rcx - 8`) or
-pushes (`[rcx] := p`, commit `rcx + 8`). Inline, the class's offset and the
-mask are constants; out of line, the class is in `rdi` and the mask in the
-`u32` table `MAG_MASKS`. -/
+then reads the slab word at `[w + r8]` into `rcx`, `w` holding the address
+of the class's word in slab 0, tests it with the mask and pops (`rax :=
+[rcx - 8]`, commit `rcx - 8`) or pushes (`[rcx] := p`, commit `rcx + 8`).
+No routine names a class or the slabs: inline, `w` is `rdi` and the mask is
+in `rsi`; out of line, `w` is `rdi` and the mask is in the table entry
+`MASK_DISP` bytes above the word, past the slabs. The out-of-line steps after the CPU
+number's (`popSteps`, `pushSteps`) take `w` and the exits as parameters, so
+that a longer routine can end with them. -/
 
 @[expose] public section
 
@@ -47,65 +50,70 @@ def cpuSteps (cold : List Instr) (ext : Option String) : List (Step Instr Cond) 
   .exit .ae cold ext,
   .instr (.shift .shl .r8 12)]
 
-/-- `[r9 + r8]`: the slab word. -/
+/-- `[r9 + r8]`: the slow path's routines' slab word. -/
 def slabWord : MemOp := { base := .r9, index := some .r8 }
 
-/-- The slab word into `rcx`, `r9` holding the address of the class's word in
-slab 0: inline, the class's offset is the constant `coff`. -/
-def wordInline : List (Step Instr Cond) := [
-  .instr (.leaSym .r9 "SLABS" 0 (some "coff")),
-  .instr (.mov .rcx (.mem slabWord))]
+/-- `[w + r8]`: the slab word, `w` holding the address of the class's word in
+slab 0 and `r8` the CPU's slab's offset. -/
+def wordAt (w : Reg) : MemOp := { base := w, index := some .r8 }
 
-/-- The same out of line, the class in `rdi`, and `r11` the masks' table. -/
-def wordTable : List (Step Instr Cond) := [
-  .instr (.leaSym .r9 "SLABS"),
-  .instr (.lea .r9 { base := .r9, index := some .rdi, scale := 8 }),
-  .instr (.mov .rcx (.mem slabWord)),
-  .instr (.leaSym .r11 "MAG_MASKS")]
-
-/-- The class's mask, out of line. -/
-def maskEntry : Src := .mem { base := .r11, index := some .rdi, scale := 4 }
-
-/-- Pop's tail: the slot below the word into `rax`, and the commit. -/
-def popTail : List (Step Instr Cond) := [
-  .instr (.mov .rax (.mem { base := .rcx, disp := -8 })),
-  .instr (.lea .rcx { base := .rcx, disp := -8 }),
-  .instr (.store slabWord .rcx)]
-
-/-- Push's tail: `p` into the free slot, and the commit of `rax`, the word
-plus 8. -/
-def pushTail (p : Reg) : List (Step Instr Cond) := [
-  .instr (.store { base := .rcx } p),
-  .instr (.store slabWord .rax)]
+/-- The class's mask, out of line: the entry `MASK_DISP` (33556480) bytes above
+the class's word in slab 0. -/
+def maskAt (w : Reg) : Src := .mem { base := w, disp := 33556480 }
 
 /-- A miss of the inline pop: it returns 0. -/
 def zero : List Instr := [.mov32 .rax (.imm 0)]
 
-/-- `slab_pop` inline: 13 fused micro-ops. -/
-def popInline : Prog isa := .rseq arm (
-  cpuSteps zero none ++ wordInline ++ [
-  .instr (.alu32 .test .rcx (.immP "mask")),
-  .exit .e zero none] ++ popTail)
+/-- `slab_pop` inline, of the class whose word in slab 0 is at `rdi`, with
+the mask in `rsi`: 11 fused micro-ops, 12 with the caller's test of the
+result. -/
+def popInline : Prog isa := .rseq arm (cpuSteps zero none ++ [
+  .instr (.mov .rcx (.mem (wordAt .rdi))),
+  .instr (.alu32 .test .rcx (.reg .rsi)),
+  .exit .e zero none,
+  .instr (.mov .rax (.mem { base := .rcx, disp := -8 })),
+  .instr (.lea .rcx { base := .rcx, disp := -8 }),
+  .instr (.store (wordAt .rdi) .rcx)])
 
-/-- `slab_push` inline of `p` in `rdi`: 13 fused micro-ops. -/
-def pushInline : Prog isa := .rseq arm (
-  cpuSteps [] (some "miss") ++ wordInline ++ [
+/-- `slab_push` inline of `p` in `rdx`, to the class whose word in slab 0 is
+at `rdi`, with the mask in `rsi`: 11 fused micro-ops. -/
+def pushInline : Prog isa := .rseq arm (cpuSteps [] (some "miss") ++ [
+  .instr (.mov .rcx (.mem (wordAt .rdi))),
   .instr (.lea .rax { base := .rcx, disp := 8 }),
-  .instr (.alu32 .test .rax (.immP "mask")),
-  .exit .e [] (some "miss")] ++ pushTail .rdi)
+  .instr (.alu32 .test .rax (.reg .rsi)),
+  .exit .e [] (some "miss"),
+  .instr (.store { base := .rcx } .rdx),
+  .instr (.store (wordAt .rdi) .rax)])
 
-/-- `slab_pop` out of line, of the class in `rdi`. -/
-def popTable : Prog isa := .rseq arm (
-  cpuSteps [] (some "slow") ++ wordTable ++ [
-  .instr (.alu32 .test .rcx maskEntry),
-  .exit .e [] (some "slow")] ++ popTail)
+/-- An out-of-line pop's steps after the CPU number's, of the class whose
+word in slab 0 is at `w`, exiting with `cold` to `ext` on a miss. The slot
+address is formed before the load from it, so that `mov rax, [rcx]` is a
+byte shorter than `mov rax, [rcx - 8]`. -/
+def popSteps (w : Reg) (cold : List Instr) (ext : Option String) : List (Step Instr Cond) := [
+  .instr (.mov .rcx (.mem (wordAt w))),
+  .instr (.alu32 .test .rcx (maskAt w)),
+  .exit .e cold ext,
+  .instr (.lea .rcx { base := .rcx, disp := -8 }),
+  .instr (.mov .rax (.mem { base := .rcx })),
+  .instr (.store (wordAt w) .rcx)]
 
-/-- `slab_push` out of line, of `p` in `rsi` to the class in `rdi`. -/
-def pushTable : Prog isa := .rseq arm (
-  cpuSteps [] (some "slow") ++ wordTable ++ [
+/-- An out-of-line push's steps after the CPU number's, of `p` to the class
+whose word in slab 0 is at `w`. -/
+def pushSteps (w p : Reg) (cold : List Instr) (ext : Option String) : List (Step Instr Cond) := [
+  .instr (.mov .rcx (.mem (wordAt w))),
   .instr (.lea .rax { base := .rcx, disp := 8 }),
-  .instr (.alu32 .test .rax maskEntry),
-  .exit .e [] (some "slow")] ++ pushTail .rsi)
+  .instr (.alu32 .test .rax (maskAt w)),
+  .exit .e cold ext,
+  .instr (.store { base := .rcx } p),
+  .instr (.store (wordAt w) .rax)]
+
+/-- `slab_pop` out of line, of the class whose word in slab 0 is at `rdi`. -/
+def popTable : Prog isa := .rseq arm (cpuSteps [] (some "slow") ++ popSteps .rdi [] (some "slow"))
+
+/-- `slab_push` out of line, of `p` in `rsi` to the class whose word in
+slab 0 is at `rdi`. -/
+def pushTable : Prog isa :=
+  .rseq arm (cpuSteps [] (some "slow") ++ pushSteps .rdi .rsi [] (some "slow"))
 
 /-! ## The slow path's routines
 

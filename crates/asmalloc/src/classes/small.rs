@@ -1,6 +1,25 @@
 //! Small classes: the ones cached in magazines.
 
-use super::{Class, MagazineSize, SMALL_COUNT};
+use super::{Class, MAX_SMALL_SIZE, MagazineSize, QUANTUM, SMALL_COUNT};
+use core::alloc::Layout;
+
+/// The small class of every rounded size, by `(size - 1) / QUANTUM`: entry `j` is the class of
+/// `QUANTUM * (j + 1)` bytes, which serves every size from `QUANTUM * j + 1` up to that.
+static BY_SIZE: [SmallClass; MAX_SMALL_SIZE / QUANTUM] = {
+    let mut table = [SmallClass(Class::SMALLEST); MAX_SMALL_SIZE / QUANTUM];
+    let mut j = 0;
+    while j < table.len() {
+        table[j] = match Class::of_size(QUANTUM * (j + 1)) {
+            Some(class) => match class.small() {
+                Some(small) => small,
+                None => panic!("a size up to MAX_SMALL_SIZE has a large class"),
+            },
+            None => panic!("a size up to MAX_SMALL_SIZE has no class"),
+        };
+        j += 1;
+    }
+    table
+};
 
 /// A class of at most [`super::MAX_SMALL_SIZE`] bytes.
 ///
@@ -42,6 +61,24 @@ impl SmallClass {
                 Some(class) => Some(SmallClass(class)),
                 None => None,
             }
+        } else {
+            None
+        }
+    }
+
+    /// The small class of a Rust request of at least one byte, as [`Class::of_layout`] gives
+    /// it, with one compare, a shift and a table load; `None` for a zero size and for every
+    /// request without a small class.
+    ///
+    /// `(size - 1) | (align - 1)` is the size rounded up to the alignment, less one, for any
+    /// size of at least one byte and power-of-two alignment. A zero size wraps it to the top, so
+    /// one compare turns away both a zero size, which [`Class::of_layout`] counts as one byte,
+    /// and a request too large to be small. A constant layout folds to a constant class.
+    #[inline(always)]
+    pub fn of_nonzero_layout(layout: Layout) -> Option<SmallClass> {
+        let less_one = layout.size().wrapping_sub(1) | (layout.align() - 1);
+        if less_one < MAX_SMALL_SIZE {
+            Some(BY_SIZE[less_one / QUANTUM])
         } else {
             None
         }
@@ -99,6 +136,34 @@ mod tests {
         assert_eq!(SmallClass::from_ordinal(SMALL_COUNT), None);
         assert_eq!(SmallClass::all().count(), SMALL_COUNT);
         assert_eq!(SmallClass::all().last().unwrap().size(), MAX_SMALL_SIZE);
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn the_table_lookup_gives_the_computed_class_of_every_small_request() {
+        for log in 0..=16 {
+            let align = 1usize << log;
+            for size in 0..=(MAX_SMALL_SIZE + 2 * align) {
+                let Ok(layout) = Layout::from_size_align(size, align) else {
+                    continue;
+                };
+                let computed = Class::of_layout(layout).and_then(Class::small);
+                let looked_up = SmallClass::of_nonzero_layout(layout);
+                if size == 0 {
+                    assert_eq!(looked_up, None);
+                } else {
+                    assert_eq!(looked_up, computed, "size {size} align {align}");
+                }
+            }
+        }
+        for (size, align) in [
+            (usize::MAX / 2, 1),
+            (1, 1 << 40),
+            (isize::MAX as usize - 7, 8),
+        ] {
+            let layout = Layout::from_size_align(size, align).unwrap();
+            assert_eq!(SmallClass::of_nonzero_layout(layout), None);
+        }
     }
 
     #[test]

@@ -65,6 +65,8 @@ impl Ctx {
         unsafe {
             rk_masks[CLASS] = MASK;
             rk_masks8[CLASS] = MASK as u64;
+            // The class-independent forms' table, 2048 bytes below the slabs.
+            rk_masks8[256 + CLASS] = MASK as u64;
             rk_masks8x[CLASS] = MASK as u64;
             rk_masks16[CLASS] = MASK as u16;
             let m = self.mags as *mut u64;
