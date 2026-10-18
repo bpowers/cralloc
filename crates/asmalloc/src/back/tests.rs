@@ -2884,6 +2884,7 @@ mod review_headers {
     /// bitmap starts a page and is all that is not committed at assignment, and the first word
     /// of every part of the block lies in the block's first 2 MiB.
     #[test]
+    #[cfg_attr(miri, ignore)]
     fn every_design_layout_starts_its_parts_in_the_first_huge_page() {
         let geometry = Geometry::DESIGN;
         let (page, huge) = (geometry.page_size(), geometry.huge_page_size());
@@ -2949,8 +2950,10 @@ mod review_headers {
 
     /// All zero is an empty, ungrown region on every path that does not abort. Natively the
     /// simulator's memory is inaccessible until committed, and the region's leaf bitmap is
-    /// not, so a path that looked at it would kill the test.
+    /// not, so a path that looked at it would kill the test. Under Miri the memory is not
+    /// guarded, so these tests would show nothing there.
     #[test]
+    #[cfg_attr(miri, ignore)]
     fn a_region_with_a_zero_header_is_empty_on_every_path() {
         for class in [small(8).class(), small(1024).class(), large(64 << 10)] {
             let state = state::<Standard>();
@@ -2975,6 +2978,7 @@ mod review_headers {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore)]
     #[should_panic(expected = "never handed out")]
     fn a_launder_into_a_region_with_a_zero_header_aborts() {
         let state = state::<Standard>();
@@ -2986,6 +2990,7 @@ mod review_headers {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore)]
     #[should_panic(expected = "never handed out")]
     fn a_large_free_into_a_region_with_a_zero_header_aborts() {
         let state = state::<Standard>();
