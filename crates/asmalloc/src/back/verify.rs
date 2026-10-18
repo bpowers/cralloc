@@ -95,11 +95,11 @@ fn headers_round_trip() {
 }
 
 /// Every class that fits a region of a plan has a layout, and the layout fits in the
-/// region's metadata block: the leaf bitmap at offset zero covers every slot, each summary level
-/// has a bit for every word below and ends in one top word, the sections do not overlap, the
-/// clean bitmap covers every page, large classes have a zero bitmap and a size word for every
-/// slot, and the
-/// part committed at assignment covers everything after the leaf bitmap.
+/// region's metadata block: the summary levels from word zero, top first, each with a bit for
+/// every word below and ending in one top word; then the clean bitmap, covering every page;
+/// then, for large classes, a zero bitmap and a size word for every slot; then the leaf bitmap,
+/// covering every slot, last and less than a page after the rest. The sections do not overlap,
+/// and the part committed at assignment covers everything before the leaf bitmap.
 pub(super) fn layouts_fit(plan: Plan) {
     let class = any_class();
     let slots = slots_in_region(plan, class);
@@ -112,37 +112,19 @@ pub(super) fn layouts_fit(plan: Plan) {
     assert!(layout.slots() == slots);
     assert!(layout.total_words() as usize * WORD_BYTES <= plan.metadata_size());
     assert!(layout.leaf_words() * BITS >= slots && (layout.leaf_words() - 1) * BITS < slots);
-    assert!(layout.tree_word(0, 0) == 0);
-    // The header is the first whole cache line after the leaf bitmap, alone on it, or, where
-    // the block has no room for that, straight after the leaf bitmap.
-    let line = (crate::lined::LINE / WORD_BYTES) as u32;
-    assert!(layout.hints_word() == layout.grow_word() + 1);
-    let after = if layout.height() >= 1 {
-        layout.tree_word(1, 0)
-    } else {
-        layout.clean_word(0)
-    };
-    let mut end = if after == layout.hints_word() + 1 {
-        assert!(layout.grow_word() == layout.leaf_words());
-        after
-    } else {
-        assert!(layout.grow_word() % line == 0);
-        assert!(layout.grow_word() >= layout.leaf_words());
-        assert!(layout.grow_word() < layout.leaf_words() + line);
-        assert!(after == layout.grow_word() + line);
-        after
-    };
+    // The summary levels from the top down, from word 0.
     let height = layout.height() as usize;
     assert!(height < MAX_LEVELS);
     assert!(layout.level_words(layout.height()) == 1);
-    let mut level = 1;
-    while level <= height {
+    let mut end = 0;
+    let mut level = height;
+    while level >= 1 {
         let below = layout.level_words(level as u8 - 1);
         let words = layout.level_words(level as u8);
         assert!(words * BITS >= below && (words - 1) * BITS < below);
         assert!(layout.tree_word(level as u8, 0) == end);
         end += words;
-        level += 1;
+        level -= 1;
     }
     assert!(layout.clean_word(0) == end);
     assert!(layout.clean_words() * BITS >= layout.region_pages());
@@ -156,12 +138,19 @@ pub(super) fn layouts_fit(plan: Plan) {
         }
         None => assert!(class.is_small() && layout.size_word(0).is_none()),
     }
-    assert!(end == layout.total_words());
-    let (start, stop) = layout.fixed_commit();
+    // Then the leaf bitmap, last, starting at most a page after the rest.
     let page = plan.geometry().page_size();
-    assert!(start % page == 0 && stop % page == 0);
-    assert!(start <= layout.grow_word() as usize * WORD_BYTES);
-    assert!(stop >= end as usize * WORD_BYTES && stop <= plan.metadata_size());
+    let leaf = layout.tree_word(0, 0);
+    assert!(leaf >= end && ((leaf - end) as usize) * WORD_BYTES < page);
+    assert!(leaf + layout.leaf_words() == layout.total_words());
+    // The part committed at assignment is everything before the leaf bitmap, as whole pages,
+    // and the leaf bitmap's first commit starts in the page it starts in.
+    let (start, stop) = layout.fixed_commit();
+    assert!(start == 0 && stop % page == 0);
+    assert!(stop >= end as usize * WORD_BYTES && stop < (leaf as usize) * WORD_BYTES + page);
+    assert!(layout.leaf_commit(0) <= leaf as usize * WORD_BYTES);
+    assert!(layout.leaf_commit(0) + page > leaf as usize * WORD_BYTES);
+    assert!(layout.block_bytes() <= plan.metadata_size());
     assert!(layout.region_pages() as usize * page == plan.region_size());
 }
 

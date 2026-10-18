@@ -50,7 +50,7 @@ pub(crate) enum Carve {
 /// Carves up to `n` slots, at least one, from a region's watermark. `n` must not be zero.
 pub(crate) fn carve<H: Host>(host: &H, region: RegionId, n: u32) -> Carve {
     let layout = host.layout();
-    let grow = host.meta(region, layout.grow_word());
+    let grow = host.grow(region);
     let mut seen = grow.load();
     loop {
         let now = Grow::unpack(seen);
@@ -141,7 +141,7 @@ fn huge_threshold(layout: &Layout) -> Option<u32> {
 /// purges work on lies above the threshold either, since nothing was committed there.
 fn switch_to_huge<H: Host>(host: &H, region: RegionId, need: u32) -> Option<u32> {
     let layout = host.layout();
-    let hints = host.meta(region, layout.hints_word());
+    let hints = host.hints(region);
     let mut seen = hints.load();
     if let Some(from) = Hints::unpack(seen).huge_from {
         return Some(from);
@@ -259,10 +259,10 @@ pub(crate) fn settle<H: Host>(host: &H, region: RegionId, index: u32, bits: u64)
 /// releases. If the page is not purged after all, the slots are ordinary free slots.
 pub(crate) fn top_up<H: Host>(host: &H, region: RegionId) -> (usize, usize) {
     let layout = host.layout();
-    let Some(huge) = Hints::unpack(host.meta(region, layout.hints_word()).load()).huge_from else {
+    let Some(huge) = Hints::unpack(host.hints(region).load()).huge_from else {
         return (0, 0);
     };
-    let now = Grow::unpack(host.meta(region, layout.grow_word()).load());
+    let now = Grow::unpack(host.grow(region).load());
     if now.carved == 0 || now.carved >= layout.slots() {
         return (0, 1);
     }
@@ -325,7 +325,7 @@ pub(crate) unsafe fn purge_held<H: Host>(host: &H, region: RegionId, slot: u32) 
     let Some(unit) = layout.slot_unit(slot) else {
         return false;
     };
-    let hints = Hints::unpack(host.meta(region, layout.hints_word()).load());
+    let hints = Hints::unpack(host.hints(region).load());
     if hints.huge_from.is_some_and(|from| unit.end > from) {
         return false;
     }
@@ -675,7 +675,7 @@ pub(crate) unsafe fn purge_part<H: Host>(
     let shift = layout.page_shift();
     let offset = layout.slot_bytes(slot) + from;
     let (mut first, mut end) = ((offset >> shift) as u32, ((offset + len) >> shift) as u32);
-    let hints = Hints::unpack(host.meta(region, layout.hints_word()).load());
+    let hints = Hints::unpack(host.hints(region).load());
     if from + len > layout.size() || hints.huge_from.is_some_and(|huge| end > huge) {
         return false;
     }

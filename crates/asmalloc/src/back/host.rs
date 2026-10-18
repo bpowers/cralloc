@@ -32,6 +32,47 @@ pub(crate) struct ClassState {
     pub(crate) carving: Lined<AtomicU32>,
 }
 
+/// A region's header: its `Grow` and `Hints` words (`layout`). All zero means nothing carved,
+/// nothing committed, no huge-page part and no purge under way.
+///
+/// The headers of all regions are in the back end's state, side by side, not in the regions'
+/// metadata blocks: every class carves and so writes its header, but a small class needs its
+/// block only once its slots reach the bitmaps (a large class writes its slots' size words
+/// there on every allocation), and a block's first touched page costs a page of memory and,
+/// 128 MiB from the next class's, often a page of page tables (`docs/research/memory.md`,
+/// "Small heaps").
+pub(crate) struct RegionHeader {
+    pub(crate) grow: Atomic,
+    pub(crate) hints: Atomic,
+}
+
+impl RegionHeader {
+    pub(crate) const fn new() -> RegionHeader {
+        RegionHeader {
+            grow: Atomic::zero(),
+            hints: Atomic::zero(),
+        }
+    }
+}
+
+/// The headers of every region, by region number, four to a line: an exception to
+/// `crate::lined`'s rule.
+///
+/// - `Grow` is written by the compare-and-swap in `region::carve`, which runs once per carving
+///   fill (twice when it also publishes a commit), once per first use of a large slot and per
+///   small allocation by a thread with no per-CPU cache (`Back::alloc`), and by `top_up` when
+///   the purge walk reaches a region's top.
+/// - `Hints` is written by `switch_to_huge` once per region, by `prepare` and `unprepare` at
+///   assignment, and by `set_cursor` once per unit the purge walk passes, from the clocked pass
+///   and from `Back::grow` when a carve pays a growth debt.
+///
+/// Sharing a line is acceptable because neither word is written in steady state: a carve is
+/// followed by faults on the memory it hands out and a purge walk by a system call per unit,
+/// and a carving fill already writes the shared growth word. Fills, launders and frees only
+/// read `Grow`. A line each would make the state 256 KiB, which the simulated heaps the tests
+/// build on their stacks cannot hold.
+pub(crate) type Headers = [RegionHeader; MAX_REGIONS];
+
 /// The class levels of a class's summary tree.
 pub(crate) struct Summary {
     pub(crate) top: Atomic,
@@ -69,16 +110,23 @@ impl ClassState {
 pub(crate) struct ClassHost<'a, O: Os> {
     pub(crate) space: Space<'a, O>,
     pub(crate) class: &'a ClassState,
+    pub(crate) headers: &'a Headers,
     pub(crate) layout: Layout,
     pub(crate) block: Cell<Option<(RegionId, NonNull<u8>)>>,
 }
 
 impl<'a, O: Os> ClassHost<'a, O> {
     #[inline(always)]
-    pub(crate) fn new(space: Space<'a, O>, class: &'a ClassState, layout: Layout) -> Self {
+    pub(crate) fn new(
+        space: Space<'a, O>,
+        class: &'a ClassState,
+        headers: &'a Headers,
+        layout: Layout,
+    ) -> Self {
         ClassHost {
             space,
             class,
+            headers,
             layout,
             block: Cell::new(None),
         }
@@ -133,6 +181,16 @@ impl<O: Os> Host for ClassHost<'_, O> {
         // region's metadata block, is 8-aligned, and is committed; it is only ever accessed
         // atomically; the borrow of the OS in `space` keeps the memory alive.
         unsafe { at.as_ref() }
+    }
+
+    #[inline(always)]
+    fn grow(&self, region: RegionId) -> &Atomic {
+        &self.headers[region.index() % MAX_REGIONS].grow
+    }
+
+    #[inline(always)]
+    fn hints(&self, region: RegionId) -> &Atomic {
+        &self.headers[region.index() % MAX_REGIONS].hints
     }
 
     #[inline(always)]

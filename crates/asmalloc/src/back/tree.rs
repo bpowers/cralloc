@@ -70,10 +70,16 @@ pub(crate) trait Host {
     /// The region with this index, if it is an object region of the heap.
     fn region(&self, index: usize) -> Option<RegionId>;
 
-    /// Word `word` of a region's metadata. The region is assigned to this class, and the word is
-    /// one the caller knows to be committed: in the fixed part, or a leaf word covering a slot
-    /// below the watermark.
+    /// Word `word` of a region's metadata block. The region is assigned to this class, and the
+    /// word is one the caller knows to be committed: in the fixed part, or a leaf word covering
+    /// a slot below the watermark.
     fn meta(&self, region: RegionId, word: u32) -> &Self::W;
+
+    /// A region's `Grow` word: its watermark and committed pages (`layout::Grow`).
+    fn grow(&self, region: RegionId) -> &Self::W;
+
+    /// A region's `Hints` word: its huge-page part and purge cursor (`layout::Hints`).
+    fn hints(&self, region: RegionId) -> &Self::W;
 
     /// The class word for regions `64 * index .. 64 * index + 64`.
     fn class_word(&self, index: u32) -> &Self::W;
