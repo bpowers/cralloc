@@ -9,8 +9,8 @@
 //! every input (`classes::verify`, `classes::verify_slow`), and the unit test
 //! `layout::tests::purge_passes_tile_the_carved_pages`.
 //!
-//! Runs of operations on a heap are not here. A harness running the real back end on
-//! `ProofOs<Tiny>` (fill, launder, fill, with two slots) exceeds the 6 GiB cap within two
+//! Runs of operations on a heap are not here. A harness running the real back end on a tiny
+//! simulated heap (fill, launder, fill, with two slots) exceeds the 6 GiB cap within two
 //! minutes: the protocols' retry loops nest (a search restarts around a descent, a clear and a
 //! walk up), and Kani unrolls each to the bound. Those runs are checked by the interleaving
 //! explorer (`back::models`) and the shadow-model tests (`back::tests`).

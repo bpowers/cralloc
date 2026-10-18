@@ -15,8 +15,8 @@
 //! ordinary, and a write to an uncommitted page is caught only later: such a page must still be
 //! zero when it is committed or purged, or the call panics.
 //!
-//! Known limits of the unguarded simulators (every shape under Miri, [`Tiny`] natively, and
-//! [`ProofOs`] everywhere), which accept what Linux would refuse:
+//! Known limits of the unguarded simulator (every shape under Miri and Kani, and [`Tiny`]
+//! natively), which accepts what Linux would refuse:
 //!
 //! - a read of memory that was never committed;
 //! - a write to it that is undone before the page is committed, purged or unmapped;
@@ -49,15 +49,11 @@ mod cpus;
 mod faults;
 mod memory;
 mod pages;
-mod proof;
-#[cfg(kani)]
-mod verify;
 #[cfg(kani)]
 mod verify_slow;
 
 pub use cpus::{SIM_THREADS, SimThread};
 pub use faults::{Call, Faults};
-pub use proof::{PROOF_THREADS, ProofOs};
 
 use self::cpus::Cpus;
 use self::faults::Injector;
@@ -369,7 +365,7 @@ impl<S: Shape> SimOs<S> {
     /// check: reading a whole reservation made Miri, which needs this check, too slow.
     fn check_untouched(&self, call: Call, first: usize, count: usize) {
         // A test aid, not part of the `Os` contract, and word reads of memory a harness wrote at
-        // a symbolic byte cost CBMC minutes; Kani proofs of the heap use `ProofOs` anyway.
+        // a symbolic byte cost CBMC minutes.
         if cfg!(kani) {
             return;
         }
