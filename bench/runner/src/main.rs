@@ -104,6 +104,7 @@ fn build(f: &Flags, p: &Paths) {
     let mut preload_packages: Vec<String> = Vec::new();
     for a in allocators(f, p) {
         if let (Some(b), Some(feat)) = (a.build_name(), a.feature.clone())
+            && a.build.is_none()
             && !names.iter().any(|(n, _)| *n == b)
         {
             names.push((b, feat));

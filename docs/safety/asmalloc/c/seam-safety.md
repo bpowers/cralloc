@@ -44,12 +44,22 @@ is `ptr`, non-null. `find` returned `Small(class)`, so by F1 `object` is the sta
 of `class`; it is a block the heap handed out by `free`'s contract; by F2 it was handed out as
 a block of `class`. The caller owns it and gives it up, by the contract.
 
-A pointer that breaks the contract is outside what the proof covers. Two kinds still fail
-safely: one outside the heap, interior to a slot, in an untagged region, or before the heap
-started makes `find` return `None` or `Large`, and goes to `free_slow`, which aborts or lets
-the back end validate it. A slot start that is not live (a double free, or a slot never handed
-out) is pushed and caught when its magazine is laundered (`Back::launder` aborts on a slot
-already free or beyond the watermark), which is the design's stated double-free detection.
+A pointer that breaks the contract is outside what the proof covers. What each kind does:
+
+- One outside the heap, in an untagged region, or before the heap started makes `find` return
+  `None` or `Large`, and goes to `free_slow`, which aborts or lets the back end validate it.
+  So does an interior pointer here; the generated C `free`, which does not divide, caches one
+  as if it were a block (design: "Interfaces").
+- A slot start that is not live is pushed like a live one, and nothing checks it until it
+  reaches the bitmaps. A double free, `free(p); free(p)`, leaves `p` twice in the CPU's caches,
+  so the next two `malloc`s of the class there both return `p`: two owners of one block. It is
+  caught only if both copies reach the bitmaps while the slot is free (`Back::launder` aborts on
+  a bit already set, or on the same slot twice in one batch); if one copy is handed out first,
+  it is never caught. A slot that was never handed out, above its region's watermark, is
+  handed out by the next `malloc` of the class, and its memory may not be committed, so the
+  program faults when it writes it; if it reaches the bitmaps first, `launder` aborts on a slot
+  beyond the watermark. The design accepts this: a double free of a small object is detected
+  only when both copies reach the bitmaps.
 
 ## SEAM-03: `slow::calloc_zero(object, total)` in `calloc`
 

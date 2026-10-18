@@ -246,6 +246,7 @@ def ownRequires {I C : Type} (req : I → List String) : List String → Code I 
   | acc, .frame i b j => add (ownRequires req (add acc (req i)) b) (req j)
   | acc, .rseq arm body =>
     (arm ++ body.flatMap Step.instrs).foldl (fun acc i => add acc (req i)) acc
+  | acc, .jump is _ => is.foldl (fun acc i => add acc (req i)) acc
 where
   add (acc fs : List String) : List String :=
     fs.foldl (fun acc f => if acc.contains f then acc else acc ++ [f]) acc
@@ -271,6 +272,7 @@ def ownFirstSome? {I C : Type} (f : I → Option String) : Code I C → Option S
   | .call _ _ => none
   | .frame i b j => f i <|> ownFirstSome? f b <|> f j
   | .rseq arm body => (arm ++ body.flatMap Step.instrs).findSome? f
+  | .jump is _ => is.findSome? f
 
 /-- A `some` of `f` over the instructions of `c`, and of the functions it
 calls, if there is one: the first of those of `c` outside its calls
@@ -371,6 +373,8 @@ where
 /-- The external targets the code exits to (`Step.exit`), each once. -/
 def exitNames {I C : Type} : Code I C → List String
   | .rseq _ body => dedup (body.filterMap fun | .exit _ _ (some t) => some t | _ => none)
+  | .seq (.rseq _ body) (.jump _ t) =>
+    dedup (body.filterMap (fun | .exit _ _ (some t) => some t | _ => none) ++ [t])
   | _ => []
 
 /-- The Rust names of the machine-level arguments of `sig`, in order: each
@@ -452,7 +456,7 @@ def inlineFunction (a : Artifact) (lines : List Line) : String :=
 /-- Whether code calls a function or has a frame, which an inline function,
 whose `asm!` block may not touch the stack, cannot. -/
 def usesStack {I C : Type} : Code I C → Bool
-  | .block _ | .rseq .. => false
+  | .block _ | .rseq .. | .jump .. => false
   | .seq a b => usesStack a || usesStack b
   | .ite _ t e => usesStack t || usesStack e
   | .loop b _ => usesStack b
@@ -715,9 +719,22 @@ def hasRseq {I C : Type} : Code I C → Bool
   | .call _ b => hasRseq b
   | .frame _ b _ => hasRseq b
   | .rseq .. => true
+  | .jump .. => false
+
+/-- Whether `c`, or the code of a function it calls, has a `jump`. -/
+def hasJump {I C : Type} : Code I C → Bool
+  | .block _ | .rseq .. => false
+  | .seq a b => hasJump a || hasJump b
+  | .ite _ t e => hasJump t || hasJump e
+  | .loop b _ => hasJump b
+  | .call _ b => hasJump b
+  | .frame _ b _ => hasJump b
+  | .jump .. => true
 
 /-- The code of `p`'s artifact has a restartable sequence only as the whole
-of its code (`Code.rseq arm body`): the printer gives every sequence the
+of its code (`Code.rseq arm body`), or followed by a `jump` (`.seq (.rseq arm
+body) (.jump is t)`), the only place a `jump` may be, to a function it
+declares, and not inline: the printer gives every sequence the
 same labels and its abort handler restarts it at its arm
 (`Printer.rseqLines`), which is then the function's first instruction, as
 `Code.abortStates` assumes. Then the target can print a sequence
@@ -731,7 +748,18 @@ operand), which it tail-calls with its arguments as they arrived
 def checkRseq (p : Prepared) : Except String Unit := do
   let a := p.art
   let P := a.target.printer
-  match a.code with
+  let (seqCode, tail) : Prog a.target.isa × Option String := match a.code with
+    | .seq (.rseq arm body) (.jump _ t) => (.rseq arm body, some t)
+    | c => (c, none)
+  if let some t := tail then
+    if a.target.inline then
+      throw s!"{a.target.name}: {a.name} is inline but ends with a jump"
+    unless a.operands.lookup t matches some (.sym _) do
+      throw s!"{a.target.name}: {a.name} jumps to `{t}`, which is not a function it declares \
+        (`Operand.sym`)"
+  else if hasJump a.code then
+    throw s!"{a.target.name}: {a.name} has a jump that does not follow a restartable sequence"
+  match seqCode with
   | .rseq arm body =>
     unless P.rseqSig.isSome do
       throw s!"{a.target.name}: {a.name} has a restartable sequence, which its target cannot print"

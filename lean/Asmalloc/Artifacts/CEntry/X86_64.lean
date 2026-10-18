@@ -5,7 +5,7 @@ public import Asmalloc.Proof.Framework.Registration
 
 /-! # The C entry points on x86-64
 
-`c_malloc`, `c_free` and `c_free_sized` out of line (`x86_64`), each a
+`c_malloc`, `c_calloc`, `c_free` and `c_free_sized` out of line (`x86_64`), each a
 naked function that tail-calls its slow path, and each also exported as the
 C symbols its `Api` names (`Api.exports`). One form only, reading glibc's
 `__rseq_offset` through its GOT slot: the exported copies are expanded in
@@ -20,6 +20,12 @@ namespace VG.Artifacts.CEntry.X86_64
 open VG.Spec.CEntry VG.Impl.CEntry.X86_64 VG.Proof.CEntry.X86_64
 
 def artifacts : List Artifact := [
+  callocApi.artifact VG.X86_64.target {
+    code := cCalloc
+    verified := cCalloc_verified
+    restartsOk := cCalloc_restartsOk
+    witnesses := Calloc.witnesses
+    witnessOk := cCalloc_witnessOk },
   mallocApi.artifact VG.X86_64.target {
     code := cMalloc
     verified := cMalloc_verified
@@ -27,29 +33,16 @@ def artifacts : List Artifact := [
     witnesses := Malloc.witnesses
     witnessOk := cMalloc_witnessOk },
   freeApi.artifact VG.X86_64.target {
-    code := cFree
-    verified := cFree_verified
-    restartsOk := cFree_restartsOk
-    witnesses := FreeWit.F.witnesses
-    witnessOk := cFree_witnessOk },
+    code := cFree .c
+    verified := cFree_verified .c
+    restartsOk := cFree_restartsOk .c
+    witnesses := FreeWit.F.witnesses .c
+    witnessOk := cFree_witnessOk .c },
   freeSizedApi.artifact VG.X86_64.target {
-    code := cFreeSized
-    verified := cFreeSized_verified
-    restartsOk := cFreeSized_restartsOk
-    witnesses := FreeWit.S.witnesses
-    witnessOk := cFreeSized_witnessOk },
-  -- The same code and proofs, leaving for the `delete` family's slow paths.
-  deleteApi.artifact VG.X86_64.target {
-    code := cFree
-    verified := cFree_verified
-    restartsOk := cFree_restartsOk
-    witnesses := FreeWit.F.witnesses
-    witnessOk := cFree_witnessOk },
-  deleteSizedApi.artifact VG.X86_64.target {
-    code := cFreeSized
-    verified := cFreeSized_verified
-    restartsOk := cFreeSized_restartsOk
-    witnesses := FreeWit.S.witnesses
-    witnessOk := cFreeSized_witnessOk }]
+    code := cFreeSized .c
+    verified := cFreeSized_verified .c
+    restartsOk := cFreeSized_restartsOk .c
+    witnesses := FreeWit.S.witnesses .c
+    witnessOk := cFreeSized_witnessOk .c }]
 
 end VG.Artifacts.CEntry.X86_64

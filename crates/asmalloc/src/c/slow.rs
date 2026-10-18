@@ -6,8 +6,8 @@
 //! They take the C function's own arguments and are `extern "C"`, so that a generated routine
 //! that misses can leave for one with a `jmp` and its argument registers intact
 //! (`docs/research/zen5-roofline.md` section 14): `malloc_slow(size)` for any size, `free_slow(ptr)`
-//! for any pointer, `calloc_slow(total)` for any total (`usize::MAX` for one that overflowed),
-//! and `calloc_zero(block, total)` after a routine popped a block; and for the sized frees,
+//! for any pointer, `calloc_slow_args(n, size)` for any arguments, and
+//! `calloc_zero_tail(n, size, block)` after a routine popped a block; and for the sized frees,
 //! `free_sized_slow(ptr, size)` and `free_aligned_sized_slow(ptr, align, size)`, which complete
 //! one whatever the size says. The ledger entry is
 //! `docs/safety/asmalloc/c/slow-safety.md`.
@@ -67,6 +67,33 @@ pub extern "C" fn calloc_slow(total: usize) -> *mut c_void {
     or_enomem(allocate(total, 1, true))
 }
 
+/// Completes `calloc(n, size)`: the generated `c_calloc`'s slow path, with its arguments.
+#[cold]
+#[inline(never)]
+pub extern "C" fn calloc_slow_args(n: usize, size: usize) -> *mut c_void {
+    // A total no block can have fails with ENOMEM.
+    calloc_slow(n.saturating_mul(size))
+}
+
+/// The generated `c_calloc`'s tail after its pop: zeroes `block` as [`calloc_zero`] does for
+/// the total `n * size`, and returns it. The routine passes its own arguments through, and the
+/// block in the third argument's register.
+///
+/// # Safety
+///
+/// `n * size` does not overflow, is at most `table::CALLOC_TABLE_MAX`, and `block` is a slot of
+/// its C class (`table::calloc_class`) that the caller owns.
+#[inline(never)]
+pub unsafe extern "C" fn calloc_zero_tail(
+    n: usize,
+    size: usize,
+    block: *mut c_void,
+) -> *mut c_void {
+    // SAFETY: SLOW-04.
+    unsafe { zero_block(block, n.wrapping_mul(size)) };
+    block
+}
+
 /// Zeroes `block`, all that `malloc_usable_size` reports of it (the class of `total`), and
 /// returns it: the tail of a `calloc` of `total` bytes whose block a pop found.
 ///
@@ -76,10 +103,79 @@ pub extern "C" fn calloc_slow(total: usize) -> *mut c_void {
 /// that table does not cover a block of at least `total` bytes, that the caller owns.
 #[inline(never)]
 pub unsafe extern "C" fn calloc_zero(block: *mut c_void, total: usize) -> *mut c_void {
-    let len = table::calloc_class(total).map_or(total, |class| class.size());
-    // SAFETY: SLOW-02.
-    unsafe { block.cast::<u8>().write_bytes(0, len) };
+    // SAFETY: passed through from the caller.
+    unsafe { zero_block(block, total) };
     block
+}
+
+/// [`calloc_zero`]'s zeroing, inlined into each caller so that the generated routine's tail
+/// is one call.
+///
+/// # Safety
+///
+/// As for [`calloc_zero`].
+#[inline(always)]
+unsafe fn zero_block(block: *mut c_void, total: usize) {
+    match table::C_CALLOC_LENS.get(total).map(|&len| usize::from(len)) {
+        Some(len) if len <= SMALL_ZERO => {
+            // SAFETY: SLOW-02.
+            unsafe { zero_small(block.cast(), len) }
+        }
+        len => {
+            // SAFETY: SLOW-02.
+            unsafe { block.cast::<u8>().write_bytes(0, len.unwrap_or(total)) };
+        }
+    }
+}
+
+/// The largest block [`zero_small`] zeroes with stores of its own rather than `memset`: above
+/// it, glibc's `memset` was as fast or faster (`docs/research/zen5-roofline.md` section 14).
+const SMALL_ZERO: usize = 32;
+
+/// Zeroes the `len` bytes at `block`, a C class's size up to [`SMALL_ZERO`]: 8, or a multiple
+/// of 16 with `block` aligned to 16.
+///
+/// The stores are volatile only so that LLVM keeps them as stores: it turns a plain loop into a
+/// call of `memset`, which for small blocks costs more than the zeroing (a call through the GOT
+/// and glibc's dispatch; `docs/research/zen5-roofline.md` section 14).
+///
+/// # Safety
+///
+/// `block` is valid for writes of `len` bytes, which nothing else accesses meanwhile, and `len`
+/// and `block` are as above.
+#[inline(always)]
+unsafe fn zero_small(block: *mut u8, len: usize) {
+    if len == 8 {
+        // SAFETY: SLOW-02.
+        unsafe { block.cast::<u64>().write_volatile(0) };
+        return;
+    }
+    let mut offset = 0;
+    while offset < len {
+        // SAFETY: SLOW-02.
+        unsafe { zero16(block.add(offset)) };
+        offset += 16;
+    }
+}
+
+/// Zeroes the 16 bytes at `at`, aligned to 16, with one store.
+///
+/// # Safety
+///
+/// As for [`zero_small`], for these 16 bytes.
+#[inline(always)]
+unsafe fn zero16(at: *mut u8) {
+    #[cfg(target_arch = "x86_64")]
+    {
+        use core::arch::x86_64::{__m128i, _mm_setzero_si128};
+        // SAFETY: SLOW-02.
+        unsafe { at.cast::<__m128i>().write_volatile(_mm_setzero_si128()) };
+    }
+    #[cfg(not(target_arch = "x86_64"))]
+    // SAFETY: SLOW-02.
+    unsafe {
+        at.cast::<u128>().write_volatile(0)
+    };
 }
 
 /// Completes `free(ptr)`: nothing for null, the push for a small block, the back end for a

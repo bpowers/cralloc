@@ -82,6 +82,11 @@ pub const HUGE_MIN_SLOTS_PER_PAGE: usize = 4;
 /// allocated at its size in one call has shown neither, and with huge pages each part touched
 /// would cost 2 MiB. The soak's growing buffers, written a stripe a megabyte past 64 MiB,
 /// were 1013 MiB resident with the whole slot advised at each growth, and 271 without.
+///
+/// Half, because a block that holds data in at least half its pages costs at most twice what
+/// it touches when huge pages back it; below that the cost can approach 512 times. One huge
+/// page, because a smaller block has no whole huge page to advise, and from one up the advice
+/// makes resident at most one huge page that the program did not write.
 pub const GROWN_HUGE_MIN_HUGE_PAGES: usize = 1;
 
 /// ...and only if it at most doubles at once: a doubling is the signature of appending. A

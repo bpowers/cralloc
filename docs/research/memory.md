@@ -14,7 +14,8 @@ allocator before the change and of prototypes.
   workload of 10 MiB or more (JSON is 0.4% over), and after a 218 MiB burst it is at 4.3 MiB
   in twelve seconds where jemalloc is at 4.5 and it used to hold 147 for ever. It is still
   0.5 to 1 MiB over in the smallest processes and 2 MiB over on the mixed-size pipeline,
-  which is the 128 KiB magazine budget.
+  which is the 128 KiB magazine budget. The budget is now 64 KiB, which puts the pipeline at
+  jemalloc's memory ("Magazine budget", below).
 
 What the review found, before the change:
 
@@ -379,15 +380,17 @@ with no tick of its own.
 
 ## 3. Worst cases by design
 
-From the constants, checked against the runs above where a run exists.
+From the constants, checked against the runs above where a run exists. Figures are for the
+64 KiB magazine budget and 128 KiB depot target chosen later ("Magazine budget"); the
+128 KiB budget's are in brackets.
 
 | What | Bound | Notes |
 |---|---|---|
-| One CPU's loaded magazines, all 44 classes full | 2.89 MiB | measured 2.9 |
+| One CPU's loaded magazines, all 44 classes full | 1.63 MiB (2.89) | 2.9 measured at 128 KiB |
 | One CPU's full spares | 0.14 MiB | the 1 MiB budget is split 44 ways, so only classes up to 80 bytes get any |
-| Magazine memory per CPU | 0.28 MiB | never unmapped; a magazine of 16-byte objects is 2 KiB for 4 KiB of objects |
-| All CPUs, every class touched | 97 MiB at 32 CPUs, 775 MiB at 256 | reaches the depot after a second idle, and stays there |
-| Depot | no bound | 256 KiB a class (11 MiB) is a target only for classes being served |
+| Magazine memory per CPU | 0.27 MiB (0.28) | never unmapped; a magazine of 16-byte objects is 2 KiB for 4 KiB of objects |
+| All CPUs, every class touched | 57 MiB at 32 CPUs, 454 MiB at 256 (97, 775) | reaches the depot after a second idle, and stays there |
+| Depot | no bound | 128 KiB a class (5.5 MiB) is a target only for classes being served (256 KiB, 11 MiB) |
 | Free and resident in the back end | no bound | see above |
 | Pages pinned by one full magazine of 16-byte objects | 1 MiB, or 508 MiB of huge pages | 254 objects, one per page |
 | Above watermarks | 2 MiB per class with 8 MiB carved | never purged |
@@ -725,6 +728,75 @@ benchmark workloads themselves; more than 8 CPUs.
 
 The experiments contain two `unsafe` blocks (a cycle-counter read and a store-if-equal of
 zero) with no ledger entry. They are prototypes and must not be merged as they are.
+
+## Magazine budget
+
+2026-10-17, at main `6111f39`. The magazine byte budget (`MAGAZINE_BUDGET`) swept at 128 (the
+value then), 64, 32 and 16 KiB, with the depot's per-class target (`DEPOT_TARGET`) at twice
+the budget, as it was. Chosen: **64 KiB, depot target 128 KiB.**
+
+**Method.** Each setting was a separate build of the workloads (build-time overrides, not
+merged), run as an allocator entry of its own (`build` in `bench/allocators.toml`) against
+jemalloc and mimalloc: ten full-size jobs of the suite, five rounds, every allocator once per
+round in a fresh random order, under the runner's cap and CPU confinement, 330 runs, none
+invalid. The machine was shared: SMT siblings of the measurement CPUs busy at a median of
+1.0 CPU (90th percentile 5.7), 4.5 CPUs' worth elsewhere, nothing foreign on the job CPUs.
+Time differences are per-round ratios against the 128 KiB build with a 95% bootstrap
+interval of the median; they resolve 2 to 3% on the pipelines and mpmc and only 10 to 40% on
+fork-join, the RPC server, churn at 1M live and JSON. Slow-path entries were counted with an
+instrumented build (a relaxed counter per class on the allocation and free slow paths), also
+not merged.
+
+Time, median of five, and the cost against 128 KiB:
+
+| Job | jemalloc | mimalloc | 128 KiB | 64 KiB | 32 KiB | 16 KiB |
+|---|---:|---:|---:|---:|---:|---:|
+| pipeline, mixed sizes (ns/alloc) | 18.5 | 21.5 | 12.3 | +5.1% [+3.6, +6.8] | +11.7% [+10.1, +15.9] | +23.3% [+21.2, +27.8] |
+| pipeline, small sizes (ns/alloc) | 8.0 | 16.4 | 3.9 | −0.3% [−15, +7] | +5.0% [−8, +9] | +18.4% [+12, +68] |
+| mpmc 3 to 1 (ns/alloc) | 10.8 | 8.0 | 5.3 | +0.4% [−1.0, +3.0] | +6.1% [+3.3, +7.4] | +12.9% [+10.7, +19.0] |
+| fork-join, 4 threads (ns/alloc) | 5.2 | 6.3 | 3.8 | +8.5% [−5, +17] | +3.1% [−4, +23] | +10.6% [−4, +20] |
+| RPC log ingest (server cycles/req) | 143k | 137k | 138k | +0.8% [−14, +35] | +9.4% [−3, +33] | +1.1% [−13, +17] |
+| churn, 1k live (cycles/op) | 36.3 | 46.2 | 26.7 | +1.8% [−0.1, +2.6] | +3.9% [−5, +21] | +0.4% [−8, +7] |
+| churn, 1M live (cycles/op) | 433 | 537 | 372 | +2.1% [−16, +27] | −0.7% [−25, +6] | +0.3% [−21, +14] |
+| churn, 100k live, mixed (cycles/op) | 131 | 113 | 101 | +2.6% [−3, +18] | +10.3% [+2, +50] | +26.8% [+11, +53] |
+| BTreeMap, 1M (cycles/entry) | 1814 | 1681 | 1777 | +1.8% [−5, +9] | −1.3% [−5, +9] | −0.5% [−8, +14] |
+| JSON, 32 MiB (cycles/byte) | 41.5 | 30.8 | 32.5 | +4.1% [−3, +47] | +5.0% [+3.3, +6.5] | +34% [+14, +62] |
+
+Cgroup peak, MiB, median of five (churn at 1M, BTreeMap and JSON moved by under 0.5 MiB at
+every setting: 109, 124 and 352 against jemalloc's 110, 125 and 358):
+
+| Job | jemalloc | mimalloc | 128 KiB | 64 KiB | 32 KiB | 16 KiB |
+|---|---:|---:|---:|---:|---:|---:|
+| pipeline, mixed | 5.24 | 8.75 | 7.07 | 5.12 | 4.00 | 3.54 |
+| pipeline, small | 1.82 | 4.75 | 2.44 | 2.52 | 2.24 | 2.14 |
+| mpmc 3 to 1 | 3.25 | 7.25 | 3.69 | 3.68 | 3.25 | 2.99 |
+| fork-join | 30.8 | 21.3 | 15.9 | 15.7 | 15.5 | 15.2 |
+| RPC log ingest | 8.9 | 24.6 | 9.4 | 8.3 | 7.6 | 8.1 |
+| churn, 100k mixed | 42.7 | 54.6 | 35.2 | 34.6 | 34.2 | 34.1 |
+
+Slow-path entries (allocation and free) per thousand allocations:
+
+| Job | 128 KiB | 64 KiB | 32 KiB | 16 KiB |
+|---|---:|---:|---:|---:|
+| pipeline, mixed | 16.6 | 28.2 | 44.3 | 65.3 |
+| churn, 100k mixed | 7.6 | 13.1 | 20.5 | 30.0 |
+| pipeline, small; mpmc; churn 1M | 4.1 to 8.7 | the same | +25 to 26% | about double |
+
+At 128 KiB every class up to 512 bytes already has the largest magazine (254 objects), so a
+smaller budget reaches only larger classes: 64 KiB halves the magazines of 512 bytes and up
+and leaves classes up to 256 bytes untouched, which is why the small-size jobs exchange
+exactly as often; 32 KiB starts on the 256-byte class. The mixed pipeline's cost at 64 KiB,
+5.1% for 11.7 more entries per thousand allocations, is about 55 ns per extra slow-path
+entry.
+
+The phase-change workload, two seconds after the change, holds 21 to 23 MiB at 64 KiB
+against 27 at 128 KiB (jemalloc 26.5, mimalloc 16.3); its peaks are too noisy between rounds
+to rank. Many classes on few CPUs peaks at 10 to 16 MiB at every budget (jemalloc 7.7), so
+that excess is not parked magazines.
+
+So 64 KiB is the one setting at or under jemalloc's memory on the mixed pipeline, for a cost
+that is measurable on that job (still 30% faster than jemalloc there) and not resolvable on
+any other.
 
 ## Reproducing
 

@@ -1,9 +1,10 @@
 //! The `Allocator` trait's operations on a heap (cargo feature `allocator-api`).
 //!
-//! `allocate` returns the whole block: the class size for a slot, every region of a run.
-//! `deallocate` may then be called with any size from the one requested to that length, which
-//! maps to the same class (the fit rule, proved in `classes::verify`), or, for a large block,
-//! is not consulted at all. A zero-size layout gets a dangling pointer aligned to it and no
+//! `allocate` returns the usable size: the class size for a small block, and for a large one
+//! the size asked for rounded up to a page (`Heap::usable_size`), never the whole slot or run,
+//! which may be far bigger. `deallocate` may then be called with any size from the one
+//! requested to that length, which maps to the same class (the fit rule, proved in
+//! `classes::verify`), or, for a large block, is not consulted at all. A zero-size layout gets a dangling pointer aligned to it and no
 //! block, and a zero-size block is never freed.
 
 use super::{Heap, Zero};

@@ -84,7 +84,8 @@ impl Bench<'_> {
         let mut buffer = vec![std::ptr::null_mut(); self.batch];
         for chunk in objects.chunks(self.batch) {
             buffer[..chunk.len()].copy_from_slice(chunk);
-            self.back.launder(self.class, &buffer[..chunk.len()]);
+            // SAFETY: the bench filled these slots itself and uses none of them.
+            unsafe { self.back.launder(self.class, &buffer[..chunk.len()]) };
         }
     }
 

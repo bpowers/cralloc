@@ -70,10 +70,11 @@ pub const MASK_COUNT: usize = 256;
 /// for it: `docs/research/zen5-roofline.md`, section 14).
 const MASK_PAGE_OFFSET: usize = 2048;
 
-/// Where the published heap words start within the masks' page, and where the region table
+/// Where the mirrors of the heap words start within the masks' page, and where the region table
 /// starts within the page after it: off the page offsets of the slab words the fast paths write,
 /// since the C frees read them on every call.
 const PUBLISHED_PAGE_OFFSET: usize = 1024;
+
 const REGION_PAGE_OFFSET: usize = 2048;
 
 /// The number of entries of the region table the C frees read: one per region.
@@ -100,7 +101,8 @@ pub const REGION_COUNT: usize = crate::space::MAX_REGIONS;
 pub struct Front {
     slabs: Slabs<[Slab; SLAB_COUNT]>,
     _gap0: [u8; PUBLISHED_PAGE_OFFSET],
-    /// The heap's region shift (in the low 32 bits) and its base address shifted right by it.
+    /// The C frees' mirror of the heap's region shift (in the low 32 bits) and its base address
+    /// shifted right by it.
     published: [AtomicU64; 2],
     _gap1: [u8; MASK_PAGE_OFFSET - PUBLISHED_PAGE_OFFSET - 16],
     masks: [AtomicU64; MASK_COUNT],
@@ -150,8 +152,8 @@ impl Front {
             .and_then(crate::classes::Class::small)
     }
 
-    /// The published heap words the C frees read: the region shift and the base's region
-    /// index, `(shift, base >> shift)`, both zero until published.
+    /// The heap words the C frees read: the region shift and the base's region index,
+    /// `(shift, base >> shift)`, both zero until published.
     #[cfg_attr(any(miri, kani), allow(dead_code))]
     pub(crate) fn published(&self) -> (&AtomicU64, &AtomicU64) {
         (&self.published[0], &self.published[1])
@@ -168,8 +170,8 @@ impl Front {
 #[cfg_attr(any(miri, kani), allow(dead_code))]
 pub(crate) const MASK_DISP: usize = offset_of!(Front, masks) - offset_of!(Front, slabs);
 
-/// The distances from `SLABS` to the published words and the region table, by the layout of
-/// [`Front`].
+/// The distances from `SLABS` to the first mirror's words and the region table, by the layout of
+/// [`Front`]; mirror `i`'s words are `16 i` bytes past the first's.
 #[cfg_attr(any(miri, kani), allow(dead_code))]
 pub(crate) const SHIFT_DISP: usize = offset_of!(Front, published) - offset_of!(Front, slabs);
 #[cfg_attr(any(miri, kani), allow(dead_code))]
@@ -188,6 +190,8 @@ const _: () = {
     assert!(MASK_DISP == c_proved::MASK_DISP && MASK_COUNT == c_proved::MASK_COUNT);
     assert!(SLAB_COUNT == c_proved::SLAB_COUNT && SLAB_BYTES == c_proved::SLAB_BYTES);
     assert!(SHIFT_DISP == c_proved::SHIFT_DISP && BASE_DISP == c_proved::BASE_DISP);
+    // The routines were proved for one mirror, C's, at `SHIFT_DISP`.
+    assert!(c_proved::MIRROR_COUNT == 1 && size_of::<[AtomicU64; 2]>() == c_proved::MIRROR_BYTES);
     assert!(REGION_DISP == c_proved::REGION_DISP && REGION_COUNT == c_proved::REGION_COUNT);
 };
 

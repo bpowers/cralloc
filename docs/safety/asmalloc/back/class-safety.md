@@ -13,8 +13,9 @@ retained count over its cap, or when the slot is advised for huge pages because 
 grew there (its size word's flag, `Recorded::huge`, which only the slot's holder reads or
 writes). Which of the two reasons applies changes nothing below: the same thread holds the
 same slot. The advice is taken back after the purge (`region::unadvise`), which changes no
-contents. `Back::free` is reached from `Heap::free_large` and the C
-`free`, for a pointer the program is giving up.
+contents. `Back::free` is crate-private (`pub(crate)`), so these are its only callers, and
+it is reached from `Heap::free_large`, the C `free` and the depot's `free_one` (a thread with
+no CPU giving up a small block), each for a pointer the program is giving up.
 
 **Proof.**
 
@@ -90,8 +91,11 @@ resize, and `old` is its recorded size, within the slot.
 range during the call, and nothing in it is needed after. For `Space::purge`: no thread reads
 or writes the range during the call and nothing in it is needed.
 
-**Proof.** `resize_in_place` is called by the heap for a live large block that its owner is
-resizing (`Heap::resize_large_in_place`, `Heap::resize_in_place_by_address`), so the owner
+**Proof.** `resize_in_place` is an `unsafe fn` whose contract is that `ptr` is a live large
+block the caller owns, unused during the call, and that the caller gives up every byte past
+`size`. Its callers are the heap's for a block its owner is resizing
+(`Heap::resize_large_in_place`, `Heap::resize_in_place_by_address`, both `unsafe fn`s with the
+same promise, from `Heap::resize` and C's `realloc`), so the owner
 holds the slot or run for the whole call and is not using the block meanwhile: a resize has
 the block exclusively, as `realloc` and `Allocator::shrink` require. The range is
 `from..from + len` with `from = size` rounded up to a page and the end the old recorded size

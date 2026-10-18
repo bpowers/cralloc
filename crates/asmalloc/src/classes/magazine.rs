@@ -22,11 +22,12 @@ pub const SLOT_BYTES: usize = 8;
 /// The most bytes of objects a magazine holds, unless that would leave it fewer than
 /// [`MagazineSize::MIN`] slots.
 ///
-/// The design asks that no magazine hold more than a few hundred kilobytes. This budget is a
-/// starting point, not a measurement: it gives 254-object magazines up to 512-byte classes and
-/// two-object magazines at 32 KiB. It bounds the memory one cached magazine can pin against the
-/// cost of exchanging magazines, two atomic instructions each.
-pub const MAGAZINE_BUDGET: usize = 128 << 10;
+/// It bounds the memory one cached magazine can pin against the cost of exchanging magazines,
+/// and gives 254-object magazines up to 256-byte classes and two-object magazines from 16 KiB.
+/// Halving it from 128 KiB brought the mixed-size pipeline down to jemalloc's memory for a few
+/// percent on that job and no resolvable cost elsewhere, since classes up to 256 bytes keep
+/// their magazines (`docs/research/memory.md`, "Magazine budget").
+pub const MAGAZINE_BUDGET: usize = 64 << 10;
 
 /// The low bits of a marker: a marker is `(generation << MARKER_SHIFT) | MARKER`.
 ///
@@ -313,6 +314,6 @@ mod tests {
     fn the_class_rule_respects_the_bounds() {
         assert_eq!(MagazineSize::for_class_size(8), MagazineSize::MAX);
         assert_eq!(MagazineSize::for_class_size(1 << 20), MagazineSize::MIN);
-        assert_eq!(MagazineSize::for_class_size(1024).slots(), 128);
+        assert_eq!(MagazineSize::for_class_size(1024).slots(), 64);
     }
 }

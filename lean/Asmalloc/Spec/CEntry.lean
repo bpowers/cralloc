@@ -6,8 +6,8 @@ public import Asmalloc.Spec.Slab
 # The C entry points: `malloc`, `free` and the sized free
 
 **Trusted** (as every file in `Spec/`). The contracts of the routines that
-serve C's `malloc(size)`, `free(ptr)` and `free_sized(ptr, size)` (also
-C++'s `operator delete` forms), each one restartable sequence that finds the
+serve C's `malloc(size)`, `calloc(n, size)`, `free(ptr)` and `free_sized(ptr, size)`, each
+one restartable sequence that finds the
 class first and then pops or pushes as the out-of-line routines of
 `Spec/Slab.lean` do. See docs/design.md, "Interfaces", and
 docs/research/zen5-roofline.md, section 14.
@@ -21,7 +21,7 @@ Rust side keeps, and is proved safe for every content of it:
   `MALLOC_MAX / 8 + 1` bytes, for a size up to `MALLOC_MAX`; a larger one
   takes the slow path.
 * `free` reads the published shift and base index of the heap, two words
-  `SHIFT_DISP` and `BASE_DISP` bytes above `SLABS`, computes the region
+  of its mirror (`Mirror`) beside the slabs, computes the region
   index `(ptr >> shift) - base_index` (the shift taken modulo 64, as the
   processor takes a count in `cl`), and, if it is below `REGION_COUNT`,
   reads the class byte of the region table `REGION_DISP` bytes above
@@ -45,6 +45,18 @@ byte the class of every block the region holds) is the Rust side's to
 keep; the routines need none of it for memory safety, and their contracts
 state what they did in terms of the values they read.
 
+## Mirrors
+
+The frees read the heap's shift and base index from a mirror (`Mirror`), a
+copy beside the slabs. It is zero until the Rust side publishes it, and a
+zero mirror sends every pointer to the slow path (the index is the pointer
+itself, which is far above `REGION_COUNT` for any address the heap can
+have). There is one mirror, C's. A family of frees that must stay on its
+slow path until the Rust side decides it may leave it (as C++'s `delete`
+forms must when a program replaces `operator new`) would get a mirror of its
+own, which the Rust side leaves zero. The routines are proved safe whatever
+a mirror holds.
+
 ## Restarts
 
 Each routine is one sequence, armed first: after the arm it reads the CPU
@@ -64,11 +76,31 @@ open VG.Spec.Slab
 
 /-! ## Layout -/
 
-/-- The published heap's region shift (32 bits) and base index (64 bits),
-`base >> shift`: just past the slabs, 1024 bytes into the page of the masks'
-table, a page offset no slab word has. -/
+/-- The first mirror of the published heap's region shift (32 bits) and base
+index (64 bits), `base >> shift`: just past the slabs, 1024 bytes into the
+page of the masks' table, a page offset no slab word has. The mirrors follow
+one another, 16 bytes each (`Mirror.disp`). -/
 def SHIFT_DISP : Nat := 33555456
 def BASE_DISP : Nat := 33555464
+def MIRROR_BYTES : Nat := 16
+
+/-- Whose copy of the heap's shift and base index a free reads. -/
+inductive Mirror
+  /-- C's `free` and `free_sized`. -/
+  | c
+  deriving DecidableEq, Repr
+
+def Mirror.index : Mirror → Nat
+  | .c => 0
+
+def MIRROR_COUNT : Nat := 1
+
+/-- The functions a mirror serves, as the documentation names them. -/
+def Mirror.doc : Mirror → String
+  | .c => "C's `free` and `free_sized`"
+
+/-- The mirror's shift word, above `SLABS`; its base index word is 8 bytes on. -/
+def Mirror.disp (m : Mirror) : Nat := SHIFT_DISP + MIRROR_BYTES * m.index
 /-- The region table: one class byte per region, `REGION_COUNT` of them,
 starting 2048 bytes into the page after the masks' table. -/
 def REGION_DISP : Nat := 33560576
@@ -81,6 +113,9 @@ def MALLOC_MAX : Nat := 32768
 def MALLOC_LEN : Nat := MALLOC_MAX / 8 + 1
 /-- The sized free's table: one byte per value of the size's low 16 bits. -/
 def SIZED_LEN : Nat := 65536
+/-- The totals `calloc`'s table covers, one byte per total, and its length. -/
+def CALLOC_MAX : Nat := 1024
+def CALLOC_LEN : Nat := CALLOC_MAX + 1
 
 theorem shift_disp_eq : SHIFT_DISP = SLAB_COUNT * SLAB_BYTES + 1024 := by decide
 theorem base_disp_eq : BASE_DISP = SHIFT_DISP + 8 := by decide
@@ -89,6 +124,9 @@ theorem region_disp_eq : REGION_DISP = SLAB_COUNT * SLAB_BYTES + SLAB_BYTES + 20
 /-- The names of the size tables the code reads, and of the slow paths. -/
 def SIZES : String := "C_SIZES"
 def SIZED : String := "C_SIZED_SIZES"
+def CALLOC_SIZES : String := "C_CALLOC_SIZES"
+/-- `calloc`'s zeroing tail, which a pop that hit jumps to. -/
+def ZERO : String := "zero"
 
 /-! ## The routines and their view of the state -/
 
@@ -100,12 +138,16 @@ inductive Kind
   | free
   /-- `c_free_sized(ptr, size)`. -/
   | freeSized
+  /-- `c_calloc(n, size)`. -/
+  | calloc
   deriving DecidableEq, Repr
 
 structure Ctx (M : ISA) where
   A : Abi M
   kind : Kind
   sig : Sig
+  /-- The mirror a free reads; `malloc`'s is never read. -/
+  mirror : Mirror
 
 namespace Ctx
 
@@ -133,9 +175,14 @@ def size : BitVec 64 := match c.kind with
   | .malloc => c.arg s 0
   | .free => 0
   | .freeSized => c.arg s 1
+  | .calloc => c.arg s 0 * c.arg s 1
 def ptr : BitVec 64 := match c.kind with
-  | .malloc => 0
+  | .malloc | .calloc => 0
   | .free | .freeSized => c.arg s 0
+/-- Whether `calloc`'s product overflows 64 bits. -/
+def overflows : Prop := 2 ^ 64 ≤ (c.arg s 0).toNat * (c.arg s 1).toNat
+
+instance : Decidable (c.overflows s) := by unfold overflows; infer_instance
 
 /-- The byte at `a`. -/
 def byteAt (a : Addr) : Nat := ((c.mem s) a).toNat
@@ -144,10 +191,11 @@ def byteAt (a : Addr) : Nat := ((c.mem s) a).toNat
 table, the size table, the published words and the region table. -/
 def slabs : Region := ⟨c.sym s SLABS, SLAB_COUNT * SLAB_BYTES⟩
 def maskTable : Region := ⟨c.sym s SLABS + BitVec.ofNat 64 MASK_DISP, 8 * MASK_COUNT⟩
-def published : Region := ⟨c.sym s SLABS + BitVec.ofNat 64 SHIFT_DISP, 16⟩
+def published : Region := ⟨c.sym s SLABS + BitVec.ofNat 64 c.mirror.disp, 16⟩
 def regionTable : Region := ⟨c.sym s SLABS + BitVec.ofNat 64 REGION_DISP, REGION_COUNT⟩
 def mallocTable : Region := ⟨c.sym s SIZES + BitVec.ofNat 64 TABLE_OFF, MALLOC_LEN⟩
 def sizedTable : Region := ⟨c.sym s SIZED + BitVec.ofNat 64 TABLE_OFF, SIZED_LEN⟩
+def callocTable : Region := ⟨c.sym s CALLOC_SIZES + BitVec.ofNat 64 TABLE_OFF, CALLOC_LEN⟩
 
 /-- The region index of the pointer, from the published words. -/
 def shift : Nat := ((c.mem s).readW (c.published s).base 32).toNat % 64
@@ -161,6 +209,8 @@ the sized free's predicts. -/
 def mallocClass : Nat :=
   c.byteAt s ((c.mallocTable s).base + BitVec.ofNat 64 (((c.size s).toNat + 7) / 8))
 def predicted : Nat := c.byteAt s ((c.sizedTable s).base + BitVec.ofNat 64 ((c.size s).toNat % SIZED_LEN))
+/-- The class `calloc`'s table gives a total up to `CALLOC_MAX`. -/
+def callocClass : Nat := c.byteAt s ((c.callocTable s).base + BitVec.ofNat 64 (c.size s).toNat)
 
 /-- The class the routine works on, if it finds one: for `malloc`, its
 table's for a size up to `MALLOC_MAX`; for `free`, the region's of a
@@ -172,6 +222,8 @@ def cls? : Option Nat := match c.kind with
       some (c.regionByte s) else none
   | .freeSized => if (c.regionIndex s).toNat < REGION_COUNT ∧ c.regionByte s = c.predicted s then
       some (c.predicted s) else none
+  | .calloc => if ¬ c.overflows s ∧ (c.size s).toNat ≤ CALLOC_MAX then some (c.callocClass s)
+      else none
 
 /-! ### A class's words, mask and magazines -/
 
@@ -198,6 +250,7 @@ def fixed : List (Region × Bool) :=
   | .malloc => [(c.mallocTable s, false)]
   | .free => [(c.published s, false), (c.regionTable s, false)]
   | .freeSized => [(c.sizedTable s, false), (c.published s, false), (c.regionTable s, false)]
+  | .calloc => [(c.callocTable s, false)]
 
 /-- What it may touch if its CPU number has a slab and it finds a class:
 the class's word in that slab, and the magazine the word names, if it names
@@ -381,6 +434,19 @@ def FreeSizedTrace (evs : List Event) : Prop :=
           c.pushTail s (c.ptr s) i k w m else []
     else []
 
+/-- The accesses of `calloc`: none to find the product, then the class (`k`) for a total its
+table covers. -/
+def CallocTrace (evs : List Event) : Prop :=
+  ∃ o d i k w m v : Nat, evs = c.head s o d i ++
+    if i < SLAB_COUNT ∧ ¬ c.overflows s ∧ (c.size s).toNat ≤ CALLOC_MAX then
+      rd ((c.callocTable s).base + BitVec.ofNat 64 (c.size s).toNat) 1 k :: c.popTail s i k w m v
+    else []
+
+/-- The third argument register, where `calloc` hands its zeroing tail the block. -/
+def third : BitVec 64 := match c.A.args [c.A.ptrBits, c.A.ptrBits, c.A.ptrBits] with
+  | some f => (f s).getD 2 0
+  | none => 0
+
 end Ctx
 
 /-! ## The contracts -/
@@ -418,10 +484,28 @@ def freeSig : Sig where
 def freeSizedSig : Sig where
   params := [("ptr", .int .usize), ("size", .int .usize)]
 
+/-- `c_calloc`: `fn(n: usize, size: usize) -> usize`; it never returns itself, leaving for its
+slow path or its zeroing tail, which return the block. -/
+def callocSig : Sig where
+  params := [("n", .int .usize), ("size", .int .usize)]
+  ret := some .usize
+
+/-- `calloc`: if `n * size` does not overflow and is at most `CALLOC_MAX`, pops a pointer of
+the class its table gives the total and tail-calls the zeroing tail with `n`, `size` and the
+pointer (in the third argument's register); otherwise, or if there is nothing to pop,
+tail-calls the slow path with `n` and `size`. -/
+def callocContract {M : ISA} (A : Abi M) : Contract M :=
+  let c : Ctx M := ⟨A, .calloc, callocSig, .c⟩
+  contract c
+    (post := fun _ _ => False)
+    (exit := fun t s s' => (t = SLOW ∧ c.PopMissed s s') ∨ (t = ZERO ∧ ∃ x, c.Popped s s' x ∧ c.third s' = x))
+    (abort := fun s p => Unchanged [c.csField s] (c.mem s) (A.mem p))
+    (trace := c.CallocTrace)
+
 /-- `malloc`: pops a pointer of the class its table gives the size and
 returns it, or tail-calls the slow path with the size. -/
 def mallocContract {M : ISA} (A : Abi M) : Contract M :=
-  let c : Ctx M := ⟨A, .malloc, mallocSig⟩
+  let c : Ctx M := ⟨A, .malloc, mallocSig, .c⟩
   contract c
     (post := fun s s' => ∃ x, c.Popped s s' x ∧ A.ret s' = x)
     (exit := fun t s s' => t = SLOW ∧ c.PopMissed s s')
@@ -430,8 +514,8 @@ def mallocContract {M : ISA} (A : Abi M) : Contract M :=
 
 /-- `free`: returns at once for null; pushes the pointer to the class of its
 region; or tail-calls the slow path with the pointer. -/
-def freeContract {M : ISA} (A : Abi M) : Contract M :=
-  let c : Ctx M := ⟨A, .free, freeSig⟩
+def freeContract {M : ISA} (A : Abi M) (m : Mirror) : Contract M :=
+  let c : Ctx M := ⟨A, .free, freeSig, m⟩
   contract c
     (post := fun s s' => ((c.ptr s).toNat = 0 ∧ Unchanged [c.csField s] (c.mem s) (A.mem s')) ∨
       c.Pushed s (c.ptr s) s')
@@ -442,8 +526,8 @@ def freeContract {M : ISA} (A : Abi M) : Contract M :=
 /-- The sized free: pushes the pointer to the class its size predicts if
 that is the class of its region, or tail-calls the slow path with the
 pointer and the size. -/
-def freeSizedContract {M : ISA} (A : Abi M) : Contract M :=
-  let c : Ctx M := ⟨A, .freeSized, freeSizedSig⟩
+def freeSizedContract {M : ISA} (A : Abi M) (m : Mirror) : Contract M :=
+  let c : Ctx M := ⟨A, .freeSized, freeSizedSig, m⟩
   contract c
     (post := fun s s' => c.Pushed s (c.ptr s) s')
     (exit := fun t s s' => t = SLOW ∧ c.PushMissed s (c.ptr s) s')
@@ -479,8 +563,8 @@ def safety (tables : List String) : List String :=
     (`VG.Spec.CEntry.Ctx.inv`)."]
 
 /-- The tables `free` reads, as the documentation names them. -/
-def regionDoc : List String :=
-  [s!"the published shift and base index (16 bytes {SHIFT_DISP} bytes above `SLABS`)",
+def regionDoc (m : Mirror) : List String :=
+  [s!"the published shift and base index (16 bytes {m.disp} bytes above `SLABS`)",
     s!"the region table ({REGION_COUNT} bytes {REGION_DISP} bytes above `SLABS`)"]
 
 def operands (table : Option String) (slow : String) : List (String × Operand) :=
@@ -491,6 +575,7 @@ def operands (table : Option String) (slow : String) : List (String × Operand) 
 /-- The layout constants the Rust side asserts. -/
 def rustConsts : List (String × IntTy × Nat) :=
   [("SHIFT_DISP", .usize, SHIFT_DISP), ("BASE_DISP", .usize, BASE_DISP),
+    ("MIRROR_BYTES", .usize, MIRROR_BYTES), ("MIRROR_COUNT", .usize, MIRROR_COUNT),
     ("REGION_DISP", .usize, REGION_DISP), ("REGION_COUNT", .usize, REGION_COUNT),
     ("TABLE_OFF", .usize, TABLE_OFF), ("MALLOC_MAX", .usize, MALLOC_MAX),
     ("MALLOC_LEN", .usize, MALLOC_LEN), ("SIZED_LEN", .usize, SIZED_LEN),
@@ -513,60 +598,63 @@ def mallocApi : Api where
   rustConsts := rustConsts
   exports := [("c", "malloc")]
 
-def freeApi : Api where
+/-- A free's `Api`: its name, mirror, slow path and the symbols it is exported as. -/
+def freeApiOf (name : String) (m : Mirror) (slow : String) (exports : List (String × String)) :
+    Api where
   module := "centry"
-  name := "c_free"
+  name := name
   sig := freeSig
-  contracts := some fun A _ => freeContract A
-  summary := "C's `free`: returns at once for null; otherwise pushes `ptr` on the calling \
+  contracts := some fun A _ => freeContract A m
+  summary := s!"For {m.doc}: returns at once for null; otherwise pushes `ptr` on the calling \
     thread's CPU's magazine of the class its region's byte names, the region index being \
-    `(ptr >> shift) - base_index` from the published words, or tail-calls \
-    `c::slow::free_slow(ptr)` if the index is not below 4096, the CPU number has no slab, the \
+    `(ptr >> shift) - base_index` from the words of the mirror at {m.disp} bytes above `SLABS`, or tail-calls \
+    `{slow}(ptr)` if the index is not below 4096, the CPU number has no slab, the \
     class's mask is 0 or its magazine has no free slot to spare.\n\n\
     Contract: `VG.Spec.CEntry.freeContract`."
-  safety := safety regionDoc
-  operands := operands none (slowPath "free_slow")
+  safety := safety (regionDoc m)
+  operands := operands none slow
   rustConsts := rustConsts
-  exports := [("c", "free")]
+  exports := exports
 
-def freeSizedApi : Api where
+/-- A sized free's `Api`. -/
+def freeSizedApiOf (name : String) (m : Mirror) (slow : String)
+    (exports : List (String × String)) : Api where
   module := "centry"
-  name := "c_free_sized"
+  name := name
   sig := freeSizedSig
-  contracts := some fun A _ => freeSizedContract A
-  summary := "C23's `free_sized` and C++'s sized `operator delete`: the class \
-    `C_SIZED_SIZES[size % 65536]` is a prediction, which the class byte of `ptr`'s region \
-    must match, as `c_free` finds it; then pushes `ptr` on the calling thread's CPU's magazine \
-    of that class, or tail-calls `c::slow::free_sized_slow(ptr, size)` if the two disagree, \
-    the region index is not below 4096, the CPU number has no slab, the class's mask is 0 or \
-    its magazine has no free slot to spare. A wrong size frees exactly what `c_free` would.\n\n\
+  contracts := some fun A _ => freeSizedContract A m
+  summary := s!"For {m.doc}: the class `C_SIZED_SIZES[size % 65536]` is a prediction, which the class \
+    byte of `ptr`'s region must match, the region found as the plain free with the same \
+    mirror finds it; then pushes `ptr` on the calling thread's CPU's magazine of \
+    that class, or tail-calls `{slow}(ptr, size)` if the two disagree, the region index is not \
+    below 4096, the CPU number has no slab, the class's mask is 0 or its magazine has no free \
+    slot to spare. A wrong size frees exactly what the plain free would.\n\n\
     Contract: `VG.Spec.CEntry.freeSizedContract`."
-  safety := safety (s!"the {SIZED_LEN} bytes {TABLE_OFF} bytes into `C_SIZED_SIZES`" :: regionDoc)
-  operands := operands (some SIZED) (slowPath "free_sized_slow")
+  safety := safety (s!"the {SIZED_LEN} bytes {TABLE_OFF} bytes into `C_SIZED_SIZES`" :: regionDoc m)
+  operands := operands (some SIZED) slow
   rustConsts := rustConsts
-  exports := [("c", "free_sized")]
+  exports := exports
 
-/-- C++'s plain `operator delete` and `delete[]`: `c_free`, leaving for the `delete` family's
-own slow path, which handles a pointer outside the heap as `delete` must, not as `free` does. -/
-def deleteApi : Api :=
-  { freeApi with
-    name := "c_delete"
-    summary := "C++'s plain `operator delete` and `delete[]`: `c_free`'s code, tail-calling \
-      `c::cxx::operator_delete_slow(ptr)` where `c_free` tail-calls `free_slow`.\n\n\
-      Contract: `VG.Spec.CEntry.freeContract`."
-    operands := operands none "crate::c::cxx::operator_delete_slow"
-    exports := [("cxx", "_ZdlPv"), ("cxx", "_ZdaPv")] }
+/-- C's `free` and `free_sized`. -/
+def freeApi : Api := freeApiOf "c_free" .c (slowPath "free_slow") [("c", "free")]
+def freeSizedApi : Api :=
+  freeSizedApiOf "c_free_sized" .c (slowPath "free_sized_slow") [("c", "free_sized")]
 
-/-- C++'s sized `operator delete` and `delete[]`: `c_free_sized`, leaving for the `delete`
-family's own slow path. -/
-def deleteSizedApi : Api :=
-  { freeSizedApi with
-    name := "c_delete_sized"
-    summary := "C++'s sized `operator delete` and `delete[]`: `c_free_sized`'s code, tail-calling \
-      `c::cxx::operator_delete_sized_slow(ptr, size)` where `c_free_sized` tail-calls \
-      `free_sized_slow`.\n\n\
-      Contract: `VG.Spec.CEntry.freeSizedContract`."
-    operands := operands (some SIZED) "crate::c::cxx::operator_delete_sized_slow"
-    exports := [("cxx", "_ZdlPvm"), ("cxx", "_ZdaPvm")] }
+def callocApi : Api where
+  module := "centry"
+  name := "c_calloc"
+  sig := callocSig
+  contracts := some fun A _ => callocContract A
+  summary := "C's `calloc`: for a product `n * size` that does not overflow and is at most 1024, \
+    pops a block of the class `C_CALLOC_SIZES[n * size]` from the calling thread's CPU's \
+    magazine and tail-calls `c::slow::calloc_zero_tail(n, size, block)`, which zeroes it and \
+    returns it; otherwise, or if the CPU number has no slab, the class's mask is 0 or its \
+    magazine has none to give, tail-calls `c::slow::calloc_slow_args(n, size)`.\n\n\
+    Contract: `VG.Spec.CEntry.callocContract`."
+  safety := safety [s!"the {CALLOC_LEN} bytes {TABLE_OFF} bytes into `C_CALLOC_SIZES`"]
+  operands := operands (some CALLOC_SIZES) (slowPath "calloc_slow_args") ++
+    [(ZERO, .sym (slowPath "calloc_zero_tail"))]
+  rustConsts := rustConsts ++ [("CALLOC_MAX", .usize, CALLOC_MAX), ("CALLOC_LEN", .usize, CALLOC_LEN)]
+  exports := [("c", "calloc")]
 
 end VG.Spec.CEntry

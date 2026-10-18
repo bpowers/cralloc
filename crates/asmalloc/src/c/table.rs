@@ -53,6 +53,23 @@ pub(crate) const C_CALLOC_CLASSES: [u8; CALLOC_TABLE_MAX + 1] = {
     table
 };
 
+/// `C_CALLOC_LENS[size]` is the size of the class of a `calloc` of `size` bytes in all, which
+/// it zeroes, for every size up to [`CALLOC_TABLE_MAX`].
+pub(crate) const C_CALLOC_LENS: [u16; CALLOC_TABLE_MAX + 1] = {
+    let mut table = [0u16; CALLOC_TABLE_MAX + 1];
+    let mut size = 0;
+    while size < table.len() {
+        let Some(class) = Class::from_index(C_CALLOC_CLASSES[size]) else {
+            panic!("a calloc table entry is not a class");
+        };
+        let len = class.size();
+        assert!(len <= u16::MAX as usize);
+        table[size] = len as u16;
+        size += 1;
+    }
+    table
+};
+
 /// The largest size the sized free's prediction covers by its table index: the low 16 bits of
 /// the size.
 pub(crate) const C_SIZED_LEN: usize = 1 << 16;
@@ -105,6 +122,11 @@ impl<const N: usize> PlacedTable<N> {
 #[doc(hidden)]
 pub static C_SIZES: PlacedTable<{ C_TABLE_MAX / 8 + 1 }> = PlacedTable::new(C_SIZE_CLASSES);
 
+/// [`C_CALLOC_CLASSES`] as `c_calloc` reads it, as [`C_SIZES`].
+#[doc(hidden)]
+pub static C_CALLOC_SIZES: PlacedTable<{ CALLOC_TABLE_MAX + 1 }> =
+    PlacedTable::new(C_CALLOC_CLASSES);
+
 /// The sized free's table (`sized_classes`) as `c_free_sized` reads it, as [`C_SIZES`].
 #[doc(hidden)]
 pub static C_SIZED_SIZES: PlacedTable<C_SIZED_LEN> = PlacedTable::new(sized_classes());
@@ -115,6 +137,7 @@ const _: () = {
     assert!(TABLE_OFF == proved::TABLE_OFF);
     assert!(C_TABLE_MAX == proved::MALLOC_MAX && C_TABLE_MAX / 8 + 1 == proved::MALLOC_LEN);
     assert!(C_SIZED_LEN == proved::SIZED_LEN);
+    assert!(CALLOC_TABLE_MAX == proved::CALLOC_MAX && CALLOC_TABLE_MAX + 1 == proved::CALLOC_LEN);
     assert!(core::mem::offset_of!(PlacedTable<1>, bytes) == TABLE_OFF);
 };
 
@@ -165,6 +188,9 @@ mod tests {
         }
         assert_eq!(calloc_class(CALLOC_TABLE_MAX + 1), None);
         assert_eq!(C_CALLOC_CLASSES.len(), 1025);
+        for (size, &len) in C_CALLOC_LENS.iter().enumerate() {
+            assert_eq!(usize::from(len), calloc_class(size).unwrap().size());
+        }
     }
 
     #[test]
@@ -178,6 +204,7 @@ mod tests {
             assert_eq!(C_SIZED_SIZES.bytes()[size], expected, "{size}");
         }
         assert_eq!(&C_SIZES.bytes()[..], &C_SIZE_CLASSES[..]);
+        assert_eq!(&C_CALLOC_SIZES.bytes()[..], &C_CALLOC_CLASSES[..]);
         let base = core::ptr::from_ref(&C_SIZES).addr();
         assert_eq!(
             core::ptr::from_ref(C_SIZES.bytes()).addr(),

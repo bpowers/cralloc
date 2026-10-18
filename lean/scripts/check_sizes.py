@@ -94,16 +94,26 @@ def functions(path: pathlib.Path):
 
 def measure(mc: str, name: str, asm: str, tmp: pathlib.Path) -> tuple[int, int]:
     """The bytes of `name`'s hot path, from its entry to the end of its
-    return, and the alignment of its section. What follows the return before
+    return (or its tail call), and the alignment of its section. What follows the return before
     the alignment directive (stubs that jump to a slow path,
     `Printer.stubExits`) runs only on a miss."""
     lines = asm.rstrip("\n").split("\n")
     if not lines[-1].strip().startswith((".p2align", ".balign", ".align")):
         raise ValueError("does not end with an alignment directive")
-    rets = [i for i, l in enumerate(lines) if l.strip() == "ret"]
-    if not rets:
+    # The hot path ends at its return, or at the tail call that replaces it (a jump to an
+    # operand, `Code.jump`), whichever comes first outside a pushed section.
+    ends, depth = [], 0
+    for i, l in enumerate(lines):
+        t = l.strip()
+        if t.startswith(".pushsection"):
+            depth += 1
+        elif t.startswith(".popsection"):
+            depth -= 1
+        elif depth == 0 and (t == "ret" or t.startswith("jmp vg_op_")):
+            ends.append(i)
+    if not ends:
         raise ValueError("has no return")
-    end = rets[0] + 1
+    end = ends[0] + 1
     body = "\n".join(lines[:end] + [f"{name}_end:"] + lines[end:-1])
     src = (f'.intel_syntax noprefix\n.section .text.{name},"ax",@progbits\n'
            f"{name}:\n{body}\n{lines[-1]}\n")

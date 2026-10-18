@@ -398,6 +398,8 @@ def rseqSample : Prog isa := .rseq
 
 -- Its hot path: the arm's 4, the load, the compare fused with its branch, the
 -- load, two branches after a load (not fused), the commit; and the return.
+#guard text (printer.function (.seq (.rseq [] []) (.jump [] "zero"))) ==
+  text (printer.lower (.rseq [] []) 0).1 ++ ["jmp <zero>"] ++ text (printer.lower (.rseq [] []) 0).2.1
 #guard printer.hotUops false rseqSample == some 11
 #guard printer.hotUops true rseqSample == some 10
 #guard printer.uopLimit == some 24
@@ -508,5 +510,12 @@ def safeDoc : String := "Does things.\n\n# Safety\n\n* `p` must be valid."
   "cmp r11b, BYTE PTR [rcx]",
   "ret"
 ]
+
+-- A tail call after a sequence: its instructions, then a jump to the operand it names, in place
+-- of the return, which the function then leaves out.
+#guard (printer.lower (.jump [.mov .rdx (.reg .rax)] "zero") 0) ==
+  ([.text "mov rdx, rax", .ops [.text "jmp ", .ref "zero"]], [], 0)
+#guard printer.hotUops false (.seq (.rseq [.mov .rax (.reg .rdi)] [.instr (.store { base := .rdi } .rax)])
+  (.jump [.mov .rdx (.reg .rax)] "zero")) == some 4
 
 end VG.Test
