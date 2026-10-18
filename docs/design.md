@@ -561,6 +561,11 @@ they would stay resident until it is freed. One that shrinks to under a quarter 
 moves instead, because a region has few slots of a large class, and a slot should not be
 held by an object a small fraction of its size.
 
+When a large object has to move, the copy goes in pieces and returns the old block's pages
+behind it, so the two copies are never both resident. The old block would be purged at its
+free anyway; this only does it sooner, and it keeps a program that grows several big buffers
+at once from holding twice their size.
+
 ### Interfaces
 
 - **`GlobalAlloc`** for `#[global_allocator]`. `dealloc` of a small object is the free
