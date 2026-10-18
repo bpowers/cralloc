@@ -4,7 +4,7 @@
 //! A class's regions are found through its summary tree, which visits them in address order. New
 //! slots are carved from one region at a time, the class's carving region. When it is exhausted,
 //! the thread that notices picks the lowest unassigned region, commits its fixed metadata (so
-//! that the region never carries a class tag without a readable header), takes it with a
+//! that the region never carries a class tag without readable summary words), takes it with a
 //! compare-and-swap on the region table, gives it its huge-page advice, and publishes it with a
 //! compare-and-swap on the class's carving word. If another thread published first, the loser
 //! zeroes what it wrote and gives its region back with a compare-and-swap; no other thread has
@@ -331,7 +331,8 @@ impl<'a, O: Os> Back<'a, O> {
         if tree::word(host, tree::Node::leaf(region, word)).load() & (1u64 << bit) != 0 {
             self.abort("double free: a large object was freed while it was free");
         }
-        if !region::recorded(host, region, slot).is_some_and(|r| r.huge) || self.keeps_grown(class)
+        if !region::recorded(host, region, slot).is_some_and(|r| r.huge)
+            || self.keeps_grown(region::charge(host, region, slot))
         {
             return false;
         }
@@ -350,11 +351,15 @@ impl<'a, O: Os> Back<'a, O> {
     /// the heart for a large free, as it does for a large allocation (`Cache::lone_heartbeat`).
     fn free_slot(&self, host: &ClassHost<'a, O>, class: Class, region: RegionId, slot: u32) {
         let purged = self.purge_before_release(host, region, slot, class);
+        // Charged while still held: the clean bits it writes are this slot's.
+        let charge = if purged {
+            0
+        } else {
+            region::charge_resident(host, region, slot)
+        };
         let (word, bit) = position(slot);
         tree::release_one(host, region, word, 1 << bit);
-        if !purged {
-            self.retain(class, class.size());
-        }
+        self.retain(class, charge);
     }
 
     /// The region and slot of a pointer the caller says is a handed-out slot of `class`, or an
@@ -384,7 +389,7 @@ impl<'a, O: Os> Back<'a, O> {
         let Some((slot, _)) = layout.block_at(offset) else {
             self.abort("free of a pointer that is not the start of a slot");
         };
-        let carved = Grow::unpack(host.meta(region, layout.grow_word()).load()).carved;
+        let carved = Grow::unpack(host.grow(region).load()).carved;
         if slot >= carved.min(layout.slots()) {
             self.abort("free of a slot that was never handed out");
         }
@@ -427,10 +432,14 @@ impl<'a, O: Os> Back<'a, O> {
         }
         let host = self.host(class)?;
         let (region, slot, zeroed) = if let Some(taken) = tree::claim(&host, 1, !class.is_small()) {
-            let settled = region::settle(&host, taken.region, taken.word, taken.bits);
+            let slot = taken.word * BITS + taken.bits.trailing_zeros();
+            let settled = if class.is_small() {
+                region::settle(&host, taken.region, taken.word, taken.bits)
+            } else {
+                region::settle_slot(&host, taken.region, slot, size)
+            };
             self.unretain(class, settled.resident);
             self.retain(class, settled.revived);
-            let slot = taken.word * BITS + taken.bits.trailing_zeros();
             (taken.region, slot, settled.zeroed != 0)
         } else {
             let (region, first, _) = self.carve(&host, class, 1)?;
@@ -445,6 +454,8 @@ impl<'a, O: Os> Back<'a, O> {
                 // The last free could not take the slot's huge-page advice back; try again,
                 // so that this block, which has not grown, does not get huge pages.
                 region::unadvise(&host, region, slot);
+                // If the advice stayed, the block's extent is in whole huge pages.
+                region::cover(&host, region, slot);
             }
         }
         let into = host.layout().stagger(slot);
@@ -484,6 +495,7 @@ impl<'a, O: Os> Back<'a, O> {
                 }
                 if let Some(before) = region::recorded(&host, region, slot) {
                     region::record(&host, region, slot, Recorded { size, ..before });
+                    region::cover(&host, region, slot);
                 }
             }
             Some(Kind::Run(regions)) => {
@@ -551,6 +563,7 @@ impl<'a, O: Os> Back<'a, O> {
                 // the resize; `last..old` lies inside its first `old` bytes.
                 let dense = || unsafe { mostly_data(written.as_ptr(), old - last, page) };
                 region::advise_grown(&host, region, slot, into, old, size, dense);
+                region::cover(&host, region, slot);
                 if let Some((from, len)) = tail(old, class.size(), into) {
                     // SAFETY: BACK-CLASS-02 in docs/safety/asmalloc/back/class-safety.md. The
                     // caller owns the object in this slot and has just given up everything
@@ -683,7 +696,10 @@ impl<'a, O: Os> Back<'a, O> {
         let mut dest = if zeroed { Dest::Zero } else { Dest::Dirty };
         // A slot within the budget is kept whole, with both copies resident for the move;
         // anything else goes back behind the copy.
-        let keep = slot.is_some_and(|class| self.keeps_grown(class));
+        let keep = match &host {
+            Some((host, region, index)) => self.keeps_grown(region::charge(host, *region, *index)),
+            None => false,
+        };
         // Pieces end at multiples of the piece in the address space, not in the block, so that
         // a piece that goes back is whole huge pages wherever the block has them: purging
         // part of a huge page would return nothing.
@@ -721,15 +737,23 @@ impl<'a, O: Os> Back<'a, O> {
                 };
                 if keep {
                     // As a plain free leaves it: resident, counted, advice and all.
-                    self.release_all(class, &[from.as_ptr()], true);
+                    let charge = region::charge_resident(&host, region, index);
+                    self.release_all(class, &[from.as_ptr()], false);
+                    self.retain(class, charge);
                     self.heartbeat();
                     return;
                 }
-                if all {
+                // Every page went back: zero, clean, uncounted. Else a purge failed, and the
+                // slot is charged as a free charges it, an over-count of what did go back.
+                let charge = if all {
                     region::mark_purged(&host, region, index);
-                }
+                    0
+                } else {
+                    region::charge_resident(&host, region, index)
+                };
                 region::unadvise(&host, region, index);
-                self.release_all(class, &[from.as_ptr()], !all);
+                self.release_all(class, &[from.as_ptr()], false);
+                self.retain(class, charge);
                 self.heartbeat();
             }
             None => self.free_run(from),
@@ -836,13 +860,14 @@ impl<'a, O: Os> Back<'a, O> {
         copy(next, end);
     }
 
-    /// Whether a grown block's slot of `class`, moved out of or freed with huge-page advice,
-    /// is kept resident rather than returned: if retained large-slot memory stays within its
-    /// budget with it (`policy::kept_grown`). Two threads may both see room and together go
+    /// Whether a grown block's slot, moved out of or freed with huge-page advice, is kept
+    /// resident rather than returned: if retained large-slot memory stays within its budget
+    /// (`policy::kept_grown`) with the slot's `charge`, what its tenant could have written
+    /// (`region::charge`). Two threads may both see room and together go
     /// past the budget by a slot; the budget bounds what is kept, not a correctness property.
-    fn keeps_grown(&self, class: Class) -> bool {
+    fn keeps_grown(&self, charge: usize) -> bool {
         let budget = kept_grown(self.space.plan().geometry());
-        self.retained_large().saturating_add(class.size()) <= budget
+        self.retained_large().saturating_add(charge) <= budget
     }
 
     /// Before the `len` bytes at `from` move into the block at `to`: if `to` is a large slot
@@ -874,6 +899,7 @@ impl<'a, O: Os> Back<'a, O> {
         let dense = || unsafe { mostly_data(from.as_ptr().add(last), len - last, page) };
         if let Some(now) = region::recorded(&host, region, index) {
             region::advise_grown(&host, region, index, into, len, now.size, dense);
+            region::cover(&host, region, index);
         }
     }
 
@@ -1022,7 +1048,8 @@ impl<'a, O: Os> Back<'a, O> {
                 continue;
             }
             // Commit the fixed metadata before the region can carry this class's tag, so that
-            // whoever learns the tag (a free of any pointer into the region) can read the header.
+            // whoever learns the tag (a free of any pointer into the region) can read its summary,
+            // clean and, for a large class, zero and size words.
             // Committing is idempotent, so doing it for a region another thread then takes
             // costs only commit charge.
             if !host.commit_meta(region, start, end - start) {
@@ -1067,8 +1094,7 @@ impl<'a, O: Os> Back<'a, O> {
                 huge_from: Some(0),
                 cursor: 0,
             };
-            host.meta(region, layout.hints_word())
-                .fetch_or(hints.pack());
+            host.hints(region).fetch_or(hints.pack());
             HugePages::Prefer
         } else {
             HugePages::Avoid
@@ -1079,7 +1105,7 @@ impl<'a, O: Os> Back<'a, O> {
     /// Undoes `prepare`'s writes, so that the region's metadata is all zero again.
     fn unprepare(&self, host: &ClassHost<'a, O>, region: RegionId, huge: bool) {
         if huge {
-            host.meta(region, host.layout().hints_word()).fetch_and(0);
+            host.hints(region).fetch_and(0);
         }
     }
 }
@@ -1178,7 +1204,7 @@ impl<'c, 'a, O: Os> Checker<'c, 'a, O> {
         if self.back.state.table.get(region) != RegionTag::Class(self.class) {
             self.back.abort("free of a pointer with the wrong class");
         }
-        let grow = self.host.meta(region, self.layout.grow_word());
+        let grow = self.host.grow(region);
         let limit = Grow::unpack(grow.load()).carved.min(self.layout.slots());
         Met { region, limit }
     }

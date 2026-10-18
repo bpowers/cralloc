@@ -5,27 +5,30 @@
 //! touched:
 //!
 //! ```text
-//! word 0                      leaf bitmap: one bit per slot, set means free
-//! header                      Grow (watermark, committed pages)
-//! header + 1                  Hints (start of the huge-page part, purge cursor)
-//! ...                         summary levels 1 to height, each a word per 64 words below
+//! word 0                      summary levels height down to 1, each a word per 64 words below
 //! ...                         clean bitmap: one bit per page, set means purged and untouched
 //! ...                         zero bitmap, large classes only: one bit per slot, set means
 //!                             free and known to read as zero
 //! ...                         sizes, large classes only: one word per slot, the size the
 //!                             object in it was last allocated or resized to, and whether
 //!                             the slot is advised for huge pages (`Recorded`)
+//! next page                   leaf bitmap: one bit per slot, set means free
 //! ```
 //!
-//! The leaf bitmap comes first so that it can be committed a page at a time as the region grows,
-//! starting at the block's first byte; everything after it is committed when the region is
-//! assigned. All zero means nothing is free, nothing is carved, nothing is committed, the region
-//! has no huge-page part and no purge is under way.
+//! Everything before the leaf bitmap is committed when the region is assigned; the leaf bitmap,
+//! the one part that grows with the region, is committed a page at a time as the region grows.
+//! All zero means nothing is free and no purge is under way.
 //!
-//! The header is a cache line of its own, the first after the leaf bitmap, wherever the block
-//! has room for the padding (every geometry but the smallest simulated ones): every free reads
-//! the watermark, and claims and releases write the leaf and summary words on either side
-//! (`crate::lined`).
+//! The order keeps what a class touches together, because each touched page of a block costs a
+//! page of memory and, at 128 MiB from the next class's block, often a page of page tables too:
+//! a region whose slots reach the bitmaps touches the first page of the block (the small top
+//! levels, and for most classes the start of level 1), the start of level 1 for the smallest
+//! classes, and the first page of the leaf bitmap, which for every small class lies in the same
+//! 2 MiB as the rest, so one page of page tables serves them all (`docs/research/memory.md`,
+//! "Small heaps"). The region's header (`Grow`, `Hints`) is not in the block at all: it is in
+//! the back end's state, beside every other region's (`host::RegionHeader`), so that a small
+//! class whose slots never reach the bitmaps never touches its block. A large class touches it
+//! on every allocation, to write the slot's size word.
 
 use super::policy::{STAGGER_SLOTS, STAGGER_STEP};
 use super::word::BITS;
@@ -40,12 +43,6 @@ pub(crate) const MAX_LEVELS: usize = 5;
 /// Bytes per metadata word.
 pub(crate) const WORD_BYTES: usize = 8;
 
-/// Header words after the leaf bitmap.
-const HEADER_WORDS: u32 = 2;
-
-/// Words in a cache line.
-const LINE_WORDS: u32 = (crate::lined::LINE / WORD_BYTES) as u32;
-
 /// The metadata layout and slot arithmetic of one class in one geometry.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(crate) struct Layout {
@@ -54,27 +51,23 @@ pub(crate) struct Layout {
     slots: u32,
     /// The top level of the region's tree: 0 if the leaf bitmap is a single word.
     height: u8,
-    /// Word offset of each level of the tree; level 0 is the leaf bitmap at offset 0.
+    /// Word offset of each level of the tree; level 0 is the leaf bitmap, last in the block.
     offset: [u32; MAX_LEVELS],
     /// Words in each level.
     count: [u32; MAX_LEVELS],
     pages: u32,
     clean: u32,
-    clean_count: u32,
     /// Word offset of the zero bitmap, or 0 if the class has none (small classes).
     zero: u32,
     /// Word offset of the per-slot sizes, or 0 if the class has none (small classes).
     sizes: u32,
-    total: u32,
     page_shift: u8,
     huge_shift: u8,
-    /// Words of padding between the leaf bitmap and the header, which put the header on a
-    /// line of its own; zero where the block has no room for them.
-    header_pad: u8,
 }
 
 /// Words a [`Layout`] packs into for [`Memo`]: everything but the size and its divisor, which
-/// come from the class, as seventeen 32-bit fields and four bytes.
+/// come from the class, as seventeen 32-bit fields (two of them, the clean-bitmap count and the
+/// total, derivable and not read back) and three bytes.
 const PACKED_WORDS: usize = 9;
 
 /// Set in the last packed word: the words hold a layout.
@@ -112,6 +105,16 @@ impl Memo {
             words[PACKED_WORDS - 1] = last;
             return Some(Layout::unpack(words, class));
         }
+        self.work_out(plan, class)
+    }
+
+    /// Works the layout out and keeps it: once per class per heap. Out of line, so that the
+    /// common path stays small enough for `Back::host` to inline: when it did not, every
+    /// large allocation and free copied the class's host through `memmove` (5% on a pipeline
+    /// of large objects; `docs/research/memory.md`, "Small heaps").
+    #[cold]
+    #[inline(never)]
+    fn work_out(&self, plan: Plan, class: Class) -> Option<Layout> {
         let layout = Layout::new(plan, class)?;
         let words = layout.pack();
         for (kept, &word) in self.words.iter().zip(&words).take(PACKED_WORDS - 1) {
@@ -230,18 +233,17 @@ impl Layout {
     /// The layout of `class` in a reservation laid out as `plan`, or `None` if a slot does not
     /// fit in a region or the metadata does not fit in the region's block.
     pub(crate) const fn new(plan: Plan, class: Class) -> Option<Layout> {
-        let slots = slots_in_region(plan, class);
-        let leaf = slots.div_ceil(BITS);
-        let pad = leaf.next_multiple_of(LINE_WORDS) - leaf;
-        // The header and the summary levels after it each start a line, if the block has room.
-        match Layout::with_pad(plan, class, pad as u8, LINE_WORDS - HEADER_WORDS) {
+        // The leaf bitmap starts a page, so that its commits are its own pages, if the block has
+        // room for the padding (every geometry but the smallest simulated ones).
+        match Layout::with_leaf_aligned(plan, class, true) {
             Some(layout) => Some(layout),
-            None => Layout::with_pad(plan, class, 0, 0),
+            None => Layout::with_leaf_aligned(plan, class, false),
         }
     }
 
-    /// The layout with `pad` words before the header and `after` words after it.
-    const fn with_pad(plan: Plan, class: Class, pad: u8, after: u32) -> Option<Layout> {
+    /// The layout, with the leaf bitmap at the next page boundary after the fixed part if
+    /// `aligned`, else straight after it.
+    const fn with_leaf_aligned(plan: Plan, class: Class, aligned: bool) -> Option<Layout> {
         let geometry = plan.geometry();
         let slots = slots_in_region(plan, class);
         if slots == 0 {
@@ -250,16 +252,21 @@ impl Layout {
         let mut offset = [0u32; MAX_LEVELS];
         let mut count = [0u32; MAX_LEVELS];
         count[0] = slots.div_ceil(BITS);
-        let mut next = count[0] + pad as u32 + HEADER_WORDS + after;
-        let mut level = 0;
-        while count[level] > 1 {
-            level += 1;
-            if level >= MAX_LEVELS {
+        let mut height = 0;
+        while count[height] > 1 {
+            height += 1;
+            if height >= MAX_LEVELS {
                 return None;
             }
-            count[level] = count[level - 1].div_ceil(BITS);
+            count[height] = count[height - 1].div_ceil(BITS);
+        }
+        // The summary levels from the top down: the small ones share the block's first page.
+        let mut next = 0;
+        let mut level = height;
+        while level >= 1 {
             offset[level] = next;
             next += count[level];
+            level -= 1;
         }
         let page_shift = geometry.page_size().trailing_zeros();
         let pages = (plan.region_size() >> page_shift) as u32;
@@ -274,9 +281,16 @@ impl Layout {
             next = sizes + slots;
             (zero, sizes)
         };
+        if aligned {
+            let page_words = (geometry.page_size() / WORD_BYTES) as u32;
+            next = next.next_multiple_of(page_words);
+        }
+        offset[0] = next;
+        next += count[0];
         if next as usize * WORD_BYTES > plan.metadata_size() {
             return None;
         }
+        let level = height;
         Some(Layout {
             size: class.size(),
             divisor: class.divisor(),
@@ -286,13 +300,10 @@ impl Layout {
             count,
             pages,
             clean,
-            clean_count,
             zero,
             sizes,
-            total: next,
             page_shift: page_shift as u8,
             huge_shift: geometry.huge_page_size().trailing_zeros() as u8,
-            header_pad: pad,
         })
     }
 
@@ -312,10 +323,10 @@ impl Layout {
             self.count[4],
             self.pages,
             self.clean,
-            self.clean_count,
+            self.clean_words(),
             self.zero,
             self.sizes,
-            self.total,
+            self.total_words(),
         ];
         let pair = |a: u32, b: u32| a as u64 | (b as u64) << 32;
         [
@@ -331,7 +342,6 @@ impl Layout {
                 | (self.height as u64) << 32
                 | (self.page_shift as u64) << 40
                 | (self.huge_shift as u64) << 48
-                | (self.header_pad as u64) << 56
                 | PACKED,
         ]
     }
@@ -350,13 +360,10 @@ impl Layout {
             count: [lo(3), hi(3), lo(4), hi(4), lo(5)],
             pages: hi(5),
             clean: lo(6),
-            clean_count: hi(6),
             zero: lo(7),
             sizes: hi(7),
-            total: lo(8),
             page_shift: (w[8] >> 40) as u8,
             huge_shift: (w[8] >> 48) as u8,
-            header_pad: (w[8] >> 56) as u8 & 0x7f,
         }
     }
 
@@ -397,18 +404,6 @@ impl Layout {
         self.count[0]
     }
 
-    /// Word offset of the `Grow` header word.
-    #[inline(always)]
-    pub(crate) const fn grow_word(&self) -> u32 {
-        self.count[0] + self.header_pad as u32
-    }
-
-    /// Word offset of the `Hints` header word.
-    #[inline(always)]
-    pub(crate) const fn hints_word(&self) -> u32 {
-        self.grow_word() + 1
-    }
-
     /// Word offset of clean-bitmap word `index`.
     #[inline(always)]
     pub(crate) const fn clean_word(&self, index: u32) -> u32 {
@@ -416,10 +411,9 @@ impl Layout {
     }
 
     /// Words in the clean bitmap.
-    #[cfg(any(test, kani))]
     #[inline(always)]
     pub(crate) const fn clean_words(&self) -> u32 {
-        self.clean_count
+        self.pages.div_ceil(BITS)
     }
 
     /// Word offset of the size word of slot `slot`, if the class records sizes (large classes).
@@ -443,10 +437,9 @@ impl Layout {
     }
 
     /// Words of metadata the layout uses.
-    #[cfg(any(test, kani))]
     #[inline(always)]
     pub(crate) const fn total_words(&self) -> u32 {
-        self.total
+        self.offset[0] + self.count[0]
     }
 
     /// Bytes per page.
@@ -501,9 +494,10 @@ impl Layout {
         (page + mask) & !mask
     }
 
-    /// Bytes of leaf bitmap that must be writable for a region committed up to page
-    /// `committed`: the words covering every slot that starts below that page, rounded up to a
-    /// whole page.
+    /// Where in the block the leaf bitmap must be writable up to, for a region committed up to
+    /// page `committed`: past the words covering every slot that starts below that page,
+    /// rounded up to a whole page. With nothing committed, the page the leaf bitmap starts in,
+    /// so that the range from one commit to the next is always whole pages of the bitmap.
     #[inline]
     pub(crate) const fn leaf_commit(&self, committed: u32) -> usize {
         let bytes = (committed as usize) << self.page_shift;
@@ -513,19 +507,29 @@ impl Layout {
             let last = self.slot_at(bytes - 1) + 1;
             if last < self.slots { last } else { self.slots }
         };
-        let leaf = covered.div_ceil(BITS) as usize * WORD_BYTES;
+        let start = self.offset[0] as usize * WORD_BYTES;
         let page = self.page_size();
-        (leaf + page - 1) & !(page - 1)
+        if covered == 0 {
+            return start & !(page - 1);
+        }
+        let end = start + covered.div_ceil(BITS) as usize * WORD_BYTES;
+        (end + page - 1) & !(page - 1)
     }
 
     /// The byte range of the metadata block that is committed when the region is assigned:
-    /// from the page holding the header to the end of the layout, as whole pages.
+    /// everything before the leaf bitmap, as whole pages.
     #[inline]
     pub(crate) const fn fixed_commit(&self) -> (usize, usize) {
         let page = self.page_size();
-        let start = (self.grow_word() as usize * WORD_BYTES) & !(page - 1);
-        let end = (self.total as usize * WORD_BYTES + page - 1) & !(page - 1);
-        (start, end)
+        let end = (self.offset[0] as usize * WORD_BYTES + page - 1) & !(page - 1);
+        (0, end)
+    }
+
+    /// Bytes of the block the layout uses, as whole pages: the most of it a region can touch.
+    #[inline]
+    pub(crate) const fn block_bytes(&self) -> usize {
+        let page = self.page_size();
+        (self.total_words() as usize * WORD_BYTES + page - 1) & !(page - 1)
     }
 
     /// The next thing a top-down purge pass looks at below page `end` (zero for the top), in a
@@ -726,31 +730,45 @@ mod tests {
         assert_eq!(layout.clean_words(), (1 << 20) / 64);
     }
 
-    /// In the design's geometry every class has room for its header on a line of its own,
-    /// away from the leaf and summary words that claims and releases write.
+    /// In the design's geometry, at every region size, the first word of every level of a small
+    /// class's block, which is what a region whose slots reach the bitmaps touches first, lies
+    /// in the block's first 2 MiB, so that one page of page tables maps them all; the leaf
+    /// bitmap starts a page; and the top levels share the block's first page.
     #[test]
-    fn the_design_header_has_a_line_of_its_own_in_every_class() {
-        let plan = Geometry::DESIGN.largest_plan();
-        for class in Class::all() {
-            let Some(layout) = Layout::new(plan, class) else {
-                continue;
-            };
-            assert_eq!(layout.grow_word() % LINE_WORDS, 0, "{class:?}");
-            assert!(layout.grow_word() >= layout.leaf_words(), "{class:?}");
-            let after = if layout.height() >= 1 {
-                layout.tree_word(1, 0)
-            } else {
-                layout.clean_word(0)
-            };
-            assert_eq!(after, layout.grow_word() + LINE_WORDS, "{class:?}");
+    fn what_a_small_class_touches_first_is_in_one_huge_page() {
+        let huge = Geometry::DESIGN.huge_page_size();
+        let page = Geometry::DESIGN.page_size();
+        for plan in [
+            Geometry::DESIGN.largest_plan(),
+            Geometry::DESIGN.smallest_plan(),
+        ] {
+            for class in Class::all().filter(|c| c.is_small()) {
+                let layout = Layout::new(plan, class).unwrap();
+                let leaf = layout.tree_word(0, 0) as usize * WORD_BYTES;
+                assert_eq!(leaf % page, 0, "{class:?}");
+                assert!(leaf < huge, "{class:?}");
+                if layout.height() > 0 {
+                    assert_eq!(layout.tree_word(layout.height(), 0), 0);
+                }
+                for level in 2..=layout.height() {
+                    assert!(
+                        (layout.tree_word(level, 0) as usize * WORD_BYTES) < page,
+                        "{class:?}"
+                    );
+                }
+                assert_eq!(layout.fixed_commit(), (0, leaf));
+            }
         }
     }
 
     #[test]
-    fn the_tiny_geometry_fills_its_metadata_exactly_for_eight_byte_slots() {
+    fn the_tiny_geometry_fits_eight_byte_slots_with_the_leaf_bitmap_last() {
         let layout = Layout::new(Tiny::GEOMETRY.largest_plan(), Class::SMALLEST).unwrap();
-        assert_eq!(layout.total_words() as usize * WORD_BYTES, 64);
-        assert_eq!(layout.fixed_commit(), (0, 64));
+        assert!(layout.total_words() as usize * WORD_BYTES <= 64);
+        assert_eq!(
+            layout.tree_word(0, 0) + layout.leaf_words(),
+            layout.total_words()
+        );
     }
 
     #[test]
@@ -924,13 +942,15 @@ mod tests {
     fn leaf_commits_cover_every_slot_below_the_commit() {
         let g = Standard::GEOMETRY.largest_plan();
         let layout = Layout::new(g, Class::SMALLEST).unwrap();
-        assert_eq!(layout.leaf_commit(0), 0);
+        let page = Standard::GEOMETRY.page_size();
+        let leaf = layout.tree_word(0, 0) as usize * WORD_BYTES;
+        assert_eq!(layout.leaf_commit(0), leaf);
         // One page of eight-byte slots needs a few leaf words, rounded up to a page.
-        assert_eq!(layout.leaf_commit(1), Standard::GEOMETRY.page_size());
+        assert_eq!(layout.leaf_commit(1), leaf + page);
         let all = layout.leaf_commit(layout.region_pages());
-        assert!(all >= layout.leaf_words() as usize * WORD_BYTES);
+        assert!(all >= layout.total_words() as usize * WORD_BYTES);
+        assert_eq!(all, layout.block_bytes());
         let (start, end) = layout.fixed_commit();
-        assert!(start <= layout.leaf_words() as usize * WORD_BYTES);
-        assert!(end >= layout.total_words() as usize * WORD_BYTES);
+        assert_eq!((start, end), (0, leaf));
     }
 }

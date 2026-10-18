@@ -32,7 +32,7 @@ fn main() {
     let chosen: Vec<String> = std::env::vars()
         .filter_map(|(k, _)| k.strip_prefix("CARGO_FEATURE_").map(|f| f.to_lowercase().replace('_', "-")))
         // Measurement options on top of the asmalloc feature, not allocators.
-        .filter(|f| f != "asmalloc-memstat" && f != "asmalloc-background")
+        .filter(|f| f != "asmalloc-memstat" && f != "asmalloc-background" && f != "memacct")
         .collect();
     if chosen.len() > 1 {
         panic!("bench-alloc: pick at most one allocator feature, got {chosen:?}");

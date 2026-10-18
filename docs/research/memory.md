@@ -1552,9 +1552,298 @@ and free every millisecond (a scratch program, resident MiB from `/proc/self/sta
 its outgrown slots below, and the clock returns them within the first interval. The same
 with a 4 MiB vector: 4.7 at the drop, 2.7 by 500 ms.
 
+### A large slot charged what its tenant could write
+
+2026-10-18, later, at main `550d70c`. The retained count charged a freed large slot its
+whole size. A block that moved in with headroom fills a fifth to a quarter of its slot, so it
+was counted four or five times what it could have touched, which inflated what the decay,
+the growth cap and the budget for kept grown blocks act on. The 4 MiB loop above lost its
+last slot every repetition for it: 20 MiB charged for 4 MiB written.
+
+**The rule.** A slot of a huge page or more whose tenant could have written less than half of
+it (its recorded size from the slot's stagger, in pages, or in huge pages if advised) is
+charged that much, and the holder marks the pages past it clean before releasing the slot.
+Every other slot is charged whole, as before. The retained count and the clean bits agree
+page for page: the release adds the slot's pages that are not clean, a claim
+(`region::settle_slot`) subtracts the slot's pages that are not clean and clears the bits
+inside the new tenant's extent, and a purge subtracts the pages it newly cleans. A held
+slot's bits stay clear inside its extent: anything that widens it (an in-place grow,
+huge-page advice, a resize) clears them up to the new one (`region::cover`), so the release
+writes only the tail, and only where its bits are not set already. A slot freed and claimed
+again at the same sizes writes no clean bit.
+
+**Why not every slot.** Charging every slot by its tenant wrote clean bits on most frees
+and claims and read the size word on every free, and blocks that cross CPUs paid for the
+shared lines: the large-object pipeline was 12% slower, `largepair` 9%. A tail under half
+the slot is the class's own rounding (classes are a quarter apart) and the stagger's page;
+slots under a huge page over-count by at most their size. Both are charged whole.
+
+**The under-count.** A tenant that follows a larger one in a slot kept resident leaves the
+larger one's pages past its own extent resident but marked clean. The purge walk still
+returns them: its unit reaches back to the start of the slot, the extent's pages are not
+clean, so the unit is not skipped. No zero bit is set by any of this, and a claim takes a slot
+for zero only from its zero bit, so `calloc` is never told such pages are zero
+(`a_small_tenant_after_a_large_one_is_under_counted_but_never_zero`).
+
+**Measured** against main `550d70c`, budget 16 MiB as before. The loops, `perf stat`, five
+interleaved runs, medians, thousands of cycles and faults per repetition, peak MiB:
+
+| Grow to | main | after | glibc | jemalloc | mimalloc crate |
+|---|---:|---:|---:|---:|---:|
+| 1 MiB | 290 / 0.2 / 10.9 | 290 / 0.2 / 11.1 | 281 / 0.2 / 10.1 | 404 / 0.1 / 10.3 | 464 / 0.0 / 21.1 |
+| 4 MiB | 1,443 / 3.3 / 15.9 | 1,265 / 0.8 / 15.8 | 1,078 / 2.1 / 13.0 | 1,833 / 2.0 / 16.3 | 1,868 / 0.1 / 27.1 |
+| 64 MiB | 27,763 / 74 / 76.1 | 27,123 / 74 / 76.1 | 68,543 / 16,388 / 73.4 | 122,731 / 30,775 / 80.8 | 37,256 / 4.6 / 147.4 |
+
+The 4 MiB loop keeps its last slot now and is 17% behind glibc, from 34%; its kernel time is
+1.7%. What is left is user time: we copy the buffer at each move into a slot four times its
+size, where glibc most likely grows the block in place or remaps it (not traced). The two
+`madvise` calls a repetition (a claim takes back the kept slot's advice, the grown move gives
+it again) are part of the 1.7%; avoiding them needs the heap to tell the claim that the block
+is a growing move's destination, which is more than one layer of plumbing, so they stay.
+
+`benchrun`, five interleaved rounds, medians:
+
+| Job | main | after | glibc | jemalloc | mimalloc crate |
+|---|---:|---:|---:|---:|---:|
+| vecgrow 64x4Mi, cycles/element | 8.91 | 8.99 | 18.43 | 10.60 | 44.17 |
+| the same, peak MiB | 276.4 | 276.5 | 269.2 | 307.2 | 289.1 |
+| vecgrow 1x256Mi, cycles/element | 4.92 | 4.61 | 9.08 | 16.92 | 5.43 |
+| the same, peak MiB | 259.9 | 259.9 | 257.0 | 264.4 | 523.5 |
+| large pipeline, ns/alloc | 68.9 | 68.6 | 356.5 | 300.0 | 40.3 |
+| map hash 1M, cycles/entry | 571 | 567 | 1,106 | 634 | 444 |
+| the same, peak MiB | 204.4 | 204.3 | 208.1 | 183.8 | 198.9 |
+| mstress 8 (preload), s | 0.264 | 0.265 | 0.365 | 0.440 | |
+| the same, peak MiB | 139.2 | 140.4 | 253.1 | 139.4 | |
+| largepair, ns | 69.8 | 72.4 | 8.1 | 136.8 | 106.6 |
+
+Paired by round, everything is within noise of main except `largepair`, 3.6% slower (3.1 to
+4.2%): its 1 MiB block's slot is past a huge page, so its free now reads the slot's size word
+and its claim the clean bits for the tail. The 1x256Mi job's 6% lower median is not a paired
+difference (-0.4%). The peaks did not move: the 64 vectors' outgrown slots are under a huge
+page or fill more than half of it, so they are most likely charged as before.
+
+**After the peak**, as above: one 256 MiB vector freed, then light work: 4.9 MiB at the drop,
+2.9 by 500 ms, 2.8 after, as main. A 4 MiB vector: 8.9 at the drop where main has 4.9, since
+its kept slots are now charged at what they hold and all fit the budget; 4.9 at 500 ms, 3.0 at
+1.5 s, 2.7 from 2.5 s, which is the decay taking a quarter of what is retained, or all of it
+under its floor, each interval. The worst cases of `worst.sh` (two runs each) are unchanged:
+burst then idle 4.8 MiB at 12 s, the phase change 9.3 against 8.8 to 9.2, the others within
+0.3 MiB. `sparse_realloc.c` resident 2 to 3 MiB after every grow, peaks within 0.3 MiB.
+
+## Small heaps
+
+2026-10-18, at main `779ba9b` (before) and the branch's tip (after). Every page of an asmalloc
+process on the small jobs, by structure, and what was trimmed.
+
+**Method.** `bench/probes/memory/acct.sh` runs each job with the full suite's arguments, CPUs
+and confinement, capped, in a cgroup of its own, interleaved by round, under the measurement
+lock. Builds with the `memacct` feature (any allocator) hold the process at exit for 2.5 s so
+the kernel flushes `memory.stat`, then write the cgroup's counters, smaps and, from `pagemap`,
+each mapping's own pages and its pages mapped to the shared zero page. asmalloc builds with
+`asmalloc-memstat` add the heap's walk (where every region, metadata block, the magazine area
+and the slabs are, and at the sample where the program held the most, each class's objects by
+use). `acct.py` attributes every own page to a structure (the binary's data by symbol) and
+estimates page tables per structure (a PTE page per 2 MiB, a PMD page per 1 GiB touched,
+charged to the structure that touched it first; a lower bound, 70 to 95% of VmPTE). The
+probes' own buffers are left out. For the workloads the state at exit is the peak's:
+memory.current at exit is within 0.3 MiB of memory.peak. The RPC servers' exit is up to 1 MiB
+under their peak, so their breakdown is indicative.
+
+Two findings about the measurement itself. The cgroup peak of a process this small includes
+the kernel's per-CPU charge stock, up to 64 pages per CPU that charged, and moves by up to
+0.4 MiB between identical runs; so "charged" below is what memory.stat says the process was
+charged for its own pages, page tables and kernel slab objects, which repeats within a few
+tens of KiB. And the parked objects of a fresh fill cost nothing: a magazine filled by a carve
+names objects nobody has touched, so a first fill of 254 objects is as cheap as one of three.
+Only objects that have been used and come back pin pages. That kills the idea of a short
+first magazine.
+
+### Where the pages are
+
+KiB at exit, one median run each, before the trims; jemalloc for comparison.
+
+| Structure | tiny | churn 1k | pipeline t2 | mpmc 4+4 | RPC echo | scales with |
+|---|---:|---:|---:|---:|---:|---|
+| binary data and BSS (jemalloc 48) | 56 | 56 | 56 | 56 | 104 | per process |
+| slabs (BSS) | 4 | 4 | 8 | 32 | 16 | 4 KiB per CPU used |
+| object pages | 44 | 216 | 828 | 3,272 | 1,732 | per class: at least a page; then live and parked objects |
+| region metadata | 44 | 84 | 204 | 212 | 488 | 4 KiB per class (the header); 16 KiB per class whose frees reach the bitmaps |
+| magazine area | 20 | 40 | 212 | 880 | 360 | 2 KiB per 256-slot magazine ever made: per CPU and class, about 1 loaded + up to 8 spares |
+| glibc, stacks, libraries, TLS | 160 | 164 | 216 | 312 | 320 | per process and thread (jemalloc's heap is in this row for it) |
+| user pages, total (jemalloc) | 336 (368) | 576 (540) | 1,524 (1,328) | 4,764 (3,000) | 3,020 (1,664) | |
+| page tables (jemalloc) | 252 (72) | 404 (76) | 432 (112) | 492 (208) | 712 (144) | about 16 KiB per class in use: 8 for its object region, 8 for its metadata block |
+| kernel slab objects (jemalloc) | 45 (17) | 59 (18) | 65 (21) | 75 (30) | 136 (27) | per class: the VMAs that commits and huge-page advice split off |
+
+Objects at the peak sample, KiB of objects on resident pages (memstat):
+
+| Job | live | loaded | spares | depot | free in bitmaps |
+|---|---:|---:|---:|---:|---:|
+| pipeline t2 | 134 to 302 | 252 to 334 | 109 to 117 | 87 to 216 | 32 to 210 |
+| mpmc 4+4 | 319 to 356 | 1,010 to 1,100 | 468 | 897 to 1,014 | 318 to 587 |
+| RPC echo | 423 to 441 | 576 to 779 | 95 to 132 | 205 to 328 | 357 to 541 |
+
+What the table says, against the suspects:
+
+- **Page tables are the largest fixed cost**: 180 to 570 KiB over jemalloc, about 16 KiB per
+  class in use. Each class's region is 4 GiB from the next, so its first page needs a PTE and a
+  PMD page of its own (8 KiB). Its metadata block, 128 MiB from the next, needed a PTE page for
+  the header, which sat after the leaf bitmap (up to 64 MiB in), and another for the leaf
+  bitmap's first page once frees reached the bitmaps.
+- **Region metadata**: one page per class for the header alone, four (leaf, header with level
+  1, level 2, levels 3 and 4) once the class's frees reach the bitmaps.
+- **The magazine area**: spare stacks four deep. A CPU that only allocates a class keeps four
+  empty magazines of it that it never fills, and the CPUs that free make new ones.
+- **Parked objects** are the whole story of mpmc: 2.5 MiB loaded, in spares and in the depot
+  against 0.3 MiB live. Spares were 468 KiB of it: four full magazines of the small classes on
+  each consumer CPU, which only frees and never takes them back. The depot's 0.9 to 1 MiB is
+  the second domain's stacks filling to the take-across threshold before the producers' domain
+  takes from them.
+- **Not suspects after all**: the slab array (4 KiB per CPU used), the magazine area's first
+  unit and commit-ahead (address space only; nothing touched beyond use), eager
+  initialisation (nothing found that writes a page it would not otherwise touch).
+
+### What was trimmed
+
+1. **Region headers out of the metadata blocks, leaf bitmap last** (`back/layout.rs`,
+   `back/host.rs`). The `Grow` and `Hints` words of every region now sit side by side in the
+   back end's state, 16 bytes each, four to a line, and a block runs top summary level first
+   and the leaf bitmap last, starting a page. A small class whose frees never reach the bitmaps
+   never touches its block; one that does touches two or three pages, all in its first 2 MiB,
+   under one page of page tables. (A large class writes its slot's size word in the block on
+   every allocation, so it touches its block as before.) The generated routines read neither. Kani's layout harnesses and
+   the safety ledger entry BACK-HOST-01 are updated.
+2. **One spare magazine per stack** (`MAX_SPARES`, 4 to 1). One covers a thread oscillating at
+   a magazine boundary; deeper stacks filled only on CPUs whose traffic goes one way.
+
+Charged at exit (own pages, page tables and kernel slab objects), MiB, median of five
+interleaved rounds:
+
+| Job | before | headers | + one spare | jemalloc | glibc |
+|---|---:|---:|---:|---:|---:|
+| tiny (three allocations) | 0.57 | 0.47 | 0.47 | 0.44 | 0.22 |
+| churn, 1k live | 0.94 | 0.75 | 0.75 | 0.61 | 0.38 |
+| pipeline t2 small | 1.92 | 1.79 | 1.71 | 1.42 | 0.46 |
+| mpmc 4+4 | 5.19 | 5.00 | 4.52 | 3.16 | 0.98 |
+| RPC echo c64 | 3.70 | 3.56 | 3.42 | 1.79 | 0.95 |
+| RPC log c64 | 4.68 | | 4.50 | 1.75 | 0.89 |
+| RPC log c256 | 6.96 | | 6.52 | 2.14 | 0.90 |
+
+(The RPC servers' jemalloc and glibc figures at exit are after the server has stopped and
+their allocators have given memory back; compare their peaks.) The "headers" column is from a
+three-round session of its own.
+
+Cgroup peak, MiB, median of five interleaved rounds:
+
+| Job | before | after | jemalloc | glibc |
+|---|---:|---:|---:|---:|
+| tiny | 0.88 | 0.68 | 0.71 | 0.48 |
+| churn, 1k live | 1.18 | 1.04 | 0.87 | 0.75 |
+| pipeline t2 small | 2.39 | 2.31 | 2.05 | 1.38 |
+| mpmc 4+4 | 6.30 | 5.55 | 4.81 | 3.34 |
+| RPC echo c64 | 5.84 | 5.50 | 5.93 | 3.35 |
+| RPC log c64 | 8.44 | 7.46 | 9.36 | 4.63 |
+| RPC log c256 | 12.32 | 12.32 | 12.94 | 7.07 |
+
+The tiny process and the RPC servers are now at or under jemalloc's peak. Churn is 0.17 MiB
+over, the pipeline 0.26 and mpmc 0.74.
+
+Time, the jobs that fit the measurement CPUs (one L3 domain, CPUs 0 to 7), five interleaved
+rounds under the lock; change of the trimmed build against `779ba9b`, median of per-round
+ratios [lowest, highest]:
+
+| Job | before | change |
+|---|---:|---:|
+| pipeline t2 small, all-alloc (ns/alloc) | 3.714 | +0.5% [-17.3, +0.8] |
+| the same, free-only | 3.719 | -0.1% [-2.9, +1.6] |
+| exchange t2 small | 4.243 | -2.5% [-3.0, +1.3] |
+| two pipelines t2, one domain (ns/alloc per chain) | 4.004 | +1.0% [-1.4, +6.2] |
+| mpmc 3+1 | 4.809 | -0.2% [-0.8, +1.0] |
+| mpmc 4+4 on CPUs 0 to 7 | 1.860 | +0.9% [-3.5, +2.6] |
+| churn, 100 live (cycles/op) | 24.64 | +0.2% [-0.1, +1.2] |
+| churn, 1k live | 25.47 | -0.2% [-0.8, +0.1] |
+| churn, 100k live | 47.86 | -0.3% [-0.6, +0.0] |
+| churn, 1M live | 116.6 | -2.0% [-10.6, -1.7] |
+
+Nothing resolvably slower on these. The back end's smoke set (`benchrun run --suite backend`,
+under the lock, CPUs 0-3 and 8-11) was then run at main `3882aee` against the branch merged
+with it, with one, two and four spares (the four-spare build is the header move alone).
+Median of five interleaved rounds, change against main:
+
+| Job | main | one spare (tip) | two spares | four spares |
+|---|---:|---:|---:|---:|
+| pipeline t2 large objects (ns/alloc) | 71.98 | +3.8% | +5.4% | +4.4% |
+| two pipelines across L3s (ns/alloc per chain) | 4.858 | -1.2% | -0.3% | -0.8% |
+| tree depth 18 (cycles/node) | 37.22 | -0.6% | -0.9% | +3.7% |
+| JSON 8 MiB (cycles/byte) | 17.82 | +0.4% | -2.0% | -0.5% |
+| sh8bench 16, preloaded (s) | 0.604 | +3.0% | +1.7% | +0.9% |
+
+sh8bench, which alternates in bursts of a few magazines, is where deeper spares earn
+something. Over three sessions (5, 5 and 12 rounds) one spare cost it +7.9, +3.0 and +1.7%,
+two +3.5, +1.7 and +1.2%, four (the header move alone) +0.9 and -0.1%. The tree and JSON jobs
+do not resolve a difference. Memory, the other side: two spares instead of one leave mpmc 4+4
+0.4 MiB higher at its peak (6.22 against 5.54 MiB in the candidate session above) and the
+pipeline about 0.1 MiB.
+
+The pipeline of large objects is 3.8 to 4.4% slower with every spare setting, so the header
+move costs it. The first measurement was 6.8%: with the layout's slow path inline, `Back::host`
+was no longer inlined and every large allocation and free copied the class's host through
+`memmove`; working the layout out in a cold call of its own removed that. What remains is
+2.5% more instructions and 14% more L1 data misses per run. These were ruled out, each as a
+build of its own: spare depth; four headers to a line (a line each measured the same);
+putting a large class's header back in its block; putting a large class's leaf bitmap first,
+next to its summary and zero bitmap; and both together, which came to +3.5%. Its cause is not
+found.
+
+### What is left, and proposals
+
+At the tip, against jemalloc:
+
+- **Object regions' page tables, about 8 KiB per class in use.** Churn with 1k live objects
+  uses 17 classes; its whole remaining gap (0.14 MiB charged) is this and the kernel's VMA
+  objects. A region's first page needs a PTE page and a PMD page because regions are 4 GiB
+  apart. Only a change to where classes start would share them, for example carving each
+  class's first few pages from a shared small-start region, or smaller regions; both are design
+  changes to the address scheme, and this is their price: 8 KiB times the classes in use.
+- **Parked objects in cross-thread flows.** mpmc 4+4 at the tip parks 1.1 MiB loaded across
+  eight CPUs, 0.3 MiB in spares, 0.9 MiB in the depot, against 0.3 MiB live, with 0.75 MiB
+  free in the bitmaps on resident pages. Two proposals, each measured as a scratch build:
+  - *Magazines of at most 128 slots* (`MAX_LOG2` 7) brings mpmc to jemalloc's charge (3.47
+    against 3.29 MiB charged, peak 5.07 against 4.87) and the pipeline under it (1.34 against
+    1.42, peak 1.70 against 1.86), but costs 16 to 20% on the pipelines, 7% on exchange and mpmc
+    3+1, 5% on mpmc 4+4 and 3.4% on churn with 100k live. Not worth it as it stands; a magazine
+    size that adapts per class and CPU (short on a CPU whose frees of a class go one way, full
+    where it both allocates and frees) would be the version to try.
+  - *The depot's cross-domain threshold.* The second domain's stacks fill to half the class's
+    target before the first takes from them: 0.9 MiB in mpmc 4+4. The depot is being changed
+    on another branch (a domain cap with a shared stack, `d37faa7`), which bounds this by one cap
+    per domain; its cap is the number to choose with this job in view.
+- **The magazine area, 2 KiB per 256-slot magazine ever made, never returned.** 128 KiB on the
+  pipeline and 544 KiB on mpmc at the tip. Magazines are never unmapped by design (stale links
+  read harmless memory); purging the pages of empty magazines on the depot's empty stacks would
+  need their links kept elsewhere. Not proposed now.
+- **Kernel slab objects**, 30 to 110 KiB over jemalloc: a VMA per piece the commits and the
+  huge-page advice split off the reservation, a few per class.
+
 ## Reproducing
 
 ```
+# Small heaps: accounting builds, then the jobs interleaved under the lock, then the tables.
+W=$(pwd)   # the checkout
+cd bench
+cargo build --release -p bench-workloads -p bench-rpc --target-dir target/asm-ms --features bench-alloc/asmalloc-memstat
+cargo build --release -p bench-workloads -p bench-rpc --target-dir target/asm-acct --features bench-alloc/asmalloc,bench-alloc/memacct
+cargo build --release -p bench-workloads -p bench-rpc --target-dir target/je-acct --features bench-alloc/je,bench-alloc/memacct
+cargo build --release -p bench-workloads -p bench-rpc --target-dir target/sys-acct --features bench-alloc/memacct
+cd ..
+flock /tmp/asmalloc-measure.lock bench/probes/memory/acct.sh $W asm-acct,asm-ms,je-acct,sys-acct 5 \
+  tiny churn1k pipe2 mpmc44 echo64 log64 log256
+python3 -I bench/probes/memory/peaks.py bench/target/memory-out/acct asm-acct je-acct sys-acct
+python3 -I bench/probes/memory/acct.py -v bench/target/memory-out/acct/pipe2.asm-ms.1
+# Time on CPUs 0-7 (plain builds; acct.sh prints each run's primary metric):
+flock /tmp/asmalloc-measure.lock bench/probes/memory/acct.sh $W before,after 5 \
+  pipe2 pipe2free exch2 pipex2 mpmc31 mpmc44a churn100 churn1k churn100k churn1M > times.txt
+python3 -I bench/probes/memory/times.py times.txt before before after
+
 # The cap charged to growth: variants built as benchrun `build` entries in allocators.toml
 # (bench/target/asmalloc-<name>), then for each targeted job:
 bench/target/release/benchrun run --suite full --rounds 5 --only "json 32Mi" --allocators before,after,cap16

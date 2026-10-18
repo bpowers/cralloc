@@ -1626,7 +1626,7 @@ fn carving(config: Config) {
             assert_eq!(slots, (0..8).collect::<Vec<u32>>());
             let region = host.region_at(0);
             assert!(host.free_slots(region).is_empty(), "carving frees nothing");
-            let header = host.meta(region, host.layout().grow_word()).load();
+            let header = host.grow(region).load();
             let grow = super::layout::Grow::unpack(header);
             assert_eq!(grow.carved, 8);
             assert!(grow.committed as usize * geometry.geometry().page_size() >= 8 * 256);
@@ -1638,9 +1638,8 @@ fn carving(config: Config) {
 fn purge_pass(host: &Host8) -> usize {
     let region = host.region_at(0);
     let layout = *host.layout();
-    let carved = super::layout::Grow::unpack(host.meta(region, layout.grow_word()).load()).carved;
-    let huge_from =
-        super::layout::Hints::unpack(host.meta(region, layout.hints_word()).load()).huge_from;
+    let carved = super::layout::Grow::unpack(host.grow(region).load()).carved;
+    let huge_from = super::layout::Hints::unpack(host.hints(region).load()).huge_from;
     let mut cursor = 0;
     let mut purged = 0;
     loop {
@@ -1775,8 +1774,7 @@ fn purge_roles(
                     cursor: 0,
                 };
                 let region = host.region_at(0);
-                host.meta(region, host.layout().hints_word())
-                    .fetch_or(hints.pack());
+                host.hints(region).fetch_or(hints.pack());
             }
             host
         },
@@ -1804,9 +1802,7 @@ fn purge_roles(
         },
         |host, _| {
             let region = host.region_at(0);
-            let layout = *host.layout();
-            let carved =
-                super::layout::Grow::unpack(host.meta(region, layout.grow_word()).load()).carved;
+            let carved = super::layout::Grow::unpack(host.grow(region).load()).carved;
             let mut expected: BTreeSet<u32> = (0..carved).collect();
             if !roles.iter().any(|r| matches!(r, Role::FreeHeld)) {
                 for slot in &held {

@@ -48,6 +48,7 @@ struct ClassStat {
     cached: [u64; 3],
     cached_res: [u64; 3],
     magazines: [u32; 3],
+    meta_res: u64,
 }
 
 #[derive(Clone, Copy)]
@@ -64,6 +65,25 @@ struct Snap {
     mags_carved: u64,
     slabs_res: u64,
     empties: u32,
+    /// Where things are, for a reader that attributes pages by address (acct.py).
+    regions: [RegionAt; MAX_LISTED],
+    listed: usize,
+    mags_base: u64,
+    mags_committed: u64,
+    slabs_base: u64,
+}
+
+/// The regions listed in a dump.
+const MAX_LISTED: usize = 256;
+
+#[derive(Clone, Copy)]
+struct RegionAt {
+    index: u32,
+    class: u8,
+    base: u64,
+    meta: u64,
+    meta_len: u64,
+    len: u64,
 }
 
 impl Snap {
@@ -83,6 +103,7 @@ impl Snap {
             cached: [0; 3],
             cached_res: [0; 3],
             magazines: [0; 3],
+            meta_res: 0,
         }; CLASSES],
         cpu_res: [[0; 2]; CPUS],
         cpus: 0,
@@ -92,6 +113,11 @@ impl Snap {
         mags_carved: 0,
         slabs_res: 0,
         empties: 0,
+        regions: [RegionAt { index: 0, class: 0, base: 0, meta: 0, meta_len: 0, len: 0 }; MAX_LISTED],
+        listed: 0,
+        mags_base: 0,
+        mags_committed: 0,
+        slabs_base: 0,
     };
 
     /// Resident bytes by use: live, loaded, spare, depot, free, above.
@@ -228,7 +254,20 @@ impl Visitor for Walk {
         let c = &mut self.snap.classes[region.class.index() as usize];
         c.resident += resident;
         c.above += above;
-        self.snap.meta_res += self.resident_once(region.metadata.addr(), region.metadata_len);
+        let meta = self.resident_once(region.metadata.addr(), region.metadata_len);
+        self.snap.meta_res += meta;
+        self.snap.classes[region.class.index() as usize].meta_res += meta;
+        if self.snap.listed < MAX_LISTED {
+            self.snap.regions[self.snap.listed] = RegionAt {
+                index: region.index as u32,
+                class: region.class.index(),
+                base: base as u64,
+                meta: region.metadata.addr() as u64,
+                meta_len: region.metadata_len as u64,
+                len: region.len as u64,
+            };
+            self.snap.listed += 1;
+        }
     }
 
     fn free(&mut self, class: Class, start: *const u8, len: usize) {
@@ -244,11 +283,14 @@ impl Visitor for Walk {
 
     fn magazine_area(&mut self, base: *const u8, carved: usize, committed: usize) {
         self.snap.mags_carved = carved as u64;
+        self.snap.mags_base = base.addr() as u64;
+        self.snap.mags_committed = committed as u64;
         self.snap.mags_res = self.resident_once(base.addr(), committed);
     }
 
     fn slabs(&mut self, base: *const u8, bytes: usize, count: usize) {
         self.snap.cpus = count as u32;
+        self.snap.slabs_base = base.addr() as u64;
         self.snap.slabs_res = self.resident_once(base.addr(), bytes * count);
     }
 
@@ -430,7 +472,7 @@ impl Sampler {
             let cached: u64 = c.cached_res.iter().sum();
             let _ = writeln!(
                 out,
-                "{label}-class size={size} regions={} carved={} committed={} huge_part={} resident={} live={} loaded={}/{} spare={}/{} depot={}/{} free={}/{} above={} magazines={}/{}/{}",
+                "{label}-class size={size} regions={} carved={} committed={} huge_part={} resident={} live={} loaded={}/{} spare={}/{} depot={}/{} free={}/{} above={} magazines={}/{}/{} meta={}",
                 c.regions,
                 c.carved,
                 c.committed,
@@ -448,7 +490,21 @@ impl Sampler {
                 c.above,
                 c.magazines[0],
                 c.magazines[1],
-                c.magazines[2]
+                c.magazines[2],
+                c.meta_res
+            );
+        }
+        let _ = writeln!(
+            out,
+            "{label}-where mags_base={:x} mags_committed={} slabs_base={:x}",
+            snap.mags_base, snap.mags_committed, snap.slabs_base
+        );
+        for r in &snap.regions[..snap.listed] {
+            let size = Class::from_index(r.class).map_or(0, Class::size);
+            let _ = writeln!(
+                out,
+                "{label}-region index={} size={size} base={:x} len={} meta={:x} meta_len={}",
+                r.index, r.base, r.len, r.meta, r.meta_len
             );
         }
         for (cpu, r) in snap.cpu_res.iter().enumerate() {
@@ -486,6 +542,14 @@ extern "C" fn finish() {
     sampler.sample();
     Sampler::dump(&mut sampler.out, "peak", &sampler.peak);
     Sampler::dump(&mut sampler.out, "final", &sampler.walk.snap);
+    // The sampler's own memory, which a whole-process account (memacct, acct.py) leaves out.
+    // SAFETY: as above; this reads the pointer, not through it.
+    let state = unsafe { SAMPLER }.addr();
+    let (scratch, temp) = (sampler.walk.scratch.addr(), sampler.walk.temp.addr());
+    for (start, len) in [(state, size_of::<Sampler>()), (scratch, SCRATCH), (temp, TEMP)] {
+        let _ = writeln!(sampler.out, "sampler-mem {start:x} {len}");
+    }
+    sampler.out.flush();
 }
 
 fn env_num(name: &std::ffi::CStr, default: u64) -> u64 {

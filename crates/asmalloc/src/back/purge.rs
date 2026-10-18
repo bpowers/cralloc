@@ -455,8 +455,8 @@ impl<O: Os> Back<'_, O> {
             return (0, 1, true);
         };
         let layout = *host.layout();
-        let hints = host.meta(region, layout.hints_word());
-        let grow = host.meta(region, layout.grow_word());
+        let hints = host.hints(region);
+        let grow = host.grow(region);
         let mut cursor = if resume {
             Hints::unpack(hints.load()).cursor
         } else {

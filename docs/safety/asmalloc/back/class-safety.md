@@ -17,7 +17,18 @@ and a later one purged every advised slot; each change only narrows or widens wh
 runs, without changing what holds when it does. A kept advised slot is released with its
 advice and flag; the next allocation of it takes them back (`alloc_at`), and only the holder
 of a slot reads the flag, so a free slot that is advised changes no other path: the purge walk
-purges free slots by their pages and never reads it, and `purge_part` acts on held slots. The advice is taken back after the purge
+purges free slots by their pages and never reads it, and `purge_part` acts on held slots.
+
+A slot released resident is charged what its last tenant could have written
+(`region::charge_resident`), when that leaves at least half of a slot of a huge page or more:
+the holder marks the slot's pages past that extent clean before it releases the bit, as the
+rule for clean bits requires (only the holder of every slot a bit describes writes it). The
+claim (`region::settle_slot`) clears the bits inside the new tenant's extent, and a change
+that widens a held slot's extent clears them up to the new one (`region::cover`). Clean bits
+only steer the retained count and the purge walk; no zero bit is set by any of this, and a
+claim takes a slot for zero only from its zero bit, which only a purge sets. So a claim never
+reports pages as zero that are not, even when an earlier, larger tenant left them resident
+(`a_small_tenant_after_a_large_one_is_under_counted_but_never_zero`). The advice is taken back after the purge
 (`region::unadvise`), which changes no contents. `free_slot` is private and called by
 `Back::free` and `Back::free_by_address` for a large class, both crate-private
 (`pub(crate)`), with the region and slot that `slot_in` found for the pointer: `Back::free`
@@ -223,7 +234,7 @@ The double-free cases are those of BACK-CLASS-01, with the copy added to the win
 into a clean, a dirty and a staggered dirty destination),
 `a_hole_is_copied_when_the_destinations_purge_fails`,
 `a_staggered_block_moves_and_returns_its_whole_slot`,
-`grown_blocks_are_kept_within_their_budget`,
+`grown_blocks_are_kept_within_their_budget`, `a_large_slot_is_charged_what_its_tenant_could_write`,
 `a_zeroed_grow_into_a_dirty_slot_reads_as_zero_past_what_it_kept`,
 `an_advised_slot_is_purged_only_in_whole_huge_pages` (a block that does not start on a
 piece boundary); the heap's and the C layer's `realloc` tests move large blocks through it

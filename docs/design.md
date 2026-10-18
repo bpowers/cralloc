@@ -677,6 +677,17 @@ only on a block the program copied or wrote in full to reach its size, so it cos
 about what the program has already spent on that block, and it never falls on a block that
 was allocated, barely touched and freed.
 
+A kept slot is charged, against that budget and against retained memory, what its tenant
+could have written, not its whole size. A block that moved in with headroom fills a quarter
+of its slot or less, and charged whole it would count several times the memory that is
+resident. The slot's clean-page bits are the one record of the charge: the free counts the
+pages that are not clean, and the next claim and the purge subtract by the same bits, so
+the three cannot disagree. Only a slot of a huge page or more whose tenant could have
+written under half of it is told apart this way; any other slot is charged whole, because
+reading the tenant's size on every free costs more than that over-count. A smaller tenant
+after a larger one leaves resident pages the count does not see, and the purge pass still
+returns them.
+
 Moving the pages with `mremap` instead would copy nothing, but it splits the heap's
 mapping in ways that take several more rules to undo, and it adds nothing to the memory
 saved; we copy.

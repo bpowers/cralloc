@@ -83,8 +83,8 @@ fn fill_hands_out_distinct_aligned_writable_slots_in_address_order() {
     assert_eq!(back.lookup(slots[0].wrapping_add(1)), None);
 }
 
-/// With 8-byte slots the leaf bitmap of a region fills pages of its own, ahead of the page the
-/// header shares with the summary, so it is committed only as carves need it. Freeing slots
+/// With 8-byte slots the leaf bitmap of a region fills pages of its own, after the pages of the
+/// summary and clean bitmap, so it is committed only as carves need it. Freeing slots
 /// writes it; the simulator's memory is inaccessible until committed, so a write the carve did
 /// not commit for kills the test.
 #[test]
@@ -1469,7 +1469,8 @@ fn a_large_slot_that_shrinks_in_place_returns_its_tail() {
     unsafe { back.resize_in_place(ptr, 2 * page) };
     assert_eq!(os.calls(Call::Purge), purges + 2);
     back.free(ptr, class);
-    assert_eq!(back.retained(), class.size());
+    // Charged the two pages it may have written, not the slot.
+    assert_eq!(back.retained(), 2 * page);
     let again = back.alloc(class, class.size()).unwrap();
     assert_eq!(again.ptr, ptr);
     assert!(!again.zeroed);
@@ -1700,9 +1701,11 @@ fn grown_blocks_are_kept_within_their_budget() {
     let back = state.get_or_reserve().unwrap();
     let os = state.os();
     let huge = Native::GEOMETRY.huge_page_size();
+    let page = Native::GEOMETRY.page_size();
     let budget = kept_grown(Native::GEOMETRY);
-    let (old_class, new_class) = (large(96 << 10), large(256 << 10));
-    assert!(old_class.size() + new_class.size() <= budget);
+    // Slots more than twice what their blocks write, so that each is charged its block.
+    let (old_class, new_class) = (large(192 << 10), large(512 << 10));
+    assert!((96 << 10) + (192 << 10) <= budget);
     let purges = || os.calls(Call::Purge);
     let before = purges();
     // A block that grows by moving: the slot it leaves is kept, data and all.
@@ -1718,19 +1721,25 @@ fn grown_blocks_are_kept_within_their_budget() {
         patterned(old.as_ptr(), 80 << 10),
         "the old slot is resident"
     );
-    assert_eq!(back.retained_large(), old_class.size());
+    // Charged what the block could have written, not its whole slot.
+    let kept = back.retained_large();
+    assert!((80 << 10..=(80 << 10) + page).contains(&kept), "{kept}");
     assert_eq!(os.huge_pages(new), Some(HugePages::Prefer));
-    // Freed with its advice, it is kept too, advice and all.
+    // Freed with its advice, it is kept too, advice and all, and charged its size in whole
+    // huge pages.
     back.free(new, new_class);
     assert_eq!(purges(), before);
     assert_eq!(os.huge_pages(new), Some(HugePages::Prefer));
-    assert_eq!(back.retained_large(), old_class.size() + new_class.size());
+    assert_eq!(
+        back.retained_large(),
+        kept + (160usize << 10).next_multiple_of(huge)
+    );
     // A block allocated in it rather than grown into it does not keep the advice.
     let again = back.alloc(new_class, new_class.size()).unwrap();
     assert_eq!(again.ptr, new);
     assert!(!again.zeroed);
     assert_eq!(os.huge_pages(new), Some(HugePages::Avoid));
-    assert_eq!(back.retained_large(), old_class.size());
+    assert_eq!(back.retained_large(), kept);
     // Past the budget the same free returns the slot and its advice.
     move_in(&back, large(64 << 10), huge, again.ptr, 2 * huge);
     assert_eq!(os.huge_pages(new), Some(HugePages::Prefer));
@@ -1744,10 +1753,178 @@ fn grown_blocks_are_kept_within_their_budget() {
     // left, and gives it back resident.
     let plain = back.alloc(old_class, old_class.size()).unwrap().ptr;
     assert_eq!(plain, old);
-    assert_eq!(back.retained(), ballast - old_class.size());
+    assert_eq!(back.retained(), ballast - kept);
     back.free(plain, old_class);
     assert_eq!(purges(), purged + 1);
-    assert_eq!(back.retained(), ballast);
+    assert_eq!(back.retained(), ballast - kept + old_class.size());
+}
+
+/// What a free of the large block at `ptr` of `class`, `size` bytes, should add to the
+/// retained count: its size from the slot's stagger, in whole pages (whole huge pages if
+/// the slot is advised), at most the slot. Read before the free, while the slot is held.
+fn charge_of<O: Os>(back: &Back<'_, O>, class: Class, ptr: NonNull<u8>, size: usize) -> usize {
+    use super::tree::Host as _;
+    let host = back.host(class).unwrap();
+    let layout = host.layout();
+    let location = back.space().locate(ptr.as_ptr()).unwrap();
+    let (index, _) = layout.block_at(location.offset as usize).unwrap();
+    let huge = super::region::recorded(&host, location.region, index)
+        .unwrap()
+        .huge;
+    let start = back
+        .space()
+        .slot(location.region, class, index)
+        .addr()
+        .get();
+    let unit = if huge {
+        layout.huge_pages() as usize * layout.page_size()
+    } else {
+        layout.page_size()
+    };
+    let end = (start + layout.stagger(index) + size).next_multiple_of(unit);
+    let charge = (end - start).min(class.size());
+    // A tail under half the slot is not told apart.
+    if (class.size() - charge) * 2 < class.size() {
+        class.size()
+    } else {
+        charge
+    }
+}
+
+/// A large slot released resident is charged what its last tenant could have written, and a
+/// claim and a purge take back exactly that, for a block at its size, one with room to grow,
+/// a staggered one, one advised for huge pages and one shrunk in place. After a mixed run the
+/// count is back at zero.
+#[test]
+#[cfg_attr(miri, ignore)]
+fn a_large_slot_is_charged_what_its_tenant_could_write() {
+    let state = state::<Native>();
+    let back = state.get_or_reserve().unwrap();
+    let page = Native::GEOMETRY.page_size();
+    let huge = Native::GEOMETRY.huge_page_size();
+    let class = large(256 << 10);
+    // Each case leaves a held block, its size and whether to claim it back (else trim).
+    let cases: [(&str, bool); 6] = [
+        ("whole", true),
+        ("headroom", false),
+        ("staggered", true),
+        ("advised", false),
+        ("shrunk", true),
+        ("grown", true),
+    ];
+    for (case, claim) in cases {
+        assert_eq!(back.retained(), 0, "{case}");
+        // A block held through the case, so that the claim below finds the case's slot.
+        let mut skip = None;
+        let (ptr, size) = match case {
+            "whole" => (back.alloc(class, class.size()).unwrap().ptr, class.size()),
+            "headroom" => (back.alloc(class, 40 << 10).unwrap().ptr, 40 << 10),
+            "staggered" => {
+                skip = Some(back.alloc_staggered(class, 1 << 10).unwrap().ptr);
+                let ptr = back.alloc_staggered(class, 40 << 10).unwrap().ptr;
+                assert_ne!(ptr.addr().get() % page, 0);
+                (ptr, 40 << 10)
+            }
+            "advised" => {
+                let ptr = back.alloc(class, class.size()).unwrap().ptr;
+                move_in(&back, large(64 << 10), huge, ptr, 2 * huge);
+                assert_eq!(state.os().huge_pages(ptr), Some(HugePages::Prefer));
+                (ptr, 2 * huge)
+            }
+            "shrunk" => {
+                let ptr = back.alloc(class, class.size()).unwrap().ptr;
+                paint(ptr.as_ptr(), class.size(), 0x42);
+                // SAFETY: the test holds the block and uses none of it during the call.
+                unsafe { back.resize_in_place(ptr, 2 * page) };
+                (ptr, 2 * page)
+            }
+            _ => {
+                // A small tenant leaves the slot's tail clean; the next grows into it in place.
+                let ptr = back.alloc(class, 8 << 10).unwrap().ptr;
+                back.free(ptr, class);
+                let ptr = back.alloc(class, 8 << 10).unwrap().ptr;
+                assert_eq!(back.retained(), 0);
+                // SAFETY: the test holds the block and uses none of it during the call.
+                unsafe { back.resize_in_place(ptr, 200 << 10) };
+                paint(ptr.as_ptr(), 200 << 10, 0x24);
+                (ptr, 200 << 10)
+            }
+        };
+        // The advised case's move kept the slot it came from, which is charged too.
+        let base = back.retained();
+        let charge = charge_of(&back, class, ptr, size);
+        // The advised block's huge pages fill half its slot or more, by its stagger.
+        if case != "advised" {
+            let told = matches!(case, "headroom" | "staggered" | "shrunk");
+            assert_eq!(charge < class.size(), told, "{case}");
+        }
+        back.free(ptr, class);
+        assert_eq!(back.retained(), base + charge, "{case}");
+        if claim {
+            let again = back.alloc(class, class.size()).unwrap().ptr;
+            assert_eq!(
+                again,
+                ptr.map_addr(|a| { core::num::NonZeroUsize::new(a.get() & !(page - 1)).unwrap() })
+            );
+            assert_eq!(back.retained(), base, "{case}");
+            back.free(again, class);
+            assert_eq!(back.retained(), base + class.size(), "{case}");
+        }
+        let held = back.retained();
+        assert_eq!(
+            back.trim(),
+            held,
+            "{case}: the purge takes back what was charged"
+        );
+        assert_eq!(back.retained(), 0, "{case}");
+        if let Some(skip) = skip {
+            let charge = charge_of(&back, class, skip, 1 << 10);
+            back.free(skip, class);
+            assert_eq!(back.trim(), charge);
+            assert_eq!(back.retained(), 0);
+        }
+    }
+}
+
+/// A small tenant after a large one in a slot kept resident: the large tenant's pages past the
+/// small one's extent stay resident but are marked clean, a known under-count. They are never
+/// taken for zero, and the purge walk still returns all of the slot.
+#[test]
+#[cfg_attr(miri, ignore)]
+fn a_small_tenant_after_a_large_one_is_under_counted_but_never_zero() {
+    let state = state::<Native>();
+    let back = state.get_or_reserve().unwrap();
+    let os = state.os();
+    let class = large(256 << 10);
+    let big = back.alloc(class, class.size()).unwrap().ptr;
+    paint(big.as_ptr(), class.size(), 0x5e);
+    back.free(big, class);
+    let small = back.alloc(class, 40 << 10).unwrap();
+    assert_eq!(small.ptr, big);
+    assert!(!small.zeroed);
+    back.free(small.ptr, class);
+    assert_eq!(back.retained(), charge_of_free(40 << 10));
+    let again = back.alloc(class, class.size()).unwrap();
+    assert_eq!(again.ptr, big);
+    assert!(!again.zeroed, "a resident tail is never reported zero");
+    assert!(painted(
+        big.as_ptr().wrapping_add(40 << 10),
+        class.size() - (40 << 10),
+        0x5e
+    ));
+    back.free(again.ptr, class);
+    let small = back.alloc(class, 40 << 10).unwrap().ptr;
+    back.free(small, class);
+    back.trim();
+    // SAFETY: no other thread runs, and the back end and this test store only integers.
+    unsafe { assert!(os.is_purged(big, class.size()), "the whole slot went back") };
+    assert_eq!(back.retained(), 0);
+}
+
+/// The charge of a block of `size` bytes in an unadvised slot at index 0, which has no
+/// stagger: its size in whole pages.
+fn charge_of_free(size: usize) -> usize {
+    size.next_multiple_of(Native::GEOMETRY.page_size())
 }
 
 /// In a slot advised for huge pages, a shrink returns its tail only in whole huge pages, and a
@@ -2348,7 +2525,7 @@ mod review {
     fn carved<O: Os>(back: &Back<'_, O>, class: Class, at: *mut u8) -> u32 {
         let host = back.host(class).unwrap();
         let region = back.space().locate(at).unwrap().region;
-        Grow::unpack(host.meta(region, host.layout().grow_word()).load()).carved
+        Grow::unpack(host.grow(region).load()).carved
     }
 
     /// Finding decay-walk-wedge. `purge_region` calls `top_up` whenever a region's cursor is
@@ -2890,5 +3067,230 @@ mod review {
                 batch.len()
             );
         }
+    }
+}
+
+/// Review of the move of the region headers into the back end's state, with the leaf bitmap
+/// last in the block (`host::RegionHeader`, `layout`).
+mod review_headers {
+    use super::super::layout::{Layout, WORD_BYTES};
+    use super::super::tree::Host;
+    use super::super::word::Word;
+    use super::*;
+    use crate::space::Geometry;
+    use crate::stats::{Region, Visitor};
+
+    /// On the real OS, in the design's geometry, where the pages a block costs are real.
+    #[cfg(not(miri))]
+    mod resident {
+        use super::*;
+        use crate::os::linux::LinuxOs;
+        use std::fs::File;
+        use std::os::unix::fs::FileExt;
+
+        /// Which pages of the `len` bytes at `start` this process has touched, as page numbers
+        /// from `start`: its own pages, and pages that a read mapped to the kernel's shared
+        /// zero page, which cost no memory but do need a page-table entry.
+        fn touched(start: *const u8, len: usize) -> (Vec<usize>, Vec<usize>) {
+            const PRESENT: u64 = 1 << 63;
+            const EXCLUSIVE: u64 = 1 << 56;
+            let page = Geometry::DESIGN.page_size();
+            let pagemap = File::open("/proc/self/pagemap").unwrap();
+            let mut entries = std::vec![0u8; len / page * 8];
+            pagemap
+                .read_exact_at(&mut entries, (start.addr() / page * 8) as u64)
+                .unwrap();
+            let (mut own, mut zero) = (Vec::new(), Vec::new());
+            for (i, &entry) in entries.as_chunks::<8>().0.iter().enumerate() {
+                let entry = u64::from_ne_bytes(entry);
+                if entry & PRESENT == 0 {
+                    continue;
+                }
+                if entry & EXCLUSIVE != 0 {
+                    own.push(i);
+                } else {
+                    zero.push(i);
+                }
+            }
+            (own, zero)
+        }
+
+        /// The block of the region `at` lies in, as the pages of it this process has touched.
+        fn block_touched(
+            back: &Back<'_, LinuxOs>,
+            class: Class,
+            at: *mut u8,
+        ) -> (Vec<usize>, Vec<usize>) {
+            let region = back.space().locate(at).unwrap().region;
+            let len = back.host(class).unwrap().layout().block_bytes();
+            touched(back.space().metadata(region).as_ptr(), len)
+        }
+
+        /// What the change is for: a small class whose slots are only ever carved, used and
+        /// kept leaves every page of its region's metadata block untouched, read or written;
+        /// and one whose slots go to the bitmaps and come back touches at most three pages of
+        /// its own, with every page it touches at all in the block's first 2 MiB, under one
+        /// page of page tables.
+        ///
+        /// Large classes are not in this: every large allocation writes its slot's size word,
+        /// which is in the block.
+        #[test]
+        fn a_small_class_touches_its_block_only_once_its_slots_reach_the_bitmaps() {
+            let state = Box::new(State::new(LinuxOs));
+            let back = state.get_or_reserve().unwrap();
+            let huge = Geometry::DESIGN.huge_page_size() / Geometry::DESIGN.page_size();
+            let sizes = [8, 16, 48, 256, 1024, 4096, 32 << 10];
+            for size in sizes {
+                let class = small(size);
+                let slots = fill(&back, class, 64);
+                assert_eq!(slots.len(), 64);
+                for &p in &slots {
+                    paint(p, size, 0x5a);
+                }
+                // The paths a class takes while nothing of it is free: a single-slot
+                // allocation, lookups, a heartbeat and a trim.
+                let one = back.alloc(class.class(), size).unwrap();
+                assert_eq!(back.usable_size(one.ptr.as_ptr()), Some(size));
+                back.heartbeat();
+                back.trim();
+                let (own, zero) = block_touched(&back, class.class(), slots[0]);
+                assert!(
+                    own.is_empty() && zero.is_empty(),
+                    "{size}: a class that only carves touched pages {own:?} and read {zero:?}"
+                );
+            }
+            for size in sizes {
+                let class = small(size);
+                let slots = fill(&back, class, 64);
+                // SAFETY: the test holds these slots and gives them up.
+                unsafe { back.launder(class, &slots) };
+                assert_eq!(fill(&back, class, 64), slots);
+                let (own, zero) = block_touched(&back, class.class(), slots[0]);
+                assert!(!own.is_empty() && own.len() <= 3, "{size}: touched {own:?}");
+                assert!(
+                    own.iter().chain(&zero).all(|&page| page < huge),
+                    "{size}: touched {own:?} and read {zero:?}"
+                );
+            }
+        }
+    }
+
+    /// In the design's geometry, at every region size and for every class that fits, the leaf
+    /// bitmap starts a page and is all that is not committed at assignment, and the first word
+    /// of every part of the block lies in the block's first 2 MiB.
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn every_design_layout_starts_its_parts_in_the_first_huge_page() {
+        let geometry = Geometry::DESIGN;
+        let (page, huge) = (geometry.page_size(), geometry.huge_page_size());
+        let mut plans = 0;
+        for shift in 0..=64 {
+            let Some(plan) = geometry.plan(shift) else {
+                continue;
+            };
+            plans += 1;
+            for class in Class::all().filter(|&c| plan.fits_region(c)) {
+                let layout = Layout::new(plan, class).unwrap();
+                let leaf = layout.tree_word(0, 0) as usize * WORD_BYTES;
+                assert_eq!(leaf % page, 0, "{shift} {class:?}");
+                assert_eq!(layout.fixed_commit(), (0, leaf), "{shift} {class:?}");
+                assert_eq!(layout.leaf_commit(0), leaf, "{shift} {class:?}");
+                let firsts = (0..=layout.height())
+                    .map(|level| layout.tree_word(level, 0))
+                    .chain([layout.clean_word(0)])
+                    .chain(layout.zero_word(0))
+                    .chain(layout.size_word(0));
+                for word in firsts {
+                    assert!((word as usize * WORD_BYTES) < huge, "{shift} {class:?}");
+                }
+            }
+        }
+        assert!(plans > 1);
+    }
+
+    #[derive(Default)]
+    struct Seen {
+        regions: Vec<(Class, usize, usize)>,
+        free: usize,
+    }
+
+    impl Visitor for Seen {
+        fn region(&mut self, region: &Region) {
+            self.regions
+                .push((region.class, region.carved, region.committed));
+        }
+        fn free(&mut self, _: Class, _: *const u8, _: usize) {
+            self.free += 1;
+        }
+    }
+
+    /// A region that carries `class`'s tag with an all-zero header and a block nothing has
+    /// written: `assign` published it, and the OS refused the commit its first carve asked for.
+    /// Returns the region's base.
+    fn assigned_and_never_carved(state: &State<Sim>, class: Class) -> *mut u8 {
+        let back = state.get_or_reserve().unwrap();
+        // The commit of the block's fixed part goes through; the commit of the slots does not.
+        state.os().set_faults(Call::Commit, Faults::once_after(1));
+        assert!(back.alloc(class, 1).is_none());
+        state.os().set_faults(Call::Commit, Faults::NONE);
+        let region = back.space().plan().region(0).unwrap();
+        assert_eq!(state.table.get(region), RegionTag::Class(class));
+        let host = back.host(class).unwrap();
+        assert_eq!(
+            (host.grow(region).load(), host.hints(region).load()),
+            (0, 0)
+        );
+        back.space().region(region).as_ptr()
+    }
+
+    /// All zero is an empty, ungrown region on every path that does not abort. Natively the
+    /// simulator's memory is inaccessible until committed, and the region's leaf bitmap is
+    /// not, so a path that looked at it would kill the test. Under Miri the memory is not
+    /// guarded, so these tests would show nothing there.
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn a_region_with_a_zero_header_is_empty_on_every_path() {
+        for class in [small(8).class(), small(1024).class(), large(64 << 10)] {
+            let state = state::<Standard>();
+            let base = assigned_and_never_carved(&state, class);
+            let back = state.get_or_reserve().unwrap();
+            assert_eq!(back.lookup(base), Some(Kind::Slot(class)));
+            assert_eq!(back.trim(), 0);
+            state.os().advance_clock(DECAY_TICKS);
+            back.heartbeat();
+            assert_eq!(state.os().calls(Call::Purge), 0);
+            let mut seen = Seen::default();
+            back.inspect(&mut seen);
+            assert_eq!(seen.regions, [(class, 0, 0)]);
+            assert_eq!(seen.free, 0);
+            // And the region grows from there as if nothing had happened.
+            let block = back.alloc(class, 1).unwrap();
+            assert_eq!(block.ptr.as_ptr(), base);
+            assert!(block.zeroed);
+            back.free(block.ptr, class);
+            assert_eq!(back.alloc(class, 1).unwrap().ptr.as_ptr(), base);
+        }
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    #[should_panic(expected = "never handed out")]
+    fn a_launder_into_a_region_with_a_zero_header_aborts() {
+        let state = state::<Standard>();
+        let class = small(64);
+        let base = assigned_and_never_carved(&state, class.class());
+        let back = state.get_or_reserve().unwrap();
+        // SAFETY: the pointers are bad ones, passed to see the abort.
+        unsafe { back.launder(class, &[base, base.wrapping_add(64)]) };
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    #[should_panic(expected = "never handed out")]
+    fn a_large_free_into_a_region_with_a_zero_header_aborts() {
+        let state = state::<Standard>();
+        let base = assigned_and_never_carved(&state, large(64 << 10));
+        let back = state.get_or_reserve().unwrap();
+        back.free_by_address(NonNull::new(base).unwrap());
     }
 }
