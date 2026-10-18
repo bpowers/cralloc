@@ -289,7 +289,7 @@ Slot 0 is a link word used by the depot, the last slot holds the fill level whil
 magazine is not loaded, and the slots between hold pointers to free objects. Magazines are
 numbered blocks in one array in the metadata area; they are created by advancing a counter
 and are never unmapped. Their size falls as the class size rises, from 256 slots to 4, so no
-magazine holds more than about 128 KiB of objects.
+magazine holds more than about 64 KiB of objects.
 
 The slab word for a class is the address of the next free slot in the loaded magazine.
 Because a magazine is aligned to its size, the low bits of that address are the slot
