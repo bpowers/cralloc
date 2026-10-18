@@ -2045,7 +2045,7 @@ fn stale_bits_setup() -> Host8 {
 /// that is set and writes nothing, while searches from the top find those words empty, clear
 /// their bits level by level, and read each word again. `Summary_look_deep.cfg` with the
 /// stale bits of `Summary_keep_deep.cfg`, on the production code.
-fn direct_frees_under_stale_bits_race_clears(preemptions: usize) {
+fn direct_frees_under_stale_bits_race_clears(preemptions: usize, wide: bool) {
     explore(
         Config {
             preemptions: Some(preemptions),
@@ -2057,7 +2057,7 @@ fn direct_frees_under_stale_bits_race_clears(preemptions: usize) {
             let (r0, r1) = (host.region_at(0), host.region_at(1));
             let got = match me {
                 0 => {
-                    free_direct(host, &[(r0, 64), (r1, 0), (r0, 64 * 64), (r0, 65)], false);
+                    free_direct(host, &[(r0, 64), (r1, 0), (r0, 64 * 64), (r0, 65)], wide);
                     Vec::new()
                 }
                 1 => claim(host, 1),
@@ -2078,13 +2078,20 @@ fn direct_frees_under_stale_bits_race_clears(preemptions: usize) {
 #[test]
 #[ignore = "slow: run with scripts/gate --all"]
 fn direct_frees_under_stale_bits_race_clears_fully() {
-    direct_frees_under_stale_bits_race_clears(1);
+    direct_frees_under_stale_bits_race_clears(1, false);
+}
+
+/// The same with each slot's walk made at once, as a batch judged wide makes it.
+#[test]
+#[ignore = "slow: run with scripts/gate --all"]
+fn wide_direct_frees_under_stale_bits_race_clears_fully() {
+    direct_frees_under_stale_bits_race_clears(1, true);
 }
 
 /// The same with a thread lost at any step, as in a forked child: afterwards a scattered
 /// launder into each word, which is the direct path's own healing walk (a look at each level,
 /// a write only where the bit is clear), makes the word reachable.
-fn direct_frees_heal_what_a_fork_left(preemptions: usize) {
+fn direct_frees_heal_what_a_fork_left(preemptions: usize, wide: bool) {
     explore(
         Config {
             preemptions: Some(preemptions),
@@ -2098,7 +2105,7 @@ fn direct_frees_heal_what_a_fork_left(preemptions: usize) {
             let got = match me {
                 0 => claim(host, 1),
                 1 => {
-                    free_direct(host, &[(r0, 64), (r1, 0), (r0, 64 * 64), (r0, 65)], false);
+                    free_direct(host, &[(r0, 64), (r1, 0), (r0, 64 * 64), (r0, 65)], wide);
                     Vec::new()
                 }
                 _ => claim_run_of(host, 2, 1),
@@ -2110,7 +2117,7 @@ fn direct_frees_heal_what_a_fork_left(preemptions: usize) {
             let distinct: BTreeSet<_> = kept.iter().copied().collect();
             assert_eq!(distinct.len(), kept.len(), "a slot claimed twice");
             let (r0, r1) = (host.region_at(0), host.region_at(1));
-            free_direct(host, &[(r0, 64 + 7), (r1, 7), (r0, 64 * 64 + 7)], false);
+            free_direct(host, &[(r0, 64 + 7), (r1, 7), (r0, 64 * 64 + 7)], wide);
             for (region, word) in [(r0, 1), (r1, 0), (r0, 64)] {
                 assert!(
                     host.path_set(Node::leaf(region, word)),
@@ -2124,5 +2131,11 @@ fn direct_frees_heal_what_a_fork_left(preemptions: usize) {
 #[test]
 #[ignore = "slow: run with scripts/gate --all"]
 fn direct_frees_heal_what_a_fork_left_fully() {
-    direct_frees_heal_what_a_fork_left(1);
+    direct_frees_heal_what_a_fork_left(1, false);
+}
+
+#[test]
+#[ignore = "slow: run with scripts/gate --all"]
+fn wide_direct_frees_heal_what_a_fork_left_fully() {
+    direct_frees_heal_what_a_fork_left(1, true);
 }
