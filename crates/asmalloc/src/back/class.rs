@@ -331,7 +331,8 @@ impl<'a, O: Os> Back<'a, O> {
         if tree::word(host, tree::Node::leaf(region, word)).load() & (1u64 << bit) != 0 {
             self.abort("double free: a large object was freed while it was free");
         }
-        if !region::recorded(host, region, slot).is_some_and(|r| r.huge) || self.keeps_grown(class)
+        if !region::recorded(host, region, slot).is_some_and(|r| r.huge)
+            || self.keeps_grown(region::charge(host, region, slot))
         {
             return false;
         }
@@ -350,11 +351,15 @@ impl<'a, O: Os> Back<'a, O> {
     /// the heart for a large free, as it does for a large allocation (`Cache::lone_heartbeat`).
     fn free_slot(&self, host: &ClassHost<'a, O>, class: Class, region: RegionId, slot: u32) {
         let purged = self.purge_before_release(host, region, slot, class);
+        // Charged while still held: the clean bits it writes are this slot's.
+        let charge = if purged {
+            0
+        } else {
+            region::charge_resident(host, region, slot)
+        };
         let (word, bit) = position(slot);
         tree::release_one(host, region, word, 1 << bit);
-        if !purged {
-            self.retain(class, class.size());
-        }
+        self.retain(class, charge);
     }
 
     /// The region and slot of a pointer the caller says is a handed-out slot of `class`, or an
@@ -427,10 +432,14 @@ impl<'a, O: Os> Back<'a, O> {
         }
         let host = self.host(class)?;
         let (region, slot, zeroed) = if let Some(taken) = tree::claim(&host, 1, !class.is_small()) {
-            let settled = region::settle(&host, taken.region, taken.word, taken.bits);
+            let slot = taken.word * BITS + taken.bits.trailing_zeros();
+            let settled = if class.is_small() {
+                region::settle(&host, taken.region, taken.word, taken.bits)
+            } else {
+                region::settle_slot(&host, taken.region, slot, size)
+            };
             self.unretain(class, settled.resident);
             self.retain(class, settled.revived);
-            let slot = taken.word * BITS + taken.bits.trailing_zeros();
             (taken.region, slot, settled.zeroed != 0)
         } else {
             let (region, first, _) = self.carve(&host, class, 1)?;
@@ -445,6 +454,8 @@ impl<'a, O: Os> Back<'a, O> {
                 // The last free could not take the slot's huge-page advice back; try again,
                 // so that this block, which has not grown, does not get huge pages.
                 region::unadvise(&host, region, slot);
+                // If the advice stayed, the block's extent is in whole huge pages.
+                region::cover(&host, region, slot);
             }
         }
         let into = host.layout().stagger(slot);
@@ -484,6 +495,7 @@ impl<'a, O: Os> Back<'a, O> {
                 }
                 if let Some(before) = region::recorded(&host, region, slot) {
                     region::record(&host, region, slot, Recorded { size, ..before });
+                    region::cover(&host, region, slot);
                 }
             }
             Some(Kind::Run(regions)) => {
@@ -551,6 +563,7 @@ impl<'a, O: Os> Back<'a, O> {
                 // the resize; `last..old` lies inside its first `old` bytes.
                 let dense = || unsafe { mostly_data(written.as_ptr(), old - last, page) };
                 region::advise_grown(&host, region, slot, into, old, size, dense);
+                region::cover(&host, region, slot);
                 if let Some((from, len)) = tail(old, class.size(), into) {
                     // SAFETY: BACK-CLASS-02 in docs/safety/asmalloc/back/class-safety.md. The
                     // caller owns the object in this slot and has just given up everything
@@ -683,7 +696,10 @@ impl<'a, O: Os> Back<'a, O> {
         let mut dest = if zeroed { Dest::Zero } else { Dest::Dirty };
         // A slot within the budget is kept whole, with both copies resident for the move;
         // anything else goes back behind the copy.
-        let keep = slot.is_some_and(|class| self.keeps_grown(class));
+        let keep = match &host {
+            Some((host, region, index)) => self.keeps_grown(region::charge(host, *region, *index)),
+            None => false,
+        };
         // Pieces end at multiples of the piece in the address space, not in the block, so that
         // a piece that goes back is whole huge pages wherever the block has them: purging
         // part of a huge page would return nothing.
@@ -721,15 +737,23 @@ impl<'a, O: Os> Back<'a, O> {
                 };
                 if keep {
                     // As a plain free leaves it: resident, counted, advice and all.
-                    self.release_all(class, &[from.as_ptr()], true);
+                    let charge = region::charge_resident(&host, region, index);
+                    self.release_all(class, &[from.as_ptr()], false);
+                    self.retain(class, charge);
                     self.heartbeat();
                     return;
                 }
-                if all {
+                // Every page went back: zero, clean, uncounted. Else a purge failed, and the
+                // slot is charged as a free charges it, an over-count of what did go back.
+                let charge = if all {
                     region::mark_purged(&host, region, index);
-                }
+                    0
+                } else {
+                    region::charge_resident(&host, region, index)
+                };
                 region::unadvise(&host, region, index);
-                self.release_all(class, &[from.as_ptr()], !all);
+                self.release_all(class, &[from.as_ptr()], false);
+                self.retain(class, charge);
                 self.heartbeat();
             }
             None => self.free_run(from),
@@ -836,13 +860,14 @@ impl<'a, O: Os> Back<'a, O> {
         copy(next, end);
     }
 
-    /// Whether a grown block's slot of `class`, moved out of or freed with huge-page advice,
-    /// is kept resident rather than returned: if retained large-slot memory stays within its
-    /// budget with it (`policy::kept_grown`). Two threads may both see room and together go
+    /// Whether a grown block's slot, moved out of or freed with huge-page advice, is kept
+    /// resident rather than returned: if retained large-slot memory stays within its budget
+    /// (`policy::kept_grown`) with the slot's `charge`, what its tenant could have written
+    /// (`region::charge`). Two threads may both see room and together go
     /// past the budget by a slot; the budget bounds what is kept, not a correctness property.
-    fn keeps_grown(&self, class: Class) -> bool {
+    fn keeps_grown(&self, charge: usize) -> bool {
         let budget = kept_grown(self.space.plan().geometry());
-        self.retained_large().saturating_add(class.size()) <= budget
+        self.retained_large().saturating_add(charge) <= budget
     }
 
     /// Before the `len` bytes at `from` move into the block at `to`: if `to` is a large slot
@@ -874,6 +899,7 @@ impl<'a, O: Os> Back<'a, O> {
         let dense = || unsafe { mostly_data(from.as_ptr().add(last), len - last, page) };
         if let Some(now) = region::recorded(&host, region, index) {
             region::advise_grown(&host, region, index, into, len, now.size, dense);
+            region::cover(&host, region, index);
         }
     }
 
