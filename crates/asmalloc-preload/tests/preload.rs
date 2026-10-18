@@ -374,6 +374,97 @@ fn a_process_exits_while_threads_allocate() {
     assert!(out.contains("exit while allocating"), "{out}");
 }
 
+/// `ASMALLOC_BACKGROUND` starts the allocator's thread, with every signal blocked in it, for
+/// any value but empty and `0`; a forked child has no such thread.
+#[test]
+fn the_background_thread_starts_when_asked_and_not_in_a_child() {
+    let exe = program("background.c");
+    for (value, threads) in [
+        (None, 0),
+        (Some(""), 0),
+        (Some("0"), 0),
+        (Some("1"), 1),
+        (Some("yes"), 1),
+    ] {
+        let mut command = Command::new(&exe);
+        command.arg("threads");
+        match value {
+            Some(value) => command.env("ASMALLOC_BACKGROUND", value),
+            None => command.env_remove("ASMALLOC_BACKGROUND"),
+        };
+        let out = run(true, &mut command);
+        assert!(out.status.success(), "{:?}", out.status);
+        assert_eq!(
+            String::from_utf8_lossy(&out.stdout),
+            format!(
+                "other threads {threads}, blocking every signal {threads}\nchild: other threads 0\n"
+            ),
+            "ASMALLOC_BACKGROUND={value:?}"
+        );
+    }
+}
+
+/// Exit, with its handlers allocating, while the background thread sleeps or is in the middle
+/// of `maintain` (just after a burst of frees, its first rounds drain, launder and purge) and
+/// other threads allocate.
+fn a_process_exits_while_the_background_thread_runs(delays: &[u32]) {
+    let exe = program("background.c");
+    for delay in delays {
+        let out = same_with_and_without(|| {
+            let mut c = Command::new(&exe);
+            c.args(["exit", &delay.to_string()])
+                .env("ASMALLOC_BACKGROUND", "1");
+            c
+        });
+        assert_eq!(out.trim(), "exit while maintaining");
+    }
+}
+
+#[test]
+fn a_process_exits_while_the_background_thread_runs_quickly() {
+    a_process_exits_while_the_background_thread_runs(&[0, 600]);
+}
+
+#[test]
+#[ignore = "slow: run with scripts/gate --all"]
+fn a_process_exits_while_the_background_thread_runs_fully() {
+    let delays: Vec<u32> = (0..12).map(|i| i * 250).collect();
+    a_process_exits_while_the_background_thread_runs(&delays);
+}
+
+/// The case the thread is for: after a burst of frees the program's light work stays inside
+/// its caches, so no slow path runs, and only the thread returns the free memory.
+#[test]
+#[ignore = "slow: run with scripts/gate --all"]
+fn the_background_thread_returns_a_quiet_programs_memory() {
+    let exe = program("background.c");
+    let measure = |on: bool| {
+        let mut command = Command::new(&exe);
+        command.args(["idle", "12"]);
+        if on {
+            command.env("ASMALLOC_BACKGROUND", "1");
+        } else {
+            command.env_remove("ASMALLOC_BACKGROUND");
+        }
+        let out = run(true, &mut command);
+        assert!(out.status.success(), "{:?}", out.status);
+        let text = String::from_utf8_lossy(&out.stdout).into_owned();
+        let numbers: Vec<u64> = text
+            .split_whitespace()
+            .filter_map(|word| word.parse().ok())
+            .collect();
+        assert_eq!(numbers.len(), 2, "{text}");
+        (numbers[0], numbers[1])
+    };
+    let (freed, off) = measure(false);
+    let (_, on) = measure(true);
+    assert!(
+        on * 8 < freed,
+        "freed {freed} MiB, {on} MiB with the thread after 12 s"
+    );
+    assert!(on * 4 < off, "{off} MiB without the thread, {on} with it");
+}
+
 #[test]
 fn a_process_without_rseq_forks_from_threads() {
     let exe = program("forks.c");

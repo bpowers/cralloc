@@ -31,4 +31,8 @@ impl<O: Os> Source for Back<'_, O> {
     fn purge_step(&self, now: &dyn Fn() -> u64) {
         self.heartbeat_with(now);
     }
+
+    fn purge_pass(&self, now: &dyn Fn() -> u64) {
+        self.decay_pass(now);
+    }
 }

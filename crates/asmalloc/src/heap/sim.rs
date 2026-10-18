@@ -167,6 +167,12 @@ impl<S: Shape> SimHeap<S> {
         self.with(|heap| heap.collect())
     }
 
+    /// One round of the heap's clocked maintenance, as `Asmalloc::maintain` does for the
+    /// process's heap, on a leased simulated thread.
+    pub fn maintain(&self) {
+        self.with(|heap| heap.maintain());
+    }
+
     /// Borrows a simulated thread that no other call is using, starting the search at one
     /// picked from the caller's stack address, so that concurrent callers spread out.
     pub(super) fn lease(&self) -> Option<Lease<'_>> {

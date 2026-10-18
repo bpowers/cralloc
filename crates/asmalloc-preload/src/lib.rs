@@ -2,12 +2,14 @@
 //! dynamically linked program with asmalloc as its `malloc`.
 //!
 //! The library is the allocator crate and the C names it exports (`asmalloc::export_c_abi!`),
-//! nothing more; C++ reaches it through its runtime's calls to `malloc` and `free`. It has no
-//! constructor and no destructor and keeps no thread state, so it works
-//! from the dynamic loader's first call of `malloc` (after relocation, when glibc has already
-//! registered rseq for the main thread) to the last `free` of the last thread, and in a forked
-//! child. It is never unloaded, which the rseq descriptors of its routines require: a thread's
-//! `rseq_cs` may point into it until the thread is next interrupted.
+//! and a constructor that starts the allocator's background thread if the environment asks
+//! for it (`ASMALLOC_BACKGROUND`, `background.rs`); C++ reaches it through its runtime's calls
+//! to `malloc` and `free`. It needs no initialization, has no destructor and keeps no thread
+//! state, so it works from the dynamic loader's first call of `malloc` (after relocation, when
+//! glibc has already registered rseq for the main thread) to the last `free` of the last
+//! thread, and in a forked child. It is never unloaded, which the rseq descriptors of its
+//! routines require: a thread's `rseq_cs` may point into it until the thread is next
+//! interrupted.
 //!
 //! It is `no_std` and must not unwind. A panic cannot happen while serving a request (the
 //! allocator rules out every one it can reach), and if one did it would end the process by the
@@ -18,6 +20,8 @@
 #![cfg_attr(not(test), no_std)]
 #![deny(unsafe_op_in_unsafe_fn)]
 #![deny(clippy::undocumented_unsafe_blocks)]
+
+mod background;
 
 // Only the C names. The C++ operators stay the C++ runtime's, which calls this `malloc` and
 // `free`: exporting some of them without the throwing `new` forms is unsound when another

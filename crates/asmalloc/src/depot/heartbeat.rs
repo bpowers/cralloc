@@ -1,8 +1,9 @@
 //! The heartbeat: the bounded maintenance every slow path does before it returns.
 //!
-//! A large allocation or free counts as a slow path ([`Cache::maintain`]; the back end takes
-//! its purge step itself). There is no background thread and no timer, so maintenance happens
-//! at a rate set by allocation activity, in units small enough that no single call pays much.
+//! A large allocation or free counts as a slow path ([`Cache::lone_heartbeat`]; the back end
+//! takes its purge step itself). There is no timer, so maintenance happens at a rate set by
+//! allocation activity, in units small enough that no single call pays much; a program that
+//! wants it paced by time instead runs `maintain` (`maintain.rs`) from a thread of its own.
 //! The clock is read at most once per heartbeat, and only when a decision needs it.
 //!
 //! - **Launder over target.** If the depot stack of the class just served holds more than its
@@ -76,6 +77,7 @@
 //! looks that both decide to drain are stopped by the sighting's compare-and-swap and, behind
 //! it, by the drain's own claim.
 
+use super::drain::Disposal;
 use super::{Cache, Drained, Source, generation};
 use crate::classes::{SMALL_COUNT, SmallClass};
 use crate::front::{Cpu, Routines};
@@ -240,7 +242,7 @@ impl<O: Os, R: Routines, S: Source> Cache<'_, O, R, S> {
     /// The heartbeat of a slow path that served no small class: a large allocation or free,
     /// which counts as a slow path of the CPU the thread is on. All but the purge step, which
     /// the back end takes inside a large allocation or free itself.
-    pub fn maintain(&self) {
+    pub fn lone_heartbeat(&self) {
         let chores = Chores {
             cpu: self.routines.cpu(),
             purged: true,
@@ -322,9 +324,15 @@ impl<O: Os, R: Routines, S: Source> Cache<'_, O, R, S> {
         if index == me.index() {
             index = (index + 1) % count;
         }
-        let Some(cpu) = self.routines.slabs().cpu(index as i32) else {
-            return;
-        };
+        if let Some(cpu) = self.routines.slabs().cpu(index as i32) {
+            self.idle_look(cpu, now, Disposal::Park);
+        }
+    }
+
+    /// The idle check's look at `cpu`'s slab with the clock at `now`: records a counter that
+    /// moved, and drains a slab whose counter has stood still for an interval, disposing of
+    /// what the drain takes as `disposal` says. A slab no slow path has used is left alone.
+    pub(super) fn idle_look(&self, cpu: Cpu, now: u64, disposal: Disposal) {
         let slab = self.slab(cpu);
         let activity = slab.activity();
         if activity == 0 {
@@ -351,7 +359,7 @@ impl<O: Os, R: Routines, S: Source> Cache<'_, O, R, S> {
                 // A drain that did not happen leaves the slab to be tried again at once. A busy
                 // one leaves it to be tried an interval from now (see the module
                 // documentation).
-                let undo = match self.drain(cpu) {
+                let undo = match self.drain_with(cpu, disposal) {
                     Drained::BackedOut | Drained::Disabled => Some(seen),
                     Drained::Busy => Some(Sighting::at(activity, now).0),
                     Drained::Done => None,

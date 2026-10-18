@@ -28,6 +28,12 @@ executable = []
 # unifies features across a workspace and this one would also replace `malloc` in every test
 # binary built alongside it.
 c-abi = []
+# `Asmalloc::start_background`, which starts a thread that calls `Asmalloc::maintain` about
+# twice a second, so that idle memory goes back to the OS even when no thread takes a slow path.
+# It brings in `std`, for the thread; without it the crate is `no_std` and starts no thread.
+# No crate of this workspace may enable it: cargo would unify it into the preload library's
+# build, which is `no_std` with a panic handler of its own and cannot link `std`.
+background = []
 # The `Allocator` trait for `Asmalloc` (and `SimHeap`). The trait is stable from Rust 1.100, so
 # until then this needs a nightly toolchain.
 allocator-api = []

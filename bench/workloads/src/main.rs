@@ -15,6 +15,7 @@ mod xthread;
 use bench_harness::Args;
 
 fn main() {
+    bench_alloc::init();
     let (name, args) = Args::from_env();
     match name.as_str() {
         "pipeline" => xthread::pipeline(&args),

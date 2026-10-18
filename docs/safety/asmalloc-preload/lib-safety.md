@@ -1,8 +1,10 @@
 # Safety ledger: `crates/asmalloc-preload/src/lib.rs` (and `build.rs`)
 
-The `LD_PRELOAD` library has no `unsafe` block of its own. What it does that the compiler
-cannot check is define symbols for the whole process: the C allocator's, through
-`asmalloc::export_c_abi!`, and the name the unwinder looks up for Rust frames.
+`lib.rs` has no `unsafe` block of its own. What it does that the compiler cannot check is
+define symbols for the whole process: the C allocator's, through `asmalloc::export_c_abi!`,
+and the name the unwinder looks up for Rust frames. The constructor that starts the background
+thread, and its calls of the C library, are in `background.rs`, whose ledger is
+`background-safety.md`.
 
 ## PRELOAD-01: `asmalloc::export_c_abi!()`
 
@@ -53,9 +55,12 @@ What the preload setting adds:
   allocator must be linked the same way; unloading one kills the process.
 - **Unwinding.** The library is built with `panic = "abort"`. A panic reaches the panic handler,
   which ends the process through `Os::abort` (raw system calls, no allocation). Nothing the
-  library calls can throw: the system call instruction, glibc's `__errno_location`, and the
-  compiler's `memcpy` and `memset`. So no
-  exception ever unwinds out through the library's frames.
+  library calls can throw: the system call instruction, glibc's `__errno_location`, the
+  compiler's `memcpy` and `memset`, and the C functions the background thread's start uses
+  (`getenv`, `sigfillset`, `pthread_sigmask`, `pthread_create`, `nanosleep`; PRELOAD-03).
+  `nanosleep` is a cancellation point, at which a cancelled thread unwinds, but nothing can
+  cancel the background thread: its identifier never leaves the function that creates it.
+  So no exception ever unwinds out through the library's frames.
 
 ## PRELOAD-02: `#[unsafe(no_mangle)] extern "C" fn asmalloc_preload_no_unwinding`, and the binding of `rust_eh_personality` to it
 

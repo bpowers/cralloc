@@ -58,6 +58,7 @@ pub(crate) struct TestSource {
     free: Mutex<BTreeMap<usize, Vec<usize>>>,
     out: Mutex<BTreeSet<usize>>,
     purges: AtomicUsize,
+    passes: AtomicUsize,
     universe: BTreeSet<usize>,
 }
 
@@ -79,6 +80,7 @@ impl TestSource {
             free: Mutex::new(free),
             out: Mutex::new(BTreeSet::new()),
             purges: AtomicUsize::new(0),
+            passes: AtomicUsize::new(0),
             universe,
         }
     }
@@ -117,6 +119,11 @@ impl TestSource {
     pub(crate) fn purges(&self) -> usize {
         self.purges.load(Ordering::Relaxed)
     }
+
+    /// How many times `maintain` has asked for a whole purge pass.
+    pub(crate) fn passes(&self) -> usize {
+        self.passes.load(Ordering::Relaxed)
+    }
 }
 
 impl Source for TestSource {
@@ -150,6 +157,10 @@ impl Source for TestSource {
 
     fn purge_step(&self, _: &dyn Fn() -> u64) {
         self.purges.fetch_add(1, Ordering::Relaxed);
+    }
+
+    fn purge_pass(&self, _: &dyn Fn() -> u64) {
+        self.passes.fetch_add(1, Ordering::Relaxed);
     }
 }
 

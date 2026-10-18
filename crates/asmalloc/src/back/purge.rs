@@ -29,7 +29,8 @@
 //! several intervals. A heap whose free memory is all fragmentation costs one walk of its
 //! bitmaps an interval, in steps, and nothing between passes. A clock that has gone back
 //! (a resume, a restored checkpoint) restarts the interval from the new time, so decay waits
-//! at most one interval for it.
+//! at most one interval for it. `decay_pass`, for the background thread's `maintain`, takes
+//! those steps in one call, until the pass it started or found has ended.
 //!
 //! A pass is two words. The decay word holds the time the last pass ended, or the time the
 //! pass under way began with its low bit set; one compare-and-swap starts a pass and one ends
@@ -272,15 +273,29 @@ impl<O: Os> Back<'_, O> {
     /// [`Back::heartbeat`] for a caller that keeps its own reading of the clock: `now` is
     /// called only when the step needs the time.
     pub fn heartbeat_with(&self, now: &dyn Fn() -> u64) {
-        self.decay_step(now);
+        let _ = self.decay_step(now);
+    }
+
+    /// The clocked pass the heartbeats of an interval would take, in one call: starts a pass
+    /// if one is due, and steps the pass under way until it ends, by meeting its goal or going
+    /// once round the heap. It stops when that pass ends or the steps stop for another reason
+    /// (nothing is due, or the pass is not yet published), and never goes on into a later
+    /// pass, so it reads at most one lap of the bitmaps. Between passes it costs what a
+    /// heartbeat's step costs: a load, and a clock read if anything is retained.
+    pub fn decay_pass(&self, now: &dyn Fn() -> u64) {
+        let Some(pass) = self.decay_step(now) else {
+            return;
+        };
+        while self.decay_step(now) == Some(pass) {}
     }
 
     /// One heartbeat's part of the clocked pass: starts a pass if an interval has gone by
     /// since the last ended and anything is retained, and takes one bounded step of the pass
     /// under way. Between passes with nothing retained it reads no clock: there is nothing to
     /// start, and a clock that went back is noticed by the first heartbeat that could start
-    /// one.
-    fn decay_step(&self, now: &dyn Fn() -> u64) {
+    /// one. Returns the decay word of the pass it stepped if it stopped at its budget with the
+    /// pass still under way, so that more steps would do more; `None` otherwise.
+    fn decay_step(&self, now: &dyn Fn() -> u64) -> Option<u64> {
         let state = self.state;
         let geometry = self.space.plan().geometry();
         let page = geometry.page_size();
@@ -289,28 +304,28 @@ impl<O: Os> Back<'_, O> {
             // `decay_look` steps a pass under way without the time.
             0
         } else if self.retained() == 0 {
-            return;
+            return None;
         } else {
             now()
         };
         match decay_look(seen, time) {
-            Decay::Wait => return,
+            Decay::Wait => return None,
             Decay::Restamp(word) => {
                 let _ = state.decay.compare_exchange(seen, word, Release, Relaxed);
-                return;
+                return None;
             }
             Decay::Start(word) => {
                 let small = self.retained_small();
                 let retained = small.saturating_add(self.retained_large());
                 if retained == 0 {
-                    return;
+                    return None;
                 }
                 if state
                     .decay
                     .compare_exchange(seen, word, Release, Relaxed)
                     .is_err()
                 {
-                    return;
+                    return None;
                 }
                 let over = small.saturating_sub(retained_cap(geometry));
                 let goal = decay_goal(geometry, retained).max(over);
@@ -347,17 +362,17 @@ impl<O: Os> Back<'_, O> {
                 } else if age >= DECAY_TICKS {
                     let _ = state.decay.compare_exchange(seen, now, Release, Relaxed);
                 }
-                return;
+                return None;
             }
             if pass.pages == 0 || state.laps.load(Relaxed) as u16 != pass.lap {
                 // The goal is met or the walk has gone round. End the pass this thread saw,
                 // and only that one.
                 let now = self.space.os().ticks() & !ACTIVE;
                 let _ = state.decay.compare_exchange(seen, now, Release, Relaxed);
-                return;
+                return None;
             }
             if spent >= PURGE_STEP_WORDS {
-                return;
+                return Some(seen);
             }
             let limit = pass.pages as usize * page;
             let (read, purged, _) = self.purge_step(PURGE_STEP_WORDS - spent, limit);
