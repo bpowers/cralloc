@@ -426,6 +426,52 @@ trim stays a call a program makes rarely. The Rust equivalent is the same functi
 is also the `collect` of (6) if given a cheaper mode that skips step 1 and only looks at
 the caller's own CPU.
 
+## The parked-object rules, built
+
+2026-10-17, after the review above, measuring the finished forms of mechanism 2 (the magazine
+age limit with its sweep of spare stacks, the depot's low-water rule, and the refresh) and
+`collect`, on top of main with the back end's clocked purge. Same machine and method as above;
+"main" is main without the rules, "rules" the branch, both built with
+`bench/probes/memory/build.sh`. Each figure is one run.
+
+Anonymous resident MiB, `bench/probes/memory/worst.sh`:
+
+| Case | when | main | rules |
+|---|---|---:|---:|
+| Burst then light work: free 218 MiB, then 2000 objects a millisecond | 4 s | 73.3 | 38.9 |
+| | 12 s | 73.3 | 4.3 |
+| Phase change: 8 CPUs use every class, then one CPU uses one | 8 s | 29.0 | 5.6 |
+| Many classes, few CPUs: 2 CPUs, 44 classes | 8 s | 10.6 | 1.3 |
+
+jemalloc's figures in the table of section 5 are 4.5, 24.7 and 4.1.
+
+**The refresh fraction.** Instructions, from the hardware counters of the measured phase,
+median of eight interleaved runs; the times of these runs were too noisy to use:
+
+| Refresh | churn, 100k live, mixed sizes | pipeline, 2 threads, small |
+|---|---:|---:|
+| none | +0.7% | +1.9% |
+| one in 32 | +5.4% | +6.3% |
+| one in 8 | +17% | +21% |
+
+After the burst, at 12 s: none 7.1 MiB, one in 32 3.3, one in 8 3.9. Most of the cost is the
+fill that replaces a laundered magazine, whose search of the bitmaps in a fragmented heap
+(`tree::claim`) dominates the profile. The rules use one in 32.
+
+**Speed of the finished rules against main**, interleaved, pinned (pipeline CPUs 0 and 1,
+churn CPU 2), sixteen runs each: churn with 1k live 24.84 and 24.95 cycles an operation (no
+slow paths, so no difference); churn with 100k live, mixed sizes, 87.9 and 89.8 (+2.3%,
+instructions +5.4%); the pipeline was too noisy for medians (7.6 and 7.6 ns an allocation),
+its fastest runs 3.81 and 4.10 (+8%), instructions +5.3%. Reading the cycle counter on every
+heartbeat had looked costly in an earlier, busier session; a direct measurement put one read
+at 7 ns, too little to matter, and the heartbeat now reads it only when a decision needs it.
+
+**One launder.** A magazine of 254 objects scattered over a region, laundered by the back end
+of a simulated heap (the same code): 0.9 us on average, 5.5 us at worst over 2000 tries. A
+slow path launders at most four magazines beyond its exchange (heartbeat.rs, "Bounded work"),
+so the rules add at most about 4 us to one slow path on average and about 20 us in the worst
+case seen, plus a sweep step's pushes of a spare stack to the depot.
+
 ## Measured and argued
 
 Measured: every figure in a table; the cap's failure; pinning; the depot and the busy CPU
