@@ -2,17 +2,17 @@
 
 HEAP-03 (the clear in `alloc_large`) is in `heap/mod-safety.md`.
 
-## HEAP-04: the copy and the free in `Heap::resize`
+## HEAP-04: the copy and the free in `Bound::resize`
 
 **Block.** `ptr.copy_to_nonoverlapping(grant.ptr, min(old.size(), new.size()))`, then
-`self.dealloc(routines, ptr, old)`; or, when the old block is large, the one call
+`self.dealloc(ptr, old)`; or, when the old block is large, the one call
 `back.move_large(ptr, grant.ptr, min(old.size(), new.size()), grant.zeroed)`, which copies the same bytes
 in pieces, returns the old block's pages behind the copy and frees it (BACK-CLASS-03 in
 `back/class-safety.md`). Its contract is the same three facts proved below: the old block is
 live, owned and long enough; the new one is writable for as much; they do not overlap.
 
 **Preconditions.** The source is valid for reads and the destination for writes of that many
-bytes, and they do not overlap; `dealloc`'s contract (H and HEAP-01's) for `ptr` and `old`.
+bytes, and they do not overlap; `dealloc`'s contract (HEAP-01's) for `ptr` and `old`.
 
 **Proof.** `resize`'s contract is `dealloc`'s for `ptr` and `old`, so the old block is live,
 owned by the caller, at least `old.size()` long. The new block was just allocated for `new`
@@ -51,3 +51,5 @@ multiples of the page size (large classes are `q << e` with `2^e` at least 8 KiB
 every geometry that hosts a large class's slot, and runs are whole regions), so the rounded
 size does too, and the range lies in the block, which is committed whole (a carved slot's
 pages, or a committed run). `before < len`.
+
+Reviewed: f41dbf9

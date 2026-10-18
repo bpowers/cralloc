@@ -1,21 +1,23 @@
 //! The front end: per-CPU slabs of magazines, and the routines that work on them.
 //!
-//! Each CPU number has a [`Slab`] in the static `SLABS`. A slab's hot word for a small class
+//! Each CPU number has a `Slab` in the static `SLABS`. A slab's hot word for a small class
 //! is the address of the next free slot of the magazine loaded for that class, or zero, or a
 //! marker; its cold part holds the CPU's spare magazines and the counters the idle check and
 //! the drain use. The array is zero-initialized, and zero is a valid slab with no magazines,
 //! so nothing needs initializing before the first call.
 //!
-//! Only the [`Routines`] write a slab, each with one restartable sequence that commits with a
+//! Only the `Routines` write a slab, each with one restartable sequence that commits with a
 //! single store, and the drain (`depot::drain`). The routines are assembly generated from Lean
-//! into `generated/` and wrapped as `Real`; [`Twin`] implements the same specifications in
+//! into `generated/` and wrapped as `Real`; `Twin` implements the same specifications in
 //! Rust for every environment where assembly cannot run (Miri, Kani and the simulated-OS
-//! tests), over a simulated processor ([`Machine`](crate::os::Machine)) that tests control. Which one a heap uses
+//! tests), over a simulated processor (`os::Machine`) that tests control. Which one a heap uses
 //! is chosen where the heap is made, by build configuration.
 //!
 //! The layout constants here must equal those the Lean specification gives the generated code
 //! (`generated/*/slab.rs`); a test compares them.
 
+#[cfg(all(target_env = "musl", target_arch = "x86_64", not(miri), not(kani)))]
+mod area;
 #[cfg(test)]
 pub(crate) mod check;
 #[cfg(all(test, target_os = "linux", target_arch = "x86_64", not(miri)))]
@@ -39,18 +41,34 @@ mod verify;
 #[cfg(kani)]
 mod verify_slow;
 
+// The module is public only for `SLABS` and `__rseq_offset`, which the C routines that
+// `export_c_abi!` defines in another crate name; the rest is the crate's own unless the test
+// kit and the benchmarks ask for it (feature `internals`).
+#[cfg(not(feature = "internals"))]
+pub(crate) use routines::{NO_CPU, Routines, StackPop, StackPush, StoreIfEqual};
+#[cfg(feature = "internals")]
 pub use routines::{NO_CPU, Routines, StackPop, StackPush, StoreIfEqual};
+#[cfg(not(feature = "internals"))]
+pub(crate) use slab::{Cpu, Field, SLAB_BYTES, SLAB_COUNT, SLAB_SHIFT, Slab, Slabs, Spare};
+#[cfg(feature = "internals")]
 pub use slab::{Cpu, Field, SLAB_BYTES, SLAB_COUNT, SLAB_SHIFT, Slab, Slabs, Spare};
+#[cfg(not(feature = "internals"))]
+pub(crate) use twin::Twin;
+#[cfg(feature = "internals")]
 pub use twin::Twin;
 
-// SAFETY: FRONT-01. glibc declares `extern const ptrdiff_t __rseq_offset;` (`sys/rseq.h`); the
-// exported C routines name it through this public path.
+// SAFETY: FRONT-01. glibc declares `extern const ptrdiff_t __rseq_offset;` (`sys/rseq.h`); on
+// musl the word is the crate's own, generated with its area (`area`). The exported C routines
+// name it through this public path.
 #[cfg(all(target_os = "linux", target_arch = "x86_64", not(miri), not(kani)))]
 unsafe extern "C" {
-    /// glibc's offset of the thread's rseq area from the thread pointer, which the generated
-    /// routines read. Public only so that the C routines the export macros define in another
-    /// crate can name it; reading it is all anyone can do.
+    /// The offset of the thread's rseq area from the thread pointer, which the generated
+    /// routines read: glibc's, or on musl, which has none, the crate's own word, under a name of
+    /// its own so that it can never be taken for a C library's. Public only so that the C
+    /// routines the export macros define in another crate can name it; reading it is all
+    /// anyone can do.
     #[doc(hidden)]
+    #[cfg_attr(target_env = "musl", link_name = "asmalloc_rseq_offset")]
     pub safe static __rseq_offset: isize;
 }
 #[cfg(all(target_os = "linux", target_arch = "x86_64", not(miri), not(kani)))]
@@ -63,7 +81,7 @@ use core::sync::atomic::{AtomicU8, AtomicU64, Ordering};
 /// The number of entries in the masks' table: one per value of a class byte, so that a class
 /// read from the region table indexes it whatever it is, and finds zero, which sends the
 /// generated C routines to their slow paths, for every byte that is not a small class.
-pub const MASK_COUNT: usize = crate::spec::MASK_COUNT;
+pub(crate) const MASK_COUNT: usize = crate::spec::MASK_COUNT;
 
 /// Where the masks' table starts within its page: past every field of a slab, so that no entry
 /// shares a page offset with a slab word (a load at the page offset of a store in flight waits
@@ -78,7 +96,7 @@ const PUBLISHED_PAGE_OFFSET: usize = 1024;
 const REGION_PAGE_OFFSET: usize = 2048;
 
 /// The number of entries of the region table the C frees read: one per region.
-pub const REGION_COUNT: usize = crate::space::MAX_REGIONS;
+pub(crate) const REGION_COUNT: usize = crate::space::MAX_REGIONS;
 
 /// The slabs, one per CPU number, and after them what the C entry points read at fixed distances
 /// from a class's word in slab 0: the masks, the published heap words and the region table.
@@ -173,17 +191,16 @@ const _: () = {
     assert!(spec::MIRROR_COUNT == 1 && size_of::<[AtomicU64; 2]>() == spec::MIRROR_BYTES);
     assert!(REGION_DISP == spec::REGION_DISP && REGION_COUNT == spec::REGION_COUNT);
     // Every small class's hot word is one the routines may address.
-    assert!(SMALL_COUNT < spec::CLASS_LIMIT);
+    assert!(Slab::HOT_BYTES / 8 <= spec::CLASS_LIMIT);
 };
 
 const _: () = {
     assert!(offset_of!(Front, slabs) == 0);
     // What the C frees read on every call is off the page offsets of the slab words the fast
-    // paths write (the spare heads, which only slow paths write, may share them).
-    assert!(
-        SHIFT_DISP % SLAB_BYTES >= Slab::HOT_BYTES
-            && (BASE_DISP + 8) % SLAB_BYTES <= MASK_PAGE_OFFSET
-    );
+    // paths write: at bytes 0 to 15 of a 32-byte chunk, where no hot word is (`slab`; the
+    // spare heads, which only slow paths write, may share them).
+    assert!(SHIFT_DISP.is_multiple_of(32) && BASE_DISP + 8 <= SHIFT_DISP + 16);
+    assert!((BASE_DISP + 8) % SLAB_BYTES <= MASK_PAGE_OFFSET);
     assert!(
         REGION_DISP % SLAB_BYTES == REGION_PAGE_OFFSET && REGION_PAGE_OFFSET >= Slab::USED_BYTES
     );
@@ -192,7 +209,7 @@ const _: () = {
     assert!(MASK_PAGE_OFFSET + MASK_COUNT * 8 <= SLAB_BYTES);
     // No mask shares a page offset with any field of a slab.
     assert!(Slab::USED_BYTES <= MASK_PAGE_OFFSET);
-    assert!(SMALL_COUNT < MASK_COUNT);
+    assert!(Slab::HOT_BYTES / 8 <= MASK_COUNT);
 };
 
 /// The slabs, and after them what the routines read at fixed distances from them. The generated
@@ -210,7 +227,7 @@ pub static SLABS: Front = Front::new();
 /// The slot mask of each small class's magazines, indexed by class index; zero for every other
 /// byte. The inlined routines are given their class's mask from here, so a constant class
 /// folds it to a constant; the generated C routines read the copy in [`SLABS`].
-pub static MASKS: [u32; MASK_COUNT] = MASK_TABLE;
+pub(crate) static MASKS: [u32; MASK_COUNT] = MASK_TABLE;
 
 const MASK_TABLE: [u32; MASK_COUNT] = {
     let mut masks = [0; MASK_COUNT];
@@ -230,16 +247,39 @@ pub(crate) fn mask(class: SmallClass) -> u32 {
     MASKS[class.class().index() as usize]
 }
 
+/// The masks the generated C routines read, as [`SLABS`] holds them: indexed by the position of
+/// the class's hot word (`Field::index`), which is what the C size tables and the region table
+/// give, so each entry is `MASK_DISP` bytes above its word; zero at every other position.
+const WORD_MASK_TABLE: [u32; MASK_COUNT] = {
+    let mut masks = [0; MASK_COUNT];
+    let mut ordinal = 0;
+    while ordinal < SMALL_COUNT {
+        if let Some(class) = SmallClass::from_ordinal(ordinal) {
+            masks[Field::hot(class).index()] = class.magazine().mask() as u32;
+        }
+        ordinal += 1;
+    }
+    masks
+};
+
+/// The last position with a mask, which [`publish_masks`] writes last and so checks first.
+const LAST_MASKED: usize = {
+    let mut last = MASK_COUNT - 1;
+    while WORD_MASK_TABLE[last] == 0 {
+        last -= 1;
+    }
+    last
+};
+
 /// Writes the masks the generated C routines read, if they have not been. Every thread writes
 /// the same values, so a race is harmless; until a class's entry is written its routines miss
 /// and land in a slow path, which calls this.
 #[cfg_attr(any(miri, kani), allow(dead_code))]
 pub(crate) fn publish_masks() {
-    let last = &SLABS.masks[SMALL_COUNT];
-    if last.load(Ordering::Relaxed) != 0 {
+    if SLABS.masks[LAST_MASKED].load(Ordering::Relaxed) != 0 {
         return;
     }
-    for (entry, &mask) in SLABS.masks.iter().zip(MASK_TABLE.iter()) {
+    for (entry, &mask) in SLABS.masks.iter().zip(WORD_MASK_TABLE.iter()) {
         entry.store(mask as u64, Ordering::Relaxed);
     }
 }
@@ -271,7 +311,7 @@ mod tests {
         assert_eq!(core::ptr::from_ref(slabs).addr(), base);
         for class in SmallClass::all() {
             let word = SLABS.word(class);
-            let entry = core::ptr::from_ref(&SLABS.masks[class.class().index() as usize]).addr();
+            let entry = core::ptr::from_ref(&SLABS.masks[Field::hot(class).index()]).addr();
             assert_eq!(entry, word + MASK_DISP);
             // Not at a slab word's page offset.
             assert!(entry % SLAB_BYTES >= Slab::USED_BYTES);
@@ -284,7 +324,7 @@ mod tests {
         publish_masks();
         publish_masks();
         for (i, entry) in SLABS.masks.iter().enumerate() {
-            assert_eq!(entry.load(Ordering::Relaxed), MASKS[i] as u64);
+            assert_eq!(entry.load(Ordering::Relaxed), WORD_MASK_TABLE[i] as u64);
         }
     }
 }

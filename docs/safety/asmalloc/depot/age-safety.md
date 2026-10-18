@@ -75,3 +75,5 @@ before sending the magazine on, and launders the top one.
   drain's exchange and the routine's commit lands first wins the chain, and the drain's steps 3
   and 4 write nothing over a commit they did not make.
 - If the routine does not commit, nothing is read from or written to the chain.
+
+Reviewed: f41dbf9

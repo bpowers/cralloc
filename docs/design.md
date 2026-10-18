@@ -172,7 +172,7 @@ less.
 6. **Pure Rust plus proved assembly.** No C. The allocator is `no_std` and never allocates,
    panics, unwinds or prints while serving a request.
 7. **One platform, done fully.** asmalloc is developed and measured on x86-64, Linux 7.2,
-   glibc 2.43 and Rust 1.99. The fast path needs the calling thread to have a registered
+   Rust 1.99, and glibc 2.43, linked dynamically or statically, or musl. The fast path needs the calling thread to have a registered
    rseq area, which Linux has offered since 4.18. A thread without one, as under valgrind,
    still works, slowly (see "Process lifecycle"). asmalloc never hands a request to another
    allocator.
@@ -183,10 +183,12 @@ less.
   policy.
 - **Speed without rseq.** The mode that runs when rseq is missing exists for correctness
   under tools such as valgrind. It reuses the path large objects take and is not tuned.
-- **Other architectures, C libraries and operating systems.** aarch64 comes after x86-64 is
-  complete; its measurements and proofs must be redone. A C library that does not register
-  rseq, such as musl, needs asmalloc to register its own area. The design allows both; neither
-  is built.
+- **Other architectures and operating systems.** aarch64 comes after x86-64 is complete; its
+  measurements and proofs must be redone.
+- **A musl shared library.** On musl the allocator supplies its own rseq area (see "Process
+  lifecycle"), which it can do in an executable. A musl shared library or preload library is
+  not supported. Statically linked musl executables are tested; dynamically linked ones are
+  expected to work and are not tested.
 - **Hardened-allocator features.** No guard pages, quarantine or randomization. Two
   protections fall out of the design anyway: there is no metadata in freed memory to
   corrupt, and a double free is detected when the object returns to the back end.
@@ -273,11 +275,15 @@ asked for (see "Large objects").
 
 ### Front end: magazines under rseq
 
-Each CPU has a slab. Its hot part is an array with one 8-byte word per small class; a
-colder part holds the CPU's spare magazines and counters. The slabs are a static array with
+Each CPU has a slab. Its hot part gives each small class a 32-byte chunk: the class's
+8-byte word at bytes 16 to 23 and the heads of its spare stacks, which only slow paths
+write, at bytes 0 to 15. A thread's rseq area is 32-byte aligned and the OS writes bytes 4
+to 15 of it, so with this placement no hot word can share a page offset with those fields,
+wherever a C library puts the area; a shared offset costs a cycle or two on every use of
+that class. A colder part of the slab holds counters. The slabs are a static array with
 an entry for every CPU number the OS can produce (8192 on x86-64), so the address of a slab
 word is the CPU number shifted and added to the address of the class's word in slab 0, a
-link-time constant plus 8 times the class, with no pointer to load. Untouched slabs cost no
+link-time constant plus 32 times the class, with no pointer to load. Untouched slabs cost no
 memory. A routine compares the CPU number with the array length and takes the slow path if
 it is out of range. That one compare keeps a thread with no rseq
 registration, which reads a negative number, away from every slab, and it means memory
@@ -452,9 +458,9 @@ each region and the high end drains, which is where purging starts.
 Every entry to a slow path does a bounded amount of maintenance before it returns: one step
 of purging, one look at a class of its own slab, one look for an idle cache, and at most one
 magazine laundered for each rule that launders. A large allocation or free counts as a slow
-path. There is no
-background thread and no timer. The work is done in units small enough that no single call
-pays much. This is mimalloc's pacing applied to a per-CPU design.
+path. By default there is no background thread and no timer. The work is done in units
+small enough that no single call pays much. This is mimalloc's pacing applied to a per-CPU
+design.
 
 How often a slow path runs depends on how hard the process allocates, so anything that
 should happen at a rate in time reads the CPU's cycle counter, which costs no system call,
@@ -467,6 +473,16 @@ for an interval, which sends that CPU to its slow path. Only a process in which 
 stays inside its magazines has no heartbeat at all. It keeps what it held when it went
 quiet: the free memory not yet purged, its parked objects, and the pages those pin. That
 lasts until a slow path runs or the program calls `collect`.
+
+A program that cannot accept that asks for a background thread. The thread is opt-in, so
+that the default stays free of hidden threads, and it buys nothing on the fast path, which
+stays as it is. Once an interval it calls `maintain`, which does for the whole heap what the
+heartbeats of an interval would have done: the idle check on every slab, each depot stack's
+shedding, and the clocked purge. It is an ordinary thread of the process, started by the
+layer that has a thread library to start it with: a function behind a cargo feature for a
+Rust program, an environment variable for the preload library. A program with an idle hook
+of its own can call `maintain` from there and needs no thread. The child of a fork does not
+inherit the thread.
 
 Objects mostly circulate through magazines and the depot without touching the bitmaps. They
 reach the bitmaps when a class's depot stack is over its target, and through the rules under
@@ -651,7 +667,9 @@ A macro exports the C names from the crate that invokes it; a cargo feature does
 and the `LD_PRELOAD` library always exports them. A feature alone would not do: cargo
 unifies features across a workspace, and every test binary would then replace `malloc`. The
 C layer sets `errno` through the C library's accessor; that and glibc's `__rseq_offset` are
-asmalloc's only references to a C library.
+asmalloc's only references to a C library. On musl there
+is no `__rseq_offset` to refer to; the references are `errno`'s accessor and the three
+pthread key functions that run code at thread exit.
 
 The recommended build is `lto = "fat"`. Thin LTO also inlines the fast path into dependency
 crates, but it silently stops doing so when the crate that declares `#[global_allocator]`
@@ -690,7 +708,14 @@ the one a Rust `Layout` of the same size implies.
   when not under Miri and keeps Miri's own, which checks each of its blocks individually.
   Our own tests run the allocator under Miri with the twins and the simulated OS.
 - **Threads.** A thread has no allocator state. Starting and exiting need no code, and
-  objects cached under a CPU stay with that CPU.
+  objects cached under a CPU stay with that CPU. The one exception is the next item.
+- **Threads on musl.** musl registers no rseq area, so the allocator defines one per thread,
+  in thread-local data emitted with the routines, at a page offset chosen to stay clear of
+  the slab words. The area reads a negative CPU number until the thread's first slow path
+  registers it with the OS. musl frees a thread's storage before the thread is gone, and a
+  thread that dies with its area registered can take the process with it, so a pthread key's
+  destructor unregisters the area and marks it retired. A retired or refused area reads a
+  negative number for good, and the thread is served as any thread without rseq is.
 - **Idle caches.** Memory can sit in the slab of a CPU the process no longer runs on. Each
   slab has an activity counter that its slow paths advance, and a heartbeat that finds one
   unchanged for an interval of about a second drains that slab. The interval is wall-clock
@@ -736,7 +761,8 @@ These hold everywhere, and the proofs and tests lean on them.
 1. A slab changes only through an rseq routine that commits with one store, or through the
    drain steps under "Idle caches".
 2. Other shared state changes only through single atomic instructions.
-3. No locks, no waiting, no thread-local state.
+3. No locks, no waiting, no thread-local state. The rseq area that the OS's interface
+   requires of each thread is the one exception, and on musl it is ours.
 4. Between any two instructions of any slow path, shared state is valid and anything
    unreachable from it is owned by exactly one thread.
 5. All-zero is a valid state for every structure.
@@ -760,6 +786,11 @@ Components depend downward only: the interfaces on the front end and large objec
 the depot and back end, everything on size classes and the OS interface. The OS interface is
 a trait with a Linux implementation built on raw system calls and a simulated implementation
 for tests.
+
+The crate's public API is small: the allocator's handle, the statistics it reports, `abort`,
+and the macro that exports the C names. The components are private. The test kit, the fuzz
+targets and the benchmarks reach them through a hidden cargo feature that is not part of the
+API.
 
 ## Testing and Verification
 
@@ -797,7 +828,14 @@ tests where a test can reach it.
   Nothing else is assumed about its value.
 - `membarrier` with the rseq command returns only after every sequence then in flight on
   the named CPU has completed or been aborted.
-- glibc registers a thread's rseq area before the thread can call the allocator.
+- glibc registers a thread's rseq area before the thread can call the allocator. On musl,
+  where the area is ours, it reads a negative CPU number until registered, and the OS
+  accepts one registration per thread.
+- On musl, a signal handler that allocates does not make its thread's first call to the
+  allocator at the one instruction boundary between a routine's arming store and its read of
+  the CPU number. There the handler's slow path would register the thread under a sequence
+  that began unregistered, and that one sequence would run to its commit unprotected. glibc
+  registers before any call, so this cannot arise there.
 - Nothing with the privilege to do so places a probe inside a sequence, which would let
   the thread return to it without an abort.
 - Of a thread's attempts at a sequence, one is at last left to finish. Only termination
@@ -944,12 +982,14 @@ Miri, fuzzing, the preload checks and the benchmarks run on demand.
 
 ### Safety ledger
 
-An `unsafe` block is covered by a machine-checked proof where one is practical. Where it is
-not, the block has an entry in `docs/safety/<crate>/<file>-safety.md`, named after the source
-file without its `.rs`. An entry states the block's preconditions, the invariants that make
-them hold, and a proof on paper. A fresh agent that did not write the code reviews each
-entry adversarially. Changing the block means updating the entry and having it reviewed
-again.
+An `unsafe` block in code that ships is covered by a machine-checked proof where one is
+practical. Where it is not, the block has an entry in `docs/safety/<crate>/<file>-safety.md`,
+named after the source file without its `.rs`. An entry states the block's preconditions,
+the invariants that make them hold, and a proof on paper. A fresh agent that did not write
+the code reviews entries adversarially and records the commit it reviewed. A script in the
+merge gate checks that every safety comment names an entry and every entry is named, and
+lists the entries changed since their review; that list is cleared before a release. The
+simulator, the twins and other test scaffolding are outside the ledger.
 
 ### Performance
 

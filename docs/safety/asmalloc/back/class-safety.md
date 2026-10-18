@@ -95,7 +95,7 @@ or writes the range during the call and nothing in it is needed.
 block the caller owns, unused during the call, and that the caller gives up every byte past
 `size`. Its callers are the heap's for a block its owner is resizing
 (`Heap::resize_large_in_place`, `Heap::resize_in_place_by_address`, both `unsafe fn`s with the
-same promise, from `Heap::resize` and C's `realloc`), so the owner
+same promise, from `Bound::resize` and C's `realloc`), so the owner
 holds the slot or run for the whole call and is not using the block meanwhile: a resize has
 the block exclusively, as `realloc` and `Allocator::shrink` require. Counted from the start
 of the slot or run, which the block starts `into` bytes past (its stagger, or zero; a run is
@@ -141,7 +141,7 @@ counted from the slot's start (from the run's for a run, which is never staggere
 owns and gives up, readable for `len` bytes, that `to` is a block it owns, writable for `len`
 bytes, whose contents it does not need, and disjoint from `from`, that nothing else uses
 either range, and that if it says `zeroed` the `len` bytes at `to` read as zero. The two
-callers are the moving paths of `Heap::resize` (HEAP-04, which passes the allocation's own
+callers are the moving paths of `Bound::resize` (HEAP-04, which passes the allocation's own
 report) and C's `realloc` (MOD-01, which passes `false`), and both hold both blocks.
 
 0. *The destination purge.* When `zeroed` is false and the block is more than one piece,
@@ -158,8 +158,11 @@ report) and C's `realloc` (MOD-01, which passes `false`), and both hold both blo
    the last copy. A page is skipped only when every byte of it in `from` is zero, and then
    `to` already reads as zero there, either because the caller said so or because of step 0.
    A failed destination purge would leave stale bytes in skipped pages: a wrong value in the
-   caller's new block, not a memory error. (The destination purge never fails in practice;
-   `MADV_DONTNEED` fails only on a bad range, which `Space::purge` rules out by aborting.)
+   caller's new block, not a memory error. The destination purge can fail: `MADV_DONTNEED`
+   returns `EINVAL` on locked memory, so in a process that called `mlockall` it fails every
+   time, and the code ignores the result. The ignored test
+   `a_block_moved_into_a_dirty_slot_arrives_whole_when_purges_fail` shows the stale bytes.
+   Until the copy stops skipping pages after a failed purge, this entry is not accepted.
 2. *The purges.* Pieces end at multiples of the piece in the address space. Each range is
    either a part already copied that ends at such a multiple (`into + done` rounded down to a
    page, to `into + boundary`: `done` is zero, which rounds down to the slot's start and so

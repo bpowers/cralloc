@@ -1,6 +1,6 @@
 # Safety ledger: `crates/asmalloc/src/heap/source.rs`
 
-## HEAP-SOURCE-01: `self.0.launder(class, objects)` in `take_back`
+## HEAP-SOURCE-01: `self.launder(class, objects)` in `take_back`
 
 **Precondition** (`Back::launder`). Every pointer that is a handed-out slot of `class` is one
 the caller owns and gives up.
@@ -13,3 +13,5 @@ invariant (`front/twin-safety.md`) and the depot's single-owner rule for a magaz
 taken (design: "Concurrency rules", rule 4). So every object here is one the depot owns and is
 giving up. A program that freed a block twice breaks that, and `launder` then aborts or, if
 the copies never meet, hands the slot out twice: SLOW-03 in `c/slow-safety.md` says what that does.
+
+Reviewed: f41dbf9

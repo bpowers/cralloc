@@ -32,7 +32,7 @@ prefix), so all `class.size()` bytes are writable.
 
 ## SLOW-02: the zeroing stores in `zero_block`, `zero_small` and `zero16`
 
-`block.write_bytes(0, len)`, and for a length up to 512 bytes, `zero_small`'s volatile stores:
+`block.write_bytes(0, len)`, and for a length up to 32 bytes (`SMALL_ZERO`), `zero_small`'s volatile stores:
 one 8-byte store for a length of 8, else one 16-byte store at each multiple of 16 below `len`.
 
 **Preconditions.** `block` is valid for writes of `len` bytes and nothing else accesses them
@@ -78,10 +78,12 @@ gives up (C's contract for `free`, which every C entry point that frees passes o
 `ptr`, non-null. `find` returned `Small(class)`, so by F1 `object` is the start of a slot of
 `class`; it is a block the heap handed out by the contract; by F2 it was handed out as a block
 of `class`. The caller owns it and gives it up, by the contract. The sized frees' slow paths are
-`free_slow` with the size ignored, so a wrong size from the caller cannot reach the class. The
-other arms make no unsafe call: `free_large` lets the back end find the class or run from the
-address and abort if the slot is not handed out (`Back::free_by_address`, `Back::launder`'s
-validation), and `None` aborts.
+`free_slow` with the size ignored, so a wrong size from the caller cannot reach the class.
+`process::free_large(object)` in the `Large` arm asks that `object` be a large block of the heap
+that the caller owns and gives up: `find` returned `Large`, so a large slot or a run starts at
+`object`, and the contract makes it a block the caller gives up. The back end finds the class or
+run from the address and aborts if the slot is not handed out (`Back::free_by_address`,
+`Back::launder`'s validation). `None` aborts.
 
 A pointer that breaks the contract is outside what the proof covers. Two kinds still fail
 safely: one outside the heap, interior to a slot, in an untagged region, or before the heap
@@ -89,3 +91,5 @@ started makes `find` return `None` or `Large`, and aborts or is validated by the
 slot start that is not live (a double free, or a slot never handed out) is pushed and caught
 when its magazine is laundered (`Back::launder` aborts on a slot already free or beyond the
 watermark), which is the design's stated double-free detection.
+
+Reviewed: f41dbf9

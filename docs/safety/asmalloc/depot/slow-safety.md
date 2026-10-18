@@ -25,3 +25,5 @@ or a marker, which these calls never pass).
 
 If the store happens, the slab now refers to the magazine and this thread no longer uses
 `held` (the `Stored` arm never touches it again). If it does not, the thread still holds it.
+
+Reviewed: f41dbf9

@@ -66,13 +66,16 @@ process light.
   calls. Test, fuzz and benchmark crates may depend on what they need.
 - Write good, clean Rust: small modules with one job, types that make wrong states hard to
   build, `unsafe` confined to a few well-named places.
-- Every `unsafe` block has a machine-checked proof (Kani, or Lean for the routines) or an
-  entry in the safety ledger at `docs/safety/<crate>/<file>-safety.md`, named after the
-  source file without `.rs`. An entry gives the preconditions, the invariants that make them
-  hold, and a proof on paper, and is reviewed adversarially by a fresh agent that did not
-  write the code. Changing the block means updating the entry and getting it reviewed again.
-  This rule covers the allocator and the preload library. Test, fuzz and benchmark crates
-  keep `unsafe` small and commented but need no ledger.
+- Every `unsafe` block in code that ships (the allocator and the preload library, not the
+  simulator, the twins or other test scaffolding) has a machine-checked proof (Kani, or Lean
+  for the routines) or an entry in the safety ledger at
+  `docs/safety/<crate>/<file>-safety.md`, named after the source file without `.rs`. An
+  entry gives the preconditions, the invariants that make them hold, and a proof on paper.
+  A fresh agent that did not write the code reviews entries adversarially and records the
+  commit it reviewed in the file (`Reviewed: <commit>`). Changing a block means updating its
+  entry; `scripts/ledger-check` lists the files that have changed since their review, and
+  that list is cleared before a release, not on every change. Test scaffolding, and the
+  test, fuzz and benchmark crates, keep `unsafe` small and commented but need no ledger.
 - The concurrency rules in the design hold everywhere: no locks, no thread-local state,
   shared state changes by one atomic instruction or one rseq commit, and all-zero is a valid
   state.

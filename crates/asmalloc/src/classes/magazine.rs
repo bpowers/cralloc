@@ -20,7 +20,7 @@
 pub const SLOT_BYTES: usize = crate::spec::WORD_BYTES;
 
 /// The most bytes of objects a magazine holds, unless that would leave it fewer than
-/// [`MagazineSize::MIN`] slots.
+/// `MagazineSize::MIN` slots.
 ///
 /// It bounds the memory one cached magazine can pin against the cost of exchanging magazines,
 /// and gives 254-object magazines up to 256-byte classes and two-object magazines from 16 KiB.
@@ -103,17 +103,18 @@ pub struct MagazineSize(u8);
 
 impl MagazineSize {
     /// The smallest magazine: 4 slots, 2 objects.
-    pub const MIN: MagazineSize = MagazineSize(MIN_LOG2);
+    pub(crate) const MIN: MagazineSize = MagazineSize(MIN_LOG2);
 
     /// The largest magazine: 256 slots, 254 objects, 2 KiB.
-    pub const MAX: MagazineSize = MagazineSize(MAX_LOG2);
+    pub(crate) const MAX: MagazineSize = MagazineSize(MAX_LOG2);
 
     /// The number of magazine sizes.
-    pub const COUNT: usize = (MAX_LOG2 - MIN_LOG2 + 1) as usize;
+    pub(crate) const COUNT: usize = (MAX_LOG2 - MIN_LOG2 + 1) as usize;
 
     /// The magazine size with this many slots, if there is one.
     #[inline]
-    pub const fn from_slots(slots: usize) -> Option<MagazineSize> {
+    #[cfg(any(test, kani))]
+    pub(crate) const fn from_slots(slots: usize) -> Option<MagazineSize> {
         if slots.is_power_of_two()
             && slots >= MagazineSize::MIN.slots()
             && slots <= Self::MAX.slots()
@@ -126,7 +127,7 @@ impl MagazineSize {
 
     /// The magazine size with this ordinal, `0..COUNT`, if there is one.
     #[inline]
-    pub const fn from_ordinal(ordinal: usize) -> Option<MagazineSize> {
+    pub(crate) const fn from_ordinal(ordinal: usize) -> Option<MagazineSize> {
         if ordinal < Self::COUNT {
             Some(MagazineSize(MIN_LOG2 + ordinal as u8))
         } else {
@@ -169,32 +170,32 @@ impl MagazineSize {
 
     /// The position among the magazine sizes, `0..COUNT`, smallest first.
     #[inline(always)]
-    pub const fn ordinal(self) -> usize {
+    pub(crate) const fn ordinal(self) -> usize {
         (self.0 - MIN_LOG2) as usize
     }
 
     /// The mask the fast paths test, `8n - 16`.
     #[inline(always)]
-    pub const fn mask(self) -> usize {
+    pub(crate) const fn mask(self) -> usize {
         self.bytes() - 2 * SLOT_BYTES
     }
 
     /// The slot number a word points at, for a word that is a slot address of a magazine of this
     /// size.
     #[inline(always)]
-    pub const fn slot_of(self, word: usize) -> usize {
+    pub(crate) const fn slot_of(self, word: usize) -> usize {
         (word & (self.bytes() - 1)) / SLOT_BYTES
     }
 
     /// Whether allocation must take the slow path: the word names no magazine or an empty one.
     #[inline(always)]
-    pub const fn alloc_slow(self, word: usize) -> bool {
+    pub(crate) const fn alloc_slow(self, word: usize) -> bool {
         word & self.mask() == 0
     }
 
     /// Whether free must take the slow path: the word names no magazine or a full one.
     #[inline(always)]
-    pub const fn free_slow(self, word: usize) -> bool {
+    pub(crate) const fn free_slow(self, word: usize) -> bool {
         word.wrapping_add(SLOT_BYTES) & self.mask() == 0
     }
 

@@ -53,7 +53,7 @@ pub(super) fn note(block: *mut u8, class: SmallClass) {
     };
     let index = (block.addr() >> shift).wrapping_sub(base_index);
     if let Some(entry) = SLABS.regions().get(index) {
-        let byte = class.class().index();
+        let byte = super::table::word_byte(class);
         if entry.load(Ordering::Relaxed) != byte {
             entry.store(byte, Ordering::Relaxed);
         }
@@ -86,7 +86,7 @@ mod tests {
         let index = (block.addr() >> region_shift) - (heap_base >> region_shift);
         assert_eq!(
             SLABS.regions()[index].load(Ordering::Relaxed),
-            class.class().index()
+            crate::c::table::word_byte(class)
         );
         // SAFETY: a live block, given up once.
         unsafe { crate::c::free(block.cast()) };

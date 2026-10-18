@@ -127,7 +127,11 @@ the slabs. Their modules also carry the layout constants the proofs assume
 sections and `Spec.Slab.path` name: `front::SLABS` (the slabs, which the
 slow path's routines name, followed by the masks' table),
 `front::pop_slow`, `front::push_slow` and glibc's `__rseq_offset` as
-`front::__rseq_offset`.
+`front::__rseq_offset`. On musl, which has none, the crate defines the area
+and the word itself, from data the emitter writes into `x86_64/area.rs`
+(`Target.ownArea`, `VG.X86_64.ownRseqArea`; data, not code, so not proved),
+and the routines' direct forms, which a musl build always selects
+(`Artifact.cfg`), read that word.
 
 The out-of-line pop's and push's steps after the CPU number's are
 definitions of their own (`Impl.Slab.X86_64.popSteps`, `pushSteps`), taking

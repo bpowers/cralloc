@@ -3,11 +3,14 @@
 //!
 //! The shapes are the ones `docs/research/zen5-roofline.md` section 14 measured as fastest for
 //! the generated `c_malloc` and `c_calloc` routines: a byte per 8-byte step of size for
-//! `malloc`, and a byte per size for the smaller range `calloc` serves inline. Each byte is a
-//! class index. They are constants built from `Class::of_c`, so they cannot drift from the
+//! `malloc`, and a byte per size for the smaller range `calloc` serves inline. Each byte is the
+//! position of the class's hot word in a slab (`Field::index`), from which the routines form the
+//! word's address and find its mask; it is not the class index, since hot words sit only at bytes
+//! 16 to 31 of each 32-byte chunk (`front::slab`). They are constants built from `Class::of_c`, so they cannot drift from the
 //! classes; the tests check every entry against it anyway, from the size side.
 
-use crate::classes::{Class, MAX_SMALL_SIZE};
+use crate::classes::{Class, MAX_SMALL_SIZE, SmallClass};
+use crate::front::Field;
 use core::alloc::Layout;
 
 /// The largest size `malloc`'s table covers: every small class.
@@ -16,18 +19,40 @@ pub(crate) const C_TABLE_MAX: usize = MAX_SMALL_SIZE;
 /// The largest size `calloc`'s table covers.
 pub(crate) const CALLOC_TABLE_MAX: usize = crate::spec::CALLOC_MAX;
 
-/// The class index of a C request for `size` bytes, for a size with a small class.
-const fn class_index(size: usize) -> u8 {
+/// The small class of a C request for `size` bytes, for a size with one.
+const fn c_class(size: usize) -> SmallClass {
     match Layout::from_size_align(size, 1) {
         Ok(layout) => match Class::of_c(layout) {
-            Some(class) => class.index(),
+            Some(class) => match class.small() {
+                Some(small) => small,
+                None => panic!("a size in the table has no small class"),
+            },
             None => panic!("a size in the table has no class"),
         },
         Err(_) => panic!("a size in the table has no layout"),
     }
 }
 
-/// `C_SIZE_CLASSES[(size + 7) >> 3]` is the class index of `malloc(size)` for every size up to
+/// The byte the tables hold for a C request for `size` bytes: the position of its class's hot
+/// word in a slab (`Field::index`), from which the C routines form the word's address.
+const fn class_index(size: usize) -> u8 {
+    word_byte(c_class(size))
+}
+
+/// The position of `class`'s hot word in a slab, as a table byte.
+pub(crate) const fn word_byte(class: SmallClass) -> u8 {
+    let index = Field::hot(class).index();
+    assert!(index < 256);
+    index as u8
+}
+
+/// The small class whose hot word is at position `byte`, if any: the inverse of [`word_byte`].
+#[cfg(test)]
+pub(crate) fn class_of_byte(byte: u8) -> Option<SmallClass> {
+    SmallClass::all().find(|&class| word_byte(class) == byte)
+}
+
+/// `C_SIZE_CLASSES[(size + 7) >> 3]` is the word byte (`word_byte`) of the class of `malloc(size)` for every size up to
 /// [`C_TABLE_MAX`]. Entry `i` is the class of `8 * i` bytes, which every size from `8 * i - 7`
 /// shares: below 16 bytes a class step is 8 bytes, and from 16 the 16-byte rule rounds a whole
 /// 8-byte step to the same multiple of 16. Entry 0 is size 0, which gets the smallest class.
@@ -41,7 +66,7 @@ pub(crate) const C_SIZE_CLASSES: [u8; C_TABLE_MAX / 8 + 1] = {
     table
 };
 
-/// `C_CALLOC_CLASSES[size]` is the class index of a `calloc` of `size` bytes in all, for every
+/// `C_CALLOC_CLASSES[size]` is the word byte of the class of a `calloc` of `size` bytes in all, for every
 /// size up to [`CALLOC_TABLE_MAX`].
 pub(crate) const C_CALLOC_CLASSES: [u8; CALLOC_TABLE_MAX + 1] = {
     let mut table = [0u8; CALLOC_TABLE_MAX + 1];
@@ -59,10 +84,7 @@ pub(crate) const C_CALLOC_LENS: [u16; CALLOC_TABLE_MAX + 1] = {
     let mut table = [0u16; CALLOC_TABLE_MAX + 1];
     let mut size = 0;
     while size < table.len() {
-        let Some(class) = Class::from_index(C_CALLOC_CLASSES[size]) else {
-            panic!("a calloc table entry is not a class");
-        };
-        let len = class.size();
+        let len = c_class(size).size();
         assert!(len <= u16::MAX as usize);
         table[size] = len as u16;
         size += 1;
@@ -74,7 +96,7 @@ pub(crate) const C_CALLOC_LENS: [u16; CALLOC_TABLE_MAX + 1] = {
 /// the size.
 pub(crate) const C_SIZED_LEN: usize = crate::spec::SIZED_LEN;
 
-/// The sized free's table: entry `n` is the class index of `malloc(n)` for every size up to
+/// The sized free's table: entry `n` is the word byte of the class of `malloc(n)` for every size up to
 /// [`C_TABLE_MAX`], and 0 (no class) above it: the class a sized free predicts from the low 16
 /// bits of its size. A size of 2^16 or more predicts the class of its low 16 bits, which the
 /// region's class then refutes, so a wrong prediction costs the slow path and nothing else.
@@ -145,15 +167,13 @@ pub(crate) fn malloc_class(size: usize) -> Option<crate::classes::SmallClass> {
     if size > C_TABLE_MAX {
         return None;
     }
-    let index = *C_SIZE_CLASSES.get((size + 7) >> 3)?;
-    Class::from_index(index).and_then(Class::small)
+    class_of_byte(*C_SIZE_CLASSES.get((size + 7) >> 3)?)
 }
 
 /// The small class of a `calloc` of `size` bytes in all from its table, or `None` above it.
 #[cfg(test)]
 pub(crate) fn calloc_class(size: usize) -> Option<crate::classes::SmallClass> {
-    let index = *C_CALLOC_CLASSES.get(size)?;
-    Class::from_index(index).and_then(Class::small)
+    class_of_byte(*C_CALLOC_CLASSES.get(size)?)
 }
 
 #[cfg(test)]
@@ -195,7 +215,7 @@ mod tests {
     fn the_sized_table_predicts_mallocs_class_and_nothing_above_it() {
         for size in 0..C_SIZED_LEN {
             let expected = if size <= C_TABLE_MAX {
-                of_c(size).index()
+                word_byte(of_c(size).small().unwrap())
             } else {
                 0
             };

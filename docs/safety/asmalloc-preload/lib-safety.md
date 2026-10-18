@@ -72,3 +72,5 @@ failing the load. Another object that looks up `rust_eh_personality` dynamically
 only reachable when an exception unwinds into the library's own frames, which nothing it calls
 can start (PRELOAD-01). If one did, it aborts, which is the behaviour Rust defines under
 `panic = "abort"`.
+
+Reviewed: f41dbf9

@@ -145,6 +145,76 @@ def rely (p p' : State) : Prop :=
   p'.fsBase = p.fsBase ∧ p'.syms = p.syms ∧ p'.params = p.params ∧ p'.csDesc = p.csDesc ∧
   p'.unknowns = p.unknowns
 
+/-! ## The crate's own rseq area
+
+musl registers no rseq area and has no `__rseq_offset`, so on musl the crate
+defines both (`OwnArea`): a `struct rseq` of `ownAreaLen` bytes in the
+initialized thread-local data, which every new thread's copy starts from,
+reading `cpu_id` -1 (`RSEQ_CPU_ID_UNINITIALIZED`,
+`include/uapi/linux/rseq.h`), a negative CPU number, until the crate
+registers it; and a read-only word holding the area's offset from the thread
+pointer, which the linker computes (`@tpoff`, a local-exec reference, valid
+in an executable: System V AMD64 psABI, "Thread-Local Storage"). The
+routines read that word as they read glibc's `__rseq_offset`, by its own
+name, which the crate maps `__rseq_offset` to.
+
+The area's section is aligned to `ownAreaAlign`, a page, and the area sits
+`ownAreaPageOffset` bytes into it. musl aligns the thread pointer of every
+thread to the thread-local data's alignment and places that data at an
+offset from it the linker fixes, so the area lies at that page offset in
+every thread: away from the slab words the routines store to. A load of
+`cpu_id` at the page offset of a slab word stored just before is taken to
+depend on the store, which costs a pair two cycles
+(docs/research/musl-and-static.md). -/
+
+/-- The bytes the crate registers: the original `struct rseq`
+(`ORIG_RSEQ_SIZE`), which every kernel with rseq accepts. -/
+def ownAreaLen : Nat := 32
+
+/-- The alignment of the area's section: a page. -/
+def ownAreaAlign : Nat := 4096
+
+/-- Where the area sits in its page: past every slab word a routine stores
+to (the crate asserts it) and below the words the C routines read at page
+offset 1024. -/
+def ownAreaPageOffset : Nat := 768
+
+/-- `cpu_id` before registration: -1, as 32 bits. -/
+def ownAreaUnregistered : Nat := 0xffffffff
+
+/-- The area and its offset's word, for musl. -/
+def ownRseqArea : OwnArea where
+  cfg := [.targetEnv "musl"]
+  lines := [
+    ".pushsection .tdata.asmalloc_rseq_area,\"awT\",@progbits",
+    s!".balign {ownAreaAlign}",
+    s!".skip {ownAreaPageOffset}",
+    ".globl asmalloc_rseq_area",
+    ".hidden asmalloc_rseq_area",
+    ".type asmalloc_rseq_area,@object",
+    s!".size asmalloc_rseq_area, {ownAreaLen}",
+    "asmalloc_rseq_area:",
+    -- cpu_id_start, cpu_id; rseq_cs; flags, node_id, mm_cid and padding.
+    s!".long 0, {hexLit ownAreaUnregistered}",
+    ".quad 0",
+    ".long 0, 0, 0, 0",
+    ".popsection",
+    ".pushsection .data.rel.ro.asmalloc_rseq_offset,\"aw\",@progbits",
+    ".balign 8",
+    ".globl asmalloc_rseq_offset",
+    ".hidden asmalloc_rseq_offset",
+    ".type asmalloc_rseq_offset,@object",
+    ".size asmalloc_rseq_offset, 8",
+    "asmalloc_rseq_offset:",
+    ".quad asmalloc_rseq_area@tpoff",
+    ".popsection"]
+  consts := [
+    ("RSEQ_SIGNATURE", .u32, rseqSignature),
+    ("RSEQ_AREA_LEN", .usize, ownAreaLen),
+    ("RSEQ_AREA_ALIGN", .usize, ownAreaAlign),
+    ("RSEQ_AREA_PAGE_OFFSET", .usize, ownAreaPageOffset),
+    ("RSEQ_CPU_ID_UNREGISTERED", .u32, ownAreaUnregistered)]
+
 /-! ## Inline functions
 
 `inlineTarget` emits functions inline (`Target.inline`): an
@@ -192,6 +262,7 @@ abbrev target : Target where
   arms := arms
   armed := armed
   rely := rely
+  ownArea := some ownRseqArea
 
 /-- The inline target: the same model, printer and argument registers, with
 the obligations of `asm!` in place of a call's and the red zone reserved
@@ -199,6 +270,8 @@ the obligations of `asm!` in place of a call's and the red zone reserved
 abbrev inlineTarget : Target :=
   { target with
     name := "x86_64_inline"
+    -- The area is the target's; emitted once, with `target`.
+    ownArea := none
     abi := inlineAbi
     abiPreserved := fun s s' => s'.gpr .rsp = s.gpr .rsp
     inline := true

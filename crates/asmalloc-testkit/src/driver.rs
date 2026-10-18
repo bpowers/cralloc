@@ -285,9 +285,38 @@ impl Drop for StopOnPanic<'_> {
     }
 }
 
+/// Where a run's threads come from.
+trait Spawn<'scope>: Sync {
+    /// Starts a thread that runs `job` and is joined before the run ends.
+    fn spawn(&'scope self, job: Box<dyn FnOnce() + Send + 'scope>);
+}
+
+impl<'scope> Spawn<'scope> for thread::Scope<'scope, '_> {
+    fn spawn(&'scope self, job: Box<dyn FnOnce() + Send + 'scope>) {
+        thread::Scope::spawn(self, job);
+    }
+}
+
+#[cfg(all(target_os = "linux", not(miri)))]
+impl<'scope> Spawn<'scope> for crate::sys::ChildThreads {
+    fn spawn(&'scope self, job: Box<dyn FnOnce() + Send + 'scope>) {
+        crate::sys::ChildThreads::spawn(self, job);
+    }
+}
+
+/// Which threads a run uses.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Threads {
+    /// The standard library's.
+    Std,
+    /// The C library's, for the child of a fork (see [`crate::sys::ChildThreads`]).
+    #[cfg(all(target_os = "linux", not(miri)))]
+    AfterFork,
+}
+
 /// Run one worker until its stream ends, a failure, or a migration hands it to a new thread.
-fn segment<'scope, 'env, 'e: 'scope, S: Subject + ?Sized>(
-    scope: &'scope thread::Scope<'scope, 'env>,
+fn segment<'scope, 'e: 'scope, S: Subject + ?Sized, T: Spawn<'scope>>(
+    scope: &'scope T,
     mut w: Worker<'e, S>,
     shared: &'scope Shared,
 ) {
@@ -314,7 +343,7 @@ fn segment<'scope, 'env, 'e: 'scope, S: Subject + ?Sized>(
         w.done += 1;
         match result {
             Ok(Effect::Migrate) => {
-                scope.spawn(move || segment(scope, w, shared));
+                scope.spawn(Box::new(move || segment(scope, w, shared)));
                 return;
             }
             Ok(effect) => w.source.observe(&effect),
@@ -340,16 +369,24 @@ fn drive<'e, S: Subject + ?Sized>(
     shadow: &'e Shadow,
     mail: &'e Mailroom,
     workers: Vec<Worker<'e, S>>,
+    threads: Threads,
 ) -> Result<Stats, Failure> {
     let n = workers.len();
     let shared = Shared::default();
-    let ran = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        thread::scope(|scope| {
+    let ran = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| match threads {
+        Threads::Std => thread::scope(|scope| {
             for w in workers {
                 let shared = &shared;
                 scope.spawn(move || segment(scope, w, shared));
             }
-        })
+        }),
+        #[cfg(all(target_os = "linux", not(miri)))]
+        Threads::AfterFork => crate::sys::ChildThreads::scope(|scope| {
+            for w in workers {
+                let shared = &shared;
+                scope.spawn(Box::new(move || segment(scope, w, shared)));
+            }
+        }),
     }));
     let Shared {
         failure,
@@ -412,7 +449,7 @@ pub fn run<S: Subject + ?Sized>(subject: &S, cfg: &Config) -> Result<Stats, Fail
         };
         workers[0].fork = Some((plan, child));
     }
-    let result = drive(subject, &shadow, &mail, workers).map_err(|mut f| {
+    let result = drive(subject, &shadow, &mail, workers, Threads::Std).map_err(|mut f| {
         f.origin = Some(*cfg);
         f
     });
@@ -487,7 +524,7 @@ pub fn run_bytes<S: Subject + ?Sized>(
         trace: TraceBuf::Complete(Vec::new()),
         fork: None,
     };
-    let result = drive(subject, &shadow, &mail, vec![worker]);
+    let result = drive(subject, &shadow, &mail, vec![worker], Threads::Std);
     if result.is_ok() {
         assert_all_released(&shadow);
     }
@@ -506,7 +543,7 @@ pub fn replay<S: Subject + ?Sized>(subject: &S, script: &Script) -> Result<Stats
         trace: TraceBuf::Complete(Vec::new()),
         fork: None,
     };
-    let result = drive(subject, &shadow, &mail, vec![worker]);
+    let result = drive(subject, &shadow, &mail, vec![worker], Threads::Std);
     if result.is_ok() {
         assert_all_released(&shadow);
     }
@@ -663,7 +700,7 @@ fn run_child<S: Subject + ?Sized>(w: &mut Worker<'_, S>, cfg: &Config) -> Result
         let adopted = first.model.adopt_unclaimed(block)?;
         first.source.observe(&Effect::Adopted(vec![adopted]));
     }
-    drive(subject, &shadow, &mail, workers)
+    drive(subject, &shadow, &mail, workers, Threads::AfterFork)
 }
 
 #[cfg(test)]

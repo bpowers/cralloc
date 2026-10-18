@@ -50,8 +50,8 @@ word is a change from one abstract magazine to another.
 
 ## The routines
 
-Each routine reads the thread's rseq area (glibc's `__rseq_offset` from the
-thread pointer, `rseq_cs` at 8, `cpu_id` at 4), points `rseq_cs` at its
+Each routine reads the thread's rseq area (`__rseq_offset` from the thread
+pointer: glibc's, or on musl the crate's own, `VG.X86_64.ownRseqArea`; `rseq_cs` at 8, `cpu_id` at 4), points `rseq_cs` at its
 descriptor, reads the CPU number, takes the slow path if it is not below
 `SLAB_COUNT` (as it is not for a thread without a registration, whose
 `cpu_id` reads as a negative number), reads the slab word, tests it with the mask, and then pops
@@ -118,8 +118,8 @@ theorem mask_disp_eq : MASK_DISP = SLAB_COUNT * SLAB_BYTES + 2048 := by decide
 def RSEQ_CS : Nat := 8
 def RSEQ_CPU_ID : Nat := 4
 
-/-- The names of the symbols: glibc's offset of the thread's rseq area
-(`Target.rseqOffsetSym` on x86-64), which the code reads; the slabs, which
+/-- The names of the symbols: the offset of the thread's rseq area
+(`Target.rseqOffsetSym` on x86-64; glibc's, or the crate's own on musl), which the code reads; the slabs, which
 the code reaches only through the word address it is given, and which the
 specification names to say where that address and the other slabs' words of
 its class are; and a routine's slow path. -/
@@ -132,8 +132,8 @@ def MISS : String := "miss"
 /-- The Rust paths of the symbols. The crate defines the slabs (`SLAB_COUNT`
 slabs of `SLAB_BYTES` bytes, zeroed, aligned to `SLAB_BYTES`, written only
 by the routines and the drainer) with the masks' table just past them, and
-the slow paths, and makes glibc's `__rseq_offset` visible as
-`front::__rseq_offset`. -/
+the slow paths, and makes glibc's `__rseq_offset`, or on musl its own word
+(`VG.X86_64.ownRseqArea`), visible as `front::__rseq_offset`. -/
 def path (n : String) : String := "crate::front::" ++ n
 
 /-- The mask of a magazine of `n` slots. -/
@@ -554,7 +554,8 @@ precondition `Ctx.pre`.
 Wherever it may be aborted, the routine has kept the invariant (`abort`).
 A retry starts where the thread resumes after the abort, and `env` is what
 other threads, the drainer and the operating system may have done
-meanwhile: changed memory, but not `__rseq_offset` (glibc sets it once) or
+meanwhile: changed memory, but not `__rseq_offset` (glibc sets it once; the crate's own is
+read-only) or
 the stack the calling convention reserves (the thread's own), keeping the
 invariant. The thread's permissions there are the routine's regions,
 recomputed from memory then: the model's account of what the routine may
@@ -750,11 +751,17 @@ def keepDoc : String :=
     returns: the function may be aborted and restarted on any CPU in between \
     (`VG.Spec.Slab.Ctx.inv`)."
 
+/-- The `# Safety` item every routine has about the thread's rseq area. -/
+def registeredDoc : String :=
+  "The calling thread's rseq area, at `__rseq_offset` from the thread pointer, must be \
+    registered with the kernel or read a negative CPU number: glibc registers its area before \
+    the thread can run code that allocates; on musl the area is the crate's own, which reads -1 \
+    until a slow path registers it."
+
 /-- What every pop and push requires of the thread and of the slabs; the
 mask is the argument `mask`. -/
 def safety : List String :=
-  ["glibc must have registered the calling thread's rseq area, as it does before the thread \
-    can run code that allocates.",
+  [registeredDoc,
   s!"`word` must be `SLABS + 8 * class` for a class below {CLASS_LIMIT}: the address of the \
     class's slab word in slab 0. `mask` must be the mask `8 * n - 16` of the class's magazines, of \
     `n = 2^k` slots for {MAG_LOG_MIN} ≤ k ≤ {MAG_LOG_MAX}.",
@@ -771,8 +778,7 @@ def safety : List String :=
 for a stack's, of the stacks. -/
 def slowSafety (stack : Bool) (push : Bool) : List String :=
   let link := if push then some "`magazine[0]`" else none
-  ["glibc must have registered the calling thread's rseq area, as it does before the thread \
-    can run code that allocates.",
+  [registeredDoc,
     layoutDoc false none link] ++
   (if stack then [] else
     [s!"In each of the {SLAB_COUNT} slabs of `SLABS`, the word at `offset` (rounded down to a \
@@ -880,8 +886,7 @@ def currentCpuApi : Api where
     another CPU before the caller uses the answer.\n\n\
     Contract: `VG.Spec.Slab.cpuContract`."
   safety := [
-    "glibc must have registered the calling thread's rseq area, as it does before the thread \
-      can run code that allocates.",
+    registeredDoc,
     "Neither `__rseq_offset` nor the thread's `cpu_id` may overlap the stack the call uses (the \
       return address on the stack, or, inline, the 128 bytes below the stack pointer and the 8 \
       bytes at it) or wrap around the end of the address space."]

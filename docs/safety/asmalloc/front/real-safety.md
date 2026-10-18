@@ -7,9 +7,10 @@ below are those sections, discharged once here for every call in the file.
 
 **The obligations, from the generated `# Safety` sections.**
 
-- (R) glibc set `__rseq_offset` for the calling thread's rseq area.
-- (W) Pop and push: `word` is `SLABS + 8 * class`, the address of the class's word in slab 0,
-  for a class below 512.
+- (R) `__rseq_offset` locates the calling thread's rseq area, which is registered or reads a
+  negative `cpu_id`.
+- (W) Pop and push: `word` is `SLABS + 8 * class`, the address of a word in slab 0 (the
+  specification's `class` is the word's position), for a position below 512.
 - (C) The `mask` argument is `8n - 16` for the class's magazines of `n = 2^k` slots,
   `2 <= k <= 16`.
 - (L) `SLABS`, the thread's `rseq_cs` and `cpu_id` and `__rseq_offset` do not
@@ -26,10 +27,15 @@ below are those sections, discharged once here for every call in the file.
 - (R): glibc 2.35 and later set `__rseq_offset` before any user code runs, for every thread,
   whether or not registration succeeded (`docs/research/linux-rseq-contract.md`, "What the
   fields read"); an unregistered thread reads `cpu_id = -2`, which the routines' unsigned
-  compare sends to the miss path. The declaration is FRONT-01 (`front/mod-safety.md`).
+  compare sends to the miss path. The declaration is FRONT-01 (`front/mod-safety.md`). On musl
+  the word and the area are the crate's own (FRONT-01, `front/area-safety.md`): each thread's
+  area reads -1 until `cpu` registers it (AREA-04), and -2 if refused or retired, both of which
+  the unsigned compare sends to the miss path.
 - (W): every word address comes from `Front::word(class)` for a `SmallClass`: the address of
-  `SLABS`'s first slab plus `Field::hot(class).offset()`, which is 8 times the class index, 1 to
-  `SMALL_COUNT` (44). `SLABS` is the `Front` static, whose slabs are at offset 0 (a compile-time
+  `SLABS`'s first slab plus `Field::hot(class).offset()`, which is 8 times the class's word
+  position, `4 c + 2` for class index `c`: bytes 16 to 23 of chunk `c`, below 184
+  (`front/slab.rs`, with compile-time assertions), so a word of slab 0 below the
+  specification's 512. `SLABS` is the `Front` static, whose slabs are at offset 0 (a compile-time
   assertion), so its symbol, which the specification calls `SLABS`, is the first slab's address.
 - (C): the mask is `front::mask(class)`, entry `class` of `front::MASKS`, built from
   `SmallClass::magazine().mask()`; `MagazineSize` keeps `n` a power of two from 4 to 256, so
@@ -52,7 +58,8 @@ below are those sections, discharged once here for every call in the file.
 
 **Proof.** `pop` and `push` pass `Front::word(class)` and `front::mask(class)` for a
 `SmallClass`, under (W) and (C); (R), (L) and (S) hold as above. `current_cpu` only reads
-`__rseq_offset` and `cpu_id`.
+`__rseq_offset` and `cpu_id`. On musl, `cpu` calls `area::register` when it reads -1, which has no
+safety obligation of its own to the routines (`front/area-safety.md`).
 
 ## REAL-02: the out-of-line routines
 
