@@ -73,6 +73,24 @@ fn workload(rig: &TestRig, machine: &SimCpu, user: &RefCell<Vec<NonNull<u8>>>) {
     free(2);
 }
 
+/// A magazine filled from the source hands its objects out lowest address first, whether the
+/// source filled it whole or, running out, only partly.
+#[test]
+fn a_filled_magazine_hands_out_ascending_addresses() {
+    let class = Class::of_size(64).unwrap().small().unwrap();
+    let capacity = class.magazine().capacity();
+    for count in [capacity, capacity + capacity / 2] {
+        let rig: TestRig = Rig::new(&[class], count, Tuning::DEFAULT);
+        let machine = SimCpu::new(0);
+        let cache = rig.cache(&machine);
+        let got: Vec<usize> = (0..count)
+            .map(|_| cache.alloc(class).unwrap().addr().get())
+            .collect();
+        assert!(got.is_sorted(), "{count}: {got:x?}");
+        assert!(cache.alloc(class).is_none(), "the source is empty");
+    }
+}
+
 #[test]
 fn a_workload_keeps_every_magazine_and_object_in_one_place() {
     let rig = rig(12, TIGHT);

@@ -35,7 +35,7 @@ fn large(size: usize) -> Class {
 
 fn fill<O: Os>(back: &Back<'_, O>, class: SmallClass, n: usize) -> Vec<*mut u8> {
     let mut out = std::vec![core::ptr::null_mut(); n];
-    let got = back.fill(class, &mut out);
+    let got = back.fill(class, &mut out[..]);
     out.truncate(got);
     out
 }
@@ -1798,6 +1798,81 @@ fn a_pointer_between_a_slot_and_its_stagger_is_not_a_block() {
     let between =
         between.map_addr(|a| core::num::NonZeroUsize::new(a.get() - STAGGER_STEP).unwrap());
     back.free_by_address(between);
+}
+
+/// A staggered block is not a multiple of its slot size from the region's base, so a free
+/// takes the launder's full check rather than its fast one; it still frees exactly its slot,
+/// which the next allocations get back.
+#[test]
+#[cfg_attr(miri, ignore)]
+fn freeing_staggered_blocks_frees_their_slots() {
+    let state = state::<Native>();
+    let back = state.get_or_reserve().unwrap();
+    let class = large(64 << 10);
+    let page = Native::GEOMETRY.page_size();
+    let starts = |blocks: &[NonNull<u8>]| -> Vec<usize> {
+        blocks
+            .iter()
+            .map(|b| b.addr().get() & !(page - 1))
+            .collect()
+    };
+    let blocks: Vec<_> = (0..6)
+        .map(|_| back.alloc_staggered(class, 1 << 10).unwrap().ptr)
+        .collect();
+    assert!(
+        blocks[1..].iter().all(|b| b.addr().get() % page != 0),
+        "staggered"
+    );
+    for &b in &blocks {
+        back.free_by_address(b);
+    }
+    let again: Vec<_> = (0..6)
+        .map(|_| back.alloc(class, 1 << 10).unwrap().ptr)
+        .collect();
+    assert_eq!(starts(&again), starts(&blocks));
+}
+
+/// A whole magazine's worth of dense slots in one launder, with one of them twice: the held
+/// word's count catches it.
+#[test]
+#[should_panic(expected = "freed twice in one batch")]
+fn a_slot_twice_in_a_dense_magazine_aborts() {
+    let state = state::<Standard>();
+    let back = state.get_or_reserve().unwrap();
+    let class = small(32);
+    let slots = fill(&back, class, 254);
+    let mut batch = slots.clone();
+    batch[200] = slots[199];
+    // SAFETY: the test holds these slots, or passes a bad one to see the abort.
+    unsafe { back.launder(class, &batch) };
+}
+
+/// A fill into a magazine's slots puts the lowest address last, where the first pop takes it,
+/// for freed slots and carved ones alike.
+#[test]
+fn a_descending_fill_puts_the_lowest_address_on_top() {
+    use super::Descending;
+    use core::sync::atomic::AtomicPtr;
+    use core::sync::atomic::Ordering::Relaxed;
+    let state = state::<Standard>();
+    let back = state.get_or_reserve().unwrap();
+    let class = small(48);
+    let held = fill(&back, class, 300);
+    // Free a scattered few, so the next fill takes them before it carves.
+    let freed: Vec<*mut u8> = held.iter().step_by(7).copied().collect();
+    // SAFETY: the test holds these slots and uses none of them.
+    unsafe { back.launder(class, &freed) };
+    let slots: Vec<AtomicPtr<u8>> = (0..126)
+        .map(|_| AtomicPtr::new(core::ptr::null_mut()))
+        .collect();
+    assert_eq!(back.fill(class, &mut Descending(&slots)), slots.len());
+    let popped: Vec<*mut u8> = slots.iter().rev().map(|s| s.load(Relaxed)).collect();
+    assert!(popped.is_sorted(), "pops ascend");
+    assert_eq!(popped[..freed.len()], freed[..], "freed slots first");
+    // A slice of pointers is filled in ascending order from its start.
+    let mut few = [core::ptr::null_mut(); 3];
+    assert_eq!(back.fill(class, &mut few[..]), 3);
+    assert!(few.is_sorted());
 }
 
 /// A staggered block moving to another staggered block, densely and sparsely: the contents

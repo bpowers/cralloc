@@ -119,7 +119,7 @@ mod tests {
         let class = SmallClass::from_ordinal(1).unwrap();
         let size = class.size();
         let mut objects = [core::ptr::null_mut(); 200];
-        assert_eq!(back.fill(class, &mut objects), 200);
+        assert_eq!(back.fill(class, &mut objects[..]), 200);
         let base = objects[0].addr();
         // Free slots 10..150 (a run that crosses word boundaries) and slot 199.
         let mut freed: Vec<*mut u8> = objects[10..150].to_vec();

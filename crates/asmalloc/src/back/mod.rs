@@ -32,7 +32,7 @@
 
 mod class;
 
-pub use class::SlotPointer;
+pub use class::{Descending, Sink, SlotPointer};
 mod group;
 mod host;
 mod inspect;

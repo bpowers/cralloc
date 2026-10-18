@@ -127,12 +127,12 @@ impl TestSource {
 }
 
 impl Source for TestSource {
-    fn fill(&self, class: SmallClass, out: &mut [Option<NonNull<u8>>]) -> usize {
+    fn fill(&self, class: SmallClass, slots: &[core::sync::atomic::AtomicPtr<u8>]) -> usize {
         let mut count = 0;
-        for slot in out.iter_mut() {
+        for slot in slots.iter().rev() {
             match self.take(class) {
                 Some(object) => {
-                    *slot = Some(object);
+                    slot.store(object.as_ptr(), Relaxed);
                     count += 1;
                 }
                 None => break,
@@ -141,8 +141,9 @@ impl Source for TestSource {
         count
     }
 
-    fn take_back(&self, class: SmallClass, objects: &[NonNull<u8>]) {
-        for &object in objects {
+    fn take_back(&self, class: SmallClass, objects: &[core::sync::atomic::AtomicPtr<u8>]) {
+        for object in objects {
+            let object = NonNull::new(object.load(Relaxed)).expect("a magazine holds null");
             self.give(class, object);
         }
     }

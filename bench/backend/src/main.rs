@@ -1,14 +1,14 @@
 //! asmalloc's back-end launder and fill on their own: cycles and instructions per object, from
 //! hardware counters, for several classes and pointer orders.
 //!
-//!   backbench run [classes=16,64,256,1024,4096] [reps=7] [batch=64] [orders=...] [fills=...]
+//!   backbench run [classes=16,64,256,1024,4096] [reps=7] [batch=mag] [orders=...] [fills=...]
 //!
 //! The benchmark keeps a heap of its own (a `back::State` over the real OS), separate from the
 //! process's global allocator, which stays glibc's. For each class it carves a pool of objects
 //! (as many as fit in a few MiB, so that laundering them never takes the retained count over
 //! its cap and starts a purge), then repeats:
 //!
-//! - **launder**: return every object of the pool, `batch` at a time (the depot's chunk), in
+//! - **launder**: return every object of the pool, `batch` at a time (default `mag`: a whole magazine, as the depot does), in
 //!   one of the orders below, and count the whole loop;
 //! - **fill**: take them all back, `batch` at a time, from bitmaps that are full.
 //!
@@ -30,11 +30,12 @@
 //! Pin it with `BENCH_CPUS` (the first CPU listed is used) and run it under `scripts/memlimit`.
 //! Each figure is the lowest of `reps` repetitions after one untimed warm-up.
 
-use asmalloc::back::{Back, State};
+use asmalloc::back::{Back, Descending, State};
 use asmalloc::classes::{Class, SmallClass};
 use asmalloc::os::linux::LinuxOs;
 use bench_harness::report::Measure;
 use bench_harness::{Args, Counters, Cpus, Rng};
+use std::sync::atomic::AtomicPtr;
 
 static STATE: State<LinuxOs> = State::new(LinuxOs);
 
@@ -65,27 +66,30 @@ struct Bench<'a> {
 }
 
 impl Bench<'_> {
-    /// Fills exactly `n` objects into a vector, `batch` at a time. Panics if the back end
-    /// gives fewer.
-    fn take(&self, n: usize) -> Vec<*mut u8> {
-        let mut out = vec![std::ptr::null_mut(); n];
-        let mut got = 0;
-        while got < n {
-            let want = (n - got).min(self.batch);
-            let filled = self.back.fill(self.class, &mut out[got..got + want]);
+    /// Fills exactly `n` objects into `out`, `batch` at a time, as the depot fills a
+    /// magazine: into its slots, from the top (`back::Descending`). Each magazine is then
+    /// copied out whole, as a stand-in for the front end. Panics if the back end gives fewer.
+    /// `out` should have room for `n`, so that a measured call does not grow it.
+    fn take(&self, n: usize, out: &mut Vec<*mut u8>) {
+        let mut magazine = vec![std::ptr::null_mut::<u8>(); self.batch];
+        out.clear();
+        while out.len() < n {
+            let want = (n - out.len()).min(self.batch);
+            let filled = self.back.fill(self.class, &mut Descending(&atomic(&mut magazine)[..want]));
             assert_eq!(filled, want, "the back end ran out of memory");
-            got += filled;
+            out.extend_from_slice(&magazine[..want]);
         }
-        out
     }
 
-    /// Launders `objects` in order, `batch` at a time.
+    /// Launders `objects` in order, `batch` at a time, as the depot launders a magazine: the
+    /// objects are copied into a magazine's slots, as frees would push them, and the back end
+    /// reads them from there.
     fn give(&self, objects: &[*mut u8]) {
-        let mut buffer = vec![std::ptr::null_mut(); self.batch];
+        let mut magazine = vec![std::ptr::null_mut::<u8>(); self.batch];
         for chunk in objects.chunks(self.batch) {
-            buffer[..chunk.len()].copy_from_slice(chunk);
+            magazine[..chunk.len()].copy_from_slice(chunk);
             // SAFETY: the bench filled these slots itself and uses none of them.
-            unsafe { self.back.launder(self.class, &buffer[..chunk.len()]) };
+            unsafe { self.back.launder(self.class, &atomic(&mut magazine)[..chunk.len()]) };
         }
     }
 
@@ -102,8 +106,8 @@ impl Bench<'_> {
     fn round(&self, order: &[*mut u8]) -> (Cost, Cost, Vec<*mut u8>) {
         let n = order.len();
         let launder = self.cost(n, || self.give(order));
-        let mut pool = Vec::new();
-        let fill = self.cost(n, || pool = self.take(n));
+        let mut pool = Vec::with_capacity(n);
+        let fill = self.cost(n, || self.take(n, &mut pool));
         (launder, fill, pool)
     }
 
@@ -112,8 +116,8 @@ impl Bench<'_> {
     fn sparse_fill(&self, pool: &mut [*mut u8], every: usize) -> Cost {
         let freed: Vec<*mut u8> = pool.iter().step_by(every).copied().collect();
         self.give(&freed);
-        let mut got = Vec::new();
-        let cost = self.cost(freed.len(), || got = self.take(freed.len()));
+        let mut got = Vec::with_capacity(freed.len());
+        let cost = self.cost(freed.len(), || self.take(freed.len(), &mut got));
         for (slot, object) in pool.iter_mut().step_by(every).zip(got) {
             *slot = object;
         }
@@ -155,6 +159,14 @@ fn order(name: &str, pool: &[*mut u8], rng: &mut Rng) -> Vec<*mut u8> {
     v
 }
 
+/// A buffer of pointers seen as a magazine's atomic slots, which the back end reads and writes
+/// (plain copies in and out of the buffer stay cheap, as the front end's are).
+fn atomic(v: &mut [*mut u8]) -> &[AtomicPtr<u8>] {
+    // SAFETY: `AtomicPtr<u8>` has the size and alignment of `*mut u8`, and the exclusive borrow
+    // means nothing else reads or writes the buffer while the view lives.
+    unsafe { std::slice::from_raw_parts(v.as_mut_ptr().cast::<AtomicPtr<u8>>(), v.len()) }
+}
+
 fn shuffle(v: &mut [*mut u8], rng: &mut Rng) {
     for i in (1..v.len()).rev() {
         v.swap(i, rng.below(i as u64 + 1) as usize);
@@ -168,7 +180,7 @@ fn main() {
     let classes: Vec<usize> =
         args.str("classes", "16,64,256,1024,4096").split(',').map(|s| s.parse().expect("a class size")).collect();
     let reps = args.usize("reps", 7);
-    let batch = args.usize("batch", 64);
+    let batch = args.str("batch", "mag");
     let orders = args.str("orders", "asc,desc,two,block,scatter,stride");
     let fills = args.str("fills", "fill,fill/8,fill/64");
     let back = STATE.get_or_reserve().expect("reserve the heap");
@@ -176,9 +188,11 @@ fn main() {
     println!("{:>6} {:>8} {:>7}  {:>9} {:>9}", "class", "case", "objects", "cyc/obj", "ins/obj");
     for size in classes {
         let class = Class::of_size(size).and_then(Class::small).expect("a small class size");
+        let batch = if batch == "mag" { class.magazine().capacity() } else { batch.parse().expect("batch=N or mag") };
         let bench = Bench { back, class, batch, counters: &counters };
         let n = (POOL_BYTES / class.size()).min(MAX_POOL);
-        let mut pool = bench.take(n);
+        let mut pool = Vec::with_capacity(n);
+        bench.take(n, &mut pool);
         pool.sort();
         let mut rng = Rng::new(size as u64);
         let mut dense_fill = Cost::default();

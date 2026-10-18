@@ -107,6 +107,20 @@ impl Magazine<'_> {
         unsafe { AtomicPtr::from_ptr(address.cast::<*mut u8>()) }
     }
 
+    /// The object slots, 1 to `capacity`, as one slice, for a fill or a launder of a magazine
+    /// this thread holds: the back end reads and writes them in place. The plain `core` atomic
+    /// type, without the interleaving checker's switch points, which a magazine nobody else
+    /// can reach does not need.
+    pub(crate) fn objects(&self) -> &[core::sync::atomic::AtomicPtr<u8>] {
+        let first = self
+            .base
+            .as_ptr()
+            .wrapping_add(SLOT_BYTES)
+            .cast::<core::sync::atomic::AtomicPtr<u8>>();
+        // SAFETY: MAGAZINE-02 in docs/safety/asmalloc/depot/magazine-safety.md.
+        unsafe { core::slice::from_raw_parts(first, self.size.capacity()) }
+    }
+
     /// The link, slot 0, as the stacks use it.
     pub(super) fn link(&self) -> &AtomicPtr<u8> {
         self.slot(0)

@@ -1,20 +1,21 @@
 //! The back end as the depot's [`Source`].
 //!
-//! The depot moves pointers in `Option<NonNull<u8>>` and `NonNull<u8>` slices, which the back
-//! end fills and launders as they are (`back::SlotPointer`).
+//! The depot hands over a magazine's object slots, which the back end fills and launders in
+//! place (`back::Descending`, `back::SlotPointer`).
 
-use crate::back::Back;
+use crate::back::{Back, Descending};
 use crate::classes::SmallClass;
 use crate::depot::Source;
 use crate::os::Os;
 use core::ptr::NonNull;
+use core::sync::atomic::AtomicPtr;
 
 impl<O: Os> Source for Back<'_, O> {
-    fn fill(&self, class: SmallClass, out: &mut [Option<NonNull<u8>>]) -> usize {
-        Back::fill(self, class, out)
+    fn fill(&self, class: SmallClass, slots: &[AtomicPtr<u8>]) -> usize {
+        Back::fill(self, class, &mut Descending(slots))
     }
 
-    fn take_back(&self, class: SmallClass, objects: &[NonNull<u8>]) {
+    fn take_back(&self, class: SmallClass, objects: &[AtomicPtr<u8>]) {
         // SAFETY: HEAP-SOURCE-01.
         unsafe { self.launder(class, objects) };
     }
