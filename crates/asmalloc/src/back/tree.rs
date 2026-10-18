@@ -33,6 +33,13 @@
 //!
 //! The summary bits are hints: they may be set over nothing free, and a word with free bits
 //! never has its bit clear once the threads working on it have finished.
+//!
+//! Until they have, a free slot can be invisible, and batching a run's clears widens two such
+//! windows. A free that completes while a run holds the clear of its word is hidden from the
+//! run's AND until the run reads that word again, so a search in that window may find nothing
+//! and carve though the slot is free. And a run lost in a fork between its AND and its re-reads
+//! leaves every word of its batch that was refilled meanwhile invisible, not one word, until a
+//! free lands in each.
 
 use super::layout::{Layout, MAX_LEVELS};
 use super::word::{BITS, Word, lowest};

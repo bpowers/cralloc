@@ -542,6 +542,8 @@ fn a_batch_release_races_claims_through_a_cursor(preemptions: usize) {
             let kept = kept.lock().unwrap().clone();
             let distinct: BTreeSet<_> = kept.iter().copied().collect();
             assert_eq!(distinct.len(), kept.len(), "a slot claimed twice");
+            // Before the releases below, whose healing walks would repair a lost bit.
+            assert!(host.all_visible(), "a free word is invisible");
             release_all(host, &kept);
             let mut expected: BTreeSet<u64> = [0, 64 * 64].into_iter().collect();
             expected.extend(freed.iter().map(|&s| s as u64));
@@ -586,6 +588,8 @@ fn a_cursor_run_races_frees_below_and_above_it(preemptions: usize) {
         |(host, kept), outcome| {
             assert!(outcome.killed.is_empty());
             let kept = kept.lock().unwrap().clone();
+            // Before the releases below, whose healing walks would repair a lost bit.
+            assert!(host.all_visible(), "a free word is invisible");
             release_all(host, &kept);
             let expected: BTreeSet<u64> = [0, 1, 64 * 64, 64 * 70].into_iter().collect();
             assert_eq!(free_set(host, 1), expected);
@@ -604,6 +608,369 @@ fn a_cursor_run_races_frees_below_and_above_it_quickly() {
 #[ignore = "slow: run with scripts/gate --all"]
 fn a_cursor_run_races_frees_below_and_above_it_fully() {
     a_cursor_run_races_frees_below_and_above_it(3);
+}
+
+/// The check of the run scenarios below: nothing was claimed twice; every word is visible before
+/// any release that would heal a lost bit; a fill alone then finds every free slot before it
+/// reports none; and with everything released, exactly `expected` is free.
+fn run_check(host: &Host8, regions: usize, kept: &Mutex<Vec<(RegionId, u32)>>, expected: &[u64]) {
+    let kept = kept.lock().unwrap().clone();
+    let distinct: BTreeSet<_> = kept.iter().copied().collect();
+    assert_eq!(distinct.len(), kept.len(), "a slot claimed twice");
+    assert!(host.all_visible(), "a free word is invisible");
+    let free = free_set(host, regions);
+    let got = claim_run_of(host, 4096, 64);
+    let found: BTreeSet<u64> = got.iter().map(|&(r, s)| host.global(r, s)).collect();
+    assert_eq!(found, free, "a fill missed a free slot");
+    assert!(host.all_visible(), "a free word is invisible after a fill");
+    release_all(host, &got);
+    release_all(host, &kept);
+    let expected: BTreeSet<u64> = expected.iter().copied().collect();
+    assert_eq!(free_set(host, regions), expected);
+    assert!(host.all_visible(), "a free word is invisible");
+}
+
+/// `deep_setup` with slot 64 free as well: two words with free slots under the first level-1
+/// word, one under the second.
+fn deep_run_setup() -> Host8 {
+    let host = deep_setup();
+    free_now(&host, host.region_at(0), 64);
+    host
+}
+
+/// Two summary levels: a run empties both words of the first group, so its batch's AND empties
+/// the level-1 word and it goes on to clear the level-2 bit, then moves to the second group.
+/// Frees land in the words it holds and in the group it moves to, and a claim searches from
+/// the top. Preemptions bounded to two (one in the quick run).
+fn a_deep_batch_that_goes_up_races_frees(preemptions: usize) {
+    explore(
+        Config {
+            preemptions: Some(preemptions),
+            ..Config::ALL
+        },
+        3,
+        || (deep_run_setup(), Mutex::new(Vec::new())),
+        |(host, kept), me| {
+            let r0 = host.region_at(0);
+            let got = match me {
+                0 => claim_run_of(host, 3, 1),
+                1 => {
+                    free_now(host, r0, 1);
+                    free_now(host, r0, 65);
+                    Vec::new()
+                }
+                _ => {
+                    free_now(host, r0, 64 * 64 + 1);
+                    claim(host, 1)
+                }
+            };
+            kept.lock().unwrap().extend(got);
+        },
+        |(host, kept), outcome| {
+            assert!(outcome.killed.is_empty());
+            run_check(host, 1, kept, &[0, 1, 64, 65, 64 * 64, 64 * 64 + 1]);
+        },
+    );
+}
+
+#[test]
+#[cfg_attr(miri, ignore)]
+fn a_deep_batch_that_goes_up_races_frees_quickly() {
+    a_deep_batch_that_goes_up_races_frees(1);
+}
+
+#[test]
+#[ignore = "slow: run with scripts/gate --all"]
+fn a_deep_batch_that_goes_up_races_frees_fully() {
+    a_deep_batch_that_goes_up_races_frees(2);
+}
+
+/// Two summary levels: two runs empty the same words of one group, so their batches overlap,
+/// while a free refills a word between them. Preemptions bounded to two (one in the quick run).
+fn deep_runs_with_overlapping_batches(preemptions: usize) {
+    explore(
+        Config {
+            preemptions: Some(preemptions),
+            ..Config::ALL
+        },
+        3,
+        || (deep_run_setup(), Mutex::new(Vec::new())),
+        |(host, kept), me| {
+            let r0 = host.region_at(0);
+            let got = match me {
+                0 | 1 => claim_run_of(host, 3, 1),
+                _ => {
+                    free_now(host, r0, 1);
+                    free_now(host, r0, 66);
+                    Vec::new()
+                }
+            };
+            kept.lock().unwrap().extend(got);
+        },
+        |(host, kept), outcome| {
+            assert!(outcome.killed.is_empty());
+            run_check(host, 1, kept, &[0, 1, 64, 66, 64 * 64]);
+        },
+    );
+}
+
+#[test]
+#[cfg_attr(miri, ignore)]
+fn deep_runs_with_overlapping_batches_quickly() {
+    deep_runs_with_overlapping_batches(1);
+}
+
+#[test]
+#[ignore = "slow: run with scripts/gate --all"]
+fn deep_runs_with_overlapping_batches_fully() {
+    deep_runs_with_overlapping_batches(2);
+}
+
+/// Two regions with one summary level each: a batch's AND empties a region's top word, whose
+/// own bit is in a class word shared with the other region, while frees land in both regions
+/// and a second run claims. Preemptions bounded to two (one in the quick run).
+fn a_batch_empties_a_region_under_a_shared_class_word(preemptions: usize) {
+    explore(
+        Config {
+            preemptions: Some(preemptions),
+            ..Config::ALL
+        },
+        3,
+        || {
+            let host = Host8::new(tiny(), class(8), 2);
+            let (r0, r1) = (host.region_at(0), host.region_at(1));
+            host.carve_all(r0, 256);
+            host.carve_all(r1, 256);
+            free_now(&host, r0, 0);
+            free_now(&host, r0, 64);
+            free_now(&host, r1, 0);
+            (host, Mutex::new(Vec::new()))
+        },
+        |(host, kept), me| {
+            let (r0, r1) = (host.region_at(0), host.region_at(1));
+            let got = match me {
+                0 => claim_run_of(host, 3, 1),
+                1 => {
+                    free_now(host, r0, 1);
+                    free_now(host, r1, 70);
+                    Vec::new()
+                }
+                _ => claim_run_of(host, 2, 2),
+            };
+            kept.lock().unwrap().extend(got);
+        },
+        |(host, kept), outcome| {
+            assert!(outcome.killed.is_empty());
+            let first = host.global(host.region_at(1), 0);
+            run_check(host, 2, kept, &[0, 1, 64, first, first + 70]);
+        },
+    );
+}
+
+#[test]
+#[cfg_attr(miri, ignore)]
+fn a_batch_empties_a_region_under_a_shared_class_word_quickly() {
+    a_batch_empties_a_region_under_a_shared_class_word(1);
+}
+
+#[test]
+#[ignore = "slow: run with scripts/gate --all"]
+fn a_batch_empties_a_region_under_a_shared_class_word_fully() {
+    a_batch_empties_a_region_under_a_shared_class_word(2);
+}
+
+/// Regions whose tree is a single word: a run has no group to batch in, and clears the word's
+/// bit, which is a class word's, as soon as it empties the word. Preemptions bounded to two
+/// (one in the quick run).
+fn runs_over_regions_of_one_word(preemptions: usize) {
+    explore(
+        Config {
+            preemptions: Some(preemptions),
+            ..Config::ALL
+        },
+        3,
+        || {
+            let host = Host8::new(tiny(), class(256), 2);
+            assert_eq!(host.layout().height(), 0);
+            let (r0, r1) = (host.region_at(0), host.region_at(1));
+            host.carve_all(r0, 8);
+            host.carve_all(r1, 8);
+            free_now(&host, r0, 0);
+            free_now(&host, r1, 0);
+            (host, Mutex::new(Vec::new()))
+        },
+        |(host, kept), me| {
+            let (r0, r1) = (host.region_at(0), host.region_at(1));
+            let got = match me {
+                0 => claim_run_of(host, 3, 1),
+                1 => {
+                    free_now(host, r0, 1);
+                    free_now(host, r1, 1);
+                    Vec::new()
+                }
+                _ => claim_run_of(host, 2, 2),
+            };
+            kept.lock().unwrap().extend(got);
+        },
+        |(host, kept), outcome| {
+            assert!(outcome.killed.is_empty());
+            let first = host.global(host.region_at(1), 0);
+            run_check(host, 2, kept, &[0, 1, first, first + 1]);
+        },
+    );
+}
+
+#[test]
+#[cfg_attr(miri, ignore)]
+fn runs_over_regions_of_one_word_quickly() {
+    runs_over_regions_of_one_word(1);
+}
+
+#[test]
+#[ignore = "slow: run with scripts/gate --all"]
+fn runs_over_regions_of_one_word_fully() {
+    runs_over_regions_of_one_word(2);
+}
+
+/// A run against a purge's claims, which take exact bits and give them back, and a free.
+/// Preemptions bounded to two (one in the quick run).
+fn a_run_races_exact_claims(preemptions: usize) {
+    explore(
+        Config {
+            preemptions: Some(preemptions),
+            ..Config::ALL
+        },
+        3,
+        || (run_setup(), Mutex::new(Vec::new())),
+        |(host, kept), me| {
+            let r0 = host.region_at(0);
+            let got = match me {
+                0 => claim_run_of(host, 3, 2),
+                1 => {
+                    for (word, bits) in [(1, 0b11), (0, 0b1)] {
+                        if tree::claim_exact(host, r0, word, bits) {
+                            tree::release(host, r0, word, bits);
+                        }
+                    }
+                    Vec::new()
+                }
+                _ => {
+                    free_now(host, r0, 1);
+                    free_now(host, r0, 129);
+                    Vec::new()
+                }
+            };
+            kept.lock().unwrap().extend(got);
+        },
+        |(host, kept), outcome| {
+            assert!(outcome.killed.is_empty());
+            run_check(host, 1, kept, &[0, 1, 64, 65, 128, 129]);
+        },
+    );
+}
+
+#[test]
+#[cfg_attr(miri, ignore)]
+fn a_run_races_exact_claims_quickly() {
+    a_run_races_exact_claims(1);
+}
+
+#[test]
+#[ignore = "slow: run with scripts/gate --all"]
+fn a_run_races_exact_claims_fully() {
+    a_run_races_exact_claims(2);
+}
+
+/// Two fills by one thread over the same words while another thread frees into them in
+/// batches, whose walks up are shared and deferred. Preemptions bounded to three (two in the
+/// quick run).
+fn two_fills_race_batched_releases(preemptions: usize) {
+    explore(
+        Config {
+            preemptions: Some(preemptions),
+            ..Config::ALL
+        },
+        2,
+        || (run_setup(), Mutex::new(Vec::new())),
+        |(host, kept), me| {
+            let got = if me == 0 {
+                let mut got = claim_run_of(host, 4, 1);
+                got.extend(claim_run_of(host, 4, 1));
+                got
+            } else {
+                free_batch(host, &[1, 66, 129, 192]);
+                free_batch(host, &[2, 130]);
+                Vec::new()
+            };
+            kept.lock().unwrap().extend(got);
+        },
+        |(host, kept), outcome| {
+            assert!(outcome.killed.is_empty());
+            run_check(host, 1, kept, &[0, 1, 2, 64, 65, 66, 128, 129, 130, 192]);
+        },
+    );
+}
+
+#[test]
+#[cfg_attr(miri, ignore)]
+fn two_fills_race_batched_releases_quickly() {
+    two_fills_race_batched_releases(2);
+}
+
+#[test]
+#[ignore = "slow: run with scripts/gate --all"]
+fn two_fills_race_batched_releases_fully() {
+    two_fills_race_batched_releases(3);
+}
+
+/// `a_run_lost_with_held_clears` with two summary levels: a run may vanish holding clears, or
+/// between its batch's AND and its re-reads, or on its way up. Afterwards a free into each
+/// word makes the word reachable, and a fill finds every free slot. Preemptions bounded to two.
+fn a_deep_run_lost_at_any_step(preemptions: usize) {
+    explore(
+        Config {
+            preemptions: Some(preemptions),
+            crash: true,
+            ..Config::ALL
+        },
+        3,
+        || (deep_run_setup(), Mutex::new(Vec::new())),
+        |(host, kept), me| {
+            let got = match me {
+                0 => {
+                    free_now(host, host.region_at(0), 1);
+                    claim_run_of(host, 2, 1)
+                }
+                1 => claim_run_of(host, 3, 1),
+                _ => claim_run_of(host, 2, 2),
+            };
+            kept.lock().unwrap().extend(got);
+        },
+        |(host, kept), _| {
+            let kept: Vec<_> = kept.lock().unwrap().clone();
+            let distinct: BTreeSet<_> = kept.iter().copied().collect();
+            assert_eq!(distinct.len(), kept.len(), "a slot claimed twice");
+            let r0 = host.region_at(0);
+            for w in [0, 1, 64] {
+                free_now(host, r0, w * BITS + 3);
+                assert!(
+                    host.path_set(Node::leaf(r0, w)),
+                    "word {w} stays invisible after a free into it"
+                );
+            }
+            let free = free_set(host, 1);
+            let got = claim_run_of(host, 4096, 64);
+            let found: BTreeSet<u64> = got.iter().map(|&(_, s)| s as u64).collect();
+            assert_eq!(found, free, "a fill missed a free slot");
+        },
+    );
+}
+
+/// No quick run: one preemption already takes several seconds, and two take minutes.
+#[test]
+#[ignore = "slow: run with scripts/gate --all"]
+fn a_deep_run_lost_at_any_step_fully() {
+    a_deep_run_lost_at_any_step(2);
 }
 
 /// `Summary_heal_crash.cfg`: as `summary_three_threads_bounded`, but threads 1 and 2 may vanish
