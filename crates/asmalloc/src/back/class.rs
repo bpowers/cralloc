@@ -1300,9 +1300,18 @@ fn release_words<'h, O: Os, P: SlotPointer, const ROOM: usize, const SPAN: usize
         if gather.scattered() {
             let mut direct = Direct::new();
             gather.drain(release, &mut direct);
+            // The leaf words below the watermark of the region the slots are in, so that each
+            // slot finds its word with an index.
+            let leaves_of = |release: &tree::Release<'h, _>, met: &Met| {
+                (met.region, release.leaves(met.region, met.limit.div_ceil(BITS)))
+            };
+            let (mut region, mut leaves) = leaves_of(release, met);
             for object in rest {
                 let slot = slot_of(checker, object, met, fast);
-                direct.free_slot(release, met.region, slot);
+                if met.region != region {
+                    (region, leaves) = leaves_of(release, met);
+                }
+                direct.free_slot(release, leaves, region, slot);
             }
             direct.finish(release);
         } else {

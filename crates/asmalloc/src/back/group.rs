@@ -370,16 +370,18 @@ impl Direct {
         }
     }
 
-    /// Frees slot `slot` of `region`. Aborts if it is free.
+    /// Frees slot `slot` of `region`, whose leaf words up to the slot's at least are `leaves`
+    /// ([`Release::leaves`]). Aborts if it is free.
     #[inline(always)]
     pub(crate) fn free_slot<H: Host>(
         &mut self,
         release: &mut Release<'_, H>,
+        leaves: &[H::W],
         region: RegionId,
         slot: u32,
     ) {
         let word = slot / BITS;
-        release.leaf_bit(region, word, 1 << (slot % BITS));
+        release.leaf_bit_in(leaves, word, 1 << (slot % BITS));
         self.debts.owe(release, region, word);
     }
 

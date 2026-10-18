@@ -194,6 +194,11 @@ impl<W: TestWord> Host for TestHost<W> {
         &self.layout
     }
 
+    fn leaves(&self, region: RegionId, count: u32) -> &[W] {
+        let first = self.layout.tree_word(0, 0) as usize;
+        &self.meta[region.index()][first..first + count as usize]
+    }
+
     fn region(&self, index: usize) -> Option<RegionId> {
         if index < self.regions {
             self.plan.region(index)

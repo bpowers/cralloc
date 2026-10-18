@@ -1395,7 +1395,8 @@ fn free_direct(host: &Host8, slots: &[(RegionId, u32)]) {
     let mut release = tree::Release::new(host, region);
     let mut direct = Direct::new();
     for &(region, slot) in slots {
-        direct.free_slot(&mut release, region, slot);
+        let leaves = release.leaves(region, slot / BITS + 1);
+        direct.free_slot(&mut release, leaves, region, slot);
     }
     direct.finish(&mut release);
     release.finish();

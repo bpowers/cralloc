@@ -75,6 +75,11 @@ pub(crate) trait Host {
     /// a slot below the watermark.
     fn meta(&self, region: RegionId, word: u32) -> &Self::W;
 
+    /// Leaf words `0..count` of a region's bitmap, as [`Host::meta`] gives them one at a time.
+    /// The caller knows them all to be committed: `count` covers only slots below a watermark
+    /// it read for the region. Aborts if `count` is more than the region has.
+    fn leaves(&self, region: RegionId, count: u32) -> &[Self::W];
+
     /// A region's `Grow` word: its watermark and committed pages (`layout::Grow`).
     fn grow(&self, region: RegionId) -> &Self::W;
 
@@ -782,6 +787,26 @@ impl<'h, H: Host> Release<'h, H> {
     #[inline(always)]
     pub(crate) fn leaf_bit(&mut self, region: RegionId, index: u32, bit: u64) {
         if Spot::leaf(region, index).word(self.host).fetch_or(bit) & bit != 0 {
+            self.host
+                .abort("double free: an object was freed while already free");
+        }
+    }
+
+    /// Leaf words `0..count` of `region`, for [`Release::leaf_bit_in`]: see [`Host::leaves`].
+    #[inline]
+    pub(crate) fn leaves(&self, region: RegionId, count: u32) -> &'h [H::W] {
+        self.host.leaves(region, count)
+    }
+
+    /// [`Release::leaf_bit`] on word `index` of `leaves`, which [`Release::leaves`] gave for the
+    /// slot's region: the word's address without working it out from the region each time.
+    /// Aborts if `index` is not one of them.
+    #[inline(always)]
+    pub(crate) fn leaf_bit_in(&mut self, leaves: &[H::W], index: u32, bit: u64) {
+        let Some(word) = leaves.get(index as usize) else {
+            self.host.abort("a leaf word past the region's watermark");
+        };
+        if word.fetch_or(bit) & bit != 0 {
             self.host
                 .abort("double free: an object was freed while already free");
         }
