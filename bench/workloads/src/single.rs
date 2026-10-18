@@ -12,6 +12,8 @@
 //!   it; `reps` times.
 //! - `vecgrow`: grow `vecs` vectors of `u64`, round-robin, until each holds `max` bytes, so
 //!   they double by `realloc` all the way, as pushing would; then drop them; `reps` times.
+//!   With `moves=1`, one more repetition after the measured phase counts the moves and the
+//!   bytes they copied.
 //! - `json`: parse a generated `size`-byte JSON document into `serde_json::Value` and drop
 //!   it, `reps` times.
 use bench_harness::mem::rss_now;
@@ -326,12 +328,55 @@ pub fn vecgrow(args: &Args) {
     let run = m.stop();
     black_box(acc);
     let elements = (reps * vecs * per) as f64;
-    Report::new("vecgrow", args)
-        .param("chunk", GROW_CHUNK as u64)
-        .phase("run", &run)
-        .metric("elements", elements)
-        .primary("cycles/element", cycles(&run) / elements, Better::Lower)
-        .emit();
+    let mut report = Report::new("vecgrow", args);
+    report.param("chunk", GROW_CHUNK as u64).phase("run", &run).metric("elements", elements);
+    // After the measured phase, so that it changes nothing the phase measures.
+    if args.usize("moves", 0) != 0 {
+        let moved = count_moves(vecs, per);
+        report
+            .metric("moves", moved.moves)
+            .metric("copied_bytes", moved.copied)
+            .metric("large_moves", moved.large_moves)
+            .metric("large_copied_bytes", moved.large_copied);
+    }
+    report.primary("cycles/element", cycles(&run) / elements, Better::Lower).emit();
+}
+
+/// What one repetition of [`grow_and_drop`] moved: reallocations that returned a new address,
+/// and the bytes the allocator had to copy for them (the old capacity), in all and for blocks
+/// above the largest small class (32 KiB).
+struct Moved {
+    moves: u64,
+    copied: u64,
+    large_moves: u64,
+    large_copied: u64,
+}
+
+/// One repetition of [`grow_and_drop`], with the same calls, that counts the moves instead of
+/// timing them (`moves=1`).
+#[inline(never)]
+fn count_moves(vecs: usize, per: usize) -> Moved {
+    let mut moved = Moved { moves: 0, copied: 0, large_moves: 0, large_copied: 0 };
+    let mut vs: Vec<Vec<u64>> = (0..vecs).map(|_| Vec::new()).collect();
+    let mut len = 0;
+    while len < per {
+        let step = len.clamp(4, GROW_CHUNK).min(per - len);
+        len += step;
+        for v in vs.iter_mut() {
+            let (at, bytes) = (v.as_ptr(), v.capacity() * 8);
+            v.resize(len, GROW_FILL);
+            if bytes > 0 && v.as_ptr() != at {
+                moved.moves += 1;
+                moved.copied += bytes as u64;
+                if bytes > 32 << 10 {
+                    moved.large_moves += 1;
+                    moved.large_copied += bytes as u64;
+                }
+            }
+        }
+    }
+    drop(black_box(vs));
+    moved
 }
 
 /// The most elements one step of [`grow_and_drop`] appends to a vector.
