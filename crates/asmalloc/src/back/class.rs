@@ -1333,7 +1333,7 @@ fn release_words<'h, O: Os, P: SlotPointer, const ROOM: usize, const SPAN: usize
     // they are scattered, else gathered as runs end.
     if let Some(rest) = objects.get(at..).filter(|rest| !rest.is_empty()) {
         if gather.scattered() {
-            let direct = gather.into_direct(release);
+            let direct = gather.go_direct(release);
             // The leaf words below the watermark of the region the slots are in, so that each
             // slot finds its word with an index.
             let leaves_of = |release: &tree::Release<'h, _>, met: &Met| {

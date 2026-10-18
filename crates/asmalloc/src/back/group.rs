@@ -81,6 +81,9 @@ pub(crate) struct Gather<const ROOM: usize, const SPAN: usize> {
 /// Where a batch's words go beyond the window and the early words: the map, or, once the batch
 /// is judged scattered, the direct path. The two are never needed at once, and share one place
 /// on the stack of whatever thread is freeing, which may be small.
+// The variants differ in size and both live on the stack: there is no heap to box one on, and
+// the enum is the one place the two share.
+#[allow(clippy::large_enum_variant)]
 enum Spill<const ROOM: usize> {
     Nothing,
     Map(Words<ROOM>),
@@ -139,7 +142,7 @@ impl<const ROOM: usize, const SPAN: usize> Gather<ROOM, SPAN> {
     /// [`Direct`] in its place, hands it every word gathered in the window and the early words,
     /// and returns it for the rest of the batch. [`Gather::finish`] pays its debts.
     #[inline(never)]
-    pub(crate) fn into_direct<H: Host>(&mut self, release: &mut Release<'_, H>) -> &mut Direct {
+    pub(crate) fn go_direct<H: Host>(&mut self, release: &mut Release<'_, H>) -> &mut Direct {
         if let Spill::Map(words) = &mut self.spill {
             words.flush(release);
         }
