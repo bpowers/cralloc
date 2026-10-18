@@ -239,5 +239,9 @@ single call:
   `abort_runs_the_programs_handler_then_ends_the_process_anyway` and
   `an_abort_inside_the_handler_ends_the_process`: child processes, checking the signal, the
   message, that a returning handler ran, and that a handler that aborts runs once.
+- `read_file_reads_a_whole_file_or_nothing`, `read_file_leaks_no_descriptor` and
+  `topology_paths_fit_for_any_cpu_number` (KERNEL-10): a file that fits, fills or overflows
+  the buffer, an empty file, a path with no NUL, a failed open, a read that fails after the
+  open, and more calls on every path than the descriptor limit.
 
-Reviewed: 415b07e
+Reviewed: e224366
