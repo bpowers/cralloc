@@ -7,8 +7,7 @@ The exception is the timestamp-counter read in `ticks` (KERNEL-09).
 Neither Kani nor Miri can run this file; the unit tests in it run every call on the real kernel.
 
 References are to the Linux man pages (mmap(2), mprotect(2), madvise(2), munmap(2),
-membarrier(2), getrandom(2), rt_sigaction(2), sigprocmask(2), tgkill(2), nanosleep(2),
-write(2)) and to
+membarrier(2), getrandom(2), rt_sigaction(2), sigprocmask(2), tgkill(2), write(2)) and to
 `include/uapi/linux/{mman,membarrier,random}.h`.
 
 ## KERNEL-01: `range_call`
@@ -104,115 +103,51 @@ memory-safety matter: a child that drew its parent's generation would treat the 
 abandoned drain claim and markers as live, which leaves one CPU's cache undrained and on the
 slow path, and duplicates nothing.
 
-## KERNEL-06: `abort`, `claim`, and the calls they make
+## KERNEL-06: `abort` and the calls it makes
 
-**Blocks.** rt_sigprocmask in `unblock_sigabrt`; getpid and gettid in `Aborter::current`;
-tgkill with signal 0 in `Aborter::is_alive`; tgkill with SIGABRT in `Aborter::raise_sigabrt`;
-nanosleep in `sleep_step`; rt_sigaction and exit_group in `abort_with`.
+**Blocks.** getpid, gettid and tgkill in `raise_sigabrt`; rt_sigaction in `default_sigabrt`;
+rt_sigprocmask in `unblock_sigabrt`; exit_group in `abort`.
 
-**Order.** The thread that claims `ABORTING` (below) unblocks SIGABRT and raises it with the
+**Order.** `abort` writes its message, then raises SIGABRT on the calling thread with the
 program's disposition in place, as glibc's `abort` does, so a crash reporter's handler runs.
 The heap is valid at that point: the allocator refused to go on, it did not break. If the
-handler returns, or ignores the signal, or calls back into `abort` on the same thread, `abort`
-restores the default action, unblocks and raises again, and ends with exit_group if even that
-returns. A thread that does not claim goes straight to that second step, after waiting if it
-must.
+raise returns (the handler returned, the signal is ignored, or it is blocked), `abort` resets
+SIGABRT to the default action, unblocks it, and raises again, which ends the process with a
+core dump. If even that returns, exit_group(127) ends the process, so the function does not
+return, as `-> !` requires.
 
-**The entry.** `ABORTING` is one `AtomicU64`: zero, or the process ID (high half) and thread
-ID (low half) of the thread that claimed it, as getpid and gettid report them. Both IDs are
-positive and at most 2^22 (`PID_MAX_LIMIT`), so the casts to `u32` keep them and zero names no
-thread. It changes only by one compare-and-swap from the value the thread judged, and is never
-cleared, since the process is ending. A fork copies it, which is why it names the process.
+**The first raise does not unblock SIGABRT.** Inside the program's own SIGABRT handler the
+signal is blocked (unless the handler was installed with `SA_NODEFER`), so an abort from there,
+by a handler that allocates into the failure that brought it here, leaves its first raise
+pending; the reset and the unblock then deliver it with the default action. The handler is not
+run again, and nothing recurses. A thread that blocked SIGABRT for some other reason skips the
+program's handler the same way.
 
-**What an aborting thread does** (`judge`, then `claim`), for every value it can find:
+**Two threads at once.** Each runs the handler on its own thread. The first whose handler
+returns resets the disposition and ends the process, possibly before the other's handler has
+finished its report. That is accepted: it costs at most part of a crash report, and it needs no
+shared state and no waiting. glibc 2.43's `abort` behaves the same way in this respect: the
+first thread to finish its handler ends the process under every other thread's
+(`stdlib/abort.c`).
 
-1. *Zero.* No one is aborting. It claims the entry and runs the handler.
-2. *Its own process and thread IDs.* Its own handler called back in (by allocating into the
-   failure that brought it here, say). It goes to the default action.
-3. *Another process's IDs.* Stale. A fork copied the entry: the child of a handler that forks
-   (crash reporters do), or of any other thread that forked while the handler ran. Or a
-   process that shares this memory without being a thread of it (a vfork child) wrote it. No
-   thread of this process will finish that abort, so it claims the entry and runs the handler.
-   This is the finding abort-parks-forked-child: before, the child kept the parent's thread ID
-   and parked for ever.
-4. *This process, a thread it no longer has.* Stale: tgkill(pid, tid, 0) fails with ESRCH (the
-   first aborter's handler left and its thread exited). It claims the entry and runs the
-   handler. A thread that is exiting is still found for a moment, so it may first count as
-   alive (case 5) for a step.
-5. *This process, a live thread.* It waits, in steps of 10 ms, judging the entry again after
-   each, for at most `PATIENCE` steps (about ten seconds). Usually the first aborter ends the
-   process meanwhile. If the entry turns stale (case 4), it claims it. If its patience runs out,
-   it goes to the default action, ending the process under the first thread's handler. That
-   happens when the handler is blocked on something the waiting thread holds (a lock on a
-   stream, if the waiting thread aborted from inside a C library call holding one), when the
-   handler is slower than ten seconds, or when the handler escaped (longjmp) and its thread
-   lives on.
-
-**Why no abort parks for ever, by construction.** Every case ends in the handler (cases 1, 3,
-4, then the default action), the default action (case 2), or a wait of at most `PATIENCE`
-steps (case 5). No case depends on another thread making progress. `sleep_step` resumes an
-interrupted nanosleep with the time remaining, which the kernel computes from the original
-expiry, so a step lasts its 10 ms of wall-clock time and no more, and a burst of signals
-cannot shorten the wait. A compare-and-swap in `claim` fails only when another aborting thread
-changed the entry; each thread's swap succeeds at most once and then it returns, so a thread
-retries at most once per other aborting thread. The one thing without a bound is the
-program's own handler on the claiming thread; a handler that never returns hangs glibc's
-`abort` too.
-
-**What it can misread, and what then happens.** Each still ends the process.
-
-- A descendant can get the process ID of an aborting process after that process is reaped, and
-  inherit its entry through a fork chain. The entry then looks like this process's, and the
-  liveness check decides: no such thread, claim (case 4); a thread with that ID, wait (case 5).
-- A thread ID can be reused within the process after the first aborter's thread exits. The new
-  thread's abort reads as nested (case 2) and skips the handler.
-- An exited main thread stays a zombie while other threads live, so tgkill finds it and the
-  waiter waits out its patience.
-- tgkill failing for any reason but ESRCH (a seccomp filter, say) counts as alive: a bounded
-  wait, not a wrong claim.
-
-**What glibc 2.43 does**, from its source at tag `glibc-2.43` (`stdlib/abort.c`,
-`signal/sigaction.c`, `sysdeps/nptl/_Fork.c`, `posix/fork.c`,
-`sysdeps/unix/sysv/linux/spawni.c`, read 2026-10-17). `abort` raises SIGABRT first, with no
-lock, so any number of threads can run the handler at once. Only when a raise returns does
-that thread take the abort lock, a reader-writer lock, on the write side with all signals
-blocked; it never releases it, resets SIGABRT to the default and raises again.
-`sigaction(SIGABRT)` takes the write side, and `_Fork` and `posix_spawn` the read side, so no
-fork starts once a thread is in that second phase, and a multithreaded fork reinitializes the
-lock in the child (`__abort_fork_reset_child`). The lock orders the reset against sigaction,
-fork and spawn. It does not protect a handler that is running: the first thread whose handler
-returns ends the process under every other thread's handler. The earlier text here said the
-parked threads waited "as they would on glibc's abort lock"; that was wrong. A handler that
-longjmps away leaves no glibc thread waiting, since nothing takes the lock before the raise.
-This design differs from glibc on purpose: a second aborter does not run the handler alongside
-the first, and waits, for a bounded time, rather than cutting the first one short. A child
-forked mid-abort starts with a usable `abort` in both.
-
-**Rules.** No lock: a waiting thread holds nothing and the first aborter waits for nothing.
-No thread-local state: the entry is one static word, all-zero valid, and changes by one
-compare-and-swap. Nothing allocates. The wait is the only one in the crate. It happens only in
-a process that is ending, and it is bounded.
+**Rules.** No shared state, no lock, no wait, no allocation.
 
 **Proof of the blocks.**
 
-- rt_sigprocmask(SIG_UNBLOCK, `&set`, null, 8) reads one signal set from a live local.
+- getpid and gettid take nothing. tgkill(pid, tid, SIGABRT) with this thread's IDs runs the
+  disposition in force on this thread: the program's handler the first time, the default (end
+  the process with a core dump) the second.
 - rt_sigaction(SIGABRT, `&default`, null, 8) reads one `KernelSigaction` from a live local.
   The layout is the kernel's x86-64 `struct sigaction`: handler, flags, restorer, mask, which
-  differs from glibc's. The size argument 8 is the kernel's `sigset_t`. The old-action and
-  old-set pointers are null, so nothing is written back.
-- nanosleep(`&request`, `&remaining`) reads one `struct timespec` (two 64-bit words on x86-64,
-  `tv_sec` then `tv_nsec`, here 0 and 10^7) from a live local and, only when interrupted,
-  writes one to `remaining`, a live, exclusively borrowed local of the same size.
-- The other pointers come from shared references and the kernel only reads them.
-- getpid and gettid take nothing. tgkill(pid, tid, 0) sends nothing: signal 0 only checks that
-  thread `tid` is in thread group `pid` and may be signalled. tgkill(pid, tid, SIGABRT) runs
-  the disposition in force: the program's handler the first time, the default (end the process
-  with a core dump) the second. exit_group(127) ends the process if both raises returned, so
-  the function does not return, as `-> !` requires.
-- Changing the process's SIGABRT disposition and mask is this function's to do, because the
-  process is ending. A handler that allocates re-enters a heap that is still consistent; at
-  worst it aborts again, which case 2 turns into the default action.
-- `ABORTING` holds no allocator state.
+  differs from glibc's. The size argument 8 is the kernel's `sigset_t`. The old-action pointer
+  is null, so nothing is written back. Resetting a handled signal to its default does not
+  discard a pending one.
+- rt_sigprocmask(SIG_UNBLOCK, `&set`, null, 8) reads one signal set from a live local and
+  writes nothing back.
+- exit_group(127) takes an integer and ends the process.
+- Changing the process's SIGABRT disposition and the thread's mask is this function's to do,
+  because the process is ending. A handler that allocates re-enters a heap that is still
+  consistent; at worst it aborts again, which the paragraph above turns into the default action.
 
 **`int_call` itself.** It forwards to `syscall` with three integer arguments. Its callers are
 getpid, gettid, tgkill and exit_group here and getpid in `random`, none of which takes a
@@ -294,21 +229,14 @@ single call:
 - `the_design_reservation_is_available`: a 16 TiB reservation.
 - `rseq_fences_aim_at_one_cpu_after_registering`, `ticks_rise`, `random_numbers_differ` and
   `marked_pages_read_as_zero_in_a_forked_child`.
-- `abort_ends_the_process_with_sigabrt` and
-  `abort_runs_the_programs_handler_then_ends_the_process_anyway`: child processes, checking
-  the signal, the message and that a returning handler ran.
-- KERNEL-06's cases, each in a child process that the test kills and fails if it outlives a
-  deadline: `a_second_aborting_thread_lets_the_first_handler_finish` (case 5, the handler
-  finishes only after it has seen the second thread in nanosleep),
-  `a_second_aborting_thread_ends_the_process_if_the_first_handler_blocks` (case 5, patience
-  spent), `an_abort_in_a_child_forked_during_an_abort_ends_the_child` (case 3, from a fork),
-  `an_abort_claims_an_entry_from_another_process` (case 3, planted) and
-  `an_abort_claims_an_entry_whose_thread_is_gone` (case 4). In process:
-  `the_rule_for_an_entry_covers_every_case` (`judge`), `liveness_is_asked_of_this_process`
-  and `a_claim_replaces_a_stale_entry_and_waits_for_a_live_one`.
+- `abort_ends_the_process_with_sigabrt`,
+  `abort_runs_the_programs_handler_then_ends_the_process_anyway` and
+  `an_abort_inside_the_handler_ends_the_process`: child processes, checking the signal, the
+  message, that a returning handler ran, and that a handler that aborts runs once.
 
 **Review.** 2026-10-17, fresh adversarial reviewer: KERNEL-01 to KERNEL-07 accepted, after
 the fixes of its first round. Its second round found that a child forked mid-abort parked for
 ever, that a waiting thread could hang the process, and that the glibc comparison and
-KERNEL-09 were wrong or stale; KERNEL-06 and KERNEL-09 were rewritten for those and need the
-same reviewer's check.
+KERNEL-09 were wrong or stale; KERNEL-09 was rewritten for those and needs the same reviewer's
+check. KERNEL-06 was since rewritten for a simpler `abort` with no shared state, and needs a
+fresh review.
