@@ -153,6 +153,13 @@ fn bitmap_sweep(bench: &Bench, bitmap: usize, order: &str, rounds: usize) -> Cos
     }
     let base = base.unwrap();
     let size = bench.class.class().size();
+    // Carving does not write the bitmap, so its pages are not resident yet: free and take back
+    // one slot per page of it, so that the timed launders do not fault them in.
+    let page_slots = 4096 * 8;
+    let touch: Vec<*mut u8> = (0..slots).step_by(page_slots).map(|s| base.wrapping_byte_add(s * size)).collect();
+    bench.give(&touch);
+    let mut again = Vec::with_capacity(touch.len());
+    bench.take(touch.len(), &mut again);
     let feistel = Feistel::new(slots, 7);
     let slot_at = |j: usize| -> usize {
         match order {

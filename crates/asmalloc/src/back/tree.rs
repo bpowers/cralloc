@@ -776,31 +776,19 @@ impl<'h, H: Host> Release<'h, H> {
         old == 0
     }
 
-    /// Frees the one slot `bit` of leaf word `index` with one atomic OR, and aborts if it was
-    /// free already: a double free. Unlike [`Release::leaf_unowed`] it does not say whether the
-    /// word was empty, so the caller owes the summary bit with `must` false ([`owe_leaves`]):
-    /// it reads the bit before it sets it, as a free into a word that was not empty does. That
-    /// is `Look` in `tla/Summary.tla`. Using only the OR's own bit lets it compile to one
-    /// `lock bts`.
-    ///
-    /// [`owe_leaves`]: Release::owe_leaves
-    #[inline(always)]
-    pub(crate) fn leaf_bit(&mut self, region: RegionId, index: u32, bit: u64) {
-        if Spot::leaf(region, index).word(self.host).fetch_or(bit) & bit != 0 {
-            self.host
-                .abort("double free: an object was freed while already free");
-        }
-    }
-
     /// Leaf words `0..count` of `region`, for [`Release::leaf_bit_in`]: see [`Host::leaves`].
     #[inline]
     pub(crate) fn leaves(&self, region: RegionId, count: u32) -> &'h [H::W] {
         self.host.leaves(region, count)
     }
 
-    /// [`Release::leaf_bit`] on word `index` of `leaves`, which [`Release::leaves`] gave for the
-    /// slot's region: the word's address without working it out from the region each time.
-    /// Aborts if `index` is not one of them.
+    /// Frees the one slot `bit` of word `index` of `leaves`, a region's leaf words as
+    /// [`Release::leaves`] gave them, with one atomic OR, and aborts if it was free already: a
+    /// double free. Unlike [`Release::leaf_unowed`] it does not say whether the word was empty,
+    /// so the caller owes the summary bit with `must` false: it reads the bit before it sets
+    /// it, as a free into a word that was not empty does. That is `Look` in
+    /// `tla/Summary.tla`. Using only the OR's own bit lets it compile to one `lock bts`.
+    /// Aborts if `index` is not one of `leaves`.
     #[inline(always)]
     pub(crate) fn leaf_bit_in(&mut self, leaves: &[H::W], index: u32, bit: u64) {
         let Some(word) = leaves.get(index as usize) else {
@@ -839,6 +827,27 @@ impl<'h, H: Host> Release<'h, H> {
         words: u64,
         must: bool,
     ) -> Option<Upward> {
+        if self.height >= 2 {
+            // Levels 1 and 2 are the region's own, which is every small class's tree: the
+            // general walk below, with its tests of where each level is, made plain. A widely
+            // scattered launder comes here for nearly every slot.
+            let summary = index / BITS;
+            let word = self
+                .host
+                .meta(region, self.host.layout().tree_word(1, summary));
+            let was_empty = set_missing(word, words, must);
+            let up = Spot {
+                region,
+                level: 2,
+                index: summary / BITS,
+            };
+            return Some(Upward {
+                key: up.key(self.height),
+                spot: up,
+                bits: 1 << (summary % BITS),
+                must: was_empty,
+            });
+        }
         let (above, bit) = Spot::leaf(region, index).parent(self.height)?;
         let bits = if self.height == 0 { bit } else { words };
         let was_empty = self.set_missing(above, bits, must);
@@ -929,13 +938,19 @@ impl<'h, H: Host> Release<'h, H> {
     /// says whether the word was empty before.
     #[inline(always)]
     fn set_missing(&mut self, spot: Spot, bits: u64, must: bool) -> bool {
-        let word = spot.word(self.host);
-        if must {
-            word.fetch_or(bits) == 0
-        } else {
-            let missing = bits & !word.load();
-            missing != 0 && word.fetch_or(missing) == 0
-        }
+        set_missing(spot.word(self.host), bits, must)
+    }
+}
+
+/// Sets whatever of `bits` in summary word `word` is clear, or all of them unread with `must`,
+/// and says whether the word was empty before.
+#[inline(always)]
+fn set_missing<W: Word>(word: &W, bits: u64, must: bool) -> bool {
+    if must {
+        word.fetch_or(bits) == 0
+    } else {
+        let missing = bits & !word.load();
+        missing != 0 && word.fetch_or(missing) == 0
     }
 }
 
