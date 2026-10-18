@@ -315,3 +315,129 @@ fn the_refresh_launders_one_retiring_magazine_in_every_few() {
     assert_eq!(laundered, retired / REFRESH_EVERY as usize);
     assert_eq!(refreshed_of(0, 400).1, 0);
 }
+
+/// The objects of `class` on CPU `n`'s spare stacks.
+fn in_spares(rig: &TestRig, n: u32, class: SmallClass) -> std::collections::BTreeSet<usize> {
+    struct Spares(u32, SmallClass, std::collections::BTreeSet<usize>);
+    impl Visitor for Spares {
+        fn cached(&mut self, place: Place, class: SmallClass, object: *const u8) {
+            if place == Place::Spare(self.0) && class == self.1 {
+                self.2.insert(object.addr());
+            }
+        }
+    }
+    let mut seen = Spares(n, class, std::collections::BTreeSet::new());
+    inspect(&rig.depot, rig.cell.get().unwrap(), rig.slabs(), &mut seen);
+    seen.2
+}
+
+/// A pipeline's consumer: CPU 1 allocates objects of a class, CPU 0 frees them, for three
+/// intervals. CPU 0's full spares are pushed and never popped there, and its loaded magazine is
+/// replaced on every exchange, so it never grows old. Whether any object that was on CPU 0's
+/// spares at the start is still there at the end.
+fn a_consumers_first_spares_stay(age_limit: bool) -> bool {
+    let class = tiny(0);
+    let tuning = Tuning {
+        max_spares: 2,
+        age_limit,
+        ..QUIET
+    };
+    let rig: TestRig = Rig::new(&[class], 4096, tuning);
+    let (zero, one) = (SimCpu::new(0), SimCpu::new(1));
+    let (consumer, producer) = (rig.cache(&zero), rig.cache(&one));
+    let round = || {
+        let objects: Vec<_> = (0..12).filter_map(|_| producer.alloc(class)).collect();
+        for object in objects {
+            consumer.free(class, object);
+        }
+    };
+    round();
+    let first = in_spares(&rig, 0, class);
+    assert!(!first.is_empty());
+    let steps = 8;
+    for _ in 0..3 * steps {
+        rig.os().advance_clock(IDLE_TICKS / steps);
+        for _ in 0..20 {
+            round();
+        }
+    }
+    let last = in_spares(&rig, 0, class);
+    rig.census(&[], false);
+    !first.is_disjoint(&last)
+}
+
+#[test]
+fn a_consumers_full_spares_are_swept() {
+    assert!(!a_consumers_first_spares_stay(true));
+    assert!(a_consumers_first_spares_stay(false));
+}
+
+/// A class that falls out of use on CPU 0 just after an allocation emptied its loaded magazine,
+/// with full spares behind it, while CPU 0 stays busy with another class for three intervals:
+/// how many of its objects CPU 0's spares hold at the end.
+fn spares_behind_an_empty_magazine(age_limit: bool) -> usize {
+    let (idle, busy) = (tiny(0), tiny(1));
+    let tuning = Tuning {
+        max_spares: 2,
+        age_limit,
+        ..QUIET
+    };
+    let rig: TestRig = Rig::new(&[idle, busy], 64, tuning);
+    let machine = SimCpu::new(0);
+    let cache = rig.cache(&machine);
+    let held: Vec<_> = (0..8).filter_map(|_| cache.alloc(idle)).collect();
+    for object in held {
+        cache.free(idle, object);
+    }
+    // Empty the loaded magazine, which is full after the frees, on the fast path.
+    let user: Vec<_> = (0..2).filter_map(|_| cache.alloc(idle)).collect();
+    assert!(is_loaded(&rig, 0, idle));
+    assert!(!in_spares(&rig, 0, idle).is_empty());
+    let steps = 8;
+    for _ in 0..3 * steps {
+        rig.os().advance_clock(IDLE_TICKS / steps);
+        for _ in 0..40 {
+            churn(&cache, busy, 3);
+        }
+    }
+    rig.census(&user, false);
+    in_spares(&rig, 0, idle).len()
+}
+
+/// With drains off, `collect` still empties the caller's own slab, through its routines, and
+/// launders the depot; another CPU's slab it cannot touch.
+#[test]
+fn collect_empties_its_own_slab_without_a_drain() {
+    let class = tiny(0);
+    let rig: TestRig = Rig::new(
+        &[class],
+        64,
+        Tuning {
+            max_spares: 2,
+            ..QUIET
+        },
+    );
+    rig.os().set_faults(
+        crate::os::sim::Call::WipeOnFork,
+        crate::os::sim::Faults::ALWAYS,
+    );
+    for n in [1, 0] {
+        let machine = SimCpu::new(n);
+        churn(&rig.cache(&machine), class, 9);
+    }
+    let before = parked(&rig, class);
+    assert!(before.on_cpu[0] > 0 && before.on_cpu[1] > 0 && before.depot > 0);
+    let machine = SimCpu::new(0);
+    rig.cache(&machine).collect();
+    let after = parked(&rig, class);
+    assert_eq!((after.on_cpu[0], after.depot), (0, 0));
+    assert_eq!(after.on_cpu[1], before.on_cpu[1]);
+    assert_eq!(rig.os().calls(crate::os::sim::Call::Fence), 0);
+    rig.census(&[], false);
+}
+
+#[test]
+fn spares_behind_an_empty_loaded_magazine_are_swept() {
+    assert_eq!(spares_behind_an_empty_magazine(true), 0);
+    assert!(spares_behind_an_empty_magazine(false) > 0);
+}

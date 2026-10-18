@@ -8,9 +8,20 @@
 //! heartbeat takes it with the store-if-equal routine, expecting the word it read and storing
 //! zero, as a replacement would; launders its objects to the source; and sends the empty
 //! magazine to the depot's empty stack. A class in use pays one refill an interval; a class out
-//! of use is emptied. A look that finds no magazine loaded launders one of the class's full
-//! spares instead, if it has any, so a class that was taken back sheds its spares too, one per
-//! look. A loaded magazine with no objects pins nothing and is left alone.
+//! of use is emptied. A loaded magazine with no objects pins nothing and is left alone.
+//!
+//! **Spares.** Full spares need a rule of their own: a CPU that only frees a class (a pipeline's
+//! consumer) pushes full spares that nothing on it ever pops, and its loaded magazine, replaced
+//! on every exchange, never grows old; a class that fell out of use just after an allocation
+//! emptied its magazine keeps its spares behind an empty one. Popping one spare at a time
+//! cannot help either: frees refill the stack, and only its top ever moves. So once an interval
+//! each CPU sweeps its slab: from the first heartbeat after an interval has passed since the
+//! last sweep began, each heartbeat takes one class's whole stack of full spares, the classes
+//! in turn, with one store-if-equal of its head to zero; launders the top magazine; and sends
+//! the rest to the depot, where consumers or the depot's low-water rule (`shed.rs`) move them
+//! on. A class in use pays one refill an interval for this too. The sweep's state is one word
+//! in the cold part of the slab ([`Sweep`]); a heartbeat whose sweep laundered skips its look,
+//! so the rule still launders at most one magazine a heartbeat.
 //!
 //! **Stamps.** One word per class in the cold part of the slab, a [`Stamp`], says which magazine
 //! is loaded there and since when. The slow path that installs a magazine clears it in its
@@ -45,11 +56,17 @@
 //! checker runs the take against mutators and drains, with the taker moving between CPUs
 //! (`interleave.rs`).
 //!
-//! The ledger for the unsafe block is `docs/safety/asmalloc/depot/age-safety.md`.
+//! The take of a spare stack is the same argument for a spare head: a head that is neither zero
+//! nor a marker is the only reference to the top magazine of that stack, whose links are the
+//! only references to the rest, so a commit that finds the word read hands this thread the
+//! whole chain as it is at the commit.
+//!
+//! The ledger for the unsafe blocks is `docs/safety/asmalloc/depot/age-safety.md`.
 
 use super::heartbeat::{Clock, IDLE_UNITS, TICK_SHIFT};
 use super::magazine::{Magazine, MagazineId};
 use super::{Cache, Source};
+use crate::classes::SMALL_COUNT;
 use crate::classes::{SmallClass, is_marker};
 use crate::front::{Cpu, Field, Routines, Spare, StoreIfEqual};
 use crate::os::Os;
@@ -100,6 +117,51 @@ impl Stamp {
         } else {
             Age::Old
         }
+    }
+}
+
+/// Where a CPU's sweep of its full spare stacks is: when it began, in units of
+/// 2^[`TICK_SHIFT`] ticks (bits 32 to 63), whether one has begun (bit 16), and the ordinal of the
+/// next class to sweep (bits 0 to 7), the class count once the sweep is done. Zero is no sweep
+/// yet; the first clocked heartbeat begins one.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(super) struct Sweep(pub(super) u64);
+
+const SWEEP_BEGUN: u64 = 1 << 16;
+const SWEEP_CURSOR: u64 = 0xff;
+const _: () = assert!(SMALL_COUNT as u64 <= SWEEP_CURSOR);
+
+impl Sweep {
+    /// A sweep beginning at `now`, at the first class.
+    pub(super) fn begin(now: u64) -> Sweep {
+        Sweep(((now >> TICK_SHIFT) as u32 as u64) << 32 | SWEEP_BEGUN)
+    }
+
+    /// The ordinal of the class this heartbeat sweeps, if a sweep is under way.
+    pub(super) fn next(self) -> Option<usize> {
+        let cursor = (self.0 & SWEEP_CURSOR) as usize;
+        (self.0 & SWEEP_BEGUN != 0 && cursor < SMALL_COUNT).then_some(cursor)
+    }
+
+    /// The sweep after the class it named.
+    pub(super) fn advanced(self) -> Sweep {
+        Sweep(self.0 + 1)
+    }
+
+    /// What a heartbeat with the clock at `now` makes of a sweep that is not under way: a new
+    /// sweep once an interval has passed since this one began (or if none has), the same
+    /// sweep restarted from now if the clock went back, or nothing.
+    pub(super) fn due(self, now: u64) -> Option<Sweep> {
+        if self.0 & SWEEP_BEGUN == 0 {
+            return Some(Sweep::begin(now));
+        }
+        let time = (now >> TICK_SHIFT) as u32;
+        let since = time.wrapping_sub((self.0 >> 32) as u32) as i32;
+        if since < 0 {
+            // Done, as if it had begun now: the next one waits an interval, not for the clock.
+            return Some(Sweep(Sweep::begin(now).0 | SMALL_COUNT as u64));
+        }
+        (since >= IDLE_UNITS as i32).then(|| Sweep::begin(now))
     }
 }
 
@@ -159,46 +221,76 @@ impl<'a, O: Os, R: Routines, S: Source> Cache<'a, O, R, S> {
 
     /// The age limit's look at `class` on `cpu`'s slab, the CPU the slow path ran on (see the
     /// module documentation). Reads the clock only if a magazine is loaded there. Launders at
-    /// most one magazine.
-    pub(super) fn age_look(&self, cpu: Cpu, class: SmallClass, clock: &Clock<'_, O>) {
+    /// most one magazine; whether it took one.
+    pub(super) fn age_look(&self, cpu: Cpu, class: SmallClass, clock: &Clock<'_, O>) -> bool {
         let slab = self.slab(cpu);
         let Some(seen) = self.hot_magazine(cpu, class) else {
-            if slab.field(Field::hot(class)).load(Relaxed).is_null() {
-                self.launder_spare(cpu, class);
-            }
-            return;
+            return false;
         };
         let stamp = slab.stamp(class);
         match Stamp(stamp.load(Relaxed)).age(seen.magazine.id(), clock.now()) {
             Age::Unstamped(fresh) => {
                 stamp.store(fresh.0, Relaxed);
-                return;
+                return false;
             }
-            Age::Young => return,
+            Age::Young => return false,
             Age::Old => {}
         }
-        if seen.level > 0 && self.reclaim(class, seen) {
+        let taken = seen.level > 0 && self.reclaim(class, seen);
+        if taken {
             stamp.store(0, Relaxed);
         }
+        taken
     }
 
-    /// Launders one full spare of `class` from the current CPU's stack, if the head of `cpu`'s
-    /// stack, read without protection, says there is one. For a class with no magazine loaded,
-    /// whose spares nothing on this CPU is about to use.
-    fn launder_spare(&self, cpu: Cpu, class: SmallClass) {
-        let head = self
-            .slab(cpu)
-            .field(Field::spare(class, Spare::Full))
-            .load(Relaxed);
+    /// One heartbeat's part of `cpu`'s sweep of its full spare stacks (see the module
+    /// documentation), `looking` when the heartbeat may read the clock to begin a sweep.
+    /// Whether it laundered a magazine.
+    pub(super) fn sweep_step(&self, cpu: Cpu, looking: bool, clock: &Clock<'_, O>) -> bool {
+        let word = self.slab(cpu).sweep();
+        let sweep = Sweep(word.load(Relaxed));
+        let Some(ordinal) = sweep.next() else {
+            if looking && let Some(next) = sweep.due(clock.now()) {
+                word.store(next.0, Relaxed);
+            }
+            return false;
+        };
+        word.store(sweep.advanced().0, Relaxed);
+        SmallClass::from_ordinal(ordinal).is_some_and(|class| self.take_spares(cpu, class))
+    }
+
+    /// Takes the current CPU's stack of full spares of `class`, if its head is still the one
+    /// read from `cpu`'s slab, launders its top magazine and sends the rest to the depot.
+    /// Whether it laundered one.
+    pub(super) fn take_spares(&self, cpu: Cpu, class: SmallClass) -> bool {
+        let field = Field::spare(class, Spare::Full);
+        let head = self.slab(cpu).field(field).load(Acquire);
         if head.is_null() || is_marker(head.addr()) {
-            return;
+            return false;
         }
-        // Another generation's marker found here is the slow path's to report.
-        let mut stale = false;
-        if let Some(magazine) = self.spare_pop(class, Spare::Full, &mut stale) {
-            self.launder_held(class, &magazine);
+        // SAFETY: AGE-02.
+        let taken = unsafe { self.routines.store_if_equal(field, head, ptr::null_mut()) };
+        if taken != StoreIfEqual::Stored {
+            return false;
+        }
+        let mut next = head.addr();
+        let mut first = true;
+        while next != 0 {
+            let Some(magazine) = self.area.magazine(next, class.magazine()) else {
+                self.os()
+                    .abort("a spare stack names something that is not a magazine");
+            };
+            // The link must be read before the depot overwrites it.
+            next = magazine.link().load(Acquire).addr();
+            // Drop the spare depth the record carries.
+            magazine.set_level(magazine.level());
+            if first {
+                self.launder_held(class, &magazine);
+                first = false;
+            }
             self.to_depot(class, magazine);
         }
+        true
     }
 }
 
@@ -206,6 +298,7 @@ impl<'a, O: Os, R: Routines, S: Source> Cache<'a, O, R, S> {
 mod tests {
     use super::super::IDLE_TICKS;
     use super::*;
+    use crate::classes::SMALL_COUNT;
 
     fn id(n: u32) -> MagazineId {
         MagazineId::new(n).unwrap()
@@ -232,6 +325,28 @@ mod tests {
             stamp.age(id(8), later),
             Age::Unstamped(Stamp::new(id(8), later))
         );
+    }
+
+    #[test]
+    fn a_sweep_goes_round_every_class_once_an_interval() {
+        let start = 3 * IDLE_TICKS;
+        let first = Sweep(0).due(start).expect("the first look begins a sweep");
+        let mut sweep = first;
+        for ordinal in 0..SMALL_COUNT {
+            assert_eq!(sweep.next(), Some(ordinal));
+            sweep = sweep.advanced();
+        }
+        assert_eq!(sweep.next(), None);
+        assert_eq!(sweep.due(start + IDLE_TICKS - (1 << TICK_SHIFT)), None);
+        assert_eq!(
+            sweep.due(start + IDLE_TICKS),
+            Some(Sweep::begin(start + IDLE_TICKS))
+        );
+        // A clock that went back restarts the wait from now, not from the old start.
+        let back = sweep.due(IDLE_TICKS).expect("the clock went back");
+        assert_eq!(back.next(), None);
+        assert_eq!(back.due(2 * IDLE_TICKS - (1 << TICK_SHIFT)), None);
+        assert!(back.due(2 * IDLE_TICKS).is_some());
     }
 
     #[test]

@@ -112,8 +112,9 @@ fn a_stamp_ages_only_its_own_magazine_and_only_after_an_interval() {
     assert!(fresh.age(id, now.wrapping_add(super::IDLE_TICKS)) == Age::Old);
 }
 
-/// A water word's low mark never rises within an interval, a debt is never more than the old
-/// mark and the depth now, and paying never raises a debt: for every word, depth and interval.
+/// A look never leaves the mark above the depth it saw, a new debt is never more than the old
+/// mark or the depth now, a note without the clock never raises the mark or changes the debt,
+/// and paying never raises a debt: for every word, depth and interval.
 #[kani::proof]
 fn a_low_water_mark_owes_at_most_what_was_never_used() {
     let water = Water(kani::any());

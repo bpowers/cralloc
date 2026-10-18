@@ -12,21 +12,23 @@
 //! **Units.** Depth counts objects, not magazines. Objects are what pin pages, and the stack
 //! already keeps an exact count of them in its top magazine's link, so a look costs two loads
 //! and adds nothing to pushes and pops; a count of magazines would need a new field that every
-//! push and pop writes. The review's concern, that drains leave many nearly empty magazines
-//! which a count of objects makes look small, does not bite here: a shed pops whole magazines
-//! until it has laundered what is owed, so a stack of nearly empty magazines sheds many of them,
-//! and their empty shells go to the empty stack for reuse. A shed may overshoot by part of one
-//! magazine, which costs a refill sooner.
+//! push and pop writes. A stack of many nearly empty magazines, such as drains leave, looks
+//! small in objects, but that does not hide them: a shed pops whole magazines until it has
+//! laundered what is owed, so such a stack sheds many of them, and their empty shells go to the
+//! empty stack for reuse. A shed may overshoot by part of one magazine, which costs a refill
+//! sooner.
 //!
 //! **Where depth is seen.** Only pops lower a stack, and every pop of a class's stack is followed
-//! by a note of its depth: the slow path that took a magazine from it notes it in its heartbeat,
-//! and the launders note it as they pop. A note reads no clock, so it counts toward the interval
-//! the word is in. Intervals begin at looks: every [`Tuning::look_every`](super::Tuning)
-//! heartbeats a CPU looks at one class's stack, the classes in turn, with the clock it reads
-//! for the idle check, and a look in a new interval starts it and sets the debt. A note or look
-//! reads the stack's head and its top magazine's link, and writes the water word only when the
-//! depth is a new low, the interval has changed, or a shed paid something, so a pop costs no
-//! shared write beyond its own in the common case.
+//! by a note of its depth, except `collect`'s, which empties the stack: that only lets the next
+//! debt overstate a stack that is then empty, which is harmless. The slow path that took a
+//! magazine notes the depth in its heartbeat, and the launders note it as they pop. A note reads
+//! no clock, except the first for a class, which starts its word; so a note counts toward the
+//! interval the word is in. Intervals begin at looks: every [`Tuning::look_every`](super::Tuning)
+//! heartbeats a CPU looks at one class's stack, the classes in turn, with the clock it reads for
+//! the idle check, and a look in a new interval starts it and sets the debt. A note or look reads
+//! the stack's head and its top magazine's link, and writes the water word only when the depth
+//! is a new low, the interval has changed, or a shed paid something, so a pop costs no shared
+//! write beyond its own in the common case.
 //!
 //! **Hints.** The water word and the set of classes that owe ([`Depot`](super::Depot)'s
 //! `owing`) change by single atomic instructions and never touch the stack head, so they add
@@ -65,8 +67,9 @@ pub(super) fn interval(now: u64) -> u64 {
 /// (bits 0 to 23), what the last interval left it owing, in objects (bits 24 to 47), which
 /// interval this is (bits 48 to 62, truncated), and whether any look has written it (bit 63).
 ///
-/// The interval number wraps after 2^15 intervals, about nine hours: a stack untouched for
-/// exactly that long reads as being in the same interval, which postpones its shed by one.
+/// The interval number is truncated to 15 bits: a gap of 2^14 intervals or more (about four and
+/// a half hours) between looks reads as a clock that went back, which re-bases the word and
+/// postpones the stack's shed by one interval.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(super) struct Water(pub(super) u64);
 
@@ -109,11 +112,16 @@ impl Water {
         if ahead == 0 {
             return Water::pack(self.low().min(depth), self.owed(), self.interval());
         }
-        // A clock that went back (another CPU's, a resume from suspend): the interval goes on,
-        // but counted from the clock's time now, so the next one begins an interval from now
-        // instead of when the clock catches up.
         if ahead >= 1 << (INTERVAL_BITS - 1) {
-            return Water::pack(self.low().min(depth), self.owed(), interval);
+            // A clock that went back. By one interval it is most likely another CPU's clock a
+            // little behind this word's writer's: stay in the word's interval, or the next
+            // look from the writer's CPU would start it again and owe the whole low twice. By
+            // more (a resume from suspend, a restored checkpoint), count the interval from the
+            // clock's time now, so the next one begins an interval from now instead of when the
+            // clock catches up.
+            let back = self.interval().wrapping_sub(interval) & INTERVAL_MASK;
+            let keep = if back <= 1 { self.interval() } else { interval };
+            return Water::pack(self.low().min(depth), self.owed(), keep);
         }
         // Since the old mark was set the stack has not fallen below it, since every pop is
         // looked at, nor below its depth now. What was unpaid of the old debt lies in that
@@ -267,7 +275,12 @@ mod tests {
         assert_eq!(top.look(7, 0).owed(), 7);
         assert_eq!(owing.look(3, 1).owed(), 50);
         assert_eq!(owing.look(3, 1).low(), 3);
-        // After a clock that went back, the next interval begins one interval later.
+        // A clock one interval behind (another CPU's) stays in the word's interval, so the
+        // word's own CPU does not start that interval again.
+        let behind = Water(0).look(9, 400).look(9, 401);
+        assert_eq!(behind.look(4, 400).look(4, 401).owed(), 9);
+        assert_eq!(behind.look(4, 400).look(4, 402).owed(), 4);
+        // After a clock that went back further, the next interval begins one interval later.
         let back = Water(0).look(9, 400).look(9, 401).look(5, 3);
         assert_eq!((back.low(), back.owed()), (5, 9));
         assert_eq!(back.look(5, 3).owed(), 9);

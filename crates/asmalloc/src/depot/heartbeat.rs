@@ -32,20 +32,25 @@
 //! whose slow path moves the counter, and the next drain is at least an interval after that.
 //!
 //! **Bounded work.** Besides the exchange itself, one slow path launders at most four
-//! magazines: one in the exchange (the refresh, `slow.rs`) and one for each of the three rules
-//! here. A magazine holds at most 254 objects (and at most about 128 KiB of them), and a launder
-//! sorts them and sets one bitmap word per run of 64 neighbours with one atomic OR. Add one
-//! purge step, at most one drain of another slab (a bounded number of atomic instructions and
-//! one fence), and a fixed number of loads and single-word writes for the looks.
+//! magazines: one for each of the three rules here (the age limit's take or sweep counts as one)
+//! and one refresh in the exchange (`slow.rs`) for each install it makes, which is one unless
+//! the thread is moved to another CPU while it exchanges and installs again. A magazine holds at
+//! most 254 objects (and at most about 128 KiB of them), and a launder sorts them and sets one
+//! bitmap word per run of 64 neighbours with one atomic OR. A sweep step also pushes the rest of
+//! one spare stack, at most a few magazines, to the depot. Add one purge step, at most one drain
+//! (of another slab, or of the thread's own when it holds another generation's markers: a
+//! bounded number of atomic instructions and one fence), and a fixed number of loads and
+//! single-word writes for the looks.
 //!
 //! **Shared writes.** A slow path that exchanges nothing with the depot writes, outside its own
 //! CPU's slab: nothing, on most entries; another slab's sighting, by compare-and-swap, on one
 //! entry in [`LOOK_EVERY`], and only if that slab's counter moved since its last sighting or it
 //! is drained; a depot stack's water word, only when a look finds a new low, a new interval or a
-//! paid debt; the depot's count of CPU numbers, once for each new highest CPU number.
-//! Laundering and purging write shared state only when there is something to give back. Its own
-//! slab's activity counter shares a line with the sighting that other CPUs' looks read and
-//! write; the age limit's stamps are on lines only its own CPU uses.
+//! paid debt, and the depot's set of owing classes, only when a debt begins or is paid; the
+//! depot's count of CPU numbers, once for each new highest CPU number. Laundering and purging
+//! write shared state only when there is something to give back. Within its own slab, the
+//! activity counter, the refresh count and the sweep share a line that other CPUs only read;
+//! the stamps have lines of their own; the sighting, which other CPUs write, has its own line.
 //!
 //! **A drain that finds the slab busy.** The look that marks a sighting drained is the only one
 //! that drains through it, since the mark is a compare-and-swap. So when that look's drain finds
@@ -272,9 +277,10 @@ impl<O: Os, R: Routines, S: Source> Cache<'_, O, R, S> {
         }
         if self.tuning.age_limit
             && let (Some(cpu), Some(activity)) = (chores.cpu, activity)
+            && !self.sweep_step(cpu, looking.is_some(), &clock)
             && let Some(class) = nth_class(activity)
         {
-            self.age_look(cpu, class, &clock);
+            let _ = self.age_look(cpu, class, &clock);
         }
         if !chores.purged {
             self.source.purge_step();

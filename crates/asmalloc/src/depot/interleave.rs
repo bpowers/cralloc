@@ -329,14 +329,15 @@ fn aged_world(migrations: usize) -> World {
     world
 }
 
-/// Two age-limit looks at CPU 0 (the first takes the loaded magazine, the second a spare), from
-/// a thread that started on CPU 0.
-fn age_looks(world: &World, machine: &CheckCpu<'_>) {
+/// The age limit at CPU 0, from a thread that started there: a look that takes the loaded
+/// magazine, and a sweep's take of the full spare stack. Counts the takes that happened in
+/// `taken`, so a scenario can check that some schedule took something.
+fn age_looks(world: &World, machine: &CheckCpu<'_>, taken: &AtomicUsize) {
     let cache = world.rig.cache(machine);
     let cpu = world.rig.slabs().cpu(0).unwrap();
-    for _ in 0..2 {
-        cache.age_look(cpu, tiny_class(), &Clock::new(world.rig.os()));
-    }
+    let hot = cache.age_look(cpu, tiny_class(), &Clock::new(world.rig.os()));
+    let spares = cache.take_spares(cpu, tiny_class());
+    taken.fetch_add(usize::from(hot) + usize::from(spares), Ordering::SeqCst);
 }
 
 /// The age limit takes CPU 0's magazine and a spare while a mutator allocates and frees there
@@ -347,6 +348,7 @@ fn an_age_take_and_a_mutator_keep_one_owner_under_every_schedule(
     bounds: Bounds,
     migrations: usize,
 ) {
+    let taken = AtomicUsize::new(0);
     let found = explore(
         bounds,
         2,
@@ -356,25 +358,30 @@ fn an_age_take_and_a_mutator_keep_one_owner_under_every_schedule(
             if me == 0 {
                 world.run(&machine, MUTATE);
             } else {
-                age_looks(world, &machine);
+                age_looks(world, &machine, &taken);
             }
         },
         |_| {},
         |world, _| world.check(false),
     );
     report("age take", found);
+    assert!(
+        taken.load(Ordering::SeqCst) > 0,
+        "no schedule took anything"
+    );
 }
 
 /// The age limit's take races a drain of the same slab from the other CPU: the take's commit
 /// and the drain's markers meet as a slow path's install and a drain do (`Drain_claim`).
 fn an_age_take_and_a_drain_keep_one_owner_under_every_schedule(bounds: Bounds) {
+    let taken = AtomicUsize::new(0);
     let found = explore(
         bounds,
         2,
         || aged_world(0),
         |world, me| {
             if me == 0 {
-                age_looks(world, &world.machine(me, 0));
+                age_looks(world, &world.machine(me, 0), &taken);
             } else {
                 let machine = world.machine(me, 1);
                 let cache = world.rig.cache(&machine);
@@ -386,6 +393,10 @@ fn an_age_take_and_a_drain_keep_one_owner_under_every_schedule(bounds: Bounds) {
         |world, _| world.check(false),
     );
     report("age take and drain", found);
+    assert!(
+        taken.load(Ordering::SeqCst) > 0,
+        "no schedule took anything"
+    );
 }
 
 /// Two threads push and pop one depot stack directly, with a third holding magazines it

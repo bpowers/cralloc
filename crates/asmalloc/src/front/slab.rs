@@ -5,12 +5,13 @@
 //! address them as `SLABS + (cpu << SLAB_SHIFT) + 8 c`. Word 0 is never used, so that the class
 //! index needs no adjustment. The cold part follows on its own cache lines: the heads of the
 //! spare stacks (one stack of non-empty and one of empty magazines per class), the activity
-//! counter, the drain claim and the count of full magazines the CPU's frees have retired; then,
+//! counter, the drain claim, the count of full magazines the CPU's frees have retired and where
+//! the age limit's sweep of the spare stacks is; then,
 //! on lines of their own that only this CPU's slow paths touch, per class a stamp of when the
 //! loaded magazine was loaded; and on a line of its own the idle check's last sighting.
 //!
 //! Every field is an atomic word and the all-zero slab is valid: no magazines, empty spare
-//! stacks, no activity, no claim, nothing retired and no stamps.
+//! stacks, no activity, no claim, nothing retired, no sweep and no stamps.
 
 use super::sync::{AtomicPtr, AtomicU64};
 use crate::classes::{SMALL_COUNT, SmallClass};
@@ -90,6 +91,7 @@ pub struct Slab {
     activity: AtomicU64,
     claim: AtomicU64,
     retired: AtomicU64,
+    sweep: AtomicU64,
     stamps: Stamps,
     /// On a line of its own: other CPUs' idle checks write it, and should not take the line
     /// that this CPU's slow paths count their activity in.
@@ -122,6 +124,7 @@ impl Slab {
             activity: AtomicU64::new(0),
             claim: AtomicU64::new(0),
             retired: AtomicU64::new(0),
+            sweep: AtomicU64::new(0),
             stamps: Stamps([const { AtomicU64::new(0) }; STAMPS]),
             seen: OwnLine(AtomicU64::new(0)),
         }
@@ -181,6 +184,13 @@ impl Slab {
         let count = self.retired.load(Ordering::Relaxed).wrapping_add(1);
         self.retired.store(count, Ordering::Relaxed);
         count
+    }
+
+    /// Where the age limit's sweep of this slab's spare stacks is, and when it began
+    /// (`depot::age`). A hint, written with single stores by this CPU's slow paths.
+    #[inline]
+    pub(crate) fn sweep(&self) -> &AtomicU64 {
+        &self.sweep
     }
 
     /// The stamp of the magazine loaded for `class` (`depot::age`): zero, or which magazine
