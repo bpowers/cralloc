@@ -12,6 +12,12 @@
 //!   the next huge-page boundary above the committed memory to the end of the region for huge
 //!   pages, records that boundary in the region's `Hints`, and later commits there are whole
 //!   huge pages.
+//! - **Populating ahead.** In the small-page part of a region of a dense class that has carved
+//!   enough, a commit makes its new pages resident too, with one call, before the carve that
+//!   committed them publishes them (`policy::populate_ahead`). Nothing has been carved there
+//!   yet, so no purge can be at work on them, and a populate changes no contents, so racing
+//!   commits that both populate do no harm. A failed populate only leaves the pages to fault
+//!   in one at a time.
 //! - **Settling** after a claim: an allocation tests and clears the slot's zero bit (large
 //!   classes), and clears the clean bits of the pages its slots touch, and counts how much of
 //!   what it took was resident.
@@ -22,7 +28,9 @@
 //!   while the purge holds the claim of every slot they describe.
 
 use super::layout::{Grow, Hints, Unit};
-use super::policy::{COMMIT_AHEAD_HUGE_PAGES, COMMIT_AHEAD_PAGES, huge_after, wants_huge};
+use super::policy::{
+    COMMIT_AHEAD_HUGE_PAGES, COMMIT_AHEAD_PAGES, huge_after, populate_ahead, wants_huge,
+};
 use super::tree::{self, Host};
 use super::word::{BITS, Word, bits_in_word};
 use crate::os::HugePages;
@@ -81,18 +89,31 @@ fn commit_to<H: Host>(host: &H, region: RegionId, now: Grow, need: u32) -> Optio
     let layout = host.layout();
     let pages = layout.region_pages();
     let huge = switch_to_huge(host, region, now);
-    let target = match huge {
-        Some(from) if need > from => {
-            layout.huge_ceil(need) + COMMIT_AHEAD_HUGE_PAGES as u32 * layout.huge_pages()
+    let page = layout.page_size();
+    let (target, ahead) = match huge {
+        Some(from) if need > from => (
+            layout.huge_ceil(need) + COMMIT_AHEAD_HUGE_PAGES as u32 * layout.huge_pages(),
+            0,
+        ),
+        _ => {
+            let ahead = populate_ahead(layout.size(), page, layout.slot_bytes(now.carved));
+            (need + ahead.max(COMMIT_AHEAD_PAGES) as u32, ahead)
         }
-        _ => need + COMMIT_AHEAD_PAGES as u32,
+    };
+    // A small-page commit never runs into the huge-page part, whose pages are committed and
+    // faulted whole; that part starts at a huge-page boundary at or above the commit.
+    let target = match huge {
+        Some(from) if need <= from => target.min(from),
+        _ => target,
     };
     let target = target.min(pages);
-    let page = layout.page_size();
     let start = now.committed as usize * page;
     let len = (target - now.committed) as usize * page;
     if !host.commit(region, start, len) {
         return None;
+    }
+    if ahead != 0 {
+        host.populate(region, start, len);
     }
     let (from, to) = (
         layout.leaf_commit(now.committed),
@@ -445,5 +466,76 @@ fn all_clean<H: Host>(host: &H, region: RegionId, unit: Unit) -> bool {
 fn release_range<H: Host>(host: &H, region: RegionId, first: u32, last: u32, from: u32, to: u32) {
     for w in from..to {
         tree::release(host, region, w, bits_in_word(w, first, last));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::back::policy::{POPULATE_MAX_PAGES, POPULATE_SHIFT};
+    use crate::back::testhost::TestHost;
+    use crate::back::word::Atomic;
+    use crate::classes::{Class, MagazineSize};
+    use crate::space::{Geometry, Plan};
+    use core::sync::atomic::Ordering::SeqCst;
+
+    /// Design pages and huge pages in a region of 128 MiB, small enough for the test host and
+    /// big enough that populate-ahead starts well before the huge-page threshold.
+    fn plan() -> Plan {
+        Geometry::new(12, 21, 27, 27, 4, 1, MagazineSize::MAX).largest_plan()
+    }
+
+    /// Carves `bytes` of `size`-byte slots a magazine at a time; returns the most pages that
+    /// were populated and not yet carved at any point.
+    fn carve_up_to(host: &TestHost<Atomic>, region: RegionId, bytes: usize) -> usize {
+        let layout = *host.layout();
+        let mut most = 0;
+        while layout.slot_bytes(Grow::unpack(host.meta(region, layout.grow_word()).load()).carved)
+            < bytes
+        {
+            assert!(matches!(carve(host, region, 254), Carve::Got { .. }));
+            let carved = Grow::unpack(host.meta(region, layout.grow_word()).load()).carved;
+            let touched = layout.slot_bytes(carved).div_ceil(layout.page_size());
+            most = most.max(host.populated.load(SeqCst).saturating_sub(touched));
+        }
+        most
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn a_dense_class_populates_ahead_in_bounded_stretches() {
+        let class = Class::of_size(64).unwrap();
+        let host = TestHost::<Atomic>::new(plan(), class, 1);
+        let region = host.region_at(0);
+        let page = host.layout().page_size();
+        // Nothing until a stretch would be a whole commit step.
+        let start = (COMMIT_AHEAD_PAGES * page) << POPULATE_SHIFT;
+        carve_up_to(&host, region, start - page);
+        assert_eq!(host.populated.load(SeqCst), 0);
+        let most = carve_up_to(&host, region, 16 << 20);
+        let populated = host.populated.load(SeqCst);
+        assert!(
+            populated * page > (15 << 20) - start,
+            "populated {populated} pages"
+        );
+        assert!(
+            most <= POPULATE_MAX_PAGES,
+            "{most} pages populated ahead of the watermark"
+        );
+        // Past the huge-page threshold, growth faults huge pages instead.
+        carve_up_to(&host, region, 40 << 20);
+        let after = host.populated.load(SeqCst);
+        carve_up_to(&host, region, 48 << 20);
+        assert_eq!(host.populated.load(SeqCst), after);
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn sparse_classes_never_populate() {
+        for size in [2048, 16 << 10, 64 << 10] {
+            let host = TestHost::<Atomic>::new(plan(), Class::of_size(size).unwrap(), 1);
+            carve_up_to(&host, host.region_at(0), 8 << 20);
+            assert_eq!(host.populated.load(SeqCst), 0, "{size}");
+        }
     }
 }

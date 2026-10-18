@@ -326,10 +326,10 @@ impl<S: Shape> SimOs<S> {
         let page = S::GEOMETRY.page_size();
         let resident = (0..self.pages.len())
             .filter(|&index| self.pages.get(index) & (RESERVED | WRITABLE) == RESERVED | WRITABLE)
-            // SAFETY: the page is inside `memory` and open, and the caller promises it is
-            // initialized and not written meanwhile.
             .filter(|&index| {
                 self.pages.get(index) & POPULATED != 0
+                    // SAFETY: the page is inside `memory` and open, and the caller promises it
+                    // is initialized and not written meanwhile.
                     || !unsafe { self.memory.is_zero(index << self.page_shift(), page) }
             })
             .count();
