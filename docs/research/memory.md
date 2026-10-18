@@ -613,7 +613,10 @@ case seen, plus a sweep step's pushes of a spare stack to the depot.
 2026-10-17, on main with the parked-object rules (8e3c0c4) and the branch that adds huge
 pages for large blocks that grow (`back/region.rs`, `advise_grown`), populate-ahead for dense
 classes, and a build-time override for both and for the huge-page threshold
-(`ASMALLOC_<NAME>` in `back/policy.rs`). The kernel primitives behind it are in
+(`ASMALLOC_<NAME>` in `back/policy.rs`). Since then populate-ahead and the overrides have
+been removed, and a grown block counts as dense only if it at most doubles at once (it was
+four times when these runs were made; Vec growth doubles, so its figures are the same).
+The kernel primitives behind it are in
 `zen5-roofline.md`, section 7. Workloads are the quick suite's single-threaded jobs, each
 build interleaved in a new order each round, the process confined and pinned to CPU 13
 (`taskset`; its CCD was idle apart from short bursts), in a cgroup of its own under
@@ -691,7 +694,8 @@ jemalloc: JSON 89.0, BTreeMap 25.9, churn 110.4 (after freeing 112.9), burst 218
   rounded up to a huge page: 64 buffers written 1 MiB densely, grown to 4 MiB by `realloc`
   and then written one byte every 64 KiB were 160 MiB resident with huge pages for grown
   blocks and 77 without (a scratch probe; the THP allocations partly failed in a first run,
-  which then showed 78). A buffer grown more than four times at once gets no huge pages.
+  which then showed 78). That run grew by four times at once; under the rule as built, which
+  allows at most a doubling, such a buffer gets no huge pages.
   The sparse tests of section 5 are unchanged (1.3 and 16.4 MiB), since a block allocated
   at its size never gets them.
 - The soak's `bigmem` through the preload library, three interleaved runs, seconds and peak

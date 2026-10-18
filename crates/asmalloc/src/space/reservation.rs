@@ -2,7 +2,7 @@
 //!
 //! [`Space`] turns plan offsets into pointers that carry the reservation's provenance, and wraps
 //! the OS's memory calls with the range check their contracts require, so code above it calls
-//! `commit`, `populate` and `advise_huge` without `unsafe`. A `Space` borrows the OS value it came from, so
+//! `commit` and `advise_huge` without `unsafe`. A `Space` borrows the OS value it came from, so
 //! it cannot outlive the memory it describes.
 //!
 //! [`SpaceCell`] owns an OS value and publishes one `Space` over it in a single word, the way
@@ -208,14 +208,6 @@ impl<'os, O: Os> Space<'os, O> {
         // inside this reservation, which `self.os` made and which is live by the type's
         // invariant.
         unsafe { self.os.commit(start, len) }
-    }
-
-    /// Makes a writable range of the reservation resident ahead of use, without changing its
-    /// contents. Aborts if the range is not one [`Space::is_callable_range`] accepts.
-    pub fn populate(&self, start: NonNull<u8>, len: usize) -> Result<(), OsError> {
-        self.check(start, len);
-        // SAFETY: as in `commit`; populating changes no contents or permissions.
-        unsafe { self.os.populate(start, len) }
     }
 
     /// Advises for or against huge pages over a range of the reservation. Aborts if the range is

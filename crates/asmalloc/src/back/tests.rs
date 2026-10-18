@@ -1231,27 +1231,23 @@ fn a_large_slot_that_shrinks_in_place_returns_its_tail() {
     back.resize_in_place(ptr, 5 * page + 100);
     back.resize_in_place(ptr, 5 * page + 7);
     assert_eq!(os.calls(Call::Purge), purges + 1);
-    // Grown back in place: the old bytes are gone, not stale. That is dense growth to a huge
-    // page (the slot is one simulated huge page), so the slot is now advised for them.
+    // Grown back in place: the old bytes are gone, not stale. Nearly threefold at once is not
+    // dense growth, so the slot gets no huge pages.
     back.resize_in_place(ptr, class.size());
     assert_eq!(back.usable_size(ptr.as_ptr()), Some(class.size()));
     assert_eq!(os.calls(Call::Purge), purges + 1);
     assert!(painted(ptr.as_ptr(), 6 * page, 0x6b));
     assert!(painted(tail.as_ptr(), class.size() - 6 * page, 0));
-    assert_eq!(os.huge_pages(ptr), Some(HugePages::Prefer));
-    // Shrunk again after being written: the tail lies inside the huge page, which goes back
-    // only whole, at the free, with the advice.
+    assert_eq!(os.huge_pages(ptr), Some(HugePages::Avoid));
+    // Shrunk again after being written, then freed and reused: the counts stay in step.
     paint(ptr.as_ptr(), class.size(), 0x11);
     back.resize_in_place(ptr, 2 * page);
-    assert_eq!(os.calls(Call::Purge), purges + 1);
-    assert!(painted(ptr.as_ptr(), class.size(), 0x11));
-    back.free(ptr, class);
     assert_eq!(os.calls(Call::Purge), purges + 2);
-    assert_eq!(os.huge_pages(ptr), Some(HugePages::Avoid));
-    assert_eq!(back.retained_large(), 0);
+    back.free(ptr, class);
+    assert_eq!(back.retained_large(), class.size());
     let again = back.alloc(class, class.size()).unwrap();
     assert_eq!(again.ptr, ptr);
-    assert!(again.zeroed && painted(ptr.as_ptr(), class.size(), 0));
+    assert!(!again.zeroed);
     assert_eq!(back.retained(), 0);
     back.free(again.ptr, class);
 }
@@ -1396,8 +1392,8 @@ fn a_block_that_grows_gets_huge_pages_until_it_is_freed() {
     assert_eq!(again.ptr, dense);
     assert!(again.zeroed);
     back.free(again.ptr, new_class);
-    // Growing more than fourfold at once says nothing about density.
-    let far = grow(24 << 10, 400 << 10);
+    // Growing more than twofold at once says nothing about density.
+    let far = grow(80 << 10, 200 << 10);
     assert_eq!(os.huge_pages(far), Some(HugePages::Avoid));
     back.free(far, new_class);
     // Growing in place: advised once the block reaches a huge page, if it grew densely.
@@ -1433,7 +1429,7 @@ fn an_advised_slot_is_purged_only_in_whole_huge_pages() {
     let first = back.alloc(class, page).unwrap().ptr;
     let slot = back.alloc(class, huge / 2).unwrap().ptr;
     assert_eq!(slot.addr().get() - first.addr().get(), class.size());
-    back.resize_in_place(slot, 2 * huge);
+    back.resize_in_place(slot, huge);
     let interior = slot.map_addr(|a| a.saturating_add(huge / 2));
     assert_eq!(os.huge_pages(interior), Some(HugePages::Prefer));
     assert_eq!(
@@ -1479,9 +1475,9 @@ fn refused_huge_page_advice_is_retried_by_the_next_holder() {
     let class = large(256 << 10);
     let block = back.alloc(class, huge / 2).unwrap().ptr;
     os.set_faults(Call::AdviseHuge, Faults::ALWAYS.partially());
-    back.resize_in_place(block, 2 * huge);
-    pattern(block.as_ptr(), 2 * huge);
-    assert!(patterned(block.as_ptr(), 2 * huge));
+    back.resize_in_place(block, huge);
+    pattern(block.as_ptr(), huge);
+    assert!(patterned(block.as_ptr(), huge));
     // Half the range took the advice before the call failed.
     assert_eq!(os.huge_pages(block), Some(HugePages::Prefer));
     let calls = || os.calls(Call::AdviseHuge);

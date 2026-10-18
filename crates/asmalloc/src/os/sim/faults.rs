@@ -12,8 +12,6 @@ pub enum Call {
     Commit,
     /// [`crate::os::Os::purge`].
     Purge,
-    /// [`crate::os::Os::populate`].
-    Populate,
     /// [`crate::os::Os::advise_huge`].
     AdviseHuge,
     /// [`crate::os::Os::wipe_on_fork`].
@@ -28,11 +26,10 @@ pub enum Call {
 
 impl Call {
     /// Every call.
-    pub const ALL: [Call; 9] = [
+    pub const ALL: [Call; 8] = [
         Call::Reserve,
         Call::Commit,
         Call::Purge,
-        Call::Populate,
         Call::AdviseHuge,
         Call::WipeOnFork,
         Call::Unmap,
@@ -44,12 +41,9 @@ impl Call {
     pub const fn error(self) -> OsError {
         match self {
             // Out of address space or commit charge, or too many mappings.
-            Call::Reserve
-            | Call::Commit
-            | Call::Purge
-            | Call::Populate
-            | Call::AdviseHuge
-            | Call::Unmap => OsError::ENOMEM,
+            Call::Reserve | Call::Commit | Call::Purge | Call::AdviseHuge | Call::Unmap => {
+                OsError::ENOMEM
+            }
             // A kernel before 4.14.
             Call::WipeOnFork => OsError::EINVAL,
             // A kernel without rseq membarrier support.

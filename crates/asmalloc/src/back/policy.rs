@@ -53,27 +53,6 @@ pub const PURGE_STEP_WORDS: usize = 256;
 /// keeps one call from paying for a whole heap; the clocked pass finishes the job.
 pub const PURGE_CAP_WORDS: usize = 1 << 14;
 
-/// A policy value that a build may override for measurement, as `ASMALLOC_<NAME>=<decimal>` in
-/// the environment of `cargo build`. Cargo rebuilds the crate when the variable changes.
-const fn knob(value: Option<&str>, default: usize) -> usize {
-    let Some(text) = value else {
-        return default;
-    };
-    let bytes = text.as_bytes();
-    let mut n = 0usize;
-    let mut i = 0;
-    while i < bytes.len() {
-        let digit = bytes[i];
-        assert!(
-            digit.is_ascii_digit(),
-            "a policy knob must be a decimal number"
-        );
-        n = n * 10 + (digit - b'0') as usize;
-        i += 1;
-    }
-    n
-}
-
 /// A region of a class that gets huge pages marks the rest of itself for them once it has
 /// carved more than this many huge pages: 8, or 16 MiB. The first touch of a huge page makes
 /// all of it resident, so the page at the watermark costs up to one huge page that the
@@ -84,10 +63,10 @@ const fn knob(value: Option<&str>, default: usize) -> usize {
 /// unchanged. 8 MiB saves a little more time and takes churn 3 MiB over jemalloc
 /// (`docs/research/zen5-roofline.md`, section 7). A simulated heap whose regions are smaller
 /// than four times this uses a quarter of a region instead.
-pub const HUGE_AFTER_HUGE_PAGES: usize = knob(option_env!("ASMALLOC_HUGE_AFTER_HUGE_PAGES"), 8);
+pub const HUGE_AFTER_HUGE_PAGES: usize = 8;
 
-/// Only classes with at least this many slots to a page get huge pages or populate-ahead: 4,
-/// so classes up to 1 KiB. Small objects are dense in their pages, so a huge page holds what the program
+/// Only classes with at least this many slots to a page get huge pages: 4, so classes up
+/// to 1 KiB. Small objects are dense in their pages, so a huge page holds what the program
 /// uses. A block of a page or more is often touched in part, and with huge pages every part
 /// touched would cost 2 MiB: 256 blocks of 1 MiB with one page written each were 246 MiB
 /// resident.
@@ -100,15 +79,14 @@ pub const HUGE_MIN_SLOTS_PER_PAGE: usize = 4;
 /// did. Growth is the evidence of dense use: a copy fills the old size, and a growing buffer
 /// is being appended to. A block allocated at its size in one call may be a buffer used
 /// sparsely, and with huge pages each part touched would cost 2 MiB, so it never gets them.
-/// Zero turns this off.
-pub const GROWN_HUGE_MIN_HUGE_PAGES: usize =
-    knob(option_env!("ASMALLOC_GROWN_HUGE_MIN_HUGE_PAGES"), 1);
+pub const GROWN_HUGE_MIN_HUGE_PAGES: usize = 1;
 
-/// ...and only if it grows by at most this factor at once: 4. A vector doubles; a program that
-/// reserves a large buffer behind a small one has said nothing about how densely it will use
-/// it, and khugepaged would make every huge page it touches resident whole
-/// (`docs/research/zen5-roofline.md`, section 7).
-pub const GROWN_HUGE_MAX_FACTOR: usize = 4;
+/// ...and only if it at most doubles at once: a doubling is the signature of appending. A
+/// larger jump is a one-off reserve that says nothing about how densely the buffer will be
+/// used, and khugepaged would make every huge page it touches resident whole
+/// (`docs/research/zen5-roofline.md`, section 7): a buffer written 1 MiB densely, grown to
+/// 4 MiB and then written sparsely kept all 4 MiB resident.
+pub const GROWN_HUGE_MAX_FACTOR: usize = 2;
 
 /// A large block that moves is copied in pieces of this many huge pages, and the pages of the
 /// old block behind each piece go back to the OS before the next is copied: 1, or 2 MiB. So a
@@ -123,22 +101,6 @@ pub const MOVE_PIECE_HUGE_PAGES: usize = 1;
 /// the carve that asked for it needs: 16, or 64 KiB. `mprotect` costs about a microsecond, so
 /// this makes it rare without charging much address space against strict overcommit.
 pub const COMMIT_AHEAD_PAGES: usize = 16;
-
-/// Populate ahead, in the small-page part of a region of a dense class: once the class has
-/// carved enough there that a stretch of `carved >> POPULATE_SHIFT` is at least
-/// `COMMIT_AHEAD_PAGES`, each commit makes that stretch writable and resident with one
-/// `MADV_POPULATE_WRITE` instead of a fault per page, up to `POPULATE_MAX_PAGES`. Pages stay
-/// 4 KiB, so purging keeps its granularity. What is resident and never carved is at most one
-/// stretch per region: an eighth of what the class has carved, and never more than the cap.
-pub const POPULATE_SHIFT: u32 = 3;
-
-/// The longest populate stretch, in pages: 0, so populate-ahead is off. A populate still
-/// allocates, zeroes and maps each page one at a time and skips only the exception: 440 ns a
-/// page against 570 for a fault, where a huge page costs 150. On the workloads it cut faults
-/// by three to five times and kernel time by under a tenth, for about 1 MiB more at each peak
-/// (`docs/research/zen5-roofline.md`, section 7). 64 (256 KiB) is the value that was
-/// measured: populating 16 pages at once already saves all populating can.
-pub const POPULATE_MAX_PAGES: usize = knob(option_env!("ASMALLOC_POPULATE_MAX_PAGES"), 0);
 
 /// In the huge-page part, each commit makes writable whole huge pages, this many beyond what
 /// the carve needs: 1, or 2 MiB, so growth faults a huge page at a time.
@@ -190,33 +152,11 @@ pub const fn wants_huge(size: usize, page: usize) -> bool {
     size * HUGE_MIN_SLOTS_PER_PAGE <= page
 }
 
-/// How many pages a commit in the small-page part of a region populates ahead, when the region
-/// has carved `carved` bytes of `size`-byte slots: zero, or a stretch of at least
-/// `COMMIT_AHEAD_PAGES` and at most `POPULATE_MAX_PAGES`.
-#[inline(always)]
-pub const fn populate_ahead(size: usize, page: usize, carved: usize) -> usize {
-    if !wants_huge(size, page) {
-        return 0;
-    }
-    let stretch = (carved >> POPULATE_SHIFT) / page;
-    let stretch = if POPULATE_MAX_PAGES < stretch {
-        POPULATE_MAX_PAGES
-    } else {
-        stretch
-    };
-    if stretch < COMMIT_AHEAD_PAGES {
-        0
-    } else {
-        stretch
-    }
-}
-
 /// Whether a large block growing from `old` to `new` bytes gets huge pages, where huge pages
 /// are `huge` bytes.
 #[inline(always)]
 pub const fn grown_huge(old: usize, new: usize, huge: usize) -> bool {
-    GROWN_HUGE_MIN_HUGE_PAGES != 0
-        && new > old
+    new > old
         && new >= GROWN_HUGE_MIN_HUGE_PAGES * huge
         && old.saturating_mul(GROWN_HUGE_MAX_FACTOR) >= new
 }
