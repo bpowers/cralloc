@@ -61,7 +61,8 @@ impl<O: Os> Heap<O> {
     }
 
     /// Allocates a large block of `size` bytes aligned to `align` (a power of two; C's 16 at
-    /// least, whatever is asked), with the requested bytes zeroed if `zero`. The request's C
+    /// least, whatever is asked). With `zero`, all of it the caller may use (its usable size)
+    /// reads as zero, skipping memory the back end knows is zero. The request's C
     /// class must not be small. `None` if there is no memory or the size and alignment
     /// describe no block.
     pub(crate) fn alloc_large_aligned(
@@ -72,7 +73,7 @@ impl<O: Os> Heap<O> {
     ) -> Option<NonNull<u8>> {
         let layout = Layout::from_size_align(size, align.max(C_ALIGN)).ok()?;
         debug_assert!(Class::of_layout(layout).is_none_or(|class| !class.is_small()));
-        let fill = if zero { Zero::Requested } else { Zero::No };
+        let fill = if zero { Zero::Whole } else { Zero::No };
         self.alloc_large(layout, fill).map(|grant| grant.ptr)
     }
 

@@ -12,6 +12,7 @@
 
 use super::host::ClassHost;
 use super::layout::{Grow, Hints};
+use super::policy::wants_huge;
 use super::region::{self, Carve};
 use super::tree::{self, Host};
 use super::word::{BITS, Word, position};
@@ -32,13 +33,15 @@ impl<'a, O: Os> Back<'a, O> {
             return 0;
         };
         let mut got = 0;
-        let mut resident = 0;
+        let (mut resident, mut revived) = (0, 0);
         while got < out.len() {
             let want = (out.len() - got).min(BITS as usize) as u32;
             let Some(taken) = tree::claim(&host, want) else {
                 break;
             };
-            resident += region::settle(&host, taken.region, taken.word, taken.bits).resident;
+            let settled = region::settle(&host, taken.region, taken.word, taken.bits);
+            resident += settled.resident;
+            revived += settled.revived;
             let mut bits = taken.bits;
             while bits != 0 {
                 let slot = taken.word * BITS + bits.trailing_zeros();
@@ -46,7 +49,8 @@ impl<'a, O: Os> Back<'a, O> {
                 got = self.put(out, got, taken.region, class.class(), slot);
             }
         }
-        self.unretain(resident);
+        self.unretain(class.class(), resident);
+        self.revive(class.class(), revived);
         while got < out.len() {
             let want = (out.len() - got).min(u32::MAX as usize) as u32;
             let Some((region, first, count)) = self.carve(&host, class.class(), want) else {
@@ -116,7 +120,7 @@ impl<'a, O: Os> Back<'a, O> {
         if let Some((r, w, bits)) = pending {
             tree::release(&host, r, w, bits);
         }
-        self.retain(objects.len().saturating_mul(class.size()));
+        self.retain(class, objects.len().saturating_mul(class.size()));
     }
 
     /// The region and slot of a pointer the caller says is a handed-out slot of `class`, or an
@@ -165,7 +169,8 @@ impl<'a, O: Os> Back<'a, O> {
         let host = self.host(class)?;
         let (region, slot, zeroed) = if let Some(taken) = tree::claim(&host, 1) {
             let settled = region::settle(&host, taken.region, taken.word, taken.bits);
-            self.unretain(settled.resident);
+            self.unretain(class, settled.resident);
+            self.revive(class, settled.revived);
             let slot = taken.word * BITS + taken.bits.trailing_zeros();
             (taken.region, slot, settled.zeroed != 0)
         } else {
@@ -174,6 +179,10 @@ impl<'a, O: Os> Back<'a, O> {
         };
         if let Some(at) = host.layout().size_word(slot) {
             host.meta(region, at).store(size as u64);
+        }
+        if !class.is_small() {
+            // As for a large free: see `Back::free`.
+            self.heartbeat();
         }
         Some(Block {
             ptr: self.space.slot(region, class, slot),
@@ -229,8 +238,23 @@ impl<'a, O: Os> Back<'a, O> {
 
     /// Frees one slot of `class` to its bitmap. Aborts as [`Back::launder`] does. A large slot's
     /// recorded size is left as it was; the next allocation of the slot writes it.
+    ///
+    /// A free of a large slot that leaves the large classes' retained count over its cap
+    /// returns that slot's pages to the OS before it returns (`purge`).
     pub fn free(&self, ptr: NonNull<u8>, class: Class) {
         self.release_all(class, &mut [ptr.as_ptr()]);
+        if class.is_small() {
+            return;
+        }
+        if self.large_over_cap()
+            && let Some(location) = self.space.locate(ptr.as_ptr())
+            && let Some(slot) = self.space.plan().slot_at(location, class)
+        {
+            self.purge_slot(class, location.region, slot);
+        }
+        // A large free is a slow path with no depot behind it, so it beats the heart itself:
+        // a program that only moves large blocks still gets its decay.
+        self.heartbeat();
     }
 
     /// Frees whatever `ptr` is the start of: a slot, whose class the region table gives, or a
@@ -298,8 +322,8 @@ impl<'a, O: Os> Back<'a, O> {
     fn assign(&self, host: &ClassHost<'a, O>, class: Class, seen: u32) -> bool {
         let plan = self.space.plan();
         // A class that has filled a region before has carved far past the huge-page threshold,
-        // so its new region uses huge pages from the start.
-        let huge = seen != 0;
+        // so its new region uses huge pages from the start, if its class gets them at all.
+        let huge = seen != 0 && wants_huge(class.size(), host.layout().page_size());
         let layout = host.layout();
         let (start, end) = layout.fixed_commit();
         for region in plan.regions() {

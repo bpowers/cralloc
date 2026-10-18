@@ -395,6 +395,21 @@ impl Layout {
         Step::Unit(Unit { start, end })
     }
 
+    /// The pages wholly inside slot `slot`, as a unit, if there are any. A slot of whole pages
+    /// (every large class) is all of them. The only slot such a unit touches is `slot`, so a
+    /// purge of it claims that slot alone.
+    #[inline]
+    pub(crate) const fn slot_unit(&self, slot: u32) -> Option<Unit> {
+        let page = self.page_size();
+        let start = self.slot_bytes(slot).div_ceil(page) as u32;
+        let end = (self.slot_bytes(slot + 1) >> self.page_shift) as u32;
+        if start < end {
+            Some(Unit { start, end })
+        } else {
+            None
+        }
+    }
+
     /// The slots a unit touches: `first..=last`.
     #[inline]
     pub(crate) const fn touching(&self, unit: Unit) -> (u32, u32) {

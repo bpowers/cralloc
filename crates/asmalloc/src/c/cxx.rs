@@ -1,20 +1,25 @@
-//! The C++ allocation operators: every replaceable form of `operator new` and `operator
-//! delete` (C++17 [new.delete], as libstdc++'s and libc++'s `<new>` declare them), on the
-//! process's heap. [`export_cxx_abi!`](crate::export_cxx_abi) exports them under their mangled
-//! names.
+//! The C++ allocation operators (C++17 [new.delete], as libstdc++'s and libc++'s `<new>`
+//! declare them) on the process's heap. [`export_cxx_abi!`](crate::export_cxx_abi) exports the
+//! nothrow forms of `new` and every form of `delete` under their mangled names.
 //!
 //! - **new** is `malloc`, or the aligned allocation for the `std::align_val_t` forms, with the
 //!   same classes and alignment. When it fails it runs the installed new-handler in a loop, as
 //!   the standard requires, until an allocation succeeds or no handler is installed. The
 //!   handler comes from `std::get_new_handler`, found at the time of the failure with `dlsym`,
-//!   so the library needs no C++ runtime to load.
-//! - **Failure.** A nothrow form returns null once no handler is installed, and a handler that
-//!   throws ends the process, since the exception cannot pass (below). A throwing form ends the process: it cannot
-//!   throw `std::bad_alloc`. The allocator is built with `panic = "abort"`, and Rust then gives
-//!   every call that may unwind a landing pad that aborts, so an exception thrown below one of
-//!   these functions (by `std::__throw_bad_alloc`, or by a new-handler) can never leave
-//!   through its frame: the unwinder reaches the landing pad and the process aborts. Only a routine that leaves no Rust frame on the stack, a generated one
-//!   whose failure path jumps to the C++ runtime's thrower, can throw from here.
+//!   so the library needs no C++ runtime to load. A nothrow form then returns null.
+//! - **The throwing forms are not exported.** Their failure must throw `std::bad_alloc`, and
+//!   no Rust function here can: the allocator is built with `panic = "abort"`, and Rust then
+//!   gives every call that may unwind a landing pad that aborts, so an exception thrown below
+//!   one of these functions never leaves through its frame. The design's answer is a generated
+//!   routine whose failure path jumps to the C++ runtime's thrower with nothing of ours on the
+//!   stack. Until it exists, the C++ runtime's own throwing `new` serves those four forms by
+//!   calling `malloc` and `aligned_alloc`, which keeps the exception catchable; its blocks are
+//!   asmalloc's, and the `delete` here frees them. [`operator_new`] and
+//!   [`operator_new_aligned`] are written as what the generated routine will do short of the
+//!   throw, around `new_slow` and `new_aligned_slow`, the slow paths it will call: each
+//!   returns the block, or null once the new-handler loop is over, and the routine throws.
+//! - **A new-handler that throws** ends the process when the new that ran it is ours (a nothrow
+//!   form), for the same reason: the exception cannot pass our frame.
 //! - **delete** takes the class from the address, as `free` does. A size passed to a sized
 //!   delete is a prediction, never the truth: a wrong one (an object deleted through a base
 //!   pointer whose destructor is not virtual) frees exactly what an unsized delete would. The
@@ -24,7 +29,6 @@
 //! The ledger entry is `docs/safety/asmalloc/c/cxx-safety.md`.
 
 use super::{seam, slow};
-use crate::heap::process;
 use core::ffi::{c_char, c_void};
 use core::ptr;
 
@@ -78,12 +82,6 @@ fn retry(allocate: impl Fn() -> *mut c_void) -> *mut c_void {
     }
 }
 
-/// The end of a throwing `new` that failed.
-#[cold]
-fn cannot_throw() -> ! {
-    process::abort("operator new: out of memory, and asmalloc cannot throw std::bad_alloc")
-}
-
 /// A block of `size` bytes aligned to `align`, or null; null at once if `align` is not a
 /// power of two, which the standard leaves undefined.
 fn aligned(size: usize, align: usize) -> *mut c_void {
@@ -93,25 +91,28 @@ fn aligned(size: usize, align: usize) -> *mut c_void {
     slow::allocate(size, align, false).cast()
 }
 
-/// Completes a throwing `operator new(size)` after the fast path failed.
+/// Completes an `operator new(size)` of any form whose first attempt failed: the new-handler
+/// loop, then the block or null. A nothrow form returns what it returns; a throwing form's
+/// routine will throw `std::bad_alloc` on null.
 #[cold]
 #[inline(never)]
 pub(crate) extern "C" fn new_slow(size: usize) -> *mut c_void {
-    let block = retry(|| slow::malloc_slow(size));
-    if block.is_null() {
-        cannot_throw();
-    }
-    block
-}
-
-/// Completes a nothrow `operator new(size, std::nothrow)` after the fast path failed.
-#[cold]
-#[inline(never)]
-pub(crate) extern "C" fn new_nothrow_slow(size: usize) -> *mut c_void {
     retry(|| slow::malloc_slow(size))
 }
 
-/// `operator new(size)` and `operator new[](size)`.
+/// Completes an `operator new(size, std::align_val_t(align))` of any form, as [`new_slow`].
+#[cold]
+#[inline(never)]
+pub(crate) extern "C" fn new_aligned_slow(size: usize, align: usize) -> *mut c_void {
+    if !align.is_power_of_two() {
+        return ptr::null_mut();
+    }
+    retry(|| aligned(size, align))
+}
+
+/// `operator new(size)` and `operator new[](size)` short of the throw: the block, or null where
+/// the C++ operator must throw `std::bad_alloc`. Not exported (see the module documentation):
+/// the throw needs a generated routine with no frame of ours below it.
 #[inline]
 pub extern "C" fn operator_new(size: usize) -> *mut c_void {
     let block = seam::malloc(size);
@@ -124,37 +125,22 @@ pub extern "C" fn operator_new(size: usize) -> *mut c_void {
 /// `operator new(size, std::nothrow)` and its array form.
 #[inline]
 pub extern "C" fn operator_new_nothrow(size: usize) -> *mut c_void {
-    let block = seam::malloc(size);
-    if block.is_null() {
-        return new_nothrow_slow(size);
-    }
-    block
+    operator_new(size)
 }
 
-/// `operator new(size, std::align_val_t(align))` and its array form.
+/// `operator new(size, std::align_val_t(align))` and its array form short of the throw, as
+/// [`operator_new`]. Not exported.
 pub extern "C" fn operator_new_aligned(size: usize, align: usize) -> *mut c_void {
     let block = aligned(size, align);
-    if !block.is_null() {
-        return block;
-    }
-    let block = if align.is_power_of_two() {
-        retry(|| aligned(size, align))
-    } else {
-        ptr::null_mut()
-    };
     if block.is_null() {
-        cannot_throw();
+        return new_aligned_slow(size, align);
     }
     block
 }
 
 /// `operator new(size, std::align_val_t(align), std::nothrow)` and its array form.
 pub extern "C" fn operator_new_aligned_nothrow(size: usize, align: usize) -> *mut c_void {
-    let block = aligned(size, align);
-    if !block.is_null() || !align.is_power_of_two() {
-        return block;
-    }
-    retry(|| aligned(size, align))
+    operator_new_aligned(size, align)
 }
 
 /// `operator delete(ptr)`, its array form, and the `std::nothrow` and `std::align_val_t`
@@ -197,18 +183,23 @@ pub unsafe extern "C" fn operator_delete_sized_aligned(
     unsafe { seam::free_aligned_sized(ptr, align, size) }
 }
 
-/// Exports the C++ allocation operators under their mangled names (Itanium C++ ABI, x86-64:
-/// `size_t` is `m`) from the crate that invokes it, so that C++ code in the program allocates
-/// from asmalloc without going through `malloc`, and sized deletes reach it with their size.
+/// Exports C++ allocation operators under their mangled names (Itanium C++ ABI, x86-64:
+/// `size_t` is `m`) from the crate that invokes it, so that sized deletes reach asmalloc with
+/// their size and nothrow `new` skips a call layer.
 /// Invoke it once per program, at the item level, alongside
 /// [`export_c_abi!`](crate::export_c_abi).
 ///
 /// It is separate from `export_c_abi!` because C++ lets a program define these operators
-/// itself; such a program can take the C interface without a clash of definitions.
+/// itself; such a program can take the C interface without a clash of definitions. The reverse
+/// is not supported: without the C interface, the C++ runtime's throwing `new` would get its
+/// blocks from the C library's `malloc`, and this `delete` would be handed them.
 ///
-/// The set is every replaceable form `<new>` declares: `new` and `new[]`, each plain,
-/// `std::nothrow`, `std::align_val_t` and both; `delete` and `delete[]`, each plain, sized,
-/// `std::nothrow`, `std::align_val_t`, aligned `std::nothrow`, and sized aligned. The placement
+/// The set is 16 of the 20 replaceable forms `<new>` declares: `new` and `new[]` with
+/// `std::nothrow`, plain and with `std::align_val_t`; `delete` and `delete[]`, each plain,
+/// sized, `std::nothrow`, `std::align_val_t`, aligned `std::nothrow`, and sized aligned. The
+/// four throwing forms of `new` are left to the C++ runtime, which can throw `std::bad_alloc`
+/// (see the [module documentation](self)); they allocate through `malloc` and `aligned_alloc`,
+/// so their blocks are asmalloc's and the `delete` exported here frees them. The placement
 /// forms are inline and not replaceable.
 #[macro_export]
 macro_rules! export_cxx_abi {
@@ -219,15 +210,9 @@ macro_rules! export_cxx_abi {
             use ::core::ffi::c_void;
             use $crate::c::cxx;
 
-            // new
-            #[unsafe(no_mangle)]
-            extern "C" fn _Znwm(size: usize) -> *mut c_void {
-                cxx::operator_new(size)
-            }
-            #[unsafe(no_mangle)]
-            extern "C" fn _Znam(size: usize) -> *mut c_void {
-                cxx::operator_new(size)
-            }
+            // new: the nothrow forms only. The throwing forms stay the C++ runtime's, which
+            // serves them through `malloc` and `aligned_alloc` and can throw `std::bad_alloc`
+            // (see `asmalloc::c::cxx`).
             #[unsafe(no_mangle)]
             extern "C" fn _ZnwmRKSt9nothrow_t(size: usize, _: *const c_void) -> *mut c_void {
                 cxx::operator_new_nothrow(size)
@@ -235,14 +220,6 @@ macro_rules! export_cxx_abi {
             #[unsafe(no_mangle)]
             extern "C" fn _ZnamRKSt9nothrow_t(size: usize, _: *const c_void) -> *mut c_void {
                 cxx::operator_new_nothrow(size)
-            }
-            #[unsafe(no_mangle)]
-            extern "C" fn _ZnwmSt11align_val_t(size: usize, align: usize) -> *mut c_void {
-                cxx::operator_new_aligned(size, align)
-            }
-            #[unsafe(no_mangle)]
-            extern "C" fn _ZnamSt11align_val_t(size: usize, align: usize) -> *mut c_void {
-                cxx::operator_new_aligned(size, align)
             }
             #[unsafe(no_mangle)]
             extern "C" fn _ZnwmSt11align_val_tRKSt9nothrow_t(

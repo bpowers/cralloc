@@ -25,9 +25,10 @@
 //!   usable size covered, up to the new size, as glibc's does.
 //! - `malloc_usable_size` is the class size of a small block, and the size last asked for,
 //!   rounded up to a page, of a large one.
-//! - `calloc` checks the product for overflow and does not clear memory the back end knows is
-//!   zero. `malloc_trim` returns wholly free pages that the back end holds; it does not empty
-//!   the magazines.
+//! - `calloc` makes all of the block's usable size read as zero, as glibc's does, checks the
+//!   product for overflow, and does not clear memory the back end knows is zero.
+//!   `malloc_trim` returns wholly free pages that the back end holds; it does not empty the
+//!   magazines.
 //! - A failure returns null (or an error number from `posix_memalign`) and sets `errno` through
 //!   the C library's own accessor (`errno.rs`). `free` and a successful call leave it alone.
 //!   Nothing here hands a request to another allocator.
