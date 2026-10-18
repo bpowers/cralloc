@@ -473,7 +473,8 @@ magazine, and the prefetchers would lose the stream each time.
 Every entry to a slow path does a bounded amount of maintenance before it returns: one step
 of purging, one look at a class of its own slab, one look for an idle cache, and at most one
 magazine laundered for each rule that launders. A large allocation or free counts as a slow
-path. By default there is no background thread and no timer. The work is done in units
+path, but does the maintenance on one call in sixteen: a program that moves large blocks
+makes such calls far more often than the maintenance needs to run. By default there is no background thread and no timer. The work is done in units
 small enough that no single call pays much. This is mimalloc's pacing applied to a per-CPU
 design.
 
