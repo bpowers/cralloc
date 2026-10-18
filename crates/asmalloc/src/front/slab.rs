@@ -19,11 +19,12 @@ use core::ptr;
 use core::sync::atomic::Ordering;
 
 /// The number of slabs: one for every CPU number the kernel can produce on x86-64.
-pub const SLAB_COUNT: usize = 8192;
+pub const SLAB_COUNT: usize = crate::spec::SLAB_COUNT;
 /// `log2` of [`SLAB_BYTES`].
-pub const SLAB_SHIFT: u32 = 12;
+pub const SLAB_SHIFT: u32 = crate::spec::SLAB_SHIFT;
 /// The bytes of a slab, and its alignment.
-pub const SLAB_BYTES: usize = 1 << SLAB_SHIFT;
+pub const SLAB_BYTES: usize = crate::spec::SLAB_BYTES;
+const _: () = assert!(SLAB_BYTES == 1 << SLAB_SHIFT);
 
 /// Hot words per slab: room for the class indexes `1..WORDS`.
 const WORDS: usize = 64;

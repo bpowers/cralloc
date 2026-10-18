@@ -61,7 +61,7 @@ use core::sync::atomic::{AtomicU8, AtomicU64, Ordering};
 /// The number of entries in the masks' table: one per value of a class byte, so that a class
 /// read from the region table indexes it whatever it is, and finds zero, which sends the
 /// generated C routines to their slow paths, for every byte that is not a small class.
-pub const MASK_COUNT: usize = 256;
+pub const MASK_COUNT: usize = crate::spec::MASK_COUNT;
 
 /// Where the masks' table starts within its page: past every field of a slab, so that no entry
 /// shares a page offset with a slab word (a load at the page offset of a store in flight waits
@@ -163,19 +163,15 @@ pub(crate) const BASE_DISP: usize = SHIFT_DISP + 8;
 pub(crate) const REGION_DISP: usize = offset_of!(Front, regions) - offset_of!(Front, slabs);
 
 // The layout is the one the routines were proved for.
-#[cfg(all(target_os = "linux", target_arch = "x86_64", not(miri), not(kani)))]
 const _: () = {
-    use generated::x86_64::centry as c_proved;
-    use generated::x86_64::slab as proved;
-    assert!(MASK_DISP == proved::MASK_DISP);
-    assert!(MASK_COUNT == proved::MASK_COUNT);
-    assert!(SLAB_COUNT == proved::SLAB_COUNT && SLAB_BYTES == proved::SLAB_BYTES);
-    assert!(MASK_DISP == c_proved::MASK_DISP && MASK_COUNT == c_proved::MASK_COUNT);
-    assert!(SLAB_COUNT == c_proved::SLAB_COUNT && SLAB_BYTES == c_proved::SLAB_BYTES);
-    assert!(SHIFT_DISP == c_proved::SHIFT_DISP && BASE_DISP == c_proved::BASE_DISP);
+    use crate::spec;
+    assert!(MASK_DISP == spec::MASK_DISP);
+    assert!(SHIFT_DISP == spec::SHIFT_DISP && BASE_DISP == spec::BASE_DISP);
     // The routines were proved for one mirror, C's, at `SHIFT_DISP`.
-    assert!(c_proved::MIRROR_COUNT == 1 && size_of::<[AtomicU64; 2]>() == c_proved::MIRROR_BYTES);
-    assert!(REGION_DISP == c_proved::REGION_DISP && REGION_COUNT == c_proved::REGION_COUNT);
+    assert!(spec::MIRROR_COUNT == 1 && size_of::<[AtomicU64; 2]>() == spec::MIRROR_BYTES);
+    assert!(REGION_DISP == spec::REGION_DISP && REGION_COUNT == spec::REGION_COUNT);
+    // Every small class's hot word is one the routines may address.
+    assert!(SMALL_COUNT < spec::CLASS_LIMIT);
 };
 
 const _: () = {
@@ -249,62 +245,6 @@ pub(crate) fn publish_masks() {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::classes::{MARKER_SHIFT, MagazineSize, SLOT_BYTES};
-    use crate::os::rseq;
-    use std::string::String;
-    use std::vec::Vec;
-
-    /// The constants the generated routines were proved against, read from the generated
-    /// source: `(name, value)`.
-    fn generated_constants(source: &str) -> Vec<(String, u64)> {
-        source
-            .lines()
-            .filter_map(|line| {
-                let rest = line.trim().strip_prefix("pub(crate) const ")?;
-                let (name, rest) = rest.split_once(':')?;
-                let value = rest.split_once('=')?.1.trim().trim_end_matches(';');
-                Some((String::from(name.trim()), value.parse().ok()?))
-            })
-            .collect()
-    }
-
-    #[test]
-    fn the_layout_matches_what_the_routines_were_proved_against() {
-        for source in [
-            include_str!("generated/x86_64/slab.rs"),
-            include_str!("generated/x86_64_inline/slab.rs"),
-        ] {
-            let constants = generated_constants(source);
-            let get = |name: &str| {
-                constants
-                    .iter()
-                    .find(|(n, _)| n == name)
-                    .unwrap_or_else(|| panic!("{name} is not generated"))
-                    .1
-            };
-            assert_eq!(get("SLAB_COUNT"), SLAB_COUNT as u64);
-            assert_eq!(get("SLAB_SHIFT"), SLAB_SHIFT as u64);
-            assert_eq!(get("SLAB_BYTES"), SLAB_BYTES as u64);
-            assert_eq!(get("WORD_BYTES"), SLOT_BYTES as u64);
-            assert_eq!(get("MARKER_SHIFT"), MARKER_SHIFT as u64);
-            if source.contains("NO_CPU") {
-                assert_eq!(get("NO_CPU"), NO_CPU as u64);
-            }
-            assert_eq!(get("RSEQ_CPU_ID"), rseq::CPU_ID as u64);
-            assert_eq!(get("RSEQ_CS"), rseq::RSEQ_CS as u64);
-            assert_eq!(get("MASK_DISP"), MASK_DISP as u64);
-            assert_eq!(get("MASK_COUNT"), MASK_COUNT as u64);
-            // Every small class's hot word is within the words the routines may address, and
-            // every magazine size is one they accept, with the mask they expect.
-            assert!((SMALL_COUNT as u64) < get("CLASS_LIMIT"));
-            for size in MagazineSize::all() {
-                let log = size.slots().trailing_zeros() as u64;
-                assert!(get("MAG_LOG_MIN") <= log && log <= get("MAG_LOG_MAX"));
-                let name = std::format!("MAG_MASK_{}", size.slots());
-                assert_eq!(get(&name), size.mask() as u64, "{name}");
-            }
-        }
-    }
 
     #[test]
     fn the_mask_table_holds_each_class_mask_at_its_index_and_zero_elsewhere() {

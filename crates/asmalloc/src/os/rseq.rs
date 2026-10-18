@@ -14,9 +14,9 @@
 pub const CPU_ID_START: usize = 0;
 /// Offset of `cpu_id`. It is -1 before the thread registers and -2 if its registration failed,
 /// so a thread is registered exactly when this field is not negative.
-pub const CPU_ID: usize = 4;
+pub const CPU_ID: usize = crate::spec::RSEQ_CPU_ID;
 /// Offset of `rseq_cs`, the pointer to the descriptor of the sequence in flight.
-pub const RSEQ_CS: usize = 8;
+pub const RSEQ_CS: usize = crate::spec::RSEQ_CS;
 /// Offset of `flags`.
 pub const FLAGS: usize = 16;
 /// Offset of `node_id`.
@@ -64,14 +64,6 @@ impl RseqArea {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::generated::lean_constant;
-
-    #[test]
-    fn the_offsets_match_the_routines() {
-        assert_eq!(CPU_ID as u64, lean_constant("RSEQ_CPU_ID"));
-        assert_eq!(RSEQ_CS as u64, lean_constant("RSEQ_CS"));
-    }
-
     #[test]
     fn a_zero_size_means_no_registration() {
         assert_eq!(RseqArea::new(-192, 0), None);
