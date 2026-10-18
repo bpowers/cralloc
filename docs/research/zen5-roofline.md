@@ -354,14 +354,14 @@ that skips all-zero source pages gets all of the memory benefit with no new mech
 Remapping buys speed only: 1.6 to 2.9 times the reallocs per second on blocks of tens of
 megabytes and up.
 
-Method. Programs in `bench/roofline/oscost/src/bin/` (`remap_heal`, `remap_cost`,
-`remap_model`) build a heap like the allocator's: one `PROT_NONE`, `MAP_NORESERVE`
-reservation, regions advised `MADV_NOHUGEPAGE` and made writable from their start. All ran
-under `scripts/memlimit` with 8 GiB or less, pinned to CPU 13 (second thread on CPU 12).
-Those two cores and their siblings were idle when sampled; the machine's load average was 12
-to 17 from other work, and repeats of the workload model differ by up to 15%. Times are the
-fastest of 3 to 40 repeats. Kernel behaviour was checked against the v7.2 sources
-(`mm/mremap.c`, `mm/vma.c`, `mm/mmap.c`, `mm/madvise.c`, `mm/util.c`).
+Method. Programs in `bench/roofline/oscost/src/bin/` (`remap_heal`, `remap_cost`, `remap_model`;
+deleted once the design chose to copy, last present at commit 666f143) build a heap like the
+allocator's: one `PROT_NONE`, `MAP_NORESERVE` reservation, regions advised `MADV_NOHUGEPAGE` and
+made writable from their start. All ran under `scripts/memlimit` with 8 GiB or less, pinned to
+CPU 13 (second thread on CPU 12). Those two cores and their siblings were idle when sampled; the
+machine's load average was 12 to 17 from other work, and repeats of the workload model differ by
+up to 15%. Times are the fastest of 3 to 40 repeats. Kernel behaviour was checked against the
+v7.2 sources (`mm/mremap.c`, `mm/vma.c`, `mm/mmap.c`, `mm/madvise.c`, `mm/util.c`).
 
 #### What the kernel does
 
@@ -511,7 +511,8 @@ not its numbers.
 
 ## 8. Moving cache lines between cores
 
-Wall-clock, single run each in two sessions.
+Wall-clock, single run each in two sessions, with `bench/roofline/xcore` (last present at
+commit 666f143).
 
 | | SMT sibling | Same L3 | Other L3 |
 |---|---:|---:|---:|
@@ -565,7 +566,8 @@ path is opaque to that folding.
 
 `__rust_alloc` and its siblings are generated in the crate that declares `#[global_allocator]`.
 Whether a call site gets the fast path inlined depends on whether the optimizer can see that
-crate from the call site. The experiment (`bench/roofline/inline`) has an allocator crate with
+crate from the call site. The experiment (`bench/roofline/inline`, superseded by
+`bench/roofline/fastpath` and last present at commit 666f143) has an allocator crate with
 `#[inline]` fast paths, a dependency crate, and a binary crate that declares the allocator and
 is large enough to be split into two codegen units.
 

@@ -17,10 +17,8 @@ L3; override with the environment variables below.
 |---|---|---|
 | `kernels/` | Hand-written assembly fast paths, store-to-load forwarding, atomics, call cost, core widths, and a code-layout sweep. Cycles, instructions, retired uops and forwards per operation. | `cargo run --release -- [prefix,...]` |
 | `rust-alloc/` | Allocation workloads through Rust's global allocator for glibc, mimalloc, jemalloc and two floor allocators, single-threaded and cross-thread. | `./run.sh [workload-prefix]` |
-| `inline/` | Whether the allocator fast path is inlined at different kinds of call site, per cargo profile. | `./check.py [variant ...]` |
 | `fastpath/` | A check that fails if asmalloc's own fast path stops inlining under fat LTO: the hot loop of each kind of call site must hold both rseq sequences and no call. Prints each loop's bytes. Seconds. | `taskset -c 4-7 ./check.py` |
 | `oscost/` | Cost of mmap, page faults, the madvise family, mprotect, guard pages and zeroing; and (`faults`) demand faults against populate stretches and huge pages, one to four threads, huge-page advice around a slot, partial purges of huge pages, khugepaged on sparse memory. | `cargo run --release`, `target/release/faults single\|threads\|advice\|split\|khuge` |
-| `xcore/` | Cost of moving a cache line between cores. | `cargo run --release` |
 | `centry/` | The C entry points: candidate `malloc`, `free` and `calloc` routines reached directly, through the PLT and through the GOT; a preloadable stand-in around the best of them, compared with glibc, jemalloc, mimalloc and tcmalloc from plain C loops. | `./build.sh`, then `./run.sh run PATTERN` and `./compare.sh` |
 | `toolchain/` | The relocation a direct load of glibc's `__rseq_offset` gets, in an executable and a shared library, and the code rustc generates around an `asm!` block that calls. | `./check.sh` |
 
@@ -132,30 +130,10 @@ object that each side spent working (waiting is excluded), and wall time:
 pair count, `RF_BUILD_CPUS` (default 4-7) where builds run. For the other L3 on the reference
 machine: `RF_CPU2=10`.
 
-## inline
-
-```
-cd inline
-taskset -c 4-7 ./check.py              # every variant and profile, about two minutes
-taskset -c 4-7 ./check.py asm          # one variant
-```
-
-Builds a four-crate workspace (`fastalloc` the allocator, `dep` a dependency with allocation
-sites, `galloc` a crate holding only the `#[global_allocator]` declaration, `app` the binary) in
-six profiles and prints a table: per call site, whether the fast path was inlined (judged from
-the disassembly), whether the call to `__rust_no_alloc_shim_is_unstable_v2` remains, and cycles
-per alloc+free pair. Variants: `rust` (plain Rust fast path), `asm` (an `asm!` rseq critical
-section), `rust+used` and `asm+used` (the binary crate has a private `#[used]` static),
-`asm+modasm` (it has module-level assembly with a local symbol), `asm+used+sep` (the allocator
-is declared in `galloc` instead of in the binary crate). `fastalloc` is a stand-in with real
-fast paths and throwaway slow paths; it is not a usable allocator.
-
-## oscost and xcore
+## oscost
 
 ```
 cd oscost && cargo run --release
-cd xcore && cargo run --release
 ```
 
-Wall-clock, single run. `oscost` maps and touches 512 MiB. `xcore` uses `RF_CPU` (2), `RF_SMT`
-(18), `RF_NEAR` (3) and `RF_FAR` (10).
+Wall-clock, single run. `oscost` maps and touches 512 MiB.
