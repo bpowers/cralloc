@@ -1764,7 +1764,35 @@ ratios [lowest, highest]:
 | churn, 100k live | 47.86 | -0.3% [-0.6, +0.0] |
 | churn, 1M live | 116.6 | -2.0% [-10.6, -1.7] |
 
-Nothing resolvably slower.
+Nothing resolvably slower on these. The back end's smoke set (`benchrun run --suite backend`,
+under the lock, CPUs 0-3 and 8-11) was then run at main `3882aee` against the branch merged
+with it, with one, two and four spares (the four-spare build is the header move alone).
+Median of five interleaved rounds, change against main:
+
+| Job | main | one spare (tip) | two spares | four spares |
+|---|---:|---:|---:|---:|
+| pipeline t2 large objects (ns/alloc) | 71.98 | +3.8% | +5.4% | +4.4% |
+| two pipelines across L3s (ns/alloc per chain) | 4.858 | -1.2% | -0.3% | -0.8% |
+| tree depth 18 (cycles/node) | 37.22 | -0.6% | -0.9% | +3.7% |
+| JSON 8 MiB (cycles/byte) | 17.82 | +0.4% | -2.0% | -0.5% |
+| sh8bench 16, preloaded (s) | 0.604 | +3.0% | +1.7% | +0.9% |
+
+sh8bench, which alternates in bursts of a few magazines, is where deeper spares earn
+something. Over three sessions (5, 5 and 12 rounds) one spare cost it +7.9, +3.0 and +1.7%,
+two +3.5, +1.7 and +1.2%, four (the header move alone) +0.9 and -0.1%. The tree and JSON jobs
+do not resolve a difference. Memory, the other side: two spares instead of one leave mpmc 4+4
+0.4 MiB higher at its peak (6.22 against 5.54 MiB in the candidate session above) and the
+pipeline about 0.1 MiB.
+
+The pipeline of large objects is 3.8 to 4.4% slower with every spare setting, so the header
+move costs it. The first measurement was 6.8%: with the layout's slow path inline, `Back::host`
+was no longer inlined and every large allocation and free copied the class's host through
+`memmove`; working the layout out in a cold call of its own removed that. What remains is
+2.5% more instructions and 14% more L1 data misses per run. These were ruled out, each as a
+build of its own: spare depth; four headers to a line (a line each measured the same);
+putting a large class's header back in its block; putting a large class's leaf bitmap first,
+next to its summary and zero bitmap; and both together, which came to +3.5%. Its cause is not
+found.
 
 ### What is left, and proposals
 
