@@ -880,6 +880,12 @@ impl<'a, O: Os> Back<'a, O> {
     /// is passed by one slot at most, the last one counted before the others took theirs back.
     fn keep_grown(&self, class: Class, charge: usize) -> bool {
         let budget = kept_grown(self.space.plan().geometry());
+        // A slot that alone is past the budget is refused without being counted, so that a
+        // large block's charge never sits in the count for a moment, where another keep or a
+        // decay pass starting then would see it.
+        if charge > budget {
+            return false;
+        }
         self.retain(class, charge);
         if self.retained_large() <= budget {
             return true;
