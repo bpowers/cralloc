@@ -555,6 +555,12 @@ A Rust resize stays in place only when the caller's next `dealloc` will still fi
 class. For a small object that means the new size maps to the same class. For a large object
 it means the new size is still large and fits the slot. Anything else moves the object.
 
+Shrinking gives memory back. A large object that shrinks in place returns the whole pages
+past its new size at once: nothing else can use them while it holds the slot, so otherwise
+they would stay resident until it is freed. One that shrinks to under a quarter of its slot
+moves instead, because a region has few slots of a large class, and a slot should not be
+held by an object a small fraction of its size.
+
 ### Interfaces
 
 - **`GlobalAlloc`** for `#[global_allocator]`. `dealloc` of a small object is the free

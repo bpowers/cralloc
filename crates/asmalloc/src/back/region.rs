@@ -243,6 +243,18 @@ pub(crate) fn top_up<H: Host>(host: &H, region: RegionId) -> (usize, usize) {
     }
     // Every slot touching the page from its start up to the watermark must be free.
     let first = layout.slot_at((start as usize) << shift);
+    // And one of them must begin in this page. If the only carved slot here is the one that
+    // straddles in from the page below, the program never touched this page (a top-up of that
+    // page carved the straddler), and carving it would walk the watermark up the region one
+    // untouched huge page a pass.
+    let begins_here = if layout.slot_bytes(first) < (start as usize) << shift {
+        first + 1
+    } else {
+        first
+    };
+    if begins_here >= now.carved {
+        return (0, 1);
+    }
     let (low, high) = (first / BITS, (now.carved - 1) / BITS);
     for w in low..=high {
         let mask = bits_in_word(w, first, now.carved - 1);
@@ -263,6 +275,49 @@ pub(crate) fn top_up<H: Host>(host: &H, region: RegionId) -> (usize, usize) {
         words += 1;
     }
     (layout.slot_bytes(count), words)
+}
+
+/// Returns the pages wholly inside slot `slot` to the OS, for a caller that holds the slot
+/// (it is allocated and being freed), then marks them clean and the slot zero if they are all
+/// of it. `true` if the pages went back; `false` if the slot has no whole page, lies in a
+/// huge-page part (which is purged only in whole huge pages) or the OS refused.
+///
+/// # Safety
+///
+/// The caller holds the slot: its free bit is clear because an allocation claimed it for the
+/// caller, who has not released it, and nothing reads or writes the slot's memory during the
+/// call or needs its contents after. The slot is below the watermark.
+pub(crate) unsafe fn purge_held<H: Host>(host: &H, region: RegionId, slot: u32) -> bool {
+    let layout = host.layout();
+    let Some(unit) = layout.slot_unit(slot) else {
+        return false;
+    };
+    let hints = Hints::unpack(host.meta(region, layout.hints_word()).load());
+    if hints.huge_from.is_some_and(|from| unit.end > from) {
+        return false;
+    }
+    let page = layout.page_size();
+    let (offset, len) = (
+        unit.start as usize * page,
+        (unit.end - unit.start) as usize * page,
+    );
+    // SAFETY: the caller's promise, for pages that lie inside the slot.
+    if !unsafe { host.purge(region, offset, len) } {
+        return false;
+    }
+    // The zero and clean bits are written only by the holder of every slot they describe:
+    // the zero bit is this slot's, and the pages are inside this slot.
+    if offset == layout.slot_bytes(slot)
+        && offset + len == layout.slot_bytes(slot + 1)
+        && let Some(at) = layout.zero_word(slot / BITS)
+    {
+        host.meta(region, at).fetch_or(1u64 << (slot % BITS));
+    }
+    for w in unit.start / BITS..=(unit.end - 1) / BITS {
+        let mask = bits_in_word(w, unit.start, unit.end - 1);
+        host.meta(region, layout.clean_word(w)).fetch_or(mask);
+    }
+    true
 }
 
 /// What purging one unit did.

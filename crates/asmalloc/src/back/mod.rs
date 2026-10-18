@@ -61,7 +61,7 @@ use crate::os::{Os, OsError};
 use crate::space::{MAX_REGIONS, RegionTable, Space, SpaceCell};
 use core::fmt;
 use core::ptr::NonNull;
-use core::sync::atomic::{AtomicU32, AtomicU64, AtomicUsize};
+use core::sync::atomic::{AtomicIsize, AtomicU32, AtomicU64, AtomicUsize};
 
 /// The back end's shared state, and the reservation it manages.
 ///
@@ -72,19 +72,23 @@ pub struct State<O: Os> {
     cell: SpaceCell<O>,
     table: RegionTable,
     classes: [ClassState; COUNT],
-    /// Bytes of free slots of small classes in the bitmaps believed to be resident.
-    retained_small: AtomicUsize,
+    /// Bytes of free slots of small classes in the bitmaps believed to be resident. Signed: a
+    /// subtraction may run ahead of the addition it answers; read as zero when negative.
+    retained_small: AtomicIsize,
     /// The same for large classes, which have a cap of their own.
-    retained_large: AtomicUsize,
+    retained_large: AtomicIsize,
+    /// The lowest the small-class count has been since its cap last acted (`purge`).
+    cap_mark: AtomicUsize,
     /// Where the next purge step looks: see `purge`.
     purge_at: AtomicU32,
     /// How many times the purge walk has gone round the heap.
     laps: AtomicU32,
     /// The clocked pass: when the last one ended, or when the one under way began with the
-    /// low bit set; the bytes the pass under way may still purge; and the lap it began in.
+    /// low bit set.
     decay: AtomicU64,
-    decay_goal: AtomicUsize,
-    decay_lap: AtomicU32,
+    /// The pass under way: its tag, the lap it began in and what it may still purge
+    /// (`purge::Pass`).
+    pass: AtomicU64,
     /// The current size of each run, at its head region's index. Out of the regions'
     /// metadata, which must stay all zero for a region that may later go to a class.
     run_sizes: [AtomicUsize; MAX_REGIONS],
@@ -97,13 +101,13 @@ impl<O: Os> State<O> {
             cell: SpaceCell::new(os),
             table: RegionTable::new(),
             classes: [const { ClassState::new() }; COUNT],
-            retained_small: AtomicUsize::new(0),
-            retained_large: AtomicUsize::new(0),
+            retained_small: AtomicIsize::new(0),
+            retained_large: AtomicIsize::new(0),
+            cap_mark: AtomicUsize::new(0),
             purge_at: AtomicU32::new(0),
             laps: AtomicU32::new(0),
             decay: AtomicU64::new(0),
-            decay_goal: AtomicUsize::new(0),
-            decay_lap: AtomicU32::new(0),
+            pass: AtomicU64::new(0),
             run_sizes: [const { AtomicUsize::new(0) }; MAX_REGIONS],
         }
     }
@@ -189,29 +193,6 @@ impl<'a, O: Os> Back<'a, O> {
     #[inline(always)]
     pub fn table(&self) -> &'a RegionTable {
         &self.state.table
-    }
-
-    /// Bytes of free slots in the bitmaps that are believed to be resident, small and large
-    /// classes together: what decays.
-    #[inline]
-    pub fn retained(&self) -> usize {
-        self.retained_small().saturating_add(self.retained_large())
-    }
-
-    /// The part of [`Back::retained`] in small classes, which the small-class cap limits.
-    #[inline]
-    pub fn retained_small(&self) -> usize {
-        self.state
-            .retained_small
-            .load(core::sync::atomic::Ordering::Relaxed)
-    }
-
-    /// The part of [`Back::retained`] in large classes, which the large-class cap limits.
-    #[inline]
-    pub fn retained_large(&self) -> usize {
-        self.state
-            .retained_large
-            .load(core::sync::atomic::Ordering::Relaxed)
     }
 
     /// The protocols' view of one class, if a slot of it fits in a region.
