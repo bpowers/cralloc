@@ -14,6 +14,16 @@ default dialect of Rust's `asm!`/`naked_asm!` on x86-64.
 
 namespace VG.X86_64
 
+/-- The signature of the threads' rseq registrations on x86 (glibc's
+`RSEQ_SIG`, sysdeps/unix/sysv/linux/x86/bits/rseq.h), which the kernel
+requires in the four bytes before every abort handler (`Printer.rseqSig`),
+and with which the crate registers its own area where the C library
+registers none (`Target.ownArea`). -/
+def rseqSignature : Nat := 0x53053053
+
+/-- `n` in hexadecimal, as `0x…`. -/
+def hexLit (n : Nat) : String := "0x" ++ String.ofList (Nat.toDigits 16 n)
+
 def Reg.name : Reg → String
   | .rax => "rax" | .rcx => "rcx" | .rdx => "rdx" | .rbx => "rbx"
   | .rsp => "rsp" | .rbp => "rbp" | .rsi => "rsi" | .rdi => "rdi"
@@ -197,7 +207,7 @@ def printer : Printer isa where
   before it make the seven decode as `ud1 edi, DWORD PTR [rip + 0x53053053]`
   (`0F B9 /r`, SDM Vol. 2 "UD"), as the kernel's selftests do, so that a
   disassembler stays in step and a stray jump into them traps. -/
-  rseqSig := some [".byte 0x0f, 0xb9, 0x3d", ".long 0x53053053"]
+  rseqSig := some [".byte 0x0f, 0xb9, 0x3d", s!".long {hexLit rseqSignature}"]
   plainStore | .store .. => true | _ => false
   /- A compare or a test and the conditional branch after it decode as one
   macro-op (AMD Software Optimization Guide for Zen 5, 58455, "Branch

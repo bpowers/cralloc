@@ -265,10 +265,17 @@ def sample64 : Prog isa := .block [
     "mov rdx, QWORD PTR [rip + <rs>@GOTPCREL]", "mov rax, 1", "ret"]
 #guard text (printer.function (.block [.movSym .rdx "rs"] : Prog isa)) ==
   ["mov rdx, QWORD PTR [rip + <rs>]", "ret"]
--- A function selected by a cargo feature, with it or without it.
-#guard Rust.cargoCfg (some ("executable", true)) == "#[cfg(feature = \"executable\")]\n"
-#guard Rust.cargoCfg (some ("executable", false)) == "#[cfg(not(feature = \"executable\"))]\n"
-#guard Rust.cargoCfg none == ""
+-- A function selected by a `cfg` predicate: one condition, or any of several, holding or not.
+#guard Rust.cfgAttr (some ([.feature "executable"], true)) == "#[cfg(feature = \"executable\")]\n"
+#guard Rust.cfgAttr (some ([.feature "executable"], false)) ==
+  "#[cfg(not(feature = \"executable\"))]\n"
+#guard Rust.cfgAttr (some ([.feature "executable", .targetEnv "musl"], true)) ==
+  "#[cfg(any(feature = \"executable\", target_env = \"musl\"))]\n"
+#guard Rust.cfgAttr (some ([.feature "executable", .targetEnv "musl"], false)) ==
+  "#[cfg(not(any(feature = \"executable\", target_env = \"musl\")))]\n"
+#guard Rust.cfgAttr none == ""
+-- The signature the abort stubs carry, and that the own area is registered with.
+#guard hexLit rseqSignature == "0x53053053"
 #guard Rust.line printer.call (.ops [.text "test ecx, ", .ref "mask"]) ==
   "        r\"test ecx, {mask}\",\n"
 #guard (printer.function (.block [.alu32 .test .rcx (.immP "mask")] : Prog isa)).flatMap Line.refs ==

@@ -20,7 +20,7 @@ open VG.Spec.Slab VG.Impl.Slab.X86_64 VG.Proof.Slab.X86_64
 
 def artifacts : List Artifact := [
   popInlineApi.artifact VG.X86_64.inlineTarget {
-    cargoFeature := some ("executable", false)
+    cfg := some ([.feature "executable"], false)
     code := popInline
     verified := popInline_verified
     restartsOk := popInline_restartsOk
@@ -29,7 +29,7 @@ def artifacts : List Artifact := [
     witnesses := PopInline.witnesses
     witnessOk := popInline_witnessOk },
   popInlineApi.artifact VG.X86_64.inlineTarget {
-    cargoFeature := some ("executable", true)
+    cfg := some ([.feature "executable"], true)
     code := (direct popInline)
     verified := popInlineD_verified
     restartsOk := popInlineD_restartsOk
@@ -38,7 +38,7 @@ def artifacts : List Artifact := [
     witnesses := PopInline.witnesses
     witnessOk := popInlineD_witnessOk },
   pushInlineApi.artifact VG.X86_64.inlineTarget {
-    cargoFeature := some ("executable", false)
+    cfg := some ([.feature "executable"], false)
     code := pushInline
     verified := pushInline_verified
     restartsOk := pushInline_restartsOk
@@ -47,7 +47,7 @@ def artifacts : List Artifact := [
     witnesses := PushInline.witnesses
     witnessOk := pushInline_witnessOk },
   pushInlineApi.artifact VG.X86_64.inlineTarget {
-    cargoFeature := some ("executable", true)
+    cfg := some ([.feature "executable"], true)
     code := (direct pushInline)
     verified := pushInlineD_verified
     restartsOk := pushInlineD_restartsOk
@@ -66,42 +66,42 @@ def artifacts : List Artifact := [
     witnesses := Cas.witnesses
     witnessOk := cas_witnessOk },
   stackPushApi.artifact VG.X86_64.target {
-    cargoFeature := some ("executable", false)
+    cfg := some ([.feature "executable"], false)
     code := stackPush
     verified := stackPush_verified
     restartsOk := stackPush_restartsOk
     witnesses := StackPush.witnesses
     witnessOk := stackPush_witnessOk },
   stackPushApi.artifact VG.X86_64.target {
-    cargoFeature := some ("executable", true)
+    cfg := some ([.feature "executable"], true)
     code := (direct stackPush)
     verified := stackPushD_verified
     restartsOk := stackPushD_restartsOk
     witnesses := StackPush.witnesses
     witnessOk := stackPushD_witnessOk },
   stackPopApi.artifact VG.X86_64.target {
-    cargoFeature := some ("executable", false)
+    cfg := some ([.feature "executable"], false)
     code := stackPop
     verified := stackPop_verified
     restartsOk := stackPop_restartsOk
     witnesses := StackPop.witnesses
     witnessOk := stackPop_witnessOk },
   stackPopApi.artifact VG.X86_64.target {
-    cargoFeature := some ("executable", true)
+    cfg := some ([.feature "executable"], true)
     code := (direct stackPop)
     verified := stackPopD_verified
     restartsOk := stackPopD_restartsOk
     witnesses := StackPop.witnesses
     witnessOk := stackPopD_witnessOk },
   currentCpuApi.artifact VG.X86_64.inlineTarget {
-    cargoFeature := some ("executable", false)
+    cfg := some ([.feature "executable"], false)
     code := currentCpu
     verified := currentCpuInline_verified
     clobbersOk := currentCpuInline_clobbersOk
     witnesses := [Cpu.wit]
     witnessOk := currentCpuInline_witnessOk },
   currentCpuApi.artifact VG.X86_64.inlineTarget {
-    cargoFeature := some ("executable", true)
+    cfg := some ([.feature "executable"], true)
     code := currentCpuDirect
     verified := Cpu.verifiedD_inline
     clobbersOk := fun _ _ hs => Cpu.clobbersOkD hs

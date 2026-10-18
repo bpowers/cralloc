@@ -64,8 +64,8 @@ structure Registration (api : Api) (target : Target) where
   spSafe : code.all (fun i => !target.isa.writesSp i) = true := by sp_safe
   /-- `Artifact.features`. -/
   features : List String := []
-  /-- `Artifact.cargoFeature`. -/
-  cargoFeature : Option (String × Bool) := none
+  /-- `Artifact.cfg`. -/
+  cfg : Option (List CfgAtom × Bool) := none
   /-- `Artifact.clobbers`. -/
   clobbers : List String := []
   /-- `Artifact.clobbersOk`. -/
@@ -114,7 +114,7 @@ def Api.artifact (api : Api) (target : Target) (r : Registration api target) : A
     cases api.contracts <;> exact (by trivial)
   spSafe := r.spSafe
   features := r.features
-  cargoFeature := r.cargoFeature
+  cfg := r.cfg
   witnesses := r.witnesses
   witnessOk := r.witnessOk
   clobbers := r.clobbers
