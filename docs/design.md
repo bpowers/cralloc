@@ -538,8 +538,10 @@ Five rules stand behind the table.
   count as evidence of dense use. A class of small objects that has carved enough for one
   huge page to be a small fraction of it has the rest of its region marked for huge pages,
   and further growth faults 2 MiB at a time. A large block that grows, by doubling or less
-  and past the size of a huge page, is being appended to, so its slot is marked for as
-  long as the block holds it; its free returns the slot whole and takes the mark back. A
+  and past the size of a huge page, with the last piece it wrote at least half full of
+  data, is being appended to. The part of its slot up to the size it asked for is marked
+  for as long as the block holds it; its free returns the slot whole and takes the mark
+  back. A
   large block allocated at its size in one call gets no huge pages: it is often touched
   sparsely, each page touched would cost 2 MiB, and the kernel later fills in any marked
   range that is touched at all.
@@ -572,6 +574,14 @@ When an object outgrows its slot it moves to one with several times the room, so
 that doubles repeatedly is copied a few times in total, not once per doubling. The address
 space this spends is plentiful, and the physical memory is only what the program touches.
 An object larger than a region takes a run of whole regions.
+
+A large object does not start at the start of its slot. Slots of a class are all aligned
+alike, so objects that began there would put their cache lines in the same sets, and a
+program that walks many such buffers together would miss the cache on every access. An
+object whose alignment is at most a cache line starts a multiple of 64 bytes into its slot,
+chosen by the slot's index, and is given a page more room so that any such start fits.
+Nothing is stored: a block starts at its slot's start or at that offset, and any other
+pointer into the slot is not a block.
 
 The current size of each large object is recorded out of band, one word per slot, written
 only when the object is allocated or resized. C's `realloc` needs it to know how much to
@@ -615,7 +625,7 @@ saved; we copy.
   fast path does not look for it: finding a slot's start takes a multiplication per free.
   Such a pointer is caught only if it reaches the bitmaps before it is handed out again.
   `malloc_usable_size` reports the class size of a small object and,
-  for a large one, its recorded size rounded up to a page. Callers write into the room
+  for a large one, its recorded size extended to the end of the page it ends in. Callers write into the room
   they are told they have, so a `realloc` that moves a block copies that much and `calloc`
   zeroes that much.
   `realloc(p, 0)` frees `p` and returns null, as glibc does.
