@@ -6,10 +6,10 @@
 //! wants it paced by time instead runs `maintain` (`maintain.rs`) from a thread of its own.
 //! The clock is read at most once per heartbeat, and only when a decision needs it.
 //!
-//! - **Launder over target.** If the shared depot stack of the class just served holds more
-//!   than its target, one magazine is popped and its objects go back to the source; the empty
-//!   magazine goes to the shared empty stack. A domain's stack needs no such rule: its cap
-//!   keeps it within bounds.
+//! - **Launder over target.** If the slow path pushed a magazine with objects on a shared depot
+//!   stack, and that stack holds more than its target, one magazine is popped and its objects
+//!   go back to the source; the empty magazine goes to the shared empty stack. Only a push makes
+//!   a stack deeper. A domain's stack needs no such rule: its cap keeps it within bounds.
 //! - **Shed what was not needed** (`shed.rs`). A note of the depth of each stack the slow path
 //!   tried to pop, and on every [`LOOK_EVERY`]th slow path of a CPU a look at one class's stacks
 //!   in its own domain and the shared pool, the classes in turn, and at one stack held by
@@ -350,12 +350,14 @@ impl<O: Os, R: Routines, S: Source> Cache<'_, O, R, S> {
         if let (Some(cpu), Some(class), true) = (chores.cpu, served, chores.installed) {
             self.unstamp(cpu, class);
         }
-        if let Some(class) = served {
-            if self.tuning.shed_unused {
-                for pool in chores.tried.pools() {
-                    self.note_depth(pool, class, &clock);
-                }
+        if let Some(class) = served
+            && self.tuning.shed_unused
+        {
+            for pool in chores.tried.pools() {
+                self.note_depth(pool, class, &clock);
             }
+        }
+        if let Some(class) = self.overflowed.take() {
             self.launder(class, &clock);
         }
         let every = self.tuning.look_every.max(1);
@@ -394,7 +396,9 @@ impl<O: Os, R: Routines, S: Source> Cache<'_, O, R, S> {
     }
 
     /// Launders one magazine of `class` from its shared stack if that is over its target
-    /// ([`Cache::shared_target`]).
+    /// ([`Cache::shared_target`]). Called for the class of the last magazine the slow path
+    /// pushed there, if it pushed one: reading the shared head on every heartbeat cost a job
+    /// whose four L3-crossing flows all overflow into the shared stacks 6% of its time.
     fn launder(&self, class: SmallClass, clock: &Clock<'_, O>) {
         let depth = self
             .depot

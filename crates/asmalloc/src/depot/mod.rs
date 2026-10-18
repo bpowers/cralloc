@@ -76,6 +76,7 @@ use crate::front::{Cpu, Routines, Slab};
 use crate::lined::Lined;
 use crate::os::Os;
 use crate::space::Space;
+use core::cell::Cell;
 
 /// The bytes of objects a class's depot stack holds before the heartbeat launders magazines
 /// back to the source, by default. Two magazine budgets, scaled with the budget when the
@@ -342,6 +343,12 @@ pub struct Cache<'a, O: Os, R: Routines, S: Source> {
     routines: R,
     source: &'a S,
     tuning: Tuning,
+    /// The class of the last magazine with objects this view pushed on a shared stack, for the
+    /// heartbeat's look at that stack's target (`heartbeat.rs`). Only a push makes a stack
+    /// deeper, so a slow path that pushed none need not read the shared head, which every
+    /// domain's overflow writes. A view lasts one call, so this is the call's, not the
+    /// thread's.
+    overflowed: Cell<Option<SmallClass>>,
 }
 
 impl<'a, O: Os, R: Routines, S: Source> Cache<'a, O, R, S> {
@@ -376,6 +383,7 @@ impl<'a, O: Os, R: Routines, S: Source> Cache<'a, O, R, S> {
             routines,
             source,
             tuning,
+            overflowed: Cell::new(None),
         }
     }
 
@@ -476,6 +484,7 @@ impl<'a, O: Os, R: Routines, S: Source> Cache<'a, O, R, S> {
             self.depot
                 .full(Pool::Shared, class)
                 .push(self.area, magazine, level);
+            self.overflowed.set(Some(class));
         } else {
             self.depot
                 .empty(Pool::Shared, magazine.size())
