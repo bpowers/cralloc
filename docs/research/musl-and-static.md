@@ -72,11 +72,30 @@ So on glibc, a program whose static TLS puts its workers' area at page offset 64
 slower per pair in every worker thread: 5 of the 64 positions the area can take. Whether the
 `rseq_cs` store at 64k + 8 costs class 8k + 1 the same was not measured.
 
-**An option, not built:** the kernel requires a registered area to be 32-byte aligned, so its
-`cpu_id` and `rseq_cs` always sit at bytes 4 to 15 of a 32-byte chunk. Laying the slab's hot
-words only at bytes 16 to 31 of each 32-byte chunk (two words per chunk, so the hot words take
-twice the bytes, still well under a page) would keep them clear of any registered area on any C
-library, by construction.
+**Ruled out by construction (2026-10-18).** The kernel requires a registered area to be 32-byte
+aligned, so its `cpu_id` and `rseq_cs` always sit at bytes 4 to 15 of a 32-byte chunk. The slab
+now gives each class a 32-byte chunk with its hot word at bytes 16 to 23 (its spare heads at 0
+to 15), so no hot word can share a page offset with either field. Same method, before (main
+f41dbf9), two hot words to a chunk at bytes 16 to 31 (tried first), and one to a chunk (adopted),
+minimum cycles over three interleaved rounds:
+
+| | before | two per chunk | one per chunk |
+|---|---:|---:|---:|
+| worker, area at 0x580, 64-byte run-time-size pair | 7.21 | 9.16 | 7.64 |
+| worker, area at 0x40, the same pair | 8.98 | 9.14 | 7.65 |
+| glibc, constant pair | 4.95 | 5.01 | 5.01 |
+| glibc, `Box` pair | 5.94 | 5.91 | 5.89 |
+| glibc, run-time-size pair | 7.43 | 9.76 | 7.78 |
+| glibc, batch of 32 | 5.44 | 5.40 | 5.40 |
+| glibc, churn | 29.8 | 33.1 | 29.5 |
+| glibc static, run-time-size pair | 7.43 | 9.75 | 7.77 |
+| musl static, run-time-size pair | 7.41 | 9.77 | 7.80 |
+| musl static, churn | 29.6 | 33.0 | 29.3 |
+
+Two to a chunk needs arithmetic to find a class's word on the run-time path (2.3 cycles a pair,
+3.4 a churn step); one to a chunk needs a shift where a scaled `lea` did (0.35 to 0.45 cycles on
+run-time-size pairs, nothing measurable elsewhere). The worker's pair now costs the same
+wherever its area lands.
 
 ## Numbers
 
