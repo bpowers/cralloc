@@ -17,11 +17,15 @@ cd bench
 cargo build --release -p bench-runner
 ./target/release/benchrun build                  # workloads, once per allocator
 ./target/release/benchrun run --suite quick      # a cross-section, about two minutes
+./target/release/benchrun run --suite backend --rounds 3   # after any change to the back end
 ./target/release/benchrun run --suite full       # everything, ten rounds, about two hours
 ./target/release/benchrun report results/full-*.jsonl --detail
 ```
 
-`benchrun list --suite full` prints the jobs. `run` takes `--only TEXT` (jobs whose id
+The `backend` suite is five small jobs that each exposed a cost of asmalloc's back end
+(`docs/research/baselines.md`, "Smoke set for the back end"); run it, against the
+incumbents, on every change to the back end. `benchrun list --suite full` prints the jobs.
+`run` takes `--only TEXT` (jobs whose id
 contains it), `--allocators a,b`, `--rounds N`, `--out FILE`, `--seed N`, `--mem-cap SIZE`
 (below), and the quiet-machine gate below. Builds run on `BENCH_BUILD_CPUS` (default
 `4-7,20-23`).
