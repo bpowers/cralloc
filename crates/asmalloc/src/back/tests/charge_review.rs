@@ -55,7 +55,7 @@ fn census<S: Shape>(back: &Back<'_, Sim<S>>) -> Census {
         let host = back.host(class).unwrap();
         let layout = *host.layout();
         let page = layout.page_size();
-        let carved = Grow::unpack(host.meta(region, layout.grow_word()).load()).carved;
+        let carved = Grow::unpack(host.grow(region).load()).carved;
         for slot in 0..carved.min(layout.slots()) {
             let (word, bit) = (slot / BITS, slot % BITS);
             if tree::word(&host, Node::leaf(region, word)).load() >> bit & 1 == 0 {

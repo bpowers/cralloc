@@ -39,6 +39,8 @@ pub(crate) struct TestHost<W> {
     /// How many of the plan's regions the host has.
     regions: usize,
     meta: Vec<Box<[W]>>,
+    /// Each region's `Grow` and `Hints` words, which the heap keeps outside the metadata block.
+    headers: Box<[(W, W)]>,
     class_words: Box<[W]>,
     top: W,
     /// For each heap-wide slot, which of its pages (counting from the slot's first page) hold
@@ -54,21 +56,25 @@ impl<W: TestWord> TestHost<W> {
         let layout = Layout::new(plan, class).expect("the class fits the plan's regions");
         assert!(regions <= plan.objects(), "the plan has that many regions");
         let slots = layout.slots() as u64;
+        let leaf = layout.tree_word(0, 0)..layout.tree_word(0, 0) + layout.leaf_words();
         let meta = (0..regions)
             .map(|r| {
                 (0..layout.total_words())
                     .map(|w| {
-                        let leaf = w < layout.leaf_words();
-                        W::new(leaf.then_some(r as u64 * slots + w as u64 * BITS as u64))
+                        let first =
+                            |w: u32| r as u64 * slots + (w - leaf.start) as u64 * BITS as u64;
+                        W::new(leaf.contains(&w).then(|| first(w)))
                     })
                     .collect()
             })
             .collect();
+        let headers = (0..regions).map(|_| (W::new(None), W::new(None))).collect();
         TestHost {
             layout,
             plan,
             regions,
             meta,
+            headers,
             class_words: (0..64).map(|_| W::new(None)).collect(),
             top: W::new(None),
             dirty: (0..regions as u64 * slots)
@@ -176,8 +182,7 @@ impl<W: TestWord> TestHost<W> {
             carved: count,
             committed: pages,
         };
-        self.meta(region, self.layout.grow_word())
-            .fetch_or(grow.pack());
+        self.grow(region).fetch_or(grow.pack());
         self.committed[region.index()].store(pages as usize, SeqCst);
     }
 }
@@ -199,6 +204,14 @@ impl<W: TestWord> Host for TestHost<W> {
 
     fn meta(&self, region: RegionId, word: u32) -> &W {
         &self.meta[region.index()][word as usize]
+    }
+
+    fn grow(&self, region: RegionId) -> &W {
+        &self.headers[region.index()].0
+    }
+
+    fn hints(&self, region: RegionId) -> &W {
+        &self.headers[region.index()].1
     }
 
     fn class_word(&self, index: u32) -> &W {
