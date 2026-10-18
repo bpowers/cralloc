@@ -35,6 +35,11 @@ link into a shared library. The `allocator-api` feature implements the `Allocato
 `Asmalloc::collect()` returns to the OS everything the heap can give back now, for a program
 that knows it is idle, and `Asmalloc::inspect` reports where the heap's memory is.
 
+A process whose threads never leave the fast path runs no maintenance, so memory it has
+freed stays resident. To have it returned, enable the `background` feature and call
+`asmalloc::Asmalloc::start_background()` early in `main`, or call `Asmalloc::maintain()`
+from an idle hook of your own. With the preload library, set `ASMALLOC_BACKGROUND=1`.
+
 As a preload library, which replaces the C `malloc` family in any dynamically linked
 program; C++ reaches it through its runtime's calls to `malloc` and `free`:
 

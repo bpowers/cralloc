@@ -478,7 +478,9 @@ A program that cannot accept that asks for a background thread. The thread is op
 that the default stays free of hidden threads, and it buys nothing on the fast path, which
 stays as it is. Once an interval it calls `maintain`, which does for the whole heap what the
 heartbeats of an interval would have done: the idle check on every slab, each depot stack's
-shedding, and the clocked purge. It is an ordinary thread of the process, started by the
+shedding, and the clocked purge. A slab it drains has its magazines laundered, not parked
+in the depot: a CPU that is busy only on fast paths would otherwise take them straight back,
+and their scattered objects would go on pinning pages. It is an ordinary thread of the process, started by the
 layer that has a thread library to start it with: a function behind a cargo feature for a
 Rust program, an environment variable for the preload library. A program with an idle hook
 of its own can call `maintain` from there and needs no thread. The child of a fork does not
@@ -662,6 +664,8 @@ saved; we copy.
 - **`collect`**, a Rust function and what `malloc_trim` calls: return everything that can be
   returned now (see "Returning memory"). `inspect` reports where the heap's memory is,
   without changing it.
+- **`maintain`**: one round of the clocked maintenance for the whole heap. The background
+  thread calls it; a program with an idle hook may call it instead.
 
 A macro exports the C names from the crate that invokes it; a cargo feature does the same,
 and the `LD_PRELOAD` library always exports them. A feature alone would not do: cargo
