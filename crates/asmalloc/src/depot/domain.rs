@@ -256,6 +256,36 @@ mod tests {
         assert_eq!(domains.count(), 16);
     }
 
+    /// What a forked child inherits when the fork cut the discovery off: a claim nobody
+    /// holds and a table part written. It keeps one domain and never retries.
+    #[test]
+    fn an_abandoned_discovery_leaves_one_domain_for_good() {
+        let os: crate::os::sim::SimOs = crate::os::sim::SimOs::new();
+        os.set_topology(crate::os::sim::SimTopology::Blocks(4));
+        let domains = Domains::new();
+        domains.state.store(CLAIMED, Release);
+        for cpu in 4..12 {
+            domains.of_cpu[cpu].store((cpu / 4) as u8, Relaxed);
+        }
+        domains.discover(&os);
+        assert_eq!(domains.count(), 1);
+        assert!((0..64).all(|cpu| domains.of(Some(cpu)) == Domain::ZERO));
+    }
+
+    /// Lists the kernel does not print but a broken or foreign file might hold never index
+    /// past the table.
+    #[test]
+    fn odd_lists_stay_inside_the_table() {
+        assert_eq!(cpus("0-3,2-5"), Some(std::vec![0, 1, 2, 3, 2, 3, 4, 5]));
+        assert_eq!(cpus("7,3"), Some(std::vec![7, 3]));
+        let beyond = cpus("8190-999999\n").unwrap();
+        assert_eq!(beyond, std::vec![8190, 8191, 8192]);
+        assert_eq!(cpus("999999"), Some(std::vec![]));
+        for bad in ["0-3\n\n", " 0", "0-3 ", "0--3", "0-3-5", "+1", "0x1", "0\0"] {
+            assert_eq!(cpus(bad), None, "{bad:?}");
+        }
+    }
+
     #[test]
     fn domain_numbers_fold_beyond_the_most_kept_apart() {
         assert_eq!(Domain::folded(MAX_DOMAINS), Domain::ZERO);
