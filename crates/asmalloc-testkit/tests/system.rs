@@ -47,10 +47,21 @@ fn every_handoff(subject: &dyn Subject, profile: Profile) -> Vec<Stats> {
         .collect()
 }
 
+/// Runs `body` with drains racing it where the target is the simulated heap, which is under
+/// Miri; the process's heap drains on its own clock.
+fn draining<T>(body: impl FnOnce() -> T) -> T {
+    #[cfg(miri)]
+    return common::with_drains(asmalloc::SimAsmalloc::heap(), body);
+    #[cfg(not(miri))]
+    body()
+}
+
 #[test]
 fn global_alloc_frees_on_other_threads() {
-    every_handoff(&target::global_alloc(), Profile::MIXED.with_migrate(5));
-    every_handoff(&target::global_alloc(), Profile::SMALL_FIXED);
+    draining(|| {
+        every_handoff(&target::global_alloc(), Profile::MIXED.with_migrate(5));
+        every_handoff(&target::global_alloc(), Profile::SMALL_FIXED);
+    });
 }
 
 #[test]
