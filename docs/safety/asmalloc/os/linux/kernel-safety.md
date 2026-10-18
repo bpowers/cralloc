@@ -233,3 +233,5 @@ ever, that a waiting thread could hang the process, and that the glibc compariso
 KERNEL-09 were wrong or stale; KERNEL-09 was rewritten for those and needs the same reviewer's
 check. KERNEL-06 was since rewritten for a simpler `abort` with no shared state, and needs a
 fresh review.
+
+Reviewed: f41dbf9

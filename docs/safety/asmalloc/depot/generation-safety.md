@@ -30,3 +30,5 @@ transparent wrapper of it, so the layout is that of a `u64` either way.
 **Review.** The page moved from the magazine area to the process page, and the raw
 `wipe_on_fork` call (formerly GENERATION-02) became the safe `Space::wipe_on_fork`. Needs the
 reviewer's check.
+
+Reviewed: f41dbf9

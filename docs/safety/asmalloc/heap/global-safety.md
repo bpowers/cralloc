@@ -69,3 +69,5 @@ succeeds, and the new layout is not empty for `resize`.
 whose `new_size` is not zero; `Allocator::deallocate`, `grow`, `grow_zeroed` and `shrink`),
 for a block this allocator returned. Every `Asmalloc` reaches `HEAP` through `process()`, so a
 block any handle returned is a block of the heap `process()` names.
+
+Reviewed: f41dbf9

@@ -69,7 +69,7 @@ nothing accesses that memory in a way that conflicts with a shared reference.
 nothing touches the range during the call and nothing in it is needed. It forwards the range
 unchanged (the region's base plus the offset). The range checks are `Space::purge`'s own: it
 aborts on a range outside the reservation or not whole pages. The caller's obligations are
-discharged at the call site, BACK-REGION-01.
+discharged at the call sites: BACK-REGION-01, BACK-REGION-02 and BACK-REGION-03.
 
 **Machine checks.** The simulator records which pages are committed, and fails a commit,
 purge or unmap of a page that was written before it was committed. The back end's `SimOs`
@@ -87,3 +87,5 @@ checks were found to overstate (no test could see an uncommitted access). Fixed 
 tracking, first in the test host and now in the simulator itself, which a deleted leaf commit
 fails. The same reviewer checked the first fix and accepted it; the move to the simulator's
 check has not been reviewed.
+
+Reviewed: f41dbf9
