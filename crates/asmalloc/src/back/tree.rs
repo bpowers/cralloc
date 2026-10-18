@@ -795,16 +795,36 @@ impl<'h, H: Host> Release<'h, H> {
         self.owe_bits(above, bits, must);
     }
 
-    /// [`Release::owe_leaves`], with the debt paid at once rather than held: for a caller
-    /// that has already merged the debts of the words under each summary word, so that
-    /// holding them would only replace one with the next.
+    /// [`Release::owe_leaves`], with the debt paid at once rather than held, for a caller
+    /// that has merged the debts of the words under each summary word itself: sets whatever of
+    /// the bits is clear, reading the word first unless `must`. Returns what the summary word
+    /// then owes the word above it, for the caller to merge with others' and hand to
+    /// [`Release::owe_upward`]; `None` if nothing is above.
     #[inline(never)]
-    pub(crate) fn pay_leaves(&mut self, region: RegionId, index: u32, words: u64, must: bool) {
-        let Some((above, bit)) = Spot::leaf(region, index).parent(self.height) else {
-            return;
-        };
+    pub(crate) fn pay_leaves(
+        &mut self,
+        region: RegionId,
+        index: u32,
+        words: u64,
+        must: bool,
+    ) -> Option<Upward> {
+        let (above, bit) = Spot::leaf(region, index).parent(self.height)?;
         let bits = if self.height == 0 { bit } else { words };
-        self.settle(above, bits, must);
+        let was_empty = self.set_missing(above, bits, must);
+        let (up, bit) = above.parent(self.height)?;
+        Some(Upward {
+            key: up.key(self.height),
+            spot: up,
+            bits: bit,
+            must: was_empty,
+        })
+    }
+
+    /// Owes what [`Release::pay_leaves`] returned, merged with other such debts to the same
+    /// word.
+    #[inline(never)]
+    pub(crate) fn owe_upward(&mut self, debt: Upward) {
+        self.owe_bits(debt.spot, debt.bits, debt.must);
     }
 
     /// Ends the process: the heap has been misused.
@@ -870,15 +890,33 @@ impl<'h, H: Host> Release<'h, H> {
     /// and owes the bit above it in turn.
     #[inline(always)]
     fn settle(&mut self, spot: Spot, bits: u64, must: bool) {
+        let was_empty = self.set_missing(spot, bits, must);
+        self.owe(spot, was_empty);
+    }
+
+    /// Sets whatever of `bits` in `spot`'s word is clear (all of them unread, with `must`), and
+    /// says whether the word was empty before.
+    #[inline(always)]
+    fn set_missing(&mut self, spot: Spot, bits: u64, must: bool) -> bool {
         let word = spot.word(self.host);
-        let was_empty = if must {
+        if must {
             word.fetch_or(bits) == 0
         } else {
             let missing = bits & !word.load();
             missing != 0 && word.fetch_or(missing) == 0
-        };
-        self.owe(spot, was_empty);
+        }
     }
+}
+
+/// Summary bits a summary word owes the word above it, from [`Release::pay_leaves`]: `bits`
+/// of the word `spot`, set unread if `must`. Debts with the same `key` are to the same word
+/// and may be merged, their bits and their `must` ORed.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct Upward {
+    pub(crate) key: u64,
+    spot: Spot,
+    pub(crate) bits: u64,
+    pub(crate) must: bool,
 }
 
 /// Walks up from `spot`, whose word is not empty, making sure every summary bit on the way to

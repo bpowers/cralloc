@@ -35,7 +35,7 @@
 //! claimed the slot in between: the same double free that goes unseen across two launders, and
 //! not worth a lookup for every scattered slot.
 
-use super::tree::{Host, Release};
+use super::tree::{Host, Release, Upward};
 use super::word::BITS;
 use crate::space::RegionId;
 
@@ -403,17 +403,24 @@ impl Direct {
     }
 }
 
-/// Places in [`Debts`].
+/// Places in each of [`Debts`]'s tables.
 const DEBTS: usize = 64;
 
 /// A key no summary word has: [`Debts`]'s keys are below 2^38.
 const NO_KEY: u64 = u64::MAX;
 
-/// What a scattered batch owes the summary words above the leaf words it has freed: per summary
-/// word, a bit for each such leaf word. A small table with a place per summary word, chosen by
-/// its low bits, so that the summary words of one region's stretch of the bitmap, where a
-/// batch's words mostly lie, each have a place. A summary word whose place another holds pays
-/// that one's debt first: more debts than one per summary word, never fewer.
+/// What a scattered batch owes the summary words above the leaf words it has freed, and what
+/// those owe the words above them in turn, merged per word.
+///
+/// Two small tables with a place per word, chosen by its low bits: per summary word, a bit for
+/// each leaf word under it that the batch freed; and per word of the next level, the bits its
+/// summary words owe it. A word whose place another holds pays that one's debt first: more
+/// debts than one per word, never fewer. A batch of slots under a few dozen summary words, as
+/// a program's freed structure of a few hundred thousand objects is, merges them in the first
+/// table and pays each once. A batch spread wider, over more summary words than it has slots,
+/// cannot merge them, and pays each summary word as its place is taken; the second table still
+/// merges what those owe the level above, which has 64 times fewer words, so the walk up the
+/// tree is not made once per slot.
 struct Debts {
     /// Per place, the summary word's key (`region << 26 | word / 64`), or [`NO_KEY`]; and the
     /// bits it is owed.
@@ -421,6 +428,8 @@ struct Debts {
     words: [u64; DEBTS],
     /// A bit per place that holds a debt.
     held: u64,
+    /// Per place, what a word of the next level is owed.
+    upward: [Option<Upward>; DEBTS],
 }
 
 impl Debts {
@@ -430,6 +439,7 @@ impl Debts {
             keys: [NO_KEY; DEBTS],
             words: [0; DEBTS],
             held: 0,
+            upward: [None; DEBTS],
         }
     }
 
@@ -455,7 +465,7 @@ impl Debts {
         self.held |= 1 << at;
     }
 
-    /// Hands every debt to `release`.
+    /// Pays every debt: the summary words', then what they owe above, which goes to `release`.
     fn pay_all<H: Host>(&mut self, release: &mut Release<'_, H>) {
         let mut held = self.held;
         while held != 0 {
@@ -463,17 +473,39 @@ impl Debts {
             held &= held - 1;
             self.pay(release, at);
         }
+        for debt in self.upward.iter_mut().filter_map(Option::take) {
+            release.owe_upward(debt);
+        }
     }
 
-    /// Hands the debt at place `at`, which holds one, to `release`, and empties the place.
+    /// Pays the debt at place `at`, which holds one, and empties the place: sets the summary
+    /// word's bits, reading it first (`Look` in `tla/Summary.tla`), and owes what it owes above.
     fn pay<H: Host>(&mut self, release: &mut Release<'_, H>, at: usize) {
         let at = at % DEBTS;
         let key = core::mem::replace(&mut self.keys[at], NO_KEY);
         let words = core::mem::replace(&mut self.words[at], 0);
+        self.held &= !(1 << at);
         let region = release.region((key >> 26) as usize);
         let first = (key as u32 & ((1 << 26) - 1)) * BITS;
-        release.pay_leaves(region, first, words, false);
-        self.held &= !(1 << at);
+        if let Some(debt) = release.pay_leaves(region, first, words, false) {
+            self.owe_upward(release, debt);
+        }
+    }
+
+    /// Merges `debt` with what its word is owed, paying the debt of a word whose place it takes.
+    fn owe_upward<H: Host>(&mut self, release: &mut Release<'_, H>, debt: Upward) {
+        let place = &mut self.upward[debt.key as usize % DEBTS];
+        match place {
+            Some(held) if held.key == debt.key => {
+                held.bits |= debt.bits;
+                held.must |= debt.must;
+            }
+            _ => {
+                if let Some(earlier) = place.replace(debt) {
+                    release.owe_upward(earlier);
+                }
+            }
+        }
     }
 }
 

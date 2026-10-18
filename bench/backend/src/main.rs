@@ -48,10 +48,12 @@ const POOL_BYTES: usize = 16 << 20;
 /// stays short.
 const MAX_POOL: usize = 1 << 16;
 
-#[derive(Clone, Copy, Default)]
+#[derive(Clone, Default)]
 struct Cost {
     cycles: f64,
     instructions: f64,
+    /// Every counter, `BENCH_EVENTS` included, per object.
+    events: Vec<(&'static str, f64)>,
 }
 
 impl Cost {
@@ -101,7 +103,8 @@ impl Bench<'_> {
         let phase = m.stop();
         assert!(!phase.counters.multiplexed, "counters were multiplexed");
         let get = |name| phase.counters.get(name).unwrap_or(0) as f64 / n as f64;
-        Cost { cycles: get("cycles"), instructions: get("instructions") }
+        let events = phase.counters.values.iter().map(|&(name, v)| (name, v as f64 / n as f64)).collect();
+        Cost { cycles: get("cycles"), instructions: get("instructions"), events }
     }
 
     /// Launders the pool in `order`, then fills it back. Returns both costs and the new pool.
@@ -124,6 +127,93 @@ impl Bench<'_> {
             *slot = object;
         }
         cost
+    }
+}
+
+/// Laundering scattered magazines out of a class whose live bitmap is `bitmap` bytes, so that
+/// the bitmap fits a chosen cache level or not. The class's first `8 * bitmap` slots are
+/// carved and held (their memory is never touched, so only the bitmap is resident); then each
+/// round launders `MAGAZINES` magazines of slots in `order`, timed, and fills them back
+/// untimed. The slots are made, not stored, so the bench holds no pool as large as the bitmap.
+fn bitmap_sweep(bench: &Bench, bitmap: usize, order: &str, rounds: usize) -> Cost {
+    const MAGAZINES: usize = 64;
+    let slots = bitmap * 8;
+    let words = slots / 64;
+    assert!(words.is_power_of_two() && words >= 64, "bitmap must be a power of two of at least 512 bytes");
+    let mut magazine = vec![std::ptr::null_mut::<u8>(); bench.batch];
+    let mut base = None;
+    let mut carved = 0;
+    while carved < slots {
+        let want = (slots - carved).min(bench.batch);
+        let got = bench.back.fill(bench.class, &mut Descending(&atomic(&mut magazine)[..want]));
+        assert_eq!(got, want, "the back end ran out of memory");
+        let lowest = magazine[..want].iter().copied().min().unwrap();
+        base = Some(base.map_or(lowest, |b: *mut u8| b.min(lowest)));
+        carved += want;
+    }
+    let base = base.unwrap();
+    let size = bench.class.class().size();
+    let feistel = Feistel::new(slots, 7);
+    let slot_at = |j: usize| -> usize {
+        match order {
+            // Consecutive slots 64 words apart, every word and summary word met in turn.
+            "stride" => {
+                let (bit, w) = (j / words, j % words);
+                (w * 64 % words + w * 64 / words) * 64 + bit
+            }
+            "scatter" => feistel.permute(j),
+            _ => panic!("order {order} is not scatter or stride for a bitmap sweep"),
+        }
+    };
+    let per_round = MAGAZINES * bench.batch;
+    let mut best = Cost::default();
+    let mut j = 0;
+    let mut objects = vec![std::ptr::null_mut::<u8>(); per_round];
+    let mut back_again = Vec::with_capacity(per_round);
+    for round in 0..=rounds {
+        for o in objects.iter_mut() {
+            *o = base.wrapping_byte_add(slot_at(j % slots) * size);
+            j += 1;
+        }
+        let cost = bench.cost(per_round, || bench.give(&objects));
+        bench.take(per_round, &mut back_again);
+        if round > 0 {
+            best = best.better(cost);
+        }
+    }
+    best
+}
+
+/// A pseudo-random permutation of `0..n`: a Feistel network on the next power of four, walked
+/// until it lands below `n`.
+struct Feistel {
+    n: usize,
+    half: u32,
+    keys: [u64; 4],
+}
+
+impl Feistel {
+    fn new(n: usize, seed: u64) -> Feistel {
+        let bits = (usize::BITS - (n - 1).leading_zeros()).max(2);
+        let half = bits.div_ceil(2);
+        let mut rng = Rng::new(seed);
+        Feistel { n, half, keys: [rng.next_u64(), rng.next_u64(), rng.next_u64(), rng.next_u64()] }
+    }
+
+    fn permute(&self, i: usize) -> usize {
+        let mask = (1u64 << self.half) - 1;
+        let mut x = i as u64;
+        loop {
+            let (mut l, mut r) = (x >> self.half, x & mask);
+            for k in self.keys {
+                let f = (r ^ k).wrapping_mul(0x9e37_79b9_7f4a_7c15) >> 32 & mask;
+                (l, r) = (r, l ^ f);
+            }
+            x = l << self.half | r;
+            if (x as usize) < self.n {
+                return x as usize;
+            }
+        }
     }
 }
 
@@ -173,6 +263,16 @@ fn atomic(v: &mut [*mut u8]) -> &[AtomicPtr<u8>] {
     unsafe { std::slice::from_raw_parts(v.as_mut_ptr().cast::<AtomicPtr<u8>>(), v.len()) }
 }
 
+/// `16K`, `4M` and the like, in bytes.
+fn parse_size(s: &str) -> usize {
+    let (num, shift) = match s.as_bytes().last() {
+        Some(b'K') => (&s[..s.len() - 1], 10),
+        Some(b'M') => (&s[..s.len() - 1], 20),
+        _ => (s, 0),
+    };
+    num.parse::<usize>().expect("a size") << shift
+}
+
 fn shuffle(v: &mut [*mut u8], rng: &mut Rng) {
     for i in (1..v.len()).rev() {
         v.swap(i, rng.below(i as u64 + 1) as usize);
@@ -191,6 +291,32 @@ fn main() {
     let fills = args.str("fills", "fill,fill/8,fill/64");
     let back = STATE.get_or_reserve().expect("reserve the heap");
     let counters = Counters::region();
+    let bitmaps = args.str("bitmaps", "");
+    if !bitmaps.is_empty() {
+        // Each size carves on top of the last in the one class, so sizes go smallest first.
+        let size = classes[0];
+        let class = Class::of_size(size).and_then(Class::small).expect("a small class size");
+        let bench = Bench { back, class, batch: class.magazine().capacity(), counters: &counters };
+        for bitmap in bitmaps.split(',') {
+            let bytes = parse_size(bitmap);
+            for name in orders.split(',').filter(|name| !name.is_empty()) {
+                let cost = bitmap_sweep(&bench, bytes, name, reps);
+                let extra: Vec<String> = cost
+                    .events
+                    .iter()
+                    .filter(|(n, _)| !matches!(*n, "cycles" | "instructions" | "cycles_user"))
+                    .map(|(n, v)| format!("{n}={v:.3}"))
+                    .collect();
+                println!(
+                    "{size:>6} {bitmap:>8} {name:>8}  {:>9.1} {:>9.1}  {}",
+                    cost.cycles,
+                    cost.instructions,
+                    extra.join(" ")
+                );
+            }
+        }
+        return;
+    }
     println!("{:>6} {:>8} {:>7}  {:>9} {:>9}", "class", "case", "objects", "cyc/obj", "ins/obj");
     for size in classes {
         let class = Class::of_size(size).and_then(Class::small).expect("a small class size");
@@ -218,7 +344,7 @@ fn main() {
         }
         for name in fills.split(',') {
             let cost = match name {
-                "fill" => dense_fill,
+                "fill" => dense_fill.clone(),
                 _ => {
                     let every: usize = name.strip_prefix("fill/").and_then(|s| s.parse().ok()).expect("fill/N");
                     let mut best = Cost::default();
