@@ -39,9 +39,14 @@
 
 pub mod cxx;
 mod errno;
+mod mirror;
+#[doc(hidden)]
+pub mod routines;
 mod seam;
-mod slow;
-mod table;
+#[doc(hidden)]
+pub mod slow;
+#[doc(hidden)]
+pub mod table;
 
 use self::errno::{EINVAL, ENOMEM};
 use self::slow::{allocate, or_enomem};
@@ -304,8 +309,10 @@ pub extern "C" fn malloc_trim(_pad: usize) -> c_int {
 
 /// Exports the C interface under its C names (`malloc`, `free` and the rest) from the crate
 /// that invokes it, for a program or shared library that wants asmalloc as its C allocator.
-/// Invoke it once per program, at the item level. Each export is a call of the function of the
-/// same name in [`asmalloc::c`](self), which inlines into it.
+/// Invoke it once per program, at the item level. `malloc`, `free` and `free_sized` are the
+/// generated routines themselves (`front/generated/x86_64/exports.rs`, a copy of each under its C
+/// name), so a call reaches the routine with no jump in between; every other export is a call of
+/// the function of the same name in [`asmalloc::c`](self), which inlines into it.
 ///
 /// Besides the C standard's functions and POSIX's `posix_memalign`, it exports every other
 /// allocation function glibc 2.43 exports that takes or returns a block: `reallocarray`,
@@ -318,13 +325,16 @@ pub extern "C" fn malloc_trim(_pad: usize) -> c_int {
 #[macro_export]
 macro_rules! export_c_abi {
     () => {
+        // `malloc`, `free` and `free_sized`: the generated routines, defined in this crate.
+        $crate::asmalloc_exports_c_x86_64!();
+
+        /// Marks that this module exports the C interface, which `export_cxx_abi!` requires.
+        #[doc(hidden)]
+        #[allow(dead_code)]
+        const ASMALLOC_C_ABI_EXPORTED: () = ();
+
         const _: () = {
             use ::core::ffi::{c_int, c_void};
-
-            #[unsafe(no_mangle)]
-            unsafe extern "C" fn malloc(size: usize) -> *mut c_void {
-                $crate::c::malloc(size)
-            }
 
             #[unsafe(no_mangle)]
             unsafe extern "C" fn calloc(n: usize, size: usize) -> *mut c_void {
@@ -348,21 +358,9 @@ macro_rules! export_c_abi {
             }
 
             #[unsafe(no_mangle)]
-            unsafe extern "C" fn free(ptr: *mut c_void) {
-                // SAFETY: C-EXPORT-01.
-                unsafe { $crate::c::free(ptr) }
-            }
-
-            #[unsafe(no_mangle)]
             unsafe extern "C" fn cfree(ptr: *mut c_void) {
                 // SAFETY: C-EXPORT-01.
                 unsafe { $crate::c::cfree(ptr) }
-            }
-
-            #[unsafe(no_mangle)]
-            unsafe extern "C" fn free_sized(ptr: *mut c_void, size: usize) {
-                // SAFETY: C-EXPORT-01.
-                unsafe { $crate::c::free_sized(ptr, size) }
             }
 
             #[unsafe(no_mangle)]
@@ -422,6 +420,8 @@ macro_rules! export_c_abi {
 
 #[cfg(feature = "c-abi")]
 export_c_abi!();
+#[cfg(all(feature = "c-abi", feature = "cxx-abi"))]
+export_cxx_abi!();
 
 #[cfg(test)]
 mod tests;

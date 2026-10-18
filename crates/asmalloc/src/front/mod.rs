@@ -27,6 +27,9 @@ pub(crate) mod check;
 mod generated;
 #[cfg(all(target_os = "linux", target_arch = "x86_64", not(miri), not(kani)))]
 mod real;
+/// The generated C entry points' module, for the C layer.
+#[cfg(all(target_os = "linux", target_arch = "x86_64", not(miri), not(kani)))]
+pub(crate) use generated::x86_64::centry as generated_centry;
 mod routines;
 mod slab;
 pub(crate) mod sync;
@@ -40,14 +43,22 @@ pub use twin::Twin;
 
 #[cfg(all(target_os = "linux", target_arch = "x86_64", not(miri), not(kani)))]
 pub(crate) use crate::heap::{pop_slow, push_slow};
+// SAFETY: FRONT-01. glibc declares `extern const ptrdiff_t __rseq_offset;` (`sys/rseq.h`), as
+// `os::linux` also declares it; the exported C routines name it through this public path.
 #[cfg(all(target_os = "linux", target_arch = "x86_64", not(miri), not(kani)))]
-pub(crate) use crate::os::linux::__rseq_offset;
+unsafe extern "C" {
+    /// glibc's offset of the thread's rseq area from the thread pointer, which the generated
+    /// routines read. Public only so that the C routines the export macros define in another
+    /// crate can name it; reading it is all anyone can do.
+    #[doc(hidden)]
+    pub safe static __rseq_offset: isize;
+}
 #[cfg(all(target_os = "linux", target_arch = "x86_64", not(miri), not(kani)))]
 pub(crate) use real::Real;
 
 use crate::classes::{SMALL_COUNT, SmallClass};
 use core::mem::offset_of;
-use core::sync::atomic::{AtomicU64, Ordering};
+use core::sync::atomic::{AtomicU8, AtomicU64, Ordering};
 
 /// The number of entries in the masks' table: one per value of a class byte, so that a class
 /// read from the region table indexes it whatever it is, and finds zero, which sends the
@@ -59,26 +70,58 @@ pub const MASK_COUNT: usize = 256;
 /// for it: `docs/research/zen5-roofline.md`, section 14).
 const MASK_PAGE_OFFSET: usize = 2048;
 
-/// The slabs, one per CPU number, and after them the out-of-line routines' masks.
+/// Where the published heap words start within the masks' page, and where the region table
+/// starts within the page after it: off the page offsets of the slab words the fast paths write,
+/// since the C frees read them on every call.
+const PUBLISHED_PAGE_OFFSET: usize = 1024;
+const REGION_PAGE_OFFSET: usize = 2048;
+
+/// The number of entries of the region table the C frees read: one per region.
+pub const REGION_COUNT: usize = crate::space::MAX_REGIONS;
+
+/// The slabs, one per CPU number, and after them what the out-of-line routines and the C entry
+/// points read at fixed distances from a class's word in slab 0: the masks, the published heap
+/// words and the region table.
 ///
-/// A routine is given the address of its class's word in slab 0; the out-of-line ones read the
-/// class's mask at a fixed distance from it, `MASK_DISP`, which the routines were proved for.
-/// One static keeps that distance fixed by construction. Everything is zero at load: an
-/// untouched slab costs no memory, and a zero mask sends every out-of-line pop and push to its
-/// slow path, which writes the masks ([`publish_masks`]).
+/// A routine is given (or forms) the address of its class's word in slab 0; the out-of-line ones
+/// read the class's mask at a fixed distance from it, `MASK_DISP`, which the routines were proved
+/// for, and the C frees read the published words and the region table at `SHIFT_DISP`,
+/// `BASE_DISP` and `REGION_DISP` from `SLABS`. One static keeps those distances fixed by
+/// construction. Everything is zero at load: an untouched slab costs no memory, a zero mask sends
+/// every out-of-line pop and push to its slow path, which writes the masks ([`publish_masks`]),
+/// and zero published words and region bytes send every C free to its slow path, which writes
+/// them (`c::mirror`).
+///
+/// The type is public, with no public field or method, only so that the C routines the export
+/// macros define in another crate can name [`SLABS`]: code outside the crate can take its address
+/// and nothing else.
+#[doc(hidden)]
 #[repr(C, align(4096))]
-pub(crate) struct Front {
+pub struct Front {
     slabs: Slabs<[Slab; SLAB_COUNT]>,
-    _gap: [u8; MASK_PAGE_OFFSET],
+    _gap0: [u8; PUBLISHED_PAGE_OFFSET],
+    /// The heap's region shift (in the low 32 bits) and its base address shifted right by it.
+    published: [AtomicU64; 2],
+    _gap1: [u8; MASK_PAGE_OFFSET - PUBLISHED_PAGE_OFFSET - 16],
     masks: [AtomicU64; MASK_COUNT],
+    _gap2: [u8; REGION_PAGE_OFFSET],
+    /// A copy of the region table's class bytes for small classes, kept in step by the C slow
+    /// paths (`c::mirror`).
+    regions: [AtomicU8; REGION_COUNT],
+    _gap3: [u8; SLAB_BYTES - REGION_PAGE_OFFSET],
 }
 
 impl Front {
     const fn new() -> Front {
         Front {
             slabs: Slabs::new(),
-            _gap: [0; MASK_PAGE_OFFSET],
+            _gap0: [0; PUBLISHED_PAGE_OFFSET],
+            published: [const { AtomicU64::new(0) }; 2],
+            _gap1: [0; MASK_PAGE_OFFSET - PUBLISHED_PAGE_OFFSET - 16],
             masks: [const { AtomicU64::new(0) }; MASK_COUNT],
+            _gap2: [0; REGION_PAGE_OFFSET],
+            regions: [const { AtomicU8::new(0) }; REGION_COUNT],
+            _gap3: [0; SLAB_BYTES - REGION_PAGE_OFFSET],
         }
     }
 
@@ -106,23 +149,60 @@ impl Front {
             .and_then(crate::classes::Class::from_index)
             .and_then(crate::classes::Class::small)
     }
+
+    /// The published heap words the C frees read: the region shift and the base's region
+    /// index, `(shift, base >> shift)`, both zero until published.
+    #[cfg_attr(any(miri, kani), allow(dead_code))]
+    pub(crate) fn published(&self) -> (&AtomicU64, &AtomicU64) {
+        (&self.published[0], &self.published[1])
+    }
+
+    /// The copy of the region table's class bytes the C frees read.
+    #[cfg_attr(any(miri, kani), allow(dead_code))]
+    pub(crate) fn regions(&self) -> &[AtomicU8; REGION_COUNT] {
+        &self.regions
+    }
 }
 
 /// The distance from a class's word in slab 0 to its mask, by the layout of [`Front`].
 #[cfg_attr(any(miri, kani), allow(dead_code))]
 pub(crate) const MASK_DISP: usize = offset_of!(Front, masks) - offset_of!(Front, slabs);
 
+/// The distances from `SLABS` to the published words and the region table, by the layout of
+/// [`Front`].
+#[cfg_attr(any(miri, kani), allow(dead_code))]
+pub(crate) const SHIFT_DISP: usize = offset_of!(Front, published) - offset_of!(Front, slabs);
+#[cfg_attr(any(miri, kani), allow(dead_code))]
+pub(crate) const BASE_DISP: usize = SHIFT_DISP + 8;
+#[cfg_attr(any(miri, kani), allow(dead_code))]
+pub(crate) const REGION_DISP: usize = offset_of!(Front, regions) - offset_of!(Front, slabs);
+
 // The layout is the one the routines were proved for.
 #[cfg(all(target_os = "linux", target_arch = "x86_64", not(miri), not(kani)))]
 const _: () = {
+    use generated::x86_64::centry as c_proved;
     use generated::x86_64::slab as proved;
     assert!(MASK_DISP == proved::MASK_DISP);
     assert!(MASK_COUNT == proved::MASK_COUNT);
     assert!(SLAB_COUNT == proved::SLAB_COUNT && SLAB_BYTES == proved::SLAB_BYTES);
+    assert!(MASK_DISP == c_proved::MASK_DISP && MASK_COUNT == c_proved::MASK_COUNT);
+    assert!(SLAB_COUNT == c_proved::SLAB_COUNT && SLAB_BYTES == c_proved::SLAB_BYTES);
+    assert!(SHIFT_DISP == c_proved::SHIFT_DISP && BASE_DISP == c_proved::BASE_DISP);
+    assert!(REGION_DISP == c_proved::REGION_DISP && REGION_COUNT == c_proved::REGION_COUNT);
 };
 
 const _: () = {
     assert!(offset_of!(Front, slabs) == 0);
+    // What the C frees read on every call is off the page offsets of the slab words the fast
+    // paths write (the spare heads, which only slow paths write, may share them).
+    assert!(
+        SHIFT_DISP % SLAB_BYTES >= Slab::HOT_BYTES
+            && (BASE_DISP + 8) % SLAB_BYTES <= MASK_PAGE_OFFSET
+    );
+    assert!(
+        REGION_DISP % SLAB_BYTES == REGION_PAGE_OFFSET && REGION_PAGE_OFFSET >= Slab::USED_BYTES
+    );
+    assert!(size_of::<Front>() == SLAB_COUNT * SLAB_BYTES + 3 * SLAB_BYTES);
     assert!(offset_of!(Front, masks) % SLAB_BYTES == MASK_PAGE_OFFSET);
     assert!(MASK_PAGE_OFFSET + MASK_COUNT * 8 <= SLAB_BYTES);
     // No mask shares a page offset with any field of a slab.
@@ -130,13 +210,17 @@ const _: () = {
     assert!(SMALL_COUNT < MASK_COUNT);
 };
 
-/// The slabs, and the out-of-line routines' masks after them. The generated routines name it
-/// as `front::SLABS`, whose address is the first slab's.
-// Crate-private: a twin or a routine wrapper made outside the crate could write these slabs
-// without restarting, behind the heap's back.
+/// The slabs, and after them what the routines read at fixed distances from them. The generated
+/// routines name it as `front::SLABS`, whose address is the first slab's.
+///
+/// Public, hidden, only so that the C routines the export macros define in another crate can
+/// name it: [`Front`] has no public field or method, so code outside the crate can take its
+/// address and nothing else. A twin or routine wrapper made outside the crate could otherwise
+/// write the slabs without restarting, behind the heap's back.
 // Only the generated routines use it, which Miri and Kani do not build.
+#[doc(hidden)]
 #[cfg_attr(any(miri, kani), allow(dead_code))]
-pub(crate) static SLABS: Front = Front::new();
+pub static SLABS: Front = Front::new();
 
 /// The slot mask of each small class's magazines, indexed by class index; zero for every other
 /// byte. The inlined routines are given their class's mask from here, so a constant class

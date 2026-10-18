@@ -213,4 +213,23 @@ def withRcx (v : BitVec 64) : State := st.setReg .rcx v
 #guard (exec (.alu .test .rax (.imm 0xfffffff0)) (withRax 0xf)).map flags ==
   some [some false, some true, some false, some false]
 
+/-! ## `movzx r32, r16` and `cmp r8, m8` -/
+
+-- The low 16 bits of `rax` (all ones), zero-extended; the flags unchanged.
+#guard (exec (.movzx16 .rcx .rax) st).map (fun s => (s.gpr .rcx, flags s)) ==
+  some (0xffff, flags st)
+#guard (exec (.movzx16 .rcx .rax) (withRax 0x8000000012345678)).map (·.gpr .rcx) == some 0x5678
+-- `cl` (0xff) against the byte at `fs:[rdx+8]`, 0xC8: equal no, below no, sign of 0x37 clear.
+#guard (exec (.cmp8 .rcx { base := .rdx, disp := 8, seg := some .fs }) st).map
+    (fun s => (s.gpr .rcx, flags s)) ==
+  some (-1, [some false, some false, some false, some false])
+-- 0xC8 against itself: equal.
+#guard (exec (.cmp8 .rcx { base := .rdx, disp := 8, seg := some .fs }) (withRcx 0xC8)).map flags ==
+  some [some false, some true, some false, some false]
+-- 0x01 against 0xC8: a borrow, sign of 0x39 clear, no signed overflow (1 - (-56) = 57).
+#guard (exec (.cmp8 .rcx { base := .rdx, disp := 8, seg := some .fs }) (withRcx 0x101)).map flags ==
+  some [some true, some false, some false, some false]
+-- Outside every region the byte load faults.
+#guard (exec (.cmp8 .rcx { base := .rdx, disp := 8 }) st).isNone
+
 end VG.Test.Semantics
