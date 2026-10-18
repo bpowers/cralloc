@@ -428,6 +428,8 @@ struct Debts {
     /// bits it is owed.
     keys: [u64; DEBTS],
     words: [u64; DEBTS],
+    /// Per place, the region the key names, so that paying needs no lookup.
+    regions: [Option<RegionId>; DEBTS],
     /// A bit per place that holds a debt.
     held: u64,
     /// Per place, what a word of the next level is owed.
@@ -440,6 +442,7 @@ impl Debts {
         Debts {
             keys: [NO_KEY; DEBTS],
             words: [0; DEBTS],
+            regions: [None; DEBTS],
             held: 0,
             upward: [None; DEBTS],
         }
@@ -451,19 +454,26 @@ impl Debts {
         let key = (region.index() as u64) << 26 | (word / BITS) as u64;
         let at = key as usize % DEBTS;
         if self.keys[at] != key {
-            self.hold(release, at, key);
+            self.hold(release, at, key, region);
         }
         self.words[at] |= 1 << (word % BITS);
     }
 
     /// Gives place `at` to summary word `key`, paying the debt of the one that held it.
     #[inline(never)]
-    fn hold<H: Host>(&mut self, release: &mut Release<'_, H>, at: usize, key: u64) {
+    fn hold<H: Host>(
+        &mut self,
+        release: &mut Release<'_, H>,
+        at: usize,
+        key: u64,
+        region: RegionId,
+    ) {
         let at = at % DEBTS;
         if self.keys[at] != NO_KEY {
             self.pay(release, at);
         }
         self.keys[at] = key;
+        self.regions[at] = Some(region);
         self.held |= 1 << at;
     }
 
@@ -482,12 +492,15 @@ impl Debts {
 
     /// Pays the debt at place `at`, which holds one, and empties the place: sets the summary
     /// word's bits, reading it first (`Look` in `tla/Summary.tla`), and owes what it owes above.
+    #[inline(always)]
     fn pay<H: Host>(&mut self, release: &mut Release<'_, H>, at: usize) {
         let at = at % DEBTS;
         let key = core::mem::replace(&mut self.keys[at], NO_KEY);
         let words = core::mem::replace(&mut self.words[at], 0);
         self.held &= !(1 << at);
-        let region = release.region((key >> 26) as usize);
+        let Some(region) = self.regions[at] else {
+            release.abort("a summary debt with no region");
+        };
         let first = (key as u32 & ((1 << 26) - 1)) * BITS;
         if let Some(debt) = release.pay_leaves(region, first, words, false) {
             self.owe_upward(release, debt);

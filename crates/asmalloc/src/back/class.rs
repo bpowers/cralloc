@@ -1303,7 +1303,10 @@ fn release_words<'h, O: Os, P: SlotPointer, const ROOM: usize, const SPAN: usize
             // The leaf words below the watermark of the region the slots are in, so that each
             // slot finds its word with an index.
             let leaves_of = |release: &tree::Release<'h, _>, met: &Met| {
-                (met.region, release.leaves(met.region, met.limit.div_ceil(BITS)))
+                (
+                    met.region,
+                    release.leaves(met.region, met.limit.div_ceil(BITS)),
+                )
             };
             let (mut region, mut leaves) = leaves_of(release, met);
             for object in rest {
