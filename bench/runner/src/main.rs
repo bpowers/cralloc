@@ -1,11 +1,11 @@
 //! The benchmark runner.
 //!
 //!   benchrun build  [--allocators a,b]
-//!   benchrun run    [--suite quick|full] [--rounds N] [--only TEXT] [--allocators a,b]
+//!   benchrun run    [--suite quick|full|backend] [--rounds N] [--only TEXT] [--allocators a,b]
 //!                   [--out FILE] [--seed N] [--max-busy CPUS] [--gate-wait SECONDS]
 //!                   [--runner-cpus LIST] [--sample-ms N] [--mem-cap SIZE]
 //!   benchrun report FILE... [--detail] [--ref NAME] [--only TEXT] [--quiet-only]
-//!   benchrun list   [--suite quick|full]
+//!   benchrun list   [--suite quick|full|backend]
 //!
 //! See bench/README.md.
 mod cap;
@@ -88,7 +88,8 @@ fn jobs(f: &Flags) -> (String, Vec<suite::Job>) {
     let mut v = match name.as_str() {
         "quick" => suite::quick(),
         "full" => suite::full(),
-        _ => die("--suite must be quick or full"),
+        "backend" => suite::backend(),
+        _ => die("--suite must be quick, full or backend"),
     };
     if let Some(only) = f.get("only") {
         v.retain(|j| j.id.contains(only));
