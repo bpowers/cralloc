@@ -15,6 +15,15 @@
 //!   empty on the way has a stale summary bit: clear it (below) and start again. At a leaf word,
 //!   take bits with one compare-and-swap against the value read; if that fails, try again
 //!   against the value it found; if it took every bit, clear the word's summary bit.
+//! - **a claim that keeps the bits** ([`claim`] with `keep`, which every large class's
+//!   allocation is): as a claim, except that when it takes every bit of a word it does not
+//!   clear the word's summary bit. In the model that is a thread that holds its clear for as long
+//!   as it likes, as a thread lost in a fork holds it for ever, so `Partition` and `Visible`
+//!   hold as before; the bit is a hint over nothing free, and the next search that finds the
+//!   word empty clears it, as it clears any stale bit. The point is a class whose slots are taken
+//!   and freed one at a time: a claim that clears walks up clearing to the top, and the free
+//!   that follows walks up setting the same bits again. With the bits kept, the free finds them
+//!   set and writes nothing above the leaf.
 //! - **a run of claims** (a fill, [`claim_next`]) is the model's `Run`: it continues from where
 //!   its last claim was rather than from the top, moves past a group of 64 words where it meets
 //!   another claimer, leaves a word it finds empty to whoever emptied it, and clears the bits of
@@ -25,7 +34,8 @@
 //!   first. The walk always goes to the top (the healing free), so a summary bit left clear by a
 //!   thread that vanished in a fork is repaired by the next free below it. A batch of releases
 //!   ([`Release`]) shares one walk: each summary word is looked at once for all the bits it
-//!   owes.
+//!   owes. The release of one slot ([`release_one`]) is the same steps for one bit with no
+//!   batch's bookkeeping.
 //! - **clear**: whoever empties a word, or finds one empty under a set bit, clears the bit with
 //!   an atomic AND and reads the word again. If the word is no longer empty it sets the bit back
 //!   by walking up as a release does. Otherwise, if the AND emptied the summary word, that word

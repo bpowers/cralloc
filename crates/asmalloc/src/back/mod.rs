@@ -232,11 +232,7 @@ impl<'a, O: Os> Back<'a, O> {
     fn host(&self, class: Class) -> Option<ClassHost<'a, O>> {
         let state = self.state.classes.get(class.index() as usize - 1)?;
         let layout = state.layout.layout(self.space.plan(), class)?;
-        Some(ClassHost {
-            space: self.space,
-            class: state,
-            layout,
-        })
+        Some(ClassHost::new(self.space, state, layout))
     }
 
     fn abort(&self, message: &str) -> ! {

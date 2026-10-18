@@ -81,6 +81,8 @@ unmapped, and `Space::unmap`'s documentation says so.
 
 `region`, `slot`, `metadata`, `magazines`, `process_page` and `pointer` compute pointers with
 `map_addr` from `base`, so each carries the reservation's provenance; forming them is safe.
+(`metadata` starts from the first metadata block's address, which `Space::new` forms once from
+`base` the same way, `base + Plan::metadata_start`.)
 `region` and `metadata` abort unless the id is an object region, `slot` aborts unless the slot
 lies wholly inside its region (`Plan::slot_fits`, proved against the slot arithmetic by
 `slots_lie_inside_their_region_and_are_aligned_*`), and `pointer` returns `None` outside the

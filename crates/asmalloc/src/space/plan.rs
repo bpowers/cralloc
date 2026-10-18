@@ -191,9 +191,13 @@ impl Plan {
     /// The offset of a region's metadata block, [`Plan::metadata_size`] bytes long.
     #[inline(always)]
     pub const fn metadata_offset(self, region: RegionId) -> usize {
-        self.magazines_offset()
-            + self.magazine_area_size()
-            + (region.index() << self.metadata_shift())
+        self.metadata_start() + (region.index() << self.metadata_shift())
+    }
+
+    /// The offset of the first region's metadata block, where the metadata blocks begin.
+    #[inline(always)]
+    pub const fn metadata_start(self) -> usize {
+        self.magazines_offset() + self.magazine_area_size()
     }
 
     /// Where the last metadata block ends.
