@@ -3,6 +3,11 @@
 //   chain: realloc a block from 64 bytes up to TOP_MIB (256) by factors of 1.05 to 2, writing
 //          every page of the new room, then back down; ROUNDS times on each of THREADS threads.
 //   grow:  as chain, but never shrinks: free at the top.
+//   random: as the soak harness's realloc mode: a random top from 1 byte to TOP_MIB, growth
+//          by 5-100% plus 1 to 16 bytes, then shrinks to a half, third or quarter (plus a byte)
+//          down to one byte, and a free. START picks the first allocation (malloc, memalign,
+//          posix_memalign, aligned_alloc, valloc; default malloc) and FREE the last (free,
+//          free_sized, realloc0; default free).
 //   huge:  malloc 512 MiB, write one byte per MiB, free.
 //   hugecalloc: the same with calloc.
 // Prints the process's peak resident memory, what is resident once every block is freed, and
@@ -36,10 +41,71 @@ static long peak_mib(void) {
     return u.ru_maxrss / 1024;
 }
 
+static unsigned long long next(unsigned long long *seed) {
+    *seed = *seed * 6364136223846793005ull + 1442695040888963407ull;
+    return *seed >> 33;
+}
+
+static char *start(size_t n) {
+    const char *s = getenv("START");
+    void *p = NULL;
+    if (!s || !strcmp(s, "malloc")) return malloc(n);
+    if (!strcmp(s, "memalign")) return memalign(4096, n);
+    if (!strcmp(s, "aligned_alloc")) return aligned_alloc(64, (n + 63) & ~(size_t)63);
+    if (!strcmp(s, "valloc")) return valloc(n);
+    if (!strcmp(s, "posix_memalign") && posix_memalign(&p, 2u << 20, n) == 0) return p;
+    fprintf(stderr, "bad START %s\n", s);
+    exit(2);
+}
+
+static void finish(char *p, size_t n) {
+    const char *f = getenv("FREE");
+    if (!f || !strcmp(f, "free")) {
+        free(p);
+    } else if (!strcmp(f, "free_sized")) {
+        free_sized(p, n);
+    } else if (!strcmp(f, "realloc0")) {
+        if (realloc(p, 0)) exit(3);
+    } else {
+        fprintf(stderr, "bad FREE %s\n", f);
+        exit(2);
+    }
+}
+
+// Writes [from, to) as the soak harness does: every byte below 1 MiB, then 64 bytes a page.
+static void touch(char *p, size_t from, size_t to) {
+    if (to <= 1u << 20) {
+        memset(p + from, 5, to - from);
+        return;
+    }
+    for (size_t o = from - from % 4096; o < to; o += 4096) {
+        size_t a = o > from ? o : from, b = o + 64 < to ? o + 64 : to;
+        if (a < b) memset(p + a, 5, b - a);
+    }
+}
+
 static void *work(void *arg) {
     unsigned long long seed = (unsigned long long)(size_t)arg;
     for (int r = 0; r < rounds; r++) {
-        if (!strcmp(mode, "chain") || !strcmp(mode, "grow")) {
+        if (!strcmp(mode, "random")) {
+            size_t n = 1 + next(&seed) % 64, goal = 1 + next(&seed) % top;
+            char *p = start(n);
+            touch(p, 0, n);
+            while (n < goal) {
+                size_t m = n + n * (5 + next(&seed) % 96) / 100 + 1 + next(&seed) % 16;
+                if (m > top) m = top;
+                if (!(p = realloc(p, m))) exit(1);
+                touch(p, n, m);
+                n = m;
+                if (n >= top) break;
+            }
+            while (n > 1) {
+                n = n / (2 + next(&seed) % 3) + 1;
+                if (!(p = realloc(p, n))) exit(1);
+                if (n <= 2) break;
+            }
+            finish(p, n);
+        } else if (!strcmp(mode, "chain") || !strcmp(mode, "grow")) {
             size_t n = 64;
             const char *al = getenv("ALIGN");
             char *p = al ? memalign(strtoul(al, NULL, 0), n) : malloc(n);

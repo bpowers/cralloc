@@ -308,6 +308,18 @@ static void live_remove(void *p) {
 // ---- allocating and freeing, through every entry point ----
 
 static void (*free_sized_fn)(void *, size_t);
+// Bytes the program holds (requested sizes), and their peak: the ground truth to read an
+// allocator's peak resident memory against.
+static _Atomic long live_bytes, live_peak;
+
+static void held(long delta) {
+    long now_ = atomic_fetch_add_explicit(&live_bytes, delta, memory_order_relaxed) + delta;
+    long seen = atomic_load_explicit(&live_peak, memory_order_relaxed);
+    while (now_ > seen && !atomic_compare_exchange_weak_explicit(&live_peak, &seen, now_,
+                                                                 memory_order_relaxed,
+                                                                 memory_order_relaxed)) {
+    }
+}
 static _Atomic uint64_t serials;
 static _Atomic long n_alloc, n_free, n_realloc, n_verify, n_xchg, n_fork, n_thread, n_signal;
 
@@ -423,6 +435,7 @@ static int alloc_rec(Rng *r, size_t req, Rec *out) {
         });
     fill(&rec, 0);
     *out = rec;
+    held((long)req);
     atomic_fetch_add(&n_alloc, 1);
     return 1;
 }
@@ -440,6 +453,7 @@ static void free_rec(Rng *r, Rec *b) {
     else
         free(b->p);
     b->p = NULL;
+    held(-(long)b->req);
     atomic_fetch_add(&n_free, 1);
 }
 
@@ -464,6 +478,7 @@ static void realloc_rec(Rec *b, size_t new_req) {
     verify(&old, keep, "after realloc (the prefix it must keep)");
     size_t n = use_usable ? malloc_usable_size(q) : new_req;
     if (n < new_req) die("realloc(%zu) returned %p with usable size %zu", new_req, q, n);
+    held((long)new_req - (long)b->req);
     b->p = q;
     b->req = new_req;
     b->n = n;
@@ -1218,9 +1233,9 @@ int main(int argc, char **argv) {
     xdrain(&r);
 
     say("soak %s: %.1fs alloc %ld free %ld realloc %ld look %ld xchg %ld fork %ld thread %ld "
-        "signal %ld trap %ld trim %ld null %ld untracked %ld\n",
+        "signal %ld trap %ld trim %ld null %ld untracked %ld; held at most %ld MiB\n",
         mode, now() - start, n_alloc, n_free, n_realloc, n_verify, n_xchg, n_fork, n_thread,
-        n_signal, n_trap, n_trim, n_null, table_dropped);
+        n_signal, n_trap, n_trim, n_null, table_dropped, live_peak >> 20);
     if (n_alloc != n_free) die("%ld blocks allocated but %ld freed", n_alloc, n_free);
     printf("soak %s: ok\n", mode);
     return 0;
