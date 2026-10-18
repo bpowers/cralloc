@@ -27,8 +27,8 @@
 //!   rounded up to a page, of a large one.
 //! - `calloc` makes all of the block's usable size read as zero, as glibc's does, checks the
 //!   product for overflow, and does not clear memory the back end knows is zero.
-//!   `malloc_trim` returns wholly free pages that the back end holds; it does not empty the
-//!   magazines.
+//! - `malloc_trim` is `collect`: it empties the magazines and the depot back to the bitmaps and
+//!   returns every wholly free page.
 //! - A failure returns null (or an error number from `posix_memalign`) and sets `errno` through
 //!   the C library's own accessor (`errno.rs`). `free` and a successful call leave it alone.
 //!   Nothing here hands a request to another allocator.
@@ -295,8 +295,9 @@ pub extern "C" fn asmalloc_version() -> *const c_char {
     VERSION.as_ptr()
 }
 
-/// glibc's `malloc_trim`: returns the wholly free pages the back end holds to the OS. The
-/// padding argument has no meaning here. Returns 1 if any memory was released, else 0.
+/// glibc's `malloc_trim`: sends every parked object back to the bitmaps and returns the wholly
+/// free pages to the OS (`collect`). The padding argument has no meaning here. Returns 1 if any
+/// memory was released, else 0.
 pub extern "C" fn malloc_trim(_pad: usize) -> c_int {
     c_int::from(process::collect() > 0)
 }

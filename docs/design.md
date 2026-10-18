@@ -448,9 +448,10 @@ each region and the high end drains, which is where purging starts.
 
 ### Heartbeat
 
-Every entry to a slow path does a bounded amount of maintenance before it returns: at most
-one magazine laundered, one step of purging, one look at a class of its own slab, and one
-look for an idle cache. A large allocation or free counts as a slow path. There is no
+Every entry to a slow path does a bounded amount of maintenance before it returns: one step
+of purging, one look at a class of its own slab, one look for an idle cache, and at most one
+magazine laundered for each rule that launders. A large allocation or free counts as a slow
+path. There is no
 background thread and no timer. The work is done in units small enough that no single call
 pays much. This is mimalloc's pacing applied to a per-CPU design.
 
@@ -498,14 +499,18 @@ for ever. Five rules follow.
   in the count; the next rule handles them.
 - **Parked objects do not pin the heap.** An object parked in a magazine holds its page as
   surely as a live one, and parked objects are a random sample of wherever the heap has
-  been. Three rules keep them moving back to the bitmaps, where the next fill takes the
+  been. Four rules keep them moving back to the bitmaps, where the next fill takes the
   lowest free addresses instead.
   - A magazine does not stay loaded for more than an interval. A slow path looks at one
     class of its own slab in turn. If the magazine loaded there has been loaded for an
     interval, the slow path takes it with the routine that replaces a magazine and launders
-    it, with that class's spares. This needs no fence, because the slab is the thread's
-    own. A class in use pays one refill per interval. A class that fell out of use on a CPU
-    that is still busy is emptied, which the idle check, being per slab, cannot do.
+    it. This needs no fence, because the slab is the thread's own. A class in use pays one
+    refill per interval. A class that fell out of use on a CPU that is still busy is
+    emptied, which the idle check, being per slab, cannot do.
+  - Full spares do not stay either. Once an interval each CPU sweeps its own slab, a class
+    per heartbeat, taking that class's whole stack of full spares in one step, laundering
+    one and sending the rest to the depot. Spares need their own rule: on a CPU that only
+    frees a class, the loaded magazine is always fresh and nothing ever pops a full spare.
   - A depot stack sheds what it did not need. The depth a class's stack never fell below
     during an interval is laundered, one magazine per heartbeat, whichever class the slow
     path was serving.
