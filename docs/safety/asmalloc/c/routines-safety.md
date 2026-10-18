@@ -1,8 +1,7 @@
 # Safety ledger: `crates/asmalloc/src/c/routines.rs`, and the exported C routines
 
-The generated C entry points (`front/generated/x86_64/centry.rs`): `c_malloc`, `c_calloc`, `c_free`,
-`c_free_sized`, and `c_delete` and `c_delete_sized`, the last two the same code as the frees
-leaving for the `delete` family's slow paths. Lean proves each against its contract
+The generated C entry points (`front/generated/x86_64/centry.rs`): `c_malloc`, `c_calloc`,
+`c_free` and `c_free_sized`. Lean proves each against its contract
 (`lean/Asmalloc/Spec/CEntry.lean`) under any interruption; the obligations below are the
 generated `# Safety` sections, discharged once here for every call: the wrappers in
 `routines.rs` (ROUTINES-01) and the copies the export macros define under the C names
@@ -13,15 +12,14 @@ generated `# Safety` sections, discharged once here for every call: the wrappers
 - (R) glibc registered the calling thread's rseq area.
 - (L) `SLABS` (the slabs), the thread's `rseq_cs` and `cpu_id`, `__rseq_offset`, the masks'
   table (`MASK_DISP` above `SLABS`), each routine's tables (`C_SIZES`, `C_CALLOC_SIZES` or `C_SIZED_SIZES` 2048
-  bytes in; the routine's mirror of the heap words, `SHIFT_DISP + 16 i` above `SLABS` for
-  mirror `i`, and the region table at `REGION_DISP` above `SLABS`) do not overlap the return address or wrap around the end of the address space;
+  bytes in; the mirror of the heap words at `SHIFT_DISP` above `SLABS`, and the region table at `REGION_DISP` above `SLABS`) do not overlap the return address or wrap around the end of the address space;
   `rseq_cs` overlaps none of the others; none but the slabs overlaps the slabs.
 - (I) For every class byte `k` below 256, the masks' table's entry `k` is zero or the mask of
   an allowed magazine size, and if it is not zero, every slab's word `8 k` is zero, a marker or
   a slot of a magazine of that size apart from all of the above, each slab's its own; every
   thread and the drainer keep this while the routine may run.
 
-The contents of the size tables, the mirrors and the region table may be anything:
+The contents of the size tables, the mirror and the region table may be anything:
 the routines are proved for every content (their contracts state what they did in terms of the
 values they read).
 
@@ -31,7 +29,7 @@ values they read).
 - (L): `SLABS` is the `Front` static; the masks, the published words and the region table are
   fields of it past every slab (compile-time assertions in `front/mod.rs` pin each to the
   generated `MASK_DISP`, `SHIFT_DISP`, `BASE_DISP`, `MIRROR_BYTES`, `MIRROR_COUNT`,
-  `MIRROR_DELETE` and `REGION_DISP`, and the static's size to
+  and `REGION_DISP`, and the static's size to
   the slabs plus three pages). `C_SIZES`, `C_CALLOC_SIZES` and `C_SIZED_SIZES` are statics of their own, immutable,
   each table 2048 bytes in (assertions in `c/table.rs` against the generated `TABLE_OFF`,
   `MALLOC_LEN` and `SIZED_LEN`). Distinct statics do not overlap, and none overlaps glibc's
@@ -57,12 +55,8 @@ frees:
   to `slow::calloc_zero_tail`, which zeroes it (SLOW-04 in `slow-safety.md`).
 - `c_free` and `c_free_sized` push the pointer to the class named by the region's byte in the
   copy beside the slabs (the sized free only when its prediction agrees), the region found
-  from the routine's mirror: C's for `c_free` and `c_free_sized`, the `delete` family's for
-  `c_delete` and `c_delete_sized`. A mirror is zero or the heap's own words (`c/mirror.rs`);
-  zero sends every pointer to the slow path. The `delete` family's is published only once its
-  slow path knows the program's basic `operator delete` is ours: a program that replaces it
-  may build its blocks inside ours (`malloc(n + 16) + 16`), which are not blocks of the heap
-  and must reach its `operator delete`, as the standard's defaults forward them. That byte is zero or
+  from the mirror of the heap's words beside the slabs, which is zero or the heap's own words
+  (`c/mirror.rs`); zero sends every pointer to the slow path. That byte is zero or
   the region's true class (`c/mirror.rs`): it is written only after a small block of the region
   has been handed out to C, and the back end never takes a region holding blocks from its
   class. By the free's contract the pointer is a block of the heap the caller owns and gives
@@ -73,7 +67,7 @@ frees:
   the contract; the routine pushes it as a block of its region's class, and it is caught only
   if it reaches the bitmaps before being handed out again (docs/design.md, "Interfaces").
 - On a miss each routine tail-calls its slow path (`malloc_slow`, `calloc_slow_args`, `free_slow`,
-  `free_sized_slow`, `cxx::operator_delete_slow`, `cxx::operator_delete_sized_slow`) with its
+  `free_sized_slow`) with its
   arguments as they arrived, which completes the call from scratch.
 
 ## ROUTINES-01: the calls in `routines.rs`

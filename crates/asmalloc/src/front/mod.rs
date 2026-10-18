@@ -75,21 +75,6 @@ const MASK_PAGE_OFFSET: usize = 2048;
 /// since the C frees read them on every call.
 const PUBLISHED_PAGE_OFFSET: usize = 1024;
 
-/// The number of mirrors of the heap words (`Mirror`).
-const MIRROR_COUNT: usize = 2;
-
-/// Whose copy of the heap's region shift and base index a generated free reads. Each is zero
-/// until published, and a zero copy sends every pointer to that free's slow path, so a family of
-/// frees can be kept off its fast path for good by never publishing its copy: the C++ `delete`
-/// forms are, when the program replaces the basic `operator delete` (`c::cxx`).
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-#[cfg_attr(any(miri, kani), allow(dead_code))]
-pub(crate) enum Mirror {
-    /// C's `free` and `free_sized`.
-    C = 0,
-    /// C++'s `operator delete` and `delete[]`, plain and sized.
-    Delete = 1,
-}
 const REGION_PAGE_OFFSET: usize = 2048;
 
 /// The number of entries of the region table the C frees read: one per region.
@@ -116,10 +101,10 @@ pub const REGION_COUNT: usize = crate::space::MAX_REGIONS;
 pub struct Front {
     slabs: Slabs<[Slab; SLAB_COUNT]>,
     _gap0: [u8; PUBLISHED_PAGE_OFFSET],
-    /// For each `Mirror`, the heap's region shift (in the low 32 bits) and its base address
+    /// The C frees' mirror of the heap's region shift (in the low 32 bits) and its base address
     /// shifted right by it.
-    published: [[AtomicU64; 2]; MIRROR_COUNT],
-    _gap1: [u8; MASK_PAGE_OFFSET - PUBLISHED_PAGE_OFFSET - 16 * MIRROR_COUNT],
+    published: [AtomicU64; 2],
+    _gap1: [u8; MASK_PAGE_OFFSET - PUBLISHED_PAGE_OFFSET - 16],
     masks: [AtomicU64; MASK_COUNT],
     _gap2: [u8; REGION_PAGE_OFFSET],
     /// A copy of the region table's class bytes for small classes, kept in step by the C slow
@@ -133,8 +118,8 @@ impl Front {
         Front {
             slabs: Slabs::new(),
             _gap0: [0; PUBLISHED_PAGE_OFFSET],
-            published: [const { [const { AtomicU64::new(0) }; 2] }; MIRROR_COUNT],
-            _gap1: [0; MASK_PAGE_OFFSET - PUBLISHED_PAGE_OFFSET - 16 * MIRROR_COUNT],
+            published: [const { AtomicU64::new(0) }; 2],
+            _gap1: [0; MASK_PAGE_OFFSET - PUBLISHED_PAGE_OFFSET - 16],
             masks: [const { AtomicU64::new(0) }; MASK_COUNT],
             _gap2: [0; REGION_PAGE_OFFSET],
             regions: [const { AtomicU8::new(0) }; REGION_COUNT],
@@ -167,12 +152,11 @@ impl Front {
             .and_then(crate::classes::Class::small)
     }
 
-    /// The heap words `mirror`'s frees read: the region shift and the base's region index,
+    /// The heap words the C frees read: the region shift and the base's region index,
     /// `(shift, base >> shift)`, both zero until published.
     #[cfg_attr(any(miri, kani), allow(dead_code))]
-    pub(crate) fn published(&self, mirror: Mirror) -> (&AtomicU64, &AtomicU64) {
-        let [shift, base] = &self.published[mirror as usize];
-        (shift, base)
+    pub(crate) fn published(&self) -> (&AtomicU64, &AtomicU64) {
+        (&self.published[0], &self.published[1])
     }
 
     /// The copy of the region table's class bytes the C frees read.
@@ -206,9 +190,8 @@ const _: () = {
     assert!(MASK_DISP == c_proved::MASK_DISP && MASK_COUNT == c_proved::MASK_COUNT);
     assert!(SLAB_COUNT == c_proved::SLAB_COUNT && SLAB_BYTES == c_proved::SLAB_BYTES);
     assert!(SHIFT_DISP == c_proved::SHIFT_DISP && BASE_DISP == c_proved::BASE_DISP);
-    assert!(MIRROR_COUNT == c_proved::MIRROR_COUNT && 16 == c_proved::MIRROR_BYTES);
-    assert!(size_of::<[AtomicU64; 2]>() == c_proved::MIRROR_BYTES);
-    assert!(Mirror::Delete as usize == c_proved::MIRROR_DELETE);
+    // The routines were proved for one mirror, C's, at `SHIFT_DISP`.
+    assert!(c_proved::MIRROR_COUNT == 1 && size_of::<[AtomicU64; 2]>() == c_proved::MIRROR_BYTES);
     assert!(REGION_DISP == c_proved::REGION_DISP && REGION_COUNT == c_proved::REGION_COUNT);
 };
 
@@ -218,7 +201,7 @@ const _: () = {
     // paths write (the spare heads, which only slow paths write, may share them).
     assert!(
         SHIFT_DISP % SLAB_BYTES >= Slab::HOT_BYTES
-            && (SHIFT_DISP + 16 * MIRROR_COUNT) % SLAB_BYTES <= MASK_PAGE_OFFSET
+            && (BASE_DISP + 8) % SLAB_BYTES <= MASK_PAGE_OFFSET
     );
     assert!(
         REGION_DISP % SLAB_BYTES == REGION_PAGE_OFFSET && REGION_PAGE_OFFSET >= Slab::USED_BYTES

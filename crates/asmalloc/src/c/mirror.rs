@@ -1,5 +1,5 @@
 //! The copies, beside the slabs, of what the generated C frees read about the heap: its region
-//! shift and base index, one copy per family of frees (`front::Mirror`), and the class byte of
+//! shift and base index, and the class byte of
 //! each region that holds small blocks (`front::Front`, `docs/research/zen5-roofline.md` section
 //! 14). The routines read them at fixed distances from `SLABS` with no lookup of their own; the
 //! back end's region table and the published heap word stay the truth, which every slow path
@@ -11,35 +11,30 @@
 //! address; a zero class byte has a zero mask). So a copy may lag the truth, which costs a slow
 //! path, but it never disagrees with it in a harmful direction:
 //!
-//! - A mirror's shift and base index are written once, the base index first, from the published
+//! - The shift and base index are written once, the base index first, from the published
 //!   heap, which never changes for the life of the process (a forked child inherits both). A free
 //!   that sees the shift sees the base index too (stores are not reordered on x86-64, and the
 //!   shift's store is a release); one that sees only the base index computes an index of at
 //!   least the pointer's region number above zero minus the base's, far out of range.
-//! - C's mirror is written from the C allocation slow paths (`note`). The `delete` family's is
-//!   written only by `publish_delete`, which its slow paths call once they know the program's
-//!   basic `operator delete` is ours; if the program replaced it, the mirror stays zero and every
-//!   `delete` reaches the slow path, which forwards it.
+//! - They are written from the C allocation slow paths (`note`).
 //! - A region's byte is written only when a small block of that region has just been handed out
 //!   to C, so the region is assigned to that class and has blocks. The back end never takes a
 //!   region holding blocks from its class (it unassigns a region only when undoing an assignment
 //!   no block was ever carved from), so the class the copy names is the region's for as long as
-//!   any block of it can be freed. A region never named here reads zero. The frees of every
-//!   family share these bytes: a byte is only ever read after a mirror's index has put the
-//!   pointer in the heap.
+//!   any block of it can be freed. A region never named here reads zero.
 //!
 //! Each write is one relaxed or release store of a value every writer agrees on, so racing
 //! writers are harmless and no write needs a lock.
 
 use crate::classes::SmallClass;
-use crate::front::{Mirror, REGION_COUNT, SLABS};
+use crate::front::{REGION_COUNT, SLABS};
 use crate::heap::process;
 use core::sync::atomic::Ordering;
 
-/// Publishes the heap's shift and base index into `mirror`, if the heap has started, and returns
-/// them as `(shift, base index)`. Idempotent.
-fn publish(mirror: Mirror) -> Option<(u64, usize)> {
-    let (shift_word, base_word) = SLABS.published(mirror);
+/// Publishes the heap's shift and base index beside the slabs, if the heap has started, and
+/// returns them as `(shift, base index)`. Idempotent.
+fn publish() -> Option<(u64, usize)> {
+    let (shift_word, base_word) = SLABS.published();
     let shift = shift_word.load(Ordering::Acquire);
     if shift != 0 {
         return Some((shift, base_word.load(Ordering::Relaxed) as usize));
@@ -51,18 +46,9 @@ fn publish(mirror: Mirror) -> Option<(u64, usize)> {
     Some((u64::from(region_shift), base_index))
 }
 
-/// Lets the `delete` family's generated routines take their fast path: publishes their mirror.
-/// Call it only once it is known that the program's basic `operator delete` is ours (so that
-/// every pointer a `delete` form is given is one of our heap's or foreign, never one of a
-/// replacement allocator's built on ours); it is then harmless to call again. Before the heap
-/// starts it does nothing, and the next call publishes.
-pub(super) fn publish_delete() {
-    publish(Mirror::Delete);
-}
-
 /// Records that `block`, a small block of `class` just allocated for C, lives in its region.
 pub(super) fn note(block: *mut u8, class: SmallClass) {
-    let Some((shift, base_index)) = publish(Mirror::C) else {
+    let Some((shift, base_index)) = publish() else {
         return;
     };
     let index = (block.addr() >> shift).wrapping_sub(base_index);
@@ -90,7 +76,7 @@ mod tests {
             panic!("a small block");
         };
         note(block, class);
-        let (shift, base) = SLABS.published(Mirror::C);
+        let (shift, base) = SLABS.published();
         let (heap_base, region_shift) = process::layout().unwrap();
         assert_eq!(shift.load(Ordering::Relaxed), u64::from(region_shift));
         assert_eq!(
@@ -101,28 +87,6 @@ mod tests {
         assert_eq!(
             SLABS.regions()[index].load(Ordering::Relaxed),
             class.class().index()
-        );
-        // SAFETY: a live block, given up once.
-        unsafe { crate::c::free(block.cast()) };
-    }
-
-    #[test]
-    fn publishing_the_delete_mirror_copies_the_heap_words() {
-        let block = crate::c::malloc(48).cast::<u8>();
-        note(
-            block,
-            match process::find(block) {
-                Some(Found::Small(class)) => class,
-                _ => panic!("a small block"),
-            },
-        );
-        let (shift, base) = SLABS.published(Mirror::Delete);
-        publish_delete();
-        let (heap_base, region_shift) = process::layout().unwrap();
-        assert_eq!(shift.load(Ordering::Relaxed), u64::from(region_shift));
-        assert_eq!(
-            base.load(Ordering::Relaxed) as usize,
-            heap_base >> region_shift
         );
         // SAFETY: a live block, given up once.
         unsafe { crate::c::free(block.cast()) };

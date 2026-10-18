@@ -1405,6 +1405,44 @@ glibc's dispatch). Then 16-byte stores up to 512 bytes, as the stand-in uses, wh
 cycles slower than `memset` from 64 bytes up (21.4 against 13.5 at 256). Only the 32-byte
 threshold was faster than both at every size.
 
+### C++ new and delete without our operators (2026-10-17)
+
+The preload library exports no C++ operators. So a C++ program's `new` and `delete` run
+libstdc++'s, which call our `malloc` and `free` through libstdc++'s PLT. `cxxloop.cpp` calls
+`::operator new(n)` and `::operator delete(p, n)` as new and delete expressions do (the sized
+form gcc emits for a complete type), and the unsized form as `upair`. `compare.sh` runs it with
+`RF_PROG=cxxloop`. "asm + C++" adds a release build of
+`crates/asmalloc-preload/tests/programs/cxx_exports`, given as `ASMALLOC_CXX_LIB` (that library
+and the C++ operator layer were deleted after this measurement; the last commit that had them is
+58bf936). That library
+exports our deletes and nothrow `new`, but not the throwing `new`, which still comes from
+libstdc++. Pinned to CPU 12, sibling 28 idle over the run, best of 3 interleaved rounds. Cycles
+per new and delete:
+
+| | asm, no C++ | asm + C++ | mimalloc | tcmalloc per-CPU | jemalloc | glibc |
+|---|---:|---:|---:|---:|---:|---:|
+| pair 32 B, sized, PLT | 17.0 | 15.0 | 15.2 | 13.0 | 20.1 | 20.0 |
+| pair 256 B, sized, PLT | 17.0 | 15.0 | 17.0 | 13.2 | 20.9 | 20.0 |
+| pair 32 B, unsized, PLT | 16.0 | 15.0 | 12.3 | 13.0 | 19.1 | 19.0 |
+| burst 32, PLT | 19.2 | 16.1 | 15.5 | 13.4 | 22.3 | 44.2 |
+| burst 100 (64 B), PLT | 17.9 | 15.9 | 14.7 | 14.4 | 21.2 | 53.4 |
+| mixed 1 to 512 B, sized, PLT | 18.3 | 15.0 | 17.5 | 13.4 | 31.2 | 20.0 |
+| pair 32 B, sized, `call [GOT]` | 29.3 | 16.5 | 16.2 | 17.4 | 38.8 | 23.3 |
+| burst 32, `call [GOT]` | 20.4 | 18.8 | 19.5 | 18.1 | 23.3 | 45.5 |
+
+Per-thread tcmalloc measured 45 to 62.
+
+- Without the export we beat glibc and jemalloc in every loop. Through the PLT we trail
+  mimalloc by 2 to 4 cycles and per-CPU tcmalloc by 4 to 6. Under `call [GOT]` we trail both
+  by about 12 in pairs.
+- Exporting the deletes buys 1 to 3 cycles through the PLT and 13 in the `call [GOT]` pair.
+- Even then, the throwing `new` goes through libstdc++'s wrapper (its new-handler loop) and
+  then our `malloc` through its PLT. That leaves 15.0 against tcmalloc's 13.0, which exports
+  `new` itself.
+- Estimate, not measured: a full export, with a generated throwing `new` (c_malloc's code
+  leaving for a slow path that runs the new-handler and throws), would put the C++ pair near
+  our C pair, 10 to 11 cycles through the PLT. That would be ahead of every incumbent.
+
 ### Caveats
 
 - One process size and one CPU, single-threaded. The stand-in's slow paths are not the

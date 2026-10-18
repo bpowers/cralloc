@@ -27,9 +27,8 @@ What the preload setting adds:
   and `aligned_alloc`, its `delete` calls `free`. That is sound in every arrangement of
   libraries. Exporting only some operators is not: a library that defines them and is looked
   up after the preload library (Boehm GC's `libgccpp`) would get the program's `new` and we its
-  `delete`, and blocks that are not ours would reach us. The operators asmalloc can export
-  (`export_cxx_abi!`, `docs/safety/asmalloc/c/cxx-safety.md`) wait until the throwing `new`
-  forms can be exported too. `nm -D` of the built library shows no `_Zn` or `_Zd` symbol
+  `delete`, and blocks that are not ours would reach us. asmalloc has no C++ operators to
+  export. `nm -D` of the built library shows no `_Zn` or `_Zd` symbol
   (`every_cxx_operator_form_meets_its_cases_and_binds_to_the_cxx_runtime`).
 - **Before the library can be called.** The dynamic loader uses its own minimal allocator until
   it has relocated every object, the preload library included, and only then switches to the
@@ -54,8 +53,7 @@ What the preload setting adds:
 - **Unwinding.** The library is built with `panic = "abort"`. A panic reaches the panic handler,
   which ends the process through `Os::abort` (raw system calls, no allocation). Nothing the
   library calls can throw: the system call instruction, glibc's `__errno_location`, and the
-  compiler's `memcpy` and `memset`. (The C++ layer's calls of a new-handler and of a program's
-  operators, CXX-04 to CXX-07, are not reachable: the library exports no C++ operator.) So no
+  compiler's `memcpy` and `memset`. So no
   exception ever unwinds out through the library's frames.
 
 ## PRELOAD-02: `#[unsafe(no_mangle)] extern "C" fn asmalloc_preload_no_unwinding`, and the binding of `rust_eh_personality` to it

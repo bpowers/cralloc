@@ -74,7 +74,7 @@ theorem cCalloc_restartsOk : ∀ s s', (callocContract abi).pre s →
       rcases hr' with rfl | rfl <;> simp_all)
     (fun _ _ he => env_retC Calloc.hX he)
 
-/-! The frees, for each mirror (`Mirror`): C's, and the `delete` family's. -/
+/-! The frees, for any mirror (`Mirror`). -/
 
 theorem cFree_verified (m : Mirror) :
     Verified target (cFree m) (freeContract (target.abi.withConsts []) m) := by

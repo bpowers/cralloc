@@ -5,7 +5,7 @@ public import Asmalloc.Proof.Framework.Registration
 
 /-! # The C entry points on x86-64
 
-`c_malloc`, `c_calloc`, `c_free` and `c_free_sized`, and `c_delete` and `c_delete_sized`, out of line (`x86_64`), each a
+`c_malloc`, `c_calloc`, `c_free` and `c_free_sized` out of line (`x86_64`), each a
 naked function that tail-calls its slow path, and each also exported as the
 C symbols its `Api` names (`Api.exports`). One form only, reading glibc's
 `__rseq_offset` through its GOT slot: the exported copies are expanded in
@@ -43,19 +43,6 @@ def artifacts : List Artifact := [
     verified := cFreeSized_verified .c
     restartsOk := cFreeSized_restartsOk .c
     witnesses := FreeWit.S.witnesses .c
-    witnessOk := cFreeSized_witnessOk .c },
-  -- The same code with the `delete` family's mirror, leaving for its slow paths.
-  deleteApi.artifact VG.X86_64.target {
-    code := cFree .delete
-    verified := cFree_verified .delete
-    restartsOk := cFree_restartsOk .delete
-    witnesses := FreeWit.F.witnesses .delete
-    witnessOk := cFree_witnessOk .delete },
-  deleteSizedApi.artifact VG.X86_64.target {
-    code := cFreeSized .delete
-    verified := cFreeSized_verified .delete
-    restartsOk := cFreeSized_restartsOk .delete
-    witnesses := FreeWit.S.witnesses .delete
-    witnessOk := cFreeSized_witnessOk .delete }]
+    witnessOk := cFreeSized_witnessOk .c }]
 
 end VG.Artifacts.CEntry.X86_64

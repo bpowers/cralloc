@@ -82,14 +82,10 @@ fn run_with(lib: Option<&Path>, command: &mut Command) -> Output {
     command.output().expect("the program starts")
 }
 
+/// The program's output, after checking it is the same with the library preloaded as without.
 fn same_with_and_without(make: impl Fn() -> Command) -> String {
-    same_with_and_without_lib(&library(), make)
-}
-
-/// The program's output, after checking it is the same with `lib` preloaded as without.
-fn same_with_and_without_lib(lib: &Path, make: impl Fn() -> Command) -> String {
     let plain = run_with(None, &mut make());
-    let preloaded = run_with(Some(lib), &mut make());
+    let preloaded = run_with(Some(&library()), &mut make());
     assert!(
         preloaded.status.success(),
         "preloaded run failed: {:?}\n{}",
@@ -181,15 +177,6 @@ fn a_pointer_that_is_not_a_block_the_slow_path_checks_aborts() {
     }
 }
 
-/// The four throwing forms of `new`, which only the C++ runtime can serve today, because they
-/// must throw `std::bad_alloc`.
-const THROWING_NEW: [&str; 4] = [
-    "_Znwm",
-    "_Znam",
-    "_ZnwmSt11align_val_t",
-    "_ZnamSt11align_val_t",
-];
-
 /// Where the dynamic loader bound each C++ allocation operator `exe` calls with `lib`
 /// preloaded, by its own report: (operator, whether it bound to `lib`), each once.
 fn operator_bindings(lib: &Path, exe: &Path) -> std::collections::BTreeMap<String, bool> {
@@ -247,64 +234,6 @@ fn every_cxx_operator_form_meets_its_cases_and_binds_to_the_cxx_runtime() {
     );
 }
 
-/// The C++ operators as built for when all of them can be exported: a shared library that
-/// exports them with the C functions (`tests/programs/cxx_exports`), built once per test run.
-fn cxx_exports() -> PathBuf {
-    static LIB: OnceLock<PathBuf> = OnceLock::new();
-    LIB.get_or_init(|| {
-        let (status, lib) = build_library("cxx_exports", "cxx_exports");
-        assert!(status.success(), "building the C++ exports");
-        lib
-    })
-    .clone()
-}
-
-/// The libraries the C++ cases run with: the preload library, and the C++ exports.
-fn cxx_libraries() -> [PathBuf; 2] {
-    [library(), cxx_exports()]
-}
-
-#[test]
-fn the_cxx_exports_meet_every_case_and_bind_where_they_should() {
-    let exe = program("cxx_operators.cpp");
-    let lib = cxx_exports();
-    let out = same_with_and_without_lib(&lib, || Command::new(&exe));
-    assert!(!out.contains("FAIL"), "{out}");
-    let bound = operator_bindings(&lib, &exe);
-    let (ours, runtime): (Vec<_>, Vec<_>) = bound.iter().partition(|&(_, &ours)| ours);
-    assert_eq!(ours.len(), 16, "{bound:?}");
-    assert_eq!(runtime.len(), 4, "{bound:?}");
-    assert!(
-        runtime
-            .iter()
-            .all(|(name, _)| THROWING_NEW.contains(&name.as_str())),
-        "{bound:?}"
-    );
-}
-
-/// Builds the crate in `tests/programs/<dir>`, a shared library outside the workspace, and
-/// returns the build's status and where the library is.
-fn build_library(dir: &str, name: &str) -> (std::process::ExitStatus, PathBuf) {
-    let target = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join(format!("{dir}-build"));
-    let cargo = std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
-    let output = Command::new(cargo)
-        .args(["build", "--quiet", "--manifest-path"])
-        .arg(
-            Path::new(env!("CARGO_MANIFEST_DIR"))
-                .join("tests/programs")
-                .join(dir)
-                .join("Cargo.toml"),
-        )
-        .arg("--target-dir")
-        .arg(&target)
-        .output()
-        .expect("cargo runs");
-    (output.status, target.join(format!("debug/lib{name}.so")))
-}
-
-/// A shared object that holds the allocator must never be unloaded: a thread's `rseq_cs` goes
-/// on naming a descriptor inside it, and the kernel reads that at the thread's next
-/// preemption. The library is linked `-z nodelete` for that (`build.rs`).
 #[test]
 fn the_library_is_marked_never_to_be_unloaded() {
     let out = Command::new("readelf")
@@ -322,60 +251,35 @@ fn the_library_is_marked_never_to_be_unloaded() {
 }
 
 /// A C++ program with a malloc of its own. Its `new` and `delete` are the C++ runtime's, on
-/// its `malloc`, under the preload library; with the C++ exports their `delete` hands a
-/// pointer outside the heap to the program's `free`.
+/// its `malloc`, under the preload library.
 #[test]
 fn a_cxx_program_with_its_own_malloc_runs() {
     let exe = program("own_malloc.cpp");
-    for lib in cxx_libraries() {
-        let out = same_with_and_without_lib(&lib, || Command::new(&exe));
-        assert_eq!(out.trim(), "99500");
-    }
+    let out = same_with_and_without(|| Command::new(&exe));
+    assert_eq!(out.trim(), "99500");
 }
 
 /// A program that replaces only `operator new(size_t)` and `operator delete(void*)`, which the
 /// standard says is enough. Its blocks sit inside our heap (its `new` is our `malloc` plus a
 /// header). Under the preload library every other form is the C++ runtime's, which forwards to
-/// the program's; the C++ exports must do the same, forward every pointer to the program's
-/// `delete` and hand nothrow `new` to the runtime's.
+/// the program's.
 #[test]
 fn a_cxx_program_with_its_own_operator_new_runs() {
     let exe = program("own_new.cpp");
-    for lib in cxx_libraries() {
-        for mode in ["array", "sized", "matching", "empty", "nothrow"] {
-            let out = same_with_and_without_lib(&lib, || {
-                let mut c = Command::new(&exe);
-                c.arg(mode);
-                c
-            });
-            assert_eq!(out.trim(), format!("{mode}: live 0"), "{}", lib.display());
-        }
-    }
-}
-
-/// The C++ export is documented as needing the C export, and the macro makes that a build
-/// error.
-#[test]
-fn the_cxx_export_without_the_c_export_does_not_build() {
-    let (status, library) = build_library("cxx_only", "cxx_only");
-    if status.success() {
-        let exe = program("cxx.cpp");
-        let out = Command::new(&exe)
-            .env("LD_PRELOAD", &library)
-            .output()
-            .expect("the program starts");
-        panic!(
-            "the crate built; a C++ program run with it: {:?}\n{}",
-            out.status,
-            String::from_utf8_lossy(&out.stderr)
-        );
+    for mode in ["array", "sized", "matching", "empty", "nothrow"] {
+        let out = same_with_and_without(|| {
+            let mut c = Command::new(&exe);
+            c.arg(mode);
+            c
+        });
+        assert_eq!(out.trim(), format!("{mode}: live 0"));
     }
 }
 
 /// A program that replaces all four basic operators and tells scalar blocks from array blocks
 /// (a checker for `new`/`delete[]` mismatches does). The standard's defaults send the array
-/// forms to `operator new[]` and `operator delete[]`; the C++ exports sent them to the scalar
-/// pair. With no operator exported, the program gets the runtime's defaults.
+/// forms to `operator new[]` and `operator delete[]`. With no operator exported, the program
+/// gets the runtime's defaults.
 #[test]
 fn a_program_with_its_own_array_operators_gets_them_from_the_array_forms() {
     let exe = program("tagged_new.cpp");
