@@ -175,9 +175,10 @@ pub unsafe trait Os: Sync {
     /// A count that rises with wall-clock time, read without a system call: the CPU's
     /// timestamp counter on Linux, a clock the test advances in the simulators. Its rate is not
     /// known (on x86-64 it is somewhere between 1 and 6 GHz), and nothing promises that two
-    /// CPUs agree or that it never goes back. It paces the idle check and nothing else, so no
-    /// promise of this trait's safety contract depends on it: a wrong count only makes a drain
-    /// come sooner or later.
+    /// CPUs agree or that it never goes back. It paces what happens once an interval: the idle
+    /// check's drains and the back end's clocked purge, both read on slow paths. No promise of
+    /// this trait's safety contract depends on it: a wrong count only makes a drain or a purge
+    /// pass come sooner or later, and both are safe at any time.
     fn ticks(&self) -> u64;
 
     /// Writes `message` to standard error and ends the process abnormally.
