@@ -1,8 +1,8 @@
 //! asmalloc as an `LD_PRELOAD` library: `LD_PRELOAD=libasmalloc_preload.so program` runs any
 //! dynamically linked program with asmalloc as its `malloc`.
 //!
-//! The library is the allocator crate and the C names and C++ operators it exports
-//! (`asmalloc::export_c_abi!`, `asmalloc::export_cxx_abi!`), nothing more. It has no
+//! The library is the allocator crate and the C names it exports (`asmalloc::export_c_abi!`),
+//! nothing more; C++ reaches it through its runtime's calls to `malloc` and `free`. It has no
 //! constructor and no destructor and keeps no thread state, so it works
 //! from the dynamic loader's first call of `malloc` (after relocation, when glibc has already
 //! registered rseq for the main thread) to the last `free` of the last thread, and in a forked
@@ -22,11 +22,10 @@
 use asmalloc::os::Os;
 use asmalloc::os::linux::LinuxOs;
 
+// Only the C names. The C++ operators stay the C++ runtime's, which calls this `malloc` and
+// `free`: exporting some of them without the throwing `new` forms is unsound when another
+// library defines the operators (design: "Interfaces", C++).
 asmalloc::export_c_abi!();
-// C++ programs then allocate without going through `malloc`, and their sized deletes arrive
-// with the size. The library needs no C++ runtime of its own: it looks up the new-handler
-// only when an allocation fails.
-asmalloc::export_cxx_abi!();
 
 // The library has no Rust allocations of its own, but cargo unifies features across the
 // workspace, and one that pulls in the `alloc` crate (the test kit's `sim`) would then need a
