@@ -203,7 +203,7 @@ impl<'os, O: Os> Space<'os, O> {
     /// [`Space::is_callable_range`] accepts.
     pub fn commit(&self, start: NonNull<u8>, len: usize) -> Result<(), OsError> {
         self.check(start, len);
-        // SAFETY: `check` returned, so the range is a non-empty, page-aligned run of whole pages
+        // SAFETY: RESERVATION-01. `check` returned, so the range is a non-empty, page-aligned run of whole pages
         // inside this reservation, which `self.os` made and which is live by the type's
         // invariant.
         unsafe { self.os.commit(start, len) }
@@ -218,7 +218,7 @@ impl<'os, O: Os> Space<'os, O> {
         advice: HugePages,
     ) -> Result<(), OsError> {
         self.check(start, len);
-        // SAFETY: as in `commit`.
+        // SAFETY: RESERVATION-01. as in `commit`.
         unsafe { self.os.advise_huge(start, len, advice) }
     }
 
@@ -226,7 +226,7 @@ impl<'os, O: Os> Space<'os, O> {
     /// is not one [`Space::is_callable_range`] accepts.
     pub fn wipe_on_fork(&self, start: NonNull<u8>, len: usize) -> Result<(), OsError> {
         self.check(start, len);
-        // SAFETY: as in `commit`; the call changes nothing in this process.
+        // SAFETY: RESERVATION-01. as in `commit`; the call changes nothing in this process.
         unsafe { self.os.wipe_on_fork(start, len) }
     }
 
@@ -238,7 +238,7 @@ impl<'os, O: Os> Space<'os, O> {
     /// No thread reads or writes the range during the call, and nothing in it is needed.
     pub unsafe fn purge(&self, start: NonNull<u8>, len: usize) -> Result<(), OsError> {
         self.check(start, len);
-        // SAFETY: the range is valid as in `commit`; the caller promises nothing uses its
+        // SAFETY: RESERVATION-02. the range is valid as in `commit`; the caller promises nothing uses its
         // contents or touches it during the call.
         unsafe { self.os.purge(start, len) }
     }
@@ -251,7 +251,7 @@ impl<'os, O: Os> Space<'os, O> {
     /// call begins. In particular it must not be a space a [`SpaceCell`] has published; the
     /// cell unmaps that one itself when it is dropped.
     pub unsafe fn unmap(self) -> Result<(), OsError> {
-        // SAFETY: the whole reservation is a page-aligned, non-empty range of itself (the plan's
+        // SAFETY: RESERVATION-03. the whole reservation is a page-aligned, non-empty range of itself (the plan's
         // size is a whole number of pages), live by the invariant; the caller promises that
         // nothing uses it afterwards.
         unsafe { self.os.unmap(self.base, self.plan.size()) }
@@ -376,7 +376,7 @@ impl<O: Os> SpaceCell<O> {
                 // returns on the first pass.
                 Err(current) => {
                     if let Some(current) = NonNull::new(current) {
-                        // SAFETY: `mine` was never published, so no other thread has its
+                        // SAFETY: RESERVATION-04. `mine` was never published, so no other thread has its
                         // address, and this thread drops it here. A failed unmap leaves the
                         // range reserved, which wastes address space and nothing else.
                         let _ = unsafe { mine.unmap() };
@@ -412,7 +412,7 @@ impl<O: Os> Drop for SpaceCell<O> {
     fn drop(&mut self) {
         if let Some(word) = NonNull::new(*self.word.get_mut()) {
             let space = self.decode(word);
-            // SAFETY: `&mut self` means no `Space` borrowed from this cell is alive, and none
+            // SAFETY: RESERVATION-05. `&mut self` means no `Space` borrowed from this cell is alive, and none
             // can be made after the drop, so nothing uses the reservation again. It is this
             // cell's own published space, which the unmap contract allows only here, where
             // the cell itself is going away.

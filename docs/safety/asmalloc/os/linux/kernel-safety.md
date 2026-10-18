@@ -146,19 +146,6 @@ first thread to finish its handler ends the process under every other thread's
 getpid, gettid, tgkill and exit_group here and getpid in `random`, none of which takes a
 pointer.
 
-## KERNEL-08: `protect_none`
-
-**Block.** `range_call(MPROTECT, start, len, PROT_NONE)`, built only for tests and the `sim`
-feature; the allocator never calls it.
-
-**Preconditions** (its `# Safety`). Whole pages of a live `LinuxOs` reservation, which nothing
-reads or writes afterwards until it is committed again.
-
-**Proof.** As KERNEL-01, with the protection lowered instead of raised: mprotect keeps the
-contents and changes only access, and since nothing touches the range until it is committed
-again, no Rust access can fault on it except a bug's, which is what the simulator's guarded
-memory exists to expose (SIM-MEMORY-06). Its one caller is `Memory::close`.
-
 ## KERNEL-09: `ticks`
 
 **Block.** `core::arch::x86_64::_rdtsc()`.
@@ -226,12 +213,5 @@ single call:
   `abort_runs_the_programs_handler_then_ends_the_process_anyway` and
   `an_abort_inside_the_handler_ends_the_process`: child processes, checking the signal, the
   message, that a returning handler ran, and that a handler that aborts runs once.
-
-**Review.** 2026-10-17, fresh adversarial reviewer: KERNEL-01 to KERNEL-07 accepted, after
-the fixes of its first round. Its second round found that a child forked mid-abort parked for
-ever, that a waiting thread could hang the process, and that the glibc comparison and
-KERNEL-09 were wrong or stale; KERNEL-09 was rewritten for those and needs the same reviewer's
-check. KERNEL-06 was since rewritten for a simpler `abort` with no shared state, and needs a
-fresh review.
 
 Reviewed: f41dbf9

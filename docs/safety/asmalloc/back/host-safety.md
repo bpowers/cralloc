@@ -82,10 +82,4 @@ fit the block (`layouts_fit_*`) and the leaf commit covers the carved slots
 (`leaf_commits_cover_the_committed_slots`); a Kani run of the protocols on a heap does not fit
 the memory cap, so the access paths are tested, not proved.
 
-**Review.** 2026-10-17, fresh adversarial reviewer: the argument was accepted; the machine
-checks were found to overstate (no test could see an uncommitted access). Fixed with commit
-tracking, first in the test host and now in the simulator itself, which a deleted leaf commit
-fails. The same reviewer checked the first fix and accepted it; the move to the simulator's
-check has not been reviewed.
-
 Reviewed: f41dbf9

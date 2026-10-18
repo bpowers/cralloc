@@ -2,27 +2,44 @@
 """Checks the safety ledger's IDs against the code (CLAUDE.md, "Correctness rules").
 
 An entry is a heading in docs/safety/**/*-safety.md that starts with its ID, such as
-`## KERNEL-06: ...`. An ID is upper-case words joined by hyphens and a two-digit number.
+`## KERNEL-06: ...`. An ID is upper-case words joined by hyphens and a two-digit number. A
+ledger file `docs/safety/<crate>/<path>-safety.md` covers `crates/<crate>/src/<path>.rs`.
 
-Fails if an ID cited in the code under crates/ names no entry, or if two entries share an ID.
-Prints, without failing for now, the entries no code cites and the ledger files with no
-`Reviewed: <commit>` line.
+Fails if an ID cited in the code under crates/ names no entry, if two entries share an ID, or
+if no code cites an entry. Prints, without failing, the ledger files with no
+`Reviewed: <commit>` line, and those whose source file has changed since that commit.
 
 Usage: scripts/ledger-check
 """
 
 import pathlib
 import re
+import subprocess
 import sys
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 ID = re.compile(r"(?<![A-Za-z0-9-])[A-Z]+(?:-[A-Z]+)*-[0-9]{2}(?![0-9])")
 HEADING = re.compile(r"^#+\s+(" + ID.pattern + r")", re.M)
-REVIEWED = re.compile(r"^Reviewed: [0-9a-f]{7,40}\b", re.M)
+REVIEWED = re.compile(r"^Reviewed: ([0-9a-f]{7,40})\b", re.M)
 
 
 def rel(path: pathlib.Path) -> str:
     return str(path.relative_to(ROOT))
+
+
+def source_of(ledger: pathlib.Path) -> pathlib.Path:
+    crate, *rest = ledger.relative_to(ROOT / "docs/safety").parts
+    name = "/".join(rest).removesuffix("-safety.md") + ".rs"
+    return ROOT / "crates" / crate / "src" / name
+
+
+def changed_since(commit: str, source: pathlib.Path) -> bool | None:
+    """Whether `source` differs from what it was at `commit` (None: git could not tell)."""
+    run = subprocess.run(
+        ["git", "-C", str(ROOT), "diff", "--quiet", commit, "--", rel(source)],
+        capture_output=True,
+    )
+    return {0: False, 1: True}.get(run.returncode)
 
 
 def main() -> int:
@@ -42,20 +59,38 @@ def main() -> int:
                 if match.group(0) not in defined:
                     unknown.append(f"{rel(path)}:{number}: {match.group(0)}")
 
-    uncited = sorted(i for i in defined if i not in cited)
-    if uncited:
-        print(f"ledger-check: {len(uncited)} entries no code cites:")
-        for i in uncited:
-            print(f"  {i} ({', '.join(map(rel, defined[i]))})")
-    unreviewed = [p for p in ledgers if not REVIEWED.search(p.read_text())]
+    unreviewed, stale = [], []
+    for ledger in ledgers:
+        found = REVIEWED.search(ledger.read_text())
+        if not found:
+            unreviewed.append(ledger)
+            continue
+        source = source_of(ledger)
+        changed = changed_since(found.group(1), source) if source.exists() else None
+        if changed is not False:
+            note = "changed" if changed else "cannot compare"
+            stale.append(f"{rel(ledger)} ({note}: {rel(source)} since {found.group(1)})")
     if unreviewed:
         print(f"ledger-check: {len(unreviewed)} of {len(ledgers)} ledger files have no "
-              "'Reviewed: <commit>' line")
+              "'Reviewed: <commit>' line:")
+        for ledger in unreviewed:
+            print(f"  {rel(ledger)}")
+    if stale:
+        print(f"ledger-check: {len(stale)} reviewed ledger files whose code changed since:")
+        for line in stale:
+            print(f"  {line}")
+
     failed = 0
     twice = sorted(i for i, files in defined.items() if len(files) > 1)
     if twice:
         print("ledger-check: IDs defined more than once:")
         for i in twice:
+            print(f"  {i} ({', '.join(map(rel, defined[i]))})")
+        failed = 1
+    uncited = sorted(i for i in defined if i not in cited)
+    if uncited:
+        print("ledger-check: entries no code cites:")
+        for i in uncited:
             print(f"  {i} ({', '.join(map(rel, defined[i]))})")
         failed = 1
     if unknown:

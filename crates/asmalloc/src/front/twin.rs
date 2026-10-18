@@ -14,8 +14,13 @@
 //! twin can be interrupted, as the step before an instruction is the only place a sequence can
 //! be, so nothing can slip in between a step's check and its access. On threads that run freely
 //! the machine keeps a fence out of that gap instead, which is why a twin tells it when its
-//! magazine access and its commit are done (`Machine::accessed`, `Machine::committed`). The ledger for the unsafe blocks here is
-//! `docs/safety/asmalloc/front/twin-safety.md`.
+//! magazine access and its commit are done (`Machine::accessed`, `Machine::committed`).
+//!
+//! The unsafe blocks turn a slab word or a spare head into an atomic view of a magazine slot.
+//! They rest on the slab invariant (S) (`docs/safety/asmalloc/front/real-safety.md`): a hot word
+//! that is neither zero nor a marker names slot 1 to `n - 1` of a committed magazine of its
+//! class, and a spare head or link that is not zero names slot 0 of one. Twins are test
+//! scaffolding, so these blocks have no ledger entries of their own.
 
 use super::routines::{Routines, StackPop, StackPush, StoreIfEqual};
 use super::slab::{Cpu, Field, Slabs};
@@ -70,7 +75,8 @@ impl<'a, M: Machine> Twin<'a, M> {
         }
         self.machine.step(Step::Access)?;
         let top = word.wrapping_byte_sub(SLOT_BYTES);
-        // SAFETY: TWIN-01.
+        // SAFETY: `word` passed `alloc_slow`, so by (S) it is slot `s >= 2` of a committed
+        // magazine, and `top` is slot `s - 1` of the same magazine, aligned to 8.
         let object = unsafe { slot(top) }.load(Relaxed);
         self.machine.accessed();
         self.machine.step(Step::Commit)?;
@@ -90,7 +96,8 @@ impl<'a, M: Machine> Twin<'a, M> {
             return Ok(false);
         }
         self.machine.step(Step::Access)?;
-        // SAFETY: TWIN-01.
+        // SAFETY: `word` passed `free_slow`, so by (S) it is slot `s <= n - 2` of a committed
+        // magazine, aligned to 8.
         unsafe { slot(word) }.store(object.as_ptr(), Relaxed);
         self.machine.accessed();
         self.machine.step(Step::Commit)?;
@@ -131,7 +138,8 @@ impl<'a, M: Machine> Twin<'a, M> {
             return Ok(StackPush::Marker);
         }
         self.machine.step(Step::Access)?;
-        // SAFETY: TWIN-02. `stack_push`'s caller promises `magazine` is a magazine it holds.
+        // SAFETY: `stack_push`'s caller promises `magazine` is slot 0 of a committed magazine
+        // it holds.
         unsafe { slot(magazine.as_ptr()) }.store(head, Relaxed);
         self.machine.accessed();
         self.machine.step(Step::Commit)?;
@@ -151,7 +159,8 @@ impl<'a, M: Machine> Twin<'a, M> {
             return Ok(StackPop::Empty);
         };
         self.machine.step(Step::Access)?;
-        // SAFETY: TWIN-03.
+        // SAFETY: `head` is neither zero nor a marker, so by (S) it is slot 0 of a committed
+        // magazine.
         let next = unsafe { slot(head) }.load(Relaxed);
         self.machine.accessed();
         self.machine.step(Step::Commit)?;

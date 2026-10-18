@@ -41,12 +41,6 @@ complete their misses through `c_alloc_small` and `c_free_small`, so through thi
 the slow paths and drain of a `Cache` made from a `Bound`. The only `Bound` with `Real` is
 `process()`'s, and its heap is always `HEAP`, the one `static` heap over Linux.
 
-**A simulated heap** (`unsafe { Bound::new(&self.heap, routines) }` in `SimHeap::with`). The
-routines are twins (`SimRoutines`) on `self.slabs`, a box the `SimHeap` owns, never hands out
-and pairs with `self.heap`, which it also owns, for the life of the value; every `Bound` with
-those slabs is made here, with that heap. Which simulated thread the twins run on (the lease)
-is SIM-01's concern, not (B)'s.
-
 ## HEAP-03: `write_bytes(0, n)` on a new block (`grant_small` here, `alloc_large` in `large.rs`)
 
 **Preconditions.** The `n` bytes at the pointer are valid for writes, and nothing else reads or

@@ -1704,8 +1704,6 @@ fn a_sparse_block_stays_sparse_when_it_moves() {
 /// keep what the destination's last owner left there.
 #[test]
 #[cfg_attr(miri, ignore)]
-#[ignore = "fails: a moved block keeps the destination's old bytes where the source was zero, \
-            when the destination's purge fails"]
 fn a_block_moved_into_a_dirty_slot_arrives_whole_when_purges_fail() {
     let state = state::<Native>();
     let back = state.get_or_reserve().unwrap();

@@ -121,7 +121,7 @@ themselves; nothing records them as holding the old contents.
 
 **Tests.** `a_large_slot_that_shrinks_in_place_returns_its_tail`,
 `a_run_that_shrinks_in_place_returns_its_tail`, and through C
-`realloc_shrinking_a_large_block_returns_its_tail`. Awaiting review.
+`realloc_shrinking_a_large_block_returns_its_tail`.
 
 ## BACK-CLASS-03: the copies and purges in `move_large_with`
 
@@ -149,20 +149,17 @@ report) and C's `realloc` (MOD-01, which passes `false`), and both hold both blo
    than a piece, so it is a large slot or a run, whole pages; it starts at most a stagger,
    under a page, past its slot's first page, and `into + len` fits the slot, so the pages
    are the caller's slot's own; nothing else uses it and its contents are not
-   needed, which is `Space::purge`'s precondition. Afterwards it reads as zero. If the purge
-   fails nothing is known to be zero, but nothing relies on the failure path either: see the
-   skip below.
+   needed, which is `Space::purge`'s precondition. If the purge succeeds the range reads as
+   zero. It can fail: `MADV_DONTNEED` returns `EINVAL` on locked memory, so in a process that
+   called `mlockall` it fails every time. The result is kept as `zero_to`: true if the caller
+   said `zeroed` or the purge succeeded, false otherwise.
 1. *The copies.* Each copies at most a page at offset `at` with `at + n <= len`, inside both
    ranges, and the bytes read have not been returned: a part of `from` goes back only after
    the piece that covers it has been copied, and the range past `len` goes back only after
-   the last copy. A page is skipped only when every byte of it in `from` is zero, and then
-   `to` already reads as zero there, either because the caller said so or because of step 0.
-   A failed destination purge would leave stale bytes in skipped pages: a wrong value in the
-   caller's new block, not a memory error. The destination purge can fail: `MADV_DONTNEED`
-   returns `EINVAL` on locked memory, so in a process that called `mlockall` it fails every
-   time, and the code ignores the result. The ignored test
-   `a_block_moved_into_a_dirty_slot_arrives_whole_when_purges_fail` shows the stale bytes.
-   Until the copy stops skipping pages after a failed purge, this entry is not accepted.
+   the last copy. A page is skipped only when `zero_to` holds and every byte of it in `from`
+   is zero, and then `to` already reads as zero there, because the caller said so or because
+   step 0's purge succeeded. When the purge failed every page is copied, so no stale byte of
+   `to` survives (`a_block_moved_into_a_dirty_slot_arrives_whole_when_purges_fail`).
 2. *The purges.* Pieces end at multiples of the piece in the address space. Each range is
    either a part already copied that ends at such a multiple (`into + done` rounded down to a
    page, to `into + boundary`: `done` is zero, which rounds down to the slot's start and so
@@ -196,8 +193,7 @@ The double-free cases are those of BACK-CLASS-01, with the copy added to the win
 `a_zeroed_grow_into_a_dirty_slot_reads_as_zero_past_what_it_kept`,
 `an_advised_slot_is_purged_only_in_whole_huge_pages` (a block that does not start on a
 piece boundary); the heap's and the C layer's `realloc` tests move large blocks through it
-with contents checked. Pieces on address boundaries, the trimming in `purge_part`, and the
-zero-page skip with its destination purge: awaiting review.
+with contents checked.
 
 ## BACK-CLASS-04: `is_zero`, `mostly_data` and `grown_into`
 
@@ -218,4 +214,4 @@ returned; and `resize_in_place`, on the last piece of a growing block's first `o
 (BACK-CLASS-02). So the slice is valid for its lifetime, the call.
 Any bit pattern is a valid `u8` and a valid `u64`, and `align_to` places in its middle part
 only whole, aligned `u64`s within the slice. Reading a page that was never written maps the
-kernel's shared zero page; it changes no contents. Awaiting review.
+kernel's shared zero page; it changes no contents.

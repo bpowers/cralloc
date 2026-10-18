@@ -51,7 +51,7 @@ below are those sections, discharged once here for every call in the file.
   thread's static TLS (FRONT-01, `front/area-safety.md`), neither inside `SLABS`, a static of its
   own. The stack is the thread's own. None of them is at the top of the address space (user
   space ends far below it on x86-64).
-- (S): the slab invariant of `front/twin-safety.md`, which every writer of a slab keeps:
+- (S): the slab invariant (below), which every writer of a slab keeps:
   the routines themselves (proved in Lean), the slow paths through `store_if_equal` and
   `stack_push` (DEPOT-SLOW-01, SPARE-01), and the drain. `Real` changes nothing about that argument:
   it is the same specification with the same writers. `Real` is private to the crate, and
@@ -60,6 +60,61 @@ below are those sections, discharged once here for every call in the file.
   crate can write these slabs, with a twin or otherwise. The C entry points' routines, which
   also write them, are proved in Lean to the same invariant for every class byte
   (`c/routines-safety.md`).
+
+## The slab invariant (S)
+
+Shipping entries cite this statement (REAL above, GLOBAL-01, HEAP-SOURCE-01, AGE-01, CACHE-01).
+For every CPU with a slab and every small class:
+
+- the hot word is zero, a marker (`classes::is_marker`), or the address of slot `s`, with
+  `1 <= s <= n - 1`, of a magazine of the class's size `n` that lies in committed magazine
+  memory; and
+- each spare head, and the link (slot 0) of each magazine on a spare stack, is zero or the slot-0
+  address of a magazine of the class's size in committed magazine memory. Never a marker below
+  the head: `stack_push` refuses to push onto a marker, so a link is always the head it saw,
+  which was zero or a magazine.
+
+Committed magazine memory stays mapped and writable for the life of the reservation (the `Os`
+contract; nothing in the crate purges or unmaps the magazine area), and every access to a
+magazine slot anywhere in the crate is atomic.
+
+**Why (S) holds.** Outside the crate, nothing can write a slab field: `Slab::field` is
+crate-private, and the only public ways in are the routines. Of those, pop and push keep (S)
+by themselves (below); store-if-equal and stack push are `unsafe fn`s whose contracts require
+exactly the values (S) allows, so a caller that breaks (S) has broken an unsafe contract. Writers
+of slab fields are:
+
+- the routines' commits (and in tests the twins', which follow the same specifications): pop
+  stores `w - 8` only when `w & mask != 0`, so `s >= 2` and the new slot is `s - 1 >= 1`; push
+  stores `w + 8` only when `(w + 8) & mask != 0`, so `s <= n - 2` and the new slot is at most
+  `n - 1`. `classes::verify` proves both tests for every size, address and marker. The stack
+  routines store a magazine address the slow path holds (below) or the link they read, which
+  (S) covers;
+- store-if-equal, whose contract requires `new` to keep (S). The crate's only callers
+  (DEPOT-SLOW-01) pass `Magazine::word(level)` with `level <= capacity`, so slot `level + 1` in
+  `1..=n - 1` of a `Magazine` handle;
+- the drain, which stores its marker, zero, or (in back-out) a value it exchanged out of the same
+  field, with markers mapped to zero.
+
+Spare-stack links (slot 0 of a magazine on a spare stack) are written only by the stack push
+that put the magazine there, and by whoever holds the magazine's handle: the depot stacks write
+slot 0 through `Magazine::link`, and `Magazine::set_object` refuses slot 0 and the last slot.
+Magazines, the magazine area and the depot stacks are crate-private, so outside the crate no
+handle can be had at all, and no stack can be given a magazine of the wrong size or another
+heap's. Inside the crate a handle is made only by the thread that took the magazine off a stack,
+out of a slab word, or out of the area, with the size of the stack or class it came from, and
+that thread then owns it (DEPOT-SLOW-01, SPARE-01, the drain's step 4).
+
+The slow paths that write a slab array all hold the one depot and space that array is used
+with (`Cache::new`'s contract, CACHE-01 in `depot/mod-safety.md`), so every magazine a slab
+word or link names is in that space's area, and admitted by that depot's committed mark.
+
+A `Magazine` handle exists only for an offset `magazine::admits` accepted: past the generation
+page, aligned to its size and inside the committed bytes (`depot::verify::
+an_admitted_magazine_lies_inside_the_committed_area`). The magazine area itself is aligned to
+at least the largest magazine (`Geometry::magazine_area_align`), so an aligned offset is an
+aligned address. So every magazine address the slow paths give a routine is in committed memory,
+and so is every value derived from one.
 
 ## REAL-01: the inlined routines (`slab_pop`, `slab_push`, `current_cpu`)
 

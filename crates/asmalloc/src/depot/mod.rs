@@ -191,7 +191,7 @@ impl<'a, O: Os, R: Routines, S: Source> Cache<'a, O, R, S> {
     /// of `routines` only with this depot and space (its words name that area's magazines).
     /// The heap's one static depot, slab array and published space meet this by construction.
     pub unsafe fn new(depot: &'a Depot, space: Space<'a, O>, routines: R, source: &'a S) -> Self {
-        // SAFETY: the caller's promise, passed on.
+        // SAFETY: CACHE-01. the caller's promise, passed on.
         unsafe { Cache::with_tuning(depot, space, routines, source, Tuning::DEFAULT) }
     }
 
