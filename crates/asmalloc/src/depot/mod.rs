@@ -72,8 +72,9 @@ use crate::space::Space;
 use core::ptr::NonNull;
 
 /// The bytes of objects a class's depot stack holds before the heartbeat launders magazines
-/// back to the source, by default.
-pub const DEPOT_TARGET: usize = 256 << 10;
+/// back to the source, by default. Two magazine budgets, scaled with the budget when the
+/// budget sweep chose it (`docs/research/memory.md`, "Magazine budget").
+pub const DEPOT_TARGET: usize = 128 << 10;
 
 /// The limits on memory parked in caches, how often the heartbeat looks around, and which of
 /// the rules that return parked objects are on. Constants in the allocator; tests change them
