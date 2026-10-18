@@ -777,7 +777,7 @@ impl<'h, H: Host> Release<'h, H> {
         old == 0
     }
 
-    /// Leaf words `0..count` of `region`, for [`Release::leaf_bit_in`]: see [`Host::leaves`].
+    /// Leaf words `0..count` of `region`, for [`Release::leaf_bit_in`]: see [`Host::tree_words`].
     #[inline]
     pub(crate) fn leaves(&self, region: RegionId, count: u32) -> &'h [H::W] {
         self.host.tree_words(region, 0, count)

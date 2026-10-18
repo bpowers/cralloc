@@ -96,8 +96,9 @@ accesses that memory in a way that conflicts with a shared reference.
 3. *Accessible.* The caller's promise, as `Host::tree_words` states it.
    - A summary level (`level >= 1`) is in the fixed part of the block, committed before the
      region carries the class's tag (BACK-HOST-01, point 3). The caller,
-     `Release::summaries`, asks for level 1 only when the region's tree has one of its own
-     (height at least 1), so `level_words(1)` words of it exist in the layout.
+     `Release::summary_levels`, asks for each level from 1 up to the height of the region's
+     own tree and for no level above it, and for exactly `level_words(level)` words of each,
+     so every word it asks for exists in the layout.
    - The leaf bitmap (`level == 0`): `count` covers only slots below a watermark the caller
      read for this region. The one caller, a launder's scattered path (`release_words` in
      `back/class.rs`, through `Release::leaves`), passes `limit.div_ceil(64)` with `limit` the
