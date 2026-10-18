@@ -1644,6 +1644,35 @@ to 8.7; that case moved as much between runs of one build in earlier sessions (5
 8.8 to 9.7 at the end) and touches no large slot. `sparse_realloc.c` stays at 2 to 3 MiB
 resident after every grow, peaks within 0.3 MiB of main.
 
+### The grow loop's 40%: where the benchmark's loop lands
+
+2026-10-18, later. The 4 MiB grow-and-free loop measured 1,765k cycles a repetition on main
+`fa4a4e0` against 1,262k on `1868dd0` the session before. It is not the allocator. Built
+today from the same bench sources, every commit since measures the same, interleaved, five
+runs: `1868dd0` 1,770k, `40876e1` 1,765k, `5eb615b` 1,766k, `dc12be3` 1,767k, `fa4a4e0`
+1,765k, all with 0.8 faults, 4 `madvise` calls (two of each advice) and a 15.8 to 15.9 MiB
+peak a repetition. The binary built last session from `1868dd0` still runs at 1,263k.
+
+The two `1868dd0` binaries retire the same instructions (9.08e9 and 9.09e9) with the same
+branch, cache, TLB, op-cache and store-forwarding counts; 85% of the time is the benchmark's
+own `Vec::push` loop in `workload::main`, a chain of one store and one load of the length
+per element, and that loop is byte for byte the same in both. What differs is where it lands:
+a change to `bench/workloads/src/single.rs` (the perf control for drop phases) moved
+`workload::main`. Rebuilding the incumbents shows the same thing for them: jemalloc's binary
+went from 1.83e9 to 1.32e9 user cycles, the mimalloc crate's from 1.35e9 to 1.86e9, with the
+same instructions. Padding the environment by up to 2 KiB, which moves the stack, changes
+nothing; building with `-C llvm-args=-align-loops=64`, which keeps the loop's stack slots
+as they were in the slow build and only moves the code, gives 1.24e9, the fast figure. So it
+is the loop's code address, most likely its store and load relative to a 32 or 64-byte
+boundary in some predictor of Zen 5's (not identified).
+
+So grow-loop numbers from different builds of the workloads cannot be compared, and the
+17% behind glibc above was measured with asmalloc's loop in a good place. Building the bench
+workspace with `-C llvm-args=-align-loops=64` puts the loop in the same place in every
+build (asmalloc 1.24e9, jemalloc 1.32e9, the mimalloc crate 1.36e9, glibc 1.08e9 user cycles
+for the 4 MiB loop); it is not adopted here, since it moves every benchmark's code and so its
+baselines.
+
 ## Small heaps
 
 2026-10-18, at main `779ba9b` (before) and the branch's tip (after). Every page of an asmalloc
