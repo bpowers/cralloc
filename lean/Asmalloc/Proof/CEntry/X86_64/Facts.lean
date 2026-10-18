@@ -26,6 +26,7 @@ def tables {M : ISA} (c : Spec.CEntry.Ctx M) (s : M.State) : List (Region × Boo
   | .malloc => [(c.mallocTable s, false)]
   | .free => [(c.published s, false), (c.regionTable s, false)]
   | .freeSized => [(c.sizedTable s, false), (c.published s, false), (c.regionTable s, false)]
+  | .calloc => [(c.callocTable s, false)]
 
 theorem fixed_tables {M : ISA} (c : Spec.CEntry.Ctx M) (s : M.State) :
     c.fixed s = (c.rsVar s, false) :: (c.cpuField s, false) :: (c.csField s, true) ::
@@ -40,6 +41,7 @@ theorem tables_ro {M : ISA} {c : Spec.CEntry.Ctx M} {s : M.State} {x : Region ×
   · rw [h]
   · rcases h with h | h <;> rw [h]
   · rcases h with h | h | h <;> rw [h]
+  · rw [h]
 
 section
 

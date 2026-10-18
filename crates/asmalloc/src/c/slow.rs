@@ -6,8 +6,8 @@
 //! They take the C function's own arguments and are `extern "C"`, so that a generated routine
 //! that misses can leave for one with a `jmp` and its argument registers intact
 //! (`docs/research/zen5-roofline.md` section 14): `malloc_slow(size)` for any size, `free_slow(ptr)`
-//! for any pointer, `calloc_slow(total)` for any total (`usize::MAX` for one that overflowed),
-//! and `calloc_zero(block, total)` after a routine popped a block; and for the sized frees,
+//! for any pointer, `calloc_slow_args(n, size)` for any arguments, and
+//! `calloc_zero_tail(n, size, block)` after a routine popped a block; and for the sized frees,
 //! `free_sized_slow(ptr, size)` and `free_aligned_sized_slow(ptr, align, size)`, which complete
 //! one whatever the size says. The ledger entry is
 //! `docs/safety/asmalloc/c/slow-safety.md`.
@@ -65,6 +65,32 @@ pub extern "C" fn malloc_slow(size: usize) -> *mut c_void {
 #[inline(never)]
 pub extern "C" fn calloc_slow(total: usize) -> *mut c_void {
     or_enomem(allocate(total, 1, true))
+}
+
+/// Completes `calloc(n, size)`: the generated `c_calloc`'s slow path, with its arguments.
+#[cold]
+#[inline(never)]
+pub extern "C" fn calloc_slow_args(n: usize, size: usize) -> *mut c_void {
+    // A total no block can have fails with ENOMEM.
+    calloc_slow(n.saturating_mul(size))
+}
+
+/// The generated `c_calloc`'s tail after its pop: zeroes `block` as [`calloc_zero`] does for
+/// the total `n * size`, and returns it. The routine passes its own arguments through, and the
+/// block in the third argument's register.
+///
+/// # Safety
+///
+/// `n * size` does not overflow, is at most `table::CALLOC_TABLE_MAX`, and `block` is a slot of
+/// its C class (`table::calloc_class`) that the caller owns.
+#[inline(never)]
+pub unsafe extern "C" fn calloc_zero_tail(
+    n: usize,
+    size: usize,
+    block: *mut c_void,
+) -> *mut c_void {
+    // SAFETY: SLOW-04.
+    unsafe { calloc_zero(block, n.wrapping_mul(size)) }
 }
 
 /// Zeroes `block`, all that `malloc_usable_size` reports of it (the class of `total`), and

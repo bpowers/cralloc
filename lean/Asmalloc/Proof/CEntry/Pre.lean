@@ -207,7 +207,7 @@ theorem fixed' (h : Same c s p) : c.fixed p = c.fixed s := by
   obtain ⟨A, k, sig⟩ := c
   cases k <;> simp only [Spec.CEntry.Ctx.fixed, h.rsVar', h.csField', h.cpuField',
     Spec.CEntry.Ctx.maskTable, Spec.CEntry.Ctx.published, Spec.CEntry.Ctx.regionTable,
-    Spec.CEntry.Ctx.mallocTable, Spec.CEntry.Ctx.sizedTable, h.sym']
+    Spec.CEntry.Ctx.mallocTable, Spec.CEntry.Ctx.sizedTable, Spec.CEntry.Ctx.callocTable, h.sym']
 
 theorem res' (h : Same c s p) : c.A.reserved 0 p = c.A.reserved 0 s := h.res
 

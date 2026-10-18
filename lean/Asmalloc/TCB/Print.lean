@@ -259,6 +259,10 @@ def Printer.hotUops (inline : Bool) : Code M.Instr M.Cond → Option Nat
 cold branches' code after it. -/
 def Printer.function (body : Code M.Instr M.Cond) : List Line :=
   let (l, k, _) := P.lower body 0
-  l ++ P.ret.map .text ++ k
+  -- Code that ends in a tail call never reaches a return.
+  let ret := match body with
+    | .seq _ (.jump ..) => []
+    | _ => P.ret.map .text
+  l ++ ret ++ k
 
 end VG

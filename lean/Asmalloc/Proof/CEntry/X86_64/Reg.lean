@@ -1,6 +1,7 @@
 module
 
 public import Asmalloc.Proof.CEntry.X86_64.MallocWit
+public import Asmalloc.Proof.CEntry.X86_64.CallocWit
 public import Asmalloc.Proof.CEntry.X86_64.FreeWit
 public import Asmalloc.Proof.Framework.X86_64.Retry
 public import Asmalloc.Proof.Slab.X86_64.Reg
@@ -46,6 +47,32 @@ theorem cMalloc_restartsOk : ∀ s s', (mallocContract abi).pre s →
       simp only [List.mem_cons, List.not_mem_nil, or_false] at hr'
       rcases hr' with rfl <;> simp_all)
     (fun _ _ he => env_retC Malloc.hX he)
+
+theorem cCalloc_verified :
+    Verified target cCalloc (callocApi.contract (target.abi.withConsts []) 0) := by
+  show Verified target cCalloc (callocContract (abi.withConsts []))
+  rw [withConsts_nil]; exact Calloc.verified
+
+theorem cCalloc_witnessOk :
+    (∃ w ∈ Calloc.witnesses, (callocApi.contract (target.abi.withConsts []) 0).pre w) ∧
+    ∀ o ∈ cCalloc.outcomes, ∃ w ∈ Calloc.witnesses,
+      (callocApi.contract (target.abi.withConsts []) 0).pre w ∧ Visits target.isa cCalloc w o.1 o.2 := by
+  show (∃ w ∈ Calloc.witnesses, (callocContract (abi.withConsts [])).pre w) ∧ _
+  rw [withConsts_nil]; exact Calloc.witnessOk
+
+theorem cCalloc_restartsOk : ∀ s s', (callocContract abi).pre s →
+    Restarts target cCalloc (callocContract abi) s s' →
+      target.abiPreserved s s' ∧ ArgsKept target.abi callocSig s s' ∧
+      (target.inline = true → target.preservedExcept [] s s') :=
+  restartsOk_target (sig := callocSig) Calloc.verified (by decide)
+    (fun s hs p hp r hr => by
+      have h := ((Proof.CEntry.abort_iff Calloc.cx Calloc.hv s p).mp
+        (Calloc.verified.abortOk hs hp).2.2.1).1
+      have hr' : r ∈ [Reg.rdi, Reg.rsi] := hr
+      simp only [List.cons.injEq, and_true] at h
+      simp only [List.mem_cons, List.not_mem_nil, or_false] at hr'
+      rcases hr' with rfl | rfl <;> simp_all)
+    (fun _ _ he => env_retC Calloc.hX he)
 
 /-! The frees, for each mirror (`Mirror`): C's, and the `delete` family's. -/
 

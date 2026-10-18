@@ -24,12 +24,28 @@ during the write.
 **Proof.** `len` is the size of `table::calloc_class(total)` when the table covers `total`,
 else `total`. `calloc_zero`'s contract is that `block` is a slot of that class (so exactly
 `len` bytes of committed memory, SLOW-01), or, beyond the table, a block of at least `total`
-bytes, and that the caller owns it; a block the caller owns is one no other code accesses. Its one
-caller today is `seam::calloc` (SEAM-03); a generated `c_calloc` routine that jumps here must
-meet the same contract, which its specification will state.
+bytes, and that the caller owns it; a block the caller owns is one no other code accesses. Its callers
+are `seam::calloc` (SEAM-03) and `calloc_zero_tail` (SLOW-04).
 
 `free_sized_slow` and `free_aligned_sized_slow` each call `free_slow(ptr)` with their own
 contract, which is `free_slow`'s (the size and alignment are not used).
+
+## SLOW-04: `calloc_zero(block, n.wrapping_mul(size))` in `calloc_zero_tail`
+
+**Preconditions.** `calloc_zero`'s: `block` is a slot of the C class of the total, which the
+caller owns.
+
+**Proof.** `calloc_zero_tail`'s contract gives that the product does not overflow, so the
+wrapping product is the total, at most the calloc table's end, and that `block` is a slot of its
+class, owned. Its one caller is the generated `c_calloc`, which jumps here only after a pop that
+committed (`Spec.CEntry.callocContract`, proved in Lean): the product did not overflow and was
+at most `CALLOC_MAX` (1024, `table::CALLOC_TABLE_MAX` by a compile-time assertion), and the block
+popped is from the magazine of the class `C_CALLOC_SIZES[total]` gives, which is
+`C_CALLOC_CLASSES`, the class of `Class::of_c` of the total (`table.rs`'s tests check every
+entry). A popped block is a free block of that class that the pop handed to this call alone
+(`routines-safety.md`). The routine passes `n` and `size` as they arrived and the block in
+`rdx`, the third argument's register, and its tail call leaves the stack as the caller of
+`calloc` left it, so the arguments arrive as the signature says.
 
 ## SLOW-03: `seam::free_small(class, object)` in `free_slow`
 

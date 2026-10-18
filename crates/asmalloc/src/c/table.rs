@@ -105,6 +105,11 @@ impl<const N: usize> PlacedTable<N> {
 #[doc(hidden)]
 pub static C_SIZES: PlacedTable<{ C_TABLE_MAX / 8 + 1 }> = PlacedTable::new(C_SIZE_CLASSES);
 
+/// [`C_CALLOC_CLASSES`] as `c_calloc` reads it, as [`C_SIZES`].
+#[doc(hidden)]
+pub static C_CALLOC_SIZES: PlacedTable<{ CALLOC_TABLE_MAX + 1 }> =
+    PlacedTable::new(C_CALLOC_CLASSES);
+
 /// The sized free's table (`sized_classes`) as `c_free_sized` reads it, as [`C_SIZES`].
 #[doc(hidden)]
 pub static C_SIZED_SIZES: PlacedTable<C_SIZED_LEN> = PlacedTable::new(sized_classes());
@@ -115,6 +120,7 @@ const _: () = {
     assert!(TABLE_OFF == proved::TABLE_OFF);
     assert!(C_TABLE_MAX == proved::MALLOC_MAX && C_TABLE_MAX / 8 + 1 == proved::MALLOC_LEN);
     assert!(C_SIZED_LEN == proved::SIZED_LEN);
+    assert!(CALLOC_TABLE_MAX == proved::CALLOC_MAX && CALLOC_TABLE_MAX + 1 == proved::CALLOC_LEN);
     assert!(core::mem::offset_of!(PlacedTable<1>, bytes) == TABLE_OFF);
 };
 
@@ -178,6 +184,7 @@ mod tests {
             assert_eq!(C_SIZED_SIZES.bytes()[size], expected, "{size}");
         }
         assert_eq!(&C_SIZES.bytes()[..], &C_SIZE_CLASSES[..]);
+        assert_eq!(&C_CALLOC_SIZES.bytes()[..], &C_CALLOC_CLASSES[..]);
         let base = core::ptr::from_ref(&C_SIZES).addr();
         assert_eq!(
             core::ptr::from_ref(C_SIZES.bytes()).addr(),
