@@ -16,7 +16,7 @@
 //! their class.
 //!
 //! A large allocation or free is a slow path of its own and runs a heartbeat
-//! ([`Heap::heartbeat`]), so a program that allocates only large blocks still keeps the caches,
+//! ([`Bound::heartbeat`]), so a program that allocates only large blocks still keeps the caches,
 //! the depot and the back end maintained.
 //!
 //! Fresh slots and runs read as zero; the back end says when a reused large slot is known to, so
@@ -27,7 +27,7 @@
 //! up to a page, so a block with headroom never reports, or makes anyone touch, the room it has not
 //! been asked for.
 
-use super::{Grant, Heap, Zero, small};
+use super::{Bound, Grant, Heap, Zero, small};
 use crate::back::policy::{STAGGER_ROOM, STAGGER_STEP};
 use crate::classes::Class;
 use crate::front::Routines;
@@ -137,42 +137,20 @@ impl<O: Os> Heap<O> {
         }
     }
 
-    /// Frees a large block, finding its class or run from its address.
+    /// Frees a large block, finding its class or run from its address. Aborts if no large
+    /// block starts there.
+    ///
+    /// # Safety
+    ///
+    /// `ptr` is a large block of this heap that the caller owns and gives up: the back end
+    /// may purge its pages before it releases the slot (BACK-CLASS-01).
     #[cold]
     #[inline(never)]
-    pub(crate) fn free_large(&self, ptr: NonNull<u8>) {
+    pub(crate) unsafe fn free_large(&self, ptr: NonNull<u8>) {
         match self.back() {
             Some(back) => back.free_by_address(ptr),
             None => self.os().abort("free of a block when no heap exists"),
         }
-    }
-
-    /// [`Heap::alloc_large`] as the slow path it counts as: the block, then a heartbeat.
-    ///
-    /// # Safety
-    ///
-    /// As for [`Heap::alloc`].
-    pub(crate) unsafe fn alloc_large_slow<R: Routines + Copy>(
-        &self,
-        routines: R,
-        layout: Layout,
-        zero: Zero,
-    ) -> Option<Grant> {
-        let grant = self.alloc_large(layout, zero);
-        // SAFETY: passed through from the caller.
-        unsafe { self.heartbeat(routines) };
-        grant
-    }
-
-    /// [`Heap::free_large`] as the slow path it counts as: the free, then a heartbeat.
-    ///
-    /// # Safety
-    ///
-    /// As for [`Heap::alloc`].
-    pub(crate) unsafe fn free_large_slow<R: Routines + Copy>(&self, routines: R, ptr: NonNull<u8>) {
-        self.free_large(ptr);
-        // SAFETY: passed through from the caller.
-        unsafe { self.heartbeat(routines) };
     }
 
     /// The bytes the block at `ptr`, described by `layout`, occupies: its class for a small
@@ -190,22 +168,71 @@ impl<O: Os> Heap<O> {
         }
     }
 
+    /// Records a large block's new size after an in-place resize, clearing what it gains if
+    /// `zero`, and returns what the caller may use now. A block that shrinks gives the whole
+    /// pages past its new usable size back to the OS at once (`Back::resize_in_place`), so
+    /// that a buffer cut down by `realloc` does not keep its old pages until it is freed.
+    ///
+    /// # Safety
+    ///
+    /// `ptr` is a live large block of this heap that the caller owns and is resizing to `new`,
+    /// which fits it.
+    unsafe fn resize_large_in_place(&self, ptr: NonNull<u8>, new: Layout, zero: bool) -> Grant {
+        let before = self.usable_size(ptr.as_ptr()).unwrap_or(0);
+        if let Some(back) = self.back() {
+            // SAFETY: the block is the caller's and `new` fits it; a resize gives up only what
+            // lies past the new size.
+            unsafe { back.resize_in_place(ptr, new.size()) };
+        }
+        let len = self.usable_size(ptr.as_ptr()).unwrap_or(new.size());
+        if zero && len > before {
+            // SAFETY: HEAP-05.
+            unsafe { ptr.as_ptr().add(before).write_bytes(0, len - before) };
+        }
+        Grant {
+            ptr,
+            len,
+            zeroed: false,
+        }
+    }
+}
+
+impl<O: Os, R: Routines + Copy> Bound<'_, O, R> {
+    /// [`Heap::alloc_large`] as the slow path it counts as: the block, then a heartbeat.
+    pub(crate) fn alloc_large_slow(self, layout: Layout, zero: Zero) -> Option<Grant> {
+        let grant = self.heap().alloc_large(layout, zero);
+        self.heartbeat();
+        grant
+    }
+
+    /// [`Heap::free_large`] as the slow path it counts as: the free, then a heartbeat.
+    ///
+    /// # Safety
+    ///
+    /// As for [`Heap::free_large`].
+    pub(crate) unsafe fn free_large_slow(self, ptr: NonNull<u8>) {
+        // SAFETY: the caller gives up the large block.
+        unsafe { self.heap().free_large(ptr) };
+        self.heartbeat();
+    }
+
     /// Resizes the block at `ptr` from `old` to `new`, in place when the next free will still
     /// find its class, else by moving it. With `zero`, the bytes of the result past the old
     /// block read as zero. `None` if a move found no memory; the old block is then untouched.
     ///
     /// # Safety
     ///
-    /// As for [`Heap::dealloc`] with `ptr` and `old`; `new` has a non-zero size.
-    pub(crate) unsafe fn resize<R: Routines + Copy>(
-        &self,
-        routines: R,
+    /// As for [`Bound::dealloc`] with `ptr` and `old`, except that the caller gives the block
+    /// up only if the resize succeeds; `new` has a non-zero size.
+    pub(crate) unsafe fn resize(
+        self,
         ptr: NonNull<u8>,
         old: Layout,
         new: Layout,
         zero: bool,
     ) -> Option<Grant> {
-        let len = self.block_len(ptr, old);
+        let heap = self.heap();
+        let len = heap.block_len(ptr, old);
         let in_place = match (small(old), Class::of_layout(new)) {
             (Some(class), Some(next)) => next == class.class(),
             (Some(_), None) => false,
@@ -228,14 +255,14 @@ impl<O: Os> Heap<O> {
                     zeroed: false,
                 });
             }
-            // SAFETY: the caller's promise for `ptr`, and `new` fits the block (`in_place`).
-            return Some(unsafe { self.resize_large_in_place(ptr, new, zero) });
+            // SAFETY: the block is the caller's, large, and `new` fits it (`in_place`).
+            return Some(unsafe { heap.resize_large_in_place(ptr, new, zero) });
         }
         // Growing a large object out of its block: take headroom. A zeroed grow takes none, so
         // that it never clears room nobody asked for.
         // Not for a run: it commits all its regions at once, so headroom would be commit charge,
         // not just address space.
-        let region = self
+        let region = heap
             .back()
             .map_or(0, |back| back.space().plan().region_size());
         let roomy = (!zero && new.size() > len && small(new).is_none())
@@ -244,17 +271,14 @@ impl<O: Os> Heap<O> {
             .filter(|layout| layout.size() <= region);
         // A zeroed grow clears only what lies past the bytes it keeps, and only when the new
         // block is not known to read as zero.
-        // SAFETY: passed through from the caller.
-        let grant = unsafe {
-            roomy
-                .and_then(|layout| self.alloc_grant(routines, layout, Zero::No))
-                .or_else(|| self.alloc_grant(routines, new, Zero::No))?
-        };
+        let grant = roomy
+            .and_then(|layout| self.alloc_grant(layout, Zero::No))
+            .or_else(|| self.alloc_grant(new, Zero::No))?;
         // A block with headroom records the size asked for, not the room it was given.
-        let grant = match self.back() {
+        let grant = match heap.back() {
             Some(back) if small(new).is_none() => {
                 back.resize(grant.ptr, new.size());
-                let len = self.usable_size(grant.ptr.as_ptr()).unwrap_or(new.size());
+                let len = heap.usable_size(grant.ptr.as_ptr()).unwrap_or(new.size());
                 Grant { len, ..grant }
             }
             _ => grant,
@@ -262,7 +286,7 @@ impl<O: Os> Heap<O> {
         let kept = old.size().min(new.size());
         // SAFETY: HEAP-04.
         unsafe {
-            match self.back() {
+            match heap.back() {
                 // A large block is copied in pieces, its old pages returned behind the copy,
                 // and freed, all by the back end.
                 Some(back) if small(old).is_none() => {
@@ -271,7 +295,7 @@ impl<O: Os> Heap<O> {
                 _ => {
                     ptr.as_ptr()
                         .copy_to_nonoverlapping(grant.ptr.as_ptr(), kept);
-                    self.dealloc(routines, ptr.as_ptr(), old);
+                    self.dealloc(ptr.as_ptr(), old);
                 }
             }
             if zero && !grant.zeroed && grant.len > kept {
@@ -283,33 +307,6 @@ impl<O: Os> Heap<O> {
             }
         }
         Some(grant)
-    }
-
-    /// Records a large block's new size after an in-place resize, clearing what it gains if
-    /// `zero`, and returns what the caller may use now. A block that shrinks gives the whole
-    /// pages past its new usable size back to the OS at once (`Back::resize_in_place`), so
-    /// that a buffer cut down by `realloc` does not keep its old pages until it is freed.
-    ///
-    /// # Safety
-    ///
-    /// `ptr` is a live large block of this heap that the caller owns and is resizing to `new`,
-    /// which fits it.
-    unsafe fn resize_large_in_place(&self, ptr: NonNull<u8>, new: Layout, zero: bool) -> Grant {
-        let before = self.usable_size(ptr.as_ptr()).unwrap_or(0);
-        if let Some(back) = self.back() {
-            // SAFETY: the caller's promise; a resize gives up what lies past the new size.
-            unsafe { back.resize_in_place(ptr, new.size()) };
-        }
-        let len = self.usable_size(ptr.as_ptr()).unwrap_or(new.size());
-        if zero && len > before {
-            // SAFETY: HEAP-05.
-            unsafe { ptr.as_ptr().add(before).write_bytes(0, len - before) };
-        }
-        Grant {
-            ptr,
-            len,
-            zeroed: false,
-        }
     }
 }
 

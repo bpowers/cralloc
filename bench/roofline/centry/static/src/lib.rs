@@ -6,6 +6,5 @@ asmalloc::export_c_abi!();
 
 #[panic_handler]
 fn panic(_: &core::panic::PanicInfo) -> ! {
-    use asmalloc::os::Os;
-    asmalloc::os::linux::LinuxOs.abort("centry-static: panic")
+    asmalloc::abort("centry-static: panic")
 }
