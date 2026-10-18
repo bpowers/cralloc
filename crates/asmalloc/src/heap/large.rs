@@ -107,9 +107,7 @@ impl<O: Os> Heap<O> {
                 } else {
                     back.alloc(class, layout.size())?
                 };
-                let len = self
-                    .usable_size(block.ptr.as_ptr())
-                    .unwrap_or(layout.size());
+                let len = block.len;
                 let clear = match zero {
                     _ if block.zeroed => 0,
                     Zero::No => 0,

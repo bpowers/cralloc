@@ -4,8 +4,10 @@
 use super::layout::{Layout, Memo, WORD_BYTES};
 use super::tree::Host;
 use super::word::Atomic;
+use crate::lined::{LINE, Lined, lines};
 use crate::os::{HugePages, Os};
 use crate::space::{MAX_REGIONS, RegionId, Space};
+use core::cell::Cell;
 use core::ptr::NonNull;
 use core::sync::atomic::AtomicU32;
 
@@ -14,24 +16,41 @@ pub(crate) const CLASS_WORDS: usize = MAX_REGIONS / 64;
 
 /// What the back end keeps per class outside the regions: the two class levels of the summary
 /// tree, and the region being carved. All zero means no regions.
+///
+/// The layout, which every operation on the class reads and nothing writes once it is worked
+/// out, is on lines of its own (`crate::lined`): claims and releases write the summary words,
+/// and a layout that shared a line with them, this class's or the next one's, cost a miss on
+/// every call. The carving word, written when a region is assigned, is apart from the summary
+/// words, which claims and releases write.
 pub(crate) struct ClassState {
-    /// A bit per class word that may be non-zero.
-    pub(crate) top: Atomic,
-    /// A bit per region whose top word may be non-zero.
-    pub(crate) words: [Atomic; CLASS_WORDS],
-    /// The region carves come from, plus one; zero for none yet.
-    pub(crate) carving: AtomicU32,
     /// The class's layout, once worked out.
-    pub(crate) layout: Memo,
+    pub(crate) layout: Lined<Memo>,
+    /// The class levels of the summary tree: a bit per class word that may be non-zero, then
+    /// a bit per region whose top word may be non-zero. One protocol writes them all.
+    pub(crate) summary: Lined<Summary>,
+    /// The region carves come from, plus one; zero for none yet.
+    pub(crate) carving: Lined<AtomicU32>,
 }
+
+/// The class levels of a class's summary tree.
+pub(crate) struct Summary {
+    pub(crate) top: Atomic,
+    pub(crate) words: [Atomic; CLASS_WORDS],
+}
+
+const _: () = assert!(
+    size_of::<ClassState>() == LINE * (lines(size_of::<Memo>()) + lines(size_of::<Summary>()) + 1)
+);
 
 impl ClassState {
     pub(crate) const fn new() -> ClassState {
         ClassState {
-            top: Atomic::zero(),
-            words: [const { Atomic::zero() }; CLASS_WORDS],
-            carving: AtomicU32::new(0),
-            layout: Memo::new(),
+            layout: Lined::new(Memo::new()),
+            summary: Lined::new(Summary {
+                top: Atomic::zero(),
+                words: [const { Atomic::zero() }; CLASS_WORDS],
+            }),
+            carving: Lined::new(AtomicU32::new(0)),
         }
     }
 }
@@ -43,22 +62,51 @@ impl ClassState {
 /// back end makes a `ClassHost` only for a class with a layout (`Back::host`), and names only
 /// regions it found through this class's summary tree, its carving word, or a region-table
 /// lookup that returned this class.
+///
+/// A `ClassHost` lives for one operation, on the stack of the thread doing it. It remembers the
+/// metadata block of the last region it was asked about (`block`), since an operation reaches
+/// many words of one region and working out a block's address costs more than using it.
 pub(crate) struct ClassHost<'a, O: Os> {
     pub(crate) space: Space<'a, O>,
     pub(crate) class: &'a ClassState,
     pub(crate) layout: Layout,
+    pub(crate) block: Cell<Option<(RegionId, NonNull<u8>)>>,
 }
 
-impl<O: Os> ClassHost<'_, O> {
+impl<'a, O: Os> ClassHost<'a, O> {
+    #[inline(always)]
+    pub(crate) fn new(space: Space<'a, O>, class: &'a ClassState, layout: Layout) -> Self {
+        ClassHost {
+            space,
+            class,
+            layout,
+            block: Cell::new(None),
+        }
+    }
+
     fn region_at(&self, region: RegionId, offset: usize) -> NonNull<u8> {
         self.space
             .region(region)
             .map_addr(|addr| addr.saturating_add(offset))
     }
 
+    /// The metadata block of `region`, as [`Space::metadata`] gives it: from the last one
+    /// worked out if it is this region's, so that the region is checked once per operation, not
+    /// once per word.
+    #[inline(always)]
+    fn block(&self, region: RegionId) -> NonNull<u8> {
+        if let Some((seen, block)) = self.block.get()
+            && seen == region
+        {
+            return block;
+        }
+        let block = self.space.metadata(region);
+        self.block.set(Some((region, block)));
+        block
+    }
+
     fn meta_at(&self, region: RegionId, offset: usize) -> NonNull<u8> {
-        self.space
-            .metadata(region)
+        self.block(region)
             .map_addr(|addr| addr.saturating_add(offset))
     }
 }
@@ -89,12 +137,12 @@ impl<O: Os> Host for ClassHost<'_, O> {
 
     #[inline(always)]
     fn class_word(&self, index: u32) -> &Atomic {
-        &self.class.words[index as usize % CLASS_WORDS]
+        &self.class.summary.words[index as usize % CLASS_WORDS]
     }
 
     #[inline(always)]
     fn class_top(&self) -> &Atomic {
-        &self.class.top
+        &self.class.summary.top
     }
 
     fn commit(&self, region: RegionId, offset: usize, len: usize) -> bool {

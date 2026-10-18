@@ -379,11 +379,15 @@ impl<'a, O: Os, R: Routines + Copy> Bound<'a, O, R> {
     }
 
     /// The heartbeat of a slow path that served no small class: a large allocation or free.
+    /// It counts the slow path first, and builds what the chores need only when they are due.
     #[cold]
     #[inline(never)]
     pub(crate) fn heartbeat(self) {
-        if let Some(back) = self.heap.started() {
-            self.cache(&back).lone_heartbeat();
+        if let crate::depot::Lone::Beat(turn) =
+            crate::depot::lone_count(&self.heap.depot, &self.routines)
+            && let Some(back) = self.heap.started()
+        {
+            self.cache(&back).lone_beat(turn);
         }
     }
 

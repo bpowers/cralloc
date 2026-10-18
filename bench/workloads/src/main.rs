@@ -25,6 +25,7 @@ fn main() {
         "spawn" => steal::spawn(&args),
         "churn" => single::churn(&args),
         "map" => single::map(&args),
+        "largepair" => single::largepair(&args),
         "tree" => single::tree(&args),
         "vecgrow" => single::vecgrow(&args),
         "json" => single::json(&args),

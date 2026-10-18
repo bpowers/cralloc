@@ -284,13 +284,13 @@ impl<O: Os> Back<'_, O> {
                 let goal = decay_goal(geometry, retained).max(over);
                 // From the top. The pass word is written last and once: until then no
                 // stepper finds its tag and none acts.
-                state.purge_at.store(0, Relaxed);
+                state.walk.purge_at.store(0, Relaxed);
                 let pass = Pass {
                     tag: Pass::tag_of(word),
-                    lap: state.laps.load(Relaxed) as u16,
+                    lap: state.walk.laps.load(Relaxed) as u16,
                     pages: goal.div_ceil(page).clamp(1, u32::MAX as usize) as u32,
                 };
-                state.pass.store(pass.pack(), Release);
+                state.walk.pass.store(pass.pack(), Release);
                 seen = word;
             }
             Decay::Step => {}
@@ -298,7 +298,7 @@ impl<O: Os> Back<'_, O> {
         let tag = Pass::tag_of(seen);
         let mut spent = 0;
         loop {
-            let pass = Pass::unpack(state.pass.load(Acquire));
+            let pass = Pass::unpack(state.walk.pass.load(Acquire));
             if pass.tag != tag {
                 // The starter has not published this pass yet, or it is over and another
                 // has begun: either way it is not this stepper's. But a starter that vanished
@@ -317,7 +317,7 @@ impl<O: Os> Back<'_, O> {
                 }
                 return None;
             }
-            if pass.pages == 0 || state.laps.load(Relaxed) as u16 != pass.lap {
+            if pass.pages == 0 || state.walk.laps.load(Relaxed) as u16 != pass.lap {
                 // The goal is met or the walk has gone round. End the pass this thread saw,
                 // and only that one.
                 let now = self.space.os().ticks() & !ACTIVE;
@@ -333,7 +333,7 @@ impl<O: Os> Back<'_, O> {
             let done = (purged / page).min(u32::MAX as usize) as u32;
             if done != 0 {
                 // Lower this pass's goal, and no other's.
-                let mut word = state.pass.load(Acquire);
+                let mut word = state.walk.pass.load(Acquire);
                 loop {
                     let now = Pass::unpack(word);
                     if now.tag != tag {
@@ -344,6 +344,7 @@ impl<O: Os> Back<'_, O> {
                         ..now
                     };
                     match state
+                        .walk
                         .pass
                         .compare_exchange(word, next.pack(), Release, Acquire)
                     {
@@ -377,7 +378,7 @@ impl<O: Os> Back<'_, O> {
     /// read, at least one, the bytes purged, and whether it finished its region.
     fn purge_step(&self, budget: usize, limit: usize) -> (usize, usize, bool) {
         let plan = self.space.plan();
-        let seen = self.state.purge_at.load(Relaxed);
+        let seen = self.state.walk.purge_at.load(Relaxed);
         // The position is the region to look at next plus one; zero means the top.
         let index = if seen == 0 || seen as usize > plan.objects() {
             plan.objects() - 1
@@ -394,12 +395,13 @@ impl<O: Os> Back<'_, O> {
         if done
             && self
                 .state
+                .walk
                 .purge_at
                 .compare_exchange(seen, index as u32, Relaxed, Relaxed)
                 .is_ok()
             && index == 0
         {
-            self.state.laps.fetch_add(1, Relaxed);
+            self.state.walk.laps.fetch_add(1, Relaxed);
         }
         (read.max(1), purged, done)
     }

@@ -46,7 +46,7 @@ impl<O: Os, R: Routines, S: Source> Cache<'_, O, R, S> {
     pub fn maintain(&self) {
         let clock = Clock::new(self.os());
         if generation::drains_enabled(self.depot) {
-            let count = self.depot.cpus.load(Acquire);
+            let count = self.depot.shared.cpus.load(Acquire);
             for index in 0..count {
                 if let Some(cpu) = self.routines.slabs().cpu(index as i32) {
                     self.idle_look(cpu, clock.now(), Disposal::Launder);

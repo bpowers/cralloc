@@ -661,7 +661,9 @@ fn trace(rig: &TestRig) -> Trace {
             .cpus()
             .map(|cpu| rig.slabs().slab(cpu).seen().load(Relaxed))
             .collect(),
-        water: rig.depot.water.iter().map(|w| w.load(Relaxed)).collect(),
+        water: (0..crate::classes::SMALL_COUNT)
+            .map(|o| rig.depot.water(o).load(Relaxed))
+            .collect(),
         owing: rig.depot.owing.load(Relaxed),
     }
 }

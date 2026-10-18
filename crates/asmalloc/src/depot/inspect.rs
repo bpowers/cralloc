@@ -47,10 +47,10 @@ pub fn inspect<O: Os>(
     let area = Area::new(space, depot);
     visitor.magazine_area(
         space.magazines().as_ptr().cast_const(),
-        UNIT + depot.carved.load(Relaxed),
-        depot.committed.load(Relaxed),
+        UNIT + depot.growth.carved.load(Relaxed),
+        depot.growth.committed.load(Relaxed),
     );
-    let cpus = depot.cpus.load(Relaxed).min(slabs.len());
+    let cpus = depot.shared.cpus.load(Relaxed).min(slabs.len());
     visitor.slabs(ptr::from_ref(slabs).cast::<u8>(), SLAB_BYTES, cpus);
     for cpu in (0..cpus).filter_map(|index| slabs.cpu(index as i32)) {
         let slab = slabs.slab(cpu);

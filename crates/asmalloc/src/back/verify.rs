@@ -113,12 +113,28 @@ pub(super) fn layouts_fit(plan: Plan) {
     assert!(layout.total_words() as usize * WORD_BYTES <= plan.metadata_size());
     assert!(layout.leaf_words() * BITS >= slots && (layout.leaf_words() - 1) * BITS < slots);
     assert!(layout.tree_word(0, 0) == 0);
-    assert!(layout.grow_word() == layout.leaf_words());
-    assert!(layout.hints_word() == layout.leaf_words() + 1);
+    // The header is the first whole cache line after the leaf bitmap, alone on it, or, where
+    // the block has no room for that, straight after the leaf bitmap.
+    let line = (crate::lined::LINE / WORD_BYTES) as u32;
+    assert!(layout.hints_word() == layout.grow_word() + 1);
+    let after = if layout.height() >= 1 {
+        layout.tree_word(1, 0)
+    } else {
+        layout.clean_word(0)
+    };
+    let mut end = if after == layout.hints_word() + 1 {
+        assert!(layout.grow_word() == layout.leaf_words());
+        after
+    } else {
+        assert!(layout.grow_word() % line == 0);
+        assert!(layout.grow_word() >= layout.leaf_words());
+        assert!(layout.grow_word() < layout.leaf_words() + line);
+        assert!(after == layout.grow_word() + line);
+        after
+    };
     let height = layout.height() as usize;
     assert!(height < MAX_LEVELS);
     assert!(layout.level_words(layout.height()) == 1);
-    let mut end = layout.hints_word() + 1;
     let mut level = 1;
     while level <= height {
         let below = layout.level_words(level as u8 - 1);

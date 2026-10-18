@@ -37,7 +37,14 @@ nothing accesses that memory in a way that conflicts with a shared reference.
    page of a slot below the watermark) or from a summary bit that a walk from such a word set
    (summary and leaf words reached in a descent). `Space::metadata(region)` is the region's
    block, `metadata_size` bytes inside the reservation (`space::verify`,
-   `plans_keep_objects_metadata_and_magazines_apart`).
+   `plans_keep_objects_metadata_and_magazines_apart`); it checks the region against the plan
+   and adds the region's offset to the first block's address, which `Space::new` works out
+   once from the plan (`Plan::metadata_start`, the same sum `Plan::metadata_offset` makes).
+   `ClassHost::block` keeps the last block it got from `Space::metadata`, with the region it
+   asked for, and hands it out again only for that same region, so `metadata(region)` is
+   always the block `Space::metadata` gave for `region`. The kept pair lives in the
+   `ClassHost`, which belongs to one operation on one thread's stack, and the space it came
+   from is the host's own, which never changes.
 2. *Aligned.* The metadata block starts on a page boundary and the offset is a multiple of 8.
    `Atomic` is `#[repr(transparent)]` over `AtomicU64`, alignment 8.
 3. *Accessible.* The word is committed before any thread forms a reference to it:
