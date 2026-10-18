@@ -74,6 +74,7 @@ OFF_SIZE_S = -4096  # 129 bytes
 OFF_SIZE_T = -3840  # 377 bytes
 OFF_SIZE_D = -3328  # 1025 bytes
 OFF_SIZE_L = -20480  # 4097 bytes: (n + 7) >> 3 for every small size
+OFF_SIZE_X = -32768  # 8193 bytes: the same, indexed by (n mod 65536 + 7) >> 3; 0 above 32 KiB
 
 RSEQ_SIG = "0x53053053"
 
@@ -353,6 +354,78 @@ def calloc_fused(P, m: M):
     return body, ["8:", f"jmp {P}calloc_slow", "10:", "mov rdi, -1", f"jmp {P}calloc_slow"]
 
 
+def free_checked(P, look="w2", order="pre", reg="slab", short=True):
+    """free_sized(p: rdi, size: rsi) with the size as a prediction and the address as the truth.
+    The class register comes from the size, as malloc computes it, so the push's store address
+    does not wait for the pointer. The class byte from the address is compared with it and a
+    mismatch, or a pointer outside the heap, goes to free_slow(p), which trusts only the address.
+    order: pre puts the address check before the arm, in puts it inside the sequence after the
+    CPU number (restart re-runs it). reg: slab reads the region table at a displacement from
+    SLABS (a 5-cycle load, off the chain here), sep through its own lea."""
+    miss = "8f" if short else f"{P}free_slow"
+    size = ["cmp rsi, 32768", f"ja {miss}", f"lea r9, [rip + {P}slabs]", "lea eax, [rsi + 7]", "shr eax, 3",
+            f"movzx edx, byte ptr [r9 + rax + {OFF_SIZE_L}]"]
+    if look == "w2":
+        addr = [f"mov rcx, qword ptr [rip + {P}space]", "shrx rax, rdi, rcx", "shrx rcx, rcx, rcx", "sub rax, rcx"]
+    else:
+        addr = [f"mov ecx, dword ptr [rip + {P}shift2]", "shrx rax, rdi, rcx", f"sub rax, qword ptr [rip + {P}baseidx2]"]
+    addr += ["cmp rax, 4096", f"jae {miss}"]
+    if reg == "slab":
+        # r9 is SLABS here (pre) or SLABS + 8 class (in): pick the displacement to match.
+        disp = OFF_REGION if order == "pre" else None
+        addr += [f"cmp dl, byte ptr [r9 + rax + {OFF_REGION}]" if order == "pre" else
+                 f"cmp dl, byte ptr [r11 + rax]", f"jne {miss}"]
+        if order == "in":
+            addr = addr[:-2] + [f"lea r11, [rip + {P}regclass_sep]"] + addr[-2:]
+    else:
+        addr += [f"lea r11, [rip + {P}regclass_sep]", "cmp dl, byte ptr [r11 + rax]", f"jne {miss}"]
+    L = size + (addr if order == "pre" else []) + ["lea r9, [r9 + rdx*8]"]
+    L += arm(P, "got", "h", miss)
+    if order == "in":
+        L += addr
+    L += ["mov rcx, qword ptr [r9 + r8]", "lea rax, [rcx + 8]", f"test eax, dword ptr [r9 + {OFF_MASK}]",
+          f"je {miss}", "mov qword ptr [rcx], rdi", "mov qword ptr [r9 + r8], rax"]
+    return L, (["8:", f"jmp {P}free_slow"] if short else [])
+
+
+def free_checked2(P, look="sb"):
+    """The checked sized free, encoded to fit two lines. The size needs no bound check: it is only
+    a prediction, and any predicted class the address's byte agrees with is right. `movzx eax,
+    si` bounds the table index instead (sizes above 32 KiB read class 0, which no small region's
+    byte equals; an unassigned region's 0 does, and its zero mask sends the push to the slow
+    path). The back half uses rsi (rseq offset), rcx (descriptor) and edx (CPU) so that fewer
+    instructions need a REX prefix."""
+    miss = "8f"
+    L = [f"lea r9, [rip + {P}slabs]", "movzx eax, si", "add eax, 7", "shr eax, 3",
+         f"movzx edx, byte ptr [r9 + rax + {OFF_SIZE_X}]"]
+    if look == "w2":
+        L += [f"mov rcx, qword ptr [rip + {P}space]", "shrx rax, rdi, rcx", "shrx rcx, rcx, rcx", "sub rax, rcx"]
+    else:
+        L += [f"mov ecx, dword ptr [rip + {P}shift2]", "shrx rax, rdi, rcx", f"sub rax, qword ptr [rip + {P}baseidx2]"]
+    L += ["cmp rax, 4096", f"jae {miss}", f"cmp dl, byte ptr [r9 + rax + {OFF_REGION}]", f"jne {miss}",
+          "lea r9, [r9 + rdx*8]"]
+    L += ["5:", "mov rsi, qword ptr [rip + __rseq_offset@GOTPCREL]", "mov rsi, qword ptr [rsi]",
+          "lea rcx, [rip + 3f]", "mov qword ptr fs:[rsi + 8], rcx", "6:", "mov edx, dword ptr fs:[rsi + 4]",
+          "cmp edx, 8192", f"jae {miss}", "shl rdx, 12", "mov rcx, qword ptr [r9 + rdx]", "lea rax, [rcx + 8]",
+          f"test eax, dword ptr [r9 + {OFF_MASK}]", f"je {miss}", "mov qword ptr [rcx], rdi",
+          "mov qword ptr [r9 + rdx], rax"]
+    return L, ["8:", f"jmp {P}free_slow"]
+
+
+def free_arith(P, short=True):
+    """Size of the prize only: unsized free with the class computed from the region index (here
+    region c holds class c, so the shift is 0; a real layout would shift by log2 of the regions
+    each class owns). The range check bounds the index to the small classes' regions."""
+    miss = "8f" if short else f"{P}free_slow"
+    L = [f"mov rcx, qword ptr [rip + {P}space]", "shrx rax, rdi, rcx", "shrx rcx, rcx, rcx", "sub rax, rcx",
+         f"cmp rax, {SMALL + 1}", f"jae {miss}", "mov edx, eax", "shr edx, 0", f"lea r9, [rip + {P}slabs]",
+         "lea r9, [r9 + rdx*8]"]
+    L += arm(P, "got", "h", miss)
+    L += ["mov rcx, qword ptr [r9 + r8]", "lea rax, [rcx + 8]", f"test eax, dword ptr [r9 + {OFF_MASK}]",
+          f"je {miss}", "mov qword ptr [rcx], rdi", "mov qword ptr [r9 + r8], rax"]
+    return L, (["8:", f"jmp {P}free_slow"] if short else [])
+
+
 def free_sized(P):
     """A free told the size (rsi), as Rust's dealloc is: the class comes from the size table, not
     from the address. The C classes stand in for Rust's here."""
@@ -515,6 +588,16 @@ for n, m in MALLOC.items():
         body, tail = malloc_fused("{P}", m)
         add(n, "malloc", body, tail)
 add("fZ", "free", free_sized("{P}"))
+# Checked sized frees (size: rsi) and the arithmetic-class free.
+for n, kw in (("fK", {}), ("fKw", {"look": "sb"}), ("fKi", {"order": "in"}), ("fKwi", {"look": "sb", "order": "in"}),
+              ("fKs", {"reg": "sep"}), ("fKl", {"short": False})):
+    body, tail = free_checked("{P}", **kw)
+    add(n, "free", body, tail)
+body, tail = free_arith("{P}")
+add("fAr", "free", body, tail)
+for n, look in (("fKx", "sb"), ("fKxw", "w2")):
+    body, tail = free_checked2("{P}", look)
+    add(n, "free", body, tail)
 for n, m in (("cD", M(idx="d", short=True)), ("cS", M(short=True)), ("cT", M(idx="t", short=True))):
     body, tail = calloc_fused("{P}", m)
     # After the commit: hand the block and the byte count to the zeroing tail.
@@ -564,10 +647,12 @@ def data_text(P, lib, stubs=True):
            ".section .bss", ".balign 4096"]
     out += obj("space", 8) + obj("shift", 8, 8) + obj("baseidx", 8, 8) + obj("rseq_off", 8, 8)
     out += obj("regbias", 8, 8) + obj("sizeptr", 129 * 8)
+    # The shift and base >> shift again, at a page offset no hot slab word has.
+    out += [".balign 4096", ".skip 2048"] + obj("shift2", 8, 8) + obj("baseidx2", 8, 8)
     out += obj("abort_count", 8, 64, pub=False)
     out += obj("masks4", 1024) + obj("size_s_sep", 129) + obj("packed", 129 * 8) + obj("regclass_sep", 4096)
     # The front block: tables at fixed offsets below the slabs.
-    out += [".balign 4096", f".globl {P}front", f".hidden {P}front", f"{P}front:", "  .zero 20480"]
+    out += [".balign 4096", f".globl {P}front", f".hidden {P}front", f"{P}front:", "  .zero 32768"]
     out += obj("slabs", 8192 * 4096, 4096)
     out += [".text", ".balign 64"]
     for slow in ("malloc_slow", "pop_slow", "push_slow", "calloc_slow", "calloc_zero") if stubs else ():
@@ -638,6 +723,8 @@ PAIRS = [
     ("mS", "fB1"), ("mS", "fB2"), ("mS", "fB3"), ("mS", "fS1"), ("mS", "fS2"), ("mS", "fS3"),
     ("mS", "fU"), ("mS", "fUj"), ("mS", "fUw"), ("mS", "fV"), ("mS", "fVj"), ("mS", "fVw"),
     ("mLj", "fWjn"), ("mSj", "fUj"), ("mSj", "fVj"), ("mDj", "fUj"), ("mTj", "fUj"), ("mSo", "fUj"), ("mLj", "fUj"), ("mLj", "fUjn"), ("mL", "fU"), ("mQj", "fUj"), ("mQj", "fWjn"), ("mQ", "fU"), ("mDj", "fVj"), ("mR", "fU"), ("mR", "fV"),
+    ("mLj", "fZ"), ("mLj", "fK"), ("mLj", "fKw"), ("mLj", "fKi"), ("mLj", "fKwi"), ("mLj", "fKs"),
+    ("mLj", "fKl"), ("mLj", "fAr"), ("mLj", "fKx"), ("mLj", "fKxw"),
     ("mY", "fY"), ("mY", "fYb"), ("mYj", "fYj"), ("mYj", "fYbj"), ("mYdj", "fYbj"), ("mYtj", "fYbj"),
     ("mYj", "fYwj"), ("mYj", "fYwbj"), ("mR", "fY"), ("mR", "fYb"),
 ]
@@ -651,7 +738,7 @@ def malloc_call(m, call):
 
 
 def free_call(f, call, src, size="r12d"):
-    if f == "fZ":
+    if f == "fZ" or f.startswith("fK"):
         return [f"mov rdi, {src}", f"mov esi, {size}"] + CALLS[call](f, "f")
     if f == "push_gen":
         return [f"mov rsi, {src}", f"mov edi, {CLASS}"] + CALLS[call](f, "f")
@@ -753,7 +840,8 @@ def main():
             w(f"  char *{s_};\n")
         w("};\n")
         w(f"enum {{ OFF_REGION = {OFF_REGION}, OFF_MASK = {OFF_MASK}, OFF_SIZE_S = {OFF_SIZE_S}, "
-          f"OFF_SIZE_T = {OFF_SIZE_T}, OFF_SIZE_D = {OFF_SIZE_D}, OFF_SIZE_L = {OFF_SIZE_L}, RUST_CLASS = {CLASS}, SMALL = {SMALL} }};\n")
+          f"OFF_SIZE_T = {OFF_SIZE_T}, OFF_SIZE_D = {OFF_SIZE_D}, OFF_SIZE_L = {OFF_SIZE_L}, "
+          f"OFF_SIZE_X = {OFF_SIZE_X}, RUST_CLASS = {CLASS}, SMALL = {SMALL} }};\n")
         w("#endif\n")
     with open(f"{out}/table.h", "w") as fh:
         w = fh.write

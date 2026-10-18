@@ -929,6 +929,67 @@ the comparison (stand-in builds differing only in the free's null test and the c
   cache misses at about one per 32 operations; the IBT build of the same objects did not. This is
   op-cache placement of caller, PLT stubs and routines, which the routines do not control.
 
+### A checked sized free
+
+Measured 2026-10-17, same harness and method (CPU 13, sibling 29 at 1 percent busy). The
+question: can `free_sized(ptr, size)` and C++'s sized `operator delete(void*, size_t)` win back
+the mixed-loop and `call [GOT]` losses above without trusting the size? The size serves as a
+prediction and the address stays the truth. The class register comes from the size exactly as
+in `c_malloc`, so the push's store address no longer waits for the pointer. In parallel the class
+byte comes from the address as in `c_free`. A mismatch, or a pointer outside the heap, goes to
+`free_slow(ptr)`, which uses only the address. That compare is a predicted branch off the
+dependency chain.
+
+| Free | Bytes / uops | Pair direct / PLT | Burst 8 direct / PLT | Burst 32 direct / PLT | Mixed direct / PLT | `call [GOT]` pair / mixed |
+|---|---:|---:|---:|---:|---:|---:|
+| `c_free`, unsized (`fUj`) | 115 / 22 | 8.00 / 10.01 | 8.50 / 10.25 | 8.32 / 10.07 | 21.9 / 23.6 | 25.8 / 26.1 |
+| size trusted (`fZ`, not safe) | 112 / 19 | 8.00 / 10.00 | 8.25 / 10.25 | 8.07 / 11.05 | 9.6 / 10.1 | 16.2 / 13.4 |
+| checked, compact (`fKx`) | 128 / 24 | 8.06 / 10.00 | 8.85 / 10.25 | 9.74 / 10.10 | 11.2 / 11.5 | 16.1 / 13.7 |
+| checked, straightforward (`fKw`) | 136 / 24 | 9.00 / 11.00 | 9.25 / 11.25 | 9.07 / 11.07 | 11.1 / 11.4 | 16.1 / 13.7 |
+| checked, with a bound check and the published word (`fK`) | 142 / 25 | 9.00 / 11.00 | 9.25 / 11.25 | 9.07 / 11.07 | 11.6 / 11.5 | 16.1 / 13.9 |
+
+- The check works as intended. In the mixed loop the checked free runs within 1.4 to 1.6 of
+  the size-trusting one, and 10.7 to 12.1 cycles under the unsized free. Under `call [GOT]` it
+  matches the size-trusting free: 16.1 a pair against 25.8. The remaining 1.5 in the mixed loop
+  is the compare's region load and the extra uops; the store address no longer depends on it.
+- The straightforward encoding is 136 bytes and pays section 13's third-line cycle on every call.
+  Two changes bring it to exactly 128 bytes and 24 uops:
+  - No bound check on the size. A wrong prediction can only cause a mismatch, so `movzx eax,
+    si` bounds the table index instead: an 8193-byte table, class 0 above 32 KiB.
+  - Register roles that drop REX prefixes in the back half: rsi for the rseq offset, rcx for the
+    descriptor, edx for the CPU number, all free once the class is known.
+- Through the PLT the compact form costs nothing over the unsized free in pairs and bursts. With
+  direct calls it costs 0.06 a pair, 0.35 per element in bursts of 8 and 1.4 in bursts of 32.
+  Inference: 24 uops plus the caller's loop overhead exceed the 4-cycle call budget when calls
+  come back to back.
+- Placing the address check inside the sequence (`fKi`, `fKwi`) or the region table behind its
+  own `lea` (`fKs`, 26 uops) measured no better. The slab-relative region read is a 5-cycle load,
+  which no longer matters because the compare is off the chain.
+- Shift and `base >> shift` as two statics save a uop over the published word, and that uop is
+  what fits the 24. Here they sit at page offset 2048, clear of the slab hot words. `fW`'s
+  class-1 and class-2 loss came from the same statics at offsets 8 and 16; the checked free was
+  measured only at the sizes of the loops above.
+
+Aligned sized delete (`operator delete(void*, size_t, align_val_t)`) gets no routine of its own.
+Its prediction would need the size rounded up to the alignment first, 3 uops on a routine already
+at 24; predicting from the bare size mismatches whenever the alignment changes the class. It
+should be the unsized `c_free`.
+
+Size of the prize from the region table alone: an unsized free that computes the class from the
+region index by arithmetic (`fAr`). This pretends each small class owns a fixed block of
+regions; here the shift is 0, so it is one `mov` and one `shr`.
+
+| | Pair direct / PLT | Mixed direct / PLT | `call [GOT]` pair / mixed |
+|---|---:|---:|---:|
+| unsized, region table (`fUj`) | 8.00 / 10.01 | 21.9 / 23.6 | 25.8 / 26.1 |
+| unsized, class by arithmetic (`fAr`) | 8.00 / 10.00 | 19.0 / 19.7 | 24.5 / 22.5 |
+| checked sized (`fKx`) | 8.06 / 10.00 | 11.2 / 11.5 | 16.1 / 13.7 |
+
+The table load accounts for 2.9 to 3.9 of the 12 to 13.5 cycles the unsized free loses in the
+mixed loop, and 1.3 of the 9.6 it loses under `call [GOT]`. The rest is the pointer chain itself:
+two loads to get the pointer in malloc, then the shifts. Changing how regions are assigned would
+not close the gap; a size from the caller does.
+
 ### Recommendations for the generator
 
 The pop and push (back half) as being changed: `r9 = SLABS + 8 * class` in, mask at a fixed
@@ -988,10 +1049,53 @@ and the abort handler as in `lean/generated`; `8:` stubs follow the `ret`. All r
    indexed by the size itself, for sizes up to 1024 (above, `calloc_slow(total)`); the pop; then
    `mov rsi, rdi; mov rdi, rax; jmp calloc_zero` (a Rust function zeroing `rsi` bytes and
    returning the block). 116 bytes, 23 uops (`cD`).
-5. No routine for realloc, `malloc_usable_size` or Rust's run-time sizes. Rust computes the
+5. `c_free_sized(ptr: rdi, size: rsi)` (`fKx`), for C23's `free_sized` and C++'s sized
+   `operator delete` and `delete[]`. 128 bytes, 24 uops; at the
+   limit of both rules, so the generator must not let it grow. The size is a prediction that the
+   address checks. Anything that disagrees or lies outside the heap tail-calls `free_slow(ptr)`
+   with `rdi` intact, so it is exactly as safe as `c_free`. Clobbers `rsi` as well.
+
+   ```asm
+       lea   r9, [rip + SLABS]
+       movzx eax, si                               ; bounds the index; no size check needed
+       add   eax, 7
+       shr   eax, 3
+       movzx edx, byte ptr [r9 + rax + SIZE_X_OFF] ; 8193 bytes; 0 for sizes above 32 KiB
+       mov   ecx, dword ptr [rip + SHIFT]          ; the shift and base >> shift, published with
+       shrx  rax, rdi, rcx                         ; the heap word, at a page offset no hot slab
+       sub   rax, qword ptr [rip + BASE_INDEX]     ; word has
+       cmp   rax, 4096
+       jae   8f
+       cmp   dl, byte ptr [r9 + rax + REGION_OFF]  ; the address's class must agree
+       jne   8f
+       lea   r9, [r9 + rdx*8]
+   5:  mov   rsi, [rip + __rseq_offset@GOTPCREL]
+       mov   rsi, [rsi]
+       lea   rcx, [rip + 3f]
+       mov   fs:[rsi + 8], rcx
+   6:  mov   edx, fs:[rsi + 4]
+       cmp   edx, 8192
+       jae   8f
+       shl   rdx, 12
+       mov   rcx, [r9 + rdx]
+       lea   rax, [rcx + 8]
+       test  eax, dword ptr [r9 + MASK_OFF]
+       je    8f
+       mov   [rcx], rdi
+       mov   [r9 + rdx], rax                       ; commit
+   7:  ret
+   8:  jmp   free_slow
+   ```
+
+   Predicted class 0 (size above 32 KiB) agrees only with an unassigned region's 0, and class 0's
+   zero mask then sends the push to the slow path. Null fails the range check. The two statics
+   must be written before the heap word is published: a free that sees a pointer into the heap
+   got it from an allocation that happened after publication. The aligned sized delete is
+   `c_free`.
+6. No routine for realloc, `malloc_usable_size` or Rust's run-time sizes. Rust computes the
    class with the same `(n + 7) >> 3` byte lookup (its own table: no 16-byte rule, alignment
    applied first) and calls the class-register routine. Generic routines measured at the floor.
-6. Placement: the 128-byte and 24-uop limits of section 13 hold for these routines and decide
+7. Placement: the 128-byte and 24-uop limits of section 13 hold for these routines and decide
    them. Keep the published heap word off the page offsets of the slab hot words (8 to 360).
    Anything read on every free that shares a page offset with a slab word of a hot class costs a
    cycle.
