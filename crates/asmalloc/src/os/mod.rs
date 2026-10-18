@@ -6,10 +6,10 @@
 //! talks to the OS.
 //!
 //! The interface is what the design needs and no more: reserve address space, make parts of it
-//! writable, make writable parts resident ahead of use, return pages, steer transparent huge
-//! pages, mark a page to be wiped in forked children, unmap, fence the restartable sequences of
-//! one CPU, draw a random number, read a clock, and abort. Each implementation also fixes the
-//! [`Geometry`] the heap is laid out with, so the simulated OS can use a scaled-down heap.
+//! writable, return pages, steer transparent huge pages, mark a page to be wiped in forked
+//! children, unmap, fence the restartable sequences of one CPU, draw a random number, read a
+//! clock, and abort. Each implementation also fixes the [`Geometry`] the heap is laid out with,
+//! so the simulated OS can use a scaled-down heap.
 //!
 //! Ranges passed to the memory calls are page-aligned, a whole number of pages long, not empty,
 //! and inside one live reservation made by the same `Os` value. [`crate::space::Space`] checks
@@ -18,7 +18,6 @@
 #[cfg(all(target_os = "linux", target_arch = "x86_64", not(kani)))]
 pub mod linux;
 pub mod machine;
-pub mod rseq;
 #[cfg(any(test, kani, feature = "sim"))]
 pub mod sim;
 
@@ -82,7 +81,7 @@ pub enum HugePages {
 /// - After `commit` succeeds the range is readable and writable until it is unmapped, and its
 ///   contents are unchanged.
 /// - After `purge` succeeds the range reads as zero and stays writable if it was.
-/// - `populate` and `advise_huge` change neither contents nor permissions.
+/// - `advise_huge` changes neither contents nor permissions.
 /// - After `wipe_on_fork` succeeds, a child forked later reads the range as zero; the calling
 ///   process's contents and permissions are unchanged.
 /// - A failed call may have taken effect on part of its range, but never beyond it.
@@ -116,15 +115,6 @@ pub unsafe trait Os: Sync {
     /// The range follows the rules in the module documentation, no thread reads or writes it
     /// during the call, and nothing in it is needed afterwards.
     unsafe fn purge(&self, start: NonNull<u8>, len: usize) -> Result<(), OsError>;
-
-    /// Makes a writable range resident now, as writing each page would, without writing
-    /// anything (`MADV_POPULATE_WRITE`): one call instead of a fault per page. Fails, having
-    /// populated at most a prefix, if part of the range is not writable or memory runs out.
-    ///
-    /// # Safety
-    ///
-    /// The range follows the rules in the module documentation.
-    unsafe fn populate(&self, start: NonNull<u8>, len: usize) -> Result<(), OsError>;
 
     /// Advises for or against transparent huge pages over a range.
     ///

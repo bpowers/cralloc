@@ -14,7 +14,7 @@ use core::alloc::Layout;
 pub(crate) const C_TABLE_MAX: usize = MAX_SMALL_SIZE;
 
 /// The largest size `calloc`'s table covers.
-pub(crate) const CALLOC_TABLE_MAX: usize = 1024;
+pub(crate) const CALLOC_TABLE_MAX: usize = crate::spec::CALLOC_MAX;
 
 /// The class index of a C request for `size` bytes, for a size with a small class.
 const fn class_index(size: usize) -> u8 {
@@ -72,7 +72,7 @@ pub(crate) const C_CALLOC_LENS: [u16; CALLOC_TABLE_MAX + 1] = {
 
 /// The largest size the sized free's prediction covers by its table index: the low 16 bits of
 /// the size.
-pub(crate) const C_SIZED_LEN: usize = 1 << 16;
+pub(crate) const C_SIZED_LEN: usize = crate::spec::SIZED_LEN;
 
 /// The sized free's table: entry `n` is the class index of `malloc(n)` for every size up to
 /// [`C_TABLE_MAX`], and 0 (no class) above it: the class a sized free predicts from the low 16
@@ -91,7 +91,7 @@ const fn sized_classes() -> [u8; C_SIZED_LEN] {
 /// Where a table the C routines read starts within its static: 2048 bytes into a page, so that
 /// the bytes of the sizes programs use most have page offsets no slab word has (a load at the page
 /// offset of a store in flight waits for it: `docs/research/zen5-roofline.md`, section 14).
-pub(crate) const TABLE_OFF: usize = 2048;
+pub(crate) const TABLE_OFF: usize = crate::spec::TABLE_OFF;
 
 /// A table of class bytes `TABLE_OFF` bytes into a page-aligned static.
 #[doc(hidden)]
@@ -133,16 +133,14 @@ pub static C_SIZED_SIZES: PlacedTable<C_SIZED_LEN> = PlacedTable::new(sized_clas
 
 // The tables are where and how long the routines were proved to read them.
 const _: () = {
-    use crate::front::generated_centry as proved;
-    assert!(TABLE_OFF == proved::TABLE_OFF);
-    assert!(C_TABLE_MAX == proved::MALLOC_MAX && C_TABLE_MAX / 8 + 1 == proved::MALLOC_LEN);
-    assert!(C_SIZED_LEN == proved::SIZED_LEN);
-    assert!(CALLOC_TABLE_MAX == proved::CALLOC_MAX && CALLOC_TABLE_MAX + 1 == proved::CALLOC_LEN);
+    use crate::spec;
+    assert!(C_TABLE_MAX == spec::MALLOC_MAX && C_TABLE_MAX / 8 + 1 == spec::MALLOC_LEN);
+    assert!(CALLOC_TABLE_MAX + 1 == spec::CALLOC_LEN);
     assert!(core::mem::offset_of!(PlacedTable<1>, bytes) == TABLE_OFF);
 };
 
 /// The small class of `malloc(size)` from the table, or `None` above it.
-#[inline(always)]
+#[cfg(test)]
 pub(crate) fn malloc_class(size: usize) -> Option<crate::classes::SmallClass> {
     if size > C_TABLE_MAX {
         return None;
@@ -152,7 +150,7 @@ pub(crate) fn malloc_class(size: usize) -> Option<crate::classes::SmallClass> {
 }
 
 /// The small class of a `calloc` of `size` bytes in all from its table, or `None` above it.
-#[inline(always)]
+#[cfg(test)]
 pub(crate) fn calloc_class(size: usize) -> Option<crate::classes::SmallClass> {
     let index = *C_CALLOC_CLASSES.get(size)?;
     Class::from_index(index).and_then(Class::small)

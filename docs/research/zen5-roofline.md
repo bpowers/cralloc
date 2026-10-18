@@ -290,7 +290,10 @@ CPUs 0 to 7 and their siblings were mostly busy with other work, CPUs 8 to 15 mo
   (`faultin_page_range`, `handle_mm_fault`): it skips the exception entry and the VMA lookup
   (in the demand-fault profile `asm_exc_page_fault` 7%, `mas_walk` 11%, `lock_vma_under_rcu`
   4%), and still allocates, zeroes, locks the page table and adds the page to the LRU for each
-  page. In its profile the page-table lock is 28% and clearing the page 9%.
+  page. In its profile the page-table lock is 28% and clearing the page 9%. Built into the
+  allocator as populate-ahead for dense classes, it cut faults three to five times on the
+  workloads and kernel time by under a tenth, for about 1 MiB at each peak
+  (`memory.md`), and was removed.
 - **A huge page is bound by zeroing.** Clearing is 85% of its profile; 151 ns per 4 KiB is
   about 27 GB/s, which is what one core writes to DRAM. So 4 KiB pages cost about 400 ns of
   bookkeeping per page on top of the zeroing that every way of getting fresh memory pays.
@@ -508,6 +511,27 @@ not its numbers.
    - at free, purge, then a fresh `mmap` and advice over exactly the moved-in range;
    - no guarantee in a forked child, where the probe will often say no and heals do not
      merge.
+
+### Large blocks at the same offset in the caches (2026-10-17)
+
+Large slots are spaced by their class size, often a power of two, so buffers that start at
+slot starts share their low address bits, and the same offset in each falls in the same
+cache set. A stand-alone probe: 64 buffers of 4 MiB at 16 MiB-aligned addresses, memory
+pre-faulted, written round-robin one `u64` at a time as 64 growing vectors are, against the
+same buffers each moved by a different multiple of 64 bytes within a page. Pinned to CPU 13,
+three interleaved runs:
+
+| | ns per element | L2 requests from L1D | of them L2 hits |
+|---|---:|---:|---:|
+| at slot starts | 7.86 to 7.95 | 2.05e9, one per store | 2.04e9 |
+| staggered | 0.74 to 0.80 | 2.1e7, one per line | 0.7e7 to 0.9e7 |
+
+At slot starts every store misses the 12-way L1: 64 streams map to one set. With large
+blocks staggered by their slot's index (`policy::STAGGER_STEP`), the workload suite's 64
+vectors grown to 4 MiB took 12.0 cycles an element against 40.9 (jemalloc 14.5, which
+offsets large extents for the same reason; mimalloc 40.0), at the same peak, 271 MiB. A
+loop `a[i] = b[i] + c[i]` over three vectors of 4 or 16 MiB was the same for every
+allocator: three streams fit the L1's ways.
 
 ## 8. Moving cache lines between cores
 
@@ -1389,6 +1413,12 @@ were over 30 in mixed.
   where `call [mem]` has disabled memory renaming (first subsection). Direct and PLT calls hide it.
   The order comes from the shared Lean pop steps. This is inference from one interleaved
   comparison.
+
+Re-measured the same evening after the C layer's Rust fast path and the out-of-line pop and push
+were deleted, which moved the routines in the library. Same method, but the machine was
+heavily loaded (load average 80; CPU 28 stayed idle). Pair 8.06 direct and 10.03 through the
+PLT, burst 32 8.80 direct and 10.45 through the PLT (1.1 better than above, which supports
+reading the earlier 11.19 as placement), mixed 22.7 and 23.7, `call [GOT]` pair 28.1.
 
 calloc, PLT, cycles per `calloc(1, n)` and free:
 

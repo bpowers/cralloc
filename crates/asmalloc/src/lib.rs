@@ -40,11 +40,14 @@ pub mod c;
 pub mod classes;
 pub mod depot;
 pub mod front;
-#[cfg(test)]
-pub(crate) mod generated;
 mod heap;
 pub mod os;
 pub mod space;
+/// The constants of the specification the routines were proved against, as the Lean emitter
+/// writes them, for every target: the layout the Rust side builds from or asserts against.
+#[path = "front/generated/constants.rs"]
+#[rustfmt::skip]
+pub(crate) mod spec;
 pub mod stats;
 
 #[cfg(all(target_os = "linux", target_arch = "x86_64", not(miri), not(kani)))]

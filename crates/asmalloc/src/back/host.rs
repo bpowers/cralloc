@@ -113,10 +113,6 @@ impl<O: Os> Host for ClassHost<'_, O> {
             .is_ok()
     }
 
-    fn populate(&self, region: RegionId, offset: usize, len: usize) {
-        let _ = self.space.populate(self.region_at(region, offset), len);
-    }
-
     unsafe fn purge(&self, region: RegionId, offset: usize, len: usize) -> bool {
         // SAFETY: the caller promises what `Space::purge` asks: nothing touches the range during
         // the call and nothing in it is needed.

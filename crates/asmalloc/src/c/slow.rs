@@ -12,7 +12,7 @@
 //! one whatever the size says. The ledger entry is
 //! `docs/safety/asmalloc/c/slow-safety.md`.
 
-use super::{errno, mirror, seam, table};
+use super::{errno, mirror, table};
 use crate::classes::Class;
 use crate::heap::{Found, process};
 use core::alloc::Layout;
@@ -30,7 +30,7 @@ pub(super) fn allocate(size: usize, align: usize, zero: bool) -> *mut u8 {
     };
     match Class::of_c(layout).and_then(Class::small) {
         Some(class) => {
-            let object = seam::alloc_small(class);
+            let object = crate::heap::c_alloc_small(class);
             if !object.is_null() {
                 mirror::note(object, class);
                 if zero {
@@ -94,26 +94,12 @@ pub unsafe extern "C" fn calloc_zero_tail(
     block
 }
 
-/// Zeroes `block`, all that `malloc_usable_size` reports of it (the class of `total`), and
-/// returns it: the tail of a `calloc` of `total` bytes whose block a pop found.
+/// Zeroes all of `block` that `malloc_usable_size` reports (the class of `total`).
 ///
 /// # Safety
 ///
-/// `block` is a slot of the C class of `total` bytes (`table::calloc_class`), or for a total
+/// `block` is a slot of the C class of `total` bytes (`table::C_CALLOC_LENS`), or for a total
 /// that table does not cover a block of at least `total` bytes, that the caller owns.
-#[inline(never)]
-pub unsafe extern "C" fn calloc_zero(block: *mut c_void, total: usize) -> *mut c_void {
-    // SAFETY: passed through from the caller.
-    unsafe { zero_block(block, total) };
-    block
-}
-
-/// [`calloc_zero`]'s zeroing, inlined into each caller so that the generated routine's tail
-/// is one call.
-///
-/// # Safety
-///
-/// As for [`calloc_zero`].
 #[inline(always)]
 unsafe fn zero_block(block: *mut c_void, total: usize) {
     match table::C_CALLOC_LENS.get(total).map(|&len| usize::from(len)) {
@@ -192,7 +178,7 @@ pub unsafe extern "C" fn free_slow(ptr: *mut c_void) {
     };
     match process::find(object.as_ptr()) {
         // SAFETY: SLOW-03.
-        Some(Found::Small(class)) => unsafe { seam::free_small(class, object) },
+        Some(Found::Small(class)) => unsafe { crate::heap::c_free_small(class, object) },
         Some(Found::Large { .. }) => process::free_large(object),
         None => process::abort("free of a pointer that is not a block of asmalloc's heap"),
     }

@@ -331,7 +331,7 @@ theorem hv : cx.A.args ((cx.sig.words cx.A.ptrBits).map (·.bits cx.A.ptrBits)) 
 
 theorem facts_of_pre (hs : (popInlineContract inlineAbi).pre s) : Facts cx s := by
   have := (pre_iff cx (s := s) hv rfl rfl).mp hs
-  exact facts_of_world hX (.inl rfl) this.2.1 this.2.2
+  exact facts_of_world hX rfl this.2.1 this.2.2
 
 theorem ofNat_toNat64 (v : BitVec 64) : BitVec.ofNat 64 v.toNat = v := by
   rw [BitVec.ofNat_toNat, BitVec.setWidth_eq]
@@ -428,7 +428,7 @@ theorem wordAddr_eq (hp : Pre s k) :
     wordAddr (s.syms SLABS) (cpu32 s).toNat (cx.cls s) = wa s := by
   rw [hp.word]; rfl
 
-theorem test_eq : BitVec.ofNat 32 (wv s).toNat &&& BitVec.ofNat 32 (cx.testMask s 0) = tst s := by
+theorem test_eq : BitVec.ofNat 32 (wv s).toNat &&& BitVec.ofNat 32 (cx.testMask s) = tst s := by
   simp only [Spec.Slab.Ctx.testMask, BitVec.ofNat_toNat, tst]; rfl
 
 theorem trace_ok (hs : (popInlineContract inlineAbi).pre s) :
@@ -437,7 +437,7 @@ theorem trace_ok (hs : (popInlineContract inlineAbi).pre s) :
   obtain ⟨k, hp⟩ := pre_of h
   show cx.PopTrace s (Code.events isa (.rseq arm body) s)
   simp only [Code.events, execBlock_arm h.toArm, events_arm h.toArm]
-  refine ⟨(o s).toNat, s.csDesc.toNat, (cpu32 s).toNat, (wv s).toNat, 0, (x s).toNat, ?_⟩
+  refine ⟨(o s).toNat, s.csDesc.toNat, (cpu32 s).toNat, (wv s).toNat, (x s).toNat, ?_⟩
   simp only [Spec.Slab.Ctx.headTrace, Spec.Slab.Ctx.rd, Spec.Slab.Ctx.wr, tp_of (c := cx) hX,
     sym_of (c := cx) hX, test_eq, ofNat_toNat64, addr8, addr4, rsName]
   by_cases hi : cx.InRange s

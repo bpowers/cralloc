@@ -31,8 +31,9 @@ values they read).
   generated `MASK_DISP`, `SHIFT_DISP`, `BASE_DISP`, `MIRROR_BYTES`, `MIRROR_COUNT`,
   and `REGION_DISP`, and the static's size to
   the slabs plus three pages). `C_SIZES`, `C_CALLOC_SIZES` and `C_SIZED_SIZES` are statics of their own, immutable,
-  each table 2048 bytes in (assertions in `c/table.rs` against the generated `TABLE_OFF`,
-  `MALLOC_LEN` and `SIZED_LEN`). Distinct statics do not overlap, and none overlaps glibc's
+  each table `TABLE_OFF` bytes in, its length the one the routines read (`c/table.rs` takes
+  `TABLE_OFF` and `SIZED_LEN` from `crate::spec`, which the Lean emitter writes, and asserts
+  `MALLOC_LEN` and `CALLOC_LEN`). Distinct statics do not overlap, and none overlaps glibc's
   thread control block, which holds the rseq area, or the thread's stack. None is at the top of
   the address space.
 - (I): for a small class, (C) and (S) of `front/real-safety.md`: the mask entry is zero or the
@@ -61,7 +62,7 @@ frees:
   has been handed out to C, and the back end never takes a region holding blocks from its
   class. By the free's contract the pointer is a block of the heap the caller owns and gives
   up; a block in a region of a small class is a slot of that class (F1, F2 in
-  `seam-safety.md`). So the push hands the heap a valid free of the right class. A zero byte, a
+  `slow-safety.md`). So the push hands the heap a valid free of the right class. A zero byte, a
   large class's or a run's has a zero mask, and the routine leaves for the slow path, which
   decides from the back end's own table. A pointer into the middle of a small block is outside
   the contract; the routine pushes it as a block of its region's class, and it is caught only
@@ -75,4 +76,6 @@ frees:
 **Proof.** The obligations hold as above for any calling thread of the process. `malloc` has no
 precondition of its own; `free` and `free_sized` pass on their callers' promise, `free`'s
 contract. Pointers cross the assembly as integers: `free` exposes the block's provenance and
-`malloc` takes the exposed provenance back, as REAL-03 argues for the out-of-line routines.
+`malloc` takes the exposed provenance back, as REAL-03 argues for the inline pop and push:
+every object address lies in the heap's reservation, whose provenance the heap exposes when it
+starts.

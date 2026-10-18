@@ -2,54 +2,6 @@
 //! Verified `centry` functions for `x86_64`.
 #![allow(dead_code)]
 
-/// From the specification (`Api.rustConsts`).
-pub(crate) const BASE_DISP: usize = 33555464;
-
-/// From the specification (`Api.rustConsts`).
-pub(crate) const CALLOC_LEN: usize = 1025;
-
-/// From the specification (`Api.rustConsts`).
-pub(crate) const CALLOC_MAX: usize = 1024;
-
-/// From the specification (`Api.rustConsts`).
-pub(crate) const MALLOC_LEN: usize = 4097;
-
-/// From the specification (`Api.rustConsts`).
-pub(crate) const MALLOC_MAX: usize = 32768;
-
-/// From the specification (`Api.rustConsts`).
-pub(crate) const MASK_COUNT: usize = 256;
-
-/// From the specification (`Api.rustConsts`).
-pub(crate) const MASK_DISP: usize = 33556480;
-
-/// From the specification (`Api.rustConsts`).
-pub(crate) const MIRROR_BYTES: usize = 16;
-
-/// From the specification (`Api.rustConsts`).
-pub(crate) const MIRROR_COUNT: usize = 1;
-
-/// From the specification (`Api.rustConsts`).
-pub(crate) const REGION_COUNT: usize = 4096;
-
-/// From the specification (`Api.rustConsts`).
-pub(crate) const REGION_DISP: usize = 33560576;
-
-/// From the specification (`Api.rustConsts`).
-pub(crate) const SHIFT_DISP: usize = 33555456;
-
-/// From the specification (`Api.rustConsts`).
-pub(crate) const SIZED_LEN: usize = 65536;
-
-/// From the specification (`Api.rustConsts`).
-pub(crate) const SLAB_BYTES: usize = 4096;
-
-/// From the specification (`Api.rustConsts`).
-pub(crate) const SLAB_COUNT: usize = 8192;
-
-/// From the specification (`Api.rustConsts`).
-pub(crate) const TABLE_OFF: usize = 2048;
-
 /// C's `calloc`: for a product `n * size` that does not overflow and is at most 1024, pops a block of the class `C_CALLOC_SIZES[n * size]` from the calling thread's CPU's magazine and tail-calls `c::slow::calloc_zero_tail(n, size, block)`, which zeroes it and returns it; otherwise, or if the CPU number has no slab, the class's mask is 0 or its magazine has none to give, tail-calls `c::slow::calloc_slow_args(n, size)`.
 ///
 /// Contract: `VG.Spec.CEntry.callocContract`.

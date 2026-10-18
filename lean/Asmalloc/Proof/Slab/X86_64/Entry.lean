@@ -32,33 +32,6 @@ theorem env_ret {c : Spec.Slab.Ctx isa} (hA : X86 c.A) {post : State → State �
   rw [mem_of hA, mem_of hA] at hk
   exact Mem.readW_congr fun i hi => hk _ (rsVar_contains _ (by omega))
 
-theorem popTable_run {s s' : State} (hs : (popContract abi).pre s)
-    (hr : Restarts target popTable (popContract abi) s s') :
-    (popContract abi).pre s' ∧ (∀ r ∈ [Reg.rdi], s'.gpr r = s.gpr r) ∧
-      ((∃ s'', Exec isa popTable s' s'' ∧ abiPreserved s s'' ∧ (popContract abi).post s' s'') ∨
-        (∃ t s'', ExecExit isa popTable s' t s'' ∧ abiPreserved s s'' ∧
-          (popContract abi).exit t s' s'')) :=
-  restarts_target_run PopTable.verified
-    (fun s hs p hp => by
-      have := ((abort_iff PopTable.cx PopTable.hv s p).mp
-        (PopTable.verified.abortOk hs hp).2.2.1).1
-      simpa using this)
-    (fun _ _ he => env_ret PopTable.hX (by decide) he) hs hr
-
-theorem pushTable_run {s s' : State} (hs : (pushContract abi).pre s)
-    (hr : Restarts target pushTable (pushContract abi) s s') :
-    (pushContract abi).pre s' ∧ (∀ r ∈ [Reg.rdi, Reg.rsi], s'.gpr r = s.gpr r) ∧
-      ((∃ s'', Exec isa pushTable s' s'' ∧ abiPreserved s s'' ∧ (pushContract abi).post s' s'') ∨
-        (∃ t s'', ExecExit isa pushTable s' t s'' ∧ abiPreserved s s'' ∧
-          (pushContract abi).exit t s' s'')) :=
-  restarts_target_run PushTable.verified
-    (fun s hs p hp => by
-      have := ((abort_iff PushTable.cx PushTable.hv s p).mp
-        (PushTable.verified.abortOk hs hp).2.2.1).1
-      simp only [List.cons.injEq, and_true] at this
-      simpa using this)
-    (fun _ _ he => env_ret PushTable.hX (by decide) he) hs hr
-
 theorem popInline_run {s s' : State} (hs : (popInlineContract inlineAbi).pre s)
     (hr : Restarts inlineTarget popInline (popInlineContract inlineAbi) s s') :
     (popInlineContract inlineAbi).pre s' ∧
@@ -134,32 +107,6 @@ theorem pushInline_restartsOk : ∀ s s', (pushInlineContract inlineAbi).pre s �
       (inlineTarget.inline = true → inlineTarget.preservedExcept PushInline.clobbers s s') :=
   restartsOk_inline (sig := pushInlineSig) PushInline.verified
   (by decide) (fun _ hs => (PushInline.clobbersOk hs).2.2) (by decide)
-
-theorem popTable_restartsOk : ∀ s s', (popContract abi).pre s →
-    Restarts target popTable (popContract abi) s s' →
-      target.abiPreserved s s' ∧ ArgsKept target.abi popSig s s' ∧
-      (target.inline = true → target.preservedExcept [] s s') :=
-  restartsOk_target (sig := popSig) PopTable.verified (by decide)
-    (fun s hs p hp r hr => by
-      have h := ((abort_iff PopTable.cx PopTable.hv s p).mp (PopTable.verified.abortOk hs hp).2.2.1).1
-      have hr' : r ∈ [Reg.rdi] := hr
-      simp only [List.cons.injEq, and_true] at h
-      simp only [List.mem_cons, List.not_mem_nil, or_false] at hr'
-      rcases hr' with rfl <;> simp_all)
-    (fun _ _ he => env_ret PopTable.hX (by decide) he)
-
-theorem pushTable_restartsOk : ∀ s s', (pushContract abi).pre s →
-    Restarts target pushTable (pushContract abi) s s' →
-      target.abiPreserved s s' ∧ ArgsKept target.abi pushSig s s' ∧
-      (target.inline = true → target.preservedExcept [] s s') :=
-  restartsOk_target (sig := pushSig) PushTable.verified (by decide)
-    (fun s hs p hp r hr => by
-      have h := ((abort_iff PushTable.cx PushTable.hv s p).mp (PushTable.verified.abortOk hs hp).2.2.1).1
-      have hr' : r ∈ [Reg.rdi, Reg.rsi] := hr
-      simp only [List.cons.injEq, and_true] at h
-      simp only [List.mem_cons, List.not_mem_nil, or_false] at hr'
-      rcases hr' with rfl | rfl <;> simp_all)
-    (fun _ _ he => env_ret PushTable.hX (by decide) he)
 
 theorem cas_restartsOk : ∀ s s', (casContract abi).pre s →
     Restarts target cas (casContract abi) s s' →

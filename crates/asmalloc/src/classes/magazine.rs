@@ -17,7 +17,7 @@
 //! all of this for every magazine size, every magazine address and every marker.
 
 /// Bytes per magazine slot: one pointer.
-pub const SLOT_BYTES: usize = 8;
+pub const SLOT_BYTES: usize = crate::spec::WORD_BYTES;
 
 /// The most bytes of objects a magazine holds, unless that would leave it fewer than
 /// [`MagazineSize::MIN`] slots.
@@ -39,9 +39,9 @@ pub const MAGAZINE_BUDGET: usize = 64 << 10;
 /// passes the allocation test.
 pub const MARKER: usize = 1;
 
-/// The number of low bits that are exactly [`MARKER`] in every marker. The routines generated
-/// from Lean use the same value (`MARKER_SHIFT` in `front/generated`).
-pub const MARKER_SHIFT: u32 = 19;
+/// The number of low bits that are exactly [`MARKER`] in every marker: the specification's,
+/// `MAG_LOG_MAX + 3` (`IsMarker` in `lean/Asmalloc/Spec/Slab.lean`).
+pub const MARKER_SHIFT: u32 = crate::spec::MARKER_SHIFT;
 
 /// Whether a slab word or stack head is a marker.
 #[inline(always)]
@@ -207,35 +207,34 @@ impl MagazineSize {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::generated::{lean_constant, lean_definition};
+    use crate::spec;
 
+    /// Every magazine size is one the routines accept, with the mask they were proved for.
     #[test]
-    fn the_masks_and_marker_match_the_routines() {
+    fn the_masks_match_the_routines() {
         for size in MagazineSize::all() {
-            let name = std::format!("MAG_MASK_{}", size.slots());
-            assert_eq!(size.mask() as u64, lean_constant(&name), "{name}");
+            let proved = match size.slots() {
+                4 => spec::MAG_MASK_4,
+                8 => spec::MAG_MASK_8,
+                16 => spec::MAG_MASK_16,
+                32 => spec::MAG_MASK_32,
+                64 => spec::MAG_MASK_64,
+                128 => spec::MAG_MASK_128,
+                256 => spec::MAG_MASK_256,
+                512 => spec::MAG_MASK_512,
+                1024 => spec::MAG_MASK_1024,
+                n => panic!("no proved mask for {n} slots"),
+            };
+            assert_eq!(size.mask(), proved as usize, "{} slots", size.slots());
+            let log = size.slots().trailing_zeros();
+            assert!((spec::MAG_LOG_MIN..=spec::MAG_LOG_MAX).contains(&log));
         }
-        assert!(MagazineSize::MIN.slots().trailing_zeros() as u64 >= lean_constant("MAG_LOG_MIN"));
-        assert!(MagazineSize::MAX.slots().trailing_zeros() as u64 <= lean_constant("MAG_LOG_MAX"));
-        assert_eq!(MARKER_SHIFT as u64, lean_constant("MARKER_SHIFT"));
-        assert_eq!(SLOT_BYTES as u64, lean_constant("WORD_BYTES"));
-        assert!((crate::classes::SMALL_COUNT as u64) < lean_constant("CLASS_LIMIT"));
+        assert_eq!(MARKER_SHIFT, spec::MAG_LOG_MAX + 3);
     }
 
-    /// `is_marker` and `Marker` transcribe Lean's `IsMarker` and `MARKER_SHIFT`; this fails if
-    /// either definition changes in Lean, so the transcription is revisited with it.
+    /// `is_marker` and `Marker` transcribe Lean's `IsMarker`: the low `MARKER_SHIFT` bits are 1.
     #[test]
-    fn markers_match_the_specification() {
-        assert_eq!(
-            lean_definition("IsMarker"),
-            "def IsMarker (w : BitVec 64) : Prop := w.toNat % 2 ^ MARKER_SHIFT = 1"
-        );
-        assert_eq!(
-            lean_definition("MARKER_SHIFT"),
-            "def MARKER_SHIFT : Nat := MAG_LOG_MAX + 3"
-        );
-        assert_eq!(MARKER_SHIFT as u64, lean_constant("MAG_LOG_MAX") + 3);
-        assert_eq!(MARKER_SHIFT as u64, lean_constant("MARKER_SHIFT"));
+    fn markers_are_what_the_specification_says() {
         let is_marker_in_lean = |w: usize| w % (1 << MARKER_SHIFT) == 1;
         let low = (1usize << MARKER_SHIFT) - 1;
         for high in [0, 1, 0xdead_beef, usize::MAX >> MARKER_SHIFT] {

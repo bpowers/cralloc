@@ -2,14 +2,13 @@
 //!
 //! One heap per process: [`HEAP`] over Linux, run with the generated routines on the static
 //! `front::SLABS`. All three are zero until the first slow path starts the heap, so the fast
-//! paths never check. This module also gives the generated out-of-line routines their slow
-//! paths, [`pop_slow`] and [`push_slow`]. The ledger for the unsafe blocks here is
+//! paths never check. This module also gives the C slow paths their way into the heap,
+//! [`c_alloc_small`] and [`c_free_small`]. The ledger for the unsafe blocks here is
 //! `docs/safety/asmalloc/heap/global-safety.md`.
 
 use super::Heap;
 use crate::classes::SmallClass;
-use crate::front::{Real, Routines, SLABS, publish_masks};
-use crate::os::Os;
+use crate::front::{Real, Routines, publish_masks};
 use crate::os::linux::LinuxOs;
 use core::alloc::{GlobalAlloc, Layout};
 use core::ptr::{self, NonNull};
@@ -59,24 +58,6 @@ impl Asmalloc {
     pub fn collect() -> usize {
         // SAFETY: GLOBAL-02.
         unsafe { HEAP.collect(Real) }
-    }
-
-    /// Pops an object of `class` with the out-of-line routine (for callers that cannot inline,
-    /// such as the C entry points). Null if there is no memory.
-    #[inline]
-    pub fn alloc_small(class: SmallClass) -> *mut u8 {
-        Real.pop_out_of_line(class)
-    }
-
-    /// Pushes an object of `class` with the out-of-line routine.
-    ///
-    /// # Safety
-    ///
-    /// `object` is a block of `class` this heap handed out, which the caller owns and gives up.
-    #[inline]
-    pub unsafe fn free_small(class: SmallClass, object: NonNull<u8>) {
-        // SAFETY: the caller's promise is the routine's.
-        unsafe { Real.push_out_of_line(class, object) }
     }
 }
 
@@ -174,50 +155,26 @@ pub(crate) fn large_heartbeat() {
     unsafe { HEAP.heartbeat(Real) }
 }
 
-/// The small class whose hot word in slab 0 is at `word`, or an abort: the out-of-line routines
-/// are given such an address, and only a small class's word has magazines.
-///
-/// Also where the masks the out-of-line routines read are written: until they are, every call
-/// of those routines misses and arrives here.
-fn small_class(word: usize) -> SmallClass {
+/// A small block of `class` for the C slow paths, from the heap's own slow path (which pops
+/// first): reached only after a generated C routine missed, so no second pop in front of it.
+/// Also where the masks the generated C routines read are written: until they are, every call of
+/// those routines misses and arrives here. Null if there is no memory.
+#[cold]
+pub(crate) fn c_alloc_small(class: SmallClass) -> *mut u8 {
     publish_masks();
-    match SLABS.class_of_word(word) {
-        Some(small) => small,
-        None => HEAP
-            .os()
-            .abort("an out-of-line routine was called with no small class's word"),
-    }
-}
-
-/// Where the out-of-line pop routine jumps when it misses, with its own argument, the address of
-/// the class's word in slab 0: the object's address, or 0 if there is no memory. The thread's
-/// `rseq_cs` still names the routine's sequence, which it has left, so an interruption only
-/// clears it.
-///
-/// # Safety
-///
-/// Reached only by the tail jump of the out-of-line pop, whose caller passed a small class's
-/// word.
-#[cold]
-#[inline(never)]
-pub(crate) unsafe extern "sysv64" fn pop_slow(word: usize) -> usize {
     // SAFETY: GLOBAL-02.
-    unsafe { HEAP.alloc_slow(Real, small_class(word)) }.expose_provenance()
+    unsafe { HEAP.alloc_slow(Real, class) }
 }
 
-/// Where the out-of-line push routine jumps when it misses, with its own arguments.
+/// Frees a small block of `class` for the C slow paths, by the heap's own slow path (which
+/// pushes first), and writes the masks as [`c_alloc_small`] does.
 ///
 /// # Safety
 ///
-/// Reached only by the tail jump of the out-of-line push, whose caller passed a small class's
-/// word and an object of that class that the caller owned and gave up (`Asmalloc::free_small`).
+/// `object` is a block of `class` this heap handed out, which the caller owns and gives up.
 #[cold]
-#[inline(never)]
-pub(crate) unsafe extern "sysv64" fn push_slow(word: usize, object: usize) {
-    let class = small_class(word);
-    let Some(object) = NonNull::new(ptr::with_exposed_provenance_mut::<u8>(object)) else {
-        HEAP.os().abort("free of a null pointer through a routine");
-    };
+pub(crate) unsafe fn c_free_small(class: SmallClass, object: NonNull<u8>) {
+    publish_masks();
     // SAFETY: GLOBAL-02 and GLOBAL-04.
     unsafe { HEAP.free_slow(Real, class, object) }
 }

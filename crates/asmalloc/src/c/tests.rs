@@ -53,11 +53,18 @@ fn small_blocks_use_their_whole_c_class() {
     }
 }
 
+/// Whether a large block of `size` bytes at `p` reports as usable what it asked for, to the
+/// end of the page it ends in: a large block may start a stagger into its first page.
+fn reports(p: *mut c_void, size: usize) -> bool {
+    let n = usable(p);
+    n >= size && n < size + PAGE && (p.addr() + n).is_multiple_of(PAGE)
+}
+
 #[test]
 fn large_blocks_report_what_was_asked_for_rounded_to_a_page() {
     for size in [(32 << 10) + 1, 40 << 10, 100_000, 3 << 20] {
         let p = malloc(size);
-        assert_eq!(usable(p), size.next_multiple_of(PAGE), "malloc({size})");
+        assert!(reports(p, size), "malloc({size})");
         release(p);
     }
     // An aligned request in a large slot reports its size, not the slot.
@@ -108,13 +115,13 @@ fn realloc_stays_in_place_when_the_class_allows() {
         let big = malloc(40 << 10);
         assert_eq!(realloc(big, 39 << 10), big);
         assert_eq!(realloc(big, 40 << 10), big);
-        assert_eq!(usable(big), 40 << 10);
+        assert!(reports(big, 40 << 10));
         // Growing out of the slot moves to one with headroom: the next steps stay.
         let grown = realloc(big, 100 << 10);
         assert_ne!(grown, big);
-        assert_eq!(usable(grown), 100 << 10);
+        assert!(reports(grown, 100 << 10));
         assert_eq!(realloc(grown, 300 << 10), grown);
-        assert_eq!(usable(grown), 300 << 10);
+        assert!(reports(grown, 300 << 10));
         // Shrinking to a small size moves into a small class.
         let small = realloc(grown, 100);
         assert_ne!(small, grown);
@@ -382,17 +389,40 @@ mod generated {
     }
 
     #[test]
-    fn they_pair_with_the_rust_functions_both_ways() {
+    fn they_pair_with_the_slow_paths_both_ways() {
         let a = routines::malloc(200);
-        let b = malloc(200);
-        // SAFETY: live blocks, each given up once, by the other implementation.
+        let b = slow::malloc_slow(200);
+        // SAFETY: live blocks, each given up once, by the other path.
         unsafe {
-            free(a);
+            slow::free_slow(a);
             routines::free(b);
         }
         let c = routines::malloc(3000);
         // SAFETY: as above, with the size it was allocated with.
         unsafe { routines::free_sized(c, 3000) };
+    }
+
+    /// Two magazines' worth of every small class, so that each class's routines miss into the
+    /// heap's slow paths (which write the masks the routines read) and then hit.
+    #[test]
+    fn they_serve_every_small_class_through_their_slow_paths() {
+        for class in crate::classes::SmallClass::all() {
+            let size = class.size();
+            if table::malloc_class(size) != Some(class) {
+                continue;
+            }
+            let held: Vec<*mut c_void> = (0..2 * class.magazine().slots())
+                .map(|_| routines::malloc(size))
+                .collect();
+            for &p in &held {
+                assert!(!p.is_null());
+                assert_eq!(usable(p), size);
+            }
+            for p in held {
+                // SAFETY: each block is live and given up once.
+                unsafe { routines::free_sized(p, size) };
+            }
+        }
     }
 
     #[test]

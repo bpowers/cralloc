@@ -1,10 +1,9 @@
 //! A simulated OS over ordinary memory, for tests, fuzzing, Kani and Miri.
 //!
 //! [`SimOs`] carves reservations out of one zeroed host allocation and records, per page,
-//! whether it is reserved, writable, purged, populated and advised for or against huge pages. It behaves as
+//! whether it is reserved, writable, purged and advised for or against huge pages. It behaves as
 //! Linux does wherever the allocator could tell the difference: reserved memory reads as zero,
-//! commit keeps contents, purge zeroes, populate makes writable pages resident and fails on the
-//! first that is not, and unmapped memory comes back zero when reserved again.
+//! commit keeps contents, purge zeroes, and unmapped memory comes back zero when reserved again.
 //! It is stricter than Linux where that catches bugs: a call on memory that is not reserved, or
 //! on a range that is not whole pages, panics. [`SimOs::is_writable`] lets a test check a block
 //! before writing, [`SimOs::resident_bytes`] measures what the heap keeps resident, and
@@ -57,9 +56,7 @@ pub use faults::{Call, Faults};
 use self::cpus::Cpus;
 use self::faults::Injector;
 use self::memory::Memory;
-use self::pages::{
-    CHECKING, HUGE, NO_HUGE, POPULATED, PURGED, Pages, RESERVED, START, WIPE, WRITABLE,
-};
+use self::pages::{CHECKING, HUGE, NO_HUGE, PURGED, Pages, RESERVED, START, WIPE, WRITABLE};
 use super::{HugePages, Os, OsError};
 use crate::classes::MagazineSize;
 use crate::space::Geometry;
@@ -259,7 +256,7 @@ impl<S: Shape> SimOs<S> {
         Some((first, end - first))
     }
 
-    fn covering_all(&self, start: NonNull<u8>, len: usize, mask: u16) -> bool {
+    fn covering_all(&self, start: NonNull<u8>, len: usize, mask: u8) -> bool {
         self.covering(start, len)
             .is_some_and(|(first, count)| self.pages.all(first, count, mask))
     }
@@ -291,9 +288,8 @@ impl<S: Shape> SimOs<S> {
         })
     }
 
-    /// Bytes the heap would have resident: committed pages that were populated, or that hold a
-    /// nonzero byte. A lower bound, since a page written only with zeros counts as not resident
-    /// unless a populate made it so.
+    /// Bytes the heap would have resident: committed pages holding a nonzero byte. A lower
+    /// bound, since a page written only with zeros counts as not resident.
     ///
     /// # Safety
     ///
@@ -304,24 +300,11 @@ impl<S: Shape> SimOs<S> {
         let page = S::GEOMETRY.page_size();
         let resident = (0..self.pages.len())
             .filter(|&index| self.pages.get(index) & (RESERVED | WRITABLE) == RESERVED | WRITABLE)
-            .filter(|&index| {
-                self.pages.get(index) & POPULATED != 0
-                    // SAFETY: the page is inside `memory` and open, and the caller promises it
-                    // is initialized and not written meanwhile.
-                    || !unsafe { self.memory.is_zero(index << self.page_shift(), page) }
-            })
+            // SAFETY: the page is inside `memory` and open, and the caller promises it is
+            // initialized and not written meanwhile.
+            .filter(|&index| !unsafe { self.memory.is_zero(index << self.page_shift(), page) })
             .count();
         resident * page
-    }
-
-    /// Bytes of pages a populate made resident and no purge has returned since.
-    pub fn populated_bytes(&self) -> usize {
-        self.pages.count(RESERVED | POPULATED) << self.page_shift()
-    }
-
-    /// Whether every page touching `start..start + len` was populated and not purged since.
-    pub fn is_populated(&self, start: NonNull<u8>, len: usize) -> bool {
-        self.covering_all(start, len, RESERVED | POPULATED)
     }
 
     /// The huge-page advice last given for the page holding `at`, if any.
@@ -462,7 +445,7 @@ fn splitmix(state: &AtomicU64) -> u64 {
 //   `unmap` zeroes a range before releasing its pages, with release ordering that the next
 //   claim's acquire pairs with. So reserved memory reads as zero.
 // - The memory is always readable and writable, so `commit` needs only to record it, and
-//   changes no contents. `purge` zeroes its range. `populate` and `advise_huge` only record.
+//   changes no contents. `purge` zeroes its range. `advise_huge` only records.
 // - An injected failure changes nothing, or with `Faults::partially` acts on the first half of
 //   its range, never beyond it.
 // - A range must lie in one live reservation of this value. `checked_range` panics before
@@ -535,20 +518,7 @@ unsafe impl<S: Shape> Os for SimOs<S> {
             self.memory
                 .zero(first << self.page_shift(), applied << self.page_shift())
         };
-        self.pages.update(first, applied, PURGED, POPULATED);
-        result
-    }
-
-    unsafe fn populate(&self, start: NonNull<u8>, len: usize) -> Result<(), OsError> {
-        let (first, count) = self.checked_range(Call::Populate, start, len);
-        let (applied, result) = self.admit(Call::Populate, count);
-        // As on Linux, it works up to the first page that is not writable and fails there.
-        for index in first..first + applied {
-            if self.pages.get(index) & WRITABLE == 0 {
-                return Err(OsError::ENOMEM);
-            }
-            self.pages.update(index, 1, POPULATED, 0);
-        }
+        self.pages.update(first, applied, PURGED, 0);
         result
     }
 
@@ -699,32 +669,6 @@ mod tests {
                 0,
                 "reserved memory is zero"
             );
-        }
-    }
-
-    #[test]
-    fn populated_pages_count_as_resident_until_purged() {
-        let os = Sim::with_capacity(region());
-        let base = os.reserve(4 * page(), region()).unwrap();
-        let third = base.map_addr(|a| a.saturating_add(2 * page()));
-        // SAFETY: whole reserved pages that nothing else uses; written only with bytes.
-        unsafe {
-            os.commit(base, 2 * page()).unwrap();
-            os.populate(base, 2 * page()).unwrap();
-            assert!(os.is_populated(base, 2 * page()));
-            assert_eq!(os.resident_bytes(), 2 * page());
-            assert_eq!(base.as_ptr().read(), 0, "populating writes nothing");
-            os.purge(base, page()).unwrap();
-            assert_eq!(os.populated_bytes(), page());
-            assert_eq!(os.resident_bytes(), page());
-            // Pages that are not writable stop it, as on Linux, after those before them.
-            assert!(os.populate(base, 4 * page()).is_err());
-            assert!(os.is_populated(base, 2 * page()));
-            assert!(!os.is_populated(third, page()));
-            os.purge(base, page()).unwrap();
-            os.set_faults(Call::Populate, Faults::once_after(0));
-            assert!(os.populate(base, page()).is_err());
-            assert!(!os.is_populated(base, page()), "a failure changes nothing");
         }
     }
 

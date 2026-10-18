@@ -814,22 +814,23 @@ def rustConstsOf (as : List Artifact) : List (String × IntTy × Nat) :=
   let all := as.flatMap (·.rustConsts)
   ((dedup (all.map (·.1))).mergeSort (· ≤ ·)).filterMap fun n => all.find? (·.1 == n)
 
-/-- A constant's name is a Rust constant's, its value fits its type, and the
-artifacts of a module that give a constant of that name give the same type
-and value. -/
+/-- A constant's name is a Rust constant's, its value fits its type in
+64 bits and on its target, and every artifact, of any target, that gives a
+constant of that name gives the same type and value: they are emitted once,
+for every target (`constsFile`). -/
 def checkRustConsts (as : List Artifact) (a : Artifact) : Except String Unit := do
   for (n, ty, v) in a.rustConsts do
     unless tableName n do
       throw s!"{a.target.name}: {a.name}'s constant {n} is not named as a Rust constant"
-    unless v < 2 ^ ty.bits a.target.abi.ptrBits do
+    unless v < 2 ^ ty.bits a.target.abi.ptrBits && v < 2 ^ ty.bits 64 do
       throw s!"{a.target.name}: {a.name}'s constant {n} does not fit in a {ty.rust}"
     for b in as do
-      if b.target.name == a.target.name && b.module == a.module then
-        for (m, ty', v') in b.rustConsts do
-          if m == n && (ty' != ty || v' != v) then
-            throw s!"{a.target.name}: {a.name} and {b.name} give the constant {n} different values"
+      for (m, ty', v') in b.rustConsts do
+        if m == n && (ty' != ty || v' != v) then
+          throw s!"{a.target.name}: {a.name} and {b.target.name}: {b.name} give the constant {n} \
+            different values"
 
-/-- The constants of a module's artifacts, as Rust. -/
+/-- Constants, as Rust. -/
 def rustConstsText (cs : List (String × IntTy × Nat)) : String :=
   String.join (cs.map fun (n, ty, v) =>
     s!"\n/// From the specification (`Api.rustConsts`).\npub(crate) const {n}: {ty.rust} = {v};\n")
@@ -962,6 +963,17 @@ def targetsOf (as : List Artifact) : List (String × String) :=
   (distinct as (·.target.name)).map fun t =>
     (t, ((as.find? (·.target.name == t)).map (·.target.rustCfg)).getD "")
 
+/-- The constants of every artifact (`Api.rustConsts`), one file for every
+target: no assembly, so it builds wherever the crate does (under Miri and
+Kani too). The crate declares it itself (`front::constants`). -/
+def constsFile (as : List Artifact) : String :=
+  header ++
+  "//! The specification's constants (`Api.rustConsts`), the same for every target: what the\n" ++
+  "//! verified functions were proved for, and what the Rust side builds its layout from or\n" ++
+  "//! asserts against.\n" ++
+  "#![allow(dead_code)]\n" ++
+  rustConstsText (rustConstsOf as)
+
 /-- The root module, `mod.rs`: a `mod` declaration of each target of `ts`
 (its name and Rust `cfg`), in order of their names. -/
 def rootFile (ts : List (String × String)) : String :=
@@ -997,15 +1009,15 @@ def render (ps : List Prepared) (moduleOf : Artifact → String → String) : Li
       (s!"{t}/{m}.rs",
         header ++ s!"//! Verified `{m}` functions for `{t}`.\n" ++
         "#![allow(dead_code)]\n" ++
-        rustConstsText (rustConstsOf ((arts.filter (·.art.module == m)).map (·.art))) ++
         String.join ((arts.filter (·.art.module == m)).map fun p =>
           "\n" ++ (if p.art.target.inline then inlineFunction p.art (inlineLines p.art)
             else function.functionOf p.art p.lines (moduleOf p.art))))).map Task.get)
   -- Each target's files on a task of their own.
-  ("mod.rs", root) :: ((targets.map fun t => Task.spawn fun _ => perTarget t).map Task.get).flatten
+  ("mod.rs", root) :: ("constants.rs", constsFile as) ::
+    ((targets.map fun t => Task.spawn fun _ => perTarget t).map Task.get).flatten
 
 /-- The generated files, as paths relative to the output directory and their
-contents: `mod.rs`, and for each target `<target>/mod.rs` and one
+contents: `mod.rs`, `constants.rs` (`constsFile`), and for each target `<target>/mod.rs` and one
 `<target>/<module>.rs` per module; an error if an artifact is not made from
 an `Api` with a contract (`checkApi`), its name or module is not a Rust
 identifier (`checkNames`), two artifacts of a target have the
