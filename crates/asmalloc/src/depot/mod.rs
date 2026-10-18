@@ -84,11 +84,12 @@ use core::cell::Cell;
 pub const DEPOT_TARGET: usize = 128 << 10;
 
 /// The bytes of objects a cache domain's stack of a class holds before the magazines freed
-/// there go to the class's shared stack instead, by default: half the target, which leaves
-/// the shared stack the other half, so that a process on one domain parks what it did when
-/// there was one stack per class (`docs/research/launder-and-fill.md`, "Domain stacks and a
-/// shared stack").
-pub const DOMAIN_CAP: usize = DEPOT_TARGET / 2;
+/// there go to the class's shared stack instead, by default: a quarter of the target, which
+/// leaves the shared stack the rest, so that a process on one domain parks what it did when
+/// there was one stack per class. Half the target was no faster on any job that crosses L3s,
+/// slower on some, and parked up to 0.7 MiB more in them (`docs/research/launder-and-fill.md`,
+/// "Domain stacks and a shared stack").
+pub const DOMAIN_CAP: usize = DEPOT_TARGET / 4;
 
 /// The limits on memory parked in caches, how often the heartbeat looks around, and which of
 /// the rules that return parked objects are on. Constants in the allocator; tests change them
