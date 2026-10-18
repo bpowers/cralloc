@@ -10,8 +10,8 @@
 //!   after `idle_ms` of idleness.
 //! - `tree`: build a complete binary tree of `Box` nodes `depth` levels deep, walk it, drop
 //!   it; `reps` times.
-//! - `vecgrow`: grow `vecs` vectors of `u64` by pushing, round-robin, until each holds `max`
-//!   bytes, so they double by `realloc` all the way; then drop them; `reps` times.
+//! - `vecgrow`: grow `vecs` vectors of `u64`, round-robin, until each holds `max` bytes, so
+//!   they double by `realloc` all the way, as pushing would; then drop them; `reps` times.
 //! - `json`: parse a generated `size`-byte JSON document into `serde_json::Value` and drop
 //!   it, `reps` times.
 use bench_harness::mem::rss_now;
@@ -322,25 +322,59 @@ pub fn vecgrow(args: &Args) {
     let counters = Counters::region();
     let per = max / 8;
     let m = Measure::start(&counters);
+    let acc = grow_and_drop(vecs, per, reps);
+    let run = m.stop();
+    black_box(acc);
+    let elements = (reps * vecs * per) as f64;
+    Report::new("vecgrow", args)
+        .param("chunk", GROW_CHUNK as u64)
+        .phase("run", &run)
+        .metric("elements", elements)
+        .primary("cycles/element", cycles(&run) / elements, Better::Lower)
+        .emit();
+}
+
+/// The most elements one step of [`grow_and_drop`] appends to a vector.
+const GROW_CHUNK: usize = 512;
+
+/// What [`grow_and_drop`] fills vectors with: every byte the same, so the fill is a `memset`.
+const GROW_FILL: u64 = 0x5a5a_5a5a_5a5a_5a5a;
+
+/// Grows `vecs` vectors of `u64` round-robin to `per` elements each and drops them, `reps`
+/// times; returns a checksum.
+///
+/// Each step appends with `resize`, never more than the vector already holds nor more than 4
+/// to an empty one (`Vec`'s smallest capacity for 8-byte elements), so a vector reallocates
+/// exactly where one `push` per element would: at 4, 8, 16, ... elements, each time to twice
+/// its capacity. The allocator sees the same calls with the same sizes.
+///
+/// It does not push because a push loop stores the vector's length and loads it back for
+/// every element, and that chain took most of the job's time at a speed that depended on
+/// where the loop's code landed: an unrelated edit to this file once made the job 40% slower,
+/// and each allocator's build put the loop elsewhere (docs/research/memory.md, "The grow
+/// loop's 40%"). Nor does it copy a chunk from the stack: the copy's loads then alias the
+/// stores to the vector at 4 KiB strides, which made it 6% slower or faster by where the
+/// stack began in each process. A fill of up to 4 KiB a step by `memset`, whose code is the
+/// same in every build and which only stores, leaves the time in what the job is for: the
+/// allocator's growth path, its copies, and the page faults. Out of line, so that a profile
+/// names it and its code does not move with `main`'s.
+#[inline(never)]
+fn grow_and_drop(vecs: usize, per: usize, reps: usize) -> u64 {
     let mut acc = 0u64;
     for _ in 0..reps {
         let mut vs: Vec<Vec<u64>> = (0..vecs).map(|_| Vec::new()).collect();
-        for i in 0..per {
+        let mut len = 0;
+        while len < per {
+            let step = len.clamp(4, GROW_CHUNK).min(per - len);
+            len += step;
             for v in vs.iter_mut() {
-                v.push(i as u64);
+                v.resize(len, GROW_FILL);
             }
         }
         acc = acc.wrapping_add(vs.iter().map(|v| v[v.len() / 2]).sum::<u64>());
         drop(black_box(vs));
     }
-    let run = m.stop();
-    black_box(acc);
-    let elements = (reps * vecs * per) as f64;
-    Report::new("vecgrow", args)
-        .phase("run", &run)
-        .metric("elements", elements)
-        .primary("cycles/element", cycles(&run) / elements, Better::Lower)
-        .emit();
+    acc
 }
 
 /// A deterministic document of about `size` bytes: an array of user records with nested
