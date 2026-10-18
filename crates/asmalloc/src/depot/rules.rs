@@ -607,3 +607,103 @@ fn two_domains_in_use_share_a_class_target() {
     );
     rig.census(&[], false);
 }
+
+/// A class in use in four domains parks no more in all than its target, as `launder` and the
+/// design ("shared among the domains whose stacks hold the class") say.
+#[test]
+#[ignore = "review finding: each domain keeps half the target however many hold the class"]
+fn four_domains_in_use_share_a_class_target() {
+    let class = tiny(0);
+    let target = 12;
+    let tuning = Tuning {
+        max_spares: 0,
+        depot_target: target * class.size(),
+        take_across: usize::MAX / 2,
+        ..QUIET
+    };
+    let os = SimOs::new();
+    os.set_topology(crate::os::sim::SimTopology::Blocks(1));
+    let rig: Rig<SimOs<Small>, 4> = Rig::with_os(os, &[class], 256, tuning);
+    let parked = |domain: usize| {
+        let machine = SimCpu::new(0);
+        let cache = rig.cache(&machine);
+        rig.depot
+            .full(super::Domain::folded(domain), class)
+            .objects(cache.area(), class.magazine()) as usize
+    };
+    for _ in 0..target {
+        for n in 0..4 {
+            let machine = SimCpu::new(n);
+            let cache = rig.cache(&machine);
+            let held: Vec<_> = (0..30).filter_map(|_| cache.alloc(class)).collect();
+            assert_eq!(held.len(), 30);
+            for object in held {
+                cache.free(class, object);
+            }
+        }
+    }
+    let each: Vec<usize> = (0..4).map(parked).collect();
+    let total: usize = each.iter().sum();
+    assert!(
+        total <= target + 4,
+        "a target of {target} objects, but the four domains park {each:?}, {total} in all"
+    );
+}
+
+/// A flow of a class from one domain to another is taken through the depot whether or not a
+/// third domain also parks the class. The take threshold is half the target, and with a
+/// second stack holding the class the producer's heartbeats launder its stack down to half
+/// the target, so unless whole magazines land exactly on the half the stack never reaches
+/// the threshold and the whole flow goes through the source instead. The numbers keep the
+/// allocator's ratio (threshold half the target) with a target that is not a whole number of
+/// magazines' worth, as 1024 objects of a 64-byte class is not of magazines of 254.
+#[test]
+#[ignore = "review finding: a third domain holding the class stops the flow between two"]
+fn a_third_domain_holding_a_class_does_not_stop_a_flow_between_two() {
+    let class = tiny(0);
+    let target = 14;
+    let tuning = Tuning {
+        max_spares: 0,
+        depot_target: target * class.size(),
+        take_across: target / 2 * class.size(),
+        ..QUIET
+    };
+    for third in [false, true] {
+        let os = SimOs::new();
+        os.set_topology(crate::os::sim::SimTopology::Blocks(1));
+        let rig: Rig<SimOs<Small>, 3> = Rig::with_os(os, &[class], 256, tuning);
+        let parked = |domain: usize| {
+            let machine = SimCpu::new(0);
+            let cache = rig.cache(&machine);
+            rig.depot
+                .full(super::Domain::folded(domain), class)
+                .objects(cache.area(), class.magazine()) as usize
+        };
+        let churn_on = |n: i32, count: usize| {
+            let machine = SimCpu::new(n);
+            let cache = rig.cache(&machine);
+            let held: Vec<_> = (0..count).filter_map(|_| cache.alloc(class)).collect();
+            assert_eq!(held.len(), count);
+            for object in held {
+                cache.free(class, object);
+            }
+        };
+        if third {
+            churn_on(2, 4);
+            assert!(parked(2) > 0);
+        }
+        // The producer, CPU 0, frees a long run; the consumer, CPU 1, then allocates.
+        churn_on(0, 60);
+        let before = parked(0);
+        let one = SimCpu::new(1);
+        let consumer = rig.cache(&one);
+        let object = consumer.alloc(class).unwrap();
+        let after = parked(0);
+        assert!(
+            after < before,
+            "third domain in use: {third}; the producer's stack held {before} of a target of \
+             {target} and the consumer took nothing"
+        );
+        consumer.free(class, object);
+    }
+}
