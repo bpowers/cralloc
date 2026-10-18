@@ -268,8 +268,18 @@ mod tests {
         use crate::os::linux::LinuxOs;
         let domains = Domains::new();
         domains.discover(&LinuxOs);
-        let count = domains.count();
-        assert!((1..=MAX_DOMAINS).contains(&count));
+        // The distinct L3 lists of the online CPUs, read with the standard library.
+        let mut lists = std::collections::BTreeSet::new();
+        let online = std::fs::read_to_string("/sys/devices/system/cpu/online").unwrap_or_default();
+        each_cpu(online.as_bytes(), |cpu| {
+            let path =
+                std::format!("/sys/devices/system/cpu/cpu{cpu}/cache/index3/shared_cpu_list");
+            if let Ok(list) = std::fs::read_to_string(path) {
+                lists.insert(list);
+            }
+        });
+        let expected = lists.len().clamp(1, MAX_DOMAINS);
+        assert_eq!(domains.count(), expected);
         // CPU 0 is always in domain 0.
         assert_eq!(domains.of(Some(0)), Domain::ZERO);
     }
