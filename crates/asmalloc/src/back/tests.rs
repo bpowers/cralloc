@@ -2008,4 +2008,146 @@ mod review {
             (third - first) as usize * 48
         );
     }
+
+    /// A batch of distinct slots in one of the shapes a launder meets, drawn from `pool`.
+    fn batch(rng: &mut Rng, pool: &[*mut u8]) -> Vec<*mut u8> {
+        let len = 1 + rng.below(254);
+        let mut picked = BTreeSet::new();
+        match rng.below(4) {
+            // A dense run, ascending or descending.
+            0 => {
+                let start = rng.below(pool.len() - len);
+                picked.extend(start..start + len);
+            }
+            // Shuffled among a few neighbouring words.
+            1 => {
+                let start = rng.below(pool.len() - 600);
+                while picked.len() < len {
+                    picked.insert(start + rng.below(600));
+                }
+            }
+            // Scattered over the pool, both regions.
+            2 => {
+                while picked.len() < len {
+                    picked.insert(rng.below(pool.len()));
+                }
+            }
+            // A few words, far apart, visited over and over.
+            _ => {
+                let bases: Vec<usize> = (0..6).map(|_| rng.below(pool.len() - 64)).collect();
+                while picked.len() < len.min(200) {
+                    picked.insert(bases[rng.below(6)] + rng.below(64));
+                }
+            }
+        }
+        let mut order: Vec<usize> = picked.into_iter().collect();
+        match rng.below(3) {
+            0 => {}
+            1 => order.reverse(),
+            _ => {
+                for i in (1..order.len()).rev() {
+                    order.swap(i, rng.below(i + 1));
+                }
+            }
+        }
+        order.into_iter().map(|i| pool[i]).collect()
+    }
+
+    /// Verification of the unsorted launder and the resumed fill, single-threaded: whatever
+    /// the order and shape of a batch of distinct slots, the launder aborts on none of them,
+    /// every slot is visible afterwards, and a fill takes them back lowest first.
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn launders_in_any_order_free_exactly_their_slots() {
+        let state = state::<Standard>();
+        let back = state.get_or_reserve().unwrap();
+        let class = small(8);
+        let pool = fill(&back, class, 40_000);
+        assert_eq!(pool.len(), 40_000);
+        let mut rng = Rng(0x9e37_79b9_7f4a_7c15);
+        for round in 0..400 {
+            let batch = batch(&mut rng, &pool);
+            // SAFETY: the test holds every slot of the pool.
+            unsafe { back.launder(class, &batch) };
+            let mut want = batch.clone();
+            want.sort_unstable();
+            assert_eq!(fill(&back, class, batch.len()), want, "round {round}");
+        }
+    }
+
+    /// Verification of the batched walk up the summary tree under racing fills and launders:
+    /// once every thread has finished, no free slot sits under a clear summary bit. Threads
+    /// fill and launder scattered batches; at the end a fill of as many slots as were ever
+    /// handed out must get exactly those back, carving nothing new.
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn after_racing_launders_and_fills_every_free_slot_is_found() {
+        for seed in 0..20u64 {
+            let state = state::<Standard>();
+            state.get_or_reserve().unwrap();
+            let state = &*state;
+            let class = small(8);
+            let seen: Mutex<BTreeSet<usize>> = Mutex::new(BTreeSet::new());
+            thread::scope(|scope| {
+                for t in 0..8u64 {
+                    let seen = &seen;
+                    scope.spawn(move || {
+                        let back = state.get().unwrap();
+                        let mut rng = Rng(0x5151_0000 + seed * 64 + t);
+                        let mut held: Vec<*mut u8> = Vec::new();
+                        for _ in 0..300 {
+                            held.extend(fill(&back, class, 1 + rng.below(254)));
+                            seen.lock().unwrap().extend(held.iter().map(|p| p.addr()));
+                            for i in (1..held.len()).rev() {
+                                held.swap(i, rng.below(i + 1));
+                            }
+                            let keep = rng.below(held.len() + 1);
+                            let give = held.split_off(keep);
+                            for chunk in give.chunks(64) {
+                                // SAFETY: this thread holds these slots.
+                                unsafe { back.launder(class, chunk) };
+                            }
+                        }
+                        // SAFETY: this thread holds these slots.
+                        unsafe { back.launder(class, &held) };
+                    });
+                }
+            });
+            let back = state.get().unwrap();
+            let seen = seen.into_inner().unwrap();
+            let all: BTreeSet<usize> = fill(&back, class, seen.len())
+                .iter()
+                .map(|p| p.addr())
+                .collect();
+            assert_eq!(all, seen, "seed {seed}: a free slot was not found");
+        }
+    }
+
+    /// The same batches with one slot repeated anywhere later in the batch: with no other
+    /// thread to claim the slot in between, every one must abort, within a part or across
+    /// parts.
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn a_slot_twice_anywhere_in_a_batch_aborts_when_nothing_claims_it() {
+        let mut rng = Rng(0x1234_5678_9abc_def1);
+        for round in 0..150 {
+            let state = state::<Standard>();
+            let back = state.get_or_reserve().unwrap();
+            let class = small(8);
+            let pool = fill(&back, class, 40_000);
+            let mut batch = batch(&mut rng, &pool);
+            let first = rng.below(batch.len());
+            let again = first + 1 + rng.below(batch.len() - first);
+            batch.insert(again, batch[first]);
+            let caught = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                // SAFETY: the test holds every slot of the pool; the repeat is the point.
+                unsafe { back.launder(class, &batch) };
+            }));
+            assert!(
+                caught.is_err(),
+                "round {round}: slot {first} again at {again} of {} was not caught",
+                batch.len()
+            );
+        }
+    }
 }
