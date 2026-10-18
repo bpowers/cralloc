@@ -436,6 +436,180 @@ the drop (180M cycles: one locked OR a scattered slot against mimalloc's plain p
 page's list) and the build (226M, at the same instructions). JSON is level with mimalloc
 within the noise of these runs.
 
+## A direct path for scattered launders (2026-10-18, later)
+
+"before" is main at 1868dd0, "after" this branch merged with it. Timed runs on CPU 2 under the
+shared measuring lock, builds interleaved in random order, medians of five rounds (backbench:
+of five runs each the lowest of seven repetitions). Builds and model checks of other work ran on
+the second L3.
+
+### Method: exact instruction counts of a drop phase
+
+- Callgrind, with the drop phases of `bench/workloads` routed through one out-of-line function
+  (`drop_phase`, named with `--toggle-collect`). Two things had to be fixed for it to see what
+  runs natively. Stock valgrind caps the client at 64 GiB of address space, so asmalloc halves
+  its regions to 8 MiB, magazines span regions and every slot takes the launder's slow check
+  (BTreeMap 1M: 337M instructions a drop under callgrind against 189M natively). A valgrind
+  3.27.1 built with `aspacem_maxAddr` raised from 128 GiB to 64 TiB
+  (`coregrind/m_aspacemgr/aspacemgr-linux.c`) takes the full reservation. And under valgrind
+  glibc's rseq registration fails, so every call takes the no-rseq path; a preloaded
+  constructor that writes 0 into `cpu_id` of the failed (so unregistered) area makes the
+  single-threaded workloads run the routines as natively. With both, callgrind's counts for a
+  drop match `perf stat`'s within a few percent, except `memset`: under valgrind glibc picks the
+  AVX2 variant, whose `rep stosb` callgrind counts per byte.
+- Frees per drop counted with a counting `GlobalAlloc`: BTreeMap 1M, 1.134M; JSON 32 MiB, 3.574M;
+  Box tree depth 20, 2.097M.
+- The workloads also accept `BENCH_PERF_CTL=CTL,ACK` to switch a `perf record -D -1 --control`
+  on for drops only. Sampling on instructions piles samples onto the instruction after a
+  locked one (25% of one profile at a single address), so it was not used for attribution.
+
+### Where the drop's instructions went, per freed object
+
+| | asmalloc before | asmalloc after | mimalloc | jemalloc |
+|---|---:|---:|---:|---:|
+| BTreeMap 1M drop, native, all | 165 | 112 | 49.5 | 137 |
+| the program's own drop code | 22 | 22 | 22 | 22 |
+| free (routine, class from layout; `mi_free`; `sdallocx` fast path) | 23 | 23 | 27 | 27 |
+| launder | ~112 | ~60 | | |
+| jemalloc's tcache flush (bin lookups, bitmap) | | | | ~60 |
+| slow path's exchange, depot, heartbeat | ~7 | ~7 | | |
+
+Before, the launder of a scattered magazine was the whole of the excess over mimalloc: grouping
+(window, map and groups) 50, the walk up the summary tree 11, the per-slot check and loop 17,
+host lookups 7, the ORs 8, the rest inlined helpers. JSON is different: its launders are dense
+(two interleaved runs), about 25 instructions an object, and the rest of its excess over
+mimalloc (106 against 72 an object) is the slow path's exchange and depot (about 5), the
+heartbeat (2 to 4; clock-driven, so more under valgrind) and a few instructions of inlined free
+glue; the program's own drop is the same for all.
+
+### What changed
+
+- **The judgement.** As before, after eight single slots in a row a batch is judged scattered if
+  most of its words fell outside the window. Words outside the window go first to a list of
+  eight (`Gather::outside`), so a batch judged scattered never makes the hash map.
+- **The direct path** (`group::Direct`). The words gathered so far are ORed, and each later
+  slot is ORed on its own with `lock bts` into its leaf word, found by index in the region's
+  committed leaf words (`Host::leaves`, ledger BACK-HOST-03). The OR's old bit is the double-free
+  check. What the leaf words owe their summary words is merged in a table of 64 places
+  (`Debts`); a summary word is paid when its place is taken or at the end, by reading it and
+  setting only the bits it lacks; what that owes the level above is merged in a second table,
+  and only then handed to `Release`.
+- **Reading before setting.** A free whose word was empty used to set the summary bit unread
+  with a locked OR. The direct path's debts read it first (`Look` in `tla/Summary.tla`), which in
+  a scattered batch, whose summary words mostly have the bit set already, is a plain load. TLC
+  finds no violation with it, with runs of claims and the healing free, on one and two summary
+  levels and in a forked child (`Summary_look*.cfg`); the explorer runs the production code
+  against claims and forks (`direct_frees_*`).
+- **A double free no longer caught.** A slot given twice in one scattered batch, which another
+  CPU claims between the two ORs, is the same double free that already goes unseen across two
+  batches. Without a claim between, the second OR catches it.
+
+### backbench
+
+Cycles and instructions per object, a magazine a call:
+
+| class | case | before cyc | before ins | after cyc | after ins |
+|---|---|---:|---:|---:|---:|
+| 16 | asc | 5.0 | 19.7 | 4.9 | 19.8 |
+| 16 | desc | 5.0 | 19.7 | 4.9 | 19.8 |
+| 16 | two | 10.0 | 42.7 | 8.4 | 38.8 |
+| 16 | block | 11.7 | 46.6 | 10.3 | 43.1 |
+| 16 | scatter | 51.1 | 106.9 | 27.5 | 56.0 |
+| 16 | stride | 34.3 | 108.5 | 26.9 | 55.5 |
+| 16 | fill | 4.5 | 16.0 | 4.5 | 16.0 |
+| 256 | asc | 4.7 | 19.3 | 4.6 | 19.4 |
+| 256 | desc | 4.7 | 19.3 | 4.6 | 19.4 |
+| 256 | two | 9.8 | 42.3 | 8.2 | 38.4 |
+| 256 | block | 11.6 | 46.4 | 10.2 | 43.0 |
+| 256 | scatter | 50.8 | 106.5 | 27.3 | 55.5 |
+| 256 | stride | 34.1 | 108.1 | 26.7 | 55.1 |
+| 256 | fill | 4.3 | 15.9 | 4.3 | 15.9 |
+| 4096 | asc | 29.9 | 85.8 | 28.7 | 88.1 |
+| 4096 | desc | 29.8 | 85.8 | 28.7 | 88.1 |
+| 4096 | two | 37.4 | 129.2 | 36.4 | 129.6 |
+| 4096 | block | 47.0 | 135.5 | 45.5 | 136.9 |
+| 4096 | scatter | 52.8 | 151.1 | 52.0 | 151.6 |
+| 4096 | stride | 54.1 | 152.8 | 53.3 | 153.2 |
+| 4096 | fill | 21.2 | 75.5 | 21.3 | 75.5 |
+
+The 4096-byte class launders 14 objects a call, too few to be judged scattered, and is
+unchanged. Of a scattered slot's 56 instructions about 40 are the loop (the check, the
+`lock bts`, the debt); the rest is the batch's first slots, taken as runs, and paying the
+summary words.
+
+### The size of the bitmap, prefetching, and the cycles random words cost
+
+`backbench run classes=8 bitmaps=SIZE`: carve as many 8-byte slots as a leaf bitmap of SIZE
+covers (16 KiB fits L1, 512 KiB L2, 8 MiB L3, 64 MiB does not), touch each bitmap page once,
+then time launders of 64 magazines of slots in random (`scatter`) or stride order and fill them
+back untimed. Per object, three rounds, medians; misses are per object from `BENCH_EVENTS`
+(`ls_l1_d_tlb_miss.all`, `.all_l2_miss` as walks, `l2_cache_req_stat.ic_dc_miss_in_l2`, demand
+fills from DRAM). `pf1` decodes 16 slots ahead and prefetches each one's leaf word, `pf2` loads
+it instead (experiments, not kept).
+
+| bitmap | order | build | cyc | ins | dTLB miss | walk | L2 miss | from DRAM |
+|---|---|---|---:|---:|---:|---:|---:|---:|
+| 16K | scatter | before | 55.8 | 120.7 | 0 | 0 | 0 | 0 |
+| 16K | scatter | after | 30.5 | 61.7 | 0 | 0 | 0 | 0 |
+| 16K | scatter | after, pf1 | 32.3 | 77.7 | 0 | 0 | 0 | 0 |
+| 16K | stride | before | 37.0 | 121.3 | 0 | 0 | 0 | 0 |
+| 16K | stride | after | 29.2 | 61.3 | 0 | 0 | 0 | 0 |
+| 512K | scatter | before | 105.2 | 337.6 | 0.49 | 0 | 0.04 | 0 |
+| 512K | scatter | after | 73.6 | 178.2 | 0.48 | 0 | 0.05 | 0 |
+| 512K | scatter | after, pf1 | 75.9 | 193.1 | 0.46 | 0 | 0.03 | 0 |
+| 8M | scatter | before | 158.3 | 428.4 | 1.24 | 0.01 | 1.02 | 0.04 |
+| 8M | scatter | after | 135.2 | 357.2 | 1.25 | 0.01 | 1.02 | 0.02 |
+| 8M | scatter | after, pf1 | 129.1 | 372.4 | 1.27 | 0 | 1.01 | 0 |
+| 64M | scatter | before | 436.1 | 453.4 | 1.90 | 0.78 | 1.93 | 0.58 |
+| 64M | scatter | after | 340.0 | 417.4 | 1.93 | 0.78 | 1.90 | 0.73 |
+| 64M | scatter | after, pf1 | 169.2 | 432.5 | 1.94 | 0.78 | 1.89 | 0.03 |
+| 64M | scatter | after, pf2 | 196.8 | 434.2 | 1.94 | 0.78 | 1.84 | 0.74 |
+| 64M | stride | before | 75.5 | 256.2 | 0.14 | 0.12 | 0.08 | 0 |
+| 64M | stride | after | 208.4 | 179.6 | 0.14 | 0.12 | 1.03 | 0.84 |
+| 64M | stride | after, pf1 | 82.6 | 194.4 | 0.14 | 0.12 | 0.23 | 0 |
+
+- **The 20 cycles were not misses.** With the bitmap in L1, before, scattered slots cost 19
+  cycles more than strided ones at the same instructions and no misses at all; after, 1.3. They
+  were the map's and groups' work on random keys, and went with them. (`perf stat` of the whole
+  process, the earlier way, showed no dTLB, L2 or store-forwarding difference either.)
+- **Prefetching pays only past L3.** It costs 16 instructions and about 2 cycles a slot while
+  the bitmap is in L1 or L2, a few percent at 8 MiB, and halves the cost at 64 MiB, where each
+  slot is a DRAM miss. A plain early load does less. Left out. One case got worse: strided
+  slots over 64 MiB of bitmap, 75 to 208 cycles, with a DRAM fill a slot where there were none.
+  The old path ORed a batch's words at its end, grouped by summary word, which the hardware
+  prefetchers followed; the direct path ORs them in the batch's order. Prefetching would
+  recover it (83).
+- **The TLB.** Page walks appear only at 64 MiB of bitmap (0.78 a slot): 512M live slots of one
+  class. At 8 MiB there are L1 dTLB misses that the L2 TLB serves. Backing a region's leaf
+  bitmap with huge pages once it passes 2 MiB (16M slots of the class) would cost at most the
+  rest of one 2 MiB page per such region, under 2% of the objects' memory for 8-byte slots and
+  less for larger ones; below that size it is not worth anything. Not built.
+- **A batch spread over more summary words than it has slots** (512 KiB of bitmap and up: 4M
+  live slots of the class) pays a summary word for nearly every slot, about 120 instructions a
+  slot more than the 16 KiB case. It is half what it was; a cheaper payment is the next thing
+  to try if such heaps matter.
+
+### Workloads
+
+M cycles / M instructions per phase, five interleaved rounds, medians:
+
+| | before | after | mimalloc | jemalloc |
+|---|---:|---:|---:|---:|
+| BTreeMap 1M, cycles/entry | 934.5 | 911.8 | 868.5 | 989.4 |
+| build | 3995 / 5194 | 4005 / 5193 | 3844 / 5166 | 4348 / 5465 |
+| drop | 670 / 932 | 554 / 632 | 498 / 280 | 605 / 776 |
+| JSON 32 MiB, cycles/byte | 16.6 | 16.3 | 16.6 | 24.9 |
+| parse | 1986 / 7119 | 1957 / 7119 | 2117 / 7129 | 2589 / 7640 |
+| drop | 791 / 1887 | 773 / 1891 | 659 / 1286 | 1596 / 2770 |
+| Box tree depth 20, cycles/node | 43.3 | 44.1 | 42.7 | 101.6 |
+| build | 291 / 1291 | 291 / 1291 | 354 / 1593 | 509 / 1946 |
+| drop | 410 / 1208 | 412 / 1211 | 344 / 830 | 1283 / 2457 |
+
+The BTreeMap drop runs 32% fewer instructions and 17% fewer cycles, ahead of jemalloc on both;
+mimalloc is 56M cycles ahead, at a quarter of the instructions. JSON's and the tree's drops are
+dense and unchanged (the tree's walk, which runs no allocator code, moved 206 to 223 between
+builds, so its total is within layout noise).
+
 # A depot per cache domain (2026-10-18)
 
 With one depot shared by every CPU, magazines that one L3 freed were popped by the other, and
