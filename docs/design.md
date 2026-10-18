@@ -602,7 +602,15 @@ saved; we copy.
   they are told they have, so a `realloc` that moves a block copies that much and `calloc`
   zeroes that much.
   `realloc(p, 0)` frees `p` and returns null, as glibc does.
-- **C++**: the replaceable forms of `operator new` and `operator delete`, so that C++
+- **C++**, not yet exported. A C++ program's `operator new` and `operator delete` belong to
+  its C++ runtime, which calls our `malloc` and `free`; that is correct in every arrangement
+  of libraries, and costs C++ a call layer and the size that sized deletes carry. Exporting
+  the operators ourselves is only sound if we export all of them: with our `delete` forms
+  but another library's `new`, blocks reach us that are not ours, and a garbage collector's
+  or an engine's C++ library that defines the operators is exactly that case. We cannot yet
+  export the throwing forms of `new` (see below), so the preload library exports none. The
+  rest of this item describes the operators as built and tested, for when it can. They are
+  the replaceable forms of `operator new` and `operator delete`, so that C++
   allocates without a detour through `malloc` and sized deletes arrive with their size. A
   failing `new` runs the installed new-handler until none is left; then a nothrow form
   returns null and a throwing form raises `std::bad_alloc`. An exception cannot unwind
