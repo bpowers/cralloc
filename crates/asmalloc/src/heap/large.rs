@@ -28,7 +28,7 @@
 //! been asked for.
 
 use super::{Grant, Heap, Zero, small};
-use crate::back::Kind;
+use crate::back::policy::{STAGGER_ROOM, STAGGER_STEP};
 use crate::classes::Class;
 use crate::front::Routines;
 use crate::os::Os;
@@ -66,9 +66,17 @@ enum Place {
 }
 
 /// Where an object with a layout that has no small class goes in a heap laid out as `plan`.
+/// A layout that may be staggered (`policy::STAGGER_STEP`) gets a slot with
+/// `policy::STAGGER_ROOM` to spare, so that its stagger always fits, unless only a slot
+/// without the room fits a region.
 fn place(layout: Layout, plan: Plan) -> Place {
-    match Class::of_layout(layout) {
-        Some(class) if plan.fits_region(class) => Place::Slot(class),
+    let slot = |layout: Layout| Class::of_layout(layout).filter(|&c| plan.fits_region(c));
+    let roomy = Layout::from_size_align(layout.size().saturating_add(STAGGER_ROOM), layout.align())
+        .ok()
+        .filter(|_| layout.align() <= STAGGER_STEP)
+        .and_then(slot);
+    match roomy.or_else(|| slot(layout)) {
+        Some(class) => Place::Slot(class),
         // The size asked for, which the run records: the alignment is met by where the run
         // starts, so rounding the size up to it would only report, and commit, room nobody
         // asked for.
@@ -94,7 +102,11 @@ impl<O: Os> Heap<O> {
         let back = self.start()?;
         match place(layout, back.space().plan()) {
             Place::Slot(class) => {
-                let block = back.alloc(class, layout.size())?;
+                let block = if layout.align() <= STAGGER_STEP {
+                    back.alloc_staggered(class, layout.size())?
+                } else {
+                    back.alloc(class, layout.size())?
+                };
                 let len = self
                     .usable_size(block.ptr.as_ptr())
                     .unwrap_or(layout.size());
@@ -169,12 +181,7 @@ impl<O: Os> Heap<O> {
         if let Some(class) = small(layout) {
             return class.size();
         }
-        let whole = self
-            .back()
-            .and_then(|back| match back.lookup(ptr.as_ptr())? {
-                Kind::Slot(class) => Some(class.size()),
-                Kind::Run(regions) => Some(regions << back.space().plan().region_shift()),
-            });
+        let whole = self.back().and_then(|back| back.room(ptr.as_ptr()));
         match whole {
             Some(len) => len,
             None => self
@@ -318,8 +325,17 @@ mod tests {
     #[test]
     fn large_layouts_take_slots_until_they_outgrow_a_region() {
         let plan = Geometry::DESIGN.largest_plan();
-        let big = Class::of_size(40 << 10).unwrap();
-        assert_eq!(place(layout(40 << 10, 8), plan), Place::Slot(big));
+        // Room for a stagger: a 40 KiB request takes the class that holds 44 KiB, and one too
+        // aligned to be staggered takes its own.
+        let roomy = Class::of_size((40 << 10) + STAGGER_ROOM).unwrap();
+        assert_eq!(place(layout(40 << 10, 8), plan), Place::Slot(roomy));
+        let exact = Class::of_size(40 << 10).unwrap();
+        assert_eq!(place(layout(40 << 10, 8192), plan), Place::Slot(exact));
+        assert_eq!(
+            place(layout(1 << 32, 8192), plan),
+            Place::Slot(Class::LARGEST)
+        );
+        // A region-sized request takes the region-sized slot without the room.
         assert_eq!(place(layout(1 << 32, 8), plan), Place::Slot(Class::LARGEST));
         assert_eq!(
             place(layout((1 << 32) + 1, 8), plan),

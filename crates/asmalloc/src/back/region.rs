@@ -379,10 +379,11 @@ pub(crate) fn record<H: Host>(host: &H, region: RegionId, slot: u32, recorded: R
     }
 }
 
-/// For the holder of large slot `slot`, whose object is growing from `old` to `new` bytes, by
+/// For the holder of large slot `slot`, whose object starts `into` bytes into it and is
+/// growing from `old` to `new` bytes, by
 /// moving there or in place: if the growth looks like appending (`policy::grown_huge`) and
 /// `dense` says the bytes the program wrote last hold data in most of their pages, advises
-/// the slot's whole huge pages up to the new size, rounded up to a huge page, for huge pages.
+/// the slot's whole huge pages that the new size covers for huge pages.
 /// Never the room past it, so the advice runs at most one growth step ahead of what the
 /// program has shown it writes densely. `dense` is asked last, because it reads memory.
 ///
@@ -393,6 +394,7 @@ pub(crate) fn advise_grown<H: Host>(
     host: &H,
     region: RegionId,
     slot: u32,
+    into: usize,
     old: usize,
     new: usize,
     dense: impl FnOnce() -> bool,
@@ -409,7 +411,10 @@ pub(crate) fn advise_grown<H: Host>(
     let Some(unit) = layout.huge_interior(slot) else {
         return;
     };
-    let wanted = layout.huge_ceil((layout.slot_bytes(slot) + new).div_ceil(page) as u32);
+    // Rounded down: the last huge page, which the block only starts, faults in small pages,
+    // so a block that ends just past a huge page does not make all of the next one resident.
+    let wanted =
+        ((layout.slot_bytes(slot) + into + new) / page) as u32 & !(layout.huge_pages() - 1);
     let end = wanted.min(unit.end);
     if end <= unit.start || !dense() {
         return;

@@ -97,11 +97,13 @@ block the caller owns, unused during the call, and that the caller gives up ever
 (`Heap::resize_large_in_place`, `Heap::resize_in_place_by_address`, both `unsafe fn`s with the
 same promise, from `Heap::resize` and C's `realloc`), so the owner
 holds the slot or run for the whole call and is not using the block meanwhile: a resize has
-the block exclusively, as `realloc` and `Allocator::shrink` require. The range is
-`from..from + len` with `from = size` rounded up to a page and the end the old recorded size
-rounded up to a page, capped at the slot or run: whole pages, inside the block, and wholly
-past the new usable size (`Back::usable_size` reports the recorded size rounded up to a page,
-and the new size is recorded before the purge). The owner asked for the smaller size, so the
+the block exclusively, as `realloc` and `Allocator::shrink` require. Counted from the start
+of the slot or run, which the block starts `into` bytes past (its stagger, or zero; a run is
+never staggered), the range is `from..from + len` with `from = into + size` rounded up to a
+page and the end `into + old` rounded up to a page, capped at the slot or run: whole pages,
+inside the slot, and wholly past the new usable size (`Back::usable_size` reports the bytes
+to the end of the page the object ends in, and the new size is recorded before the purge).
+`into + size` is checked to fit the slot, so `from` is at most the slot's size. The owner asked for the smaller size, so the
 bytes past it are given up. `validate` aborts unless the pointer is a handed-out slot of the
 class; a run is found by its head tag, and the size is checked against its length.
 
@@ -131,6 +133,10 @@ before a piecewise copy into a destination not known to be zero; `region::purge_
 **Preconditions.** As for `copy_nonoverlapping`, `purge_part`, `Space::purge` and `is_zero`
 (BACK-CLASS-04).
 
+**Offsets.** A large block starts at its slot's start or at its stagger, less than a page
+in; `offset_in_slot` gives which. Every range below that `purge_part` or `give_back` takes is
+counted from the slot's start (from the run's for a run, which is never staggered).
+
 **Proof.** `move_large` is an `unsafe fn`: its caller promises that `from` is a large block it
 owns and gives up, readable for `len` bytes, that `to` is a block it owns, writable for `len`
 bytes, whose contents it does not need, and disjoint from `from`, that nothing else uses
@@ -139,9 +145,10 @@ callers are the moving paths of `Heap::resize` (HEAP-04, which passes the alloca
 report) and C's `realloc` (MOD-01, which passes `false`), and both hold both blocks.
 
 0. *The destination purge.* When `zeroed` is false and the block is more than one piece,
-   `to..to + len` rounded up to a page is purged before anything is copied. `to` starts on a
-   page (large slots and runs do) and its block is whole pages at least `len` long, so the
-   range is whole pages of the caller's block; nothing else uses it and its contents are not
+   the pages `to..to + len` touches are purged before anything is copied. `to` holds more
+   than a piece, so it is a large slot or a run, whole pages; it starts at most a stagger,
+   under a page, past its slot's first page, and `into + len` fits the slot, so the pages
+   are the caller's slot's own; nothing else uses it and its contents are not
    needed, which is `Space::purge`'s precondition. Afterwards it reads as zero. If the purge
    fails nothing is known to be zero, but nothing relies on the failure path either: see the
    skip below.
@@ -154,11 +161,12 @@ report) and C's `realloc` (MOD-01, which passes `false`), and both hold both blo
    caller's new block, not a memory error. (The destination purge never fails in practice;
    `MADV_DONTNEED` fails only on a bad range, which `Space::purge` rules out by aborting.)
 2. *The purges.* Pieces end at multiples of the piece in the address space. Each range is
-   either a part already copied that ends at such a multiple (`done..boundary`, where
-   `done` is zero or the previous multiple, so both ends are page-aligned: the block starts
-   on a page and the piece is a page multiple) or, once, everything from the last multiple
-   at or below `from + len` (or from the start, if there is none) to the end of the slot or
-   run. Every byte before that start has been copied. In a slot advised for huge pages
+   either a part already copied that ends at such a multiple (`into + done` rounded down to a
+   page, to `into + boundary`: `done` is zero, which rounds down to the slot's start and so
+   takes the stagger's padding, which holds nothing, or the previous multiple, which is
+   page-aligned) or, once, everything from the last multiple at or below `from + len` (or
+   from the slot's start, if there is none) to the end of the slot or run. Every byte of the
+   block before that start has been copied. In a slot advised for huge pages
    `purge_part` may trim a range inward to whole huge pages (BACK-REGION-03), which only
    returns less, and then reports `false`, so step 3 does not count the range as gone. All
    lie inside `from`'s slot or run, whose start is page-aligned, and the caller holds it and
