@@ -93,7 +93,19 @@ for the range. The one caller and why it holds the slot are BACK-CLASS-01 in
 `class-safety.md`, which also says what a double free can do.
 
 `purge_held` declines a slot in a huge-page part (a purge there must be whole huge pages);
-that is policy, not safety. Awaiting review.
+that is policy, not safety. Accepted by the reviewer, 2026-10-17.
+
+## BACK-REGION-03: `host.purge(...)` in `purge_part`
+
+**Preconditions** (`Host::purge`). No thread reads or writes the range during the call, and
+nothing in it is needed afterwards.
+
+**Proof.** `purge_part` is an `unsafe fn` whose caller promises that it holds the slot, that
+nothing uses the range during the call and that nothing in it is needed after. The function
+checks that `from + len` is within the slot's size, so the range is inside the slot the
+caller holds. Its callers and why their ranges are given up are BACK-CLASS-02 (the tail of an
+object that shrank in place) and BACK-CLASS-03 (the part of a moving object already copied)
+in `class-safety.md`. Awaiting review.
 
 **Review.** 2026-10-17, fresh adversarial reviewer: the protocol was accepted; three gaps were
 found in the argument: exclusivity under a double free, the huge-page part not covered by the

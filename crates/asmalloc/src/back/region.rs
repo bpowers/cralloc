@@ -305,8 +305,24 @@ pub(crate) unsafe fn purge_held<H: Host>(host: &H, region: RegionId, slot: u32) 
     if !unsafe { host.purge(region, offset, len) } {
         return false;
     }
-    // The zero and clean bits are written only by the holder of every slot they describe:
-    // the zero bit is this slot's, and the pages are inside this slot.
+    mark_purged(host, region, slot);
+    true
+}
+
+/// Records that every whole page inside slot `slot` has just been returned to the OS, for the
+/// thread that holds the slot and returned them: sets the pages' clean bits and, if they are
+/// all of the slot, its zero bit. Those bits are written only by the holder of every slot
+/// they describe: the zero bit is this slot's, and the pages are inside this slot.
+pub(crate) fn mark_purged<H: Host>(host: &H, region: RegionId, slot: u32) {
+    let layout = host.layout();
+    let Some(unit) = layout.slot_unit(slot) else {
+        return;
+    };
+    let page = layout.page_size();
+    let (offset, len) = (
+        unit.start as usize * page,
+        (unit.end - unit.start) as usize * page,
+    );
     if offset == layout.slot_bytes(slot)
         && offset + len == layout.slot_bytes(slot + 1)
         && let Some(at) = layout.zero_word(slot / BITS)
@@ -317,7 +333,35 @@ pub(crate) unsafe fn purge_held<H: Host>(host: &H, region: RegionId, slot: u32) 
         let mask = bits_in_word(w, unit.start, unit.end - 1);
         host.meta(region, layout.clean_word(w)).fetch_or(mask);
     }
-    true
+}
+
+/// Returns `len` bytes at `from` bytes into slot `slot` to the OS, for a caller that holds
+/// the slot and no longer needs them: the tail of an object that shrank in place, or the part
+/// of a moving object already copied. Both are page multiples and the range lies inside the
+/// slot. No bitmap changes: the slot stays allocated, and its clean and zero bits describe it
+/// only while it is free. `false`, and nothing done, in a huge-page part, which is purged only
+/// in whole huge pages, or if the OS refused.
+///
+/// # Safety
+///
+/// The caller holds the slot (its free bit is clear on the caller's behalf), nothing reads or
+/// writes the range during the call, and nothing in it is needed after.
+pub(crate) unsafe fn purge_part<H: Host>(
+    host: &H,
+    region: RegionId,
+    slot: u32,
+    from: usize,
+    len: usize,
+) -> bool {
+    let layout = host.layout();
+    let offset = layout.slot_bytes(slot) + from;
+    let end = ((offset + len) >> layout.page_shift()) as u32;
+    let hints = Hints::unpack(host.meta(region, layout.hints_word()).load());
+    if from + len > layout.size() || hints.huge_from.is_some_and(|huge| end > huge) {
+        return false;
+    }
+    // SAFETY: the caller's promise, for a range inside the slot.
+    unsafe { host.purge(region, offset, len) }
 }
 
 /// What purging one unit did.
