@@ -7,7 +7,7 @@ name = "asmalloc"
 version = "0.1.0"
 
 [[package]]
-name = "race"
+name = "start-race"
 version = "0.1.0"
 dependencies = [
  "asmalloc",

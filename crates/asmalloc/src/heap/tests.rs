@@ -304,9 +304,13 @@ fn a_simulated_heap_serves_threads() {
 #[test]
 fn threads_that_start_a_fresh_heap_together_agree_on_it() {
     let rounds = if cfg!(miri) { 1 } else { 200 };
+    // The simulated OS has room for one heap, so every thread but the winner sees its
+    // reservation fail while the winner's is in flight; none of them may settle for less.
+    let largest = <crate::os::sim::Standard as crate::os::sim::Shape>::GEOMETRY.largest_plan();
     for _ in 0..rounds {
         let heap = SimHeap::<crate::os::sim::Standard>::new();
         threads(&heap, if cfg!(miri) { 20 } else { 300 });
+        assert_eq!(heap.heap.back().unwrap().space().plan(), largest);
     }
 }
 

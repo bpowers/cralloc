@@ -9,18 +9,23 @@
 //! start-up needs: two threads may race to reserve, one compare-and-swap picks the winner, and
 //! the loser unmaps its own.
 //!
-//! # Start-up under a tight address-space limit
+//! # Racing reservations
 //!
-//! The race has two windows that a lock would close and the design does not allow a lock for.
+//! Between one thread's reservation and its compare-and-swap, the address space it holds is
+//! not available to another thread starting at the same moment, and only a few full
+//! reservations fit in the address space at once. So a failed reservation does not by itself
+//! mean that address space is short. The cell counts the reservers in flight in one word, and a
+//! thread whose reservation fails while another is counted looks for the published space and
+//! tries again at the same size, after a short bounded spin. Only a failure with no other
+//! reserver in flight, or once its patience for the whole start is used up, halves the region
+//! size, and only a failure at the floor is an `Err` (a null return to the caller). Nothing
+//! waits without bound and nothing is locked; a race costs at worst a heap with smaller regions,
+//! never memory unsafety.
 //!
-//! - Between one thread's reservation and its compare-and-swap, the address space it holds is
-//!   not available to a second thread starting at the same moment. Under a limit with room for
-//!   only one reservation, the second shrinks its regions to the floor and then fails, or wins
-//!   with a smaller reservation if the first has not published yet. The failure is an `Err` from
-//!   [`SpaceCell::get_or_reserve`] (a null return to the caller); it is never memory unsafety.
-//!   A later call finds the published space.
-//! - A fork in that window gives the child a copy of a reservation that no published word names.
-//!   It is never used and costs the child address space only.
+//! A fork while a thread reserves gives the child a copy of a reservation that no published
+//! word names, and a count that no thread of the child will take back. The reservation is never
+//! used and costs the child address space only; the count costs the child's first start its
+//! patience, bounded, and then it halves as it would have.
 
 use super::{Location, Plan, RegionId};
 use crate::classes::Class;
@@ -28,7 +33,7 @@ use crate::os::{HugePages, Os, OsError};
 use core::fmt;
 use core::num::NonZeroUsize;
 use core::ptr::{self, NonNull};
-use core::sync::atomic::{AtomicPtr, Ordering};
+use core::sync::atomic::{AtomicPtr, AtomicUsize, Ordering};
 
 /// A live reservation obtained from `os`.
 ///
@@ -73,12 +78,6 @@ impl<'os, O: Os> Space<'os, O> {
     /// half that, and so on down to the floor, with the same number of regions each time. The
     /// error is the OS's answer at the floor: below it the heap cannot start.
     pub fn reserve(os: &'os O) -> Result<Space<'os, O>, OsError> {
-        Space::reserve_unless(os, || false)
-    }
-
-    /// As [`Space::reserve`], but gives up before each smaller attempt if `stop()` says the
-    /// reservation is no longer wanted.
-    fn reserve_unless(os: &'os O, stop: impl Fn() -> bool) -> Result<Space<'os, O>, OsError> {
         let geometry = O::GEOMETRY;
         let mut shift = geometry.max_region_shift();
         loop {
@@ -87,7 +86,7 @@ impl<'os, O: Os> Space<'os, O> {
             };
             match os.reserve(plan.size(), plan.region_size()) {
                 Ok(base) => return Ok(Space { base, plan, os }),
-                Err(error) if shift == geometry.min_region_shift() || stop() => return Err(error),
+                Err(error) if shift == geometry.min_region_shift() => return Err(error),
                 Err(_) => shift -= 1,
             }
         }
@@ -273,10 +272,23 @@ impl<'os, O: Os> Space<'os, O> {
 /// which are free because the base is aligned to a region of at least 2 KiB. Zero means nothing
 /// is published. Only this cell writes the word, and only with a reservation of its own OS, which
 /// lives as long as the cell.
+///
+/// A second word counts the threads that are reserving in [`SpaceCell::get_or_reserve`]: each
+/// adds one before its `reserve` and takes it away after the call fails, or after it has
+/// published or unmapped what the call gave it.
 pub struct SpaceCell<O: Os> {
     os: O,
     word: AtomicPtr<u8>,
+    reserving: AtomicUsize,
 }
+
+/// Failed reservations, over one start, that a thread retries at the same size because other
+/// reservers were in flight. Bounded, so that a stale count (a child forked while a parent's
+/// thread was reserving) costs a bounded delay and then the ordinary halving.
+const PATIENCE: u32 = 1 << 10;
+
+/// How long a retry waits, in spins, for another reserver to publish or finish.
+const SPINS: u32 = 1 << 10;
 
 impl<O: Os> SpaceCell<O> {
     /// A cell over `os` with nothing published.
@@ -284,6 +296,7 @@ impl<O: Os> SpaceCell<O> {
         SpaceCell {
             os,
             word: AtomicPtr::new(ptr::null_mut()),
+            reserving: AtomicUsize::new(0),
         }
     }
 
@@ -302,17 +315,62 @@ impl<O: Os> SpaceCell<O> {
 
     /// The published space, reserving and publishing one first if there is none. If another
     /// thread publishes first, this one unmaps its own reservation and returns the winner. See
-    /// the module documentation for what a tight address-space limit does to the race.
+    /// the module documentation for how racing threads tell a full address space from one that
+    /// other reservers hold for a moment.
     pub fn get_or_reserve(&self) -> Result<Space<'_, O>, OsError> {
         if let Some(space) = self.get() {
             return Ok(space);
         }
-        // Many threads may race here, each reserving the whole heap. Once one has published, the
-        // others stop shrinking their attempts, and a failure is no failure.
-        let mine = match Space::reserve_unless(&self.os, || self.is_published()) {
-            Ok(mine) => mine,
-            Err(error) => return self.get().ok_or(error),
-        };
+        let geometry = O::GEOMETRY;
+        let mut shift = geometry.max_region_shift();
+        let mut patience = PATIENCE;
+        loop {
+            let Some(plan) = geometry.plan(shift) else {
+                return Err(OsError::EINVAL);
+            };
+            self.reserving.fetch_add(1, Ordering::AcqRel);
+            let error = match self.os.reserve(plan.size(), plan.region_size()) {
+                Ok(base) => {
+                    let space = self.publish(Space {
+                        base,
+                        plan,
+                        os: &self.os,
+                    });
+                    self.reserving.fetch_sub(1, Ordering::AcqRel);
+                    return Ok(space);
+                }
+                Err(error) => error,
+            };
+            // This thread is still counted, so anyone else makes the count more than one.
+            let others = self.reserving.fetch_sub(1, Ordering::AcqRel) > 1;
+            if let Some(space) = self.get() {
+                return Ok(space);
+            }
+            if others && patience > 0 {
+                patience -= 1;
+                self.wait_for_others();
+                continue;
+            }
+            if shift == geometry.min_region_shift() {
+                return Err(error);
+            }
+            shift -= 1;
+        }
+    }
+
+    /// Spins, a bounded while, until another reserver publishes or none is left in flight.
+    fn wait_for_others(&self) {
+        for _ in 0..SPINS {
+            if self.is_published() || self.reserving.load(Ordering::Acquire) == 0 {
+                return;
+            }
+            core::hint::spin_loop();
+        }
+    }
+
+    /// Publishes `mine` unless another space was published first, in which case `mine` is
+    /// unmapped and the winner returned.
+    fn publish<'a>(&'a self, mine: Space<'a, O>) -> Space<'a, O> {
         let word = encode(mine);
         loop {
             match self.word.compare_exchange(
@@ -321,7 +379,7 @@ impl<O: Os> SpaceCell<O> {
                 Ordering::AcqRel,
                 Ordering::Acquire,
             ) {
-                Ok(_) => return Ok(mine),
+                Ok(_) => return mine,
                 // A strong compare-and-swap from null fails only on a non-null word, so this
                 // returns on the first pass.
                 Err(current) => {
@@ -330,7 +388,7 @@ impl<O: Os> SpaceCell<O> {
                         // address, and this thread drops it here. A failed unmap leaves the
                         // range reserved, which wastes address space and nothing else.
                         let _ = unsafe { mine.unmap() };
-                        return Ok(self.decode(current));
+                        return self.decode(current);
                     }
                 }
             }
@@ -341,7 +399,7 @@ impl<O: Os> SpaceCell<O> {
         !self.word.load(Ordering::Acquire).is_null()
     }
 
-    /// The space a non-null word stands for. Only `get_or_reserve` stores words, and only
+    /// The space a non-null word stands for. Only `publish` stores words, and only
     /// `encode` of a reservation of `self.os`.
     fn decode(&self, word: NonNull<u8>) -> Space<'_, O> {
         let (_, shift) = unpack(word.addr().get());
@@ -602,5 +660,86 @@ mod tests {
         cell.os().set_faults(Call::Reserve, Faults::ALWAYS);
         assert_eq!(cell.get_or_reserve(), Err(OsError::ENOMEM));
         assert_eq!(cell.get(), None);
+        assert_eq!(cell.reserving.load(Ordering::Relaxed), 0);
+    }
+
+    /// Room for regions half the largest size, as under an address-space limit.
+    fn half_room() -> SpaceCell<Sim> {
+        let g = Sim::GEOMETRY;
+        let half = g.plan(g.max_region_shift() - 1).unwrap();
+        SpaceCell::new(Sim::with_capacity(
+            half.size().next_multiple_of(largest().region_size()),
+        ))
+    }
+
+    #[test]
+    fn a_failure_while_another_reserves_is_retried_at_the_same_size() {
+        // Another thread is between its reservation and its publish; the first three attempts
+        // fail for want of the room it holds, then it unmaps and the fourth fits.
+        let cell = SpaceCell::new(Sim::new());
+        cell.reserving.store(1, Ordering::Relaxed);
+        cell.os().set_faults(
+            Call::Reserve,
+            Faults {
+                pass: 0,
+                fail: 3,
+                partial: false,
+            },
+        );
+        let space = cell.get_or_reserve().unwrap();
+        assert_eq!(
+            space.plan(),
+            largest(),
+            "it did not settle for smaller regions"
+        );
+        assert_eq!(cell.os().calls(Call::Reserve), 4);
+        assert_eq!(
+            cell.reserving.load(Ordering::Relaxed),
+            1,
+            "its own count is back"
+        );
+    }
+
+    #[test]
+    fn a_failure_with_no_other_reserver_halves_at_once() {
+        let cell = half_room();
+        let space = cell.get_or_reserve().unwrap();
+        assert_eq!(
+            space.plan().region_shift(),
+            Sim::GEOMETRY.max_region_shift() - 1
+        );
+        assert_eq!(cell.os().calls(Call::Reserve), 2);
+        assert_eq!(cell.reserving.load(Ordering::Relaxed), 0);
+    }
+
+    /// A child forked while its parent's thread was reserving inherits a count that nothing
+    /// will take back. Its patience runs out, and then it halves as if alone.
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn a_stale_count_costs_bounded_patience_and_then_halves() {
+        let cell = half_room();
+        cell.reserving.store(1, Ordering::Relaxed);
+        let space = cell.get_or_reserve().unwrap();
+        assert_eq!(
+            space.plan().region_shift(),
+            Sim::GEOMETRY.max_region_shift() - 1
+        );
+        assert_eq!(cell.os().calls(Call::Reserve), u64::from(PATIENCE) + 2);
+    }
+
+    #[test]
+    fn threads_racing_for_room_for_one_heap_all_get_the_largest() {
+        let rounds = if cfg!(miri) { 2 } else { 100 };
+        for _ in 0..rounds {
+            let cell = SpaceCell::new(Sim::new());
+            let plans: Vec<Plan> = thread::scope(|scope| {
+                let handles: Vec<_> = (0..4)
+                    .map(|_| scope.spawn(|| cell.get_or_reserve().unwrap().plan()))
+                    .collect();
+                handles.into_iter().map(|h| h.join().unwrap()).collect()
+            });
+            assert!(plans.iter().all(|&plan| plan == largest()), "{plans:?}");
+            assert_eq!(cell.reserving.load(Ordering::Relaxed), 0);
+        }
     }
 }
