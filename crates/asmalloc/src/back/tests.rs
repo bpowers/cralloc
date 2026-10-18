@@ -3139,9 +3139,10 @@ mod review_headers {
         }
     }
 
-    /// In the design's geometry, at every region size and for every class that fits, the leaf
-    /// bitmap starts a page and is all that is not committed at assignment, and the first word
-    /// of every part of the block lies in the block's first 2 MiB.
+    /// In the design's geometry, at every region size and for every class that fits, the first
+    /// word of every part of the block lies in the block's first 2 MiB. A small class's leaf
+    /// bitmap starts a page and is all that is not committed at assignment; a large class's
+    /// block, header first, is committed whole.
     #[test]
     #[cfg_attr(miri, ignore)]
     fn every_design_layout_starts_its_parts_in_the_first_huge_page() {
@@ -3156,9 +3157,17 @@ mod review_headers {
             for class in Class::all().filter(|&c| plan.fits_region(c)) {
                 let layout = Layout::new(plan, class).unwrap();
                 let leaf = layout.tree_word(0, 0) as usize * WORD_BYTES;
-                assert_eq!(leaf % page, 0, "{shift} {class:?}");
-                assert_eq!(layout.fixed_commit(), (0, leaf), "{shift} {class:?}");
-                assert_eq!(layout.leaf_commit(0), leaf, "{shift} {class:?}");
+                if class.is_small() {
+                    assert_eq!(leaf % page, 0, "{shift} {class:?}");
+                    assert_eq!(layout.fixed_commit(), (0, leaf), "{shift} {class:?}");
+                    assert_eq!(layout.leaf_commit(0), leaf, "{shift} {class:?}");
+                    assert_eq!(layout.header_word(), None);
+                } else {
+                    let whole = layout.block_bytes();
+                    assert_eq!(layout.fixed_commit(), (0, whole), "{shift} {class:?}");
+                    assert_eq!(layout.leaf_commit(0), whole, "{shift} {class:?}");
+                    assert_eq!(layout.header_word(), Some(0));
+                }
                 let firsts = (0..=layout.height())
                     .map(|level| layout.tree_word(level, 0))
                     .chain([layout.clean_word(0)])

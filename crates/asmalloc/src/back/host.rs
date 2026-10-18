@@ -35,12 +35,13 @@ pub(crate) struct ClassState {
 /// A region's header: its `Grow` and `Hints` words (`layout`). All zero means nothing carved,
 /// nothing committed, no huge-page part and no purge under way.
 ///
-/// The headers of all regions are in the back end's state, side by side, not in the regions'
+/// A small class's headers are in the back end's state, side by side, not in the regions'
 /// metadata blocks: every class carves and so writes its header, but a small class needs its
-/// block only once its slots reach the bitmaps (a large class writes its slots' size words
-/// there on every allocation), and a block's first touched page costs a page of memory and,
-/// 128 MiB from the next class's, often a page of page tables (`docs/research/memory.md`,
-/// "Small heaps").
+/// block only once its slots reach the bitmaps, and a block's first touched page costs a page
+/// of memory and, 128 MiB from the next class's, often a page of page tables
+/// (`docs/research/memory.md`, "Small heaps"). A large class touches its block on every
+/// allocation and free anyway, so its header stays there (`Layout::header_word`), and its
+/// entry here is unused.
 pub(crate) struct RegionHeader {
     pub(crate) grow: Atomic,
     pub(crate) hints: Atomic,
@@ -55,13 +56,12 @@ impl RegionHeader {
     }
 }
 
-/// The headers of every region, by region number, four to a line: an exception to
+/// The headers of every region of a small class, by region number, four to a line: an exception to
 /// `crate::lined`'s rule.
 ///
 /// - `Grow` is written by the compare-and-swap in `region::carve`, which runs once per carving
-///   fill (twice when it also publishes a commit), once per first use of a large slot and per
-///   small allocation by a thread with no per-CPU cache (`Back::alloc`), and by `top_up` when
-///   the purge walk reaches a region's top.
+///   fill (twice when it also publishes a commit) and per small allocation by a thread with no
+///   per-CPU cache (`Back::alloc`), and by `top_up` when the purge walk reaches a region's top.
 /// - `Hints` is written by `switch_to_huge` once per region, by `prepare` and `unprepare` at
 ///   assignment, and by `set_cursor` once per unit the purge walk passes, from the clocked pass
 ///   and from `Back::grow` when a carve pays a growth debt.
@@ -185,12 +185,18 @@ impl<O: Os> Host for ClassHost<'_, O> {
 
     #[inline(always)]
     fn grow(&self, region: RegionId) -> &Atomic {
-        &self.headers[region.index() % MAX_REGIONS].grow
+        match self.layout.header_word() {
+            Some(word) => self.meta(region, word),
+            None => &self.headers[region.index() % MAX_REGIONS].grow,
+        }
     }
 
     #[inline(always)]
     fn hints(&self, region: RegionId) -> &Atomic {
-        &self.headers[region.index() % MAX_REGIONS].hints
+        match self.layout.header_word() {
+            Some(word) => self.meta(region, word + 1),
+            None => &self.headers[region.index() % MAX_REGIONS].hints,
+        }
     }
 
     #[inline(always)]
