@@ -1552,83 +1552,126 @@ and free every millisecond (a scratch program, resident MiB from `/proc/self/sta
 its outgrown slots below, and the clock returns them within the first interval. The same
 with a 4 MiB vector: 4.7 at the drop, 2.7 by 500 ms.
 
-### A large slot charged what its tenant could write
+### A large slot charged its pages that are not clean
 
-2026-10-18, later, at main `550d70c`. The retained count charged a freed large slot its
-whole size. A block that moved in with headroom fills a fifth to a quarter of its slot, so it
-was counted four or five times what it could have touched, which inflated what the decay,
-the growth cap and the budget for kept grown blocks act on. The 4 MiB loop above lost its
-last slot every repetition for it: 20 MiB charged for 4 MiB written.
+2026-10-18, later. The retained count charged a freed large slot its whole size. A block that
+moved in with headroom fills a fifth to a quarter of its slot, so it was counted four or five
+times what it could have touched, which inflated what the decay, the growth cap and the budget
+for kept grown blocks act on. The 4 MiB loop above lost its last slot every repetition for it:
+20 MiB charged for 4 MiB written.
 
-**The rule.** A slot of a huge page or more whose tenant could have written less than half of
-it (its recorded size from the slot's stagger, in pages, or in huge pages if advised) is
-charged that much, and the holder marks the pages past it clean before releasing the slot.
-Every other slot is charged whole, as before. The retained count and the clean bits agree
-page for page: the release adds the slot's pages that are not clean, a claim
-(`region::settle_slot`) subtracts the slot's pages that are not clean and clears the bits
-inside the new tenant's extent, and a purge subtracts the pages it newly cleans. A held
-slot's bits stay clear inside its extent: anything that widens it (an in-place grow,
-huge-page advice, a resize) clears them up to the new one (`region::cover`), so the release
-writes only the tail, and only where its bits are not set already. A slot freed and claimed
-again at the same sizes writes no clean bit.
+**The first rule, and why it went.** As first merged (`d6e8841`), the free marked the slot's
+pages past what its tenant could have written clean, in slots of a huge page or more whose
+tenant wrote less than half, and charged the rest. An adversarial review found that the free
+did not know whether an earlier tenant had written those pages, and that this broke two
+things: a tenant that asked for nothing (a zero-size `aligned_alloc` at a huge alignment) left
+an extent of no pages, so its free marked a resident slot wholly clean and no purge, not even
+`malloc_trim`, ever returned it; and a smaller tenant after a larger one hid the larger one's
+pages from the count without bound in total, ten MiB resident behind a 1.7 MiB count in its
+test, out of sight of the cap and the budget. It also found that moves under way at once each
+kept a slot past the budget, since the budget was checked before the copy and counted after.
 
-**Why not every slot.** Charging every slot by its tenant wrote clean bits on most frees
-and claims and read the size word on every free, and blocks that cross CPUs paid for the
-shared lines: the large-object pipeline was 12% slower, `largepair` 9%. A tail under half
-the slot is the class's own rounding (classes are a quarter apart) and the stagger's page;
-slots under a huge page over-count by at most their size. Both are charged whole.
+**The rule now.** A clean bit is true: it says the page has not been written since it was
+carved or last purged. Only a purge, a shrink's purge that went back whole, and the carve of a
+slot (for the pages past the block it was carved for, which nothing has written) set one; a
+claim, and anything that widens a held block (an in-place grow, huge-page advice, a resize),
+clear the bits under what the block may write, writing only words that change. A free slot is
+charged its pages that are not clean (`region::charge`), and the free writes no clean bit and
+reads no size word. The free, the claim (`region::settle_slot`), the keep decision and the
+purge's count agree on that, so the count is exact: the review's random runs now also check
+that no clean bit, of a free slot or a held one, stands over a page that holds data, and that
+holds with purges and advice failing and with twelve threads at once.
 
-**The under-count.** A tenant that follows a larger one in a slot kept resident leaves the
-larger one's pages past its own extent resident but marked clean. The purge walk still
-returns them: its unit reaches back to the start of the slot, the extent's pages are not
-clean, so the unit is not skipped. No zero bit is set by any of this, and a claim takes a slot
-for zero only from its zero bit, so `calloc` is never told such pages are zero
-(`a_small_tenant_after_a_large_one_is_under_counted_but_never_zero`).
+So that the carve knows which pages a block with headroom will write, the heap claims the slot
+for the size the block uses, not for the room (`Heap::alloc_large_using`), where it used to
+claim it for the room and record the smaller size after. The keep decision adds the slot's
+charge to the count first and takes it back if the result is past the budget, so moves under
+way at once pass it by one slot at most. There is no longer any condition on slot size or tail:
+a slot of any size is charged what is true of it, and in the steady state the free and the
+claim read the slot's clean words and write nothing.
 
-**Measured** against main `550d70c`, budget 16 MiB as before. The loops, `perf stat`, five
-interleaved runs, medians, thousands of cycles and faults per repetition, peak MiB:
+**Measured** against main `1868dd0`, interleaved, budget 16 MiB. The loops, `perf stat`, five
+runs, medians, thousands of cycles and faults per repetition, peak MiB:
 
 | Grow to | main | after | glibc | jemalloc | mimalloc crate |
 |---|---:|---:|---:|---:|---:|
-| 1 MiB | 290 / 0.2 / 10.9 | 290 / 0.2 / 11.1 | 281 / 0.2 / 10.1 | 404 / 0.1 / 10.3 | 464 / 0.0 / 21.1 |
-| 4 MiB | 1,443 / 3.3 / 15.9 | 1,265 / 0.8 / 15.8 | 1,078 / 2.1 / 13.0 | 1,833 / 2.0 / 16.3 | 1,868 / 0.1 / 27.1 |
-| 64 MiB | 27,763 / 74 / 76.1 | 27,123 / 74 / 76.1 | 68,543 / 16,388 / 73.4 | 122,731 / 30,775 / 80.8 | 37,256 / 4.6 / 147.4 |
+| 1 MiB | 291 / 0.1 / 10.7 | 291 / 0.1 / 10.7 | 269 / 0.2 / 10.2 | 404 / 0.1 / 10.4 | 465 / 0.0 / 21.0 |
+| 4 MiB | 1,262 / 0.8 / 15.8 | 1,259 / 0.8 / 15.8 | 1,073 / 2.1 / 13.1 | 1,828 / 2.0 / 16.4 | 1,867 / 0.1 / 27.1 |
+| 64 MiB | 28,655 / 73 / 75.9 | 28,374 / 73 / 75.9 | 68,782 / 16,388 / 73.4 | 122,957 / 30,775 / 80.7 | 43,934 / 4.6 / 147.2 |
 
-The 4 MiB loop keeps its last slot now and is 17% behind glibc, from 34%; its kernel time is
-1.7%. What is left is user time: we copy the buffer at each move into a slot four times its
-size, where glibc most likely grows the block in place or remaps it (not traced). The two
-`madvise` calls a repetition (a claim takes back the kept slot's advice, the grown move gives
-it again) are part of the 1.7%; avoiding them needs the heap to tell the claim that the block
-is a growing move's destination, which is more than one layer of plumbing, so they stay.
+The 4 MiB loop is where the first rule had it, 17% behind glibc. What is left there is user
+time: the buffer is copied at each move into a slot four times its size, where glibc most
+likely grows the block in place or remaps it (not traced). The two `madvise` calls a
+repetition (the claim takes back a kept slot's advice, the grown move gives it again) are in
+its 1.6% kernel time; avoiding them would need the heap to tell the claim that the block is a
+growing move's destination, so they stay.
 
-`benchrun`, five interleaved rounds, medians:
+A claim of a kept slot takes its advice back but not the huge pages already faulted, so that
+tenant's shrink in place is not trimmed to whole huge pages and may purge part of one; on
+Linux 7.2.9 a partly unmapped huge page stays charged whole to the cgroup until memory pressure
+splits it (`thp_partial.c`: purging half of each huge page of 64 MiB took RSS from 67 to 35 MiB
+but the charge only to 56, unchanged 2 s later). It is bounded at under two huge pages a
+shrink, and those pages are marked clean, so the retained count does not see them; the
+behaviour is left as it is.
 
-| Job | main | after | glibc | jemalloc | mimalloc crate |
-|---|---:|---:|---:|---:|---:|
-| vecgrow 64x4Mi, cycles/element | 8.91 | 8.99 | 18.43 | 10.60 | 44.17 |
-| the same, peak MiB | 276.4 | 276.5 | 269.2 | 307.2 | 289.1 |
-| vecgrow 1x256Mi, cycles/element | 4.92 | 4.61 | 9.08 | 16.92 | 5.43 |
-| the same, peak MiB | 259.9 | 259.9 | 257.0 | 264.4 | 523.5 |
-| large pipeline, ns/alloc | 68.9 | 68.6 | 356.5 | 300.0 | 40.3 |
-| map hash 1M, cycles/entry | 571 | 567 | 1,106 | 634 | 444 |
-| the same, peak MiB | 204.4 | 204.3 | 208.1 | 183.8 | 198.9 |
-| mstress 8 (preload), s | 0.264 | 0.265 | 0.365 | 0.440 | |
-| the same, peak MiB | 139.2 | 140.4 | 253.1 | 139.4 | |
-| largepair, ns | 69.8 | 72.4 | 8.1 | 136.8 | 106.6 |
+`benchrun`, five interleaved rounds, medians; the change is paired by round:
 
-Paired by round, everything is within noise of main except `largepair`, 3.6% slower (3.1 to
-4.2%): its 1 MiB block's slot is past a huge page, so its free now reads the slot's size word
-and its claim the clean bits for the tail. The 1x256Mi job's 6% lower median is not a paired
-difference (-0.4%). The peaks did not move: the 64 vectors' outgrown slots are under a huge
-page or fill more than half of it, so they are most likely charged as before.
+| Job | main | after | change | glibc | jemalloc | mimalloc crate |
+|---|---:|---:|---:|---:|---:|---:|
+| vecgrow 64x4Mi, cycles/element | 9.00 | 8.97 | -0.9% | 18.47 | 10.58 | 43.80 |
+| the same, peak MiB | 276.3 | 279.3 | | 269.2 | 307.1 | 289.1 |
+| vecgrow 1x256Mi, cycles/element | 4.72 | 4.78 | -1.3% | 9.13 | 17.33 | 5.44 |
+| the same, peak MiB | 259.8 | 259.7 | | 257.0 | 264.4 | 523.4 |
+| large pipeline, ns/alloc | 71.6 | 65.5 | -8.5% | 391.5 | 297.2 | 49.2 |
+| map hash 1M, cycles/entry | 560 | 561 | -0.0% | 1,103 | 631 | 432 |
+| the same, peak MiB | 204.3 | 204.3 | | 208.2 | 181.6 | 198.9 |
+| mstress 8 (preload), s | 0.262 | 0.271 | +2.5% | 0.363 | 0.441 | |
+| the same, peak MiB | 139.7 | 141.5 | | 242.9 | 139.4 | |
+| largepair, ns | 78.7 | 74.4 | -4.2% | 8.1 | 135.9 | 108.1 |
 
-**After the peak**, as above: one 256 MiB vector freed, then light work: 4.9 MiB at the drop,
-2.9 by 500 ms, 2.8 after, as main. A 4 MiB vector: 8.9 at the drop where main has 4.9, since
-its kept slots are now charged at what they hold and all fit the budget; 4.9 at 500 ms, 3.0 at
-1.5 s, 2.7 from 2.5 s, which is the decay taking a quarter of what is retained, or all of it
-under its floor, each interval. The worst cases of `worst.sh` (two runs each) are unchanged:
-burst then idle 4.8 MiB at 12 s, the phase change 9.3 against 8.8 to 9.2, the others within
-0.3 MiB. `sparse_realloc.c` resident 2 to 3 MiB after every grow, peaks within 0.3 MiB.
+`largepair` is 4.2% faster than main (2.4 to 5.4% by round), since its free no longer reads the
+size word. The pipeline's paired change is -8.5% but its rounds range from -29.5% to -7.6%,
+and main's own pipeline moved 4% with the layout change of `1868dd0`; take it as no slower.
+mstress ranges from -3.1% to +5.6%, noise. The 64 vectors' peak is 3 MiB higher, within the
+budget for kept grown blocks, whose slots are now charged what they hold.
+
+**After the peak**, as above, one vector grown and dropped, then light work, resident MiB: a
+256 MiB vector 4.8 at the drop, 2.9 by 500 ms, 2.7 from 1.5 s (main 5.0, 3.0, 2.9); a 4 MiB
+vector 8.9 at the drop, 4.9 at 500 ms, 3.0 at 1.5 s, 2.8 from 2.5 s (main 8.8, 4.8, 3.0, 2.7).
+The worst cases of `worst.sh`, two runs each, are within 0.3 MiB of main except the phase
+change, whose peak was 52 to 55 MiB against 46 to 49 and which ended at 9.0 to 9.2 against 8.2
+to 8.7; that case moved as much between runs of one build in earlier sessions (50 to 56 MiB,
+8.8 to 9.7 at the end) and touches no large slot. `sparse_realloc.c` stays at 2 to 3 MiB
+resident after every grow, peaks within 0.3 MiB of main.
+
+### The grow loop's 40%: where the benchmark's loop lands
+
+2026-10-18, later. The 4 MiB grow-and-free loop measured 1,765k cycles a repetition on main
+`fa4a4e0` against 1,262k on `1868dd0` the session before. It is not the allocator. Built
+today from the same bench sources, every commit since measures the same, interleaved, five
+runs: `1868dd0` 1,770k, `40876e1` 1,765k, `5eb615b` 1,766k, `dc12be3` 1,767k, `fa4a4e0`
+1,765k, all with 0.8 faults, 4 `madvise` calls (two of each advice) and a 15.8 to 15.9 MiB
+peak a repetition. The binary built last session from `1868dd0` still runs at 1,263k.
+
+The two `1868dd0` binaries retire the same instructions (9.08e9 and 9.09e9) with the same
+branch, cache, TLB, op-cache and store-forwarding counts; 85% of the time is the benchmark's
+own `Vec::push` loop in `workload::main`, a chain of one store and one load of the length
+per element, and that loop is byte for byte the same in both. What differs is where it lands:
+a change to `bench/workloads/src/single.rs` (the perf control for drop phases) moved
+`workload::main`. Rebuilding the incumbents shows the same thing for them: jemalloc's binary
+went from 1.83e9 to 1.32e9 user cycles, the mimalloc crate's from 1.35e9 to 1.86e9, with the
+same instructions. Padding the environment by up to 2 KiB, which moves the stack, changes
+nothing; building with `-C llvm-args=-align-loops=64`, which keeps the loop's stack slots
+as they were in the slow build and only moves the code, gives 1.24e9, the fast figure. So it
+is the loop's code address, most likely its store and load relative to a 32 or 64-byte
+boundary in some predictor of Zen 5's (not identified).
+
+So grow-loop numbers from different builds of the workloads cannot be compared, and the
+17% behind glibc above was measured with asmalloc's loop in a good place. Building the bench
+workspace with `-C llvm-args=-align-loops=64` puts the loop in the same place in every
+build (asmalloc 1.24e9, jemalloc 1.32e9, the mimalloc crate 1.36e9, glibc 1.08e9 user cycles
+for the 4 MiB loop); it is not adopted here, since it moves every benchmark's code and so its
+baselines.
 
 ## Small heaps
 
@@ -1793,6 +1836,33 @@ build of its own: spare depth; four headers to a line (a line each measured the 
 putting a large class's header back in its block; putting a large class's leaf bitmap first,
 next to its summary and zero bitmap; and both together, which came to +3.5%. Its cause is not
 found.
+
+*Found, the same day, by attribution.* `callgrind` on `largepair` (single-threaded, the same
+large allocate and free sequence; 200k operations) at `3882aee` and `1868dd0`: 3550 against
+3677 instructions per operation, all of the difference in `Back::alloc_at` (+55 per call),
+`tree::release_one` (+9) and `Heap::free_large` (+6). Per instruction, `alloc_at` executed
+19 more stack stores and 18 more loads per call: the layout memo returned a layout from two
+places, the unpacked words and the cold call that works one out, so `alloc_at` built the
+class's host twice and copied it; and `Back::grow` had come to be inlined whole, adding spills.
+`release_one`'s extra nine are the host's block cache, which a free used to fill by reading the
+header and now fills in `release_one`. AMD IBS op sampling with data addresses (five runs a
+build, about 18,000 user samples each) put the extra L1 misses of the pipeline in the large
+classes' metadata blocks: 31 misses in 45 accesses on the page holding the zero bitmap and
+the start of the sizes, which with the header moved out and the leaf bitmap after the sizes
+were no longer near the summary. None of the extra misses were on lines both threads write.
+
+Fixed (`dc2c720`): the cold call only fills the memo and the layout is always unpacked from
+it; paying the growth debt is a cold call of its own; and a large class's block, which every
+large allocation and free touches anyway, starts with its header (on its own line), then the
+summary, leaf and zero bitmaps, then the clean bitmap and sizes, and is committed whole at
+assignment. Small classes keep the layout that saves their pages. `perf stat`, five
+interleaved rounds under the lock, medians:
+
+| Job | `3882aee` | `1868dd0` | fixed |
+|---|---:|---:|---:|
+| pipeline t2, large objects (ns/alloc) | 72.61 | 76.61 | 72.28 |
+| largepair (ns/op) | 75.36 | 80.65 | 74.86 |
+| largepair, instructions | 6.061 G | 6.333 G | 6.061 G |
 
 ### What is left, and proposals
 

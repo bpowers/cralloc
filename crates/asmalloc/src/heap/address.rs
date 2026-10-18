@@ -86,12 +86,10 @@ impl<O: Os> Heap<O> {
                 .is_none_or(|back| room <= back.space().plan().region_size())
         });
         if let Some(room) = roomy
-            && let Some(ptr) = self.alloc_large_aligned(room, C_ALIGN, false)
+            && let Ok(layout) = Layout::from_size_align(room, C_ALIGN)
+            && let Some(grant) = self.alloc_large_using(layout, size, Zero::No)
         {
-            if let Some(back) = self.back() {
-                back.resize(ptr, size);
-            }
-            return Some(ptr);
+            return Some(grant.ptr);
         }
         self.alloc_large_aligned(size, C_ALIGN, false)
     }
@@ -322,6 +320,34 @@ mod tests {
         });
         // SAFETY: the test's block, freed once.
         unsafe { heap.heap.free_large(grown) };
+    }
+
+    /// Review finding empty-extent (`back::tests::charge_review`), reached through the heap as
+    /// C's `aligned_alloc(huge, 0)` reaches it: a zero-size request aligned to a huge page gets
+    /// a large slot and records a size of zero, so its free marks the whole slot clean. The
+    /// slot's earlier tenant left it resident, and no trim returns it.
+    #[test]
+    fn a_zero_size_aligned_block_leaves_its_slot_resident_for_good() {
+        use crate::os::sim::{Shape, Standard};
+        let heap = SimHeap::<Standard>::new();
+        let huge = Standard::GEOMETRY.huge_page_size();
+        let full = heap.heap.alloc_large_aligned(huge, huge, false).unwrap();
+        // SAFETY: the test's block, of this size, freed once.
+        unsafe {
+            full.as_ptr().write_bytes(0x77, huge);
+            heap.heap.free_large(full);
+        }
+        let empty = heap.heap.alloc_large_aligned(0, huge, false).unwrap();
+        assert_eq!(empty, full);
+        // SAFETY: the test's block, freed once.
+        unsafe { heap.heap.free_large(empty) };
+        let back = heap.heap.back().unwrap();
+        // Counted as resident, which it is. (As reviewed, nothing was counted.)
+        assert_eq!(back.retained(), huge);
+        back.trim();
+        // SAFETY: no other thread runs, and the heap and this test store only integers.
+        let purged = unsafe { heap.heap.os().is_purged(full, huge) };
+        assert!(purged, "a free slot is still resident after a trim");
     }
 
     fn ptr_of(x: &u8) -> *const u8 {

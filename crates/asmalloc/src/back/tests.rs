@@ -1738,18 +1738,15 @@ fn grown_blocks_are_kept_within_their_budget() {
     let back = state.get_or_reserve().unwrap();
     let os = state.os();
     let huge = Native::GEOMETRY.huge_page_size();
-    let page = Native::GEOMETRY.page_size();
     let budget = kept_grown(Native::GEOMETRY);
-    // Slots more than twice what their blocks write, so that each is charged its block.
     let (old_class, new_class) = (large(192 << 10), large(512 << 10));
-    assert!((96 << 10) + (192 << 10) <= budget);
     let purges = || os.calls(Call::Purge);
     let before = purges();
-    // A block that grows by moving: the slot it leaves is kept, data and all.
+    // A block that grows by moving, as the heap moves it: a fresh slot claimed for the size
+    // the block uses, then the move. The slot it leaves is kept, data and all.
     let old = back.alloc(old_class, 80 << 10).unwrap().ptr;
     pattern(old.as_ptr(), 80 << 10);
-    let new = back.alloc(new_class, new_class.size()).unwrap().ptr;
-    back.resize(new, 160 << 10);
+    let new = back.alloc(new_class, 160 << 10).unwrap().ptr;
     // SAFETY: both are live blocks that nothing else uses, and `new` is fresh.
     unsafe { back.move_large(old, new, 80 << 10, true) };
     assert!(patterned(new.as_ptr(), 80 << 10));
@@ -1758,19 +1755,20 @@ fn grown_blocks_are_kept_within_their_budget() {
         patterned(old.as_ptr(), 80 << 10),
         "the old slot is resident"
     );
-    // Charged what the block could have written, not its whole slot.
+    // Charged the pages its block may have written, not its whole slot: the rest of the
+    // fresh slot was marked clean when it was carved.
     let kept = back.retained_large();
+    let page = Native::GEOMETRY.page_size();
     assert!((80 << 10..=(80 << 10) + page).contains(&kept), "{kept}");
     assert_eq!(os.huge_pages(new), Some(HugePages::Prefer));
-    // Freed with its advice, it is kept too, advice and all, and charged its size in whole
-    // huge pages.
+    // Freed with its advice, it is kept too, advice and all, and charged its block's size in
+    // whole huge pages, which the advice may have faulted.
     back.free(new, new_class);
     assert_eq!(purges(), before);
     assert_eq!(os.huge_pages(new), Some(HugePages::Prefer));
-    assert_eq!(
-        back.retained_large(),
-        kept + (160usize << 10).next_multiple_of(huge)
-    );
+    let advised = back.retained_large() - kept;
+    assert_eq!(advised, (160usize << 10).next_multiple_of(huge));
+    assert!(kept + advised <= budget);
     // A block allocated in it rather than grown into it does not keep the advice.
     let again = back.alloc(new_class, new_class.size()).unwrap();
     assert_eq!(again.ptr, new);
@@ -1787,7 +1785,7 @@ fn grown_blocks_are_kept_within_their_budget() {
     assert_eq!(os.huge_pages(new), Some(HugePages::Avoid));
     assert_eq!(back.retained(), ballast);
     // A plain free keeps its slot whatever the count: this one takes the kept slot the move
-    // left, and gives it back resident.
+    // left, and gives it back resident, charged its pages that are not clean.
     let plain = back.alloc(old_class, old_class.size()).unwrap().ptr;
     assert_eq!(plain, old);
     assert_eq!(back.retained(), ballast - kept);
@@ -1796,77 +1794,89 @@ fn grown_blocks_are_kept_within_their_budget() {
     assert_eq!(back.retained(), ballast - kept + old_class.size());
 }
 
-/// What a free of the large block at `ptr` of `class`, `size` bytes, should add to the
-/// retained count: its size from the slot's stagger, in whole pages (whole huge pages if
-/// the slot is advised), at most the slot. Read before the free, while the slot is held.
-fn charge_of<O: Os>(back: &Back<'_, O>, class: Class, ptr: NonNull<u8>, size: usize) -> usize {
+/// What the free slot holding `ptr` is charged: its pages that are not marked clean.
+fn not_clean<O: Os>(back: &Back<'_, O>, class: Class, ptr: NonNull<u8>) -> usize {
+    use super::tree::Host as _;
+    use super::word::{BITS, Word as _};
+    let host = back.host(class).unwrap();
+    let layout = host.layout();
+    let location = back.space().locate(ptr.as_ptr()).unwrap();
+    let (index, _) = layout.block_at(location.offset as usize).unwrap();
+    let unit = layout.slot_unit(index).unwrap();
+    let clean = (unit.start..unit.end)
+        .filter(|&p| {
+            host.meta(location.region, layout.clean_word(p / BITS))
+                .load()
+                >> (p % BITS)
+                & 1
+                != 0
+        })
+        .count();
+    class.size() - clean * layout.page_size()
+}
+
+/// The pages a block of `size` bytes in the slot holding `ptr` may write: from the slot's
+/// start to its stagger plus `size`, in whole pages, at most the slot.
+fn extent<O: Os>(back: &Back<'_, O>, class: Class, ptr: NonNull<u8>, size: usize) -> usize {
     use super::tree::Host as _;
     let host = back.host(class).unwrap();
     let layout = host.layout();
     let location = back.space().locate(ptr.as_ptr()).unwrap();
     let (index, _) = layout.block_at(location.offset as usize).unwrap();
-    let huge = super::region::recorded(&host, location.region, index)
-        .unwrap()
-        .huge;
-    let start = back
-        .space()
-        .slot(location.region, class, index)
-        .addr()
-        .get();
-    let unit = if huge {
-        layout.huge_pages() as usize * layout.page_size()
-    } else {
-        layout.page_size()
-    };
-    let end = (start + layout.stagger(index) + size).next_multiple_of(unit);
-    let charge = (end - start).min(class.size());
-    // A tail under half the slot is not told apart.
-    if (class.size() - charge) * 2 < class.size() {
-        class.size()
-    } else {
-        charge
-    }
+    (layout.stagger(index) + size)
+        .next_multiple_of(layout.page_size())
+        .min(class.size())
 }
 
-/// A large slot released resident is charged what its last tenant could have written, and a
-/// claim and a purge take back exactly that, for a block at its size, one with room to grow,
-/// a staggered one, one advised for huge pages and one shrunk in place. After a mixed run the
-/// count is back at zero.
+/// A large slot released resident is charged its pages that are not clean, and a claim and a
+/// purge take back exactly that, for a block at its size, one with room to grow (whose slot's
+/// pages past it were marked clean when it was carved), a staggered one, one advised for huge
+/// pages, one shrunk in place (whose tail went back and is clean) and one grown in place over
+/// a clean tail (which `cover` clears). After each case the count is back at zero.
 #[test]
 #[cfg_attr(miri, ignore)]
-fn a_large_slot_is_charged_what_its_tenant_could_write() {
+fn a_large_slot_is_charged_its_pages_that_are_not_clean() {
     let state = state::<Native>();
     let back = state.get_or_reserve().unwrap();
     let page = Native::GEOMETRY.page_size();
     let huge = Native::GEOMETRY.huge_page_size();
     let class = large(256 << 10);
-    // Each case leaves a held block, its size and whether to claim it back (else trim).
-    let cases: [(&str, bool); 6] = [
-        ("whole", true),
-        ("headroom", false),
-        ("staggered", true),
-        ("advised", false),
-        ("shrunk", true),
-        ("grown", true),
+    let cases = [
+        "whole",
+        "headroom",
+        "staggered",
+        "advised",
+        "shrunk",
+        "grown",
     ];
-    for (case, claim) in cases {
+    for case in cases {
         assert_eq!(back.retained(), 0, "{case}");
         // A block held through the case, so that the claim below finds the case's slot.
         let mut skip = None;
-        let (ptr, size) = match case {
-            "whole" => (back.alloc(class, class.size()).unwrap().ptr, class.size()),
-            "headroom" => (back.alloc(class, 40 << 10).unwrap().ptr, 40 << 10),
+        let (ptr, expected) = match case {
+            "whole" => {
+                let ptr = back.alloc(class, class.size()).unwrap().ptr;
+                (ptr, class.size())
+            }
+            "headroom" => {
+                let ptr = back.alloc(class, 40 << 10).unwrap().ptr;
+                (ptr, extent(&back, class, ptr, 40 << 10))
+            }
             "staggered" => {
                 skip = Some(back.alloc_staggered(class, 1 << 10).unwrap().ptr);
                 let ptr = back.alloc_staggered(class, 40 << 10).unwrap().ptr;
                 assert_ne!(ptr.addr().get() % page, 0);
-                (ptr, 40 << 10)
+                (ptr, extent(&back, class, ptr, 40 << 10))
             }
             "advised" => {
-                let ptr = back.alloc(class, class.size()).unwrap().ptr;
+                let ptr = back.alloc(class, 2 * huge).unwrap().ptr;
                 move_in(&back, large(64 << 10), huge, ptr, 2 * huge);
                 assert_eq!(state.os().huge_pages(ptr), Some(HugePages::Prefer));
-                (ptr, 2 * huge)
+                let advised =
+                    (2 * huge)
+                        .next_multiple_of(huge)
+                        .max(extent(&back, class, ptr, 2 * huge));
+                (ptr, advised.min(class.size()))
             }
             "shrunk" => {
                 let ptr = back.alloc(class, class.size()).unwrap().ptr;
@@ -1876,37 +1886,32 @@ fn a_large_slot_is_charged_what_its_tenant_could_write() {
                 (ptr, 2 * page)
             }
             _ => {
-                // A small tenant leaves the slot's tail clean; the next grows into it in place.
+                // A small tenant of a purged slot leaves its tail clean; the next grows into
+                // it in place.
                 let ptr = back.alloc(class, 8 << 10).unwrap().ptr;
                 back.free(ptr, class);
+                back.trim();
                 let ptr = back.alloc(class, 8 << 10).unwrap().ptr;
                 assert_eq!(back.retained(), 0);
                 // SAFETY: the test holds the block and uses none of it during the call.
                 unsafe { back.resize_in_place(ptr, 200 << 10) };
                 paint(ptr.as_ptr(), 200 << 10, 0x24);
-                (ptr, 200 << 10)
+                (ptr, extent(&back, class, ptr, 200 << 10))
             }
         };
         // The advised case's move kept the slot it came from, which is charged too.
         let base = back.retained();
-        let charge = charge_of(&back, class, ptr, size);
-        // The advised block's huge pages fill half its slot or more, by its stagger.
-        if case != "advised" {
-            let told = matches!(case, "headroom" | "staggered" | "shrunk");
-            assert_eq!(charge < class.size(), told, "{case}");
-        }
         back.free(ptr, class);
-        assert_eq!(back.retained(), base + charge, "{case}");
-        if claim {
-            let again = back.alloc(class, class.size()).unwrap().ptr;
-            assert_eq!(
-                again,
-                ptr.map_addr(|a| { core::num::NonZeroUsize::new(a.get() & !(page - 1)).unwrap() })
-            );
-            assert_eq!(back.retained(), base, "{case}");
-            back.free(again, class);
-            assert_eq!(back.retained(), base + class.size(), "{case}");
-        }
+        assert_eq!(back.retained(), base + expected, "{case}");
+        assert_eq!(not_clean(&back, class, ptr), expected, "{case}");
+        let again = back.alloc(class, class.size()).unwrap().ptr;
+        assert_eq!(
+            again,
+            ptr.map_addr(|a| core::num::NonZeroUsize::new(a.get() & !(page - 1)).unwrap())
+        );
+        assert_eq!(back.retained(), base, "{case}");
+        back.free(again, class);
+        assert_eq!(back.retained(), base + class.size(), "{case}");
         let held = back.retained();
         assert_eq!(
             back.trim(),
@@ -1915,20 +1920,19 @@ fn a_large_slot_is_charged_what_its_tenant_could_write() {
         );
         assert_eq!(back.retained(), 0, "{case}");
         if let Some(skip) = skip {
-            let charge = charge_of(&back, class, skip, 1 << 10);
             back.free(skip, class);
-            assert_eq!(back.trim(), charge);
+            back.trim();
             assert_eq!(back.retained(), 0);
         }
     }
 }
 
-/// A small tenant after a large one in a slot kept resident: the large tenant's pages past the
-/// small one's extent stay resident but are marked clean, a known under-count. They are never
-/// taken for zero, and the purge walk still returns all of the slot.
+/// A small tenant after a large one in a slot kept resident: the large tenant's pages are not
+/// clean, so the slot is charged all of them, never reported zero, and returned whole by the
+/// purge walk.
 #[test]
 #[cfg_attr(miri, ignore)]
-fn a_small_tenant_after_a_large_one_is_under_counted_but_never_zero() {
+fn a_small_tenant_after_a_large_one_is_charged_what_is_resident() {
     let state = state::<Native>();
     let back = state.get_or_reserve().unwrap();
     let os = state.os();
@@ -1940,7 +1944,7 @@ fn a_small_tenant_after_a_large_one_is_under_counted_but_never_zero() {
     assert_eq!(small.ptr, big);
     assert!(!small.zeroed);
     back.free(small.ptr, class);
-    assert_eq!(back.retained(), charge_of_free(40 << 10));
+    assert_eq!(back.retained(), class.size(), "all of it is resident");
     let again = back.alloc(class, class.size()).unwrap();
     assert_eq!(again.ptr, big);
     assert!(!again.zeroed, "a resident tail is never reported zero");
@@ -1950,18 +1954,10 @@ fn a_small_tenant_after_a_large_one_is_under_counted_but_never_zero() {
         0x5e
     ));
     back.free(again.ptr, class);
-    let small = back.alloc(class, 40 << 10).unwrap().ptr;
-    back.free(small, class);
     back.trim();
     // SAFETY: no other thread runs, and the back end and this test store only integers.
     unsafe { assert!(os.is_purged(big, class.size()), "the whole slot went back") };
     assert_eq!(back.retained(), 0);
-}
-
-/// The charge of a block of `size` bytes in an unadvised slot at index 0, which has no
-/// stagger: its size in whole pages.
-fn charge_of_free(size: usize) -> usize {
-    size.next_multiple_of(Native::GEOMETRY.page_size())
 }
 
 /// In a slot advised for huge pages, a shrink returns its tail only in whole huge pages, and a
@@ -3107,6 +3103,8 @@ mod review {
     }
 }
 
+mod charge_review;
+
 /// Review of the move of the region headers into the back end's state, with the leaf bitmap
 /// last in the block (`host::RegionHeader`, `layout`).
 mod review_headers {
@@ -3212,9 +3210,10 @@ mod review_headers {
         }
     }
 
-    /// In the design's geometry, at every region size and for every class that fits, the leaf
-    /// bitmap starts a page and is all that is not committed at assignment, and the first word
-    /// of every part of the block lies in the block's first 2 MiB.
+    /// In the design's geometry, at every region size and for every class that fits, the first
+    /// word of every part of the block lies in the block's first 2 MiB. A small class's leaf
+    /// bitmap starts a page and is all that is not committed at assignment; a large class's
+    /// block, header first, is committed whole.
     #[test]
     #[cfg_attr(miri, ignore)]
     fn every_design_layout_starts_its_parts_in_the_first_huge_page() {
@@ -3229,9 +3228,17 @@ mod review_headers {
             for class in Class::all().filter(|&c| plan.fits_region(c)) {
                 let layout = Layout::new(plan, class).unwrap();
                 let leaf = layout.tree_word(0, 0) as usize * WORD_BYTES;
-                assert_eq!(leaf % page, 0, "{shift} {class:?}");
-                assert_eq!(layout.fixed_commit(), (0, leaf), "{shift} {class:?}");
-                assert_eq!(layout.leaf_commit(0), leaf, "{shift} {class:?}");
+                if class.is_small() {
+                    assert_eq!(leaf % page, 0, "{shift} {class:?}");
+                    assert_eq!(layout.fixed_commit(), (0, leaf), "{shift} {class:?}");
+                    assert_eq!(layout.leaf_commit(0), leaf, "{shift} {class:?}");
+                    assert_eq!(layout.header_word(), None);
+                } else {
+                    let whole = layout.block_bytes();
+                    assert_eq!(layout.fixed_commit(), (0, whole), "{shift} {class:?}");
+                    assert_eq!(layout.leaf_commit(0), whole, "{shift} {class:?}");
+                    assert_eq!(layout.header_word(), Some(0));
+                }
                 let firsts = (0..=layout.height())
                     .map(|level| layout.tree_word(level, 0))
                     .chain([layout.clean_word(0)])
@@ -3329,5 +3336,471 @@ mod review_headers {
         let base = assigned_and_never_carved(&state, large(64 << 10));
         let back = state.get_or_reserve().unwrap();
         back.free_by_address(NonNull::new(base).unwrap());
+    }
+}
+
+/// Adversarial review of the direct path for scattered launders (`group::Direct`): the
+/// summary bits above every slot it frees, at the tree heights the design's geometry has
+/// (the simulated shapes stop at two summary levels), and slots given twice on either side of
+/// the judgement.
+mod review_direct {
+    use super::super::Sink;
+    use super::super::layout::Grow;
+    use super::super::tree::{self, Host, Node};
+    use super::super::word::{BITS, Word};
+    use super::*;
+    use crate::space::RegionId;
+    use std::sync::atomic::{AtomicU8, AtomicUsize, Ordering::SeqCst};
+
+    /// A sink that keeps nothing: for carving more slots than a vector of pointers should hold.
+    struct Discard(usize);
+
+    impl Sink for Discard {
+        fn positions(&self) -> usize {
+            self.0
+        }
+        fn run(&mut self, _: usize, _: *mut u8, _: usize, _: usize) {}
+        fn put(&mut self, _: usize, _: *mut u8) {}
+    }
+
+    /// The class's regions in address order: each with its base and its watermark.
+    fn regions_of<O: Os>(back: &Back<'_, O>, class: Class) -> Vec<(RegionId, *mut u8, u32)> {
+        let host = back.host(class).unwrap();
+        back.space()
+            .plan()
+            .regions()
+            .filter(|&r| back.table().get(r) == RegionTag::Class(class))
+            .map(|r| {
+                let carved = Grow::unpack(host.grow(r).load()).carved;
+                (r, back.space().region(r).as_ptr(), carved)
+            })
+            .collect()
+    }
+
+    /// Whether leaf word `word` of `region` can be reached from the class's top word.
+    fn path_set<H: Host>(host: &H, region: RegionId, word: u32) -> bool {
+        let mut index = word;
+        for level in 0..host.layout().height() {
+            let above = Node::Region {
+                region,
+                level: level + 1,
+                index: index / BITS,
+            };
+            if tree::word(host, above).load() & (1 << (index % BITS)) == 0 {
+                return false;
+            }
+            index /= BITS;
+        }
+        let r = region.index() as u32;
+        host.class_word(r / BITS).load() & (1 << (r % BITS)) != 0
+            && host.class_top().load() & (1 << (r / BITS % BITS)) != 0
+    }
+
+    /// Whether `slot` of `region` is free and can be found.
+    fn visible<H: Host>(host: &H, region: RegionId, slot: u32) -> bool {
+        let leaf = tree::word(host, Node::leaf(region, slot / BITS)).load();
+        leaf & (1 << (slot % BITS)) != 0 && path_set(host, region, slot / BITS)
+    }
+
+    /// One batch of a shape that stresses a part of the direct path, as (region number in
+    /// `regions`, slot) in the order it is laundered: candidates, which the caller thins to
+    /// distinct slots that are not free.
+    fn shape(rng: &mut Rng, regions: &[(RegionId, *mut u8, u32)], n: usize) -> Vec<(usize, u32)> {
+        let r = rng.below(regions.len());
+        let carved = regions[r].2;
+        let any = |rng: &mut Rng| {
+            let r = rng.below(regions.len());
+            (r, rng.below(regions[r].2 as usize) as u32)
+        };
+        let clip = |slot: u64| (slot % carved as u64) as u32;
+        let (b, b2, b3) = (BITS as u64, (BITS * BITS) as u64, (BITS as u64).pow(3));
+        match rng.below(10) {
+            // Anywhere: mostly more summary words than slots.
+            0 => (0..n).map(|_| any(rng)).collect(),
+            // Under three neighbouring summary words.
+            1 => {
+                let first = rng.below(carved as usize) as u64 / b2 * b2;
+                (0..n)
+                    .map(|_| (r, clip(first + rng.below(3 * b2 as usize) as u64)))
+                    .collect()
+            }
+            // Strided, up or down.
+            2 => {
+                let start = rng.below(carved as usize) as u64;
+                let stride = 64 + rng.below(8192) as u64;
+                let down = rng.below(2) == 1;
+                (0..n as u64)
+                    .map(|k| {
+                        let k = if down { n as u64 - 1 - k } else { k };
+                        (r, clip(start + k * stride))
+                    })
+                    .collect()
+            }
+            // Summary words that share a place in the table of debts.
+            3 => {
+                let s = rng.below(carved as usize) as u64 / b2;
+                (0..n)
+                    .map(|_| {
+                        let summary = s + 64 * rng.below(6) as u64;
+                        (r, clip(summary * b2 + rng.below(b2 as usize) as u64))
+                    })
+                    .collect()
+            }
+            // Words of the next level that share a place in the table of upward debts.
+            4 => {
+                let u = rng.below(carved as usize) as u64 / b3;
+                (0..n)
+                    .map(|_| {
+                        let upper = u + 64 * rng.below(6) as u64;
+                        (r, clip(upper * b3 + rng.below(b3 as usize) as u64))
+                    })
+                    .collect()
+            }
+            // The same places of two regions, in turn.
+            5 => {
+                let least = regions.iter().map(|r| r.2).min().unwrap() as usize;
+                let first = rng.below(least) as u64;
+                (0..n)
+                    .map(|k| {
+                        let slot = (first + rng.below(8 * b2 as usize) as u64) % least as u64;
+                        (k % regions.len(), slot as u32)
+                    })
+                    .collect()
+            }
+            // Scattered, then dense.
+            6 => {
+                let scattered = 9 + rng.below(8);
+                let start = rng.below(carved as usize) as u64;
+                (0..n)
+                    .map(|k| {
+                        if k < scattered {
+                            any(rng)
+                        } else {
+                            (r, clip(start + (k - scattered) as u64))
+                        }
+                    })
+                    .collect()
+            }
+            // Runs of a few slots in words apart, enough of them to need the map, then
+            // scattered.
+            7 => {
+                let mut out = Vec::new();
+                for _ in 0..9 + rng.below(8) {
+                    let (r, slot) = any(rng);
+                    let first = slot / BITS * BITS;
+                    out.extend((0..2 + rng.below(3) as u32).map(|k| (r, first + k)));
+                }
+                out.extend((0..n).map(|_| any(rng)));
+                out
+            }
+            // Scattered around the window, so that the window holds some of the first words.
+            8 => {
+                let first = rng.below(carved as usize) as u64;
+                (0..n)
+                    .map(|k| {
+                        if k % 3 == 0 {
+                            (r, clip(first + rng.below(128 * b as usize) as u64))
+                        } else {
+                            any(rng)
+                        }
+                    })
+                    .collect()
+            }
+            // Dense.
+            _ => {
+                let start = rng.below(carved as usize) as u64;
+                (0..n as u64).map(|k| (r, clip(start + k))).collect()
+            }
+        }
+    }
+
+    /// Launders batches of every shape and length into a class of `size`-byte slots that has
+    /// one full region and part of another, in the geometry `back` has, and checks after each
+    /// that every slot it freed is free and reachable from the class's top word. Fills in
+    /// between take slots back, lowest first, which is the claim side's view of the same
+    /// thing: a fill that carves, or skips a free slot, could not see it.
+    fn every_slot_is_visible<O: Os>(back: &Back<'_, O>, size: usize, seed: u64, batches: usize) {
+        let class = small(size);
+        let host = back.host(class.class()).unwrap();
+        let per_region = host.layout().slots() as usize;
+        let want = per_region + per_region / 4;
+        assert_eq!(back.fill(class, &mut Discard(want)), want);
+        let regions = regions_of(back, class.class());
+        assert_eq!(regions.len(), 2, "{size}");
+        let address = |&(r, slot): &(usize, u32)| regions[r].1.wrapping_add(slot as usize * size);
+        let mut rng = Rng(seed | 1);
+        let mut free: BTreeSet<(usize, u32)> = BTreeSet::new();
+        for batch in 0..batches {
+            let n = match rng.below(4) {
+                0 => 2 + rng.below(30),
+                1 => 32 + rng.below(96),
+                2 => 128 + rng.below(200),
+                _ => 300 + rng.below(700),
+            };
+            let mut met = BTreeSet::new();
+            let slots: Vec<(usize, u32)> = shape(&mut rng, &regions, n)
+                .into_iter()
+                .filter(|slot| !free.contains(slot) && met.insert(*slot))
+                .collect();
+            let pointers: Vec<*mut u8> = slots.iter().map(address).collect();
+            // SAFETY: the test holds these slots and gives them up.
+            unsafe { back.launder(class, &pointers) };
+            for &(r, slot) in &slots {
+                assert!(
+                    visible(&host, regions[r].0, slot),
+                    "{size}: batch {batch}: slot {slot} of region {r} cannot be found: {slots:?}"
+                );
+            }
+            free.extend(slots);
+            if rng.below(3) == 0 {
+                let most = if rng.below(8) == 0 { free.len() } else { 1500 };
+                let k = rng.below(free.len().min(most) + 1);
+                let lowest: Vec<(usize, u32)> = free.iter().take(k).copied().collect();
+                let expected: Vec<*mut u8> = lowest.iter().map(address).collect();
+                assert_eq!(fill(back, class, k), expected, "{size}: batch {batch}");
+                for slot in lowest {
+                    free.remove(&slot);
+                }
+            }
+            if batch % 64 == 0 {
+                for &(r, slot) in &free {
+                    assert!(visible(&host, regions[r].0, slot), "{size}: batch {batch}");
+                }
+            }
+        }
+        let expected: Vec<*mut u8> = free.iter().map(address).collect();
+        assert_eq!(fill(back, class, free.len()), expected, "{size}");
+    }
+
+    /// In the design's geometry on the real OS, where a small class's tree has three or four
+    /// levels of its own, which no simulated shape has.
+    #[cfg(not(miri))]
+    mod design {
+        use super::*;
+        use crate::os::linux::LinuxOs;
+
+        /// One of these tests at a time: each reserves the design's whole address space, and
+        /// only a few such reservations fit in a process at once.
+        static ONE_HEAP: Mutex<()> = Mutex::new(());
+
+        #[test]
+        #[ignore = "slow: run with scripts/gate --all"]
+        fn every_slot_a_launder_frees_is_visible_at_the_design_heights() {
+            let _one = ONE_HEAP.lock().unwrap_or_else(|e| e.into_inner());
+            for (size, height) in [(8, 4), (16, 4), (256, 3), (4096, 3), (32 << 10, 2)] {
+                let state = Box::new(State::new(LinuxOs));
+                let back = state.get_or_reserve().unwrap();
+                let host = back.host(small(size).class()).unwrap();
+                assert_eq!(host.layout().height(), height, "{size}");
+                every_slot_is_visible(&back, size, 0x9e37_79b9 ^ size as u64, 1500);
+            }
+        }
+
+        /// Threads launder scattered slots they hold and fill again, at once, in one class.
+        /// The fills take the lowest free slots, so they keep emptying words and clearing
+        /// summary bits where the launders' frees land, and the launders read those bits
+        /// before they set them. It runs in short episodes: each thread launders and fills
+        /// twice, then every thread stops and every word a launder freed into is checked to
+        /// be reachable from the class's top word. A summary bit lost in a long run is mostly
+        /// put back by the next free into its word before anyone looks; here little follows
+        /// it (a run of claims that skips its re-read fails within a few hundred episodes).
+        /// At the end no slot is held twice and none is missing.
+        ///
+        /// A failure is kept and reported once the threads have been let go: a panic while
+        /// the others wait at a barrier would leave them there.
+        fn episodes_scatter_and_fill(slots: usize, threads: usize, episodes: usize, seed: u64) {
+            use std::panic::{AssertUnwindSafe, catch_unwind};
+            use std::string::String;
+            use std::sync::Barrier;
+            use std::sync::atomic::AtomicBool;
+            let _one = ONE_HEAP.lock().unwrap_or_else(|e| e.into_inner());
+            let state = Box::new(State::new(LinuxOs));
+            let back = state.get_or_reserve().unwrap();
+            let class = small(16);
+            assert_eq!(back.fill(class, &mut Discard(slots)), slots);
+            let regions = regions_of(&back, class.class());
+            assert_eq!(regions.len(), 1);
+            let (region, base, _) = regions[0];
+            let base = base.addr();
+            let owners: Vec<AtomicU8> = (0..slots * 16).map(|_| AtomicU8::new(0)).collect();
+            let touched: Vec<Mutex<Vec<u32>>> =
+                (0..threads).map(|_| Mutex::new(Vec::new())).collect();
+            let (start, done) = (Barrier::new(threads + 1), Barrier::new(threads + 1));
+            let stop = AtomicBool::new(false);
+            let failed: Mutex<Option<String>> = Mutex::new(None);
+            let held = AtomicUsize::new(0);
+            let state = &*state;
+            thread::scope(|scope| {
+                for t in 0..threads {
+                    let (owners, held, touched) = (&owners, &held, &touched);
+                    let (start, done, stop, failed) = (&start, &done, &stop, &failed);
+                    scope.spawn(move || {
+                        let back = state.get().unwrap();
+                        let me = t as u8 + 1;
+                        let mut rng = Rng(seed + 977 * t as u64 + 1);
+                        let mut pool: Vec<u32> = (0..slots as u32)
+                            .filter(|s| *s as usize % threads == t)
+                            .collect();
+                        for &slot in &pool {
+                            owners[slot as usize].store(me, SeqCst);
+                        }
+                        let mut batch: Vec<*mut u8> = Vec::new();
+                        loop {
+                            start.wait();
+                            if stop.load(SeqCst) {
+                                break;
+                            }
+                            let episode = catch_unwind(AssertUnwindSafe(|| {
+                                let mut words = touched[t].lock().unwrap();
+                                words.clear();
+                                for _ in 0..2 {
+                                    batch.clear();
+                                    for _ in 0..pool.len().min(10 + rng.below(60)) {
+                                        let slot = pool.swap_remove(rng.below(pool.len()));
+                                        let was = owners[slot as usize].swap(0, SeqCst);
+                                        assert_eq!(was, me, "slot {slot} is not mine to free");
+                                        words.push(slot / BITS);
+                                        batch.push(core::ptr::without_provenance_mut(
+                                            base + slot as usize * 16,
+                                        ));
+                                    }
+                                    // SAFETY: the thread holds these slots and gives them up.
+                                    unsafe { back.launder(class, &batch) };
+                                    for p in fill(&back, class, 10 + rng.below(60)) {
+                                        let slot = (p.addr() - base) / 16;
+                                        let was = owners[slot].swap(me, SeqCst);
+                                        assert_eq!(was, 0, "slot {slot} handed out while held");
+                                        pool.push(slot as u32);
+                                    }
+                                }
+                            }));
+                            if episode.is_err() {
+                                let mut failed = failed.lock().unwrap();
+                                failed.get_or_insert(std::format!("thread {t} panicked"));
+                            }
+                            done.wait();
+                        }
+                        held.fetch_add(pool.len(), SeqCst);
+                    });
+                }
+                let host = back.host(class.class()).unwrap();
+                for episode in 0..episodes {
+                    start.wait();
+                    done.wait();
+                    for words in &touched {
+                        let Ok(words) = words.lock() else { continue };
+                        for &word in words.iter() {
+                            let bits = tree::word(&host, Node::leaf(region, word)).load();
+                            if bits != 0 && !path_set(&host, region, word) {
+                                failed.lock().unwrap().get_or_insert(std::format!(
+                                    "episode {episode}: word {word} has free slots {bits:#x} \
+                                     that no search can find"
+                                ));
+                            }
+                        }
+                    }
+                    if failed.lock().unwrap().is_some() {
+                        break;
+                    }
+                }
+                stop.store(true, SeqCst);
+                start.wait();
+            });
+            if let Some(failure) = failed.lock().unwrap().take() {
+                panic!("{failure}");
+            }
+            let host = back.host(class.class()).unwrap();
+            let carved = Grow::unpack(host.grow(region).load()).carved;
+            let mut free = 0;
+            for word in 0..carved.div_ceil(BITS) {
+                let bits = tree::word(&host, Node::leaf(region, word)).load();
+                free += bits.count_ones() as usize;
+                assert!(bits == 0 || path_set(&host, region, word), "word {word}");
+            }
+            assert_eq!(free + held.load(SeqCst), carved as usize, "a slot was lost");
+        }
+
+        #[test]
+        #[ignore = "slow: run with scripts/gate --all"]
+        fn episodes_scatter_and_fill_under_a_few_summary_words() {
+            for seed in 0..2 {
+                episodes_scatter_and_fill(1 << 16, 6, 20_000, seed);
+            }
+        }
+
+        #[test]
+        #[ignore = "slow: run with scripts/gate --all"]
+        fn episodes_scatter_and_fill_under_many_summary_words() {
+            episodes_scatter_and_fill(1 << 20, 6, 20_000, 7);
+        }
+    }
+
+    /// The same in the simulated shape, so that the default run has it.
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn every_slot_a_launder_frees_is_visible() {
+        for size in [8, 16, 64, 1024] {
+            let state = state::<Native>();
+            let back = state.get_or_reserve().unwrap();
+            every_slot_is_visible(&back, size, 0x51ed_270b ^ size as u64, 300);
+        }
+    }
+
+    /// One slot to a word, far apart, of `slots`, a fill of 64 KiB of 16-byte slots: the
+    /// first nine are taken before the batch is judged, the rest go to the direct path.
+    fn scattered(slots: &[*mut u8], n: usize) -> Vec<*mut u8> {
+        (0..n).map(|i| slots[(i * 389 % 1024) * 64]).collect()
+    }
+
+    fn launder_twice(first: usize, again_after: usize) {
+        let state = state::<Standard>();
+        let back = state.get_or_reserve().unwrap();
+        let class = small(16);
+        let slots = fill(&back, class, 64 * 1024);
+        let mut batch = scattered(&slots, 200);
+        batch.insert(again_after, batch[first]);
+        // SAFETY: the test holds these slots, or passes a bad one to see the abort.
+        unsafe { back.launder(class, &batch) };
+    }
+
+    /// The batch's first slot, which is in the window, comes again in the direct part.
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    #[should_panic(expected = "double free: an object was freed while already free")]
+    fn a_window_slot_again_in_the_direct_part_aborts() {
+        launder_twice(0, 120);
+    }
+
+    /// A slot of one of the words held in the list of early words comes again in the direct
+    /// part.
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    #[should_panic(expected = "double free: an object was freed while already free")]
+    fn an_early_slot_again_in_the_direct_part_aborts() {
+        launder_twice(4, 60);
+    }
+
+    /// The slot in hand when the batch is judged comes again as the first of the direct part.
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    #[should_panic(expected = "double free: an object was freed while already free")]
+    fn the_slot_in_hand_at_the_judgement_again_aborts() {
+        launder_twice(8, 9);
+    }
+
+    /// A slot of the direct part comes again straight after itself.
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    #[should_panic(expected = "double free: an object was freed while already free")]
+    fn a_direct_slot_again_at_once_aborts() {
+        launder_twice(50, 51);
+    }
+
+    /// A slot twice among the slots taken before the judgement is caught by the gathering.
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    #[should_panic(expected = "freed twice in one batch")]
+    fn a_slot_twice_before_the_judgement_aborts() {
+        launder_twice(2, 6);
     }
 }

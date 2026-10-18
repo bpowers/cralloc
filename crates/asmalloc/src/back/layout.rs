@@ -2,16 +2,11 @@
 //! pages and purge units.
 //!
 //! A region's metadata block (`Space::metadata`) is an array of 64-bit words, all zero until
-//! touched:
+//! touched. A small class's block:
 //!
 //! ```text
 //! word 0                      summary levels height down to 1, each a word per 64 words below
 //! ...                         clean bitmap: one bit per page, set means purged and untouched
-//! ...                         zero bitmap, large classes only: one bit per slot, set means
-//!                             free and known to read as zero
-//! ...                         sizes, large classes only: one word per slot, the size the
-//!                             object in it was last allocated or resized to, and whether
-//!                             the slot is advised for huge pages (`Recorded`)
 //! next page                   leaf bitmap: one bit per slot, set means free
 //! ```
 //!
@@ -25,10 +20,28 @@
 //! levels, and for most classes the start of level 1), the start of level 1 for the smallest
 //! classes, and the first page of the leaf bitmap, which for every small class lies in the same
 //! 2 MiB as the rest, so one page of page tables serves them all (`docs/research/memory.md`,
-//! "Small heaps"). The region's header (`Grow`, `Hints`) is not in the block at all: it is in
-//! the back end's state, beside every other region's (`host::RegionHeader`), so that a small
-//! class whose slots never reach the bitmaps never touches its block. A large class touches it
-//! on every allocation, to write the slot's size word.
+//! "Small heaps"). A small class's header (`Grow`, `Hints`) is not in the block at all: it is
+//! in the back end's state, beside every other region's (`host::RegionHeader`), so that a small
+//! class whose slots never reach the bitmaps never touches its block.
+//!
+//! A large class touches its block on every allocation and free, so its block keeps everything
+//! those read together, and is committed whole at assignment (its leaf bitmap is small):
+//!
+//! ```text
+//! word 0                      header: Grow (watermark, committed pages), then Hints (start of
+//!                             the huge-page part, purge cursor), on a line of its own
+//! ...                         summary levels height down to 1
+//! ...                         leaf bitmap
+//! ...                         zero bitmap: one bit per slot, set means free and known to read
+//!                             as zero
+//! ...                         clean bitmap
+//! ...                         sizes: one word per slot, the size the object in it was last
+//!                             allocated or resized to, and whether the slot is advised for huge
+//!                             pages (`Recorded`)
+//! ```
+//!
+//! With the header in the back end's state and the leaf bitmap after the sizes, each large
+//! allocation and free touched two more lines than this, 1.5% on a pipeline of large objects.
 
 use super::policy::{STAGGER_SLOTS, STAGGER_STEP};
 use super::word::BITS;
@@ -42,6 +55,12 @@ pub(crate) const MAX_LEVELS: usize = 5;
 
 /// Bytes per metadata word.
 pub(crate) const WORD_BYTES: usize = 8;
+
+/// A large class's header words at the start of its block: `Grow`, then `Hints`.
+const HEADER_WORDS: u32 = 2;
+
+/// Words in a cache line.
+const LINE_WORDS: u32 = (crate::lined::LINE / WORD_BYTES) as u32;
 
 /// The metadata layout and slot arithmetic of one class in one geometry.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -96,32 +115,33 @@ impl Memo {
     /// kept. `plan` must be the same for every call on one memo.
     #[inline]
     pub(crate) fn layout(&self, plan: Plan, class: Class) -> Option<Layout> {
-        let last = self.words[PACKED_WORDS - 1].load(Ordering::Acquire);
-        if last & PACKED != 0 {
-            let mut words = [0; PACKED_WORDS];
-            for (word, kept) in words.iter_mut().zip(&self.words) {
-                *word = kept.load(Ordering::Relaxed);
-            }
-            words[PACKED_WORDS - 1] = last;
-            return Some(Layout::unpack(words, class));
+        let mut last = self.words[PACKED_WORDS - 1].load(Ordering::Acquire);
+        if last & PACKED == 0 {
+            last = self.work_out(plan, class)?;
         }
-        self.work_out(plan, class)
+        let mut words = [0; PACKED_WORDS];
+        for (word, kept) in words.iter_mut().zip(&self.words) {
+            *word = kept.load(Ordering::Relaxed);
+        }
+        words[PACKED_WORDS - 1] = last;
+        Some(Layout::unpack(words, class))
     }
 
-    /// Works the layout out and keeps it: once per class per heap. Out of line, so that the
-    /// common path stays small enough for `Back::host` to inline: when it did not, every
-    /// large allocation and free copied the class's host through `memmove` (5% on a pipeline
-    /// of large objects; `docs/research/memory.md`, "Small heaps").
+    /// Works the layout out and keeps it, once per class per heap, and returns the last packed
+    /// word. Out of line and returning no layout of its own, so that the common path is small
+    /// and makes its layout in one place: when the layout came back from here too, the caller
+    /// built the class's host twice over and copied it (`memmove`, then 20 stores and loads),
+    /// 4% on a pipeline of large objects (`docs/research/memory.md`, "Small heaps").
     #[cold]
     #[inline(never)]
-    fn work_out(&self, plan: Plan, class: Class) -> Option<Layout> {
+    fn work_out(&self, plan: Plan, class: Class) -> Option<u64> {
         let layout = Layout::new(plan, class)?;
         let words = layout.pack();
         for (kept, &word) in self.words.iter().zip(&words).take(PACKED_WORDS - 1) {
             kept.store(word, Ordering::Relaxed);
         }
         self.words[PACKED_WORDS - 1].store(words[PACKED_WORDS - 1], Ordering::Release);
-        Some(layout)
+        Some(words[PACKED_WORDS - 1])
     }
 }
 
@@ -260,8 +280,14 @@ impl Layout {
             }
             count[height] = count[height - 1].div_ceil(BITS);
         }
-        // The summary levels from the top down: the small ones share the block's first page.
-        let mut next = 0;
+        // A large class's header first, on a line of its own where the block has room
+        // (`header_word`); then the summary levels from the top down, the small ones sharing the
+        // block's first page.
+        let mut next = match (class.is_small(), aligned) {
+            (true, _) => 0,
+            (false, true) => LINE_WORDS,
+            (false, false) => HEADER_WORDS,
+        };
         let mut level = height;
         while level >= 1 {
             offset[level] = next;
@@ -270,23 +296,30 @@ impl Layout {
         }
         let page_shift = geometry.page_size().trailing_zeros();
         let pages = (plan.region_size() >> page_shift) as u32;
-        let clean = next;
         let clean_count = pages.div_ceil(BITS);
-        next += clean_count;
-        let (zero, sizes) = if class.is_small() {
-            (0, 0)
+        let (clean, zero, sizes) = if class.is_small() {
+            // The clean bitmap, then the leaf bitmap from a page boundary, last, so that it can
+            // be committed as the region grows.
+            let clean = next;
+            next += clean_count;
+            if aligned {
+                let page_words = (geometry.page_size() / WORD_BYTES) as u32;
+                next = next.next_multiple_of(page_words);
+            }
+            offset[0] = next;
+            next += count[0];
+            (clean, 0, 0)
         } else {
-            let zero = next;
-            let sizes = zero + count[0];
+            // What every allocation and free reads, together after the summary: the leaf and
+            // zero bitmaps; then the clean bitmap and the sizes. The block is committed whole at
+            // assignment: a large class's leaf bitmap is small.
+            offset[0] = next;
+            let zero = offset[0] + count[0];
+            let clean = zero + count[0];
+            let sizes = clean + clean_count;
             next = sizes + slots;
-            (zero, sizes)
+            (clean, zero, sizes)
         };
-        if aligned {
-            let page_words = (geometry.page_size() / WORD_BYTES) as u32;
-            next = next.next_multiple_of(page_words);
-        }
-        offset[0] = next;
-        next += count[0];
         if next as usize * WORD_BYTES > plan.metadata_size() {
             return None;
         }
@@ -416,6 +449,15 @@ impl Layout {
         self.pages.div_ceil(BITS)
     }
 
+    /// Word offset of the region's `Grow` word in its block, `Hints` the word after it, for a
+    /// large class; `None` for a small class, whose header is in the back end's state
+    /// (`host::RegionHeader`). Every large allocation and free touches its block anyway, and
+    /// with the header outside it touched one more line.
+    #[inline(always)]
+    pub(crate) const fn header_word(&self) -> Option<u32> {
+        if self.sizes == 0 { None } else { Some(0) }
+    }
+
     /// Word offset of the size word of slot `slot`, if the class records sizes (large classes).
     #[inline(always)]
     pub(crate) const fn size_word(&self, slot: u32) -> Option<u32> {
@@ -439,7 +481,11 @@ impl Layout {
     /// Words of metadata the layout uses.
     #[inline(always)]
     pub(crate) const fn total_words(&self) -> u32 {
-        self.offset[0] + self.count[0]
+        if self.sizes == 0 {
+            self.offset[0] + self.count[0]
+        } else {
+            self.sizes + self.slots
+        }
     }
 
     /// Bytes per page.
@@ -497,9 +543,14 @@ impl Layout {
     /// Where in the block the leaf bitmap must be writable up to, for a region committed up to
     /// page `committed`: past the words covering every slot that starts below that page,
     /// rounded up to a whole page. With nothing committed, the page the leaf bitmap starts in,
-    /// so that the range from one commit to the next is always whole pages of the bitmap.
+    /// so that the range from one commit to the next is always whole pages of the bitmap. For a
+    /// large class, whose block is committed whole at assignment, the end of the block, so that
+    /// no carve commits anything more.
     #[inline]
     pub(crate) const fn leaf_commit(&self, committed: u32) -> usize {
+        if self.sizes != 0 {
+            return self.block_bytes();
+        }
         let bytes = (committed as usize) << self.page_shift;
         let covered = if bytes == 0 {
             0
@@ -516,10 +567,14 @@ impl Layout {
         (end + page - 1) & !(page - 1)
     }
 
-    /// The byte range of the metadata block that is committed when the region is assigned:
-    /// everything before the leaf bitmap, as whole pages.
+    /// The byte range of the metadata block that is committed when the region is assigned, as
+    /// whole pages: for a small class everything before the leaf bitmap, for a large class the
+    /// whole block.
     #[inline]
     pub(crate) const fn fixed_commit(&self) -> (usize, usize) {
+        if self.sizes != 0 {
+            return (0, self.block_bytes());
+        }
         let page = self.page_size();
         let end = (self.offset[0] as usize * WORD_BYTES + page - 1) & !(page - 1);
         (0, end)

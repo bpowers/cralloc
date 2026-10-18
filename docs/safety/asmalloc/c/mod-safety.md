@@ -26,9 +26,9 @@ caller owns and gives up).
   the block is a whole slot of `class`, all of it the block's and committed. For
   `Found::Large { size: used }`, the block's usable size, `process::usable_size(old)`: `used`,
   the size the back end recorded when the block was last allocated or resized
-  (`Back::alloc`, `Back::alloc_run`, `Back::resize`), rounded up to a page (or `used` itself
+  (`Back::alloc`, `Back::alloc_run`, `Back::resize_in_place`), rounded up to a page (or `used` itself
   if no block were found, which cannot happen for the address `find` just found). It is
-  within the slot or run: `used` is (`Back::alloc` and `Back::resize` abort on a size larger
+  within the slot or run: `used` is (`Back::alloc` and `Back::resize_in_place` abort on a size larger
   than the slot or run, and `alloc_run` records the size it was asked to hold), and the slot
   or run is a whole number of pages (every class above the small ones is a quarter step of a
   power of two of at least 32 KiB, so a multiple of 8 KiB; a run is whole regions), so

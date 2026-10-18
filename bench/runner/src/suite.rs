@@ -375,6 +375,24 @@ pub fn backend() -> Vec<Job> {
         rust("single-thread", "tree depth=18".into(), Native, "tree depth=18 reps=4", one(), 60),
         rust("single-thread", "json 8Mi".into(), Native, "json size=8Mi reps=3", one(), 60),
         cprog("sh8bench 16", "sh8bench", "16", both(), Metric::Wall, 60),
+        // A buffer grown by doubling and freed, over and over: the large path's moves, kept
+        // slots and their charge (docs/research/memory.md, "Grown blocks kept up to a budget").
+        rust(
+            "single-thread",
+            "vecgrow 1x4Mi grow-and-free".into(),
+            Native,
+            "vecgrow vecs=1 max=4Mi reps=1000",
+            one(),
+            60,
+        ),
+        rust(
+            "single-thread",
+            "vecgrow 1x1Mi grow-and-free".into(),
+            Native,
+            "vecgrow vecs=1 max=1Mi reps=4000",
+            one(),
+            60,
+        ),
     ]
 }
 

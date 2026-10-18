@@ -248,11 +248,13 @@ prefix well ahead of what is in use. Under strict overcommit the commit charge i
 writable prefix, not the reservation.
 
 The rest of the reservation holds metadata: each region's bitmaps at an address computed
-from the region number, and an array of magazines. A region's watermark and its other
-header words are not with its bitmaps. They sit together in the allocator's static state,
-so a region of a small class touches none of its metadata pages until its objects first
-come back to the bitmaps, and a small process pays no pages or page tables for bitmaps it
-never uses. Memory that holds application objects never holds allocator state.
+from the region number, and an array of magazines. A small class's region keeps its
+watermark and its other header words apart from its bitmaps, together with the other
+regions' in the allocator's static state, so it touches none of its metadata pages until
+its objects first come back to the bitmaps, and a small process pays no pages or page
+tables for bitmaps it never uses. A large class reads and writes its metadata on every
+allocation and free, so its header stays beside its bitmaps and sizes. Memory that holds
+application objects never holds allocator state.
 
 ### Size classes and alignment
 
@@ -682,16 +684,14 @@ only on a block the program copied or wrote in full to reach its size, so it cos
 about what the program has already spent on that block, and it never falls on a block that
 was allocated, barely touched and freed.
 
-A kept slot is charged, against that budget and against retained memory, what its tenant
-could have written, not its whole size. A block that moved in with headroom fills a quarter
-of its slot or less, and charged whole it would count several times the memory that is
-resident. The slot's clean-page bits are the one record of the charge: the free counts the
-pages that are not clean, and the next claim and the purge subtract by the same bits, so
-the three cannot disagree. Only a slot of a huge page or more whose tenant could have
-written under half of it is told apart this way; any other slot is charged whole, because
-reading the tenant's size on every free costs more than that over-count. A smaller tenant
-after a larger one leaves resident pages the count does not see, and the purge pass still
-returns them.
+A kept slot is charged, against that budget and against retained memory, the pages that
+may be resident, not its whole size: a block that moved in with headroom fills a quarter of
+its slot or less. The record is the slot's clean-page bits, and a clean bit is true: it says
+the page has not been written since it was carved or last purged. Only a purge sets one, and
+the carve of a slot for the pages past the block it was carved for. A claim, and anything
+that widens a block, clears them under what the block may write. A free writes none. So a
+smaller tenant after a larger one is charged what the larger one left, and the free, the
+claim, the keep decision and the purge count a slot by the same bits and cannot disagree.
 
 Moving the pages with `mremap` instead would copy nothing, but it splits the heap's
 mapping in ways that take several more rules to undo, and it adds nothing to the memory

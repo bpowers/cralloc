@@ -23,7 +23,7 @@
 //! zeroed allocation clears only what it must.
 //!
 //! Every allocation and in-place resize of a large object records the size asked for
-//! (`Back::alloc`, `Back::alloc_run`, `Back::resize`). What the caller may use is that size rounded
+//! (`Back::alloc`, `Back::alloc_run`, `Back::resize_in_place`). What the caller may use is that size rounded
 //! up to a page, so a block with headroom never reports, or makes anyone touch, the room it has not
 //! been asked for.
 
@@ -99,19 +99,33 @@ impl<O: Os> Heap<O> {
     #[cold]
     #[inline(never)]
     pub(crate) fn alloc_large(&self, layout: Layout, zero: Zero) -> Option<Grant> {
+        self.alloc_large_using(layout, layout.size(), zero)
+    }
+
+    /// [`Heap::alloc_large`] with the room of `layout` for a block that uses `used` bytes of it,
+    /// at most `layout.size()`: a block that grows and takes headroom. The slot is chosen for
+    /// the room and the block records `used`, so the back end knows from the claim which of the
+    /// slot's pages the block may write (`back::region::settle_slot`). A run records the room.
+    pub(crate) fn alloc_large_using(
+        &self,
+        layout: Layout,
+        used: usize,
+        zero: Zero,
+    ) -> Option<Grant> {
         let back = self.start()?;
+        let used = used.min(layout.size());
         match place(layout, back.space().plan()) {
             Place::Slot(class) => {
                 let block = if layout.align() <= STAGGER_STEP {
-                    back.alloc_staggered(class, layout.size())?
+                    back.alloc_staggered(class, used)?
                 } else {
-                    back.alloc(class, layout.size())?
+                    back.alloc(class, used)?
                 };
                 let len = block.len;
                 let clear = match zero {
                     _ if block.zeroed => 0,
                     Zero::No => 0,
-                    Zero::Requested => layout.size(),
+                    Zero::Requested => used,
                     Zero::Whole => len,
                 };
                 // SAFETY: HEAP-03.
@@ -198,7 +212,17 @@ impl<O: Os> Heap<O> {
 impl<O: Os, R: Routines + Copy> Bound<'_, O, R> {
     /// [`Heap::alloc_large`] as the slow path it counts as: the block, then a heartbeat.
     pub(crate) fn alloc_large_slow(self, layout: Layout, zero: Zero) -> Option<Grant> {
-        let grant = self.heap().alloc_large(layout, zero);
+        self.alloc_large_slow_using(layout, layout.size(), zero)
+    }
+
+    /// [`Heap::alloc_large_using`] as the slow path it counts as.
+    pub(crate) fn alloc_large_slow_using(
+        self,
+        layout: Layout,
+        used: usize,
+        zero: Zero,
+    ) -> Option<Grant> {
+        let grant = self.heap().alloc_large_using(layout, used, zero);
         self.heartbeat();
         grant
     }
@@ -269,18 +293,10 @@ impl<O: Os, R: Routines + Copy> Bound<'_, O, R> {
             .filter(|layout| layout.size() <= region);
         // A zeroed grow clears only what lies past the bytes it keeps, and only when the new
         // block is not known to read as zero.
-        let grant = roomy
-            .and_then(|layout| self.alloc_grant(layout, Zero::No))
-            .or_else(|| self.alloc_grant(new, Zero::No))?;
         // A block with headroom records the size asked for, not the room it was given.
-        let grant = match heap.back() {
-            Some(back) if small(new).is_none() => {
-                back.resize(grant.ptr, new.size());
-                let len = heap.usable_size(grant.ptr.as_ptr()).unwrap_or(new.size());
-                Grant { len, ..grant }
-            }
-            _ => grant,
-        };
+        let grant = roomy
+            .and_then(|layout| self.alloc_large_slow_using(layout, new.size(), Zero::No))
+            .or_else(|| self.alloc_grant(new, Zero::No))?;
         let kept = old.size().min(new.size());
         // SAFETY: HEAP-04.
         unsafe {

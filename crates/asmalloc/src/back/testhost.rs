@@ -213,11 +213,17 @@ impl<W: TestWord> Host for TestHost<W> {
     }
 
     fn grow(&self, region: RegionId) -> &W {
-        &self.headers[region.index()].0
+        match self.layout.header_word() {
+            Some(word) => self.meta(region, word),
+            None => &self.headers[region.index()].0,
+        }
     }
 
     fn hints(&self, region: RegionId) -> &W {
-        &self.headers[region.index()].1
+        match self.layout.header_word() {
+            Some(word) => self.meta(region, word + 1),
+            None => &self.headers[region.index()].1,
+        }
     }
 
     fn class_word(&self, index: u32) -> &W {
