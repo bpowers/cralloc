@@ -193,18 +193,34 @@ pub fn tree(args: &Args) {
     let depth = args.num("depth", 20) as u32;
     let reps = args.usize("reps", 10);
     let counters = Counters::region();
-    let m = Measure::start(&counters);
+    let (mut build, mut walked, mut dropped) = (None, None, None);
     let mut acc = 0u64;
     for r in 0..reps {
+        let m = Measure::start(&counters);
         let t = build_tree(depth, r as u64);
+        accumulate(&mut build, m.stop());
+        let m = Measure::start(&counters);
         acc = acc.wrapping_add(walk(&t));
+        accumulate(&mut walked, m.stop());
+        let m = Measure::start(&counters);
         drop(t);
+        accumulate(&mut dropped, m.stop());
     }
-    let run = m.stop();
+    let (build, walked, dropped) = (build.unwrap(), walked.unwrap(), dropped.unwrap());
+    let mut run = build.clone();
+    for p in [&walked, &dropped] {
+        run.wall_ns += p.wall_ns;
+        for (n, v) in run.counters.values.iter_mut() {
+            *v += p.counters.get(n).unwrap_or(0);
+        }
+    }
     black_box(acc);
     let nodes = reps as u64 * ((1u64 << (depth + 1)) - 1);
     Report::new("tree", args)
         .phase("run", &run)
+        .phase("build", &build)
+        .phase("walk", &walked)
+        .phase("drop", &dropped)
         .metric("nodes", nodes)
         .primary("cycles/node", cycles(&run) / nodes as f64, Better::Lower)
         .emit();

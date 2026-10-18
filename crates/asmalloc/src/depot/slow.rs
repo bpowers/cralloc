@@ -159,11 +159,20 @@ impl<'a, O: Os, R: Routines, S: Source> Cache<'a, O, R, S> {
             let want = (capacity - level).min(CHUNK);
             let got = self.source.fill(class, &mut buffer[..want]).min(want);
             for object in buffer[..got].iter().flatten() {
+                magazine.set_object(capacity - level, *object);
                 level += 1;
-                magazine.set_object(level, *object);
             }
             if got < want {
                 break;
+            }
+        }
+        for slot in (level < capacity)
+            .then_some(1..=level)
+            .into_iter()
+            .flatten()
+        {
+            if let Some(object) = NonNull::new(magazine.object(capacity - level + slot)) {
+                magazine.set_object(slot, object);
             }
         }
         magazine.set_level(level);
