@@ -712,6 +712,30 @@ jemalloc: JSON 89.0, BTreeMap 25.9, churn 110.4 (after freeing 112.9), burst 218
   build makes more likely. The first "on" run of each of the first two modes took 5.4 and
   7.0 s: huge-page faults compacting memory (roofline note, section 7).
 
+### Moves that keep sparse blocks sparse, and the density test
+
+2026-10-17, later. A move now skips source pages that are all zero, and a grown block gets
+huge pages only when the last 2 MiB the program wrote hold data in at least half their
+pages, and then only up to the size asked for. Through the preload library, pinned, capped,
+one run each unless a range is given; "main" is main before these changes.
+
+`crates/asmalloc-preload/tests/programs/sparse_realloc.c` (malloc N, one byte a MiB, realloc
+to 4N), resident MiB after the grow and cgroup peak:
+
+| N | main | now | glibc |
+|---|---:|---:|---:|
+| 16 MiB | 17, peak 19 | 2, peak 3 | 1, peak 1 |
+| 64 MiB | 65, peak 67 | 2, peak 2 | 2, peak 1 |
+| 256 MiB | 257, peak 259 | 2, peak 3 | 2, peak 2 |
+
+The soak's `realloc secs=60 threads=4 maxsize=268435456 budget=1024`, peak of its scope,
+two runs each: main 1.0 GiB; with the sparse copy alone 896 to 1013 MiB; with the density
+test as well 430 to 454 MiB; with no huge pages for grown blocks 267 to 283 MiB; glibc 310 to
+345 MiB. Its blocks double but are written a stripe a MiB past 64 MiB, and huge pages on
+the whole slot made them resident in full; what is left over glibc is the one growth step
+the rule lets the advice run ahead, per thread. Vec growth keeps its gain (4.3 cycles an
+element against 11 without huge pages for grown blocks), and `bigmem` is unchanged.
+
 ## Measured and argued
 
 Measured: every figure in a table; the cap's failure; pinning; the depot and the busy CPU
