@@ -142,7 +142,7 @@ const _: () = {
 };
 
 /// The small class of `malloc(size)` from the table, or `None` above it.
-#[inline(always)]
+#[cfg(test)]
 pub(crate) fn malloc_class(size: usize) -> Option<crate::classes::SmallClass> {
     if size > C_TABLE_MAX {
         return None;
@@ -152,7 +152,7 @@ pub(crate) fn malloc_class(size: usize) -> Option<crate::classes::SmallClass> {
 }
 
 /// The small class of a `calloc` of `size` bytes in all from its table, or `None` above it.
-#[inline(always)]
+#[cfg(test)]
 pub(crate) fn calloc_class(size: usize) -> Option<crate::classes::SmallClass> {
     let index = *C_CALLOC_CLASSES.get(size)?;
     Class::from_index(index).and_then(Class::small)

@@ -101,9 +101,6 @@ theorem cls_lt (h : c.argsOk s) : c.cls s < CLASS_LIMIT := by
   obtain ⟨A, f, sig⟩ := c
   cases f
   · exact h.2.1
-  · have := h.2
-    simp only [MASK_COUNT, CLASS_LIMIT, SLAB_BYTES, SLAB_SHIFT] at this ⊢
-    omega
   all_goals
     simp only [Spec.Slab.Ctx.cls, SLAB_BYTES, SLAB_SHIFT, CLASS_LIMIT]
     omega
@@ -151,12 +148,6 @@ theorem more_apart (hinv : c.inv s) (hi : c.InRange s) : ∀ x ∈ c.more s, c.A
     · intro x hx
       simp only [List.mem_singleton] at hx; subst hx
       exact (hinv.1 _ hi).2 (by assumption)
-    · simp
-  · split
-    · rename_i hs
-      intro x hx
-      simp only [List.mem_singleton] at hx; subst hx
-      exact (hinv.2.1 (mask_ne_zero_of_isSlot hs) _ hi).2 hs
     · simp
   · simp
   · simp
@@ -257,9 +248,6 @@ theorem cls (h : Same c s p) : c.cls p = c.cls s := by
   obtain ⟨A, f, sig⟩ := c
   cases f <;> simp only [Spec.Slab.Ctx.cls, h.sym, h.arg]
 
-theorem maskEntry (h : Same c s p) : c.maskEntry p = c.maskEntry s := by
-  simp only [Spec.Slab.Ctx.maskEntry, Spec.Slab.Ctx.maskAddr, h.arg]
-
 theorem link (h : Same c s p) : c.link p = c.link s := by
   simp only [Spec.Slab.Ctx.link, h.arg]
 
@@ -267,7 +255,7 @@ theorem slabs (h : Same c s p) : c.slabs p = c.slabs s := by
   simp only [Spec.Slab.Ctx.slabs, h.sym]
 
 theorem fixed (h : Same c s p) : c.fixed p = c.fixed s := by
-  simp only [Spec.Slab.Ctx.fixed, h.rsVar_eq, h.cpuField, h.csField, h.maskEntry, h.link]
+  simp only [Spec.Slab.Ctx.fixed, h.rsVar_eq, h.cpuField, h.csField, h.link]
 
 theorem apart (h : Same c s p) (r : Region) : c.Apart p r ↔ c.Apart s r := by
   simp only [Spec.Slab.Ctx.Apart, h.slabs, h.fixed, h.res]
@@ -307,10 +295,10 @@ section Inv
 variable {M : ISA} {c : Spec.Slab.Ctx M} {s p : M.State}
 
 /-- What a region a routine writes before its commit must be apart from, for
-the invariant to be kept: the slabs, `__rseq_offset`, the mask's entry and,
-for a stack's routine, every region that may hold a link slot. -/
+the invariant to be kept: the slabs, `__rseq_offset` and, for a stack's
+routine, every region that may hold a link slot. -/
 def Harmless (c : Spec.Slab.Ctx M) (s : M.State) (w : Region) : Prop :=
-  w.Disjoint (c.slabs s) ∧ w.Disjoint (c.rsVar s) ∧ (c.form = .table → w.Disjoint (c.maskEntry s)) ∧
+  w.Disjoint (c.slabs s) ∧ w.Disjoint (c.rsVar s) ∧
     ((c.form = .stackPush ∨ c.form = .stackPop) → ∀ r, c.Apart s r → r.Disjoint w)
 
 /-- Memory changed only in harmless regions keeps the class's words. -/
@@ -321,26 +309,19 @@ theorem wordOf_frame (h : Same c s p) {W : List Region} (hm : Frame W (c.mem s) 
   exact hm.readW (r := ⟨wordAddr (c.sym s SLABS) i (c.cls s), 8⟩) (Region.contains_self _ _)
     (fun w hw => (hW w hw).1.symm.sub_left (wordAt_sub hc hi)) (by decide)
 
-/-- The routine's mask, in memory changed only in harmless regions. -/
-theorem mask_frame (h : Same c s p) {W : List Region} (hm : Frame W (c.mem s) (c.mem p))
-    (hW : ∀ w ∈ W, Harmless c s w) : c.mask p = c.mask s := by
-  have hma : c.maskAddr p = c.maskAddr s := by simp only [Spec.Slab.Ctx.maskAddr, h.arg]
+/-- The routine's mask: an argument, whatever memory does. -/
+theorem mask_eq (h : Same c s p) : c.mask p = c.mask s := by
   obtain ⟨A, f, sig⟩ := c
   cases f <;> simp only [Spec.Slab.Ctx.mask, h.arg]
-  rw [hma]
-  refine congrArg BitVec.toNat ?_
-  exact hm.readW (r := ⟨Spec.Slab.Ctx.maskAddr ⟨A, .table, sig⟩ s, 4⟩) (Region.contains_self _ _)
-    (fun w hw => ((hW w hw).2.2.1 rfl).symm) (by decide)
 
-theorem slots_frame (h : Same c s p) {W : List Region} (hm : Frame W (c.mem s) (c.mem p))
-    (hW : ∀ w ∈ W, Harmless c s w) : c.slots p = c.slots s := by
-  simp only [Spec.Slab.Ctx.slots, mask_frame h hm hW]
+theorem slots_eq (h : Same c s p) : c.slots p = c.slots s := by
+  simp only [Spec.Slab.Ctx.slots, mask_eq h]
 
 /-- The invariant is kept by memory changed only in harmless regions. -/
 theorem inv_frame (h : Same c s p) {W : List Region} (hm : Frame W (c.mem s) (c.mem p))
     (hW : ∀ w ∈ W, Harmless c s w) (hc : c.cls s < CLASS_LIMIT) (hinv : c.inv s) : c.inv p := by
   have hwo := fun i (hi : i < SLAB_COUNT) => wordOf_frame h hm hW hc hi
-  have hsl := slots_frame h hm hW
+  have hsl := slots_eq h
   have hap := h.apart
   obtain ⟨A, f, sig⟩ := c
   cases f <;> simp only [Spec.Slab.Ctx.inv, Spec.Slab.Ctx.SlotOk] at hinv ⊢
@@ -351,14 +332,6 @@ theorem inv_frame (h : Same c s p) {W : List Region} (hm : Frame W (c.mem s) (c.
       intro i hi j hj
       rw [hwo i hi, hwo j hj]
       exact hinv.2 i hi j hj
-  · have hmk := mask_frame h hm hW
-    refine ⟨by rw [hmk]; exact hinv.1, fun hz i hi => ?_, ?_⟩
-    · rw [hwo i hi, hsl, hap]
-      exact hinv.2.1 (by rwa [hmk] at hz) i hi
-    · simp only [Spec.Slab.Ctx.Exclusive, hsl]
-      intro i hi j hj
-      rw [hwo i hi, hwo j hj]
-      exact hinv.2.2 i hi j hj
   · intro i hi
     rw [hwo i hi]
     exact hinv i hi
@@ -367,7 +340,7 @@ theorem inv_frame (h : Same c s p) {W : List Region} (hm : Frame W (c.mem s) (c.
     rw [hwo i hi]
     refine stackOk_frame (hinv i hi) (fun r hr => (hap r).mpr hr) fun x hx => ?_
     exact hm.readW (r := ⟨x, 8⟩) (Region.contains_self _ _)
-      (fun w hw => (hW w hw).2.2.2 (by simp) _ hx) (by decide)
+      (fun w hw => (hW w hw).2.2 (by simp) _ hx) (by decide)
 
 end Inv
 
@@ -405,11 +378,6 @@ theorem rsVar_mem_fixed : (c.rsVar s, false) ∈ c.fixed s :=
 theorem cs_mem_fixed : (c.csField s, true) ∈ c.fixed s :=
   List.mem_append_left _ (List.mem_cons_of_mem _ (List.mem_cons_of_mem _ (List.mem_singleton_self _)))
 
-theorem mask_mem_fixed (hf : c.form = .table) : (c.maskEntry s, false) ∈ c.fixed s := by
-  obtain ⟨A, f, sig⟩ := c
-  cases hf
-  exact List.mem_append_right _ (List.mem_singleton_self _)
-
 theorem link_mem_fixed (hf : c.form = .stackPush) : (c.link s, true) ∈ c.fixed s := by
   obtain ⟨A, f, sig⟩ := c
   cases hf
@@ -432,21 +400,11 @@ theorem harmless_cs (hl : c.Layout s) : Harmless c s (c.csField s) := by
   have h1 : (c.csField s).Disjoint (c.slabs s) := hl.slabs (c.csField s, true) cs_mem_fixed
   have h2 : (c.csField s).Disjoint (c.rsVar s) := (disj_cs_rsVar hl).symm
   have h4 : ∀ r, c.Apart s r → r.Disjoint (c.csField s) := fun r hr => hr.2.2.1 (c.csField s, true) cs_mem_fixed
-  refine ⟨h1, h2, fun hf => ?_, fun _ => h4⟩
-  obtain ⟨A, f, sig⟩ := c
-  cases hf
-  have hd := hl.disj
-  have e : Spec.Slab.Ctx.fixed ⟨A, .table, sig⟩ s =
-      [(Spec.Slab.Ctx.rsVar ⟨A, .table, sig⟩ s, false), (Spec.Slab.Ctx.cpuField ⟨A, .table, sig⟩ s, false),
-        (Spec.Slab.Ctx.csField ⟨A, .table, sig⟩ s, true),
-        (Spec.Slab.Ctx.maskEntry ⟨A, .table, sig⟩ s, false)] := rfl
-  rw [e] at hd
-  exact (List.pairwise_cons.mp (List.pairwise_cons.mp (List.pairwise_cons.mp hd).2).2).1
-    (Spec.Slab.Ctx.maskEntry ⟨A, .table, sig⟩ s, false) (List.mem_singleton_self _) (Bool.true_or _)
+  exact ⟨h1, h2, fun _ => h4⟩
 
 /-- A stack push's magazine's link slot is harmless. -/
 theorem harmless_link (hf : c.form = .stackPush) (hl : c.Layout s) : Harmless c s (c.link s) := by
-  refine ⟨hl.slabs (c.link s, true) (link_mem_fixed hf), ?_, (fun h => by rw [hf] at h; cases h),
+  refine ⟨hl.slabs (c.link s, true) (link_mem_fixed hf), ?_,
     fun _ r hr => hr.2.2.1 (c.link s, true) (link_mem_fixed hf)⟩
   obtain ⟨A, f, sig⟩ := c
   cases hf
@@ -455,11 +413,10 @@ theorem harmless_link (hf : c.form = .stackPush) (hl : c.Layout s) : Harmless c 
     (Bool.or_true _)).symm
 
 /-- A region within an `Apart` magazine of a pop's or push's is harmless. -/
-theorem harmless_mag (hf : c.form = .inline ∨ c.form = .table) {r w : Region} (ha : c.Apart s r)
+theorem harmless_mag (hf : c.form = .inline) {r w : Region} (ha : c.Apart s r)
     (hs : Region.Sub w r) : Harmless c s w := by
-  refine ⟨ha.2.1.sub_left hs, (ha.2.2.1 (c.rsVar s, false) rsVar_mem_fixed).sub_left hs,
-    fun h => (ha.2.2.1 (c.maskEntry s, false) (mask_mem_fixed h)).sub_left hs, fun h => ?_⟩
-  rcases hf with hf | hf <;> rw [hf] at h <;> simp at h
+  refine ⟨ha.2.1.sub_left hs, (ha.2.2.1 (c.rsVar s, false) rsVar_mem_fixed).sub_left hs, fun h => ?_⟩
+  rw [hf] at h; simp at h
 
 end Harmless
 

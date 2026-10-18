@@ -2,8 +2,6 @@ module
 
 public import Asmalloc.Proof.Slab.X86_64.PopInlineWit
 public import Asmalloc.Proof.Slab.X86_64.PushInlineWit
-public import Asmalloc.Proof.Slab.X86_64.PopTableWit
-public import Asmalloc.Proof.Slab.X86_64.PushTableWit
 public import Asmalloc.Proof.Slab.X86_64.Cas
 public import Asmalloc.Proof.Slab.X86_64.StackPush
 public import Asmalloc.Proof.Slab.X86_64.StackPop
@@ -36,16 +34,6 @@ theorem pushInline_verified :
   show Verified inlineTarget pushInline (pushInlineContract (inlineAbi.withConsts []))
   rw [withConsts_nil_inline]; exact PushInline.verified
 
-theorem popTable_verified :
-    Verified target popTable (popApi.contract (target.abi.withConsts []) 0) := by
-  show Verified target popTable (popContract (abi.withConsts []))
-  rw [withConsts_nil]; exact PopTable.verified
-
-theorem pushTable_verified :
-    Verified target pushTable (pushApi.contract (target.abi.withConsts []) 0) := by
-  show Verified target pushTable (pushContract (abi.withConsts []))
-  rw [withConsts_nil]; exact PushTable.verified
-
 theorem popInline_witnessOk :
     (∃ w ∈ PopInline.witnesses, (popInlineApi.contract (inlineTarget.abi.withConsts []) 0).pre w) ∧
     ∀ o ∈ popInline.outcomes, ∃ w ∈ PopInline.witnesses,
@@ -61,20 +49,6 @@ theorem pushInline_witnessOk :
         Visits inlineTarget.isa pushInline w o.1 o.2 := by
   show (∃ w ∈ PushInline.witnesses, (pushInlineContract (inlineAbi.withConsts [])).pre w) ∧ _
   rw [withConsts_nil_inline]; exact PushInline.witnessOk
-
-theorem popTable_witnessOk :
-    (∃ w ∈ PopTable.witnesses, (popApi.contract (target.abi.withConsts []) 0).pre w) ∧
-    ∀ o ∈ popTable.outcomes, ∃ w ∈ PopTable.witnesses,
-      (popApi.contract (target.abi.withConsts []) 0).pre w ∧ Visits target.isa popTable w o.1 o.2 := by
-  show (∃ w ∈ PopTable.witnesses, (popContract (abi.withConsts [])).pre w) ∧ _
-  rw [withConsts_nil]; exact PopTable.witnessOk
-
-theorem pushTable_witnessOk :
-    (∃ w ∈ PushTable.witnesses, (pushApi.contract (target.abi.withConsts []) 0).pre w) ∧
-    ∀ o ∈ pushTable.outcomes, ∃ w ∈ PushTable.witnesses,
-      (pushApi.contract (target.abi.withConsts []) 0).pre w ∧ Visits target.isa pushTable w o.1 o.2 := by
-  show (∃ w ∈ PushTable.witnesses, (pushContract (abi.withConsts [])).pre w) ∧ _
-  rw [withConsts_nil]; exact PushTable.witnessOk
 
 theorem popInline_clobbersOk : inlineTarget.inline = true → ∀ s,
     (popInlineApi.contract (inlineTarget.abi.withConsts []) 0).pre s →
@@ -137,21 +111,6 @@ theorem stackPop_witnessOk :
       (stackPopApi.contract (target.abi.withConsts []) 0).pre w ∧ Visits target.isa stackPop w o.1 o.2 := by
   show (∃ w ∈ StackPop.witnesses, (stackPopContract (abi.withConsts [])).pre w) ∧ _
   rw [withConsts_nil]; exact StackPop.witnessOk
-
-theorem currentCpu_verified :
-    Verified target currentCpu (currentCpuApi.contract (target.abi.withConsts []) 0) := by
-  show Verified target currentCpu (cpuContract (abi.withConsts []))
-  rw [withConsts_nil]; exact Cpu.verified
-
-theorem currentCpu_witnessOk :
-    (∃ w ∈ [Cpu.wit], (currentCpuApi.contract (target.abi.withConsts []) 0).pre w) ∧
-    ∀ o ∈ currentCpu.outcomes, ∃ w ∈ [Cpu.wit],
-      (currentCpuApi.contract (target.abi.withConsts []) 0).pre w ∧
-        Visits target.isa currentCpu w o.1 o.2 := by
-  show (∃ w ∈ [Cpu.wit], (cpuContract (abi.withConsts [])).pre w) ∧ _
-  rw [withConsts_nil]
-  exact ⟨⟨_, List.mem_singleton_self _, Cpu.pre_wit_abi⟩, fun o ho => by
-    rw [Cpu.code_eq] at ho; cases ho⟩
 
 theorem currentCpuInline_verified :
     Verified inlineTarget currentCpu (currentCpuApi.contract (inlineTarget.abi.withConsts []) 0) := by

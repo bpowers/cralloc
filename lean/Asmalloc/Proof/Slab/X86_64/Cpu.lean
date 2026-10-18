@@ -8,7 +8,7 @@ public import Asmalloc.Proof.Framework.Arm
 # The CPU number on x86-64
 
 `current_cpu` (`Impl.Slab.X86_64.currentCpu`) against `Spec.Slab.cpuContract`,
-out of line (`abi`) and inline (`inlineAbi`): three loads, `__rseq_offset`'s
+inline (`inlineAbi`): three loads, `__rseq_offset`'s
 address from its GOT slot (`movGot`, which the model gives as the symbol's
 address), `__rseq_offset`, and `cpu_id` through `fs`, zero-extended.
 -/
@@ -141,14 +141,6 @@ theorem rseqOk {T : Target} {k : Contract T.isa} {c : Prog T.isa} {s : T.isa.Sta
     (h : ∀ arm body, c ≠ .rseq arm body) (h' : ∀ arm body c₂, c ≠ .seq (.rseq arm body) c₂) :
     RseqOk T c k s := RseqOk.of_ne h h'
 
-/-! ## Out of line -/
-
-theorem correct {s : State} (hs : (cpuContract abi).pre s) :
-    ∃ s', Exec isa currentCpu s s' ∧ abiPreserved s s' ∧ (cpuContract abi).post s s' :=
-  ⟨σ3 s, by rw [code_eq]; exact .block (exec_body x86_abi hs),
-    ⟨fun r hr => gpr_σ3 r (by rintro rfl; simp [calleeSaved] at hr), by rw [mem_σ3]⟩,
-    post x86_abi⟩
-
 /-! ## Inline -/
 
 theorem correct_inline {s : State} (hs : (cpuContract inlineAbi).pre s) :
@@ -199,16 +191,8 @@ theorem pre_wit {A : Abi isa} (hA : X86 A)
   simp only [List.all_eq_true] at hres
   exact Region.disjoint_of_sep (hres x hx q hq)
 
-theorem pre_wit_abi : (cpuContract abi).pre wit :=
-  pre_wit x86_abi (by decide +kernel) (by decide +kernel) (by decide +kernel)
-
 theorem pre_wit_inline : (cpuContract inlineAbi).pre wit :=
   pre_wit x86_inline (by decide +kernel) (by decide +kernel) (by decide +kernel)
-
-theorem verified : Verified target currentCpu (cpuContract abi) :=
-  ⟨fun _ hs => .inl (correct hs), fun _ _ => rseqOk (by rw [code_eq]; intro _ _ h; cases h)
-    (by rw [code_eq]; intro _ _ _ h; cases h),
-    ⟨wit, pre_wit_abi⟩, fun o ho => by rw [code_eq] at ho; cases ho⟩
 
 theorem verified_inline : Verified inlineTarget currentCpu (cpuContract inlineAbi) :=
   ⟨fun _ hs => .inl (correct_inline hs), fun _ _ => rseqOk (by rw [code_eq]; intro _ _ h; cases h)
@@ -218,9 +202,6 @@ theorem verified_inline : Verified inlineTarget currentCpu (cpuContract inlineAb
 /-! ## Reading `__rseq_offset` directly -/
 
 theorem codeD_eq : currentCpuDirect = .block [.movSym .rax RS, .mov32 .rax (.mem cpuOp)] := rfl
-
-theorem verifiedD : Verified target currentCpuDirect (cpuContract abi) := by
-  rw [codeD_eq]; exact Verified.of_block verified fun s hs => same_direct x86_abi hs
 
 theorem verifiedD_inline : Verified inlineTarget currentCpuDirect (cpuContract inlineAbi) := by
   rw [codeD_eq]; exact Verified.of_block verified_inline fun s hs => same_direct x86_inline hs

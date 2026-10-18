@@ -57,7 +57,7 @@ def slabWord : MemOp := { base := .r9, index := some .r8 }
 slab 0 and `r8` the CPU's slab's offset. -/
 def wordAt (w : Reg) : MemOp := { base := w, index := some .r8 }
 
-/-- The class's mask, out of line: the entry `MASK_DISP` (33556480) bytes above
+/-- The class's mask, for the C entry points: the entry `MASK_DISP` (33556480) bytes above
 the class's word in slab 0. -/
 def maskAt (w : Reg) : Src := .mem { base := w, disp := 33556480 }
 
@@ -106,14 +106,6 @@ def pushSteps (w p : Reg) (cold : List Instr) (ext : Option String) : List (Step
   .exit .e cold ext,
   .instr (.store { base := .rcx } p),
   .instr (.store (wordAt w) .rax)]
-
-/-- `slab_pop` out of line, of the class whose word in slab 0 is at `rdi`. -/
-def popTable : Prog isa := .rseq arm (cpuSteps [] (some "slow") ++ popSteps .rdi [] (some "slow"))
-
-/-- `slab_push` out of line, of `p` in `rsi` to the class whose word in
-slab 0 is at `rdi`. -/
-def pushTable : Prog isa :=
-  .rseq arm (cpuSteps [] (some "slow") ++ pushSteps .rdi .rsi [] (some "slow"))
 
 /-! ## The slow path's routines
 

@@ -382,17 +382,40 @@ mod generated {
     }
 
     #[test]
-    fn they_pair_with_the_rust_functions_both_ways() {
+    fn they_pair_with_the_slow_paths_both_ways() {
         let a = routines::malloc(200);
-        let b = malloc(200);
-        // SAFETY: live blocks, each given up once, by the other implementation.
+        let b = slow::malloc_slow(200);
+        // SAFETY: live blocks, each given up once, by the other path.
         unsafe {
-            free(a);
+            slow::free_slow(a);
             routines::free(b);
         }
         let c = routines::malloc(3000);
         // SAFETY: as above, with the size it was allocated with.
         unsafe { routines::free_sized(c, 3000) };
+    }
+
+    /// Two magazines' worth of every small class, so that each class's routines miss into the
+    /// heap's slow paths (which write the masks the routines read) and then hit.
+    #[test]
+    fn they_serve_every_small_class_through_their_slow_paths() {
+        for class in crate::classes::SmallClass::all() {
+            let size = class.size();
+            if table::malloc_class(size) != Some(class) {
+                continue;
+            }
+            let held: Vec<*mut c_void> = (0..2 * class.magazine().slots())
+                .map(|_| routines::malloc(size))
+                .collect();
+            for &p in &held {
+                assert!(!p.is_null());
+                assert_eq!(usable(p), size);
+            }
+            for p in held {
+                // SAFETY: each block is live and given up once.
+                unsafe { routines::free_sized(p, size) };
+            }
+        }
     }
 
     #[test]

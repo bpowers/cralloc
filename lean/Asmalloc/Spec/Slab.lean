@@ -6,11 +6,11 @@ public import Asmalloc.TCB.Artifact
 # The front end: slabs, magazines and the routines that pop and push
 
 **Trusted** (as every file in `Spec/`). The layout of the slabs, the slab
-invariant, the abstract slab, and the contracts of the four routines that
-work on them: pop and push, each inline (an `asm!` block) and out of line (a
-function). Neither bakes in a class: each is given the address of its
-class's word in slab 0, and inline its mask too, in registers; out of line
-it reads the mask from a table at a fixed distance from that word. See
+invariant, the abstract slab, and the contracts of the routines that work
+on them: pop and push, inline (`asm!` blocks), and the slow path's
+store-if-equal and spare-stack routines, out of line. Neither pop nor push
+bakes in a class: each is given the address of its class's word in slab 0
+and its mask, in registers. See
 docs/design.md, "Front end: magazines under rseq".
 
 ## Layout
@@ -26,10 +26,10 @@ slot-number bit), or the address of the next free slot of the magazine loaded fo
 that class: `8 s` past its base, for `1 ≤ s ≤ n - 1`, slots `1` to `s - 1`
 holding the cached pointers (`Mag.ofWord`). The mask of an `n`-slot
 magazine is `8 n - 16` (`magMask`): the bits of the slot number but its
-lowest. The out-of-line routines read the mask of the class `c` from the
-low 32 bits of the 8-byte entry `MASK_DISP` bytes above the class's word in
-slab 0: a table of `MASK_COUNT` entries just past the slabs. An
-entry may be zero, before start-up or for a class with no magazines; a
+lowest. The C entry points (`Spec/CEntry.lean`) read the mask of the class
+`c` from the low 32 bits of the 8-byte entry `MASK_DISP` bytes above the
+class's word in slab 0: a table of `MASK_COUNT` entries just past the slabs.
+An entry may be zero, before start-up or for a class with no magazines; a
 routine given a zero mask always misses (`slotsOf 0 = 1`: no word is a slot
 of a one-slot magazine).
 
@@ -37,7 +37,7 @@ of a one-slot magazine).
 
 For every CPU below `SLAB_COUNT`, the slab word of the routine's class is
 zero, a marker, or a slot address with `s ≥ 1` of a magazine of the
-class's size (`WordOk`; out of line, if the mask is not zero), and the
+class's size (`WordOk`), and the
 magazine lies apart from the slabs, the
 thread's rseq area, `__rseq_offset` and the stack the calling convention
 reserves (`Ctx.Apart`). That nothing else refers to the magazine, and that
@@ -57,8 +57,8 @@ descriptor, reads the CPU number, takes the slow path if it is not below
 `cpu_id` reads as a negative number), reads the slab word, tests it with the mask, and then pops
 the top pointer or pushes one, committing by storing the new slab word.
 What each may touch is one function of the state (`Ctx.regions`): the
-variable `__rseq_offset` and `cpu_id` (read), `rseq_cs` (written), the
-mask's table entry (read, out of line), and, if the CPU number is in range,
+variable `__rseq_offset` and `cpu_id` (read), `rseq_cs` (written), and, if
+the CPU number is in range,
 the slab word and the magazine it names (written). Every marker fails both
 mask tests, so no routine stores over one.
 
@@ -104,7 +104,7 @@ lowest bit set, and the drainer's generation it carries above every bit of
 the slot number of every allowed magazine size, so that both mask tests
 fail on it. -/
 def MARKER_SHIFT : Nat := MAG_LOG_MAX + 3
-/-- The out-of-line routines' masks: `MASK_COUNT` entries of 8 bytes, the
+/-- The masks the C entry points read: `MASK_COUNT` entries of 8 bytes, the
 entry of class `c` `MASK_DISP` bytes above the class's word in slab 0. The
 table lies past the last slab, 2048 bytes into a page, so that no entry
 shares a page offset with a slab word, whose stores a load at the same
@@ -252,9 +252,6 @@ inductive Form
   /-- A pop or push of a pointer, given the address of its class's word in
   slab 0 as the first argument and the mask as the second. -/
   | inline
-  /-- A pop or push of a pointer, given the address of its class's word in
-  slab 0 as the first argument; the mask is in the table past the slabs. -/
-  | table
   /-- The slow path's store-if-equal of the word at the byte offset in the
   first argument (`cls`). -/
   | cas
@@ -298,16 +295,12 @@ given the address of the word in slab 0 (`argsOk` says it is one); the slow
 path's routines take a byte offset, of which they use the word it falls in,
 so that any offset names a word of the slab. -/
 def cls : Nat := match c.form with
-  | .inline | .table => (c.arg s 0 - c.sym s SLABS).toNat / 8
+  | .inline => (c.arg s 0 - c.sym s SLABS).toNat / 8
   | .cas | .stackPush | .stackPop => (c.arg s 0).toNat % SLAB_BYTES / 8
-
-/-- Where the out-of-line routine reads its class's mask. -/
-def maskAddr : Addr := c.arg s 0 + BitVec.ofNat 64 MASK_DISP
 
 /-- The mask, and the slots of the class's magazines. -/
 def mask : Nat := match c.form with
   | .inline => (c.arg s 1).toNat
-  | .table => ((c.mem s).readW (c.maskAddr s) 32).toNat
   | .cas | .stackPush | .stackPop => 0
 def slots : Nat := slotsOf (c.mask s)
 
@@ -327,21 +320,18 @@ def mag : Mag := Mag.ofWord (c.slots s) (c.mem s) (c.w s)
 /-- The magazine's region, if the word names one. -/
 def magRegion : Region := ⟨magBase (c.slots s) (c.w s), 8 * c.slots s⟩
 
-/-- The slabs, `__rseq_offset`, the mask's table entry, and the link slot
-of the magazine a stack push pushes. -/
+/-- The slabs, `__rseq_offset`, and the link slot of the magazine a stack
+push pushes. -/
 def slabs : Region := ⟨c.sym s SLABS, SLAB_COUNT * SLAB_BYTES⟩
 def rsVar : Region := ⟨c.sym s RSEQ_OFFSET, 8⟩
-def maskEntry : Region := ⟨c.maskAddr s, 4⟩
 def link : Region := ⟨c.arg s 1, 8⟩
 
 /-- What a routine may access whatever its CPU number, and whether it may
-write it: `__rseq_offset` and `cpu_id` (read), `rseq_cs` (written), the
-mask's table entry (`table`, read) and the pushed magazine's link slot
-(`stackPush`, written). -/
+write it: `__rseq_offset` and `cpu_id` (read), `rseq_cs` (written), and the
+pushed magazine's link slot (`stackPush`, written). -/
 def fixed : List (Region × Bool) :=
   [(c.rsVar s, false), (c.cpuField s, false), (c.csField s, true)] ++
   match c.form with
-  | .table => [(c.maskEntry s, false)]
   | .stackPush => [(c.link s, true)]
   | _ => []
 
@@ -349,7 +339,7 @@ def fixed : List (Region × Bool) :=
 a pop's or push's magazine, if the word names one (written); a stack pop's
 top magazine's link slot, if the head names one (read). -/
 def more : List (Region × Bool) := match c.form with
-  | .inline | .table => if IsSlot (c.slots s) (c.w s) then [(c.magRegion s, true)] else []
+  | .inline => if IsSlot (c.slots s) (c.w s) then [(c.magRegion s, true)] else []
   | .cas | .stackPush => []
   | .stackPop => if (c.w s).toNat ≠ 0 ∧ (c.w s).toNat % 2 = 0 then [(⟨c.w s, 8⟩, false)] else []
 
@@ -401,14 +391,12 @@ structure World : Prop where
 
 /-- What the routine's arguments must be, which its registers hold: a pop's
 or push's word address is that of a class's word in slab 0 (`SLABS` plus 8
-times the class) and, inline, its mask an allowed one; out of line, the
-class has an entry in the masks' table; a stack push's magazine is a nonzero
+times the class) and its mask an allowed one; a stack push's magazine is a nonzero
 multiple of 8. (A slow path's offset names a word of the slab whatever it
 is: `cls`.) -/
 def argsOk : Prop := match c.form with
   | .inline => (c.arg s 0 - c.sym s SLABS).toNat = 8 * c.cls s ∧ c.cls s < CLASS_LIMIT ∧
       MaskOk (c.mask s)
-  | .table => (c.arg s 0 - c.sym s SLABS).toNat = 8 * c.cls s ∧ c.cls s < MASK_COUNT
   | .cas | .stackPop => True
   | .stackPush => (c.arg s 1).toNat ≠ 0 ∧ (c.arg s 1).toNat % 8 = 0
 
@@ -429,9 +417,7 @@ def Exclusive : Prop := ∀ i < SLAB_COUNT, ∀ j < SLAB_COUNT, i ≠ j →
 
 /-- The invariant the routine relies on, of memory, which every thread and
 the drainer keep: for a pop or push, that of the class's word in every slab
-(`SlotOk`) and each slab's magazine its own (`Exclusive`), and, out of line,
-that the class's mask in the table is zero or an allowed one, the words'
-invariant holding only if it is not zero; for a stack push or
+(`SlotOk`) and each slab's magazine its own (`Exclusive`); for a stack push or
 pop, that each slab's head at the offset is a marker or heads a stack whose
 link slots lie `Apart` (so, for a push, apart from the magazine pushed: it
 is on no stack); for a store-if-equal, that no slab's word at the offset is
@@ -439,8 +425,6 @@ is on no stack); for a store-if-equal, that no slab's word at the offset is
 allocator is: each is zero, a marker or a multiple of 8). -/
 def inv : Prop := match c.form with
   | .inline => (∀ i < SLAB_COUNT, c.SlotOk s (c.wordOf s i)) ∧ c.Exclusive s
-  | .table => (c.mask s = 0 ∨ MaskOk (c.mask s)) ∧
-      (c.mask s ≠ 0 → ∀ i < SLAB_COUNT, c.SlotOk s (c.wordOf s i)) ∧ c.Exclusive s
   | .cas => ∀ i < SLAB_COUNT, (c.wordOf s i).toNat ≠ NO_CPU
   | .stackPush | .stackPop => ∀ i < SLAB_COUNT, StackOk (c.mem s) (c.wordOf s i) (c.Apart s)
 
@@ -494,7 +478,7 @@ reads (`Contract.trace`): another thread may change memory between them
 what the code stores as a function of what it read, not of memory on entry.
 Both read `__rseq_offset` (`o`), arm `rseq_cs` (`d`), read the CPU number (`i`), and
 then, for one with a slab, read the slab word once (`w`) and test it with
-the mask (`k`, read from the table out of line); a pop then reads the slot
+the mask (`k`); a pop then reads the slot
 below (`v`) and commits `w - 8`; a push stores its pointer `x` in the free
 slot, which no abstraction of the slab includes, and commits `w + 8`. The
 commit is the last access and the only store to a slab word. -/
@@ -504,31 +488,28 @@ def rd (a : Addr) (n v : Nat) : Event := ⟨a, n, false, v⟩
 def wr (a : Addr) (n v : Nat) : Event := ⟨a, n, true, v⟩
 
 /-- The accesses up to the slab word's, given the values read. -/
-def headTrace (o d i w k : Nat) : List Event :=
+def headTrace (o d i w : Nat) : List Event :=
   let a := c.tp s + BitVec.ofNat 64 o
   [rd (c.sym s RSEQ_OFFSET) 8 o, wr (a + BitVec.ofNat 64 RSEQ_CS) 8 d,
     rd (a + BitVec.ofNat 64 RSEQ_CPU_ID) 4 i] ++
   if i < SLAB_COUNT then
-    rd (wordAddr (c.sym s SLABS) i (c.cls s)) 8 w ::
-      (match c.form with | .table => [rd (c.maskAddr s) 4 k] | _ => [])
+    [rd (wordAddr (c.sym s SLABS) i (c.cls s)) 8 w]
   else []
 
-/-- The mask a routine tests with, given the table entry it read. -/
-def testMask (k : Nat) : Nat := match c.form with
-  | .inline => (c.arg s 1).toNat
-  | _ => k
+/-- The mask a routine tests with. -/
+def testMask : Nat := (c.arg s 1).toNat
 
 /-- The accesses of a pop. -/
 def PopTrace (evs : List Event) : Prop :=
-  ∃ o d i w k v : Nat, evs = c.headTrace s o d i w k ++
-    if i < SLAB_COUNT ∧ BitVec.ofNat 32 w &&& BitVec.ofNat 32 (c.testMask s k) ≠ 0 then
+  ∃ o d i w v : Nat, evs = c.headTrace s o d i w ++
+    if i < SLAB_COUNT ∧ BitVec.ofNat 32 w &&& BitVec.ofNat 32 (c.testMask s) ≠ 0 then
       [rd (BitVec.ofNat 64 w - 8) 8 v, wr (wordAddr (c.sym s SLABS) i (c.cls s)) 8 (BitVec.ofNat 64 w - 8).toNat]
     else []
 
 /-- The accesses of a push of `x`. -/
 def PushTrace (x : BitVec 64) (evs : List Event) : Prop :=
-  ∃ o d i w k : Nat, evs = c.headTrace s o d i w k ++
-    if i < SLAB_COUNT ∧ BitVec.ofNat 32 (w + 8) &&& BitVec.ofNat 32 (c.testMask s k) ≠ 0 then
+  ∃ o d i w : Nat, evs = c.headTrace s o d i w ++
+    if i < SLAB_COUNT ∧ BitVec.ofNat 32 (w + 8) &&& BitVec.ofNat 32 (c.testMask s) ≠ 0 then
       [wr (BitVec.ofNat 64 w) 8 x.toNat, wr (wordAddr (c.sym s SLABS) i (c.cls s)) 8 (BitVec.ofNat 64 w + 8).toNat]
     else []
 
@@ -543,20 +524,20 @@ names, the head it read once, and commits what it holds. -/
 
 /-- The accesses of a store-if-equal of `x` if the word is `e`. -/
 def CasTrace (e x : BitVec 64) (evs : List Event) : Prop :=
-  ∃ o d i w : Nat, evs = c.headTrace s o d i w 0 ++
+  ∃ o d i w : Nat, evs = c.headTrace s o d i w ++
     if i < SLAB_COUNT ∧ w = e.toNat then [wr (wordAddr (c.sym s SLABS) i (c.cls s)) 8 x.toNat]
     else []
 
 /-- The accesses of a stack push of the magazine `g`. -/
 def StackPushTrace (g : BitVec 64) (evs : List Event) : Prop :=
-  ∃ o d i w : Nat, evs = c.headTrace s o d i w 0 ++
+  ∃ o d i w : Nat, evs = c.headTrace s o d i w ++
     if i < SLAB_COUNT ∧ w % 2 = 0 then
       [wr g 8 w, wr (wordAddr (c.sym s SLABS) i (c.cls s)) 8 g.toNat]
     else []
 
 /-- The accesses of a stack pop: the link read is at the head read. -/
 def StackPopTrace (evs : List Event) : Prop :=
-  ∃ o d i w v : Nat, evs = c.headTrace s o d i w 0 ++
+  ∃ o d i w v : Nat, evs = c.headTrace s o d i w ++
     if i < SLAB_COUNT ∧ w ≠ 0 ∧ w % 2 = 0 then
       [rd (BitVec.ofNat 64 w) 8 v, wr (wordAddr (c.sym s SLABS) i (c.cls s)) 8 v]
     else []
@@ -605,15 +586,6 @@ def popInlineSig : Sig where
 def pushInlineSig : Sig where
   params := [("word", .int .usize), ("mask", .int .usize), ("p", .int .usize)]
 
-/-- `slab_pop` out of line: `fn(word: usize) -> usize`. -/
-def popSig : Sig where
-  params := [("word", .int .usize)]
-  ret := some .usize
-
-/-- `slab_push` out of line: `fn(word: usize, p: usize)`. -/
-def pushSig : Sig where
-  params := [("word", .int .usize), ("p", .int .usize)]
-
 /-- Inline pop: returns the top pointer of the magazine and removes it, or
 returns 0 and changes nothing the abstraction sees. -/
 def popInlineContract {M : ISA} (A : Abi M) : Contract M :=
@@ -641,28 +613,6 @@ def pushInlineContract {M : ISA} (A : Abi M) : Contract M :=
     (exit := fun t s s' => t = MISS ∧ c.PushMissed s (c.arg s 2) s')
     (abort := PushAbort c)
     (trace := fun s => c.PushTrace s (c.arg s 2))
-
-/-- Out-of-line pop of the class whose word is `word`: returns the top
-pointer of the magazine and removes it, or tail-calls the slow path `SLOW`
-with `word`, having changed nothing the abstraction sees. -/
-def popContract {M : ISA} (A : Abi M) : Contract M :=
-  let c : Ctx M := ⟨A, .table, popSig⟩
-  contract c
-    (post := fun s s' => ∃ x, c.Popped s s' x ∧ A.ret s' = x)
-    (exit := fun t s s' => t = SLOW ∧ c.PopMissed s s')
-    (abort := fun s p => Unchanged [c.csField s] (c.mem s) (A.mem p))
-    (trace := c.PopTrace)
-
-/-- Out-of-line push of `p` of the class whose word is `word`: pushes it, or
-tail-calls the slow path `SLOW` with `word` and `p`, having changed nothing
-the abstraction sees. -/
-def pushContract {M : ISA} (A : Abi M) : Contract M :=
-  let c : Ctx M := ⟨A, .table, pushSig⟩
-  contract c
-    (post := fun s s' => c.Pushed s (c.arg s 1) s')
-    (exit := fun t s s' => t = SLOW ∧ c.PushMissed s (c.arg s 1) s')
-    (abort := PushAbort c)
-    (trace := fun s => c.PushTrace s (c.arg s 1))
 
 /-! ### The slow path's routines
 
@@ -781,8 +731,8 @@ def stackDoc (inline : Bool) : String :=
   else "the return address on the stack"
 
 /-- The memory every routine reads or writes whatever its CPU number, as
-the documentation names it (`Ctx.fixed`), for a table's mask entry `mask`
-and a pushed magazine's link slot `link`. -/
+the documentation names it (`Ctx.fixed`), for a mask entry `mask` (the C
+entry points') and a pushed magazine's link slot `link`. -/
 def fixedNames (mask link : Option String) : List String :=
   ["`SLABS`", "the thread's `rseq_cs` and `cpu_id`", "`__rseq_offset`"] ++ mask.toList ++ link.toList
 
@@ -800,29 +750,21 @@ def keepDoc : String :=
     returns: the function may be aborted and restarted on any CPU in between \
     (`VG.Spec.Slab.Ctx.inv`)."
 
-/-- What every pop and push requires of the thread and of the slabs: inline
-(`true`), the mask is the argument `mask`; out of line it is the table entry
-below the word, which may be zero. -/
-def safety (inline : Bool) : List String :=
-  let mask := if inline then none else some s!"the mask's entry `word + {MASK_DISP}`"
+/-- What every pop and push requires of the thread and of the slabs; the
+mask is the argument `mask`. -/
+def safety : List String :=
   ["glibc must have registered the calling thread's rseq area, as it does before the thread \
     can run code that allocates.",
-  (if inline then
-    s!"`word` must be `SLABS + 8 * class` for a class below {CLASS_LIMIT}: the address of the \
-      class's slab word in slab 0. `mask` must be the mask `8 * n - 16` of the class's magazines, of \
-      `n = 2^k` slots for {MAG_LOG_MIN} ≤ k ≤ {MAG_LOG_MAX}."
-  else
-    s!"`word` must be `SLABS + 8 * class` for a class below {MASK_COUNT}: the address of the \
-      class's slab word in slab 0. The low 32 bits of the 8-byte entry {MASK_DISP} bytes above \
-      it must be 0, which sends every call to the slow path, or the mask `8 * n - 16` of the \
-      class's magazines, of `n = 2^k` slots for {MAG_LOG_MIN} ≤ k ≤ {MAG_LOG_MAX}. " ++ keepDoc),
-  layoutDoc inline mask none,
-  s!"{if inline then "" else "If the mask is not 0: "}in each of the {SLAB_COUNT} slabs of \
+  s!"`word` must be `SLABS + 8 * class` for a class below {CLASS_LIMIT}: the address of the \
+    class's slab word in slab 0. `mask` must be the mask `8 * n - 16` of the class's magazines, of \
+    `n = 2^k` slots for {MAG_LOG_MIN} ≤ k ≤ {MAG_LOG_MAX}.",
+  layoutDoc true none none,
+  s!"in each of the {SLAB_COUNT} slabs of \
     `SLABS`, the class's slab word must be 0, a marker \
     (a word whose low {MARKER_SHIFT} bits are 1), or the address of a slot other than slot 0 \
     of a magazine of the class (`8 * n` bytes, aligned to `8 * n`), whose pointers are not 0 \
     (a pop returns 0 for none) and which does not overlap \
-    {englishList "or" (fixedNames mask none ++ [stackDoc inline])}, the magazine another \
+    {englishList "or" (fixedNames none none ++ [stackDoc true])}, the magazine another \
     slab's word of the class names, nor wrap around the end of the address space. " ++ keepDoc]
 
 /-- What the slow path's routines require of the thread and the slab, and,
@@ -871,7 +813,7 @@ def popInlineApi : Api where
     word in slab 0 is at `word`, or returns 0 if the CPU number has no slab or the magazine \
     none to give.\n\n\
     Contract: `VG.Spec.Slab.popInlineContract`."
-  safety := safety true
+  safety := safety
   operands := [(RSEQ_OFFSET, .sym (path RSEQ_OFFSET))]
   rustConsts := rustConsts
 
@@ -884,38 +826,8 @@ def pushInlineApi : Api where
     slab 0 is at `word` and returns `true`, or returns `false` if the CPU number has no slab or \
     the magazine no free slot to spare.\n\n\
     Contract: `VG.Spec.Slab.pushInlineContract`."
-  safety := safety true
+  safety := safety
   operands := [(RSEQ_OFFSET, .sym (path RSEQ_OFFSET))]
-  rustConsts := rustConsts
-
-def popApi : Api where
-  module := "slab"
-  name := "slab_pop"
-  sig := popSig
-  contracts := some fun A _ => popContract A
-  summary := "Pops a pointer from the magazine of the calling thread's CPU of the class whose \
-    word in slab 0 is at `word` and returns it, or tail-calls `front::pop_slow(word)` if the CPU \
-    number has no slab, the mask is 0 or the magazine has none to give. `pop_slow` starts with \
-    the thread's `rseq_cs` still pointing at this function's sequence, which it has left: the \
-    kernel clears it at the next preemption, and `pop_slow` may arm its own.\n\n\
-    Contract: `VG.Spec.Slab.popContract`."
-  safety := safety false
-  operands := [(RSEQ_OFFSET, .sym (path RSEQ_OFFSET)), (SLOW, .sym (path "pop_slow"))]
-  rustConsts := rustConsts
-
-def pushApi : Api where
-  module := "slab"
-  name := "slab_push"
-  sig := pushSig
-  contracts := some fun A _ => pushContract A
-  summary := "Pushes `p` on the magazine of the calling thread's CPU of the class whose word in \
-    slab 0 is at `word`, or tail-calls `front::push_slow(word, p)` if the CPU number has no \
-    slab, the mask is 0 or the magazine no free slot to spare. `push_slow` starts with the \
-    thread's `rseq_cs` still pointing at this function's sequence, which it has left: the \
-    kernel clears it at the next preemption, and `push_slow` may arm its own.\n\n\
-    Contract: `VG.Spec.Slab.pushContract`."
-  safety := safety false
-  operands := [(RSEQ_OFFSET, .sym (path RSEQ_OFFSET)), (SLOW, .sym (path "push_slow"))]
   rustConsts := rustConsts
 
 def casApi : Api where

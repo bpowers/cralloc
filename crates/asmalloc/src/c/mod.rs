@@ -36,15 +36,14 @@
 //!   the C library's own accessor (`errno.rs`). `free` and a successful call leave it alone.
 //!   Nothing here hands a request to another allocator.
 //!
-//! The fast path for `malloc`, `free` and `calloc` sits behind one seam (`seam.rs`) for the
-//! generated C routines to replace; their slow paths (`slow.rs`) complete any call. The ledger
-//! is under `docs/safety/asmalloc/c/`.
+//! `malloc`, `calloc`, `free` and `free_sized` are the routines generated from Lean
+//! (`routines.rs`), whose misses complete in the slow paths (`slow.rs`), which also serve every
+//! other function here. The ledger is under `docs/safety/asmalloc/c/`.
 
 mod errno;
 mod mirror;
 #[doc(hidden)]
 pub mod routines;
-mod seam;
 #[doc(hidden)]
 pub mod slow;
 #[doc(hidden)]
@@ -66,13 +65,13 @@ const PAGE: usize = <LinuxOs as Os>::GEOMETRY.page_size();
 /// C's `malloc`.
 #[inline]
 pub extern "C" fn malloc(size: usize) -> *mut c_void {
-    seam::malloc(size)
+    routines::malloc(size)
 }
 
 /// C's `calloc`.
 #[inline]
 pub extern "C" fn calloc(n: usize, size: usize) -> *mut c_void {
-    seam::calloc(n, size)
+    routines::calloc(n, size)
 }
 
 /// C's `free`.
@@ -84,7 +83,7 @@ pub extern "C" fn calloc(n: usize, size: usize) -> *mut c_void {
 #[inline]
 pub unsafe extern "C" fn free(ptr: *mut c_void) {
     // SAFETY: the caller's promise.
-    unsafe { seam::free(ptr) }
+    unsafe { routines::free(ptr) }
 }
 
 /// C23's `free_sized`. The size is not trusted: the class comes from the address.
@@ -95,18 +94,18 @@ pub unsafe extern "C" fn free(ptr: *mut c_void) {
 #[inline]
 pub unsafe extern "C" fn free_sized(ptr: *mut c_void, size: usize) {
     // SAFETY: the caller's promise.
-    unsafe { seam::free_sized(ptr, size) }
+    unsafe { routines::free_sized(ptr, size) }
 }
 
-/// C23's `free_aligned_sized`. Neither the alignment nor the size is trusted.
+/// C23's `free_aligned_sized`: [`free`], since neither the alignment nor the size is trusted.
 ///
 /// # Safety
 ///
 /// As for [`free`].
 #[inline]
-pub unsafe extern "C" fn free_aligned_sized(ptr: *mut c_void, align: usize, size: usize) {
+pub unsafe extern "C" fn free_aligned_sized(ptr: *mut c_void, _align: usize, _size: usize) {
     // SAFETY: the caller's promise.
-    unsafe { seam::free_aligned_sized(ptr, align, size) }
+    unsafe { routines::free(ptr) }
 }
 
 /// The obsolete `cfree`, which glibc still exports for old binaries: [`free`].
@@ -117,7 +116,7 @@ pub unsafe extern "C" fn free_aligned_sized(ptr: *mut c_void, align: usize, size
 #[inline]
 pub unsafe extern "C" fn cfree(ptr: *mut c_void) {
     // SAFETY: the caller's promise.
-    unsafe { seam::free(ptr) }
+    unsafe { routines::free(ptr) }
 }
 
 /// The block at `ptr`, or an abort naming `call` if no block of the heap starts there.
@@ -166,7 +165,7 @@ pub unsafe extern "C" fn realloc(ptr: *mut c_void, size: usize) -> *mut c_void {
         }
     };
     let new = match next.and_then(Class::small) {
-        Some(class) => seam::alloc_small(class),
+        Some(_) => malloc(size).cast(),
         None if size > kept => process::alloc_large_grown(size),
         None => process::alloc_large(size, C_ALIGN, false),
     };

@@ -64,34 +64,6 @@ end Generic
 
 /-! ## Each routine -/
 
-theorem popTableD_verified : Verified target (direct popTable) (popContract abi) :=
-  verified_direct (fun _ hs => (PopTable.facts_of_pre hs).toArm) PopTable.verified
-
-theorem popTableD_witnessOk : (∃ w ∈ PopTable.witnesses, (popContract abi).pre w) ∧
-    ∀ o ∈ (direct popTable).outcomes, ∃ w ∈ PopTable.witnesses, (popContract abi).pre w ∧
-      Visits isa (direct popTable) w o.1 o.2 :=
-  witnessOk_direct (fun _ hs => (PopTable.facts_of_pre hs).toArm) PopTable.witnessOk
-
-theorem popTableD_restartsOk : ∀ s s', (popContract abi).pre s →
-    Restarts target (direct popTable) (popContract abi) s s' →
-      target.abiPreserved s s' ∧ ArgsKept target.abi popSig s s' ∧
-      (target.inline = true → target.preservedExcept [] s s') :=
-  restartsOk_direct (fun _ hs => (PopTable.facts_of_pre hs).toArm) PopTable.verified popTable_restartsOk
-
-theorem pushTableD_verified : Verified target (direct pushTable) (pushContract abi) :=
-  verified_direct (fun _ hs => (PushTable.facts_of_pre hs).toArm) PushTable.verified
-
-theorem pushTableD_witnessOk : (∃ w ∈ PushTable.witnesses, (pushContract abi).pre w) ∧
-    ∀ o ∈ (direct pushTable).outcomes, ∃ w ∈ PushTable.witnesses, (pushContract abi).pre w ∧
-      Visits isa (direct pushTable) w o.1 o.2 :=
-  witnessOk_direct (fun _ hs => (PushTable.facts_of_pre hs).toArm) PushTable.witnessOk
-
-theorem pushTableD_restartsOk : ∀ s s', (pushContract abi).pre s →
-    Restarts target (direct pushTable) (pushContract abi) s s' →
-      target.abiPreserved s s' ∧ ArgsKept target.abi pushSig s s' ∧
-      (target.inline = true → target.preservedExcept [] s s') :=
-  restartsOk_direct (fun _ hs => (PushTable.facts_of_pre hs).toArm) PushTable.verified pushTable_restartsOk
-
 theorem casD_verified : Verified target (direct cas) (casContract abi) :=
   verified_direct (fun _ hs => (Cas.facts_of_pre hs).toArm) Cas.verified
 

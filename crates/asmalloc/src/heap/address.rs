@@ -12,8 +12,8 @@
 //! [`SHRINK_MOVES_BELOW`](super::large::SHRINK_MOVES_BELOW)th of it; a block that outgrows its
 //! slot moves to one with [`HEADROOM`] times the room, but not past a region.
 //!
-//! Small blocks are not served here: the C layer allocates and frees them with the
-//! out-of-line routines (`Asmalloc::alloc_small`, `Asmalloc::free_small`).
+//! Small blocks are not served here: the C layer allocates and frees them with the generated C
+//! routines and, when those miss, the heap's slow paths (`c_alloc_small`, `c_free_small`).
 
 use super::large::{HEADROOM, stays_after_shrink};
 use super::{Heap, Zero};

@@ -19,9 +19,7 @@
 #[cfg(test)]
 pub(crate) mod check;
 // The generated routines and their wrapper, wherever assembly can run. The generated code names
-// its surroundings by path, so they are provided here: `SLABS`, `__rseq_offset`,
-// `pop_slow` and `push_slow`. The last two are the heap's slow paths, which sit above this
-// module; only the generated code's tail jumps reach them through these names.
+// its surroundings by path, so they are provided here: `SLABS` and `__rseq_offset`.
 #[cfg(all(target_os = "linux", target_arch = "x86_64", not(miri), not(kani)))]
 #[allow(clippy::undocumented_unsafe_blocks)]
 mod generated;
@@ -41,8 +39,6 @@ pub use routines::{NO_CPU, Routines, StackPop, StackPush, StoreIfEqual};
 pub use slab::{Cpu, Field, SLAB_BYTES, SLAB_COUNT, SLAB_SHIFT, Slab, Slabs, Spare};
 pub use twin::Twin;
 
-#[cfg(all(target_os = "linux", target_arch = "x86_64", not(miri), not(kani)))]
-pub(crate) use crate::heap::{pop_slow, push_slow};
 // SAFETY: FRONT-01. glibc declares `extern const ptrdiff_t __rseq_offset;` (`sys/rseq.h`), as
 // `os::linux` also declares it; the exported C routines name it through this public path.
 #[cfg(all(target_os = "linux", target_arch = "x86_64", not(miri), not(kani)))]
@@ -62,7 +58,7 @@ use core::sync::atomic::{AtomicU8, AtomicU64, Ordering};
 
 /// The number of entries in the masks' table: one per value of a class byte, so that a class
 /// read from the region table indexes it whatever it is, and finds zero, which sends the
-/// out-of-line routines to their slow paths, for every byte that is not a small class.
+/// generated C routines to their slow paths, for every byte that is not a small class.
 pub const MASK_COUNT: usize = 256;
 
 /// Where the masks' table starts within its page: past every field of a slab, so that no entry
@@ -80,16 +76,14 @@ const REGION_PAGE_OFFSET: usize = 2048;
 /// The number of entries of the region table the C frees read: one per region.
 pub const REGION_COUNT: usize = crate::space::MAX_REGIONS;
 
-/// The slabs, one per CPU number, and after them what the out-of-line routines and the C entry
-/// points read at fixed distances from a class's word in slab 0: the masks, the published heap
-/// words and the region table.
+/// The slabs, one per CPU number, and after them what the C entry points read at fixed distances
+/// from a class's word in slab 0: the masks, the published heap words and the region table.
 ///
-/// A routine is given (or forms) the address of its class's word in slab 0; the out-of-line ones
-/// read the class's mask at a fixed distance from it, `MASK_DISP`, which the routines were proved
-/// for, and the C frees read the published words and the region table at `SHIFT_DISP`,
+/// A C routine forms the address of its class's word in slab 0 and reads the class's mask at a
+/// fixed distance from it, `MASK_DISP`, which the routines were proved for, and the C frees read the published words and the region table at `SHIFT_DISP`,
 /// `BASE_DISP` and `REGION_DISP` from `SLABS`. One static keeps those distances fixed by
 /// construction. Everything is zero at load: an untouched slab costs no memory, a zero mask sends
-/// every out-of-line pop and push to its slow path, which writes the masks ([`publish_masks`]),
+/// every generated C routine to its slow path, which writes the masks ([`publish_masks`]),
 /// and zero published words and region bytes send every C free to its slow path, which writes
 /// them (`c::mirror`).
 ///
@@ -137,19 +131,6 @@ impl Front {
     #[inline(always)]
     pub(crate) fn word(&self, class: SmallClass) -> usize {
         core::ptr::from_ref(&self.slabs).addr() + Field::hot(class).offset()
-    }
-
-    /// The class whose hot word in slab 0 is at `word`, if it is one: what an out-of-line
-    /// routine's slow path is given.
-    pub(crate) fn class_of_word(&self, word: usize) -> Option<SmallClass> {
-        let offset = word.checked_sub(core::ptr::from_ref(&self.slabs).addr())?;
-        if offset % 8 != 0 {
-            return None;
-        }
-        u8::try_from(offset / 8)
-            .ok()
-            .and_then(crate::classes::Class::from_index)
-            .and_then(crate::classes::Class::small)
     }
 
     /// The heap words the C frees read: the region shift and the base's region index,
@@ -228,7 +209,7 @@ pub static SLABS: Front = Front::new();
 
 /// The slot mask of each small class's magazines, indexed by class index; zero for every other
 /// byte. The inlined routines are given their class's mask from here, so a constant class
-/// folds it to a constant; the out-of-line routines read the copy in [`SLABS`].
+/// folds it to a constant; the generated C routines read the copy in [`SLABS`].
 pub static MASKS: [u32; MASK_COUNT] = MASK_TABLE;
 
 const MASK_TABLE: [u32; MASK_COUNT] = {
@@ -249,7 +230,7 @@ pub(crate) fn mask(class: SmallClass) -> u32 {
     MASKS[class.class().index() as usize]
 }
 
-/// Writes the masks the out-of-line routines read, if they have not been. Every thread writes
+/// Writes the masks the generated C routines read, if they have not been. Every thread writes
 /// the same values, so a race is harmless; until a class's entry is written its routines miss
 /// and land in a slow path, which calls this.
 #[cfg_attr(any(miri, kani), allow(dead_code))]
@@ -346,15 +327,11 @@ mod tests {
         assert_eq!(core::ptr::from_ref(slabs).addr(), base);
         for class in SmallClass::all() {
             let word = SLABS.word(class);
-            assert_eq!(SLABS.class_of_word(word), Some(class));
             let entry = core::ptr::from_ref(&SLABS.masks[class.class().index() as usize]).addr();
             assert_eq!(entry, word + MASK_DISP);
             // Not at a slab word's page offset.
             assert!(entry % SLAB_BYTES >= Slab::USED_BYTES);
         }
-        assert_eq!(SLABS.class_of_word(base), None);
-        assert_eq!(SLABS.class_of_word(base + 4), None);
-        assert_eq!(SLABS.class_of_word(base + 8 * (SMALL_COUNT + 1)), None);
     }
 
     #[test]
