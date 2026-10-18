@@ -16,7 +16,7 @@
 //! explorer (`back::models`) and the shadow-model tests (`back::tests`).
 
 use super::class::{Fast, odd_inverse};
-use super::layout::{Layout, Step, WORD_BYTES, slots_in_region};
+use super::layout::{Layout, Memo, Step, WORD_BYTES, slots_in_region};
 use super::verify::{any_class, any_plan_of, any_used_plan, layouts_fit};
 use super::word::{BITS, lowest};
 use crate::classes::MagazineSize;
@@ -50,6 +50,21 @@ fn layouts_fit_the_used_geometries() {
 #[kani::unwind(6)]
 fn layouts_fit_every_geometry() {
     layouts_fit(any_plan());
+}
+
+/// The layout `Back::host` reads back from a class's memo is the one that was worked out, and
+/// so the one the harnesses above are about: packing it into the memo's words loses nothing.
+/// The bound is for the comparison, which goes over the bytes of the layout's arrays.
+#[kani::proof]
+#[kani::unwind(21)]
+fn layouts_come_back_from_the_memo() {
+    let plan = any_used_plan();
+    let class = any_class();
+    let memo = Memo::new();
+    let Some(layout) = memo.layout(plan, class) else {
+        return;
+    };
+    assert!(memo.layout(plan, class) == Some(layout));
 }
 
 /// The slot count without a divide is the quotient.

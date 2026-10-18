@@ -3033,3 +3033,228 @@ mod review {
         }
     }
 }
+
+/// Review of the move of the region headers into the back end's state, with the leaf bitmap
+/// last in the block (`host::RegionHeader`, `layout`).
+mod review_headers {
+    use super::super::layout::{Layout, WORD_BYTES};
+    use super::super::tree::Host;
+    use super::super::word::Word;
+    use super::*;
+    use crate::space::Geometry;
+    use crate::stats::{Region, Visitor};
+
+    /// On the real OS, in the design's geometry, where the pages a block costs are real.
+    #[cfg(not(miri))]
+    mod resident {
+        use super::*;
+        use crate::os::linux::LinuxOs;
+        use std::fs::File;
+        use std::os::unix::fs::FileExt;
+
+        /// Which pages of the `len` bytes at `start` this process has touched, as page numbers
+        /// from `start`: its own pages, and pages that a read mapped to the kernel's shared
+        /// zero page, which cost no memory but do need a page-table entry.
+        fn touched(start: *const u8, len: usize) -> (Vec<usize>, Vec<usize>) {
+            const PRESENT: u64 = 1 << 63;
+            const EXCLUSIVE: u64 = 1 << 56;
+            let page = Geometry::DESIGN.page_size();
+            let pagemap = File::open("/proc/self/pagemap").unwrap();
+            let mut entries = std::vec![0u8; len / page * 8];
+            pagemap
+                .read_exact_at(&mut entries, (start.addr() / page * 8) as u64)
+                .unwrap();
+            let (mut own, mut zero) = (Vec::new(), Vec::new());
+            for (i, &entry) in entries.as_chunks::<8>().0.iter().enumerate() {
+                let entry = u64::from_ne_bytes(entry);
+                if entry & PRESENT == 0 {
+                    continue;
+                }
+                if entry & EXCLUSIVE != 0 {
+                    own.push(i);
+                } else {
+                    zero.push(i);
+                }
+            }
+            (own, zero)
+        }
+
+        /// The block of the region `at` lies in, as the pages of it this process has touched.
+        fn block_touched(
+            back: &Back<'_, LinuxOs>,
+            class: Class,
+            at: *mut u8,
+        ) -> (Vec<usize>, Vec<usize>) {
+            let region = back.space().locate(at).unwrap().region;
+            let len = back.host(class).unwrap().layout().block_bytes();
+            touched(back.space().metadata(region).as_ptr(), len)
+        }
+
+        /// What the change is for: a small class whose slots are only ever carved, used and
+        /// kept leaves every page of its region's metadata block untouched, read or written;
+        /// and one whose slots go to the bitmaps and come back touches at most three pages of
+        /// its own, with every page it touches at all in the block's first 2 MiB, under one
+        /// page of page tables.
+        ///
+        /// Large classes are not in this: every large allocation writes its slot's size word,
+        /// which is in the block.
+        #[test]
+        fn a_small_class_touches_its_block_only_once_its_slots_reach_the_bitmaps() {
+            let state = Box::new(State::new(LinuxOs));
+            let back = state.get_or_reserve().unwrap();
+            let huge = Geometry::DESIGN.huge_page_size() / Geometry::DESIGN.page_size();
+            let sizes = [8, 16, 48, 256, 1024, 4096, 32 << 10];
+            for size in sizes {
+                let class = small(size);
+                let slots = fill(&back, class, 64);
+                assert_eq!(slots.len(), 64);
+                for &p in &slots {
+                    paint(p, size, 0x5a);
+                }
+                // The paths a class takes while nothing of it is free: a single-slot
+                // allocation, lookups, a heartbeat and a trim.
+                let one = back.alloc(class.class(), size).unwrap();
+                assert_eq!(back.usable_size(one.ptr.as_ptr()), Some(size));
+                back.heartbeat();
+                back.trim();
+                let (own, zero) = block_touched(&back, class.class(), slots[0]);
+                assert!(
+                    own.is_empty() && zero.is_empty(),
+                    "{size}: a class that only carves touched pages {own:?} and read {zero:?}"
+                );
+            }
+            for size in sizes {
+                let class = small(size);
+                let slots = fill(&back, class, 64);
+                // SAFETY: the test holds these slots and gives them up.
+                unsafe { back.launder(class, &slots) };
+                assert_eq!(fill(&back, class, 64), slots);
+                let (own, zero) = block_touched(&back, class.class(), slots[0]);
+                assert!(!own.is_empty() && own.len() <= 3, "{size}: touched {own:?}");
+                assert!(
+                    own.iter().chain(&zero).all(|&page| page < huge),
+                    "{size}: touched {own:?} and read {zero:?}"
+                );
+            }
+        }
+    }
+
+    /// In the design's geometry, at every region size and for every class that fits, the leaf
+    /// bitmap starts a page and is all that is not committed at assignment, and the first word
+    /// of every part of the block lies in the block's first 2 MiB.
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn every_design_layout_starts_its_parts_in_the_first_huge_page() {
+        let geometry = Geometry::DESIGN;
+        let (page, huge) = (geometry.page_size(), geometry.huge_page_size());
+        let mut plans = 0;
+        for shift in 0..=64 {
+            let Some(plan) = geometry.plan(shift) else {
+                continue;
+            };
+            plans += 1;
+            for class in Class::all().filter(|&c| plan.fits_region(c)) {
+                let layout = Layout::new(plan, class).unwrap();
+                let leaf = layout.tree_word(0, 0) as usize * WORD_BYTES;
+                assert_eq!(leaf % page, 0, "{shift} {class:?}");
+                assert_eq!(layout.fixed_commit(), (0, leaf), "{shift} {class:?}");
+                assert_eq!(layout.leaf_commit(0), leaf, "{shift} {class:?}");
+                let firsts = (0..=layout.height())
+                    .map(|level| layout.tree_word(level, 0))
+                    .chain([layout.clean_word(0)])
+                    .chain(layout.zero_word(0))
+                    .chain(layout.size_word(0));
+                for word in firsts {
+                    assert!((word as usize * WORD_BYTES) < huge, "{shift} {class:?}");
+                }
+            }
+        }
+        assert!(plans > 1);
+    }
+
+    #[derive(Default)]
+    struct Seen {
+        regions: Vec<(Class, usize, usize)>,
+        free: usize,
+    }
+
+    impl Visitor for Seen {
+        fn region(&mut self, region: &Region) {
+            self.regions
+                .push((region.class, region.carved, region.committed));
+        }
+        fn free(&mut self, _: Class, _: *const u8, _: usize) {
+            self.free += 1;
+        }
+    }
+
+    /// A region that carries `class`'s tag with an all-zero header and a block nothing has
+    /// written: `assign` published it, and the OS refused the commit its first carve asked for.
+    /// Returns the region's base.
+    fn assigned_and_never_carved(state: &State<Sim>, class: Class) -> *mut u8 {
+        let back = state.get_or_reserve().unwrap();
+        // The commit of the block's fixed part goes through; the commit of the slots does not.
+        state.os().set_faults(Call::Commit, Faults::once_after(1));
+        assert!(back.alloc(class, 1).is_none());
+        state.os().set_faults(Call::Commit, Faults::NONE);
+        let region = back.space().plan().region(0).unwrap();
+        assert_eq!(state.table.get(region), RegionTag::Class(class));
+        let host = back.host(class).unwrap();
+        assert_eq!(
+            (host.grow(region).load(), host.hints(region).load()),
+            (0, 0)
+        );
+        back.space().region(region).as_ptr()
+    }
+
+    /// All zero is an empty, ungrown region on every path that does not abort. Natively the
+    /// simulator's memory is inaccessible until committed, and the region's leaf bitmap is
+    /// not, so a path that looked at it would kill the test. Under Miri the memory is not
+    /// guarded, so these tests would show nothing there.
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn a_region_with_a_zero_header_is_empty_on_every_path() {
+        for class in [small(8).class(), small(1024).class(), large(64 << 10)] {
+            let state = state::<Standard>();
+            let base = assigned_and_never_carved(&state, class);
+            let back = state.get_or_reserve().unwrap();
+            assert_eq!(back.lookup(base), Some(Kind::Slot(class)));
+            assert_eq!(back.trim(), 0);
+            state.os().advance_clock(DECAY_TICKS);
+            back.heartbeat();
+            assert_eq!(state.os().calls(Call::Purge), 0);
+            let mut seen = Seen::default();
+            back.inspect(&mut seen);
+            assert_eq!(seen.regions, [(class, 0, 0)]);
+            assert_eq!(seen.free, 0);
+            // And the region grows from there as if nothing had happened.
+            let block = back.alloc(class, 1).unwrap();
+            assert_eq!(block.ptr.as_ptr(), base);
+            assert!(block.zeroed);
+            back.free(block.ptr, class);
+            assert_eq!(back.alloc(class, 1).unwrap().ptr.as_ptr(), base);
+        }
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    #[should_panic(expected = "never handed out")]
+    fn a_launder_into_a_region_with_a_zero_header_aborts() {
+        let state = state::<Standard>();
+        let class = small(64);
+        let base = assigned_and_never_carved(&state, class.class());
+        let back = state.get_or_reserve().unwrap();
+        // SAFETY: the pointers are bad ones, passed to see the abort.
+        unsafe { back.launder(class, &[base, base.wrapping_add(64)]) };
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    #[should_panic(expected = "never handed out")]
+    fn a_large_free_into_a_region_with_a_zero_header_aborts() {
+        let state = state::<Standard>();
+        let base = assigned_and_never_carved(&state, large(64 << 10));
+        let back = state.get_or_reserve().unwrap();
+        back.free_by_address(NonNull::new(base).unwrap());
+    }
+}
