@@ -8,11 +8,11 @@ writes the slot's memory during the call or needs its contents after; and the sl
 the watermark.
 
 **Where it is called.** `Back::free` of a large class calls `purge_before_release` before it
-releases the slot's bit, when keeping the slot resident would take the large classes'
-retained count over its cap, or when the slot is advised for huge pages because its object
-grew there (its size word's flag, `Recorded::huge`, which only the slot's holder reads or
-writes). Which of the two reasons applies changes nothing below: the same thread holds the
-same slot. The advice is taken back after the purge (`region::unadvise`), which changes no
+releases the slot's bit, and it purges only when the slot is advised for huge pages because
+its object grew there (its size word's flag, `Recorded::huge`, which only the slot's holder
+reads or writes). An earlier form also purged when keeping the slot would take a large-class
+retained count over its cap; that rule is gone, and dropping it narrows when the block runs
+without changing what holds when it does. The advice is taken back after the purge (`region::unadvise`), which changes no
 contents. `Back::free` is crate-private (`pub(crate)`), so these are its only callers, and
 it is reached from `Heap::free_large`, the C `free` and the depot's `free_one` (a thread with
 no CPU giving up a small block), each for a pointer the program is giving up.
@@ -66,18 +66,13 @@ that window set the bit silently and a third party could then allocate the slot 
 being purged. Purging before the release removes that: at no point is a free slot's memory
 returned by a thread that does not hold it through a claim of its own or the program's.
 
-**Tests.** `freed_large_slots_have_a_small_cap_of_their_own` (kept slots stay resident, purged
-ones read as zero and say so, a slot bigger than the cap goes back at once);
-`racing_large_frees_leave_the_large_count_over_its_cap_with_nothing_free` (64 threads
-allocating and freeing slots that are always purged; the model-based and stress tests of the
-back end run the same path with contents checked).
+**Tests.** `a_block_that_grows_gets_huge_pages_until_it_is_freed` (the advised slot goes
+back whole at the free, reads as zero and says so, and its advice is taken back);
+`an_advised_slot_is_purged_only_in_whole_huge_pages`; the model-based and stress tests of the
+back end run the same path with contents checked.
 
 **Review.** 2026-10-17, fresh adversarial reviewer: accepted, with the stronger statement of
 the third case above added at the reviewer's request.
-
-The count that decides whether to purge is read here and raised by the release, so several
-threads freeing at once can each keep their slot and together pass the cap by one slot per
-thread but the first. That is policy, not safety.
 
 ## BACK-CLASS-02: the purges in `resize_in_place`
 

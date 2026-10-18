@@ -20,7 +20,9 @@
 //! - [`Back::alloc_run`] and `Back::free_run` serve objects bigger than a region as runs of
 //!   whole regions. [`Back::lookup`] and [`Back::usable_size`] find what an address is.
 //! - [`Back::heartbeat`] does one bounded step of the clocked pass that returns free memory to
-//!   the OS, and [`Back::trim`] returns everything it can.
+//!   the OS, and [`Back::trim`] returns everything it can. Fills and large allocations that
+//!   carve purge toward the retained cap (`purge`); a free purges nothing but a
+//!   large slot advised for huge pages.
 //!
 //! Every change to shared state is one atomic instruction, and all-zero state means an empty
 //! heap: no regions, nothing free, nothing carved. The protocols follow the TLA+ models in
@@ -74,13 +76,11 @@ pub struct State<O: Os> {
     cell: SpaceCell<O>,
     table: RegionTable,
     classes: [ClassState; COUNT],
-    /// Bytes of free slots of small classes in the bitmaps believed to be resident. Signed: a
-    /// subtraction may run ahead of the addition it answers; read as zero when negative.
-    retained_small: AtomicIsize,
-    /// The same for large classes, which have a cap of their own.
-    retained_large: AtomicIsize,
-    /// The lowest the small-class count has been since its cap last acted (`purge`).
-    cap_mark: AtomicUsize,
+    /// Bytes of free slots in the bitmaps believed to be resident. Signed: a subtraction may
+    /// run ahead of the addition it answers; read as zero when negative.
+    retained: AtomicIsize,
+    /// Bytes carved since a grower last checked the cap (`purge`).
+    growth: AtomicUsize,
     /// Where the next purge step looks: see `purge`.
     purge_at: AtomicU32,
     /// How many times the purge walk has gone round the heap.
@@ -103,9 +103,8 @@ impl<O: Os> State<O> {
             cell: SpaceCell::new(os),
             table: RegionTable::new(),
             classes: [const { ClassState::new() }; COUNT],
-            retained_small: AtomicIsize::new(0),
-            retained_large: AtomicIsize::new(0),
-            cap_mark: AtomicUsize::new(0),
+            retained: AtomicIsize::new(0),
+            growth: AtomicUsize::new(0),
             purge_at: AtomicU32::new(0),
             laps: AtomicU32::new(0),
             decay: AtomicU64::new(0),

@@ -184,39 +184,26 @@ fn a_decay_pass_starts_only_after_an_interval() {
     assert!(decay_look(now & !1, now) == Decay::Wait);
 }
 
-/// The small-class cap: a launder never purges at or under the cap, nor until the count is a
-/// re-arm step above its mark, and always purges when it is both. So a count that moves less
-/// than a step around the cap purges once, and a count held over the cap purges once for
-/// every step it grows.
+/// The cap's decision at growth: a grower purges nothing for less than a step of debt or with
+/// the count at or under the cap; otherwise it purges no more than it grew and no more than
+/// is over the cap, and exactly the smaller of the two, so that growth over the cap pays for
+/// itself and never takes the count under the cap.
 ///
-/// This is the decision alone. `Back::retain` reads the mark and writes it in separate steps,
-/// so two launders can race: both may purge, or one may lower a mark the other just raised.
-/// Either costs one bounded purge more or one later; the review found no worse outcome.
+/// This is the decision alone. `Back::grow` adds to the debt and takes it in separate steps,
+/// so a racing grower may take less than a step and purge nothing: one purge later.
 #[kani::proof]
-fn the_cap_fires_only_a_step_above_its_mark() {
-    use super::policy::CAP_REARM;
-    use super::purge::cap_fires;
-    // Sixteen-bit counts: the function divides, and the property does not depend on scale.
-    let (mark, new, cap) = (
-        kani::any::<u16>() as usize,
-        kani::any::<u16>() as usize,
-        kani::any::<u16>() as usize,
-    );
-    kani::assume(cap >= CAP_REARM);
-    let step = cap / CAP_REARM;
-    let fires = cap_fires(mark, new, cap);
-    if new <= cap || new < mark.saturating_add(step) {
-        assert!(!fires);
-    }
-    if new > cap && new >= mark + step {
-        assert!(fires);
-    }
-    // Once it has fired the mark is at least where the count stood, and nothing fires again
-    // until the count is a step above that.
-    if fires {
-        let again: usize = kani::any::<u16>() as usize;
-        kani::assume(again < new + step);
-        assert!(!cap_fires(new, again, cap));
+fn growth_purges_the_smaller_of_its_debt_and_the_excess() {
+    use super::policy::growth_goal;
+    let (debt, retained, cap, step): (usize, usize, usize, usize) =
+        (kani::any(), kani::any(), kani::any(), kani::any());
+    let goal = growth_goal(debt, retained, cap, step);
+    assert!(goal <= debt);
+    assert!(goal <= retained.saturating_sub(cap));
+    if debt < step || retained <= cap {
+        assert!(goal == 0);
+    } else {
+        assert!(goal == debt || goal == retained - cap);
+        assert!(goal == debt.min(retained - cap));
     }
 }
 

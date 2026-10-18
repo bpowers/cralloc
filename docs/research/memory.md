@@ -893,9 +893,106 @@ interval's pass walks the bitmaps once round without meeting its goal, which is 
 purge's rule for a fragmented heap. That is 0.05% of a CPU for a heap of two million small
 objects, and it grows with the bitmaps.
 
+## The cap charged to growth
+
+2026-10-18. The cap on retained memory used to act on frees: a launder that took the
+small-class count past 64 MiB purged toward it, and a large free past 8 MiB of retained large
+slots purged its own slot. A free cannot tell idle memory from memory about to be reused,
+and the quiet-machine session (`baselines.md`, cause A) found programs that free and
+reallocate the same classes faulting their memory straight back. Now one cap covers small
+and large classes together and is charged when the heap carves: each 2 MiB of carving, while
+retained memory is over the cap, purges up to as much as was carved (`back/purge.rs`). Frees
+purge nothing except a large slot advised for huge pages. The clocked decay is unchanged,
+including its term for everything over the cap.
+
+A first version also charged claims that made purged pages resident again. That made the
+allocator chase its own tail: a `HashMap` rebuilt five times made 24,500 `madvise` calls
+(5,600 under the old rule), every one a growth purge of pages the same build was about to
+reuse, which then refaulted and purged more. Charging only carving: 43.
+
+**Method.** "Before" is main at 867aadf; "after" is the branch merged with it (af7fa45 plus
+the carve-only change); "cap 16" is the same with the cap at 16 MiB. Times, kernel share and
+faults from `benchrun run --suite full --only <job> --rounds 5`, the three builds interleaved
+in a fresh order each round, on the runner's CPUs, with the machine otherwise quiet but for
+two other implementers' builds; medians. Kernel share is kernel cycles over all cycles of the
+measured phases. `madvise` calls from `strace -c -f` of a separate run of the same command on
+CPUs 4-7 (the count, not the time). Memory from `bench/probes/memory/memrun.sh` on CPUs
+4-7 and 12-15, two rounds, medians: cgroup peaks, and anonymous resident memory after the
+peak.
+
+| Job | | before | after | cap 16 |
+|---|---|---:|---:|---:|
+| pipeline, 2 threads, 4-256 KiB objects | ns/alloc | 318.9 | **119.2** | 98.9 |
+| | kernel share | 54% | 0.2% | 0.2% |
+| | faults | 241,000 | 676 | 659 |
+| | `madvise` | 298,000 | 53 | 52 |
+| JSON 32 MiB | cycles/byte | 20.89 | **18.32** | 18.35 |
+| | kernel share | 14.7% | 3.2% | 3.2% |
+| | faults | 93,500 | 28,300 | 28,300 |
+| | `madvise` | 81,400 | 62 | 62 |
+| mstress, preloaded | s | 0.396 | **0.270** | 0.288 |
+| | faults | 684,000 | 35,900 | 40,600 |
+| | `madvise` | 10,100 | 301 | 340 |
+| | peak MiB | 128.7 | 139.9 | 140.1 |
+| HashMap 1M | cycles/entry | 671.1 | **579.0** | 567.5 |
+| | kernel share | 16.2% | 5.3% | 6.0% |
+| | faults | 190,000 | 60,700 | 69,100 |
+| | `madvise` | 5,590 | 43 | 50 |
+| | peak MiB | 175.1 | **204.3** | 204.2 |
+| BTreeMap 1M | cycles/entry | 962.6 | 935.9 | 950.1 |
+| | faults | 38,400 | 24,900 | 24,900 |
+| | `madvise` | 16,400 | 22 | 22 |
+| churn, 1M live | cycles/op | 112.6 | 100.3 | 113.2 |
+| | `madvise` | 741 | 21 | 20 |
+| Vec growth to 256 MiB | cycles/element | 4.80 | 4.95 | 4.94 |
+| | `madvise` | 378 | 378 | 377 |
+
+The back-end smoke set (`--suite backend --rounds 3`): the large pipeline 432 to 128 ns/alloc,
+JSON 8 MiB 20.5 to 18.7 cycles/byte, sh8bench 1.28 to 1.18 s; the tree and the small
+pipeline unchanged.
+
+- The large pipeline is still three times tcmalloc's 36 ns; none of what is left is the
+  kernel. Churn's 11% is larger than anything this change does to it (it makes 741 purges
+  in 20M operations before and 21 after) and is probably the session's noise; it is not
+  slower. Vec growth's 3% is within its run-to-run spread; its `madvise` calls are the
+  moves', unchanged.
+- **HashMap peaks 29 MiB higher**, now 11% over jemalloc's 183.6. A growing map frees each
+  table it outgrows: about 30 MiB of large slots, one per class, all under the cap. The 8 MiB
+  large cap returned them at each free; now they stay resident, and the next build reuses
+  them. The 16 MiB cap does not change it, since carving is done in the first build and later
+  builds refault what decay returned without charge. mstress keeps its large blocks the same
+  way, 11 MiB more, level with jemalloc's 139.6.
+
+Cgroup peaks, MiB, before / after / cap 16: Vec growth 258.1 / 258.1 / 258.0, JSON 352.7 /
+352.5 / 352.3, phase change 41 / 36 / 37, many classes on 2 CPUs 14.5 / 16.1 / 13.5, 16
+threads on 2 CPUs 14.9 / 16.2 / 14.6, sparse 1 MiB blocks 3.6 / 3.8 / 4.0, sparse 64 KiB
+blocks 33.4 / 33.8 / 34.0. The phase-change and few-CPU peaks move by 5 MiB between rounds
+of one build, so none of these differences is resolved.
+
+After the peak (free 218 MiB, then light work), anonymous resident MiB:
+
+| | freed | 1 s | 2 s | 3 s | 4 s | 6 s | 8 s | 10 s | 12 s |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| before | 162 | 94 | 70 | 64 | 53 | 30 | 17.6 | 8.9 | 4.9 |
+| after | 217 | 93 | 74 | 70 | 53 | 30 | 17.6 | 8.9 | 4.9 |
+| cap 16 | 217 | 93 | 79 | 22 | 17.4 | 9.0 | 5.0 | 1.2 | 1.2 |
+| after, no over-cap term in decay | 217 | 151 | 115 | 107 | 86 | 50 | 29 | 16 | 9.6 |
+
+Before, the free itself purged the burst down to the cap, so the process held 55 MiB less
+until the first decay pass; within a second that pass's over-the-cap term does the same, and
+the curves agree from 4 s. Without that term decay takes a quarter an interval from 217
+MiB and is twice as high at 12 s. At 16 MiB the over-cap pass takes far more at once (at 3 s,
+22 against 70).
+
+Ends of the worst cases, eight seconds after the event, before / after / cap 16: phase change
+7.5 / 6.8 / 6.0, many classes on 2 CPUs 1.2 / 1.2 / 1.2, 16 threads on 2 CPUs 1.6 / 1.5 / 1.4.
+
 ## Reproducing
 
 ```
+# The cap charged to growth: variants built as benchrun `build` entries in allocators.toml
+# (bench/target/asmalloc-<name>), then for each targeted job:
+bench/target/release/benchrun run --suite full --rounds 5 --only "json 32Mi" --allocators before,after,cap16
 W=$(pwd)   # the checkout
 bench/probes/memory/build.sh $W/bench asmalloc je mi base-ms=asmalloc-memstat
 bench/probes/memory/peaks.sh $W asmalloc,je,mi pipe2 pipemix churn1M vecgrow json

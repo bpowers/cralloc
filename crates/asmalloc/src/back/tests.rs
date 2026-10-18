@@ -2,8 +2,7 @@
 //! and a threaded stress test.
 
 use super::policy::{
-    CAP_REARM, DECAY_TICKS, STAGGER_ROOM, STAGGER_STEP, large_retained_cap, move_piece,
-    retained_cap,
+    DECAY_TICKS, STAGGER_ROOM, STAGGER_STEP, growth_goal, growth_step, move_piece, retained_cap,
 };
 use super::{Back, Block, Kind, State};
 use crate::classes::{Class, SmallClass};
@@ -350,12 +349,12 @@ fn large_slots_say_when_they_are_zero() {
 }
 
 /// Several large slots to a region (the native shape's 1 MiB regions hold sixteen 64 KiB
-/// slots): freeing them past the cap purges them, top down, until the count is under it; the
-/// pages leave the resident set; and the purged slots come back zeroed, with their zero bits
-/// set and cleared exactly once.
+/// slots): freed past the cap they all stay resident; another class's growth then purges
+/// them, top down, until the count is under the cap; the pages leave the resident set; and
+/// the purged slots come back zeroed, with their zero bits set and cleared exactly once.
 #[test]
 #[cfg_attr(miri, ignore)]
-fn large_slots_past_the_cap_are_purged_and_come_back_zeroed() {
+fn large_slots_past_the_cap_are_purged_by_growth_and_come_back_zeroed() {
     let state = state::<Native>();
     let back = state.get_or_reserve().unwrap();
     let os = state.os();
@@ -372,11 +371,18 @@ fn large_slots_past_the_cap_are_purged_and_come_back_zeroed() {
     // SAFETY: no other thread runs, and the back end and this test store only integers, so
     // every byte is initialized.
     let resident = || unsafe { os.resident_bytes() };
-    let before = resident();
-    assert!(before >= n * class.size());
+    let purges = os.calls(Call::Purge);
     for b in &blocks {
         back.free(b.ptr, class);
     }
+    assert_eq!(os.calls(Call::Purge), purges, "a free purged");
+    assert_eq!(back.retained(), n * class.size());
+    // Another class grows by as much as is over the cap, and pays for it.
+    let before = resident();
+    let other = large(128 << 10);
+    let grown: Vec<Block> = (0..(n * class.size() - cap) / other.size())
+        .map(|_| back.alloc(other, other.size()).unwrap())
+        .collect();
     assert!(back.retained() <= cap, "{} > {cap}", back.retained());
     let returned = before - resident();
     assert!(returned >= (n * class.size()).saturating_sub(cap) - class.size());
@@ -398,6 +404,9 @@ fn large_slots_past_the_cap_are_purged_and_come_back_zeroed() {
     );
     for b in again {
         back.free(b.ptr, class);
+    }
+    for b in grown {
+        back.free(b.ptr, other);
     }
     back.trim();
     assert_eq!(back.retained(), 0);
@@ -586,29 +595,128 @@ fn a_refused_purge_is_skipped_and_retried() {
     assert!(again.iter().all(|&p| painted(p, 1024, 0)));
 }
 
+/// A grower purges nothing for less than a step, nothing at or under the cap, and otherwise
+/// as much as it grew or what is over the cap, whichever is less.
 #[test]
-fn passing_the_cap_purges_back_under_it() {
+fn growth_pays_for_what_it_grew_up_to_what_is_over_the_cap() {
+    let (cap, step) = (64 << 20, 2 << 20);
+    assert_eq!(growth_goal(step - 1, 2 * cap, cap, step), 0);
+    assert_eq!(growth_goal(0, 2 * cap, cap, step), 0);
+    assert_eq!(growth_goal(step, cap, cap, step), 0);
+    assert_eq!(growth_goal(step, 0, cap, step), 0);
+    assert_eq!(growth_goal(step, 2 * cap, cap, step), step);
+    assert_eq!(growth_goal(step, cap + 4096, cap, step), 4096);
+    assert_eq!(growth_goal(1 << 30, 2 * cap, cap, step), cap);
+    assert_eq!(growth_goal(usize::MAX, usize::MAX, 0, step), usize::MAX);
+}
+
+/// Freeing far past the cap purges nothing, and neither does reusing what was freed: reuse is
+/// not growth. Another class's growth then purges about as much as it grows, from the top,
+/// until the count is at the cap, and no more.
+#[test]
+#[cfg_attr(miri, ignore)]
+fn frees_and_reuse_never_purge_and_growth_pays_for_itself() {
     let state = state::<Standard>();
     let back = state.get_or_reserve().unwrap();
+    let os = state.os();
     let cap = retained_cap(Standard::GEOMETRY);
+    let step = growth_step(Standard::GEOMETRY);
     let class = small(1024);
-    let n = 2 * cap / 1024;
+    let n = 3 * cap / 1024;
     let slots = fill(&back, class, n);
     assert_eq!(slots.len(), n);
-    let before = state.os().calls(Call::Purge);
-    // SAFETY: the test holds these slots, or passes a bad one to see the abort.
+    let purges = os.calls(Call::Purge);
+    for _ in 0..4 {
+        // SAFETY: the test holds these slots, or passes a bad one to see the abort.
+        unsafe { back.launder(class, &slots) };
+        assert_eq!(os.calls(Call::Purge), purges, "a free purged");
+        assert_eq!(back.retained(), n * 1024);
+        assert_eq!(fill(&back, class, n), slots, "reuse took other slots");
+        assert_eq!(os.calls(Call::Purge), purges, "reuse purged");
+    }
+    // SAFETY: as above.
     unsafe { back.launder(class, &slots) };
-    assert!(state.os().calls(Call::Purge) > before);
-    assert!(back.retained() <= cap, "{} > {cap}", back.retained());
+    // Another class grows by one step at a time; each step purges about one step.
+    let other = small(512);
+    let mut grown = Vec::new();
+    let mut last = back.retained();
+    while last > cap {
+        grown.extend(fill(&back, other, step / 512));
+        let now = back.retained();
+        assert!(
+            last - now <= 2 * step,
+            "one step of growth purged {} bytes",
+            last - now
+        );
+        last = now;
+    }
+    assert!(grown.len() * 512 <= n * 1024 - cap + 2 * step);
+    // At the cap, growth purges nothing more.
+    let purges = os.calls(Call::Purge);
+    grown.extend(fill(&back, other, 4 * step / 512));
+    assert_eq!(os.calls(Call::Purge), purges);
     // The purged pages are the top ones: the lowest slots are still resident.
-    let low = fill(&back, class, 1)[0];
     // SAFETY: no other thread runs, and the back end and this test store only integers.
-    let purged = unsafe {
-        state
-            .os()
-            .is_purged(core::ptr::NonNull::new(low).unwrap(), 1024)
-    };
-    assert!(!purged);
+    unsafe {
+        assert!(!os.is_purged(NonNull::new(slots[0]).unwrap(), 1024));
+        assert!(os.is_purged(NonNull::new(slots[n - 1]).unwrap(), 1024));
+    }
+}
+
+/// Taking purged pages back is reuse, not growth: with free memory over the cap, a class that
+/// refills from pages it gave back purges nothing, so a purge never sets off another.
+#[test]
+#[cfg_attr(miri, ignore)]
+fn reusing_purged_pages_over_the_cap_purges_nothing() {
+    let state = state::<Standard>();
+    let back = state.get_or_reserve().unwrap();
+    let os = state.os();
+    let cap = retained_cap(Standard::GEOMETRY);
+    let other = small(512);
+    let returned = fill(&back, other, cap / 512);
+    // SAFETY: the test holds these slots, or passes a bad one to see the abort.
+    unsafe { back.launder(other, &returned) };
+    assert_eq!(back.trim(), cap);
+    let class = small(1024);
+    let slots = fill(&back, class, 3 * cap / 1024);
+    // SAFETY: as above.
+    unsafe { back.launder(class, &slots) };
+    assert!(back.retained() > cap);
+    let purges = os.calls(Call::Purge);
+    assert_eq!(fill(&back, other, cap / 512), returned);
+    assert_eq!(os.calls(Call::Purge), purges);
+}
+
+/// A heap whose free memory over the cap is all fragmentation pays one bounded walk for each
+/// step of growth, and the walk purges nothing.
+#[test]
+#[cfg_attr(miri, ignore)]
+fn growth_over_a_fragmented_heap_walks_once_a_step() {
+    let state = state::<Standard>();
+    let back = state.get_or_reserve().unwrap();
+    let os = state.os();
+    let cap = retained_cap(Standard::GEOMETRY);
+    let step = growth_step(Standard::GEOMETRY);
+    let class = small(1024);
+    let per_page = Standard::GEOMETRY.page_size() / 1024;
+    let slots = fill(&back, class, 3 * cap / 1024);
+    let (_live, freed): (Vec<*mut u8>, Vec<*mut u8>) = slots
+        .iter()
+        .partition(|p| (p.addr() / 1024).is_multiple_of(per_page));
+    // SAFETY: the test holds these slots, or passes a bad one to see the abort.
+    unsafe { back.launder(class, &freed) };
+    assert!(back.retained() > cap);
+    // The walk starts at the top, so one circuit of it is one lap.
+    let laps = || state.laps.load(core::sync::atomic::Ordering::Relaxed);
+    let other = small(512);
+    for _ in 0..8 {
+        let before = laps();
+        let _ = fill(&back, other, step / 512 - 1);
+        assert_eq!(laps(), before, "a fill under a step walked");
+        let _ = fill(&back, other, 1);
+        assert_eq!(laps(), before + 1, "a step of growth is one walk");
+    }
+    assert_eq!(os.calls(Call::Purge), 0);
 }
 
 /// How many heartbeats the tests give a decay pass to finish: far more than a pass over a
@@ -626,10 +734,9 @@ fn pass_under_way<O: Os>(state: &State<O>) -> bool {
 }
 
 /// The defect the reset caused (`docs/research/memory.md`): in a storm of frees every page
-/// still has a live neighbour while the cap's purge runs, so it purges nothing. The count must
-/// keep those bytes, so that when the neighbours are freed too the memory is still known and
-/// is returned. The old code zeroed the count after the fruitless pass; the second assertion
-/// fails on it, and so does the last, because the survivors' bytes alone never reached the cap.
+/// still has a live neighbour while a purge runs, so it purges nothing. The count must keep
+/// those bytes, so that when the neighbours are freed too the memory is still known and is
+/// returned. The old code zeroed the count after a fruitless pass.
 #[test]
 #[cfg_attr(miri, ignore)]
 fn a_fruitless_purge_does_not_make_the_count_forget() {
@@ -656,21 +763,17 @@ fn a_fruitless_purge_does_not_make_the_count_forget() {
         // SAFETY: the test holds these slots, or passes a bad one to see the abort.
         unsafe { back.launder(class, chunk) };
     }
+    // A pass over the storm: every page has a live neighbour.
+    os.advance_clock(DECAY_TICKS);
+    beat(&back);
     assert_eq!(os.calls(Call::Purge), purges, "no page was wholly free");
-    assert_eq!(
-        back.retained_small(),
-        freed,
-        "the count forgot fragmented bytes"
-    );
+    assert_eq!(back.retained(), freed, "the count forgot fragmented bytes");
     // The neighbours go too. Nothing is live now, and the memory comes back with the clock.
     for chunk in survivors.chunks_mut(64) {
         // SAFETY: the test holds these slots, or passes a bad one to see the abort.
         unsafe { back.launder(class, chunk) };
     }
-    // The count still knew the storm's bytes, so these frees took it over further steps and
-    // the cap acted on pages that are wholly free now.
-    assert!(os.calls(Call::Purge) > purges);
-    assert!(back.retained_small() <= cap + cap / CAP_REARM);
+    assert_eq!(back.retained(), n * 1024);
     for _ in 0..40 {
         os.advance_clock(DECAY_TICKS);
         beat(&back);
@@ -791,83 +894,55 @@ fn a_fragmented_heap_costs_one_lap_an_interval() {
     assert_eq!(back.retained(), retained);
 }
 
-/// While the count stays over the cap, a launder purges again each time the count has grown
-/// by another quarter of the cap, so memory that becomes purgeable later in a burst is found
-/// without waiting for the clock.
+/// Freed large slots stay resident whatever their number, and a program that frees and
+/// reallocates them never purges: the pipeline of large objects that faulted its slots back on
+/// every round trip. A large allocation of another class then pays for its own growth.
 #[test]
 #[cfg_attr(miri, ignore)]
-fn the_cap_acts_again_as_the_count_grows_past_it() {
-    let state = state::<Standard>();
-    let back = state.get_or_reserve().unwrap();
-    let os = state.os();
-    let cap = retained_cap(Standard::GEOMETRY);
-    let class = small(1024);
-    let per_page = Standard::GEOMETRY.page_size() / 1024;
-    let slots = fill(&back, class, 2 * cap / 1024);
-    let (mut survivors, mut storm): (Vec<*mut u8>, Vec<*mut u8>) = slots
-        .iter()
-        .partition(|p| (p.addr() / 1024).is_multiple_of(per_page));
-    for chunk in storm.chunks_mut(64) {
-        // SAFETY: the test holds these slots, or passes a bad one to see the abort.
-        unsafe { back.launder(class, chunk) };
-    }
-    assert_eq!(os.calls(Call::Purge), 0);
-    assert!(back.retained_small() > cap);
-    // Freeing the survivors makes pages wholly free, and takes the count over further steps.
-    for chunk in survivors.chunks_mut(64) {
-        // SAFETY: the test holds these slots, or passes a bad one to see the abort.
-        unsafe { back.launder(class, chunk) };
-    }
-    assert!(os.calls(Call::Purge) > 0, "the cap never acted again");
-    assert!(back.retained_small() <= cap + cap / CAP_REARM);
-}
-
-/// Freed large slots are kept up to their own small cap; past it each free returns the slot
-/// it frees, so the count never passes the cap by more than nothing; and a program that frees
-/// and reallocates one slot at the cap does not purge each time round.
-#[test]
-#[cfg_attr(miri, ignore)]
-fn freed_large_slots_have_a_small_cap_of_their_own() {
+fn freed_large_slots_stay_until_growth_pays_for_them() {
     let state = state::<Native>();
     let back = state.get_or_reserve().unwrap();
     let os = state.os();
     let class = large(64 << 10);
-    let cap = large_retained_cap(Native::GEOMETRY);
-    let n = 3 * cap / class.size();
+    let cap = retained_cap(Native::GEOMETRY);
+    let n = 2 * cap / class.size();
     let blocks: Vec<Block> = (0..n)
         .map(|_| back.alloc(class, class.size()).unwrap())
         .collect();
     for b in &blocks {
         paint(b.ptr.as_ptr(), class.size(), 0x33);
     }
-    for (i, b) in blocks.iter().enumerate() {
-        back.free(b.ptr, class);
-        assert!(back.retained_large() <= cap, "after {i} frees");
-    }
-    assert_eq!(back.retained_large(), cap);
-    assert_eq!(back.retained_small(), 0);
-    assert_eq!(os.calls(Call::Purge) as usize, n - cap / class.size());
-    // The first freed were kept and the later ones purged.
-    // SAFETY: no other thread runs, and the back end and this test store only integers.
-    unsafe {
-        assert!(!os.is_purged(blocks[0].ptr, class.size()));
-        assert!(os.is_purged(blocks[n - 1].ptr, class.size()));
-    }
     let purges = os.calls(Call::Purge);
-    for _ in 0..100 {
-        let block = back.alloc(class, class.size()).unwrap();
-        assert!(!block.zeroed, "reuse takes a kept slot");
-        back.free(block.ptr, class);
+    for b in &blocks {
+        back.free(b.ptr, class);
     }
-    assert_eq!(os.calls(Call::Purge), purges, "a loop at the cap purged");
-    // A slot bigger than the cap goes back at once and comes back zeroed.
-    let big = large(2 * cap);
+    assert_eq!(back.retained(), n * class.size());
+    for _ in 0..4 {
+        let again: Vec<Block> = (0..n)
+            .map(|_| back.alloc(class, class.size()).unwrap())
+            .collect();
+        assert!(again.iter().all(|b| !b.zeroed), "reuse takes a kept slot");
+        for b in &again {
+            back.free(b.ptr, class);
+        }
+    }
+    assert_eq!(os.calls(Call::Purge), purges, "frees and reuse purged");
+    // Another class's block: its growth purges as much as it asked for, and its free keeps it.
+    let big = large(512 << 10);
     let block = back.alloc(big, big.size()).unwrap();
+    assert!(os.calls(Call::Purge) > purges);
+    let left = n * class.size() - back.retained();
+    assert!(
+        left >= big.size() && left < big.size() + class.size(),
+        "growth of {} purged {left}",
+        big.size()
+    );
     paint(block.ptr.as_ptr(), big.size(), 1);
+    let retained = back.retained();
     back.free(block.ptr, big);
-    assert_eq!(back.retained_large(), cap);
+    assert_eq!(back.retained(), retained + big.size());
     let again = back.alloc(big, big.size()).unwrap();
-    assert!(again.zeroed && painted(again.ptr.as_ptr(), big.size(), 0));
+    assert!(!again.zeroed && painted(again.ptr.as_ptr(), big.size(), 1));
 }
 
 /// Only classes of small, dense slots are ever advised for huge pages, however much they
@@ -1312,7 +1387,7 @@ fn a_large_slot_that_shrinks_in_place_returns_its_tail() {
     unsafe { back.resize_in_place(ptr, 2 * page) };
     assert_eq!(os.calls(Call::Purge), purges + 2);
     back.free(ptr, class);
-    assert_eq!(back.retained_large(), class.size());
+    assert_eq!(back.retained(), class.size());
     let again = back.alloc(class, class.size()).unwrap();
     assert_eq!(again.ptr, ptr);
     assert!(!again.zeroed);
@@ -1419,7 +1494,7 @@ fn a_moving_large_block_releases_its_old_pages_behind_the_copy() {
     unsafe { back.move_large(one, new, piece, false) };
     assert!(patterned(new.as_ptr(), piece));
     assert_eq!(os.calls(Call::Purge), purges);
-    assert_eq!(back.retained_large(), small_class.size());
+    assert_eq!(back.retained(), small_class.size());
 }
 
 /// A block that grows by moving, densely and past a huge page, gets huge pages in its new
@@ -1465,7 +1540,7 @@ fn a_block_that_grows_gets_huge_pages_until_it_is_freed() {
         "the whole slot goes back at the free"
     );
     assert_eq!(os.huge_pages(dense), Some(HugePages::Avoid));
-    assert_eq!(back.retained_large(), 0);
+    assert_eq!(back.retained(), 0);
     // Reused by a block that did not grow: no advice, and zero.
     let again = back.alloc(new_class, new_class.size()).unwrap();
     assert_eq!(again.ptr, dense);
@@ -1677,7 +1752,8 @@ fn a_sparse_block_stays_sparse_when_it_moves() {
             // A destination an earlier block left dirty.
             paint(new.ptr.as_ptr(), new_class.size(), 0x77);
         }
-        assert!(new.zeroed, "a fresh slot");
+        // The second round reuses the first's slot, which its free kept resident.
+        assert_eq!(new.zeroed, zeroed, "a fresh slot, then the kept one");
         let before = resident();
         let purges = os.calls(Call::Purge) as usize;
         // SAFETY: both are live blocks that nothing else uses; `new` reads as zero when said.
@@ -2022,7 +2098,7 @@ mod review {
         }
         // SAFETY: the test holds these slots, or passes a bad one to see the abort.
         unsafe { back.launder(low, &victims) };
-        assert!(back.retained_small() < retained_cap(Wide::GEOMETRY));
+        assert!(back.retained() < retained_cap(Wide::GEOMETRY));
         for _ in 0..10 {
             os.advance_clock(DECAY_TICKS);
             beat(&back);
@@ -2064,21 +2140,17 @@ mod review {
         );
     }
 
-    /// Finding count-drifts-up, across threads, for the large-class count. A race, so it is
-    /// evidence when it fails and none when it passes: two threads allocate and free slots of
-    /// one large class that is bigger than the large cap. Each free purges its own slot, so
-    /// with nothing allocated the count should be zero. When one thread's claim lowers the
-    /// count between the other's `release` and `retain`, the subtraction is lost at zero and
-    /// the addition stays; the freeing thread then finds its slot taken and cannot purge it.
-    /// The count is left over the cap with nothing free, and from then on every large free
-    /// purges its slot.
+    /// Finding count-drifts-up, across threads. A race, so it is evidence when it fails and
+    /// none when it passes: many threads allocate and free slots of one large class. When one
+    /// thread's claim lowers the count between another's `release` and `retain`, a count that
+    /// stopped at zero would lose the subtraction and keep the addition, and after a trim it
+    /// would say bytes are resident with nothing free.
     #[test]
-    fn racing_large_frees_leave_the_large_count_over_its_cap_with_nothing_free() {
+    fn racing_large_frees_and_claims_leave_no_count_behind() {
         let state = state::<Native>();
         state.get_or_reserve().unwrap();
         let state = &*state;
         let class = large(512 << 10);
-        assert!(class.size() > large_retained_cap(Native::GEOMETRY));
         thread::scope(|scope| {
             // More threads than CPUs, so that some are preempted between the two steps.
             for _ in 0..64 {
@@ -2096,17 +2168,17 @@ mod review {
         let back = state.get().unwrap();
         back.trim();
         assert_eq!(
-            back.retained_large(),
+            back.retained(),
             0,
             "every slot is free and purged, yet the count says this much is resident"
         );
     }
 
-    /// Finding cap-has-no-hysteresis. `cap_fires` looks only at the two ends of one launder's
-    /// own addition, so a count that hovers at the cap (or at any re-arm step) fires on every
-    /// launder that crosses upward: here each one walks the whole fragmented heap for nothing.
+    /// Finding cap-has-no-hysteresis. When the cap acted at the free, a count that hovered at
+    /// the cap fired on every launder that crossed upward, and each walked the whole
+    /// fragmented heap for nothing. Now frees and reuse never walk at all.
     #[test]
-    fn a_count_hovering_at_the_cap_walks_the_heap_on_every_launder() {
+    fn a_count_hovering_at_the_cap_never_walks_the_heap() {
         let state = state::<Standard>();
         let back = state.get_or_reserve().unwrap();
         let os = state.os();
@@ -2124,7 +2196,7 @@ mod review {
             // SAFETY: the test holds these slots, or passes a bad one to see the abort.
             unsafe { back.launder(class, chunk) };
         }
-        assert_eq!(back.retained_small(), cap - 32 * 1024);
+        assert_eq!(back.retained(), cap - 32 * 1024);
         let laps = || state.laps.load(core::sync::atomic::Ordering::Relaxed);
         let before = laps();
         // The program frees 64 slots and takes 64 back, over and over, so the count moves
@@ -2132,38 +2204,17 @@ mod review {
         for _ in 0..50 {
             // SAFETY: the test holds these slots, or passes a bad one to see the abort.
             unsafe { back.launder(class, &extra) };
-            assert!(back.retained_small() > cap);
+            assert!(back.retained() > cap);
             extra = fill(&back, class, 64);
-            assert!(back.retained_small() <= cap);
+            assert!(back.retained() <= cap);
         }
         assert_eq!(os.calls(Call::Purge), 0, "nothing was purgeable");
-        assert!(
-            laps() - before <= 2,
+        assert_eq!(
+            laps(),
+            before,
             "50 launders across the cap walked the heap {} times",
             laps() - before
         );
-    }
-
-    /// Finding cap-rearms-after-a-fruitless-walk. A fill on another thread can take the count
-    /// under the cap while a cap purge walks the heap and finds nothing; the mark must not then
-    /// re-arm, or the next launder past the cap walks again. The race needs two threads at one
-    /// moment, so this checks the rule the purge applies.
-    #[test]
-    fn a_fruitless_purge_does_not_rearm_the_cap() {
-        use super::super::purge::{cap_fires, mark_after};
-        let cap = retained_cap(Standard::GEOMETRY);
-        // Nothing purged, the count fell under the cap meanwhile: the mark stays at the count,
-        // and a launder that takes the count a little over the cap does not purge.
-        let left = cap - 1024;
-        let mark = mark_after(left, cap, 0);
-        assert_eq!(mark, left);
-        assert!(!cap_fires(mark, cap + 1024, cap));
-        // A purge that returned bytes and got under the cap re-arms as before.
-        let mark = mark_after(left, cap, 4096);
-        assert!(mark < left);
-        assert!(cap_fires(mark, cap + 1024, cap));
-        // Over the cap, the mark is the count whatever was purged.
-        assert_eq!(mark_after(cap + 1, cap, 4096), cap + 1);
     }
 
     /// Finding clock-back-stops-decay. `decay_look` reads a clock behind the last pass's end as
@@ -2320,14 +2371,12 @@ mod review {
         );
     }
 
-    /// Finding cap-purge-stops-at-the-lap-count (opened by the fix for the cap's hysteresis).
-    /// The cap's purge now stops when the lap count changes, and it starts wherever the shared
-    /// walk was left. If that is near the bottom, it looks at the few regions below, the lap
-    /// ends, and it stops without having seen the regions that hold the freed memory. The
-    /// mark is then set to the count, so the cap does not act again until a quarter-cap more
-    /// is freed. Here the walk was left at region 0 (set by hand; a decay pass that met its
-    /// goal there, or a cap purge that got under the cap there, leaves it so), and the
-    /// program frees more than the cap, all of it purgeable, in the regions above.
+    /// Finding cap-purge-stops-at-the-lap-count. The cap's purge starts wherever the shared
+    /// walk was left. A purge that stopped when the lap count changed would, from near the
+    /// bottom, look at the few regions below, end the lap, and stop without having seen the
+    /// regions that hold the freed memory. Here the walk was left at region 0 (set by hand; a
+    /// decay pass that met its goal there leaves it so), the program frees more than the cap,
+    /// all of it purgeable, in the regions above, and another class then grows.
     #[test]
     fn the_cap_purges_wherever_the_walk_was_left() {
         use core::sync::atomic::Ordering::Relaxed;
@@ -2347,11 +2396,13 @@ mod review {
             // SAFETY: the test holds these slots, or passes a bad one to see the abort.
             unsafe { back.launder(class, chunk) };
         }
+        let step = growth_step(Standard::GEOMETRY);
+        let _grown = fill(&back, small(512), 2 * step / 512);
         assert!(
-            os.calls(Call::Purge) > 0 && back.retained_small() <= cap,
+            os.calls(Call::Purge) > 0 && back.retained() <= cap,
             "{} bytes are free and wholly purgeable, the cap is {cap}, and the cap's purge \
              returned nothing",
-            back.retained_small()
+            back.retained()
         );
     }
 
