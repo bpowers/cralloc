@@ -201,6 +201,41 @@ fn calloc_zeroes_reused_small_and_large_blocks() {
     }
 }
 
+/// A large block cut down by `realloc` stays where it is and gives its tail back: grown again
+/// in place, the kept part still holds its bytes and the rest reads as zero, which it would
+/// not if the pages had stayed. A later `realloc` that moves it copies all of that.
+#[test]
+fn realloc_shrinking_a_large_block_returns_its_tail() {
+    let (big, small) = (4 << 20, (3 << 19) + 1);
+    // SAFETY: each block is live with the size used where it is read or written, and given up
+    // once.
+    unsafe {
+        let p = malloc(big).cast::<u8>();
+        p.write_bytes(0xab, big);
+        let q = realloc(p.cast(), small).cast::<u8>();
+        assert_eq!(
+            q, p,
+            "a shrink to over a quarter of the slot stays in place"
+        );
+        let kept = usable(q.cast());
+        assert!(kept >= small && kept < small + 4096);
+        let r = realloc(q.cast(), big).cast::<u8>();
+        assert_eq!(r, p, "it grows back within its slot");
+        let bytes = core::slice::from_raw_parts(r, big);
+        assert!(bytes[..kept].iter().all(|&b| b == 0xab));
+        assert!(
+            bytes[kept..].iter().all(|&b| b == 0),
+            "the tail kept its old pages"
+        );
+        let moved = realloc(r.cast(), 8 * big).cast::<u8>();
+        assert_ne!(moved, r);
+        let bytes = core::slice::from_raw_parts(moved, big);
+        assert!(bytes[..kept].iter().all(|&b| b == 0xab));
+        assert!(bytes[kept..].iter().all(|&b| b == 0));
+        free(moved.cast());
+    }
+}
+
 #[test]
 fn malloc_trim_returns_memory_after_a_peak() {
     let blocks: Vec<_> = (0..64).map(|_| malloc(1 << 20)).collect();
@@ -334,6 +369,32 @@ fn the_throwing_forms_slow_paths_return_null_for_the_routine_to_throw() {
     assert_eq!(p.addr() % 4096, 0);
     // SAFETY: a live block, given up once.
     unsafe { cxx::operator_delete(p) };
+}
+
+/// A megabyte is a class. One byte more outgrows the slot and moves to a slot with four times
+/// the room; cut back to a megabyte, the block is under a quarter of that slot, so it moves
+/// again, to an exact slot, where the next extra byte moves it once more. Headroom gives a
+/// block a quarter of its slot at most and a shrink moves a block under a quarter, so the two
+/// rules meet with no gap between them, and a block resized back and forth across a class
+/// boundary is copied on every call.
+#[test]
+#[ignore = "finding: a block resized across a class boundary is copied at every call"]
+fn a_block_resized_back_and_forth_across_a_class_boundary_settles() {
+    let size = 1 << 20;
+    let mut moves = 0;
+    // SAFETY: the block is live where it is resized and given up once.
+    unsafe {
+        let mut p = malloc(size);
+        for _ in 0..10 {
+            for next in [size + 1, size] {
+                let q = realloc(p, next);
+                moves += usize::from(q != p);
+                p = q;
+            }
+        }
+        free(p);
+    }
+    assert!(moves <= 2, "{moves} of 20 calls moved the megabyte");
 }
 
 #[test]

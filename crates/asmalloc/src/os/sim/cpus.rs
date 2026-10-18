@@ -30,7 +30,7 @@
 //! magazine the drainer had already taken and passed on.
 
 use crate::os::machine::{Aborted, Machine, Step};
-use core::sync::atomic::{AtomicI32, AtomicU8, Ordering};
+use core::sync::atomic::{AtomicU8, AtomicU64, Ordering};
 
 /// The number of simulated threads a [`super::SimOs`] has.
 pub const SIM_THREADS: usize = if cfg!(kani) { 2 } else { 64 };
@@ -54,19 +54,117 @@ const fn encode(step: Step) -> u8 {
     }
 }
 
+/// A thread's CPU and sequence state in one word, so that one atomic instruction reads or
+/// changes both: a fence that decides by the CPU acts on the state it saw with it, and a move
+/// to another CPU interrupts the sequence in the same instruction, as a migration does. With
+/// two words, a fence could read the new CPU and pass over a sequence still accessing the old
+/// CPU's slab.
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct Word(u64);
+
+impl Word {
+    const fn new(cpu: i32, sequence: u8) -> Word {
+        Word((cpu as u32 as u64) << 32 | sequence as u64)
+    }
+
+    const fn cpu(self) -> i32 {
+        (self.0 >> 32) as u32 as i32
+    }
+
+    const fn sequence(self) -> u8 {
+        self.0 as u8
+    }
+
+    const fn with_sequence(self, sequence: u8) -> Word {
+        Word::new(self.cpu(), sequence)
+    }
+
+    /// Whether the sequence is past the point where an interruption can stop it, so that
+    /// whoever would interrupt it must wait until it ends.
+    const fn must_wait_out(self) -> bool {
+        self.sequence() == COMMITTING || self.sequence() == ACCESSING
+    }
+
+    /// The word after an interruption: a running sequence is aborted.
+    const fn interrupted(self) -> Word {
+        if self.sequence() == RUNNING {
+            self.with_sequence(ABORTED)
+        } else {
+            self
+        }
+    }
+}
+
+/// Which threads a barrier interrupts.
+#[derive(Clone, Copy)]
+enum Target {
+    Any,
+    Cpu(i32),
+}
+
 /// One simulated thread's rseq state.
 pub(super) struct ThreadState {
-    cpu: AtomicI32,
-    sequence: AtomicU8,
+    word: AtomicU64,
     abort_at: AtomicU8,
 }
 
 impl ThreadState {
     const fn new(cpu: i32) -> ThreadState {
         ThreadState {
-            cpu: AtomicI32::new(cpu),
-            sequence: AtomicU8::new(IDLE),
+            word: AtomicU64::new(Word::new(cpu, IDLE).0),
             abort_at: AtomicU8::new(NO_STEP),
+        }
+    }
+
+    fn load(&self) -> Word {
+        Word(self.word.load(Ordering::Acquire))
+    }
+
+    /// Replaces the word with `change(old)` in one compare-and-swap, first waiting out a
+    /// committing sequence or an access in progress whenever `waits(old)` says to. Returns the
+    /// word it replaced.
+    fn update(&self, waits: impl Fn(Word) -> bool, change: impl Fn(Word) -> Word) -> Word {
+        let mut old = self.load();
+        loop {
+            if waits(old) && old.must_wait_out() {
+                core::hint::spin_loop();
+                old = self.load();
+                continue;
+            }
+            match self.word.compare_exchange(
+                old.0,
+                change(old).0,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            ) {
+                Ok(_) => return old,
+                Err(now) => old = Word(now),
+            }
+        }
+    }
+
+    /// Sets the sequence state, keeping the CPU, without waiting.
+    fn set_sequence(&self, sequence: u8) -> Word {
+        self.update(|_| false, |old| old.with_sequence(sequence))
+    }
+
+    /// Changes the sequence state from `from` to `to`, keeping the CPU, or returns the state
+    /// found instead of `from`.
+    fn transition(&self, from: u8, to: u8) -> Result<(), u8> {
+        let mut old = self.load();
+        loop {
+            if old.sequence() != from {
+                return Err(old.sequence());
+            }
+            match self.word.compare_exchange(
+                old.0,
+                old.with_sequence(to).0,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            ) {
+                Ok(_) => return Ok(()),
+                Err(now) => old = Word(now),
+            }
         }
     }
 
@@ -75,35 +173,28 @@ impl ThreadState {
     /// a fence waits for a routine's last instruction. One in the middle of its magazine access
     /// is interrupted once the access is over.
     fn interrupt(&self) -> bool {
-        self.barrier(true)
+        self.barrier(Target::Any)
     }
 
     /// A successful read-modify-write of the state, whether or not it changes it: the write
-    /// orders this call against the thread's next `ReadCpu` (itself a swap) and hands that
-    /// sequence everything the caller stored before, as the kernel's barrier does. With `abort`
-    /// it also interrupts a running sequence, waiting out a committing one and an access in
-    /// progress; it returns whether it interrupted one.
-    fn barrier(&self, abort: bool) -> bool {
-        let mut old = self.sequence.load(Ordering::Acquire);
-        loop {
-            if abort && (old == COMMITTING || old == ACCESSING) {
-                core::hint::spin_loop();
-                old = self.sequence.load(Ordering::Acquire);
-                continue;
-            }
-            let new = if abort && old == RUNNING {
-                ABORTED
-            } else {
-                old
-            };
-            match self
-                .sequence
-                .compare_exchange(old, new, Ordering::AcqRel, Ordering::Acquire)
-            {
-                Ok(_) => return abort && old == RUNNING,
-                Err(now) => old = now,
-            }
-        }
+    /// orders this call against the thread's next `ReadCpu` (itself a read-modify-write) and
+    /// hands that sequence everything the caller stored before, as the kernel's barrier does.
+    /// If the thread is on a CPU `target` names, it also interrupts a running sequence, waiting
+    /// out a committing one and an access in progress; it returns whether it interrupted one.
+    /// The CPU it decides by is the one in the word it replaces.
+    fn barrier(&self, target: Target) -> bool {
+        let hits = move |word: Word| match target {
+            Target::Any => true,
+            Target::Cpu(cpu) => word.cpu() == cpu,
+        };
+        let old = self.update(hits, |old| if hits(old) { old.interrupted() } else { old });
+        hits(old) && old.sequence() == RUNNING
+    }
+
+    /// Moves the thread to `cpu`, interrupting its sequence in the same instruction and first
+    /// waiting out a committing sequence or an access in progress, which belong to the old CPU.
+    fn migrate(&self, cpu: i32) {
+        self.update(|_| true, |old| Word::new(cpu, old.interrupted().sequence()));
     }
 }
 
@@ -136,7 +227,7 @@ impl<const N: usize> Cpus<N> {
     pub(super) fn fence(&self, cpu: u32) -> usize {
         self.threads
             .iter()
-            .filter(|thread| thread.barrier(thread.cpu.load(Ordering::Acquire) == cpu as i32))
+            .filter(|thread| thread.barrier(Target::Cpu(cpu as i32)))
             .count()
     }
 
@@ -147,7 +238,7 @@ impl<const N: usize> Cpus<N> {
             if index == survivor {
                 thread.interrupt();
             } else {
-                thread.sequence.store(GONE, Ordering::Release);
+                thread.set_sequence(GONE);
             }
         }
     }
@@ -169,10 +260,11 @@ impl SimThread<'_> {
     }
 
     /// Moves the thread to CPU `cpu`, or takes its registration away with a negative number. A
-    /// move interrupts a sequence in flight, as migration does.
+    /// move interrupts a sequence in flight, as migration does, and waits out a committing
+    /// sequence or an access in progress first, so a fence on the old CPU never finds the
+    /// thread gone while its sequence still writes there.
     pub fn set_cpu(&self, cpu: i32) {
-        self.state.cpu.store(cpu, Ordering::Release);
-        self.state.interrupt();
+        self.state.migrate(cpu);
     }
 
     /// Interrupts the thread's sequence, if it is in one: a preemption or a signal.
@@ -187,12 +279,12 @@ impl SimThread<'_> {
 
     /// Whether the thread is inside a sequence that has not been interrupted.
     pub fn in_sequence(&self) -> bool {
-        self.state.sequence.load(Ordering::Acquire) == RUNNING
+        self.state.load().sequence() == RUNNING
     }
 
     fn check_alive(&self) {
         assert!(
-            self.state.sequence.load(Ordering::Acquire) != GONE,
+            self.state.load().sequence() != GONE,
             "simulated thread {} did not survive the fork",
             self.index
         );
@@ -202,7 +294,7 @@ impl SimThread<'_> {
 impl Machine for SimThread<'_> {
     fn cpu_id(&self) -> i32 {
         self.check_alive();
-        self.state.cpu.load(Ordering::Acquire)
+        self.state.load().cpu()
     }
 
     fn step(&self, step: Step) -> Result<(), Aborted> {
@@ -213,19 +305,19 @@ impl Machine for SimThread<'_> {
             .compare_exchange(encode(step), NO_STEP, Ordering::AcqRel, Ordering::Acquire)
             .is_ok()
         {
-            state.sequence.store(IDLE, Ordering::Release);
+            state.set_sequence(IDLE);
             return Err(Aborted);
         }
         match step {
             Step::ReadCpu => {
-                // A swap, so that it reads what the last fence of this thread wrote.
-                state.sequence.swap(RUNNING, Ordering::AcqRel);
+                // A read-modify-write, so that it reads what the last fence of this thread
+                // wrote, and the CPU the sequence runs on comes from the same word.
+                let cpu = state.set_sequence(RUNNING).cpu();
                 // One CPU runs one thread at a time: if another thread is in a sequence on
                 // this CPU, it was preempted for this one to start.
-                let cpu = state.cpu.load(Ordering::Acquire);
                 for (index, other) in self.threads.iter().enumerate() {
-                    if index != self.index && other.cpu.load(Ordering::Acquire) == cpu {
-                        other.interrupt();
+                    if index != self.index {
+                        other.barrier(Target::Cpu(cpu));
                     }
                 }
                 Ok(())
@@ -236,20 +328,15 @@ impl Machine for SimThread<'_> {
                     Step::Access => ACCESSING,
                     _ => RUNNING,
                 };
-                match state.sequence.compare_exchange(
-                    RUNNING,
-                    next,
-                    Ordering::AcqRel,
-                    Ordering::Acquire,
-                ) {
-                    Ok(_) => Ok(()),
+                match state.transition(RUNNING, next) {
+                    Ok(()) => Ok(()),
                     Err(now) => {
                         // A fence would wait for ever on an access that is never ended.
                         assert!(
                             now != ACCESSING,
                             "a twin took a step without ending its access (`Machine::accessed`)"
                         );
-                        state.sequence.store(IDLE, Ordering::Release);
+                        state.set_sequence(IDLE);
                         Err(Aborted)
                     }
                 }
@@ -259,24 +346,14 @@ impl Machine for SimThread<'_> {
 
     fn accessed(&self) {
         // Only an access in progress ends here. Nothing else changes the state meanwhile: a
-        // fence waits, and only this thread runs the sequence.
-        let _ = self.state.sequence.compare_exchange(
-            ACCESSING,
-            RUNNING,
-            Ordering::AcqRel,
-            Ordering::Acquire,
-        );
+        // fence or a move waits, and only this thread runs the sequence.
+        let _ = self.state.transition(ACCESSING, RUNNING);
     }
 
     fn committed(&self) {
         // Only a committing sequence ends here; anything else (a twin that called this without
         // committing) is left as it is.
-        let _ = self.state.sequence.compare_exchange(
-            COMMITTING,
-            IDLE,
-            Ordering::AcqRel,
-            Ordering::Acquire,
-        );
+        let _ = self.state.transition(COMMITTING, IDLE);
     }
 }
 
@@ -323,6 +400,55 @@ mod tests {
         });
         assert_eq!(twin.step(Step::Commit), Err(Aborted));
         assert_eq!(run(&twin), Ok(()), "the restart succeeds");
+    }
+
+    /// A move and a fence on the old CPU, both while the thread is in its access. When the move
+    /// stored the new CPU before interrupting the thread, the fence read the new CPU, passed
+    /// over the thread and returned with the access still in progress on the old CPU. The test
+    /// gives an old-order move time to store the new CPU (it does so at once), then fences.
+    #[test]
+    fn a_fence_on_the_old_cpu_waits_for_an_access_that_a_move_interrupts() {
+        use std::sync::atomic::AtomicBool;
+        use std::thread;
+        use std::time::{Duration, Instant};
+        let cpus = Cpus::<4>::new();
+        let twin = cpus.thread(0);
+        twin.step(Step::ReadCpu).unwrap();
+        twin.step(Step::Load).unwrap();
+        twin.step(Step::Access).unwrap();
+        let moving = AtomicBool::new(false);
+        let access_over = AtomicBool::new(false);
+        let patience = Duration::from_millis(100);
+        thread::scope(|scope| {
+            let mover = scope.spawn(|| {
+                moving.store(true, Ordering::Release);
+                twin.set_cpu(1);
+            });
+            while !moving.load(Ordering::Acquire) {
+                thread::yield_now();
+            }
+            let started = Instant::now();
+            while twin.cpu_id() != 1 && started.elapsed() < patience {
+                thread::yield_now();
+            }
+            let fence = scope.spawn(|| {
+                cpus.fence(0);
+                access_over.load(Ordering::Acquire)
+            });
+            let started = Instant::now();
+            while !fence.is_finished() && started.elapsed() < patience {
+                thread::yield_now();
+            }
+            access_over.store(true, Ordering::Release);
+            twin.accessed();
+            assert!(
+                fence.join().unwrap(),
+                "the fence returned during the access"
+            );
+            mover.join().unwrap();
+        });
+        assert_eq!(twin.cpu_id(), 1);
+        assert_eq!(twin.step(Step::Commit), Err(Aborted), "the move aborted it");
     }
 
     #[test]

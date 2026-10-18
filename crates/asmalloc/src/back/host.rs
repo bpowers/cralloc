@@ -104,10 +104,14 @@ impl<O: Os> Host for ClassHost<'_, O> {
         self.space.commit(self.meta_at(region, offset), len).is_ok()
     }
 
-    fn advise(&self, region: RegionId, offset: usize, len: usize, advice: HugePages) {
-        let _ = self
-            .space
-            .advise_huge(self.region_at(region, offset), len, advice);
+    fn advise(&self, region: RegionId, offset: usize, len: usize, advice: HugePages) -> bool {
+        self.space
+            .advise_huge(self.region_at(region, offset), len, advice)
+            .is_ok()
+    }
+
+    fn populate(&self, region: RegionId, offset: usize, len: usize) {
+        let _ = self.space.populate(self.region_at(region, offset), len);
     }
 
     unsafe fn purge(&self, region: RegionId, offset: usize, len: usize) -> bool {

@@ -50,6 +50,17 @@ impl Asmalloc {
         HEAP.inspect(Real.slabs(), visitor);
     }
 
+    /// Returns everything the heap can return now, without waiting for its clock: empties the
+    /// magazines of every CPU it has run on (one `membarrier` per CPU other than the caller's),
+    /// sends every object parked in magazines and the depot back to the bitmaps, and returns
+    /// every wholly free page to the OS. For a program that knows it is idle; while other
+    /// threads allocate it is a racy sweep, safe but incomplete. Returns the bytes returned to
+    /// the OS that the heap believed resident. `malloc_trim` calls it.
+    pub fn collect() -> usize {
+        // SAFETY: GLOBAL-02.
+        unsafe { HEAP.collect(Real) }
+    }
+
     /// Pops an object of `class` with the out-of-line routine (for callers that cannot inline,
     /// such as the C entry points). Null if there is no memory.
     #[inline]
@@ -153,6 +164,14 @@ unsafe impl core::alloc::Allocator for Asmalloc {
         // SAFETY: GLOBAL-02.
         unsafe { HEAP.shrink(Real, ptr, old, new) }
     }
+}
+
+/// The heartbeat of a large allocation or free that the C entry points made straight on the
+/// back end, which counts as a slow path as a Rust one does.
+#[cold]
+pub(crate) fn large_heartbeat() {
+    // SAFETY: GLOBAL-02.
+    unsafe { HEAP.heartbeat(Real) }
 }
 
 /// The small class whose hot word in slab 0 is at `word`, or an abort: the out-of-line routines

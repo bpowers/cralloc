@@ -1,0 +1,17 @@
+# A Rust shared library with asmalloc as its global allocator, for the unload test in
+# tests/preload.rs. Outside the workspace: the test builds it on its own.
+[package]
+name = "unload-plugin"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[lib]
+crate-type = ["cdylib"]
+test = false
+doctest = false
+
+[dependencies]
+asmalloc = { path = "../../../../asmalloc" }
+
+[workspace]

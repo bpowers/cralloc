@@ -15,6 +15,10 @@
 //! Small objects get no headroom: their class comes from the layout, so their slot must be exactly
 //! their class.
 //!
+//! A large allocation or free is a slow path of its own and runs a heartbeat
+//! ([`Heap::heartbeat`]), so a program that allocates only large blocks still keeps the caches,
+//! the depot and the back end maintained.
+//!
 //! Fresh slots and runs read as zero; the back end says when a reused large slot is known to, so
 //! zeroed allocation clears only what it must.
 //!
@@ -107,6 +111,34 @@ impl<O: Os> Heap<O> {
         }
     }
 
+    /// [`Heap::alloc_large`] as the slow path it counts as: the block, then a heartbeat.
+    ///
+    /// # Safety
+    ///
+    /// As for [`Heap::alloc`].
+    pub(crate) unsafe fn alloc_large_slow<R: Routines + Copy>(
+        &self,
+        routines: R,
+        layout: Layout,
+        zero: Zero,
+    ) -> Option<Grant> {
+        let grant = self.alloc_large(layout, zero);
+        // SAFETY: passed through from the caller.
+        unsafe { self.heartbeat(routines) };
+        grant
+    }
+
+    /// [`Heap::free_large`] as the slow path it counts as: the free, then a heartbeat.
+    ///
+    /// # Safety
+    ///
+    /// As for [`Heap::alloc`].
+    pub(crate) unsafe fn free_large_slow<R: Routines + Copy>(&self, routines: R, ptr: NonNull<u8>) {
+        self.free_large(ptr);
+        // SAFETY: passed through from the caller.
+        unsafe { self.heartbeat(routines) };
+    }
+
     /// The bytes the block at `ptr`, described by `layout`, occupies: its class for a small
     /// layout, else its whole slot or run. Aborts if no large block starts there.
     fn block_len(&self, ptr: NonNull<u8>, layout: Layout) -> usize {
@@ -192,21 +224,31 @@ impl<O: Os> Heap<O> {
             }
             _ => grant,
         };
+        let kept = old.size().min(new.size());
         // SAFETY: HEAP-04.
         unsafe {
-            ptr.as_ptr()
-                .copy_to_nonoverlapping(grant.ptr.as_ptr(), old.size().min(new.size()));
-            self.dealloc(routines, ptr.as_ptr(), old);
+            match self.back() {
+                // A large block is copied in pieces, its old pages returned behind the copy,
+                // and freed, all by the back end.
+                Some(back) if small(old).is_none() => back.move_large(ptr, grant.ptr, kept),
+                _ => {
+                    ptr.as_ptr()
+                        .copy_to_nonoverlapping(grant.ptr.as_ptr(), kept);
+                    self.dealloc(routines, ptr.as_ptr(), old);
+                }
+            }
         }
         Some(grant)
     }
 
     /// Records a large block's new size after an in-place resize, clearing what it gains if
-    /// `zero`, and returns what the caller may use now.
+    /// `zero`, and returns what the caller may use now. A block that shrinks gives the whole
+    /// pages past its new usable size back to the OS at once (`Back::resize_in_place`), so
+    /// that a buffer cut down by `realloc` does not keep its old pages until it is freed.
     fn resize_large_in_place(&self, ptr: NonNull<u8>, new: Layout, zero: bool) -> Grant {
         let before = self.usable_size(ptr.as_ptr()).unwrap_or(0);
         if let Some(back) = self.back() {
-            back.resize(ptr, new.size());
+            back.resize_in_place(ptr, new.size());
         }
         let len = self.usable_size(ptr.as_ptr()).unwrap_or(new.size());
         if zero && len > before {

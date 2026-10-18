@@ -49,6 +49,19 @@ other promises:
   real one executes no further instruction. Tests: `os::sim::cpus::tests::
   a_fence_waits_for_an_access_in_progress_and_then_aborts_the_sequence` and `front::twin::tests::
   an_aborted_push_does_not_write_the_magazine_after_the_fence_returns`.
+- That holds whoever moves the thread, and whenever. A thread's CPU and sequence state are one
+  atomic word. A fence decides whether a thread is on its CPU from the same word it replaces,
+  and a move (`SimThread::set_cpu`) changes the CPU and aborts the sequence in one
+  compare-and-swap, after waiting out a commit or an access in progress, as a fence does. So a
+  fence on the old CPU either finds the thread there and handles it, or finds it moved, and
+  then its sequence was aborted and its access had ended before the move. When the CPU was a
+  word of its own, stored before the interruption, a fence could read the new CPU, pass over
+  a thread still accessing the old CPU's slab and return. Interrupting first would not do
+  either: a free-running thread could start a sequence on the old CPU between the
+  interruption and the store. `ReadCpu` takes its CPU from the word it swaps, for the same
+  reason. Test: `os::sim::cpus::tests::
+  a_fence_on_the_old_cpu_waits_for_an_access_that_a_move_interrupts`, which failed on the old
+  order in each of five runs.
 - `abort` panics, so it does not return.
 - `ticks` reads a clock that only a test moves; the trait asks nothing of it.
 
@@ -83,4 +96,5 @@ writes".
 fixes of its first round. Since then the simulator gained partial faults, fences that abort
 twins, a whole fork, and the checks of SIM-OS-04; those parts need the reviewer's check. So
 does the fence's wait for an access in progress, added after a free-running aborted push was
-found storing into a magazine a drain had already passed on.
+found storing into a magazine a drain had already passed on, and the one-word move that the
+reviewer's second round asked for.

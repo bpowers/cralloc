@@ -1,7 +1,7 @@
 //! The back end over the simulated OS: unit tests, fault injection, a shadow-model property test
 //! and a threaded stress test.
 
-use super::policy::{CAP_REARM, DECAY_TICKS, large_retained_cap, retained_cap};
+use super::policy::{CAP_REARM, DECAY_TICKS, large_retained_cap, move_piece, retained_cap};
 use super::{Back, Block, Kind, State};
 use crate::classes::{Class, SmallClass};
 use crate::os::sim::{Call, Faults, Native, Shape, SimOs, Standard};
@@ -1125,6 +1125,338 @@ fn threads_never_share_a_slot() {
 /// Evidence for the adversarial review of the memory-return machinery. Each test fails on the
 /// code as reviewed and is ignored so the gate passes; run one with
 /// `cargo test -p asmalloc --lib back::tests::review -- --ignored <name>`.
+/// A large object that shrinks in place gives back the whole pages past its new usable size:
+/// they are not resident afterwards, the part kept is intact, no retained count moves, and a
+/// grow back in place finds zeroes there. A shrink inside a page makes no call.
+#[test]
+#[cfg_attr(miri, ignore)]
+fn a_large_slot_that_shrinks_in_place_returns_its_tail() {
+    let state = state::<Native>();
+    let back = state.get_or_reserve().unwrap();
+    let os = state.os();
+    let page = Native::GEOMETRY.page_size();
+    let class = large(64 << 10);
+    let block = back.alloc(class, class.size()).unwrap();
+    let ptr = block.ptr;
+    paint(ptr.as_ptr(), class.size(), 0x6b);
+    let purges = os.calls(Call::Purge);
+    // To five pages and a byte: six pages stay usable.
+    back.resize_in_place(ptr, 5 * page + 1);
+    assert_eq!(back.usable_size(ptr.as_ptr()), Some(6 * page));
+    assert_eq!(os.calls(Call::Purge), purges + 1);
+    let tail = ptr.map_addr(|a| a.saturating_add(6 * page));
+    // SAFETY: no other thread runs, and the back end and this test store only integers.
+    unsafe {
+        assert!(os.is_purged(tail, class.size() - 6 * page));
+        assert!(!os.is_purged(ptr, 6 * page));
+    }
+    assert!(painted(ptr.as_ptr(), 6 * page, 0x6b));
+    assert_eq!(back.retained(), 0);
+    // Within the last page: recorded, and nothing to return.
+    back.resize_in_place(ptr, 5 * page + 100);
+    back.resize_in_place(ptr, 5 * page + 7);
+    assert_eq!(os.calls(Call::Purge), purges + 1);
+    // Grown back in place: the old bytes are gone, not stale. That is dense growth to a huge
+    // page (the slot is one simulated huge page), so the slot is now advised for them.
+    back.resize_in_place(ptr, class.size());
+    assert_eq!(back.usable_size(ptr.as_ptr()), Some(class.size()));
+    assert_eq!(os.calls(Call::Purge), purges + 1);
+    assert!(painted(ptr.as_ptr(), 6 * page, 0x6b));
+    assert!(painted(tail.as_ptr(), class.size() - 6 * page, 0));
+    assert_eq!(os.huge_pages(ptr), Some(HugePages::Prefer));
+    // Shrunk again after being written: the tail lies inside the huge page, which goes back
+    // only whole, at the free, with the advice.
+    paint(ptr.as_ptr(), class.size(), 0x11);
+    back.resize_in_place(ptr, 2 * page);
+    assert_eq!(os.calls(Call::Purge), purges + 1);
+    assert!(painted(ptr.as_ptr(), class.size(), 0x11));
+    back.free(ptr, class);
+    assert_eq!(os.calls(Call::Purge), purges + 2);
+    assert_eq!(os.huge_pages(ptr), Some(HugePages::Avoid));
+    assert_eq!(back.retained_large(), 0);
+    let again = back.alloc(class, class.size()).unwrap();
+    assert_eq!(again.ptr, ptr);
+    assert!(again.zeroed && painted(ptr.as_ptr(), class.size(), 0));
+    assert_eq!(back.retained(), 0);
+    back.free(again.ptr, class);
+}
+
+/// The same for a run of regions.
+#[test]
+#[cfg_attr(miri, ignore)]
+fn a_run_that_shrinks_in_place_returns_its_tail() {
+    let state = state::<Standard>();
+    let back = state.get_or_reserve().unwrap();
+    let os = state.os();
+    let page = Standard::GEOMETRY.page_size();
+    let region = back.space().plan().region_size();
+    let ptr = back.alloc_run(2 * region, 8).unwrap();
+    paint(ptr.as_ptr(), 2 * region, 0x2c);
+    let purges = os.calls(Call::Purge);
+    back.resize_in_place(ptr, region / 2 + 1);
+    let kept = region / 2 + page;
+    assert_eq!(back.usable_size(ptr.as_ptr()), Some(kept));
+    assert_eq!(os.calls(Call::Purge), purges + 1);
+    let tail = ptr.map_addr(|a| a.saturating_add(kept));
+    // SAFETY: no other thread runs, and the back end and this test store only integers.
+    unsafe {
+        assert!(os.is_purged(tail, 2 * region - kept));
+        assert!(!os.is_purged(ptr, kept));
+    }
+    assert!(painted(ptr.as_ptr(), kept, 0x2c));
+    back.resize_in_place(ptr, 2 * region);
+    assert!(painted(tail.as_ptr(), 2 * region - kept, 0));
+    back.free_run(ptr);
+}
+
+/// Bytes that differ along a block, so a piece copied to the wrong place shows.
+fn pattern(ptr: *mut u8, len: usize) {
+    for i in 0..len {
+        // SAFETY: the tests only write blocks the back end handed out.
+        unsafe { ptr.add(i).write((i / 7 + i / 4096) as u8 | 1) };
+    }
+}
+
+fn patterned(ptr: *const u8, len: usize) -> bool {
+    // SAFETY: as in `pattern`.
+    (0..len).all(|i| unsafe { ptr.add(i).read() } == (i / 7 + i / 4096) as u8 | 1)
+}
+
+/// A large block that moves is copied a piece at a time with the old block's pages returned
+/// behind the copy: the move never has more resident than it started with plus one piece,
+/// the contents arrive intact, and the old slot ends as purged memory, zero, uncounted and
+/// not purged again by its free.
+#[test]
+#[cfg_attr(miri, ignore)]
+fn a_moving_large_block_releases_its_old_pages_behind_the_copy() {
+    let state = state::<Native>();
+    let back = state.get_or_reserve().unwrap();
+    let os = state.os();
+    let piece = move_piece(Native::GEOMETRY);
+    let (old_class, new_class) = (large(512 << 10), large(1 << 20));
+    let len = old_class.size() - 100;
+    assert!(len > 4 * piece);
+    let old = back.alloc(old_class, len).unwrap().ptr;
+    pattern(old.as_ptr(), len);
+    let new = back.alloc(new_class, new_class.size()).unwrap().ptr;
+    // SAFETY: no other thread runs, and the back end and this test store only integers.
+    let resident = || unsafe { os.resident_bytes() };
+    let before = resident();
+    let purges = os.calls(Call::Purge) as usize;
+    let (mut peak, mut pieces) = (0, 0);
+    // SAFETY: `old` is a live block of `len` bytes that the test gives up, `new` a live block
+    // of more, and nothing else uses either.
+    unsafe {
+        back.move_large_with(old, new, len, || {
+            peak = peak.max(resident());
+            pieces += 1;
+        });
+    }
+    assert_eq!(pieces, len.div_ceil(piece));
+    assert!(
+        peak <= before + piece + Native::GEOMETRY.page_size(),
+        "the move had {} bytes more resident than it began with; a piece is {piece}",
+        peak - before
+    );
+    assert!(patterned(new.as_ptr(), len));
+    // One call for each whole piece, one for the rest of the slot, and none at the free.
+    assert_eq!(os.calls(Call::Purge) as usize, purges + len / piece + 1);
+    assert_eq!(back.retained(), 0);
+    // SAFETY: as above.
+    unsafe {
+        assert!(os.is_purged(old, old_class.size()));
+    }
+    let again = back.alloc(old_class, old_class.size()).unwrap();
+    assert_eq!(again.ptr, old);
+    assert!(again.zeroed && painted(old.as_ptr(), old_class.size(), 0));
+    // A block of one piece or less is copied whole and freed the ordinary way.
+    let small_class = large(piece);
+    let one = back.alloc(small_class, piece).unwrap().ptr;
+    pattern(one.as_ptr(), piece);
+    let purges = os.calls(Call::Purge);
+    // SAFETY: as above.
+    unsafe { back.move_large(one, new, piece) };
+    assert!(patterned(new.as_ptr(), piece));
+    assert_eq!(os.calls(Call::Purge), purges);
+    assert_eq!(back.retained_large(), small_class.size());
+}
+
+/// A block that grows by moving, densely and past a huge page, gets huge pages in its new
+/// slot until it is freed; the free returns the whole slot and takes the advice back. A block
+/// that grows by much more at once, or is allocated at its size, gets none.
+#[test]
+#[cfg_attr(miri, ignore)]
+fn a_block_that_grows_gets_huge_pages_until_it_is_freed() {
+    let state = state::<Native>();
+    let back = state.get_or_reserve().unwrap();
+    let os = state.os();
+    let huge = Native::GEOMETRY.huge_page_size();
+    let (old_class, new_class) = (large(96 << 10), large(512 << 10));
+    let grow = |len: usize, size: usize| {
+        let old = back.alloc(old_class, len).unwrap().ptr;
+        pattern(old.as_ptr(), len);
+        // As the heap moves a block: a new slot with room, its size recorded, then the move.
+        let new = back.alloc(new_class, new_class.size()).unwrap().ptr;
+        back.resize(new, size);
+        // SAFETY: both are live blocks of these sizes that nothing else uses.
+        unsafe { back.move_large(old, new, len) };
+        assert!(patterned(new.as_ptr(), len));
+        new
+    };
+    let dense = grow(80 << 10, 160 << 10);
+    let end = dense.map_addr(|a| a.saturating_add(new_class.size() - 1));
+    assert_eq!(os.huge_pages(dense), Some(HugePages::Prefer));
+    assert_eq!(os.huge_pages(end), Some(HugePages::Prefer));
+    let purges = os.calls(Call::Purge);
+    back.free(dense, new_class);
+    assert_eq!(
+        os.calls(Call::Purge),
+        purges + 1,
+        "the whole slot goes back at the free"
+    );
+    assert_eq!(os.huge_pages(dense), Some(HugePages::Avoid));
+    assert_eq!(back.retained_large(), 0);
+    // Reused by a block that did not grow: no advice, and zero.
+    let again = back.alloc(new_class, new_class.size()).unwrap();
+    assert_eq!(again.ptr, dense);
+    assert!(again.zeroed);
+    back.free(again.ptr, new_class);
+    // Growing more than fourfold at once says nothing about density.
+    let far = grow(24 << 10, 400 << 10);
+    assert_eq!(os.huge_pages(far), Some(HugePages::Avoid));
+    back.free(far, new_class);
+    // Growing in place: advised once the block reaches a huge page, if it grew densely.
+    let block = back.alloc(new_class, huge / 2).unwrap().ptr;
+    assert_eq!(os.huge_pages(block), Some(HugePages::Avoid));
+    let advice = os.calls(Call::AdviseHuge);
+    back.resize_in_place(block, huge);
+    assert_eq!(os.huge_pages(block), Some(HugePages::Prefer));
+    back.resize_in_place(block, 2 * huge);
+    assert_eq!(
+        os.calls(Call::AdviseHuge),
+        advice + 1,
+        "a slot is advised once"
+    );
+    back.free(block, new_class);
+    assert_eq!(os.huge_pages(block), Some(HugePages::Avoid));
+}
+
+/// In a slot advised for huge pages, a shrink returns its tail only in whole huge pages, and a
+/// move returns the old block's pages piece by piece on huge-page boundaries even when the
+/// slot does not start on one.
+#[test]
+#[cfg_attr(miri, ignore)]
+fn an_advised_slot_is_purged_only_in_whole_huge_pages() {
+    let state = state::<Native>();
+    let back = state.get_or_reserve().unwrap();
+    let os = state.os();
+    let page = Native::GEOMETRY.page_size();
+    let huge = Native::GEOMETRY.huge_page_size();
+    // 160 KiB slots: slot 1 starts 32 KiB past a huge-page boundary and holds two whole huge
+    // pages, at 192 to 320 KiB of the region.
+    let class = large(160 << 10);
+    let first = back.alloc(class, page).unwrap().ptr;
+    let slot = back.alloc(class, huge / 2).unwrap().ptr;
+    assert_eq!(slot.addr().get() - first.addr().get(), class.size());
+    back.resize_in_place(slot, 2 * huge);
+    let interior = slot.map_addr(|a| a.saturating_add(huge / 2));
+    assert_eq!(os.huge_pages(interior), Some(HugePages::Prefer));
+    assert_eq!(
+        os.huge_pages(slot),
+        Some(HugePages::Avoid),
+        "only whole huge pages"
+    );
+    back.resize_in_place(slot, class.size());
+    paint(slot.as_ptr(), class.size(), 0x5a);
+    // A shrink to the middle of the first huge page keeps all of it; the rest goes back.
+    back.resize_in_place(slot, huge / 2 + 3 * page);
+    let past = interior.map_addr(|a| a.saturating_add(huge));
+    assert!(painted(slot.as_ptr(), huge / 2 + huge, 0x5a));
+    // SAFETY: no other thread runs, and the back end and this test store only integers.
+    unsafe { assert!(os.is_purged(past, class.size() - huge / 2 - huge)) };
+    // A move of it: every page of the old slot goes back, the contents arrive.
+    back.resize_in_place(slot, class.size());
+    pattern(slot.as_ptr(), class.size());
+    let to = back.alloc(large(512 << 10), 2 * class.size()).unwrap().ptr;
+    let (mut pieces, purges) = (0, os.calls(Call::Purge));
+    // SAFETY: both are live blocks that nothing else uses.
+    unsafe { back.move_large_with(slot, to, class.size(), || pieces += 1) };
+    assert!(patterned(to.as_ptr(), class.size()));
+    // To the first boundary, then the two huge pages, each returned as it is copied.
+    assert_eq!(pieces, 3);
+    assert_eq!(os.calls(Call::Purge), purges + 3);
+    // SAFETY: as above.
+    unsafe { assert!(os.is_purged(slot, class.size())) };
+    assert_eq!(os.huge_pages(interior), Some(HugePages::Avoid));
+    back.free(first, class);
+    back.free(to, large(512 << 10));
+}
+
+/// A refused or partial advice leaves a correct heap: the flag is kept until the advice is
+/// taken back, and the next holder of the slot tries again.
+#[test]
+#[cfg_attr(miri, ignore)]
+fn refused_huge_page_advice_is_retried_by_the_next_holder() {
+    let state = state::<Native>();
+    let back = state.get_or_reserve().unwrap();
+    let os = state.os();
+    let huge = Native::GEOMETRY.huge_page_size();
+    let class = large(256 << 10);
+    let block = back.alloc(class, huge / 2).unwrap().ptr;
+    os.set_faults(Call::AdviseHuge, Faults::ALWAYS.partially());
+    back.resize_in_place(block, 2 * huge);
+    pattern(block.as_ptr(), 2 * huge);
+    assert!(patterned(block.as_ptr(), 2 * huge));
+    // Half the range took the advice before the call failed.
+    assert_eq!(os.huge_pages(block), Some(HugePages::Prefer));
+    let calls = || os.calls(Call::AdviseHuge);
+    let before = calls();
+    back.free(block, class);
+    assert_eq!(calls(), before + 1, "the free tried to take it back");
+    // The next holder tries again, and so does its free, until the OS accepts.
+    let again = back.alloc(class, class.size()).unwrap();
+    assert_eq!(again.ptr, block);
+    assert!(again.zeroed && painted(block.as_ptr(), class.size(), 0));
+    assert_eq!(calls(), before + 2);
+    back.free(again.ptr, class);
+    assert_eq!(calls(), before + 3);
+    os.set_faults(Call::AdviseHuge, Faults::NONE);
+    let third = back.alloc(class, class.size()).unwrap();
+    assert_eq!(third.ptr, block);
+    assert_eq!(calls(), before + 4);
+    let last = block.map_addr(|a| a.saturating_add(class.size() - 1));
+    assert_eq!(os.huge_pages(block), Some(HugePages::Avoid));
+    assert_eq!(os.huge_pages(last), Some(HugePages::Avoid));
+    back.free(third.ptr, class);
+    assert_eq!(calls(), before + 4, "taken back for good");
+}
+
+/// The same for a run of regions moving to a larger run.
+#[test]
+#[cfg_attr(miri, ignore)]
+fn a_moving_run_releases_its_old_pages_behind_the_copy() {
+    let state = state::<Standard>();
+    let back = state.get_or_reserve().unwrap();
+    let os = state.os();
+    let piece = move_piece(Standard::GEOMETRY);
+    let region = back.space().plan().region_size();
+    let len = 2 * region - 5;
+    let old = back.alloc_run(len, 8).unwrap();
+    pattern(old.as_ptr(), len);
+    let new = back.alloc_run(3 * region, 8).unwrap();
+    // SAFETY: no other thread runs, and the back end and this test store only integers.
+    let resident = || unsafe { os.resident_bytes() };
+    let before = resident();
+    let mut peak = 0;
+    // SAFETY: `old` is a live run of `len` bytes that the test gives up, `new` a live run of
+    // more, and nothing else uses either.
+    unsafe { back.move_large_with(old, new, len, || peak = peak.max(resident())) };
+    assert!(peak <= before + piece + Standard::GEOMETRY.page_size());
+    assert!(patterned(new.as_ptr(), len));
+    assert_eq!(back.lookup(old.as_ptr()), None, "the old run is free");
+    back.free_run(new);
+}
+
 mod review {
     use super::super::layout::Grow;
     use super::super::tree::Host;
@@ -1388,6 +1720,9 @@ mod review {
             paint(p, 1024, 5);
         }
         back.launder(class, &mut slots);
+        // The pass began just now: one that stays unpublished for an interval is another
+        // matter (`a_pass_whose_starter_vanished_before_publishing_ends_some_day`).
+        state.os().advance_clock(7 * DECAY_TICKS);
         let started = (7 * DECAY_TICKS) | 1;
         let stale = Pass {
             tag: Pass::tag_of(started) ^ 1,
@@ -1413,6 +1748,81 @@ mod review {
         beat(&back);
         assert!(!pass_under_way(&state));
         assert_eq!(state.os().calls(Call::Purge), 16);
+    }
+
+    /// Finding abandoned-pass-start-stops-decay (opened by the fix for the four-write start).
+    /// The starter's compare-and-swap of the decay word and its store of the pass word are
+    /// two writes. A thread that vanishes between them (a fork abandons it there) leaves a
+    /// decay word that says a pass is under way and no pass word with its tag. Every stepper
+    /// then finds a tag that is not its own and returns, and nothing but a stepper ends a
+    /// pass or starts one: the child never decays again. The state is set up by hand, as in
+    /// `a_stepper_does_not_end_a_pass_whose_goal_is_not_published`, which asserts the first
+    /// half of this as intended; here the starter never comes back.
+    #[test]
+    fn a_pass_whose_starter_vanished_before_publishing_ends_some_day() {
+        use super::super::purge::Pass;
+        use core::sync::atomic::Ordering::Relaxed;
+        let state = state::<Standard>();
+        let back = state.get_or_reserve().unwrap();
+        let os = state.os();
+        let class = small(1024);
+        let mut slots = fill(&back, class, 256);
+        for &p in &slots {
+            paint(p, 1024, 5);
+        }
+        back.launder(class, &mut slots);
+        os.advance_clock(7 * DECAY_TICKS);
+        let started = (7 * DECAY_TICKS) | 1;
+        assert_ne!(
+            Pass::tag_of(started),
+            0,
+            "the all-zero pass word is not this pass's"
+        );
+        state.decay.store(started, Relaxed);
+        for _ in 0..50 {
+            os.advance_clock(DECAY_TICKS);
+            beat(&back);
+        }
+        assert!(
+            !pass_under_way(&state) && os.calls(Call::Purge) > 0,
+            "fifty intervals on, the abandoned pass is still under way and nothing has decayed: \
+             {} bytes retained",
+            back.retained()
+        );
+    }
+
+    /// Finding cap-purge-stops-at-the-lap-count (opened by the fix for the cap's hysteresis).
+    /// The cap's purge now stops when the lap count changes, and it starts wherever the shared
+    /// walk was left. If that is near the bottom, it looks at the few regions below, the lap
+    /// ends, and it stops without having seen the regions that hold the freed memory. The
+    /// mark is then set to the count, so the cap does not act again until a quarter-cap more
+    /// is freed. Here the walk was left at region 0 (set by hand; a decay pass that met its
+    /// goal there, or a cap purge that got under the cap there, leaves it so), and the
+    /// program frees more than the cap, all of it purgeable, in the regions above.
+    #[test]
+    fn the_cap_purges_wherever_the_walk_was_left() {
+        use core::sync::atomic::Ordering::Relaxed;
+        let state = state::<Standard>();
+        let back = state.get_or_reserve().unwrap();
+        let os = state.os();
+        let cap = retained_cap(Standard::GEOMETRY);
+        // Region 0 goes to a class that stays in use.
+        let _live = fill(&back, small(16), 8);
+        let class = small(1024);
+        let mut slots = fill(&back, class, cap / 1024 + 128);
+        for &p in &slots {
+            paint(p, 1024, 5);
+        }
+        state.purge_at.store(1, Relaxed);
+        for chunk in slots.chunks_mut(64) {
+            back.launder(class, chunk);
+        }
+        assert!(
+            os.calls(Call::Purge) > 0 && back.retained_small() <= cap,
+            "{} bytes are free and wholly purgeable, the cap is {cap}, and the cap's purge \
+             returned nothing",
+            back.retained_small()
+        );
     }
 
     /// Finding top-up-creeps. For a class whose size does not divide a huge page, `top_up`

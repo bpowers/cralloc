@@ -28,6 +28,12 @@ impl Asmalloc {
     pub fn usable_size(_ptr: *const u8) -> Option<usize> {
         None
     }
+
+    /// Returns what the heap can return now. Under Miri there is no heap of asmalloc's, so
+    /// nothing.
+    pub fn collect() -> usize {
+        0
+    }
 }
 
 // SAFETY: MIRI-02. Miri's allocator keeps `GlobalAlloc`'s promises.

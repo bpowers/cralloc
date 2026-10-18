@@ -50,6 +50,8 @@ pub(crate) struct TestHost<W> {
     pub(crate) fail_commit: AtomicBool,
     pub(crate) fail_purge: AtomicBool,
     pub(crate) purges: AtomicUsize,
+    /// Pages populated, in all.
+    pub(crate) populated: AtomicUsize,
 }
 
 impl<W: TestWord> TestHost<W> {
@@ -82,6 +84,7 @@ impl<W: TestWord> TestHost<W> {
             fail_commit: AtomicBool::new(false),
             fail_purge: AtomicBool::new(false),
             purges: AtomicUsize::new(0),
+            populated: AtomicUsize::new(0),
         }
     }
 
@@ -232,9 +235,23 @@ impl<W: TestWord> Host for TestHost<W> {
         !self.fail_commit.load(SeqCst)
     }
 
-    fn advise(&self, _: RegionId, offset: usize, len: usize, _: HugePages) {
+    fn advise(&self, _: RegionId, offset: usize, len: usize, _: HugePages) -> bool {
         let page = self.layout.page_size();
         assert!(offset.is_multiple_of(page) && len.is_multiple_of(page) && len > 0);
+        true
+    }
+
+    fn populate(&self, region: RegionId, offset: usize, len: usize) {
+        let page = self.layout.page_size();
+        assert!(offset.is_multiple_of(page) && len.is_multiple_of(page) && len > 0);
+        assert!((offset + len) / page <= self.committed[region.index()].load(SeqCst));
+        // Only pages no carve has published yet, so no slot there can be in use or purged.
+        let grow = super::layout::Grow::unpack(self.meta(region, self.layout.grow_word()).load());
+        assert!(
+            offset / page >= grow.committed as usize,
+            "populated published pages"
+        );
+        self.populated.fetch_add(len / page, SeqCst);
     }
 
     unsafe fn purge(&self, region: RegionId, offset: usize, len: usize) -> bool {

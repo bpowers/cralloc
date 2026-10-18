@@ -41,10 +41,12 @@
 //! **The caps** act at the free, for bursts inside an interval.
 //!
 //! - Small classes (`policy::retained_cap`): a launder purges toward the cap, within
-//!   `policy::PURGE_CAP_WORDS` of bitmap and one lap, when it leaves the count over the cap
-//!   and at least `cap / policy::CAP_REARM` above the mark. The mark is the lowest the count
-//!   has been since the cap last acted, so a count that hovers at the cap acts once, and a
-//!   count held over the cap by fragmentation acts again only after that much more is freed.
+//!   `policy::PURGE_CAP_WORDS` of bitmap and one circuit of the heap from where the walk
+//!   stands, when it leaves the count over the cap
+//!   and at least `cap / policy::CAP_REARM` above the mark. After a purge that could not get
+//!   under the cap, the mark is the lowest the count has been since, so a count that
+//!   fragmentation holds at or over the cap acts once and then only after that much more is
+//!   freed. After a purge that did get under, the next launder past the cap acts again.
 //! - Large classes (`policy::large_retained_cap`): a free that would take the count over the
 //!   cap returns the slot's pages to the OS before it releases the slot (`Back::free`). The
 //!   freeing thread still holds the slot, so this needs no claim and no search.
@@ -124,8 +126,10 @@ pub(crate) struct Pass {
 
 impl Pass {
     /// The tag of the pass a decay word started: every part of the word folded together, so
-    /// two passes share a tag only by a one-in-65536 accident, which costs a stale stepper one
-    /// step against the wrong goal.
+    /// two passes share a tag only by a one-in-65536 accident. The pass word a stepper then
+    /// mistakes for the new pass's is the last pass's, whose goal is met or whose lap is over,
+    /// so the stepper ends the new pass before it has purged anything: one pass is lost, and
+    /// the next interval starts another.
     pub(crate) const fn tag_of(decay: u64) -> u16 {
         (decay ^ decay >> 16 ^ decay >> 32 ^ decay >> 48) as u16
     }
@@ -203,20 +207,36 @@ impl<O: Os> Back<'_, O> {
         if !cap_fires(mark, new, cap) {
             return;
         }
-        // Raise the mark first, so that launders racing this one do not all purge.
+        // Raise the mark first, so that launders racing this one do not all purge. The mark
+        // is read and written in separate steps here and above, so racing launders can both
+        // purge, or one can lower the mark the other just raised; either costs one bounded
+        // purge more or one later, never a count that goes unwatched.
         state.cap_mark.store(new, Relaxed);
-        let lap = state.laps.load(Relaxed);
-        let mut spent = 0;
+        // One circuit of the heap from wherever the shared walk stands, counted in regions
+        // finished: the lap count says nothing here, since the walk may stand one region from
+        // the bottom with everything this launder freed above it.
+        let regions = self.space.plan().objects();
+        let (mut spent, mut finished) = (0, 0);
         loop {
             let over = self.retained_small().saturating_sub(cap);
-            if over == 0 || spent >= PURGE_CAP_WORDS || state.laps.load(Relaxed) != lap {
+            if over == 0 || spent >= PURGE_CAP_WORDS || finished >= regions {
                 break;
             }
-            spent += self.purge_step(PURGE_CAP_WORDS - spent, over).0;
+            let (read, _, done) = self.purge_step(PURGE_CAP_WORDS - spent, over);
+            spent += read;
+            finished += usize::from(done);
         }
-        // What is left is where the count stands with the cap's work done: the next purge
-        // waits for a step above it.
-        state.cap_mark.store(self.retained_small(), Relaxed);
+        // If that brought the count under the cap, the cap is working and acts again on the
+        // next launder that passes it: the mark goes a step below the count. If it could
+        // not (what is left is fragmentation, or beyond the bound), the mark is the count,
+        // and the next purge waits for a step above it.
+        let left = self.retained_small();
+        let mark = if left <= cap {
+            left.saturating_sub(cap / CAP_REARM)
+        } else {
+            left
+        };
+        state.cap_mark.store(mark, Relaxed);
     }
 
     /// Counts `bytes` of free slots of `class` as retained without acting on a cap: free
@@ -288,7 +308,20 @@ impl<O: Os> Back<'_, O> {
             let pass = Pass::unpack(state.pass.load(Acquire));
             if pass.tag != tag {
                 // The starter has not published this pass yet, or it is over and another
-                // has begun: either way it is not this stepper's.
+                // has begun: either way it is not this stepper's. But a starter that vanished
+                // between its two writes (a fork abandons it there) never publishes, and
+                // only steppers end passes. So a pass that is still unpublished an interval
+                // after it began is ended here, and the next interval starts a fresh one. A
+                // clock behind the start re-stamps it, so that its age can be told.
+                let now = self.space.os().ticks() & !ACTIVE;
+                let age = now.wrapping_sub(seen & !ACTIVE);
+                if age >= 1 << 63 {
+                    let _ = state
+                        .decay
+                        .compare_exchange(seen, now | ACTIVE, Release, Relaxed);
+                } else if age >= DECAY_TICKS {
+                    let _ = state.decay.compare_exchange(seen, now, Release, Relaxed);
+                }
                 return;
             }
             if pass.pages == 0 || state.laps.load(Relaxed) as u16 != pass.lap {
@@ -302,7 +335,7 @@ impl<O: Os> Back<'_, O> {
                 return;
             }
             let limit = pass.pages as usize * page;
-            let (read, purged) = self.purge_step(PURGE_STEP_WORDS - spent, limit);
+            let (read, purged, _) = self.purge_step(PURGE_STEP_WORDS - spent, limit);
             spent += read;
             let done = (purged / page).min(u32::MAX as usize) as u32;
             if done != 0 {
@@ -348,8 +381,8 @@ impl<O: Os> Back<'_, O> {
     /// One step of the walk: works on the region at the walk's position, and moves the
     /// position on if that region is done. Stops after `budget` words of bitmap or once it
     /// has purged `limit` bytes, finishing the unit it is on. Returns the words of bitmap
-    /// read, at least one, and the bytes purged.
-    fn purge_step(&self, budget: usize, limit: usize) -> (usize, usize) {
+    /// read, at least one, the bytes purged, and whether it finished its region.
+    fn purge_step(&self, budget: usize, limit: usize) -> (usize, usize, bool) {
         let plan = self.space.plan();
         let seen = self.state.purge_at.load(Relaxed);
         // The position is the region to look at next plus one; zero means the top.
@@ -359,7 +392,7 @@ impl<O: Os> Back<'_, O> {
             seen as usize - 1
         };
         let Some(region) = plan.region(index) else {
-            return (1, 0);
+            return (1, 0, true);
         };
         let (purged, read, done) = match self.purgeable(region) {
             Some(class) => self.purge_region(class, region, budget, limit, true),
@@ -375,7 +408,7 @@ impl<O: Os> Back<'_, O> {
         {
             self.state.laps.fetch_add(1, Relaxed);
         }
-        (read.max(1), purged)
+        (read.max(1), purged, done)
     }
 
     /// The class of a region the walk should look at: a class region whose summary bit is set.
