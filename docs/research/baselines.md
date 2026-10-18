@@ -717,9 +717,13 @@ The C programs (cfrac, espresso, cache-scratch 1) are not built here and were no
   it would make it another job, so it is left as it is, and json results compared across
   builds of the workloads carry a few percent of layout.
 - **tree**, two places. The drop phase is 7% slower in `loops64` (404 against 432 Mcycles at
-  depth 20), at the `lea 0x8(%rcx)` that waits on the load of the per-CPU slab's top in
-  asmalloc's free fast path, inlined into the recursive drop: each free loads the top that
-  the previous free stored. That is the allocator's code and was not touched. The walk phase
+  depth 20). The profile put it at the `lea 0x8(%rcx)` after the load of the per-CPU slab's
+  top in asmalloc's free fast path, inlined into the recursive drop, and this audit took it
+  for the store-to-load hop on that word. It is not: the hop stays free at every placement.
+  The drop function's last straight run leaves a tail of one to three instructions in a new
+  64-byte line at some placements, which misses the op cache on every call, and the profile
+  blames whatever dispatches late behind it (`zen5-roofline.md`, section 15). The caller's
+  layout decides it and no change to the routine removes it. The walk phase
   (a recursive sum, workload code) is 5 to 7% slower in the default build than in the others.
   A loop over an explicit stack instead put a store-to-load chain on every node and made the
   walk twice as slow, so the recursion stays.
