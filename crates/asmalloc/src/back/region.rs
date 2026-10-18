@@ -18,8 +18,10 @@
 //!   page returns nothing to the OS until the kernel gets round to splitting it. The free either
 //!   purges the whole slot and takes the advice back, or, within the budget for kept grown
 //!   blocks, releases it resident with its advice, which the next claim takes back
-//!   (`Back::alloc_at`). A purge of a free slot needs no rule of its own: it returns the slot's
-//!   pages whole.
+//!   (`Back::alloc_at`). The huge pages already faulted stay, and that tenant's flag is clear,
+//!   so a shrink of it in place is not trimmed to whole huge pages and may split one: the
+//!   kernel then returns the part, a cost in time, not memory. A purge of a free slot needs no
+//!   rule of its own: it returns the slot's pages whole.
 //! - **Clean bits** say a page has not been written since it was carved or last purged. Only a
 //!   purge and the first claim of a carved slot set them (`mark_fresh`, for the pages past its
 //!   block); a claim and anything that widens a held block clear them under what it may write
