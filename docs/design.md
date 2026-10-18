@@ -576,14 +576,19 @@ across a class boundary settles in one slot instead of being copied on every cal
 When a large object has to move, the copy goes in pieces and returns the old block's pages
 behind it, so the two copies are never both resident. The old block would be purged at its
 free anyway; this only does it sooner, and it keeps a program that grows several big buffers
-at once from holding twice their size.
+at once from holding twice their size. The copy skips source pages that are all zero and
+leaves the destination's pages untouched there, so a block the program wrote sparsely stays
+sparse. Moving the pages with `mremap` instead would copy nothing, but it splits the heap's
+mapping in ways that take several more rules to undo, and it adds nothing to the memory
+saved; we copy.
 
 ### Interfaces
 
 - **`GlobalAlloc`** for `#[global_allocator]`. `dealloc` of a small object is the free
   routine and nothing else.
 - **`Allocator`**, on Rust versions that have it, through a zero-sized handle. All handles
-  share the one heap. `allocate` returns the full class size. A zero-size request gets a
+  share the one heap. `allocate` returns the full class size of a small block and the
+  usable size of a large one. A zero-size request gets a
   dangling, aligned pointer and no block.
 - **C ABI**: `malloc`, `calloc`, `realloc`, `reallocarray`, `free`, the aligned-allocation
   family, `malloc_usable_size`, `malloc_trim` and the sized frees: every function glibc
@@ -603,12 +608,18 @@ at once from holding twice their size.
   returns null and a throwing form raises `std::bad_alloc`. An exception cannot unwind
   through the allocator's Rust frames, so the throwing forms are generated routines that on
   failure jump to the C++ runtime's own throw function with nothing of ours on the stack.
-  A program may replace `malloc`, or only the basic `operator new` and `operator delete`,
-  as the standard allows, and its blocks then reach our other `delete` forms. So a
-  `delete` that is handed a pointer outside the heap does what the C++ runtime's default
-  would have done before it gives up: it passes the block to the program's basic
-  `operator delete` if there is one, else to the program's `free`, and aborts only if both
-  are ours. This costs nothing on the path of a block we own.
+  A program may replace only the basic `operator new` and `operator delete`, as the
+  standard allows, and its blocks then reach our other `delete` forms. Those blocks can
+  lie inside our heap without being ours to free: a replacement that adds a header calls
+  our `malloc` and returns a pointer into the middle of the block. So we do what the C++
+  runtime's defaults do. If the first basic `operator delete` in the process is not ours,
+  every other `delete` form forwards every pointer to it, and likewise our nothrow `new`
+  forms hand off when the basic `new` is replaced. The generated `delete` routines get
+  this for nothing: they read the heap's position from a word of their own, which the
+  slow path fills in only once it has found that the basic `delete` is ours, and while
+  that word is zero every pointer takes the slow path. A program may also replace `malloc`
+  itself; then a `delete` that is handed a pointer outside the heap passes it to the
+  program's `free`, and aborts only if `free` is ours too.
 - **A size from C or C++ is a prediction, never trusted.** A sized free or delete may use
   the size to find the class early, but the class from the address is the truth, and a
   wrong size (a derived object deleted through a base pointer, say) behaves exactly like a
@@ -643,12 +654,12 @@ the one a Rust `Layout` of the same size implies.
   again at the same size, and only a failure with no other reserver in flight, or after a
   bounded number of tries, makes it settle for a smaller heap or report failure. A count of
   reservers in flight, kept in one word, tells it which case it is in.
-- **Unloading.** A shared object that contains the allocator can never be unloaded. A
+- **Unloading.** A shared object that contains the allocator must not be unloaded. A
   thread's rseq area goes on naming a sequence inside it after the last call returns, and
-  the kernel reads that the next time the thread is preempted. So the allocator looks at
-  its own image when the heap starts: if it finds itself in a shared object that is not
-  marked against unloading, it pins the object through the loader. The preload library is
-  linked with that mark.
+  the kernel reads that the next time the thread is preempted, so unloading kills the
+  process. The preload library is linked so that it cannot be unloaded. Anyone else who
+  builds the allocator into a shared object links it the same way; we do not guard against
+  it at run time.
 - **Without rseq.** A thread with no rseq registration reads a negative CPU number, so every
   routine sends it to the slow path and it never touches a slab. That covers a whole process
   under valgrind or with the C library's registration turned off, and a single thread whose
@@ -706,7 +717,9 @@ These hold everywhere, and the proofs and tests lean on them.
 1. A slab changes only through an rseq routine that commits with one store, or through the
    drain steps under "Idle caches".
 2. Other shared state changes only through single atomic instructions.
-3. No locks, no waiting, no thread-local state.
+3. No locks, no waiting, no thread-local state. The one exception is in the C++ layer,
+   which asks the loader which `operator new` and `delete` the process uses, once per
+   family and on a failing `new`; that lookup can wait on the loader's lock.
 4. Between any two instructions of any slow path, shared state is valid and anything
    unreachable from it is owned by exactly one thread.
 5. All-zero is a valid state for every structure.

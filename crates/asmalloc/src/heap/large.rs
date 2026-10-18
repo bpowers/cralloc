@@ -7,9 +7,9 @@
 //!
 //! A resize stays in place only when the caller's next free will still find the right class: for a
 //! small object, when the new layout has the same class; for a large one, when the new layout is
-//! still large and fits the slot or run, and, when it shrinks (a decision beyond the design), keeps
-//! at least a [`HEADROOM`]th of it, so that a big buffer shrunk to a sliver does not keep its
-//! pages. Anything else moves the object. An object that outgrows its block moves to one with
+//! still large and fits the slot or run, and, when it shrinks, keeps at least a
+//! [`SHRINK_MOVES_BELOW`]th of it, so that a big buffer shrunk to a sliver does not hold its
+//! slot. Anything else moves the object. An object that outgrows its block moves to one with
 //! [`HEADROOM`] times the room it asked for, so a buffer that doubles is copied every other
 //! doubling, not at each one; but not past a region, since a run commits all its memory at once.
 //! Small objects get no headroom: their class comes from the layout, so their slot must be exactly
@@ -36,8 +36,25 @@ use crate::space::Plan;
 use core::alloc::Layout;
 use core::ptr::NonNull;
 
-/// How many times the room it asked for an object gets when it outgrows its block.
+/// How many times the room it asked for an object gets when it outgrows its block: it then
+/// fills between a fifth and a quarter of its new slot (a class is less than a quarter above
+/// the size it was chosen for).
 pub(crate) const HEADROOM: usize = 4;
+
+/// A large object that shrinks to under this fraction of its slot or run moves: a region has
+/// few slots of a large class, and one should not be held by an object a small fraction of its
+/// size.
+pub(crate) const SHRINK_MOVES_BELOW: usize = 8;
+
+// The two rules must leave a gap: a block that moved in with headroom and then shrinks back to
+// the size it had before must stay, or a block resized back and forth across a class boundary
+// is copied at every call. It fills more than 1 / (HEADROOM * 5 / 4) of its slot.
+const _: () = assert!(4 * SHRINK_MOVES_BELOW > 5 * HEADROOM);
+
+/// Whether a large block of `len` bytes stays in place when it shrinks to `size` bytes.
+pub(crate) const fn stays_after_shrink(size: usize, len: usize) -> bool {
+    size >= len / SHRINK_MOVES_BELOW
+}
 
 /// Where a large object goes.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -52,9 +69,11 @@ enum Place {
 fn place(layout: Layout, plan: Plan) -> Place {
     match Class::of_layout(layout) {
         Some(class) if plan.fits_region(class) => Place::Slot(class),
-        // `Layout` keeps the size rounded up to its alignment within `isize::MAX`.
+        // The size asked for, which the run records: the alignment is met by where the run
+        // starts, so rounding the size up to it would only report, and commit, room nobody
+        // asked for.
         _ => Place::Run {
-            size: layout.size().max(1).next_multiple_of(layout.align()),
+            size: layout.size().max(1),
             align: layout.align(),
         },
     }
@@ -180,14 +199,12 @@ impl<O: Os> Heap<O> {
             (Some(_), None) => false,
             // Still large, fitting the block, and aligned as the new layout asks: the next free
             // reads the block from the address and finds it whole.
-            // A shrink to less than a [`HEADROOM`]th of the block moves, so the pages it gives
-            // up go back with the old block instead of staying resident in a block that is
-            // mostly empty.
+            // A shrink to less than a [`SHRINK_MOVES_BELOW`]th of the block moves.
             (None, next) => {
                 let needed = new.size().next_multiple_of(new.align());
                 next.is_none_or(|c| !c.is_small())
                     && needed <= len
-                    && (new.size() >= old.size() || needed >= len / HEADROOM)
+                    && (new.size() >= old.size() || stays_after_shrink(needed, len))
                     && ptr.addr().get() & (new.align() - 1) == 0
             }
         };
@@ -195,7 +212,8 @@ impl<O: Os> Heap<O> {
             if small(old).is_some() {
                 return Some(Grant { ptr, len });
             }
-            return Some(self.resize_large_in_place(ptr, new, zero));
+            // SAFETY: the caller's promise for `ptr`, and `new` fits the block (`in_place`).
+            return Some(unsafe { self.resize_large_in_place(ptr, new, zero) });
         }
         // Growing a large object out of its block: take headroom. A zeroed grow takes none, so
         // that it never clears room nobody asked for.
@@ -245,10 +263,16 @@ impl<O: Os> Heap<O> {
     /// `zero`, and returns what the caller may use now. A block that shrinks gives the whole
     /// pages past its new usable size back to the OS at once (`Back::resize_in_place`), so
     /// that a buffer cut down by `realloc` does not keep its old pages until it is freed.
-    fn resize_large_in_place(&self, ptr: NonNull<u8>, new: Layout, zero: bool) -> Grant {
+    ///
+    /// # Safety
+    ///
+    /// `ptr` is a live large block of this heap that the caller owns and is resizing to `new`,
+    /// which fits it.
+    unsafe fn resize_large_in_place(&self, ptr: NonNull<u8>, new: Layout, zero: bool) -> Grant {
         let before = self.usable_size(ptr.as_ptr()).unwrap_or(0);
         if let Some(back) = self.back() {
-            back.resize_in_place(ptr, new.size());
+            // SAFETY: the caller's promise; a resize gives up what lies past the new size.
+            unsafe { back.resize_in_place(ptr, new.size()) };
         }
         let len = self.usable_size(ptr.as_ptr()).unwrap_or(new.size());
         if zero && len > before {
@@ -277,15 +301,15 @@ mod tests {
         assert_eq!(
             place(layout((1 << 32) + 1, 8), plan),
             Place::Run {
-                size: (1 << 32) + 8,
+                size: (1 << 32) + 1,
                 align: 8
             }
         );
-        // An alignment above the region size is a run aligned to it.
+        // An alignment above the region size is a run aligned to it, holding what was asked.
         assert_eq!(
             place(layout(8, 1 << 33), plan),
             Place::Run {
-                size: 1 << 33,
+                size: 8,
                 align: 1 << 33
             }
         );

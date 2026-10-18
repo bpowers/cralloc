@@ -23,7 +23,7 @@
 //!   "Interfaces").
 //! - `realloc(p, 0)` frees `p` and returns null, as glibc's does. `realloc` keeps a small block
 //!   in place when the new size has the same class, and a large one when the new size is still
-//!   large, fits the slot or run and, shrinking, keeps a quarter of it; a large block that
+//!   large, fits the slot or run and, shrinking, keeps an eighth of it; a large block that
 //!   grows out of its slot moves to one with headroom. A block that moves keeps every byte its
 //!   usable size covered, up to the new size, as glibc's does.
 //! - `malloc_usable_size` is the class size of a small block, and the size last asked for,
@@ -42,6 +42,7 @@
 
 pub mod cxx;
 mod errno;
+mod loader;
 mod mirror;
 #[doc(hidden)]
 pub mod routines;
@@ -157,7 +158,8 @@ pub unsafe extern "C" fn realloc(ptr: *mut c_void, size: usize) -> *mut c_void {
         Found::Small(class) if next == Some(class.class()) => return ptr,
         Found::Small(class) => class.size(),
         Found::Large { size: used } => {
-            if process::resize_in_place_by_address(old, used, size) {
+            // SAFETY: MOD-04.
+            if unsafe { process::resize_in_place_by_address(old, used, size) } {
                 return ptr;
             }
             // Everything `malloc_usable_size` reported, not just the size asked for: programs

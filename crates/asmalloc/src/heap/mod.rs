@@ -65,7 +65,7 @@ pub(crate) struct Heap<O: Os> {
     depot: Depot,
 }
 
-/// A block, and the bytes of it the caller may use: the whole slot or run.
+/// A block, and the bytes of it the caller may use: its usable size (`Heap::usable_size`).
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct Grant {
     pub(crate) ptr: NonNull<u8>,
@@ -130,23 +130,12 @@ impl<O: Os> Heap<O> {
         Some(back)
     }
 
-    /// Reserves the heap's address space, or finds the reservation another thread made.
-    ///
-    /// Threads that start the heap together each reserve, and one publishes. Where the OS has
-    /// room for only one reservation, the others fail, and they may fail before the winner has
-    /// published, which would turn a race into an out-of-memory error. So a failure is retried
-    /// a few times, each looking for the winner's reservation first. The bound keeps start-up
-    /// from waiting on a thread that never publishes (one that stopped in a fork, say); past it
-    /// the request fails as out of memory, which is all a real shortage can do.
+    /// Reserves the heap's address space, or finds the reservation another thread made. Threads
+    /// that start the heap together each reserve, and one publishes; `SpaceCell` keeps a
+    /// failure caused by the others' reservations from shrinking the heap or failing the call.
     #[cold]
     fn reserve(&self) -> Option<Back<'_, O>> {
-        const ATTEMPTS: usize = 4;
-        for _ in 0..ATTEMPTS {
-            if let Ok(back) = self.back.get_or_reserve() {
-                return Some(back);
-            }
-        }
-        self.back.get()
+        self.back.get_or_reserve().ok()
     }
 
     /// Whether `ptr` lies in the heap's object regions. A block of this heap does; so may an

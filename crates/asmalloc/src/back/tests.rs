@@ -89,9 +89,10 @@ fn the_leaf_bitmap_is_committed_before_it_is_written() {
     let state = state::<Standard>();
     let back = state.get_or_reserve().unwrap();
     let class = small(8);
-    let mut slots = fill(&back, class, 3000);
+    let slots = fill(&back, class, 3000);
     assert_eq!(slots.len(), 3000);
-    back.launder(class, &mut slots);
+    // SAFETY: the test holds these slots, or passes a bad one to see the abort.
+    unsafe { back.launder(class, &slots) };
     assert_eq!(fill(&back, class, 3000).len(), 3000);
     back.trim();
 }
@@ -102,8 +103,9 @@ fn launder_then_fill_reuses_the_lowest_free_slots_first() {
     let back = state.get_or_reserve().unwrap();
     let class = small(64);
     let slots = fill(&back, class, 200);
-    let mut freed: Vec<*mut u8> = slots[10..60].iter().rev().copied().collect();
-    back.launder(class, &mut freed);
+    let freed: Vec<*mut u8> = slots[10..60].iter().rev().copied().collect();
+    // SAFETY: the test holds these slots, or passes a bad one to see the abort.
+    unsafe { back.launder(class, &freed) };
     assert_eq!(back.retained(), 50 * 64);
     let again = fill(&back, class, 20);
     assert_eq!(again, slots[10..30].to_vec());
@@ -121,18 +123,102 @@ fn a_double_free_aborts() {
     let back = state.get_or_reserve().unwrap();
     let class = small(16);
     let slots = fill(&back, class, 4);
-    back.launder(class, &mut [slots[1]]);
-    back.launder(class, &mut [slots[1]]);
+    // SAFETY: the test holds these slots, or passes a bad one to see the abort.
+    unsafe { back.launder(class, &[slots[1]]) };
+    // SAFETY: the test holds these slots, or passes a bad one to see the abort.
+    unsafe { back.launder(class, &[slots[1]]) };
 }
 
 #[test]
-#[should_panic(expected = "double free")]
+#[should_panic(expected = "freed twice in one batch")]
 fn a_slot_twice_in_one_batch_aborts() {
     let state = state::<Standard>();
     let back = state.get_or_reserve().unwrap();
     let class = small(16);
     let slots = fill(&back, class, 4);
-    back.launder(class, &mut [slots[1], slots[2], slots[1]]);
+    // SAFETY: the test holds these slots, or passes a bad one to see the abort.
+    unsafe { back.launder(class, &[slots[1], slots[2], slots[1]]) };
+}
+
+/// A launder keeps four words open; a slot that comes back after its word was closed is still
+/// caught, from the record of closed words.
+#[test]
+#[should_panic(expected = "freed twice in one batch")]
+fn a_slot_twice_after_its_word_closed_aborts() {
+    let state = state::<Standard>();
+    let back = state.get_or_reserve().unwrap();
+    let class = small(16);
+    let slots = fill(&back, class, 64 * 8);
+    let batch: Vec<*mut u8> = (0..6).map(|w| slots[w * 64]).chain([slots[0]]).collect();
+    // SAFETY: the test holds these slots, or passes a bad one to see the abort.
+    unsafe { back.launder(class, &batch) };
+}
+
+/// The same when the word was closed and opened again before the slot comes back: the second
+/// opening carries the bits its first OR set.
+#[test]
+#[should_panic(expected = "freed twice in one batch")]
+fn a_slot_twice_across_a_reopened_word_aborts() {
+    let state = state::<Standard>();
+    let back = state.get_or_reserve().unwrap();
+    let class = small(16);
+    let slots = fill(&back, class, 64 * 8);
+    let mut batch: Vec<*mut u8> = (0..6).map(|w| slots[w * 64]).collect();
+    batch.extend([slots[1], slots[0]]);
+    // SAFETY: the test holds these slots, or passes a bad one to see the abort.
+    unsafe { back.launder(class, &batch) };
+}
+
+/// A scattered batch ends its part when the part's list of closed words fills. A different
+/// slot of a word closed in an earlier part is no double free; the same slot again is, caught
+/// by its word's OR.
+#[test]
+#[should_panic(expected = "double free: an object was freed while already free")]
+fn a_slot_twice_after_many_closed_words_aborts() {
+    let state = state::<Standard>();
+    let back = state.get_or_reserve().unwrap();
+    let class = small(16);
+    let slots = fill(&back, class, 64 * 40);
+    let words: Vec<*mut u8> = (0..30).map(|w| slots[w * 64]).collect();
+    let mut fine = words.clone();
+    fine.push(slots[1]);
+    // SAFETY: the test holds these slots, or passes a bad one to see the abort.
+    unsafe { back.launder(class, &fine) };
+    assert_eq!(fill(&back, class, 31).len(), 31);
+    let mut twice = words;
+    twice.push(slots[0]);
+    // SAFETY: the test holds these slots, or passes a bad one to see the abort.
+    unsafe { back.launder(class, &twice) };
+}
+
+/// Scattered frees, one slot to a word across several summary words, and frees that close and
+/// reopen words, all reach the bitmaps: a fill afterwards gets every slot back, lowest first.
+#[test]
+fn scattered_launders_free_every_slot_and_fills_take_the_lowest() {
+    let state = state::<Standard>();
+    let back = state.get_or_reserve().unwrap();
+    let class = small(8);
+    // 8-byte slots in the standard geometry: two summary levels, 64 leaf words to a summary
+    // word, so this spans four of them.
+    let n = 64 * 64 * 4;
+    let mut slots = fill(&back, class, n);
+    slots.sort();
+    let order: Vec<*mut u8> = (0..n).map(|i| slots[i * 7919 % n]).collect();
+    for chunk in order.chunks(64) {
+        // SAFETY: the test holds these slots, or passes a bad one to see the abort.
+        unsafe { back.launder(class, chunk) };
+    }
+    let again = fill(&back, class, n);
+    assert_eq!(again, slots, "every slot back, in address order");
+    // Now a scattered subset: a fill takes exactly those, in order, before carving.
+    let some: Vec<*mut u8> = slots.iter().step_by(37).copied().collect();
+    let shuffled: Vec<*mut u8> = (0..some.len()).map(|i| some[i * 31 % some.len()]).collect();
+    assert_ne!(some.len() % 31, 0, "a permutation");
+    for chunk in shuffled.chunks(64) {
+        // SAFETY: the test holds these slots, or passes a bad one to see the abort.
+        unsafe { back.launder(class, chunk) };
+    }
+    assert_eq!(fill(&back, class, some.len()), some);
 }
 
 #[test]
@@ -142,7 +228,8 @@ fn freeing_an_interior_pointer_aborts() {
     let back = state.get_or_reserve().unwrap();
     let class = small(32);
     let slots = fill(&back, class, 4);
-    back.launder(class, &mut [slots[1].wrapping_add(8)]);
+    // SAFETY: the test holds these slots, or passes a bad one to see the abort.
+    unsafe { back.launder(class, &[slots[1].wrapping_add(8)]) };
 }
 
 #[test]
@@ -151,7 +238,8 @@ fn freeing_with_the_wrong_class_aborts() {
     let state = state::<Standard>();
     let back = state.get_or_reserve().unwrap();
     let slots = fill(&back, small(32), 4);
-    back.launder(small(64), &mut [slots[0]]);
+    // SAFETY: the test holds these slots, or passes a bad one to see the abort.
+    unsafe { back.launder(small(64), &[slots[0]]) };
 }
 
 #[test]
@@ -161,7 +249,8 @@ fn freeing_an_uncarved_slot_aborts() {
     let back = state.get_or_reserve().unwrap();
     let class = small(32);
     let slots = fill(&back, class, 4);
-    back.launder(class, &mut [slots[3].wrapping_add(32)]);
+    // SAFETY: the test holds these slots, or passes a bad one to see the abort.
+    unsafe { back.launder(class, &[slots[3].wrapping_add(32)]) };
 }
 
 #[test]
@@ -170,7 +259,8 @@ fn freeing_a_foreign_pointer_aborts() {
     let state = state::<Standard>();
     let back = state.get_or_reserve().unwrap();
     let mut local = 0u8;
-    back.launder(small(8), &mut [&raw mut local]);
+    // SAFETY: the test holds these slots, or passes a bad one to see the abort.
+    unsafe { back.launder(small(8), &[&raw mut local]) };
 }
 
 #[test]
@@ -424,8 +514,9 @@ fn the_heap_runs_out_and_recovers() {
     assert!(fill(&back, class, 1).is_empty());
     assert!(back.alloc(class.class(), 1).is_none());
     assert!(back.alloc_run(1, 8).is_none());
-    let mut some = slots.split_off(all - 3);
-    back.launder(class, &mut some);
+    let some = slots.split_off(all - 3);
+    // SAFETY: the test holds these slots, or passes a bad one to see the abort.
+    unsafe { back.launder(class, &some) };
     assert_eq!(fill(&back, class, 5).len(), 3);
 }
 
@@ -476,7 +567,8 @@ fn a_refused_purge_is_skipped_and_retried() {
         paint(p, 1024, 9);
     }
     let keep = slots.split_off(64);
-    back.launder(class, &mut slots);
+    // SAFETY: the test holds these slots, or passes a bad one to see the abort.
+    unsafe { back.launder(class, &slots) };
     state.os().set_faults(Call::Purge, Faults::ALWAYS);
     assert_eq!(back.trim(), 0);
     state.os().set_faults(Call::Purge, Faults::NONE);
@@ -498,10 +590,11 @@ fn passing_the_cap_purges_back_under_it() {
     let cap = retained_cap(Standard::GEOMETRY);
     let class = small(1024);
     let n = 2 * cap / 1024;
-    let mut slots = fill(&back, class, n);
+    let slots = fill(&back, class, n);
     assert_eq!(slots.len(), n);
     let before = state.os().calls(Call::Purge);
-    back.launder(class, &mut slots);
+    // SAFETY: the test holds these slots, or passes a bad one to see the abort.
+    unsafe { back.launder(class, &slots) };
     assert!(state.os().calls(Call::Purge) > before);
     assert!(back.retained() <= cap, "{} > {cap}", back.retained());
     // The purged pages are the top ones: the lowest slots are still resident.
@@ -557,7 +650,8 @@ fn a_fruitless_purge_does_not_make_the_count_forget() {
     assert!(freed > cap && survivors.len() * 1024 < cap);
     let purges = os.calls(Call::Purge);
     for chunk in storm.chunks_mut(64) {
-        back.launder(class, chunk);
+        // SAFETY: the test holds these slots, or passes a bad one to see the abort.
+        unsafe { back.launder(class, chunk) };
     }
     assert_eq!(os.calls(Call::Purge), purges, "no page was wholly free");
     assert_eq!(
@@ -567,7 +661,8 @@ fn a_fruitless_purge_does_not_make_the_count_forget() {
     );
     // The neighbours go too. Nothing is live now, and the memory comes back with the clock.
     for chunk in survivors.chunks_mut(64) {
-        back.launder(class, chunk);
+        // SAFETY: the test holds these slots, or passes a bad one to see the abort.
+        unsafe { back.launder(class, chunk) };
     }
     // The count still knew the storm's bytes, so these frees took it over further steps and
     // the cap acted on pages that are wholly free now.
@@ -594,12 +689,13 @@ fn free_memory_decays_by_quarters_from_the_top() {
     let os = state.os();
     let class = small(1024);
     let total = retained_cap(Standard::GEOMETRY) / 2;
-    let mut slots = fill(&back, class, total / 1024);
+    let slots = fill(&back, class, total / 1024);
     for &p in &slots {
         paint(p, 1024, 5);
     }
     let (lowest, highest) = (slots[0], slots[slots.len() - 1]);
-    back.launder(class, &mut slots);
+    // SAFETY: the test holds these slots, or passes a bad one to see the abort.
+    unsafe { back.launder(class, &slots) };
     assert_eq!(back.retained(), total);
     let purges = os.calls(Call::Purge);
     beat(&back);
@@ -642,8 +738,9 @@ fn reuse_lowers_the_count_and_reviving_a_page_raises_it() {
     let back = state.get_or_reserve().unwrap();
     let class = small(1024);
     let page = Standard::GEOMETRY.page_size();
-    let mut slots = fill(&back, class, 64);
-    back.launder(class, &mut slots);
+    let slots = fill(&back, class, 64);
+    // SAFETY: the test holds these slots, or passes a bad one to see the abort.
+    unsafe { back.launder(class, &slots) };
     assert_eq!(back.retained(), 64 * 1024);
     let again = fill(&back, class, 16);
     assert_eq!(back.retained(), 48 * 1024);
@@ -652,8 +749,9 @@ fn reuse_lowers_the_count_and_reviving_a_page_raises_it() {
     // One slot of a purged page: the page's other slots are free and resident again.
     let one = fill(&back, class, 1);
     assert_eq!(back.retained(), page - 1024);
-    let mut all: Vec<*mut u8> = again.into_iter().chain(one).collect();
-    back.launder(class, &mut all);
+    let all: Vec<*mut u8> = again.into_iter().chain(one).collect();
+    // SAFETY: the test holds these slots, or passes a bad one to see the abort.
+    unsafe { back.launder(class, &all) };
     assert_eq!(back.retained(), page + 16 * 1024);
 }
 
@@ -668,10 +766,11 @@ fn a_fragmented_heap_costs_one_lap_an_interval() {
     let class = small(1024);
     let per_page = Standard::GEOMETRY.page_size() / 1024;
     let slots = fill(&back, class, 1024);
-    let (_live, mut freed): (Vec<*mut u8>, Vec<*mut u8>) = slots
+    let (_live, freed): (Vec<*mut u8>, Vec<*mut u8>) = slots
         .iter()
         .partition(|p| (p.addr() / 1024).is_multiple_of(per_page));
-    back.launder(class, &mut freed);
+    // SAFETY: the test holds these slots, or passes a bad one to see the abort.
+    unsafe { back.launder(class, &freed) };
     let retained = back.retained();
     let laps = || state.laps.load(core::sync::atomic::Ordering::Relaxed);
     for _ in 0..3 {
@@ -706,13 +805,15 @@ fn the_cap_acts_again_as_the_count_grows_past_it() {
         .iter()
         .partition(|p| (p.addr() / 1024).is_multiple_of(per_page));
     for chunk in storm.chunks_mut(64) {
-        back.launder(class, chunk);
+        // SAFETY: the test holds these slots, or passes a bad one to see the abort.
+        unsafe { back.launder(class, chunk) };
     }
     assert_eq!(os.calls(Call::Purge), 0);
     assert!(back.retained_small() > cap);
     // Freeing the survivors makes pages wholly free, and takes the count over further steps.
     for chunk in survivors.chunks_mut(64) {
-        back.launder(class, chunk);
+        // SAFETY: the test holds these slots, or passes a bad one to see the abort.
+        unsafe { back.launder(class, chunk) };
     }
     assert!(os.calls(Call::Purge) > 0, "the cap never acted again");
     assert!(back.retained_small() <= cap + cap / CAP_REARM);
@@ -827,7 +928,8 @@ fn the_huge_page_at_the_watermark_is_purged_with_the_rest() {
         "the watermark is mid-page"
     );
     for chunk in slots.chunks_mut(64) {
-        back.launder(class, chunk);
+        // SAFETY: the test holds these slots, or passes a bad one to see the abort.
+        unsafe { back.launder(class, chunk) };
     }
     let purged = back.trim();
     // Everything carved by the program, and the rest of the watermark's huge page.
@@ -860,7 +962,8 @@ fn a_watermark_page_in_use_is_not_carved() {
     let count = slots.len();
     let live = slots.pop().unwrap();
     for chunk in slots.chunks_mut(64) {
-        back.launder(class, chunk);
+        // SAFETY: the test holds these slots, or passes a bad one to see the abort.
+        unsafe { back.launder(class, chunk) };
     }
     back.trim();
     // The next never-used slot is still the one after the last the program got.
@@ -1008,8 +1111,9 @@ fn shadow_run<S: Shape>(seed: u64, steps: usize, faults: bool) {
                 }
                 match class {
                     Some(c) if c.is_small() => {
-                        let mut batch = batch;
-                        back.launder(c.small().unwrap(), &mut batch);
+                        let batch = batch;
+                        // SAFETY: the test holds these slots, or passes a bad one to see the abort.
+                        unsafe { back.launder(c.small().unwrap(), &batch) };
                     }
                     _ => {
                         for p in batch {
@@ -1082,7 +1186,7 @@ fn threads_never_share_a_slot() {
                 let stamp = t + 1;
                 for _ in 0..300 {
                     let class = classes[rng.below(classes.len())];
-                    let mut got = fill(&back, class, 1 + rng.below(60));
+                    let got = fill(&back, class, 1 + rng.below(60));
                     for &p in &got {
                         assert!(held.lock().unwrap().insert(p.addr()), "a slot held twice");
                         paint(p, class.size(), stamp);
@@ -1100,7 +1204,8 @@ fn threads_never_share_a_slot() {
                         );
                         held.lock().unwrap().remove(&p.addr());
                     }
-                    back.launder(class, &mut got);
+                    // SAFETY: the test holds these slots, or passes a bad one to see the abort.
+                    unsafe { back.launder(class, &got) };
                     if let Some(b) = block {
                         assert!(painted(b.ptr.as_ptr(), big.size(), stamp));
                         held.lock().unwrap().remove(&b.ptr.addr().get());
@@ -1141,7 +1246,8 @@ fn a_large_slot_that_shrinks_in_place_returns_its_tail() {
     paint(ptr.as_ptr(), class.size(), 0x6b);
     let purges = os.calls(Call::Purge);
     // To five pages and a byte: six pages stay usable.
-    back.resize_in_place(ptr, 5 * page + 1);
+    // SAFETY: the test holds the block and uses none of it during the call.
+    unsafe { back.resize_in_place(ptr, 5 * page + 1) };
     assert_eq!(back.usable_size(ptr.as_ptr()), Some(6 * page));
     assert_eq!(os.calls(Call::Purge), purges + 1);
     let tail = ptr.map_addr(|a| a.saturating_add(6 * page));
@@ -1153,12 +1259,15 @@ fn a_large_slot_that_shrinks_in_place_returns_its_tail() {
     assert!(painted(ptr.as_ptr(), 6 * page, 0x6b));
     assert_eq!(back.retained(), 0);
     // Within the last page: recorded, and nothing to return.
-    back.resize_in_place(ptr, 5 * page + 100);
-    back.resize_in_place(ptr, 5 * page + 7);
+    // SAFETY: the test holds the block and uses none of it during the call.
+    unsafe { back.resize_in_place(ptr, 5 * page + 100) };
+    // SAFETY: the test holds the block and uses none of it during the call.
+    unsafe { back.resize_in_place(ptr, 5 * page + 7) };
     assert_eq!(os.calls(Call::Purge), purges + 1);
     // Grown back in place: the old bytes are gone, not stale. That is dense growth to a huge
     // page (the slot is one simulated huge page), so the slot is now advised for them.
-    back.resize_in_place(ptr, class.size());
+    // SAFETY: the test holds the block and uses none of it during the call.
+    unsafe { back.resize_in_place(ptr, class.size()) };
     assert_eq!(back.usable_size(ptr.as_ptr()), Some(class.size()));
     assert_eq!(os.calls(Call::Purge), purges + 1);
     assert!(painted(ptr.as_ptr(), 6 * page, 0x6b));
@@ -1167,7 +1276,8 @@ fn a_large_slot_that_shrinks_in_place_returns_its_tail() {
     // Shrunk again after being written: the tail lies inside the huge page, which goes back
     // only whole, at the free, with the advice.
     paint(ptr.as_ptr(), class.size(), 0x11);
-    back.resize_in_place(ptr, 2 * page);
+    // SAFETY: the test holds the block and uses none of it during the call.
+    unsafe { back.resize_in_place(ptr, 2 * page) };
     assert_eq!(os.calls(Call::Purge), purges + 1);
     assert!(painted(ptr.as_ptr(), class.size(), 0x11));
     back.free(ptr, class);
@@ -1193,7 +1303,8 @@ fn a_run_that_shrinks_in_place_returns_its_tail() {
     let ptr = back.alloc_run(2 * region, 8).unwrap();
     paint(ptr.as_ptr(), 2 * region, 0x2c);
     let purges = os.calls(Call::Purge);
-    back.resize_in_place(ptr, region / 2 + 1);
+    // SAFETY: the test holds the block and uses none of it during the call.
+    unsafe { back.resize_in_place(ptr, region / 2 + 1) };
     let kept = region / 2 + page;
     assert_eq!(back.usable_size(ptr.as_ptr()), Some(kept));
     assert_eq!(os.calls(Call::Purge), purges + 1);
@@ -1204,7 +1315,8 @@ fn a_run_that_shrinks_in_place_returns_its_tail() {
         assert!(!os.is_purged(ptr, kept));
     }
     assert!(painted(ptr.as_ptr(), kept, 0x2c));
-    back.resize_in_place(ptr, 2 * region);
+    // SAFETY: the test holds the block and uses none of it during the call.
+    unsafe { back.resize_in_place(ptr, 2 * region) };
     assert!(painted(tail.as_ptr(), 2 * region - kept, 0));
     back.free_run(ptr);
 }
@@ -1329,9 +1441,11 @@ fn a_block_that_grows_gets_huge_pages_until_it_is_freed() {
     let block = back.alloc(new_class, huge / 2).unwrap().ptr;
     assert_eq!(os.huge_pages(block), Some(HugePages::Avoid));
     let advice = os.calls(Call::AdviseHuge);
-    back.resize_in_place(block, huge);
+    // SAFETY: the test holds the block and uses none of it during the call.
+    unsafe { back.resize_in_place(block, huge) };
     assert_eq!(os.huge_pages(block), Some(HugePages::Prefer));
-    back.resize_in_place(block, 2 * huge);
+    // SAFETY: the test holds the block and uses none of it during the call.
+    unsafe { back.resize_in_place(block, 2 * huge) };
     assert_eq!(
         os.calls(Call::AdviseHuge),
         advice + 1,
@@ -1358,7 +1472,8 @@ fn an_advised_slot_is_purged_only_in_whole_huge_pages() {
     let first = back.alloc(class, page).unwrap().ptr;
     let slot = back.alloc(class, huge / 2).unwrap().ptr;
     assert_eq!(slot.addr().get() - first.addr().get(), class.size());
-    back.resize_in_place(slot, 2 * huge);
+    // SAFETY: the test holds the block and uses none of it during the call.
+    unsafe { back.resize_in_place(slot, 2 * huge) };
     let interior = slot.map_addr(|a| a.saturating_add(huge / 2));
     assert_eq!(os.huge_pages(interior), Some(HugePages::Prefer));
     assert_eq!(
@@ -1366,16 +1481,19 @@ fn an_advised_slot_is_purged_only_in_whole_huge_pages() {
         Some(HugePages::Avoid),
         "only whole huge pages"
     );
-    back.resize_in_place(slot, class.size());
+    // SAFETY: the test holds the block and uses none of it during the call.
+    unsafe { back.resize_in_place(slot, class.size()) };
     paint(slot.as_ptr(), class.size(), 0x5a);
     // A shrink to the middle of the first huge page keeps all of it; the rest goes back.
-    back.resize_in_place(slot, huge / 2 + 3 * page);
+    // SAFETY: the test holds the block and uses none of it during the call.
+    unsafe { back.resize_in_place(slot, huge / 2 + 3 * page) };
     let past = interior.map_addr(|a| a.saturating_add(huge));
     assert!(painted(slot.as_ptr(), huge / 2 + huge, 0x5a));
     // SAFETY: no other thread runs, and the back end and this test store only integers.
     unsafe { assert!(os.is_purged(past, class.size() - huge / 2 - huge)) };
     // A move of it: every page of the old slot goes back, the contents arrive.
-    back.resize_in_place(slot, class.size());
+    // SAFETY: the test holds the block and uses none of it during the call.
+    unsafe { back.resize_in_place(slot, class.size()) };
     pattern(slot.as_ptr(), class.size());
     let to = back.alloc(large(512 << 10), 2 * class.size()).unwrap().ptr;
     let (mut pieces, purges) = (0, os.calls(Call::Purge));
@@ -1404,7 +1522,8 @@ fn refused_huge_page_advice_is_retried_by_the_next_holder() {
     let class = large(256 << 10);
     let block = back.alloc(class, huge / 2).unwrap().ptr;
     os.set_faults(Call::AdviseHuge, Faults::ALWAYS.partially());
-    back.resize_in_place(block, 2 * huge);
+    // SAFETY: the test holds the block and uses none of it during the call.
+    unsafe { back.resize_in_place(block, 2 * huge) };
     pattern(block.as_ptr(), 2 * huge);
     assert!(patterned(block.as_ptr(), 2 * huge));
     // Half the range took the advice before the call failed.
@@ -1495,7 +1614,7 @@ mod review {
         let huge = Wide::GEOMETRY.huge_page_size();
         // Region 0: a class that is wholly free, which the clock should return.
         let low = small(1024);
-        let mut victims = fill(&back, low, 512);
+        let victims = fill(&back, low, 512);
         for &p in &victims {
             paint(p, 1024, 7);
         }
@@ -1519,9 +1638,11 @@ mod review {
             .map_addr(|a| a.saturating_add(Wide::GEOMETRY.largest_plan().region_size() - 1));
         assert_eq!(os.huge_pages(end), Some(HugePages::Prefer));
         for chunk in slots.chunks_mut(64) {
-            back.launder(class, chunk);
+            // SAFETY: the test holds these slots, or passes a bad one to see the abort.
+            unsafe { back.launder(class, chunk) };
         }
-        back.launder(low, &mut victims);
+        // SAFETY: the test holds these slots, or passes a bad one to see the abort.
+        unsafe { back.launder(low, &victims) };
         assert!(back.retained_small() < retained_cap(Wide::GEOMETRY));
         for _ in 0..10 {
             os.advance_clock(DECAY_TICKS);
@@ -1550,8 +1671,9 @@ mod review {
         let back = state.get_or_reserve().unwrap();
         let class = small(16);
         let page = Standard::GEOMETRY.page_size();
-        let mut slots = fill(&back, class, page / 16);
-        back.launder(class, &mut slots);
+        let slots = fill(&back, class, page / 16);
+        // SAFETY: the test holds these slots, or passes a bad one to see the abort.
+        unsafe { back.launder(class, &slots) };
         assert_eq!(back.trim(), page);
         assert_eq!(back.retained(), 0);
         let again = fill(&back, class, page / 16);
@@ -1620,7 +1742,8 @@ mod review {
         let mut extra = storm.split_off(cap / 1024 - 32);
         extra.truncate(64);
         for chunk in storm.chunks_mut(64) {
-            back.launder(class, chunk);
+            // SAFETY: the test holds these slots, or passes a bad one to see the abort.
+            unsafe { back.launder(class, chunk) };
         }
         assert_eq!(back.retained_small(), cap - 32 * 1024);
         let laps = || state.laps.load(core::sync::atomic::Ordering::Relaxed);
@@ -1628,7 +1751,8 @@ mod review {
         // The program frees 64 slots and takes 64 back, over and over, so the count moves
         // between 32 KiB under the cap and 32 KiB over it.
         for _ in 0..50 {
-            back.launder(class, &mut extra);
+            // SAFETY: the test holds these slots, or passes a bad one to see the abort.
+            unsafe { back.launder(class, &extra) };
             assert!(back.retained_small() > cap);
             extra = fill(&back, class, 64);
             assert!(back.retained_small() <= cap);
@@ -1639,6 +1763,28 @@ mod review {
             "50 launders across the cap walked the heap {} times",
             laps() - before
         );
+    }
+
+    /// Finding cap-rearms-after-a-fruitless-walk. A fill on another thread can take the count
+    /// under the cap while a cap purge walks the heap and finds nothing; the mark must not then
+    /// re-arm, or the next launder past the cap walks again. The race needs two threads at one
+    /// moment, so this checks the rule the purge applies.
+    #[test]
+    fn a_fruitless_purge_does_not_rearm_the_cap() {
+        use super::super::purge::{cap_fires, mark_after};
+        let cap = retained_cap(Standard::GEOMETRY);
+        // Nothing purged, the count fell under the cap meanwhile: the mark stays at the count,
+        // and a launder that takes the count a little over the cap does not purge.
+        let left = cap - 1024;
+        let mark = mark_after(left, cap, 0);
+        assert_eq!(mark, left);
+        assert!(!cap_fires(mark, cap + 1024, cap));
+        // A purge that returned bytes and got under the cap re-arms as before.
+        let mark = mark_after(left, cap, 4096);
+        assert!(mark < left);
+        assert!(cap_fires(mark, cap + 1024, cap));
+        // Over the cap, the mark is the count whatever was purged.
+        assert_eq!(mark_after(cap + 1, cap, 4096), cap + 1);
     }
 
     /// Finding clock-back-stops-decay. `decay_look` reads a clock behind the last pass's end as
@@ -1652,11 +1798,12 @@ mod review {
         let os = state.os();
         let class = small(1024);
         let total = retained_cap(Standard::GEOMETRY) / 2;
-        let mut slots = fill(&back, class, total / 1024);
+        let slots = fill(&back, class, total / 1024);
         for &p in &slots {
             paint(p, 1024, 5);
         }
-        back.launder(class, &mut slots);
+        // SAFETY: the test holds these slots, or passes a bad one to see the abort.
+        unsafe { back.launder(class, &slots) };
         os.advance_clock(100 * DECAY_TICKS);
         beat(&back);
         assert!(!pass_under_way(&state));
@@ -1686,11 +1833,12 @@ mod review {
         let os = state.os();
         let class = small(32 << 10);
         let total = 3 << 20;
-        let mut slots = fill(&back, class, total / class.size());
+        let slots = fill(&back, class, total / class.size());
         for &p in &slots {
             paint(p, class.size(), 5);
         }
-        back.launder(class, &mut slots);
+        // SAFETY: the test holds these slots, or passes a bad one to see the abort.
+        unsafe { back.launder(class, &slots) };
         assert_eq!(back.retained(), total);
         assert!(total < retained_cap(Wide::GEOMETRY));
         os.advance_clock(DECAY_TICKS);
@@ -1715,11 +1863,12 @@ mod review {
         let state = state::<Standard>();
         let back = state.get_or_reserve().unwrap();
         let class = small(1024);
-        let mut slots = fill(&back, class, 256);
+        let slots = fill(&back, class, 256);
         for &p in &slots {
             paint(p, 1024, 5);
         }
-        back.launder(class, &mut slots);
+        // SAFETY: the test holds these slots, or passes a bad one to see the abort.
+        unsafe { back.launder(class, &slots) };
         // The pass began just now: one that stays unpublished for an interval is another
         // matter (`a_pass_whose_starter_vanished_before_publishing_ends_some_day`).
         state.os().advance_clock(7 * DECAY_TICKS);
@@ -1766,11 +1915,12 @@ mod review {
         let back = state.get_or_reserve().unwrap();
         let os = state.os();
         let class = small(1024);
-        let mut slots = fill(&back, class, 256);
+        let slots = fill(&back, class, 256);
         for &p in &slots {
             paint(p, 1024, 5);
         }
-        back.launder(class, &mut slots);
+        // SAFETY: the test holds these slots, or passes a bad one to see the abort.
+        unsafe { back.launder(class, &slots) };
         os.advance_clock(7 * DECAY_TICKS);
         let started = (7 * DECAY_TICKS) | 1;
         assert_ne!(
@@ -1815,7 +1965,8 @@ mod review {
         }
         state.purge_at.store(1, Relaxed);
         for chunk in slots.chunks_mut(64) {
-            back.launder(class, chunk);
+            // SAFETY: the test holds these slots, or passes a bad one to see the abort.
+            unsafe { back.launder(class, chunk) };
         }
         assert!(
             os.calls(Call::Purge) > 0 && back.retained_small() <= cap,
@@ -1842,7 +1993,8 @@ mod review {
         }
         let top = slots[slots.len() - 1];
         for chunk in slots.chunks_mut(64) {
-            back.launder(class, chunk);
+            // SAFETY: the test holds these slots, or passes a bad one to see the abort.
+            unsafe { back.launder(class, chunk) };
         }
         back.trim();
         let first = carved(&back, class.class(), top);

@@ -158,7 +158,8 @@ The soak's `bigmem` through the preload library, peak resident MiB, one run each
 | `grow 10 4` | 1008 | 859 | 871 |
 
 Not measured: a block written sparsely and then moved, which the piecewise copy makes
-dense; moving large blocks by remapping is planned for that.
+dense; the fix chosen is a copy that skips all-zero source pages (see the roofline note,
+section 7).
 
 ### Still open
 
