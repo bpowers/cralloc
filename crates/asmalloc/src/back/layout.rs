@@ -56,12 +56,10 @@ pub(crate) struct Layout {
     count: [u32; MAX_LEVELS],
     pages: u32,
     clean: u32,
-    clean_count: u32,
     /// Word offset of the zero bitmap, or 0 if the class has none (small classes).
     zero: u32,
     /// Word offset of the per-slot sizes, or 0 if the class has none (small classes).
     sizes: u32,
-    total: u32,
     page_shift: u8,
     huge_shift: u8,
 }
@@ -105,6 +103,16 @@ impl Memo {
             words[PACKED_WORDS - 1] = last;
             return Some(Layout::unpack(words, class));
         }
+        self.work_out(plan, class)
+    }
+
+    /// Works the layout out and keeps it: once per class per heap. Out of line, so that the
+    /// common path stays small enough for `Back::host` to inline: when it did not, every
+    /// large allocation and free copied the class's host through `memmove` (5% on a pipeline
+    /// of large objects; `docs/research/memory.md`, "Small heaps").
+    #[cold]
+    #[inline(never)]
+    fn work_out(&self, plan: Plan, class: Class) -> Option<Layout> {
         let layout = Layout::new(plan, class)?;
         let words = layout.pack();
         for (kept, &word) in self.words.iter().zip(&words).take(PACKED_WORDS - 1) {
@@ -290,10 +298,8 @@ impl Layout {
             count,
             pages,
             clean,
-            clean_count,
             zero,
             sizes,
-            total: next,
             page_shift: page_shift as u8,
             huge_shift: geometry.huge_page_size().trailing_zeros() as u8,
         })
@@ -315,10 +321,10 @@ impl Layout {
             self.count[4],
             self.pages,
             self.clean,
-            self.clean_count,
+            self.clean_words(),
             self.zero,
             self.sizes,
-            self.total,
+            self.total_words(),
         ];
         let pair = |a: u32, b: u32| a as u64 | (b as u64) << 32;
         [
@@ -352,10 +358,8 @@ impl Layout {
             count: [lo(3), hi(3), lo(4), hi(4), lo(5)],
             pages: hi(5),
             clean: lo(6),
-            clean_count: hi(6),
             zero: lo(7),
             sizes: hi(7),
-            total: lo(8),
             page_shift: (w[8] >> 40) as u8,
             huge_shift: (w[8] >> 48) as u8,
         }
@@ -405,10 +409,9 @@ impl Layout {
     }
 
     /// Words in the clean bitmap.
-    #[cfg(any(test, kani))]
     #[inline(always)]
     pub(crate) const fn clean_words(&self) -> u32 {
-        self.clean_count
+        self.pages.div_ceil(BITS)
     }
 
     /// Word offset of the size word of slot `slot`, if the class records sizes (large classes).
@@ -432,10 +435,9 @@ impl Layout {
     }
 
     /// Words of metadata the layout uses.
-    #[cfg(any(test, kani))]
     #[inline(always)]
     pub(crate) const fn total_words(&self) -> u32 {
-        self.total
+        self.offset[0] + self.count[0]
     }
 
     /// Bytes per page.
@@ -525,7 +527,7 @@ impl Layout {
     #[inline]
     pub(crate) const fn block_bytes(&self) -> usize {
         let page = self.page_size();
-        (self.total as usize * WORD_BYTES + page - 1) & !(page - 1)
+        (self.total_words() as usize * WORD_BYTES + page - 1) & !(page - 1)
     }
 
     /// The next thing a top-down purge pass looks at below page `end` (zero for the top), in a
