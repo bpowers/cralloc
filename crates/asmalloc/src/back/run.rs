@@ -54,7 +54,10 @@ impl<O: Os> Back<'_, O> {
                 self.unclaim_run(first, regions, regions);
                 return None;
             }
-            let _ = self.space.advise_huge(start, len, HugePages::Prefer);
+            // A run is one object, often touched in part, so it gets no huge pages. The
+            // advice is given, not just left out: these regions may carry a preference from
+            // an earlier use.
+            let _ = self.space.advise_huge(start, len, HugePages::Avoid);
             self.set_run_size(start, size);
             return Some(start);
         }

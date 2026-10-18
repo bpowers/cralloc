@@ -376,6 +376,10 @@ fn runs_hold_objects_bigger_than_a_region() {
     let page = back.space().plan().geometry().page_size();
     assert_eq!(back.usable_size(ptr.as_ptr()), Some(3 * region + page));
     assert!(state.os().is_writable(ptr, 4 * region));
+    // A run is advised against huge pages, at both ends.
+    let last = ptr.map_addr(|a| a.saturating_add(4 * region - 1));
+    assert_eq!(state.os().huge_pages(ptr), Some(HugePages::Avoid));
+    assert_eq!(state.os().huge_pages(last), Some(HugePages::Avoid));
     assert!(painted(ptr.as_ptr(), 4 * region, 0));
     paint(ptr.as_ptr(), 4 * region, 3);
     assert_eq!(back.lookup(ptr.as_ptr().wrapping_add(region)), None);
@@ -1152,7 +1156,6 @@ mod review {
     /// region: the pass never ends, and nothing in that region or any region below it is
     /// returned by the clock.
     #[test]
-    #[ignore = "finding: decay-walk-wedge"]
     fn a_live_slot_high_in_the_watermark_page_wedges_the_decay_walk() {
         let state = state::<Wide>();
         let back = state.get_or_reserve().unwrap();
@@ -1210,7 +1213,6 @@ mod review {
     /// threads when a claim's `unretain` runs between a free's `release` and its `retain`
     /// (`class.rs`, `release_all`): there the lost amount is a whole large slot.
     #[test]
-    #[ignore = "finding: count-drifts-up"]
     fn a_fill_from_purged_memory_leaves_bytes_counted_that_are_not_free() {
         let state = state::<Standard>();
         let back = state.get_or_reserve().unwrap();
@@ -1238,7 +1240,6 @@ mod review {
     /// The count is left over the cap with nothing free, and from then on every large free
     /// purges its slot.
     #[test]
-    #[ignore = "finding: count-drifts-up"]
     fn racing_large_frees_leave_the_large_count_over_its_cap_with_nothing_free() {
         let state = state::<Native>();
         state.get_or_reserve().unwrap();
@@ -1272,7 +1273,6 @@ mod review {
     /// own addition, so a count that hovers at the cap (or at any re-arm step) fires on every
     /// launder that crosses upward: here each one walks the whole fragmented heap for nothing.
     #[test]
-    #[ignore = "finding: cap-has-no-hysteresis"]
     fn a_count_hovering_at_the_cap_walks_the_heap_on_every_launder() {
         let state = state::<Standard>();
         let back = state.get_or_reserve().unwrap();
@@ -1314,7 +1314,6 @@ mod review {
     /// timestamp counter on most machines; a restored checkpoint) nothing decays until the
     /// counter has caught up with where it was, however long that is.
     #[test]
-    #[ignore = "finding: clock-back-stops-decay"]
     fn a_clock_that_went_back_stops_decay_until_it_catches_up() {
         let state = state::<Standard>();
         let back = state.get_or_reserve().unwrap();
@@ -1349,7 +1348,6 @@ mod review {
     /// in the design's geometry 16 MiB of 1 KiB slots, 512 MiB of 32 KiB ones. The first pass
     /// returns everything, where the design says up to a quarter.
     #[test]
-    #[ignore = "finding: decay-overshoots-goal"]
     fn a_decay_pass_over_big_slots_returns_everything_at_once() {
         let state = state::<Wide>();
         let back = state.get_or_reserve().unwrap();
@@ -1374,13 +1372,55 @@ mod review {
         );
     }
 
+    /// Finding decay-start-is-four-writes. A stepper that sees a pass under way before the
+    /// starter has published its goal must not take the pass word left by the last pass (its
+    /// goal met, so zero) for this one's and end the new pass. The window is set up by hand:
+    /// a decay word that says a pass began, and the pass word of an earlier pass.
+    #[test]
+    fn a_stepper_does_not_end_a_pass_whose_goal_is_not_published() {
+        use super::super::purge::Pass;
+        use core::sync::atomic::Ordering::Relaxed;
+        let state = state::<Standard>();
+        let back = state.get_or_reserve().unwrap();
+        let class = small(1024);
+        let mut slots = fill(&back, class, 256);
+        for &p in &slots {
+            paint(p, 1024, 5);
+        }
+        back.launder(class, &mut slots);
+        let started = (7 * DECAY_TICKS) | 1;
+        let stale = Pass {
+            tag: Pass::tag_of(started) ^ 1,
+            lap: 0,
+            pages: 0,
+        };
+        state.pass.store(stale.pack(), Relaxed);
+        state.decay.store(started, Relaxed);
+        beat(&back);
+        assert_eq!(
+            state.decay.load(Relaxed),
+            started,
+            "a stepper ended a pass it had no goal for"
+        );
+        assert_eq!(state.os().calls(Call::Purge), 0);
+        // The starter publishes; the pass now runs and ends.
+        let goal = Pass {
+            tag: Pass::tag_of(started),
+            lap: state.laps.load(Relaxed) as u16,
+            pages: 16,
+        };
+        state.pass.store(goal.pack(), Relaxed);
+        beat(&back);
+        assert!(!pass_under_way(&state));
+        assert_eq!(state.os().calls(Call::Purge), 16);
+    }
+
     /// Finding top-up-creeps. For a class whose size does not divide a huge page, `top_up`
     /// carves through the slot that straddles the page's end, which leaves the watermark just
     /// inside the next huge page with one free slot below it. The next pass over the region
     /// takes that for a watermark page worth purging and carves all of it too, though it was
     /// never touched, and so on until a huge-page boundary that the size divides.
     #[test]
-    #[ignore = "finding: top-up-creeps"]
     fn topping_up_a_straddled_huge_page_carves_untouched_ones_on_later_passes() {
         let state = state::<Native>();
         let back = state.get_or_reserve().unwrap();
