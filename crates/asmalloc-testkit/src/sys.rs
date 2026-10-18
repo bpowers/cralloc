@@ -5,6 +5,16 @@ use core::ffi::{c_int, c_void};
 use std::time::{Duration, Instant};
 
 unsafe extern "C" {
+    fn pthread_attr_init(attr: *mut ThreadAttr) -> c_int;
+    fn pthread_attr_setstacksize(attr: *mut ThreadAttr, size: usize) -> c_int;
+    fn pthread_attr_destroy(attr: *mut ThreadAttr) -> c_int;
+    fn pthread_create(
+        thread: *mut usize,
+        attr: *const ThreadAttr,
+        start: extern "C" fn(*mut c_void) -> *mut c_void,
+        arg: *mut c_void,
+    ) -> c_int;
+    fn pthread_join(thread: usize, value: *mut *mut c_void) -> c_int;
     fn fork() -> c_int;
     fn pipe2(fds: *mut c_int, flags: c_int) -> c_int;
     fn read(fd: c_int, buf: *mut c_void, n: usize) -> isize;
@@ -139,5 +149,123 @@ fn decode(status: c_int) -> Exit {
         Exit::Code((status >> 8) & 0xff)
     } else {
         Exit::Signal(sig)
+    }
+}
+
+/// Room for the C library's `pthread_attr_t`, which is 56 bytes on x86-64 Linux with glibc and
+/// with musl.
+#[repr(C, align(8))]
+struct ThreadAttr([u8; 64]);
+
+/// The stack of a child's thread: what the standard library gives its own.
+const STACK: usize = 2 << 20;
+
+/// What a thread of [`ChildThreads`] runs.
+type Job<'s> = Box<dyn FnOnce() + Send + 's>;
+
+/// Threads for the child of a fork, made with `pthread_create` and not by the standard
+/// library.
+///
+/// The standard library takes a process-wide lock when a thread it made starts and again when
+/// it ends (the registry of stacks for its stack-overflow handler). A fork while a thread of
+/// the parent holds that lock leaves it locked in the child for ever, and every thread the
+/// child then makes through the standard library waits on it before running a line of its
+/// closure. The parent of the kit's fork test starts and ends threads all the time, so about
+/// one fork in thirty on a busy machine did that, and the child hung. The C library's own
+/// thread state is made good by its `fork`.
+///
+/// Like `std::thread::scope`: every thread is joined before [`ChildThreads::scope`] returns, so
+/// a thread may borrow from the caller, and a panic on a thread is raised again from `scope`.
+pub struct ChildThreads {
+    handles: std::sync::Mutex<Vec<usize>>,
+    panicked: std::sync::atomic::AtomicBool,
+}
+
+/// A job and the scope to tell if it panics.
+struct Start {
+    job: Job<'static>,
+    panicked: *const std::sync::atomic::AtomicBool,
+}
+
+extern "C" fn start(arg: *mut c_void) -> *mut c_void {
+    // SAFETY: `arg` is the box `spawn` leaked for this thread alone.
+    let start = unsafe { Box::from_raw(arg.cast::<Start>()) };
+    let Start { job, panicked } = *start;
+    if std::panic::catch_unwind(std::panic::AssertUnwindSafe(job)).is_err() {
+        // SAFETY: the scope joins this thread before it goes away.
+        unsafe { &*panicked }.store(true, std::sync::atomic::Ordering::Release);
+    }
+    std::ptr::null_mut()
+}
+
+impl ChildThreads {
+    /// Runs `f`, which may start threads, and returns once all of them have ended, those
+    /// started by other threads included. Panics if a thread panicked.
+    pub fn scope<R>(f: impl for<'s> FnOnce(&'s ChildThreads) -> R) -> R {
+        /// Joins on the way out, by a panic too: the threads borrow from the caller.
+        struct Join<'a>(&'a ChildThreads);
+        impl Drop for Join<'_> {
+            fn drop(&mut self) {
+                // A thread adds the threads it starts before it ends, so the list is empty
+                // only when no thread is left to add to it.
+                loop {
+                    let next = self.0.lock().pop();
+                    let Some(handle) = next else { break };
+                    // SAFETY: a thread `pthread_create` made, joined once.
+                    unsafe { pthread_join(handle, std::ptr::null_mut()) };
+                }
+            }
+        }
+        let threads = ChildThreads {
+            handles: std::sync::Mutex::new(Vec::new()),
+            panicked: std::sync::atomic::AtomicBool::new(false),
+        };
+        let result = {
+            let _join = Join(&threads);
+            f(&threads)
+        };
+        assert!(
+            !threads.panicked.load(std::sync::atomic::Ordering::Acquire),
+            "a thread of the child panicked"
+        );
+        result
+    }
+
+    fn lock(&self) -> std::sync::MutexGuard<'_, Vec<usize>> {
+        self.handles
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    /// Starts a thread that runs `job`. Panics if the thread cannot be made.
+    pub fn spawn<'s>(&'s self, job: Job<'s>) {
+        // SAFETY: only the lifetime changes. The job runs on a thread that `scope` joins
+        // before it returns, and `&'s self` is a borrow `scope` handed out, so everything the
+        // job borrows outlives its run.
+        let job = unsafe { std::mem::transmute::<Job<'s>, Job<'static>>(job) };
+        let arg = Box::into_raw(Box::new(Start {
+            job,
+            panicked: &self.panicked,
+        }));
+        let mut attr = ThreadAttr([0; 64]);
+        let mut handle = 0usize;
+        // The list is locked across the call so that the joiner cannot find it empty between
+        // this thread's creation and its entry.
+        let mut handles = self.lock();
+        // SAFETY: `attr` has room for the C library's attribute object and is initialized
+        // before use and destroyed after; `start` takes back the box that `arg` leaks.
+        let rc = unsafe {
+            pthread_attr_init(&mut attr);
+            pthread_attr_setstacksize(&mut attr, STACK);
+            let rc = pthread_create(&mut handle, &attr, start, arg.cast());
+            pthread_attr_destroy(&mut attr);
+            rc
+        };
+        if rc != 0 {
+            // SAFETY: no thread was made, so the box is still this thread's.
+            drop(unsafe { Box::from_raw(arg) });
+            panic!("pthread_create failed: {rc}");
+        }
+        handles.push(handle);
     }
 }
