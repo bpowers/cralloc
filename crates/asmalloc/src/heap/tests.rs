@@ -770,6 +770,7 @@ fn blocks_have_one_owner_while_threads_churn_and_the_clock_runs() {
             tagged_churn(
                 &heap,
                 if cfg!(miri) { 3 } else { 10 },
+                0,
                 if cfg!(miri) { 200 } else { 50_000 },
             );
             done.store(true, std::sync::atomic::Ordering::Relaxed);
