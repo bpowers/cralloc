@@ -23,14 +23,13 @@ pub const SPARE_BUDGET: usize = 1 << 20;
 
 /// The most magazines one spare stack holds, by default.
 ///
-/// One covers a thread oscillating around a magazine boundary, which is what spares are for.
-/// Deeper stacks fill only on a CPU whose traffic in a class goes one way, and that CPU never
-/// takes them back: a CPU that only allocates keeps empty magazines it will never fill, and one
-/// that only frees keeps full ones it will never empty, while the other side makes new
-/// magazines or fills from the bitmaps. At four, those cost a four-to-four mpmc 0.5 MiB of the
-/// 1.9 MiB it was over jemalloc; at one, no job measured was slower (`docs/research/memory.md`,
-/// "Small heaps").
-pub const MAX_SPARES: usize = 1;
+/// A thread that allocates and frees in bursts of a few magazines stays out of the depot
+/// with a stack this deep; at one or two, sh8bench on sixteen threads is a few percent
+/// slower. The price falls on a CPU whose traffic in a class goes one way: it fills a stack
+/// it does not take back, a CPU that only allocates with empty magazines and one that only
+/// frees with full ones, until the sweep moves them on. That is about 0.5 MiB of a
+/// four-to-four mpmc's peak (`docs/research/memory.md`, "Small heaps").
+pub const MAX_SPARES: usize = 4;
 
 /// How many magazines a CPU's spare stack of this kind may hold for `class`: for magazines
 /// with objects, as many as fit in the class's share of the budget; for empty ones, which hold
