@@ -10,6 +10,10 @@
 //! behind `Asmalloc`, the handle a program installs with `#[global_allocator]`, and behind
 //! `SimAsmalloc` and `SimHeap` (feature `sim`), the same heap over the simulated OS with twins.
 //!
+//! `Asmalloc` does not exist under Miri, which cannot run its routines or system calls: a
+//! program checked under Miri puts `#[cfg(not(miri))]` on its `#[global_allocator]` and gets
+//! Miri's own allocator.
+//!
 //! A shared object that contains the allocator must be linked `-z nodelete`, as the preload
 //! library is: unloading one kills the process, because a thread's restartable-sequence area
 //! goes on naming code inside it.
@@ -43,7 +47,7 @@ pub mod os;
 pub mod space;
 pub mod stats;
 
-#[cfg(any(miri, all(target_os = "linux", target_arch = "x86_64", not(kani))))]
+#[cfg(all(target_os = "linux", target_arch = "x86_64", not(miri), not(kani)))]
 pub use heap::Asmalloc;
 #[cfg(any(test, feature = "sim"))]
 pub use heap::{SimAsmalloc, SimHeap};
