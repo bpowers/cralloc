@@ -21,7 +21,7 @@
 //!   whole regions. [`Back::lookup`] and [`Back::usable_size`] find what an address is.
 //! - [`Back::heartbeat`] does one bounded step of the clocked pass that returns free memory to
 //!   the OS, and [`Back::trim`] returns everything it can. Fills and large allocations that
-//!   take fresh memory purge toward the retained cap (`purge`); a free purges nothing but a
+//!   carve purge toward the retained cap (`purge`); a free purges nothing but a
 //!   large slot advised for huge pages.
 //!
 //! Every change to shared state is one atomic instruction, and all-zero state means an empty
@@ -79,7 +79,7 @@ pub struct State<O: Os> {
     /// Bytes of free slots in the bitmaps believed to be resident. Signed: a subtraction may
     /// run ahead of the addition it answers; read as zero when negative.
     retained: AtomicIsize,
-    /// Bytes of fresh memory taken since a grower last checked the cap (`purge`).
+    /// Bytes carved since a grower last checked the cap (`purge`).
     growth: AtomicUsize,
     /// Where the next purge step looks: see `purge`.
     purge_at: AtomicU32,

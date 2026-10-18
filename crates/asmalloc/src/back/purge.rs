@@ -21,7 +21,8 @@
 //!
 //! **Decay** (`decay_step`, one call per heartbeat). Once an interval of the clock
 //! (`policy::DECAY_TICKS`) a pass starts at the top of the heap with a goal: a quarter of the
-//! retained count (`policy::decay_goal`), or everything above the cap if that is more. Each
+//! retained count (`policy::decay_goal`), or everything above the cap if that is more: the
+//! clock's part of the cap, for memory over it that growth has not paid for. Each
 //! heartbeat then does one bounded step of the walk until the goal is met or the walk has gone
 //! once round. The goal is in bytes and the walk stops within one unit of it,
 //! whatever the slot size. Fills take the lowest addresses, so what is being reused sits at
@@ -41,17 +42,23 @@
 //!
 //! **The cap** (`policy::retained_cap`) is enforced when the heap grows, never when it frees.
 //! A free cannot tell memory that is idle from memory about to be reused, and purging there
-//! faulted reused memory straight back. Growth is memory a fill or a large allocation makes
-//! resident that was not: slots carved past a watermark, and purged pages a claim takes
-//! (`region::Settled::fresh`). It goes on a debt (`Back::grow`). When the debt reaches a step
-//! (`policy::growth_step`), the grower takes it and, if retained memory is over the cap,
-//! purges up to the smaller of the two (`policy::growth_goal`), within
-//! `policy::PURGE_CAP_WORDS` of bitmap and one circuit of the heap from where the walk stands.
-//! The debt is cleared whatever the walk returned, so a heap whose free memory is all
-//! fragmentation pays one bounded walk per step of growth. A program that frees and reuses
-//! the same classes never grows and never purges on its own traffic; one that frees class X
-//! and then grows class Y purges X as Y grows, so resident memory stays within the cap of what
-//! is live.
+//! faulted reused memory straight back. Growth is carving: slots past a watermark, and runs.
+//! It goes on a debt (`Back::grow`). When the debt reaches a step (`policy::growth_step`),
+//! the grower takes it and, if retained memory is over the cap, purges up to the smaller of
+//! the two (`policy::growth_goal`), within `policy::PURGE_CAP_WORDS` of bitmap and one circuit
+//! of the heap from where the walk stands. The debt is cleared whatever the walk returned, so
+//! a heap whose free memory is all fragmentation pays one bounded walk per step of growth. A
+//! program that frees and reuses the same classes never grows and never purges on its own
+//! traffic; one that frees class X and then grows class Y purges X as Y grows, so resident
+//! memory stays within the cap of what is live.
+//!
+//! A claim that makes purged pages resident again is reuse, not growth, though it raises
+//! resident memory as growth does. Charging it made the allocator chase its own tail: with
+//! free memory over the cap, a purge of memory about to be reused caused a refault, which
+//! purged more of it, until the count reached the cap (a `HashMap` rebuilt in a loop made four
+//! times the `madvise` calls). The case it leaves open, a phase change into a class whose pages
+//! decay had returned, is what the decay pass's term for everything over the cap bounds, to
+//! about an interval.
 //!
 //! **The walk** goes over the regions from the highest address down, skipping regions whose
 //! class summary bit says nothing in them is free. Within a region it walks units of pages
@@ -179,8 +186,7 @@ impl<O: Os> Back<'_, O> {
         }
     }
 
-    /// Charges `bytes` of fresh memory, which a fill or a large allocation has just taken, to
-    /// the growth debt; once the debt is a step, takes it and purges as much, or what is over
+    /// Charges `bytes` that a fill or a large allocation has just carved to the growth debt; once the debt is a step, takes it and purges as much, or what is over
     /// the cap if that is less. The caller holds its slots by now, so the walk cannot take
     /// them.
     ///

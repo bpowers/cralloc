@@ -59,7 +59,7 @@ impl<O: Os> Back<'_, O> {
             // an earlier use.
             let _ = self.space.advise_huge(start, len, HugePages::Avoid);
             self.set_run_size(start, size);
-            // Fresh memory, which the retained cap charges (`purge`).
+            // Growth, which the retained cap charges (`purge`).
             self.grow(size);
             // A run is a large allocation, a slow path of its own, as `Back::alloc` says.
             self.heartbeat();

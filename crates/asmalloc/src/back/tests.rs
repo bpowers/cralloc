@@ -663,6 +663,30 @@ fn frees_and_reuse_never_purge_and_growth_pays_for_itself() {
     }
 }
 
+/// Taking purged pages back is reuse, not growth: with free memory over the cap, a class that
+/// refills from pages it gave back purges nothing, so a purge never sets off another.
+#[test]
+#[cfg_attr(miri, ignore)]
+fn reusing_purged_pages_over_the_cap_purges_nothing() {
+    let state = state::<Standard>();
+    let back = state.get_or_reserve().unwrap();
+    let os = state.os();
+    let cap = retained_cap(Standard::GEOMETRY);
+    let other = small(512);
+    let returned = fill(&back, other, cap / 512);
+    // SAFETY: the test holds these slots, or passes a bad one to see the abort.
+    unsafe { back.launder(other, &returned) };
+    assert_eq!(back.trim(), cap);
+    let class = small(1024);
+    let slots = fill(&back, class, 3 * cap / 1024);
+    // SAFETY: as above.
+    unsafe { back.launder(class, &slots) };
+    assert!(back.retained() > cap);
+    let purges = os.calls(Call::Purge);
+    assert_eq!(fill(&back, other, cap / 512), returned);
+    assert_eq!(os.calls(Call::Purge), purges);
+}
+
 /// A heap whose free memory over the cap is all fragmentation pays one bounded walk for each
 /// step of growth, and the walk purges nothing.
 #[test]

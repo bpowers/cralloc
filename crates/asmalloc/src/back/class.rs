@@ -82,7 +82,7 @@ impl<'a, O: Os> Back<'a, O> {
             return 0;
         };
         let mut got = 0;
-        let (mut resident, mut revived, mut fresh) = (0, 0, 0);
+        let (mut resident, mut revived) = (0, 0);
         let mut cursor = None;
         while got < out.len() {
             let want = (out.len() - got).min(BITS as usize) as u32;
@@ -92,7 +92,6 @@ impl<'a, O: Os> Back<'a, O> {
             let settled = region::settle(&host, taken.region, taken.word, taken.bits);
             resident += settled.resident;
             revived += settled.revived;
-            fresh += settled.fresh;
             let base = taken.word * BITS;
             let high = base + (BITS - 1 - taken.bits.leading_zeros());
             let mut bits = taken.bits;
@@ -105,6 +104,7 @@ impl<'a, O: Os> Back<'a, O> {
         }
         self.unretain(resident);
         self.retain(revived);
+        let mut carved = 0;
         while got < out.len() {
             let want = (out.len() - got).min(u32::MAX as usize) as u32;
             let Some((region, first, count)) = self.carve(&host, class.class(), want) else {
@@ -112,9 +112,9 @@ impl<'a, O: Os> Back<'a, O> {
             };
             let high = first + count - 1;
             got = self.put(host.layout(), out, got, region, high, first..first + count);
-            fresh += host.layout().slot_bytes(count);
+            carved += host.layout().slot_bytes(count);
         }
-        self.grow(fresh);
+        self.grow(carved);
         got
     }
 
@@ -284,23 +284,19 @@ impl<'a, O: Os> Back<'a, O> {
             self.abort("an allocation larger than its class");
         }
         let host = self.host(class)?;
-        let (region, slot, zeroed, fresh) = if let Some(taken) = tree::claim(&host, 1) {
+        let (region, slot, zeroed) = if let Some(taken) = tree::claim(&host, 1) {
             let settled = region::settle(&host, taken.region, taken.word, taken.bits);
             self.unretain(settled.resident);
             self.retain(settled.revived);
             let slot = taken.word * BITS + taken.bits.trailing_zeros();
-            (taken.region, slot, settled.zeroed != 0, settled.fresh)
+            (taken.region, slot, settled.zeroed != 0)
         } else {
             let (region, first, _) = self.carve(&host, class, 1)?;
-            (region, first, true, class.size())
+            // A large block makes resident at most what it asked for (one with headroom asks
+            // for the room it may grow into), however big its slot.
+            self.grow(if class.is_small() { class.size() } else { size });
+            (region, first, true)
         };
-        // A large block makes resident at most what it asked for (one with headroom asks for
-        // the room it may grow into), however big its slot.
-        self.grow(if class.is_small() {
-            fresh
-        } else {
-            fresh.min(size)
-        });
         if let Some(before) = region::recorded(&host, region, slot) {
             region::record(&host, region, slot, Recorded { size, ..before });
             // The last free could not take the slot's huge-page advice back; try again, so

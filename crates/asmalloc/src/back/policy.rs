@@ -17,7 +17,7 @@ use crate::space::Geometry;
 pub const RETAINED_CAP_HUGE_PAGES: usize = 32;
 
 /// Growth is charged against the cap in steps of this many huge pages: 1, or 2 MiB. Each step
-/// of fresh memory, while retained memory is over the cap, pays for at most one bounded purge
+/// of carving, while retained memory is over the cap, pays for at most one bounded purge
 /// walk, so a heap whose free memory is all fragmentation pays one walk per step of growth.
 /// A step costs at least a huge-page fault or 512 small ones, which dwarfs the walk.
 pub const GROWTH_STEP_HUGE_PAGES: usize = 1;
