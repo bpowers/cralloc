@@ -2,9 +2,12 @@
 //! its interfaces share.
 //!
 //! A [`Heap`] is the back end's state and the depot. The slab array belongs to the routines it
-//! is run with: the generated routines ([`crate::front::Real`]) on the static `front::SLABS` in
-//! the process's heap, or twins on a small array in a simulated heap. Everything here is
-//! generic over the routines, so the two heaps share every line but the fast-path seam.
+//! is run with: the generated routines (`front::Real`) on the static `front::SLABS` in the
+//! process's heap, or twins on a small array in a simulated heap. A [`Bound`] is a heap with its
+//! routines, made by the one `unsafe` constructor whose contract is that the two belong
+//! together. Everything that allocates or maintains the heap is a safe method of it; only frees
+//! and resizes, which take a block, are `unsafe`. Everything here is generic over the routines,
+//! so the two heaps share every line but the fast-path seam.
 //!
 //! - **Small objects** take their class from the `Layout`, with one compare and a table load
 //!   (`SmallClass::of_nonzero_layout`), which a constant layout folds to a constant. Allocation
@@ -50,7 +53,6 @@ pub(crate) use address::Found;
 #[cfg(all(target_os = "linux", target_arch = "x86_64", not(miri), not(kani)))]
 pub(crate) use address::process;
 
-use self::source::BackSource;
 use crate::back::{Back, State};
 use crate::classes::{Class, SmallClass};
 use crate::depot::{Cache, Depot};
@@ -124,12 +126,12 @@ impl<O: Os> Heap<O> {
             Some(back) => back,
             None => self.reserve()?,
         };
-        // The generated routines hand object addresses over as integers. Exposing the
-        // reservation's provenance gives every object address one to take back. Every slow
-        // path exposes it (it costs no instruction), so no thread can pop an object before
-        // some exposure it is ordered after.
-        let _ = back.space().base().expose_provenance();
-        Some(back)
+        Some(exposed(back))
+    }
+
+    /// The back end, if the heap has started, for a slow path that hands no object out.
+    fn started(&self) -> Option<Back<'_, O>> {
+        self.back.get().map(exposed)
     }
 
     /// Reserves the heap's address space, or finds the reservation another thread made. Threads
@@ -154,125 +156,128 @@ impl<O: Os> Heap<O> {
     pub(crate) fn usable_size(&self, ptr: *const u8) -> Option<usize> {
         self.back()?.usable_size(ptr)
     }
+}
+
+/// `back`, with its reservation's provenance exposed. The generated routines hand object
+/// addresses over as integers, and exposing the reservation's provenance gives every object
+/// address one to take back. Every slow path exposes it (it costs no instruction), so no thread
+/// can pop an object before some exposure it is ordered after.
+fn exposed<O: Os>(back: Back<'_, O>) -> Back<'_, O> {
+    let _ = back.space().base().expose_provenance();
+    back
+}
+
+/// A heap and the routines that write its slab array: what every interface runs on. A copy is
+/// one reference and the routines, which for the process's heap are zero-sized.
+pub(crate) struct Bound<'a, O: Os, R> {
+    heap: &'a Heap<O>,
+    routines: R,
+}
+
+impl<O: Os, R: Copy> Clone for Bound<'_, O, R> {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+
+impl<O: Os, R: Copy> Copy for Bound<'_, O, R> {}
+
+impl<'a, O: Os, R: Routines + Copy> Bound<'a, O, R> {
+    /// `heap`, run with `routines`.
+    ///
+    /// # Safety
+    ///
+    /// The slab array of `routines` belongs to `heap`: while either is used, it is used with no
+    /// other heap, and nothing writes it but `routines` and `heap`'s own slow paths and drains.
+    /// Its words then name only `heap`'s magazines, as `Cache::new` asks. Ledger: HEAP-02.
+    #[inline(always)]
+    pub(crate) const unsafe fn new(heap: &'a Heap<O>, routines: R) -> Self {
+        Bound { heap, routines }
+    }
+
+    /// The heap.
+    #[inline(always)]
+    pub(crate) fn heap(self) -> &'a Heap<O> {
+        self.heap
+    }
+
+    /// The caches and the depot as this thread sees them, over `back`, this heap's back end.
+    fn cache<'s>(self, back: &'s Back<'a, O>) -> Cache<'s, O, R, Back<'a, O>> {
+        // SAFETY: HEAP-02. The depot and the back end are the two halves of one `Heap`, whose
+        // state publishes one space for its whole life, and the routines' slab array belongs
+        // to this heap by the constructor's contract.
+        unsafe { Cache::new(&self.heap.depot, back.space(), self.routines, back) }
+    }
 
     /// Walks the heap for `visitor` (`crate::stats`): read-only, and a racy snapshot beside
-    /// running threads. Reports nothing before the heap has started. `slabs` is the slab array
-    /// this heap is run with.
-    pub(crate) fn inspect(
-        &self,
-        slabs: &crate::front::Slabs,
-        visitor: &mut impl crate::stats::Visitor,
-    ) {
-        if let Some(back) = self.back() {
+    /// running threads. Reports nothing before the heap has started.
+    pub(crate) fn inspect(self, visitor: &mut impl crate::stats::Visitor) {
+        if let Some(back) = self.heap.back() {
             back.inspect(visitor);
-            crate::depot::inspect(&self.depot, back.space(), slabs, visitor);
+            crate::depot::inspect(
+                &self.heap.depot,
+                back.space(),
+                self.routines.slabs(),
+                visitor,
+            );
         }
     }
 
     /// Allocates a block for `layout`; null if there is no memory.
-    ///
-    /// # Safety
-    ///
-    /// The slab array of `routines` is used only with this heap (`Cache::new`'s contract).
     #[inline(always)]
-    pub(crate) unsafe fn alloc<R: Routines + Copy>(&self, routines: R, layout: Layout) -> *mut u8 {
+    pub(crate) fn alloc(self, layout: Layout) -> *mut u8 {
         match SmallClass::of_nonzero_layout(layout) {
-            // SAFETY: passed through from the caller.
-            Some(class) => unsafe { self.alloc_small(routines, class) },
-            // SAFETY: passed through from the caller.
-            None => unsafe { self.alloc_other(routines, layout) },
+            Some(class) => self.alloc_small(class),
+            None => self.alloc_other(layout),
         }
     }
 
     /// Allocates an object of a small class: the pop routine, and its slow path on a miss.
-    ///
-    /// # Safety
-    ///
-    /// As for [`Heap::alloc`].
     #[inline(always)]
-    unsafe fn alloc_small<R: Routines + Copy>(&self, routines: R, class: SmallClass) -> *mut u8 {
-        match routines.pop(class) {
+    fn alloc_small(self, class: SmallClass) -> *mut u8 {
+        match self.routines.pop(class) {
             Some(object) => object.as_ptr(),
-            // SAFETY: passed through from the caller.
-            None => unsafe { self.alloc_slow(routines, class) },
+            None => self.alloc_slow(class),
         }
     }
 
     /// A request the inlined lookup turns away: a large one, or one of zero bytes, which has a
     /// small class.
-    ///
-    /// # Safety
-    ///
-    /// As for [`Heap::alloc`].
     #[cold]
     #[inline(never)]
-    unsafe fn alloc_other<R: Routines + Copy>(&self, routines: R, layout: Layout) -> *mut u8 {
+    fn alloc_other(self, layout: Layout) -> *mut u8 {
         match small(layout) {
-            // SAFETY: passed through from the caller.
-            Some(class) => unsafe { self.alloc_small(routines, class) },
-            // SAFETY: passed through from the caller.
-            None => unsafe { self.alloc_large_slow(routines, layout, Zero::No) }
+            Some(class) => self.alloc_small(class),
+            None => self
+                .alloc_large_slow(layout, Zero::No)
                 .map_or(ptr::null_mut(), |grant| grant.ptr.as_ptr()),
         }
     }
 
     /// Allocates a block for `layout` with the bytes `zero` names zeroed, and says how much of
     /// it the caller may use.
-    ///
-    /// # Safety
-    ///
-    /// As for [`Heap::alloc`].
     #[inline(always)]
-    pub(crate) unsafe fn alloc_grant<R: Routines + Copy>(
-        &self,
-        routines: R,
-        layout: Layout,
-        zero: Zero,
-    ) -> Option<Grant> {
+    pub(crate) fn alloc_grant(self, layout: Layout, zero: Zero) -> Option<Grant> {
         match SmallClass::of_nonzero_layout(layout) {
-            // SAFETY: passed through from the caller.
-            Some(class) => unsafe { self.grant_small(routines, class, layout, zero) },
-            // SAFETY: passed through from the caller.
-            None => unsafe { self.grant_other(routines, layout, zero) },
+            Some(class) => self.grant_small(class, layout, zero),
+            None => self.grant_other(layout, zero),
         }
     }
 
-    /// [`Heap::alloc_grant`] for a request the inlined lookup turns away.
-    ///
-    /// # Safety
-    ///
-    /// As for [`Heap::alloc`].
+    /// [`Bound::alloc_grant`] for a request the inlined lookup turns away.
     #[cold]
     #[inline(never)]
-    unsafe fn grant_other<R: Routines + Copy>(
-        &self,
-        routines: R,
-        layout: Layout,
-        zero: Zero,
-    ) -> Option<Grant> {
+    fn grant_other(self, layout: Layout, zero: Zero) -> Option<Grant> {
         match small(layout) {
-            // SAFETY: passed through from the caller.
-            Some(class) => unsafe { self.grant_small(routines, class, layout, zero) },
-            // SAFETY: passed through from the caller.
-            None => unsafe { self.alloc_large_slow(routines, layout, zero) },
+            Some(class) => self.grant_small(class, layout, zero),
+            None => self.alloc_large_slow(layout, zero),
         }
     }
 
-    /// [`Heap::alloc_grant`] of an object of a small class.
-    ///
-    /// # Safety
-    ///
-    /// As for [`Heap::alloc`].
+    /// [`Bound::alloc_grant`] of an object of a small class.
     #[inline(always)]
-    unsafe fn grant_small<R: Routines + Copy>(
-        &self,
-        routines: R,
-        class: SmallClass,
-        layout: Layout,
-        zero: Zero,
-    ) -> Option<Grant> {
-        // SAFETY: passed through from the caller.
-        let ptr = NonNull::new(unsafe { self.alloc_small(routines, class) })?;
+    fn grant_small(self, class: SmallClass, layout: Layout, zero: Zero) -> Option<Grant> {
+        let ptr = NonNull::new(self.alloc_small(class))?;
         let len = class.size();
         let zeroed = match zero {
             Zero::No => 0,
@@ -292,23 +297,19 @@ impl<O: Os> Heap<O> {
     ///
     /// # Safety
     ///
-    /// As for [`Heap::alloc`]; and `ptr` is a block this heap handed out that the caller owns and
-    /// gives up, described by `layout`: the layout it was allocated with, or one whose size lies
-    /// between that and the length the heap returned, with the same alignment.
+    /// `ptr` is a block this heap handed out that the caller owns and gives up, described by
+    /// `layout`: the layout it was allocated with, or one whose size lies between that and the
+    /// length the heap returned, with the same alignment.
     #[inline(always)]
-    pub(crate) unsafe fn dealloc<R: Routines + Copy>(
-        &self,
-        routines: R,
-        ptr: *mut u8,
-        layout: Layout,
-    ) {
+    pub(crate) unsafe fn dealloc(self, ptr: *mut u8, layout: Layout) {
         // SAFETY: HEAP-01.
         let object = unsafe { NonNull::new_unchecked(ptr) };
         match SmallClass::of_nonzero_layout(layout) {
-            // SAFETY: passed through from the caller.
-            Some(class) => unsafe { self.free_small(routines, class, object) },
-            // SAFETY: passed through from the caller.
-            None => unsafe { self.dealloc_other(routines, object, layout) },
+            // SAFETY: a small block is a slot of its layout's class, and every layout that
+            // describes it has that class (the fit rule), so the block is of `class`.
+            Some(class) => unsafe { self.free_small(class, object) },
+            // SAFETY: the block is the caller's, described by `layout`, and not null.
+            None => unsafe { self.dealloc_other(object, layout) },
         }
     }
 
@@ -316,60 +317,40 @@ impl<O: Os> Heap<O> {
     ///
     /// # Safety
     ///
-    /// As for [`Heap::dealloc`], `object` being of `class`.
+    /// `object` is a block of `class` this heap handed out, which the caller owns and gives up.
     #[inline(always)]
-    unsafe fn free_small<R: Routines + Copy>(
-        &self,
-        routines: R,
-        class: SmallClass,
-        object: NonNull<u8>,
-    ) {
-        if !routines.push(class, object) {
-            // SAFETY: passed through from the caller.
-            unsafe { self.free_slow(routines, class, object) }
+    unsafe fn free_small(self, class: SmallClass, object: NonNull<u8>) {
+        if !self.routines.push(class, object) {
+            // SAFETY: a push that misses stores nothing, so the block is still the caller's.
+            unsafe { self.free_slow(class, object) }
         }
     }
 
-    /// [`Heap::dealloc`] for a layout the inlined lookup turns away.
+    /// [`Bound::dealloc`] for a layout the inlined lookup turns away.
     ///
     /// # Safety
     ///
-    /// As for [`Heap::dealloc`].
+    /// As for [`Bound::dealloc`].
     #[cold]
     #[inline(never)]
-    unsafe fn dealloc_other<R: Routines + Copy>(
-        &self,
-        routines: R,
-        object: NonNull<u8>,
-        layout: Layout,
-    ) {
+    unsafe fn dealloc_other(self, object: NonNull<u8>, layout: Layout) {
         match small(layout) {
-            // SAFETY: passed through from the caller.
-            Some(class) => unsafe { self.free_small(routines, class, object) },
-            // SAFETY: passed through from the caller.
-            None => unsafe { self.free_large_slow(routines, object) },
+            // SAFETY: as in `dealloc`, the layout's small class is the block's.
+            Some(class) => unsafe { self.free_small(class, object) },
+            // SAFETY: a layout with no small class describes a large block (GLOBAL-03), which
+            // the caller gives up.
+            None => unsafe { self.free_large_slow(object) },
         }
     }
 
     /// The slow path of a small allocation: start the heap if need be, then exchange magazines.
-    ///
-    /// # Safety
-    ///
-    /// As for [`Heap::alloc`].
     #[cold]
     #[inline(never)]
-    pub(crate) unsafe fn alloc_slow<R: Routines + Copy>(
-        &self,
-        routines: R,
-        class: SmallClass,
-    ) -> *mut u8 {
-        let Some(back) = self.start() else {
+    pub(crate) fn alloc_slow(self, class: SmallClass) -> *mut u8 {
+        let Some(back) = self.heap.start() else {
             return ptr::null_mut();
         };
-        let source = BackSource(back);
-        // SAFETY: HEAP-02.
-        let cache = unsafe { Cache::new(&self.depot, back.space(), routines, &source) };
-        cache
+        self.cache(&back)
             .alloc_slow(class)
             .map_or(ptr::null_mut(), NonNull::as_ptr)
     }
@@ -378,61 +359,45 @@ impl<O: Os> Heap<O> {
     ///
     /// # Safety
     ///
-    /// As for [`Heap::dealloc`].
+    /// `object` is a block of `class` this heap handed out, which the caller owns and gives up.
     #[cold]
     #[inline(never)]
-    pub(crate) unsafe fn free_slow<R: Routines + Copy>(
-        &self,
-        routines: R,
-        class: SmallClass,
-        object: NonNull<u8>,
-    ) {
-        let Some(back) = self.back() else {
-            self.os().abort("free of a block when no heap exists");
+    pub(crate) unsafe fn free_slow(self, class: SmallClass, object: NonNull<u8>) {
+        let Some(back) = self.heap.started() else {
+            self.heap.os().abort("free of a block when no heap exists");
         };
-        let _ = back.space().base().expose_provenance();
-        let source = BackSource(back);
-        // SAFETY: HEAP-02.
-        let cache = unsafe { Cache::new(&self.depot, back.space(), routines, &source) };
-        cache.free_slow(class, object);
+        self.cache(&back).free_slow(class, object);
     }
 
     /// The heartbeat of a slow path that served no small class: a large allocation or free.
-    ///
-    /// # Safety
-    ///
-    /// As for [`Heap::alloc`].
     #[cold]
     #[inline(never)]
-    pub(crate) unsafe fn heartbeat<R: Routines + Copy>(&self, routines: R) {
-        let Some(back) = self.back() else {
-            return;
-        };
-        let _ = back.space().base().expose_provenance();
-        let source = BackSource(back);
-        // SAFETY: HEAP-02.
-        let cache = unsafe { Cache::new(&self.depot, back.space(), routines, &source) };
-        cache.maintain();
+    pub(crate) fn heartbeat(self) {
+        if let Some(back) = self.heap.started() {
+            self.cache(&back).maintain();
+        }
     }
 
     /// Returns everything that can be returned now: drains every slab a slow path has used
     /// (the caller's own through its routines), launders every depot stack, then purges every
     /// wholly free page. Returns the bytes purged that had been resident, as the back end
     /// counts them. Nothing before the heap has started.
-    ///
-    /// # Safety
-    ///
-    /// As for [`Heap::alloc`].
-    pub(crate) unsafe fn collect<R: Routines + Copy>(&self, routines: R) -> usize {
-        let Some(back) = self.back() else {
+    pub(crate) fn collect(self) -> usize {
+        let Some(back) = self.heap.started() else {
             return 0;
         };
-        let _ = back.space().base().expose_provenance();
-        let source = BackSource(back);
-        // SAFETY: HEAP-02.
-        let cache = unsafe { Cache::new(&self.depot, back.space(), routines, &source) };
-        cache.collect();
+        self.cache(&back).collect();
         back.trim()
+    }
+
+    /// Drains the slab of CPU number `cpu` now, as the heartbeat's idle check would once it had
+    /// been quiet for an interval, and says how the drain ended. `None` if the heap has not
+    /// started or the slab array has no such CPU.
+    #[cfg(any(test, feature = "sim"))]
+    pub(crate) fn drain(self, cpu: usize) -> Option<crate::depot::Drained> {
+        let back = self.heap.back()?;
+        let cpu = self.routines.slabs().cpu(i32::try_from(cpu).ok()?)?;
+        Some(self.cache(&back).drain(cpu))
     }
 }
 
