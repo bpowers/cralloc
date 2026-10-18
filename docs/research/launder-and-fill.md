@@ -318,14 +318,21 @@ the `malloc` and `free` routines 30%.
 
 ## The routines in sh8bench
 
-The generated `malloc` and `free` cost about 12 and 8.5 cycles a call here, plus 2 for the
-PLT, against 8 to 10 a pair measured in isolation. Counted per symbol with grouped hardware
-counters (branch build, CPUs 4-7 and 12-15): they retire 12 and 17 instructions a call, their
-straight-line length, so rseq aborts are rare (2,248 context switches in the whole run);
-branch mispredictions are about 0.01 a call. The difference is L1 misses: 0.32 a `malloc`
-and 0.18 a `free`, landing on the slab word load, the magazine slot load and `free`'s chain
-of the rseq offset, the published heap words and the region table. sh8bench writes every
-object it allocates and streams through more memory than L1 holds (its own loop takes 46% of
-all L1 misses), and each pair touches about six lines of allocator metadata besides the
-object, which get evicted between calls; mimalloc's free list lives in the objects the
-program is about to touch anyway. This is inference from where the misses land.
+The generated `malloc` and `free` cost about 12 and 8.5 cycles a call in the two-L3 run
+(CPUs 4-7 and 12-15), plus 2 for the PLT, against 8 to 10 a pair measured in isolation. They
+retire 12 and 17 instructions a call, their straight-line length, so rseq aborts are rare
+(2,248 context switches in the whole run), and branch mispredictions are about 0.01 a call.
+
+Corrected 2026-10-18 (later the same day). An earlier version of this note blamed L1 misses on
+allocator metadata, from per-symbol counts with the counters in one perf group. That was wrong:
+a group's events are all sampled at the leader's (cycles) instruction pointer, so the L1-miss
+column was cycles-weighted, not where misses happen. IBS op sampling (`perf record -d -e
+ibs_op/cnt_ctl=1/`, `perf mem report`) on CPUs 0-7 puts 2,120 of 2,148 load samples in `malloc`
+and `free` in L1 (5 in L2, 3 in L3, 20 in the fill buffer). On one L3 the pair costs
+about 11 cycles plus the PLT, near the isolated figure, and a hand-edited experiment that cut
+the metadata lines a pair touches from about seven to five changed nothing measurable in
+sh8bench, larson, mstress or xmalloc-test. On one L3 about 40% of the routines' cycles
+are dispatch slots the front end left empty (`de_no_dispatch_per_slot.no_ops_from_frontend`):
+the call and return through the PLT. What makes the two-L3 run slower is not established; magazines
+crossing between L3s through the depot (their slots and the objects they name written on the
+other L3) are the likely cause and were not measured.
