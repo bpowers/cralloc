@@ -604,6 +604,117 @@ fn large_frees_find_the_class_from_the_address() {
     assert!(!Class::of_size(40 << 10).unwrap().is_small());
 }
 
+/// Where a heap's parked objects are, by `inspect`.
+#[derive(Default, Debug)]
+struct Parked {
+    /// In loaded magazines and spares.
+    on_cpus: usize,
+    /// In the depot.
+    in_depot: usize,
+}
+
+impl crate::stats::Visitor for Parked {
+    fn cached(&mut self, place: crate::stats::Place, _: SmallClass, _: *const u8) {
+        match place {
+            crate::stats::Place::Depot => self.in_depot += 1,
+            _ => self.on_cpus += 1,
+        }
+    }
+}
+
+fn parked<S: crate::os::sim::Shape>(heap: &SimHeap<S>) -> Parked {
+    let mut seen = Parked::default();
+    heap.inspect(&mut seen);
+    seen
+}
+
+/// Allocates and frees `count` small objects of mixed sizes on each of `threads` threads, which
+/// leaves objects parked on several CPUs and in the depot.
+fn park<H: GlobalAlloc + Sync>(heap: &H, threads: usize, count: usize) {
+    thread::scope(|scope| {
+        for t in 0..threads {
+            scope.spawn(move || {
+                let blocks: Vec<_> = (0..count)
+                    .map(|i| {
+                        let l = layout(8 + (i * 7 + t) % 600, 8);
+                        // SAFETY: a valid layout.
+                        let p = unsafe { heap.alloc(l) };
+                        assert!(!p.is_null());
+                        (p, l)
+                    })
+                    .collect();
+                for (p, l) in blocks {
+                    // SAFETY: allocated above with this layout, freed once.
+                    unsafe { heap.dealloc(p, l) };
+                }
+            });
+        }
+    });
+}
+
+#[test]
+fn collect_leaves_nothing_parked_and_returns_the_free_pages() {
+    let heap = SimHeap::<Shape>::new();
+    park(&heap, 4, if cfg!(miri) { 300 } else { 3000 });
+    let before = parked(&heap);
+    assert!(before.on_cpus > 0 && before.in_depot > 0, "{before:?}");
+    let purged = heap.collect();
+    let after = parked(&heap);
+    assert_eq!((after.on_cpus, after.in_depot), (0, 0), "{after:?}");
+    assert!(purged > 0, "nothing was purged");
+    // The heap goes on serving.
+    park(&heap, 2, 100);
+}
+
+#[test]
+fn large_allocations_and_frees_run_the_heartbeat() {
+    let heap = SimHeap::<Shape>::new();
+    let small = layout(64, 8);
+    // SAFETY: valid layouts; each block is freed once.
+    unsafe {
+        let blocks: Vec<_> = (0..100).map(|_| heap.alloc(small)).collect();
+        for p in blocks {
+            heap.dealloc(p, small);
+        }
+    }
+    assert!(parked(&heap).on_cpus > 0);
+    heap.os().advance_clock(2 * crate::depot::IDLE_TICKS);
+    // Only large blocks from here: their heartbeats take the magazines that have been loaded
+    // for an interval, and the spares of classes left with none loaded, a class at a time.
+    let large = layout(64 << 10, 8);
+    for _ in 0..400 {
+        // SAFETY: as above.
+        unsafe { heap.dealloc(heap.alloc(large), large) };
+    }
+    assert_eq!(parked(&heap).on_cpus, 0, "{:?}", parked(&heap));
+}
+
+/// As `blocks_have_one_owner_while_threads_churn_and_drains_run`, with the clock moving an
+/// interval every few milliseconds, so that the age limit's takes, the depot's sheds and the
+/// idle check's drains all run among the churn.
+#[test]
+fn blocks_have_one_owner_while_threads_churn_and_the_clock_runs() {
+    let rounds = if cfg!(miri) { 1 } else { 4 };
+    for _ in 0..rounds {
+        let heap = SimHeap::<crate::os::sim::Standard>::new();
+        let done = std::sync::atomic::AtomicBool::new(false);
+        thread::scope(|scope| {
+            scope.spawn(|| {
+                while !done.load(std::sync::atomic::Ordering::Relaxed) {
+                    heap.os().advance_clock(crate::depot::IDLE_TICKS / 4);
+                    thread::sleep(std::time::Duration::from_millis(1));
+                }
+            });
+            tagged_churn(
+                &heap,
+                if cfg!(miri) { 3 } else { 10 },
+                if cfg!(miri) { 200 } else { 50_000 },
+            );
+            done.store(true, std::sync::atomic::Ordering::Relaxed);
+        });
+    }
+}
+
 #[cfg(all(target_os = "linux", target_arch = "x86_64", not(miri)))]
 mod process {
     use super::*;
@@ -644,6 +755,16 @@ mod process {
     #[test]
     fn the_process_heap_serves_threads() {
         threads(&Asmalloc, 20_000);
+    }
+
+    /// Collect drains the process heap's slabs with real fences while other tests use it; the
+    /// heap must go on serving everyone.
+    #[test]
+    fn the_process_heap_collects_and_goes_on() {
+        bursts(&Asmalloc, 64, 600, 4);
+        let _ = Asmalloc::collect();
+        every_class(&Asmalloc, 1);
+        let _ = Asmalloc::collect();
     }
 
     #[test]

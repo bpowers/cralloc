@@ -1,8 +1,9 @@
 //! The heartbeat: the bounded maintenance every slow path does before it returns.
 //!
-//! A large allocation or free counts as a slow path ([`Cache::maintain`]). There is no
-//! background thread and no timer, so maintenance happens at a rate set by allocation activity,
-//! in units small enough that no single call pays much. The clock is read once per heartbeat.
+//! A large allocation or free counts as a slow path ([`Cache::maintain`]; the back end takes
+//! its purge step itself). There is no background thread and no timer, so maintenance happens
+//! at a rate set by allocation activity, in units small enough that no single call pays much.
+//! The clock is read once per heartbeat.
 //!
 //! - **Launder over target.** If the depot stack of the class just served holds more than its
 //!   target, one magazine is popped and its objects go back to the source; the empty magazine
@@ -169,14 +170,18 @@ pub(super) struct Chores {
     pub(super) installed: Option<MagazineId>,
     /// It popped a magazine from the depot stack of the class it served.
     pub(super) popped: bool,
+    /// Its purge step is already taken.
+    pub(super) purged: bool,
 }
 
 impl<O: Os, R: Routines, S: Source> Cache<'_, O, R, S> {
     /// The heartbeat of a slow path that served no small class: a large allocation or free,
-    /// which counts as a slow path of the CPU the thread is on.
+    /// which counts as a slow path of the CPU the thread is on. All but the purge step, which
+    /// the back end takes inside a large allocation or free itself.
     pub fn maintain(&self) {
         let chores = Chores {
             cpu: self.routines.cpu(),
+            purged: true,
             ..Chores::default()
         };
         self.heartbeat(None, chores);
@@ -216,7 +221,9 @@ impl<O: Os, R: Routines, S: Source> Cache<'_, O, R, S> {
         {
             self.age_look(cpu, class, now);
         }
-        self.source.purge_step();
+        if !chores.purged {
+            self.source.purge_step();
+        }
         if !generation::drains_enabled(self.depot) {
             return;
         }
