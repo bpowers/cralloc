@@ -557,8 +557,9 @@ it means the new size is still large and fits the slot. Anything else moves the 
   exports that takes or returns a block. `free(p)` reads the class from the address table
   and joins the same path as a Rust free. A pointer outside the heap is a caller's bug and
   aborts the process. `malloc_usable_size` reports the class size of a small object and,
-  for a large one, its recorded size rounded up to a page; a `realloc` that moves a block
-  copies that much, because callers write into the room they are told they have.
+  for a large one, its recorded size rounded up to a page. Callers write into the room
+  they are told they have, so a `realloc` that moves a block copies that much and `calloc`
+  zeroes that much.
   `realloc(p, 0)` frees `p` and returns null, as glibc does.
 - **C++**: the replaceable forms of `operator new` and `operator delete`, so that C++
   allocates without a detour through `malloc` and sized deletes arrive with their size. A
