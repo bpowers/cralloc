@@ -71,13 +71,23 @@ result is a block the program's `new` made, which the caller frees with the prog
 **Precondition** (SEAM-01). `object` starts a slot of `class` that the heap handed out, owned
 by the caller and given up.
 
-**Proof.** `release` is reached only when the program has not replaced the basic `delete` of
-the family (`DELETE`, `DELETE_ALIGNED`), so every `new` of the process that pairs with this
-`delete` is ours or the C++ runtime's default, whose blocks come from `malloc` and
-`aligned_alloc`, ours too under the C interface the macro requires (CXX-EXPORT-01). The
-`delete`'s contract then says `ptr` is null or a block of the heap the caller owns and gives
-up, and with `find` returning `Small(class)` the proof is SEAM-02's. A pointer `find` does not
-know is not freed by us at all (CXX-07).
+**Status: switched off, and not proved for the arrangements that switched it off.** Nothing
+exports the `delete` forms that reach `release`, so in a running program this block is not
+reached. The argument it rested on was that when the first basic `delete` in the process is
+ours, every `new` that pairs with our `delete` is ours or the C++ runtime's default (whose
+blocks come from our `malloc`). That is false: a library looked up after ours that defines
+`operator new` and `delete` (`libgccpp`, `liblib_new.so` in the preload tests) gets the
+program's `new`, because we export no throwing `new`, while our `delete` comes first. Its
+blocks then reach `release`, where a pointer into our heap with a header in front
+(`malloc(n + 16) + 16`) is not one `find` can tell from ours.
+
+**What must hold before it is switched on.** Every replaceable form exported, the throwing
+`new` forms included, so that the `new` and `delete` a program binds to come from the same
+object. And replacement decided by `new`, not `delete`: if the first `operator new` the
+program binds to is not ours, the program (or a library before ours) replaced the operators,
+and every `delete` of ours must forward to the replacement. Then a pointer that reaches
+`release` came from one of our `new` forms, a block of the heap the caller owns and gives up,
+and with `find` returning `Small(class)` the proof is SEAM-02's.
 
 ## CXX-07: the calls to the program's `operator delete` and `free`
 

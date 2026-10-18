@@ -100,9 +100,9 @@ g++ -O2 -pthread -std=c++20 -o "$bin/cxx-containers" "$programs/cxx_containers.c
 g++ -O2 -std=c++20 -o "$bin/cxx-operators" "$programs/cxx_operators.cpp" || exit 1
 g++ -O2 -std=c++20 -o "$bin/own-malloc" "$programs/own_malloc.cpp" || exit 1
 g++ -O2 -std=c++20 -o "$bin/own-new" "$programs/own_new.cpp" || exit 1
-g++ -O2 -std=c++20 -shared -fPIC -o "$bin/liboperators.so" "$programs/lib_operators.cpp" || exit 1
-g++ -O2 -std=c++20 -DPROGRAM -o "$bin/lib-operators" "$programs/lib_operators.cpp" \
-  -L"$bin" -loperators -Wl,-rpath,"$bin" || exit 1
+g++ -O2 -std=c++20 -o "$bin/tagged-new" "$programs/tagged_new.cpp" || exit 1
+g++ -O2 -std=c++20 -shared -fPIC -o "$bin/liblib_new.so" "$programs/lib_new.cpp" || exit 1
+g++ -O2 -std=c++20 -o "$bin/use-lib-new" "$programs/use_lib_new.cpp" "$bin/liblib_new.so" || exit 1
 
 # bindings NAME CMD...: where the dynamic loader bound each C++ allocation operator the program
 # calls (its own report, LD_DEBUG=bindings). The library exports none (docs/design.md,
@@ -172,8 +172,9 @@ check cxx-own-malloc "$bin/own-malloc"
 for mode in array sized matching empty nothrow; do
   check "cxx-own-new-$mode" "$bin/own-new" "$mode"
 done
-# Boehm GC's libgccpp, in small: a shared library that defines the C++ operators.
-check cxx-library-operators "$bin/lib-operators"
+check cxx-own-array-operators "$bin/tagged-new"
+# A shared library that defines the C++ operators, as Boehm GC's libgccpp does.
+check cxx-library-operators "$bin/use-lib-new"
 check threads "$bin/threads" 20 16 20000
 check threads-exit "$bin/threads" exit
 check forks "$bin/forks" 8 40

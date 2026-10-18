@@ -353,36 +353,6 @@ fn a_cxx_program_with_its_own_operator_new_runs() {
     }
 }
 
-/// The soak's finding with Boehm GC's `libgccpp`: a program linked with a shared library that
-/// defines the C++ operators. The loader looks that library up after the preload library, so a
-/// preload library that exported some operators would take the program's deletes and be handed
-/// the other library's blocks.
-#[test]
-fn a_program_linked_with_a_library_that_defines_the_cxx_operators_runs() {
-    let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR"))
-        .join(format!("lib-operators-{:?}", std::thread::current().id()));
-    std::fs::create_dir_all(&dir).expect("a scratch directory");
-    let source = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/programs/lib_operators.cpp");
-    let compile = |before: &[&str], after: &[&str]| {
-        let status = Command::new("c++")
-            .current_dir(&dir)
-            .args(["-O2", "-std=c++20"])
-            .args(before)
-            .arg(&source)
-            .args(after)
-            .status()
-            .expect("a C++ compiler (c++) is installed");
-        assert!(status.success(), "compiling {}", source.display());
-    };
-    compile(&["-shared", "-fPIC", "-o", "liboperators.so"], &[]);
-    compile(
-        &["-DPROGRAM", "-o", "program"],
-        &["-L.", "-loperators", "-Wl,-rpath,$ORIGIN"],
-    );
-    let out = same_with_and_without(|| Command::new(dir.join("program")));
-    assert_eq!(out.trim(), "live 0");
-}
-
 /// The C++ export is documented as needing the C export, and the macro makes that a build
 /// error.
 #[test]
@@ -402,28 +372,23 @@ fn the_cxx_export_without_the_c_export_does_not_build() {
     }
 }
 
-// The two tests below are findings of the review of the replacement rules: each states what
-// should happen and fails today. `cargo test -p asmalloc-preload -- --ignored` runs them.
-
 /// A program that replaces all four basic operators and tells scalar blocks from array blocks
 /// (a checker for `new`/`delete[]` mismatches does). The standard's defaults send the array
-/// forms to `operator new[]` and `operator delete[]`; ours send them to the scalar pair, so the
-/// program sees its array blocks deleted as scalars and its nothrow arrays made as scalars.
+/// forms to `operator new[]` and `operator delete[]`; the C++ exports sent them to the scalar
+/// pair. With no operator exported, the program gets the runtime's defaults.
 #[test]
-#[ignore = "finding: the array forms forward to a program's scalar operators"]
 fn a_program_with_its_own_array_operators_gets_them_from_the_array_forms() {
     let exe = program("tagged_new.cpp");
     let out = same_with_and_without(|| Command::new(&exe));
     assert_eq!(out.trim(), "mismatches 0");
 }
 
-/// The operators are replaced by a shared library the program links (as `libtcmalloc.so` does),
-/// not by the program itself. The preloaded library comes before it in the search order, so
-/// `operator delete` is ours while `operator new`, which we do not define, is the library's:
-/// the first `delete` is handed a pointer of the library's and aborts. Rare: it takes a second
-/// allocator linked as a shared library under the preload.
+/// The operators are replaced by a shared library the program links (as `libtcmalloc.so` and
+/// Boehm GC's `libgccpp` do), not by the program itself. The preloaded library comes before it
+/// in the search order, so if the preload exported `operator delete` but not the throwing
+/// `operator new`, the program's `new` would be the library's and its `delete` ours, which is
+/// why the preload library exports no C++ operator.
 #[test]
-#[ignore = "finding: operators replaced by a shared library pair its new with our delete"]
 fn a_program_linked_to_a_library_that_replaces_the_operators_runs() {
     let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("lib-new");
     std::fs::create_dir_all(&dir).expect("a scratch directory");
