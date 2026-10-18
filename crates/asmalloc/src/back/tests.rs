@@ -282,6 +282,7 @@ fn a_scattered_batch_with_a_dense_tail_frees_every_slot() {
 /// each slot's summary word at once: every slot is freed once, a fill takes them back lowest
 /// first, and a slot given twice is caught by its second OR.
 #[test]
+#[cfg_attr(miri, ignore)]
 fn a_wide_batch_frees_every_slot() {
     let state = state::<Standard>();
     let back = state.get_or_reserve().unwrap();
@@ -300,6 +301,7 @@ fn a_wide_batch_frees_every_slot() {
 }
 
 #[test]
+#[cfg_attr(miri, ignore)]
 #[should_panic(expected = "double free: an object was freed while already free")]
 fn a_slot_twice_in_a_wide_batch_aborts() {
     let state = state::<Standard>();
