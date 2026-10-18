@@ -467,8 +467,10 @@ been touched.
   region's watermark with one atomic add, and when that region is exhausted it assigns a
   new one to the class.
 - **Laundering a magazine** groups its pointers by bitmap word and sets each word's bits
-  with one atomic OR. If a bit was already set, the object was freed twice and the process
-  aborts.
+  with one atomic OR. A magazine whose objects are scattered, each in a word of its own, has
+  nothing to group: once a batch shows that, each remaining object gets one atomic bit-set
+  and no grouping is built. Either way, if a bit was already set, the object was freed twice
+  and the process aborts.
 - **Summary bits are hints.** They may be set when nothing below is free, and they never
   stay clear when something is. A free sets the word's bits and then sets every summary bit
   above it that it finds clear. Whoever empties a word clears its summary bit, at once or
