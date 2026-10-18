@@ -3345,7 +3345,7 @@ mod review_headers {
 /// the judgement.
 mod review_direct {
     use super::super::Sink;
-    use super::super::layout::Grow;
+    use super::super::layout::{Grow, MAX_LEVELS};
     use super::super::tree::{self, Host, Node};
     use super::super::word::{BITS, Word};
     use super::*;
@@ -3414,7 +3414,7 @@ mod review_direct {
         };
         let clip = |slot: u64| (slot % carved as u64) as u32;
         let (b, b2, b3) = (BITS as u64, (BITS * BITS) as u64, (BITS as u64).pow(3));
-        match rng.below(10) {
+        match rng.below(12) {
             // Anywhere: mostly more summary words than slots.
             0 => (0..n).map(|_| any(rng)).collect(),
             // Under three neighbouring summary words.
@@ -3506,6 +3506,31 @@ mod review_direct {
                     })
                     .collect()
             }
+            // The same summary word of each region in turn, then the next: every slot takes
+            // another's place in the table of debts, so the batch is judged wide whatever the
+            // tree's height, and the wide walk changes region at every slot.
+            9 => {
+                let first = rng.below(carved as usize) as u64 / b2;
+                (0..n)
+                    .map(|k| {
+                        let r = k % regions.len();
+                        let summary = first + (k / regions.len()) as u64;
+                        let slot = summary * b2 + rng.below(b2 as usize) as u64;
+                        (r, (slot % regions[r].2 as u64) as u32)
+                    })
+                    .collect()
+            }
+            // Pairs of slots in words apart: never judged scattered, and more words than the
+            // map holds, so the map is flushed on the way.
+            10 => {
+                let mut out = Vec::new();
+                for _ in 0..n.div_ceil(2) {
+                    let (r, slot) = any(rng);
+                    let first = slot / BITS * BITS;
+                    out.extend([(r, first), (r, first + 1)]);
+                }
+                out
+            }
             // Dense.
             _ => {
                 let start = rng.below(carved as usize) as u64;
@@ -3515,18 +3540,27 @@ mod review_direct {
     }
 
     /// Launders batches of every shape and length into a class of `size`-byte slots that has
-    /// one full region and part of another, in the geometry `back` has, and checks after each
-    /// that every slot it freed is free and reachable from the class's top word. Fills in
-    /// between take slots back, lowest first, which is the claim side's view of the same
-    /// thing: a fill that carves, or skips a free slot, could not see it.
-    fn every_slot_is_visible<O: Os>(back: &Back<'_, O>, size: usize, seed: u64, batches: usize) {
+    /// `count` regions, the last a quarter carved, in the geometry `back` has, and checks
+    /// after each that every slot it freed is free and reachable from the class's top word.
+    /// Fills in between take slots back, lowest first, which is the claim side's view of the
+    /// same thing: a fill that carves, or skips a free slot, could not see it.
+    ///
+    /// A batch is judged wide by how many places its slots take in the table of debts, so a
+    /// tree with few summary words to a region, or none, needs several regions for that.
+    fn every_slot_is_visible<O: Os>(
+        back: &Back<'_, O>,
+        size: usize,
+        count: usize,
+        seed: u64,
+        batches: usize,
+    ) {
         let class = small(size);
         let host = back.host(class.class()).unwrap();
         let per_region = host.layout().slots() as usize;
-        let want = per_region + per_region / 4;
+        let want = (count - 1) * per_region + per_region / 4;
         assert_eq!(back.fill(class, &mut Discard(want)), want);
         let regions = regions_of(back, class.class());
-        assert_eq!(regions.len(), 2, "{size}");
+        assert_eq!(regions.len(), count, "{size}");
         let address = |&(r, slot): &(usize, u32)| regions[r].1.wrapping_add(slot as usize * size);
         let mut rng = Rng(seed | 1);
         let mut free: BTreeSet<(usize, u32)> = BTreeSet::new();
@@ -3572,6 +3606,116 @@ mod review_direct {
         assert_eq!(fill(back, class, free.len()), expected, "{size}");
     }
 
+    /// Carves `count` regions of `size`-byte slots, the last a quarter, and returns them.
+    fn carve_regions<O: Os>(
+        back: &Back<'_, O>,
+        size: usize,
+        count: usize,
+    ) -> Vec<(RegionId, *mut u8, u32)> {
+        let class = small(size);
+        let per_region = back.host(class.class()).unwrap().layout().slots() as usize;
+        let want = (count - 1) * per_region + per_region / 4;
+        assert_eq!(back.fill(class, &mut Discard(want)), want);
+        let regions = regions_of(back, class.class());
+        assert_eq!(regions.len(), count, "{size}");
+        regions
+    }
+
+    /// `n` slots, each under a summary word of its own, in every region but `late` in turn:
+    /// each takes another's place in the table of debts, so a batch that begins with 73 of
+    /// them (nine gathered, 64 freed directly) is judged wide whatever the tree's height.
+    fn wide_head(regions: &[(RegionId, *mut u8, u32)], late: usize, n: usize) -> Vec<(usize, u32)> {
+        let b2 = (BITS * BITS) as u64;
+        let others: Vec<usize> = (0..regions.len()).filter(|&r| r != late).collect();
+        let mut slots: Vec<(usize, u32)> = Vec::new();
+        for k in 0u64.. {
+            if slots.len() == n {
+                break;
+            }
+            let r = others[k as usize % others.len()];
+            let summary = k / others.len() as u64;
+            let slot = (r, ((summary * b2 + k % b2) % regions[r].2 as u64) as u32);
+            if !slots.contains(&slot) {
+                slots.push(slot);
+            }
+        }
+        slots
+    }
+
+    /// Launders `slots` into a class with nothing free, and checks that each can be found from
+    /// the class's top word and that a fill takes exactly them back.
+    fn launder_and_find<O: Os>(
+        back: &Back<'_, O>,
+        size: usize,
+        regions: &[(RegionId, *mut u8, u32)],
+        slots: &[(usize, u32)],
+    ) {
+        let class = small(size);
+        let host = back.host(class.class()).unwrap();
+        let address = |&(r, slot): &(usize, u32)| regions[r].1.wrapping_add(slot as usize * size);
+        let pointers: Vec<*mut u8> = slots.iter().map(address).collect();
+        // SAFETY: the test holds these slots and gives them up.
+        unsafe { back.launder(class, &pointers) };
+        for &(r, slot) in slots {
+            assert!(
+                visible(&host, regions[r].0, slot),
+                "{size}: slot {slot} of region {r} cannot be found"
+            );
+        }
+        let mut expected = slots.to_vec();
+        expected.sort();
+        let expected: Vec<*mut u8> = expected.iter().map(address).collect();
+        assert_eq!(fill(back, class, expected.len()), expected, "{size}");
+    }
+
+    /// A batch that is judged wide before it first meets region `late`, into a class with
+    /// nothing free: a head of a hundred slots elsewhere, then a tail in `late`, one slot
+    /// under each of level-2 words 64 to 95, then 0 to 31, then 32 to 63, where the tree has
+    /// them. Each run of 32 takes the places of the one before in the table of upward debts,
+    /// so the first two are paid by walking on up at once, and the first lies under a word of
+    /// level 3 that nothing else in the batch pays.
+    fn a_wide_batch_meets_a_region_late<O: Os>(
+        back: &Back<'_, O>,
+        size: usize,
+        count: usize,
+        late: usize,
+    ) {
+        let regions = carve_regions(back, size, count);
+        let (b2, b3) = ((BITS * BITS) as u64, (BITS as u64).pow(3));
+        let mut slots = wide_head(&regions, late, 100);
+        let carved = regions[late].2 as u64;
+        for (j, upper) in (64..96).chain(0..64).enumerate() {
+            let slot = (
+                late,
+                ((upper * b3 + j as u64 * b2 + j as u64) % carved) as u32,
+            );
+            if !slots.contains(&slot) {
+                slots.push(slot);
+            }
+        }
+        assert!(slots.len() > 100, "{size}: no tail");
+        launder_and_find(back, size, &regions, &slots);
+    }
+
+    /// A batch that first meets region `late` just before it is judged wide, and ends there:
+    /// 63 slots elsewhere and ten in `late`, 73 in all. What the ten owe is still in the table
+    /// of debts when the batch is judged, and is paid by walking up at once
+    /// (`pay_by_walking`), the only payment `late` gets: every summary bit above its slots,
+    /// its bit in the class word included, is that walk's to set.
+    fn a_wide_batch_ends_as_it_is_judged<O: Os>(
+        back: &Back<'_, O>,
+        size: usize,
+        count: usize,
+        late: usize,
+    ) {
+        let regions = carve_regions(back, size, count);
+        let b2 = (BITS * BITS) as u64;
+        let mut slots = wide_head(&regions, late, 63);
+        let carved = regions[late].2 as u64;
+        slots.extend((0..10u64).map(|j| (late, ((j * b2 + j) % carved) as u32)));
+        launder_and_find(back, size, &regions, &slots);
+    }
+
     /// In the design's geometry on the real OS, where a small class's tree has three or four
     /// levels of its own, which no simulated shape has.
     #[cfg(not(miri))]
@@ -3583,17 +3727,62 @@ mod review_direct {
         /// only a few such reservations fit in a process at once.
         static ONE_HEAP: Mutex<()> = Mutex::new(());
 
-        #[test]
-        #[ignore = "slow: run with scripts/gate --all"]
-        fn every_slot_a_launder_frees_is_visible_at_the_design_heights() {
+        /// `every_slot_is_visible` for each of `classes` (slot size, regions), whose trees
+        /// have `height` levels above the leaf bitmap.
+        fn visible_at_height(height: u8, classes: &[(usize, usize)]) {
             let _one = ONE_HEAP.lock().unwrap_or_else(|e| e.into_inner());
-            for (size, height) in [(8, 4), (16, 4), (256, 3), (4096, 3), (32 << 10, 2)] {
+            for &(size, count) in classes {
                 let state = Box::new(State::new(LinuxOs));
                 let back = state.get_or_reserve().unwrap();
                 let host = back.host(small(size).class()).unwrap();
                 assert_eq!(host.layout().height(), height, "{size}");
-                every_slot_is_visible(&back, size, 0x9e37_79b9 ^ size as u64, 1500);
+                every_slot_is_visible(&back, size, count, 0x9e37_79b9 ^ size as u64, 1500);
             }
+        }
+
+        /// Not ignored: it is two batches a class, and the only check in the default run of
+        /// the wide walk above level two. Where the process cannot have the design's whole
+        /// reservation (an address-space limit, valgrind), the regions are smaller and their
+        /// trees shorter, and there is nothing here to check.
+        #[test]
+        fn a_wide_batch_meets_a_region_late_at_the_design_heights() {
+            let _one = ONE_HEAP.lock().unwrap_or_else(|e| e.into_inner());
+            let design = crate::space::Geometry::DESIGN.largest_plan().region_size();
+            for (size, height, count) in [(8, 4, 3), (16, 4, 3), (256, 3, 3), (32 << 10, 2, 8)] {
+                for ends in [false, true] {
+                    let state = Box::new(State::new(LinuxOs));
+                    let back = state.get_or_reserve().unwrap();
+                    if back.space().plan().region_size() != design {
+                        return;
+                    }
+                    let host = back.host(small(size).class()).unwrap();
+                    assert_eq!(host.layout().height(), height, "{size}");
+                    if ends {
+                        a_wide_batch_ends_as_it_is_judged(&back, size, count, 1);
+                    } else {
+                        a_wide_batch_meets_a_region_late(&back, size, count, 1);
+                    }
+                }
+            }
+        }
+
+        #[test]
+        #[ignore = "slow: run with scripts/gate --all"]
+        fn every_slot_a_launder_frees_is_visible_at_height_four() {
+            visible_at_height(4, &[(8, 2), (16, 2)]);
+        }
+
+        #[test]
+        #[ignore = "slow: run with scripts/gate --all"]
+        fn every_slot_a_launder_frees_is_visible_at_height_three() {
+            visible_at_height(3, &[(256, 2), (4096, 3)]);
+        }
+
+        /// Thirty-two summary words to a region, so only a batch over several regions is wide.
+        #[test]
+        #[ignore = "slow: run with scripts/gate --all"]
+        fn every_slot_a_launder_frees_is_visible_at_height_two() {
+            visible_at_height(2, &[(32 << 10, 8)]);
         }
 
         /// Threads launder scattered slots they hold and fill again, at once, in one class.
@@ -3608,7 +3797,17 @@ mod review_direct {
         ///
         /// A failure is kept and reported once the threads have been let go: a panic while
         /// the others wait at a barrier would leave them there.
-        fn episodes_scatter_and_fill(slots: usize, threads: usize, episodes: usize, seed: u64) {
+        ///
+        /// The threads start with the slots `in_pool` picks of the `slots` carved, and launder
+        /// and fill `least` to `least + spread` slots at a time.
+        fn episodes_scatter_and_fill(
+            slots: usize,
+            in_pool: fn(u32) -> bool,
+            (least, spread): (usize, usize),
+            threads: usize,
+            episodes: usize,
+            seed: u64,
+        ) {
             use std::panic::{AssertUnwindSafe, catch_unwind};
             use std::string::String;
             use std::sync::Barrier;
@@ -3622,7 +3821,8 @@ mod review_direct {
             assert_eq!(regions.len(), 1);
             let (region, base, _) = regions[0];
             let base = base.addr();
-            let owners: Vec<AtomicU8> = (0..slots * 16).map(|_| AtomicU8::new(0)).collect();
+            // Room for what fills carve when they see nothing free.
+            let owners: Vec<AtomicU8> = (0..slots + (1 << 20)).map(|_| AtomicU8::new(0)).collect();
             let touched: Vec<Mutex<Vec<u32>>> =
                 (0..threads).map(|_| Mutex::new(Vec::new())).collect();
             let (start, done) = (Barrier::new(threads + 1), Barrier::new(threads + 1));
@@ -3639,7 +3839,7 @@ mod review_direct {
                         let me = t as u8 + 1;
                         let mut rng = Rng(seed + 977 * t as u64 + 1);
                         let mut pool: Vec<u32> = (0..slots as u32)
-                            .filter(|s| *s as usize % threads == t)
+                            .filter(|s| *s as usize % threads == t && in_pool(*s))
                             .collect();
                         for &slot in &pool {
                             owners[slot as usize].store(me, SeqCst);
@@ -3655,7 +3855,7 @@ mod review_direct {
                                 words.clear();
                                 for _ in 0..2 {
                                     batch.clear();
-                                    for _ in 0..pool.len().min(10 + rng.below(60)) {
+                                    for _ in 0..pool.len().min(least + rng.below(spread)) {
                                         let slot = pool.swap_remove(rng.below(pool.len()));
                                         let was = owners[slot as usize].swap(0, SeqCst);
                                         assert_eq!(was, me, "slot {slot} is not mine to free");
@@ -3666,7 +3866,7 @@ mod review_direct {
                                     }
                                     // SAFETY: the thread holds these slots and gives them up.
                                     unsafe { back.launder(class, &batch) };
-                                    for p in fill(&back, class, 10 + rng.below(60)) {
+                                    for p in fill(&back, class, least + rng.below(spread)) {
                                         let slot = (p.addr() - base) / 16;
                                         let was = owners[slot].swap(me, SeqCst);
                                         assert_eq!(was, 0, "slot {slot} handed out while held");
@@ -3717,33 +3917,102 @@ mod review_direct {
                 free += bits.count_ones() as usize;
                 assert!(bits == 0 || path_set(&host, region, word), "word {word}");
             }
-            assert_eq!(free + held.load(SeqCst), carved as usize, "a slot was lost");
+            // The slots no thread was given stay the test's.
+            let kept = (0..slots as u32).filter(|s| !in_pool(*s)).count();
+            let held = held.load(SeqCst) + kept;
+            assert_eq!(free + held, carved as usize, "a slot was lost");
         }
 
         #[test]
         #[ignore = "slow: run with scripts/gate --all"]
         fn episodes_scatter_and_fill_under_a_few_summary_words() {
             for seed in 0..2 {
-                episodes_scatter_and_fill(1 << 16, 6, 20_000, seed);
+                episodes_scatter_and_fill(1 << 16, |_| true, (10, 60), 6, 20_000, seed);
             }
         }
 
         #[test]
         #[ignore = "slow: run with scripts/gate --all"]
         fn episodes_scatter_and_fill_under_many_summary_words() {
-            episodes_scatter_and_fill(1 << 20, 6, 20_000, 7);
+            episodes_scatter_and_fill(1 << 20, |_| true, (10, 60), 6, 20_000, 7);
+        }
+
+        /// Batches long enough to be judged wide, and wide by the table's count although they
+        /// keep to eight summary words: the eight share one place in the table of debts, so
+        /// every slot takes another's, and their level-2 words share places in the table of
+        /// upward debts two by two, so the wide walk goes on up from there (`walk_upward`).
+        /// Eight summary words are few enough leaf words that the fills empty the words the
+        /// launders free into.
+        #[test]
+        #[ignore = "slow: run with scripts/gate --all"]
+        fn episodes_scatter_and_fill_with_wide_batches() {
+            fn in_pool(slot: u32) -> bool {
+                let summary = slot / (BITS * BITS);
+                summary.is_multiple_of(64) && (summary < 256 || (2048..2304).contains(&summary))
+            }
+            for seed in 0..2 {
+                episodes_scatter_and_fill(1 << 24, in_pool, (80, 120), 6, 6_000, seed);
+            }
         }
     }
 
-    /// The same in the simulated shape, so that the default run has it.
+    /// The same in the simulated shape, so that the default run has it: two summary levels
+    /// (8 and 16 bytes) and one (64 and 1024).
     #[test]
     #[cfg_attr(miri, ignore)]
     fn every_slot_a_launder_frees_is_visible() {
-        for size in [8, 16, 64, 1024] {
+        for (size, count) in [(8, 8), (16, 2), (64, 8), (1024, 2)] {
             let state = state::<Native>();
             let back = state.get_or_reserve().unwrap();
-            every_slot_is_visible(&back, size, 0x51ed_270b ^ size as u64, 300);
+            every_slot_is_visible(&back, size, count, 0x51ed_270b ^ size as u64, 300);
         }
+    }
+
+    /// The same for trees with one summary level of the region's own (two leaf words to a
+    /// region) and with none (one leaf word, its summary bit in the class word), as the
+    /// largest small classes have where the address space is short and regions are small.
+    /// Twelve regions, so that batches are judged wide and walk up such a tree.
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn every_slot_a_launder_frees_is_visible_in_trees_of_one_and_two_words() {
+        for (size, height) in [(2048, 1), (4096, 0)] {
+            let state = state::<Standard>();
+            let back = state.get_or_reserve().unwrap();
+            let host = back.host(small(size).class()).unwrap();
+            assert_eq!(host.layout().height(), height, "{size}");
+            every_slot_is_visible(&back, size, 12, 0x2545_f491 ^ size as u64, 600);
+        }
+    }
+
+    /// `a_wide_batch_meets_a_region_late` and `a_wide_batch_ends_as_it_is_judged` for trees
+    /// with two summary levels of the region's own, one, and none.
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn a_wide_batch_meets_a_region_late_in_short_trees() {
+        for (size, height) in [(8, 2), (2048, 1), (4096, 0)] {
+            for ends in [false, true] {
+                let state = state::<Standard>();
+                let back = state.get_or_reserve().unwrap();
+                let host = back.host(small(size).class()).unwrap();
+                assert_eq!(host.layout().height(), height, "{size}");
+                if ends {
+                    a_wide_batch_ends_as_it_is_judged(&back, size, 12, 5);
+                } else {
+                    a_wide_batch_meets_a_region_late(&back, size, 12, 5);
+                }
+            }
+        }
+    }
+
+    /// One wide batch into a tree with a summary level of the region's own, small enough for
+    /// Miri, which has no other test of the slices of a region's summary levels that the wide
+    /// walk reads (`Host::tree_words`): the two wide batches above it in this file fill and
+    /// sort four million slots first.
+    #[test]
+    fn a_wide_batch_for_miri() {
+        let state = state::<Standard>();
+        let back = state.get_or_reserve().unwrap();
+        a_wide_batch_meets_a_region_late(&back, 2048, 6, 3);
     }
 
     /// One slot to a word, far apart, of `slots`, a fill of 64 KiB of 16-byte slots: the
@@ -3802,5 +4071,208 @@ mod review_direct {
     #[should_panic(expected = "freed twice in one batch")]
     fn a_slot_twice_before_the_judgement_aborts() {
         launder_twice(2, 6);
+    }
+
+    /// Two slots of word 0, then two of each of `words` words outside its window: runs of
+    /// two, so the batch is never judged scattered and those words go to the map, which holds
+    /// 63 and is flushed when the sixty-third comes. `slots` is a fill of 16-byte slots.
+    fn pairs(slots: &[*mut u8], words: usize) -> Vec<*mut u8> {
+        let mut batch = std::vec![slots[0], slots[1]];
+        for w in 0..words {
+            batch.extend([slots[pair(w)], slots[pair(w) + 1]]);
+        }
+        batch
+    }
+
+    /// The first slot of the `w`-th word of [`pairs`].
+    fn pair(w: usize) -> usize {
+        (128 + 2 * w) * 64
+    }
+
+    /// Launders [`pairs`] of `words` words and then the first slot of its `again`-th once more.
+    fn launder_pairs_and_again(words: usize, again: usize) {
+        let state = state::<Standard>();
+        let back = state.get_or_reserve().unwrap();
+        let class = small(16);
+        let slots = fill(&back, class, 64 * 1024);
+        let mut batch = pairs(&slots, words);
+        batch.push(slots[pair(again)]);
+        // SAFETY: the test holds these slots, or passes a bad one to see the abort.
+        unsafe { back.launder(class, &batch) };
+    }
+
+    /// A slot whose word the map flushed when it filled comes again: its second OR finds the
+    /// first.
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    #[should_panic(expected = "double free: an object was freed while already free")]
+    fn a_slot_again_after_the_map_flushed_its_word_aborts() {
+        launder_pairs_and_again(100, 5);
+    }
+
+    /// The same for the word whose coming filled the map.
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    #[should_panic(expected = "double free: an object was freed while already free")]
+    fn a_slot_of_the_word_that_filled_the_map_again_aborts() {
+        launder_pairs_and_again(100, 62);
+    }
+
+    /// A slot of a word the map still holds, before any flush or after one, is caught by the
+    /// map.
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    #[should_panic(expected = "freed twice in one batch")]
+    fn a_slot_again_while_the_map_holds_its_word_aborts() {
+        launder_pairs_and_again(40, 5);
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    #[should_panic(expected = "freed twice in one batch")]
+    fn a_slot_again_in_the_map_after_a_flush_aborts() {
+        launder_pairs_and_again(100, 80);
+    }
+
+    /// A batch that has a map when it turns to the direct path: the map's words are ORed at
+    /// the turn, so a slot of one that comes again in the direct part is caught by its OR.
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    #[should_panic(expected = "double free: an object was freed while already free")]
+    fn a_map_slot_again_in_the_direct_part_aborts() {
+        let state = state::<Standard>();
+        let back = state.get_or_reserve().unwrap();
+        let class = small(16);
+        let slots = fill(&back, class, 64 * 1024);
+        let mut batch = pairs(&slots, 12);
+        batch.extend((0..80).map(|i| slots[(400 + 5 * i) * 64]));
+        batch.push(slots[pair(3)]);
+        // SAFETY: the test holds these slots, or passes a bad one to see the abort.
+        unsafe { back.launder(class, &batch) };
+    }
+
+    /// A wide batch of 8-byte slots, one under each of 200 summary words, with the slot at
+    /// `first` given again at `again_at`. The first nine slots are gathered, the next 64 are
+    /// freed directly and judged, and from the seventy-fourth on each walks up at once.
+    fn launder_twice_wide(first: usize, again_at: usize) {
+        let state = state::<Standard>();
+        let back = state.get_or_reserve().unwrap();
+        let class = small(8);
+        let mut slots = fill(&back, class, 64 * 64 * 1024);
+        slots.sort();
+        let mut batch: Vec<*mut u8> = (0..200)
+            .map(|i| slots[(i * 7919 % 1024) * 64 * 64])
+            .collect();
+        batch.insert(again_at, batch[first]);
+        // SAFETY: the test holds these slots, or passes a bad one to see the abort.
+        unsafe { back.launder(class, &batch) };
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    #[should_panic(expected = "double free: an object was freed while already free")]
+    fn a_window_slot_again_in_the_wide_part_aborts() {
+        launder_twice_wide(0, 150);
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    #[should_panic(expected = "double free: an object was freed while already free")]
+    fn an_early_slot_again_in_the_wide_part_aborts() {
+        launder_twice_wide(4, 150);
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    #[should_panic(expected = "double free: an object was freed while already free")]
+    fn a_judged_slot_again_in_the_wide_part_aborts() {
+        launder_twice_wide(40, 150);
+    }
+
+    /// The last slot freed before the batch is judged wide comes again as the first after.
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    #[should_panic(expected = "double free: an object was freed while already free")]
+    fn the_last_judged_slot_again_as_the_first_wide_one_aborts() {
+        launder_twice_wide(72, 73);
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    #[should_panic(expected = "double free: an object was freed while already free")]
+    fn a_wide_slot_again_at_once_aborts() {
+        launder_twice_wide(73, 74);
+    }
+
+    /// A region that carries `class`'s tag and has never been carved from: `assign` published
+    /// it, and the OS refused the commit its first carve asked for.
+    fn never_carved(state: &State<Sim>, class: Class) -> RegionId {
+        let back = state.get_or_reserve().unwrap();
+        state.os().set_faults(Call::Commit, Faults::once_after(1));
+        assert!(back.alloc(class, 1).is_none());
+        state.os().set_faults(Call::Commit, Faults::NONE);
+        let region = back.space().plan().region(0).unwrap();
+        assert_eq!(back.table().get(region), RegionTag::Class(class));
+        region
+    }
+
+    /// BACK-HOST-03 for the summary levels: every word of every summary level of a region can
+    /// be read from the moment the region carries its class's tag, before anything is carved
+    /// or freed there. Natively the simulator's memory is inaccessible until committed, so a
+    /// level that was not committed with the block's fixed part would kill the test.
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn every_summary_level_can_be_read_before_a_region_is_carved() {
+        for class in [small(8).class(), small(64).class(), small(4096).class()] {
+            let state = state::<Standard>();
+            let region = never_carved(&state, class);
+            let back = state.get_or_reserve().unwrap();
+            let host = back.host(class).unwrap();
+            let layout = *host.layout();
+            for level in 1..=layout.height() {
+                let words = host.tree_words(region, level, layout.level_words(level));
+                assert_eq!(words.len(), layout.level_words(level) as usize);
+                assert!(words.iter().all(|word| word.load() == 0));
+            }
+            // No leaf word is promised yet, and none is asked for.
+            assert!(host.tree_words(region, 0, 0).is_empty());
+            // A level the tree does not have has no words.
+            for level in layout.height() + 1..MAX_LEVELS as u8 {
+                assert!(host.tree_words(region, level, 0).is_empty());
+            }
+        }
+    }
+
+    /// The slice of a level, asked for through the host with more words than the level has, or
+    /// for a level no tree has.
+    fn tree_words_of(level: u8, beyond: u32) {
+        let class = small(8).class();
+        let state = state::<Standard>();
+        let region = never_carved(&state, class);
+        let back = state.get_or_reserve().unwrap();
+        let host = back.host(class).unwrap();
+        let count = host.layout().level_words(level.min(MAX_LEVELS as u8 - 1)) + beyond;
+        let _ = host.tree_words(region, level, count);
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    #[should_panic(expected = "more words than a level of a region's tree has")]
+    fn a_summary_slice_longer_than_its_level_aborts() {
+        tree_words_of(1, 1);
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    #[should_panic(expected = "more words than a level of a region's tree has")]
+    fn a_slice_of_a_level_above_the_tree_aborts() {
+        tree_words_of(3, 1);
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    #[should_panic(expected = "more words than a level of a region's tree has")]
+    fn a_slice_of_a_level_no_tree_has_aborts() {
+        tree_words_of(MAX_LEVELS as u8, 0);
     }
 }
