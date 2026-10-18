@@ -1126,8 +1126,8 @@ difference was in cycles, and the rule-off build was the steadier of the two, wh
 at layout or the machine rather than the test.
 
 **The 64-Vec peak.** 374.8 MiB in every run of both builds, against 270.3 in `baselines.md`
-(`b5d6e8f`) and 269 for glibc: something merged since then holds about 100 MiB more at this
-job's peak. Not investigated here.
+(`b5d6e8f`) and 269 for glibc. That is the trail of outgrown blocks the next part of this
+section removes.
 
 **The gap to the mimalloc crate on one Vec to 256 MiB.** None on this day: 5.68 against 5.74
 cycles an element (its three good rounds 5.64 to 5.74; two rounds at 7.4 and 8.9 paid
@@ -1184,6 +1184,62 @@ slower (the third row of the first table).
 and free memory was under 1 GiB with 52 GiB in the page cache, so huge-page faults sometimes
 compacted memory. Every timed run was on CPU 2 under the measurement lock, interleaved with
 the runs it is compared to. "before" is `a763ad7`, "after" this change.
+
+### A move returns the old block at any size
+
+A block of at most one piece (2 MiB) was copied whole and then freed the ordinary way. Since
+frees stopped returning memory because of a level (main `3426f7a` removed the 8 MiB cap on
+freed large slots), such a free keeps the slot resident until the clock or the growth cap
+reaches it. Sixty-four vectors growing to 4 MiB each leave a trail of 32 KiB to 2 MiB
+blocks, about 100 MiB, which is the 374.8 MiB above. A free keeps a slot because the next
+block of its class may want it; a move is evidence against that, since the block has just
+been outgrown (or shrunk far below its slot), and that holds whatever its size. So every
+move now takes the piecewise path: the old slot's pages go back after the copy and the slot
+is released as purged memory, uncounted. A run's tail is no longer purged before `free_run`,
+which purges the whole run.
+
+`benchrun`, five interleaved rounds, medians; "before" is `a763ad7`, "after" both changes of
+this section:
+
+| Job | before | after | glibc | jemalloc | mimalloc crate |
+|---|---:|---:|---:|---:|---:|
+| vecgrow 64x4Mi, cycles/element | 7.77 | 8.96 | 18.56 | 10.71 | 43.69 |
+| the same, peak MiB | 374.8 | 263.4 | 269.2 | 307.2 | 289.1 |
+| the same, faults | 79,736 | 149,850 | 272,626 | 234,766 | 153 |
+| vecgrow 1x256Mi, cycles/element | 5.38 | 5.30 | 8.97 | 16.56 | 5.35 |
+| the same, peak MiB | 257.8 | 257.6 | 256.9 | 264.4 | 523.5 |
+| largepair 64Ki+1Mi, ns | 71.8 | 72.6 | 8.3 | 137.6 | 110.4 |
+| large pipeline (t2, 1M objects), ns/alloc | 69.6 | 69.0 | 409.6 | 311.2 | 42.1 |
+| map hash 1M, peak MiB | 204.3 | 204.3 | 208.2 | 183.9 | 198.7 |
+| mstress 8 (preload), s | 0.283 | 0.281 | 0.386 | 0.473 | |
+| the same, peak MiB | 140.1 | 141.2 | 247.2 | 140.9 | |
+
+The 64 Vecs give back 111 MiB of peak, under glibc's, and pay for it in faults: each
+repetition faults its outgrown blocks again where it used to find them resident, 15% slower
+than before (+15.1 to +16.3% by round), still 16% ahead of jemalloc and 6% ahead of what
+`baselines.md` measured with the old cap (9.51). The rest is unchanged within noise.
+
+The case that pays most: one block grown from nothing to 4 MiB by doubling and freed, a
+thousand times (`vecgrow vecs=1 max=4Mi reps=1000`, `perf stat`, five interleaved runs,
+cycles an element; 512 Ki elements a repetition):
+
+| | before | after | glibc | jemalloc | mimalloc crate |
+|---|---:|---:|---:|---:|---:|
+| cycles/element | 4.87 | 5.08 | 1.72 | 2.91 | 2.45 |
+| page faults | 514,358 | 578,230 | 2,148 | 2,000 | 122 |
+
+The move adds 4%: 64 faults a repetition, the outgrown blocks below 2 MiB. Both builds are
+about twice as slow as the incumbents here, and that is not the move: each repetition already
+faulted 514 pages before, most likely because the grown block is advised for huge pages and
+its free returns it (`purge_before_release`), so the next repetition faults it back (an
+inference from the counts, not traced). A block resized back and forth across a class boundary does not move at all (the
+headroom and shrink rules; `a_block_resized_back_and_forth_across_a_class_boundary_settles`
+passes unchanged).
+
+`sparse_realloc.c` now also returns the block it shrinks to an eighth, which moves: N=16 MiB
+peaks at 1.3 MiB against 3.5 (64 and 256 MiB: 1.5 and 3.1 against 1.6 and 2.9; resident
+after the grow 2 MiB in every case). The sparse worst cases are unchanged (2.3 and 32.2 MiB
+resident).
 
 ## Reproducing
 
