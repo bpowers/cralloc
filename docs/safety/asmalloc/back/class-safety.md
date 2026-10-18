@@ -7,20 +7,25 @@ because an allocation claimed it for the caller, who has not released it; nothin
 writes the slot's memory during the call or needs its contents after; and the slot is below
 the watermark.
 
-**Where it is called.** `Back::free` of a large class calls `purge_before_release` before it
-releases the slot's bit, and it purges only when the slot is advised for huge pages because
-its object grew there (its size word's flag, `Recorded::huge`, which only the slot's holder
-reads or writes). An earlier form also purged when keeping the slot would take a large-class
-retained count over its cap; that rule is gone, and dropping it narrows when the block runs
-without changing what holds when it does. The advice is taken back after the purge (`region::unadvise`), which changes no
-contents. `Back::free` is crate-private (`pub(crate)`), so these are its only callers, and
-it is reached from `Heap::free_large`, the C `free` and the depot's `free_one` (a thread with
-no CPU giving up a small block), each for a pointer the program is giving up.
+**Where it is called.** `free_slot`, the free of one large slot, calls `purge_before_release`
+before it releases the slot's bit, and it purges only when the slot is advised for huge pages
+because its object grew there (its size word's flag, `Recorded::huge`, which only the slot's
+holder reads or writes). An earlier form also purged when keeping the slot would take a
+large-class retained count over its cap; that rule is gone, and dropping it narrows when the
+block runs without changing what holds when it does. The advice is taken back after the purge
+(`region::unadvise`), which changes no contents. `free_slot` is private and called by
+`Back::free` and `Back::free_by_address` for a large class, both crate-private
+(`pub(crate)`), with the region and slot that `slot_in` found for the pointer: `Back::free`
+after `validate` has checked the pointer lies in a region tagged for the class, and
+`free_by_address` after reading the class from that region's tag. They are reached from
+`Heap::free_large` and the C `free`, each for a pointer the program is giving up.
 
 **Proof.**
 
-1. *The slot is below the watermark.* `validate` aborts unless the pointer is the start of a
-   slot of the class in a region tagged for it and `slot < carved`. The watermark only grows.
+1. *The slot is below the watermark.* `slot_in` aborts unless the pointer is the start of a
+   slot (or of its stagger) of the region's class and `slot < carved`, and the region is
+   tagged for that class (checked by `validate`, or read from the tag by `free_by_address`).
+   The watermark only grows.
 2. *The caller holds the slot.* The program was given the slot by `Back::alloc`, which
    cleared its bit, and is freeing it now, so by the allocator's contract (a block is freed
    once, by its owner, and not used afterwards) the bit is still clear and no one else has

@@ -59,7 +59,7 @@ mod verify;
 
 pub use drain::Drained;
 pub use generation::Generation;
-pub use heartbeat::{IDLE_TICKS, LOOK_EVERY};
+pub use heartbeat::{IDLE_TICKS, LOOK_EVERY, Lone, LoneTurn, lone_count};
 pub use inspect::inspect;
 pub(crate) use magazine::{Area, Magazine, UNIT};
 pub use slow::REFRESH_EVERY;

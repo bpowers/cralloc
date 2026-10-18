@@ -327,7 +327,7 @@ fn large_slots_say_when_they_are_zero() {
     let state = state::<Native>();
     let back = state.get_or_reserve().unwrap();
     let class = large(64 << 10);
-    let Block { ptr, zeroed } = back.alloc(class, class.size()).unwrap();
+    let Block { ptr, zeroed, .. } = back.alloc(class, class.size()).unwrap();
     assert!(zeroed && painted(ptr.as_ptr(), class.size(), 0));
     paint(ptr.as_ptr(), class.size(), 7);
     back.free(ptr, class);

@@ -268,6 +268,7 @@ pub fn full() -> Vec<Job> {
     v.push(rust("single-thread", "vecgrow 1x256Mi".into(), Native, "vecgrow vecs=1 max=256Mi reps=4", one(), 300));
     v.push(rust("single-thread", "vecgrow 64x4Mi".into(), Native, "vecgrow vecs=64 max=4Mi reps=4", one(), 300));
     v.push(rust("single-thread", "json 32Mi".into(), Native, "json size=32Mi reps=5", one(), 300));
+    v.push(rust("single-thread", "largepair 64Ki+1Mi".into(), Native, "largepair ops=2M", one(), 120));
     // The same Rust programs through LD_PRELOAD, where every free is C's unsized free().
     v.push(rust("preload", "churn live=100k small".into(), Preload, "churn live=100k ops=20M sizes=small", one(), 300));
     v.push(rust(

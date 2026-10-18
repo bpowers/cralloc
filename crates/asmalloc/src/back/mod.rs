@@ -200,6 +200,9 @@ pub struct Block {
     /// Whether the slot is known to read as zero: never used, or purged since it was last
     /// used. Only large classes track purged slots, so a reused small slot says `false`.
     pub zeroed: bool,
+    /// What [`Back::usable_size`] says of the block, worked out here so that the caller need
+    /// not look the block up again.
+    pub len: usize,
 }
 
 /// What a heap address is the start of.

@@ -243,12 +243,18 @@ impl Spot {
 
 /// Claims up to `n` free slots, at least one, from the lowest leaf word of the class that has
 /// any, or returns `None` if the class has none free. `n` must not be zero.
-pub(crate) fn claim<H: Host>(host: &H, n: u32) -> Option<Taken> {
+///
+/// With `keep`, a claim that empties its word leaves the summary bits above it set: the
+/// model's clear, held for as long as the thread likes, as a thread lost in a fork holds it.
+/// The next search that finds the word empty clears them, as it clears any stale bit. A class
+/// whose slots are freed and taken one at a time, as large ones are, would otherwise clear the
+/// bits up to the top on every claim and set them again on every free.
+pub(crate) fn claim<H: Host>(host: &H, n: u32, keep: bool) -> Option<Taken> {
     loop {
         let leaf = from_top(host)?;
         match take(host, leaf, n) {
             Take::Took { bits, emptied, .. } => {
-                if emptied {
+                if emptied && !keep {
                     clear(host, leaf);
                 }
                 return Some(Taken {
@@ -611,6 +617,29 @@ pub(crate) fn release<H: Host>(host: &H, region: RegionId, index: u32, bits: u64
     let mut release = Release::new(host, region);
     release.leaf(region, index, bits);
     release.finish();
+}
+
+/// Frees the one slot `bit` of a leaf word: the model's release for one bit, with none of a
+/// batch's bookkeeping. One atomic OR, which aborts if the bit was set already (a double free),
+/// then the healing walk to the top: at each level, the OR alone if the word below was empty
+/// before this thread's write, else a look and an OR only if the bit is clear.
+pub(crate) fn release_one<H: Host>(host: &H, region: RegionId, index: u32, bit: u64) {
+    let mut spot = Spot::leaf(region, index);
+    let old = spot.word(host).fetch_or(bit);
+    if old & bit != 0 {
+        host.abort("double free: an object was freed while already free");
+    }
+    let mut must = old == 0;
+    let height = host.layout().height();
+    while let Some((above, bit)) = spot.parent(height) {
+        let word = above.word(host);
+        must = if must || word.load() & bit == 0 {
+            word.fetch_or(bit) == 0
+        } else {
+            false
+        };
+        spot = above;
+    }
 }
 
 /// Summary levels a walk up can owe a bit in: a region's levels above its leaf bitmap (at most

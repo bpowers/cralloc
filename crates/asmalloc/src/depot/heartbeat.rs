@@ -1,7 +1,7 @@
 //! The heartbeat: the bounded maintenance every slow path does before it returns.
 //!
-//! A large allocation or free counts as a slow path ([`Cache::lone_heartbeat`]; the back end
-//! takes its purge step itself). There is no timer, so maintenance happens at a rate set by
+//! A large allocation or free counts as a slow path, and does the chores below on one in
+//! [`LONE_EVERY`] of them ([`Cache::lone_heartbeat`]). There is no timer, so maintenance happens at a rate set by
 //! allocation activity, in units small enough that no single call pays much; a program that
 //! wants it paced by time instead runs `maintain` (`maintain.rs`) from a thread of its own.
 //! The clock is read at most once per heartbeat, and only when a decision needs it.
@@ -78,7 +78,7 @@
 //! it, by the drain's own claim.
 
 use super::drain::Disposal;
-use super::{Cache, Drained, Source, generation};
+use super::{Cache, Depot, Drained, Source, generation};
 use crate::classes::{SMALL_COUNT, SmallClass};
 use crate::front::{Cpu, Routines};
 use crate::os::Os;
@@ -105,6 +105,14 @@ pub const IDLE_TICKS: u64 = 1 << IDLE_SHIFT;
 /// one slow path in sixteen keeps that off the slow path's cost, and a CPU still looks at every
 /// slab many times an interval while it allocates at any appreciable rate.
 pub const LOOK_EVERY: u64 = 16;
+
+/// A large allocation or free does its heartbeat's chores on one count of its CPU's activity
+/// in this many: 16. Large blocks are seldom allocated at a rate that would starve the chores,
+/// and a program that only moves large blocks still gets a heartbeat every few calls. A power
+/// of two dividing [`LOOK_EVERY`], so that some of those heartbeats are looks.
+pub const LONE_EVERY: u64 = 16;
+
+const _: () = assert!(LOOK_EVERY.is_multiple_of(LONE_EVERY));
 
 /// The low bits of a tick count that a sighting or a stamp drops: they keep time in units of
 /// 2^20 ticks, a fraction of a millisecond.
@@ -238,28 +246,79 @@ pub(super) struct Chores {
     pub(super) purged: bool,
 }
 
+/// What a large allocation or free's heartbeat is to do (see [`lone_count`]).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Lone {
+    /// Nothing more: the slow path is counted.
+    Counted,
+    /// The chores, by [`Cache::lone_beat`].
+    Beat(LoneTurn),
+}
+
+/// The CPU and the turn of a large allocation or free's heartbeat that is due.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct LoneTurn {
+    cpu: Option<Cpu>,
+    turn: Option<u64>,
+}
+
+/// The first half of the heartbeat of a slow path that served no small class: a large
+/// allocation or free, which counts as a slow path of the CPU the thread is on. It always
+/// counts itself, so that the CPU looks busy to the idle check, but the chores, the purge step
+/// among them, are due only on every [`LONE_EVERY`]th count: a large allocation or free is a
+/// few hundred instructions of its own, and a whole heartbeat on each would cost about as much
+/// again. A thread with no valid CPU has no counter, and beats every time. This half needs
+/// only the depot and the routines, so that the caller builds the rest of a [`Cache`] only
+/// when the chores are due.
+pub fn lone_count<R: Routines>(depot: &Depot, routines: &R) -> Lone {
+    let cpu = routines.cpu();
+    let activity = cpu.map(|cpu| count(depot, routines, cpu));
+    if activity.is_some_and(|activity| !activity.is_multiple_of(LONE_EVERY)) {
+        return Lone::Counted;
+    }
+    // The chores take turns by count, the classes and the CPUs looked at in rotation, so they
+    // turn once per beat, not once per count, or they would visit a fraction of each.
+    Lone::Beat(LoneTurn {
+        cpu,
+        turn: activity.map(|activity| activity / LONE_EVERY),
+    })
+}
+
+/// Counts a slow path of `cpu` in its slab's activity counter, and returns the count.
+fn count<R: Routines>(depot: &Depot, routines: &R, cpu: Cpu) -> u64 {
+    if depot.shared.cpus.load(Relaxed) <= cpu.index() {
+        depot.shared.cpus.fetch_max(cpu.index() + 1, Relaxed);
+    }
+    routines.slabs().slab(cpu).note_activity()
+}
+
 impl<O: Os, R: Routines, S: Source> Cache<'_, O, R, S> {
-    /// The heartbeat of a slow path that served no small class: a large allocation or free,
-    /// which counts as a slow path of the CPU the thread is on. All but the purge step, which
-    /// the back end takes inside a large allocation or free itself.
+    /// The heartbeat of a large allocation or free, both halves (see [`lone_count`]).
     pub fn lone_heartbeat(&self) {
+        if let Lone::Beat(turn) = lone_count(self.depot, &self.routines) {
+            self.lone_beat(turn);
+        }
+    }
+
+    /// The chores of a large allocation or free's heartbeat that [`lone_count`] found due.
+    pub fn lone_beat(&self, turn: LoneTurn) {
         let chores = Chores {
-            cpu: self.routines.cpu(),
-            purged: true,
+            cpu: turn.cpu,
             ..Chores::default()
         };
-        self.heartbeat(None, chores);
+        self.beat(None, chores, turn.turn);
     }
 
     /// One heartbeat, after a slow path that served `served`, if it served a small class.
     pub(super) fn heartbeat(&self, served: Option<SmallClass>, chores: Chores) {
+        let activity = chores.cpu.map(|cpu| count(self.depot, &self.routines, cpu));
+        self.beat(served, chores, activity);
+    }
+
+    /// The chores of a heartbeat. `activity` is its turn, which picks the class and the CPU
+    /// that the rotating chores look at: for a small slow path, the count of its CPU's activity.
+    fn beat(&self, served: Option<SmallClass>, chores: Chores, activity: Option<u64>) {
         let clock = Clock::new(self.os());
-        let activity = chores.cpu.map(|cpu| {
-            if self.depot.shared.cpus.load(Relaxed) <= cpu.index() {
-                self.depot.shared.cpus.fetch_max(cpu.index() + 1, Relaxed);
-            }
-            self.slab(cpu).note_activity()
-        });
         if let (Some(cpu), Some(class), true) = (chores.cpu, served, chores.installed) {
             self.unstamp(cpu, class);
         }
