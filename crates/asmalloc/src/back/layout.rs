@@ -13,7 +13,8 @@
 //! ...                         zero bitmap, large classes only: one bit per slot, set means
 //!                             free and known to read as zero
 //! ...                         sizes, large classes only: one word per slot, the size the
-//!                             object in it was last allocated or resized to
+//!                             object in it was last allocated or resized to, and whether
+//!                             the slot is advised for huge pages (`Recorded`)
 //! ```
 //!
 //! The leaf bitmap comes first so that it can be committed a page at a time as the region grows,
@@ -113,6 +114,34 @@ impl Hints {
             None => 0,
         };
         huge as u64 | (self.cursor as u64) << 32
+    }
+}
+
+/// What a large slot's size word holds: the size of the object in it, and whether the slot's
+/// whole huge pages are advised for huge pages because the object grew there. One word,
+/// written only by whoever holds the slot. A size is at most a region, 4 GiB, so the flag
+/// takes the top bit.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) struct Recorded {
+    pub(crate) size: usize,
+    pub(crate) huge: bool,
+}
+
+impl Recorded {
+    const HUGE: u64 = 1 << 63;
+
+    #[inline(always)]
+    pub(crate) const fn unpack(word: u64) -> Recorded {
+        Recorded {
+            size: (word & !Recorded::HUGE) as usize,
+            huge: word & Recorded::HUGE != 0,
+        }
+    }
+
+    #[inline(always)]
+    pub(crate) const fn pack(self) -> u64 {
+        let flag = if self.huge { Recorded::HUGE } else { 0 };
+        self.size as u64 | flag
     }
 }
 
@@ -410,6 +439,22 @@ impl Layout {
         }
     }
 
+    /// The whole huge pages inside slot `slot`, as a unit, if there are any: the part of a
+    /// slot that huge-page advice may cover without making a huge page straddle into the
+    /// slots beside it.
+    #[inline]
+    pub(crate) const fn huge_interior(&self, slot: u32) -> Option<Unit> {
+        let page = self.page_size();
+        let start = self.huge_ceil(self.slot_bytes(slot).div_ceil(page) as u32);
+        let end =
+            ((self.slot_bytes(slot + 1) >> self.page_shift) as u32) & !(self.huge_pages() - 1);
+        if start < end {
+            Some(Unit { start, end })
+        } else {
+            None
+        }
+    }
+
     /// The slots a unit touches: `first..=last`.
     #[inline]
     pub(crate) const fn touching(&self, unit: Unit) -> (u32, u32) {
@@ -568,6 +613,35 @@ mod tests {
                 cursor: 0
             }
         );
+        for huge in [false, true] {
+            let recorded = Recorded {
+                size: 1 << 32,
+                huge,
+            };
+            assert_eq!(Recorded::unpack(recorded.pack()), recorded);
+        }
+        assert_eq!(Recorded::unpack(4096).size, 4096);
+    }
+
+    #[test]
+    fn a_slots_huge_interior_is_its_whole_huge_pages() {
+        let plan = Geometry::DESIGN.largest_plan();
+        let huge = Geometry::DESIGN.huge_page_size();
+        let page = Geometry::DESIGN.page_size();
+        for class in Class::all().filter(|c| !c.is_small() && plan.fits_region(*c)) {
+            let layout = Layout::new(plan, class).unwrap();
+            for slot in [0, 1, 2, 3, layout.slots() - 1] {
+                let (start, end) = (layout.slot_bytes(slot), layout.slot_bytes(slot + 1));
+                match layout.huge_interior(slot) {
+                    Some(unit) => {
+                        let (a, b) = (unit.start as usize * page, unit.end as usize * page);
+                        assert!(a >= start && b <= end && a % huge == 0 && b % huge == 0);
+                        assert!(a - start < huge && end - b < huge, "{class:?} {slot}");
+                    }
+                    None => assert!(start.next_multiple_of(huge) + huge > end, "{class:?}"),
+                }
+            }
+        }
     }
 
     /// Walks every top-down pass over a region of the standard geometry and checks that the

@@ -89,6 +89,23 @@ pub const HUGE_AFTER_HUGE_PAGES: usize = knob(option_env!("ASMALLOC_HUGE_AFTER_H
 /// resident.
 pub const HUGE_MIN_SLOTS_PER_PAGE: usize = 4;
 
+/// A large block that grows to at least this many huge pages, by moving or in place, gets huge
+/// pages: its slot's whole huge pages are advised for them (`region::advise_grown`) until the
+/// slot is freed, when they are purged and the advice is taken back. 1, or 2 MiB, so the most
+/// the advice can make resident that the program did not ask for is under half of what it
+/// did. Growth is the evidence of dense use: a copy fills the old size, and a growing buffer
+/// is being appended to. A block allocated at its size in one call may be a buffer used
+/// sparsely, and with huge pages each part touched would cost 2 MiB, so it never gets them.
+/// Zero turns this off.
+pub const GROWN_HUGE_MIN_HUGE_PAGES: usize =
+    knob(option_env!("ASMALLOC_GROWN_HUGE_MIN_HUGE_PAGES"), 1);
+
+/// ...and only if it grows by at most this factor at once: 4. A vector doubles; a program that
+/// reserves a large buffer behind a small one has said nothing about how densely it will use
+/// it, and khugepaged would make every huge page it touches resident whole
+/// (`docs/research/zen5-roofline.md`, section 7).
+pub const GROWN_HUGE_MAX_FACTOR: usize = 4;
+
 /// A large block that moves is copied in pieces of this many huge pages, and the pages of the
 /// old block behind each piece go back to the OS before the next is copied: 1, or 2 MiB. So a
 /// moving block has both copies resident for at most one piece, where a single copy had them
@@ -185,4 +202,14 @@ pub const fn populate_ahead(size: usize, page: usize, carved: usize) -> usize {
     } else {
         stretch
     }
+}
+
+/// Whether a large block growing from `old` to `new` bytes gets huge pages, where huge pages
+/// are `huge` bytes.
+#[inline(always)]
+pub const fn grown_huge(old: usize, new: usize, huge: usize) -> bool {
+    GROWN_HUGE_MIN_HUGE_PAGES != 0
+        && new > old
+        && new >= GROWN_HUGE_MIN_HUGE_PAGES * huge
+        && old.saturating_mul(GROWN_HUGE_MAX_FACTOR) >= new
 }

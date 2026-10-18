@@ -18,6 +18,13 @@
 //!   yet, so no purge can be at work on them, and a populate changes no contents, so racing
 //!   commits that both populate do no harm. A failed populate only leaves the pages to fault
 //!   in one at a time.
+//! - **Huge pages for grown blocks.** A large slot whose object grows densely past a size gets
+//!   its whole huge pages advised for huge pages, and its size word records that
+//!   (`Recorded::huge`). Only the slot's holder reads or writes the flag. While it is set, a
+//!   partial purge of the slot rounds inward to whole huge pages, since purging part of a huge
+//!   page returns nothing to the OS until the kernel gets round to splitting it; and the free
+//!   purges the whole slot and takes the advice back, so a free slot is never advised and a
+//!   purge of a free slot needs no rule of its own.
 //! - **Settling** after a claim: an allocation tests and clears the slot's zero bit (large
 //!   classes), and clears the clean bits of the pages its slots touch, and counts how much of
 //!   what it took was resident.
@@ -27,9 +34,9 @@
 //!   clean bits of its pages; then release the bits. The zero and clean bits are written only
 //!   while the purge holds the claim of every slot they describe.
 
-use super::layout::{Grow, Hints, Unit};
+use super::layout::{Grow, Hints, Recorded, Unit};
 use super::policy::{
-    COMMIT_AHEAD_HUGE_PAGES, COMMIT_AHEAD_PAGES, huge_after, populate_ahead, wants_huge,
+    COMMIT_AHEAD_HUGE_PAGES, COMMIT_AHEAD_PAGES, grown_huge, huge_after, populate_ahead, wants_huge,
 };
 use super::tree::{self, Host};
 use super::word::{BITS, Word, bits_in_word};
@@ -356,12 +363,81 @@ pub(crate) fn mark_purged<H: Host>(host: &H, region: RegionId, slot: u32) {
     }
 }
 
+/// What large slot `slot`'s size word holds, if the class records sizes. Only meaningful to
+/// the slot's holder.
+pub(crate) fn recorded<H: Host>(host: &H, region: RegionId, slot: u32) -> Option<Recorded> {
+    let at = host.layout().size_word(slot)?;
+    Some(Recorded::unpack(host.meta(region, at).load()))
+}
+
+/// Writes large slot `slot`'s size word, for the slot's holder. Does nothing for a class that
+/// records no sizes.
+pub(crate) fn record<H: Host>(host: &H, region: RegionId, slot: u32, recorded: Recorded) {
+    if let Some(at) = host.layout().size_word(slot) {
+        host.meta(region, at).store(recorded.pack());
+    }
+}
+
+/// For the holder of large slot `slot`, whose object has just grown from `old` to `new` bytes
+/// (moved there, or grown in place): advises the slot's whole huge pages for huge pages if
+/// the growth says the object is dense (`policy::grown_huge`) and the slot is not advised yet.
+///
+/// The flag is recorded before the advice, because a failed advice may have acted on part of
+/// the range, and the flag is what makes the free take it back. Advice changes no contents,
+/// and the range is inside the holder's slot, so nothing else is affected.
+pub(crate) fn advise_grown<H: Host>(host: &H, region: RegionId, slot: u32, old: usize, new: usize) {
+    let layout = host.layout();
+    let Some(now) = recorded(host, region, slot) else {
+        return;
+    };
+    let huge = layout.page_size() * layout.huge_pages() as usize;
+    if now.huge || !grown_huge(old, new, huge) {
+        return;
+    }
+    let Some(unit) = layout.huge_interior(slot) else {
+        return;
+    };
+    record(host, region, slot, Recorded { huge: true, ..now });
+    let page = layout.page_size();
+    let (offset, len) = (
+        unit.start as usize * page,
+        (unit.end - unit.start) as usize * page,
+    );
+    host.advise(region, offset, len, HugePages::Prefer);
+}
+
+/// For the holder of large slot `slot`: takes back the huge-page advice `advise_grown` gave
+/// it, if any, and clears the flag once the OS has accepted. A refusal keeps the flag, so the
+/// next holder tries again (`Back::alloc`).
+pub(crate) fn unadvise<H: Host>(host: &H, region: RegionId, slot: u32) {
+    let layout = host.layout();
+    let Some(now) = recorded(host, region, slot).filter(|r| r.huge) else {
+        return;
+    };
+    let undone = match layout.huge_interior(slot) {
+        Some(unit) => {
+            let page = layout.page_size();
+            let (offset, len) = (
+                unit.start as usize * page,
+                (unit.end - unit.start) as usize * page,
+            );
+            host.advise(region, offset, len, HugePages::Avoid)
+        }
+        None => true,
+    };
+    if undone {
+        record(host, region, slot, Recorded { huge: false, ..now });
+    }
+}
+
 /// Returns `len` bytes at `from` bytes into slot `slot` to the OS, for a caller that holds
 /// the slot and no longer needs them: the tail of an object that shrank in place, or the part
 /// of a moving object already copied. Both are page multiples and the range lies inside the
 /// slot. No bitmap changes: the slot stays allocated, and its clean and zero bits describe it
-/// only while it is free. `false`, and nothing done, in a huge-page part, which is purged only
-/// in whole huge pages, or if the OS refused.
+/// only while it is free. In a slot advised for huge pages the range is first trimmed to
+/// whole huge pages where it ends inside one. `false`, and nothing done, if nothing is left
+/// after trimming, in a huge-page part, which is purged only in whole huge pages, or if the
+/// OS refused.
 ///
 /// # Safety
 ///
@@ -375,14 +451,29 @@ pub(crate) unsafe fn purge_part<H: Host>(
     len: usize,
 ) -> bool {
     let layout = host.layout();
+    let shift = layout.page_shift();
     let offset = layout.slot_bytes(slot) + from;
-    let end = ((offset + len) >> layout.page_shift()) as u32;
+    let (mut first, mut end) = ((offset >> shift) as u32, ((offset + len) >> shift) as u32);
     let hints = Hints::unpack(host.meta(region, layout.hints_word()).load());
     if from + len > layout.size() || hints.huge_from.is_some_and(|huge| end > huge) {
         return false;
     }
-    // SAFETY: the caller's promise, for a range inside the slot.
-    unsafe { host.purge(region, offset, len) }
+    if recorded(host, region, slot).is_some_and(|r| r.huge)
+        && let Some(unit) = layout.huge_interior(slot)
+    {
+        if first > unit.start && first < unit.end {
+            first = layout.huge_ceil(first);
+        }
+        if end > unit.start && end < unit.end {
+            end &= !(layout.huge_pages() - 1);
+        }
+    }
+    if first >= end {
+        return false;
+    }
+    let page = layout.page_size();
+    // SAFETY: the caller's promise, for a range inside the slot: trimming only shrank it.
+    unsafe { host.purge(region, first as usize * page, (end - first) as usize * page) }
 }
 
 /// What purging one unit did.

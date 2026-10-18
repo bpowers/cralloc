@@ -103,7 +103,10 @@ nothing in it is needed afterwards.
 **Proof.** `purge_part` is an `unsafe fn` whose caller promises that it holds the slot, that
 nothing uses the range during the call and that nothing in it is needed after. The function
 checks that `from + len` is within the slot's size, so the range is inside the slot the
-caller holds. Its callers and why their ranges are given up are BACK-CLASS-02 (the tail of an
+caller holds. When the slot is advised for huge pages it may then move the start up and the
+end down to huge-page boundaries inside the slot (`Layout::huge_interior`), and returns
+without a call if nothing is left: the range purged is a subrange of the one the caller gave
+up, so the precondition still holds for it. Its callers and why their ranges are given up are BACK-CLASS-02 (the tail of an
 object that shrank in place) and BACK-CLASS-03 (the part of a moving object already copied)
 in `class-safety.md`. Awaiting review.
 
