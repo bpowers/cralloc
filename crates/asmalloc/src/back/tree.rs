@@ -241,7 +241,7 @@ impl Spot {
 /// any, or returns `None` if the class has none free. `n` must not be zero.
 pub(crate) fn claim<H: Host>(host: &H, n: u32) -> Option<Taken> {
     let height = host.layout().height();
-    'search: loop {
+    loop {
         let top = host.class_top().load();
         if top == 0 {
             return None;
@@ -250,47 +250,112 @@ pub(crate) fn claim<H: Host>(host: &H, n: u32) -> Option<Taken> {
         let regions = host.class_word(class_word).load();
         if regions == 0 {
             clear(host, Spot::class_word(host, class_word));
-            continue 'search;
+            continue;
         }
         let Some(region) = host.region((class_word * BITS + regions.trailing_zeros()) as usize)
         else {
             host.abort("a class summary bit names a region outside the heap")
         };
-        let mut spot = Spot {
+        let top = Spot {
             region,
             level: height,
             index: 0,
         };
-        loop {
-            let word = spot.word(host);
-            let seen = word.load();
-            if seen == 0 {
-                clear(host, spot);
-                continue 'search;
-            }
-            if spot.level == 0 {
-                let bits = lowest(seen, n);
-                match word.compare_exchange(seen, seen & !bits) {
-                    Ok(_) => {
-                        if bits == seen {
-                            clear(host, spot);
-                        }
-                        return Some(Taken {
-                            region,
-                            word: spot.index,
-                            bits,
-                        });
-                    }
-                    Err(_) => continue 'search,
-                }
-            }
-            spot = Spot {
-                level: spot.level - 1,
-                index: spot.index * BITS + seen.trailing_zeros(),
-                ..spot
-            };
+        if let Some(taken) = descend(host, top, n) {
+            return Some(taken);
         }
     }
+}
+
+/// Walks down from `spot` through the lowest set bit of each word and claims up to `n` slots
+/// from the leaf word it reaches. `None` if a word on the way is empty (its stale summary bit
+/// is cleared) or the compare-and-swap fails: the caller searches again.
+#[inline]
+fn descend<H: Host>(host: &H, mut spot: Spot, n: u32) -> Option<Taken> {
+    loop {
+        let word = spot.word(host);
+        let seen = word.load();
+        if seen == 0 {
+            clear(host, spot);
+            return None;
+        }
+        if spot.level == 0 {
+            let bits = lowest(seen, n);
+            word.compare_exchange(seen, seen & !bits).ok()?;
+            if bits == seen {
+                clear(host, spot);
+            }
+            return Some(Taken {
+                region: spot.region,
+                word: spot.index,
+                bits,
+            });
+        }
+        spot = Spot {
+            level: spot.level - 1,
+            index: spot.index * BITS + seen.trailing_zeros(),
+            ..spot
+        };
+    }
+}
+
+/// Where a run of claims has got to: the leaf word it claimed from last. Only ever made by
+/// [`claim_next`] from its own claim, and kept for no longer than one fill.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) struct Cursor {
+    region: RegionId,
+    word: u32,
+}
+
+/// [`claim`] for one of a run of claims, as a fill makes them. With a `cursor` from the run's
+/// last claim, the search starts there: that word if it has free slots left, else the lowest
+/// word above it in its region that the summary bits lead to, found by walking up only as far
+/// as a summary word with a set bit beyond the path. Only when that leads nowhere, or meets a
+/// stale bit or a lost race, does it search from the class's top word. Updates `cursor`.
+///
+/// The last claim took the lowest free slots there were, so the slots below the cursor were
+/// not free a moment ago, and the run still takes the lowest it can see. What it can miss is a
+/// slot freed below the cursor since, by another thread: the order of the two is a race either
+/// way, and the next fill starts from the top. Words found empty on the way are cleared as a
+/// claim from the top clears them, and the claim itself is the same compare-and-swap.
+pub(crate) fn claim_next<H: Host>(host: &H, n: u32, cursor: &mut Option<Cursor>) -> Option<Taken> {
+    let taken = match cursor.and_then(|at| claim_after(host, n, at)) {
+        Some(taken) => taken,
+        None => claim(host, n)?,
+    };
+    *cursor = Some(Cursor {
+        region: taken.region,
+        word: taken.word,
+    });
+    Some(taken)
+}
+
+/// The search of [`claim_next`] within the cursor's region: `None` if it leads nowhere there.
+fn claim_after<H: Host>(host: &H, n: u32, at: Cursor) -> Option<Taken> {
+    let height = host.layout().height();
+    let leaf = Spot::leaf(at.region, at.word);
+    if leaf.word(host).load() != 0 {
+        return descend(host, leaf, n);
+    }
+    let mut spot = leaf;
+    while spot.level < height {
+        let (index, bit) = (spot.index / BITS, spot.index % BITS);
+        let above = Spot {
+            level: spot.level + 1,
+            index,
+            ..spot
+        };
+        let beyond = above.word(host).load() & (u64::MAX << bit << 1);
+        if beyond != 0 {
+            let next = Spot {
+                index: index * BITS + beyond.trailing_zeros(),
+                ..spot
+            };
+            return descend(host, next, n);
+        }
+        spot = above;
+    }
+    None
 }
 
 /// Claims exactly `bits` of a leaf word if every one of them is free, as a purge does. Returns

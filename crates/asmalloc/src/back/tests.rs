@@ -126,13 +126,68 @@ fn a_double_free_aborts() {
 }
 
 #[test]
-#[should_panic(expected = "double free")]
+#[should_panic(expected = "freed twice in one batch")]
 fn a_slot_twice_in_one_batch_aborts() {
     let state = state::<Standard>();
     let back = state.get_or_reserve().unwrap();
     let class = small(16);
     let slots = fill(&back, class, 4);
     back.launder(class, &[slots[1], slots[2], slots[1]]);
+}
+
+/// A launder keeps four words open; a slot that comes back after its word was closed is still
+/// caught, from the record of closed words.
+#[test]
+#[should_panic(expected = "freed twice in one batch")]
+fn a_slot_twice_after_its_word_closed_aborts() {
+    let state = state::<Standard>();
+    let back = state.get_or_reserve().unwrap();
+    let class = small(16);
+    let slots = fill(&back, class, 64 * 8);
+    let batch: Vec<*mut u8> = (0..6).map(|w| slots[w * 64]).chain([slots[0]]).collect();
+    back.launder(class, &batch);
+}
+
+/// The same when the word was closed and opened again before the slot comes back: the second
+/// opening carries the bits its first OR set.
+#[test]
+#[should_panic(expected = "freed twice in one batch")]
+fn a_slot_twice_across_a_reopened_word_aborts() {
+    let state = state::<Standard>();
+    let back = state.get_or_reserve().unwrap();
+    let class = small(16);
+    let slots = fill(&back, class, 64 * 8);
+    let mut batch: Vec<*mut u8> = (0..6).map(|w| slots[w * 64]).collect();
+    batch.extend([slots[1], slots[0]]);
+    back.launder(class, &batch);
+}
+
+/// Scattered frees, one slot to a word across several summary words, and frees that close and
+/// reopen words, all reach the bitmaps: a fill afterwards gets every slot back, lowest first.
+#[test]
+fn scattered_launders_free_every_slot_and_fills_take_the_lowest() {
+    let state = state::<Standard>();
+    let back = state.get_or_reserve().unwrap();
+    let class = small(8);
+    // 8-byte slots in the standard geometry: two summary levels, 64 leaf words to a summary
+    // word, so this spans four of them.
+    let n = 64 * 64 * 4;
+    let mut slots = fill(&back, class, n);
+    slots.sort();
+    let order: Vec<*mut u8> = (0..n).map(|i| slots[i * 7919 % n]).collect();
+    for chunk in order.chunks(64) {
+        back.launder(class, chunk);
+    }
+    let again = fill(&back, class, n);
+    assert_eq!(again, slots, "every slot back, in address order");
+    // Now a scattered subset: a fill takes exactly those, in order, before carving.
+    let some: Vec<*mut u8> = slots.iter().step_by(37).copied().collect();
+    let shuffled: Vec<*mut u8> = (0..some.len()).map(|i| some[i * 31 % some.len()]).collect();
+    assert_ne!(some.len() % 31, 0, "a permutation");
+    for chunk in shuffled.chunks(64) {
+        back.launder(class, chunk);
+    }
+    assert_eq!(fill(&back, class, some.len()), some);
 }
 
 #[test]

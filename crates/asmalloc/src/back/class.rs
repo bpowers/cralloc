@@ -35,9 +35,10 @@ impl<'a, O: Os> Back<'a, O> {
         };
         let mut got = 0;
         let (mut resident, mut revived) = (0, 0);
+        let mut cursor = None;
         while got < out.len() {
             let want = (out.len() - got).min(BITS as usize) as u32;
-            let Some(taken) = tree::claim(&host, want) else {
+            let Some(taken) = tree::claim_next(&host, want, &mut cursor) else {
                 break;
             };
             let settled = region::settle(&host, taken.region, taken.word, taken.bits);

@@ -296,6 +296,115 @@ fn summary_deep_bounded() {
     );
 }
 
+/// The deep host of `summary_deep_bounded`: 8-byte slots in a 64 KiB region, two summary
+/// levels, slots 0 and `64 * 64` free.
+fn deep_setup() -> Host8 {
+    let host = Host8::new(standard(), class(8), 1);
+    assert_eq!(host.layout().height(), 2);
+    let r0 = host.region_at(0);
+    host.carve_all(r0, host.layout().slots());
+    free_now(&host, r0, 0);
+    free_now(&host, r0, 64 * 64);
+    host
+}
+
+/// Frees `slots` of region 0 as one batch: one OR per slot, one walk up for all.
+fn free_batch(host: &Host8, slots: &[u32]) {
+    let r0 = host.region_at(0);
+    let mut release = tree::Release::new(host, r0);
+    for &slot in slots {
+        release.leaf(r0, slot / BITS, 1 << (slot % BITS));
+    }
+    release.finish();
+}
+
+/// Claims `times` times through one cursor, as a fill does, keeping what it gets.
+fn claim_run(host: &Host8, times: usize) -> Vec<(RegionId, u32)> {
+    let mut cursor = None;
+    let mut out = Vec::new();
+    for _ in 0..times {
+        let Some(taken) = tree::claim_next(host, 1, &mut cursor) else {
+            break;
+        };
+        out.push((
+            taken.region,
+            taken.word * BITS + taken.bits.trailing_zeros(),
+        ));
+    }
+    out
+}
+
+/// A batch of releases under three summary words, whose walk is shared and deferred, races a
+/// run of claims through a cursor and a claim from the top. Every slot ends up free once and
+/// every word visible (`Partition`, `Visible`). Preemptions bounded to two.
+#[test]
+#[cfg_attr(miri, ignore)]
+fn a_batch_release_races_claims_through_a_cursor() {
+    let freed = [64 + 1, 64 * 65 + 2, 64 * 2 + 3, 64 + 4];
+    explore(
+        Config {
+            preemptions: Some(2),
+            ..Config::ALL
+        },
+        3,
+        || (deep_setup(), Mutex::new(Vec::new())),
+        |(host, kept), me| {
+            let got = match me {
+                0 => {
+                    free_batch(host, &freed);
+                    Vec::new()
+                }
+                1 => claim_run(host, 3),
+                _ => claim(host, 1),
+            };
+            kept.lock().unwrap().extend(got);
+        },
+        |(host, kept), outcome| {
+            assert!(outcome.killed.is_empty());
+            let kept = kept.lock().unwrap().clone();
+            let distinct: BTreeSet<_> = kept.iter().copied().collect();
+            assert_eq!(distinct.len(), kept.len(), "a slot claimed twice");
+            release_all(host, &kept);
+            let mut expected: BTreeSet<u64> = [0, 64 * 64].into_iter().collect();
+            expected.extend(freed.iter().map(|&s| s as u64));
+            assert_eq!(free_set(host, 1), expected);
+            assert!(host.all_visible(), "a free word is invisible");
+        },
+    );
+}
+
+/// A run of claims through a cursor while another thread frees below and above it: nothing is
+/// handed out twice or lost, and every word stays visible. Preemptions bounded to three.
+#[test]
+#[cfg_attr(miri, ignore)]
+fn a_cursor_run_races_frees_below_and_above_it() {
+    explore(
+        Config {
+            preemptions: Some(3),
+            ..Config::ALL
+        },
+        2,
+        || (deep_setup(), Mutex::new(Vec::new())),
+        |(host, kept), me| {
+            if me == 0 {
+                let got = claim_run(host, 3);
+                kept.lock().unwrap().extend(got);
+            } else {
+                free_now(host, host.region_at(0), 1);
+                free_now(host, host.region_at(0), 64 * 70);
+            }
+        },
+        |(host, kept), outcome| {
+            assert!(outcome.killed.is_empty());
+            let kept = kept.lock().unwrap().clone();
+            release_all(host, &kept);
+            let expected: BTreeSet<u64> = [0, 1, 64 * 64, 64 * 70].into_iter().collect();
+            assert_eq!(free_set(host, 1), expected);
+            assert!(host.all_visible(), "a free word is invisible");
+        },
+    );
+}
+
 /// `Summary_heal_crash.cfg`: as `summary_three_threads_bounded`, but threads 1 and 2 may vanish
 /// at any step, as in a forked child. What a vanished thread held is lost; nothing is ever
 /// handed out twice; and once the survivor is done, a free into any word makes that word

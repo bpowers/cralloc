@@ -181,7 +181,7 @@ fn main() {
         pool.sort();
         let mut rng = Rng::new(size as u64);
         let mut dense_fill = Cost::default();
-        for name in orders.split(',') {
+        for name in orders.split(',').filter(|name| !name.is_empty()) {
             let mut launder = Cost::default();
             for rep in 0..=reps {
                 let ord = order(name, &pool, &mut rng);

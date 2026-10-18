@@ -188,7 +188,21 @@ pub(crate) fn settle<H: Host>(host: &H, region: RegionId, index: u32, bits: u64)
     let page = layout.page_size();
     let shift = layout.page_shift();
     let mut cleaned = 0usize;
-    let mut rest = bits;
+    // Most claims find no clean page anywhere under the word's claimed slots: then one look at
+    // the clean bits of the whole span, which reads and writes nothing it must not, does for
+    // every run.
+    let (first, last) = (
+        index * BITS + bits.trailing_zeros(),
+        index * BITS + (BITS - 1 - bits.leading_zeros()),
+    );
+    let (start, end) = (
+        (layout.slot_bytes(first) >> shift) as u32,
+        layout.slot_bytes(last + 1).div_ceil(page) as u32,
+    );
+    let any_clean = (start / BITS..=(end - 1) / BITS).any(|w| {
+        host.meta(region, layout.clean_word(w)).load() & bits_in_word(w, start, end - 1) != 0
+    });
+    let mut rest = if any_clean { bits } else { 0 };
     while rest != 0 {
         let low = rest.trailing_zeros();
         let run = (!(rest >> low)).trailing_zeros();
