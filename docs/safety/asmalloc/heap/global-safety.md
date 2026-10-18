@@ -42,7 +42,15 @@ fits; grow and shrink keep contents and leave the old block alone on error.
 **Proof.** As GLOBAL-01, with: the returned length is the class size for a small block, by the
 fit rule every size from the request to it has the same class (`classes::verify`), so a
 deallocation with any fitting size finds the class; for a large block the length is
-`usable_size`, at most the slot or run, and the class comes from the address. Zero-size
+`usable_size`, at most the slot or run, and the class comes from the address. That last needs
+`dealloc` to treat every fitting layout of a large block as large, or a large slot would be
+pushed into a magazine. It does: a block is large because its layout's class is not small
+(`small(layout)` is `None`: `Heap::alloc_other`, `Heap::resize`), a fitting layout has the
+same alignment and a size at least the one requested, and the class of a layout is monotone in
+its size (the size is rounded up to a multiple of the alignment and the class is the smallest
+at least that, both non-decreasing; `classes::verify`). So a fitting layout's class is at least
+the requested one's, above every small class or none at all, and `dealloc` takes the large
+path, which finds the slot or run from the address. Zero-size
 layouts get a dangling, aligned pointer and are never freed (`heap/allocator.rs`). Every handle
 reaches `HEAP`, so blocks may move between handles.
 

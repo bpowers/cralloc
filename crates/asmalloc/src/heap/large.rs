@@ -212,7 +212,8 @@ impl<O: Os> Heap<O> {
             if small(old).is_some() {
                 return Some(Grant { ptr, len });
             }
-            return Some(self.resize_large_in_place(ptr, new, zero));
+            // SAFETY: the caller's promise for `ptr`, and `new` fits the block (`in_place`).
+            return Some(unsafe { self.resize_large_in_place(ptr, new, zero) });
         }
         // Growing a large object out of its block: take headroom. A zeroed grow takes none, so
         // that it never clears room nobody asked for.
@@ -262,10 +263,16 @@ impl<O: Os> Heap<O> {
     /// `zero`, and returns what the caller may use now. A block that shrinks gives the whole
     /// pages past its new usable size back to the OS at once (`Back::resize_in_place`), so
     /// that a buffer cut down by `realloc` does not keep its old pages until it is freed.
-    fn resize_large_in_place(&self, ptr: NonNull<u8>, new: Layout, zero: bool) -> Grant {
+    ///
+    /// # Safety
+    ///
+    /// `ptr` is a live large block of this heap that the caller owns and is resizing to `new`,
+    /// which fits it.
+    unsafe fn resize_large_in_place(&self, ptr: NonNull<u8>, new: Layout, zero: bool) -> Grant {
         let before = self.usable_size(ptr.as_ptr()).unwrap_or(0);
         if let Some(back) = self.back() {
-            back.resize_in_place(ptr, new.size());
+            // SAFETY: the caller's promise; a resize gives up what lies past the new size.
+            unsafe { back.resize_in_place(ptr, new.size()) };
         }
         let len = self.usable_size(ptr.as_ptr()).unwrap_or(new.size());
         if zero && len > before {

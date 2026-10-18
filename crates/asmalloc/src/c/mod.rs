@@ -155,7 +155,8 @@ pub unsafe extern "C" fn realloc(ptr: *mut c_void, size: usize) -> *mut c_void {
         Found::Small(class) if next == Some(class.class()) => return ptr,
         Found::Small(class) => class.size(),
         Found::Large { size: used } => {
-            if process::resize_in_place_by_address(old, used, size) {
+            // SAFETY: MOD-04.
+            if unsafe { process::resize_in_place_by_address(old, used, size) } {
                 return ptr;
             }
             // Everything `malloc_usable_size` reported, not just the size asked for: programs

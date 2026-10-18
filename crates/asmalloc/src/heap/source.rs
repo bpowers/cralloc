@@ -18,7 +18,8 @@ impl<O: Os> Source for BackSource<'_, O> {
     }
 
     fn take_back(&self, class: SmallClass, objects: &[NonNull<u8>]) {
-        self.0.launder(class, objects);
+        // SAFETY: HEAP-SOURCE-01.
+        unsafe { self.0.launder(class, objects) };
     }
 
     fn alloc_one(&self, class: SmallClass) -> Option<NonNull<u8>> {
