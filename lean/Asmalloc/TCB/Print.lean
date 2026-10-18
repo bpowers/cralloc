@@ -64,6 +64,12 @@ which the emitter allows only once per function (`Rust.checkRseq`):
     .popsection
 ```
 
+An exit straight to an external target, with no code of its own, is a
+branch to it; or, if the printer has `stubExits`, a branch to a stub
+`N: jmp target` placed after the function's return, so that the assembler
+can give the branch its short form. Either way the branch leaves the
+sequence for the target with nothing else run in between.
+
 So the abort handler lies outside the sequence, after the signature, and
 the arming code (x86-64's `leaRseqCs`, `lea r, [rip + 3f]`) names this
 descriptor. The descriptor holds absolute addresses, which the dynamic
@@ -138,36 +144,49 @@ structure Printer (M : ISA) where
   /-- The most fused micro-ops a function's hot path may have (`Rust.checkUops`),
   if the target has a limit. -/
   uopLimit : Option Nat := none
+  /-- Whether a restartable sequence's exit straight to an external target
+  branches to a stub after the function's return, `N: jmp target`, rather
+  than to the target itself. The assembler can then encode the branch in its
+  short form, the stub's jump taking the long one off the hot path. Only for
+  a function that has a return to put the stubs after. -/
+  stubExits : Bool := false
 
 variable {M : ISA} (P : Printer M)
 
 /-- The number of the `n`-th label of a function. -/
 def labelNum (n : Nat) : String := s!"2{n}"
 
-/-- The lines of a restartable sequence's body, and of its exits' code out
-of line, using labels `labelNum n`: an exit with no code of its own
-branches straight to its external target, or to the end of the sequence
-(label `7`); any other branches to a label of its own, whose code ends with
-a jump to the end of the sequence or to its external target. -/
-def Printer.lowerBody : List (Step M.Instr M.Cond) → Nat → List Line × List Line × Nat
-  | [], n => ([], [], n)
+/-- The lines of a restartable sequence's body, of its exits' code out of
+line, and of its exits' stubs (`stubExits`), using labels `labelNum n`: an
+exit with no code of its own branches straight to its external target, or
+to a stub of its own that jumps there, or to the end of the sequence (label
+`7`); any other branches to a label of its own, whose code ends with a jump
+to the end of the sequence or to its external target. -/
+def Printer.lowerBody : List (Step M.Instr M.Cond) → Nat → List Line × List Line × List Line × Nat
+  | [], n => ([], [], [], n)
   | .instr i :: rest, n =>
-    let (l, k, n) := lowerBody rest n
-    (P.instr i ++ l, k, n)
+    let (l, k, st, n) := lowerBody rest n
+    (P.instr i ++ l, k, st, n)
   | .exit c [] (some t) :: rest, n =>
-    let (l, k, n) := lowerBody rest n
-    (.ops [.text (P.branch c ""), .ref t] :: l, k, n)
+    if P.stubExits then
+      let lab := labelNum n
+      let (l, k, st, n) := lowerBody rest (n + 1)
+      (.text (P.branch c (lab ++ "f")) :: l, k,
+        [.text (lab ++ ":"), .ops [.text (P.jump ""), .ref t]] ++ st, n)
+    else
+      let (l, k, st, n) := lowerBody rest n
+      (.ops [.text (P.branch c ""), .ref t] :: l, k, st, n)
   | .exit c [] none :: rest, n =>
-    let (l, k, n) := lowerBody rest n
-    (.text (P.branch c "7f") :: l, k, n)
+    let (l, k, st, n) := lowerBody rest n
+    (.text (P.branch c "7f") :: l, k, st, n)
   | .exit c cold ext :: rest, n =>
     let lab := labelNum n
-    let (l, k, n) := lowerBody rest (n + 1)
+    let (l, k, st, n) := lowerBody rest (n + 1)
     let back : Line := match ext with
       | none => .text (P.jump "7b")
       | some t => .ops [.text (P.jump ""), .ref t]
     (.text (P.branch c (lab ++ "f")) :: l,
-      [.text (lab ++ ":")] ++ cold.flatMap P.instr ++ [back] ++ k, n)
+      [.text (lab ++ ":")] ++ cold.flatMap P.instr ++ [back] ++ k, st, n)
 
 /-- The lines of the restartable sequence `rseq arm body` (see the module
 docs), given its body's lines and its exits' code (`lowerBody`). -/
@@ -210,8 +229,8 @@ def Printer.lower : Code M.Instr M.Cond → Nat → List Line × List Line × Na
     let (lb, kb, n) := lower body n
     (P.instr i ++ lb ++ P.instr j, kb, n)
   | .rseq arm body, n =>
-    let (lb, kb, n) := P.lowerBody body n
-    (P.rseqLines arm lb kb, [], n)
+    let (lb, kb, st, n) := P.lowerBody body n
+    (P.rseqLines arm lb kb, st, n)
 
 /-- The fused micro-ops of a restartable sequence's body when no exit is
 taken: one per instruction and per exit, but an exit right after an

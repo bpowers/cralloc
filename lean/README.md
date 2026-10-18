@@ -119,11 +119,21 @@ The front end's pop and push (`Spec/Slab.lean`, `Impl/Slab/`,
 `Proof/Slab/`, `Artifacts/Slab/`) are restartable sequences, each emitted
 inline (`front/generated/x86_64_inline/slab.rs`, an `asm!` block in an
 `#[inline(always)]` function) and out of line (`front/generated/x86_64/slab.rs`, a
-naked function). Their modules also carry the layout constants the proofs
-assume (`Spec.Slab.rustConsts`). The Rust crate must provide what their
-`# Safety` sections and `Spec.Slab.path` name: `front::SLABS`,
-`front::MAG_MASKS`, `front::pop_slow`, `front::push_slow` and glibc's
-`__rseq_offset` as `front::__rseq_offset`.
+naked function). Neither names a class or the slabs: each is given the
+address of its class's word in slab 0, inline with the mask in a register,
+out of line with the mask in a table `MASK_DISP` bytes above that word, past
+the slabs. Their modules also carry the layout constants the proofs assume
+(`Spec.Slab.rustConsts`). The Rust crate must provide what their `# Safety`
+sections and `Spec.Slab.path` name: `front::SLABS` (the slabs, which the
+slow path's routines name, followed by the masks' table),
+`front::pop_slow`, `front::push_slow` and glibc's `__rseq_offset` as
+`front::__rseq_offset`.
+
+The out-of-line pop's and push's steps after the CPU number's are
+definitions of their own (`Impl.Slab.X86_64.popSteps`, `pushSteps`), taking
+the register that holds the word's address and the exits as parameters, so
+that a longer routine (a C entry point that finds the class first) can end
+with them.
 
 ## What you need to trust
 

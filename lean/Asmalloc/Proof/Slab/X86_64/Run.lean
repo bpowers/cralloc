@@ -72,6 +72,10 @@ theorem exec_test32_immP (d : Reg) (n : String) :
     exec (.alu32 .test d (.immP n)) σ =
       some (arithFlags σ ((σ.gpr d).setWidth 32 &&& (σ.params n).setWidth 32) false false) := rfl
 
+theorem exec_test32_reg (d r : Reg) :
+    exec (.alu32 .test d (.reg r)) σ =
+      some (arithFlags σ ((σ.gpr d).setWidth 32 &&& (σ.gpr r).setWidth 32) false false) := rfl
+
 theorem exec_test32_mem {d : Reg} {m : MemOp} (h : InRegions (σ.rd ++ σ.wr) (σ.ea m) 4) :
     exec (.alu32 .test d (.mem m)) σ =
       some (arithFlags σ ((σ.gpr d).setWidth 32 &&& σ.mem.readW (σ.ea m) 32) false false) := by

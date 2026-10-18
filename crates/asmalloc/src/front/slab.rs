@@ -5,8 +5,9 @@
 //! address them as `SLABS + (cpu << SLAB_SHIFT) + 8 c`. Word 0 is never used, so that the class
 //! index needs no adjustment. The cold part follows on its own cache lines: the heads of the
 //! spare stacks (one stack of non-empty and one of empty magazines per class), the activity
-//! counter, the idle check's last sighting of it, the drain claim, the count of full magazines
-//! the CPU's frees have retired, and per class a stamp of when the loaded magazine was loaded.
+//! counter, the drain claim and the count of full magazines the CPU's frees have retired; then,
+//! on lines of their own that only this CPU's slow paths touch, per class a stamp of when the
+//! loaded magazine was loaded; and on a line of its own the idle check's last sighting.
 //!
 //! Every field is an atomic word and the all-zero slab is valid: no magazines, empty spare
 //! stacks, no activity, no claim, nothing retired and no stamps.
@@ -30,6 +31,12 @@ const HEADS: usize = 64;
 
 const _: () = assert!(SMALL_COUNT < WORDS && SMALL_COUNT < HEADS);
 const _: () = assert!(size_of::<Slab>() == SLAB_BYTES && align_of::<Slab>() == SLAB_BYTES);
+// The fast path loads only the hot words; the cold words are on lines of their own.
+const _: () = assert!(core::mem::offset_of!(Slab, activity) % 64 == 0);
+const _: () = assert!(core::mem::offset_of!(Slab, seen) % 64 == 0);
+const _: () = assert!(core::mem::offset_of!(Slab, seen) >= core::mem::offset_of!(Slab, claim) + 8);
+const _: () = assert!(core::mem::offset_of!(Slab, stamps) % 64 == 0);
+const _: () = assert!(core::mem::offset_of!(Slab, stamps) >= WORDS * 8);
 
 /// Which spare stack of a class.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -75,34 +82,48 @@ impl Field {
     }
 }
 
-/// Per class, indexed like the hot words, when the magazine loaded there was loaded. On lines
-/// of their own: only this CPU's slow paths write them, and other CPUs never read them.
-#[repr(C, align(64))]
-struct Stamps([AtomicU64; WORDS]);
-
 /// One CPU's slab. See the module documentation.
 #[repr(C, align(4096))]
 pub struct Slab {
     /// The hot words, then the full heads, then the empty heads.
     fields: [AtomicPtr<u8>; WORDS + 2 * HEADS],
     activity: AtomicU64,
-    seen: AtomicU64,
     claim: AtomicU64,
     retired: AtomicU64,
     stamps: Stamps,
+    /// On a line of its own: other CPUs' idle checks write it, and should not take the line
+    /// that this CPU's slow paths count their activity in.
+    seen: OwnLine,
 }
 
+/// Per class, indexed by class index like the hot words, when the magazine loaded there was
+/// loaded (`depot::age`). On lines of their own, away from the hot words the fast path loads
+/// and from the sighting other CPUs write. Only the class indexes in use have one, so that the
+/// slab's fields stay below the masks' page offset.
+#[repr(C, align(64))]
+struct Stamps([AtomicU64; STAMPS]);
+
+/// Stamps per slab: one for each class index up to the largest small class's.
+const STAMPS: usize = SMALL_COUNT + 1;
+
+/// A word alone on its cache line.
+#[repr(C, align(64))]
+struct OwnLine(AtomicU64);
+
 impl Slab {
+    /// The bytes at the start of a slab that hold its fields; the rest of its page is unused.
+    pub(crate) const USED_BYTES: usize = core::mem::offset_of!(Slab, seen) + size_of::<OwnLine>();
+
     /// A slab with nothing in it.
     #[allow(clippy::new_without_default)]
     pub const fn new() -> Slab {
         Slab {
             fields: [const { AtomicPtr::new(ptr::null_mut()) }; WORDS + 2 * HEADS],
             activity: AtomicU64::new(0),
-            seen: AtomicU64::new(0),
             claim: AtomicU64::new(0),
             retired: AtomicU64::new(0),
-            stamps: Stamps([const { AtomicU64::new(0) }; WORDS]),
+            stamps: Stamps([const { AtomicU64::new(0) }; STAMPS]),
+            seen: OwnLine(AtomicU64::new(0)),
         }
     }
 
@@ -142,7 +163,7 @@ impl Slab {
     /// (`depot::heartbeat`).
     #[inline]
     pub(crate) fn seen(&self) -> &AtomicU64 {
-        &self.seen
+        &self.seen.0
     }
 
     /// The drain claim: zero, or the generation of the drainer that holds it.
@@ -163,10 +184,10 @@ impl Slab {
     }
 
     /// The stamp of the magazine loaded for `class` (`depot::age`): zero, or which magazine
-    /// was loaded and when. A hint, written with single stores.
+    /// was loaded and since when. A hint, written with single stores.
     #[inline]
     pub(crate) fn stamp(&self, class: SmallClass) -> &AtomicU64 {
-        &self.stamps.0[class.class().index() as usize % WORDS]
+        &self.stamps.0[class.class().index() as usize % STAMPS]
     }
 }
 

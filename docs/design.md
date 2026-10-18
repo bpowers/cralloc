@@ -277,9 +277,10 @@ asked for (see "Large objects").
 Each CPU has a slab. Its hot part is an array with one 8-byte word per small class; a
 colder part holds the CPU's spare magazines and counters. The slabs are a static array with
 an entry for every CPU number the OS can produce (8192 on x86-64), so the address of a slab
-word is the CPU number shifted and added to a link-time constant, with no pointer to load.
-Untouched slabs cost no memory. A routine compares the CPU number with the array length and
-takes the slow path if it is out of range. That one compare keeps a thread with no rseq
+word is the CPU number shifted and added to the address of the class's word in slab 0, a
+link-time constant plus 8 times the class, with no pointer to load. Untouched slabs cost no
+memory. A routine compares the CPU number with the array length and takes the slow path if
+it is out of range. That one compare keeps a thread with no rseq
 registration, which reads a negative number, away from every slab, and it means memory
 safety does not depend on what the OS writes there.
 
@@ -311,28 +312,33 @@ class, the slab word is zero, a marker, or the address of slot `s` of a magazine
 class that nothing else refers to, with slots 1 to `s - 1` holding pointers to distinct free
 objects of that class that appear nowhere else.
 
-Allocation of an object whose class is a compile-time constant has this shape (the exact
-instructions are chosen by measurement and may change):
+A routine names no class. It is given the address of its class's word in slab 0, and the
+class's mask; allocation has this shape (the exact instructions are chosen by measurement and
+may change):
 
 ```asm
-    mov   rdx, [rip + __rseq_offset@GOTPCREL]
-    mov   rdx, [rdx]                  ; where glibc put this thread's rseq area
-    lea   r10, [rip + descriptor]
-    mov   fs:[rdx + 8], r10           ; arm: tell the OS which sequence we are in
+                                      ; rdi: SLABS + CLASS*8, esi: the class's mask
+    mov   r10, [rip + __rseq_offset@GOTPCREL]
+    mov   r10, [r10]                  ; where glibc put this thread's rseq area
+    lea   r11, [rip + descriptor]
+    mov   fs:[r10 + 8], r11           ; arm: tell the OS which sequence we are in
 start:
-    mov   r8d, fs:[rdx + 4]           ; CPU number
+    mov   r8d, fs:[r10 + 4]           ; CPU number
     cmp   r8d, SLAB_COUNT             ; out of range, or no registration
     jae   slow
     shl   r8, SLAB_SHIFT
-    lea   r9, [rip + SLABS + CLASS*8]
-    mov   rcx, [r9 + r8]              ; next free slot of the loaded magazine
-    test  ecx, MASK                   ; no magazine, or empty?
+    mov   rcx, [rdi + r8]             ; next free slot of the loaded magazine
+    test  ecx, esi                    ; no magazine, or empty?
     jz    slow
     mov   rax, [rcx - 8]              ; the object
     lea   rcx, [rcx - 8]
-    mov   [r9 + r8], rcx              ; commit
+    mov   [rdi + r8], rcx             ; commit
 end:
 ```
+
+When the class is a compile-time constant, the caller's computation of the two inputs folds
+to a `lea` and a `mov`; when it is not, to a compare and a load from a table of classes by
+size.
 
 An executable can read `__rseq_offset` with one load instead of two, because the linker
 gives it its own copy of the variable; that saves a cycle per pair, and a cargo feature
@@ -363,10 +369,14 @@ emit one that breaks them:
 - the slow path is out of line.
 
 Each routine is generated in two forms. The inlined form is an `asm!` block in an
-`#[inline]` function with the class and mask as constants. It becomes part of `__rust_alloc`
-in the user's binary and, with LTO, of its callers. The out-of-line form takes the class in
-a register and loads the mask from a per-class table; the C entry points use it, as do Rust
-callers whose layout is not constant.
+`#[inline]` function that takes the word's address and the mask in registers. It becomes part
+of `__rust_alloc` in the user's binary and, with LTO, of its callers, whether their layouts are
+constant or not. The out-of-line form takes the word's address in a register and reads the mask
+from a table placed after the slabs at a fixed distance from the word, one entry per possible
+class byte. The table is zero until the first slow path writes it, and a zero mask fails both
+tests, so it needs no initialization check, and every byte that is not a small class sends a
+free by address to the slow path. The C entry points use it, ending their own routines with
+the same steps.
 
 ### Slow path: exchanging magazines
 

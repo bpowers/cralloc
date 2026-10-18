@@ -18,7 +18,8 @@ namespace VG.Test.Retry
 /-- CPU 0's word of class 1 is `SLABS + 4096 + 8`, CPU 1's word's address. -/
 def sBad : State :=
   { PopInline.wit 0 0x1001008 PopInline.roW [⟨0x10108, 8⟩, ⟨0x1000008, 8⟩, ⟨0x1001000, 32⟩] with
-    gpr := fun r => if r = .rsp then 0x7000000 else if r = .rdi then 4 else 0 }
+    gpr := fun r => if r = .rsp then 0x7000000 else if r = .rdi then 0x1000008
+      else if r = .rsi then 16 else if r = .rdx then 4 else 0 }
 
 theorem bad_rejected : ¬ (pushInlineContract inlineAbi).pre sBad := by
   intro h
@@ -30,7 +31,8 @@ theorem bad_rejected : ¬ (pushInlineContract inlineAbi).pre sBad := by
 push on CPU 0 aborted before its commit would change CPU 1's magazine. Each
 slab's magazine is now its own (`Ctx.Exclusive`). -/
 def sShare : State where
-  gpr r := if r = .rsp then 0x7000000 else if r = .rdi then 0x6000 else 0
+  gpr r := if r = .rsp then 0x7000000 else if r = .rdi then 0x1000008 else if r = .rsi then 16
+    else if r = .rdx then 0x6000 else 0
   cf := none
   zf := none
   sf := none
@@ -41,7 +43,7 @@ def sShare : State where
   wr := [⟨0x10108, 8⟩, ⟨0x1000008, 8⟩, ⟨0x4000, 32⟩]
   syms n := if n = "__rseq_offset" then 0x2000 else if n = "SLABS" then 0x1000000 else 0
   fsBase := 0x10000
-  params n := if n = "coff" then 8 else if n = "mask" then 16 else 0
+  params _ := 0
   csDesc := 0x9000
 
 theorem share_rejected : ¬ (pushInlineContract inlineAbi).pre sShare := by

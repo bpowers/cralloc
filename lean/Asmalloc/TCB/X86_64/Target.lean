@@ -208,6 +208,8 @@ abbrev inlineTarget : Target :=
     preservedExcept := preservedExcept
     -- An inlined routine: one more than the twelve the processor delivers at
     -- full speed (docs/design.md, "Front end").
-    printer := { printer with uopLimit := some 13 } }
+    -- An `asm!` block has no return to put exit stubs after; its exits are
+    -- labels of the Rust function, which the assembler reaches directly.
+    printer := { printer with uopLimit := some 13, stubExits := false } }
 
 end VG.X86_64

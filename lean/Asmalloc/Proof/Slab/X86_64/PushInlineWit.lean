@@ -23,7 +23,7 @@ theorem pre_wit (s : State) (hm : ∃ cpu word rd wr, s = PopInline.wit cpu word
     (hp : Sig.pairsSep (cx.regions s) = true)
     (hres : ((cx.regions s).all fun x => (cx.A.reserved 0 s).all fun q => Region.sep x.1 q) = true)
     (hl : layoutCheck cx s = true)
-    (hcoff : (s.params "coff").toNat = 8 * cx.cls s) (hcls : cx.cls s = 1)
+    (hoff : (cx.arg s 0 - cx.sym s SLABS).toNat = 8 * cx.cls s) (hcls : cx.cls s = 1)
     (hmask : cx.mask s = magMask (2 ^ 2)) (hslots : cx.slots s = 4)
     (hsyms : s.syms SLABS = 0x1000000)
     (h0 : cx.SlotOk s (s.mem.readW (wordAddr 0x1000000 0 1) 64)) :
@@ -49,7 +49,7 @@ theorem pre_wit (s : State) (hm : ∃ cpu word rd wr, s = PopInline.wit cpu word
     · exact absurd hsj (hn j (by omega) hj)
     · exact absurd hsi (hn i h hi)
   refine (pre_iff cx (s := s) hv rfl rfl).mpr ⟨trivial, world_of_check hX hrd hwr hnw hp hres,
-    rfl, rfl, ⟨rfl, hcoff, by rw [hcls]; decide, ⟨2, by decide, by decide, hmask⟩⟩,
+    rfl, rfl, ⟨hoff, by rw [hcls]; decide, ⟨2, by decide, by decide, hmask⟩⟩,
     layout_of_check hX hl, hslot, hex⟩
 
 theorem pre_w0 : (pushInlineContract inlineAbi).pre PopInline.w0 :=
