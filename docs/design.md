@@ -603,12 +603,18 @@ at once from holding twice their size.
   returns null and a throwing form raises `std::bad_alloc`. An exception cannot unwind
   through the allocator's Rust frames, so the throwing forms are generated routines that on
   failure jump to the C++ runtime's own throw function with nothing of ours on the stack.
-  A program may replace `malloc`, or only the basic `operator new` and `operator delete`,
-  as the standard allows, and its blocks then reach our other `delete` forms. So a
-  `delete` that is handed a pointer outside the heap does what the C++ runtime's default
-  would have done before it gives up: it passes the block to the program's basic
-  `operator delete` if there is one, else to the program's `free`, and aborts only if both
-  are ours. This costs nothing on the path of a block we own.
+  A program may replace only the basic `operator new` and `operator delete`, as the
+  standard allows, and its blocks then reach our other `delete` forms. Those blocks can
+  lie inside our heap without being ours to free: a replacement that adds a header calls
+  our `malloc` and returns a pointer into the middle of the block. So we do what the C++
+  runtime's defaults do. If the first basic `operator delete` in the process is not ours,
+  every other `delete` form forwards every pointer to it, and likewise our nothrow `new`
+  forms hand off when the basic `new` is replaced. The generated `delete` routines get
+  this for nothing: they read the heap's position from a word of their own, which the
+  slow path fills in only once it has found that the basic `delete` is ours, and while
+  that word is zero every pointer takes the slow path. A program may also replace `malloc`
+  itself; then a `delete` that is handed a pointer outside the heap passes it to the
+  program's `free`, and aborts only if `free` is ours too.
 - **A size from C or C++ is a prediction, never trusted.** A sized free or delete may use
   the size to find the class early, but the class from the address is the truth, and a
   wrong size (a derived object deleted through a base pointer, say) behaves exactly like a
