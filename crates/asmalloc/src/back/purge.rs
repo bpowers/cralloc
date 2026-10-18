@@ -210,18 +210,31 @@ impl<O: Os> Back<'_, O> {
     /// The add and the take are separate atomic steps, so two growers may both see a step:
     /// the first takes it, and the second takes what accrued since, under a step, and does
     /// nothing. The few bytes it drops cost one purge later.
+    #[inline]
     pub(super) fn grow(&self, bytes: usize) {
         if bytes == 0 {
             return;
         }
-        let state = self.state;
-        let geometry = self.space.plan().geometry();
-        let step = growth_step(geometry);
-        let debt = state.growth.fetch_add(bytes, Relaxed).wrapping_add(bytes);
-        if debt < step {
-            return;
+        let step = growth_step(self.space.plan().geometry());
+        let debt = self
+            .state
+            .growth
+            .fetch_add(bytes, Relaxed)
+            .wrapping_add(bytes);
+        if debt >= step {
+            self.pay_growth(step);
         }
-        let debt = state.growth.swap(0, Relaxed);
+    }
+
+    /// Takes the growth debt and purges toward it: `grow`'s rare part. Out of line, because
+    /// inlined into `alloc_at` it made the compiler keep the class's layout on the stack, and
+    /// every large allocation paid 19 more stores and 18 more loads for it (4% on a pipeline
+    /// of large objects; `docs/research/memory.md`, "Small heaps").
+    #[cold]
+    #[inline(never)]
+    fn pay_growth(&self, step: usize) {
+        let geometry = self.space.plan().geometry();
+        let debt = self.state.growth.swap(0, Relaxed);
         let goal = growth_goal(debt, self.retained(), retained_cap(geometry), step);
         // One circuit of the heap from wherever the shared walk stands, counted in regions
         // finished: the lap count says nothing here, since the walk may stand one region from
