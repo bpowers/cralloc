@@ -878,7 +878,7 @@ fn resident<S: crate::os::sim::Shape>(heap: &SimHeap<S>) -> usize {
 /// interval once under the cap: resident memory comes down to what `collect` leaves, within
 /// what that rate leaves after the intervals run. A second call in an interval does nothing.
 #[test]
-#[cfg_attr(miri, ignore = "reads every page of the simulated memory dozens of times")]
+#[cfg_attr(miri, ignore = "reads every simulated page dozens of times")]
 fn maintain_brings_a_quiet_heap_down_to_what_collect_leaves() {
     let heap = SimHeap::<Shape>::new();
     burst(&heap, if cfg!(miri) { 3000 } else { 100_000 });
