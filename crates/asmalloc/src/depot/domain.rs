@@ -4,7 +4,7 @@
 //! A magazine that one L3 filled and another pops costs the popping CPU a fill from the other
 //! L3 for each line of the magazine and, mostly, for each object it names: with one depot
 //! shared by two L3s, sh8bench took 2.2 times as long and xmalloc-test ran at a third of its
-//! speed (`docs/research/launder-and-fill.md`, "One depot for every L3"). So the depot has
+//! speed (`docs/research/launder-and-fill.md`, "A depot per cache domain"). So the depot has
 //! stacks per domain (`super::Depot`), and a slow path uses its CPU's.
 //!
 //! **Finding them.** Once, from the process's first slow path (`generation::prepare`), and
