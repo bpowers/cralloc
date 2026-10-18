@@ -322,6 +322,53 @@ fn the_cxx_export_without_the_c_export_does_not_build() {
     }
 }
 
+// The two tests below are findings of the review of the replacement rules: each states what
+// should happen and fails today. `cargo test -p asmalloc-preload -- --ignored` runs them.
+
+/// A program that replaces all four basic operators and tells scalar blocks from array blocks
+/// (a checker for `new`/`delete[]` mismatches does). The standard's defaults send the array
+/// forms to `operator new[]` and `operator delete[]`; ours send them to the scalar pair, so the
+/// program sees its array blocks deleted as scalars and its nothrow arrays made as scalars.
+#[test]
+#[ignore = "finding: the array forms forward to a program's scalar operators"]
+fn a_program_with_its_own_array_operators_gets_them_from_the_array_forms() {
+    let exe = program("tagged_new.cpp");
+    let out = same_with_and_without(|| Command::new(&exe));
+    assert_eq!(out.trim(), "mismatches 0");
+}
+
+/// The operators are replaced by a shared library the program links (as `libtcmalloc.so` does),
+/// not by the program itself. The preloaded library comes before it in the search order, so
+/// `operator delete` is ours while `operator new`, which we do not define, is the library's:
+/// the first `delete` is handed a pointer of the library's and aborts. Rare: it takes a second
+/// allocator linked as a shared library under the preload.
+#[test]
+#[ignore = "finding: operators replaced by a shared library pair its new with our delete"]
+fn a_program_linked_to_a_library_that_replaces_the_operators_runs() {
+    let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("lib-new");
+    std::fs::create_dir_all(&dir).expect("a scratch directory");
+    let programs = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/programs");
+    let library = dir.join("liblib_new.so");
+    let status = Command::new("c++")
+        .args(["-O2", "-std=c++20", "-shared", "-fPIC", "-o"])
+        .arg(&library)
+        .arg(programs.join("lib_new.cpp"))
+        .status()
+        .expect("a C++ compiler");
+    assert!(status.success());
+    let exe = dir.join("use_lib_new");
+    let status = Command::new("c++")
+        .args(["-O2", "-std=c++20", "-o"])
+        .arg(&exe)
+        .arg(programs.join("use_lib_new.cpp"))
+        .arg(&library)
+        .status()
+        .expect("a C++ compiler");
+    assert!(status.success());
+    let out = same_with_and_without(|| Command::new(&exe));
+    assert_eq!(out.trim(), "99500");
+}
+
 #[test]
 fn a_throwing_new_that_fails_throws_a_catchable_bad_alloc() {
     let exe = program("cxx_operators.cpp");
