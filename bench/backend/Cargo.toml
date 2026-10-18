@@ -1,0 +1,16 @@
+[package]
+name = "bench-backend"
+version = "0.0.0"
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+# Launder and fill of asmalloc's back end on their own, against a heap of the benchmark's own
+# (the process's global allocator stays glibc's).
+[[bin]]
+name = "backbench"
+path = "src/main.rs"
+
+[dependencies]
+asmalloc = { path = "../../crates/asmalloc" }
+bench-harness.workspace = true
