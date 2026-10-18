@@ -610,6 +610,82 @@ mimalloc is 56M cycles ahead, at a quarter of the instructions. JSON's and the t
 dense and unchanged (the tree's walk, which runs no allocator code, moved 206 to 223 between
 builds, so its total is within layout noise).
 
+### Wide batches
+
+"before" is main at d56e3bf, "after" the branch that followed; same method.
+
+A class with a few million live objects has more summary words than a magazine has slots, so
+a scattered batch's slots almost never share one, the debt table merges nothing, and each slot
+paid for a place taken and another summary word's debt through `Release`'s general walk: 174
+instructions a slot at 512 KiB of bitmap (4M slots) against 62 at 16 KiB.
+
+**Paying each debt at once does not beat the table where the table merges.** Built as the
+simplest form (each slot pays its summary word by looking, and hands what that owes upward to
+the second table), it took the 16 KiB case from 64 to 107 instructions and 31 to 47 cycles, and
+the 512 KiB case from 173 to 123. It cannot stop where it finds a bit set: that is the design
+without the healing free, which `Summary_crash.cfg` shows leaves a bit cleared by a thread lost
+in a fork unrepaired for good. So the walk above the first level still has to be paid, merged
+or not.
+
+**So a batch is judged wide or narrow once**, as scattered or dense is: its first 64 direct
+slots go through the table, and if 56 or more of them took places of their own, the rest of the
+batch is wide. Strided and clustered slots come back to summary words they met and stay narrow;
+a judgement after 32 slots misjudged a strided batch over 32 summary words (16 KiB) and cost it
+16 cycles a slot. A wide batch:
+
+- pays the table's debts by walking up at once;
+- for each later slot, looks at its summary word, found by index in the region's level-1
+  words (`Host::tree_words`, BACK-HOST-03, now any level), and merges what that owes level 2,
+  which has 64 times fewer words;
+- pays a level-2 debt whose place is taken by walking the rest of the way up through the
+  region's levels held the same way (`Release::walk_upward`), not through `Release`'s one debt
+  per level, which at 8 MiB and beyond paid nearly every slot generically.
+
+Every payment reads before it sets, as modelled (`Look` at level 1, the model's `Up` above it),
+and nothing is reordered across the leaf bit it answers for. An explorer runs the wide path
+against claims and forks (`wide_direct_frees_*`), and a unit test frees a batch over 1024
+summary words and takes it back.
+
+Bitmap sweep, 8-byte class, per object, three rounds, medians:
+
+| bitmap | order | before cyc | before ins | after cyc | after ins |
+|---|---|---:|---:|---:|---:|
+| 16K | scatter | 30.7 | 64.0 | 30.7 | 62.3 |
+| 16K | stride | 29.4 | 63.6 | 29.5 | 62.0 |
+| 512K | scatter | 74.3 | 173.4 | 54.7 | 124.2 |
+| 512K | stride | 76.8 | 173.8 | 53.4 | 122.3 |
+| 8M | scatter | 133.4 | 353.1 | 102.2 | 258.8 |
+| 8M | stride | 77.5 | 174.3 | 59.0 | 124.0 |
+| 64M | scatter | 316.4 | 412.7 | 255.6 | 291.6 |
+| 64M | stride | 221.9 | 174.3 | 142.5 | 124.0 |
+
+dTLB and cache misses per object are unchanged between the builds at every size; in this bench
+a fill empties the words between rounds, so many slots find their summary word empty and pay a
+locked OR, as the first frees into a full heap do. Walking from level 1 for every wide slot,
+without the level-2 table, measured 164, 204 and 210 instructions at 512 KiB, 8 MiB and 64 MiB:
+better past 8 MiB, worse at the size a program with a few million objects of a class has, so
+not kept.
+
+backbench, a magazine a call, five rounds: unchanged within 0.2 cycles in every case and class
+(16-byte scatter 27.6 to 27.5 cycles, 56.0 to 54.0 instructions; 4096-byte cases 0 to 1.4
+instructions more).
+
+Workloads, M cycles / M instructions, five interleaved rounds, medians:
+
+| | before | after | mimalloc | jemalloc |
+|---|---:|---:|---:|---:|
+| BTreeMap 1M drop | 571 / 632 | 567 / 633 | 532 / 280 | 632 / 776 |
+| JSON 32 MiB drop | 878 / 1891 | 846 / 1892 | 731 / 1286 | 1674 / 2786 |
+| Box tree depth 20 drop | 421 / 1211 | 417 / 1211 | 369 / 830 | 1316 / 2457 |
+| BTreeMap 8M (reps=2) drop | 2939 / 3357 | 2670 / 2942 | 2296 / 896 | 2980 / 2554 |
+| BTreeMap 8M build | 25411 / 17408 | 25926 / 17831 | 26728 / 18643 | 28723 / 19034 |
+
+The narrow drops did not move. BTreeMap at 8M entries (about a million live objects in each of
+its busiest classes, a gigabyte resident) is the wide case in a workload: its drop runs 12%
+fewer instructions and 9% fewer cycles, ahead of jemalloc in cycles and behind it in
+instructions; mimalloc is 14% faster. Its build, which this change does not touch, moved 2%
+between builds.
+
 # A depot per cache domain (2026-10-18)
 
 With one depot shared by every CPU, magazines that one L3 freed were popped by the other, and
