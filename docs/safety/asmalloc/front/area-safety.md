@@ -75,6 +75,20 @@ musl thread and never calls the allocator through musl's thread start. The descr
 executable's `__rseq_cs` section, mapped for the life of the process (a musl build is an
 executable; musl never unmaps a loaded object).
 
+**What this does not cover: registration in the middle of a routine.** The obligations above
+are about the slow path's call. The routines' own `# Safety` items require the thread to be
+registered, or unregistered, for the whole of each call (`registeredDoc` in
+`lean/Asmalloc/Spec/Slab.lean`), and a registration made by a signal handler during a routine
+breaks that. The race between the slow path's read of -1 and its `register` is harmless (the
+handler registers, the slow path gets `EBUSY`, which counts as registered). The race between a
+routine's arming store and its read of `cpu_id` is not: on a thread at -1 the kernel does not
+abort the interrupted routine, the handler's first allocation registers the thread, and the
+routine then reads a valid CPU number with `rseq_cs` naming the handler's last sequence, so it
+runs to its commit unprotected. No argument here rules that out; `docs/design.md` lists it
+under "What is trusted", and `front/area.rs` says when it can happen (a handler that allocates
+as the thread's first allocator call, at that boundary, then a second event within about eight
+instructions).
+
 Residual: if a thread's first allocator call comes after its destructors' last round (musl runs
 `PTHREAD_DESTRUCTOR_ITERATIONS`, 4), it registers and its value never gets a destructor run, so
 a detached such thread could die registered. In musl that needs an allocation from the exit path
