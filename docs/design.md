@@ -275,11 +275,15 @@ asked for (see "Large objects").
 
 ### Front end: magazines under rseq
 
-Each CPU has a slab. Its hot part is an array with one 8-byte word per small class; a
-colder part holds the CPU's spare magazines and counters. The slabs are a static array with
+Each CPU has a slab. Its hot part gives each small class a 32-byte chunk: the class's
+8-byte word at bytes 16 to 23 and the heads of its spare stacks, which only slow paths
+write, at bytes 0 to 15. A thread's rseq area is 32-byte aligned and the OS writes bytes 4
+to 15 of it, so with this placement no hot word can share a page offset with those fields,
+wherever a C library puts the area; a shared offset costs a cycle or two on every use of
+that class. A colder part of the slab holds counters. The slabs are a static array with
 an entry for every CPU number the OS can produce (8192 on x86-64), so the address of a slab
 word is the CPU number shifted and added to the address of the class's word in slab 0, a
-link-time constant plus 8 times the class, with no pointer to load. Untouched slabs cost no
+link-time constant plus 32 times the class, with no pointer to load. Untouched slabs cost no
 memory. A routine compares the CPU number with the array length and takes the slow path if
 it is out of range. That one compare keeps a thread with no rseq
 registration, which reads a negative number, away from every slab, and it means memory
@@ -827,6 +831,11 @@ tests where a test can reach it.
 - glibc registers a thread's rseq area before the thread can call the allocator. On musl,
   where the area is ours, it reads a negative CPU number until registered, and the OS
   accepts one registration per thread.
+- On musl, a signal handler that allocates does not make its thread's first call to the
+  allocator at the one instruction boundary between a routine's arming store and its read of
+  the CPU number. There the handler's slow path would register the thread under a sequence
+  that began unregistered, and that one sequence would run to its commit unprotected. glibc
+  registers before any call, so this cannot arise there.
 - Nothing with the privilege to do so places a probe inside a sequence, which would let
   the thread return to it without an abort.
 - Of a thread's attempts at a sequence, one is at last left to finish. Only termination
