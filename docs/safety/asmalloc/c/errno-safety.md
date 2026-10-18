@@ -17,6 +17,10 @@ on this target. `#[link(name = "c")]` adds `-lc`, the library that defines it. g
 it in every configuration the design supports (glibc 2.43, dynamically or statically linked);
 a program that links the crate with std links the same library already.
 
+musl declares the same (`include/errno.h`: `int *__errno_location(void);`) and defines it in
+`libc.a` (`src/errno/__errno_location.c`), returning the calling thread's `errno` slot; the
+same declaration and argument hold.
+
 ## ERRNO-02: `__errno_location().write(value)` in `set`
 
 **Preconditions.** The call is sound to make on the calling thread; the pointer it returns is

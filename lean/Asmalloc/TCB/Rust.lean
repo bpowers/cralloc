@@ -177,12 +177,23 @@ def featureDoc (doc : String) : List String → String
   | fs => doc ++ s!"\n* The CPU must support the {codeList fs} target \
     feature{if fs.length == 1 then "" else "s"}."
 
-/-- The `cfg` attribute that compiles a function only under its cargo
-feature (`Artifact.cargoFeature`), if it has one. -/
-def cargoCfg : Option (String × Bool) → String
+/-- One condition of a `cfg` predicate, as Rust. -/
+def cfgAtom : CfgAtom → String
+  | .feature f => s!"feature = \"{escape f}\""
+  | .targetEnv e => s!"target_env = \"{escape e}\""
+
+/-- The predicate that holds where any of `cs` does: the condition itself if
+there is one, else `any(…)`. -/
+def cfgAny : List CfgAtom → String
+  | [c] => cfgAtom c
+  | cs => "any(" ++ ", ".intercalate (cs.map cfgAtom) ++ ")"
+
+/-- The `cfg` attribute that compiles a function only where its predicate
+(`Artifact.cfg`) holds, or only where it does not; nothing if it has none. -/
+def cfgAttr : Option (List CfgAtom × Bool) → String
   | none => ""
-  | some (f, true) => s!"#[cfg(feature = \"{escape f}\")]\n"
-  | some (f, false) => s!"#[cfg(not(feature = \"{escape f}\"))]\n"
+  | some (cs, true) => s!"#[cfg({cfgAny cs})]\n"
+  | some (cs, false) => s!"#[cfg(not({cfgAny cs}))]\n"
 
 /-- The constant of the CPU features `fs` that the function `name`
 requires; nothing if there are none. -/
@@ -358,9 +369,9 @@ where
   let body := lines ++ a.target.printer.funcAlign.map .text
   let callees := dedup (body.filterMap fun | .call n => some n | _ => none)
   let refs := dedup (body.flatMap Line.refs)
-  cargoCfg a.cargoFeature ++ featuresConst a.name a.features ++
+  cfgAttr a.cfg ++ featuresConst a.name a.features ++
   docComment "" (fullDoc a) ++
-  cargoCfg a.cargoFeature ++
+  cfgAttr a.cfg ++
   "#[unsafe(naked)]\n" ++
   s!"pub(crate) unsafe extern \"{a.target.rustAbi}\" fn {a.name}{a.sig.rust} " ++ "{\n" ++
   "    core::arch::naked_asm!(\n" ++
@@ -435,9 +446,9 @@ def inlineFunction (a : Artifact) (lines : List Line) : String :=
     (a.clobbers.filter fun c => !(args.map (·.1)).contains c && (ret.isNone || c != T.retReg)).map
       fun c => s!"out(\"{c}\") _"
   let gen := if a.generics.isEmpty then "" else s!"<{a.generics}>"
-  cargoCfg a.cargoFeature ++ featuresConst a.name a.features ++
+  cfgAttr a.cfg ++ featuresConst a.name a.features ++
   docComment "" (fullDoc a) ++
-  cargoCfg a.cargoFeature ++
+  cfgAttr a.cfg ++
   "#[inline(always)]\n" ++
   s!"pub(crate) unsafe fn {a.name}{gen}{sig} " ++ "{\n" ++
   (match ret with | some ty => s!"    let ret: {ty.rust};\n" | none => "") ++
@@ -638,7 +649,7 @@ them. The copy's operands name the same items as the function's, through
 expanded; so `checkExports` allows exports only of code whose operands are
 all paths into that crate (`crate::…`), that calls no function and reads no
 table of constants (which `function` names relative to its own module), and
-that no cargo feature selects (a `cfg` in an expansion would read the
+that no `cfg` predicate selects (a `cfg` in an expansion would read the
 features of the crate that invokes it). The copy is the printed code
 `function` emits, and the symbol the only difference. -/
 
@@ -685,15 +696,15 @@ def exportsFile (t : String) (ps : List Prepared) : String :=
 
 /-- `p`'s exports are as the module docs require: each group and symbol a
 Rust identifier, no symbol exported twice on the target (by `ps`), and the
-artifact one whose code a macro can copy: out of line, selected by no cargo
-feature, calling no function, reading no table of constants, and naming
+artifact one whose code a macro can copy: out of line, selected by no `cfg`
+predicate, calling no function, reading no table of constants, and naming
 only operands that are paths into the crate. -/
 def checkExports (ps : List Prepared) (p : Prepared) : Except String Unit := do
   let a := p.art
   if a.exports.isEmpty then return
   let n := s!"{a.target.name}: {a.name}"
   if a.target.inline then throw s!"{n} is inline but has exports"
-  if a.cargoFeature.isSome then throw s!"{n} is selected by a cargo feature but has exports"
+  if a.cfg.isSome then throw s!"{n} is selected by a `cfg` predicate but has exports"
   unless a.code.calls.isEmpty do throw s!"{n} calls a function but has exports"
   unless a.consts.isEmpty do throw s!"{n} reads tables of constants but has exports"
   for (_, op) in a.operands do
@@ -783,22 +794,22 @@ def checkRseq (p : Prepared) : Except String Unit := do
       throw s!"{a.target.name}: {a.name} has a restartable sequence that is not the whole of its code"
 
 /-- No two artifacts of a target have the same name, but a pair selected by
-a cargo feature, one compiled with it and one without, of the same
-signature and generic parameters (`Artifact.cargoFeature`): exactly one of
+a `cfg` predicate, one compiled where it holds and one where it does not, of
+the same signature and generic parameters (`Artifact.cfg`): exactly one of
 each name is compiled. -/
 def checkUnique (as : List Artifact) : Except String Unit :=
   as.forM fun a => do
     match as.filter fun b => b.target.name == a.target.name && b.name == a.name with
     | [_] => pure ()
     | [b, c] =>
-      match b.cargoFeature, c.cargoFeature with
+      match b.cfg, c.cfg with
       | some (f, x), some (g, y) =>
         unless f == g && x != y && b.sig == c.sig && b.generics == c.generics do
-          throw s!"{a.target.name}: {a.name} is defined twice, but not as one function with \
-            and one without a cargo feature, of the same signature"
+          throw s!"{a.target.name}: {a.name} is defined twice, but not as one function where \
+            a `cfg` predicate holds and one where it does not, of the same signature"
       | _, _ =>
-        throw s!"{a.target.name}: {a.name} is defined twice, but not as one function with and \
-          one without a cargo feature"
+        throw s!"{a.target.name}: {a.name} is defined twice, but not as one function where a \
+          `cfg` predicate holds and one where it does not"
     | _ => throw s!"{a.target.name}: {a.name} is defined more than once"
 
 /-- A table's name is a Rust constant's: an uppercase ASCII letter, then
@@ -865,6 +876,8 @@ def checkConsts (ps : List Prepared) (p : Prepared) : Except String Unit := do
     throw s!"{a.target.name}: an artifact's module is `consts`, the module of the tables of constants"
   if (ps.any fun q => q.art.target.name == a.target.name && q.art.module == "exports") then
     throw s!"{a.target.name}: an artifact's module is `exports`, the module of the exports"
+  if (ps.any fun q => q.art.target.name == a.target.name && q.art.module == "area") then
+    throw s!"{a.target.name}: an artifact's module is `area`, the module of the own rseq area"
 
 /-- Every operand `p`'s code names (`Line.refs`) is one of its tables of
 constants or of its declared operands (`Artifact.operands`), and none is
@@ -963,16 +976,55 @@ def targetsOf (as : List Artifact) : List (String × String) :=
   (distinct as (·.target.name)).map fun t =>
     (t, ((as.find? (·.target.name == t)).map (·.target.rustCfg)).getD "")
 
-/-- The constants of every artifact (`Api.rustConsts`), one file for every
-target: no assembly, so it builds wherever the crate does (under Miri and
-Kani too). The crate declares it itself (`front::constants`). -/
+/-- The own rseq areas of the targets of `as` (`Target.ownArea`), each with
+its target's name, in first-seen order of the targets. -/
+def areasOf (as : List Artifact) : List (String × OwnArea) :=
+  (distinct as (·.target.name)).filterMap fun t =>
+    (as.find? (·.target.name == t)).bind fun a => a.target.ownArea.map (t, ·)
+
+/-- The constants of every artifact (`Api.rustConsts`) and of every own rseq
+area (`OwnArea.consts`), one file for every target: no assembly, so it
+builds wherever the crate does (under Miri and Kani too). The crate
+declares it itself (`front::constants`). -/
 def constsFile (as : List Artifact) : String :=
   header ++
   "//! The specification's constants (`Api.rustConsts`), the same for every target: what the\n" ++
   "//! verified functions were proved for, and what the Rust side builds its layout from or\n" ++
   "//! asserts against.\n" ++
   "#![allow(dead_code)]\n" ++
-  rustConstsText (rustConstsOf as)
+  rustConstsText (rustConstsOf as) ++
+  String.join ((areasOf as).map fun (t, oa) => String.join (oa.consts.map fun (n, ty, v) =>
+    s!"\n/// Of the rseq area for `{t}` (`OwnArea.consts`).\npub(crate) const {n}: {ty.rust} = {v};\n"))
+
+/-- The module of a target's own rseq area (`Target.ownArea`): its lines, as
+one `global_asm!` block, which the target's `mod.rs` compiles only under the
+area's `cfg`. -/
+def areaFile (t : String) (oa : OwnArea) : String :=
+  header ++
+  s!"//! The rseq area the crate defines and registers itself for `{t}` (`Target.ownArea`),\n" ++
+  "//! where the C library registers none: data, not code, so nothing here is proved.\n" ++
+  "\ncore::arch::global_asm!(\n" ++
+  String.join (oa.lines.map fun l => "    " ++ literal (escapeBraces l) ++ ",\n") ++
+  ");\n"
+
+/-- The own rseq area of every target is as the crate needs it: its
+constants are named as Rust constants, fit their types, and are named apart
+from every artifact's constants; its lines are not empty and have no
+newline (each is one line of the block). -/
+def checkAreas (as : List Artifact) : Except String Unit := do
+  let artConsts := (as.flatMap (·.rustConsts)).map (·.1)
+  for (t, oa) in areasOf as do
+    if oa.lines.isEmpty then throw s!"{t}: the own rseq area has no lines"
+    for l in oa.lines do
+      if l.any (· == '\n') then throw s!"{t}: a line of the own rseq area has a newline"
+    if oa.cfg.isEmpty then throw s!"{t}: the own rseq area is compiled under no condition"
+    for (n, ty, v) in oa.consts do
+      unless tableName n do
+        throw s!"{t}: the own rseq area's constant {n} is not named as a Rust constant"
+      unless v < 2 ^ ty.bits 64 do
+        throw s!"{t}: the own rseq area's constant {n} does not fit in a {ty.rust}"
+      if artConsts.contains n || ((oa.consts.map (·.1)).filter (· == n)).length != 1 then
+        throw s!"{t}: the own rseq area's constant {n} is named twice"
 
 /-- The root module, `mod.rs`: a `mod` declaration of each target of `ts`
 (its name and Rust `cfg`), in order of their names. -/
@@ -999,9 +1051,12 @@ def render (ps : List Prepared) (moduleOf : Artifact → String → String) : Li
     let ts := tables (arts.map (·.art))
     let exported := arts.filter (!·.art.exports.isEmpty)
     let extra := (if ts.isEmpty then [] else ["consts"]) ++ (if exported.isEmpty then [] else ["exports"])
+    let area := (areasOf (arts.map (·.art))).head?.map (·.2)
+    let extra := extra ++ (if area.isSome then ["area"] else [])
     let mods := (modules ++ extra).mergeSort (· ≤ ·)
     (s!"{t}/mod.rs", header ++ s!"//! Verified functions for `{t}`.\n" ++
-      modDecls mods (fun _ => none)) ::
+      modDecls mods (fun m => if m == "area" then area.map (cfgAny ·.cfg) else none)) ::
+    (match area with | some oa => [(s!"{t}/area.rs", areaFile t oa)] | none => []) ++
     (if ts.isEmpty then [] else [(s!"{t}/consts.rs", tablesFile t ts)]) ++
     (if exported.isEmpty then [] else [(s!"{t}/exports.rs", exportsFile t exported)]) ++
     -- Each module's file on a task of its own.
@@ -1052,6 +1107,7 @@ def files (as : List Artifact) : Except String (List (String × String)) := do
   forMPar as checkInline
   forMPar as checkUops
   forMPar as (checkRustConsts as)
+  checkAreas as
   forMPar ps (checkExports ps)
   return render ps fun a n => ((callee as a n).map (·.module)).getD ""
 
