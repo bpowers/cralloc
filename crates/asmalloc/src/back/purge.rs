@@ -167,22 +167,39 @@ impl<O: Os> Back<'_, O> {
     /// classes together: what decays, and what the cap limits.
     #[inline]
     pub fn retained(&self) -> usize {
-        clamped(&self.state.retained)
+        let retained = &self.state.retained;
+        clamped(&retained.small).saturating_add(clamped(&retained.large))
     }
 
-    /// Counts `bytes` of free slots as retained: slots freed to the bitmaps, or free slots
-    /// that became resident by something other than a free. Never purges (see the module
-    /// documentation).
-    pub(super) fn retain(&self, bytes: usize) {
-        if bytes != 0 {
-            self.state.retained.fetch_add(bytes as isize, Relaxed);
+    /// The part of [`Back::retained`] in large classes.
+    #[inline]
+    pub fn retained_large(&self) -> usize {
+        clamped(&self.state.retained.large)
+    }
+
+    /// The count of `class`'s kind.
+    fn count(&self, class: Class) -> &AtomicIsize {
+        if class.is_small() {
+            &self.state.retained.small
+        } else {
+            &self.state.retained.large
         }
     }
 
-    /// Subtracts `bytes` of slots, claimed while resident or purged, from the count.
-    pub(super) fn unretain(&self, bytes: usize) {
+    /// Counts `bytes` of free slots of `class` as retained: slots freed to the bitmaps, or
+    /// free slots that became resident by something other than a free. Never purges (see the
+    /// module documentation).
+    pub(super) fn retain(&self, class: Class, bytes: usize) {
         if bytes != 0 {
-            self.state.retained.fetch_sub(bytes as isize, Relaxed);
+            self.count(class).fetch_add(bytes as isize, Relaxed);
+        }
+    }
+
+    /// Subtracts `bytes` of slots of `class`, claimed while resident or purged, from the
+    /// count.
+    pub(super) fn unretain(&self, class: Class, bytes: usize) {
+        if bytes != 0 {
+            self.count(class).fetch_sub(bytes as isize, Relaxed);
         }
     }
 
@@ -450,7 +467,7 @@ impl<O: Os> Back<'_, O> {
             // At the top of the region: bring the watermark up to the end of its huge page,
             // if that page could then be purged whole.
             let (bytes, words) = region::top_up(&host, region);
-            self.retain(bytes);
+            self.retain(class, bytes);
             read += words;
         }
         let mut first = true;
@@ -487,7 +504,7 @@ impl<O: Os> Back<'_, O> {
             }
             cursor = next;
         };
-        self.unretain(purged);
+        self.unretain(class, purged);
         (purged, read, done)
     }
 }

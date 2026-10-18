@@ -2,8 +2,8 @@
 //! and a threaded stress test.
 
 use super::policy::{
-    DECAY_TICKS, STAGGER_ROOM, STAGGER_STEP, growth_goal, growth_step, huge_after, move_piece,
-    retained_cap,
+    DECAY_TICKS, STAGGER_ROOM, STAGGER_STEP, growth_goal, growth_step, huge_after, kept_grown,
+    move_piece, retained_cap,
 };
 use super::{Back, Block, Kind, State};
 use crate::classes::{Class, SmallClass};
@@ -1493,6 +1493,7 @@ fn patterned(ptr: *const u8, len: usize) -> bool {
 fn a_moving_large_block_releases_its_old_pages_behind_the_copy() {
     let state = state::<Native>();
     let back = state.get_or_reserve().unwrap();
+    let ballast = spend_kept_budget(&back);
     let os = state.os();
     let piece = move_piece(Native::GEOMETRY);
     let (old_class, new_class) = (large(512 << 10), large(1 << 20));
@@ -1523,7 +1524,7 @@ fn a_moving_large_block_releases_its_old_pages_behind_the_copy() {
     assert!(patterned(new.as_ptr(), len));
     // One call for each whole piece, one for the rest of the slot, and none at the free.
     assert_eq!(os.calls(Call::Purge) as usize, purges + len / piece + 1);
-    assert_eq!(back.retained(), 0);
+    assert_eq!(back.retained(), ballast);
     // SAFETY: as above.
     unsafe {
         assert!(os.is_purged(old, old_class.size()));
@@ -1542,7 +1543,7 @@ fn a_moving_large_block_releases_its_old_pages_behind_the_copy() {
     unsafe { back.move_large(one, new, small_class.size(), false) };
     assert!(patterned(new.as_ptr(), small_class.size()));
     assert_eq!(os.calls(Call::Purge), purges + 1);
-    assert_eq!(back.retained(), 0);
+    assert_eq!(back.retained(), ballast);
     // SAFETY: as above.
     unsafe { assert!(os.is_purged(one, small_class.size())) };
     let again = back.alloc(small_class, small_class.size()).unwrap();
@@ -1558,6 +1559,7 @@ fn a_moving_large_block_releases_its_old_pages_behind_the_copy() {
 fn a_block_that_grows_gets_huge_pages_until_it_is_freed() {
     let state = state::<Native>();
     let back = state.get_or_reserve().unwrap();
+    let ballast = spend_kept_budget(&back);
     let os = state.os();
     let huge = Native::GEOMETRY.huge_page_size();
     let (old_class, new_class) = (large(96 << 10), large(512 << 10));
@@ -1593,7 +1595,7 @@ fn a_block_that_grows_gets_huge_pages_until_it_is_freed() {
         "the whole slot goes back at the free"
     );
     assert_eq!(os.huge_pages(dense), Some(HugePages::Avoid));
-    assert_eq!(back.retained(), 0);
+    assert_eq!(back.retained(), ballast);
     // Reused by a block that did not grow: no advice, and zero.
     let again = back.alloc(new_class, new_class.size()).unwrap();
     assert_eq!(again.ptr, dense);
@@ -1631,6 +1633,17 @@ fn a_block_that_grows_gets_huge_pages_until_it_is_freed() {
 
 /// Moves a dense block of `len` bytes of `class` into `to`, a fresh block whose object is to
 /// be `size` bytes, as the heap's growing move does.
+/// Spends the budget for kept grown blocks (`policy::kept_grown`) with a plain free of an
+/// untouched block of a class of its own, so that moves and frees of grown blocks return their
+/// pages, as they do in a process that has kept its fill. Returns the bytes left retained.
+fn spend_kept_budget<O: Os>(back: &Back<'_, O>) -> usize {
+    let class = large(kept_grown(back.space().plan().geometry()) + 1);
+    let ballast = back.alloc(class, class.size()).unwrap().ptr;
+    back.free(ballast, class);
+    assert!(back.retained_large() >= class.size());
+    back.retained()
+}
+
 fn move_in<O: Os>(back: &Back<'_, O>, class: Class, len: usize, to: NonNull<u8>, size: usize) {
     let from = back.alloc(class, len).unwrap().ptr;
     pattern(from.as_ptr(), len);
@@ -1638,6 +1651,67 @@ fn move_in<O: Os>(back: &Back<'_, O>, class: Class, len: usize, to: NonNull<u8>,
     // SAFETY: both are live blocks that nothing else uses, and `to` is fresh.
     unsafe { back.move_large(from, to, len, true) };
     assert!(patterned(to.as_ptr(), len));
+}
+
+/// Within the budget for kept grown blocks, the slot a block moves out of and a grown block
+/// freed with huge-page advice both stay resident, counted and, for the second, advised, as a
+/// plain free leaves a slot; a block then allocated in the advised slot has the advice taken
+/// back. Past the budget they go back to the OS, and a plain free never does.
+#[test]
+#[cfg_attr(miri, ignore)]
+fn grown_blocks_are_kept_within_their_budget() {
+    let state = state::<Native>();
+    let back = state.get_or_reserve().unwrap();
+    let os = state.os();
+    let huge = Native::GEOMETRY.huge_page_size();
+    let budget = kept_grown(Native::GEOMETRY);
+    let (old_class, new_class) = (large(96 << 10), large(256 << 10));
+    assert!(old_class.size() + new_class.size() <= budget);
+    let purges = || os.calls(Call::Purge);
+    let before = purges();
+    // A block that grows by moving: the slot it leaves is kept, data and all.
+    let old = back.alloc(old_class, 80 << 10).unwrap().ptr;
+    pattern(old.as_ptr(), 80 << 10);
+    let new = back.alloc(new_class, new_class.size()).unwrap().ptr;
+    back.resize(new, 160 << 10);
+    // SAFETY: both are live blocks that nothing else uses, and `new` is fresh.
+    unsafe { back.move_large(old, new, 80 << 10, true) };
+    assert!(patterned(new.as_ptr(), 80 << 10));
+    assert_eq!(purges(), before, "nothing went back");
+    assert!(
+        patterned(old.as_ptr(), 80 << 10),
+        "the old slot is resident"
+    );
+    assert_eq!(back.retained_large(), old_class.size());
+    assert_eq!(os.huge_pages(new), Some(HugePages::Prefer));
+    // Freed with its advice, it is kept too, advice and all.
+    back.free(new, new_class);
+    assert_eq!(purges(), before);
+    assert_eq!(os.huge_pages(new), Some(HugePages::Prefer));
+    assert_eq!(back.retained_large(), old_class.size() + new_class.size());
+    // A block allocated in it rather than grown into it does not keep the advice.
+    let again = back.alloc(new_class, new_class.size()).unwrap();
+    assert_eq!(again.ptr, new);
+    assert!(!again.zeroed);
+    assert_eq!(os.huge_pages(new), Some(HugePages::Avoid));
+    assert_eq!(back.retained_large(), old_class.size());
+    // Past the budget the same free returns the slot and its advice.
+    move_in(&back, large(64 << 10), huge, again.ptr, 2 * huge);
+    assert_eq!(os.huge_pages(new), Some(HugePages::Prefer));
+    let ballast = spend_kept_budget(&back);
+    let purged = purges();
+    back.free(again.ptr, new_class);
+    assert_eq!(purges(), purged + 1);
+    assert_eq!(os.huge_pages(new), Some(HugePages::Avoid));
+    assert_eq!(back.retained(), ballast);
+    // A plain free keeps its slot whatever the count: this one takes the kept slot the move
+    // left, and gives it back resident.
+    let plain = back.alloc(old_class, old_class.size()).unwrap().ptr;
+    assert_eq!(plain, old);
+    assert_eq!(back.retained(), ballast - old_class.size());
+    back.free(plain, old_class);
+    assert_eq!(purges(), purged + 1);
+    assert_eq!(back.retained(), ballast);
 }
 
 /// In a slot advised for huge pages, a shrink returns its tail only in whole huge pages, and a
@@ -1648,6 +1722,7 @@ fn move_in<O: Os>(back: &Back<'_, O>, class: Class, len: usize, to: NonNull<u8>,
 fn an_advised_slot_is_purged_only_in_whole_huge_pages() {
     let state = state::<Native>();
     let back = state.get_or_reserve().unwrap();
+    spend_kept_budget(&back);
     let os = state.os();
     let page = Native::GEOMETRY.page_size();
     let huge = Native::GEOMETRY.huge_page_size();
@@ -1702,6 +1777,7 @@ fn an_advised_slot_is_purged_only_in_whole_huge_pages() {
 fn a_trimmed_purge_of_an_advised_slot_says_it_kept_part() {
     let state = state::<Native>();
     let back = state.get_or_reserve().unwrap();
+    spend_kept_budget(&back);
     let os = state.os();
     let huge = Native::GEOMETRY.huge_page_size();
     let class = large(256 << 10);
@@ -1732,6 +1808,7 @@ fn a_trimmed_purge_of_an_advised_slot_says_it_kept_part() {
 fn refused_huge_page_advice_is_retried_by_the_next_holder() {
     let state = state::<Native>();
     let back = state.get_or_reserve().unwrap();
+    spend_kept_budget(&back);
     let os = state.os();
     let huge = Native::GEOMETRY.huge_page_size();
     let class = large(256 << 10);
@@ -1771,6 +1848,7 @@ fn refused_huge_page_advice_is_retried_by_the_next_holder() {
 fn a_sparse_block_stays_sparse_when_it_moves() {
     let state = state::<Native>();
     let back = state.get_or_reserve().unwrap();
+    spend_kept_budget(&back);
     let os = state.os();
     let page = Native::GEOMETRY.page_size();
     let piece = move_piece(Native::GEOMETRY);
@@ -1837,6 +1915,7 @@ fn a_sparse_block_stays_sparse_when_it_moves() {
 fn a_block_moved_into_a_dirty_slot_arrives_whole_when_purges_fail() {
     let state = state::<Native>();
     let back = state.get_or_reserve().unwrap();
+    spend_kept_budget(&back);
     let os = state.os();
     let page = Native::GEOMETRY.page_size();
     let (old_class, new_class) = (large(512 << 10), large(1 << 20));
@@ -1873,6 +1952,7 @@ fn a_block_moved_into_a_dirty_slot_arrives_whole_when_purges_fail() {
 fn a_dense_block_with_a_hole_moves_whole_and_keeps_the_hole() {
     let state = state::<Native>();
     let back = state.get_or_reserve().unwrap();
+    spend_kept_budget(&back);
     let os = state.os();
     let page = Native::GEOMETRY.page_size();
     let piece = move_piece(Native::GEOMETRY);
@@ -1946,6 +2026,7 @@ fn a_dense_block_with_a_hole_moves_whole_and_keeps_the_hole() {
 fn a_hole_is_copied_when_the_destinations_purge_fails() {
     let state = state::<Native>();
     let back = state.get_or_reserve().unwrap();
+    let ballast = spend_kept_budget(&back);
     let os = state.os();
     let page = Native::GEOMETRY.page_size();
     let piece = move_piece(Native::GEOMETRY);
@@ -1984,7 +2065,7 @@ fn a_hole_is_copied_when_the_destinations_purge_fails() {
     assert_eq!(os.calls(Call::Purge) as usize, purges + len / piece + 1);
     // SAFETY: no other thread runs, and the back end and this test store only integers.
     unsafe { assert!(os.is_purged(old, len)) };
-    assert_eq!(back.retained(), 0);
+    assert_eq!(back.retained(), ballast);
     back.free(new.ptr, new_class);
 }
 
@@ -2137,6 +2218,7 @@ fn a_descending_fill_puts_the_lowest_address_on_top() {
 fn a_staggered_block_moves_and_returns_its_whole_slot() {
     let state = state::<Native>();
     let back = state.get_or_reserve().unwrap();
+    spend_kept_budget(&back);
     let os = state.os();
     let (old_class, new_class) = (large(512 << 10), large(1 << 20));
     for sparse in [false, true] {
