@@ -253,7 +253,7 @@ unsafe fn release(ptr: *mut c_void) {
 /// not. If the program replaced `operator delete(void*)`, every pointer goes to it, as the
 /// standard's default for every other form would send it: its blocks may sit inside our heap
 /// (a replacement `new` on top of `malloc`), where no check can tell them from ours. Otherwise
-/// the routine may serve our blocks from now on (`publish_delete_mirror`).
+/// the routines may serve our blocks from now on (`mirror::publish_delete`).
 ///
 /// # Safety
 ///
@@ -266,15 +266,13 @@ pub unsafe extern "C" fn operator_delete_slow(ptr: *mut c_void) {
         // SAFETY: CXX-07.
         return unsafe { core::mem::transmute::<usize, Delete>(delete)(ptr) };
     }
-    publish_delete_mirror();
+    // The basic `delete` is ours, so from now on the generated routines may free our blocks
+    // themselves; until this, they send every pointer here.
+    super::mirror::publish_delete();
     // SAFETY: CXX-06: with no replaced `delete`, every `new` of the process is ours or the
     // C++ runtime's, whose blocks come from `malloc`.
     unsafe { release(ptr) }
 }
-
-/// The generated delete routines' copy of where the heap is, written once the slow path knows
-/// that the program's basic `delete` is ours. Until then they send every pointer here.
-fn publish_delete_mirror() {}
 
 /// Completes a sized `operator delete(ptr, size)` or `delete[]` the generated `c_delete_sized`
 /// routine did not, as [`operator_delete_slow`]: the standard's default for the sized forms

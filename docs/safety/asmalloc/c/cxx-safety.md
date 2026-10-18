@@ -96,11 +96,15 @@ program binds to, which is the program's own when its `free` is (`own_malloc.cpp
 
 What this does not cover: a program that replaces `operator delete[]` without `operator
 delete`, or replaces only some nothrow forms, gets the scalar family's answer; the standard's
-defaults would send it to its array form. And until the generated `delete` routines read a
-copy of the heap's location of their own that stays empty while the basic `delete` is
-replaced, a replaced `new` whose blocks lie inside our heap (a header in front of a block from
-our `malloc`) can have them taken by the routines' fast path: that case is the
-`a_cxx_program_with_its_own_operator_new_runs` test, ignored until then.
+defaults would send it to its array form.
+
+**The generated routines.** `_ZdlPv`, `_ZdaPv`, `_ZdlPvm` and `_ZdaPvm` are generated routines
+that read the heap's position from a mirror of their own (`front::Mirror::Delete`), zero until
+`operator_delete_slow` publishes it (`mirror::publish_delete`), which it does only after
+`DELETE` has said the basic `delete` is ours. While it is zero every pointer misses their range
+check and reaches the slow paths here, so a replaced `new` whose blocks lie inside our heap (a
+header in front of a block from our `malloc`, `own_new.cpp`) never has them taken by a fast
+path: with the basic `delete` replaced the mirror is never published.
 
 ## CXX-EXPORT-01: the `export_cxx_abi!` forwarding calls and its `#[unsafe(no_mangle)]` items
 

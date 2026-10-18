@@ -295,7 +295,6 @@ fn a_cxx_program_with_its_own_operator_new_gets_it_from_nothrow_new() {
 /// the standard says is enough. Its blocks sit inside our heap (its `new` is our `malloc` plus
 /// a header), so every `delete` form of ours must forward every pointer to the program's.
 #[test]
-#[ignore = "needs the generated delete routines to read a mirror of their own (lean-c)"]
 fn a_cxx_program_with_its_own_operator_new_runs() {
     for mode in ["array", "sized", "matching", "empty"] {
         own_new_runs(mode);

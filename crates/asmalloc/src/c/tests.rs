@@ -492,3 +492,14 @@ mod generated {
         assert!(same > 900, "{same}");
     }
 }
+
+/// This test binary defines no `operator delete`, so the first delete finds the basic one ours,
+/// publishes the delete routines' mirror, and frees the block itself.
+#[test]
+fn a_delete_with_no_replacement_frees_ours_and_lets_the_routines_take_over() {
+    let p = malloc(64);
+    // SAFETY: a live block of the heap, given up once.
+    unsafe { cxx::operator_delete_slow(p) };
+    let (shift, _) = crate::front::SLABS.published(crate::front::Mirror::Delete);
+    assert_ne!(shift.load(core::sync::atomic::Ordering::Acquire), 0);
+}
