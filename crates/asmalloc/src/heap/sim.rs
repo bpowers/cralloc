@@ -11,9 +11,8 @@
 //!
 //! The ledger for the unsafe blocks here is `docs/safety/asmalloc/heap/sim-safety.md`.
 
-use super::source::BackSource;
-use super::{Heap, Zero};
-use crate::depot::{Cache, Drained};
+use super::{Bound, Heap, Zero};
+use crate::depot::Drained;
 use crate::front::{Cpu, Field, Routines, Slab, Slabs, StackPop, StackPush, StoreIfEqual, Twin};
 use crate::os::sim::{SIM_THREADS, Shape, SimOs, SimThread, Standard};
 use crate::os::{Aborted, Machine, Step};
@@ -96,12 +95,12 @@ unsafe impl Routines for SimRoutines<'_> {
     }
 
     unsafe fn store_if_equal(&self, field: Field, expected: *mut u8, new: *mut u8) -> StoreIfEqual {
-        // SAFETY: the caller's promise is the twin's.
+        // SAFETY: the twin's method has the trait's contract, on these same slabs.
         unsafe { self.twin().store_if_equal(field, expected, new) }
     }
 
     unsafe fn stack_push(&self, field: Field, magazine: NonNull<u8>) -> StackPush {
-        // SAFETY: the caller's promise is the twin's.
+        // SAFETY: the twin's method has the trait's contract, on these same slabs.
         unsafe { self.twin().stack_push(field, magazine) }
     }
 
@@ -156,15 +155,14 @@ impl<S: Shape> SimHeap<S> {
 
     /// Walks the heap for `visitor`, as `Asmalloc::inspect` does the process's heap.
     pub fn inspect(&self, visitor: &mut impl crate::stats::Visitor) {
-        self.heap.inspect(&*self.slabs, visitor);
+        self.with(|heap| heap.inspect(visitor));
     }
 
     /// Returns everything the heap can return now, as `Asmalloc::collect` does for the
     /// process's heap, on a leased simulated thread. Returns the bytes purged that the heap
     /// believed resident.
     pub fn collect(&self) -> usize {
-        // SAFETY: SIM-03.
-        self.with(|heap, routines| unsafe { heap.collect(routines) })
+        self.with(|heap| heap.collect())
     }
 
     /// Borrows a simulated thread that no other call is using, starting the search at one
@@ -192,14 +190,7 @@ impl<S: Shape> SimHeap<S> {
     /// slab asks for them here, where the idle check, paced by the clock and by how often slow
     /// paths look, would give it a handful.
     pub fn drain(&self, cpu: usize) -> Option<Drained> {
-        self.with(|heap, routines| {
-            let back = heap.back()?;
-            let cpu = routines.slabs().cpu(i32::try_from(cpu).ok()?)?;
-            let source = BackSource(back);
-            // SAFETY: SIM-05.
-            let cache = unsafe { Cache::new(&heap.depot, back.space(), routines, &source) };
-            Some(cache.drain(cpu))
-        })
+        self.with(|heap| heap.drain(cpu))
     }
 
     /// Grows the block at `ptr` from `old` to `new` with the bytes past `old` reading as zero,
@@ -217,14 +208,14 @@ impl<S: Shape> SimHeap<S> {
         new: Layout,
     ) -> Option<(*mut u8, usize)> {
         let ptr = NonNull::new(ptr)?;
-        // SAFETY: SIM-03, and the caller's promise.
-        let grant =
-            self.with(|heap, routines| unsafe { heap.resize(routines, ptr, old, new, true) })?;
+        // SAFETY: `ptr` is a live block of this heap that `old` describes, which the caller
+        // gives up unless the grow fails, and `new` is not empty.
+        let grant = self.with(|heap| unsafe { heap.resize(ptr, old, new, true) })?;
         Some((grant.ptr.as_ptr(), grant.len))
     }
 
     /// Runs `f` with the heap and the twins of a leased simulated thread.
-    fn with<T>(&self, f: impl FnOnce(&Heap<SimOs<S>>, SimRoutines<'_>) -> T) -> T {
+    fn with<T>(&self, f: impl FnOnce(Bound<'_, SimOs<S>, SimRoutines<'_>>) -> T) -> T {
         let lease = self.lease();
         let processor = match &lease {
             Some(lease) => Processor::Thread(self.heap.os().thread(lease.index)),
@@ -234,7 +225,8 @@ impl<S: Shape> SimHeap<S> {
             slabs: &*self.slabs,
             processor,
         };
-        let result = f(&self.heap, routines);
+        // SAFETY: HEAP-02, a simulated heap.
+        let result = f(unsafe { Bound::new(&self.heap, routines) });
         drop(lease);
         result
     }
@@ -249,21 +241,19 @@ impl<S: Shape> Default for SimHeap<S> {
 // SAFETY: SIM-02. Every method is the heap's, with twins on this heap's own slabs.
 unsafe impl<S: Shape> GlobalAlloc for SimHeap<S> {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
-        // SAFETY: SIM-03.
-        self.with(|heap, routines| unsafe { heap.alloc(routines, layout) })
+        self.with(|heap| heap.alloc(layout))
     }
 
     unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut u8 {
-        self.with(|heap, routines| {
-            // SAFETY: SIM-03.
-            unsafe { heap.alloc_grant(routines, layout, Zero::Requested) }
+        self.with(|heap| {
+            heap.alloc_grant(layout, Zero::Requested)
                 .map_or(ptr::null_mut(), |grant| grant.ptr.as_ptr())
         })
     }
 
     unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
-        // SAFETY: SIM-03.
-        self.with(|heap, routines| unsafe { heap.dealloc(routines, ptr, layout) })
+        // SAFETY: SIM-06.
+        self.with(|heap| unsafe { heap.dealloc(ptr, layout) })
     }
 
     unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
@@ -273,9 +263,9 @@ unsafe impl<S: Shape> GlobalAlloc for SimHeap<S> {
         ) else {
             return ptr::null_mut();
         };
-        self.with(|heap, routines| {
-            // SAFETY: SIM-03.
-            unsafe { heap.resize(routines, block, layout, new, false) }
+        self.with(|heap| {
+            // SAFETY: SIM-06; `new_size` is not zero, by `realloc`'s contract.
+            unsafe { heap.resize(block, layout, new, false) }
                 .map_or(ptr::null_mut(), |grant| grant.ptr.as_ptr())
         })
     }
@@ -285,18 +275,16 @@ unsafe impl<S: Shape> GlobalAlloc for SimHeap<S> {
 // SAFETY: SIM-02.
 unsafe impl<S: Shape> core::alloc::Allocator for SimHeap<S> {
     fn allocate(&self, layout: Layout) -> Result<NonNull<[u8]>, core::alloc::AllocError> {
-        // SAFETY: SIM-03.
-        self.with(|heap, routines| unsafe { heap.allocate(routines, layout, false) })
+        self.with(|heap| heap.allocate(layout, false))
     }
 
     fn allocate_zeroed(&self, layout: Layout) -> Result<NonNull<[u8]>, core::alloc::AllocError> {
-        // SAFETY: SIM-03.
-        self.with(|heap, routines| unsafe { heap.allocate(routines, layout, true) })
+        self.with(|heap| heap.allocate(layout, true))
     }
 
     unsafe fn deallocate(&self, ptr: NonNull<u8>, layout: Layout) {
-        // SAFETY: SIM-03.
-        self.with(|heap, routines| unsafe { heap.deallocate(routines, ptr, layout) })
+        // SAFETY: SIM-06.
+        self.with(|heap| unsafe { heap.deallocate(ptr, layout) })
     }
 
     unsafe fn grow(
@@ -305,8 +293,8 @@ unsafe impl<S: Shape> core::alloc::Allocator for SimHeap<S> {
         old: Layout,
         new: Layout,
     ) -> Result<NonNull<[u8]>, core::alloc::AllocError> {
-        // SAFETY: SIM-03.
-        self.with(|heap, routines| unsafe { heap.grow(routines, ptr, old, new, false) })
+        // SAFETY: SIM-06.
+        self.with(|heap| unsafe { heap.grow(ptr, old, new, false) })
     }
 
     unsafe fn grow_zeroed(
@@ -315,8 +303,8 @@ unsafe impl<S: Shape> core::alloc::Allocator for SimHeap<S> {
         old: Layout,
         new: Layout,
     ) -> Result<NonNull<[u8]>, core::alloc::AllocError> {
-        // SAFETY: SIM-03.
-        self.with(|heap, routines| unsafe { heap.grow(routines, ptr, old, new, true) })
+        // SAFETY: SIM-06.
+        self.with(|heap| unsafe { heap.grow(ptr, old, new, true) })
     }
 
     unsafe fn shrink(
@@ -325,8 +313,8 @@ unsafe impl<S: Shape> core::alloc::Allocator for SimHeap<S> {
         old: Layout,
         new: Layout,
     ) -> Result<NonNull<[u8]>, core::alloc::AllocError> {
-        // SAFETY: SIM-03.
-        self.with(|heap, routines| unsafe { heap.shrink(routines, ptr, old, new) })
+        // SAFETY: SIM-06.
+        self.with(|heap| unsafe { heap.shrink(ptr, old, new) })
     }
 }
 
@@ -368,22 +356,23 @@ impl SimAsmalloc {
 // SAFETY: SIM-02, for the shared heap.
 unsafe impl GlobalAlloc for SimAsmalloc {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
-        // SAFETY: the caller's promise is the shared heap's.
-        unsafe { SimAsmalloc::heap().alloc(layout) }
+        SimAsmalloc::heap().with(|heap| heap.alloc(layout))
     }
 
     unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut u8 {
-        // SAFETY: the caller's promise is the shared heap's.
-        unsafe { SimAsmalloc::heap().alloc_zeroed(layout) }
+        SimAsmalloc::heap().with(|heap| {
+            heap.alloc_grant(layout, Zero::Requested)
+                .map_or(ptr::null_mut(), |grant| grant.ptr.as_ptr())
+        })
     }
 
     unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
-        // SAFETY: the caller's promise is the shared heap's.
+        // SAFETY: SIM-07.
         unsafe { SimAsmalloc::heap().dealloc(ptr, layout) }
     }
 
     unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
-        // SAFETY: the caller's promise is the shared heap's.
+        // SAFETY: SIM-07.
         unsafe { SimAsmalloc::heap().realloc(ptr, layout, new_size) }
     }
 }
@@ -400,7 +389,7 @@ unsafe impl core::alloc::Allocator for SimAsmalloc {
     }
 
     unsafe fn deallocate(&self, ptr: NonNull<u8>, layout: Layout) {
-        // SAFETY: the caller's promise is the shared heap's.
+        // SAFETY: SIM-07.
         unsafe { SimAsmalloc::heap().deallocate(ptr, layout) }
     }
 
@@ -410,7 +399,7 @@ unsafe impl core::alloc::Allocator for SimAsmalloc {
         old: Layout,
         new: Layout,
     ) -> Result<NonNull<[u8]>, core::alloc::AllocError> {
-        // SAFETY: the caller's promise is the shared heap's.
+        // SAFETY: SIM-07.
         unsafe { SimAsmalloc::heap().grow(ptr, old, new) }
     }
 
@@ -420,7 +409,7 @@ unsafe impl core::alloc::Allocator for SimAsmalloc {
         old: Layout,
         new: Layout,
     ) -> Result<NonNull<[u8]>, core::alloc::AllocError> {
-        // SAFETY: the caller's promise is the shared heap's.
+        // SAFETY: SIM-07.
         unsafe { SimAsmalloc::heap().grow_zeroed(ptr, old, new) }
     }
 
@@ -430,7 +419,7 @@ unsafe impl core::alloc::Allocator for SimAsmalloc {
         old: Layout,
         new: Layout,
     ) -> Result<NonNull<[u8]>, core::alloc::AllocError> {
-        // SAFETY: the caller's promise is the shared heap's.
+        // SAFETY: SIM-07.
         unsafe { SimAsmalloc::heap().shrink(ptr, old, new) }
     }
 }

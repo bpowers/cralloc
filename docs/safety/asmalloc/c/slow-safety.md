@@ -78,10 +78,12 @@ gives up (C's contract for `free`, which every C entry point that frees passes o
 `ptr`, non-null. `find` returned `Small(class)`, so by F1 `object` is the start of a slot of
 `class`; it is a block the heap handed out by the contract; by F2 it was handed out as a block
 of `class`. The caller owns it and gives it up, by the contract. The sized frees' slow paths are
-`free_slow` with the size ignored, so a wrong size from the caller cannot reach the class. The
-other arms make no unsafe call: `free_large` lets the back end find the class or run from the
-address and abort if the slot is not handed out (`Back::free_by_address`, `Back::launder`'s
-validation), and `None` aborts.
+`free_slow` with the size ignored, so a wrong size from the caller cannot reach the class.
+`process::free_large(object)` in the `Large` arm asks that `object` be a large block of the heap
+that the caller owns and gives up: `find` returned `Large`, so a large slot or a run starts at
+`object`, and the contract makes it a block the caller gives up. The back end finds the class or
+run from the address and aborts if the slot is not handed out (`Back::free_by_address`,
+`Back::launder`'s validation). `None` aborts.
 
 A pointer that breaks the contract is outside what the proof covers. Two kinds still fail
 safely: one outside the heap, interior to a slot, in an untagged region, or before the heap

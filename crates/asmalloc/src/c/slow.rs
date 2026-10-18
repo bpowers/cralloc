@@ -179,7 +179,8 @@ pub unsafe extern "C" fn free_slow(ptr: *mut c_void) {
     match process::find(object.as_ptr()) {
         // SAFETY: SLOW-03.
         Some(Found::Small(class)) => unsafe { crate::heap::c_free_small(class, object) },
-        Some(Found::Large { .. }) => process::free_large(object),
+        // SAFETY: SLOW-03.
+        Some(Found::Large { .. }) => unsafe { process::free_large(object) },
         None => process::abort("free of a pointer that is not a block of asmalloc's heap"),
     }
 }
