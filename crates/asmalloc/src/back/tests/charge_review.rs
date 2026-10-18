@@ -1,16 +1,25 @@
 //! Evidence for the adversarial review of the large-slot charge and the budget for kept grown
-//! blocks (main `630883b..d6e8841`).
+//! blocks (main `630883b..d6e8841`), and for the check of its fix (main `b313200`).
 //!
-//! The tests that are not ignored are the properties the review checked and found to hold: a
-//! slot said to be zero reads as zero, and the retained count equals what the clean bits of
-//! the free slots say, after every step of a random run and after a threaded one. The ignored
-//! ones each fail on the code as reviewed; run one with
-//! `cargo test -p asmalloc --lib back::tests::charge_review -- --ignored <name>`.
+//! The properties: a slot said to be zero reads as zero; a clean bit is true, so none stands
+//! over a page that holds data or under what a held block may write; and the retained count
+//! is the bytes of the free slots' pages that are not clean. They are checked after every step
+//! of random runs against the back end and against the heap, the second by a program that
+//! fills all it is told it may use, and after threaded runs. Three tests are the first
+//! review's findings, which failed on the code as reviewed and pass since the fix.
+//!
+//! The slow runs do less in a debug build, which is what `scripts/gate --all` runs, than in a
+//! release one: `cargo test --release -p asmalloc --lib charge_review -- --include-ignored`
+//! runs them in full in about a minute.
 
 use super::super::layout::Grow;
 use super::super::tree::{self, Host, Node};
 use super::super::word::{BITS, Word};
 use super::*;
+use crate::SimHeap;
+use crate::classes::{C_ALIGN, MAX_SMALL_SIZE};
+use crate::heap::Found;
+use core::alloc::{GlobalAlloc, Layout};
 use core::sync::atomic::Ordering::Relaxed;
 
 /// What the bitmaps and the simulated memory say of the free large slots.
@@ -34,15 +43,48 @@ struct Census {
     told: usize,
 }
 
-/// Whether the page at `at`, a page boundary, holds a byte that is not zero.
-fn holds_data(at: *const u8, page: usize) -> bool {
-    // SAFETY: a page of a slot below a watermark, which is committed; the heap and these
-    // tests store only integers there, and nothing else runs.
-    let words = unsafe { core::slice::from_raw_parts(at.cast::<u64>(), page / 8) };
-    words.iter().any(|&w| w != 0)
+/// Whether the `len` bytes at `at` all equal `byte`. A comparison of whole pages, which is a
+/// library call and as fast in a debug build as in a release one: a census reads every page
+/// of every large slot.
+fn all_are(at: *const u8, len: usize, byte: u8) -> bool {
+    let like = [byte; 4096];
+    // SAFETY: the tests read only slots below a watermark, which are committed; the heap and
+    // these tests store only integers there.
+    let bytes = unsafe { core::slice::from_raw_parts(at, len) };
+    bytes
+        .chunks(like.len())
+        .all(|chunk| chunk == &like[..chunk.len()])
 }
 
-/// Reads every free large slot below a watermark. Nothing else may run.
+/// Whether the page at `at` holds a byte that is not zero.
+fn holds_data(at: *const u8, page: usize) -> bool {
+    !all_are(at, page, 0)
+}
+
+/// The pages marked clean under the `len` bytes at `ptr`, a block in a large slot. The block
+/// may write all of them, so there should be none. Nothing for a run or a small slot.
+fn clean_under<S: Shape>(back: &Back<'_, Sim<S>>, ptr: NonNull<u8>, len: usize) -> usize {
+    let Some(Kind::Slot(class)) = back.lookup(ptr.as_ptr()) else {
+        return 0;
+    };
+    if class.is_small() || len == 0 {
+        return 0;
+    }
+    let host = back.host(class).unwrap();
+    let layout = *host.layout();
+    let location = back.space().locate(ptr.as_ptr()).unwrap();
+    let offset = location.offset as usize;
+    let first = (offset >> layout.page_shift()) as u32;
+    let end = (offset + len).div_ceil(layout.page_size()) as u32;
+    (first..end)
+        .filter(|&p| {
+            let word = host.meta(location.region, layout.clean_word(p / BITS));
+            word.load() >> (p % BITS) & 1 != 0
+        })
+        .count()
+}
+
+/// Reads every large slot below a watermark. Nothing else may run.
 fn census<S: Shape>(back: &Back<'_, Sim<S>>) -> Census {
     let mut census = Census::default();
     for region in back.space().plan().regions() {
@@ -162,7 +204,7 @@ fn take<O: Os>(back: &Back<'_, O>, rng: &mut Rng, class: Class, size: usize) -> 
     assert!(size <= room);
     if block.zeroed {
         assert!(
-            painted(block.ptr.as_ptr(), room, 0),
+            all_are(block.ptr.as_ptr(), room, 0),
             "a slot of {class:?} was said to be zero and is not"
         );
     }
@@ -227,6 +269,14 @@ fn step<O: Os>(
         3 | 4 if !live.is_empty() => {
             let at = pick(rng, live);
             scribble(rng, &mut live[at], byte);
+            if rng.below(3) == 0 {
+                // And the rest of what it may use, as a C program that asks for its usable size
+                // does. A grow reads what is there, so the shadow needs none of it.
+                let held = &live[at];
+                let usable = back.usable_size(held.ptr.as_ptr()).unwrap();
+                let size = held.shadow.len();
+                paint(held.ptr.as_ptr().wrapping_add(size), usable - size, byte);
+            }
         }
         5 | 6 if !live.is_empty() => {
             let held = live.swap_remove(pick(rng, live));
@@ -286,7 +336,7 @@ fn step<O: Os>(
                 // What the heap's zeroed grow relies on to skip clearing past what it kept.
                 let room = back.room(to.ptr.as_ptr()).unwrap();
                 assert!(
-                    painted(to.ptr.as_ptr().wrapping_add(kept), room - kept, 0),
+                    all_are(to.ptr.as_ptr().wrapping_add(kept), room - kept, 0),
                     "a move into a zero slot left it not zero past what it copied"
                 );
             }
@@ -370,6 +420,15 @@ fn run(seed: u64, steps: usize, faults: bool) -> Met {
             census.counted as isize,
             "seed {seed:#x} step {at}: the count against the clean bits ({census:?})"
         );
+        // Nor does one stand under what a held block may write, written yet or not.
+        for held in &live {
+            let usable = back.usable_size(held.ptr.as_ptr()).unwrap();
+            assert_eq!(
+                clean_under(&back, held.ptr, usable),
+                0,
+                "seed {seed:#x} step {at}: a clean bit under a block of {usable} bytes"
+            );
+        }
         if trimmed && !faults {
             assert_eq!(
                 census.resident, 0,
@@ -392,6 +451,11 @@ fn run(seed: u64, steps: usize, faults: bool) -> Met {
     met
 }
 
+/// How much less a slow run does in a debug build, where a step costs several times what it
+/// does in a release one: `scripts/gate --all` runs debug builds under a time limit, and each
+/// of these then takes ten seconds or less.
+const DEBUG_LESS: u64 = if cfg!(debug_assertions) { 4 } else { 1 };
+
 /// `seeds` runs; they must between them have met every kind of free slot the review is about.
 fn runs(salt: u64, seeds: u64, steps: usize, faults: bool) {
     let mut met = Met::default();
@@ -407,19 +471,19 @@ fn runs(salt: u64, seeds: u64, steps: usize, faults: bool) {
 #[test]
 #[cfg_attr(miri, ignore)]
 fn the_count_follows_the_clean_bits_and_zero_slots_are_zero_quickly() {
-    runs(0x6a09_e667_f3bc_c908, 2, 500, false);
+    runs(0x6a09_e667_f3bc_c908, 3, 600, false);
 }
 
 #[test]
 #[ignore = "slow: run with scripts/gate --all"]
 fn the_count_follows_the_clean_bits_and_zero_slots_are_zero_fully() {
-    runs(0x6a09_e667_f3bc_c908, 24, 2500, false);
+    runs(0x6a09_e667_f3bc_c908, 24 / DEBUG_LESS, 2500, false);
 }
 
 #[test]
 #[ignore = "slow: run with scripts/gate --all"]
 fn the_count_follows_the_clean_bits_when_purges_and_advice_fail() {
-    runs(0xbb67_ae85_84ca_a73b, 24, 2500, true);
+    runs(0xbb67_ae85_84ca_a73b, 24 / DEBUG_LESS, 2500, true);
 }
 
 /// The same steps on several threads at once, each with its own blocks, while another trims
@@ -475,6 +539,11 @@ fn racing_tenants_and_purges_leave_the_count_at_the_clean_bits() {
         let census = census(&back);
         assert_eq!(census.wrong_zero, 0, "round {round}");
         assert_eq!(
+            (census.hidden, census.hidden_held),
+            (0, 0),
+            "round {round}: a clean bit over a written page ({census:?})"
+        );
+        assert_eq!(
             count(state),
             census.counted as isize,
             "round {round}: {census:?}"
@@ -499,6 +568,7 @@ fn racing_tenants_and_purges_leave_the_count_at_the_clean_bits() {
 /// accept the size), and
 /// `a_zero_size_aligned_block_leaves_its_slot_resident_for_good` in `heap::address` shows it.
 #[test]
+#[cfg_attr(miri, ignore)]
 fn a_tenant_that_asked_for_nothing_hides_a_resident_slot_from_the_purge() {
     let state = state::<Native>();
     let back = state.get_or_reserve().unwrap();
@@ -542,6 +612,7 @@ fn a_tenant_that_asked_for_nothing_hides_a_resident_slot_from_the_purge() {
 /// one thread whose moves nest at the first piece, which is the order sixteen threads take
 /// when each is preempted during its copy.
 #[test]
+#[cfg_attr(miri, ignore)]
 fn moves_under_way_at_once_each_keep_a_slot_past_the_budget() {
     const MOVERS: usize = 16;
     let state = state::<Native>();
@@ -590,6 +661,7 @@ fn moves_under_way_at_once_each_keep_a_slot_past_the_budget() {
 /// with five times the cap resident in free slots, so growth in another class pays nothing;
 /// only the clocked pass returns it.
 #[test]
+#[cfg_attr(miri, ignore)]
 fn tenants_after_larger_ones_hide_free_memory_from_the_cap() {
     const SLOTS: usize = 40;
     let state = state::<Native>();
@@ -630,4 +702,377 @@ fn tenants_after_larger_ones_hide_free_memory_from_the_cap() {
         grown.len() * other.size(),
         back.retained()
     );
+}
+
+/// A block a program holds through the heap.
+struct Owned {
+    ptr: NonNull<u8>,
+    /// A layout that fits it, for a block of the Rust calls; none for one of the C calls.
+    layout: Option<Layout>,
+    /// The bytes the program wrote, from the block's start: all it was told it may use.
+    wrote: usize,
+    fill: u8,
+}
+
+/// C's `realloc` of a large block to a large size, as `c::realloc` does it on the process's
+/// heap: in place if the block's room allows, else a new block (with headroom if it grows)
+/// and a move of everything the old one's usable size covered.
+fn c_realloc(sim: &SimHeap<Native>, old: NonNull<u8>, size: usize) -> NonNull<u8> {
+    let heap = sim.heap();
+    let Some(Found::Large { size: used }) = heap.find(old.as_ptr()) else {
+        panic!("not a large block");
+    };
+    // SAFETY: the test holds the block and uses none of it during the call.
+    if unsafe { heap.resize_in_place_by_address(old, used, size) } {
+        return old;
+    }
+    let kept = heap.usable_size(old.as_ptr()).unwrap();
+    let new = if size > kept {
+        heap.alloc_large_grown(size)
+    } else {
+        heap.alloc_large_aligned(size, C_ALIGN, false)
+    }
+    .unwrap();
+    // SAFETY: both are live blocks the test holds, `old` given up.
+    unsafe {
+        heap.back()
+            .unwrap()
+            .move_large(old, new, kept.min(size), false)
+    };
+    new
+}
+
+/// A size a large request may have: mostly one that takes a slot, of any class the native
+/// shape's regions hold, sometimes one that takes a run.
+fn large_size(rng: &mut Rng) -> usize {
+    match rng.below(12) {
+        0 => (1 << 20) + 1 + rng.below(2 << 20),
+        1..=4 => MAX_SMALL_SIZE + 1 + rng.below(64 << 10),
+        _ => MAX_SMALL_SIZE + 1 + rng.below(700 << 10),
+    }
+}
+
+/// A program on the heap that fills all it is told it may use: what `malloc_usable_size`
+/// reports of a block of the C calls, the layout's size of a block of the Rust ones, and the
+/// length a zeroed grow returns. Blocks are allocated plain, zeroed, aligned (some with a
+/// size of zero or a few bytes), with headroom by a growing `realloc`, resized in place and
+/// moved, and freed, with collections and the clocked pass between. After every step the
+/// clean bits are true (none over a page that holds data, none under a held block), no zero
+/// bit stands over data, the count is the free slots' pages that are not clean, and memory
+/// promised zero is zero. A heap that claimed a slot for less than it then let the program
+/// write fails the check after that step.
+fn fill_all(seed: u64, steps: usize) -> Met {
+    let sim = SimHeap::<Native>::new();
+    let os = sim.os();
+    let heap = sim.heap();
+    let page = Native::GEOMETRY.page_size();
+    let mut rng = Rng(seed | 1);
+    let mut live: Vec<Owned> = Vec::new();
+    let (mut fill, mut met) = (0u8, Met::default());
+    let write = |ptr: NonNull<u8>, len: usize, fill: u8| paint(ptr.as_ptr(), len, fill);
+    for at in 0..steps {
+        fill = fill.wrapping_add(1).max(1);
+        let pick = |rng: &mut Rng, live: &Vec<Owned>, c: bool| {
+            let of: Vec<usize> = (0..live.len())
+                .filter(|&i| live[i].layout.is_none() == c)
+                .collect();
+            (!of.is_empty()).then(|| of[rng.below(of.len())])
+        };
+        match rng.below(16) {
+            // C: malloc, calloc, aligned_alloc.
+            0..=3 if live.len() < 20 => {
+                let (size, align, zero) = match rng.below(4) {
+                    0 => (large_size(&mut rng), C_ALIGN, true),
+                    1 => {
+                        let size = [0, 1, 100, 5000, 40 << 10, 200 << 10][rng.below(6)];
+                        (size, (64 << 10) << rng.below(3), rng.below(4) == 0)
+                    }
+                    _ => (large_size(&mut rng), C_ALIGN, false),
+                };
+                let ptr = heap.alloc_large_aligned(size, align, zero).unwrap();
+                assert_eq!(ptr.addr().get() % align, 0);
+                let usable = heap.usable_size(ptr.as_ptr()).unwrap();
+                assert!(usable >= size);
+                if zero {
+                    assert!(
+                        all_are(ptr.as_ptr(), usable, 0),
+                        "seed {seed:#x} step {at}: a zeroed block of {size} bytes is not zero"
+                    );
+                }
+                write(ptr, usable, fill);
+                live.push(Owned {
+                    ptr,
+                    layout: None,
+                    wrote: usable,
+                    fill,
+                });
+            }
+            // C: realloc.
+            4..=6 => {
+                if let Some(i) = pick(&mut rng, &live, true) {
+                    let old = &live[i];
+                    let size = large_size(&mut rng).min(900 << 10);
+                    let ptr = c_realloc(&sim, old.ptr, size);
+                    let usable = heap.usable_size(ptr.as_ptr()).unwrap();
+                    assert!(usable >= size);
+                    assert!(
+                        all_are(ptr.as_ptr(), old.wrote.min(size), old.fill),
+                        "seed {seed:#x} step {at}: realloc to {size} lost bytes"
+                    );
+                    write(ptr, usable, fill);
+                    live[i] = Owned {
+                        ptr,
+                        layout: None,
+                        wrote: usable,
+                        fill,
+                    };
+                }
+            }
+            // C: free.
+            7 => {
+                if let Some(i) = pick(&mut rng, &live, true) {
+                    let old = live.swap_remove(i);
+                    assert!(all_are(old.ptr.as_ptr(), old.wrote, old.fill));
+                    // SAFETY: the test's block, freed once.
+                    unsafe { heap.free_large(old.ptr) };
+                }
+            }
+            // Rust: alloc and alloc_zeroed, small blocks among them.
+            8 | 9 if live.len() < 20 => {
+                let size = match rng.below(4) {
+                    0 => 1 + rng.below(MAX_SMALL_SIZE),
+                    _ => large_size(&mut rng),
+                };
+                let align = [8, 16, page, 64 << 10][rng.below(4)];
+                let layout = Layout::from_size_align(size, align).unwrap();
+                let zero = rng.below(3) == 0;
+                // SAFETY: the layout's size is not zero.
+                let ptr = unsafe {
+                    if zero {
+                        GlobalAlloc::alloc_zeroed(&sim, layout)
+                    } else {
+                        GlobalAlloc::alloc(&sim, layout)
+                    }
+                };
+                let ptr = NonNull::new(ptr).unwrap();
+                if zero {
+                    assert!(
+                        all_are(ptr.as_ptr(), size, 0),
+                        "seed {seed:#x} step {at}: alloc_zeroed of {size} bytes is not zero"
+                    );
+                }
+                write(ptr, size, fill);
+                live.push(Owned {
+                    ptr,
+                    layout: Some(layout),
+                    wrote: size,
+                    fill,
+                });
+            }
+            // Rust: realloc, and a zeroed grow.
+            10..=12 => {
+                if let Some(i) = pick(&mut rng, &live, false) {
+                    let old = &live[i];
+                    let layout = old.layout.unwrap();
+                    let grow_zeroed = rng.below(3) == 0;
+                    let size = match rng.below(4) {
+                        _ if grow_zeroed => layout.size() + 1 + rng.below(300 << 10),
+                        0 => 1 + rng.below(MAX_SMALL_SIZE),
+                        1 => (layout.size() * 2).min(900 << 10),
+                        _ => large_size(&mut rng),
+                    };
+                    let new = Layout::from_size_align(size, layout.align()).unwrap();
+                    let kept = old.wrote.min(layout.size()).min(size);
+                    let (ptr, wrote) = if grow_zeroed {
+                        let before = sim.usable_size(old.ptr.as_ptr()).unwrap();
+                        // SAFETY: the test's block, which `layout` fits; `new` is larger.
+                        let (ptr, len) =
+                            unsafe { sim.grow_zeroed_for_test(old.ptr.as_ptr(), layout, new) }
+                                .unwrap();
+                        assert!(len >= size);
+                        assert_eq!(
+                            sim.usable_size(ptr),
+                            Some(len),
+                            "seed {seed:#x} step {at}: a grant of {len} bytes for {size}"
+                        );
+                        // Past the old block, which ended at its usable size if it stayed
+                        // and at its layout's if it moved.
+                        let from = before.max(layout.size()).min(len);
+                        assert!(
+                            all_are(ptr.wrapping_add(from), len - from, 0),
+                            "seed {seed:#x} step {at}: a zeroed grow to {size} is not zero"
+                        );
+                        (ptr, len)
+                    } else {
+                        // SAFETY: the test's block, which `layout` fits; `size` is not zero.
+                        (
+                            unsafe { GlobalAlloc::realloc(&sim, old.ptr.as_ptr(), layout, size) },
+                            size,
+                        )
+                    };
+                    let ptr = NonNull::new(ptr).unwrap();
+                    assert!(
+                        all_are(ptr.as_ptr(), kept, old.fill),
+                        "seed {seed:#x} step {at}: a resize to {size} lost bytes"
+                    );
+                    write(ptr, wrote, fill);
+                    // Any size from the one asked for to the length granted fits the block.
+                    let fits = Layout::from_size_align(wrote, layout.align()).unwrap();
+                    live[i] = Owned {
+                        ptr,
+                        layout: Some(fits),
+                        wrote,
+                        fill,
+                    };
+                }
+            }
+            // Rust: dealloc.
+            13 => {
+                if let Some(i) = pick(&mut rng, &live, false) {
+                    let old = live.swap_remove(i);
+                    assert!(all_are(old.ptr.as_ptr(), old.wrote, old.fill));
+                    // SAFETY: the test's block, which the layout fits, freed once.
+                    unsafe { GlobalAlloc::dealloc(&sim, old.ptr.as_ptr(), old.layout.unwrap()) };
+                }
+            }
+            14 => {
+                os.advance_clock(DECAY_TICKS);
+                sim.maintain();
+            }
+            _ if rng.below(4) == 0 => {
+                sim.collect();
+            }
+            _ => {}
+        }
+        let Some(back) = heap.back() else {
+            continue;
+        };
+        let census = census(&back);
+        assert_eq!(census.wrong_zero, 0, "seed {seed:#x} step {at}");
+        assert_eq!(
+            (census.hidden, census.hidden_held),
+            (0, 0),
+            "seed {seed:#x} step {at}: a clean bit over a written page ({census:?})"
+        );
+        for owned in &live {
+            let usable = heap.usable_size(owned.ptr.as_ptr()).unwrap();
+            assert!(owned.wrote <= usable);
+            assert_eq!(
+                clean_under(&back, owned.ptr, usable),
+                0,
+                "seed {seed:#x} step {at}: a clean bit under a block of {usable} bytes"
+            );
+        }
+        assert_eq!(
+            back.state.retained.large.load(Relaxed),
+            census.counted as isize,
+            "seed {seed:#x} step {at}: the count against the clean bits ({census:?})"
+        );
+        met.add(&census);
+    }
+    for owned in live.drain(..) {
+        assert!(all_are(owned.ptr.as_ptr(), owned.wrote, owned.fill));
+        // SAFETY: the test's blocks, each freed once.
+        unsafe {
+            match owned.layout {
+                Some(layout) => GlobalAlloc::dealloc(&sim, owned.ptr.as_ptr(), layout),
+                None => heap.free_large(owned.ptr),
+            }
+        }
+    }
+    sim.collect();
+    let back = heap.back().unwrap();
+    let census = census(&back);
+    assert_eq!((census.resident, census.wrong_zero), (0, 0), "{census:?}");
+    assert_eq!(back.state.retained.large.load(Relaxed), 0);
+    met
+}
+
+fn fills(seeds: u64, steps: usize) {
+    let mut met = Met::default();
+    for seed in 0..seeds {
+        met.join(fill_all(0x510e_527f_ade6_82d1 ^ seed, steps));
+    }
+    assert!(
+        met.zero != 0 && met.told != 0,
+        "the runs missed a case: {met:?}"
+    );
+}
+
+#[test]
+#[cfg_attr(miri, ignore)]
+fn a_program_that_fills_all_it_may_use_meets_no_clean_page_quickly() {
+    fills(2, 300);
+}
+
+#[test]
+#[ignore = "slow: run with scripts/gate --all"]
+fn a_program_that_fills_all_it_may_use_meets_no_clean_page_fully() {
+    fills(16 / DEBUG_LESS, 2500);
+}
+
+/// Moves on many threads at once, each out of a block of its own into a block it keeps, so
+/// that the only slots freed are those the moves leave and every one is a decision to keep or
+/// return. A decision counts its slot before it looks (`keep_grown`), and here no claim can
+/// take a slot out of the count before it is in, so the slots kept never pass the budget, at
+/// any moment and so at the end; and no update of the count is lost.
+#[test]
+#[ignore = "slow: run with scripts/gate --all"]
+fn racing_moves_keep_within_the_budget() {
+    let budget = kept_grown(Native::GEOMETRY);
+    // The block moved into is more than twice the one moved, so it is never advised for huge
+    // pages, and it is freed only after the count has been read.
+    let (class, wider) = (large(96 << 10), large(256 << 10));
+    let len = class.size() - 100;
+    for round in 0..8 {
+        let state = state::<Native>();
+        state.get_or_reserve().unwrap();
+        let state = &*state;
+        let most = core::sync::atomic::AtomicUsize::new(0);
+        let into: Vec<usize> = (0..16)
+            .map(|_| {
+                let back = state.get().unwrap();
+                back.alloc(wider, wider.size()).unwrap().ptr.addr().get()
+            })
+            .collect();
+        thread::scope(|scope| {
+            for &to in &into {
+                let most = &most;
+                scope.spawn(move || {
+                    let back = state.get().unwrap();
+                    let to = back.space().pointer(to).unwrap();
+                    for at in 0..600usize {
+                        let stamp = (at as u8).max(1);
+                        let from = back.alloc(class, len).unwrap().ptr;
+                        paint(from.as_ptr(), len, stamp);
+                        // SAFETY: both are live blocks this thread holds, `from` given up.
+                        unsafe { back.move_large(from, to, len, false) };
+                        assert!(all_are(to.as_ptr(), len, stamp));
+                        most.fetch_max(back.retained_large(), Relaxed);
+                    }
+                });
+            }
+        });
+        let back = state.get().unwrap();
+        let census = census(&back);
+        assert_eq!(count(state), census.counted as isize, "round {round}");
+        // Every free slot is one a move left.
+        let kept = census.counted;
+        assert!(
+            kept <= budget,
+            "round {round}: {kept} bytes of the slots moved out of are kept; the budget is {budget}"
+        );
+        // A reading during the run also holds the charges of decisions not yet taken back.
+        let most = most.load(Relaxed);
+        assert!(
+            most <= budget + 16 * class.size(),
+            "round {round}: the count reached {most}"
+        );
+        assert_ne!(kept, 0, "round {round}: nothing was kept at all");
+        for &to in &into {
+            back.free(back.space().pointer(to).unwrap(), wider);
+        }
+        back.trim();
+        assert_eq!(count(state), 0, "round {round}");
+    }
 }
