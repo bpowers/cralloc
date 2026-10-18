@@ -107,29 +107,39 @@ impl Group {
     }
 
     /// The caller holds `held` open and has met `next`, one slot of another word. Returns the
-    /// word the caller holds now: `next`'s, with the bits gathered for it if it was open, the
-    /// held word going back into the group. If `next`'s word was not open, the oldest open word
-    /// is closed into `release`. Aborts if `next`'s slot is already in the group.
-    #[inline(never)]
+    /// word the caller holds now. If `next`'s word is open here its bit is added here and the
+    /// caller keeps `held`; otherwise `held` goes into the group, the oldest open word is
+    /// closed into `release`, and the caller holds `next`. Aborts if `next`'s slot is already
+    /// in the group.
+    ///
+    /// Inlined, with the open word found by a mask rather than a branch per way, and updated in
+    /// place: a magazine whose slots come back shuffled among a few words, or two runs
+    /// interleaved, meets an open word other than the held one on most slots.
+    #[inline(always)]
     pub(crate) fn switch<H: Host>(
         &mut self,
         release: &mut Release<'_, H>,
         held: Open,
         next: Open,
     ) -> Open {
+        let mut found = 0u32;
         for way in 0..WAYS - 1 {
-            if self.ways[way].key == next.key {
-                let mut open = self.ways[way];
-                if self.earlier[way] & next.bits != 0 {
-                    release.abort(TWICE);
-                }
-                open.add(release, next.bits);
-                self.ways[way] = held;
-                let earlier = core::mem::replace(&mut self.earlier[way], self.held_earlier);
-                self.held_earlier = earlier;
-                return open;
-            }
+            found |= ((self.ways[way].key == next.key) as u32) << way;
         }
+        if found == 0 {
+            return self.open(release, held, next);
+        }
+        let way = (found.trailing_zeros() as usize) % (WAYS - 1);
+        if (self.ways[way].bits | self.earlier[way]) & next.bits != 0 {
+            release.abort(TWICE);
+        }
+        self.ways[way].bits |= next.bits;
+        held
+    }
+
+    /// [`Group::switch`] for a `next` whose word is not open: opens it and closes the oldest.
+    #[inline(never)]
+    fn open<H: Host>(&mut self, release: &mut Release<'_, H>, held: Open, next: Open) -> Open {
         let mut earlier = 0;
         let hash = key_hash(next.key);
         if self.filter[hash / 64] & (1 << (hash % 64)) != 0 {
