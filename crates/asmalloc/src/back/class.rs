@@ -331,7 +331,8 @@ impl<'a, O: Os> Back<'a, O> {
         if tree::word(host, tree::Node::leaf(region, word)).load() & (1u64 << bit) != 0 {
             self.abort("double free: a large object was freed while it was free");
         }
-        if !region::recorded(host, region, slot).is_some_and(|r| r.huge) || self.keeps_grown(class)
+        if !region::recorded(host, region, slot).is_some_and(|r| r.huge)
+            || self.keeps_grown(region::charge(host, region, slot))
         {
             return false;
         }
@@ -687,7 +688,10 @@ impl<'a, O: Os> Back<'a, O> {
         let mut dest = if zeroed { Dest::Zero } else { Dest::Dirty };
         // A slot within the budget is kept whole, with both copies resident for the move;
         // anything else goes back behind the copy.
-        let keep = slot.is_some_and(|class| self.keeps_grown(class));
+        let keep = match &host {
+            Some((host, region, index)) => self.keeps_grown(region::charge(host, *region, *index)),
+            None => false,
+        };
         // Pieces end at multiples of the piece in the address space, not in the block, so that
         // a piece that goes back is whole huge pages wherever the block has them: purging
         // part of a huge page would return nothing.
@@ -842,13 +846,14 @@ impl<'a, O: Os> Back<'a, O> {
         copy(next, end);
     }
 
-    /// Whether a grown block's slot of `class`, moved out of or freed with huge-page advice,
-    /// is kept resident rather than returned: if retained large-slot memory stays within its
-    /// budget with it (`policy::kept_grown`). Two threads may both see room and together go
+    /// Whether a grown block's slot, moved out of or freed with huge-page advice, is kept
+    /// resident rather than returned: if retained large-slot memory stays within its budget
+    /// (`policy::kept_grown`) with the slot's `charge`, what its tenant could have written
+    /// (`region::charge`). Two threads may both see room and together go
     /// past the budget by a slot; the budget bounds what is kept, not a correctness property.
-    fn keeps_grown(&self, class: Class) -> bool {
+    fn keeps_grown(&self, charge: usize) -> bool {
         let budget = kept_grown(self.space.plan().geometry());
-        self.retained_large().saturating_add(class.size()) <= budget
+        self.retained_large().saturating_add(charge) <= budget
     }
 
     /// Before the `len` bytes at `from` move into the block at `to`: if `to` is a large slot

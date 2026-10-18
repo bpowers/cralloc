@@ -364,14 +364,10 @@ pub(crate) unsafe fn purge_held<H: Host>(host: &H, region: RegionId, slot: u32) 
 pub(crate) fn charge_resident<H: Host>(host: &H, region: RegionId, slot: u32) -> usize {
     let layout = host.layout();
     let size = layout.size();
-    let (Some(unit), Some(now)) = (layout.slot_unit(slot), recorded(host, region, slot)) else {
+    let (Some(unit), Some(end)) = (layout.slot_unit(slot), extent(host, region, slot)) else {
         return size;
     };
     let page = layout.page_size();
-    let written = layout.slot_bytes(slot) + layout.stagger(slot) + now.size;
-    let end = written.div_ceil(page).min(unit.end as usize) as u32;
-    let end = if now.huge { layout.huge_ceil(end) } else { end };
-    let end = end.clamp(unit.start, unit.end);
     // Counted over the whole slot, as the claim counts: a page found clean already would be
     // subtracted there too.
     let mut clean = 0usize;
@@ -391,6 +387,29 @@ pub(crate) fn charge_resident<H: Host>(host: &H, region: RegionId, slot: u32) ->
         clean += (now & all).count_ones() as usize;
     }
     size.saturating_sub(clean * page)
+}
+
+/// The page, counted from the region's start, past the last that large slot `slot`'s tenant
+/// could have written (`charge_resident`), within the slot's pages. `None` for a slot that
+/// records no size. For the slot's holder.
+fn extent<H: Host>(host: &H, region: RegionId, slot: u32) -> Option<u32> {
+    let layout = host.layout();
+    let (unit, now) = (layout.slot_unit(slot)?, recorded(host, region, slot)?);
+    let page = layout.page_size();
+    let written = layout.slot_bytes(slot) + layout.stagger(slot) + now.size;
+    let end = written.div_ceil(page).min(unit.end as usize) as u32;
+    let end = if now.huge { layout.huge_ceil(end) } else { end };
+    Some(end.clamp(unit.start, unit.end))
+}
+
+/// What `charge_resident` would count for large slot `slot` now, without marking anything:
+/// for deciding whether to keep it. For the slot's holder, whose slot has no clean page.
+pub(crate) fn charge<H: Host>(host: &H, region: RegionId, slot: u32) -> usize {
+    let layout = host.layout();
+    match (layout.slot_unit(slot), extent(host, region, slot)) {
+        (Some(unit), Some(end)) => layout.size() - (unit.end - end) as usize * layout.page_size(),
+        _ => layout.size(),
+    }
 }
 
 /// Records that every whole page inside slot `slot` has just been returned to the OS, for the
