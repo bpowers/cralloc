@@ -170,6 +170,7 @@ impl<'a, O: Os> Back<'a, O> {
                 taken.bits,
             );
         }
+        tree::finish_run(&host, cursor);
         self.unretain(class.class(), resident);
         self.revive(class.class(), revived);
         while got < len {

@@ -368,18 +368,149 @@ fn free_batch(host: &Host8, slots: &[u32]) {
 
 /// Claims `times` times through one cursor, as a fill does, keeping what it gets.
 fn claim_run(host: &Host8, times: usize) -> Vec<(RegionId, u32)> {
+    claim_run_of(host, times, 1)
+}
+
+/// Claims up to `n` slots `times` times through one cursor, then ends the run, as a fill does.
+fn claim_run_of(host: &Host8, times: usize, n: u32) -> Vec<(RegionId, u32)> {
     let mut cursor = None;
     let mut out = Vec::new();
     for _ in 0..times {
-        let Some(taken) = tree::claim_next(host, 1, &mut cursor) else {
+        let Some(taken) = tree::claim_next(host, n, &mut cursor) else {
             break;
         };
-        out.push((
-            taken.region,
-            taken.word * BITS + taken.bits.trailing_zeros(),
-        ));
+        let mut bits = taken.bits;
+        while bits != 0 {
+            out.push((taken.region, taken.word * BITS + bits.trailing_zeros()));
+            bits &= bits - 1;
+        }
     }
+    tree::finish_run(host, cursor);
     out
+}
+
+/// A host of 8-byte slots in one `Tiny` region (four leaf words under one summary word, so a
+/// run batches its clears), with slots 0, 64, 65 and 128 free and the rest held.
+fn run_setup() -> Host8 {
+    let host = Host8::new(tiny(), class(8), 1);
+    let r0 = host.region_at(0);
+    host.carve_all(r0, 256);
+    for slot in [0, 64, 65, 128] {
+        free_now(&host, r0, slot);
+    }
+    host
+}
+
+/// Two runs of claims race each other and a free into a word one of them empties: each run
+/// empties words and clears their bits as a batch, moves past the other, and leaves words the
+/// other emptied to it. Nothing is handed out twice or lost, and every word is visible at the
+/// end (`Summary_run.cfg`). Preemptions bounded to two (one in the quick run).
+fn two_runs_race_a_free(preemptions: usize) {
+    explore(
+        Config {
+            preemptions: Some(preemptions),
+            ..Config::ALL
+        },
+        3,
+        || (run_setup(), Mutex::new(Vec::new())),
+        |(host, kept), me| {
+            let got = match me {
+                0 => claim_run_of(host, 3, 2),
+                1 => claim_run_of(host, 2, 1),
+                _ => {
+                    free_now(host, host.region_at(0), 1);
+                    Vec::new()
+                }
+            };
+            kept.lock().unwrap().extend(got);
+        },
+        |(host, kept), outcome| {
+            assert!(outcome.killed.is_empty());
+            let kept = kept.lock().unwrap().clone();
+            let distinct: BTreeSet<_> = kept.iter().copied().collect();
+            assert_eq!(distinct.len(), kept.len(), "a slot claimed twice");
+            // Before the releases below, whose healing walks would repair a lost bit.
+            assert!(host.all_visible(), "a free word is invisible");
+            release_all(host, &kept);
+            let expected: BTreeSet<u64> = [0, 1, 64, 65, 128].into_iter().collect();
+            assert_eq!(free_set(host, 1), expected);
+            assert!(host.all_visible(), "a free word is invisible");
+        },
+    );
+}
+
+#[test]
+#[cfg_attr(miri, ignore)]
+fn two_runs_race_a_free_quickly() {
+    two_runs_race_a_free(1);
+}
+
+#[test]
+#[ignore = "slow: run with scripts/gate --all"]
+fn two_runs_race_a_free_fully() {
+    two_runs_race_a_free(2);
+}
+
+/// `Summary_run_crash.cfg`: a run may vanish, as in a forked child, while it holds clears it has
+/// not made, leaving bits set over words it emptied. The survivor then fills from the top: it
+/// must still find every free slot before it reports none (the stale bits cost it a clear, not
+/// a carve), and the words stay visible. Preemptions bounded to two (one in the quick run).
+fn a_run_lost_with_held_clears(preemptions: usize) {
+    explore(
+        Config {
+            preemptions: Some(preemptions),
+            crash: true,
+            ..Config::ALL
+        },
+        3,
+        || (run_setup(), Mutex::new(Vec::new())),
+        |(host, kept), me| {
+            let got = match me {
+                // The survivor: frees into a word a run may be emptying, then fills.
+                0 => {
+                    free_now(host, host.region_at(0), 129);
+                    claim_run_of(host, 2, 1)
+                }
+                1 => claim_run_of(host, 3, 1),
+                _ => claim_run_of(host, 2, 2),
+            };
+            kept.lock().unwrap().extend(got);
+        },
+        |(host, kept), _| {
+            let kept: Vec<_> = kept.lock().unwrap().clone();
+            let distinct: BTreeSet<_> = kept.iter().copied().collect();
+            assert_eq!(distinct.len(), kept.len(), "a slot claimed twice");
+            // A vanished thread may have cleared a bit and not read its word again, which
+            // only the next free into the word repairs (`Summary_crash.cfg`): free a slot the
+            // program held in every word.
+            let r0 = host.region_at(0);
+            for w in 0..host.layout().leaf_words() {
+                free_now(host, r0, w * BITS + 3);
+            }
+            // Now a fill from the top finds every free slot before it reports none: bits a
+            // lost run left set over words it emptied cost a clear, not a missed slot.
+            let free = free_set(host, 1);
+            let got = claim_run_of(host, 16, 64);
+            let got: BTreeSet<u64> = got.iter().map(|&(_, s)| s as u64).collect();
+            assert_eq!(got, free, "a fill missed a free slot");
+            for &slot in &got {
+                free_now(host, r0, slot as u32);
+            }
+            assert!(host.all_visible(), "a free word is invisible");
+        },
+    );
+}
+
+#[test]
+#[cfg_attr(miri, ignore)]
+fn a_run_lost_with_held_clears_quickly() {
+    a_run_lost_with_held_clears(1);
+}
+
+#[test]
+#[ignore = "slow: run with scripts/gate --all"]
+fn a_run_lost_with_held_clears_fully() {
+    a_run_lost_with_held_clears(2);
 }
 
 /// A batch of releases under three summary words, whose walk is shared and deferred, races a

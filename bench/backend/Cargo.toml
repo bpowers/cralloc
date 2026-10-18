@@ -11,6 +11,11 @@ publish.workspace = true
 name = "backbench"
 path = "src/main.rs"
 
+# Fill and launder of one class from several threads at once.
+[[bin]]
+name = "backcontend"
+path = "src/contend.rs"
+
 [dependencies]
 # `internals`: the back end itself is what this measures.
 asmalloc = { path = "../../crates/asmalloc", features = ["internals"] }

@@ -20,10 +20,21 @@
    Heal = TRUE is a proposed change: a free walks all the way up and sets any
    summary bit it finds clear, even when its word was not empty.
    Crash = TRUE lets every thread but one vanish at an arbitrary step, once,
-   which is what a forked child sees. *)
+   which is what a forked child sees.
+   Run = TRUE adds what a run of claims (a fill) does:
+     - a search may start at any word, as a run that resumes at its cursor
+       or moves past another thread does;
+     - a search that finds a word empty may leave it without clearing its
+       bit, as a run leaves a word another thread emptied to that thread;
+     - a thread that empties a level-0 word may hold its clear, and later
+       clear the bits of every word it holds under one summary word with one
+       atomic AND, then read each of those words again: a word no longer
+       empty has its bit set back by a walk up, and if the AND emptied the
+       summary word and every word read empty, the thread clears the summary
+       word's own bit, as a single clear would. *)
 EXTENDS Naturals, FiniteSets, TLC
 
-CONSTANTS Threads, B, Top, Reread, Heal, Crash
+CONSTANTS Threads, B, Top, Reread, Heal, Crash, Run
 
 Bits == 0..(B - 1)
 
@@ -38,18 +49,23 @@ VARIABLES
     bits,     \* bits[k][i]: the set bits of word i at level k
     live,     \* objects the program holds
     th,       \* per-thread state
+    held,     \* held[t]: level-0 words t emptied and has not yet cleared
     crashed,
     gone,     \* ghost: objects that vanished threads were holding
     touched   \* ghost: level-0 words freed into since the crash
 
-vars == <<bits, live, th, crashed, gone, touched>>
+vars == <<bits, live, th, held, crashed, gone, touched>>
 
-Idle == [pc |-> "idle", k |-> 0, i |-> 0, must |-> FALSE, pe |-> FALSE, set |-> {}]
+\* g: the summary word of a batch; rr: its words still to read again; ok: every
+\* one read so far was empty; ret: an up walk that returns to the batch.
+Idle == [pc |-> "idle", k |-> 0, i |-> 0, must |-> FALSE, pe |-> FALSE, set |-> {},
+         g |-> 0, rr |-> {}, ok |-> TRUE, ret |-> FALSE]
 
 Init ==
     /\ bits = [k \in Levels |-> [i \in Words(k) |-> Bits]]
     /\ live = {}
     /\ th = [t \in Threads |-> Idle]
+    /\ held = [t \in Threads |-> {}]
     /\ crashed = FALSE
     /\ gone = {}
     /\ touched = {}
@@ -58,6 +74,12 @@ Set(t, T) == th' = [th EXCEPT ![t] = T]
 Parent(i) == i \div B
 Bit(i) == i % B
 ObjsOf(i, S) == {i * B + b : b \in S}
+
+\* The end of an up walk: back to the batch it was part of, or idle.
+WalkDone(t, T) ==
+    IF T.ret
+    THEN Set(t, [T EXCEPT !.pc = "breread", !.ret = FALSE, !.must = FALSE])
+    ELSE Set(t, Idle)
 
 ----------------------------------------------------------------------------
 (* Free *)
@@ -69,7 +91,7 @@ FreeBegin(t) ==
         /\ ObjsOf(i, S) \subseteq live
         /\ live' = live \ ObjsOf(i, S)
         /\ Set(t, [Idle EXCEPT !.pc = "f_or", !.i = i, !.set = S])
-    /\ UNCHANGED <<bits, crashed, gone, touched>>
+    /\ UNCHANGED <<bits, held, crashed, gone, touched>>
 
 \* One atomic OR. If the word was empty the summary bit must be set.
 FreeOr(t) ==
@@ -81,7 +103,7 @@ FreeOr(t) ==
         /\ IF old = {} \/ Heal
            THEN Set(t, [Idle EXCEPT !.pc = "up", !.i = T.i, !.must = (old = {})])
            ELSE Set(t, Idle)
-    /\ UNCHANGED <<live, crashed, gone>>
+    /\ UNCHANGED <<live, held, crashed, gone>>
 
 \* Walk up from word (k, i). With `must`, set its summary bit with an atomic
 \* OR and carry on only if the summary word was empty. Without it (Heal
@@ -91,25 +113,28 @@ Up(t) ==
     /\ LET T == th[t]
            p == Parent(T.i)
            old == bits[T.k + 1][p] IN
-        IF T.k = Top THEN Set(t, Idle) /\ UNCHANGED bits
+        IF T.k = Top THEN WalkDone(t, T) /\ UNCHANGED bits
         ELSE IF T.must
         THEN /\ bits' = [bits EXCEPT ![T.k + 1][p] = old \cup {Bit(T.i)}]
              /\ IF old = {} \/ Heal
                 THEN Set(t, [T EXCEPT !.k = T.k + 1, !.i = p, !.must = (old = {})])
-                ELSE Set(t, Idle)
+                ELSE WalkDone(t, T)
         ELSE /\ UNCHANGED bits
              /\ IF Bit(T.i) \in old
                 THEN Set(t, [T EXCEPT !.k = T.k + 1, !.i = p])
                 ELSE Set(t, [T EXCEPT !.must = TRUE])
-    /\ UNCHANGED <<live, crashed, gone, touched>>
+    /\ UNCHANGED <<live, held, crashed, gone, touched>>
 
 ----------------------------------------------------------------------------
 (* Claim *)
 
+\* A search starts at the top word, or with Run at any word.
 SearchBegin(t) ==
     /\ th[t].pc = "idle"
-    /\ Set(t, [Idle EXCEPT !.pc = "s_read", !.k = Top])
-    /\ UNCHANGED <<bits, live, crashed, gone, touched>>
+    /\ \/ Set(t, [Idle EXCEPT !.pc = "s_read", !.k = Top])
+       \/ Run /\ \E k \in Levels : \E i \in Words(k) :
+                    Set(t, [Idle EXCEPT !.pc = "s_read", !.k = k, !.i = i])
+    /\ UNCHANGED <<bits, live, held, crashed, gone, touched>>
 
 \* Read one word on the way down. Any set bit may be followed; the design
 \* follows the lowest, which is one of the choices.
@@ -120,13 +145,16 @@ SearchRead(t) ==
         IF w = {}
         THEN IF T.k = Top
              THEN Set(t, Idle)
-             ELSE Set(t, [T EXCEPT !.pc = "clr"])       \* a stale hint
+             ELSE \/ Set(t, [T EXCEPT !.pc = "clr"])       \* a stale hint
+                  \/ Run /\ Set(t, Idle)                   \* left to another
         ELSE IF T.k = 0
         THEN Set(t, [T EXCEPT !.pc = "s_cas", !.set = w])
         ELSE \E b \in w : Set(t, [T EXCEPT !.k = T.k - 1, !.i = T.i * B + b])
-    /\ UNCHANGED <<bits, live, crashed, gone, touched>>
+    /\ UNCHANGED <<bits, live, held, crashed, gone, touched>>
 
-\* Take some of the bits read, with one compare-and-swap.
+\* Take some of the bits read, with one compare-and-swap. A thread that empties
+\* the word clears its bit now or, with Run, holds the clear: in a batch of
+\* words under one summary word.
 SearchCas(t) ==
     /\ th[t].pc = "s_cas"
     /\ LET T == th[t] IN
@@ -135,9 +163,13 @@ SearchCas(t) ==
                 /\ bits' = [bits EXCEPT ![0][T.i] = T.set \ S]
                 /\ live' = live \cup ObjsOf(T.i, S)
                 /\ IF S = T.set
-                   THEN Set(t, [T EXCEPT !.pc = "clr", !.set = {}])
-                   ELSE Set(t, Idle)
-        ELSE Set(t, Idle) /\ UNCHANGED <<bits, live>>
+                   THEN \/ Set(t, [T EXCEPT !.pc = "clr", !.set = {}]) /\ UNCHANGED held
+                        \/ /\ Run /\ Top > 0
+                           /\ \A j \in held[t] : Parent(j) = Parent(T.i)
+                           /\ held' = [held EXCEPT ![t] = @ \cup {T.i}]
+                           /\ Set(t, Idle)
+                   ELSE Set(t, Idle) /\ UNCHANGED held
+        ELSE Set(t, Idle) /\ UNCHANGED <<bits, live, held>>
     /\ UNCHANGED <<crashed, gone, touched>>
 
 \* Word (k, i) is empty: clear its summary bit with an atomic AND.
@@ -153,7 +185,7 @@ Clear(t) ==
                 ELSE IF new = {}
                 THEN Set(t, [T EXCEPT !.k = T.k + 1, !.i = p])
                 ELSE Set(t, Idle)
-    /\ UNCHANGED <<live, crashed, gone, touched>>
+    /\ UNCHANGED <<live, held, crashed, gone, touched>>
 
 \* Read the word again. If something was freed into it meanwhile, put the
 \* summary bit back. Otherwise, if clearing the bit emptied the summary
@@ -166,22 +198,56 @@ ReadAgain(t) ==
         ELSE IF T.pe
         THEN Set(t, [T EXCEPT !.pc = "clr", !.k = T.k + 1, !.i = Parent(T.i), !.pe = FALSE])
         ELSE Set(t, Idle)
-    /\ UNCHANGED <<bits, live, crashed, gone, touched>>
+    /\ UNCHANGED <<bits, live, held, crashed, gone, touched>>
+
+\* The held clears, made with one atomic AND of their summary word.
+ClearHeld(t) ==
+    /\ th[t].pc = "idle" /\ held[t] # {}
+    /\ LET g == Parent(CHOOSE j \in held[t] : TRUE)
+           new == bits[1][g] \ {Bit(j) : j \in held[t]} IN
+        /\ bits' = [bits EXCEPT ![1][g] = new]
+        /\ held' = [held EXCEPT ![t] = {}]
+        /\ IF Reread
+           THEN Set(t, [Idle EXCEPT !.pc = "breread", !.g = g, !.rr = held[t],
+                                    !.pe = (new = {}), !.ok = TRUE])
+           ELSE IF new = {}
+           THEN Set(t, [Idle EXCEPT !.pc = "clr", !.k = 1, !.i = g])
+           ELSE Set(t, Idle)
+    /\ UNCHANGED <<live, crashed, gone, touched>>
+
+\* Read each word of the batch again, setting back the bit of any that is
+\* not empty. When none is left: if the AND emptied the summary word and
+\* every word read empty, the summary word is one this thread emptied.
+BatchReread(t) ==
+    /\ th[t].pc = "breread"
+    /\ LET T == th[t] IN
+        IF T.rr = {}
+        THEN IF T.pe /\ T.ok
+             THEN Set(t, [Idle EXCEPT !.pc = "clr", !.k = 1, !.i = T.g])
+             ELSE Set(t, Idle)
+        ELSE \E j \in T.rr :
+                IF bits[0][j] # {}
+                THEN Set(t, [T EXCEPT !.pc = "up", !.k = 0, !.i = j, !.must = TRUE,
+                                      !.rr = T.rr \ {j}, !.ok = FALSE, !.ret = TRUE])
+                ELSE Set(t, [T EXCEPT !.rr = T.rr \ {j}])
+    /\ UNCHANGED <<bits, live, held, crashed, gone, touched>>
 
 ----------------------------------------------------------------------------
 
 \* Fork: one thread survives. Objects the others were about to free are lost
-\* with them.
+\* with them, and so are the clears they held.
 CrashAllBut(t) ==
     /\ Crash /\ ~crashed
     /\ crashed' = TRUE
     /\ gone' = UNION {ObjsOf(th[u].i, th[u].set) : u \in {u \in Threads \ {t} : th[u].pc = "f_or"}}
     /\ th' = [u \in Threads |-> IF u = t THEN th[t] ELSE Idle]
+    /\ held' = [u \in Threads |-> IF u = t THEN held[t] ELSE {}]
     /\ UNCHANGED <<bits, live, touched>>
 
 Next == \E t \in Threads :
     \/ FreeBegin(t) \/ FreeOr(t) \/ Up(t)
     \/ SearchBegin(t) \/ SearchRead(t) \/ SearchCas(t) \/ Clear(t) \/ ReadAgain(t)
+    \/ ClearHeld(t) \/ BatchReread(t)
     \/ CrashAllBut(t)
 
 Spec == Init /\ [][Next]_vars
@@ -202,10 +268,12 @@ Partition ==
     /\ \A t, u \in Threads : t # u => Batch(t) \cap Batch(u) = {}
     /\ FreeObjs \cup live \cup Batches \cup gone = Objs
 
-\* Thread t is still going to set, or reconsider, the summary bit of (k, i).
+\* Thread t is still going to set, or reconsider, the summary bit of (k, i):
+\* the word its walk or clear is at, or a word of its batch not yet read again.
 Owes(t, k, i) ==
-    /\ th[t].k = k /\ th[t].i = i
-    /\ th[t].pc \in {"up", "reread"}
+    \/ /\ th[t].k = k /\ th[t].i = i
+       /\ th[t].pc \in {"up", "reread"}
+    \/ k = 0 /\ i \in th[t].rr
 
 \* A non-empty word has its summary bit set, or some thread is about to set
 \* it. So once the threads at work finish, every free object can be found
