@@ -6,6 +6,12 @@
 pub(crate) const BASE_DISP: usize = 33555464;
 
 /// From the specification (`Api.rustConsts`).
+pub(crate) const CALLOC_LEN: usize = 1025;
+
+/// From the specification (`Api.rustConsts`).
+pub(crate) const CALLOC_MAX: usize = 1024;
+
+/// From the specification (`Api.rustConsts`).
 pub(crate) const MALLOC_LEN: usize = 4097;
 
 /// From the specification (`Api.rustConsts`).
@@ -46,6 +52,27 @@ pub(crate) const SLAB_COUNT: usize = 8192;
 
 /// From the specification (`Api.rustConsts`).
 pub(crate) const TABLE_OFF: usize = 2048;
+
+/// C's `calloc`: for a product `n * size` that does not overflow and is at most 1024, pops a block of the class `C_CALLOC_SIZES[n * size]` from the calling thread's CPU's magazine and tail-calls `c::slow::calloc_zero_tail(n, size, block)`, which zeroes it and returns it; otherwise, or if the CPU number has no slab, the class's mask is 0 or its magazine has none to give, tail-calls `c::slow::calloc_slow_args(n, size)`.
+///
+/// Contract: `VG.Spec.CEntry.callocContract`.
+///
+/// # Safety
+///
+/// * glibc must have registered the calling thread's rseq area, as it does before the thread can run code that allocates.
+/// * None of `SLABS` (the slabs, `8192 * 4096` bytes), the thread's `rseq_cs` and `cpu_id`, `__rseq_offset`, the masks' table (2048 bytes 33556480 bytes above `SLABS`), the 1025 bytes 2048 bytes into `C_CALLOC_SIZES` may overlap the return address on the stack or wrap around the end of the address space, and `rseq_cs` must not overlap any of the others; nor may any but the slabs overlap the slabs (`VG.Spec.CEntry.Ctx.Layout`). Their contents may be anything but as the next item says.
+/// * For every class byte `k` below 256, the low 32 bits of the masks' table's entry `k` must be 0 or the mask `8 * n - 16` of magazines of `n = 2^j` slots for 2 ≤ j ≤ 16; if it is not 0, in each of the 8192 slabs the word `8 * k` must be 0, a marker (a word whose low 19 bits are 1), or the address of a slot other than slot 0 of a magazine of that size (`8 * n` bytes, aligned to `8 * n`) that overlaps none of the memory the previous item names, the return address on the stack, or another slab's magazine of the class, nor wraps around the end of the address space. Every thread and the drainer must keep this from when the function is called until it returns: the function may be aborted and restarted on any CPU in between (`VG.Spec.CEntry.Ctx.inv`).
+#[unsafe(naked)]
+pub(crate) unsafe extern "sysv64" fn c_calloc(n: usize, size: usize) -> usize {
+    core::arch::naked_asm!(
+        "5:\nmov r10, QWORD PTR [rip + {__rseq_offset}@GOTPCREL]\nmov r10, QWORD PTR [r10]\nlea r11, [rip + 3f]\nmov QWORD PTR fs:[r10+8], r11\n6:\nmov r8d, DWORD PTR fs:[r10+4]\ncmp r8d, 8192\njae 20f\nshl r8, 12\nmov rax, rdi\nmul rsi\njb 21f\ncmp rax, 1025\njae 22f\nlea rcx, [rip + {C_CALLOC_SIZES} + 2048]\nmovzx edx, BYTE PTR [rcx+rax*1]\nlea r9, [rip + {SLABS}]\nlea r9, [r9+rdx*8]\nmov rcx, QWORD PTR [r9+r8*1]\ntest ecx, DWORD PTR [r9+33556480]\nje 23f\nlea rcx, [rcx-8]\nmov rax, QWORD PTR [rcx]\nmov QWORD PTR [r9+r8*1], rcx\n7:\n.pushsection __rseq_cs, \"aw\"\n.balign 32\n3:\n.long 0, 0\n.quad 6b, 7b - 6b, 4f\n.popsection\n.pushsection .text.unlikely, \"ax\"\n.byte 0x0f, 0xb9, 0x3d\n.long 0x53053053\n4:\njmp 5b\n.popsection\nmov rdx, rax\njmp {zero}\n20:\njmp {slow}\n21:\njmp {slow}\n22:\njmp {slow}\n23:\njmp {slow}\n.p2align 6",
+        __rseq_offset = sym crate::front::__rseq_offset,
+        C_CALLOC_SIZES = sym crate::c::table::C_CALLOC_SIZES,
+        SLABS = sym crate::front::SLABS,
+        zero = sym crate::c::slow::calloc_zero_tail,
+        slow = sym crate::c::slow::calloc_slow_args,
+    )
+}
 
 /// C's `malloc`: pops a block of the class `C_SIZES[(size + 7) / 8]` from the calling thread's CPU's magazine and returns it, or tail-calls `c::slow::malloc_slow(size)` if the size is above 32768, the CPU number has no slab, the class's mask is 0 or its magazine has none to give. `malloc_slow` starts with the thread's `rseq_cs` still pointing at this function's sequence, which it has left.
 ///

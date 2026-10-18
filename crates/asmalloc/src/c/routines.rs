@@ -1,5 +1,5 @@
 //! The generated C entry points (`front/generated/x86_64/centry.rs`), callable from Rust:
-//! `malloc`, `free` and `free_sized` as the exported C symbols run them, for the tests and the
+//! `malloc`, `calloc`, `free` and `free_sized` as the exported C symbols run them, for the tests and the
 //! conformance suite, which cannot export `malloc` from their own processes. Each is a call of
 //! the routine; the exported symbols are the routines themselves (`export_c_abi!`). The ledger
 //! entry is `docs/safety/asmalloc/c/routines-safety.md`.
@@ -12,6 +12,12 @@ use core::ptr;
 pub extern "C" fn malloc(size: usize) -> *mut c_void {
     // SAFETY: ROUTINES-01.
     ptr::with_exposed_provenance_mut(unsafe { centry::c_malloc(size) })
+}
+
+/// The generated `calloc`.
+pub extern "C" fn calloc(n: usize, size: usize) -> *mut c_void {
+    // SAFETY: ROUTINES-01.
+    ptr::with_exposed_provenance_mut(unsafe { centry::c_calloc(n, size) })
 }
 
 /// The generated `free`.

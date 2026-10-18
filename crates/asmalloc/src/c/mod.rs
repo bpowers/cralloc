@@ -330,7 +330,8 @@ pub extern "C" fn malloc_trim(_pad: usize) -> c_int {
 #[macro_export]
 macro_rules! export_c_abi {
     () => {
-        // `malloc`, `free` and `free_sized`: the generated routines, defined in this crate.
+        // `malloc`, `calloc`, `free` and `free_sized`: the generated routines, defined in this
+        // crate.
         $crate::asmalloc_exports_c_x86_64!();
 
         /// Marks that this module exports the C interface, which `export_cxx_abi!` requires.
@@ -340,11 +341,6 @@ macro_rules! export_c_abi {
 
         const _: () = {
             use ::core::ffi::{c_int, c_void};
-
-            #[unsafe(no_mangle)]
-            unsafe extern "C" fn calloc(n: usize, size: usize) -> *mut c_void {
-                $crate::c::calloc(n, size)
-            }
 
             #[unsafe(no_mangle)]
             unsafe extern "C" fn realloc(ptr: *mut c_void, size: usize) -> *mut c_void {

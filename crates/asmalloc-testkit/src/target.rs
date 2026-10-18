@@ -54,6 +54,7 @@ pub fn c_fns_generated() -> CFns {
     CFns {
         name: "asmalloc (generated routines)",
         malloc: c::routines::malloc,
+        calloc: c::routines::calloc,
         free: c::routines::free,
         sized_free: Some(crate::subject::SizedFree {
             free_sized: c::routines::free_sized,

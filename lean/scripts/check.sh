@@ -6,6 +6,9 @@
 # Needs `lake` on PATH (elan installs it in ~/.elan/bin). Pass the output
 # directory if it is not the allocator crate's `src/front/generated/`.
 set -euo pipefail
+# The kernel checker at full thread count goes over 16 GiB on the shared machine, above any
+# cap we may run under; four threads keep the whole check under 4 GiB.
+export LEAN_NUM_THREADS="${LEAN_NUM_THREADS:-4}"
 cd "$(dirname "$0")/.."
 
 python3 scripts/check_lean_imports.py

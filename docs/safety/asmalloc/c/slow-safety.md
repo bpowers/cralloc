@@ -16,20 +16,43 @@ at least the size it is computed for, after rounding to the alignment (`classes:
 handed-out slot is committed memory (the back end carves only from a region's writable
 prefix), so all `class.size()` bytes are writable.
 
-## SLOW-02: `block.write_bytes(0, len)` in `calloc_zero`
+## SLOW-02: the zeroing stores in `zero_block`, `zero_small` and `zero16`
+
+`block.write_bytes(0, len)`, and for a length up to 512 bytes, `zero_small`'s volatile stores:
+one 8-byte store for a length of 8, else one 16-byte store at each multiple of 16 below `len`.
 
 **Preconditions.** `block` is valid for writes of `len` bytes and nothing else accesses them
-during the write.
+during the write; for `zero_small`'s stores, `len` is 8, or a multiple of 16 with `block`
+aligned to 16 (each store is aligned and inside the `len` bytes).
 
-**Proof.** `len` is the size of `table::calloc_class(total)` when the table covers `total`,
-else `total`. `calloc_zero`'s contract is that `block` is a slot of that class (so exactly
+**Proof.** `len` is `table::C_CALLOC_LENS[total]`, the size of `table::calloc_class(total)`
+(the table's tests check every entry), when the table covers `total`, else `total`. C classes
+are 8 bytes or a multiple of 16 (the malloc table's test checks the 16-byte rule for every small
+size), and a slot of a class of 16 bytes or more is aligned to 16: slots are carved at multiples
+of the class size from a region start, which is page-aligned. `calloc_zero`'s contract is that `block` is a slot of that class (so exactly
 `len` bytes of committed memory, SLOW-01), or, beyond the table, a block of at least `total`
-bytes, and that the caller owns it; a block the caller owns is one no other code accesses. Its one
-caller today is `seam::calloc` (SEAM-03); a generated `c_calloc` routine that jumps here must
-meet the same contract, which its specification will state.
+bytes, and that the caller owns it; a block the caller owns is one no other code accesses. Its callers
+are `seam::calloc` (SEAM-03) and, through `zero_block`, `calloc_zero_tail` (SLOW-04).
 
 `free_sized_slow` and `free_aligned_sized_slow` each call `free_slow(ptr)` with their own
 contract, which is `free_slow`'s (the size and alignment are not used).
+
+## SLOW-04: `zero_block(block, n.wrapping_mul(size))` in `calloc_zero_tail`
+
+**Preconditions.** `calloc_zero`'s, which `zero_block` shares: `block` is a slot of the C class of the total, which the
+caller owns.
+
+**Proof.** `calloc_zero_tail`'s contract gives that the product does not overflow, so the
+wrapping product is the total, at most the calloc table's end, and that `block` is a slot of its
+class, owned. Its one caller is the generated `c_calloc`, which jumps here only after a pop that
+committed (`Spec.CEntry.callocContract`, proved in Lean): the product did not overflow and was
+at most `CALLOC_MAX` (1024, `table::CALLOC_TABLE_MAX` by a compile-time assertion), and the block
+popped is from the magazine of the class `C_CALLOC_SIZES[total]` gives, which is
+`C_CALLOC_CLASSES`, the class of `Class::of_c` of the total (`table.rs`'s tests check every
+entry). A popped block is a free block of that class that the pop handed to this call alone
+(`routines-safety.md`). The routine passes `n` and `size` as they arrived and the block in
+`rdx`, the third argument's register, and its tail call leaves the stack as the caller of
+`calloc` left it, so the arguments arrive as the signature says.
 
 ## SLOW-03: `seam::free_small(class, object)` in `free_slow`
 

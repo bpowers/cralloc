@@ -110,6 +110,25 @@ def freeSizedFront (m : Mirror) : List (Step Instr Cond) := [
   .exit .ne [] slow,
   .instr (.lea .r9 { base := .r9, index := some .rdx, scale := 8 })]
 
+/-- `calloc`'s steps that find the class: the product of `n` and `size` (`mul` writes `rdx`,
+which no argument uses), leaving for the slow path if it overflows or is above 1024. -/
+def callocFront : List (Step Instr Cond) := [
+  .instr (.mov .rax (.reg .rdi)),
+  .instr (.mul .rsi),
+  .exit .b [] slow,
+  .instr (.alu .cmp .rax (.imm 1025)),
+  .exit .ae [] slow,
+  .instr (.leaSym .rcx "C_CALLOC_SIZES" 2048),
+  .instr (.movzx8 .rdx { base := .rcx, index := some .rax }),
+  .instr (.leaSym .r9 "SLABS"),
+  .instr (.lea .r9 { base := .r9, index := some .rdx, scale := 8 })]
+
+/-- `c_calloc(n, size)`: the pop, then, after the commit and outside the sequence, the block
+into `rdx` and a jump to the zeroing tail, with `n` and `size` as they arrived. -/
+def cCalloc : Prog isa :=
+  .seq (.rseq arm (cpuSteps [] slow ++ callocFront ++ popSteps .r9 [] slow))
+    (.jump [.mov .rdx (.reg .rax)] "zero")
+
 /-- `c_malloc(size)`. -/
 def cMalloc : Prog isa := .rseq arm (cpuSteps [] slow ++ mallocFront ++ popSteps .r9 [] slow)
 

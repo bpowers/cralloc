@@ -5,7 +5,7 @@ public import Asmalloc.Proof.Framework.Registration
 
 /-! # The C entry points on x86-64
 
-`c_malloc`, `c_free` and `c_free_sized`, and `c_delete` and `c_delete_sized`, out of line (`x86_64`), each a
+`c_malloc`, `c_calloc`, `c_free` and `c_free_sized`, and `c_delete` and `c_delete_sized`, out of line (`x86_64`), each a
 naked function that tail-calls its slow path, and each also exported as the
 C symbols its `Api` names (`Api.exports`). One form only, reading glibc's
 `__rseq_offset` through its GOT slot: the exported copies are expanded in
@@ -20,6 +20,12 @@ namespace VG.Artifacts.CEntry.X86_64
 open VG.Spec.CEntry VG.Impl.CEntry.X86_64 VG.Proof.CEntry.X86_64
 
 def artifacts : List Artifact := [
+  callocApi.artifact VG.X86_64.target {
+    code := cCalloc
+    verified := cCalloc_verified
+    restartsOk := cCalloc_restartsOk
+    witnesses := Calloc.witnesses
+    witnessOk := cCalloc_witnessOk },
   mallocApi.artifact VG.X86_64.target {
     code := cMalloc
     verified := cMalloc_verified
