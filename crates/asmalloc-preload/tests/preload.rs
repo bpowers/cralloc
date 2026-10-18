@@ -70,17 +70,26 @@ fn program(file: &str) -> PathBuf {
 }
 
 fn run(preload: bool, command: &mut Command) -> Output {
-    if preload {
-        command.env("LD_PRELOAD", library());
-    } else {
-        command.env_remove("LD_PRELOAD");
-    }
+    run_with(preload.then(library).as_deref(), command)
+}
+
+/// Runs `command` with `lib` preloaded, or nothing.
+fn run_with(lib: Option<&Path>, command: &mut Command) -> Output {
+    match lib {
+        Some(lib) => command.env("LD_PRELOAD", lib),
+        None => command.env_remove("LD_PRELOAD"),
+    };
     command.output().expect("the program starts")
 }
 
 fn same_with_and_without(make: impl Fn() -> Command) -> String {
-    let plain = run(false, &mut make());
-    let preloaded = run(true, &mut make());
+    same_with_and_without_lib(&library(), make)
+}
+
+/// The program's output, after checking it is the same with `lib` preloaded as without.
+fn same_with_and_without_lib(lib: &Path, make: impl Fn() -> Command) -> String {
+    let plain = run_with(None, &mut make());
+    let preloaded = run_with(Some(lib), &mut make());
     assert!(
         preloaded.status.success(),
         "preloaded run failed: {:?}\n{}",
@@ -172,8 +181,8 @@ fn a_pointer_that_is_not_a_block_the_slow_path_checks_aborts() {
     }
 }
 
-/// The four throwing forms of `new`, which the C++ runtime keeps so that it can throw
-/// `std::bad_alloc`; the library exports the other 16 forms.
+/// The four throwing forms of `new`, which only the C++ runtime can serve today, because they
+/// must throw `std::bad_alloc`.
 const THROWING_NEW: [&str; 4] = [
     "_Znwm",
     "_Znam",
@@ -181,8 +190,38 @@ const THROWING_NEW: [&str; 4] = [
     "_ZnamSt11align_val_t",
 ];
 
+/// Where the dynamic loader bound each C++ allocation operator `exe` calls with `lib`
+/// preloaded, by its own report: (operator, whether it bound to `lib`), each once.
+fn operator_bindings(lib: &Path, exe: &Path) -> std::collections::BTreeMap<String, bool> {
+    let traced = run_with(Some(lib), Command::new(exe).env("LD_DEBUG", "bindings"));
+    let report = String::from_utf8_lossy(&traced.stderr);
+    let to_lib = format!("to {} ", lib.display());
+    let mut bound = std::collections::BTreeMap::new();
+    for line in report.lines() {
+        let Some(at) = line.find("symbol `") else {
+            continue;
+        };
+        let name = &line[at + "symbol `".len()..];
+        let name = &name[..name.find('\'').unwrap_or(name.len())];
+        if ["_Znw", "_Zna", "_Zdl", "_Zda"]
+            .iter()
+            .any(|p| name.starts_with(p))
+        {
+            assert!(
+                line.contains(&to_lib) || line.contains("libstdc++.so"),
+                "{line}"
+            );
+            bound.insert(name.to_owned(), line.contains(&to_lib));
+        }
+    }
+    bound
+}
+
+/// The library exports no C++ operator (design: "Interfaces", C++): exporting some of them
+/// without the throwing `new` forms is unsound when another library defines them. So every
+/// operator a C++ program calls is the C++ runtime's, which calls the library's `malloc`.
 #[test]
-fn every_cxx_operator_form_meets_its_cases_and_binds_where_it_should() {
+fn every_cxx_operator_form_meets_its_cases_and_binds_to_the_cxx_runtime() {
     let exe = program("cxx_operators.cpp");
     let out = same_with_and_without(|| Command::new(&exe));
     assert!(!out.contains("FAIL"), "{out}");
@@ -191,35 +230,56 @@ fn every_cxx_operator_form_meets_its_cases_and_binds_where_it_should() {
         9,
         "{out}"
     );
-    // The dynamic loader's own report of where each operator the program calls was bound.
-    let lib = library();
-    let traced = run(true, Command::new(&exe).env("LD_DEBUG", "bindings"));
-    let report = String::from_utf8_lossy(&traced.stderr);
-    let to_lib = format!("to {} ", lib.display());
-    let mut ours = std::collections::BTreeSet::new();
-    let mut runtime = std::collections::BTreeSet::new();
-    for line in report.lines() {
-        let Some(at) = line.find("symbol `") else {
-            continue;
-        };
-        let name = &line[at + "symbol `".len()..];
-        let name = &name[..name.find('\'').unwrap_or(name.len())];
-        if !["_Znw", "_Zna", "_Zdl", "_Zda"]
+    let bound = operator_bindings(&library(), &exe);
+    assert_eq!(bound.len(), 20, "{bound:?}");
+    assert!(bound.values().all(|&ours| !ours), "{bound:?}");
+    let out = Command::new("nm")
+        .args(["-D", "--defined-only"])
+        .arg(library())
+        .output()
+        .expect("nm runs");
+    let exports = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        !exports
+            .lines()
+            .any(|l| l.contains(" _Zn") || l.contains(" _Zd")),
+        "{exports}"
+    );
+}
+
+/// The C++ operators as built for when all of them can be exported: a shared library that
+/// exports them with the C functions (`tests/programs/cxx_exports`), built once per test run.
+fn cxx_exports() -> PathBuf {
+    static LIB: OnceLock<PathBuf> = OnceLock::new();
+    LIB.get_or_init(|| {
+        let (status, lib) = build_library("cxx_exports", "cxx_exports");
+        assert!(status.success(), "building the C++ exports");
+        lib
+    })
+    .clone()
+}
+
+/// The libraries the C++ cases run with: the preload library, and the C++ exports.
+fn cxx_libraries() -> [PathBuf; 2] {
+    [library(), cxx_exports()]
+}
+
+#[test]
+fn the_cxx_exports_meet_every_case_and_bind_where_they_should() {
+    let exe = program("cxx_operators.cpp");
+    let lib = cxx_exports();
+    let out = same_with_and_without_lib(&lib, || Command::new(&exe));
+    assert!(!out.contains("FAIL"), "{out}");
+    let bound = operator_bindings(&lib, &exe);
+    let (ours, runtime): (Vec<_>, Vec<_>) = bound.iter().partition(|&(_, &ours)| ours);
+    assert_eq!(ours.len(), 16, "{bound:?}");
+    assert_eq!(runtime.len(), 4, "{bound:?}");
+    assert!(
+        runtime
             .iter()
-            .any(|p| name.starts_with(p))
-        {
-            continue;
-        }
-        if THROWING_NEW.contains(&name) {
-            assert!(line.contains("libstdc++.so"), "{line}");
-            runtime.insert(name.to_owned());
-        } else {
-            assert!(line.contains(&to_lib), "{line}");
-            ours.insert(name.to_owned());
-        }
-    }
-    assert_eq!(ours.len(), 16, "{ours:?}");
-    assert_eq!(runtime.len(), 4, "{runtime:?}");
+            .all(|(name, _)| THROWING_NEW.contains(&name.as_str())),
+        "{bound:?}"
+    );
 }
 
 /// Builds the crate in `tests/programs/<dir>`, a shared library outside the workspace, and
@@ -261,50 +321,40 @@ fn the_library_is_marked_never_to_be_unloaded() {
     );
 }
 
-/// A C++ program with a malloc of its own. Under the library its `delete` is ours and its
-/// throwing `new` is libstdc++'s, which calls the program's malloc: our `delete` hands a
+/// A C++ program with a malloc of its own. Its `new` and `delete` are the C++ runtime's, on
+/// its `malloc`, under the preload library; with the C++ exports their `delete` hands a
 /// pointer outside the heap to the program's `free`.
 #[test]
 fn a_cxx_program_with_its_own_malloc_runs() {
     let exe = program("own_malloc.cpp");
-    let out = same_with_and_without(|| Command::new(&exe));
-    assert_eq!(out.trim(), "99500");
-}
-
-/// `own_new.cpp` in `mode`, with and without the library: its replaced `new` and `delete` see
-/// every block.
-fn own_new_runs(mode: &str) {
-    let exe = program("own_new.cpp");
-    let out = same_with_and_without(|| {
-        let mut c = Command::new(&exe);
-        c.arg(mode);
-        c
-    });
-    assert_eq!(out.trim(), format!("{mode}: live 0"));
-}
-
-/// A program that replaces `operator new(size_t)` and calls the nothrow form, which the
-/// library exports: ours must hand off to the C++ runtime's, which calls the program's, or the
-/// program's `delete` is given a block its `new` never made.
-#[test]
-fn a_cxx_program_with_its_own_operator_new_gets_it_from_nothrow_new() {
-    own_new_runs("nothrow");
-}
-
-/// A program that replaces only `operator new(size_t)` and `operator delete(void*)`, which
-/// the standard says is enough. Its blocks sit inside our heap (its `new` is our `malloc` plus
-/// a header), so every `delete` form of ours must forward every pointer to the program's.
-#[test]
-fn a_cxx_program_with_its_own_operator_new_runs() {
-    for mode in ["array", "sized", "matching", "empty"] {
-        own_new_runs(mode);
+    for lib in cxx_libraries() {
+        let out = same_with_and_without_lib(&lib, || Command::new(&exe));
+        assert_eq!(out.trim(), "99500");
     }
 }
 
-/// The C++ export is documented as needing the C export. Nothing enforces it: the crate
-/// builds, and at run time a block from libstdc++'s `new` (glibc's malloc) reaches our
-/// `delete`, which aborts; one from our nothrow `new` reaches glibc's `free`. The build should
-/// fail instead.
+/// A program that replaces only `operator new(size_t)` and `operator delete(void*)`, which the
+/// standard says is enough. Its blocks sit inside our heap (its `new` is our `malloc` plus a
+/// header). Under the preload library every other form is the C++ runtime's, which forwards to
+/// the program's; the C++ exports must do the same, forward every pointer to the program's
+/// `delete` and hand nothrow `new` to the runtime's.
+#[test]
+fn a_cxx_program_with_its_own_operator_new_runs() {
+    let exe = program("own_new.cpp");
+    for lib in cxx_libraries() {
+        for mode in ["array", "sized", "matching", "empty", "nothrow"] {
+            let out = same_with_and_without_lib(&lib, || {
+                let mut c = Command::new(&exe);
+                c.arg(mode);
+                c
+            });
+            assert_eq!(out.trim(), format!("{mode}: live 0"), "{}", lib.display());
+        }
+    }
+}
+
+/// The C++ export is documented as needing the C export, and the macro makes that a build
+/// error.
 #[test]
 fn the_cxx_export_without_the_c_export_does_not_build() {
     let (status, library) = build_library("cxx_only", "cxx_only");
@@ -322,28 +372,23 @@ fn the_cxx_export_without_the_c_export_does_not_build() {
     }
 }
 
-// The two tests below are findings of the review of the replacement rules: each states what
-// should happen and fails today. `cargo test -p asmalloc-preload -- --ignored` runs them.
-
 /// A program that replaces all four basic operators and tells scalar blocks from array blocks
 /// (a checker for `new`/`delete[]` mismatches does). The standard's defaults send the array
-/// forms to `operator new[]` and `operator delete[]`; ours send them to the scalar pair, so the
-/// program sees its array blocks deleted as scalars and its nothrow arrays made as scalars.
+/// forms to `operator new[]` and `operator delete[]`; the C++ exports sent them to the scalar
+/// pair. With no operator exported, the program gets the runtime's defaults.
 #[test]
-#[ignore = "finding: the array forms forward to a program's scalar operators"]
 fn a_program_with_its_own_array_operators_gets_them_from_the_array_forms() {
     let exe = program("tagged_new.cpp");
     let out = same_with_and_without(|| Command::new(&exe));
     assert_eq!(out.trim(), "mismatches 0");
 }
 
-/// The operators are replaced by a shared library the program links (as `libtcmalloc.so` does),
-/// not by the program itself. The preloaded library comes before it in the search order, so
-/// `operator delete` is ours while `operator new`, which we do not define, is the library's:
-/// the first `delete` is handed a pointer of the library's and aborts. Rare: it takes a second
-/// allocator linked as a shared library under the preload.
+/// The operators are replaced by a shared library the program links (as `libtcmalloc.so` and
+/// Boehm GC's `libgccpp` do), not by the program itself. The preloaded library comes before it
+/// in the search order, so if the preload exported `operator delete` but not the throwing
+/// `operator new`, the program's `new` would be the library's and its `delete` ours, which is
+/// why the preload library exports no C++ operator.
 #[test]
-#[ignore = "finding: operators replaced by a shared library pair its new with our delete"]
 fn a_program_linked_to_a_library_that_replaces_the_operators_runs() {
     let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("lib-new");
     std::fs::create_dir_all(&dir).expect("a scratch directory");
