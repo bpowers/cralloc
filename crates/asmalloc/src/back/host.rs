@@ -39,9 +39,7 @@ pub(crate) struct ClassState {
 /// metadata blocks: every class carves and so writes its header, but only a class whose slots
 /// reach the bitmaps needs its block, and a block's first touched page costs a page of memory
 /// and, 4 GiB from the next class's, a page of page tables (`docs/research/memory.md`, "Small
-/// heaps"). Four headers share a line, an exception to `crate::lined`'s rule: the words
-/// change once per magazine carved or purge step, not per object, and a line each would make
-/// the state 256 KiB, which the simulated heaps the tests make on their stacks cannot hold.
+/// heaps").
 pub(crate) struct RegionHeader {
     pub(crate) grow: Atomic,
     pub(crate) hints: Atomic,
@@ -56,7 +54,15 @@ impl RegionHeader {
     }
 }
 
-/// The headers of every region, by region number.
+/// The headers of every region, by region number, four to a line: an exception to
+/// `crate::lined`'s rule, because neither word is written on a path that runs often. `Grow` is
+/// written only by a carve, and a carve that hands out fresh memory is followed by the faults
+/// on that memory, which cost far more than a line moving between cores (the other carve, the
+/// purge pass's top-up of the watermark's huge page, is clocked). `Hints` is written when a
+/// region is assigned, when it crosses the huge-page threshold, and by the clocked purge pass.
+/// No ordinary fill, launder or free writes either; a launder reads `Grow` once for each region
+/// a magazine's objects lie in. A line each would make the state 256 KiB, which the simulated
+/// heaps the tests build on their stacks cannot hold.
 pub(crate) type Headers = [RegionHeader; MAX_REGIONS];
 
 /// The class levels of a class's summary tree.
