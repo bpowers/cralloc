@@ -21,7 +21,7 @@ static BY_SIZE: [SmallClass; MAX_SMALL_SIZE / QUANTUM] = {
     table
 };
 
-/// A class of at most [`super::MAX_SMALL_SIZE`] bytes.
+/// A class of at most `MAX_SMALL_SIZE` bytes.
 ///
 /// Small classes have a slab word and a magazine size. Their ordinal, `index - 1`, numbers them
 /// from zero for arrays with one entry per small class, such as the slab's hot words.
@@ -45,7 +45,7 @@ const MAGAZINES: [MagazineSize; SMALL_COUNT] = {
 impl SmallClass {
     /// The class as a small class, if it is one.
     #[inline(always)]
-    pub const fn new(class: Class) -> Option<SmallClass> {
+    pub(crate) const fn new(class: Class) -> Option<SmallClass> {
         if class.is_small() {
             Some(SmallClass(class))
         } else {
@@ -55,7 +55,7 @@ impl SmallClass {
 
     /// The small class with this ordinal, if there is one.
     #[inline(always)]
-    pub const fn from_ordinal(ordinal: usize) -> Option<SmallClass> {
+    pub(crate) const fn from_ordinal(ordinal: usize) -> Option<SmallClass> {
         if ordinal < SMALL_COUNT {
             match Class::from_index(ordinal as u8 + 1) {
                 Some(class) => Some(SmallClass(class)),
@@ -75,7 +75,7 @@ impl SmallClass {
     /// one compare turns away both a zero size, which [`Class::of_layout`] counts as one byte,
     /// and a request too large to be small. A constant layout folds to a constant class.
     #[inline(always)]
-    pub fn of_nonzero_layout(layout: Layout) -> Option<SmallClass> {
+    pub(crate) fn of_nonzero_layout(layout: Layout) -> Option<SmallClass> {
         let less_one = layout.size().wrapping_sub(1) | (layout.align() - 1);
         if less_one < MAX_SMALL_SIZE {
             Some(BY_SIZE[less_one / QUANTUM])
@@ -92,7 +92,7 @@ impl SmallClass {
 
     /// The position among the small classes, `0..SMALL_COUNT`.
     #[inline(always)]
-    pub const fn ordinal(self) -> usize {
+    pub(crate) const fn ordinal(self) -> usize {
         self.0.index() as usize - 1
     }
 

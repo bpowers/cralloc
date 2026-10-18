@@ -16,7 +16,7 @@
 //! The walks themselves live with the structures they read: `back/inspect.rs` and
 //! `depot/inspect.rs`.
 
-use crate::classes::{Class, MagazineSize, SmallClass};
+pub use crate::classes::{Class, MagazineSize, SmallClass};
 
 /// Where a magazine is.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]

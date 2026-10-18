@@ -12,8 +12,9 @@ description = "Shadow-model tester, mutant allocators and C-ABI conformance case
 allocator-api = ["asmalloc/allocator-api"]
 
 [dependencies]
-# `sim` brings the simulated heap the kit judges under Miri.
-asmalloc = { path = "../asmalloc", features = ["sim"] }
+# `sim` brings the simulated heap the kit judges under Miri; `internals`, the simulated OS and
+# the depot constants its drainer uses.
+asmalloc = { path = "../asmalloc", features = ["sim", "internals"] }
 
 [lints]
 workspace = true

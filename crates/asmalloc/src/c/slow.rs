@@ -75,7 +75,7 @@ pub extern "C" fn calloc_slow_args(n: usize, size: usize) -> *mut c_void {
     calloc_slow(n.saturating_mul(size))
 }
 
-/// The generated `c_calloc`'s tail after its pop: zeroes `block` as [`calloc_zero`] does for
+/// The generated `c_calloc`'s tail after its pop: zeroes `block` as `zero_block` does for
 /// the total `n * size`, and returns it. The routine passes its own arguments through, and the
 /// block in the third argument's register.
 ///
@@ -179,7 +179,8 @@ pub unsafe extern "C" fn free_slow(ptr: *mut c_void) {
     match process::find(object.as_ptr()) {
         // SAFETY: SLOW-03.
         Some(Found::Small(class)) => unsafe { crate::heap::c_free_small(class, object) },
-        Some(Found::Large { .. }) => process::free_large(object),
+        // SAFETY: SLOW-03.
+        Some(Found::Large { .. }) => unsafe { process::free_large(object) },
         None => process::abort("free of a pointer that is not a block of asmalloc's heap"),
     }
 }

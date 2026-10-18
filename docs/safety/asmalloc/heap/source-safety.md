@@ -1,6 +1,6 @@
 # Safety ledger: `crates/asmalloc/src/heap/source.rs`
 
-## HEAP-SOURCE-01: `self.0.launder(class, objects)` in `take_back`
+## HEAP-SOURCE-01: `self.launder(class, objects)` in `take_back`
 
 **Precondition** (`Back::launder`). Every pointer that is a handed-out slot of `class` is one
 the caller owns and gives up.

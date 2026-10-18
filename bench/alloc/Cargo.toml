@@ -21,7 +21,7 @@ mi-crate = ["dep:mimalloc"]
 asmalloc = ["dep:asmalloc", "asmalloc/executable"]
 # asmalloc with a sampler thread that breaks its resident memory down by use (src/memstat.rs).
 # Not an allocator of its own: build.rs does not count it. For docs/research/memory.md.
-asmalloc-memstat = ["asmalloc"]
+asmalloc-memstat = ["asmalloc", "asmalloc/internals"]
 # tikv-jemallocator itself, default features: its static, prefixed jemalloc build, which is
 # what a Rust service that depends on it gets.
 je = ["dep:tikv-jemallocator"]

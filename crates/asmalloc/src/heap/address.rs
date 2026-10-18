@@ -119,7 +119,8 @@ impl<O: Os> Heap<O> {
         };
         let fits = is_large(new) && new <= room && (new >= old || stays_after_shrink(new, room));
         if fits {
-            // SAFETY: the caller's promise; a resize gives up what lies past the new size.
+            // SAFETY: the block is the caller's and live, and `new` fits its room, so what the
+            // back end gives up past `new` is the caller's to give.
             unsafe { back.resize_in_place(ptr, new) };
         }
         fits
@@ -130,24 +131,24 @@ impl<O: Os> Heap<O> {
 /// allocation or free here is a slow path, and runs a heartbeat as the Rust ones do.
 #[cfg(all(target_os = "linux", target_arch = "x86_64", not(miri), not(kani)))]
 pub(crate) mod process {
-    use super::super::global::{HEAP, large_heartbeat};
+    use super::super::global;
     use super::Found;
-    use crate::Asmalloc;
     use crate::os::Os;
     use core::ptr::{self, NonNull};
 
     /// The block that starts at `ptr`, if one does.
     #[inline]
     pub(crate) fn find(ptr: *const u8) -> Option<Found> {
-        HEAP.find(ptr)
+        global::process().heap().find(ptr)
     }
 
     /// A large block of `size` bytes aligned to `align`, zeroed if `zero`; null if there is no
     /// memory.
     #[cold]
     pub(crate) fn alloc_large(size: usize, align: usize, zero: bool) -> *mut u8 {
-        let block = HEAP.alloc_large_aligned(size, align, zero);
-        large_heartbeat();
+        let heap = global::process();
+        let block = heap.heap().alloc_large_aligned(size, align, zero);
+        heap.heartbeat();
         block.map_or(ptr::null_mut(), NonNull::as_ptr)
     }
 
@@ -155,17 +156,22 @@ pub(crate) mod process {
     /// no memory.
     #[cold]
     pub(crate) fn alloc_large_grown(size: usize) -> *mut u8 {
-        let block = HEAP.alloc_large_grown(size);
-        large_heartbeat();
+        let heap = global::process();
+        let block = heap.heap().alloc_large_grown(size);
+        heap.heartbeat();
         block.map_or(ptr::null_mut(), NonNull::as_ptr)
     }
 
     /// Frees the large block at `ptr`, finding its class or run from the address. Aborts if no
-    /// large block starts there, or if it is free.
+    /// large block starts there.
+    ///
+    /// # Safety
+    ///
+    /// `ptr` is a large block of the heap that the caller owns and gives up.
     #[cold]
-    pub(crate) fn free_large(ptr: NonNull<u8>) {
-        HEAP.free_large(ptr);
-        large_heartbeat();
+    pub(crate) unsafe fn free_large(ptr: NonNull<u8>) {
+        // SAFETY: the contract of `Bound::free_large_slow` is this function's, word for word.
+        unsafe { global::process().free_large_slow(ptr) }
     }
 
     /// Moves `len` bytes of the large block at `from` to `to` and frees `from`, a piece at a
@@ -178,10 +184,12 @@ pub(crate) mod process {
     /// overlap it.
     #[cold]
     pub(crate) unsafe fn move_large(from: NonNull<u8>, to: NonNull<u8>, len: usize) {
-        match HEAP.back() {
-            // SAFETY: the caller's promise, passed on.
+        let heap = global::process().heap();
+        match heap.back() {
+            // SAFETY: the contract of `Back::move_large` is this function's, and `zeroed` is
+            // false, which never lets it skip a page.
             Some(back) => unsafe { back.move_large(from, to, len, false) },
-            None => HEAP.os().abort("a move of a block when no heap exists"),
+            None => heap.os().abort("a move of a block when no heap exists"),
         }
     }
 
@@ -195,24 +203,29 @@ pub(crate) mod process {
         old: usize,
         new: usize,
     ) -> bool {
-        // SAFETY: the caller's promise, passed on.
-        unsafe { HEAP.resize_in_place_by_address(ptr, old, new) }
+        // SAFETY: the contract of `Heap::resize_in_place_by_address` is this function's, for
+        // the process's heap.
+        unsafe {
+            global::process()
+                .heap()
+                .resize_in_place_by_address(ptr, old, new)
+        }
     }
 
     /// The bytes the block at `ptr` may use, if a block starts there.
     pub(crate) fn usable_size(ptr: *const u8) -> Option<usize> {
-        HEAP.usable_size(ptr)
+        global::process().heap().usable_size(ptr)
     }
 
     /// See `Asmalloc::collect`.
     pub(crate) fn collect() -> usize {
-        Asmalloc::collect()
+        global::process().collect()
     }
 
     /// The published heap's base address and region shift, once it has started: what the C
     /// layer copies beside the slabs for the C frees (`c::mirror`).
     pub(crate) fn layout() -> Option<(usize, u32)> {
-        HEAP.back().map(|back| {
+        global::process().heap().back().map(|back| {
             (
                 back.space().base().addr().get(),
                 back.space().plan().region_shift(),
@@ -223,7 +236,7 @@ pub(crate) mod process {
     /// Ends the process with `message`.
     #[cold]
     pub(crate) fn abort(message: &str) -> ! {
-        HEAP.os().abort(message)
+        global::process().heap().os().abort(message)
     }
 }
 
@@ -289,7 +302,8 @@ mod tests {
         );
         // A size with a small class never stays in a large slot.
         assert!(!resize(33 << 10, 32 << 10));
-        heap.heap.free_large(big);
+        // SAFETY: the test's block, freed once.
+        unsafe { heap.heap.free_large(big) };
     }
 
     #[test]
@@ -306,7 +320,8 @@ mod tests {
             heap.heap
                 .resize_in_place_by_address(grown, 40 << 10, 150 << 10)
         });
-        heap.heap.free_large(grown);
+        // SAFETY: the test's block, freed once.
+        unsafe { heap.heap.free_large(grown) };
     }
 
     fn ptr_of(x: &u8) -> *const u8 {
