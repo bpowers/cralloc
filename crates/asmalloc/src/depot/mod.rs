@@ -70,7 +70,7 @@ pub(crate) use stack::Stack;
 use crate::classes::{MagazineSize, SMALL_COUNT, SmallClass};
 use crate::front::sync::{AtomicU64, AtomicUsize};
 use crate::front::{Cpu, Routines, Slab};
-use crate::lined::{LINE, Lined};
+use crate::lined::Lined;
 use crate::os::Os;
 use crate::space::Space;
 
@@ -165,7 +165,8 @@ struct Shared {
 }
 
 #[cfg(not(test))]
-const _: () = assert!(size_of::<Depot>() == LINE * (SMALL_COUNT + MagazineSize::COUNT + 3));
+const _: () =
+    assert!(size_of::<Depot>() == crate::lined::LINE * (SMALL_COUNT + MagazineSize::COUNT + 3));
 
 impl Depot {
     /// The empty depot.
