@@ -23,7 +23,7 @@
 //! zeroed allocation clears only what it must.
 //!
 //! Every allocation and in-place resize of a large object records the size asked for
-//! (`Back::alloc`, `Back::alloc_run`, `Back::resize`). What the caller may use is that size rounded
+//! (`Back::alloc`, `Back::alloc_run`, `Back::resize_in_place`). What the caller may use is that size rounded
 //! up to a page, so a block with headroom never reports, or makes anyone touch, the room it has not
 //! been asked for.
 
