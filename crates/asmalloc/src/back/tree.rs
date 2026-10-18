@@ -699,13 +699,44 @@ impl<'h, H: Host> Release<'h, H> {
         self.owe(spot, old == 0);
     }
 
-    /// [`Release::leaf`] for a region given by its number.
+    /// The region with this number, or an abort if there is none.
     #[inline]
-    pub(crate) fn leaf_by_number(&mut self, region: usize, index: u32, bits: u64) {
-        let Some(region) = self.host.region(region) else {
-            self.abort("a free into a region outside the heap");
+    pub(crate) fn region(&self, number: usize) -> RegionId {
+        match self.host.region(number) {
+            Some(region) => region,
+            None => self.abort("a free into a region outside the heap"),
+        }
+    }
+
+    /// [`Release::leaf`] without the debt: frees `bits` of leaf word `index` with one atomic OR
+    /// and returns whether the word was empty before, leaving the summary bit above it to a
+    /// call of [`Release::owe_leaves`] for it and its neighbours. Aborts on a double free.
+    #[inline(always)]
+    pub(crate) fn leaf_unowed(&mut self, region: RegionId, index: u32, bits: u64) -> bool {
+        // The OR's own old value, so that the double-free check is atomic with it. A plain load,
+        // the check, and an OR whose result is unused (one `lock or`) measured a cycle cheaper
+        // a scattered slot out of fifty, not worth a check that two threads freeing one slot
+        // at once could both pass.
+        let old = Spot::leaf(region, index).word(self.host).fetch_or(bits);
+        if old & bits != 0 {
+            self.host
+                .abort("double free: an object was freed while already free");
+        }
+        old == 0
+    }
+
+    /// Owes the summary bits above leaf words of `region` that share one summary word, freed
+    /// by [`Release::leaf_unowed`]: `words` has bit `w % 64` for each such word `w`, `index` is
+    /// any of them, and `must` says whether any was empty before its OR. One debt for all of
+    /// them, which is what [`Release::leaf`] would have owed for each, merged.
+    #[inline]
+    pub(crate) fn owe_leaves(&mut self, region: RegionId, index: u32, words: u64, must: bool) {
+        let Some((above, bit)) = Spot::leaf(region, index).parent(self.height) else {
+            return;
         };
-        self.leaf(region, index, bits);
+        // A region with one leaf word has its bit in a class word, whatever the word's number.
+        let bits = if self.height == 0 { bit } else { words };
+        self.owe_bits(above, bits, must);
     }
 
     /// Ends the process: the heap has been misused.
@@ -730,13 +761,20 @@ impl<'h, H: Host> Release<'h, H> {
         let Some((above, bit)) = spot.parent(self.height) else {
             return;
         };
+        self.owe_bits(above, bit, must);
+    }
+
+    /// Owes `bits` of the summary word `above`, for words below it that are not empty; `must`
+    /// if one of them was empty before this thread's write.
+    #[inline]
+    fn owe_bits(&mut self, above: Spot, bits: u64, must: bool) {
         let key = above.key(self.height);
         let at = above.level as usize - 1;
         let Some(entry) = self.owed.get_mut(at) else {
             self.host.abort("a summary level above the top of the tree");
         };
         if entry.bits != 0 && entry.key == key {
-            entry.bits |= bit;
+            entry.bits |= bits;
             entry.must |= must as u64;
             return;
         }
@@ -744,7 +782,7 @@ impl<'h, H: Host> Release<'h, H> {
             entry,
             Owed {
                 key,
-                bits: bit,
+                bits,
                 must: must as u64,
             },
         );

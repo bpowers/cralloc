@@ -329,3 +329,102 @@ object it allocates and streams through more memory than L1 holds (its own loop 
 all L1 misses), and each pair touches about six lines of allocator metadata besides the
 object, which get evicted between calls; mimalloc's free list lives in the objects the
 program is about to touch anyway. This is inference from where the misses land.
+
+## Scattered launders (2026-10-18)
+
+"main" is c9784ab, "after" this branch. CPU 2 under the shared measuring lock, the other L3
+busy with other work; `backbench`, a magazine a call, lowest of three interleaved rounds of
+seven; workloads five interleaved rounds, medians.
+
+### Where a scattered slot's 315 instructions went
+
+A scattered magazine puts each slot in a word of its own. Per slot, by `callgrind`: about 90
+instructions in the group of open words, closed words and its filter (`group.rs`), about 120
+in the walk up (`tree::Release`: each word owed its summary bit separately, and with the words
+in arbitrary order nearly every debt was paid at once, with a region lookup and an address
+computed from the plan each time), and about 50 entering and leaving the dense loop.
+
+### What changed
+
+- **Runs, a window and a map.** A run of slots of one word still gathers in the dense loop. A
+  run that ends goes into a window of one or two summary words of leaf words around the
+  batch's first slot (a plain array indexed by word), or, outside it, into a hash map of the
+  batch's words. Every word met gets one OR at the end. Dense magazines, two interleaved runs
+  and slots shuffled among a few words fall in the window; scattered ones go to the map.
+- **Scattered batches stop making runs.** After eight runs of one slot in a row, the rest of
+  the batch goes a slot at a time, and if most of it has fallen outside the window, the
+  window's words move to the map and every slot goes there without asking which of the two it
+  falls in: for scattered slots that branch is a coin toss.
+- **One debt per summary word.** The window's words, and the map's grouped by summary word,
+  are ORed with `Release::leaf_unowed` and owe their summary word one merged debt
+  (`Release::owe_leaves`). The release protocol's steps are unchanged; only their batching is.
+- **Duplicates are caught exactly** within a batch of up to 254 distinct words (the window
+  and the map hold every word met until the end, each word in one of them); beyond that, a
+  slot on both sides of a map flush is caught by its word's OR, as before.
+
+Tried and not kept: a counting sort of the map's words in place of following the groups'
+links (no change); a plain load, the double-free check, and an OR whose result is unused,
+which compiles to a single `lock or` in place of a `lock cmpxchg` loop (scatter 52.2 to 51.2
+cycles, stride 35.3 to 34.4, dense unchanged: not worth a double-free check that two threads
+freeing one slot at once could both pass).
+
+### The microbenchmark
+
+| class | case | main cyc | main ins | after cyc | after ins |
+|---|---|---:|---:|---:|---:|
+| 16 | asc | 5.1 | 21.5 | 5.0 | 20.2 |
+| 16 | desc | 5.1 | 21.5 | 4.9 | 20.2 |
+| 16 | two | 9.9 | 52.9 | 9.8 | 42.3 |
+| 16 | block | 20.5 | 69.1 | 11.6 | 46.1 |
+| 16 | scatter | 57.2 | 316.1 | 52.2 | 115.5 |
+| 16 | stride | 57.1 | 323.1 | 35.2 | 118.5 |
+| 256 | asc | 4.9 | 21.1 | 4.8 | 19.8 |
+| 256 | desc | 4.9 | 21.1 | 4.8 | 19.8 |
+| 256 | two | 9.7 | 52.6 | 9.6 | 41.8 |
+| 256 | block | 20.4 | 68.5 | 11.6 | 45.9 |
+| 256 | scatter | 57.0 | 315.6 | 52.0 | 115.1 |
+| 256 | stride | 56.9 | 322.7 | 35.1 | 118.1 |
+| 4096 | asc | 28.8 | 92.1 | 30.1 | 94.2 |
+| 4096 | desc | 28.8 | 92.1 | 30.1 | 94.2 |
+| 4096 | two | 36.4 | 132.4 | 37.4 | 138.7 |
+| 4096 | block | 57.4 | 163.0 | 47.8 | 146.1 |
+| 4096 | scatter | 71.2 | 272.6 | 53.4 | 167.4 |
+| 4096 | stride | 69.2 | 278.9 | 54.8 | 169.9 |
+
+Fills are unchanged (dense 4.4 cycles, 16.6 instructions). The 4096-byte class launders 14
+objects a call, and pays a cycle more on its dense cases for the window's set-up.
+
+### The floor for a scattered slot
+
+A scattered slot needs its own locked OR, about 20 cycles that do not overlap the next one's.
+Built with a plain load and store in place of every leaf OR (measurement only), scatter runs at
+41 cycles and stride at 21, at the same instruction count: the locks cost about 11 and 14
+cycles a slot here, and the rest is ordinary work. Why random words cost scatter some 20
+cycles a slot more than stride's regular ones, with the same instructions, is not found. Ruled
+out: branch mispredictions (under one a slot in either, from `perf stat` differences), L1
+misses (fewer in scatter than in stride), the order within a magazine (the same slots sorted
+within each magazine, the bench's `spread`, cost the same as `scatter`), the dependent loads of
+the flush's linked groups (a counting sort into a plain array changed nothing), and the locks
+(the gap stays without them).
+
+### Workloads
+
+| | main | after | mimalloc | jemalloc |
+|---|---:|---:|---:|---:|
+| BTreeMap 1M, cycles/entry | 943 | 941 | 859 | 985 |
+| build, M cycles / M instructions | 4005 / 5197 | 4023 / 5198 | 3797 / 5172 | 4289 / 5456 |
+| drop | 709 / 2086 | 680 / 992 | 500 / 281 | 641 / 791 |
+| JSON 32 MiB, cycles/byte | 16.2 | 16.6 | 16.4 | 23.1 |
+| parse | 1956 / 7131 | 2010 / 7130 | 2108 / 7129 | 2548 / 7661 |
+| drop | 764 / 1966 | 770 / 1882 | 642 / 1286 | 1337 / 2779 |
+| Box tree depth 20, cycles/node | 43.8 | 43.9 | 44.9 | 102.4 |
+
+The smoke set's single-thread jobs (three rounds; its two-thread jobs span both L3s and were
+not run): tree depth 18, 40.6 to 39.3 cycles/node (mimalloc 33.7); JSON 8 MiB, 17.25 both
+(mimalloc 16.0).
+
+BTreeMap's drop halves its instructions and loses 4% of its cycles: a scattered slot's cost
+is its locked OR and the work that random words cost besides. What is left against mimalloc is
+the drop (180M cycles: one locked OR a scattered slot against mimalloc's plain pushes onto a
+page's list) and the build (226M, at the same instructions). JSON is level with mimalloc
+within the noise of these runs.

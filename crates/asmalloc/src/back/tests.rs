@@ -142,10 +142,10 @@ fn a_slot_twice_in_one_batch_aborts() {
     unsafe { back.launder(class, &[slots[1], slots[2], slots[1]]) };
 }
 
-/// A launder keeps four words open; a slot that comes back after its word was closed is still
-/// caught, from the record of closed words.
+/// A slot that comes back after its word was ORed, the batch having gone on in order, is
+/// caught by the word's OR.
 #[test]
-#[should_panic(expected = "freed twice in one batch")]
+#[should_panic(expected = "double free")]
 fn a_slot_twice_after_its_word_closed_aborts() {
     let state = state::<Standard>();
     let back = state.get_or_reserve().unwrap();
@@ -156,10 +156,10 @@ fn a_slot_twice_after_its_word_closed_aborts() {
     unsafe { back.launder(class, &batch) };
 }
 
-/// The same when the word was closed and opened again before the slot comes back: the second
-/// opening carries the bits its first OR set.
+/// The same when the word was met again before the slot comes back: in the map or by its OR,
+/// the second free is caught.
 #[test]
-#[should_panic(expected = "freed twice in one batch")]
+#[should_panic(expected = "double free")]
 fn a_slot_twice_across_a_reopened_word_aborts() {
     let state = state::<Standard>();
     let back = state.get_or_reserve().unwrap();
@@ -171,24 +171,42 @@ fn a_slot_twice_across_a_reopened_word_aborts() {
     unsafe { back.launder(class, &batch) };
 }
 
-/// A scattered batch ends its part when the part's list of closed words fills. A different
-/// slot of a word closed in an earlier part is no double free; the same slot again is, caught
-/// by its word's OR.
+/// A scattered batch remembers every word it has met, however many: a different slot of a
+/// word met long before is no double free; the same slot again is.
 #[test]
-#[should_panic(expected = "double free: an object was freed while already free")]
+#[should_panic(expected = "freed twice in one batch")]
 fn a_slot_twice_after_many_closed_words_aborts() {
     let state = state::<Standard>();
     let back = state.get_or_reserve().unwrap();
     let class = small(16);
-    let slots = fill(&back, class, 64 * 40);
-    let words: Vec<*mut u8> = (0..30).map(|w| slots[w * 64]).collect();
+    let slots = fill(&back, class, 64 * 300);
+    // Out of order, so that the batch keeps its words in the map.
+    let words: Vec<*mut u8> = (0..250).map(|w| slots[w * 97 % 250 * 64]).collect();
     let mut fine = words.clone();
     fine.push(slots[1]);
     // SAFETY: the test holds these slots, or passes a bad one to see the abort.
     unsafe { back.launder(class, &fine) };
-    assert_eq!(fill(&back, class, 31).len(), 31);
-    let mut twice = words;
-    twice.push(slots[0]);
+    assert_eq!(fill(&back, class, 251).len(), 251);
+    let mut twice = words.clone();
+    // A word met after the order broke, so in the map.
+    twice.push(words[100]);
+    // SAFETY: the test holds these slots, or passes a bad one to see the abort.
+    unsafe { back.launder(class, &twice) };
+}
+
+/// A batch longer than its map of words holds flushes the map when it fills; the same slot
+/// on both sides of a flush is caught by its word's OR.
+#[test]
+#[should_panic(expected = "double free: an object was freed while already free")]
+fn a_slot_twice_across_a_full_map_aborts() {
+    let state = state::<Standard>();
+    let back = state.get_or_reserve().unwrap();
+    let class = small(16);
+    let slots = fill(&back, class, 64 * 700);
+    let mut twice: Vec<*mut u8> = (0..650).map(|w| slots[w * 97 % 650 * 64]).collect();
+    // Word 194 is the first to go to the map, outside the window around word 0, and is ORed
+    // when the map first fills.
+    twice.push(slots[194 * 64]);
     // SAFETY: the test holds these slots, or passes a bad one to see the abort.
     unsafe { back.launder(class, &twice) };
 }
