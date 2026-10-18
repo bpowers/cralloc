@@ -7,8 +7,8 @@ below are those sections, discharged once here for every call in the file.
 
 **The obligations, from the generated `# Safety` sections.**
 
-- (R) `__rseq_offset` locates the calling thread's rseq area, which is registered or reads a
-  negative `cpu_id`.
+- (R) `__rseq_offset` locates the calling thread's rseq area, which, from the call until it
+  returns, is registered, or reads a negative `cpu_id` and stays unregistered.
 - (W) Pop and push: `word` is `SLABS + 8 * class`, the address of a word in slab 0 (the
   specification's `class` is the word's position), for a position below 512.
 - (C) The `mask` argument is `8n - 16` for the class's magazines of `n = 2^k` slots,
@@ -30,20 +30,27 @@ below are those sections, discharged once here for every call in the file.
   compare sends to the miss path. The declaration is FRONT-01 (`front/mod-safety.md`). On musl
   the word and the area are the crate's own (FRONT-01, `front/area-safety.md`): each thread's
   area reads -1 until `cpu` registers it (AREA-04), and -2 if refused or retired, both of which
-  the unsigned compare sends to the miss path.
+  the unsigned compare sends to the miss path. A registration made during a routine breaks
+  "for the whole call": a signal handler that allocates for the first time on a thread at -1,
+  between a routine's arming store and its read of `cpu_id`, registers the thread, and the
+  interrupted routine then runs to its commit unprotected. Nothing here rules that out; it is
+  stated under "What is trusted" in `docs/design.md`, and shown by the ignored test
+  `limitation_a_handler_that_registers_a_thread_inside_its_first_sequence_unprotects_it` in `front/area.rs`.
 - (W): every word address comes from `Front::word(class)` for a `SmallClass`: the address of
   `SLABS`'s first slab plus `Field::hot(class).offset()`, which is 8 times the class's word
   position, `4 c + 2` for class index `c`: bytes 16 to 23 of chunk `c`, below 184
   (`front/slab.rs`, with compile-time assertions), so a word of slab 0 below the
   specification's 512. `SLABS` is the `Front` static, whose slabs are at offset 0 (a compile-time
   assertion), so its symbol, which the specification calls `SLABS`, is the first slab's address.
-- (C): the mask is `front::mask(class)`, entry `class` of `front::MASKS`, built from
+- (C): the mask is `front::mask(class)`, the entry of `front::MASKS` at the class's word position, built from
   `SmallClass::magazine().mask()`; `MagazineSize` keeps `n` a power of two from 4 to 256, so
   `k` is 2 to 8. A test checks each size's mask against the one the routines were proved for
   (`crate::spec`, which the Lean emitter writes).
-- (L): `__rseq_offset` is glibc's, and the
-  rseq area is in glibc's thread control block; the stack is the thread's own. None of them is
-  at the top of the address space (user space ends far below it on x86-64).
+- (L): on glibc, `__rseq_offset` is glibc's and the rseq area is in glibc's static TLS for the
+  thread; on musl, the word is the crate's own in `.rodata` and the area the crate's own in the
+  thread's static TLS (FRONT-01, `front/area-safety.md`), neither inside `SLABS`, a static of its
+  own. The stack is the thread's own. None of them is at the top of the address space (user
+  space ends far below it on x86-64).
 - (S): the slab invariant of `front/twin-safety.md`, which every writer of a slab keeps:
   the routines themselves (proved in Lean), the slow paths through `store_if_equal` and
   `stack_push` (DEPOT-SLOW-01, SPARE-01), and the drain. `Real` changes nothing about that argument:
@@ -58,8 +65,9 @@ below are those sections, discharged once here for every call in the file.
 
 **Proof.** `pop` and `push` pass `Front::word(class)` and `front::mask(class)` for a
 `SmallClass`, under (W) and (C); (R), (L) and (S) hold as above. `current_cpu` only reads
-`__rseq_offset` and `cpu_id`. On musl, `cpu` calls `area::register` when it reads -1, which has no
-safety obligation of its own to the routines (`front/area-safety.md`).
+`__rseq_offset` and `cpu_id`. On musl, `cpu` calls `area::register` when it reads -1, between
+routines, which keeps (R) for the routines that follow; what it cannot keep is (R) for a routine
+that a signal handler's registration interrupts, as (R) above says.
 
 ## REAL-02: the out-of-line routines
 

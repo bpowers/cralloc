@@ -7,6 +7,21 @@
 //! slow path, whose first question, `Real::cpu`, calls [`register`] when it reads -1. From then
 //! on `cpu_id` is the thread's CPU and the fast path runs.
 //!
+//! **What registering lazily cannot protect.** A routine arms its sequence (points `rseq_cs` at
+//! its descriptor) and then reads `cpu_id`. On a thread still at -1 the kernel aborts nothing,
+//! so a signal between those two instructions is delivered with the routine's arm in place. If
+//! the handler allocates, and that is the thread's first allocator call, its slow path registers
+//! the thread, and the handler's own sequences leave `rseq_cs` naming one of theirs. The
+//! interrupted routine then reads a valid CPU number and runs to its commit with nothing to
+//! restart it: a second preemption, migration or signal within its few instructions would let
+//! another thread interleave on that CPU's slab. The routines' contracts require the thread to
+//! be registered, or unregistered, for the whole call, and this breaks that; no fix fits inside
+//! lazy registration, so the design states it under "What is trusted". It needs a handler that
+//! allocates as the thread's first allocator call, at exactly that boundary, and then a second
+//! event within about eight instructions. The ignored test
+//! `limitation_a_handler_that_registers_a_thread_inside_its_first_sequence_unprotects_it`
+//! below puts a thread there by single-stepping.
+//!
 //! `cpu_id` is also all the state the area has, so the thread keeps nothing else:
 //!
 //! - -1: never tried;
@@ -26,6 +41,22 @@
 //! keys may run after ours and free memory: they find `cpu_id` -2 and take the slow path. A
 //! thread that never registers gives the key no value and runs nothing at exit. The main thread
 //! ends with the process, which frees nothing first.
+//!
+//! **Limits.**
+//!
+//! - A thread whose first allocator call comes after our destructor can no longer run (from
+//!   another key's destructor in musl's last round, `PTHREAD_DESTRUCTOR_ITERATIONS`, or after
+//!   the destructors) registers and dies registered; if it is detached, that can crash the
+//!   process, as above.
+//! - Destructors that run after ours, which in practice include Rust's thread-local
+//!   destructors, run without rseq, on the slow path: a thread that exits holding many blocks in
+//!   thread-locals frees them more slowly than on glibc.
+//! - A seccomp filter that fails `arch_prctl(ARCH_GET_FS)` leaves the thread at -1, so every
+//!   slow path tries again (one failed system call each); one that kills the process on
+//!   `arch_prctl` or `rseq` kills it at the thread's first slow path.
+//! - The first registration of the process makes the key, and `pthread_key_create` takes musl's
+//!   key lock: a signal handler that allocates for the first time in the process while the same
+//!   thread holds that lock (inside `pthread_key_create` or `pthread_key_delete`) deadlocks.
 //!
 //! These are, with `__errno_location`, the crate's only calls into the C library; the ledger
 //! entry for the unsafe blocks here is `docs/safety/asmalloc/front/area-safety.md`.
@@ -54,9 +85,9 @@ const _: () = {
     let end = start + spec::RSEQ_AREA_LEN;
     assert!(spec::RSEQ_AREA_ALIGN == spec::SLAB_BYTES);
     assert!(start.is_multiple_of(32) && end <= 1024);
-    assert!(
-        spec::RSEQ_CPU_ID + 4 <= spec::RSEQ_AREA_LEN && spec::RSEQ_CS + 8 <= spec::RSEQ_AREA_LEN
-    );
+    // The bytes the kernel writes and the routines read, `cpu_id` and `rseq_cs`, are within
+    // bytes 0 to 15 of that chunk, where no hot word is.
+    assert!(spec::RSEQ_CPU_ID + 4 <= 16 && spec::RSEQ_CS + 8 <= 16);
 };
 
 /// The key whose destructor unregisters a thread's area, plus one; zero until made.

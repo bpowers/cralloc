@@ -1,6 +1,7 @@
 import Asmalloc.TCB.X86_64.Print
 import Asmalloc.TCB.Rust
 import Asmalloc.TCB.X86_64.Target
+import Asmalloc.Spec.Slab
 
 /-!
 # Golden tests for the trusted printers
@@ -276,6 +277,11 @@ def sample64 : Prog isa := .block [
 #guard Rust.cfgAttr none == ""
 -- The signature the abort stubs carry, and that the own area is registered with.
 #guard hexLit rseqSignature == "0x53053053"
+-- The own area's data puts `cpu_id` and `rseq_cs` where the specification reads them: two
+-- 4-byte words (`cpu_id_start`, then `cpu_id`, -1) and then the 8-byte `rseq_cs`.
+#guard VG.Spec.Slab.RSEQ_CPU_ID == 4 && VG.Spec.Slab.RSEQ_CS == 8 &&
+  (ownRseqArea.lines.dropWhile (· != "asmalloc_rseq_area:")).take 3 ==
+    ["asmalloc_rseq_area:", s!".long 0, {hexLit ownAreaUnregistered}", ".quad 0"]
 #guard Rust.line printer.call (.ops [.text "test ecx, ", .ref "mask"]) ==
   "        r\"test ecx, {mask}\",\n"
 #guard (printer.function (.block [.alu32 .test .rcx (.immP "mask")] : Prog isa)).flatMap Line.refs ==
