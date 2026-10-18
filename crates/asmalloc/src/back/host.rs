@@ -32,6 +32,33 @@ pub(crate) struct ClassState {
     pub(crate) carving: Lined<AtomicU32>,
 }
 
+/// A region's header: its `Grow` and `Hints` words (`layout`). All zero means nothing carved,
+/// nothing committed, no huge-page part and no purge under way.
+///
+/// The headers of all regions are in the back end's state, side by side, not in the regions'
+/// metadata blocks: every class carves and so writes its header, but only a class whose slots
+/// reach the bitmaps needs its block, and a block's first touched page costs a page of memory
+/// and, 4 GiB from the next class's, a page of page tables (`docs/research/memory.md`, "Small
+/// heaps"). Four headers share a line, an exception to `crate::lined`'s rule: the words
+/// change once per magazine carved or purge step, not per object, and a line each would make
+/// the state 256 KiB, which the simulated heaps the tests make on their stacks cannot hold.
+pub(crate) struct RegionHeader {
+    pub(crate) grow: Atomic,
+    pub(crate) hints: Atomic,
+}
+
+impl RegionHeader {
+    pub(crate) const fn new() -> RegionHeader {
+        RegionHeader {
+            grow: Atomic::zero(),
+            hints: Atomic::zero(),
+        }
+    }
+}
+
+/// The headers of every region, by region number.
+pub(crate) type Headers = [RegionHeader; MAX_REGIONS];
+
 /// The class levels of a class's summary tree.
 pub(crate) struct Summary {
     pub(crate) top: Atomic,
@@ -69,16 +96,23 @@ impl ClassState {
 pub(crate) struct ClassHost<'a, O: Os> {
     pub(crate) space: Space<'a, O>,
     pub(crate) class: &'a ClassState,
+    pub(crate) headers: &'a Headers,
     pub(crate) layout: Layout,
     pub(crate) block: Cell<Option<(RegionId, NonNull<u8>)>>,
 }
 
 impl<'a, O: Os> ClassHost<'a, O> {
     #[inline(always)]
-    pub(crate) fn new(space: Space<'a, O>, class: &'a ClassState, layout: Layout) -> Self {
+    pub(crate) fn new(
+        space: Space<'a, O>,
+        class: &'a ClassState,
+        headers: &'a Headers,
+        layout: Layout,
+    ) -> Self {
         ClassHost {
             space,
             class,
+            headers,
             layout,
             block: Cell::new(None),
         }
@@ -133,6 +167,16 @@ impl<O: Os> Host for ClassHost<'_, O> {
         // region's metadata block, is 8-aligned, and is committed; it is only ever accessed
         // atomically; the borrow of the OS in `space` keeps the memory alive.
         unsafe { at.as_ref() }
+    }
+
+    #[inline(always)]
+    fn grow(&self, region: RegionId) -> &Atomic {
+        &self.headers[region.index() % MAX_REGIONS].grow
+    }
+
+    #[inline(always)]
+    fn hints(&self, region: RegionId) -> &Atomic {
+        &self.headers[region.index() % MAX_REGIONS].hints
     }
 
     #[inline(always)]

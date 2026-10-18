@@ -2230,7 +2230,7 @@ mod review {
     fn carved<O: Os>(back: &Back<'_, O>, class: Class, at: *mut u8) -> u32 {
         let host = back.host(class).unwrap();
         let region = back.space().locate(at).unwrap().region;
-        Grow::unpack(host.meta(region, host.layout().grow_word()).load()).carved
+        Grow::unpack(host.grow(region).load()).carved
     }
 
     /// Finding decay-walk-wedge. `purge_region` calls `top_up` whenever a region's cursor is

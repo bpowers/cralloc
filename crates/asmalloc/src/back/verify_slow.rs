@@ -80,7 +80,7 @@ fn leaf_commits_cover_the_committed_slots() {
     let slot: u32 = kani::any();
     kani::assume(slot < layout.slots());
     if layout.slot_bytes(slot) < (committed as usize) << layout.page_shift() {
-        assert!((slot / BITS + 1) as usize * WORD_BYTES <= bytes);
+        assert!((layout.tree_word(0, slot / BITS) + 1) as usize * WORD_BYTES <= bytes);
     }
 }
 

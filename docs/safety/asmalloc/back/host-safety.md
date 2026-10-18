@@ -28,7 +28,7 @@ nothing accesses that memory in a way that conflicts with a shared reference.
 
 1. *In bounds.* `at = metadata(region) + 8 * word`. Callers pass only word numbers that the
    layout names: `tree_word(level, index)` with `index` below that level's count,
-   `grow_word`, `hints_word`, `clean_word(w)` with `w` below the clean count, `zero_word(w)`
+   `clean_word(w)` with `w` below the clean count, `zero_word(w)`
    with `w` below the leaf count, and `size_word(slot)` with `slot` below the slot count (a
    slot `Plan::slot_at` accepted). Kani's `layouts_fit_the_used_geometries` and
    `layouts_fit_every_geometry` prove that all of these sections lie inside
@@ -48,9 +48,9 @@ nothing accesses that memory in a way that conflicts with a shared reference.
 2. *Aligned.* The metadata block starts on a page boundary and the offset is a multiple of 8.
    `Atomic` is `#[repr(transparent)]` over `AtomicU64`, alignment 8.
 3. *Accessible.* The word is committed before any thread forms a reference to it:
-   - The fixed part (header, summary levels, clean and zero bitmaps) is committed by `assign`
+   - The fixed part (summary levels, clean and zero bitmaps, sizes) is committed by `assign`
      before its compare-and-swap puts this class's tag on the region (`Layout::fixed_commit`
-     covers from the page holding the header to the end of the layout; proved in
+     covers from the block's start to the start of the leaf bitmap, which comes last; proved in
      `layouts_fit`). So any thread that learns the region through the table, the carving word or
      the summary tree finds it committed: the OS has finished the commit before that thread's
      acquire of the tag or word, and commit is never undone.
@@ -58,7 +58,9 @@ nothing accesses that memory in a way that conflicts with a shared reference.
      summary bits. A carve commits the leaf words of every slot starting below the new commit
      frontier (`Layout::leaf_commit`, proved in `leaf_commits_cover_the_committed_slots`) before
      its compare-and-swap publishes that frontier, and the watermark never passes the frontier
-     (both are in the one `Grow` word, and a carve advances the watermark only when the
+     (both are in the region's one `Grow` word, kept outside the block in `State::headers`
+     and reached through `grow`, which needs no `unsafe`; a carve advances the watermark only
+     when the
      frontier covers the new slots). `validate` checks `slot < carved` before `release`;
      `purge_unit` looks only at slots below the watermark (`unit_below`); a descent reaches a
      leaf word only through a summary bit, and a summary bit is set only by `tree::up`, which

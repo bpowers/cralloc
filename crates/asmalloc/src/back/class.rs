@@ -379,7 +379,7 @@ impl<'a, O: Os> Back<'a, O> {
         let Some((slot, _)) = layout.block_at(offset) else {
             self.abort("free of a pointer that is not the start of a slot");
         };
-        let carved = Grow::unpack(host.meta(region, layout.grow_word()).load()).carved;
+        let carved = Grow::unpack(host.grow(region).load()).carved;
         if slot >= carved.min(layout.slots()) {
             self.abort("free of a slot that was never handed out");
         }
@@ -1039,8 +1039,7 @@ impl<'a, O: Os> Back<'a, O> {
                 huge_from: Some(0),
                 cursor: 0,
             };
-            host.meta(region, layout.hints_word())
-                .fetch_or(hints.pack());
+            host.hints(region).fetch_or(hints.pack());
             HugePages::Prefer
         } else {
             HugePages::Avoid
@@ -1051,7 +1050,7 @@ impl<'a, O: Os> Back<'a, O> {
     /// Undoes `prepare`'s writes, so that the region's metadata is all zero again.
     fn unprepare(&self, host: &ClassHost<'a, O>, region: RegionId, huge: bool) {
         if huge {
-            host.meta(region, host.layout().hints_word()).fetch_and(0);
+            host.hints(region).fetch_and(0);
         }
     }
 }
@@ -1150,7 +1149,7 @@ impl<'c, 'a, O: Os> Checker<'c, 'a, O> {
         if self.back.state.table.get(region) != RegionTag::Class(self.class) {
             self.back.abort("free of a pointer with the wrong class");
         }
-        let grow = self.host.meta(region, self.layout.grow_word());
+        let grow = self.host.grow(region);
         let limit = Grow::unpack(grow.load()).carved.min(self.layout.slots());
         Met { region, limit }
     }

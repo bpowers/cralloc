@@ -6,7 +6,7 @@
 //! slots below a watermark it has just read, committed before that watermark was published.
 
 use super::Back;
-use super::layout::{Grow, Hints, WORD_BYTES};
+use super::layout::{Grow, Hints};
 use super::tree::Host;
 use super::word::{BITS, Word};
 use crate::classes::Class;
@@ -38,11 +38,10 @@ impl<O: Os> Back<'_, O> {
         };
         let layout = *host.layout();
         let page = layout.page_size();
-        let grow = Grow::unpack(host.meta(region, layout.grow_word()).load());
-        let hints = Hints::unpack(host.meta(region, layout.hints_word()).load());
+        let grow = Grow::unpack(host.grow(region).load());
+        let hints = Hints::unpack(host.hints(region).load());
         let carved = grow.carved.min(layout.slots());
         let base = self.space.region(region).as_ptr().cast_const();
-        let (_, fixed_end) = layout.fixed_commit();
         visitor.region(&Region {
             class,
             index: region.index(),
@@ -52,7 +51,7 @@ impl<O: Os> Back<'_, O> {
             committed: grow.committed as usize * page,
             huge_from: hints.huge_from.map(|from| from as usize * page),
             metadata: self.space.metadata(region).as_ptr().cast_const(),
-            metadata_len: fixed_end.max(WORD_BYTES),
+            metadata_len: layout.block_bytes(),
         });
         // Runs of consecutive set bits, joined across words.
         let mut run: Option<(u32, u32)> = None;
