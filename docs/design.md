@@ -587,7 +587,8 @@ saved; we copy.
 - **`GlobalAlloc`** for `#[global_allocator]`. `dealloc` of a small object is the free
   routine and nothing else.
 - **`Allocator`**, on Rust versions that have it, through a zero-sized handle. All handles
-  share the one heap. `allocate` returns the full class size. A zero-size request gets a
+  share the one heap. `allocate` returns the full class size of a small block and the
+  usable size of a large one. A zero-size request gets a
   dangling, aligned pointer and no block.
 - **C ABI**: `malloc`, `calloc`, `realloc`, `reallocarray`, `free`, the aligned-allocation
   family, `malloc_usable_size`, `malloc_trim` and the sized frees: every function glibc
@@ -716,7 +717,9 @@ These hold everywhere, and the proofs and tests lean on them.
 1. A slab changes only through an rseq routine that commits with one store, or through the
    drain steps under "Idle caches".
 2. Other shared state changes only through single atomic instructions.
-3. No locks, no waiting, no thread-local state.
+3. No locks, no waiting, no thread-local state. The one exception is in the C++ layer,
+   which asks the loader which `operator new` and `delete` the process uses, once per
+   family and on a failing `new`; that lookup can wait on the loader's lock.
 4. Between any two instructions of any slow path, shared state is valid and anything
    unreachable from it is owned by exactly one thread.
 5. All-zero is a valid state for every structure.
