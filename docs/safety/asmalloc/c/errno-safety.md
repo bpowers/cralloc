@@ -50,3 +50,5 @@ instruction). A handler that runs between the store and the C caller's read can 
 `errno`, which is the ordinary C rule for errno and handlers, not a memory-safety question.
 The write is a plain `i32` store into memory glibc owns on the program's behalf and documents
 as writable by any code (`errno` is a modifiable lvalue).
+
+Reviewed: f41dbf9

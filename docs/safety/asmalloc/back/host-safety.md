@@ -87,3 +87,5 @@ checks were found to overstate (no test could see an uncommitted access). Fixed 
 tracking, first in the test host and now in the simulator itself, which a deleted leaf commit
 fails. The same reviewer checked the first fix and accepted it; the move to the simulator's
 check has not been reviewed.
+
+Reviewed: f41dbf9

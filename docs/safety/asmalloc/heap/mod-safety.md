@@ -58,3 +58,5 @@ small block is a whole slot of its class in carved, committed memory (the back e
 before it hands a slot out; magazines hold only slots that `fill` handed out). For a large slot
 `n` is the layout's size or `len`, both at most the class size, the slot's length. Runs are not
 written. The pointer carries the reservation's provenance (`Space::slot`).
+
+Reviewed: f41dbf9

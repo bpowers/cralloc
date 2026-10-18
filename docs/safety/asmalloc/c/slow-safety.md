@@ -91,3 +91,5 @@ started makes `find` return `None` or `Large`, and aborts or is validated by the
 slot start that is not live (a double free, or a slot never handed out) is pushed and caught
 when its magazine is laundered (`Back::launder` aborts on a slot already free or beyond the
 watermark), which is the design's stated double-free detection.
+
+Reviewed: f41dbf9
