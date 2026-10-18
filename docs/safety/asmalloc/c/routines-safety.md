@@ -9,7 +9,8 @@ generated `# Safety` sections, discharged once here for every call: the wrappers
 
 ## The obligations
 
-- (R) glibc registered the calling thread's rseq area.
+- (R) From the call until it returns, the calling thread's rseq area is registered, or reads
+  a negative `cpu_id` and stays unregistered.
 - (L) `SLABS` (the slabs), the thread's `rseq_cs` and `cpu_id`, `__rseq_offset`, the masks'
   table (`MASK_DISP` above `SLABS`), each routine's tables (`C_SIZES`, `C_CALLOC_SIZES` or `C_SIZED_SIZES` 2048
   bytes in; the mirror of the heap words at `SHIFT_DISP` above `SLABS`, and the region table at `REGION_DISP` above `SLABS`) do not overlap the return address or wrap around the end of the address space;
@@ -25,7 +26,9 @@ values they read).
 
 ## Why they hold
 
-- (R): as (R) in `front/real-safety.md`.
+- (R): as (R) in `front/real-safety.md`, with its limitation on musl: a signal handler that
+  registers the thread between a C routine's arming store and its read of `cpu_id` leaves that
+  routine unprotected (`limitation_a_handler_that_registers_a_thread_inside_its_first_sequence_unprotects_it`).
 - (L): `SLABS` is the `Front` static; the masks, the published words and the region table are
   fields of it past every slab (compile-time assertions in `front/mod.rs` pin each to the
   generated `MASK_DISP`, `SHIFT_DISP`, `BASE_DISP`, `MIRROR_BYTES`, `MIRROR_COUNT`,
@@ -33,13 +36,16 @@ values they read).
   the slabs plus three pages). `C_SIZES`, `C_CALLOC_SIZES` and `C_SIZED_SIZES` are statics of their own, immutable,
   each table `TABLE_OFF` bytes in, its length the one the routines read (`c/table.rs` takes
   `TABLE_OFF` and `SIZED_LEN` from `crate::spec`, which the Lean emitter writes, and asserts
-  `MALLOC_LEN` and `CALLOC_LEN`). Distinct statics do not overlap, and none overlaps glibc's
-  thread control block, which holds the rseq area, or the thread's stack. None is at the top of
+  `MALLOC_LEN` and `CALLOC_LEN`). Distinct statics do not overlap, and none overlaps the thread's
+  static TLS, which holds the rseq area (glibc's, or on musl the crate's own), or the thread's
+  stack. None is at the top of
   the address space.
 - (I): for a small class, (C) and (S) of `front/real-safety.md`: the mask entry is zero or the
-  class's, which `MagazineSize` keeps allowed, and the slab invariant holds of its words. For
-  any other byte the entry is zero: `publish_masks` writes `MASK_TABLE`, which is zero for every
-  index that is not a small class's (`front::tests`), and nothing else writes the table. A zero
+  class's, which `MagazineSize` keeps allowed, and the slab invariant holds of its words. The
+  byte of a small class is the position of its hot word (`Field::index`), not its class index;
+  the tables and the mirror hold that byte (`c::table::word_byte`). For any other byte the
+  entry is zero: `publish_masks` writes `MASK_TABLE`, which is zero for every position
+  that is not a small class's hot word (`front::tests`), and nothing else writes the table. A zero
   mask carries no obligation on the words.
 
 ## What the routines' results mean
@@ -79,3 +85,5 @@ contract. Pointers cross the assembly as integers: `free` exposes the block's pr
 `malloc` takes the exposed provenance back, as REAL-03 argues for the inline pop and push:
 every object address lies in the heap's reservation, whose provenance the heap exposes when it
 starts.
+
+Reviewed: 415b07e

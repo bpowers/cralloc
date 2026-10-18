@@ -25,10 +25,10 @@ one writes the symbol while Rust may read it (a `safe` static is read without `u
 
 3. *On musl*, which has no `__rseq_offset`, the declaration links to `asmalloc_rseq_offset`
    (`link_name`), a word the crate defines in the data generated from Lean
-   (`front/generated/x86_64/area.rs`): 8 bytes, 8-aligned, in `.data.rel.ro`, holding
+   (`front/generated/x86_64/area.rs`): 8 bytes, 8-aligned, in `.rodata`, holding
    `asmalloc_rseq_area@tpoff`, which the linker resolves to a constant in an executable (a
-   static or static-PIE musl executable has no dynamic relocation for it; a dynamic one would
-   have it applied before any code runs, and then made read-only). So the same type, every bit
+   static or static-PIE musl executable has no dynamic relocation for it, nor would a dynamic
+   musl executable, whose own TLS offsets are link-time constants too). So the same type, every bit
    pattern valid, and one value for ever. The name is the crate's own, so a C library that one
    day defines `__rseq_offset` cannot be confused with it (the crate would then find that
    library's registration in place and be refused, AREA-04, which is safe).
@@ -40,3 +40,5 @@ to the miss path before it touches a slab.
 
 It is public, and hidden, only so that the C routines the export macros define in another crate
 can name it as an operand; what any code can do with it is read a constant.
+
+Reviewed: 415b07e

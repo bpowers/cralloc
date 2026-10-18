@@ -103,18 +103,19 @@ it expects), and its body passes its arguments to the function of the same name 
 frees, given up), or for `posix_memalign` a writable `void *`. The functions without pointer
 arguments have no preconditions.
 
-The symbols are meant to replace the C library's allocator, which is the point of the macro,
-and they replace it whole: every glibc 2.43 function that takes or returns a block is among
-them (the list and the census behind it are in the macro's documentation and in the preload
-crate's ledger). Replacing a subset would let glibc serve a block from its own heap that
-asmalloc is then asked to free, or the reverse. glibc supports replacing its allocator by
-interposition and calls `malloc` and the rest through the interposable symbols itself (glibc
-manual, "Replacing malloc"). The macro also defines `asmalloc_version`, a name no C library or other allocator defines; it
-returns a pointer to a static NUL-terminated string, valid for the life of the program. A
-program must invoke the macro at most once, or enable the `c-abi`
-feature and not invoke it, since two definitions of one symbol fail to link; and it must not
-also link another allocator that defines these names (the design's non-goal: one instance per
-process).
+The symbols are meant to replace the C library's allocator, which is the point of the macro, and
+they replace it whole: every glibc 2.43 function that takes or returns a block is among them
+(the list and the census behind it are in the macro's documentation and in the preload crate's
+ledger). Replacing a subset would let glibc serve a block from its own heap that asmalloc is
+then asked to free, or the reverse. glibc supports replacing its allocator by interposition and
+calls `malloc` and the rest through the interposable symbols itself (glibc manual, "Replacing
+malloc"). For a static musl program, where no export list applies, the evidence that the whole
+family is replaced is the experiments in `docs/research/musl-and-static.md`. The macro also
+defines `asmalloc_version`, a name no C library or other allocator defines; it returns a pointer
+to a static NUL-terminated string, valid for the life of the program. A program must invoke the
+macro at most once, or enable the `c-abi` feature and not invoke it, since two definitions of
+one symbol fail to link; and it must not also link another allocator that defines these names
+(the design's non-goal: one instance per process).
 
 ## C-EXPORT-02: the generated routines `export_c_abi!` defines
 
@@ -135,3 +136,5 @@ promise. The copies name the crate's statics and slow paths through `$crate`, so
 same memory and functions as the routines in the crate. The rest of C-EXPORT-01 (what the
 symbols replace) is unchanged.
 
+
+Reviewed: 415b07e

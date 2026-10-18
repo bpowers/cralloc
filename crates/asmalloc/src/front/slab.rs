@@ -1,11 +1,19 @@
 //! Slabs: one block of state per CPU number.
 //!
-//! A slab is [`SLAB_BYTES`] bytes. Its first words are the hot words, one per class, the word of
-//! class `c` (its [`Class::index`](crate::classes::Class::index)) at byte `8 c`; the routines
-//! address them as `SLABS + (cpu << SLAB_SHIFT) + 8 c`. Word 0 is never used, so that the class
-//! index needs no adjustment. The cold part follows on its own cache lines: the heads of the
-//! spare stacks (one stack of non-empty and one of empty magazines per class), the activity
-//! counter, the drain claim, the count of full magazines the CPU's frees have retired and where
+//! A slab is [`SLAB_BYTES`] bytes. It begins with a 32-byte chunk per class, chunk `c` for class
+//! index `c` (chunk 0 unused): the heads of the class's two spare stacks (one of non-empty and
+//! one of empty magazines) at bytes 0 to 15, its hot word at bytes 16 to 23 ([`Field::hot`]),
+//! and a word unused. The routines address the word at position `p` as
+//! `SLABS + (cpu << SLAB_SHIFT) + 8 p`, and the C size tables and the region table give that
+//! position, `4 c + 2`. Bytes 0 to 15 of each chunk hold no hot word, because a thread's
+//! rseq area, which the kernel requires to be 32-byte aligned, has `cpu_id` and `rseq_cs` at
+//! bytes 4 to 15 of a 32-byte chunk: a load of `cpu_id` at the page offset of a hot word stored
+//! just before waits for that store as if it were the same location, which costs a pair about
+//! two cycles, and where the C library puts the area is its choice
+//! (`docs/research/musl-and-static.md`). So no hot word can share a page offset with them,
+//! wherever the area is. One class to a chunk keeps the word's address one shift from the class
+//! index, where two to a chunk cost a run-time-size pair two cycles of arithmetic. The cold
+//! part follows on its own cache lines: the activity counter, the drain claim, the count of full magazines the CPU's frees have retired and where
 //! the age limit's sweep of the spare stacks is; then,
 //! on lines of their own that only this CPU's slow paths touch, per class a stamp of when the
 //! loaded magazine was loaded; and on a line of its own the idle check's last sighting.
@@ -14,7 +22,7 @@
 //! stacks, no activity, no claim, nothing retired, no sweep and no stamps.
 
 use super::sync::{AtomicPtr, AtomicU64};
-use crate::classes::{SMALL_COUNT, SmallClass};
+use crate::classes::{SMALL_COUNT, SmallClass, WORD_START, WORD_STRIDE};
 use core::ptr;
 use core::sync::atomic::Ordering;
 
@@ -26,19 +34,37 @@ pub const SLAB_SHIFT: u32 = crate::spec::SLAB_SHIFT;
 pub const SLAB_BYTES: usize = crate::spec::SLAB_BYTES;
 const _: () = assert!(SLAB_BYTES == 1 << SLAB_SHIFT);
 
-/// Hot words per slab: room for the class indexes `1..WORDS`.
-const WORDS: usize = 64;
-/// Spare-stack heads per kind, indexed like the hot words.
-const HEADS: usize = 64;
+/// One 32-byte chunk per class index `0..=SMALL_COUNT` (chunk 0 unused, and one more if needed
+/// for the cold fields to start on a cache line): its full head, its empty head, its hot word
+/// at bytes 16 to 23, and a word unused.
+const CHUNKS: usize = (SMALL_COUNT + 1).next_multiple_of(2);
+/// All the pointer fields: four to a chunk.
+const FIELDS: usize = 4 * CHUNKS;
 
-const _: () = assert!(SMALL_COUNT < WORDS && SMALL_COUNT < HEADS);
+/// The position of class index `index`'s hot word among the slab's words: bytes 16 to 23 of
+/// chunk `index`, as a [`SmallClass`] holds it.
+const fn hot_position(index: usize) -> usize {
+    WORD_STRIDE * index + WORD_START
+}
+const _: () = assert!(WORD_STRIDE == 4 && WORD_START == 2);
+
+const _: () = assert!(hot_position(SMALL_COUNT) < FIELDS && hot_position(1) == 6);
+// No hot word is at bytes 0 to 15 of a 32-byte chunk, where a 32-byte-aligned rseq area has its
+// `cpu_id` and `rseq_cs` (see the module documentation).
+const _: () = {
+    let mut index = 1;
+    while index <= SMALL_COUNT {
+        assert!((8 * hot_position(index)) % 32 >= 16);
+        index += 1;
+    }
+};
 const _: () = assert!(size_of::<Slab>() == SLAB_BYTES && align_of::<Slab>() == SLAB_BYTES);
 // The fast path loads only the hot words; the cold words are on lines of their own.
 const _: () = assert!(core::mem::offset_of!(Slab, activity) % 64 == 0);
 const _: () = assert!(core::mem::offset_of!(Slab, seen) % 64 == 0);
 const _: () = assert!(core::mem::offset_of!(Slab, seen) >= core::mem::offset_of!(Slab, claim) + 8);
 const _: () = assert!(core::mem::offset_of!(Slab, stamps) % 64 == 0);
-const _: () = assert!(core::mem::offset_of!(Slab, stamps) >= WORDS * 8);
+const _: () = assert!(core::mem::offset_of!(Slab, stamps) >= FIELDS * 8);
 
 /// Which spare stack of a class.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -58,17 +84,17 @@ impl Field {
     /// The hot word of a class: the address of the next free slot of its loaded magazine.
     #[inline(always)]
     pub const fn hot(class: SmallClass) -> Field {
-        Field(8 * class.class().index() as u16)
+        Field(8 * class.word() as u16)
     }
 
     /// The head of one of a class's spare stacks.
     #[inline(always)]
     pub const fn spare(class: SmallClass, kind: Spare) -> Field {
-        let base = match kind {
-            Spare::Full => WORDS,
-            Spare::Empty => WORDS + HEADS,
+        let within = match kind {
+            Spare::Full => 0,
+            Spare::Empty => 1,
         };
-        Field(8 * (base + class.class().index() as usize) as u16)
+        Field(8 * (class.word() - WORD_START + within) as u16)
     }
 
     /// The byte offset in the slab.
@@ -77,9 +103,11 @@ impl Field {
         self.0 as usize
     }
 
-    /// The index in a slab's array of pointer fields.
+    /// The index in a slab's array of pointer fields: for a hot word, its position, which the C
+    /// size tables and the region table hold for the class and the C routines turn into the
+    /// word's address.
     #[inline(always)]
-    const fn index(self) -> usize {
+    pub(crate) const fn index(self) -> usize {
         self.0 as usize / 8
     }
 }
@@ -87,8 +115,8 @@ impl Field {
 /// One CPU's slab. See the module documentation.
 #[repr(C, align(4096))]
 pub struct Slab {
-    /// The hot words, then the full heads, then the empty heads.
-    fields: [AtomicPtr<u8>; WORDS + 2 * HEADS],
+    /// A chunk per class: its full head, its empty head, its hot word, and a word unused.
+    fields: [AtomicPtr<u8>; FIELDS],
     activity: AtomicU64,
     claim: AtomicU64,
     retired: AtomicU64,
@@ -114,8 +142,9 @@ const STAMPS: usize = SMALL_COUNT + 1;
 struct OwnLine(AtomicU64);
 
 impl Slab {
-    /// The bytes at the start of a slab that hold its hot words, which the fast paths write.
-    pub(crate) const HOT_BYTES: usize = 8 * WORDS;
+    /// The bytes at the start of a slab that hold its hot words, which the fast paths write,
+    /// and the spare heads beside them.
+    pub(crate) const HOT_BYTES: usize = 8 * FIELDS;
 
     /// The bytes at the start of a slab that hold its fields; the rest of its page is unused.
     pub(crate) const USED_BYTES: usize = core::mem::offset_of!(Slab, seen) + size_of::<OwnLine>();
@@ -124,7 +153,7 @@ impl Slab {
     #[allow(clippy::new_without_default)]
     pub const fn new() -> Slab {
         Slab {
-            fields: [const { AtomicPtr::new(ptr::null_mut()) }; WORDS + 2 * HEADS],
+            fields: [const { AtomicPtr::new(ptr::null_mut()) }; FIELDS],
             activity: AtomicU64::new(0),
             claim: AtomicU64::new(0),
             retired: AtomicU64::new(0),
@@ -137,7 +166,7 @@ impl Slab {
     /// A field. A [`Field`] is always in bounds; the mask lets the compiler drop the check.
     #[inline(always)]
     pub(crate) fn field(&self, field: Field) -> &AtomicPtr<u8> {
-        &self.fields[field.index() % (WORDS + 2 * HEADS)]
+        &self.fields[field.index() % FIELDS]
     }
 
     /// The fields the drain exchanges: every small class's hot word and spare heads.
@@ -306,13 +335,17 @@ mod tests {
     }
 
     #[test]
-    fn the_hot_word_is_at_eight_times_the_class_index() {
+    fn each_class_has_a_chunk_with_its_hot_word_at_bytes_16_to_23() {
         let slab = Slab::new();
         for class in SmallClass::all() {
             let field = slab.field(Field::hot(class));
             let offset = ptr::from_ref(field).addr() - ptr::from_ref(&slab).addr();
-            assert_eq!(offset, 8 * class.class().index() as usize);
             assert_eq!(offset, Field::hot(class).offset());
+            let chunk = 32 * class.class().index() as usize;
+            assert_eq!(offset, chunk + 16);
+            assert_eq!(Field::spare(class, Spare::Full).offset(), chunk);
+            assert_eq!(Field::spare(class, Spare::Empty).offset(), chunk + 8);
+            assert!(offset + 8 <= Slab::HOT_BYTES);
         }
         let largest = Class::LARGEST_SMALL.small().unwrap();
         let head = slab.field(Field::spare(largest, Spare::Empty));

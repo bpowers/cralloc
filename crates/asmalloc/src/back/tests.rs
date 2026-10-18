@@ -1698,6 +1698,41 @@ fn a_sparse_block_stays_sparse_when_it_moves() {
     }
 }
 
+/// Review finding: `move_large_with` ignores the result of the purge that is meant to make a
+/// dirty destination read as zero, and then skips the source's zero pages all the same. Where
+/// `madvise(MADV_DONTNEED)` fails, as it does on locked memory (`mlockall`), the pages it skipped
+/// keep what the destination's last owner left there.
+#[test]
+#[cfg_attr(miri, ignore)]
+fn a_block_moved_into_a_dirty_slot_arrives_whole_when_purges_fail() {
+    let state = state::<Native>();
+    let back = state.get_or_reserve().unwrap();
+    let os = state.os();
+    let page = Native::GEOMETRY.page_size();
+    let (old_class, new_class) = (large(512 << 10), large(1 << 20));
+    let len = old_class.size();
+    let old = back.alloc(old_class, len).unwrap().ptr;
+    // One byte in every fourth page; the rest of the block is zero.
+    for at in (0..len).step_by(4 * page) {
+        // SAFETY: inside a live block the test owns.
+        unsafe { old.as_ptr().add(at + 3).write(1) };
+    }
+    let new = back.alloc(new_class, new_class.size()).unwrap();
+    paint(new.ptr.as_ptr(), new_class.size(), 0x77);
+    os.set_faults(Call::Purge, Faults::ALWAYS);
+    // SAFETY: both are live blocks that nothing else uses; `new` is not said to be zero.
+    unsafe { back.move_large(old, new.ptr, len, false) };
+    os.set_faults(Call::Purge, Faults::NONE);
+    // SAFETY: a live block the test owns.
+    let bytes = unsafe { core::slice::from_raw_parts(new.ptr.as_ptr(), len) };
+    let stale = bytes.iter().filter(|&&b| b == 0x77).count();
+    assert_eq!(
+        stale, 0,
+        "bytes of the destination's last owner in the moved block"
+    );
+    back.free(new.ptr, new_class);
+}
+
 /// Large blocks of one class start at their slots' staggers: different multiples of a cache
 /// line, within a page. Everything that maps a pointer back to its slot agrees: lookup, size,
 /// usable size, room, resize, and the free, which aborts on any other offset into the slot.

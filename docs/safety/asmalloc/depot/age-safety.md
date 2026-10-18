@@ -23,7 +23,7 @@ the magazine's last slot, reads slots `1..=level` and hands their objects to the
   `1..=level` holding free objects of the class that appear nowhere else. `Area::loaded`
   admitted it (MAGAZINE-01), so the handle's slot accesses are in bounds whatever happens.
 - The routine commits only if the field of the CPU it runs on holds exactly `seen.word` at the
-  commit, inside one restartable sequence (TWIN-04 / REAL-03). By the slab invariant at that
+  commit, inside one restartable sequence (REAL-03). By the slab invariant at that
   moment, a hot word equal to `seen.word` is the only reference to that magazine and encodes the
   same level. The commit replaces it with zero, so afterwards nothing in any slab, spare stack
   or depot stack refers to the magazine: it is this thread's alone, with slots `1..=level`
@@ -75,3 +75,5 @@ before sending the magazine on, and launders the top one.
   drain's exchange and the routine's commit lands first wins the chain, and the drain's steps 3
   and 4 write nothing over a commit they did not make.
 - If the routine does not commit, nothing is read from or written to the chain.
+
+Reviewed: f41dbf9

@@ -11,3 +11,5 @@ magazines obtained for `class` (DEPOT-SLOW-01) or displaced from `class`'s hot w
 `Area::loaded` built with `class.magazine()`. Handles lie in committed magazine memory
 (MAGAZINE-01). On `Pushed` the stack holds the magazine and the handle is dropped unused; on
 `Marker` or `NoCpu` nothing was written and the handle comes back to the caller.
+
+Reviewed: f41dbf9

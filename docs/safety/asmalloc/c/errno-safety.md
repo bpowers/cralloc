@@ -1,7 +1,8 @@
 # Safety ledger: `crates/asmalloc/src/c/errno.rs`
 
-How the C layer sets `errno`: through glibc's accessor, the only reference to a C library in
-the allocator.
+How the C layer sets `errno`: through the C library's accessor. It is one of the allocator's
+few references to a C library; the others are glibc's `__rseq_offset` (FRONT-01) and, on musl,
+the pthread key calls (AREA-01).
 
 ## ERRNO-01: the declaration of `__errno_location`
 
@@ -31,7 +32,10 @@ write in a way that races with it.
 
 - I1. glibc's `__errno_location` returns the address of the calling thread's `errno`, a
   thread-local `int` in the thread's static TLS block (`csu/errno-loc.c`: `return &errno;`).
-  It has no preconditions and touches no other state. It is async-signal-safe.
+  It has no preconditions and touches no other state. It is async-signal-safe. musl's returns
+  the address of the `errno` field of the calling thread's descriptor
+  (`src/errno/__errno_location.c`: `return &__pthread_self()->errno_val;`), with the same
+  properties; read "the C library" for glibc in I2 and the proof.
 - I2. The C layer runs only on threads glibc made or initialized (the main thread, threads of
   `pthread_create`, and forked children of either), so the thread pointer and its static TLS
   exist. The design's non-goal excludes `vfork`/`CLONE_VM` children and raw `clone` threads,
@@ -46,3 +50,5 @@ instruction). A handler that runs between the store and the C caller's read can 
 `errno`, which is the ordinary C rule for errno and handlers, not a memory-safety question.
 The write is a plain `i32` store into memory glibc owns on the program's behalf and documents
 as writable by any code (`errno` is a modifiable lvalue).
+
+Reviewed: f41dbf9

@@ -7,10 +7,10 @@ below are those sections, discharged once here for every call in the file.
 
 **The obligations, from the generated `# Safety` sections.**
 
-- (R) `__rseq_offset` locates the calling thread's rseq area, which is registered or reads a
-  negative `cpu_id`.
-- (W) Pop and push: `word` is `SLABS + 8 * class`, the address of the class's word in slab 0,
-  for a class below 512.
+- (R) `__rseq_offset` locates the calling thread's rseq area, which, from the call until it
+  returns, is registered, or reads a negative `cpu_id` and stays unregistered.
+- (W) Pop and push: `word` is `SLABS + 8 * class`, the address of a word in slab 0 (the
+  specification's `class` is the word's position), for a position below 512.
 - (C) The `mask` argument is `8n - 16` for the class's magazines of `n = 2^k` slots,
   `2 <= k <= 16`.
 - (L) `SLABS`, the thread's `rseq_cs` and `cpu_id` and `__rseq_offset` do not
@@ -30,19 +30,28 @@ below are those sections, discharged once here for every call in the file.
   compare sends to the miss path. The declaration is FRONT-01 (`front/mod-safety.md`). On musl
   the word and the area are the crate's own (FRONT-01, `front/area-safety.md`): each thread's
   area reads -1 until `cpu` registers it (AREA-04), and -2 if refused or retired, both of which
-  the unsigned compare sends to the miss path.
+  the unsigned compare sends to the miss path. A registration made during a routine breaks
+  "for the whole call": a signal handler that allocates for the first time on a thread at -1,
+  between a routine's arming store and its read of `cpu_id`, registers the thread, and the
+  interrupted routine then runs to its commit unprotected. Nothing here rules that out; it is
+  stated under "What is trusted" in `docs/design.md`, and shown by the ignored test
+  `limitation_a_handler_that_registers_a_thread_inside_its_first_sequence_unprotects_it` in `front/area.rs`.
 - (W): every word address comes from `Front::word(class)` for a `SmallClass`: the address of
-  `SLABS`'s first slab plus `Field::hot(class).offset()`, which is 8 times the class index, 1 to
-  `SMALL_COUNT` (44). `SLABS` is the `Front` static, whose slabs are at offset 0 (a compile-time
+  `SLABS`'s first slab plus `Field::hot(class).offset()`, which is 8 times the class's word
+  position, `4 c + 2` for class index `c`: bytes 16 to 23 of chunk `c`, below 184
+  (`front/slab.rs`, with compile-time assertions), so a word of slab 0 below the
+  specification's 512. `SLABS` is the `Front` static, whose slabs are at offset 0 (a compile-time
   assertion), so its symbol, which the specification calls `SLABS`, is the first slab's address.
-- (C): the mask is `front::mask(class)`, entry `class` of `front::MASKS`, built from
+- (C): the mask is `front::mask(class)`, the entry of `front::MASKS` at the class's word position, built from
   `SmallClass::magazine().mask()`; `MagazineSize` keeps `n` a power of two from 4 to 256, so
   `k` is 2 to 8. A test checks each size's mask against the one the routines were proved for
   (`crate::spec`, which the Lean emitter writes).
-- (L): `__rseq_offset` is glibc's, and the
-  rseq area is in glibc's thread control block; the stack is the thread's own. None of them is
-  at the top of the address space (user space ends far below it on x86-64).
-- (S): the slab invariant of `front/twin-safety.md`, which every writer of a slab keeps:
+- (L): on glibc, `__rseq_offset` is glibc's and the rseq area is in glibc's static TLS for the
+  thread; on musl, the word is the crate's own in `.rodata` and the area the crate's own in the
+  thread's static TLS (FRONT-01, `front/area-safety.md`), neither inside `SLABS`, a static of its
+  own. The stack is the thread's own. None of them is at the top of the address space (user
+  space ends far below it on x86-64).
+- (S): the slab invariant (below), which every writer of a slab keeps:
   the routines themselves (proved in Lean), the slow paths through `store_if_equal` and
   `stack_push` (DEPOT-SLOW-01, SPARE-01), and the drain. `Real` changes nothing about that argument:
   it is the same specification with the same writers. `Real` is private to the crate, and
@@ -52,12 +61,68 @@ below are those sections, discharged once here for every call in the file.
   also write them, are proved in Lean to the same invariant for every class byte
   (`c/routines-safety.md`).
 
+## The slab invariant (S)
+
+Shipping entries cite this statement (REAL above, GLOBAL-01, HEAP-SOURCE-01, AGE-01, CACHE-01).
+For every CPU with a slab and every small class:
+
+- the hot word is zero, a marker (`classes::is_marker`), or the address of slot `s`, with
+  `1 <= s <= n - 1`, of a magazine of the class's size `n` that lies in committed magazine
+  memory; and
+- each spare head, and the link (slot 0) of each magazine on a spare stack, is zero or the slot-0
+  address of a magazine of the class's size in committed magazine memory. Never a marker below
+  the head: `stack_push` refuses to push onto a marker, so a link is always the head it saw,
+  which was zero or a magazine.
+
+Committed magazine memory stays mapped and writable for the life of the reservation (the `Os`
+contract; nothing in the crate purges or unmaps the magazine area), and every access to a
+magazine slot anywhere in the crate is atomic.
+
+**Why (S) holds.** Outside the crate, nothing can write a slab field: `Slab::field` is
+crate-private, and the only public ways in are the routines. Of those, pop and push keep (S)
+by themselves (below); store-if-equal and stack push are `unsafe fn`s whose contracts require
+exactly the values (S) allows, so a caller that breaks (S) has broken an unsafe contract. Writers
+of slab fields are:
+
+- the routines' commits (and in tests the twins', which follow the same specifications): pop
+  stores `w - 8` only when `w & mask != 0`, so `s >= 2` and the new slot is `s - 1 >= 1`; push
+  stores `w + 8` only when `(w + 8) & mask != 0`, so `s <= n - 2` and the new slot is at most
+  `n - 1`. `classes::verify` proves both tests for every size, address and marker. The stack
+  routines store a magazine address the slow path holds (below) or the link they read, which
+  (S) covers;
+- store-if-equal, whose contract requires `new` to keep (S). The crate's only callers
+  (DEPOT-SLOW-01) pass `Magazine::word(level)` with `level <= capacity`, so slot `level + 1` in
+  `1..=n - 1` of a `Magazine` handle;
+- the drain, which stores its marker, zero, or (in back-out) a value it exchanged out of the same
+  field, with markers mapped to zero.
+
+Spare-stack links (slot 0 of a magazine on a spare stack) are written only by the stack push
+that put the magazine there, and by whoever holds the magazine's handle: the depot stacks write
+slot 0 through `Magazine::link`, and `Magazine::set_object` refuses slot 0 and the last slot.
+Magazines, the magazine area and the depot stacks are crate-private, so outside the crate no
+handle can be had at all, and no stack can be given a magazine of the wrong size or another
+heap's. Inside the crate a handle is made only by the thread that took the magazine off a stack,
+out of a slab word, or out of the area, with the size of the stack or class it came from, and
+that thread then owns it (DEPOT-SLOW-01, SPARE-01, the drain's step 4).
+
+The slow paths that write a slab array all hold the one depot and space that array is used
+with (`Cache::new`'s contract, CACHE-01 in `depot/mod-safety.md`), so every magazine a slab
+word or link names is in that space's area, and admitted by that depot's committed mark.
+
+A `Magazine` handle exists only for an offset `magazine::admits` accepted: past the generation
+page, aligned to its size and inside the committed bytes (`depot::verify::
+an_admitted_magazine_lies_inside_the_committed_area`). The magazine area itself is aligned to
+at least the largest magazine (`Geometry::magazine_area_align`), so an aligned offset is an
+aligned address. So every magazine address the slow paths give a routine is in committed memory,
+and so is every value derived from one.
+
 ## REAL-01: the inlined routines (`slab_pop`, `slab_push`, `current_cpu`)
 
 **Proof.** `pop` and `push` pass `Front::word(class)` and `front::mask(class)` for a
 `SmallClass`, under (W) and (C); (R), (L) and (S) hold as above. `current_cpu` only reads
-`__rseq_offset` and `cpu_id`. On musl, `cpu` calls `area::register` when it reads -1, which has no
-safety obligation of its own to the routines (`front/area-safety.md`).
+`__rseq_offset` and `cpu_id`. On musl, `cpu` calls `area::register` when it reads -1, between
+routines, which keeps (R) for the routines that follow; what it cannot keep is (R) for a routine
+that a signal handler's registration interrupts, as (R) above says.
 
 ## REAL-02: the out-of-line routines
 
@@ -89,3 +154,5 @@ enter magazines through the slow paths come from that reservation. Words that ar
 (slab words, stack heads) are turned back into references only through the magazine area
 (`Area::magazine`), so the pointers built for them with `without_provenance_mut` are never
 dereferenced.
+
+Reviewed: 415b07e

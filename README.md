@@ -54,6 +54,9 @@ Limits worth knowing:
   library is: unloading it kills the process.
 - The heap reserves address space, not memory, and makes do with less under a limit. Under
   a limit too small for its smallest reservation, every allocation fails.
+- A program that locks its memory with `mlockall` needs an unlimited `memlock` limit or
+  the capability that lifts it: the heap's address-space reservation counts against the
+  limit even though nothing in it is resident.
 - One copy per process: two copies have separate heaps and cannot free each other's blocks.
 - Under Miri, declare the allocator `#[cfg(not(miri))]` and keep Miri's own.
 

@@ -81,7 +81,7 @@ pub extern "C" fn calloc(n: usize, size: usize) -> *mut c_void {
 /// gives up.
 #[inline]
 pub unsafe extern "C" fn free(ptr: *mut c_void) {
-    // SAFETY: the caller's promise.
+    // SAFETY: MOD-03. the caller's promise.
     unsafe { routines::free(ptr) }
 }
 
@@ -92,7 +92,7 @@ pub unsafe extern "C" fn free(ptr: *mut c_void) {
 /// As for [`free`].
 #[inline]
 pub unsafe extern "C" fn free_sized(ptr: *mut c_void, size: usize) {
-    // SAFETY: the caller's promise.
+    // SAFETY: MOD-03. the caller's promise.
     unsafe { routines::free_sized(ptr, size) }
 }
 
@@ -103,7 +103,7 @@ pub unsafe extern "C" fn free_sized(ptr: *mut c_void, size: usize) {
 /// As for [`free`].
 #[inline]
 pub unsafe extern "C" fn free_aligned_sized(ptr: *mut c_void, _align: usize, _size: usize) {
-    // SAFETY: the caller's promise.
+    // SAFETY: MOD-03. the caller's promise.
     unsafe { routines::free(ptr) }
 }
 
@@ -114,7 +114,7 @@ pub unsafe extern "C" fn free_aligned_sized(ptr: *mut c_void, _align: usize, _si
 /// As for [`free`].
 #[inline]
 pub unsafe extern "C" fn cfree(ptr: *mut c_void) {
-    // SAFETY: the caller's promise.
+    // SAFETY: MOD-03. the caller's promise.
     unsafe { routines::free(ptr) }
 }
 
@@ -137,7 +137,7 @@ pub unsafe extern "C" fn realloc(ptr: *mut c_void, size: usize) -> *mut c_void {
         return malloc(size);
     };
     if size == 0 {
-        // SAFETY: the caller's promise; glibc's choice for C17's implementation-defined case.
+        // SAFETY: MOD-03. the caller's promise; glibc's choice for C17's implementation-defined case.
         unsafe { free(ptr) };
         return ptr::null_mut();
     }
@@ -196,7 +196,7 @@ pub unsafe extern "C" fn realloc(ptr: *mut c_void, size: usize) -> *mut c_void {
 /// As for [`realloc`].
 pub unsafe extern "C" fn reallocarray(ptr: *mut c_void, n: usize, size: usize) -> *mut c_void {
     match n.checked_mul(size) {
-        // SAFETY: the caller's promise.
+        // SAFETY: MOD-03. the caller's promise.
         Some(total) => unsafe { realloc(ptr, total) },
         None => {
             errno::set(ENOMEM);
@@ -329,7 +329,7 @@ pub extern "C" fn malloc_trim(_pad: usize) -> c_int {
 macro_rules! export_c_abi {
     () => {
         // `malloc`, `calloc`, `free` and `free_sized`: the generated routines, defined in this
-        // crate.
+        // crate. Their unsafe code is generated, so its ledger entry is cited here: C-EXPORT-02.
         $crate::asmalloc_exports_c_x86_64!();
 
         const _: () = {

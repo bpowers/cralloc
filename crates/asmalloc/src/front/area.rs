@@ -7,6 +7,21 @@
 //! slow path, whose first question, `Real::cpu`, calls [`register`] when it reads -1. From then
 //! on `cpu_id` is the thread's CPU and the fast path runs.
 //!
+//! **What registering lazily cannot protect.** A routine arms its sequence (points `rseq_cs` at
+//! its descriptor) and then reads `cpu_id`. On a thread still at -1 the kernel aborts nothing,
+//! so a signal between those two instructions is delivered with the routine's arm in place. If
+//! the handler allocates, and that is the thread's first allocator call, its slow path registers
+//! the thread, and the handler's own sequences leave `rseq_cs` naming one of theirs. The
+//! interrupted routine then reads a valid CPU number and runs to its commit with nothing to
+//! restart it: a second preemption, migration or signal within its few instructions would let
+//! another thread interleave on that CPU's slab. The routines' contracts require the thread to
+//! be registered, or unregistered, for the whole call, and this breaks that; no fix fits inside
+//! lazy registration, so the design states it under "What is trusted". It needs a handler that
+//! allocates as the thread's first allocator call, at exactly that boundary, and then a second
+//! event within about eight instructions. The ignored test
+//! `limitation_a_handler_that_registers_a_thread_inside_its_first_sequence_unprotects_it`
+//! below puts a thread there by single-stepping.
+//!
 //! `cpu_id` is also all the state the area has, so the thread keeps nothing else:
 //!
 //! - -1: never tried;
@@ -27,6 +42,22 @@
 //! thread that never registers gives the key no value and runs nothing at exit. The main thread
 //! ends with the process, which frees nothing first.
 //!
+//! **Limits.**
+//!
+//! - A thread whose first allocator call comes after our destructor can no longer run (from
+//!   another key's destructor in musl's last round, `PTHREAD_DESTRUCTOR_ITERATIONS`, or after
+//!   the destructors) registers and dies registered; if it is detached, that can crash the
+//!   process, as above.
+//! - Destructors that run after ours, which in practice include Rust's thread-local
+//!   destructors, run without rseq, on the slow path: a thread that exits holding many blocks in
+//!   thread-locals frees them more slowly than on glibc.
+//! - A seccomp filter that fails `arch_prctl(ARCH_GET_FS)` leaves the thread at -1, so every
+//!   slow path tries again (one failed system call each); one that kills the process on
+//!   `arch_prctl` or `rseq` kills it at the thread's first slow path.
+//! - The first registration of the process makes the key, and `pthread_key_create` takes musl's
+//!   key lock: a signal handler that allocates for the first time in the process while the same
+//!   thread holds that lock (inside `pthread_key_create` or `pthread_key_delete`) deadlocks.
+//!
 //! These are, with `__errno_location`, the crate's only calls into the C library; the ledger
 //! entry for the unsafe blocks here is `docs/safety/asmalloc/front/area-safety.md`.
 
@@ -43,20 +74,20 @@ pub(crate) const RETIRED: i32 = -2;
 /// `cpu_id` before the thread has tried: -1, as the generated area starts.
 pub(crate) const UNREGISTERED: u32 = spec::RSEQ_CPU_ID_UNREGISTERED;
 
-// The area is placed in its page clear of every slab word a routine writes, and of the words
-// the C routines read at page offsets from 1024 up. A load of `cpu_id` at the page offset of a
-// slab word stored just before waits for that store as if it were the same location, which
-// costs a pair two cycles (docs/research/musl-and-static.md). The thread pointer is aligned to
-// the area's section, a page, so the offset holds in every thread.
+// The area's page offset is pinned, the same in every thread (the thread pointer is aligned to
+// the area's section, a page). It is 32-byte aligned, as every registered area is, so `cpu_id`
+// and `rseq_cs` are at bytes 4 to 15 of a 32-byte chunk, where no slab hot word is (`slab`): a
+// load of `cpu_id` at the page offset of a hot word stored just before would wait for that
+// store, two cycles a pair (docs/research/musl-and-static.md). It is also below the words the C
+// routines read at page offsets from 1024 up.
 const _: () = {
-    use super::Slab;
     let start = spec::RSEQ_AREA_PAGE_OFFSET;
     let end = start + spec::RSEQ_AREA_LEN;
     assert!(spec::RSEQ_AREA_ALIGN == spec::SLAB_BYTES);
-    assert!(start >= Slab::HOT_BYTES && end <= 1024);
-    assert!(
-        spec::RSEQ_CPU_ID + 4 <= spec::RSEQ_AREA_LEN && spec::RSEQ_CS + 8 <= spec::RSEQ_AREA_LEN
-    );
+    assert!(start.is_multiple_of(32) && end <= 1024);
+    // The bytes the kernel writes and the routines read, `cpu_id` and `rseq_cs`, are within
+    // bytes 0 to 15 of that chunk, where no hot word is.
+    assert!(spec::RSEQ_CPU_ID + 4 <= 16 && spec::RSEQ_CS + 8 <= 16);
 };
 
 /// The key whose destructor unregisters a thread's area, plus one; zero until made.
@@ -231,6 +262,7 @@ mod tests {
                 "--exact",
                 &std::format!("front::area::tests::{name}"),
                 "--nocapture",
+                "--include-ignored",
             ])
             .env(CHILD, name)
             .stdout(std::process::Stdio::piped())
@@ -440,5 +472,260 @@ mod tests {
             t.join().unwrap();
         }
         assert_eq!(exit, 0);
+    }
+
+    // Review finding: a thread that is registered by a signal handler while one of its own
+    // sequences is armed but has not yet read `cpu_id`.
+    //
+    // A routine arms `rseq_cs` and then reads `cpu_id`. On an unregistered thread the kernel
+    // does not abort the sequence when a signal arrives between the two. If the handler
+    // allocates, its slow path registers the thread; the interrupted routine then reads a valid
+    // CPU number, with `rseq_cs` naming whatever sequence the handler ran last, so nothing
+    // restarts it from then on. The tests below put the thread there by single-stepping.
+
+    unsafe extern "C" {
+        fn sigaction(signal: c_int, new: *const SigAction, old: *mut SigAction) -> c_int;
+        fn raise(signal: c_int) -> c_int;
+        fn pthread_create(
+            thread: *mut usize,
+            attributes: *const c_void,
+            start: extern "C" fn(*mut c_void) -> *mut c_void,
+            argument: *mut c_void,
+        ) -> c_int;
+        fn pthread_join(thread: usize, result: *mut *mut c_void) -> c_int;
+        fn sched_getcpu() -> c_int;
+        fn sched_setaffinity(pid: c_int, size: usize, mask: *const u64) -> c_int;
+    }
+
+    /// `struct sigaction` as musl's `sigaction` takes it on x86-64.
+    #[repr(C)]
+    struct SigAction {
+        handler: usize,
+        mask: [u64; 16],
+        flags: c_int,
+        restorer: usize,
+    }
+
+    /// `struct rseq_cs` (`include/uapi/linux/rseq.h`).
+    #[repr(C)]
+    struct Descriptor {
+        version: u32,
+        flags: u32,
+        start: u64,
+        len: u64,
+        abort: u64,
+    }
+
+    const SIGTRAP: c_int = 5;
+    const SIGUSR1: c_int = 10;
+    const SA_SIGINFO: c_int = 4;
+    /// The offsets of `rip` and `eflags` in `ucontext_t` (`gregs[REG_RIP]`, `gregs[REG_EFL]`).
+    const UC_RIP: usize = 168;
+    const UC_EFLAGS: usize = 176;
+    const TRAP_FLAG: u64 = 0x100;
+    const STEP_LIMIT: usize = 5_000_000;
+
+    /// 0: stepping toward the first armed sequence. 1: inside it. 2: done, stepping off.
+    static STAGE: AtomicU32 = AtomicU32::new(0);
+    static STEPS: AtomicUsize = AtomicUsize::new(0);
+    static RANGE: [AtomicUsize; 2] = [AtomicUsize::new(0), AtomicUsize::new(0)];
+    static ABORTS: AtomicUsize = AtomicUsize::new(0);
+    static NESTED: [AtomicUsize; 64] = [const { AtomicUsize::new(0) }; 64];
+    static NESTED_COUNT: AtomicUsize = AtomicUsize::new(0);
+    static OUTER: AtomicUsize = AtomicUsize::new(0);
+    static CPU_ID_AT_START: AtomicI32 = AtomicI32::new(0);
+
+    const STEP_LAYOUT: Layout = Layout::new::<[u64; 6]>();
+
+    /// Allocates and frees in a handler, as a program's handler may, and remembers the block it
+    /// kept. The free comes last, so that the area names the push's sequence when the handler
+    /// returns, not the pop's: a build in which the handler and the interrupted code share one
+    /// copy of the pop would otherwise protect the interrupted pop by accident.
+    fn allocate_nested() {
+        // SAFETY: non-zero sizes; `scratch` is freed once with its layout; `block` is never
+        // freed, the process ends with the test.
+        let block = unsafe {
+            let block = Asmalloc.alloc(STEP_LAYOUT);
+            let scratch = Asmalloc.alloc(STEP_LAYOUT);
+            Asmalloc.dealloc(scratch, STEP_LAYOUT);
+            block
+        };
+        let n = NESTED_COUNT.fetch_add(1, Ordering::Relaxed);
+        if n < NESTED.len() {
+            NESTED[n].store(block.addr(), Ordering::Relaxed);
+        }
+    }
+
+    /// Turns single-stepping on for the interrupted code.
+    unsafe extern "C" fn start_stepping(_: c_int, _: *mut c_void, context: *mut c_void) {
+        // SAFETY: the kernel's `ucontext_t` for this delivery.
+        unsafe { *context.byte_add(UC_EFLAGS).cast::<u64>() |= TRAP_FLAG };
+    }
+
+    /// One step. When the thread is about to run the first instruction of the sequence its
+    /// area names (the read of `cpu_id`, just after the arming store), allocates, which
+    /// registers a thread that was not; then allocates again before each further instruction of
+    /// that sequence, as a second handler might; and stops stepping once the thread leaves it.
+    unsafe extern "C" fn step(_: c_int, _: *mut c_void, context: *mut c_void) {
+        // SAFETY: the kernel's `ucontext_t` for this delivery.
+        let (rip, eflags) = unsafe {
+            (
+                *context.byte_add(UC_RIP).cast::<u64>() as usize,
+                &mut *context.byte_add(UC_EFLAGS).cast::<u64>(),
+            )
+        };
+        let steps = STEPS.fetch_add(1, Ordering::Relaxed);
+        // The kernel clears `rseq_cs` when it aborts a sequence, so an abort is known by where
+        // the thread now is: just past the signature every abort handler carries.
+        const SIGNATURE: [u8; 7] = [0x0f, 0xb9, 0x3d, 0x53, 0x30, 0x05, 0x53];
+        // SAFETY: the seven bytes before an instruction of this program's text.
+        let before = unsafe { core::slice::from_raw_parts((rip - 7) as *const u8, 7) };
+        if STAGE.load(Ordering::Relaxed) < 2 && before == SIGNATURE {
+            ABORTS.fetch_add(1, Ordering::Relaxed);
+            STAGE.store(2, Ordering::Relaxed);
+        }
+        match STAGE.load(Ordering::Relaxed) {
+            0 => {
+                // SAFETY: the calling thread's own area; `rseq_cs` is null or a descriptor.
+                let armed = unsafe {
+                    area()
+                        .unwrap()
+                        .byte_add(spec::RSEQ_CS)
+                        .cast::<usize>()
+                        .read()
+                };
+                let descriptor = core::ptr::with_exposed_provenance::<Descriptor>(armed);
+                // SAFETY: as above; descriptors are static data.
+                if let Some(d) = unsafe { descriptor.as_ref() }
+                    && rip == d.start as usize
+                {
+                    RANGE[0].store(d.start as usize, Ordering::Relaxed);
+                    RANGE[1].store((d.start + d.len) as usize, Ordering::Relaxed);
+                    STAGE.store(1, Ordering::Relaxed);
+                    allocate_nested();
+                }
+            }
+            1 => {
+                let inside = rip > RANGE[0].load(Ordering::Relaxed)
+                    && rip < RANGE[1].load(Ordering::Relaxed);
+                if inside {
+                    allocate_nested();
+                } else {
+                    STAGE.store(2, Ordering::Relaxed);
+                }
+            }
+            _ => {}
+        }
+        if STAGE.load(Ordering::Relaxed) == 2 || steps > STEP_LIMIT {
+            *eflags &= !TRAP_FLAG;
+        }
+    }
+
+    /// A thread that std did not start, so that the allocation below is its first call of the
+    /// allocator. With an argument it registers first, as a control.
+    extern "C" fn first_call_under_steps(register_first: *mut c_void) -> *mut c_void {
+        // Stay on one CPU, so that the magazine the handler installs is the one the
+        // interrupted sequence finds.
+        // SAFETY: plain calls; the mask is one word.
+        unsafe {
+            let mask = 1u64 << sched_getcpu();
+            sched_setaffinity(0, 8, &raw const mask);
+        }
+        if !register_first.is_null() {
+            let _ = Real.cpu();
+        }
+        CPU_ID_AT_START.store(read_cpu_id(), Ordering::Relaxed);
+        // SAFETY: the handler turns stepping on; the allocation has a non-zero size.
+        let block = unsafe {
+            raise(SIGUSR1);
+            Asmalloc.alloc(STEP_LAYOUT)
+        };
+        OUTER.store(block.addr(), Ordering::Relaxed);
+        core::ptr::null_mut()
+    }
+
+    /// Runs `first_call_under_steps` and returns the block its allocation got, the blocks the
+    /// handler got, how many aborts the handler saw, and the thread's `cpu_id` at its start.
+    fn step_through_a_first_call(register_first: bool) -> (usize, Vec<usize>, usize, i32) {
+        churn_blocks(3);
+        let handlers: [(c_int, unsafe extern "C" fn(c_int, *mut c_void, *mut c_void)); 2] =
+            [(SIGUSR1, start_stepping), (SIGTRAP, step)];
+        for (signal, handler) in handlers {
+            let action = SigAction {
+                handler: handler as usize,
+                mask: [0; 16],
+                flags: SA_SIGINFO,
+                restorer: 0,
+            };
+            // SAFETY: a handler of the three-argument form, as `SA_SIGINFO` says.
+            let set = unsafe { sigaction(signal, &raw const action, core::ptr::null_mut()) };
+            assert_eq!(set, 0);
+        }
+        let mut thread = 0usize;
+        let argument = core::ptr::without_provenance_mut(register_first as usize);
+        // SAFETY: a start function that returns, joined below.
+        unsafe {
+            let made = pthread_create(
+                &mut thread,
+                core::ptr::null(),
+                first_call_under_steps,
+                argument,
+            );
+            assert_eq!(made, 0);
+            assert_eq!(pthread_join(thread, core::ptr::null_mut()), 0);
+        }
+        assert_eq!(
+            STAGE.load(Ordering::Relaxed),
+            2,
+            "the steps never met the sequence"
+        );
+        let nested = NESTED_COUNT.load(Ordering::Relaxed).min(NESTED.len());
+        (
+            OUTER.load(Ordering::Relaxed),
+            NESTED[..nested]
+                .iter()
+                .map(|b| b.load(Ordering::Relaxed))
+                .collect(),
+            ABORTS.load(Ordering::Relaxed),
+            CPU_ID_AT_START.load(Ordering::Relaxed),
+        )
+    }
+
+    /// The control: on a registered thread, a signal at the first instruction of a sequence
+    /// aborts it, and the handler never sees the thread inside.
+    #[test]
+    fn a_signal_inside_a_registered_threads_sequence_aborts_it() {
+        let name = "a_signal_inside_a_registered_threads_sequence_aborts_it";
+        if !is_child(name) {
+            return in_fresh_process(name);
+        }
+        let (outer, nested, aborts, cpu_id) = step_through_a_first_call(true);
+        assert!(cpu_id >= 0);
+        assert_eq!((aborts, nested.len()), (1, 0));
+        assert_ne!(outer, 0);
+    }
+
+    #[test]
+    #[ignore = "an accepted limitation on musl (design, What is trusted): fails, because a \
+                handler that registers the thread inside an armed sequence leaves the sequence \
+                unprotected, and it hands out a block the handler was given"]
+    fn limitation_a_handler_that_registers_a_thread_inside_its_first_sequence_unprotects_it() {
+        let name =
+            "limitation_a_handler_that_registers_a_thread_inside_its_first_sequence_unprotects_it";
+        if !is_child(name) {
+            return in_fresh_process(name);
+        }
+        let (outer, nested, aborts, cpu_id) = step_through_a_first_call(false);
+        assert_eq!(cpu_id, -1, "the thread starts unregistered");
+        std::eprintln!("outer {outer:#x}, aborts {aborts}, nested {nested:x?}");
+        let mut blocks = nested.clone();
+        blocks.push(outer);
+        blocks.sort_unstable();
+        let distinct = blocks.windows(2).all(|pair| pair[0] != pair[1]);
+        assert!(
+            distinct,
+            "a block was handed out twice: the interrupted call got {outer:#x}, the handler \
+             {nested:x?}"
+        );
     }
 }

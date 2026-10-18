@@ -32,7 +32,7 @@ prefix), so all `class.size()` bytes are writable.
 
 ## SLOW-02: the zeroing stores in `zero_block`, `zero_small` and `zero16`
 
-`block.write_bytes(0, len)`, and for a length up to 512 bytes, `zero_small`'s volatile stores:
+`block.write_bytes(0, len)`, and for a length up to 32 bytes (`SMALL_ZERO`), `zero_small`'s volatile stores:
 one 8-byte store for a length of 8, else one 16-byte store at each multiple of 16 below `len`.
 
 **Preconditions.** `block` is valid for writes of `len` bytes and nothing else accesses them
@@ -91,3 +91,5 @@ started makes `find` return `None` or `Large`, and aborts or is validated by the
 slot start that is not live (a double free, or a slot never handed out) is pushed and caught
 when its magazine is laundered (`Back::launder` aborts on a slot already free or beyond the
 watermark), which is the design's stated double-free detection.
+
+Reviewed: f41dbf9

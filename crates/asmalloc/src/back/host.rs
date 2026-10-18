@@ -114,7 +114,7 @@ impl<O: Os> Host for ClassHost<'_, O> {
     }
 
     unsafe fn purge(&self, region: RegionId, offset: usize, len: usize) -> bool {
-        // SAFETY: the caller promises what `Space::purge` asks: nothing touches the range during
+        // SAFETY: BACK-HOST-02. the caller promises what `Space::purge` asks: nothing touches the range during
         // the call and nothing in it is needed.
         unsafe { self.space.purge(self.region_at(region, offset), len) }.is_ok()
     }

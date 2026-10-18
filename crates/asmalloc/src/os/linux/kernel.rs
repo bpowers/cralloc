@@ -74,7 +74,7 @@ unsafe fn range_call(
     len: usize,
     arg: usize,
 ) -> Result<(), OsError> {
-    // SAFETY: passed through from the caller. The calls read and write no user memory through
+    // SAFETY: KERNEL-01. passed through from the caller. The calls read and write no user memory through
     // their arguments; what they do to the range itself (madvise may zero it) is what the
     // caller's contract permits.
     result(unsafe {
@@ -87,7 +87,7 @@ unsafe fn range_call(
 }
 
 fn membarrier(command: usize, flags: usize, cpu: u32) -> Result<(), OsError> {
-    // SAFETY: membarrier takes no pointers and changes no memory; the rseq commands only
+    // SAFETY: KERNEL-02. membarrier takes no pointers and changes no memory; the rseq commands only
     // restart sequences in flight, which every sequence must tolerate anyway.
     result(unsafe {
         syscall(
@@ -109,7 +109,7 @@ fn membarrier(command: usize, flags: usize, cpu: u32) -> Result<(), OsError> {
 fn getrandom() -> Option<u64> {
     let mut value = 0u64;
     let buffer: Reg = ptr::from_mut(&mut value).cast();
-    // SAFETY: getrandom writes at most 8 bytes to `buffer`, a live, exclusively borrowed local
+    // SAFETY: KERNEL-05. getrandom writes at most 8 bytes to `buffer`, a live, exclusively borrowed local
     // of 8 bytes, and changes nothing else. `GRND_INSECURE` keeps it from blocking.
     let written = result(unsafe {
         syscall(
@@ -127,7 +127,7 @@ fn getrandom() -> Option<u64> {
 fn write_stderr(mut bytes: &[u8]) {
     while !bytes.is_empty() {
         let buffer: Reg = bytes.as_ptr().cast_mut();
-        // SAFETY: write reads `bytes.len()` bytes from `buffer`, which is a live slice.
+        // SAFETY: KERNEL-04. write reads `bytes.len()` bytes from `buffer`, which is a live slice.
         let written = result(unsafe {
             syscall(
                 nr::WRITE,
@@ -154,13 +154,13 @@ fn write_stderr(mut bytes: &[u8]) {
 ///
 /// As for [`syscall`]; the callers below are getpid, gettid, tgkill and exit_group.
 unsafe fn int_call(number: usize, a: usize, b: usize, c: usize) -> usize {
-    // SAFETY: passed through from the caller.
+    // SAFETY: KERNEL-06. passed through from the caller.
     unsafe { syscall(number, [int(a), int(b), int(c), int(0), int(0), int(0)]) }.addr()
 }
 
 /// Sends SIGABRT to the calling thread, which runs the disposition in force.
 fn raise_sigabrt() {
-    // SAFETY: getpid and gettid take nothing and change nothing. tgkill sends SIGABRT to this
+    // SAFETY: KERNEL-06. getpid and gettid take nothing and change nothing. tgkill sends SIGABRT to this
     // thread, which runs the disposition the process chose or ends it; raising it is `abort`'s
     // purpose.
     unsafe {
@@ -179,7 +179,7 @@ fn default_sigabrt() {
         mask: 0,
     };
     let action: Reg = ptr::from_ref(&default).cast_mut().cast();
-    // SAFETY: rt_sigaction reads one `KernelSigaction` from `action`, a live local, and writes
+    // SAFETY: KERNEL-06. rt_sigaction reads one `KernelSigaction` from `action`, a live local, and writes
     // nothing back (the old-action pointer is null). The process is ending, so changing its
     // SIGABRT disposition is ours to do.
     unsafe {
@@ -198,7 +198,7 @@ fn default_sigabrt() {
 fn unblock_sigabrt() {
     let set: u64 = 1 << (SIGABRT - 1);
     let set: Reg = ptr::from_ref(&set).cast_mut().cast();
-    // SAFETY: rt_sigprocmask reads one signal set from `set`, a live local, and writes nothing
+    // SAFETY: KERNEL-06. rt_sigprocmask reads one signal set from `set`, a live local, and writes nothing
     // back (the old-set pointer is null). Unblocking SIGABRT while aborting is ours to do.
     unsafe {
         syscall(
@@ -215,7 +215,7 @@ fn unblock_sigabrt() {
     }
 }
 
-// SAFETY: each promise of `Os`, against the kernel's documented behaviour (mmap(2), mprotect(2),
+// SAFETY: KERNEL-07. each promise of `Os`, against the kernel's documented behaviour (mmap(2), mprotect(2),
 // madvise(2), munmap(2), membarrier(2)):
 // - `reserve` maps a fresh private anonymous range, which overlaps nothing that exists; the
 //   kernel returns it with the provenance of a new allocation through the `syscall` result
@@ -258,7 +258,7 @@ unsafe impl Os for LinuxOs {
             int(usize::MAX),
             int(0),
         ];
-        // SAFETY: an anonymous mapping at an address of the kernel's choosing replaces nothing
+        // SAFETY: KERNEL-03. an anonymous mapping at an address of the kernel's choosing replaces nothing
         // and reads no user memory (fd -1, offset 0).
         let mapped = result(unsafe { syscall(nr::MMAP, args) })?;
         let Some(mapped) = NonNull::new(mapped) else {
@@ -269,25 +269,25 @@ unsafe impl Os for LinuxOs {
         let tail = span - lead - len;
         // A failed trim leaves an inaccessible range mapped, which costs address space only.
         if lead != 0 {
-            // SAFETY: `mapped..start` is the unused head of the fresh mapping.
+            // SAFETY: KERNEL-03. `mapped..start` is the unused head of the fresh mapping.
             let _ = unsafe { range_call(nr::MUNMAP, mapped, lead, 0) };
         }
         if tail != 0 {
             let end = start.map_addr(|a| a.saturating_add(len));
-            // SAFETY: `end..end + tail` is the unused tail of the fresh mapping.
+            // SAFETY: KERNEL-03. `end..end + tail` is the unused tail of the fresh mapping.
             let _ = unsafe { range_call(nr::MUNMAP, end, tail, 0) };
         }
         Ok(start)
     }
 
     unsafe fn commit(&self, start: NonNull<u8>, len: usize) -> Result<(), OsError> {
-        // SAFETY: the caller passes whole pages of a live reservation; making them writable
+        // SAFETY: KERNEL-03. the caller passes whole pages of a live reservation; making them writable
         // changes no contents and nothing else relies on them being inaccessible.
         unsafe { range_call(nr::MPROTECT, start, len, PROT_READ | PROT_WRITE) }
     }
 
     unsafe fn purge(&self, start: NonNull<u8>, len: usize) -> Result<(), OsError> {
-        // SAFETY: the caller passes whole pages of a live reservation that nothing uses during
+        // SAFETY: KERNEL-03. the caller passes whole pages of a live reservation that nothing uses during
         // the call and whose contents nothing needs, so zeroing them breaks nothing.
         unsafe { range_call(nr::MADVISE, start, len, MADV_DONTNEED) }
     }
@@ -302,19 +302,19 @@ unsafe impl Os for LinuxOs {
             HugePages::Prefer => MADV_HUGEPAGE,
             HugePages::Avoid => MADV_NOHUGEPAGE,
         };
-        // SAFETY: the caller passes whole pages of a live reservation; the advice changes no
+        // SAFETY: KERNEL-03. the caller passes whole pages of a live reservation; the advice changes no
         // contents or permissions.
         unsafe { range_call(nr::MADVISE, start, len, advice) }
     }
 
     unsafe fn wipe_on_fork(&self, start: NonNull<u8>, len: usize) -> Result<(), OsError> {
-        // SAFETY: the caller passes whole pages of a live reservation; the advice changes
+        // SAFETY: KERNEL-03. the caller passes whole pages of a live reservation; the advice changes
         // nothing in this process.
         unsafe { range_call(nr::MADVISE, start, len, MADV_WIPEONFORK) }
     }
 
     unsafe fn unmap(&self, start: NonNull<u8>, len: usize) -> Result<(), OsError> {
-        // SAFETY: the caller passes whole pages of a live reservation that nothing uses again.
+        // SAFETY: KERNEL-03. the caller passes whole pages of a live reservation that nothing uses again.
         unsafe { range_call(nr::MUNMAP, start, len, 0) }
     }
 
@@ -338,7 +338,7 @@ unsafe impl Os for LinuxOs {
         // the parent's, and the stack address and the process id both change across a fork in
         // practice; a collision costs one CPU's cache its drains, not correctness.
         let local = 0u8;
-        // SAFETY: getpid takes nothing and changes nothing.
+        // SAFETY: KERNEL-05. getpid takes nothing and changes nothing.
         let pid = unsafe { int_call(nr::GETPID, 0, 0, 0) };
         let mixed = ptr::from_ref(&local).addr() as u64 ^ (pid as u64).rotate_left(32);
         mixed.wrapping_mul(0x9e37_79b9_7f4a_7c15)
@@ -365,7 +365,7 @@ unsafe impl Os for LinuxOs {
         unblock_sigabrt();
         raise_sigabrt();
         loop {
-            // SAFETY: exit_group takes an integer and ends the process, which is this
+            // SAFETY: KERNEL-06. exit_group takes an integer and ends the process, which is this
             // function's purpose; it is reached only if the signal did not end it.
             unsafe { int_call(nr::EXIT_GROUP, 127, 0, 0) };
         }

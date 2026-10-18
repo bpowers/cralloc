@@ -154,8 +154,9 @@ reading `cpu_id` -1 (`RSEQ_CPU_ID_UNINITIALIZED`,
 `include/uapi/linux/rseq.h`), a negative CPU number, until the crate
 registers it; and a read-only word holding the area's offset from the thread
 pointer, which the linker computes (`@tpoff`, a local-exec reference, valid
-in an executable: System V AMD64 psABI, "Thread-Local Storage"). The
-routines read that word as they read glibc's `__rseq_offset`, by its own
+in an executable: System V AMD64 psABI, "Thread-Local Storage"). In an
+executable that offset is a link-time constant, so the word needs no
+relocation at run time and lives in `.rodata`. The routines read that word as they read glibc's `__rseq_offset`, by its own
 name, which the crate maps `__rseq_offset` to.
 
 The area's section is aligned to `ownAreaAlign`, a page, and the area sits
@@ -199,7 +200,7 @@ def ownRseqArea : OwnArea where
     ".quad 0",
     ".long 0, 0, 0, 0",
     ".popsection",
-    ".pushsection .data.rel.ro.asmalloc_rseq_offset,\"aw\",@progbits",
+    ".pushsection .rodata.asmalloc_rseq_offset,\"a\",@progbits",
     ".balign 8",
     ".globl asmalloc_rseq_offset",
     ".hidden asmalloc_rseq_offset",

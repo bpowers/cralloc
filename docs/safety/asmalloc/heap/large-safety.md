@@ -51,3 +51,5 @@ multiples of the page size (large classes are `q << e` with `2^e` at least 8 KiB
 every geometry that hosts a large class's slot, and runs are whole regions), so the rounded
 size does too, and the range lies in the block, which is committed whole (a carved slot's
 pages, or a committed run). `before < len`.
+
+Reviewed: f41dbf9

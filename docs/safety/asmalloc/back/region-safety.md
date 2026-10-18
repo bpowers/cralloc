@@ -107,11 +107,14 @@ caller holds. When the slot is advised for huge pages it may then move the start
 end down to huge-page boundaries inside the slot (`Layout::huge_interior`), and returns
 without a call if nothing is left: the range purged is a subrange of the one the caller gave
 up, so the precondition still holds for it. It returns `true` only when the range it was
-given went back whole, which BACK-CLASS-03 relies on before marking a slot zero. Its callers and why their ranges are given up are BACK-CLASS-02 (the tail of an
-object that shrank in place) and BACK-CLASS-03 (the part of a moving object already copied)
-in `class-safety.md`. Awaiting review.
+given went back whole, which BACK-CLASS-03 relies on before marking a slot zero. Its
+callers and why their ranges are given up are BACK-CLASS-02 (the tail of an object that
+shrank in place) and BACK-CLASS-03 (the part of a moving object already copied) in
+`class-safety.md`.
 
 **Review.** 2026-10-17, fresh adversarial reviewer: the protocol was accepted; three gaps were
 found in the argument: exclusivity under a double free, the huge-page part not covered by the
 cited proof, and no explored test of a carve or a second purger racing a purge. All three are
 addressed above; the same reviewer checked the fixes and accepted them.
+
+Reviewed: 415b07e

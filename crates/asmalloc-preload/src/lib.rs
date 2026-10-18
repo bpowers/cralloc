@@ -25,7 +25,8 @@ mod background;
 
 // Only the C names. The C++ operators stay the C++ runtime's, which calls this `malloc` and
 // `free`: exporting some of them without the throwing `new` forms is unsound when another
-// library defines the operators (design: "Interfaces", C++).
+// library defines the operators (design: "Interfaces", C++). Replacing the C library's
+// allocator this way is PRELOAD-01.
 asmalloc::export_c_abi!();
 
 // The library has no Rust allocations of its own, but cargo unifies features across the
@@ -50,6 +51,7 @@ fn panic(_: &core::panic::PanicInfo) -> ! {
 /// that name out of the library's exports. Exported, it would take the place of the real one
 /// for every Rust shared library loaded after this one that looks its own up dynamically
 /// (`librustc_driver` does), and their panics would abort instead of unwinding.
+// PRELOAD-02: why exporting this symbol, and binding the personality name to it, is sound.
 #[unsafe(no_mangle)]
 extern "C" fn asmalloc_preload_no_unwinding() -> ! {
     asmalloc::abort("asmalloc-preload: unwinding is not supported")

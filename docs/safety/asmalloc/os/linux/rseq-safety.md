@@ -56,3 +56,5 @@ the thread's signal mask is the caller's to do.
 whose size is passed. The kernel ignores `SIGKILL` and `SIGSTOP` in the set. The only caller is
 the destructor that retires an exiting thread's area (AREA-05), which blocks signals for two
 system calls and restores the mask it found, so code that runs after it sees the mask it had.
+
+Reviewed: f41dbf9
