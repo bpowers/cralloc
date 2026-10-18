@@ -23,9 +23,13 @@ process light.
   `main`.
 - Merge early and fix forward. A semantic conflict or a regression on `main` is something to
   fix next, not a reason to hold work back.
-- The gate is formatting, lints, unit tests and the quick proofs, about a minute in total.
-  Run it before asking for a merge. Never add a slow step to it. Benchmarks and long proofs
-  run on demand.
+- The gate (`scripts/gate`) is formatting, lints, a check that generated files were not
+  edited by hand, a check that safety comments and ledger entries name each other, and the
+  tests and proofs that take a few seconds each. It runs in well under a minute. Run it
+  before asking for a merge, and never add a slow step to it: a test or proof that takes
+  more than a few seconds is marked slow and runs with `scripts/gate --all`, which you run
+  before asking to merge a change to shared types or protocols. Benchmarks, the Lean check,
+  TLA+, Miri, fuzzing and the preload checks run on demand.
 - The machine is shared. Stop only processes you started, by process ID; never kill by
   name (`pkill`, `killall`), since another teammate may be running the same tool.
 - Everything that runs the allocator runs under a memory cap. An uncapped test once took
