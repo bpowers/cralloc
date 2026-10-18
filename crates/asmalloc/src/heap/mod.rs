@@ -65,7 +65,7 @@ pub(crate) struct Heap<O: Os> {
     depot: Depot,
 }
 
-/// A block, and the bytes of it the caller may use: the whole slot or run.
+/// A block, and the bytes of it the caller may use: its usable size (`Heap::usable_size`).
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct Grant {
     pub(crate) ptr: NonNull<u8>,
