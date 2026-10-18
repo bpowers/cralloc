@@ -642,22 +642,25 @@ a judgement after 32 slots misjudged a strided batch over 32 summary words (16 K
   per level, which at 8 MiB and beyond paid nearly every slot generically.
 
 Every payment reads before it sets, as modelled (`Look` at level 1, the model's `Up` above it),
-and nothing is reordered across the leaf bit it answers for. An explorer runs the wide path
+and nothing is reordered across the leaf bit it answers for. In the model each free whose word
+was empty now chooses whether to look, as the code mixes them on one tree (scattered launders
+look; grouped launders and single frees do not): `Summary_look`, `_look_deep` and
+`_look_crash` pass with the mix, in about 23 minutes together. An explorer runs the wide path
 against claims and forks (`wide_direct_frees_*`), and a unit test frees a batch over 1024
 summary words and takes it back.
 
-Bitmap sweep, 8-byte class, per object, three rounds, medians:
+Bitmap sweep, 8-byte class, per object, three rounds, medians (after the stack changes below):
 
 | bitmap | order | before cyc | before ins | after cyc | after ins |
 |---|---|---:|---:|---:|---:|
-| 16K | scatter | 30.7 | 64.0 | 30.7 | 62.3 |
-| 16K | stride | 29.4 | 63.6 | 29.5 | 62.0 |
-| 512K | scatter | 74.3 | 173.4 | 54.7 | 124.2 |
-| 512K | stride | 76.8 | 173.8 | 53.4 | 122.3 |
-| 8M | scatter | 133.4 | 353.1 | 102.2 | 258.8 |
-| 8M | stride | 77.5 | 174.3 | 59.0 | 124.0 |
-| 64M | scatter | 316.4 | 412.7 | 255.6 | 291.6 |
-| 64M | stride | 221.9 | 174.3 | 142.5 | 124.0 |
+| 16K | scatter | 30.6 | 64.0 | 30.6 | 61.7 |
+| 16K | stride | 29.4 | 63.6 | 29.2 | 61.4 |
+| 512K | scatter | 74.3 | 173.4 | 54.4 | 124.0 |
+| 512K | stride | 76.8 | 173.8 | 53.4 | 122.0 |
+| 8M | scatter | 133.1 | 352.6 | 101.8 | 267.2 |
+| 8M | stride | 77.6 | 174.3 | 58.7 | 123.7 |
+| 64M | scatter | 329.3 | 413.1 | 268.4 | 287.9 |
+| 64M | stride | 216.6 | 174.7 | 139.4 | 123.7 |
 
 dTLB and cache misses per object are unchanged between the builds at every size; in this bench
 a fill empties the words between rounds, so many slots find their summary word empty and pay a
@@ -666,25 +669,43 @@ without the level-2 table, measured 164, 204 and 210 instructions at 512 KiB, 8 
 better past 8 MiB, worse at the size a program with a few million objects of a class has, so
 not kept.
 
-backbench, a magazine a call, five rounds: unchanged within 0.2 cycles in every case and class
-(16-byte scatter 27.6 to 27.5 cycles, 56.0 to 54.0 instructions; 4096-byte cases 0 to 1.4
-instructions more).
+backbench, a magazine a call, five rounds: unchanged or slightly better in every case and class
+(16-byte scatter 27.2 to 26.9 cycles, 55.5 to 52.8 instructions; dense cases within 0.2 cycles;
+the 4096-byte class 2 instructions fewer).
+
+**A scattered head and a dense tail** (`headtail`: each magazine's first 24 slots swapped with
+slots anywhere in the pool) is judged scattered and takes a locked OR per slot of its tail.
+Against the grouped path before the direct path (550d70c, the same harness), 16-byte class:
+22.4 cycles and 70.9 instructions there, 27.1 and 52.7 here: 4.7 cycles a slot more. Not worth
+a second judgement.
+
+**Stack.** The slow paths run on whatever stack called `free`. The direct path had grown the
+launder's frame: its tables beside a map sized for a whole magazine, and the map moved onto a
+frame of its own when the batch turned direct. `workload stack` (`bench/workloads/src/stack.rs`,
+release build) paints a thread's stack, frees a million objects in random order and then in
+order, and reports the deepest byte written below the loop's frame; `bound=BYTES` makes it fail
+above a bound. Peak: 16223 bytes at d56e3bf; 6151 now, with the map and the direct path in one
+place (`Spill`), the map flushed where it lies and holding at most 63 words, and the upward
+table at 32 places. The deepest frames: `Cache::launder_held` with the launder inlined, 4280
+bytes (the window, 1 KiB; the map or the direct path's tables, about 2.3 KiB), `Words::flush`
+856 when the map is used, `Bound::free_slow` 296. A batch that meets more than 63 words without
+being judged scattered now flushes its map, and a slot on both sides of that flush is caught by
+its second OR, as for a scattered batch.
 
 Workloads, M cycles / M instructions, five interleaved rounds, medians:
 
 | | before | after | mimalloc | jemalloc |
 |---|---:|---:|---:|---:|
-| BTreeMap 1M drop | 571 / 632 | 567 / 633 | 532 / 280 | 632 / 776 |
-| JSON 32 MiB drop | 878 / 1891 | 846 / 1892 | 731 / 1286 | 1674 / 2786 |
-| Box tree depth 20 drop | 421 / 1211 | 417 / 1211 | 369 / 830 | 1316 / 2457 |
-| BTreeMap 8M (reps=2) drop | 2939 / 3357 | 2670 / 2942 | 2296 / 896 | 2980 / 2554 |
-| BTreeMap 8M build | 25411 / 17408 | 25926 / 17831 | 26728 / 18643 | 28723 / 19034 |
+| BTreeMap 1M drop | 570 / 632 | 563 / 630 | 525 / 280 | 630 / 776 |
+| JSON 32 MiB drop | 834 / 1891 | 826 / 1889 | 698 / 1286 | 1663 / 2770 |
+| Box tree depth 20 drop | 421 / 1211 | 419 / 1209 | 371 / 830 | 1324 / 2457 |
+| BTreeMap 8M (reps=2) drop | 2910 / 3346 | 2622 / 2931 | 2234 / 896 | 2947 / 2555 |
+| BTreeMap 8M, cycles/entry | 1817.3 | 1730.2 | 1701.4 | 1963.9 |
 
 The narrow drops did not move. BTreeMap at 8M entries (about a million live objects in each of
 its busiest classes, a gigabyte resident) is the wide case in a workload: its drop runs 12%
-fewer instructions and 9% fewer cycles, ahead of jemalloc in cycles and behind it in
-instructions; mimalloc is 14% faster. Its build, which this change does not touch, moved 2%
-between builds.
+fewer instructions and 10% fewer cycles, ahead of jemalloc in cycles and behind it in
+instructions; mimalloc is 15% faster at the drop and 2% over the whole job.
 
 # A depot per cache domain (2026-10-18)
 
