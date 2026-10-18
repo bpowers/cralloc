@@ -54,4 +54,4 @@ through this block.
 **Review.** 2026-10-17, fresh adversarial reviewer: accepted (register convention, clobbers,
 `preserves_flags`, `nostack` and the red zone, memory, pointer-typed registers).
 
-Reviewed: f41dbf9
+Reviewed: 415b07e

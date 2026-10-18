@@ -112,3 +112,5 @@ that thread in `register`. Signals are blocked (RSEQ-04) around the unregistrati
 store of `RETIRED`, so no handler can find `cpu_id` -1 in between and register again; if
 unregistering fails (it does not, as the arguments are the registration's), the area is left as
 it is.
+
+Reviewed: 415b07e

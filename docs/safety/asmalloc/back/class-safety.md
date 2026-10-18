@@ -215,3 +215,5 @@ returned; and `resize_in_place`, on the last piece of a growing block's first `o
 Any bit pattern is a valid `u8` and a valid `u64`, and `align_to` places in its middle part
 only whole, aligned `u64`s within the slice. Reading a page that was never written maps the
 kernel's shared zero page; it changes no contents.
+
+Reviewed: 415b07e
