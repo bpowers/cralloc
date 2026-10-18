@@ -639,9 +639,11 @@ pub(crate) fn unadvise<H: Host>(host: &H, region: RegionId, slot: u32) {
 /// Returns `len` bytes at `from` bytes into slot `slot` to the OS, for a caller that holds
 /// the slot and no longer needs them: the tail of an object that shrank in place, or the part
 /// of a moving object already copied. Both are page multiples and the range lies inside the
-/// slot. No bitmap changes: the slot stays allocated, and its clean and zero bits describe it
-/// only while it is free. In a slot advised for huge pages the range is first trimmed to
-/// whole huge pages where it ends inside one. `true` only if the whole range went back:
+/// slot. It writes no bitmap: the slot stays allocated. A caller told that the whole range
+/// went back may mark its pages clean (`mark_clean`), which is then true of them; the zero
+/// bit describes a whole free slot, and only `mark_purged` sets it for a held one. In a slot
+/// advised for huge pages the range is first trimmed to whole huge pages where it ends inside
+/// one. `true` only if the whole range went back:
 /// `false` if trimming left part of it, or all, resident, in a huge-page part, which is purged
 /// only in whole huge pages (nothing is done), or if the OS refused. A caller that marks the
 /// slot zero afterwards relies on that.

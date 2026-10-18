@@ -523,8 +523,11 @@ impl<'a, O: Os> Back<'a, O> {
     ///
     /// The size is recorded first: only the owner asks for a live object's size, and the owner
     /// is here. The pages were the live object's, so they were never in a retained count and
-    /// none changes; no bitmap changes either. If the object later grows back in place the
-    /// pages read as zero, which is as good as the stale bytes a grow may otherwise expose.
+    /// none changes, and no leaf or zero bit changes. When the whole tail went back its pages
+    /// are marked clean (`region::mark_clean`), so the free that follows charges only what the
+    /// block kept; a grow in place clears them again (`region::cover`). If the object later
+    /// grows back in place the pages read as zero, which is as good as the stale bytes a grow
+    /// may otherwise expose.
     ///
     /// There is no hysteresis: every shrink that crosses a page boundary is one system call,
     /// so a program that shrinks a block a page at a time pays a call each time, as it does
