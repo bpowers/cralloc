@@ -1,0 +1,32 @@
+#!/usr/bin/env bash
+# Checks that the assembly Lean emits into the allocator crate was not edited by hand: every
+# file under crates/asmalloc/src/front/generated/ must match the checksum recorded in
+# crates/asmalloc/src/front/generated.sha256, and no file may be added or removed.
+#
+# The manifest is written by `scripts/generated-check --write`, which lean/scripts/check.sh runs
+# when it has passed: the real check (that the files are what Lean generates from proved
+# routines) takes minutes and runs on demand; this one takes milliseconds and runs in the gate.
+#
+# Usage: scripts/generated-check [--write]
+set -euo pipefail
+cd "$(dirname "${BASH_SOURCE[0]}")/.."
+dir=crates/asmalloc/src/front/generated
+manifest=crates/asmalloc/src/front/generated.sha256
+
+sums() {
+  find "$dir" -type f -print0 | LC_ALL=C sort -z | xargs -0 sha256sum
+}
+
+case "${1-}" in
+  --write) sums > "$manifest" ;;
+  "")
+    if ! diff -u "$manifest" <(sums) >&2; then
+      echo "generated-check: the files under $dir differ from $manifest." >&2
+      echo "They are emitted by lean/Emit.lean and must not be edited by hand. After" >&2
+      echo "regenerating them, run lean/scripts/check.sh, which rewrites the manifest when" >&2
+      echo "it passes." >&2
+      exit 1
+    fi
+    ;;
+  *) echo "usage: scripts/generated-check [--write]" >&2; exit 2 ;;
+esac
