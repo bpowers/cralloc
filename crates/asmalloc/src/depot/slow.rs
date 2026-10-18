@@ -166,7 +166,11 @@ impl<'a, O: Os, R: Routines, S: Source> Cache<'a, O, R, S> {
                 break;
             }
         }
-        for slot in (level < capacity).then_some(1..=level).into_iter().flatten() {
+        for slot in (level < capacity)
+            .then_some(1..=level)
+            .into_iter()
+            .flatten()
+        {
             if let Some(object) = NonNull::new(magazine.object(capacity - level + slot)) {
                 magazine.set_object(slot, object);
             }
