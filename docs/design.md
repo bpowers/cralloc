@@ -277,9 +277,10 @@ asked for (see "Large objects").
 Each CPU has a slab. Its hot part is an array with one 8-byte word per small class; a
 colder part holds the CPU's spare magazines and counters. The slabs are a static array with
 an entry for every CPU number the OS can produce (8192 on x86-64), so the address of a slab
-word is the CPU number shifted and added to a link-time constant, with no pointer to load.
-Untouched slabs cost no memory. A routine compares the CPU number with the array length and
-takes the slow path if it is out of range. That one compare keeps a thread with no rseq
+word is the CPU number shifted and added to the address of the class's word in slab 0, a
+link-time constant plus 8 times the class, with no pointer to load. Untouched slabs cost no
+memory. A routine compares the CPU number with the array length and takes the slow path if
+it is out of range. That one compare keeps a thread with no rseq
 registration, which reads a negative number, away from every slab, and it means memory
 safety does not depend on what the OS writes there.
 
@@ -311,28 +312,33 @@ class, the slab word is zero, a marker, or the address of slot `s` of a magazine
 class that nothing else refers to, with slots 1 to `s - 1` holding pointers to distinct free
 objects of that class that appear nowhere else.
 
-Allocation of an object whose class is a compile-time constant has this shape (the exact
-instructions are chosen by measurement and may change):
+A routine names no class. It is given the address of its class's word in slab 0, and the
+class's mask; allocation has this shape (the exact instructions are chosen by measurement and
+may change):
 
 ```asm
-    mov   rdx, [rip + __rseq_offset@GOTPCREL]
-    mov   rdx, [rdx]                  ; where glibc put this thread's rseq area
-    lea   r10, [rip + descriptor]
-    mov   fs:[rdx + 8], r10           ; arm: tell the OS which sequence we are in
+                                      ; rdi: SLABS + CLASS*8, esi: the class's mask
+    mov   r10, [rip + __rseq_offset@GOTPCREL]
+    mov   r10, [r10]                  ; where glibc put this thread's rseq area
+    lea   r11, [rip + descriptor]
+    mov   fs:[r10 + 8], r11           ; arm: tell the OS which sequence we are in
 start:
-    mov   r8d, fs:[rdx + 4]           ; CPU number
+    mov   r8d, fs:[r10 + 4]           ; CPU number
     cmp   r8d, SLAB_COUNT             ; out of range, or no registration
     jae   slow
     shl   r8, SLAB_SHIFT
-    lea   r9, [rip + SLABS + CLASS*8]
-    mov   rcx, [r9 + r8]              ; next free slot of the loaded magazine
-    test  ecx, MASK                   ; no magazine, or empty?
+    mov   rcx, [rdi + r8]             ; next free slot of the loaded magazine
+    test  ecx, esi                    ; no magazine, or empty?
     jz    slow
     mov   rax, [rcx - 8]              ; the object
     lea   rcx, [rcx - 8]
-    mov   [r9 + r8], rcx              ; commit
+    mov   [rdi + r8], rcx             ; commit
 end:
 ```
+
+When the class is a compile-time constant, the caller's computation of the two inputs folds
+to a `lea` and a `mov`; when it is not, to a compare and a load from a table of classes by
+size.
 
 An executable can read `__rseq_offset` with one load instead of two, because the linker
 gives it its own copy of the variable; that saves a cycle per pair, and a cargo feature
@@ -363,10 +369,14 @@ emit one that breaks them:
 - the slow path is out of line.
 
 Each routine is generated in two forms. The inlined form is an `asm!` block in an
-`#[inline]` function with the class and mask as constants. It becomes part of `__rust_alloc`
-in the user's binary and, with LTO, of its callers. The out-of-line form takes the class in
-a register and loads the mask from a per-class table; the C entry points use it, as do Rust
-callers whose layout is not constant.
+`#[inline]` function that takes the word's address and the mask in registers. It becomes part
+of `__rust_alloc` in the user's binary and, with LTO, of its callers, whether their layouts are
+constant or not. The out-of-line form takes the word's address in a register and reads the mask
+from a table placed after the slabs at a fixed distance from the word, one entry per possible
+class byte. The table is zero until the first slow path writes it, and a zero mask fails both
+tests, so it needs no initialization check, and every byte that is not a small class sends a
+free by address to the slow path. The C entry points use it, ending their own routines with
+the same steps.
 
 ### Slow path: exchanging magazines
 
@@ -407,7 +417,8 @@ and pops intervene during one attempt.
 Exchanging through the depot is how objects move between CPUs. A thread that only frees
 fills magazines and pushes them; a thread that only allocates pops them. The cost is two
 atomic instructions per magazine and no work per object, however frees and allocations are
-spread across threads. Each class has a target for the bytes held in its depot stack.
+spread across threads. Each class has a target for the bytes held in its depot stack, and
+a stack gives up whatever it did not need during an interval (see "Returning memory").
 
 ### Back end: regions and bitmaps
 
@@ -438,39 +449,83 @@ each region and the high end drains, which is where purging starts.
 ### Heartbeat
 
 Every entry to a slow path does a bounded amount of maintenance before it returns: at most
-one magazine laundered, one step of purging, and one look for an idle cache. There is no
-background thread and no timer. Maintenance happens at a rate set by allocation activity, in
-units small enough that no single call pays much. This is mimalloc's pacing applied to a
-per-CPU design.
+one magazine laundered, one step of purging, one look at a class of its own slab, and one
+look for an idle cache. A large allocation or free counts as a slow path. There is no
+background thread and no timer. The work is done in units small enough that no single call
+pays much. This is mimalloc's pacing applied to a per-CPU design.
 
-Laundering is not the common case. Objects circulate through magazines and the depot, and
-reach the bitmaps only when a class's depot stack is over its target, one magazine per
-heartbeat.
+How often a slow path runs depends on how hard the process allocates, so anything that
+should happen at a rate in time reads the CPU's cycle counter, which costs no system call,
+and acts once about a second has passed since it last did. "An interval" below means that.
+
+Nothing runs on the fast path, so a thread whose allocations and frees are all served by
+its loaded magazines never runs a heartbeat. Other threads cover for it: any slow path
+maintains the shared structures, and the idle check drains a slab that has had no slow path
+for an interval, which sends that CPU to its slow path. Only a process in which every thread
+stays inside its magazines has no heartbeat at all. It keeps what it held when it went
+quiet: the free memory not yet purged, its parked objects, and the pages those pin. That
+lasts until a slow path runs or the program calls `collect`.
+
+Objects mostly circulate through magazines and the depot without touching the bitmaps. They
+reach the bitmaps when a class's depot stack is over its target, and through the rules under
+"Returning memory" that keep parked objects from pinning the heap.
 
 ### Returning memory and huge pages
 
 A huge-page fault delivers 512 pages for about a fifth of the per-page price of small
-faults, and a page returned too early is faulted straight back. Four rules follow.
+faults, and a page returned too early is faulted straight back. Against that, memory the
+program has stopped using must go back to the OS within seconds, or a process keeps its peak
+for ever. Five rules follow.
 
 - **Purge late and from the top.** Purging claims the bits of every object that overlaps a
   range of pages, exactly as an allocation would. If all of them were free it returns the
   pages with `madvise(MADV_DONTNEED)`. Either way it then releases the bits. Nothing else
-  can allocate the range while it is claimed, so no lock is needed. Purging starts at the
-  high end of a region and is rate limited.
-- **Retained memory is capped.** The back end counts the free memory it holds that is still
-  resident, updating the count once per laundered magazine and per large free. When the
-  count passes a cap, the call that pushed it there purges wholly free pages until it is
-  back under, large objects first. Two things lie outside the cap and are bounded
-  separately: free objects on pages that also hold live ones, which is fragmentation, and
-  objects parked in magazines, spares and the depot, which the spare budgets and depot
-  targets limit. A program that frees a great deal and then goes quiet keeps at most the
-  cap plus those; `malloc_trim` and its Rust equivalent release what can be released.
-- **Small pages while a class is small, huge pages once it is large.** A region starts
-  marked against transparent huge pages, so a lightly used class costs only the 4 KiB pages
-  it touches. Once a class has carved more than a threshold, the rest of its region is
-  marked for huge pages and further growth faults 2 MiB at a time.
+  can allocate the range while it is claimed, so no lock is needed. Once an interval a pass
+  starts at the high end of the heap and returns up to a quarter of the retained memory, in
+  bounded steps spread over the heartbeats that follow. Fills take the lowest addresses, so
+  what is being reused sits at the bottom and is mostly left alone, and what is not reused
+  is gone within several intervals.
+- **Retained memory is counted and capped.** The back end keeps an estimate of the free
+  memory it holds that is still resident. Frees and laundered magazines raise it; only
+  reuse and purging lower it. It is never reset on the grounds that a pass found nothing
+  to purge: in a storm of frees every page still has a live neighbour for a moment, and a
+  count that forgets those bytes stops bounding anything. The call that pushes the count
+  past a cap purges toward it, within a bound on its own work, and the clocked pass does
+  the rest. Free objects on pages that also hold live ones cannot be purged; that is
+  fragmentation, and it stays counted. Freed large slots have a separate and much smaller
+  cap, checked at the free: a freed large slot can serve only its own class, and one call
+  returns it. Objects parked in magazines, spares and the depot are not free and are not
+  in the count; the next rule handles them.
+- **Parked objects do not pin the heap.** An object parked in a magazine holds its page as
+  surely as a live one, and parked objects are a random sample of wherever the heap has
+  been. Three rules keep them moving back to the bitmaps, where the next fill takes the
+  lowest free addresses instead.
+  - A magazine does not stay loaded for more than an interval. A slow path looks at one
+    class of its own slab in turn. If the magazine loaded there has been loaded for an
+    interval, the slow path takes it with the routine that replaces a magazine and launders
+    it, with that class's spares. This needs no fence, because the slab is the thread's
+    own. A class in use pays one refill per interval. A class that fell out of use on a CPU
+    that is still busy is emptied, which the idle check, being per slab, cannot do.
+  - A depot stack sheds what it did not need. The depth a class's stack never fell below
+    during an interval is laundered, one magazine per heartbeat, whichever class the slow
+    path was serving.
+  - One retiring full magazine in every few is laundered instead of kept, so objects in
+    steady circulation are gradually replaced by the lowest free ones.
+- **Huge pages only where objects are dense.** A region starts marked against transparent
+  huge pages, so a lightly used class costs only the 4 KiB pages it touches. Once a class
+  of small objects has carved a large amount, the rest of its region is marked for huge
+  pages and further growth faults 2 MiB at a time. Classes of larger objects never are: a
+  large block is often touched sparsely, and with huge pages each page touched would cost
+  2 MiB.
 - **Never split a huge page.** In the huge-page part of a region, purging works only in
-  whole 2 MiB units.
+  whole 2 MiB units. That includes the unit holding the watermark, whose upper part was
+  made resident by the fault and never allocated: a purge first carves the rest of that
+  unit and frees it, counting it as retained, so the whole unit is ordinary free memory
+  that it can claim like any other.
+
+`collect`, and `malloc_trim` in C, do all of this at once without waiting for the clock:
+drain every slab in use, launder every depot stack, and purge what is free. A program that
+knows it is idle calls it to return what a quiet process would otherwise keep.
 
 Memory at or above the watermark is zero, and so is purged memory. For large classes a
 second bitmap records which free objects are still zero, so zeroed allocation skips the
@@ -500,6 +555,12 @@ A Rust resize stays in place only when the caller's next `dealloc` will still fi
 class. For a small object that means the new size maps to the same class. For a large object
 it means the new size is still large and fits the slot. Anything else moves the object.
 
+Shrinking gives memory back. A large object that shrinks in place returns the whole pages
+past its new size at once: nothing else can use them while it holds the slot, so otherwise
+they would stay resident until it is freed. One that shrinks to under a quarter of its slot
+moves instead, because a region has few slots of a large class, and a slot should not be
+held by an object a small fraction of its size.
+
 ### Interfaces
 
 - **`GlobalAlloc`** for `#[global_allocator]`. `dealloc` of a small object is the free
@@ -507,16 +568,35 @@ it means the new size is still large and fits the slot. Anything else moves the 
 - **`Allocator`**, on Rust versions that have it, through a zero-sized handle. All handles
   share the one heap. `allocate` returns the full class size. A zero-size request gets a
   dangling, aligned pointer and no block.
-- **C ABI**: `malloc`, `calloc`, `realloc`, `free`, the aligned-allocation family,
-  `malloc_usable_size`, `malloc_trim` and the sized frees. These are exported when a cargo
-  feature asks for them, and always by the `LD_PRELOAD` library. `free(p)` reads the class
-  from the address table and joins the same path as a Rust free. A pointer outside the heap
-  is a caller's bug and aborts the process. The sized frees also take the class from the
-  address, since a wrong size from C would otherwise corrupt the heap. `malloc_usable_size`
-  reports the class size of a small object and, for a large one, its recorded size rounded
-  up to a page. `realloc(p, 0)` frees `p` and
-  returns null, as glibc does. This layer sets `errno` through the C library's own
-  accessor; it is the only part of asmalloc that refers to a C library.
+- **C ABI**: `malloc`, `calloc`, `realloc`, `reallocarray`, `free`, the aligned-allocation
+  family, `malloc_usable_size`, `malloc_trim` and the sized frees: every function glibc
+  exports that takes or returns a block. `free(p)` reads the class from the address table
+  and joins the same path as a Rust free. A pointer outside the heap is a caller's bug and
+  aborts the process. `malloc_usable_size` reports the class size of a small object and,
+  for a large one, its recorded size rounded up to a page. Callers write into the room
+  they are told they have, so a `realloc` that moves a block copies that much and `calloc`
+  zeroes that much.
+  `realloc(p, 0)` frees `p` and returns null, as glibc does.
+- **C++**: the replaceable forms of `operator new` and `operator delete`, so that C++
+  allocates without a detour through `malloc` and sized deletes arrive with their size. A
+  failing `new` runs the installed new-handler until none is left; then a nothrow form
+  returns null and a throwing form raises `std::bad_alloc`. An exception cannot unwind
+  through the allocator's Rust frames, so the throwing forms are generated routines that on
+  failure jump to the C++ runtime's own throw function with nothing of ours on the stack.
+- **A size from C or C++ is a prediction, never trusted.** A sized free or delete may use
+  the size to find the class early, but the class from the address is the truth, and a
+  wrong size (a derived object deleted through a base pointer, say) behaves exactly like a
+  free with no size.
+
+A macro exports the C names, and another the C++ names, from the crate that invokes it; a
+cargo feature does the same, and the `LD_PRELOAD` library always exports both. A feature
+alone would not do: cargo unifies features across a workspace, and every test binary would
+then replace `malloc`. The C layer sets `errno` through the C library's accessor and finds
+the new-handler and the throw function by symbol lookup; these are the only parts of
+asmalloc that refer to a C library or a C++ runtime.
+- **`collect`**, a Rust function and what `malloc_trim` calls: return everything that can be
+  returned now (see "Returning memory"). `inspect` reports where the heap's memory is,
+  without changing it.
 
 The recommended build is `lto = "fat"`. Thin LTO also inlines the fast path into dependency
 crates, but it silently stops doing so when the crate that declares `#[global_allocator]`

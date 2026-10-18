@@ -40,8 +40,8 @@ fn library() -> PathBuf {
     .clone()
 }
 
-/// Compiles `tests/programs/<name>.c` once per run, and returns the executable.
-fn program(name: &str) -> PathBuf {
+/// Compiles `tests/programs/<file>` (C, or C++ for `.cpp`) and returns the executable.
+fn program(file: &str) -> PathBuf {
     static DIR: OnceLock<PathBuf> = OnceLock::new();
     let dir = DIR.get_or_init(|| {
         let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("preload-programs");
@@ -50,15 +50,21 @@ fn program(name: &str) -> PathBuf {
     });
     let source = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("tests/programs")
-        .join(format!("{name}.c"));
+        .join(file);
     // Each test compiles into its own file, so tests running at once do not race on one.
-    let exe = dir.join(format!("{name}-{:?}", std::thread::current().id()));
-    let status = Command::new("cc")
-        .args(["-O2", "-pthread", "-ldl", "-o"])
+    let exe = dir.join(format!("{file}-{:?}", std::thread::current().id()));
+    let (compiler, standard) = if file.ends_with(".cpp") {
+        ("c++", "-std=c++20")
+    } else {
+        ("cc", "-std=gnu17")
+    };
+    let status = Command::new(compiler)
+        .args(["-O2", standard, "-pthread", "-o"])
         .arg(&exe)
         .arg(&source)
+        .arg("-ldl")
         .status()
-        .expect("a C compiler (cc) is installed");
+        .expect("a C and C++ compiler (cc, c++) is installed");
     assert!(status.success(), "compiling {}", source.display());
     exe
 }
@@ -91,7 +97,7 @@ fn same_with_and_without(make: impl Fn() -> Command) -> String {
 
 #[test]
 fn the_library_serves_malloc() {
-    let exe = program("interposed");
+    let exe = program("interposed.c");
     let out = run(true, &mut Command::new(&exe));
     assert_eq!(
         String::from_utf8_lossy(&out.stdout).trim(),
@@ -116,7 +122,7 @@ fn a_shell_pipeline_prints_the_same() {
 
 #[test]
 fn threads_hand_blocks_to_each_other() {
-    let exe = program("threads");
+    let exe = program("threads.c");
     let out = same_with_and_without(|| {
         let mut c = Command::new(&exe);
         c.args(["3", "8", "3000"]);
@@ -127,7 +133,7 @@ fn threads_hand_blocks_to_each_other() {
 
 #[test]
 fn threads_fork_while_others_allocate() {
-    let exe = program("forks");
+    let exe = program("forks.c");
     let out = same_with_and_without(|| {
         let mut c = Command::new(&exe);
         c.args(["4", "5"]);
@@ -138,7 +144,7 @@ fn threads_fork_while_others_allocate() {
 
 #[test]
 fn a_process_without_rseq_is_served() {
-    let exe = program("threads");
+    let exe = program("threads.c");
     let out = same_with_and_without(|| {
         let mut c = Command::new(&exe);
         c.args(["2", "4", "2000"])
@@ -151,7 +157,7 @@ fn a_process_without_rseq_is_served() {
 #[test]
 fn a_pointer_that_is_not_a_block_aborts() {
     use std::os::unix::process::ExitStatusExt;
-    let exe = program("foreign");
+    let exe = program("foreign.c");
     for args in [&[][..], &["interior"][..]] {
         let out = run(true, Command::new(&exe).args(args));
         assert_eq!(out.status.signal(), Some(6), "{:?}", out.status);
@@ -162,4 +168,65 @@ fn a_pointer_that_is_not_a_block_aborts() {
         );
         assert!(out.stdout.is_empty());
     }
+}
+
+/// The four throwing forms of `new`, which the C++ runtime keeps so that it can throw
+/// `std::bad_alloc`; the library exports the other 16 forms.
+const THROWING_NEW: [&str; 4] = [
+    "_Znwm",
+    "_Znam",
+    "_ZnwmSt11align_val_t",
+    "_ZnamSt11align_val_t",
+];
+
+#[test]
+fn every_cxx_operator_form_meets_its_cases_and_binds_where_it_should() {
+    let exe = program("cxx_operators.cpp");
+    let out = same_with_and_without(|| Command::new(&exe));
+    assert!(!out.contains("FAIL"), "{out}");
+    assert_eq!(
+        out.lines().filter(|l| l.starts_with("ok ")).count(),
+        9,
+        "{out}"
+    );
+    // The dynamic loader's own report of where each operator the program calls was bound.
+    let lib = library();
+    let traced = run(true, Command::new(&exe).env("LD_DEBUG", "bindings"));
+    let report = String::from_utf8_lossy(&traced.stderr);
+    let to_lib = format!("to {} ", lib.display());
+    let mut ours = std::collections::BTreeSet::new();
+    let mut runtime = std::collections::BTreeSet::new();
+    for line in report.lines() {
+        let Some(at) = line.find("symbol `") else {
+            continue;
+        };
+        let name = &line[at + "symbol `".len()..];
+        let name = &name[..name.find('\'').unwrap_or(name.len())];
+        if !["_Znw", "_Zna", "_Zdl", "_Zda"]
+            .iter()
+            .any(|p| name.starts_with(p))
+        {
+            continue;
+        }
+        if THROWING_NEW.contains(&name) {
+            assert!(line.contains("libstdc++.so"), "{line}");
+            runtime.insert(name.to_owned());
+        } else {
+            assert!(line.contains(&to_lib), "{line}");
+            ours.insert(name.to_owned());
+        }
+    }
+    assert_eq!(ours.len(), 16, "{ours:?}");
+    assert_eq!(runtime.len(), 4, "{runtime:?}");
+}
+
+#[test]
+fn a_throwing_new_that_fails_throws_a_catchable_bad_alloc() {
+    let exe = program("cxx_operators.cpp");
+    let out = same_with_and_without(|| {
+        let mut c = Command::new(&exe);
+        c.arg("throw");
+        c
+    });
+    assert_eq!(out.trim(), "caught bad_alloc");
 }

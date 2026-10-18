@@ -20,8 +20,14 @@ What the preload setting adds:
   and reads or tunes only glibc's own heap, which then stays empty. `__libc_malloc` and its
   siblings are glibc's internal aliases; no binary or library on the reference host imports
   them (census of `/usr/bin`, `/usr/lib64` and `/usr/libexec`), and glibc's own code calls the
-  interposable names. libstdc++'s `operator new` and `delete` in all their forms call `malloc`,
-  `aligned_alloc` and `free`, so C++ needs nothing more.
+  interposable names.
+- **C++.** The library also exports 16 of the 20 replaceable C++ allocation operators: the
+  nothrow `new` forms and every `delete` (`asmalloc::export_cxx_abi!`, CXX-EXPORT-01 in
+  `docs/safety/asmalloc/c/cxx-safety.md`). libstdc++ keeps the four throwing forms of `new`,
+  which allocate with the library's `malloc` and `aligned_alloc` and can throw
+  `std::bad_alloc`, so every block either `new` returns is asmalloc's, and the library's
+  `delete` frees it. The library has no dependency on a C++ runtime; it finds the
+  new-handler with `dlsym` when an allocation fails, and loads into programs that have none.
 - **Before the library can be called.** The dynamic loader uses its own minimal allocator until
   it has relocated every object, the preload library included, and only then switches to the
   interposed `malloc`; glibc has registered rseq for the main thread before that
@@ -39,9 +45,12 @@ What the preload setting adds:
   which a thread's `rseq_cs` may name until its next preemption, stay mapped for the life of
   the process.
 - **Unwinding.** The library is built with `panic = "abort"`. A panic reaches the panic handler,
-  which ends the process through `Os::abort` (raw system calls, no allocation). No foreign
-  exception can unwind into the library's frames: it calls nothing that throws (the system
-  call instruction, glibc's `__errno_location`, and the compiler's `memcpy` and `memset`).
+  which ends the process through `Os::abort` (raw system calls, no allocation). The only
+  function the library calls that may throw is a C++ new-handler (CXX-04); that call is
+  `extern "C-unwind"`, so rustc gives it a landing pad, whose personality (PRELOAD-02) aborts.
+  Everything else it calls cannot throw: the system call instruction, glibc's
+  `__errno_location` and `dlsym`, `std::get_new_handler` (`noexcept`), and the compiler's
+  `memcpy` and `memset`. So no exception ever unwinds out through the library's frames.
 
 ## PRELOAD-02: `#[unsafe(no_mangle)] extern "C" fn asmalloc_preload_no_unwinding`, and the binding of `rust_eh_personality` to it
 
@@ -56,5 +65,7 @@ library's dynamic symbol table (checked with `nm -D`). The unwind tables of the 
 `core` linked into the library name it, and they now resolve inside the library instead of
 failing the load. Another object that looks up `rust_eh_personality` dynamically
 (`librustc_driver` exports and imports its own) does not find this library's. The function is
-only reachable if something unwinds through the library's own frames, which PRELOAD-01 rules
-out; if that ever happened it would abort, which keeps the heap as it was.
+only reachable when an exception unwinds into the library's own frames, which happens in one
+case: a C++ new-handler that throws (PRELOAD-01). Then it aborts, which is the behaviour Rust
+defines for that call under `panic = "abort"`, and the heap is left as it was: the handler runs
+between attempts, when the allocator holds nothing.

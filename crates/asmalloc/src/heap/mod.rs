@@ -6,9 +6,13 @@
 //! the process's heap, or twins on a small array in a simulated heap. Everything here is
 //! generic over the routines, so the two heaps share every line but the fast-path seam.
 //!
-//! - **Small objects** take their class from the `Layout`. Allocation is the pop routine and,
-//!   when it misses, the depot's slow path, which exchanges magazines. Free is the push routine
-//!   and its slow path. The slow paths are out of line and cold.
+//! - **Small objects** take their class from the `Layout`, with one compare and a table load
+//!   (`SmallClass::of_nonzero_layout`), which a constant layout folds to a constant. Allocation
+//!   is the pop routine and, when it misses, the depot's slow path, which exchanges magazines.
+//!   Free is the push routine and its slow path. Everything but the lookup and the routine is
+//!   out of line and cold, so that the inlined fast path stays small enough to inline into
+//!   every caller: the slow paths, large requests, and zero-size ones, which the lookup turns
+//!   away although they have a small class.
 //! - **Start-up.** The slabs start zero, which the routines read as "no magazine", so the first
 //!   call of each class takes the slow path, and the first slow path of the process reserves the
 //!   address space ([`crate::back::State::get_or_reserve`]). The fast path never checks.
@@ -157,6 +161,20 @@ impl<O: Os> Heap<O> {
         self.back()?.usable_size(ptr)
     }
 
+    /// Walks the heap for `visitor` (`crate::stats`): read-only, and a racy snapshot beside
+    /// running threads. Reports nothing before the heap has started. `slabs` is the slab array
+    /// this heap is run with.
+    pub(crate) fn inspect(
+        &self,
+        slabs: &crate::front::Slabs,
+        visitor: &mut impl crate::stats::Visitor,
+    ) {
+        if let Some(back) = self.back() {
+            back.inspect(visitor);
+            crate::depot::inspect(&self.depot, back.space(), slabs, visitor);
+        }
+    }
+
     /// Allocates a block for `layout`; null if there is no memory.
     ///
     /// # Safety
@@ -164,12 +182,40 @@ impl<O: Os> Heap<O> {
     /// The slab array of `routines` is used only with this heap (`Cache::new`'s contract).
     #[inline(always)]
     pub(crate) unsafe fn alloc<R: Routines + Copy>(&self, routines: R, layout: Layout) -> *mut u8 {
+        match SmallClass::of_nonzero_layout(layout) {
+            // SAFETY: passed through from the caller.
+            Some(class) => unsafe { self.alloc_small(routines, class) },
+            // SAFETY: passed through from the caller.
+            None => unsafe { self.alloc_other(routines, layout) },
+        }
+    }
+
+    /// Allocates an object of a small class: the pop routine, and its slow path on a miss.
+    ///
+    /// # Safety
+    ///
+    /// As for [`Heap::alloc`].
+    #[inline(always)]
+    unsafe fn alloc_small<R: Routines + Copy>(&self, routines: R, class: SmallClass) -> *mut u8 {
+        match routines.pop(class) {
+            Some(object) => object.as_ptr(),
+            // SAFETY: passed through from the caller.
+            None => unsafe { self.alloc_slow(routines, class) },
+        }
+    }
+
+    /// A request the inlined lookup turns away: a large one, or one of zero bytes, which has a
+    /// small class.
+    ///
+    /// # Safety
+    ///
+    /// As for [`Heap::alloc`].
+    #[cold]
+    #[inline(never)]
+    unsafe fn alloc_other<R: Routines + Copy>(&self, routines: R, layout: Layout) -> *mut u8 {
         match small(layout) {
-            Some(class) => match routines.pop(class) {
-                Some(object) => object.as_ptr(),
-                // SAFETY: passed through from the caller.
-                None => unsafe { self.alloc_slow(routines, class) },
-            },
+            // SAFETY: passed through from the caller.
+            Some(class) => unsafe { self.alloc_small(routines, class) },
             None => self
                 .alloc_large(layout, Zero::No)
                 .map_or(ptr::null_mut(), |grant| grant.ptr.as_ptr()),
@@ -189,11 +235,49 @@ impl<O: Os> Heap<O> {
         layout: Layout,
         zero: Zero,
     ) -> Option<Grant> {
-        let Some(class) = small(layout) else {
-            return self.alloc_large(layout, zero);
-        };
+        match SmallClass::of_nonzero_layout(layout) {
+            // SAFETY: passed through from the caller.
+            Some(class) => unsafe { self.grant_small(routines, class, layout, zero) },
+            // SAFETY: passed through from the caller.
+            None => unsafe { self.grant_other(routines, layout, zero) },
+        }
+    }
+
+    /// [`Heap::alloc_grant`] for a request the inlined lookup turns away.
+    ///
+    /// # Safety
+    ///
+    /// As for [`Heap::alloc`].
+    #[cold]
+    #[inline(never)]
+    unsafe fn grant_other<R: Routines + Copy>(
+        &self,
+        routines: R,
+        layout: Layout,
+        zero: Zero,
+    ) -> Option<Grant> {
+        match small(layout) {
+            // SAFETY: passed through from the caller.
+            Some(class) => unsafe { self.grant_small(routines, class, layout, zero) },
+            None => self.alloc_large(layout, zero),
+        }
+    }
+
+    /// [`Heap::alloc_grant`] of an object of a small class.
+    ///
+    /// # Safety
+    ///
+    /// As for [`Heap::alloc`].
+    #[inline(always)]
+    unsafe fn grant_small<R: Routines + Copy>(
+        &self,
+        routines: R,
+        class: SmallClass,
+        layout: Layout,
+        zero: Zero,
+    ) -> Option<Grant> {
         // SAFETY: passed through from the caller.
-        let ptr = NonNull::new(unsafe { self.alloc(routines, layout) })?;
+        let ptr = NonNull::new(unsafe { self.alloc_small(routines, class) })?;
         let len = class.size();
         let zeroed = match zero {
             Zero::No => 0,
@@ -221,13 +305,48 @@ impl<O: Os> Heap<O> {
     ) {
         // SAFETY: HEAP-01.
         let object = unsafe { NonNull::new_unchecked(ptr) };
+        match SmallClass::of_nonzero_layout(layout) {
+            // SAFETY: passed through from the caller.
+            Some(class) => unsafe { self.free_small(routines, class, object) },
+            // SAFETY: passed through from the caller.
+            None => unsafe { self.dealloc_other(routines, object, layout) },
+        }
+    }
+
+    /// Frees an object of a small class: the push routine, and its slow path on a miss.
+    ///
+    /// # Safety
+    ///
+    /// As for [`Heap::dealloc`], `object` being of `class`.
+    #[inline(always)]
+    unsafe fn free_small<R: Routines + Copy>(
+        &self,
+        routines: R,
+        class: SmallClass,
+        object: NonNull<u8>,
+    ) {
+        if !routines.push(class, object) {
+            // SAFETY: passed through from the caller.
+            unsafe { self.free_slow(routines, class, object) }
+        }
+    }
+
+    /// [`Heap::dealloc`] for a layout the inlined lookup turns away.
+    ///
+    /// # Safety
+    ///
+    /// As for [`Heap::dealloc`].
+    #[cold]
+    #[inline(never)]
+    unsafe fn dealloc_other<R: Routines + Copy>(
+        &self,
+        routines: R,
+        object: NonNull<u8>,
+        layout: Layout,
+    ) {
         match small(layout) {
-            Some(class) => {
-                if !routines.push(class, object) {
-                    // SAFETY: passed through from the caller.
-                    unsafe { self.free_slow(routines, class, object) }
-                }
-            }
+            // SAFETY: passed through from the caller.
+            Some(class) => unsafe { self.free_small(routines, class, object) },
             None => self.free_large(object),
         }
     }

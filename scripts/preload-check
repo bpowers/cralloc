@@ -96,6 +96,36 @@ cc -O2 -pthread -o "$bin/signals" "$programs/signals.c" || exit 1
 cc -O2 -pthread -o "$bin/dl" "$programs/dl.c" -ldl || exit 1
 cc -O2 -shared -fPIC -o "$bin/libdlib.so" "$programs/dlib.c" || exit 1
 g++ -O2 -pthread -std=c++20 -o "$bin/cxx" "$programs/cxx.cpp" || exit 1
+g++ -O2 -pthread -std=c++20 -o "$bin/cxx-containers" "$programs/cxx_containers.cpp" || exit 1
+g++ -O2 -std=c++20 -o "$bin/cxx-operators" "$programs/cxx_operators.cpp" || exit 1
+
+# bindings NAME CMD...: where the dynamic loader bound each C++ allocation operator the program
+# calls (its own report, LD_DEBUG=bindings). The four throwing forms of new must bind to the
+# C++ runtime, which can throw std::bad_alloc; the other 16 forms to the library.
+bindings() {
+  local name="$1"
+  shift
+  wanted "$name" || return 0
+  MEMLIMIT_QUIET=1 "$here/memlimit" -m "$mem" -t 5m -- \
+    env LD_PRELOAD="$lib" LD_DEBUG=bindings "$@" >/dev/null 2>"$work/$name.bindings"
+  local throwing='symbol `_Zn[wa]m(St11align_val_t)?'"'"
+  local ops='symbol `_Z(nw|na|dl|da)'
+  local ours runtime stray
+  ours=$(grep -F "to $lib " "$work/$name.bindings" | grep -oE "$ops[^']*'" | sort -u | wc -l)
+  runtime=$(grep -F "to /lib64/libstdc++.so.6 " "$work/$name.bindings" | grep -oE "$throwing" |
+    sort -u | wc -l)
+  # Any other binding of an operator: a throwing form bound to us, or a form bound elsewhere.
+  stray=$(grep -E "$ops" "$work/$name.bindings" |
+    grep -vE "to $lib .*symbol \`_Z(nw|na)m(St11align_val_t)?RKSt9nothrow_t'|to $lib .*symbol \`_Zd[la]" |
+    grep -vcE "to /lib64/libstdc\+\+.so.6 .*$throwing")
+  if [ "$ours" -eq 16 ] && [ "$runtime" -eq 4 ] && [ "$stray" -eq 0 ]; then
+    printf 'PASS  %-24s 16 operators bind to the library, 4 throwing new to libstdc++\n' "$name"
+  else
+    printf 'FAIL  %-24s %s to the library, %s throwing to libstdc++, %s stray\n' \
+      "$name" "$ours" "$runtime" "$stray"
+    failed+=("$name")
+  fi
+}
 
 if [[ "$(LD_PRELOAD="$lib" "$bin/interposed")" != "asmalloc "* ]]; then
   echo "FAIL  the library does not serve malloc in a preloaded program"
@@ -132,6 +162,14 @@ check git-repack bash -c '
 check xz-threads bash -c 'xz -T8 -6 -c "$1" | tee "$2/xz-$MODE" | sha256sum; xz -T8 -dc "$2/xz-$MODE" | sha256sum; rm -f "$2/xz-$MODE"' _ "$data" "$work"
 check zstd-threads bash -c 'zstd -q -T8 -15 -c "$1" | tee "$2/zst-$MODE" | sha256sum; zstd -q -T8 -dc "$2/zst-$MODE" | sha256sum; rm -f "$2/zst-$MODE"' _ "$data" "$work"
 check cxx "$bin/cxx"
+check cxx-containers "$bin/cxx-containers"
+check cxx-operators "$bin/cxx-operators"
+bindings cxx-bindings "$bin/cxx-operators"
+# A throwing new that fails throws std::bad_alloc, caught, with or without the library.
+check cxx-new-fails "$bin/cxx-operators" throw
+# The one difference left: a new-handler that throws from a nothrow new, which is the library's,
+# ends the process, where libstdc++'s nothrow new returns null (see asmalloc::c::cxx).
+expect cxx-throwing-handler 134 "$bin/cxx-operators" throwing-handler
 check threads "$bin/threads" 20 16 20000
 check threads-exit "$bin/threads" exit
 check forks "$bin/forks" 8 40

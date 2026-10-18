@@ -150,6 +150,34 @@ fn lowest_takes_the_lowest_set_bits() {
     }
 }
 
+/// The unit a large free purges lies inside its slot, so below the watermark whenever the slot
+/// is, and touches no other slot: for every class and slot of the tiny heap's regions.
+#[kani::proof]
+#[kani::unwind(6)]
+fn a_slot_unit_touches_only_its_slot_on_the_tiny_heap() {
+    use crate::os::sim::{Shape, Tiny};
+    let plan = Tiny::GEOMETRY.largest_plan();
+    let class = any_class();
+    let Some(layout) = Layout::new(plan, class) else {
+        return;
+    };
+    let slot: u32 = kani::any();
+    kani::assume(slot < layout.slots());
+    let Some(unit) = layout.slot_unit(slot) else {
+        return;
+    };
+    let page = layout.page_size();
+    let (start, end) = (unit.start as usize * page, unit.end as usize * page);
+    assert!(start < end);
+    assert!(layout.slot_bytes(slot) <= start && end <= layout.slot_bytes(slot + 1));
+    assert!(unit.end <= layout.carved_pages(slot + 1));
+    assert!(layout.touching(unit) == (slot, slot));
+    // A slot of whole pages is covered entirely.
+    if layout.size() % page == 0 {
+        assert!(start == layout.slot_bytes(slot) && end == layout.slot_bytes(slot + 1));
+    }
+}
+
 /// The slots a unit touches are exactly those overlapping its pages, and those `inside` reports
 /// are exactly those wholly within them, for every class, watermark, cursor and huge-page part
 /// of the tiny heap's regions.

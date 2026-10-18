@@ -58,10 +58,11 @@ theorem shl12 (h : Mid rs s m p) {r : Reg} (hr : r ∈ rs) : Mid rs s m (VG.Proo
 
 end Mid
 
-/-- The scratch registers of the routines, inline (`scratchI`) and out of
-line (`scratchT`): the same six. -/
-def scratchI : List Reg := [.rax, .rcx, .r8, .r9, .r10, .r11]
-abbrev scratchT : List Reg := scratchI
+/-- The scratch registers of the routines: the pop's and push's
+(`scratchI`), which name no register for the slabs, and the slow path's
+(`scratchT`), which keep the slabs' address in `r9`. -/
+def scratchI : List Reg := [.rax, .rcx, .r8, .r10, .r11]
+def scratchT : List Reg := [.rax, .rcx, .r8, .r9, .r10, .r11]
 
 section
 

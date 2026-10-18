@@ -131,3 +131,134 @@ pub(super) fn layouts_fit(plan: Plan) {
 fn layouts_fit_the_used_geometries() {
     layouts_fit(any_used_plan());
 }
+
+/// The decay word: a pass under way is stepped whatever the clock says. Otherwise a pass
+/// starts exactly when the clock is an interval or more past the word's time; a clock behind
+/// the word re-stamps it with the time now, after which a pass starts one interval later; and
+/// the word that starts a pass is marked active and keeps the time.
+#[kani::proof]
+fn a_decay_pass_starts_only_after_an_interval() {
+    use super::policy::DECAY_TICKS;
+    use super::purge::{Decay, decay_look};
+    let word: u64 = kani::any();
+    let now: u64 = kani::any();
+    let since = (now & !1).wrapping_sub(word);
+    match decay_look(word, now) {
+        Decay::Step => assert!(word & 1 == 1),
+        Decay::Start(next) => {
+            assert!(word & 1 == 0 && next & 1 == 1);
+            assert!(next | 1 == now | 1);
+            assert!(decay_look(next, kani::any()) == Decay::Step);
+            assert!(since >= DECAY_TICKS && since < 1 << 63);
+        }
+        Decay::Restamp(next) => {
+            assert!(word & 1 == 0 && since >= 1 << 63);
+            assert!(next == now & !1);
+            // From the new stamp the wait is one interval, wherever the clock goes forward.
+            assert!(decay_look(next, now) == Decay::Wait);
+            assert!(
+                decay_look(next, now.wrapping_add(DECAY_TICKS))
+                    == Decay::Start(now.wrapping_add(DECAY_TICKS) | 1)
+            );
+        }
+        Decay::Wait => assert!(word & 1 == 0 && since < DECAY_TICKS),
+    }
+    // A pass that has just ended at `now` does not start again at once.
+    assert!(decay_look(now & !1, now) == Decay::Wait);
+}
+
+/// The small-class cap: a launder never purges at or under the cap, nor until the count is a
+/// re-arm step above its mark, and always purges when it is both. So a count that moves less
+/// than a step around the cap purges once, and a count held over the cap purges once for
+/// every step it grows.
+#[kani::proof]
+fn the_cap_fires_only_a_step_above_its_mark() {
+    use super::policy::CAP_REARM;
+    use super::purge::cap_fires;
+    // Sixteen-bit counts: the function divides, and the property does not depend on scale.
+    let (mark, new, cap) = (
+        kani::any::<u16>() as usize,
+        kani::any::<u16>() as usize,
+        kani::any::<u16>() as usize,
+    );
+    kani::assume(cap >= CAP_REARM);
+    let step = cap / CAP_REARM;
+    let fires = cap_fires(mark, new, cap);
+    if new <= cap || new < mark.saturating_add(step) {
+        assert!(!fires);
+    }
+    if new > cap && new >= mark + step {
+        assert!(fires);
+    }
+    // Once it has fired the mark is at least where the count stood, and nothing fires again
+    // until the count is a step above that.
+    if fires {
+        let again: usize = kani::any::<u16>() as usize;
+        kani::assume(again < new + step);
+        assert!(!cap_fires(new, again, cap));
+    }
+}
+
+/// A pass word keeps its three parts apart, and a stepper can tell its pass from another: the
+/// tag of a pass's decay word is the only one it acts on.
+#[kani::proof]
+fn a_pass_word_round_trips() {
+    use super::purge::Pass;
+    let pass = Pass {
+        tag: kani::any(),
+        lap: kani::any(),
+        pages: kani::any(),
+    };
+    assert!(Pass::unpack(pass.pack()) == pass);
+    let word: u64 = kani::any();
+    assert!(Pass::unpack(word).pack() == word);
+    // The all-zero word, which is what the state starts as, is a pass with nothing to purge.
+    assert!(Pass::unpack(0).pages == 0);
+}
+
+/// A large slot is whole pages in every geometry in use, so the unit a large free returns
+/// (`Layout::slot_unit`) is exactly the slot's bytes: it starts and ends on the slot's own
+/// boundaries and holds no byte of another slot.
+#[kani::proof]
+fn a_large_slot_is_whole_pages() {
+    let geometry = match kani::any::<u8>() {
+        0 => Geometry::DESIGN,
+        1 => Standard::GEOMETRY,
+        2 => Native::GEOMETRY,
+        _ => Tiny::GEOMETRY,
+    };
+    let class = any_class();
+    kani::assume(!class.is_small());
+    let page = geometry.page_size();
+    assert!(class.size() & (page - 1) == 0);
+    // With the size a page multiple, `slot_unit`'s two roundings are exact for any slot.
+    let slot: u32 = kani::any();
+    // A region holds at most 2^32 bytes, so the products below are slot offsets within one.
+    kani::assume((slot as u128 + 1) * class.size() as u128 <= 1 << 32);
+    let (start, end) = (
+        slot as usize * class.size(),
+        (slot as usize + 1) * class.size(),
+    );
+    assert!(start.div_ceil(page) * page == start && (end >> page.trailing_zeros()) * page == end);
+}
+
+/// A decay pass's goal is never more than is retained, is all of it once that is within the
+/// floor, at least a quarter otherwise, and zero only when nothing is retained.
+#[kani::proof]
+fn a_decay_goal_is_a_quarter_or_the_floor() {
+    use super::policy::{DECAY_SHIFT, decay_goal};
+    let geometry = match kani::any::<u8>() {
+        0 => Geometry::DESIGN,
+        1 => Standard::GEOMETRY,
+        2 => Native::GEOMETRY,
+        _ => Tiny::GEOMETRY,
+    };
+    let retained: usize = kani::any();
+    let goal = decay_goal(geometry, retained);
+    assert!(goal <= retained);
+    assert!(goal >= retained >> DECAY_SHIFT);
+    assert!((goal == 0) == (retained == 0));
+    if retained <= geometry.huge_page_size() {
+        assert!(goal == retained);
+    }
+}

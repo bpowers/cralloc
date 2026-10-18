@@ -100,8 +100,10 @@ variable {M : ISA} {c : Spec.Slab.Ctx M} {s : M.State}
 theorem cls_lt (h : c.argsOk s) : c.cls s < CLASS_LIMIT := by
   obtain ⟨A, f, sig⟩ := c
   cases f
-  · exact h.2.2.1
-  · exact h
+  · exact h.2.1
+  · have := h.2
+    simp only [MASK_COUNT, CLASS_LIMIT, SLAB_BYTES, SLAB_SHIFT] at this ⊢
+    omega
   all_goals
     simp only [Spec.Slab.Ctx.cls, SLAB_BYTES, SLAB_SHIFT, CLASS_LIMIT]
     omega
@@ -131,6 +133,16 @@ theorem nowrap_sub (hpb : c.A.ptrBits = 64) (hl : c.Layout s) {i : Nat} (hc : c.
   rw [Nat.mod_eq_of_lt (a := i * 2 ^ 12 + 8 * c.cls s) (by omega), Nat.mod_eq_of_lt (by omega)]
   omega
 
+/-- No word is a slot of the magazines of a zero mask, which have one slot. -/
+theorem not_isSlot_slotsOf_zero (w : BitVec 64) : ¬ IsSlot (slotsOf 0) w := by
+  simp only [IsSlot, slotsOf, slot, ↓reduceIte]
+  omega
+
+theorem mask_ne_zero_of_isSlot {w : BitVec 64} (h : IsSlot (c.slots s) w) : c.mask s ≠ 0 := by
+  intro hz
+  simp only [Spec.Slab.Ctx.slots, hz] at h
+  exact not_isSlot_slotsOf_zero w h
+
 /-- What `more` names lies apart, by the invariant. -/
 theorem more_apart (hinv : c.inv s) (hi : c.InRange s) : ∀ x ∈ c.more s, c.Apart s x.1 := by
   obtain ⟨A, f, sig⟩ := c
@@ -141,9 +153,10 @@ theorem more_apart (hinv : c.inv s) (hi : c.InRange s) : ∀ x ∈ c.more s, c.A
       exact (hinv.1 _ hi).2 (by assumption)
     · simp
   · split
-    · intro x hx
+    · rename_i hs
+      intro x hx
       simp only [List.mem_singleton] at hx; subst hx
-      exact (hinv.2.1 _ hi).2 (by assumption)
+      exact (hinv.2.1 (mask_ne_zero_of_isSlot hs) _ hi).2 hs
     · simp
   · simp
   · simp
@@ -242,10 +255,10 @@ theorem cpuField (h : Same c s p) : c.cpuField p = c.cpuField s := by
 
 theorem cls (h : Same c s p) : c.cls p = c.cls s := by
   obtain ⟨A, f, sig⟩ := c
-  cases f <;> simp only [Spec.Slab.Ctx.cls, h.param, h.arg]
+  cases f <;> simp only [Spec.Slab.Ctx.cls, h.sym, h.arg]
 
 theorem maskEntry (h : Same c s p) : c.maskEntry p = c.maskEntry s := by
-  simp only [Spec.Slab.Ctx.maskEntry, Spec.Slab.Ctx.maskAddr, h.sym, h.cls]
+  simp only [Spec.Slab.Ctx.maskEntry, Spec.Slab.Ctx.maskAddr, h.arg]
 
 theorem link (h : Same c s p) : c.link p = c.link s := by
   simp only [Spec.Slab.Ctx.link, h.arg]
@@ -281,7 +294,7 @@ theorem layout (h : Same c s p) : c.Layout p ↔ c.Layout s :=
 
 theorem argsOk (h : Same c s p) : c.argsOk p ↔ c.argsOk s := by
   obtain ⟨A, f, sig⟩ := c
-  cases f <;> simp only [Spec.Slab.Ctx.argsOk, Spec.Slab.Ctx.mask, h.param, h.cls, h.arg]
+  cases f <;> simp only [Spec.Slab.Ctx.argsOk, Spec.Slab.Ctx.mask, h.sym, h.cls, h.arg]
 
 end Same
 
@@ -311,11 +324,11 @@ theorem wordOf_frame (h : Same c s p) {W : List Region} (hm : Frame W (c.mem s) 
 /-- The routine's mask, in memory changed only in harmless regions. -/
 theorem mask_frame (h : Same c s p) {W : List Region} (hm : Frame W (c.mem s) (c.mem p))
     (hW : ∀ w ∈ W, Harmless c s w) : c.mask p = c.mask s := by
-  have hma : c.maskAddr p = c.maskAddr s := congrArg Region.base h.maskEntry
+  have hma : c.maskAddr p = c.maskAddr s := by simp only [Spec.Slab.Ctx.maskAddr, h.arg]
   obtain ⟨A, f, sig⟩ := c
-  cases f <;> simp only [Spec.Slab.Ctx.mask, h.param]
+  cases f <;> simp only [Spec.Slab.Ctx.mask, h.arg]
   rw [hma]
-  congr 1
+  refine congrArg BitVec.toNat ?_
   exact hm.readW (r := ⟨Spec.Slab.Ctx.maskAddr ⟨A, .table, sig⟩ s, 4⟩) (Region.contains_self _ _)
     (fun w hw => ((hW w hw).2.2.1 rfl).symm) (by decide)
 
@@ -338,9 +351,10 @@ theorem inv_frame (h : Same c s p) {W : List Region} (hm : Frame W (c.mem s) (c.
       intro i hi j hj
       rw [hwo i hi, hwo j hj]
       exact hinv.2 i hi j hj
-  · refine ⟨by rw [mask_frame h hm hW]; exact hinv.1, fun i hi => ?_, ?_⟩
+  · have hmk := mask_frame h hm hW
+    refine ⟨by rw [hmk]; exact hinv.1, fun hz i hi => ?_, ?_⟩
     · rw [hwo i hi, hsl, hap]
-      exact hinv.2.1 i hi
+      exact hinv.2.1 (by rwa [hmk] at hz) i hi
     · simp only [Spec.Slab.Ctx.Exclusive, hsl]
       intro i hi j hj
       rw [hwo i hi, hwo j hj]

@@ -5,12 +5,29 @@
 **Preconditions** (`Host::purge`, which for the heap is `Space::purge`). No thread reads or
 writes the range during the call, and nothing in it is needed afterwards.
 
-**The range.** Pages `unit.start..unit.end` of the region, from `Layout::unit_below`. Kani's
-`purge_steps_move_down_within_one_part` proves `unit.end` is at most `carved_pages(carved)`:
-the pages lie wholly below the watermark as read before the step. The watermark only grows (a
-carve's compare-and-swap replaces `carved` with a larger value, and nothing else writes it), so
-the pages stay below it, and no carve can hand out a slot that touches them. The scenario
-`a_carve_racing_a_purge` explores this under interleaving.
+**The range.** Pages `unit.start..unit.end` of the region, from `Layout::unit_below`; the walk
+in `back/purge.rs` is `purge_unit`'s only caller. `unit.end` is at most `carved_pages(carved)`:
+the pages lie wholly below the watermark as read before the step. What supports that, and how
+far each piece of evidence reaches:
+
+- Kani's `purge_steps_move_down_within_one_part` (in `verify_slow.rs`, so on demand, not in
+  the gate) proves it for classes whose size is a power of two, which it assumes.
+- Kani's `units_touch_exactly_their_slots_on_the_tiny_heap` (also on demand) asserts
+  `last < carved` for every class that fits the tiny heap's regions, power of two or not.
+  No large class fits there.
+- The unit test `purge_passes_tile_the_carved_pages` checks the units against direct
+  arithmetic for every class that fits a region, large ones included, in the standard and native
+  geometries.
+- For the design's geometry and sizes that are not powers of two the argument is on paper:
+  `unit_below` clamps `end` to `carved_pages(carved)`, which is `floor(carved * size / page)`,
+  and only ever moves `end` down from there.
+
+The watermark only grows: a carve's compare-and-swap replaces `carved` with a larger value,
+and nothing else writes it. `region::top_up`, which the walk calls to bring the watermark to
+the end of its huge page, moves it only by calling `carve`, and owns the slots it gets like
+any other caller until it releases them. So pages below the watermark stay below it, and no
+carve can hand out a slot that touches them. The scenario `a_carve_racing_a_purge` explores
+this under interleaving.
 
 **Proof.**
 
@@ -53,6 +70,30 @@ slot touching the range (`back::models::purge_*`, following `tla/Purge.tla`'s `P
 version of `purge_unit` that claims only the slots wholly inside fails three of those
 scenarios, as `Purge_claim_inside.cfg` predicts. The scenarios include the huge-page part
 (`purge_in_huge_pages`) and two purgers on the same units (`two_purgers_on_the_same_units`).
+
+**Changed 2026-10-17.** `purge_unit` is unchanged. The walk now calls `region::top_up` before
+its first unit in a region, and "The range" says what that does to the watermark and how far
+each proof of the range reaches. A first version of the large-class cap gave `purge_unit` a
+second caller that claimed a freed slot back; the reviewer found that it widened the window
+in which a double free is silent, and it is gone: a large free now purges while it still
+holds the slot, under BACK-REGION-02 and `class-safety.md`.
+
+## BACK-REGION-02: `host.purge(...)` in `purge_held`
+
+**Preconditions** (`Host::purge`). No thread reads or writes the range during the call, and
+nothing in it is needed afterwards.
+
+**Proof.** `purge_held` is an `unsafe fn` whose caller promises that it holds the slot (the
+slot's free bit is clear on the caller's behalf), that nothing uses the slot's memory during
+the call or needs it after, and that the slot is below the watermark. The range is the pages
+of `Layout::slot_unit(slot)`: `ceil(start / page)..floor(end / page)` of the slot's own
+bytes, so every byte of it is inside the slot. With the slot held, no allocation can hand it
+out, no purge walk can claim it, and the program has given it up, so the precondition holds
+for the range. The one caller and why it holds the slot are BACK-CLASS-01 in
+`class-safety.md`, which also says what a double free can do.
+
+`purge_held` declines a slot in a huge-page part (a purge there must be whole huge pages);
+that is policy, not safety. Awaiting review.
 
 **Review.** 2026-10-17, fresh adversarial reviewer: the protocol was accepted; three gaps were
 found in the argument: exclusivity under a double free, the huge-page part not covered by the

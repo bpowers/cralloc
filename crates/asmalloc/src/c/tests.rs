@@ -124,6 +124,31 @@ fn realloc_stays_in_place_when_the_class_allows() {
 }
 
 #[test]
+fn realloc_keeps_every_usable_byte_when_it_moves() {
+    // Programs write up to `malloc_usable_size` (redis sizes its strings by it), so a move must
+    // carry that much, not just the size last asked for.
+    for size in [100, 5000, 40_000, 100_000, 300_000, 1_000_000, 5 << 20] {
+        let p = malloc(size).cast::<u8>();
+        let n = usable(p.cast());
+        assert!(n >= size);
+        // SAFETY: `p` is live with `n` usable bytes; `q` is live with at least `4 * n`, and each
+        // block is given up once.
+        unsafe {
+            p.write_bytes(0xab, n);
+            let q = realloc(p.cast(), 4 * n).cast::<u8>();
+            assert!(!q.is_null());
+            let kept = core::slice::from_raw_parts(q, n);
+            assert!(
+                kept.iter().all(|&b| b == 0xab),
+                "malloc({size}): usable {n}, lost from {:?}",
+                kept.iter().position(|&b| b != 0xab)
+            );
+            release(q.cast());
+        }
+    }
+}
+
+#[test]
 fn the_sized_frees_take_the_class_from_the_address() {
     // A wrong size or alignment from C must not send a block to the wrong class: the freed
     // block is the one the next allocation of its own class gets.
@@ -246,4 +271,91 @@ fn the_version_is_the_crates() {
     let version = unsafe { core::ffi::CStr::from_ptr(asmalloc_version()) };
     assert_eq!(version.to_str(), Ok(env!("CARGO_PKG_VERSION")));
     assert_eq!(asmalloc_version(), asmalloc_version());
+}
+
+#[test]
+fn operator_new_serves_every_form_with_its_alignment() {
+    for size in [0, 1, 16, 24, 100, 40 << 10, 3 << 20] {
+        for p in [cxx::operator_new(size), cxx::operator_new_nothrow(size)] {
+            assert!(!p.is_null());
+            assert!(usable(p) >= size);
+            if size >= 16 {
+                assert_eq!(p.addr() % 16, 0);
+            }
+            // SAFETY: a live block, given up once.
+            unsafe { cxx::operator_delete_sized(p, size) };
+        }
+        for align in [1, 64, 4096, 1 << 21] {
+            let p = cxx::operator_new_aligned(size, align);
+            let q = cxx::operator_new_aligned_nothrow(size, align);
+            assert_eq!(p.addr() % align, 0);
+            assert_eq!(q.addr() % align, 0);
+            // SAFETY: live blocks, each given up once.
+            unsafe {
+                cxx::operator_delete_sized_aligned(p, size, align);
+                cxx::operator_delete(q);
+            }
+        }
+    }
+}
+
+#[test]
+fn nothrow_new_fails_with_null_when_no_handler_is_installed() {
+    // A Rust test binary has no C++ runtime, so there is no new-handler to run.
+    assert!(cxx::operator_new_nothrow(usize::MAX / 4).is_null());
+    assert!(cxx::operator_new_aligned_nothrow(usize::MAX / 4, 64).is_null());
+    // An alignment that is not a power of two is not served.
+    assert!(cxx::operator_new_aligned_nothrow(16, 48).is_null());
+}
+
+#[test]
+fn a_sized_delete_with_the_wrong_size_frees_the_right_block() {
+    let mut seen = Vec::new();
+    for _ in 0..64 {
+        let p = cxx::operator_new(100);
+        // SAFETY: `p` is live and given up once; the size is deliberately wrong.
+        unsafe { cxx::operator_delete_sized(p, 1 << 20) };
+        let q = cxx::operator_new(100);
+        seen.push(q == p);
+        // SAFETY: as above, with a wrong size and alignment.
+        unsafe { cxx::operator_delete_sized_aligned(q, 8, 4096) };
+    }
+    assert!(seen.iter().filter(|&&same| same).count() > 32, "{seen:?}");
+}
+
+#[test]
+fn the_throwing_forms_slow_paths_return_null_for_the_routine_to_throw() {
+    // Not exported; what the generated routine will call. With no C++ runtime in a Rust test
+    // binary there is no new-handler, so the loop ends at once.
+    assert!(cxx::operator_new(usize::MAX / 4).is_null());
+    assert!(cxx::operator_new_aligned(usize::MAX / 4, 64).is_null());
+    assert!(cxx::operator_new_aligned(16, 48).is_null());
+    let p = cxx::operator_new_aligned(100, 4096);
+    assert_eq!(p.addr() % 4096, 0);
+    // SAFETY: a live block, given up once.
+    unsafe { cxx::operator_delete(p) };
+}
+
+#[test]
+fn calloc_zeroes_all_it_reports_usable() {
+    // As glibc's calloc does: a program that sizes a block by malloc_usable_size (redis does)
+    // may rely on the whole of it reading as zero.
+    for size in [1, 17, 100, 1000, 1025, 30_000, 40_001, 100_001] {
+        let dirty: Vec<_> = (0..16).map(|_| malloc(size)).collect();
+        for &p in &dirty {
+            // SAFETY: a live block, all of whose usable bytes are the caller's.
+            unsafe { p.cast::<u8>().write_bytes(0xA5, usable(p)) };
+            release(p);
+        }
+        for p in [calloc(1, size), calloc(size, 1)] {
+            let len = usable(p);
+            // SAFETY: a live block of `len` usable bytes.
+            let bytes = unsafe { core::slice::from_raw_parts(p.cast::<u8>(), len) };
+            assert!(
+                bytes.iter().all(|&b| b == 0),
+                "calloc of {size} bytes left dirt in its {len} usable"
+            );
+            release(p);
+        }
+    }
 }

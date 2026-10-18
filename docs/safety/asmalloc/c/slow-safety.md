@@ -3,27 +3,33 @@
 The slow paths of `malloc`, `free` and `calloc`, and `calloc`'s zeroing tail. F1 and F2 are
 stated in `seam-safety.md`.
 
-## SLOW-01: `object.write_bytes(0, size)` in `allocate`
+## SLOW-01: `object.write_bytes(0, class.size())` in `allocate`
 
-**Preconditions.** `object` is valid for writes of `size` bytes and nothing else accesses them
-during the write.
+**Preconditions.** `object` is valid for writes of `class.size()` bytes and nothing else
+accesses them during the write.
 
 **Proof.** `object` is non-null and came from `seam::alloc_small(class)` with `class` the small
 class of `Class::of_c(layout)`, where `layout` is `size` bytes at alignment `align`. A class is
 at least the size it is computed for, after rounding to the alignment (`classes::verify`), so
-`class.size() >= size`. The heap hands a slot to one caller at a time (GLOBAL-01 in
+`class.size() >= size`; the write covers the whole slot, no more. The heap hands a slot to one caller at a time (GLOBAL-01 in
 `heap/global-safety.md`), and this call has not returned it yet, so no other code holds it. A
 handed-out slot is committed memory (the back end carves only from a region's writable
 prefix), so all `class.size()` bytes are writable.
 
-## SLOW-02: `block.write_bytes(0, total)` in `calloc_zero`
+## SLOW-02: `block.write_bytes(0, len)` in `calloc_zero`
 
-**Preconditions.** As SLOW-01, for `block` and `total`.
+**Preconditions.** `block` is valid for writes of `len` bytes and nothing else accesses them
+during the write.
 
-**Proof.** `calloc_zero`'s contract is that `block` is a block of the heap of at least `total`
-bytes that the caller owns; a block the caller owns is one no other code accesses. Its one
+**Proof.** `len` is the size of `table::calloc_class(total)` when the table covers `total`,
+else `total`. `calloc_zero`'s contract is that `block` is a slot of that class (so exactly
+`len` bytes of committed memory, SLOW-01), or, beyond the table, a block of at least `total`
+bytes, and that the caller owns it; a block the caller owns is one no other code accesses. Its one
 caller today is `seam::calloc` (SEAM-03); a generated `c_calloc` routine that jumps here must
 meet the same contract, which its specification will state.
+
+`free_sized_slow` and `free_aligned_sized_slow` each call `free_slow(ptr)` with their own
+contract, which is `free_slow`'s (the size and alignment are not used).
 
 ## SLOW-03: `seam::free_small(class, object)` in `free_slow`
 

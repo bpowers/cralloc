@@ -26,10 +26,17 @@ which the caller owns and gives up.
 **Proof.** `free_small`'s own contract is that precondition, word for word, and its callers
 discharge it (SEAM-02, SLOW-03).
 
-## SEAM-02: `free_small(class, object)` in `free`
+## SEAM-02: `free_small(class, object)` in `free`, `free_sized` and `free_aligned_sized`
 
 **Precondition.** As SEAM-01: `object` starts a slot of `class` that the heap handed out, owned
 by the caller and given up.
+
+The three front halves are the same code; the sized two receive a size (and an alignment) and
+do not use it to choose the class, so the proof below is the same for each. A wrong size from
+the caller (C's `free_sized`, or C++'s sized `delete` of an object through a base pointer with
+no virtual destructor) cannot reach the class: the class comes from the address alone. Their
+slow paths, `slow::free_sized_slow` and `slow::free_aligned_sized_slow`, are `free_slow`
+(SLOW-03) with the size ignored.
 
 **Proof.** `free`'s contract: `ptr` is null or a block of the heap that the caller owns and
 gives up (C's contract for `free`, which every C entry point that frees passes on). `object`
@@ -46,7 +53,7 @@ already free or beyond the watermark), which is the design's stated double-free 
 
 ## SEAM-03: `slow::calloc_zero(object, total)` in `calloc`
 
-**Precondition** (`calloc_zero`). `object` is a block of the heap of at least `total` bytes
+**Precondition** (`calloc_zero`). `object` is a slot of the class `table::calloc_class(total)`
 that the caller owns.
 
 **Proof.** `object` is non-null and came from `alloc_small(class)`, so it is a fresh slot of
@@ -54,4 +61,4 @@ that the caller owns.
 `global-safety.md`, GLOBAL-01), and the whole slot, `class.size()` bytes, is writable. `class`
 is `table::calloc_class(total)`, the class of `Class::of_c` of `total` bytes (the table's tests
 check every entry), and a class is at least the size it was computed for
-(`classes::verify`), so `class.size() >= total`.
+(`classes::verify`), so `class.size() >= total`. It is exactly the slot `calloc_zero` asks for.

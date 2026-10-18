@@ -21,12 +21,14 @@
 //! - `realloc(p, 0)` frees `p` and returns null, as glibc's does. `realloc` keeps a small block
 //!   in place when the new size has the same class, and a large one when the new size is still
 //!   large, fits the slot or run and, shrinking, keeps a quarter of it; a large block that
-//!   grows out of its slot moves to one with headroom.
+//!   grows out of its slot moves to one with headroom. A block that moves keeps every byte its
+//!   usable size covered, up to the new size, as glibc's does.
 //! - `malloc_usable_size` is the class size of a small block, and the size last asked for,
 //!   rounded up to a page, of a large one.
-//! - `calloc` checks the product for overflow and does not clear memory the back end knows is
-//!   zero. `malloc_trim` returns wholly free pages that the back end holds; it does not empty
-//!   the magazines.
+//! - `calloc` makes all of the block's usable size read as zero, as glibc's does, checks the
+//!   product for overflow, and does not clear memory the back end knows is zero.
+//!   `malloc_trim` returns wholly free pages that the back end holds; it does not empty the
+//!   magazines.
 //! - A failure returns null (or an error number from `posix_memalign`) and sets `errno` through
 //!   the C library's own accessor (`errno.rs`). `free` and a successful call leave it alone.
 //!   Nothing here hands a request to another allocator.
@@ -35,6 +37,7 @@
 //! generated C routines to replace; their slow paths (`slow.rs`) complete any call. The ledger
 //! is under `docs/safety/asmalloc/c/`.
 
+pub mod cxx;
 mod errno;
 mod seam;
 mod slow;
@@ -83,9 +86,9 @@ pub unsafe extern "C" fn free(ptr: *mut c_void) {
 ///
 /// As for [`free`].
 #[inline]
-pub unsafe extern "C" fn free_sized(ptr: *mut c_void, _size: usize) {
+pub unsafe extern "C" fn free_sized(ptr: *mut c_void, size: usize) {
     // SAFETY: the caller's promise.
-    unsafe { seam::free(ptr) }
+    unsafe { seam::free_sized(ptr, size) }
 }
 
 /// C23's `free_aligned_sized`. Neither the alignment nor the size is trusted.
@@ -94,9 +97,9 @@ pub unsafe extern "C" fn free_sized(ptr: *mut c_void, _size: usize) {
 ///
 /// As for [`free`].
 #[inline]
-pub unsafe extern "C" fn free_aligned_sized(ptr: *mut c_void, _align: usize, _size: usize) {
+pub unsafe extern "C" fn free_aligned_sized(ptr: *mut c_void, align: usize, size: usize) {
     // SAFETY: the caller's promise.
-    unsafe { seam::free(ptr) }
+    unsafe { seam::free_aligned_sized(ptr, align, size) }
 }
 
 /// The obsolete `cfree`, which glibc still exports for old binaries: [`free`].
@@ -149,7 +152,9 @@ pub unsafe extern "C" fn realloc(ptr: *mut c_void, size: usize) -> *mut c_void {
             if process::resize_in_place_by_address(old, used, size) {
                 return ptr;
             }
-            used
+            // Everything `malloc_usable_size` reported, not just the size asked for: programs
+            // write into that room (redis's strings do) and glibc's `realloc` keeps it.
+            process::usable_size(old.as_ptr()).unwrap_or(used)
         }
     };
     let new = match next.and_then(Class::small) {

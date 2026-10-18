@@ -534,6 +534,60 @@ mod tests {
         write_stderr(b"handler ran\n");
     }
 
+    static FORKED: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+
+    /// A crash handler that forks, as reporters do, and whose child then meets an allocator
+    /// abort of its own. The child's copy of the handler returns at once, so a child that can
+    /// abort ends with SIGABRT.
+    extern "C" fn forking_handler(_: i32) {
+        unsafe extern "C" {
+            fn fork() -> i32;
+            fn waitpid(pid: i32, status: *mut i32, options: i32) -> i32;
+            fn kill(pid: i32, signal: i32) -> i32;
+        }
+        const WNOHANG: i32 = 1;
+        if FORKED.swap(true, Ordering::AcqRel) {
+            return;
+        }
+        // SAFETY: fork, waitpid and kill are async-signal-safe; the child only aborts.
+        unsafe {
+            let pid = fork();
+            if pid == 0 {
+                LinuxOs.abort("child abort");
+            }
+            let mut status = 0;
+            for _ in 0..100 {
+                if waitpid(pid, &mut status, WNOHANG) == pid {
+                    write_stderr(b"child ended\n");
+                    return;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(100));
+            }
+            write_stderr(b"child parked\n");
+            kill(pid, 9);
+            waitpid(pid, &mut status, 0);
+        }
+    }
+
+    /// Finding abort-parks-forked-child (KERNEL-06). `ABORTING` is a static that a fork
+    /// copies. A child forked while a thread of the parent is aborting inherits the parent's
+    /// thread ID there; no thread of the child has that ID, so any abort in the child parks
+    /// for ever instead of ending the process. Here the child is forked by the SIGABRT handler
+    /// itself; a child forked by any other thread during the handler has the same static, and
+    /// outlives the parent with it. The parent waits ten seconds for the child to end.
+    #[test]
+    #[ignore = "finding: abort-parks-forked-child"]
+    fn an_abort_in_a_child_forked_during_an_abort_ends_the_child() {
+        let output = run_abort_child("fork");
+        assert_eq!(output.status.signal(), Some(SIGABRT as i32), "{output:?}");
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(stderr.contains("asmalloc: child abort\n"), "{stderr}");
+        assert!(
+            stderr.contains("child ended\n"),
+            "the child never ended: {stderr}"
+        );
+    }
+
     /// Run on its own by `abort_ends_the_process_with_sigabrt`; does nothing otherwise. With
     /// the variable set to `handler`, it first installs a SIGABRT handler that returns.
     #[test]
@@ -545,6 +599,10 @@ mod tests {
             // SAFETY: installs a handler that only writes to standard error, which is
             // async-signal-safe.
             unsafe { signal(SIGABRT as i32, returning_handler) };
+        }
+        if mode == "fork" {
+            // SAFETY: installs a handler that forks, waits and writes to standard error.
+            unsafe { signal(SIGABRT as i32, forking_handler) };
         }
         if mode == "race" {
             // SAFETY: installs a handler that writes to standard error and sleeps, both

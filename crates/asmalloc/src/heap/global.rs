@@ -7,8 +7,8 @@
 //! `docs/safety/asmalloc/heap/global-safety.md`.
 
 use super::Heap;
-use crate::classes::{Class, SmallClass};
-use crate::front::Real;
+use crate::classes::SmallClass;
+use crate::front::{Real, Routines, SLABS, publish_masks};
 use crate::os::Os;
 use crate::os::linux::LinuxOs;
 use core::alloc::{GlobalAlloc, Layout};
@@ -42,6 +42,12 @@ impl Asmalloc {
     /// `None` if no slot or run of the heap starts at `ptr`.
     pub fn usable_size(ptr: *const u8) -> Option<usize> {
         HEAP.usable_size(ptr)
+    }
+
+    /// Walks the heap for `visitor`: every region, free run and cached object. Read-only; a
+    /// racy snapshot when other threads are allocating. See [`crate::stats`].
+    pub fn inspect(visitor: &mut impl crate::stats::Visitor) {
+        HEAP.inspect(Real.slabs(), visitor);
     }
 
     /// Pops an object of `class` with the out-of-line routine (for callers that cannot inline,
@@ -149,45 +155,47 @@ unsafe impl core::alloc::Allocator for Asmalloc {
     }
 }
 
-/// The small class with index `class`, or an abort: the out-of-line routines take any index
-/// below 512, and only a small class's has a magazine.
-fn small_class(class: usize) -> SmallClass {
-    match u8::try_from(class)
-        .ok()
-        .and_then(Class::from_index)
-        .and_then(Class::small)
-    {
+/// The small class whose hot word in slab 0 is at `word`, or an abort: the out-of-line routines
+/// are given such an address, and only a small class's word has magazines.
+///
+/// Also where the masks the out-of-line routines read are written: until they are, every call
+/// of those routines misses and arrives here.
+fn small_class(word: usize) -> SmallClass {
+    publish_masks();
+    match SLABS.class_of_word(word) {
         Some(small) => small,
         None => HEAP
             .os()
-            .abort("an out-of-line routine was called with no small class"),
+            .abort("an out-of-line routine was called with no small class's word"),
     }
 }
 
-/// Where the out-of-line pop routine jumps when it misses, with its own arguments: the object's
-/// address, or 0 if there is no memory. The thread's `rseq_cs` still names the routine's
-/// sequence, which it has left, so an interruption only clears it.
+/// Where the out-of-line pop routine jumps when it misses, with its own argument, the address of
+/// the class's word in slab 0: the object's address, or 0 if there is no memory. The thread's
+/// `rseq_cs` still names the routine's sequence, which it has left, so an interruption only
+/// clears it.
 ///
 /// # Safety
 ///
-/// Reached only by the tail jump of the out-of-line pop, whose caller passed a small class.
+/// Reached only by the tail jump of the out-of-line pop, whose caller passed a small class's
+/// word.
 #[cold]
 #[inline(never)]
-pub(crate) unsafe extern "sysv64" fn pop_slow(class: usize) -> usize {
+pub(crate) unsafe extern "sysv64" fn pop_slow(word: usize) -> usize {
     // SAFETY: GLOBAL-02.
-    unsafe { HEAP.alloc_slow(Real, small_class(class)) }.expose_provenance()
+    unsafe { HEAP.alloc_slow(Real, small_class(word)) }.expose_provenance()
 }
 
 /// Where the out-of-line push routine jumps when it misses, with its own arguments.
 ///
 /// # Safety
 ///
-/// Reached only by the tail jump of the out-of-line push, whose caller passed a small class and
-/// an object of it that the caller owned and gave up (`Asmalloc::free_small`).
+/// Reached only by the tail jump of the out-of-line push, whose caller passed a small class's
+/// word and an object of that class that the caller owned and gave up (`Asmalloc::free_small`).
 #[cold]
 #[inline(never)]
-pub(crate) unsafe extern "sysv64" fn push_slow(class: usize, object: usize) {
-    let class = small_class(class);
+pub(crate) unsafe extern "sysv64" fn push_slow(word: usize, object: usize) {
+    let class = small_class(word);
     let Some(object) = NonNull::new(ptr::with_exposed_provenance_mut::<u8>(object)) else {
         HEAP.os().abort("free of a null pointer through a routine");
     };

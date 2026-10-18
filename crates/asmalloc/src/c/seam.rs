@@ -1,7 +1,8 @@
 //! The C layer's fast path, in one place so that the generated C routines can replace it.
 //!
 //! `docs/research/zen5-roofline.md` section 14 settles what will sit here: generated
-//! `c_malloc`, `c_free` and `c_calloc` routines, each exported as the C symbol itself, that
+//! `c_malloc`, `c_free` and `c_calloc` routines (and a sized free that checks the size against
+//! the address), each exported as the C symbol itself, that
 //! find the class from a table or the region table and leave by `jmp` to the slow paths in
 //! `slow.rs` with their own arguments. Until they exist, the front halves below do the same in
 //! Rust: find the small class, run the existing out-of-line pop or push (which completes its
@@ -64,6 +65,44 @@ pub(super) unsafe fn free(ptr: *mut c_void) {
     }
     // SAFETY: passed through from the caller.
     unsafe { slow::free_slow(ptr) }
+}
+
+/// A sized free (`free_sized`, C++'s sized `delete`): today the class still comes from the
+/// region table and the size is unused. A generated routine will take the class from the size
+/// and check it against the address off the critical path; whatever the size, the slow path
+/// frees exactly what `free` would.
+///
+/// # Safety
+///
+/// As for [`free`]. A wrong `size` is safe.
+#[inline(always)]
+pub(super) unsafe fn free_sized(ptr: *mut c_void, size: usize) {
+    if let Some(object) = NonNull::new(ptr.cast::<u8>())
+        && let Some(Found::Small(class)) = process::find(object.as_ptr())
+    {
+        // SAFETY: SEAM-02.
+        return unsafe { free_small(class, object) };
+    }
+    // SAFETY: passed through from the caller.
+    unsafe { slow::free_sized_slow(ptr, size) }
+}
+
+/// A sized free with an alignment (`free_aligned_sized`, C++'s sized aligned `delete`), as
+/// [`free_sized`].
+///
+/// # Safety
+///
+/// As for [`free`]. A wrong `align` or `size` is safe.
+#[inline(always)]
+pub(super) unsafe fn free_aligned_sized(ptr: *mut c_void, align: usize, size: usize) {
+    if let Some(object) = NonNull::new(ptr.cast::<u8>())
+        && let Some(Found::Small(class)) = process::find(object.as_ptr())
+    {
+        // SAFETY: SEAM-02.
+        return unsafe { free_small(class, object) };
+    }
+    // SAFETY: passed through from the caller.
+    unsafe { slow::free_aligned_sized_slow(ptr, align, size) }
 }
 
 /// `calloc`: for totals up to the calloc table's end, a pop and the zeroing tail; anything

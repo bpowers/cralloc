@@ -6,8 +6,9 @@
 //!   memory is writable. A carve that needs more memory commits ahead of the watermark first
 //!   (and the leaf-bitmap words for the new slots), then publishes the new commit with a
 //!   compare-and-swap, and tries again.
-//! - **Huge pages.** A region starts advised against huge pages. Once it has carved more than
-//!   `policy::HUGE_AFTER_HUGE_PAGES` huge pages, the carve that notices marks everything from
+//! - **Huge pages.** A region starts advised against huge pages. Only classes of small, dense
+//!   slots ever leave that (`policy::wants_huge`). Once such a region has carved more than
+//!   `policy::huge_after` huge pages, the carve that notices marks everything from
 //!   the next huge-page boundary above the committed memory to the end of the region for huge
 //!   pages, records that boundary in the region's `Hints`, and later commits there are whole
 //!   huge pages.
@@ -21,7 +22,7 @@
 //!   while the purge holds the claim of every slot they describe.
 
 use super::layout::{Grow, Hints, Unit};
-use super::policy::{COMMIT_AHEAD_HUGE_PAGES, COMMIT_AHEAD_PAGES, HUGE_AFTER_HUGE_PAGES};
+use super::policy::{COMMIT_AHEAD_HUGE_PAGES, COMMIT_AHEAD_PAGES, huge_after, wants_huge};
 use super::tree::{self, Host};
 use super::word::{BITS, Word, bits_in_word};
 use crate::os::HugePages;
@@ -112,7 +113,11 @@ fn switch_to_huge<H: Host>(host: &H, region: RegionId, now: Grow) -> Option<u32>
     if let Some(from) = Hints::unpack(seen).huge_from {
         return Some(from);
     }
-    let threshold = HUGE_AFTER_HUGE_PAGES * layout.huge_pages() as usize;
+    if !wants_huge(layout.size(), layout.page_size()) {
+        return None;
+    }
+    let region_huge_pages = (layout.region_pages() / layout.huge_pages()) as usize;
+    let threshold = huge_after(region_huge_pages) * layout.huge_pages() as usize;
     if (layout.slot_bytes(now.carved) >> layout.page_shift()) <= threshold {
         return None;
     }
@@ -156,6 +161,10 @@ pub(crate) struct Settled {
     pub(crate) zeroed: u64,
     /// Bytes of the claimed slots that were resident, as far as the clean bits tell.
     pub(crate) resident: usize,
+    /// Bytes of other free slots that the claim made resident again: the rest of the purged
+    /// pages it touched. They were taken out of the retained count when the pages were purged
+    /// and are resident once the claimed slots are written.
+    pub(crate) revived: usize,
 }
 
 /// After claiming `bits` of leaf word `index`: tests and clears their zero bits, and clears the
@@ -199,7 +208,116 @@ pub(crate) fn settle<H: Host>(host: &H, region: RegionId, index: u32, bits: u64)
     Settled {
         zeroed,
         resident: claimed.saturating_sub(cleaned * page),
+        revived: (cleaned * page).saturating_sub(claimed),
     }
+}
+
+/// Brings a region's watermark up to the end of the huge page that holds it, when that could
+/// let the page be purged: the region has a huge-page part, the watermark lies inside one of
+/// its huge pages, that page is committed, and every slot of it below the watermark is free.
+/// The first touch of a huge page makes all of it resident, so the part above the watermark is
+/// resident too, and a purge may only take pages wholly below the watermark. So this carves
+/// the slots up to the end of the page, as an allocation would, which no other thread can
+/// then do, and releases them as free; the unit is then like any other and the walk's next
+/// step can purge it. Returns the bytes released (free, and resident if the page was ever
+/// touched) and the words of bitmap read or written.
+///
+/// A racing carve only changes which slots this call gets; whatever it gets it owns and
+/// releases. If the page is not purged after all, the slots are ordinary free slots.
+pub(crate) fn top_up<H: Host>(host: &H, region: RegionId) -> (usize, usize) {
+    let layout = host.layout();
+    let Some(huge) = Hints::unpack(host.meta(region, layout.hints_word()).load()).huge_from else {
+        return (0, 0);
+    };
+    let now = Grow::unpack(host.meta(region, layout.grow_word()).load());
+    if now.carved == 0 || now.carved >= layout.slots() {
+        return (0, 1);
+    }
+    let shift = layout.page_shift();
+    let granule = layout.huge_pages();
+    let mark = layout.slot_bytes(now.carved);
+    let start = ((mark >> shift) as u32) & !(granule - 1);
+    let end = start + granule;
+    if start < huge || end > now.committed || mark == (start as usize) << shift {
+        return (0, 1);
+    }
+    // Every slot touching the page from its start up to the watermark must be free.
+    let first = layout.slot_at((start as usize) << shift);
+    // And one of them must begin in this page. If the only carved slot here is the one that
+    // straddles in from the page below, the program never touched this page (a top-up of that
+    // page carved the straddler), and carving it would walk the watermark up the region one
+    // untouched huge page a pass.
+    let begins_here = if layout.slot_bytes(first) < (start as usize) << shift {
+        first + 1
+    } else {
+        first
+    };
+    if begins_here >= now.carved {
+        return (0, 1);
+    }
+    let (low, high) = (first / BITS, (now.carved - 1) / BITS);
+    for w in low..=high {
+        let mask = bits_in_word(w, first, now.carved - 1);
+        if tree::word(host, tree::Node::leaf(region, w)).load() & mask != mask {
+            return (0, (w - low + 1) as usize);
+        }
+    }
+    let mut words = (high - low + 1) as usize;
+    let last = layout
+        .slot_at(((end as usize) << shift) - 1)
+        .min(layout.slots() - 1);
+    let Carve::Got { first, count } = carve(host, region, last + 1 - now.carved) else {
+        return (0, words);
+    };
+    let until = first + count - 1;
+    for w in first / BITS..=until / BITS {
+        tree::release(host, region, w, bits_in_word(w, first, until));
+        words += 1;
+    }
+    (layout.slot_bytes(count), words)
+}
+
+/// Returns the pages wholly inside slot `slot` to the OS, for a caller that holds the slot
+/// (it is allocated and being freed), then marks them clean and the slot zero if they are all
+/// of it. `true` if the pages went back; `false` if the slot has no whole page, lies in a
+/// huge-page part (which is purged only in whole huge pages) or the OS refused.
+///
+/// # Safety
+///
+/// The caller holds the slot: its free bit is clear because an allocation claimed it for the
+/// caller, who has not released it, and nothing reads or writes the slot's memory during the
+/// call or needs its contents after. The slot is below the watermark.
+pub(crate) unsafe fn purge_held<H: Host>(host: &H, region: RegionId, slot: u32) -> bool {
+    let layout = host.layout();
+    let Some(unit) = layout.slot_unit(slot) else {
+        return false;
+    };
+    let hints = Hints::unpack(host.meta(region, layout.hints_word()).load());
+    if hints.huge_from.is_some_and(|from| unit.end > from) {
+        return false;
+    }
+    let page = layout.page_size();
+    let (offset, len) = (
+        unit.start as usize * page,
+        (unit.end - unit.start) as usize * page,
+    );
+    // SAFETY: the caller's promise, for pages that lie inside the slot.
+    if !unsafe { host.purge(region, offset, len) } {
+        return false;
+    }
+    // The zero and clean bits are written only by the holder of every slot they describe:
+    // the zero bit is this slot's, and the pages are inside this slot.
+    if offset == layout.slot_bytes(slot)
+        && offset + len == layout.slot_bytes(slot + 1)
+        && let Some(at) = layout.zero_word(slot / BITS)
+    {
+        host.meta(region, at).fetch_or(1u64 << (slot % BITS));
+    }
+    for w in unit.start / BITS..=(unit.end - 1) / BITS {
+        let mask = bits_in_word(w, unit.start, unit.end - 1);
+        host.meta(region, layout.clean_word(w)).fetch_or(mask);
+    }
+    true
 }
 
 /// What purging one unit did.

@@ -1,17 +1,17 @@
 //! [`Real`]: the routines as the assembly generated from Lean (`generated/`).
 //!
 //! The generated functions take and return plain words; this module turns them into
-//! [`Routines`] and nothing more. Pop and push are the inlined forms, which take the class and
-//! its mask as constants: a `match` over the small classes picks the instance, so a class known
-//! at compile time leaves one routine and nothing of the `match`, and a class known only at run
-//! time costs a jump through a table. The out-of-line forms, which take the class in a register
-//! and tail-call `pop_slow` and `push_slow` on a miss, are for callers that want one call per
-//! operation (the C entry points); the store-if-equal and stack routines exist only out of
-//! line.
+//! [`Routines`] and nothing more. Pop and push are the inlined forms. They name no class: each
+//! is given the address of its class's word in slab 0 and the class's mask, which a class known
+//! at compile time folds to an address and a constant, and a class known only at run time
+//! computes with an add and a table load. The out-of-line forms, which take the word's address
+//! in a register, read the mask from the table after the slabs and tail-call `pop_slow` and
+//! `push_slow` on a miss, are for callers that want one call per operation (the C entry
+//! points); the store-if-equal and stack routines exist only out of line.
 //!
-//! The generated code names its surroundings by path: `front::SLABS`, `front::MAG_MASKS`,
-//! `front::__rseq_offset`, `front::pop_slow` and `front::push_slow` (see `super`). The ledger
-//! for the unsafe blocks here is `docs/safety/asmalloc/front/real-safety.md`.
+//! The generated code names its surroundings by path: `front::SLABS`, `front::__rseq_offset`,
+//! `front::pop_slow` and `front::push_slow` (see `super`). The ledger for the unsafe blocks
+//! here is `docs/safety/asmalloc/front/real-safety.md`.
 //!
 //! Object pointers cross the assembly as integers. A pushed pointer's provenance is exposed, and
 //! a popped address takes the exposed provenance back; the heap exposes its reservation's
@@ -21,8 +21,8 @@ use super::generated::x86_64::slab as outline;
 use super::generated::x86_64_inline::slab as inline;
 use super::routines::{Routines, StackPop, StackPush, StoreIfEqual};
 use super::slab::{Cpu, Field, Slabs};
-use super::{MASKS, SLABS};
-use crate::classes::{SMALL_COUNT, SmallClass};
+use super::{SLABS, mask};
+use crate::classes::SmallClass;
 use core::ptr::{self, NonNull};
 
 /// The generated routines, on the static [`SLABS`]. A zero-sized handle, private to the crate:
@@ -30,58 +30,13 @@ use core::ptr::{self, NonNull};
 #[derive(Clone, Copy, Debug, Default)]
 pub(crate) struct Real;
 
-/// Instantiates the inlined pop and push for every small class, by class index. The list must
-/// be `1..=SMALL_COUNT`; the constant below checks it.
-macro_rules! by_class {
-    ($($index:literal)*) => {
-        const _: () = {
-            let indexes = [$($index),*];
-            assert!(indexes.len() == SMALL_COUNT);
-            let mut i = 0;
-            while i < indexes.len() {
-                assert!(indexes[i] == i + 1);
-                i += 1;
-            }
-        };
-
-        /// The inlined pop for `class`: the object's address, or 0 on a miss.
-        #[inline(always)]
-        fn pop_inline(class: SmallClass) -> usize {
-            match class.class().index() {
-                $(
-                    // SAFETY: REAL-01.
-                    $index => unsafe { inline::slab_pop::<$index, { MASKS[$index] }>() },
-                )*
-                _ => 0,
-            }
-        }
-
-        /// The inlined push for `class`: whether the object went in.
-        #[inline(always)]
-        fn push_inline(class: SmallClass, object: usize) -> bool {
-            match class.class().index() {
-                $(
-                    // SAFETY: REAL-01.
-                    $index => unsafe { inline::slab_push::<$index, { MASKS[$index] }>(object) },
-                )*
-                _ => false,
-            }
-        }
-    };
-}
-
-by_class!(
-    1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 22
-    23 24 25 26 27 28 29 30 31 32 33 34 35 36 37 38 39 40 41 42 43 44
-);
-
 impl Real {
     /// Pops an object of `class` with the out-of-line routine, which on a miss continues in the
     /// heap's slow path (`pop_slow`). Null if the heap has no memory.
     #[inline]
     pub(crate) fn pop_out_of_line(self, class: SmallClass) -> *mut u8 {
         // SAFETY: REAL-02.
-        let address = unsafe { outline::slab_pop(class.class().index() as usize) };
+        let address = unsafe { outline::slab_pop(SLABS.word(class)) };
         ptr::with_exposed_provenance_mut(address)
     }
 
@@ -95,12 +50,7 @@ impl Real {
     #[inline]
     pub(crate) unsafe fn push_out_of_line(self, class: SmallClass, object: NonNull<u8>) {
         // SAFETY: REAL-02.
-        unsafe {
-            outline::slab_push(
-                class.class().index() as usize,
-                object.as_ptr().expose_provenance(),
-            )
-        }
+        unsafe { outline::slab_push(SLABS.word(class), object.as_ptr().expose_provenance()) }
     }
 }
 
@@ -109,7 +59,7 @@ impl Real {
 unsafe impl Routines for Real {
     #[inline(always)]
     fn slabs(&self) -> &Slabs {
-        &SLABS
+        SLABS.slabs()
     }
 
     #[inline]
@@ -121,12 +71,16 @@ unsafe impl Routines for Real {
 
     #[inline(always)]
     fn pop(&self, class: SmallClass) -> Option<NonNull<u8>> {
-        NonNull::new(ptr::with_exposed_provenance_mut(pop_inline(class)))
+        // SAFETY: REAL-01.
+        let address = unsafe { inline::slab_pop(SLABS.word(class), mask(class) as usize) };
+        NonNull::new(ptr::with_exposed_provenance_mut(address))
     }
 
     #[inline(always)]
     fn push(&self, class: SmallClass, object: NonNull<u8>) -> bool {
-        push_inline(class, object.as_ptr().expose_provenance())
+        let object = object.as_ptr().expose_provenance();
+        // SAFETY: REAL-01.
+        unsafe { inline::slab_push(SLABS.word(class), mask(class) as usize, object) }
     }
 
     #[inline]
@@ -154,7 +108,6 @@ unsafe impl Routines for Real {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::classes::Class;
 
     #[test]
     fn this_thread_reads_a_cpu_with_a_slab() {
@@ -172,11 +125,10 @@ mod tests {
     }
 
     #[test]
-    fn every_class_has_an_inlined_instance() {
-        // A class index outside the small classes misses without touching a slab.
+    fn every_class_word_is_in_slab_zero_of_the_routines_slabs() {
+        let base = ptr::from_ref(Real.slabs()).addr();
         for class in SmallClass::all() {
-            assert_eq!(class.class().index() as usize, class.ordinal() + 1);
+            assert_eq!(SLABS.word(class), base + Field::hot(class).offset());
         }
-        assert!(Class::LARGEST_SMALL.small().is_some());
     }
 }

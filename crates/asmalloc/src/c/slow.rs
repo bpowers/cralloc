@@ -5,10 +5,12 @@
 //! that misses can leave for one with a `jmp` and its argument registers intact
 //! (`docs/research/zen5-roofline.md` section 14): `malloc_slow(size)` for any size, `free_slow(ptr)`
 //! for any pointer, `calloc_slow(total)` for any total (`usize::MAX` for one that overflowed),
-//! and `calloc_zero(block, total)` after a routine popped a block. The ledger entry is
+//! and `calloc_zero(block, total)` after a routine popped a block; and for the sized frees,
+//! `free_sized_slow(ptr, size)` and `free_aligned_sized_slow(ptr, align, size)`, which complete
+//! one whatever the size says. The ledger entry is
 //! `docs/safety/asmalloc/c/slow-safety.md`.
 
-use super::{errno, seam};
+use super::{errno, seam, table};
 use crate::classes::Class;
 use crate::heap::{Found, process};
 use core::alloc::Layout;
@@ -16,9 +18,10 @@ use core::ffi::c_void;
 use core::ptr::{self, NonNull};
 
 /// A block of at least `size` bytes aligned to `align`, a power of two, by C's rules (16 bytes
-/// for a block of 16 or more, whatever is asked), with the requested bytes zeroed if `zero`.
-/// Null if there is no memory, or if no block can have that size and alignment; errno is not
-/// set.
+/// for a block of 16 or more, whatever is asked). With `zero`, all of it that
+/// `malloc_usable_size` reports reads as zero, as glibc's `calloc` makes it: a program that
+/// sizes a block by its usable size may read the slack. Null if there is no memory, or if no
+/// block can have that size and alignment; errno is not set.
 pub(super) fn allocate(size: usize, align: usize, zero: bool) -> *mut u8 {
     let Ok(layout) = Layout::from_size_align(size, align) else {
         return ptr::null_mut();
@@ -28,7 +31,7 @@ pub(super) fn allocate(size: usize, align: usize, zero: bool) -> *mut u8 {
             let object = seam::alloc_small(class);
             if zero && !object.is_null() {
                 // SAFETY: SLOW-01.
-                unsafe { object.write_bytes(0, size) };
+                unsafe { object.write_bytes(0, class.size()) };
             }
             object
         }
@@ -59,16 +62,18 @@ pub(crate) extern "C" fn calloc_slow(total: usize) -> *mut c_void {
     or_enomem(allocate(total, 1, true))
 }
 
-/// Zeroes the first `total` bytes of `block` and returns it: the tail of a `calloc` whose
-/// block a pop found.
+/// Zeroes `block`, all that `malloc_usable_size` reports of it (the class of `total`), and
+/// returns it: the tail of a `calloc` of `total` bytes whose block a pop found.
 ///
 /// # Safety
 ///
-/// `block` is a block of the heap of at least `total` bytes that the caller owns.
+/// `block` is a slot of the C class of `total` bytes (`table::calloc_class`), or for a total
+/// that table does not cover a block of at least `total` bytes, that the caller owns.
 #[inline(never)]
 pub(crate) unsafe extern "C" fn calloc_zero(block: *mut c_void, total: usize) -> *mut c_void {
+    let len = table::calloc_class(total).map_or(total, |class| class.size());
     // SAFETY: SLOW-02.
-    unsafe { block.cast::<u8>().write_bytes(0, total) };
+    unsafe { block.cast::<u8>().write_bytes(0, len) };
     block
 }
 
@@ -90,4 +95,34 @@ pub(crate) unsafe extern "C" fn free_slow(ptr: *mut c_void) {
         Some(Found::Large { .. }) => process::free_large(object),
         None => process::abort("free of a pointer that is not a block of asmalloc's heap"),
     }
+}
+
+/// Completes a sized free, `free_sized(ptr, size)` or C++'s sized `delete`: the size is a
+/// prediction a routine may have acted on, and this frees exactly what `free_slow(ptr)` would.
+///
+/// # Safety
+///
+/// As for [`free_slow`]. A wrong `size` is safe.
+#[cold]
+#[inline(never)]
+pub(crate) unsafe extern "C" fn free_sized_slow(ptr: *mut c_void, _size: usize) {
+    // SAFETY: the caller's promise.
+    unsafe { free_slow(ptr) }
+}
+
+/// Completes `free_aligned_sized(ptr, align, size)` or C++'s sized aligned `delete`, as
+/// [`free_sized_slow`].
+///
+/// # Safety
+///
+/// As for [`free_slow`]. A wrong `align` or `size` is safe.
+#[cold]
+#[inline(never)]
+pub(crate) unsafe extern "C" fn free_aligned_sized_slow(
+    ptr: *mut c_void,
+    _align: usize,
+    _size: usize,
+) {
+    // SAFETY: the caller's promise.
+    unsafe { free_slow(ptr) }
 }
