@@ -131,3 +131,78 @@ pub(super) fn layouts_fit(plan: Plan) {
 fn layouts_fit_the_used_geometries() {
     layouts_fit(any_used_plan());
 }
+
+/// The decay word: a pass under way is stepped whatever the clock says; otherwise a pass
+/// starts exactly when the clock is an interval or more past the word's time, never when the
+/// clock has gone back, and the word that starts it is marked active and keeps the time.
+#[kani::proof]
+fn a_decay_pass_starts_only_after_an_interval() {
+    use super::policy::DECAY_TICKS;
+    use super::purge::{Decay, decay_look};
+    let word: u64 = kani::any();
+    let now: u64 = kani::any();
+    match decay_look(word, now) {
+        Decay::Step => assert!(word & 1 == 1),
+        Decay::Start(next) => {
+            assert!(word & 1 == 0 && next & 1 == 1);
+            assert!(next | 1 == now | 1);
+            assert!(decay_look(next, kani::any()) == Decay::Step);
+            let since = (now & !1).wrapping_sub(word);
+            assert!(since >= DECAY_TICKS && since < 1 << 63);
+        }
+        Decay::Wait => {
+            assert!(word & 1 == 0);
+            let since = (now & !1).wrapping_sub(word);
+            assert!(since < DECAY_TICKS || since >= 1 << 63);
+        }
+    }
+    // A pass that has just ended at `now` does not start again at once.
+    assert!(decay_look(now & !1, now) == Decay::Wait);
+}
+
+/// The small-class cap: a launder never purges at or under the cap, always purges when it
+/// takes the count across the cap, and above the cap purges again at least once for every
+/// `cap / CAP_REARM` the count grows.
+#[kani::proof]
+fn the_cap_fires_on_crossing_and_on_every_step_above() {
+    use super::policy::CAP_REARM;
+    use super::purge::cap_fires;
+    // Sixteen-bit counts: the function divides, and the property does not depend on scale.
+    let (old, new, cap) = (
+        kani::any::<u16>() as usize,
+        kani::any::<u16>() as usize,
+        kani::any::<u16>() as usize,
+    );
+    kani::assume(old <= new && cap >= CAP_REARM);
+    let fires = cap_fires(old, new, cap);
+    if new <= cap {
+        assert!(!fires);
+    }
+    if old <= cap && new > cap {
+        assert!(fires);
+    }
+    if old > cap && new - old >= cap / CAP_REARM {
+        assert!(fires);
+    }
+}
+
+/// A decay pass's goal is never more than is retained, is all of it once that is within the
+/// floor, at least a quarter otherwise, and zero only when nothing is retained.
+#[kani::proof]
+fn a_decay_goal_is_a_quarter_or_the_floor() {
+    use super::policy::{DECAY_SHIFT, decay_goal};
+    let geometry = match kani::any::<u8>() {
+        0 => Geometry::DESIGN,
+        1 => Standard::GEOMETRY,
+        2 => Native::GEOMETRY,
+        _ => Tiny::GEOMETRY,
+    };
+    let retained: usize = kani::any();
+    let goal = decay_goal(geometry, retained);
+    assert!(goal <= retained);
+    assert!(goal >= retained >> DECAY_SHIFT);
+    assert!((goal == 0) == (retained == 0));
+    if retained <= geometry.huge_page_size() {
+        assert!(goal == retained);
+    }
+}

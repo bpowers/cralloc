@@ -1,12 +1,13 @@
 //! The back end over the simulated OS: unit tests, fault injection, a shadow-model property test
 //! and a threaded stress test.
 
-use super::policy::retained_cap;
+use super::policy::{CAP_REARM, DECAY_TICKS, large_retained_cap, retained_cap};
 use super::{Back, Block, Kind, State};
 use crate::classes::{Class, SmallClass};
 use crate::os::sim::{Call, Faults, Native, Shape, SimOs, Standard};
 use crate::os::{HugePages, Os};
 use crate::space::RegionTag;
+use core::ptr::NonNull;
 use std::boxed::Box;
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Mutex;
@@ -176,8 +177,9 @@ fn freeing_a_foreign_pointer_aborts() {
 fn regions_are_assigned_as_a_class_grows() {
     let state = state::<Standard>();
     let back = state.get_or_reserve().unwrap();
-    // 8 KiB slots: enough for two full regions and a few in a third.
-    let class = small(8 << 10);
+    // 1 KiB slots, a class that gets huge pages: enough for two full regions and a few in a
+    // third.
+    let class = small(1024);
     let per = back.space().plan().slots_per_region(class.class()) as usize;
     let slots = fill(&back, class, 2 * per + 4);
     assert_eq!(slots.len(), 2 * per + 4);
@@ -509,27 +511,358 @@ fn passing_the_cap_purges_back_under_it() {
     assert!(!purged);
 }
 
-#[test]
-fn heartbeats_keep_purging_while_over_the_cap() {
-    let state = state::<Standard>();
-    let back = state.get_or_reserve().unwrap();
-    let cap = retained_cap(Standard::GEOMETRY);
-    let class = large(40 << 10);
-    // Large slots, one to a region; free them one at a time so that the frees after the one
-    // that crosses the cap do not purge, then let heartbeats finish.
-    let blocks: Vec<Block> = (0..3 * cap / class.size())
-        .map(|_| back.alloc(class, class.size()).unwrap())
-        .collect();
-    for block in &blocks {
-        paint(block.ptr.as_ptr(), class.size(), 1);
-    }
-    for block in &blocks {
-        back.free(block.ptr, class);
-    }
-    for _ in 0..1000 {
+/// How many heartbeats the tests give a decay pass to finish: far more than a pass over a
+/// simulated heap needs.
+const BEATS: usize = 4000;
+
+fn beat<O: Os>(back: &Back<'_, O>) {
+    for _ in 0..BEATS {
         back.heartbeat();
     }
-    assert!(back.retained() <= cap);
+}
+
+fn pass_under_way<O: Os>(state: &State<O>) -> bool {
+    state.decay.load(core::sync::atomic::Ordering::Relaxed) & 1 != 0
+}
+
+/// The defect the reset caused (`docs/research/memory.md`): in a storm of frees every page
+/// still has a live neighbour while the cap's purge runs, so it purges nothing. The count must
+/// keep those bytes, so that when the neighbours are freed too the memory is still known and
+/// is returned. The old code zeroed the count after the fruitless pass; the second assertion
+/// fails on it, and so does the last, because the survivors' bytes alone never reached the cap.
+#[test]
+#[cfg_attr(miri, ignore)]
+fn a_fruitless_purge_does_not_make_the_count_forget() {
+    let state = state::<Standard>();
+    let back = state.get_or_reserve().unwrap();
+    let os = state.os();
+    let cap = retained_cap(Standard::GEOMETRY);
+    let class = small(1024);
+    let per_page = Standard::GEOMETRY.page_size() / 1024;
+    let n = 2 * cap / 1024;
+    let slots = fill(&back, class, n);
+    assert_eq!(slots.len(), n);
+    for &p in &slots {
+        paint(p, 1024, 3);
+    }
+    // One slot of every page stays live; the rest are freed, well past the cap.
+    let (mut survivors, mut storm): (Vec<*mut u8>, Vec<*mut u8>) = slots
+        .iter()
+        .partition(|p| (p.addr() / 1024).is_multiple_of(per_page));
+    let freed = storm.len() * 1024;
+    assert!(freed > cap && survivors.len() * 1024 < cap);
+    let purges = os.calls(Call::Purge);
+    for chunk in storm.chunks_mut(64) {
+        back.launder(class, chunk);
+    }
+    assert_eq!(os.calls(Call::Purge), purges, "no page was wholly free");
+    assert_eq!(
+        back.retained_small(),
+        freed,
+        "the count forgot fragmented bytes"
+    );
+    // The neighbours go too. Nothing is live now, and the memory comes back with the clock.
+    for chunk in survivors.chunks_mut(64) {
+        back.launder(class, chunk);
+    }
+    // The count still knew the storm's bytes, so these frees took it over further steps and
+    // the cap acted on pages that are wholly free now.
+    assert!(os.calls(Call::Purge) > purges);
+    assert!(back.retained_small() <= cap + cap / CAP_REARM);
+    for _ in 0..40 {
+        os.advance_clock(DECAY_TICKS);
+        beat(&back);
+    }
+    assert_eq!(back.retained(), 0);
+    // SAFETY: no other thread runs, and the back end and this test store only integers.
+    let resident = unsafe { os.resident_bytes() };
+    assert!(resident < n * 1024 / 16, "{resident} bytes still resident");
+}
+
+/// Below the cap nothing is purged until an interval has passed. Then one pass returns about a
+/// quarter, from the top; it does not run again until the next interval; and what stays free
+/// is all gone after enough intervals.
+#[test]
+#[cfg_attr(miri, ignore)]
+fn free_memory_decays_by_quarters_from_the_top() {
+    let state = state::<Standard>();
+    let back = state.get_or_reserve().unwrap();
+    let os = state.os();
+    let class = small(1024);
+    let total = retained_cap(Standard::GEOMETRY) / 2;
+    let mut slots = fill(&back, class, total / 1024);
+    for &p in &slots {
+        paint(p, 1024, 5);
+    }
+    let (lowest, highest) = (slots[0], slots[slots.len() - 1]);
+    back.launder(class, &mut slots);
+    assert_eq!(back.retained(), total);
+    let purges = os.calls(Call::Purge);
+    beat(&back);
+    os.advance_clock(DECAY_TICKS - 1);
+    beat(&back);
+    assert_eq!(
+        os.calls(Call::Purge),
+        purges,
+        "purged before an interval had passed"
+    );
+    os.advance_clock(1);
+    beat(&back);
+    assert!(!pass_under_way(&state));
+    let left = back.retained();
+    assert!(
+        left <= total - total / 4 && left > total / 2,
+        "{left} of {total}"
+    );
+    // SAFETY: no other thread runs, and the back end and this test store only integers.
+    unsafe {
+        assert!(os.is_purged(NonNull::new(highest).unwrap(), 1024));
+        assert!(!os.is_purged(NonNull::new(lowest).unwrap(), 1024));
+    }
+    // No second pass inside the same interval.
+    let purges = os.calls(Call::Purge);
+    beat(&back);
+    assert_eq!(os.calls(Call::Purge), purges);
+    for _ in 0..40 {
+        os.advance_clock(DECAY_TICKS);
+        beat(&back);
+    }
+    assert_eq!(back.retained(), 0);
+}
+
+/// Memory that is reused is not counted as retained and not purged: a claim lowers the count,
+/// and a claim that touches a purged page counts the rest of that page as resident again.
+#[test]
+fn reuse_lowers_the_count_and_reviving_a_page_raises_it() {
+    let state = state::<Standard>();
+    let back = state.get_or_reserve().unwrap();
+    let class = small(1024);
+    let page = Standard::GEOMETRY.page_size();
+    let mut slots = fill(&back, class, 64);
+    back.launder(class, &mut slots);
+    assert_eq!(back.retained(), 64 * 1024);
+    let again = fill(&back, class, 16);
+    assert_eq!(back.retained(), 48 * 1024);
+    assert_eq!(back.trim(), 48 * 1024);
+    assert_eq!(back.retained(), 0);
+    // One slot of a purged page: the page's other slots are free and resident again.
+    let one = fill(&back, class, 1);
+    assert_eq!(back.retained(), page - 1024);
+    let mut all: Vec<*mut u8> = again.into_iter().chain(one).collect();
+    back.launder(class, &mut all);
+    assert_eq!(back.retained(), page + 16 * 1024);
+}
+
+/// A heap whose free memory is all fragmentation is walked once an interval and not between:
+/// the pass ends after one lap, purges nothing, and leaves the count alone.
+#[test]
+#[cfg_attr(miri, ignore)]
+fn a_fragmented_heap_costs_one_lap_an_interval() {
+    let state = state::<Standard>();
+    let back = state.get_or_reserve().unwrap();
+    let os = state.os();
+    let class = small(1024);
+    let per_page = Standard::GEOMETRY.page_size() / 1024;
+    let slots = fill(&back, class, 1024);
+    let (_live, mut freed): (Vec<*mut u8>, Vec<*mut u8>) = slots
+        .iter()
+        .partition(|p| (p.addr() / 1024).is_multiple_of(per_page));
+    back.launder(class, &mut freed);
+    let retained = back.retained();
+    let laps = || state.laps.load(core::sync::atomic::Ordering::Relaxed);
+    for _ in 0..3 {
+        os.advance_clock(DECAY_TICKS);
+        let before = laps();
+        back.heartbeat();
+        assert!(pass_under_way(&state));
+        beat(&back);
+        assert!(!pass_under_way(&state));
+        assert_eq!(laps(), before + 1, "a pass is one lap");
+        beat(&back);
+        assert_eq!(laps(), before + 1, "no walking between passes");
+    }
+    assert_eq!(os.calls(Call::Purge), 0);
+    assert_eq!(back.retained(), retained);
+}
+
+/// While the count stays over the cap, a launder purges again each time the count has grown
+/// by another quarter of the cap, so memory that becomes purgeable later in a burst is found
+/// without waiting for the clock.
+#[test]
+#[cfg_attr(miri, ignore)]
+fn the_cap_acts_again_as_the_count_grows_past_it() {
+    let state = state::<Standard>();
+    let back = state.get_or_reserve().unwrap();
+    let os = state.os();
+    let cap = retained_cap(Standard::GEOMETRY);
+    let class = small(1024);
+    let per_page = Standard::GEOMETRY.page_size() / 1024;
+    let slots = fill(&back, class, 2 * cap / 1024);
+    let (mut survivors, mut storm): (Vec<*mut u8>, Vec<*mut u8>) = slots
+        .iter()
+        .partition(|p| (p.addr() / 1024).is_multiple_of(per_page));
+    for chunk in storm.chunks_mut(64) {
+        back.launder(class, chunk);
+    }
+    assert_eq!(os.calls(Call::Purge), 0);
+    assert!(back.retained_small() > cap);
+    // Freeing the survivors makes pages wholly free, and takes the count over further steps.
+    for chunk in survivors.chunks_mut(64) {
+        back.launder(class, chunk);
+    }
+    assert!(os.calls(Call::Purge) > 0, "the cap never acted again");
+    assert!(back.retained_small() <= cap + cap / CAP_REARM);
+}
+
+/// Freed large slots are kept up to their own small cap; past it each free returns the slot
+/// it frees, so the count never passes the cap by more than nothing; and a program that frees
+/// and reallocates one slot at the cap does not purge each time round.
+#[test]
+#[cfg_attr(miri, ignore)]
+fn freed_large_slots_have_a_small_cap_of_their_own() {
+    let state = state::<Native>();
+    let back = state.get_or_reserve().unwrap();
+    let os = state.os();
+    let class = large(64 << 10);
+    let cap = large_retained_cap(Native::GEOMETRY);
+    let n = 3 * cap / class.size();
+    let blocks: Vec<Block> = (0..n)
+        .map(|_| back.alloc(class, class.size()).unwrap())
+        .collect();
+    for b in &blocks {
+        paint(b.ptr.as_ptr(), class.size(), 0x33);
+    }
+    for (i, b) in blocks.iter().enumerate() {
+        back.free(b.ptr, class);
+        assert!(back.retained_large() <= cap, "after {i} frees");
+    }
+    assert_eq!(back.retained_large(), cap);
+    assert_eq!(back.retained_small(), 0);
+    assert_eq!(os.calls(Call::Purge) as usize, n - cap / class.size());
+    // The first freed were kept and the later ones purged.
+    // SAFETY: no other thread runs, and the back end and this test store only integers.
+    unsafe {
+        assert!(!os.is_purged(blocks[0].ptr, class.size()));
+        assert!(os.is_purged(blocks[n - 1].ptr, class.size()));
+    }
+    let purges = os.calls(Call::Purge);
+    for _ in 0..100 {
+        let block = back.alloc(class, class.size()).unwrap();
+        assert!(!block.zeroed, "reuse takes a kept slot");
+        back.free(block.ptr, class);
+    }
+    assert_eq!(os.calls(Call::Purge), purges, "a loop at the cap purged");
+    // A slot bigger than the cap goes back at once and comes back zeroed.
+    let big = large(2 * cap);
+    let block = back.alloc(big, big.size()).unwrap();
+    paint(block.ptr.as_ptr(), big.size(), 1);
+    back.free(block.ptr, big);
+    assert_eq!(back.retained_large(), cap);
+    let again = back.alloc(big, big.size()).unwrap();
+    assert!(again.zeroed && painted(again.ptr.as_ptr(), big.size(), 0));
+}
+
+/// Only classes of small, dense slots are ever advised for huge pages, however much they
+/// carve: a block of a page or more is often touched in part.
+#[test]
+#[cfg_attr(miri, ignore)]
+fn classes_of_a_page_or_more_never_get_huge_pages() {
+    let state = state::<Native>();
+    let back = state.get_or_reserve().unwrap();
+    let plan = back.space().plan();
+    for class in [small(2048).class(), small(8 << 10).class(), large(64 << 10)] {
+        // More than a region's worth, so a second region is assigned too.
+        let n = plan.slots_per_region(class) as usize + 2;
+        let blocks: Vec<Block> = (0..n)
+            .map(|_| back.alloc(class, class.size()).unwrap())
+            .collect();
+        for b in [blocks[0], blocks[n - 1]] {
+            let region = back.space().locate(b.ptr.as_ptr()).unwrap().region;
+            let base = back.space().region(region);
+            let end = base.map_addr(|a| a.saturating_add(plan.region_size() - 1));
+            assert_eq!(
+                state.os().huge_pages(base),
+                Some(HugePages::Avoid),
+                "{class:?}"
+            );
+            assert_eq!(
+                state.os().huge_pages(end),
+                Some(HugePages::Avoid),
+                "{class:?}"
+            );
+        }
+    }
+}
+
+/// The huge page that holds the watermark can be purged: the purge carves the rest of it,
+/// releases those slots as free and counts them, and then takes the page like any other. The
+/// carved slots are ordinary free slots afterwards.
+#[test]
+#[cfg_attr(miri, ignore)]
+fn the_huge_page_at_the_watermark_is_purged_with_the_rest() {
+    let state = state::<Native>();
+    let back = state.get_or_reserve().unwrap();
+    let os = state.os();
+    let class = small(64);
+    let huge = Native::GEOMETRY.huge_page_size();
+    // Past the threshold and half way into a huge page of the huge-page part.
+    let mut slots = Vec::new();
+    while slots.len() < (6 * huge + huge / 2) / 64 {
+        slots.extend(fill(&back, class, 64));
+    }
+    let count = slots.len();
+    let top = slots[count - 1];
+    for &p in &slots {
+        paint(p, 64, 8);
+    }
+    let region = back.space().locate(top).unwrap().region;
+    let base = back.space().region(region).addr().get();
+    let unit = (top.addr() - base) / huge;
+    assert!(
+        !(top.addr() + 64 - base).is_multiple_of(huge),
+        "the watermark is mid-page"
+    );
+    for chunk in slots.chunks_mut(64) {
+        back.launder(class, chunk);
+    }
+    let purged = back.trim();
+    // Everything carved by the program, and the rest of the watermark's huge page.
+    assert_eq!(purged, (unit + 1) * huge);
+    assert_eq!(back.retained(), 0);
+    // SAFETY: no other thread runs, and the back end and this test store only integers.
+    unsafe {
+        assert!(os.is_purged(NonNull::new(top).unwrap(), 64));
+    }
+    // The slots carved to fill the page are handed out like any others, each once.
+    let again = fill(&back, class, (unit + 1) * huge / 64);
+    let distinct: BTreeSet<usize> = again.iter().map(|p| p.addr()).collect();
+    assert_eq!(distinct.len(), (unit + 1) * huge / 64);
+    assert!(again.iter().all(|&p| p.addr() < base + (unit + 1) * huge));
+    assert!(again.iter().all(|&p| painted(p, 64, 0)));
+}
+
+/// A watermark page with a live slot below the watermark is left alone: nothing is carved.
+#[test]
+#[cfg_attr(miri, ignore)]
+fn a_watermark_page_in_use_is_not_carved() {
+    let state = state::<Native>();
+    let back = state.get_or_reserve().unwrap();
+    let class = small(64);
+    let huge = Native::GEOMETRY.huge_page_size();
+    let mut slots = Vec::new();
+    while slots.len() < (6 * huge + huge / 2) / 64 {
+        slots.extend(fill(&back, class, 64));
+    }
+    let count = slots.len();
+    let live = slots.pop().unwrap();
+    for chunk in slots.chunks_mut(64) {
+        back.launder(class, chunk);
+    }
+    back.trim();
+    // The next never-used slot is still the one after the last the program got.
+    let mut all = fill(&back, class, count);
+    all.sort_unstable();
+    assert_eq!(all[count - 1].addr(), live.addr() + 64);
 }
 
 /// A tiny random number generator, so the property tests need no dependency.
