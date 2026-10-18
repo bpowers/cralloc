@@ -79,18 +79,22 @@ pub fn inspect<O: Os>(
             }
         }
     }
-    for class in SmallClass::all() {
-        depot
-            .full(class)
-            .walk(area, class.magazine(), DEPOT_STEPS, |magazine| {
-                report(visitor, Place::Depot, class, magazine, magazine.level());
-            });
+    for domain in depot.all_domains() {
+        for class in SmallClass::all() {
+            depot
+                .full(domain, class)
+                .walk(area, class.magazine(), DEPOT_STEPS, |magazine| {
+                    report(visitor, Place::Depot, class, magazine, magazine.level());
+                });
+        }
     }
     for size in MagazineSize::all() {
         let mut count = 0;
-        depot
-            .empty(size)
-            .walk(area, size, DEPOT_STEPS, |_| count += 1);
+        for domain in depot.all_domains() {
+            depot
+                .empty(domain, size)
+                .walk(area, size, DEPOT_STEPS, |_| count += 1);
+        }
         visitor.empties(size, count);
     }
 }

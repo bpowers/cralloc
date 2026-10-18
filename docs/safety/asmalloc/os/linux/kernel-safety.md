@@ -7,7 +7,8 @@ The exception is the timestamp-counter read in `ticks` (KERNEL-09).
 Neither Kani nor Miri can run this file; the unit tests in it run every call on the real kernel.
 
 References are to the Linux man pages (mmap(2), mprotect(2), madvise(2), munmap(2),
-membarrier(2), getrandom(2), rt_sigaction(2), sigprocmask(2), tgkill(2), write(2)) and to
+membarrier(2), getrandom(2), rt_sigaction(2), sigprocmask(2), tgkill(2), write(2), openat(2),
+read(2), close(2)) and to
 `include/uapi/linux/{mman,membarrier,random}.h`.
 
 ## KERNEL-01: `range_call`
@@ -190,10 +191,35 @@ CPUs, or goes back makes a drain or a purge pass come earlier or later, and both
 any time (the drain protocol, `depot/drain.rs`; a purge claims the bits of what it returns,
 `back/region.rs`).
 
+## KERNEL-10: `read_file`
+
+**Blocks.** `syscall(OPENAT, [AT_FDCWD, path, O_RDONLY | O_CLOEXEC, 0, 0, 0])`,
+`syscall(READ, [fd, rest, rest.len(), 0, 0, 0])` in a loop, and `int_call(CLOSE, fd, 0, 0)`.
+
+**Preconditions.** `path` is a live slice whose last byte is NUL, which the function checks
+before the first call; `buf` is a live, exclusively borrowed slice.
+
+**Proof.** openat(2) reads the string at `path` up to its NUL, which lies inside the slice, and
+returns a new descriptor or an error; it changes no user memory. `O_CLOEXEC` keeps the
+descriptor from an `exec` that races the call. Each read(2) writes at most its length argument
+to `rest`, the unread tail of `buf`, a live slice of exactly that length, and the count it
+returns is capped at that length before it advances `len`, so `len` never passes `buf.len()`
+and `rest` is never empty when passed (an empty tail ends the loop as "does not fit"). Any bit
+pattern is a valid `u8`. An error or end of file ends the loop. close(2) releases the
+descriptor that this function opened and nothing else holds: the number came from openat in
+this call and was never stored. If a signal handler in another thread closed and reused that
+number in between, which no correct program does to a descriptor it did not open, the reads
+would read another file into `buf` and the close would close it; neither touches memory
+outside `buf`.
+
+**Where it runs.** Only from the process's first slow path (`depot::domain`), never later, so
+that a program that enters a seccomp sandbox afterwards never makes these calls. What it reads
+decides only which cache domain's depot stacks a CPU uses; no safety argument rests on it.
+
 ## KERNEL-07: `unsafe impl Os for LinuxOs`
 
 The comment above the impl maps each promise of the `Os` trait to the kernel behaviour that
-provides it, and KERNEL-01 to KERNEL-06 and KERNEL-09 cover the individual calls. The promises not covered by a
+provides it, and KERNEL-01 to KERNEL-06, KERNEL-09 and KERNEL-10 cover the individual calls. The promises not covered by a
 single call:
 
 - *Valid until unmapped or dropped.* Reservations are mappings of the process. Dropping a

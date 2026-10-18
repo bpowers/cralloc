@@ -35,6 +35,7 @@
 
 mod age;
 mod collect;
+pub(crate) mod domain;
 mod drain;
 mod generation;
 mod heartbeat;
@@ -57,6 +58,7 @@ mod tests;
 #[cfg(kani)]
 mod verify;
 
+pub use domain::{Domain, MAX_DOMAINS};
 pub use drain::Drained;
 pub use generation::Generation;
 pub use heartbeat::{IDLE_TICKS, LOOK_EVERY, Lone, LoneTurn, lone_count};
@@ -79,6 +81,11 @@ use crate::space::Space;
 /// budget sweep chose it (`docs/research/memory.md`, "Magazine budget").
 pub const DEPOT_TARGET: usize = 128 << 10;
 
+/// The bytes of objects another cache domain's stack of a class must hold before a slow path
+/// takes from it, by default: its target, the depth at which its own heartbeats would launder
+/// to the source anyway, so that only a flow from that domain to this one is taken.
+pub const TAKE_ACROSS: usize = DEPOT_TARGET;
+
 /// The limits on memory parked in caches, how often the heartbeat looks around, and which of
 /// the rules that return parked objects are on. Constants in the allocator; tests change them
 /// to reach every path with small magazines and few slow paths, and to show what each rule
@@ -91,6 +98,9 @@ pub struct Tuning {
     pub max_spares: usize,
     /// Bytes of objects a class's depot stack holds before the heartbeat launders.
     pub depot_target: usize,
+    /// Bytes of objects a class's stack in another cache domain must hold before a slow path
+    /// whose own domain's stack is empty takes from it (`slow.rs`).
+    pub take_across: usize,
     /// How many of its own slow paths a CPU makes between looks for an idle slab, and between
     /// looks at a depot stack that no slow path is serving.
     pub look_every: u64,
@@ -109,6 +119,7 @@ impl Tuning {
         spare_budget: SPARE_BUDGET,
         max_spares: MAX_SPARES,
         depot_target: DEPOT_TARGET,
+        take_across: TAKE_ACROSS,
         look_every: LOOK_EVERY,
         refresh_every: REFRESH_EVERY,
         age_limit: true,
@@ -117,29 +128,59 @@ impl Tuning {
 }
 
 /// The depot and the rest of the middle tier's shared state. One per heap, static in the
-/// allocator; the all-zero value is valid: empty stacks, no magazines made, nothing prepared.
+/// allocator; the all-zero value is valid: empty stacks, no magazines made, nothing prepared,
+/// one cache domain.
+///
+/// The stacks are per cache domain ([`domain`]): a slow path pushes to and pops from its CPU's
+/// domain's, so that magazines, and the objects they name, stay in the L3 that freed them.
+/// Untouched domains cost no memory.
 ///
 /// Every group of words is on lines of its own (`crate::lined`): a class's full stack with its
-/// water mark, which its pushes, pops and sheds write; each size's empty stack; the magazine
-/// area's growth; the start-up status and the CPU count, which every slow path reads and almost
-/// nothing writes; and the set of owing classes. Packed together, the stack heads of eight
-/// classes shared a line, and two CPUs exchanging magazines of different classes took it from
-/// each other on every push and pop.
+/// water mark, which its pushes, pops and sheds write; each size's empty stack; each domain's
+/// set of owing classes; the magazine area's growth; the start-up status and the CPU count,
+/// which every slow path reads and almost nothing writes; and the set of domains that owe.
+/// Packed together, the stack heads of eight classes shared a line, and two CPUs exchanging
+/// magazines of different classes took it from each other on every push and pop.
 pub struct Depot {
-    /// Per small class, by ordinal.
-    classes: [Lined<ClassDepot>; SMALL_COUNT],
-    /// Per magazine size, by ordinal: empty magazines.
-    empty: [Lined<Stack>; MagazineSize::COUNT],
+    /// Per cache domain.
+    domains: [DomainDepot; MAX_DOMAINS],
     growth: Lined<Growth>,
     shared: Lined<Shared>,
-    /// The classes whose stacks owe magazines to the source, one bit per ordinal (`shed.rs`).
-    owing: Lined<AtomicU64>,
+    /// The domains whose stacks owe magazines to the source, one bit per domain (`shed.rs`).
+    owing_domains: Lined<AtomicU64>,
+    /// Which CPUs are in which domain.
+    topology: domain::Domains,
     /// Magazines made, for audits.
     #[cfg(test)]
     created: std::sync::atomic::AtomicUsize,
 }
 
-/// One class's part of the depot.
+/// One cache domain's stacks.
+struct DomainDepot {
+    /// Per small class, by ordinal.
+    classes: [Lined<ClassDepot>; SMALL_COUNT],
+    /// Per magazine size, by ordinal: empty magazines.
+    empty: [Lined<Stack>; MagazineSize::COUNT],
+    /// The classes whose stacks owe magazines to the source, one bit per ordinal (`shed.rs`).
+    owing: Lined<AtomicU64>,
+}
+
+impl DomainDepot {
+    const fn new() -> DomainDepot {
+        DomainDepot {
+            classes: [const {
+                Lined::new(ClassDepot {
+                    full: Stack::new(),
+                    water: AtomicU64::new(0),
+                })
+            }; SMALL_COUNT],
+            empty: [const { Lined::new(Stack::new()) }; MagazineSize::COUNT],
+            owing: Lined::new(AtomicU64::new(0)),
+        }
+    }
+}
+
+/// One class's part of a domain's depot.
 struct ClassDepot {
     /// Magazines with objects in them.
     full: Stack,
@@ -164,22 +205,12 @@ struct Shared {
     cpus: AtomicUsize,
 }
 
-#[cfg(not(test))]
-const _: () =
-    assert!(size_of::<Depot>() == crate::lined::LINE * (SMALL_COUNT + MagazineSize::COUNT + 3));
-
 impl Depot {
     /// The empty depot.
     #[allow(clippy::new_without_default)]
     pub const fn new() -> Depot {
         Depot {
-            classes: [const {
-                Lined::new(ClassDepot {
-                    full: Stack::new(),
-                    water: AtomicU64::new(0),
-                })
-            }; SMALL_COUNT],
-            empty: [const { Lined::new(Stack::new()) }; MagazineSize::COUNT],
+            domains: [const { DomainDepot::new() }; MAX_DOMAINS],
             growth: Lined::new(Growth {
                 carved: AtomicUsize::new(0),
                 committed: AtomicUsize::new(0),
@@ -188,25 +219,50 @@ impl Depot {
                 status: AtomicU64::new(0),
                 cpus: AtomicUsize::new(0),
             }),
-            owing: Lined::new(AtomicU64::new(0)),
+            owing_domains: Lined::new(AtomicU64::new(0)),
+            topology: domain::Domains::new(),
             #[cfg(test)]
             created: std::sync::atomic::AtomicUsize::new(0),
         }
     }
 
-    /// The stack of magazines with objects of `class`.
-    pub(crate) fn full(&self, class: SmallClass) -> &Stack {
-        &self.classes[class.ordinal() % SMALL_COUNT].full
+    fn domain(&self, domain: Domain) -> &DomainDepot {
+        &self.domains[domain.index()]
     }
 
-    /// The water mark of the class of ordinal `ordinal` (`shed.rs`).
-    pub(crate) fn water(&self, ordinal: usize) -> &AtomicU64 {
-        &self.classes[ordinal % SMALL_COUNT].water
+    /// The stack of magazines with objects of `class` in `domain`.
+    pub(crate) fn full(&self, domain: Domain, class: SmallClass) -> &Stack {
+        &self.domain(domain).classes[class.ordinal() % SMALL_COUNT].full
     }
 
-    /// The stack of empty magazines of `size`.
-    pub(crate) fn empty(&self, size: MagazineSize) -> &Stack {
-        &self.empty[size.ordinal() % MagazineSize::COUNT]
+    /// The water mark of the class of ordinal `ordinal` in `domain` (`shed.rs`).
+    pub(crate) fn water(&self, domain: Domain, ordinal: usize) -> &AtomicU64 {
+        &self.domain(domain).classes[ordinal % SMALL_COUNT].water
+    }
+
+    /// The set of classes whose stacks in `domain` owe (`shed.rs`).
+    pub(crate) fn owing(&self, domain: Domain) -> &AtomicU64 {
+        &self.domain(domain).owing
+    }
+
+    /// The stack of empty magazines of `size` in `domain`.
+    pub(crate) fn empty(&self, domain: Domain, size: MagazineSize) -> &Stack {
+        &self.domain(domain).empty[size.ordinal() % MagazineSize::COUNT]
+    }
+
+    /// How many cache domains the stacks are kept for: 1 until start-up has found more.
+    pub(crate) fn domain_count(&self) -> usize {
+        self.topology.count()
+    }
+
+    /// Every domain in use.
+    pub(crate) fn all_domains(&self) -> impl Iterator<Item = Domain> {
+        (0..self.domain_count()).map(Domain::folded)
+    }
+
+    /// The domain of CPU `cpu`; domain 0 for none.
+    pub(crate) fn domain_of(&self, cpu: Option<Cpu>) -> Domain {
+        self.topology.of(cpu.map(Cpu::index))
     }
 }
 
@@ -278,13 +334,25 @@ impl<'a, O: Os, R: Routines, S: Source> Cache<'a, O, R, S> {
         self.area.space().os()
     }
 
-    /// Sends a magazine this thread holds to the depot: to its class's stack if it has
-    /// objects, else to its size's empty stack.
+    /// The cache domain of the CPU the thread is on now.
+    fn here(&self) -> Domain {
+        self.depot.domain_of(self.routines.cpu())
+    }
+
+    /// Sends a magazine this thread holds to the depot of the domain the thread is in: to its
+    /// class's stack if it has objects, else to its size's empty stack.
     fn to_depot(&self, class: SmallClass, magazine: Magazine<'_>) {
+        self.to_domain(self.here(), class, magazine);
+    }
+
+    /// Sends a magazine this thread holds to `domain`'s depot, as [`Cache::to_depot`] does.
+    fn to_domain(&self, domain: Domain, class: SmallClass, magazine: Magazine<'_>) {
         if magazine.level() > 0 {
-            self.depot.full(class).push(self.area, magazine);
+            self.depot.full(domain, class).push(self.area, magazine);
         } else {
-            self.depot.empty(magazine.size()).push(self.area, magazine);
+            self.depot
+                .empty(domain, magazine.size())
+                .push(self.area, magazine);
         }
     }
 
@@ -299,13 +367,16 @@ impl<'a, O: Os, R: Routines, S: Source> Cache<'a, O, R, S> {
         level
     }
 
-    /// Pops one magazine of `class` from its depot stack and launders it; the empty magazine
-    /// goes to the empty stack. Returns how many objects it held, or `None` if the stack was
-    /// empty.
-    fn launder_one(&self, class: SmallClass) -> Option<usize> {
-        let magazine = self.depot.full(class).pop(self.area, class.magazine())?;
+    /// Pops one magazine of `class` from its stack in `domain` and launders it; the empty
+    /// magazine goes to that domain's empty stack. Returns how many objects it held, or `None`
+    /// if the stack was empty.
+    fn launder_one(&self, domain: Domain, class: SmallClass) -> Option<usize> {
+        let magazine = self
+            .depot
+            .full(domain, class)
+            .pop(self.area, class.magazine())?;
         let level = self.launder_held(class, &magazine);
-        self.to_depot(class, magazine);
+        self.to_domain(domain, class, magazine);
         Some(level)
     }
 }

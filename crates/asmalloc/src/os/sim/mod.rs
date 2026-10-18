@@ -55,7 +55,7 @@ use self::cpus::Cpus;
 use self::faults::Injector;
 use self::memory::Memory;
 use self::pages::{CHECKING, HUGE, NO_HUGE, PURGED, Pages, RESERVED, START, WIPE, WRITABLE};
-use super::{HugePages, Os, OsError};
+use super::{HugePages, Os, OsError, Topology};
 use crate::classes::MagazineSize;
 use crate::space::Geometry;
 use core::fmt;
@@ -128,7 +128,89 @@ pub struct SimOs<S: Shape = Standard> {
     random: AtomicU64,
     clock: AtomicU64,
     cpus: Cpus<SIM_THREADS>,
+    topology: AtomicU64,
     shape: PhantomData<fn() -> S>,
+}
+
+/// The CPU topology a [`SimOs`] reports through [`Os::topology`]. Its CPUs are the simulated
+/// threads' numbers, `0..SIM_THREADS`, all online.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum SimTopology {
+    /// No topology files, as in a sandbox or without sysfs: every read fails. The default.
+    Missing,
+    /// L3s of `n` consecutive CPUs, listed as ranges (`0-3`).
+    Blocks(u32),
+    /// `n` L3s with CPU `c` in L3 `c % n`, listed one CPU at a time (`0,2,4`).
+    Stripes(u32),
+    /// The online list reads, but no CPU has an L3 file.
+    NoL3,
+    /// The L3 lists hold text that is not a CPU list.
+    Garbage,
+}
+
+impl SimTopology {
+    fn pack(self) -> u64 {
+        match self {
+            SimTopology::Missing => 0,
+            SimTopology::Blocks(n) => 1 | (n as u64) << 8,
+            SimTopology::Stripes(n) => 2 | (n as u64) << 8,
+            SimTopology::NoL3 => 3,
+            SimTopology::Garbage => 4,
+        }
+    }
+
+    fn unpack(word: u64) -> SimTopology {
+        let n = (word >> 8) as u32;
+        match word & 0xff {
+            1 => SimTopology::Blocks(n.max(1)),
+            2 => SimTopology::Stripes(n.max(1)),
+            3 => SimTopology::NoL3,
+            4 => SimTopology::Garbage,
+            _ => SimTopology::Missing,
+        }
+    }
+}
+
+/// Writes CPU-list text into a buffer, as the kernel prints it.
+struct ListWriter<'b> {
+    buf: &'b mut [u8],
+    len: usize,
+    fits: bool,
+}
+
+impl ListWriter<'_> {
+    fn byte(&mut self, b: u8) {
+        match self.buf.get_mut(self.len) {
+            Some(slot) => {
+                *slot = b;
+                self.len += 1;
+            }
+            None => self.fits = false,
+        }
+    }
+
+    fn number(&mut self, n: u32) {
+        if n >= 10 {
+            self.number(n / 10);
+        }
+        self.byte(b'0' + (n % 10) as u8);
+    }
+
+    fn range(&mut self, first: u32, last: u32) {
+        if self.len > 0 {
+            self.byte(b',');
+        }
+        self.number(first);
+        if last != first {
+            self.byte(b'-');
+            self.number(last);
+        }
+    }
+
+    fn done(mut self) -> Option<usize> {
+        self.byte(b'\n');
+        self.fits.then_some(self.len)
+    }
 }
 
 impl<S: Shape> SimOs<S> {
@@ -157,6 +239,7 @@ impl<S: Shape> SimOs<S> {
             random: AtomicU64::new(0),
             clock: AtomicU64::new(0),
             cpus: Cpus::new(),
+            topology: AtomicU64::new(0),
             shape: PhantomData,
         }
     }
@@ -165,6 +248,11 @@ impl<S: Shape> SimOs<S> {
     /// only when a test moves it.
     pub fn advance_clock(&self, ticks: u64) {
         self.clock.fetch_add(ticks, Ordering::AcqRel);
+    }
+
+    /// Sets the CPU topology [`Os::topology`] reports from now on.
+    pub fn set_topology(&self, topology: SimTopology) {
+        self.topology.store(topology.pack(), Ordering::Release);
     }
 
     /// Sets when `call` fails from now on.
@@ -592,6 +680,39 @@ unsafe impl<S: Shape> Os for SimOs<S> {
 
     fn ticks(&self) -> u64 {
         self.clock.load(Ordering::Acquire)
+    }
+
+    fn topology(&self, which: Topology, buf: &mut [u8]) -> Option<usize> {
+        let topology = SimTopology::unpack(self.topology.load(Ordering::Acquire));
+        let last = SIM_THREADS as u32 - 1;
+        let mut out = ListWriter {
+            buf,
+            len: 0,
+            fits: true,
+        };
+        match (topology, which) {
+            (SimTopology::Missing, _) => return None,
+            (_, Topology::Online) => out.range(0, last),
+            (_, Topology::SharedL3(cpu)) if cpu > last => return None,
+            (SimTopology::NoL3, Topology::SharedL3(_)) => return None,
+            (SimTopology::Garbage, Topology::SharedL3(_)) => {
+                for &b in b"0-x" {
+                    out.byte(b);
+                }
+            }
+            (SimTopology::Blocks(n), Topology::SharedL3(cpu)) => {
+                let first = cpu / n * n;
+                out.range(first, (first + n - 1).min(last));
+            }
+            (SimTopology::Stripes(n), Topology::SharedL3(cpu)) => {
+                let mut other = cpu % n;
+                while other <= last {
+                    out.range(other, other);
+                    other += n;
+                }
+            }
+        }
+        out.done()
     }
 
     fn abort(&self, message: &str) -> ! {

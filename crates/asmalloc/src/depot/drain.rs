@@ -33,6 +33,7 @@
 //! and the objects in them, scattered wherever the heap once was, would pin their pages for
 //! ever.
 
+use super::domain::Domain;
 use super::magazine::Magazine;
 use super::{Cache, Source, generation};
 use crate::classes::{SMALL_COUNT, SmallClass, is_marker};
@@ -90,6 +91,8 @@ impl<O: Os, R: Routines, S: Source> Cache<'_, O, R, S> {
         };
         let slab = self.slab(cpu);
         let marker = generation.marker();
+        // What the drain takes stays in the drained CPU's cache domain.
+        let domain = self.depot.domain_of(Some(cpu));
 
         // Step 1.
         let claim = slab.claim().load(Acquire);
@@ -160,8 +163,8 @@ impl<O: Os, R: Routines, S: Source> Cache<'_, O, R, S> {
                     continue;
                 }
                 match kind {
-                    None => self.take_loaded(class, was.addr(), disposal),
-                    Some(_) => self.take_chain(class, was.addr(), disposal),
+                    None => self.take_loaded(domain, class, was.addr(), disposal),
+                    Some(_) => self.take_chain(domain, class, was.addr(), disposal),
                 }
             }
         }
@@ -178,20 +181,26 @@ impl<O: Os, R: Routines, S: Source> Cache<'_, O, R, S> {
             .compare_exchange(generation, 0, AcqRel, Relaxed);
     }
 
-    /// Disposes of a magazine the drain took.
-    fn dispose(&self, class: SmallClass, magazine: Magazine<'_>, disposal: Disposal) {
+    /// Disposes of a magazine the drain took from a slab of `domain`, to that domain's depot.
+    fn dispose(
+        &self,
+        domain: Domain,
+        class: SmallClass,
+        magazine: Magazine<'_>,
+        disposal: Disposal,
+    ) {
         if disposal == Disposal::Launder {
             self.launder_held(class, &magazine);
         }
-        self.to_depot(class, magazine);
+        self.to_domain(domain, class, magazine);
     }
 
     /// Disposes of the magazine a hot word named, at the level the word gave it.
-    fn take_loaded(&self, class: SmallClass, word: usize, disposal: Disposal) {
+    fn take_loaded(&self, domain: Domain, class: SmallClass, word: usize, disposal: Disposal) {
         match self.area.loaded(word, class.magazine()) {
             Some((magazine, level)) => {
                 magazine.set_level(level);
-                self.dispose(class, magazine, disposal);
+                self.dispose(domain, class, magazine, disposal);
             }
             None => self
                 .os()
@@ -200,7 +209,7 @@ impl<O: Os, R: Routines, S: Source> Cache<'_, O, R, S> {
     }
 
     /// Disposes of every magazine of a spare stack, each at its recorded level.
-    fn take_chain(&self, class: SmallClass, head: usize, disposal: Disposal) {
+    fn take_chain(&self, domain: Domain, class: SmallClass, head: usize, disposal: Disposal) {
         let mut next = head;
         while next != 0 {
             let magazine: Magazine<'_> = match self.area.magazine(next, class.magazine()) {
@@ -212,7 +221,7 @@ impl<O: Os, R: Routines, S: Source> Cache<'_, O, R, S> {
             // The link must be read before the depot overwrites it.
             next = magazine.link().load(Acquire).addr();
             magazine.set_level(magazine.level());
-            self.dispose(class, magazine, disposal);
+            self.dispose(domain, class, magazine, disposal);
         }
     }
 }

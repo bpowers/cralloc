@@ -40,6 +40,7 @@ pub(crate) const TIGHT: Tuning = Tuning {
     spare_budget: usize::MAX / 2,
     max_spares: 1,
     depot_target: 2 * (32 << 10),
+    take_across: 2 * (32 << 10),
     look_every: 1,
     refresh_every: 2,
     age_limit: true,
@@ -326,23 +327,30 @@ impl<O: Os, const N: usize> Rig<O, N> {
                 }
             }
         }
-        for class in SmallClass::all() {
-            let stack = self.depot.full(class);
-            let mut total = 0;
-            for magazine in stack.magazines(area, class.magazine()) {
-                let level = magazine.level();
-                assert!(level > 0, "an empty magazine on {class:?}'s depot stack");
-                total += level;
-                place_magazine(&magazine, level, std::format!("depot {class:?}"));
-                census.depot += 1;
+        // Every domain, used or not: a magazine must not be anywhere a census misses.
+        for domain in (0..super::MAX_DOMAINS).map(super::Domain::folded) {
+            for class in SmallClass::all() {
+                let stack = self.depot.full(domain, class);
+                let mut total = 0;
+                for magazine in stack.magazines(area, class.magazine()) {
+                    let level = magazine.level();
+                    assert!(level > 0, "an empty magazine on {class:?}'s depot stack");
+                    total += level;
+                    place_magazine(&magazine, level, std::format!("depot {domain:?} {class:?}"));
+                    census.depot += 1;
+                }
+                assert_eq!(stack.objects(area, class.magazine()) as usize, total);
             }
-            assert_eq!(stack.objects(area, class.magazine()) as usize, total);
-        }
-        for size in crate::classes::MagazineSize::all() {
-            for magazine in self.depot.empty(size).magazines(area, size) {
-                assert_eq!(magazine.level(), 0, "a full magazine on an empty stack");
-                place_magazine(&magazine, 0, std::format!("depot empty {size:?}"));
-                census.depot += 1;
+            for size in crate::classes::MagazineSize::all() {
+                for magazine in self.depot.empty(domain, size).magazines(area, size) {
+                    assert_eq!(magazine.level(), 0, "a full magazine on an empty stack");
+                    place_magazine(
+                        &magazine,
+                        0,
+                        std::format!("depot {domain:?} empty {size:?}"),
+                    );
+                    census.depot += 1;
+                }
             }
         }
         for address in self.source.held() {

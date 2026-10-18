@@ -23,6 +23,7 @@ const QUIET: Tuning = Tuning {
     spare_budget: usize::MAX / 2,
     max_spares: 1,
     depot_target: usize::MAX / 2,
+    take_across: usize::MAX / 2,
     look_every: 1,
     refresh_every: 0,
     age_limit: false,
@@ -178,7 +179,7 @@ fn in_depot(rig: &TestRig, class: SmallClass) -> usize {
     let machine = SimCpu::new(0);
     let cache = rig.cache(&machine);
     rig.depot
-        .full(class)
+        .full(super::Domain::ZERO, class)
         .objects(cache.area(), class.magazine()) as usize
 }
 
@@ -302,7 +303,7 @@ fn refreshed_of(refresh_every: u64, count: usize) -> (usize, usize) {
     let area = cache.area();
     let kept = rig
         .depot
-        .full(class)
+        .full(super::Domain::ZERO, class)
         .magazines(area, class.magazine())
         .len();
     (kept + laundered, laundered)
@@ -440,4 +441,129 @@ fn collect_empties_its_own_slab_without_a_drain() {
 fn spares_behind_an_empty_loaded_magazine_are_swept() {
     assert_eq!(spares_behind_an_empty_magazine(true), 0);
     assert!(spares_behind_an_empty_magazine(false) > 0);
+}
+
+/// A rig whose two CPUs are in cache domains of their own (every simulated CPU its own L3).
+fn two_domains(classes: &[SmallClass], count: usize, tuning: Tuning) -> TestRig {
+    let os = SimOs::new();
+    os.set_topology(crate::os::sim::SimTopology::Blocks(1));
+    Rig::with_os(os, classes, count, tuning)
+}
+
+/// Objects of `class` in the depot stack of `domain`.
+fn in_domain(rig: &TestRig, domain: usize, class: SmallClass) -> usize {
+    let machine = SimCpu::new(0);
+    let cache = rig.cache(&machine);
+    rig.depot
+        .full(super::Domain::folded(domain), class)
+        .objects(cache.area(), class.magazine()) as usize
+}
+
+/// Objects of `class` that CPU `n` allocates and frees again, which with no spares sends its
+/// full magazines to the depot.
+fn free_into_depot(rig: &TestRig, n: i32, class: SmallClass, count: usize) {
+    let machine = SimCpu::new(n);
+    let cache = rig.cache(&machine);
+    let held: Vec<_> = (0..count).filter_map(|_| cache.alloc(class)).collect();
+    assert_eq!(held.len(), count);
+    for object in held {
+        cache.free(class, object);
+    }
+}
+
+/// The depot keeps what a CPU frees in that CPU's domain, and a domain whose CPUs go quiet
+/// sheds its stacks within the intervals a quiet class's stack sheds in, through the looks and
+/// sheds of the other domain's slow paths.
+#[test]
+fn a_quiet_domain_gives_its_stacks_back() {
+    let (idle, busy) = (tiny(0), tiny(1));
+    for shed_unused in [true, false] {
+        let tuning = Tuning {
+            max_spares: 0,
+            shed_unused,
+            ..QUIET
+        };
+        let rig = two_domains(&[idle, busy], 64, tuning);
+        free_into_depot(&rig, 0, idle, 22);
+        assert_eq!(rig.depot.domain_count(), super::MAX_DOMAINS);
+        assert!(in_domain(&rig, 0, idle) >= 20);
+        assert_eq!(
+            in_domain(&rig, 1, idle),
+            0,
+            "kept in the freeing CPU's domain"
+        );
+        let one = SimCpu::new(1);
+        let other = rig.cache(&one);
+        let steps = 8;
+        for _ in 0..3 * steps {
+            rig.os().advance_clock(IDLE_TICKS / steps);
+            for _ in 0..40 {
+                churn(&other, busy, 3);
+            }
+        }
+        rig.census(&[], false);
+        if shed_unused {
+            assert_eq!(in_domain(&rig, 0, idle), 0);
+        } else {
+            assert!(in_domain(&rig, 0, idle) >= 20);
+        }
+    }
+}
+
+/// A slow path whose domain's stack is empty takes from another domain's stack only when that
+/// holds at least the take threshold; otherwise it fills from the source.
+#[test]
+fn a_slow_path_takes_across_domains_only_from_a_stack_at_its_threshold() {
+    let class = tiny(0);
+    for (parked, takes) in [(4, false), (12, true)] {
+        let tuning = Tuning {
+            max_spares: 0,
+            take_across: 10 * class.size(),
+            ..QUIET
+        };
+        let rig = two_domains(&[class], 64, tuning);
+        free_into_depot(&rig, 0, class, parked);
+        let before = in_domain(&rig, 0, class);
+        let one = SimCpu::new(1);
+        let consumer = rig.cache(&one);
+        let object = consumer.alloc(class).unwrap();
+        let after = in_domain(&rig, 0, class);
+        assert_eq!(
+            after < before,
+            takes,
+            "parked {parked}: {before} then {after}"
+        );
+        consumer.free(class, object);
+        rig.census(&[], false);
+    }
+}
+
+/// `collect` launders the depot stacks of every domain, and `maintain` sheds them all.
+#[test]
+fn collect_and_maintain_reach_every_domain() {
+    let class = tiny(0);
+    let tuning = Tuning {
+        max_spares: 0,
+        shed_unused: true,
+        ..QUIET
+    };
+    for maintain in [false, true] {
+        let rig = two_domains(&[class], 64, tuning);
+        free_into_depot(&rig, 0, class, 9);
+        free_into_depot(&rig, 1, class, 9);
+        assert!(in_domain(&rig, 0, class) > 0 && in_domain(&rig, 1, class) > 0);
+        let machine = SimCpu::new(0);
+        let cache = rig.cache(&machine);
+        if maintain {
+            for _ in 0..3 {
+                cache.maintain();
+                rig.os().advance_clock(IDLE_TICKS);
+            }
+        } else {
+            cache.collect();
+        }
+        assert_eq!(in_domain(&rig, 0, class), 0, "maintain {maintain}");
+        assert_eq!(in_domain(&rig, 1, class), 0, "maintain {maintain}");
+        rig.census(&[], false);
+    }
 }

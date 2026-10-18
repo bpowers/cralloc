@@ -6,13 +6,14 @@
 //! wants it paced by time instead runs `maintain` (`maintain.rs`) from a thread of its own.
 //! The clock is read at most once per heartbeat, and only when a decision needs it.
 //!
-//! - **Launder over target.** If the depot stack of the class just served holds more than its
-//!   target, one magazine is popped and its objects go back to the source; the empty magazine
-//!   goes to the empty stack.
+//! - **Launder over target.** If the depot stack of the class just served, in the slow path's
+//!   cache domain, holds more than its target, one magazine is popped and its objects go back
+//!   to the source; the empty magazine goes to the empty stack.
 //! - **Shed what was not needed** (`shed.rs`). A note of the depth of the stack the slow path
-//!   popped from, and on every [`LOOK_EVERY`]th slow path of a CPU a look at one class's stack,
-//!   the classes in turn, which starts its new interval; then at most one magazine laundered
-//!   from a stack that owes.
+//!   popped from, and on every [`LOOK_EVERY`]th slow path of a CPU a look at one class's stacks
+//!   in every cache domain, the classes in turn, which starts their new interval; then at most
+//!   one magazine laundered from a stack that owes. So a domain whose CPUs have gone quiet is
+//!   looked at by the others, and sheds as a quiet class does.
 //! - **Age limit** (`age.rs`). A look at one class of the CPU's own slab, the classes in turn,
 //!   which takes and launders the magazine loaded there if it has been loaded for an interval,
 //!   or launders one full spare of a class with nothing loaded.
@@ -77,6 +78,7 @@
 //! looks that both decide to drain are stopped by the sighting's compare-and-swap and, behind
 //! it, by the drain's own claim.
 
+use super::domain::Domain;
 use super::drain::Disposal;
 use super::{Cache, Depot, Drained, Source, generation};
 use crate::classes::{SMALL_COUNT, SmallClass};
@@ -240,8 +242,8 @@ pub(super) struct Chores {
     pub(super) stale: bool,
     /// It installed a magazine for the class it served in that CPU's slab.
     pub(super) installed: bool,
-    /// It popped a magazine from the depot stack of the class it served.
-    pub(super) popped: bool,
+    /// It popped a magazine from the depot stack of the class it served, in this domain.
+    pub(super) popped: Option<Domain>,
     /// Its purge step is already taken.
     pub(super) purged: bool,
 }
@@ -323,16 +325,20 @@ impl<O: Os, R: Routines, S: Source> Cache<'_, O, R, S> {
             self.unstamp(cpu, class);
         }
         if let Some(class) = served {
-            if self.tuning.shed_unused && chores.popped {
-                self.note_depth(class, &clock);
+            if self.tuning.shed_unused
+                && let Some(domain) = chores.popped
+            {
+                self.note_depth(domain, class, &clock);
             }
-            self.launder(class, &clock);
+            self.launder(self.depot.domain_of(chores.cpu), class, &clock);
         }
         let every = self.tuning.look_every.max(1);
         let looking = activity.filter(|activity| activity.is_multiple_of(every));
         if self.tuning.shed_unused {
             if let Some(class) = looking.and_then(|activity| nth_class(activity / every)) {
-                self.look_at_depth(class, clock.now());
+                for domain in self.depot.all_domains() {
+                    self.look_at_depth(domain, class, clock.now());
+                }
             }
             self.shed(activity.unwrap_or(0));
         }
@@ -358,15 +364,15 @@ impl<O: Os, R: Routines, S: Source> Cache<'_, O, R, S> {
         }
     }
 
-    /// Launders one magazine of `class` if its depot stack is over its target.
-    fn launder(&self, class: SmallClass, clock: &Clock<'_, O>) {
+    /// Launders one magazine of `class` if its depot stack in `domain` is over its target.
+    fn launder(&self, domain: Domain, class: SmallClass, clock: &Clock<'_, O>) {
         let target = self.tuning.depot_target / class.size();
-        let stack = self.depot.full(class);
+        let stack = self.depot.full(domain, class);
         if (stack.objects(self.area, class.magazine()) as usize) <= target {
             return;
         }
-        if self.launder_one(class).is_some() && self.tuning.shed_unused {
-            self.note_depth(class, clock);
+        if self.launder_one(domain, class).is_some() && self.tuning.shed_unused {
+            self.note_depth(domain, class, clock);
         }
     }
 

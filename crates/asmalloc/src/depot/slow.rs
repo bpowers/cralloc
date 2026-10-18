@@ -28,6 +28,7 @@
 //! pinned can be purged. The count is the CPU's own, in the cold part of its slab
 //! ([`Slab::count_retired`](crate::front::Slab)).
 
+use super::domain::Domain;
 use super::heartbeat::Chores;
 use super::magazine::Magazine;
 use super::{Cache, Source};
@@ -99,7 +100,9 @@ impl<'a, O: Os, R: Routines, S: Source> Cache<'a, O, R, S> {
         }
     }
 
-    /// An empty magazine for `class`: from the CPU's spares, the depot, or newly made.
+    /// An empty magazine for `class`: from the CPU's spares, its domain's depot, another
+    /// domain's, or newly made. An empty shell carries no objects, so taking one from another
+    /// domain costs only its own lines, and is better than making a magazine more.
     fn obtain_empty(&self, class: SmallClass, stale: &mut bool) -> Option<Magazine<'a>> {
         if let Some(magazine) = self.spare_pop(class, Spare::Empty, stale) {
             if magazine.level() == 0 {
@@ -107,14 +110,20 @@ impl<'a, O: Os, R: Routines, S: Source> Cache<'a, O, R, S> {
             }
             self.to_depot(class, magazine);
         }
-        if let Some(magazine) = self
-            .depot
-            .empty(class.magazine())
-            .pop(self.area, class.magazine())
-        {
-            return Some(magazine);
+        let here = self.here();
+        let size = class.magazine();
+        for domain in self.domains_from(here) {
+            if let Some(magazine) = self.depot.empty(domain, size).pop(self.area, size) {
+                return Some(magazine);
+            }
         }
-        self.area.create(class.magazine())
+        self.area.create(size)
+    }
+
+    /// Every domain in use, `first` first and the others after it in turn.
+    pub(super) fn domains_from(&self, first: Domain) -> impl Iterator<Item = Domain> {
+        let count = self.depot.domain_count();
+        (0..count).map(move |step| Domain::folded((first.index() + step) % count))
     }
 
     /// A magazine with objects of `class`: from the CPU's spares, the depot, or by filling an
@@ -126,8 +135,8 @@ impl<'a, O: Os, R: Routines, S: Source> Cache<'a, O, R, S> {
             }
             self.to_depot(class, magazine);
         }
-        if let Some(magazine) = self.depot.full(class).pop(self.area, class.magazine()) {
-            chores.popped = true;
+        if let Some((domain, magazine)) = self.pop_full(class) {
+            chores.popped = Some(domain);
             return Obtained::Magazine(magazine);
         }
         let Some(magazine) = self.obtain_empty(class, &mut chores.stale) else {
@@ -138,6 +147,29 @@ impl<'a, O: Os, R: Routines, S: Source> Cache<'a, O, R, S> {
             return Obtained::OutOfMemory;
         }
         Obtained::Magazine(magazine)
+    }
+
+    /// A magazine of `class` from the depot: from the stack of the domain the thread is in,
+    /// else from another domain's stack that holds at least the take threshold
+    /// ([`Tuning::take_across`]), which is where a flow of objects from one domain to another
+    /// passes. A balanced domain's stack is left to that domain, and the caller fills from the
+    /// source instead. With the domain it came from.
+    fn pop_full(&self, class: SmallClass) -> Option<(Domain, Magazine<'a>)> {
+        let here = self.here();
+        let size = class.magazine();
+        if let Some(magazine) = self.depot.full(here, class).pop(self.area, size) {
+            return Some((here, magazine));
+        }
+        let threshold = (self.tuning.take_across / class.size()).max(1);
+        for domain in self.domains_from(here).skip(1) {
+            let stack = self.depot.full(domain, class);
+            if stack.objects(self.area, size) as usize >= threshold
+                && let Some(magazine) = stack.pop(self.area, size)
+            {
+                return Some((domain, magazine));
+            }
+        }
+        None
     }
 
     /// Whether the full magazine a free on `cpu` just displaced is the one in

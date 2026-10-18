@@ -515,7 +515,7 @@ fn the_depot_launders_what_is_over_its_target() {
     let census = rig.census(&[], false);
     let in_depot = rig
         .depot
-        .full(class)
+        .full(super::Domain::ZERO, class)
         .objects(cache.area(), class.magazine()) as usize;
     assert!(in_depot * class.size() <= TIGHT.depot_target + 2 * class.size());
     assert!(rig.source.held().len() >= 12, "{census:?}");
@@ -662,9 +662,9 @@ fn trace(rig: &TestRig) -> Trace {
             .map(|cpu| rig.slabs().slab(cpu).seen().load(Relaxed))
             .collect(),
         water: (0..crate::classes::SMALL_COUNT)
-            .map(|o| rig.depot.water(o).load(Relaxed))
+            .map(|o| rig.depot.water(super::Domain::ZERO, o).load(Relaxed))
             .collect(),
-        owing: rig.depot.owing.load(Relaxed),
+        owing: rig.depot.owing(super::Domain::ZERO).load(Relaxed),
     }
 }
 
@@ -776,13 +776,23 @@ fn maintain_without_drains_sheds_the_depot() {
     let keeper = rig.cache(SimCpu::new(1));
     let class = tiny_class();
     let area = keeper.area();
-    assert!(rig.depot.full(class).objects(area, class.magazine()) > 0);
+    assert!(
+        rig.depot
+            .full(super::Domain::ZERO, class)
+            .objects(area, class.magazine())
+            > 0
+    );
     for _ in 0..3 {
         keeper.maintain();
         rig.os().advance_clock(IDLE_TICKS);
     }
     assert_eq!(rig.os().calls(Call::Fence), 0);
-    assert_eq!(rig.depot.full(class).objects(area, class.magazine()), 0);
+    assert_eq!(
+        rig.depot
+            .full(super::Domain::ZERO, class)
+            .objects(area, class.magazine()),
+        0
+    );
     assert!(!cpu_0_is_empty(&rig));
     rig.census(&[], false);
 }

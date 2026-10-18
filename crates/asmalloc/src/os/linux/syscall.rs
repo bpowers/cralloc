@@ -22,7 +22,9 @@ pub(super) const fn int(value: usize) -> Reg {
 
 /// System-call numbers on x86-64 (`arch/x86/entry/syscalls/syscall_64.tbl`).
 pub(super) mod nr {
+    pub const READ: usize = 0;
     pub const WRITE: usize = 1;
+    pub const CLOSE: usize = 3;
     pub const MMAP: usize = 9;
     pub const MPROTECT: usize = 10;
     pub const MUNMAP: usize = 11;
@@ -33,6 +35,7 @@ pub(super) mod nr {
     pub const GETTID: usize = 186;
     pub const EXIT_GROUP: usize = 231;
     pub const TGKILL: usize = 234;
+    pub const OPENAT: usize = 257;
     pub const GETRANDOM: usize = 318;
     pub const MEMBARRIER: usize = 324;
 }

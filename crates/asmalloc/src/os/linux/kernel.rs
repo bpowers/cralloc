@@ -5,7 +5,7 @@
 //! `docs/safety/asmalloc/os/linux/kernel-safety.md`.
 
 use super::syscall::{Reg, int, nr, result, syscall};
-use crate::os::{HugePages, Os, OsError};
+use crate::os::{HugePages, Os, OsError, Topology};
 use crate::space::Geometry;
 use core::ptr::{self, NonNull};
 
@@ -28,6 +28,11 @@ const SIGABRT: usize = 6;
 const SIG_DFL: usize = 0;
 const SIG_UNBLOCK: usize = 1;
 const STDERR: usize = 2;
+/// `openat`'s directory argument for a path relative to the working directory, and its flags
+/// for reading a file that no `exec` should inherit.
+const AT_FDCWD: usize = -100isize as usize;
+const O_RDONLY: usize = 0;
+const O_CLOEXEC: usize = 0o2_000_000;
 /// The kernel's `sigset_t` is one 64-bit word on x86-64.
 const SIGSET_SIZE: usize = 8;
 
@@ -121,6 +126,84 @@ fn getrandom() -> Option<u64> {
         Ok(n) if n.addr() == 8 => Some(value),
         _ => None,
     }
+}
+
+/// Reads the whole file at `path`, a NUL-terminated string, into `buf`. The bytes read, or
+/// `None` if the file cannot be opened or read or does not fit in `buf`.
+fn read_file(path: &[u8], buf: &mut [u8]) -> Option<usize> {
+    if path.last() != Some(&0) {
+        return None;
+    }
+    let name: Reg = path.as_ptr().cast_mut();
+    // SAFETY: KERNEL-10. openat reads the NUL-terminated string at `name`, a live slice whose
+    // last byte is the NUL, and opens a new descriptor that only this function uses.
+    let fd = result(unsafe {
+        syscall(
+            nr::OPENAT,
+            [
+                int(AT_FDCWD),
+                name,
+                int(O_RDONLY | O_CLOEXEC),
+                int(0),
+                int(0),
+                int(0),
+            ],
+        )
+    })
+    .ok()?
+    .addr();
+    let mut len = 0;
+    let whole = loop {
+        let Some(rest) = buf.get_mut(len..).filter(|rest| !rest.is_empty()) else {
+            break false;
+        };
+        let into: Reg = rest.as_mut_ptr();
+        // SAFETY: KERNEL-10. read writes at most `rest.len()` bytes to `into`, the start of a
+        // live, exclusively borrowed slice of that length, from the descriptor opened above.
+        let read = result(unsafe {
+            syscall(
+                nr::READ,
+                [int(fd), into, int(rest.len()), int(0), int(0), int(0)],
+            )
+        });
+        match read {
+            Ok(n) if n.addr() == 0 => break true,
+            Ok(n) => len += n.addr().min(rest.len()),
+            Err(_) => break false,
+        }
+    };
+    // SAFETY: KERNEL-10. close releases the descriptor opened above, which nothing else holds.
+    let _ = unsafe { int_call(nr::CLOSE, fd, 0, 0) };
+    whole.then_some(len)
+}
+
+/// Appends `bytes` to `path` at `at`; `false` if they do not fit.
+fn append(path: &mut [u8], at: &mut usize, bytes: &[u8]) -> bool {
+    match path.get_mut(*at..*at + bytes.len()) {
+        Some(room) => {
+            room.copy_from_slice(bytes);
+            *at += bytes.len();
+            true
+        }
+        None => false,
+    }
+}
+
+/// Appends the decimal digits of `n` to `path` at `at`; `false` if they do not fit.
+fn append_number(path: &mut [u8], at: &mut usize, n: u32) -> bool {
+    let mut digits = [0u8; 10];
+    let mut count = 0;
+    let mut rest = n;
+    loop {
+        digits[count] = b'0' + (rest % 10) as u8;
+        count += 1;
+        rest /= 10;
+        if rest == 0 {
+            break;
+        }
+    }
+    digits[..count].reverse();
+    append(path, at, &digits[..count])
 }
 
 /// Writes all of `bytes` to standard error, giving up on any error.
@@ -347,6 +430,23 @@ unsafe impl Os for LinuxOs {
     fn ticks(&self) -> u64 {
         // SAFETY: KERNEL-09.
         unsafe { core::arch::x86_64::_rdtsc() }
+    }
+
+    fn topology(&self, which: Topology, buf: &mut [u8]) -> Option<usize> {
+        let mut path = [0u8; 96];
+        let mut at = 0;
+        let built = match which {
+            Topology::Online => append(&mut path, &mut at, b"/sys/devices/system/cpu/online\0"),
+            Topology::SharedL3(cpu) => {
+                append(&mut path, &mut at, b"/sys/devices/system/cpu/cpu")
+                    && append_number(&mut path, &mut at, cpu)
+                    && append(&mut path, &mut at, b"/cache/index3/shared_cpu_list\0")
+            }
+        };
+        if !built {
+            return None;
+        }
+        read_file(&path[..at], buf)
     }
 
     fn abort(&self, message: &str) -> ! {

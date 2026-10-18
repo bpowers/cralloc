@@ -37,6 +37,7 @@
 //! a stack shed a magazine early or late, more or less, and never anything worse: shedding is a
 //! launder, which is safe at any time.
 
+use super::domain::Domain;
 use super::heartbeat::{Clock, IDLE_SHIFT};
 use super::{Cache, Source};
 use crate::classes::{SMALL_COUNT, SmallClass};
@@ -152,33 +153,42 @@ impl Water {
 }
 
 impl<O: Os, R: Routines, S: Source> Cache<'_, O, R, S> {
-    /// Looks at the depth of `class`'s stack at `now`: a new low, or the start of a new
-    /// interval and what the stack owes for the last one.
-    pub(super) fn look_at_depth(&self, class: SmallClass, now: u64) {
-        self.update_water(class, Some(interval(now)), 0);
+    /// Looks at the depth of `class`'s stack in `domain` at `now`: a new low, or the start of a
+    /// new interval and what the stack owes for the last one.
+    pub(super) fn look_at_depth(&self, domain: Domain, class: SmallClass, now: u64) {
+        self.update_water(domain, class, Some(interval(now)), 0);
     }
 
-    /// Notes the depth of `class`'s stack after a pop, as a new low if it is one. Reads the
-    /// clock only for a word no look has started yet, once per class: otherwise a pop noted in
-    /// an interval that has ended but not yet been started anew counts toward the old one,
-    /// which can only make the stack shed less.
-    pub(super) fn note_depth(&self, class: SmallClass, clock: &Clock<'_, O>) {
+    /// Notes the depth of `class`'s stack in `domain` after a pop, as a new low if it is one.
+    /// Reads the clock only for a word no look has started yet, once per stack: otherwise a
+    /// pop noted in an interval that has ended but not yet been started anew counts toward the
+    /// old one, which can only make the stack shed less.
+    pub(super) fn note_depth(&self, domain: Domain, class: SmallClass, clock: &Clock<'_, O>) {
         let ordinal = class.ordinal() % SMALL_COUNT;
-        if Water(self.depot.water(ordinal).load(Relaxed)).seen() {
-            self.update_water(class, None, 0);
+        if Water(self.depot.water(domain, ordinal).load(Relaxed)).seen() {
+            self.update_water(domain, class, None, 0);
         } else {
-            self.look_at_depth(class, clock.now());
+            self.look_at_depth(domain, class, clock.now());
         }
     }
 
-    /// Pays `paid` objects off `class`'s debt, then notes its depth, starting a new interval if
-    /// `interval` says one has begun; returns the new word.
-    fn update_water(&self, class: SmallClass, interval: Option<u64>, paid: u32) -> Water {
+    /// Pays `paid` objects off the debt of `class`'s stack in `domain`, then notes its depth,
+    /// starting a new interval if `interval` says one has begun; returns the new word.
+    fn update_water(
+        &self,
+        domain: Domain,
+        class: SmallClass,
+        interval: Option<u64>,
+        paid: u32,
+    ) -> Water {
         let ordinal = class.ordinal() % SMALL_COUNT;
-        let word = &self.depot.water(ordinal);
+        let word = self.depot.water(domain, ordinal);
         let mut seen = word.load(Relaxed);
         loop {
-            let depth = self.depot.full(class).objects(self.area, class.magazine());
+            let depth = self
+                .depot
+                .full(domain, class)
+                .objects(self.area, class.magazine());
             let paid_off = Water(seen).paid(paid);
             let next = match interval {
                 Some(interval) => paid_off.look(depth, interval),
@@ -187,14 +197,13 @@ impl<O: Os, R: Routines, S: Source> Cache<'_, O, R, S> {
             if next.0 == seen {
                 return next;
             }
-            // Sequentially consistent with the set of owing classes, so that a shed that
-            // clears a class's bit and then reads this word cannot miss a debt written here
+            // Sequentially consistent with the sets of owing classes and domains, so that a
+            // shed that clears a bit and then reads this word cannot miss a debt written here
             // whose bit it cleared (see `settle`).
             match word.compare_exchange(seen, next.0, SeqCst, Relaxed) {
                 Ok(_) => {
-                    let bit = 1u64 << ordinal;
-                    if next.owed() > 0 && self.depot.owing.load(SeqCst) & bit == 0 {
-                        self.depot.owing.fetch_or(bit, SeqCst);
+                    if next.owed() > 0 {
+                        self.mark_owing(domain, ordinal);
                     }
                     return next;
                 }
@@ -203,61 +212,107 @@ impl<O: Os, R: Routines, S: Source> Cache<'_, O, R, S> {
         }
     }
 
-    /// Launders one magazine from a stack that owes, if any does: the first owing class at or
-    /// after ordinal `turn` (mod the class count), so that CPUs spread over the classes.
+    /// Sets the owing bits of the stack of `ordinal` in `domain`, and of the domain.
+    fn mark_owing(&self, domain: Domain, ordinal: usize) {
+        let bit = 1u64 << ordinal;
+        let owing = self.depot.owing(domain);
+        if owing.load(SeqCst) & bit == 0 {
+            owing.fetch_or(bit, SeqCst);
+        }
+        let domain_bit = 1u64 << domain.index();
+        if self.depot.owing_domains.load(SeqCst) & domain_bit == 0 {
+            self.depot.owing_domains.fetch_or(domain_bit, SeqCst);
+        }
+    }
+
+    /// Launders one magazine from a stack that owes, if any does: in the first owing domain
+    /// at or after `turn` (mod the domain bits), its first owing class at or after `turn`
+    /// (mod the class count), so that CPUs spread over the domains and the classes.
     pub(super) fn shed(&self, turn: u64) {
-        let owing = self.depot.owing.load(Relaxed);
+        let domains = self.depot.owing_domains.load(Relaxed);
+        if domains == 0 {
+            return;
+        }
+        let start = (turn % u64::BITS as u64) as u32;
+        let index = (domains.rotate_right(start).trailing_zeros() + start) % u64::BITS;
+        let domain = Domain::folded(index as usize);
+        let owing = self.depot.owing(domain).load(Relaxed);
         if owing == 0 {
+            self.settle_domain(domain);
             return;
         }
         let start = (turn % SMALL_COUNT as u64) as u32;
         let ordinal = (owing.rotate_right(start).trailing_zeros() + start) % u64::BITS;
-        let Some(class) = SmallClass::from_ordinal(ordinal as usize) else {
+        self.shed_in(domain, ordinal as usize);
+    }
+
+    /// Launders one magazine from the stack of `ordinal` in `domain` if it owes, and settles
+    /// its bit once its debt is paid.
+    fn shed_in(&self, domain: Domain, ordinal: usize) {
+        let Some(class) = SmallClass::from_ordinal(ordinal) else {
             // No look sets a bit past the classes; one that is set is cleared.
-            self.depot.owing.fetch_and(!(1u64 << ordinal), SeqCst);
+            self.depot
+                .owing(domain)
+                .fetch_and(!(1u64 << ordinal), SeqCst);
             return;
         };
-        let owed = Water(self.depot.water(ordinal as usize).load(Relaxed)).owed();
+        let owed = Water(self.depot.water(domain, ordinal).load(Relaxed)).owed();
         let paid = if owed == 0 {
             0
         } else {
             // An empty stack owes nothing more.
-            self.launder_one(class)
+            self.launder_one(domain, class)
                 .map_or(u32::MAX, |level| level as u32)
         };
-        if self.update_water(class, None, paid).owed() == 0 {
-            self.settle(ordinal as usize);
+        if self.update_water(domain, class, None, paid).owed() == 0 {
+            self.settle(domain, ordinal);
         }
     }
 
-    /// Pays every debt the stacks owe now, a magazine at a time, for `maintain`: what the
-    /// heartbeats of an interval would launder by [`Cache::shed`]. Each shed of an owing class
-    /// pays at least one object or ends the debt, so a class takes at most one shed more than
-    /// the objects it owed when its turn came; the bound only keeps a debt that a racing look
-    /// starts from extending the loop.
+    /// Pays every debt the stacks of every domain owe now, a magazine at a time, for
+    /// `maintain`: what the heartbeats of an interval would launder by [`Cache::shed`]. Each
+    /// shed of an owing stack pays at least one object or ends the debt, so a stack takes at
+    /// most one shed more than the objects it owed when its turn came; the bound only keeps a
+    /// debt that a racing look starts from extending the loop.
     pub(super) fn shed_all(&self) {
-        for class in SmallClass::all() {
-            let ordinal = class.ordinal() % SMALL_COUNT;
-            let bit = 1u64 << ordinal;
-            let owed = Water(self.depot.water(ordinal).load(Relaxed)).owed();
-            for _ in 0..=owed {
-                if self.depot.owing.load(Relaxed) & bit == 0 {
-                    break;
+        for domain in self.depot.all_domains() {
+            for class in SmallClass::all() {
+                let ordinal = class.ordinal() % SMALL_COUNT;
+                let bit = 1u64 << ordinal;
+                let owed = Water(self.depot.water(domain, ordinal).load(Relaxed)).owed();
+                for _ in 0..=owed {
+                    if self.depot.owing(domain).load(Relaxed) & bit == 0 {
+                        break;
+                    }
+                    self.shed_in(domain, ordinal);
                 }
-                // The first owing class at or after this one's ordinal is this one.
-                self.shed(ordinal as u64);
             }
         }
     }
 
-    /// Clears the owing bit of a class whose debt is paid. A look that made it owe again after
+    /// Clears the owing bit of a stack whose debt is paid. A look that made it owe again after
     /// the debt was read either set the bit after this clears it, or wrote its debt before the
-    /// clear, in which case the read below sees it and the bit is set again.
-    fn settle(&self, ordinal: usize) {
+    /// clear, in which case the read below sees it and the bit is set again. Then the domain's
+    /// bit, if no class of it owes.
+    fn settle(&self, domain: Domain, ordinal: usize) {
         let bit = 1u64 << ordinal;
-        self.depot.owing.fetch_and(!bit, SeqCst);
-        if Water(self.depot.water(ordinal).load(SeqCst)).owed() > 0 {
-            self.depot.owing.fetch_or(bit, SeqCst);
+        let owing = self.depot.owing(domain);
+        owing.fetch_and(!bit, SeqCst);
+        if Water(self.depot.water(domain, ordinal).load(SeqCst)).owed() > 0 {
+            owing.fetch_or(bit, SeqCst);
+        }
+        if owing.load(SeqCst) == 0 {
+            self.settle_domain(domain);
+        }
+    }
+
+    /// Clears the owing bit of a domain none of whose stacks owes, as `settle` does a class's:
+    /// a class bit set after the domain's was read is followed by a set of the domain's.
+    fn settle_domain(&self, domain: Domain) {
+        let bit = 1u64 << domain.index();
+        self.depot.owing_domains.fetch_and(!bit, SeqCst);
+        if self.depot.owing(domain).load(SeqCst) != 0 {
+            self.depot.owing_domains.fetch_or(bit, SeqCst);
         }
     }
 }
