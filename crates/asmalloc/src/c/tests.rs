@@ -430,7 +430,10 @@ mod generated {
     fn they_serve_every_c_class_and_large_blocks() {
         for size in [0, 1, 8, 9, 24, 100, 4097, 32 << 10, (32 << 10) + 1, 100_000] {
             let p = routines::malloc(size);
-            assert!(!p.is_null() && Asmalloc::contains(p.cast()), "malloc({size})");
+            assert!(
+                !p.is_null() && Asmalloc::contains(p.cast()),
+                "malloc({size})"
+            );
             assert!(usable(p) >= size);
             if size >= 16 {
                 assert_eq!(p.addr() % 16, 0, "malloc({size})");

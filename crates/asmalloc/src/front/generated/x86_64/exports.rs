@@ -55,7 +55,7 @@ macro_rules! asmalloc_exports_cxx_x86_64 {
                 "5:\nmov r10, QWORD PTR [rip + {__rseq_offset}@GOTPCREL]\nmov r10, QWORD PTR [r10]\nlea r11, [rip + 3f]\nmov QWORD PTR fs:[r10+8], r11\n6:\nmov r8d, DWORD PTR fs:[r10+4]\ncmp r8d, 8192\njae 20f\nshl r8, 12\ntest rdi, rdi\nje 7f\nlea r9, [rip + {SLABS}]\nmov ecx, DWORD PTR [r9+33555456]\nmov rax, rdi\nshr rax, cl\nsub rax, QWORD PTR [r9+33555464]\ncmp rax, 4096\njae 21f\nlea rdx, [r9+33560576]\nmovzx edx, BYTE PTR [rdx+rax*1]\nlea r9, [r9+rdx*8]\nmov rcx, QWORD PTR [r9+r8*1]\nlea rax, [rcx+8]\ntest eax, DWORD PTR [r9+33556480]\nje 22f\nmov QWORD PTR [rcx], rdi\nmov QWORD PTR [r9+r8*1], rax\n7:\n.pushsection __rseq_cs, \"aw\"\n.balign 32\n3:\n.long 0, 0\n.quad 6b, 7b - 6b, 4f\n.popsection\n.pushsection .text.unlikely, \"ax\"\n.byte 0x0f, 0xb9, 0x3d\n.long 0x53053053\n4:\njmp 5b\n.popsection\nret\n20:\njmp {slow}\n21:\njmp {slow}\n22:\njmp {slow}\n.p2align 6",
                 __rseq_offset = sym $crate::front::__rseq_offset,
                 SLABS = sym $crate::front::SLABS,
-                slow = sym $crate::c::slow::free_slow,
+                slow = sym $crate::c::cxx::operator_delete_slow,
             )
         }
 
@@ -67,7 +67,7 @@ macro_rules! asmalloc_exports_cxx_x86_64 {
                 __rseq_offset = sym $crate::front::__rseq_offset,
                 SLABS = sym $crate::front::SLABS,
                 C_SIZED_SIZES = sym $crate::c::table::C_SIZED_SIZES,
-                slow = sym $crate::c::slow::free_sized_slow,
+                slow = sym $crate::c::cxx::operator_delete_sized_slow,
             )
         }
 
@@ -78,7 +78,7 @@ macro_rules! asmalloc_exports_cxx_x86_64 {
                 "5:\nmov r10, QWORD PTR [rip + {__rseq_offset}@GOTPCREL]\nmov r10, QWORD PTR [r10]\nlea r11, [rip + 3f]\nmov QWORD PTR fs:[r10+8], r11\n6:\nmov r8d, DWORD PTR fs:[r10+4]\ncmp r8d, 8192\njae 20f\nshl r8, 12\ntest rdi, rdi\nje 7f\nlea r9, [rip + {SLABS}]\nmov ecx, DWORD PTR [r9+33555456]\nmov rax, rdi\nshr rax, cl\nsub rax, QWORD PTR [r9+33555464]\ncmp rax, 4096\njae 21f\nlea rdx, [r9+33560576]\nmovzx edx, BYTE PTR [rdx+rax*1]\nlea r9, [r9+rdx*8]\nmov rcx, QWORD PTR [r9+r8*1]\nlea rax, [rcx+8]\ntest eax, DWORD PTR [r9+33556480]\nje 22f\nmov QWORD PTR [rcx], rdi\nmov QWORD PTR [r9+r8*1], rax\n7:\n.pushsection __rseq_cs, \"aw\"\n.balign 32\n3:\n.long 0, 0\n.quad 6b, 7b - 6b, 4f\n.popsection\n.pushsection .text.unlikely, \"ax\"\n.byte 0x0f, 0xb9, 0x3d\n.long 0x53053053\n4:\njmp 5b\n.popsection\nret\n20:\njmp {slow}\n21:\njmp {slow}\n22:\njmp {slow}\n.p2align 6",
                 __rseq_offset = sym $crate::front::__rseq_offset,
                 SLABS = sym $crate::front::SLABS,
-                slow = sym $crate::c::slow::free_slow,
+                slow = sym $crate::c::cxx::operator_delete_slow,
             )
         }
 
@@ -90,7 +90,7 @@ macro_rules! asmalloc_exports_cxx_x86_64 {
                 __rseq_offset = sym $crate::front::__rseq_offset,
                 SLABS = sym $crate::front::SLABS,
                 C_SIZED_SIZES = sym $crate::c::table::C_SIZED_SIZES,
-                slow = sym $crate::c::slow::free_sized_slow,
+                slow = sym $crate::c::cxx::operator_delete_sized_slow,
             )
         }
     };

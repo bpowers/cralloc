@@ -37,6 +37,19 @@ def artifacts : List Artifact := [
     verified := cFreeSized_verified
     restartsOk := cFreeSized_restartsOk
     witnesses := FreeWit.S.witnesses
+    witnessOk := cFreeSized_witnessOk },
+  -- The same code and proofs, leaving for the `delete` family's slow paths.
+  deleteApi.artifact VG.X86_64.target {
+    code := cFree
+    verified := cFree_verified
+    restartsOk := cFree_restartsOk
+    witnesses := FreeWit.F.witnesses
+    witnessOk := cFree_witnessOk },
+  deleteSizedApi.artifact VG.X86_64.target {
+    code := cFreeSized
+    verified := cFreeSized_verified
+    restartsOk := cFreeSized_restartsOk
+    witnesses := FreeWit.S.witnesses
     witnessOk := cFreeSized_witnessOk }]
 
 end VG.Artifacts.CEntry.X86_64

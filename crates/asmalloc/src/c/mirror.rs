@@ -49,7 +49,10 @@ pub(super) fn note(block: *mut u8, class: SmallClass) {
             entry.store(byte, Ordering::Relaxed);
         }
     }
-    debug_assert!(index < REGION_COUNT, "a heap block outside the region table");
+    debug_assert!(
+        index < REGION_COUNT,
+        "a heap block outside the region table"
+    );
 }
 
 #[cfg(test)]
@@ -67,9 +70,15 @@ mod tests {
         let (shift, base) = SLABS.published();
         let (heap_base, region_shift) = process::layout().unwrap();
         assert_eq!(shift.load(Ordering::Relaxed), u64::from(region_shift));
-        assert_eq!(base.load(Ordering::Relaxed) as usize, heap_base >> region_shift);
+        assert_eq!(
+            base.load(Ordering::Relaxed) as usize,
+            heap_base >> region_shift
+        );
         let index = (block.addr() >> region_shift) - (heap_base >> region_shift);
-        assert_eq!(SLABS.regions()[index].load(Ordering::Relaxed), class.class().index());
+        assert_eq!(
+            SLABS.regions()[index].load(Ordering::Relaxed),
+            class.class().index()
+        );
         // SAFETY: a live block, given up once.
         unsafe { crate::c::free(block.cast()) };
     }

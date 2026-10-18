@@ -58,7 +58,7 @@ pub(crate) use real::Real;
 
 use crate::classes::{SMALL_COUNT, SmallClass};
 use core::mem::offset_of;
-use core::sync::atomic::{AtomicU64, AtomicU8, Ordering};
+use core::sync::atomic::{AtomicU8, AtomicU64, Ordering};
 
 /// The number of entries in the masks' table: one per value of a class byte, so that a class
 /// read from the region table indexes it whatever it is, and finds zero, which sends the
@@ -195,8 +195,13 @@ const _: () = {
     assert!(offset_of!(Front, slabs) == 0);
     // What the C frees read on every call is off the page offsets of the slab words the fast
     // paths write (the spare heads, which only slow paths write, may share them).
-    assert!(SHIFT_DISP % SLAB_BYTES >= Slab::HOT_BYTES && (BASE_DISP + 8) % SLAB_BYTES <= MASK_PAGE_OFFSET);
-    assert!(REGION_DISP % SLAB_BYTES == REGION_PAGE_OFFSET && REGION_PAGE_OFFSET >= Slab::USED_BYTES);
+    assert!(
+        SHIFT_DISP % SLAB_BYTES >= Slab::HOT_BYTES
+            && (BASE_DISP + 8) % SLAB_BYTES <= MASK_PAGE_OFFSET
+    );
+    assert!(
+        REGION_DISP % SLAB_BYTES == REGION_PAGE_OFFSET && REGION_PAGE_OFFSET >= Slab::USED_BYTES
+    );
     assert!(size_of::<Front>() == SLAB_COUNT * SLAB_BYTES + 3 * SLAB_BYTES);
     assert!(offset_of!(Front, masks) % SLAB_BYTES == MASK_PAGE_OFFSET);
     assert!(MASK_PAGE_OFFSET + MASK_COUNT * 8 <= SLAB_BYTES);

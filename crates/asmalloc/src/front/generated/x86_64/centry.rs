@@ -96,3 +96,42 @@ pub(crate) unsafe extern "sysv64" fn c_free_sized(ptr: usize, size: usize) {
         slow = sym crate::c::slow::free_sized_slow,
     )
 }
+
+/// C++'s plain `operator delete` and `delete[]`: `c_free`'s code, tail-calling `c::cxx::operator_delete_slow(ptr)` where `c_free` tail-calls `free_slow`.
+///
+/// Contract: `VG.Spec.CEntry.freeContract`.
+///
+/// # Safety
+///
+/// * glibc must have registered the calling thread's rseq area, as it does before the thread can run code that allocates.
+/// * None of `SLABS` (the slabs, `8192 * 4096` bytes), the thread's `rseq_cs` and `cpu_id`, `__rseq_offset`, the masks' table (2048 bytes 33556480 bytes above `SLABS`), the published shift and base index (16 bytes 33555456 bytes above `SLABS`) and the region table (4096 bytes 33560576 bytes above `SLABS`) may overlap the return address on the stack or wrap around the end of the address space, and `rseq_cs` must not overlap any of the others; nor may any but the slabs overlap the slabs (`VG.Spec.CEntry.Ctx.Layout`). Their contents may be anything but as the next item says.
+/// * For every class byte `k` below 256, the low 32 bits of the masks' table's entry `k` must be 0 or the mask `8 * n - 16` of magazines of `n = 2^j` slots for 2 ≤ j ≤ 16; if it is not 0, in each of the 8192 slabs the word `8 * k` must be 0, a marker (a word whose low 19 bits are 1), or the address of a slot other than slot 0 of a magazine of that size (`8 * n` bytes, aligned to `8 * n`) that overlaps none of the memory the previous item names, the return address on the stack, or another slab's magazine of the class, nor wraps around the end of the address space. Every thread and the drainer must keep this from when the function is called until it returns: the function may be aborted and restarted on any CPU in between (`VG.Spec.CEntry.Ctx.inv`).
+#[unsafe(naked)]
+pub(crate) unsafe extern "sysv64" fn c_delete(ptr: usize) {
+    core::arch::naked_asm!(
+        "5:\nmov r10, QWORD PTR [rip + {__rseq_offset}@GOTPCREL]\nmov r10, QWORD PTR [r10]\nlea r11, [rip + 3f]\nmov QWORD PTR fs:[r10+8], r11\n6:\nmov r8d, DWORD PTR fs:[r10+4]\ncmp r8d, 8192\njae 20f\nshl r8, 12\ntest rdi, rdi\nje 7f\nlea r9, [rip + {SLABS}]\nmov ecx, DWORD PTR [r9+33555456]\nmov rax, rdi\nshr rax, cl\nsub rax, QWORD PTR [r9+33555464]\ncmp rax, 4096\njae 21f\nlea rdx, [r9+33560576]\nmovzx edx, BYTE PTR [rdx+rax*1]\nlea r9, [r9+rdx*8]\nmov rcx, QWORD PTR [r9+r8*1]\nlea rax, [rcx+8]\ntest eax, DWORD PTR [r9+33556480]\nje 22f\nmov QWORD PTR [rcx], rdi\nmov QWORD PTR [r9+r8*1], rax\n7:\n.pushsection __rseq_cs, \"aw\"\n.balign 32\n3:\n.long 0, 0\n.quad 6b, 7b - 6b, 4f\n.popsection\n.pushsection .text.unlikely, \"ax\"\n.byte 0x0f, 0xb9, 0x3d\n.long 0x53053053\n4:\njmp 5b\n.popsection\nret\n20:\njmp {slow}\n21:\njmp {slow}\n22:\njmp {slow}\n.p2align 6",
+        __rseq_offset = sym crate::front::__rseq_offset,
+        SLABS = sym crate::front::SLABS,
+        slow = sym crate::c::cxx::operator_delete_slow,
+    )
+}
+
+/// C++'s sized `operator delete` and `delete[]`: `c_free_sized`'s code, tail-calling `c::cxx::operator_delete_sized_slow(ptr, size)` where `c_free_sized` tail-calls `free_sized_slow`.
+///
+/// Contract: `VG.Spec.CEntry.freeSizedContract`.
+///
+/// # Safety
+///
+/// * glibc must have registered the calling thread's rseq area, as it does before the thread can run code that allocates.
+/// * None of `SLABS` (the slabs, `8192 * 4096` bytes), the thread's `rseq_cs` and `cpu_id`, `__rseq_offset`, the masks' table (2048 bytes 33556480 bytes above `SLABS`), the 65536 bytes 2048 bytes into `C_SIZED_SIZES`, the published shift and base index (16 bytes 33555456 bytes above `SLABS`) and the region table (4096 bytes 33560576 bytes above `SLABS`) may overlap the return address on the stack or wrap around the end of the address space, and `rseq_cs` must not overlap any of the others; nor may any but the slabs overlap the slabs (`VG.Spec.CEntry.Ctx.Layout`). Their contents may be anything but as the next item says.
+/// * For every class byte `k` below 256, the low 32 bits of the masks' table's entry `k` must be 0 or the mask `8 * n - 16` of magazines of `n = 2^j` slots for 2 ≤ j ≤ 16; if it is not 0, in each of the 8192 slabs the word `8 * k` must be 0, a marker (a word whose low 19 bits are 1), or the address of a slot other than slot 0 of a magazine of that size (`8 * n` bytes, aligned to `8 * n`) that overlaps none of the memory the previous item names, the return address on the stack, or another slab's magazine of the class, nor wraps around the end of the address space. Every thread and the drainer must keep this from when the function is called until it returns: the function may be aborted and restarted on any CPU in between (`VG.Spec.CEntry.Ctx.inv`).
+#[unsafe(naked)]
+pub(crate) unsafe extern "sysv64" fn c_delete_sized(ptr: usize, size: usize) {
+    core::arch::naked_asm!(
+        "5:\nmov r10, QWORD PTR [rip + {__rseq_offset}@GOTPCREL]\nmov r10, QWORD PTR [r10]\nlea r11, [rip + 3f]\nmov QWORD PTR fs:[r10+8], r11\n6:\nmov r8d, DWORD PTR fs:[r10+4]\ncmp r8d, 8192\njae 20f\nshl r8, 12\nlea r9, [rip + {SLABS}]\nlea rcx, [rip + {C_SIZED_SIZES} + 2048]\nmovzx eax, si\nmovzx edx, BYTE PTR [rcx+rax*1]\nmov ecx, DWORD PTR [r9+33555456]\nmov rax, rdi\nshr rax, cl\nsub rax, QWORD PTR [r9+33555464]\ncmp rax, 4096\njae 21f\ncmp dl, BYTE PTR [r9+rax*1+33560576]\njne 22f\nlea r9, [r9+rdx*8]\nmov rcx, QWORD PTR [r9+r8*1]\nlea rax, [rcx+8]\ntest eax, DWORD PTR [r9+33556480]\nje 23f\nmov QWORD PTR [rcx], rdi\nmov QWORD PTR [r9+r8*1], rax\n7:\n.pushsection __rseq_cs, \"aw\"\n.balign 32\n3:\n.long 0, 0\n.quad 6b, 7b - 6b, 4f\n.popsection\n.pushsection .text.unlikely, \"ax\"\n.byte 0x0f, 0xb9, 0x3d\n.long 0x53053053\n4:\njmp 5b\n.popsection\nret\n20:\njmp {slow}\n21:\njmp {slow}\n22:\njmp {slow}\n23:\njmp {slow}\n.p2align 6",
+        __rseq_offset = sym crate::front::__rseq_offset,
+        SLABS = sym crate::front::SLABS,
+        C_SIZED_SIZES = sym crate::c::table::C_SIZED_SIZES,
+        slow = sym crate::c::cxx::operator_delete_sized_slow,
+    )
+}

@@ -486,7 +486,7 @@ def regionDoc : List String :=
 def operands (table : Option String) (slow : String) : List (String × Operand) :=
   [(RSEQ_OFFSET, .sym (path RSEQ_OFFSET)), (SLABS, .sym (path SLABS))] ++
   (table.map fun t => (t, Operand.sym (tablePath t))).toList ++
-  [(SLOW, .sym (slowPath slow))]
+  [(SLOW, .sym slow)]
 
 /-- The layout constants the Rust side asserts. -/
 def rustConsts : List (String × IntTy × Nat) :=
@@ -509,7 +509,7 @@ def mallocApi : Api where
     at this function's sequence, which it has left.\n\n\
     Contract: `VG.Spec.CEntry.mallocContract`."
   safety := safety [s!"the {MALLOC_LEN} bytes {TABLE_OFF} bytes into `C_SIZES`"]
-  operands := operands (some SIZES) "malloc_slow"
+  operands := operands (some SIZES) (slowPath "malloc_slow")
   rustConsts := rustConsts
   exports := [("c", "malloc")]
 
@@ -525,9 +525,9 @@ def freeApi : Api where
     class's mask is 0 or its magazine has no free slot to spare.\n\n\
     Contract: `VG.Spec.CEntry.freeContract`."
   safety := safety regionDoc
-  operands := operands none "free_slow"
+  operands := operands none (slowPath "free_slow")
   rustConsts := rustConsts
-  exports := [("c", "free"), ("cxx", "_ZdlPv"), ("cxx", "_ZdaPv")]
+  exports := [("c", "free")]
 
 def freeSizedApi : Api where
   module := "centry"
@@ -542,8 +542,31 @@ def freeSizedApi : Api where
     its magazine has no free slot to spare. A wrong size frees exactly what `c_free` would.\n\n\
     Contract: `VG.Spec.CEntry.freeSizedContract`."
   safety := safety (s!"the {SIZED_LEN} bytes {TABLE_OFF} bytes into `C_SIZED_SIZES`" :: regionDoc)
-  operands := operands (some SIZED) "free_sized_slow"
+  operands := operands (some SIZED) (slowPath "free_sized_slow")
   rustConsts := rustConsts
-  exports := [("c", "free_sized"), ("cxx", "_ZdlPvm"), ("cxx", "_ZdaPvm")]
+  exports := [("c", "free_sized")]
+
+/-- C++'s plain `operator delete` and `delete[]`: `c_free`, leaving for the `delete` family's
+own slow path, which handles a pointer outside the heap as `delete` must, not as `free` does. -/
+def deleteApi : Api :=
+  { freeApi with
+    name := "c_delete"
+    summary := "C++'s plain `operator delete` and `delete[]`: `c_free`'s code, tail-calling \
+      `c::cxx::operator_delete_slow(ptr)` where `c_free` tail-calls `free_slow`.\n\n\
+      Contract: `VG.Spec.CEntry.freeContract`."
+    operands := operands none "crate::c::cxx::operator_delete_slow"
+    exports := [("cxx", "_ZdlPv"), ("cxx", "_ZdaPv")] }
+
+/-- C++'s sized `operator delete` and `delete[]`: `c_free_sized`, leaving for the `delete`
+family's own slow path. -/
+def deleteSizedApi : Api :=
+  { freeSizedApi with
+    name := "c_delete_sized"
+    summary := "C++'s sized `operator delete` and `delete[]`: `c_free_sized`'s code, tail-calling \
+      `c::cxx::operator_delete_sized_slow(ptr, size)` where `c_free_sized` tail-calls \
+      `free_sized_slow`.\n\n\
+      Contract: `VG.Spec.CEntry.freeSizedContract`."
+    operands := operands (some SIZED) "crate::c::cxx::operator_delete_sized_slow"
+    exports := [("cxx", "_ZdlPvm"), ("cxx", "_ZdaPvm")] }
 
 end VG.Spec.CEntry

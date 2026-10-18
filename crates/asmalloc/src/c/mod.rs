@@ -328,6 +328,11 @@ macro_rules! export_c_abi {
         // `malloc`, `free` and `free_sized`: the generated routines, defined in this crate.
         $crate::asmalloc_exports_c_x86_64!();
 
+        /// Marks that this module exports the C interface, which `export_cxx_abi!` requires.
+        #[doc(hidden)]
+        #[allow(dead_code)]
+        const ASMALLOC_C_ABI_EXPORTED: () = ();
+
         const _: () = {
             use ::core::ffi::{c_int, c_void};
 
@@ -415,6 +420,8 @@ macro_rules! export_c_abi {
 
 #[cfg(feature = "c-abi")]
 export_c_abi!();
+#[cfg(all(feature = "c-abi", feature = "cxx-abi"))]
+export_cxx_abi!();
 
 #[cfg(test)]
 mod tests;

@@ -123,11 +123,7 @@ pub unsafe extern "C" fn free_sized_slow(ptr: *mut c_void, _size: usize) {
 /// As for [`free_slow`]. A wrong `align` or `size` is safe.
 #[cold]
 #[inline(never)]
-pub unsafe extern "C" fn free_aligned_sized_slow(
-    ptr: *mut c_void,
-    _align: usize,
-    _size: usize,
-) {
+pub unsafe extern "C" fn free_aligned_sized_slow(ptr: *mut c_void, _align: usize, _size: usize) {
     // SAFETY: the caller's promise.
     unsafe { free_slow(ptr) }
 }
