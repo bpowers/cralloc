@@ -22,6 +22,8 @@ struct Census {
     resident: usize,
     /// Bytes of their pages that hold data and are marked clean: resident, and in no count.
     hidden: usize,
+    /// The same for the slots the program holds: a clean bit over a page the tenant wrote.
+    hidden_held: usize,
     /// Slots whose zero bit is set though some byte of them is not zero.
     wrong_zero: usize,
     /// Slots whose zero bit is set.
@@ -57,6 +59,17 @@ fn census<S: Shape>(back: &Back<'_, Sim<S>>) -> Census {
         for slot in 0..carved.min(layout.slots()) {
             let (word, bit) = (slot / BITS, slot % BITS);
             if tree::word(&host, Node::leaf(region, word)).load() >> bit & 1 == 0 {
+                // Held: no clean bit may stand over a page that holds data.
+                let unit = layout.slot_unit(slot).unwrap();
+                let start = back.space().slot(region, class, slot).as_ptr();
+                for p in unit.start..unit.end {
+                    let clean =
+                        host.meta(region, layout.clean_word(p / BITS)).load() >> (p % BITS) & 1;
+                    let at = start.wrapping_add((p - unit.start) as usize * page);
+                    if clean != 0 && holds_data(at, page) {
+                        census.hidden_held += page;
+                    }
+                }
                 continue;
             }
             let zero = host.meta(region, layout.zero_word(word).unwrap()).load() >> bit & 1 != 0;
@@ -346,6 +359,12 @@ fn run(seed: u64, steps: usize, faults: bool) -> Met {
         }
         let census = census(&back);
         assert_eq!(census.wrong_zero, 0, "seed {seed:#x} step {at}");
+        // Clean bits are true: no page marked clean holds data, free or held.
+        assert_eq!(
+            (census.hidden, census.hidden_held),
+            (0, 0),
+            "seed {seed:#x} step {at}: a clean bit over a written page ({census:?})"
+        );
         assert_eq!(
             count(&state),
             census.counted as isize,
@@ -380,7 +399,7 @@ fn runs(salt: u64, seeds: u64, steps: usize, faults: bool) {
         met.join(run(salt ^ seed, steps, faults));
     }
     assert!(
-        met.zero != 0 && met.advised != 0 && met.told != 0 && met.hidden != 0,
+        met.zero != 0 && met.advised != 0 && met.told != 0,
         "the runs missed a case: {met:?}"
     );
 }
@@ -480,7 +499,6 @@ fn racing_tenants_and_purges_leave_the_count_at_the_clean_bits() {
 /// accept the size), and
 /// `a_zero_size_aligned_block_leaves_its_slot_resident_for_good` in `heap::address` shows it.
 #[test]
-#[ignore = "review finding: fails on the code as reviewed"]
 fn a_tenant_that_asked_for_nothing_hides_a_resident_slot_from_the_purge() {
     let state = state::<Native>();
     let back = state.get_or_reserve().unwrap();
@@ -496,8 +514,12 @@ fn a_tenant_that_asked_for_nothing_hides_a_resident_slot_from_the_purge() {
     back.free(empty.ptr, class);
     let census = census(&back);
     assert_eq!(census.resident, class.size(), "the slot is still resident");
-    // The count and the bits agree with each other, and both say nothing is resident.
-    assert_eq!((back.retained(), census.counted), (0, 0));
+    // The count and the bits agree with each other, and with what is resident. (As reviewed,
+    // both said nothing was.)
+    assert_eq!(
+        (back.retained(), census.counted),
+        (class.size(), class.size())
+    );
     os.advance_clock(DECAY_TICKS);
     for _ in 0..64 {
         back.heartbeat();
@@ -520,7 +542,6 @@ fn a_tenant_that_asked_for_nothing_hides_a_resident_slot_from_the_purge() {
 /// one thread whose moves nest at the first piece, which is the order sixteen threads take
 /// when each is preempted during its copy.
 #[test]
-#[ignore = "review finding: fails on the code as reviewed"]
 fn moves_under_way_at_once_each_keep_a_slot_past_the_budget() {
     const MOVERS: usize = 16;
     let state = state::<Native>();
@@ -569,7 +590,6 @@ fn moves_under_way_at_once_each_keep_a_slot_past_the_budget() {
 /// with five times the cap resident in free slots, so growth in another class pays nothing;
 /// only the clocked pass returns it.
 #[test]
-#[ignore = "review finding: fails on the code as reviewed"]
 fn tenants_after_larger_ones_hide_free_memory_from_the_cap() {
     const SLOTS: usize = 40;
     let state = state::<Native>();
@@ -594,7 +614,8 @@ fn tenants_after_larger_ones_hide_free_memory_from_the_cap() {
     }
     let before = census(&back);
     assert_eq!(before.resident, SLOTS * class.size());
-    assert!(back.retained() < cap, "the count is under the cap");
+    // The count is what is resident. (As reviewed, it was under the cap.)
+    assert_eq!(back.retained(), before.resident);
     // A phase change: another class grows by as much as is free and resident.
     let other = large(128 << 10);
     let grown: Vec<_> = (0..before.resident / other.size())

@@ -86,12 +86,10 @@ impl<O: Os> Heap<O> {
                 .is_none_or(|back| room <= back.space().plan().region_size())
         });
         if let Some(room) = roomy
-            && let Some(ptr) = self.alloc_large_aligned(room, C_ALIGN, false)
+            && let Ok(layout) = Layout::from_size_align(room, C_ALIGN)
+            && let Some(grant) = self.alloc_large_using(layout, size, Zero::No)
         {
-            if let Some(back) = self.back() {
-                back.resize(ptr, size);
-            }
-            return Some(ptr);
+            return Some(grant.ptr);
         }
         self.alloc_large_aligned(size, C_ALIGN, false)
     }
@@ -329,7 +327,6 @@ mod tests {
     /// a large slot and records a size of zero, so its free marks the whole slot clean. The
     /// slot's earlier tenant left it resident, and no trim returns it.
     #[test]
-    #[ignore = "review finding: fails on the code as reviewed"]
     fn a_zero_size_aligned_block_leaves_its_slot_resident_for_good() {
         use crate::os::sim::{Shape, Standard};
         let heap = SimHeap::<Standard>::new();
@@ -345,7 +342,8 @@ mod tests {
         // SAFETY: the test's block, freed once.
         unsafe { heap.heap.free_large(empty) };
         let back = heap.heap.back().unwrap();
-        assert_eq!(back.retained(), 0, "nothing is counted");
+        // Counted as resident, which it is. (As reviewed, nothing was counted.)
+        assert_eq!(back.retained(), huge);
         back.trim();
         // SAFETY: no other thread runs, and the heap and this test store only integers.
         let purged = unsafe { heap.heap.os().is_purged(full, huge) };

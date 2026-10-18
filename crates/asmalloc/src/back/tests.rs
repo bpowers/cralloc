@@ -1665,18 +1665,15 @@ fn grown_blocks_are_kept_within_their_budget() {
     let back = state.get_or_reserve().unwrap();
     let os = state.os();
     let huge = Native::GEOMETRY.huge_page_size();
-    let page = Native::GEOMETRY.page_size();
     let budget = kept_grown(Native::GEOMETRY);
-    // Slots more than twice what their blocks write, so that each is charged its block.
     let (old_class, new_class) = (large(192 << 10), large(512 << 10));
-    assert!((96 << 10) + (192 << 10) <= budget);
     let purges = || os.calls(Call::Purge);
     let before = purges();
-    // A block that grows by moving: the slot it leaves is kept, data and all.
+    // A block that grows by moving, as the heap moves it: a fresh slot claimed for the size
+    // the block uses, then the move. The slot it leaves is kept, data and all.
     let old = back.alloc(old_class, 80 << 10).unwrap().ptr;
     pattern(old.as_ptr(), 80 << 10);
-    let new = back.alloc(new_class, new_class.size()).unwrap().ptr;
-    back.resize(new, 160 << 10);
+    let new = back.alloc(new_class, 160 << 10).unwrap().ptr;
     // SAFETY: both are live blocks that nothing else uses, and `new` is fresh.
     unsafe { back.move_large(old, new, 80 << 10, true) };
     assert!(patterned(new.as_ptr(), 80 << 10));
@@ -1685,19 +1682,20 @@ fn grown_blocks_are_kept_within_their_budget() {
         patterned(old.as_ptr(), 80 << 10),
         "the old slot is resident"
     );
-    // Charged what the block could have written, not its whole slot.
+    // Charged the pages its block may have written, not its whole slot: the rest of the
+    // fresh slot was marked clean when it was carved.
     let kept = back.retained_large();
+    let page = Native::GEOMETRY.page_size();
     assert!((80 << 10..=(80 << 10) + page).contains(&kept), "{kept}");
     assert_eq!(os.huge_pages(new), Some(HugePages::Prefer));
-    // Freed with its advice, it is kept too, advice and all, and charged its size in whole
-    // huge pages.
+    // Freed with its advice, it is kept too, advice and all, and charged its block's size in
+    // whole huge pages, which the advice may have faulted.
     back.free(new, new_class);
     assert_eq!(purges(), before);
     assert_eq!(os.huge_pages(new), Some(HugePages::Prefer));
-    assert_eq!(
-        back.retained_large(),
-        kept + (160usize << 10).next_multiple_of(huge)
-    );
+    let advised = back.retained_large() - kept;
+    assert_eq!(advised, (160usize << 10).next_multiple_of(huge));
+    assert!(kept + advised <= budget);
     // A block allocated in it rather than grown into it does not keep the advice.
     let again = back.alloc(new_class, new_class.size()).unwrap();
     assert_eq!(again.ptr, new);
@@ -1714,7 +1712,7 @@ fn grown_blocks_are_kept_within_their_budget() {
     assert_eq!(os.huge_pages(new), Some(HugePages::Avoid));
     assert_eq!(back.retained(), ballast);
     // A plain free keeps its slot whatever the count: this one takes the kept slot the move
-    // left, and gives it back resident.
+    // left, and gives it back resident, charged its pages that are not clean.
     let plain = back.alloc(old_class, old_class.size()).unwrap().ptr;
     assert_eq!(plain, old);
     assert_eq!(back.retained(), ballast - kept);
@@ -1723,77 +1721,89 @@ fn grown_blocks_are_kept_within_their_budget() {
     assert_eq!(back.retained(), ballast - kept + old_class.size());
 }
 
-/// What a free of the large block at `ptr` of `class`, `size` bytes, should add to the
-/// retained count: its size from the slot's stagger, in whole pages (whole huge pages if
-/// the slot is advised), at most the slot. Read before the free, while the slot is held.
-fn charge_of<O: Os>(back: &Back<'_, O>, class: Class, ptr: NonNull<u8>, size: usize) -> usize {
+/// What the free slot holding `ptr` is charged: its pages that are not marked clean.
+fn not_clean<O: Os>(back: &Back<'_, O>, class: Class, ptr: NonNull<u8>) -> usize {
+    use super::tree::Host as _;
+    use super::word::{BITS, Word as _};
+    let host = back.host(class).unwrap();
+    let layout = host.layout();
+    let location = back.space().locate(ptr.as_ptr()).unwrap();
+    let (index, _) = layout.block_at(location.offset as usize).unwrap();
+    let unit = layout.slot_unit(index).unwrap();
+    let clean = (unit.start..unit.end)
+        .filter(|&p| {
+            host.meta(location.region, layout.clean_word(p / BITS))
+                .load()
+                >> (p % BITS)
+                & 1
+                != 0
+        })
+        .count();
+    class.size() - clean * layout.page_size()
+}
+
+/// The pages a block of `size` bytes in the slot holding `ptr` may write: from the slot's
+/// start to its stagger plus `size`, in whole pages, at most the slot.
+fn extent<O: Os>(back: &Back<'_, O>, class: Class, ptr: NonNull<u8>, size: usize) -> usize {
     use super::tree::Host as _;
     let host = back.host(class).unwrap();
     let layout = host.layout();
     let location = back.space().locate(ptr.as_ptr()).unwrap();
     let (index, _) = layout.block_at(location.offset as usize).unwrap();
-    let huge = super::region::recorded(&host, location.region, index)
-        .unwrap()
-        .huge;
-    let start = back
-        .space()
-        .slot(location.region, class, index)
-        .addr()
-        .get();
-    let unit = if huge {
-        layout.huge_pages() as usize * layout.page_size()
-    } else {
-        layout.page_size()
-    };
-    let end = (start + layout.stagger(index) + size).next_multiple_of(unit);
-    let charge = (end - start).min(class.size());
-    // A tail under half the slot is not told apart.
-    if (class.size() - charge) * 2 < class.size() {
-        class.size()
-    } else {
-        charge
-    }
+    (layout.stagger(index) + size)
+        .next_multiple_of(layout.page_size())
+        .min(class.size())
 }
 
-/// A large slot released resident is charged what its last tenant could have written, and a
-/// claim and a purge take back exactly that, for a block at its size, one with room to grow,
-/// a staggered one, one advised for huge pages and one shrunk in place. After a mixed run the
-/// count is back at zero.
+/// A large slot released resident is charged its pages that are not clean, and a claim and a
+/// purge take back exactly that, for a block at its size, one with room to grow (whose slot's
+/// pages past it were marked clean when it was carved), a staggered one, one advised for huge
+/// pages, one shrunk in place (whose tail went back and is clean) and one grown in place over
+/// a clean tail (which `cover` clears). After each case the count is back at zero.
 #[test]
 #[cfg_attr(miri, ignore)]
-fn a_large_slot_is_charged_what_its_tenant_could_write() {
+fn a_large_slot_is_charged_its_pages_that_are_not_clean() {
     let state = state::<Native>();
     let back = state.get_or_reserve().unwrap();
     let page = Native::GEOMETRY.page_size();
     let huge = Native::GEOMETRY.huge_page_size();
     let class = large(256 << 10);
-    // Each case leaves a held block, its size and whether to claim it back (else trim).
-    let cases: [(&str, bool); 6] = [
-        ("whole", true),
-        ("headroom", false),
-        ("staggered", true),
-        ("advised", false),
-        ("shrunk", true),
-        ("grown", true),
+    let cases = [
+        "whole",
+        "headroom",
+        "staggered",
+        "advised",
+        "shrunk",
+        "grown",
     ];
-    for (case, claim) in cases {
+    for case in cases {
         assert_eq!(back.retained(), 0, "{case}");
         // A block held through the case, so that the claim below finds the case's slot.
         let mut skip = None;
-        let (ptr, size) = match case {
-            "whole" => (back.alloc(class, class.size()).unwrap().ptr, class.size()),
-            "headroom" => (back.alloc(class, 40 << 10).unwrap().ptr, 40 << 10),
+        let (ptr, expected) = match case {
+            "whole" => {
+                let ptr = back.alloc(class, class.size()).unwrap().ptr;
+                (ptr, class.size())
+            }
+            "headroom" => {
+                let ptr = back.alloc(class, 40 << 10).unwrap().ptr;
+                (ptr, extent(&back, class, ptr, 40 << 10))
+            }
             "staggered" => {
                 skip = Some(back.alloc_staggered(class, 1 << 10).unwrap().ptr);
                 let ptr = back.alloc_staggered(class, 40 << 10).unwrap().ptr;
                 assert_ne!(ptr.addr().get() % page, 0);
-                (ptr, 40 << 10)
+                (ptr, extent(&back, class, ptr, 40 << 10))
             }
             "advised" => {
-                let ptr = back.alloc(class, class.size()).unwrap().ptr;
+                let ptr = back.alloc(class, 2 * huge).unwrap().ptr;
                 move_in(&back, large(64 << 10), huge, ptr, 2 * huge);
                 assert_eq!(state.os().huge_pages(ptr), Some(HugePages::Prefer));
-                (ptr, 2 * huge)
+                let advised =
+                    (2 * huge)
+                        .next_multiple_of(huge)
+                        .max(extent(&back, class, ptr, 2 * huge));
+                (ptr, advised.min(class.size()))
             }
             "shrunk" => {
                 let ptr = back.alloc(class, class.size()).unwrap().ptr;
@@ -1803,37 +1813,32 @@ fn a_large_slot_is_charged_what_its_tenant_could_write() {
                 (ptr, 2 * page)
             }
             _ => {
-                // A small tenant leaves the slot's tail clean; the next grows into it in place.
+                // A small tenant of a purged slot leaves its tail clean; the next grows into
+                // it in place.
                 let ptr = back.alloc(class, 8 << 10).unwrap().ptr;
                 back.free(ptr, class);
+                back.trim();
                 let ptr = back.alloc(class, 8 << 10).unwrap().ptr;
                 assert_eq!(back.retained(), 0);
                 // SAFETY: the test holds the block and uses none of it during the call.
                 unsafe { back.resize_in_place(ptr, 200 << 10) };
                 paint(ptr.as_ptr(), 200 << 10, 0x24);
-                (ptr, 200 << 10)
+                (ptr, extent(&back, class, ptr, 200 << 10))
             }
         };
         // The advised case's move kept the slot it came from, which is charged too.
         let base = back.retained();
-        let charge = charge_of(&back, class, ptr, size);
-        // The advised block's huge pages fill half its slot or more, by its stagger.
-        if case != "advised" {
-            let told = matches!(case, "headroom" | "staggered" | "shrunk");
-            assert_eq!(charge < class.size(), told, "{case}");
-        }
         back.free(ptr, class);
-        assert_eq!(back.retained(), base + charge, "{case}");
-        if claim {
-            let again = back.alloc(class, class.size()).unwrap().ptr;
-            assert_eq!(
-                again,
-                ptr.map_addr(|a| { core::num::NonZeroUsize::new(a.get() & !(page - 1)).unwrap() })
-            );
-            assert_eq!(back.retained(), base, "{case}");
-            back.free(again, class);
-            assert_eq!(back.retained(), base + class.size(), "{case}");
-        }
+        assert_eq!(back.retained(), base + expected, "{case}");
+        assert_eq!(not_clean(&back, class, ptr), expected, "{case}");
+        let again = back.alloc(class, class.size()).unwrap().ptr;
+        assert_eq!(
+            again,
+            ptr.map_addr(|a| core::num::NonZeroUsize::new(a.get() & !(page - 1)).unwrap())
+        );
+        assert_eq!(back.retained(), base, "{case}");
+        back.free(again, class);
+        assert_eq!(back.retained(), base + class.size(), "{case}");
         let held = back.retained();
         assert_eq!(
             back.trim(),
@@ -1842,20 +1847,19 @@ fn a_large_slot_is_charged_what_its_tenant_could_write() {
         );
         assert_eq!(back.retained(), 0, "{case}");
         if let Some(skip) = skip {
-            let charge = charge_of(&back, class, skip, 1 << 10);
             back.free(skip, class);
-            assert_eq!(back.trim(), charge);
+            back.trim();
             assert_eq!(back.retained(), 0);
         }
     }
 }
 
-/// A small tenant after a large one in a slot kept resident: the large tenant's pages past the
-/// small one's extent stay resident but are marked clean, a known under-count. They are never
-/// taken for zero, and the purge walk still returns all of the slot.
+/// A small tenant after a large one in a slot kept resident: the large tenant's pages are not
+/// clean, so the slot is charged all of them, never reported zero, and returned whole by the
+/// purge walk.
 #[test]
 #[cfg_attr(miri, ignore)]
-fn a_small_tenant_after_a_large_one_is_under_counted_but_never_zero() {
+fn a_small_tenant_after_a_large_one_is_charged_what_is_resident() {
     let state = state::<Native>();
     let back = state.get_or_reserve().unwrap();
     let os = state.os();
@@ -1867,7 +1871,7 @@ fn a_small_tenant_after_a_large_one_is_under_counted_but_never_zero() {
     assert_eq!(small.ptr, big);
     assert!(!small.zeroed);
     back.free(small.ptr, class);
-    assert_eq!(back.retained(), charge_of_free(40 << 10));
+    assert_eq!(back.retained(), class.size(), "all of it is resident");
     let again = back.alloc(class, class.size()).unwrap();
     assert_eq!(again.ptr, big);
     assert!(!again.zeroed, "a resident tail is never reported zero");
@@ -1877,18 +1881,10 @@ fn a_small_tenant_after_a_large_one_is_under_counted_but_never_zero() {
         0x5e
     ));
     back.free(again.ptr, class);
-    let small = back.alloc(class, 40 << 10).unwrap().ptr;
-    back.free(small, class);
     back.trim();
     // SAFETY: no other thread runs, and the back end and this test store only integers.
     unsafe { assert!(os.is_purged(big, class.size()), "the whole slot went back") };
     assert_eq!(back.retained(), 0);
-}
-
-/// The charge of a block of `size` bytes in an unadvised slot at index 0, which has no
-/// stagger: its size in whole pages.
-fn charge_of_free(size: usize) -> usize {
-    size.next_multiple_of(Native::GEOMETRY.page_size())
 }
 
 /// In a slot advised for huge pages, a shrink returns its tail only in whole huge pages, and a
