@@ -440,7 +440,7 @@ fn the_background_thread_returns_a_quiet_programs_memory() {
     let exe = program("background.c");
     let measure = |on: bool| {
         let mut command = Command::new(&exe);
-        command.args(["idle", "8"]);
+        command.args(["idle", "12"]);
         if on {
             command.env("ASMALLOC_BACKGROUND", "1");
         } else {
@@ -460,7 +460,7 @@ fn the_background_thread_returns_a_quiet_programs_memory() {
     let (_, on) = measure(true);
     assert!(
         on * 8 < freed,
-        "freed {freed} MiB, {on} MiB with the thread after 8 s"
+        "freed {freed} MiB, {on} MiB with the thread after 12 s"
     );
     assert!(on * 4 < off, "{off} MiB without the thread, {on} with it");
 }

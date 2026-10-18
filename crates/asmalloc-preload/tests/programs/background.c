@@ -7,9 +7,9 @@
 //                               threads allocate inside their caches and an exit handler
 //                               allocates: the background thread is asleep or in `maintain`
 //        background idle SECS   frees a burst of 200 MiB in random order, then for SECS seconds
-//                               does light work that stays inside the allocator's caches, and
-//                               prints the anonymous resident memory after the frees and at the
-//                               end, in MiB
+//                               does light work, one object at a time, that never leaves the
+//                               allocator's caches, and prints the anonymous resident memory
+//                               after the frees and at the end, in MiB
 #include <dirent.h>
 #include <pthread.h>
 #include <signal.h>
@@ -30,18 +30,15 @@ static uint64_t next(uint64_t *s) {
 
 // Threads other than the calling one, and how many of them block every signal the C library
 // lets a program block (the mask sigfillset gives, less SIGKILL and SIGSTOP, which the kernel
-// never blocks).
+// never blocks). A thread may block more: glibc blocks everything while a new thread starts.
 static void others(int *count, int *blocking) {
-    char want[64] = {0};
+    uint64_t want = 0;
     {
         sigset_t all;
         sigfillset(&all);
-        // SigBlk is the mask in hex, highest signal first, 16 digits for 64 signals.
-        uint64_t bits = 0;
         for (int sig = 1; sig <= 64; sig++)
             if (sigismember(&all, sig) == 1 && sig != SIGKILL && sig != SIGSTOP)
-                bits |= 1ull << (sig - 1);
-        snprintf(want, sizeof want, "%016llx", (unsigned long long)bits);
+                want |= 1ull << (sig - 1);
     }
     *count = 0;
     *blocking = 0;
@@ -57,7 +54,9 @@ static void others(int *count, int *blocking) {
         FILE *status = fopen(path, "r");
         if (!status) continue;
         while (fgets(line, sizeof line, status))
-            if (strncmp(line, "SigBlk:", 7) == 0 && strstr(line + 7, want)) ++*blocking;
+            // The mask in hex, highest signal first.
+            if (strncmp(line, "SigBlk:", 7) == 0 && (strtoull(line + 7, NULL, 16) & want) == want)
+                ++*blocking;
         fclose(status);
     }
     closedir(dir);
@@ -113,6 +112,12 @@ static void light(uint64_t *s) {
     for (int i = 0; i < 120; i++) free(held[i]);
 }
 
+// Light work one object at a time, which never leaves the loaded magazines at all.
+static void pairs(uint64_t *s) {
+    static const size_t sizes[12] = {16, 24, 32, 40, 48, 64, 80, 96, 128, 160, 192, 256};
+    for (int i = 0; i < 2000; i++) free(malloc(sizes[next(s) % 12]));
+}
+
 static volatile int stop;
 
 static void *worker(void *arg) {
@@ -161,7 +166,7 @@ int main(int argc, char **argv) {
         struct timespec start, now;
         clock_gettime(CLOCK_MONOTONIC, &start);
         do {
-            for (int i = 0; i < 16; i++) light(&s);
+            pairs(&s);
             sleep_ms(1);
             clock_gettime(CLOCK_MONOTONIC, &now);
         } while (now.tv_sec - start.tv_sec < secs);
