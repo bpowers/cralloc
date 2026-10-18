@@ -138,7 +138,7 @@ alone() {
 }
 
 limit="$((secs * 3 / 60 + 5))m"
-modes=(churn prodcons fork threadstorm realloc huge idle)
+modes=(churn prodcons fork threadstorm realloc huge idle trim)
 for seed in $(seq 1 "$seeds"); do
   for m in "${modes[@]}"; do
     extra=()
@@ -153,7 +153,7 @@ for seed in $(seq 1 "$seeds"); do
   alone "soak-breakpoint-s$seed" "$mem" "$limit" env SOAK_INSNS="$work/insns" \
     "$soak" breakpoint secs="$secs" seed="$seed"
   # Many threads on two CPUs: preempted and migrated inside sequences all the time.
-  for m in churn prodcons idle fork; do
+  for m in churn prodcons idle fork trim; do
     compare "two-cpus-$m-s$seed" "$mem" "$limit" taskset -c "$two" \
       "$soak" "$m" threads=64 live=500 secs="$secs" seed="$seed"
   done

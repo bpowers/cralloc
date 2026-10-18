@@ -124,7 +124,7 @@ mod tests {
         // Free slots 10..150 (a run that crosses word boundaries) and slot 199.
         let mut freed: Vec<*mut u8> = objects[10..150].to_vec();
         freed.push(objects[199]);
-        back.launder(class, &mut freed);
+        back.launder(class, &freed);
         let mut seen = Seen::default();
         back.inspect(&mut seen);
         assert_eq!(seen.regions.len(), 1);

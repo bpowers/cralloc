@@ -46,7 +46,8 @@
 //!   and at least `cap / policy::CAP_REARM` above the mark. After a purge that could not get
 //!   under the cap, the mark is the lowest the count has been since, so a count that
 //!   fragmentation holds at or over the cap acts once and then only after that much more is
-//!   freed. After a purge that did get under, the next launder past the cap acts again.
+//!   freed. After a purge that returned memory and got under, the next launder past the cap
+//!   acts again (`mark_after`).
 //! - Large classes (`policy::large_retained_cap`): a free that would take the count over the
 //!   cap returns the slot's pages to the OS before it releases the slot (`Back::free`). The
 //!   freeing thread still holds the slot, so this needs no claim and no search.
@@ -155,6 +156,22 @@ pub(crate) const fn cap_fires(mark: usize, new: usize, cap: usize) -> bool {
     new > cap && new - low >= cap / CAP_REARM
 }
 
+/// The cap's mark after a purge for the cap that purged `purged` bytes and left the
+/// small-class count at `left`. A purge that got the count under the cap shows the cap is
+/// working: the mark goes a step below the count, so the next launder past the cap acts again.
+/// Otherwise (what is left is fragmentation, or beyond the bound) the mark is the count, and
+/// the next purge waits for a step above it. A count under the cap after a purge that returned
+/// nothing was lowered by someone else, a fill on another thread, and says nothing about
+/// whether purging works, so it does not re-arm: if it did, every launder that took the count
+/// back over would walk the heap again for nothing.
+pub(crate) const fn mark_after(left: usize, cap: usize, purged: usize) -> usize {
+    if purged != 0 && left <= cap {
+        left.saturating_sub(cap / CAP_REARM)
+    } else {
+        left
+    }
+}
+
 /// A count read for use: zero when a subtraction has run ahead of its addition.
 fn clamped(count: &AtomicIsize) -> usize {
     count.load(Relaxed).max(0) as usize
@@ -216,26 +233,18 @@ impl<O: Os> Back<'_, O> {
         // finished: the lap count says nothing here, since the walk may stand one region from
         // the bottom with everything this launder freed above it.
         let regions = self.space.plan().objects();
-        let (mut spent, mut finished) = (0, 0);
+        let (mut spent, mut finished, mut purged) = (0, 0, 0);
         loop {
             let over = self.retained_small().saturating_sub(cap);
             if over == 0 || spent >= PURGE_CAP_WORDS || finished >= regions {
                 break;
             }
-            let (read, _, done) = self.purge_step(PURGE_CAP_WORDS - spent, over);
+            let (read, bytes, done) = self.purge_step(PURGE_CAP_WORDS - spent, over);
             spent += read;
+            purged += bytes;
             finished += usize::from(done);
         }
-        // If that brought the count under the cap, the cap is working and acts again on the
-        // next launder that passes it: the mark goes a step below the count. If it could
-        // not (what is left is fragmentation, or beyond the bound), the mark is the count,
-        // and the next purge waits for a step above it.
-        let left = self.retained_small();
-        let mark = if left <= cap {
-            left.saturating_sub(cap / CAP_REARM)
-        } else {
-            left
-        };
+        let mark = mark_after(self.retained_small(), cap, purged);
         state.cap_mark.store(mark, Relaxed);
     }
 
@@ -257,18 +266,34 @@ impl<O: Os> Back<'_, O> {
 
     /// The maintenance a slow path does on its way out: one step of decay.
     pub fn heartbeat(&self) {
-        self.decay_step();
+        self.heartbeat_with(&|| self.space.os().ticks());
+    }
+
+    /// [`Back::heartbeat`] for a caller that keeps its own reading of the clock: `now` is
+    /// called only when the step needs the time.
+    pub fn heartbeat_with(&self, now: &dyn Fn() -> u64) {
+        self.decay_step(now);
     }
 
     /// One heartbeat's part of the clocked pass: starts a pass if an interval has gone by
     /// since the last ended and anything is retained, and takes one bounded step of the pass
-    /// under way.
-    fn decay_step(&self) {
+    /// under way. Between passes with nothing retained it reads no clock: there is nothing to
+    /// start, and a clock that went back is noticed by the first heartbeat that could start
+    /// one.
+    fn decay_step(&self, now: &dyn Fn() -> u64) {
         let state = self.state;
         let geometry = self.space.plan().geometry();
         let page = geometry.page_size();
         let mut seen = state.decay.load(Acquire);
-        match decay_look(seen, self.space.os().ticks()) {
+        let time = if seen & ACTIVE != 0 {
+            // `decay_look` steps a pass under way without the time.
+            0
+        } else if self.retained() == 0 {
+            return;
+        } else {
+            now()
+        };
+        match decay_look(seen, time) {
             Decay::Wait => return,
             Decay::Restamp(word) => {
                 let _ = state.decay.compare_exchange(seen, word, Release, Relaxed);

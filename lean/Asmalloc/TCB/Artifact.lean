@@ -496,6 +496,11 @@ structure Api where
   writes them into the function's module, so that the Rust and the Lean
   agree by construction. -/
   rustConsts : List (String × IntTy × Nat) := []
+  /-- The C symbols the function is also defined as, each with the group of
+  exports it belongs to (`(group, symbol)`): the emitter writes a copy of the
+  function under each symbol into a macro of the group's, which only a crate
+  that invokes the macro expands (`Rust.exportsFile`). -/
+  exports : List (String × String) := []
 
 /-- The documentation of `api` on a target: its summary, then the paragraphs
 `notes`, then its `# Safety` section. -/
@@ -543,6 +548,8 @@ structure Artifact where
   generics : String := ""
   /-- `Api.rustConsts`. -/
   rustConsts : List (String × IntTy × Nat) := []
+  /-- `Api.exports`. -/
+  exports : List (String × String) := []
   code : Prog target.isa
   contract : Contract target.isa
   verified : Verified target code contract

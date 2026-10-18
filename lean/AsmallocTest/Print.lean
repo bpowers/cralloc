@@ -499,4 +499,14 @@ def safeDoc : String := "Does things.\n\n# Safety\n\n* `p` must be valid."
   "/// The CPU features `vg_mul_bmi2` requires (`Artifact.features`).\n\
   pub(crate) const VG_MUL_BMI2_FEATURES: &[&str] = &[\"bmi2\", \"adx\"];\n\n"
 
+-- `movzx r32, r16` and `cmp r8, m8`.
+#guard text (printer.function (.block [.movzx16 .rax .rsi, .movzx16 .r9 .r10,
+    .cmp8 .rdx { base := .r9, index := some .rax, disp := 33560576 }, .cmp8 .r11 { base := .rcx }])) == [
+  "movzx eax, si",
+  "movzx r9d, r10w",
+  "cmp dl, BYTE PTR [r9+rax*1+33560576]",
+  "cmp r11b, BYTE PTR [rcx]",
+  "ret"
+]
+
 end VG.Test

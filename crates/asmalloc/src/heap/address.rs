@@ -195,6 +195,17 @@ pub(crate) mod process {
         Asmalloc::collect()
     }
 
+    /// The published heap's base address and region shift, once it has started: what the C
+    /// layer copies beside the slabs for the C frees (`c::mirror`).
+    pub(crate) fn layout() -> Option<(usize, u32)> {
+        HEAP.back().map(|back| {
+            (
+                back.space().base().addr().get(),
+                back.space().plan().region_shift(),
+            )
+        })
+    }
+
     /// Ends the process with `message`.
     #[cold]
     pub(crate) fn abort(message: &str) -> ! {

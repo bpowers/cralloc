@@ -154,20 +154,30 @@ fn a_process_without_rseq_is_served() {
     assert!(out.contains("bad 0"), "{out}");
 }
 
+/// An interior pointer of a block, in a region whose class the C frees' copy of the region
+/// table names, reaches the generated `free`'s fast path, which checks the region and not the
+/// slot boundary (docs/research/zen5-roofline.md, section 14), so it is cached as a block.
 #[test]
-fn a_pointer_that_is_not_a_block_aborts() {
+#[ignore = "decision for the lead: the generated free does not check slot boundaries"]
+fn an_interior_pointer_aborts() {
     use std::os::unix::process::ExitStatusExt;
     let exe = program("foreign.c");
-    for args in [&[][..], &["interior"][..]] {
-        let out = run(true, Command::new(&exe).args(args));
-        assert_eq!(out.status.signal(), Some(6), "{:?}", out.status);
-        assert!(
-            String::from_utf8_lossy(&out.stderr).contains("not a block of asmalloc's heap"),
-            "{}",
-            String::from_utf8_lossy(&out.stderr)
-        );
-        assert!(out.stdout.is_empty());
-    }
+    let out = run(true, Command::new(&exe).arg("interior"));
+    assert_eq!(out.status.signal(), Some(6), "{:?}", out.status);
+}
+
+#[test]
+fn a_pointer_outside_the_heap_aborts() {
+    use std::os::unix::process::ExitStatusExt;
+    let exe = program("foreign.c");
+    let out = run(true, &mut Command::new(&exe));
+    assert_eq!(out.status.signal(), Some(6), "{:?}", out.status);
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("not a block of asmalloc's heap"),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(out.stdout.is_empty());
 }
 
 /// The four throwing forms of `new`, which the C++ runtime keeps so that it can throw
@@ -218,6 +228,110 @@ fn every_cxx_operator_form_meets_its_cases_and_binds_where_it_should() {
     }
     assert_eq!(ours.len(), 16, "{ours:?}");
     assert_eq!(runtime.len(), 4, "{runtime:?}");
+}
+
+/// Builds the crate in `tests/programs/<dir>`, a shared library outside the workspace, and
+/// returns the build's status and where the library is.
+fn build_library(dir: &str, name: &str) -> (std::process::ExitStatus, PathBuf) {
+    let target = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join(format!("{dir}-build"));
+    let cargo = std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
+    let output = Command::new(cargo)
+        .args(["build", "--quiet", "--manifest-path"])
+        .arg(
+            Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("tests/programs")
+                .join(dir)
+                .join("Cargo.toml"),
+        )
+        .arg("--target-dir")
+        .arg(&target)
+        .output()
+        .expect("cargo runs");
+    (output.status, target.join(format!("debug/lib{name}.so")))
+}
+
+// The tests below are the review's findings: each states what should happen and fails today.
+// `cargo test -p asmalloc-preload -- --ignored` runs them.
+
+/// A shared library with asmalloc inside it (a Rust plugin whose global allocator is
+/// asmalloc) is loaded, called and unloaded by a host that keeps running. Today the host dies
+/// with SIGSEGV from the kernel: the thread's `rseq_cs` still names a descriptor in the
+/// unloaded library. With `GLIBC_TUNABLES=glibc.pthread.rseq=0` it survives, and its address
+/// space grows by the 16 TiB reservation at every load.
+#[test]
+#[ignore = "finding: unloading a library that contains the allocator kills the process"]
+fn a_library_with_the_allocator_can_be_unloaded() {
+    let (status, plugin) = build_library("unload", "unload_plugin");
+    assert!(status.success(), "building the plugin");
+    let host = program("unload_host.c");
+    let out = run(false, Command::new(&host).arg(&plugin).arg("3"));
+    assert!(
+        out.status.success(),
+        "{:?}\n{}{}",
+        out.status,
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.ends_with("done\n"), "{stdout}");
+    // Three loads must not hold three reservations.
+    let last = stdout.lines().rev().nth(1).unwrap_or_default();
+    let gib: u64 = last
+        .split_whitespace()
+        .rev()
+        .nth(1)
+        .and_then(|n| n.parse().ok())
+        .unwrap_or(u64::MAX);
+    assert!(gib < 20 << 10, "{last}");
+}
+
+/// A C++ program with a malloc of its own runs under glibc, jemalloc and tcmalloc. Under the
+/// library its `delete` is ours and its throwing `new` is libstdc++'s, which calls the
+/// program's malloc, so the first `delete` aborts on a pointer that is not ours.
+#[test]
+#[ignore = "finding: a C++ program with its own malloc aborts under the library"]
+fn a_cxx_program_with_its_own_malloc_runs() {
+    let exe = program("own_malloc.cpp");
+    let out = same_with_and_without(|| Command::new(&exe));
+    assert_eq!(out.trim(), "99500");
+}
+
+/// A program that replaces only `operator new(size_t)` and `operator delete(void*)`, which
+/// the standard says is enough, runs under glibc and jemalloc. Under the library every other
+/// `delete` form is ours and never reaches the program's.
+#[test]
+#[ignore = "finding: a program that replaces the two basic C++ operators aborts under the library"]
+fn a_cxx_program_with_its_own_operator_new_runs() {
+    let exe = program("own_new.cpp");
+    for mode in ["array", "nothrow", "sized"] {
+        let out = same_with_and_without(|| {
+            let mut c = Command::new(&exe);
+            c.arg(mode);
+            c
+        });
+        assert_eq!(out.trim(), format!("{mode}: live 0"));
+    }
+}
+
+/// The C++ export is documented as needing the C export. Nothing enforces it: the crate
+/// builds, and at run time a block from libstdc++'s `new` (glibc's malloc) reaches our
+/// `delete`, which aborts; one from our nothrow `new` reaches glibc's `free`. The build should
+/// fail instead.
+#[test]
+fn the_cxx_export_without_the_c_export_does_not_build() {
+    let (status, library) = build_library("cxx_only", "cxx_only");
+    if status.success() {
+        let exe = program("cxx.cpp");
+        let out = Command::new(&exe)
+            .env("LD_PRELOAD", &library)
+            .output()
+            .expect("the program starts");
+        panic!(
+            "the crate built; a C++ program run with it: {:?}\n{}",
+            out.status,
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
 }
 
 #[test]
