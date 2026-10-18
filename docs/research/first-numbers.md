@@ -52,21 +52,23 @@ of the word, `mov` of the mask, and the routine, inlined into the caller
 (`bench/roofline/fastpath` checks this). A run-time size adds `lea; cmp; jae; shr; movzx; lea;
 or; mov` (the byte table indexed by `(size - 1) / 8`, alignment folded in).
 
-**What the 1.0 to 1.5 cycles over the 4.0 floor are** (inference from the disassembly): the
-register allocator keeps the word address in a callee-saved register, because the cold calls
-to the slow paths clobber the argument registers, and copies it, and rematerializes the mask
-immediate, before each sequence: four more micro-ops per pair than the kernels' best loop.
-Inputs in callee-saved registers would remove them; that is a change to the inline target's
-calling convention in Lean's trusted core, not made here. The `Box` pair adds the caller's
-initialisation of 32 bytes.
+**What the 1.0 to 1.5 cycles over the 4.0 floor are.** An earlier reading of the disassembly
+said register copies: the inline routines take their inputs in fixed registers (`rdi`, `esi`,
+`rdx`), which the cold slow-path calls clobber, so the compiler copies the word address and
+rematerializes the mask before each sequence. A measurement (below, "Inputs as `in(reg)`")
+refuted that. Removing the copies saves 5 instructions a pair but only 0.04 to 0.25 cycle. The
+pair is bound by 8-wide retirement of about 29 to 34 ops, plus 0.5 to 1.4 cycles in which
+retirement waits on a load. The `Box` pair adds the caller's initialisation of 32 bytes.
 
-**Default release, `Box`, GOT form: 29.6 cycles, unexplained.** The same code with the direct
-`__rseq_offset` load costs 12.1, and both builds call std's allocation shim through
-`call [GOT]`, which section 14 found ends zero-latency forwarding across the call. The GOT
-build shows 2.4 million branch-predictor resyncs over 80 million pairs (the direct build
-1,700) and two more store-to-load forwards per pair. Padding the environment or moving the
-thread control block changes nothing. Fat LTO removes the shim call, and there the two forms
-differ by one cycle, as section 13 measured.
+**Default release, `Box`, GOT form: the 29.6 cycles did not reproduce** (re-measured
+2026-10-17, evening). Today's code measured 13.7 cycles in 30 runs, ASLR on and off
+interleaved, and the commit measured above (3c21b82) measured 13.7 to 14.5. The direct form
+measured 12.1 to 12.3. Both builds call std's marker `__rust_no_alloc_shim_is_unstable_v2` (an
+empty function) through `call [GOT]` on every `Box::new`; the linker did not relax it in either
+build. So the call form does not separate the two builds, and the remaining difference of about
+1.5 cycles is the GOT form's extra load. During a stretch of heavy load on other cores, the
+same binary measured 16.7 to 22.0, so the 29.6 is most likely interference that the earlier
+check of the sibling CPU missed. No build setting is needed. Fat LTO removes the marker call.
 
 **The run-time-size pair** under fat LTO (7.5 to 8.8) is under the two-call floor because it
 is inlined; it is also faster than every incumbent's constant-size pair.
@@ -107,3 +109,46 @@ each site's loop):
 The descriptor (`__rseq_cs`, 32 bytes) holds three absolute addresses, which in a PIE are
 three `R_X86_64_RELATIVE` relocations of 24 bytes each, applied once at load. A call to an
 out-of-line routine instead costs 5 to 10 bytes and 4 cycles.
+
+## Inputs as `in(reg)`, and what bounds the inline pair (2026-10-17)
+
+The question: do the inline pop's and push's fixed input registers cost the last cycle of the
+Rust fast path? `bench/roofline/inreg` copies the generated inline routines with their inputs
+as `in(reg)` operands (`patch.py`) and builds `rust-alloc`'s `asm` and `asm_exe` variants with
+fat LTO, both ways. Pinned to CPU 12, minimum of 8 interleaved rounds, cycles (instructions)
+per allocate and free:
+
+| | GOT, fixed | GOT, `in(reg)` | direct, fixed | direct, `in(reg)` |
+|---|---:|---:|---:|---:|
+| pair, constant | 5.46 (42) | 5.42 (37) | 4.96 (40) | 4.73 (35) |
+| pair, `Box` | 6.93 (46) | 6.85 (42) | 5.94 (44) | 5.89 (40) |
+| pair, run-time size | 7.74 (62) | 7.52 (57) | 7.38 (60) | 7.05 (55) |
+| batch of 32 | 5.98 (45.3) | 6.27 (40.3) | 5.34 (43.3) | 5.08 (38.3) |
+
+`in(reg)` removes exactly the predicted copies (`mov esi, 0x7f0`, `mov rdi, r15` before each
+sequence, `mov rdx, r12` before the push) and adds one (`mov r14, rax`, since the popped
+pointer can no longer share `rax`). The GOT batch loop got 0.3 slower, which is not explained.
+
+Counters, per constant pair, direct form:
+
+| | Retired ops | Cycles | Cycles retirement waits on a load |
+|---|---:|---:|---:|
+| fixed | 33.7 | 4.96 | 0.51 |
+| `in(reg)` | 28.8 | 4.74 | 0.87 |
+| `in(reg)`, word address in one register | 31.0 | 5.26 | 1.20 |
+
+The GOT form with `in(reg)` retires 30.9 ops in 5.45 cycles, 1.41 of them waiting on a load.
+Retirement is 8 ops a cycle, so the fixed pair is mostly op count (4.2 cycles of 4.96).
+Removing 5 ops makes the wait on loads grow by about as much as it saves. The loop is then
+bound by load latency, not by width.
+
+The last row tests one guess at that latency: that the slab word's store-to-load hop is slow
+because both accesses are addressed `[word + r8]`, with `r8` reloaded every sequence. The
+variant forms the address once into `r9` (`lea r9, [word + r8]`) and uses `[r9]` for the load
+and the commit. It is 0.5 slower, and the wait on loads grows again, by about the cycle the
+`lea` adds to the address chain. So the address form is not the cause. The loads wait on the
+per-sequence address chain: the `cpu_id` load, `shl`, then the word load, and in the GOT form
+the two `__rseq_offset` loads before them. Lengthening that chain costs cycles one for one.
+That chain is what the design's per-CPU addressing needs, so the inline pair stops at 4.7 to
+5.0 cycles (direct form) and 5.4 to 5.5 (GOT form).
+
