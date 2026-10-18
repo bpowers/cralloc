@@ -10,7 +10,7 @@
 //! zeroes what it wrote and gives its region back with a compare-and-swap; no other thread has
 //! named it, because nothing points into a region until it has been carved from.
 
-use super::group::{Gather, Run};
+use super::group::{Direct, Gather, Run};
 use super::host::ClassHost;
 use super::layout::{Grow, Hints, Layout, Recorded};
 use super::policy::{kept_grown, move_piece, wants_huge};
@@ -252,12 +252,12 @@ impl<'a, O: Os> Back<'a, O> {
     }
 
     /// Returns free slots of `class` to their bitmaps, grouped by bitmap word as they come
-    /// (`group`), with one atomic OR per word and one walk up the summary tree for the batch.
-    /// Aborts the process if a pointer is not the start of a slot of `class` that has been
-    /// handed out, if a slot is already free, or if a slot appears twice in the batch (in a
-    /// batch of more than 254 distinct words, twice on either side of a flush of the map is
-    /// caught as already free; see `group`): those are double frees or frees of foreign
-    /// pointers.
+    /// (`group`), with one atomic OR per word, or per slot once a batch is judged scattered,
+    /// and one walk up the summary tree for the batch. Aborts the process if a pointer is not
+    /// the start of a slot of `class` that has been handed out, if a slot is already free, or
+    /// if a slot appears twice in the batch (a scattered one, or one of more than 254 distinct
+    /// words, catches it by the second OR, unless another thread claimed the slot between the
+    /// two; see `group`): those are double frees or frees of foreign pointers.
     ///
     /// # Safety
     ///
@@ -1268,15 +1268,17 @@ fn release_words<'h, O: Os, P: SlotPointer, const ROOM: usize, const SPAN: usize
         (first, span) = fast.word(held.key, *met);
     }
     gather.end(release, held);
-    // The rest of a batch of single slots, a slot at a time, with no runs: into the map alone
-    // if they are scattered, else as runs end.
+    // The rest of a batch of single slots, a slot at a time, with no runs: each ORed at once if
+    // they are scattered, else gathered as runs end.
     if let Some(rest) = objects.get(at..).filter(|rest| !rest.is_empty()) {
-        if gather.scatter(release) {
+        if gather.scattered() {
+            let mut direct = Direct::new();
+            gather.drain(release, &mut direct);
             for object in rest {
                 let slot = slot_of(checker, object, met, fast);
-                let key = (met.region.index() as u64) << 32 | (slot / BITS) as u64;
-                gather.scattered(release, key, 1 << (slot % BITS));
+                direct.free_slot(release, met.region, slot);
             }
+            direct.finish(release);
         } else {
             for object in rest {
                 let slot = slot_of(checker, object, met, fast);

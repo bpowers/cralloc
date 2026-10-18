@@ -242,6 +242,42 @@ fn scattered_launders_free_every_slot_and_fills_take_the_lowest() {
     assert_eq!(fill(&back, class, some.len()), some);
 }
 
+/// A batch judged scattered frees each later slot with its own OR, so a slot given twice in
+/// it is caught by the second OR, its bit being set by the first.
+#[test]
+#[should_panic(expected = "double free: an object was freed while already free")]
+fn a_slot_twice_in_a_scattered_batch_aborts() {
+    let state = state::<Standard>();
+    let back = state.get_or_reserve().unwrap();
+    let class = small(16);
+    let slots = fill(&back, class, 64 * 1024);
+    // One slot to a word, spread far beyond the window around the first.
+    let mut batch: Vec<*mut u8> = (0..200).map(|i| slots[(i * 389 % 1024) * 64]).collect();
+    batch.push(batch[150]);
+    // SAFETY: the test holds these slots, or passes a bad one to see the abort.
+    unsafe { back.launder(class, &batch) };
+}
+
+/// A batch judged scattered whose rest turns dense, with slots of the words its scattered part
+/// met and of words in the window: every slot is freed once, and a fill takes them back lowest
+/// first.
+#[test]
+fn a_scattered_batch_with_a_dense_tail_frees_every_slot() {
+    let state = state::<Standard>();
+    let back = state.get_or_reserve().unwrap();
+    let class = small(16);
+    let mut slots = fill(&back, class, 64 * 1024);
+    slots.sort();
+    let mut batch: Vec<*mut u8> = (0..40).map(|i| slots[(i * 389 % 1024) * 64]).collect();
+    batch.extend((1..64).map(|b| slots[b]));
+    batch.extend((1..64).map(|b| slots[389 * 64 + b]));
+    let mut expected = batch.clone();
+    expected.sort();
+    // SAFETY: the test holds these slots and gives them up.
+    unsafe { back.launder(class, &batch) };
+    assert_eq!(fill(&back, class, expected.len()), expected);
+}
+
 #[test]
 #[should_panic(expected = "not the start of a slot")]
 fn freeing_an_interior_pointer_aborts() {

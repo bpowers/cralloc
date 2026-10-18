@@ -24,6 +24,8 @@ use std::hint::black_box;
 fn pin_main() -> Cpus {
     let cpus = Cpus::from_env();
     cpus.pin(0);
+    // Opens the FIFOs outside every measured phase.
+    perf_control();
     cpus
 }
 
@@ -142,6 +144,56 @@ pub fn largepair(args: &Args) {
         .emit();
 }
 
+/// Drops a measured structure out of line, so that a profiler can name the drop phase
+/// (`valgrind --toggle-collect='*drop_phase*'`): inlined, a drop has no symbol of its own, and
+/// a recursive drop function toggles collection off at every nested call.
+///
+/// With `BENCH_PERF_CTL=CTL,ACK` naming the control and acknowledgement FIFOs of a
+/// `perf record -D -1 --control fifo:CTL,ACK`, the recording is on during drops alone, so that
+/// a sampled profile of the real heap covers the drop phases. Valgrind cannot stand in: it
+/// cannot map asmalloc's full reservation, and smaller regions change what a launder does.
+#[inline(never)]
+fn drop_phase<T>(value: T) {
+    let control = perf_control();
+    if let Some(control) = control {
+        control.send("enable");
+    }
+    drop(value);
+    if let Some(control) = control {
+        control.send("disable");
+    }
+}
+
+struct PerfControl {
+    ctl: std::fs::File,
+    ack: std::fs::File,
+}
+
+impl PerfControl {
+    /// Sends `command` and waits for perf to acknowledge it, so that the drop starts only
+    /// once the recording is on.
+    fn send(&self, command: &str) {
+        use std::io::{Read, Write};
+        (&self.ctl).write_all(format!("{command}\n").as_bytes()).expect("write to perf's control FIFO");
+        let mut reply = [0u8; 5];
+        (&self.ack).read_exact(&mut reply).expect("read perf's acknowledgement");
+    }
+}
+
+fn perf_control() -> Option<&'static PerfControl> {
+    static CONTROL: std::sync::OnceLock<Option<PerfControl>> = std::sync::OnceLock::new();
+    CONTROL
+        .get_or_init(|| {
+            let spec = std::env::var("BENCH_PERF_CTL").ok()?;
+            let (ctl, ack) = spec.split_once(',').expect("BENCH_PERF_CTL=CTL,ACK");
+            let open = |path: &str, write: bool| {
+                std::fs::OpenOptions::new().read(!write).write(write).open(path).expect("open a perf FIFO")
+            };
+            Some(PerfControl { ctl: open(ctl, true), ack: open(ack, false) })
+        })
+        .as_ref()
+}
+
 pub fn map(args: &Args) {
     pin_main();
     let kind = args.str("kind", "btree");
@@ -169,7 +221,7 @@ pub fn map(args: &Args) {
                 accumulate(&mut build, m.stop());
                 rss_built = rss_now();
                 let m = Measure::start(&counters);
-                drop(black_box(map));
+                drop_phase(black_box(map));
                 accumulate(&mut teardown, m.stop());
             }
             "hash" => {
@@ -239,7 +291,7 @@ pub fn tree(args: &Args) {
         acc = acc.wrapping_add(walk(&t));
         accumulate(&mut walked, m.stop());
         let m = Measure::start(&counters);
-        drop(t);
+        drop_phase(t);
         accumulate(&mut dropped, m.stop());
     }
     let (build, walked, dropped) = (build.unwrap(), walked.unwrap(), dropped.unwrap());
@@ -348,7 +400,7 @@ pub fn json(args: &Args) {
         let v: serde_json::Value = serde_json::from_str(&doc).unwrap();
         accumulate(&mut parse, m.stop());
         let m = Measure::start(&counters);
-        drop(black_box(v));
+        drop_phase(black_box(v));
         accumulate(&mut teardown, m.stop());
     }
     let (parse, teardown) = (parse.unwrap(), teardown.unwrap());

@@ -765,6 +765,22 @@ impl<'h, H: Host> Release<'h, H> {
         old == 0
     }
 
+    /// Frees the one slot `bit` of leaf word `index` with one atomic OR, and aborts if it was
+    /// free already: a double free. Unlike [`Release::leaf_unowed`] it does not say whether the
+    /// word was empty, so the caller owes the summary bit with `must` false ([`owe_leaves`]):
+    /// it reads the bit before it sets it, as a free into a word that was not empty does. That
+    /// is `Look` in `tla/Summary.tla`. Using only the OR's own bit lets it compile to one
+    /// `lock bts`.
+    ///
+    /// [`owe_leaves`]: Release::owe_leaves
+    #[inline(always)]
+    pub(crate) fn leaf_bit(&mut self, region: RegionId, index: u32, bit: u64) {
+        if Spot::leaf(region, index).word(self.host).fetch_or(bit) & bit != 0 {
+            self.host
+                .abort("double free: an object was freed while already free");
+        }
+    }
+
     /// Owes the summary bits above leaf words of `region` that share one summary word, freed
     /// by [`Release::leaf_unowed`]: `words` has bit `w % 64` for each such word `w`, `index` is
     /// any of them, and `must` says whether any was empty before its OR. One debt for all of
@@ -777,6 +793,18 @@ impl<'h, H: Host> Release<'h, H> {
         // A region with one leaf word has its bit in a class word, whatever the word's number.
         let bits = if self.height == 0 { bit } else { words };
         self.owe_bits(above, bits, must);
+    }
+
+    /// [`Release::owe_leaves`], with the debt paid at once rather than held: for a caller
+    /// that has already merged the debts of the words under each summary word, so that
+    /// holding them would only replace one with the next.
+    #[inline(never)]
+    pub(crate) fn pay_leaves(&mut self, region: RegionId, index: u32, words: u64, must: bool) {
+        let Some((above, bit)) = Spot::leaf(region, index).parent(self.height) else {
+            return;
+        };
+        let bits = if self.height == 0 { bit } else { words };
+        self.settle(above, bits, must);
     }
 
     /// Ends the process: the heap has been misused.
@@ -835,11 +863,18 @@ impl<'h, H: Host> Release<'h, H> {
     /// it in turn: the healing walk always goes to the top.
     fn pay(&mut self, at: usize, owed: Owed) {
         let spot = Spot::of_key(self.host, at as u8 + 1, owed.key, self.under);
+        self.settle(spot, owed.bits, owed.must != 0);
+    }
+
+    /// Sets whatever of `bits` in `spot`'s word is clear (all of them unread, with `must`),
+    /// and owes the bit above it in turn.
+    #[inline(always)]
+    fn settle(&mut self, spot: Spot, bits: u64, must: bool) {
         let word = spot.word(self.host);
-        let was_empty = if owed.must != 0 {
-            word.fetch_or(owed.bits) == 0
+        let was_empty = if must {
+            word.fetch_or(bits) == 0
         } else {
-            let missing = owed.bits & !word.load();
+            let missing = bits & !word.load();
             missing != 0 && word.fetch_or(missing) == 0
         };
         self.owe(spot, was_empty);

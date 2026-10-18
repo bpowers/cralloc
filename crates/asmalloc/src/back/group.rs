@@ -11,23 +11,29 @@
 //! So the caller gathers a run of consecutive slots of one word in hand ([`Run`]), and when the
 //! run ends it goes to [`Gather`]: into a window of one or two summary words' leaf words
 //! around the batch's first slot, where its bits are ORed into a plain array; or, outside the
-//! window, into a small hash map of the batch's words ([`Words`]), which merges them with the
-//! bits the word already has there. A batch whose runs are single slots stops making runs: its
-//! slots go one at a time to the window, or, if they mostly fall outside it, straight to the
-//! map, so that the processor is not asked to guess, slot by slot, which of the two a
-//! scattered slot falls in. At the end every word met gets one OR, the window's in address
-//! order, and the words under one summary word owe that summary word one debt between them
-//! ([`Release::owe_leaves`]), so the walk up the tree looks at each summary word once, however
-//! the words were met.
+//! window, among a few early words and then into a small hash map of the batch's words
+//! ([`Words`]), which merges them with the bits the word already has there. At the end every
+//! word met gets one OR, the window's in address order, and the words under one summary word
+//! owe that summary word one debt between them ([`Release::owe_leaves`]), so the walk up the
+//! tree looks at each summary word once, however the words were met.
+//!
+//! A batch whose runs are single slots stops making runs. If its words have mostly fallen
+//! inside the window, as two interleaved runs or a few shuffled words do, its slots go one at
+//! a time to the window or the map. If they have mostly fallen outside, the batch is
+//! scattered, and the rest of it is freed a slot at a time ([`Direct`]): an OR of its own for
+//! each slot, which the slot would mostly have needed anyway, and no map. The judgement is made
+//! once per batch, after a few single slots, so a batch is never taken one way and then the
+//! other.
 //!
 //! **Slots that appear twice.** A batch must not free a slot twice: the second free would undo
 //! a claim made between the two ORs and hand the slot to two owners. A run counts its slots
 //! against its bits, and the window and the map hold every word the batch has met with all of
 //! its bits until the end, a word in one or the other but never both, so a slot met twice is
 //! caught when it comes the second time. The map holds `ROOM - 1` words, more than a magazine
-//! has slots; a longer batch flushes it when it fills, and a slot that appears on both sides of
-//! a flush is caught by its word's OR unless another thread claimed the slot in between, as for
-//! any two launders.
+//! has slots; a longer batch flushes it when it fills. A slot that appears on both sides of a
+//! flush, or twice in a scattered batch, is caught by its second OR unless another thread
+//! claimed the slot in between: the same double free that goes unseen across two launders, and
+//! not worth a lookup for every scattered slot.
 
 use super::tree::{Host, Release};
 use super::word::BITS;
@@ -64,8 +70,16 @@ pub(crate) struct Gather<const ROOM: usize, const SPAN: usize> {
     /// word, which for a few words scattered in the window the processor would mispredict.
     /// `SPAN` is at most two summary words.
     occupied: [u64; 2],
+    /// The first words met outside the window, before there are enough to need the map:
+    /// a scattered batch is judged one before it has met more, and then needs no map at all.
+    early: [(u64, u64); EARLY],
+    early_count: usize,
     words: Option<Words<ROOM>>,
 }
+
+/// Words outside the window that [`Gather`] holds before it makes its map: as many as the
+/// single slots after which a batch is judged scattered.
+const EARLY: usize = 8;
 
 impl<const ROOM: usize, const SPAN: usize> Gather<ROOM, SPAN> {
     /// A window on the summary words around word `key` (`region << 32 | word`), the batch's
@@ -79,6 +93,8 @@ impl<const ROOM: usize, const SPAN: usize> Gather<ROOM, SPAN> {
             base: word.saturating_sub((SPAN as u64 - BITS as u64) / 4) & !(BITS as u64 - 1),
             bits: [0; SPAN],
             occupied: [0; 2],
+            early: [(0, 0); EARLY],
+            early_count: 0,
             words: None,
         }
     }
@@ -91,41 +107,51 @@ impl<const ROOM: usize, const SPAN: usize> Gather<ROOM, SPAN> {
         self.end_one(release, run.key, run.bits);
     }
 
-    /// For the rest of a batch of single slots: if they have mostly fallen outside the window,
-    /// moves the window's words to the map, so that every later slot goes there through
-    /// [`Gather::scattered`] without asking whether it falls in the window, which for scattered
-    /// slots is a coin toss the processor cannot predict, and returns `true`. Slots that keep
-    /// to the window, as two interleaved runs or a few shuffled words do, stay with it.
-    #[inline(never)]
-    pub(crate) fn scatter<H: Host>(&mut self, release: &mut Release<'_, H>) -> bool {
-        let mapped = self.words.as_ref().map_or(0, |words| words.count);
+    /// Whether a batch whose last runs were single slots is scattered: its words have mostly
+    /// fallen outside the window. Slots that keep to the window, as two interleaved runs or a
+    /// few shuffled words do, are not.
+    #[inline(always)]
+    pub(crate) fn scattered(&self) -> bool {
+        let mapped = self.early_count + self.words.as_ref().map_or(0, |words| words.count);
         let windowed = self
             .occupied
             .iter()
             .map(|o| o.count_ones() as usize)
             .sum::<usize>();
-        if mapped <= windowed {
-            return false;
-        }
-        let words = self.words.get_or_insert_with(Words::new);
-        for half in 0..2 {
-            let mut occupied = core::mem::replace(&mut self.occupied[half], 0);
-            while occupied != 0 {
-                let at = half * BITS as usize + occupied.trailing_zeros() as usize;
-                occupied &= occupied - 1;
-                let bits = core::mem::replace(&mut self.bits[at % SPAN], 0);
-                words.add(release, self.region | (self.base + at as u64), bits);
-            }
-        }
-        true
+        mapped > windowed
     }
 
-    /// One slot of a scattered batch, after [`Gather::scatter`]: bit `bit` of word `key`.
-    #[inline(always)]
-    pub(crate) fn scattered<H: Host>(&mut self, release: &mut Release<'_, H>, key: u64, bit: u64) {
-        match self.words.as_mut() {
-            Some(words) => words.add(release, key, bit),
-            None => release.abort("a scattered launder with no map"),
+    /// Hands every word gathered so far to `direct`, which frees it at once and remembers its
+    /// slots, and leaves the window and the map empty: the rest of the batch goes to `direct`.
+    #[inline(never)]
+    pub(crate) fn drain<H: Host>(&mut self, release: &mut Release<'_, H>, direct: &mut Direct) {
+        if self.occupied != [0; 2] {
+            let region = release.region((self.region >> 32) as usize);
+            for half in 0..2 {
+                let mut occupied = core::mem::replace(&mut self.occupied[half], 0);
+                while occupied != 0 {
+                    let at = half * BITS as usize + occupied.trailing_zeros() as usize;
+                    occupied &= occupied - 1;
+                    let bits = core::mem::replace(&mut self.bits[at % SPAN], 0);
+                    direct.free(release, region, (self.base as usize + at) as u32, bits);
+                }
+            }
+        }
+        let early = core::mem::replace(&mut self.early_count, 0);
+        for &(key, bits) in &self.early[..early.min(EARLY)] {
+            let region = release.region((key >> 32) as usize);
+            direct.free(release, region, key as u32, bits);
+        }
+        if let Some(words) = self.words.take() {
+            for (&key, &bits) in words
+                .keys
+                .iter()
+                .zip(&words.bits)
+                .take(words.count.min(ROOM - 1))
+            {
+                let region = release.region((key >> 32) as usize);
+                direct.free(release, region, key as u32, bits);
+            }
         }
     }
 
@@ -143,9 +169,35 @@ impl<const ROOM: usize, const SPAN: usize> Gather<ROOM, SPAN> {
             self.occupied[at / BITS as usize % 2] |= 1 << (at % BITS as usize);
             return;
         }
-        self.words
-            .get_or_insert_with(Words::new)
-            .add(release, key, bits);
+        self.outside(release, key, bits);
+    }
+
+    /// [`Gather::end_one`] for a word outside the window: among the early words while they
+    /// have room, else in the map.
+    #[inline(never)]
+    fn outside<H: Host>(&mut self, release: &mut Release<'_, H>, key: u64, bits: u64) {
+        if let Some(words) = self.words.as_mut() {
+            return words.add(release, key, bits);
+        }
+        let count = self.early_count.min(EARLY);
+        if let Some(early) = self.early[..count].iter_mut().find(|(k, _)| *k == key) {
+            if early.1 & bits != 0 {
+                release.abort(TWICE);
+            }
+            early.1 |= bits;
+            return;
+        }
+        if count < EARLY {
+            self.early[count] = (key, bits);
+            self.early_count += 1;
+            return;
+        }
+        let words = self.words.insert(Words::new());
+        for &(key, bits) in &self.early {
+            words.add(release, key, bits);
+        }
+        self.early_count = 0;
+        words.add(release, key, bits);
     }
 
     /// ORs every word gathered into `release`: the window's in address order, owing each of
@@ -169,6 +221,13 @@ impl<const ROOM: usize, const SPAN: usize> Gather<ROOM, SPAN> {
                     release.owe_leaves(region, first, below, must);
                 }
             }
+        }
+        let early = core::mem::replace(&mut self.early_count, 0);
+        for &(key, bits) in &self.early[..early.min(EARLY)] {
+            let region = release.region((key >> 32) as usize);
+            let index = key as u32;
+            let must = release.leaf_unowed(region, index, bits);
+            release.owe_leaves(region, index, 1 << (index % BITS), must);
         }
         if let Some(words) = self.words.as_mut() {
             words.flush(release);
@@ -284,6 +343,137 @@ impl<const ROOM: usize> Words<ROOM> {
         }
         self.count = 0;
         self.places = [[0; 2]; ROOM];
+    }
+}
+
+/// A scattered batch, freed a slot at a time: see the module documentation.
+///
+/// Each slot is ORed into its leaf word on its own, one locked instruction whose old value
+/// says whether the slot was free already, which is a double free. Grouping slots by word
+/// first would save nothing, as each has a word of its own, and costs about as much as the OR.
+/// What the words owe the summary words above them is kept in [`Debts`], which merges the
+/// debts of words under one summary word, as the map's groups do.
+///
+/// The OR's old value is not asked whether the word was empty: each debt is paid by reading
+/// the summary word and setting only the bits it lacks (`Look` in `tla/Summary.tla`), which in
+/// a scattered batch, whose words share summary words with many others, is a plain load where
+/// setting the bits unread would be a locked OR.
+pub(crate) struct Direct {
+    debts: Debts,
+}
+
+impl Direct {
+    #[inline(always)]
+    pub(crate) fn new() -> Direct {
+        Direct {
+            debts: Debts::new(),
+        }
+    }
+
+    /// Frees slot `slot` of `region`. Aborts if it is free.
+    #[inline(always)]
+    pub(crate) fn free_slot<H: Host>(
+        &mut self,
+        release: &mut Release<'_, H>,
+        region: RegionId,
+        slot: u32,
+    ) {
+        let word = slot / BITS;
+        release.leaf_bit(region, word, 1 << (slot % BITS));
+        self.debts.owe(release, region, word);
+    }
+
+    /// Frees the slots `bits` of leaf word `word` of `region` with one OR. Aborts if one of
+    /// them is free.
+    pub(crate) fn free<H: Host>(
+        &mut self,
+        release: &mut Release<'_, H>,
+        region: RegionId,
+        word: u32,
+        bits: u64,
+    ) {
+        release.leaf_unowed(region, word, bits);
+        self.debts.owe(release, region, word);
+    }
+
+    /// Owes `release` every summary bit still owed, for its walk up the tree.
+    #[inline(never)]
+    pub(crate) fn finish<H: Host>(&mut self, release: &mut Release<'_, H>) {
+        self.debts.pay_all(release);
+    }
+}
+
+/// Places in [`Debts`].
+const DEBTS: usize = 64;
+
+/// A key no summary word has: [`Debts`]'s keys are below 2^38.
+const NO_KEY: u64 = u64::MAX;
+
+/// What a scattered batch owes the summary words above the leaf words it has freed: per summary
+/// word, a bit for each such leaf word. A small table with a place per summary word, chosen by
+/// its low bits, so that the summary words of one region's stretch of the bitmap, where a
+/// batch's words mostly lie, each have a place. A summary word whose place another holds pays
+/// that one's debt first: more debts than one per summary word, never fewer.
+struct Debts {
+    /// Per place, the summary word's key (`region << 26 | word / 64`), or [`NO_KEY`]; and the
+    /// bits it is owed.
+    keys: [u64; DEBTS],
+    words: [u64; DEBTS],
+    /// A bit per place that holds a debt.
+    held: u64,
+}
+
+impl Debts {
+    #[inline(always)]
+    fn new() -> Debts {
+        Debts {
+            keys: [NO_KEY; DEBTS],
+            words: [0; DEBTS],
+            held: 0,
+        }
+    }
+
+    /// Owes the summary bit of leaf word `word` of `region`.
+    #[inline(always)]
+    fn owe<H: Host>(&mut self, release: &mut Release<'_, H>, region: RegionId, word: u32) {
+        let key = (region.index() as u64) << 26 | (word / BITS) as u64;
+        let at = key as usize % DEBTS;
+        if self.keys[at] != key {
+            self.hold(release, at, key);
+        }
+        self.words[at] |= 1 << (word % BITS);
+    }
+
+    /// Gives place `at` to summary word `key`, paying the debt of the one that held it.
+    #[inline(never)]
+    fn hold<H: Host>(&mut self, release: &mut Release<'_, H>, at: usize, key: u64) {
+        let at = at % DEBTS;
+        if self.keys[at] != NO_KEY {
+            self.pay(release, at);
+        }
+        self.keys[at] = key;
+        self.held |= 1 << at;
+    }
+
+    /// Hands every debt to `release`.
+    fn pay_all<H: Host>(&mut self, release: &mut Release<'_, H>) {
+        let mut held = self.held;
+        while held != 0 {
+            let at = held.trailing_zeros() as usize;
+            held &= held - 1;
+            self.pay(release, at);
+        }
+    }
+
+    /// Hands the debt at place `at`, which holds one, to `release`, and empties the place.
+    fn pay<H: Host>(&mut self, release: &mut Release<'_, H>, at: usize) {
+        let at = at % DEBTS;
+        let key = core::mem::replace(&mut self.keys[at], NO_KEY);
+        let words = core::mem::replace(&mut self.words[at], 0);
+        let region = release.region((key >> 26) as usize);
+        let first = (key as u32 & ((1 << 26) - 1)) * BITS;
+        release.pay_leaves(region, first, words, false);
+        self.held &= !(1 << at);
     }
 }
 

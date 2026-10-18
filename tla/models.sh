@@ -47,6 +47,10 @@ run Summary Summary_run_noreread violates Visible
 run Summary Summary_keep        ok
 run Summary Summary_keep_deep   ok
 run Summary Summary_keep_crash  ok
+run Summary Summary_look        ok
+run Summary Summary_look_deep   ok
+run Summary Summary_look_crash  ok
+run Summary Summary_look_noheal ok
 # Three bits to a word: about 81 million states and six minutes.
 if [ -n "${SLOW:-}" ]; then run Summary Summary_run_wide ok; fi
 
