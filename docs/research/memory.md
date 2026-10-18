@@ -1068,6 +1068,123 @@ pipeline, the mixed exchange, mpmc and the mixed churn the same within 2%, and t
 the same within 0.2 MiB; `worst.sh` the same, its phase change 0.9 MiB higher eight seconds
 after.
 
+## Moving a dense block in whole pieces
+
+2026-10-18, at main `a763ad7`. A move of a large block (`Back::move_large_with`) tested and
+copied each 4 KiB page of a piece on its own, so that all-zero pages could be left out, and
+into a destination not known to read as zero it first purged the whole destination, which the
+copy then faulted back. Now each 2 MiB piece's pages are tested first (a page whose first word
+is not zero costs one load); a piece with no all-zero page is one copy and leaves the
+destination as it is. Only a piece with zero pages purges the destination, in the whole pages
+under the span from its first zero page to its last, and leaves those pages out.
+
+**What it changes.** Only moves into a destination that an earlier block left resident. A
+dense 64 MiB block moved by `realloc` to 256 MiB, twenty times, each into the slot the
+previous one freed (a scratch program, CPU 2, TSC ticks for the `realloc` alone, median of
+five interleaved runs of each build):
+
+| Move | before | after |
+|---|---:|---:|
+| Dense, into a slot left resident | 53.9 M ticks, 655,500 faults | 27.6 M, 344,200 faults |
+| Dense, into a fresh slot | 42.9 M | 43.6 M |
+| One byte a MiB, into a slot left resident | 22.1 M | 21.2 M |
+
+The faults are the whole run's; the difference is the destination's 16,384 pages a move,
+purged and faulted back before, written in place now.
+
+**Vec growth does not move.** In both vecgrow jobs every move lands in a slot that reads as
+zero, so the old code never purged a destination, and the copy is a few percent of the run.
+`benchrun`, five interleaved rounds, CPU 2, medians; user and kernel cycles and faults are
+the measured phase's, peak is the cgroup's:
+
+| vecgrow 1x256Mi | cycles/element | user Mcycles | kernel Mcycles | faults | peak MiB |
+|---|---:|---:|---:|---:|---:|
+| asmalloc before | 5.664 | 500 | 261 | 3,007 | 257.8 |
+| asmalloc after | 5.677 | 512 | 258 | 3,008 | 257.8 |
+| glibc | 9.388 | 434 | 825 | 262,167 | 257.0 |
+| jemalloc | 17.78 | 870 | 1,536 | 517,968 | 264.4 |
+| mimalloc crate | 5.740 | 673 | 91 | 267 | 523.5 |
+
+| vecgrow 64x4Mi | cycles/element | user Mcycles | kernel Mcycles | faults | peak MiB |
+|---|---:|---:|---:|---:|---:|
+| asmalloc before | 8.740 | 721 | 454 | 79,736 | 374.8 |
+| asmalloc after | 8.797 | 725 | 454 | 79,736 | 374.8 |
+| glibc | 19.37 | 1,648 | 944 | 272,626 | 269.2 |
+| jemalloc | 11.49 | 753 | 782 | 235,113 | 307.2 |
+| mimalloc crate | 44.28 | 5,880 | 64 | 153 | 289.0 |
+
+After against before, paired by round: -0.4% (rounds from -7.5% to +4.7%) and +0.7% (-0.4%
+to +1.0%). `madvise` calls, counted with `strace`, are the same in both builds: 376 and
+1,257 (304 and 594 of them `MADV_DONTNEED`), one more `MADV_NOHUGEPAGE` after, from where
+the reservation landed.
+
+Section 10 of `baselines.md` found the zero-page rule cost 8.5% on the first job and 4.9% on
+the second. That does not reproduce: a build with the rule switched off the same way
+(every page copied, a page at a time, no test) measured the same as before and after,
+within 2%, over six interleaved rounds. Its instruction counts there differed by 0.2%; the
+difference was in cycles, and the rule-off build was the steadier of the two, which points
+at layout or the machine rather than the test.
+
+**The 64-Vec peak.** 374.8 MiB in every run of both builds, against 270.3 in `baselines.md`
+(`b5d6e8f`) and 269 for glibc: something merged since then holds about 100 MiB more at this
+job's peak. Not investigated here.
+
+**The gap to the mimalloc crate on one Vec to 256 MiB.** None on this day: 5.68 against 5.74
+cycles an element (its three good rounds 5.64 to 5.74; two rounds at 7.4 and 8.9 paid
+compaction). The two spend their time differently. mimalloc keeps what is freed, so after the
+first repetition it takes no faults (267 in all; 91 M kernel cycles), at twice the peak. We
+return the old block behind each move and a grown block's pages at its free, so every
+repetition faults its memory again: 3,008 faults, most of them huge pages the kernel clears,
+258 M kernel cycles. Our user time is a quarter lower than mimalloc's. What is left is that
+policy, not the copy.
+
+**The copy itself.** `copy_to_nonoverlapping` in a `no_std` crate becomes a call to
+`memcpy`, which in a glibc process is glibc's (`__memmove_avx512_unaligned_erms` on this
+machine). For 2 MiB it runs its vector loop with ordinary stores: glibc's thresholds for
+`rep movsb` and for non-temporal stores are both 24 MiB here (`ld.so --list-diagnostics`).
+A scratch program copied 256 MiB from a source pushed out of the caches, in 2 MiB pieces,
+into huge pages, TSC ticks a MiB, median of five:
+
+| Copy of a 2 MiB piece | into fresh pages (faulted by the copy) | into resident pages |
+|---|---:|---:|
+| glibc `memcpy`, one call | 283 k | 267 k |
+| glibc `memcpy`, a call a 4 KiB page | 327 k | 280 k |
+| 16-byte non-temporal stores (SSE2) | 283 k | 190 k |
+| 32-byte non-temporal stores (AVX) | 278 k | 185 k |
+
+One call for the piece is 15% faster than a call a page when the copy faults the
+destination in, which is the common move. Non-temporal stores gain nothing there, because
+the kernel has just cleared the page and its lines are in the cache, and are 30% faster into
+resident pages, where ordinary stores must first read each line. Only a move into a slot
+left resident would gain, and its data would arrive out of the cache; `rep movsb` would need
+hand-written assembly. Not adopted.
+
+**Sparse blocks stay sparse.** `sparse_realloc.c` through the preload library (malloc N, one
+byte a MiB, realloc to 4N), resident MiB after the grow and cgroup peak, median of five
+interleaved runs; mimalloc is the preload build of `third_party`'s:
+
+| N | asmalloc before | asmalloc after | glibc | jemalloc | mimalloc |
+|---|---:|---:|---:|---:|---:|
+| 16 MiB | 2, peak 3.3 | 2, peak 3.5 | 1, peak 1.0 | 19, peak 17.3 | 36, peak 34.7 |
+| 64 MiB | 2, peak 1.6 | 2, peak 1.8 | 2, peak 1.3 | 67, peak 65.3 | 132, peak 138.9 |
+| 256 MiB | 3, peak 3.0 | 2, peak 3.3 | 2, peak 2.6 | 259, peak 258.7 | 260, peak 291.7 |
+
+The sparse worst cases of `worst.sh` (allocation, no move) are unchanged: 256 blocks of
+1 MiB at 2.3 MiB resident, peak 3.5, both builds; 4096 of 64 KiB at 32.2, peak 33.2 and
+33.5.
+
+**Cost of a hole.** Into a destination left resident, the old move made one purge of the
+whole destination; the new one makes one for each piece that has zero pages, and faults back
+the data pages between a piece's first and last zero page, and nothing for a piece without.
+A block with one byte written a MiB has zero pages in every piece, so its move into a slot
+left resident now makes 32 purges of the destination where it made one; it measured no
+slower (the third row of the first table).
+
+**Method.** The machine was shared: builds of other work ran on the second L3 throughout,
+and free memory was under 1 GiB with 52 GiB in the page cache, so huge-page faults sometimes
+compacted memory. Every timed run was on CPU 2 under the measurement lock, interleaved with
+the runs it is compared to. "before" is `a763ad7`, "after" this change.
+
 ## Reproducing
 
 ```
