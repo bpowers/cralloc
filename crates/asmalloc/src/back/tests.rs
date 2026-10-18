@@ -1761,12 +1761,13 @@ fn a_large_slot_is_charged_what_its_tenant_could_write() {
     let huge = Native::GEOMETRY.huge_page_size();
     let class = large(256 << 10);
     // Each case leaves a held block, its size and whether to claim it back (else trim).
-    let cases: [(&str, bool); 5] = [
+    let cases: [(&str, bool); 6] = [
         ("whole", true),
         ("headroom", false),
         ("staggered", true),
         ("advised", false),
         ("shrunk", true),
+        ("grown", true),
     ];
     for (case, claim) in cases {
         assert_eq!(back.retained(), 0, "{case}");
@@ -1787,12 +1788,23 @@ fn a_large_slot_is_charged_what_its_tenant_could_write() {
                 assert_eq!(state.os().huge_pages(ptr), Some(HugePages::Prefer));
                 (ptr, 2 * huge)
             }
-            _ => {
+            "shrunk" => {
                 let ptr = back.alloc(class, class.size()).unwrap().ptr;
                 paint(ptr.as_ptr(), class.size(), 0x42);
                 // SAFETY: the test holds the block and uses none of it during the call.
                 unsafe { back.resize_in_place(ptr, 2 * page) };
                 (ptr, 2 * page)
+            }
+            _ => {
+                // A small tenant leaves the slot's tail clean; the next grows into it in place.
+                let ptr = back.alloc(class, 8 << 10).unwrap().ptr;
+                back.free(ptr, class);
+                let ptr = back.alloc(class, 8 << 10).unwrap().ptr;
+                assert_eq!(back.retained(), 0);
+                // SAFETY: the test holds the block and uses none of it during the call.
+                unsafe { back.resize_in_place(ptr, 200 << 10) };
+                paint(ptr.as_ptr(), 200 << 10, 0x24);
+                (ptr, 200 << 10)
             }
         };
         // The advised case's move kept the slot it came from, which is charged too.

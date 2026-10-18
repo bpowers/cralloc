@@ -432,10 +432,14 @@ impl<'a, O: Os> Back<'a, O> {
         }
         let host = self.host(class)?;
         let (region, slot, zeroed) = if let Some(taken) = tree::claim(&host, 1, !class.is_small()) {
-            let settled = region::settle(&host, taken.region, taken.word, taken.bits);
+            let slot = taken.word * BITS + taken.bits.trailing_zeros();
+            let settled = if class.is_small() {
+                region::settle(&host, taken.region, taken.word, taken.bits)
+            } else {
+                region::settle_slot(&host, taken.region, slot, size)
+            };
             self.unretain(class, settled.resident);
             self.retain(class, settled.revived);
-            let slot = taken.word * BITS + taken.bits.trailing_zeros();
             (taken.region, slot, settled.zeroed != 0)
         } else {
             let (region, first, _) = self.carve(&host, class, 1)?;
@@ -450,6 +454,8 @@ impl<'a, O: Os> Back<'a, O> {
                 // The last free could not take the slot's huge-page advice back; try again,
                 // so that this block, which has not grown, does not get huge pages.
                 region::unadvise(&host, region, slot);
+                // If the advice stayed, the block's extent is in whole huge pages.
+                region::cover(&host, region, slot);
             }
         }
         let into = host.layout().stagger(slot);
@@ -489,6 +495,7 @@ impl<'a, O: Os> Back<'a, O> {
                 }
                 if let Some(before) = region::recorded(&host, region, slot) {
                     region::record(&host, region, slot, Recorded { size, ..before });
+                    region::cover(&host, region, slot);
                 }
             }
             Some(Kind::Run(regions)) => {
@@ -556,6 +563,7 @@ impl<'a, O: Os> Back<'a, O> {
                 // the resize; `last..old` lies inside its first `old` bytes.
                 let dense = || unsafe { mostly_data(written.as_ptr(), old - last, page) };
                 region::advise_grown(&host, region, slot, into, old, size, dense);
+                region::cover(&host, region, slot);
                 if let Some((from, len)) = tail(old, class.size(), into) {
                     // SAFETY: BACK-CLASS-02 in docs/safety/asmalloc/back/class-safety.md. The
                     // caller owns the object in this slot and has just given up everything
@@ -735,11 +743,17 @@ impl<'a, O: Os> Back<'a, O> {
                     self.heartbeat();
                     return;
                 }
-                if all {
+                // Every page went back: zero, clean, uncounted. Else a purge failed, and the
+                // slot is charged as a free charges it, an over-count of what did go back.
+                let charge = if all {
                     region::mark_purged(&host, region, index);
-                }
+                    0
+                } else {
+                    region::charge_resident(&host, region, index)
+                };
                 region::unadvise(&host, region, index);
-                self.release_all(class, &[from.as_ptr()], !all);
+                self.release_all(class, &[from.as_ptr()], false);
+                self.retain(class, charge);
                 self.heartbeat();
             }
             None => self.free_run(from),
@@ -885,6 +899,7 @@ impl<'a, O: Os> Back<'a, O> {
         let dense = || unsafe { mostly_data(from.as_ptr().add(last), len - last, page) };
         if let Some(now) = region::recorded(&host, region, index) {
             region::advise_grown(&host, region, index, into, len, now.size, dense);
+            region::cover(&host, region, index);
         }
     }
 
