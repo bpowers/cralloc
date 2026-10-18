@@ -371,6 +371,32 @@ fn the_throwing_forms_slow_paths_return_null_for_the_routine_to_throw() {
     unsafe { cxx::operator_delete(p) };
 }
 
+/// A megabyte is a class. One byte more outgrows the slot and moves to a slot with four times
+/// the room; cut back to a megabyte, the block is under a quarter of that slot, so it moves
+/// again, to an exact slot, where the next extra byte moves it once more. Headroom gives a
+/// block a quarter of its slot at most and a shrink moves a block under a quarter, so the two
+/// rules meet with no gap between them, and a block resized back and forth across a class
+/// boundary is copied on every call.
+#[test]
+#[ignore = "finding: a block resized across a class boundary is copied at every call"]
+fn a_block_resized_back_and_forth_across_a_class_boundary_settles() {
+    let size = 1 << 20;
+    let mut moves = 0;
+    // SAFETY: the block is live where it is resized and given up once.
+    unsafe {
+        let mut p = malloc(size);
+        for _ in 0..10 {
+            for next in [size + 1, size] {
+                let q = realloc(p, next);
+                moves += usize::from(q != p);
+                p = q;
+            }
+        }
+        free(p);
+    }
+    assert!(moves <= 2, "{moves} of 20 calls moved the megabyte");
+}
+
 #[test]
 fn calloc_zeroes_all_it_reports_usable() {
     // As glibc's calloc does: a program that sizes a block by malloc_usable_size (redis does)

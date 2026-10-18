@@ -660,6 +660,26 @@ mod process {
         }
     }
 
+    /// The design: what a large block may use is the size asked for, to a page, never the
+    /// room it sits in, so that a caller that fills what it is told it may use touches about
+    /// what it asked for. A layout aligned beyond a region takes a run, and the run records
+    /// the size rounded up to the alignment: eight bytes aligned to 8 GiB report 8 GiB
+    /// usable, all of it committed.
+    #[test]
+    #[ignore = "finding: an over-aligned run reports its alignment as its usable size"]
+    fn an_over_aligned_run_reports_what_was_asked_for() {
+        let l = layout(8, 1 << 33);
+        // SAFETY: a valid layout; the block is freed once.
+        unsafe {
+            let p = Asmalloc.alloc(l);
+            assert!(!p.is_null());
+            assert_eq!(p.addr() % (1 << 33), 0);
+            let usable = Asmalloc::usable_size(p);
+            Asmalloc.dealloc(p, l);
+            assert_eq!(usable, Some(4096));
+        }
+    }
+
     #[test]
     fn the_out_of_line_routines_reach_the_slow_paths() {
         let class = Class::of_size(96).unwrap().small().unwrap();
