@@ -8,7 +8,7 @@ mod common;
 use asmalloc::SimAsmalloc;
 use asmalloc_testkit::subject::ViaGlobalAlloc;
 use asmalloc_testkit::{Config, Handoff, Profile, check};
-use common::{balanced, ops, ops_for, profiles};
+use common::{balanced, ops, ops_for, profiles, with_drains};
 
 /// The simulated heap holds 64 MiB in all, shared by every test here, which run at once and
 /// with up to six workers each: keep what they hold well inside it.
@@ -31,12 +31,14 @@ fn the_simulated_heap_serves_every_profile() {
 fn the_simulated_heap_frees_on_other_threads_with_miri_sizes() {
     let s = ViaGlobalAlloc(SimAsmalloc);
     let p = Profile::MIXED.with_migrate(5).capped(4096, 4096, 1 << 20);
-    for handoff in [Handoff::Pairs, Handoff::AllToAll, Handoff::Steal] {
-        for seed in 1..=20 {
-            let cfg = Config::threads(p, 3, handoff, seed, ops(6000, 0));
-            balanced(&check(&s, &cfg), &format!("{handoff:?}"));
+    with_drains(SimAsmalloc::heap(), || {
+        for handoff in [Handoff::Pairs, Handoff::AllToAll, Handoff::Steal] {
+            for seed in 1..=20 {
+                let cfg = Config::threads(p, 3, handoff, seed, ops(6000, 0));
+                balanced(&check(&s, &cfg), &format!("{handoff:?}"));
+            }
         }
-    }
+    });
 }
 
 /// A fresh simulated heap, by reference.
@@ -75,19 +77,21 @@ fn fresh_simulated_heaps_serve_threads_that_hand_blocks_over() {
             seed,
             6000,
         );
-        balanced(&check(&s, &cfg), "fresh");
+        with_drains(heap.0, || balanced(&check(&s, &cfg), "fresh"));
     }
 }
 
 #[test]
 fn the_simulated_heap_frees_on_other_threads() {
     let s = ViaGlobalAlloc(SimAsmalloc);
-    for profile in [Profile::MIXED.with_migrate(5), Profile::SMALL_FIXED] {
-        for handoff in [Handoff::Pairs, Handoff::AllToAll, Handoff::Steal] {
-            for seed in [11, 12, 13] {
-                let cfg = Config::threads(fit(profile), 6, handoff, seed, ops(6000, 0));
-                balanced(&check(&s, &cfg), &format!("{handoff:?}"));
+    with_drains(SimAsmalloc::heap(), || {
+        for profile in [Profile::MIXED.with_migrate(5), Profile::SMALL_FIXED] {
+            for handoff in [Handoff::Pairs, Handoff::AllToAll, Handoff::Steal] {
+                for seed in [11, 12, 13] {
+                    let cfg = Config::threads(fit(profile), 6, handoff, seed, ops(6000, 0));
+                    balanced(&check(&s, &cfg), &format!("{handoff:?}"));
+                }
             }
         }
-    }
+    });
 }

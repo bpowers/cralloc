@@ -4,7 +4,19 @@
 reading. Speed was not the subject; where a proposal has a speed cost, the note says whether
 it was measured.
 
+The mechanisms it proposed have since been built. What they achieve is the first section
+after the summary; the rest is the review as it was written, with its measurements of the
+allocator before the change and of prototypes.
+
 ## Summary
+
+- **With the mechanisms built**, asmalloc peaks at or under jemalloc on every benchmark
+  workload of 10 MiB or more (JSON is 0.4% over), and after a 218 MiB burst it is at 4.3 MiB
+  in twelve seconds where jemalloc is at 4.5 and it used to hold 147 for ever. It is still
+  0.5 to 1 MiB over in the smallest processes and 2 MiB over on the mixed-size pipeline,
+  which is the 128 KiB magazine budget.
+
+What the review found, before the change:
 
 - **At the peak of the benchmark workloads asmalloc is already close to jemalloc** now that
   the idle check is fixed: within 1 MiB on most, under on fork-join, hash map, tree and mixed
@@ -31,6 +43,130 @@ it was measured.
   1M-object churn, which stay about 1 MiB over because of huge pages.
 - **Where per-CPU caches already win.** Sixteen threads on two CPUs that each touch every
   class: asmalloc keeps 12 MiB, jemalloc 52, mimalloc 28.
+
+## What the finished mechanisms achieve
+
+Measured 2026-10-17 on main at 6803b5b, after the mechanisms this note proposed were built
+properly (sections 1 to 5 below are the review that led to them, measured earlier the same
+day on prototypes, and are kept as written). Same method. The machine was busy throughout:
+load average 18 to 29 on 32 CPUs. That does not move memory figures much, but times mean
+nothing and are not given.
+
+What was built: the retained counts that are never reset, the 8 MiB cap for freed large
+slots, and the clocked top-down purge of a quarter an interval; huge pages only for classes
+up to 1 KiB, after 64 MiB carved, with the watermark's huge page purgeable; a loaded magazine
+aged out after an interval, each CPU's full spares swept once an interval, a depot stack
+shedding the depth it did not need, and one retiring magazine in 32 laundered; `collect` and
+`malloc_trim` doing all of it at once; a large block that shrinks in place returning its
+tail, and one that moves copied in 2 MiB pieces with the old pages returned behind the copy.
+Magazines still hold up to 128 KiB of objects; that question was deferred.
+
+### Peaks
+
+Cgroup peak, MiB. asmalloc and jemalloc are three runs each, lowest to highest; mimalloc is
+one run.
+
+| Workload | asmalloc | jemalloc | mimalloc |
+|---|---:|---:|---:|
+| pipeline, 2 threads, small | 3.0 to 3.2 | 2.0 | 7.5 |
+| pipeline, 2 threads, mixed sizes | 7.5 to 7.7 | 5.2 to 5.7 | 9.5 |
+| exchange, 2 threads | 3.0 to 3.1 | 2.3 to 2.5 | 7.2 |
+| mpmc 3+1 | 4.5 to 5.0 | 4.0 to 4.2 | 8.5 |
+| fork-join, 4 threads | 15.7 to 16.9 | 16.5 to 17.3 | 25.4 |
+| spawn, 4 threads | 3.4 | 2.7 to 2.9 | 10.5 |
+| churn, 1k live | 1.1 to 1.4 | 0.7 to 1.2 | 4.7 |
+| churn, 1M live | 107.9 to 108.0 | 110.1 to 110.6 | 117.2 |
+| churn, 100k live, mixed sizes | 34.5 to 34.8 | 36.8 | 52.7 |
+| BTreeMap 200k | 25.9 to 26.0 | 25.8 to 26.0 | 26.8 |
+| HashMap 200k | 32.5 to 32.8 | 34.6 to 34.9 | 36.8 |
+| tree, depth 18 | 13.1 to 13.2 | 17.3 to 17.6 | 19.0 |
+| Vec growth, 1 x 64 MiB | 67.5 to 67.9 | 72.0 to 72.4 | 139.0 |
+| Vec growth, 64 x 4 MiB | 269.7 to 270.0 | 305.4 to 305.5 | 263.3 |
+| JSON 8 MiB | 89.3 to 89.5 | 88.9 to 89.2 | 97.0 |
+
+Every workload of 10 MiB or more is at or under jemalloc, except JSON, which is 0.4 MiB
+(0.4%) over. Vec growth went from 11 MiB over to 4.5 under, the 1M-object churn from 1 over
+to 2.4 under.
+
+### What is still above jemalloc, and why
+
+- **The smallest processes: 0.5 to 1 MiB over** (pipeline 3.0 against 2.0, exchange 3.0
+  against 2.4, mpmc 4.7 against 4.0, spawn 3.4 against 2.8). The sampler on the small
+  pipeline at its peak: 1.6 MiB of heap, of which the program holds 0.5, parked objects are
+  0.5, and metadata, magazine area and slabs are 0.55. Page tables are about 0.1 MiB more
+  than jemalloc's. None of the new rules acts inside a run of a tenth of a second. This is a
+  fixed cost of a few hundred kilobytes, not something that grows.
+- **The mixed-size pipeline: 2.1 MiB over** (7.6 against 5.5), unchanged by the rules. Yes,
+  it is still parked objects in 128 KiB magazines: at the peak the program holds 0.5 MiB,
+  loaded magazines 2.4, the depot 2.2 and spares 0.1, out of 5.8 MiB of heap. The classes
+  from 384 bytes to 8 KiB each have about 0.1 MiB loaded and as much in the depot. The run
+  lasts 60 ms, so nothing ages out. The 32 KiB budget took this workload to 5.5 in the
+  prototype (section 5, mechanism 5); that is the deferred question, and this is its cost.
+- **The same thing at a phase change's first moment.** Eight CPUs using every class peak at
+  30 to 50 MiB against jemalloc's 28, and two CPUs at 13.9 against 7.2. A second later the
+  rules have begun to return it (below), but the peak itself is the magazine budget.
+- **JSON, 0.4 MiB over**: the bookkeeping above on a heap whose live data is the same.
+
+### After the peak
+
+Free 218 MiB of small objects in random order, then allocate and free 2000 objects of 64
+bytes every millisecond. Anonymous resident MiB:
+
+| | at peak | 2 s | 4 s | 6 s | 8 s | 10 s | 12 s |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| asmalloc | 211 | 52 | 30 | 23 | 13.5 | 8.2 | 4.3 |
+| jemalloc | 218 | 142 | 126 | 59 | 12.5 | 4.4 | 4.5 |
+| mimalloc | 226 | 226 | 226 | 226 | 14.8 | 14.8 | 14.8 |
+
+Before the change asmalloc held 147 MiB for as long as the run lasted. Now it returns
+memory sooner than jemalloc for the first six seconds (a quarter of what is free each
+second, against jemalloc's curve that starts slowly), is level with it at eight, and ends
+at the same place, 4.3 against 4.5. Its tail is slower: from 30 MiB down it loses about a
+third every two seconds where jemalloc's curve finishes steeply, so between 9 and 11 s it
+is a few megabytes above. The fraction and the interval are two constants.
+
+### The worst cases
+
+Anonymous resident MiB, eight seconds after the event unless a time is given.
+
+| Case | asmalloc before | asmalloc | jemalloc | mimalloc |
+|---|---:|---:|---:|---:|
+| Burst then light work, at 12 s | 147 | 4.3 | 4.5 | 14.8 |
+| Phase change: 8 CPUs use every class, then one CPU uses one | 30 to 49 | 10.0 | 24.7 | 15.8 |
+| Many CPUs, few classes: 8 CPUs, 4 classes | 4.6 | 1.1 | 4.3 | 8.3 |
+| Many classes, few CPUs: 2 CPUs, 44 classes | 10.9 | 1.6 | 4.1 | 6.2 |
+| Many threads, few CPUs: 16 threads on 2 CPUs, 44 classes | 11.9 | 1.6 | 52.2 | 28.3 |
+| Sparse: 256 blocks of 1 MiB, one page written each | 246 | 1.3 | 2.9 | 276 |
+| Sparse: 4096 blocks of 64 KiB, one page written each | 247 | 16.4 | 33.2 | 344 |
+| Three small objects | 0.2 | 0.2 | 0.3 | 2.2 |
+
+The phase change was still falling at eight seconds (38, 21, 16, 10 at 2, 4, 6 and 8 s); it
+is the slowest of these because seven idle slabs are drained one interval after they go
+quiet, their magazines then wait in the depot for its low-water rule, and the purge takes a
+quarter a pass.
+
+### Large blocks that shrink or move
+
+The soak's `bigmem` through the preload library, peak resident MiB, one run each
+(`crates/asmalloc-preload/tests/programs/bigmem.c`; `chain` grows a block to 256 MiB by
+`realloc` and shrinks it back, `grow` frees at the top; rounds, then threads):
+
+| Mode | glibc | asmalloc before | asmalloc |
+|---|---:|---:|---:|
+| `chain 10 1` | 257 | 392 | 263 |
+| `chain 10 4` | 1008 | 1178 | 1011 |
+| `grow 10 4` | 1008 | 859 | 871 |
+
+Not measured: a block written sparsely and then moved, which the piecewise copy makes
+dense; moving large blocks by remapping is planned for that.
+
+### Still open
+
+- The magazine budget, which is all of the mixed pipeline's gap and of the phase-change
+  peak.
+- A process in which no thread reaches a slow path returns nothing until it calls `collect`.
+- Speed: none of this was timed, on this machine or any other.
+- More than 8 CPUs, the RPC server, and runs longer than 12 s were not measured.
 
 ## Method
 
@@ -580,11 +716,10 @@ zero) with no ledger entry. They are prototypes and must not be merged as they a
 
 ```
 W=$(pwd)   # the checkout
-bench/probes/memory/build.sh $W/bench asmalloc je mi base-ms=asmalloc-memstat \
-    age-thpoff=asmalloc+x-purge-decay+x-class-age+x-depot-gc+x-refresh+x-thp-off \
-    lean=asmalloc+x-purge-decay+x-class-age+x-depot-gc+x-refresh+x-thp-small+x-mag-32k+x-cap-8m
-bench/probes/memory/peaks.sh $W asmalloc,lean,je,mi pipe2 pipemix churn1M vecgrow json
-bench/probes/memory/worst.sh $W asmalloc,lean,age-thpoff,je,mi
+bench/probes/memory/build.sh $W/bench asmalloc je mi base-ms=asmalloc-memstat
+bench/probes/memory/peaks.sh $W asmalloc,je,mi pipe2 pipemix churn1M vecgrow json
+bench/probes/memory/worst.sh $W asmalloc,je,mi
+# The prototype builds (`lean`, `age-thpoff`) need the review branch and its x-* features.
 bench/probes/memory/memrun.sh $W base-ms 0,1,2,3,8,9,10,11 phase touch threads=8 secs=8 sizes=s64
 python3 bench/probes/memory/summ.py -c -s bench/target/memory-out/phase.base-ms.memstat
 ```
