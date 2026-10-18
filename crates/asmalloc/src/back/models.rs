@@ -1983,3 +1983,112 @@ fn purge_sets_zero_bits_only_inside() {
     assert!(host.is_zero(region, 0) && host.is_zero(region, 1));
     assert!(!host.is_zero(region, 2));
 }
+
+/// Two regions of two summary levels in which words 1 and 64 of region 0 and word 0 of region
+/// 1 are empty under summary bits set at every level, as claims that keep the bits leave
+/// them, and nothing is free. The slots the claims took (64 and `64 * 64` of region 0, 0 of
+/// region 1) are the program's.
+fn stale_bits_setup() -> Host8 {
+    let host = Host8::new(standard(), class(8), 2);
+    assert_eq!(host.layout().height(), 2);
+    for r in 0..2 {
+        host.carve_all(host.region_at(r), host.layout().slots());
+    }
+    let (r0, r1) = (host.region_at(0), host.region_at(1));
+    // Highest first: a search stops at the lowest word with a free slot, so it never reaches
+    // the bits already left over the empty words above, which it would clear.
+    for (region, slot) in [(r1, 0), (r0, 64 * 64), (r0, 64)] {
+        free_now(&host, region, slot);
+        assert_eq!(claim_with(&host, 1, true), [(region, slot)]);
+    }
+    assert!(free_set(&host, 2).is_empty());
+    for (region, word) in [(r0, 1), (r0, 64), (r1, 0)] {
+        assert!(host.path_set(Node::leaf(region, word)));
+    }
+    host
+}
+
+/// Review of the direct path (`Look` against clears that go up the tree). A scattered launder
+/// frees into words that are empty under set summary bits, so at every level it reads a bit
+/// that is set and writes nothing, while searches from the top find those words empty, clear
+/// their bits level by level, and read each word again. `Summary_look_deep.cfg` with the
+/// stale bits of `Summary_keep_deep.cfg`, on the production code.
+fn direct_frees_under_stale_bits_race_clears(preemptions: usize) {
+    explore(
+        Config {
+            preemptions: Some(preemptions),
+            ..Config::ALL
+        },
+        3,
+        || (stale_bits_setup(), Mutex::new(Vec::new())),
+        |(host, kept), me| {
+            let (r0, r1) = (host.region_at(0), host.region_at(1));
+            let got = match me {
+                0 => {
+                    free_direct(host, &[(r0, 64), (r1, 0), (r0, 64 * 64), (r0, 65)]);
+                    Vec::new()
+                }
+                1 => claim(host, 1),
+                _ => claim_run_of(host, 2, 1),
+            };
+            kept.lock().unwrap().extend(got);
+        },
+        |(host, kept), outcome| {
+            assert!(outcome.killed.is_empty());
+            let first = host.global(host.region_at(1), 0);
+            run_check(host, 2, kept, &[64, 65, 64 * 64, first]);
+        },
+    );
+}
+
+#[test]
+#[ignore = "slow: run with scripts/gate --all"]
+fn direct_frees_under_stale_bits_race_clears_fully() {
+    direct_frees_under_stale_bits_race_clears(2);
+}
+
+/// The same with a thread lost at any step, as in a forked child: afterwards a scattered
+/// launder into each word, which is the direct path's own healing walk (a look at each level,
+/// a write only where the bit is clear), makes the word reachable.
+fn direct_frees_heal_what_a_fork_left(preemptions: usize) {
+    explore(
+        Config {
+            preemptions: Some(preemptions),
+            crash: true,
+            ..Config::ALL
+        },
+        3,
+        || (stale_bits_setup(), Mutex::new(Vec::new())),
+        |(host, kept), me| {
+            let (r0, r1) = (host.region_at(0), host.region_at(1));
+            let got = match me {
+                0 => claim(host, 1),
+                1 => {
+                    free_direct(host, &[(r0, 64), (r1, 0), (r0, 64 * 64), (r0, 65)]);
+                    Vec::new()
+                }
+                _ => claim_run_of(host, 2, 1),
+            };
+            kept.lock().unwrap().extend(got);
+        },
+        |(host, kept), _| {
+            let kept: Vec<_> = kept.lock().unwrap().clone();
+            let distinct: BTreeSet<_> = kept.iter().copied().collect();
+            assert_eq!(distinct.len(), kept.len(), "a slot claimed twice");
+            let (r0, r1) = (host.region_at(0), host.region_at(1));
+            free_direct(host, &[(r0, 64 + 7), (r1, 7), (r0, 64 * 64 + 7)]);
+            for (region, word) in [(r0, 1), (r1, 0), (r0, 64)] {
+                assert!(
+                    host.path_set(Node::leaf(region, word)),
+                    "word {word} stays invisible after a scattered launder into it"
+                );
+            }
+        },
+    );
+}
+
+#[test]
+#[ignore = "slow: run with scripts/gate --all"]
+fn direct_frees_heal_what_a_fork_left_fully() {
+    direct_frees_heal_what_a_fork_left(2);
+}
