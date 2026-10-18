@@ -483,6 +483,90 @@ mod tests {
     const PAGE: usize = 4096;
     const REGION: usize = 1 << 32;
 
+    /// A file of `bytes` for `read_file`, and its NUL-terminated path.
+    fn file_of(name: &str, bytes: &[u8]) -> std::vec::Vec<u8> {
+        let path = std::env::temp_dir().join(std::format!(
+            "asmalloc-read-file-{}-{name}",
+            std::process::id()
+        ));
+        std::fs::write(&path, bytes).unwrap();
+        let mut path = path.into_os_string().into_encoded_bytes();
+        path.push(0);
+        path
+    }
+
+    fn remove(path: &[u8]) {
+        let _ = std::fs::remove_file(core::str::from_utf8(&path[..path.len() - 1]).unwrap());
+    }
+
+    #[test]
+    fn read_file_reads_a_whole_file_or_nothing() {
+        let text = b"0-7,16-23\n";
+        let path = file_of("list", text);
+        let mut buf = [0xaau8; 64];
+        assert_eq!(read_file(&path, &mut buf), Some(text.len()));
+        assert_eq!(&buf[..text.len()], text);
+        assert!(buf[text.len()..].iter().all(|&b| b == 0xaa));
+        // A buffer the file exactly fills cannot show that the file ended: it does not fit.
+        let mut exact = [0u8; 10];
+        assert_eq!(read_file(&path, &mut exact), None);
+        let mut short = [0u8; 3];
+        assert_eq!(read_file(&path, &mut short), None);
+        assert_eq!(read_file(&path, &mut []), None);
+        // No NUL at the end of the path: no call.
+        assert_eq!(read_file(&path[..path.len() - 1], &mut buf), None);
+        assert_eq!(read_file(b"", &mut buf), None);
+        remove(&path);
+        assert_eq!(read_file(&path, &mut buf), None);
+        let empty = file_of("empty", b"");
+        assert_eq!(read_file(&empty, &mut buf), Some(0));
+        remove(&empty);
+        // A directory opens and its read fails.
+        assert_eq!(read_file(b"/\0", &mut buf), None);
+    }
+
+    /// Every path through `read_file` closes what it opened: far more calls than the
+    /// descriptor limit allows open at once, and files still open afterwards.
+    #[test]
+    fn read_file_leaks_no_descriptor() {
+        let path = file_of("leak", b"0-3\n");
+        let mut buf = [0u8; 16];
+        let mut short = [0u8; 2];
+        let limit = std::fs::read_to_string("/proc/self/limits")
+            .unwrap()
+            .lines()
+            .find(|line| line.starts_with("Max open files"))
+            .and_then(|line| line.split_whitespace().nth(3)?.parse::<usize>().ok())
+            .unwrap();
+        let rounds = limit.min(1 << 16) + 64;
+        for _ in 0..rounds {
+            assert_eq!(read_file(&path, &mut short), None);
+            assert_eq!(read_file(b"/\0", &mut buf), None);
+            assert_eq!(read_file(&path, &mut buf), Some(4));
+        }
+        remove(&path);
+    }
+
+    #[test]
+    fn topology_paths_fit_for_any_cpu_number() {
+        let mut buf = [0u8; 512];
+        // No such CPU: the path is built, the open fails, and nothing is read.
+        assert_eq!(
+            LinuxOs.topology(Topology::SharedL3(u32::MAX), &mut buf),
+            None
+        );
+        let mut path = [0u8; 16];
+        let mut at = 0;
+        assert!(append_number(&mut path, &mut at, 0));
+        assert!(append_number(&mut path, &mut at, u32::MAX));
+        assert_eq!(&path[..at], b"04294967295");
+        assert!(!append_number(&mut path, &mut at, 123_456));
+        assert!(append(&mut path, &mut at, b"12345"));
+        assert!(!append(&mut path, &mut at, b"1"));
+        let len = LinuxOs.topology(Topology::Online, &mut buf).unwrap();
+        assert!(crate::depot::domain::each_cpu(&buf[..len], |_| {}));
+    }
+
     #[test]
     fn reserve_commit_purge_and_unmap() {
         let os = LinuxOs;

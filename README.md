@@ -63,6 +63,11 @@ Limits worth knowing:
   the capability that lifts it: the heap's address-space reservation counts against the
   limit even though nothing in it is resident.
 - One copy per process: two copies have separate heaps and cannot free each other's blocks.
+- The first allocation that cannot be served from a cache reads a few files under
+  `/sys/devices/system/cpu` to learn which CPUs share a cache, and never reads them again. A
+  program that installs a seccomp filter before it first allocates must let `openat`, `read`
+  and `close` fail or succeed, not kill; if they fail, the allocator treats the machine as
+  one cache domain.
 - Under Miri, declare the allocator `#[cfg(not(miri))]` and keep Miri's own.
 
 The code in this repository is written by Claude.

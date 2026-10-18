@@ -22,7 +22,8 @@
 //! - [`Back::heartbeat`] does one bounded step of the clocked pass that returns free memory to
 //!   the OS, and [`Back::trim`] returns everything it can. Fills and large allocations that
 //!   carve purge toward the retained cap (`purge`); a free purges nothing but a
-//!   large slot advised for huge pages.
+//!   large slot advised for huge pages, and that only past the budget for kept grown blocks
+//!   (`policy::KEPT_GROWN_HUGE_PAGES`).
 //!
 //! Every change to shared state is one atomic instruction, and all-zero state means an empty
 //! heap: no regions, nothing free, nothing carved. The protocols follow the TLA+ models in
@@ -82,9 +83,8 @@ pub struct State<O: Os> {
     cell: Lined<SpaceCell<O>>,
     table: Lined<RegionTable>,
     classes: [ClassState; COUNT],
-    /// Bytes of free slots in the bitmaps believed to be resident. Signed: a subtraction may
-    /// run ahead of the addition it answers; read as zero when negative.
-    retained: Lined<AtomicIsize>,
+    /// Bytes of free slots in the bitmaps believed to be resident (`purge`).
+    retained: Lined<Retained>,
     /// Bytes carved since a grower last checked the cap (`purge`).
     growth: Lined<AtomicUsize>,
     /// The clocked pass: when the last one ended, or when the one under way began with the
@@ -98,6 +98,15 @@ pub struct State<O: Os> {
     /// Each region's header (`host::RegionHeader`). Out of the regions' metadata
     /// blocks, so that a class whose slots never reach the bitmaps never touches its block.
     headers: Lined<Headers>,
+}
+
+/// Bytes of free slots in the bitmaps believed to be resident, for small classes and large
+/// ones. Signed: a subtraction may run ahead of the addition it answers; read as zero when
+/// negative. The decay and the cap act on the sum; the large count alone decides whether a
+/// grown block is kept (`policy::kept_grown`).
+struct Retained {
+    small: AtomicIsize,
+    large: AtomicIsize,
 }
 
 /// What the steps of the purge walk share (`purge`).
@@ -133,7 +142,10 @@ impl<O: Os> State<O> {
             cell: Lined::new(SpaceCell::new(os)),
             table: Lined::new(RegionTable::new()),
             classes: [const { ClassState::new() }; COUNT],
-            retained: Lined::new(AtomicIsize::new(0)),
+            retained: Lined::new(Retained {
+                small: AtomicIsize::new(0),
+                large: AtomicIsize::new(0),
+            }),
             growth: Lined::new(AtomicUsize::new(0)),
             decay: Lined::new(AtomicU64::new(0)),
             walk: Lined::new(Walk {

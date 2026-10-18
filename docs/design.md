@@ -536,8 +536,8 @@ rule that returns it (`docs/research/memory.md` has the measurements behind them
 |---|---|---|
 | Free slots in the bitmaps, on pages with nothing live on them | The clocked purge | Once an interval: up to a quarter of the retained memory, or all of it above the cap, from the top of the heap down |
 | The same, while more than the cap is retained and the heap grows somewhere else | The carve that grows it returns as much as it takes | At that carve, within a bound on its work |
-| A freed large slot whose block had huge pages | The free itself | Before it releases the slot |
-| The tail of a large block that shrinks in place; the old copy of one that moves | The resize (see "Large objects") | At once |
+| A large block left behind by a move, or one that grew and is freed, beyond a small budget of such memory | The move or the free (see "Large objects") | Before it releases the slot |
+| The tail of a large block that shrinks in place; the pages behind a move made in pieces | The resize (see "Large objects") | At once |
 | Objects in a magazine that stays loaded | A slow path of the same CPU launders it | Once it has been loaded for an interval |
 | Objects in a CPU's full spares | That CPU's sweep launders one magazine and sends the rest to the depot | Once an interval |
 | Objects in a depot stack | A heartbeat launders a magazine; a look at a class looks at its stack in every domain, so a domain that goes quiet sheds as a quiet class does | While the stack is over its target, and for the depth it did not need during an interval |
@@ -662,11 +662,22 @@ of a slot that headroom gives a block when it moves in, so a block resized back 
 across a class boundary settles in one slot instead of being copied on every call.
 
 When a large object has to move, the copy goes in pieces and returns the old block's pages
-behind it, so the two copies are never both resident. The block has just been outgrown, so
-its slot is unlikely to be wanted again soon, and this keeps a program that grows several
-big buffers at once from holding twice their size. The copy skips source pages that are all zero and
-leaves the destination's pages untouched there, so a block the program wrote sparsely stays
-sparse. Moving the pages with `mremap` instead would copy nothing, but it splits the heap's
+behind each piece, so the two copies are never both resident. Each piece's pages are tested
+first. A piece with no all-zero page is one copy. Where there are zero pages the copy leaves
+them out, and the destination is purged only under them, so a block the program wrote
+sparsely stays sparse.
+
+A block small enough to move in one piece is left whole behind the move, and what becomes
+of it, and of a block that grew and is then freed, depends on how much such memory is
+already kept. A buffer grown and freed again and again should find its memory resident each
+time; many buffers growing at once should not leave a trail of the blocks they outgrew. So
+the slot stays resident while retained large-slot memory is within a small budget, and goes
+back at once beyond it. This is not the level that a free must not act on. The purge falls
+only on a block the program copied or wrote in full to reach its size, so it costs at most
+about what the program has already spent on that block, and it never falls on a block that
+was allocated, barely touched and freed.
+
+Moving the pages with `mremap` instead would copy nothing, but it splits the heap's
 mapping in ways that take several more rules to undo, and it adds nothing to the memory
 saved; we copy.
 
