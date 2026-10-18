@@ -154,3 +154,5 @@ enter magazines through the slow paths come from that reservation. Words that ar
 (slab words, stack heads) are turned back into references only through the magazine area
 (`Area::magazine`), so the pointers built for them with `without_provenance_mut` are never
 dereferenced.
+
+Reviewed: 415b07e

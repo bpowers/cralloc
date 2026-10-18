@@ -104,4 +104,4 @@ whoever dereferences it, in their own ledger.
 
 On the real kernel, `os::linux::kernel::tests::the_design_reservation_is_available`.
 
-Reviewed: f41dbf9
+Reviewed: 415b07e

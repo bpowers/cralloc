@@ -85,3 +85,5 @@ contract. Pointers cross the assembly as integers: `free` exposes the block's pr
 `malloc` takes the exposed provenance back, as REAL-03 argues for the inline pop and push:
 every object address lies in the heap's reservation, whose provenance the heap exposes when it
 starts.
+
+Reviewed: 415b07e

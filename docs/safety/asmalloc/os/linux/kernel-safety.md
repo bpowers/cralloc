@@ -214,4 +214,4 @@ single call:
   `an_abort_inside_the_handler_ends_the_process`: child processes, checking the signal, the
   message, that a returning handler ran, and that a handler that aborts runs once.
 
-Reviewed: f41dbf9
+Reviewed: 415b07e
