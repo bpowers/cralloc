@@ -322,3 +322,40 @@ fn a_sized_delete_with_the_wrong_size_frees_the_right_block() {
     }
     assert!(seen.iter().filter(|&&same| same).count() > 32, "{seen:?}");
 }
+
+#[test]
+fn the_throwing_forms_slow_paths_return_null_for_the_routine_to_throw() {
+    // Not exported; what the generated routine will call. With no C++ runtime in a Rust test
+    // binary there is no new-handler, so the loop ends at once.
+    assert!(cxx::operator_new(usize::MAX / 4).is_null());
+    assert!(cxx::operator_new_aligned(usize::MAX / 4, 64).is_null());
+    assert!(cxx::operator_new_aligned(16, 48).is_null());
+    let p = cxx::operator_new_aligned(100, 4096);
+    assert_eq!(p.addr() % 4096, 0);
+    // SAFETY: a live block, given up once.
+    unsafe { cxx::operator_delete(p) };
+}
+
+#[test]
+fn calloc_zeroes_all_it_reports_usable() {
+    // As glibc's calloc does: a program that sizes a block by malloc_usable_size (redis does)
+    // may rely on the whole of it reading as zero.
+    for size in [1, 17, 100, 1000, 1025, 30_000, 40_001, 100_001] {
+        let dirty: Vec<_> = (0..16).map(|_| malloc(size)).collect();
+        for &p in &dirty {
+            // SAFETY: a live block, all of whose usable bytes are the caller's.
+            unsafe { p.cast::<u8>().write_bytes(0xA5, usable(p)) };
+            release(p);
+        }
+        for p in [calloc(1, size), calloc(size, 1)] {
+            let len = usable(p);
+            // SAFETY: a live block of `len` usable bytes.
+            let bytes = unsafe { core::slice::from_raw_parts(p.cast::<u8>(), len) };
+            assert!(
+                bytes.iter().all(|&b| b == 0),
+                "calloc of {size} bytes left dirt in its {len} usable"
+            );
+            release(p);
+        }
+    }
+}
