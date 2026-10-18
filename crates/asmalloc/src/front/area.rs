@@ -675,10 +675,12 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "fails: a handler that registers the thread inside an armed sequence leaves the \
-                sequence unprotected, and it hands out a block the handler was given"]
-    fn a_handler_that_registers_a_thread_inside_its_sequence_leaves_it_protected() {
-        let name = "a_handler_that_registers_a_thread_inside_its_sequence_leaves_it_protected";
+    #[ignore = "an accepted limitation on musl (design, What is trusted): fails, because a \
+                handler that registers the thread inside an armed sequence leaves the sequence \
+                unprotected, and it hands out a block the handler was given"]
+    fn limitation_a_handler_that_registers_a_thread_inside_its_first_sequence_unprotects_it() {
+        let name =
+            "limitation_a_handler_that_registers_a_thread_inside_its_first_sequence_unprotects_it";
         if !is_child(name) {
             return in_fresh_process(name);
         }
