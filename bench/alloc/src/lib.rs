@@ -82,10 +82,15 @@ use system as chosen;
 pub const NAME: &str = chosen::NAME;
 
 /// Starts what the allocator needs started before the workload runs: asmalloc's background
-/// thread, with the `asmalloc-background` feature. Nothing for any other build.
+/// thread, with the `asmalloc-background` feature, and the cache domains of
+/// `ASMALLOC_DOMAIN_WIDTH`, with `asmalloc-domains`. Nothing for any other build.
 pub fn init() {
     #[cfg(feature = "asmalloc-background")]
     asmalloc::Asmalloc::start_background().expect("asmalloc's background thread starts");
+    #[cfg(feature = "asmalloc-domains")]
+    if let Some(width) = std::env::var("ASMALLOC_DOMAIN_WIDTH").ok().and_then(|w| w.parse().ok()) {
+        asmalloc::Asmalloc::split_domains(width);
+    }
 }
 
 /// What the running process can tell about its allocator.

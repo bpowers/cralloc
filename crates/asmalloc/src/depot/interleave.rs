@@ -16,7 +16,7 @@
 
 use super::heartbeat::Clock;
 use super::test_rig::{Rig, Small, TIGHT, tiny_class};
-use super::{Drained, IDLE_TICKS, Source};
+use super::{Domain, Drained, IDLE_TICKS, Pool, Source};
 use crate::front::check::{Bounds, Report, choose, explore, switch_point};
 use crate::os::sim::{Call, Faults, SimOs, SimThread};
 use crate::os::{Aborted, Machine, Os, Step};
@@ -473,8 +473,9 @@ fn an_age_take_and_a_drain_keep_one_owner_under_every_schedule(bounds: Bounds) {
     );
 }
 
-/// Two threads push and pop one depot stack directly, with a third holding magazines it
-/// pushes back (`Depot.tla`): the version counter keeps every magazine with one owner.
+/// Two threads push and pop one depot stack directly (`Depot.tla`): the version counter keeps
+/// every magazine with one owner, and a capped push that gives its magazine back changes
+/// nothing.
 fn depot_stacks_keep_one_owner_under_every_schedule(bounds: Bounds) {
     let found = explore(
         bounds,
@@ -484,7 +485,7 @@ fn depot_stacks_keep_one_owner_under_every_schedule(bounds: Bounds) {
             let machine = world.machine(THREADS - 1, 0);
             let cache = world.rig.cache(&machine);
             let class = tiny_class();
-            // Three magazines with one object each, on the class's depot stack.
+            // Three magazines with one object each, on the class's shared stack.
             for _ in 0..3 {
                 let magazine = cache.area().create(class.magazine()).unwrap();
                 let object = world.rig.source.alloc_one(class).unwrap();
@@ -493,8 +494,8 @@ fn depot_stacks_keep_one_owner_under_every_schedule(bounds: Bounds) {
                 world
                     .rig
                     .depot
-                    .full(super::Domain::ZERO, class)
-                    .push(cache.area(), magazine);
+                    .full(Pool::Shared, class)
+                    .push(cache.area(), magazine, 1);
             }
             world
         },
@@ -502,9 +503,11 @@ fn depot_stacks_keep_one_owner_under_every_schedule(bounds: Bounds) {
             let machine = world.machine(me, 0);
             let cache = world.rig.cache(&machine);
             let class = tiny_class();
-            let stack = world.rig.depot.full(super::Domain::ZERO, class);
+            let stack = world.rig.depot.full(Pool::Shared, class);
             // Thread 1 pops two and pushes the first back before the second: the ABA a
-            // stale head would miss. Thread 0 pops one and pushes it back.
+            // stale head would miss. Thread 0 pops one and pushes it back. A push back that
+            // finds the stack at a cap of two objects sends its magazine to a domain's stack
+            // instead, which some schedules reach and others do not.
             let first = stack.pop(cache.area(), class.magazine());
             let second = if me == 1 {
                 stack.pop(cache.area(), class.magazine())
@@ -512,13 +515,53 @@ fn depot_stacks_keep_one_owner_under_every_schedule(bounds: Bounds) {
                 None
             };
             for magazine in [first, second].into_iter().flatten() {
-                stack.push(cache.area(), magazine);
+                if let Err(magazine) = stack.push_under(cache.area(), magazine, 1, 2) {
+                    cache.to_domain(Domain::ZERO, class, magazine);
+                }
             }
         },
         |_| {},
         |world, _| world.check(false),
     );
     report("depot", found);
+}
+
+/// A pop and a push back onto a domain's stack race a look that finds the stack empty and
+/// clears its bit in the sets of what the domains hold (`held.rs`): the census checks that a
+/// stack holding a magazine ends with both its bits set.
+fn held_hints_stay_set_under_every_schedule(bounds: Bounds) {
+    let found = explore(
+        bounds,
+        2,
+        || {
+            let world = World::new(6, 0);
+            let machine = world.machine(THREADS - 1, 0);
+            let cache = world.rig.cache(&machine);
+            let class = tiny_class();
+            let magazine = cache.area().create(class.magazine()).unwrap();
+            let object = world.rig.source.alloc_one(class).unwrap();
+            magazine.set_object(1, object);
+            magazine.set_level(1);
+            cache.to_domain(Domain::ZERO, class, magazine);
+            world
+        },
+        |world, me| {
+            let machine = world.machine(me, 0);
+            let cache = world.rig.cache(&machine);
+            let class = tiny_class();
+            if me == 0 {
+                let stack = world.rig.depot.full(Pool::Domain(Domain::ZERO), class);
+                if let Some(magazine) = stack.pop(cache.area(), class.magazine()) {
+                    cache.to_domain(Domain::ZERO, class, magazine);
+                }
+            } else {
+                cache.unhold(Domain::ZERO, class);
+            }
+        },
+        |_| {},
+        |world, _| world.check(false),
+    );
+    report("held hints", found);
 }
 
 #[test]
@@ -694,5 +737,17 @@ mod run {
     #[ignore = "slow: run with scripts/gate --all"]
     fn depot_stacks_keep_one_owner_under_every_schedule_fully() {
         super::depot_stacks_keep_one_owner_under_every_schedule(Bounds::preemptions(3));
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn held_hints_stay_set_under_every_schedule_quickly() {
+        super::held_hints_stay_set_under_every_schedule(Bounds::preemptions(2));
+    }
+
+    #[test]
+    #[ignore = "slow: run with scripts/gate --all"]
+    fn held_hints_stay_set_under_every_schedule_fully() {
+        super::held_hints_stay_set_under_every_schedule(Bounds::preemptions(3));
     }
 }

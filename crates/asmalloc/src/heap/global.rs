@@ -86,6 +86,16 @@ impl Asmalloc {
     /// at 6 GHz), so that every interval gets a call.
     #[doc(hidden)]
     pub const MAINTAIN_EVERY: core::time::Duration = core::time::Duration::from_millis(500);
+
+    /// Puts CPU number `c` in cache domain `c / width` instead of the domain its L3 gives it,
+    /// so that a benchmark can run with more domains than the machine has L3s. For
+    /// measurement only: the hidden feature `internals` is never part of a build that serves
+    /// a program.
+    #[cfg(feature = "internals")]
+    #[doc(hidden)]
+    pub fn split_domains(width: usize) {
+        HEAP.split_domains(width);
+    }
 }
 
 // SAFETY: GLOBAL-01. Every method is the process heap's.

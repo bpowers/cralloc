@@ -122,6 +122,12 @@ impl<O: Os> Heap<O> {
         self.back.os()
     }
 
+    /// Puts CPU number `c` in cache domain `c / width` (`Depot::split_domains`).
+    #[cfg(any(test, feature = "internals"))]
+    pub(crate) fn split_domains(&self, width: usize) {
+        self.depot.split_domains(self.os(), width);
+    }
+
     /// The back end, if the heap has started.
     #[inline]
     pub(crate) fn back(&self) -> Option<Back<'_, O>> {

@@ -5,7 +5,8 @@
 //!    each spare stack is popped empty.
 //! 2. Every other slab a slow path has run on is drained with the drain protocol (`drain.rs`):
 //!    a claim, markers and one fence per CPU. Drained magazines go to the depot.
-//! 3. Every class's depot stack in every cache domain is laundered, a magazine at a time.
+//! 3. Every class's depot stack, in every cache domain and the shared pool, is laundered, a
+//!    magazine at a time.
 //!
 //! The back end's purge is the heap's to ask for afterwards. What collect empties stays empty
 //! only while nothing allocates: it is for a program that knows it is idle, and it is a racy
@@ -16,8 +17,7 @@
 //! by [`SPARE_POPS`] per spare stack, and by the objects a depot stack held when its launder
 //! began, so concurrent pushes cannot keep it going.
 
-use super::domain::Domain;
-use super::{Cache, Source};
+use super::{Cache, Pool, Source};
 use crate::classes::SmallClass;
 use crate::front::{Cpu, Routines, Spare};
 use crate::os::Os;
@@ -40,7 +40,7 @@ impl<O: Os, R: Routines, S: Source> Cache<'_, O, R, S> {
         }
         let count = self
             .depot
-            .shared
+            .common
             .cpus
             .load(core::sync::atomic::Ordering::Acquire);
         for index in 0..count {
@@ -50,9 +50,9 @@ impl<O: Os, R: Routines, S: Source> Cache<'_, O, R, S> {
                 self.drain(cpu);
             }
         }
-        for domain in self.depot.all_domains() {
+        for pool in self.depot.pools() {
             for class in SmallClass::all() {
-                self.launder_stack(domain, class);
+                self.launder_stack(pool, class);
             }
         }
     }
@@ -80,16 +80,16 @@ impl<O: Os, R: Routines, S: Source> Cache<'_, O, R, S> {
         }
     }
 
-    /// Launders `class`'s depot stack in `domain`, up to the objects it held when this began.
-    fn launder_stack(&self, domain: Domain, class: SmallClass) {
+    /// Launders `class`'s depot stack in `pool`, up to the objects it held when this began.
+    fn launder_stack(&self, pool: Pool, class: SmallClass) {
         let held = self
             .depot
-            .full(domain, class)
-            .objects(self.area, class.magazine()) as usize;
+            .full(pool, class)
+            .count(self.area, class.magazine()) as usize;
         let mut done = 0;
         while done < held {
             // A magazine on the stack holds at least one object, so this ends.
-            match self.launder_one(domain, class) {
+            match self.launder_one(pool, class) {
                 Some(level) => done += level.max(1),
                 None => break,
             }

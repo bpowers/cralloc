@@ -13,9 +13,8 @@
 //!    once per interval: the sighting a drain leaves waits for the counter to move, and then
 //!    for an interval of quiet after that.
 //! 2. **Every depot stack's shedding** (`shed.rs`): a look at the depth of every class's stack
-//!    in every cache domain,
-//!    which starts a new interval for each that is due and sets what it owes, and then the
-//!    whole of every debt laundered.
+//!    in every cache domain and the shared pool, which starts a new interval for each that is
+//!    due and sets what it owes, and then the whole of every debt laundered.
 //! 3. **The clocked purge** ([`Source::purge_pass`]): the pass that is under way or due, run
 //!    to its end.
 //!
@@ -47,7 +46,7 @@ impl<O: Os, R: Routines, S: Source> Cache<'_, O, R, S> {
     pub fn maintain(&self) {
         let clock = Clock::new(self.os());
         if generation::drains_enabled(self.depot) {
-            let count = self.depot.shared.cpus.load(Acquire);
+            let count = self.depot.common.cpus.load(Acquire);
             for index in 0..count {
                 if let Some(cpu) = self.routines.slabs().cpu(index as i32) {
                     self.idle_look(cpu, clock.now(), Disposal::Launder);
@@ -55,9 +54,9 @@ impl<O: Os, R: Routines, S: Source> Cache<'_, O, R, S> {
             }
         }
         if self.tuning.shed_unused {
-            for domain in self.depot.all_domains() {
+            for pool in self.depot.pools() {
                 for class in crate::classes::SmallClass::all() {
-                    self.look_at_depth(domain, class, clock.now());
+                    self.look_at_depth(pool, class, clock.now());
                 }
             }
             self.shed_all();

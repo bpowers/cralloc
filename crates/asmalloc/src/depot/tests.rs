@@ -513,11 +513,22 @@ fn the_depot_launders_what_is_over_its_target() {
         cache.free(class, object);
     }
     let census = rig.census(&[], false);
-    let in_depot = rig
-        .depot
-        .full(super::Domain::ZERO, class)
-        .objects(cache.area(), class.magazine()) as usize;
-    assert!(in_depot * class.size() <= TIGHT.depot_target + 2 * class.size());
+    let in_pool = |pool| {
+        rig.depot
+            .full(pool, class)
+            .count(cache.area(), class.magazine()) as usize
+    };
+    let own = in_pool(super::Pool::Domain(super::Domain::ZERO));
+    let shared = in_pool(super::Pool::Shared);
+    // The domain's stack takes a magazine while it is under its cap; the shared one is
+    // laundered down to its target, here a magazine.
+    let magazine = class.magazine().capacity();
+    assert!(own * class.size() <= TIGHT.domain_cap + magazine * class.size());
+    assert!(shared * class.size() <= TIGHT.depot_target - TIGHT.domain_cap + class.size());
+    assert!(
+        shared > 0,
+        "the domain's stack overflowed into the shared one"
+    );
     assert!(rig.source.held().len() >= 12, "{census:?}");
 }
 
@@ -639,20 +650,24 @@ fn park_on_cpu_0(rig: &TestRig, count: usize) {
 }
 
 /// What `maintain` changes that a test can see: the fences made, the objects the source holds,
-/// and the hints the clocked rules keep (each slab's sighting, the depot's water words and its
-/// set of owing classes).
+/// and the hints the clocked rules keep (each slab's sighting, and the depot's water words and
+/// sets of owing classes, in the one domain and the shared pool).
 #[derive(PartialEq, Eq, Debug)]
 struct Trace {
     fences: u64,
     held: Vec<usize>,
     sightings: Vec<u64>,
     water: Vec<u64>,
-    owing: u64,
+    owing: Vec<u64>,
 }
 
 fn trace(rig: &TestRig) -> Trace {
     let mut held = rig.source.held();
     held.sort_unstable();
+    let pools = [
+        super::Pool::Domain(super::Domain::ZERO),
+        super::Pool::Shared,
+    ];
     Trace {
         fences: rig.os().calls(Call::Fence),
         held,
@@ -661,16 +676,25 @@ fn trace(rig: &TestRig) -> Trace {
             .cpus()
             .map(|cpu| rig.slabs().slab(cpu).seen().load(Relaxed))
             .collect(),
-        water: (0..crate::classes::SMALL_COUNT)
-            .map(|o| rig.depot.water(super::Domain::ZERO, o).load(Relaxed))
+        water: pools
+            .iter()
+            .flat_map(|&pool| {
+                (0..crate::classes::SMALL_COUNT)
+                    .map(move |o| rig.depot.water(pool, o).load(Relaxed))
+            })
             .collect(),
-        owing: rig.depot.owing(super::Domain::ZERO).load(Relaxed),
+        owing: pools
+            .iter()
+            .map(|&pool| rig.depot.owing(pool).load(Relaxed))
+            .collect(),
     }
 }
 
 /// A quiet heap, with no slow path anywhere: `maintain` once an interval drains the idle slab
 /// (laundering what it takes) an interval after its first look, and the depot sheds what it held
-/// at the next look, so that everything parked is back in the source.
+/// at the first look in the interval after the last one in which its stack was empty, so that
+/// everything parked is back in the source. CPU 0 found its stack empty when it began to park,
+/// in the first interval, so its stack sheds at the third call.
 #[test]
 fn maintain_returns_what_a_quiet_heap_parked() {
     let rig = rig(12, TIGHT);
@@ -690,12 +714,14 @@ fn maintain_returns_what_a_quiet_heap_parked() {
     assert_eq!(rig.os().calls(Call::Fence), 1);
     assert_eq!(rig.os().last_fence(), Some(0));
     assert!(cpu_0_is_empty(&rig));
+    rig.os().advance_clock(IDLE_TICKS);
+    cache.maintain();
     assert_eq!(rig.source.held().len(), 12, "{:?}", rig.census(&[], false));
     // `maintain` is not a slow path of the CPU it runs on.
     assert_eq!(rig.slabs().slab(cpu(&rig, 1)).activity(), 0);
     let census = rig.census(&[], false);
     assert_eq!((census.markers, census.claims), (0, 0));
-    assert_eq!(rig.source.passes(), 2, "each call asks for the purge pass");
+    assert_eq!(rig.source.passes(), 3, "each call asks for the purge pass");
     assert_eq!(rig.source.purges(), steps, "and takes no heartbeat's step");
 }
 
@@ -776,23 +802,20 @@ fn maintain_without_drains_sheds_the_depot() {
     let keeper = rig.cache(SimCpu::new(1));
     let class = tiny_class();
     let area = keeper.area();
-    assert!(
-        rig.depot
-            .full(super::Domain::ZERO, class)
-            .objects(area, class.magazine())
-            > 0
-    );
+    let parked = || {
+        [
+            super::Pool::Domain(super::Domain::ZERO),
+            super::Pool::Shared,
+        ]
+        .map(|pool| rig.depot.full(pool, class).count(area, class.magazine()))
+    };
+    assert!(parked()[0] > 0, "{:?}", parked());
     for _ in 0..3 {
         keeper.maintain();
         rig.os().advance_clock(IDLE_TICKS);
     }
     assert_eq!(rig.os().calls(Call::Fence), 0);
-    assert_eq!(
-        rig.depot
-            .full(super::Domain::ZERO, class)
-            .objects(area, class.magazine()),
-        0
-    );
+    assert_eq!(parked(), [0, 0]);
     assert!(!cpu_0_is_empty(&rig));
     rig.census(&[], false);
 }

@@ -5,7 +5,7 @@
 //! on, so each test fails if its rule stops working.
 
 use super::test_rig::{Rig, SimCpu, Small, TestSource};
-use super::{Cache, IDLE_TICKS, REFRESH_EVERY, Tuning, inspect};
+use super::{Cache, Domain, IDLE_TICKS, Pool, REFRESH_EVERY, Tuning, inspect};
 use crate::classes::{MagazineSize, SmallClass};
 use crate::front::{Cpu, Field, Twin};
 use crate::os::Os;
@@ -23,7 +23,7 @@ const QUIET: Tuning = Tuning {
     spare_budget: usize::MAX / 2,
     max_spares: 1,
     depot_target: usize::MAX / 2,
-    take_across: usize::MAX / 2,
+    domain_cap: usize::MAX / 4,
     look_every: 1,
     refresh_every: 0,
     age_limit: false,
@@ -179,8 +179,8 @@ fn in_depot(rig: &TestRig, class: SmallClass) -> usize {
     let machine = SimCpu::new(0);
     let cache = rig.cache(&machine);
     rig.depot
-        .full(super::Domain::ZERO, class)
-        .objects(cache.area(), class.magazine()) as usize
+        .full(Pool::Domain(Domain::ZERO), class)
+        .count(cache.area(), class.magazine()) as usize
 }
 
 /// Twenty objects of one class freed into the depot on CPU 0, which then goes quiet, while CPU
@@ -303,7 +303,7 @@ fn refreshed_of(refresh_every: u64, count: usize) -> (usize, usize) {
     let area = cache.area();
     let kept = rig
         .depot
-        .full(super::Domain::ZERO, class)
+        .full(Pool::Domain(Domain::ZERO), class)
         .magazines(area, class.magazine())
         .len();
     (kept + laundered, laundered)
@@ -443,25 +443,40 @@ fn spares_behind_an_empty_loaded_magazine_are_swept() {
     assert!(spares_behind_an_empty_magazine(false) > 0);
 }
 
-/// A rig whose two CPUs are in cache domains of their own (every simulated CPU its own L3).
-fn two_domains(classes: &[SmallClass], count: usize, tuning: Tuning) -> TestRig {
+/// A rig of `N` CPUs in which each `width` consecutive simulated CPUs share an L3, which makes
+/// `SIM_THREADS / width` cache domains.
+fn domains<const N: usize>(
+    width: u32,
+    classes: &[SmallClass],
+    count: usize,
+    tuning: Tuning,
+) -> Rig<SimOs<Small>, N> {
     let os = SimOs::new();
-    os.set_topology(crate::os::sim::SimTopology::Blocks(1));
+    os.set_topology(crate::os::sim::SimTopology::Blocks(width));
     Rig::with_os(os, classes, count, tuning)
 }
 
-/// Objects of `class` in the depot stack of `domain`.
-fn in_domain(rig: &TestRig, domain: usize, class: SmallClass) -> usize {
+fn domain(n: usize) -> Pool {
+    Pool::Domain(Domain::folded(n))
+}
+
+/// Objects of `class` in `pool`'s stack.
+fn in_pool<const N: usize>(rig: &Rig<SimOs<Small>, N>, pool: Pool, class: SmallClass) -> usize {
     let machine = SimCpu::new(0);
     let cache = rig.cache(&machine);
     rig.depot
-        .full(super::Domain::folded(domain), class)
-        .objects(cache.area(), class.magazine()) as usize
+        .full(pool, class)
+        .count(cache.area(), class.magazine()) as usize
 }
 
 /// Objects of `class` that CPU `n` allocates and frees again, which with no spares sends its
 /// full magazines to the depot.
-fn free_into_depot(rig: &TestRig, n: i32, class: SmallClass, count: usize) {
+fn free_into_depot<const N: usize>(
+    rig: &Rig<SimOs<Small>, N>,
+    n: i32,
+    class: SmallClass,
+    count: usize,
+) {
     let machine = SimCpu::new(n);
     let cache = rig.cache(&machine);
     let held: Vec<_> = (0..count).filter_map(|_| cache.alloc(class)).collect();
@@ -471,87 +486,127 @@ fn free_into_depot(rig: &TestRig, n: i32, class: SmallClass, count: usize) {
     }
 }
 
-/// The depot keeps what a CPU frees in that CPU's domain, and a domain whose CPUs go quiet
-/// sheds its stacks within the intervals a quiet class's stack sheds in, through the looks and
-/// sheds of the other domain's slow paths.
+/// Every cache domain but CPU 0's parks objects of two classes and goes quiet, while CPU 0
+/// runs another class's slow paths. `width` CPUs share each domain. When, in ticks from the
+/// start, the quiet domains' stacks were empty, and when every object of the two classes was
+/// back in the source, if within five intervals.
+fn quiet_domains_emptied(width: u32, shed_unused: bool) -> (Option<u64>, Option<u64>) {
+    let (a, b, busy) = (tiny(0), tiny(1), tiny(2));
+    let tuning = Tuning {
+        max_spares: 0,
+        shed_unused,
+        ..QUIET
+    };
+    let objects = 512;
+    let rig: Rig<SimOs<Small>, 64> = domains(width, &[a, b, busy], objects, tuning);
+    let count = crate::os::sim::SIM_THREADS / width as usize;
+    for d in 1..count {
+        let cpu = (d * width as usize) as i32;
+        free_into_depot(&rig, cpu, a, 5);
+        free_into_depot(&rig, cpu, b, 3);
+    }
+    assert_eq!(rig.depot.domain_count(), count);
+    let in_stacks = || {
+        (1..count)
+            .map(|d| in_pool(&rig, domain(d), a) + in_pool(&rig, domain(d), b))
+            .sum::<usize>()
+    };
+    assert!(in_stacks() >= (count - 1) * 4, "{}", in_stacks());
+    let zero = SimCpu::new(0);
+    let cache = rig.cache(&zero);
+    let start = rig.os().ticks();
+    let (mut stacks, mut all) = (None, None);
+    let steps = 8;
+    for _ in 0..5 * steps {
+        rig.os().advance_clock(IDLE_TICKS / steps);
+        for _ in 0..40 {
+            churn(&cache, busy, 3);
+        }
+        let now = rig.os().ticks() - start;
+        if stacks.is_none() && in_stacks() == 0 {
+            stacks = Some(now);
+        }
+        if rig.source.held_of(a) == objects && rig.source.held_of(b) == objects {
+            all = Some(now);
+            break;
+        }
+    }
+    rig.census(&[], false);
+    (stacks, all)
+}
+
+/// A quiet domain's stacks shed as a quiet class's stack does, through the looks and sheds of
+/// another domain's slow paths, whether there are 2, 8 or 64 domains. A stack sheds the depth
+/// it did not use in an interval: its debt is set at the first look in the interval after one
+/// in which nothing took from it, and paid by the heartbeats after that. Here the stacks were
+/// empty when the quiet CPUs began to park, in the first interval, and the quiet CPUs' slabs
+/// are drained into them an interval after the first look sees them still, in the second; so
+/// the stacks shed what they held at the third interval's start in the third interval, and the
+/// drained magazines at the fourth's.
 #[test]
-fn a_quiet_domain_gives_its_stacks_back() {
-    let (idle, busy) = (tiny(0), tiny(1));
-    for shed_unused in [true, false] {
-        let tuning = Tuning {
-            max_spares: 0,
-            shed_unused,
-            ..QUIET
-        };
-        let rig = two_domains(&[idle, busy], 64, tuning);
-        free_into_depot(&rig, 0, idle, 22);
-        assert_eq!(rig.depot.domain_count(), super::MAX_DOMAINS);
-        assert!(in_domain(&rig, 0, idle) >= 20);
-        assert_eq!(
-            in_domain(&rig, 1, idle),
-            0,
-            "kept in the freeing CPU's domain"
+fn a_quiet_domain_gives_its_stacks_back_with_2_8_and_64_domains() {
+    for width in [32, 8, 1] {
+        let (stacks, all) = quiet_domains_emptied(width, true);
+        let stacks = stacks.expect("the quiet domains' stacks are emptied");
+        let all = all.expect("everything goes back");
+        std::eprintln!(
+            "{} domains: stacks empty after {:.3} intervals, all back after {:.3}",
+            crate::os::sim::SIM_THREADS / width as usize,
+            stacks as f64 / IDLE_TICKS as f64,
+            all as f64 / IDLE_TICKS as f64
         );
-        let one = SimCpu::new(1);
-        let other = rig.cache(&one);
-        let steps = 8;
-        for _ in 0..3 * steps {
-            rig.os().advance_clock(IDLE_TICKS / steps);
-            for _ in 0..40 {
-                churn(&other, busy, 3);
-            }
-        }
-        rig.census(&[], false);
-        if shed_unused {
-            assert_eq!(in_domain(&rig, 0, idle), 0);
-        } else {
-            assert!(in_domain(&rig, 0, idle) >= 20);
-        }
+        assert!(stacks <= all, "{width}: {stacks} {all}");
+        assert!(all <= 3 * IDLE_TICKS + IDLE_TICKS / 8, "{width}: {all}");
+        assert_eq!(quiet_domains_emptied(width, false), (None, None), "{width}");
     }
 }
 
-/// A slow path whose domain's stack is empty takes from another domain's stack only when that
-/// holds at least the take threshold; otherwise it fills from the source.
+/// A slow path takes from no other domain's stack, only from the shared stack, which holds
+/// what a domain's stack had no room for.
 #[test]
-fn a_slow_path_takes_across_domains_only_from_a_stack_at_its_threshold() {
+fn a_domain_overflows_into_the_shared_stack_and_others_take_only_from_that() {
     let class = tiny(0);
-    for (parked, takes) in [(4, false), (12, true)] {
+    for (parked, overflows) in [(4, false), (12, true)] {
         let tuning = Tuning {
             max_spares: 0,
-            take_across: 10 * class.size(),
+            domain_cap: 4 * class.size(),
             ..QUIET
         };
-        let rig = two_domains(&[class], 64, tuning);
+        let rig: TestRig = domains(1, &[class], 64, tuning);
         free_into_depot(&rig, 0, class, parked);
-        let before = in_domain(&rig, 0, class);
+        let own = in_pool(&rig, domain(0), class);
+        let shared = in_pool(&rig, Pool::Shared, class);
+        assert!(own > 0 && own < 4 + class.magazine().capacity(), "{own}");
+        assert_eq!(shared > 0, overflows, "{parked}: {own} {shared}");
         let one = SimCpu::new(1);
         let consumer = rig.cache(&one);
+        let fills = rig.source.fills();
         let object = consumer.alloc(class).unwrap();
-        let after = in_domain(&rig, 0, class);
-        assert_eq!(
-            after < before,
-            takes,
-            "parked {parked}: {before} then {after}"
-        );
+        assert_eq!(in_pool(&rig, domain(0), class), own, "{parked}");
+        assert_eq!(in_pool(&rig, Pool::Shared, class) < shared, overflows);
+        assert_eq!(rig.source.fills() > fills, !overflows, "{parked}");
         consumer.free(class, object);
         rig.census(&[], false);
     }
 }
 
-/// `collect` launders the depot stacks of every domain, and `maintain` sheds them all.
+/// `collect` launders every stack, the domains' and the shared one, and `maintain` sheds them
+/// all.
 #[test]
-fn collect_and_maintain_reach_every_domain() {
+fn collect_and_maintain_empty_every_stack() {
     let class = tiny(0);
     let tuning = Tuning {
         max_spares: 0,
+        domain_cap: 2 * class.size(),
         shed_unused: true,
         ..QUIET
     };
     for maintain in [false, true] {
-        let rig = two_domains(&[class], 64, tuning);
+        let rig: TestRig = domains(1, &[class], 64, tuning);
         free_into_depot(&rig, 0, class, 9);
         free_into_depot(&rig, 1, class, 9);
-        assert!(in_domain(&rig, 0, class) > 0 && in_domain(&rig, 1, class) > 0);
+        let pools = [domain(0), domain(1), Pool::Shared];
+        assert!(pools.iter().all(|&pool| in_pool(&rig, pool, class) > 0));
         let machine = SimCpu::new(0);
         let cache = rig.cache(&machine);
         if maintain {
@@ -562,148 +617,189 @@ fn collect_and_maintain_reach_every_domain() {
         } else {
             cache.collect();
         }
-        assert_eq!(in_domain(&rig, 0, class), 0, "maintain {maintain}");
-        assert_eq!(in_domain(&rig, 1, class), 0, "maintain {maintain}");
+        for pool in pools {
+            assert_eq!(
+                in_pool(&rig, pool, class),
+                0,
+                "maintain {maintain}: {pool:?}"
+            );
+        }
         rig.census(&[], false);
     }
 }
 
-/// A class whose stacks hold objects in two domains shares its target between them: each
-/// stack's heartbeat launders it down to half the target, where a class in one domain keeps
-/// the whole.
+/// A class in use in four domains parks at most a cap in each and the shared stack's target:
+/// the domain stacks never pass their caps by more than the magazine that reached them, and the
+/// heartbeat launders the shared stack down to its target.
 #[test]
-fn two_domains_in_use_share_a_class_target() {
+fn four_domains_in_use_park_at_most_four_caps_and_the_shared_target() {
     let class = tiny(0);
-    let target = 12;
+    let (target, cap) = (12, 6);
     let tuning = Tuning {
         max_spares: 0,
         depot_target: target * class.size(),
-        take_across: usize::MAX / 2,
+        domain_cap: cap * class.size(),
         ..QUIET
     };
-    let rig = two_domains(&[class], 128, tuning);
-    free_into_depot(&rig, 0, class, 30);
-    let alone = in_domain(&rig, 0, class);
-    assert!(
-        alone > target / 2 && alone <= target,
-        "one domain keeps its target: {alone}"
-    );
-    free_into_depot(&rig, 1, class, 30);
-    let second = in_domain(&rig, 1, class);
-    assert!(
-        second <= target / 2,
-        "the second domain keeps half: {second}"
-    );
-    // The first domain's next slow paths of the class lower it to its share too, a magazine
-    // a heartbeat.
+    let rig: Rig<SimOs<Small>, 4> = domains(1, &[class], 256, tuning);
     for _ in 0..target {
-        free_into_depot(&rig, 0, class, 6);
+        for n in 0..4 {
+            free_into_depot(&rig, n, class, 30);
+        }
     }
-    let first = in_domain(&rig, 0, class);
+    let magazine = class.magazine().capacity();
+    let each: Vec<usize> = (0..4).map(|d| in_pool(&rig, domain(d), class)).collect();
+    let shared = in_pool(&rig, Pool::Shared, class);
     assert!(
-        first <= target / 2 + 2,
-        "{alone} {second} then {first}, {}",
-        in_domain(&rig, 1, class)
+        each.iter().all(|&n| n > 0 && n < cap + magazine),
+        "{each:?}"
     );
+    assert!(shared <= target - cap + magazine, "{shared}");
     rig.census(&[], false);
 }
 
-/// A class in use in four domains parks no more in all than its target, as `launder` and the
-/// design ("shared among the domains whose stacks hold the class") say.
+/// A flow of a class from one domain to another, objects freed in one and allocated in the
+/// other, goes through the shared stack once the freeing domain's stack is at its cap, whether
+/// no other domain, one or sixty-two others also park the class: in steady state the
+/// allocating side fills nothing from the source.
 #[test]
-#[ignore = "review finding: each domain keeps half the target however many hold the class"]
-fn four_domains_in_use_share_a_class_target() {
-    let class = tiny(0);
-    let target = 12;
-    let tuning = Tuning {
-        max_spares: 0,
-        depot_target: target * class.size(),
-        take_across: usize::MAX / 2,
-        ..QUIET
-    };
-    let os = SimOs::new();
-    os.set_topology(crate::os::sim::SimTopology::Blocks(1));
-    let rig: Rig<SimOs<Small>, 4> = Rig::with_os(os, &[class], 256, tuning);
-    let parked = |domain: usize| {
-        let machine = SimCpu::new(0);
-        let cache = rig.cache(&machine);
-        rig.depot
-            .full(super::Domain::folded(domain), class)
-            .objects(cache.area(), class.magazine()) as usize
-    };
-    for _ in 0..target {
-        for n in 0..4 {
-            let machine = SimCpu::new(n);
-            let cache = rig.cache(&machine);
-            let held: Vec<_> = (0..30).filter_map(|_| cache.alloc(class)).collect();
-            assert_eq!(held.len(), 30);
-            for object in held {
-                cache.free(class, object);
-            }
-        }
-    }
-    let each: Vec<usize> = (0..4).map(parked).collect();
-    let total: usize = each.iter().sum();
-    assert!(
-        total <= target + 4,
-        "a target of {target} objects, but the four domains park {each:?}, {total} in all"
-    );
-}
-
-/// A flow of a class from one domain to another is taken through the depot whether or not a
-/// third domain also parks the class. The take threshold is half the target, and with a
-/// second stack holding the class the producer's heartbeats launder its stack down to half
-/// the target, so unless whole magazines land exactly on the half the stack never reaches
-/// the threshold and the whole flow goes through the source instead. The numbers keep the
-/// allocator's ratio (threshold half the target) with a target that is not a whole number of
-/// magazines' worth, as 1024 objects of a 64-byte class is not of magazines of 254.
-#[test]
-#[ignore = "review finding: a third domain holding the class stops the flow between two"]
-fn a_third_domain_holding_a_class_does_not_stop_a_flow_between_two() {
+fn a_flow_between_two_domains_is_not_stopped_by_others() {
     let class = tiny(0);
     let target = 14;
     let tuning = Tuning {
         max_spares: 0,
         depot_target: target * class.size(),
-        take_across: target / 2 * class.size(),
+        domain_cap: target / 2 * class.size(),
         ..QUIET
     };
-    for third in [false, true] {
-        let os = SimOs::new();
-        os.set_topology(crate::os::sim::SimTopology::Blocks(1));
-        let rig: Rig<SimOs<Small>, 3> = Rig::with_os(os, &[class], 256, tuning);
-        let parked = |domain: usize| {
-            let machine = SimCpu::new(0);
-            let cache = rig.cache(&machine);
-            rig.depot
-                .full(super::Domain::folded(domain), class)
-                .objects(cache.area(), class.magazine()) as usize
-        };
-        let churn_on = |n: i32, count: usize| {
-            let machine = SimCpu::new(n);
-            let cache = rig.cache(&machine);
-            let held: Vec<_> = (0..count).filter_map(|_| cache.alloc(class)).collect();
-            assert_eq!(held.len(), count);
-            for object in held {
-                cache.free(class, object);
+    for others in [0, 1, 62] {
+        let rig: Rig<SimOs<Small>, 64> = domains(1, &[class], 1024, tuning);
+        for n in 0..others {
+            free_into_depot(&rig, 2 + n, class, 4);
+        }
+        let parked: usize = (0..others)
+            .map(|n| in_pool(&rig, domain(2 + n as usize), class))
+            .sum();
+        assert!(parked >= others as usize, "{others}: {parked}");
+        let (zero, one) = (SimCpu::new(0), SimCpu::new(1));
+        let (freer, allocator) = (rig.cache(&zero), rig.cache(&one));
+        let round = || {
+            let objects: Vec<_> = (0..6).map(|_| allocator.alloc(class).unwrap()).collect();
+            for object in objects {
+                freer.free(class, object);
             }
         };
-        if third {
-            churn_on(2, 4);
-            assert!(parked(2) > 0);
+        for _ in 0..10 {
+            round();
         }
-        // The producer, CPU 0, frees a long run; the consumer, CPU 1, then allocates.
-        churn_on(0, 60);
-        let before = parked(0);
-        let one = SimCpu::new(1);
-        let consumer = rig.cache(&one);
-        let object = consumer.alloc(class).unwrap();
-        let after = parked(0);
+        let shared = rig.depot.full(Pool::Shared, class).version();
+        let fills = rig.source.fills();
+        for _ in 0..40 {
+            round();
+        }
+        assert_eq!(rig.source.fills(), fills, "{others} others");
+        assert_ne!(rig.depot.full(Pool::Shared, class).version(), shared);
+        rig.census(&[], false);
+    }
+}
+
+/// Two domains that each allocate and free what they need, within their stacks' caps, keep
+/// their magazines to themselves: in steady state neither touches a shared stack, and neither
+/// fills from the source.
+#[test]
+fn balanced_domains_do_not_touch_the_shared_stacks() {
+    let class = tiny(0);
+    let tuning = Tuning {
+        max_spares: 0,
+        depot_target: 16 * class.size(),
+        domain_cap: 8 * class.size(),
+        ..QUIET
+    };
+    let rig: TestRig = domains(1, &[class], 256, tuning);
+    let (zero, one) = (SimCpu::new(0), SimCpu::new(1));
+    let caches = [rig.cache(&zero), rig.cache(&one)];
+    let round = || {
+        for cache in &caches {
+            churn(cache, class, 6);
+        }
+    };
+    for _ in 0..5 {
+        round();
+    }
+    let area = caches[0].area();
+    let versions = || {
+        (
+            rig.depot.full(Pool::Shared, class).version(),
+            rig.depot.empty(Pool::Shared, class.magazine()).version(),
+        )
+    };
+    let (before, fills) = (versions(), rig.source.fills());
+    for _ in 0..50 {
+        round();
+    }
+    assert_eq!(versions(), before);
+    assert_eq!(rig.source.fills(), fills);
+    assert!(in_pool(&rig, domain(0), class) > 0 && in_pool(&rig, domain(1), class) > 0);
+    assert_eq!(
+        rig.depot
+            .full(Pool::Shared, class)
+            .count(area, class.magazine()),
+        0
+    );
+    rig.census(&[], false);
+}
+
+/// A forked child reaches every stack the parent filled, in every domain and the shared pool:
+/// its heartbeats shed them, through its looks at other domains, and its `collect` launders
+/// them.
+#[test]
+fn a_forked_child_reaches_every_stack_the_parent_filled() {
+    let (idle, busy) = (tiny(0), tiny(1));
+    let tuning = Tuning {
+        max_spares: 0,
+        domain_cap: 2 * idle.size(),
+        shed_unused: true,
+        ..QUIET
+    };
+    for collect in [false, true] {
+        let objects = 256;
+        let rig: Rig<SimOs<Small>, 64> = domains(8, &[idle, busy], objects, tuning);
+        let pools: Vec<Pool> = (0..8).map(domain).chain([Pool::Shared]).collect();
+        // Not from CPU 0, where the child runs with the age limit off: its slab would keep a
+        // loaded magazine of the class.
+        for d in 0..8 {
+            free_into_depot(&rig, d * 8 + 1, idle, 7);
+        }
         assert!(
-            after < before,
-            "third domain in use: {third}; the producer's stack held {before} of a target of \
-             {target} and the consumer took nothing"
+            pools.iter().all(|&pool| in_pool(&rig, pool, idle) > 0),
+            "{:?}",
+            pools
+                .iter()
+                .map(|&pool| in_pool(&rig, pool, idle))
+                .collect::<Vec<_>>()
         );
-        consumer.free(class, object);
+        // SAFETY: one thread, outside the allocator.
+        unsafe { rig.os().wipe_for_fork() };
+        let child = SimCpu::new(0);
+        let cache = rig.cache(&child);
+        if collect {
+            cache.collect();
+        } else {
+            let steps = 8;
+            for _ in 0..4 * steps {
+                rig.os().advance_clock(IDLE_TICKS / steps);
+                for _ in 0..40 {
+                    churn(&cache, busy, 3);
+                }
+            }
+        }
+        for &pool in &pools {
+            assert_eq!(in_pool(&rig, pool, idle), 0, "collect {collect}: {pool:?}");
+        }
+        if !collect {
+            // The parent's slabs, drained by the child's idle checks, have gone back too.
+            assert_eq!(rig.source.held_of(idle), objects);
+        }
+        rig.census(&[], false);
     }
 }

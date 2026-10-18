@@ -112,6 +112,29 @@ impl Domains {
         self.state.store(count as u64 + PUBLISHED, Release);
     }
 
+    /// Puts each online CPU `c` in domain `c / width`, folded, and publishes the count, in
+    /// place of whatever discovery found or is finding (`Depot::split_domains`). Without an
+    /// online list, every CPU number with a slab.
+    #[cfg(any(test, feature = "internals"))]
+    pub(crate) fn split<O: Os>(&self, os: &O, width: usize) {
+        let width = width.max(1);
+        let mut online = [0u8; LIST_BYTES];
+        let mut highest = None;
+        if let Some(len) = os.topology(Topology::Online, &mut online) {
+            each_cpu(online.get(..len).unwrap_or(&[]), |cpu| {
+                if cpu < SLAB_COUNT {
+                    highest = highest.max(Some(cpu));
+                }
+            });
+        }
+        let highest = highest.unwrap_or(SLAB_COUNT - 1);
+        for (cpu, byte) in self.of_cpu.iter().enumerate() {
+            byte.store(Domain::folded(cpu / width).0, Relaxed);
+        }
+        let count = (highest / width + 1).min(MAX_DOMAINS);
+        self.state.store(count as u64 + PUBLISHED, Release);
+    }
+
     /// Fills the table from the OS's lists and returns the number of domains, at most
     /// [`MAX_DOMAINS`]; `None` if anything fails, when the table is not to be read.
     fn fill<O: Os>(&self, os: &O) -> Option<usize> {
@@ -284,6 +307,23 @@ mod tests {
         for bad in ["0-3\n\n", " 0", "0-3 ", "0--3", "0-3-5", "+1", "0x1", "0\0"] {
             assert_eq!(cpus(bad), None, "{bad:?}");
         }
+    }
+
+    #[test]
+    fn a_split_replaces_what_discovery_found() {
+        let os: crate::os::sim::SimOs = crate::os::sim::SimOs::new();
+        os.set_topology(crate::os::sim::SimTopology::Blocks(32));
+        let domains = Domains::new();
+        domains.discover(&os);
+        assert_eq!(domains.count(), 2);
+        domains.split(&os, 4);
+        assert_eq!(domains.count(), crate::os::sim::SIM_THREADS / 4);
+        assert!((0..64).all(|cpu| domains.of(Some(cpu)).index() == cpu / 4));
+        // Without an online list, every CPU number with a slab, folded.
+        os.set_topology(crate::os::sim::SimTopology::Missing);
+        domains.split(&os, 1);
+        assert_eq!(domains.count(), MAX_DOMAINS);
+        assert_eq!(domains.of(Some(MAX_DOMAINS + 2)).index(), 2);
     }
 
     #[test]
