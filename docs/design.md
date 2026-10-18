@@ -248,8 +248,11 @@ prefix well ahead of what is in use. Under strict overcommit the commit charge i
 writable prefix, not the reservation.
 
 The rest of the reservation holds metadata: each region's bitmaps at an address computed
-from the region number, and an array of magazines. Memory that holds application objects
-never holds allocator state.
+from the region number, and an array of magazines. A region's watermark and its other
+header words are not with its bitmaps. They sit together in the allocator's static state,
+so a region of a small class touches none of its metadata pages until its objects first
+come back to the bitmaps, and a small process pays no pages or page tables for bitmaps it
+never uses. Memory that holds application objects never holds allocator state.
 
 ### Size classes and alignment
 
