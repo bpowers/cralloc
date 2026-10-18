@@ -633,8 +633,9 @@ saved; we copy.
   wrong size (a derived object deleted through a base pointer, say) behaves exactly like a
   free with no size.
 
-A macro exports the C names, and another the C++ names, from the crate that invokes it; a
-cargo feature does the same, and the `LD_PRELOAD` library always exports both. A feature
+A macro exports the C names from the crate that invokes it; a cargo feature does the same,
+and the `LD_PRELOAD` library always exports them. A second macro holds the C++ names for
+when they can all be exported. A feature
 alone would not do: cargo unifies features across a workspace, and every test binary would
 then replace `malloc`. The C layer sets `errno` through the C library's accessor and finds
 the new-handler and the throw function by symbol lookup; these are the only parts of
