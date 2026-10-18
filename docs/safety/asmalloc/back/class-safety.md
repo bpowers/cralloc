@@ -125,8 +125,7 @@ themselves; nothing records them as holding the old contents.
 
 ## BACK-CLASS-03: the copies and purges in `move_large_with`
 
-**Blocks.** In `move_large_with`: `from.copy_to_nonoverlapping(to, ..)` for a block of one
-piece or less, the calls of `copy_window`, and `region::purge_part` or `Space::purge` on
+**Blocks.** In `move_large_with`: the calls of `copy_window`, and `region::purge_part` or `Space::purge` on
 parts of `from`. In `copy_window`: `from.add(x).copy_to_nonoverlapping(to.add(x), ..)` for
 the runs it copies, `Space::purge` on whole pages of `to` under a window's zero pages, and
 `is_zero` on the window's pages of `from` (BACK-CLASS-04).
@@ -145,7 +144,7 @@ either range, and that if it says `zeroed` the `len` bytes at `to` read as zero.
 callers are the moving paths of `Bound::resize` (HEAP-04, which passes the allocation's own
 report) and C's `realloc` (MOD-01, which passes `false`), and both hold both blocks.
 
-0. *The windows.* A block of more than one piece is copied by `copy_window` over
+0. *The windows.* Every block, whatever its length, is copied by `copy_window` over
    consecutive, disjoint ranges `start..end` of block offsets that together are `0..len`, in
    increasing order, each inside one piece; a window is at most `WINDOW` pages of `from`'s
    address space, which its bitmap of zero pages has room for. So when a window runs, the
@@ -181,9 +180,11 @@ report) and C's `realloc` (MOD-01, which passes `false`), and both hold both blo
    either a part already copied that ends at such a multiple (`into + done` rounded down to a
    page, to `into + boundary`: `done` is zero, which rounds down to the slot's start and so
    takes the stagger's padding, which holds nothing, or the previous multiple, which is
-   page-aligned) or, once, everything from the last multiple at or below `from + len` (or
-   from the slot's start, if there is none) to the end of the slot or run. Every byte of the
-   block before that start has been copied. In a slot advised for huge pages
+   page-aligned) or, once and for a slot only, everything from the last multiple at or below
+   `from + len` (or from the slot's start, if there is none) to the end of the slot. Every
+   byte of the block before that start has been copied. A block of one piece or less that
+   crosses no multiple gives back only that last range, the whole slot, after its one
+   copy. In a slot advised for huge pages
    `purge_part` may trim a range inward to whole huge pages (BACK-REGION-03), which only
    returns less, and then reports `false`, so step 5 does not count the range as gone. All
    lie inside `from`'s slot or run, whose start is page-aligned, and the caller holds it and
@@ -200,7 +201,8 @@ report) and C's `realloc` (MOD-01, which passes `false`), and both hold both blo
    `mark_purged` and an uncounted release leave it exactly as `purge_held` does; if any did
    not, the slot is released as resident and counted, with no zero or clean bit set, which
    only over-counts the parts that did go back. A run is freed by `free_run`, which purges
-   it again (harmless) to restore its zero promise.
+   all of it (again, for the pieces already returned; harmless) to restore its zero
+   promise.
 
 The double-free cases are those of BACK-CLASS-01, with the copy added to the window.
 

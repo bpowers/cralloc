@@ -1503,16 +1503,23 @@ fn a_moving_large_block_releases_its_old_pages_behind_the_copy() {
     let again = back.alloc(old_class, old_class.size()).unwrap();
     assert_eq!(again.ptr, old);
     assert!(again.zeroed && painted(old.as_ptr(), old_class.size(), 0));
-    // A block of one piece or less is copied whole and freed the ordinary way.
+    // A block of one piece or less goes back the same way, in one purge, where a free would
+    // keep it: an outgrown block left resident is the trail a program growing many buffers
+    // leaves behind.
     let small_class = large(piece);
-    let one = back.alloc(small_class, piece).unwrap().ptr;
-    pattern(one.as_ptr(), piece);
+    let one = back.alloc(small_class, small_class.size()).unwrap().ptr;
+    pattern(one.as_ptr(), small_class.size());
     let purges = os.calls(Call::Purge);
     // SAFETY: as above.
-    unsafe { back.move_large(one, new, piece, false) };
-    assert!(patterned(new.as_ptr(), piece));
-    assert_eq!(os.calls(Call::Purge), purges);
-    assert_eq!(back.retained(), small_class.size());
+    unsafe { back.move_large(one, new, small_class.size(), false) };
+    assert!(patterned(new.as_ptr(), small_class.size()));
+    assert_eq!(os.calls(Call::Purge), purges + 1);
+    assert_eq!(back.retained(), 0);
+    // SAFETY: as above.
+    unsafe { assert!(os.is_purged(one, small_class.size())) };
+    let again = back.alloc(small_class, small_class.size()).unwrap();
+    assert_eq!(again.ptr, one);
+    assert!(again.zeroed);
 }
 
 /// A block that grows by moving, densely and past a huge page, gets huge pages in its new

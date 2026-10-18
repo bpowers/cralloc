@@ -572,11 +572,16 @@ impl<'a, O: Os> Back<'a, O> {
     }
 
     /// Moves the contents of the large object or run at `from` to `to` and frees `from`: copies
-    /// `len` bytes and gives the block up, as a copy followed by [`Back::free_by_address`]
-    /// would. A block of more than one piece (`policy::move_piece`) is copied a piece at a
-    /// time, and the whole pages of `from` behind each piece go back to the OS before the next
-    /// is copied, so the two copies are both resident for one piece at most. Aborts if `from`
-    /// is not the start of a handed-out large slot or a run.
+    /// `len` bytes and gives the block up. The block is copied a piece (`policy::move_piece`)
+    /// at a time, and the whole pages of `from` behind each piece go back to the OS before the
+    /// next is copied, so the two copies are both resident for one piece at most; the rest of
+    /// the slot goes back after the last piece. Aborts if `from` is not the start of a
+    /// handed-out large slot or a run.
+    ///
+    /// Unlike a free, which keeps a slot's pages for the next block of its class, a move
+    /// returns them whatever the block's size: the block has just been outgrown (or shrunk
+    /// far below its slot), so its slot is unlikely to be wanted again soon, and a program
+    /// that grows many buffers would otherwise leave a trail of outgrown blocks resident.
     ///
     /// When every page of a slot went back this way, the slot is released as purged memory:
     /// zero, clean and not counted as retained, exactly as the free of a slot advised for huge
@@ -624,11 +629,6 @@ impl<'a, O: Os> Back<'a, O> {
         // Before the copy, so that the copy already faults huge pages.
         // SAFETY: BACK-CLASS-03: `from` is readable for `len` bytes and nothing writes it.
         unsafe { self.grown_into(from, to, len) };
-        if len <= piece {
-            // SAFETY: BACK-CLASS-03: the caller's promise about the two ranges.
-            unsafe { from.as_ptr().copy_to_nonoverlapping(to.as_ptr(), len) };
-            return self.free_by_address(from);
-        }
         // What `from` may have resident: its whole slot or run. Past the bytes copied that
         // is the rest of the old object and whatever an earlier owner of the slot left.
         // Ranges below are counted from the start of `from`'s slot or run, which `from` is `into`
@@ -696,8 +696,12 @@ impl<'a, O: Os> Back<'a, O> {
             done += step;
             observe();
         }
-        let last = ((base + len) & !(piece - 1)).saturating_sub(base - into);
-        all &= give_back(last, whole);
+        // The rest of a slot, from the last piece boundary the copy reached (or the slot's
+        // start); `free_run` purges the whole of a run.
+        if host.is_some() {
+            let last = ((base + len) & !(piece - 1)).saturating_sub(base - into);
+            all &= give_back(last, whole);
+        }
         match host {
             Some((host, region, index)) => {
                 let Some(class) = slot else {
