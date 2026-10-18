@@ -1400,8 +1400,8 @@ fn free_direct(host: &Host8, slots: &[(RegionId, u32)], wide: bool) {
     for &(region, slot) in slots {
         let leaves = release.leaves(region, slot / BITS + 1);
         if wide {
-            let summaries = release.summaries(region);
-            direct.free_slot_wide(&mut release, leaves, summaries, region, slot);
+            let levels = release.summary_levels(region);
+            direct.free_slot_wide(&mut release, leaves, &levels, slot);
         } else {
             direct.free_slot(&mut release, leaves, region, slot);
         }

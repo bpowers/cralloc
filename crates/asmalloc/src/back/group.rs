@@ -35,7 +35,7 @@
 //! claimed the slot in between: the same double free that goes unseen across two launders, and
 //! not worth a lookup for every scattered slot.
 
-use super::tree::{Host, Release, Upward};
+use super::tree::{Host, Levels, Release, Upward};
 use super::word::BITS;
 use crate::space::RegionId;
 
@@ -364,8 +364,9 @@ impl<const ROOM: usize> Words<ROOM> {
 /// million live objects are, shares almost none, and then the table costs a place taken and
 /// another's debt paid for every slot. So a batch whose first [`JUDGE`] slots ([`Direct::free_slot`])
 /// have nearly all taken places of their own is judged wide ([`Direct::wide`]), once, and each
-/// later slot pays its summary word at once ([`Direct::free_slot_wide`]), by looking (`Look`),
-/// merging only what that owes the level above, which has 64 times fewer words.
+/// later slot makes its walk up the region's tree at once ([`Direct::free_slot_wide`]): a load
+/// and a test at each level, the words held in the cache by the slots before it near the top,
+/// and missed only where the batch is truly spread.
 pub(crate) struct Direct {
     debts: Debts,
 }
@@ -408,22 +409,36 @@ impl Direct {
         self.debts.owe(release, region, word);
     }
 
-    /// [`Direct::free_slot`] for a wide batch: pays the summary word's debt at once, its word
-    /// found in `summaries`, the region's level-1 words ([`Release::summaries`]).
+    /// [`Direct::free_slot`] for a wide batch: pays the slot's summary word at once
+    /// ([`Release::look_leaf`]), the levels' words found in `levels`, and merges what that owes
+    /// the level above, which has 64 times fewer words; a debt whose place another takes is
+    /// paid by walking on up at once ([`Release::walk_upward`]).
     #[inline(always)]
-    pub(crate) fn free_slot_wide<H: Host>(
+    pub(crate) fn free_slot_wide<'h, H: Host>(
         &mut self,
-        release: &mut Release<'_, H>,
+        release: &mut Release<'h, H>,
         leaves: &[H::W],
-        summaries: &[H::W],
-        region: RegionId,
+        levels: &Levels<'h, H::W>,
         slot: u32,
     ) {
         let word = slot / BITS;
         release.leaf_bit_in(leaves, word, 1 << (slot % BITS));
-        if let Some(up) = release.look_leaf(summaries, region, word) {
-            self.debts.owe_upward(release, up);
+        if let Some(up) = release.look_leaf(levels, word) {
+            self.debts
+                .merge_upward(up, |earlier| release.walk_upward(levels, earlier));
         }
+    }
+
+    /// Pays the debts the batch holds by walking up at once, as a wide batch pays its later
+    /// slots' ([`Release::walk_up`]): for a batch judged wide, whose debts the table could not
+    /// merge. Debts in another region than `levels`' wait for [`Direct::finish`].
+    #[inline(never)]
+    pub(crate) fn pay_by_walking<'h, H: Host>(
+        &mut self,
+        release: &mut Release<'h, H>,
+        levels: &Levels<'h, H::W>,
+    ) {
+        self.debts.pay_by_walking(release, levels);
     }
 
     /// Frees the slots `bits` of leaf word `word` of `region` with one OR. Aborts if one of
@@ -522,6 +537,26 @@ impl Debts {
         self.taken += 1;
     }
 
+    /// Pays the debts of `levels`' region by walking up ([`Release::walk_up`]).
+    fn pay_by_walking<'h, H: Host>(
+        &mut self,
+        release: &mut Release<'h, H>,
+        levels: &Levels<'h, H::W>,
+    ) {
+        let mut held = self.held;
+        while held != 0 {
+            let at = held.trailing_zeros() as usize;
+            held &= held - 1;
+            if self.regions[at] != Some(levels.region()) {
+                continue;
+            }
+            let key = core::mem::replace(&mut self.keys[at], NO_KEY);
+            let words = core::mem::replace(&mut self.words[at], 0);
+            self.held &= !(1 << at);
+            release.walk_up(levels, (key as u32 & ((1 << 26) - 1)) * BITS, words);
+        }
+    }
+
     /// Pays every debt: the summary words', then what they owe above, which goes to `release`.
     fn pay_all<H: Host>(&mut self, release: &mut Release<'_, H>) {
         let mut held = self.held;
@@ -554,6 +589,13 @@ impl Debts {
 
     /// Merges `debt` with what its word is owed, paying the debt of a word whose place it takes.
     fn owe_upward<H: Host>(&mut self, release: &mut Release<'_, H>, debt: Upward) {
+        self.merge_upward(debt, |earlier| release.owe_upward(earlier));
+    }
+
+    /// Merges `debt` with what its word is owed, handing the debt of a word whose place it
+    /// takes to `pay`.
+    #[inline(always)]
+    fn merge_upward(&mut self, debt: Upward, pay: impl FnOnce(Upward)) {
         let place = &mut self.upward[debt.key as usize % DEBTS];
         match place {
             Some(held) if held.key == debt.key => {
@@ -562,7 +604,7 @@ impl Debts {
             }
             _ => {
                 if let Some(earlier) = place.replace(debt) {
-                    release.owe_upward(earlier);
+                    pay(earlier);
                 }
             }
         }

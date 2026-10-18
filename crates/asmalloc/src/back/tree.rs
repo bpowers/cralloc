@@ -783,38 +783,92 @@ impl<'h, H: Host> Release<'h, H> {
         self.host.tree_words(region, 0, count)
     }
 
-    /// The level-1 summary words of `region`, all of them, for [`Release::look_leaf`]; none if
-    /// the region's tree has no level 1 of its own.
+    /// The summary levels of `region`'s own tree, all their words, for [`Release::walk_up`].
     #[inline]
-    pub(crate) fn summaries(&self, region: RegionId) -> &'h [H::W] {
-        if self.height == 0 {
-            return &[];
+    pub(crate) fn summary_levels(&self, region: RegionId) -> Levels<'h, H::W> {
+        let layout = self.host.layout();
+        let mut words: [&'h [H::W]; LEVEL_SLOTS] = [&[]; LEVEL_SLOTS];
+        for (level, words) in words.iter_mut().enumerate().skip(1) {
+            if level >= MAX_LEVELS || level as u8 > self.height {
+                break;
+            }
+            *words = self
+                .host
+                .tree_words(region, level as u8, layout.level_words(level as u8));
         }
-        let words = self.host.layout().level_words(1);
-        self.host.tree_words(region, 1, words)
+        Levels { region, words }
     }
 
-    /// Pays at once what leaf word `index` of `region`, just freed into, owes its summary word:
-    /// reads the word in `summaries` ([`Release::summaries`]) and sets the bit if it is clear
-    /// (`Look`), as [`Release::pay_leaves`] does for one word. Returns what the summary word
-    /// then owes the word above it.
+    /// The healing walk for leaf words of `levels`' region just freed into, made at once: the
+    /// words `words` has a bit for (`w % 64`) under the summary word of leaf word `first`. At
+    /// each of the region's summary levels it reads the bits and sets those that are clear
+    /// (`Look` at the first, as for every debt of a scattered launder), or sets them unread if
+    /// the word below was empty before this thread's write; then it owes the bit above the
+    /// region's top word, which every word of the region shares, to the batch. These are the
+    /// steps of [`Release::owe_leaves`] and [`Release::finish`] for these words, without
+    /// holding each level's debt for merging, which a batch spread wider than its slots never
+    /// gets to use.
     #[inline(always)]
-    pub(crate) fn look_leaf(
+    pub(crate) fn walk_up(&mut self, levels: &Levels<'h, H::W>, first: u32, words: u64) {
+        self.walk_from(levels, 1, first / BITS, words, false, first);
+    }
+
+    /// The walk of [`Release::walk_up`] from word `index` of level `from`, which is owed
+    /// `bits`, unread if `must`; `below` is the index of the word of level `from - 1` the walk
+    /// comes from, which is the top word's when the region's tree has no level `from`.
+    #[inline(always)]
+    fn walk_from(
         &mut self,
-        summaries: &[H::W],
-        region: RegionId,
+        levels: &Levels<'h, H::W>,
+        from: usize,
         index: u32,
-    ) -> Option<Upward> {
+        bits: u64,
+        must: bool,
+        below: u32,
+    ) {
+        let height = self.height as usize;
+        let (mut index, mut bits, mut must, mut top) = (index, bits, must, below);
+        // Each level's words at a fixed place, so that the walk is a few instructions a level.
+        for level in 1..LEVEL_SLOTS {
+            if level < from {
+                continue;
+            }
+            if level > height {
+                break;
+            }
+            let Some(word) = levels.words[level].get(index as usize) else {
+                self.host.abort("a summary word past the region's tree");
+            };
+            must = set_missing(word, bits, must);
+            top = index;
+            bits = 1 << (index % BITS);
+            index /= BITS;
+        }
+        let top = Spot {
+            region: levels.region,
+            level: self.height,
+            index: top,
+        };
+        self.owe(top, must);
+    }
+
+    /// Pays at once what leaf word `index` of `levels`' region, just freed into, owes its
+    /// summary word, as [`Release::walk_up`] does at its first level, and returns what that
+    /// owes the level above, for a caller that merges those. In a tree with no level 2 of the
+    /// region's own it makes the whole walk and returns nothing.
+    #[inline(always)]
+    pub(crate) fn look_leaf(&mut self, levels: &Levels<'h, H::W>, index: u32) -> Option<Upward> {
         if self.height < 2 {
-            return self.pay_leaves(region, index, 1 << (index % BITS), false);
+            self.walk_up(levels, index, 1 << (index % BITS));
+            return None;
         }
         let summary = index / BITS;
-        let Some(word) = summaries.get(summary as usize) else {
+        let Some(word) = levels.words[1].get(summary as usize) else {
             self.host.abort("a summary word past the region's tree");
         };
-        let was_empty = set_missing(word, 1 << (index % BITS), false);
+        let must = set_missing(word, 1 << (index % BITS), false);
         let up = Spot {
-            region,
+            region: levels.region,
             level: 2,
             index: summary / BITS,
         };
@@ -822,8 +876,20 @@ impl<'h, H: Host> Release<'h, H> {
             key: up.key(self.height),
             spot: up,
             bits: 1 << (summary % BITS),
-            must: was_empty,
+            must,
         })
+    }
+
+    /// Pays `debt` from [`Release::look_leaf`] by walking on up at once
+    /// ([`Release::walk_up`]), or owes it as [`Release::owe_upward`] does if it is not to a
+    /// level-2 word of `levels`' region.
+    #[inline(never)]
+    pub(crate) fn walk_upward(&mut self, levels: &Levels<'h, H::W>, debt: Upward) {
+        if debt.spot.level != 2 || debt.spot.region != levels.region {
+            return self.owe_upward(debt);
+        }
+        let below = debt.spot.index * BITS + debt.bits.trailing_zeros();
+        self.walk_from(levels, 2, debt.spot.index, debt.bits, debt.must, below);
     }
 
     /// Frees the one slot `bit` of word `index` of `leaves`, a region's leaf words as
@@ -997,6 +1063,23 @@ fn set_missing<W: Word>(word: &W, bits: u64, must: bool) -> bool {
         missing != 0 && word.fetch_or(missing) == 0
     }
 }
+
+/// The words of each summary level of one region's tree, for [`Release::walk_up`]: level `k`
+/// at `words[k]`, empty above the region's height.
+pub(crate) struct Levels<'h, W> {
+    region: RegionId,
+    words: [&'h [W]; LEVEL_SLOTS],
+}
+
+impl<W> Levels<'_, W> {
+    /// The region whose levels these are.
+    pub(crate) fn region(&self) -> RegionId {
+        self.region
+    }
+}
+
+/// Room for a region's levels in [`Levels`], a power of two so that indexing needs no division.
+const LEVEL_SLOTS: usize = MAX_LEVELS.next_power_of_two();
 
 /// Summary bits a summary word owes the word above it, from [`Release::pay_leaves`]: `bits`
 /// of the word `spot`, set unread if `must`. Debts with the same `key` are to the same word

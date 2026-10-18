@@ -1318,14 +1318,15 @@ fn release_words<'h, O: Os, P: SlotPointer, const ROOM: usize, const SPAN: usize
                 direct.free_slot(release, leaves, region, slot);
             }
             if direct.wide() {
-                let mut summaries = release.summaries(region);
+                let mut levels = release.summary_levels(region);
+                direct.pay_by_walking(release, &levels);
                 for object in rest {
                     let slot = slot_of(checker, object, met, fast);
                     if met.region != region {
                         (region, leaves) = leaves_of(release, met);
-                        summaries = release.summaries(region);
+                        levels = release.summary_levels(region);
                     }
-                    direct.free_slot_wide(release, leaves, summaries, region, slot);
+                    direct.free_slot_wide(release, leaves, &levels, slot);
                 }
             } else {
                 for object in rest {
