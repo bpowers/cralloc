@@ -2,7 +2,7 @@
 //! Verified `slab` functions for `x86_64_inline`.
 #![allow(dead_code)]
 
-#[cfg(not(feature = "executable"))]
+#[cfg(not(any(feature = "executable", target_env = "musl")))]
 /// Pops a pointer from the magazine of the calling thread's CPU of the class whose word in slab 0 is at `word`, or returns 0 if the CPU number has no slab or the magazine none to give.
 ///
 /// Contract: `VG.Spec.Slab.popInlineContract`.
@@ -13,7 +13,7 @@
 /// * `word` must be `SLABS + 8 * class` for a class below 512: the address of the class's slab word in slab 0. `mask` must be the mask `8 * n - 16` of the class's magazines, of `n = 2^k` slots for 2 ≤ k ≤ 16.
 /// * None of `SLABS`, the thread's `rseq_cs` and `cpu_id` and `__rseq_offset` may overlap the 128 bytes of stack below the stack pointer (the red zone) or the 8 bytes at it or wrap around the end of the address space, nor overlap another of them, but where both are only read (`cpu_id` and `__rseq_offset`) (`VG.Spec.Slab.Ctx.Layout`).
 /// * in each of the 8192 slabs of `SLABS`, the class's slab word must be 0, a marker (a word whose low 19 bits are 1), or the address of a slot other than slot 0 of a magazine of the class (`8 * n` bytes, aligned to `8 * n`), whose pointers are not 0 (a pop returns 0 for none) and which does not overlap `SLABS`, the thread's `rseq_cs` and `cpu_id`, `__rseq_offset` or the 128 bytes of stack below the stack pointer (the red zone) or the 8 bytes at it, the magazine another slab's word of the class names, nor wrap around the end of the address space. Every thread and the drainer must keep this from when the function is called until it returns: the function may be aborted and restarted on any CPU in between (`VG.Spec.Slab.Ctx.inv`).
-#[cfg(not(feature = "executable"))]
+#[cfg(not(any(feature = "executable", target_env = "musl")))]
 #[inline(always)]
 pub(crate) unsafe fn slab_pop(word: usize, mask: usize) -> usize {
     let ret: usize;
@@ -34,7 +34,7 @@ pub(crate) unsafe fn slab_pop(word: usize, mask: usize) -> usize {
     ret
 }
 
-#[cfg(feature = "executable")]
+#[cfg(any(feature = "executable", target_env = "musl"))]
 /// Pops a pointer from the magazine of the calling thread's CPU of the class whose word in slab 0 is at `word`, or returns 0 if the CPU number has no slab or the magazine none to give.
 ///
 /// Contract: `VG.Spec.Slab.popInlineContract`.
@@ -45,7 +45,7 @@ pub(crate) unsafe fn slab_pop(word: usize, mask: usize) -> usize {
 /// * `word` must be `SLABS + 8 * class` for a class below 512: the address of the class's slab word in slab 0. `mask` must be the mask `8 * n - 16` of the class's magazines, of `n = 2^k` slots for 2 ≤ k ≤ 16.
 /// * None of `SLABS`, the thread's `rseq_cs` and `cpu_id` and `__rseq_offset` may overlap the 128 bytes of stack below the stack pointer (the red zone) or the 8 bytes at it or wrap around the end of the address space, nor overlap another of them, but where both are only read (`cpu_id` and `__rseq_offset`) (`VG.Spec.Slab.Ctx.Layout`).
 /// * in each of the 8192 slabs of `SLABS`, the class's slab word must be 0, a marker (a word whose low 19 bits are 1), or the address of a slot other than slot 0 of a magazine of the class (`8 * n` bytes, aligned to `8 * n`), whose pointers are not 0 (a pop returns 0 for none) and which does not overlap `SLABS`, the thread's `rseq_cs` and `cpu_id`, `__rseq_offset` or the 128 bytes of stack below the stack pointer (the red zone) or the 8 bytes at it, the magazine another slab's word of the class names, nor wrap around the end of the address space. Every thread and the drainer must keep this from when the function is called until it returns: the function may be aborted and restarted on any CPU in between (`VG.Spec.Slab.Ctx.inv`).
-#[cfg(feature = "executable")]
+#[cfg(any(feature = "executable", target_env = "musl"))]
 #[inline(always)]
 pub(crate) unsafe fn slab_pop(word: usize, mask: usize) -> usize {
     let ret: usize;
@@ -66,7 +66,7 @@ pub(crate) unsafe fn slab_pop(word: usize, mask: usize) -> usize {
     ret
 }
 
-#[cfg(not(feature = "executable"))]
+#[cfg(not(any(feature = "executable", target_env = "musl")))]
 /// Pushes `p` on the magazine of the calling thread's CPU of the class whose word in slab 0 is at `word` and returns `true`, or returns `false` if the CPU number has no slab or the magazine no free slot to spare.
 ///
 /// Contract: `VG.Spec.Slab.pushInlineContract`.
@@ -77,7 +77,7 @@ pub(crate) unsafe fn slab_pop(word: usize, mask: usize) -> usize {
 /// * `word` must be `SLABS + 8 * class` for a class below 512: the address of the class's slab word in slab 0. `mask` must be the mask `8 * n - 16` of the class's magazines, of `n = 2^k` slots for 2 ≤ k ≤ 16.
 /// * None of `SLABS`, the thread's `rseq_cs` and `cpu_id` and `__rseq_offset` may overlap the 128 bytes of stack below the stack pointer (the red zone) or the 8 bytes at it or wrap around the end of the address space, nor overlap another of them, but where both are only read (`cpu_id` and `__rseq_offset`) (`VG.Spec.Slab.Ctx.Layout`).
 /// * in each of the 8192 slabs of `SLABS`, the class's slab word must be 0, a marker (a word whose low 19 bits are 1), or the address of a slot other than slot 0 of a magazine of the class (`8 * n` bytes, aligned to `8 * n`), whose pointers are not 0 (a pop returns 0 for none) and which does not overlap `SLABS`, the thread's `rseq_cs` and `cpu_id`, `__rseq_offset` or the 128 bytes of stack below the stack pointer (the red zone) or the 8 bytes at it, the magazine another slab's word of the class names, nor wrap around the end of the address space. Every thread and the drainer must keep this from when the function is called until it returns: the function may be aborted and restarted on any CPU in between (`VG.Spec.Slab.Ctx.inv`).
-#[cfg(not(feature = "executable"))]
+#[cfg(not(any(feature = "executable", target_env = "musl")))]
 #[inline(always)]
 pub(crate) unsafe fn slab_push(word: usize, mask: usize, p: usize) -> bool {
     unsafe {
@@ -99,7 +99,7 @@ pub(crate) unsafe fn slab_push(word: usize, mask: usize, p: usize) -> bool {
     true
 }
 
-#[cfg(feature = "executable")]
+#[cfg(any(feature = "executable", target_env = "musl"))]
 /// Pushes `p` on the magazine of the calling thread's CPU of the class whose word in slab 0 is at `word` and returns `true`, or returns `false` if the CPU number has no slab or the magazine no free slot to spare.
 ///
 /// Contract: `VG.Spec.Slab.pushInlineContract`.
@@ -110,7 +110,7 @@ pub(crate) unsafe fn slab_push(word: usize, mask: usize, p: usize) -> bool {
 /// * `word` must be `SLABS + 8 * class` for a class below 512: the address of the class's slab word in slab 0. `mask` must be the mask `8 * n - 16` of the class's magazines, of `n = 2^k` slots for 2 ≤ k ≤ 16.
 /// * None of `SLABS`, the thread's `rseq_cs` and `cpu_id` and `__rseq_offset` may overlap the 128 bytes of stack below the stack pointer (the red zone) or the 8 bytes at it or wrap around the end of the address space, nor overlap another of them, but where both are only read (`cpu_id` and `__rseq_offset`) (`VG.Spec.Slab.Ctx.Layout`).
 /// * in each of the 8192 slabs of `SLABS`, the class's slab word must be 0, a marker (a word whose low 19 bits are 1), or the address of a slot other than slot 0 of a magazine of the class (`8 * n` bytes, aligned to `8 * n`), whose pointers are not 0 (a pop returns 0 for none) and which does not overlap `SLABS`, the thread's `rseq_cs` and `cpu_id`, `__rseq_offset` or the 128 bytes of stack below the stack pointer (the red zone) or the 8 bytes at it, the magazine another slab's word of the class names, nor wrap around the end of the address space. Every thread and the drainer must keep this from when the function is called until it returns: the function may be aborted and restarted on any CPU in between (`VG.Spec.Slab.Ctx.inv`).
-#[cfg(feature = "executable")]
+#[cfg(any(feature = "executable", target_env = "musl"))]
 #[inline(always)]
 pub(crate) unsafe fn slab_push(word: usize, mask: usize, p: usize) -> bool {
     unsafe {
@@ -132,7 +132,7 @@ pub(crate) unsafe fn slab_push(word: usize, mask: usize, p: usize) -> bool {
     true
 }
 
-#[cfg(not(feature = "executable"))]
+#[cfg(not(any(feature = "executable", target_env = "musl")))]
 /// Returns the calling thread's CPU number as the slab routines read it: its rseq area's `cpu_id`, zero-extended. A number not below `SLAB_COUNT` has no slab (an unregistered thread's reads as one). Not a restartable sequence: the thread may move to another CPU before the caller uses the answer.
 ///
 /// Contract: `VG.Spec.Slab.cpuContract`.
@@ -141,7 +141,7 @@ pub(crate) unsafe fn slab_push(word: usize, mask: usize, p: usize) -> bool {
 ///
 /// * The calling thread's rseq area, at `__rseq_offset` from the thread pointer, must be registered with the kernel or read a negative CPU number: glibc registers its area before the thread can run code that allocates; on musl the area is the crate's own, which reads -1 until a slow path registers it.
 /// * Neither `__rseq_offset` nor the thread's `cpu_id` may overlap the stack the call uses (the return address on the stack, or, inline, the 128 bytes below the stack pointer and the 8 bytes at it) or wrap around the end of the address space.
-#[cfg(not(feature = "executable"))]
+#[cfg(not(any(feature = "executable", target_env = "musl")))]
 #[inline(always)]
 pub(crate) unsafe fn current_cpu() -> u32 {
     let ret: u32;
@@ -158,7 +158,7 @@ mov eax, DWORD PTR fs:[rax+4]",
     ret
 }
 
-#[cfg(feature = "executable")]
+#[cfg(any(feature = "executable", target_env = "musl"))]
 /// Returns the calling thread's CPU number as the slab routines read it: its rseq area's `cpu_id`, zero-extended. A number not below `SLAB_COUNT` has no slab (an unregistered thread's reads as one). Not a restartable sequence: the thread may move to another CPU before the caller uses the answer.
 ///
 /// Contract: `VG.Spec.Slab.cpuContract`.
@@ -167,7 +167,7 @@ mov eax, DWORD PTR fs:[rax+4]",
 ///
 /// * The calling thread's rseq area, at `__rseq_offset` from the thread pointer, must be registered with the kernel or read a negative CPU number: glibc registers its area before the thread can run code that allocates; on musl the area is the crate's own, which reads -1 until a slow path registers it.
 /// * Neither `__rseq_offset` nor the thread's `cpu_id` may overlap the stack the call uses (the return address on the stack, or, inline, the 128 bytes below the stack pointer and the 8 bytes at it) or wrap around the end of the address space.
-#[cfg(feature = "executable")]
+#[cfg(any(feature = "executable", target_env = "musl"))]
 #[inline(always)]
 pub(crate) unsafe fn current_cpu() -> u32 {
     let ret: u32;

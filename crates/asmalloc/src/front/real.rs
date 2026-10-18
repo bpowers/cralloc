@@ -40,6 +40,14 @@ unsafe impl Routines for Real {
     fn cpu(&self) -> Option<Cpu> {
         // SAFETY: REAL-01.
         let cpu_id = unsafe { inline::current_cpu() };
+        // On musl the area is the crate's own, and a thread that has never tried registers it
+        // here, at its first slow path (`area`).
+        #[cfg(target_env = "musl")]
+        if cpu_id == super::area::UNREGISTERED {
+            super::area::register();
+            // SAFETY: REAL-01.
+            return self.slabs().cpu(unsafe { inline::current_cpu() } as i32);
+        }
         self.slabs().cpu(cpu_id as i32)
     }
 

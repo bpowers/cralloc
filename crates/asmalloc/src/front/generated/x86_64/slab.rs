@@ -20,7 +20,7 @@ pub(crate) unsafe extern "sysv64" fn slab_cas(offset: usize, expected: usize, ne
     )
 }
 
-#[cfg(not(feature = "executable"))]
+#[cfg(not(any(feature = "executable", target_env = "musl")))]
 /// Pushes `magazine` on the calling thread's CPU's stack whose head is at `offset`, unless the head is a marker, and returns the head it read; returns `NO_CPU` (2) if the CPU number has no slab.
 ///
 /// Contract: `VG.Spec.Slab.stackPushContract`.
@@ -31,7 +31,7 @@ pub(crate) unsafe extern "sysv64" fn slab_cas(offset: usize, expected: usize, ne
 /// * None of `SLABS`, the thread's `rseq_cs` and `cpu_id`, `__rseq_offset` and `magazine[0]` may overlap the return address on the stack or wrap around the end of the address space, nor overlap another of them, but where both are only read (`cpu_id` and `__rseq_offset`) (`VG.Spec.Slab.Ctx.Layout`).
 /// * In each of the 8192 slabs of `SLABS`, the head at `offset` (rounded down to a multiple of 8, within the slab) must be a marker (a word whose low 19 bits are 1) or head a stack of magazines: 0, or the address, a nonzero multiple of 8, of a magazine whose link slot holds the next head. No link slot of those stacks may overlap `SLABS`, the thread's `rseq_cs` and `cpu_id`, `__rseq_offset`, `magazine[0]` or the return address on the stack, nor wrap around the end of the address space. Every thread and the drainer must keep this from when the function is called until it returns: the function may be aborted and restarted on any CPU in between (`VG.Spec.Slab.Ctx.inv`).
 /// * `magazine` must be a nonzero multiple of 8, and the magazine must be the caller's: on no stack.
-#[cfg(not(feature = "executable"))]
+#[cfg(not(any(feature = "executable", target_env = "musl")))]
 #[unsafe(naked)]
 pub(crate) unsafe extern "sysv64" fn slab_stack_push(offset: usize, magazine: usize) -> usize {
     core::arch::naked_asm!(
@@ -41,7 +41,7 @@ pub(crate) unsafe extern "sysv64" fn slab_stack_push(offset: usize, magazine: us
     )
 }
 
-#[cfg(feature = "executable")]
+#[cfg(any(feature = "executable", target_env = "musl"))]
 /// Pushes `magazine` on the calling thread's CPU's stack whose head is at `offset`, unless the head is a marker, and returns the head it read; returns `NO_CPU` (2) if the CPU number has no slab.
 ///
 /// Contract: `VG.Spec.Slab.stackPushContract`.
@@ -52,7 +52,7 @@ pub(crate) unsafe extern "sysv64" fn slab_stack_push(offset: usize, magazine: us
 /// * None of `SLABS`, the thread's `rseq_cs` and `cpu_id`, `__rseq_offset` and `magazine[0]` may overlap the return address on the stack or wrap around the end of the address space, nor overlap another of them, but where both are only read (`cpu_id` and `__rseq_offset`) (`VG.Spec.Slab.Ctx.Layout`).
 /// * In each of the 8192 slabs of `SLABS`, the head at `offset` (rounded down to a multiple of 8, within the slab) must be a marker (a word whose low 19 bits are 1) or head a stack of magazines: 0, or the address, a nonzero multiple of 8, of a magazine whose link slot holds the next head. No link slot of those stacks may overlap `SLABS`, the thread's `rseq_cs` and `cpu_id`, `__rseq_offset`, `magazine[0]` or the return address on the stack, nor wrap around the end of the address space. Every thread and the drainer must keep this from when the function is called until it returns: the function may be aborted and restarted on any CPU in between (`VG.Spec.Slab.Ctx.inv`).
 /// * `magazine` must be a nonzero multiple of 8, and the magazine must be the caller's: on no stack.
-#[cfg(feature = "executable")]
+#[cfg(any(feature = "executable", target_env = "musl"))]
 #[unsafe(naked)]
 pub(crate) unsafe extern "sysv64" fn slab_stack_push(offset: usize, magazine: usize) -> usize {
     core::arch::naked_asm!(
@@ -62,7 +62,7 @@ pub(crate) unsafe extern "sysv64" fn slab_stack_push(offset: usize, magazine: us
     )
 }
 
-#[cfg(not(feature = "executable"))]
+#[cfg(not(any(feature = "executable", target_env = "musl")))]
 /// Pops the top magazine off the calling thread's CPU's stack whose head is at `offset`, unless the stack is empty (0) or the head a marker, and returns the head it read; returns `NO_CPU` (2) if the CPU number has no slab.
 ///
 /// Contract: `VG.Spec.Slab.stackPopContract`.
@@ -72,7 +72,7 @@ pub(crate) unsafe extern "sysv64" fn slab_stack_push(offset: usize, magazine: us
 /// * The calling thread's rseq area, at `__rseq_offset` from the thread pointer, must be registered with the kernel or read a negative CPU number: glibc registers its area before the thread can run code that allocates; on musl the area is the crate's own, which reads -1 until a slow path registers it.
 /// * None of `SLABS`, the thread's `rseq_cs` and `cpu_id` and `__rseq_offset` may overlap the return address on the stack or wrap around the end of the address space, nor overlap another of them, but where both are only read (`cpu_id` and `__rseq_offset`) (`VG.Spec.Slab.Ctx.Layout`).
 /// * In each of the 8192 slabs of `SLABS`, the head at `offset` (rounded down to a multiple of 8, within the slab) must be a marker (a word whose low 19 bits are 1) or head a stack of magazines: 0, or the address, a nonzero multiple of 8, of a magazine whose link slot holds the next head. No link slot of those stacks may overlap `SLABS`, the thread's `rseq_cs` and `cpu_id`, `__rseq_offset` or the return address on the stack, nor wrap around the end of the address space. Every thread and the drainer must keep this from when the function is called until it returns: the function may be aborted and restarted on any CPU in between (`VG.Spec.Slab.Ctx.inv`).
-#[cfg(not(feature = "executable"))]
+#[cfg(not(any(feature = "executable", target_env = "musl")))]
 #[unsafe(naked)]
 pub(crate) unsafe extern "sysv64" fn slab_stack_pop(offset: usize) -> usize {
     core::arch::naked_asm!(
@@ -82,7 +82,7 @@ pub(crate) unsafe extern "sysv64" fn slab_stack_pop(offset: usize) -> usize {
     )
 }
 
-#[cfg(feature = "executable")]
+#[cfg(any(feature = "executable", target_env = "musl"))]
 /// Pops the top magazine off the calling thread's CPU's stack whose head is at `offset`, unless the stack is empty (0) or the head a marker, and returns the head it read; returns `NO_CPU` (2) if the CPU number has no slab.
 ///
 /// Contract: `VG.Spec.Slab.stackPopContract`.
@@ -92,7 +92,7 @@ pub(crate) unsafe extern "sysv64" fn slab_stack_pop(offset: usize) -> usize {
 /// * The calling thread's rseq area, at `__rseq_offset` from the thread pointer, must be registered with the kernel or read a negative CPU number: glibc registers its area before the thread can run code that allocates; on musl the area is the crate's own, which reads -1 until a slow path registers it.
 /// * None of `SLABS`, the thread's `rseq_cs` and `cpu_id` and `__rseq_offset` may overlap the return address on the stack or wrap around the end of the address space, nor overlap another of them, but where both are only read (`cpu_id` and `__rseq_offset`) (`VG.Spec.Slab.Ctx.Layout`).
 /// * In each of the 8192 slabs of `SLABS`, the head at `offset` (rounded down to a multiple of 8, within the slab) must be a marker (a word whose low 19 bits are 1) or head a stack of magazines: 0, or the address, a nonzero multiple of 8, of a magazine whose link slot holds the next head. No link slot of those stacks may overlap `SLABS`, the thread's `rseq_cs` and `cpu_id`, `__rseq_offset` or the return address on the stack, nor wrap around the end of the address space. Every thread and the drainer must keep this from when the function is called until it returns: the function may be aborted and restarted on any CPU in between (`VG.Spec.Slab.Ctx.inv`).
-#[cfg(feature = "executable")]
+#[cfg(any(feature = "executable", target_env = "musl"))]
 #[unsafe(naked)]
 pub(crate) unsafe extern "sysv64" fn slab_stack_pop(offset: usize) -> usize {
     core::arch::naked_asm!(

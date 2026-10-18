@@ -16,6 +16,8 @@
 //! The layout constants here must equal those the Lean specification gives the generated code
 //! (`generated/*/slab.rs`); a test compares them.
 
+#[cfg(all(target_env = "musl", target_arch = "x86_64", not(miri), not(kani)))]
+mod area;
 #[cfg(test)]
 pub(crate) mod check;
 #[cfg(all(test, target_os = "linux", target_arch = "x86_64", not(miri)))]
@@ -55,14 +57,18 @@ pub(crate) use twin::Twin;
 #[cfg(feature = "internals")]
 pub use twin::Twin;
 
-// SAFETY: FRONT-01. glibc declares `extern const ptrdiff_t __rseq_offset;` (`sys/rseq.h`); the
-// exported C routines name it through this public path.
+// SAFETY: FRONT-01. glibc declares `extern const ptrdiff_t __rseq_offset;` (`sys/rseq.h`); on
+// musl the word is the crate's own, generated with its area (`area`). The exported C routines
+// name it through this public path.
 #[cfg(all(target_os = "linux", target_arch = "x86_64", not(miri), not(kani)))]
 unsafe extern "C" {
-    /// glibc's offset of the thread's rseq area from the thread pointer, which the generated
-    /// routines read. Public only so that the C routines the export macros define in another
-    /// crate can name it; reading it is all anyone can do.
+    /// The offset of the thread's rseq area from the thread pointer, which the generated
+    /// routines read: glibc's, or on musl, which has none, the crate's own word, under a name of
+    /// its own so that it can never be taken for a C library's. Public only so that the C
+    /// routines the export macros define in another crate can name it; reading it is all
+    /// anyone can do.
     #[doc(hidden)]
+    #[cfg_attr(target_env = "musl", link_name = "asmalloc_rseq_offset")]
     pub safe static __rseq_offset: isize;
 }
 #[cfg(all(target_os = "linux", target_arch = "x86_64", not(miri), not(kani)))]
