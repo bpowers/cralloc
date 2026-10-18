@@ -155,6 +155,12 @@ impl<S: Shape> SimHeap<S> {
         self.heap.usable_size(ptr)
     }
 
+    /// The heap itself, for tests that call what the C layer calls or read the back end.
+    #[cfg(test)]
+    pub(crate) fn heap(&self) -> &Heap<SimOs<S>> {
+        &self.heap
+    }
+
     /// Walks the heap for `visitor`, as `Asmalloc::inspect` does the process's heap.
     pub fn inspect(&self, visitor: &mut impl crate::stats::Visitor) {
         self.with(|heap| heap.inspect(visitor));
