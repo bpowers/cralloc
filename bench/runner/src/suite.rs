@@ -345,6 +345,38 @@ pub fn quick() -> Vec<Job> {
     ]
 }
 
+/// The shapes that exposed the back end's worst costs in the 2026-10-18 session
+/// (docs/research/baselines.md, "Smoke set for the back end"), small enough to run on every
+/// change to the back end in about a minute: large objects crossing threads (a purge on every
+/// free past the large cap), a tree built and dropped (every object through the bitmaps,
+/// recycled out of address order), sh8bench preloaded (contended refills), JSON (the
+/// small-class cap purging what the next parse faults back), and two independent pipelines
+/// on different L3 domains (objects handed across domains by the shared depot).
+pub fn backend() -> Vec<Job> {
+    use Consumers::*;
+    use Mode::*;
+    let one = || vec![SINGLE];
+    vec![
+        xjob(
+            "pipeline t2 sizes=large local".into(),
+            "pipeline threads=2 sizes=large objects=300k inflight=512",
+            local(2),
+            AllAlloc,
+            60,
+        ),
+        xjob(
+            "pipeline t2 x2 sizes=small split".into(),
+            "pipeline threads=2 chains=2 sizes=small objects=2M",
+            vec![0, 1, 8, 9],
+            AllAlloc,
+            60,
+        ),
+        rust("single-thread", "tree depth=18".into(), Native, "tree depth=18 reps=4", one(), 60),
+        rust("single-thread", "json 8Mi".into(), Native, "json size=8Mi reps=3", one(), 60),
+        cprog("sh8bench 16", "sh8bench", "16", both(), Metric::Wall, 60),
+    ]
+}
+
 /// Every CPU any job may use.
 pub fn measurement_cpus() -> Vec<usize> {
     both()
