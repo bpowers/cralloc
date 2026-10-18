@@ -453,10 +453,12 @@ The order of preference in a fill is the fragmentation policy: reuse free object
 carving fresh memory, and take the lowest address first. Live data packs toward the start of
 each region and the high end drains, which is where purging starts.
 
-A filled magazine also hands its objects out lowest address first. A program that allocates
-a run of objects and then visits them in the order it made them, which is what building and
-walking most linked structures does, then reads memory in ascending order, which is the
-order hardware prefetchers follow best.
+A filled magazine also hands its objects out lowest address first, so that the order within
+a magazine is the order across magazines. A program that allocates a run of objects and then
+visits them in the order it made them, which is what building and walking most linked
+structures does, then reads memory in one direction, and hardware prefetchers follow it. If
+each magazine handed its objects out highest first, the direction would reverse at every
+magazine, and the prefetchers would lose the stream each time.
 
 ### Heartbeat
 
