@@ -24,9 +24,13 @@ python3 "$here/patch.py" "$gen"
 build inreg asm
 build inreg_exe asm_exe
 cp "$tgt/slab.rs.orig" "$gen"
+python3 "$here/patch.py" --onereg "$gen"
+build onereg asm
+build onereg_exe asm_exe
+cp "$tgt/slab.rs.orig" "$gen"
 trap - EXIT
 for _ in $(seq "${RF_ROUNDS:-3}"); do
-  for v in fixed inreg fixed_exe inreg_exe; do
+  for v in fixed inreg onereg fixed_exe inreg_exe onereg_exe; do
     RF_CPU=${RF_CPU:-12} MEMLIMIT_QUIET=1 "$repo/scripts/memlimit" -m 2G -t 10m -- \
       "$tgt/$v/lto/roofline-rust-alloc" "$v" "${1:-pair}"
   done

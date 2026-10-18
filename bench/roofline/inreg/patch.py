@@ -4,12 +4,17 @@ their inputs are `in(reg)` operands, which LLVM may place in any register, inste
 `rdi`, `esi` and `rdx`. The result is `rax` becomes `out` (not `lateout`) in the pop, so that no
 input shares it: the pop writes `rax` before it last reads the word (and a restart reads it again).
 
-    patch.py FILE    rewrites FILE in place
+    patch.py [--onereg] FILE    rewrites FILE in place
+
+With --onereg the slab word's address is also formed once per sequence into r9 (`lea r9,
+[word + r8]`), and the load and the commit use `[r9]`: a test of whether the word's hop through
+memory is slow because its address is `[word + r8]` with r8 reloaded every sequence.
 """
 import re
 import sys
 
-path = sys.argv[1]
+onereg = "--onereg" in sys.argv[1:]
+path = [a for a in sys.argv[1:] if a != "--onereg"][0]
 s = open(path).read()
 out, n = [], 0
 for chunk in re.split(r"(?=#\[cfg\()", s):
@@ -21,6 +26,12 @@ for chunk in re.split(r"(?=#\[cfg\()", s):
         chunk = chunk.replace('in("rsi") mask,', "mask = in(reg) mask,")
         chunk = chunk.replace('in("rdx") p,', "p = in(reg) p,")
         chunk = chunk.replace('lateout("rax") ret,', 'out("rax") ret,')
+        if onereg:
+            chunk = chunk.replace("mov rcx, QWORD PTR [{word}+r8*1]",
+                                  "lea r9, [{word}+r8*1]\nmov rcx, QWORD PTR [r9]")
+            chunk = chunk.replace("QWORD PTR [{word}+r8*1], ", "QWORD PTR [r9], ")
+            chunk = chunk.replace('out("r8") _,', 'out("r8") _,\n            out("r9") _,')
+            assert "{word}+r8" in chunk and "[r9]" in chunk
         assert "rdi" not in chunk.split("core::arch::asm!")[1].split("options")[0], chunk
         n += 1
     out.append(chunk)
