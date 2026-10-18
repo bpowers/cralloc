@@ -33,7 +33,8 @@ below are those sections, discharged once here for every call in the file.
   assertion), so its symbol, which the specification calls `SLABS`, is the first slab's address.
 - (C): the mask is `front::mask(class)`, entry `class` of `front::MASKS`, built from
   `SmallClass::magazine().mask()`; `MagazineSize` keeps `n` a power of two from 4 to 256, so
-  `k` is 2 to 8. `front::tests` pins the generated constants to the crate's.
+  `k` is 2 to 8. A test checks each size's mask against the one the routines were proved for
+  (`crate::spec`, which the Lean emitter writes).
 - (L): `__rseq_offset` is glibc's, and the
   rseq area is in glibc's thread control block; the stack is the thread's own. None of them is
   at the top of the address space (user space ends far below it on x86-64).

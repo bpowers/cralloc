@@ -31,8 +31,9 @@ values they read).
   generated `MASK_DISP`, `SHIFT_DISP`, `BASE_DISP`, `MIRROR_BYTES`, `MIRROR_COUNT`,
   and `REGION_DISP`, and the static's size to
   the slabs plus three pages). `C_SIZES`, `C_CALLOC_SIZES` and `C_SIZED_SIZES` are statics of their own, immutable,
-  each table 2048 bytes in (assertions in `c/table.rs` against the generated `TABLE_OFF`,
-  `MALLOC_LEN` and `SIZED_LEN`). Distinct statics do not overlap, and none overlaps glibc's
+  each table `TABLE_OFF` bytes in, its length the one the routines read (`c/table.rs` takes
+  `TABLE_OFF` and `SIZED_LEN` from `crate::spec`, which the Lean emitter writes, and asserts
+  `MALLOC_LEN` and `CALLOC_LEN`). Distinct statics do not overlap, and none overlaps glibc's
   thread control block, which holds the rseq area, or the thread's stack. None is at the top of
   the address space.
 - (I): for a small class, (C) and (S) of `front/real-safety.md`: the mask entry is zero or the
