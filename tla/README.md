@@ -47,7 +47,8 @@ TLC_PREFIX="taskset -c 11,26,27" TLC_WORKERS=3 tla/check
 differs from its expectation, and prints the number of distinct states and the time for
 each. The whole run takes about a quarter of an hour on three cores, most of it in
 `Exchange` and the four largest drain configurations. `SLOW=1 tla/check` adds
-`Drain_gen_any_full`, which takes about ten minutes more.
+`Drain_gen_any_full`, which takes about ten minutes more, and `Summary_run_wide`, which
+takes about six (81 million distinct states, on four workers, 2026-10-18).
 
 ## The models
 
@@ -62,7 +63,7 @@ them cheap.
 | `Exchange.tla` | The slow path between routines: obtain, install, retire or put back; migration at every step; two threads on one cid; a signal handler as a nested call at any step; the marker branch; a call with no valid cid. Everything has exactly one owner and a call in progress always has a step it can take. | Routines, depot and back end are single steps. The drainer is an environment. |
 | `Drain.tla` | The drain: claim, exchange of slab word and spare head, one fence, re-read, release; back-out when `membarrier` fails; concurrent drainers; drain against install, pop, push and spare push and pop in flight; fork during a drain and the child's repair. | One class and one spare stack per cid. Magazines carry a fill level, not objects. The depot is a set. |
 | `Depot.tla` | Push and pop by compare-and-swap on a head with a version counter, with stale link reads and owners overwriting the link. | One stack. |
-| `Summary.tla` | Claim by compare-and-swap, release by atomic OR, set-on-first-free, clear-then-reread, at every level of a summary tree. With `Run` (`Summary_run*`), a fill's run of claims: searches that start at any word, empty words left to the thread that emptied them, and the clears of several emptied words made with one AND and a re-read of each. | One region; two bits to a word; batches only at the leaf level. |
+| `Summary.tla` | Claim by compare-and-swap, release by atomic OR, set-on-first-free, clear-then-reread, at every level of a summary tree. With `Run` (`Summary_run*`), a fill's run of claims: searches that start at any word, empty words left to the thread that emptied them, and the clears of several emptied words made with one AND and a re-read of each. | One region; two bits to a word (three in `Summary_run_wide`); batches only at the leaf level. |
 | `Purge.tla` | Purge as a claim against allocation and laundering, with objects that do not line up with pages, and the zero bitmap of large classes. | Summary bits; the watermark. |
 | `Startup.tla` | Racing initializers, one compare-and-swap, the loser unmapping, callers arriving throughout; a limited address-space budget; fork. | The heap's contents. |
 | `Fork.tla` | One small instance of every shared structure, a fork at any step, and what the child can and cannot reach afterwards. | Routines and depot operations are single steps. |
@@ -82,6 +83,10 @@ at once, or a counter overflow; `Depot_wrap` covers the latter by shrinking the 
 The drain configurations with a fork split the roles between threads to stay small.
 `Drain_gen_any` has two threads; a three-thread version was explored to 22 million states
 without a violation and not run to completion.
+
+With two bits to a word, a batch of held clears in `Summary_run` is at most two words, and
+they are every word under their summary word. `Summary_run_wide` has three bits to a word
+and two threads, so a batch can leave a sibling's bit set in the summary word.
 
 `Drain.tla` keeps no cid for a thread outside a sequence. A sequence starts on any cid that
 no sequence in flight is using, and the OS may abort any sequence at any time. This is the

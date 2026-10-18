@@ -44,6 +44,8 @@ run Summary Summary_run         ok
 run Summary Summary_run_deep    ok
 run Summary Summary_run_crash   ok
 run Summary Summary_run_noreread violates Visible
+# Three bits to a word: about 81 million states and six minutes.
+if [ -n "${SLOW:-}" ]; then run Summary Summary_run_wide ok; fi
 
 # 6. Purge as a claim
 run Purge Purge               ok
