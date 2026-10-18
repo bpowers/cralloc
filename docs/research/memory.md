@@ -694,6 +694,15 @@ jemalloc: JSON 89.0, BTreeMap 25.9, churn 110.4 (after freeing 112.9), burst 218
   which then showed 78). A buffer grown more than four times at once gets no huge pages.
   The sparse tests of section 5 are unchanged (1.3 and 16.4 MiB), since a block allocated
   at its size never gets them.
+- The soak's `bigmem` through the preload library, three interleaved runs, seconds and peak
+  MiB, with huge pages for grown blocks ("on") and without them at the old 64 MiB threshold
+  ("off"): `chain 10 1` 0.64 against 1.2 s (glibc 0.66), peak 264 both (glibc 257);
+  `chain 10 4` 2.5 against 4.9 s (glibc 2.5), peak 914 to 1038 against 857 to 984 (glibc
+  1000 to 1008); `grow 10 4` 1.15 to 1.97 against 3.5 to 3.7 s (glibc 2.5 to 2.7), peak 886
+  to 952 against 835 to 849 (glibc 997 to 1014). Four threads each at 256 MiB is 1024 MiB;
+  how close a run comes depends on how far the threads' growth overlaps, which the faster
+  build makes more likely. The first "on" run of each of the first two modes took 5.4 and
+  7.0 s: huge-page faults compacting memory (roofline note, section 7).
 
 ## Measured and argued
 
