@@ -587,7 +587,8 @@ saved; we copy.
 - **`GlobalAlloc`** for `#[global_allocator]`. `dealloc` of a small object is the free
   routine and nothing else.
 - **`Allocator`**, on Rust versions that have it, through a zero-sized handle. All handles
-  share the one heap. `allocate` returns the full class size. A zero-size request gets a
+  share the one heap. `allocate` returns the full class size of a small block and the
+  usable size of a large one. A zero-size request gets a
   dangling, aligned pointer and no block.
 - **C ABI**: `malloc`, `calloc`, `realloc`, `reallocarray`, `free`, the aligned-allocation
   family, `malloc_usable_size`, `malloc_trim` and the sized frees: every function glibc
@@ -601,7 +602,15 @@ saved; we copy.
   they are told they have, so a `realloc` that moves a block copies that much and `calloc`
   zeroes that much.
   `realloc(p, 0)` frees `p` and returns null, as glibc does.
-- **C++**: the replaceable forms of `operator new` and `operator delete`, so that C++
+- **C++**, not yet exported. A C++ program's `operator new` and `operator delete` belong to
+  its C++ runtime, which calls our `malloc` and `free`; that is correct in every arrangement
+  of libraries, and costs C++ a call layer and the size that sized deletes carry. Exporting
+  the operators ourselves is only sound if we export all of them: with our `delete` forms
+  but another library's `new`, blocks reach us that are not ours, and a garbage collector's
+  or an engine's C++ library that defines the operators is exactly that case. We cannot yet
+  export the throwing forms of `new` (see below), so the preload library exports none. The
+  rest of this item describes the operators as built and tested, for when it can. They are
+  the replaceable forms of `operator new` and `operator delete`, so that C++
   allocates without a detour through `malloc` and sized deletes arrive with their size. A
   failing `new` runs the installed new-handler until none is left; then a nothrow form
   returns null and a throwing form raises `std::bad_alloc`. An exception cannot unwind
@@ -716,7 +725,9 @@ These hold everywhere, and the proofs and tests lean on them.
 1. A slab changes only through an rseq routine that commits with one store, or through the
    drain steps under "Idle caches".
 2. Other shared state changes only through single atomic instructions.
-3. No locks, no waiting, no thread-local state.
+3. No locks, no waiting, no thread-local state. The one exception is in the C++ layer,
+   which asks the loader which `operator new` and `delete` the process uses, once per
+   family and on a failing `new`; that lookup can wait on the loader's lock.
 4. Between any two instructions of any slow path, shared state is valid and anything
    unreachable from it is owned by exactly one thread.
 5. All-zero is a valid state for every structure.
