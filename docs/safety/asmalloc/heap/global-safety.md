@@ -14,7 +14,7 @@ of the layout, which by alignment by construction (`classes::verify`) is a multi
 alignment and at least the size, and slots are aligned to their class's alignment; a large one
 is a slot of the layout's class or a run aligned as `alloc_run` was asked. Exclusivity: the
 back end hands each slot once until it is freed, and magazines hold each free object once (the
-slab invariant, `front/twin-safety.md`). No unwinding: the allocator's paths never panic
+slab invariant, `front/real-safety.md`). No unwinding: the allocator's paths never panic
 (aborts go through `Os::abort`, which does not return). `realloc` builds the new layout with
 `Layout::from_size_align`, returning null on an invalid size without touching the block;
 `Bound::resize` frees the old block only after copying (HEAP-04).

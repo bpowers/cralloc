@@ -9,7 +9,8 @@
 //! sequences on one CPU never interleave. A real thread that finds every simulated one taken
 //! runs as a thread without an rseq registration, straight on the back end: it never waits.
 //!
-//! The ledger for the unsafe blocks here is `docs/safety/asmalloc/heap/sim-safety.md`.
+//! The heap here is test scaffolding: its unsafe code has no ledger entries, and its
+//! `SAFETY` comments say why each block is sound.
 
 use super::{Bound, Heap, Zero};
 use crate::depot::Drained;
@@ -76,7 +77,8 @@ impl<'a> SimRoutines<'a> {
     }
 }
 
-// SAFETY: SIM-01. Every method is the twin's, on the same slabs and processor.
+// SAFETY: every method is the twin's, on the same slabs and processor, so each keeps the
+// twin's contract for the simulated thread, whose machine the simulator keeps.
 unsafe impl Routines for SimRoutines<'_> {
     fn slabs(&self) -> &Slabs {
         self.slabs
@@ -225,7 +227,8 @@ impl<S: Shape> SimHeap<S> {
             slabs: &*self.slabs,
             processor,
         };
-        // SAFETY: HEAP-02, a simulated heap.
+        // SAFETY: the twins run on `self.slabs`, which this heap owns, never hands out and
+        // pairs only with `self.heap`, so every `Bound` over those slabs names this heap.
         let result = f(unsafe { Bound::new(&self.heap, routines) });
         drop(lease);
         result
@@ -238,7 +241,8 @@ impl<S: Shape> Default for SimHeap<S> {
     }
 }
 
-// SAFETY: SIM-02. Every method is the heap's, with twins on this heap's own slabs.
+// SAFETY: as the process heap's `GlobalAlloc` and `Allocator`, for this heap and its twins.
+// Every method is the heap's, with twins on this heap's own slabs.
 unsafe impl<S: Shape> GlobalAlloc for SimHeap<S> {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
         self.with(|heap| heap.alloc(layout))
@@ -252,7 +256,7 @@ unsafe impl<S: Shape> GlobalAlloc for SimHeap<S> {
     }
 
     unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
-        // SAFETY: SIM-06.
+        // SAFETY: the trait method's own contract, for a block this heap returned.
         self.with(|heap| unsafe { heap.dealloc(ptr, layout) })
     }
 
@@ -264,7 +268,8 @@ unsafe impl<S: Shape> GlobalAlloc for SimHeap<S> {
             return ptr::null_mut();
         };
         self.with(|heap| {
-            // SAFETY: SIM-06; `new_size` is not zero, by `realloc`'s contract.
+            // SAFETY: the trait method's own contract, for a block this heap returned;
+            // `new_size` is not zero, by `realloc`'s contract.
             unsafe { heap.resize(block, layout, new, false) }
                 .map_or(ptr::null_mut(), |grant| grant.ptr.as_ptr())
         })
@@ -272,7 +277,7 @@ unsafe impl<S: Shape> GlobalAlloc for SimHeap<S> {
 }
 
 #[cfg(feature = "allocator-api")]
-// SAFETY: SIM-02.
+// SAFETY: as the process heap's `GlobalAlloc` and `Allocator`, for this heap and its twins.
 unsafe impl<S: Shape> core::alloc::Allocator for SimHeap<S> {
     fn allocate(&self, layout: Layout) -> Result<NonNull<[u8]>, core::alloc::AllocError> {
         self.with(|heap| heap.allocate(layout, false))
@@ -283,7 +288,7 @@ unsafe impl<S: Shape> core::alloc::Allocator for SimHeap<S> {
     }
 
     unsafe fn deallocate(&self, ptr: NonNull<u8>, layout: Layout) {
-        // SAFETY: SIM-06.
+        // SAFETY: the trait method's own contract, for a block this heap returned.
         self.with(|heap| unsafe { heap.deallocate(ptr, layout) })
     }
 
@@ -293,7 +298,7 @@ unsafe impl<S: Shape> core::alloc::Allocator for SimHeap<S> {
         old: Layout,
         new: Layout,
     ) -> Result<NonNull<[u8]>, core::alloc::AllocError> {
-        // SAFETY: SIM-06.
+        // SAFETY: the trait method's own contract, for a block this heap returned.
         self.with(|heap| unsafe { heap.grow(ptr, old, new, false) })
     }
 
@@ -303,7 +308,7 @@ unsafe impl<S: Shape> core::alloc::Allocator for SimHeap<S> {
         old: Layout,
         new: Layout,
     ) -> Result<NonNull<[u8]>, core::alloc::AllocError> {
-        // SAFETY: SIM-06.
+        // SAFETY: the trait method's own contract, for a block this heap returned.
         self.with(|heap| unsafe { heap.grow(ptr, old, new, true) })
     }
 
@@ -313,7 +318,7 @@ unsafe impl<S: Shape> core::alloc::Allocator for SimHeap<S> {
         old: Layout,
         new: Layout,
     ) -> Result<NonNull<[u8]>, core::alloc::AllocError> {
-        // SAFETY: SIM-06.
+        // SAFETY: the trait method's own contract, for a block this heap returned.
         self.with(|heap| unsafe { heap.shrink(ptr, old, new) })
     }
 }
@@ -342,18 +347,21 @@ impl SimAsmalloc {
             ) {
                 Ok(_) => current = mine,
                 Err(winner) => {
-                    // SAFETY: SIM-04.
+                    // SAFETY: `mine` is this thread's until published, and a published heap
+                    // is never freed.
                     drop(unsafe { Box::from_raw(mine) });
                     current = winner;
                 }
             }
         }
-        // SAFETY: SIM-04.
+        // SAFETY: `mine` is this thread's until published, and a published heap is never
+        // freed.
         unsafe { &*current }
     }
 }
 
-// SAFETY: SIM-02, for the shared heap.
+// SAFETY: as the process heap's `GlobalAlloc` and `Allocator`, for the one shared heap and its
+// twins.
 unsafe impl GlobalAlloc for SimAsmalloc {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
         SimAsmalloc::heap().with(|heap| heap.alloc(layout))
@@ -367,18 +375,19 @@ unsafe impl GlobalAlloc for SimAsmalloc {
     }
 
     unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
-        // SAFETY: SIM-07.
+        // SAFETY: the trait method's own contract, for a block of the one shared heap.
         unsafe { SimAsmalloc::heap().dealloc(ptr, layout) }
     }
 
     unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
-        // SAFETY: SIM-07.
+        // SAFETY: the trait method's own contract, for a block of the one shared heap.
         unsafe { SimAsmalloc::heap().realloc(ptr, layout, new_size) }
     }
 }
 
 #[cfg(feature = "allocator-api")]
-// SAFETY: SIM-02, for the shared heap.
+// SAFETY: as the process heap's `GlobalAlloc` and `Allocator`, for the one shared heap and its
+// twins.
 unsafe impl core::alloc::Allocator for SimAsmalloc {
     fn allocate(&self, layout: Layout) -> Result<NonNull<[u8]>, core::alloc::AllocError> {
         SimAsmalloc::heap().allocate(layout)
@@ -389,7 +398,7 @@ unsafe impl core::alloc::Allocator for SimAsmalloc {
     }
 
     unsafe fn deallocate(&self, ptr: NonNull<u8>, layout: Layout) {
-        // SAFETY: SIM-07.
+        // SAFETY: the trait method's own contract, for a block of the one shared heap.
         unsafe { SimAsmalloc::heap().deallocate(ptr, layout) }
     }
 
@@ -399,7 +408,7 @@ unsafe impl core::alloc::Allocator for SimAsmalloc {
         old: Layout,
         new: Layout,
     ) -> Result<NonNull<[u8]>, core::alloc::AllocError> {
-        // SAFETY: SIM-07.
+        // SAFETY: the trait method's own contract, for a block of the one shared heap.
         unsafe { SimAsmalloc::heap().grow(ptr, old, new) }
     }
 
@@ -409,7 +418,7 @@ unsafe impl core::alloc::Allocator for SimAsmalloc {
         old: Layout,
         new: Layout,
     ) -> Result<NonNull<[u8]>, core::alloc::AllocError> {
-        // SAFETY: SIM-07.
+        // SAFETY: the trait method's own contract, for a block of the one shared heap.
         unsafe { SimAsmalloc::heap().grow_zeroed(ptr, old, new) }
     }
 
@@ -419,7 +428,7 @@ unsafe impl core::alloc::Allocator for SimAsmalloc {
         old: Layout,
         new: Layout,
     ) -> Result<NonNull<[u8]>, core::alloc::AllocError> {
-        // SAFETY: SIM-07.
+        // SAFETY: the trait method's own contract, for a block of the one shared heap.
         unsafe { SimAsmalloc::heap().shrink(ptr, old, new) }
     }
 }
