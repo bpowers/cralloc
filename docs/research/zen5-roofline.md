@@ -344,6 +344,174 @@ Multi-size THP (16 KiB to 1 MiB folios, which would fault 4 to 256 pages at a ti
 the 2 MiB granularity) is off on this machine at every size, and an unprivileged process
 cannot turn it on.
 
+### Moving a large block: `mremap` against copying (2026-10-17)
+
+The question: a large block that outgrows its slot is copied, which makes a sparsely written
+block fully resident and is slow; glibc moves such blocks with `mremap`. Can asmalloc move
+pages with `mremap(old, len, len, MREMAP_MAYMOVE | MREMAP_FIXED | MREMAP_DONTUNMAP, new)` and
+later put a fresh `mmap(MAP_FIXED)` over the destination ("heal") so that the heap's mappings
+merge again?
+
+**Answer.** It works, with a stricter recipe than first proposed, and it is fast. But a copy
+that skips all-zero source pages gets all of the memory benefit with no new mechanism.
+Remapping buys speed only: 1.6 to 2.9 times the reallocs per second on blocks of tens of
+megabytes and up.
+
+Method. Programs in `bench/roofline/oscost/src/bin/` (`remap_heal`, `remap_cost`,
+`remap_model`) build a heap like the allocator's: one `PROT_NONE`, `MAP_NORESERVE`
+reservation, regions advised `MADV_NOHUGEPAGE` and made writable from their start. All ran
+under `scripts/memlimit` with 8 GiB or less, pinned to CPU 13 (second thread on CPU 12).
+Those two cores and their siblings were idle when sampled; the machine's load average was 12
+to 17 from other work, and repeats of the workload model differ by up to 15%. Times are the
+fastest of 3 to 40 repeats. Kernel behaviour was checked against the v7.2 sources
+(`mm/mremap.c`, `mm/vma.c`, `mm/mmap.c`, `mm/madvise.c`, `mm/util.c`).
+
+#### What the kernel does
+
+- **The move.** The destination's pages in the moved range are freed and replaced; the rest
+  of the destination slot keeps its old bytes. The source stays mapped, is not split, and
+  reads as zero, so it can be recorded as zero. Resident memory does not rise. The moved
+  range arrives as a mapping of its own that cannot merge with its neighbours: two more
+  mappings per moved-in block, never more.
+- **What blocks the merge.** The moved pages keep their original file offset, and the moved
+  mapping carries the source region's `anon_vma`. `MADV_DONTNEED` does not help. A fresh
+  `mmap` merges only once it has the neighbours' protection, `MAP_NORESERVE` and the
+  `MADV_NOHUGEPAGE` advice; `PROT_NONE` then `mprotect` also works. The wipe-on-fork page is
+  not in an object region and plays no part. The source needs no fresh `mmap` unless it was
+  itself moved into.
+- **The heal does not always return the count to where it was.** A healed range that is
+  written while it has a moved-in mapping on both sides gets an `anon_vma` of its own, and
+  the split between it and the region's mapping is then permanent. With whole-slot heals,
+  random cycles settled at 57 to 69 mappings against a baseline of 13 (bounded by the number
+  of slots, not creeping). Three rules make the return exact, 13 after every round of 28,000
+  moves: heal exactly the moved-in range; never remap the last page of a destination slot,
+  so every slot keeps a page of the region's own mapping; write one page of a region before
+  the first move into it.
+- **A block that grows in place after arriving lies in two mappings.** Linux 7.2 will move
+  several mappings in one call, but not atomically: four below `vm.max_map_count`, a block in
+  three mappings came back `ENOMEM` with two pieces moved, the third not, and the third's
+  destination unmapped. A call on one mapping is refused cleanly within three of the limit.
+  So a move must be one call on a range known to be one mapping. The kernel can be asked:
+  `mremap(p, len, len + 4096, 0)` fails with `EFAULT` if the range crosses a mapping and
+  `ENOMEM` if it does not, changing nothing (it must not be used on a range that ends where
+  unmapped space begins, where it succeeds and grows the mapping). The program can split a
+  block's mapping itself with `madvise` or `mlock`, so this cannot be known without asking.
+- **A refused move can leave the destination unmapped.** The kernel unmaps the destination
+  first. A failure after that (commit charge under strict overcommit, or no kernel memory)
+  returns `ENOMEM` with the source intact and a hole where the destination was. Shown with an
+  accounted mapping larger than RAM. The hole has to be mapped again before anything else
+  lands in it.
+- **`mlock`.** The move clears `VM_LOCKED` on the whole source mapping, not just the moved
+  range. In a process that called `mlockall`, one move would unlock a region. `MADV_COLD` on
+  one source page fails with `EINVAL` if the mapping is locked, which is a cheap test.
+- **Fork.** Parent and child each keep a correct view when the other moves the block. In
+  the parent, heals still merge. In a forked child they never merge with inherited mappings
+  (the kernel refuses to merge with a mapping copied by fork), so a child settles at up to
+  two extra mappings for each slot it has moved into: 490 against 13 with 288 slots, stable
+  over 5 rounds. In a child, blocks also lie in several mappings without having been moved.
+  Growing an inherited region by `mprotect` in a child, which the allocator already does,
+  costs one extra mapping per region, not one per step.
+- **Huge pages.** With both ends aligned to 2 MiB, huge pages move whole. Otherwise they are
+  split. A destination holding huge pages is simply replaced.
+- **Memory cap.** A 505 MiB block moves under a 512 MiB cgroup cap; a copy needs room for
+  one piece. An unaligned move allocates page tables (about 1 MiB per 512 MiB), and at the
+  very edge of the cap that is an OOM kill, as any page fault would be.
+- **Overcommit** (from the source). In modes 0 and 1 the heap is `VM_NORESERVE` and a move
+  charges nothing. In mode 2 the kernel ignores `MAP_NORESERVE`, writable parts are
+  accounted, and the move charges the full length after uncharging the destination: no net
+  change, but it can fail, leaving the hole above.
+- **Mapping count.** Up to two extra mappings per live moved-in block. The default
+  `vm.max_map_count` is 65530 (1048576 on this machine), and the allocator's own `mprotect`
+  needs headroom, so the number of live moved-in blocks needs a cap in the low thousands.
+
+#### Cost
+
+Microseconds, fastest of the repeats. "Copy" is the present move: 2 MiB pieces, the source's
+pages returned behind each. "Sparse copy" is the same, skipping source pages that are all
+zero. Dense means every page written; sparse means one byte per MiB.
+
+| Block | `mremap`, ends at 2 MiB | `mremap`, ends at different offsets | Copy, destination not resident | Copy, destination resident | Sparse copy |
+|---|---:|---:|---:|---:|---:|
+| 64 KiB dense | 1.5 | 1.5 | 5.9 | 0.4 | 5.9 |
+| 256 KiB dense | 1.8 | 1.8 | 21 | 1.6 | 21 |
+| 1 MiB dense | 3.0 | 3.0 | 90 | 13 | 90 |
+| 16 MiB dense | 10 | 31 | 2,100 | 1,100 | 2,300 |
+| 256 MiB dense | 32 | 390 | 43,000 | 26,000 | 46,000 |
+| 1 GiB dense | 94 | 1,500 | 177,000 | | 186,000 |
+| 4 GiB dense | 180 | 6,100 | 681,000 | | 696,000 |
+| 1 MiB sparse | 1.9 | 2.0 | 128 | 47 | 49 |
+| 256 MiB sparse | 29 | 131 | 48,000 | 23,000 | 13,600 |
+| 4 GiB sparse | 176 | 2,400 | 775,000 | | 217,000 |
+
+- Around the `mremap`: the one-mapping probe 0.1 to 2, the lock probe 0.6 to 4, and at free
+  the fresh `mmap` and advice 0.8 to 15 on top of the purge any freed block may pay.
+- With both ends on a 1 GiB boundary the kernel moves whole upper-level tables: 11 for
+  1 GiB or 3 GiB. Ends at the same odd offset cost the same as aligned ends. Classes of
+  8 MiB and up are multiples of 2 MiB, so only blocks under 8 MiB move page by page.
+- A destination with resident pages costs the `mremap` their release under the lock: 38 ms
+  for 1 GiB. Purge it first.
+- Resident after moving a 256 MiB sparse block: 1 MiB by `mremap`, 256 by copy, 1 by sparse
+  copy. The sparse copy pays a read fault per untouched source page, 0.19 us, which maps the
+  shared zero page and adds no resident memory.
+- **Crossover.** Against a destination whose pages are not resident, `mremap` wins at every
+  large size. Against a resident one (a retained slot), the copy wins up to about 256 KiB.
+  The workload below is insensitive to the threshold from 64 KiB to 16 MiB.
+
+**What it does to other threads.** A second thread's longest pause during one move, middle
+of 7 to 25 repeats:
+
+| Second thread | `mremap` 64 MiB unaligned | `mremap` 1 GiB aligned | `mremap` 1 GiB unaligned | Copy, 1 GiB |
+|---|---:|---:|---:|---:|
+| Computing only (sees the TLB shootdowns) | 1.3 us | 2.6 us | 2.9 us | 5.3 us |
+| Page faults in a mapping of its own | 2.6 us | 10 us | 5.7 us | 18 us |
+| Page faults in the source's region | 114 us | 100 us | 1,550 us | 13 us |
+| Page faults in the destination's region | 113 us | 100 us | 1,530 us | 12 us |
+| `mmap` and `munmap` | 157 us | 396 us | 2,090 us | 760 us |
+
+A thread that faults in either region, or needs the address-space lock, waits for the whole
+call: about 0.1 ms per GiB aligned, 1.5 ms per GiB page by page (which the class sizes limit
+to blocks under 8 MiB, about 12 us). Other threads are not held. The copy never holds anyone
+for long. The `mmap` row is noisy in every column.
+
+#### The soak's realloc workload
+
+`remap_model` replays the soak's `realloc` mode (growth chains to a random top and back
+down, written and checked as the soak does) against a model of the large-object rules, one
+thread. Three runs at 256 MiB; ranges are the runs.
+
+| Way of moving | Reallocs per second, blocks to 256 MiB | Peak resident | Reallocs per second, to 1 GiB | Peak resident |
+|---|---:|---:|---:|---:|
+| glibc | 2,460 to 2,490 | 65 MiB | 2,170 | 69 MiB |
+| copy (now) | 1,260 to 1,280 | 136 MiB | 480 | 506 MiB |
+| sparse copy | 1,220 to 1,380 | 72 MiB | 810 | 77 MiB |
+| one `mremap`, sparse copy for the rest | 1,820 to 2,120 | 71 MiB | 1,420 | 75 MiB |
+
+With blocks to 16 MiB all four are within 10% (4,440 to 5,000 per second, 18 to 27 MiB).
+The model reproduces the soak's shape (glibc 1.9 times the copy's rate and half its peak),
+not its numbers.
+
+#### What follows
+
+1. **Sparse copy fixes the memory problem by itself**: peak within 12% of glibc's, against
+   2 to 7 times. It needs the destination to read as zero (purge it first unless the back
+   end already knows it is zero) and no other state, no new system call and no new failure
+   path. It does not speed up dense blocks.
+2. **Remapping adds only speed**, 1.6 times at 256 MiB and 2.9 times at 1 GiB over the copy,
+   and still short of glibc. Its price in mechanism: three new OS calls and their simulated
+   model (mappings, not just pages), a word per large slot, a cap on live moved-in blocks,
+   and these rules, each of which the experiments showed is needed:
+   - one `mremap` per move, of the largest piece of the block that the probe says is one
+     mapping; sparse copy for the rest, after the `mremap`, so a refusal leaves the source
+     whole;
+   - never the last page of the destination slot; a region written once before its first
+     move in;
+   - purge a destination that is not known zero before the call;
+   - skip the remap if the lock probe fails;
+   - on refusal, map the destination range again; if that fails too, never use the slot;
+   - at free, purge, then a fresh `mmap` and advice over exactly the moved-in range;
+   - no guarantee in a forked child, where the probe will often say no and heals do not
+     merge.
+
 ## 8. Moving cache lines between cores
 
 Wall-clock, single run each in two sessions.

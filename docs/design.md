@@ -576,7 +576,11 @@ across a class boundary settles in one slot instead of being copied on every cal
 When a large object has to move, the copy goes in pieces and returns the old block's pages
 behind it, so the two copies are never both resident. The old block would be purged at its
 free anyway; this only does it sooner, and it keeps a program that grows several big buffers
-at once from holding twice their size.
+at once from holding twice their size. The copy skips source pages that are all zero and
+leaves the destination's pages untouched there, so a block the program wrote sparsely stays
+sparse. Moving the pages with `mremap` instead would copy nothing, but it splits the heap's
+mapping in ways that take several more rules to undo, and it adds nothing to the memory
+saved; we copy.
 
 ### Interfaces
 
