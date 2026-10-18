@@ -158,8 +158,11 @@ report) and C's `realloc` (MOD-01, which passes `false`), and both hold both blo
    the last copy. A page is skipped only when every byte of it in `from` is zero, and then
    `to` already reads as zero there, either because the caller said so or because of step 0.
    A failed destination purge would leave stale bytes in skipped pages: a wrong value in the
-   caller's new block, not a memory error. (The destination purge never fails in practice;
-   `MADV_DONTNEED` fails only on a bad range, which `Space::purge` rules out by aborting.)
+   caller's new block, not a memory error. The destination purge can fail: `MADV_DONTNEED`
+   returns `EINVAL` on locked memory, so in a process that called `mlockall` it fails every
+   time, and the code ignores the result. The ignored test
+   `a_block_moved_into_a_dirty_slot_arrives_whole_when_purges_fail` shows the stale bytes.
+   Until the copy stops skipping pages after a failed purge, this entry is not accepted.
 2. *The purges.* Pieces end at multiples of the piece in the address space. Each range is
    either a part already copied that ends at such a multiple (`into + done` rounded down to a
    page, to `into + boundary`: `done` is zero, which rounds down to the slot's start and so
