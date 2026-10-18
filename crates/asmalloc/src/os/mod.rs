@@ -7,10 +7,9 @@
 //!
 //! The interface is what the design needs and no more: reserve address space, make parts of it
 //! writable, make writable parts resident ahead of use, return pages, steer transparent huge
-//! pages, mark a page to be wiped in forked
-//! children, unmap, fence the restartable sequences of one CPU, report the rseq registration,
-//! draw a random number, read a clock, and abort. Each implementation also fixes the [`Geometry`] the
-//! heap is laid out with, so the simulated OS can use a scaled-down heap.
+//! pages, mark a page to be wiped in forked children, unmap, fence the restartable sequences of
+//! one CPU, draw a random number, read a clock, and abort. Each implementation also fixes the
+//! [`Geometry`] the heap is laid out with, so the simulated OS can use a scaled-down heap.
 //!
 //! Ranges passed to the memory calls are page-aligned, a whole number of pages long, not empty,
 //! and inside one live reservation made by the same `Os` value. [`crate::space::Space`] checks
@@ -24,7 +23,6 @@ pub mod rseq;
 pub mod sim;
 
 pub use machine::{Aborted, Machine, Pinned, Step};
-pub use rseq::RseqArea;
 
 use crate::space::Geometry;
 use core::fmt;
@@ -92,8 +90,6 @@ pub enum HugePages {
 ///   dropped, whichever is first. Moving the value moves none of its reservations.
 /// - `fence(cpu)` returns `Ok` only after every restartable sequence of the process that was in
 ///   flight on CPU `cpu` when it was called has completed or been aborted.
-/// - `rseq` reports the process's registration as the C library made it. It does not promise
-///   that the calling thread is registered; see [`Os::rseq`].
 /// - `abort` does not return.
 /// - Every method may be called from any thread at any time, including from a signal handler,
 ///   and none of them allocates.
@@ -166,16 +162,6 @@ pub unsafe trait Os: Sync {
     /// offline or does not exist has no sequence in flight, so fencing it succeeds at once.
     /// Fails unless [`Os::register_fence`] succeeded, and may fail for want of memory.
     fn fence(&self, cpu: u32) -> Result<(), OsError>;
-
-    /// Where the rseq area is and how much of it the kernel maintains, or `None` if the process
-    /// has no registration.
-    ///
-    /// This describes the process, not the calling thread. glibc registers each thread as it
-    /// starts, and a registration that fails later (for example under a seccomp filter installed
-    /// after start-up) leaves that thread's `cpu_id` field at -2 while these facts stay the
-    /// same. Code that relies on a thread being registered must check the thread's own `cpu_id`
-    /// (`rseq::CPU_ID`) is not negative. Meant for start-up: on Linux each call is a system call.
-    fn rseq(&self) -> Option<RseqArea>;
 
     /// A random number. It names a process generation, so it should differ from the parent's
     /// with overwhelming probability; it need not be fit for cryptography. Never fails: if the

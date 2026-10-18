@@ -27,7 +27,7 @@ below are those sections, discharged once here for every call in the file.
 - (R): glibc 2.35 and later set `__rseq_offset` before any user code runs, for every thread,
   whether or not registration succeeded (`docs/research/linux-rseq-contract.md`, "What the
   fields read"); an unregistered thread reads `cpu_id = -2`, which the routines' unsigned
-  compare sends to the miss path. The declaration is GLIBC-01 (`os/linux/glibc-safety.md`).
+  compare sends to the miss path. The declaration is FRONT-01 (`front/mod-safety.md`).
 - (W): every word address comes from `Front::word(class)` for a `SmallClass`: the address of
   `SLABS`'s first slab plus `Field::hot(class).offset()`, which is 8 times the class index, 1 to
   `SMALL_COUNT` (44). `SLABS` is the `Front` static, whose slabs are at offset 0 (a compile-time

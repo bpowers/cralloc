@@ -29,7 +29,6 @@
 //! What a test controls:
 //!
 //! - Any call can be made to fail on demand ([`SimOs::set_faults`]).
-//! - The rseq registration it reports can be changed ([`SimOs::set_rseq`]).
 //! - Simulated threads run twins on CPUs the test chooses, and the test can interrupt their
 //!   sequences; `fence` aborts the ones on its CPU ([`SimOs::thread`]).
 //! - A fork happens in place ([`SimOs::fork`]), or only its wiping of marked pages
@@ -61,7 +60,7 @@ use self::memory::Memory;
 use self::pages::{
     CHECKING, HUGE, NO_HUGE, POPULATED, PURGED, Pages, RESERVED, START, WIPE, WRITABLE,
 };
-use super::{HugePages, Os, OsError, RseqArea};
+use super::{HugePages, Os, OsError};
 use crate::classes::MagazineSize;
 use crate::space::Geometry;
 use core::fmt;
@@ -121,10 +120,6 @@ pub const fn capacity_for<S: Shape>() -> usize {
     plan.size().next_multiple_of(plan.region_size())
 }
 
-/// What glibc reports on the reference host: the area 320 bytes below the thread pointer, with
-/// the full 33-byte feature set.
-const DEFAULT_RSEQ: Option<RseqArea> = RseqArea::new(-320, 33);
-
 /// The random generator's step (splitmix64's increment: the odd number nearest `2^64 / phi`).
 const GAMMA: u64 = 0x9e37_79b9_7f4a_7c15;
 
@@ -133,7 +128,6 @@ pub struct SimOs<S: Shape = Standard> {
     memory: Memory,
     pages: Pages,
     faults: Injector,
-    rseq: AtomicU64,
     fence_registered: AtomicBool,
     last_fence: AtomicU64,
     random: AtomicU64,
@@ -163,7 +157,6 @@ impl<S: Shape> SimOs<S> {
             memory: Memory::new(bytes, region, geometry.page_size().is_multiple_of(4096)),
             pages: Pages::new(bytes / geometry.page_size()),
             faults: Injector::new(),
-            rseq: AtomicU64::new(encode_rseq(DEFAULT_RSEQ)),
             fence_registered: AtomicBool::new(false),
             last_fence: AtomicU64::new(0),
             random: AtomicU64::new(0),
@@ -193,12 +186,6 @@ impl<S: Shape> SimOs<S> {
     /// that panicked on a bad range.
     pub fn calls(&self, call: Call) -> u64 {
         self.faults.count(call)
-    }
-
-    /// Sets the rseq registration [`Os::rseq`] reports, for example `None` to simulate valgrind
-    /// or a registration without a concurrency ID. The offset must fit in an `i32`.
-    pub fn set_rseq(&self, area: Option<RseqArea>) {
-        self.rseq.store(encode_rseq(area), Ordering::Release);
     }
 
     /// Whether [`Os::register_fence`] has succeeded.
@@ -472,20 +459,6 @@ fn splitmix(state: &AtomicU64) -> u64 {
     z ^ (z >> 31)
 }
 
-fn encode_rseq(area: Option<RseqArea>) -> u64 {
-    match area {
-        None => 0,
-        Some(area) => {
-            let offset = i32::try_from(area.offset()).expect("simulated rseq offset fits in i32");
-            (offset as u32 as u64) << 32 | area.size() as u64
-        }
-    }
-}
-
-fn decode_rseq(word: u64) -> Option<RseqArea> {
-    RseqArea::new((word >> 32) as u32 as i32 as isize, word as u32)
-}
-
 // SAFETY: every promise of `Os` holds for the simulator.
 // - Reservations are runs of pages claimed by compare-and-swap from the one allocation `memory`
 //   owns, so they are disjoint from each other and from every other allocation, carry the
@@ -648,10 +621,6 @@ unsafe impl<S: Shape> Os for SimOs<S> {
         } else {
             Err(OsError::EPERM)
         }
-    }
-
-    fn rseq(&self) -> Option<RseqArea> {
-        decode_rseq(self.rseq.load(Ordering::Acquire))
     }
 
     fn random(&self) -> u64 {
@@ -1058,17 +1027,6 @@ mod tests {
             !(owned && committed),
             "the drainer owned the word and a twin committed over it"
         );
-    }
-
-    #[test]
-    fn the_rseq_registration_can_be_changed() {
-        let os = Sim::new();
-        assert_eq!(os.rseq(), DEFAULT_RSEQ);
-        os.set_rseq(None);
-        assert_eq!(os.rseq(), None);
-        let legacy = RseqArea::new(-4096, 20);
-        os.set_rseq(legacy);
-        assert_eq!(os.rseq(), legacy);
     }
 
     #[test]

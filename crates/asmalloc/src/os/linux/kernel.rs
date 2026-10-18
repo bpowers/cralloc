@@ -4,9 +4,8 @@
 //! kernel's documentation. The ledger entry for the unsafe blocks here is
 //! `docs/safety/asmalloc/os/linux/kernel-safety.md`.
 
-use super::glibc;
 use super::syscall::{Reg, int, nr, result, syscall};
-use crate::os::{HugePages, Os, OsError, RseqArea};
+use crate::os::{HugePages, Os, OsError};
 use crate::space::Geometry;
 use core::ptr::{self, NonNull};
 use core::sync::atomic::{AtomicU64, Ordering};
@@ -351,7 +350,6 @@ fn sleep_step() {
 // - `fence(cpu)` is MEMBARRIER_CMD_PRIVATE_EXPEDITED_RSEQ with MEMBARRIER_CMD_FLAG_CPU, which
 //   returns after the thread of the process running on that CPU, if any, has been interrupted
 //   out of any rseq critical section; it fails with EPERM unless the process registered.
-// - `rseq` reads glibc's process-wide registration facts.
 // - `ticks` is the timestamp counter, which the trait asks nothing of.
 // - `abort` ends with exit_group if the signal did not end the process first, so it does not
 //   return.
@@ -453,10 +451,6 @@ unsafe impl Os for LinuxOs {
             MEMBARRIER_CMD_FLAG_CPU,
             cpu,
         )
-    }
-
-    fn rseq(&self) -> Option<RseqArea> {
-        glibc::registration()
     }
 
     fn random(&self) -> u64 {
@@ -582,14 +576,6 @@ mod tests {
         assert_eq!(space.plan().objects(), Geometry::DESIGN.max_objects());
         // SAFETY: the space was never published and nothing uses it.
         unsafe { space.unmap().unwrap() };
-    }
-
-    #[test]
-    fn glibc_registers_rseq() {
-        // The supported platform is glibc 2.43 on Linux 7.2, which always register.
-        let area = LinuxOs.rseq().expect("glibc registered rseq");
-        assert!(area.size() >= crate::os::rseq::ORIGINAL_SIZE, "{area:?}");
-        assert_eq!(area.offset() % 32, 0, "the area is 32-byte aligned");
     }
 
     #[test]

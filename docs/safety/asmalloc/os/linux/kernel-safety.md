@@ -284,8 +284,6 @@ single call:
 - *Valid until unmapped or dropped.* Reservations are mappings of the process. Dropping a
   `LinuxOs`, which is zero-sized, changes nothing.
 - *Reserved memory reads as zero.* Fresh private anonymous memory is zero-filled on first touch.
-- *`rseq` reports glibc's registration.* It describes the process; whether the calling thread
-  is registered is for the caller to check through its own `cpu_id` (GLIBC-01).
 - *Any thread, signal handlers, no allocation.* Every method is a fixed sequence of system calls
   and arithmetic on locals, all async-signal-safe.
 
@@ -294,7 +292,6 @@ single call:
 - `reserve_commit_purge_and_unmap`: alignment, zero-fill, purge zeroes, unmap.
 - `bad_arguments_are_errors_not_calls`.
 - `the_design_reservation_is_available`: a 16 TiB reservation.
-- `glibc_registers_rseq`.
 - `rseq_fences_aim_at_one_cpu_after_registering`, `ticks_rise`, `random_numbers_differ` and
   `marked_pages_read_as_zero_in_a_forked_child`.
 - `abort_ends_the_process_with_sigabrt` and
