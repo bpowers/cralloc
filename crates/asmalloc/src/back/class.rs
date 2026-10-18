@@ -531,6 +531,10 @@ impl<'a, O: Os> Back<'a, O> {
             }
         };
         let page = self.space.plan().geometry().page_size();
+        // Whether `to` reads as zero, so that the copy may skip the source's all-zero pages. A
+        // purge can fail (`MADV_DONTNEED` on locked memory always does), and then the old
+        // bytes stay and every page must be copied.
+        let mut zero_to = zeroed;
         if !zeroed {
             // The pages that `to`'s `len` bytes touch. `to` holds more than a piece, so it is a
             // large slot or a run, which are whole pages; a staggered block starts less than a
@@ -540,7 +544,7 @@ impl<'a, O: Os> Back<'a, O> {
             let end = (to.addr().get() + len).next_multiple_of(page);
             // SAFETY: BACK-CLASS-03: the caller owns `to`'s slot or run, nothing else uses it,
             // and its contents are not needed.
-            let _ = unsafe { self.space.purge(first, end - first.addr().get()) };
+            zero_to = unsafe { self.space.purge(first, end - first.addr().get()) }.is_ok();
         }
         // Pieces end at multiples of the piece in the address space, not in the block, so that
         // a piece that goes back is whole huge pages wherever the block has them: purging
@@ -556,10 +560,10 @@ impl<'a, O: Os> Back<'a, O> {
                 let n = ((base + at + 1).next_multiple_of(page) - base - at).min(done + step - at);
                 // SAFETY: BACK-CLASS-03: `at + n <= len`, inside both ranges, which do not
                 // overlap; the bytes of `from` read here have not been returned. A page left
-                // uncopied is all zero, and `to` reads as zero there.
+                // uncopied is all zero, and `to` reads as zero there (`zero_to`).
                 unsafe {
                     let src = from.as_ptr().add(at);
-                    if !is_zero(src, n) {
+                    if !zero_to || !is_zero(src, n) {
                         src.copy_to_nonoverlapping(to.as_ptr().add(at), n);
                     }
                 }

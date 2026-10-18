@@ -149,20 +149,17 @@ report) and C's `realloc` (MOD-01, which passes `false`), and both hold both blo
    than a piece, so it is a large slot or a run, whole pages; it starts at most a stagger,
    under a page, past its slot's first page, and `into + len` fits the slot, so the pages
    are the caller's slot's own; nothing else uses it and its contents are not
-   needed, which is `Space::purge`'s precondition. Afterwards it reads as zero. If the purge
-   fails nothing is known to be zero, but nothing relies on the failure path either: see the
-   skip below.
+   needed, which is `Space::purge`'s precondition. If the purge succeeds the range reads as
+   zero. It can fail: `MADV_DONTNEED` returns `EINVAL` on locked memory, so in a process that
+   called `mlockall` it fails every time. The result is kept as `zero_to`: true if the caller
+   said `zeroed` or the purge succeeded, false otherwise.
 1. *The copies.* Each copies at most a page at offset `at` with `at + n <= len`, inside both
    ranges, and the bytes read have not been returned: a part of `from` goes back only after
    the piece that covers it has been copied, and the range past `len` goes back only after
-   the last copy. A page is skipped only when every byte of it in `from` is zero, and then
-   `to` already reads as zero there, either because the caller said so or because of step 0.
-   A failed destination purge would leave stale bytes in skipped pages: a wrong value in the
-   caller's new block, not a memory error. The destination purge can fail: `MADV_DONTNEED`
-   returns `EINVAL` on locked memory, so in a process that called `mlockall` it fails every
-   time, and the code ignores the result. The ignored test
-   `a_block_moved_into_a_dirty_slot_arrives_whole_when_purges_fail` shows the stale bytes.
-   Until the copy stops skipping pages after a failed purge, this entry is not accepted.
+   the last copy. A page is skipped only when `zero_to` holds and every byte of it in `from`
+   is zero, and then `to` already reads as zero there, because the caller said so or because
+   step 0's purge succeeded. When the purge failed every page is copied, so no stale byte of
+   `to` survives (`a_block_moved_into_a_dirty_slot_arrives_whole_when_purges_fail`).
 2. *The purges.* Pieces end at multiples of the piece in the address space. Each range is
    either a part already copied that ends at such a multiple (`into + done` rounded down to a
    page, to `into + boundary`: `done` is zero, which rounds down to the slot's start and so
