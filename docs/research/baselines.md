@@ -1032,9 +1032,8 @@ whole pages over 256 also give); lines also left `spawn` alone (above).
 churn live=100 under main ran at 34 cycles/op in one of three runs, and 22.6 in the others
 and in every run of the change; L1 misses fell by more than half there too. rpc log, which
 was +0.5 to +1.7% in earlier sessions on an earlier build, is −1.2% here: noise. The smoke
-set (three rounds, on the first version of the change, which spread origins by bit
-reversal) is level but for tree depth=18, which runs at 37.4 or 39 to 40
-cycles/node in both builds from run to run (section 14). Cgroup peaks of the small-process
-probes (`bench/probes/memory/peaks.sh`: spawn, churn1k, pipe2, mpmc, forkjoin, btree, json,
-hmap; two rounds, the same first version) are within 0.4 MiB of main.
-
+set (three rounds) is level but sh8bench preloaded, +2.2% here and +3% on the first version
+of the change (which spread origins by bit reversal), not analysed further; tree depth=18
+runs at 37.4 or 39 to 40 cycles/node in both builds from run to run (section 14). Cgroup
+peaks of the small-process probes (`bench/probes/memory/peaks.sh`: spawn, churn1k, pipe2,
+mpmc, forkjoin, btree, json, hmap) are within 0.5 MiB of main, the larger differences lower.
