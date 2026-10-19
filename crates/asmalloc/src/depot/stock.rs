@@ -49,9 +49,10 @@
 //! returns the magazines above the new limit one a heartbeat, staying on the class until none is
 //! left: full ones to the source, empty ones to the depot. Stock in use loses nothing; a class
 //! that went unused loses its credit within an interval and its stock over the heartbeats that
-//! follow. A class whose stock is in use keeps its fixed spares too, which the sweep otherwise
-//! takes: the pops that use the stock reach them, or the low-water mark shrinks the stock until
-//! they do. Objects in circulation through stock are replaced by the lowest free ones as any
+//! follow. A class whose stock is in use has its fixed spares swept all the same, once its
+//! visit finds nothing above the limit: the sweep takes the stack, puts the stock back on top
+//! and sweeps the fixed number under it as it would any class's, so that a class that only ever
+//! swaps the top of its stack does not keep the magazines under it parked for good. Objects in circulation through stock are replaced by the lowest free ones as any
 //! others are, by the refresh rule (`slow.rs`), which launders one retiring full magazine in
 //! [`super::REFRESH_EVERY`] before it would reach the spares. A CPU that goes quiet has its
 //! whole slab drained by the idle check, stock included; its credit stays, costing nothing,
@@ -442,17 +443,8 @@ impl<'a, O: Os, R: Routines, S: Source> Cache<'a, O, R, S> {
         let mut stale = false;
         let mut laundered = false;
         let returned = if full_over > 0 {
-            match self.spare_pop(class, Spare::Full, &mut stale) {
-                Some(magazine) => {
-                    // Drop the spare depth the record carries.
-                    magazine.set_level(magazine.level());
-                    self.launder_held(class, &magazine);
-                    self.to_depot(class, magazine);
-                    laundered = true;
-                    1
-                }
-                None => 0,
-            }
+            laundered = self.return_top_spare(class);
+            u32::from(laundered)
         } else if empty_over > 0 {
             match self.spare_pop(class, Spare::Empty, &mut stale) {
                 Some(magazine) => {
@@ -475,7 +467,25 @@ impl<'a, O: Os, R: Routines, S: Source> Cache<'a, O, R, S> {
             // Nothing left of the stock: the fixed spares are swept as any class's.
             return Swept::Plain;
         }
+        if !more && returned == 0 {
+            // Stock in use, nothing above the limit: the fixed spares under it are swept as
+            // any class's would be, so that the objects parked there are replaced too, and
+            // the stock goes back on top.
+            let depth = self.depth_of(cpu, class, Spare::Full);
+            let keep = depth.saturating_sub(full_limit);
+            laundered = self.take_spares_keeping(cpu, class, keep);
+        }
         Swept::Stocked { laundered, more }
+    }
+
+    /// How many full spares of `class` `cpu`'s stack may hold: its fixed limit and its credit.
+    pub(super) fn full_keep(&self, cpu: Cpu, class: SmallClass) -> u32 {
+        let credit = if self.tuning.stock {
+            self.stock(cpu, class).credit(Spare::Full)
+        } else {
+            0
+        };
+        fixed_limit(self.tuning, class, Spare::Full).saturating_add(credit)
     }
 }
 
