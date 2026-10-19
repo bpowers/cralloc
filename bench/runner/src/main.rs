@@ -121,7 +121,7 @@ fn jobs(f: &Flags) -> (String, Vec<suite::Job>) {
 }
 
 fn build_cpus() -> String {
-    std::env::var("BENCH_BUILD_CPUS").unwrap_or_else(|_| "4-7,20-23".into())
+    std::env::var("BENCH_BUILD_CPUS").unwrap_or_else(|_| "12-15,28-31".into())
 }
 
 /// Builds the workloads (`bench-workloads`, `bench-rpc`) with bench-alloc's `feature` ("" for

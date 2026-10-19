@@ -28,7 +28,7 @@ incumbents, on every change to the back end. `benchrun list --suite full` prints
 `run` takes `--only TEXT` (jobs whose id
 contains it), `--allocators a,b`, `--rounds N`, `--out FILE`, `--seed N`, `--mem-cap SIZE`
 (below), `--no-warm` (skip the clock warm-up below, only to measure what it changes), and
-the quiet-machine gate below. Builds run on `BENCH_BUILD_CPUS` (default `4-7,20-23`).
+the quiet-machine gate below. Builds run on `BENCH_BUILD_CPUS` (default `12-15,28-31`, the cores `scripts/heavy` uses).
 `report` takes `--steady-only` to leave out runs whose clock was off.
 
 `run` takes no lock itself: start it under `scripts/measure --both-l3`, since the suite uses
