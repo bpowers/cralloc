@@ -16,8 +16,10 @@ use crate::stats::{Place, Visitor};
 use core::ptr;
 use core::sync::atomic::Ordering::Relaxed;
 
-/// The most magazines followed on one spare stack. The budget allows a handful.
-const SPARE_STEPS: usize = 16;
+/// The most magazines followed on one spare stack: a handful by the fixed limits, and up to a
+/// CPU's stock budget in magazines of the smallest size where the CPU keeps stock
+/// (`stock.rs`); a stack that changes under the walk can lead it in a circle, so it is bounded.
+const SPARE_STEPS: usize = 1 << 16;
 
 /// The most magazines followed on one depot stack.
 const DEPOT_STEPS: usize = 1 << 20;

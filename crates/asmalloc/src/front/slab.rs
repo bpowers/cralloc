@@ -3,7 +3,8 @@
 //! A slab is [`SLAB_BYTES`] bytes. It begins with a 32-byte chunk per class, chunk `c` for class
 //! index `c` (chunk 0 unused): the heads of the class's two spare stacks (one of non-empty and
 //! one of empty magazines) at bytes 0 to 15, its hot word at bytes 16 to 23 ([`Field::hot`]),
-//! and a word unused. The routines address the word at position `p` as
+//! and at bytes 24 to 31 the class's stock word, which only this CPU's slow paths read and write
+//! with plain loads and stores (`depot::stock`); no routine is ever aimed at it. The routines address the word at position `p` as
 //! `SLABS + (cpu << SLAB_SHIFT) + 8 p`, and the C size tables and the region table give that
 //! position, `4 c + 2`. Bytes 0 to 15 of each chunk hold no hot word, because a thread's
 //! rseq area, which the kernel requires to be 32-byte aligned, has `cpu_id` and `rseq_cs` at
@@ -13,8 +14,9 @@
 //! (`docs/research/musl-and-static.md`). So no hot word can share a page offset with them,
 //! wherever the area is. One class to a chunk keeps the word's address one shift from the class
 //! index, where two to a chunk cost a run-time-size pair two cycles of arithmetic. The cold
-//! part follows on its own cache lines: the activity counter, the drain claim, the count of full magazines the CPU's frees have retired and where
-//! the age limit's sweep of the spare stacks is; then,
+//! part follows on its own cache lines: the activity counter, the drain claim, the count of full
+//! magazines the CPU's frees have retired, where the age limit's sweep of the spare stacks is,
+//! and the bytes the CPU holds as stock; then,
 //! on lines of their own that only this CPU's slow paths touch, per class a stamp of when the
 //! loaded magazine was loaded; and on a line of its own the idle check's last sighting.
 //!
@@ -36,7 +38,7 @@ const _: () = assert!(SLAB_BYTES == 1 << SLAB_SHIFT);
 
 /// One 32-byte chunk per class index `0..=SMALL_COUNT` (chunk 0 unused, and one more if needed
 /// for the cold fields to start on a cache line): its full head, its empty head, its hot word
-/// at bytes 16 to 23, and a word unused.
+/// at bytes 16 to 23, and its stock word.
 const CHUNKS: usize = (SMALL_COUNT + 1).next_multiple_of(2);
 /// All the pointer fields: four to a chunk.
 const FIELDS: usize = 4 * CHUNKS;
@@ -48,7 +50,7 @@ const fn hot_position(index: usize) -> usize {
 }
 const _: () = assert!(WORD_STRIDE == 4 && WORD_START == 2);
 
-const _: () = assert!(hot_position(SMALL_COUNT) < FIELDS && hot_position(1) == 6);
+const _: () = assert!(hot_position(SMALL_COUNT) + 1 < FIELDS && hot_position(1) == 6);
 // No hot word is at bytes 0 to 15 of a 32-byte chunk, where a 32-byte-aligned rseq area has its
 // `cpu_id` and `rseq_cs` (see the module documentation).
 const _: () = {
@@ -115,12 +117,14 @@ impl Field {
 /// One CPU's slab. See the module documentation.
 #[repr(C, align(4096))]
 pub struct Slab {
-    /// A chunk per class: its full head, its empty head, its hot word, and a word unused.
+    /// A chunk per class: its full head, its empty head, its hot word, and its stock word.
     fields: [AtomicPtr<u8>; FIELDS],
     activity: AtomicU64,
     claim: AtomicU64,
     retired: AtomicU64,
     sweep: AtomicU64,
+    /// The bytes held as stock beyond the fixed spare limits (`depot::stock`).
+    stock_held: AtomicU64,
     stamps: Stamps,
     /// On a line of its own: other CPUs' idle checks write it, and should not take the line
     /// that this CPU's slow paths count their activity in.
@@ -158,6 +162,7 @@ impl Slab {
             claim: AtomicU64::new(0),
             retired: AtomicU64::new(0),
             sweep: AtomicU64::new(0),
+            stock_held: AtomicU64::new(0),
             stamps: Stamps([const { AtomicU64::new(0) }; STAMPS]),
             seen: OwnLine(AtomicU64::new(0)),
         }
@@ -167,6 +172,15 @@ impl Slab {
     #[inline(always)]
     pub(crate) fn field(&self, field: Field) -> &AtomicPtr<u8> {
         &self.fields[field.index() % FIELDS]
+    }
+
+    /// The stock word of `class` (`depot::stock`): bytes 24 to 31 of its chunk, beside the
+    /// spare heads that every use of it reads anyway, so it costs no line of its own. A hint,
+    /// not a field the routines can be aimed at, and not one the drain exchanges; zero is no
+    /// stock.
+    #[inline]
+    pub(crate) fn stock(&self, class: SmallClass) -> &AtomicPtr<u8> {
+        &self.fields[(class.word() + 1) % FIELDS]
     }
 
     /// The fields the drain exchanges: every small class's hot word and spare heads.
@@ -224,6 +238,14 @@ impl Slab {
     #[inline]
     pub(crate) fn sweep(&self) -> &AtomicU64 {
         &self.sweep
+    }
+
+    /// What this CPU holds as stock beyond the fixed spare limits (`depot::stock`): a hint,
+    /// written with single stores by this CPU's slow paths and cleared by a drain. On the line
+    /// the activity counter shares, which every slow path writes, so it costs no line of its own.
+    #[inline]
+    pub(crate) fn stock_held(&self) -> &AtomicU64 {
+        &self.stock_held
     }
 
     /// The stamp of the magazine loaded for `class` (`depot::age`): zero, or which magazine

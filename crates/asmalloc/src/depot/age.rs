@@ -256,7 +256,10 @@ impl<'a, O: Os, R: Routines, S: Source> Cache<'a, O, R, S> {
             return false;
         };
         word.store(sweep.advanced().0, Relaxed);
-        SmallClass::from_ordinal(ordinal).is_some_and(|class| self.take_spares(cpu, class))
+        SmallClass::from_ordinal(ordinal).is_some_and(|class| {
+            self.settle_stock(cpu, class);
+            self.take_spares(cpu, class)
+        })
     }
 
     /// Takes the current CPU's stack of full spares of `class`, if its head is still the one
@@ -282,6 +285,7 @@ impl<'a, O: Os, R: Routines, S: Source> Cache<'a, O, R, S> {
             };
             // The link must be read before the depot overwrites it.
             next = magazine.link().load(Acquire).addr();
+            self.note_swept(cpu, class, magazine.record().depth);
             // Drop the spare depth the record carries.
             magazine.set_level(magazine.level());
             if first {
