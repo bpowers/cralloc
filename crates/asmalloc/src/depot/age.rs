@@ -74,7 +74,7 @@ use crate::classes::{SmallClass, is_marker};
 use crate::front::{Cpu, Field, Routines, Spare, StoreIfEqual};
 use crate::os::Os;
 use core::ptr;
-use core::sync::atomic::Ordering::{Acquire, Relaxed};
+use core::sync::atomic::Ordering::{Acquire, Relaxed, Release};
 
 /// Which magazine a slab had loaded for a class, and since when: the magazine's number in the
 /// low 32 bits and the clock, in units of 2^[`TICK_SHIFT`] ticks, in the high 32. Zero is no
@@ -264,6 +264,12 @@ impl<'a, O: Os, R: Routines, S: Source> Cache<'a, O, R, S> {
         };
         match self.sweep_stock(cpu, class) {
             Swept::Plain => {
+                // A stack deeper than its fixed limit (stock whose word a race lost) is not
+                // taken whole: its top goes back a magazine a heartbeat, as stock's does, and
+                // the sweep stays on the class until the stack is within the limit.
+                if self.full_spares_over_limit(cpu, class) {
+                    return self.return_top_spare(class);
+                }
                 word.store(sweep.advanced().0, Relaxed);
                 self.take_spares(cpu, class)
             }
@@ -282,6 +288,16 @@ impl<'a, O: Os, R: Routines, S: Source> Cache<'a, O, R, S> {
     /// read from `cpu`'s slab, launders its top magazine and sends the rest to the depot.
     /// Whether it laundered one.
     pub(super) fn take_spares(&self, cpu: Cpu, class: SmallClass) -> bool {
+        self.take_spares_keeping(cpu, class, 0)
+    }
+
+    /// [`Cache::take_spares`], except that the top `keep` magazines go back on the current
+    /// CPU's stack, in their order, and only those under them are swept: the first of those
+    /// laundered and the rest sent to the depot. A kept magazine the stack does not take back
+    /// (its limit, a drain) goes to the depot too. The work is a walk of the stack's links and
+    /// a push for each kept magazine, none of them atomic, and the sweep's own work on what
+    /// lies under them. Whether it laundered one.
+    pub(super) fn take_spares_keeping(&self, cpu: Cpu, class: SmallClass, keep: u32) -> bool {
         let field = Field::spare(class, Spare::Full);
         let head = self.slab(cpu).field(field).load(Acquire);
         if head.is_null() || is_marker(head.addr()) {
@@ -294,21 +310,67 @@ impl<'a, O: Os, R: Routines, S: Source> Cache<'a, O, R, S> {
         }
         let mut next = head.addr();
         let mut first = true;
+        let mut laundered = false;
+        // The kept magazines, deepest first: a list of the taken chain's own, linked through
+        // their link words, which this thread holds now.
+        let mut kept = ptr::null_mut::<u8>();
+        let mut seen = 0u32;
         while next != 0 {
             let Some(magazine) = self.area.magazine(next, class.magazine()) else {
                 self.os()
                     .abort("a spare stack names something that is not a magazine");
             };
-            // The link must be read before the depot overwrites it.
+            // The link must be read before the depot or the list overwrites it.
             next = magazine.link().load(Acquire).addr();
+            if seen < keep {
+                seen += 1;
+                magazine.link().store(kept, Release);
+                kept = magazine.base().as_ptr();
+                continue;
+            }
             // Drop the spare depth the record carries.
             magazine.set_level(magazine.level());
             if first {
                 self.launder_held(class, &magazine);
                 first = false;
+                laundered = true;
             }
             self.to_depot(class, magazine);
         }
+        let mut stale = false;
+        let mut back = kept.addr();
+        while back != 0 {
+            let Some(magazine) = self.area.magazine(back, class.magazine()) else {
+                self.os()
+                    .abort("a spare stack names something that is not a magazine");
+            };
+            back = magazine.link().load(Acquire).addr();
+            magazine.set_level(magazine.level());
+            if let Err(magazine) = self.spare_push(class, Spare::Full, magazine, &mut stale) {
+                self.to_depot(class, magazine);
+            }
+        }
+        laundered
+    }
+
+    /// Whether `cpu`'s stack of full spares of `class` holds more than its fixed limit and its
+    /// credit allow.
+    fn full_spares_over_limit(&self, cpu: Cpu, class: SmallClass) -> bool {
+        self.spare_depth(class, Spare::Full)
+            .is_some_and(|depth| depth > self.full_keep(cpu, class))
+    }
+
+    /// Pops the top of the current CPU's full spares of `class`, launders it and sends it to
+    /// the depot empty. Whether it laundered one.
+    pub(super) fn return_top_spare(&self, class: SmallClass) -> bool {
+        let mut stale = false;
+        let Some(magazine) = self.spare_pop(class, Spare::Full, &mut stale) else {
+            return false;
+        };
+        // Drop the spare depth the record carries.
+        magazine.set_level(magazine.level());
+        self.launder_held(class, &magazine);
+        self.to_depot(class, magazine);
         true
     }
 }

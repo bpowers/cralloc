@@ -1653,8 +1653,44 @@ fn the_bottom_spares_are_taken(stock: bool) -> bool {
 /// there. Without stock the sweep takes them once an interval, which is the rule the design's
 /// table gives for a CPU's full spares.
 #[test]
-#[ignore = "finding: the fixed spares under stock in use are never swept"]
 fn stock_review_fixed_spares_under_stock_in_use_are_swept() {
     assert!(the_bottom_spares_are_taken(false), "without stock");
     assert!(the_bottom_spares_are_taken(true), "with one credit");
+}
+
+/// A stack deeper than its fixed limit whose class lost its stock word to a race (a stale
+/// store of zero) is not taken whole by the sweep's plain path either: its top goes back a
+/// magazine a heartbeat until the stack is within the limit, then the fixed spares are swept.
+#[test]
+fn a_deep_stack_without_credit_goes_back_a_magazine_a_call() {
+    let (bursty, busy) = (tiny(0), tiny(1));
+    let tuning = Tuning {
+        stock: true,
+        age_limit: true,
+        look_every: 1,
+        domain_cap: 2 * 2 * bursty.size(),
+        depot_target: 6 * 2 * bursty.size(),
+        ..QUIET
+    };
+    let rig: TestRig = Rig::new(&[bursty, busy], 512, tuning);
+    let machine = SimCpu::new(0);
+    let cache = rig.cache(&machine);
+    churn(&cache, busy, 400);
+    give_credit(&rig, 0, bursty, 40, 40);
+    churn(&cache, bursty, 200);
+    assert!(in_spares(&rig, 0, bursty).len() >= 80, "stock grew");
+    // The race: the class's word is zero while its stack is deep.
+    give_credit(&rig, 0, bursty, 0, 0);
+    let mut most = 0;
+    for _ in 0..2 {
+        rig.os().advance_clock(IDLE_TICKS);
+        for _ in 0..200 {
+            let before = rig.source.held_of(bursty);
+            churn(&cache, busy, 3);
+            most = most.max(rig.source.held_of(bursty).saturating_sub(before));
+        }
+    }
+    assert!(in_spares(&rig, 0, bursty).is_empty(), "the sweep took it");
+    assert!(most <= 4 * 2, "one call laundered {most} objects");
+    rig.census(&[], false);
 }

@@ -43,7 +43,7 @@ the magazine's last slot, reads slots `1..=level` and hands their objects to the
 `interleave.rs` checks the take against a mutator (with migrations) and against a drain under
 every schedule within its bounds, with the census after each execution.
 
-## AGE-02: `store_if_equal(Field::spare(class, Spare::Full), head, null)` in `Cache::take_spares`
+## AGE-02: `store_if_equal(Field::spare(class, Spare::Full), head, null)` in `Cache::take_spares_keeping`
 
 The age limit's sweep of a CPU's full spare stacks.
 
@@ -55,7 +55,12 @@ keeps the invariant.
 `Empty` on it and the push links a magazine above it.
 
 **What the thread then owns.** The block after the commit walks the chain, reading each link
-before sending the magazine on, and launders the top one.
+before it writes the magazine's link or sends the magazine on. It relinks the top `keep`
+magazines into a private list through their own link words and pushes them back on the stack
+afterwards with the stack-push routine (by `spare_push`, SPARE-01), and launders the first of
+the rest and sends them to the depot. Writing a link is the thread's to do only because the
+chain is its own, which the points below establish; a link is read before it is written, so
+the walk follows the chain the commit took.
 
 - `head` was read from the full spare head of `class` and is neither zero nor a marker, so by
   the slab invariant it was then the slot-0 address of the top magazine of that stack.
