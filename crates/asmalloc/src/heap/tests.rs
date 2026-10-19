@@ -1094,7 +1094,13 @@ mod process {
 
     #[test]
     fn the_process_heap_resizes_in_place_and_with_headroom() {
-        realloc_walk(&Asmalloc, 32 << 20, true);
+        // Whether the process's heap got its full reservation is the machine's to say: under
+        // an address-space limit its regions are halved, and it gives no size sixteen times.
+        // SAFETY: a valid layout; the block is freed once.
+        unsafe { Asmalloc.dealloc(Asmalloc.alloc(layout(8, 8)), layout(8, 8)) };
+        let plan = Asmalloc.plan().expect("the heap has started");
+        let full = plan.region_shift() == plan.geometry().max_region_shift();
+        realloc_walk(&Asmalloc, 32 << 20, full);
     }
 
     #[test]
@@ -1159,6 +1165,48 @@ mod process {
             let r = Asmalloc.realloc(q, layout(sliver + 4096, 8), sliver - 4096);
             assert_ne!(r, q, "a shrink to under the threshold moves");
             Asmalloc.dealloc(r, layout(sliver - 4096, 8));
+        }
+    }
+
+    /// The threshold follows the slot, in a heap with its full reservation: a block in a slot
+    /// of at most a sixteenth of a region stays down to a thirty-second of it, and one in a
+    /// larger slot moves once it is under an eighth, as it did before growing blocks got
+    /// sixteen times the room. The fractions are spelled out here, not taken from
+    /// `shrink_moves_below_for`. A heap whose regions were halved to fit an address-space limit
+    /// has no slot of these sizes on either side, and the test asks nothing of it.
+    #[test]
+    fn the_process_heap_keeps_a_thirty_second_of_a_small_slot_and_an_eighth_of_a_large_one() {
+        // SAFETY: valid layouts; each block is freed once with the layout it has. The blocks
+        // are never written, so they cost address space and no memory.
+        unsafe {
+            let under = layout(250 << 20, 8);
+            let p = Asmalloc.alloc(under);
+            let back = crate::heap::global::process().heap().back().unwrap();
+            let plan = back.space().plan();
+            if plan.region_shift() != plan.geometry().max_region_shift() {
+                Asmalloc.dealloc(p, under);
+                return;
+            }
+            let share = plan.region_size() / 16;
+            let room = back.room(p).unwrap();
+            assert!(room <= share, "{room}");
+            let q = Asmalloc.realloc(p, under, room / 16);
+            assert_eq!(q, p, "a sixteenth of a small slot stays");
+            let cut = room / 32 - 4096;
+            let r = Asmalloc.realloc(q, layout(room / 16, 8), cut);
+            assert_ne!(r, q, "under a thirty-second of a small slot moves");
+            Asmalloc.dealloc(r, layout(cut, 8));
+
+            let over = layout(257 << 20, 8);
+            let p = Asmalloc.alloc(over);
+            let room = back.room(p).unwrap();
+            assert!(room > share, "{room}");
+            let kept = room / 8 + 4096;
+            let q = Asmalloc.realloc(p, over, kept);
+            assert_eq!(q, p, "an eighth of a large slot stays");
+            let r = Asmalloc.realloc(q, layout(kept, 8), room / 16);
+            assert_ne!(r, q, "a sixteenth of a large slot moves");
+            Asmalloc.dealloc(r, layout(room / 16, 8));
         }
     }
 
