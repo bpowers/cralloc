@@ -855,12 +855,37 @@ the classes whose stacks may hold magazines, and the depot a word of the domains
 not zero: a push onto an empty stack sets the bits, a look that finds a stack empty clears
 them, and a clear rereads the head so that a racing push is never lost (`depot/held.rs`). Each
 periodic look visits its own domain's stack and the shared stack of one class, the classes in
-turn, and one stack of another domain, chosen from those words in rotation. A CPU's looks visit
-every held stack of the `n` other domains that hold anything once in `n * m` looks, `m` the
-most classes one domain holds. In the simulator, with one busy CPU, quiet domains holding two
-classes each gave everything back after 3.0 intervals with 2 and 8 domains and 3.125 with 64
-(the debt is set at the first look of the interval after the stack was last empty, and the
-idle drain adds an interval before the slabs' magazines reach the stacks).
+turn, and every held stack of one other domain, the domains chosen from those words in
+rotation (at first it was one stack of one other domain; see "Corrected" below). A CPU's looks
+visit every held stack of the `n` other domains that hold anything once in `n` looks.
+
+**Corrected (2026-10-19).** The figures first given here, everything back after 3.0 intervals
+with 2 and 8 domains and 3.125 with 64, came from a test that looked on every slow path,
+sixteen times the allocator's rate. A review measured the first version at the allocator's
+rate (`LOOK_EVERY`, one busy CPU at 640 slow paths an interval, stacks parked with no slabs to
+drain): quiet stacks went back in 2 intervals for 7 domains of 5 classes, 7 for 63 of 2, and
+16 for 63 of 5, against 3 in every case at ee4c29b. A stack owes nothing until a second look,
+in a later interval than the first, and each look visited one stack. With every held class of
+the domain a look visits, the same cases take 2, 4 and 4 intervals; the look's work grows with
+the classes one domain holds, not with the domains. Counting the quiet CPUs' slabs too, which
+the idle check drains one slab a look, everything went back in 2, 4 and 6.4 intervals with 2,
+8 and 64 domains of two classes (`depot/rules.rs`, both tests at the allocator's rate).
+
+Visiting a whole domain is not free when that domain is in use: three independent pipelines
+over two L3s (x3) ran 5 to 7% slower in every round (5.22-5.40 ns before, 5.57-5.78 after),
+because each look read and sometimes wrote the other L3's busiest stack lines. A domain in use
+sheds through its own looks, so each domain now records the last interval one of its CPUs
+looked (one store an interval), and a look from elsewhere skips a domain that looked in this
+one; the quiet cases above did not move. Against 23def4e, five interleaved rounds, the
+per-round ratio's median and range: x3 0.970 (0.93-1.13), exchange t2 split 1.004
+(0.98-1.03), larson-sized 8 0.994 (0.98-1.03), xmalloc-test 4+4 bimodal as before (one
+fast run each), sh8bench on two L3s 0.593 against 0.599 s and on one 0.325 against 0.333 s.
+
+Also from the review: the heartbeat's check of a shared stack's target ran before its own
+sweep and drain, so what they parked there stayed over the target until the low-water rule
+shed it (fifteen drained CPUs left 62 objects against a target of 2 for an interval). The
+check now runs last, for every class the call pushed, laundering at most as many magazines as
+it pushed.
 
 Two things the first version got wrong. Every heartbeat read the served class's shared head and
 top link to check the target; in mpmc p4 c4 every domain's overflow writes those lines, and the

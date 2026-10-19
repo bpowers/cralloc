@@ -770,6 +770,54 @@ fn two_looks_and_a_push_leave_the_domain_marked(bounds: Bounds) {
     report("two looks and a push", found);
 }
 
+/// A shed pays a stack's debt and settles its owing bits while a look in a new interval writes
+/// a new debt on the same stack (`shed.rs`): the class's bit and the domain's must end set, or
+/// no shed would find the debt. The settle clears a bit and then rereads the debt (or the
+/// class bits) to set it back; the census checks the bits.
+fn a_settle_and_a_new_debt_leave_the_debt_marked(bounds: Bounds) {
+    let class = tiny_class();
+    let home = Domain::ZERO;
+    let found = explore(
+        bounds,
+        2,
+        || {
+            // Room for two magazines in the domain's stack.
+            let tuning = super::Tuning {
+                domain_cap: 4 * class.size(),
+                ..TIGHT
+            };
+            let world = World {
+                rig: Rig::with_os(SimOs::new(), &[class], 6, tuning),
+                migrations: AtomicUsize::new(0),
+                user: Mutex::new(Vec::new()),
+            };
+            let machine = world.machine(THREADS - 1, 0);
+            let cache = world.rig.cache(&machine);
+            let pool = Pool::Domain(home);
+            // One object deep for an interval, then two: the stack owes the one.
+            world.park(&machine, home, class);
+            cache.look_at_depth(pool, class, world.rig.os().ticks());
+            world.park(&machine, home, class);
+            world.rig.os().advance_clock(IDLE_TICKS);
+            cache.look_at_depth(pool, class, world.rig.os().ticks());
+            world
+        },
+        |world, me| {
+            let machine = world.machine(me, me);
+            let cache = world.rig.cache(&machine);
+            if me == 0 {
+                cache.shed(1);
+            } else {
+                let next = world.rig.os().ticks() + IDLE_TICKS;
+                cache.look_at_depth(Pool::Domain(home), class, next);
+            }
+        },
+        |_| {},
+        |world, _| world.check(false),
+    );
+    report("settle and a new debt", found);
+}
+
 #[test]
 fn a_fence_aborts_the_sequence_in_flight_on_its_cpu() {
     let world = World::new(2, 0);
@@ -1025,5 +1073,18 @@ mod run {
     #[ignore = "slow: run with scripts/gate --all, optimized"]
     fn a_domains_hint_survives_a_look_that_empties_another_class_fully() {
         super::a_domains_hint_survives_a_look_that_empties_another_class(Bounds::preemptions(3));
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn a_settle_and_a_new_debt_leave_the_debt_marked_quickly() {
+        super::a_settle_and_a_new_debt_leave_the_debt_marked(Bounds::preemptions(1));
+    }
+
+    #[test]
+    #[cfg(not(debug_assertions))]
+    #[ignore = "slow: run with scripts/gate --all, optimized"]
+    fn a_settle_and_a_new_debt_leave_the_debt_marked_fully() {
+        super::a_settle_and_a_new_debt_leave_the_debt_marked(Bounds::preemptions(2));
     }
 }

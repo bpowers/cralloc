@@ -378,6 +378,25 @@ impl<O: Os, const N: usize> Rig<O, N> {
                         "{domain:?} holds magazines, unmarked"
                     );
                 }
+                // A debt the sheds cannot find is never paid: its class's bit, and its domain's,
+                // must be set (`shed.rs`, `settle`). A fork can cut a look off between its
+                // debt and its bits.
+                let ordinal = class.ordinal() % crate::classes::SMALL_COUNT;
+                let owed = super::shed::Water(self.depot.water(pool, ordinal).load(Relaxed)).owed();
+                if owed > 0 && !lossy {
+                    assert_ne!(
+                        self.depot.owing(pool).load(Relaxed) & 1 << ordinal,
+                        0,
+                        "{class:?}'s stack in {pool:?} owes {owed}, unmarked"
+                    );
+                    if let Pool::Domain(domain) = pool {
+                        assert_ne!(
+                            self.depot.owing_domains.load(Relaxed) & 1 << domain.index(),
+                            0,
+                            "{domain:?} owes, unmarked"
+                        );
+                    }
+                }
             }
             for size in crate::classes::MagazineSize::all() {
                 let stack = self.depot.empty(pool, size);

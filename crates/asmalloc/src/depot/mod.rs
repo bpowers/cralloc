@@ -73,7 +73,7 @@ pub(crate) use stack::Stack;
 use crate::classes::{MagazineSize, SMALL_COUNT, SmallClass};
 use crate::front::sync::{AtomicU64, AtomicUsize};
 use crate::front::{Cpu, Routines, Slab};
-use crate::lined::Lined;
+use crate::lined::{LINE, Lined, lines};
 use crate::os::Os;
 use crate::space::Space;
 use core::cell::Cell;
@@ -206,9 +206,19 @@ struct Stacks {
     /// The classes whose stacks here owe magazines to the source, one bit per ordinal
     /// (`shed.rs`).
     owing: Lined<AtomicU64>,
-    /// The classes whose stacks here may hold magazines, one bit per ordinal (`held.rs`); only
-    /// a domain's pool keeps it.
-    held: Lined<AtomicU64>,
+    /// What other domains' looks read here (`held.rs`); only a domain's pool keeps it.
+    marks: Lined<Marks>,
+}
+
+/// A domain's words that other domains' looks read, on one line: written rarely, by a push onto
+/// an empty stack, a look that finds one emptied, and the domain's own first look in an
+/// interval.
+struct Marks {
+    /// The classes whose stacks here may hold magazines, one bit per ordinal.
+    held: AtomicU64,
+    /// The last interval in which one of the domain's own CPUs looked at its stacks, plus one,
+    /// as `shed::interval` numbers it; zero for never.
+    looked: AtomicU64,
 }
 
 impl Stacks {
@@ -222,7 +232,10 @@ impl Stacks {
             }; SMALL_COUNT],
             empty: [const { Lined::new(Stack::new()) }; MagazineSize::COUNT],
             owing: Lined::new(AtomicU64::new(0)),
-            held: Lined::new(AtomicU64::new(0)),
+            marks: Lined::new(Marks {
+                held: AtomicU64::new(0),
+                looked: AtomicU64::new(0),
+            }),
         }
     }
 }
@@ -251,6 +264,27 @@ struct Common {
     /// One more than the largest CPU number a slow path has run on.
     cpus: AtomicUsize,
 }
+
+// Each group of words on lines of its own (`crate::lined`): a pool is a line per class, a line
+// per magazine size and its two sets; the depot, its pools, four lines of its own words and
+// the topology's table, after which tests' count of magazines made takes what the table's last
+// line leaves.
+const _: () = assert!(
+    size_of::<Stacks>()
+        == LINE * (SMALL_COUNT * lines(size_of::<ClassDepot>()) + MagazineSize::COUNT + 2)
+);
+const _: () = assert!(
+    size_of::<Depot>()
+        == POOLS * size_of::<Stacks>()
+            + LINE
+                * (lines(size_of::<Growth>())
+                    + lines(size_of::<Common>())
+                    + 2
+                    + lines(
+                        size_of::<domain::Domains>()
+                            + if cfg!(test) { size_of::<usize>() } else { 0 }
+                    ))
+);
 
 impl Depot {
     /// The empty depot.
@@ -295,7 +329,13 @@ impl Depot {
 
     /// The set of classes whose stacks in `domain` may hold magazines (`held.rs`).
     pub(crate) fn held(&self, domain: Domain) -> &AtomicU64 {
-        &self.pool(Pool::Domain(domain)).held
+        &self.pool(Pool::Domain(domain)).marks.held
+    }
+
+    /// The last interval, plus one, in which `domain`'s own CPUs looked at its stacks
+    /// (`held.rs`).
+    pub(crate) fn looked(&self, domain: Domain) -> &AtomicU64 {
+        &self.pool(Pool::Domain(domain)).marks.looked
     }
 
     /// The stack of empty magazines of `size` in `pool`.
@@ -344,12 +384,18 @@ pub struct Cache<'a, O: Os, R: Routines, S: Source> {
     routines: R,
     source: &'a S,
     tuning: Tuning,
-    /// The class of the last magazine with objects this view pushed on a shared stack, for the
-    /// heartbeat's look at that stack's target (`heartbeat.rs`). Only a push makes a stack
-    /// deeper, so a slow path that pushed none need not read the shared head, which every
-    /// domain's overflow writes. A view lasts one call, so this is the call's, not the
-    /// thread's.
-    overflowed: Cell<Option<SmallClass>>,
+    /// What this view pushed on the shared stacks of magazines with objects, for the heartbeat's
+    /// look at their targets (`heartbeat.rs`). A view lasts one call, so this is the call's,
+    /// not the thread's.
+    overflowed: Cell<Overflow>,
+}
+
+/// The shared stacks a call pushed magazines with objects on: their classes, one bit per
+/// ordinal, and how many magazines in all.
+#[derive(Clone, Copy, Default, Debug)]
+pub(super) struct Overflow {
+    pub(super) classes: u64,
+    pub(super) magazines: u32,
 }
 
 impl<'a, O: Os, R: Routines, S: Source> Cache<'a, O, R, S> {
@@ -384,7 +430,7 @@ impl<'a, O: Os, R: Routines, S: Source> Cache<'a, O, R, S> {
             routines,
             source,
             tuning,
-            overflowed: Cell::new(None),
+            overflowed: Cell::new(Overflow::default()),
         }
     }
 
@@ -485,7 +531,11 @@ impl<'a, O: Os, R: Routines, S: Source> Cache<'a, O, R, S> {
             self.depot
                 .full(Pool::Shared, class)
                 .push(self.area, magazine, level);
-            self.overflowed.set(Some(class));
+            let seen = self.overflowed.get();
+            self.overflowed.set(Overflow {
+                classes: seen.classes | 1 << (class.ordinal() % SMALL_COUNT),
+                magazines: seen.magazines.saturating_add(1),
+            });
         } else {
             self.depot
                 .empty(Pool::Shared, magazine.size())

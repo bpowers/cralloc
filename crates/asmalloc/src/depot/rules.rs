@@ -18,13 +18,14 @@ use std::vec::Vec;
 type TestRig = Rig<SimOs<Small>, 2>;
 
 /// Limits that keep each rule's effect apart from the others': room for one spare per stack,
-/// a depot target no test reaches, looks on every slow path, and no rule on.
+/// a depot target no test reaches, looks at the allocator's rate (a test that states how soon
+/// something happens must not look more often than the allocator does), and no rule on.
 const QUIET: Tuning = Tuning {
     spare_budget: usize::MAX / 2,
     max_spares: 1,
     depot_target: usize::MAX / 2,
     domain_cap: usize::MAX / 4,
-    look_every: 1,
+    look_every: super::LOOK_EVERY,
     refresh_every: 0,
     age_limit: false,
     shed_unused: false,
@@ -338,9 +339,13 @@ fn in_spares(rig: &TestRig, n: u32, class: SmallClass) -> std::collections::BTre
 /// spares at the start is still there at the end.
 fn a_consumers_first_spares_stay(age_limit: bool) -> bool {
     let class = tiny(0);
+    // A look on every slow path, so that sweeps begin as soon as they are due. The objects
+    // circulate between the CPUs and come back onto the spares, so the outcome depends on when
+    // the sweeps fall; this checks that the sweep takes the stack, not how soon.
     let tuning = Tuning {
         max_spares: 2,
         age_limit,
+        look_every: 1,
         ..QUIET
     };
     let rig: TestRig = Rig::new(&[class], 4096, tuning);
@@ -489,12 +494,13 @@ fn free_into_depot<const N: usize>(
 /// Every cache domain but CPU 0's parks objects of two classes and goes quiet, while CPU 0
 /// runs another class's slow paths. `width` CPUs share each domain. When, in ticks from the
 /// start, the quiet domains' stacks were empty, and when every object of the two classes was
-/// back in the source, if within five intervals.
+/// back in the source, if within ten intervals, at the allocator's look rate.
 fn quiet_domains_emptied(width: u32, shed_unused: bool) -> (Option<u64>, Option<u64>) {
     let (a, b, busy) = (tiny(0), tiny(1), tiny(2));
     let tuning = Tuning {
         max_spares: 0,
         shed_unused,
+        look_every: super::LOOK_EVERY,
         ..QUIET
     };
     let objects = 512;
@@ -517,7 +523,7 @@ fn quiet_domains_emptied(width: u32, shed_unused: bool) -> (Option<u64>, Option<
     let start = rig.os().ticks();
     let (mut stacks, mut all) = (None, None);
     let steps = 8;
-    for _ in 0..5 * steps {
+    for _ in 0..10 * steps {
         rig.os().advance_clock(IDLE_TICKS / steps);
         for _ in 0..40 {
             churn(&cache, busy, 3);
@@ -536,13 +542,14 @@ fn quiet_domains_emptied(width: u32, shed_unused: bool) -> (Option<u64>, Option<
 }
 
 /// A quiet domain's stacks shed as a quiet class's stack does, through the looks and sheds of
-/// another domain's slow paths, whether there are 2, 8 or 64 domains. A stack sheds the depth
-/// it did not use in an interval: its debt is set at the first look in the interval after one
-/// in which nothing took from it, and paid by the heartbeats after that. Here the stacks were
-/// empty when the quiet CPUs began to park, in the first interval, and the quiet CPUs' slabs
-/// are drained into them an interval after the first look sees them still, in the second; so
-/// the stacks shed what they held at the third interval's start in the third interval, and the
-/// drained magazines at the fourth's.
+/// another domain's slow paths, whether there are 2, 8 or 64 domains, at the allocator's look
+/// rate and one busy CPU's 640 slow paths an interval. A stack sheds the depth it did not use in
+/// an interval: its debt is set at the first look in the interval after one in which nothing
+/// took from it, and paid by the heartbeats after that. The quiet CPUs' slabs are drained into
+/// the stacks an interval after the busy CPU's idle check first sees them still, and that check
+/// visits one slab a look, so with 63 quiet CPUs the last drains come in the fourth interval and
+/// their magazines shed in the sixth or seventh: 2, 4 and 6.4 intervals with 2, 8 and 64
+/// domains.
 #[test]
 fn a_quiet_domain_gives_its_stacks_back_with_2_8_and_64_domains() {
     for width in [32, 8, 1] {
@@ -556,7 +563,7 @@ fn a_quiet_domain_gives_its_stacks_back_with_2_8_and_64_domains() {
             all as f64 / IDLE_TICKS as f64
         );
         assert!(stacks <= all, "{width}: {stacks} {all}");
-        assert!(all <= 3 * IDLE_TICKS + IDLE_TICKS / 8, "{width}: {all}");
+        assert!(all <= 7 * IDLE_TICKS, "{width}: {all}");
         assert_eq!(quiet_domains_emptied(width, false), (None, None), "{width}");
     }
 }
@@ -882,7 +889,7 @@ fn cpu0<const N: usize>(rig: &Rig<SimOs<Small>, N>) -> Cpu {
 /// 16 intervals to empty and with two classes 7; at ee4c29b, where a look read one class in
 /// every domain, both took 3.
 #[test]
-#[ignore = "review finding: a quiet domain's stacks go back at a rate that falls with the stacks held"]
+
 fn review_quiet_domains_go_back_at_the_allocators_look_rate() {
     let mut slowest = 0;
     for (width, held) in [(32, 2), (8, 2), (8, 5), (1, 2), (1, 5)] {
@@ -952,7 +959,7 @@ fn shared_depth_after_drains(shed_unused: bool, intervals: usize) -> (Vec<usize>
 /// shared stack while it is over its target, and that a class parks at most the domains' caps
 /// and the shared target.
 #[test]
-#[ignore = "review finding: a drain's pushes on a shared stack are not checked against its target"]
+
 fn review_a_shared_stack_that_drains_fill_is_laundered_to_its_target() {
     let magazine = tiny(0).magazine().capacity();
     let (with_shed, target) = shared_depth_after_drains(true, 5);
@@ -967,4 +974,39 @@ fn review_a_shared_stack_that_drains_fill_is_laundered_to_its_target() {
             "target {target}: {depths:?}"
         );
     }
+}
+
+/// A look from another domain leaves alone a domain whose own CPUs looked at its stacks in the
+/// same interval, since their looks shed it, and so reads none of its lines; it looks at every
+/// stack of a domain that has not.
+#[test]
+fn a_look_from_elsewhere_skips_a_domain_that_looked_this_interval() {
+    let class = tiny(0);
+    let rig: TestRig = domains(1, &[class], 64, QUIET);
+    free_into_depot(&rig, 1, class, 6);
+    let (zero, one) = (SimCpu::new(0), SimCpu::new(1));
+    let (cache, other) = (rig.cache(&zero), rig.cache(&one));
+    let (here, there) = (Domain::folded(0), Domain::folded(1));
+    let water = || {
+        rig.depot
+            .water(
+                Pool::Domain(there),
+                class.ordinal() % crate::classes::SMALL_COUNT,
+            )
+            .load(Relaxed)
+    };
+    rig.os().advance_clock(5 * IDLE_TICKS);
+    let now = rig.os().ticks();
+    other.note_looked(there, now);
+    let before = water();
+    cache.look_elsewhere(here, 0, now);
+    assert_eq!(
+        water(),
+        before,
+        "a domain that looked this interval is left alone"
+    );
+    rig.os().advance_clock(IDLE_TICKS);
+    cache.look_elsewhere(here, 0, rig.os().ticks());
+    assert_ne!(water(), before, "a domain that has not is looked at");
+    rig.census(&[], false);
 }
