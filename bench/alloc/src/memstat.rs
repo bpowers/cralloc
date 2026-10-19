@@ -229,8 +229,9 @@ impl Visitor for Walk {
     fn region(&mut self, region: &Region) {
         let c = &mut self.snap.classes[region.class.index() as usize];
         c.regions += 1;
-        c.carved += region.carved as u64;
-        c.committed += region.committed as u64;
+        // What is carved and committed, not the address space below the class's first slot.
+        c.carved += region.carved.saturating_sub(region.origin) as u64;
+        c.committed += region.committed.saturating_sub(region.origin) as u64;
         if let Some(from) = region.huge_from {
             c.huge_part += region.committed.saturating_sub(from) as u64;
         }

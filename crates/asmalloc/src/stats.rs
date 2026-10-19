@@ -40,6 +40,11 @@ pub struct Region {
     pub base: *const u8,
     /// Its size in bytes: the heap's region size.
     pub len: usize,
+    /// Where the first slot is, in bytes from the base: the class's origin, a few whole pages for
+    /// a small class and zero for a large one. Nothing below it is ever written or made
+    /// writable, so `carved - origin` bytes have been handed out and `committed - origin` (or
+    /// none) are writable.
+    pub origin: usize,
     /// Where the watermark is, in bytes from the base: the slots below it have been handed out
     /// at least once. A small class's slots start a few pages past the base (its origin), and
     /// nothing below the first slot is ever written or made writable.

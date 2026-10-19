@@ -47,6 +47,7 @@ impl<O: Os> Back<'_, O> {
             index: region.index(),
             base,
             len: self.space.plan().region_size(),
+            origin: layout.slot_bytes(0),
             carved: layout.slot_bytes(carved),
             committed: grow.committed as usize * page,
             huge_from: hints.huge_from.map(|from| from as usize * page),

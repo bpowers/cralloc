@@ -38,13 +38,13 @@ fn design_plans() -> impl Iterator<Item = Plan> {
     (g.min_region_shift()..=g.max_region_shift()).filter_map(move |shift| g.plan(shift))
 }
 
-/// Finding: the shapes most tests run on have no origins. `Standard` (the default of the back
-/// end's tests, of `SimHeap`, and so of Miri and the testkit's simulated suites) has regions
-/// of 256 KiB, and `Tiny` (the Kani harnesses that run `touching`, `inside` and `slot_unit` for
-/// every class) of 2 KiB; a sixty-fourth of either is at most one page, so every origin
-/// rounds to zero. Only `Native` and the real OS exercise the change.
+/// Finding, fixed: the shapes most tests run on had no origins. `Standard` (the default of the
+/// back end's tests, of `SimHeap`, and so of Miri and the testkit's simulated suites) has
+/// regions of 256 KiB, and `Tiny` (the Kani harnesses that run `touching`, `inside` and
+/// `slot_unit` for every class) of 2 KiB; a sixty-fourth of either was at most one page, so
+/// every origin rounded to zero. Origins now lie in the first `ORIGIN_SHARE`th of a region,
+/// a few pages in both.
 #[test]
-#[ignore = "review finding: the Standard and Tiny shapes have no class with an origin"]
 fn every_simulated_shape_has_a_class_with_an_origin() {
     for (name, plan) in [
         ("Standard", Standard::GEOMETRY.largest_plan()),
@@ -76,7 +76,10 @@ fn every_slot_is_found_from_its_address_at_every_design_region_size() {
             assert_eq!(layout.origin_page() as usize * page, origin, "{what}");
             assert_eq!(origin % class.align(), 0, "{what}");
             assert!(origin == 0 || class.is_small(), "{what}");
-            assert!(origin == 0 || origin < plan.region_size() / 64, "{what}");
+            assert!(
+                origin == 0 || origin < plan.region_size() / crate::space::ORIGIN_SHARE,
+                "{what}"
+            );
             assert_eq!(slots, plan.slots_per_region(class), "{what}");
             assert!(slots >= 1, "{what}");
             assert!(layout.slot_bytes(slots) <= plan.region_size(), "{what}");

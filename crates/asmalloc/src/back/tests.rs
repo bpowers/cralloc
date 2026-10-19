@@ -40,6 +40,24 @@ fn fill<O: Os>(back: &Back<'_, O>, class: SmallClass, n: usize) -> Vec<*mut u8> 
     out
 }
 
+/// How many slots of `class` lie in a region's small-page part, from the class's origin to
+/// where a class that gets huge pages switches to them (`policy::huge_after`): the slots a
+/// purge returns in pages rather than huge pages.
+fn small_part<O: Os>(back: &Back<'_, O>, class: SmallClass) -> usize {
+    let plan = back.space().plan();
+    let huge = O::GEOMETRY.huge_page_size();
+    let threshold = huge_after(plan.region_size() / huge) * huge;
+    (threshold - plan.slot_origin(class.class())) / class.size()
+}
+
+/// The fewest slots of `class` that fill whole regions and hold at least `bytes`: what a test
+/// fills when every byte it frees must be purgeable, since the region a fill stops part way
+/// through keeps the rest of the huge page its watermark is in.
+fn whole_regions<O: Os>(back: &Back<'_, O>, class: SmallClass, bytes: usize) -> usize {
+    let per_region = back.space().plan().slots_per_region(class.class()) as usize;
+    bytes.div_ceil(per_region * class.size()) * per_region
+}
+
 /// Writes `len` bytes of `byte` at `ptr`.
 fn paint(ptr: *mut u8, len: usize, byte: u8) {
     // SAFETY: the tests only paint slots the back end handed out, whose memory is committed
@@ -695,11 +713,13 @@ fn a_refused_purge_is_skipped_and_retried() {
     let state = state::<Standard>();
     let back = state.get_or_reserve().unwrap();
     let class = small(1024);
-    let mut slots = fill(&back, class, 128);
+    // The freed slots fill the small-page part, so that all of them are purged in pages.
+    let n = small_part(&back, class);
+    let mut slots = fill(&back, class, 2 * n);
     for &p in &slots {
         paint(p, 1024, 9);
     }
-    let keep = slots.split_off(64);
+    let keep = slots.split_off(n);
     // SAFETY: the test holds these slots, or passes a bad one to see the abort.
     unsafe { back.launder(class, &slots) };
     state.os().set_faults(Call::Purge, Faults::ALWAYS);
@@ -708,11 +728,11 @@ fn a_refused_purge_is_skipped_and_retried() {
     for &p in &keep {
         assert!(painted(p, 1024, 9), "a refused purge touched a live slot");
     }
-    assert_eq!(back.trim(), 64 * 1024);
+    assert_eq!(back.trim(), n * 1024);
     for &p in &keep {
         assert!(painted(p, 1024, 9));
     }
-    let again = fill(&back, class, 64);
+    let again = fill(&back, class, n);
     assert!(again.iter().all(|&p| painted(p, 1024, 0)));
 }
 
@@ -794,17 +814,18 @@ fn reusing_purged_pages_over_the_cap_purges_nothing() {
     let os = state.os();
     let cap = retained_cap(Standard::GEOMETRY);
     let other = small(512);
-    let returned = fill(&back, other, cap / 512);
+    let n = whole_regions(&back, other, cap);
+    let returned = fill(&back, other, n);
     // SAFETY: the test holds these slots, or passes a bad one to see the abort.
     unsafe { back.launder(other, &returned) };
-    assert_eq!(back.trim(), cap);
+    assert_eq!(back.trim(), n * 512);
     let class = small(1024);
     let slots = fill(&back, class, 3 * cap / 1024);
     // SAFETY: as above.
     unsafe { back.launder(class, &slots) };
     assert!(back.retained() > cap);
     let purges = os.calls(Call::Purge);
-    assert_eq!(fill(&back, other, cap / 512), returned);
+    assert_eq!(fill(&back, other, n), returned);
     assert_eq!(os.calls(Call::Purge), purges);
 }
 
@@ -965,13 +986,15 @@ fn reuse_lowers_the_count_and_reviving_a_page_raises_it() {
     let back = state.get_or_reserve().unwrap();
     let class = small(1024);
     let page = Standard::GEOMETRY.page_size();
-    let slots = fill(&back, class, 64);
+    // The small-page part, so that whatever is free is purged in pages.
+    let n = small_part(&back, class);
+    let slots = fill(&back, class, n);
     // SAFETY: the test holds these slots, or passes a bad one to see the abort.
     unsafe { back.launder(class, &slots) };
-    assert_eq!(back.retained(), 64 * 1024);
+    assert_eq!(back.retained(), n * 1024);
     let again = fill(&back, class, 16);
-    assert_eq!(back.retained(), 48 * 1024);
-    assert_eq!(back.trim(), 48 * 1024);
+    assert_eq!(back.retained(), (n - 16) * 1024);
+    assert_eq!(back.trim(), (n - 16) * 1024);
     assert_eq!(back.retained(), 0);
     // One slot of a purged page: the page's other slots are free and resident again.
     let one = fill(&back, class, 1);
@@ -2964,7 +2987,7 @@ mod review {
         // Region 0 goes to a class that stays in use.
         let _live = fill(&back, small(16), 8);
         let class = small(1024);
-        let mut slots = fill(&back, class, cap / 1024 + 128);
+        let mut slots = fill(&back, class, whole_regions(&back, class, cap + 128 * 1024));
         for &p in &slots {
             paint(p, 1024, 5);
         }
@@ -2973,8 +2996,10 @@ mod review {
             // SAFETY: the test holds these slots, or passes a bad one to see the abort.
             unsafe { back.launder(class, chunk) };
         }
+        // Growth pays for what it grew, up to what is over the cap: grow by that much.
         let step = growth_step(Standard::GEOMETRY);
-        let _grown = fill(&back, small(512), 2 * step / 512);
+        let over = slots.len() * 1024 - cap;
+        let _grown = fill(&back, small(512), over.div_ceil(step) * step / 512);
         assert!(
             os.calls(Call::Purge) > 0 && back.retained() <= cap,
             "{} bytes are free and wholly purgeable, the cap is {cap}, and the cap's purge \

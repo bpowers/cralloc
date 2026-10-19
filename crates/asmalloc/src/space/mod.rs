@@ -2,7 +2,8 @@
 //!
 //! At first use the allocator reserves one range of address space: 16 TiB in the design's
 //! [`Geometry`]. Most of it is 3940 object regions of 4 GiB, each assigned to one class on demand
-//! and holding slots of that class at `region_base + index * class_size`. Above the object
+//! and holding slots of that class at `region_base + origin + index * class_size`, the origin
+//! a few whole pages for a small class and zero for a large one (`Plan::slot_origin`). Above the object
 //! regions sit the magazine area, one metadata block per region and the process page ([`Plan`]).
 //! Memory that holds objects never holds allocator state. If the process cannot have that much
 //! address space, the region size is halved, keeping the number of regions, down to the
@@ -27,6 +28,7 @@ mod verify;
 mod verify_slow;
 
 pub use geometry::{Geometry, MAX_REGIONS, METADATA_SHIFT};
-pub use plan::{Location, Plan, RegionId};
+pub(crate) use plan::slot_from;
+pub use plan::{Location, ORIGIN_SHARE, Plan, RegionId};
 pub use reservation::{Space, SpaceCell};
 pub use table::{RegionTable, RegionTag};

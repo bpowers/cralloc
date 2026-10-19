@@ -206,8 +206,9 @@ impl Class {
         1 << self.factors().1
     }
 
-    /// The offset of slot `index` from its region's base: `index * size`, computed as
-    /// `(index * odd) << shift` so that the alignment is evident to a reader and to Kani.
+    /// The offset of slot `index` from the class's first slot, `index * size`, computed as
+    /// `(index * odd) << shift` so that the alignment is evident to a reader and to Kani. The
+    /// first slot lies at the class's origin in its region (`Plan::slot_origin`).
     #[inline(always)]
     pub(crate) const fn slot_offset(self, index: u32) -> usize {
         let (odd, shift) = self.factors();
