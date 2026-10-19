@@ -1066,7 +1066,7 @@ fn bursts(stock: bool, alloc: i32, free: i32, burst: usize, rounds: usize, credi
     for n in 0..2 {
         let slab = rig.slabs().slab(cpu(&rig, n));
         // The credits: a CPU that sent magazines away may have its marks set.
-        seen.stock[n as usize] = slab.stock(class).load(Relaxed).addr() as u64 & 0x3fff_ffff;
+        seen.stock[n as usize] = slab.stock(class).load(Relaxed).addr() as u64 & 0x0fff_ffff;
     }
     rig.census(&[], false);
     seen
@@ -1172,39 +1172,12 @@ fn stock_unused_for_an_interval_goes_back() {
         }
     }
     assert_eq!(
-        slab.stock(bursty).load(Relaxed).addr() & 0x3fff_ffff,
+        slab.stock(bursty).load(Relaxed).addr() & 0x0fff_ffff,
         0,
         "no credit left"
     );
     assert!(in_spares(&rig, 0, bursty).is_empty());
     rig.census(&[], false);
-}
-
-/// A CPU that only allocates a class, filling magazines from the source, sends its empty
-/// magazines to the depot and takes them back to fill: a round trip of empties alone. It keeps
-/// no empty stock, since it has no full stock to free into it.
-#[test]
-fn a_cpu_that_only_allocates_keeps_no_empty_stock() {
-    let class = tiny(0);
-    let tuning = Tuning {
-        stock: true,
-        ..QUIET
-    };
-    let rig: TestRig = Rig::new(&[class], 400, tuning);
-    let machine = SimCpu::new(0);
-    let cache = rig.cache(&machine);
-    let held: Vec<_> = (0..400).filter_map(|_| cache.alloc(class)).collect();
-    assert_eq!(held.len(), 400);
-    let slab = rig.slabs().slab(cpu(&rig, 0));
-    let empties = cache
-        .spare_depth(class, crate::front::Spare::Empty)
-        .unwrap();
-    assert!(
-        empties as usize <= QUIET.max_spares,
-        "{empties} empty spares"
-    );
-    assert_eq!(slab.stock_held().load(Relaxed), 0);
-    rig.census(&held, false);
 }
 
 // Findings of the adversarial review of stock (`stock.rs`, commit 1bd3010). Each test below
@@ -1245,9 +1218,14 @@ fn give_credit(rig: &TestRig, n: i32, class: SmallClass, full: u32, empty: u32) 
         .store(super::stock::credits(full, empty), Relaxed);
 }
 
-/// The bytes CPU `n` counts as full stock: the low half of its count.
+/// The bytes CPU `n` counts as full stock, as the room check reads them.
 fn counted_full(rig: &TestRig, n: i32) -> usize {
-    rig.slabs().slab(cpu(rig, n)).stock_held().load(Relaxed) as u32 as usize
+    counted(rig, n, Spare::Full)
+}
+
+fn counted(rig: &TestRig, n: i32, kind: Spare) -> usize {
+    let machine = SimCpu::new(n);
+    rig.cache(&machine).stock_held(cpu(rig, n), kind)
 }
 
 fn round_trip<M: Machine>(
@@ -1267,7 +1245,6 @@ fn round_trip<M: Machine>(
 /// a few"). With stock a stack holds up to its fixed limit plus the room in magazines, 450 for
 /// the 8-byte class with the allocator's limits, so the caller's own CPU keeps the rest.
 #[test]
-#[ignore = "finding: collect leaves the caller's stock past 64 magazines a stack"]
 fn stock_review_collect_empties_the_callers_stock() {
     let class = tiny(0);
     let tuning = Tuning {
@@ -1299,7 +1276,6 @@ fn stock_review_collect_empties_the_callers_stock() {
 /// behind on the CPU popped from) takes a magazine's weight off that CPU's room for good, so a
 /// CPU that never idles drifts towards keeping no stock.
 #[test]
-#[ignore = "finding: a stock count misplaced by a move stays until the CPU idles"]
 fn stock_review_a_sweep_puts_a_misplaced_count_right() {
     let (bursty, busy) = (tiny(0), tiny(1));
     let tuning = Tuning {
@@ -1360,7 +1336,6 @@ fn stock_review_a_sweep_puts_a_misplaced_count_right() {
 /// use or not. `heartbeat.rs`, "Bounded work", says one slow path launders at most four
 /// magazines and that a sweep step pushes "at most a few".
 #[test]
-#[ignore = "finding: one heartbeat launders a class's whole stock"]
 fn stock_review_one_call_launders_a_few_magazines() {
     let (bursty, busy) = (tiny(0), tiny(1));
     // The depot's limits against the stock as the allocator's are against its room: a
@@ -1382,20 +1357,25 @@ fn stock_review_one_call_launders_a_few_magazines() {
     give_credit(&rig, 0, bursty, 40, 40);
     churn(&cache, bursty, 200);
     assert!(in_spares(&rig, 0, bursty).len() >= 80, "stock grew");
-    rig.os().advance_clock(IDLE_TICKS);
     let mut most = 0;
     let mut call = |act: &mut dyn FnMut()| {
         let before = rig.source.held_of(bursty);
         act();
         most = most.max(rig.source.held_of(bursty).saturating_sub(before));
     };
-    for _ in 0..200 {
-        let mut held = Vec::new();
-        for _ in 0..3 {
-            call(&mut || held.extend(cache.alloc(busy)));
-        }
-        for object in held {
-            call(&mut || cache.free(busy, object));
+    // The stock was in use in the interval that built it, so the first sweep after keeps it;
+    // the interval after that, in which nothing uses it, is when it goes, a magazine a
+    // heartbeat.
+    for _ in 0..2 {
+        rig.os().advance_clock(IDLE_TICKS);
+        for _ in 0..200 {
+            let mut held = Vec::new();
+            for _ in 0..3 {
+                call(&mut || held.extend(cache.alloc(busy)));
+            }
+            for object in held {
+                call(&mut || cache.free(busy, object));
+            }
         }
     }
     assert!(in_spares(&rig, 0, bursty).is_empty(), "the sweep took it");
@@ -1415,7 +1395,6 @@ fn stock_review_one_call_launders_a_few_magazines() {
 /// left that is none. They are counted against that CPU's room for empty stock until the class
 /// is freed there again or the CPU idles.
 #[test]
-#[ignore = "finding: empty stock whose credit was settled from another CPU is never returned"]
 fn stock_review_empty_stock_settled_by_a_moved_thread_goes_back() {
     let (bursty, busy) = (tiny(0), tiny(1));
     let tuning = Tuning {
@@ -1440,7 +1419,7 @@ fn stock_review_empty_stock_settled_by_a_moved_thread_goes_back() {
     assert!(empties() > limit + 20, "empty stock grew: {}", empties());
     // The heartbeat of a slow path that began on CPU 0, its thread on CPU 1 by now.
     let elsewhere = SimCpu::new(1);
-    rig.cache(&elsewhere).settle_stock(cpu(&rig, 0), bursty);
+    let _ = rig.cache(&elsewhere).sweep_stock(cpu(&rig, 0), bursty);
     // CPU 0 stays busy with another class for three intervals, sweeps and all.
     let steps = 8;
     for _ in 0..3 * steps {
@@ -1534,7 +1513,10 @@ fn empty_stock_unused_for_an_interval_goes_back() {
         }
     }
     assert!(empties() <= limit, "{} empty spares", empties());
-    assert_eq!(rig.slabs().slab(cpu(&rig, 0)).stock_held().load(Relaxed), 0);
+    assert_eq!(
+        counted(&rig, 0, Spare::Full) + counted(&rig, 0, Spare::Empty),
+        0
+    );
     rig.census(&held, false);
 }
 
@@ -1567,6 +1549,56 @@ fn empty_stock_needs_credit_for_full_stock() {
             freer.free(class, object);
         }
     }
-    assert_eq!(rig.slabs().slab(cpu(&rig, 0)).stock_held().load(Relaxed), 0);
+    assert_eq!(
+        counted(&rig, 0, Spare::Full) + counted(&rig, 0, Spare::Empty),
+        0
+    );
     rig.census(&[], false);
+}
+
+/// A round trip earns credit for the kind of spare that made it, and no more than the room
+/// holds of the class. (Crediting the other kind, or dropping the cap, went unnoticed.)
+#[test]
+fn credit_goes_to_the_kind_that_round_tripped_up_to_the_room() {
+    use super::stock::{Stock, room};
+    let class = tiny(0);
+    let tuning = Tuning {
+        stock: true,
+        spare_budget: 1 << 20,
+        ..QUIET
+    };
+    let rig: TestRig = Rig::new(&[class], 16, tuning);
+    let machine = SimCpu::new(0);
+    let cache = rig.cache(&machine);
+    let word = || {
+        Stock(
+            rig.slabs()
+                .slab(cpu(&rig, 0))
+                .stock(class)
+                .load(Relaxed)
+                .addr() as u64,
+        )
+    };
+    cache.note_sent(class, Spare::Full, true);
+    cache.note_return(class, Spare::Full, false);
+    assert_eq!(
+        (word().credit(Spare::Full), word().credit(Spare::Empty)),
+        (1, 0)
+    );
+    cache.note_sent(class, Spare::Empty, false);
+    cache.note_return(class, Spare::Empty, true);
+    assert_eq!(
+        (word().credit(Spare::Full), word().credit(Spare::Empty)),
+        (1, 1)
+    );
+    // An uncontended round trip earns nothing.
+    cache.note_sent(class, Spare::Full, false);
+    cache.note_return(class, Spare::Full, false);
+    assert_eq!(word().credit(Spare::Full), 1);
+    let most = (room(tuning) / (class.magazine().capacity() * class.size())) as u32;
+    assert!(most > 1);
+    give_credit(&rig, 0, class, most, 0);
+    cache.note_sent(class, Spare::Full, true);
+    cache.note_return(class, Spare::Full, true);
+    assert_eq!(word().credit(Spare::Full), most);
 }

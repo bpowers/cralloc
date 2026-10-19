@@ -49,6 +49,29 @@ pub const fn spare_limit(tuning: Tuning, class: SmallClass, kind: Spare) -> usiz
     }
 }
 
+/// [`spare_limit`] as the slow paths use it: for the allocator's limits from a table worked out
+/// at compile time, since the full limit takes a division by a class's magazine bytes.
+#[inline]
+pub(super) fn fixed_limit(tuning: Tuning, class: SmallClass, kind: Spare) -> u32 {
+    const FULL: [u16; SMALL_COUNT] = {
+        let mut table = [0u16; SMALL_COUNT];
+        let mut ordinal = 0;
+        while let Some(class) = SmallClass::from_ordinal(ordinal) {
+            table[ordinal] = spare_limit(Tuning::DEFAULT, class, Spare::Full) as u16;
+            ordinal += 1;
+        }
+        table
+    };
+    if tuning == Tuning::DEFAULT {
+        match kind {
+            Spare::Full => FULL[class.ordinal() % SMALL_COUNT] as u32,
+            Spare::Empty => MAX_SPARES as u32,
+        }
+    } else {
+        spare_limit(tuning, class, kind) as u32
+    }
+}
+
 /// A stack head read without protection, for the depth check.
 pub(super) enum Head {
     /// Empty: the new magazine would be the only one.
@@ -131,7 +154,7 @@ impl<'a, O: Os, R: Routines, S: Source> Cache<'a, O, R, S> {
         magazine: Magazine<'a>,
         stale: &mut bool,
     ) -> Result<(), Magazine<'a>> {
-        let limit = spare_limit(self.tuning, class, kind) as u32;
+        let limit = fixed_limit(self.tuning, class, kind);
         let depth = match self.spare_head(class, kind) {
             None => return Err(magazine),
             Some(Head::Marker(marker)) => {
@@ -141,8 +164,7 @@ impl<'a, O: Os, R: Routines, S: Source> Cache<'a, O, R, S> {
             Some(Head::Empty) => 0,
             Some(Head::Depth(depth)) => depth,
         };
-        let stock = depth >= limit;
-        if stock && !self.stock_admits(class, kind, depth - limit) {
+        if depth >= limit && !self.stock_admits(class, kind, depth - limit) {
             return Err(magazine);
         }
         magazine.set_record(Record {
@@ -155,12 +177,7 @@ impl<'a, O: Os, R: Routines, S: Source> Cache<'a, O, R, S> {
                 .stack_push(Field::spare(class, kind), magazine.base())
         };
         match pushed {
-            StackPush::Pushed => {
-                if stock {
-                    self.note_stock_push(class, kind);
-                }
-                Ok(())
-            }
+            StackPush::Pushed => Ok(()),
             StackPush::Marker | StackPush::NoCpu => Err(magazine),
         }
     }

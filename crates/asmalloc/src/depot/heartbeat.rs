@@ -46,7 +46,9 @@
 //! as were pushed, at most a slab's worth. A magazine holds at
 //! most 254 objects (and at most about 64 KiB of them), and a launder sets one bitmap word
 //! per group of neighbours with one atomic OR. A sweep step also pushes the rest of one spare
-//! stack, at most a few magazines, to the depot. Add one purge step, at most one drain
+//! stack, at most a few magazines, to the depot; for a class with stock it instead returns one
+//! magazine above the class's limit, and the sweep stays on the class at later heartbeats
+//! (`stock.rs`). Add one purge step, at most one drain
 //! (of another slab, or of the thread's own when it holds another generation's markers: a
 //! bounded number of atomic instructions and one fence), and a fixed number of loads and
 //! single-word writes for the looks.

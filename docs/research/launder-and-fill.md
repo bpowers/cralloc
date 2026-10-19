@@ -1231,3 +1231,48 @@ exchanges the stock does not cover. On two L3s, 524 against 250 to 330: objects 
 cross through the shared stack and the bitmaps when a burst outruns the room. Four times the
 room buys another 11 ms on one L3 and 22 ms on two, at the same peak within the spread (129
 against 132 MiB), and larson, mstress and RPC no differently.
+
+## After the review
+
+An adversarial review found five faults. The fixes:
+
+- **Disuse returns only what was not needed, a magazine a heartbeat.** The sweep took a class's
+  whole full-spare stack, stock and all, and the same heartbeat's launder over target sent most
+  of it to the bitmaps: up to about 370 magazines of the 8-byte class inside one `malloc` or
+  `free`, once an interval per stocked class, used or not. Now the sweep's visit to a class
+  with stock takes the unused depth off the credit once, then returns one magazine above the new
+  limit a heartbeat (a full one to the source, then empty ones to the depot), staying on the
+  class until none is left. Stock in use is not taken; nor are the fixed spares of a class
+  whose stock is in use, since the pops that use the stock reach them, or the low-water mark
+  shrinks the stock until they do. What replaces objects in circulation through stock is the
+  refresh rule, one retiring full magazine in 32 laundered before it reaches the spares, the
+  same rate as for everything else.
+- **`collect` empties the caller's stacks whatever their depth**, bounded by the depth each had
+  when its emptying began, in place of 64 pops a stack.
+- **No count to drift.** The per-CPU byte count could be misplaced by a thread moved between a
+  stack routine and the count's update, or by a lost update, and an excess never healed on a
+  busy CPU. The room check now reads what the stacks hold: over a per-CPU set of the classes
+  that may keep stock, how far each stack's head lies past its fixed limit, from its record. The
+  set is a hint too, but one that heals: the check that admits a class's first magazine past its
+  limit puts the class in, and the class's sweep puts it back if a race took it out. This also
+  removes the drain's store that could wipe stock pushed meanwhile.
+- **One CPU per decision.** The sweep's stock step acts only when the thread is still on the CPU
+  whose slab it sweeps (otherwise that CPU's own next heartbeat carries on), and each decision
+  reads the CPU once and acts on that CPU's words and stacks.
+- Credit survives a drain until the CPU's next sweep, which finds it unused and takes it: credit
+  is a permission and costs nothing until stock is pushed under it.
+
+Also: the fixed limits come from a table worked out at compile time (a full spare pop had paid a
+division); an interleaving scenario goes from real contention to credit to stock and back to
+nothing after an interval of disuse; a test holds that a round trip credits only its own kind
+and no more than the room.
+
+A first version of the room check scanned all 44 classes' words on every push past a limit:
+sh8bench's instructions rose 8.6% and its time 4.6% on one L3 (282 to 295 ms). The set of stocked
+classes brought it back.
+
+Against main (eafb661), five runner rounds on two L3s and six by hand on one: sh8bench 285.5 and
+285 ms on one L3 (1% more cycles, 3.4% more instructions), 0.509 and 0.506 s on two (peaks 125
+and 127 MiB); xmalloc-test, exchange split, rpc echo and both rpc log jobs level in time and peak;
+larson 2 to 4% lower in both placements, within the ranges (one L3 618 to 641 against 616 to
+625 M ops/s); the phase probe 46.7 and 45.4 against 47.7 and 52.8 MiB, tiny 0.5 MiB.

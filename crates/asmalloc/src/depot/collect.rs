@@ -14,17 +14,14 @@
 //! some of that CPU's slab instead and leaves some of its first CPU's to step 2. A slab whose
 //! drain backs out or finds another drainer keeps its magazines, and with drains off (no
 //! `membarrier`) only the caller's own slab is emptied. Each loop is bounded: by the classes,
-//! by [`SPARE_POPS`] per spare stack, and by the objects a depot stack held when its launder
-//! began, so concurrent pushes cannot keep it going.
+//! by the depth a spare stack had when its emptying began (stock can make it hundreds deep), and
+//! by the objects a depot stack held when its launder began, so concurrent pushes cannot keep
+//! it going.
 
 use super::{Cache, Pool, Source};
 use crate::classes::SmallClass;
 use crate::front::{Cpu, Routines, Spare};
 use crate::os::Os;
-
-/// The most magazines collect pops from one spare stack. Spare stacks hold at most a few
-/// (`spare.rs`); the bound only makes the loop's end certain.
-const SPARE_POPS: usize = 64;
 
 impl<O: Os, R: Routines, S: Source> Cache<'_, O, R, S> {
     /// Sends everything cached in slabs and the depot back to the source, as far as it can
@@ -69,7 +66,8 @@ impl<O: Os, R: Routines, S: Source> Cache<'_, O, R, S> {
             }
             let mut stale = false;
             for kind in [Spare::Full, Spare::Empty] {
-                for _ in 0..SPARE_POPS {
+                let depth = self.spare_depth(class, kind).unwrap_or(0);
+                for _ in 0..depth {
                     let Some(magazine) = self.spare_pop(class, kind, &mut stale) else {
                         break;
                     };
