@@ -670,12 +670,15 @@ class. For a small object that means the new size maps to the same class. For a 
 it means the new size is still large and fits the slot. Anything else moves the object.
 
 A large object that has to move because it grew moves into a slot with room to grow in
-place: sixteen times its size while that slot is at most a sixteenth of a region, four
-times while that fits a region, and none past that, falling back from sixteen to four to
-none when the larger slot cannot be had. A buffer that doubles is otherwise copied at every
+place. A heap with its full reservation gives sixteen times the block's size where that
+slot is at most a sixteenth of a region; otherwise, and in every heap that got less than
+its full reservation, the room is four times where that fits a region, and none past that.
+Each falls back to the next when the larger slot cannot be had. A buffer that doubles is otherwise copied at every
 doubling, and the copies add up to more than the buffer. The room is given only where a
 region still holds many such slots, because a region is never taken back from a class: a
-class with one slot to a region would let a few thousand growing buffers use every region. The room costs address space and
+class with one slot to a region would let a few thousand growing buffers use every region.
+A heap under an address-space limit has small regions and none to spare, so it does not
+make the trade at all. The room costs address space and
 nothing else: pages nobody wrote are not resident, and are never counted, kept or purged
 (see below). Under strict overcommit it does cost commit charge, since a region's writable
 prefix is charged whole, and a failed commit falls back to less room. A factor only makes
@@ -684,11 +687,13 @@ a given final size has copied depends on where it falls between two moves.
 
 Shrinking gives memory back. A large object that shrinks in place returns the whole pages
 past its new size at once: nothing else can use them while it holds the slot, so otherwise
-they would stay resident until it is freed. One that shrinks to under a thirty-second of its
-slot moves instead, because a region has few slots of a large class, and a slot should not
-be held for good by an object a tiny fraction of its size. The threshold is tied to the
-growth room and sits below the fraction of a slot that a block fills when it moves in, so a
-block resized back and forth across a class boundary settles in one slot instead of being
+they would stay resident until it is freed. One that shrinks to a small enough fraction of
+its slot moves instead, because a region has few slots of a large class, and a slot should
+not be held for good by an object a tiny fraction of its size. The fraction is half of what
+a block fills when it moves into a slot of that size with room: a thirty-second for the
+small slots of a full heap that give sixteen times, an eighth for every other slot and for
+blocks of a region or more. Being below what a block fills when it moves in, it lets a
+block resized back and forth across a class boundary settle in one slot instead of being
 copied on every call.
 
 When a large object has to move, the copy goes in pieces and returns the old block's pages
