@@ -584,6 +584,9 @@ pub(crate) fn record<H: Host>(host: &H, region: RegionId, slot: u32, recorded: R
 /// The flag is recorded before the advice, because a failed advice may have acted on part of
 /// the range, and the flag is what makes the free take it back. Advice changes no contents,
 /// and the range is inside the holder's slot, so nothing else is affected.
+///
+/// Returns the page, counted from the region's start, at which the advised range ends, if it
+/// gave advice.
 pub(crate) fn advise_grown<H: Host>(
     host: &H,
     region: RegionId,
@@ -592,26 +595,22 @@ pub(crate) fn advise_grown<H: Host>(
     old: usize,
     new: usize,
     dense: impl FnOnce() -> bool,
-) {
+) -> Option<u32> {
     let layout = host.layout();
-    let Some(now) = recorded(host, region, slot) else {
-        return;
-    };
+    let now = recorded(host, region, slot)?;
     let page = layout.page_size();
     let huge = page * layout.huge_pages() as usize;
     if !grown_huge(old, new, huge) {
-        return;
+        return None;
     }
-    let Some(unit) = layout.huge_interior(slot) else {
-        return;
-    };
+    let unit = layout.huge_interior(slot)?;
     // Rounded down: the last huge page, which the block only starts, faults in small pages,
     // so a block that ends just past a huge page does not make all of the next one resident.
     let wanted =
         ((layout.slot_bytes(slot) + into + new) / page) as u32 & !(layout.huge_pages() - 1);
     let end = wanted.min(unit.end);
     if end <= unit.start || !dense() {
-        return;
+        return None;
     }
     record(host, region, slot, Recorded { huge: true, ..now });
     // From the start, though part may be advised already: advice on a range that has it is
@@ -621,6 +620,7 @@ pub(crate) fn advise_grown<H: Host>(
         (end - unit.start) as usize * page,
     );
     host.advise(region, offset, len, HugePages::Prefer);
+    Some(end)
 }
 
 /// For the holder of large slot `slot`: takes back the huge-page advice `advise_grown` gave

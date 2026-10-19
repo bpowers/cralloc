@@ -585,7 +585,14 @@ impl<'a, O: Os> Back<'a, O> {
                 // SAFETY: BACK-CLASS-02: the caller owns the block and does not use it during
                 // the resize; `last..old` lies inside its first `old` bytes.
                 let dense = || unsafe { mostly_data(written.as_ptr(), old - last, page) };
-                region::advise_grown(&host, region, slot, into, old, size, dense);
+                if let Some(advised) =
+                    region::advise_grown(&host, region, slot, into, old, size, dense)
+                {
+                    // SAFETY: BACK-CLASS-05 in docs/safety/asmalloc/back/class-safety.md. The
+                    // caller owns the block, now `size` bytes, and does not use it during the
+                    // resize.
+                    unsafe { self.unspill(&host, region, slot, ptr, into, old, size, advised) };
+                }
                 region::cover(&host, region, slot);
                 if let Some((from, len)) = tail(old, class.size(), into) {
                     // SAFETY: BACK-CLASS-02 in docs/safety/asmalloc/back/class-safety.md. The
@@ -615,6 +622,77 @@ impl<'a, O: Os> Back<'a, O> {
             }
             None => self.abort("a resize of a pointer that is not the start of a heap object"),
         }
+    }
+
+    /// For the holder of large slot `slot`, whose block at `ptr`, `into` bytes into the slot,
+    /// has just grown in place from `old` to `new` bytes and had its huge-page advice extended
+    /// to page `advised` (`region::advise_grown`): lets the huge page that holds the block's
+    /// old end fault whole, where the block had written only part of its first page there.
+    ///
+    /// The advice rounds down, so the huge page a block only starts is left on small pages,
+    /// and a staggered block whose size is a whole number of huge pages spills its stagger, a
+    /// few bytes, into the next one. Those bytes give the page a page table, and advice given
+    /// to a page that has one changes nothing: when the block grows over it, the rest of it
+    /// faults 4 KiB at a time, 511 faults where one huge one would do, at each such doubling
+    /// (`docs/research/memory.md`, "Growing blocks fault their spilled huge page in small
+    /// pages"). So the page of bytes is copied aside into the block's own new room, the huge
+    /// page is returned, which frees its emptied page table, and the bytes are copied back,
+    /// which faults the huge page whole under its new advice. The room is the first page of the
+    /// next huge page, which the block may now use; a block that fills its new size writes it
+    /// anyway, as its next spill. Where the OS keeps the page table, or refuses the purge, the
+    /// copy back restores the bytes all the same, and the page goes on in small pages, as
+    /// before.
+    ///
+    /// # Safety
+    ///
+    /// The caller owns the block, which may now use `new` bytes rounded up to the end of their
+    /// last page, and nothing reads or writes it during the call; its contents are what it
+    /// could use before, `old` bytes rounded up the same way, and the rest is new room whose
+    /// contents it does not need.
+    #[allow(clippy::too_many_arguments)]
+    unsafe fn unspill(
+        &self,
+        host: &ClassHost<'a, O>,
+        region: RegionId,
+        slot: u32,
+        ptr: NonNull<u8>,
+        into: usize,
+        old: usize,
+        new: usize,
+        advised: u32,
+    ) {
+        let layout = host.layout();
+        let page = layout.page_size();
+        let pages = layout.huge_pages();
+        let huge = page * pages as usize;
+        // Offsets from the start of the slot. The huge page at `at` holds the block's old end,
+        // `part` bytes into it. The end is the usable size's, the size rounded up to a page:
+        // a caller may have written all it was told it could use.
+        let base = layout.slot_bytes(slot);
+        let end = (into + old).next_multiple_of(page);
+        let at = ((base + end) & !(huge - 1)) - base;
+        let part = end - at;
+        // Only the spill of a first page, the page must now be advised, and it, and the room
+        // the bytes go to, must lie inside what the block may now use, its new size rounded
+        // up to a page; `at > into` also keeps the block's start out of the page.
+        let first = ((base + at) / page) as u32;
+        if part == 0
+            || part > page
+            || at <= into
+            || first + pages > advised
+            || at + huge + part > (into + new).next_multiple_of(page)
+        {
+            return;
+        }
+        let spill = ptr.map_addr(|a| a.saturating_add(at - into));
+        let aside = spill.map_addr(|a| a.saturating_add(huge));
+        // SAFETY: BACK-CLASS-05: both ranges lie in the block's `new` bytes, `huge` apart.
+        unsafe { spill.copy_to_nonoverlapping(aside, part) };
+        // SAFETY: BACK-CLASS-05: the holder's whole huge page inside its block, whose bytes
+        // are copied aside.
+        let _ = unsafe { region::purge_part(host, region, slot, at, huge) };
+        // SAFETY: BACK-CLASS-05: as the first copy, the other way.
+        unsafe { aside.copy_to_nonoverlapping(spill, part) };
     }
 
     /// Moves the contents of the large object or run at `from` to `to` and frees `from`: copies
