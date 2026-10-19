@@ -37,6 +37,12 @@ background = []
 # The `Allocator` trait for `Asmalloc` (and `SimHeap`). The trait is stable from Rust 1.100, so
 # until then this needs a nightly toolchain.
 allocator-api = []
+# EXPERIMENT (domain-affine back end), not for merging. `x-count` counts where fills and depot
+# pops get their objects (`xcount`); `x-no-affinity` makes fills ignore the domain, as main's do;
+# `x-own-fill-first` fills from the domain's own free slots before popping the shared stack.
+x-count = []
+x-no-affinity = []
+x-own-fill-first = []
 
 [dependencies]
 

@@ -106,6 +106,13 @@ pub(crate) trait Host {
         None
     }
 
+    /// EXPERIMENT: whether a search that finds nothing free in the preferred regions goes on
+    /// to the others.
+    #[inline(always)]
+    fn falls_back(&self) -> bool {
+        true
+    }
+
     /// Makes `len` bytes at `offset` in a region writable. Both are page multiples.
     fn commit(&self, region: RegionId, offset: usize, len: usize) -> bool;
 
@@ -320,10 +327,13 @@ pub(crate) fn claim<H: Host>(host: &H, n: u32, keep: bool) -> Option<Taken> {
 /// has a stale bit: it is cleared, and the search starts again.
 fn from_top<H: Host>(host: &H) -> Option<Spot> {
     // EXPERIMENT: the preferred regions first, then any.
-    if host.preferred(0).is_some()
-        && let Some(spot) = from_top_preferred(host)
-    {
-        return Some(spot);
+    if host.preferred(0).is_some() {
+        if let Some(spot) = from_top_preferred(host) {
+            return Some(spot);
+        }
+        if !host.falls_back() {
+            return None;
+        }
     }
     from_top_any(host)
 }

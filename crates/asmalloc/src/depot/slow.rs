@@ -113,6 +113,15 @@ impl<'a, O: Os, R: Routines, S: Source> Cache<'a, O, R, S> {
             if let Some((magazine, contended)) =
                 self.depot.empty(pool, size).pop_noting(self.area, size)
             {
+                #[cfg(feature = "x-count")]
+                if let Pool::Shared = pool {
+                    use crate::xcount::{Event, add, from_other};
+                    let d = self.here().index();
+                    add(d, Event::PopEmptyShared, 1);
+                    if from_other(magazine.id().get(), d) {
+                        add(d, Event::PopEmptySharedOther, 1);
+                    }
+                }
                 self.note_return(class, Spare::Empty, contended);
                 return Some(magazine);
             }
@@ -128,6 +137,11 @@ impl<'a, O: Os, R: Routines, S: Source> Cache<'a, O, R, S> {
                 return Obtained::Magazine(magazine);
             }
             self.to_depot(class, magazine);
+        }
+        if cfg!(feature = "x-own-fill-first") {
+            return self
+                .own_fill_first(class, chores)
+                .unwrap_or(Obtained::NoMagazine);
         }
         if let Some(magazine) = self.pop_full(class, &mut chores.tried) {
             return Obtained::Magazine(magazine);
@@ -153,11 +167,78 @@ impl<'a, O: Os, R: Routines, S: Source> Cache<'a, O, R, S> {
             if let Some((magazine, contended)) =
                 self.depot.full(pool, class).pop_noting(self.area, size)
             {
+                #[cfg(feature = "x-count")]
+                {
+                    use crate::xcount::{Event, add, from_other};
+                    let d = self.here().index();
+                    match pool {
+                        Pool::Shared => {
+                            add(d, Event::PopShared, 1);
+                            if from_other(magazine.id().get(), d) {
+                                add(d, Event::PopSharedOther, 1);
+                                add(d, Event::PopSharedOtherObjects, magazine.level() as u64);
+                            }
+                        }
+                        Pool::Domain(_) => add(d, Event::PopDomain, 1),
+                    }
+                }
                 self.note_return(class, Spare::Full, contended);
                 return Some(magazine);
             }
         }
         None
+    }
+
+    /// EXPERIMENT (`x-own-fill-first`): a magazine of `class` from the domain's stack, else
+    /// filled from free objects in the domain's own regions, else from the shared stack, else
+    /// filled as usual. `None` when there is no magazine at all.
+    fn own_fill_first(&self, class: SmallClass, chores: &mut Chores) -> Option<Obtained<'a>> {
+        let size = class.magazine();
+        let here = Pool::Domain(self.here());
+        chores.tried.note(here);
+        if let Some((magazine, contended)) =
+            self.depot.full(here, class).pop_noting(self.area, size)
+        {
+            #[cfg(feature = "x-count")]
+            crate::xcount::add(self.here().index(), crate::xcount::Event::PopDomain, 1);
+            self.note_return(class, Spare::Full, contended);
+            return Some(Obtained::Magazine(magazine));
+        }
+        let Some(magazine) = self.obtain_empty(class, &mut chores.stale) else {
+            return self.pop_full(class, &mut chores.tried).map(Obtained::Magazine);
+        };
+        let slots = magazine.objects();
+        let capacity = slots.len();
+        let level = self
+            .source
+            .fill_own(class, slots, self.here().index())
+            .min(capacity);
+        if level > 0 {
+            if level < capacity
+                && let Some(filled) = slots.get(capacity - level..)
+            {
+                for (to, from) in slots.iter().zip(filled) {
+                    to.store(from.load(Relaxed), Relaxed);
+                }
+            }
+            magazine.set_level(level);
+            #[cfg(feature = "x-count")]
+            {
+                use crate::xcount::{Event, add};
+                add(self.here().index(), Event::OwnFirst, 1);
+                add(self.here().index(), Event::OwnFirstObjects, level as u64);
+            }
+            return Some(Obtained::Magazine(magazine));
+        }
+        if let Some(full) = self.pop_full(class, &mut chores.tried) {
+            self.retire(class, Spare::Empty, magazine, &mut chores.stale);
+            return Some(Obtained::Magazine(full));
+        }
+        if self.fill(class, &magazine) == 0 {
+            self.retire(class, Spare::Empty, magazine, &mut chores.stale);
+            return Some(Obtained::OutOfMemory);
+        }
+        Some(Obtained::Magazine(magazine))
     }
 
     /// Whether the full magazine a free on `cpu` just displaced is the one in

@@ -56,3 +56,76 @@ fn panic(_: &core::panic::PanicInfo) -> ! {
 extern "C" fn asmalloc_preload_no_unwinding() -> ! {
     asmalloc::abort("asmalloc-preload: unwinding is not supported")
 }
+
+/// EXPERIMENT (domain-affine back end): the allocator's counters, one line per domain that
+/// counted anything, written to standard error when the process exits.
+#[cfg(feature = "x-count")]
+mod xdump {
+    use asmalloc::xcount::{NAMES, snapshot};
+
+    unsafe extern "C" {
+        fn write(fd: i32, buf: *const u8, n: usize) -> isize;
+    }
+
+    struct Line {
+        buf: [u8; 1024],
+        len: usize,
+    }
+
+    impl Line {
+        fn text(&mut self, s: &str) {
+            for &b in s.as_bytes() {
+                if self.len < self.buf.len() {
+                    self.buf[self.len] = b;
+                    self.len += 1;
+                }
+            }
+        }
+
+        fn number(&mut self, mut n: u64) {
+            let mut digits = [0u8; 20];
+            let mut i = digits.len();
+            loop {
+                i -= 1;
+                digits[i] = b'0' + (n % 10) as u8;
+                n /= 10;
+                if n == 0 {
+                    break;
+                }
+            }
+            for &b in &digits[i..] {
+                if self.len < self.buf.len() {
+                    self.buf[self.len] = b;
+                    self.len += 1;
+                }
+            }
+        }
+    }
+
+    extern "C" fn dump() {
+        for (d, counts) in snapshot().iter().enumerate() {
+            if counts.iter().all(|&c| c == 0) {
+                continue;
+            }
+            let mut line = Line {
+                buf: [0; 1024],
+                len: 0,
+            };
+            line.text("XCOUNT domain=");
+            line.number(d as u64);
+            for (name, &c) in NAMES.iter().zip(counts) {
+                line.text(" ");
+                line.text(name);
+                line.text("=");
+                line.number(c);
+            }
+            line.text("\n");
+            // SAFETY: an experiment's diagnostic; the buffer is valid for `len` bytes.
+            let _ = unsafe { write(2, line.buf.as_ptr(), line.len) };
+        }
+    }
+
+    #[used]
+    #[unsafe(link_section = ".fini_array")]
+    static DUMP: extern "C" fn() = dump;
+}

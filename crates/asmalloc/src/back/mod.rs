@@ -361,6 +361,12 @@ impl<'a, O: Os> Back<'a, O> {
     /// prefer that domain's regions and whose carves come from its carving region.
     #[inline]
     fn host_in(&self, class: Class, domain: Option<usize>) -> Option<ClassHost<'a, O>> {
+        // With `x-no-affinity` every operation is as main's: no preference, domain 0's carving.
+        let domain = if cfg!(feature = "x-no-affinity") {
+            None
+        } else {
+            domain
+        };
         let state = self.state.classes.get(class.index() as usize - 1)?;
         let layout = state.layout.layout(self.space.plan(), class)?;
         Some(ClassHost::new(

@@ -143,6 +143,8 @@ pub(crate) struct ClassHost<'a, O: Os> {
     /// EXPERIMENT: the domain whose regions a search prefers and whose carving word carves;
     /// `None` for no preference (carving in domain 0).
     pub(crate) domain: Option<usize>,
+    /// EXPERIMENT: a search looks only in the domain's regions.
+    pub(crate) own_only: bool,
 }
 
 impl<'a, O: Os> ClassHost<'a, O> {
@@ -164,7 +166,15 @@ impl<'a, O: Os> ClassHost<'a, O> {
             layout,
             owners,
             domain,
+            own_only: false,
         }
+    }
+
+    /// EXPERIMENT: whether `region` is in this operation's domain.
+    #[inline(always)]
+    pub(crate) fn owns(&self, region: usize) -> bool {
+        let (word, bit) = self.owner_bit(self.carving_domain(), region);
+        word.load() & bit != 0
     }
 
     /// EXPERIMENT: the domain this operation carves in, below `BACK_DOMAINS`.
@@ -273,6 +283,11 @@ impl<O: Os> Host for ClassHost<'_, O> {
     #[inline(always)]
     fn class_top(&self) -> &Atomic {
         &self.class.summary.top
+    }
+
+    #[inline(always)]
+    fn falls_back(&self) -> bool {
+        !self.own_only
     }
 
     #[inline(always)]

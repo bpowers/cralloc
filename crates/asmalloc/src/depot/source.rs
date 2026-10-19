@@ -28,6 +28,13 @@ pub trait Source {
         self.fill(class, slots)
     }
 
+    /// EXPERIMENT: fills only from free objects that `domain` itself would prefer, and none
+    /// carved; zero if there are none.
+    fn fill_own(&self, class: SmallClass, slots: &[AtomicPtr<u8>], domain: usize) -> usize {
+        let _ = (class, slots, domain);
+        0
+    }
+
     /// Takes back free objects of `class`, each one this source handed out, from the object
     /// slots of a magazine this thread holds.
     fn take_back(&self, class: SmallClass, objects: &[AtomicPtr<u8>]);

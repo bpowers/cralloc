@@ -162,9 +162,26 @@ impl<'a, O: Os> Back<'a, O> {
         out: &mut S,
         domain: Option<usize>,
     ) -> usize {
-        let Some(host) = self.host_in(class.class(), domain) else {
+        self.fill_inner(class, out, domain, false)
+    }
+
+    /// EXPERIMENT: [`Back::fill_in`] from free slots in `domain`'s own regions only, with
+    /// nothing carved: zero if they have none.
+    pub fn fill_own<S: Sink + ?Sized>(&self, class: SmallClass, out: &mut S, domain: usize) -> usize {
+        self.fill_inner(class, out, Some(domain), true)
+    }
+
+    fn fill_inner<S: Sink + ?Sized>(
+        &self,
+        class: SmallClass,
+        out: &mut S,
+        domain: Option<usize>,
+        own_only: bool,
+    ) -> usize {
+        let Some(mut host) = self.host_in(class.class(), domain) else {
             return 0;
         };
+        host.own_only = own_only;
         let len = out.positions();
         let mut got = 0;
         let (mut resident, mut revived) = (0, 0);
@@ -180,6 +197,16 @@ impl<'a, O: Os> Back<'a, O> {
             let settled = region::settle(&host, taken.region, taken.word, taken.bits);
             resident += settled.resident;
             revived += settled.revived;
+            #[cfg(feature = "x-count")]
+            if let Some(d) = domain {
+                use crate::xcount::{Event, add};
+                let event = if host.owns(taken.region.index()) {
+                    Event::FillOwn
+                } else {
+                    Event::FillOther
+                };
+                add(d, event, taken.bits.count_ones() as u64);
+            }
             got = self.put(
                 host.layout(),
                 out,
@@ -195,7 +222,13 @@ impl<'a, O: Os> Back<'a, O> {
         self.unretain(class.class(), resident);
         self.retain(class.class(), revived);
         let mut carved = 0;
-        while got < len {
+        #[cfg(feature = "x-count")]
+        if let Some(d) = domain
+            && !own_only
+        {
+            crate::xcount::add(d, crate::xcount::Event::FillCalls, 1);
+        }
+        while got < len && !own_only {
             let want = (len - got).min(u32::MAX as usize) as u32;
             let Some((region, first, count)) = self.carve(&host, class.class(), want) else {
                 break;
@@ -203,6 +236,10 @@ impl<'a, O: Os> Back<'a, O> {
             region::reach(&host, region, first + count - 1, self.epoch());
             got = self.put_run(host.layout(), out, got, region, first, count);
             carved += host.layout().bytes_of(count);
+            #[cfg(feature = "x-count")]
+            if let Some(d) = domain {
+                crate::xcount::add(d, crate::xcount::Event::FillCarved, count as u64);
+            }
         }
         self.grow(carved);
         got

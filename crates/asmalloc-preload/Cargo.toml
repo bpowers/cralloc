@@ -20,3 +20,10 @@ asmalloc = { path = "../asmalloc" }
 
 [lints]
 workspace = true
+
+[features]
+# EXPERIMENT (domain-affine back end), not for merging: the allocator's counters, written to
+# standard error at exit; and the allocator's experiment switches, passed through.
+x-count = ["asmalloc/x-count"]
+x-no-affinity = ["asmalloc/x-no-affinity"]
+x-own-fill-first = ["asmalloc/x-own-fill-first"]

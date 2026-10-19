@@ -535,6 +535,14 @@ impl<'a, O: Os, R: Routines, S: Source> Cache<'a, O, R, S> {
     /// contention.
     fn to_shared(&self, class: SmallClass, magazine: Magazine<'_>) -> bool {
         let level = magazine.level() as u32;
+        #[cfg(feature = "x-count")]
+        {
+            let d = self.here().index();
+            crate::xcount::pushed(magazine.id().get(), d);
+            if level > 0 {
+                crate::xcount::add(d, crate::xcount::Event::PushShared, 1);
+            }
+        }
         if level > 0 {
             let contended = self
                 .depot
@@ -566,6 +574,12 @@ impl<'a, O: Os, R: Routines, S: Source> Cache<'a, O, R, S> {
     /// records it empty. Returns how many there were.
     fn launder_held(&self, class: SmallClass, magazine: &Magazine<'_>) -> usize {
         let level = magazine.level();
+        #[cfg(feature = "x-count")]
+        crate::xcount::add(
+            self.here().index(),
+            crate::xcount::Event::Laundered,
+            level as u64,
+        );
         if let Some(objects) = magazine.objects().get(..level) {
             self.source.take_back(class, objects);
         }
