@@ -9,7 +9,7 @@ public import Asmalloc.Proof.Framework.Arm
 
 `current_cpu` (`Impl.Slab.X86_64.currentCpu`) against `Spec.Slab.cpuContract`,
 inline (`inlineAbi`): three loads, `__rseq_offset`'s
-address from its GOT slot (`movGot`, which the model gives as the symbol's
+address from the word holding it (`movGot`, which the model gives as the symbol's
 address), `__rseq_offset`, and `cpu_id` through `fs`, zero-extended.
 -/
 

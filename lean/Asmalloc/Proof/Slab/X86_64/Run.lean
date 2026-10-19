@@ -223,7 +223,7 @@ theorem events_arm (h : ArmOk s) :
 /-! ### Armed with `__rseq_offset` read directly
 
 The same states and accesses as `arm`'s: `movSym` loads the variable that
-`movGot` and the load after it reach through its GOT slot. -/
+`movGot` and the load after it reach through the word holding its address. -/
 
 theorem setReg_setReg_same (σ : State) (r : Reg) (a b : BitVec 64) :
     (σ.setReg r a).setReg r b = σ.setReg r b := by

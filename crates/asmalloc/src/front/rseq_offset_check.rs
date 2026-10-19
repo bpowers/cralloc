@@ -1,10 +1,10 @@
 //! Whether the rseq offset this test binary's routines load shares a page offset with a hot word.
 //!
-//! The routines load the thread's rseq offset on every call, from storage the linker or the C
-//! library placed: the executable's copy of glibc's `__rseq_offset` (the `executable` form), its
-//! GOT slot and then glibc's variable (the default form), or, on musl, the crate's own word. If
-//! any of those overlaps a hot word in the low 12 bits of its address, a call can wait for the
-//! previous call's store to that hot word, and a loop of them runs one at a time
+//! The routines load the thread's rseq offset on every call: the executable's copy of glibc's
+//! `__rseq_offset` (the `executable` form), or a 16-aligned word of their own holding its address
+//! and then glibc's variable (the default form), or, on musl, the crate's own word. If any of
+//! those overlaps a hot word in the low 12 bits of its address, a call can wait for the previous
+//! call's store to that hot word, and a loop of them runs one at a time
 //! (`docs/research/zen5-roofline.md`, section 16). The layout keeps hot words at bytes 24 to 31
 //! of each 32-byte chunk, which clears any 16-aligned word; this test catches a link where that
 //! assumption failed. `scripts/rseq-offset-check` does the same for other binaries.
@@ -14,7 +14,8 @@ use std::string::String;
 use std::vec::Vec;
 
 /// Where this binary's relocations put something for `__rseq_offset`: (relocation type,
-/// address in the file's image). A GOT slot (`R_X86_64_GLOB_DAT`) or a copy (`R_X86_64_COPY`).
+/// address in the file's image). A routine's word holding its address (`R_X86_64_64`), a GOT
+/// slot (`R_X86_64_GLOB_DAT`) or a copy (`R_X86_64_COPY`).
 fn rseq_offset_relocations(image: &[u8]) -> Vec<(u32, u64)> {
     let u16_at = |at: usize| u16::from_le_bytes(image[at..at + 2].try_into().unwrap()) as usize;
     let u32_at = |at: usize| u32::from_le_bytes(image[at..at + 4].try_into().unwrap());
@@ -51,16 +52,21 @@ fn rseq_offset_relocations(image: &[u8]) -> Vec<(u32, u64)> {
 fn the_rseq_offset_the_routines_load_is_off_every_hot_words_page_offset() {
     let image = std::fs::read("/proc/self/exe").expect("read the test binary");
     let relocations = rseq_offset_relocations(&image);
-    // With a copy (the `executable` form) the inlined routines read the copy, and only the
-    // out-of-line ones read through the GOT slot.
-    let copied = relocations.iter().any(|&(kind, _)| kind == 5);
+    // The routines that read through a word (all of them by default, the out-of-line ones in the
+    // `executable` form) read their own; only Rust code off the fast paths reads the GOT slot.
+    if cfg!(target_env = "gnu") {
+        assert!(
+            relocations.iter().any(|&(kind, _)| kind == 1),
+            "no routine's word holds the address of `__rseq_offset` (R_X86_64_64)"
+        );
+    }
     let mut sites: Vec<(String, usize)> = relocations
         .into_iter()
-        .filter(|&(kind, _)| !(copied && kind == 6))
+        .filter(|&(kind, _)| kind != 6)
         .map(|(kind, at)| {
             let what = match kind {
+                1 => "a routine's word holding the address of `__rseq_offset` (R_X86_64_64)",
                 5 => "the copy of `__rseq_offset` (R_X86_64_COPY)",
-                6 => "the GOT slot of `__rseq_offset` (R_X86_64_GLOB_DAT)",
                 _ => "a relocation of `__rseq_offset`",
             };
             (what.into(), at as usize)
@@ -80,7 +86,7 @@ fn the_rseq_offset_the_routines_load_is_off_every_hot_words_page_offset() {
              fast path loads it right after the previous call's store to a hot word, and can then \
              wait for that store: allocation loops of that class may run several times slower, \
              depending on the predictor (docs/research/zen5-roofline.md, section 16). The layout \
-             assumes the linker and the C library place it 16-aligned.",
+             assumes the routines' words, the linker and the C library place it 16-aligned.",
             at % SLAB_BYTES
         );
     }

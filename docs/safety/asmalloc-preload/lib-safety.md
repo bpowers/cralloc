@@ -36,8 +36,9 @@ What the preload setting adds:
 - **Before the library can be called.** The dynamic loader uses its own minimal allocator until
   it has relocated every object, the preload library included, and only then switches to the
   interposed `malloc`; glibc has registered rseq for the main thread before that
-  (`docs/research/linux-rseq-contract.md`, section 4). So the first call finds `__rseq_offset`
-  and the library's GOT relocated. The switch looks up `malloc`, `calloc`, `realloc` and `free`
+  (`docs/research/linux-rseq-contract.md`, section 4). So the first call finds `__rseq_offset`,
+  the library's GOT and the routines' words holding the variable's address (`R_X86_64_64`
+  relocations, applied in the same pass as the GOT's) relocated. The switch looks up `malloc`, `calloc`, `realloc` and `free`
   in the global scope (`elf/dl-minimal.c`, `__rtld_malloc_init_real`), where the preload
   library comes before libc, and the unversioned definitions here satisfy its `GLIBC_2.0`
   lookup. Memory the minimal allocator handed out is not passed to the interposed `free`: the
