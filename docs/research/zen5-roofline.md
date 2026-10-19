@@ -26,6 +26,7 @@ Contents
 13. The proved routines: encoding and placement
 14. The C entry points
 15. The slab word's chain and code placement
+16. Loads at the page offset of the last hot-word store
 
 ## 1. Summary
 
@@ -1652,3 +1653,97 @@ this core; it is not something our instruction choice brings.
 - `baselines.md` section 14 attributed the tree's drop to the free's load of the slab top. It
   is the drop function's own last line; the job stays as it is, and its drop carries up to 9%
   of layout.
+
+## 16. Loads at the page offset of the last hot-word store
+
+Measured 2026-10-19 at `8fcd7dd` (branch `purge-frontier`) and the fix on top of it. The
+question: `workload fragchurn` (allocate, write and free 400k 64-byte objects, over and over)
+cost 31 cycles an object in one build and 23 in others, with equal instructions and cache and
+TLB misses (`memory.md`, the frontier section). Was it where the inlined fast path landed?
+
+**Answer.** No: it was a page offset in the allocator's data. With a size known only at run
+time, an inlined allocation loads its class from `BY_SIZE` right after the previous one stored
+its class's hot word. `BY_SIZE` sat at 0x2d109 in every build, so the 64-byte entry had page
+offset 0x110, which is the 64-byte class's hot word (class 8: 32 × 8 + 16). Zen 5 holds a load
+whose bytes overlap, in the low 12 bits, a store still in flight; and since the hot word's
+address comes from the lookup, the allocations then run one at a time. Whether and how long
+the load is held is predictor state: the same file ran 23, 31 or 58 cycles from one run to the
+next, a fresh copy of the file ran differently from the original, and turning off address
+randomization changed neither. `benchrun layout`'s variants never moved the table. The
+generated routines are not involved.
+
+Counters per object, same binary bytes (fragchurn, 2-second runs on CPU 2, user mode, at most
+three extra events a run, two runs each):
+
+| | 23-cycle run | 31-cycle run |
+|---|---:|---:|
+| Instructions | 109.2 | 109.3 |
+| Cycles with nothing retiring while a load is outstanding | 5.9 | 11.1 to 13.4 |
+| Ops dispatched / retired | 100.0 / 94.4 | 102.5 / 94.4 |
+| Store-to-load forwards | 4.9 | 5.0 |
+| L1 misses (MAB allocations) / demand fills from L2 / from L3 | 0.06 / 0.04 / 0.01 | the same |
+| L2 prefetches filled from L3 / DRAM | 1.15 / 0.08 | the same |
+| L1 dTLB misses / op-cache misses | 0.016 / 1.7 | 0.016 / 1.6 |
+
+A cycles profile put all eight extra cycles in the allocation loop, and none in the free loop,
+which has the same lookup. Op sampling (IBS) of the allocation loop, mean cycles from dispatch
+to completion: the `BY_SIZE` load 32 in a fast run and 146 in a slow one; the mask and slab-word
+loads, whose addresses come from it, 37 and 43 against 152 and 153; the loads that do not
+depend on it (the stack, the rseq area, the magazine slot) 16 to 45 in both.
+
+**The mechanism alone** (`bench/probes/page_offset_hold.rs`): a loop that loads a class byte,
+forms a slab word's address from it, loads the word and stores it back, with the byte at each
+distance from the word's page offset, in 64 pairs of fresh 4 KiB pages:
+
+| Byte's distance from the stored word | Cycles per iteration (pairs) |
+|---|---|
+| -32 to -1, +8 to +64 | 1.00 (all 64) |
+| 0 to +7 | 2 (17 or 18), 10 (40 or 41), 18 to 25 (5) |
+
+Only bytes that overlap the store pay, by page offset alone. The mode does not follow the page
+pair: it changes in streaks over the run, as in the workload.
+
+**Fix.** `BY_SIZE` and the inlined routines' `MASKS` now each start 2048 bytes into a
+page-aligned static, past every slab field (`Slab::USED_BYTES`), which is where the C routines'
+tables already sat. Every size up to 16 KiB has its entry clear of the hot words; larger sizes
+wrap round onto low offsets, as in the C tables. The code is the same instructions with another
+displacement. `front` asserts the placement at compile time, and a test checks every entry.
+
+fragchurn, cycles per object, a fresh copy of the binary for every run, interleaved, five runs
+a cell at 64 bytes and two at 32:
+
+| Build | default | `loops64` | `shuffle1` | `shuffle2` |
+|---|---|---|---|---|
+| Before, 64 bytes | 23.1 to 27.2 | 22.9 to 56.4 | 23.2 to 24.1 | 23.9 to 30.7 |
+| After, 64 bytes | 21.8 to 22.5 | 22.0 to 22.5 | 21.7 to 22.3 | 21.8 to 22.3 |
+| Before, 32 bytes | 32.1, 33.6 | 21.0, 21.2 | 21.2, 21.2 | 21.2, 21.7 |
+| After, 32 bytes | 21.2, 21.2 | 21.3, 21.4 | 21.2, 21.3 | 20.9, 21.4 |
+
+Even the best runs before paid a cycle (23.1 against 22.0): the probe's 2-cycle mode.
+
+**Not fixed: `__rseq_offset`.** The routines load it on every call, and its page offset is the
+linker's. In the executable form it is a copy in `.bss.rel.ro`; at `8fcd7dd` that copy was at
+page offset 0x090, the 32-byte class's hot word, which is the 32-byte row above. Of eight
+builds (two commits, four layouts) the copy shared a hot word's offset in four, each time a
+different class (32, 1792, 3072 and 10240 bytes). The library form reads a GOT slot the linker
+places, then glibc's variable (page offset 0xa30 in this glibc, clear). glibc also places the
+rseq area itself, whose `cpu_id` every call loads (0xac4 here, clear). Nothing in the crate
+controls these.
+
+**Rule.** Nothing an inlined fast path loads on every call may overlap, in page offset, a hot
+word: the previous call's store to it may still be in flight, and the load can then wait for
+it. A layout check that varies only code placement does not find this; runs of one build that
+split into modes, with equal instructions and misses, are the sign.
+
+**Also checked: mstress.** The branch's 2.6% over main, from three rounds, is noise:
+`mstress 8` preloaded, 48 interleaved rounds in two sessions of 24 (`benchrun run --only
+"mstress 8"`, the two commits' preload libraries as allocator entries, under `scripts/measure
+--both-l3`): main 0.260 s, the branch 0.259 s (-0.3%, a tie; the sessions gave -0.7% and
++0.2%), with equal faults.
+
+Method. Workloads built as `benchrun layout` builds them (its `RUSTFLAGS`) from `git archive`
+of each commit; each run copies the binary to a new file first, so that its page-cache pages
+are new; `fragchurn secs=2 set_size=N` pinned to CPU 2 under `scripts/memlimit`, all under
+`scripts/measure`. Counters through `BENCH_EVENTS` (raw events: `0xa2d6`, `0x7aa`, `0xc1`,
+`0x35`, `0x741`, `0x143`, `0x243`, `0xff71`, `0xff72`, `0xff45`, `0x20000048f`); IBS with `perf
+record -C 2 -e ibs_op/cnt_ctl=1/` and the decoded `perf report -D`.
