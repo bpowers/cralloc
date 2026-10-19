@@ -455,10 +455,9 @@ in its own. With both chains in one domain asmalloc is 49% ahead.
 
 **Others.**
 
-- *tokio spawn* (10 to 18% behind glibc and jemalloc): no allocator symbol is among the top
-  entries; the extra cycles (15.8e9 against 12.9e9) are in tokio's own code, with 40% more
-  fills from other cores of the same L3, so task cells appear to be reused on a different
-  worker from the one that freed them. Inference only.
+- *tokio spawn* (10 to 18% behind glibc and jemalloc): false sharing inside tokio's own
+  structures, which depends on where the allocator happens to place them; task cells are not
+  the cause. Section 15.
 - *One Vec grown to 256 MiB* (15% behind the mimalloc crate): mimalloc's huge pages; asmalloc
   takes the faults of 4 KiB pages up to the size where grown blocks get huge pages.
 - *The same Rust programs preloaded* behave as natively: JSON is 44% behind for cause A.
@@ -744,3 +743,96 @@ Without the push loop, the 1 and 4 MiB loops take a quarter to a sixth of what t
 is 1.7 to 2 times glibc there: about half of its cycles are `memmove` in its moves, while
 glibc's loop is 96% the fill itself, so it grows without copying. At 64 MiB asmalloc leads by
 2.2 times.
+
+## 15. The tokio spawn jobs: false sharing in tokio, placed by the allocator
+
+2026-10-18 and 19, at `a92d51a`. asmalloc trailed on both spawn jobs in two full sessions
+(t4: 130.9 ns/task against glibc 99.1 and jemalloc 113.8; t8: 254.7 against 235.6 and
+226.6). The cause is not work in the allocator. Two of tokio's own structures have fields
+that different workers write sitting on one cache line, and whether they do depends on where
+the allocator puts those structures.
+
+**Method.** The workload binaries as `benchrun build` makes them, run by hand on the
+session's CPUs (0-3; 0-3 and 8-11) under the measurement lock, the allocators interleaved,
+three or four rounds. `perf stat` for counters (no more than two events beside the
+workload's own, so nothing multiplexed); `perf record` of cycles for profiles; IBS op
+sampling (`perf c2c record -c 10000`) for the data address, source and latency of each
+sampled load; hardware breakpoints (`perf stat -e mem:ADDR:x`, ASLR off) to count calls of
+out-of-line functions. Experiments were one-line edits to a scratch build, not merged.
+
+**What the allocator does.** Per task: three allocations and three frees (the child's
+256-byte task cell, a request and a response of 16 to 256 bytes). asmalloc retires fewer
+instructions per task than anyone (t4: 1,705 against jemalloc 2,036 and glibc 2,070). Over a
+whole t4 run, 56k allocation and 56k free slow paths for 16.9M allocations (0.3%), 36k
+pushes to the depot's domain stacks; slow paths and depot together are about 0.5% of the
+cycles. Faults, system calls and kernel time match jemalloc's (553 against 475 faults a
+process, 31 ms of system time each); the workers are pinned, about ten migrations a process,
+all at start-up, and about 20 involuntary switches a run bound the rseq aborts. tokio makes
+the same calls under asmalloc and jemalloc (5.5M `notify_parked_local`, 0.2M parks and 10.9M
+`run_task` per t4 run, within 2%).
+
+**Where the cycles go.** The extra cycles are in tokio's code, at locked instructions
+(compare-and-swap on a task's state, the `Arc` count, the task list's counter) that wait for
+earlier stores to lines that another core holds. asmalloc's t4 runs make 40 requests for a
+line in exclusive state per task against jemalloc's 26 and glibc's 21, and fetch 42 lines
+per task from the L3 or another core's cache against 30 and 25. IBS puts 75 to 95% of all
+L1-miss latency, for every allocator, on one line of tokio's scheduler handle (item 2), and
+in asmalloc's runs most of the rest on the workers' run-queue headers (item 1):
+
+1. **The workers' run-queue headers.** tokio allocates each worker's queue header, an
+   `Arc<queue::Inner>` of 40 bytes holding the queue's `head` (written by thieves) and
+   `tail` (written by the owner), one after another on the thread that builds the runtime,
+   with a 48-byte `Arc<park::Inner>` between each two. asmalloc has a 40-byte class, so the
+   four headers land 40 bytes apart and share lines: worker 1's `head` shares a line with
+   worker 0's `head` and `tail`, and worker 1's `tail` with worker 2's. jemalloc has no
+   40-byte class; the headers go to its 48-byte class, interleaved with the park structures,
+   96 bytes apart, and IBS sees no misses on them. glibc puts each worker's 2 KiB queue
+   buffer between two headers. Serving 33 to 40 bytes from the 48-byte class instead (a
+   scratch build, not a proposal) gave the same interleaving and removed the difference:
+
+   | ns/task (cycles/task, all workers) | asmalloc | asmalloc, 40 served as 48 | jemalloc |
+   |---|---:|---:|---:|
+   | spawn t4 local | 130.2 (2,895) | 115.4 (2,573) | 114.3 (2,535) |
+   | spawn t8 both | 251.5 (11,139) | 235.1 (10,440) | 226.7 (10,061) |
+
+   The run-queue line costs asmalloc about 320 cycles a task at t4 and 700 at t8. The slow
+   compare-and-swaps on task headers in `wake_by_val` and in the child's poll (twice
+   jemalloc's cycles there, with few misses of their own) are this too, most likely waiting
+   for an earlier store to the falsely shared `tail` to drain. With the headers apart, every
+   tokio function costs what it does under jemalloc. The 4% left at t8 is on the task-list
+   line below, whose cost under eight cores on two L3s varies; not analysed further.
+
+2. **The scheduler handle's task-list line.** `Arc<Handle>` is about 640 bytes. On one line
+   of it sit the owned-task list's counter, which every spawn increments and every
+   completion decrements from any worker, and fields that the same calls only read (and, in
+   some builds, the idle-worker state that `notify_parked_local` reads). asmalloc and
+   jemalloc give a 640-byte block 64-byte alignment (asmalloc's class 640 gives 128), so
+   these fields always share the line. glibc's block starts after a 16-byte header at whatever
+   offset earlier allocations left, which the program's own arguments decide: the same glibc
+   binary runs spawn t8 at 178 ns/task started from a 101-byte path and at 235 from the main
+   checkout's 62-byte path (three interleaved runs each, 177 to 182 against 233 to 237),
+   presumably because `std::env::args` allocates the path ahead of everything tokio
+   allocates. IBS shows the hot line split in two in the fast layout, with a third of the
+   miss latency. The session's glibc results are this lottery: the good layout at t4 (99.1),
+   the bad one at t8 (235.6). asmalloc could only change this by giving up alignment by
+   construction.
+
+**The ±7% on t4.** Cycles per task are flat across the spread: asmalloc's ten session runs
+took 2,880 to 2,935 cycles a task whether they took 129 or 166 ns, and jemalloc's and
+tcmalloc's outliers (131 to 147 ns) also kept their cycles. The clock ran slower in those
+runs (about 4.4 GHz against 5.6); it is not the allocator.
+
+**Cache-set aliasing, checked: not the cause here.** Every class region starts on a 4 GiB
+boundary and fills take the lowest addresses, so the few live objects of each class sit at
+the same page offsets: five in six of asmalloc's L1 misses that hit L2 fall in the first
+eight of the 64 L1 sets, and nearly all its misses in the first 64 of the 1,024 L2 sets,
+where jemalloc's spread. Starting each region's first carve at a different offset (scratch
+build) spread them and removed the L2 hits, and changed neither time nor transfers: a real
+effect, too small to matter here.
+
+**What would fix it.** Not the allocator, short of tuning its classes to tokio's structure
+sizes: which types share a class decides whether these headers interleave, and a coarser
+class would move the problem to other programs and cost memory everywhere. tokio could pad
+`queue::Inner` and move the task-list counter away from the fields it reads. Until then the
+spawn jobs rank where each allocator puts these few lines more than what it costs to
+allocate, and glibc's result there changes with the program's path.
