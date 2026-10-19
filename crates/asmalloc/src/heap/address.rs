@@ -10,8 +10,7 @@
 //! resizes, restated for a block described by its address: a block stays put when the new size
 //! is still large, fits the slot or run, and, when it shrinks, keeps at least a
 //! [`SHRINK_MOVES_BELOW`](super::large::SHRINK_MOVES_BELOW)th of it; a block that outgrows its
-//! slot moves to one with [`HEADROOM`](super::large::HEADROOM) times the room, but not past a
-//! region, or with less when that cannot be had.
+//! slot moves to one with headroom (`growth_rooms`), or with less when that cannot be had.
 //!
 //! Small blocks are not served here: the C layer allocates and frees them with the generated C
 //! routines and, when those miss, the heap's slow paths (`c_alloc_small`, `c_free_small`).
@@ -350,7 +349,7 @@ mod tests {
     /// When the reservation's regions are all assigned, a growing block that cannot have a slot
     /// with full headroom takes one with less, then one of its size, and fails only where a
     /// plain allocation of its size fails too. In the native shape a region is a megabyte, so
-    /// a slot with sixteen times 40 KiB takes a whole one.
+    /// 40 KiB gets four times the room, never sixteen.
     #[test]
     #[cfg_attr(miri, ignore)]
     fn a_growing_block_takes_less_headroom_once_the_regions_run_out() {

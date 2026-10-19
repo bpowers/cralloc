@@ -584,7 +584,6 @@ fn layout_of(size: usize) -> Layout {
 /// 246 MiB of data, use every region, where `e486bc4` fits 23,634; after that `malloc(256)`
 /// returns null.
 #[test]
-#[ignore = "review finding regions-used-up: fails on 769974a"]
 fn six_hundred_buffers_grown_to_64_kib_leave_room_for_another_class() {
     let sim = SimHeap::<Native>::new();
     let (before, after) = (layout_of(40 << 10), 64 << 10);
@@ -648,7 +647,6 @@ fn all_but_one_region_assigned() -> Box<SimHeap<Native>> {
 /// is served. `e486bc4` fails this too, with its one attempt at four times the room; sixteen
 /// times asks the OS for four times as much, so it is refused sooner.
 #[test]
-#[ignore = "review finding last-region: fails on 769974a, and on e486bc4"]
 fn a_refused_commit_of_the_larger_slot_does_not_cost_the_growth_the_last_region() {
     let size = 40 << 10;
     // A plain allocation of the size is served from the last region.

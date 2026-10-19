@@ -1,7 +1,7 @@
 //! The heap through `GlobalAlloc`: the process's heap with the generated routines where they
 //! run, and simulated heaps with twins everywhere.
 
-use super::large::{HEADROOM, SHRINK_MOVES_BELOW};
+use super::large::{HEADROOM, SHRINK_MOVES_BELOW, growth_rooms};
 use crate::SimHeap;
 use crate::classes::{Class, MAX_SMALL_SIZE, SmallClass};
 use crate::os::OsError;
@@ -144,7 +144,9 @@ fn bursts<H: GlobalAlloc>(heap: &H, size: usize, burst: usize, rounds: usize) {
 }
 
 /// Grows a buffer from one byte to `top`, then shrinks it, through `realloc`, checking the
-/// contents survive and that large growth moves rarely while headroom fits in a `region`.
+/// contents survive and that large growth moves as rarely as its headroom allows in a heap of
+/// `region`-byte regions: a block that moved with `f` times its room has `log2 f` doublings in
+/// place before it moves again.
 fn realloc_walk<H: Inspect>(heap: &H, top: usize, region: usize) {
     let align = 8;
     let mut size = 1;
@@ -153,8 +155,8 @@ fn realloc_walk<H: Inspect>(heap: &H, top: usize, region: usize) {
     assert!(!p.is_null());
     // SAFETY: the block is live and `size` long.
     unsafe { fill(p, size, 7) };
-    let mut large_moves = 0;
-    let mut large_steps = 0;
+    // Doublings and moves by the factor of headroom the doubling's size gets; none is 1.
+    let mut by_factor = std::collections::BTreeMap::<usize, (usize, usize)>::new();
     while size < top {
         let next = size * 2;
         // SAFETY: `p` is live with this layout; `next` is valid.
@@ -162,23 +164,33 @@ fn realloc_walk<H: Inspect>(heap: &H, top: usize, region: usize) {
         assert!(!q.is_null());
         // SAFETY: the first `size` bytes were carried over.
         assert!(unsafe { holds(q, size, 7) }, "at {size}");
-        if next > MAX_SMALL_SIZE && size > MAX_SMALL_SIZE && next * HEADROOM <= region {
-            large_steps += 1;
-            large_moves += usize::from(q != p);
+        if next > MAX_SMALL_SIZE && size > MAX_SMALL_SIZE {
+            let factor = growth_rooms(next, region)
+                .next()
+                .map_or(1, |room| room / next);
+            let (steps, moves) = by_factor.entry(factor).or_default();
+            *steps += 1;
+            *moves += usize::from(q != p);
         }
         // SAFETY: the block is live and `next` long.
         unsafe { fill(q, next, 7) };
         p = q;
         size = next;
     }
-    if large_steps >= 4 {
-        // With headroom of HEADROOM times, at most every other doubling moves (with 16, one
-        // in five).
-        assert!(
-            large_moves * 2 <= large_steps + 1,
-            "{large_moves} moves in {large_steps} doublings with headroom {HEADROOM}"
-        );
+    for (&factor, &(steps, moves)) in &by_factor {
+        if factor > 1 {
+            // One more move where the walk enters this factor's sizes.
+            let most = steps / (factor.ilog2() as usize + 1) + 1;
+            assert!(
+                moves <= most,
+                "{moves} moves in {steps} doublings with {factor} times the room: {by_factor:?}"
+            );
+        }
     }
+    assert!(
+        by_factor.contains_key(&HEADROOM) || region < (64 << 20),
+        "{by_factor:?}"
+    );
     // Shrinking keeps the contents, in place or not.
     while size > 1 {
         let next = size / 2;
@@ -784,7 +796,8 @@ fn large_frees_find_the_class_from_the_address() {
             }
         };
         let region = heap.heap.back().unwrap().space().plan().region_size();
-        assert!(slot >= (HEADROOM * (50 << 10)).min(region), "{slot}");
+        let room = growth_rooms(50 << 10, region).next().unwrap();
+        assert!(slot >= room, "{slot}");
         // What the caller may use is what it asked for, to a page, not the headroom.
         let page = heap
             .heap
