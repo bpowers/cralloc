@@ -1212,9 +1212,17 @@ memory is the same 244 KiB in both builds, and its cgroup peak runs 0.5 to 0.8 M
 by which run reads the binary's pages first. A process that never sends a magazine to the
 depot never writes a stock word.
 
-mstress on two L3s is slower with stock in two sessions (0.258 against 0.273 and 0.283 s), at
-cycles within 2% (3.63 against 3.71 G, the allocator's share level); on one L3 it is level.
-Not explained; the cycles say it is not the allocator's own work.
+mstress on two L3s looked slower with stock in two sessions of hand-started runner rounds
+(0.258 against 0.273 and 0.283 s) at cycles within 2%. It is not real: under the runner with
+its clock warmed, ten interleaved rounds of main (c379026) against the same build with stock
+off give 0.261 against 0.259 s (0.257 to 0.267 and 0.252 to 0.267), with the same clock (5.52
+GHz), CPU time (1.07 s), voluntary and involuntary context switches (389 against 391, 262
+against 300) and minor faults (36.0k against 37.3k).
+
+On current main (c379026, which adds small classes starting on pages of their own and an exact
+read of the retained count), sh8bench is 0.505 s against 0.504 for the stock commit before those
+changes on two L3s (runner, eight rounds; 0.580 with stock off), and 291 against 284 ms on one L3
+(six rounds by hand; 2% more cycles at the same instructions).
 
 ## What is left
 
