@@ -173,6 +173,11 @@ pub(crate) struct Taken {
     pub(crate) word: u32,
     /// The bits taken: slot `64 * word + b` for each set bit `b`.
     pub(crate) bits: u64,
+    /// The claim came after its run moved past a group where it met another claimer
+    /// ([`claim_next`]), so the slots below it are not known to be in use: they may be free
+    /// slots the other claimer had not reached. Always `false` for a claim that searched
+    /// from the top.
+    pub(crate) beyond: bool,
 }
 
 /// A word of the tree by number, as the walks use it. Levels `0..=height` are a region's
@@ -295,6 +300,7 @@ pub(crate) fn claim<H: Host>(host: &H, n: u32, keep: bool) -> Option<Taken> {
                     region: leaf.region,
                     word: leaf.index,
                     bits,
+                    beyond: false,
                 });
             }
             Take::Empty { raced } => {
@@ -409,6 +415,9 @@ pub(crate) struct Cursor {
     /// The words of the group the run has emptied and whose summary bits it has not yet
     /// cleared, as bits of the group's summary word.
     emptied: u64,
+    /// The run has moved past a group where it met another claimer, since it last searched
+    /// from the top.
+    skipped: bool,
 }
 
 impl Cursor {
@@ -418,6 +427,7 @@ impl Cursor {
             next: leaf.index,
             group: leaf.index / BITS,
             emptied: 0,
+            skipped: false,
         }
     }
 }
@@ -443,6 +453,9 @@ impl Cursor {
 /// clears it. And the bits of the words the run empties itself are cleared together, one
 /// atomic AND for each group the run leaves (`clear_group`), not one for each word.
 ///
+/// A claim made after the run has moved past another thread says so (`Taken::beyond`): the
+/// slots it skipped may be free, so a fill does not count it as reuse reaching that high.
+///
 /// The run takes the lowest slots it can see, except where it moved past another thread. What
 /// it can miss is a slot freed behind it since, by another thread, which is a race either way,
 /// and the next fill starts from the top.
@@ -461,7 +474,13 @@ pub(crate) fn claim_next<H: Host>(host: &H, n: u32, cursor: &mut Option<Cursor>)
                     (leaf, at)
                 } else {
                     clear_group(host, at);
-                    (leaf, Cursor::at(leaf))
+                    (
+                        leaf,
+                        Cursor {
+                            skipped: at.skipped,
+                            ..Cursor::at(leaf)
+                        },
+                    )
                 }
             }
             _ => {
@@ -489,12 +508,15 @@ pub(crate) fn claim_next<H: Host>(host: &H, n: u32, cursor: &mut Option<Cursor>)
                 }
                 run = Some(Cursor {
                     next: past_group(leaf.index),
+                    skipped: true,
                     ..at
                 });
                 continue;
             }
         };
         let mut at = at;
+        let beyond = at.skipped;
+        at.skipped |= raced;
         if emptied {
             if host.layout().height() == 0 {
                 // The word's summary bit is a class word's, shared with other regions.
@@ -515,6 +537,7 @@ pub(crate) fn claim_next<H: Host>(host: &H, n: u32, cursor: &mut Option<Cursor>)
             region: leaf.region,
             word: leaf.index,
             bits,
+            beyond,
         });
     }
 }

@@ -157,23 +157,28 @@ impl<'a, O: Os> Back<'a, O> {
         let mut got = 0;
         let (mut resident, mut revived) = (0, 0);
         let mut cursor = None;
-        // The highest slot claimed in the region the run is in, for its frontier: recorded
-        // once a region, as the run leaves it, not once a word.
-        let mut reached: Option<(RegionId, u32)> = None;
+        // The highest claim before the run first moved past another filler, in the region the
+        // run is in, for its frontier: kept as the claim, and worked out and recorded once a
+        // region, as the run leaves it. Claims past a meeting are not evidence that the slots
+        // skipped are in use.
+        let mut reached: Option<tree::Taken> = None;
         while got < len {
             let want = (len - got).min(BITS as usize) as u32;
             let Some(taken) = tree::claim_next(&host, want, &mut cursor) else {
                 break;
             };
-            let high = taken.word * BITS + (BITS - 1 - taken.bits.leading_zeros());
-            reached = match reached {
-                Some((region, at)) if region == taken.region => Some((region, at.max(high))),
-                Some((region, at)) => {
-                    region::reach(&host, region, at, self.epoch());
-                    Some((taken.region, high))
+            if !taken.beyond {
+                match reached {
+                    // A run that searched from the top again may come back lower in the
+                    // same region.
+                    Some(last) if last.region == taken.region && last.word > taken.word => {}
+                    Some(last) if last.region != taken.region => {
+                        self.reach_claim(&host, last);
+                        reached = Some(taken);
+                    }
+                    _ => reached = Some(taken),
                 }
-                None => Some((taken.region, high)),
-            };
+            }
             let settled = region::settle(&host, taken.region, taken.word, taken.bits);
             resident += settled.resident;
             revived += settled.revived;
@@ -187,8 +192,8 @@ impl<'a, O: Os> Back<'a, O> {
             );
         }
         tree::finish_run(&host, cursor);
-        if let Some((region, at)) = reached {
-            region::reach(&host, region, at, self.epoch());
+        if let Some(last) = reached {
+            self.reach_claim(&host, last);
         }
         self.unretain(class.class(), resident);
         self.retain(class.class(), revived);
@@ -204,6 +209,13 @@ impl<'a, O: Os> Back<'a, O> {
         }
         self.grow(carved);
         got
+    }
+
+    /// Raises the frontier of the region of `taken` to the highest slot it took.
+    #[inline(never)]
+    fn reach_claim(&self, host: &ClassHost<'a, O>, taken: tree::Taken) {
+        let high = taken.word * BITS + (BITS - 1 - taken.bits.leading_zeros());
+        region::reach(host, taken.region, high, self.epoch());
     }
 
     /// Writes the addresses of the slots of leaf word `word` of `region` whose bits are set in
