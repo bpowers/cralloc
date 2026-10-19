@@ -36,7 +36,8 @@ instruction, and the compiler's model of what it does.
    holds.
 5. *Memory.* Neither `nomem` nor `readonly` is given. The compiler therefore assumes the block
    may read and write any memory reachable from the pointer arguments, as the kernel does for
-   `write`, `rt_sigaction` and `prctl`. No such memory is held in registers across the block.
+   `write` and `openat` (which read a buffer and a path), `read` (which writes a buffer),
+   `rt_sigaction` and `prctl`. No such memory is held in registers across the block.
 6. *Provenance.* Arguments and the result are typed `*mut u8`. A pointer argument is passed with
    its provenance, which inline assembly may use as the caller's preconditions allow. The result
    of `mmap` is the address of a new mapping, and inline assembly, like a foreign function, may
@@ -44,14 +45,26 @@ instruction, and the compiler's model of what it does.
    through `addr()`. No integer-to-pointer cast is involved.
 7. *Result decoding* (`result()`, safe code). Linux returns `-errno`, in `-4095..=-1`, on
    failure, and the test `value > usize::MAX - 4095` selects exactly that range. No successful
-   call used here returns a value in it: `mmap` cannot return an address in the top page, and
-   the others return small counts or zero.
+   call used here returns a value in it: `mmap` cannot return an address in the top page;
+   `openat` returns a file descriptor, a small non-negative number; `read` and `write` return
+   a count no larger than the buffer they were given; and the others return small counts or
+   zero.
+
+**Call numbers.** The constants in `nr` are the x86-64 numbers of
+`arch/x86/entry/syscalls/syscall_64.tbl`: `read` 0, `write` 1, `close` 3, `mmap` 9, `mprotect`
+10, `munmap` 11, `rt_sigaction` 13, `rt_sigprocmask` 14, `madvise` 28, `getpid` 39, `gettid`
+186, `exit_group` 231, `tgkill` 234, `openat` 257, `getrandom` 318, `membarrier` 324. A wrong
+number would make a different call with the same arguments, so each is checked against the
+table; `read`, `close` and `openat` were added for the topology read (`kernel.rs`, KERNEL-10),
+and its tests in `kernel.rs` read real files through them.
 
 **Machine checks.** `os::linux::syscall::tests::a_call_reaches_the_kernel` (getpid agrees with
 `std::process::id`) and `results_decode_errors`. Every `LinuxOs` test in `kernel.rs` goes
 through this block.
 
 **Review.** 2026-10-17, fresh adversarial reviewer: accepted (register convention, clobbers,
-`preserves_flags`, `nostack` and the red zone, memory, pointer-typed registers).
+`preserves_flags`, `nostack` and the red zone, memory, pointer-typed registers). 2026-10-18,
+another: the sixteen call numbers against `asm/unistd_64.h`, and items 5 and 7 as they now
+read for `openat` and `read`.
 
-Reviewed: 415b07e
+Reviewed: e3614f2

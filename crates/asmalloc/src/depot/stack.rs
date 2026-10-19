@@ -3,11 +3,20 @@
 //! The head is one 64-bit word: the top magazine's number in the low half and a version
 //! counter in the high half, changed only by compare-and-swap, and the counter goes up by one
 //! on every push and every pop. A magazine's link is its slot 0: the number of the magazine
-//! below it and, in the high half, the number of objects in it and every magazine below, so the
-//! top's link says how many objects the stack holds without a counter of its own. Magazine
-//! memory is never unmapped, so a pop that reads the link of a magazine another thread has
-//! already taken reads harmless memory, and its compare-and-swap then fails unless exactly a
-//! multiple of `2^32` pushes and pops happened in between and left the same magazine on top.
+//! below it and, in the high half, the stack's count up to and including it, so the top's link
+//! gives the count without a counter of its own. Each push says what its magazine adds to the
+//! count: a stack of magazines with objects counts objects, and a stack of empty ones counts
+//! magazines. Magazine memory is never unmapped, so a pop that reads the link of a magazine
+//! another thread has already taken reads harmless memory, and its compare-and-swap then fails
+//! unless exactly a multiple of `2^32` pushes and pops happened in between and left the same
+//! magazine on top.
+//!
+//! **A capped push** gives the magazine back instead when the stack's count has reached a cap.
+//! The cap is exact: the count is read from the top's link between reading the head and the
+//! compare-and-swap, and the compare-and-swap succeeds only if the head, version and all, is
+//! still the one read, so the top is still the magazine whose link was read and its link is
+//! the one its pusher wrote. A push that gives up has written nothing anyone else reads: at most
+//! the link of the magazine it still holds, from a try whose compare-and-swap failed.
 //!
 //! The all-zero head is an empty stack.
 
@@ -16,7 +25,14 @@ use crate::classes::MagazineSize;
 use crate::front::sync::AtomicU64;
 use crate::os::Os;
 use core::ptr;
-use core::sync::atomic::Ordering::{AcqRel, Acquire, Relaxed, Release};
+use core::sync::atomic::Ordering::{AcqRel, Acquire, Relaxed, Release, SeqCst};
+
+/// What a push did besides taking the magazine.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) struct Pushed {
+    /// The stack was empty before it.
+    pub(crate) onto_empty: bool,
+}
 
 /// A head or a link: a magazine number (zero for none) and a version or object count.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -60,19 +76,35 @@ impl Stack {
         }
     }
 
-    /// Pushes a magazine this thread holds; its recorded level counts toward the stack's
-    /// objects. Afterwards the stack owns it.
-    pub(crate) fn push<O: Os>(&self, area: Area<'_, O>, magazine: Magazine<'_>) {
-        let level = magazine.level() as u32;
+    /// Pushes a magazine this thread holds, which adds `weight` to the stack's count; afterwards
+    /// the stack owns it.
+    pub(crate) fn push<O: Os>(&self, area: Area<'_, O>, magazine: Magazine<'_>, weight: u32) {
+        // Without a cap the push cannot give the magazine back.
+        let _ = self.push_under(area, magazine, weight, u32::MAX);
+    }
+
+    /// Pushes a magazine this thread holds, which adds `weight` to the stack's count, if the
+    /// count is below `cap`; afterwards the stack owns it. Otherwise gives it back. Whether
+    /// the stack was empty before the push.
+    pub(crate) fn push_under<'a, O: Os>(
+        &self,
+        area: Area<'_, O>,
+        magazine: Magazine<'a>,
+        weight: u32,
+        cap: u32,
+    ) -> Result<Pushed, Magazine<'a>> {
         let mut head = Packed::from_word(self.head.load(Acquire));
         loop {
             // The count below is read from the top's link, which may be stale; then the
             // compare-and-swap fails and the loop reads it again.
             let below = Self::link(area, head.number, magazine.size());
-            let objects = if head.number == 0 { 0 } else { below.high };
+            let count = if head.number == 0 { 0 } else { below.high };
+            if count >= cap {
+                return Err(magazine);
+            }
             let link = Packed {
                 number: head.number,
-                high: objects.saturating_add(level),
+                high: count.saturating_add(weight),
             };
             magazine.link().store(
                 ptr::without_provenance_mut(link.to_word() as usize),
@@ -82,11 +114,19 @@ impl Stack {
                 number: magazine.id().get(),
                 high: head.high.wrapping_add(1),
             };
+            // Sequentially consistent so that the hint of which stacks hold magazines, which
+            // a push onto an empty stack sets after this and a look clears before reading the
+            // head, is never left clear on a stack that holds one (`held.rs`). On x86-64 every
+            // compare-and-swap is.
             match self
                 .head
-                .compare_exchange(head.to_word(), new.to_word(), AcqRel, Acquire)
+                .compare_exchange(head.to_word(), new.to_word(), SeqCst, Acquire)
             {
-                Ok(_) => return,
+                Ok(_) => {
+                    return Ok(Pushed {
+                        onto_empty: head.number == 0,
+                    });
+                }
                 Err(now) => head = Packed::from_word(now),
             }
         }
@@ -121,15 +161,21 @@ impl Stack {
         }
     }
 
-    /// The number of objects in the stack, as of a moment during the call: the count in the
-    /// top magazine's link. A hint for the depot's targets.
-    pub(crate) fn objects<O: Os>(&self, area: Area<'_, O>, size: MagazineSize) -> u32 {
+    /// The stack's count, as of a moment during the call: the count in the top magazine's
+    /// link, objects or magazines as its pushes counted. A hint for the depot's targets.
+    pub(crate) fn count<O: Os>(&self, area: Area<'_, O>, size: MagazineSize) -> u32 {
         let head = Packed::from_word(self.head.load(Relaxed));
         if head.number == 0 {
             0
         } else {
             Self::link(area, head.number, size).high
         }
+    }
+
+    /// Whether the stack holds a magazine, read sequentially consistently, for the hint that
+    /// a look clears and a push sets (`held.rs`).
+    pub(crate) fn holds_any(&self) -> bool {
+        Packed::from_word(self.head.load(SeqCst)).number != 0
     }
 
     /// Calls `visit` for each magazine on the stack, top first, without taking any, for at most
@@ -150,6 +196,13 @@ impl Stack {
             number = Packed::from_word(magazine.link().load(Relaxed).addr() as u64).number;
             visit(&magazine);
         }
+    }
+
+    /// The head's version: how many pushes and pops the stack has had, modulo `2^32`. For tests
+    /// that check a stack was not touched.
+    #[cfg(test)]
+    pub(crate) fn version(&self) -> u32 {
+        Packed::from_word(self.head.load(Relaxed)).high
     }
 
     /// Every magazine on the stack, top first, without taking any. For audits of a quiescent

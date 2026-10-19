@@ -16,9 +16,10 @@
 
 use super::heartbeat::Clock;
 use super::test_rig::{Rig, Small, TIGHT, tiny_class};
-use super::{Drained, IDLE_TICKS, Source};
+use super::{Domain, Drained, IDLE_TICKS, Pool, Source};
+use crate::classes::{MagazineSize, SmallClass};
 use crate::front::check::{Bounds, Report, choose, explore, switch_point};
-use crate::os::sim::{Call, Faults, SimOs, SimThread};
+use crate::os::sim::{Call, Faults, SimOs, SimThread, SimTopology};
 use crate::os::{Aborted, Machine, Os, Step};
 use core::ptr::NonNull;
 use std::sync::Mutex;
@@ -473,8 +474,9 @@ fn an_age_take_and_a_drain_keep_one_owner_under_every_schedule(bounds: Bounds) {
     );
 }
 
-/// Two threads push and pop one depot stack directly, with a third holding magazines it
-/// pushes back (`Depot.tla`): the version counter keeps every magazine with one owner.
+/// Two threads push and pop one depot stack directly (`Depot.tla`): the version counter keeps
+/// every magazine with one owner, and a capped push that gives its magazine back changes
+/// nothing.
 fn depot_stacks_keep_one_owner_under_every_schedule(bounds: Bounds) {
     let found = explore(
         bounds,
@@ -484,7 +486,7 @@ fn depot_stacks_keep_one_owner_under_every_schedule(bounds: Bounds) {
             let machine = world.machine(THREADS - 1, 0);
             let cache = world.rig.cache(&machine);
             let class = tiny_class();
-            // Three magazines with one object each, on the class's depot stack.
+            // Three magazines with one object each, on the class's shared stack.
             for _ in 0..3 {
                 let magazine = cache.area().create(class.magazine()).unwrap();
                 let object = world.rig.source.alloc_one(class).unwrap();
@@ -493,8 +495,8 @@ fn depot_stacks_keep_one_owner_under_every_schedule(bounds: Bounds) {
                 world
                     .rig
                     .depot
-                    .full(super::Domain::ZERO, class)
-                    .push(cache.area(), magazine);
+                    .full(Pool::Shared, class)
+                    .push(cache.area(), magazine, 1);
             }
             world
         },
@@ -502,9 +504,11 @@ fn depot_stacks_keep_one_owner_under_every_schedule(bounds: Bounds) {
             let machine = world.machine(me, 0);
             let cache = world.rig.cache(&machine);
             let class = tiny_class();
-            let stack = world.rig.depot.full(super::Domain::ZERO, class);
+            let stack = world.rig.depot.full(Pool::Shared, class);
             // Thread 1 pops two and pushes the first back before the second: the ABA a
-            // stale head would miss. Thread 0 pops one and pushes it back.
+            // stale head would miss. Thread 0 pops one and pushes it back. A push back that
+            // finds the stack at a cap of two objects sends its magazine to a domain's stack
+            // instead, which some schedules reach and others do not.
             let first = stack.pop(cache.area(), class.magazine());
             let second = if me == 1 {
                 stack.pop(cache.area(), class.magazine())
@@ -512,13 +516,258 @@ fn depot_stacks_keep_one_owner_under_every_schedule(bounds: Bounds) {
                 None
             };
             for magazine in [first, second].into_iter().flatten() {
-                stack.push(cache.area(), magazine);
+                if let Err(magazine) = stack.push_under(cache.area(), magazine, 1, 2) {
+                    cache.to_domain(Domain::ZERO, class, magazine);
+                }
             }
         },
         |_| {},
         |world, _| world.check(false),
     );
     report("depot", found);
+}
+
+/// A pop and a push back onto a domain's stack race a look that finds the stack empty and
+/// clears its bit in the sets of what the domains hold (`held.rs`): the census checks that a
+/// stack holding a magazine ends with both its bits set.
+fn held_hints_stay_set_under_every_schedule(bounds: Bounds) {
+    let found = explore(
+        bounds,
+        2,
+        || {
+            let world = World::new(6, 0);
+            let machine = world.machine(THREADS - 1, 0);
+            let cache = world.rig.cache(&machine);
+            let class = tiny_class();
+            let magazine = cache.area().create(class.magazine()).unwrap();
+            let object = world.rig.source.alloc_one(class).unwrap();
+            magazine.set_object(1, object);
+            magazine.set_level(1);
+            cache.to_domain(Domain::ZERO, class, magazine);
+            world
+        },
+        |world, me| {
+            let machine = world.machine(me, 0);
+            let cache = world.rig.cache(&machine);
+            let class = tiny_class();
+            if me == 0 {
+                let stack = world.rig.depot.full(Pool::Domain(Domain::ZERO), class);
+                if let Some(magazine) = stack.pop(cache.area(), class.magazine()) {
+                    cache.to_domain(Domain::ZERO, class, magazine);
+                }
+            } else {
+                cache.unhold(Domain::ZERO, class);
+            }
+        },
+        |_| {},
+        |world, _| world.check(false),
+    );
+    report("held hints", found);
+}
+
+impl World {
+    /// A heap whose every CPU is a cache domain of its own, so that CPU 0 and CPU 1 use
+    /// different stacks and each is "another domain" to the other, with `classes`.
+    fn in_two_domains(classes: &[SmallClass]) -> World {
+        let os = SimOs::new();
+        os.set_topology(SimTopology::Blocks(1));
+        let world = World {
+            rig: Rig::with_os(os, classes, 6, TIGHT),
+            migrations: AtomicUsize::new(0),
+            user: Mutex::new(Vec::new()),
+        };
+        let machine = world.machine(THREADS - 1, 0);
+        assert!(world.rig.cache(&machine).prepare());
+        assert!(world.rig.depot.domain_count() >= 2);
+        world
+    }
+
+    /// Makes a magazine with one object of `class` and sends it to `domain`'s stacks, as a
+    /// slow path of that domain retiring it would.
+    fn park(&self, machine: &CheckCpu<'_>, domain: Domain, class: SmallClass) {
+        let cache = self.rig.cache(machine);
+        let magazine = cache.area().create(class.magazine()).unwrap();
+        let object = self.rig.source.alloc_one(class).unwrap();
+        magazine.set_object(1, object);
+        magazine.set_level(1);
+        cache.to_domain(domain, class, magazine);
+    }
+}
+
+/// The two largest classes, whose magazines hold two objects.
+fn two_tiny_classes() -> [SmallClass; 2] {
+    let mut classes: Vec<SmallClass> = SmallClass::all()
+        .filter(|c| c.magazine() == MagazineSize::MIN)
+        .collect();
+    classes.reverse();
+    [classes[0], classes[1]]
+}
+
+/// What no scenario above reaches, since each runs in one cache domain: CPU 1's periodic look
+/// at a stack of CPU 0's domain (`held.rs`, `look_elsewhere`), which starts the stack's interval,
+/// sets its debt and clears its hint if it finds it empty, and the shed that then launders from
+/// that stack (`shed.rs`), racing the stack's own domain popping it and pushing back. Every
+/// magazine keeps one owner, and a stack that ends holding a magazine has both its hints.
+fn a_look_and_a_shed_from_another_domain_keep_one_owner_and_the_hints(bounds: Bounds) {
+    let class = tiny_class();
+    let home = Domain::ZERO;
+    let found = explore(
+        bounds,
+        2,
+        || {
+            let world = World::in_two_domains(&[class]);
+            let machine = world.machine(THREADS - 1, 0);
+            world.park(&machine, home, class);
+            // A look saw the stack this deep two intervals ago, so the next look finds that it
+            // owes all of it.
+            let cache = world.rig.cache(&machine);
+            cache.look_at_depth(Pool::Domain(home), class, world.rig.os().ticks());
+            world.rig.os().advance_clock(2 * IDLE_TICKS);
+            world
+        },
+        |world, me| {
+            let machine = world.machine(me, me);
+            let cache = world.rig.cache(&machine);
+            if me == 0 {
+                let stack = world.rig.depot.full(Pool::Domain(home), class);
+                if let Some(magazine) = stack.pop(cache.area(), class.magazine()) {
+                    cache.to_domain(home, class, magazine);
+                }
+            } else {
+                let here = world.rig.depot.domain_of(world.rig.slabs().cpu(1));
+                assert_ne!(here, home);
+                cache.look_elsewhere(here, 0, world.rig.os().ticks());
+                cache.shed(1);
+            }
+        },
+        |_| {},
+        |world, _| world.check(false),
+    );
+    report("look and shed elsewhere", found);
+}
+
+/// The hint of which domains hold magazines, against a push of another class: CPU 1's look
+/// finds one class's stack in CPU 0's domain empty and clears its bit, which leaves the
+/// domain's set empty, so it clears the domain's bit too; meanwhile CPU 0 pushes a magazine of
+/// a second class onto its empty stack there. The domain must end marked, or no look from
+/// another domain would visit the stack again (`held.rs`, `unhold_domain`).
+fn a_domains_hint_survives_a_look_that_empties_another_class(bounds: Bounds) {
+    let [emptied, pushed] = two_tiny_classes();
+    let home = Domain::ZERO;
+    let found = explore(
+        bounds,
+        2,
+        || {
+            let world = World::in_two_domains(&[emptied, pushed]);
+            let machine = world.machine(THREADS - 1, 0);
+            world.park(&machine, home, emptied);
+            // Take it back out: the stack is empty and its bits are still set, as after the
+            // domain's own pop.
+            let cache = world.rig.cache(&machine);
+            let stack = world.rig.depot.full(Pool::Domain(home), emptied);
+            let magazine = stack.pop(cache.area(), emptied.magazine()).unwrap();
+            cache.launder_held(emptied, &magazine);
+            cache.to_domain(home, emptied, magazine);
+            world
+        },
+        |world, me| {
+            let machine = world.machine(me, me);
+            if me == 0 {
+                world.park(&machine, home, pushed);
+            } else {
+                let cache = world.rig.cache(&machine);
+                let here = world.rig.depot.domain_of(world.rig.slabs().cpu(1));
+                cache.look_elsewhere(here, 0, world.rig.os().ticks());
+            }
+        },
+        |_| {},
+        |world, _| world.check(false),
+    );
+    report("domain hint", found);
+}
+
+/// A push that first reads its stack holding a magazine and, after another thread pops that
+/// one, lands on an empty stack, while a look clears the emptied stack's hint in between: the
+/// push must still count as one onto an empty stack and set the hint again (`Stack::push_under`
+/// reports the emptiness its successful compare-and-swap saw, not its first read's).
+fn a_push_that_retries_onto_an_emptied_stack_sets_its_hint(bounds: Bounds) {
+    let class = tiny_class();
+    let home = Domain::ZERO;
+    let found = explore(
+        bounds,
+        3,
+        || {
+            // Room for two magazines under the cap, so that the push is not turned away.
+            let os = SimOs::new();
+            let tuning = super::Tuning {
+                domain_cap: 4 * class.size(),
+                ..TIGHT
+            };
+            let world = World {
+                rig: Rig::with_os(os, &[class], 6, tuning),
+                migrations: AtomicUsize::new(0),
+                user: Mutex::new(Vec::new()),
+            };
+            let machine = world.machine(THREADS - 1, 0);
+            world.park(&machine, home, class);
+            world
+        },
+        |world, me| {
+            let machine = world.machine(me, 0);
+            let cache = world.rig.cache(&machine);
+            match me {
+                0 => world.park(&machine, home, class),
+                1 => {
+                    let stack = world.rig.depot.full(Pool::Domain(home), class);
+                    if let Some(magazine) = stack.pop(cache.area(), class.magazine()) {
+                        cache.launder_held(class, &magazine);
+                        cache.to_domain(home, class, magazine);
+                    }
+                }
+                _ => cache.unhold(home, class),
+            }
+        },
+        |_| {},
+        |world, _| world.check(false),
+    );
+    report("push onto an emptied stack", found);
+}
+
+/// Two looks from another domain and a push: one look clears the class's bit and, finding that
+/// the push came, sets it back, while the other finds the domain's set empty in between and
+/// clears the domain's bit. Whoever sets a class bit back must make sure of the domain's
+/// (`held.rs`), or the stack ends with its class marked in a domain no look visits.
+fn two_looks_and_a_push_leave_the_domain_marked(bounds: Bounds) {
+    let class = tiny_class();
+    let home = Domain::ZERO;
+    let found = explore(
+        bounds,
+        3,
+        || {
+            let world = World::in_two_domains(&[class]);
+            let machine = world.machine(THREADS - 1, 0);
+            world.park(&machine, home, class);
+            let cache = world.rig.cache(&machine);
+            let stack = world.rig.depot.full(Pool::Domain(home), class);
+            let magazine = stack.pop(cache.area(), class.magazine()).unwrap();
+            cache.launder_held(class, &magazine);
+            cache.to_domain(home, class, magazine);
+            world
+        },
+        |world, me| {
+            if me == 0 {
+                world.park(&world.machine(me, 0), home, class);
+            } else {
+                let machine = world.machine(me, 1);
+                let cache = world.rig.cache(&machine);
+                let here = world.rig.depot.domain_of(world.rig.slabs().cpu(1));
+                cache.look_elsewhere(here, 0, world.rig.os().ticks());
+            }
+        },
+        |_| {},
+        |world, _| world.check(false),
+    );
+    report("two looks and a push", found);
 }
 
 #[test]
@@ -537,8 +786,11 @@ fn a_fence_aborts_the_sequence_in_flight_on_its_cpu() {
 }
 
 /// The scenarios within bounds small enough for the merge gate, and within the larger bounds
-/// they were checked with, which run on demand: `cargo test -p asmalloc -- --ignored interleave`
-/// (a few minutes). Only the larger bounds reach the schedules in which a sequence commits
+/// they were checked with, which run on demand in an optimized build:
+/// `cargo test --release -p asmalloc --lib -- --ignored depot::interleave` (several minutes;
+/// `scripts/gate --all` runs it). A debug build takes ten times as long, over ten minutes for
+/// the drain and a mutator, so the full runs exist only in optimized builds; the debug build
+/// runs the quick bounds. Only the larger bounds reach the schedules in which a sequence commits
 /// over a drainer's marker (two preemptions) or a fork takes a drainer mid-drain (one
 /// preemption and a fork); deliberately broken drains, back-outs and claim checks pass the
 /// quick runs and fail the full ones.
@@ -552,7 +804,8 @@ mod run {
     }
 
     #[test]
-    #[ignore = "slow: run with scripts/gate --all"]
+    #[cfg(not(debug_assertions))]
+    #[ignore = "slow: run with scripts/gate --all, optimized"]
     fn exchanges_keep_one_owner_under_every_schedule_fully() {
         super::exchanges_keep_one_owner_under_every_schedule(Bounds::preemptions(2));
     }
@@ -568,7 +821,8 @@ mod run {
     }
 
     #[test]
-    #[ignore = "slow: run with scripts/gate --all"]
+    #[cfg(not(debug_assertions))]
+    #[ignore = "slow: run with scripts/gate --all, optimized"]
     fn a_drain_and_a_mutator_keep_one_owner_under_every_schedule_fully() {
         // The mutator may also move to the other CPU once, mid-drain.
         super::a_drain_and_a_mutator_keep_one_owner_under_every_schedule(
@@ -585,7 +839,8 @@ mod run {
     }
 
     #[test]
-    #[ignore = "slow: run with scripts/gate --all"]
+    #[cfg(not(debug_assertions))]
+    #[ignore = "slow: run with scripts/gate --all, optimized"]
     fn two_drains_and_a_mutator_keep_one_owner_under_every_schedule_fully() {
         super::two_drains_and_a_mutator_keep_one_owner_under_every_schedule(Bounds::preemptions(1));
     }
@@ -600,7 +855,8 @@ mod run {
     }
 
     #[test]
-    #[ignore = "slow: run with scripts/gate --all"]
+    #[cfg(not(debug_assertions))]
+    #[ignore = "slow: run with scripts/gate --all, optimized"]
     fn a_drain_that_backs_out_keeps_one_owner_under_every_schedule_fully() {
         super::a_drain_that_backs_out_keeps_one_owner_under_every_schedule(
             Bounds::preemptions(2),
@@ -615,7 +871,8 @@ mod run {
     }
 
     #[test]
-    #[ignore = "slow: run with scripts/gate --all"]
+    #[cfg(not(debug_assertions))]
+    #[ignore = "slow: run with scripts/gate --all, optimized"]
     fn a_fork_at_any_step_duplicates_nothing_fully() {
         super::a_fork_at_any_step_duplicates_nothing(Bounds::preemptions(1).with_fork(), MUTATE);
     }
@@ -630,7 +887,8 @@ mod run {
     }
 
     #[test]
-    #[ignore = "slow: run with scripts/gate --all"]
+    #[cfg(not(debug_assertions))]
+    #[ignore = "slow: run with scripts/gate --all, optimized"]
     fn maintain_and_a_mutator_keep_one_owner_under_every_schedule_fully() {
         super::maintain_and_a_mutator_keep_one_owner_under_every_schedule(
             Bounds::preemptions(2),
@@ -647,7 +905,8 @@ mod run {
     }
 
     #[test]
-    #[ignore = "slow: run with scripts/gate --all"]
+    #[cfg(not(debug_assertions))]
+    #[ignore = "slow: run with scripts/gate --all, optimized"]
     fn a_fork_at_any_step_of_maintain_duplicates_nothing_fully() {
         super::a_fork_at_any_step_of_maintain_duplicates_nothing(
             Bounds::preemptions(1).with_fork(),
@@ -664,7 +923,8 @@ mod run {
     }
 
     #[test]
-    #[ignore = "slow: run with scripts/gate --all"]
+    #[cfg(not(debug_assertions))]
+    #[ignore = "slow: run with scripts/gate --all, optimized"]
     fn an_age_take_and_a_mutator_keep_one_owner_under_every_schedule_fully() {
         super::an_age_take_and_a_mutator_keep_one_owner_under_every_schedule(
             Bounds::preemptions(2),
@@ -679,7 +939,8 @@ mod run {
     }
 
     #[test]
-    #[ignore = "slow: run with scripts/gate --all"]
+    #[cfg(not(debug_assertions))]
+    #[ignore = "slow: run with scripts/gate --all, optimized"]
     fn an_age_take_and_a_drain_keep_one_owner_under_every_schedule_fully() {
         super::an_age_take_and_a_drain_keep_one_owner_under_every_schedule(Bounds::preemptions(2));
     }
@@ -691,8 +952,78 @@ mod run {
     }
 
     #[test]
-    #[ignore = "slow: run with scripts/gate --all"]
+    #[cfg(not(debug_assertions))]
+    #[ignore = "slow: run with scripts/gate --all, optimized"]
     fn depot_stacks_keep_one_owner_under_every_schedule_fully() {
         super::depot_stacks_keep_one_owner_under_every_schedule(Bounds::preemptions(3));
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn held_hints_stay_set_under_every_schedule_quickly() {
+        super::held_hints_stay_set_under_every_schedule(Bounds::preemptions(2));
+    }
+
+    #[test]
+    #[cfg(not(debug_assertions))]
+    #[ignore = "slow: run with scripts/gate --all, optimized"]
+    fn held_hints_stay_set_under_every_schedule_fully() {
+        super::held_hints_stay_set_under_every_schedule(Bounds::preemptions(3));
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn a_look_and_a_shed_from_another_domain_keep_one_owner_and_the_hints_quickly() {
+        super::a_look_and_a_shed_from_another_domain_keep_one_owner_and_the_hints(
+            Bounds::preemptions(2),
+        );
+    }
+
+    #[test]
+    #[cfg(not(debug_assertions))]
+    #[ignore = "slow: run with scripts/gate --all, optimized"]
+    fn a_look_and_a_shed_from_another_domain_keep_one_owner_and_the_hints_fully() {
+        super::a_look_and_a_shed_from_another_domain_keep_one_owner_and_the_hints(
+            Bounds::preemptions(3),
+        );
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn a_push_that_retries_onto_an_emptied_stack_sets_its_hint_quickly() {
+        super::a_push_that_retries_onto_an_emptied_stack_sets_its_hint(Bounds::preemptions(1));
+    }
+
+    #[test]
+    #[cfg(not(debug_assertions))]
+    #[ignore = "slow: run with scripts/gate --all, optimized"]
+    fn a_push_that_retries_onto_an_emptied_stack_sets_its_hint_fully() {
+        super::a_push_that_retries_onto_an_emptied_stack_sets_its_hint(Bounds::preemptions(2));
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn two_looks_and_a_push_leave_the_domain_marked_quickly() {
+        super::two_looks_and_a_push_leave_the_domain_marked(Bounds::preemptions(2));
+    }
+
+    #[test]
+    #[cfg(not(debug_assertions))]
+    #[ignore = "slow: run with scripts/gate --all, optimized"]
+    fn two_looks_and_a_push_leave_the_domain_marked_fully() {
+        super::two_looks_and_a_push_leave_the_domain_marked(Bounds::preemptions(3));
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn a_domains_hint_survives_a_look_that_empties_another_class_quickly() {
+        super::a_domains_hint_survives_a_look_that_empties_another_class(Bounds::preemptions(2));
+    }
+
+    #[test]
+    #[cfg(not(debug_assertions))]
+    #[ignore = "slow: run with scripts/gate --all, optimized"]
+    fn a_domains_hint_survives_a_look_that_empties_another_class_fully() {
+        super::a_domains_hint_survives_a_look_that_empties_another_class(Bounds::preemptions(3));
     }
 }

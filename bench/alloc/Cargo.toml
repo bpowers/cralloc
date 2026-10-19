@@ -28,6 +28,11 @@ memacct = []
 # asmalloc with its background thread, which `init` starts (asmalloc's `background` feature).
 # A measurement option on top of the asmalloc feature: build.rs does not count it.
 asmalloc-background = ["asmalloc", "asmalloc/background"]
+# asmalloc with its cache domains split by `ASMALLOC_DOMAIN_WIDTH=<n>` (CPUs n*k to n*k+n-1 in
+# domain k) instead of by L3, which `init` applies; for measuring the depot with more domains
+# than the machine has. A measurement option on top of the asmalloc feature, never a build
+# that is compared with other allocators: build.rs does not count it.
+asmalloc-domains = ["asmalloc", "asmalloc/internals"]
 # tikv-jemallocator itself, default features: its static, prefixed jemalloc build, which is
 # what a Rust service that depends on it gets.
 je = ["dep:tikv-jemallocator"]

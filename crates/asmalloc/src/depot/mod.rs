@@ -11,12 +11,12 @@
 //! never waits: when the slab word is a live marker, or the thread has no valid CPU, it serves
 //! the request from the magazine it holds and sends that magazine to the depot.
 //!
-//! The depot ([`Depot`]) holds, per class, a stack of magazines with objects in them and, per
-//! magazine size, a stack of empty ones (`stack.rs`). Each slow path then does a bounded amount
-//! of maintenance, the heartbeat (`heartbeat.rs`): a magazine laundered back to the source when
-//! the class's depot stack is over its target, one purge step, and one look for an idle cache,
-//! which it drains (`drain.rs`) under a claim that carries the process generation
-//! (`generation.rs`).
+//! The depot ([`Depot`]) holds, per class, stacks of magazines with objects in them and, per
+//! magazine size, stacks of empty ones (`stack.rs`): one of each per cache domain, capped, and
+//! one shared (see [`Depot`]). Each slow path then does a bounded amount of maintenance, the
+//! heartbeat (`heartbeat.rs`): a magazine laundered back to the source when the class's shared
+//! stack is over its target, one purge step, and one look for an idle cache, which it drains
+//! (`drain.rs`) under a claim that carries the process generation (`generation.rs`).
 //!
 //! Objects parked in magazines pin the pages they lie on, so three rules keep them moving back
 //! to the source, where fills take the lowest free addresses: a magazine loaded for an
@@ -39,6 +39,7 @@ pub(crate) mod domain;
 mod drain;
 mod generation;
 mod heartbeat;
+mod held;
 mod inspect;
 #[cfg(test)]
 mod interleave;
@@ -75,20 +76,20 @@ use crate::front::{Cpu, Routines, Slab};
 use crate::lined::Lined;
 use crate::os::Os;
 use crate::space::Space;
+use core::cell::Cell;
 
 /// The bytes of objects a class's depot stack holds before the heartbeat launders magazines
 /// back to the source, by default. Two magazine budgets, scaled with the budget when the
 /// budget sweep chose it (`docs/research/memory.md`, "Magazine budget").
 pub const DEPOT_TARGET: usize = 128 << 10;
 
-/// The bytes of objects another cache domain's stack of a class must hold before a slow path
-/// takes from it, by default: half the target, the share of it each of two domains in use
-/// holds before its own heartbeats launder to the source anyway, so that a flow from that
-/// domain to this one is taken and a balanced domain is left alone. The whole target sent half
-/// of the flow of a pipeline split across two L3s through the bitmaps; a quarter let
-/// independent pipelines in two L3s take each other's magazines
-/// (`docs/research/launder-and-fill.md`, "A depot per cache domain").
-pub const TAKE_ACROSS: usize = DEPOT_TARGET / 2;
+/// The bytes of objects a cache domain's stack of a class holds before the magazines freed
+/// there go to the class's shared stack instead, by default: a quarter of the target, which
+/// leaves the shared stack the rest, so that a process on one domain parks what it did when
+/// there was one stack per class. Half the target was no faster on any job that crosses L3s,
+/// slower on some, and parked up to 0.7 MiB more in them (`docs/research/launder-and-fill.md`,
+/// "Domain stacks and a shared stack").
+pub const DOMAIN_CAP: usize = DEPOT_TARGET / 4;
 
 /// The limits on memory parked in caches, how often the heartbeat looks around, and which of
 /// the rules that return parked objects are on. Constants in the allocator; tests change them
@@ -100,12 +101,13 @@ pub struct Tuning {
     pub spare_budget: usize,
     /// The most magazines one spare stack holds.
     pub max_spares: usize,
-    /// Bytes of objects a class's depot stack holds before the heartbeat launders, shared among
-    /// the cache domains whose stacks of the class hold anything (`heartbeat.rs`).
+    /// Bytes of objects a class's stacks hold in a process on one cache domain: the domain
+    /// stack's cap and the shared stack's target together.
     pub depot_target: usize,
-    /// Bytes of objects a class's stack in another cache domain must hold before a slow path
-    /// whose own domain's stack is empty takes from it (`slow.rs`).
-    pub take_across: usize,
+    /// Bytes of objects a class's stack in one cache domain holds before magazines go to the
+    /// shared stack instead; the rest of `depot_target` is the shared stack's target, over
+    /// which the heartbeat launders (`heartbeat.rs`).
+    pub domain_cap: usize,
     /// How many of its own slow paths a CPU makes between looks for an idle slab, and between
     /// looks at a depot stack that no slow path is serving.
     pub look_every: u64,
@@ -124,7 +126,7 @@ impl Tuning {
         spare_budget: SPARE_BUDGET,
         max_spares: MAX_SPARES,
         depot_target: DEPOT_TARGET,
-        take_across: TAKE_ACROSS,
+        domain_cap: DOMAIN_CAP,
         look_every: LOOK_EVERY,
         refresh_every: REFRESH_EVERY,
         age_limit: true,
@@ -136,23 +138,36 @@ impl Tuning {
 /// allocator; the all-zero value is valid: empty stacks, no magazines made, nothing prepared,
 /// one cache domain.
 ///
-/// The stacks are per cache domain ([`domain`]): a slow path pushes to and pops from its CPU's
-/// domain's, so that magazines, and the objects they name, stay in the L3 that freed them.
-/// Untouched domains cost no memory.
+/// **Two levels.** Each class has a stack of magazines with objects in each cache domain
+/// ([`domain`]), and one shared stack; so does each magazine size, for empty magazines. A slow
+/// path retiring a magazine pushes it on its CPU's domain's stack if that holds less than its
+/// cap, else on the shared stack; one that needs a magazine pops its domain's stack, else the
+/// shared one, else fills or makes one. Nobody reads another domain's stack on a slow path. So
+/// a domain in balance keeps its magazines, and the objects they name, in its own L3: they
+/// reach the shared stack only at the ends of its range. A flow of objects from one domain to
+/// another fills the freeing domain's stack once and then passes through the shared stack at
+/// two atomic instructions a magazine, however many other domains use the class. The cap
+/// bounds what a domain parks; the heartbeat launders the shared stack down to its target
+/// (`heartbeat.rs`), and every stack sheds what it did not need (`shed.rs`), a quiet domain's
+/// through the other domains' looks (`held.rs`). Untouched domains cost no memory.
 ///
 /// Every group of words is on lines of its own (`crate::lined`): a class's full stack with its
-/// water mark, which its pushes, pops and sheds write; each size's empty stack; each domain's
-/// set of owing classes; the magazine area's growth; the start-up status and the CPU count,
-/// which every slow path reads and almost nothing writes; and the set of domains that owe.
-/// Packed together, the stack heads of eight classes shared a line, and two CPUs exchanging
-/// magazines of different classes took it from each other on every push and pop.
+/// water mark, which its pushes, pops and sheds write; each size's empty stack; each pool's
+/// set of owing classes and of classes it holds; the magazine area's growth; the start-up
+/// status and the CPU count, which every slow path reads and almost nothing writes; and the
+/// sets of domains that owe and that hold magazines. Packed together, the stack heads of eight
+/// classes shared a line, and two CPUs exchanging magazines of different classes took it from
+/// each other on every push and pop.
 pub struct Depot {
-    /// Per cache domain.
-    domains: [DomainDepot; MAX_DOMAINS],
+    /// Per cache domain, and the shared pool last ([`Pool::index`]).
+    pools: [Stacks; POOLS],
     growth: Lined<Growth>,
-    shared: Lined<Shared>,
+    common: Lined<Common>,
     /// The domains whose stacks owe magazines to the source, one bit per domain (`shed.rs`).
     owing_domains: Lined<AtomicU64>,
+    /// The domains whose stacks of some class may hold magazines, one bit per domain
+    /// (`held.rs`).
+    held_domains: Lined<AtomicU64>,
     /// Which CPUs are in which domain.
     topology: domain::Domains,
     /// Magazines made, for audits.
@@ -160,19 +175,45 @@ pub struct Depot {
     created: std::sync::atomic::AtomicUsize,
 }
 
-/// One cache domain's stacks.
-struct DomainDepot {
+/// The pools of stacks: one per cache domain and the shared one.
+const POOLS: usize = MAX_DOMAINS + 1;
+
+/// Which of the depot's sets of stacks: a cache domain's, or the shared one.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum Pool {
+    /// The stacks of the CPUs of one cache domain.
+    Domain(Domain),
+    /// The stacks every domain overflows into and takes from when its own are empty.
+    Shared,
+}
+
+impl Pool {
+    /// The pool's place in the depot: its domain's number, or [`MAX_DOMAINS`] for the shared one.
+    const fn index(self) -> usize {
+        match self {
+            Pool::Domain(domain) => domain.index(),
+            Pool::Shared => MAX_DOMAINS,
+        }
+    }
+}
+
+/// One pool's stacks.
+struct Stacks {
     /// Per small class, by ordinal.
     classes: [Lined<ClassDepot>; SMALL_COUNT],
     /// Per magazine size, by ordinal: empty magazines.
     empty: [Lined<Stack>; MagazineSize::COUNT],
-    /// The classes whose stacks owe magazines to the source, one bit per ordinal (`shed.rs`).
+    /// The classes whose stacks here owe magazines to the source, one bit per ordinal
+    /// (`shed.rs`).
     owing: Lined<AtomicU64>,
+    /// The classes whose stacks here may hold magazines, one bit per ordinal (`held.rs`); only
+    /// a domain's pool keeps it.
+    held: Lined<AtomicU64>,
 }
 
-impl DomainDepot {
-    const fn new() -> DomainDepot {
-        DomainDepot {
+impl Stacks {
+    const fn new() -> Stacks {
+        Stacks {
             classes: [const {
                 Lined::new(ClassDepot {
                     full: Stack::new(),
@@ -181,11 +222,12 @@ impl DomainDepot {
             }; SMALL_COUNT],
             empty: [const { Lined::new(Stack::new()) }; MagazineSize::COUNT],
             owing: Lined::new(AtomicU64::new(0)),
+            held: Lined::new(AtomicU64::new(0)),
         }
     }
 }
 
-/// One class's part of a domain's depot.
+/// One class's part of a pool.
 struct ClassDepot {
     /// Magazines with objects in them.
     full: Stack,
@@ -203,7 +245,7 @@ struct Growth {
 }
 
 /// What every slow path reads and almost nothing writes.
-struct Shared {
+struct Common {
     /// What start-up has done (`generation.rs`).
     status: AtomicU64,
     /// One more than the largest CPU number a slow path has run on.
@@ -215,44 +257,50 @@ impl Depot {
     #[allow(clippy::new_without_default)]
     pub const fn new() -> Depot {
         Depot {
-            domains: [const { DomainDepot::new() }; MAX_DOMAINS],
+            pools: [const { Stacks::new() }; POOLS],
             growth: Lined::new(Growth {
                 carved: AtomicUsize::new(0),
                 committed: AtomicUsize::new(0),
             }),
-            shared: Lined::new(Shared {
+            common: Lined::new(Common {
                 status: AtomicU64::new(0),
                 cpus: AtomicUsize::new(0),
             }),
             owing_domains: Lined::new(AtomicU64::new(0)),
+            held_domains: Lined::new(AtomicU64::new(0)),
             topology: domain::Domains::new(),
             #[cfg(test)]
             created: std::sync::atomic::AtomicUsize::new(0),
         }
     }
 
-    fn domain(&self, domain: Domain) -> &DomainDepot {
-        &self.domains[domain.index()]
+    fn pool(&self, pool: Pool) -> &Stacks {
+        &self.pools[pool.index() % POOLS]
     }
 
-    /// The stack of magazines with objects of `class` in `domain`.
-    pub(crate) fn full(&self, domain: Domain, class: SmallClass) -> &Stack {
-        &self.domain(domain).classes[class.ordinal() % SMALL_COUNT].full
+    /// The stack of magazines with objects of `class` in `pool`.
+    pub(crate) fn full(&self, pool: Pool, class: SmallClass) -> &Stack {
+        &self.pool(pool).classes[class.ordinal() % SMALL_COUNT].full
     }
 
-    /// The water mark of the class of ordinal `ordinal` in `domain` (`shed.rs`).
-    pub(crate) fn water(&self, domain: Domain, ordinal: usize) -> &AtomicU64 {
-        &self.domain(domain).classes[ordinal % SMALL_COUNT].water
+    /// The water mark of the class of ordinal `ordinal` in `pool` (`shed.rs`).
+    pub(crate) fn water(&self, pool: Pool, ordinal: usize) -> &AtomicU64 {
+        &self.pool(pool).classes[ordinal % SMALL_COUNT].water
     }
 
-    /// The set of classes whose stacks in `domain` owe (`shed.rs`).
-    pub(crate) fn owing(&self, domain: Domain) -> &AtomicU64 {
-        &self.domain(domain).owing
+    /// The set of classes whose stacks in `pool` owe (`shed.rs`).
+    pub(crate) fn owing(&self, pool: Pool) -> &AtomicU64 {
+        &self.pool(pool).owing
     }
 
-    /// The stack of empty magazines of `size` in `domain`.
-    pub(crate) fn empty(&self, domain: Domain, size: MagazineSize) -> &Stack {
-        &self.domain(domain).empty[size.ordinal() % MagazineSize::COUNT]
+    /// The set of classes whose stacks in `domain` may hold magazines (`held.rs`).
+    pub(crate) fn held(&self, domain: Domain) -> &AtomicU64 {
+        &self.pool(Pool::Domain(domain)).held
+    }
+
+    /// The stack of empty magazines of `size` in `pool`.
+    pub(crate) fn empty(&self, pool: Pool, size: MagazineSize) -> &Stack {
+        &self.pool(pool).empty[size.ordinal() % MagazineSize::COUNT]
     }
 
     /// How many cache domains the stacks are kept for: 1 until start-up has found more.
@@ -260,14 +308,27 @@ impl Depot {
         self.topology.count()
     }
 
-    /// Every domain in use.
-    pub(crate) fn all_domains(&self) -> impl Iterator<Item = Domain> {
-        (0..self.domain_count()).map(Domain::folded)
+    /// Every pool in use: each domain's, then the shared one.
+    pub(crate) fn pools(&self) -> impl Iterator<Item = Pool> {
+        (0..self.domain_count())
+            .map(|n| Pool::Domain(Domain::folded(n)))
+            .chain([Pool::Shared])
     }
 
     /// The domain of CPU `cpu`; domain 0 for none.
     pub(crate) fn domain_of(&self, cpu: Option<Cpu>) -> Domain {
         self.topology.of(cpu.map(Cpu::index))
+    }
+
+    /// Puts CPU number `c` in cache domain `c / width` instead of the domain discovery gave
+    /// it, so that a test or benchmark can run with more domains than the machine has L3s. A
+    /// slow path that reads the table while it changes may use either domain; nothing but
+    /// where magazines are kept depends on it. Only with the hidden feature `internals`, never
+    /// in a build that serves a program.
+    #[cfg(any(test, feature = "internals"))]
+    #[doc(hidden)]
+    pub fn split_domains<O: Os>(&self, os: &O, width: usize) {
+        self.topology.split(os, width);
     }
 }
 
@@ -283,6 +344,12 @@ pub struct Cache<'a, O: Os, R: Routines, S: Source> {
     routines: R,
     source: &'a S,
     tuning: Tuning,
+    /// The class of the last magazine with objects this view pushed on a shared stack, for the
+    /// heartbeat's look at that stack's target (`heartbeat.rs`). Only a push makes a stack
+    /// deeper, so a slow path that pushed none need not read the shared head, which every
+    /// domain's overflow writes. A view lasts one call, so this is the call's, not the
+    /// thread's.
+    overflowed: Cell<Option<SmallClass>>,
 }
 
 impl<'a, O: Os, R: Routines, S: Source> Cache<'a, O, R, S> {
@@ -317,6 +384,7 @@ impl<'a, O: Os, R: Routines, S: Source> Cache<'a, O, R, S> {
             routines,
             source,
             tuning,
+            overflowed: Cell::new(None),
         }
     }
 
@@ -344,20 +412,93 @@ impl<'a, O: Os, R: Routines, S: Source> Cache<'a, O, R, S> {
         self.depot.domain_of(self.routines.cpu())
     }
 
-    /// Sends a magazine this thread holds to the depot of the domain the thread is in: to its
-    /// class's stack if it has objects, else to its size's empty stack.
+    /// The objects of `class` a domain's stack holds before magazines go to the shared stack:
+    /// at least one, so that the stack takes at least a magazine.
+    pub(super) fn domain_cap(&self, class: SmallClass) -> u32 {
+        (self.tuning.domain_cap / class.size()).clamp(1, u32::MAX as usize) as u32
+    }
+
+    /// The empty magazines of `class`'s size a domain's stack holds before they go to the
+    /// shared stack: as many as the domain's full stack of the class holds, at least one.
+    fn empty_cap(&self, class: SmallClass) -> u32 {
+        self.domain_cap(class)
+            .div_ceil(class.magazine().capacity() as u32)
+            .max(1)
+    }
+
+    /// The objects of `class` the shared stack holds before the heartbeat launders from it:
+    /// what the target leaves after the domain's cap, and at least a magazine, so that a flow
+    /// between domains passes through it instead of being laundered as it arrives.
+    pub(super) fn shared_target(&self, class: SmallClass) -> usize {
+        let bytes = self
+            .tuning
+            .depot_target
+            .saturating_sub(self.tuning.domain_cap);
+        (bytes / class.size()).max(class.magazine().capacity())
+    }
+
+    /// Sends a magazine this thread holds to the depot for the domain the thread is in.
     fn to_depot(&self, class: SmallClass, magazine: Magazine<'_>) {
         self.to_domain(self.here(), class, magazine);
     }
 
-    /// Sends a magazine this thread holds to `domain`'s depot, as [`Cache::to_depot`] does.
+    /// Sends a magazine this thread holds to `domain`'s stacks: its class's stack if it has
+    /// objects, else its size's empty stack, if that is under its cap; else to the shared
+    /// stack of the same kind.
     fn to_domain(&self, domain: Domain, class: SmallClass, magazine: Magazine<'_>) {
-        if magazine.level() > 0 {
-            self.depot.full(domain, class).push(self.area, magazine);
+        let pool = Pool::Domain(domain);
+        let level = magazine.level() as u32;
+        let overflow = if level > 0 {
+            match self.depot.full(pool, class).push_under(
+                self.area,
+                magazine,
+                level,
+                self.domain_cap(class),
+            ) {
+                Ok(pushed) => {
+                    if pushed.onto_empty {
+                        self.hold(domain, class);
+                    }
+                    return;
+                }
+                Err(magazine) => magazine,
+            }
+        } else {
+            let size = magazine.size();
+            match self.depot.empty(pool, size).push_under(
+                self.area,
+                magazine,
+                1,
+                self.empty_cap(class),
+            ) {
+                Ok(_) => return,
+                Err(magazine) => magazine,
+            }
+        };
+        self.to_shared(class, overflow);
+    }
+
+    /// Sends a magazine this thread holds to the shared stacks.
+    fn to_shared(&self, class: SmallClass, magazine: Magazine<'_>) {
+        let level = magazine.level() as u32;
+        if level > 0 {
+            self.depot
+                .full(Pool::Shared, class)
+                .push(self.area, magazine, level);
+            self.overflowed.set(Some(class));
         } else {
             self.depot
-                .empty(domain, magazine.size())
-                .push(self.area, magazine);
+                .empty(Pool::Shared, magazine.size())
+                .push(self.area, magazine, 1);
+        }
+    }
+
+    /// Sends a magazine this thread holds to `pool`'s stacks, as [`Cache::to_domain`] does for
+    /// a domain's.
+    fn to_pool(&self, pool: Pool, class: SmallClass, magazine: Magazine<'_>) {
+        match pool {
+            Pool::Domain(domain) => self.to_domain(domain, class, magazine),
+            Pool::Shared => self.to_shared(class, magazine),
         }
     }
 
@@ -372,16 +513,16 @@ impl<'a, O: Os, R: Routines, S: Source> Cache<'a, O, R, S> {
         level
     }
 
-    /// Pops one magazine of `class` from its stack in `domain` and launders it; the empty
-    /// magazine goes to that domain's empty stack. Returns how many objects it held, or `None`
+    /// Pops one magazine of `class` from its stack in `pool` and launders it; the empty
+    /// magazine goes to that pool's empty stacks. Returns how many objects it held, or `None`
     /// if the stack was empty.
-    fn launder_one(&self, domain: Domain, class: SmallClass) -> Option<usize> {
+    fn launder_one(&self, pool: Pool, class: SmallClass) -> Option<usize> {
         let magazine = self
             .depot
-            .full(domain, class)
+            .full(pool, class)
             .pop(self.area, class.magazine())?;
         let level = self.launder_held(class, &magazine);
-        self.to_domain(domain, class, magazine);
+        self.to_pool(pool, class, magazine);
         Some(level)
     }
 }

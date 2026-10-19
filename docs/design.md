@@ -421,9 +421,12 @@ handler that allocates, and safe to abandon at any instruction in a forked child
 
 ### Depot
 
-The depot holds, for each cache domain (the CPUs that share a last-level cache), per class a
-stack of non-empty magazines and per magazine size a stack of empty ones. A slow path uses
-the stacks of its CPU's domain. The domains are read once from sysfs, on the process's first
+The depot holds, per class, a stack of non-empty magazines for each cache domain (the CPUs
+that share a last-level cache) and one more shared by all of them, and per magazine size
+the same for empty magazines. A slow path that retires a magazine pushes it on its domain's
+stack while that holds less than a cap, else on the shared stack. One that needs a magazine
+pops its domain's stack, else the shared one, else fills or makes one. The domains are read
+once from sysfs, on the process's first
 slow path and never later, so that a program which has since entered a sandbox is not caught
 opening a file; where they cannot be read there is one domain. A stack head is one 64-bit
 word: a 32-bit magazine number and a 32-bit version
@@ -440,15 +443,21 @@ Magazines stay in the cache domain that freed them. An object's cache lines live
 was last used, and a magazine handed to a CPU under another last-level cache brings objects
 whose every first touch is a miss served from the other cache: with one set of stacks for
 the whole machine, two unrelated pairs of threads on different domains traded magazines
-through it and each ran at half speed. A slow path whose own stack is empty takes from
-another domain's stack only if that one holds at least half the class's target, which a
-flow of objects from one domain to another reaches and a domain in balance does not;
-otherwise it fills from the back end. So objects still cross domains without touching the
-bitmaps when the program really moves them across.
+through it and each ran at half speed.
 
-Each class has a target for the bytes its depot stacks hold, shared among the domains whose
-stacks hold the class, and a stack gives up whatever it did not need during an interval (see
-"Returning memory").
+A domain in balance keeps its magazines: they reach the shared stack only at the ends of
+its range. A flow of objects from one domain to another fills the freeing domain's stack to
+its cap once and then passes through the shared stack, at two atomic instructions a
+magazine, so objects still cross domains without touching the bitmaps when the program
+really moves them across. No slow path reads another domain's stack, so its work does not
+grow with the number of domains, and a flow between two domains cannot stall behind a third
+that happens to hold the class.
+
+Each class has a target for the bytes its depot stacks hold in a process that runs in one
+domain. A domain stack's cap is a quarter of it and the shared stack's target is the rest.
+A domain stack cannot pass its cap, the heartbeat launders the shared stack while it is over
+its target, and every stack gives up whatever it did not need during an interval (see
+"Returning memory"). A class in use on N domains parks at most N caps and the shared target.
 
 ### Back end: regions and bitmaps
 
@@ -528,7 +537,7 @@ of its own can call `maintain` from there and needs no thread. The child of a fo
 inherit the thread.
 
 Objects mostly circulate through magazines and the depot without touching the bitmaps. They
-reach the bitmaps when a class's depot stack is over its target, and through the rules under
+reach the bitmaps when a class's shared depot stack is over its target, and through the rules under
 "Returning memory" that keep parked objects from pinning the heap.
 
 ### Returning memory and huge pages
@@ -547,7 +556,7 @@ rule that returns it (`docs/research/memory.md` has the measurements behind them
 | The tail of a large block that shrinks in place; the pages behind a move made in pieces | The resize (see "Large objects") | At once |
 | Objects in a magazine that stays loaded | A slow path of the same CPU launders it | Once it has been loaded for an interval |
 | Objects in a CPU's full spares | That CPU's sweep launders one magazine and sends the rest to the depot | Once an interval |
-| Objects in a depot stack | A heartbeat launders a magazine; a look at a class looks at its stack in every domain, so a domain that goes quiet sheds as a quiet class does | While the stack is over its target, and for the depth it did not need during an interval |
+| Objects in a depot stack | A heartbeat launders a magazine from the shared stack. Every stack sheds what it did not need, and each periodic look visits one stack of another domain, in rotation over those that hold magazines, so a domain that goes quiet sheds as a quiet class does | While the shared stack is over its target, and for the depth a stack did not need during an interval |
 | Objects in steady circulation | The free that retires a full magazine launders it instead | One retirement in every few |
 | The slab of a CPU the process no longer runs on | The idle drain sends its magazines to the depot (see "Process lifecycle") | After an interval with no slow path there |
 | The part of a huge page above a region's watermark, made resident by the fault and never allocated | The purge carves it and frees it, so that the page can go whole | When the purge reaches that page |

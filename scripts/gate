@@ -82,7 +82,10 @@ tests() {
   if [ -n "$all" ]; then
     # Not the doctests: an ignored doctest is an example that is not meant to run.
     cargo test --workspace --quiet --lib --bins --tests -- --include-ignored &&
-      cargo test --workspace --quiet --doc
+      cargo test --workspace --quiet --doc &&
+      # The depot's full interleaving explorations exist only in optimized builds: a debug build
+      # takes ten times as long, over ten minutes for one of them (depot/interleave.rs).
+      cargo test --release -p asmalloc --lib --quiet -- --ignored depot::interleave::run::
   else
     cargo test --workspace --quiet
   fi
