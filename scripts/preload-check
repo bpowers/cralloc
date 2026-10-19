@@ -83,6 +83,17 @@ if [[ "$(LD_PRELOAD="$lib" "$bin/interposed")" != "asmalloc "* ]]; then
 fi
 echo "work directory: $work"
 
+# Where the library's routines load the rseq offset from: its GOT slot and the dynamic linker's
+# variable, neither of which the crate places (docs/research/zen5-roofline.md, section 16).
+if wanted rseq-offset; then
+  if "$here/rseq-offset-check" "$lib"; then
+    printf 'PASS  %-24s\n' rseq-offset
+  else
+    printf 'FAIL  %-24s\n' rseq-offset
+    failed+=(rseq-offset)
+  fi
+fi
+
 # Data for the compressors: binaries (compressible, varied) and text.
 data="$work/data"
 { cat /usr/bin/bash /usr/bin/python3* /usr/lib64/libc.so.6 2>/dev/null; seq 1 3000000; } >"$data"

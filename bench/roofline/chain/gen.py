@@ -34,7 +34,8 @@ Everything else about the copies is identical.
 
 A variant of the routine text can be measured by passing the name of an alternative generated
 directory in the environment variable CHAIN_GEN (relative to the repository root), which is how
-prototypes of the generator's output are compared with the checked-in one. CHAIN_SPLIT=INSN
+prototypes of the generator's output are compared with the checked-in one. CHAIN_CLASS sets the
+word's position in the slab (`CLASS`). CHAIN_SPLIT=INSN
 inserts a taken `jmp` to the next instruction after the routine's first line equal to INSN
 (the split-run prototype in docs/research/zen5-roofline.md, section 15).
 """
@@ -45,7 +46,9 @@ import sys
 ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", ".."))
 GEN = os.path.join(ROOT, os.environ.get("CHAIN_GEN", "crates/asmalloc/src/front/generated"))
 
-CLASS = 14  # the tree job's node class: its word is SLABS + 0x70
+# The tree job's node class (index 3): its word is SLABS + 0x78, bytes 24 to 31 of chunk 3.
+# CHAIN_CLASS=14 places it at bytes 16 to 23 instead, where it was before 2026-10-19.
+CLASS = int(os.environ.get("CHAIN_CLASS", "15"))
 SLOTS = 1024
 MASK = 8 * SLOTS - 16
 C_SIZE = 100  # (100 + 7) >> 3 = 13: the C size table's entry 13 holds CLASS

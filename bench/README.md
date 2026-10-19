@@ -34,6 +34,11 @@ the quiet-machine gate below. Builds run on `BENCH_BUILD_CPUS` (default `12-15,2
 `run` takes no lock itself: start it under `scripts/measure --both-l3`, since the suite uses
 both L3s.
 
+`build` and `run` refuse an asmalloc build whose routines load the rseq offset at a slab hot
+word's page offset (`scripts/rseq-offset-check`): every allocation of that class could wait for
+the previous one, and the session would measure the link (`docs/research/zen5-roofline.md`,
+section 16). `run` records the offsets in its session record.
+
 `--suite` also takes several suites joined by commas, `--only` several texts joined by
 commas, and `--group NAME` keeps one group's jobs (`benchrun list` prints the groups).
 

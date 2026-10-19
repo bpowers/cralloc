@@ -600,7 +600,61 @@ fn gate(o: &Options, cpus: &CpuSets) -> Value {
     }
 }
 
-fn header(o: &Options, allocs: &[Allocator], jobs: &[Job], session: &str) -> Value {
+/// Where the routines of each asmalloc build the session runs load the thread's rseq offset from,
+/// as `scripts/rseq-offset-check` reports it, by allocator. An `Err` names the builds where one
+/// of those places shares a page offset with a slab hot word: every allocation of that class
+/// could then wait on the previous one's store, which would make the session measure the link,
+/// not the allocator (docs/research/zen5-roofline.md, section 16).
+fn rseq_offsets(o: &Options, allocs: &[Allocator], jobs: &[Job]) -> Result<Value, String> {
+    let script = o.bench_dir.join("../scripts/rseq-offset-check");
+    let mut report = serde_json::Map::new();
+    let mut bad = Vec::new();
+    for a in allocs.iter().filter(|a| a.expect.allocator.as_deref() == Some("asmalloc")) {
+        let mut files: Vec<PathBuf> = Vec::new();
+        if let Some(build) = a.build_name() {
+            for j in jobs.iter().filter(|j| j.mode == Mode::Native) {
+                if let Program::Rust(b) = j.program {
+                    let f = rust_bin(&o.bench_dir, &build, b);
+                    if f.exists() && !files.contains(&f) {
+                        files.push(f);
+                    }
+                }
+            }
+        }
+        if let Some(lib) = a.preload.as_deref().filter(|l| !l.is_empty())
+            && jobs.iter().any(|j| j.mode == Mode::Preload)
+        {
+            files.push(PathBuf::from(lib));
+        }
+        if files.is_empty() {
+            continue;
+        }
+        let out = std::process::Command::new(&script)
+            .args(&files)
+            .output()
+            .map_err(|e| format!("{}: {e}", script.display()))?;
+        let lines: Vec<Value> =
+            String::from_utf8_lossy(&out.stdout).lines().map(|l| Value::String(l.to_string())).collect();
+        match out.status.code() {
+            Some(0) => {}
+            Some(1) => bad.push(format!("{}: {}", a.name, String::from_utf8_lossy(&out.stdout).trim())),
+            _ => return Err(format!("{}: {}", script.display(), String::from_utf8_lossy(&out.stderr))),
+        }
+        report.insert(a.name.clone(), Value::Array(lines));
+    }
+    if bad.is_empty() {
+        Ok(Value::Object(report))
+    } else {
+        Err(format!(
+            "an asmalloc build loads its rseq offset at a hot word's page offset, so its fast paths \
+             depend on the link (docs/research/zen5-roofline.md, section 16); rebuild it or report \
+             it:\n{}",
+            bad.join("\n")
+        ))
+    }
+}
+
+fn header(o: &Options, allocs: &[Allocator], jobs: &[Job], session: &str, rseq: Value) -> Value {
     let manifests: serde_json::Map<String, Value> = std::fs::read_dir(o.baselines.join("manifest"))
         .map(|d| {
             d.filter_map(|e| e.ok())
@@ -656,10 +710,12 @@ fn header(o: &Options, allocs: &[Allocator], jobs: &[Job], session: &str) -> Val
         })).collect::<Vec<_>>(),
         "jobs": jobs.iter().map(|j| json!({ "id": j.id, "group": j.group, "mode": j.mode.name() })).collect::<Vec<_>>(),
         "manifests": manifests,
+        "rseq_offsets": rseq,
     })
 }
 
 pub fn session(o: &Options, allocs: &[Allocator], jobs: &[Job]) -> std::io::Result<()> {
+    let rseq = rseq_offsets(o, allocs, jobs).map_err(std::io::Error::other)?;
     bench_harness::cpus::pin_to(&o.runner_cpus);
     if let Some(p) = o.out.parent() {
         std::fs::create_dir_all(p)?;
@@ -667,7 +723,7 @@ pub fn session(o: &Options, allocs: &[Allocator], jobs: &[Job]) -> std::io::Resu
     let mut out = std::fs::OpenOptions::new().create(true).append(true).open(&o.out)?;
     let session =
         format!("{}-{:x}", SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap().as_secs(), o.seed);
-    writeln!(out, "{}", header(o, allocs, jobs, &session))?;
+    writeln!(out, "{}", header(o, allocs, jobs, &session, rseq))?;
     let meas: BTreeSet<usize> = crate::suite::measurement_cpus().into_iter().collect();
     let siblings: BTreeSet<usize> = meas.iter().flat_map(|&c| sys::siblings(c)).filter(|c| !meas.contains(c)).collect();
     let runner: BTreeSet<usize> = o.runner_cpus.iter().flat_map(|&c| sys::siblings(c)).collect();

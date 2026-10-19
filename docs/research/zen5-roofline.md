@@ -1721,19 +1721,60 @@ a cell at 64 bytes and two at 32:
 
 Even the best runs before paid a cycle (23.1 against 22.0): the probe's 2-cycle mode.
 
-**Not fixed: `__rseq_offset`.** The routines load it on every call, and its page offset is the
-linker's. In the executable form it is a copy in `.bss.rel.ro`; at `8fcd7dd` that copy was at
-page offset 0x090, the 32-byte class's hot word, which is the 32-byte row above. Of eight
-builds (two commits, four layouts) the copy shared a hot word's offset in four, each time a
-different class (32, 1792, 3072 and 10240 bytes). The library form reads a GOT slot the linker
-places, then glibc's variable (page offset 0xa30 in this glibc, clear). glibc also places the
-rseq area itself, whose `cpu_id` every call loads (0xac4 here, clear). Nothing in the crate
-controls these.
+**The rseq offset: hot words moved to bytes 24 to 31.** The routines also load the thread's
+rseq offset on every call, from storage the linker and glibc place. In the executable form it
+is the copy of glibc's `__rseq_offset` in `.bss.rel.ro`; at `8fcd7dd` that copy was at page
+offset 0x090, the 32-byte class's hot word, which is the 32-byte row above. Of eight builds
+(two commits, four layouts) the copy shared a hot word's offset in four, each time another
+class (32, 1792, 3072 and 10240 bytes). Every one of those copies was 16-aligned: lld aligns a
+copy as the shared object aligns the symbol, and this glibc's sits at 0x38a30 in `ld.so`. So
+since 2026-10-19 each class's hot word is at bytes 24 to 31 of its 32-byte chunk (the stock
+word, which only slow paths use, moved to 16 to 23). No 16-aligned 8-byte word can overlap
+it, and neither can the rseq area's `cpu_id` and `rseq_cs`, at bytes 4 to 15 of a 32-byte
+chunk since the kernel requires the area to be 32-byte aligned (the routines touch no other
+field: not `node_id`, not `mm_cid`). The Lean specification takes the word's position from the
+crate's tables, so only Rust constants changed, and musl's own offset word is now 16-aligned too
+(`ownRseqArea`). The move costs nothing: the chain kernels (section 15), with the word at either
+position at every entry offset 0 to 63, ran the same cycles to within 0.01 at every placement in
+`if`, `ifg`, `ip`, `cf` and `cm` and within 0.13 in `ia` and 0.45 in `cp` (where the faster cell
+was the new position), and the same instructions in every form.
 
-**Rule.** Nothing an inlined fast path loads on every call may overlap, in page offset, a hot
-word: the previous call's store to it may still be in flight, and the load can then wait for
-it. A layout check that varies only code placement does not find this; runs of one build that
-split into modes, with equal instructions and misses, are the sign.
+fragchurn after the move, a fresh copy per run, three runs a cell: 21.0 to 21.4 cycles at 32
+bytes and 21.7 to 23.0 at 64 under all four layouts. At 1792 bytes (`set=20000`), where the
+`shuffle1` build's copy had hit the old position, 74.7 and 83.6 before against 66.6 and 66.7
+after; the other layouts ran 66 to 69 both ways. The smoke set (`--suite backend`, ten rounds,
+main against the move) tied on every job but the split pipeline, 3.0% apart in that session and
+a tie (-0.4%) over twenty more rounds.
+
+**Checks.** `front` asserts the rule at compile time for everything the crate places: the hot
+words against every 16-aligned word and every 32-aligned area's `cpu_id` and `rseq_cs`, the
+size tables, the masks, the published words and the region table's lower half. What the linker
+placed is checked on the linked files: a test reads the test binary's relocations and the
+variable's run-time address; `scripts/rseq-offset-check` does the same for any binary, and
+runs in `scripts/preload-check` on the preload library and in `benchrun build` and `benchrun
+run`, which refuse a build that collides and record the offsets in the session record.
+
+**Held: the crate's own copy of the offset.** A word of the crate's, placed off the hot words and
+written by the first slow path, would put every load under the rule. Zero must then mean "not
+yet", and the routine must leave before its first `fs` access, which is the arming store. The
+Lean framework allows nothing but straight-line instructions before that store, so it needs a
+change to the trusted core (a guarded sequence: `Code`, `Verified`, the printer and
+`Rust.checkRseq`), every routine's arming steps reproved, and a witness for the new exit in each
+of about 13 artifacts: 4 to 5 days. `c_free_sized` is already at 128 bytes, and the test and
+branch would take it past, onto a third line.
+
+**Limits.** Each of these can still put a load at a hot word's page offset:
+
+- A GOT slot, which is 8-aligned. The preload library's is at 0xdc0, clear; in executables the
+  slot serves only the out-of-line routines, and was on a hot word in three of four layouts.
+  Linking more or fewer GOT entries before it moves it.
+- A glibc whose `__rseq_offset` is only 8-aligned: its copy may then land on a hot word, for
+  about one link in twelve. The checks report it.
+- The size tables above 16 KiB, which wrap round the page: a loop of allocations of one size
+  of 16 to 32 KiB whose entry overlaps its own class's word.
+- The sized free's table for sizes of 2 KiB and up, indexed by byte: about one size in twelve
+  overlaps a hot word, and a loop of sized frees of such a size can serialize.
+- The region table's top half: frees of objects in regions numbered 2048 and up.
 
 **Also checked: mstress.** The branch's 2.6% over main, from three rounds, is noise:
 `mstress 8` preloaded, 48 interleaved rounds in two sessions of 24 (`benchrun run --only

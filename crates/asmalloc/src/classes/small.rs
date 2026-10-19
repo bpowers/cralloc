@@ -68,9 +68,9 @@ pub(crate) fn by_size_entry(size: usize) -> usize {
 pub struct SmallClass(NonZeroU8);
 
 /// A small class's hot word is at position `WORD_STRIDE * index + WORD_START` of its slab: one
-/// 32-byte chunk per class, the word at its bytes 16 to 23.
+/// 32-byte chunk per class, the word at its bytes 24 to 31.
 pub(crate) const WORD_STRIDE: usize = 4;
-pub(crate) const WORD_START: usize = 2;
+pub(crate) const WORD_START: usize = 3;
 const _: () = assert!(WORD_STRIDE.is_power_of_two() && WORD_START < WORD_STRIDE);
 const _: () = assert!(WORD_STRIDE * SMALL_COUNT + WORD_START <= u8::MAX as usize);
 

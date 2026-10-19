@@ -1,0 +1,100 @@
+#!/usr/bin/env python3
+"""Checks that the rseq offset an asmalloc binary's routines load shares no page offset with a
+slab hot word.
+
+Usage: scripts/rseq-offset-check [--quiet] FILE...   (executables or shared libraries)
+
+The routines load the thread's rseq offset on every call: the executable's copy of glibc's
+`__rseq_offset` (R_X86_64_COPY), or its GOT slot (R_X86_64_GLOB_DAT) and then the variable in
+the dynamic linker. A load whose bytes overlap a hot word in the low 12 bits of its address can
+wait for the previous call's store to that word, and a loop of allocations of that class then
+runs one at a time (docs/research/zen5-roofline.md, section 16). Prints each place, with its
+page offset, and exits 1 if one that fast paths load on every call collides, 0 otherwise; a
+file with no such relocation (built without asmalloc, or statically linked) passes. Needs
+`readelf` (binutils).
+"""
+
+import re
+import subprocess
+import sys
+
+# The page offsets of the hot words: bytes 24 to 31 of chunk c of a slab, for every class index c
+# (crates/asmalloc/src/front/slab.rs; a test there checks that this line agrees).
+HOT_WORDS = [32 * c + 24 for c in range(1, 45)]
+
+
+def collides(addr: int) -> bool:
+    at = addr % 4096
+    return any(at < w + 8 and w < at + 8 for w in HOT_WORDS)
+
+
+def readelf(*args: str) -> str:
+    return subprocess.run(["readelf", "-W", *args], check=True, capture_output=True, text=True).stdout
+
+
+def interpreter(path: str) -> str | None:
+    m = re.search(r"Requesting program interpreter: ([^\]]+)\]", readelf("-l", path))
+    return m.group(1) if m else None
+
+
+def symbol_value(path: str, name: str) -> int | None:
+    for line in readelf("--dyn-syms", path).splitlines():
+        f = line.split()
+        if len(f) >= 8 and f[7].split("@")[0] == name and f[6] != "UND":
+            return int(f[1], 16)
+    return None
+
+
+def places(path: str) -> list[tuple[str, int, bool]]:
+    """Each place the routines in `path` load the rseq offset from, as (what, address, whether
+    the inlined fast paths load it on every call, so that a collision fails the check)."""
+    relocs = []
+    for line in readelf("-r", path).splitlines():
+        f = line.split()
+        if len(f) >= 5 and f[4].split("@")[0] == "__rseq_offset":
+            relocs.append((f[2], int(f[0], 16)))
+    kinds = {k for k, _ in relocs}
+    found = []
+    for kind, addr in relocs:
+        if kind == "R_X86_64_GLOB_DAT" and "R_X86_64_COPY" in kinds:
+            # An executable with a copy: the inlined routines read the copy, and only the
+            # out-of-line ones (the slow path's, and the C entry points a statically linked C
+            # program would call) read through the slot.
+            found.append(("the GOT slot of __rseq_offset (out-of-line routines only)", addr, False))
+        elif kind == "R_X86_64_GLOB_DAT":
+            found.append(("the GOT slot of __rseq_offset", addr, True))
+        else:
+            found.append((f"{kind} of __rseq_offset", addr, True))
+    if "R_X86_64_GLOB_DAT" in kinds and "R_X86_64_COPY" not in kinds:
+        # Through the GOT, the second load reads the variable where the C library defines it.
+        ld = interpreter(path) or "/lib64/ld-linux-x86-64.so.2"
+        value = symbol_value(ld, "__rseq_offset")
+        if value is not None:
+            found.append((f"__rseq_offset in {ld}", value, True))
+    return found
+
+
+def main() -> int:
+    args = sys.argv[1:]
+    quiet = "--quiet" in args
+    files = [a for a in args if a != "--quiet"]
+    if not files:
+        print(__doc__, file=sys.stderr)
+        return 2
+    bad = 0
+    for path in files:
+        for what, addr, hot in places(path):
+            hit = collides(addr)
+            bad += hit and hot
+            if hit or not quiet:
+                verdict = ("COLLIDES with a hot word" if hot else "shares a hot word's offset") \
+                    if hit else "clear"
+                print(f"{path}: {what} at page offset {addr % 4096:#05x}: {verdict}")
+    if bad:
+        print("rseq-offset-check: a routine's every call can wait on the previous call's store "
+              "to a hot word; see docs/research/zen5-roofline.md, section 16", file=sys.stderr)
+    return 1 if bad else 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

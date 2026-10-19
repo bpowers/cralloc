@@ -176,8 +176,39 @@ fn build(f: &Flags, p: &Paths) {
             die(&format!("build of {pkg} failed"));
         }
     }
-    for (name, feat) in names {
-        build_workloads(p, &name, &feat, None);
+    for (name, feat) in &names {
+        build_workloads(p, name, feat, None);
+    }
+    check_rseq_offsets(p, &names);
+}
+
+/// Runs `scripts/rseq-offset-check` on the asmalloc builds just made, and stops if one loads its
+/// rseq offset at a hot word's page offset (docs/research/zen5-roofline.md, section 16): every
+/// allocation of that class could wait on the previous one, so no session should run on it.
+/// `run` checks again and records the offsets in its session record.
+fn check_rseq_offsets(p: &Paths, names: &[(String, String)]) {
+    let mut files: Vec<PathBuf> = names
+        .iter()
+        .filter(|(_, feat)| feat.starts_with("asmalloc"))
+        .flat_map(|(name, _)| {
+            ["workload", "rpc-server"].map(|bin| p.bench.join("target").join(name).join("release").join(bin))
+        })
+        .filter(|f| f.exists())
+        .collect();
+    let lib = p.bench.join("../target/release/libasmalloc_preload.so");
+    if lib.exists() {
+        files.push(lib);
+    }
+    if files.is_empty() {
+        return;
+    }
+    let st = Command::new(p.bench.join("../scripts/rseq-offset-check"))
+        .arg("--quiet")
+        .args(&files)
+        .status()
+        .unwrap_or_else(|e| die(&format!("scripts/rseq-offset-check: {e}")));
+    if !st.success() {
+        die("an asmalloc build loads its rseq offset at a hot word's page offset; see above");
     }
 }
 

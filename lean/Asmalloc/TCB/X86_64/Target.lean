@@ -201,7 +201,9 @@ def ownRseqArea : OwnArea where
     ".long 0, 0, 0, 0",
     ".popsection",
     ".pushsection .rodata.asmalloc_rseq_offset,\"a\",@progbits",
-    ".balign 8",
+    -- 16, not 8: every call loads the word, and the slabs' hot words are at bytes 24 to 31 of
+    -- each 32-byte chunk, which no 16-aligned word overlaps.
+    ".balign 16",
     ".globl asmalloc_rseq_offset",
     ".hidden asmalloc_rseq_offset",
     ".type asmalloc_rseq_offset,@object",
