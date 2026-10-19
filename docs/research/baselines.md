@@ -1,65 +1,83 @@
 # Allocator baselines on workloads
 
-Measured 2026-10-18 on a quiet machine, at commit `b5d6e8f`, with the suite in `bench/`
+Measured 2026-10-18 on a quiet machine, at commit `a92d51a`, with the suite in `bench/`
 (commands and method in `bench/README.md`): asmalloc against glibc, mimalloc (the newest
-release and the `mimalloc` crate as shipped), jemalloc (`tikv-jemallocator`) and tcmalloc
-(per-CPU and per-thread), on every workload of the full suite, ten rounds. This replaces the
-2026-10-17 session, which ran on a busy machine without asmalloc (section 12).
+release called as the `mimalloc` crate calls it, the same with the size passed back to free,
+and the `mimalloc` crate as shipped), jemalloc (`tikv-jemallocator`) and tcmalloc (per-CPU
+and per-thread), on every workload of the full suite, ten rounds. This replaces the session
+at `b5d6e8f` earlier the same day; section 4 says what moved between the two and why.
 
-Raw results: `bench/results/full-2026-10-18-b5d6e8f.jsonl` in the main checkout, and
-`docs/research/data/baselines-2026-10-18.jsonl.gz` (`benchrun report` reads it after
-`gunzip`). Per-workload tables with every allocator, spread, memory and faults:
-`docs/research/data/baselines-2026-10-18-detail.md`.
+| Session | Raw results | Per-workload tables (every allocator, spread, memory, faults) |
+|---|---|---|
+| `a92d51a`, 2026-10-18, this note | `docs/research/data/baselines-2026-10-18-a92d51a.jsonl.gz`; `bench/results/full-2026-10-18-a92d51a.jsonl` in the main checkout | `docs/research/data/baselines-2026-10-18-a92d51a-detail.md` |
+| `b5d6e8f`, 2026-10-18, the previous report | `docs/research/data/baselines-2026-10-18.jsonl.gz`; `bench/results/full-2026-10-18-b5d6e8f.jsonl` | `docs/research/data/baselines-2026-10-18-detail.md` |
+| `60ce673`, 2026-10-17, busy machine, no asmalloc | `docs/research/data/baselines-2026-10-17.jsonl.gz` | `docs/research/data/baselines-2026-10-17-detail.md` |
+
+`benchrun report` reads the raw results after `gunzip`.
 
 ## 1. Summary
 
 Time, asmalloc against the best incumbent on each job (a gap is the median of per-round
-ratios; "level" means the 95% interval includes no difference):
+ratios; "level" means the 95% interval includes no difference). asmalloc is ahead on 33 of
+the 56 jobs, level on 4 and behind on 19; at `b5d6e8f` it was 28, 4 and 23 of 55.
 
-- **Cross-thread, one L3 domain, 2 to 8 threads:** ahead on every job, 8 to 52%, except the
-  eight-thread pipeline (level). Across L3 domains, ahead 27 to 52%.
-- **Independent pipelines side by side across L3 domains:** behind 16 to 35% (10 against
-  jemalloc's 8 ns per chain). Two in one domain: ahead 49%.
-- **Large objects (4 to 256 KiB) crossing threads:** behind 8.3 times (297 against 36 ns).
-- **Work stealing:** rayon ahead 15% at four threads, level at eight; tokio behind 10 to 18%.
-- **RPC server:** behind 2% on server cycles per request.
-- **Single-threaded churn, 100 to 10M live objects:** ahead 6 to 31%.
-- **Build and drop:** behind mimalloc on BTreeMap (32%), HashMap (60%), Box tree (116%),
-  JSON (45%) and one Vec grown to 256 MiB (15%); ahead 7% on 64 Vecs to 4 MiB.
-- **C programs, preloaded:** behind on larson (29 to 30%), mstress (57%) and sh8bench (4.6
-  times); level or within 2% on xmalloc-test, cache-scratch, cfrac and espresso.
+- **Cross-thread, small objects:** ahead on every job, 4% (eight threads in a pipeline) to
+  51%, and 36 to 80% ahead of mimalloc. Independent pipelines on different L3 domains, 16 to
+  35% behind jemalloc at `b5d6e8f`, are now 33 to 43% ahead.
+- **Single-threaded churn, 100 to 10M live objects:** ahead 7 to 33%.
+- **Box tree:** 3% ahead of mimalloc (116% behind at `b5d6e8f`). **One Vec grown to 256
+  MiB:** 45% ahead (the job was redefined; section 4).
+- **Work stealing:** rayon 22% ahead at four threads, level at eight.
 
-Memory (cgroup peak, against the smallest incumbent):
+Where asmalloc is behind (section 9 has the causes):
 
-- **Heaps of 10 MiB or more:** ahead, level or within 4% everywhere: churn, maps, tree,
-  JSON, Vec growth, fork-join and mstress are ahead by up to 21% or level, churn at 100k
-  live objects is 4% over; larson is behind 10 to 13% (60 against 53 MiB).
-- **Small heaps (1 to 11 MiB):** behind glibc by 0.4 to 3 MiB of fixed footprint, which
-  reads as 20 to 180%; against jemalloc on the same jobs, from 2 MiB under (the RPC
-  server, fork-join) to 1.3 MiB over (mpmc with one producer).
-- **After the peak:** lowest of the three measured. After freeing 218 MiB, asmalloc holds 1.2
-  MiB at 16 seconds, jemalloc 4.5 and mimalloc 16.2. Behind only on the peak of a phase
-  change (53 against jemalloc's 29 MiB) and of many classes on few CPUs (15 against 8).
+- **Large objects (4 to 256 KiB) crossing threads:** 62 ns/alloc against per-thread
+  tcmalloc's 35 (76% behind) and mimalloc's 42 (49%); jemalloc takes 305. It was 297 ns.
+- **One 64 KiB and one 1 MiB block allocated and freed (`largepair`, new):** glibc takes 8.1
+  ns a pair, far ahead of everyone, because it serves both blocks from the top of its heap.
+  asmalloc's 67 ns is fourth of eight: 9 and 14% behind the two tcmallocs, 25% ahead of
+  mimalloc and 50% ahead of jemalloc.
+- **64 Vecs grown to 4 MiB together:** 86% behind mimalloc (5.9 against 3.1 cycles/element),
+  level with tcmalloc, 22% ahead of jemalloc.
+- **Build and drop of maps:** HashMap 23% behind the mimalloc crate (16% behind mimalloc),
+  BTreeMap 8%. JSON is level with mimalloc (1% behind the crate, 2% ahead of mimalloc); 5%
+  behind preloaded.
+- **tokio spawn:** 33% behind glibc at four threads (level with mimalloc), 12% behind jemalloc
+  at eight (3% behind mimalloc).
+- **RPC server:** 2 to 4% behind on server cycles per request; level to 1% against mimalloc.
+- **C programs, preloaded:** sh8bench 2.2 times mimalloc (0.60 against 0.27 s) and 19%
+  behind jemalloc; larson 16 to 25% behind mimalloc, a gap accepted for now (C++ programs
+  reach the allocator through libstdc++, and exporting the C++ operators is deferred);
+  mstress 6%, espresso 4%, cfrac 1%; cache-scratch level. xmalloc-test is bimodal (section 7).
 
-Five causes explain most of the gaps (section 9): memory returned and faulted straight back
-(large pipeline, HashMap, JSON, mstress), every object passing through the back end's bitmaps
-on each build-and-drop cycle (tree, BTreeMap), contended refills (sh8bench), a global depot
-that hands objects across L3 domains (independent pipelines), and C++ operators reached
-through libstdc++ (larson). mimalloc's build-and-drop lead is also its huge pages: 100 to 600
-times fewer page faults with transparent huge pages in `madvise` mode.
+Memory (cgroup peak):
+
+- **Against jemalloc, the bar:** at or under it on every job of 10 MiB or more but two:
+  HashMap, 12% over (204 against 182 MiB), because the tables a map outgrows now stay
+  resident for its next build; and churn with 100k live objects, 1 to 2% (0.1 to 0.3 MiB,
+  native and preloaded).
+- **Small heaps (under 12 MiB):** 0.25 to 3.3 MiB over glibc where glibc is the smallest.
+  Against jemalloc, from 1.5 MiB over (mpmc, four producers and four consumers) to 1.8 MiB
+  under (exchange, eight threads) and 5.8 under (the large-object pipeline).
+- **Against the smallest incumbent** the largest gap on a big heap is larson, 32 to 35% over
+  per-thread tcmalloc (72 against 54 MiB, and 19% under jemalloc). It was 60 MiB at
+  `b5d6e8f`; not attributed.
+- **After the peak** (measured at `b5d6e8f`, section 8): the lowest of the three measured.
 
 ## 2. Machine, versions and method
 
 AMD Ryzen 9 9950X (Zen 5), 16 cores with SMT, two L3 domains (CPUs 0-7 with siblings 16-23,
 8-15 with 24-31), 60 GiB, Linux 7.2.9-201.fc44, glibc 2.43, rustc 1.99.1, GCC 16.2.1.
 Governor `powersave`, energy preference `balance_performance`, boost on, transparent huge
-pages `madvise` (defrag `madvise`), NMI watchdog on.
+pages `madvise` (defrag `madvise`), NMI watchdog on. The same as at `b5d6e8f`, with the same
+baseline manifests.
 
 | Allocator | Version and build | Native (Rust `#[global_allocator]`) | Preload |
 |---|---|---|---|
-| asmalloc | `b5d6e8f` | `asmalloc::Asmalloc`, `executable` feature, fat LTO | `asmalloc-preload` (C names only) |
+| asmalloc | `a92d51a` | `asmalloc::Asmalloc`, `executable` feature, fat LTO | `asmalloc-preload` (C names only) |
 | glibc | 2.43 | `std::alloc::System` | none |
 | mimalloc | v3.5.3 (`31d034d9`), `src/static.c` at `-O3` as libmimalloc-sys builds it | as the `mimalloc` crate calls it | cmake Release shared library |
+| mimalloc-sized | the same library | the same, freeing with `mi_free_size_aligned` (mimalloc v3 ignores the size in release builds, so only the call path differs) | not run |
 | mimalloc-crate | the `mimalloc` crate 0.1.52 as shipped (bundles 3.3.2) | itself | not run |
 | jemalloc | `tikv-jemallocator` 0.6.1 (jemalloc 5.3.0-1-ge13ca993, static, prefixed, no stats or profiling) | itself | Fedora 5.3.0-14 shared library |
 | tcmalloc-percpu | google/tcmalloc `f3c6669a`, bazel 8.8.0 `-c opt`, initial-exec TLS | as `tcmalloc-better` 0.1.19 calls it | shared library; both with `GLIBC_TUNABLES=glibc.pthread.rseq=0` |
@@ -67,28 +85,30 @@ pages `madvise` (defrag `madvise`), NMI watchdog on.
 | mimalloc-ctl | mimalloc built a second time: the control | | |
 
 `bench/baselines/build.sh` builds the C libraries and records versions and flags in the
-manifests, which every result file carries.
+manifests, which every result file carries. mimalloc-sized was not in the `b5d6e8f` session.
 
 **Method.** One fresh process per run; each round runs every job under every allocator in a
-new random order. Ten rounds, 55 jobs, 4,280 runs, none invalid. Threads are pinned one per
-physical core on CPUs 0-3 and 8-11 (single-threaded jobs on CPU 2), the process confined to
-its CPUs before `execve`, and every run under a per-run memory cap (4 GiB) inside a capped
-session scope. Every run reported the allocator, mode, library and version it was meant to
-have. Single-threaded jobs rank by cycles per operation (user and kernel), multithreaded ones
-by wall time per allocation, C programs by their own throughput or wall time; memory ranks
-by each run's cgroup peak. Cross-thread consumers check every object's header, so a block
-handed out twice fails the run.
+new random order. Ten rounds, 56 jobs, 4,800 runs, none invalid, over 95 minutes. Threads are
+pinned one per physical core on CPUs 0-3 and 8-11 (single-threaded jobs on CPU 2), the
+process confined to its CPUs before `execve`, and every run under a per-run memory cap (4 GiB)
+inside a capped session scope; no run reached its cap. Every run reported the allocator,
+mode, library and version it was meant to have, and no run's counters were multiplexed.
+Single-threaded jobs rank by cycles per operation (user and kernel), multithreaded ones by
+wall time per allocation, C programs by their own throughput or wall time; memory ranks by
+each run's cgroup peak. Cross-thread consumers check every object's header, so a block handed
+out twice fails the run.
 
-**Quiet.** Before the session, 0.03 CPUs' worth of work ran on the whole machine over ten
-seconds, and the CPU temperature (Tctl 41°C, CCDs 30°C) held over half a minute. No other
-work ran during it: the quiet gate (nothing on the measurement CPUs or their siblings, at most
-one CPU's worth elsewhere) passed before every job without waiting, and no run was left out
-as busy.
+**Quiet.** No other work ran during the session: the quiet gate (nothing on the measurement
+CPUs or their siblings, at most one CPU's worth elsewhere) passed before every job without
+waiting, its one-second look seeing at most 0.09 CPUs' worth on the measurement CPUs and 0.06
+elsewhere, and no run was left out as busy.
 
 **Control.** mimalloc-ctl against mimalloc, paired by round: the largest median difference
-is 9.1%; 7 of 55 intervals exclude zero where chance predicts 2.8, all under 1% except two
-with wide intervals (exchange of mixed sizes, the preloaded pipeline). Single-threaded
-differences of 1% and cross-thread differences of a few percent are resolved.
+is 6.4% (the four-thread pipeline, interval +2.4% to +16.1%); 7 of 56 intervals exclude zero
+where chance predicts 2.8. Of the other six, larson and larson-sized differ by +4.9% and
+-4.8%, opposite ways, and the rest (the RPC log jobs, eight-thread spawn, `largepair`) by
+under 2%. Single-threaded differences of 1% and cross-thread differences of a few percent are
+resolved.
 
 **Code layout.** The control does not catch a job whose time depends on where its code
 landed, because every allocator's build places the workload's code somewhere else. When a job
@@ -100,161 +120,201 @@ and the jobs that are sensitive.
 
 The best incumbent is the one with the lowest median cost; the gap is the median of
 per-round ratios of asmalloc to it, with "level" where the 95% interval includes no
-difference. Memory compares cgroup peaks with the smallest incumbent the same way.
+difference. "vs mimalloc" is the same against mimalloc (v3.5.3; the shared library when
+preloaded). Memory compares cgroup peaks with the smallest incumbent the same way, and with
+jemalloc.
 
-| Workload | Metric | asmalloc | Best incumbent | Time | Cgroup peak MiB, asm / best | Memory |
-|---|---|---:|---|---|---|---|
-| pipeline t2 sizes=s64 local all-alloc (native) | ns/alloc | 3.845 | jemalloc 6.409 | ahead 40% | 1.4 / glibc 1.0 | behind 40% |
-| pipeline t2 sizes=small local all-alloc (native) | ns/alloc | 3.753 | tcmalloc-percpu 6.6 | ahead 43% | 2.3 / glibc 1.2 | behind 90% |
-| pipeline t2 sizes=mixed local all-alloc (native) | ns/alloc | 11.27 | tcmalloc-percpu 12.52 | ahead 10% | 5.1 / glibc 3.1 | behind 65% |
-| pipeline t2 sizes=small local free-only (native) | ns/alloc | 3.717 | tcmalloc-percpu 6.602 | ahead 44% | 2.3 / glibc 1.2 | behind 92% |
-| pipeline t2 sizes=large objects=1M inflight=512 local all-alloc (native) | ns/alloc | 296.6 | tcmalloc-thread 35.64 | behind 721% | 3.1 / tcmalloc-thread 3.8 | ahead 16% |
-| pipeline t2 sizes=small split all-alloc (native) | ns/alloc | 12.09 | jemalloc 18.35 | ahead 38% | 2.2 / glibc 1.0 | behind 129% |
-| pipeline t2 sizes=small split free-only (native) | ns/alloc | 11.05 | tcmalloc-percpu 23.47 | ahead 52% | 2.2 / glibc 0.8 | behind 182% |
-| pipeline t4 sizes=small local all-alloc (native) | ns/alloc | 3.235 | jemalloc 3.602 | ahead 10% | 4.1 / glibc 2.8 | behind 46% |
-| pipeline t8 sizes=small both all-alloc (native) | ns/alloc | 4.269 | jemalloc 4.396 | level (-3%) | 7.4 / glibc 6.0 | behind 24% |
-| pipeline t2 x2 sizes=small local all-alloc (native) | ns/alloc per chain | 3.983 | tcmalloc-percpu 7.874 | ahead 49% | 3.6 / glibc 2.0 | behind 75% |
-| pipeline t2 x2 sizes=small split all-alloc (native) | ns/alloc per chain | 10.81 | jemalloc 8.013 | behind 35% | 3.4 / glibc 2.0 | behind 70% |
-| pipeline t2 x3 sizes=small both all-alloc (native) | ns/alloc per chain | 9.379 | jemalloc 8.081 | behind 16% | 4.7 / glibc 3.0 | behind 54% |
-| pipeline t2 x4 sizes=small both all-alloc (native) | ns/alloc per chain | 10.16 | jemalloc 8.157 | behind 24% | 6.0 / glibc 4.0 | behind 53% |
-| exchange t2 sizes=small local (native) | ns/alloc | 4.26 | tcmalloc-percpu 6.936 | ahead 39% | 2.5 / glibc 1.7 | behind 47% |
-| exchange t2 sizes=mixed local (native) | ns/alloc | 8.082 | tcmalloc-percpu 8.791 | ahead 8% | 4.9 / tcmalloc-percpu 4.0 | behind 21% |
-| exchange t2 sizes=small split (native) | ns/alloc | 13.79 | jemalloc 18.74 | ahead 27% | 2.4 / glibc 1.4 | behind 74% |
-| exchange t4 sizes=small local (native) | ns/alloc | 2.363 | tcmalloc-percpu 3.688 | ahead 36% | 3.8 / glibc 3.2 | behind 18% |
-| exchange t8 sizes=small both (native) | ns/alloc | 3.254 | jemalloc 3.991 | ahead 19% | 6.6 / tcmalloc-percpu 5.2 | behind 26% |
-| mpmc p1 c3 sizes=small local all-alloc (native) | ns/alloc | 5.905 | jemalloc 7.522 | ahead 30% | 3.2 / glibc 1.2 | behind 154% |
-| mpmc p1 c3 sizes=small local free-only (native) | ns/alloc | 5.087 | tcmalloc-percpu 8.559 | ahead 40% | 3.3 / glibc 1.4 | behind 132% |
-| mpmc p3 c1 sizes=small local all-alloc (native) | ns/alloc | 5.16 | tcmalloc-percpu 7.126 | ahead 28% | 3.7 / glibc 2.1 | behind 76% |
-| mpmc p3 c1 sizes=small local free-only (native) | ns/alloc | 5.876 | tcmalloc-percpu 7.245 | ahead 28% | 3.7 / glibc 2.0 | behind 84% |
-| mpmc p4 c4 sizes=small both all-alloc (native) | ns/alloc | 4.921 | jemalloc 8.565 | ahead 43% | 5.7 / glibc 2.8 | behind 110% |
-| forkjoin t4 local (native) | ns/alloc | 3.743 | tcmalloc-percpu 4.394 | ahead 15% | 15.7 / tcmalloc-percpu 16.4 | ahead 4% |
-| spawn t4 local (native) | ns/task | 125.6 | glibc 105.9 | behind 18% | 2.6 / glibc 1.6 | behind 66% |
-| forkjoin t8 both (native) | ns/alloc | 4.058 | jemalloc 3.963 | behind 3% | 17.9 / tcmalloc-percpu 17.8 | level (+0%) |
-| spawn t8 both (native) | ns/task | 249.6 | jemalloc 224.9 | behind 10% | 4.8 / glibc 3.1 | behind 59% |
-| rpc echo c64 (native) | server cycles/req | 4.62e+04 | tcmalloc-percpu 4.54e+04 | behind 2% | 5.8 / glibc 3.3 | behind 79% |
-| rpc log c64 (native) | server cycles/req | 1.228e+05 | mimalloc 1.215e+05 | behind 2% | 7.7 / glibc 4.9 | behind 54% |
-| rpc log c256 (native) | server cycles/req | 1.199e+05 | mimalloc 1.176e+05 | behind 2% | 11.0 / glibc 8.0 | behind 38% |
-| churn live=100 small (native) | cycles/op | 24.21 | jemalloc 34.78 | ahead 31% | 0.9 / glibc 0.5 | behind 89% |
-| churn live=1k small (native) | cycles/op | 25.13 | jemalloc 36 | ahead 30% | 1.1 / glibc 0.6 | behind 69% |
-| churn live=10k small (native) | cycles/op | 32.16 | jemalloc 40.3 | ahead 21% | 2.3 / glibc 1.7 | behind 31% |
-| churn live=100k small (native) | cycles/op | 47.79 | jemalloc 54.5 | ahead 12% | 12.2 / jemalloc 11.8 | behind 4% |
-| churn live=1M small (native) | cycles/op | 113.6 | jemalloc 126.2 | ahead 10% | 109.3 / jemalloc 110.3 | ahead 1% |
-| churn live=10M small (native) | cycles/op | 217.4 | jemalloc 250.3 | ahead 13% | 1069.7 / jemalloc 1091.5 | ahead 2% |
-| churn live=100k mixed (native) | cycles/op | 88.83 | tcmalloc-percpu 94.38 | ahead 6% | 34.7 / tcmalloc-thread 34.6 | behind 0% |
-| map btree 1M (native) | cycles/entry | 1089 | mimalloc-crate 826 | behind 32% | 123.4 / jemalloc 125.1 | ahead 1% |
-| map hash 1M (native) | cycles/entry | 690.6 | mimalloc-crate 431.8 | behind 60% | 175.1 / jemalloc 183.6 | ahead 5% |
-| tree depth=20 (native) | cycles/node | 99.26 | mimalloc 45.89 | behind 116% | 51.3 / glibc 64.6 | ahead 21% |
-| vecgrow 1x256Mi (native) | cycles/element | 5.363 | mimalloc-crate 4.812 | behind 15% | 257.9 / glibc 257.0 | behind 0% |
-| vecgrow 64x4Mi (native) | cycles/element | 9.38 | jemalloc 10.1 | ahead 7% | 270.3 / mimalloc 265.1 | behind 2% |
-| json 32Mi (native) | cycles/byte | 23.62 | mimalloc-crate 16.34 | behind 45% | 352.2 / mimalloc-crate 355.0 | ahead 1% |
-| churn live=100k small (preload) | cycles/op | 53.22 | mimalloc 52.13 | behind 2% | 12.3 / jemalloc 12.0 | behind 2% |
-| pipeline t2 sizes=small local all-alloc (preload) | ns/alloc | 3.997 | tcmalloc-percpu 6.334 | ahead 37% | 2.0 / glibc 1.1 | behind 78% |
-| json 32Mi (preload) | cycles/byte | 23.9 | mimalloc 16.63 | behind 44% | 353.1 / jemalloc 356.8 | ahead 1% |
-| larson-sized 8 (preload) | Mops/s | 404.2 | mimalloc 522.7 | behind 30% | 60.3 / tcmalloc-thread 54.5 | behind 10% |
-| larson 8 (preload) | Mops/s | 402.6 | mimalloc 514.6 | behind 29% | 60.0 / tcmalloc-thread 52.9 | behind 13% |
-| xmalloc-test 4+4 (preload) | Mfrees/s | 325.8 | tcmalloc-percpu 545.6 | level (+23%) | 20.9 / tcmalloc-thread 34.0 | level (-39%) |
-| sh8bench 16 (preload) | s | 1.19 | mimalloc 0.2559 | behind 364% | 119.5 / tcmalloc-percpu 119.8 | level (-0%) |
-| mstress 8 (preload) | s | 0.3936 | mimalloc 0.2497 | behind 57% | 128.1 / jemalloc 139.6 | ahead 9% |
-| cache-scratch 1 (preload) | s | 0.5136 | jemalloc 0.5001 | level (+2%) | 0.8 / glibc 0.8 | level (+2%) |
-| cache-scratch 8 (preload) | s | 0.06737 | mimalloc 0.06764 | level (-0%) | 2.8 / glibc 2.5 | behind 10% |
-| cfrac (preload) | s | 2.106 | mimalloc 2.07 | behind 2% | 1.7 / jemalloc 1.4 | behind 22% |
-| espresso (preload) | s | 2.249 | mimalloc 2.231 | behind 1% | 2.8 / glibc 1.3 | behind 110% |
+| Workload | Metric | asmalloc | Best incumbent | Time | vs mimalloc | Cgroup peak MiB, asm / smallest | Memory | vs jemalloc |
+|---|---|---:|---|---|---|---|---|---|
+| pipeline t2 sizes=s64 local all-alloc (native) | ns/alloc | 3.741 | jemalloc 6.282 | ahead 40% | ahead 72% | 1.2 / glibc 1.0 | behind 25% | ahead 13% |
+| pipeline t2 sizes=small local all-alloc (native) | ns/alloc | 3.745 | tcmalloc-percpu 6.708 | ahead 44% | ahead 76% | 2.2 / glibc 1.2 | behind 80% | behind 14% |
+| pipeline t2 sizes=mixed local all-alloc (native) | ns/alloc | 11.29 | tcmalloc-percpu 12.53 | ahead 10% | ahead 44% | 5.0 / tcmalloc-thread 3.1 | behind 58% | ahead 5% |
+| pipeline t2 sizes=small local free-only (native) | ns/alloc | 3.755 | tcmalloc-percpu 6.673 | ahead 44% | ahead 75% | 2.0 / glibc 1.1 | behind 80% | behind 26% |
+| pipeline t2 sizes=large objects=1M inflight=512 local all-alloc (native) | ns/alloc | 62.21 | tcmalloc-thread 35.49 | behind 76% | behind 49% | 2.8 / tcmalloc-thread 3.7 | ahead 25% | ahead 68% |
+| pipeline t2 sizes=small split all-alloc (native) | ns/alloc | 11.54 | jemalloc 18.49 | ahead 38% | ahead 77% | 2.6 / glibc 1.0 | behind 165% | behind 29% |
+| pipeline t2 sizes=small split free-only (native) | ns/alloc | 12.54 | tcmalloc-percpu 24.59 | ahead 51% | ahead 77% | 2.6 / glibc 1.0 | behind 157% | behind 47% |
+| pipeline t4 sizes=small local all-alloc (native) | ns/alloc | 3.172 | jemalloc 3.584 | ahead 12% | ahead 68% | 4.0 / glibc 2.8 | behind 42% | behind 10% |
+| pipeline t8 sizes=small both all-alloc (native) | ns/alloc | 4.232 | jemalloc 4.383 | ahead 4% | ahead 63% | 7.7 / glibc 6.0 | behind 29% | behind 12% |
+| pipeline t2 x2 sizes=small local all-alloc (native) | ns/alloc per chain | 4.134 | jemalloc 7.865 | ahead 47% | ahead 76% | 3.4 / glibc 2.0 | behind 69% | behind 5% |
+| pipeline t2 x2 sizes=small split all-alloc (native) | ns/alloc per chain | 4.633 | jemalloc 8.037 | ahead 43% | ahead 73% | 3.4 / glibc 2.0 | behind 70% | behind 4% |
+| pipeline t2 x3 sizes=small both all-alloc (native) | ns/alloc per chain | 5.313 | jemalloc 8.121 | ahead 34% | ahead 70% | 4.8 / glibc 3.0 | behind 57% | level (+1%) |
+| pipeline t2 x4 sizes=small both all-alloc (native) | ns/alloc per chain | 5.498 | jemalloc 8.169 | ahead 33% | ahead 69% | 5.9 / glibc 4.0 | behind 50% | ahead 2% |
+| exchange t2 sizes=small local (native) | ns/alloc | 4.438 | tcmalloc-percpu 6.912 | ahead 37% | ahead 65% | 2.2 / glibc 1.8 | behind 26% | ahead 7% |
+| exchange t2 sizes=mixed local (native) | ns/alloc | 8.150 | tcmalloc-percpu 8.809 | ahead 7% | ahead 47% | 4.8 / tcmalloc-percpu 4.0 | behind 19% | ahead 22% |
+| exchange t2 sizes=small split (native) | ns/alloc | 14.05 | jemalloc 18.63 | ahead 26% | ahead 65% | 2.9 / glibc 1.5 | behind 94% | behind 22% |
+| exchange t4 sizes=small local (native) | ns/alloc | 2.350 | tcmalloc-percpu 3.715 | ahead 38% | ahead 62% | 3.7 / glibc 3.3 | behind 14% | ahead 13% |
+| exchange t8 sizes=small both (native) | ns/alloc | 2.996 | jemalloc 3.969 | ahead 27% | ahead 60% | 6.8 / tcmalloc-percpu 5.2 | behind 29% | ahead 21% |
+| mpmc p1 c3 sizes=small local all-alloc (native) | ns/alloc | 5.237 | jemalloc 7.583 | ahead 30% | ahead 80% | 3.1 / glibc 1.2 | behind 142% | behind 36% |
+| mpmc p1 c3 sizes=small local free-only (native) | ns/alloc | 5.361 | tcmalloc-percpu 8.679 | ahead 37% | ahead 74% | 3.0 / glibc 1.2 | behind 140% | behind 50% |
+| mpmc p3 c1 sizes=small local all-alloc (native) | ns/alloc | 4.842 | mimalloc 7.704 | ahead 37% | ahead 37% | 3.5 / glibc 2.0 | behind 68% | behind 7% |
+| mpmc p3 c1 sizes=small local free-only (native) | ns/alloc | 4.876 | tcmalloc-percpu 7.152 | ahead 32% | ahead 36% | 3.5 / glibc 2.0 | behind 71% | behind 19% |
+| mpmc p4 c4 sizes=small both all-alloc (native) | ns/alloc | 4.991 | jemalloc 8.579 | ahead 41% | ahead 76% | 6.0 / glibc 2.7 | behind 122% | behind 32% |
+| forkjoin t4 local (native) | ns/alloc | 3.453 | tcmalloc-percpu 4.416 | ahead 22% | ahead 41% | 15.6 / tcmalloc-percpu 16.4 | ahead 5% | ahead 46% |
+| spawn t4 local (native) | ns/task | 130.9 | glibc 99.11 | behind 33% | level (+9%) | 2.5 / glibc 1.7 | behind 49% | level (+1%) |
+| forkjoin t8 both (native) | ns/alloc | 3.818 | jemalloc 3.947 | level (-4%) | ahead 50% | 17.8 / tcmalloc-percpu 17.8 | level (+1%) | ahead 25% |
+| spawn t8 both (native) | ns/task | 254.7 | jemalloc 226.6 | behind 12% | behind 3% | 4.6 / glibc 3.1 | behind 53% | level (+1%) |
+| rpc echo c64 (native) | server cycles/req | 46816 | tcmalloc-percpu 45614 | behind 3% | level (+0%) | 5.6 / glibc 3.3 | behind 71% | ahead 3% |
+| rpc log c64 (native) | server cycles/req | 125168 | mimalloc-crate 120967 | behind 4% | behind 1% | 8.3 / glibc 5.3 | behind 57% | ahead 14% |
+| rpc log c256 (native) | server cycles/req | 121083 | mimalloc-crate 118012 | behind 2% | level (+0%) | 11.7 / glibc 9.7 | behind 23% | ahead 20% |
+| churn live=100 small (native) | cycles/op | 22.67 | jemalloc 33.86 | ahead 33% | ahead 49% | 0.8 / glibc 0.5 | behind 60% | behind 12% |
+| churn live=1k small (native) | cycles/op | 23.97 | jemalloc 35.16 | ahead 32% | ahead 46% | 0.9 / glibc 0.6 | behind 45% | behind 11% |
+| churn live=10k small (native) | cycles/op | 31.48 | jemalloc 39.65 | ahead 21% | ahead 36% | 2.1 / glibc 1.8 | behind 21% | behind 13% |
+| churn live=100k small (native) | cycles/op | 46.51 | jemalloc 53.15 | ahead 12% | ahead 28% | 12.1 / jemalloc 11.8 | behind 2% | behind 2% |
+| churn live=1M small (native) | cycles/op | 104.3 | jemalloc 119.5 | ahead 13% | ahead 42% | 109.2 / jemalloc 110.3 | ahead 1% | ahead 1% |
+| churn live=10M small (native) | cycles/op | 214.1 | jemalloc 247.0 | ahead 13% | ahead 49% | 1069.7 / jemalloc 1091.4 | ahead 2% | ahead 2% |
+| churn live=100k mixed (native) | cycles/op | 87.47 | tcmalloc-percpu 93.66 | ahead 7% | ahead 10% | 34.4 / tcmalloc-thread 34.5 | ahead <1% | ahead 19% |
+| map btree 1M (native) | cycles/entry | 884.6 | mimalloc-crate 817.6 | behind 8% | behind 8% | 123.5 / jemalloc 125.2 | ahead 1% | ahead 1% |
+| map hash 1M (native) | cycles/entry | 533.8 | mimalloc-crate 434.4 | behind 23% | behind 16% | 204.3 / jemalloc 181.7 | behind 12% | behind 12% |
+| tree depth=20 (native) | cycles/node | 43.25 | mimalloc-crate 44.31 | ahead 3% | ahead 3% | 51.2 / glibc 64.5 | ahead 21% | ahead 24% |
+| vecgrow 1x256Mi (native) | cycles/element | 2.203 | mimalloc-crate 4.150 | ahead 45% | ahead 77% | 258.4 / glibc 257.0 | behind 1% | ahead 2% |
+| vecgrow 64x4Mi (native) | cycles/element | 5.891 | mimalloc-sized 3.055 | behind 86% | behind 77% | 277.4 / mimalloc-sized 265.0 | behind 5% | ahead 10% |
+| json 32Mi (native) | cycles/byte | 16.19 | mimalloc-crate 16.13 | behind 1% | ahead 2% | 352.5 / mimalloc-crate 355.0 | ahead 1% | ahead 3% |
+| largepair 64Ki+1Mi (native) | ns/pair | 67.46 | glibc 8.087 | behind 735% | ahead 25% | 0.8 / glibc 0.5 | behind 66% | behind 15% |
+| churn live=100k small (preload) | cycles/op | 51.52 | mimalloc 50.87 | behind 1% | behind 1% | 12.1 / jemalloc 12.0 | behind 1% | behind 1% |
+| pipeline t2 sizes=small local all-alloc (preload) | ns/alloc | 3.985 | tcmalloc-percpu 6.823 | ahead 42% | ahead 72% | 2.0 / glibc 1.2 | behind 60% | level (-0%) |
+| json 32Mi (preload) | cycles/byte | 17.12 | mimalloc 16.30 | behind 5% | behind 5% | 353.3 / jemalloc 360.5 | ahead 2% | ahead 2% |
+| larson-sized 8 (preload) | Mops/s | 426.9 | mimalloc 541.1 | behind 25% | behind 25% | 71.5 / tcmalloc-thread 54.3 | behind 32% | ahead 19% |
+| larson 8 (preload) | Mops/s | 433.6 | mimalloc 500.8 | behind 16% | behind 16% | 72.2 / tcmalloc-thread 53.6 | behind 35% | ahead 19% |
+| xmalloc-test 4+4 (preload) | Mfrees/s | 396.5 | tcmalloc-percpu 549.5 | bimodal (section 7) | ahead 25% | 4.4 / tcmalloc-thread 34.0 | bimodal | ahead 90% |
+| sh8bench 16 (preload) | s | 0.5966 | mimalloc 0.2712 | behind 124% | behind 124% | 120.1 / tcmalloc-percpu 119.7 | level (+0%) | ahead 26% |
+| mstress 8 (preload) | s | 0.2625 | mimalloc 0.2474 | behind 6% | behind 6% | 139.5 / jemalloc 139.1 | level (-1%) | level (-1%) |
+| cache-scratch 1 (preload) | s | 0.5186 | mimalloc 0.5062 | level (+2%) | level (+2%) | 1.0 / glibc 0.8 | level (+16%) | ahead 20% |
+| cache-scratch 8 (preload) | s | 0.0674 | mimalloc 0.0672 | level (+0%) | level (+0%) | 2.8 / glibc 2.5 | behind 10% | level (+0%) |
+| cfrac (preload) | s | 2.107 | mimalloc 2.080 | behind 1% | behind 1% | 1.6 / jemalloc 1.4 | behind 17% | behind 17% |
+| espresso (preload) | s | 2.316 | mimalloc 2.226 | behind 4% | behind 4% | 2.6 / glibc 1.3 | behind 92% | behind 51% |
 
-## 4. Cross-thread
+## 4. What moved since `b5d6e8f`, and why
+
+The incumbents held still between the two sessions: each one's median change over the jobs
+the sessions share is under 1%. The jobs below moved by far more, and only for asmalloc,
+except where said. The workloads were rebuilt between the sessions, and some jobs' times
+depend on where their code landed (section 14), so moves of a few percent on JSON and the
+tree are not resolved; none of those below is that small. Causes come from the notes that
+measured each change, before and after, on its own.
+
+| Job | `b5d6e8f` | `a92d51a` | Against the best, then and now | What moved it |
+|---|---:|---:|---|---|
+| Large objects crossing threads, ns/alloc | 296.6 | 62.21 | behind 721%, behind 76% | Frees no longer purge: the retained cap is charged to growth (`e618a42`, `c2b8a31`; 319 to 119 ns, `madvise` calls 298k to 53). Then shared words on cache lines of their own (`f5647f2`) and a large allocation and free in half the instructions (`fd8e607`): 99.9 to 69.0 ns. `memory.md`, "The cap charged to growth" and "Lines between CPUs, and the cost of a large block". |
+| Independent pipelines across L3s (x2 split, x3, x4), ns/alloc per chain | 10.81, 9.379, 10.16 | 4.633, 5.313, 5.498 | behind 35, 16, 24%; ahead 43, 34, 33% | A depot per cache domain (`e4dcd16`, `f023136`), then a capped stack per domain and a shared stack per class (`d37faa7`, `1dbe734`): magazines stay in the L3 that freed them. x2 split 11.16 to 4.78 ns. `launder-and-fill.md`, "A depot per cache domain". |
+| Box tree depth 20, cycles/node | 99.26 | 43.25 | behind 116%, ahead 3% | Magazines hand out objects lowest address first (`94c5784`; the walk 531 to 211 M cycles), and are filled and laundered whole, in place (`4b0af00`; 61.7 to 44.3 cycles/node). `launder-and-fill.md`, "Ascending magazines, and whole magazines in place". The job's own code also changed (build, walk and drop now timed apart, the drop out of line): glibc moved 113 to 86 with it and per-thread tcmalloc 162 to 144, the other incumbents under 5%. |
+| JSON 32 MiB, cycles/byte, native; preloaded | 23.62; 23.90 | 16.19; 17.12 | behind 45, 44%; behind 1, 5% | The cap charged to growth (81k `madvise` calls to 62, kernel share 15% to 3%) and whole-magazine launders and fills. |
+| BTreeMap 1M, cycles/entry | 1089 | 884.6 | behind 32%, 8% | Whole-magazine launders and fills (1138 to 995), scattered launders through a window and a map (`68eb74d`) and then a direct path (`1b49725`; drop instructions per object 165 to 112), and the cap charged to growth (faults 38k to 25k). |
+| HashMap 1M, cycles/entry; cgroup peak | 690.6; 175.1 MiB | 533.8; 204.3 MiB | behind 60%, 23%; memory ahead 5%, behind 12% of jemalloc | The cap charged to growth: 671 to 579 cycles/entry, faults 190k to 61k, and 29 MiB more peak, since the tables a map outgrows now stay resident for its next build instead of being purged at their free. |
+| mstress 8, s; cgroup peak | 0.394; 128.1 MiB | 0.263; 139.5 MiB | behind 57%, 6%; memory ahead 9%, level with jemalloc | The cap charged to growth (0.396 to 0.270 s, faults 684k to 36k, peak 128.7 to 139.9 MiB). |
+| sh8bench 16, s | 1.190 | 0.597 | behind 364%, 124% | Fillers of one class stopped fighting over the same summary words (`4f6039c`; 1.163 to 0.782 s), and the depot per cache domain (0.720 to 0.606 s). `launder-and-fill.md`. |
+| larson, larson-sized, Mops/s; cgroup peak | 402.6, 404.2; 60 MiB | 433.6, 426.9; 72 MiB | behind 29, 30%; behind 16, 25% | Speed: the depot per cache domain and its domain stacks measured +2% and +1 to 3% across two L3s (`launder-and-fill.md`); the rest not attributed. The 12 MiB more peak: not attributed. |
+| Smallest heaps (churn 100 and 1k live), cgroup peak MiB | 0.94, 1.05 | 0.80, 0.91 | | Region headers moved out of the metadata blocks (`38ac817`) and one spare magazine per stack (`a790dfe`). `memory.md`, "Small heaps". |
+| Pipelines and exchange split across L3s, cgroup peak MiB | 2.2 to 2.4 | 2.6 to 2.9 | | The depot per cache domain: a domain's frees wait in its own stack before the other domain takes them, and meanwhile the other carves (`launder-and-fill.md`, "Parked memory"). |
+| Split pipeline, free-only consumer, ns/alloc | 11.05 | 12.54 | ahead 52%, ahead 51% | 14% slower. The depot per cache domain measured +2%; the rest not attributed. |
+| tokio spawn, four threads, ns/task | 125.6 | 130.9 | behind 18%, 33% | Not attributed. asmalloc is 4% slower and glibc 6% faster (105.9 to 99.1); asmalloc's runs fall in two groups, 129 to 131 and 149 to 166 ns. |
+
+**Redefined, not compared.** The `vecgrow` jobs fill each vector by `memset` steps instead of
+one push per element (`f0690eb`; section 14), so their numbers before and after the change
+are different jobs. Under the new definition, sixteen times the room for a growing block
+(`c43b949`) made one Vec to 256 MiB 34% faster (`memory.md`, "Headroom for growing blocks").
+`largepair 64Ki+1Mi` is new in the full suite.
+
+**xmalloc-test is bimodal**, as `launder-and-fill.md` found for every library on two L3s, so
+its medians do not compare. asmalloc's slow runs went from 260-346 to 374-401 Mfrees/s and
+its fast runs from 650-664 to 739-750; the depot per cache domain measured the slow runs at
+377-390 before and 399-441 after.
+
+## 5. Multithreaded
 
 Medians of ten.
 
-Time:
+Cross-thread, time:
 
-| Job | Metric | asmalloc | glibc | mimalloc | mi crate | jemalloc | tc per-CPU | tc per-thread |
-|---|---|---:|---:|---:|---:|---:|---:|---:|
-| pipeline t2 sizes=s64 local all-alloc | ns/alloc | 3.845 | 91.63 | 15.93 | 18.95 | 6.409 | 9.078 | 10.21 |
-| pipeline t2 sizes=small local all-alloc | ns/alloc | 3.753 | 127.2 | 14.59 | 17.67 | 8.231 | 6.600 | 10.15 |
-| pipeline t2 sizes=mixed local all-alloc | ns/alloc | 11.27 | 132.6 | 20.05 | 21.61 | 17.03 | 12.52 | 16.60 |
-| pipeline t2 sizes=small local free-only | ns/alloc | 3.717 | 126.6 | 15.08 | 17.71 | 22.66 | 6.602 | 10.12 |
-| pipeline t2 sizes=large objects=1M inflight=512 local all-alloc | ns/alloc | 296.6 | 370.1 | 41.74 | 40.01 | 300.2 | 40.46 | 35.64 |
-| pipeline t2 sizes=small split all-alloc | ns/alloc | 12.09 | 123.2 | 53.01 | 67.01 | 18.35 | 23.35 | 29.83 |
-| pipeline t2 sizes=small split free-only | ns/alloc | 11.05 | 122.3 | 53.52 | 64.48 | 50.61 | 23.47 | 29.07 |
-| pipeline t4 sizes=small local all-alloc | ns/alloc | 3.235 | 33.31 | 10.18 | 10.06 | 3.602 | 4.136 | 6.854 |
-| pipeline t8 sizes=small both all-alloc | ns/alloc | 4.269 | 49.05 | 11.37 | 11.91 | 4.396 | 5.931 | 7.865 |
-| pipeline t2 x2 sizes=small local all-alloc | ns/alloc per chain | 3.983 | 131.3 | 17.00 | 18.35 | 7.908 | 7.874 | 12.63 |
-| pipeline t2 x2 sizes=small split all-alloc | ns/alloc per chain | 10.81 | 139.0 | 16.99 | 20.16 | 8.013 | 22.49 | 29.88 |
-| pipeline t2 x3 sizes=small both all-alloc | ns/alloc per chain | 9.379 | 139.8 | 17.41 | 20.59 | 8.081 | 20.89 | 28.62 |
-| pipeline t2 x4 sizes=small both all-alloc | ns/alloc per chain | 10.16 | 147.1 | 17.54 | 21.41 | 8.157 | 25.62 | 33.88 |
-| exchange t2 sizes=small local | ns/alloc | 4.260 | 45.54 | 12.01 | 12.78 | 7.629 | 6.936 | 11.86 |
-| exchange t2 sizes=mixed local | ns/alloc | 8.082 | 71.58 | 15.17 | 15.54 | 10.11 | 8.791 | 12.74 |
-| exchange t2 sizes=small split | ns/alloc | 13.79 | 129.8 | 42.66 | 46.48 | 18.74 | 27.22 | 32.96 |
-| exchange t4 sizes=small local | ns/alloc | 2.363 | 25.38 | 6.181 | 6.792 | 4.535 | 3.688 | 6.954 |
-| exchange t8 sizes=small both | ns/alloc | 3.254 | 23.55 | 8.535 | 9.619 | 3.991 | 6.037 | 9.082 |
-| mpmc p1 c3 sizes=small local all-alloc | ns/alloc | 5.905 | 101.1 | 20.66 | 21.51 | 7.522 | 8.506 | 9.681 |
-| mpmc p1 c3 sizes=small local free-only | ns/alloc | 5.087 | 97.78 | 19.98 | 21.12 | 20.15 | 8.559 | 9.710 |
-| mpmc p3 c1 sizes=small local all-alloc | ns/alloc | 5.160 | 77.64 | 7.807 | 8.846 | 10.28 | 7.126 | 11.73 |
-| mpmc p3 c1 sizes=small local free-only | ns/alloc | 5.876 | 75.69 | 7.678 | 8.852 | 20.99 | 7.245 | 12.97 |
-| mpmc p4 c4 sizes=small both all-alloc | ns/alloc | 4.921 | 73.73 | 21.25 | 24.20 | 8.565 | 9.955 | 12.38 |
+| Job | Metric | asmalloc | glibc | mimalloc | mi sized | mi crate | jemalloc | tc per-CPU | tc per-thread |
+|---|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| pipeline t2 sizes=s64 local all-alloc | ns/alloc | 3.741 | 92.23 | 13.69 | 14.16 | 15.89 | 6.282 | 9.734 | 10.19 |
+| pipeline t2 sizes=small local all-alloc | ns/alloc | 3.745 | 126.3 | 15.52 | 15.01 | 17.85 | 7.712 | 6.708 | 10.12 |
+| pipeline t2 sizes=mixed local all-alloc | ns/alloc | 11.29 | 134.8 | 20.05 | 20.30 | 21.61 | 17.00 | 12.53 | 16.63 |
+| pipeline t2 sizes=small local free-only | ns/alloc | 3.755 | 127.5 | 15.01 | 15.04 | 18.86 | 22.31 | 6.673 | 10.09 |
+| pipeline t2 sizes=large objects=1M inflight=512 local all-alloc | ns/alloc | 62.21 | 355.8 | 41.74 | 41.91 | 40.27 | 305.0 | 40.67 | 35.49 |
+| pipeline t2 sizes=small split all-alloc | ns/alloc | 11.54 | 129.3 | 51.05 | 50.59 | 67.61 | 18.49 | 24.24 | 30.11 |
+| pipeline t2 sizes=small split free-only | ns/alloc | 12.54 | 127.5 | 53.01 | 50.73 | 64.58 | 50.63 | 24.59 | 29.82 |
+| pipeline t4 sizes=small local all-alloc | ns/alloc | 3.172 | 33.26 | 10.05 | 10.12 | 10.01 | 3.584 | 4.134 | 6.859 |
+| pipeline t8 sizes=small both all-alloc | ns/alloc | 4.232 | 49.10 | 11.27 | 11.92 | 12.78 | 4.383 | 5.915 | 7.849 |
+| pipeline t2 x2 sizes=small local all-alloc | ns/alloc per chain | 4.134 | 134.2 | 16.95 | 18.05 | 18.54 | 7.865 | 7.903 | 12.55 |
+| pipeline t2 x2 sizes=small split all-alloc | ns/alloc per chain | 4.633 | 138.5 | 17.05 | 17.32 | 20.77 | 8.037 | 22.49 | 29.44 |
+| pipeline t2 x3 sizes=small both all-alloc | ns/alloc per chain | 5.313 | 141.7 | 17.60 | 17.29 | 20.77 | 8.121 | 20.84 | 29.26 |
+| pipeline t2 x4 sizes=small both all-alloc | ns/alloc per chain | 5.498 | 143.8 | 17.72 | 17.60 | 21.23 | 8.169 | 24.11 | 33.94 |
+| exchange t2 sizes=small local | ns/alloc | 4.438 | 45.93 | 12.10 | 12.31 | 13.01 | 7.591 | 6.912 | 11.86 |
+| exchange t2 sizes=mixed local | ns/alloc | 8.150 | 71.51 | 15.27 | 15.35 | 15.66 | 10.12 | 8.809 | 12.73 |
+| exchange t2 sizes=small split | ns/alloc | 14.05 | 129.8 | 42.72 | 40.70 | 47.98 | 18.63 | 24.85 | 33.12 |
+| exchange t4 sizes=small local | ns/alloc | 2.350 | 25.06 | 6.183 | 6.087 | 7.657 | 4.028 | 3.715 | 7.315 |
+| exchange t8 sizes=small both | ns/alloc | 2.996 | 24.01 | 7.786 | 8.296 | 9.815 | 3.969 | 6.120 | 8.552 |
+| mpmc p1 c3 sizes=small local all-alloc | ns/alloc | 5.237 | 101.2 | 26.47 | 23.43 | 21.72 | 7.583 | 8.508 | 9.643 |
+| mpmc p1 c3 sizes=small local free-only | ns/alloc | 5.361 | 97.06 | 20.53 | 22.20 | 21.50 | 20.25 | 8.679 | 9.680 |
+| mpmc p3 c1 sizes=small local all-alloc | ns/alloc | 4.842 | 79.30 | 7.704 | 9.346 | 9.056 | 10.73 | 8.182 | 11.73 |
+| mpmc p3 c1 sizes=small local free-only | ns/alloc | 4.876 | 79.93 | 7.648 | 8.207 | 10.23 | 21.27 | 7.152 | 12.45 |
+| mpmc p4 c4 sizes=small both all-alloc | ns/alloc | 4.991 | 73.89 | 21.31 | 21.36 | 24.37 | 8.579 | 9.399 | 12.26 |
 
-Cgroup peak, MiB:
+Cross-thread, cgroup peak, MiB:
 
-| Job | asmalloc | glibc | mimalloc | mi crate | jemalloc | tc per-CPU | tc per-thread |
-|---|---:|---:|---:|---:|---:|---:|---:|
-| pipeline t2 sizes=s64 local all-alloc | 1.396 | 1.000 | 6.750 | 4.750 | 1.443 | 2.527 | 2.250 |
-| pipeline t2 sizes=small local all-alloc | 2.299 | 1.250 | 4.750 | 6.627 | 1.877 | 2.799 | 2.590 |
-| pipeline t2 sizes=mixed local all-alloc | 5.143 | 3.104 | 8.750 | 9.691 | 5.051 | 3.750 | 3.189 |
-| pipeline t2 sizes=small local free-only | 2.283 | 1.250 | 4.750 | 4.750 | 1.744 | 2.787 | 2.582 |
-| pipeline t2 sizes=large objects=1M inflight=512 local all-alloc | 3.143 | 33.86 | 65.88 | 58.73 | 8.609 | 4.381 | 3.752 |
-| pipeline t2 sizes=small split all-alloc | 2.160 | 1.000 | 4.750 | 6.627 | 1.816 | 2.865 | 2.578 |
-| pipeline t2 sizes=small split free-only | 2.230 | 0.762 | 4.750 | 4.750 | 1.746 | 2.734 | 2.578 |
-| pipeline t4 sizes=small local all-alloc | 4.082 | 2.768 | 7.250 | 9.250 | 3.637 | 4.162 | 4.734 |
-| pipeline t8 sizes=small both all-alloc | 7.383 | 5.982 | 12.50 | 14.50 | 6.828 | 6.564 | 9.158 |
-| pipeline t2 x2 sizes=small local all-alloc | 3.594 | 2.012 | 7.250 | 9.248 | 3.246 | 3.994 | 3.602 |
-| pipeline t2 x2 sizes=small split all-alloc | 3.441 | 2.012 | 7.250 | 9.250 | 3.246 | 3.230 | 3.723 |
-| pipeline t2 x3 sizes=small both all-alloc | 4.672 | 3.000 | 8.000 | 9.750 | 4.746 | 3.990 | 4.846 |
-| pipeline t2 x4 sizes=small both all-alloc | 6.035 | 4.000 | 10.25 | 12.00 | 6.062 | 4.482 | 5.941 |
-| exchange t2 sizes=small local | 2.490 | 1.686 | 6.750 | 8.750 | 2.445 | 2.930 | 9.449 |
-| exchange t2 sizes=mixed local | 4.902 | 4.537 | 12.75 | 14.65 | 6.270 | 4.006 | 9.244 |
-| exchange t2 sizes=small split | 2.418 | 1.385 | 6.750 | 8.750 | 2.314 | 2.893 | 8.654 |
-| exchange t4 sizes=small local | 3.787 | 3.230 | 8.250 | 9.250 | 4.277 | 3.691 | 16.06 |
-| exchange t8 sizes=small both | 6.617 | 6.160 | 12.38 | 14.49 | 9.018 | 5.238 | 25.61 |
-| mpmc p1 c3 sizes=small local all-alloc | 3.215 | 1.250 | 7.250 | 6.764 | 2.246 | 3.000 | 2.539 |
-| mpmc p1 c3 sizes=small local free-only | 3.262 | 1.375 | 5.250 | 5.250 | 1.996 | 3.000 | 2.531 |
-| mpmc p3 c1 sizes=small local all-alloc | 3.715 | 2.104 | 7.250 | 9.250 | 3.180 | 3.490 | 3.020 |
-| mpmc p3 c1 sizes=small local free-only | 3.664 | 1.951 | 7.250 | 9.250 | 2.994 | 3.492 | 3.039 |
-| mpmc p4 c4 sizes=small both all-alloc | 5.746 | 2.750 | 10.25 | 10.50 | 4.742 | 4.234 | 4.076 |
+| Job | asmalloc | glibc | mimalloc | mi sized | mi crate | jemalloc | tc per-CPU | tc per-thread |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| pipeline t2 sizes=s64 local all-alloc | 1.250 | 1.000 | 4.750 | 4.750 | 4.750 | 1.443 | 2.500 | 2.250 |
+| pipeline t2 sizes=small local all-alloc | 2.242 | 1.250 | 4.750 | 4.750 | 6.750 | 1.938 | 2.750 | 2.582 |
+| pipeline t2 sizes=mixed local all-alloc | 4.951 | 3.311 | 8.750 | 8.750 | 10.64 | 5.070 | 3.750 | 3.070 |
+| pipeline t2 sizes=small local free-only | 1.988 | 1.117 | 4.750 | 4.750 | 6.750 | 1.746 | 2.750 | 2.500 |
+| pipeline t2 sizes=large objects=1M inflight=512 local all-alloc | 2.752 | 33.69 | 67.77 | 67.77 | 56.73 | 8.527 | 4.320 | 3.695 |
+| pipeline t2 sizes=small split all-alloc | 2.574 | 0.973 | 4.750 | 4.750 | 6.750 | 1.965 | 2.658 | 2.574 |
+| pipeline t2 sizes=small split free-only | 2.572 | 1.000 | 4.750 | 4.750 | 6.750 | 1.746 | 2.709 | 2.572 |
+| pipeline t4 sizes=small local all-alloc | 3.996 | 2.809 | 7.250 | 8.250 | 9.248 | 3.639 | 3.998 | 4.590 |
+| pipeline t8 sizes=small both all-alloc | 7.725 | 5.994 | 12.50 | 12.50 | 14.50 | 6.873 | 6.861 | 8.990 |
+| pipeline t2 x2 sizes=small local all-alloc | 3.424 | 2.020 | 5.250 | 5.250 | 9.250 | 3.246 | 3.682 | 3.580 |
+| pipeline t2 x2 sizes=small split all-alloc | 3.445 | 2.012 | 5.250 | 5.250 | 9.250 | 3.248 | 3.215 | 3.562 |
+| pipeline t2 x3 sizes=small both all-alloc | 4.787 | 2.957 | 8.000 | 7.750 | 9.750 | 4.746 | 3.750 | 4.602 |
+| pipeline t2 x4 sizes=small both all-alloc | 5.869 | 3.996 | 10.12 | 9.750 | 12.38 | 6.072 | 4.496 | 5.721 |
+| exchange t2 sizes=small local | 2.246 | 1.752 | 4.750 | 4.750 | 8.750 | 2.432 | 2.912 | 9.270 |
+| exchange t2 sizes=mixed local | 4.779 | 4.533 | 12.75 | 12.75 | 14.75 | 6.096 | 4.004 | 9.336 |
+| exchange t2 sizes=small split | 2.895 | 1.498 | 4.750 | 4.750 | 8.750 | 2.381 | 2.889 | 8.043 |
+| exchange t4 sizes=small local | 3.688 | 3.271 | 9.250 | 9.250 | 9.250 | 4.240 | 3.762 | 16.14 |
+| exchange t8 sizes=small both | 6.838 | 6.197 | 12.50 | 14.25 | 14.38 | 8.682 | 5.240 | 25.72 |
+| mpmc p1 c3 sizes=small local all-alloc | 3.059 | 1.250 | 5.250 | 5.250 | 9.250 | 2.246 | 3.027 | 2.701 |
+| mpmc p1 c3 sizes=small local free-only | 3.023 | 1.250 | 5.250 | 5.250 | 6.756 | 1.996 | 3.094 | 2.578 |
+| mpmc p3 c1 sizes=small local all-alloc | 3.467 | 2.039 | 7.250 | 7.250 | 9.250 | 3.246 | 3.496 | 3.027 |
+| mpmc p3 c1 sizes=small local free-only | 3.471 | 2.025 | 7.250 | 7.250 | 9.250 | 2.963 | 3.254 | 3.002 |
+| mpmc p4 c4 sizes=small both all-alloc | 6.023 | 2.732 | 10.25 | 10.38 | 12.25 | 4.516 | 4.219 | 3.961 |
 
-## 5. Work stealing and the RPC server
+The large-object pipeline is bimodal for asmalloc (seven rounds at 61.6 to 62.3 ns, three at
+79 to 81) and, less often, for the tcmallocs and mimalloc.
 
-Time:
+Work stealing, time:
 
-| Job | Metric | asmalloc | glibc | mimalloc | mi crate | jemalloc | tc per-CPU | tc per-thread |
-|---|---|---:|---:|---:|---:|---:|---:|---:|
-| forkjoin t4 local | ns/alloc | 3.743 | 10.69 | 5.754 | 5.710 | 4.769 | 4.394 | 5.128 |
-| spawn t4 local | ns/task | 125.6 | 105.9 | 119.4 | 118.2 | 113.2 | 113.8 | 113.8 |
-| forkjoin t8 both | ns/alloc | 4.058 | 17.78 | 7.457 | 8.356 | 3.963 | 5.723 | 7.134 |
-| spawn t8 both | ns/task | 249.6 | 228.1 | 244.9 | 237.1 | 224.9 | 230.7 | 227.3 |
+| Job | Metric | asmalloc | glibc | mimalloc | mi sized | mi crate | jemalloc | tc per-CPU | tc per-thread |
+|---|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| forkjoin t4 local | ns/alloc | 3.453 | 10.69 | 5.786 | 5.846 | 5.934 | 4.803 | 4.416 | 5.144 |
+| spawn t4 local | ns/task | 130.9 | 99.11 | 121.0 | 119.6 | 117.3 | 113.8 | 114.3 | 124.0 |
+| forkjoin t8 both | ns/alloc | 3.818 | 17.75 | 7.998 | 7.549 | 8.564 | 3.947 | 5.134 | 7.632 |
+| spawn t8 both | ns/task | 254.7 | 235.6 | 246.9 | 244.0 | 236.0 | 226.6 | 231.1 | 228.4 |
 
-Cgroup peak, MiB:
+Work stealing, cgroup peak, MiB:
 
-| Job | asmalloc | glibc | mimalloc | mi crate | jemalloc | tc per-CPU | tc per-thread |
-|---|---:|---:|---:|---:|---:|---:|---:|
-| forkjoin t4 local | 15.72 | 17.92 | 21.59 | 23.25 | 28.39 | 16.39 | 16.61 |
-| spawn t4 local | 2.594 | 1.588 | 9.250 | 11.25 | 2.521 | 3.291 | 2.846 |
-| forkjoin t8 both | 17.91 | 21.33 | 26.50 | 28.50 | 22.89 | 17.82 | 18.73 |
-| spawn t8 both | 4.836 | 3.072 | 12.50 | 14.50 | 4.572 | 4.842 | 4.369 |
+| Job | asmalloc | glibc | mimalloc | mi sized | mi crate | jemalloc | tc per-CPU | tc per-thread |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| forkjoin t4 local | 15.60 | 18.08 | 21.59 | 21.62 | 23.38 | 28.90 | 16.39 | 16.63 |
+| spawn t4 local | 2.521 | 1.686 | 9.250 | 9.250 | 9.250 | 2.504 | 3.324 | 2.793 |
+| forkjoin t8 both | 17.82 | 19.28 | 26.71 | 26.64 | 28.67 | 23.82 | 17.83 | 18.71 |
+| spawn t8 both | 4.613 | 3.121 | 12.50 | 12.50 | 14.50 | 4.590 | 4.826 | 4.227 |
 
-Time:
+The RPC server, time:
 
-| Job | Metric | asmalloc | glibc | mimalloc | mi crate | jemalloc | tc per-CPU | tc per-thread |
-|---|---|---:|---:|---:|---:|---:|---:|---:|
-| rpc echo c64 | server cycles/req | 46199 | 49130 | 46740 | 47001 | 46014 | 45404 | 47407 |
-| rpc log c64 | server cycles/req | 122789 | 148744 | 121547 | 122308 | 125354 | 122973 | 128475 |
-| rpc log c256 | server cycles/req | 119942 | 150747 | 117570 | 118996 | 122295 | 119292 | 125778 |
+| Job | Metric | asmalloc | glibc | mimalloc | mi sized | mi crate | jemalloc | tc per-CPU | tc per-thread |
+|---|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| rpc echo c64 | server cycles/req | 46816 | 48862 | 46746 | 46590 | 47105 | 45799 | 45614 | 47409 |
+| rpc log c64 | server cycles/req | 125168 | 149854 | 123607 | 121462 | 120967 | 127620 | 122863 | 128922 |
+| rpc log c256 | server cycles/req | 121083 | 152528 | 119946 | 118420 | 118012 | 125013 | 119607 | 126574 |
 
-Cgroup peak, MiB:
+The RPC server, cgroup peak, MiB:
 
-| Job | asmalloc | glibc | mimalloc | mi crate | jemalloc | tc per-CPU | tc per-thread |
-|---|---:|---:|---:|---:|---:|---:|---:|
-| rpc echo c64 | 5.838 | 3.254 | 14.12 | 15.37 | 5.834 | 6.154 | 18.42 |
-| rpc log c64 | 7.664 | 4.938 | 24.69 | 26.55 | 9.314 | 9.082 | 18.64 |
-| rpc log c256 | 10.96 | 7.990 | 27.70 | 31.42 | 12.98 | 11.80 | 27.17 |
+| Job | asmalloc | glibc | mimalloc | mi sized | mi crate | jemalloc | tc per-CPU | tc per-thread |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| rpc echo c64 | 5.646 | 3.277 | 13.75 | 13.22 | 14.96 | 5.832 | 6.141 | 18.76 |
+| rpc log c64 | 8.271 | 5.297 | 25.07 | 25.41 | 26.54 | 9.695 | 9.355 | 19.32 |
+| rpc log c256 | 11.72 | 9.666 | 29.11 | 28.08 | 31.57 | 14.40 | 15.49 | 27.23 |
 
 The RPC client is the bottleneck, so these rank the server's cycles per request.
 
@@ -262,39 +322,41 @@ The RPC client is the bottleneck, so these rank the server's cycles per request.
 
 Time:
 
-| Job | Metric | asmalloc | glibc | mimalloc | mi crate | jemalloc | tc per-CPU | tc per-thread |
-|---|---|---:|---:|---:|---:|---:|---:|---:|
-| churn live=100 small | cycles/op | 24.21 | 35.09 | 45.71 | 47.03 | 34.78 | 37.65 | 73.96 |
-| churn live=1k small | cycles/op | 25.13 | 45.61 | 45.77 | 46.33 | 36.00 | 38.49 | 73.98 |
-| churn live=10k small | cycles/op | 32.16 | 56.43 | 50.24 | 54.41 | 40.30 | 41.96 | 75.42 |
-| churn live=100k small | cycles/op | 47.79 | 78.93 | 65.71 | 72.82 | 54.50 | 58.84 | 95.11 |
-| churn live=1M small | cycles/op | 113.6 | 305.7 | 184.2 | 217.3 | 126.2 | 140.3 | 282.7 |
-| churn live=10M small | cycles/op | 217.4 | 459.1 | 433.8 | 563.1 | 250.3 | 300.1 | 520.6 |
-| churn live=100k mixed | cycles/op | 88.83 | 166.3 | 98.33 | 108.7 | 107.8 | 94.38 | 149.6 |
-| map btree 1M | cycles/entry | 1089 | 1322 | 837.6 | 826.0 | 963.5 | 1034 | 1221 |
-| map hash 1M | cycles/entry | 690.6 | 1098 | 455.4 | 431.8 | 622.9 | 599.3 | 771.4 |
-| tree depth=20 | cycles/node | 99.26 | 113.4 | 45.89 | 45.92 | 101.9 | 115.9 | 161.8 |
-| vecgrow 1x256Mi | cycles/element | 5.363 | 8.636 | 10.86 | 4.812 | 16.69 | 13.14 | 13.15 |
-| vecgrow 64x4Mi | cycles/element | 9.380 | 18.24 | 36.69 | 43.73 | 10.10 | 37.62 | 37.92 |
-| json 32Mi | cycles/byte | 23.62 | 22.60 | 16.61 | 16.34 | 23.28 | 28.84 | 33.22 |
+| Job | Metric | asmalloc | glibc | mimalloc | mi sized | mi crate | jemalloc | tc per-CPU | tc per-thread |
+|---|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| churn live=100 small | cycles/op | 22.67 | 34.59 | 44.85 | 45.38 | 46.89 | 33.86 | 36.91 | 73.70 |
+| churn live=1k small | cycles/op | 23.97 | 44.91 | 44.84 | 45.07 | 46.37 | 35.16 | 37.78 | 73.69 |
+| churn live=10k small | cycles/op | 31.48 | 55.73 | 49.32 | 49.15 | 54.04 | 39.65 | 41.40 | 75.37 |
+| churn live=100k small | cycles/op | 46.51 | 78.28 | 64.96 | 63.85 | 72.64 | 53.15 | 58.27 | 94.83 |
+| churn live=1M small | cycles/op | 104.3 | 306.6 | 179.8 | 171.4 | 215.8 | 119.5 | 133.3 | 283.6 |
+| churn live=10M small | cycles/op | 214.1 | 456.4 | 421.4 | 411.0 | 557.3 | 247.0 | 298.3 | 520.8 |
+| churn live=100k mixed | cycles/op | 87.47 | 164.9 | 96.99 | 98.04 | 109.4 | 106.6 | 93.66 | 149.7 |
+| map btree 1M | cycles/entry | 884.6 | 1324 | 820.6 | 826.1 | 817.6 | 947.9 | 1030 | 1224 |
+| map hash 1M | cycles/entry | 533.8 | 1088 | 456.8 | 463.8 | 434.4 | 626.0 | 596.7 | 771.7 |
+| tree depth=20 | cycles/node | 43.25 | 85.89 | 44.54 | 46.42 | 44.31 | 101.3 | 117.3 | 143.8 |
+| vecgrow 1x256Mi | cycles/element | 2.203 | 6.718 | 9.653 | 9.636 | 4.150 | 14.37 | 11.82 | 11.79 |
+| vecgrow 64x4Mi | cycles/element | 5.891 | 8.213 | 3.504 | 3.055 | 3.153 | 8.170 | 6.405 | 6.375 |
+| json 32Mi | cycles/byte | 16.19 | 22.96 | 16.56 | 16.77 | 16.13 | 23.30 | 28.70 | 33.46 |
+| largepair 64Ki+1Mi | ns/pair | 67.46 | 8.087 | 90.19 | 90.35 | 106.7 | 133.6 | 59.01 | 61.74 |
 
 Cgroup peak, MiB:
 
-| Job | asmalloc | glibc | mimalloc | mi crate | jemalloc | tc per-CPU | tc per-thread |
-|---|---:|---:|---:|---:|---:|---:|---:|
-| churn live=100 small | 0.938 | 0.500 | 2.537 | 4.521 | 0.711 | 2.117 | 1.707 |
-| churn live=1k small | 1.053 | 0.621 | 4.539 | 4.527 | 0.830 | 2.250 | 1.832 |
-| churn live=10k small | 2.266 | 1.738 | 6.547 | 6.527 | 1.867 | 3.332 | 2.836 |
-| churn live=100k small | 12.23 | 12.60 | 14.56 | 16.54 | 11.78 | 13.44 | 13.01 |
-| churn live=1M small | 109.3 | 120.7 | 116.8 | 118.8 | 110.3 | 113.9 | 113.5 |
-| churn live=10M small | 1070 | 1199 | 1143 | 1141 | 1091 | 1114 | 1114 |
-| churn live=100k mixed | 34.73 | 40.46 | 54.63 | 56.63 | 42.61 | 34.95 | 34.56 |
-| map btree 1M | 123.4 | 130.5 | 128.6 | 128.6 | 125.1 | 134.1 | 133.7 |
-| map hash 1M | 175.1 | 208.2 | 299.1 | 198.9 | 183.6 | 253.6 | 253.2 |
-| tree depth=20 | 51.31 | 64.55 | 96.67 | 96.66 | 66.82 | 68.75 | 68.35 |
-| vecgrow 1x256Mi | 257.9 | 257.0 | 525.5 | 523.5 | 264.4 | 683.4 | 682.9 |
-| vecgrow 64x4Mi | 270.3 | 269.3 | 265.1 | 289.1 | 307.1 | 286.6 | 296.2 |
-| json 32Mi | 352.2 | 414.4 | 387.3 | 355.0 | 360.1 | 398.7 | 398.3 |
+| Job | asmalloc | glibc | mimalloc | mi sized | mi crate | jemalloc | tc per-CPU | tc per-thread |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| churn live=100 small | 0.801 | 0.500 | 2.539 | 2.539 | 4.531 | 0.713 | 2.113 | 1.707 |
+| churn live=1k small | 0.910 | 0.629 | 4.543 | 4.547 | 4.527 | 0.820 | 2.244 | 1.834 |
+| churn live=10k small | 2.117 | 1.750 | 6.549 | 6.547 | 6.533 | 1.869 | 3.322 | 2.834 |
+| churn live=100k small | 12.07 | 12.60 | 14.57 | 14.56 | 16.55 | 11.77 | 13.47 | 13.00 |
+| churn live=1M small | 109.2 | 120.6 | 116.8 | 116.8 | 118.8 | 110.3 | 113.9 | 113.5 |
+| churn live=10M small | 1070 | 1199 | 1143 | 1143 | 1141 | 1091 | 1114 | 1114 |
+| churn live=100k mixed | 34.40 | 40.64 | 54.64 | 54.64 | 56.63 | 42.68 | 34.92 | 34.49 |
+| map btree 1M | 123.5 | 130.5 | 128.6 | 128.6 | 128.6 | 125.2 | 134.1 | 134.2 |
+| map hash 1M | 204.3 | 208.2 | 299.1 | 299.1 | 260.8 | 181.7 | 253.6 | 253.2 |
+| tree depth=20 | 51.16 | 64.50 | 96.68 | 96.67 | 96.66 | 66.93 | 68.72 | 68.45 |
+| vecgrow 1x256Mi | 258.4 | 257.0 | 525.4 | 525.5 | 527.5 | 264.4 | 683.3 | 683.0 |
+| vecgrow 64x4Mi | 277.4 | 265.4 | 265.0 | 265.0 | 291.0 | 307.1 | 286.7 | 296.3 |
+| json 32Mi | 352.5 | 414.3 | 387.3 | 387.3 | 355.0 | 362.3 | 398.6 | 398.3 |
+| largepair 64Ki+1Mi | 0.799 | 0.479 | 4.547 | 4.543 | 4.521 | 0.697 | 2.062 | 1.652 |
 
 ## 7. Programs through LD_PRELOAD
 
@@ -304,17 +366,17 @@ Time:
 
 | Job | Metric | asmalloc | glibc | mimalloc | jemalloc | tc per-CPU | tc per-thread |
 |---|---|---:|---:|---:|---:|---:|---:|
-| churn live=100k small (preload) | cycles/op | 53.22 | 78.74 | 52.13 | 61.19 | 56.91 | 93.92 |
-| pipeline t2 sizes=small local all-alloc (preload) | ns/alloc | 3.997 | 125.3 | 14.43 | 7.640 | 6.334 | 8.925 |
-| json 32Mi (preload) | cycles/byte | 23.90 | 22.62 | 16.63 | 23.94 | 29.30 | 32.94 |
+| churn live=100k small (preload) | cycles/op | 51.52 | 77.92 | 50.87 | 60.09 | 55.54 | 93.01 |
+| pipeline t2 sizes=small local all-alloc (preload) | ns/alloc | 3.985 | 126.9 | 14.07 | 7.644 | 6.823 | 8.928 |
+| json 32Mi (preload) | cycles/byte | 17.12 | 22.91 | 16.30 | 24.01 | 29.27 | 32.97 |
 
 Cgroup peak, MiB:
 
 | Job | asmalloc | glibc | mimalloc | jemalloc | tc per-CPU | tc per-thread |
 |---|---:|---:|---:|---:|---:|---:|
-| churn live=100k small (preload) | 12.28 | 12.62 | 14.59 | 11.99 | 13.46 | 13.05 |
-| pipeline t2 sizes=small local all-alloc (preload) | 1.994 | 1.121 | 4.750 | 1.949 | 2.514 | 2.357 |
-| json 32Mi (preload) | 353.1 | 414.4 | 387.3 | 356.8 | 419.0 | 418.6 |
+| churn live=100k small (preload) | 12.11 | 12.61 | 14.59 | 12.00 | 13.47 | 13.04 |
+| pipeline t2 sizes=small local all-alloc (preload) | 1.992 | 1.250 | 4.750 | 1.996 | 2.689 | 2.275 |
+| json 32Mi (preload) | 353.3 | 414.4 | 387.3 | 360.5 | 418.8 | 418.6 |
 
 mimalloc-bench programs:
 
@@ -322,38 +384,48 @@ Time:
 
 | Job | Metric | asmalloc | glibc | mimalloc | jemalloc | tc per-CPU | tc per-thread |
 |---|---|---:|---:|---:|---:|---:|---:|
-| larson-sized 8 | Mops/s | 404.2 | 355.3 | 522.7 | 391.7 | 496.1 | 334.3 |
-| larson 8 | Mops/s | 402.6 | 347.6 | 514.6 | 401.2 | 435.3 | 316.0 |
-| xmalloc-test 4+4 | Mfrees/s | 325.8 | 75.20 | 301.3 | 20.09 | 545.6 | 6.674 |
-| sh8bench 16 | s | 1.190 | 1.528 | 0.256 | 0.568 | 1.977 | 5.099 |
-| mstress 8 | s | 0.394 | 0.358 | 0.250 | 0.430 | 0.294 | 0.319 |
-| cache-scratch 1 | s | 0.514 | 0.509 | 0.522 | 0.500 | 0.521 | 0.511 |
-| cache-scratch 8 | s | 0.067 | 0.072 | 0.068 | 0.068 | 0.071 | 0.071 |
-| cfrac | s | 2.106 | 2.101 | 2.070 | 2.144 | 2.184 | 2.705 |
-| espresso | s | 2.249 | 2.485 | 2.231 | 2.293 | 2.266 | 2.436 |
+| larson-sized 8 | Mops/s | 426.9 | 394.4 | 541.1 | 393.7 | 492.5 | 333.9 |
+| larson 8 | Mops/s | 433.6 | 401.3 | 500.8 | 401.5 | 434.5 | 324.1 |
+| xmalloc-test 4+4 | Mfrees/s | 396.5 | 95.03 | 301.4 | 21.72 | 549.5 | 6.488 |
+| sh8bench 16 | s | 0.5966 | 1.570 | 0.2712 | 0.5034 | 1.980 | 5.118 |
+| mstress 8 | s | 0.2625 | 0.3620 | 0.2474 | 0.4502 | 0.2907 | 0.3168 |
+| cache-scratch 1 | s | 0.5186 | 0.5075 | 0.5062 | 0.5148 | 0.5084 | 0.5187 |
+| cache-scratch 8 | s | 0.0674 | 0.0789 | 0.0672 | 0.0675 | 0.0711 | 0.0714 |
+| cfrac | s | 2.107 | 2.102 | 2.080 | 2.206 | 2.183 | 2.720 |
+| espresso | s | 2.316 | 2.479 | 2.226 | 2.290 | 2.270 | 2.434 |
 
 Cgroup peak, MiB:
 
 | Job | asmalloc | glibc | mimalloc | jemalloc | tc per-CPU | tc per-thread |
 |---|---:|---:|---:|---:|---:|---:|
-| larson-sized 8 | 60.30 | 88.92 | 103.9 | 88.70 | 65.25 | 54.49 |
-| larson 8 | 60.02 | 89.93 | 103.3 | 89.46 | 60.65 | 52.93 |
-| xmalloc-test 4+4 | 20.95 | 41.56 | 68.00 | 42.58 | 39.03 | 34.03 |
-| sh8bench 16 | 119.5 | 165.4 | 213.4 | 161.9 | 119.8 | 121.9 |
-| mstress 8 | 128.1 | 252.5 | 284.1 | 139.6 | 160.6 | 161.3 |
-| cache-scratch 1 | 0.762 | 0.750 | 2.750 | 1.000 | 2.250 | 1.750 |
-| cache-scratch 8 | 2.750 | 2.500 | 4.500 | 2.742 | 4.000 | 3.500 |
-| cfrac | 1.734 | 1.445 | 4.527 | 1.410 | 2.812 | 2.377 |
-| espresso | 2.797 | 1.334 | 8.537 | 1.721 | 3.070 | 2.750 |
+| larson-sized 8 | 71.47 | 89.11 | 105.0 | 88.77 | 65.05 | 54.33 |
+| larson 8 | 72.24 | 92.03 | 102.1 | 89.76 | 60.70 | 53.60 |
+| xmalloc-test 4+4 | 4.361 | 41.83 | 67.95 | 45.08 | 38.85 | 33.99 |
+| sh8bench 16 | 120.1 | 164.7 | 210.7 | 162.2 | 119.7 | 121.9 |
+| mstress 8 | 139.5 | 247.2 | 282.8 | 139.1 | 165.0 | 163.9 |
+| cache-scratch 1 | 1.000 | 0.750 | 2.750 | 1.246 | 2.250 | 1.750 |
+| cache-scratch 8 | 2.750 | 2.500 | 4.500 | 2.744 | 4.000 | 3.500 |
+| cfrac | 1.641 | 1.447 | 4.527 | 1.404 | 2.809 | 2.381 |
+| espresso | 2.570 | 1.334 | 8.535 | 1.707 | 3.105 | 2.838 |
+
+**xmalloc-test** runs in one of two modes, by where the scheduler puts each pair of threads
+(`launder-and-fill.md`, "A depot per cache domain"), so its medians say little. asmalloc: seven
+runs at 374 to 401 Mfrees/s, peaking at 3.7 to 4.4 MiB, and three at 739 to 750, peaking at
+34 to 36 MiB. Per-CPU tcmalloc: three runs at 189 to 194, seven at 547 to 557. The memory
+median of 4.4 MiB is the slow mode's; at `b5d6e8f` five of ten runs were fast and the median
+was 21 MiB.
 
 asmalloc's preload library exports only the C names; C++ `new` and `delete` reach it through
 libstdc++'s operators, where mimalloc's library defines them itself (section 9).
 
 ## 8. Memory after the peak
 
-Measured on the same quiet machine with `bench/probes/memory/` (each process confined to its
-CPUs and capped; medians of two or three rounds, which agreed to within 0.1 MiB). Anonymous
-resident MiB.
+Measured 2026-10-18 with the allocator at `b5d6e8f`, on the same quiet machine as that
+session, with `bench/probes/memory/` (each process confined to its CPUs and capped; medians of
+two or three rounds, which agreed to within 0.1 MiB). Not repeated at `a92d51a`. The change
+since that bears on it, the cap charged to growth, was measured on its own: its after-peak
+curve agrees with the one below from 4 s on (`memory.md`, "The cap charged to growth").
+Anonymous resident MiB.
 
 After freeing 218 MiB in random order, with 2,000 64-byte objects allocated every millisecond
 (`memrun.sh ... quiet live=2M sizes=small secs=16 after=burst after_sizes=s64`):
@@ -392,11 +464,64 @@ background thread is on (`background.sh`, three rounds):
 
 ## 9. Where asmalloc is behind, and why
 
-For each job behind the best incumbent by more than about 10% on time, a profile (`perf
-record`, one run, the same CPUs and confinement as the session) and counters per allocation:
-slow-path entries from an instrumented copy of the allocator (not merged), system calls from
-`strace -c`, page faults and cache fills from `perf stat`. Single runs; the session's medians
-are in section 3.
+### At `a92d51a`
+
+The gaps of the summary, with what the notes that measured them found. None was profiled
+again for this session.
+
+- **Large objects crossing threads** (62 against per-thread tcmalloc's 35 ns/alloc). With
+  the kernel gone from it, the largest cost left is the leaf word's compare-and-swap, which
+  moves a cache line between the two cores on every allocation and free of a large object.
+  tcmalloc caches objects up to 256 KiB per CPU and moves them between CPUs in batches; doing
+  the same here would park hundreds of KiB per CPU per class and move the small/large
+  boundary, and was decided against (`memory.md`, "Lines between CPUs, and the cost of a
+  large block").
+- **`largepair`** (67 ns a pair against glibc's 8 and per-CPU tcmalloc's 59). glibc serves both
+  blocks from the top of its heap and gives them back there. asmalloc runs about 1,400
+  instructions a pair, after the change that halved them, against tcmalloc's 1,000 (same
+  section).
+- **64 Vecs grown to 4 MiB** (5.9 against mimalloc's 3.1 cycles/element; 185k faults against
+  281). A block that grows in place loses a huge page at each doubling: its stagger makes a
+  block of exactly 2 MiB end a few bytes into the next huge page, which the program then
+  faults as a small page. Advising that page at the growth took the job to 4.5
+  cycles/element but cost 126 MiB of peak, and was not adopted (`memory.md`, "Headroom for
+  growing blocks").
+- **HashMap** (23% behind the mimalloc crate; 61k faults against 277). hashbrown allocates
+  each larger table fresh, at its size, and a large block allocated at its size gets no huge
+  pages by design, since a sparse one would cost 2 MiB per page touched; so the build faults
+  4 KiB pages, and the drop launders scattered values (`memory.md`, "HashMap"). Its 12% of
+  memory over jemalloc is the outgrown tables kept for the next build (section 4).
+- **BTreeMap** (8%). The drop takes one locked OR per scattered slot against mimalloc's plain
+  pushes onto a page's list; the build runs mimalloc's instructions in more cycles, on 4 KiB
+  pages for the internal nodes' class, which never reaches the 16 MiB at which a class gets
+  huge pages (`launder-and-fill.md`, "A direct path for scattered launders"; `memory.md`,
+  "Build phases against mimalloc"). A 4 MiB threshold would win about 4% here for up to 6 MiB
+  of peak elsewhere; it stays at 16 MiB by decision.
+- **sh8bench** (2.2 times mimalloc, 19% behind jemalloc). Over 40% of its time is the
+  placement across two L3s: on one L3 it takes 0.33 s (`launder-and-fill.md`, "Domain stacks and a
+  shared stack"). What the rest of the two-L3 cost is made of is not established.
+- **larson** (16 to 25% behind mimalloc): cause D below, unchanged. Accepted for now: C++
+  programs reach the allocator through libstdc++'s operators, and exporting `operator new`
+  and `delete` is deferred.
+- **tokio spawn** (33% behind glibc at four threads, 12% behind jemalloc at eight): not
+  analysed again; at `b5d6e8f` the extra cycles were in tokio's own code (below).
+- **RPC, mstress, preloaded JSON, espresso, cfrac** (1 to 6%): not analysed.
+- **Small heaps (memory)**: fixed footprint, mostly page tables (about 8 KiB per class in use,
+  since each class's region is 4 GiB from the next), parked objects in cross-thread flows, and
+  the magazine area (`memory.md`, "Small heaps", "What is left, and proposals").
+
+### At `b5d6e8f`
+
+Profiles and counters for each job then behind the best incumbent by more than about 10% on
+time, kept as they were written. Since then cause A was removed by charging the retained cap
+to growth, most of B by ascending, whole-magazine fills and launders and a direct path for
+scattered launders, about half of C by fillers that no longer meet on the same words and by
+the depot per cache domain, and E by the depot per cache domain; D is unchanged (section 4).
+
+For each job, a profile (`perf record`, one run, the same CPUs and confinement as the
+session) and counters per allocation: slow-path entries from an instrumented copy of the
+allocator (not merged), system calls from `strace -c`, page faults and cache fills from `perf
+stat`. Single runs; that session's medians are in its detail file.
 
 **A. Memory returned and faulted straight back.**
 
@@ -459,23 +584,32 @@ in its own. With both chains in one domain asmalloc is 49% ahead.
   entries; the extra cycles (15.8e9 against 12.9e9) are in tokio's own code, with 40% more
   fills from other cores of the same L3, so task cells appear to be reused on a different
   worker from the one that freed them. Inference only.
-- *One Vec grown to 256 MiB* (15% behind the mimalloc crate): mimalloc's huge pages; asmalloc
-  takes the faults of 4 KiB pages up to the size where grown blocks get huge pages.
+- *One Vec grown to 256 MiB* (15% behind the mimalloc crate, under the job's old definition):
+  mimalloc's huge pages; asmalloc takes the faults of 4 KiB pages up to the size where grown
+  blocks get huge pages.
 - *The same Rust programs preloaded* behave as natively: JSON is 44% behind for cause A.
 - *Small heaps (memory)*: the 0.4 to 3 MiB over glibc on jobs of a few MiB is fixed
   footprint: the slab array, the first magazine-area unit, a loaded magazine per class in
   use and the metadata of each region a class has touched.
 
-**What would fix them** (smallest changes, not implemented or measured): A, stop purging
-large slots on the free path at 8 MiB and let the clocked decay return them, keeping a
-per-free purge only above a much larger bound; the small-class cap similarly. B, let a
-class's depot keep what was freed within an interval (shedding at the interval's end)
-instead of laundering past a fixed 128 KiB, and fill magazines so they pop in ascending
-address order. C, claim a whole bitmap word per atomic operation and continue the descent
-instead of restarting it. D, export `operator new` and `delete` from the preload library. E,
-prefer magazines from the same L3 domain in the depot.
+**What would fix them**, as proposed then (smallest changes, not implemented or measured at
+the time): A, stop purging large slots on the free path at 8 MiB and let the clocked decay
+return them, keeping a per-free purge only above a much larger bound; the small-class cap
+similarly. B, let a class's depot keep what was freed within an interval (shedding at the
+interval's end) instead of laundering past a fixed 128 KiB, and fill magazines so they pop in
+ascending address order. C, claim a whole bitmap word per atomic operation and continue the
+descent instead of restarting it. D, export `operator new` and `delete` from the preload
+library. E, prefer magazines from the same L3 domain in the depot. What was built instead or
+as proposed: for A, the cap charged to growth; for B, ascending magazines, but not the
+interval rule (whole-magazine and direct launders made the laundering cheaper instead); for
+C, a claim that retries against the value it found and runs of claims that move apart; for
+E, a depot per cache domain. D is deferred.
 
 ## 10. Do the memory rules earn their place?
+
+Measured 2026-10-18 with the allocator at `b5d6e8f`. Several rules have changed since (the
+cap is charged to growth, not to frees, and growing blocks get sixteen times their room;
+`memory.md`), so this describes the allocator then.
 
 Each rule switched off in a scratch copy (one edit each, not merged), built and run as an
 allocator entry of its own against asmalloc as built: eleven jobs, five interleaved rounds
@@ -532,22 +666,23 @@ Cgroup peak, each rule off against asmalloc as built (* = 95% interval excludes 
 ## 11. Smoke set for the back end
 
 `benchrun run --suite backend` runs five small jobs that between them expose every cause in
-section 9 except D, in about 35 seconds a round: two threads passing 300k objects of 4 to
-256 KiB (cause A for large blocks), two independent pipelines on different L3 domains (E), a
-Box tree of depth 18 built and dropped four times (B), JSON of 8 MiB parsed three times (A
-for small classes) and sh8bench preloaded (C). Two more were added later: one buffer grown
-by doubling to 4 MiB and freed, a thousand times, and the same to 1 MiB four thousand times,
-which time the large path's moves and kept slots (`memory.md`, "Grown blocks kept up to a
-budget"). Run it with `--rounds 3` against the
-incumbents on every change to the back end. One round on 2026-10-18, asmalloc against the
-best incumbent: 351 against 46 ns/alloc, 11.1 against 8.2 ns per chain, 128 against 34
-cycles/node, 23.5 against 17.5 cycles/byte, 1.36 against 0.39 s.
+section 9's `b5d6e8f` list except D, in about 35 seconds a round: two threads passing 300k
+objects of 4 to 256 KiB (cause A for large blocks), two independent pipelines on different L3
+domains (E), a Box tree of depth 18 built and dropped four times (B), JSON of 8 MiB parsed
+three times (A for small classes) and sh8bench preloaded (C). Two more were added later: one
+buffer grown by doubling to 4 MiB and freed, a thousand times, and the same to 1 MiB four
+thousand times, which time the large path's moves and kept slots (`memory.md`, "Grown blocks
+kept up to a budget"). Run it with `--rounds 3` against the incumbents on every change to the
+back end. One round on 2026-10-18 at `b5d6e8f`, asmalloc against the best incumbent: 351
+against 46 ns/alloc, 11.1 against 8.2 ns per chain, 128 against 34 cycles/node, 23.5 against
+17.5 cycles/byte, 1.36 against 0.39 s.
 
 ## 12. Caveats
 
-- One machine, one kernel, transparent huge pages in `madvise` mode, which decides the
-  build-and-drop jobs for mimalloc (the only allocator here that asks for huge pages). A
-  session with THP `always` would show the other side.
+- One machine, one kernel, transparent huge pages in `madvise` mode, which decides much of
+  the build-and-drop jobs: mimalloc asks for huge pages for its whole heap, asmalloc for small
+  classes past 16 MiB carved and for grown blocks. A session with THP `always` would show the
+  other side.
 - Single-threaded build jobs measure every repetition from a cold process, so allocators that
   keep freed memory gain over those that return it; jemalloc's time-based purging never fires
   in runs this short.
@@ -557,17 +692,36 @@ cycles/node, 23.5 against 17.5 cycles/byte, 1.36 against 0.39 s.
   during a page-table walk.
 - The RPC client is the bottleneck, so the RPC jobs rank server CPU per request.
 - Peak memory on small jobs is mostly fixed footprint.
+- Some jobs run in two modes: xmalloc-test, the large-object pipeline and tokio spawn. Their
+  medians depend on how many runs fell in each.
+- The workloads were rebuilt between the `b5d6e8f` and `a92d51a` sessions, and JSON and the
+  tree carry a few percent of code layout (section 14), so moves of that size between the
+  sessions are not resolved.
 - The profiles in section 9 are single runs; their counts per allocation are exact, their
   attribution of cycles to symbols is sampled.
 
 ## 13. Earlier sessions and changes to the suite
 
-The first session (2026-10-17, at `60ce673`, without asmalloc) ran on a busy machine; its
-raw results are `docs/research/data/baselines-2026-10-17.jsonl.gz` and its tables
-`docs/research/data/baselines-2026-10-17-detail.md`. Its findings about the incumbents hold
-in this session (jemalloc and per-CPU tcmalloc lead cross-thread work among the incumbents,
-mimalloc leads build-and-drop through huge pages, jemalloc is the memory floor on large
-heaps), with these changes to the suite since, measured at the time:
+**The `b5d6e8f` session** (2026-10-18, the same machine, quiet, ten rounds, 55 jobs, 4,280
+runs, none invalid, none left out as busy) was the previous report; its data are listed at
+the top. Its control's largest difference was 9.1%, with 7 of 55 intervals excluding zero.
+Section 4 compares it with this one, and sections 8, 10 and 11 were measured with the
+allocator at that commit. Changes to the suite between the two sessions:
+
+- `largepair 64Ki+1Mi` was added to the full suite: one 64 KiB and one 1 MiB block
+  allocated, written once and freed, two million times.
+- The `vecgrow` jobs fill each vector by `memset` steps instead of one push per element
+  (section 14), so their numbers before and after are different jobs.
+- The tree job times its build, walk and drop apart, and the drops of the tree and the maps
+  run out of line, so that a profiler can name them. The jobs' metrics are defined as before;
+  the tree's incumbents moved with the change (glibc 24%), the maps' by 2% or less.
+- mimalloc-sized was run; the `b5d6e8f` session left it out.
+
+**The first session** (2026-10-17, at `60ce673`, without asmalloc) ran on a busy machine; its
+data are listed at the top. Its findings about the incumbents hold in both later sessions
+(jemalloc and per-CPU tcmalloc lead cross-thread work among the incumbents, mimalloc leads
+build-and-drop through huge pages, jemalloc is the memory floor on large heaps), with these
+changes to the suite since, measured at the time:
 
 Measured 2026-10-17, 15:15 to 15:45, on the same machine, again shared with other work
 (one or two CPUs' worth of load outside the measurement CPUs; single-threaded jobs on CPU 2,
@@ -743,4 +897,5 @@ by hand, seven interleaved runs):
 Without the push loop, the 1 and 4 MiB loops take a quarter to a sixth of what they did, and asmalloc
 is 1.7 to 2 times glibc there: about half of its cycles are `memmove` in its moves, while
 glibc's loop is 96% the fill itself, so it grows without copying. At 64 MiB asmalloc leads by
-2.2 times.
+2.2 times. (Measured before growing blocks got sixteen times their room; `memory.md`,
+"Headroom for growing blocks", has the loops since.)
