@@ -295,11 +295,12 @@ hot word. The crate places its own tables clear of them. A thread's rseq area is
 aligned and the routines touch bytes 4 to 15 of it. The copy of the C library's rseq offset
 that an executable reads is clear whenever it is 16-aligned, since it then lies at bytes 0
 to 7 or 16 to 23 of a chunk; the linker decides that, so a test and the build checks flag a
-binary where it is not. A colder part of the slab holds counters. The slabs are a static array with
-an entry for every CPU number the OS can produce (8192 on x86-64), so the address of a slab
-word is the CPU number shifted and added to the address of the class's word in slab 0, a
-link-time constant plus 32 times the class, with no pointer to load. Untouched slabs cost no
-memory. A routine compares the CPU number with the array length and takes the slow path if
+binary where it is not. A colder part of the slab holds counters. The slabs are a static
+array with an entry for every CPU number the OS can produce (8192 on x86-64), so the address
+of a slab word is the CPU number shifted and added to the address of the class's word in
+slab 0, a link-time constant plus 32 times the class, with no pointer to load. Untouched
+slabs cost no memory.
+A routine compares the CPU number with the array length and takes the slow path if
 it is out of range. That one compare keeps a thread with no rseq
 registration, which reads a negative number, away from every slab, and it means memory
 safety does not depend on what the OS writes there.
