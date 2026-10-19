@@ -16,7 +16,7 @@ core::arch::global_asm!(
     r".long 0, 0, 0, 0",
     r".popsection",
     ".pushsection .rodata.asmalloc_rseq_offset,\"a\",@progbits",
-    r".balign 8",
+    r".balign 16",
     r".globl asmalloc_rseq_offset",
     r".hidden asmalloc_rseq_offset",
     r".type asmalloc_rseq_offset,@object",

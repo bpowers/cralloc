@@ -1,6 +1,6 @@
 6ace24d6559026350ed3a85a552ffe451bf8374d05d1ce5f940f49509c8c5b72  crates/asmalloc/src/front/generated/constants.rs
 2df6d5b45ac9a30ff78bc8b92367c665d14968229463b4fcd9f19075be8b0941  crates/asmalloc/src/front/generated/mod.rs
-1f12d239e821c6906c140917ce32bb3d7dbb44a9789d7b055282fa17ca8ec5a8  crates/asmalloc/src/front/generated/x86_64/area.rs
+cf6883384537ab9bc382567868c7eb92c62463e37c630cf4d1fbec69d32d2d0d  crates/asmalloc/src/front/generated/x86_64/area.rs
 51cc55e339c43b5e8e17b5ce35d60cf594002af72d7e8e374bf04f549b5e70c6  crates/asmalloc/src/front/generated/x86_64/centry.rs
 f62bd44537b4edef3bcc3308fd3789d730dad7cba2e71c1fcab32039fe54248d  crates/asmalloc/src/front/generated/x86_64/exports.rs
 2ee0b3ac96b41681710be2fed1577fd139a6bd25c23039c31c6faf5389cd40d8  crates/asmalloc/src/front/generated/x86_64/mod.rs

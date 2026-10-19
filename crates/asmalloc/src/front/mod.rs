@@ -29,6 +29,8 @@ mod differential;
 mod generated;
 #[cfg(all(target_os = "linux", target_arch = "x86_64", not(miri), not(kani)))]
 mod real;
+#[cfg(all(test, target_os = "linux", target_arch = "x86_64", not(miri)))]
+mod rseq_offset_check;
 /// The generated C entry points' module, for the C layer.
 #[cfg(all(target_os = "linux", target_arch = "x86_64", not(miri), not(kani)))]
 pub(crate) use generated::x86_64::centry as generated_centry;
@@ -247,20 +249,90 @@ struct PlacedMasks {
     masks: [u32; MASK_COUNT],
 }
 
-// What an inlined fast path loads on every call, beside the routine itself, is off the page
-// offsets of every slab field, so that it never waits for the hot word the previous call stored
-// (`docs/research/zen5-roofline.md`, section 16): the masks, and the class lookup's entries for
-// every size up to `BY_SIZE_CLEAR`. Larger sizes wrap round onto the slab's offsets, as in the C
-// routines' tables (`c::table`).
+// The page-offset rule (`docs/research/zen5-roofline.md`, section 16): a load whose bytes overlap,
+// in the low 12 bits of the address, a hot word that the previous call stored and that is still
+// in flight can wait for that store, and since the hot word's address comes from what the call
+// loaded, a loop of calls then runs one at a time. So nothing a fast path reads or writes on
+// every call shares a page offset with a hot word. For what the crate places, that is checked
+// here. For what others place it rests on alignment: the kernel requires a thread's
+// `struct rseq` to be 32-byte aligned (`include/uapi/linux/rseq.h`), and the routines touch
+// only its `cpu_id` (read) and `rseq_cs` (written), at bytes 4 to 15 of their 32-byte chunk,
+// never `node_id` or `mm_cid`; and the executable's copy of glibc's `__rseq_offset` is an
+// 8-byte word as aligned as glibc's own, 16 bytes on the glibc measured. What is not covered is
+// listed in that section: a GOT slot, an only 8-aligned `__rseq_offset`, and the tables' wrapped
+// entries (sizes above 16 KiB, sized frees of 2 KiB and up, the region table's top half).
+// `rseq_offset_check` (tests) and `scripts/rseq-offset-check` look at the linked binaries.
+
+/// Whether page offset `b` is a byte of some small class's hot word.
+const HOT_PAGE_BYTES: [bool; SLAB_BYTES] = {
+    let mut hot = [false; SLAB_BYTES];
+    let mut ordinal = 0;
+    while ordinal < SMALL_COUNT {
+        if let Some(class) = SmallClass::from_ordinal(ordinal) {
+            let at = Field::hot(class).offset() % SLAB_BYTES;
+            let mut b = 0;
+            while b < 8 {
+                hot[at + b] = true;
+                b += 1;
+            }
+        }
+        ordinal += 1;
+    }
+    hot
+};
+
+/// Whether no byte of `len` bytes at page offset `at` (wrapping round the page) is a hot word's.
+const fn clear_of_hot(at: usize, len: usize) -> bool {
+    let mut b = 0;
+    while b < len {
+        if HOT_PAGE_BYTES[(at + b) % SLAB_BYTES] {
+            return false;
+        }
+        b += 1;
+    }
+    true
+}
+
 const _: () = {
     use crate::classes::{BY_SIZE_CLEAR, BY_SIZE_PAGE_OFFSET, QUANTUM};
+    use crate::spec;
     assert!(SLAB_BYTES == 4096 && align_of::<Front>() == SLAB_BYTES);
     assert!(align_of::<PlacedMasks>() == SLAB_BYTES);
     assert!(offset_of!(PlacedMasks, masks) == MASKS_PAGE_OFFSET);
-    assert!(Slab::USED_BYTES <= MASKS_PAGE_OFFSET);
-    assert!(MASKS_PAGE_OFFSET + size_of::<[u32; MASK_COUNT]>() <= SLAB_BYTES);
-    assert!(Slab::USED_BYTES <= BY_SIZE_PAGE_OFFSET);
+    // Others' placements: every `cpu_id` and `rseq_cs` of a 32-byte-aligned area, and every
+    // 16-aligned 8-byte word.
+    let mut at = 0;
+    while at < SLAB_BYTES {
+        assert!(clear_of_hot(at + spec::RSEQ_CPU_ID, 4) && clear_of_hot(at + spec::RSEQ_CS, 8));
+        assert!(clear_of_hot(at, 8) && clear_of_hot(at + 16, 8));
+        at += 32;
+    }
+    // The published words the C frees read.
+    assert!(clear_of_hot(SHIFT_DISP % SLAB_BYTES, spec::MIRROR_BYTES));
+    // The masks, the C routines' copy and the inlined routines' table, at each class's position.
+    let mut ordinal = 0;
+    while ordinal < SMALL_COUNT {
+        if let Some(class) = SmallClass::from_ordinal(ordinal) {
+            assert!(clear_of_hot(
+                (MASK_DISP + Field::hot(class).offset()) % SLAB_BYTES,
+                8
+            ));
+            assert!(clear_of_hot(MASKS_PAGE_OFFSET + 4 * class.word(), 4));
+        }
+        ordinal += 1;
+    }
+    // The size tables, for every size up to 16 KiB (`BY_SIZE_CLEAR`); the C tables are
+    // `spec::TABLE_OFF` into page-aligned statics (`c::table`). And the region table's lower
+    // half.
     assert!(BY_SIZE_PAGE_OFFSET + BY_SIZE_CLEAR / QUANTUM == SLAB_BYTES);
+    assert!(clear_of_hot(BY_SIZE_PAGE_OFFSET, BY_SIZE_CLEAR / QUANTUM));
+    assert!(clear_of_hot(spec::TABLE_OFF, BY_SIZE_CLEAR / 8 + 1));
+    assert!(clear_of_hot(spec::TABLE_OFF, spec::CALLOC_LEN));
+    assert!(clear_of_hot(spec::TABLE_OFF, SLAB_BYTES - spec::TABLE_OFF));
+    assert!(clear_of_hot(
+        REGION_DISP % SLAB_BYTES,
+        SLAB_BYTES - REGION_PAGE_OFFSET
+    ));
 };
 
 const MASK_TABLE: [u32; MASK_COUNT] = {

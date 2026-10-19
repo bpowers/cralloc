@@ -286,11 +286,13 @@ asked for (see "Large objects").
 ### Front end: magazines under rseq
 
 Each CPU has a slab. Its hot part gives each small class a 32-byte chunk: the class's
-8-byte word at bytes 16 to 23 and the heads of its spare stacks, which only slow paths
-write, at bytes 0 to 15. A thread's rseq area is 32-byte aligned and the OS writes bytes 4
-to 15 of it, so with this placement no hot word can share a page offset with those fields,
-wherever a C library puts the area; a shared offset costs a cycle or two on every use of
-that class. A colder part of the slab holds counters. The slabs are a static array with
+8-byte word at bytes 24 to 31, and at bytes 0 to 23 words that only slow paths use. A load
+that shares a page offset with a hot word the previous call stored can wait for that store,
+and a loop of calls then runs one at a time. So nothing a fast path reads or writes on every
+call shares a page offset with a hot word: the crate places its own tables off them; a
+thread's rseq area is 32-byte aligned and the routines touch bytes 4 to 15 of it; and the
+copy of the C library's rseq offset that an executable reads lies at bytes 0 to 7 or 16 to 23
+of a 32-byte chunk whenever it is 16-aligned. A colder part of the slab holds counters. The slabs are a static array with
 an entry for every CPU number the OS can produce (8192 on x86-64), so the address of a slab
 word is the CPU number shifted and added to the address of the class's word in slab 0, a
 link-time constant plus 32 times the class, with no pointer to load. Untouched slabs cost no
