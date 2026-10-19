@@ -1,7 +1,8 @@
 //! The back end: class regions, their free bitmaps, and memory to and from the OS.
 //!
 //! Every class has regions of its own, each holding slots of that class at
-//! `region_base + index * size`. A region's metadata block (see `layout`) holds a leaf bitmap
+//! `region_base + origin + index * size`, the origin a few pages for a small class
+//! (`Plan::slot_origin`) and zero for a large one. A region's metadata block (see `layout`) holds a leaf bitmap
 //! with one bit per slot, set when the slot is free, and above it summary bits up to one word
 //! per region; above the regions, two class-level words lead to every region that may have free
 //! slots (`tree`). A watermark per region separates slots that have been handed out at least

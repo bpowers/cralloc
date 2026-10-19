@@ -46,7 +46,7 @@
 use super::policy::{STAGGER_SLOTS, STAGGER_STEP};
 use super::word::BITS;
 use crate::classes::{Class, Divisor};
-use crate::space::Plan;
+use crate::space::{Plan, slot_from};
 use core::sync::atomic::{AtomicU64, Ordering};
 
 /// The most levels a region's bit tree has, leaf included: a 4 GiB region of 8-byte slots has
@@ -65,6 +65,7 @@ const LINE_WORDS: u32 = (crate::lined::LINE / WORD_BYTES) as u32;
 /// The metadata layout and slot arithmetic of one class in one geometry.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(crate) struct Layout {
+    class: Class,
     size: usize,
     divisor: Divisor,
     /// Where slot 0 lies in the region (`Plan::slot_origin`): whole pages, zero for a large
@@ -329,6 +330,7 @@ impl Layout {
         }
         let level = height;
         Some(Layout {
+            class,
             size: class.size(),
             divisor: class.divisor(),
             origin,
@@ -390,6 +392,7 @@ impl Layout {
         let lo = |i: usize| w[i] as u32;
         let hi = |i: usize| (w[i] >> 32) as u32;
         Layout {
+            class,
             size: class.size(),
             divisor: class.divisor(),
             origin: hi(6) as usize,
@@ -682,12 +685,18 @@ impl Layout {
 
     /// The slot a block starting at byte `offset` of the region is in, and how far into the
     /// slot it starts, if `offset` is a block's start: the slot's start, or its stagger. The
-    /// one place a pointer becomes a slot. The slot may be past the region's last one; callers
-    /// check it against the watermark or the slot count.
+    /// one place a pointer becomes a slot. A small class's is `Plan::slot_at`'s own arithmetic
+    /// (`space::slot_from`), which the proofs cover, so it is a slot of the region; a large
+    /// class's may be past the region's last one, and callers check it against the watermark
+    /// or the slot count.
     #[inline(always)]
     pub(crate) const fn block_at(&self, offset: usize) -> Option<(u32, usize)> {
-        if offset < self.origin {
-            return None;
+        if self.sizes == 0 {
+            let room = (self.pages as usize) << self.page_shift;
+            return match slot_from(self.origin, offset, self.class, room) {
+                Some(slot) => Some((slot, 0)),
+                None => None,
+            };
         }
         let slot = self.slot_at(offset);
         let into = offset - self.slot_bytes(slot);

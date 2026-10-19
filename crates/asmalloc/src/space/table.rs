@@ -13,7 +13,7 @@ use core::sync::atomic::{AtomicU8, Ordering};
 pub enum RegionTag {
     /// Nothing: never assigned, or a region beyond the object regions.
     Unassigned,
-    /// Slots of one class, at `region_base + index * class_size`.
+    /// Slots of one class, at `region_base + origin + index * class_size` (`Plan::slot_origin`).
     Class(Class),
     /// The first region of an object larger than a region; it starts at the region's base.
     RunHead,
