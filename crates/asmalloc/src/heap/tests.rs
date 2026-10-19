@@ -1021,7 +1021,10 @@ fn maintain_brings_a_quiet_heap_down_to_what_collect_leaves() {
     let geometry = <Shape as crate::os::sim::Shape>::GEOMETRY;
     let cap = crate::back::policy::retained_cap(geometry);
     let left = cap as f64 * 0.75f64.powi(intervals - 5);
-    let slack = 2 * geometry.huge_page_size();
+    // Huge pages are purged whole, so where the watermarks fall against them moves both
+    // figures by whole huge pages: with the classes' origins (`Plan::slot_origin`) collect
+    // leaves one huge page less here and maintain the same.
+    let slack = 3 * geometry.huge_page_size();
     std::eprintln!("quiet {quiet} maintained {maintained} collected {collected} bound {left}");
     assert!(
         maintained <= collected + left as usize + slack,

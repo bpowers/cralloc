@@ -129,8 +129,10 @@ fn commit_to<H: Host>(host: &H, region: RegionId, now: Grow, need: u32) -> Optio
         _ => target,
     };
     let target = target.min(pages);
-    let start = now.committed as usize * page;
-    let len = (target - now.committed) as usize * page;
+    // Nothing below the class's origin holds a slot, so it is never made writable.
+    let from = now.committed.max(layout.origin_page());
+    let start = from as usize * page;
+    let len = (target - from) as usize * page;
     if !host.commit(region, start, len) {
         return None;
     }
@@ -332,7 +334,7 @@ pub(crate) fn top_up<H: Host>(host: &H, region: RegionId) -> (usize, usize) {
         tree::release(host, region, w, bits_in_word(w, first, until));
         words += 1;
     }
-    (layout.slot_bytes(count), words)
+    (layout.bytes_of(count), words)
 }
 
 /// Returns the pages wholly inside slot `slot` to the OS, for a caller that holds the slot

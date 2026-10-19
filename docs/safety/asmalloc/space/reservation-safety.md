@@ -90,8 +90,8 @@ unmapped, and `Space::unmap`'s documentation says so.
 (`metadata` starts from the first metadata block's address, which `Space::new` forms once from
 `base` the same way, `base + Plan::metadata_start`.)
 `region` and `metadata` abort unless the id is an object region, `slot` aborts unless the slot
-lies wholly inside its region (`Plan::slot_fits`, proved against the slot arithmetic by
-`slots_lie_inside_their_region_and_are_aligned_*`), and `pointer` returns `None` outside the
+lies wholly inside its region (`Plan::slot_fits`, proved against the slot arithmetic, the
+class's origin included, by `slots_lie_inside_their_region_and_are_aligned_*`), and `pointer` returns `None` outside the
 reservation. So every pointer is inside the reservation, at the place its name says. Whether
 the memory there may be read or written (committed, owned by the caller) is the obligation of
 whoever dereferences it, in their own ledger.

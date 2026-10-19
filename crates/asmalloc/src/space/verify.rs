@@ -110,7 +110,9 @@ pub(super) fn locate_inverts_region_offsets(geometry: Geometry) {
             assert!(plan.region_offset(location.region) + location.offset as usize == delta);
             let class = any_class();
             if let Some(index) = plan.slot_at(location, class) {
-                assert!(class.slot_offset(index) == location.offset as usize);
+                assert!(
+                    plan.slot_origin(class) + class.slot_offset(index) == location.offset as usize
+                );
                 assert!(location.offset as usize + class.size() <= plan.region_size());
                 assert!(plan.slot_fits(class, index));
             }
@@ -119,9 +121,10 @@ pub(super) fn locate_inverts_region_offsets(geometry: Geometry) {
 }
 
 /// Every slot `slot_fits` accepts lies inside its region, is found again by `locate` at the
-/// offset `index * size`, and is aligned to its class's alignment or the region size, whichever
-/// is smaller, given a region-aligned base. With the division proofs in `classes`, `slot` then
-/// recovers the index.
+/// offset `origin + index * size`, and is aligned to its class's alignment or the region
+/// size, whichever is smaller, given a region-aligned base. With the division proofs in
+/// `classes`, `Plan::slot_at` then recovers the index: past the origin it is the search with
+/// no origin (`plan::slot_from`).
 pub(super) fn slots_lie_inside_their_region_and_are_aligned(geometry: Geometry) {
     let plan = any_plan(geometry);
     let region = any_object_region(plan);
@@ -133,7 +136,7 @@ pub(super) fn slots_lie_inside_their_region_and_are_aligned(geometry: Geometry) 
     assert!(offset + class.size() <= plan.region_offset(region) + plan.region_size());
     let location = plan.locate(offset).unwrap();
     assert!(location.region == region);
-    assert!(location.offset as usize == class.slot_offset(index));
+    assert!(location.offset as usize == plan.slot_origin(class) + class.slot_offset(index));
 
     let align = if class.align() < plan.region_size() {
         class.align()

@@ -226,13 +226,17 @@ that much address space, as under an address-space limit or valgrind, the region
 halved until the reservation fits, so the number of regions stays the same; below a floor
 of a few megabytes per region the allocator cannot start. A region is
 assigned to a class on demand and holds only objects of that class, at
-`region_base + index * class_size`. A 4096-byte table records the class of each region.
+`region_base + origin + index * class_size`. A small class's origin is a few whole pages,
+different for each class, so that the first pages of the classes in use do not all share
+the low page-number bits that index the TLB's sets; the pages below it are never committed,
+so it costs address space and nothing else. A large class's origin is zero. A 4096-byte
+table records the class of each region.
 
 Every pointer therefore has two properties that hold without per-object metadata:
 
 - its class is `class_of[(ptr - heap_base) >> region_shift]`, one load from a table that
   fits in the L1 cache;
-- its index within the region is `(ptr - region_base) / class_size`.
+- its index within the region is `(ptr - region_base - origin) / class_size`.
 
 The Rust entry points do not need even that for small objects: they compute the class from
 the `Layout`. The table serves the C entry points and large objects. The scheme also removes

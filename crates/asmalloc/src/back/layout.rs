@@ -67,6 +67,9 @@ const LINE_WORDS: u32 = (crate::lined::LINE / WORD_BYTES) as u32;
 pub(crate) struct Layout {
     size: usize,
     divisor: Divisor,
+    /// Where slot 0 lies in the region (`Plan::slot_origin`): whole pages, zero for a large
+    /// class. The pages below it hold no slot and are never committed.
+    origin: usize,
     slots: u32,
     /// The top level of the region's tree: 0 if the leaf bitmap is a single word.
     height: u8,
@@ -85,8 +88,8 @@ pub(crate) struct Layout {
 }
 
 /// Words a [`Layout`] packs into for [`Memo`]: everything but the size and its divisor, which
-/// come from the class, as seventeen 32-bit fields (two of them, the clean-bitmap count and the
-/// total, derivable and not read back) and three bytes.
+/// come from the class, as seventeen 32-bit fields (the total derivable and not read back) and
+/// three bytes.
 const PACKED_WORDS: usize = 9;
 
 /// Set in the last packed word: the words hold a layout.
@@ -265,6 +268,7 @@ impl Layout {
     /// `aligned`, else straight after it.
     const fn with_leaf_aligned(plan: Plan, class: Class, aligned: bool) -> Option<Layout> {
         let geometry = plan.geometry();
+        let origin = plan.slot_origin(class);
         let slots = slots_in_region(plan, class);
         if slots == 0 {
             return None;
@@ -327,6 +331,7 @@ impl Layout {
         Some(Layout {
             size: class.size(),
             divisor: class.divisor(),
+            origin,
             slots,
             height: level as u8,
             offset,
@@ -356,7 +361,7 @@ impl Layout {
             self.count[4],
             self.pages,
             self.clean,
-            self.clean_words(),
+            self.origin as u32,
             self.zero,
             self.sizes,
             self.total_words(),
@@ -387,6 +392,7 @@ impl Layout {
         Layout {
             size: class.size(),
             divisor: class.divisor(),
+            origin: hi(6) as usize,
             slots: lo(0),
             height: (w[8] >> 32) as u8,
             offset: [hi(0), lo(1), hi(1), lo(2), hi(2)],
@@ -444,6 +450,7 @@ impl Layout {
     }
 
     /// Words in the clean bitmap.
+    #[cfg(any(test, kani))]
     #[inline(always)]
     pub(crate) const fn clean_words(&self) -> u32 {
         self.pages.div_ceil(BITS)
@@ -512,18 +519,31 @@ impl Layout {
         self.pages
     }
 
-    /// The offset of slot `index` from the region base, `index * size`. For `index <= slots`
-    /// this is at most the region size.
+    /// The offset of slot `index` from the region base, `origin + index * size`. For
+    /// `index <= slots` this is at most the region size.
     #[inline(always)]
     pub(crate) const fn slot_bytes(&self, index: u32) -> usize {
-        index as usize * self.size
+        self.origin + self.bytes_of(index)
     }
 
-    /// The slot holding byte `offset` of the region. `offset` must be below the region size,
-    /// which is at most 4 GiB.
+    /// The bytes of `count` slots.
+    #[inline(always)]
+    pub(crate) const fn bytes_of(&self, count: u32) -> usize {
+        count as usize * self.size
+    }
+
+    /// The page holding slot 0: no purge or commit goes below it.
+    #[inline(always)]
+    pub(crate) const fn origin_page(&self) -> u32 {
+        (self.origin >> self.page_shift) as u32
+    }
+
+    /// The slot holding byte `offset` of the region, or slot 0 for a byte below the origin.
+    /// `offset` must be below the region size, which is at most 4 GiB.
     #[inline(always)]
     pub(crate) const fn slot_at(&self, offset: usize) -> u32 {
-        self.divisor.divide(offset as u32)
+        self.divisor
+            .divide(offset.saturating_sub(self.origin) as u32)
     }
 
     /// Pages lying wholly below the watermark: a purge looks only at these, so it never touches
@@ -552,7 +572,7 @@ impl Layout {
             return self.block_bytes();
         }
         let bytes = (committed as usize) << self.page_shift;
-        let covered = if bytes == 0 {
+        let covered = if bytes <= self.origin {
             0
         } else {
             let last = self.slot_at(bytes - 1) + 1;
@@ -590,8 +610,9 @@ impl Layout {
     /// The next thing a top-down purge pass looks at below page `end` (zero for the top), in a
     /// region with `carved` slots and a huge-page part from `huge_from`.
     ///
-    /// Only pages wholly below the watermark count. In the huge-page part a unit is whole huge
-    /// pages; in the rest, whole pages. A unit ends at a unit boundary and starts at the
+    /// Only pages wholly below the watermark and at or above the origin count. In the
+    /// huge-page part a unit is whole huge pages, but for one that the origin cuts; in the
+    /// rest, whole pages. A unit ends at a unit boundary and starts at the
     /// boundary at or below the start of the slot holding its last byte, so a unit of slots of
     /// a page or more is exactly the pages of one slot when the slot is aligned to the unit,
     /// and the slots it touches are always consecutive.
@@ -614,6 +635,15 @@ impl Layout {
             }
             _ => (0, end, 1),
         };
+        // Nothing below the origin holds a slot or was ever committed.
+        let floor = if floor < self.origin_page() {
+            self.origin_page()
+        } else {
+            floor
+        };
+        if end <= floor {
+            return Step::Done;
+        }
         let last = self.slot_at(((end as usize) << self.page_shift) - 1);
         let first_page = (self.slot_bytes(last) >> self.page_shift) as u32;
         let start = first_page & !(granule - 1);
@@ -656,6 +686,9 @@ impl Layout {
     /// check it against the watermark or the slot count.
     #[inline(always)]
     pub(crate) const fn block_at(&self, offset: usize) -> Option<(u32, usize)> {
+        if offset < self.origin {
+            return None;
+        }
         let slot = self.slot_at(offset);
         let into = offset - self.slot_bytes(slot);
         if into == 0 || into == self.stagger(slot) {
@@ -709,12 +742,12 @@ impl Layout {
     }
 }
 
-/// The number of slots of `class` in a region of `plan`: `region_size / size`, zero if a slot
-/// does not fit. Without a divide instruction, because the back end computes layouts at run time
-/// from the reservation's plan: `Divisor` gives `m = (region_size - 1) / size`, and one more
-/// slot fits exactly when the size divides the region size.
+/// The number of slots of `class` in a region of `plan`: `(region_size - origin) / size`, zero
+/// if a slot does not fit. Without a divide instruction, because the back end computes layouts
+/// at run time from the reservation's plan: `Divisor` gives `m = (room - 1) / size`, and one
+/// more slot fits exactly when the size divides the room.
 pub(crate) const fn slots_in_region(plan: Plan, class: Class) -> u32 {
-    let region = plan.region_size();
+    let region = plan.region_size() - plan.slot_origin(class);
     let size = class.size();
     if size > region {
         return 0;
@@ -775,12 +808,16 @@ mod tests {
 
     #[test]
     fn the_design_tree_has_five_levels_for_eight_byte_slots() {
-        let layout = Layout::new(Geometry::DESIGN.largest_plan(), Class::SMALLEST).unwrap();
-        assert_eq!(layout.slots(), 1 << 29);
+        let plan = Geometry::DESIGN.largest_plan();
+        let layout = Layout::new(plan, Class::SMALLEST).unwrap();
+        let origin = plan.slot_origin(Class::SMALLEST);
+        assert_eq!(layout.slot_bytes(0), origin);
+        assert_eq!(layout.slots() as usize, ((1 << 32) - origin) / 8);
         assert_eq!(layout.height(), 4);
+        let leaf = layout.slots().div_ceil(64);
         assert_eq!(
             [0, 1, 2, 3, 4].map(|l| layout.level_words(l)),
-            [1 << 23, 1 << 17, 1 << 11, 1 << 5, 1]
+            [leaf, leaf.div_ceil(64), 1 << 11, 1 << 5, 1]
         );
         assert_eq!(layout.clean_words(), (1 << 20) / 64);
     }
@@ -967,7 +1004,11 @@ mod tests {
                     if let Some(h) = huge_from.filter(|&h| unit.end > h) {
                         assert!(unit.start >= h);
                         assert_eq!(unit.end % layout.huge_pages(), 0);
-                        assert!(unit.start == h || unit.start % layout.huge_pages() == 0);
+                        assert!(
+                            unit.start == h
+                                || unit.start == layout.origin_page()
+                                || unit.start % layout.huge_pages() == 0
+                        );
                     }
                     let (first, last) = layout.touching(unit);
                     assert!(last < carved);
@@ -983,6 +1024,7 @@ mod tests {
                             layout.slot_bytes(slot) >= start && layout.slot_bytes(slot + 1) <= end;
                         assert_eq!(wholly, slot >= lo && slot < hi);
                     }
+                    assert!(unit.start >= layout.origin_page());
                     covered_to = unit.start;
                     if unit.start == 0 {
                         break;
@@ -1000,8 +1042,11 @@ mod tests {
         let page = Standard::GEOMETRY.page_size();
         let leaf = layout.tree_word(0, 0) as usize * WORD_BYTES;
         assert_eq!(layout.leaf_commit(0), leaf);
-        // One page of eight-byte slots needs a few leaf words, rounded up to a page.
-        assert_eq!(layout.leaf_commit(1), leaf + page);
+        // Pages up to the origin hold no slots; one page of eight-byte slots past it needs a
+        // few leaf words, rounded up to a page.
+        let origin = layout.origin_page();
+        assert_eq!(layout.leaf_commit(origin), leaf);
+        assert_eq!(layout.leaf_commit(origin + 1), leaf + page);
         let all = layout.leaf_commit(layout.region_pages());
         assert!(all >= layout.total_words() as usize * WORD_BYTES);
         assert_eq!(all, layout.block_bytes());
