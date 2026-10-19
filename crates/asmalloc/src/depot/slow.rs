@@ -138,7 +138,9 @@ impl<'a, O: Os, R: Routines, S: Source> Cache<'a, O, R, S> {
             }
             self.to_depot(class, magazine);
         }
-        if cfg!(feature = "x-own-fill-first") {
+        // With one domain every magazine on the shared stack is the domain's own: popping it
+        // is cheaper than a fill.
+        if cfg!(feature = "x-own-fill-first") && self.depot.domain_count() > 1 {
             return self
                 .own_fill_first(class, chores)
                 .unwrap_or(Obtained::NoMagazine);
