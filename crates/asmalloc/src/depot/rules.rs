@@ -1602,3 +1602,59 @@ fn credit_goes_to_the_kind_that_round_tripped_up_to_the_room() {
     cache.note_return(class, Spare::Full, true);
     assert_eq!(word().credit(Spare::Full), most);
 }
+
+/// A class in steady use on CPU 0 whose pops take the top of its full spares and never the
+/// bottom, for three intervals. Whether the full spares were ever seen below their fixed limit
+/// of three: whether the sweep took them.
+fn the_bottom_spares_are_taken(stock: bool) -> bool {
+    let (class, busy) = (tiny(0), tiny(1));
+    let tuning = Tuning {
+        stock,
+        age_limit: true,
+        look_every: 1,
+        max_spares: 3,
+        ..QUIET
+    };
+    let rig: TestRig = Rig::new(&[class, busy], 512, tuning);
+    let machine = SimCpu::new(0);
+    let cache = rig.cache(&machine);
+    // The first clocked heartbeat's sweep runs out before the class has credit.
+    churn(&cache, busy, 400);
+    if stock {
+        give_credit(&rig, 0, class, 1, 1);
+    }
+    churn(&cache, class, 12);
+    let depth = || cache.spare_depth(class, Spare::Full).unwrap();
+    assert!(depth() >= 3, "{}", depth());
+    let mut taken = false;
+    let steps = 8;
+    for _ in 0..3 * steps {
+        rig.os().advance_clock(IDLE_TICKS / steps);
+        for _ in 0..60 {
+            let held: Vec<NonNull<u8>> = (0..3).filter_map(|_| cache.alloc(class)).collect();
+            taken |= depth() < 2;
+            for object in held {
+                cache.free(class, object);
+            }
+        }
+    }
+    rig.census(&[], false);
+    taken
+}
+
+/// Finding (check of the fix, b5070c3): a class with credit whose stock is in use by the
+/// low-water rule keeps its fixed full spares out of the sweep, on the argument that "the pops
+/// that use the stock reach them, or the low-water mark shrinks the stock until they do"
+/// (`stock.rs`, "Disuse"). The mark shrinks the stock only down to the fixed limit: pops that
+/// leave the stack at or below its limit take nothing off the credit, so a class that swaps
+/// the top of its stack keeps one credit for good, and the magazines under the top are never
+/// popped, never swept and never refreshed: up to the fixed limit of each class, 139 KiB of
+/// objects a CPU with the allocator's limits, parked for as long as the class stays busy
+/// there. Without stock the sweep takes them once an interval, which is the rule the design's
+/// table gives for a CPU's full spares.
+#[test]
+#[ignore = "finding: the fixed spares under stock in use are never swept"]
+fn stock_review_fixed_spares_under_stock_in_use_are_swept() {
+    assert!(the_bottom_spares_are_taken(false), "without stock");
+    assert!(the_bottom_spares_are_taken(true), "with one credit");
+}
