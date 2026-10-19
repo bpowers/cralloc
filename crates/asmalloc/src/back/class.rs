@@ -1324,19 +1324,20 @@ impl<'a, O: Os> Back<'a, O> {
                 .walk
                 .top
                 .fetch_max(region.index() as u32 + 1, SeqCst);
-            // EXPERIMENT: the region is its carving domain's from before anything can be freed
-            // into it, so a search that prefers that domain finds its free slots.
-            let (owner, bit) = host.owner_bit(host.carving_domain(), region.index());
-            owner.fetch_or(bit);
             if self
                 .state
                 .table
                 .replace(region, RegionTag::Unassigned, RegionTag::Class(class))
                 .is_err()
             {
-                owner.fetch_and(!bit);
                 continue;
             }
+            // EXPERIMENT: the region is its carving domain's from before the carving word names
+            // it, so before anything can be carved or freed there, and a search that prefers
+            // that domain finds its free slots. Only the thread that took the region from the
+            // table writes its bit.
+            let (owner, bit) = host.owner_bit(host.carving_domain(), region.index());
+            owner.fetch_or(bit);
             if let Some(committed) = committed {
                 // The region's header, which nothing reads until the carving word names it.
                 host.grow(region).store(
