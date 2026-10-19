@@ -1276,3 +1276,89 @@ Against main (eafb661), five runner rounds on two L3s and six by hand on one: sh
 and 127 MiB); xmalloc-test, exchange split, rpc echo and both rpc log jobs level in time and peak;
 larson 2 to 4% lower in both placements, within the ranges (one L3 618 to 641 against 616 to
 625 M ops/s); the phase probe 46.7 and 45.4 against 47.7 and 52.8 MiB, tiny 0.5 MiB.
+
+## The tree and JSON jobs between `a92d51a` and `e96086d`
+
+2026-10-19. Between the full sessions at `a92d51a` and `e96086d`, `tree depth=20` went from
+43.25 to 44.56 cycles a node (+3.0%), `json 32Mi` from 16.19 to 16.63 cycles a byte (+2.7%),
+and most small-object jobs retired 0.3 to 1.2% more instructions. Neither job got slower
+because of the allocator's added work; each moved because of where code landed.
+
+**Method.** Ten commits on main's first-parent line, each built from `git archive` with the
+same `bench/` sources (`e96086d`'s), as `build = ...` entries in `bench/allocators.toml`, run
+interleaved with `benchrun run` under `scripts/measure`, three rounds, medians. Instructions
+per phase are deterministic to 0.01%. Where they went: call counts from gdb breakpoints, and
+gdb single-stepping of runs of consecutive slow paths with the cycle counter frozen (the slow
+paths act on the clock, and stepping is thousands of times slower than running), each inlined
+routine stepped over as one step. Function placement from `nm`; `align64` builds add
+`-C llvm-args=-align-all-functions=6`.
+
+**Instructions: stock and the frontier, as designed.** Per phase, in millions over the job's
+ten repetitions (two million nodes each):
+
+| Commit | build | walk | drop | whole process |
+|---|---:|---:|---:|---:|
+| `a92d51a` | 1301.0 | 440.9 | 1223.2 | 2969.7 |
+| `6d95572` (origins, exact retained read) | 1304.0 | 440.9 | 1221.0 | 2970.6 |
+| `4a77350` (stock) | 1309.3 | 440.9 | 1236.3 | 2991.1 |
+| `74df709` (frontier) | 1322.9 | 440.9 | 1236.6 | 3004.9 |
+| `e3e93ab` (hot words moved) | 1320.4 | 440.9 | 1237.3 | 3003.2 |
+
+Stock adds about 60 to 80 instructions to each magazine exchange, about 1.0 a node: the stock
+word's checks (`note_return`, `note_sent`, `stock_admits`), the contention flags, and the depot
+push no longer inlined into `to_shared` (it now returns whether it was contended, and
+`push_under` stays out of line; marking it `#[inline]` saves nothing). The frontier adds about
+100 instructions and one compare-and-swap to each fill, about 0.65 a node: a fill always
+reaches higher than the last in a job that only grows, so `region::reach` writes the region's
+word every time. JSON's 33M are the same two (drop +18M at stock; parse +6M at stock, +11M at
+the frontier). The class origins, the exact read, the lookup tables and the hot-word move add
+none. Churn that never leaves the magazines runs no slow path, which is why it is level.
+
+**Cycles: the tree's walk.** The extra instructions cost the build and drop phases about 0.4
+cycles a node between the two sessions (+3.4M and +4.4M cycles). The rest, +27M of +27M in
+`run`, is the walk, which runs no allocator code and retires the same instructions in every
+build. The walk is a recursive function of 72 bytes; where the allocator's code size puts it
+decides its time:
+
+| Build | walk's offset in its 64-byte line | walk, M cycles |
+|---|---:|---:|
+| `6b7d72d`, `a76b222`, `4a77350`, `74df709` | 0x20 | 194 to 208 |
+| `aeb7451` | 0x30 | 205 to 220 |
+| `e3e93ab` | 0x10 | 202 to 216 |
+| `a92d51a`, `6d95572`, `94b5b44`, `c3c4676` | 0x00 | 220 to 226 |
+| the session's own `e96086d` build | 0x00 | 225 |
+
+At offset 0 its last four instructions (three pops and the return) sit alone in a second line,
+which costs a cycle on each of its two million returns (`zen5-roofline.md`, section 15). The
+same builds of `a92d51a` and `e3e93ab` with every function 64-aligned put the walk at 0x00 in
+both, and run 44.21 and 44.25 cycles a node: the regression is gone, and the 33M instructions
+cost 0.1%.
+
+**Cycles: JSON's parse.** Parse cycles rise 3% at `c3c4676` with level instructions. That
+commit put `BY_SIZE` and `MASKS` 2048 bytes into page-aligned statics (`zen5-roofline.md`,
+section 16); every inlined runtime-size allocation and free now loads them with a 32-bit
+displacement, and LLVM inlines `__rust_dealloc` at more of serde_json's call sites:
+`Value::deserialize` grows from 0x1001 to 0x1189 bytes. The same commit with the padding taken
+out has the old code and the old time (five rounds: 1,993 against 2,029 Mcycles parse; padded
+but not page-aligned, 2,050; page-aligned but not padded, 1,947). Function alignment does not
+remove it (2,067 against 1,932). Reaching the table through a static reference or a constant
+pointer gives the same code as the padded field. The padding is what keeps the inlined lookups
+off the hot words' page offsets, which was worth up to 34 cycles an object in `fragchurn`, so it
+stays; JSON compared across builds of the allocator carries this as it carries serde's own
+layout (`baselines.md`, section 14).
+
+**The split pipelines are another cause.** `pipeline t2 sizes=small split`, all-alloc and
+free-only, CPUs 0 and 8: 11.45 and 11.42 ns before the class origins (`6b7d72d`), 12.00 and
+12.08 after (`a76b222`), level from there to `e3e93ab` (six rounds), at the same instructions.
+Stock, the frontier and the GOT slot are not it: the session's own binary, whose GOT slot for
+`__rseq_offset` lies at 0x218 (the 256-byte class's hot word), ran 11.98 against 12.14 for a
+build of the same commit with the slot at 0x2b0. With origins the job takes 50 times fewer 4 KiB
+page walks (3,600 against 130k to 200k a run) and no fewer cycles; why spreading the classes'
+first pages costs this job across L3s is not found.
+
+**Nothing changed.** The instructions are stock's and the frontier's bookkeeping, at the
+measured price of each; the cycles are code placement in the workload (tree) and an inlining
+decision LLVM makes in serde_json (JSON). Building the workloads with every function 64-aligned
+would stop the allocator's code size from moving workload functions, so sessions and
+allocators compare on the same workload layout; it changes every job's numbers, so it is a
+decision for the suite, not made here.
