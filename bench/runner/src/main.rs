@@ -3,8 +3,8 @@
 //!   benchrun build  [--allocators a,b]
 //!   benchrun run    [--suite quick|full|backend] [--rounds N] [--only TEXT] [--allocators a,b]
 //!                   [--out FILE] [--seed N] [--max-busy CPUS] [--gate-wait SECONDS]
-//!                   [--runner-cpus LIST] [--sample-ms N] [--mem-cap SIZE]
-//!   benchrun report FILE... [--detail] [--ref NAME] [--only TEXT] [--quiet-only]
+//!                   [--runner-cpus LIST] [--sample-ms N] [--mem-cap SIZE] [--no-warm]
+//!   benchrun report FILE... [--detail] [--ref NAME] [--only TEXT] [--quiet-only] [--steady-only]
 //!   benchrun list   [--suite quick|full|backend]
 //!   benchrun layout --only TEXT|--group NAME [--suite S] [--allocators a,b] [--layouts L,...]
 //!                   [--rounds N] [--no-build] [run's other options]
@@ -14,6 +14,7 @@
 //!
 //! See bench/README.md.
 mod cap;
+mod clock;
 mod config;
 mod launch;
 mod layout;
@@ -44,7 +45,7 @@ impl Flags {
                 if let Some((k, v)) = name.split_once('=') {
                     named.push((k.to_string(), Some(v.to_string())));
                 } else if it.peek().is_some_and(|n| !n.starts_with("--"))
-                    && !matches!(name, "detail" | "quiet-only" | "no-build")
+                    && !matches!(name, "detail" | "quiet-only" | "no-build" | "no-warm" | "steady-only")
                 {
                     named.push((name.to_string(), it.next()));
                 } else {
@@ -212,6 +213,7 @@ fn run_options(f: &Flags, p: &Paths, suite: String, default_rounds: usize) -> ru
         rollup_ms: f.num("rollup-ms", 1000),
         max_busy: f.num("max-busy", 1.0),
         gate_wait: Duration::from_secs(f.num("gate-wait", 900)),
+        warm: !f.has("no-warm"),
         suite,
     }
 }
@@ -308,6 +310,7 @@ fn main() {
                 detail: f.has("detail"),
                 filter: f.get("only").map(String::from),
                 quiet_only: f.has("quiet-only"),
+                steady_only: f.has("steady-only"),
             });
         }
         _ => die("usage: benchrun <build|run|report|list|layout> [options]; see bench/README.md"),
