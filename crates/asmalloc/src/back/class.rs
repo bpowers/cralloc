@@ -1090,6 +1090,16 @@ impl<'a, O: Os> Back<'a, O> {
             if !host.commit_meta(region, start, end - start) {
                 return false;
             }
+            // A large class commits its first slot first too (`region::commit_first`): a
+            // refusal leaves the region unassigned, for a smaller slot to take.
+            let committed = if class.is_small() {
+                None
+            } else {
+                match region::commit_first(host, region) {
+                    Some(pages) => Some(pages),
+                    None => return false,
+                }
+            };
             if self
                 .state
                 .table
@@ -1097,6 +1107,16 @@ impl<'a, O: Os> Back<'a, O> {
                 .is_err()
             {
                 continue;
+            }
+            if let Some(committed) = committed {
+                // The region's header, which nothing reads until the carving word names it.
+                host.grow(region).store(
+                    Grow {
+                        carved: 0,
+                        committed,
+                    }
+                    .pack(),
+                );
             }
             self.prepare(host, region, huge);
             let published = region.index() as u32 + 1;
@@ -1137,10 +1157,14 @@ impl<'a, O: Os> Back<'a, O> {
         host.advise(region, 0, pages * layout.page_size(), advice);
     }
 
-    /// Undoes `prepare`'s writes, so that the region's metadata is all zero again.
+    /// Undoes `prepare`'s writes, and the grow word `assign` wrote, so that the region's
+    /// metadata is all zero again.
     fn unprepare(&self, host: &ClassHost<'a, O>, region: RegionId, huge: bool) {
         if huge {
             host.hints(region).fetch_and(0);
+        }
+        if host.layout().header_word().is_some() {
+            host.grow(region).store(0);
         }
     }
 }

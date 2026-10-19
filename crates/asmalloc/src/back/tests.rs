@@ -3271,15 +3271,33 @@ mod review_headers {
     }
 
     /// A region that carries `class`'s tag with an all-zero header and a block nothing has
-    /// written: `assign` published it, and the OS refused the commit its first carve asked for.
-    /// Returns the region's base.
+    /// written: for a small class, `assign` published it and the OS refused the commit its
+    /// first carve asked for. A large class commits its first slot before it takes a region
+    /// (`region::commit_first`), so its region is in this state only between the tag and the
+    /// header's store, which a free racing the assignment can see; it is made here as `assign`
+    /// makes it up to that store. Returns the region's base.
     fn assigned_and_never_carved(state: &State<Sim>, class: Class) -> *mut u8 {
         let back = state.get_or_reserve().unwrap();
-        // The commit of the block's fixed part goes through; the commit of the slots does not.
-        state.os().set_faults(Call::Commit, Faults::once_after(1));
-        assert!(back.alloc(class, 1).is_none());
-        state.os().set_faults(Call::Commit, Faults::NONE);
         let region = back.space().plan().region(0).unwrap();
+        if class.is_small() {
+            // The commit of the block's fixed part goes through; the commit of the slots does
+            // not.
+            state.os().set_faults(Call::Commit, Faults::once_after(1));
+            assert!(back.alloc(class, 1).is_none());
+            state.os().set_faults(Call::Commit, Faults::NONE);
+        } else {
+            let host = back.host(class).unwrap();
+            let (start, end) = host.layout().fixed_commit();
+            assert!(host.commit_meta(region, start, end - start));
+            state
+                .table
+                .replace(region, RegionTag::Unassigned, RegionTag::Class(class))
+                .unwrap();
+            host.class.carving.store(
+                region.index() as u32 + 1,
+                core::sync::atomic::Ordering::SeqCst,
+            );
+        }
         assert_eq!(state.table.get(region), RegionTag::Class(class));
         let host = back.host(class).unwrap();
         assert_eq!(
