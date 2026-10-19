@@ -207,3 +207,72 @@ fn a_purge_that_fails_part_way_keeps_the_bytes() {
         back.free(block, class);
     }
 }
+
+/// The check of the fixes (main `5a406f3`), at the edges of where the page is set aside: old
+/// and new sizes whose ends fall just before, on and just past page and huge-page boundaries,
+/// up to the slot's end. Whatever the growth does, the block keeps every byte it could use,
+/// the growth returns one huge page at most, and no advised huge page of the new room is
+/// written before the program reaches it.
+#[test]
+#[cfg_attr(miri, ignore)]
+fn a_growth_at_any_boundary_keeps_the_bytes_and_writes_no_advised_room() {
+    let huge = Native::GEOMETRY.huge_page_size();
+    let page = Native::GEOMETRY.page_size();
+    let class = large(8 * huge);
+    // Offsets from a boundary, for the end of a block that starts a cache line into its slot.
+    let near = |at: usize| {
+        [
+            at - page,
+            at - 64,
+            at - 1,
+            at,
+            at + 1,
+            at + page - 64,
+            at + page,
+        ]
+    };
+    let (mut cases, mut returned) = (0, 0);
+    for old in [2, 3].into_iter().flat_map(|n| near(n * huge)) {
+        for new in (3..=8).flat_map(|n| near(n * huge)) {
+            let state = state::<Native>();
+            let back = state.get_or_reserve().unwrap();
+            let os = state.os();
+            let block = second_slot(&back, class, old);
+            let room = back.room(block.as_ptr()).unwrap();
+            if new <= old || new > 2 * old || new > room {
+                continue;
+            }
+            let before = back.usable_size(block.as_ptr()).unwrap();
+            let purges = fill_and_grow(&back, os, block, new);
+            assert!(purges <= 1, "{old} to {new}: {purges} purges");
+            assert!(
+                patterned(block.as_ptr(), before),
+                "{old} to {new}: the block lost bytes"
+            );
+            let after = back.usable_size(block.as_ptr()).unwrap();
+            assert!(after <= room);
+            let begun = (block.addr().get() + before - 1) & !(huge - 1);
+            for offset in (before..after).step_by(page) {
+                let at = block.map_addr(|a| a.saturating_add(offset));
+                if at.addr().get() & !(huge - 1) != begun
+                    && os.huge_pages(at) == Some(HugePages::Prefer)
+                {
+                    assert!(
+                        painted(at.as_ptr(), page, 0),
+                        "{old} to {new}: the growth wrote advised room at {offset}"
+                    );
+                }
+            }
+            // The program can fill all it was given, and free it.
+            pattern(block.as_ptr(), after);
+            back.free(block, class);
+            cases += 1;
+            returned += purges;
+        }
+    }
+    // The sweep reaches both outcomes: growths that return the page and growths that do not.
+    assert!(
+        cases > 50 && returned > 5 && returned < cases,
+        "{returned} of {cases}"
+    );
+}
