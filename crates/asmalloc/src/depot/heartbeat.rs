@@ -6,14 +6,17 @@
 //! wants it paced by time instead runs `maintain` (`maintain.rs`) from a thread of its own.
 //! The clock is read at most once per heartbeat, and only when a decision needs it.
 //!
-//! - **Launder over target.** If the depot stack of the class just served, in the slow path's
-//!   cache domain, holds more than its target, one magazine is popped and its objects go back
-//!   to the source; the empty magazine goes to the empty stack.
-//! - **Shed what was not needed** (`shed.rs`). A note of the depth of the stack the slow path
-//!   popped from, and on every [`LOOK_EVERY`]th slow path of a CPU a look at one class's stacks
-//!   in every cache domain, the classes in turn, which starts their new interval; then at most
-//!   one magazine laundered from a stack that owes. So a domain whose CPUs have gone quiet is
-//!   looked at by the others, and sheds as a quiet class does.
+//! - **Launder over target.** If the slow path pushed a magazine with objects on a shared depot
+//!   stack, and that stack holds more than its target, one magazine is popped and its objects
+//!   go back to the source; the empty magazine goes to the shared empty stack. Only a push makes
+//!   a stack deeper. A domain's stack needs no such rule: its cap keeps it within bounds.
+//! - **Shed what was not needed** (`shed.rs`). A note of the depth of each stack the slow path
+//!   tried to pop, and on every [`LOOK_EVERY`]th slow path of a CPU a look at one class's stacks
+//!   in its own domain and the shared pool, the classes in turn, and at one stack held by
+//!   another domain, in rotation (`held.rs`), each of which starts a new interval for the stack
+//!   it looks at; then at most one magazine laundered from a stack that owes. So a domain whose
+//!   CPUs have gone quiet is looked at by the others, at a cost per look that does not grow
+//!   with the number of domains.
 //! - **Age limit** (`age.rs`). A look at one class of the CPU's own slab, the classes in turn,
 //!   which takes and launders the magazine loaded there if it has been loaded for an interval,
 //!   or launders one full spare of a class with nothing loaded.
@@ -48,8 +51,12 @@
 //! CPU's slab: nothing, on most entries; another slab's sighting, by compare-and-swap, on one
 //! entry in [`LOOK_EVERY`], and only if that slab's counter moved since its last sighting or it
 //! is drained; a depot stack's water word, only when a look finds a new low, a new interval or a
-//! paid debt, and the depot's set of owing classes, only when a debt begins or is paid; the
-//! depot's count of CPU numbers, once for each new highest CPU number. Laundering and purging
+//! paid debt, and the depot's sets of owing classes, only when a debt begins or is paid; the
+//! sets of what the domains hold, only when a look finds a domain's stack emptied; the
+//! depot's count of CPU numbers, once for each new highest CPU number. A slow path that
+//! exchanges with the depot writes its domain's stack heads, and the shared ones only when its
+//! domain's stack is full or empty; a push that finds its domain's stack empty also sets that
+//! stack's bit in the sets of what the domains hold, if it is clear. Laundering and purging
 //! write shared state only when there is something to give back. Within its own slab, the
 //! activity counter, the refresh count and the sweep share a line that other CPUs only read;
 //! the stamps have lines of their own; the sighting, which other CPUs write, has its own line.
@@ -78,9 +85,8 @@
 //! looks that both decide to drain are stopped by the sighting's compare-and-swap and, behind
 //! it, by the drain's own claim.
 
-use super::domain::Domain;
 use super::drain::Disposal;
-use super::{Cache, Depot, Drained, Source, generation};
+use super::{Cache, Depot, Drained, Pool, Source, generation};
 use crate::classes::{SMALL_COUNT, SmallClass};
 use crate::front::{Cpu, Routines};
 use crate::os::Os;
@@ -242,10 +248,30 @@ pub(super) struct Chores {
     pub(super) stale: bool,
     /// It installed a magazine for the class it served in that CPU's slab.
     pub(super) installed: bool,
-    /// It popped a magazine from the depot stack of the class it served, in this domain.
-    pub(super) popped: Option<Domain>,
+    /// The depot stacks of the class it served that it tried to pop.
+    pub(super) tried: Tried,
     /// Its purge step is already taken.
     pub(super) purged: bool,
+}
+
+/// The depot stacks of a class that a slow path tried to pop, in order: its domain's and,
+/// if that was empty, the shared one. The heartbeat notes the depth of each, the empty one
+/// too, since that is the lowest it has been.
+#[derive(Default, Debug)]
+pub(super) struct Tried([Option<Pool>; 2]);
+
+impl Tried {
+    /// Records a try of `pool`'s stack. A slow path that goes round its exchange again tries
+    /// the same stacks; the first two tries are the ones kept.
+    pub(super) fn note(&mut self, pool: Pool) {
+        if let Some(slot) = self.0.iter_mut().find(|slot| slot.is_none()) {
+            *slot = Some(pool);
+        }
+    }
+
+    fn pools(&self) -> impl Iterator<Item = Pool> + '_ {
+        self.0.iter().flatten().copied()
+    }
 }
 
 /// What a large allocation or free's heartbeat is to do (see [`lone_count`]).
@@ -288,8 +314,8 @@ pub fn lone_count<R: Routines>(depot: &Depot, routines: &R) -> Lone {
 
 /// Counts a slow path of `cpu` in its slab's activity counter, and returns the count.
 fn count<R: Routines>(depot: &Depot, routines: &R, cpu: Cpu) -> u64 {
-    if depot.shared.cpus.load(Relaxed) <= cpu.index() {
-        depot.shared.cpus.fetch_max(cpu.index() + 1, Relaxed);
+    if depot.common.cpus.load(Relaxed) <= cpu.index() {
+        depot.common.cpus.fetch_max(cpu.index() + 1, Relaxed);
     }
     routines.slabs().slab(cpu).note_activity()
 }
@@ -324,21 +350,26 @@ impl<O: Os, R: Routines, S: Source> Cache<'_, O, R, S> {
         if let (Some(cpu), Some(class), true) = (chores.cpu, served, chores.installed) {
             self.unstamp(cpu, class);
         }
-        if let Some(class) = served {
-            if self.tuning.shed_unused
-                && let Some(domain) = chores.popped
-            {
-                self.note_depth(domain, class, &clock);
+        if let Some(class) = served
+            && self.tuning.shed_unused
+        {
+            for pool in chores.tried.pools() {
+                self.note_depth(pool, class, &clock);
             }
-            self.launder(self.depot.domain_of(chores.cpu), class, &clock);
+        }
+        if let Some(class) = self.overflowed.take() {
+            self.launder(class, &clock);
         }
         let every = self.tuning.look_every.max(1);
         let looking = activity.filter(|activity| activity.is_multiple_of(every));
         if self.tuning.shed_unused {
-            if let Some(class) = looking.and_then(|activity| nth_class(activity / every)) {
-                for domain in self.depot.all_domains() {
-                    self.look_at_depth(domain, class, clock.now());
+            if let Some(turn) = looking.map(|activity| activity / every) {
+                let here = self.depot.domain_of(chores.cpu);
+                if let Some(class) = nth_class(turn) {
+                    self.look_at_depth(Pool::Domain(here), class, clock.now());
+                    self.look_at_depth(Pool::Shared, class, clock.now());
                 }
+                self.look_elsewhere(here, turn, clock.now());
             }
             self.shed(activity.unwrap_or(0));
         }
@@ -364,32 +395,20 @@ impl<O: Os, R: Routines, S: Source> Cache<'_, O, R, S> {
         }
     }
 
-    /// Launders one magazine of `class` if its depot stack in `domain` is over its target. The
-    /// target is the class's share of [`Tuning::depot_target`] among the domains whose stacks
-    /// of the class hold anything, so that a class in use in two domains parks no more in all
-    /// than it would in one. The other domains' stacks are read only when this one is over the
-    /// smallest share it can have, half the target with two domains in use.
-    fn launder(&self, domain: Domain, class: SmallClass, clock: &Clock<'_, O>) {
-        let target = self.tuning.depot_target / class.size();
-        let size = class.magazine();
-        let depth = self.depot.full(domain, class).objects(self.area, size) as usize;
-        if depth <= target / self.depot.domain_count().min(2) {
+    /// Launders one magazine of `class` from its shared stack if that is over its target
+    /// ([`Cache::shared_target`]). Called for the class of the last magazine the slow path
+    /// pushed there, if it pushed one: reading the shared head on every heartbeat cost a job
+    /// whose four L3-crossing flows all overflow into the shared stacks 6% of its time.
+    fn launder(&self, class: SmallClass, clock: &Clock<'_, O>) {
+        let depth = self
+            .depot
+            .full(Pool::Shared, class)
+            .count(self.area, class.magazine()) as usize;
+        if depth <= self.shared_target(class) {
             return;
         }
-        if depth <= target {
-            let others = self
-                .depot
-                .all_domains()
-                .filter(|&other| {
-                    other != domain && self.depot.full(other, class).objects(self.area, size) > 0
-                })
-                .count();
-            if depth <= target / (others + 1) {
-                return;
-            }
-        }
-        if self.launder_one(domain, class).is_some() && self.tuning.shed_unused {
-            self.note_depth(domain, class, clock);
+        if self.launder_one(Pool::Shared, class).is_some() && self.tuning.shed_unused {
+            self.note_depth(Pool::Shared, class, clock);
         }
     }
 
@@ -398,7 +417,7 @@ impl<O: Os, R: Routines, S: Source> Cache<'_, O, R, S> {
     fn idle_check(&self, me: Cpu, activity: u64, now: u64) {
         let every = self.tuning.look_every.max(1);
         // At least `me + 1`: this thread raised it to that before.
-        let count = self.depot.shared.cpus.load(Relaxed);
+        let count = self.depot.common.cpus.load(Relaxed);
         if count < 2 {
             return;
         }

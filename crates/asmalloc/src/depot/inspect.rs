@@ -50,7 +50,7 @@ pub fn inspect<O: Os>(
         UNIT + depot.growth.carved.load(Relaxed),
         depot.growth.committed.load(Relaxed),
     );
-    let cpus = depot.shared.cpus.load(Relaxed).min(slabs.len());
+    let cpus = depot.common.cpus.load(Relaxed).min(slabs.len());
     visitor.slabs(ptr::from_ref(slabs).cast::<u8>(), SLAB_BYTES, cpus);
     for cpu in (0..cpus).filter_map(|index| slabs.cpu(index as i32)) {
         let slab = slabs.slab(cpu);
@@ -79,10 +79,10 @@ pub fn inspect<O: Os>(
             }
         }
     }
-    for domain in depot.all_domains() {
+    for pool in depot.pools() {
         for class in SmallClass::all() {
             depot
-                .full(domain, class)
+                .full(pool, class)
                 .walk(area, class.magazine(), DEPOT_STEPS, |magazine| {
                     report(visitor, Place::Depot, class, magazine, magazine.level());
                 });
@@ -90,9 +90,9 @@ pub fn inspect<O: Os>(
     }
     for size in MagazineSize::all() {
         let mut count = 0;
-        for domain in depot.all_domains() {
+        for pool in depot.pools() {
             depot
-                .empty(domain, size)
+                .empty(pool, size)
                 .walk(area, size, DEPOT_STEPS, |_| count += 1);
         }
         visitor.empties(size, count);

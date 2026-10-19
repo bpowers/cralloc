@@ -1,7 +1,7 @@
 //! Test equipment for the middle tier: a small heap shape, an object source, a simulated CPU,
 //! and a census that checks the TLA+ models' invariants on a quiescent heap.
 
-use super::{Cache, Depot, Magazine, Source, Tuning};
+use super::{Cache, Depot, Magazine, Pool, Source, Tuning};
 use crate::classes::{MagazineSize, SmallClass, is_marker};
 use crate::front::check::switch_point;
 use crate::front::{Field, Slab, Slabs, Spare, Twin};
@@ -40,7 +40,7 @@ pub(crate) const TIGHT: Tuning = Tuning {
     spare_budget: usize::MAX / 2,
     max_spares: 1,
     depot_target: 2 * (32 << 10),
-    take_across: 2 * (32 << 10),
+    domain_cap: 32 << 10,
     look_every: 1,
     refresh_every: 2,
     age_limit: true,
@@ -60,6 +60,7 @@ pub(crate) struct TestSource {
     out: Mutex<BTreeSet<usize>>,
     purges: AtomicUsize,
     passes: AtomicUsize,
+    fills: AtomicUsize,
     universe: BTreeSet<usize>,
 }
 
@@ -82,6 +83,7 @@ impl TestSource {
             out: Mutex::new(BTreeSet::new()),
             purges: AtomicUsize::new(0),
             passes: AtomicUsize::new(0),
+            fills: AtomicUsize::new(0),
             universe,
         }
     }
@@ -125,10 +127,25 @@ impl TestSource {
     pub(crate) fn passes(&self) -> usize {
         self.passes.load(Ordering::Relaxed)
     }
+
+    /// The objects of `class` the source holds.
+    pub(crate) fn held_of(&self, class: SmallClass) -> usize {
+        self.free
+            .lock()
+            .unwrap()
+            .get(&class.ordinal())
+            .map_or(0, Vec::len)
+    }
+
+    /// How many magazines the source has been asked to fill.
+    pub(crate) fn fills(&self) -> usize {
+        self.fills.load(Ordering::Relaxed)
+    }
 }
 
 impl Source for TestSource {
     fn fill(&self, class: SmallClass, slots: &[core::sync::atomic::AtomicPtr<u8>]) -> usize {
+        self.fills.fetch_add(1, Ordering::Relaxed);
         let mut count = 0;
         for slot in slots.iter().rev() {
             match self.take(class) {
@@ -327,30 +344,51 @@ impl<O: Os, const N: usize> Rig<O, N> {
                 }
             }
         }
-        // Every domain, used or not: a magazine must not be anywhere a census misses.
-        for domain in (0..super::MAX_DOMAINS).map(super::Domain::folded) {
+        // Every domain, used or not, and the shared pool: a magazine must not be anywhere a
+        // census misses.
+        let pools = (0..super::MAX_DOMAINS)
+            .map(|n| Pool::Domain(super::Domain::folded(n)))
+            .chain([Pool::Shared]);
+        for pool in pools {
             for class in SmallClass::all() {
-                let stack = self.depot.full(domain, class);
+                let stack = self.depot.full(pool, class);
                 let mut total = 0;
                 for magazine in stack.magazines(area, class.magazine()) {
                     let level = magazine.level();
                     assert!(level > 0, "an empty magazine on {class:?}'s depot stack");
                     total += level;
-                    place_magazine(&magazine, level, std::format!("depot {domain:?} {class:?}"));
+                    place_magazine(&magazine, level, std::format!("depot {pool:?} {class:?}"));
                     census.depot += 1;
                 }
-                assert_eq!(stack.objects(area, class.magazine()) as usize, total);
+                assert_eq!(stack.count(area, class.magazine()) as usize, total);
+                // A fork can cut a push off between its compare-and-swap and its hint.
+                if let Pool::Domain(domain) = pool
+                    && total > 0
+                    && !lossy
+                {
+                    let bit = 1 << (class.ordinal() % crate::classes::SMALL_COUNT);
+                    assert_ne!(
+                        self.depot.held(domain).load(Relaxed) & bit,
+                        0,
+                        "{class:?}'s stack in {domain:?} holds magazines, unmarked"
+                    );
+                    assert_ne!(
+                        self.depot.held_domains.load(Relaxed) & 1 << domain.index(),
+                        0,
+                        "{domain:?} holds magazines, unmarked"
+                    );
+                }
             }
             for size in crate::classes::MagazineSize::all() {
-                for magazine in self.depot.empty(domain, size).magazines(area, size) {
+                let stack = self.depot.empty(pool, size);
+                let mut count = 0;
+                for magazine in stack.magazines(area, size) {
                     assert_eq!(magazine.level(), 0, "a full magazine on an empty stack");
-                    place_magazine(
-                        &magazine,
-                        0,
-                        std::format!("depot {domain:?} empty {size:?}"),
-                    );
+                    place_magazine(&magazine, 0, std::format!("depot {pool:?} empty {size:?}"));
                     census.depot += 1;
+                    count += 1;
                 }
+                assert_eq!(stack.count(area, size) as usize, count);
             }
         }
         for address in self.source.held() {
