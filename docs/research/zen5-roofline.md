@@ -1763,11 +1763,29 @@ change to the trusted core (a guarded sequence: `Code`, `Verified`, the printer 
 of about 13 artifacts: 4 to 5 days. `c_free_sized` is already at 128 bytes, and the test and
 branch would take it past, onto a third line.
 
+**The GOT slot replaced by a word of the routines' own (2026-10-19).** Routines in their GOT form
+read `__rseq_offset`'s address from a GOT slot, which the linker places at any 8-aligned
+address: on a hot word for one link in four (our benchmark executable's out-of-line routines,
+at 0x218). The printer now emits, beside each such load, a 16-aligned word in
+`.data.rel.ro.asmalloc_got` holding `.quad __rseq_offset`, and the load reads it with the same
+7-byte RIP-relative `mov`. The model's `movGot` is unchanged (the loader fills the word in the
+pass in which it would fill the slot, and RELRO maps it read-only), so no proof changed and every
+routine kept its size. Each inlined copy has its own word: 57 in the preload library (912
+bytes). Linked as a shared library, PIE and non-PIE executable with GNU ld and lld, the word
+takes an `R_X86_64_64` dynamic relocation; static and static-pie against glibc resolve it at
+link time or with `R_X86_64_RELATIVE`; no link made a text or copy relocation, and the C loops
+ran in each. The preload library no longer has a GOT slot for `__rseq_offset`.
+
+Before and after, interleaved, best of three rounds, CPU 2: the C loops (`cloop.c`) through the
+PLT with each preload library, pair 10.00 and 10.00, burst 32 10.38 and 10.41, mixed 23.69 and
+23.74; linked statically (`static/`), pair 8.03 and 8.03, burst 32 8.72 and 8.71, mixed 22.67
+and 22.55. The chain kernels at entries 0 to 56 in steps of 8: `ifg`, `ip`, `cf`, `cm` and `cp`
+within 0.01 at every entry, `ia` within 0.12 (the faster cell the new one). Instructions equal
+everywhere. A program linked against static glibc used to have the GOT load relaxed into a `lea`
+and now loads the word; its pair still ran at 8.03, the floor being 8.00.
+
 **Limits.** Each of these can still put a load at a hot word's page offset:
 
-- A GOT slot, which is 8-aligned. The preload library's is at 0xdc0, clear; in executables the
-  slot serves only the out-of-line routines, and was on a hot word in three of four layouts.
-  Linking more or fewer GOT entries before it moves it.
 - A glibc whose `__rseq_offset` is only 8-aligned: its copy may then land on a hot word, for
   about one link in twelve. The checks report it.
 - The size tables above 16 KiB, which wrap round the page: a loop of allocations of one size

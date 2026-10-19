@@ -43,9 +43,9 @@ Modelling choices:
 * A `static` the code reads (`Artifact.consts`) is at the address
   `State.syms name`, where `name` is its name, which `leaSym` (`lea` of a
   RIP-relative operand, resolved by the linker) puts in a register, or that
-  address plus a constant; `movGot` reads the address from the symbol's slot in
-  the global offset table, for a symbol of another shared object (glibc's
-  `__rseq_offset`), and `movSym` reads the 8 bytes at the symbol's address
+  address plus a constant; `movGot` reads the address from a word holding it,
+  as from a slot in the global offset table, for a symbol of another shared
+  object (glibc's `__rseq_offset`), and `movSym` reads the 8 bytes at the symbol's address
   directly, as an executable may for such a symbol (a copy relocation puts
   the variable in the executable). No
   instruction changes `syms`: a static's address is fixed for the run of
@@ -176,9 +176,10 @@ inductive Instr
   `State.syms name`, plus `off`, plus the compile-time constant `offP` if
   given (`State.params`). -/
   | leaSym (dst : Reg) (name : String) (off : Int := 0) (offP : Option String := none)
-  /-- `mov r64, QWORD PTR [rip + name@GOTPCREL]` (REX.W + 8B /r, with a
-  RIP-relative memory operand): the address of the symbol `name`, read from
-  its slot in the global offset table. -/
+  /-- `mov r64, QWORD PTR [rip + word]` (REX.W + 8B /r, with a RIP-relative
+  memory operand), where `word` holds the address of the symbol `name`: a
+  global offset table slot of the routine's own, which the printer emits
+  beside it (`gotLines`). -/
   | movGot (dst : Reg) (name : String)
   /-- `mov r64, QWORD PTR [rip + name]` (REX.W + 8B /r, with a RIP-relative
   memory operand): the 8 bytes at the address of the symbol `name`. -/
@@ -301,13 +302,14 @@ def exec : Instr → State → Option State
     some (s.setReg d (s.syms name + BitVec.ofInt 64 off + ((offP.map s.params).getD 0)))
   -- `movGot`: SDM Vol. 2, "MOV—Move", `MOV r64, r/m64` (`REX.W + 8B /r`),
   -- `DEST := SRC`, with a RIP-relative source (§2.2.1.6) whose `disp32` the
-  -- linker writes so that it addresses the global offset table's slot for
-  -- `name` (`R_X86_64_GOTPCREL`, or `R_X86_64_REX_GOTPCRELX`, which a linker
-  -- may relax into `lea` of the symbol itself: System V AMD64 psABI §4.4 and
-  -- Appendix B.2). The dynamic linker fills the slot with the symbol's
-  -- address `S` before any code of the program runs and, with RELRO, maps it
-  -- read-only, so the load reads `S` and never faults: `DEST := S`. No flags
-  -- are affected.
+  -- assembler writes so that it addresses a word the printer emits beside
+  -- the instruction (`gotLines`), in relocated read-only data, holding the
+  -- address of `name` by an absolute relocation (`R_X86_64_64`: System V
+  -- AMD64 psABI §4.4). The linker or, for a symbol another shared object
+  -- defines, the dynamic linker fills the word with the symbol's address `S`
+  -- before any code of the program runs, as it fills a global offset table
+  -- slot, and with RELRO maps it read-only, so the load reads `S` and never
+  -- faults: `DEST := S`. No flags are affected.
   | .movGot d name, s => some (s.setReg d (s.syms name))
   -- `movSym`: "MOV" as for `movGot`, its RIP-relative source's `disp32`
   -- written by the linker so that it addresses the symbol itself

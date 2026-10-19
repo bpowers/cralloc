@@ -8,7 +8,7 @@ public import Asmalloc.Proof.Framework.Registration
 `c_malloc`, `c_calloc`, `c_free` and `c_free_sized` out of line (`x86_64`), each a
 naked function that tail-calls its slow path, and each also exported as the
 C symbols its `Api` names (`Api.exports`). One form only, reading glibc's
-`__rseq_offset` through its GOT slot: the exported copies are expanded in
+`__rseq_offset` through a word holding its address (`movGot`): the exported copies are expanded in
 the crate that invokes the export macro, whose cargo features are not the
 allocator's, and out of line the direct load saves nothing
 (docs/research/zen5-roofline.md, section 13). -/
