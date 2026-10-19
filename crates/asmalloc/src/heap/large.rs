@@ -149,12 +149,18 @@ enum Place {
 /// `policy::STAGGER_ROOM` to spare, so that its stagger always fits, unless only a slot
 /// without the room fits a region.
 fn place(layout: Layout, plan: Plan) -> Place {
-    let slot = |layout: Layout| Class::of_layout(layout).filter(|&c| plan.fits_region(c));
-    let roomy = Layout::from_size_align(layout.size().saturating_add(STAGGER_ROOM), layout.align())
-        .ok()
-        .filter(|_| layout.align() <= STAGGER_STEP)
-        .and_then(slot);
-    match roomy.or_else(|| slot(layout)) {
+    let slot = |class: Option<Class>| class.filter(|&c| plan.fits_region(c));
+    // An alignment that may be staggered is at most a cache line, so the size with the room,
+    // rounded up to it, cannot overflow: a layout's size is at most `isize::MAX`.
+    let roomy = if layout.align() <= STAGGER_STEP {
+        let mask = layout.align() - 1;
+        slot(Class::of_size(
+            (layout.size().max(1) + STAGGER_ROOM + mask) & !mask,
+        ))
+    } else {
+        None
+    };
+    match roomy.or_else(|| slot(Class::of_layout(layout))) {
         Some(class) => Place::Slot(class),
         // The size asked for, which the run records: the alignment is met by where the run
         // starts, so rounding the size up to it would only report, and commit, room nobody
