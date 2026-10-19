@@ -91,7 +91,7 @@ use super::word::{BITS, Word};
 use crate::classes::Class;
 use crate::os::Os;
 use crate::space::{RegionId, RegionTag};
-use core::sync::atomic::Ordering::{Acquire, Relaxed, Release};
+use core::sync::atomic::Ordering::{Acquire, Relaxed, Release, SeqCst};
 
 /// The decay word's low bit: a pass is under way. The rest is the time the pass began, or the
 /// time the last one ended.
@@ -187,7 +187,7 @@ impl<O: Os> Back<'_, O> {
     pub(super) fn retain(&self, class: Class, bytes: usize) {
         if bytes != 0 {
             let tally = self.state.retained.added.of(!class.is_small());
-            tally.fetch_add(bytes, Relaxed);
+            tally.fetch_add(bytes, SeqCst);
         }
     }
 
@@ -196,7 +196,7 @@ impl<O: Os> Back<'_, O> {
     pub(super) fn unretain(&self, class: Class, bytes: usize) {
         if bytes != 0 {
             let tally = self.state.retained.taken.of(!class.is_small());
-            tally.fetch_add(bytes, Relaxed);
+            tally.fetch_add(bytes, SeqCst);
         }
     }
 
