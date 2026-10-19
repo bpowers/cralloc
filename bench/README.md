@@ -27,8 +27,12 @@ The `backend` suite is seven small jobs that each exposed a cost of asmalloc's b
 incumbents, on every change to the back end. `benchrun list --suite full` prints the jobs.
 `run` takes `--only TEXT` (jobs whose id
 contains it), `--allocators a,b`, `--rounds N`, `--out FILE`, `--seed N`, `--mem-cap SIZE`
-(below), and the quiet-machine gate below. Builds run on `BENCH_BUILD_CPUS` (default
-`4-7,20-23`).
+(below), `--no-warm` (skip the clock warm-up below, only to measure what it changes), and
+the quiet-machine gate below. Builds run on `BENCH_BUILD_CPUS` (default `4-7,20-23`).
+`report` takes `--steady-only` to leave out runs whose clock was off.
+
+`run` takes no lock itself: start it under `scripts/measure --both-l3`, since the suite uses
+both L3s.
 
 `--suite` also takes several suites joined by commas, `--only` several texts joined by
 commas, and `--group NAME` keeps one group's jobs (`benchrun list` prints the groups).
@@ -152,7 +156,26 @@ cannot be rebuilt under a session.
   (default 1.0) runs elsewhere, for at most `--gate-wait` seconds (default 900), then runs
   anyway and records what it saw. Every run records the load on the siblings, on the other
   CPUs, and the work on its own CPUs that was not its own; `report --quiet-only` leaves out
-  runs where the last two were high.
+  runs where the last two were high. The gate spins on the runner's own CPU while it
+  measures, to keep the clock up (next item); that CPU is in none of the sets it measures.
+- **Clock.** With the CPU's boost left to the firmware (amd-pstate-epp, EPP
+  `balance_performance` on the reference machine), a job's time depends on what the machine
+  did just before it: after about 300 ms with every core idle, every core runs at the
+  nominal clock (4.38 GHz) for the first 250 ms of work, then boosts to 5.56 to 5.71 GHz.
+  One busy core anywhere keeps the boost for all of them. Runs started after the gate took
+  up to 30% longer at the same cycles, so medians of jobs ranked by time carried noise from
+  the order of the runs (`docs/research/baselines.md`, section 16). So before each run the
+  runner spins on the job's CPUs, measuring each one's clock in 5 ms windows, until all of
+  them have held their warm clock for three windows, and starts the job straight after
+  (the boost outlasts 200 ms of idle; the start takes a few). The warm clock of each CPU set
+  is learned from an 800 ms spin the first time the set is used. The warm-up comes before
+  the run's interference baseline, so it is not counted as foreign work. It adds about
+  15 ms a run, about a minute and a half to a full session. Every run records the clock it
+  got (`clock.ghz`: cycles over on-CPU time of its measured phases) and its warm-up
+  (`clock.warmup`); the report gives each job's median clock and the runs more than 5%
+  below their allocator's usual clock on that job. An allocator can set the clock itself:
+  glibc's large-object pipeline, all system calls and page faults, runs near nominal.
+  Machine settings (governor, EPP) are left as they come.
 - **Ranking.** Each job has one primary metric (named in the report with its unit; lower is
   better except rates). The report gives medians, half the interquartile range as a
   percentage, the fastest and the smallest (peak resident set) allocator, the runner-up

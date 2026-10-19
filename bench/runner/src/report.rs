@@ -15,6 +15,8 @@ pub struct Options {
     pub filter: Option<String>,
     /// Leave out runs during which the machine was measurably busy around them.
     pub quiet_only: bool,
+    /// Leave out runs whose clock was off (`CLOCK_OFF`).
+    pub steady_only: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -31,6 +33,11 @@ struct Run {
     rss_mean: f64,
     huge_peak: f64,
     minflt: f64,
+    /// The clock over what the run measured, GHz; NaN in results from before the runner
+    /// recorded it.
+    ghz: f64,
+    /// Its clock was below `CLOCK_OFF` of its allocator's median clock on the job.
+    clock_off: bool,
     extra: BTreeMap<String, f64>,
 }
 
@@ -42,7 +49,20 @@ struct Group {
     invalid: Vec<(String, String)>,
     /// Valid runs left out because the machine was busy around them (`quiet_only`).
     busy: usize,
+    /// The median clock of the job's valid runs, every allocator's together.
+    ghz: f64,
+    /// Valid runs whose clock was off, and how many of them `steady_only` left out.
+    off: usize,
+    off_dropped: usize,
 }
+
+/// A run whose clock was below this fraction of the median clock of its allocator's runs of
+/// the same job is flagged. The reference is per allocator because an allocator can set the
+/// clock itself: glibc's large-object pipeline, all system calls and page faults, runs at the
+/// nominal clock however warm the package was. Runs of one allocator on one job share a
+/// clock within a percent or two when it is steady; one that started from an idle package
+/// ran at the nominal clock, 23% below the boosted one on the reference machine.
+const CLOCK_OFF: f64 = 0.95;
 
 /// With `quiet_only`, a run is left out if its CPUs' SMT siblings were this busy (CPUs'
 /// worth) while it ran...
@@ -66,6 +86,8 @@ struct Line {
     rss_mean_med: f64,
     huge_med: f64,
     minflt_med: f64,
+    ghz_med: f64,
+    clock_off: usize,
     extra: BTreeMap<String, f64>,
 }
 
@@ -93,7 +115,7 @@ fn pct(r: f64) -> String {
     format!("{:+.1}%", (r - 1.0) * 100.0)
 }
 
-fn load(files: &[PathBuf], quiet_only: bool) -> (Vec<String>, Vec<String>, BTreeMap<String, Group>) {
+fn load(files: &[PathBuf], quiet_only: bool, steady_only: bool) -> (Vec<String>, Vec<String>, BTreeMap<String, Group>) {
     let mut order = Vec::new();
     let mut alloc_order: Vec<String> = Vec::new();
     let mut groups: BTreeMap<String, Group> = BTreeMap::new();
@@ -159,11 +181,39 @@ fn load(files: &[PathBuf], quiet_only: bool) -> (Vec<String>, Vec<String>, BTree
                 rss_mean: m["rss_mean"].as_f64().unwrap_or(f64::NAN),
                 huge_peak: m["anon_huge_peak"].as_f64().unwrap_or(f64::NAN),
                 minflt: v["rusage"]["minflt"].as_f64().unwrap_or(f64::NAN),
+                ghz: run_ghz(&v),
+                clock_off: false,
                 extra,
             });
         }
     }
+    for g in groups.values_mut() {
+        let ghz: Vec<f64> = g.runs.iter().map(|r| r.ghz).filter(|x| x.is_finite()).collect();
+        g.ghz = median(&ghz);
+        let mut by_alloc: BTreeMap<String, Vec<f64>> = BTreeMap::new();
+        for r in g.runs.iter().filter(|r| r.ghz.is_finite()) {
+            by_alloc.entry(r.alloc.clone()).or_default().push(r.ghz);
+        }
+        let usual: BTreeMap<String, f64> = by_alloc.into_iter().map(|(a, v)| (a, median(&v))).collect();
+        for r in &mut g.runs {
+            r.clock_off = usual.get(&r.alloc).is_some_and(|&u| r.ghz < u * CLOCK_OFF);
+        }
+        g.off = g.runs.iter().filter(|r| r.clock_off).count();
+        if steady_only {
+            g.runs.retain(|r| !r.clock_off);
+            g.off_dropped = g.off;
+        }
+    }
     (order, alloc_order, groups)
+}
+
+/// The run's recorded clock; for results from before the runner recorded it, the same
+/// computed from the counters they have.
+fn run_ghz(v: &Value) -> f64 {
+    v["clock"]["ghz"]
+        .as_f64()
+        .or_else(|| crate::clock::of_run(Some(&v["workload"]), Some(&v["window"]), &v["process"]).map(|c| c.0))
+        .unwrap_or(f64::NAN)
 }
 
 fn lines_of(g: &Group, alloc_order: &[String]) -> Vec<Line> {
@@ -196,6 +246,8 @@ fn lines_of(g: &Group, alloc_order: &[String]) -> Vec<Line> {
             rss_mean_med: median(&col(|r| r.rss_mean)),
             huge_med: median(&col(|r| r.huge_peak)),
             minflt_med: median(&col(|r| r.minflt)),
+            ghz_med: median(&col(|r| r.ghz)),
+            clock_off: rs.iter().filter(|r| r.clock_off).count(),
             extra,
         });
     }
@@ -252,11 +304,20 @@ fn margin(second: &Option<RunnerUp>) -> String {
     }
 }
 
+/// A job's median clock, and how many of its valid runs were off it.
+fn clock_cell(g: &Group) -> String {
+    if !g.ghz.is_finite() {
+        return "-".into();
+    }
+    let n = g.runs.len() + g.off_dropped;
+    if g.off == 0 { format!("{:.2} GHz", g.ghz) } else { format!("{:.2} GHz, {} of {n} off", g.ghz, g.off) }
+}
+
 pub fn report(o: &Options) {
-    let (order, alloc_order, groups) = load(&o.files, o.quiet_only);
+    let (order, alloc_order, groups) = load(&o.files, o.quiet_only, o.steady_only);
     let mut controls: Vec<(String, f64, (f64, f64))> = Vec::new();
-    println!("| Workload | Metric | Fastest | Margin | Least memory (cgroup peak) | Margin | Control |");
-    println!("|---|---|---|---|---|---|---|");
+    println!("| Workload | Metric | Fastest | Margin | Least memory (cgroup peak) | Margin | Control | Clock |");
+    println!("|---|---|---|---|---|---|---|---|");
     for (i, key) in order.iter().enumerate() {
         if o.filter.as_ref().is_some_and(|f| !key.contains(f.as_str())) {
             continue;
@@ -295,12 +356,13 @@ pub fn report(o: &Options) {
             }
         }
         println!(
-            "| {key} | {} | {} | {} | {}{small_by} | {} | {control} |",
+            "| {key} | {} | {} | {} | {}{small_by} | {} | {control} | {} |",
             g.metric,
             fast.map(|f| f.0.alloc.as_str()).unwrap_or("-"),
             fast.map(|f| margin(&f.1)).unwrap_or_default(),
             small.map(|f| f.0.alloc.as_str()).unwrap_or("-"),
             small.map(|f| margin(&f.1)).unwrap_or_default(),
+            clock_cell(g),
         );
     }
     if o.detail {
@@ -314,13 +376,17 @@ pub fn report(o: &Options) {
             let extra_keys: Vec<String> = ls.first().map(|l| l.extra.keys().cloned().collect()).unwrap_or_default();
             println!("\n### {key}\n");
             println!(
-                "| Allocator | n | {} ({}) | ± | vs {} | Cgroup peak MiB | VmHWM MiB | Mean RSS MiB | THP MiB | Faults |{}",
+                "| Allocator | n | {} ({}) | ± | vs {} | GHz | Clock off | Cgroup peak MiB | VmHWM MiB | Mean RSS MiB \
+                 | THP MiB | Faults |{}",
                 g.metric,
                 if g.higher_better { "higher is better" } else { "lower is better" },
                 o.reference,
                 extra_keys.iter().map(|k| format!(" {k} |")).collect::<String>()
             );
-            println!("|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|{}", "---:|".repeat(extra_keys.len()));
+            println!(
+                "|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|{}",
+                "---:|".repeat(extra_keys.len())
+            );
             for l in &ls {
                 let vs = reference.map(|r| pct(l.med / r)).unwrap_or_else(|| "-".into());
                 let ex: String = extra_keys
@@ -335,11 +401,13 @@ pub fn report(o: &Options) {
                     })
                     .collect();
                 println!(
-                    "| {} | {} | {} | {:.1}% | {vs} | {} | {} | {} | {} | {} |{ex}",
+                    "| {} | {} | {} | {:.1}% | {vs} | {:.2} | {} | {} | {} | {} | {} | {} |{ex}",
                     l.alloc,
                     l.n,
                     fmt(l.med),
                     l.spread * 100.0,
+                    l.ghz_med,
+                    l.clock_off,
                     mib(l.cg_peak_med),
                     mib(l.rss_peak_med),
                     mib(l.rss_mean_med),
@@ -358,7 +426,15 @@ pub fn report(o: &Options) {
     let invalid: usize = groups.values().map(|g| g.invalid.len()).sum();
     let valid: usize = groups.values().map(|g| g.runs.len()).sum();
     let busy: usize = groups.values().map(|g| g.busy).sum();
+    let off: usize = groups.values().map(|g| g.off).sum();
+    let off_dropped: usize = groups.values().map(|g| g.off_dropped).sum();
     println!("\n{valid} valid runs used, {busy} valid runs left out as busy, {invalid} invalid.");
+    println!(
+        "Clock: each job's median clock (cycles over on-CPU time of what it measured), and how many runs ran more than \
+         {:.0}% below the median of their allocator's runs of the job ({off} in all{}).",
+        (1.0 - CLOCK_OFF) * 100.0,
+        if o.steady_only { format!(", {off_dropped} left out") } else { String::new() }
+    );
     println!(
         "Memory ranks on each run's cgroup peak (anonymous memory, page tables, and file pages the run was first to \
          read); VmHWM includes shared libraries. Mean RSS is sampled over the whole process."

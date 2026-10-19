@@ -1,6 +1,7 @@
 //! A measurement session: rounds of every job under every allocator, in a fresh random order
 //! each round, one fresh process per run, one JSON line per run.
 use crate::cap::{self, Group, Scope};
+use crate::clock::{self, Clock, Warmup};
 use crate::config::Allocator;
 use crate::launch::{Child, Exit, MemSample, ProcStat, Sampler, Spec};
 use crate::suite::{Job, Metric, Mode, Program};
@@ -34,6 +35,9 @@ pub struct Options {
     pub max_busy: f64,
     /// ...but no longer than this.
     pub gate_wait: Duration,
+    /// Bring each run's CPUs to their warm clock before it starts (`clock.rs`); off only to
+    /// measure what that changes.
+    pub warm: bool,
     pub suite: String,
 }
 
@@ -360,16 +364,21 @@ struct CpuSets {
     others: BTreeSet<usize>,
 }
 
-fn run_one(job: &Job, a: &Allocator, cx: &Context) -> Value {
+fn run_one(job: &Job, a: &Allocator, cx: &Context, clock: &mut Clock) -> Value {
     let scratch = cx.o.out.with_extension("work");
     let _ = std::fs::create_dir_all(&scratch);
     let _ = std::fs::remove_file(scratch.join("probe.json"));
     let (argv, env) = command(job, a, cx.o, &scratch);
     let load = sys::loadavg();
+    // Nothing starts without its cgroup, so nothing runs uncapped.
+    let groups = Groups::create(job, cx.o, cx.seq);
+    // The warm-up comes last before the start, so the clock has no time to fall back, and
+    // before the interference baseline, so that its spin on the job's CPUs is not counted
+    // as foreign work there.
+    let warmup: Option<Warmup> = (cx.o.warm && groups.is_ok()).then(|| clock.warm(&job.cpus));
     let t0 = CpuTimes::read();
     let started = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap().as_secs_f64();
-    // Nothing starts without its cgroup, so nothing runs uncapped.
-    let (out, usage, driver_usage) = match Groups::create(job, cx.o, cx.seq) {
+    let (out, usage, driver_usage) = match groups {
         Ok(g) => {
             let out = execute(job, &argv, &env, &scratch, cx.o, &g);
             (out, Some(g.run.usage()), g.driver.as_ref().map(Group::usage))
@@ -478,6 +487,7 @@ fn run_one(job: &Job, a: &Allocator, cx: &Context) -> Value {
     if multiplexed {
         problems.push("hardware counters were multiplexed".into());
     }
+    let run_clock = clock::of_run(out.result.as_ref(), out.window.as_ref(), &out.counters.to_json());
     let stderr_tail = std::fs::read_to_string(scratch.join("stderr.txt"))
         .map(|s| s.lines().rev().take(5).collect::<Vec<_>>().into_iter().rev().collect::<Vec<_>>().join("\n"))
         .unwrap_or_default();
@@ -515,6 +525,11 @@ fn run_one(job: &Job, a: &Allocator, cx: &Context) -> Value {
         "workload": out.result,
         "driver": out.driver,
         "window": out.window,
+        "clock": {
+            "ghz": run_clock.map(|c| c.0),
+            "over": run_clock.map(|c| c.1),
+            "warmup": warmup.as_ref().map(Warmup::to_json),
+        },
         "interference": {
             "loadavg_before": load,
             "siblings_busy": sys::busy_sum(&busy, &cx.cpus.siblings),
@@ -551,7 +566,15 @@ fn gate(o: &Options, cpus: &CpuSets) -> Value {
     let t0 = Instant::now();
     loop {
         let a = CpuTimes::read();
-        std::thread::sleep(Duration::from_secs(1));
+        // The gate's second would let the package fall back to its nominal clock, leaving
+        // the first run's warm-up a 300 ms ramp to sit through. Spinning on the runner's own
+        // CPU keeps the boost for every core, and that CPU and its sibling are in none of
+        // the sets measured here.
+        if o.warm {
+            clock::spin(Duration::from_secs(1));
+        } else {
+            std::thread::sleep(Duration::from_secs(1));
+        }
         let busy = CpuTimes::read().busy_since(&a);
         let (ob, sb, mb) = (
             sys::busy_sum(&busy, &cpus.others),
@@ -617,6 +640,8 @@ fn header(o: &Options, allocs: &[Allocator], jobs: &[Job], session: &str) -> Val
         "sample_ms": o.sample_ms,
         "rollup_ms": o.rollup_ms,
         "max_busy": o.max_busy,
+        "warm": o.warm,
+        "nominal_mhz": sys::read_trim("/sys/devices/system/cpu/cpu0/acpi_cppc/nominal_freq"),
         "mem_cap": o.mem_cap,
         "driver_mem_cap": cap::DRIVER,
         "scope": { "unit": o.scope.unit, "mem_cap": o.scope.cap },
@@ -655,6 +680,7 @@ pub fn session(o: &Options, allocs: &[Allocator], jobs: &[Job]) -> std::io::Resu
     let total: usize =
         jobs.iter().map(|j| allocs.iter().filter(|a| runs_under(j, a)).count()).sum::<usize>() * o.rounds;
     let mut seq = 0;
+    let mut clock = Clock::new(clock::Settings::default());
     let t0 = Instant::now();
     for round in 0..o.rounds {
         for job in jobs {
@@ -665,7 +691,7 @@ pub fn session(o: &Options, allocs: &[Allocator], jobs: &[Job]) -> std::io::Resu
             let g = gate(o, &cpus);
             for a in order {
                 let cx = Context { o, session: session.clone(), round, seq, gate: g.clone(), cpus: &cpus };
-                let rec = run_one(job, a, &cx);
+                let rec = run_one(job, a, &cx, &mut clock);
                 writeln!(out, "{rec}")?;
                 out.flush()?;
                 seq += 1;

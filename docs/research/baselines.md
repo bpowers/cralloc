@@ -994,3 +994,81 @@ class would move the problem to other programs and cost memory everywhere. tokio
 `queue::Inner` and move the task-list counter away from the fields it reads. Until then the
 spawn jobs rank where each allocator puts these few lines more than what it costs to
 allocate, and glibc's result there changes with the program's path.
+
+## 16. The clock a run starts with
+
+2026-10-19, at `35b00fa` plus the runner change it describes. Short multithreaded jobs spread
+by up to 30% in time at the same cycles (section 15; `memory.md`, "The cost of a large block,
+by cause"). The cause is the package's boost, and the runner now controls it.
+
+**What the clock depends on.** `bench/probes/clock_ramp.rs` spins threads on chosen CPUs and
+reads each one's cycles over wall time in 5 to 20 ms windows, with the heavy-work slice
+frozen and nothing else busy (amd-pstate-epp, governor `powersave`, EPP
+`balance_performance`, as the machine comes):
+
+- After 1.5 s of idle, every core runs at 4.38 GHz, the nominal clock (`acpi_cppc/
+  nominal_freq` is 4300 MHz), for the first 200 to 260 ms of a spin, then reaches the boost
+  within 40 ms: 5.71 GHz with one core busy, 5.67 with four, 5.56 with eight. The ramp takes
+  the same time for one, four or eight cores.
+- The state is the package's. A 500 ms spin on CPU 3 (same L3), 18 (CPU 2's SMT sibling) or
+  10 (the other L3) put CPU 2 at 5.68 GHz from its first 10 ms; 250 ms did so in one of six
+  trials, 100 ms never.
+- It decays between 200 and 400 ms of idle. After an 800 ms spin, a spin started 5 to
+  200 ms later ran at 5.70 from its second 5 ms window (the first, a core waking from idle,
+  reads 5.0 to 5.5); after 400 ms it was back at 4.38 for 45 to 60 ms before ramping.
+- Load from other people's work keeps the boost (a session's quiet gate allows one CPU's
+  worth elsewhere), and lowers it a little: CPU 2 alone ran at 5.42 GHz with seven other CPUs
+  busy.
+
+So in a session, a run that starts after the gate's second of idle runs its first 250 ms at
+4.38 GHz, and a job shorter than that runs all of it there. In the `b5d6e8f` full session,
+61% of the first runs after a gate in the cross-thread, work-stealing and single-thread
+groups ran below 4.6 GHz, 30% of the second and 15% of the third, against 5.5% later; 602 of
+its 4,280 runs are more than 5% below their allocator's usual clock on the job.
+
+**What the runner does** (`bench/runner/src/clock.rs`, `bench/README.md`, "Clock"). Before
+each run it spins on the job's CPUs, reading each one's clock in 5 ms windows, until every one
+has held the CPU set's warm clock (within 3%) for three windows, then starts the job: the
+start is a few milliseconds, far inside the 200 ms the boost survives. The warm clock is
+learned from an 800 ms spin the first time a session uses a CPU set, and relearned if a
+warm-up cannot reach it within 800 ms. The gate spins on the runner's CPU while it measures,
+which keeps the package boosted without touching any CPU the gate counts, so the warm-up
+after it is a check, not a ramp. Every run records the clock over its measured phases
+(`clock.ghz`) and its warm-up (`clock.warmup`); `benchrun report` gives each job's median
+clock and counts runs more than 5% below their allocator's median on the job
+(`--steady-only` leaves them out).
+
+**Cost.** 15.4 ms a run (median of 340), 0.8 s for each CPU set's first warm-up: about a
+minute and a half on a full session of 4,800 runs.
+
+**Before and after.** The four jobs below, all allocators, ten rounds each way, in alternating
+blocks of five, under `scripts/measure --both-l3` with the gate tightened to 0.3 CPUs busy
+elsewhere so that every job started from a quiet package, as on an idle machine (all 680
+runs passed the gate quiet). Before is `--no-warm` (the old behaviour: sleep through the
+gate, no warm-up).
+
+| Job, allocator | Before: median, ± (half IQR), range | Runs off clock | After: median, ±, range | Runs off |
+|---|---|---:|---|---:|
+| pipeline t2 large, asmalloc (ns/alloc) | 58.13, 9.9%, 57.7 to 74.9 | 3 | 58.43, 0.3%, 57.8 to 59.3 | 0 |
+| pipeline t2 large, tcmalloc-percpu | 40.65, 14.2%, 39.9 to 52.3 | 4 | 40.34, 0.3%, 40.0 to 40.9 | 0 |
+| pipeline t2 large, mimalloc-crate | 40.17, 8.3%, 39.9 to 52.2 | 4 | 40.02, 0.3%, 39.8 to 40.4 | 0 |
+| spawn t4 local, asmalloc (ns/task) | 139.05, 7.2%, 128.8 to 166.1 | 5 | 129.90, 0.4%, 128.6 to 131.0 | 0 |
+| spawn t4 local, tcmalloc-thread | 113.72, 6.7%, 112.1 to 147.7 | 3 | 113.04, 0.6%, 111.9 to 114.4 | 0 |
+| spawn t4 local, jemalloc | 113.17, 0.6%, 111.1 to 131.1 | 1 | 113.41, 0.3%, 112.4 to 115.2 | 0 |
+
+Before, 46 of 340 runs were off clock; after, none. Medians of the allocator-job pairs with
+no run off clock before moved by 0.4% at most, except glibc's pipeline (-1.6%, a job that
+spreads by ±5% either way); asmalloc's spawn t4 median fell 6.6%, because five of its ten
+runs before had started cold. The single-threaded `churn live=1k
+small`, ranked by cycles, had cold runs before (10 of 90 runs off) and its medians moved by
+0.4% at most: cycles do not see the clock. The preloaded `cfrac` (2.1 s, ranked by time) had
+no run off clock either way, since only its first 250 ms can be cold, and its medians moved by
+0.2% at most.
+
+glibc's large-object pipeline is the exception that shows why the report compares a run with
+its own allocator's usual clock: its threads spend their time in `mmap`, `munmap` and page
+faults and run at 4.4 to 4.5 GHz however warm the package is, before and after.
+
+An earlier pair of runs, taken while another worktree's proofs kept one CPU busy outside the
+frozen slice, had no cold runs in either arm: a busy machine hides the effect, which is why it
+came and went between sessions.
