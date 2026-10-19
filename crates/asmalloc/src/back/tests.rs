@@ -4392,3 +4392,93 @@ mod review_direct {
         tree_words_of(MAX_LEVELS as u8, 0);
     }
 }
+
+/// The retained count read while other threads count in and out: a reader preempted between
+/// its loads of the two tallies. Each load here first runs the other threads' work scheduled
+/// for that point, so the window is the same on every run.
+mod retained_reading {
+    use super::super::{EXACT_TRIES, difference};
+    use std::boxed::Box;
+    use std::cell::Cell;
+
+    /// The other threads' work to run just before the `n`-th load of either tally.
+    type Others = Box<dyn Fn(usize, &Tallies)>;
+
+    /// Two tallies, and the other threads' work between the loads.
+    struct Tallies {
+        added: Cell<usize>,
+        taken: Cell<usize>,
+        loads: Cell<usize>,
+        others: Others,
+    }
+
+    impl Tallies {
+        fn new(added: usize, taken: usize, others: impl Fn(usize, &Tallies) + 'static) -> Tallies {
+            Tallies {
+                added: Cell::new(added),
+                taken: Cell::new(taken),
+                loads: Cell::new(0),
+                others: Box::new(others),
+            }
+        }
+
+        fn load(&self, tally: &Cell<usize>) -> usize {
+            let n = self.loads.get();
+            self.loads.set(n + 1);
+            (self.others)(n, self);
+            tally.get()
+        }
+
+        /// A free and a claim of the same bytes, which leave the count as it was.
+        fn churn(&self, bytes: usize) {
+            self.added.set(self.added.get() + bytes);
+            self.taken.set(self.taken.get() + bytes);
+        }
+
+        fn read(&self) -> isize {
+            difference(|| self.load(&self.taken), || self.load(&self.added))
+        }
+    }
+
+    const MIB: usize = 1 << 20;
+
+    /// What `racing_moves_keep_within_the_budget` met at random: 40 MiB of blocks freed and
+    /// claimed again between the reader's two loads, while 16 MiB stayed retained throughout.
+    /// Read once each, taken first, the count came out at 56 MiB; read with the taken tally on
+    /// both sides of the added one, it is 16.
+    #[test]
+    fn churn_between_the_loads_is_not_counted() {
+        let others = |n: usize, t: &Tallies| {
+            if n == 1 {
+                t.churn(40 * MIB);
+            }
+        };
+        let once = Tallies::new(16 * MIB, 0, others);
+        let taken = once.load(&once.taken);
+        let added = once.load(&once.added);
+        assert_eq!(added.wrapping_sub(taken), 56 * MIB);
+        assert_eq!(Tallies::new(16 * MIB, 0, others).read(), 16 * MIB as isize);
+    }
+
+    /// Churn at every point between the loads for the first tries: the reading is still exact,
+    /// from the first try in which the taken tally holds still.
+    #[test]
+    fn a_reading_is_exact_once_the_taken_tally_holds_still() {
+        for busy in 0..EXACT_TRIES {
+            let tallies = Tallies::new(5 * MIB, MIB, move |n, t| {
+                if n < 2 * busy + 1 {
+                    t.churn(MIB);
+                }
+            });
+            assert_eq!(tallies.read(), 4 * MIB as isize, "{busy}");
+        }
+    }
+
+    /// Churn that never stops: the reading errs, and only high, which every caller can take.
+    #[test]
+    fn a_reading_that_never_settles_errs_high() {
+        let tallies = Tallies::new(5 * MIB, MIB, |_, t| t.churn(MIB));
+        let read = tallies.read();
+        assert!(read > 4 * MIB as isize, "{read}");
+    }
+}

@@ -67,7 +67,7 @@ use crate::os::{Os, OsError};
 use crate::space::{MAX_REGIONS, RegionTable, Space, SpaceCell};
 use core::fmt;
 use core::ptr::NonNull;
-use core::sync::atomic::Ordering::Relaxed;
+use core::sync::atomic::Ordering::SeqCst;
 use core::sync::atomic::{AtomicU32, AtomicU64, AtomicUsize};
 
 /// The back end's shared state, and the reservation it manages.
@@ -137,12 +137,44 @@ impl Tally {
 
 impl Retained {
     /// The count of large classes if `large`, else of small ones: what was counted in less
-    /// what was counted out, which is negative while a subtraction runs ahead.
+    /// what was counted out, which is negative while a subtraction runs ahead. A value the count
+    /// had at a moment during the call (`difference`). Every caller is off the fast paths: the
+    /// decay pass that is due, the cap charged to growth, the decision to keep a grown block,
+    /// and the heap's inspection.
     fn signed(&self, large: bool) -> isize {
-        let taken = self.taken.of(large).load(Relaxed);
-        let added = self.added.of(large).load(Relaxed);
-        added.wrapping_sub(taken) as isize
+        let (taken, added) = (self.taken.of(large), self.added.of(large));
+        difference(|| taken.load(SeqCst), || added.load(SeqCst))
     }
+}
+
+/// How many times [`difference`] reads the tallies again before it settles for a reading that
+/// errs high. Each try is three loads; a try fails only when a claim or fill counted out
+/// between its first load and its last.
+const EXACT_TRIES: usize = 8;
+
+/// `added - taken` of two tallies that only grow, as a value it really had: the taken tally
+/// read on both sides of the added one, again while it moved. When it did not move, no
+/// subtraction fell between the loads, so the difference was the count at the moment of the
+/// added load (every tally operation is sequentially consistent, in one order). Read once
+/// each, in either order, the two loads straddle a window whose additions or subtractions only
+/// one of them sees: taken first erred high by every addition of the window, which a reader
+/// preempted between the loads saw as tens of MiB of large blocks moved meanwhile.
+///
+/// If the taken tally moves on every try, the last reading is taken before added, which can
+/// only err high: by the additions after that taken load. Every caller is safe that way round:
+/// a grown block is purged rather than kept, the decay pass or the growth that pays for the cap
+/// purges a little more, and nothing is under-counted.
+fn difference(taken: impl Fn() -> usize, added: impl Fn() -> usize) -> isize {
+    let mut before = taken();
+    for _ in 0..EXACT_TRIES {
+        let added = added();
+        let after = taken();
+        if after == before {
+            return added.wrapping_sub(before) as isize;
+        }
+        before = after;
+    }
+    added().wrapping_sub(before) as isize
 }
 
 /// What the steps of the purge walk share (`purge`).
