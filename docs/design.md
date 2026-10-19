@@ -669,13 +669,24 @@ A Rust resize stays in place only when the caller's next `dealloc` will still fi
 class. For a small object that means the new size maps to the same class. For a large object
 it means the new size is still large and fits the slot. Anything else moves the object.
 
+A large object that has to move because it grew moves into a slot with room to grow in
+place: sixteen times its size where such a slot can be had, else four times, else its own
+size, and never more than a region. A buffer that doubles is otherwise copied at every
+doubling, and the copies add up to more than the buffer. The room costs address space and
+nothing else: pages nobody wrote are not resident, and are never counted, kept or purged
+(see below). Under strict overcommit it does cost commit charge, since a region's writable
+prefix is charged whole, and a failed commit falls back to less room. A factor only makes
+copies rarer. A buffer still copies itself once each time it outgrows its room, so how much
+a given final size has copied depends on where it falls between two moves.
+
 Shrinking gives memory back. A large object that shrinks in place returns the whole pages
 past its new size at once: nothing else can use them while it holds the slot, so otherwise
-they would stay resident until it is freed. One that shrinks to under an eighth of its slot
-moves instead, because a region has few slots of a large class, and a slot should not be
-held by an object a small fraction of its size. The threshold sits well below the quarter
-of a slot that headroom gives a block when it moves in, so a block resized back and forth
-across a class boundary settles in one slot instead of being copied on every call.
+they would stay resident until it is freed. One that shrinks to under a thirty-second of its
+slot moves instead, because a region has few slots of a large class, and a slot should not
+be held for good by an object a tiny fraction of its size. The threshold is tied to the
+growth room and sits below the fraction of a slot that a block fills when it moves in, so a
+block resized back and forth across a class boundary settles in one slot instead of being
+copied on every call.
 
 When a large object has to move, the copy goes in pieces and returns the old block's pages
 behind each piece, so the two copies are never both resident. Each piece's pages are tested
@@ -694,8 +705,8 @@ about what the program has already spent on that block, and it never falls on a 
 was allocated, barely touched and freed.
 
 A kept slot is charged, against that budget and against retained memory, the pages that
-may be resident, not its whole size: a block that moved in with headroom fills a quarter of
-its slot or less. The record is the slot's clean-page bits, and a clean bit is true: it says
+may be resident, not its whole size: a block that moved in with room to grow fills a small
+fraction of its slot. The record is the slot's clean-page bits, and a clean bit is true: it says
 the page has not been written since it was carved or last purged. Only a purge sets one, and
 the carve of a slot for the pages past the block it was carved for. A claim, and anything
 that widens a block, clears them under what the block may write. A free writes none. So a
