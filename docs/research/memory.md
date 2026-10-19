@@ -1958,6 +1958,117 @@ meets all three pairs of headroom and threshold that can occur: sixteen times wi
 thirty-second, four times with a thirty-second (a small four-times slot of a full heap), and
 four times with an eighth.
 
+## Growing blocks fault their spilled huge page in small pages
+
+2026-10-18, at main `a92d51a`. A full session had asmalloc well behind mimalloc on two build
+jobs, with tens of thousands of faults to mimalloc's few hundred: `vecgrow 64x4Mi` 5.89
+against 3.06 cycles an element, `map hash 1M` 534 against 434 cycles an entry.
+
+**Method.** Workloads run by hand on CPU 2 under `scripts/memlimit` and the measurement lock,
+builds interleaved in a fresh order each round, three to five rounds, medians; faults, user
+and kernel cycles from the job's own counters; huge-page faults from `thp_fault_alloc` in
+`/proc/vmstat` around each run. Fault addresses from `perf record -e page-faults -c 1 -d`,
+grouped by region and by offset within a slot. The machine was shared and busier than in the
+full session, so absolute times run a few to 25% higher; compare within a table. The neighbour
+check is `benchrun run` (one round per hold of the lock, three rounds) with the old build as an
+extra allocator entry.
+
+**vecgrow 64x4Mi.** All of the gap is the kernel: 543M kernel cycles against mimalloc's 30M,
+while asmalloc's user cycles are lower (228M against 380M). Per vector and repetition there
+were about 722 small faults and one huge one:
+
+- 504 in the 40 MiB slot's second huge page. A vector moves at 2 MiB into a slot with headroom,
+  at its stagger, so its 2 MiB end a few bytes into the next huge page. Advice is rounded down
+  (`region::advise_grown`), so the program writes those bytes on a small page, and the page
+  table that creates keeps the whole huge page on small pages when the vector doubles in place
+  to 4 MiB and the advice reaches it. This is the spill described under "Headroom for growing
+  blocks"; there, advising the spill page ahead cost 126 MiB of peak.
+- 226 in the 1.25 MiB slots of the outgrown 1 MiB blocks. A move returns the slot it outgrew
+  once the budget for kept grown blocks is spent, and the next repetition faults it back.
+
+mimalloc faults 132 huge pages in the first repetition and nothing after: it keeps what is
+freed and reuses it at any size, so the 4 MiB blocks of one repetition become the small and
+medium blocks of the next. Class segregation rules that out here; keeping either kind of block
+instead costs peak (below).
+
+**The change.** When an in-place growth extends a block's advice over the huge page that holds
+its old end, and the block used only the first page of it, that page is copied aside into the
+block's new room, the huge page is returned, and the page is copied back
+(`Back::unspill`). `MADV_DONTNEED` frees a page table it empties (`reclaim_pt`, Linux 6.14 and
+later with `CONFIG_PT_RECLAIM`, on by default on x86-64), so the copy back faults the huge
+page whole. Where the page table stays, the page goes on in small pages as before. Costs of
+the ways to fill such a page, measured with a scratch C program, TSC ticks per 2 MiB, one 4
+KiB page written first, median of 64:
+
+| Fill the rest of the huge page | ticks |
+|---|---:|
+| as small faults | 1,146k to 1,191k |
+| `MADV_COLLAPSE`, then write | 503k to 518k |
+| copy aside, `MADV_DONTNEED`, copy back, then write | 376k |
+| a fresh advised huge page (reference) | 357k to 389k |
+
+`MADV_COLLAPSE` breaks even with small faults at half the page written, and it calls
+`lru_add_drain_all`, which queues and waits for work on every CPU, and takes the mmap lock for
+writing; not chosen.
+
+**Before and after**, `benchrun`, three rounds:
+
+| Job | before | after | mimalloc | jemalloc |
+|---|---:|---:|---:|---:|
+| vecgrow 64x4Mi, cycles/element | 5.69 | **3.97** | 3.06 | 7.48 |
+| the same, faults | 185,064 | 56,544 | 279 | 246,894 |
+| the same, cgroup peak MiB | 277 | 278 | 265 | 303 |
+| vecgrow 1x256Mi, cycles/element (five rounds by hand) | 1.778 | 1.780 | | |
+| vecgrow 1x4Mi grow-and-free | 0.478 | 0.485 | 0.872 | 0.800 |
+| vecgrow 1x1Mi grow-and-free (five rounds by hand) | 0.299 | 0.299 | | |
+| map hash 1M, cycles/entry | 537 | 536 | 464 | 632 |
+| map btree 1M | 920 | 916 | 838 | 962 |
+| tree depth=20 | 44.1 | 44.0 | 46.1 | 97.3 |
+| tree depth=18 | 40.1 | 38.4 | 34.6 | 64.9 |
+| json 32Mi | 16.38 | 16.18 | 16.58 | 23.54 |
+| json 8Mi | 16.73 | 17.01 | 15.98 | 23.41 |
+| pipeline t2 sizes=large, ns/alloc | 80.3 | 80.6 | 55.6 | 386 |
+| pipeline t2 x2 sizes=small | 5.46 | 5.36 | 20.6 | 9.80 |
+
+In the `benchrun` session 1x256Mi read 1.84 and 2.18 with ±5% and identical faults, and
+1x1Mi showed 470 and 727 faults; run again interleaved by hand, both are level (above). Neither
+can reach the change: one vector lives in slot 0, which has no stagger, and a 1 MiB block gets
+no advice. sh8bench through the preload library, which allocates no large blocks, ran 0.606 s
+after (full session 0.60). Cgroup peaks from `bench/probes/memory/peaks.sh` agree within 0.2
+MiB before and after on every job it runs (pipelines, churn, maps at 200k, tree 18, json 8 MiB,
+both vecgrows).
+
+**What is left on vecgrow 64x4Mi.** 56K small faults on the outgrown 1 MiB blocks, and 512
+huge-page faults, two per vector and repetition, all of it faulting memory back that was
+returned. Both are the price of the memory bar. A budget for kept grown blocks of 64 MiB
+instead of 16 (a scratch build) runs 4.07 cycles an element with 19,896 faults, but peaks at
+327 MiB, over jemalloc's 305.
+
+**map hash 1M.** 52K of the 60.6K faults are in the first repetition (one repetition alone
+takes 51,952), first touches of the tables and of the value classes, all on 4 KiB pages; later
+repetitions find the tables resident. The tables are large blocks allocated at their size,
+which get no huge pages by design, so they stay on small pages in every repetition: the build's
+extra dTLB misses and walks in "Build phases against mimalloc". The peak is the outgrown
+tables: at the last resize the four or five smaller tables freed earlier in the repetition,
+about 33 MiB, are still resident and retained (under the 64 MiB cap, and a free never purges),
+next to the old and new tables; jemalloc reuses that memory for the values. Huge pages for every
+large block of 2 MiB or more at allocation (a scratch build, an upper bound; it breaks the
+sparse-block rule) measured, three rounds by hand:
+
+| map hash 1M | cycles/entry | faults | VmHWM MiB |
+|---|---:|---:|---:|
+| main | 547.5 | 60,558 | 206.5 |
+| huge pages for at-size blocks of 2 MiB or more | 467.1 | 21,432 | 181.3 |
+| mimalloc | 468.7 | 160 | 301.2 |
+| jemalloc | 633.5 | 181,212 | 186.0 |
+
+It closes both gaps: the tables fault whole, and freed tables carry advice, so past the budget
+for kept grown blocks their free returns them. Its cost is the case the rule exists for: a
+block of 2 MiB or more that is touched once every 2 MiB becomes wholly resident, up to 512
+times what it touched (arithmetic). Not adopted; whether to take that trade, or to learn
+density per class at the free (which would help the repetitions after the first, but not the
+first, where most of the faults are), is the owner's decision.
+
 ## Small heaps
 
 2026-10-18, at main `779ba9b` (before) and the branch's tip (after). Every page of an asmalloc

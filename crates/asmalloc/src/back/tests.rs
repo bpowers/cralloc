@@ -1707,6 +1707,66 @@ fn a_block_that_grows_gets_huge_pages_until_it_is_freed() {
     }
 }
 
+/// A staggered block of a whole huge page spills its stagger into the next huge page. When it
+/// doubles in place and the advice reaches that page, the page is returned once, so that it can
+/// fault whole, and the spilled bytes survive; a block that spills nothing, or more than its
+/// first page, is left alone.
+#[test]
+#[cfg_attr(miri, ignore)]
+fn a_block_growing_over_its_spilled_huge_page_returns_it_and_keeps_its_bytes() {
+    let state = state::<Native>();
+    let back = state.get_or_reserve().unwrap();
+    let os = state.os();
+    let huge = Native::GEOMETRY.huge_page_size();
+    let page = Native::GEOMETRY.page_size();
+    let class = large(4 * huge);
+    // Slot 0 has no stagger; slot 1 starts a cache line in; slot 2 is a block that spills
+    // more than a page, since it is not a whole number of huge pages.
+    let blocks: std::vec::Vec<_> = (0..3)
+        .map(|_| back.alloc_staggered(class, huge).unwrap().ptr)
+        .collect();
+    let base = back.space().slot(
+        back.space().locate(blocks[0].as_ptr()).unwrap().region,
+        class,
+        0,
+    );
+    assert_eq!(blocks[0], base, "slot 0 is not staggered");
+    assert_ne!(blocks[1].addr().get() % huge, 0, "slot 1 is staggered");
+    for (i, (block, len, spills)) in [
+        (blocks[0], huge, false),
+        (blocks[1], huge, true),
+        (blocks[2], huge + 2 * page, false),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        // SAFETY: the test holds the block, now `len` bytes, and uses none of it during the
+        // call.
+        unsafe { back.resize_in_place(block, len) };
+        // All it may use, as a C caller may: to the end of the page its size ends in.
+        let usable = back.usable_size(block.as_ptr()).unwrap();
+        assert!(usable > len || !spills);
+        pattern(block.as_ptr(), usable);
+        let purges = os.calls(Call::Purge);
+        // SAFETY: as above.
+        unsafe { back.resize_in_place(block, 2 * len) };
+        assert!(
+            patterned(block.as_ptr(), usable),
+            "block {i} lost its bytes"
+        );
+        let next = block.map_addr(|a| a.saturating_add(len));
+        assert_eq!(os.huge_pages(next), Some(HugePages::Prefer), "block {i}");
+        assert_eq!(
+            os.calls(Call::Purge),
+            purges + spills as u64,
+            "block {i}: the spilled page goes back once, and nothing else"
+        );
+    }
+    for block in blocks {
+        back.free(block, class);
+    }
+}
+
 /// Moves a dense block of `len` bytes of `class` into `to`, a fresh block whose object is to
 /// be `size` bytes, as the heap's growing move does.
 /// Spends the budget for kept grown blocks (`policy::kept_grown`) with a plain free of an

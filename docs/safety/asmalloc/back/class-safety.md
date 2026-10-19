@@ -271,4 +271,46 @@ Any bit pattern is a valid `u8` and a valid `u64`, and `align_to` places in its 
 only whole, aligned `u64`s within the slice. Reading a page that was never written maps the
 kernel's shared zero page; it changes no contents.
 
+## BACK-CLASS-05: the copies and the purge in `unspill`
+
+**Blocks.** In `resize_in_place`, the call of `unspill`. In `unspill`,
+`spill.copy_to_nonoverlapping(aside, part)`, `region::purge_part(host, region, slot, at,
+huge)`, and `aside.copy_to_nonoverlapping(spill, part)`.
+
+**Preconditions.** For `unspill`: its `# Safety`, that the caller owns the block, may now
+use `new` bytes rounded up to the end of their last page, and does not read or write it during
+the call, and that its contents are what it could use before, `old` bytes rounded up the same
+way. For the copies: both ranges valid for `part` bytes, the source readable, the destination
+writable, and the two not overlapping. For `purge_part`: the caller holds the slot, nothing
+reads or writes the range during the call, and nothing in it is needed after.
+
+**Proof.** `resize_in_place` is an `unsafe fn` whose callers own the block and do not use it
+during the call (BACK-CLASS-02). It calls `unspill` only when the block grows in place, after
+`validate` found the slot and checked `into + new` within the class size, and after recording
+the new size. What a block may use is its usable size (`Back::usable_size`): its recorded size
+rounded up to the end of the page it ends in, which C callers are told and may write in full.
+So the caller's contents end at `end`, `into + old` rounded up to a page, counted from the
+slot's start, and the block may now use up to `into + new` rounded up to a page, which is at
+most the class size, a whole number of pages, so it lies in the slot.
+
+`at` is the start of the huge page holding `end`, and `unspill` returns early unless
+`into < at`, `0 < part <= page` with `part = end - at`, and `at + huge + part` is at most the
+new usable end. So `spill` (offset `at`, `part` bytes) and `aside` (offset `at + huge`, `part`
+bytes) both lie inside what the block may now use, and they are `huge >= part` apart, so they
+do not overlap. `spill` holds the block's contents from `at` to `end`; `aside` starts at
+`at + huge`, past `end`, in new room whose contents the caller does not need, so writing it
+destroys nothing (a zeroed grow clears it after the resize, `Heap::resize_large_in_place`).
+The purge range is `at..at + huge`: whole pages, inside what the block may use and so inside
+the slot, held by the caller. Its only contents are the `part` bytes now copied aside; the
+rest is past `end`. A purge may act on part of the range even when it fails, so the bytes are
+copied back whatever it returns; after it, the range reads as zero or as before, and the copy
+back writes the same `part` bytes at `spill`, restoring the block's contents exactly. Nothing
+else can reach the range: the slot's bit stays clear for the whole call, so no purge walk or
+claim can take it.
+
+No leaf, zero or clean bit is written. The purged pages lie inside what the block may write,
+whose clean bits `region::cover` clears right after; none is set here, so no clean bit stands
+over a page with data, and the purged pages were never in a retained count, being the held
+block's.
+
 Reviewed: 415b07e
