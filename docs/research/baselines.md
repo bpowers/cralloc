@@ -986,7 +986,8 @@ the same page offsets: five in six of asmalloc's L1 misses that hit L2 fall in t
 eight of the 64 L1 sets, and nearly all its misses in the first 64 of the 1,024 L2 sets,
 where jemalloc's spread. Starting each region's first carve at a different offset (scratch
 build) spread them and removed the L2 hits, and changed neither time nor transfers: a real
-effect, too small to matter here.
+effect, too small to matter here. The same alignment does matter to the data TLB on other jobs; see
+"Small classes start on pages of their own" below.
 
 **What would fix it.** Not the allocator, short of tuning its classes to tokio's structure
 sizes: which types share a class decides whether these headers interleave, and a coarser
@@ -994,3 +995,46 @@ class would move the problem to other programs and cost memory everywhere. tokio
 `queue::Inner` and move the task-list counter away from the fields it reads. Until then the
 spawn jobs rank where each allocator puts these few lines more than what it costs to
 allocate, and glibc's result there changes with the program's path.
+
+### Small classes start on pages of their own
+
+2026-10-19, at `700c8ce` against main at `35b00fa`. Every region starts on a 4 GiB
+boundary and fills take the lowest slots, so the first pages of all the classes in use had
+the same low virtual page numbers, which index the second-level data TLB's sets. A small
+heap spread over many classes then walked the page tables though it used a few hundred
+kilobytes. Each small class's slot 0 now lies at an origin of its own
+(`Plan::slot_origin`): class `i` at `i * 159` pages modulo 256, rounded down to the class's
+alignment, never more than a 64th of a region. No two small classes start on the same page
+in a full-size region, and the pages below an origin are never committed, so it costs
+address space only. The class from an address is the region table's as before; only the
+back end's slot arithmetic subtracts the origin, so the fast paths are unchanged.
+
+**Method.** Eleven jobs where a small heap spans many classes, run by `benchrun` with main
+and the change as two allocator builds, interleaved, under `scripts/measure` (`--both-l3`
+for the RPC jobs and mstress). A scratch patch to the runner counted raw events: in the
+workload's measured region for the Rust workloads, over the server's window for RPC, and for
+the whole process for the C programs. Per operation, medians of three rounds (first L3) or
+four (both L3s). Scratch builds first tested where the offset matters: whole pages over 16
+pages removed half to five sixths of the walks, over 256 pages all of them, and offsets of
+whole lines within one page none of them (espresso gained 2.7% from fewer L1 misses, which
+whole pages over 256 also give); lines also left `spawn` alone (above).
+
+| Job | Time | 4 KiB page walks per operation |
+|---|---:|---:|
+| churn live=10k small | −11.6% | 0.133 → 0.0001 |
+| espresso (preload) | −3.3% | 443k → 6.9k a run |
+| rpc echo c64 | −2.3% | 24.1 → 5.5 |
+| rpc log c64 | −1.2% | 99 → 71 |
+| cfrac (preload) | −1.0% | 8.9k → 1.5k a run |
+| churn live=100, map btree 1M, forkjoin t4, json 32Mi preload, mstress 8 | within ±1% (mstress −3.5% on wall time, cycles not) | level |
+| json 32Mi | +2.4% this session; −0.1 to +0.7% in three earlier ones | level |
+
+churn live=100 under main ran at 34 cycles/op in one of three runs, and 22.6 in the others
+and in every run of the change; L1 misses fell by more than half there too. rpc log, which
+was +0.5 to +1.7% in earlier sessions on an earlier build, is −1.2% here: noise. The smoke
+set (three rounds, on the first version of the change, which spread origins by bit
+reversal) is level but for tree depth=18, which runs at 37.4 or 39 to 40
+cycles/node in both builds from run to run (section 14). Cgroup peaks of the small-process
+probes (`bench/probes/memory/peaks.sh`: spawn, churn1k, pipe2, mpmc, forkjoin, btree, json,
+hmap; two rounds, the same first version) are within 0.4 MiB of main.
+
