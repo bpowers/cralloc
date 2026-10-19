@@ -61,7 +61,7 @@ mod verify;
 #[cfg(kani)]
 mod verify_slow;
 
-use self::host::{ClassHost, ClassState, Frontiers, Headers, RegionHeader};
+use self::host::{ClassHost, ClassState, Frontiers, Headers, Owners, RegionHeader};
 use crate::classes::{COUNT, Class};
 use crate::lined::{LINE, Lined};
 use crate::os::{Os, OsError};
@@ -102,6 +102,8 @@ pub struct State<O: Os> {
     headers: Lined<Headers>,
     /// Each region's frontier, for small classes (`host::Frontiers`).
     frontiers: Lined<Frontiers>,
+    /// EXPERIMENT: the regions of each cache domain (`host::Owners`).
+    owners: Lined<Owners>,
 }
 
 /// Bytes of free slots in the bitmaps believed to be resident, for small classes and large
@@ -225,7 +227,8 @@ const _: () = {
         + 5
         + lines(size_of::<[AtomicUsize; MAX_REGIONS]>())
         + lines(size_of::<[[u64; 2]; MAX_REGIONS]>())
-        + lines(size_of::<[u64; MAX_REGIONS]>());
+        + lines(size_of::<[u64; MAX_REGIONS]>())
+        + lines(size_of::<Owners>());
     assert!(
         size_of::<State<crate::os::linux::LinuxOs>>()
             == size_of::<[ClassState; COUNT]>() + LINE * groups
@@ -258,6 +261,7 @@ impl<O: Os> State<O> {
             run_sizes: Lined::new([const { AtomicUsize::new(0) }; MAX_REGIONS]),
             headers: Lined::new([const { RegionHeader::new() }; MAX_REGIONS]),
             frontiers: Lined::new([const { word::Atomic::zero() }; MAX_REGIONS]),
+            owners: Lined::new([const { [const { word::Atomic::zero() }; host::CLASS_WORDS] }; host::BACK_DOMAINS]),
         }
     }
 
@@ -350,6 +354,13 @@ impl<'a, O: Os> Back<'a, O> {
     /// The protocols' view of one class, if a slot of it fits in a region.
     #[inline]
     fn host(&self, class: Class) -> Option<ClassHost<'a, O>> {
+        self.host_in(class, None)
+    }
+
+    /// EXPERIMENT: [`Back::host`] for an operation of cache domain `domain`, whose searches
+    /// prefer that domain's regions and whose carves come from its carving region.
+    #[inline]
+    fn host_in(&self, class: Class, domain: Option<usize>) -> Option<ClassHost<'a, O>> {
         let state = self.state.classes.get(class.index() as usize - 1)?;
         let layout = state.layout.layout(self.space.plan(), class)?;
         Some(ClassHost::new(
@@ -358,6 +369,8 @@ impl<'a, O: Os> Back<'a, O> {
             &self.state.headers,
             &self.state.frontiers,
             layout,
+            &self.state.owners,
+            domain,
         ))
     }
 

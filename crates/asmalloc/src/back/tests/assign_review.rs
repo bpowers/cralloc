@@ -153,7 +153,7 @@ fn check(state: &State<Sim<Native>>, held: &[Held], round: u64) -> usize {
                     "round {round}: region {at} of {class:?} records a commit that did not \
                      happen ({grow:?})"
                 );
-                let carving = host.class.carving.load(SeqCst) == at as u32 + 1;
+                let carving = host.carving().load(SeqCst) == at as u32 + 1;
                 assert!(
                     grow.carved != 0 || carving,
                     "round {round}: region {at} was taken for {class:?} and left ({grow:?})"

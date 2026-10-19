@@ -45,7 +45,7 @@ const SLOTS: usize = MagazineSize::MAX.slots();
 
 /// Two magazines of the largest size, each aligned to that size, so that the first `n` slots of
 /// either are a magazine of `n` slots whatever the magazine size.
-#[repr(C, align(4096))]
+#[repr(C, align(8192))]
 struct Magazines([AtomicPtr<u8>; 2 * SLOTS]);
 
 const _: () = assert!(align_of::<Magazines>().is_multiple_of(MagazineSize::MAX.bytes()));

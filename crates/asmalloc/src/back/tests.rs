@@ -4007,8 +4007,7 @@ mod review_headers {
                 .replace(region, RegionTag::Unassigned, RegionTag::Class(class))
                 .unwrap();
             let carving = host
-                .class
-                .carving
+                .carving()
                 .load(core::sync::atomic::Ordering::SeqCst);
             assert_ne!(carving, region.index() as u32 + 1);
         }
@@ -4056,7 +4055,7 @@ mod review_headers {
                     }
                     .pack(),
                 );
-                host.class.carving.store(
+                host.carving().store(
                     region.index() as u32 + 1,
                     core::sync::atomic::Ordering::SeqCst,
                 );

@@ -3,7 +3,7 @@
 
 use super::layout::{Layout, MAX_LEVELS, Memo, WORD_BYTES};
 use super::tree::Host;
-use super::word::Atomic;
+use super::word::{Atomic, Word};
 use crate::lined::{LINE, Lined, lines};
 use crate::os::{HugePages, Os};
 use crate::space::{MAX_REGIONS, RegionId, Space};
@@ -12,6 +12,16 @@ use core::sync::atomic::AtomicU32;
 
 /// Words in a class's per-region summary: one bit per region.
 pub(crate) const CLASS_WORDS: usize = MAX_REGIONS / 64;
+
+/// EXPERIMENT (domain-affine back end): the cache domains the back end keeps apart. A small
+/// class has a carving region per domain, and a fill prefers free slots in its own domain's
+/// regions. Domains fold modulo this; 16 keeps the eight CPUs of the suite (0-3, 8-11) apart
+/// when every CPU is made a domain of its own.
+pub(crate) const BACK_DOMAINS: usize = 16;
+
+/// EXPERIMENT: which regions belong to each domain, one bit per region, by domain. Written when
+/// a region is assigned (and given back), read by a fill's search for its own domain's slots.
+pub(crate) type Owners = [[Atomic; CLASS_WORDS]; BACK_DOMAINS];
 
 /// What the back end keeps per class outside the regions: the two class levels of the summary
 /// tree, and the region being carved. All zero means no regions.
@@ -27,8 +37,9 @@ pub(crate) struct ClassState {
     /// The class levels of the summary tree: a bit per class word that may be non-zero, then
     /// a bit per region whose top word may be non-zero. One protocol writes them all.
     pub(crate) summary: Lined<Summary>,
-    /// The region carves come from, plus one; zero for none yet.
-    pub(crate) carving: Lined<AtomicU32>,
+    /// The region carves come from, plus one; zero for none yet. EXPERIMENT: one per domain
+    /// (`BACK_DOMAINS`); large classes and threads without a domain use domain 0's.
+    pub(crate) carving: Lined<[AtomicU32; BACK_DOMAINS]>,
 }
 
 /// A region's header: its `Grow` and `Hints` words (`layout`). All zero means nothing carved,
@@ -92,7 +103,11 @@ pub(crate) struct Summary {
 }
 
 const _: () = assert!(
-    size_of::<ClassState>() == LINE * (lines(size_of::<Memo>()) + lines(size_of::<Summary>()) + 1)
+    size_of::<ClassState>()
+        == LINE
+            * (lines(size_of::<Memo>())
+                + lines(size_of::<Summary>())
+                + lines(size_of::<[AtomicU32; BACK_DOMAINS]>()))
 );
 
 impl ClassState {
@@ -103,7 +118,7 @@ impl ClassState {
                 top: Atomic::zero(),
                 words: [const { Atomic::zero() }; CLASS_WORDS],
             }),
-            carving: Lined::new(AtomicU32::new(0)),
+            carving: Lined::new([const { AtomicU32::new(0) }; BACK_DOMAINS]),
         }
     }
 }
@@ -123,6 +138,11 @@ pub(crate) struct ClassHost<'a, O: Os> {
     pub(crate) headers: &'a Headers,
     pub(crate) frontiers: &'a Frontiers,
     pub(crate) layout: Layout,
+    /// EXPERIMENT: the regions of each domain.
+    pub(crate) owners: &'a Owners,
+    /// EXPERIMENT: the domain whose regions a search prefers and whose carving word carves;
+    /// `None` for no preference (carving in domain 0).
+    pub(crate) domain: Option<usize>,
 }
 
 impl<'a, O: Os> ClassHost<'a, O> {
@@ -133,6 +153,8 @@ impl<'a, O: Os> ClassHost<'a, O> {
         headers: &'a Headers,
         frontiers: &'a Frontiers,
         layout: Layout,
+        owners: &'a Owners,
+        domain: Option<usize>,
     ) -> Self {
         ClassHost {
             space,
@@ -140,7 +162,30 @@ impl<'a, O: Os> ClassHost<'a, O> {
             headers,
             frontiers,
             layout,
+            owners,
+            domain,
         }
+    }
+
+    /// EXPERIMENT: the domain this operation carves in, below `BACK_DOMAINS`.
+    #[inline(always)]
+    pub(crate) fn carving_domain(&self) -> usize {
+        self.domain.unwrap_or(0) % BACK_DOMAINS
+    }
+
+    /// EXPERIMENT: the carving word of this operation's domain.
+    #[inline(always)]
+    pub(crate) fn carving(&self) -> &'a AtomicU32 {
+        &self.class.carving[self.carving_domain()]
+    }
+
+    /// EXPERIMENT: the word of `owners` for `domain` that has `region`'s bit, and the bit.
+    #[inline(always)]
+    pub(crate) fn owner_bit(&self, domain: usize, region: usize) -> (&'a Atomic, u64) {
+        (
+            &self.owners[domain % BACK_DOMAINS][(region / 64) % CLASS_WORDS],
+            1 << (region % 64),
+        )
     }
 
     fn region_at(&self, region: RegionId, offset: usize) -> NonNull<u8> {
@@ -228,6 +273,12 @@ impl<O: Os> Host for ClassHost<'_, O> {
     #[inline(always)]
     fn class_top(&self) -> &Atomic {
         &self.class.summary.top
+    }
+
+    #[inline(always)]
+    fn preferred(&self, index: u32) -> Option<u64> {
+        let domain = self.domain?;
+        Some(self.owners[domain % BACK_DOMAINS][index as usize % CLASS_WORDS].load())
     }
 
     fn commit(&self, region: RegionId, offset: usize, len: usize) -> bool {

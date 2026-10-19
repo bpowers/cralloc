@@ -21,6 +21,13 @@ pub trait Source {
     /// ascending address order. Zero means there are none to be had.
     fn fill(&self, class: SmallClass, slots: &[AtomicPtr<u8>]) -> usize;
 
+    /// EXPERIMENT (domain-affine back end): [`Source::fill`] for a thread in cache domain
+    /// `domain`, which a source may use to prefer objects that domain freed.
+    fn fill_in(&self, class: SmallClass, slots: &[AtomicPtr<u8>], domain: usize) -> usize {
+        let _ = domain;
+        self.fill(class, slots)
+    }
+
     /// Takes back free objects of `class`, each one this source handed out, from the object
     /// slots of a magazine this thread holds.
     fn take_back(&self, class: SmallClass, objects: &[AtomicPtr<u8>]);

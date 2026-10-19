@@ -173,7 +173,10 @@ impl<'a, O: Os, R: Routines, S: Source> Cache<'a, O, R, S> {
     fn fill(&self, class: SmallClass, magazine: &Magazine) -> usize {
         let slots = magazine.objects();
         let capacity = slots.len();
-        let level = self.source.fill(class, slots).min(capacity);
+        let level = self
+            .source
+            .fill_in(class, slots, self.here().index())
+            .min(capacity);
         if level < capacity
             && let Some(filled) = slots.get(capacity - level..)
         {

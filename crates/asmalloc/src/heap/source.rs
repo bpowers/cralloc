@@ -15,6 +15,10 @@ impl<O: Os> Source for Back<'_, O> {
         Back::fill(self, class, &mut Descending(slots))
     }
 
+    fn fill_in(&self, class: SmallClass, slots: &[AtomicPtr<u8>], domain: usize) -> usize {
+        Back::fill_in(self, class, &mut Descending(slots), Some(domain))
+    }
+
     fn take_back(&self, class: SmallClass, objects: &[AtomicPtr<u8>]) {
         // SAFETY: HEAP-SOURCE-01.
         unsafe { self.launder(class, objects) };

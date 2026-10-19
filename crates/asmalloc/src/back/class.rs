@@ -150,7 +150,19 @@ impl<'a, O: Os> Back<'a, O> {
     /// asked means the heap is out of address space or the OS refused memory; zero means not
     /// even one slot could be had.
     pub fn fill<S: Sink + ?Sized>(&self, class: SmallClass, out: &mut S) -> usize {
-        let Some(host) = self.host(class.class()) else {
+        self.fill_in(class, out, None)
+    }
+
+    /// EXPERIMENT (domain-affine back end): [`Back::fill`] for a thread of cache domain
+    /// `domain`: free slots in that domain's regions first, then in any region of the class,
+    /// and carves from the domain's own carving region only when the class has none free.
+    pub fn fill_in<S: Sink + ?Sized>(
+        &self,
+        class: SmallClass,
+        out: &mut S,
+        domain: Option<usize>,
+    ) -> usize {
+        let Some(host) = self.host_in(class.class(), domain) else {
             return 0;
         };
         let len = out.positions();
@@ -1181,7 +1193,7 @@ impl<'a, O: Os> Back<'a, O> {
     /// exhausted. Returns the region, the first slot and the count.
     fn carve(&self, host: &ClassHost<'a, O>, class: Class, n: u32) -> Option<(RegionId, u32, u32)> {
         loop {
-            let seen = host.class.carving.load(SeqCst);
+            let seen = host.carving().load(SeqCst);
             if seen != 0 {
                 let Some(region) = self.space.plan().region(seen as usize - 1) else {
                     self.abort("a class's carving region is outside the heap");
@@ -1209,7 +1221,7 @@ impl<'a, O: Os> Back<'a, O> {
         let layout = host.layout();
         let (start, end) = layout.fixed_commit();
         for region in plan.regions() {
-            if host.class.carving.load(SeqCst) != seen {
+            if host.carving().load(SeqCst) != seen {
                 return true;
             }
             if self.state.table.get(region) != RegionTag::Unassigned {
@@ -1238,12 +1250,17 @@ impl<'a, O: Os> Back<'a, O> {
                 .walk
                 .top
                 .fetch_max(region.index() as u32 + 1, SeqCst);
+            // EXPERIMENT: the region is its carving domain's from before anything can be freed
+            // into it, so a search that prefers that domain finds its free slots.
+            let (owner, bit) = host.owner_bit(host.carving_domain(), region.index());
+            owner.fetch_or(bit);
             if self
                 .state
                 .table
                 .replace(region, RegionTag::Unassigned, RegionTag::Class(class))
                 .is_err()
             {
+                owner.fetch_and(!bit);
                 continue;
             }
             if let Some(committed) = committed {
@@ -1259,14 +1276,15 @@ impl<'a, O: Os> Back<'a, O> {
             self.prepare(host, region, huge);
             let published = region.index() as u32 + 1;
             if host
-                .class
-                .carving
+                .carving()
                 .compare_exchange(seen, published, SeqCst, SeqCst)
                 .is_ok()
             {
                 return true;
             }
             self.unprepare(host, region, huge);
+            // Before the region can be taken again, possibly by the same domain.
+            owner.fetch_and(!bit);
             let _ =
                 self.state
                     .table

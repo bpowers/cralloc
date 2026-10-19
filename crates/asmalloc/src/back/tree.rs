@@ -97,6 +97,15 @@ pub(crate) trait Host {
     /// The class's top word, with a bit per class word.
     fn class_top(&self) -> &Self::W;
 
+    /// EXPERIMENT (domain-affine back end): the regions under class word `index` that a search
+    /// from the top prefers, one bit each, or `None` for no preference. A search looks in
+    /// these first and in the others only if they have nothing free.
+    #[inline(always)]
+    fn preferred(&self, index: u32) -> Option<u64> {
+        let _ = index;
+        None
+    }
+
     /// Makes `len` bytes at `offset` in a region writable. Both are page multiples.
     fn commit(&self, region: RegionId, offset: usize, len: usize) -> bool;
 
@@ -310,6 +319,70 @@ pub(crate) fn claim<H: Host>(host: &H, n: u32, keep: bool) -> Option<Taken> {
 /// each word, or `None` if the class has nothing free. A summary word found empty on the way
 /// has a stale bit: it is cleared, and the search starts again.
 fn from_top<H: Host>(host: &H) -> Option<Spot> {
+    // EXPERIMENT: the preferred regions first, then any.
+    if host.preferred(0).is_some()
+        && let Some(spot) = from_top_preferred(host)
+    {
+        return Some(spot);
+    }
+    from_top_any(host)
+}
+
+/// EXPERIMENT: [`from_top`] restricted to the regions the host prefers: the lowest leaf word
+/// with free slots in the lowest preferred region that has any, or `None` if none has. Stale
+/// bits it meets are cleared as [`from_top_any`] clears them.
+fn from_top_preferred<H: Host>(host: &H) -> Option<Spot> {
+    'search: loop {
+        let mut top = host.class_top().load();
+        while top != 0 {
+            let class_word = top.trailing_zeros();
+            top &= top - 1;
+            let regions = host.class_word(class_word).load();
+            if regions == 0 {
+                clear(host, Spot::class_word(host, class_word));
+                continue 'search;
+            }
+            let mine = regions & host.preferred(class_word).unwrap_or(u64::MAX);
+            if mine == 0 {
+                continue;
+            }
+            let Some(region) = host.region((class_word * BITS + mine.trailing_zeros()) as usize)
+            else {
+                host.abort("a class summary bit names a region outside the heap")
+            };
+            match descend(host, region) {
+                Some(spot) => return Some(spot),
+                None => continue 'search,
+            }
+        }
+        return None;
+    }
+}
+
+/// EXPERIMENT: from a region's top word down through the lowest set bit of each word to a leaf
+/// word; `None` if a word on the way was empty, whose stale bit it then cleared.
+fn descend<H: Host>(host: &H, region: RegionId) -> Option<Spot> {
+    let mut spot = Spot {
+        region,
+        level: host.layout().height(),
+        index: 0,
+    };
+    while spot.level > 0 {
+        let seen = spot.word(host).load();
+        if seen == 0 {
+            clear(host, spot);
+            return None;
+        }
+        spot = Spot {
+            level: spot.level - 1,
+            index: spot.index * BITS + seen.trailing_zeros(),
+            ..spot
+        };
+    }
+    Some(spot)
+}
+
+fn from_top_any<H: Host>(host: &H) -> Option<Spot> {
     let height = host.layout().height();
     'search: loop {
         let top = host.class_top().load();
