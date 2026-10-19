@@ -618,7 +618,9 @@ Five rules stand behind the table.
   and past the size of a huge page, with the last piece it wrote at least half full of
   data, is being appended to. The part of its slot up to the size it asked for is marked
   for as long as the block holds it; its free returns the slot whole and takes the mark
-  back. A
+  back. A block that grows in place over a huge page it had only started has that page
+  returned and its first bytes written back, so that the page faults whole instead of a
+  small page at a time. A
   large block allocated at its size in one call gets no huge pages: it is often touched
   sparsely, each page touched would cost 2 MiB, and the kernel later fills in any marked
   range that is touched at all.
