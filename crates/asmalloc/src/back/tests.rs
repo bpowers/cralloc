@@ -3171,6 +3171,9 @@ mod charge_review;
 /// region: racing assignments, and every region looked at afterwards.
 mod assign_review;
 
+/// Review of `Back::unspill`: the huge page a growing block returns so that it faults whole.
+mod unspill_review;
+
 /// Review of the move of the region headers into the back end's state, with the leaf bitmap
 /// last in the block (`host::RegionHeader`, `layout`).
 mod review_headers {
