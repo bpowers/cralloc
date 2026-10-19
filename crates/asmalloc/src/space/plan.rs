@@ -25,6 +25,13 @@ use crate::classes::{Class, MAX_SMALL_SIZE};
 /// and over 256 they went.
 pub const ORIGIN_SPAN_PAGES: usize = 256;
 
+/// The part of a region an origin lies in: under `region_size / ORIGIN_SHARE`. A 4 GiB region
+/// of the design is never near it (its origins span 1 MiB). It shapes the regions of a heap
+/// that got less than its full reservation, which lose at most a sixteenth of a region's slots
+/// in the class with the largest origin, and the simulator's small regions, where it gives
+/// origins of a few pages, so that the tests that run there see origins too.
+pub const ORIGIN_SHARE: usize = 16;
+
 /// The step between successive classes' origins, in pages: the odd number nearest the span
 /// over the golden ratio, which keeps successive multiples far apart. A bit-reversed index,
 /// tried first, put the 32 KiB class on the 128-byte class's page once rounded to its
@@ -170,9 +177,10 @@ impl Plan {
     /// a golden-ratio step, so that classes of neighbouring sizes, which programs tend to use
     /// together, lie far apart, and no two small classes start on the same page however the
     /// origin is rounded (`tests::small_classes_start_on_pages_of_their_own`). It is a multiple
-    /// of the class's alignment, so every slot keeps the alignment the class gives, and it is
-    /// less than a sixty-fourth of a region, so the simulator's small geometries keep almost
-    /// all their slots. The pages below it are never committed: it costs address space only.
+    /// of the class's alignment, so every slot keeps the alignment the class gives, and it lies
+    /// in the first [`ORIGIN_SHARE`]th of a region: far inside the span in the design's
+    /// regions, and in the simulator's small ones a few pages, so that the tests that run there
+    /// see origins too. The pages below it are never committed: it costs address space only.
     #[inline(always)]
     pub const fn slot_origin(self, class: Class) -> usize {
         if !class.is_small() {
@@ -180,11 +188,8 @@ impl Plan {
         }
         let page = self.geometry.page_size();
         let span = ORIGIN_SPAN_PAGES * page;
-        let span = if span < self.region_size() / 64 {
-            span
-        } else {
-            self.region_size() / 64
-        };
+        let share = self.region_size() / ORIGIN_SHARE;
+        let span = if span < share { span } else { share };
         let pages = span / page;
         let turn = class.index() as usize * ORIGIN_STEP % ORIGIN_SPAN_PAGES;
         let origin = (turn * pages / ORIGIN_SPAN_PAGES) * page;
@@ -426,8 +431,8 @@ mod tests {
             let page = plan.geometry().page_size();
             let mut seen = std::collections::BTreeMap::new();
             // A heap that got less than its full reservation has smaller regions and spreads
-            // its origins over a 64th of one; there two classes may share a start.
-            let spread = plan.region_size() / 64 >= ORIGIN_SPAN_PAGES * page;
+            // its origins over a share of one; there two classes may share a start.
+            let spread = plan.region_size() / ORIGIN_SHARE >= ORIGIN_SPAN_PAGES * page;
             for class in Class::all().filter(|c| c.is_small() && spread) {
                 let first = plan.slot_origin(class) / page % ORIGIN_SPAN_PAGES;
                 if let Some(other) = seen.insert(first, class) {
