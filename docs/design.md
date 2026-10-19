@@ -417,7 +417,16 @@ the depot, so it never waits. The free side is symmetric with an empty magazine.
 Each CPU keeps a few spare full and empty magazines per class, in stacks whose heads live
 in the cold part of the slab and are updated by single-store routines. A thread that
 oscillates around a magazine boundary swaps locally without touching shared state. The
-spares of one CPU are limited by a byte budget.
+spares of one CPU are limited by a byte budget, and each class by a small fixed share of it.
+
+A CPU may keep spares of a class past that share, as stock, where sending them away costs
+time and brings them straight back: a thread that frees a burst far larger than its spares
+and then allocates it again, on a depot stack that other CPUs are using. Sending a magazine
+to the depot because the spares are full marks the class, and taking one of that kind back
+earns the class room for one more spare if either trip had a compare-and-swap fail. A flow
+that goes one way never takes back what it sent, and an exchange on a quiet stack is cheap,
+so neither earns any. A CPU's stock is bounded by the byte budget less what the fixed
+shares can park, so its spares never hold more than the budget.
 
 Every step is one commit. Between steps all shared state is valid and whatever the thread
 holds is private to it. This is what makes the slow path safe to interrupt with a signal
@@ -560,6 +569,7 @@ rule that returns it (`docs/research/memory.md` has the measurements behind them
 | The tail of a large block that shrinks in place; the pages behind a move made in pieces | The resize (see "Large objects") | At once |
 | Objects in a magazine that stays loaded | A slow path of the same CPU launders it | Once it has been loaded for an interval |
 | Objects in a CPU's full spares | That CPU's sweep launders one magazine and sends the rest to the depot | Once an interval |
+| Objects in a CPU's stock | The sweep takes the depth not needed during an interval off the class's room, and the stock itself with the full spares; the idle drain takes it with the slab | Once an interval |
 | Objects in a depot stack | A heartbeat launders a magazine from the shared stack. Every stack sheds what it did not need, and each periodic look visits every stack of one other domain whose own CPUs have not looked this interval, the domains in rotation over those that hold magazines, so a domain that goes quiet sheds within a few intervals | While the shared stack is over its target, and for the depth a stack did not need during an interval |
 | Objects in steady circulation | The free that retires a full magazine launders it instead | One retirement in every few |
 | The slab of a CPU the process no longer runs on | The idle drain sends its magazines to the depot (see "Process lifecycle") | After an interval with no slow path there |
