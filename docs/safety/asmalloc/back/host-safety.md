@@ -18,15 +18,17 @@ reach a host only from:
 A class never gives a region up. The only tag change away from `Class(class)` is `assign`
 reverting a region it took but did not publish, which no other thread has named.
 
-## BACK-HOST-01: `at.as_ref()` in `ClassHost::meta`
+## BACK-HOST-01: `&*at` in `ClassHost::meta`
 
-**Preconditions of `NonNull::as_ref`.** `at` is aligned for `Atomic`, points to a live,
-initialized `Atomic` for the lifetime of the returned reference (the borrow of `self`), and
-nothing accesses that memory in a way that conflicts with a shared reference.
+**Preconditions of dereferencing `at` for a shared reference.** `at` is non-null and aligned for
+`Atomic`, points to a live, initialized `Atomic` for the lifetime of the returned reference (the
+borrow of `self`), its provenance covers the word, and nothing accesses that memory in a way
+that conflicts with a shared reference.
 
 **Proof.**
 
-1. *In bounds.* `at = metadata(region) + 8 * word`. Callers pass only word numbers that the
+1. *In bounds.* `at = metadata(region) + 8 * word`, made by `Space::metadata_at(region, 8 *
+   word)`. Callers pass only word numbers that the
    layout names: `tree_word(level, index)` with `index` below that level's count, for a
    large class `header_word()` and the word after it (`grow` and `hints`, words 0 and 1),
    `clean_word(w)` with `w` below the clean count, `zero_word(w)`
@@ -40,15 +42,17 @@ nothing accesses that memory in a way that conflicts with a shared reference.
    page of a slot below the watermark) or from a summary bit that a walk from such a word set
    (summary and leaf words reached in a descent). `Space::metadata(region)` is the region's
    block, `metadata_size` bytes inside the reservation (`space::verify`,
-   `plans_keep_objects_metadata_and_magazines_apart`); it checks the region against the plan
-   and adds the region's offset to the first block's address, which `Space::new` works out
-   once from the plan (`Plan::metadata_start`, the same sum `Plan::metadata_offset` makes).
-   `ClassHost::block` keeps the last block it got from `Space::metadata`, with the region it
-   asked for, and hands it out again only for that same region, so `metadata(region)` is
-   always the block `Space::metadata` gave for `region`. The kept pair lives in the
-   `ClassHost`, which belongs to one operation on one thread's stack, and the space it came
-   from is the host's own, which never changes.
-2. *Aligned.* The metadata block starts on a page boundary and the offset is a multiple of 8.
+   `plans_keep_objects_metadata_and_magazines_apart`). `Space::metadata_at` checks the region
+   against the plan, as `Space::metadata` does, and adds the region's offset
+   (`region << metadata_shift`) and then `offset` to the first block's address, which
+   `Space::new` works out once from the plan (`Plan::metadata_start`, the same sum
+   `Plan::metadata_offset` makes). The additions are wrapping, but with the region checked and
+   the word inside the block they stay inside the reservation, so they never wrap, and the
+   result is exactly the address `Space::metadata(region)` plus the offset gives.
+   `wrapping_byte_add` keeps the provenance of the first block's pointer, which is the
+   reservation's.
+2. *Non-null and aligned.* The address lies inside the reservation, which does not contain
+   zero. The metadata block starts on a page boundary and the offset is a multiple of 8.
    `Atomic` is `#[repr(transparent)]` over `AtomicU64`, alignment 8.
 3. *Accessible.* The word is committed before any thread forms a reference to it:
    - The fixed part is committed by `assign` before its compare-and-swap puts this class's
@@ -61,13 +65,17 @@ nothing accesses that memory in a way that conflicts with a shared reference.
      summary bits. A carve commits the leaf words of every slot starting below the new commit
      frontier (`Layout::leaf_commit`, proved in `leaf_commits_cover_the_committed_slots`) before
      its compare-and-swap publishes that frontier, and the watermark never passes the frontier
-     (both are in the region's one `Grow` word, kept outside the block in `State::headers`
-     and reached through `grow`, which needs no `unsafe`; a carve advances the watermark only
-     when the frontier covers the new slots). A small class's slots start at its origin
-     (`Plan::slot_origin`, whole pages): the pages below it hold no slot and are never
-     committed, so the leaf words a frontier covers start with the first slot past the origin,
-     and the harness, run on the layouts with their origins, covers that. `validate` checks
-     `slot < carved` before `release`; `purge_unit` looks only at slots below the watermark (`unit_below`); a descent reaches a
+     (both are in the region's one `Grow` word, reached through `grow`: for a small class it
+     is kept outside the block in `State::headers` and needs no `unsafe`; for a large class it
+     is word 0 of the block, in the fixed part committed before the region is tagged, and
+     reached through `meta` as any other word of it; a carve advances the watermark only when
+     the frontier covers the new slots). A large class's leaf bitmap is in that fixed part too,
+     so every leaf word of a large class is committed whatever the watermark. A small class's
+     slots start at its origin (`Plan::slot_origin`, whole pages): the pages below it hold no
+     slot and are never committed, so the leaf words a frontier covers start with the first
+     slot past the origin, and the harness, run on the layouts with their origins, covers
+     that. `validate` checks `slot < carved` before `release`; `purge_unit` looks only at
+     slots below the watermark (`unit_below`); a descent reaches a
      leaf word only through a summary bit, and a summary bit is set only by `tree::up`, which
      starts at a leaf word that was just freed into, hence below the watermark.
 4. *Live.* The reservation is published by the `SpaceCell` that `State` owns, and only that

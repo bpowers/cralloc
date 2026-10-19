@@ -1303,7 +1303,146 @@ pipeline, the mixed exchange, mpmc and the mixed churn the same within 2%, and t
 the same within 0.2 MiB; `worst.sh` the same, its phase change 0.9 MiB higher eight seconds
 after.
 
-## Moving a dense block in whole pieces
+## The cost of a large block, by cause
+
+2026-10-19, from main `a92d51a`. Where the cycles of one large allocation and free go, alone
+(`largepair 64Ki+1Mi`) and across two threads (`pipeline t2 sizes=large objects=1M
+inflight=512`, 4 to 256 KiB objects, half of them 32 KiB or more and so large), what was cut,
+and what is left.
+
+**Method.** Cycles, instructions and lines taken from another core
+(`ls_dmnd_fills_from_sys.local_ccx`) from `perf stat`; where they go from `perf record` of
+cycles and of that event (a sample lands one instruction past its cause, read off the
+disassembly); instruction counts by source line from callgrind with `--dump-instr=yes` (no
+rseq under valgrind, so its heartbeat counts are not the real ones). Variants built by hand,
+interleaved in random order, three to five runs each on CPUs 0-1 or 2 under the measurement
+lock, each run after half a second of spinning on CPU 3 (below). The before/after rows are
+`benchrun`, five rounds, against `a92d51a` built as a second allocator.
+
+**The pipeline's spread is the clock, not the allocator.** Over the ten rounds of the
+`a92d51a` session the pipeline took 62 ns in seven and 79 to 81 ns in three, at the same
+cycles per allocation (700 to 711) in all ten: the slow rounds ran at 4.4 GHz instead of 5.7.
+Every allocator shows it, at random rounds (tcmalloc per CPU in three, tcmalloc per thread in
+two), and the longer jobs nearly always run at the lower clock. What picks the clock is
+whether the package was busy just before the run. Run after a pause of 0.2 s or more, the
+job ran at 4.39 GHz for all of its 80 ms, twelve runs out of twelve; run back to back, or after
+half a second of spinning on any core, of either L3 (CPU 2, or CPU 14), it ran at 5.7 GHz,
+nine out of nine; 50 ms of spinning was not enough. So a short job's nanoseconds depend on
+what ran on the machine in the second before it, while its cycles do not. Comparisons below
+are in cycles; a session that ranks short jobs by time should warm the package before each
+run, or rank them by cycles.
+
+### Alone: `largepair`
+
+Per allocation and free, cycles and instructions from `perf stat`, atomic read-modify-write
+instructions counted in the code path:
+
+| | `a92d51a` | now | floor |
+|---|---:|---:|---:|
+| cycles | 379 | 271 | about 140 |
+| instructions | 1,630 | 1,290 | about 300 |
+| atomic read-modify-writes | 8 | 4 | 4 |
+| lines from other cores, system calls, page faults | 0 | 0 | 0 |
+| ns (`benchrun`, five rounds) | 66.6 | 48.2 | |
+| cgroup peak, MiB | 0.8 | 0.8 | |
+
+tcmalloc takes 61.6 ns (per thread) and 66.3 (per CPU) in the same session, glibc 8.
+
+The floor is what this design must do: a claim is a walk down the class's summary words to a
+leaf word and one compare-and-swap there, a read of the slot's zero and clean bits and a write
+of its size word, and the retained count lowered by what the slot held; a free finds the slot
+from the address (a region-table load, a multiply, the stagger and watermark checks), counts
+its pages that are not clean, sets its bit with one atomic OR, looks at the summary words
+above, and raises the retained count. Four atomic instructions, each about 20 cycles and
+serialized with the others, and a few hundred instructions.
+
+The four that were above the floor:
+
+- The size word was stored sequentially consistently, which is an `xchg`; only the slot's
+  holder writes or reads it, so a release store does.
+- The activity counter that a large allocation or free bumps for the idle check was a locked
+  add, twice per pair; it is a hint, and a load and a store do.
+- The free of a slot whose leaf word was empty (in this loop, every free) set the summary bit
+  above it without looking, an atomic OR of a bit that a large class's claims leave set. The
+  single-slot release now looks first at every level, the one above a summary word its own OR
+  found empty included, on a tree whose claims keep their bits; `tla/SummaryLookUp.tla`
+  models that step.
+
+The instructions that went: each metadata word was reached through a block address cached in
+the class's host, with saturating arithmetic and a compare at every access (100 instructions a
+claim); the claim counted the slot's clean pages in one pass and cleared those under the block
+in a second, and counted bits without a population-count instruction, which the baseline
+instruction set lacks, though a slot's clean pages are one run nearly always (100 more); and
+the claim's tail worked out the class size and the slot's address again.
+
+What is left above the floor is about a thousand instructions of layering, none of it large
+alone: per allocation about 500 in the claim (the class's layout unpacked from its memo, the
+walk's spot arithmetic, the stagger, the usable size), 200 in the heap above it (`place`, the
+start check, the grant), and per free about 450. A large path written as one function over a
+region's metadata block would come near the floor; it was not done here, since the job is
+ahead of every incumbent already and the pipeline below is not bound by instructions.
+
+### Across threads: the pipeline
+
+Cycles per allocation over both threads (the faster thread spins), and lines one core took
+from the other:
+
+| | `a92d51a` | now | tcmalloc per thread | tcmalloc per CPU |
+|---|---:|---:|---:|---:|
+| cycles per allocation | 702 | 656 | 402 | 459 |
+| lines from the other core, per allocation | 4.9 | 4.0 | | |
+| cgroup peak, MiB | 2.9 | 2.8 | 3.8 | 4.2 |
+
+Of the 0.9 lines cut, 0.7 came from the retained count. It was one word, raised by every free
+and lowered by every claim, so in the pipeline its line went to the other thread twice per
+large object, and every heartbeat read it to decide whether a decay pass could start, which
+took the line from whichever thread had just written it. It is now two tallies that only grow,
+on lines of their own, one for what is counted in (frees, launders) and one for what is
+counted out (claims, fills); and a heartbeat reads the clock to decide whether a pass is due,
+reading the tallies only when one is. A due pass that finds nothing retained ends at once, so
+the next interval's heartbeats wait again. Separating the two tallies by 128 bytes as well, in
+case the L2's adjacent-line prefetcher fetched one with the other, changed nothing measurable.
+
+Where the 656 cycles go. The two threads take turns being the slower one (in a profile with
+call stacks, a fifth of the producer's samples were waits on a full ring and an eighth of the
+consumer's on an empty one), so a cut on one side alone shows only in part. The producer's
+time, which is the larger: half in large claims, a third in the small classes' magazine
+exchanges, a seventh in the workload's own work. Within a large claim, two thirds of the
+samples are the leaf word's compare-and-swap, the load of the summary word on the leaf's line
+before it, and the counted-out tally's add after it: the waits for a line the consumer has just
+written. The consumer's large free is likewise mostly its `lock bts` on the same line.
+
+The floor for this design is set by those lines. A large slot freed on one thread and claimed
+on another sets a bit in a leaf word that the claimer must then read and change, and the
+lowest-address-first claim keeps every live slot of a class in one or two leaf words, so each
+large object moves its leaf word's line twice, once each way, about 100 cycles a move within
+an L3, plus the two threads' tally adds. The small half of the mix, 4 to 32 KiB, goes through
+magazines, and from 12 KiB up a magazine has four slots and holds two objects, so every
+second object is an exchange with the depot: a full magazine popped from the stack the other
+thread pushed it on, an empty one pushed back, the stack heads and the magazine's link moving
+between the cores each time. Neither is bookkeeping that can be cut by construction; both are
+the price of handing objects across threads one at a time, or two at a time. tcmalloc gets
+402 cycles by caching objects up to 256 KiB per thread or per CPU and moving them in batches.
+
+Changes that were tried and did not help: taking the leaf line exclusive before reading it (a
+compare-and-swap of zero for zero ahead of the claim's load) cost the single-threaded job 16
+cycles and gained nothing across threads; giving a large class's leaf bitmap a pair of lines of
+its own, apart from its summary words, changed nothing, since the summary word and the leaf
+come over together.
+
+**Options that park memory** (not built; measured as throwaway builds on top of the cuts
+above, pipeline cycles per allocation, three runs):
+
+| Magazines of the 12 to 32 KiB classes | cycles | what more a CPU may park |
+|---|---:|---|
+| 4 slots, 2 objects (now) | 656 | |
+| 8 slots, 6 objects | 530 | 4 more objects in each of the seven classes: up to 584 KiB with all loaded |
+| 16 slots, 14 objects | 466 | 12 more in each, and 8 more in the 8 and 10 KiB classes: up to 1.9 MiB with all loaded |
+
+The 8-slot floor is the one measured in "Lines between CPUs" above (85 to 75 ns then), with
+the same memory cost. Reaching tcmalloc's 402 would also need the large objects batched: a
+per-CPU cache of 32 to 256 KiB slots, or large classes as magazine classes, which the design
+has turned down for their memory.
 
 2026-10-18, at main `a763ad7`. A move of a large block (`Back::move_large_with`) tested and
 copied each 4 KiB page of a piece on its own, so that all-zero pages could be left out, and
@@ -2037,6 +2176,56 @@ no advice. sh8bench through the preload library, which allocates no large blocks
 after (full session 0.60). Cgroup peaks from `bench/probes/memory/peaks.sh` agree within 0.2
 MiB before and after on every job it runs (pipelines, churn, maps at 200k, tree 18, json 8 MiB,
 both vecgrows).
+
+**After review (2026-10-19).** As first merged, the change cost time and memory in two cases
+the jobs above never reach, since a single vector sits in slot 0, which has no stagger:
+
+- It returned the page on arithmetic alone. A staggered buffer grown and freed again and
+  again lands in the slot it was kept in (the budget for kept grown blocks), where the huge
+  page is resident already; the growth threw it away and faulted it back, one huge fault a
+  doubling, and with transparent huge pages off for the process 2 MiB dropped and 511 small
+  faults. Now the OS is asked (`Os::resident`, `mincore`) whether any page of the huge page
+  past the first is resident, and the page is returned only if none is. The clean bits cannot
+  answer this: an advised block's extent is rounded up to a huge page, so they are cleared
+  over the page before the program writes it.
+- It set the page aside one huge page on, which for any doubling from two huge pages up lies
+  inside the range just advised, so the copy faulted a huge page the program had not reached.
+  Now it goes in the first page of the huge page holding the new end, which the rounded-down
+  advice never covers.
+
+With transparent huge pages off, a growth in a fresh slot still returns one small page and
+faults it back, for nothing; the allocator does not know the setting, and that costs one call
+and one fault a doubling.
+
+The review's probe (`crates/asmalloc-preload/tests/programs/unspill_probe.c`), preloaded,
+CPU 2, the builds interleaved, three rounds that agreed within a few percent; one buffer in
+slot 1 grown by doubling from 1 MiB and freed, eight repetitions; the sums over repetitions 2
+to 8 of faults inside `realloc` (huge ones in brackets), resident memory added inside
+`realloc`, and TSC ticks of `realloc` and fill together. "before unspill" is `a92d51a`, "as
+merged" main `16bf1b1`, "fixed" this change.
+
+| To, slot | THP | before unspill | as merged | fixed |
+|---|---|---:|---:|---:|
+| 8 MiB, kept slot | on | 0, +0 MiB, 100.5M | 14 [14], +0 MiB, 101.3M | 0, +0 MiB, 100.3M |
+| 8 MiB, kept slot | off | 0, 100.4M | 14 and 7,154 in the fill, 111.4M | 0, 100.5M |
+| 16 MiB, fresh slot | on | 0, 250.4M (10,780 in the fill) | 42 [35], +70 MiB, 237.0M | 42 [21], +42 MiB, 237.2M |
+| 16 MiB, fresh slot | off | 0, 270.5M | 42, 269.6M | 42, 270.7M |
+
+In a fresh slot every repetition now faults three huge pages inside `realloc`, each the one the
+block had begun, instead of five; with the slot kept, nothing, as before the change. The
+`mincore` call costs about 2.5k ticks a growth. No run lost a byte.
+
+`vecgrow`, by hand as above, five interleaved rounds, cycles an element, faults and huge-page
+faults; the 2-vector jobs keep vector 1 in staggered slots that are kept between repetitions:
+
+| Job | before unspill | as merged | fixed |
+|---|---:|---:|---:|
+| vecgrow 64x4Mi | 6.70, 184,897 [260] | 5.02, 56,377 [512] | 4.98, 56,376 [512] |
+| vecgrow vecs=2 max=4Mi reps=1000 | 0.508, 1,355 [3] | 0.589, 1,843 [1,003] | 0.506, 844 [4] |
+| vecgrow vecs=2 max=8Mi reps=500 | 1.516, 514,342 [1,004] | 0.623, 4,341 [2,004] | 0.625, 4,342 [2,004] |
+
+The machine was busier than in the session above, so 64x4Mi reads higher in every column;
+peaks are the same in all three builds (278.8, 13.7 and 21.4 MiB).
 
 **What is left on vecgrow 64x4Mi.** 56K small faults on the outgrown 1 MiB blocks, and 512
 huge-page faults, two per vector and repetition, all of it faulting memory back that was

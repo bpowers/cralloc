@@ -7,7 +7,6 @@ use super::word::Atomic;
 use crate::lined::{LINE, Lined, lines};
 use crate::os::{HugePages, Os};
 use crate::space::{MAX_REGIONS, RegionId, Space};
-use core::cell::Cell;
 use core::ptr::NonNull;
 use core::sync::atomic::AtomicU32;
 
@@ -104,15 +103,12 @@ impl ClassState {
 /// regions it found through this class's summary tree, its carving word, or a region-table
 /// lookup that returned this class.
 ///
-/// A `ClassHost` lives for one operation, on the stack of the thread doing it. It remembers the
-/// metadata block of the last region it was asked about (`block`), since an operation reaches
-/// many words of one region and working out a block's address costs more than using it.
+/// A `ClassHost` lives for one operation, on the stack of the thread doing it.
 pub(crate) struct ClassHost<'a, O: Os> {
     pub(crate) space: Space<'a, O>,
     pub(crate) class: &'a ClassState,
     pub(crate) headers: &'a Headers,
     pub(crate) layout: Layout,
-    pub(crate) block: Cell<Option<(RegionId, NonNull<u8>)>>,
 }
 
 impl<'a, O: Os> ClassHost<'a, O> {
@@ -128,7 +124,6 @@ impl<'a, O: Os> ClassHost<'a, O> {
             class,
             headers,
             layout,
-            block: Cell::new(None),
         }
     }
 
@@ -138,24 +133,12 @@ impl<'a, O: Os> ClassHost<'a, O> {
             .map_addr(|addr| addr.saturating_add(offset))
     }
 
-    /// The metadata block of `region`, as [`Space::metadata`] gives it: from the last one
-    /// worked out if it is this region's, so that the region is checked once per operation, not
-    /// once per word.
+    /// Byte `offset` of `region`'s metadata block, as [`Space::metadata`] gives the block.
+    /// Plain pointer arithmetic, worked out afresh each time: an operation reaches a handful of
+    /// words, and keeping the last block it found cost more than finding it.
     #[inline(always)]
-    fn block(&self, region: RegionId) -> NonNull<u8> {
-        if let Some((seen, block)) = self.block.get()
-            && seen == region
-        {
-            return block;
-        }
-        let block = self.space.metadata(region);
-        self.block.set(Some((region, block)));
-        block
-    }
-
-    fn meta_at(&self, region: RegionId, offset: usize) -> NonNull<u8> {
-        self.block(region)
-            .map_addr(|addr| addr.saturating_add(offset))
+    fn meta_at(&self, region: RegionId, offset: usize) -> *mut u8 {
+        self.space.metadata_at(region, offset)
     }
 }
 
@@ -180,7 +163,7 @@ impl<O: Os> Host for ClassHost<'_, O> {
         // SAFETY: BACK-HOST-01 in docs/safety/asmalloc/back/host-safety.md. The word lies in the
         // region's metadata block, is 8-aligned, and is committed; it is only ever accessed
         // atomically; the borrow of the OS in `space` keeps the memory alive.
-        unsafe { at.as_ref() }
+        unsafe { &*at }
     }
 
     #[inline(always)]
@@ -197,7 +180,7 @@ impl<O: Os> Host for ClassHost<'_, O> {
         // SAFETY: BACK-HOST-03 in docs/safety/asmalloc/back/host-safety.md. The words are the
         // first `count` of one level of the region's tree, which lies in its metadata block,
         // and the caller knows each to be committed; they are only ever accessed atomically.
-        unsafe { core::slice::from_raw_parts(first.as_ptr(), count as usize) }
+        unsafe { core::slice::from_raw_parts(first, count as usize) }
     }
 
     #[inline(always)]
@@ -233,7 +216,9 @@ impl<O: Os> Host for ClassHost<'_, O> {
     }
 
     fn commit_meta(&self, region: RegionId, offset: usize, len: usize) -> bool {
-        self.space.commit(self.meta_at(region, offset), len).is_ok()
+        let block = self.space.metadata(region);
+        let start = block.map_addr(|addr| addr.saturating_add(offset));
+        self.space.commit(start, len).is_ok()
     }
 
     fn advise(&self, region: RegionId, offset: usize, len: usize, advice: HugePages) -> bool {

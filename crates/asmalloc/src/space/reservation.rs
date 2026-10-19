@@ -179,6 +179,17 @@ impl<'os, O: Os> Space<'os, O> {
         self.metadata.map_addr(|start| start.saturating_add(offset))
     }
 
+    /// Byte `offset` of a region's metadata block, as a raw pointer with the reservation's
+    /// provenance: [`Space::metadata`] for a caller that reaches a word of the block on every
+    /// operation, with no saturating arithmetic. `offset` is the caller's to keep inside the
+    /// block; past it the pointer is merely not one to dereference.
+    #[inline(always)]
+    pub fn metadata_at(&self, region: RegionId, offset: usize) -> *mut u8 {
+        self.check_region(region);
+        let at = (region.index() << self.plan.metadata_shift()).wrapping_add(offset);
+        self.metadata.as_ptr().wrapping_byte_add(at)
+    }
+
     /// The magazine area, [`Plan::magazine_area_size`] bytes, aligned to the region size.
     #[inline(always)]
     pub fn magazines(&self) -> NonNull<u8> {
@@ -236,6 +247,19 @@ impl<'os, O: Os> Space<'os, O> {
         self.check(start, len);
         // SAFETY: RESERVATION-01. as in `commit`.
         unsafe { self.os.advise_huge(start, len, advice) }
+    }
+
+    /// How many pages of a range of the reservation are resident. Aborts if the range is not
+    /// one [`Space::is_callable_range`] accepts.
+    ///
+    /// # Safety
+    ///
+    /// No thread writes the range during the call.
+    pub unsafe fn resident(&self, start: NonNull<u8>, len: usize) -> Result<usize, OsError> {
+        self.check(start, len);
+        // SAFETY: RESERVATION-06. the range is valid as in `commit`; the caller promises nothing
+        // writes it during the call.
+        unsafe { self.os.resident(start, len) }
     }
 
     /// Marks a range of the reservation to read as zero in a forked child. Aborts if the range

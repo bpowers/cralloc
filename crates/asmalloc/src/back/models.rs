@@ -64,7 +64,7 @@ fn free_now(host: &Host8, region: RegionId, slot: u32) {
 
 /// Frees `slot` the way a single large free does (`tree::release_one`).
 fn free_one(host: &Host8, region: RegionId, slot: u32) {
-    tree::release_one(host, region, slot / BITS, 1 << (slot % BITS));
+    tree::release_one(host, region, slot / BITS, slot % BITS);
 }
 
 /// Claims up to `n` slots and returns them, with their region.
@@ -2138,4 +2138,106 @@ fn direct_frees_heal_what_a_fork_left_fully() {
 #[ignore = "slow: run with scripts/gate --all"]
 fn wide_direct_frees_heal_what_a_fork_left_fully() {
     direct_frees_heal_what_a_fork_left(1, true);
+}
+
+/// Review of the single free that looks at every level (`tree::release_one`, main `5c38865`).
+/// The step it takes that `Up` in `tla/Summary.tla` does not: its OR of a level-1 bit finds
+/// the level-1 word empty, and it still reads the level-2 bit before setting it, while the
+/// thread that emptied that word is clearing the same bit on its way up
+/// (`tla/SummaryLookUp.tla`). Two summary levels and the class's two; the claim is a purge's
+/// (`claim_exact`), which clears and reads again at every level. With `alone`, nothing else
+/// in the class is free, so the clears go on through the class word to its top word and the
+/// free looks at each of those behind an OR that found the word below empty. Every schedule,
+/// or those with at most `preemptions` preemptions.
+fn a_single_free_looks_above_a_word_it_found_empty(alone: bool, preemptions: Option<usize>) {
+    explore(
+        Config {
+            preemptions,
+            ..Config::ALL
+        },
+        2,
+        || {
+            let host = Host8::new(standard(), class(8), 1);
+            assert_eq!(host.layout().height(), 2);
+            let r0 = host.region_at(0);
+            host.carve_all(r0, host.layout().slots());
+            free_now(&host, r0, 64 * 64);
+            if !alone {
+                free_now(&host, r0, 0);
+            }
+            host
+        },
+        |host, me| {
+            let r0 = host.region_at(0);
+            if me == 0 {
+                assert!(tree::claim_exact(host, r0, 64, 1));
+            } else {
+                free_one(host, r0, 65 * 64 + 1);
+            }
+        },
+        |host, outcome| {
+            assert!(outcome.killed.is_empty());
+            let mut expected: BTreeSet<u64> = [65 * 64 + 1].into_iter().collect();
+            if !alone {
+                expected.insert(0);
+            }
+            assert_eq!(free_set(host, 1), expected);
+            assert!(host.all_visible(), "a free word is invisible");
+        },
+    );
+}
+
+#[test]
+#[cfg_attr(miri, ignore)]
+fn a_single_free_looks_above_a_word_it_found_empty_quickly() {
+    a_single_free_looks_above_a_word_it_found_empty(false, Some(3));
+    a_single_free_looks_above_a_word_it_found_empty(true, Some(3));
+}
+
+/// Every schedule: about ten seconds beside other free slots and forty alone.
+#[test]
+#[ignore = "slow: run with scripts/gate --all"]
+fn a_single_free_looks_above_a_word_it_found_empty_fully() {
+    a_single_free_looks_above_a_word_it_found_empty(false, None);
+    a_single_free_looks_above_a_word_it_found_empty(true, None);
+}
+
+/// `direct_frees_under_stale_bits_race_clears` for single frees: they land in words that are
+/// empty under summary bits set at every level, so each reads bits that are set and writes
+/// nothing above its leaf word, while a search from the top and a run find those words empty,
+/// clear their bits level by level and read each word again.
+fn single_frees_under_stale_bits_race_clears(preemptions: usize) {
+    explore(
+        Config {
+            preemptions: Some(preemptions),
+            ..Config::ALL
+        },
+        3,
+        || (stale_bits_setup(), Mutex::new(Vec::new())),
+        |(host, kept), me| {
+            let (r0, r1) = (host.region_at(0), host.region_at(1));
+            let got = match me {
+                0 => {
+                    for (region, slot) in [(r0, 64), (r1, 0), (r0, 64 * 64), (r0, 65)] {
+                        free_one(host, region, slot);
+                    }
+                    Vec::new()
+                }
+                1 => claim(host, 1),
+                _ => claim_run_of(host, 2, 1),
+            };
+            kept.lock().unwrap().extend(got);
+        },
+        |(host, kept), outcome| {
+            assert!(outcome.killed.is_empty());
+            let first = host.global(host.region_at(1), 0);
+            run_check(host, 2, kept, &[64, 65, 64 * 64, first]);
+        },
+    );
+}
+
+#[test]
+#[ignore = "slow: run with scripts/gate --all"]
+fn single_frees_under_stale_bits_race_clears_fully() {
+    single_frees_under_stale_bits_race_clears(1);
 }

@@ -7,9 +7,12 @@
 //! one step, as in the TLA+ models, and the explorer enumerates the schedules by depth-first
 //! search over those choices, replaying each schedule from a fresh state.
 //!
-//! The protocols use only sequentially consistent atomics on these words, and the rest of each
-//! thread's state is private, so the interleavings of whole operations are exactly the
-//! executions the memory model allows; there are no weaker behaviours to explore.
+//! The protocols use only sequentially consistent atomics on these words, but for `Word::store`,
+//! and the rest of each thread's state is private, so the interleavings of whole operations are
+//! exactly the executions the memory model allows; there are no weaker behaviours to explore.
+//! The heap's `store` is a release store, used only on words no protocol races on (see
+//! `Word`); the explorer's is sequentially consistent, which for those words allows the same
+//! executions.
 //!
 //! Two options cut or widen the search. A preemption bound limits how many times the scheduler
 //! may switch away from a thread that could continue, which keeps three-thread scenarios

@@ -1,16 +1,19 @@
 //! Retained memory, its cap, the clocked decay pass and the purge walk.
 //!
 //! **Retained memory** is the back end's estimate of the bytes of free slots in its bitmaps
-//! that are resident, small and large classes in one count. A launder or a free raises it by
+//! that are resident, for small classes and for large ones. A launder or a free raises it by
 //! what it returned. Only two things lower it: reuse (a claim subtracts what it took, less
 //! what the clean bits say was not resident) and purging (the pages returned that were not
 //! already clean). A claim that makes a purged page resident again adds back the rest of that
 //! page.
 //!
-//! The count is signed and changed by plain atomic adds and subtracts, and read as zero when
-//! negative. A subtraction can run before the addition it answers (a claim takes a slot between
-//! another thread's release of it and that thread's add); a count that stopped at zero would
-//! lose the subtraction and keep the addition, and drift upward for ever.
+//! Each count is two tallies that only grow, on lines of their own: what frees, launders and
+//! revivals counted in, and what claims, fills and purges counted out (`State::retained`), so that a
+//! thread that only frees and one that only allocates do not take one line from each other. The
+//! count is their difference, read as signed and as zero when negative. A subtraction can run
+//! before the addition it answers (a claim takes a slot between another thread's release of it
+//! and that thread's add); a count that stopped at zero would lose the subtraction and keep the
+//! addition, and drift upward for ever.
 //!
 //! The count is never reset. Free slots on pages that also hold live ones cannot be purged
 //! and stay counted for as long as they are free. An earlier version set the count to zero
@@ -28,7 +31,9 @@
 //! whatever the slot size. Fills take the lowest addresses, so what is being reused sits at
 //! the bottom and the top-down pass mostly leaves it alone; what stays free is returned over
 //! several intervals. A heap whose free memory is all fragmentation costs one walk of its
-//! bitmaps an interval, in steps, and nothing between passes. A clock that has gone back
+//! bitmaps an interval, in steps. Between passes a heartbeat reads the decay word and the clock,
+//! and the tallies only when a pass is due; a due pass that finds nothing retained ends as it
+//! starts, so the next is an interval later. A clock that has gone back
 //! (a resume, a restored checkpoint) restarts the interval from the new time, so decay waits
 //! at most one interval for it. `decay_pass`, for the background thread's `maintain`, takes
 //! those steps in one call, until the pass it started or found has ended.
@@ -86,7 +91,6 @@ use super::word::{BITS, Word};
 use crate::classes::Class;
 use crate::os::Os;
 use crate::space::{RegionId, RegionTag};
-use core::sync::atomic::AtomicIsize;
 use core::sync::atomic::Ordering::{Acquire, Relaxed, Release};
 
 /// The decay word's low bit: a pass is under way. The rest is the time the pass began, or the
@@ -157,33 +161,24 @@ impl Pass {
     }
 }
 
-/// A count read for use: zero when a subtraction has run ahead of its addition.
-fn clamped(count: &AtomicIsize) -> usize {
-    count.load(Relaxed).max(0) as usize
-}
-
 impl<O: Os> Back<'_, O> {
     /// Bytes of free slots in the bitmaps that are believed to be resident, small and large
     /// classes together: what decays, and what the cap limits.
     #[inline]
     pub fn retained(&self) -> usize {
-        let retained = &self.state.retained;
-        clamped(&retained.small).saturating_add(clamped(&retained.large))
+        self.clamped(false).saturating_add(self.clamped(true))
     }
 
     /// The part of [`Back::retained`] in large classes.
     #[inline]
     pub fn retained_large(&self) -> usize {
-        clamped(&self.state.retained.large)
+        self.clamped(true)
     }
 
-    /// The count of `class`'s kind.
-    fn count(&self, class: Class) -> &AtomicIsize {
-        if class.is_small() {
-            &self.state.retained.small
-        } else {
-            &self.state.retained.large
-        }
+    /// The count of large classes if `large`, else of small ones, read for use: zero when a
+    /// subtraction has run ahead of its addition.
+    fn clamped(&self, large: bool) -> usize {
+        self.state.retained.signed(large).max(0) as usize
     }
 
     /// Counts `bytes` of free slots of `class` as retained: slots freed to the bitmaps, or
@@ -191,7 +186,8 @@ impl<O: Os> Back<'_, O> {
     /// module documentation).
     pub(super) fn retain(&self, class: Class, bytes: usize) {
         if bytes != 0 {
-            self.count(class).fetch_add(bytes as isize, Relaxed);
+            let tally = self.state.retained.added.of(!class.is_small());
+            tally.fetch_add(bytes, Relaxed);
         }
     }
 
@@ -199,7 +195,8 @@ impl<O: Os> Back<'_, O> {
     /// count.
     pub(super) fn unretain(&self, class: Class, bytes: usize) {
         if bytes != 0 {
-            self.count(class).fetch_sub(bytes as isize, Relaxed);
+            let tally = self.state.retained.taken.of(!class.is_small());
+            tally.fetch_add(bytes, Relaxed);
         }
     }
 
@@ -265,7 +262,7 @@ impl<O: Os> Back<'_, O> {
     /// once round the heap. It stops when that pass ends or the steps stop for another reason
     /// (nothing is due, or the pass is not yet published), and never goes on into a later
     /// pass, so it reads at most one lap of the bitmaps. Between passes it costs what a
-    /// heartbeat's step costs: a load, and a clock read if anything is retained.
+    /// heartbeat's step costs: a load and a clock read.
     pub fn decay_pass(&self, now: &dyn Fn() -> u64) {
         let Some(pass) = self.decay_step(now) else {
             return;
@@ -275,23 +272,21 @@ impl<O: Os> Back<'_, O> {
 
     /// One heartbeat's part of the clocked pass: starts a pass if an interval has gone by
     /// since the last ended and anything is retained, and takes one bounded step of the pass
-    /// under way. Between passes with nothing retained it reads no clock: there is nothing to
-    /// start, and a clock that went back is noticed by the first heartbeat that could start
-    /// one. Returns the decay word of the pass it stepped if it stopped at its budget with the
-    /// pass still under way, so that more steps would do more; `None` otherwise.
+    /// under way. A pass that is due finds nothing retained is ended as it starts, so the next
+    /// one is due an interval later. Returns the decay word of the pass it stepped if it
+    /// stopped at its budget with the pass still under way, so that more steps would do more;
+    /// `None` otherwise.
     fn decay_step(&self, now: &dyn Fn() -> u64) -> Option<u64> {
         let state = self.state;
         let geometry = self.space.plan().geometry();
         let page = geometry.page_size();
         let mut seen = state.decay.load(Acquire);
-        let time = if seen & ACTIVE != 0 {
-            // `decay_look` steps a pass under way without the time.
-            0
-        } else if self.retained() == 0 {
-            return None;
-        } else {
-            now()
-        };
+        // `decay_look` steps a pass under way without the time. Between passes it reads the
+        // clock, and only a pass that is due reads the retained count: its tallies are written
+        // by frees and claims, and reading them on every heartbeat took their lines from the
+        // threads writing them (`docs/research/memory.md`, "The cost of a large block, by
+        // cause").
+        let time = if seen & ACTIVE != 0 { 0 } else { now() };
         match decay_look(seen, time) {
             Decay::Wait => return None,
             Decay::Restamp(word) => {
@@ -301,6 +296,11 @@ impl<O: Os> Back<'_, O> {
             Decay::Start(word) => {
                 let retained = self.retained();
                 if retained == 0 {
+                    // A pass with nothing to do, ended as it starts, so that the heartbeats
+                    // of the next interval wait instead of reading the count.
+                    let _ = state
+                        .decay
+                        .compare_exchange(seen, word & !ACTIVE, Release, Relaxed);
                     return None;
                 }
                 if state

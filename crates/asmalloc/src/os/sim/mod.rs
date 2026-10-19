@@ -531,7 +531,8 @@ fn splitmix(state: &AtomicU64) -> u64 {
 //   `unmap` zeroes a range before releasing its pages, with release ordering that the next
 //   claim's acquire pairs with. So reserved memory reads as zero.
 // - The memory is always readable and writable, so `commit` needs only to record it, and
-//   changes no contents. `purge` zeroes its range. `advise_huge` only records.
+//   changes no contents. `purge` zeroes its range. `advise_huge` only records, and `resident`
+//   only reads.
 // - An injected failure changes nothing, or with `Faults::partially` acts on the first half of
 //   its range, never beyond it.
 // - A range must lie in one live reservation of this value. `checked_range` panics before
@@ -621,6 +622,21 @@ unsafe impl<S: Shape> Os for SimOs<S> {
             HugePages::Avoid => self.pages.update(first, applied, NO_HUGE, HUGE),
         }
         result
+    }
+
+    unsafe fn resident(&self, start: NonNull<u8>, len: usize) -> Result<usize, OsError> {
+        let (first, count) = self.checked_range(Call::Resident, start, len);
+        self.admit(Call::Resident, count).1?;
+        // A page Linux would have resident is one written since it was committed or purged.
+        // The simulator sees writes only by what they leave, so it counts a committed page
+        // that holds a nonzero byte, as `resident_bytes` does.
+        let resident = (first..first + count)
+            .filter(|&index| self.pages.get(index) & WRITABLE != 0)
+            // SAFETY: the caller promises nothing writes the range during the call, and the
+            // allocator stores only integers, so its bytes are initialized.
+            .filter(|&index| !unsafe { self.page_reads_zero(index) })
+            .count();
+        Ok(resident)
     }
 
     unsafe fn wipe_on_fork(&self, start: NonNull<u8>, len: usize) -> Result<(), OsError> {
@@ -1007,6 +1023,28 @@ mod tests {
                 "a write faults the page back in"
             );
             assert_eq!(os.resident_bytes(), 2 * page());
+        }
+    }
+
+    /// `resident` counts the committed pages a write left nonzero, as Linux counts those
+    /// written since the last purge; it fails as injected.
+    #[test]
+    fn resident_counts_written_pages() {
+        let os = Sim::with_capacity(region());
+        let base = os.reserve(4 * page(), region()).unwrap();
+        let p = base.as_ptr();
+        // SAFETY: whole reserved pages; this thread alone writes them, and only with bytes,
+        // as the queries need.
+        unsafe {
+            os.commit(base, 3 * page()).unwrap();
+            assert_eq!(os.resident(base, 4 * page()), Ok(0));
+            p.write(1);
+            p.add(2 * page() + 5).write(1);
+            assert_eq!(os.resident(base, 4 * page()), Ok(2));
+            os.purge(base, page()).unwrap();
+            assert_eq!(os.resident(base, 4 * page()), Ok(1));
+            os.set_faults(Call::Resident, Faults::once_after(0));
+            assert_eq!(os.resident(base, page()), Err(OsError::ENOMEM));
         }
     }
 

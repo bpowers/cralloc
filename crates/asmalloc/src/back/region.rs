@@ -392,18 +392,23 @@ const fn extent_of(layout: &Layout, slot: u32, unit: Unit, size: usize, huge: bo
     }
 }
 
-/// The bits of clean word `w` for pages `from..to`, none if the range misses the word.
+/// The clean words that pages `from..to` lie in, `from < to`, each with the bits of its pages
+/// in the range.
 #[inline(always)]
-const fn pages(w: u32, from: u32, to: u32) -> u64 {
-    let base = w * BITS;
-    let lo = from.saturating_sub(base);
-    let hi = to.saturating_sub(base);
-    let hi = if hi > BITS { BITS } else { hi };
-    if hi <= lo {
-        0
-    } else {
-        (u64::MAX >> (BITS - (hi - lo))) << lo
-    }
+fn page_words(from: u32, to: u32) -> impl Iterator<Item = (u32, u64)> {
+    let (first, last) = (from / BITS, (to - 1) / BITS);
+    let head = u64::MAX << (from % BITS);
+    let tail = u64::MAX >> (BITS - 1 - (to - 1) % BITS);
+    (first..=last).map(move |w| {
+        let mut mask = u64::MAX;
+        if w == first {
+            mask &= head;
+        }
+        if w == last {
+            mask &= tail;
+        }
+        (w, mask)
+    })
 }
 
 /// The bytes of large slot `slot` to count as retained when it is free: its pages whose clean
@@ -413,24 +418,47 @@ const fn pages(w: u32, from: u32, to: u32) -> u64 {
 /// before it clears anything) all use this count, and a purge subtracts the pages it newly
 /// cleans, so the retained count is the free slots' pages that are not clean, exactly.
 ///
-/// It reads the slot's clean words and writes nothing. A word with no bit set is 64 pages, a
-/// word with every bit set none; only a mixed word needs a count.
+/// It reads the slot's clean words and writes nothing.
 pub(crate) fn charge<H: Host>(host: &H, region: RegionId, slot: u32) -> usize {
     let layout = host.layout();
     let Some(unit) = layout.slot_unit(slot) else {
         return layout.size();
     };
     let mut clean = 0usize;
-    for w in unit.start / BITS..=(unit.end - 1) / BITS {
-        let mask = pages(w, unit.start, unit.end);
-        let seen = host.meta(region, layout.clean_word(w)).load() & mask;
-        clean += match seen {
-            0 => 0,
-            _ if seen == mask => mask.count_ones() as usize,
-            _ => seen.count_ones() as usize,
-        };
+    for (w, mask) in page_words(unit.start, unit.end) {
+        clean += count(host.meta(region, layout.clean_word(w)).load() & mask);
     }
     layout.size() - clean * layout.page_size()
+}
+
+/// The bits of clean word `w` for the pages below page `end`.
+#[inline(always)]
+const fn below(w: u32, end: u32) -> u64 {
+    let base = w * BITS;
+    if end <= base {
+        0
+    } else if end - base >= BITS {
+        u64::MAX
+    } else {
+        u64::MAX >> (BITS - (end - base))
+    }
+}
+
+/// The bits set in `bits`. The baseline instruction set the crate is built for has no
+/// population count, and the clean pages of a slot are nearly always one run, from the end of
+/// what its tenants wrote to its end: a run is counted from its ends, and only a word with
+/// gaps is counted bit by bit.
+#[inline(always)]
+fn count(bits: u64) -> usize {
+    if bits == 0 {
+        return 0;
+    }
+    let run = bits >> bits.trailing_zeros();
+    if run & run.wrapping_add(1) == 0 {
+        (BITS - run.leading_zeros()) as usize
+    } else {
+        bits.count_ones() as usize
+    }
 }
 
 /// For the thread that has just carved large slot `slot` for a block of `size` bytes: marks the
@@ -447,9 +475,8 @@ pub(crate) fn mark_fresh<H: Host>(host: &H, region: RegionId, slot: u32, size: u
     if end >= unit.end {
         return;
     }
-    for w in end / BITS..=(unit.end - 1) / BITS {
-        host.meta(region, layout.clean_word(w))
-            .fetch_or(pages(w, end, unit.end));
+    for (w, mask) in page_words(end, unit.end) {
+        host.meta(region, layout.clean_word(w)).fetch_or(mask);
     }
 }
 
@@ -463,9 +490,8 @@ pub(crate) fn mark_clean<H: Host>(host: &H, region: RegionId, slot: u32, from: u
     if first >= end {
         return;
     }
-    for w in first / BITS..=(end - 1) / BITS {
-        host.meta(region, layout.clean_word(w))
-            .fetch_or(pages(w, first, end));
+    for (w, mask) in page_words(first, end) {
+        host.meta(region, layout.clean_word(w)).fetch_or(mask);
     }
 }
 
@@ -485,8 +511,7 @@ pub(crate) fn cover<H: Host>(host: &H, region: RegionId, slot: u32) {
     if end <= unit.start {
         return;
     }
-    for w in unit.start / BITS..=(end - 1) / BITS {
-        let inside = pages(w, unit.start, end);
+    for (w, inside) in page_words(unit.start, end) {
         let word = host.meta(region, layout.clean_word(w));
         if word.load() & inside != 0 {
             word.fetch_and(!inside);
@@ -514,22 +539,29 @@ pub(crate) fn settle_slot<H: Host>(host: &H, region: RegionId, slot: u32, size: 
         }
         None => 0,
     };
-    let resident = charge(host, region, slot);
-    if let Some(unit) = layout.slot_unit(slot) {
-        let end = extent_of(layout, slot, unit, size, false);
-        if end > unit.start {
-            for w in unit.start / BITS..=(end - 1) / BITS {
-                let inside = pages(w, unit.start, end);
-                let word = host.meta(region, layout.clean_word(w));
-                if word.load() & inside != 0 {
-                    word.fetch_and(!inside);
-                }
-            }
+    let Some(unit) = layout.slot_unit(slot) else {
+        return Settled {
+            zeroed,
+            resident: layout.size(),
+            revived: 0,
+        };
+    };
+    // One pass over the slot's clean words: count the clean pages, as `charge` does, from what
+    // each word held before this claim cleared any of it, and clear those under the block.
+    let end = extent_of(layout, slot, unit, size, false);
+    let mut clean = 0usize;
+    for (w, mask) in page_words(unit.start, unit.end) {
+        let word = host.meta(region, layout.clean_word(w));
+        let seen = word.load() & mask;
+        clean += count(seen);
+        let inside = mask & below(w, end);
+        if seen & inside != 0 {
+            word.fetch_and(!inside);
         }
     }
     Settled {
         zeroed,
-        resident,
+        resident: layout.size() - clean * layout.page_size(),
         revived: 0,
     }
 }
@@ -588,7 +620,7 @@ pub(crate) fn record<H: Host>(host: &H, region: RegionId, slot: u32, recorded: R
 /// and the range is inside the holder's slot, so nothing else is affected.
 ///
 /// Returns the page, counted from the region's start, at which the advised range ends, if it
-/// gave advice.
+/// gave advice and the OS took it.
 pub(crate) fn advise_grown<H: Host>(
     host: &H,
     region: RegionId,
@@ -621,8 +653,8 @@ pub(crate) fn advise_grown<H: Host>(
         unit.start as usize * page,
         (end - unit.start) as usize * page,
     );
-    host.advise(region, offset, len, HugePages::Prefer);
-    Some(end)
+    host.advise(region, offset, len, HugePages::Prefer)
+        .then_some(end)
 }
 
 /// For the holder of large slot `slot`: takes back the huge-page advice `advise_grown` gave

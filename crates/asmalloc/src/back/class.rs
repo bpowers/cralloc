@@ -286,7 +286,7 @@ impl<'a, O: Os> Back<'a, O> {
             // One slot needs none of a batch's grouping: one check, one OR, one walk up.
             let (region, slot) = self.validate(&host, first.address(), class);
             let (word, bit) = position(slot);
-            tree::release_one(&host, region, word, 1 << bit);
+            tree::release_one(&host, region, word, bit);
             if count {
                 self.retain(class, class.size());
             }
@@ -370,7 +370,7 @@ impl<'a, O: Os> Back<'a, O> {
     fn free_slot(&self, host: &ClassHost<'a, O>, class: Class, region: RegionId, slot: u32) {
         let charge = self.purge_before_release(host, region, slot, class);
         let (word, bit) = position(slot);
-        tree::release_one(host, region, word, 1 << bit);
+        tree::release_one(host, region, word, bit);
         self.retain(class, charge);
     }
 
@@ -439,13 +439,16 @@ impl<'a, O: Os> Back<'a, O> {
     }
 
     fn alloc_at(&self, class: Class, size: usize, stagger: bool) -> Option<Block> {
-        if size > class.size() {
+        let host = self.host(class)?;
+        // The class's size as the layout holds it: a load, where the class works it out.
+        let bytes = host.layout().size();
+        if size > bytes {
             self.abort("an allocation larger than its class");
         }
-        let host = self.host(class)?;
-        let (region, slot, zeroed) = if let Some(taken) = tree::claim(&host, 1, !class.is_small()) {
+        let small = class.is_small();
+        let (region, slot, zeroed) = if let Some(taken) = tree::claim(&host, 1, !small) {
             let slot = taken.word * BITS + taken.bits.trailing_zeros();
-            let settled = if class.is_small() {
+            let settled = if small {
                 region::settle(&host, taken.region, taken.word, taken.bits)
             } else {
                 region::settle_slot(&host, taken.region, slot, size)
@@ -457,8 +460,8 @@ impl<'a, O: Os> Back<'a, O> {
             let (region, first, _) = self.carve(&host, class, 1)?;
             // A large block makes resident at most what it asked for (one with headroom asks
             // for the room it may grow into), however big its slot.
-            self.grow(if class.is_small() { class.size() } else { size });
-            if !class.is_small() {
+            self.grow(if small { bytes } else { size });
+            if !small {
                 region::mark_fresh(&host, region, first, size);
             }
             (region, first, true)
@@ -473,20 +476,29 @@ impl<'a, O: Os> Back<'a, O> {
                 region::cover(&host, region, slot);
             }
         }
-        let into = host.layout().stagger(slot);
-        let into = if stagger && size + into <= class.size() {
+        let layout = host.layout();
+        let into = layout.stagger(slot);
+        let into = if stagger && size + into <= bytes {
             into
         } else {
             0
         };
-        let start = self.space.slot(region, class, slot);
-        let len = if class.is_small() {
-            class.size()
+        // A slot below the region's count lies wholly inside the region, which is what
+        // `Space::slot` checks.
+        if slot >= layout.slots() {
+            self.abort("a slot index outside its region");
+        }
+        let offset = layout.slot_bytes(slot) + into;
+        let len = if small {
+            bytes
         } else {
-            usable(size, into, host.layout().page_size())
+            usable(size, into, layout.page_size())
         };
         Some(Block {
-            ptr: start.map_addr(|a| a.saturating_add(into)),
+            ptr: self
+                .space
+                .region(region)
+                .map_addr(|a| a.saturating_add(offset)),
             zeroed,
             len,
         })
@@ -637,11 +649,25 @@ impl<'a, O: Os> Back<'a, O> {
     /// (`docs/research/memory.md`, "Growing blocks fault their spilled huge page in small
     /// pages"). So the page of bytes is copied aside into the block's own new room, the huge
     /// page is returned, which frees its emptied page table, and the bytes are copied back,
-    /// which faults the huge page whole under its new advice. The room is the first page of the
-    /// next huge page, which the block may now use; a block that fills its new size writes it
-    /// anyway, as its next spill. Where the OS keeps the page table, or refuses the purge, the
-    /// copy back restores the bytes all the same, and the page goes on in small pages, as
-    /// before.
+    /// which faults the huge page whole under its new advice. Where the OS keeps the page
+    /// table, or refuses the purge, the copy back restores the bytes all the same, and the page
+    /// goes on in small pages, as before.
+    ///
+    /// Only when the rest of the huge page is not resident, which the OS is asked: in a slot
+    /// kept resident from its last tenant, or one the block shrank in and grows back over, the
+    /// page is resident already, often whole, and returning it would throw that away and fault
+    /// it back. The clean bits cannot say this: the extent of an advised block is rounded up to
+    /// a huge page, so they are cleared over the page before the program writes it.
+    ///
+    /// The room is the first page of the huge page that holds the new end, which the advice,
+    /// rounded down, does not cover, and which a block that fills its new size writes anyway as
+    /// its next spill. Anywhere in the advised range the copy would fault a whole huge page the
+    /// program has not reached. A growth that ends on a huge-page boundary has no such page and
+    /// is left alone.
+    ///
+    /// Where the OS gives no huge pages at all (transparent huge pages off for the process),
+    /// this returns one small page and faults it back at each such growth, for nothing; the
+    /// allocator does not know that setting, and the cost is one call and one fault.
     ///
     /// # Safety
     ///
@@ -672,21 +698,31 @@ impl<'a, O: Os> Back<'a, O> {
         let end = (into + old).next_multiple_of(page);
         let at = ((base + end) & !(huge - 1)) - base;
         let part = end - at;
-        // Only the spill of a first page, the page must now be advised, and it, and the room
-        // the bytes go to, must lie inside what the block may now use, its new size rounded
-        // up to a page; `at > into` also keeps the block's start out of the page.
+        // The room: the first page of the huge page that holds the new usable end.
+        let fresh = (into + new).next_multiple_of(page);
+        let room = ((base + fresh - 1) & !(huge - 1)) - base;
+        // Only the spill of a first page; the page must now be advised; `at > into` keeps the
+        // block's start out of it; and the room must lie past it, past the advised range, and
+        // inside what the block may now use, its new size rounded up to a page.
         let first = ((base + at) / page) as u32;
         if part == 0
             || part > page
             || at <= into
             || first + pages > advised
-            || at + huge + part > (into + new).next_multiple_of(page)
+            || room < at + huge
+            || base + room < advised as usize * page
+            || room + part > fresh
         {
             return;
         }
         let spill = ptr.map_addr(|a| a.saturating_add(at - into));
-        let aside = spill.map_addr(|a| a.saturating_add(huge));
-        // SAFETY: BACK-CLASS-05: both ranges lie in the block's `new` bytes, `huge` apart.
+        let rest = spill.map_addr(|a| a.saturating_add(page));
+        // SAFETY: BACK-CLASS-05: whole pages inside the block, which nothing writes meanwhile.
+        if unsafe { self.space.resident(rest, huge - page) } != Ok(0) {
+            return;
+        }
+        let aside = ptr.map_addr(|a| a.saturating_add(room - into));
+        // SAFETY: BACK-CLASS-05: both ranges lie in what the block may now use, apart.
         unsafe { spill.copy_to_nonoverlapping(aside, part) };
         // SAFETY: BACK-CLASS-05: the holder's whole huge page inside its block, whose bytes
         // are copied aside.

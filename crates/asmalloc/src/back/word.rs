@@ -2,7 +2,7 @@
 //! on one word.
 
 use core::sync::atomic::AtomicU64;
-use core::sync::atomic::Ordering::SeqCst;
+use core::sync::atomic::Ordering::{Release, SeqCst};
 
 /// Bits per bitmap word.
 pub(crate) const BITS: u32 = u64::BITS;
@@ -13,12 +13,20 @@ pub(crate) const BITS: u32 = u64::BITS;
 /// under Kani on a few words, and under the interleaving explorer in the tests, whose words
 /// yield to a scheduler before every operation.
 ///
-/// Every operation is sequentially consistent. The summary protocol needs that: a free ORs a word
-/// and then reads the summary bit above it, while a search clears the summary bit and then reads
-/// the word. That is the store-buffering pattern, and only sequential consistency (or fences)
-/// rules out both reads missing the other's write. On x86-64 a sequentially consistent
-/// read-modify-write is the same locked instruction as any other and a sequentially consistent
-/// load is a plain load, so it costs nothing.
+/// Every operation but `store` is sequentially consistent. The summary protocol needs that: a
+/// free ORs a word and then reads the summary bit above it, while a search clears the summary bit
+/// and then reads the word. That is the store-buffering pattern, and only sequential consistency
+/// (or fences) rules out both reads missing the other's write. On x86-64 a sequentially
+/// consistent read-modify-write is the same locked instruction as any other and a sequentially
+/// consistent load is a plain load, so it costs nothing.
+///
+/// `store` is a release store, a plain `mov`, where a sequentially consistent one is an `xchg`.
+/// It writes only words no protocol races on: a large slot's size word, which only the slot's
+/// holder reads or writes, and a slot changes holder only through a sequentially consistent
+/// operation on its leaf word (the free's OR, the next claim's compare-and-swap), which orders
+/// the old holder's accesses before the new one's; and a region's `Grow` word when `assign`
+/// takes or gives back the region, which the table's and the carving word's compare-and-swaps
+/// that follow publish to any thread that later reads it.
 pub(crate) trait Word: Sync {
     /// Reads the word.
     fn load(&self) -> u64;
@@ -29,7 +37,8 @@ pub(crate) trait Word: Sync {
     /// Replaces `current` with `new`, returning the old value on success and the value found on
     /// failure. A failure changes nothing.
     fn compare_exchange(&self, current: u64, new: u64) -> Result<u64, u64>;
-    /// Writes the word. Only for words a single owner writes, such as a slot's size.
+    /// Writes the word, with release ordering. Only for words a single owner writes, such as a
+    /// slot's size (see the trait's documentation).
     fn store(&self, value: u64);
 }
 
@@ -68,7 +77,7 @@ impl Word for Atomic {
 
     #[inline(always)]
     fn store(&self, value: u64) {
-        self.0.store(value, SeqCst)
+        self.0.store(value, Release)
     }
 }
 

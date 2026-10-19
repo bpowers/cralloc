@@ -1,0 +1,44 @@
+#!/usr/bin/env bash
+# Run a build, test, proof or model check where it does not disturb a measurement: at low
+# priority, on the cores the benchmark suite does not pin to, and in a cgroup that a
+# measurement using both L3s pauses while it runs.
+#
+# Why: heavy work on one core of an L3 shares that L3's cache with a measurement on its
+# other cores. Waiting for heavy work to finish does not scale (a full gate runs for half an
+# hour, and several people build at once), so `scripts/measure --both-l3` freezes this
+# cgroup for the minutes it measures and thaws it afterwards. Wall-clock timeouts inside the
+# command keep counting while it is paused.
+#
+# Usage: scripts/heavy command args...
+#   ASMALLOC_HEAVY_CPUS  the CPU list, default 12-15,28-31 (`lscpu -e` shows which CPUs
+#                        share an L3, and `bench/README.md`, "Pinning", which the suite uses).
+#   ASMALLOC_LOCK_DIR    where the lock files live, default /tmp.
+set -euo pipefail
+
+[ $# -gt 0 ] || { echo "usage: scripts/heavy command args..." >&2; exit 2; }
+cpus="${ASMALLOC_HEAVY_CPUS:-12-15,28-31}"
+locks="${ASMALLOC_LOCK_DIR:-/tmp}"
+slice="asmalloc-heavy.slice"
+
+# A measurement on both L3s holds the turnstile exclusively while it runs, so work that
+# arrives meanwhile waits here instead of starting beside it.
+exec 8>>"$locks/asmalloc-heavy.turn"
+flock -s 8
+# Holding the turnstile means no such measurement is running, so a slice found frozen now was
+# left that way by one that was killed before it could thaw.
+systemctl --user thaw "$slice" 2>/dev/null || true
+
+if command -v systemd-run >/dev/null 2>&1 \
+   && systemd-run --user --scope -q --collect --slice="$slice" -- true 8>&- >/dev/null 2>&1; then
+  # scripts/memlimit starts a scope of its own for the memory cap, which would leave this
+  # slice; the variable tells it to stay inside.
+  export ASMALLOC_HEAVY_SLICE="$slice"
+  # The turnstile is let go only once the command is inside its scope. A scope cannot start
+  # in a frozen slice, so one that let go earlier could find the slice frozen under it and
+  # would have to run outside, beside the measurement.
+  exec systemd-run --user --scope -q --collect --slice="$slice" -- \
+    bash -c 'exec 8>&-; exec "$@"' heavy taskset -c "$cpus" nice "$@"
+fi
+exec 8>&-
+echo "heavy: systemd-run unavailable; a measurement on both L3s cannot pause this" >&2
+exec taskset -c "$cpus" nice "$@"
