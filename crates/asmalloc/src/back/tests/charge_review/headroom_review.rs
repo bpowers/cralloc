@@ -1,19 +1,20 @@
-//! Evidence for the adversarial review of the growth headroom rule (`e486bc4..769974a`): a
-//! large block that outgrows its slot moves into one with sixteen times its room, falling back
-//! to four times and then to its size.
+//! Evidence for the adversarial review of the growth headroom rule (`e486bc4..769974a`), and
+//! for the check of its fix (main `9a076f4`): a large block that outgrows its slot moves into
+//! one with sixteen times its room while that is at most a sixteenth of a region, four times
+//! while that fits a region, and falls back from sixteen to four to its size when the larger
+//! slot cannot be had.
 //!
-//! The simulator's native shape has regions of a megabyte, so at sixteen times every slot with
-//! headroom is a class above half a region and sits alone in its region: the parent module's
-//! random runs never put two such slots side by side. [`Roomy`] has regions of 32 MiB, which
-//! hold several slots of sixteen times any block the runs here make, as the design's regions
-//! do. The runs check the parent's properties on it (a clean bit is true, a zero bit is true,
-//! the count is the free slots' pages that are not clean, and it returns to zero), and one
-//! more: every page of a slot past what its tenants were given is clean, so the room nobody
-//! wrote is in no count. They run also with commits failing, so that growth takes its
-//! fallbacks.
+//! The simulator's native shape has regions of a megabyte, where no large block is small
+//! enough for sixteen times the room, so the parent module's random runs never make a slot
+//! with it. [`Roomy`] has regions of 32 MiB: a block of up to 128 KiB gets sixteen times its
+//! room there, a larger one four times, and a region holds a dozen or more of either slot, as
+//! the design's regions do. The runs check the parent's properties on it (a clean bit is true,
+//! a zero bit is true, the count is the free slots' pages that are not clean, and it returns
+//! to zero), and one more: every page of a slot past what its tenants were given is clean, so
+//! the room nobody wrote is in no count. They run also with commits failing, so that growth
+//! takes its fallbacks.
 //!
-//! Two tests are findings. They fail on the code as reviewed and are ignored for that reason;
-//! run one by name with `--include-ignored`.
+//! Two tests were findings: they failed on the code as reviewed, and pass since the fix.
 
 use super::*;
 use crate::classes::MagazineSize;
@@ -27,7 +28,8 @@ impl Shape for Roomy {
     const GEOMETRY: Geometry = Geometry::new(12, 16, 25, 17, 128, 1, MagazineSize::MAX);
 }
 
-/// The most a block of the runs asks for. Sixteen times it is a class a region holds three of.
+/// The most a block of the runs asks for. Four times it is a class a region holds twelve of,
+/// as sixteen times the largest block that gets that much is.
 const TOP: usize = 600 << 10;
 
 /// The most blocks a run holds at once. A census reads every carved large slot, and a class
@@ -76,8 +78,12 @@ fn c_realloc_in<S: Shape>(sim: &SimHeap<S>, old: NonNull<u8>, size: usize) -> Op
 #[derive(Default, Debug, Clone, Copy)]
 struct Seen {
     met: Met,
-    /// Growths that moved into a slot at least twice the size asked for.
-    roomy: usize,
+    /// Growths that moved into a slot at least eight times the size asked for, which only
+    /// sixteen times the room gives: four times lands in a class at most five times the size.
+    full: usize,
+    /// Growths that moved into a slot from twice to eight times the size asked for: four times
+    /// the room.
+    less: usize,
     /// Growths that moved into a slot under twice the size asked for: the last fallback.
     bare: usize,
     /// Growths that moved although the OS refused a commit during the call: a fallback taken.
@@ -103,8 +109,10 @@ fn note_growth<S: Shape>(
     };
     if !class.is_small() {
         seen.fell_back += usize::from(back.state.os().faults(Call::Commit).fail < failing);
-        if class.size() >= 2 * size {
-            seen.roomy += 1;
+        if class.size() >= 8 * size {
+            seen.full += 1;
+        } else if class.size() >= 2 * size {
+            seen.less += 1;
         } else {
             seen.bare += 1;
         }
@@ -522,7 +530,8 @@ fn roomy_runs(salt: u64, seeds: u64, steps: usize, faults: bool) {
     for seed in 0..seeds {
         let one = fill_roomy(salt ^ seed, steps, faults);
         seen.met.join(one.met);
-        seen.roomy += one.roomy;
+        seen.full += one.full;
+        seen.less += one.less;
         seen.bare += one.bare;
         seen.fell_back += one.fell_back;
         seen.refused += one.refused;
@@ -532,13 +541,14 @@ fn roomy_runs(salt: u64, seeds: u64, steps: usize, faults: bool) {
         seen.met.zero != 0
             && seen.met.told != 0
             && seen.met.advised != 0
-            && seen.roomy != 0
+            && seen.full != 0
+            && seen.less != 0
             && seen.side_by_side != 0,
         "the runs missed a case: {seen:?}"
     );
     // With commits failing, some growth must have been refused a slot and taken another, and
     // some call must have found no memory at all. With none failing, every growth of a large
-    // block gets room: sixteen times the largest block here fits a region.
+    // block gets room: four times the largest block here fits a region.
     if faults {
         assert!(
             seen.fell_back != 0 && seen.refused != 0,
@@ -571,18 +581,19 @@ fn layout_of(size: usize) -> Layout {
     Layout::from_size_align(size, 8).unwrap()
 }
 
-/// Finding regions-used-up. A room past half a region is a slot of a whole region, and a
-/// region is never unassigned, so every buffer that grows past a thirty-second of a region
-/// takes a region for good, and when the regions are gone every class that needs one fails,
-/// small classes too. In the native shape (247 regions of a megabyte) that is every buffer
-/// grown to 64 KiB. Six hundred of them, 38 MiB of data in a 247 MiB heap, fit at four times
-/// the room (three slots to a region, 202 regions); at sixteen the 247th cannot grow and
-/// nothing of a new class can be allocated.
+/// Finding regions-used-up, as reviewed (`769974a`). A room past half a region is a slot of a
+/// whole region, and a region is never unassigned, so every buffer that grew past a
+/// thirty-second of a region took a region for good, and when the regions were gone every
+/// class that needed one failed, small classes too. In the native shape (247 regions of a
+/// megabyte) that was every buffer grown to 64 KiB. Six hundred of them, 38 MiB of data in a
+/// 247 MiB heap, fit at four times the room (three slots to a region, 202 regions); at sixteen
+/// the 247th could not grow and nothing of a new class could be allocated.
 ///
-/// The process's heap is the same under an address-space limit, which shrinks its regions:
+/// The process's heap was the same under an address-space limit, which shrinks its regions:
 /// under `prlimit --as` of 16 GiB (regions of 2 MiB) 3,939 buffers grown from 40 to 64 KiB,
-/// 246 MiB of data, use every region, where `e486bc4` fits 23,634; after that `malloc(256)`
-/// returns null.
+/// 246 MiB of data, used every region, where `e486bc4` fits 23,634; after that `malloc(256)`
+/// returned null. Since the fix a block gets sixteen times its room only while that is at most
+/// a sixteenth of a region, and the native shape and that limit fit what `e486bc4` fits.
 #[test]
 fn six_hundred_buffers_grown_to_64_kib_leave_room_for_another_class() {
     let sim = SimHeap::<Native>::new();
@@ -637,15 +648,16 @@ fn all_but_one_region_assigned() -> Box<SimHeap<Native>> {
     sim
 }
 
-/// Finding last-region. The fallback's promise is that a growth fails only where a plain
-/// allocation of its size fails. A refused attempt is not free, though: the attempt at the
-/// larger slot assigns a region to that slot's class before it commits the slot
-/// (`Back::assign`, then `region::carve`), and a region is never unassigned. So when the OS
-/// refuses that commit, as strict overcommit and a data-segment limit refuse the largest
-/// request first, and the region was the last one, the smaller rooms and the size itself have
-/// no region to take, and the growth fails where a plain allocation of its size, tried first,
-/// is served. `e486bc4` fails this too, with its one attempt at four times the room; sixteen
-/// times asks the OS for four times as much, so it is refused sooner.
+/// Finding last-region, as reviewed (`769974a`). The fallback's promise is that a growth fails
+/// only where a plain allocation of its size fails. A refused attempt was not free, though:
+/// the attempt at the larger slot assigned a region to that slot's class before it committed
+/// the slot (`Back::assign`, then `region::carve`), and a region is never unassigned. So when
+/// the OS refused that commit, as strict overcommit and a data-segment limit refuse the
+/// largest request first, and the region was the last one, the smaller rooms and the size
+/// itself had no region to take, and the growth failed where a plain allocation of its size,
+/// tried first, is served. `e486bc4` failed this too, with its one attempt at four times the
+/// room. Since the fix a large class commits its first slot before it takes a region
+/// (`region::commit_first`).
 #[test]
 fn a_refused_commit_of_the_larger_slot_does_not_cost_the_growth_the_last_region() {
     let size = 40 << 10;
@@ -657,8 +669,8 @@ fn a_refused_commit_of_the_larger_slot_does_not_cost_the_growth_the_last_region(
             .alloc_large_aligned(size, C_ALIGN, false)
             .is_some()
     );
-    // The growth: the region's metadata commits, the slot with sixteen times the room does not,
-    // and every commit after that would succeed.
+    // The growth: the region's metadata commits, the slot with room does not, and every commit
+    // after that would succeed.
     let sim = all_but_one_region_assigned();
     let commits = sim.os().calls(Call::Commit);
     sim.os().set_faults(Call::Commit, Faults::once_after(1));
@@ -671,4 +683,52 @@ fn a_refused_commit_of_the_larger_slot_does_not_cost_the_growth_the_last_region(
         sim.os().calls(Call::Commit) - commits,
         sim.heap().alloc_large_aligned(size, C_ALIGN, false)
     );
+}
+
+/// The fix to last-region where the rule has both rooms. On [`Roomy`] a block growing to
+/// 40 KiB tries a slot with sixteen times its room, then one with four. When the OS refuses to
+/// commit the first, no region is taken for its class, and the second takes the region the
+/// first would have had.
+#[test]
+#[cfg_attr(miri, ignore)]
+fn a_refused_commit_of_the_roomiest_slot_leaves_its_region_for_the_next_room() {
+    let sim = SimHeap::<Roomy>::new();
+    let heap = sim.heap();
+    let size = 40 << 10;
+    // Start the heap, with a block of a class the growth does not use.
+    let other = heap.alloc_large_aligned(300 << 10, C_ALIGN, false).unwrap();
+    let back = heap.back().unwrap();
+    let tagged = || {
+        let regions = back.space().plan().regions();
+        regions
+            .filter(|&r| back.table().get(r) != RegionTag::Unassigned)
+            .count()
+    };
+    let slot_of = |ptr: NonNull<u8>| match back.lookup(ptr.as_ptr()) {
+        Some(Kind::Slot(class)) => class.size(),
+        other => panic!("{other:?}"),
+    };
+    assert_eq!(tagged(), 1);
+    // The region's metadata commits; the slot with sixteen times the room does not.
+    sim.os().set_faults(Call::Commit, Faults::once_after(1));
+    let less = heap.alloc_large_grown(size).unwrap();
+    assert_eq!(sim.os().faults(Call::Commit), Faults::NONE);
+    assert!(
+        (4 * size..8 * size).contains(&slot_of(less)),
+        "a slot of {} bytes for {size}",
+        slot_of(less)
+    );
+    assert_eq!(tagged(), 2, "the refused slot's class kept a region");
+    assert_eq!(
+        back.space().locate(less.as_ptr()).unwrap().region.index(),
+        1
+    );
+    // With no commit refused, the next such block gets the full room.
+    let full = heap.alloc_large_grown(size).unwrap();
+    assert!(slot_of(full) >= 16 * size);
+    assert_eq!(tagged(), 3);
+    for block in [other, less, full] {
+        // SAFETY: the test's blocks, each freed once.
+        unsafe { heap.free_large(block) };
+    }
 }
