@@ -92,7 +92,7 @@ impl Marker {
 }
 
 const MIN_LOG2: u8 = 2;
-const MAX_LOG2: u8 = 8;
+const MAX_LOG2: u8 = 10;
 
 /// A magazine size: a power-of-two number of slots, from 4 to 256.
 ///
