@@ -3107,6 +3107,10 @@ mod review {
 
 mod charge_review;
 
+/// The check of the fix that commits a large class's first slot before `assign` takes its
+/// region: racing assignments, and every region looked at afterwards.
+mod assign_review;
+
 /// Review of the move of the region headers into the back end's state, with the leaf bitmap
 /// last in the block (`host::RegionHeader`, `layout`).
 mod review_headers {
