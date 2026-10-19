@@ -43,6 +43,8 @@ allocator-api = []
 x-count = []
 x-no-affinity = []
 x-own-fill-first = []
+# `x-carve-own-first`: a fill carves in its own domain before it reuses another domain's free slots.
+x-carve-own-first = []
 
 [dependencies]
 

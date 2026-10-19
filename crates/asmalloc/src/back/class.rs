@@ -181,20 +181,49 @@ impl<'a, O: Os> Back<'a, O> {
         let Some(mut host) = self.host_in(class.class(), domain) else {
             return 0;
         };
-        host.own_only = own_only;
+        // With `x-carve-own-first`, a domain carves its own before it reuses another's.
+        let carve_first = cfg!(feature = "x-carve-own-first") && host.domain.is_some() && !own_only;
+        host.own_only = own_only || carve_first;
         let len = out.positions();
-        let mut got = 0;
+        let mut got = self.claim_into(&host, class, out, 0, domain);
+        if !own_only {
+            got = self.carve_into(&host, class, out, got, domain);
+        }
+        if carve_first && got < len {
+            host.own_only = false;
+            got = self.claim_into(&host, class, out, got, domain);
+        }
+        #[cfg(feature = "x-count")]
+        if let Some(d) = domain
+            && !own_only
+        {
+            crate::xcount::add(d, crate::xcount::Event::FillCalls, 1);
+        }
+        got
+    }
+
+    /// EXPERIMENT: the claims of a fill, from position `got` on; returns the next position.
+    fn claim_into<S: Sink + ?Sized>(
+        &self,
+        host: &ClassHost<'a, O>,
+        class: SmallClass,
+        out: &mut S,
+        mut got: usize,
+        domain: Option<usize>,
+    ) -> usize {
+        let _ = domain;
+        let len = out.positions();
         let (mut resident, mut revived) = (0, 0);
         let mut cursor = None;
         // The frontier of each region the run leaves, and of the one it ends in: how far its
         // claims reached before it first moved past another filler (`tree::claim_next`).
-        let mut leave = |reached: tree::Taken| self.reach_claim(&host, reached);
+        let mut leave = |reached: tree::Taken| self.reach_claim(host, reached);
         while got < len {
             let want = (len - got).min(BITS as usize) as u32;
-            let Some(taken) = tree::claim_next(&host, want, &mut cursor, &mut leave) else {
+            let Some(taken) = tree::claim_next(host, want, &mut cursor, &mut leave) else {
                 break;
             };
-            let settled = region::settle(&host, taken.region, taken.word, taken.bits);
+            let settled = region::settle(host, taken.region, taken.word, taken.bits);
             resident += settled.resident;
             revived += settled.revived;
             #[cfg(feature = "x-count")]
@@ -216,24 +245,32 @@ impl<'a, O: Os> Back<'a, O> {
                 taken.bits,
             );
         }
-        if let Some(reached) = tree::finish_run(&host, cursor) {
-            self.reach_claim(&host, reached);
+        if let Some(reached) = tree::finish_run(host, cursor) {
+            self.reach_claim(host, reached);
         }
         self.unretain(class.class(), resident);
         self.retain(class.class(), revived);
+        got
+    }
+
+    /// EXPERIMENT: the carves of a fill, from position `got` on; returns the next position.
+    fn carve_into<S: Sink + ?Sized>(
+        &self,
+        host: &ClassHost<'a, O>,
+        class: SmallClass,
+        out: &mut S,
+        mut got: usize,
+        domain: Option<usize>,
+    ) -> usize {
+        let _ = domain;
+        let len = out.positions();
         let mut carved = 0;
-        #[cfg(feature = "x-count")]
-        if let Some(d) = domain
-            && !own_only
-        {
-            crate::xcount::add(d, crate::xcount::Event::FillCalls, 1);
-        }
-        while got < len && !own_only {
+        while got < len {
             let want = (len - got).min(u32::MAX as usize) as u32;
-            let Some((region, first, count)) = self.carve(&host, class.class(), want) else {
+            let Some((region, first, count)) = self.carve(host, class.class(), want) else {
                 break;
             };
-            region::reach(&host, region, first + count - 1, self.epoch());
+            region::reach(host, region, first + count - 1, self.epoch());
             got = self.put_run(host.layout(), out, got, region, first, count);
             carved += host.layout().bytes_of(count);
             #[cfg(feature = "x-count")]
