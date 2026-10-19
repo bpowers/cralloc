@@ -228,7 +228,40 @@ pub static SLABS: Front = Front::new();
 /// (`SmallClass::word`); zero for every other byte. The inlined routines are given their class's
 /// mask from here, so a constant class folds it to a constant; the generated C routines read the
 /// copy in [`SLABS`], at the same index, `MASK_DISP` bytes above the word.
-pub(crate) static MASKS: [u32; MASK_COUNT] = MASK_TABLE;
+///
+/// An inlined routine with a class known only at run time loads its mask on every call, so the
+/// table sits at page offsets no slab field has, as the class lookup does
+/// (`classes::BY_SIZE_PAGE_OFFSET`).
+static MASKS: PlacedMasks = PlacedMasks {
+    _pad: [0; MASKS_PAGE_OFFSET],
+    masks: MASK_TABLE,
+};
+
+/// Where [`MASKS`] starts within its page.
+const MASKS_PAGE_OFFSET: usize = 2048;
+
+/// [`MASKS`]'s table, [`MASKS_PAGE_OFFSET`] bytes into a page-aligned static.
+#[repr(C, align(4096))]
+struct PlacedMasks {
+    _pad: [u8; MASKS_PAGE_OFFSET],
+    masks: [u32; MASK_COUNT],
+}
+
+// What an inlined fast path loads on every call, beside the routine itself, is off the page
+// offsets of every slab field, so that it never waits for the hot word the previous call stored
+// (`docs/research/zen5-roofline.md`, section 16): the masks, and the class lookup's entries for
+// every size up to `BY_SIZE_CLEAR`. Larger sizes wrap round onto the slab's offsets, as in the C
+// routines' tables (`c::table`).
+const _: () = {
+    use crate::classes::{BY_SIZE_CLEAR, BY_SIZE_PAGE_OFFSET, QUANTUM};
+    assert!(SLAB_BYTES == 4096 && align_of::<Front>() == SLAB_BYTES);
+    assert!(align_of::<PlacedMasks>() == SLAB_BYTES);
+    assert!(offset_of!(PlacedMasks, masks) == MASKS_PAGE_OFFSET);
+    assert!(Slab::USED_BYTES <= MASKS_PAGE_OFFSET);
+    assert!(MASKS_PAGE_OFFSET + size_of::<[u32; MASK_COUNT]>() <= SLAB_BYTES);
+    assert!(Slab::USED_BYTES <= BY_SIZE_PAGE_OFFSET);
+    assert!(BY_SIZE_PAGE_OFFSET + BY_SIZE_CLEAR / QUANTUM == SLAB_BYTES);
+};
 
 const MASK_TABLE: [u32; MASK_COUNT] = {
     let mut masks = [0; MASK_COUNT];
@@ -245,7 +278,7 @@ const MASK_TABLE: [u32; MASK_COUNT] = {
 /// The mask of a class's magazines.
 #[inline(always)]
 pub(crate) fn mask(class: SmallClass) -> u32 {
-    MASKS[class.word()]
+    MASKS.masks[class.word()]
 }
 
 /// The last position with a mask, which [`publish_masks`] writes last and so checks first.
@@ -280,8 +313,30 @@ mod tests {
             assert_eq!(mask(class) as usize, class.magazine().mask());
         }
         let small = SmallClass::all().count();
-        assert_eq!(MASKS.iter().filter(|&&m| m != 0).count(), small);
-        assert_eq!(MASKS[0], 0);
+        assert_eq!(MASKS.masks.iter().filter(|&&m| m != 0).count(), small);
+        assert_eq!(MASKS.masks[0], 0);
+    }
+
+    /// The placement the constant assertions describe, on the addresses the build gave: no
+    /// mask, and no class lookup entry up to `BY_SIZE_CLEAR` bytes, overlaps a hot word's page
+    /// offset.
+    #[test]
+    fn the_inlined_lookups_are_off_every_hot_words_page_offset() {
+        use crate::classes::{BY_SIZE_CLEAR, by_size_entry};
+        let hot: std::vec::Vec<usize> = SmallClass::all()
+            .map(|class| Field::hot(class).offset() % SLAB_BYTES)
+            .collect();
+        let clear = |addr: usize, len: usize| {
+            let at = addr % SLAB_BYTES;
+            hot.iter().all(|&word| at + len <= word || word + 8 <= at)
+        };
+        for class in SmallClass::all() {
+            let entry = core::ptr::from_ref(&MASKS.masks[class.word()]).addr();
+            assert!(clear(entry, 4), "{class:?}");
+        }
+        for size in 1..=BY_SIZE_CLEAR {
+            assert!(clear(by_size_entry(size), 1), "{size}");
+        }
     }
 
     // The static's 32 MiB of atomics exceed what Miri can track; under Miri the twins run on
