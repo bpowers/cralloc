@@ -157,28 +157,14 @@ impl<'a, O: Os> Back<'a, O> {
         let mut got = 0;
         let (mut resident, mut revived) = (0, 0);
         let mut cursor = None;
-        // The highest claim before the run first moved past another filler, in the region the
-        // run is in, for its frontier: kept as the claim, and worked out and recorded once a
-        // region, as the run leaves it. Claims past a meeting are not evidence that the slots
-        // skipped are in use.
-        let mut reached: Option<tree::Taken> = None;
+        // The frontier of each region the run leaves, and of the one it ends in: how far its
+        // claims reached before it first moved past another filler (`tree::claim_next`).
+        let mut leave = |reached: tree::Taken| self.reach_claim(&host, reached);
         while got < len {
             let want = (len - got).min(BITS as usize) as u32;
-            let Some(taken) = tree::claim_next(&host, want, &mut cursor) else {
+            let Some(taken) = tree::claim_next(&host, want, &mut cursor, &mut leave) else {
                 break;
             };
-            if !taken.beyond {
-                match reached {
-                    // A run that searched from the top again may come back lower in the
-                    // same region.
-                    Some(last) if last.region == taken.region && last.word > taken.word => {}
-                    Some(last) if last.region != taken.region => {
-                        self.reach_claim(&host, last);
-                        reached = Some(taken);
-                    }
-                    _ => reached = Some(taken),
-                }
-            }
             let settled = region::settle(&host, taken.region, taken.word, taken.bits);
             resident += settled.resident;
             revived += settled.revived;
@@ -191,9 +177,8 @@ impl<'a, O: Os> Back<'a, O> {
                 taken.bits,
             );
         }
-        tree::finish_run(&host, cursor);
-        if let Some(last) = reached {
-            self.reach_claim(&host, last);
+        if let Some(reached) = tree::finish_run(&host, cursor) {
+            self.reach_claim(&host, reached);
         }
         self.unretain(class.class(), resident);
         self.retain(class.class(), revived);
