@@ -6,10 +6,12 @@
 //! wants it paced by time instead runs `maintain` (`maintain.rs`) from a thread of its own.
 //! The clock is read at most once per heartbeat, and only when a decision needs it.
 //!
-//! - **Launder over target.** Last in the heartbeat, after its own sweep and drain: for each
-//!   shared depot stack the call pushed a magazine with objects on, while that stack holds more
-//!   than its target, a magazine is popped and its objects go back to the source, at most as
-//!   many as the call pushed there; the empty magazines go to the shared empty stack. Only a
+//! - **Launder over target.** For each shared depot stack the call's exchange pushed a magazine
+//!   with objects on, while that stack holds more than its target, a magazine is popped and its
+//!   objects go back to the source, as many as the exchange pushed there, first and whatever
+//!   the budget below; the empty magazines go to the shared empty stack. Last in the heartbeat,
+//!   after its own sweep and drain, the same again for the stacks the call pushed on at all,
+//!   within the budget, which also catches up what earlier calls left over a target. Only a
 //!   push makes a stack deeper. A domain's stack needs no such rule: its cap keeps it within
 //!   bounds.
 //! - **Shed what was not needed** (`shed.rs`). A note of the depth of each stack the slow path
@@ -38,20 +40,24 @@
 //! counter, so it looks idle and is drained once per interval; the drain costs it one refill,
 //! whose slow path moves the counter, and the next drain is at least an interval after that.
 //!
-//! **Bounded work.** Besides the exchange itself, one slow path launders at most four
-//! magazines: one for each of the three rules here (the age limit's take or sweep counts as one)
-//! and one refresh in the exchange (`slow.rs`) for each install it makes, which is one unless
-//! the thread is moved to another CPU while it exchanges and installs again; and when its sweep
-//! or drain pushed several magazines on shared stacks, the launder over target takes as many
-//! as were pushed, at most a slab's worth. A magazine holds at
-//! most 254 objects (and at most about 64 KiB of them), and a launder sets one bitmap word
-//! per group of neighbours with one atomic OR. A sweep step also pushes the rest of one spare
-//! stack, at most a few magazines, to the depot; for a class with stock it instead returns one
-//! magazine above the class's limit, and the sweep stays on the class at later heartbeats
-//! (`stock.rs`). Add one purge step, at most one drain
-//! (of another slab, or of the thread's own when it holds another generation's markers: a
-//! bounded number of atomic instructions and one fence), and a fixed number of loads and
-//! single-word writes for the looks.
+//! **Bounded work.** Besides the exchange itself, which fills at most one magazine and that
+//! from at most [`FILL_CLAIMS`](crate::back::policy::FILL_CLAIMS) bitmap words, a slow path
+//! launders at most [`LAUNDER_BUDGET`](super::LAUNDER_BUDGET) objects by its own choice: the
+//! refresh in the exchange (`slow.rs`), the age limit's take or the sweep's step, the shed, and
+//! the launder over target past the exchange's own pushes each launder a magazine only while a
+//! full one would fit in what is left of it. A rule that finds no room waits for a later slow
+//! path. On top of that budget comes one launder for each magazine the exchange pushed past a
+//! shared stack's target, which is one, or none when the exchange refreshed instead, unless the
+//! thread is moved to another CPU while it exchanges and pushes again. So a `free` launders at
+//! most about one largest magazine, 1,022 objects, and a `malloc` that much besides its fill. A
+//! launder sets one bitmap word per group of neighbours with one atomic OR, or one per object
+//! when they are scattered. A sweep step also pushes the rest of one spare stack, at most a few
+//! magazines, to the depot; for a class with stock it instead returns one magazine above the
+//! class's limit, and the sweep stays on the class at later heartbeats (`stock.rs`). Add one
+//! purge step, at most one drain (of another slab, or of the thread's own when it holds another
+//! generation's markers: a bounded number of atomic instructions and one fence), and a fixed
+//! number of loads and single-word writes for the looks. What a drain parks over a shared
+//! stack's target is laundered within the budget, and the rest by later calls and the shed.
 //!
 //! **Shared writes.** A slow path that exchanges nothing with the depot writes, outside its own
 //! CPU's slab: nothing, on most entries; another slab's sighting, by compare-and-swap, on one
@@ -336,6 +342,7 @@ impl<O: Os, R: Routines, S: Source> Cache<'_, O, R, S> {
 
     /// The chores of a large allocation or free's heartbeat that [`lone_count`] found due.
     pub fn lone_beat(&self, turn: LoneTurn) {
+        self.begin_slow_path();
         let chores = Chores {
             cpu: turn.cpu,
             ..Chores::default()
@@ -353,6 +360,11 @@ impl<O: Os, R: Routines, S: Source> Cache<'_, O, R, S> {
     /// that the rotating chores look at: for a small slow path, the count of its CPU's activity.
     fn beat(&self, served: Option<SmallClass>, chores: Chores, activity: Option<u64>) {
         let clock = Clock::new(self.os());
+        // First what the exchange pushed past a shared stack's target, whatever the budget:
+        // one launder for each such push keeps the stack from gaining on the magazines that
+        // arrive. Every launder after it is within the budget.
+        let pushed = self.overflowed.take();
+        self.launder_overflow(pushed, &clock, false);
         if let (Some(cpu), Some(class), true) = (chores.cpu, served, chores.installed) {
             self.unstamp(cpu, class);
         }
@@ -381,6 +393,7 @@ impl<O: Os, R: Routines, S: Source> Cache<'_, O, R, S> {
             && let (Some(cpu), Some(activity)) = (chores.cpu, activity)
             && !self.sweep_step(cpu, looking.is_some(), &clock)
             && let Some(class) = nth_class(activity)
+            && self.may_launder(class)
         {
             let _ = self.age_look(cpu, class, &clock);
         }
@@ -396,27 +409,40 @@ impl<O: Os, R: Routines, S: Source> Cache<'_, O, R, S> {
                 _ => {}
             }
         }
-        // Last, so that it sees what this heartbeat's own sweep and drain parked.
-        self.launder_overflow(&clock);
+        // Last, so that it sees what this heartbeat's own sweep and drain parked, and within
+        // the budget: those, and whatever earlier calls left over the targets of the stacks
+        // this call pushed on.
+        let parked = self.overflowed.take();
+        self.launder_overflow(
+            Overflow {
+                classes: pushed.classes | parked.classes,
+                magazines: u32::MAX,
+            },
+            &clock,
+            true,
+        );
     }
 
-    /// Launders magazines from the shared stacks this call pushed on, while each is over its
-    /// target ([`Cache::shared_target`]), at most as many as the call pushed there: so a
-    /// shared stack ends a heartbeat no deeper than its target and a magazine, or than it began,
-    /// and the work is bounded by the pushes, one in an exchange and a slab's worth in a drain.
-    /// Only a push makes a stack deeper, so a call that pushed nothing there reads no shared
-    /// head: reading it on every heartbeat cost a job whose four L3-crossing flows all overflow
-    /// into the shared stacks 6% of its time.
-    fn launder_overflow(&self, clock: &Clock<'_, O>) {
+    /// Launders magazines from the shared stacks of `overflow`'s classes, while each is over its
+    /// target ([`Cache::shared_target`]): at most `overflow.magazines` in all, and, `within`
+    /// the budget, only while [`Cache::may_launder`] allows. Only a push makes a stack deeper,
+    /// so a call that pushed nothing on a class's shared stack reads no head of it: reading it
+    /// on every heartbeat cost a job whose four L3-crossing flows all overflow into the shared
+    /// stacks 6% of its time.
+    fn launder_overflow(&self, overflow: Overflow, clock: &Clock<'_, O>, within: bool) {
         let Overflow {
             mut classes,
             mut magazines,
-        } = self.overflowed.take();
+        } = overflow;
         while classes != 0 && magazines > 0 {
             let ordinal = classes.trailing_zeros() as usize;
             let Some(class) = SmallClass::from_ordinal(ordinal) else {
                 break;
             };
+            if within && !self.may_launder(class) {
+                classes &= classes - 1;
+                continue;
+            }
             let stack = self.depot.full(Pool::Shared, class);
             if stack.count(self.area, class.magazine()) as usize <= self.shared_target(class)
                 || self.launder_one(Pool::Shared, class).is_none()

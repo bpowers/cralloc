@@ -37,8 +37,9 @@ pub const METADATA_SHIFT: u32 = 5;
 /// - pages are at least 64 bytes; pages divide huge pages, huge pages divide regions at every
 ///   size the geometry allows, and pages divide metadata blocks, so every one of them can be
 ///   committed and purged on its own;
-/// - the magazine area, a whole number of regions, holds at least one of the largest magazines
-///   even at the smallest region size;
+/// - a region at the smallest region size is at least as large as the largest magazine, so the
+///   magazine area, a whole number of regions aligned to the region size, holds one and aligns
+///   every magazine to its own size, which the fast paths' slot tests need;
 /// - at least one object region fits next to the magazines and metadata, and the whole
 ///   reservation spans at most `max_regions` regions, so every address in it has an entry in the
 ///   class-of-region table.
@@ -115,7 +116,7 @@ impl Geometry {
             && magazine_regions >= 1
             && max_regions <= MAX_REGIONS
             && max_regions > magazine_regions
-            && (magazine_regions << min_region_shift) >= max_magazine.bytes();
+            && (1usize << min_region_shift) >= max_magazine.bytes();
         if !valid {
             return None;
         }
@@ -281,9 +282,13 @@ mod tests {
         assert!(Geometry::try_new(12, 21, 32, 21, 4097, 1, max).is_none());
         // No room for an object region next to the magazines.
         assert!(Geometry::try_new(12, 21, 32, 21, 1, 1, max).is_none());
-        // The smallest valid region (2 KiB) already holds the largest magazine (2 KiB), so the
-        // rule that the magazine area hold one cannot fail today; it guards larger magazines.
-        assert!(Geometry::try_new(6, 8, 11, 11, 4, 1, max).is_some());
+        // Regions smaller than the largest magazine (8 KiB): the magazine area is aligned only
+        // to the region size, so a magazine in it would not be aligned to its own, however many
+        // regions the area has.
+        assert!(Geometry::try_new(6, 8, 12, 12, 32, 8, max).is_none());
+        assert!(Geometry::try_new(6, 8, 13, 13, 16, 4, max).is_some());
+        let quarter = MagazineSize::from_slots(256).unwrap();
+        assert!(Geometry::try_new(6, 8, 11, 11, 4, 1, quarter).is_some());
     }
 
     #[test]

@@ -262,6 +262,11 @@ impl<'a, O: Os, R: Routines, S: Source> Cache<'a, O, R, S> {
             word.store(sweep.advanced().0, Relaxed);
             return false;
         };
+        // The sweep stays on a class until a heartbeat has room in its budget to launder one
+        // of its magazines (`LAUNDER_BUDGET`).
+        if !self.may_launder(class) {
+            return false;
+        }
         match self.sweep_stock(cpu, class) {
             Swept::Plain => {
                 // A stack deeper than its fixed limit (stock whose word a race lost) is not

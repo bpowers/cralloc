@@ -3,6 +3,7 @@
 //! The depot hands over a magazine's object slots, which the back end fills and launders in
 //! place (`back::Descending`, `back::SlotPointer`).
 
+use crate::back::policy::FILL_CLAIMS;
 use crate::back::{Back, Descending};
 use crate::classes::SmallClass;
 use crate::depot::Source;
@@ -12,7 +13,7 @@ use core::sync::atomic::AtomicPtr;
 
 impl<O: Os> Source for Back<'_, O> {
     fn fill(&self, class: SmallClass, slots: &[AtomicPtr<u8>]) -> usize {
-        Back::fill(self, class, &mut Descending(slots))
+        Back::fill_within(self, class, &mut Descending(slots), FILL_CLAIMS)
     }
 
     fn take_back(&self, class: SmallClass, objects: &[AtomicPtr<u8>]) {

@@ -150,9 +150,24 @@ impl<'a, O: Os> Back<'a, O> {
     /// asked means the heap is out of address space or the OS refused memory; zero means not
     /// even one slot could be had.
     pub fn fill<S: Sink + ?Sized>(&self, class: SmallClass, out: &mut S) -> usize {
+        self.fill_within(class, out, usize::MAX)
+    }
+
+    /// [`Back::fill`], except that once it has claimed from `claims` bitmap words it stops and
+    /// returns what it has, fewer than asked if the words were sparse. A claim takes what one
+    /// word has free, so the bound caps the search and the atomic instructions a fill spends,
+    /// whatever its length: a fill from words with one free slot each costs about a hundred
+    /// cycles a claim (`docs/research/launder-and-fill.md`). A bound of zero is taken as one.
+    pub fn fill_within<S: Sink + ?Sized>(
+        &self,
+        class: SmallClass,
+        out: &mut S,
+        claims: usize,
+    ) -> usize {
         let Some(host) = self.host(class.class()) else {
             return 0;
         };
+        let claims = claims.max(1);
         let len = out.positions();
         let mut got = 0;
         let (mut resident, mut revived) = (0, 0);
@@ -160,11 +175,13 @@ impl<'a, O: Os> Back<'a, O> {
         // The frontier of each region the run leaves, and of the one it ends in: how far its
         // claims reached before it first moved past another filler (`tree::claim_next`).
         let mut leave = |reached: tree::Taken| self.reach_claim(&host, reached);
-        while got < len {
+        let mut claimed = 0;
+        while got < len && claimed < claims {
             let want = (len - got).min(BITS as usize) as u32;
             let Some(taken) = tree::claim_next(&host, want, &mut cursor, &mut leave) else {
                 break;
             };
+            claimed += 1;
             let settled = region::settle(&host, taken.region, taken.word, taken.bits);
             resident += settled.resident;
             revived += settled.revived;
@@ -183,7 +200,9 @@ impl<'a, O: Os> Back<'a, O> {
         self.unretain(class.class(), resident);
         self.retain(class.class(), revived);
         let mut carved = 0;
-        while got < len {
+        // A fill that ran out of claims has objects to hand out; it carves only when the
+        // bitmaps had too few, which is when it ran out of free slots instead.
+        while got < len && claimed < claims {
             let want = (len - got).min(u32::MAX as usize) as u32;
             let Some((region, first, count)) = self.carve(&host, class.class(), want) else {
                 break;

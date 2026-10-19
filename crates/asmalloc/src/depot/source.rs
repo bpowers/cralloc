@@ -18,7 +18,8 @@ pub trait Source {
     /// Fills the object slots of a magazine this thread holds with free objects of `class`,
     /// up to its capacity, and returns how many, `n`. The objects go in the last `n` slots,
     /// lowest address last, so that the magazine, popped from the top, hands them out in
-    /// ascending address order. Zero means there are none to be had.
+    /// ascending address order. A fill may stop short of the capacity once it has objects, to
+    /// bound its work where free objects are sparse. Zero means there are none to be had.
     fn fill(&self, class: SmallClass, slots: &[AtomicPtr<u8>]) -> usize;
 
     /// Takes back free objects of `class`, each one this source handed out, from the object

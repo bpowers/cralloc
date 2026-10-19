@@ -19,12 +19,13 @@ use std::sync::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::vec::Vec;
 
-/// A heap of 128 KiB: 64-byte pages, 4 KiB regions, a 32 KiB magazine area (eight regions).
-/// Small enough to make afresh for every execution the interleaving checker runs.
+/// A heap of 128 KiB: 64-byte pages, 8 KiB regions (a region holds the largest magazine), a
+/// 32 KiB magazine area (four regions). Small enough to make afresh for every execution the
+/// interleaving checker runs.
 pub(crate) enum Small {}
 
 impl Shape for Small {
-    const GEOMETRY: Geometry = Geometry::new(6, 8, 12, 12, 32, 8, MagazineSize::MAX);
+    const GEOMETRY: Geometry = Geometry::new(6, 8, 13, 13, 16, 4, MagazineSize::MAX);
 }
 
 /// The class with the smallest magazines (4 slots, 2 objects), which keeps every scenario
@@ -62,6 +63,7 @@ pub(crate) struct TestSource {
     purges: AtomicUsize,
     passes: AtomicUsize,
     fills: AtomicUsize,
+    laundered: AtomicUsize,
     universe: BTreeSet<usize>,
 }
 
@@ -85,6 +87,7 @@ impl TestSource {
             purges: AtomicUsize::new(0),
             passes: AtomicUsize::new(0),
             fills: AtomicUsize::new(0),
+            laundered: AtomicUsize::new(0),
             universe,
         }
     }
@@ -138,6 +141,11 @@ impl TestSource {
             .map_or(0, Vec::len)
     }
 
+    /// How many objects magazines have brought back to the source in all.
+    pub(crate) fn laundered(&self) -> usize {
+        self.laundered.load(Ordering::Relaxed)
+    }
+
     /// How many magazines the source has been asked to fill.
     pub(crate) fn fills(&self) -> usize {
         self.fills.load(Ordering::Relaxed)
@@ -161,6 +169,7 @@ impl Source for TestSource {
     }
 
     fn take_back(&self, class: SmallClass, objects: &[core::sync::atomic::AtomicPtr<u8>]) {
+        self.laundered.fetch_add(objects.len(), Ordering::Relaxed);
         for object in objects {
             let object = NonNull::new(object.load(Relaxed)).expect("a magazine holds null");
             self.give(class, object);

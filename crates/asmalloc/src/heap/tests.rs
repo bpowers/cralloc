@@ -294,12 +294,13 @@ fn a_simulated_heap_serves_every_class() {
 fn a_simulated_heap_exchanges_magazines() {
     let heap = SimHeap::<Shape>::new();
     if cfg!(miri) {
-        // Past one magazine of 254 objects, so every exchange still runs.
-        bursts(&heap, 48, 300, 2);
+        // Past one magazine of 1,022 objects, so every exchange still runs.
+        bursts(&heap, 48, 1100, 2);
         return;
     }
+    // Past the largest magazine, 1,022 objects, so that every class exchanges.
     for size in [8, 48, 512, MAX_SMALL_SIZE] {
-        bursts(&heap, size, 600, 40);
+        bursts(&heap, size, 2500, 40);
     }
 }
 

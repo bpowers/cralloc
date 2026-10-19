@@ -112,7 +112,8 @@ word or link names is in that space's area, and admitted by that depot's committ
 A `Magazine` handle exists only for an offset `magazine::admits` accepted: past the generation
 page, aligned to its size and inside the committed bytes (`depot::verify::
 an_admitted_magazine_lies_inside_the_committed_area`). The magazine area itself is aligned to
-at least the largest magazine (`Geometry::magazine_area_align`), so an aligned offset is an
+the region size (`Plan::magazines_offset`), which `Geometry::try_new` requires to be at least
+the largest magazine at every region size the geometry allows, so an aligned offset is an
 aligned address. So every magazine address the slow paths give a routine is in committed memory,
 and so is every value derived from one.
 

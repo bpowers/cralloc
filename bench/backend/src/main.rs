@@ -2,6 +2,7 @@
 //! hardware counters, for several classes and pointer orders.
 //!
 //!   backbench run [classes=16,64,256,1024,4096] [reps=7] [batch=mag] [orders=...] [fills=...]
+//!                 [claims=N]
 //!
 //! The benchmark keeps a heap of its own (a `back::State` over the real OS), separate from the
 //! process's global allocator, which stays glibc's. For each class it carves a pool of objects
@@ -20,7 +21,7 @@
 //!   magazines of a parsed and dropped JSON document look like.
 //! - `block`: shuffled within each 256 objects, a magazine's worth.
 //! - `scatter`: shuffled across the whole pool, as a `BTreeMap` dropped in key order frees.
-//! - `spread`: shuffled across the whole pool, then each 254 sorted: scattered slots that a
+//! - `spread`: shuffled across the whole pool, then each batch sorted: scattered slots that a
 //!   magazine holds in address order.
 //! - `headtail`: ascending, with each magazine's first 24 slots swapped with slots anywhere in
 //!   the pool: a batch judged scattered whose tail is dense.
@@ -68,6 +69,9 @@ struct Bench<'a> {
     back: Back<'a, LinuxOs>,
     class: SmallClass,
     batch: usize,
+    /// The most bitmap words a fill claims from (`claims`, default unbounded); the depot's
+    /// fills use `back::policy::FILL_CLAIMS`.
+    claims: usize,
     counters: &'a Counters,
 }
 
@@ -81,9 +85,12 @@ impl Bench<'_> {
         out.clear();
         while out.len() < n {
             let want = (n - out.len()).min(self.batch);
-            let filled = self.back.fill(self.class, &mut Descending(&atomic(&mut magazine)[..want]));
-            assert_eq!(filled, want, "the back end ran out of memory");
-            out.extend_from_slice(&magazine[..want]);
+            let slots = &mut magazine[..want];
+            let filled = self.back.fill_within(self.class, &mut Descending(&atomic(slots)), self.claims);
+            assert!(filled > 0, "the back end ran out of memory");
+            // A fill bounded in claims comes back short from sparse words, its objects in the
+            // last slots.
+            out.extend_from_slice(&slots[want - filled..]);
         }
     }
 
@@ -240,8 +247,8 @@ impl Feistel {
     }
 }
 
-/// The pool in the named order. `pool` is ascending.
-fn order(name: &str, pool: &[*mut u8], rng: &mut Rng) -> Vec<*mut u8> {
+/// The pool in the named order, for batches of `batch`. `pool` is ascending.
+fn order(name: &str, pool: &[*mut u8], batch: usize, rng: &mut Rng) -> Vec<*mut u8> {
     let mut v = pool.to_vec();
     match name {
         "asc" => {}
@@ -264,13 +271,13 @@ fn order(name: &str, pool: &[*mut u8], rng: &mut Rng) -> Vec<*mut u8> {
         "scatter" => shuffle(&mut v, rng),
         "spread" => {
             shuffle(&mut v, rng);
-            v.chunks_mut(254).for_each(|magazine| magazine.sort());
+            v.chunks_mut(batch).for_each(|magazine| magazine.sort());
         }
         "headtail" => {
             // Each magazine's first 24 slots swapped with slots anywhere in the pool: a
             // scattered head, judged scattered, then a mostly dense tail.
             let n = v.len();
-            for start in (0..n).step_by(254) {
+            for start in (0..n).step_by(batch) {
                 for i in start..(start + 24).min(n) {
                     v.swap(i, rng.below(n as u64) as usize);
                 }
@@ -322,6 +329,7 @@ fn main() {
     let batch = args.str("batch", "mag");
     let orders = args.str("orders", "asc,desc,two,block,scatter,stride");
     let fills = args.str("fills", "fill,fill/8,fill/64");
+    let claims = args.usize("claims", usize::MAX);
     let back = STATE.get_or_reserve().expect("reserve the heap");
     let counters = Counters::region();
     let bitmaps = args.str("bitmaps", "");
@@ -329,7 +337,7 @@ fn main() {
         // Each size carves on top of the last in the one class, so sizes go smallest first.
         let size = classes[0];
         let class = Class::of_size(size).and_then(Class::small).expect("a small class size");
-        let bench = Bench { back, class, batch: class.magazine().capacity(), counters: &counters };
+        let bench = Bench { back, class, batch: class.magazine().capacity(), claims, counters: &counters };
         for bitmap in bitmaps.split(',') {
             let bytes = parse_size(bitmap);
             for name in orders.split(',').filter(|name| !name.is_empty()) {
@@ -354,7 +362,7 @@ fn main() {
     for size in classes {
         let class = Class::of_size(size).and_then(Class::small).expect("a small class size");
         let batch = if batch == "mag" { class.magazine().capacity() } else { batch.parse().expect("batch=N or mag") };
-        let bench = Bench { back, class, batch, counters: &counters };
+        let bench = Bench { back, class, batch, claims, counters: &counters };
         let n = (POOL_BYTES / class.size()).min(MAX_POOL);
         let mut pool = Vec::with_capacity(n);
         bench.take(n, &mut pool);
@@ -364,7 +372,7 @@ fn main() {
         for name in orders.split(',').filter(|name| !name.is_empty()) {
             let mut launder = Cost::default();
             for rep in 0..=reps {
-                let ord = order(name, &pool, &mut rng);
+                let ord = order(name, &pool, batch, &mut rng);
                 let (l, f, mut next) = bench.round(&ord);
                 next.sort();
                 pool = next;

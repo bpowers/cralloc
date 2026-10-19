@@ -37,6 +37,15 @@ pub const DECAY_SHIFT: u32 = 2;
 /// decay ends instead of shrinking by quarters for ever.
 pub const DECAY_FLOOR_HUGE_PAGES: usize = 1;
 
+/// The most bitmap words a fill for a magazine claims from before it hands out what it has:
+/// 256. A claim takes what one word has free, from one slot to 64, at about a hundred cycles
+/// when it is one; so a magazine of up to 254 objects, the largest before magazines grew to
+/// 1,022 (`classes::MagazineSize::MAX`), is filled whole from any bitmap as before, and a
+/// larger one from words this sparse comes back partly filled, after the work the smaller one
+/// cost. The fill's cost per object is then what it was, and its worst single call no larger.
+/// Dense words fill a whole magazine in sixteen claims.
+pub const FILL_CLAIMS: usize = 256;
+
 /// How much bitmap a heartbeat's step of a decay pass may read, in words: 256 words, 2 KiB.
 /// Each word covers 64 slots, so this is one 4 KiB page of 8-byte slots read eight times over,
 /// or a few hundred pages of larger ones. A step always finishes the unit it started, so a

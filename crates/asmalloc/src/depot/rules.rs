@@ -1694,3 +1694,79 @@ fn a_deep_stack_without_credit_goes_back_a_magazine_a_call() {
     assert!(most <= 4 * 2, "one call laundered {most} objects");
     rig.census(&[], false);
 }
+
+/// A heap whose magazine area holds some thirty of the largest magazines (8 KiB each), for the
+/// rules' bounds on work with the smallest classes' magazines of 1,022 objects.
+enum Roomy {}
+
+impl crate::os::sim::Shape for Roomy {
+    const GEOMETRY: crate::space::Geometry =
+        crate::space::Geometry::new(6, 8, 13, 13, 64, 32, MagazineSize::MAX);
+}
+
+/// One slow path launders at most `LAUNDER_BUDGET` objects, and a rule the budget turns away
+/// does its work at a later slow path. Here a free retires a full magazine of the smallest
+/// class (1,022 objects) and refreshes it, which spends the budget, while the sweep, due on the
+/// same class in the same heartbeat, wants to launder a full spare: without the budget that
+/// call would launder two magazines.
+#[test]
+fn a_rule_the_budget_turns_away_waits_for_the_next_slow_path() {
+    let class = SmallClass::from_ordinal(0).unwrap();
+    let capacity = class.magazine().capacity();
+    assert_eq!(capacity, super::LAUNDER_BUDGET);
+    let tuning = Tuning {
+        refresh_every: 1,
+        age_limit: true,
+        look_every: 1,
+        max_spares: 2,
+        ..QUIET
+    };
+    let rig: Rig<SimOs<Roomy>, 2> = Rig::with_os(SimOs::new(), &[class], 4 * capacity, tuning);
+    let machine = SimCpu::new(0);
+    let cache = rig.cache(&machine);
+    // One slow path loads a filled magazine and begins the sweep at the first class; the
+    // frees then fill the loaded magazine back up to one short of full.
+    let held: Vec<NonNull<u8>> = (0..capacity).filter_map(|_| cache.alloc(class)).collect();
+    assert_eq!(held.len(), capacity);
+    let mut held = held.into_iter();
+    for object in held.by_ref().take(capacity - 1) {
+        cache.free(class, object);
+    }
+    // A full spare for the sweep to take.
+    let spare = cache.area().create(class.magazine()).unwrap();
+    assert_eq!(rig.source.fill(class, spare.objects()), capacity);
+    spare.set_level(capacity);
+    let mut stale = false;
+    assert!(
+        cache
+            .spare_push(class, Spare::Full, spare, &mut stale)
+            .is_ok()
+    );
+    let cpu = rig.slabs().cpu(0).unwrap();
+    let spare_head = || {
+        rig.slabs()
+            .slab(cpu)
+            .field(Field::spare(class, Spare::Full))
+            .load(Relaxed)
+    };
+    let spares = || !spare_head().is_null();
+    assert!(spares());
+    // The last free fills the loaded magazine; the next one exchanges it and refreshes it.
+    cache.free(class, held.next().unwrap());
+    let extra = rig.source.alloc_one(class).unwrap();
+    let before = rig.source.laundered();
+    cache.free(class, extra);
+    assert_eq!(
+        rig.source.laundered() - before,
+        capacity,
+        "the refresh alone"
+    );
+    assert!(spares(), "the sweep waited");
+    // The next slow path has the budget, and the sweep takes the spare.
+    let before = rig.source.laundered();
+    let clock = super::heartbeat::Clock::new(rig.os());
+    cache.begin_slow_path();
+    assert!(cache.sweep_step(cpu, true, &clock));
+    assert_eq!(rig.source.laundered() - before, capacity);
+    assert!(!spares());
+}
