@@ -774,3 +774,46 @@ fn three_hundred_buffers_cut_to_40_kib_leave_their_regions() {
         }
     }
 }
+
+/// The room the rule gives is the room a block gets, on both resize paths. On [`Roomy`], a
+/// heap with its full reservation, a block that grows to 64 KiB moves into a slot of sixteen
+/// times that and then doubles four times in place, to a megabyte; four times the room holds
+/// two doublings. The heap's own walk (`heap::tests::realloc_walk`) allows eight doublings two
+/// moves, which four times the room also makes, so it passes whichever room the heap gives.
+#[test]
+#[cfg_attr(miri, ignore)]
+fn a_block_that_grew_doubles_four_times_in_place_on_both_paths() {
+    let sim = SimHeap::<Roomy>::new();
+    let (first, grown) = (40 << 10, 64 << 10);
+    // SAFETY: valid layouts; the block is live where it is resized, with the layout it has,
+    // and freed once.
+    unsafe {
+        let p = GlobalAlloc::alloc(&sim, layout_of(first));
+        let mut q = GlobalAlloc::realloc(&sim, p, layout_of(first), grown);
+        assert!(!q.is_null() && q != p);
+        let mut size = grown;
+        for _ in 0..4 {
+            let next = GlobalAlloc::realloc(&sim, q, layout_of(size), 2 * size);
+            assert_eq!(
+                next,
+                q,
+                "a Rust block grown to {grown} moved at {}",
+                2 * size
+            );
+            (q, size) = (next, 2 * size);
+        }
+        GlobalAlloc::dealloc(&sim, q, layout_of(size));
+    }
+    let heap = sim.heap();
+    let p = heap.alloc_large_aligned(first, C_ALIGN, false).unwrap();
+    let q = c_realloc_in(&sim, p, grown).unwrap();
+    assert_ne!(q, p);
+    let mut size = grown;
+    for _ in 0..4 {
+        size *= 2;
+        let next = c_realloc_in(&sim, q, size).unwrap();
+        assert_eq!(next, q, "a C block grown to {grown} moved at {size}");
+    }
+    // SAFETY: the test's block, freed once.
+    unsafe { heap.free_large(q) };
+}
