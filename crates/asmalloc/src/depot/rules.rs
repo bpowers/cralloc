@@ -5,7 +5,7 @@
 //! on, so each test fails if its rule stops working.
 
 use super::test_rig::{Rig, SimCpu, Small, TestSource};
-use super::{Cache, Domain, IDLE_TICKS, Pool, REFRESH_EVERY, Tuning, inspect};
+use super::{Cache, Domain, IDLE_TICKS, Pool, REFRESH_EVERY, Source, Tuning, inspect};
 use crate::classes::{MagazineSize, SmallClass};
 use crate::front::{Cpu, Field, Twin};
 use crate::os::Os;
@@ -801,5 +801,170 @@ fn a_forked_child_reaches_every_stack_the_parent_filled() {
             assert_eq!(rig.source.held_of(idle), objects);
         }
         rig.census(&[], false);
+    }
+}
+
+/// The classes with the smallest magazines but the `skip` largest, `count` of them.
+fn tiny_classes(skip: usize, count: usize) -> Vec<SmallClass> {
+    (skip..skip + count).map(tiny).collect()
+}
+
+/// Every cache domain but CPU 0's holds one magazine of each of `held` classes in its stack and
+/// is quiet (nothing in its slabs), while CPU 0 runs another class's slow paths at the rate of
+/// `a_quiet_domain_gives_its_stacks_back_with_2_8_and_64_domains`, looking once in
+/// `look_every` of them. `width` CPUs share each domain. Returns how many of the quiet domains'
+/// stacks still held a magazine after each interval, for `intervals` of them, and how many slow
+/// paths CPU 0 ran.
+fn quiet_stacks_left(
+    width: u32,
+    held: usize,
+    look_every: u64,
+    intervals: usize,
+) -> (Vec<usize>, u64) {
+    let busy = tiny(0);
+    let classes = tiny_classes(1, held);
+    let tuning = Tuning {
+        max_spares: 0,
+        shed_unused: true,
+        look_every,
+        ..QUIET
+    };
+    let mut all = classes.clone();
+    all.push(busy);
+    let rig: Rig<SimOs<Small>, 64> = domains(width, &all, 512, tuning);
+    let zero = SimCpu::new(0);
+    let cache = rig.cache(&zero);
+    churn(&cache, busy, 3);
+    let count = crate::os::sim::SIM_THREADS / width as usize;
+    assert_eq!(rig.depot.domain_count(), count);
+    for d in 1..count {
+        for &class in &classes {
+            let magazine = cache.area().create(class.magazine()).unwrap();
+            for slot in 1..=2 {
+                magazine.set_object(slot, rig.source.alloc_one(class).unwrap());
+            }
+            magazine.set_level(2);
+            cache.to_domain(Domain::folded(d), class, magazine);
+        }
+    }
+    let left = || {
+        (1..count)
+            .flat_map(|d| classes.iter().map(move |&class| (d, class)))
+            .filter(|&(d, class)| in_pool(&rig, domain(d), class) > 0)
+            .count()
+    };
+    assert_eq!(left(), (count - 1) * held);
+    let before = rig.slabs().slab(cpu0(&rig)).activity();
+    let steps = 8;
+    let mut after_each = Vec::new();
+    for _ in 0..intervals {
+        for _ in 0..steps {
+            rig.os().advance_clock(IDLE_TICKS / steps);
+            for _ in 0..40 {
+                churn(&cache, busy, 3);
+            }
+        }
+        after_each.push(left());
+    }
+    rig.census(&[], false);
+    (after_each, rig.slabs().slab(cpu0(&rig)).activity() - before)
+}
+
+fn cpu0<const N: usize>(rig: &Rig<SimOs<Small>, N>) -> Cpu {
+    rig.slabs().cpu(0).unwrap()
+}
+
+/// Review: how long a quiet domain's stacks take to go back grows with how many stacks the other
+/// domains hold, because each look visits one of them and a stack needs two looks in different
+/// intervals before it owes anything. The test of 2, 8 and 64 domains above looks on every slow
+/// path, sixteen times the allocator's rate. At the allocator's rate and the same pace (640
+/// slow paths an interval on the one busy CPU), 63 quiet domains holding five classes each take
+/// 16 intervals to empty and with two classes 7; at ee4c29b, where a look read one class in
+/// every domain, both took 3.
+#[test]
+#[ignore = "review finding: a quiet domain's stacks go back at a rate that falls with the stacks held"]
+fn review_quiet_domains_go_back_at_the_allocators_look_rate() {
+    let mut slowest = 0;
+    for (width, held) in [(32, 2), (8, 2), (8, 5), (1, 2), (1, 5)] {
+        for look_every in [1, super::LOOK_EVERY] {
+            let (left, slow_paths) = quiet_stacks_left(width, held, look_every, 24);
+            let emptied = left
+                .iter()
+                .position(|&n| n == 0)
+                .map_or(usize::MAX, |i| i + 1);
+            std::eprintln!(
+                "{} domains, {held} classes each, a look every {look_every}: {} stacks, \
+                 empty after {emptied} intervals ({} slow paths an interval)",
+                crate::os::sim::SIM_THREADS / width as usize,
+                (crate::os::sim::SIM_THREADS / width as usize - 1) * held,
+                slow_paths / 24,
+            );
+            slowest = slowest.max(emptied);
+        }
+    }
+    assert!(slowest <= 4, "{slowest} intervals");
+}
+
+/// CPUs 1 to 15 park a class in their slabs, their domain's stack and the shared stack and go
+/// quiet; CPU 0, in the same domain, runs another class's slow paths, and its idle checks drain
+/// their slabs into the depot. The objects of the class on the shared stack after each eighth
+/// of an interval, and the shared stack's target.
+fn shared_depth_after_drains(shed_unused: bool, intervals: usize) -> (Vec<usize>, usize) {
+    let (class, busy) = (tiny(0), tiny(1));
+    let magazine = class.magazine().capacity();
+    let tuning = Tuning {
+        max_spares: 2,
+        depot_target: 2 * magazine * class.size(),
+        domain_cap: magazine * class.size(),
+        shed_unused,
+        ..QUIET
+    };
+    let rig: Rig<SimOs<Small>, 16> = Rig::new(&[class, busy], 256, tuning);
+    for n in 1..16 {
+        let quiet = SimCpu::new(n);
+        churn(&rig.cache(&quiet), class, 6 * magazine);
+    }
+    let zero = SimCpu::new(0);
+    let cache = rig.cache(&zero);
+    let target = cache.shared_target(class);
+    assert_eq!(target, magazine);
+    let shared = || in_pool(&rig, Pool::Shared, class);
+    // The pushes of the CPUs' own slow paths were each followed by the check.
+    assert!(shared() <= target + magazine, "{}", shared());
+    let steps = 8;
+    let mut after_each = Vec::new();
+    for _ in 0..intervals * steps {
+        rig.os().advance_clock(IDLE_TICKS / steps as u64);
+        for _ in 0..40 {
+            churn(&cache, busy, 3);
+        }
+        after_each.push(shared());
+    }
+    rig.census(&[], false);
+    (after_each, target)
+}
+
+/// Review: the heartbeat looks at a shared stack's target only in a slow path that pushed on
+/// it, and before that slow path's own sweep and drain. What a drain parks there (and the rest
+/// of a swept spare stack) is therefore never checked. With nothing else pushing the class, the
+/// stack stays over its target until the low-water rule sheds the whole of it, an interval or
+/// two later, and for good where that rule is off. The design says the heartbeat launders the
+/// shared stack while it is over its target, and that a class parks at most the domains' caps
+/// and the shared target.
+#[test]
+#[ignore = "review finding: a drain's pushes on a shared stack are not checked against its target"]
+fn review_a_shared_stack_that_drains_fill_is_laundered_to_its_target() {
+    let magazine = tiny(0).magazine().capacity();
+    let (with_shed, target) = shared_depth_after_drains(true, 5);
+    let (without, _) = shared_depth_after_drains(false, 5);
+    std::eprintln!(
+        "target {target}; shared after each eighth of an interval: {with_shed:?}; \
+         with the low-water rule off: {without:?}"
+    );
+    for depths in [with_shed, without] {
+        assert!(
+            depths.iter().all(|&depth| depth <= target + magazine),
+            "target {target}: {depths:?}"
+        );
     }
 }

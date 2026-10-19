@@ -55,14 +55,16 @@ instruction, and the compiler's model of what it does.
 10, `munmap` 11, `rt_sigaction` 13, `rt_sigprocmask` 14, `madvise` 28, `getpid` 39, `gettid`
 186, `exit_group` 231, `tgkill` 234, `openat` 257, `getrandom` 318, `membarrier` 324. A wrong
 number would make a different call with the same arguments, so each is checked against the
-table; `read`, `close` and `openat` were added for the topology read (`kernel.rs`, KERNEL-10)
-after the review below, and its tests in `kernel.rs` read real files through them.
+table; `read`, `close` and `openat` were added for the topology read (`kernel.rs`, KERNEL-10),
+and its tests in `kernel.rs` read real files through them.
 
 **Machine checks.** `os::linux::syscall::tests::a_call_reaches_the_kernel` (getpid agrees with
 `std::process::id`) and `results_decode_errors`. Every `LinuxOs` test in `kernel.rs` goes
 through this block.
 
 **Review.** 2026-10-17, fresh adversarial reviewer: accepted (register convention, clobbers,
-`preserves_flags`, `nostack` and the red zone, memory, pointer-typed registers).
+`preserves_flags`, `nostack` and the red zone, memory, pointer-typed registers). 2026-10-18,
+another: the sixteen call numbers against `asm/unistd_64.h`, and items 5 and 7 as they now
+read for `openat` and `read`.
 
-Reviewed: 415b07e
+Reviewed: e3614f2
