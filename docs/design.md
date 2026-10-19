@@ -569,7 +569,7 @@ rule that returns it (`docs/research/memory.md` has the measurements behind them
 | The tail of a large block that shrinks in place; the pages behind a move made in pieces | The resize (see "Large objects") | At once |
 | Objects in a magazine that stays loaded | A slow path of the same CPU launders it | Once it has been loaded for an interval |
 | Objects in a CPU's full spares | That CPU's sweep launders one magazine and sends the rest to the depot | Once an interval |
-| Objects in a CPU's stock | The sweep takes the depth not needed during an interval off the class's room, and the stock itself with the full spares; the idle drain takes it with the slab | Once an interval |
+| Objects in a CPU's stock | The sweep takes the depth not needed during an interval off the class's room and returns what lies above the new limit, a magazine a heartbeat; the idle drain takes it with the slab | Once an interval |
 | Objects in a depot stack | A heartbeat launders a magazine from the shared stack. Every stack sheds what it did not need, and each periodic look visits every stack of one other domain whose own CPUs have not looked this interval, the domains in rotation over those that hold magazines, so a domain that goes quiet sheds within a few intervals | While the shared stack is over its target, and for the depth a stack did not need during an interval |
 | Objects in steady circulation | The free that retires a full magazine launders it instead | One retirement in every few |
 | The slab of a CPU the process no longer runs on | The idle drain sends its magazines to the depot (see "Process lifecycle") | After an interval with no slow path there |
