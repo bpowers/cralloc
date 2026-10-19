@@ -65,10 +65,12 @@ that conflicts with a shared reference.
      summary bits. A carve commits the leaf words of every slot starting below the new commit
      frontier (`Layout::leaf_commit`, proved in `leaf_commits_cover_the_committed_slots`) before
      its compare-and-swap publishes that frontier, and the watermark never passes the frontier
-     (both are in the region's one `Grow` word, kept outside the block in `State::headers`
-     and reached through `grow`, which needs no `unsafe`; a carve advances the watermark only
-     when the
-     frontier covers the new slots). `validate` checks `slot < carved` before `release`;
+     (both are in the region's one `Grow` word, reached through `grow`: for a small class it
+     is kept outside the block in `State::headers` and needs no `unsafe`; for a large class it
+     is word 0 of the block, in the fixed part committed before the region is tagged, and
+     reached through `meta` as any other word of it; a carve advances the watermark only when
+     the frontier covers the new slots). A large class's leaf bitmap is in that fixed part too,
+     so every leaf word of a large class is committed whatever the watermark. `validate` checks `slot < carved` before `release`;
      `purge_unit` looks only at slots below the watermark (`unit_below`); a descent reaches a
      leaf word only through a summary bit, and a summary bit is set only by `tree::up`, which
      starts at a leaf word that was just freed into, hence below the watermark.

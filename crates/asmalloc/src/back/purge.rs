@@ -1,16 +1,19 @@
 //! Retained memory, its cap, the clocked decay pass and the purge walk.
 //!
 //! **Retained memory** is the back end's estimate of the bytes of free slots in its bitmaps
-//! that are resident, small and large classes in one count. A launder or a free raises it by
+//! that are resident, for small classes and for large ones. A launder or a free raises it by
 //! what it returned. Only two things lower it: reuse (a claim subtracts what it took, less
 //! what the clean bits say was not resident) and purging (the pages returned that were not
 //! already clean). A claim that makes a purged page resident again adds back the rest of that
 //! page.
 //!
-//! The count is signed and changed by plain atomic adds and subtracts, and read as zero when
-//! negative. A subtraction can run before the addition it answers (a claim takes a slot between
-//! another thread's release of it and that thread's add); a count that stopped at zero would
-//! lose the subtraction and keep the addition, and drift upward for ever.
+//! Each count is two tallies that only grow, on lines of their own: what frees, launders and
+//! revivals counted in, and what claims, fills and purges counted out (`State::retained`), so that a
+//! thread that only frees and one that only allocates do not take one line from each other. The
+//! count is their difference, read as signed and as zero when negative. A subtraction can run
+//! before the addition it answers (a claim takes a slot between another thread's release of it
+//! and that thread's add); a count that stopped at zero would lose the subtraction and keep the
+//! addition, and drift upward for ever.
 //!
 //! The count is never reset. Free slots on pages that also hold live ones cannot be purged
 //! and stay counted for as long as they are free. An earlier version set the count to zero
@@ -28,7 +31,9 @@
 //! whatever the slot size. Fills take the lowest addresses, so what is being reused sits at
 //! the bottom and the top-down pass mostly leaves it alone; what stays free is returned over
 //! several intervals. A heap whose free memory is all fragmentation costs one walk of its
-//! bitmaps an interval, in steps, and nothing between passes. A clock that has gone back
+//! bitmaps an interval, in steps. Between passes a heartbeat reads the decay word and the clock,
+//! and the tallies only when a pass is due; a due pass that finds nothing retained ends as it
+//! starts, so the next is an interval later. A clock that has gone back
 //! (a resume, a restored checkpoint) restarts the interval from the new time, so decay waits
 //! at most one interval for it. `decay_pass`, for the background thread's `maintain`, takes
 //! those steps in one call, until the pass it started or found has ended.
