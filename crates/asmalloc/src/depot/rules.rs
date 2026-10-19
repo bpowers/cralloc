@@ -29,6 +29,7 @@ const QUIET: Tuning = Tuning {
     refresh_every: 0,
     age_limit: false,
     shed_unused: false,
+    stock: false,
 };
 
 /// Small classes whose magazines hold two objects, largest first, so a few calls cross many
@@ -1009,4 +1010,199 @@ fn a_look_from_elsewhere_skips_a_domain_that_looked_this_interval() {
     cache.look_elsewhere(here, 0, rig.os().ticks());
     assert_ne!(water(), before, "a domain that has not is looked at");
     rig.census(&[], false);
+}
+
+/// What a run of bursts of one class did: CPU `alloc` allocates `burst` objects, CPU `free`
+/// frees them all, `rounds` times.
+struct Bursts {
+    /// Pushes and pops of the domain's full and empty stacks of the class in the last round.
+    depot_last_round: u32,
+    /// The class's credits on each CPU at the end.
+    stock: [u64; 2],
+    /// The most objects the CPUs' spares held at the end of any round, each CPU apart.
+    spares_most: [usize; 2],
+}
+
+/// `credit`, if not zero, is given to the class on both CPUs before the first round, as a
+/// contended round trip would earn it.
+fn bursts(stock: bool, alloc: i32, free: i32, burst: usize, rounds: usize, credit: u32) -> Bursts {
+    let class = tiny(0);
+    let tuning = Tuning { stock, ..QUIET };
+    let rig: TestRig = Rig::new(&[class], 4 * burst, tuning);
+    if credit > 0 {
+        for n in 0..2 {
+            let slab = rig.slabs().slab(cpu(&rig, n));
+            slab.stock(class)
+                .store(super::stock::credits(credit, credit), Relaxed);
+        }
+    }
+    let (a, f) = (SimCpu::new(alloc), SimCpu::new(free));
+    let (allocator, freer) = (rig.cache(&a), rig.cache(&f));
+    let pool = Pool::Domain(Domain::ZERO);
+    let versions = || {
+        rig.depot
+            .full(pool, class)
+            .version()
+            .wrapping_add(rig.depot.empty(pool, class.magazine()).version())
+    };
+    let mut seen = Bursts {
+        depot_last_round: 0,
+        stock: [0; 2],
+        spares_most: [0; 2],
+    };
+    for _ in 0..rounds {
+        let before = versions();
+        let objects: Vec<_> = (0..burst).filter_map(|_| allocator.alloc(class)).collect();
+        assert_eq!(objects.len(), burst);
+        for object in objects {
+            freer.free(class, object);
+        }
+        seen.depot_last_round = versions().wrapping_sub(before);
+        for n in 0..2 {
+            let held = in_spares(&rig, n, class).len();
+            seen.spares_most[n as usize] = seen.spares_most[n as usize].max(held);
+        }
+    }
+    for n in 0..2 {
+        let slab = rig.slabs().slab(cpu(&rig, n));
+        // The credits: a CPU that sent magazines away may have its marks set.
+        seen.stock[n as usize] = slab.stock(class).load(Relaxed).addr() as u64 & 0x3fff_ffff;
+    }
+    rig.census(&[], false);
+    seen
+}
+
+/// A thread that allocates a burst and frees it on one CPU sends magazines to the depot and
+/// takes them back. With no other thread on the stack, nothing contends, and the CPU keeps no
+/// stock: the request handler on a quiet server, whose exchanges are cheap.
+#[test]
+fn a_cpu_that_round_trips_on_an_uncontended_stack_keeps_no_stock() {
+    let without = bursts(false, 0, 0, 40, 12, 0);
+    let with = bursts(true, 0, 0, 40, 12, 0);
+    assert!(
+        without.depot_last_round >= 30,
+        "{}",
+        without.depot_last_round
+    );
+    assert_eq!(with.stock, [0, 0]);
+    assert_eq!(with.depot_last_round, without.depot_last_round);
+    assert_eq!(with.spares_most, without.spares_most);
+}
+
+/// A CPU whose class has earned credit keeps its bursts: the depot sees none of them.
+#[test]
+fn a_cpu_with_credit_keeps_its_bursts() {
+    let without = bursts(false, 0, 0, 40, 12, 0);
+    let with = bursts(true, 0, 0, 40, 12, 40);
+    assert_eq!(with.depot_last_round, 0);
+    assert!(with.spares_most[0] > without.spares_most[0]);
+}
+
+/// A pipeline (one CPU only allocates the class, the other only frees it) never takes back a
+/// kind of magazine it sent away, so stock changes nothing: the same depot traffic, the same
+/// spares and no credit on either CPU. This is the property that keeps `pipeline` and `mpmc`
+/// jobs as they were.
+#[test]
+fn a_one_way_flow_behaves_as_without_stock() {
+    for (alloc, free) in [(1, 0), (0, 1)] {
+        let without = bursts(false, alloc, free, 40, 12, 0);
+        let with = bursts(true, alloc, free, 40, 12, 0);
+        assert_eq!(with.stock, [0, 0]);
+        assert_eq!(with.depot_last_round, without.depot_last_round);
+        assert_eq!(with.spares_most, without.spares_most);
+    }
+}
+
+/// Stock is bounded by the spare budget less what the fixed limits could park: a CPU that
+/// round-trips a burst far bigger than that keeps no more in its spares than its fixed limit and
+/// that room.
+#[test]
+fn stock_stays_within_the_spare_budget() {
+    let class = tiny(0);
+    let tuning = Tuning {
+        stock: true,
+        spare_budget: 8 << 20,
+        ..QUIET
+    };
+    let fixed = super::spare_limit(tuning, class, crate::front::Spare::Full);
+    let bound = (fixed + super::stock::room(tuning) / (2 * class.size())) * 2;
+    let burst = 4 * bound;
+    let rig: TestRig = Rig::new(&[class], 2 * burst, tuning);
+    let slab = rig.slabs().slab(cpu(&rig, 0));
+    slab.stock(class)
+        .store(super::stock::credits(u32::MAX, u32::MAX), Relaxed);
+    let machine = SimCpu::new(0);
+    let cache = rig.cache(&machine);
+    for _ in 0..8 {
+        churn(&cache, class, burst);
+        let held = in_spares(&rig, 0, class).len();
+        assert!(held <= bound, "{held} > {bound}");
+    }
+    assert!(in_spares(&rig, 0, class).len() > 2, "stock grew");
+    rig.census(&[], false);
+}
+
+/// A class that stops round-tripping while the CPU stays busy with another loses its stock: the
+/// sweep takes the unused depth off its credit and its spares with it.
+#[test]
+fn stock_unused_for_an_interval_goes_back() {
+    let (bursty, busy) = (tiny(0), tiny(1));
+    let tuning = Tuning {
+        stock: true,
+        age_limit: true,
+        look_every: 1,
+        ..QUIET
+    };
+    let rig: TestRig = Rig::new(&[bursty, busy], 256, tuning);
+    let slab = rig.slabs().slab(cpu(&rig, 0));
+    slab.stock(bursty)
+        .store(super::stock::credits(40, 40), Relaxed);
+    let machine = SimCpu::new(0);
+    let cache = rig.cache(&machine);
+    for _ in 0..12 {
+        churn(&cache, bursty, 40);
+    }
+    assert_ne!(slab.stock(bursty).load(Relaxed).addr(), 0);
+    assert!(in_spares(&rig, 0, bursty).len() > 2);
+    let steps = 8;
+    for _ in 0..3 * steps {
+        rig.os().advance_clock(IDLE_TICKS / steps);
+        for _ in 0..40 {
+            churn(&cache, busy, 3);
+        }
+    }
+    assert_eq!(
+        slab.stock(bursty).load(Relaxed).addr() & 0x3fff_ffff,
+        0,
+        "no credit left"
+    );
+    assert!(in_spares(&rig, 0, bursty).is_empty());
+    rig.census(&[], false);
+}
+
+/// A CPU that only allocates a class, filling magazines from the source, sends its empty
+/// magazines to the depot and takes them back to fill: a round trip of empties alone. It keeps
+/// no empty stock, since it has no full stock to free into it.
+#[test]
+fn a_cpu_that_only_allocates_keeps_no_empty_stock() {
+    let class = tiny(0);
+    let tuning = Tuning {
+        stock: true,
+        ..QUIET
+    };
+    let rig: TestRig = Rig::new(&[class], 400, tuning);
+    let machine = SimCpu::new(0);
+    let cache = rig.cache(&machine);
+    let held: Vec<_> = (0..400).filter_map(|_| cache.alloc(class)).collect();
+    assert_eq!(held.len(), 400);
+    let slab = rig.slabs().slab(cpu(&rig, 0));
+    let empties = cache
+        .spare_depth(class, crate::front::Spare::Empty)
+        .unwrap();
+    assert!(
+        empties as usize <= QUIET.max_spares,
+        "{empties} empty spares"
+    );
+    assert_eq!(slab.stock_held().load(Relaxed), 0);
+    rig.census(&held, false);
 }

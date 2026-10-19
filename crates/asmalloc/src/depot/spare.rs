@@ -69,7 +69,11 @@ impl<'a, O: Os, R: Routines, S: Source> Cache<'a, O, R, S> {
         stale: &mut bool,
     ) -> Option<Magazine<'a>> {
         match self.routines.stack_pop(Field::spare(class, kind)) {
-            StackPop::Popped(head) => Some(self.magazine_or_abort(head.addr().get(), class)),
+            StackPop::Popped(head) => {
+                let magazine = self.magazine_or_abort(head.addr().get(), class);
+                self.note_spare_pop(class, kind, &magazine);
+                Some(magazine)
+            }
             StackPop::Empty => {
                 if let Some(Head::Marker(marker)) = self.spare_head(class, kind) {
                     *stale |= !self.is_live(marker);
@@ -106,6 +110,16 @@ impl<'a, O: Os, R: Routines, S: Source> Cache<'a, O, R, S> {
         })
     }
 
+    /// How many magazines the current CPU's spare stack of `kind` for `class` holds, read
+    /// without protection; `None` without a valid CPU or for a stack being drained.
+    pub(super) fn spare_depth(&self, class: SmallClass, kind: Spare) -> Option<u32> {
+        match self.spare_head(class, kind)? {
+            Head::Empty => Some(0),
+            Head::Depth(depth) => Some(depth),
+            Head::Marker(_) => None,
+        }
+    }
+
     /// Pushes a magazine this thread holds, with its level recorded, on the current CPU's spare
     /// stack of `kind` for `class`, if the budget allows. Gives the magazine back if not, or if
     /// the stack is being drained or the thread has no valid CPU. A stack head that is another
@@ -127,7 +141,8 @@ impl<'a, O: Os, R: Routines, S: Source> Cache<'a, O, R, S> {
             Some(Head::Empty) => 0,
             Some(Head::Depth(depth)) => depth,
         };
-        if depth >= limit {
+        let stock = depth >= limit;
+        if stock && !self.stock_admits(class, kind, depth - limit) {
             return Err(magazine);
         }
         magazine.set_record(Record {
@@ -140,7 +155,12 @@ impl<'a, O: Os, R: Routines, S: Source> Cache<'a, O, R, S> {
                 .stack_push(Field::spare(class, kind), magazine.base())
         };
         match pushed {
-            StackPush::Pushed => Ok(()),
+            StackPush::Pushed => {
+                if stock {
+                    self.note_stock_push(class, kind);
+                }
+                Ok(())
+            }
             StackPush::Marker | StackPush::NoCpu => Err(magazine),
         }
     }
@@ -155,7 +175,8 @@ impl<'a, O: Os, R: Routines, S: Source> Cache<'a, O, R, S> {
         stale: &mut bool,
     ) {
         if let Err(magazine) = self.spare_push(class, kind, magazine, stale) {
-            self.to_depot(class, magazine);
+            let contended = self.to_depot(class, magazine);
+            self.note_sent(class, kind, contended);
         }
     }
 }

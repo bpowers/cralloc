@@ -1132,3 +1132,94 @@ Neither touches the two-L3 object crossing directly. That needs fills to prefer 
 domain laundered itself (per-domain regions for a class), and an overflow that reaches the
 other domain only when that domain is short; both are design changes to the depot and back
 end.
+
+# Stock: a CPU keeps what it sends away and takes back, when the depot is contended (2026-10-19)
+
+The second option above, built in its bounded form (`depot/stock.rs`). "main" is 6b7d72d,
+"stock" the branch, "room x4" the branch with four times the room, measured once to show what
+the cap costs.
+
+## The rule
+
+- **Contended round trips.** When a slow path sends a magazine of a class to the depot because
+  its CPU's spare stack of that kind is full, it marks the class's stock word: sent, and
+  contended if a compare-and-swap of that push failed. When the same CPU later takes a magazine
+  of that kind and class back from the depot, the round trip is complete and the marks are
+  cleared; if the push or the pop found its stack contended, the class earns one credit for
+  that kind of spare. Contention is what makes an exchange expensive (sh8bench, above: 1,600
+  cycles, 35% of compare-and-swaps failing); on a stack nobody else is using an exchange is
+  cheap, and stock would only park memory. Stock relieves the contention, the failures stop,
+  and the credit stops growing. A CPU whose traffic in a class goes one way never takes back a
+  kind it sent, and earns nothing. Empty magazines earn credit the same way, and a class keeps
+  no more empty stock than full.
+- **Depth.** A spare stack holds its fixed limit plus its credit, while the CPU's stock (spares
+  past their fixed limits, counted in the objects a full magazine holds) stays within the spare
+  budget less what the fixed limits could park: 1 MiB less 139 KiB, 885 KiB a kind. The fixed
+  limits split the 1 MiB evenly over 44 classes, and most classes' magazines are bigger than
+  their share, so they reach 139 KiB of it. When the room is spent, magazines go to the depot as
+  before.
+- **Disuse.** While a class has credit, its spare pops keep a low-water mark; the sweep that
+  takes each class's full spares once an interval first takes the unused depth off the credit
+  and returns empty spares above the new limit. The idle drain takes stock with the slab.
+- **State.** A word per class in the unused quarter of its slab chunk, beside the spare heads,
+  and a per-CPU count of stock bytes on the activity counter's line: no line a slow path did not
+  already touch. Plain loads and stores, hints; all zero is no stock. The stack protocol, the
+  drain and the fast paths are unchanged; a push and a pop now report whether a
+  compare-and-swap failed.
+
+Two versions came before. Marking the magazine itself (a tag in its record, credit when the CPU
+popped that very magazine back) earned too little: other CPUs take a CPU's magazines first, and
+1.2% of depot pops returned the popper's own, 0.06% under contention. Without the contention
+condition, stock went to every round-tripping CPU: sh8bench 297 ms on one L3, but the RPC
+servers held 2 to 4 MiB more for no speed, and `exchange t2 split` 1.2 MiB more.
+
+## sh8bench
+
+Five interleaved rounds, wall ms and user G-cycles:
+
+| | main | stock | room x4 |
+|---|---:|---:|---:|
+| one L3 | 347, 12.9 | 291, 10.1 | 280, 9.8 |
+| two L3s | 599, 20.8 | 524, 18.9 | 502, 18.3 |
+| suite runner, two L3s, s, and cgroup peak MiB | 0.577, 121 | 0.523, 132 | 0.509, 129 |
+
+## Neighbours
+
+Suite runner, three to six rounds; C programs on one L3 by hand, three rounds:
+
+| Job | main | stock | room x4 | peak main / stock / x4, MiB |
+|---|---:|---:|---:|---|
+| larson 8, one L3, M ops/s | 567 to 588 | 598 to 616 | 606 to 613 | |
+| larson 8, two L3s | 438 | 445 to 462 | 425 | 72 / 75 / 73 |
+| larson-sized 8 | 429 to 431 | 445 to 446 | 442 to 452 | 72 / 74 / 74 |
+| xmalloc-test, one L3, M frees/s | 739 to 753 | 1137 to 1166 | 1162 to 1181 | |
+| mstress, one L3, ms | 269 to 275 | 256 to 270 | 256 to 268 | |
+| mstress, two L3s, s | 0.258 | 0.273 to 0.283 | 0.262 | 139 to 140 / 140 / 143 |
+| mpmc p4 c4, ns | 5.15 | 5.09 | 5.08 | 5.9 / 5.9 / 5.9 |
+| exchange t2 split, ns | 15.25 to 15.48 | 15.36 to 15.51 | 15.30 to 15.68 | 2.8 to 2.9 / 2.8 to 2.9 / 2.7 to 2.9 |
+| rpc echo c64 | 46659 | 46472 | 46212 | 5.7 / 5.7 / 5.7 |
+| rpc log c64 | 124163 to 124687 | 123257 to 124359 | 125154 to 125706 | 7.5 to 8.6 / 8.4 to 8.5 / 7.5 to 8.3 |
+| rpc log c256 | 120480 | 120430 | 121055 | runs 10.9 to 14.2 / 10.4 to 14.6 (medians 12.8 / 12.6) |
+
+The pipelines, mpmc p3 c1, forkjoin, spawn, churn, BTreeMap, vecgrow, JSON, tree depth 20 and
+the smoke set's other jobs are level within their spread; pipeline x3 and mpmc p3 c1 peaks 4.9
+and 3.5 against 4.6 and 3.7 MiB. Memory probes (`worst.sh`, two runs) are level: burst-idle
+218, phase 46 to 54 for both, cpus-few-classes 6.0 to 8.1, threads-few-cpus 15.1 to 15.6,
+sparse 3.5 and 33.2, tiny 0.5 and 0.5.
+
+The tiny probe's 0.5 against 0.8 MiB in the first version was noise: its anonymous resident
+memory is the same 244 KiB in both builds, and its cgroup peak runs 0.5 to 0.8 MiB for either,
+by which run reads the binary's pages first. A process that never sends a magazine to the
+depot never writes a stock word.
+
+mstress on two L3s is slower with stock in two sessions (0.258 against 0.273 and 0.283 s), at
+cycles within 2% (3.63 against 3.71 G, the allocator's share level); on one L3 it is level.
+Not explained; the cycles say it is not the allocator's own work.
+
+## What is left
+
+On one L3, 291 against mimalloc's 225 ms: the room, the refresh rule's launders and the
+exchanges the stock does not cover. On two L3s, 524 against 250 to 330: objects that still
+cross through the shared stack and the bitmaps when a burst outruns the room. Four times the
+room buys another 11 ms on one L3 and 22 ms on two, at the same peak within the spread (129
+against 132 MiB), and larson, mstress and RPC no differently.

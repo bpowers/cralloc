@@ -52,6 +52,7 @@ mod slow;
 mod source;
 mod spare;
 mod stack;
+mod stock;
 #[cfg(test)]
 pub(crate) mod test_rig;
 #[cfg(test)]
@@ -118,6 +119,10 @@ pub struct Tuning {
     pub age_limit: bool,
     /// Whether depot stacks shed the depth they did not need during an interval (`shed.rs`).
     pub shed_unused: bool,
+    /// Whether a CPU keeps stock: spares beyond `max_spares` for a class whose magazines it
+    /// has sent to the depot and taken back, within the bytes the fixed limits could park on
+    /// one CPU (`stock.rs`).
+    pub stock: bool,
 }
 
 impl Tuning {
@@ -131,6 +136,7 @@ impl Tuning {
         refresh_every: REFRESH_EVERY,
         age_limit: true,
         shed_unused: true,
+        stock: true,
     };
 }
 
@@ -483,15 +489,16 @@ impl<'a, O: Os, R: Routines, S: Source> Cache<'a, O, R, S> {
         (bytes / class.size()).max(class.magazine().capacity())
     }
 
-    /// Sends a magazine this thread holds to the depot for the domain the thread is in.
-    fn to_depot(&self, class: SmallClass, magazine: Magazine<'_>) {
-        self.to_domain(self.here(), class, magazine);
+    /// Sends a magazine this thread holds to the depot for the domain the thread is in. Whether
+    /// a compare-and-swap of the push that took it failed: whether the stack was contended.
+    fn to_depot(&self, class: SmallClass, magazine: Magazine<'_>) -> bool {
+        self.to_domain(self.here(), class, magazine)
     }
 
     /// Sends a magazine this thread holds to `domain`'s stacks: its class's stack if it has
     /// objects, else its size's empty stack, if that is under its cap; else to the shared
-    /// stack of the same kind.
-    fn to_domain(&self, domain: Domain, class: SmallClass, magazine: Magazine<'_>) {
+    /// stack of the same kind. Whether the push that took it met contention.
+    fn to_domain(&self, domain: Domain, class: SmallClass, magazine: Magazine<'_>) -> bool {
         let pool = Pool::Domain(domain);
         let level = magazine.level() as u32;
         let overflow = if level > 0 {
@@ -505,7 +512,7 @@ impl<'a, O: Os, R: Routines, S: Source> Cache<'a, O, R, S> {
                     if pushed.onto_empty {
                         self.hold(domain, class);
                     }
-                    return;
+                    return pushed.contended;
                 }
                 Err(magazine) => magazine,
             }
@@ -517,18 +524,20 @@ impl<'a, O: Os, R: Routines, S: Source> Cache<'a, O, R, S> {
                 1,
                 self.empty_cap(class),
             ) {
-                Ok(_) => return,
+                Ok(pushed) => return pushed.contended,
                 Err(magazine) => magazine,
             }
         };
-        self.to_shared(class, overflow);
+        self.to_shared(class, overflow)
     }
 
-    /// Sends a magazine this thread holds to the shared stacks.
-    fn to_shared(&self, class: SmallClass, magazine: Magazine<'_>) {
+    /// Sends a magazine this thread holds to the shared stacks. Whether the push met
+    /// contention.
+    fn to_shared(&self, class: SmallClass, magazine: Magazine<'_>) -> bool {
         let level = magazine.level() as u32;
         if level > 0 {
-            self.depot
+            let contended = self
+                .depot
                 .full(Pool::Shared, class)
                 .push(self.area, magazine, level);
             let seen = self.overflowed.get();
@@ -536,20 +545,21 @@ impl<'a, O: Os, R: Routines, S: Source> Cache<'a, O, R, S> {
                 classes: seen.classes | 1 << (class.ordinal() % SMALL_COUNT),
                 magazines: seen.magazines.saturating_add(1),
             });
+            contended
         } else {
             self.depot
                 .empty(Pool::Shared, magazine.size())
-                .push(self.area, magazine, 1);
+                .push(self.area, magazine, 1)
         }
     }
 
     /// Sends a magazine this thread holds to `pool`'s stacks, as [`Cache::to_domain`] does for
     /// a domain's.
     fn to_pool(&self, pool: Pool, class: SmallClass, magazine: Magazine<'_>) {
-        match pool {
+        let _ = match pool {
             Pool::Domain(domain) => self.to_domain(domain, class, magazine),
             Pool::Shared => self.to_shared(class, magazine),
-        }
+        };
     }
 
     /// Returns the objects of a magazine this thread holds to the source, in one call, and

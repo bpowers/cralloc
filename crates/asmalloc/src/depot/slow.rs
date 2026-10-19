@@ -110,7 +110,10 @@ impl<'a, O: Os, R: Routines, S: Source> Cache<'a, O, R, S> {
         }
         let size = class.magazine();
         for pool in [Pool::Domain(self.here()), Pool::Shared] {
-            if let Some(magazine) = self.depot.empty(pool, size).pop(self.area, size) {
+            if let Some((magazine, contended)) =
+                self.depot.empty(pool, size).pop_noting(self.area, size)
+            {
+                self.note_return(class, Spare::Empty, contended);
                 return Some(magazine);
             }
         }
@@ -147,7 +150,10 @@ impl<'a, O: Os, R: Routines, S: Source> Cache<'a, O, R, S> {
         let size = class.magazine();
         for pool in [Pool::Domain(self.here()), Pool::Shared] {
             tried.note(pool);
-            if let Some(magazine) = self.depot.full(pool, class).pop(self.area, size) {
+            if let Some((magazine, contended)) =
+                self.depot.full(pool, class).pop_noting(self.area, size)
+            {
+                self.note_return(class, Spare::Full, contended);
                 return Some(magazine);
             }
         }

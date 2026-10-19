@@ -72,8 +72,12 @@ struct World {
 
 impl World {
     fn new(objects: usize, migrations: usize) -> World {
+        World::tuned(objects, migrations, TIGHT)
+    }
+
+    fn tuned(objects: usize, migrations: usize, tuning: super::Tuning) -> World {
         World {
-            rig: Rig::with_os(SimOs::new(), &[tiny_class()], objects, TIGHT),
+            rig: Rig::with_os(SimOs::new(), &[tiny_class()], objects, tuning),
             migrations: AtomicUsize::new(migrations),
             user: Mutex::new(Vec::new()),
         }
@@ -474,6 +478,113 @@ fn an_age_take_and_a_drain_keep_one_owner_under_every_schedule(bounds: Bounds) {
     );
 }
 
+/// A world in which CPU 0 has sent magazines of the tiny class to the depot and taken them back
+/// until it keeps stock (`stock.rs`), with every object back in the heap's hands and the clock
+/// an interval on, so that a sweep settles.
+fn stocked_world(migrations: usize) -> World {
+    let world = World::tuned(
+        6,
+        migrations,
+        super::Tuning {
+            stock: true,
+            ..TIGHT
+        },
+    );
+    let slab = world.rig.slabs().slab(world.rig.slabs().cpu(0).unwrap());
+    slab.stock(tiny_class())
+        .store(super::stock::credits(4, 4), Ordering::Relaxed);
+    let machine = world.machine(THREADS - 1, 0);
+    for _ in 0..4 {
+        for _ in 0..6 {
+            world.alloc(&machine);
+        }
+        for _ in 0..6 {
+            world.free(&machine);
+        }
+    }
+    world.populate();
+    world.rig.os().advance_clock(2 * IDLE_TICKS);
+    world
+}
+
+/// With stock on CPU 0, a thread that round-trips there races a drain of CPU 0 from CPU 1, and
+/// a sweep's settling of the stock: the stock word is a hint, so all that must hold is what
+/// holds without it, one owner for every magazine and object.
+fn stock_keeps_one_owner_under_every_schedule(bounds: Bounds, migrations: usize) {
+    let found = explore(
+        bounds,
+        3,
+        || stocked_world(migrations),
+        |world, me| {
+            if me == 0 {
+                world.run(&world.machine(me, 0), &[Op::Free, Op::Alloc, Op::Free]);
+            } else if me == 1 {
+                let machine = world.machine(me, 1);
+                let cache = world.rig.cache(&machine);
+                cache.drain(world.rig.slabs().cpu(0).unwrap());
+            } else {
+                let machine = world.machine(me, 0);
+                let cache = world.rig.cache(&machine);
+                let cpu = world.rig.slabs().cpu(0).unwrap();
+                cache.settle_stock(cpu, tiny_class());
+                cache.take_spares(cpu, tiny_class());
+            }
+        },
+        |_| {},
+        |world, _| world.check(false),
+    );
+    report("stock", found);
+}
+
+/// Two CPUs each send a magazine of the tiny class to the depot and take one back, racing on
+/// the one stack: credit is earned only by a CPU that took back its own magazine in a schedule
+/// where its push or its pop found the stack contended, and some schedule does. With no
+/// preemption nothing contends, and no schedule earns any.
+fn contended_round_trips_earn_stock(bounds: Bounds) -> usize {
+    let earned = AtomicUsize::new(0);
+    let found = explore(
+        bounds,
+        2,
+        || {
+            World::tuned(
+                8,
+                0,
+                super::Tuning {
+                    stock: true,
+                    max_spares: 0,
+                    ..TIGHT
+                },
+            )
+        },
+        |world, me| {
+            let machine = world.machine(me, me);
+            // A burst of two magazines and its frees: the second magazine of each goes to the
+            // depot both ways.
+            let cache = world.rig.cache(&machine);
+            let held: Vec<_> = (0..4).filter_map(|_| cache.alloc(tiny_class())).collect();
+            for object in held.iter().rev() {
+                cache.free(tiny_class(), *object);
+            }
+            let again: Vec<_> = (0..4).filter_map(|_| cache.alloc(tiny_class())).collect();
+            for object in again {
+                cache.free(tiny_class(), object);
+            }
+        },
+        |_| {},
+        |world, _| {
+            world.check(false);
+            for n in 0..2 {
+                let slab = world.rig.slabs().slab(world.rig.slabs().cpu(n).unwrap());
+                if slab.stock(tiny_class()).load(Ordering::Relaxed).addr() & 0x3fff_ffff != 0 {
+                    earned.fetch_add(1, Ordering::SeqCst);
+                }
+            }
+        },
+    );
+    report("contended round trips", found);
+    earned.load(Ordering::SeqCst)
+}
+
 /// Two threads push and pop one depot stack directly (`Depot.tla`): the version counter keeps
 /// every magazine with one owner, and a capped push that gives its magazine back changes
 /// nothing.
@@ -844,6 +955,32 @@ fn a_fence_aborts_the_sequence_in_flight_on_its_cpu() {
 /// quick runs and fail the full ones.
 mod run {
     use super::*;
+
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn only_contended_round_trips_earn_stock() {
+        assert_eq!(
+            super::contended_round_trips_earn_stock(Bounds::preemptions(0)),
+            0
+        );
+        assert!(super::contended_round_trips_earn_stock(Bounds::preemptions(1)) > 0);
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn stock_keeps_one_owner_under_every_schedule_quickly() {
+        super::stock_keeps_one_owner_under_every_schedule(Bounds::preemptions(1), 0);
+    }
+
+    #[test]
+    #[cfg(not(debug_assertions))]
+    #[ignore = "slow: run with scripts/gate --all, optimized"]
+    fn stock_keeps_one_owner_under_every_schedule_fully() {
+        // Two preemptions, or one with a move to the other CPU: both together pass the
+        // explorer's bound on executions.
+        super::stock_keeps_one_owner_under_every_schedule(Bounds::preemptions(2), 0);
+        super::stock_keeps_one_owner_under_every_schedule(Bounds::preemptions(1), 1);
+    }
 
     #[test]
     #[cfg_attr(miri, ignore)]

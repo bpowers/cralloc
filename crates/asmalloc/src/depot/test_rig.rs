@@ -45,6 +45,7 @@ pub(crate) const TIGHT: Tuning = Tuning {
     refresh_every: 2,
     age_limit: true,
     shed_unused: true,
+    stock: false,
 };
 
 /// A fake object: an address that is never dereferenced.
@@ -333,7 +334,8 @@ impl<O: Os, const N: usize> Rig<O, N> {
                         );
                         next = magazine.link().load(Relaxed).addr();
                         depth += 1;
-                        assert!(depth < 64, "a spare stack loops");
+                        // Deeper than any stock a test makes: a loop.
+                        assert!(depth < 1 << 16, "a spare stack loops");
                         place_magazine(
                             &magazine,
                             level,

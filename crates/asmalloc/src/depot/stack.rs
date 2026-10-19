@@ -32,6 +32,8 @@ use core::sync::atomic::Ordering::{AcqRel, Acquire, Relaxed, Release, SeqCst};
 pub(crate) struct Pushed {
     /// The stack was empty before it.
     pub(crate) onto_empty: bool,
+    /// A compare-and-swap of the push failed: another thread changed the head meanwhile.
+    pub(crate) contended: bool,
 }
 
 /// A head or a link: a magazine number (zero for none) and a version or object count.
@@ -78,9 +80,16 @@ impl Stack {
 
     /// Pushes a magazine this thread holds, which adds `weight` to the stack's count; afterwards
     /// the stack owns it.
-    pub(crate) fn push<O: Os>(&self, area: Area<'_, O>, magazine: Magazine<'_>, weight: u32) {
+    /// Whether a compare-and-swap of the push failed.
+    pub(crate) fn push<O: Os>(
+        &self,
+        area: Area<'_, O>,
+        magazine: Magazine<'_>,
+        weight: u32,
+    ) -> bool {
         // Without a cap the push cannot give the magazine back.
-        let _ = self.push_under(area, magazine, weight, u32::MAX);
+        self.push_under(area, magazine, weight, u32::MAX)
+            .is_ok_and(|pushed| pushed.contended)
     }
 
     /// Pushes a magazine this thread holds, which adds `weight` to the stack's count, if the
@@ -93,6 +102,7 @@ impl Stack {
         weight: u32,
         cap: u32,
     ) -> Result<Pushed, Magazine<'a>> {
+        let mut contended = false;
         let mut head = Packed::from_word(self.head.load(Acquire));
         loop {
             // The count below is read from the top's link, which may be stale; then the
@@ -125,9 +135,13 @@ impl Stack {
                 Ok(_) => {
                     return Ok(Pushed {
                         onto_empty: head.number == 0,
+                        contended,
                     });
                 }
-                Err(now) => head = Packed::from_word(now),
+                Err(now) => {
+                    contended = true;
+                    head = Packed::from_word(now);
+                }
             }
         }
     }
@@ -138,6 +152,17 @@ impl Stack {
         area: Area<'a, O>,
         size: MagazineSize,
     ) -> Option<Magazine<'a>> {
+        self.pop_noting(area, size).map(|(magazine, _)| magazine)
+    }
+
+    /// Pops a magazine of `size`, which this thread then holds, and says whether a
+    /// compare-and-swap of the pop failed: whether the stack was contended.
+    pub(crate) fn pop_noting<'a, O: Os>(
+        &self,
+        area: Area<'a, O>,
+        size: MagazineSize,
+    ) -> Option<(Magazine<'a>, bool)> {
+        let mut contended = false;
         let mut head = Packed::from_word(self.head.load(Acquire));
         loop {
             let top = MagazineId::new(head.number)?;
@@ -155,8 +180,11 @@ impl Stack {
                 .head
                 .compare_exchange(head.to_word(), new.to_word(), AcqRel, Acquire)
             {
-                Ok(_) => return Some(magazine),
-                Err(now) => head = Packed::from_word(now),
+                Ok(_) => return Some((magazine, contended)),
+                Err(now) => {
+                    contended = true;
+                    head = Packed::from_word(now);
+                }
             }
         }
     }
