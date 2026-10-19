@@ -1,7 +1,7 @@
 //! The heap through `GlobalAlloc`: the process's heap with the generated routines where they
 //! run, and simulated heaps with twins everywhere.
 
-use super::large::HEADROOM;
+use super::large::{HEADROOM, SHRINK_MOVES_BELOW};
 use crate::SimHeap;
 use crate::classes::{Class, MAX_SMALL_SIZE, SmallClass};
 use crate::os::OsError;
@@ -172,7 +172,8 @@ fn realloc_walk<H: Inspect>(heap: &H, top: usize, region: usize) {
         size = next;
     }
     if large_steps >= 4 {
-        // With headroom of HEADROOM times, at most every other doubling moves.
+        // With headroom of HEADROOM times, at most every other doubling moves (with 16, one
+        // in five).
         assert!(
             large_moves * 2 <= large_steps + 1,
             "{large_moves} moves in {large_steps} doublings with headroom {HEADROOM}"
@@ -599,26 +600,95 @@ fn a_thread_without_a_lease_is_served_by_the_back_end() {
     bursts(&heap, 64, burst, 2);
 }
 
+/// A large shrink stays in place unless it leaves less than a `SHRINK_MOVES_BELOW`th of the
+/// block. The simulated regions are too small for a large size to be that little of a slot;
+/// `the_process_heap_moves_a_large_shrink_to_a_sliver` takes the other side.
 #[test]
-fn a_large_shrink_stays_in_place_unless_it_leaves_under_an_eighth_of_the_block() {
+fn a_large_shrink_stays_in_place_unless_it_leaves_a_sliver_of_the_block() {
     let heap = SimHeap::<Shape>::new();
     let l = layout(200 << 10, 8);
     // SAFETY: valid layouts; each block is freed once with the layout it has.
     unsafe {
         let p = heap.alloc(l);
         let q = heap.realloc(p, l, 120 << 10);
-        assert_eq!(q, p, "a shrink to more than an eighth of the slot stays");
+        assert_eq!(q, p, "a shrink to a large part of the slot stays");
         let r = heap.realloc(q, layout(120 << 10, 8), 40 << 10);
-        assert_eq!(r, q, "a shrink to more than an eighth of the slot stays");
+        assert_eq!(r, q, "a shrink to a large part of the slot stays");
         heap.dealloc(r, layout(40 << 10, 8));
-        // Regions of the native shape hold a megabyte slot, whose eighth is a large size.
-        if !cfg!(miri) {
-            let l = layout(1 << 20, 8);
-            let p = heap.alloc(l);
-            let q = heap.realloc(p, l, 100 << 10);
-            assert_ne!(q, p, "a shrink to less than an eighth of the slot moves");
-            heap.dealloc(q, layout(100 << 10, 8));
+    }
+}
+
+/// A block that outgrows its slot by a byte moves once, into a slot with headroom; cut back
+/// to the size it had and grown again across the same boundary, over and over, it stays: the
+/// shrink threshold is well below what a block fills of a slot it moved into.
+#[test]
+fn a_block_resized_back_and_forth_across_its_slot_boundary_settles() {
+    let heap = SimHeap::<Shape>::new();
+    let mut size = 40 << 10;
+    // SAFETY: valid layouts; the block is live where it is resized and freed once with the
+    // layout it has.
+    unsafe {
+        let mut p = heap.alloc(layout(size, 8));
+        let edge = heap.heap.back().unwrap().room(p).unwrap();
+        let mut moves = 0;
+        for _ in 0..10 {
+            for next in [edge + 1, edge] {
+                let q = heap.realloc(p, layout(size, 8), next);
+                assert!(!q.is_null());
+                moves += usize::from(q != p);
+                (p, size) = (q, next);
+            }
         }
+        assert_eq!(moves, 1, "the block moved {moves} times in 20 resizes");
+        heap.dealloc(p, layout(size, 8));
+    }
+}
+
+/// The room a block moves in with is never written, so it is never charged, kept or purged: a
+/// grown block freed with huge-page advice adds to the retained count only the pages it may
+/// have written, is kept on that charge within the budget for kept grown blocks, and a trim
+/// takes back exactly what was counted.
+#[test]
+#[cfg_attr(miri, ignore)]
+fn the_room_a_grown_block_never_wrote_is_never_charged_kept_or_purged() {
+    use crate::back::policy::{STAGGER_ROOM, kept_grown};
+    // The block's charge must fit the budget for the slot to be kept.
+    const _: () = assert!(kept_grown(crate::os::sim::Native::GEOMETRY) >= 2 * (128 << 10));
+    use crate::os::HugePages;
+    use crate::os::sim::Shape as _;
+    let heap = SimHeap::<crate::os::sim::Native>::new();
+    let geometry = crate::os::sim::Native::GEOMETRY;
+    let huge = geometry.huge_page_size();
+    let (small, grown) = (layout(40 << 10, 8), layout(80 << 10, 8));
+    // SAFETY: valid layouts; each block is written within its size and freed once with the
+    // layout it has.
+    unsafe {
+        let p = heap.alloc(small);
+        fill(p, small.size(), 1);
+        // Doubling past a huge page, densely: a move into a slot with headroom, and advice.
+        let q = heap.realloc(p, small, grown.size());
+        fill(q, grown.size(), 2);
+        let back = heap.heap.back().unwrap();
+        let slot = match back.lookup(q) {
+            Some(crate::back::Kind::Slot(class)) => class.size(),
+            other => panic!("{other:?}"),
+        };
+        let most = (grown.size() + STAGGER_ROOM).next_multiple_of(huge);
+        assert!(slot >= 2 * most, "a slot of {slot}");
+        let advised = || heap.os().huge_pages(ptr::NonNull::new(q).unwrap());
+        assert_eq!(advised(), Some(HugePages::Prefer));
+        let before = back.retained_large();
+        heap.dealloc(q, grown);
+        let charge = back.retained_large() - before;
+        assert!(
+            (grown.size()..=most).contains(&charge),
+            "charged {charge} for a block of {} in a slot of {slot}",
+            grown.size()
+        );
+        assert_eq!(advised(), Some(HugePages::Prefer), "the slot was kept");
+        let held = back.retained();
+        assert_eq!(back.trim(), held, "the purge takes back what was counted");
+        assert_eq!(back.retained(), 0);
     }
 }
 
@@ -713,7 +783,8 @@ fn large_frees_find_the_class_from_the_address() {
                 regions << heap.heap.back().unwrap().space().plan().region_shift()
             }
         };
-        assert!(slot >= HEADROOM * (50 << 10), "{slot}");
+        let region = heap.heap.back().unwrap().space().plan().region_size();
+        assert!(slot >= (HEADROOM * (50 << 10)).min(region), "{slot}");
         // What the caller may use is what it asked for, to a page, not the headroom.
         let page = heap
             .heap
@@ -1037,6 +1108,30 @@ mod process {
         assert_eq!(named(), 1);
         every_class(&Asmalloc, 1);
         Asmalloc::maintain();
+    }
+
+    /// What the simulated heaps cannot show: a large block cut to a sliver of its slot, under
+    /// a `SHRINK_MOVES_BELOW`th of it, moves to a block of its size, and one cut to just above
+    /// that stays.
+    #[test]
+    fn the_process_heap_moves_a_large_shrink_to_a_sliver() {
+        let l = layout(4 << 20, 8);
+        // SAFETY: valid layouts; each block is freed once with the layout it has.
+        unsafe {
+            let p = Asmalloc.alloc(l);
+            let room = crate::heap::global::process()
+                .heap()
+                .back()
+                .unwrap()
+                .room(p)
+                .unwrap();
+            let sliver = room / SHRINK_MOVES_BELOW;
+            let q = Asmalloc.realloc(p, l, sliver + 4096);
+            assert_eq!(q, p, "a shrink to just above the threshold stays");
+            let r = Asmalloc.realloc(q, layout(sliver + 4096, 8), sliver - 4096);
+            assert_ne!(r, q, "a shrink to under the threshold moves");
+            Asmalloc.dealloc(r, layout(sliver - 4096, 8));
+        }
     }
 
     #[test]

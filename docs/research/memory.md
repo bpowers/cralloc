@@ -1674,6 +1674,200 @@ for the 4 MiB loop); it is not adopted here, since it moves every benchmark's co
 baselines. Instead the job no longer pushes (`baselines.md`, section 14), and its numbers
 above are not comparable with later ones.
 
+### Headroom for growing blocks
+
+2026-10-18, later, at main `32eb3b0` (variants) and `e486bc4` (the confirming run). A block that
+outgrows its slot moves to one with `HEADROOM` times the room it asked for. At four, half the
+cycles of a buffer grown to 4 MiB and freed were `memmove` in its moves. Since a slot is
+charged, kept and purged by its pages that are not clean, room nobody writes costs no memory,
+so a larger factor costs only address space and commit charge. Now it is sixteen
+(`heap/large.rs`), with a fallback to four and then none, and the shrink threshold moved with
+it. A room past a region is now cut to a region, where it used to be dropped, which left a
+block over a quarter of a region at 4 (a sixteenth at 16) to move at every doubling.
+
+**Bytes copied.** A doubling buffer lands in the class above `H` times its size plus the
+stagger's 4 KiB. That class is `1.25 H` times the size, so for `H = 2^k` the buffer moves once
+every `k + 1` doublings. Averaged over final sizes it copies about `1/(k+1)` of its final size:
+a third at 4, a quarter at 8, a fifth at 16, a sixth at 32. Any one final size sees a
+sawtooth: right after a move it has just copied half of itself, whatever the factor. Counted
+with `vecgrow ... moves=1`, MiB copied by blocks above 32 KiB, and moves, per repetition:
+
+| Final | 4 (main) | 8 | 16 | 32 |
+|---|---:|---:|---:|---:|
+| 1 MiB | 0.25 / 1 | 0.50 / 1 | 0 / 0 | 0 / 0 |
+| 2 MiB | 0.25 / 1 | 0.50 / 1 | 1.00 / 1 | 0 / 0 |
+| 4 MiB | 2.25 / 2 | 0.50 / 1 | 1.00 / 1 | 2.00 / 1 |
+| 8 MiB | 2.25 / 2 | 0.50 / 1 | 1.00 / 1 | 2.00 / 1 |
+| 16 MiB | 2.25 / 2 | 8.50 / 2 | 1.00 / 1 | 2.00 / 1 |
+| 32 MiB | 18.25 / 3 | 8.50 / 2 | 1.00 / 1 | 2.00 / 1 |
+| 64 MiB | 18.25 / 3 | 8.50 / 2 | 33.00 / 2 | 2.00 / 1 |
+| 128 MiB | 18.25 / 3 | 8.50 / 2 | 33.00 / 2 | 2.00 / 1 |
+| 256 MiB | 146.25 / 4 | 136.50 / 3 | 33.00 / 2 | 130.00 / 2 |
+| mean copied / final | 0.325 | 0.274 | 0.208 | 0.166 |
+
+**Time.** The grow-and-free loop at each final size, thousands of cycles a repetition (CPU 2,
+the builds interleaved in random order, five rounds, medians; `reps` 4000/MiB, at least 60):
+
+| Final | 4 | 8 | 16 | 32 | glibc | jemalloc |
+|---|---:|---:|---:|---:|---:|---:|
+| 1 MiB | 55.2 | 73.3 | 40.6 | 40.0 | 33.4 | 42.0 |
+| 2 MiB | 111.7 | 132.3 | 165.5 | 93.5 | 80.6 | 167.9 |
+| 4 MiB | 341.6 | 218.2 | 252.0 | 347.1 | 172.4 | 390.9 |
+| 8 MiB | 525.0 | 380.9 | 416.7 | 514.9 | 352.5 | 4,968 |
+| 16 MiB | 1,528 | 2,045 | 1,417 | 1,530 | 689 | 15,154 |
+| 32 MiB | 5,850 | 6,530 | 3,308 | 3,768 | 22,464 | 39,485 |
+| 64 MiB | 14,741 | 16,261 | 19,932 | 12,567 | 50,861 | 100,341 |
+| geomean vs 4 | | +2.7% | -10.7% | -14.5% | -1.7% | +244% |
+
+Time follows the bytes copied, size by size. Faults a repetition are no higher at 16 than at
+4 at any size. VmHWM is within 1.4 MiB of 4, and 8 is 6 MiB higher from 16 MiB up. Seven
+sizes from 1 MiB do not cover whole periods, so the geomean favours 32 a little. The averages
+of copied bytes are the fairer summary.
+
+The other jobs (`benchrun`, five interleaved rounds, medians, change paired by round against
+4; `r16` is 16 limited to rooms of 256 MiB, above which it takes 4):
+
+| Job | 4 | 8 | 16 | 32 | r16 | glibc | jemalloc |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| vecgrow 1x256Mi, cycles/element | 3.33 | 3.32 (-0.0%) | 2.13 (-35.6%) | 3.19 (-4.3%) | 2.10 (-35.3%) | 6.81 | 14.83 |
+| the same, faults / peak MiB | 1,454 / 259.8 | 1,491 / 266.0 | 897 / 258.5 | 1,367 / 259.5 | 889 / 258.3 | 262,166 / 257.1 | 517,967 / 264.4 |
+| vecgrow 64x4Mi, cycles/element | 6.90 | 7.93 (+15.1%) | 6.47 (-6.2%) | 6.50 (-5.7%) | 6.41 (-7.3%) | 8.88 | 8.80 |
+| the same, faults / peak MiB | 137,557 / 279.4 | 282,480 / 277.6 | 184,881 / 277.3 | 122,497 / 277.7 | 184,881 / 277.2 | 272,625 / 269.2 | 246,703 / 303.1 |
+| large pipeline, ns/alloc | 62.1 | 62.3 | 62.4 | 62.1 | 62.7 | 336.9 | 303.1 |
+| largepair, ns | 67.4 | 67.6 | 67.4 | 67.5 | 67.8 | 8.1 | 132.1 |
+
+`main` measured as 4 throughout, within 1%. The pipeline and `largepair` never resize, and
+they moved by under 1%. `r16` is 16 on every job here; it differs only for blocks past 16 MiB
+that grow on past 256 MiB, which it copies more.
+
+**Why 16 loses the 64 MiB loop.** It is the copy, not faults. Per repetition (40
+repetitions, three interleaved runs; huge faults from `thp_fault_alloc`, calls by `strace -c`,
+user cycles split by `perf record -e cycles:u`):
+
+| | 4 | 16 |
+|---|---:|---:|
+| MiB copied, moves | 18.25, 3 | 33.0, 2 |
+| user kcycles | 5,000 to 5,700 | 8,700 to 10,400 |
+| of them `memmove` / `memset` | 28% / 66% | 57% / 36% |
+| kernel kcycles | 7,600 to 9,600 | 8,100 to 9,600 |
+| faults, of them huge | 68.7, 40 | 56.0, 48 |
+| `madvise`, `mprotect` | 19, 1.9 | 26, 1.9 |
+
+At 4 the last move is to 32 MiB, copying 16, and the 160 MiB slot then holds 64 MiB. At 16 the
+last move is to 64 MiB, copying 32. That copy also costs twice as much a byte (158k against
+77k cycles a MiB), since a 32 MiB source no longer fits the L3. The `memset` is the same at
+both. A single buffer grows in slot 0 of each class, which has no stagger, so it loses no huge
+page in place (below).
+
+**The 64 vectors and huge pages.** At 8 and 16 the 64-vector job faults more (twice and 1.35
+times as often) because more of its growth is in place, and in-place growth loses huge pages.
+Each slot starts its block at a different stagger, so a block of exactly 2 MiB ends a few
+bytes into the next huge page. Its advice is rounded down (`region::advise_grown`), so writing
+those bytes faults a small page there. At the next growth that huge page is advised but
+already has a page table, and it stays small: one huge page of each in-place doubling. That
+spill page is one the block can write, so advising it at the growth, before the program
+writes it, is the fix at the cause. Measured (five interleaved rounds, medians):
+
+| `vecgrow 64x4Mi` | cycles/element | faults | peak MiB |
+|---|---:|---:|---:|
+| 16 | 5.86 | 184,880 | 277.3 |
+| 16, the spill page advised | 4.46 (-24.5%) | 56,108 | 403.0 |
+| 4 | 5.90 | 137,557 | 279.2 |
+| 4, the spill page advised | 6.38 (+8.4%) | 137,557 | 403.9 |
+
+The 1 and 4 MiB loops and 1x256Mi are unchanged by it, within 0.3%. It costs 126 MiB of peak:
+a buffer that stops at a multiple of a huge page holds one more whole huge page for the few
+bytes it wrote there. It was not adopted. Starting a grown block unstaggered would remove the
+spill, but this is the case the stagger is for: 64 buffers of 4 MiB walked together took 40.9
+cycles an element at slot starts and 12.0 staggered (`zen5-roofline.md`, section 7). Any
+stagger smaller than a huge page makes a block of `k` huge pages span `k + 1`, so the choice is
+between that page's memory and its faults.
+
+**Address space and commit charge.** What large classes hold at exit (memstat builds, one run
+each): regions assigned, and committed MiB, which is the commit charge under strict
+overcommit and equals what was carved:
+
+| Job | 4 | 8 | 16 | 32 |
+|---|---:|---:|---:|---:|
+| 1 MiB loop | 2 / 2.9 | 2 / 10.8 | 1 / 1.3 | 1 / 2.6 |
+| 4 MiB loop | 3 / 23.0 | 2 / 10.8 | 2 / 41.4 | 2 / 162.6 |
+| 64 MiB loop | 4 / 183 | 3 / 171 | 3 / 1,321 | 2 / 163 |
+| vecgrow 64x4Mi | 3 / 1,460 | 2 / 680 | 2 / 2,640 | 4 / 10,400 |
+| vecgrow 1x256Mi | 5 / 1,463 | 4 / 2,731 | 3 / 1,321 | 3 / 4,259 |
+
+A growing buffer is charged the whole slot it ends in. At factor `H` that is `1.25 H / 2^j`
+times its final size, for a final size `j` doublings past its last move: at 4 between 1.25
+and 5 times (a mean of 2.9 over sizes), at 16 between 1.25 and 20 (mean 7.75), and at 32 up to
+40. Watermarks only rise, so the charge outlives the buffer, though the next buffer of the
+class reuses the slot. `r16` holds the charge of a big buffer to 256 MiB of room: 361 MiB for
+the 64 and 256 MiB jobs where 16 has 1,321. A failed commit is not a failed allocation: the growth falls back to four
+times the room, then to the size alone. Nothing was built for strict overcommit.
+
+**Running out of address space.** Each large class takes regions from one shared pool of
+3,940. A region holds `region / class` slots of the class. Growing buffers of final size `F`
+fit until about `3940 * (slots of the class they end in)` are live, which in the design's
+geometry is hundreds of GiB even at 32. A buffer ends in a slot up to `1.25 H` times its
+size, so the live data that fills the reservation is about 15.4 TiB over that: at least 3 TiB at
+4, 770 GiB at 16, 385 GiB at 32. Under an address-space limit, regions shrink and that bound
+shrinks with them. `bench/probes/memory/grow_exhaust.c`, preloaded under `prlimit --as`:
+buffers grown from 64 KiB by doubling and kept (first byte written, so they cost address
+space only), until an allocation fails:
+
+| Limit (region) | Final | 4 | 16 | 32 |
+|---|---|---:|---:|---:|
+| 16 GiB (2 MiB) | 256 KiB | 11,769 | 3,923 | 3,923 |
+| 16 GiB | 1 MiB | 3,922 | 3,923 | 3,923 |
+| 16 GiB | 4 MiB | 1,960 | 1,961 | 1,961 |
+| 64 GiB (8 MiB) | 256 KiB | 47,220 | 11,805 | 3,935 |
+| 64 GiB | 1 MiB | 3,934 | 11,805 | 3,935 |
+| 64 GiB | 4 MiB | 3,934 | 3,934 | 3,935 |
+
+In every case, at the failure, a plain `malloc` of the size whose growth failed also fails,
+and a 64 KiB one succeeds. The fallback (16, then 4, then the size) never refuses what an exact
+allocation could serve (`a_growing_block_takes_less_headroom_once_the_regions_run_out`).
+Capacity is not the same, though: what was used is gone, since a region is never unassigned.
+Small regions are where it shows. A slot of a whole region holds one buffer, so at 16 and 32
+every buffer of 256 KiB or more takes a region, and 4 fits three or four times more 256 KiB
+buffers. Which factor fits more depends on how the final slot divides a region (16 fits three
+times more 1 MiB buffers at 64 GiB). Below about 8 GiB the heap does not start at all, so this
+is a limit to document, not a case to build for. The design geometry needs hundreds of GiB of
+live buffers to get there.
+
+**The shrink threshold** is twice the factor, 32: a block that moved in fills more than
+`1/(1.25 H)` of its slot. `a_block_that_moved_in_with_headroom_stays_when_it_shrinks_back`
+checks, for factors 4, 8, 16 and 32 and every large class, that a block that outgrew its
+class by a byte and moved stays when cut back. `a_block_resized_back_and_forth_across_its_slot_boundary_settles`
+and the C test of the same name check that twenty resizes across a slot's edge move once.
+The cost: a large block may now shrink in place to a thirty-second of its slot before it moves.
+The pages past it still go back at once, so it holds address space, not memory.
+
+**An untouched tail is never charged, kept or purged**, at 4, 8, 16 and 32 (the crate's
+tests, run with the constant set to each): `the_room_a_grown_block_never_wrote_is_never_charged_kept_or_purged`
+grows a block by a move into a slot of a whole simulated region and frees it with its advice.
+The block is charged its block's huge pages, not the slot, and is kept on that charge. A trim
+then takes back exactly what was counted. The back end's charge tests
+(`a_large_slot_is_charged_its_pages_that_are_not_clean`, the review's random runs) pass
+unchanged.
+
+**Memory after the peak**, as in "Grown blocks kept up to a budget" (preloaded scratch
+program, resident MiB at the free and at 0.5, 1.5 and 2.5 s): 256 MiB at 4 4.3, 2.6, 2.4,
+2.3; at 16 3.0, 2.3, 2.3, 2.3. 4 MiB at 4 8.2, 4.5, 2.6, 2.2; at 16 7.0, 3.2, 2.3, 2.2.
+`sparse_realloc.c` is the same at both (1 to 3 MiB resident at every step for 16, 64 and 256
+MiB). Every case of `worst.sh` ends within 0.5 MiB and peaks within 1 MiB of 4 (none grows a
+block).
+
+**Chosen: 16, the shrink threshold 32.** Against 4 it copies about a third fewer bytes on
+average (0.21 of the final size against 0.33). That is 28 to 34% of the time of the 1 and
+4 MiB loops and of one vector to 256 MiB, and 6% of the 64 vectors. Like any constant, it loses at some sizes: 2 and 64 MiB copy half the final
+size, and the 64 MiB loop is 35% slower, since it copies 33 MiB a repetition where 4
+copies 18. 32 would copy a fifth fewer bytes again for twice the
+address space and commit charge (10.4 GiB committed for 64 buffers of 4 MiB). The gains
+diminish with the logarithm of the factor while the costs grow with the factor, so sixteen,
+not more. The confirming run, final build against main `e486bc4` (five rounds, change paired by round):
+1 MiB loop -28.2%, 4 MiB loop -29.8%, 1x256Mi -34.2%, 64x4Mi -5.8%, the large pipeline
++0.5%, `largepair` -0.5%, tree +0.5%, JSON -1.2%. Against glibc, the loops are now
+1.25 and 1.48 times its time where they were 1.74 and 2.11.
+
 ## Small heaps
 
 2026-10-18, at main `779ba9b` (before) and the branch's tip (after). Every page of an asmalloc
@@ -1915,6 +2109,13 @@ flock /tmp/asmalloc-measure.lock bench/probes/memory/acct.sh $W before,after 5 \
   pipe2 pipe2free exch2 pipex2 mpmc31 mpmc44a churn100 churn1k churn100k churn1M > times.txt
 python3 -I bench/probes/memory/times.py times.txt before before after
 
+# Headroom: variants built with HEADROOM edited, as benchrun `build` entries in allocators.toml
+# (bench/target/asmalloc-<name>); bytes copied by one repetition, then the timed jobs.
+bench/target/asmalloc-h16/release/workload vecgrow vecs=1 max=4Mi reps=1 moves=1
+bench/target/release/benchrun run --suite full,backend --rounds 5 --allocators h4,h16,glibc,jemalloc \
+  --only "vecgrow 1x256Mi,vecgrow 64x4Mi,largepair,sizes=large objects=1M,grow-and-free"
+cc -O2 -o grow_exhaust bench/probes/memory/grow_exhaust.c
+prlimit --as=$((64 << 30)) env LD_PRELOAD=target/release/libasmalloc_preload.so ./grow_exhaust 262144
 # The cap charged to growth: variants built as benchrun `build` entries in allocators.toml
 # (bench/target/asmalloc-<name>), then for each targeted job:
 bench/target/release/benchrun run --suite full --rounds 5 --only "json 32Mi" --allocators before,after,cap16

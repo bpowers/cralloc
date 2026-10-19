@@ -220,10 +220,7 @@ fn realloc_shrinking_a_large_block_returns_its_tail() {
         let p = malloc(big).cast::<u8>();
         p.write_bytes(0xab, big);
         let q = realloc(p.cast(), small).cast::<u8>();
-        assert_eq!(
-            q, p,
-            "a shrink to over an eighth of the slot stays in place"
-        );
+        assert_eq!(q, p, "a shrink to a large part of the slot stays in place");
         let kept = usable(q.cast());
         assert!(kept >= small && kept < small + 4096);
         let r = realloc(q.cast(), big).cast::<u8>();
@@ -315,18 +312,19 @@ fn the_version_is_the_crates() {
     assert_eq!(asmalloc_version(), asmalloc_version());
 }
 
-/// A megabyte is a class. One byte more outgrows the slot and moves to a slot with four times
-/// the room; cut back to a megabyte, the block still fills a fifth of that slot, more than the
-/// eighth under which a shrink moves, so it stays, and so does every later step.
+/// A megabyte takes the slot of the class above it, for the stagger's room. One byte past that
+/// slot outgrows it and moves to a slot with headroom; cut back to the slot's size, the block
+/// still fills more of the new slot than the fraction under which a shrink moves, so it stays,
+/// and so does every later step.
 #[test]
 fn a_block_resized_back_and_forth_across_a_class_boundary_settles() {
-    let size = 1 << 20;
+    let class = Class::of_size((1 << 20) + 4096).unwrap().size();
     let mut moves = 0;
     // SAFETY: the block is live where it is resized and given up once.
     unsafe {
-        let mut p = malloc(size);
+        let mut p = malloc(1 << 20);
         for _ in 0..10 {
-            for next in [size + 1, size] {
+            for next in [class + 1, class] {
                 let q = realloc(p, next);
                 moves += usize::from(q != p);
                 p = q;
@@ -334,7 +332,7 @@ fn a_block_resized_back_and_forth_across_a_class_boundary_settles() {
         }
         free(p);
     }
-    assert!(moves <= 2, "{moves} of 20 calls moved the megabyte");
+    assert_eq!(moves, 1, "{moves} of 20 calls moved the block");
 }
 
 #[test]

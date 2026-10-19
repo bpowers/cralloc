@@ -10,12 +10,13 @@
 //! resizes, restated for a block described by its address: a block stays put when the new size
 //! is still large, fits the slot or run, and, when it shrinks, keeps at least a
 //! [`SHRINK_MOVES_BELOW`](super::large::SHRINK_MOVES_BELOW)th of it; a block that outgrows its
-//! slot moves to one with [`HEADROOM`] times the room, but not past a region.
+//! slot moves to one with [`HEADROOM`](super::large::HEADROOM) times the room, but not past a
+//! region, or with less when that cannot be had.
 //!
 //! Small blocks are not served here: the C layer allocates and frees them with the generated C
 //! routines and, when those miss, the heap's slow paths (`c_alloc_small`, `c_free_small`).
 
-use super::large::{HEADROOM, stays_after_shrink};
+use super::large::{growth_rooms, stays_after_shrink};
 use super::{Heap, Zero};
 use crate::back::Kind;
 use crate::classes::{C_ALIGN, Class, SmallClass};
@@ -77,21 +78,17 @@ impl<O: Os> Heap<O> {
         self.alloc_large(layout, fill).map(|grant| grant.ptr)
     }
 
-    /// Allocates a large block for an object growing to `size` bytes: with [`HEADROOM`] times
-    /// the room if that fits in a region, recording `size` as the size in use, else exactly.
-    /// The request's C class must not be small.
+    /// Allocates a large block for an object growing to `size` bytes: with
+    /// [`HEADROOM`](super::large::HEADROOM) times the room, at most a region, or less if that
+    /// cannot be had (`growth_rooms`), recording `size` as the size in use; else exactly. The
+    /// request's C class must not be small.
     pub(crate) fn alloc_large_grown(&self, size: usize) -> Option<NonNull<u8>> {
-        let roomy = size.checked_mul(HEADROOM).filter(|&room| {
-            self.back()
-                .is_none_or(|back| room <= back.space().plan().region_size())
-        });
-        if let Some(room) = roomy
-            && let Ok(layout) = Layout::from_size_align(room, C_ALIGN)
-            && let Some(grant) = self.alloc_large_using(layout, size, Zero::No)
-        {
-            return Some(grant.ptr);
-        }
-        self.alloc_large_aligned(size, C_ALIGN, false)
+        let region = self.start()?.space().plan().region_size();
+        growth_rooms(size, region)
+            .filter_map(|room| Layout::from_size_align(room, C_ALIGN).ok())
+            .find_map(|layout| self.alloc_large_using(layout, size, Zero::No))
+            .map(|grant| grant.ptr)
+            .or_else(|| self.alloc_large_aligned(size, C_ALIGN, false))
     }
 
     /// Resizes the large block at `ptr`, which holds `old` bytes in use, to `new` bytes in
@@ -288,7 +285,7 @@ mod tests {
             unsafe { heap.heap.resize_in_place_by_address(big, old, new) }
         };
         // Growth past the room from the block to its slot's end moves; within it, and a shrink
-        // to an eighth, stays.
+        // to a large part of it, stays.
         let room = heap.heap.back().unwrap().room(big.as_ptr()).unwrap();
         assert!(room >= 40 << 10);
         assert!(!resize(40 << 10, room + 1));
@@ -312,7 +309,7 @@ mod tests {
             heap.heap.find(grown.as_ptr()),
             Some(Found::Large { size: 40 << 10 })
         );
-        // Room for four times as much: growth to 150 KiB stays.
+        // Room for headroom times as much: growth to 150 KiB stays.
         // SAFETY: the test holds the block and uses none of it meanwhile.
         assert!(unsafe {
             heap.heap
@@ -348,6 +345,47 @@ mod tests {
         // SAFETY: no other thread runs, and the heap and this test store only integers.
         let purged = unsafe { heap.heap.os().is_purged(full, huge) };
         assert!(purged, "a free slot is still resident after a trim");
+    }
+
+    /// When the reservation's regions are all assigned, a growing block that cannot have a slot
+    /// with full headroom takes one with less, then one of its size, and fails only where a
+    /// plain allocation of its size fails too. In the native shape a region is a megabyte, so
+    /// a slot with sixteen times 40 KiB takes a whole one.
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn a_growing_block_takes_less_headroom_once_the_regions_run_out() {
+        let heap = SimHeap::<crate::os::sim::Native>::new();
+        let size = 40 << 10;
+        let back = heap.heap.start().unwrap();
+        let region = back.space().plan().region_size();
+        // Each room the growth may take, most first, and then the size itself.
+        let steps: std::vec::Vec<usize> = growth_rooms(size, region).chain([size]).collect();
+        // A block of each room but the first, freed, so that each of their classes has a
+        // region with free slots when the regions run out.
+        for &room in &steps[1..] {
+            let layout = layout(room, C_ALIGN);
+            let block = heap.heap.alloc_large_using(layout, size, Zero::No).unwrap();
+            // SAFETY: the test's block, freed once.
+            unsafe { heap.heap.free_large(block.ptr) };
+        }
+        let (mut held, mut taken) = (std::vec::Vec::new(), std::vec::Vec::new());
+        while let Some(block) = heap.heap.alloc_large_grown(size) {
+            let Some(Kind::Slot(class)) = back.lookup(block.as_ptr()) else {
+                panic!("a growing block of {size} took a run");
+            };
+            // The largest room the block's slot holds.
+            let step = steps.iter().copied().find(|&s| class.size() >= s).unwrap();
+            if taken.last() != Some(&step) {
+                taken.push(step);
+            }
+            held.push(block);
+        }
+        assert_eq!(taken, steps, "{} blocks", held.len());
+        assert_eq!(heap.heap.alloc_large_aligned(size, C_ALIGN, false), None);
+        for block in held {
+            // SAFETY: the test's blocks, each freed once.
+            unsafe { heap.heap.free_large(block) };
+        }
     }
 
     fn ptr_of(x: &u8) -> *const u8 {
