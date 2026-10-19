@@ -1166,6 +1166,148 @@ fn growth_pays_with_idle_memory_first() {
     }
 }
 
+/// For the two tests below: an old class of `idle_regions` regions that is all fragmentation
+/// (the last slot of every purge unit live, so a walk reads each unit to its last word and
+/// purges nothing), filled long ago; a class filled and freed this interval, twice the cap,
+/// all of it below its frontier; then a third class grows by 16 steps. Returns whether growth
+/// purged anything.
+fn growth_beside_an_idle_fragmented_class(idle_regions: usize) -> bool {
+    let state = state::<Standard>();
+    let back = state.get_or_reserve().unwrap();
+    let os = state.os();
+    let cap = retained_cap(Standard::GEOMETRY);
+    let step = growth_step(Standard::GEOMETRY);
+    let plan = back.space().plan();
+    let page = Standard::GEOMETRY.page_size();
+    let huge = Standard::GEOMETRY.huge_page_size();
+    let small_end = huge_after(plan.region_size() / huge) * huge;
+    let old = small(8);
+    let per_region = plan.slots_per_region(old.class()) as usize;
+    let olds = fill(&back, old, idle_regions * per_region);
+    assert_eq!(olds.len(), idle_regions * per_region);
+    let (_live, freed): (Vec<*mut u8>, Vec<*mut u8>) = olds.iter().partition(|&&p| {
+        let end = back.space().locate(p).unwrap().offset as usize + 8;
+        let unit = if end <= small_end { page } else { huge };
+        end.is_multiple_of(unit)
+    });
+    // SAFETY: the test holds these slots and gives them up.
+    unsafe { back.launder(old, &freed) };
+    forget_reuse(&back);
+    let reused = small(1024);
+    let reuseds = fill(&back, reused, whole_regions(&back, reused, 2 * cap));
+    for &p in &reuseds {
+        paint(p, 1024, 6);
+    }
+    // SAFETY: as above.
+    unsafe { back.launder(reused, &reuseds) };
+    assert!(back.retained() > cap + 16 * step);
+    state
+        .walk
+        .purge_at
+        .store(0, core::sync::atomic::Ordering::Relaxed);
+    let purges = os.calls(Call::Purge);
+    let grower = small(256);
+    let mut grown = Vec::new();
+    for _ in 0..16 {
+        grown.extend(fill(&back, grower, step / 256));
+    }
+    os.calls(Call::Purge) != purges
+}
+
+/// The control for the finding below: with a short circuit above the frontiers, growth over
+/// the cap goes on to its circuit below them and pays with what the interval reused.
+#[test]
+#[cfg_attr(miri, ignore)]
+fn growth_pays_below_the_frontiers_after_a_short_idle_circuit() {
+    assert!(growth_beside_an_idle_fragmented_class(4));
+}
+
+/// Finding (frontier review): `pay_growth` gives its two circuits one budget of
+/// `PURGE_CAP_WORDS`. When the circuit above the frontiers costs more than that, the circuit
+/// below them never starts, in this call or any later one, since each call begins again above
+/// them: growth over the cap then never pays with memory below a frontier, however much there
+/// is. A walk reads a word for every page-sized unit above a frontier, purged or not, and one
+/// for every region of the heap, so any heap with a few tens of MiB carved above its frontiers
+/// in classes that do not get huge pages is in this state. Before frontiers the one circuit
+/// carried on across calls and reached everything.
+#[test]
+#[cfg_attr(miri, ignore)]
+#[ignore = "finding: growth over the cap never purges below the frontiers once a circuit above them costs more than PURGE_CAP_WORDS"]
+fn growth_pays_below_the_frontiers_after_a_long_idle_circuit() {
+    assert!(
+        growth_beside_an_idle_fragmented_class(48),
+        "16 steps of growth over the cap purged nothing of two caps' worth of free pages"
+    );
+}
+
+/// For the two tests below: a program that reuses the same few pages of one class every
+/// interval, beside `fragmented` bytes of another class's free slots that share their pages
+/// with live ones. Returns in how many of the last eight of sixteen intervals the pass purged
+/// the pages being reused.
+fn reuse_beside_fragmentation(fragmented: usize) -> usize {
+    let state = state::<Standard>();
+    let back = state.get_or_reserve().unwrap();
+    let os = state.os();
+    let other = small(1024);
+    let per_page = Standard::GEOMETRY.page_size() / 1024;
+    let others = fill(&back, other, fragmented / 1024 * per_page / (per_page - 1));
+    let (_live, freed): (Vec<*mut u8>, Vec<*mut u8>) = others
+        .iter()
+        .partition(|p| (p.addr() / 1024).is_multiple_of(per_page));
+    // SAFETY: the test holds these slots and gives them up.
+    unsafe { back.launder(other, &freed) };
+    forget_reuse(&back);
+    let class = small(512);
+    let k = 8 * Standard::GEOMETRY.page_size() / 512;
+    let slots = fill(&back, class, k);
+    let mut hit = 0;
+    for interval in 0..16 {
+        for &p in &slots {
+            paint(p, 512, 9);
+        }
+        // SAFETY: the test holds these slots and gives them up.
+        unsafe { back.launder(class, &slots) };
+        os.advance_clock(DECAY_TICKS);
+        beat(&back);
+        // SAFETY: no other thread runs, and the back end and this test store only integers.
+        let purged = unsafe {
+            slots
+                .iter()
+                .any(|&p| os.is_purged(NonNull::new(p).unwrap(), 512))
+        };
+        hit += usize::from(interval >= 8 && purged);
+        assert_eq!(fill(&back, class, k), slots);
+    }
+    hit
+}
+
+/// The control for the finding below: under the cap, the pages reused each interval are
+/// never purged.
+#[test]
+#[cfg_attr(miri, ignore)]
+fn the_pass_spares_reuse_beside_fragmentation_under_the_cap() {
+    let cap = retained_cap(Standard::GEOMETRY);
+    assert_eq!(reuse_beside_fragmentation(cap / 2), 0);
+}
+
+/// Finding (frontier review): free slots on pages that also hold live ones are counted as
+/// retained and can never be purged, so a heap with more than the cap of them is over the cap
+/// for good. Every pass then takes its lap below the frontiers for the excess, and what the
+/// program reuses each interval is purged each interval, as before frontiers: the frontier
+/// protects nothing in any heap whose fragmentation alone exceeds the cap (64 MiB in the
+/// design's geometry), and each pass is two laps instead of one.
+#[test]
+#[cfg_attr(miri, ignore)]
+#[ignore = "finding: with more than the cap of fragmentation, every pass purges below the frontiers"]
+fn the_pass_spares_reuse_beside_fragmentation_over_the_cap() {
+    let cap = retained_cap(Standard::GEOMETRY);
+    assert_eq!(
+        reuse_beside_fragmentation(2 * cap),
+        0,
+        "intervals of the last eight in which the pass purged the pages reused every interval"
+    );
+}
+
 /// Ages every region's frontier by two intervals, as two passes begun with no fill between
 /// them leave it: whatever the test filled is no longer reuse the clocked pass must spare.
 fn forget_reuse<O: Os>(back: &Back<'_, O>) {
