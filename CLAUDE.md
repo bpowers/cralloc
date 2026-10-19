@@ -35,10 +35,10 @@ process light.
 - Timed measurements do not share cores, or a cache, with anything else. Run every build,
   test, model check and proof through `scripts/heavy`: it runs the command at low priority
   on the cores the benchmark suite does not pin to. Run every timed measurement through
-  `scripts/measure`, one teammate at a time, for minutes, not hours; a measurement that
-  also uses cores of the second L3 takes `--both-l3`, which waits for heavy work to finish
-  and holds new heavy work back while it runs. Do not take the lock files by hand: the
-  scripts queue so that neither side starves the other.
+  `scripts/measure`, one teammate at a time, for minutes, not hours (split a long session
+  into pieces); a measurement that also uses cores of the second L3 takes `--both-l3`,
+  which pauses heavy work while it runs. Do not take the lock files by hand, and do not
+  start heavy work any other way, or a measurement cannot pause it.
 - Everything that runs the allocator runs under a memory cap. An uncapped test once took
   57 GiB and the machine with it. `cargo test`, `cargo run` and `cargo bench` are capped by
   the workspace's cargo runner (`scripts/run-capped`: 4 GiB unless `ASMALLOC_TEST_MEM` says

@@ -51,7 +51,9 @@ if command -v systemd-run >/dev/null 2>&1 \
   # systemd client, not the command.
   unit="memlimit-$$-$(date +%s%N)"
   set +e
+  # Under scripts/heavy the scope stays in the slice that a measurement pauses.
   systemd-run --user --scope -q --unit="$unit" \
+    ${ASMALLOC_HEAVY_SLICE:+--slice="$ASMALLOC_HEAVY_SLICE"} \
     -p MemoryMax="$MEM" -p MemorySwapMax=0 \
     -- timeout --signal=TERM --kill-after=30s "$TIMEOUT" "$@"
   status=$?
