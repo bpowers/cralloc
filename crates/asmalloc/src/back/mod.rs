@@ -67,7 +67,8 @@ use crate::os::{Os, OsError};
 use crate::space::{MAX_REGIONS, RegionTable, Space, SpaceCell};
 use core::fmt;
 use core::ptr::NonNull;
-use core::sync::atomic::{AtomicIsize, AtomicU32, AtomicU64, AtomicUsize};
+use core::sync::atomic::Ordering::Relaxed;
+use core::sync::atomic::{AtomicU32, AtomicU64, AtomicUsize};
 
 /// The back end's shared state, and the reservation it manages.
 ///
@@ -76,15 +77,15 @@ use core::sync::atomic::{AtomicIsize, AtomicU32, AtomicU64, AtomicUsize};
 /// it can only ever describe that one reservation.
 ///
 /// Every group of words is on lines of its own (`crate::lined`). The reservation and the
-/// region table are read on every operation and written rarely; the retained count is written
-/// by every free and claim; the decay word is read by every heartbeat; the walk's words are
-/// written by its steps.
+/// region table are read on every operation and written rarely; the retained count's two
+/// tallies are written, one by frees and the other by claims; the decay word is read by every
+/// heartbeat; the walk's words are written by its steps.
 pub struct State<O: Os> {
     cell: Lined<SpaceCell<O>>,
     table: Lined<RegionTable>,
     classes: [ClassState; COUNT],
     /// Bytes of free slots in the bitmaps believed to be resident (`purge`).
-    retained: Lined<Retained>,
+    retained: Retained,
     /// Bytes carved since a grower last checked the cap (`purge`).
     growth: Lined<AtomicUsize>,
     /// The clocked pass: when the last one ended, or when the one under way began with the
@@ -101,12 +102,47 @@ pub struct State<O: Os> {
 }
 
 /// Bytes of free slots in the bitmaps believed to be resident, for small classes and large
-/// ones. Signed: a subtraction may run ahead of the addition it answers; read as zero when
-/// negative. The decay and the cap act on the sum; the large count alone decides whether a
-/// grown block is kept (`policy::kept_grown`).
+/// ones: what was counted in, less what was counted out. Signed: a subtraction may run ahead of
+/// the addition it answers; read as zero when negative. The decay and the cap act on the sum;
+/// the large count alone decides whether a grown block is kept (`policy::kept_grown`).
+///
+/// What is counted in and what is counted out are two tallies that only grow (and wrap), each
+/// on a line of its own, not one count. Frees and launders count in and claims and fills count
+/// out, so in a program that allocates on one thread and frees on another each thread writes
+/// a line the other only reads; with one count, every large allocation and free took the line
+/// from the other thread (`docs/research/memory.md`, "The cost of a large block, by cause").
 struct Retained {
-    small: AtomicIsize,
-    large: AtomicIsize,
+    added: Lined<Tally>,
+    taken: Lined<Tally>,
+}
+
+/// One tally of [`Retained`], for each kind of class.
+struct Tally {
+    small: AtomicUsize,
+    large: AtomicUsize,
+}
+
+impl Tally {
+    const fn new() -> Tally {
+        Tally {
+            small: AtomicUsize::new(0),
+            large: AtomicUsize::new(0),
+        }
+    }
+
+    fn of(&self, large: bool) -> &AtomicUsize {
+        if large { &self.large } else { &self.small }
+    }
+}
+
+impl Retained {
+    /// The count of large classes if `large`, else of small ones: what was counted in less
+    /// what was counted out, which is negative while a subtraction runs ahead.
+    fn signed(&self, large: bool) -> isize {
+        let taken = self.taken.of(large).load(Relaxed);
+        let added = self.added.of(large).load(Relaxed);
+        added.wrapping_sub(taken) as isize
+    }
 }
 
 /// What the steps of the purge walk share (`purge`).
@@ -126,7 +162,7 @@ const _: () = {
     use core::mem::size_of;
     let groups = lines(size_of::<SpaceCell<crate::os::linux::LinuxOs>>())
         + lines(size_of::<RegionTable>())
-        + 4
+        + 5
         + lines(size_of::<[AtomicUsize; MAX_REGIONS]>())
         + lines(size_of::<[[u64; 2]; MAX_REGIONS]>());
     assert!(
@@ -142,10 +178,10 @@ impl<O: Os> State<O> {
             cell: Lined::new(SpaceCell::new(os)),
             table: Lined::new(RegionTable::new()),
             classes: [const { ClassState::new() }; COUNT],
-            retained: Lined::new(Retained {
-                small: AtomicIsize::new(0),
-                large: AtomicIsize::new(0),
-            }),
+            retained: Retained {
+                added: Lined::new(Tally::new()),
+                taken: Lined::new(Tally::new()),
+            },
             growth: Lined::new(AtomicUsize::new(0)),
             decay: Lined::new(AtomicU64::new(0)),
             walk: Lined::new(Walk {

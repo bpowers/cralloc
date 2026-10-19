@@ -184,9 +184,9 @@ impl Slab {
     /// the idle check, so a lost increment does no harm.
     #[inline]
     pub fn note_activity(&self) -> u64 {
-        self.activity
-            .fetch_add(1, Ordering::Relaxed)
-            .wrapping_add(1)
+        let next = self.activity.load(Ordering::Relaxed).wrapping_add(1);
+        self.activity.store(next, Ordering::Relaxed);
+        next
     }
 
     /// The activity counter.
