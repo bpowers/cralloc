@@ -749,7 +749,6 @@ fn a_refused_commit_of_the_roomiest_slot_leaves_its_region_for_the_next_room() {
 /// 3,940 buffers allocated at 1 MiB and cut to 100 KiB, 384 MiB of data, use every region,
 /// where `e486bc4` fits 70,902; after that `malloc(256)` returns null.
 #[test]
-#[ignore = "review finding shrunk-blocks-hold-regions: fails on main 9a076f4"]
 fn three_hundred_buffers_cut_to_40_kib_leave_their_regions() {
     let sim = SimHeap::<Native>::new();
     let (before, after) = (layout_of(512 << 10), 40 << 10);

@@ -1,11 +1,12 @@
 //! The heap through `GlobalAlloc`: the process's heap with the generated routines where they
 //! run, and simulated heaps with twins everywhere.
 
-use super::large::{HEADROOM, SHRINK_MOVES_BELOW, growth_rooms};
+use super::large::{HEADROOM, growth_rooms, shrink_moves_below_for};
 use crate::SimHeap;
 use crate::classes::{Class, MAX_SMALL_SIZE, SmallClass};
 use crate::os::OsError;
 use crate::os::sim::{Call, Faults, SIM_THREADS, SimOs};
+use crate::space::Plan;
 
 /// The simulated shape: one with large classes natively, the small one Miri can afford.
 #[cfg(not(miri))]
@@ -25,6 +26,8 @@ fn layout(size: usize, align: usize) -> Layout {
 trait Inspect: GlobalAlloc + Sync {
     fn contains(&self, ptr: *const u8) -> bool;
     fn usable(&self, ptr: *const u8) -> Option<usize>;
+    /// The heap's plan, once it has started.
+    fn plan(&self) -> Option<Plan>;
 }
 
 impl<S: crate::os::sim::Shape> Inspect for SimHeap<S> {
@@ -34,6 +37,10 @@ impl<S: crate::os::sim::Shape> Inspect for SimHeap<S> {
 
     fn usable(&self, ptr: *const u8) -> Option<usize> {
         self.usable_size(ptr)
+    }
+
+    fn plan(&self) -> Option<Plan> {
+        self.heap.back().map(|back| back.space().plan())
     }
 }
 
@@ -144,10 +151,11 @@ fn bursts<H: GlobalAlloc>(heap: &H, size: usize, burst: usize, rounds: usize) {
 }
 
 /// Grows a buffer from one byte to `top`, then shrinks it, through `realloc`, checking the
-/// contents survive and that large growth moves as rarely as its headroom allows in a heap of
-/// `region`-byte regions: a block that moved with `f` times its room has `log2 f` doublings in
-/// place before it moves again.
-fn realloc_walk<H: Inspect>(heap: &H, top: usize, region: usize) {
+/// contents survive and that large growth moves as rarely as its headroom allows: a block that
+/// moved with `f` times its room has `log2 f` doublings in place before it moves again. With
+/// `full`, the heap must give some sizes sixteen times, and those must move fewer times than
+/// four times would make them.
+fn realloc_walk<H: Inspect>(heap: &H, top: usize, full: bool) {
     let align = 8;
     let mut size = 1;
     // SAFETY: a valid, non-empty layout.
@@ -155,6 +163,7 @@ fn realloc_walk<H: Inspect>(heap: &H, top: usize, region: usize) {
     assert!(!p.is_null());
     // SAFETY: the block is live and `size` long.
     unsafe { fill(p, size, 7) };
+    let plan = heap.plan().expect("the heap has started");
     // Doublings and moves by the factor of headroom the doubling's size gets; none is 1.
     let mut by_factor = std::collections::BTreeMap::<usize, (usize, usize)>::new();
     while size < top {
@@ -165,7 +174,7 @@ fn realloc_walk<H: Inspect>(heap: &H, top: usize, region: usize) {
         // SAFETY: the first `size` bytes were carried over.
         assert!(unsafe { holds(q, size, 7) }, "at {size}");
         if next > MAX_SMALL_SIZE && size > MAX_SMALL_SIZE {
-            let factor = growth_rooms(next, region)
+            let factor = growth_rooms(next, plan)
                 .next()
                 .map_or(1, |room| room / next);
             let (steps, moves) = by_factor.entry(factor).or_default();
@@ -177,20 +186,24 @@ fn realloc_walk<H: Inspect>(heap: &H, top: usize, region: usize) {
         p = q;
         size = next;
     }
+    // At most one move in each run of `log2 f + 1` doublings, the walk entering each factor's
+    // sizes with a move.
+    let most = |factor: usize, steps: usize| steps.div_ceil(factor.ilog2() as usize + 1);
     for (&factor, &(steps, moves)) in &by_factor {
         if factor > 1 {
-            // One more move where the walk enters this factor's sizes.
-            let most = steps / (factor.ilog2() as usize + 1) + 1;
             assert!(
-                moves <= most,
+                moves <= most(factor, steps),
                 "{moves} moves in {steps} doublings with {factor} times the room: {by_factor:?}"
             );
         }
     }
-    assert!(
-        by_factor.contains_key(&HEADROOM) || region < (64 << 20),
-        "{by_factor:?}"
-    );
+    if full {
+        let (steps, _) = by_factor[&HEADROOM];
+        assert!(
+            most(HEADROOM, steps) < most(4, steps),
+            "{steps} doublings do not tell sixteen times from four: {by_factor:?}"
+        );
+    }
     // Shrinking keeps the contents, in place or not.
     while size > 1 {
         let next = size / 2;
@@ -294,7 +307,7 @@ fn a_simulated_heap_exchanges_magazines() {
 #[cfg_attr(miri, ignore)]
 fn a_simulated_heap_resizes_in_place_and_with_headroom() {
     let heap = SimHeap::<Shape>::new();
-    realloc_walk(&heap, 8 << 20, 1 << 20);
+    realloc_walk(&heap, 8 << 20, false);
 }
 
 #[test]
@@ -612,8 +625,8 @@ fn a_thread_without_a_lease_is_served_by_the_back_end() {
     bursts(&heap, 64, burst, 2);
 }
 
-/// A large shrink stays in place unless it leaves less than a `SHRINK_MOVES_BELOW`th of the
-/// block. The simulated regions are too small for a large size to be that little of a slot;
+/// A large shrink stays in place unless it leaves a sliver of the block
+/// (`stays_after_shrink`). The simulated regions are too small for a large size to be that little of a slot;
 /// `the_process_heap_moves_a_large_shrink_to_a_sliver` takes the other side.
 #[test]
 fn a_large_shrink_stays_in_place_unless_it_leaves_a_sliver_of_the_block() {
@@ -795,8 +808,8 @@ fn large_frees_find_the_class_from_the_address() {
                 regions << heap.heap.back().unwrap().space().plan().region_shift()
             }
         };
-        let region = heap.heap.back().unwrap().space().plan().region_size();
-        let room = growth_rooms(50 << 10, region).next().unwrap();
+        let plan = heap.heap.back().unwrap().space().plan();
+        let room = growth_rooms(50 << 10, plan).next().unwrap();
         assert!(slot >= room, "{slot}");
         // What the caller may use is what it asked for, to a page, not the headroom.
         let page = heap
@@ -1058,6 +1071,13 @@ mod process {
         fn usable(&self, ptr: *const u8) -> Option<usize> {
             Asmalloc::usable_size(ptr)
         }
+
+        fn plan(&self) -> Option<Plan> {
+            crate::heap::global::process()
+                .heap()
+                .back()
+                .map(|back| back.space().plan())
+        }
     }
 
     #[test]
@@ -1074,7 +1094,7 @@ mod process {
 
     #[test]
     fn the_process_heap_resizes_in_place_and_with_headroom() {
-        realloc_walk(&Asmalloc, 32 << 20, 1 << 32);
+        realloc_walk(&Asmalloc, 32 << 20, true);
     }
 
     #[test]
@@ -1123,22 +1143,17 @@ mod process {
         Asmalloc::maintain();
     }
 
-    /// What the simulated heaps cannot show: a large block cut to a sliver of its slot, under
-    /// a `SHRINK_MOVES_BELOW`th of it, moves to a block of its size, and one cut to just above
-    /// that stays.
+    /// What the simulated heaps cannot show: a large block cut to a sliver of its slot, under its
+    /// threshold, moves to a block of its size, and one cut to just above that stays.
     #[test]
     fn the_process_heap_moves_a_large_shrink_to_a_sliver() {
         let l = layout(4 << 20, 8);
         // SAFETY: valid layouts; each block is freed once with the layout it has.
         unsafe {
             let p = Asmalloc.alloc(l);
-            let room = crate::heap::global::process()
-                .heap()
-                .back()
-                .unwrap()
-                .room(p)
-                .unwrap();
-            let sliver = room / SHRINK_MOVES_BELOW;
+            let back = crate::heap::global::process().heap().back().unwrap();
+            let room = back.room(p).unwrap();
+            let sliver = room / shrink_moves_below_for(room, back.space().plan());
             let q = Asmalloc.realloc(p, l, sliver + 4096);
             assert_eq!(q, p, "a shrink to just above the threshold stays");
             let r = Asmalloc.realloc(q, layout(sliver + 4096, 8), sliver - 4096);
