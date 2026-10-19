@@ -157,10 +157,22 @@ impl<'a, O: Os> Back<'a, O> {
         let mut got = 0;
         let (mut resident, mut revived) = (0, 0);
         let mut cursor = None;
+        // The highest slot claimed in the region the run is in, for its frontier: recorded
+        // once a region, as the run leaves it, not once a word.
+        let mut reached: Option<(RegionId, u32)> = None;
         while got < len {
             let want = (len - got).min(BITS as usize) as u32;
             let Some(taken) = tree::claim_next(&host, want, &mut cursor) else {
                 break;
+            };
+            let high = taken.word * BITS + (BITS - 1 - taken.bits.leading_zeros());
+            reached = match reached {
+                Some((region, at)) if region == taken.region => Some((region, at.max(high))),
+                Some((region, at)) => {
+                    region::reach(&host, region, at);
+                    Some((taken.region, high))
+                }
+                None => Some((taken.region, high)),
             };
             let settled = region::settle(&host, taken.region, taken.word, taken.bits);
             resident += settled.resident;
@@ -175,6 +187,9 @@ impl<'a, O: Os> Back<'a, O> {
             );
         }
         tree::finish_run(&host, cursor);
+        if let Some((region, at)) = reached {
+            region::reach(&host, region, at);
+        }
         self.unretain(class.class(), resident);
         self.retain(class.class(), revived);
         let mut carved = 0;
@@ -183,6 +198,7 @@ impl<'a, O: Os> Back<'a, O> {
             let Some((region, first, count)) = self.carve(&host, class.class(), want) else {
                 break;
             };
+            region::reach(&host, region, first + count - 1);
             got = self.put_run(host.layout(), out, got, region, first, count);
             carved += host.layout().bytes_of(count);
         }
@@ -466,6 +482,7 @@ impl<'a, O: Os> Back<'a, O> {
             }
             (region, first, true)
         };
+        region::reach(&host, region, slot);
         if let Some(before) = region::recorded(&host, region, slot) {
             region::record(&host, region, slot, Recorded { size, ..before });
             if before.huge {

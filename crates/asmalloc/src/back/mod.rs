@@ -61,7 +61,7 @@ mod verify;
 #[cfg(kani)]
 mod verify_slow;
 
-use self::host::{ClassHost, ClassState, Headers, RegionHeader};
+use self::host::{ClassHost, ClassState, Frontiers, Headers, RegionHeader};
 use crate::classes::{COUNT, Class};
 use crate::lined::{LINE, Lined};
 use crate::os::{Os, OsError};
@@ -80,7 +80,8 @@ use core::sync::atomic::{AtomicU32, AtomicU64, AtomicUsize};
 /// Every group of words is on lines of its own (`crate::lined`). The reservation and the
 /// region table are read on every operation and written rarely; the retained count's two
 /// tallies are written, one by frees and the other by claims; the decay word is read by every
-/// heartbeat; the walk's words are written by its steps.
+/// heartbeat; the walk's words are written by its steps. The regions' headers and frontiers
+/// share lines among regions (`host::Headers`, `host::Frontiers`).
 pub struct State<O: Os> {
     cell: Lined<SpaceCell<O>>,
     table: Lined<RegionTable>,
@@ -100,6 +101,8 @@ pub struct State<O: Os> {
     /// Each region's header (`host::RegionHeader`). Out of the regions' metadata
     /// blocks, so that a small class whose slots never reach the bitmaps never touches its block.
     headers: Lined<Headers>,
+    /// Each region's frontier, for small classes (`host::Frontiers`).
+    frontiers: Lined<Frontiers>,
 }
 
 /// Bytes of free slots in the bitmaps believed to be resident, for small classes and large
@@ -202,7 +205,8 @@ const _: () = {
         + lines(size_of::<RegionTable>())
         + 5
         + lines(size_of::<[AtomicUsize; MAX_REGIONS]>())
-        + lines(size_of::<[[u64; 2]; MAX_REGIONS]>());
+        + lines(size_of::<[[u64; 2]; MAX_REGIONS]>())
+        + lines(size_of::<[u64; MAX_REGIONS]>());
     assert!(
         size_of::<State<crate::os::linux::LinuxOs>>()
             == size_of::<[ClassState; COUNT]>() + LINE * groups
@@ -230,6 +234,7 @@ impl<O: Os> State<O> {
             }),
             run_sizes: Lined::new([const { AtomicUsize::new(0) }; MAX_REGIONS]),
             headers: Lined::new([const { RegionHeader::new() }; MAX_REGIONS]),
+            frontiers: Lined::new([const { word::Atomic::zero() }; MAX_REGIONS]),
         }
     }
 
@@ -328,6 +333,7 @@ impl<'a, O: Os> Back<'a, O> {
             self.space,
             state,
             &self.state.headers,
+            &self.state.frontiers,
             layout,
         ))
     }

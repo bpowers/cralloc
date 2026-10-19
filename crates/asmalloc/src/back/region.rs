@@ -35,13 +35,17 @@
 //! - **Settling** after a claim: an allocation tests and clears the slot's zero bit (large
 //!   classes), and clears the clean bits of the pages its slots touch, and counts how much of
 //!   what it took was resident.
+//! - **Frontiers** say how far up a region's reuse reached in the clocked pass's current and
+//!   last intervals (`Frontier`): a fill or allocation raises its region's after it claims
+//!   (`reach`), the thread that starts a pass rotates every region's (`rotate`), and the pass
+//!   leaves what lies below (`floor`). Hints only: no protocol's safety reads them.
 //! - **Purging** one unit of pages is a claim, as `tla/Purge.tla` models it: claim the bits of
 //!   every slot that touches the unit, word by word from the lowest, giving up and releasing if
 //!   any is not free; return the pages; set the zero bits of slots wholly inside the unit and the
 //!   clean bits of its pages; then release the bits. The zero and clean bits are written only
 //!   while the purge holds the claim of every slot they describe.
 
-use super::layout::{Grow, Hints, Layout, Recorded, Unit};
+use super::layout::{Frontier, Grow, Hints, Layout, Recorded, Unit};
 use super::policy::{
     COMMIT_AHEAD_HUGE_PAGES, COMMIT_AHEAD_PAGES, grown_huge, huge_after, wants_huge,
 };
@@ -272,6 +276,65 @@ pub(crate) fn settle<H: Host>(host: &H, region: RegionId, index: u32, bits: u64)
     }
 }
 
+/// Records that a fill or allocation has just claimed or carved slots of `region` up to slot
+/// `last`: raises the region's frontier (`Frontier`) to the page past that slot's end, if
+/// that is higher than any claim this interval reached. One load and a compare when it is
+/// not, which is every claim but the first of an interval and the few that reach a little
+/// higher; else a compare-and-swap, tried again against whatever a racing claim or rotation
+/// wrote.
+///
+/// A record that lands after the rotation that ends its claim's interval is counted in the
+/// next interval instead, and one that a racing claim made unnecessary is covered by that
+/// claim's: either way the claim stays under the floor until two rotations have passed. A
+/// thread stopped between its claim and this record leaves the claim uncounted until it runs
+/// again; meanwhile the slots it claimed are not free, so no purge can take them, and only the
+/// free pages beside them are exposed a little early.
+#[inline]
+pub(crate) fn reach<H: Host>(host: &H, region: RegionId, last: u32) {
+    let layout = host.layout();
+    let page = layout.slot_bytes(last + 1).div_ceil(layout.page_size()) as u32;
+    let word = host.frontier(region);
+    let mut seen = word.load();
+    while let Some(next) = Frontier::unpack(seen).rise(page) {
+        match word.compare_exchange(seen, next.pack()) {
+            Ok(_) => return,
+            Err(found) => seen = found,
+        }
+    }
+}
+
+/// Starts a new interval of `region`'s frontier, `intervals` of them after the last
+/// (`Frontier::age`): after one, this interval's becomes the last one's; after two or more,
+/// both are forgotten. For the thread that has just started a clocked pass, on every region.
+/// A word that is zero stays as it is, unwritten, so a region no claim has touched for two
+/// intervals costs a load.
+///
+/// The compare-and-swap is tried again against whatever a racing claim wrote, so a claim
+/// recorded before the rotation is moved into the last interval's frontier and one recorded
+/// after it stays in this one's; neither is lost, and every value leaves the word after two
+/// rotations, so none sticks.
+pub(crate) fn rotate<H: Host>(host: &H, region: RegionId, intervals: u32) {
+    let word = host.frontier(region);
+    let mut seen = word.load();
+    while seen != 0 {
+        let next = Frontier::unpack(seen).age(intervals).pack();
+        if next == seen {
+            return;
+        }
+        match word.compare_exchange(seen, next) {
+            Ok(_) => return,
+            Err(found) => seen = found,
+        }
+    }
+}
+
+/// The page below which `region`'s reuse reached in the last two intervals: the clocked pass
+/// leaves units that start below it alone.
+#[inline]
+pub(crate) fn floor<H: Host>(host: &H, region: RegionId) -> u32 {
+    Frontier::unpack(host.frontier(region).load()).floor()
+}
+
 /// Brings a region's watermark up to the end of the huge page that holds it, when that could
 /// let the page be purged: the region has a huge-page part, the watermark lies inside one of
 /// its huge pages, that page is committed, and every slot of it below the watermark is free.
@@ -282,9 +345,13 @@ pub(crate) fn settle<H: Host>(host: &H, region: RegionId, index: u32, bits: u64)
 /// step can purge it. Returns the bytes released (free, and resident if the page was ever
 /// touched) and the words of bitmap read or written.
 ///
+/// Nothing is carved if the page starts below `floor`: a purge that may not take pages below
+/// a frontier (`floor`) could not take this one, and the slots would only wait, free, for a
+/// fill.
+///
 /// A racing carve only changes which slots this call gets; whatever it gets it owns and
 /// releases. If the page is not purged after all, the slots are ordinary free slots.
-pub(crate) fn top_up<H: Host>(host: &H, region: RegionId) -> (usize, usize) {
+pub(crate) fn top_up<H: Host>(host: &H, region: RegionId, floor: u32) -> (usize, usize) {
     let layout = host.layout();
     let Some(huge) = Hints::unpack(host.hints(region).load()).huge_from else {
         return (0, 0);
@@ -298,7 +365,7 @@ pub(crate) fn top_up<H: Host>(host: &H, region: RegionId) -> (usize, usize) {
     let mark = layout.slot_bytes(now.carved);
     let start = ((mark >> shift) as u32) & !(granule - 1);
     let end = start + granule;
-    if start < huge || end > now.committed || mark == (start as usize) << shift {
+    if start < huge || start < floor || end > now.committed || mark == (start as usize) << shift {
         return (0, 1);
     }
     // Every slot touching the page from its start up to the watermark must be free.

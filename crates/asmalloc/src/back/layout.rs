@@ -28,8 +28,9 @@
 //! those read together, and is committed whole at assignment (its leaf bitmap is small):
 //!
 //! ```text
-//! word 0                      header: Grow (watermark, committed pages), then Hints (start of
-//!                             the huge-page part, purge cursor), on a line of its own
+//! word 0                      header: Grow (watermark, committed pages), Hints (start of the
+//!                             huge-page part, purge cursor), then Frontier (how far up the
+//!                             last two intervals' claims reached), on a line of its own
 //! ...                         summary levels height down to 1
 //! ...                         leaf bitmap
 //! ...                         zero bitmap: one bit per slot, set means free and known to read
@@ -56,8 +57,8 @@ pub(crate) const MAX_LEVELS: usize = 5;
 /// Bytes per metadata word.
 pub(crate) const WORD_BYTES: usize = 8;
 
-/// A large class's header words at the start of its block: `Grow`, then `Hints`.
-const HEADER_WORDS: u32 = 2;
+/// A large class's header words at the start of its block: `Grow`, `Hints`, then `Frontier`.
+const HEADER_WORDS: u32 = 3;
 
 /// Words in a cache line.
 const LINE_WORDS: u32 = (crate::lined::LINE / WORD_BYTES) as u32;
@@ -203,6 +204,88 @@ impl Hints {
             None => 0,
         };
         huge as u64 | (self.cursor as u64) << 32
+    }
+}
+
+/// How far up a region's reuse reached: for the interval of the clocked pass under way and for
+/// the one before it, the page past the highest slot a fill or allocation claimed or carved in
+/// the region, zero if none. One word.
+///
+/// Fills and allocations take the lowest free slots of a region, so the slots an interval
+/// reused lie below its frontier, and the free pages above the higher of the two frontiers
+/// went a whole interval without being wanted: those are what the clocked pass returns
+/// (`purge`). All zero means no claim in either interval, so everything free may go, as in a
+/// fresh process.
+///
+/// A claim raises `now` with a compare-and-swap, only if it reaches higher, so the common
+/// case is a load and a compare. The thread that starts a clocked pass moves `now` to `last`
+/// and clears `now` (`region::rotate`), one compare-and-swap per region whose word is not
+/// zero. Both are hints: the purge is a claim (`region::purge_unit`), so a frontier that is
+/// wrong costs a purge too many or too few and nothing else.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) struct Frontier {
+    /// This interval's: the page past the highest slot claimed since the pass began.
+    pub(crate) now: u32,
+    /// The last interval's.
+    pub(crate) last: u32,
+}
+
+impl Frontier {
+    #[inline(always)]
+    pub(crate) const fn unpack(word: u64) -> Frontier {
+        Frontier {
+            now: word as u32,
+            last: (word >> 32) as u32,
+        }
+    }
+
+    #[inline(always)]
+    pub(crate) const fn pack(self) -> u64 {
+        self.now as u64 | (self.last as u64) << 32
+    }
+
+    /// The page below which the last two intervals' reuse reached: nothing below it is the
+    /// clocked pass's to return.
+    #[inline(always)]
+    pub(crate) const fn floor(self) -> u32 {
+        if self.now > self.last {
+            self.now
+        } else {
+            self.last
+        }
+    }
+
+    /// The frontier once a claim has reached up to page `page`, if that raises it.
+    #[inline(always)]
+    pub(crate) const fn rise(self, page: u32) -> Option<Frontier> {
+        if page > self.now {
+            Some(Frontier {
+                now: page,
+                last: self.last,
+            })
+        } else {
+            None
+        }
+    }
+
+    /// The frontier as a new interval begins: this interval's becomes the last one's.
+    #[inline(always)]
+    pub(crate) const fn rotate(self) -> Frontier {
+        Frontier {
+            now: 0,
+            last: self.now,
+        }
+    }
+
+    /// The frontier `intervals` intervals on, with no claim meanwhile: as it is for none, once
+    /// rotated for one, and nothing for two or more.
+    #[inline(always)]
+    pub(crate) const fn age(self, intervals: u32) -> Frontier {
+        match intervals {
+            0 => self,
+            1 => self.rotate(),
+            _ => Frontier { now: 0, last: 0 },
+        }
     }
 }
 
@@ -459,8 +542,9 @@ impl Layout {
         self.pages.div_ceil(BITS)
     }
 
-    /// Word offset of the region's `Grow` word in its block, `Hints` the word after it, for a
-    /// large class; `None` for a small class, whose header is in the back end's state
+    /// Word offset of the region's `Grow` word in its block, `Hints` and `Frontier` the words
+    /// after it, for a large class; `None` for a small class, whose header is in the back end's
+    /// state
     /// (`host::RegionHeader`). Every large allocation and free touches its block anyway, and
     /// with the header outside it touched one more line.
     #[inline(always)]
@@ -934,6 +1018,12 @@ mod tests {
                 cursor: 0
             }
         );
+        let frontier = Frontier {
+            now: 7,
+            last: 1 << 20,
+        };
+        assert_eq!(Frontier::unpack(frontier.pack()), frontier);
+        assert_eq!(Frontier::unpack(0), Frontier { now: 0, last: 0 });
         for huge in [false, true] {
             let recorded = Recorded {
                 size: 1 << 32,

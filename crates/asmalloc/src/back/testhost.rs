@@ -41,6 +41,8 @@ pub(crate) struct TestHost<W> {
     meta: Vec<Box<[W]>>,
     /// Each region's `Grow` and `Hints` words, which the heap keeps outside the metadata block.
     headers: Box<[(W, W)]>,
+    /// Each region's `Frontier` word, which the heap keeps outside the block for a small class.
+    frontiers: Box<[W]>,
     class_words: Box<[W]>,
     top: W,
     /// For each heap-wide slot, which of its pages (counting from the slot's first page) hold
@@ -75,6 +77,7 @@ impl<W: TestWord> TestHost<W> {
             regions,
             meta,
             headers,
+            frontiers: (0..regions).map(|_| W::new(None)).collect(),
             class_words: (0..64).map(|_| W::new(None)).collect(),
             top: W::new(None),
             dirty: (0..regions as u64 * slots)
@@ -223,6 +226,13 @@ impl<W: TestWord> Host for TestHost<W> {
         match self.layout.header_word() {
             Some(word) => self.meta(region, word + 1),
             None => &self.headers[region.index()].1,
+        }
+    }
+
+    fn frontier(&self, region: RegionId) -> &W {
+        match self.layout.header_word() {
+            Some(word) => self.meta(region, word + 2),
+            None => &self.frontiers[region.index()],
         }
     }
 

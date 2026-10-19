@@ -1926,6 +1926,110 @@ fn a_carve_racing_a_purge_fully() {
     a_carve_racing_a_purge(3);
 }
 
+/// The page a claim of `slot` raises its region's frontier to (`region::reach`).
+fn reach_page(host: &Host8, slot: u32) -> u32 {
+    let layout = host.layout();
+    layout.slot_bytes(slot + 1).div_ceil(layout.page_size()) as u32
+}
+
+/// A fill and a single allocation race the rotation a pass starter makes of their region's
+/// frontier (`region::reach`, `region::rotate`). From `run_setup`, with the frontier holding
+/// `now` 2 and `last` 9 from earlier intervals: thread 0 claims two slots through a run, as a
+/// fill does, and records the higher; thread 1 claims one and records it, as `Back::alloc`
+/// does; thread 2 rotates. In every schedule:
+///
+/// - no claim is hidden: the floor is at or above the page of every slot a thread claimed and
+///   recorded, whether its record landed before the rotation (and moved to `last`) or after
+///   (in `now`), or found a higher frontier and wrote nothing;
+/// - nothing is invented or kept: `now` is zero or a claim's page, `last` the old `now` or a
+///   claim's page, and the old `last` is gone;
+/// - nothing sticks: two more rotations, from outside, leave the word zero.
+///
+/// With `crash`, one thread may vanish at any step, as in a fork: a fill lost between its
+/// claim and its record leaves its claim unrecorded (its slots are lost with it, so no purge
+/// can take them), a rotation lost before its compare-and-swap leaves the word unrotated, and
+/// the word is one of the values above all the same.
+fn a_fill_races_the_rotation(preemptions: Option<usize>, crash: bool) {
+    use super::layout::Frontier;
+    explore(
+        Config {
+            preemptions,
+            crash,
+            ..Config::ALL
+        },
+        3,
+        || {
+            let host = run_setup();
+            let r0 = host.region_at(0);
+            host.frontier(r0).store(Frontier { now: 2, last: 9 }.pack());
+            (host, Mutex::new(Vec::new()))
+        },
+        |(host, recorded), me| {
+            let r0 = host.region_at(0);
+            let got = match me {
+                0 => claim_run_of(host, 2, 1),
+                1 => claim(host, 1),
+                _ => {
+                    region::rotate(host, r0, 1);
+                    return;
+                }
+            };
+            if let Some(&(region, high)) = got.iter().max_by_key(|&&(_, slot)| slot) {
+                region::reach(host, region, high);
+            }
+            recorded.lock().unwrap().extend(got);
+        },
+        |(host, recorded), outcome| {
+            let r0 = host.region_at(0);
+            let frontier = Frontier::unpack(host.frontier(r0).load());
+            let recorded = recorded.lock().unwrap();
+            let pages: BTreeSet<u32> = recorded
+                .iter()
+                .map(|&(_, slot)| reach_page(host, slot))
+                .collect();
+            for &page in &pages {
+                assert!(frontier.floor() >= page, "{frontier:?} hides page {page}");
+            }
+            // Pages any thread could have recorded, finished or not.
+            let possible: BTreeSet<u32> = [0, 64, 65, 128]
+                .into_iter()
+                .map(|slot| reach_page(host, slot))
+                .collect();
+            // A rotation lost in a fork leaves the earlier intervals' values in place.
+            let rotated = !outcome.killed.contains(&2);
+            assert!(
+                frontier.now == 0
+                    || possible.contains(&frontier.now)
+                    || !rotated && frontier.now == 2,
+                "{frontier:?}"
+            );
+            assert!(
+                frontier.last == 2
+                    || possible.contains(&frontier.last)
+                    || !rotated && frontier.last == 9,
+                "{frontier:?}"
+            );
+            region::rotate(host, r0, 1);
+            region::rotate(host, r0, 1);
+            assert_eq!(host.frontier(r0).load(), 0, "a frontier stuck");
+        },
+    );
+}
+
+#[test]
+#[cfg_attr(miri, ignore)]
+fn a_fill_races_the_rotation_quickly() {
+    a_fill_races_the_rotation(Some(2), false);
+    a_fill_races_the_rotation(Some(1), true);
+}
+
+#[test]
+#[ignore = "slow: run with scripts/gate --all"]
+fn a_fill_races_the_rotation_fully() {
+    a_fill_races_the_rotation(Some(3), false);
+    a_fill_races_the_rotation(Some(2), true);
+}
+
 /// `Purge.cfg`: two 32-byte slots to a 64-byte page.
 fn purge_aligned_slots(bound: usize) {
     purge_scenario(tiny(), 32, 4, &[1], bound);
