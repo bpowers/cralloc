@@ -12,9 +12,11 @@
 //!    paths would otherwise pop its own magazines straight back. A slab is drained at most
 //!    once per interval: the sighting a drain leaves waits for the counter to move, and then
 //!    for an interval of quiet after that.
-//! 2. **Every depot stack's shedding** (`shed.rs`): a look at the depth of every class's stack
-//!    in every cache domain and the shared pool, which starts a new interval for each that is
-//!    due and sets what it owes, and then the whole of every debt laundered.
+//! 2. **Every depot stack's shedding** (`shed.rs`): a look at the depth of every class's
+//!    shared stack and of every stack a domain holds by its hint (`held.rs`), which starts a
+//!    new interval for each that is due and sets what it owes, and then the whole of every
+//!    debt laundered. A domain's stack whose hint a fork cut off is left to `collect` and to
+//!    its own domain's heartbeats.
 //! 3. **The clocked purge** ([`Source::purge_pass`]): the pass that is under way or due, run
 //!    to its end.
 //!
@@ -36,10 +38,11 @@
 
 use super::drain::Disposal;
 use super::heartbeat::Clock;
-use super::{Cache, Source, generation};
+use super::{Cache, Pool, Source, generation};
+use crate::classes::{SMALL_COUNT, SmallClass};
 use crate::front::Routines;
 use crate::os::Os;
-use core::sync::atomic::Ordering::Acquire;
+use core::sync::atomic::Ordering::{Acquire, Relaxed};
 
 impl<O: Os, R: Routines, S: Source> Cache<'_, O, R, S> {
     /// One round of the clocked maintenance for the whole heap (see the module documentation).
@@ -55,8 +58,14 @@ impl<O: Os, R: Routines, S: Source> Cache<'_, O, R, S> {
         }
         if self.tuning.shed_unused {
             for pool in self.depot.pools() {
-                for class in crate::classes::SmallClass::all() {
-                    self.look_at_depth(pool, class, clock.now());
+                let held = match pool {
+                    Pool::Domain(domain) => self.depot.held(domain).load(Relaxed),
+                    Pool::Shared => u64::MAX,
+                };
+                for class in SmallClass::all() {
+                    if held & 1 << (class.ordinal() % SMALL_COUNT) != 0 {
+                        self.look_at_depth(pool, class, clock.now());
+                    }
                 }
             }
             self.shed_all();

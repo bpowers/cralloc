@@ -285,14 +285,17 @@ impl<O: Os, R: Routines, S: Source> Cache<'_, O, R, S> {
     }
 
     /// Pays every debt the stacks of every pool owe now, a magazine at a time, for `maintain`:
-    /// what the heartbeats of an interval would launder by [`Cache::shed`]. Each shed of an
+    /// what the heartbeats of an interval would launder by [`Cache::shed`]. It visits the
+    /// classes whose owing bits are set; a look that writes a debt sets its bit. Each shed of an
     /// owing stack pays at least one object or ends the debt, so a stack takes at most one shed
     /// more than the objects it owed when its turn came; the bound only keeps a debt that a
     /// racing look starts from extending the loop.
     pub(super) fn shed_all(&self) {
         for pool in self.depot.pools() {
-            for class in SmallClass::all() {
-                let ordinal = class.ordinal() % SMALL_COUNT;
+            let mut owing = self.depot.owing(pool).load(Relaxed);
+            while owing != 0 {
+                let ordinal = owing.trailing_zeros() as usize;
+                owing &= owing - 1;
                 let bit = 1u64 << ordinal;
                 let owed = Water(self.depot.water(pool, ordinal).load(Relaxed)).owed();
                 for _ in 0..=owed {

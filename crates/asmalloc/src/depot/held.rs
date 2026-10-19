@@ -15,7 +15,7 @@
 //! **Hints.** The sets change by single atomic instructions and only steer looks: a bit that is
 //! set on a stack that is empty costs a look that finds nothing, and the look clears it. A bit
 //! must not stay clear on a stack that holds a magazine, or a quiet domain would keep it until
-//! `maintain` or `collect`, which look at everything. So:
+//! `collect`, which looks at everything (`maintain` looks by the hints too). So:
 //!
 //! - a push onto an empty stack (`Stack::push_under` says so), after its compare-and-swap, sets
 //!   the class's bit if it reads it clear, and then the domain's bit if it reads that clear;
@@ -28,6 +28,10 @@
 //! consistent, so of a push and a clear that race, either the clear's second read sees the push
 //! or the push's read sees the clear; either way the bit ends set. On x86-64 that costs nothing:
 //! every read-modify-write is a full barrier there and every load is already ordered.
+//!
+//! A fork can cut a push off between its compare-and-swap and its bits, leaving the child a stack
+//! with no bit; the child's `collect` and that domain's own heartbeats, which look at each class
+//! in turn whatever the hints say, still reach it.
 //!
 //! Only domain pools keep the sets. The shared stacks are looked at by every look.
 
@@ -102,6 +106,9 @@ impl<O: Os, R: Routines, S: Source> Cache<'_, O, R, S> {
     /// one held domain, in rotation (see the module documentation), looked at with the clock
     /// at `now`.
     pub(super) fn look_elsewhere(&self, here: Domain, turn: u64, now: u64) {
+        if self.depot.domain_count() < 2 {
+            return;
+        }
         let others = self.depot.held_domains.load(Relaxed) & !(1u64 << here.index());
         if others == 0 {
             return;
