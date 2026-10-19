@@ -97,6 +97,17 @@ pub(crate) fn carve<H: Host>(host: &H, region: RegionId, n: u32) -> Carve {
     }
 }
 
+/// For a thread about to take `region` for a large class: makes writable what the region's
+/// first carve, of one slot, needs, as that carve would, and returns the pages now committed;
+/// `None` if the OS refused. A large class takes a region for one slot at a time, and a region
+/// is never given back, so the commit comes before the region is taken: a refusal then costs
+/// nothing, and the region is still there for a smaller slot whose commit the OS allows.
+pub(crate) fn commit_first<H: Host>(host: &H, region: RegionId) -> Option<u32> {
+    let layout = host.layout();
+    let need = layout.slot_bytes(1).div_ceil(layout.page_size()) as u32;
+    commit_to(host, region, Grow::unpack(0), need)
+}
+
 /// Makes the region writable up to at least page `need`, and the leaf bitmap with it. Returns
 /// the new number of committed pages, or `None` if the OS refused.
 fn commit_to<H: Host>(host: &H, region: RegionId, now: Grow, need: u32) -> Option<u32> {

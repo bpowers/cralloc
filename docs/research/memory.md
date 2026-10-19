@@ -1868,6 +1868,55 @@ not more. The confirming run, final build against main `e486bc4` (five rounds, c
 +0.5%, `largepair` -0.5%, tree +0.5%, JSON -1.2%. Against glibc, the loops are now
 1.25 and 1.48 times its time where they were 1.74 and 2.11.
 
+### Headroom only while it is a small part of a region
+
+2026-10-18, later, after review. As first merged, a room past a region was cut to a whole
+region. In the full reservation that only matters for buffers past 256 MiB, but regions shrink
+under an address-space limit, and a region is never unassigned. Every buffer whose sixteen
+times reached half a region then took a region of a class with one slot to a region. When the
+regions were gone, nothing of any new class could be had, `malloc(256)` included. The rule now:
+sixteen times the size where that is at most a sixteenth of a region, otherwise four times
+where that fits a region, as before, otherwise none. The class sixteen times lands in has a
+dozen slots or more to a region, and past that the rule is the earlier one.
+
+**Buffers that fit** (the review's `grow_starve.c`: `malloc(FROM)`, `realloc(TO)`, kept; under
+`prlimit --as`, preloaded; the base is four times, as at `e486bc4`):
+
+| Limit (region) | 40 to 64 KiB | 128 to 256 KiB | 512 KiB to 1 MiB | 2 to 4 MiB |
+|---|---|---|---|---|
+| 16 GiB (2 MiB): base, as merged, now | 23,634, 3,939, 23,634 | 3,939, 3,939, 3,939 | 3,939, 3,939, 3,939 | 1,969, 1,969, 1,969 |
+| 64 GiB (8 MiB): base, as merged, now | 98,475, 23,634, 98,475 | 23,634, 3,939, 23,634 | 3,939, 3,939, 3,939 | 3,939, 3,939, 3,939 |
+
+Under these limits sixteen times would need a buffer of a 256th of a region, 8 or 32 KiB,
+which is not a large block, so the rule there is the base's, buffer for buffer. In the full
+reservation it gives sixteen times up to 16 MiB. There it fits fewer buffers than the base:
+slots up to 320 MiB, twelve or more to a region, against the base's 5 times the size. That is
+still hundreds of GiB of live buffers.
+
+**Time** (`benchrun`, five interleaved rounds, medians, against the rule as merged): the 1 and
+4 MiB loops -0.8% and -0.3%, `vecgrow 1x256Mi` -0.1%, `vecgrow 64x4Mi` -1.0%; the 64 MiB loop
+copies the same 33 MiB. Bytes copied up to 256 MiB are unchanged. Past that the room is four
+times, so a buffer grown by doubling copies, in MiB, against the base and the rule as merged:
+
+| Final | base | as merged | now |
+|---|---:|---:|---:|
+| 512 MiB | 146 | 33 | 289 |
+| 1 GiB | 146 | 33 | 289 |
+| 2 GiB | 1,170 | 1,057 | 289 |
+| 4 GiB (arithmetic) | 3,218 | 3,105 | 2,337 |
+
+**Commit charge.** Under a 2 GiB `RLIMIT_DATA` (preloaded `grow_exhaust.c`, buffers grown from
+64 KiB by doubling and kept), base against now: 396 and 789 buffers of 1 MiB, 394 and 28 of
+4 MiB, 49 and 26 of 16 MiB. A buffer is charged the whole slot it moved into, up to twenty
+times its size up to 16 MiB and five times above.
+
+**A refused commit no longer costs the last region.** `Back::assign` took a region for a class
+and then committed the slot. When the OS refused the commit (strict overcommit, a data limit),
+the region stayed with that class, empty, and the smaller rooms after it had none. A large
+class now commits its first slot before it takes the region (`region::commit_first`), and
+records the commit in the region's header. A refusal leaves the region for the next attempt.
+Small classes are unchanged: their first carve is a magazine, and they take a region once.
+
 ## Small heaps
 
 2026-10-18, at main `779ba9b` (before) and the branch's tip (after). Every page of an asmalloc
