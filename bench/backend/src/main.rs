@@ -137,24 +137,38 @@ impl Bench<'_> {
 /// carved and held (their memory is never touched, so only the bitmap is resident); then each
 /// round launders `MAGAZINES` magazines of slots in `order`, timed, and fills them back
 /// untimed. The slots are made, not stored, so the bench holds no pool as large as the bitmap.
+/// Every size of one run must fit, together with the sizes before it, in the class's first
+/// region: for 8-byte slots 32 MiB of bitmap does, 64 MiB does not (the slots start at the
+/// class's origin, so a 4 GiB region holds a little under 2^29 of them).
 fn bitmap_sweep(bench: &Bench, bitmap: usize, order: &str, rounds: usize) -> Cost {
     const MAGAZINES: usize = 64;
     let slots = bitmap * 8;
     let words = slots / 64;
     assert!(words.is_power_of_two() && words >= 64, "bitmap must be a power of two of at least 512 bytes");
     let mut magazine = vec![std::ptr::null_mut::<u8>(); bench.batch];
+    let size = bench.class.class().size();
     let mut base = None;
     let mut carved = 0;
     while carved < slots {
         let want = (slots - carved).min(bench.batch);
         let got = bench.back.fill(bench.class, &mut Descending(&atomic(&mut magazine)[..want]));
         assert_eq!(got, want, "the back end ran out of memory");
+        // The sweep names its slots as `base + index * size`, which holds only while every slot
+        // carved lies in one region, contiguous from the first. A region's slots start at its
+        // class's origin, a few pages in, so a run that spills into the next region has a gap
+        // there, and a slot named past the first region's end is not a slot.
         let lowest = magazine[..want].iter().copied().min().unwrap();
-        base = Some(base.map_or(lowest, |b: *mut u8| b.min(lowest)));
+        let highest = magazine[..want].iter().copied().max().unwrap();
+        let first = *base.get_or_insert(lowest);
+        assert!(
+            lowest == first.wrapping_byte_add(carved * size)
+                && highest == first.wrapping_byte_add((carved + want - 1) * size),
+            "a bitmap of {bitmap} bytes needs {slots} slots of {size} bytes in one region, carved \
+             contiguously after the {carved} before them; this heap's region cannot hold them",
+        );
         carved += want;
     }
     let base = base.unwrap();
-    let size = bench.class.class().size();
     // Carving does not write the bitmap, so its pages are not resident yet: free and take back
     // one slot per page of it, so that the timed launders do not fault them in.
     let page_slots = 4096 * 8;
