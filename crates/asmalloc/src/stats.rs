@@ -40,9 +40,12 @@ pub struct Region {
     pub base: *const u8,
     /// Its size in bytes: the heap's region size.
     pub len: usize,
-    /// Bytes below the watermark: slots that have been handed out at least once.
+    /// Where the watermark is, in bytes from the base: the slots below it have been handed out
+    /// at least once. A small class's slots start a few pages past the base (its origin), and
+    /// nothing below the first slot is ever written or made writable.
     pub carved: usize,
-    /// Bytes from the base that are writable.
+    /// Where the writable part ends, in bytes from the base. It starts at the class's first
+    /// slot.
     pub committed: usize,
     /// The byte offset at which the huge-page part begins, if the region has one.
     pub huge_from: Option<usize>,

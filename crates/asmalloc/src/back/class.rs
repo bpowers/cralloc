@@ -184,7 +184,7 @@ impl<'a, O: Os> Back<'a, O> {
                 break;
             };
             got = self.put_run(host.layout(), out, got, region, first, count);
-            carved += host.layout().slot_bytes(count);
+            carved += host.layout().bytes_of(count);
         }
         self.grow(carved);
         got
@@ -1316,7 +1316,7 @@ impl<'c, 'a, O: Os> Checker<'c, 'a, O> {
         let size = self.class.size();
         let shift = size.trailing_zeros();
         Fast {
-            base: self.base + (met.region.index() << self.region_shift),
+            base: self.base + (met.region.index() << self.region_shift) + self.layout.slot_bytes(0),
             inverse: odd_inverse((size >> shift) as u64),
             shift,
             limit: met.limit as u64,

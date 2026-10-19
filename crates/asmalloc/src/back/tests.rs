@@ -1131,17 +1131,20 @@ fn the_huge_page_at_the_watermark_is_purged_with_the_rest() {
         unsafe { back.launder(class, chunk) };
     }
     let purged = back.trim();
-    // Everything carved by the program, and the rest of the watermark's huge page.
-    assert_eq!(purged, (unit + 1) * huge);
+    // Everything carved by the program, and the rest of the watermark's huge page, from the
+    // class's origin, below which nothing was ever committed.
+    let origin = back.space().plan().slot_origin(class.class());
+    assert_eq!(purged, (unit + 1) * huge - origin);
     assert_eq!(back.retained(), 0);
     // SAFETY: no other thread runs, and the back end and this test store only integers.
     unsafe {
         assert!(os.is_purged(NonNull::new(top).unwrap(), 64));
     }
     // The slots carved to fill the page are handed out like any others, each once.
-    let again = fill(&back, class, (unit + 1) * huge / 64);
+    let carved_to = ((unit + 1) * huge - origin) / 64;
+    let again = fill(&back, class, carved_to);
     let distinct: BTreeSet<usize> = again.iter().map(|p| p.addr()).collect();
-    assert_eq!(distinct.len(), (unit + 1) * huge / 64);
+    assert_eq!(distinct.len(), carved_to);
     assert!(again.iter().all(|&p| p.addr() < base + (unit + 1) * huge));
     assert!(again.iter().all(|&p| painted(p, 64, 0)));
 }
@@ -2561,7 +2564,8 @@ fn a_staggered_block_moves_and_returns_its_whole_slot() {
         let slot = back.space().slot(
             back.space().locate(old.as_ptr()).unwrap().region,
             old_class,
-            back.space().locate(old.as_ptr()).unwrap().slot(old_class),
+            // A large class, whose slots start at the region's base.
+            (back.space().locate(old.as_ptr()).unwrap().offset as usize / old_class.size()) as u32,
         );
         // SAFETY: as above.
         unsafe { assert!(os.is_purged(slot, old_class.size())) };
@@ -3340,7 +3344,7 @@ mod review_headers {
     /// (`region::commit_first`), so its region is in this state only between the tag and the
     /// header's store, before the carving word names it, which a free racing the assignment
     /// can see; it is made here as `assign` makes it up to that store, the carving word left
-    /// as it was. Returns the region's base.
+    /// as it was. Returns the region's first slot.
     fn assigned_and_never_carved(state: &State<Sim>, class: Class) -> *mut u8 {
         let back = state.get_or_reserve().unwrap();
         let region = back.space().plan().region(0).unwrap();
@@ -3370,7 +3374,7 @@ mod review_headers {
             (host.grow(region).load(), host.hints(region).load()),
             (0, 0)
         );
-        back.space().region(region).as_ptr()
+        back.space().slot(region, class, 0).as_ptr()
     }
 
     /// All zero is an empty, ungrown region on every path that does not abort. Natively the
@@ -3391,7 +3395,8 @@ mod review_headers {
             assert_eq!(state.os().calls(Call::Purge), 0);
             let mut seen = Seen::default();
             back.inspect(&mut seen);
-            assert_eq!(seen.regions, [(class, 0, 0)]);
+            let origin = back.space().plan().slot_origin(class);
+            assert_eq!(seen.regions, [(class, origin, 0)]);
             assert_eq!(seen.free, 0);
             // And the region grows from there as if nothing had happened. A large class's
             // region is named by the carving word only once its assignment has stored the
@@ -3476,7 +3481,7 @@ mod review_direct {
             .filter(|&r| back.table().get(r) == RegionTag::Class(class))
             .map(|r| {
                 let carved = Grow::unpack(host.grow(r).load()).carved;
-                (r, back.space().region(r).as_ptr(), carved)
+                (r, back.space().slot(r, class, 0).as_ptr(), carved)
             })
             .collect()
     }

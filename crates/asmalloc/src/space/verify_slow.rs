@@ -58,7 +58,9 @@ fn published_words_round_trip_in_every_geometry() {
     published_words_round_trip(any_geometry());
 }
 
-/// `slots_per_region` counts exactly the slots that fit, and `slot_fits` accepts exactly them.
+/// `slots_per_region` counts exactly the slots that fit past the class's origin, and
+/// `slot_fits` accepts exactly them. The origin is whole pages, a multiple of the class's
+/// alignment, zero for a large class, and under a sixty-fourth of the region.
 #[kani::proof]
 fn slots_per_region_counts_the_slots_that_fit() {
     let geometry = any_geometry();
@@ -69,8 +71,12 @@ fn slots_per_region_counts_the_slots_that_fit() {
     let class = any_class();
     let slots = plan.slots_per_region(class);
     let size = class.size();
-    assert!(slots as usize * size <= plan.region_size());
-    assert!((slots as usize + 1) * size > plan.region_size());
+    let origin = plan.slot_origin(class);
+    assert!(origin % geometry.page_size() == 0 && origin % class.align() == 0);
+    assert!(class.is_small() || origin == 0);
+    assert!(origin < plan.region_size() / 64 || origin == 0);
+    assert!(origin + slots as usize * size <= plan.region_size());
+    assert!(origin + (slots as usize + 1) * size > plan.region_size());
     assert!(plan.fits_region(class) == (slots >= 1));
     let index: u32 = kani::any();
     assert!(plan.slot_fits(class, index) == (index < slots));

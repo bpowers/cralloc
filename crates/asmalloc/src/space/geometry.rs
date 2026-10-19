@@ -238,7 +238,10 @@ mod tests {
         assert_eq!(plan.metadata_size(), 128 << 20);
         assert_eq!(plan.magazine_area_size(), 128 << 30);
         assert!(plan.size() <= 16 << 40);
-        assert_eq!(plan.slots_per_region(Class::SMALLEST), 1 << 29);
+        assert_eq!(
+            plan.slots_per_region(Class::SMALLEST) as usize,
+            ((4 << 30) - plan.slot_origin(Class::SMALLEST)) / 8
+        );
         assert!(Class::all().all(|c| plan.fits_region(c)));
         assert!(plan.hosts_every_small_class());
         let floor = g.smallest_plan();

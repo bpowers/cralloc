@@ -143,8 +143,11 @@ fn check(state: &State<Sim<Native>>, held: &[Held], round: u64) -> usize {
                 );
                 let committed = grow.committed as usize * page;
                 assert!(layout.slot_bytes(grow.carved) <= committed);
+                // Nothing below the class's origin is ever committed.
+                let origin = layout.slot_bytes(0);
                 assert!(
-                    committed == 0 || os.is_writable(back.space().region(region), committed),
+                    committed == 0
+                        || os.is_writable(back.space().slot(region, class, 0), committed - origin),
                     "round {round}: region {at} of {class:?} records a commit that did not \
                      happen ({grow:?})"
                 );

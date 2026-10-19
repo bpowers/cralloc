@@ -19,6 +19,12 @@
 use super::{Geometry, MAX_REGIONS, METADATA_SHIFT};
 use crate::classes::{Class, MAX_SMALL_SIZE};
 
+/// The pages over which [`Plan::slot_origin`] spreads the small classes' first slots: where
+/// the second-level data TLB's set index repeats on the reference machine, as measured: over
+/// 16 pages the page walks it removes fell by a half to five sixths on the jobs that had them,
+/// and over 256 they went.
+pub const ORIGIN_SPAN_PAGES: usize = 256;
+
 /// A region number: less than [`MAX_REGIONS`], so it indexes the class-of-region table.
 ///
 /// Only [`Plan::region`], [`Plan::regions`] and [`Plan::locate`] make one, so outside this module
@@ -52,16 +58,6 @@ pub struct Location {
     pub region: RegionId,
     /// The offset within the region. Regions are at most 4 GiB, so it fits.
     pub offset: u32,
-}
-
-impl Location {
-    /// The index of the slot-sized piece of the region that holds this byte, counting from the
-    /// region's base in steps of `class`'s size. No divide instruction. The piece may be the
-    /// unused tail of the region; [`Plan::slot_at`] checks for that.
-    #[inline(always)]
-    pub const fn slot(self, class: Class) -> u32 {
-        class.divisor().divide(self.offset)
-    }
 }
 
 /// The layout of one reservation: a geometry and the region size it got.
@@ -137,11 +133,11 @@ impl Plan {
         self.region_size() >= MAX_SMALL_SIZE
     }
 
-    /// The number of slots of a class in one region, zero if it does not fit. This divides; it
-    /// is meant for setup, not per-object paths.
+    /// The number of slots of a class in one region, from its origin, zero if it does not fit.
+    /// This divides; it is meant for setup, not per-object paths.
     #[inline]
     pub const fn slots_per_region(self, class: Class) -> u32 {
-        (self.region_size() / class.size()) as u32
+        ((self.region_size() - self.slot_origin(class)) / class.size()) as u32
     }
 
     /// The offset of a region's first byte.
@@ -150,10 +146,42 @@ impl Plan {
         region.index() << self.region_shift
     }
 
-    /// The offset of a slot: `index` slots of `class` into `region`.
+    /// The offset of a slot: `index` slots of `class` into `region`, past the class's origin.
     #[inline(always)]
     pub const fn slot_offset(self, region: RegionId, class: Class, index: u32) -> usize {
-        self.region_offset(region) + class.slot_offset(index)
+        self.region_offset(region) + self.slot_origin(class) + class.slot_offset(index)
+    }
+
+    /// Where slot 0 of `class` lies in each of its regions: a whole number of pages, different
+    /// for each small class, and zero for a large one.
+    ///
+    /// Regions are aligned to their size and fills take the lowest slots, so with slot 0 at
+    /// every region's base, the first pages of all the classes in use share their low virtual
+    /// page numbers, which index the sets of the second-level data TLB: a small heap spread
+    /// over many classes walked the page tables up to every few operations while using a few
+    /// hundred kilobytes (`docs/research/baselines.md`, section 15). The origin spreads the
+    /// classes over [`ORIGIN_SPAN_PAGES`] pages in bit-reversed order of their index, so that
+    /// classes of neighbouring sizes, which programs tend to use together, lie far apart. It
+    /// is a multiple of the class's alignment, so every slot keeps the alignment the class
+    /// gives, and it is less than a sixty-fourth of a region, so the simulator's small
+    /// geometries keep almost all their slots. The pages below it are never committed.
+    #[inline(always)]
+    pub const fn slot_origin(self, class: Class) -> usize {
+        if !class.is_small() {
+            return 0;
+        }
+        let page = self.geometry.page_size();
+        let span = ORIGIN_SPAN_PAGES * page;
+        let span = if span < self.region_size() / 64 {
+            span
+        } else {
+            self.region_size() / 64
+        };
+        let pages = span / page;
+        let turn = class.index().reverse_bits() as usize;
+        let origin = ((turn * pages) >> 8) * page;
+        let (_, shift) = class.factors();
+        origin & !((1 << shift) - 1)
     }
 
     /// Where the object regions end and the magazine area begins.
@@ -242,9 +270,14 @@ impl Plan {
     /// check a pointer from outside (C `free`, a checked build) must pass before it is trusted.
     #[inline(always)]
     pub const fn slot_at(self, location: Location, class: Class) -> Option<u32> {
-        let index = location.slot(class);
-        let start = class.slot_offset(index);
-        if start == location.offset as usize && start + class.size() <= self.region_size() {
+        let origin = self.slot_origin(class);
+        let offset = location.offset as usize;
+        if offset < origin {
+            return None;
+        }
+        let index = class.divisor().divide((offset - origin) as u32);
+        let start = origin + class.slot_offset(index);
+        if start == offset && start + class.size() <= self.region_size() {
             Some(index)
         } else {
             None
@@ -257,8 +290,11 @@ impl Plan {
         // In units of `2^shift` bytes: slot `index` ends at `(index + 1) * odd`. Counting in those
         // units keeps every term below 2^36, where `slot_offset` of a huge index would shift
         // bits out of the word.
+        // The origin is a multiple of `2^shift`.
         let (odd, shift) = class.factors();
-        shift <= self.region_shift() && index as usize * odd + odd <= self.region_size() >> shift
+        shift <= self.region_shift()
+            && index as usize * odd + odd + (self.slot_origin(class) >> shift)
+                <= self.region_size() >> shift
     }
 }
 
@@ -327,27 +363,35 @@ mod tests {
                     assert!(plan.slot_fits(class, index));
                     let location = plan.locate(plan.slot_offset(region, class, index)).unwrap();
                     assert_eq!(location.region, region);
-                    assert_eq!(location.slot(class), index, "{class:?}");
-                    assert_eq!(plan.slot_at(location, class), Some(index));
+                    assert_eq!(plan.slot_at(location, class), Some(index), "{class:?}");
                 }
                 assert!(!plan.slot_fits(class, slots));
                 let inside = plan.locate(plan.slot_offset(region, class, 0) + 1).unwrap();
                 assert_eq!(plan.slot_at(inside, class), None);
+                let origin = plan.slot_origin(class);
+                assert_eq!(origin % class.align(), 0, "{class:?}");
+                assert_eq!(origin % plan.geometry().page_size(), 0, "{class:?}");
+                if origin > 0 {
+                    let below = plan.locate(plan.region_offset(region) + origin - class.size());
+                    assert_eq!(plan.slot_at(below.unwrap(), class), None, "{class:?}");
+                }
             }
         }
     }
 
     #[test]
     fn the_unused_tail_of_a_region_is_no_slot() {
-        // A 4 GiB region holds 178956970 slots of 24 bytes, ending 16 bytes short of the end; an
-        // offset 16 bytes from the end is a multiple of 24 but not a slot.
+        // A 4 GiB region holds as many slots of 24 bytes as fit past the class's origin, ending
+        // short of the end; the next multiple of 24 past the last slot is not a slot.
         let plan = Geometry::DESIGN.largest_plan();
         let class = Class::of_size(24).unwrap();
-        let tail = plan.locate((1 << 32) - 16).unwrap();
-        assert_eq!(tail.slot(class), 178_956_970);
-        assert_eq!(plan.slots_per_region(class), 178_956_970);
+        let origin = plan.slot_origin(class);
+        assert!(origin > 0);
+        let slots = ((1 << 32) - origin) / 24;
+        assert_eq!(plan.slots_per_region(class) as usize, slots);
+        let tail = plan.locate(origin + slots * 24).unwrap();
         assert_eq!(plan.slot_at(tail, class), None);
-        let last = plan.locate((1 << 32) - 40).unwrap();
-        assert_eq!(plan.slot_at(last, class), Some(178_956_969));
+        let last = plan.locate(origin + (slots - 1) * 24).unwrap();
+        assert_eq!(plan.slot_at(last, class), Some(slots as u32 - 1));
     }
 }

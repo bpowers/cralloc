@@ -99,9 +99,10 @@ fn leaf_commits_cover_the_committed_slots() {
     }
 }
 
-/// A purge step moves down: a unit lies wholly below the watermark and below the cursor, ends
-/// on a unit boundary, starts below where it ends, and stays in one part of the region (whole
-/// huge pages in the huge-page part); a skip moves the cursor down.
+/// A purge step moves down: a unit lies wholly below the watermark and below the cursor and at
+/// or above the class's origin, ends on a unit boundary, starts below where it ends, and stays
+/// in one part of the region (whole huge pages in the huge-page part, but for one the origin
+/// cuts); a skip moves the cursor down; the pass ends at the origin.
 ///
 /// For classes whose size is a power of two, where `Divisor::divide` is a shift: with an odd
 /// factor of 3, 5 or 7, CBMC does not finish its 64-bit multiply within 20 minutes. The unit
@@ -132,18 +133,21 @@ fn purge_steps_move_down_within_one_part() {
         cursor
     };
     match layout.unit_below(carved, huge_from, cursor) {
-        Step::Done => assert!(bound == 0),
+        Step::Done => assert!(bound <= layout.origin_page()),
         Step::Skip(next) => {
             assert!(next < bound);
             assert!(huge_from == Some(next));
         }
         Step::Unit(unit) => {
             assert!(unit.start < unit.end && unit.end <= bound);
+            assert!(unit.start >= layout.origin_page());
             match huge_from {
                 Some(h) if unit.end > h => {
                     assert!(unit.start >= h);
                     assert!(unit.end % layout.huge_pages() == 0);
-                    assert!(unit.start % layout.huge_pages() == 0);
+                    assert!(
+                        unit.start % layout.huge_pages() == 0 || unit.start == layout.origin_page()
+                    );
                 }
                 _ => {}
             }
