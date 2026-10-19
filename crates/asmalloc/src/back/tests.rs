@@ -977,7 +977,7 @@ fn a_frontier_lives_two_intervals_of_the_clock() {
     assert_eq!(floor_at(&back, slots[0]), past(slots[7]));
     tick(&back, 1);
     assert_eq!(floor_at(&back, slots[0]), 0);
-    // However long a pass lasts, the heartbeats under it keep the interval moving.
+    // Three intervals with no heartbeat: the first heartbeat after them reads the clock.
     let low = fill(&back, class, 8);
     // SAFETY: as above.
     unsafe { back.launder(class, &low) };

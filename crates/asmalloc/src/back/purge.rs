@@ -48,18 +48,19 @@
 //! costs is time: its memory waits until no fill has reached it for an interval.
 //!
 //! A frontier word carries the number of its interval, the clock's time over the interval
-//! (`Clocked::epoch`, which the first heartbeat of each interval writes), so nothing has to
-//! age the words: a reader in interval E takes a word of E whole, a word of E - 1 for its
-//! `now`, and anything older as nothing. A frontier therefore lives one to two intervals of
-//! the clock after the claim that set it, however late or long the passes are.
+//! (`Clocked::epoch`), so nothing has to age the words: a reader in interval E takes a word of
+//! E whole, a word of E - 1 for its `now`, and anything older as nothing. A frontier
+//! therefore lives one to two intervals of the clock after the claim that set it, however late
+//! the passes are. The number is written by the first heartbeat of each interval that reads
+//! the clock: every heartbeat between passes, and a pass as it finishes each region and as it
+//! ends, so a long pass makes it lag by at most the walk of one region.
 //!
 //! Regions are in the order classes were first used, so the order across them says nothing
 //! about reuse: the passes carry on round the heap instead of each starting at the top, which
 //! spent every pass's goal on the pages a quiet program revived each interval in the higher
 //! regions and left the free pages of the lowest resident for good. A heap whose free memory
-//! is all fragmentation costs one walk of its bitmaps an interval, in steps. Every heartbeat
-//! reads the clock, to keep the interval number current; between passes it also reads the
-//! decay word, and the tallies only when a pass is due; a due pass that finds nothing retained
+//! is all fragmentation costs one walk of its bitmaps an interval, in steps. Between passes a
+//! heartbeat reads the decay word and the clock, and the tallies only when a pass is due; a due pass that finds nothing retained
 //! ends as it starts, so the next is an interval later. A clock that has gone back (a resume,
 //! a restored checkpoint) restarts the interval from the new time, so decay waits at most one
 //! interval for it. `decay_pass`, for the background thread's `maintain`, takes those steps in
@@ -331,7 +332,7 @@ impl<O: Os> Back<'_, O> {
     }
 
     /// [`Back::heartbeat`] for a caller that keeps its own reading of the clock: `now` is
-    /// called once.
+    /// called only when the step needs the time.
     pub fn heartbeat_with(&self, now: &dyn Fn() -> u64) {
         let _ = self.decay_step(now);
     }
@@ -360,13 +361,17 @@ impl<O: Os> Back<'_, O> {
         let geometry = self.space.plan().geometry();
         let page = geometry.page_size();
         let mut seen = state.decay.word.load(Acquire);
-        // Every heartbeat reads the clock, so that the interval number a frontier lives by
-        // moves with the clock even while a long pass is under way. Only a pass that is due
-        // reads the retained count: its tallies are written by frees and claims, and reading
-        // them on every heartbeat took their lines from the threads writing them
+        // `decay_look` steps a pass under way without the time, as the depot's heartbeat reads
+        // the clock only when a decision needs it (`depot::heartbeat`, `Clock`: a read on every
+        // heartbeat cost a pipeline 3%). Between passes it reads the clock, which keeps the
+        // interval number current; a pass notes it as it finishes a region and as it ends. Only a pass that is
+        // due reads the retained count: its tallies are written by frees and claims, and
+        // reading them on every heartbeat took their lines from the threads writing them
         // (`docs/research/memory.md`, "The cost of a large block, by cause").
-        let time = now();
-        self.note_epoch(time);
+        let time = if seen & ACTIVE != 0 { 0 } else { now() };
+        if seen & ACTIVE == 0 {
+            self.note_epoch(time);
+        }
         match decay_look(seen, time) {
             Decay::Wait => return None,
             Decay::Restamp(word) => {
@@ -443,7 +448,9 @@ impl<O: Os> Back<'_, O> {
             if pass.pages == 0 || self.went_round(pass) {
                 // The goal is met or the walk has gone round. End the pass this thread saw,
                 // and only that one.
-                let now = self.space.os().ticks() & !ACTIVE;
+                let now = self.space.os().ticks();
+                self.note_epoch(now);
+                let now = now & !ACTIVE;
                 let _ = state
                     .decay
                     .word
@@ -454,8 +461,14 @@ impl<O: Os> Back<'_, O> {
                 return Some(seen);
             }
             let limit = pass.pages as usize * page;
-            let (read, purged, _) = self.purge_step(PURGE_STEP_WORDS - spent, limit, Scope::Idle);
+            let (read, purged, finished) =
+                self.purge_step(PURGE_STEP_WORDS - spent, limit, Scope::Idle);
             spent += read;
+            if finished {
+                // A long lap goes region by region, so the interval number lags the clock by
+                // at most the walk of one region.
+                self.note_epoch(self.space.os().ticks());
+            }
             let done = (purged / page).min(u32::MAX as usize) as u32;
             if done != 0 {
                 // Lower this pass's goal, and no other's.

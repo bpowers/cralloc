@@ -25,6 +25,7 @@ fn main() {
         "forkjoin" => steal::forkjoin(&args),
         "spawn" => steal::spawn(&args),
         "churn" => single::churn(&args),
+        "fragchurn" => single::fragchurn(&args),
         "map" => single::map(&args),
         "largepair" => single::largepair(&args),
         "tree" => single::tree(&args),

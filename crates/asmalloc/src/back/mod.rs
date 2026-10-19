@@ -188,8 +188,8 @@ struct Clocked {
     word: AtomicU64,
     /// The number of the clock's interval (the time over `policy::DECAY_TICKS`) as a heartbeat
     /// last saw it: what a claim's frontier is recorded under and a pass reads frontiers by
-    /// (`layout::Frontier`). Written by the first heartbeat of each interval, so once an
-    /// interval; zero until the first heartbeat.
+    /// (`layout::Frontier`). Written by the first heartbeat of each interval that reads the
+    /// clock (`purge`), so once an interval; zero until the first heartbeat.
     epoch: AtomicU64,
 }
 

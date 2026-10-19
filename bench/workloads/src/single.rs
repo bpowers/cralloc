@@ -3,6 +3,13 @@
 //!
 //! - `churn`: `live` objects; each step frees a random one and allocates a replacement of a
 //!   random size, `ops` times. From `live=100` (all in L1) to `live=10M` (DRAM).
+//! - `fragchurn`: a large heap left fragmented beside a small working set. Allocate `big`
+//!   objects of `frag_size` bytes and write them, free all but one in `keep` at random, so
+//!   that most pages keep a live object and their free slots can never be returned; then for
+//!   `secs` seconds allocate `set` objects of `set_size` bytes, write them and free them, over
+//!   and over. Ranks by cycles per working-set object. The free memory the program cannot
+//!   give back stays far over any cap on retained memory, which is where a purge that chases
+//!   the cap would take the working set every interval.
 //! - `largepair`: allocate a block of each of `sizes` bytes, write its first word, free it;
 //!   `ops` times. The cost of one large allocation and free, with no other work.
 //! - `map`: build a `BTreeMap` or `HashMap` of `n` entries with `String` values, drop it;
@@ -108,6 +115,65 @@ pub fn churn(args: &Args) {
         .metric("index_bytes", (live * std::mem::size_of::<(*mut u8, u32)>()) as u64)
         .metric("rss_live", rss_live)
         .metric("rss_freed", rss_freed)
+        .primary("cycles/op", cycles(&run) / ops as f64, Better::Lower)
+        .emit();
+}
+
+pub fn fragchurn(args: &Args) {
+    pin_main();
+    let (big, frag_size, keep) = (args.usize("big", 4 << 20), args.usize("frag_size", 256), args.num("keep", 8));
+    let (set, set_size, secs) = (args.usize("set", 400_000), args.usize("set_size", 64), args.num("secs", 20));
+    let counters = Counters::region();
+    let mut rng = Rng::new(7);
+    let lay = |n: usize| unsafe { Layout::from_size_align_unchecked(n, 8) };
+    let mut kept = Vec::with_capacity(big / keep as usize + 1);
+    let objs: Vec<*mut u8> = (0..big)
+        .map(|i| {
+            // SAFETY: non-zero size; freed below with the same layout.
+            let p = unsafe { alloc(lay(frag_size)) };
+            unsafe { p.cast::<u64>().write(i as u64) };
+            p
+        })
+        .collect();
+    for p in objs {
+        if rng.below(keep) == 0 {
+            kept.push(p);
+        } else {
+            // SAFETY: allocated above with this layout.
+            unsafe { dealloc(p, lay(frag_size)) };
+        }
+    }
+    let rss_fragmented = rss_now();
+    let mut held: Vec<*mut u8> = Vec::with_capacity(set);
+    let (mut ops, mut acc) = (0u64, 0u64);
+    let begin = std::time::Instant::now();
+    let m = Measure::start(&counters);
+    while begin.elapsed() < std::time::Duration::from_secs(secs) {
+        for i in 0..set {
+            // SAFETY: non-zero size; freed below with the same layout.
+            let p = unsafe { alloc(lay(set_size)) };
+            unsafe { p.cast::<u64>().write(i as u64) };
+            acc = acc.wrapping_add(p as u64);
+            held.push(p);
+        }
+        for p in held.drain(..) {
+            // SAFETY: as above.
+            unsafe { dealloc(p, lay(set_size)) };
+        }
+        ops += set as u64;
+    }
+    let run = m.stop();
+    black_box(acc);
+    let rss_end = rss_now();
+    for p in kept {
+        // SAFETY: as above.
+        unsafe { dealloc(p, lay(frag_size)) };
+    }
+    Report::new("fragchurn", args)
+        .phase("run", &run)
+        .metric("ops", ops)
+        .metric("rss_fragmented", rss_fragmented)
+        .metric("rss_end", rss_end)
         .primary("cycles/op", cycles(&run) / ops as f64, Better::Lower)
         .emit();
 }
