@@ -996,3 +996,139 @@ With the depot as above (quarter cap), `MAX_SPARES` at 1 against 4, five interle
 p4 c4 peaked at 5.61 MiB against 6.07 (4.63 against 4.67 ns), and sh8bench took 0.332 against
 0.329 s on one L3 and 0.614 against 0.593 s on two (+3.5%; 0.603 to 0.635 against 0.575 to
 0.613). One spare still costs sh8bench across L3s.
+
+# sh8bench, accounted (2026-10-19)
+
+Why sh8bench (preloaded, 16 threads) takes 1.6 times mimalloc's time on one L3 and 2.2 to 2.5
+times on two, at a945951. No allocator code changed; the options at the end were built only to
+be measured.
+
+## The program
+
+The main thread starts 16 workers, then mallocs 10M 8-byte blocks, writes a link into each, and
+publishes them in an 80 MB array. Each worker frees its sixteenth of that array as the main
+thread fills it, then runs 43,750 iterations over an array of 62,500 pointers. Each iteration
+mallocs a run of one size, cycling through 1000 x 8, 5000 x 16, 1000 x 48, 100 each of 72, 148
+and 200, 10 x 520, 5 x 1056, 3 x 4096, and one each of 9162, 34562 and 168524 bytes (two large
+blocks per 7321), writing the first and last byte of each. When its array wraps, the worker
+frees four fifths of it in one burst (the bottom part in allocation order, the top in reverse)
+and keeps the next fifth for one more pass. So every worker allocates and frees its own blocks,
+in bursts of 50,000 (about 1.4 MB, 200 magazines, two thirds of them 16-byte); a block lives
+one or two passes; only the main thread's 10M blocks cross threads. 437M mallocs and as many
+frees in all; 17 threads on 8 CPUs.
+
+## Method
+
+Preloaded, `taskset` to CPUs 0-7 (one L3) or 0-3 and 8-11 (two), under the measurement lock,
+libraries and placements interleaved, five rounds, medians. Cycles are user plus kernel,
+summed over CPUs, per call (874M `malloc` and `free` calls). Fills from `perf stat`
+(`ls_dmnd_fills_from_sys.*`). The program's own touches are separated by a copy of the
+program built the same way without `p[0] = 0; p[size-1] = 0` (`notouch`). Where cycles go
+inside the allocator comes from `cycles:u` profiles of the `notouch` program, grouped by symbol
+and scaled to the counted total; sampled fill events say which code waits for lines from where.
+Slow-path traffic was counted with temporary per-CPU counters in a build not kept. Interventions
+are builds that change one constant, to see what a cause is worth.
+
+## One L3
+
+14.5 cycles a call against mimalloc's 9.2: 5.3 more.
+
+| Cause | Cycles a call |
+|---|---:|
+| Depot stack pushes and pops: a contended compare-and-swap on the domain or shared head, after reading the top magazine's link, both lines last written by another core | +2.2 |
+| The rest of each exchange: spares, records, heartbeat (most of it waiting for stores still in flight at its first locked or mis-forwarded access) | +1.6 |
+| Launder and fill, 51M objects (12% of allocations), less mimalloc's page work | +1.2 |
+| Program touching handed-out objects that are not in this core's L2 (140M more L3 fills; 0.5 to 1.2 G cycles between sessions) | +0.6 |
+| Fast paths and PLT | -0.6 |
+| Kernel: 31K faults and 2,200 `mprotect`s against 390 faults (both about 0.17 a call) | 0 |
+| Measured gap | 5.3 |
+
+Every 250 calls is a slow path (3.5M), and each costs about 1,600 cycles: 560 in stack
+operations (35% of compare-and-swaps fail), 400 of glue, 570 laundering and filling. Of the
+3.5M exchanges, 74% pop the domain's stack and 9% the shared one; the per-CPU spares serve 5%,
+because a burst is 50 times what four spares hold. Of the 51M objects through the bitmaps,
+13.6M are the refresh rule's (one retiring magazine in 32) and 37M overflow the shared stack's
+target. The fault count is not a cost: kernel time is 1% for both allocators. Removing the
+`mprotect` sleeps (a build committing 16 MiB at a time: 400 voluntary switches down to 70)
+changed nothing.
+
+What each cause is worth when removed, cycles (G) and wall (ms), four to six rounds:
+
+| Build | One L3 | Two L3s (suite runner, s) |
+|---|---|---|
+| a945951 | 12.8, 341-360 | 0.597 |
+| refresh off | 12.3, 328 | |
+| depot target 64 MiB (no overflow launders) | 12.3, 338 | |
+| every spare kept on its CPU (256 spares, 1 GiB) | 9.1, 262 | 0.423 |
+| magazines up to 1024 slots | 9.5, 265-270 | 0.431 |
+| up to 4096 slots | 8.6, 247 | |
+| mimalloc | 8.2, 213-225 | 0.27 |
+
+So almost all of the one-L3 gap is the number of magazine exchanges that reach shared
+structures. Laundering is a smaller part than it looks: without it, the same objects come
+back through the depot from other cores' caches instead. A `lock xadd` per slow path (the
+activity counter) and two struct copies that defeat store forwarding are where the profile
+shows the waits, but making the counter a load and a store moved the wait to the next locked
+instruction and changed nothing measurable (six rounds); the waits are the misses of the
+exchange, not the instructions that expose them.
+
+## Two L3s
+
+22.7 cycles a call against 10.0: 12.7 more. It adds to the one-L3 causes (4.6, the notouch
+part above) two of its own:
+
+| Cause | Cycles a call |
+|---|---:|
+| One-L3 causes, allocator part | +4.6 |
+| Objects last written in the other L3: 30M more fills from its cache and 21M more from DRAM | +6.3 |
+| Allocator lines crossing L3s | +1.8 |
+| Measured gap | 12.7 |
+
+Objects reach the other L3 two ways: 67% of shared-stack pops (197K of 293K magazines, about
+40M objects) take a magazine the other domain pushed, because a 50,000-object burst overflows a
+domain's cap (eight 16-byte magazines) at once; and 76M objects (17% of allocations, against 12%
+on one L3) are filled from bitmap words the other domain laundered, since fills take the
+lowest address whoever freed it. Threads rarely move between L3s (16 changes in a run).
+mimalloc keeps each object on its thread's page, so a block freed and reallocated by its own
+thread never leaves that core; its two-L3 traffic is the main thread's 10M blocks.
+
+The allocator's own lines that cross, by the code that waits for them (notouch, 6.9M fills
+from the other L3): magazine slots read by `malloc` and written by `free` (29%; empty
+magazines come from the shared empty stack too), depot heads and links (20%), bitmap leaf words
+(17%), summary words (4%), the exchange's glue (12%), the program (7%).
+
+Wall time hides part of this. In every asmalloc run one L3's four CPUs are busy throughout and
+the other's partly idle (12.3 against 2.6 to 12 G cycles); runs where the kernel packs nearly
+all threads into one L3 take the same 600 ms as spread ones, because spreading costs as many
+cycles as the second L3 adds. mimalloc's runs spread evenly (250 ms) or not (327 ms). The kernel
+here has `CONFIG_SCHED_CACHE`, which prefers one LLC per process; asmalloc's voluntary sleeps
+(400 against 5) give it more wakeups to place, but removing most of them did not change the
+placement or the time.
+
+## Options
+
+Neither is built; each was measured as a constant change.
+
+**Larger magazines for small classes.** Today a magazine holds at most 254 objects. With the
+byte budget alone deciding (1024 or 4096 slots for classes up to 64 or 16 bytes), exchanges fall
+4 to 16 times and compare-and-swap failures 20 times. sh8bench: one L3 360 to 270 ms (1024) or
+247 (4096, mimalloc 225); two L3s 0.597 to 0.431 s; peak unchanged (118 MiB). Elsewhere, 1024
+slots, three rounds: tree depth 18 -9%, pipelines -9 to -15%, JSON 8 MiB 0 to -6%, larson-sized
++4%, the rest level. The cost is memory on small cross-thread heaps, from bigger magazines in
+flight: pipeline t2 2.2 to 3.0 MiB (3.2 at 4096; jemalloc 1.9), x3 4.9 to 6.7 (8.2; jemalloc
+4.7), mpmc p3 c1 3.5 to 4.9 (6.0), exchange split 2.7 to 3.5 (4.2). That breaks the jemalloc bar
+on those jobs. The fast path is unchanged (the routines are proved to 2^16 slots); the back
+end's launder batches, the drain's bounded work and the spare budget would need review.
+
+**Keep bursts on their CPU.** Letting every spare stay on its CPU gives the same sh8bench speed
+(262 ms, 0.423 s) at 142 MiB peak (jemalloc 162), but unbounded it ruins one-way flows: a
+consumer CPU keeps everything it frees (pipeline t2 2 to 87 MiB and twice as slow, x2 split 176
+MiB). A version that grows a class's spare limit only while the CPU both pops and pushes that
+class's magazines with the depot in an interval, within the per-CPU byte budget given to the
+classes in use rather than split evenly over 44, would keep one-way flows as they are. Not
+measured; its peak on sh8bench would sit between 118 and 142 MiB.
+
+Neither touches the two-L3 object crossing directly. That needs fills to prefer slots a
+domain laundered itself (per-domain regions for a class), and an overflow that reaches the
+other domain only when that domain is short; both are design changes to the depot and back
+end.
