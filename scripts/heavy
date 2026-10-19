@@ -27,15 +27,18 @@ flock -s 8
 # Holding the turnstile means no such measurement is running, so a slice found frozen now was
 # left that way by one that was killed before it could thaw.
 systemctl --user thaw "$slice" 2>/dev/null || true
-exec 8>&-
 
 if command -v systemd-run >/dev/null 2>&1 \
-   && systemd-run --user --scope -q --collect --slice="$slice" -- true >/dev/null 2>&1; then
+   && systemd-run --user --scope -q --collect --slice="$slice" -- true 8>&- >/dev/null 2>&1; then
   # scripts/memlimit starts a scope of its own for the memory cap, which would leave this
   # slice; the variable tells it to stay inside.
   export ASMALLOC_HEAVY_SLICE="$slice"
+  # The turnstile is let go only once the command is inside its scope. A scope cannot start
+  # in a frozen slice, so one that let go earlier could find the slice frozen under it and
+  # would have to run outside, beside the measurement.
   exec systemd-run --user --scope -q --collect --slice="$slice" -- \
-    taskset -c "$cpus" nice "$@"
+    bash -c 'exec 8>&-; exec "$@"' heavy taskset -c "$cpus" nice "$@"
 fi
+exec 8>&-
 echo "heavy: systemd-run unavailable; a measurement on both L3s cannot pause this" >&2
 exec taskset -c "$cpus" nice "$@"
