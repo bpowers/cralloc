@@ -5,12 +5,16 @@
 //! another domain's heartbeats look at them (`shed.rs`). A look at one class in every domain
 //! would read a stack head in each of up to 64 domains, whatever the process uses. Instead each
 //! domain keeps the set of classes whose stacks may hold magazines, and the depot the set of
-//! domains whose set is not empty, and each periodic look visits one stack in another domain,
-//! chosen from those sets in rotation: the `t`-th look of a CPU visits, of the `n` other
-//! domains that hold something, the `(t mod n)`-th, and of that domain's `m` held classes the
-//! `((t / n) mod m)`-th. So a look costs the same however many domains there are, and while the
-//! sets stay as they are, a CPU's looks visit every held stack of the other domains once in
-//! every `n * m` looks, `m` the most classes one domain holds. A quiet domain usually holds few.
+//! domains whose set is not empty, and each periodic look visits one other domain, chosen from
+//! those sets in rotation: the `t`-th look of a CPU visits, of the `n` other domains that hold
+//! something, the `(t mod n)`-th, and looks at every stack its set names. So a look's work
+//! grows with the classes one domain holds, never with the number of domains, and while the
+//! sets stay as they are a CPU's looks visit every held stack of the other domains once in
+//! every `n` looks. A stack owes nothing until a second look, in a later interval than the
+//! first, sees it still deep, so a quiet domain's stacks go back within two rounds of looks
+//! and an interval: with one CPU at 640 slow paths an interval, a look in every
+//! [`LOOK_EVERY`](super::LOOK_EVERY), and 63 quiet domains, four intervals. Visiting one stack
+//! a look, as this did first, took sixteen with five classes a domain.
 //!
 //! **Hints.** The sets change by single atomic instructions and only steer looks: a bit that is
 //! set on a stack that is empty costs a look that finds nothing, and the look clears it. A bit
@@ -102,9 +106,9 @@ impl<O: Os, R: Routines, S: Source> Cache<'_, O, R, S> {
         }
     }
 
-    /// The `turn`-th look's visit to a stack in a domain other than `here`: one held class of
-    /// one held domain, in rotation (see the module documentation), looked at with the clock
-    /// at `now`.
+    /// The `turn`-th look's visit to a domain other than `here`: every held class of one held
+    /// domain, the domains in rotation (see the module documentation), looked at with the
+    /// clock at `now`.
     pub(super) fn look_elsewhere(&self, here: Domain, turn: u64, now: u64) {
         if self.depot.domain_count() < 2 {
             return;
@@ -120,10 +124,13 @@ impl<O: Os, R: Routines, S: Source> Cache<'_, O, R, S> {
             self.unhold_domain(domain);
             return;
         }
-        let m = u64::from(classes.count_ones());
-        let ordinal = nth_set_bit(classes, (turn / n % m) as u32);
-        if let Some(class) = SmallClass::from_ordinal(ordinal as usize) {
-            self.look_at_depth(Pool::Domain(domain), class, now);
+        let mut rest = classes;
+        while rest != 0 {
+            let ordinal = rest.trailing_zeros() as usize;
+            rest &= rest - 1;
+            if let Some(class) = SmallClass::from_ordinal(ordinal) {
+                self.look_at_depth(Pool::Domain(domain), class, now);
+            }
         }
     }
 }
