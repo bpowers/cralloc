@@ -63,9 +63,11 @@ nothing accesses that memory in a way that conflicts with a shared reference.
      its compare-and-swap publishes that frontier, and the watermark never passes the frontier
      (both are in the region's one `Grow` word, kept outside the block in `State::headers`
      and reached through `grow`, which needs no `unsafe`; a carve advances the watermark only
-     when the
-     frontier covers the new slots). `validate` checks `slot < carved` before `release`;
-     `purge_unit` looks only at slots below the watermark (`unit_below`); a descent reaches a
+     when the frontier covers the new slots). A small class's slots start at its origin
+     (`Plan::slot_origin`, whole pages): the pages below it hold no slot and are never
+     committed, so the leaf words a frontier covers start with the first slot past the origin,
+     and the harness, run on the layouts with their origins, covers that. `validate` checks
+     `slot < carved` before `release`; `purge_unit` looks only at slots below the watermark (`unit_below`); a descent reaches a
      leaf word only through a summary bit, and a summary bit is set only by `tree::up`, which
      starts at a leaf word that was just freed into, hence below the watermark.
 4. *Live.* The reservation is published by the `SpaceCell` that `State` owns, and only that

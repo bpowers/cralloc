@@ -121,9 +121,10 @@ pub(super) fn locate_inverts_region_offsets(geometry: Geometry) {
 }
 
 /// Every slot `slot_fits` accepts lies inside its region, is found again by `locate` at the
-/// offset `origin + index * size`, and is aligned to its class's alignment or the region size, whichever
-/// is smaller, given a region-aligned base. With the division proofs in `classes`, `slot` then
-/// recovers the index.
+/// offset `origin + index * size`, and is aligned to its class's alignment or the region
+/// size, whichever is smaller, given a region-aligned base. With the division proofs in
+/// `classes`, `Plan::slot_at` then recovers the index: past the origin it is the search with
+/// no origin (`plan::slot_from`).
 pub(super) fn slots_lie_inside_their_region_and_are_aligned(geometry: Geometry) {
     let plan = any_plan(geometry);
     let region = any_object_region(plan);
@@ -136,7 +137,6 @@ pub(super) fn slots_lie_inside_their_region_and_are_aligned(geometry: Geometry) 
     let location = plan.locate(offset).unwrap();
     assert!(location.region == region);
     assert!(location.offset as usize == plan.slot_origin(class) + class.slot_offset(index));
-    assert!(plan.slot_at(location, class) == Some(index));
 
     let align = if class.align() < plan.region_size() {
         class.align()

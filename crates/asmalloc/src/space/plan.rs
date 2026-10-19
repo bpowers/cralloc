@@ -25,6 +25,12 @@ use crate::classes::{Class, MAX_SMALL_SIZE};
 /// and over 256 they went.
 pub const ORIGIN_SPAN_PAGES: usize = 256;
 
+/// The step between successive classes' origins, in pages: the odd number nearest the span
+/// over the golden ratio, which keeps successive multiples far apart. A bit-reversed index,
+/// tried first, put the 32 KiB class on the 128-byte class's page once rounded to its
+/// alignment.
+const ORIGIN_STEP: usize = 159;
+
 /// A region number: less than [`MAX_REGIONS`], so it indexes the class-of-region table.
 ///
 /// Only [`Plan::region`], [`Plan::regions`] and [`Plan::locate`] make one, so outside this module
@@ -160,11 +166,13 @@ impl Plan {
     /// page numbers, which index the sets of the second-level data TLB: a small heap spread
     /// over many classes walked the page tables up to every few operations while using a few
     /// hundred kilobytes (`docs/research/baselines.md`, section 15). The origin spreads the
-    /// classes over [`ORIGIN_SPAN_PAGES`] pages in bit-reversed order of their index, so that
-    /// classes of neighbouring sizes, which programs tend to use together, lie far apart. It
-    /// is a multiple of the class's alignment, so every slot keeps the alignment the class
-    /// gives, and it is less than a sixty-fourth of a region, so the simulator's small
-    /// geometries keep almost all their slots. The pages below it are never committed.
+    /// classes over [`ORIGIN_SPAN_PAGES`] pages: class `i` at `i * ORIGIN_STEP` modulo the span,
+    /// a golden-ratio step, so that classes of neighbouring sizes, which programs tend to use
+    /// together, lie far apart, and no two small classes start on the same page however the
+    /// origin is rounded (`tests::small_classes_start_on_pages_of_their_own`). It is a multiple
+    /// of the class's alignment, so every slot keeps the alignment the class gives, and it is
+    /// less than a sixty-fourth of a region, so the simulator's small geometries keep almost
+    /// all their slots. The pages below it are never committed: it costs address space only.
     #[inline(always)]
     pub const fn slot_origin(self, class: Class) -> usize {
         if !class.is_small() {
@@ -178,8 +186,8 @@ impl Plan {
             self.region_size() / 64
         };
         let pages = span / page;
-        let turn = class.index().reverse_bits() as usize;
-        let origin = ((turn * pages) >> 8) * page;
+        let turn = class.index() as usize * ORIGIN_STEP % ORIGIN_SPAN_PAGES;
+        let origin = (turn * pages / ORIGIN_SPAN_PAGES) * page;
         let (_, shift) = class.factors();
         origin & !((1 << shift) - 1)
     }
@@ -270,18 +278,12 @@ impl Plan {
     /// check a pointer from outside (C `free`, a checked build) must pass before it is trusted.
     #[inline(always)]
     pub const fn slot_at(self, location: Location, class: Class) -> Option<u32> {
-        let origin = self.slot_origin(class);
-        let offset = location.offset as usize;
-        if offset < origin {
-            return None;
-        }
-        let index = class.divisor().divide((offset - origin) as u32);
-        let start = origin + class.slot_offset(index);
-        if start == offset && start + class.size() <= self.region_size() {
-            Some(index)
-        } else {
-            None
-        }
+        slot_from(
+            self.slot_origin(class),
+            location.offset as usize,
+            class,
+            self.region_size(),
+        )
     }
 
     /// Whether slot `index` of `class` lies wholly inside a region.
@@ -295,6 +297,38 @@ impl Plan {
         shift <= self.region_shift()
             && index as usize * odd + odd + (self.slot_origin(class) >> shift)
                 <= self.region_size() >> shift
+    }
+}
+
+/// The index of the slot of `class` that starts `offset` bytes into a region of `region_size`
+/// bytes whose slots start at `origin`, if one does: [`Plan::slot_at`]'s arithmetic. An origin
+/// only moves the search: past it, this is the search with no origin in a region shorter by
+/// the origin, so the round trip from a slot's offset back to its index rests on the division
+/// proofs in `classes` alone, as it did before slots had origins.
+#[inline(always)]
+pub(crate) const fn slot_from(
+    origin: usize,
+    offset: usize,
+    class: Class,
+    region_size: usize,
+) -> Option<u32> {
+    if offset < origin {
+        return None;
+    }
+    slot_in(offset - origin, class, region_size - origin)
+}
+
+/// The index of the slot of `class` that starts `offset` bytes into `room` bytes of slots that
+/// start at its beginning, if one does: the offset is a multiple of the class size and the
+/// whole slot fits.
+#[inline(always)]
+const fn slot_in(offset: usize, class: Class, room: usize) -> Option<u32> {
+    let index = class.divisor().divide(offset as u32);
+    let start = class.slot_offset(index);
+    if start == offset && start + class.size() <= room {
+        Some(index)
+    } else {
+        None
     }
 }
 
@@ -374,6 +408,41 @@ mod tests {
                 if origin > 0 {
                     let below = plan.locate(plan.region_offset(region) + origin - class.size());
                     assert_eq!(plan.slot_at(below.unwrap(), class), None, "{class:?}");
+                }
+            }
+        }
+    }
+
+    /// The property the origins are for: in the design's full regions no two small classes start on
+    /// pages with the same low page-number bits (those the second-level TLB's sets are indexed
+    /// by), and every slot is found again from its address at the first, an interior and the
+    /// last slot of each class.
+    #[test]
+    fn small_classes_start_on_pages_of_their_own() {
+        for plan in [
+            Geometry::DESIGN.largest_plan(),
+            Geometry::DESIGN.smallest_plan(),
+        ] {
+            let page = plan.geometry().page_size();
+            let mut seen = std::collections::BTreeMap::new();
+            // A heap that got less than its full reservation has smaller regions and spreads
+            // its origins over a 64th of one; there two classes may share a start.
+            let spread = plan.region_size() / 64 >= ORIGIN_SPAN_PAGES * page;
+            for class in Class::all().filter(|c| c.is_small() && spread) {
+                let first = plan.slot_origin(class) / page % ORIGIN_SPAN_PAGES;
+                if let Some(other) = seen.insert(first, class) {
+                    panic!("{class:?} and {other:?} start on page {first}");
+                }
+            }
+            let region = plan.region(3).unwrap();
+            for class in Class::all().filter(|&c| plan.fits_region(c)) {
+                let slots = plan.slots_per_region(class);
+                for index in [0, slots / 2, slots - 1] {
+                    let offset = plan.slot_offset(region, class, index);
+                    let location = plan.locate(offset).unwrap();
+                    assert_eq!(location.region, region);
+                    assert_eq!(plan.slot_at(location, class), Some(index), "{class:?}");
+                    assert_eq!(plan.slot_offset(region, class, index), offset);
                 }
             }
         }
