@@ -1740,17 +1740,48 @@ The other jobs (`benchrun`, five interleaved rounds, medians, change paired by r
 they moved by under 1%. `r16` is 16 on every job here; it differs only for blocks past 16 MiB
 that grow on past 256 MiB, which it copies more.
 
+**Why 16 loses the 64 MiB loop.** It is the copy, not faults. Per repetition (40
+repetitions, three interleaved runs; huge faults from `thp_fault_alloc`, calls by `strace -c`,
+user cycles split by `perf record -e cycles:u`):
+
+| | 4 | 16 |
+|---|---:|---:|
+| MiB copied, moves | 18.25, 3 | 33.0, 2 |
+| user kcycles | 5,000 to 5,700 | 8,700 to 10,400 |
+| of them `memmove` / `memset` | 28% / 66% | 57% / 36% |
+| kernel kcycles | 7,600 to 9,600 | 8,100 to 9,600 |
+| faults, of them huge | 68.7, 40 | 56.0, 48 |
+| `madvise`, `mprotect` | 19, 1.9 | 26, 1.9 |
+
+At 4 the last move is to 32 MiB, copying 16, and the 160 MiB slot then holds 64 MiB. At 16 the
+last move is to 64 MiB, copying 32. That copy also costs twice as much a byte (158k against
+77k cycles a MiB), since a 32 MiB source no longer fits the L3. The `memset` is the same at
+both. A single buffer grows in slot 0 of each class, which has no stagger, so it loses no huge
+page in place (below).
+
 **The 64 vectors and huge pages.** At 8 and 16 the 64-vector job faults more (twice and 1.35
 times as often) because more of its growth is in place, and in-place growth loses huge pages.
 Each slot starts its block at a different stagger, so a block of exactly 2 MiB ends a few
 bytes into the next huge page. Its advice is rounded down (`region::advise_grown`), so writing
 those bytes faults a small page there. At the next growth that huge page is advised but
-already has a page table, and it stays small. A single vector, at slot 0, has no stagger and
-no loss. Rounding up when only the stagger carries a block over the boundary cut the faults of
-the 64 vectors at 16 from 49,929 to 17,736 a run. It raised VmHWM from 278 to 396 MiB, though,
-because a buffer that stops there then holds a whole huge page for a few bytes (at 4: 280 to
-321 MiB, no fewer faults). It was not adopted. An `MADV_COLLAPSE` of that one huge page at the
-next in-place growth would get the page without the memory, but it was not tried.
+already has a page table, and it stays small: one huge page of each in-place doubling. That
+spill page is one the block can write, so advising it at the growth, before the program
+writes it, is the fix at the cause. Measured (five interleaved rounds, medians):
+
+| `vecgrow 64x4Mi` | cycles/element | faults | peak MiB |
+|---|---:|---:|---:|
+| 16 | 5.86 | 184,880 | 277.3 |
+| 16, the spill page advised | 4.46 (-24.5%) | 56,108 | 403.0 |
+| 4 | 5.90 | 137,557 | 279.2 |
+| 4, the spill page advised | 6.38 (+8.4%) | 137,557 | 403.9 |
+
+The 1 and 4 MiB loops and 1x256Mi are unchanged by it, within 0.3%. It costs 126 MiB of peak:
+a buffer that stops at a multiple of a huge page holds one more whole huge page for the few
+bytes it wrote there. It was not adopted. Starting a grown block unstaggered would remove the
+spill, but this is the case the stagger is for: 64 buffers of 4 MiB walked together took 40.9
+cycles an element at slot starts and 12.0 staggered (`zen5-roofline.md`, section 7). Any
+stagger smaller than a huge page makes a block of `k` huge pages span `k + 1`, so the choice is
+between that page's memory and its faults.
 
 **Address space and commit charge.** What large classes hold at exit (memstat builds, one run
 each): regions assigned, and committed MiB, which is the commit charge under strict
@@ -1828,7 +1859,8 @@ block).
 **Chosen: 16, the shrink threshold 32.** Against 4 it copies about a third fewer bytes on
 average (0.21 of the final size against 0.33). That is 28 to 34% of the time of the 1 and
 4 MiB loops and of one vector to 256 MiB, and 6% of the 64 vectors. Like any constant, it loses at some sizes: 2 and 64 MiB copy half the final
-size, and the 64 MiB loop is 35% slower. 32 would copy a fifth fewer bytes again for twice the
+size, and the 64 MiB loop is 35% slower, since it copies 33 MiB a repetition where 4
+copies 18. 32 would copy a fifth fewer bytes again for twice the
 address space and commit charge (10.4 GiB committed for 64 buffers of 4 MiB). The gains
 diminish with the logarithm of the factor while the costs grow with the factor, so sixteen,
 not more. The confirming run, final build against main `e486bc4` (five rounds, change paired by round):
