@@ -587,7 +587,9 @@ Five rules stand behind the table.
   the bits. Nothing else can allocate the range while it is claimed, so no lock is needed.
   What to purge is decided on evidence of reuse. Fills and allocations take the lowest free
   slots of a region, so the highest slot a region's claims reached during an interval shows
-  that everything below it was needed in that interval. Each region keeps that frontier for
+  that everything below it was needed in that interval. A fill that moved past another
+  fill records only what it reached before that, because what it claims beyond says
+  nothing about the slots it skipped. Each region keeps that frontier for
   the interval under way and the one before, in one word that also names its interval. A
   claim writes the word only when it reaches higher or is the region's first of an
   interval, and a reader takes a word from two or more intervals back as empty, so nothing
