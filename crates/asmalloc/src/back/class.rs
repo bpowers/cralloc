@@ -3,12 +3,17 @@
 //!
 //! A class's regions are found through its summary tree, which visits them in address order. New
 //! slots are carved from one region at a time, the class's carving region. When it is exhausted,
-//! the thread that notices picks the lowest unassigned region, commits its fixed metadata (so
-//! that the region never carries a class tag without readable summary words), takes it with a
-//! compare-and-swap on the region table, gives it its huge-page advice, and publishes it with a
-//! compare-and-swap on the class's carving word. If another thread published first, the loser
-//! zeroes what it wrote and gives its region back with a compare-and-swap; no other thread has
-//! named it, because nothing points into a region until it has been carved from.
+//! the thread that notices picks the lowest unassigned region and commits its fixed metadata (so
+//! that the region never carries a class tag without readable summary words). For a large class
+//! it also commits the memory of the region's first slot, so that an OS that refuses the commit
+//! costs the class nothing: the region is still unassigned. It takes the region with a
+//! compare-and-swap on the region table, then, for a large class, records that commit in the
+//! region's header, gives the region its huge-page advice, and publishes it with a
+//! compare-and-swap on the class's carving word. Between the tag and the header's store the
+//! header is zero, which reads as a region with nothing carved. If another thread published
+//! first, the loser zeroes what it wrote and gives its region back with a compare-and-swap; no
+//! other thread has named it, because nothing points into a region until it has been carved
+//! from.
 
 use super::group::{Gather, JUDGE, Run};
 use super::host::ClassHost;
