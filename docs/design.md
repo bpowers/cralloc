@@ -506,7 +506,9 @@ been touched.
 
 The order of preference in a fill is the fragmentation policy: reuse free objects before
 carving fresh memory, and take the lowest address first. Live data packs toward the start of
-each region and the high end drains, which is where purging starts.
+each region and the high end drains. It also makes the highest slot a fill reaches a measure
+of how much of the region the program needed, which the purge relies on (see "Returning
+memory and huge pages").
 
 A filled magazine also hands its objects out lowest address first, so that the order within
 a magazine is the order across magazines. A program that allocates a run of objects and then
@@ -563,8 +565,8 @@ rule that returns it (`docs/research/memory.md` has the measurements behind them
 
 | What holds the memory | What returns it | When |
 |---|---|---|
-| Free slots in the bitmaps, on pages with nothing live on them | The clocked purge | Once an interval: up to a quarter of the retained memory, or all of it above the cap, from the top of the heap down |
-| The same, while more than the cap is retained and the heap grows somewhere else | The carve that grows it returns as much as it takes | At that carve, within a bound on its work |
+| Free slots in the bitmaps, on pages with nothing live on them, above what fills reached in the last two intervals | The clocked purge | Once an interval: up to a quarter of the retained memory, or all of it above the cap, carrying on round the heap from where the last pass stopped |
+| The same, whether fills reached it or not, while more than the cap is retained and the heap grows somewhere else | The carve that grows it returns as much as it takes | At that carve, within a bound on its work |
 | A large block left behind by a move, or one that grew and is freed, beyond a small budget of such memory | The move or the free (see "Large objects") | Before it releases the slot |
 | The tail of a large block that shrinks in place; the pages behind a move made in pieces | The resize (see "Large objects") | At once |
 | Objects in a magazine that stays loaded | A slow path of the same CPU launders it | Once it has been loaded for an interval |
@@ -579,14 +581,25 @@ rule that returns it (`docs/research/memory.md` has the measurements behind them
 
 Five rules stand behind the table.
 
-- **Purge late and from the top.** Purging claims the bits of every object that overlaps a
-  range of pages, exactly as an allocation would. If all of them were free it returns the
-  pages with `madvise(MADV_DONTNEED)`. Either way it then releases the bits. Nothing else
-  can allocate the range while it is claimed, so no lock is needed. Once an interval a pass
-  starts at the high end of the heap and returns up to a quarter of the retained memory, in
-  bounded steps spread over the heartbeats that follow. Fills take the lowest addresses, so
-  what is being reused sits at the bottom and is mostly left alone, and what is not reused
-  is gone within several intervals.
+- **Purge late, and only what fills did not reach.** Purging claims the bits of every
+  object that overlaps a range of pages, exactly as an allocation would. If all of them
+  were free it returns the pages with `madvise(MADV_DONTNEED)`. Either way it then releases
+  the bits. Nothing else can allocate the range while it is claimed, so no lock is needed.
+  What to purge is decided on evidence of reuse. Fills and allocations take the lowest free
+  slots of a region, so the highest slot a region's claims reached during an interval shows
+  that everything below it was needed in that interval. Each region keeps that frontier for
+  the interval under way and the one before, in one word that also names its interval. A
+  claim writes the word only when it reaches higher or is the region's first of an
+  interval, and a reader takes a word from two or more intervals back as empty, so nothing
+  has to age the words and only a thread that holds a claim in a region writes its word.
+  Once an interval a pass carries on round the heap from where the last one stopped and
+  returns free pages above the frontiers: up to a quarter of the retained memory, or all of
+  it above the cap, in bounded steps spread over the heartbeats that follow. It never takes
+  pages below a frontier, however high the count. Those are the pages the next fills take,
+  and purging them only makes the program fault them back. What two intervals did not need
+  goes back, which is the rule the depot stacks, the spares and stock follow too. A
+  frontier is a hint: a wrong one costs a purge too many or too few, never a page in use,
+  because the purge is a claim.
 - **Retained memory is counted, and growth pays for it.** The back end keeps an estimate
   of the free memory it holds that is still resident, small and large classes together.
   Frees and laundered magazines raise it; only reuse and purging lower it, and it is never
@@ -597,14 +610,20 @@ Five rules stand behind the table.
   so memory freed in one class can serve another only by way of the OS, and a program that
   frees a great deal of one size and then allocates as much of another would hold both. So
   while the count is over a cap, growth is paid for: memory carved past a watermark is
-  matched by an equal purge of retained memory, a step at a time and within a bound on the
-  work. Taking back pages that a purge returned is reuse, not growth, and is not charged;
-  charging it sets the allocator purging what it is about to refill. That leaves a class
-  that the clock had emptied free to refill while another's freed memory is still
-  resident; the clocked pass returns everything above the cap, so that lasts about an
-  interval. Free objects on pages that also hold live ones cannot be purged; that is
-  fragmentation, and it stays counted. Objects parked in magazines, spares and the depot
-  are not free and are not in the count; the next rule handles them.
+  matched by an equal purge of retained memory, from wherever the purge walk stands and
+  whether or not fills still reach it, a step at a time and within a bound on the work.
+  This is the one place a frontier is ignored: the program is growing now, and holding
+  both is what the cap exists to stop. Taking back pages that a purge returned is reuse,
+  not growth, and is not charged; charging it sets the allocator purging what it is about
+  to refill. That leaves a class that the clock had emptied free to refill while another's
+  freed memory is still resident; the clocked pass returns everything above the cap that
+  fills no longer reach, so that lasts about two intervals. Free objects on pages that
+  also hold live ones cannot be purged; that is fragmentation, and it stays counted. A
+  large heap can therefore sit over the cap for good. Its growth always pays and its idle
+  memory goes in one pass, but the memory it is reusing is left alone, which is why the
+  clocked pass does not take the count as licence to purge below a frontier. Objects
+  parked in magazines, spares and the depot are not free and are not in the count; the
+  next rule handles them.
 - **Parked objects do not pin the heap.** An object parked in a magazine holds its page as
   surely as a live one, and parked objects are a random sample of wherever the heap has
   been. Four rules keep them moving back to the bitmaps, where the next fill takes the
