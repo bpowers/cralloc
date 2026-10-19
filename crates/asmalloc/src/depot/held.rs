@@ -7,7 +7,11 @@
 //! domain keeps the set of classes whose stacks may hold magazines, and the depot the set of
 //! domains whose set is not empty, and each periodic look visits one other domain, chosen from
 //! those sets in rotation: the `t`-th look of a CPU visits, of the `n` other domains that hold
-//! something, the `(t mod n)`-th, and looks at every stack its set names. So a look's work
+//! something, the `(t mod n)`-th, and looks at every stack its set names, unless one of that
+//! domain's own CPUs has looked at its stacks in this interval (each domain records the last
+//! interval it did, one store an interval). A domain in use sheds through its own looks, and a
+//! look from another L3 at each of its stacks read, and sometimes wrote, its busiest lines:
+//! that cost three independent pipelines spread over two L3s 6%. So a look's work
 //! grows with the classes one domain holds, never with the number of domains, and while the
 //! sets stay as they are a CPU's looks visit every held stack of the other domains once in
 //! every `n` looks. A stack owes nothing until a second look, in a later interval than the
@@ -40,6 +44,7 @@
 //! Only domain pools keep the sets. The shared stacks are looked at by every look.
 
 use super::domain::Domain;
+use super::shed::interval;
 use super::{Cache, Pool, Source};
 use crate::classes::{SMALL_COUNT, SmallClass};
 use crate::front::Routines;
@@ -106,9 +111,23 @@ impl<O: Os, R: Routines, S: Source> Cache<'_, O, R, S> {
         }
     }
 
+    /// Records that a CPU of `here` looks at its own stacks in the interval of `now`, unless one
+    /// already has: one store a domain an interval.
+    pub(super) fn note_looked(&self, here: Domain, now: u64) {
+        if self.depot.domain_count() < 2 {
+            return;
+        }
+        let stamp = interval(now) + 1;
+        let looked = self.depot.looked(here);
+        if looked.load(Relaxed) != stamp {
+            looked.store(stamp, Relaxed);
+        }
+    }
+
     /// The `turn`-th look's visit to a domain other than `here`: every held class of one held
     /// domain, the domains in rotation (see the module documentation), looked at with the
-    /// clock at `now`.
+    /// clock at `now`, unless that domain's own CPUs have looked at its stacks in this
+    /// interval.
     pub(super) fn look_elsewhere(&self, here: Domain, turn: u64, now: u64) {
         if self.depot.domain_count() < 2 {
             return;
@@ -119,6 +138,9 @@ impl<O: Os, R: Routines, S: Source> Cache<'_, O, R, S> {
         }
         let n = u64::from(others.count_ones());
         let domain = Domain::folded(nth_set_bit(others, (turn % n) as u32) as usize);
+        if self.depot.looked(domain).load(Relaxed) == interval(now) + 1 {
+            return;
+        }
         let classes = self.depot.held(domain).load(Relaxed);
         if classes == 0 {
             self.unhold_domain(domain);

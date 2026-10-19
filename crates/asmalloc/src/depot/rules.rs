@@ -975,3 +975,38 @@ fn review_a_shared_stack_that_drains_fill_is_laundered_to_its_target() {
         );
     }
 }
+
+/// A look from another domain leaves alone a domain whose own CPUs looked at its stacks in the
+/// same interval, since their looks shed it, and so reads none of its lines; it looks at every
+/// stack of a domain that has not.
+#[test]
+fn a_look_from_elsewhere_skips_a_domain_that_looked_this_interval() {
+    let class = tiny(0);
+    let rig: TestRig = domains(1, &[class], 64, QUIET);
+    free_into_depot(&rig, 1, class, 6);
+    let (zero, one) = (SimCpu::new(0), SimCpu::new(1));
+    let (cache, other) = (rig.cache(&zero), rig.cache(&one));
+    let (here, there) = (Domain::folded(0), Domain::folded(1));
+    let water = || {
+        rig.depot
+            .water(
+                Pool::Domain(there),
+                class.ordinal() % crate::classes::SMALL_COUNT,
+            )
+            .load(Relaxed)
+    };
+    rig.os().advance_clock(5 * IDLE_TICKS);
+    let now = rig.os().ticks();
+    other.note_looked(there, now);
+    let before = water();
+    cache.look_elsewhere(here, 0, now);
+    assert_eq!(
+        water(),
+        before,
+        "a domain that looked this interval is left alone"
+    );
+    rig.os().advance_clock(IDLE_TICKS);
+    cache.look_elsewhere(here, 0, rig.os().ticks());
+    assert_ne!(water(), before, "a domain that has not is looked at");
+    rig.census(&[], false);
+}

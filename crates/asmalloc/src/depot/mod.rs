@@ -206,9 +206,19 @@ struct Stacks {
     /// The classes whose stacks here owe magazines to the source, one bit per ordinal
     /// (`shed.rs`).
     owing: Lined<AtomicU64>,
-    /// The classes whose stacks here may hold magazines, one bit per ordinal (`held.rs`); only
-    /// a domain's pool keeps it.
-    held: Lined<AtomicU64>,
+    /// What other domains' looks read here (`held.rs`); only a domain's pool keeps it.
+    marks: Lined<Marks>,
+}
+
+/// A domain's words that other domains' looks read, on one line: written rarely, by a push onto
+/// an empty stack, a look that finds one emptied, and the domain's own first look in an
+/// interval.
+struct Marks {
+    /// The classes whose stacks here may hold magazines, one bit per ordinal.
+    held: AtomicU64,
+    /// The last interval in which one of the domain's own CPUs looked at its stacks, plus one,
+    /// as `shed::interval` numbers it; zero for never.
+    looked: AtomicU64,
 }
 
 impl Stacks {
@@ -222,7 +232,10 @@ impl Stacks {
             }; SMALL_COUNT],
             empty: [const { Lined::new(Stack::new()) }; MagazineSize::COUNT],
             owing: Lined::new(AtomicU64::new(0)),
-            held: Lined::new(AtomicU64::new(0)),
+            marks: Lined::new(Marks {
+                held: AtomicU64::new(0),
+                looked: AtomicU64::new(0),
+            }),
         }
     }
 }
@@ -316,7 +329,13 @@ impl Depot {
 
     /// The set of classes whose stacks in `domain` may hold magazines (`held.rs`).
     pub(crate) fn held(&self, domain: Domain) -> &AtomicU64 {
-        &self.pool(Pool::Domain(domain)).held
+        &self.pool(Pool::Domain(domain)).marks.held
+    }
+
+    /// The last interval, plus one, in which `domain`'s own CPUs looked at its stacks
+    /// (`held.rs`).
+    pub(crate) fn looked(&self, domain: Domain) -> &AtomicU64 {
+        &self.pool(Pool::Domain(domain)).marks.looked
     }
 
     /// The stack of empty magazines of `size` in `pool`.

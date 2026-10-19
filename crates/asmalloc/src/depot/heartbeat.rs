@@ -366,6 +366,7 @@ impl<O: Os, R: Routines, S: Source> Cache<'_, O, R, S> {
         if self.tuning.shed_unused {
             if let Some(turn) = looking.map(|activity| activity / every) {
                 let here = self.depot.domain_of(chores.cpu);
+                self.note_looked(here, clock.now());
                 if let Some(class) = nth_class(turn) {
                     self.look_at_depth(Pool::Domain(here), class, clock.now());
                     self.look_at_depth(Pool::Shared, class, clock.now());
