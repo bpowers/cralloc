@@ -730,3 +730,147 @@ fills from the bitmaps, carving new slots for each class in use. Single-L3 jobs 
 memory worst cases (`bench/probes/memory/worst.sh`: phase change, many CPUs and few classes,
 many threads on few CPUs) end where they did; the many-CPUs case peaked at 6.1 to 7.0 MiB
 against 4.5 to 5.7.
+
+# Domain stacks and a shared stack (2026-10-18)
+
+A review of the depot per cache domain found three faults that need three or more domains,
+which is every server: with a third domain holding a class, the heartbeat kept each stack at
+or just under the take threshold, so a flow between two other domains went through the
+bitmaps; N domains in use parked N/2 targets; and a miss in a domain's stack read the stack
+head of every other domain on the machine, as did the look for an empty magazine and the
+heartbeat's look at a class. This section replaces the take-across rule. "before" is main at
+ee4c29b; "half" and "quarter" are the change at 0f1d653 with the domain cap at half of the
+class's target and at a quarter, the default from 1dbe734.
+
+## The change
+
+Per class, one stack per domain and one shared stack; per magazine size, the same for empty
+magazines. A slow path pushes on its domain's stack while that holds less than the cap, else
+on the shared stack, and pops its domain's stack, else the shared one, else fills. The cap is
+exact: the push checks the count it reads from the top's link, and its compare-and-swap
+succeeds only if the head has not changed since. The shared stack's target is the class's
+target less the cap, so a process on one domain parks what it did with one stack. The
+heartbeat launders the shared stack while it is over its target; every stack sheds the depth
+it did not need. Nobody reads another domain's stack on a slow path.
+
+A domain that goes quiet sheds through the other domains' looks. Each domain keeps a word of
+the classes whose stacks may hold magazines, and the depot a word of the domains whose word is
+not zero: a push onto an empty stack sets the bits, a look that finds a stack empty clears
+them, and a clear rereads the head so that a racing push is never lost (`depot/held.rs`). Each
+periodic look visits its own domain's stack and the shared stack of one class, the classes in
+turn, and one stack of another domain, chosen from those words in rotation. A CPU's looks visit
+every held stack of the `n` other domains that hold anything once in `n * m` looks, `m` the
+most classes one domain holds. In the simulator, with one busy CPU, quiet domains holding two
+classes each gave everything back after 3.0 intervals with 2 and 8 domains and 3.125 with 64
+(the debt is set at the first look of the interval after the stack was last empty, and the
+idle drain adds an interval before the slabs' magazines reach the stacks).
+
+Two things the first version got wrong. Every heartbeat read the served class's shared head and
+top link to check the target; in mpmc p4 c4 every domain's overflow writes those lines, and the
+read cost 6% (4.59 to 4.89 ns, five interleaved rounds). The shared stack grows only by pushes,
+so the check now runs only after the slow path pushed there: 4.53. And a pop that tries its
+domain's stack and then the shared one now notes both depths; the empty domain stack's note
+starts its interval at zero, so a stack that was empty during an interval sheds one interval
+later than before (two `maintain` calls became three in one test).
+
+## Method
+
+As in the section above: the runner, one round per invocation under the measurement lock, the
+three builds rotating within each round, five rounds; preloaded C programs on CPUs 0-7 (one
+L3) and 0-3 and 8-11 (two), sh8bench 16, larson `3 8 1000 5000 100 4141 8`, xmalloc-test
+`-w 4 -t 3 -s 64`, mstress `8 50 25`, each in a cgroup of its own for its peak. The machine's
+speed shifted between rounds of this session (most jobs show a fast and a slow cluster, the
+same in every build), so the suite table gives each build's per-round ratio to before, paired
+within the round, beside the medians.
+
+## Suite jobs
+
+ns per allocation (cycles per op for churn), medians, and the median and range of the
+per-round ratio to before; cgroup peak MiB:
+
+| Job | before | half | quarter | half / before | quarter / before | peak before | half | quarter |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| pipeline t2 local all-alloc | 3.75 | 3.72 | 3.88 | 0.995 (0.96-1.05) | 1.003 (1.00-1.08) | 2.5 | 2.2 | 2.5 |
+| pipeline t2 local all-alloc, preload | 4.01 | 4.06 | 4.09 | 1.018 (1.00-1.04) | 1.027 (0.98-1.03) | 2.2 | 2.3 | 2.2 |
+| pipeline t2 split all-alloc | 12.44 | 12.58 | 12.26 | 1.014 (0.99-1.03) | 0.987 (0.98-1.00) | 3.0 | 3.2 | 2.7 |
+| pipeline t2 split free-only | 12.19 | 12.51 | 12.12 | 0.999 (0.99-1.03) | 0.986 (0.97-0.99) | 2.7 | 3.5 | 3.0 |
+| pipeline t2 x2 local | 4.07 | 4.01 | 4.02 | 1.002 (0.99-1.01) | 1.002 (0.99-1.01) | 3.7 | 3.7 | 3.7 |
+| pipeline t2 x2 split | 4.73 | 4.86 | 4.85 | 1.010 (0.97-1.20) | 1.019 (0.99-1.07) | 3.7 | 3.5 | 3.7 |
+| pipeline t2 x3 both | 5.58 | 5.59 | 5.73 | 1.002 (0.99-1.06) | 1.033 (1.03-1.07) | 5.1 | 4.9 | 4.9 |
+| pipeline t2 x4 both | 6.34 | 5.53 | 5.55 | 0.989 (0.85-1.01) | 1.002 (0.84-1.03) | 6.3 | 6.5 | 6.3 |
+| exchange t2 local | 4.87 | 4.92 | 4.85 | 1.015 (1.00-1.02) | 0.993 (0.99-1.00) | 2.5 | 2.5 | 2.2 |
+| exchange t2 split | 13.54 | 14.33 | 14.10 | 1.046 (1.03-1.18) | 1.023 (1.02-1.18) | 3.2 | 3.5 | 3.0 |
+| exchange t8 both | 2.89 | 3.11 | 2.84 | 1.007 (0.98-1.17) | 0.977 (0.82-1.20) | 7.4 | 7.5 | 6.9 |
+| mpmc p1 c3 local all-alloc | 6.01 | 5.23 | 5.25 | 0.983 (0.77-1.01) | 0.972 (0.79-1.00) | 3.3 | 3.5 | 3.3 |
+| mpmc p3 c1 local all-alloc | 5.51 | 5.46 | 5.47 | 0.989 (0.98-0.99) | 0.990 (0.97-1.00) | 3.7 | 3.7 | 3.7 |
+| mpmc p4 c4 both | 4.76 | 4.87 | 4.60 | 1.022 (1.01-1.04) | 1.006 (0.91-1.03) | 6.2 | 6.7 | 6.2 |
+| churn live=100k | 47.39 | 47.38 | 47.52 | 0.999 (1.00-1.00) | 1.002 (1.00-1.01) | 12.2 | 12.2 | 12.2 |
+| churn live=100k, preload | 52.56 | 52.57 | 52.36 | 1.002 (0.99-1.01) | 0.997 (0.99-1.00) | 12.2 | 12.2 | 12.2 |
+
+The paired ratios put every job within 2% of before but exchange t2 split, slower in all three
+sessions this change was measured in (+2 to +5% at half, +2% at a quarter), x3 at a quarter
+(+3%), and the preloaded local pipeline at a quarter (+2.7%, but 0.98 to 1.03 and faster than
+before in the two earlier sessions). x2 split stayed where it was (4.73 before, 4.85 at a quarter); the 4.8 of the
+section above was a fast session. A quarter was faster than half on every job that crosses
+L3s but x3, and kept the peaks of jobs across both L3s at before's level, where half parked up
+to 0.7 MiB more (mpmc p4 c4 6.16 MiB before, 6.70 half, 6.18 a quarter). The default is a
+quarter.
+
+## C programs
+
+Medians of five, and cgroup peak MiB:
+
+| Program | Placement | before | half | quarter | peak before | half | quarter |
+|---|---|---:|---:|---:|---:|---:|---:|
+| sh8bench, s | one L3 | 0.339 | 0.331 | 0.334 | 116.9 | 118.3 | 117.9 |
+| | two L3s | 0.606 | 0.595 | 0.594 | 121.4 | 124.6 | 122.4 |
+| larson, Mops/s | one L3 | 581 | 591 | 589 | 100.5 | 101.3 | 101.7 |
+| | two L3s | 418 | 431 | 421 | 80.7 | 82.7 | 81.1 |
+| xmalloc-test, M frees/s | one L3 | 1039 | 1076 | 1081 | 7.2 | 15.2 | 34.4 |
+| mstress, s | one L3 | 0.266 | 0.255 | 0.267 | 142.9 | 142.5 | 142.8 |
+| | two L3s | 0.270 | 0.263 | 0.269 | 143.4 | 141.5 | 141.0 |
+
+xmalloc-test on two L3s is bimodal as before, and so are its peaks (5 to 37 MiB, in every
+build, and on one L3 too, which is why that row's peaks differ); one run of five per build was
+fast (741, 753, 755) and the slow runs were 401 to 519 before, 403 to 422 at half and 380 to
+435 at a quarter. xmalloc-test on one L3 gained 4% in both sessions; larson on two L3s 1% at a
+quarter and 3% at half; nothing else moved beyond its spread. The memory worst cases
+(`bench/probes/memory/worst.sh`, three rounds, medians of cgroup peaks, before and a quarter)
+did not move: phase 51.8 and 51.1 MiB, many CPUs and few classes 7.2 and 7.4, many threads on
+few CPUs 15.0 and 15.5, the rest identical.
+
+## More domains than L3s
+
+Under the hidden `internals` feature a benchmark build can split the domains by CPU number
+(bench-alloc's `asmalloc-domains`, `ASMALLOC_DOMAIN_WIDTH`), so cases with three or more
+domains run on real threads. Width 2 makes eight domains of the suite's CPUs, one per pair (0-1,
+2-3, 8-9, 10-11): each two-thread pipeline has a domain of its own. Width 1 makes every CPU a
+domain: every pipeline is a flow between two domains. Three rounds, quarter cap, medians, ns
+per allocation and cgroup peak MiB:
+
+| Job | L3s (2 domains) | width 2 | width 1 | peak L3s | width 2 | width 1 |
+|---|---:|---:|---:|---:|---:|---:|
+| pipeline t2 split all-alloc | 11.94 | 11.99 | 12.04 | 3.0 | 3.0 | 2.7 |
+| pipeline t2 x2 local | 4.14 | 3.95 | 4.15 | 3.7 | 3.7 | 4.9 |
+| pipeline t2 x2 split | 4.94 | 4.77 | 11.36 | 3.7 | 3.7 | 4.7 |
+| pipeline t2 x3 both | 5.36 | 4.90 | 9.64 | 5.2 | 4.9 | 6.6 |
+| pipeline t2 x4 both | 5.72 | 4.87 | 10.42 | 6.2 | 6.3 | 8.3 |
+| exchange t8 both | 2.87 | 2.87 | 3.31 | 6.9 | 7.9 | 9.5 |
+| mpmc p4 c4 both | 4.64 | 4.72 | 4.61 | 6.1 | 7.0 | 8.2 |
+
+Balanced domains keep to themselves however many there are: with four or eight of them the
+independent pipelines run faster than with two (x4 4.87 against 5.72). Flows between domains
+share one stack per class, though, and so trade magazines with each other: at width 1 two
+pipelines in different L3s (x2 split) took each other's magazines and ran at 11.4 ns, what one
+depot for the machine cost before domains. On real hardware a domain is an L3, so a flow between
+two domains crosses an L3 whichever flow's magazine it takes; the cost here comes from domains
+finer than the L3s, which only this override makes. Where it would show on hardware is a
+machine with more than one memory node, where a flow on one node could take a magazine from a
+flow on another; a shared stack per node would keep them apart.
+
+## One spare magazine per stack
+
+With the depot as above (quarter cap), `MAX_SPARES` at 1 against 4, five interleaved rounds: mpmc
+p4 c4 peaked at 5.61 MiB against 6.07 (4.63 against 4.67 ns), and sh8bench took 0.332 against
+0.329 s on one L3 and 0.614 against 0.593 s on two (+3.5%; 0.603 to 0.635 against 0.575 to
+0.613). One spare still costs sh8bench across L3s.
