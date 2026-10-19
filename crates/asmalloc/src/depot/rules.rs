@@ -891,7 +891,7 @@ fn cpu0<const N: usize>(rig: &Rig<SimOs<Small>, N>) -> Cpu {
 /// every domain, both took 3.
 #[test]
 
-fn review_quiet_domains_go_back_at_the_allocators_look_rate() {
+fn stock_review_quiet_domains_go_back_at_the_allocators_look_rate() {
     let mut slowest = 0;
     for (width, held) in [(32, 2), (8, 2), (8, 5), (1, 2), (1, 5)] {
         for look_every in [1, super::LOOK_EVERY] {
@@ -961,7 +961,7 @@ fn shared_depth_after_drains(shed_unused: bool, intervals: usize) -> (Vec<usize>
 /// and the shared target.
 #[test]
 
-fn review_a_shared_stack_that_drains_fill_is_laundered_to_its_target() {
+fn stock_review_a_shared_stack_that_drains_fill_is_laundered_to_its_target() {
     let magazine = tiny(0).magazine().capacity();
     let (with_shed, target) = shared_depth_after_drains(true, 5);
     let (without, _) = shared_depth_after_drains(false, 5);
@@ -1205,4 +1205,368 @@ fn a_cpu_that_only_allocates_keeps_no_empty_stock() {
     );
     assert_eq!(slab.stock_held().load(Relaxed), 0);
     rig.census(&held, false);
+}
+
+// Findings of the adversarial review of stock (`stock.rs`, commit 1bd3010). Each test below
+// fails as the code stands and is ignored so that the gate stays green; each names what it
+// shows. Run them with `cargo test -p asmalloc --lib stock_review_ -- --ignored`.
+
+use crate::front::Spare;
+use crate::os::{Aborted, Machine, Step};
+use core::cell::Cell;
+
+/// A thread that the OS moves to another CPU right after a routine's commit, when told to: a
+/// preemption between a routine and the slow path's next instruction.
+struct Mover {
+    cpu: Cell<i32>,
+    then: Cell<Option<i32>>,
+}
+
+impl Machine for Mover {
+    fn cpu_id(&self) -> i32 {
+        self.cpu.get()
+    }
+
+    fn step(&self, _: Step) -> Result<(), Aborted> {
+        Ok(())
+    }
+
+    fn committed(&self) {
+        if let Some(cpu) = self.then.take() {
+            self.cpu.set(cpu);
+        }
+    }
+}
+
+fn give_credit(rig: &TestRig, n: i32, class: SmallClass, full: u32, empty: u32) {
+    rig.slabs()
+        .slab(cpu(rig, n))
+        .stock(class)
+        .store(super::stock::credits(full, empty), Relaxed);
+}
+
+/// The bytes CPU `n` counts as full stock: the low half of its count.
+fn counted_full(rig: &TestRig, n: i32) -> usize {
+    rig.slabs().slab(cpu(rig, n)).stock_held().load(Relaxed) as u32 as usize
+}
+
+fn round_trip<M: Machine>(
+    cache: &Cache<'_, SimOs<Small>, Twin<'_, M>, TestSource>,
+    class: SmallClass,
+    n: usize,
+) {
+    let held: Vec<NonNull<u8>> = (0..n).filter_map(|_| cache.alloc(class)).collect();
+    assert_eq!(held.len(), n);
+    for object in held {
+        cache.free(class, object);
+    }
+}
+
+/// Finding: `collect` (and so `malloc_trim`) empties the caller's own slab by popping at most
+/// 64 magazines from each spare stack (`collect.rs`, `SPARE_POPS`, "spare stacks hold at most
+/// a few"). With stock a stack holds up to its fixed limit plus the room in magazines, 450 for
+/// the 8-byte class with the allocator's limits, so the caller's own CPU keeps the rest.
+#[test]
+#[ignore = "finding: collect leaves the caller's stock past 64 magazines a stack"]
+fn stock_review_collect_empties_the_callers_stock() {
+    let class = tiny(0);
+    let tuning = Tuning {
+        stock: true,
+        ..QUIET
+    };
+    let rig: TestRig = Rig::new(&[class], 1024, tuning);
+    give_credit(&rig, 0, class, 200, 200);
+    let machine = SimCpu::new(0);
+    let cache = rig.cache(&machine);
+    churn(&cache, class, 500);
+    assert!(in_spares(&rig, 0, class).len() > 2 * 64, "stock grew");
+    cache.collect();
+    let left = in_spares(&rig, 0, class).len();
+    assert_eq!(
+        left, 0,
+        "collect left {left} objects in the caller's spares"
+    );
+    rig.census(&[], false);
+}
+
+/// Finding: the per-CPU count of stock bytes is added to whatever CPU the thread is on after
+/// the push routine returns (`spare_push`, then `note_stock_push`, each reading the CPU
+/// number), so a thread moved between the two counts the magazine on a CPU that does not hold
+/// it. A count above what the CPU holds is never put right while the CPU stays busy: pops and
+/// the sweep take off only what they find, and only the idle drain clears the count. `stock.rs`
+/// says "the next drain or sweep puts it right". Each such move (and each lost update between
+/// the count's load and its store, and each pop followed by a move, which leaves the count
+/// behind on the CPU popped from) takes a magazine's weight off that CPU's room for good, so a
+/// CPU that never idles drifts towards keeping no stock.
+#[test]
+#[ignore = "finding: a stock count misplaced by a move stays until the CPU idles"]
+fn stock_review_a_sweep_puts_a_misplaced_count_right() {
+    let (bursty, busy) = (tiny(0), tiny(1));
+    let tuning = Tuning {
+        stock: true,
+        age_limit: true,
+        look_every: 1,
+        ..QUIET
+    };
+    let rig: TestRig = Rig::new(&[bursty, busy], 512, tuning);
+    let mover = Mover {
+        cpu: Cell::new(0),
+        then: Cell::new(None),
+    };
+    let cache = rig.cache(&mover);
+    // The sweep that the first clocked heartbeat begins runs out first: it would settle away
+    // credit that no pop has used yet.
+    round_trip(&cache, busy, 400);
+    give_credit(&rig, 0, bursty, 8, 8);
+    round_trip(&cache, bursty, 40);
+    let weight = 2 * bursty.size();
+    assert_eq!(counted_full(&rig, 0), 8 * weight, "CPU 0 counts its stock");
+    // One more magazine retired to CPU 0's stock, by a thread moved to CPU 1 right after the
+    // push routine's commit.
+    let mut stale = false;
+    let magazine = cache.spare_pop(bursty, Spare::Full, &mut stale).unwrap();
+    assert_eq!(counted_full(&rig, 0), 7 * weight);
+    mover.then.set(Some(1));
+    assert!(
+        cache
+            .spare_push(bursty, Spare::Full, magazine, &mut stale)
+            .is_ok()
+    );
+    assert_eq!(mover.cpu_id(), 1);
+    assert_eq!(cache.spare_depth(bursty, Spare::Full), Some(0));
+    // CPU 1 stays busy with another class for three intervals, sweeps and all.
+    let steps = 8;
+    for _ in 0..3 * steps {
+        rig.os().advance_clock(IDLE_TICKS / steps);
+        for _ in 0..40 {
+            round_trip(&cache, busy, 3);
+        }
+    }
+    assert!(in_spares(&rig, 1, bursty).is_empty());
+    assert_eq!(
+        counted_full(&rig, 1),
+        0,
+        "CPU 1 holds no stock, and counts some against its room"
+    );
+    rig.census(&[], false);
+}
+
+/// Finding: the sweep's step for a class takes its whole stack of full spares, stock and all,
+/// and sends all but the top magazine to the depot in one heartbeat; what the domain's stack
+/// and the shared stack's target do not take, the same heartbeat's launder over target sends
+/// back to the source. With the allocator's limits that is up to 885 KiB of one class's objects
+/// less the 128 KiB the depot keeps, some 370 magazines of the 8-byte class, laundered inside
+/// one call to `malloc` or `free`, once an interval for each class a CPU keeps stock of, in
+/// use or not. `heartbeat.rs`, "Bounded work", says one slow path launders at most four
+/// magazines and that a sweep step pushes "at most a few".
+#[test]
+#[ignore = "finding: one heartbeat launders a class's whole stock"]
+fn stock_review_one_call_launders_a_few_magazines() {
+    let (bursty, busy) = (tiny(0), tiny(1));
+    // The depot's limits against the stock as the allocator's are against its room: a
+    // fraction of it.
+    let tuning = Tuning {
+        stock: true,
+        age_limit: true,
+        look_every: 1,
+        domain_cap: 2 * 2 * bursty.size(),
+        depot_target: 6 * 2 * bursty.size(),
+        ..QUIET
+    };
+    let rig: TestRig = Rig::new(&[bursty, busy], 512, tuning);
+    let machine = SimCpu::new(0);
+    let cache = rig.cache(&machine);
+    // The sweep that the first clocked heartbeat begins runs out first: it would settle away
+    // credit that no pop has used yet.
+    churn(&cache, busy, 400);
+    give_credit(&rig, 0, bursty, 40, 40);
+    churn(&cache, bursty, 200);
+    assert!(in_spares(&rig, 0, bursty).len() >= 80, "stock grew");
+    rig.os().advance_clock(IDLE_TICKS);
+    let mut most = 0;
+    let mut call = |act: &mut dyn FnMut()| {
+        let before = rig.source.held_of(bursty);
+        act();
+        most = most.max(rig.source.held_of(bursty).saturating_sub(before));
+    };
+    for _ in 0..200 {
+        let mut held = Vec::new();
+        for _ in 0..3 {
+            call(&mut || held.extend(cache.alloc(busy)));
+        }
+        for object in held {
+            call(&mut || cache.free(busy, object));
+        }
+    }
+    assert!(in_spares(&rig, 0, bursty).is_empty(), "the sweep took it");
+    assert!(
+        most <= 4 * 2,
+        "one call laundered {most} objects, {} magazines",
+        most / 2
+    );
+    rig.census(&[], false);
+}
+
+/// Finding: the sweep settles the stock word of the CPU its slow path began on, but returns
+/// the empty spares past the new limit by popping the stack of the CPU the thread is on by
+/// then (`settle_stock`: `spare_depth` and `spare_pop` read the CPU again). A thread moved in
+/// between takes the credit from one CPU and the magazines from another, and the first CPU's
+/// empties stay: later sweeps pop only as many as the credit they take off, and with no credit
+/// left that is none. They are counted against that CPU's room for empty stock until the class
+/// is freed there again or the CPU idles.
+#[test]
+#[ignore = "finding: empty stock whose credit was settled from another CPU is never returned"]
+fn stock_review_empty_stock_settled_by_a_moved_thread_goes_back() {
+    let (bursty, busy) = (tiny(0), tiny(1));
+    let tuning = Tuning {
+        stock: true,
+        age_limit: true,
+        look_every: 1,
+        ..QUIET
+    };
+    let rig: TestRig = Rig::new(&[bursty, busy], 512, tuning);
+    let machine = SimCpu::new(0);
+    let cache = rig.cache(&machine);
+    // The sweep that the first clocked heartbeat begins runs out first: it would settle away
+    // credit that no pop has used yet.
+    churn(&cache, busy, 400);
+    give_credit(&rig, 0, bursty, 40, 0);
+    churn(&cache, bursty, 200);
+    // The program takes the burst and keeps it: the full stock becomes empty stock.
+    give_credit(&rig, 0, bursty, 40, 40);
+    let held: Vec<NonNull<u8>> = (0..120).filter_map(|_| cache.alloc(bursty)).collect();
+    let limit = tuning.max_spares as u32;
+    let empties = || cache.spare_depth(bursty, Spare::Empty).unwrap();
+    assert!(empties() > limit + 20, "empty stock grew: {}", empties());
+    // The heartbeat of a slow path that began on CPU 0, its thread on CPU 1 by now.
+    let elsewhere = SimCpu::new(1);
+    rig.cache(&elsewhere).settle_stock(cpu(&rig, 0), bursty);
+    // CPU 0 stays busy with another class for three intervals, sweeps and all.
+    let steps = 8;
+    for _ in 0..3 * steps {
+        rig.os().advance_clock(IDLE_TICKS / steps);
+        for _ in 0..40 {
+            churn(&cache, busy, 3);
+        }
+    }
+    assert!(
+        empties() <= limit,
+        "{} empty spares against a limit of {limit}",
+        empties()
+    );
+    rig.census(&held, false);
+}
+
+// Tests the review added for rules that no test held (each mutation named was not noticed by
+// the suite at 1bd3010). They pass.
+
+/// Gives the rig's CPU 0 forty magazines of full stock of `bursty`, for the tests below.
+fn stock_up(rig: &TestRig, bursty: SmallClass, busy: SmallClass) {
+    let machine = SimCpu::new(0);
+    let cache = rig.cache(&machine);
+    // The first clocked heartbeat's sweep runs out before the class has credit.
+    churn(&cache, busy, 400);
+    give_credit(rig, 0, bursty, 40, 40);
+    churn(&cache, bursty, 200);
+    assert_eq!(counted_full(rig, 0), 40 * 2 * bursty.size());
+}
+
+/// The sweep takes what it takes off the CPU's count of stock, and so does a drain: a count
+/// left behind would be room the CPU never gets back. (Not taking the sweep's magazines off
+/// the count, or not clearing it in the drain, went unnoticed.)
+#[test]
+fn the_sweep_and_the_drain_take_stock_off_the_count() {
+    let tuning = Tuning {
+        stock: true,
+        age_limit: true,
+        look_every: 1,
+        ..QUIET
+    };
+    let (bursty, busy) = (tiny(0), tiny(1));
+    let rig: TestRig = Rig::new(&[bursty, busy], 512, tuning);
+    stock_up(&rig, bursty, busy);
+    let machine = SimCpu::new(0);
+    let cache = rig.cache(&machine);
+    let steps = 8;
+    for _ in 0..3 * steps {
+        rig.os().advance_clock(IDLE_TICKS / steps);
+        for _ in 0..40 {
+            churn(&cache, busy, 3);
+        }
+    }
+    assert!(in_spares(&rig, 0, bursty).is_empty());
+    assert_eq!(counted_full(&rig, 0), 0, "after the sweep");
+
+    let rig: TestRig = Rig::new(&[bursty, busy], 512, tuning);
+    stock_up(&rig, bursty, busy);
+    let other = SimCpu::new(1);
+    assert_eq!(rig.cache(&other).drain(cpu(&rig, 0)), super::Drained::Done);
+    assert!(in_spares(&rig, 0, bursty).is_empty());
+    assert_eq!(counted_full(&rig, 0), 0, "after the drain");
+    rig.census(&[], false);
+}
+
+/// Empty stock that an interval does not use goes back to the depot with its credit. (A sweep
+/// that returned no empty spares went unnoticed.)
+#[test]
+fn empty_stock_unused_for_an_interval_goes_back() {
+    let tuning = Tuning {
+        stock: true,
+        age_limit: true,
+        look_every: 1,
+        ..QUIET
+    };
+    let (bursty, busy) = (tiny(0), tiny(1));
+    let rig: TestRig = Rig::new(&[bursty, busy], 512, tuning);
+    stock_up(&rig, bursty, busy);
+    let machine = SimCpu::new(0);
+    let cache = rig.cache(&machine);
+    // The program takes the burst and keeps it: the full stock becomes empty stock.
+    let held: Vec<NonNull<u8>> = (0..120).filter_map(|_| cache.alloc(bursty)).collect();
+    let limit = tuning.max_spares as u32;
+    let empties = || cache.spare_depth(bursty, Spare::Empty).unwrap();
+    assert!(empties() > limit + 20, "empty stock grew: {}", empties());
+    let steps = 8;
+    for _ in 0..3 * steps {
+        rig.os().advance_clock(IDLE_TICKS / steps);
+        for _ in 0..40 {
+            churn(&cache, busy, 3);
+        }
+    }
+    assert!(empties() <= limit, "{} empty spares", empties());
+    assert_eq!(rig.slabs().slab(cpu(&rig, 0)).stock_held().load(Relaxed), 0);
+    rig.census(&held, false);
+}
+
+/// A CPU that allocates what another frees takes full magazines from the depot and retires
+/// empty ones. With credit for empty stock and none for full it keeps no empty stock: an empty
+/// kept is room for a full one freed there, and nothing is. (`a_cpu_that_only_allocates_keeps_
+/// no_empty_stock` fills from the source, where each slow path pops the empty spare it pushed,
+/// so its stack never passes one with or without the rule, and dropping the rule went
+/// unnoticed.)
+#[test]
+fn empty_stock_needs_credit_for_full_stock() {
+    let class = tiny(0);
+    let tuning = Tuning {
+        stock: true,
+        ..QUIET
+    };
+    let rig: TestRig = Rig::new(&[class], 256, tuning);
+    give_credit(&rig, 0, class, 0, 40);
+    let (a, f) = (SimCpu::new(0), SimCpu::new(1));
+    let (allocator, freer) = (rig.cache(&a), rig.cache(&f));
+    for _ in 0..6 {
+        let objects: Vec<_> = (0..80).filter_map(|_| allocator.alloc(class)).collect();
+        assert_eq!(objects.len(), 80);
+        let empties = allocator.spare_depth(class, Spare::Empty).unwrap();
+        assert!(
+            empties as usize <= tuning.max_spares,
+            "{empties} empty spares"
+        );
+        for object in objects {
+            freer.free(class, object);
+        }
+    }
+    assert_eq!(rig.slabs().slab(cpu(&rig, 0)).stock_held().load(Relaxed), 0);
+    rig.census(&[], false);
 }

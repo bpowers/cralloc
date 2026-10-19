@@ -585,6 +585,75 @@ fn contended_round_trips_earn_stock(bounds: Bounds) -> usize {
     earned.load(Ordering::SeqCst)
 }
 
+/// Finding (review of stock, commit 1bd3010): the drain clears the count of stock bytes of the
+/// slab it drained with a plain store after it has given the slab back to its CPU (markers
+/// cleared in step 4's first pass, then the disposal of everything taken, a launder each for
+/// `maintain`, then the store). Stock the CPU pushes meanwhile, with the credit the drain left
+/// it, is counted and then wiped from the count, so the CPU can hold that much again past its
+/// room: `stock.rs` says the drain puts the count right. Thread 0 frees a burst on CPU 0, which
+/// has credit, while thread 1 drains CPU 0 from CPU 1; afterwards CPU 0 must count at least the
+/// stock it holds.
+fn a_drain_leaves_no_stock_uncounted(bounds: Bounds) {
+    use crate::front::{Field, Spare};
+    let tuning = super::Tuning {
+        stock: true,
+        age_limit: false,
+        shed_unused: false,
+        refresh_every: 0,
+        ..TIGHT
+    };
+    let found = explore(
+        bounds,
+        2,
+        || {
+            let world = World::tuned(12, 0, tuning);
+            let machine = world.machine(THREADS - 1, 0);
+            for _ in 0..10 {
+                world.alloc(&machine);
+            }
+            let slab = world.rig.slabs().slab(world.rig.slabs().cpu(0).unwrap());
+            slab.stock(tiny_class())
+                .store(super::stock::credits(4, 4), Ordering::Relaxed);
+            world
+        },
+        |world, me| {
+            if me == 0 {
+                world.run(&world.machine(me, 0), &[Op::Free; 8]);
+            } else {
+                let machine = world.machine(me, 1);
+                let cache = world.rig.cache(&machine);
+                cache.drain(world.rig.slabs().cpu(0).unwrap());
+            }
+        },
+        |_| {},
+        |world, _| {
+            world.check(false);
+            let class = tiny_class();
+            let limit = super::spare_limit(tuning, class, Spare::Full) as u32;
+            let slab = world.rig.slabs().slab(world.rig.slabs().cpu(0).unwrap());
+            let cache = world.rig.cache(crate::os::Pinned(-1));
+            let mut next = slab
+                .field(Field::spare(class, Spare::Full))
+                .load(Ordering::Relaxed)
+                .addr();
+            let mut stock = 0;
+            while next != 0 {
+                let magazine = cache.area().magazine(next, class.magazine()).unwrap();
+                if magazine.record().depth >= limit {
+                    stock += class.magazine().capacity() * class.size();
+                }
+                next = magazine.link().load(Ordering::Relaxed).addr();
+            }
+            let counted = slab.stock_held().load(Ordering::Relaxed) as u32 as usize;
+            assert!(
+                counted >= stock,
+                "CPU 0 holds {stock} bytes of full stock and counts {counted}"
+            );
+        },
+    );
+    report("a drain and the stock count", found);
+}
+
 /// Two threads push and pop one depot stack directly (`Depot.tla`): the version counter keeps
 /// every magazine with one owner, and a capped push that gives its magazine back changes
 /// nothing.
@@ -964,6 +1033,13 @@ mod run {
             0
         );
         assert!(super::contended_round_trips_earn_stock(Bounds::preemptions(1)) > 0);
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    #[ignore = "finding: a drain wipes the count of stock its CPU pushed meanwhile"]
+    fn stock_review_a_drain_leaves_no_stock_uncounted() {
+        super::a_drain_leaves_no_stock_uncounted(Bounds::preemptions(2));
     }
 
     #[test]
