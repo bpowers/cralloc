@@ -3182,6 +3182,9 @@ mod unspill_review;
 /// single free that looks at every level, the two tallies and the clock-led decay step.
 mod large_path_review;
 
+/// Review of the small classes' origins (`Plan::slot_origin`): the tests that see one.
+mod origin_review;
+
 /// Review of the move of the region headers into the back end's state, with the leaf bitmap
 /// last in the block (`host::RegionHeader`, `layout`).
 mod review_headers {
