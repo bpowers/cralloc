@@ -168,6 +168,21 @@ pub(crate) const fn decay_look(word: u64, now: u64) -> Decay {
     }
 }
 
+/// The interval number to store over `seen` for a clock reading `now`, or `None` to leave it:
+/// the clock's interval if that is later, so that a heartbeat that read the clock just before
+/// a boundary cannot take the number back over one that a later reading wrote (a pass step in
+/// that moment would read every current frontier as old). A clock more than an interval
+/// behind the number has gone back (a resume, a restored checkpoint), as the decay word's
+/// restamp allows for, and is taken as it is.
+pub(crate) const fn epoch_after(seen: u64, now: u64) -> Option<u64> {
+    let epoch = now / DECAY_TICKS;
+    if epoch > seen || epoch.wrapping_add(1) < seen {
+        Some(epoch)
+    } else {
+        None
+    }
+}
+
 /// A pass word: what the steppers of one decay pass share.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(crate) struct Pass {
@@ -313,16 +328,16 @@ impl<O: Os> Back<'_, O> {
         self.state.decay.epoch.load(Relaxed)
     }
 
-    /// Keeps the interval number current: the clock at `now` over the interval. Written only
-    /// when it changes, so once an interval, by the first heartbeat to see the new interval.
-    /// Two heartbeats with readings either side of a boundary may write in turn; the number
-    /// is then a step behind for a moment, which is a hint error like any other.
+    /// Keeps the interval number current: the clock at `now` over the interval, if later
+    /// (`epoch_after`). Written once an interval, by the first heartbeat to see the new one.
     pub(super) fn note_epoch(&self, now: u64) {
-        let epoch = now / DECAY_TICKS;
         let word = &self.state.decay.epoch;
-        let seen = word.load(Relaxed);
-        if seen != epoch {
-            let _ = word.compare_exchange(seen, epoch, Relaxed, Relaxed);
+        let mut seen = word.load(Relaxed);
+        while let Some(next) = epoch_after(seen, now) {
+            match word.compare_exchange(seen, next, Relaxed, Relaxed) {
+                Ok(_) => return,
+                Err(found) => seen = found,
+            }
         }
     }
 

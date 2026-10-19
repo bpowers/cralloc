@@ -19,6 +19,12 @@
 //!   interval. `cycles` times: allocate `live` objects (`sizes`) and write them, free them in
 //!   random order, then run `quiet`'s light work for `gap_ms` milliseconds.
 //!
+//! - `refill`: several CPUs refilling one class every interval after a peak. Thread 0
+//!   allocates `peak` bytes of `size`-byte objects, writes them and frees them; then for
+//!   `secs` seconds each of `threads` pinned threads, every `period_ms`, allocates `set` bytes
+//!   of the same size, writes the first word of each page, and frees them. The threads' fills
+//!   meet in the class's bitmaps and move past one another.
+//!
 //! Every `MEM` line also gives the process's minor page faults so far (`minflt`).
 use bench_harness::{Args, Cpus, Rng, SizeMix};
 use std::alloc::{Layout, alloc, dealloc};
@@ -124,6 +130,57 @@ pub fn quiet(args: &Args) {
     let later = SizeMix::parse(&later).unwrap_or_else(|| panic!("after_sizes={later} is not a size mix"));
     after(args, later, &mut rng, start);
     kept.into_iter().for_each(drop_one);
+    report("end", start);
+}
+
+pub fn refill(args: &Args) {
+    let cpus = Cpus::from_env();
+    let threads = args.usize("threads", 4);
+    let size = args.usize("size", 4096);
+    let (peak, set) = (args.usize("peak", 256 << 20), args.usize("set", 8 << 20));
+    let (secs, period) = (args.num("secs", 10), Duration::from_millis(args.num("period_ms", 1000)));
+    let start = Instant::now();
+    report("start", start);
+    cpus.pin(0);
+    let touch = |n: usize| -> Vec<(*mut u8, usize)> {
+        (0..n)
+            .map(|_| {
+                // SAFETY: the size is not zero and 8 is a power of two; the writes stay inside
+                // the block.
+                unsafe {
+                    let p = alloc(Layout::from_size_align_unchecked(size, 8));
+                    assert!(!p.is_null());
+                    for at in (0..size).step_by(4096) {
+                        p.add(at).write(1);
+                    }
+                    (p, size)
+                }
+            })
+            .collect()
+    };
+    touch(peak / size).into_iter().for_each(drop_one);
+    report("freed", start);
+    let begin = Instant::now();
+    std::thread::scope(|scope| {
+        for i in 0..threads {
+            let (cpus, touch) = (&cpus, &touch);
+            scope.spawn(move || {
+                cpus.pin(i);
+                let mut next = begin;
+                while begin.elapsed() < Duration::from_secs(secs) {
+                    touch(set / size).into_iter().for_each(drop_one);
+                    next += period;
+                    if let Some(wait) = next.checked_duration_since(Instant::now()) {
+                        std::thread::sleep(wait);
+                    }
+                }
+            });
+        }
+        while begin.elapsed() < Duration::from_secs(secs) {
+            std::thread::sleep(Duration::from_millis(1000));
+            report("after", start);
+        }
+    });
     report("end", start);
 }
 

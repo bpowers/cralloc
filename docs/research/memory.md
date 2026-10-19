@@ -2547,11 +2547,11 @@ mstress, +2.6% [+0.7, +4.7] at the same faults. The maintain row's main figures 
   fragmented for good; then 400k 64-byte objects allocated, written and freed for twenty
   seconds): main purges and faults the working set back every interval, 38,330 `madvise`
   calls and 36k to 46k faults; the frontier makes 552 calls and no fault after the working
-  set's first round. Its cycles per object depend on where the inlined fast path lands: 31 in the normal
-  build of the branch against 23 for main, 22.8 against 23.1 with every loop aligned, at
-  equal instructions, dTLB misses and cache misses per object. That is layout, not the
-  purge: a build that differed from the branch in one line of the decay step measured 23,
-  and the branch with that very line measured 31 again.
+  set's first round. Its cycles per object swung between builds, 31 in the normal build of
+  the branch against 23 for main and 22.8 against 23.1 with every loop aligned, at equal
+  instructions and misses: not the purge, but a load held behind a store to the same page
+  offset, which the build's placement of the fast path's tables decided
+  (`zen5-roofline.md`, section 16).
 - **Quiet memory waits for its frontier, over the cap too.** A burst that goes quiet keeps
   its memory one interval longer: 215 MiB at one second against main's 102, then level from
   two seconds and lower at twelve. The phase change holds up to 9 MiB more for the first four
@@ -2559,6 +2559,29 @@ mstress, +2.6% [+0.7, +4.7] at the same faults. The maintain row's main figures 
   an interval, whatever the count says; growth over the cap still pays at once.
 - **The fill pays a load and a compare:** 0.1 cycle a slot from full words, 0.6 a claim from
   fragmented bitmaps.
+
+**Follow-ups, the same day.** Three changes after the second review, measured against main at
+`c3c4676` (which has the frontier), three rounds unless said:
+
+- **A fill that meets another records only what it reached before.** A run that meets
+  another filler moves past its group of 64 words and claims beyond it; those claims are not
+  evidence that the words skipped are in use, and they raised the frontier by a group per
+  meeting (16 MiB of 4 KiB slots, 128 MiB of 32 KiB ones). `workload refill` (thread 0
+  writes and frees 256 MiB of one class, then four threads on CPUs 0-3 each write and free
+  8 MiB of it every second for ten seconds): main holds 129 MiB at 32 KiB and 49 MiB at
+  4 KiB from four seconds to the end; the branch comes down to 28 MiB both ways. The price
+  is a few refaults where fills overlap: 6% more faults at 32 KiB, level at 4 KiB, and on rpc
+  log c64 (eight rounds) 363 window faults against 268 at level cycles (-0.3%
+  [-1.1, +0.3]).
+- **The interval number moves only forward**, unless the clock is more than an interval
+  behind it.
+- **The fill keeps its reach in the run's cursor.** `backbench`, cycles and instructions a
+  slot, main / branch / the branch with no frontier work at all: full words 4.3, 16.4 / 4.3,
+  16.4 / 4.2, 15.8; one slot a word (`fill/8`) 15.9, 73.4 / 15.9, 72.2 / 15.6, 70.6; one a
+  group (`fill/64`) 102, 466 / 98, 459 / 96, 445. What is left is about 0.3 cycles a claim:
+  two stores into the cursor and the record at the end of a fill.
+
+The period probe at 1.5 s is level (44 and 37 faults a re-allocation).
 
 **A working set that comes and goes on a period longer than the interval.** `workload period
 live=N sizes=small cycles=4 gap_ms=G after=burst after_sizes=s64`: allocate N objects and

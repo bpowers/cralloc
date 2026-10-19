@@ -421,7 +421,7 @@ fn claim_run_of(host: &Host8, times: usize, n: u32) -> Vec<(RegionId, u32)> {
     let mut cursor = None;
     let mut out = Vec::new();
     for _ in 0..times {
-        let Some(taken) = tree::claim_next(host, n, &mut cursor) else {
+        let Some(taken) = tree::claim_next(host, n, &mut cursor, &mut |_| {}) else {
             break;
         };
         let mut bits = taken.bits;

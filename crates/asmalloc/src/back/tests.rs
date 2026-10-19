@@ -998,6 +998,64 @@ fn a_frontier_lives_two_intervals_of_the_clock() {
     assert_eq!(floor_at(&back, at), 0);
 }
 
+/// A fill that meets another filler and moves past its group of 64 words records only what
+/// it reached before: the words it skipped may be free. Here the other filler has emptied the
+/// second word and still holds its summary bit, as one does while it batches its clears, and
+/// the run, led to that word, finds it empty and moves to the next group.
+#[test]
+fn a_fill_that_skips_past_another_records_only_what_it_reached_before() {
+    use super::tree::Host;
+    use super::word::Word;
+    let state = state::<Standard>();
+    let back = state.get_or_reserve().unwrap();
+    let class = small(8);
+    let per_region = back.space().plan().slots_per_region(class.class()) as usize;
+    let slots = fill(&back, class, per_region);
+    let group = 64 * 64;
+    assert!(per_region > 2 * group);
+    // Word 0, word 1 and the whole of the next group go back.
+    let freed: Vec<*mut u8> = slots[..128]
+        .iter()
+        .chain(&slots[group..2 * group])
+        .copied()
+        .collect();
+    // SAFETY: the test holds these slots and gives them up.
+    unsafe { back.launder(class, &freed) };
+    forget_reuse(&back);
+    // The other filler takes word 1, leaving its summary bit set.
+    let host = back.host(class.class()).unwrap();
+    let region = back.space().locate(slots[0]).unwrap().region;
+    host.meta(region, host.layout().tree_word(0, 1)).store(0);
+    let got = fill(&back, class, 128);
+    assert_eq!(got[..64], slots[..64]);
+    assert_eq!(
+        got[64..],
+        slots[group..group + 64],
+        "the run did not move past the group"
+    );
+    assert_eq!(floor_at(&back, slots[0]), page_past(&back, slots[63], 8));
+}
+
+/// The interval number never goes back a step: a heartbeat that read the clock just before
+/// a boundary leaves the number a later reading wrote. A clock that has gone back by more
+/// than an interval (a resume) is taken as it is.
+#[test]
+fn the_interval_number_moves_only_forward() {
+    let state = state::<Standard>();
+    let back = state.get_or_reserve().unwrap();
+    back.note_epoch(5 * DECAY_TICKS);
+    assert_eq!(back.epoch(), 5);
+    back.note_epoch(5 * DECAY_TICKS - 1);
+    assert_eq!(back.epoch(), 5, "a stale reading took the number back");
+    back.note_epoch(6 * DECAY_TICKS + 7);
+    assert_eq!(back.epoch(), 6);
+    back.note_epoch(2 * DECAY_TICKS);
+    assert_eq!(back.epoch(), 2, "a clock gone back was not followed");
+    assert_eq!(super::purge::epoch_after(9, 8 * DECAY_TICKS), None);
+    assert_eq!(super::purge::epoch_after(9, 10 * DECAY_TICKS), Some(10));
+    assert_eq!(super::purge::epoch_after(9, 7 * DECAY_TICKS), Some(7));
+}
+
 /// A fill whose run of claims leaves one region for the next records the first region's
 /// frontier as it leaves, as well as the last region's at the end.
 #[test]

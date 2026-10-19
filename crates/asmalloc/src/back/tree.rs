@@ -409,6 +409,14 @@ pub(crate) struct Cursor {
     /// The words of the group the run has emptied and whose summary bits it has not yet
     /// cleared, as bits of the group's summary word.
     emptied: u64,
+    /// The run has moved past a group where it met another claimer, since it last searched
+    /// from the top.
+    skipped: bool,
+    /// The leaf word and bits of the run's last claim before it first moved past another
+    /// claimer, since it last searched from the top: how far up the run's reuse is known to
+    /// reach (`Back::fill` raises the region's frontier to it). No bits for none yet.
+    reach_word: u32,
+    reach_bits: u64,
 }
 
 impl Cursor {
@@ -418,6 +426,9 @@ impl Cursor {
             next: leaf.index,
             group: leaf.index / BITS,
             emptied: 0,
+            skipped: false,
+            reach_word: 0,
+            reach_bits: 0,
         }
     }
 }
@@ -443,6 +454,12 @@ impl Cursor {
 /// clears it. And the bits of the words the run empties itself are cleared together, one
 /// atomic AND for each group the run leaves (`clear_group`), not one for each word.
 ///
+/// The cursor keeps the run's last claim before it first moved past another thread: the slots
+/// it skipped may be free, so the claims after it are not reuse reaching that high. A run
+/// moves only upward until it searches from the top again, so that claim is the highest it
+/// knows reuse to reach; the run hands it to `leave` when it searches from the top again, and
+/// [`finish_run`] returns the last one. A fill raises its regions' frontiers to them.
+///
 /// The run takes the lowest slots it can see, except where it moved past another thread. What
 /// it can miss is a slot freed behind it since, by another thread, which is a race either way,
 /// and the next fill starts from the top.
@@ -450,7 +467,12 @@ impl Cursor {
 /// Out of line: inlined into `Back::fill`, its state took registers from the fill's loop over
 /// the slots, which then reloaded two values from the stack for every slot.
 #[inline(never)]
-pub(crate) fn claim_next<H: Host>(host: &H, n: u32, cursor: &mut Option<Cursor>) -> Option<Taken> {
+pub(crate) fn claim_next<H: Host>(
+    host: &H,
+    n: u32,
+    cursor: &mut Option<Cursor>,
+    leave: &mut impl FnMut(Taken),
+) -> Option<Taken> {
     let mut run = *cursor;
     loop {
         let found = run.and_then(|at| seek(host, at.region, at.next));
@@ -461,12 +483,23 @@ pub(crate) fn claim_next<H: Host>(host: &H, n: u32, cursor: &mut Option<Cursor>)
                     (leaf, at)
                 } else {
                     clear_group(host, at);
-                    (leaf, Cursor::at(leaf))
+                    (
+                        leaf,
+                        Cursor {
+                            skipped: at.skipped,
+                            reach_word: at.reach_word,
+                            reach_bits: at.reach_bits,
+                            ..Cursor::at(leaf)
+                        },
+                    )
                 }
             }
             _ => {
                 if let Some(at) = run.take() {
                     clear_group(host, at);
+                    if let Some(reached) = at.reached() {
+                        leave(reached);
+                    }
                 }
                 *cursor = None;
                 let leaf = from_top(host)?;
@@ -489,12 +522,18 @@ pub(crate) fn claim_next<H: Host>(host: &H, n: u32, cursor: &mut Option<Cursor>)
                 }
                 run = Some(Cursor {
                     next: past_group(leaf.index),
+                    skipped: true,
                     ..at
                 });
                 continue;
             }
         };
         let mut at = at;
+        if !at.skipped {
+            at.reach_word = leaf.index;
+            at.reach_bits = bits;
+        }
+        at.skipped |= raced;
         if emptied {
             if host.layout().height() == 0 {
                 // The word's summary bit is a class word's, shared with other regions.
@@ -519,11 +558,23 @@ pub(crate) fn claim_next<H: Host>(host: &H, n: u32, cursor: &mut Option<Cursor>)
     }
 }
 
-/// Ends a run of claims: clears the summary bits it owes. A run that is never finished, as in
-/// a thread lost in a fork, leaves them set over empty words, which the protocol allows.
-pub(crate) fn finish_run<H: Host>(host: &H, cursor: Option<Cursor>) {
-    if let Some(at) = cursor {
-        clear_group(host, at);
+/// Ends a run of claims: clears the summary bits it owes, and returns how far up its reuse is
+/// known to reach in the region it ends in (`Cursor::reached`). A run that is never finished,
+/// as in a thread lost in a fork, leaves them set over empty words, which the protocol allows.
+pub(crate) fn finish_run<H: Host>(host: &H, cursor: Option<Cursor>) -> Option<Taken> {
+    let at = cursor?;
+    clear_group(host, at);
+    at.reached()
+}
+
+impl Cursor {
+    /// The run's last claim before it first moved past another claimer, if it made one.
+    fn reached(self) -> Option<Taken> {
+        (self.reach_bits != 0).then_some(Taken {
+            region: self.region,
+            word: self.reach_word,
+            bits: self.reach_bits,
+        })
     }
 }
 
