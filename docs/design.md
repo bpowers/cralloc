@@ -339,7 +339,7 @@ may change):
 
 ```asm
                                       ; rdi: SLABS + CLASS*8, esi: the class's mask
-    mov   r10, [rip + __rseq_offset@GOTPCREL]
+    mov   r10, [rip + word]           ; the address of __rseq_offset, from a word of our own
     mov   r10, [r10]                  ; where glibc put this thread's rseq area
     lea   r11, [rip + descriptor]
     mov   fs:[r10 + 8], r11           ; arm: tell the OS which sequence we are in
@@ -363,7 +363,10 @@ size.
 
 An executable can read `__rseq_offset` with one load instead of two, because the linker
 gives it its own copy of the variable; that saves a cycle per pair, and a cargo feature
-selects it. A shared library must go through the indirection shown.
+selects it. A shared library must go through the indirection shown. The linker would give it
+a slot in its offset table for that, wherever the slot happens to fall; each routine instead
+reads the variable's address from a 16-aligned word emitted with it, which the loader fills
+as it would have filled the slot, so the load never shares a page offset with a hot word.
 
 If the thread is preempted, migrated or signalled anywhere between `start` and `end`, the OS
 resumes it at an abort handler that jumps back to the arming store. Nothing before the last
