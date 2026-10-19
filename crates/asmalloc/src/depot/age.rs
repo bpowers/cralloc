@@ -19,7 +19,9 @@
 //! last sweep began, each heartbeat takes one class's whole stack of full spares, the classes
 //! in turn, with one store-if-equal of its head to zero; launders the top magazine; and sends
 //! the rest to the depot, where consumers or the depot's low-water rule (`shed.rs`) move them
-//! on. A class in use pays one refill an interval for this too. The sweep's state is one word
+//! on.
+//! A class with stock (`stock.rs`) is not taken whole: the sweep takes its unused depth off the
+//! credit and returns what lies above the new limit a magazine a heartbeat. A class in use pays one refill an interval for this too. The sweep's state is one word
 //! in the cold part of the slab ([`Sweep`]); a heartbeat whose sweep laundered skips its look,
 //! so the rule still launders at most one magazine a heartbeat.
 //!
@@ -65,6 +67,7 @@
 
 use super::heartbeat::{Clock, IDLE_UNITS, TICK_SHIFT};
 use super::magazine::{Magazine, MagazineId};
+use super::stock::Swept;
 use super::{Cache, Source};
 use crate::classes::SMALL_COUNT;
 use crate::classes::{SmallClass, is_marker};
@@ -255,11 +258,24 @@ impl<'a, O: Os, R: Routines, S: Source> Cache<'a, O, R, S> {
             }
             return false;
         };
-        word.store(sweep.advanced().0, Relaxed);
-        SmallClass::from_ordinal(ordinal).is_some_and(|class| {
-            self.settle_stock(cpu, class);
-            self.take_spares(cpu, class)
-        })
+        let Some(class) = SmallClass::from_ordinal(ordinal) else {
+            word.store(sweep.advanced().0, Relaxed);
+            return false;
+        };
+        match self.sweep_stock(cpu, class) {
+            Swept::Plain => {
+                word.store(sweep.advanced().0, Relaxed);
+                self.take_spares(cpu, class)
+            }
+            Swept::Stocked { laundered, more } => {
+                // A class with stock returns it a magazine a heartbeat, the sweep staying on
+                // it until none is left above its limit (`stock.rs`).
+                if !more {
+                    word.store(sweep.advanced().0, Relaxed);
+                }
+                laundered
+            }
+        }
     }
 
     /// Takes the current CPU's stack of full spares of `class`, if its head is still the one
@@ -285,7 +301,6 @@ impl<'a, O: Os, R: Routines, S: Source> Cache<'a, O, R, S> {
             };
             // The link must be read before the depot overwrites it.
             next = magazine.link().load(Acquire).addr();
-            self.note_swept(cpu, class, magazine.record().depth);
             // Drop the spare depth the record carries.
             magazine.set_level(magazine.level());
             if first {

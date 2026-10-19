@@ -526,8 +526,9 @@ fn stock_keeps_one_owner_under_every_schedule(bounds: Bounds, migrations: usize)
                 let machine = world.machine(me, 0);
                 let cache = world.rig.cache(&machine);
                 let cpu = world.rig.slabs().cpu(0).unwrap();
-                cache.settle_stock(cpu, tiny_class());
-                cache.take_spares(cpu, tiny_class());
+                if cache.sweep_stock(cpu, tiny_class()) == super::stock::Swept::Plain {
+                    cache.take_spares(cpu, tiny_class());
+                }
             }
         },
         |_| {},
@@ -541,7 +542,9 @@ fn stock_keeps_one_owner_under_every_schedule(bounds: Bounds, migrations: usize)
 /// where its push or its pop found the stack contended, and some schedule does. With no
 /// preemption nothing contends, and no schedule earns any.
 fn contended_round_trips_earn_stock(bounds: Bounds) -> usize {
+    use crate::front::Spare;
     let earned = AtomicUsize::new(0);
+    let ended = AtomicUsize::new(0);
     let found = explore(
         bounds,
         2,
@@ -574,15 +577,49 @@ fn contended_round_trips_earn_stock(bounds: Bounds) -> usize {
         |world, _| {
             world.check(false);
             for n in 0..2 {
-                let slab = world.rig.slabs().slab(world.rig.slabs().cpu(n).unwrap());
-                if slab.stock(tiny_class()).load(Ordering::Relaxed).addr() & 0x3fff_ffff != 0 {
-                    earned.fetch_add(1, Ordering::SeqCst);
+                let cpu = world.rig.slabs().cpu(n).unwrap();
+                let slab = world.rig.slabs().slab(cpu);
+                let word = slab.stock(tiny_class()).load(Ordering::Relaxed).addr();
+                if word & 0x0fff_ffff == 0 {
+                    continue;
                 }
+                earned.fetch_add(1, Ordering::SeqCst);
+                if word & 0x3fff == 0 {
+                    // Credit for empty stock alone keeps nothing (`stock.rs`).
+                    continue;
+                }
+                ended.fetch_add(1, Ordering::SeqCst);
+                // End to end: the credit the contention earned keeps the CPU's next burst as
+                // stock, and the stock goes back once an interval passes without its use.
+                let machine = world.machine(0, n as usize);
+                let cache = world.rig.cache(&machine);
+                let held: Vec<_> = (0..4).filter_map(|_| cache.alloc(tiny_class())).collect();
+                for object in held {
+                    cache.free(tiny_class(), object);
+                }
+                let full = || cache.spare_depth(tiny_class(), Spare::Full).unwrap_or(0);
+                assert!(full() > 0, "credit kept no stock");
+                for _ in 0..2 {
+                    world.rig.os().advance_clock(2 * IDLE_TICKS);
+                    for _ in 0..8 {
+                        if cache.sweep_stock(cpu, tiny_class()) == super::stock::Swept::Plain {
+                            cache.take_spares(cpu, tiny_class());
+                            break;
+                        }
+                    }
+                }
+                assert_eq!(full(), 0, "unused stock went back");
+                world.check(false);
             }
         },
     );
     report("contended round trips", found);
-    earned.load(Ordering::SeqCst)
+    let earned = earned.load(Ordering::SeqCst);
+    assert!(
+        earned == 0 || ended.load(Ordering::SeqCst) > 0,
+        "no schedule earned full credit and kept stock with it"
+    );
+    earned
 }
 
 /// Finding (review of stock, commit 1bd3010): the drain clears the count of stock bytes of the
@@ -644,7 +681,7 @@ fn a_drain_leaves_no_stock_uncounted(bounds: Bounds) {
                 }
                 next = magazine.link().load(Ordering::Relaxed).addr();
             }
-            let counted = slab.stock_held().load(Ordering::Relaxed) as u32 as usize;
+            let counted = cache.stock_held(world.rig.slabs().cpu(0).unwrap(), Spare::Full);
             assert!(
                 counted >= stock,
                 "CPU 0 holds {stock} bytes of full stock and counts {counted}"
@@ -1037,8 +1074,14 @@ mod run {
 
     #[test]
     #[cfg_attr(miri, ignore)]
-    #[ignore = "finding: a drain wipes the count of stock its CPU pushed meanwhile"]
     fn stock_review_a_drain_leaves_no_stock_uncounted() {
+        super::a_drain_leaves_no_stock_uncounted(Bounds::preemptions(1));
+    }
+
+    #[test]
+    #[cfg(not(debug_assertions))]
+    #[ignore = "slow: run with scripts/gate --all, optimized"]
+    fn stock_review_a_drain_leaves_no_stock_uncounted_fully() {
         super::a_drain_leaves_no_stock_uncounted(Bounds::preemptions(2));
     }
 

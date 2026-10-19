@@ -169,9 +169,6 @@ impl<O: Os, R: Routines, S: Source> Cache<'_, O, R, S> {
             }
         }
 
-        // What the slab held as stock went with its spares (`stock.rs`).
-        slab.stock_held().store(0, Relaxed);
-
         // Step 5.
         self.release(cpu, generation.get());
         Drained::Done

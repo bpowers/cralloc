@@ -16,7 +16,7 @@
 //! index, where two to a chunk cost a run-time-size pair two cycles of arithmetic. The cold
 //! part follows on its own cache lines: the activity counter, the drain claim, the count of full
 //! magazines the CPU's frees have retired, where the age limit's sweep of the spare stacks is,
-//! and the bytes the CPU holds as stock; then,
+//! and the classes that may keep stock; then,
 //! on lines of their own that only this CPU's slow paths touch, per class a stamp of when the
 //! loaded magazine was loaded; and on a line of its own the idle check's last sighting.
 //!
@@ -123,8 +123,8 @@ pub struct Slab {
     claim: AtomicU64,
     retired: AtomicU64,
     sweep: AtomicU64,
-    /// The bytes held as stock beyond the fixed spare limits (`depot::stock`).
-    stock_held: AtomicU64,
+    /// The classes that may keep stock here, one bit per ordinal (`depot::stock`).
+    stocked: AtomicU64,
     stamps: Stamps,
     /// On a line of its own: other CPUs' idle checks write it, and should not take the line
     /// that this CPU's slow paths count their activity in.
@@ -162,7 +162,7 @@ impl Slab {
             claim: AtomicU64::new(0),
             retired: AtomicU64::new(0),
             sweep: AtomicU64::new(0),
-            stock_held: AtomicU64::new(0),
+            stocked: AtomicU64::new(0),
             stamps: Stamps([const { AtomicU64::new(0) }; STAMPS]),
             seen: OwnLine(AtomicU64::new(0)),
         }
@@ -240,12 +240,12 @@ impl Slab {
         &self.sweep
     }
 
-    /// What this CPU holds as stock beyond the fixed spare limits (`depot::stock`): a hint,
-    /// written with single stores by this CPU's slow paths and cleared by a drain. On the line
-    /// the activity counter shares, which every slow path writes, so it costs no line of its own.
+    /// The classes that may keep stock on this CPU, one bit per ordinal (`depot::stock`): a
+    /// hint, written with single stores by this CPU's slow paths, on the line of the activity
+    /// counter that every slow path writes.
     #[inline]
-    pub(crate) fn stock_held(&self) -> &AtomicU64 {
-        &self.stock_held
+    pub(crate) fn stocked(&self) -> &AtomicU64 {
+        &self.stocked
     }
 
     /// The stamp of the magazine loaded for `class` (`depot::age`): zero, or which magazine
