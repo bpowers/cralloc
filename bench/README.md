@@ -133,7 +133,7 @@ cannot be rebuilt under a session.
   execs. A run killed at its cap, or one that reached the cap and was slowed by reclaim, is
   recorded as invalid with that reason, and the session goes on. Every process is charged to
   some memory cgroup anyway, so the cap adds no work to allocation; an interleaved A/B is in
-  `docs/research/baselines.md` section 11.
+  `docs/research/baselines.md` section 13.
 - **Checks.** Each run must report the allocator, and for tcmalloc the mode, it was meant to
   run with, and where the allocator's code was: linked into the executable, or which shared
   library. A preload run must report the library it preloaded. Native runs report from

@@ -18,7 +18,7 @@
 //! `je` is exactly what a service that depends on `tikv-jemallocator` gets: jemalloc built by
 //! `tikv-jemalloc-sys`, static and with the `_rjem_` prefix, so C code in the process keeps
 //! glibc's malloc. (Before 2026-10-17 `je` linked Fedora's shared libjemalloc instead; see
-//! docs/research/baselines.md section 11 for what differs.)
+//! docs/research/baselines.md section 13 for what differs.)
 //!
 //! `mimalloc` and `tikv-jemallocator` also route `realloc` and `alloc_zeroed` to the
 //! allocator's own functions. `tcmalloc-better` uses the generic fallbacks (allocate, copy,
