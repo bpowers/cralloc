@@ -138,6 +138,17 @@ pub unsafe trait Os: Sync {
         advice: HugePages,
     ) -> Result<(), OsError>;
 
+    /// How many pages of a range are resident (`mincore`). No promise of this trait's safety
+    /// contract depends on the answer: a wrong count only makes the allocator return a page it
+    /// could have kept, or keep one it could have returned. The simulator counts a committed
+    /// page that holds a nonzero byte, a lower bound, since it cannot see a write of zeros.
+    ///
+    /// # Safety
+    ///
+    /// The range follows the rules in the module documentation, and no thread writes it during
+    /// the call (the simulator reads it).
+    unsafe fn resident(&self, start: NonNull<u8>, len: usize) -> Result<usize, OsError>;
+
     /// Marks a range so that a child forked afterwards reads it as zero (`MADV_WIPEONFORK`).
     /// The process generation lives on such a page.
     ///

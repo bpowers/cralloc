@@ -308,7 +308,7 @@ fn unblock_sigabrt() {
 //   after which private anonymous memory reads as zero and stays mapped with its protection.
 //   `advise_huge` is MADV_HUGEPAGE or MADV_NOHUGEPAGE, which change neither. `wipe_on_fork` is
 //   MADV_WIPEONFORK, which changes nothing in this process and makes a child's copy of the
-//   range read as zero.
+//   range read as zero. `resident` is mincore, which changes nothing in the range.
 // - A failed call reports `-errno`; mprotect and madvise may have acted on part of the range,
 //   never beyond it.
 // - Reservations are mappings of the process, valid until unmapped; dropping a `LinuxOs`
@@ -388,6 +388,36 @@ unsafe impl Os for LinuxOs {
         // SAFETY: KERNEL-03. the caller passes whole pages of a live reservation; the advice changes no
         // contents or permissions.
         unsafe { range_call(nr::MADVISE, start, len, advice) }
+    }
+
+    unsafe fn resident(&self, start: NonNull<u8>, len: usize) -> Result<usize, OsError> {
+        // One byte a page, a huge page's worth at a time, on the stack.
+        const BATCH: usize = 512;
+        let page = Self::GEOMETRY.page_size();
+        let mut flags = [0u8; BATCH];
+        let (mut done, mut count) = (0, 0);
+        while done < len {
+            let pages = ((len - done) / page).min(BATCH);
+            let at = start.map_addr(|a| a.saturating_add(done));
+            // SAFETY: KERNEL-08. mincore reads no user memory and writes one byte for each of
+            // `pages` pages into `flags`, a live local of at least that many bytes.
+            result(unsafe {
+                syscall(
+                    nr::MINCORE,
+                    [
+                        at.as_ptr(),
+                        int(pages * page),
+                        flags.as_mut_ptr(),
+                        int(0),
+                        int(0),
+                        int(0),
+                    ],
+                )
+            })?;
+            count += flags[..pages].iter().filter(|&&f| f & 1 != 0).count();
+            done += pages * page;
+        }
+        Ok(count)
     }
 
     unsafe fn wipe_on_fork(&self, start: NonNull<u8>, len: usize) -> Result<(), OsError> {
@@ -582,6 +612,29 @@ mod tests {
             os.purge(base, 2 * PAGE).unwrap();
             assert_eq!(p.add(PAGE + 1).read(), 0);
             os.unmap(base, 4 * REGION).unwrap();
+        }
+    }
+
+    /// `resident` counts the pages written since the last purge, over more than one batch.
+    #[test]
+    fn resident_counts_written_pages() {
+        let os = LinuxOs;
+        let pages = 1100;
+        let base = os.reserve(REGION, REGION).unwrap();
+        let p = base.as_ptr();
+        // SAFETY: each range is whole pages of the reservation, and nothing else uses it.
+        unsafe {
+            os.commit(base, pages * PAGE).unwrap();
+            os.advise_huge(base, pages * PAGE, HugePages::Avoid)
+                .unwrap();
+            assert_eq!(os.resident(base, pages * PAGE), Ok(0));
+            for i in [0, 3, 600, 1099] {
+                p.add(i * PAGE).write(1);
+            }
+            assert_eq!(os.resident(base, pages * PAGE), Ok(4));
+            os.purge(base, pages * PAGE).unwrap();
+            assert_eq!(os.resident(base, pages * PAGE), Ok(0));
+            os.unmap(base, REGION).unwrap();
         }
     }
 

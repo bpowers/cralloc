@@ -238,6 +238,19 @@ impl<'os, O: Os> Space<'os, O> {
         unsafe { self.os.advise_huge(start, len, advice) }
     }
 
+    /// How many pages of a range of the reservation are resident. Aborts if the range is not
+    /// one [`Space::is_callable_range`] accepts.
+    ///
+    /// # Safety
+    ///
+    /// No thread writes the range during the call.
+    pub unsafe fn resident(&self, start: NonNull<u8>, len: usize) -> Result<usize, OsError> {
+        self.check(start, len);
+        // SAFETY: RESERVATION-06. the range is valid as in `commit`; the caller promises nothing
+        // writes it during the call.
+        unsafe { self.os.resident(start, len) }
+    }
+
     /// Marks a range of the reservation to read as zero in a forked child. Aborts if the range
     /// is not one [`Space::is_callable_range`] accepts.
     pub fn wipe_on_fork(&self, start: NonNull<u8>, len: usize) -> Result<(), OsError> {

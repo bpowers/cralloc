@@ -586,7 +586,7 @@ pub(crate) fn record<H: Host>(host: &H, region: RegionId, slot: u32, recorded: R
 /// and the range is inside the holder's slot, so nothing else is affected.
 ///
 /// Returns the page, counted from the region's start, at which the advised range ends, if it
-/// gave advice.
+/// gave advice and the OS took it.
 pub(crate) fn advise_grown<H: Host>(
     host: &H,
     region: RegionId,
@@ -619,8 +619,8 @@ pub(crate) fn advise_grown<H: Host>(
         unit.start as usize * page,
         (end - unit.start) as usize * page,
     );
-    host.advise(region, offset, len, HugePages::Prefer);
-    Some(end)
+    host.advise(region, offset, len, HugePages::Prefer)
+        .then_some(end)
 }
 
 /// For the holder of large slot `slot`: takes back the huge-page advice `advise_grown` gave

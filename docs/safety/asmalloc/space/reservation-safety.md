@@ -52,6 +52,12 @@ invariant. `check` calls `os.abort` on failure, which does not return.
 thread touches the range during the call, nothing in it is needed) are this function's own
 `# Safety` conditions, forwarded unchanged.
 
+## RESERVATION-06: `os.resident` in `Space::resident`
+
+**Proof.** The range conditions are as for RESERVATION-01. The extra `Os::resident` condition
+(no thread writes the range during the call) is this function's own `# Safety` condition,
+forwarded unchanged.
+
 ## RESERVATION-03: `os.unmap` in `Space::unmap`
 
 **Proof.** The range is the whole reservation, `base` and `plan.size()`. The size is the end of
