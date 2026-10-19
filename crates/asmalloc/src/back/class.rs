@@ -286,7 +286,7 @@ impl<'a, O: Os> Back<'a, O> {
             // One slot needs none of a batch's grouping: one check, one OR, one walk up.
             let (region, slot) = self.validate(&host, first.address(), class);
             let (word, bit) = position(slot);
-            tree::release_one(&host, region, word, 1 << bit);
+            tree::release_one(&host, region, word, bit);
             if count {
                 self.retain(class, class.size());
             }
@@ -370,7 +370,7 @@ impl<'a, O: Os> Back<'a, O> {
     fn free_slot(&self, host: &ClassHost<'a, O>, class: Class, region: RegionId, slot: u32) {
         let charge = self.purge_before_release(host, region, slot, class);
         let (word, bit) = position(slot);
-        tree::release_one(host, region, word, 1 << bit);
+        tree::release_one(host, region, word, bit);
         self.retain(class, charge);
     }
 
@@ -439,13 +439,16 @@ impl<'a, O: Os> Back<'a, O> {
     }
 
     fn alloc_at(&self, class: Class, size: usize, stagger: bool) -> Option<Block> {
-        if size > class.size() {
+        let host = self.host(class)?;
+        // The class's size as the layout holds it: a load, where the class works it out.
+        let bytes = host.layout().size();
+        if size > bytes {
             self.abort("an allocation larger than its class");
         }
-        let host = self.host(class)?;
-        let (region, slot, zeroed) = if let Some(taken) = tree::claim(&host, 1, !class.is_small()) {
+        let small = class.is_small();
+        let (region, slot, zeroed) = if let Some(taken) = tree::claim(&host, 1, !small) {
             let slot = taken.word * BITS + taken.bits.trailing_zeros();
-            let settled = if class.is_small() {
+            let settled = if small {
                 region::settle(&host, taken.region, taken.word, taken.bits)
             } else {
                 region::settle_slot(&host, taken.region, slot, size)
@@ -457,8 +460,8 @@ impl<'a, O: Os> Back<'a, O> {
             let (region, first, _) = self.carve(&host, class, 1)?;
             // A large block makes resident at most what it asked for (one with headroom asks
             // for the room it may grow into), however big its slot.
-            self.grow(if class.is_small() { class.size() } else { size });
-            if !class.is_small() {
+            self.grow(if small { bytes } else { size });
+            if !small {
                 region::mark_fresh(&host, region, first, size);
             }
             (region, first, true)
@@ -473,20 +476,29 @@ impl<'a, O: Os> Back<'a, O> {
                 region::cover(&host, region, slot);
             }
         }
-        let into = host.layout().stagger(slot);
-        let into = if stagger && size + into <= class.size() {
+        let layout = host.layout();
+        let into = layout.stagger(slot);
+        let into = if stagger && size + into <= bytes {
             into
         } else {
             0
         };
-        let start = self.space.slot(region, class, slot);
-        let len = if class.is_small() {
-            class.size()
+        // A slot below the region's count lies wholly inside the region, which is what
+        // `Space::slot` checks.
+        if slot >= layout.slots() {
+            self.abort("a slot index outside its region");
+        }
+        let offset = layout.slot_bytes(slot) + into;
+        let len = if small {
+            bytes
         } else {
-            usable(size, into, host.layout().page_size())
+            usable(size, into, layout.page_size())
         };
         Some(Block {
-            ptr: start.map_addr(|a| a.saturating_add(into)),
+            ptr: self
+                .space
+                .region(region)
+                .map_addr(|a| a.saturating_add(offset)),
             zeroed,
             len,
         })

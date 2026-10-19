@@ -492,7 +492,7 @@ fn fill_roomy(seed: u64, steps: usize, faults: bool) -> Seen {
             );
         }
         assert_eq!(
-            back.state.retained.large.load(Relaxed),
+            back.state.retained.signed(true),
             census.counted as isize,
             "seed {seed:#x} step {at}: the count against the clean bits ({census:?})"
         );
@@ -517,7 +517,7 @@ fn fill_roomy(seed: u64, steps: usize, faults: bool) -> Seen {
     let back = heap.back().unwrap();
     let census = census(&back);
     assert_eq!((census.resident, census.wrong_zero), (0, 0), "{census:?}");
-    assert_eq!(back.state.retained.large.load(Relaxed), 0);
+    assert_eq!(back.state.retained.signed(true), 0);
     seen
 }
 

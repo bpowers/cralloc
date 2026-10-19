@@ -36,7 +36,7 @@
 //!   thread that vanished in a fork is repaired by the next free below it. A batch of releases
 //!   ([`Release`]) shares one walk: each summary word is looked at once for all the bits it
 //!   owes. The release of one slot ([`release_one`]) is the same steps for one bit with no
-//!   batch's bookkeeping.
+//!   batch's bookkeeping, and looks at every level, the one above an empty word included.
 //! - **clear**: whoever empties a word, or finds one empty under a set bit, clears the bit with
 //!   an atomic AND and reads the word again. If the word is no longer empty it sets the bit back
 //!   by walking up as a release does. Otherwise, if the AND emptied the summary word, that word
@@ -649,25 +649,29 @@ pub(crate) fn release<H: Host>(host: &H, region: RegionId, index: u32, bits: u64
     release.finish();
 }
 
-/// Frees the one slot `bit` of a leaf word: the model's release for one bit, with none of a
-/// batch's bookkeeping. One atomic OR, which aborts if the bit was set already (a double free),
-/// then the healing walk to the top: at each level, the OR alone if the word below was empty
-/// before this thread's write, else a look and an OR only if the bit is clear.
-pub(crate) fn release_one<H: Host>(host: &H, region: RegionId, index: u32, bit: u64) {
+/// Frees the one slot `b` (a bit number, below 64) of a leaf word: the model's release for one
+/// bit, with none of a batch's bookkeeping. One atomic OR, which aborts if the bit was set
+/// already (a double free), then the healing walk to the top: at each level a look, and an OR
+/// only if the bit is clear (`Look` in `tla/Summary.tla`).
+///
+/// The walk looks even where the word below was empty before this thread's OR, which a batch's
+/// walk sets without looking: a large class's claims leave the summary bits set (`claim` with
+/// `keep`), so the bit is nearly always there, and an OR that finds it set is an atomic
+/// instruction for nothing. Only the OR's own bit is read back, so that it is one `lock bts`
+/// rather than a load and a compare-and-swap loop.
+pub(crate) fn release_one<H: Host>(host: &H, region: RegionId, index: u32, b: u32) {
     let mut spot = Spot::leaf(region, index);
+    let bit = 1u64 << (b % BITS);
     let old = spot.word(host).fetch_or(bit);
     if old & bit != 0 {
         host.abort("double free: an object was freed while already free");
     }
-    let mut must = old == 0;
     let height = host.layout().height();
     while let Some((above, bit)) = spot.parent(height) {
         let word = above.word(host);
-        must = if must || word.load() & bit == 0 {
-            word.fetch_or(bit) == 0
-        } else {
-            false
-        };
+        if word.load() & bit == 0 {
+            word.fetch_or(bit);
+        }
         spot = above;
     }
 }

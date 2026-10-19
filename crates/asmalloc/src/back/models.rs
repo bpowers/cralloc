@@ -64,7 +64,7 @@ fn free_now(host: &Host8, region: RegionId, slot: u32) {
 
 /// Frees `slot` the way a single large free does (`tree::release_one`).
 fn free_one(host: &Host8, region: RegionId, slot: u32) {
-    tree::release_one(host, region, slot / BITS, 1 << (slot % BITS));
+    tree::release_one(host, region, slot / BITS, slot % BITS);
 }
 
 /// Claims up to `n` slots and returns them, with their region.

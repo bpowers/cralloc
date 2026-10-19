@@ -2,7 +2,7 @@
 //! on one word.
 
 use core::sync::atomic::AtomicU64;
-use core::sync::atomic::Ordering::SeqCst;
+use core::sync::atomic::Ordering::{Release, SeqCst};
 
 /// Bits per bitmap word.
 pub(crate) const BITS: u32 = u64::BITS;
@@ -68,7 +68,7 @@ impl Word for Atomic {
 
     #[inline(always)]
     fn store(&self, value: u64) {
-        self.0.store(value, SeqCst)
+        self.0.store(value, Release)
     }
 }
 

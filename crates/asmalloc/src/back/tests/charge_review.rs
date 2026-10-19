@@ -147,7 +147,7 @@ fn census<S: Shape>(back: &Back<'_, Sim<S>>) -> Census {
 
 /// The large-slot retained count as it stands, signed.
 fn count<S: Shape>(state: &State<Sim<S>>) -> isize {
-    state.retained.large.load(Relaxed)
+    state.retained.signed(true)
 }
 
 fn bytes(ptr: NonNull<u8>, len: usize) -> Vec<u8> {
@@ -964,7 +964,7 @@ fn fill_all(seed: u64, steps: usize) -> Met {
             );
         }
         assert_eq!(
-            back.state.retained.large.load(Relaxed),
+            back.state.retained.signed(true),
             census.counted as isize,
             "seed {seed:#x} step {at}: the count against the clean bits ({census:?})"
         );
@@ -984,7 +984,7 @@ fn fill_all(seed: u64, steps: usize) -> Met {
     let back = heap.back().unwrap();
     let census = census(&back);
     assert_eq!((census.resident, census.wrong_zero), (0, 0), "{census:?}");
-    assert_eq!(back.state.retained.large.load(Relaxed), 0);
+    assert_eq!(back.state.retained.signed(true), 0);
     met
 }
 
