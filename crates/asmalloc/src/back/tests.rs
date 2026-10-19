@@ -871,6 +871,50 @@ fn beat<O: Os>(back: &Back<'_, O>) {
     }
 }
 
+/// A clocked pass carries on from where the walk stands instead of starting at the top: left
+/// at the lowest region, the next pass works there first, and a region above it waits its
+/// turn. Passes that each began at the top spent their goal on the higher regions, and the
+/// free pages of the lowest stayed resident for as long as anything above them was free.
+#[test]
+fn a_pass_resumes_where_the_walk_stands() {
+    use core::sync::atomic::Ordering::Relaxed;
+    let state = state::<Standard>();
+    let back = state.get_or_reserve().unwrap();
+    let os = state.os();
+    let (low, high) = (small(1024), small(512));
+    let lows = fill(&back, low, small_part(&back, low));
+    // Enough above it that a quarter of what is retained is more than the floor, and much
+    // more than the lower class frees.
+    let floor = super::policy::DECAY_FLOOR_HUGE_PAGES * Standard::GEOMETRY.huge_page_size();
+    let highs = fill(&back, high, whole_regions(&back, high, 16 * floor));
+    let region = |p: *mut u8| back.space().locate(p).unwrap().region.index();
+    assert!(region(lows[0]) < region(highs[0]));
+    // SAFETY: the test holds these slots and gives them up.
+    unsafe {
+        back.launder(low, &lows);
+        back.launder(high, &highs);
+    }
+    // The walk stands at the lower class's region, as a lap that stopped there leaves it.
+    state
+        .walk
+        .purge_at
+        .store(region(lows[0]) as u32 + 1, Relaxed);
+    os.advance_clock(DECAY_TICKS);
+    back.decay_pass(&|| os.ticks());
+    // The pass began there, emptied that region, went on from the top of the heap with the
+    // rest of its quarter, and stopped long before the bottom of the higher class's lowest
+    // region. A pass from the top would have spent its quarter on the higher class alone.
+    // SAFETY: no other thread runs, and the back end and this test store only integers.
+    unsafe {
+        assert!(
+            lows.iter()
+                .all(|&p| os.is_purged(NonNull::new(p).unwrap(), 1024))
+        );
+        assert!(os.is_purged(NonNull::new(*highs.last().unwrap()).unwrap(), 512));
+        assert!(!os.is_purged(NonNull::new(highs[0]).unwrap(), 512));
+    }
+}
+
 fn pass_under_way<O: Os>(state: &State<O>) -> bool {
     state.decay.load(core::sync::atomic::Ordering::Relaxed) & 1 != 0
 }

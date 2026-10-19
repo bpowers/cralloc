@@ -312,9 +312,12 @@ impl<O: Os> Back<'_, O> {
                 }
                 let over = retained.saturating_sub(retained_cap(geometry));
                 let goal = decay_goal(geometry, retained).max(over);
-                // From the top. The pass word is written last and once: until then no
-                // stepper finds its tag and none acts.
-                state.walk.purge_at.store(0, Relaxed);
+                // From where the walk stands: a pass that started at the top every time spent
+                // its goal on the regions above whatever a quiet program revived each interval,
+                // and never reached the free pages of the lowest regions. The pass word is
+                // written last and once: until then no stepper finds its tag and none acts.
+                let from = state.walk.purge_at.load(Relaxed);
+                state.walk.pass_from.store(from, Relaxed);
                 let pass = Pass {
                     tag: Pass::tag_of(word),
                     lap: state.walk.laps.load(Relaxed) as u16,
@@ -347,7 +350,7 @@ impl<O: Os> Back<'_, O> {
                 }
                 return None;
             }
-            if pass.pages == 0 || state.walk.laps.load(Relaxed) as u16 != pass.lap {
+            if pass.pages == 0 || self.went_round(pass) {
                 // The goal is met or the walk has gone round. End the pass this thread saw,
                 // and only that one.
                 let now = self.space.os().ticks() & !ACTIVE;
@@ -384,6 +387,19 @@ impl<O: Os> Back<'_, O> {
                 }
             }
         }
+    }
+
+    /// Whether the walk has gone once round since `pass` began: a lap has ended since, and the
+    /// walk is back at or below where the pass began. A pass that began at the top is round
+    /// when the lap ends, as every pass was before passes resumed the walk.
+    fn went_round(&self, pass: Pass) -> bool {
+        let walk = &self.state.walk;
+        if walk.laps.load(Relaxed) as u16 == pass.lap {
+            return false;
+        }
+        let from = walk.pass_from.load(Relaxed);
+        let at = walk.purge_at.load(Relaxed);
+        from == 0 || (at != 0 && at <= from)
     }
 
     /// Returns every wholly free page the bitmaps hold to the OS, for `malloc_trim`. Slots

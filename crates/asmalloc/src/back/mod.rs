@@ -180,10 +180,15 @@ fn difference(taken: impl Fn() -> usize, added: impl Fn() -> usize) -> isize {
 
 /// What the steps of the purge walk share (`purge`).
 struct Walk {
-    /// Where the next purge step looks.
+    /// Where the next purge step looks: the region plus one, zero for the top. Every purger
+    /// carries on from it, the clocked pass included, so the walk goes round the heap and no
+    /// region waits behind the others.
     purge_at: AtomicU32,
-    /// How many times the purge walk has gone round the heap.
+    /// How many times the purge walk has gone round the heap: finished the lowest region.
     laps: AtomicU32,
+    /// Where the clocked pass under way began, as `purge_at` was then: the pass has gone once
+    /// round when the walk, a lap later, is back there.
+    pass_from: AtomicU32,
     /// The pass under way: its tag, the lap it began in and what it may still purge
     /// (`purge::Pass`).
     pass: AtomicU64,
@@ -220,6 +225,7 @@ impl<O: Os> State<O> {
             walk: Lined::new(Walk {
                 purge_at: AtomicU32::new(0),
                 laps: AtomicU32::new(0),
+                pass_from: AtomicU32::new(0),
                 pass: AtomicU64::new(0),
             }),
             run_sizes: Lined::new([const { AtomicUsize::new(0) }; MAX_REGIONS]),
