@@ -1917,6 +1917,47 @@ class now commits its first slot before it takes the region (`region::commit_fir
 records the commit in the region's header. A refusal leaves the region for the next attempt.
 Small classes are unchanged: their first carve is a magazine, and they take a region once.
 
+### Sixteen times only in a full heap, and the threshold of each slot
+
+2026-10-18, later, after a second review. Two costs remained.
+
+- The thirty-second shrink threshold applied to every large block, also where no block gets
+  sixteen times the room. So a buffer allocated big and cut to between a thirty-second and an
+  eighth of its slot kept the slot. Under a 16 GiB limit, 3,940 buffers allocated at 1 MiB and
+  cut to 100 KiB used every region, where the base fits 70,902.
+- At a 128 GiB limit (16 MiB regions), 64 KiB buffers got sixteen times again: 47,268 fit
+  against the base's 200,889.
+
+The rule now. A heap that did not get its full reservation lacks address space, so it does not
+trade any for speed: it gives four times the room where that fits a region, and keeps a shrink
+threshold of an eighth, as the base did. A heap with its full reservation gives sixteen times
+where the slot that takes is at most a sixteenth of a region. A slot's threshold is twice the
+factor a block growing into a slot of its size gets: a thirty-second for those small slots of
+a full heap, an eighth for every other slot and for runs. A heap knows which it got from its
+plan: its region size is the geometry's largest.
+
+**Buffers that fit**, base against now (preloaded, `prlimit --as`; growing: the review's
+`grow_starve.c`, `malloc(FROM)` then `realloc(TO)`; shrinking: `shrink_starve.c`, allocate,
+cut, keep, at most 200,000):
+
+| Limit | 40→64 KiB | 128→256 KiB | 512 KiB→1 MiB | 2→4 MiB | 512 KiB cut to 40 KiB | 1 MiB cut to 100 KiB | 64 MiB cut to 3 MiB |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| 16 GiB | 23,634 | 3,939 | 3,939 | 1,969 | 165,438 | 70,902 | 1,954 |
+| 64 GiB | 98,475 | 23,634 | 3,939 | 3,939 | 200,000 | 200,000 | 7,864 |
+| 128 GiB | 200,889 | 47,268 | 11,817 | 3,939 | 200,000 | 200,000 | 15,744 |
+| 256 GiB | 401,778 | 98,475 | 23,634 | 3,939 | 200,000 | 200,000 | 35,442 |
+
+Every cell is the same for the base and now.
+
+**In the full reservation** nothing that was measured changed. Bytes copied are as before up
+to 2 GiB. Against the rule as first merged (five interleaved rounds): the 1 and 4 MiB loops
+-0.3% and -0.6%, `vecgrow 1x256Mi` +0.0%, `vecgrow 64x4Mi` -3.2%. Under a 2 GiB
+`RLIMIT_DATA`, which leaves the reservation full, the counts are still 789, 28 and 26 buffers
+grown to 1, 4 and 16 MiB. The settling test now runs every plan of the design's geometry and
+meets all three pairs of headroom and threshold that can occur: sixteen times with a
+thirty-second, four times with a thirty-second (a small four-times slot of a full heap), and
+four times with an eighth.
+
 ## Small heaps
 
 2026-10-18, at main `779ba9b` (before) and the branch's tip (after). Every page of an asmalloc

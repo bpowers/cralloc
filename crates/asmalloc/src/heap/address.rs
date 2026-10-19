@@ -8,8 +8,8 @@
 //!
 //! The in-place and headroom rules for large blocks are the ones `large.rs` applies to Rust
 //! resizes, restated for a block described by its address: a block stays put when the new size
-//! is still large, fits the slot or run, and, when it shrinks, keeps at least a
-//! [`SHRINK_MOVES_BELOW`](super::large::SHRINK_MOVES_BELOW)th of it; a block that outgrows its
+//! is still large, fits the slot or run, and, when it shrinks, keeps a part of it
+//! (`stays_after_shrink`); a block that outgrows its
 //! slot moves to one with headroom (`growth_rooms`), or with less when that cannot be had.
 //!
 //! Small blocks are not served here: the C layer allocates and frees them with the generated C
@@ -82,8 +82,8 @@ impl<O: Os> Heap<O> {
     /// cannot be had (`growth_rooms`), recording `size` as the size in use; else exactly. The
     /// request's C class must not be small.
     pub(crate) fn alloc_large_grown(&self, size: usize) -> Option<NonNull<u8>> {
-        let region = self.start()?.space().plan().region_size();
-        growth_rooms(size, region)
+        let plan = self.start()?.space().plan();
+        growth_rooms(size, plan)
             .filter_map(|room| Layout::from_size_align(room, C_ALIGN).ok())
             .find_map(|layout| self.alloc_large_using(layout, size, Zero::No))
             .map(|grant| grant.ptr)
@@ -111,7 +111,9 @@ impl<O: Os> Heap<O> {
             Some(_) => back.room(ptr.as_ptr()).unwrap_or(0),
             None => return false,
         };
-        let fits = is_large(new) && new <= room && (new >= old || stays_after_shrink(new, room));
+        let plan = back.space().plan();
+        let fits =
+            is_large(new) && new <= room && (new >= old || stays_after_shrink(new, room, plan));
         if fits {
             // SAFETY: the block is the caller's and live, and `new` fits its room, so what the
             // back end gives up past `new` is the caller's to give.
@@ -356,9 +358,10 @@ mod tests {
         let heap = SimHeap::<crate::os::sim::Native>::new();
         let size = 40 << 10;
         let back = heap.heap.start().unwrap();
-        let region = back.space().plan().region_size();
         // Each room the growth may take, most first, and then the size itself.
-        let steps: std::vec::Vec<usize> = growth_rooms(size, region).chain([size]).collect();
+        let steps: std::vec::Vec<usize> = growth_rooms(size, back.space().plan())
+            .chain([size])
+            .collect();
         // A block of each room but the first, freed, so that each of their classes has a
         // region with free slots when the regions run out.
         for &room in &steps[1..] {

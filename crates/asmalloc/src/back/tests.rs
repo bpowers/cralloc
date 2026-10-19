@@ -3278,8 +3278,9 @@ mod review_headers {
     /// written: for a small class, `assign` published it and the OS refused the commit its
     /// first carve asked for. A large class commits its first slot before it takes a region
     /// (`region::commit_first`), so its region is in this state only between the tag and the
-    /// header's store, which a free racing the assignment can see; it is made here as `assign`
-    /// makes it up to that store. Returns the region's base.
+    /// header's store, before the carving word names it, which a free racing the assignment
+    /// can see; it is made here as `assign` makes it up to that store, the carving word left
+    /// as it was. Returns the region's base.
     fn assigned_and_never_carved(state: &State<Sim>, class: Class) -> *mut u8 {
         let back = state.get_or_reserve().unwrap();
         let region = back.space().plan().region(0).unwrap();
@@ -3297,10 +3298,11 @@ mod review_headers {
                 .table
                 .replace(region, RegionTag::Unassigned, RegionTag::Class(class))
                 .unwrap();
-            host.class.carving.store(
-                region.index() as u32 + 1,
-                core::sync::atomic::Ordering::SeqCst,
-            );
+            let carving = host
+                .class
+                .carving
+                .load(core::sync::atomic::Ordering::SeqCst);
+            assert_ne!(carving, region.index() as u32 + 1);
         }
         assert_eq!(state.table.get(region), RegionTag::Class(class));
         let host = back.host(class).unwrap();
@@ -3331,7 +3333,25 @@ mod review_headers {
             back.inspect(&mut seen);
             assert_eq!(seen.regions, [(class, 0, 0)]);
             assert_eq!(seen.free, 0);
-            // And the region grows from there as if nothing had happened.
+            // And the region grows from there as if nothing had happened. A large class's
+            // region is named by the carving word only once its assignment has stored the
+            // header, so that is done first, as `assign` does it.
+            if !class.is_small() {
+                let host = back.host(class).unwrap();
+                let region = back.space().plan().region(0).unwrap();
+                let committed = super::super::region::commit_first(&host, region).unwrap();
+                host.grow(region).store(
+                    super::super::layout::Grow {
+                        carved: 0,
+                        committed,
+                    }
+                    .pack(),
+                );
+                host.class.carving.store(
+                    region.index() as u32 + 1,
+                    core::sync::atomic::Ordering::SeqCst,
+                );
+            }
             let block = back.alloc(class, 1).unwrap();
             assert_eq!(block.ptr.as_ptr(), base);
             assert!(block.zeroed);

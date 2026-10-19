@@ -14,7 +14,8 @@
 //! the room nobody wrote is in no count. They run also with commits failing, so that growth
 //! takes its fallbacks.
 //!
-//! Two tests were findings: they failed on the code as reviewed, and pass since the fix.
+//! Two tests were findings: they failed on the code as reviewed, and pass since the fix. A
+//! third is a finding of the check of the fix, and is ignored because it fails.
 
 use super::*;
 use crate::classes::MagazineSize;
@@ -730,5 +731,46 @@ fn a_refused_commit_of_the_roomiest_slot_leaves_its_region_for_the_next_room() {
     for block in [other, less, full] {
         // SAFETY: the test's blocks, each freed once.
         unsafe { heap.free_large(block) };
+    }
+}
+
+/// Finding shrunk-blocks-hold-regions, found in the check of the fix (main `9a076f4`). The
+/// shrink threshold is tied to sixteen times the room (`SHRINK_MOVES_BELOW`, a thirty-second
+/// of the slot) for every large block, also where no block gets that room: a plain block, a
+/// run, and every block of a heap whose regions are too small for it. So a buffer allocated
+/// big and cut to between a thirty-second and an eighth of its slot, as one that is read into
+/// and then shrunk to fit is, keeps its slot where at `e486bc4` it moved to a slot of its
+/// size. In the native shape a 512 KiB buffer has a region to itself; three hundred of them,
+/// each cut to 40 KiB before the next is allocated, are 12 MiB of data in a 247 MiB heap,
+/// and after 247 of them no region is left. At `e486bc4` each moves out of the one region
+/// they are all allocated in, and together they take sixteen.
+///
+/// The process's heap is the same under an address-space limit: under `prlimit --as` of 16 GiB
+/// 3,940 buffers allocated at 1 MiB and cut to 100 KiB, 384 MiB of data, use every region,
+/// where `e486bc4` fits 70,902; after that `malloc(256)` returns null.
+#[test]
+fn three_hundred_buffers_cut_to_40_kib_leave_their_regions() {
+    let sim = SimHeap::<Native>::new();
+    let (before, after) = (layout_of(512 << 10), 40 << 10);
+    let mut held = Vec::new();
+    for i in 0..300 {
+        // SAFETY: valid layouts; each block is live where it is resized and freed once.
+        let cut = unsafe {
+            let p = GlobalAlloc::alloc(&sim, before);
+            assert!(
+                !p.is_null(),
+                "buffer {i}: no block of 512 KiB, with {} KiB of data in the heap",
+                (i * after) >> 10
+            );
+            GlobalAlloc::realloc(&sim, p, before, after)
+        };
+        assert!(!cut.is_null());
+        held.push(cut);
+    }
+    // SAFETY: the test's blocks, each freed once with a layout that fits it.
+    unsafe {
+        for p in held {
+            GlobalAlloc::dealloc(&sim, p, layout_of(after));
+        }
     }
 }
