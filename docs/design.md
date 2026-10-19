@@ -266,9 +266,9 @@ A request is first rounded up to a multiple of its alignment. Classes are every 
 8 bytes up to 64, then four per doubling. The class of a request is the smallest class at
 least as large as the rounded size.
 
-Alignment needs no further work. Regions are aligned to their size and objects sit at
-multiples of the class size, so an object is aligned to the largest power of two that divides its
-class size. With four classes per doubling, the class chosen for a size that is a multiple
+Alignment needs no further work. Regions are aligned to their size, a class's origin is
+a multiple of the largest power of two that divides its class size, and objects sit at
+multiples of the class size from there, so an object is aligned to that power of two. With four classes per doubling, the class chosen for a size that is a multiple
 of `A` is itself a multiple of `A`. Every alignment up to the region size is satisfied with
 no over-allocation and no interior pointers. This property, and the `Allocator` requirement
 that every size from the request to the class size maps to the same class, are proved for
