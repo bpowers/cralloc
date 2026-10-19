@@ -35,6 +35,7 @@ fn main() {
         "touch" => mem::touch(&args),
         "sparse" => mem::sparse(&args),
         "tiny" => mem::tiny(&args),
+        "period" => mem::period(&args),
         // A probe of the slow paths' stack depth; not part of any suite.
         "stack" => stack::stack(&args),
         _ => {

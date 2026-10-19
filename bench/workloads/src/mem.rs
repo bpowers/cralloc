@@ -15,6 +15,11 @@
 //!   first runs `quiet`'s burst work on one size for `secs` seconds.
 //! - `sparse`: allocate `n` blocks of `size` bytes and write the first `touch` bytes of each.
 //! - `tiny`: a process that allocates almost nothing.
+//! - `period`: a working set that comes and goes on a period longer than an allocator's purge
+//!   interval. `cycles` times: allocate `live` objects (`sizes`) and write them, free them in
+//!   random order, then run `quiet`'s light work for `gap_ms` milliseconds.
+//!
+//! Every `MEM` line also gives the process's minor page faults so far (`minflt`).
 use bench_harness::{Args, Cpus, Rng, SizeMix};
 use std::alloc::{Layout, alloc, dealloc};
 use std::sync::Barrier;
@@ -28,16 +33,24 @@ fn field(text: &str, key: &str) -> u64 {
         * 1024
 }
 
+/// The process's minor page faults so far: the tenth field of `/proc/self/stat`, the seventh
+/// after the command name's closing parenthesis.
+fn minor_faults() -> u64 {
+    let stat = std::fs::read_to_string("/proc/self/stat").unwrap_or_default();
+    stat.rsplit_once(')').and_then(|(_, rest)| rest.split_whitespace().nth(7)).and_then(|f| f.parse().ok()).unwrap_or(0)
+}
+
 fn report(phase: &str, start: Instant) {
     let status = std::fs::read_to_string("/proc/self/status").unwrap_or_default();
     let rollup = std::fs::read_to_string("/proc/self/smaps_rollup").unwrap_or_default();
     println!(
-        "MEM alloc={} phase={phase} t_ms={} rss_anon={} pte={} thp={}",
+        "MEM alloc={} phase={phase} t_ms={} rss_anon={} pte={} thp={} minflt={}",
         bench_alloc::NAME,
         start.elapsed().as_millis(),
         field(&status, "RssAnon:"),
         field(&status, "VmPTE:"),
-        field(&rollup, "AnonHugePages:")
+        field(&rollup, "AnonHugePages:"),
+        minor_faults()
     );
 }
 
@@ -64,12 +77,17 @@ fn size_mix(args: &Args) -> SizeMix {
 
 /// Light work for `secs` seconds, reporting every 250 ms.
 fn after(args: &Args, mix: SizeMix, rng: &mut Rng, start: Instant) {
-    let (secs, burst) = (args.num("secs", 5), args.usize("burst", 2000));
+    light(args, mix, rng, start, Duration::from_secs(args.num("secs", 5)));
+}
+
+/// Light work for `length`, reporting every 250 ms.
+fn light(args: &Args, mix: SizeMix, rng: &mut Rng, start: Instant, length: Duration) {
+    let burst = args.usize("burst", 2000);
     let mode = args.str("after", "burst");
     let begin = Instant::now();
     let mut next = Duration::from_millis(250);
     let mut held = Vec::with_capacity(burst);
-    while begin.elapsed() < Duration::from_secs(secs) {
+    while begin.elapsed() < length {
         match mode.as_str() {
             "burst" => {
                 held.extend((0..burst).map(|_| make(mix.sample(rng))));
@@ -106,6 +124,28 @@ pub fn quiet(args: &Args) {
     let later = SizeMix::parse(&later).unwrap_or_else(|| panic!("after_sizes={later} is not a size mix"));
     after(args, later, &mut rng, start);
     kept.into_iter().for_each(drop_one);
+    report("end", start);
+}
+
+pub fn period(args: &Args) {
+    Cpus::from_env().pin(0);
+    let start = Instant::now();
+    let (live, cycles, mix) = (args.usize("live", 1_000_000), args.usize("cycles", 4), size_mix(args));
+    let gap = Duration::from_millis(args.num("gap_ms", 2500));
+    let later = args.str("after_sizes", &mix.name());
+    let later = SizeMix::parse(&later).unwrap_or_else(|| panic!("after_sizes={later} is not a size mix"));
+    let mut rng = Rng::new(7);
+    report("start", start);
+    for _ in 0..cycles {
+        let mut objects: Vec<_> = (0..live).map(|_| make(mix.sample(&mut rng))).collect();
+        report("peak", start);
+        for i in (1..objects.len()).rev() {
+            objects.swap(i, rng.below(i as u64 + 1) as usize);
+        }
+        objects.into_iter().for_each(drop_one);
+        report("freed", start);
+        light(args, later, &mut rng, start, gap);
+    }
     report("end", start);
 }
 
