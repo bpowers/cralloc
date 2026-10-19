@@ -256,6 +256,50 @@ fn a_pass_word_round_trips() {
     assert!(Pass::unpack(0).pages == 0);
 }
 
+/// A frontier word, in the format of any region size a geometry allows, round-trips. Read in
+/// interval E it gives the higher of both frontiers if it is E's, its `now` if it is E - 1's,
+/// and nothing otherwise. A claim in E that reaches page p leaves a word of E (or of E + 1, if
+/// it found one of E + 1) that reads at least p in its interval and exactly p in the next,
+/// nothing in the one after, and never less than the old word read in its interval; it writes
+/// nothing only when the word, of E or E + 1, already reads at least p. The all-zero word
+/// reads nothing in any interval but the first two.
+#[kani::proof]
+fn a_frontier_word_names_its_interval() {
+    use super::layout::FrontierFormat;
+    let pages: u32 = kani::any();
+    kani::assume(pages >= 1 && pages <= 1 << 26);
+    let format = FrontierFormat::of(pages);
+    let word: u64 = kani::any();
+    assert!(format.pack(format.unpack(word)) == word);
+    let epoch: u64 = kani::any();
+    let page: u32 = kani::any();
+    kani::assume(page <= pages);
+    let f = format.unpack(word);
+    let floor = format.floor(word, epoch);
+    assert!(floor == 0 || floor == f.now || floor == f.last);
+    let mask = u64::MAX >> (64 - format.epoch_bits());
+    match format.record(word, epoch, page) {
+        Some(next) => {
+            // Recorded under this interval, or the next if the word is already of the next.
+            let at = format.unpack(next).epoch;
+            assert!(at == epoch & mask || at == epoch.wrapping_add(1) & mask);
+            assert!(format.floor(next, at) >= page);
+            assert!(format.floor(next, at) >= format.floor(word, at));
+            assert!(format.floor(next, at.wrapping_add(1)) == page);
+            if format.epoch_bits() > 1 {
+                assert!(format.floor(next, at.wrapping_add(2)) == 0);
+            }
+        }
+        None => {
+            assert!(f.epoch == epoch & mask || f.epoch == epoch.wrapping_add(1) & mask);
+            assert!(format.floor(word, f.epoch) >= page);
+        }
+    }
+    if format.epoch_bits() > 1 && epoch & (u64::MAX >> (64 - format.epoch_bits())) > 1 {
+        assert!(format.floor(0, epoch) == 0);
+    }
+}
+
 /// A large slot is whole pages in every geometry in use, so the unit a large free returns
 /// (`Layout::slot_unit`) is exactly the slot's bytes: it starts and ends on the slot's own
 /// boundaries and holds no byte of another slot.

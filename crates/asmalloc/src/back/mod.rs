@@ -61,7 +61,7 @@ mod verify;
 #[cfg(kani)]
 mod verify_slow;
 
-use self::host::{ClassHost, ClassState, Headers, RegionHeader};
+use self::host::{ClassHost, ClassState, Frontiers, Headers, RegionHeader};
 use crate::classes::{COUNT, Class};
 use crate::lined::{LINE, Lined};
 use crate::os::{Os, OsError};
@@ -80,7 +80,8 @@ use core::sync::atomic::{AtomicU32, AtomicU64, AtomicUsize};
 /// Every group of words is on lines of its own (`crate::lined`). The reservation and the
 /// region table are read on every operation and written rarely; the retained count's two
 /// tallies are written, one by frees and the other by claims; the decay word is read by every
-/// heartbeat; the walk's words are written by its steps.
+/// heartbeat; the walk's words are written by its steps. The regions' headers and frontiers
+/// share lines among regions (`host::Headers`, `host::Frontiers`).
 pub struct State<O: Os> {
     cell: Lined<SpaceCell<O>>,
     table: Lined<RegionTable>,
@@ -89,9 +90,8 @@ pub struct State<O: Os> {
     retained: Retained,
     /// Bytes carved since a grower last checked the cap (`purge`).
     growth: Lined<AtomicUsize>,
-    /// The clocked pass: when the last one ended, or when the one under way began with the
-    /// low bit set.
-    decay: Lined<AtomicU64>,
+    /// The clocked pass's word and the clock's interval number (`Clocked`).
+    decay: Lined<Clocked>,
     /// The purge walk's position, its laps and the pass under way, which its steps write.
     walk: Lined<Walk>,
     /// The current size of each run, at its head region's index. Out of the regions'
@@ -100,6 +100,8 @@ pub struct State<O: Os> {
     /// Each region's header (`host::RegionHeader`). Out of the regions' metadata
     /// blocks, so that a small class whose slots never reach the bitmaps never touches its block.
     headers: Lined<Headers>,
+    /// Each region's frontier, for small classes (`host::Frontiers`).
+    frontiers: Lined<Frontiers>,
 }
 
 /// Bytes of free slots in the bitmaps believed to be resident, for small classes and large
@@ -178,15 +180,40 @@ fn difference(taken: impl Fn() -> usize, added: impl Fn() -> usize) -> isize {
     added().wrapping_sub(before) as isize
 }
 
+/// What the clock decides, on a line that is written a few times an interval and read by every
+/// heartbeat and every fill.
+struct Clocked {
+    /// The clocked pass: when the last one ended, or when the one under way began with the
+    /// low bit set.
+    word: AtomicU64,
+    /// The number of the clock's interval (the time over `policy::DECAY_TICKS`) as a heartbeat
+    /// last saw it: what a claim's frontier is recorded under and a pass reads frontiers by
+    /// (`layout::Frontier`). Written by the first heartbeat of each interval that reads the
+    /// clock (`purge`), so once an interval; zero until the first heartbeat.
+    epoch: AtomicU64,
+}
+
 /// What the steps of the purge walk share (`purge`).
 struct Walk {
-    /// Where the next purge step looks.
+    /// Where the next purge step looks: the region plus one, zero for the top. Every purger
+    /// carries on from it, the clocked pass included, so the walk goes round the heap and no
+    /// region waits behind the others.
     purge_at: AtomicU32,
-    /// How many times the purge walk has gone round the heap.
+    /// How many times the purge walk has gone round the heap: finished the lowest region.
     laps: AtomicU32,
+    /// Where the clocked pass under way began, as `purge_at` was then: the pass has gone once
+    /// round when the walk, a lap later, is back there.
+    pass_from: AtomicU32,
     /// The pass under way: its tag, the lap it began in and what it may still purge
     /// (`purge::Pass`).
     pass: AtomicU64,
+    /// One past the highest region ever about to be given to a class, zero for none: the walk
+    /// goes round regions below it only. Classes take the lowest unassigned regions and runs
+    /// come from the top, so in a heap of a hundred class regions a lap reads a hundred table
+    /// entries, not every region of the reservation. Raised with `fetch_max` before the region
+    /// is tagged, so it is never below a class region; a region given back leaves it high,
+    /// which costs a look at an unassigned entry.
+    top: AtomicU32,
 }
 
 #[cfg(all(target_os = "linux", target_arch = "x86_64", not(kani)))]
@@ -197,7 +224,8 @@ const _: () = {
         + lines(size_of::<RegionTable>())
         + 5
         + lines(size_of::<[AtomicUsize; MAX_REGIONS]>())
-        + lines(size_of::<[[u64; 2]; MAX_REGIONS]>());
+        + lines(size_of::<[[u64; 2]; MAX_REGIONS]>())
+        + lines(size_of::<[u64; MAX_REGIONS]>());
     assert!(
         size_of::<State<crate::os::linux::LinuxOs>>()
             == size_of::<[ClassState; COUNT]>() + LINE * groups
@@ -216,14 +244,20 @@ impl<O: Os> State<O> {
                 taken: Lined::new(Tally::new()),
             },
             growth: Lined::new(AtomicUsize::new(0)),
-            decay: Lined::new(AtomicU64::new(0)),
+            decay: Lined::new(Clocked {
+                word: AtomicU64::new(0),
+                epoch: AtomicU64::new(0),
+            }),
             walk: Lined::new(Walk {
                 purge_at: AtomicU32::new(0),
                 laps: AtomicU32::new(0),
+                pass_from: AtomicU32::new(0),
                 pass: AtomicU64::new(0),
+                top: AtomicU32::new(0),
             }),
             run_sizes: Lined::new([const { AtomicUsize::new(0) }; MAX_REGIONS]),
             headers: Lined::new([const { RegionHeader::new() }; MAX_REGIONS]),
+            frontiers: Lined::new([const { word::Atomic::zero() }; MAX_REGIONS]),
         }
     }
 
@@ -322,6 +356,7 @@ impl<'a, O: Os> Back<'a, O> {
             self.space,
             state,
             &self.state.headers,
+            &self.state.frontiers,
             layout,
         ))
     }

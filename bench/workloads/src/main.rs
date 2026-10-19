@@ -25,6 +25,7 @@ fn main() {
         "forkjoin" => steal::forkjoin(&args),
         "spawn" => steal::spawn(&args),
         "churn" => single::churn(&args),
+        "fragchurn" => single::fragchurn(&args),
         "map" => single::map(&args),
         "largepair" => single::largepair(&args),
         "tree" => single::tree(&args),
@@ -35,6 +36,7 @@ fn main() {
         "touch" => mem::touch(&args),
         "sparse" => mem::sparse(&args),
         "tiny" => mem::tiny(&args),
+        "period" => mem::period(&args),
         // A probe of the slow paths' stack depth; not part of any suite.
         "stack" => stack::stack(&args),
         _ => {

@@ -2479,9 +2479,121 @@ At the tip, against jemalloc:
 - **Kernel slab objects**, 30 to 110 KiB over jemalloc: a VMA per piece the commits and the
   huge-page advice split off the reservation, a few per class.
 
+## The clocked pass spares what fills reach: a frontier per region
+
+2026-10-19. On main every clocked pass started at the top of the heap, which left a quiet
+heap's lowest region resident for ever (`baselines.md`, "The clocked pass carries on round
+the heap"). Carrying the pass on round the heap removed that residue but cost the busy RPC
+server 2 to 4% and more faults, because the pass then took its turn in the server's busiest
+regions. Neither order knew which free pages were being reused.
+
+Now each region keeps a frontier: the page past the highest slot a fill or allocation claimed
+or carved there, for an interval of the clock and the one before, under the interval's
+number (`back/layout.rs`, `Frontier`). Fills take a region's lowest free slots, so free pages
+above the frontier went a whole interval unwanted, and the clocked pass takes only those; its
+quarter, its steps and the carried-on order are unchanged. It does so over the cap too.
+Growth over the cap pays as on main, from where the walk stands, frontiers or not. A fill
+reads its region's word once and writes it only when it reaches higher or is the region's
+first claim of an interval. Nobody sweeps the words.
+
+**What changed after review.** The first version rotated every region's frontier when a pass
+started, and over the cap took a second lap below the frontiers. The review (`782e88b`)
+found that a heap with more than the cap of fragmentation, which no purge can lower, is over
+the cap for good, so that lap purged what the program reused every interval; and that
+growth's walk above the frontiers could starve its walk below them for good. The rotation
+also wrote a large class's block header on a bare table lookup. The frontier now carries its
+interval number, holds over the cap, and lives in the back end's state for every class. The
+walk also goes round only the regions below the highest ever given to a class, so a lap no
+longer reads every entry of the reservation.
+
+**Method.** Main (`94b5b44`) against the branch (`f004a01`, "frontier"), each from
+`git archive` of its commit with the same workload sources, interleaved. RPC jobs with
+`benchrun run` under `scripts/measure --both-l3`, ten rounds, medians, with the per-round
+ratio to main and its interquartile range; the suite's memory jobs three rounds. Faults are
+the process's, and for RPC also those inside the measured window. `madvise` calls from
+`strace -f -c` of separate runs on CPUs 12-15 (counts only). Memory probes with
+`bench/probes/memory/worst.sh` and `workload period`, three rounds, medians. `backbench` on
+CPU 2, three runs each. `workload fragchurn` on CPU 2, three rounds, in the normal build and
+with every loop aligned to 64 bytes (benchrun layout's `loops64`).
+
+| | main | frontier |
+|---|---:|---:|
+| rpc log c64: server cycles/req; vs main | 122.0k | 122.6k; +0.9% [-1.4, +1.2] |
+| rpc log c64: faults, process / window | 2,810 / 1,050 | 1,830 / 250 |
+| rpc log c256: server cycles/req; vs main | 119.7k | 119.8k; +0.05% [-1.7, +2.2] |
+| rpc log c256: faults, process / window | 5,310 / 2,250 | 3,060 / 480 |
+| rpc echo c64: server cycles/req; vs main | 44.77k | 45.05k; +0.7% [+0.5, +0.9] |
+| rpc echo c64: faults, process / window | 1,380 / 260 | 1,140 / 54 |
+| fragchurn: faults over 20 s; `madvise` calls | 36k to 46k; 38,330 | 4,730; 552 |
+| fragchurn: cycles per object, normal build / loops aligned | 23.1 / 23.1 | 31.0 / 22.8 |
+| burst-idle: MiB resident 1 / 2 / 4 / 8 / 12 s after freeing 218 MiB | 102 / 68 / 38.5 / 11.9 / 3.2 | 215 / 68 / 38.3 / 11.3 / 1.3 |
+| phase change: MiB resident 1 / 2 / 4 / 6 / 8 s after | 37.6 / 28.7 / 16.3 / 12.5 / 8.0 | 46.7 / 35.4 / 20.0 / 11.6 / 7.3 |
+| phase change: cgroup peak MiB | 46.9 | 49.6 |
+| maintain test (`Native` shape): purges an interval, steady; left over `collect` after 40 intervals | 28; 50 pages | 11; 0 |
+| `backbench` fill, full words / one slot a word: cycles and instructions a slot | 4.2, 15.7 / 15.2, 70.1 | 4.3, 16.4 / 15.8, 73.4 |
+
+The suite's memory jobs: cgroup peaks identical (json 32Mi 354.1 MiB, map hash 204.2, map
+btree 123.2, churn 1M 110.2, mstress 139 to 141), faults identical, times within 0.3% but
+mstress, +2.6% [+0.7, +4.7] at the same faults. The maintain row's main figures are from the
+`baselines.md` note (origins forced to zero).
+
+- **The busy server keeps what it reuses.** Window faults fall by three quarters on all three
+  RPC jobs, and the cost purge-resume's order had is gone: cycles per request are level on
+  rpc log, and echo's 0.7% was traced in a thirty-round run of the first version to kernel
+  scheduling and network locks with user cycles, throughput and latency level (no page-fault
+  or `madvise` work in the kernel profile).
+- **Fragmentation over the cap no longer costs the working set.** `workload fragchurn` (a
+  gigabyte of 256-byte objects with one in eight kept at random, so more than the cap stays
+  fragmented for good; then 400k 64-byte objects allocated, written and freed for twenty
+  seconds): main purges and faults the working set back every interval, 38,330 `madvise`
+  calls and 36k to 46k faults; the frontier makes 552 calls and no fault after the working
+  set's first round. Its cycles per object depend on where the inlined fast path lands: 31 in the normal
+  build of the branch against 23 for main, 22.8 against 23.1 with every loop aligned, at
+  equal instructions, dTLB misses and cache misses per object. That is layout, not the
+  purge: a build that differed from the branch in one line of the decay step measured 23,
+  and the branch with that very line measured 31 again.
+- **Quiet memory waits for its frontier, over the cap too.** A burst that goes quiet keeps
+  its memory one interval longer: 215 MiB at one second against main's 102, then level from
+  two seconds and lower at twelve. The phase change holds up to 9 MiB more for the first four
+  seconds and is level from six. Memory a fill reached stays until no fill has reached it for
+  an interval, whatever the count says; growth over the cap still pays at once.
+- **The fill pays a load and a compare:** 0.1 cycle a slot from full words, 0.6 a claim from
+  fragmented bitmaps.
+
+**A working set that comes and goes on a period longer than the interval.** `workload period
+live=N sizes=small cycles=4 gap_ms=G after=burst after_sizes=s64`: allocate N objects and
+write them, free them in random order, run burst-idle's light work for G ms, four times. MiB
+resident one and two seconds into each gap and at its end, mean over cycles, and the faults
+of each allocation after the first:
+
+| | main | frontier |
+|---|---:|---:|
+| 300k objects (33 MiB, under the cap), 2.5 s gaps: MiB at 1 s / 2 s / end | 25.1 / 19.2 / 17.0 | 32.5 / 28.6 / 24.3 |
+| the same: faults per re-allocation | 3,820 | 2,140 |
+| 300k objects, 1.5 s gaps: MiB at 1 s / end | 25.1 / 22.2 | 32.5 / 32.5 |
+| the same: faults per re-allocation | 2,450 | 41 |
+| 2M objects (218 MiB, over the cap), 2.5 s gaps: MiB at 1 s / 2 s / end | 101.7 / 82.4 / 67.6 | 215.0 / 92.5 / 58.8 |
+| the same: faults per re-allocation | 35,180 | 31,730 |
+
+Under the cap the frontier keeps the working set through a gap of one and a half intervals
+and faults almost nothing when it returns, and a little less than half as much after two and
+a half. Over the cap it is spared for the first interval of the gap now, and faults a tenth
+less when it comes back.
+
 ## Reproducing
 
 ```
+# The frontier: three builds from `git archive <commit>` into src-<name>, each built with
+#   (cd src-<name>/bench && cargo build --release -p bench-workloads -p bench-rpc \
+#      --features bench-alloc/asmalloc --target-dir $W/bench/target/asmalloc-<name>)
+# and listed in allocators.toml as `build = "asmalloc-<name>"` entries; then, from bench/:
+scripts/measure --both-l3 target/release/benchrun run --suite full --only "rpc " \
+  --allocators main,frontier --rounds 5          # twice
+bench/probes/memory/worst.sh $W asmalloc-main,asmalloc-frontier burst-idle phase
+bench/probes/memory/memrun.sh $W asmalloc-main,asmalloc-frontier 2 period-under \
+  period live=300k sizes=small cycles=4 gap_ms=2500 after=burst after_sizes=s64
+BENCH_CPUS=2 scripts/memlimit -m 4G -- taskset -c 2 bench/target/asmalloc-<name>/release/workload fragchurn
+strace -f -qq -c -e trace=madvise <workload command>   # on CPUs 12-15, under scripts/memlimit
 # Small heaps: accounting builds, then the jobs interleaved under the lock, then the tables.
 W=$(pwd)   # the checkout
 cd bench

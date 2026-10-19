@@ -72,6 +72,19 @@ impl RegionHeader {
 /// build on their stacks cannot hold.
 pub(crate) type Headers = [RegionHeader; MAX_REGIONS];
 
+/// The `Frontier` word of every region, by region number, eight to a line: an exception to
+/// `crate::lined`'s rule, as [`Headers`] is. Large classes' are here too, not in their blocks'
+/// headers: a word that only a thread holding a claim in the region writes needs no other
+/// reader or writer to know the region's class.
+///
+/// Every fill and every claim of a single slot reads its region's word, and writes it only
+/// when it reaches higher than any claim of the interval so far, or is the region's first
+/// claim of an interval. In steady reuse that is the first fill of each interval and the few
+/// after it that reach a little higher: a handful of writes a region a second. A line each
+/// would make the state another 224 KiB, too much for the simulated heaps the tests build on
+/// their stacks.
+pub(crate) type Frontiers = [Atomic; MAX_REGIONS];
+
 /// The class levels of a class's summary tree.
 pub(crate) struct Summary {
     pub(crate) top: Atomic,
@@ -108,6 +121,7 @@ pub(crate) struct ClassHost<'a, O: Os> {
     pub(crate) space: Space<'a, O>,
     pub(crate) class: &'a ClassState,
     pub(crate) headers: &'a Headers,
+    pub(crate) frontiers: &'a Frontiers,
     pub(crate) layout: Layout,
 }
 
@@ -117,12 +131,14 @@ impl<'a, O: Os> ClassHost<'a, O> {
         space: Space<'a, O>,
         class: &'a ClassState,
         headers: &'a Headers,
+        frontiers: &'a Frontiers,
         layout: Layout,
     ) -> Self {
         ClassHost {
             space,
             class,
             headers,
+            frontiers,
             layout,
         }
     }
@@ -197,6 +213,11 @@ impl<O: Os> Host for ClassHost<'_, O> {
             Some(word) => self.meta(region, word + 1),
             None => &self.headers[region.index() % MAX_REGIONS].hints,
         }
+    }
+
+    #[inline(always)]
+    fn frontier(&self, region: RegionId) -> &Atomic {
+        &self.frontiers[region.index() % MAX_REGIONS]
     }
 
     #[inline(always)]

@@ -1926,6 +1926,100 @@ fn a_carve_racing_a_purge_fully() {
     a_carve_racing_a_purge(3);
 }
 
+/// The page a claim of `slot` raises its region's frontier to (`region::reach`).
+fn reach_page(host: &Host8, slot: u32) -> u32 {
+    let layout = host.layout();
+    layout.slot_bytes(slot + 1).div_ceil(layout.page_size()) as u32
+}
+
+/// Claims across an interval boundary race on their region's frontier (`region::reach`). From
+/// `run_setup`, with the frontier holding `now` 2 and `last` 9 under interval E - 1: thread 0
+/// claims two slots through a run, as a fill does, and records the higher in interval E;
+/// thread 1 claims one and records it in E + 1, as an allocation that read the interval
+/// number after it moved; thread 2 claims one and records it in E, as one that read it
+/// before. In every schedule, read in E + 1:
+///
+/// - no claim is hidden: the floor is at or above the page of every slot a thread claimed and
+///   recorded, whichever record landed first, including a record of E that finds the word
+///   already of E + 1;
+/// - nothing is invented or kept: the floor is zero or a claim's page, and the earlier
+///   intervals' 2 and 9 are gone;
+/// - nothing sticks: read two intervals later, the word gives nothing.
+///
+/// With `crash`, one thread may vanish at any step, as in a fork: a claim lost between claim
+/// and record is unrecorded (its slots are lost with it, so no purge can take them), and the
+/// word is one of the values above all the same.
+fn claims_race_across_an_interval(preemptions: Option<usize>, crash: bool) {
+    use super::layout::Frontier;
+    const E: u64 = 7;
+    explore(
+        Config {
+            preemptions,
+            crash,
+            ..Config::ALL
+        },
+        3,
+        || {
+            let host = run_setup();
+            let r0 = host.region_at(0);
+            let format = host.layout().frontier_format();
+            let earlier = Frontier {
+                epoch: E - 1,
+                now: 2,
+                last: 9,
+            };
+            host.frontier(r0).store(format.pack(earlier));
+            (host, Mutex::new(Vec::new()))
+        },
+        |(host, recorded), me| {
+            let (got, epoch) = match me {
+                0 => (claim_run_of(host, 2, 1), E),
+                1 => (claim(host, 1), E + 1),
+                _ => (claim(host, 1), E),
+            };
+            if let Some(&(region, high)) = got.iter().max_by_key(|&&(_, slot)| slot) {
+                region::reach(host, region, high, epoch);
+            }
+            recorded.lock().unwrap().extend(got);
+        },
+        |(host, recorded), _| {
+            let r0 = host.region_at(0);
+            let floor = |epoch| region::floor(host, r0, epoch);
+            let recorded = recorded.lock().unwrap();
+            for &(_, slot) in recorded.iter() {
+                let page = reach_page(host, slot);
+                assert!(
+                    floor(E + 1) >= page,
+                    "the floor {} hides page {page}",
+                    floor(E + 1)
+                );
+            }
+            // Pages any thread could have recorded, finished or not.
+            let possible: BTreeSet<u32> = [0, 64, 65, 128]
+                .into_iter()
+                .map(|slot| reach_page(host, slot))
+                .collect();
+            let now = floor(E + 1);
+            assert!(now == 0 || possible.contains(&now), "{now}");
+            assert_eq!(floor(E + 3), 0, "a frontier stuck");
+        },
+    );
+}
+
+#[test]
+#[cfg_attr(miri, ignore)]
+fn claims_race_across_an_interval_quickly() {
+    claims_race_across_an_interval(Some(2), false);
+    claims_race_across_an_interval(Some(1), true);
+}
+
+#[test]
+#[ignore = "slow: run with scripts/gate --all"]
+fn claims_race_across_an_interval_fully() {
+    claims_race_across_an_interval(Some(3), false);
+    claims_race_across_an_interval(Some(2), true);
+}
+
 /// `Purge.cfg`: two 32-byte slots to a 64-byte page.
 fn purge_aligned_slots(bound: usize) {
     purge_scenario(tiny(), 32, 4, &[1], bound);

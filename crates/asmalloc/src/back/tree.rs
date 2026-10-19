@@ -87,6 +87,10 @@ pub(crate) trait Host {
     /// A region's `Hints` word: its huge-page part and purge cursor (`layout::Hints`).
     fn hints(&self, region: RegionId) -> &Self::W;
 
+    /// A region's `Frontier` word: how far up its last two intervals' claims reached
+    /// (`layout::Frontier`).
+    fn frontier(&self, region: RegionId) -> &Self::W;
+
     /// The class word for regions `64 * index .. 64 * index + 64`.
     fn class_word(&self, index: u32) -> &Self::W;
 

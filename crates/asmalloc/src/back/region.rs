@@ -35,6 +35,10 @@
 //! - **Settling** after a claim: an allocation tests and clears the slot's zero bit (large
 //!   classes), and clears the clean bits of the pages its slots touch, and counts how much of
 //!   what it took was resident.
+//! - **Frontiers** say how far up a region's reuse reached in an interval of the clock and the
+//!   one before (`Frontier`): a fill or allocation raises its region's after it claims
+//!   (`reach`), and the clocked pass leaves what lies below (`floor`). The word names its
+//!   interval, so nothing ages it. Hints only: no protocol's safety reads them.
 //! - **Purging** one unit of pages is a claim, as `tla/Purge.tla` models it: claim the bits of
 //!   every slot that touches the unit, word by word from the lowest, giving up and releasing if
 //!   any is not free; return the pages; set the zero bits of slots wholly inside the unit and the
@@ -272,6 +276,43 @@ pub(crate) fn settle<H: Host>(host: &H, region: RegionId, index: u32, bits: u64)
     }
 }
 
+/// Records that a fill or allocation in interval `epoch` has just claimed or carved slots of
+/// `region` up to slot `last`: raises the region's frontier (`Frontier`) to the page past that
+/// slot's end, if the word does not already say as much for this interval. One load and a
+/// compare when it does, which is every claim of an interval but the region's first and the
+/// few that reach a little higher; else a compare-and-swap, tried again against whatever a
+/// racing claim wrote.
+///
+/// Only a thread that holds a claim in the region writes its word, so the word never needs the
+/// region's class, and a region given back and reassigned keeps a word that only describes
+/// claims. A record that lands in the interval after its claim's counts there instead, which
+/// keeps the claim a little longer. A thread stopped between its claim and this record leaves
+/// the claim uncounted until it runs again; meanwhile the slots it claimed are not free, so no
+/// purge can take them, and only the free pages beside them are exposed a little early.
+#[inline]
+pub(crate) fn reach<H: Host>(host: &H, region: RegionId, last: u32, epoch: u64) {
+    let layout = host.layout();
+    let page = layout.slot_bytes(last + 1).div_ceil(layout.page_size()) as u32;
+    let format = layout.frontier_format();
+    let word = host.frontier(region);
+    let mut seen = word.load();
+    while let Some(next) = format.record(seen, epoch, page) {
+        match word.compare_exchange(seen, next) {
+            Ok(_) => return,
+            Err(found) => seen = found,
+        }
+    }
+}
+
+/// The page below which `region`'s reuse reached in interval `epoch` and the one before: the
+/// clocked pass leaves units that start below it alone.
+#[inline]
+pub(crate) fn floor<H: Host>(host: &H, region: RegionId, epoch: u64) -> u32 {
+    host.layout()
+        .frontier_format()
+        .floor(host.frontier(region).load(), epoch)
+}
+
 /// Brings a region's watermark up to the end of the huge page that holds it, when that could
 /// let the page be purged: the region has a huge-page part, the watermark lies inside one of
 /// its huge pages, that page is committed, and every slot of it below the watermark is free.
@@ -282,9 +323,13 @@ pub(crate) fn settle<H: Host>(host: &H, region: RegionId, index: u32, bits: u64)
 /// step can purge it. Returns the bytes released (free, and resident if the page was ever
 /// touched) and the words of bitmap read or written.
 ///
+/// Nothing is carved if the page starts below `floor`: a purge that may not take pages below
+/// a frontier (`floor`) could not take this one, and the slots would only wait, free, for a
+/// fill.
+///
 /// A racing carve only changes which slots this call gets; whatever it gets it owns and
 /// releases. If the page is not purged after all, the slots are ordinary free slots.
-pub(crate) fn top_up<H: Host>(host: &H, region: RegionId) -> (usize, usize) {
+pub(crate) fn top_up<H: Host>(host: &H, region: RegionId, floor: u32) -> (usize, usize) {
     let layout = host.layout();
     let Some(huge) = Hints::unpack(host.hints(region).load()).huge_from else {
         return (0, 0);
@@ -298,7 +343,7 @@ pub(crate) fn top_up<H: Host>(host: &H, region: RegionId) -> (usize, usize) {
     let mark = layout.slot_bytes(now.carved);
     let start = ((mark >> shift) as u32) & !(granule - 1);
     let end = start + granule;
-    if start < huge || end > now.committed || mark == (start as usize) << shift {
+    if start < huge || start < floor || end > now.committed || mark == (start as usize) << shift {
         return (0, 1);
     }
     // Every slot touching the page from its start up to the watermark must be free.

@@ -322,7 +322,7 @@ fn an_empty_pass_ends_at_once_and_the_next_is_an_interval_later() {
     let state = state::<Standard>();
     let back = state.get_or_reserve().unwrap();
     let os = state.os();
-    let word = || state.decay.load(Relaxed);
+    let word = || state.decay.word.load(Relaxed);
     let class = small(1024);
     let slots = fill(&back, class, 256);
     for &p in &slots {
