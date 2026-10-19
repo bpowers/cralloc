@@ -90,9 +90,8 @@ pub struct State<O: Os> {
     retained: Retained,
     /// Bytes carved since a grower last checked the cap (`purge`).
     growth: Lined<AtomicUsize>,
-    /// The clocked pass: when the last one ended, or when the one under way began with the
-    /// low bit set.
-    decay: Lined<AtomicU64>,
+    /// The clocked pass's word and the clock's interval number (`Clocked`).
+    decay: Lined<Clocked>,
     /// The purge walk's position, its laps and the pass under way, which its steps write.
     walk: Lined<Walk>,
     /// The current size of each run, at its head region's index. Out of the regions'
@@ -181,6 +180,19 @@ fn difference(taken: impl Fn() -> usize, added: impl Fn() -> usize) -> isize {
     added().wrapping_sub(before) as isize
 }
 
+/// What the clock decides, on a line that is written a few times an interval and read by every
+/// heartbeat and every fill.
+struct Clocked {
+    /// The clocked pass: when the last one ended, or when the one under way began with the
+    /// low bit set.
+    word: AtomicU64,
+    /// The number of the clock's interval (the time over `policy::DECAY_TICKS`) as a heartbeat
+    /// last saw it: what a claim's frontier is recorded under and a pass reads frontiers by
+    /// (`layout::Frontier`). Written by the first heartbeat of each interval, so once an
+    /// interval; zero until the first heartbeat.
+    epoch: AtomicU64,
+}
+
 /// What the steps of the purge walk share (`purge`).
 struct Walk {
     /// Where the next purge step looks: the region plus one, zero for the top. Every purger
@@ -195,6 +207,13 @@ struct Walk {
     /// The pass under way: its tag, the lap it began in and what it may still purge
     /// (`purge::Pass`).
     pass: AtomicU64,
+    /// One past the highest region ever about to be given to a class, zero for none: the walk
+    /// goes round regions below it only. Classes take the lowest unassigned regions and runs
+    /// come from the top, so in a heap of a hundred class regions a lap reads a hundred table
+    /// entries, not every region of the reservation. Raised with `fetch_max` before the region
+    /// is tagged, so it is never below a class region; a region given back leaves it high,
+    /// which costs a look at an unassigned entry.
+    top: AtomicU32,
 }
 
 #[cfg(all(target_os = "linux", target_arch = "x86_64", not(kani)))]
@@ -225,12 +244,16 @@ impl<O: Os> State<O> {
                 taken: Lined::new(Tally::new()),
             },
             growth: Lined::new(AtomicUsize::new(0)),
-            decay: Lined::new(AtomicU64::new(0)),
+            decay: Lined::new(Clocked {
+                word: AtomicU64::new(0),
+                epoch: AtomicU64::new(0),
+            }),
             walk: Lined::new(Walk {
                 purge_at: AtomicU32::new(0),
                 laps: AtomicU32::new(0),
                 pass_from: AtomicU32::new(0),
                 pass: AtomicU64::new(0),
+                top: AtomicU32::new(0),
             }),
             run_sizes: Lined::new([const { AtomicUsize::new(0) }; MAX_REGIONS]),
             headers: Lined::new([const { RegionHeader::new() }; MAX_REGIONS]),

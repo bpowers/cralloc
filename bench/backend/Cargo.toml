@@ -16,11 +16,6 @@ path = "src/main.rs"
 name = "backcontend"
 path = "src/contend.rs"
 
-# What the rotation of the regions' frontiers costs the thread that starts a clocked pass.
-[[bin]]
-name = "backrotate"
-path = "src/rotate.rs"
-
 [dependencies]
 # `internals`: the back end itself is what this measures.
 asmalloc = { path = "../../crates/asmalloc", features = ["internals"] }

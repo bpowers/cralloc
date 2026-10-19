@@ -41,7 +41,7 @@ pub(crate) struct TestHost<W> {
     meta: Vec<Box<[W]>>,
     /// Each region's `Grow` and `Hints` words, which the heap keeps outside the metadata block.
     headers: Box<[(W, W)]>,
-    /// Each region's `Frontier` word, which the heap keeps outside the block for a small class.
+    /// Each region's `Frontier` word, which the heap keeps outside the block.
     frontiers: Box<[W]>,
     class_words: Box<[W]>,
     top: W,
@@ -230,10 +230,7 @@ impl<W: TestWord> Host for TestHost<W> {
     }
 
     fn frontier(&self, region: RegionId) -> &W {
-        match self.layout.header_word() {
-            Some(word) => self.meta(region, word + 2),
-            None => &self.frontiers[region.index()],
-        }
+        &self.frontiers[region.index()]
     }
 
     fn class_word(&self, index: u32) -> &W {

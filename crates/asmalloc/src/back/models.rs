@@ -1932,25 +1932,26 @@ fn reach_page(host: &Host8, slot: u32) -> u32 {
     layout.slot_bytes(slot + 1).div_ceil(layout.page_size()) as u32
 }
 
-/// A fill and a single allocation race the rotation a pass starter makes of their region's
-/// frontier (`region::reach`, `region::rotate`). From `run_setup`, with the frontier holding
-/// `now` 2 and `last` 9 from earlier intervals: thread 0 claims two slots through a run, as a
-/// fill does, and records the higher; thread 1 claims one and records it, as `Back::alloc`
-/// does; thread 2 rotates. In every schedule:
+/// Claims across an interval boundary race on their region's frontier (`region::reach`). From
+/// `run_setup`, with the frontier holding `now` 2 and `last` 9 under interval E - 1: thread 0
+/// claims two slots through a run, as a fill does, and records the higher in interval E;
+/// thread 1 claims one and records it in E + 1, as an allocation that read the interval
+/// number after it moved; thread 2 claims one and records it in E, as one that read it
+/// before. In every schedule, read in E + 1:
 ///
 /// - no claim is hidden: the floor is at or above the page of every slot a thread claimed and
-///   recorded, whether its record landed before the rotation (and moved to `last`) or after
-///   (in `now`), or found a higher frontier and wrote nothing;
-/// - nothing is invented or kept: `now` is zero or a claim's page, `last` the old `now` or a
-///   claim's page, and the old `last` is gone;
-/// - nothing sticks: two more rotations, from outside, leave the word zero.
+///   recorded, whichever record landed first, including a record of E that finds the word
+///   already of E + 1;
+/// - nothing is invented or kept: the floor is zero or a claim's page, and the earlier
+///   intervals' 2 and 9 are gone;
+/// - nothing sticks: read two intervals later, the word gives nothing.
 ///
-/// With `crash`, one thread may vanish at any step, as in a fork: a fill lost between its
-/// claim and its record leaves its claim unrecorded (its slots are lost with it, so no purge
-/// can take them), a rotation lost before its compare-and-swap leaves the word unrotated, and
-/// the word is one of the values above all the same.
-fn a_fill_races_the_rotation(preemptions: Option<usize>, crash: bool) {
+/// With `crash`, one thread may vanish at any step, as in a fork: a claim lost between claim
+/// and record is unrecorded (its slots are lost with it, so no purge can take them), and the
+/// word is one of the values above all the same.
+fn claims_race_across_an_interval(preemptions: Option<usize>, crash: bool) {
     use super::layout::Frontier;
+    const E: u64 = 7;
     explore(
         Config {
             preemptions,
@@ -1961,73 +1962,62 @@ fn a_fill_races_the_rotation(preemptions: Option<usize>, crash: bool) {
         || {
             let host = run_setup();
             let r0 = host.region_at(0);
-            host.frontier(r0).store(Frontier { now: 2, last: 9 }.pack());
+            let format = host.layout().frontier_format();
+            let earlier = Frontier {
+                epoch: E - 1,
+                now: 2,
+                last: 9,
+            };
+            host.frontier(r0).store(format.pack(earlier));
             (host, Mutex::new(Vec::new()))
         },
         |(host, recorded), me| {
-            let r0 = host.region_at(0);
-            let got = match me {
-                0 => claim_run_of(host, 2, 1),
-                1 => claim(host, 1),
-                _ => {
-                    region::rotate(host, r0, 1);
-                    return;
-                }
+            let (got, epoch) = match me {
+                0 => (claim_run_of(host, 2, 1), E),
+                1 => (claim(host, 1), E + 1),
+                _ => (claim(host, 1), E),
             };
             if let Some(&(region, high)) = got.iter().max_by_key(|&&(_, slot)| slot) {
-                region::reach(host, region, high);
+                region::reach(host, region, high, epoch);
             }
             recorded.lock().unwrap().extend(got);
         },
-        |(host, recorded), outcome| {
+        |(host, recorded), _| {
             let r0 = host.region_at(0);
-            let frontier = Frontier::unpack(host.frontier(r0).load());
+            let floor = |epoch| region::floor(host, r0, epoch);
             let recorded = recorded.lock().unwrap();
-            let pages: BTreeSet<u32> = recorded
-                .iter()
-                .map(|&(_, slot)| reach_page(host, slot))
-                .collect();
-            for &page in &pages {
-                assert!(frontier.floor() >= page, "{frontier:?} hides page {page}");
+            for &(_, slot) in recorded.iter() {
+                let page = reach_page(host, slot);
+                assert!(
+                    floor(E + 1) >= page,
+                    "the floor {} hides page {page}",
+                    floor(E + 1)
+                );
             }
             // Pages any thread could have recorded, finished or not.
             let possible: BTreeSet<u32> = [0, 64, 65, 128]
                 .into_iter()
                 .map(|slot| reach_page(host, slot))
                 .collect();
-            // A rotation lost in a fork leaves the earlier intervals' values in place.
-            let rotated = !outcome.killed.contains(&2);
-            assert!(
-                frontier.now == 0
-                    || possible.contains(&frontier.now)
-                    || !rotated && frontier.now == 2,
-                "{frontier:?}"
-            );
-            assert!(
-                frontier.last == 2
-                    || possible.contains(&frontier.last)
-                    || !rotated && frontier.last == 9,
-                "{frontier:?}"
-            );
-            region::rotate(host, r0, 1);
-            region::rotate(host, r0, 1);
-            assert_eq!(host.frontier(r0).load(), 0, "a frontier stuck");
+            let now = floor(E + 1);
+            assert!(now == 0 || possible.contains(&now), "{now}");
+            assert_eq!(floor(E + 3), 0, "a frontier stuck");
         },
     );
 }
 
 #[test]
 #[cfg_attr(miri, ignore)]
-fn a_fill_races_the_rotation_quickly() {
-    a_fill_races_the_rotation(Some(2), false);
-    a_fill_races_the_rotation(Some(1), true);
+fn claims_race_across_an_interval_quickly() {
+    claims_race_across_an_interval(Some(2), false);
+    claims_race_across_an_interval(Some(1), true);
 }
 
 #[test]
 #[ignore = "slow: run with scripts/gate --all"]
-fn a_fill_races_the_rotation_fully() {
-    a_fill_races_the_rotation(Some(3), false);
-    a_fill_races_the_rotation(Some(2), true);
+fn claims_race_across_an_interval_fully() {
+    claims_race_across_an_interval(Some(3), false);
+    claims_race_across_an_interval(Some(2), true);
 }
 
 /// `Purge.cfg`: two 32-byte slots to a 64-byte page.

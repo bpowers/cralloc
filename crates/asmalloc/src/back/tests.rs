@@ -830,9 +830,7 @@ fn reusing_purged_pages_over_the_cap_purges_nothing() {
 }
 
 /// A heap whose free memory over the cap is all fragmentation pays one bounded walk for each
-/// step of growth, and the walk purges nothing. It is two circuits of the heap: one above the
-/// frontiers, which stops at the top of each region the fill reached and reads almost nothing,
-/// and one below them, since the cap is a bound.
+/// step of growth, and the walk purges nothing.
 #[test]
 #[cfg_attr(miri, ignore)]
 fn growth_over_a_fragmented_heap_walks_once_a_step() {
@@ -858,11 +856,7 @@ fn growth_over_a_fragmented_heap_walks_once_a_step() {
         let _ = fill(&back, other, step / 512 - 1);
         assert_eq!(laps(), before, "a fill under a step walked");
         let _ = fill(&back, other, 1);
-        assert_eq!(
-            laps(),
-            before + 2,
-            "a step of growth is one walk of each scope"
-        );
+        assert_eq!(laps(), before + 1, "a step of growth is one walk");
     }
     assert_eq!(os.calls(Call::Purge), 0);
 }
@@ -923,16 +917,23 @@ fn a_pass_resumes_where_the_walk_stands() {
     }
 }
 
-/// The frontier of the region `p` lies in.
-fn frontier_at<O: Os>(back: &Back<'_, O>, p: *mut u8) -> super::layout::Frontier {
-    use super::tree::Host;
-    use super::word::Word;
+/// The floor of the region `p` lies in, read in the interval the back end is in: the page
+/// below which the clocked pass spares free pages.
+fn floor_at<O: Os>(back: &Back<'_, O>, p: *mut u8) -> u32 {
     let location = back.space().locate(p).unwrap();
     let RegionTag::Class(class) = back.table().get(location.region) else {
         panic!("not a class region");
     };
-    let word = back.host(class).unwrap().frontier(location.region).load();
-    super::layout::Frontier::unpack(word)
+    let host = back.host(class).unwrap();
+    super::region::floor(&host, location.region, back.epoch())
+}
+
+/// Moves the clock `intervals` on and lets the back end see it, as a heartbeat would, without
+/// stepping or starting a pass.
+fn tick<S: Shape>(back: &Back<'_, Sim<S>>, intervals: u64) {
+    let os = back.space().os();
+    os.advance_clock(intervals * DECAY_TICKS);
+    back.note_epoch(os.ticks());
 }
 
 /// The page past the end of the `size`-byte slot at `p`, counted from its region's start: what
@@ -942,73 +943,160 @@ fn page_past<O: Os>(back: &Back<'_, O>, p: *mut u8, size: usize) -> u32 {
     (location.offset as usize + size).div_ceil(O::GEOMETRY.page_size()) as u32
 }
 
-/// A region's frontier rises with the highest slot a fill claims or carves there, and only
-/// rises within an interval; each pass that begins moves it to the last interval's, and one
-/// that begins with no fill since forgets it. A pass that begins two intervals or more after
-/// the last ended forgets it at once. A large class's frontier, in its block, does the same.
+/// A region's frontier rises with the highest slot a fill claims or carves there, and lives by
+/// the clock: the interval of the claim and the next, then it is gone, with no pass to age it.
+/// A claim in the next interval moves the first interval's frontier to `last`, so the higher
+/// of the two holds. A large class's frontier, in the same array, does the same.
 #[test]
-fn a_frontier_rises_within_an_interval_and_rotates_with_each_pass() {
-    use super::layout::Frontier;
+fn a_frontier_lives_two_intervals_of_the_clock() {
     let state = state::<Standard>();
     let back = state.get_or_reserve().unwrap();
-    let os = state.os();
     let class = small(1024);
+    back.note_epoch(state.os().ticks());
     let slots = fill(&back, class, 64);
     let past = |p: *mut u8| page_past(&back, p, 1024);
     let top = past(slots[63]);
-    assert_eq!(frontier_at(&back, slots[0]), Frontier { now: top, last: 0 });
+    assert_eq!(floor_at(&back, slots[0]), top);
     // SAFETY: the test holds these slots and gives them up.
     unsafe { back.launder(class, &slots) };
     // A fill that reaches less high leaves it.
     let low = fill(&back, class, 8);
     assert_eq!(low, slots[..8]);
-    assert_eq!(frontier_at(&back, slots[0]).now, top);
+    assert_eq!(floor_at(&back, slots[0]), top);
     // SAFETY: as above.
     unsafe { back.launder(class, &low) };
-    // Each pass that begins starts an interval.
-    os.advance_clock(DECAY_TICKS);
-    beat(&back);
-    assert_eq!(frontier_at(&back, slots[0]), Frontier { now: 0, last: top });
+    // The next interval still reads the last one's; a claim there keeps it as `last`.
+    tick(&back, 1);
+    assert_eq!(floor_at(&back, slots[0]), top);
     let low = fill(&back, class, 8);
-    assert_eq!(frontier_at(&back, slots[0]).now, past(slots[7]));
+    assert_eq!(floor_at(&back, slots[0]), top);
     // SAFETY: as above.
     unsafe { back.launder(class, &low) };
-    os.advance_clock(DECAY_TICKS);
-    beat(&back);
-    assert_eq!(
-        frontier_at(&back, slots[0]),
-        Frontier {
-            now: 0,
-            last: past(slots[7])
-        }
-    );
-    os.advance_clock(DECAY_TICKS);
-    beat(&back);
-    assert_eq!(frontier_at(&back, slots[0]), Frontier { now: 0, last: 0 });
-    // A fill, then three intervals with no slow path: the pass that begins then forgets it.
+    // One interval on, only the second claim's reach is left; one more, nothing.
+    tick(&back, 1);
+    assert_eq!(floor_at(&back, slots[0]), past(slots[7]));
+    tick(&back, 1);
+    assert_eq!(floor_at(&back, slots[0]), 0);
+    // However long a pass lasts, the heartbeats under it keep the interval moving.
     let low = fill(&back, class, 8);
     // SAFETY: as above.
     unsafe { back.launder(class, &low) };
-    os.advance_clock(3 * DECAY_TICKS);
+    state.os().advance_clock(3 * DECAY_TICKS);
     back.heartbeat();
-    assert_eq!(frontier_at(&back, slots[0]), Frontier { now: 0, last: 0 });
-    // A large class's, in its block.
+    assert_eq!(floor_at(&back, slots[0]), 0);
+    // A large class's.
     let big = large(64 << 10);
     let blocks: Vec<Block> = (0..3)
         .map(|_| back.alloc(big, big.size()).unwrap())
         .collect();
     let at = blocks[0].ptr.as_ptr();
+    let reach = page_past(&back, blocks[2].ptr.as_ptr(), big.size());
+    assert_eq!(floor_at(&back, at), reach);
+    tick(&back, 1);
+    assert_eq!(floor_at(&back, at), reach);
+    tick(&back, 1);
+    assert_eq!(floor_at(&back, at), 0);
+}
+
+/// A fill whose run of claims leaves one region for the next records the first region's
+/// frontier as it leaves, as well as the last region's at the end.
+#[test]
+fn a_fill_across_two_regions_records_both_frontiers() {
+    let state = state::<Standard>();
+    let back = state.get_or_reserve().unwrap();
+    let class = small(1024);
+    let per_region = back.space().plan().slots_per_region(class.class()) as usize;
+    let slots = fill(&back, class, per_region + 64);
+    let region = |p: *mut u8| back.space().locate(p).unwrap().region;
+    assert_ne!(region(slots[per_region - 1]), region(slots[per_region]));
+    // The top eight of the first region and the bottom eight of the second.
+    let freed: Vec<*mut u8> = slots[per_region - 8..per_region + 8].to_vec();
+    // SAFETY: the test holds these slots and gives them up.
+    unsafe { back.launder(class, &freed) };
+    forget_reuse(&back);
+    assert_eq!(floor_at(&back, slots[0]), 0);
+    let again = fill(&back, class, 16);
+    assert_eq!(again, freed);
     assert_eq!(
-        frontier_at(&back, at).now,
-        page_past(&back, blocks[2].ptr.as_ptr(), big.size())
+        floor_at(&back, slots[0]),
+        page_past(&back, slots[per_region - 1], 1024)
     );
-    beat(&back);
+    assert_eq!(
+        floor_at(&back, slots[per_region]),
+        page_past(&back, slots[per_region + 7], 1024)
+    );
+}
+
+/// A huge-page unit that the frontier cuts through is spared whole: fills reached into it, so
+/// none of it is the clocked pass's, though every slot in it is free. The units above it go.
+#[test]
+#[cfg_attr(miri, ignore)]
+fn a_unit_the_frontier_cuts_through_is_spared() {
+    let state = state::<Native>();
+    let back = state.get_or_reserve().unwrap();
+    let os = state.os();
+    let huge = Native::GEOMETRY.huge_page_size();
+    // Idle memory in a lower region, enough that the pass's goal is more than the region of
+    // the class below can give, so that the walk reaches the cut unit.
+    let other = small(512);
+    let others = fill(&back, other, 4 * retained_cap(Native::GEOMETRY) / 512);
+    for &p in &others {
+        paint(p, 512, 2);
+    }
+    let class = small(64);
+    let mut slots = Vec::new();
+    while slots.len() < (6 * huge + huge / 2) / 64 {
+        slots.extend(fill(&back, class, 64));
+    }
+    for &p in &slots {
+        paint(p, 64, 8);
+    }
+    let offset = |p: *mut u8| back.space().locate(p).unwrap().offset as usize;
+    assert!(
+        back.space().locate(others[0]).unwrap().region
+            < back.space().locate(slots[0]).unwrap().region
+    );
+    // SAFETY: the test holds these slots and gives them up.
+    unsafe { back.launder(other, &others) };
+    forget_reuse(&back);
+    // The upper half of huge page 5 and everything above it go back; a fill then takes the
+    // lowest of them, from the middle of huge page 5.
+    let middle = 5 * huge + huge / 2;
+    let (upper, lower): (Vec<*mut u8>, Vec<*mut u8>) =
+        slots.iter().partition(|&&p| offset(p) >= middle);
+    // SAFETY: as above.
+    unsafe { back.launder(class, &upper) };
+    let reused = fill(&back, class, 16);
+    assert!(
+        reused
+            .iter()
+            .all(|&p| (middle..middle + 16 * 64).contains(&offset(p)))
+    );
+    let (cut, held): (Vec<*mut u8>, Vec<*mut u8>) =
+        lower.iter().partition(|&&p| offset(p) >= 5 * huge);
+    // SAFETY: as above.
+    unsafe {
+        back.launder(class, &reused);
+        back.launder(class, &cut);
+    }
     os.advance_clock(DECAY_TICKS);
     beat(&back);
-    assert_eq!(
-        frontier_at(&back, at).last,
-        page_past(&back, blocks[2].ptr.as_ptr(), big.size())
-    );
+    assert!(!pass_under_way(&state));
+    // SAFETY: no other thread runs, and the back end and this test store only integers.
+    unsafe {
+        let above = *upper.iter().find(|&&p| offset(p) >= 6 * huge).unwrap();
+        assert!(
+            os.is_purged(NonNull::new(above).unwrap(), 64),
+            "a unit above was kept"
+        );
+        assert!(
+            cut.iter()
+                .chain(&reused)
+                .all(|&p| !os.is_purged(NonNull::new(p).unwrap(), 64)),
+            "the unit the frontier cuts through was purged"
+        );
+    }
+    drop(held);
 }
 
 /// The clocked pass returns only what no fill of the last two intervals reached. A program
@@ -1076,25 +1164,44 @@ fn the_clocked_pass_spares_what_fills_reuse() {
     assert_eq!(back.retained(), 0);
 }
 
-/// The cap is a bound, not a preference. Retained memory over the cap that the last interval's
-/// fills all reached is still brought down to the cap by the next pass: a lap above the
-/// frontiers finds nothing, and a lap below them takes the excess, from the top.
+/// The frontier holds over the cap too. Memory over the cap that fills reached in the last two
+/// intervals is spared by the clocked pass however high the count; memory over the cap that no
+/// fill reached for an interval goes in one pass, down to the cap, from wherever it lies, and
+/// what is reused stays.
 #[test]
 #[cfg_attr(miri, ignore)]
-fn over_the_cap_a_pass_takes_reused_memory_too() {
+fn over_the_cap_a_pass_spares_reuse_and_takes_idle_memory() {
     let state = state::<Standard>();
     let back = state.get_or_reserve().unwrap();
     let os = state.os();
     let cap = retained_cap(Standard::GEOMETRY);
-    let class = small(1024);
-    let n = whole_regions(&back, class, 2 * cap);
-    let slots = fill(&back, class, n);
-    for &p in &slots {
+    let idle = small(1024);
+    let idles = fill(&back, idle, whole_regions(&back, idle, 2 * cap));
+    for &p in &idles {
         paint(p, 1024, 4);
     }
     // SAFETY: the test holds these slots and gives them up.
-    unsafe { back.launder(class, &slots) };
+    unsafe { back.launder(idle, &idles) };
     assert!(back.retained() > cap);
+    // Filled this interval: the next pass spares it all.
+    let purges = os.calls(Call::Purge);
+    os.advance_clock(DECAY_TICKS);
+    beat(&back);
+    assert!(!pass_under_way(&state));
+    assert_eq!(
+        os.calls(Call::Purge),
+        purges,
+        "a pass purged what fills just reached"
+    );
+    // Two intervals on it is idle; meanwhile another class is filled and freed.
+    forget_reuse(&back);
+    let reused = small(512);
+    let reuseds = fill(&back, reused, whole_regions(&back, reused, cap / 2));
+    for &p in &reuseds {
+        paint(p, 512, 4);
+    }
+    // SAFETY: as above.
+    unsafe { back.launder(reused, &reuseds) };
     os.advance_clock(DECAY_TICKS);
     beat(&back);
     assert!(!pass_under_way(&state));
@@ -1106,24 +1213,26 @@ fn over_the_cap_a_pass_takes_reused_memory_too() {
     );
     // SAFETY: no other thread runs, and the back end and this test store only integers.
     unsafe {
-        assert!(os.is_purged(NonNull::new(slots[n - 1]).unwrap(), 1024));
-        assert!(!os.is_purged(NonNull::new(slots[0]).unwrap(), 1024));
+        assert!(
+            reuseds
+                .iter()
+                .all(|&p| !os.is_purged(NonNull::new(p).unwrap(), 512)),
+            "a pass over the cap purged what fills reached"
+        );
+        assert!(os.is_purged(NonNull::new(*idles.last().unwrap()).unwrap(), 1024));
     }
 }
 
-/// Growth over the cap pays first with memory no fill has reached for two intervals, wherever
-/// the walk finds it, and leaves what the last interval reused for as long as there is
-/// enough of the other.
+/// Growth over the cap pays from wherever the walk stands, frontiers or not: it is resident
+/// memory the program asked for now, and the walk carries on from there at the next payment.
 #[test]
 #[cfg_attr(miri, ignore)]
-fn growth_pays_with_idle_memory_first() {
+fn growth_pays_from_where_the_walk_stands_frontiers_or_not() {
     let state = state::<Standard>();
     let back = state.get_or_reserve().unwrap();
     let os = state.os();
     let cap = retained_cap(Standard::GEOMETRY);
     let step = growth_step(Standard::GEOMETRY);
-    // The idle class first, so that its regions are below the reused one's and a walk from
-    // the top reaches them last.
     let idle = small(1024);
     let idles = fill(&back, idle, whole_regions(&back, idle, cap));
     for &p in &idles {
@@ -1143,26 +1252,18 @@ fn growth_pays_with_idle_memory_first() {
     assert!(region(*idles.last().unwrap()) < region(reuseds[0]));
     assert!(back.retained() > cap);
     let before = back.retained();
-    // The walk at the top, so that it meets the reused regions first.
+    // The walk at the top, where it meets the reused class first.
     state
         .walk
         .purge_at
         .store(0, core::sync::atomic::Ordering::Relaxed);
     let grower = small(256);
     let _grown = fill(&back, grower, step / 256);
-    assert!(
-        back.retained() < before,
-        "growth over the cap purged nothing"
-    );
+    let purged = before - back.retained();
+    assert!(purged >= step, "growth over the cap purged {purged}");
     // SAFETY: no other thread runs, and the back end and this test store only integers.
     unsafe {
-        assert!(
-            reuseds
-                .iter()
-                .all(|&p| !os.is_purged(NonNull::new(p).unwrap(), 512)),
-            "growth purged what the interval reused while idle memory was left"
-        );
-        assert!(os.is_purged(NonNull::new(*idles.last().unwrap()).unwrap(), 1024));
+        assert!(os.is_purged(NonNull::new(*reuseds.last().unwrap()).unwrap(), 512));
     }
 }
 
@@ -1214,25 +1315,20 @@ fn growth_beside_an_idle_fragmented_class(idle_regions: usize) -> bool {
     os.calls(Call::Purge) != purges
 }
 
-/// The control for the finding below: with a short circuit above the frontiers, growth over
-/// the cap goes on to its circuit below them and pays with what the interval reused.
+/// Growth over the cap pays beside a short walk of fragmentation.
 #[test]
 #[cfg_attr(miri, ignore)]
 fn growth_pays_below_the_frontiers_after_a_short_idle_circuit() {
     assert!(growth_beside_an_idle_fragmented_class(4));
 }
 
-/// Finding (frontier review): `pay_growth` gives its two circuits one budget of
-/// `PURGE_CAP_WORDS`. When the circuit above the frontiers costs more than that, the circuit
-/// below them never starts, in this call or any later one, since each call begins again above
-/// them: growth over the cap then never pays with memory below a frontier, however much there
-/// is. A walk reads a word for every page-sized unit above a frontier, purged or not, and one
-/// for every region of the heap, so any heap with a few tens of MiB carved above its frontiers
-/// in classes that do not get huge pages is in this state. Before frontiers the one circuit
-/// carried on across calls and reached everything.
+/// Found in review: when growth's purge walked above the frontiers first, on one budget with
+/// its walk below them, a long walk above them (48 regions of fragmentation here) meant it
+/// never reached below them, in any call, and growth over the cap never paid. Growth now walks
+/// one circuit, frontiers or not, carrying on from where the last payment stopped, so it
+/// reaches the free pages past the fragmentation within a few steps.
 #[test]
 #[cfg_attr(miri, ignore)]
-#[ignore = "finding: growth over the cap never purges below the frontiers once a circuit above them costs more than PURGE_CAP_WORDS"]
 fn growth_pays_below_the_frontiers_after_a_long_idle_circuit() {
     assert!(
         growth_beside_an_idle_fragmented_class(48),
@@ -1281,8 +1377,7 @@ fn reuse_beside_fragmentation(fragmented: usize) -> usize {
     hit
 }
 
-/// The control for the finding below: under the cap, the pages reused each interval are
-/// never purged.
+/// Under the cap, the pages reused each interval are never purged.
 #[test]
 #[cfg_attr(miri, ignore)]
 fn the_pass_spares_reuse_beside_fragmentation_under_the_cap() {
@@ -1290,15 +1385,12 @@ fn the_pass_spares_reuse_beside_fragmentation_under_the_cap() {
     assert_eq!(reuse_beside_fragmentation(cap / 2), 0);
 }
 
-/// Finding (frontier review): free slots on pages that also hold live ones are counted as
-/// retained and can never be purged, so a heap with more than the cap of them is over the cap
-/// for good. Every pass then takes its lap below the frontiers for the excess, and what the
-/// program reuses each interval is purged each interval, as before frontiers: the frontier
-/// protects nothing in any heap whose fragmentation alone exceeds the cap (64 MiB in the
-/// design's geometry), and each pass is two laps instead of one.
+/// Found in review: free slots on pages that also hold live ones are counted as retained and
+/// can never be purged, so a heap with more than the cap of them is over the cap for good.
+/// When a pass over the cap went below the frontiers for the excess, what the program reused
+/// each interval was purged each interval. The frontier now holds over the cap too.
 #[test]
 #[cfg_attr(miri, ignore)]
-#[ignore = "finding: with more than the cap of fragmentation, every pass purges below the frontiers"]
 fn the_pass_spares_reuse_beside_fragmentation_over_the_cap() {
     let cap = retained_cap(Standard::GEOMETRY);
     assert_eq!(
@@ -1308,15 +1400,15 @@ fn the_pass_spares_reuse_beside_fragmentation_over_the_cap() {
     );
 }
 
-/// Ages every region's frontier by two intervals, as two passes begun with no fill between
-/// them leave it: whatever the test filled is no longer reuse the clocked pass must spare.
-fn forget_reuse<O: Os>(back: &Back<'_, O>) {
-    back.rotate_frontiers(1);
-    back.rotate_frontiers(1);
+/// Moves the clock two intervals on and lets the back end see it, as two intervals with no
+/// claim leave every frontier: whatever the test filled is no longer reuse the clocked pass
+/// must spare. Starts no pass; the next heartbeat may.
+fn forget_reuse<S: Shape>(back: &Back<'_, Sim<S>>) {
+    tick(back, 2);
 }
 
 fn pass_under_way<O: Os>(state: &State<O>) -> bool {
-    state.decay.load(core::sync::atomic::Ordering::Relaxed) & 1 != 0
+    state.decay.word.load(core::sync::atomic::Ordering::Relaxed) & 1 != 0
 }
 
 /// The defect the reset caused (`docs/research/memory.md`): in a storm of frees every page
@@ -1467,12 +1559,14 @@ fn a_fragmented_heap_costs_one_lap_an_interval() {
     let state = state::<Standard>();
     let back = state.get_or_reserve().unwrap();
     let os = state.os();
-    let class = small(1024);
-    let per_page = Standard::GEOMETRY.page_size() / 1024;
-    let slots = fill(&back, class, 1024);
+    // A class that never gets huge pages, with more pages than a heartbeat's step reads, so
+    // that a lap takes several heartbeats.
+    let class = small(2048);
+    let per_page = Standard::GEOMETRY.page_size() / 2048;
+    let slots = fill(&back, class, 4 * super::policy::PURGE_STEP_WORDS * per_page);
     let (_live, freed): (Vec<*mut u8>, Vec<*mut u8>) = slots
         .iter()
-        .partition(|p| (p.addr() / 1024).is_multiple_of(per_page));
+        .partition(|p| (p.addr() / 2048).is_multiple_of(per_page));
     // SAFETY: the test holds these slots, or passes a bad one to see the abort.
     unsafe { back.launder(class, &freed) };
     // Long ago, so that every pass walks the whole heap rather than stopping at the top of
@@ -3362,25 +3456,21 @@ mod review {
         let stale = Pass {
             tag: Pass::tag_of(started) ^ 1,
             lap: 0,
-            below: false,
             pages: 0,
         };
         state.walk.pass.store(stale.pack(), Relaxed);
-        state.decay.store(started, Relaxed);
+        state.decay.word.store(started, Relaxed);
         beat(&back);
         assert_eq!(
-            state.decay.load(Relaxed),
+            state.decay.word.load(Relaxed),
             started,
             "a stepper ended a pass it had no goal for"
         );
         assert_eq!(state.os().calls(Call::Purge), 0);
-        // The starter publishes; the pass now runs and ends. The slots were filled two
-        // intervals before it, as far as their frontier knows.
-        forget_reuse(&back);
+        // The starter publishes; the pass now runs and ends.
         let goal = Pass {
             tag: Pass::tag_of(started),
-            lap: Pass::lap_of(state.walk.laps.load(Relaxed)),
-            below: false,
+            lap: state.walk.laps.load(Relaxed) as u16,
             pages: 16,
         };
         state.walk.pass.store(goal.pack(), Relaxed);
@@ -3419,7 +3509,7 @@ mod review {
             0,
             "the all-zero pass word is not this pass's"
         );
-        state.decay.store(started, Relaxed);
+        state.decay.word.store(started, Relaxed);
         for _ in 0..50 {
             os.advance_clock(DECAY_TICKS);
             beat(&back);

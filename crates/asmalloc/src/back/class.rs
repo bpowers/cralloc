@@ -169,7 +169,7 @@ impl<'a, O: Os> Back<'a, O> {
             reached = match reached {
                 Some((region, at)) if region == taken.region => Some((region, at.max(high))),
                 Some((region, at)) => {
-                    region::reach(&host, region, at);
+                    region::reach(&host, region, at, self.epoch());
                     Some((taken.region, high))
                 }
                 None => Some((taken.region, high)),
@@ -188,7 +188,7 @@ impl<'a, O: Os> Back<'a, O> {
         }
         tree::finish_run(&host, cursor);
         if let Some((region, at)) = reached {
-            region::reach(&host, region, at);
+            region::reach(&host, region, at, self.epoch());
         }
         self.unretain(class.class(), resident);
         self.retain(class.class(), revived);
@@ -198,7 +198,7 @@ impl<'a, O: Os> Back<'a, O> {
             let Some((region, first, count)) = self.carve(&host, class.class(), want) else {
                 break;
             };
-            region::reach(&host, region, first + count - 1);
+            region::reach(&host, region, first + count - 1, self.epoch());
             got = self.put_run(host.layout(), out, got, region, first, count);
             carved += host.layout().bytes_of(count);
         }
@@ -482,7 +482,7 @@ impl<'a, O: Os> Back<'a, O> {
             }
             (region, first, true)
         };
-        region::reach(&host, region, slot);
+        region::reach(&host, region, slot, self.epoch());
         if let Some(before) = region::recorded(&host, region, slot) {
             region::record(&host, region, slot, Recorded { size, ..before });
             if before.huge {
@@ -1236,6 +1236,11 @@ impl<'a, O: Os> Back<'a, O> {
                     None => return false,
                 }
             };
+            // Before the tag, so that the purge walk's bound is never below a class region.
+            self.state
+                .walk
+                .top
+                .fetch_max(region.index() as u32 + 1, SeqCst);
             if self
                 .state
                 .table

@@ -28,9 +28,8 @@
 //! those read together, and is committed whole at assignment (its leaf bitmap is small):
 //!
 //! ```text
-//! word 0                      header: Grow (watermark, committed pages), Hints (start of the
-//!                             huge-page part, purge cursor), then Frontier (how far up the
-//!                             last two intervals' claims reached), on a line of its own
+//! word 0                      header: Grow (watermark, committed pages), then Hints (start of
+//!                             the huge-page part, purge cursor), on a line of its own
 //! ...                         summary levels height down to 1
 //! ...                         leaf bitmap
 //! ...                         zero bitmap: one bit per slot, set means free and known to read
@@ -57,8 +56,8 @@ pub(crate) const MAX_LEVELS: usize = 5;
 /// Bytes per metadata word.
 pub(crate) const WORD_BYTES: usize = 8;
 
-/// A large class's header words at the start of its block: `Grow`, `Hints`, then `Frontier`.
-const HEADER_WORDS: u32 = 3;
+/// A large class's header words at the start of its block: `Grow`, then `Hints`.
+const HEADER_WORDS: u32 = 2;
 
 /// Words in a cache line.
 const LINE_WORDS: u32 = (crate::lined::LINE / WORD_BYTES) as u32;
@@ -207,85 +206,146 @@ impl Hints {
     }
 }
 
-/// How far up a region's reuse reached: for the interval of the clocked pass under way and for
-/// the one before it, the page past the highest slot a fill or allocation claimed or carved in
-/// the region, zero if none. One word.
+/// How far up a region's reuse reached in an interval of the clock and in the one before it:
+/// for each, the page past the highest slot a fill or allocation claimed or carved in the
+/// region, zero if none, under the number of the later interval (`epoch`). One word, packed as
+/// [`FrontierFormat`] says.
 ///
 /// Fills and allocations take the lowest free slots of a region, so the slots an interval
-/// reused lie below its frontier, and the free pages above the higher of the two frontiers
-/// went a whole interval without being wanted: those are what the clocked pass returns
-/// (`purge`). All zero means no claim in either interval, so everything free may go, as in a
-/// fresh process.
+/// reused lie below its frontier, and free pages above both went a whole interval without
+/// being wanted: those are what the clocked pass returns (`purge`). The word says which
+/// intervals it describes, so nobody sweeps the regions to age them: a reader in interval E
+/// takes both frontiers of a word numbered E, only `now` of one numbered E - 1 (its `now` is
+/// the last interval's), and nothing of an older one. All zero is a word of interval zero with
+/// nothing claimed, which every reader takes as nothing.
 ///
-/// A claim raises `now` with a compare-and-swap, only if it reaches higher, so the common
-/// case is a load and a compare. The thread that starts a clocked pass moves `now` to `last`
-/// and clears `now` (`region::rotate`), one compare-and-swap per region whose word is not
-/// zero. Both are hints: the purge is a claim (`region::purge_unit`), so a frontier that is
-/// wrong costs a purge too many or too few and nothing else.
+/// Only a thread that has just claimed in the region writes the word (`region::reach`): in
+/// the interval the word names it raises `now` with a compare-and-swap, only if it reaches
+/// higher, so the common case is a load and a compare; in the next interval it moves `now` to
+/// `last` and records; later than that it starts afresh. The word is a hint: the purge is a
+/// claim (`region::purge_unit`), so a wrong frontier costs a purge too many or too few and
+/// nothing else.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(crate) struct Frontier {
-    /// This interval's: the page past the highest slot claimed since the pass began.
+    /// The interval `now` belongs to, as many low bits of its number as the format keeps.
+    pub(crate) epoch: u64,
+    /// That interval's frontier.
     pub(crate) now: u32,
-    /// The last interval's.
+    /// The interval before's.
     pub(crate) last: u32,
 }
 
-impl Frontier {
+/// How a region's [`Frontier`] packs into a word: `now` in the low `page_bits`, `last` in
+/// the next `page_bits`, and the interval's number in the rest. `page_bits` holds every page
+/// index from zero to the region's page count, so it comes from the geometry: 21 bits for
+/// 4 GiB regions of 4 KiB pages, which leaves 22 bits of interval, a wrap every 48 days of
+/// one-second intervals. A word whose number has wrapped round to the reader's, or to the
+/// one before, is read as recent: a purge too few for at most two intervals.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) struct FrontierFormat {
+    page_bits: u32,
+}
+
+/// Every geometry the constructor accepts has at most 2^26 pages in a region (regions of at
+/// most 4 GiB, pages of at least 64 bytes), which leaves ten bits of interval; the design's
+/// leaves 22.
+const _: () = {
+    assert!(FrontierFormat::of(1 << 26).epoch_bits() >= 10);
+    let design = crate::space::Geometry::DESIGN;
+    let pages = 1u64 << (design.max_region_shift() - design.page_size().trailing_zeros());
+    assert!(FrontierFormat::of(pages as u32).epoch_bits() >= 22);
+};
+
+impl FrontierFormat {
+    /// The format for regions of `region_pages` pages.
     #[inline(always)]
-    pub(crate) const fn unpack(word: u64) -> Frontier {
+    pub(crate) const fn of(region_pages: u32) -> FrontierFormat {
+        FrontierFormat {
+            page_bits: u32::BITS - region_pages.leading_zeros(),
+        }
+    }
+
+    /// Bits of the interval's number the word keeps.
+    #[inline(always)]
+    pub(crate) const fn epoch_bits(self) -> u32 {
+        64 - 2 * self.page_bits
+    }
+
+    #[inline(always)]
+    const fn epoch_mask(self) -> u64 {
+        u64::MAX >> (64 - self.epoch_bits())
+    }
+
+    #[inline(always)]
+    const fn page_mask(self) -> u64 {
+        (1 << self.page_bits) - 1
+    }
+
+    #[inline(always)]
+    pub(crate) const fn unpack(self, word: u64) -> Frontier {
         Frontier {
-            now: word as u32,
-            last: (word >> 32) as u32,
+            now: (word & self.page_mask()) as u32,
+            last: (word >> self.page_bits & self.page_mask()) as u32,
+            epoch: word >> (2 * self.page_bits),
         }
     }
 
+    /// The word for `frontier`; the interval's number keeps its low bits, and each page index
+    /// must be at most the region's page count.
     #[inline(always)]
-    pub(crate) const fn pack(self) -> u64 {
-        self.now as u64 | (self.last as u64) << 32
+    pub(crate) const fn pack(self, frontier: Frontier) -> u64 {
+        frontier.now as u64 & self.page_mask()
+            | (frontier.last as u64 & self.page_mask()) << self.page_bits
+            | (frontier.epoch & self.epoch_mask()) << (2 * self.page_bits)
     }
 
-    /// The page below which the last two intervals' reuse reached: nothing below it is the
-    /// clocked pass's to return.
+    /// The page below which reuse reached, read in interval `epoch`: the higher of both
+    /// frontiers of a word of this interval, the `now` of a word of the last, which is the last
+    /// interval's, and nothing of an older one. Nothing below it is the clocked pass's to return.
     #[inline(always)]
-    pub(crate) const fn floor(self) -> u32 {
-        if self.now > self.last {
-            self.now
+    pub(crate) const fn floor(self, word: u64, epoch: u64) -> u32 {
+        let frontier = self.unpack(word);
+        let epoch = epoch & self.epoch_mask();
+        if frontier.epoch == epoch {
+            if frontier.now > frontier.last {
+                frontier.now
+            } else {
+                frontier.last
+            }
+        } else if frontier.epoch == epoch.wrapping_sub(1) & self.epoch_mask() {
+            frontier.now
         } else {
-            self.last
+            0
         }
     }
 
-    /// The frontier once a claim has reached up to page `page`, if that raises it.
+    /// The word after a claim in interval `epoch` has reached up to page `page`, or `None` if
+    /// the word already says as much. A word of the next interval, which a claimer that read
+    /// the interval number just before it moved finds, is raised as one of its own interval,
+    /// so that a late claimer never takes a newer claim's frontier away; its claim then counts
+    /// an interval later, which keeps it a little longer.
     #[inline(always)]
-    pub(crate) const fn rise(self, page: u32) -> Option<Frontier> {
-        if page > self.now {
-            Some(Frontier {
-                now: page,
-                last: self.last,
-            })
+    pub(crate) const fn record(self, word: u64, epoch: u64, page: u32) -> Option<u64> {
+        let frontier = self.unpack(word);
+        let mut epoch = epoch & self.epoch_mask();
+        let last = if frontier.epoch == epoch
+            || frontier.epoch == epoch.wrapping_add(1) & self.epoch_mask()
+        {
+            if page <= frontier.now {
+                return None;
+            }
+            epoch = frontier.epoch;
+            frontier.last
+        } else if frontier.epoch == epoch.wrapping_sub(1) & self.epoch_mask() {
+            frontier.now
         } else {
-            None
-        }
-    }
-
-    /// The frontier as a new interval begins: this interval's becomes the last one's.
-    #[inline(always)]
-    pub(crate) const fn rotate(self) -> Frontier {
-        Frontier {
-            now: 0,
-            last: self.now,
-        }
-    }
-
-    /// The frontier `intervals` intervals on, with no claim meanwhile: as it is for none, once
-    /// rotated for one, and nothing for two or more.
-    #[inline(always)]
-    pub(crate) const fn age(self, intervals: u32) -> Frontier {
-        match intervals {
-            0 => self,
-            1 => self.rotate(),
-            _ => Frontier { now: 0, last: 0 },
-        }
+            0
+        };
+        Some(self.pack(Frontier {
+            epoch,
+            now: page,
+            last,
+        }))
     }
 }
 
@@ -542,9 +602,8 @@ impl Layout {
         self.pages.div_ceil(BITS)
     }
 
-    /// Word offset of the region's `Grow` word in its block, `Hints` and `Frontier` the words
-    /// after it, for a large class; `None` for a small class, whose header is in the back end's
-    /// state
+    /// Word offset of the region's `Grow` word in its block, `Hints` the word after it, for a
+    /// large class; `None` for a small class, whose header is in the back end's state
     /// (`host::RegionHeader`). Every large allocation and free touches its block anyway, and
     /// with the header outside it touched one more line.
     #[inline(always)]
@@ -598,6 +657,12 @@ impl Layout {
     #[inline(always)]
     pub(crate) const fn huge_pages(&self) -> u32 {
         1 << (self.huge_shift - self.page_shift)
+    }
+
+    /// How a region's frontier word packs (`FrontierFormat`).
+    #[inline(always)]
+    pub(crate) const fn frontier_format(&self) -> FrontierFormat {
+        FrontierFormat::of(self.pages)
     }
 
     /// Pages in a region.
@@ -1018,12 +1083,14 @@ mod tests {
                 cursor: 0
             }
         );
+        let format = FrontierFormat::of(1 << 20);
         let frontier = Frontier {
+            epoch: 12345,
             now: 7,
             last: 1 << 20,
         };
-        assert_eq!(Frontier::unpack(frontier.pack()), frontier);
-        assert_eq!(Frontier::unpack(0), Frontier { now: 0, last: 0 });
+        assert_eq!(format.unpack(format.pack(frontier)), frontier);
+        assert_eq!(format.floor(0, 0), 0);
         for huge in [false, true] {
             let recorded = Recorded {
                 size: 1 << 32,

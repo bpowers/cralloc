@@ -99,7 +99,7 @@ fn headers_round_trip() {
 /// first, each with a bit for every word below and ending in one top word; the clean bitmap,
 /// covering every page; the leaf bitmap, covering every slot, last and less than a page after
 /// the rest; committed at assignment up to the leaf bitmap. A large class's block: its header
-/// (three words, `header_word` zero) alone on a line where the block has room; the summary
+/// (two words, `header_word` zero) alone on a line where the block has room; the summary
 /// levels; the leaf, zero and clean bitmaps; a size word for every slot; committed whole at
 /// assignment. The sections do not overlap.
 pub(super) fn layouts_fit(plan: Plan) {
@@ -127,7 +127,7 @@ pub(super) fn layouts_fit(plan: Plan) {
             } else {
                 layout.tree_word(0, 0)
             };
-            assert!(first == line || first == 3);
+            assert!(first == line || first == 2);
             first
         }
         None => {
@@ -239,71 +239,65 @@ fn growth_purges_the_smaller_of_its_debt_and_the_excess() {
     }
 }
 
-/// A pass word keeps its four parts apart, and a stepper can tell its pass from another: the
-/// tag of a pass's decay word is the only one it acts on. The lap field keeps the low bits of
-/// the lap count, which is what a stepper compares it with.
+/// A pass word keeps its three parts apart, and a stepper can tell its pass from another: the
+/// tag of a pass's decay word is the only one it acts on.
 #[kani::proof]
 fn a_pass_word_round_trips() {
     use super::purge::Pass;
-    let laps: u32 = kani::any();
     let pass = Pass {
         tag: kani::any(),
-        lap: Pass::lap_of(laps),
-        below: kani::any(),
+        lap: kani::any(),
         pages: kani::any(),
     };
     assert!(Pass::unpack(pass.pack()) == pass);
     let word: u64 = kani::any();
     assert!(Pass::unpack(word).pack() == word);
-    // The all-zero word, which is what the state starts as, is a pass with nothing to purge
-    // that takes nothing below a frontier.
-    assert!(Pass::unpack(0).pages == 0 && !Pass::unpack(0).below);
+    // The all-zero word, which is what the state starts as, is a pass with nothing to purge.
+    assert!(Pass::unpack(0).pages == 0);
 }
 
-/// A frontier word round-trips. A claim raises this interval's frontier only, and only
-/// upward; the floor is never below either interval's; a rotation hands this interval's to
-/// the last and forgets the last's, so that every value is gone after two rotations; and the
-/// all-zero word, a fresh region's, has a floor of zero, below which nothing is held back.
+/// A frontier word, in the format of any region size a geometry allows, round-trips. Read in
+/// interval E it gives the higher of both frontiers if it is E's, its `now` if it is E - 1's,
+/// and nothing otherwise. A claim in E that reaches page p leaves a word of E (or of E + 1, if
+/// it found one of E + 1) that reads at least p in its interval and exactly p in the next,
+/// nothing in the one after, and never less than the old word read in its interval; it writes
+/// nothing only when the word, of E or E + 1, already reads at least p. The all-zero word
+/// reads nothing in any interval but the first two.
 #[kani::proof]
-fn a_frontier_rises_rotates_and_is_forgotten() {
-    use super::layout::Frontier;
+fn a_frontier_word_names_its_interval() {
+    use super::layout::FrontierFormat;
+    let pages: u32 = kani::any();
+    kani::assume(pages >= 1 && pages <= 1 << 26);
+    let format = FrontierFormat::of(pages);
     let word: u64 = kani::any();
-    let frontier = Frontier::unpack(word);
-    assert!(frontier.pack() == word);
-    assert!(frontier.floor() >= frontier.now && frontier.floor() >= frontier.last);
-    assert!(frontier.floor() == frontier.now || frontier.floor() == frontier.last);
+    assert!(format.pack(format.unpack(word)) == word);
+    let epoch: u64 = kani::any();
     let page: u32 = kani::any();
-    match frontier.rise(page) {
+    kani::assume(page <= pages);
+    let f = format.unpack(word);
+    let floor = format.floor(word, epoch);
+    assert!(floor == 0 || floor == f.now || floor == f.last);
+    let mask = u64::MAX >> (64 - format.epoch_bits());
+    match format.record(word, epoch, page) {
         Some(next) => {
-            assert!(page > frontier.now && next.now == page && next.last == frontier.last);
-            assert!(next.floor() >= frontier.floor() && next.floor() >= page);
+            // Recorded under this interval, or the next if the word is already of the next.
+            let at = format.unpack(next).epoch;
+            assert!(at == epoch & mask || at == epoch.wrapping_add(1) & mask);
+            assert!(format.floor(next, at) >= page);
+            assert!(format.floor(next, at) >= format.floor(word, at));
+            assert!(format.floor(next, at.wrapping_add(1)) == page);
+            if format.epoch_bits() > 1 {
+                assert!(format.floor(next, at.wrapping_add(2)) == 0);
+            }
         }
-        None => assert!(page <= frontier.now && frontier.floor() >= page),
+        None => {
+            assert!(f.epoch == epoch & mask || f.epoch == epoch.wrapping_add(1) & mask);
+            assert!(format.floor(word, f.epoch) >= page);
+        }
     }
-    let rotated = frontier.rotate();
-    assert!(rotated.now == 0 && rotated.last == frontier.now);
-    assert!(rotated.rotate().pack() == 0);
-    assert!(Frontier::unpack(0).floor() == 0 && Frontier::unpack(0).rotate().pack() == 0);
-    let intervals: u32 = kani::any();
-    let aged = frontier.age(intervals);
-    match intervals {
-        0 => assert!(aged == frontier),
-        1 => assert!(aged == rotated),
-        _ => assert!(aged.pack() == 0),
+    if format.epoch_bits() > 1 && epoch & (u64::MAX >> (64 - format.epoch_bits())) > 1 {
+        assert!(format.floor(0, epoch) == 0);
     }
-}
-
-/// A pass that starts begins one interval of the frontiers, or two (forgetting them) only when
-/// the last pass ended two intervals ago or more by a clock that has not gone back.
-#[kani::proof]
-fn a_pass_forgets_the_frontiers_only_after_two_quiet_intervals() {
-    use super::policy::DECAY_TICKS;
-    use super::purge::intervals_since;
-    let (word, now): (u64, u64) = (kani::any(), kani::any());
-    let since = (now & !1).wrapping_sub(word & !1);
-    let intervals = intervals_since(word, now);
-    assert!(intervals == 1 || intervals == 2);
-    assert!((intervals == 2) == (since >= 2 * DECAY_TICKS && since < 1 << 63));
 }
 
 /// A large slot is whole pages in every geometry in use, so the unit a large free returns

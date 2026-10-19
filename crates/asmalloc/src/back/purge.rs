@@ -24,79 +24,83 @@
 //!
 //! **Decay** (`decay_step`, one call per heartbeat). Once an interval of the clock
 //! (`policy::DECAY_TICKS`) a pass starts where the walk stands with a goal: a quarter of the
-//! retained count (`policy::decay_goal`), or everything above the cap if that is more: the
-//! clock's part of the cap, for memory over it that growth has not paid for. Each
+//! retained count (`policy::decay_goal`), or everything above the cap if that is more. Each
 //! heartbeat then does one bounded step of the walk until the goal is met or the walk has gone
 //! once round, back where the pass began a lap later. The goal is in bytes and the walk stops
 //! within one unit of it, whatever the slot size.
 //!
-//! The pass takes only what the last two intervals did not reuse. Fills and allocations take
-//! the lowest free slots of a region, so the highest slot claimed or carved in an interval
-//! marks how far up that interval's reuse reached: each region keeps that frontier for the
-//! interval under way and the one before (`layout::Frontier`), and the pass takes only units
-//! at or above the higher of the two ([`Scope::Idle`]). Free pages below it are in the zone
-//! fills are reusing, and purging them only made the program fault them back; free pages
-//! above it went a whole interval unwanted. In a region whose reuse reaches high little is
-//! eligible and the walk moves on; in one no fill touched for two intervals everything free
-//! is, as before frontiers. The thread that starts a pass rotates every region's frontier
-//! (`rotate_frontiers`); a pass that starts two intervals or more after the last ended forgets
-//! them (`intervals_since`). What an interval did not need goes back: the rule the depot
-//! stacks, spares and stock follow.
+//! The pass takes only what the last two intervals did not reuse, whatever the count says.
+//! Fills and allocations take the lowest free slots of a region, so the highest slot claimed or
+//! carved in an interval marks how far up that interval's reuse reached: each region keeps
+//! that frontier for an interval of the clock and the one before (`layout::Frontier`), and the
+//! pass takes only units at or above it ([`Scope::Idle`]). Free pages below it were wanted
+//! within the last two intervals and are what fills take next; purging them only made the
+//! program fault them back. Free pages above it went a whole interval unwanted. In a region
+//! whose reuse reaches high little is eligible and the walk moves on; in one no fill touched
+//! for two intervals everything free is. What an interval did not need goes back: the rule the
+//! depot stacks, spares and stock follow.
 //!
-//! If a lap above the frontiers leaves more than the cap retained, the pass takes one more
-//! lap, below them too, for the excess ([`Pass::below`]): the cap is a bound, and memory over
-//! it goes within about an interval wherever it lies.
+//! That holds over the cap too. The count includes free slots on pages that also hold live
+//! ones, which no purge can lower, so a heap with more than the cap of fragmentation is over
+//! it for good, and a pass that went below the frontiers to bring the count down would purge
+//! what the program reuses every interval. The cap's job, the memory one class frees while
+//! another grows, is growth's to pay (below). What a burst over the cap that then goes quiet
+//! costs is time: its memory waits until no fill has reached it for an interval.
+//!
+//! A frontier word carries the number of its interval, the clock's time over the interval
+//! (`Clocked::epoch`, which the first heartbeat of each interval writes), so nothing has to
+//! age the words: a reader in interval E takes a word of E whole, a word of E - 1 for its
+//! `now`, and anything older as nothing. A frontier therefore lives one to two intervals of
+//! the clock after the claim that set it, however late or long the passes are.
 //!
 //! Regions are in the order classes were first used, so the order across them says nothing
 //! about reuse: the passes carry on round the heap instead of each starting at the top, which
 //! spent every pass's goal on the pages a quiet program revived each interval in the higher
 //! regions and left the free pages of the lowest resident for good. A heap whose free memory
-//! is all fragmentation costs one walk of its bitmaps an interval, in steps. Between passes a
-//! heartbeat reads the decay word and the clock, and the tallies only when a pass is due; a
-//! due pass that finds nothing retained ends as it starts (and still rotates the frontiers),
-//! so the next is an interval later. A clock that has gone back (a resume, a restored
-//! checkpoint) restarts the interval from the new time, so decay waits at most one interval
-//! for it. `decay_pass`, for the background thread's `maintain`, takes those steps in one
-//! call, until the pass it started or found has ended.
+//! is all fragmentation costs one walk of its bitmaps an interval, in steps. Every heartbeat
+//! reads the clock, to keep the interval number current; between passes it also reads the
+//! decay word, and the tallies only when a pass is due; a due pass that finds nothing retained
+//! ends as it starts, so the next is an interval later. A clock that has gone back (a resume,
+//! a restored checkpoint) restarts the interval from the new time, so decay waits at most one
+//! interval for it. `decay_pass`, for the background thread's `maintain`, takes those steps in
+//! one call, until the pass it started or found has ended.
 //!
 //! A pass is two words. The decay word holds the time the last pass ended, or the time the
 //! pass under way began with its low bit set; one compare-and-swap starts a pass and one ends
-//! it. The pass word holds the pass's remaining goal, the lap it began in and whether it may
-//! go below the frontiers, under a tag derived from the decay word; it is written once when
-//! the pass starts, after the frontiers are rotated, and once more by the one stepper whose
-//! compare-and-swap switches it to its lap below the frontiers. A stepper acts only on a pass
-//! word whose tag matches the decay word it read, so it never steps a new pass with the last
-//! one's goal, and ends only the pass it saw.
+//! it. The pass word holds the pass's remaining goal and the lap it began in, under a tag
+//! derived from the decay word, and is written once, when the pass starts. A stepper acts only
+//! on a pass word whose tag matches the decay word it read, so it never steps a new pass with
+//! the last one's goal, and ends only the pass it saw.
 //!
-//! **Frontiers are hints.** A claim raises its region's frontier with a compare-and-swap only
-//! when it reaches higher (`region::reach`): a load and a compare otherwise. A rotation is a
-//! compare-and-swap per region whose frontier is not zero (`region::rotate`). Either may lose
-//! a race to the other or be cut short by a fork; a claim recorded late counts in the next
-//! interval, and one never recorded (its thread lost between claim and record) leaves its
-//! slots claimed, so no purge can take them. The worst a wrong frontier does is a purge too
-//! many or too few, for at most two intervals; safety rests on the purge being a claim
-//! (`region::purge_unit`), as before.
+//! **Frontiers are hints.** Only a thread that has just claimed in a region writes its word,
+//! with a compare-and-swap, and only when it reaches higher or the word is of an earlier
+//! interval (`region::reach`): a load and a compare otherwise. A claim recorded late counts in
+//! the next interval; one never recorded (its thread lost between claim and record) leaves its
+//! slots claimed, so no purge can take them; an interval number that has wrapped round makes
+//! an old word read as recent. The worst a wrong frontier does is a purge too many or too few,
+//! for at most two intervals; safety rests on the purge being a claim (`region::purge_unit`).
 //!
 //! **The cap** (`policy::retained_cap`) is enforced when the heap grows, never when it frees.
 //! A free cannot tell memory that is idle from memory about to be reused, and purging there
 //! faulted reused memory straight back. Growth is carving: slots past a watermark, and runs.
 //! It goes on a debt (`Back::grow`). When the debt reaches a step (`policy::growth_step`),
 //! the grower takes it and, if retained memory is over the cap, purges up to the smaller of
-//! the two (`policy::growth_goal`), within `policy::PURGE_CAP_WORDS` of bitmap: one circuit
-//! of the heap from where the walk stands above the frontiers, and, if that is not enough,
-//! one below them, since the cap is a bound. The debt is cleared whatever the walk returned, so
-//! a heap whose free memory is all fragmentation pays one bounded walk per step of growth. A
-//! program that frees and reuses the same classes never grows and never purges on its own
-//! traffic; one that frees class X and then grows class Y purges X as Y grows, so resident
-//! memory stays within the cap of what is live.
+//! the two (`policy::growth_goal`), within `policy::PURGE_CAP_WORDS` of bitmap and one circuit
+//! of the heap from where the walk stands, frontiers or not ([`Scope::All`]): growth is
+//! resident memory the program asked for now, and paying for it is what keeps memory within
+//! the cap of what is live. The debt is cleared whatever the walk returned, so a heap whose
+//! free memory is all fragmentation pays one bounded walk per step of growth. A program that
+//! frees and reuses the same classes never grows and never purges on its own traffic; one that
+//! frees class X and then grows class Y purges X as Y grows.
 //!
 //! A claim that makes purged pages resident again is reuse, not growth, though it raises
 //! resident memory as growth does. Charging it made the allocator chase its own tail: with
 //! free memory over the cap, a purge of memory about to be reused caused a refault, which
 //! purged more of it, until the count reached the cap (a `HashMap` rebuilt in a loop made four
 //! times the `madvise` calls). The case it leaves open, a phase change into a class whose pages
-//! decay had returned, is what the decay pass's term for everything over the cap bounds, to
-//! about an interval.
+//! decay had returned while another class's freed memory stays resident, is what the decay
+//! pass's term for everything over the cap bounds: the other class's memory, which no fill
+//! reaches any more, goes within about two intervals.
 //!
 //! **The walk** goes over the regions from the highest address down and round again from the
 //! top, skipping regions whose class summary bit says nothing in them is free. Within a region it walks units of pages
@@ -106,7 +110,8 @@
 //! (`region::top_up`), so that the part of that huge page the fault made resident beyond the
 //! watermark can go with the rest. Each region keeps its own cursor in its `Hints`, and the
 //! walk over regions is one word in the state that every purger carries on from: the clocked
-//! pass, the cap's purge on growth. A count of completed laps and the position a pass began
+//! pass, the cap's purge on growth. It goes round only the regions below the highest ever
+//! given to a class (`Walk::top`), so a lap costs the class regions, not the reservation. A count of completed laps and the position a pass began
 //! at let a decay pass see that the walk has gone round even when another caller took the
 //! step that finished the lap. All of these are hints: two purgers on the same unit are safe because each purge is a
 //! claim (`region::purge_unit`), and a lost update only moves a purge earlier or later.
@@ -162,34 +167,14 @@ pub(crate) const fn decay_look(word: u64, now: u64) -> Decay {
     }
 }
 
-/// How many intervals of the frontiers a pass that starts at `now` begins, after a decay word
-/// `word` that holds the time the last pass ended: one, or two once that is two intervals ago
-/// or more. Claims are made on slow paths, whose heartbeats start a pass once one is due, so a
-/// pass that starts two intervals after the last ended has, but for a few large allocations
-/// (which beat the heart one call in sixteen), seen no claim for at least an interval: what
-/// the frontiers hold is older than the interval before it, and is forgotten. Otherwise a
-/// process woken after a long quiet would spare for one more interval what it reused before it
-/// went quiet. The few large claims a wrong guess forgets cost a purge too many.
-pub(crate) const fn intervals_since(word: u64, now: u64) -> u32 {
-    let since = (now & !ACTIVE).wrapping_sub(word & !ACTIVE);
-    if since >= 1 << 63 || since < 2 * DECAY_TICKS {
-        1
-    } else {
-        2
-    }
-}
-
 /// A pass word: what the steppers of one decay pass share.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(crate) struct Pass {
     /// Names the pass: [`Pass::tag_of`] the decay word that started it.
     pub(crate) tag: u16,
-    /// The low bits ([`Pass::LAP_BITS`]) of the lap count when the pass, or its lap below the
-    /// frontiers, began; that lap is over once they differ and the walk is back where it began.
+    /// The low bits of the lap count when the pass began; the pass ends when they differ and
+    /// the walk is back where it began.
     pub(crate) lap: u16,
-    /// Whether the pass may take pages below the regions' frontiers: the lap it takes once a
-    /// lap above them has left more than the cap retained ([`Scope::All`]).
-    pub(crate) below: bool,
     /// Pages the pass may still purge.
     pub(crate) pages: u32,
 }
@@ -198,27 +183,13 @@ pub(crate) struct Pass {
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(crate) enum Scope {
     /// Only units that start at or above their region's frontier (`region::floor`): pages
-    /// that no fill of the last two intervals reached. What the clocked pass takes, and what
-    /// the cap takes first.
+    /// that no fill of the last two intervals reached. What the clocked pass takes.
     Idle,
-    /// Every free unit: what the cap takes when the idle ones are not enough, and what `trim`
-    /// takes.
+    /// Every free unit: what growth over the cap and `trim` take.
     All,
 }
 
 impl Pass {
-    /// The bits of the lap count a pass word keeps: fifteen, the field's top bit being
-    /// `below`. A lap is a walk of the whole heap, and a pass takes at most two, so the field
-    /// wraps only if thousands of laps pass while one stepper looks.
-    pub(crate) const LAP_BITS: u32 = 15;
-
-    const LAP_MASK: u16 = (1 << Pass::LAP_BITS) - 1;
-
-    /// The lap field for a lap count.
-    pub(crate) const fn lap_of(laps: u32) -> u16 {
-        laps as u16 & Pass::LAP_MASK
-    }
-
     /// The tag of the pass a decay word started: every part of the word folded together, so
     /// two passes share a tag only by a one-in-65536 accident. The pass word a stepper then
     /// mistakes for the new pass's is the last pass's, whose goal is met or whose lap is over,
@@ -229,19 +200,15 @@ impl Pass {
     }
 
     pub(crate) const fn unpack(word: u64) -> Pass {
-        let lap = (word >> 32) as u16;
         Pass {
             tag: (word >> 48) as u16,
-            lap: lap & Pass::LAP_MASK,
-            below: lap & !Pass::LAP_MASK != 0,
+            lap: (word >> 32) as u16,
             pages: word as u32,
         }
     }
 
-    /// The word for this pass. A `lap` wider than [`Pass::LAP_BITS`] keeps its low bits.
     pub(crate) const fn pack(self) -> u64 {
-        let lap = (self.lap & Pass::LAP_MASK) as u64 | (self.below as u64) << Pass::LAP_BITS;
-        (self.tag as u64) << 48 | lap << 32 | self.pages as u64
+        (self.tag as u64) << 48 | (self.lap as u64) << 32 | self.pages as u64
     }
 }
 
@@ -319,19 +286,42 @@ impl<O: Os> Back<'_, O> {
         let goal = growth_goal(debt, self.retained(), retained_cap(geometry), step);
         // One circuit of the heap from wherever the shared walk stands, counted in regions
         // finished: the lap count says nothing here, since the walk may stand one region from
-        // the bottom with everything purgeable above it. The cap is a bound, so a circuit of
-        // what is idle that falls short is followed by one that takes what fills reuse too.
-        let regions = self.space.plan().objects();
-        let (mut spent, mut purged) = (0, 0);
-        for scope in [Scope::Idle, Scope::All] {
-            let mut finished = 0;
-            while purged < goal && spent < PURGE_CAP_WORDS && finished < regions {
-                let (read, bytes, done) =
-                    self.purge_step(PURGE_CAP_WORDS - spent, goal - purged, scope);
-                spent += read;
-                purged += bytes;
-                finished += usize::from(done);
-            }
+        // the bottom with everything purgeable above it. Frontiers or not: this is growth the
+        // program asked for now, and the walk carries on from here at the next payment.
+        let regions = self.walk_regions().max(1);
+        let (mut spent, mut finished, mut purged) = (0, 0, 0);
+        while purged < goal && spent < PURGE_CAP_WORDS && finished < regions {
+            let (read, bytes, done) =
+                self.purge_step(PURGE_CAP_WORDS - spent, goal - purged, Scope::All);
+            spent += read;
+            purged += bytes;
+            finished += usize::from(done);
+        }
+    }
+
+    /// The regions the walk goes round: those below the highest ever given to a class.
+    fn walk_regions(&self) -> usize {
+        (self.state.walk.top.load(Relaxed) as usize).min(self.space.plan().objects())
+    }
+
+    /// The number of the clock's interval as the last heartbeat saw it, which claims record
+    /// their frontiers under and the clocked pass reads them by. One load from a line written
+    /// a few times an interval.
+    #[inline(always)]
+    pub(super) fn epoch(&self) -> u64 {
+        self.state.decay.epoch.load(Relaxed)
+    }
+
+    /// Keeps the interval number current: the clock at `now` over the interval. Written only
+    /// when it changes, so once an interval, by the first heartbeat to see the new interval.
+    /// Two heartbeats with readings either side of a boundary may write in turn; the number
+    /// is then a step behind for a moment, which is a hint error like any other.
+    pub(super) fn note_epoch(&self, now: u64) {
+        let epoch = now / DECAY_TICKS;
+        let word = &self.state.decay.epoch;
+        let seen = word.load(Relaxed);
+        if seen != epoch {
+            let _ = word.compare_exchange(seen, epoch, Relaxed, Relaxed);
         }
     }
 
@@ -341,7 +331,7 @@ impl<O: Os> Back<'_, O> {
     }
 
     /// [`Back::heartbeat`] for a caller that keeps its own reading of the clock: `now` is
-    /// called only when the step needs the time.
+    /// called once.
     pub fn heartbeat_with(&self, now: &dyn Fn() -> u64) {
         let _ = self.decay_step(now);
     }
@@ -369,45 +359,43 @@ impl<O: Os> Back<'_, O> {
         let state = self.state;
         let geometry = self.space.plan().geometry();
         let page = geometry.page_size();
-        let mut seen = state.decay.load(Acquire);
-        // `decay_look` steps a pass under way without the time. Between passes it reads the
-        // clock, and only a pass that is due reads the retained count: its tallies are written
-        // by frees and claims, and reading them on every heartbeat took their lines from the
-        // threads writing them (`docs/research/memory.md`, "The cost of a large block, by
-        // cause").
-        let time = if seen & ACTIVE != 0 { 0 } else { now() };
+        let mut seen = state.decay.word.load(Acquire);
+        // Every heartbeat reads the clock, so that the interval number a frontier lives by
+        // moves with the clock even while a long pass is under way. Only a pass that is due
+        // reads the retained count: its tallies are written by frees and claims, and reading
+        // them on every heartbeat took their lines from the threads writing them
+        // (`docs/research/memory.md`, "The cost of a large block, by cause").
+        let time = now();
+        self.note_epoch(time);
         match decay_look(seen, time) {
             Decay::Wait => return None,
             Decay::Restamp(word) => {
-                let _ = state.decay.compare_exchange(seen, word, Release, Relaxed);
+                let _ = state
+                    .decay
+                    .word
+                    .compare_exchange(seen, word, Release, Relaxed);
                 return None;
             }
             Decay::Start(word) => {
                 let retained = self.retained();
                 if retained == 0 {
                     // A pass with nothing to do, ended as it starts, so that the heartbeats
-                    // of the next interval wait instead of reading the count. It still begins
-                    // an interval of the frontiers, so that a frontier says what the interval
-                    // before the next pass reused, not what one long before it did.
-                    if state
-                        .decay
-                        .compare_exchange(seen, word & !ACTIVE, Release, Relaxed)
-                        .is_ok()
-                    {
-                        self.rotate_frontiers(intervals_since(seen, time));
-                    }
+                    // of the next interval wait instead of reading the count.
+                    let _ =
+                        state
+                            .decay
+                            .word
+                            .compare_exchange(seen, word & !ACTIVE, Release, Relaxed);
                     return None;
                 }
                 if state
                     .decay
+                    .word
                     .compare_exchange(seen, word, Release, Relaxed)
                     .is_err()
                 {
                     return None;
                 }
-                // Before the pass word is published, so that no step of this pass reads a
-                // floor from before the interval that just ended.
-                self.rotate_frontiers(intervals_since(seen, time));
                 let over = retained.saturating_sub(retained_cap(geometry));
                 let goal = decay_goal(geometry, retained).max(over);
                 // From where the walk stands: a pass that started at the top every time spent
@@ -418,8 +406,7 @@ impl<O: Os> Back<'_, O> {
                 state.walk.pass_from.store(from, Relaxed);
                 let pass = Pass {
                     tag: Pass::tag_of(word),
-                    lap: Pass::lap_of(state.walk.laps.load(Relaxed)),
-                    below: false,
+                    lap: state.walk.laps.load(Relaxed) as u16,
                     pages: pages_of(goal, page),
                 };
                 state.walk.pass.store(pass.pack(), Release);
@@ -430,8 +417,7 @@ impl<O: Os> Back<'_, O> {
         let tag = Pass::tag_of(seen);
         let mut spent = 0;
         loop {
-            let word = state.walk.pass.load(Acquire);
-            let pass = Pass::unpack(word);
+            let pass = Pass::unpack(state.walk.pass.load(Acquire));
             if pass.tag != tag {
                 // The starter has not published this pass yet, or it is over and another
                 // has begun: either way it is not this stepper's. But a starter that vanished
@@ -444,54 +430,31 @@ impl<O: Os> Back<'_, O> {
                 if age >= 1 << 63 {
                     let _ = state
                         .decay
+                        .word
                         .compare_exchange(seen, now | ACTIVE, Release, Relaxed);
                 } else if age >= DECAY_TICKS {
-                    let _ = state.decay.compare_exchange(seen, now, Release, Relaxed);
+                    let _ = state
+                        .decay
+                        .word
+                        .compare_exchange(seen, now, Release, Relaxed);
                 }
                 return None;
             }
-            let round = pass.pages != 0 && self.went_round(pass);
-            if round && !pass.below {
-                // A lap of what is idle is done. If it left more than the cap retained, the
-                // cap is a bound: one more lap takes the excess wherever it lies, under the
-                // frontiers too. One stepper switches the pass, with one compare-and-swap of
-                // the word it read; the others find the new word and step it.
-                let over = self.retained().saturating_sub(retained_cap(geometry));
-                if over != 0 {
-                    let from = state.walk.purge_at.load(Relaxed);
-                    let next = Pass {
-                        lap: Pass::lap_of(state.walk.laps.load(Relaxed)),
-                        below: true,
-                        pages: pages_of(over, page),
-                        ..pass
-                    };
-                    if state
-                        .walk
-                        .pass
-                        .compare_exchange(word, next.pack(), Release, Relaxed)
-                        .is_ok()
-                    {
-                        // After the switch, so that a switcher that lost cannot move the
-                        // place another pass's lap ends. Until it lands, the new lap's count
-                        // has not moved, so no stepper looks at it.
-                        state.walk.pass_from.store(from, Relaxed);
-                    }
-                    continue;
-                }
-            }
-            if pass.pages == 0 || round {
+            if pass.pages == 0 || self.went_round(pass) {
                 // The goal is met or the walk has gone round. End the pass this thread saw,
                 // and only that one.
                 let now = self.space.os().ticks() & !ACTIVE;
-                let _ = state.decay.compare_exchange(seen, now, Release, Relaxed);
+                let _ = state
+                    .decay
+                    .word
+                    .compare_exchange(seen, now, Release, Relaxed);
                 return None;
             }
             if spent >= PURGE_STEP_WORDS {
                 return Some(seen);
             }
             let limit = pass.pages as usize * page;
-            let scope = if pass.below { Scope::All } else { Scope::Idle };
-            let (read, purged, _) = self.purge_step(PURGE_STEP_WORDS - spent, limit, scope);
+            let (read, purged, _) = self.purge_step(PURGE_STEP_WORDS - spent, limit, Scope::Idle);
             spent += read;
             let done = (purged / page).min(u32::MAX as usize) as u32;
             if done != 0 {
@@ -524,7 +487,7 @@ impl<O: Os> Back<'_, O> {
     /// when the lap ends, as every pass was before passes resumed the walk.
     fn went_round(&self, pass: Pass) -> bool {
         let walk = &self.state.walk;
-        if Pass::lap_of(walk.laps.load(Relaxed)) == pass.lap {
+        if walk.laps.load(Relaxed) as u16 == pass.lap {
             return false;
         }
         let from = walk.pass_from.load(Relaxed);
@@ -554,10 +517,12 @@ impl<O: Os> Back<'_, O> {
     /// read, at least one, the bytes purged, and whether it finished its region.
     fn purge_step(&self, budget: usize, limit: usize, scope: Scope) -> (usize, usize, bool) {
         let plan = self.space.plan();
+        let top = self.walk_regions();
         let seen = self.state.walk.purge_at.load(Relaxed);
-        // The position is the region to look at next plus one; zero means the top.
-        let index = if seen == 0 || seen as usize > plan.objects() {
-            plan.objects() - 1
+        // The position is the region to look at next plus one; zero means the top, the highest
+        // region ever given to a class.
+        let index = if seen == 0 || seen as usize > top {
+            top.saturating_sub(1)
         } else {
             seen as usize - 1
         };
@@ -580,22 +545,6 @@ impl<O: Os> Back<'_, O> {
             self.state.walk.laps.fetch_add(1, Relaxed);
         }
         (read.max(1), purged, done)
-    }
-
-    /// Begins a new interval of every class region's frontier, `intervals` after the last
-    /// (`region::rotate`), for the thread whose compare-and-swap of the decay word has just
-    /// begun one. A load from the region table for each region of the heap, and a load and at
-    /// most one compare-and-swap for each class region, which writes only a frontier that is
-    /// not zero.
-    pub(super) fn rotate_frontiers(&self, intervals: u32) {
-        let plan = self.space.plan();
-        for region in (0..plan.objects()).filter_map(|i| plan.region(i)) {
-            if let RegionTag::Class(class) = self.state.table.get(region)
-                && let Some(host) = self.host(class)
-            {
-                region::rotate(&host, region, intervals);
-            }
-        }
     }
 
     /// The class of a region the walk should look at: a class region whose summary bit is set.
@@ -641,7 +590,7 @@ impl<O: Os> Back<'_, O> {
             0
         };
         let floor = match scope {
-            Scope::Idle => region::floor(&host, region),
+            Scope::Idle => region::floor(&host, region, self.epoch()),
             Scope::All => 0,
         };
         if cursor != 0 && cursor <= floor {
