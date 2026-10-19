@@ -53,6 +53,15 @@ run Summary Summary_look_crash  ok
 # Three bits to a word: about 81 million states and six minutes.
 if [ -n "${SLOW:-}" ]; then run Summary Summary_run_wide ok; fi
 
+# A free that looks at every level of its walk (`tree::release_one`), with claims that keep
+# their bits: about a minute. The larger ones take 88 to 122 million states and eight to
+# eighteen minutes each on six workers.
+run SummaryLookUp SummaryLookUp ok
+if [ -n "${SLOW:-}" ]; then
+    run SummaryLookUp SummaryLookUp_crash ok
+    run SummaryLookUp SummaryLookUp_deep  ok
+fi
+
 # 6. Purge as a claim
 run Purge Purge               ok
 run Purge Purge_straddle      ok
