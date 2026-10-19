@@ -670,9 +670,12 @@ class. For a small object that means the new size maps to the same class. For a 
 it means the new size is still large and fits the slot. Anything else moves the object.
 
 A large object that has to move because it grew moves into a slot with room to grow in
-place: sixteen times its size where such a slot can be had, else four times, else its own
-size, and never more than a region. A buffer that doubles is otherwise copied at every
-doubling, and the copies add up to more than the buffer. The room costs address space and
+place: sixteen times its size while that slot is at most a sixteenth of a region, four
+times while that fits a region, and none past that, falling back from sixteen to four to
+none when the larger slot cannot be had. A buffer that doubles is otherwise copied at every
+doubling, and the copies add up to more than the buffer. The room is given only where a
+region still holds many such slots, because a region is never taken back from a class: a
+class with one slot to a region would let a few thousand growing buffers use every region. The room costs address space and
 nothing else: pages nobody wrote are not resident, and are never counted, kept or purged
 (see below). Under strict overcommit it does cost commit charge, since a region's writable
 prefix is charged whole, and a failed commit falls back to less room. A factor only makes

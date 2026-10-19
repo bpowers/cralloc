@@ -59,6 +59,10 @@ Limits worth knowing:
   library is: unloading it kills the process.
 - The heap reserves address space, not memory, and makes do with less under a limit. Under
   a limit too small for its smallest reservation, every allocation fails.
+- Under strict overcommit, or a data-segment limit (`RLIMIT_DATA`), a buffer that grows is
+  charged for the room it was moved into to grow in place, which can be many times its size,
+  whether or not it ever writes there. Such a system fits far fewer large growing buffers
+  than its memory would suggest.
 - A program that locks its memory with `mlockall` needs an unlimited `memlock` limit or
   the capability that lifts it: the heap's address-space reservation counts against the
   limit even though nothing in it is resident.
