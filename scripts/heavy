@@ -1,0 +1,39 @@
+#!/usr/bin/env bash
+# Run a build, test, proof or model check where it does not disturb a measurement: at low
+# priority, on the cores the benchmark suite does not pin to, and not while a measurement
+# that uses both L3s is running or waiting to run.
+#
+# Why: heavy work on one core of an L3 shares that L3's cache with a measurement on its
+# other cores. A measurement on both L3s therefore has to wait for heavy work to finish, and
+# with several people building it would wait for ever unless new heavy work queues behind it.
+#
+# Usage: scripts/heavy command args...
+#   ASMALLOC_HEAVY_CPUS  the CPU list, default 12-15,28-31 (`lscpu -e` shows which CPUs
+#                        share an L3, and `bench/README.md`, "Pinning", which the suite uses).
+#   ASMALLOC_LOCK_DIR    where the lock files live, default /tmp.
+set -euo pipefail
+
+[ $# -gt 0 ] || { echo "usage: scripts/heavy command args..." >&2; exit 2; }
+cpus="${ASMALLOC_HEAVY_CPUS:-12-15,28-31}"
+locks="${ASMALLOC_LOCK_DIR:-/tmp}"
+
+# The turnstile is what stops starvation: a measurement waiting for the heavy lock holds it
+# exclusively, so work that arrives later waits here instead of joining the shared holders.
+exec 8>>"$locks/asmalloc-heavy.turn"
+flock -s 8
+exec 9>>"$locks/asmalloc-heavy.lock"
+flock -s 9
+exec 8>&-
+
+# The command does not inherit the lock, so a daemon it leaves behind cannot keep it.
+child=
+trap '[ -n "$child" ] && kill -TERM "$child" 2>/dev/null' TERM INT HUP
+taskset -c "$cpus" nice "$@" 9>&- &
+child=$!
+status=0
+wait "$child" || status=$?
+# A trapped signal ends the first wait early; the second collects the command's own status.
+if kill -0 "$child" 2>/dev/null; then
+  wait "$child" || status=$?
+fi
+exit "$status"

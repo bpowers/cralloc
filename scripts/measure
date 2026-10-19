@@ -1,0 +1,34 @@
+#!/usr/bin/env bash
+# Run a timed measurement with nothing else measuring, and, for one that uses both L3s,
+# with no heavy work sharing a cache with it.
+#
+# Usage: scripts/measure [--both-l3] command args...
+#   A measurement on the first L3 only waits for other measurements. With --both-l3 it first
+#   holds back new heavy work (scripts/heavy), waits for what is running to finish, and only
+#   then queues for the measurement lock, so it never holds that lock while it waits for a
+#   long build. Hold either for minutes, not hours.
+#   ASMALLOC_LOCK_DIR  where the lock files live, default /tmp.
+#
+# `benchrun layout` takes the measurement lock itself: run it without this script.
+set -euo pipefail
+
+both=0
+if [ "${1:-}" = "--both-l3" ]; then
+  both=1
+  shift
+fi
+[ $# -gt 0 ] || { echo "usage: scripts/measure [--both-l3] command args..." >&2; exit 2; }
+locks="${ASMALLOC_LOCK_DIR:-/tmp}"
+
+if [ "$both" = 1 ]; then
+  exec 8>>"$locks/asmalloc-heavy.turn"
+  flock -x 8
+  exec 9>>"$locks/asmalloc-heavy.lock"
+  flock -x 9
+fi
+exec 7>>"$locks/asmalloc-measure.lock"
+flock -x 7
+
+status=0
+"$@" 7>&- 8>&- 9>&- || status=$?
+exit "$status"

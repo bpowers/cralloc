@@ -32,16 +32,13 @@ process light.
   TLA+, Miri, fuzzing and the preload checks run on demand.
 - The machine is shared. Stop only processes you started, by process ID; never kill by
   name (`pkill`, `killall`), since another teammate may be running the same tool.
-- Timed measurements do not share cores with anything else. Heavy work that is not a
-  measurement (builds, tests, model checks, proofs) runs at low priority on the cores of the
-  second L3 that the benchmark suite does not pin to (`taskset -c ... nice`; `lscpu -e`
-  shows which CPUs share an L3, and `bench/README.md`, "Pinning", which ones the suite
-  uses). A timed measurement runs one teammate at a time under
-  `flock /tmp/asmalloc-measure.lock`, and holds the lock for minutes, not hours.
-- A measurement that uses both L3s shares a cache with that heavy work. So heavy work that
-  runs for more than a minute or two (the full gate, proofs, model checks, long test runs)
-  holds `/tmp/asmalloc-heavy.lock` shared (`flock -s`), and a measurement on both L3s takes
-  it exclusively as well as the measurement lock, measurement lock first.
+- Timed measurements do not share cores, or a cache, with anything else. Run every build,
+  test, model check and proof through `scripts/heavy`: it runs the command at low priority
+  on the cores the benchmark suite does not pin to. Run every timed measurement through
+  `scripts/measure`, one teammate at a time, for minutes, not hours; a measurement that
+  also uses cores of the second L3 takes `--both-l3`, which waits for heavy work to finish
+  and holds new heavy work back while it runs. Do not take the lock files by hand: the
+  scripts queue so that neither side starves the other.
 - Everything that runs the allocator runs under a memory cap. An uncapped test once took
   57 GiB and the machine with it. `cargo test`, `cargo run` and `cargo bench` are capped by
   the workspace's cargo runner (`scripts/run-capped`: 4 GiB unless `ASMALLOC_TEST_MEM` says
