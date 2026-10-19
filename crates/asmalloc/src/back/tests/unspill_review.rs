@@ -3,8 +3,9 @@
 //! page faults whole.
 //!
 //! No way to lose the block's bytes was found; `a_purge_that_fails_part_way_keeps_the_bytes`
-//! covers the one case the original test left out. The two findings are of cost, and their
-//! tests are ignored until they are fixed:
+//! covers the one case the original test left out. The two findings are of cost; both are
+//! fixed (the OS is asked whether the rest of the page is resident, and the page is set aside
+//! where the advice does not reach), and their tests pin the fixes:
 //!
 //! - kept-slot: the page is returned whether or not the rest of it is resident. In a slot kept
 //!   resident from its last tenant (`policy::kept_grown`), or one that shrank and grows back,
@@ -60,7 +61,7 @@ fn fill_and_grow<O: Shape>(
 /// block to grow there has the huge page past its old end resident already, whole; returning
 /// it frees no page table worth freeing and costs the fault it was meant to save.
 #[test]
-#[ignore = "review finding kept-slot: unspill returns a huge page that is already resident"]
+#[cfg_attr(miri, ignore)]
 fn a_block_regrown_in_a_kept_slot_keeps_its_resident_huge_page() {
     let state = state::<Native>();
     let back = state.get_or_reserve().unwrap();
@@ -96,7 +97,7 @@ fn a_block_regrown_in_a_kept_slot_keeps_its_resident_huge_page() {
 /// keeps the huge page its new end lies in (the tail goes back in whole huge pages only), and
 /// growing back returns that resident page and faults it again, at every round.
 #[test]
-#[ignore = "review finding kept-slot: unspill returns a huge page that is already resident"]
+#[cfg_attr(miri, ignore)]
 fn a_block_that_shrinks_and_grows_back_keeps_its_resident_huge_page() {
     let state = state::<Native>();
     let back = state.get_or_reserve().unwrap();
@@ -130,7 +131,7 @@ fn a_block_that_shrinks_and_grows_back_keeps_its_resident_huge_page() {
 /// one huge page past the old end; when the block doubles from two huge pages that is inside
 /// the range just advised, and on Linux the copy faults that huge page whole.
 #[test]
-#[ignore = "review finding aside-ahead: unspill writes an advised huge page of the new room"]
+#[cfg_attr(miri, ignore)]
 fn a_growth_writes_no_advised_huge_page_the_program_has_not_reached() {
     let state = state::<Native>();
     let back = state.get_or_reserve().unwrap();

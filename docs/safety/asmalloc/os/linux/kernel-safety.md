@@ -147,6 +147,19 @@ first thread to finish its handler ends the process under every other thread's
 getpid, gettid, tgkill and exit_group here and getpid in `random`, none of which takes a
 pointer.
 
+## KERNEL-08: `mincore` in `resident`
+
+**Block.** `syscall(MINCORE, [at, pages * page, flags, 0, 0, 0])`.
+
+**Proof.** mincore(2) takes a page-aligned address, a length and a vector, reads no user
+memory, and writes one byte for each page of the range into the vector. `at` is `start` plus a
+multiple of the page size, page-aligned since `start` is (the trait's range rules), and the
+length is `pages` whole pages with `pages <= BATCH`, so the kernel writes at most `BATCH`
+bytes into `flags`, a live local array of `BATCH` bytes. The range lies inside the caller's,
+which is inside a live reservation, so the call reads or changes nothing of it. A failed call
+reports `-errno` and writes nothing the code then reads: the `?` returns before `flags` is
+looked at.
+
 ## KERNEL-09: `ticks`
 
 **Block.** `core::arch::x86_64::_rdtsc()`.

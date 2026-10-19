@@ -649,11 +649,25 @@ impl<'a, O: Os> Back<'a, O> {
     /// (`docs/research/memory.md`, "Growing blocks fault their spilled huge page in small
     /// pages"). So the page of bytes is copied aside into the block's own new room, the huge
     /// page is returned, which frees its emptied page table, and the bytes are copied back,
-    /// which faults the huge page whole under its new advice. The room is the first page of the
-    /// next huge page, which the block may now use; a block that fills its new size writes it
-    /// anyway, as its next spill. Where the OS keeps the page table, or refuses the purge, the
-    /// copy back restores the bytes all the same, and the page goes on in small pages, as
-    /// before.
+    /// which faults the huge page whole under its new advice. Where the OS keeps the page
+    /// table, or refuses the purge, the copy back restores the bytes all the same, and the page
+    /// goes on in small pages, as before.
+    ///
+    /// Only when the rest of the huge page is not resident, which the OS is asked: in a slot
+    /// kept resident from its last tenant, or one the block shrank in and grows back over, the
+    /// page is resident already, often whole, and returning it would throw that away and fault
+    /// it back. The clean bits cannot say this: the extent of an advised block is rounded up to
+    /// a huge page, so they are cleared over the page before the program writes it.
+    ///
+    /// The room is the first page of the huge page that holds the new end, which the advice,
+    /// rounded down, does not cover, and which a block that fills its new size writes anyway as
+    /// its next spill. Anywhere in the advised range the copy would fault a whole huge page the
+    /// program has not reached. A growth that ends on a huge-page boundary has no such page and
+    /// is left alone.
+    ///
+    /// Where the OS gives no huge pages at all (transparent huge pages off for the process),
+    /// this returns one small page and faults it back at each such growth, for nothing; the
+    /// allocator does not know that setting, and the cost is one call and one fault.
     ///
     /// # Safety
     ///
@@ -684,21 +698,31 @@ impl<'a, O: Os> Back<'a, O> {
         let end = (into + old).next_multiple_of(page);
         let at = ((base + end) & !(huge - 1)) - base;
         let part = end - at;
-        // Only the spill of a first page, the page must now be advised, and it, and the room
-        // the bytes go to, must lie inside what the block may now use, its new size rounded
-        // up to a page; `at > into` also keeps the block's start out of the page.
+        // The room: the first page of the huge page that holds the new usable end.
+        let fresh = (into + new).next_multiple_of(page);
+        let room = ((base + fresh - 1) & !(huge - 1)) - base;
+        // Only the spill of a first page; the page must now be advised; `at > into` keeps the
+        // block's start out of it; and the room must lie past it, past the advised range, and
+        // inside what the block may now use, its new size rounded up to a page.
         let first = ((base + at) / page) as u32;
         if part == 0
             || part > page
             || at <= into
             || first + pages > advised
-            || at + huge + part > (into + new).next_multiple_of(page)
+            || room < at + huge
+            || base + room < advised as usize * page
+            || room + part > fresh
         {
             return;
         }
         let spill = ptr.map_addr(|a| a.saturating_add(at - into));
-        let aside = spill.map_addr(|a| a.saturating_add(huge));
-        // SAFETY: BACK-CLASS-05: both ranges lie in the block's `new` bytes, `huge` apart.
+        let rest = spill.map_addr(|a| a.saturating_add(page));
+        // SAFETY: BACK-CLASS-05: whole pages inside the block, which nothing writes meanwhile.
+        if unsafe { self.space.resident(rest, huge - page) } != Ok(0) {
+            return;
+        }
+        let aside = ptr.map_addr(|a| a.saturating_add(room - into));
+        // SAFETY: BACK-CLASS-05: both ranges lie in what the block may now use, apart.
         unsafe { spill.copy_to_nonoverlapping(aside, part) };
         // SAFETY: BACK-CLASS-05: the holder's whole huge page inside its block, whose bytes
         // are copied aside.

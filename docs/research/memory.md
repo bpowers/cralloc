@@ -2176,6 +2176,56 @@ after (full session 0.60). Cgroup peaks from `bench/probes/memory/peaks.sh` agre
 MiB before and after on every job it runs (pipelines, churn, maps at 200k, tree 18, json 8 MiB,
 both vecgrows).
 
+**After review (2026-10-19).** As first merged, the change cost time and memory in two cases
+the jobs above never reach, since a single vector sits in slot 0, which has no stagger:
+
+- It returned the page on arithmetic alone. A staggered buffer grown and freed again and
+  again lands in the slot it was kept in (the budget for kept grown blocks), where the huge
+  page is resident already; the growth threw it away and faulted it back, one huge fault a
+  doubling, and with transparent huge pages off for the process 2 MiB dropped and 511 small
+  faults. Now the OS is asked (`Os::resident`, `mincore`) whether any page of the huge page
+  past the first is resident, and the page is returned only if none is. The clean bits cannot
+  answer this: an advised block's extent is rounded up to a huge page, so they are cleared
+  over the page before the program writes it.
+- It set the page aside one huge page on, which for any doubling from two huge pages up lies
+  inside the range just advised, so the copy faulted a huge page the program had not reached.
+  Now it goes in the first page of the huge page holding the new end, which the rounded-down
+  advice never covers.
+
+With transparent huge pages off, a growth in a fresh slot still returns one small page and
+faults it back, for nothing; the allocator does not know the setting, and that costs one call
+and one fault a doubling.
+
+The review's probe (`crates/asmalloc-preload/tests/programs/unspill_probe.c`), preloaded,
+CPU 2, the builds interleaved, three rounds that agreed within a few percent; one buffer in
+slot 1 grown by doubling from 1 MiB and freed, eight repetitions; the sums over repetitions 2
+to 8 of faults inside `realloc` (huge ones in brackets), resident memory added inside
+`realloc`, and TSC ticks of `realloc` and fill together. "before unspill" is `a92d51a`, "as
+merged" main `16bf1b1`, "fixed" this change.
+
+| To, slot | THP | before unspill | as merged | fixed |
+|---|---|---:|---:|---:|
+| 8 MiB, kept slot | on | 0, +0 MiB, 100.5M | 14 [14], +0 MiB, 101.3M | 0, +0 MiB, 100.3M |
+| 8 MiB, kept slot | off | 0, 100.4M | 14 and 7,154 in the fill, 111.4M | 0, 100.5M |
+| 16 MiB, fresh slot | on | 0, 250.4M (10,780 in the fill) | 42 [35], +70 MiB, 237.0M | 42 [21], +42 MiB, 237.2M |
+| 16 MiB, fresh slot | off | 0, 270.5M | 42, 269.6M | 42, 270.7M |
+
+In a fresh slot every repetition now faults three huge pages inside `realloc`, each the one the
+block had begun, instead of five; with the slot kept, nothing, as before the change. The
+`mincore` call costs about 2.5k ticks a growth. No run lost a byte.
+
+`vecgrow`, by hand as above, five interleaved rounds, cycles an element, faults and huge-page
+faults; the 2-vector jobs keep vector 1 in staggered slots that are kept between repetitions:
+
+| Job | before unspill | as merged | fixed |
+|---|---:|---:|---:|
+| vecgrow 64x4Mi | 6.70, 184,897 [260] | 5.02, 56,377 [512] | 4.98, 56,376 [512] |
+| vecgrow vecs=2 max=4Mi reps=1000 | 0.508, 1,355 [3] | 0.589, 1,843 [1,003] | 0.506, 844 [4] |
+| vecgrow vecs=2 max=8Mi reps=500 | 1.516, 514,342 [1,004] | 0.623, 4,341 [2,004] | 0.625, 4,342 [2,004] |
+
+The machine was busier than in the session above, so 64x4Mi reads higher in every column;
+peaks are the same in all three builds (278.8, 13.7 and 21.4 MiB).
+
 **What is left on vecgrow 64x4Mi.** 56K small faults on the outgrown 1 MiB blocks, and 512
 huge-page faults, two per vector and repetition, all of it faulting memory back that was
 returned. Both are the price of the memory bar. A budget for kept grown blocks of 64 MiB
