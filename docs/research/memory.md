@@ -1364,8 +1364,9 @@ The four that were above the floor:
   add, twice per pair; it is a hint, and a load and a store do.
 - The free of a slot whose leaf word was empty (in this loop, every free) set the summary bit
   above it without looking, an atomic OR of a bit that a large class's claims leave set. The
-  single-slot release now looks first, as a batch's release already does for scattered slots
-  (`Look` in `tla/Summary.tla`).
+  single-slot release now looks first at every level, the one above a summary word its own OR
+  found empty included, on a tree whose claims keep their bits; `tla/SummaryLookUp.tla`
+  models that step.
 
 The instructions that went: each metadata word was reached through a block address cached in
 the class's host, with saturating arithmetic and a compare at every access (100 instructions a
