@@ -1115,3 +1115,42 @@ faults and run at 4.4 to 4.5 GHz however warm the package is, before and after.
 An earlier pair of runs, taken while another worktree's proofs kept one CPU busy outside the
 frozen slice, had no cold runs in either arm: a busy machine hides the effect, which is why it
 came and went between sessions.
+
+### The clocked pass carries on round the heap
+
+2026-10-19, at `186bf6a` against main at `233ffbf`. The maintain test (`heap/tests.rs`) passed
+only by a slack of two huge pages. Run for 40 intervals, maintain left 50 pages (36 with
+origins) that `collect` then returned: free, resident pages at the bottom of the lowest
+region. Each interval the idle drain launders the loaded magazines of a quiet program's light
+classes, and the light work refills them from the lowest free slots, reviving a few pages at
+the bottom of each class's region. Every clocked pass began at the top of the heap and spent
+its quarter of what is retained re-purging those pages in the higher regions, so it never
+reached the lowest region's. "Fills take the lowest addresses" holds within a region; across
+regions the order is only that in which classes were first used.
+
+A pass now begins where the walk stands and carries on region by region, top-down within
+each, wrapping from the lowest region to the highest; it ends when its goal is met or the walk
+is back where it began a lap later. Its budget and steps are unchanged, and the cap's purge
+already carried on from where the walk stood.
+
+Measured on the simulated `Native` shape (the maintain scenario, 40 intervals) and the real
+machine (`benchrun`, three to five interleaved rounds; the burst-idle and phase probes of
+`bench/probes/memory/worst.sh`, three rounds, `madvise` counted with `strace -c` and minor
+faults with `time`):
+
+| | main | carried on |
+|---|---:|---:|
+| maintain: resident over what `collect` leaves, after 14 / 40 intervals | 328k / 147k | 4 KiB / 0 |
+| maintain: purges an interval, steady | 28 | 20 |
+| burst-idle probe: `madvise` calls, faults, MiB resident at 4, 8 and 12 s | 31.9k, 40.8k, 52/15/3 | 31.8k, 40.8k, 52/15/3 |
+| phase probe: `madvise` calls, faults | 5.7k to 6.1k, 10.2k to 10.6k | 6.1k to 6.6k, 10.0k to 10.7k |
+| rpc log c64: server cycles/req, process faults (five rounds) | 123.9k, 2,660 | 128.9k (+4.0%), 2,970 |
+| json 32Mi native / preload, cycles/byte (five rounds) | 16.36 / 17.33 | 16.67 (+1.9%) / 17.45 (+0.7%) |
+
+The rest of the smoke set, mstress 8, rpc echo c64 and the RPC jobs' peaks are level. json's
+faults are identical in both builds, so its 1.9% is more likely code placement (section 14).
+rpc log's are not: 12% more faults and 4% more cycles a request say the carried-on pass now
+also purges free pages at the top of the busy server's lowest regions, the classes it used
+first, which it then faults back. Before, those regions were only reached when the higher
+ones had nothing left to give.
+

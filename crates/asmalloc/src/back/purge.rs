@@ -23,14 +23,18 @@
 //! acts again (`docs/research/memory.md`: 136 MiB free and resident under a 64 MiB cap).
 //!
 //! **Decay** (`decay_step`, one call per heartbeat). Once an interval of the clock
-//! (`policy::DECAY_TICKS`) a pass starts at the top of the heap with a goal: a quarter of the
+//! (`policy::DECAY_TICKS`) a pass starts where the walk stands with a goal: a quarter of the
 //! retained count (`policy::decay_goal`), or everything above the cap if that is more: the
 //! clock's part of the cap, for memory over it that growth has not paid for. Each
 //! heartbeat then does one bounded step of the walk until the goal is met or the walk has gone
-//! once round. The goal is in bytes and the walk stops within one unit of it,
-//! whatever the slot size. Fills take the lowest addresses, so what is being reused sits at
-//! the bottom and the top-down pass mostly leaves it alone; what stays free is returned over
-//! several intervals. A heap whose free memory is all fragmentation costs one walk of its
+//! once round, back where the pass began a lap later. The goal is in bytes and the walk stops
+//! within one unit of it, whatever the slot size. Fills take the lowest addresses of a region,
+//! so what is being reused sits at the bottom of each region and the walk, top-down within a
+//! region, reaches it last; what stays free is returned over several intervals. Regions are in
+//! the order classes were first used, so the order across them says nothing about reuse: the
+//! passes carry on round the heap instead of each starting at the top, which spent every
+//! pass's goal on the pages a quiet program revived each interval in the higher regions and
+//! left the free pages of the lowest resident for good. A heap whose free memory is all fragmentation costs one walk of its
 //! bitmaps an interval, in steps. Between passes a heartbeat reads the decay word and the clock,
 //! and the tallies only when a pass is due; a due pass that finds nothing retained ends as it
 //! starts, so the next is an interval later. A clock that has gone back
@@ -65,16 +69,17 @@
 //! decay had returned, is what the decay pass's term for everything over the cap bounds, to
 //! about an interval.
 //!
-//! **The walk** goes over the regions from the highest address down, skipping regions whose
-//! class summary bit says nothing in them is free. Within a region it walks units of pages
+//! **The walk** goes over the regions from the highest address down and round again from the
+//! top, skipping regions whose class summary bit says nothing in them is free. Within a region it walks units of pages
 //! from the watermark down (`Layout::unit_below`): whole pages in the small-page part, whole
 //! huge pages in the huge-page part, so a huge page is never split. At the top of a region
 //! with a huge-page part it first carves the rest of the unit that holds the watermark
 //! (`region::top_up`), so that the part of that huge page the fault made resident beyond the
 //! watermark can go with the rest. Each region keeps its own cursor in its `Hints`, and the
-//! walk over regions is one word in the state. A count of completed laps lets a decay pass
-//! see that the walk has gone round even when another caller took the step that finished the
-//! lap. All of these are hints: two purgers on the same unit are safe because each purge is a
+//! walk over regions is one word in the state that every purger carries on from: the clocked
+//! pass, the cap's purge on growth. A count of completed laps and the position a pass began
+//! at let a decay pass see that the walk has gone round even when another caller took the
+//! step that finished the lap. All of these are hints: two purgers on the same unit are safe because each purge is a
 //! claim (`region::purge_unit`), and a lost update only moves a purge earlier or later.
 //!
 //! **Trim** purges every unit of every region, ignoring the cap, the clock and the cursors.
