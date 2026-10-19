@@ -11,6 +11,9 @@
 //! more: every page of a slot past what its tenants were given is clean, so the room nobody
 //! wrote is in no count. They run also with commits failing, so that growth takes its
 //! fallbacks.
+//!
+//! Two tests are findings. They fail on the code as reviewed and are ignored for that reason;
+//! run one by name with `--include-ignored`.
 
 use super::*;
 use crate::classes::MagazineSize;
@@ -562,4 +565,112 @@ fn slots_with_headroom_side_by_side_keep_the_clean_bits_true_fully() {
 #[ignore = "slow: run with scripts/gate --all"]
 fn growth_that_falls_back_when_commits_fail_keeps_the_clean_bits_true() {
     roomy_runs(0xbb67_ae85_84ca_a73b, 8 / DEBUG_LESS, 1200, true);
+}
+
+fn layout_of(size: usize) -> Layout {
+    Layout::from_size_align(size, 8).unwrap()
+}
+
+/// Finding regions-used-up. A room past half a region is a slot of a whole region, and a
+/// region is never unassigned, so every buffer that grows past a thirty-second of a region
+/// takes a region for good, and when the regions are gone every class that needs one fails,
+/// small classes too. In the native shape (247 regions of a megabyte) that is every buffer
+/// grown to 64 KiB. Six hundred of them, 38 MiB of data in a 247 MiB heap, fit at four times
+/// the room (three slots to a region, 202 regions); at sixteen the 247th cannot grow and
+/// nothing of a new class can be allocated.
+///
+/// The process's heap is the same under an address-space limit, which shrinks its regions:
+/// under `prlimit --as` of 16 GiB (regions of 2 MiB) 3,939 buffers grown from 40 to 64 KiB,
+/// 246 MiB of data, use every region, where `e486bc4` fits 23,634; after that `malloc(256)`
+/// returns null.
+#[test]
+#[ignore = "review finding regions-used-up: fails on 769974a"]
+fn six_hundred_buffers_grown_to_64_kib_leave_room_for_another_class() {
+    let sim = SimHeap::<Native>::new();
+    let (before, after) = (layout_of(40 << 10), 64 << 10);
+    let mut held = Vec::new();
+    let assigned = |sim: &SimHeap<Native>| {
+        let back = sim.heap().back().unwrap();
+        let regions = back.space().plan().regions();
+        regions
+            .filter(|&r| back.table().get(r) != RegionTag::Unassigned)
+            .count()
+    };
+    for i in 0..600 {
+        // SAFETY: valid layouts; each block is live where it is resized and freed once.
+        let grown = unsafe {
+            let p = GlobalAlloc::alloc(&sim, before);
+            assert!(!p.is_null(), "buffer {i}: no block of 40 KiB");
+            GlobalAlloc::realloc(&sim, p, before, after)
+        };
+        assert!(
+            !grown.is_null(),
+            "buffer {i} could not grow to 64 KiB: {} regions assigned of {}",
+            assigned(&sim),
+            Native::GEOMETRY.max_objects()
+        );
+        held.push(grown);
+    }
+    // SAFETY: a valid layout.
+    let other = unsafe { GlobalAlloc::alloc(&sim, layout_of(8)) };
+    assert!(!other.is_null(), "no region left for a class not used yet");
+    // SAFETY: the test's blocks, each freed once with a layout that fits it.
+    unsafe {
+        GlobalAlloc::dealloc(&sim, other, layout_of(8));
+        for p in held {
+            GlobalAlloc::dealloc(&sim, p, layout_of(after));
+        }
+    }
+}
+
+/// A native heap with every region but one assigned, to slots of a whole region that the
+/// caller never frees. Boxed, and made in a frame of its own: a heap's state is too big for a
+/// test's stack to hold two.
+#[inline(never)]
+fn all_but_one_region_assigned() -> Box<SimHeap<Native>> {
+    let region = Native::GEOMETRY.largest_plan().region_size();
+    let sim = Box::new(SimHeap::<Native>::new());
+    for _ in 1..Native::GEOMETRY.max_objects() {
+        sim.heap()
+            .alloc_large_aligned(region, C_ALIGN, false)
+            .unwrap();
+    }
+    sim
+}
+
+/// Finding last-region. The fallback's promise is that a growth fails only where a plain
+/// allocation of its size fails. A refused attempt is not free, though: the attempt at the
+/// larger slot assigns a region to that slot's class before it commits the slot
+/// (`Back::assign`, then `region::carve`), and a region is never unassigned. So when the OS
+/// refuses that commit, as strict overcommit and a data-segment limit refuse the largest
+/// request first, and the region was the last one, the smaller rooms and the size itself have
+/// no region to take, and the growth fails where a plain allocation of its size, tried first,
+/// is served. `e486bc4` fails this too, with its one attempt at four times the room; sixteen
+/// times asks the OS for four times as much, so it is refused sooner.
+#[test]
+#[ignore = "review finding last-region: fails on 769974a, and on e486bc4"]
+fn a_refused_commit_of_the_larger_slot_does_not_cost_the_growth_the_last_region() {
+    let size = 40 << 10;
+    // A plain allocation of the size is served from the last region.
+    let plain = all_but_one_region_assigned();
+    assert!(
+        plain
+            .heap()
+            .alloc_large_aligned(size, C_ALIGN, false)
+            .is_some()
+    );
+    // The growth: the region's metadata commits, the slot with sixteen times the room does not,
+    // and every commit after that would succeed.
+    let sim = all_but_one_region_assigned();
+    let commits = sim.os().calls(Call::Commit);
+    sim.os().set_faults(Call::Commit, Faults::once_after(1));
+    let grown = sim.heap().alloc_large_grown(size);
+    assert_eq!(sim.os().faults(Call::Commit), Faults::NONE);
+    assert!(
+        grown.is_some(),
+        "a growth to {size} bytes found no memory after {} commits, one refused; a plain \
+         allocation of {size} bytes is then {:?}",
+        sim.os().calls(Call::Commit) - commits,
+        sim.heap().alloc_large_aligned(size, C_ALIGN, false)
+    );
 }
