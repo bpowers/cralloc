@@ -6,14 +6,15 @@
 //! wants it paced by time instead runs `maintain` (`maintain.rs`) from a thread of its own.
 //! The clock is read at most once per heartbeat, and only when a decision needs it.
 //!
-//! - **Launder over target.** For each shared depot stack the call's exchange pushed a magazine
-//!   with objects on, while that stack holds more than its target, a magazine is popped and its
-//!   objects go back to the source, as many as the exchange pushed there, first and whatever
-//!   the budget below; the empty magazines go to the shared empty stack. Last in the heartbeat,
-//!   after its own sweep and drain, the same again for the stacks the call pushed on at all,
-//!   within the budget, which also catches up what earlier calls left over a target. Only a
-//!   push makes a stack deeper. A domain's stack needs no such rule: its cap keeps it within
-//!   bounds.
+//! - **Launder over target.** Last in the heartbeat, after its own sweep and drain: for each
+//!   shared depot stack the call's exchange pushed a magazine with objects on, while that stack
+//!   holds more than its target, a magazine is popped and its objects go back to the source, as
+//!   many as the exchange pushed there, whatever the rules before it did (they ran within what
+//!   those objects left of the budget below); the empty magazines go to the shared empty stack.
+//!   Then the same, within the budget, for what the heartbeat's own sweep and drain pushed on
+//!   shared stacks; what the budget leaves over a target, the shed takes back over the
+//!   heartbeats that follow. Only a push makes a stack deeper. A domain's stack needs no such
+//!   rule: its cap keeps it within bounds.
 //! - **Shed what was not needed** (`shed.rs`). A note of the depth of each stack the slow path
 //!   tried to pop, and on every [`LOOK_EVERY`]th slow path of a CPU a look at one class's stacks
 //!   in its own domain and the shared pool, the classes in turn, and at one stack held by
@@ -45,11 +46,11 @@
 //! launders at most [`LAUNDER_BUDGET`](super::LAUNDER_BUDGET) objects by its own choice: the
 //! refresh in the exchange (`slow.rs`), the age limit's take or the sweep's step, the shed, and
 //! the launder over target past the exchange's own pushes each launder a magazine only while a
-//! full one would fit in what is left of it. A rule that finds no room waits for a later slow
-//! path. On top of that budget comes one launder for each magazine the exchange pushed past a
-//! shared stack's target, which is one, or none when the exchange refreshed instead, unless the
-//! thread is moved to another CPU while it exchanges and pushes again. So a `free` launders at
-//! most about one largest magazine, 1,022 objects, and a `malloc` that much besides its fill. A
+//! full one would fit in what is left of it, after the objects the exchange pushed on shared
+//! stacks are set aside for the launder over target. A rule that finds no room waits for a later
+//! slow path. Only when the exchange pushes more than the budget, which takes a thread moved to
+//! another CPU while it exchanges, does the call launder more. So a `free` launders at most one
+//! of the largest magazines, 1,022 objects, and a `malloc` that much besides its fill. A
 //! launder sets one bitmap word per group of neighbours with one atomic OR, or one per object
 //! when they are scattered. A sweep step also pushes the rest of one spare stack, at most a few
 //! magazines, to the depot; for a class with stock it instead returns one magazine above the
@@ -360,11 +361,11 @@ impl<O: Os, R: Routines, S: Source> Cache<'_, O, R, S> {
     /// that the rotating chores look at: for a small slow path, the count of its CPU's activity.
     fn beat(&self, served: Option<SmallClass>, chores: Chores, activity: Option<u64>) {
         let clock = Clock::new(self.os());
-        // First what the exchange pushed past a shared stack's target, whatever the budget:
-        // one launder for each such push keeps the stack from gaining on the magazines that
-        // arrive. Every launder after it is within the budget.
+        // What the exchange pushed on shared stacks is laundered at the end, one magazine for
+        // each push while the stack is over its target, so that the stack does not gain on
+        // what arrives; the rules before then work within what that leaves of the budget.
         let pushed = self.overflowed.take();
-        self.launder_overflow(pushed, &clock, false);
+        self.reserved.set(pushed.objects);
         if let (Some(cpu), Some(class), true) = (chores.cpu, served, chores.installed) {
             self.unstamp(cpu, class);
         }
@@ -409,18 +410,13 @@ impl<O: Os, R: Routines, S: Source> Cache<'_, O, R, S> {
                 _ => {}
             }
         }
-        // Last, so that it sees what this heartbeat's own sweep and drain parked, and within
-        // the budget: those, and whatever earlier calls left over the targets of the stacks
-        // this call pushed on.
+        // Last, so that it sees what this heartbeat's own sweep and drain parked.
+        self.reserved.set(0);
+        self.launder_overflow(pushed, &clock, false);
+        // Then, within the budget, as many as this heartbeat's own sweep and drain pushed on
+        // shared stacks. What the budget leaves over a target the shed takes back later.
         let parked = self.overflowed.take();
-        self.launder_overflow(
-            Overflow {
-                classes: pushed.classes | parked.classes,
-                magazines: u32::MAX,
-            },
-            &clock,
-            true,
-        );
+        self.launder_overflow(parked, &clock, true);
     }
 
     /// Launders magazines from the shared stacks of `overflow`'s classes, while each is over its
@@ -433,6 +429,7 @@ impl<O: Os, R: Routines, S: Source> Cache<'_, O, R, S> {
         let Overflow {
             mut classes,
             mut magazines,
+            ..
         } = overflow;
         while classes != 0 && magazines > 0 {
             let ordinal = classes.trailing_zeros() as usize;
