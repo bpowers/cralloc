@@ -248,8 +248,13 @@ classes lightly has one partly used page per class, and each hot class needs its
 entries. The huge-page policy below is built around this.
 
 A region becomes writable in steps, each a single `mprotect` that extends the writable
-prefix well ahead of what is in use. Under strict overcommit the commit charge is the
-writable prefix, not the reservation.
+prefix by about as much as the region has made writable already, from a few pages at first
+to at most 64 MiB a step. Each call holds the kernel's lock on the process's address space
+and on the region's mapping, and page faults in the region and every other mapping change
+wait behind it, so the number of calls must grow with the logarithm of a region's use and
+not with the use itself. If the OS refuses a step, the region asks for the smallest one
+instead. Under strict overcommit the commit charge is the writable prefix, not the
+reservation: at most about twice what a region has used.
 
 The rest of the reservation holds metadata: each region's bitmaps at an address computed
 from the region number, and an array of magazines. A small class's region keeps its
