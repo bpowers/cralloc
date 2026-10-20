@@ -56,6 +56,9 @@ const _: () = assert!(
 /// The count of intervals and when the last step was taken (see the module documentation).
 pub(crate) struct Counted {
     word: AtomicU64,
+    /// One more than the count at which `maintain` last ran a round, zero for never: what
+    /// limits it to one round an interval (design: "Heartbeat").
+    maintained: AtomicU64,
 }
 
 /// What a reading of the word and the clock decides.
@@ -113,6 +116,7 @@ impl Counted {
     pub(crate) const fn new() -> Self {
         Counted {
             word: AtomicU64::new(0),
+            maintained: AtomicU64::new(0),
         }
     }
 
@@ -133,6 +137,21 @@ impl Counted {
                 Err(found) => word = found,
             }
         }
+    }
+
+    /// Whether a round of `maintain` is due: none has run in the interval the count is in. The
+    /// caller that gets `true` has claimed the round, with one compare-and-swap, so of callers
+    /// in one interval at most one runs it. Reads the counted time first, so a call is what
+    /// steps the count through a silence.
+    pub(crate) fn claim_round<O: Os + ?Sized>(&self, os: &O) -> bool {
+        let _ = self.now(os);
+        let round = self.count() as u64 + 1;
+        let last = self.maintained.load(Relaxed);
+        last != round
+            && self
+                .maintained
+                .compare_exchange(last, round, Relaxed, Relaxed)
+                .is_ok()
     }
 
     /// The count of intervals, without reading the clock.

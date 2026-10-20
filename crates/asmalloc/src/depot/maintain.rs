@@ -1,7 +1,9 @@
 //! `maintain`: the middle tier's share of one round of the clocked maintenance for the whole
-//! heap, for a background thread or a program's idle hook. It does at once what the heartbeats
-//! of an interval would have done, and respects the clock as they do, so a second call within
-//! an interval finds nothing to do.
+//! heap, for a background thread or a program's timer. It does at once what the heartbeats of
+//! an interval would have done. It runs at most one round in each counted interval
+//! (`crate::clock`): a call in an interval that has had its round returns after one clock read
+//! and a load, so a timer or a hook may call it freely. Its clock read is also what steps the
+//! count through a silence, so with a timer calling it, intervals pass in wall time.
 //!
 //! 1. **The idle look at every slab** a slow path has used ([`Cache::idle_look`]): a slab whose
 //!    activity counter has stood still for an interval is drained, including one busy only on
@@ -45,8 +47,13 @@ use crate::os::Os;
 use core::sync::atomic::Ordering::{Acquire, Relaxed};
 
 impl<O: Os, R: Routines, S: Source> Cache<'_, O, R, S> {
-    /// One round of the clocked maintenance for the whole heap (see the module documentation).
+    /// One round of the clocked maintenance for the whole heap (see the module documentation),
+    /// unless a round has already run in this interval: then it returns at once, so a timer
+    /// or a hook may call it as often as it likes.
     pub fn maintain(&self) {
+        if !self.source.clock().claim_round(self.os()) {
+            return;
+        }
         let clock = Clock::new(self.os(), self.source.clock());
         if generation::drains_enabled(self.depot) {
             let count = self.depot.common.cpus.load(Acquire);

@@ -1040,6 +1040,42 @@ fn tick<S: Shape>(back: &Back<'_, Sim<S>>, intervals: u64) {
     }
 }
 
+/// A silence counts as one interval (`crate::clock`): memory a fill reached half an interval
+/// before a long silence is still inside its region's frontier when the heartbeats after the
+/// silence start a clocked pass, so the pass leaves it for the burst that follows; heartbeats
+/// over the intervals after that return it as before. Read off the cycle counter, the first
+/// pass after the silence found every frontier gone and purged it all.
+#[test]
+fn a_silence_ages_a_frontier_by_at_most_one_interval() {
+    let state = state::<Standard>();
+    let back = state.get_or_reserve().unwrap();
+    let os = state.os();
+    let class = small(1024);
+    tick(&back, 1);
+    os.advance_clock(DECAY_TICKS / 2);
+    beat(&back);
+    let slots = fill(&back, class, 256);
+    for &p in &slots {
+        paint(p, 1024, 3);
+    }
+    // SAFETY: the test holds these slots and gives them up.
+    unsafe { back.launder(class, &slots) };
+    let purges = os.calls(Call::Purge);
+    os.advance_clock(50 * DECAY_TICKS);
+    beat(&back);
+    assert_eq!(
+        os.calls(Call::Purge),
+        purges,
+        "purged what the last interval reached"
+    );
+    for _ in 0..3 {
+        os.advance_clock(DECAY_TICKS);
+        beat(&back);
+    }
+    assert!(os.calls(Call::Purge) > purges);
+    assert!(back.retained() < 256 * 1024);
+}
+
 /// The page past the end of the `size`-byte slot at `p`, counted from its region's start: what
 /// a claim of it raises the region's frontier to.
 fn page_past<O: Os>(back: &Back<'_, O>, p: *mut u8, size: usize) -> u32 {

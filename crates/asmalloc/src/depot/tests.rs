@@ -252,6 +252,29 @@ fn a_clock_that_goes_back_delays_a_drain_by_one_interval_only() {
     rig.census(&user, false);
 }
 
+/// A silence counts as one interval (`crate::clock`): an idle slab that a look saw half an
+/// interval before a long silence is not drained by the first looks after it, which find it
+/// quiet for half an interval, and is drained once heartbeats have run for an interval more.
+/// Read off the cycle counter, the first look after the silence drained it.
+#[test]
+fn a_silence_ages_an_idle_slab_by_at_most_one_interval() {
+    let (rig, user) = an_idle_cpu_0(IDLE_TICKS / 2);
+    heartbeats_on_cpu_1(&rig);
+    rig.os().advance_clock(50 * IDLE_TICKS);
+    heartbeats_on_cpu_1(&rig);
+    assert_eq!(
+        rig.os().calls(Call::Fence),
+        0,
+        "drained by the first look after a silence"
+    );
+    assert!(!cpu_0_is_empty(&rig));
+    rig.os().advance_clock(IDLE_TICKS);
+    heartbeats_on_cpu_1(&rig);
+    assert_eq!(rig.os().calls(Call::Fence), 1);
+    assert!(cpu_0_is_empty(&rig));
+    rig.census(&user, false);
+}
+
 /// A look whose drain finds the slab claimed by someone else (here a claim left as if by a
 /// `collect` that then backed out) tries again an interval later, so an idle slab with
 /// magazines parked is still drained.
@@ -749,6 +772,32 @@ fn maintain_twice_in_an_interval_changes_nothing_the_second_time() {
     rig.census(&[], false);
 }
 
+/// `maintain` runs one round in each counted interval and returns at once for every other call
+/// in it, so a timer or a hook may call it freely; its own calls step the count through a
+/// silence, so called once an interval it runs once an interval.
+#[test]
+fn maintain_runs_one_round_an_interval() {
+    let rig = rig(12, TIGHT);
+    let machine = SimCpu::new(0);
+    let cache = rig.cache(&machine);
+    cache.maintain();
+    assert_eq!(rig.source.passes(), 1);
+    for _ in 0..15 {
+        rig.os().advance_clock(IDLE_TICKS / 16);
+        cache.maintain();
+    }
+    assert_eq!(rig.source.passes(), 1, "two rounds in an interval");
+    rig.os().advance_clock(IDLE_TICKS / 16);
+    cache.maintain();
+    assert_eq!(rig.source.passes(), 2);
+    for round in 3..8 {
+        rig.os().advance_clock(IDLE_TICKS);
+        cache.maintain();
+        cache.maintain();
+        assert_eq!(rig.source.passes(), round);
+    }
+}
+
 /// `maintain`'s idle look sees a CPU that is busy only on fast paths stand still, as a
 /// heartbeat's does: it drains it, and its objects go back to the source, at most once an
 /// interval however often `maintain` runs.
@@ -781,7 +830,14 @@ fn maintain_drains_a_cpu_busy_on_fast_paths_at_most_once_an_interval() {
             drains.push(rig.os().ticks());
         }
     }
-    assert_eq!(slab.activity(), 1 + drains.len() as u64);
+    // One slow path to start, and a refill after each drain but perhaps the last, which can
+    // fall in the last step.
+    let refills = slab.activity() - 1;
+    assert!(
+        refills == drains.len() as u64 || refills + 1 == drains.len() as u64,
+        "{refills} refills after {} drains",
+        drains.len()
+    );
     assert!(drains.len() >= intervals as usize / 2 - 1, "{drains:?}");
     for pair in drains.windows(2) {
         assert!(
