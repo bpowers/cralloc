@@ -193,6 +193,19 @@ impl<'a, O: Os, R: Routines, S: Source> Cache<'a, O, R, S> {
         None
     }
 
+    /// EXPERIMENT (`x-home`): whether the top object of magazine `top`, read without taking the
+    /// magazine, lives in this domain's memory. A hint: the magazine may have been popped and
+    /// reused meanwhile, and its memory is never unmapped.
+    fn top_homed_here(&self, top: u32, class: SmallClass) -> bool {
+        let Some(magazine) = super::magazine::MagazineId::new(top)
+            .and_then(|id| self.area.by_id(id, class.magazine()))
+        else {
+            return false;
+        };
+        let object = magazine.object(magazine.level());
+        !object.is_null() && self.source.homed_in(object, self.here().index())
+    }
+
     /// EXPERIMENT (`x-own-fill-first`): a magazine of `class` from the domain's stack, else
     /// filled from free objects in the domain's own regions, else from the shared stack, else
     /// filled as usual. `None` when there is no magazine at all.
@@ -210,9 +223,13 @@ impl<'a, O: Os, R: Routines, S: Source> Cache<'a, O, R, S> {
         }
         // With `x-peek`, a shared stack whose top magazine this domain pushed is popped as
         // usual: its objects are the domain's own.
+        // With `x-home` also when its top object lives in the domain's memory: a flow from this
+        // domain to another sends its objects back that way, and they are this domain's to
+        // reuse.
         #[cfg(feature = "x-peek")]
         if let Some(top) = self.depot.full(Pool::Shared, class).top()
-            && !crate::xtag::from_other(top, self.here().index())
+            && (!crate::xtag::from_other(top, self.here().index())
+                || (cfg!(feature = "x-home") && self.top_homed_here(top, class)))
             && let Some(magazine) = self.pop_full(class, &mut chores.tried)
         {
             return Some(Obtained::Magazine(magazine));

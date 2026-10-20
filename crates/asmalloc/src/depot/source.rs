@@ -35,6 +35,13 @@ pub trait Source {
         0
     }
 
+    /// EXPERIMENT: whether an object this source handed out lives in memory of cache domain
+    /// `domain`. A hint.
+    fn homed_in(&self, object: *const u8, domain: usize) -> bool {
+        let _ = (object, domain);
+        false
+    }
+
     /// Takes back free objects of `class`, each one this source handed out, from the object
     /// slots of a magazine this thread holds.
     fn take_back(&self, class: SmallClass, objects: &[AtomicPtr<u8>]);

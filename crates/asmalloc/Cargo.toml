@@ -47,6 +47,8 @@ x-own-fill-first = []
 x-carve-own-first = []
 # `x-peek` (with `x-own-fill-first`): pop the shared stack first when its top magazine is the domain's own.
 x-peek = ["x-own-fill-first"]
+# `x-home` (with `x-peek`): also pop it first when its top object lives in the domain's memory.
+x-home = ["x-peek"]
 
 [dependencies]
 

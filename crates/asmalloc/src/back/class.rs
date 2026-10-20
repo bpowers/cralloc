@@ -1233,6 +1233,17 @@ impl<'a, O: Os> Back<'a, O> {
         }
     }
 
+    /// EXPERIMENT: whether `ptr` lies in a region of cache domain `domain`. A hint.
+    pub fn homed_in(&self, ptr: *const u8, domain: usize) -> bool {
+        let Some(location) = self.space.locate(ptr) else {
+            return false;
+        };
+        let r = location.region.index();
+        let word = &self.state.owners[domain % super::host::BACK_DOMAINS]
+            [(r / 64) % super::host::CLASS_WORDS];
+        word.load() & (1 << (r % 64)) != 0
+    }
+
     /// What `ptr` is the start of, if anything: a slot of a class (handed out or not), or a run
     /// of regions. One load from the region table, then arithmetic.
     pub fn lookup(&self, ptr: *const u8) -> Option<Kind> {

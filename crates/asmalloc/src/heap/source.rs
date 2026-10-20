@@ -23,6 +23,10 @@ impl<O: Os> Source for Back<'_, O> {
         Back::fill_own(self, class, &mut Descending(slots), domain)
     }
 
+    fn homed_in(&self, object: *const u8, domain: usize) -> bool {
+        Back::homed_in(self, object, domain)
+    }
+
     fn take_back(&self, class: SmallClass, objects: &[AtomicPtr<u8>]) {
         // SAFETY: HEAP-SOURCE-01.
         unsafe { self.launder(class, objects) };
