@@ -132,3 +132,39 @@ pub fn disk_use(dir: &Path) -> u64 {
         .and_then(|o| String::from_utf8(o.stdout).ok()?.split_whitespace().next()?.parse().ok())
         .unwrap_or(0)
 }
+
+#[cfg(test)]
+mod tests {
+    use crate::paths::Paths;
+
+    fn programs() -> Vec<&'static str> {
+        let mut v: Vec<&'static str> = crate::suite::apps().iter().filter_map(|j| j.program.app()).collect();
+        v.dedup();
+        v
+    }
+
+    #[test]
+    fn every_program_pins_the_workloads_allocator_versions() {
+        let p = Paths::new();
+        for program in programs() {
+            super::check_lock(&p, program).unwrap();
+        }
+    }
+
+    /// `build-apps` passes each allocator's bench-alloc feature to the program's driver, which
+    /// must forward it under the same name.
+    #[test]
+    fn every_program_forwards_every_allocator_feature() {
+        let p = Paths::new();
+        let allocators = crate::config::load(&p.bench, &p.baselines).unwrap();
+        for program in programs() {
+            let path = p.bench.join("apps").join(program).join("Cargo.toml");
+            let manifest: toml::Table = toml::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+            let features = manifest.get("features").and_then(|f| f.as_table()).cloned().unwrap_or_default();
+            for f in allocators.iter().filter_map(|a| a.feature.as_deref()).filter(|f| !f.is_empty()) {
+                let want = toml::Value::Array(vec![toml::Value::String(format!("bench-alloc/{f}"))]);
+                assert_eq!(features.get(f), Some(&want), "{}: feature {f}", path.display());
+            }
+        }
+    }
+}

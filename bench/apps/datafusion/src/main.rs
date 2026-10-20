@@ -46,11 +46,12 @@ fn main() {
         let rt = tokio::runtime::Builder::new_multi_thread().enable_all().build().expect("tokio runtime");
         rt.block_on(session(&data, iterations))
     });
-    let rows = rows.unwrap_or_else(|e| fail(&format!("datafusion: {e}")));
+    let (rows, ms) = rows.unwrap_or_else(|e| fail(&format!("datafusion: {e}")));
     let first = &rows[..QUERIES.len()];
     let counts = first.iter().map(usize::to_string).collect::<Vec<_>>().join(",");
     d.report()
         .metric("rows", counts.as_str())
+        .metric("query_ms", ms)
         .metric("threads", std::thread::available_parallelism().map_or(0, |n| n.get()));
     for (i, it) in rows.chunks(QUERIES.len()).enumerate() {
         if it != first {
@@ -64,8 +65,8 @@ fn main() {
 }
 
 /// Declares the tables and runs every query `iterations` times; returns the row count of each
-/// query's result, in order, for every iteration.
-async fn session(data: &str, iterations: usize) -> datafusion::error::Result<Vec<usize>> {
+/// query's result, in order, for every iteration, and the milliseconds each took.
+async fn session(data: &str, iterations: usize) -> datafusion::error::Result<(Vec<usize>, Vec<f64>)> {
     let ctx = SessionContext::new();
     for t in TABLES {
         ctx.sql(&format!("CREATE EXTERNAL TABLE {t} STORED AS PARQUET LOCATION '{data}/{t}.parquet'"))
@@ -74,8 +75,10 @@ async fn session(data: &str, iterations: usize) -> datafusion::error::Result<Vec
             .await?;
     }
     let mut rows = Vec::with_capacity(iterations * QUERIES.len());
+    let mut ms = Vec::with_capacity(iterations * QUERIES.len());
     for _ in 0..iterations {
         for q in QUERIES {
+            let t0 = std::time::Instant::now();
             // Query 15 creates a view, selects from it and drops it; its answer is the
             // statement that returns rows.
             let mut n = 0;
@@ -84,7 +87,8 @@ async fn session(data: &str, iterations: usize) -> datafusion::error::Result<Vec
                 n += batches.iter().map(|b| b.num_rows()).sum::<usize>();
             }
             rows.push(n);
+            ms.push((t0.elapsed().as_secs_f64() * 1e4).round() / 10.0);
         }
     }
-    Ok(rows)
+    Ok((rows, ms))
 }

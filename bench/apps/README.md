@@ -7,8 +7,8 @@ and it is written so that it could move to a repository of its own.
 
 | Program | Work | Threads | Shape | Ships with |
 |---|---|---|---|---|
-| `ruff` 0.16.9 | `ruff check` of Home Assistant core 2026.10.2 (19k files, 3.8M lines) with its own configuration, no cache; 2 s, 70 MB | 4 (rayon) | a compiler-like CLI: parse, many passes, short-lived process | jemalloc |
-| `datafusion` 55.2.0 | the 22 TPC-H queries at scale factor 3 on Parquet, as datafusion-cli runs them; 3 s, 1 GB | 8 (tokio) | analytics: large buffers, hash tables that grow, async tasks moving between workers | mimalloc |
+| `ruff` 0.16.9 | `ruff check` of Home Assistant core 2026.10.2 (19k files, 3.8M lines) with its own configuration, no cache; 1.1 s, 40 MB | 4 (rayon) | a compiler-like CLI: parse, many passes, short-lived process | jemalloc |
+| `datafusion` 55.2.0 | the 22 TPC-H queries at scale factor 3 on Parquet, as datafusion-cli runs them; 3.6 s, 1 GB | 4 (tokio) | analytics: large buffers, hash tables that grow, async tasks moving between workers | mimalloc |
 | `boa` 0.22.0 | the V8 benchmark suite (v7), each benchmark a fixed number of times; 8 s, 250 MB | 1 | an interpreter with a tracing GC: many small objects, one thread | jemalloc |
 
 (Times and peaks are rough, with glibc on the reference machine; `docs/research/` has
@@ -32,7 +32,10 @@ one other than glibc's because it mattered to them, which is a reason to measure
 - **Deterministic, fixed work**: the same work in every run whatever the allocator's speed (no
   "as many iterations as fit in a second"), inputs generated deterministically, vendored when
   small, or fetched once and checked against a digest. No network at run time. Seconds per
-  run (roughly 2 to 20), so that a session of many rounds fits in minutes.
+  run (roughly 1 to 20): long enough that the spread between runs is well under the
+  differences between allocators, short enough that a session of many rounds fits in
+  minutes. Do not repeat a short job inside the process to make it longer; that changes its
+  shape. ruff's whole check of a 3.8-million-line project takes 1.1 s, and that is the job.
 - **The program checks its own output**, so that an allocator that breaks it cannot win: the
   number of diagnostics, the rows each query returns, the benchmark's self-checks.
 - **Time and memory for every run**: the measured work's wall time ranks the allocators;

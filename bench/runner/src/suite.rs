@@ -435,13 +435,15 @@ pub fn apps() -> Vec<Job> {
         // Home Assistant passes its own ruff release's checks: no diagnostics. Four threads,
         // as a CI runner has; on eight the check takes about a second.
         app("ruff check ha-core t4", "ruff", "check root={inputs}/ha-core expect=0", local(4), 120),
-        // Scale factor 3, about 3 s on eight threads. The queries' constants are the ones for
-        // scale factor 1, which leaves query 11 with no rows here.
+        // Scale factor 3, about 3.6 s on four threads. The queries' constants are the ones for
+        // scale factor 1, which leaves query 11 with no rows here. On eight threads across
+        // both L3 domains every allocator's runs split into two modes, 2.4 and 3.5 s, nearly
+        // every query slower in the slow one; on one domain they agree within 1%.
         app(
-            "datafusion tpch sf3 t8",
+            "datafusion tpch sf3 t4",
             "datafusion",
             "tpch data={inputs}/sf3 expect=4,100,10,5,5,1,4,2,175,20,0,2,43,1,1,26798,1,100,1,556,100,7",
-            both(),
+            local(4),
             120,
         ),
         app("boa v8", "boa", &format!("v8 dir={{inputs}}/v8 counts={V8_COUNTS}"), vec![SINGLE], 120),
