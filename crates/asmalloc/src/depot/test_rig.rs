@@ -49,6 +49,7 @@ pub(crate) const TIGHT: Tuning = Tuning {
     age_limit: true,
     shed_unused: true,
     stock: false,
+    centre_swings: true,
 };
 
 /// A fake object: an address that is never dereferenced.

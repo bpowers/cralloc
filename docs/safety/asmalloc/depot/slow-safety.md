@@ -42,7 +42,13 @@ invariant allows and every routine reads as one.
 which `classify` read and found to name slot `s` of the magazine `old`. By the slab invariant
 that word was the only reference to `old`, so after the commit nothing refers to it and it is
 this thread's, at the level the word gave it (as the age limit's take argues, AGE-01, including
-for a thread that moved between the read and the routine). The thread then holds `held` and
+for a thread that moved between the read and the routine). For an allocation that level is 0:
+`centre_for_alloc` runs only on `Seen::Loaded` with the level its caller found exhausted (the
+pop failed and the classified level was 0, or the loop would have retried), so the word named
+slot 1 and `old` holds no object. That is what makes writing slots `1..=half` of `old` safe: no
+object there is overwritten, and `old`'s record says level 0 until `move_top_into` sets it to
+`half`. For a free the word named slot `capacity + 1`, the magazine full, and `move_top_into`
+writes only `held`, which `obtain_empty` returned at level 0. The thread then holds `held` and
 `old`, neither loaded nor on a stack, and copies between them with `move_top_into` before either
 is installed or retired. Between this store and the install the slab word is zero: a routine on
 the CPU misses and its slow path may install its own magazine, or a drain may put a marker

@@ -65,8 +65,8 @@
 //! launders at most one of the largest magazines, 1,022 objects, besides a `malloc`'s fill, and
 //! twice that on a call that carries a rule turned away, which happens at most once an interval
 //! for each class and rule; and more only when the exchange pushes more than one magazine past
-//! a target, which takes a thread moved to another CPU while it exchanges. A
-//! launder sets one bitmap word per group of neighbours with one atomic OR, or one per object
+//! a target, which takes a thread moved to another CPU while it exchanges, or a half-full swap
+//! whose install finds a drain's marker, which retires both magazines it holds. A launder sets one bitmap word per group of neighbours with one atomic OR, or one per object
 //! when they are scattered. A sweep step also pushes the rest of one spare stack, at most a few
 //! magazines, to the depot; for a class with stock it instead returns one magazine above the
 //! class's limit, and the sweep stays on the class at later heartbeats (`stock.rs`). Add one
@@ -361,16 +361,20 @@ pub(super) const BEAT_SHIFT: u32 = 15;
 /// 32 KiB is the most for which the clocked rules still act within the times the rules tests
 /// assert (`rules.rs`): their busy CPUs exchange magazines of two objects of 24 to 32 KiB, so
 /// one exchange must still be a beat, and at 64 KiB a quiet domain's stacks went back after 8.4
-/// intervals instead of within 7. At 32 KiB every class from 32 bytes up beats on each exchange,
-/// as before; the 8 and 16-byte classes, whose swaps with spares are the commonest, beat on one
-/// in four and one in two. Measured in `docs/research/launder-and-fill.md`, "A lean slow path".
+/// intervals instead of within 7. At 32 KiB most classes beat on each exchange, as before. Seven
+/// move less per exchange and beat on a share of them, the bytes they move over 32 KiB: the 8,
+/// 16, 24 and 32-byte classes (magazines of 1,022: one in four, one in two, three in four, and
+/// all but one in 200), whose swaps with spares are the commonest, and the 5,120, 12,288 and
+/// 14,336-byte classes (magazines of six and two: 94%, 75% and 88%). Measured in
+/// `docs/research/launder-and-fill.md`, "A lean slow path".
 pub const BEAT_BYTES: u64 = 1 << BEAT_SHIFT;
 
 /// Adds `bytes` moved by a slow path of `cpu` to its slab's activity counter and, if the
 /// counter passed a multiple of [`BEAT_BYTES`], counts a heartbeat and returns its turn: the
 /// number of heartbeats the CPU has run, so that the chores that go round the classes and the
-/// CPUs take every turn whatever a call moves. Every call moves the activity counter, so the
-/// idle check sees a CPU busy on slow paths of any kind as active.
+/// CPUs take every turn whatever a call moves. Every call moves something, at least the object
+/// it served, so it moves the activity counter, and the idle check sees a CPU busy on slow paths
+/// of any kind as active.
 fn count<R: Routines>(
     depot: &Depot,
     routines: &R,
@@ -381,8 +385,9 @@ fn count<R: Routines>(
     if depot.common.cpus.load(Relaxed) <= cpu.index() {
         depot.common.cpus.fetch_max(cpu.index() + 1, Relaxed);
     }
+    debug_assert!(bytes > 0, "a slow path that moved nothing would look idle");
     let slab = routines.slabs().slab(cpu);
-    let (before, after) = slab.note_activity(bytes.max(1));
+    let (before, after) = slab.note_activity(bytes);
     (after >> shift != before >> shift).then(|| slab.note_beat())
 }
 
@@ -411,11 +416,17 @@ impl<O: Os, R: Routines, S: Source> Cache<'_, O, R, S> {
         let Some(cpu) = chores.cpu else {
             return self.beat(served, chores, None);
         };
+        // A call that installed no magazine (served straight from the source, or from the
+        // magazine it held) moved the one object it served.
+        let moved = match (chores.moved, served) {
+            (0, Some(class)) => class.size(),
+            (moved, _) => moved,
+        };
         match count(
             self.depot,
             &self.routines,
             cpu,
-            chores.moved as u64,
+            moved as u64,
             self.tuning.beat_shift,
         ) {
             Some(turn) => self.beat(served, chores, Some(turn)),
@@ -435,7 +446,8 @@ impl<O: Os, R: Routines, S: Source> Cache<'_, O, R, S> {
     /// it tried (the low-water marks the shed reads), a drain of its own slab where it met
     /// another generation's marker, and the launder over target of what it pushed on shared
     /// stacks, one magazine for each push that left a stack over its target, which bounds the
-    /// stacks whatever the pace.
+    /// stacks whatever the pace. What the drain pushed past a target is laundered within the
+    /// budget ([`LAUNDER_BUDGET`](super::LAUNDER_BUDGET)), and the shed takes back the rest.
     fn between_beats(&self, served: Option<SmallClass>, chores: Chores, cpu: Cpu) {
         if let (Some(class), true) = (served, chores.installed) {
             self.unstamp(cpu, class);
@@ -448,12 +460,18 @@ impl<O: Os, R: Routines, S: Source> Cache<'_, O, R, S> {
                 self.note_depth(pool, class, &clock);
             }
         }
+        // The call's own pushes before the drain's: those are laundered whatever the budget,
+        // and what a drain parks over a target only within it, as in `beat`.
+        let pushed = self.overflowed.take();
         if chores.stale && generation::drains_enabled(self.depot) {
             self.drain(cpu);
         }
-        let pushed = self.overflowed.take();
         if pushed.magazines > 0 {
             self.launder_overflow(pushed, &clock, false);
+        }
+        let parked = self.overflowed.take();
+        if parked.magazines > 0 {
+            self.launder_overflow(parked, &clock, true);
         }
     }
 

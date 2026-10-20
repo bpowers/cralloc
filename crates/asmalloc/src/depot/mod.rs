@@ -147,6 +147,9 @@ pub struct Tuning {
     /// has sent to the depot and taken back, within the bytes the fixed limits could park on
     /// one CPU (`stock.rs`).
     pub stock: bool,
+    /// Whether a swap with evidence of a lock leaves its magazine half full (`slow.rs`,
+    /// `stock::plan_swap`).
+    pub centre_swings: bool,
 }
 
 impl Tuning {
@@ -162,6 +165,7 @@ impl Tuning {
         age_limit: true,
         shed_unused: true,
         stock: true,
+        centre_swings: true,
     };
 }
 

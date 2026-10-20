@@ -1975,8 +1975,11 @@ threshold was bounded by the rules tests, whose busy CPUs exchange magazines of 
 | 64 KiB | a quiet domain's stacks back in 8.4 intervals, not within 7; a forked child's reach |
 | 256 KiB | twelve |
 
-At 32 KiB the 8 and 16-byte classes, the ones with spares to swap with, beat on one swap in
-four and one in two; every class from 32 bytes up still beats on every exchange.
+At 32 KiB most classes still beat on every exchange. Seven move less per exchange and beat
+on that share of them: the 8, 16, 24 and 32-byte classes (magazines of 1,022: one swap in
+four, one in two, three in four, and all but one in 200), the ones with spares to swap with
+most, and the 5,120, 12,288 and 14,336-byte classes (magazines of six and two: 94%, 75% and
+88%). (Corrected 2026-10-20: this said every class from 32 bytes up beats on each exchange.)
 
 ## Workloads
 

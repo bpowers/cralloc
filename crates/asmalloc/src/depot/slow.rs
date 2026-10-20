@@ -26,9 +26,12 @@
 //! allocation, empty for a free. Work that swings both ways across a magazine's end, a few
 //! allocations and then as many frees, then crosses the far end of the new magazine too, and
 //! does on every repetition: two swaps each, for as long as the work is steady
-//! (`docs/research/rpc-slow-mode.md`). So each CPU records which way its last swap of each class
-//! went, a hint in the class's stock word ([`Cache::note_swap`]), and a swap that reverses it is
-//! taken as evidence of a swing: the slow path leaves the loaded magazine half full. It takes
+//! (`docs/research/rpc-slow-mode.md`). So each CPU records which way its last swaps of each
+//! class went, a hint in the class's stock word ([`Cache::plan_swap`]). A swap that reverses a
+//! swap which itself reversed the one before is evidence of such a lock, and the slow path
+//! leaves the loaded magazine half full; a reversal after a run of swaps one way is the turn of
+//! a longer swing, and stays plain. A half-full swap that the next swap reverses at once did not
+//! help, and the rule backs off, exponentially, before it tries again (`stock::plan_swap`). It takes
 //! the loaded magazine out of the slab with store-if-equal, storing zero, so that both
 //! magazines are its own; moves half of one's objects into the other, a copy between two
 //! magazines nobody else can reach; and installs the half full one with store-if-equal,
@@ -38,7 +41,7 @@
 //! magazines and retires them or serves from them as a failed install does. No spare is needed:
 //! the loaded magazine itself receives or gives the half. A swing of less than half a magazine
 //! then never leaves it. A flow never reverses, so it never pays: one more store-if-equal and a
-//! copy of half a magazine fall only on a reversing swap.
+//! copy of half a magazine fall only on a swap with evidence of a lock.
 //!
 //! **Refresh.** One full magazine in [`REFRESH_EVERY`] that a free displaces is laundered and
 //! retired empty instead of going to the spares or the depot, so the objects in steady
@@ -48,7 +51,7 @@
 
 use super::heartbeat::{Chores, Tried};
 use super::magazine::Magazine;
-use super::stock::Swap;
+use super::stock::{Swap, SwapPlan};
 use super::{Cache, Pool, Source};
 use crate::classes::{SmallClass, is_marker};
 use crate::front::{Cpu, Field, Routines, Spare, StoreIfEqual};
@@ -293,19 +296,19 @@ impl<'a, O: Os, R: Routines, S: Source> Cache<'a, O, R, S> {
             if let Seen::Live = seen {
                 return self.serve_alloc(class, held);
             }
-            let reversed = self.note_swap(cpu, class, Swap::Alloc);
-            let (seen, held) =
-                match self.centre_for_alloc(class, word, seen, held, reversed, chores) {
-                    Centring::Skipped(seen, held) => (seen, held),
-                    Centring::Again => continue,
-                    Centring::Finished(object) => return object,
-                };
+            let plan = self.plan_swap(cpu, class, Swap::Alloc);
+            let (seen, held) = match self.centre_for_alloc(class, word, seen, held, plan, chores) {
+                Centring::Skipped(seen, held) => (seen, held),
+                Centring::Again => continue,
+                Centring::Finished(object) => return object,
+            };
             let level = held.level();
             // SAFETY: DEPOT-SLOW-01.
             let installed = unsafe { self.routines.store_if_equal(field, word, held.word(level)) };
             match installed {
                 StoreIfEqual::Stored => {
                     chores.installed = true;
+                    self.record_swap(cpu, class, plan.plain());
                     chores.moved = magazine_bytes(class);
                     if let Seen::Loaded(old, _) = seen {
                         old.set_level(0);
@@ -367,9 +370,9 @@ impl<'a, O: Os, R: Routines, S: Source> Cache<'a, O, R, S> {
             if let Seen::Live = seen {
                 return self.serve_free(class, held, object);
             }
-            let reversed = self.note_swap(cpu, class, Swap::Free);
+            let plan = self.plan_swap(cpu, class, Swap::Free);
             let (seen, held) =
-                match self.centre_for_free(class, word, seen, held, object, reversed, chores) {
+                match self.centre_for_free(class, word, seen, held, object, plan, chores) {
                     Centring::Skipped(seen, held) => (seen, held),
                     Centring::Again => continue,
                     Centring::Finished(()) => return,
@@ -379,6 +382,7 @@ impl<'a, O: Os, R: Routines, S: Source> Cache<'a, O, R, S> {
             match installed {
                 StoreIfEqual::Stored => {
                     chores.installed = true;
+                    self.record_swap(cpu, class, plan.plain());
                     chores.moved = magazine_bytes(class);
                     if let Seen::Loaded(old, level) = seen {
                         old.set_level(level);
@@ -423,20 +427,20 @@ impl<'a, O: Os, R: Routines, S: Source> Cache<'a, O, R, S> {
     /// documentation, "Half full on a reversal"): the loaded magazine, read as `word` and empty,
     /// is taken out with the store-if-equal routine, the top half of `held` is moved into it,
     /// and `held` is installed half full in its place. Skipped, giving back what it was given,
-    /// unless the swap reverses the last one, the word names a magazine and `held` has two
-    /// objects or more.
+    /// unless `plan` says to centre, the word names a magazine and `held` has two objects or
+    /// more.
     fn centre_for_alloc(
         &self,
         class: SmallClass,
         word: *mut u8,
         seen: Seen<'a>,
         held: Magazine<'a>,
-        reversed: bool,
+        plan: SwapPlan,
         chores: &mut Chores,
     ) -> Centring<'a, Option<NonNull<u8>>> {
         let level = held.level();
         let old = match seen {
-            Seen::Loaded(old, _) if reversed && level >= 2 => old,
+            Seen::Loaded(old, _) if plan.centre && level >= 2 => old,
             seen => return Centring::Skipped(seen, held),
         };
         let field = Field::hot(class);
@@ -464,6 +468,9 @@ impl<'a, O: Os, R: Routines, S: Source> Cache<'a, O, R, S> {
         match installed {
             StoreIfEqual::Stored => {
                 chores.installed = true;
+                if let Some(cpu) = chores.cpu {
+                    self.record_swap(cpu, class, plan);
+                }
                 chores.moved = magazine_bytes(class);
                 self.retire(class, Spare::Full, old, &mut chores.stale);
                 Centring::Again
@@ -484,7 +491,7 @@ impl<'a, O: Os, R: Routines, S: Source> Cache<'a, O, R, S> {
         }
     }
 
-    /// The swap of a free that reverses its CPU's last swap of `class`: the loaded magazine,
+    /// The swap of a free that `plan` says to centre: the loaded magazine,
     /// read as `word` and full, is taken out with the store-if-equal routine, its top half is
     /// moved into `held`, which is empty, and `held` is installed half full in its place; the
     /// other half retires as any displaced magazine does. Skipped as for an allocation.
@@ -496,11 +503,11 @@ impl<'a, O: Os, R: Routines, S: Source> Cache<'a, O, R, S> {
         seen: Seen<'a>,
         held: Magazine<'a>,
         object: NonNull<u8>,
-        reversed: bool,
+        plan: SwapPlan,
         chores: &mut Chores,
     ) -> Centring<'a, ()> {
         let (old, level) = match seen {
-            Seen::Loaded(old, level) if reversed && level >= 2 => (old, level),
+            Seen::Loaded(old, level) if plan.centre && level >= 2 => (old, level),
             seen => return Centring::Skipped(seen, held),
         };
         let Some(cpu) = chores.cpu else {
@@ -535,6 +542,7 @@ impl<'a, O: Os, R: Routines, S: Source> Cache<'a, O, R, S> {
         match installed {
             StoreIfEqual::Stored => {
                 chores.installed = true;
+                self.record_swap(cpu, class, plan);
                 chores.moved = magazine_bytes(class);
                 self.retire_displaced(cpu, class, old, chores);
                 Centring::Again
