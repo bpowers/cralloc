@@ -565,6 +565,17 @@ How often a slow path runs depends on how hard the process allocates, so anythin
 should happen at a rate in time reads the CPU's cycle counter, which costs no system call,
 and acts once about a second has passed since it last did. "An interval" below means that.
 
+Intervals are counted, not computed from the clock. The count steps by one when a heartbeat
+finds that a second has passed since the last step, however long ago that was, so a
+process that was silent for a minute has aged everything it holds by one interval, not
+sixty. The evidence the rules act on is that something went unused while the program was
+running, and a silence is not that. Counted by the clock alone, the first requests after a
+silence find every cache marked idle and pay to tear down what they are about to use: a
+server driven in bursts spent the first milliseconds of each burst purging single pages
+and draining other CPUs' slabs (`docs/research/server-latency.md`). Memory that should go
+back during a silence needs something that runs during it, which is what the rest of this
+section is about.
+
 Nothing runs on the fast path, so a thread whose allocations and frees are all served by
 its loaded magazines never runs a heartbeat. Other threads cover for it: any slow path
 maintains the shared structures, and the idle check drains a slab that has had no slow path
@@ -594,12 +605,14 @@ layer that has a thread library to start it with: a function behind a cargo feat
 Rust program, an environment variable for the preload library. The child of a fork does not
 inherit the thread.
 
-A program with an idle hook of its own calls `maintain` from there and needs no thread. An
-async runtime's hook for a worker that is about to park is such a place, and the right
-one for a server: the heap is maintained whenever a worker runs out of work, which is when
-it has the time, and a server that falls silent after a burst gives the burst back.
-`maintain` limits its own rate, returning at once unless an interval has passed since the
-last heartbeat or the last call, so a hook may call it every time.
+A program with a timer of its own calls `maintain` from it and needs no thread. In an
+async runtime that is a task that wakes once an interval. It costs one wake-up a second,
+it runs while a server is silent, which is when a burst's memory should go back, and it
+takes that work off the first requests of the next burst. `maintain` limits its own rate,
+returning at once unless an interval has passed since it last ran, so it is harmless to
+call it more often, as from a hook that runs when a worker is about to park. Such a hook
+does not replace the timer: a worker parks once at the start of a silence, and nothing
+calls the hook again until the silence is over.
 
 Objects mostly circulate through magazines and the depot without touching the bitmaps. They
 reach the bitmaps when a class's shared depot stack is over its target, and through the rules under
