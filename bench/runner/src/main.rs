@@ -116,7 +116,10 @@ fn jobs(f: &Flags) -> (String, Vec<suite::Job>) {
         };
         let chosen = js.into_iter().filter(|j| {
             f.get("group").is_none_or(|g| j.group == g)
-                && f.get("only").is_none_or(|only| only.split(',').any(|o| j.id.contains(o)))
+                && f.get("only").is_none_or(|only| {
+                    // A text that starts with `=` names one job exactly.
+                    only.split(',').any(|o| o.strip_prefix('=').map_or(j.id.contains(o), |exact| j.id == exact))
+                })
         });
         for j in chosen {
             match v.iter().find(|k| k.id == j.id && k.mode == j.mode) {

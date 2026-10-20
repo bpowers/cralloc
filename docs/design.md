@@ -617,10 +617,7 @@ Rust program, an environment variable for the preload library. The child of a fo
 inherit the thread.
 
 A program with a timer of its own calls `maintain` from it and needs no thread. In an
-async runtime that is a task that wakes once an interval, and we ship one for tokio, in a
-crate of its own because the allocator has no dependencies. Both are offered because
-neither fits every program: a server without an async runtime has no timer to borrow, and
-one that must stay single-threaded cannot take the thread. The task costs one wake-up a second,
+async runtime that is a task that wakes once an interval. It costs one wake-up a second,
 it runs while a server is silent, which is when a burst's memory should go back, and it
 takes that work off the first requests of the next burst. `maintain` limits its own rate,
 returning at once unless an interval has passed since it last ran, so it is harmless to

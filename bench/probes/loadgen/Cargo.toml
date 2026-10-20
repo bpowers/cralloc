@@ -10,6 +10,7 @@ description = "An open-loop HTTP/1.1 load generator that measures latency from w
 [dependencies]
 libc = "0.2"
 mio = { version = "1", features = ["net", "os-poll"] }
+loona-hpack = "0.4.3"
 
 [profile.release]
 debug = 1
