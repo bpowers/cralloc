@@ -188,6 +188,25 @@ impl Magazine<'_> {
         }
     }
 
+    /// Moves the top `n` of this magazine's `level` objects, in their order, into slots 1 to
+    /// `n` of `to`, and records both levels: `level - n` here and `n` there. Both are this
+    /// thread's: neither is loaded or on a stack, so the copy is not a commit and nothing else
+    /// sees it until one of them is installed or pushed. `n` is cut to what `level` and `to`'s
+    /// capacity allow.
+    pub(crate) fn move_top_into(&self, level: usize, to: &Magazine<'_>, n: usize) {
+        let level = level.min(self.size().capacity());
+        let n = n.min(level).min(to.size().capacity());
+        let from = self.objects();
+        let into = to.objects();
+        if let (Some(from), Some(into)) = (from.get(level - n..level), into.get(..n)) {
+            for (to, from) in into.iter().zip(from) {
+                to.store(from.load(Relaxed), Relaxed);
+            }
+        }
+        self.set_level(level - n);
+        to.set_level(n);
+    }
+
     /// The slab word that loads this magazine at `level`: the address of slot `level + 1`. A
     /// level above the capacity is taken as the capacity, so the word always names a slot of
     /// this magazine.

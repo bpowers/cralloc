@@ -8,7 +8,7 @@
 //! object is in exactly one place.
 
 use super::test_rig::{Rig, SimCpu, Small, TIGHT, tiny_class};
-use super::{Drained, IDLE_TICKS, Tuning};
+use super::{Drained, IDLE_TICKS, Source, Tuning};
 use crate::classes::{Class, SmallClass};
 use crate::front::check::interrupt_at;
 use crate::front::{Cpu, Routines};
@@ -137,6 +137,66 @@ fn cpu_0_is_empty(rig: &TestRig) -> bool {
             .load(core::sync::atomic::Ordering::Relaxed)
             .is_null()
     })
+}
+
+/// A swing that straddles a magazine's end, two allocations and then two frees from a level of
+/// one, crossed both ends on every repetition when every swap installed a magazine at its end:
+/// two slow paths a repetition for as long as it ran. The swap that reverses the last leaves
+/// the loaded magazine half full, and the swing then stays inside it: no slow path after the
+/// first few repetitions.
+#[test]
+fn a_swing_across_a_magazines_end_stops_taking_slow_paths_after_the_reversal() {
+    let class = SmallClass::from_ordinal(0).unwrap();
+    let rig: TestRig = Rig::new(&[class], 4 * class.magazine().capacity(), Tuning::DEFAULT);
+    let machine = SimCpu::new(0);
+    let cache = rig.cache(&machine);
+    let slab = rig.slabs().slab(cpu(&rig, 0));
+    // A free loads an empty magazine at a level of one.
+    cache.free(class, rig.source.alloc_one(class).unwrap());
+    let mut held = Vec::new();
+    let mut slow_paths = Vec::new();
+    for _ in 0..20 {
+        let before = slab.activity();
+        for _ in 0..2 {
+            held.push(cache.alloc(class).unwrap());
+        }
+        for object in held.drain(..).rev() {
+            cache.free(class, object);
+        }
+        slow_paths.push(slab.activity() != before);
+    }
+    assert!(
+        slow_paths[4..].iter().all(|&slow| !slow),
+        "slow paths in each repetition: {slow_paths:?}"
+    );
+    rig.census(&[], false);
+}
+
+/// The evidence of a swing is a swap that reverses the last of its class on its CPU: a flow
+/// that goes one way never shows it, so it never pays for moving objects between magazines.
+#[test]
+fn only_a_swap_that_reverses_the_last_is_a_reversal() {
+    use super::stock::Swap;
+    let class = SmallClass::from_ordinal(0).unwrap();
+    let rig: TestRig = Rig::new(&[class], 64, Tuning::DEFAULT);
+    let machine = SimCpu::new(0);
+    let cache = rig.cache(&machine);
+    let cpu = cpu(&rig, 0);
+    let ways = [
+        (Swap::Free, false),
+        (Swap::Free, false),
+        (Swap::Free, false),
+        (Swap::Alloc, true),
+        (Swap::Alloc, false),
+        (Swap::Free, true),
+        (Swap::Alloc, true),
+    ];
+    for (way, reversed) in ways {
+        assert_eq!(cache.note_swap(cpu, class, way), reversed, "{way:?}");
+    }
+    // Each class keeps its own direction.
+    let other = SmallClass::from_ordinal(1).unwrap();
+    assert!(!cache.note_swap(cpu, other, Swap::Alloc));
 }
 
 /// A CPU whose slow paths are all swaps with its own spares, each of which moves less than a

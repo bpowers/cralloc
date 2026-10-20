@@ -108,8 +108,11 @@ fn emptied_after_falling_out_of_use(age_limit: bool) -> Option<u64> {
     let rig: TestRig = Rig::new(&[idle, busy], 64, Tuning { age_limit, ..QUIET });
     let machine = SimCpu::new(0);
     let cache = rig.cache(&machine);
-    // A loaded magazine with an object in it, and a full spare.
-    let held: Vec<_> = (0..5).filter_map(|_| cache.alloc(idle)).collect();
+    // A loaded magazine with an object in it, and a full spare: objects made on CPU 1 and
+    // freed on CPU 0, one way, so that no swap reverses and leaves a magazine half full.
+    let one = SimCpu::new(1);
+    let maker = rig.cache(&one);
+    let held: Vec<_> = (0..5).filter_map(|_| maker.alloc(idle)).collect();
     for object in held {
         cache.free(idle, object);
     }
@@ -266,17 +269,21 @@ fn a_stack_in_use(shed_unused: bool, intervals: usize) -> (Vec<usize>, Vec<usize
 fn a_depot_stack_in_use_sheds_only_its_unused_depth() {
     let intervals = 8;
     let (depths, served) = a_stack_in_use(true, intervals);
-    // Each round takes two magazines from the stack (the third allocation comes from the one
-    // CPU 1 keeps loaded) and gives two back. The rest is never used (sixteen objects, and the
-    // magazine the idle check drains from CPU 0 after an interval) and is gone within a few
-    // intervals; what each round uses stays.
-    assert!(depths[0] >= 20, "{depths:?}");
-    for &depth in &depths[3..] {
-        assert_eq!(depth, 4, "{depths:?}");
+    // Each round of six allocations takes what the magazine CPU 1 keeps loaded does not hold
+    // from the stack, and gives it back. The rest is never used (sixteen objects or so, and
+    // the magazine the idle check drains from CPU 0 after an interval) and is gone within a
+    // few intervals; what each round uses stays, and the stack serves every round wholly. How
+    // much a round takes depends on how the loaded magazine was left, half full after a swap
+    // that reversed the last: five of the six.
+    assert!(depths[0] >= 20, "{depths:?} {served:?}");
+    for (&depth, &taken) in depths[3..].iter().zip(&served[3..]) {
+        assert_eq!(
+            depth, taken,
+            "the stack keeps what a round uses: {depths:?} {served:?}"
+        );
+        assert!((4..6).contains(&taken), "{depths:?} {served:?}");
     }
-    for &taken in &served[1..] {
-        assert_eq!(taken, 4, "the stack served every round: {served:?}");
-    }
+    assert!(served[3..].windows(2).all(|w| w[0] == w[1]), "{served:?}");
     let (kept, _) = a_stack_in_use(false, intervals);
     assert!(kept.iter().all(|&depth| depth >= 18), "{kept:?}");
 }
@@ -1728,9 +1735,12 @@ fn a_rule_the_budget_turns_away_waits_for_the_next_slow_path() {
     let rig: Rig<SimOs<Roomy>, 2> = Rig::with_os(SimOs::new(), &[class], 4 * capacity, tuning);
     let machine = SimCpu::new(0);
     let cache = rig.cache(&machine);
-    // One slow path loads a filled magazine and begins the sweep at the first class; the
-    // frees then fill the loaded magazine back up to one short of full.
-    let held: Vec<NonNull<u8>> = (0..capacity).filter_map(|_| cache.alloc(class)).collect();
+    // Objects from the source, freed on CPU 0: its first slow path loads a magazine and begins
+    // the sweep at the first class, and the frees fill the loaded magazine up to one short of
+    // full. Only frees, so that no swap reverses and leaves a magazine half full.
+    let held: Vec<NonNull<u8>> = (0..capacity)
+        .filter_map(|_| rig.source.alloc_one(class))
+        .collect();
     assert_eq!(held.len(), capacity);
     let mut held = held.into_iter();
     for object in held.by_ref().take(capacity - 1) {
