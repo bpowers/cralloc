@@ -1,0 +1,27 @@
+# NAME CRATE VERSION [cargo install args]: the candidates built from crates.io, for
+# `build-all.sh`. Defaults that choose an allocator are turned off here; the note records them.
+ripgrep ripgrep 15.2.0
+fd fd-find 10.5.0
+tokei tokei 15.0.0
+jaq jaq 3.1.1 --no-default-features
+tantivy tantivy-cli 0.24.0
+boa boa_cli 0.22.0 --no-default-features --features boa_engine/annex-b,boa_runtime/annex-b,boa_engine/experimental,boa_engine/intl_bundled
+wasmi wasmi_cli 2.0.0
+rhai rhai 1.26.1 --features bin-features
+starlark starlark_bin 0.14.2
+oxipng oxipng 10.2.1
+pulldown-cmark pulldown-cmark 0.13.4
+mdbook mdbook 0.5.4 --no-default-features --features search
+mini-redis mini-redis 0.4.1
+oha oha 1.16.0
+tpchgen tpchgen-cli 4.0.0
+parquet parquet 60.0.0 --features cli
+typst typst-cli 0.15.1 --no-default-features --features embedded-fonts
+bat bat 0.26.1
+difftastic difftastic 0.71.0
+xsv xsv 0.13.0
+rustpython rustpython 0.4.0
+wasmtime wasmtime-cli 44.0.3
+datafusion datafusion-cli 54.1.0
+gix gitoxide 0.60.0
+rav1e rav1e 0.8.1 --no-default-features --features binaries,threading

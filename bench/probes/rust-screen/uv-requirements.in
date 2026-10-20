@@ -1,0 +1,9 @@
+apache-airflow[amazon,google,postgres,celery,cncf-kubernetes,http,ssh,slack]==2.10.3
+jupyterlab
+pandas
+scikit-learn
+fastapi[all]
+django
+boto3
+matplotlib
+sqlalchemy
