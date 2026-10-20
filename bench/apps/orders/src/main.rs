@@ -62,8 +62,14 @@ async fn actix_serve(listener: TcpListener, addr: std::net::SocketAddr) {
         store.create(new.into_inner())
     }
     let store = web::Data::new(Store::default());
-    // actix-web stops gracefully on SIGTERM by itself.
+    // actix-web stops gracefully on SIGTERM by itself. Its defaults close a connection that
+    // has been idle for 5 s and one whose request has not arrived within 5 s of its accept;
+    // under the generator's plan some of the 64 pooled connections were closed that way and
+    // reopened, which costs the server work that hyper (axum) never does. Long limits, as a
+    // service behind a pooled client is configured, keep the comparison to the allocator.
     let server = HttpServer::new(move || App::new().app_data(store.clone()).route("/orders", web::post().to(create)))
+        .keep_alive(std::time::Duration::from_secs(300))
+        .client_request_timeout(std::time::Duration::ZERO)
         .listen(listener)
         .unwrap_or_else(|e| fail(&format!("listen: {e}")))
         .run();
