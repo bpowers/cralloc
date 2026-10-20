@@ -692,7 +692,8 @@ fn collect_and_maintain_empty_every_stack() {
         let machine = SimCpu::new(0);
         let cache = rig.cache(&machine);
         if maintain {
-            for _ in 0..3 {
+            // The first two calls find the heartbeats of the setup recent and step the count.
+            for _ in 0..5 {
                 cache.maintain();
                 rig.os().advance_clock(IDLE_TICKS);
             }

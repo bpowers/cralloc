@@ -371,6 +371,7 @@ impl<O: Os, R: Routines, S: Source> Cache<'_, O, R, S> {
     /// The chores of a heartbeat. `activity` is its turn, which picks the class and the CPU
     /// that the rotating chores look at: for a small slow path, the count of its CPU's activity.
     fn beat(&self, served: Option<SmallClass>, chores: Chores, activity: Option<u64>) {
+        self.source.clock().note_beat();
         let clock = Clock::new(self.os(), self.source.clock());
         // A rule of this CPU's that an earlier slow path's budget turned away goes first, and
         // this call's launder over target waits for what the rule leaves of the budget: the

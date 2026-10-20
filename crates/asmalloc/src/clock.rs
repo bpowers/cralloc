@@ -59,6 +59,9 @@ pub(crate) struct Counted {
     /// One more than the count at which `maintain` last ran a round, zero for never: what
     /// limits it to one round an interval (design: "Heartbeat").
     maintained: AtomicU64,
+    /// One more than the count at which a heartbeat last ran, zero for never: `maintain`
+    /// leaves a heap whose heartbeats are running to them.
+    beaten: AtomicU64,
 }
 
 /// What a reading of the word and the clock decides.
@@ -117,6 +120,7 @@ impl Counted {
         Counted {
             word: AtomicU64::new(0),
             maintained: AtomicU64::new(0),
+            beaten: AtomicU64::new(0),
         }
     }
 
@@ -139,13 +143,28 @@ impl Counted {
         }
     }
 
-    /// Whether a round of `maintain` is due: none has run in the interval the count is in. The
-    /// caller that gets `true` has claimed the round, with one compare-and-swap, so of callers
-    /// in one interval at most one runs it. Reads the counted time first, so a call is what
-    /// steps the count through a silence.
+    /// Notes that a heartbeat ran in the interval the count is in. A load, and a store once an
+    /// interval.
+    pub(crate) fn note_beat(&self) {
+        let mark = self.count() as u64 + 1;
+        if self.beaten.load(Relaxed) != mark {
+            self.beaten.store(mark, Relaxed);
+        }
+    }
+
+    /// Whether a round of `maintain` is due: no heartbeat ran in this interval or the one
+    /// before, so that the heap's own maintenance is not running, and no round has run in this
+    /// interval. The caller that gets `true` has claimed the round, with one compare-and-swap,
+    /// so of callers in one interval at most one runs it. Reads the counted time first, so a
+    /// call is what steps the count through a silence. A heap busy on its slow paths is left
+    /// to its heartbeats, and a silence is maintained from its second interval on.
     pub(crate) fn claim_round<O: Os + ?Sized>(&self, os: &O) -> bool {
         let _ = self.now(os);
         let round = self.count() as u64 + 1;
+        let beaten = self.beaten.load(Relaxed);
+        if beaten != 0 && beaten + 1 >= round {
+            return false;
+        }
         let last = self.maintained.load(Relaxed);
         last != round
             && self

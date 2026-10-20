@@ -369,6 +369,7 @@ impl<O: Os> Back<'_, O> {
 
     /// The maintenance a slow path does on its way out: one step of decay.
     pub fn heartbeat(&self) {
+        self.state.decay.clock.note_beat();
         self.heartbeat_with(&|| self.now());
     }
 
