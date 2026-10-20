@@ -87,3 +87,66 @@ expect = { allocator = "tcmalloc", mode = "per-thread", library = "executable" }
 [[allocator]]
 name = "mimalloc-ctl"
 same_as = "mimalloc"
+
+[[allocator]]
+name = "base"
+feature = "asmalloc"
+build = "asm-base"
+preload = "/tmp/claude-1000/-home-bpowers-src-asmalloc/9350b66e-ff5f-4010-842a-f49ee9af0052/scratchpad/libs/base.so"
+expect = { allocator = "asmalloc", library = "executable" }
+
+[[allocator]]
+name = "dom"
+feature = "asmalloc"
+build = "asm-dom"
+preload = "/tmp/claude-1000/-home-bpowers-src-asmalloc/9350b66e-ff5f-4010-842a-f49ee9af0052/scratchpad/libs/dom.so"
+expect = { allocator = "asmalloc", library = "executable" }
+
+[[allocator]]
+name = "domp"
+feature = "asmalloc"
+build = "asm-domp"
+preload = "/tmp/claude-1000/-home-bpowers-src-asmalloc/9350b66e-ff5f-4010-842a-f49ee9af0052/scratchpad/libs/domp.so"
+expect = { allocator = "asmalloc", library = "executable" }
+
+[[allocator]]
+name = "domcp"
+feature = "asmalloc"
+build = "asm-domcp"
+preload = "/tmp/claude-1000/-home-bpowers-src-asmalloc/9350b66e-ff5f-4010-842a-f49ee9af0052/scratchpad/libs/domcp.so"
+expect = { allocator = "asmalloc", library = "executable" }
+
+[[allocator]]
+name = "domof"
+feature = "asmalloc"
+build = "asm-domof"
+preload = "/tmp/claude-1000/-home-bpowers-src-asmalloc/9350b66e-ff5f-4010-842a-f49ee9af0052/scratchpad/libs/domof.so"
+expect = { allocator = "asmalloc", library = "executable" }
+
+[[allocator]]
+name = "domcof"
+feature = "asmalloc"
+build = "asm-domcof"
+preload = "/tmp/claude-1000/-home-bpowers-src-asmalloc/9350b66e-ff5f-4010-842a-f49ee9af0052/scratchpad/libs/domcof.so"
+expect = { allocator = "asmalloc", library = "executable" }
+
+[[allocator]]
+name = "domph"
+feature = "asmalloc"
+build = "asm-domph"
+preload = "/tmp/claude-1000/-home-bpowers-src-asmalloc/9350b66e-ff5f-4010-842a-f49ee9af0052/scratchpad/libs/domph.so"
+expect = { allocator = "asmalloc", library = "executable" }
+
+[[allocator]]
+name = "domcph"
+feature = "asmalloc"
+build = "asm-domcph"
+preload = "/tmp/claude-1000/-home-bpowers-src-asmalloc/9350b66e-ff5f-4010-842a-f49ee9af0052/scratchpad/libs/domcph.so"
+expect = { allocator = "asmalloc", library = "executable" }
+
+[[allocator]]
+name = "domrh"
+feature = "asmalloc"
+build = "asm-domrh"
+preload = "/tmp/claude-1000/-home-bpowers-src-asmalloc/9350b66e-ff5f-4010-842a-f49ee9af0052/scratchpad/libs/domrh.so"
+expect = { allocator = "asmalloc", library = "executable" }
