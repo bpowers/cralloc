@@ -460,6 +460,79 @@ fn the_huge_page_part_starts_at_the_threshold() {
     assert_eq!(advice(threshold), Some(HugePages::Prefer));
 }
 
+/// A commit runs ahead of the carve by as much as the region has committed
+/// (`policy::commit_ahead`), so carving a whole region one slot at a time makes a number of
+/// commits that grows with the logarithm of the region's pages, not with its slots: here 512
+/// slots of 2 KiB, and 25 of 40 KiB, each in 256 pages, where a fixed 16 pages ahead took 14
+/// and 12 commits.
+#[test]
+#[cfg_attr(miri, ignore)]
+fn carving_a_region_commits_a_logarithmic_number_of_times() {
+    let state = state::<Native>();
+    let back = state.get_or_reserve().unwrap();
+    let plan = back.space().plan();
+    let pages = plan.region_size() / Native::GEOMETRY.page_size();
+    for class in [small(2048).class(), large(40 << 10)] {
+        let first = back.alloc(class, class.size()).unwrap();
+        let region = back.space().locate(first.ptr.as_ptr()).unwrap().region;
+        let mut held = std::vec![first.ptr];
+        let mut commits = 0;
+        loop {
+            let before = state.os().calls(Call::Commit);
+            let block = back.alloc(class, class.size()).unwrap();
+            held.push(block.ptr);
+            if back.space().locate(block.ptr.as_ptr()).unwrap().region != region {
+                break;
+            }
+            commits += state.os().calls(Call::Commit) - before;
+        }
+        // The region's data, doubling from its first commit, and its leaf bitmap, a page.
+        let bound = u64::from(pages.ilog2()) + 2;
+        assert!(
+            commits <= bound,
+            "{class:?}: {commits} commits to carve a region of {pages} pages"
+        );
+        for ptr in held {
+            back.free(ptr, class);
+        }
+    }
+}
+
+/// A commit that runs far ahead and is refused, as it may be under strict overcommit, is tried
+/// again with the least run ahead, so a carve that the OS can still serve does not fail.
+#[test]
+#[cfg_attr(miri, ignore)]
+fn a_refused_commit_far_ahead_falls_back_to_the_least() {
+    let state = state::<Native>();
+    let back = state.get_or_reserve().unwrap();
+    let class = large(40 << 10);
+    let first = back.alloc(class, class.size()).unwrap();
+    let region = back.space().locate(first.ptr.as_ptr()).unwrap().region;
+    let mut held = std::vec![first.ptr];
+    // The region has committed its first slot, so its next commit runs ahead by that much.
+    state.os().set_faults(Call::Commit, Faults::once_after(0));
+    loop {
+        let before = state.os().calls(Call::Commit);
+        let block = back.alloc(class, class.size()).unwrap();
+        held.push(block.ptr);
+        assert_eq!(
+            back.space().locate(block.ptr.as_ptr()).unwrap().region,
+            region
+        );
+        let calls = state.os().calls(Call::Commit) - before;
+        if calls != 0 {
+            assert_eq!(
+                calls, 2,
+                "the refused commit and the one with the least run ahead"
+            );
+            break;
+        }
+    }
+    for ptr in held {
+        back.free(ptr, class);
+    }
+}
+
 #[test]
 #[cfg_attr(miri, ignore)]
 fn large_slots_say_when_they_are_zero() {
