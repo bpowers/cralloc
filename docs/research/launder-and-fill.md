@@ -1898,3 +1898,116 @@ heartbeat as it was.
 - The routines and their proofs needed nothing: the masks are 32 bits, the Lean specification and
   the generated constants already cover 4 to 2^16 slots, and Kani's marker harness checks every
   mask from 2^2 to 2^16. No generated file changed.
+
+# A lean slow path (2026-10-20)
+
+What a swap with a spare cost, where it went, and what is left, on branch `lean-slow` (from
+5c9881f, main merged at fd10e89). Three changes: no store-forwarding stall at slow-path entry,
+by construction; the heartbeat paced by the bytes slow paths move rather than by calls; the
+readiness check inline.
+
+## Method
+
+`workload burst`: `burst` objects of one class allocated, then freed in reverse, on CPU 2,
+under `scripts/measure`, builds interleaved, seven rounds. A burst of 1,000 fits a 1,022-object
+magazine and makes no slow path; one of 1,100 makes exactly two a repetition (counted with a
+scratch build that counts slow paths, spare and depot trips). For the 8-byte class both are
+swaps with the CPU's spares; the 64-byte class keeps no full spare, so half its slow paths go
+to the depot. Cycles per slow path are the 1,100 run's cycles less the 1,000 run's per
+operation, over the slow paths, from the workload's own counters (user and kernel; kernel time
+was nil). Profiles: `perf record -e cycles:u` and `instructions:u`, shares only, since the
+sampled totals were throttled.
+
+## Where a swap's cycles went
+
+At 5c9881f a swap with a spare (8-byte class) cost 338 cycles and a slow path through the
+depot (64-byte class) 450. A third of the swap was the slow-path entry and exchange, a third
+the heartbeat, a quarter the refresh rule (one retiring full magazine in 32 laundered, and the
+fill that later replaces it: a thousand objects every 32 swaps for this class), and about a
+twentieth the spare stacks' pops and pushes.
+
+- **Store-forwarding stalls.** Every slow path built the back end's handle, a `Space` whose
+  `Plan` held an eleven-byte `Geometry` of byte and half-word fields, with narrow stores, and
+  copied it with eight-byte loads; and `obtain_full` returned a three-field magazine handle
+  through memory, which the caller read back with one sixteen-byte load. A load that spans
+  several stores waits for them to retire. Profiles put two thirds of the entry's samples on
+  one such load. Now a `Space` keeps only the region shift, as a word, and rebuilds its plan
+  from the OS's constant geometry, and a `Magazine` is one word (base with the size's ordinal
+  in its low five bits), so a handle, an `Option` of one and the obtain result travel in
+  registers. Compile-time assertions pin those sizes. 338 to 304 cycles a swap, 450 to 331
+  through the depot.
+- **The heartbeat on every slow path.** Now paced by bytes moved (`depot::heartbeat`,
+  `BEAT_BYTES`). With the heartbeat off the swap entirely the 8-byte swap measured 225 to 245.
+- **What is left** (final build, 271 cycles a swap): the refresh rule's launder and refill,
+  about a quarter, which is a memory rule and stays; and the general exchange, about 70
+  instructions on each side: classifying the word, the obtain machinery, the spare depth check
+  (which reads the top spare's record, another line), the stock bookkeeping on each pop and
+  push, and two or three restartable sequences. A path for the local swap alone could skip the
+  classification and the obtain machinery; it was not built.
+
+| Build, cycles per slow path | swap with a spare (8 B) | through the depot (64 B) |
+|---|---:|---:|
+| 5c9881f | 338 | 450 |
+| `Space` of whole words | 319 to 338 | 422 |
+| and one-word magazine handles | 288 to 304 | 331 to 345 |
+| and pacing by bytes (final, 32 KiB) | 271 | 352 |
+
+(Rows from three sessions; within one session two builds differ by up to 20 cycles run to
+run.) Branch misses per slow path fell from 1.3 to 0.8 on the swap.
+
+## Pacing, and its threshold
+
+Each exchange adds the bytes a full magazine of its class holds to its CPU's activity counter;
+a heartbeat runs when the counter passes a multiple of `BEAT_BYTES`, and a separate count of
+heartbeats is the turn of the chores that go round classes and CPUs. A large call adds a
+sixteenth. A slow path whose CPU has a rule the launder budget turned away beats at once, since
+the refresh waits for it. Between beats a call still unstamps what it installed, notes the
+depths of the depot stacks it tried, drains its own slab if it met another generation's marker,
+and launders its own pushes over target.
+
+Bytes, not objects: the chores return memory, and magazines are already sized in bytes. The
+threshold was bounded by the rules tests, whose busy CPUs exchange magazines of two objects of
+24 to 32 KiB and whose asserted times assume each exchange beats:
+
+| Threshold | rules and depot tests failing |
+|---|---|
+| 32 KiB | none (three tests that counted slow paths through the activity counter now count bytes; the budget test and the interleaving rig beat on every slow path, as they look on every one) |
+| 64 KiB | a quiet domain's stacks back in 8.4 intervals, not within 7; a forked child's reach |
+| 256 KiB | twelve |
+
+At 32 KiB the 8 and 16-byte classes, the ones with spares to swap with, beat on one swap in
+four and one in two; every class from 32 bytes up still beats on every exchange.
+
+## Workloads
+
+Against main (fd10e89), five interleaved rounds, change in the primary metric and cgroup peak
+MiB (main / lean):
+
+| Job | main | change | peak |
+|---|---:|---:|---|
+| pipeline t2 s64 | 2.99 ns | -2.0% | 1.5 / 1.5 |
+| pipeline t2 small | 3.40 ns | -0.2% | 2.9 / 3.0 |
+| pipeline t2 mixed | 10.7 ns | -1.7% | 5.7 / 5.7 |
+| pipeline t2 small, split | 10.7 ns | -5.0% | 3.5 / 3.5 |
+| pipeline t8 | 4.16 ns | +0.2% | 10.8 / 10.7 |
+| pipeline t2 x2 split / x3 / x4 | 3.89 / 4.35 / 4.51 | -0.4 / -0.4 / +0.2% | 8.5 / 8.2 (x4) |
+| exchange t2 local / split / t8 | 3.84 / 13.0 / 2.61 | +1.2 / +0.2 / +0.1% | |
+| mpmc p1c3 / p3c1 / p4c4 | 4.71 / 4.51 / 4.21 | -1.0 / +1.7 / -1.5% | |
+| tree depth 20, cycles/node | 40.6 | -0.1% | 50.3 / 50.2 |
+| JSON 32 MiB native / preloaded | 16.5 / 16.6 | -2.1 / -0.3% | 354 both |
+| rpc echo c64 / log c64 / log c256 | | 0.0 / -0.5 / -0.1% | 6.3 / 6.5, 9.2 / 9.3, 15.3 / 15.9 |
+| sh8bench (preloaded) | 0.377 s | -0.5% | 131 / 130 |
+
+`benchrun layout` (default, loops aligned to 64, two link-order shuffles; five rounds each) on
+both builds, for the jobs that moved: no job is sensitive to placement on either (spread 0.9 to
+3.4%, noise 0.3 to 1.5%, instructions level within 1%). Across all four placements the split
+pipeline's gain holds (10.2 to 10.4 ns against 10.6 to 10.8) and the s64 pipeline's, about
+1.5%; JSON's does not (16.0 to 16.5 against 16.1 to 16.5), nor mpmc p3c1's or exchange t2's
+loss. So the measurable effect on whole jobs is a few percent on cross-thread flows that
+exchange with the depot, and nothing elsewhere: these jobs spend little of their time in slow
+paths, and the classes that swap with spares, where pacing saves most, are the smallest.
+
+Memory after a peak (`burst-idle`, every 250 ms sample, three runs each): identical at every
+sample, from 215 MiB through 68, 51, 39 down to 4.9 MiB at 11.75 s, and the peaks 216 MiB both.
+Its light traffic after the burst is a 64-byte class, which beats on every exchange either way,
+so it does not test the 8 and 16-byte classes' slower pace.
