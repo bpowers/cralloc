@@ -619,6 +619,7 @@ impl<'a, O: Os, R: Routines, S: Source> Cache<'a, O, R, S> {
     /// Returns the objects of a magazine this thread holds to the source, in one call, and
     /// records it empty. Returns how many there were.
     fn launder_held(&self, class: SmallClass, magazine: &Magazine<'_>) -> usize {
+        probe!(self.routines.cpu(), class, Launder);
         let level = magazine.level();
         if let Some(objects) = magazine.objects().get(..level) {
             self.source.take_back(class, objects);
