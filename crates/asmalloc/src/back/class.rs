@@ -404,6 +404,7 @@ impl<'a, O: Os> Back<'a, O> {
         let (word, bit) = position(slot);
         tree::release_one(host, region, word, bit);
         self.retain(class, charge);
+        self.hold_released(class, region);
     }
 
     /// The region and slot of a pointer the caller says is a handed-out slot of `class`, or an
@@ -915,6 +916,7 @@ impl<'a, O: Os> Back<'a, O> {
                 if keep {
                     // As a plain free leaves it: resident, advice and all, and counted already.
                     self.release_all(class, &[from.as_ptr()], false);
+                    self.hold_released(class, region);
                     self.heartbeat();
                     return;
                 }
@@ -929,6 +931,9 @@ impl<'a, O: Os> Back<'a, O> {
                 region::unadvise(&host, region, index);
                 self.release_all(class, &[from.as_ptr()], false);
                 self.retain(class, charge);
+                if charge != 0 {
+                    self.hold_released(class, region);
+                }
                 self.heartbeat();
             }
             None => self.free_run(from),

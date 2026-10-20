@@ -193,6 +193,35 @@ pub const fn commit_ahead(used: u32, least: u32, most: u32) -> u32 {
     }
 }
 
+/// A step of the hold's fine count (`hold::Fine`), in ticks of the cycle counter: 2^23,
+/// about 2 ms. A reading of the counted clock steps the count by at most one, so across a
+/// silence a hold ages by one step, not by the silence.
+pub const FINE_TICKS: u64 = 1 << 23;
+
+/// How many fine steps a free large slot's region must go without a release before its free
+/// slots go back to the OS: 64, about 125 ms (`hold`). Long enough for most of the reuse that
+/// follows a free (86 to 100% of the large slots taken again after a purge were taken within
+/// 60 ms in tpchgen, gix-hours and datafusion, `docs/research/memory.md`, "Faults and system
+/// calls in real programs"); short next to the clocked pass's second, which let DataFusion
+/// hold every query's free large slots on top of the next query's ("DataFusion's peak against
+/// jemalloc's"). On DataFusion 125 ms held the peak lower than 60 ms (842 against 848 MiB)
+/// with fewer faults (+14% against +19% over no hold); 250 ms let it back up to 1,075 MiB, as
+/// its queries' free blocks outlived the hold of the next (`docs/research/large-hold.md`).
+pub const HOLD_STEPS: u32 = 64;
+
+/// The hold returns nothing while free large slots believed resident total at most this many
+/// huge pages, and above it returns only what is over it: 16, or 32 MiB. A small process
+/// never pays the returns and the faults that take its memory back; tens of megabytes are a
+/// constant next to the heaps of hundreds of megabytes and more that the hold is for
+/// (`docs/design.md`, "Goals").
+pub const HOLD_FLOOR_HUGE_PAGES: usize = 16;
+
+/// The floor of [`HOLD_FLOOR_HUGE_PAGES`] in bytes for a geometry.
+#[inline(always)]
+pub const fn hold_floor(geometry: Geometry) -> usize {
+    HOLD_FLOOR_HUGE_PAGES * geometry.huge_page_size()
+}
+
 /// The retained-memory cap in bytes for a geometry.
 #[inline(always)]
 pub const fn retained_cap(geometry: Geometry) -> usize {

@@ -331,7 +331,7 @@ impl<O: Os> Back<'_, O> {
     }
 
     /// The regions the walk goes round: those below the highest ever given to a class.
-    fn walk_regions(&self) -> usize {
+    pub(super) fn walk_regions(&self) -> usize {
         (self.state.walk.top.load(Relaxed) as usize).min(self.space.plan().objects())
     }
 
@@ -376,7 +376,15 @@ impl<O: Os> Back<'_, O> {
     /// [`Back::heartbeat`] for a caller that keeps its own reading of the clock: `now` is
     /// called only when the step needs the time.
     pub fn heartbeat_with(&self, now: &dyn Fn() -> u64) {
-        let _ = self.decay_step(now);
+        // The hold's fine count steps on the reading the decay step makes, when it makes one,
+        // so that the hold costs no clock read of its own.
+        let read = core::cell::Cell::new(None);
+        let _ = self.decay_step(&|| {
+            let time = now();
+            read.set(Some(time));
+            time
+        });
+        self.hold_step(read.get(), now);
     }
 
     /// The clocked pass the heartbeats of an interval would take, in one call: starts a pass
@@ -618,7 +626,7 @@ impl<O: Os> Back<'_, O> {
     }
 
     /// The class of a region the walk should look at: a class region whose summary bit is set.
-    fn purgeable(&self, region: RegionId) -> Option<Class> {
+    pub(super) fn purgeable(&self, region: RegionId) -> Option<Class> {
         let RegionTag::Class(class) = self.state.table.get(region) else {
             return None;
         };
@@ -639,7 +647,7 @@ impl<O: Os> Back<'_, O> {
     /// (`region::floor`, read once a call): a unit that starts below it is left, with the
     /// rest of the region under it. Returns the bytes purged, the words read, and whether the
     /// walk reached the bottom, or the frontier.
-    fn purge_region(
+    pub(super) fn purge_region(
         &self,
         class: Class,
         region: RegionId,

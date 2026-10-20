@@ -40,7 +40,8 @@ pub(crate) struct ClassState {
 /// of memory and, 128 MiB from the next class's, often a page of page tables
 /// (`docs/research/memory.md`, "Small heaps"). A large class touches its block on every
 /// allocation and free anyway, so its header stays there (`Layout::header_word`), and its
-/// entry here is unused.
+/// entry here holds something else: `grow` is the region's stamp for the hold on free large
+/// slots (`hold`), and `hints` is unused.
 pub(crate) struct RegionHeader {
     pub(crate) grow: Atomic,
     pub(crate) hints: Atomic,

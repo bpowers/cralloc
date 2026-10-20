@@ -2,8 +2,8 @@
 //! and a threaded stress test.
 
 use super::policy::{
-    DECAY_TICKS, STAGGER_ROOM, STAGGER_STEP, growth_goal, growth_step, huge_after, kept_grown,
-    move_piece, retained_cap,
+    DECAY_TICKS, FINE_TICKS, HOLD_STEPS, STAGGER_ROOM, STAGGER_STEP, growth_goal, growth_step,
+    hold_floor, huge_after, kept_grown, move_piece, retained_cap,
 };
 use super::{Back, Block, Kind, State};
 use crate::classes::{Class, SmallClass};
@@ -560,6 +560,109 @@ fn a_refused_commit_far_ahead_falls_back_to_the_least() {
     for ptr in held {
         back.free(ptr, class);
     }
+}
+
+/// Heartbeats `n` times, the clock moving `ticks` before each.
+fn beat_for<O: Os>(back: &Back<'_, O>, os: &SimOs<Native>, n: u32, ticks: u64) {
+    for _ in 0..n {
+        os.advance_clock(ticks);
+        back.heartbeat();
+    }
+}
+
+/// Allocates and paints enough slots of `class` to hold twice the hold's floor, and one more
+/// that stays live above them, then frees the first ones after starting the fine count.
+/// Returns the freed blocks and the live one.
+fn free_twice_the_floor<O: Os>(
+    back: &Back<'_, O>,
+    os: &SimOs<Native>,
+    class: Class,
+) -> (Vec<NonNull<u8>>, NonNull<u8>) {
+    let size = class.size();
+    let n = 2 * hold_floor(Native::GEOMETRY) / size;
+    let blocks: Vec<NonNull<u8>> = (0..n)
+        .map(|_| back.alloc(class, size).unwrap().ptr)
+        .collect();
+    let top = back.alloc(class, size).unwrap().ptr;
+    for b in &blocks {
+        paint(b.as_ptr(), size, 7);
+    }
+    // Start the fine count, so that the frees are stamped in a counted step.
+    beat_for(back, os, 2, FINE_TICKS);
+    for b in &blocks {
+        back.free(*b, class);
+    }
+    assert_eq!(back.retained_large(), n * size);
+    (blocks, top)
+}
+
+/// Free large slots stay resident while their regions' hold lasts, and when it ends what is
+/// over the floor goes back to the OS, counted in fine steps that heartbeats take (`hold`).
+#[test]
+#[cfg_attr(miri, ignore)]
+fn free_large_slots_over_the_floor_go_back_when_their_hold_ends() {
+    let state = state::<Native>();
+    let back = state.get_or_reserve().unwrap();
+    let os = state.os();
+    let class = large(256 << 10);
+    let (blocks, top) = free_twice_the_floor(&back, os, class);
+    let freed = back.retained_large();
+    beat_for(&back, os, HOLD_STEPS - 1, FINE_TICKS);
+    assert_eq!(back.retained_large(), freed, "held for the hold");
+    assert!(blocks.iter().all(|b| painted(b.as_ptr(), class.size(), 7)));
+    beat_for(&back, os, 2, FINE_TICKS);
+    let floor = hold_floor(Native::GEOMETRY);
+    let left = back.retained_large();
+    assert!(
+        left <= floor && left + class.size() > floor,
+        "down to the floor: {left}"
+    );
+    let purged = blocks
+        .iter()
+        // SAFETY: the slots are free and nothing else uses the simulated heap meanwhile.
+        .filter(|b| unsafe { os.is_purged(**b, class.size()) })
+        .count();
+    assert_eq!(purged * class.size(), freed - left);
+    back.free(top, class);
+}
+
+/// Under the floor nothing is returned, however long it waits.
+#[test]
+#[cfg_attr(miri, ignore)]
+fn free_large_slots_under_the_floor_stay() {
+    let state = state::<Native>();
+    let back = state.get_or_reserve().unwrap();
+    let os = state.os();
+    let class = large(256 << 10);
+    let a = back.alloc(class, class.size()).unwrap();
+    let top = back.alloc(class, class.size()).unwrap();
+    beat_for(&back, os, 2, FINE_TICKS);
+    back.free(a.ptr, class);
+    beat_for(&back, os, 8 * HOLD_STEPS, FINE_TICKS);
+    assert_eq!(back.retained_large(), class.size());
+    back.free(top.ptr, class);
+}
+
+/// A silence ages a hold by one fine step however long it lasts: the first heartbeats after
+/// it do not return what the program is about to take again (design: "Heartbeat").
+#[test]
+#[cfg_attr(miri, ignore)]
+fn a_silence_ages_a_hold_by_one_step() {
+    let state = state::<Native>();
+    let back = state.get_or_reserve().unwrap();
+    let os = state.os();
+    let class = large(256 << 10);
+    let (blocks, top) = free_twice_the_floor(&back, os, class);
+    let freed = back.retained_large();
+    // Ten seconds of silence, then a few heartbeats close together.
+    os.advance_clock(10 * DECAY_TICKS);
+    beat_for(&back, os, 4, FINE_TICKS / 4);
+    assert_eq!(back.retained_large(), freed, "a silence is one step");
+    assert!(blocks.iter().all(|b| painted(b.as_ptr(), class.size(), 7)));
+    let again = back.alloc(class, class.size()).unwrap();
+    assert!(!again.zeroed, "the slot came back resident");
+    back.free(again.ptr, class);
+    back.free(top, class);
 }
 
 #[test]
