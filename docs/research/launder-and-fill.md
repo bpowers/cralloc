@@ -1456,12 +1456,35 @@ heartbeat as it was.
   each full magazine it takes back, at a quarter of the frequency it reached it before. Nothing
   measured shows a cost; one guaranteed full spare per class in use (64 KiB of objects per class
   and CPU at most) is the follow-up to try if a job does.
-- **Memory after a peak goes back more slowly.** Found on the recheck after review (`worst.sh`,
-  one run each, the same in both branch builds): burst-idle holds 90.6, 30.2 and 4.9 MiB at 2, 6
-  and 12 s after freeing 218 MiB, against main's 68.0, 21.3 and 1.3; the phase change 11.2
-  against 7.8 MiB at 8 s. A loaded or parked magazine of scattered 8-byte objects pins up to
-  1,022 pages, four times what one of 254 did, and the rules return a magazine at a time.
-  Peaks are level.
+- **Memory after a peak: level, once the probe's marks are off the purge's steps.** The
+  recheck after review first read burst-idle as 90.6, 30.2 and 4.9 MiB at 2, 6 and 12 s against
+  main's 68.0, 21.3 and 1.3. Those marks fall a few milliseconds from the clocked purge's steps,
+  which come once an interval at the same times in every run, so a run reads a step early or
+  late by chance of a few milliseconds. Sampled every 250 ms, three runs each, medians, MiB:
+
+  | burst-idle, s after the free | 1.5 | 2.5 | 3.5 | 4.5 | 6.5 | 8.5 | 10.5 | 11.9 | mean |
+  |---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+  | main | 214.9 | 68.0 | 50.2 | 38.3 | 21.3 | 11.3 | 5.3 | 3.3 | 52.1 |
+  | branch | 215.1 | 68.2 | 51.4 | 39.1 | 22.7 | 12.7 | 6.7 | 4.7 | 55.2 |
+
+  | phase change, s after | 1.5 | 2.5 | 4.5 | 6.5 | 7.9 | mean |
+  |---|---:|---:|---:|---:|---:|---:|
+  | main | 50.6 | 38.4 | 22.0 | 12.7 | 8.0 | 27.4 |
+  | branch | 49.9 | 40.5 | 23.8 | 14.2 | 9.7 | 28.8 |
+
+  What is left is 1 to 1.7 MiB, from about 4 s on, in the class the idle phase uses: a
+  sampler counting pages (a scratch probe) found 3.4 MiB of its free pages unpurged and 1.6 MiB
+  pinned by its magazines at 12 s, against 0.1 and 0.2 on main. Fills of 1,022 objects reach
+  further into the region, so its frontier keeps more pages, and its magazines are larger. The
+  depot's parked objects were the same on both, 33,000 to 34,000 pinning 49 MiB just after the
+  free. In one probe run the depot shed them an interval late on the branch (40 MiB pinned
+  until 2.3 s): the debt is set at a look in a new interval, and looks come every sixteen slow
+  paths, a quarter as many per allocation as on main. Looking every four slow paths removed
+  that lag in its run, but it also looks four times as often on paths whose magazines did not
+  grow: the large-object pipeline +3.5% against +1.4%, largepair +1.2% against -0.3% (three
+  rounds), so it is not kept. Counting the look period in objects moved rather than in slow
+  paths would remove the lag without that cost. jemalloc holds 141.5, 55.9 and 4.5 MiB at 2, 6
+  and 12 s on this probe; mimalloc 226.2 until 6 s, then 14.8 to 16.2.
 - **rpc log c64**, rechecked after review over twenty rounds: +1.3% [-1.8, +3.6] server
   cycles a request, at the same instructions (82.69 against 82.73 G); `benchrun layout` puts
   four layouts of the branch 1.7% apart (noise 0.7%), and the first build measured -0.7% at ten
