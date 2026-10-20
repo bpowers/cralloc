@@ -45,6 +45,8 @@ struct ClassStat {
     above: u64,
     free: u64,
     free_res: u64,
+    /// Resident bytes of pages that lie wholly inside one run of free slots: purgeable.
+    free_whole: u64,
     cached: [u64; 3],
     cached_res: [u64; 3],
     magazines: [u32; 3],
@@ -55,6 +57,12 @@ struct ClassStat {
 struct Snap {
     t_ms: u64,
     rss: u64,
+    /// AnonHugePages of the process, when `ASMALLOC_MEMSTAT_THP` is set.
+    thp: u64,
+    /// Bytes the program asked for and holds, by the class of the layout it asked with.
+    req: [i64; CLASSES],
+    /// The same, by the class of the slot that holds them (the last entry: not yet known).
+    req_slot: [i64; CLASSES],
     retained: u64,
     classes: [ClassStat; CLASSES],
     cpu_res: [[u64; 2]; CPUS],
@@ -90,6 +98,9 @@ impl Snap {
     const ZERO: Snap = Snap {
         t_ms: 0,
         rss: 0,
+        thp: 0,
+        req: [0; CLASSES],
+        req_slot: [0; CLASSES],
         retained: 0,
         classes: [ClassStat {
             regions: 0,
@@ -100,6 +111,7 @@ impl Snap {
             above: 0,
             free: 0,
             free_res: 0,
+            free_whole: 0,
             cached: [0; 3],
             cached_res: [0; 3],
             magazines: [0; 3],
@@ -247,6 +259,9 @@ impl Visitor for Walk {
         self.by_index[region.index] = self.count as u16 + 1;
         self.heap_base = base - region.index * region.len;
         self.region_shift = region.len.trailing_zeros();
+        HEAP_BASE.store(self.heap_base, Relaxed);
+        REGION_SHIFT.store(self.region_shift as usize, Relaxed);
+        REGION_CLASS[region.index].store(region.class.index() + 1, Relaxed);
         self.current = self.count;
         self.count += 1;
         self.used += pages;
@@ -273,9 +288,13 @@ impl Visitor for Walk {
 
     fn free(&mut self, class: Class, start: *const u8, len: usize) {
         let resident = if self.current == usize::MAX { 0 } else { self.overlap(self.current, start.addr(), len) };
+        let (first, end) = (start.addr().next_multiple_of(PAGE), (start.addr() + len) & !(PAGE - 1));
+        let whole =
+            if self.current == usize::MAX || first >= end { 0 } else { self.overlap(self.current, first, end - first) };
         let c = &mut self.snap.classes[class.index() as usize];
         c.free += len as u64;
         c.free_res += resident;
+        c.free_whole += whole;
     }
 
     fn run(&mut self, base: *const u8, len: usize, _size: usize) {
@@ -364,6 +383,10 @@ impl std::fmt::Write for Out {
 struct Sampler {
     walk: Walk,
     peak: Snap,
+    /// The sample with the largest resident set.
+    peak_rss: Snap,
+    /// `/proc/self/smaps_rollup`, open when `ASMALLOC_MEMSTAT_THP` is set, else 0.
+    rollup: i32,
     out: Out,
     statm: i32,
     start_ms: u64,
@@ -399,6 +422,22 @@ fn map(len: usize) -> *mut u8 {
 }
 
 impl Sampler {
+    fn thp(&self) -> u64 {
+        if self.rollup <= 0 {
+            return 0;
+        }
+        let mut buf = [0u8; 2048];
+        // SAFETY: pread writes at most the buffer's length.
+        let n = unsafe { libc::pread(self.rollup, buf.as_mut_ptr().cast(), buf.len(), 0) };
+        let text = std::str::from_utf8(&buf[..n.max(0) as usize]).unwrap_or("");
+        text.lines()
+            .find(|l| l.starts_with("AnonHugePages:"))
+            .and_then(|l| l.split_whitespace().nth(1))
+            .and_then(|k| k.parse::<u64>().ok())
+            .unwrap_or(0)
+            * 1024
+    }
+
     fn rss(&self) -> u64 {
         let mut buf = [0u8; 128];
         // SAFETY: pread writes at most the buffer's length.
@@ -417,11 +456,22 @@ impl Sampler {
         asmalloc::Asmalloc::inspect(w);
         w.snap.t_ms = now_ms() - self.start_ms;
         self.walk.snap.rss = self.rss();
+        self.walk.snap.thp = self.thp();
+        for (i, r) in REQ.iter().enumerate() {
+            self.walk.snap.req[i] = r.load(Relaxed);
+        }
+        for (i, r) in REQ_SLOT.iter().enumerate() {
+            self.walk.snap.req_slot[i] = r.load(Relaxed);
+        }
+        if self.walk.snap.rss > self.peak_rss.rss {
+            self.peak_rss = self.walk.snap;
+        }
         let snap = &self.walk.snap;
         let u = snap.uses();
         let _ = writeln!(
             self.out,
-            "sample t_ms={} rss={} heap={} live={} loaded={} spare={} depot={} free={} above={} runs={} meta={} mags={} slabs={} retained={}",
+            "sample probe_live={} t_ms={} rss={} heap={} live={} loaded={} spare={} depot={} free={} above={} runs={} meta={} mags={} slabs={} retained={}",
+            probe_live(),
             snap.t_ms,
             snap.rss,
             snap.heap(),
@@ -446,9 +496,11 @@ impl Sampler {
         let u = snap.uses();
         let _ = writeln!(
             out,
-            "{label} t_ms={} rss={} heap={} live={} loaded={} spare={} depot={} free={} above={} runs={} meta={} mags={} mags_carved={} slabs={} cpus={} retained={} empty_magazines={}",
+            "{label} t_ms={} rss={} thp={} req={} heap={} live={} loaded={} spare={} depot={} free={} above={} runs={} meta={} mags={} mags_carved={} slabs={} cpus={} retained={} empty_magazines={}",
             snap.t_ms,
             snap.rss,
+            snap.thp,
+            snap.req.iter().sum::<i64>(),
             snap.heap(),
             u[0],
             u[1],
@@ -466,14 +518,17 @@ impl Sampler {
             snap.empties
         );
         for (index, c) in snap.classes.iter().enumerate() {
-            if c.regions == 0 {
+            if c.regions == 0 && snap.req[index] == 0 {
                 continue;
             }
             let size = Class::from_index(index as u8).map_or(0, Class::size);
             let cached: u64 = c.cached_res.iter().sum();
             let _ = writeln!(
                 out,
-                "{label}-class size={size} regions={} carved={} committed={} huge_part={} resident={} live={} loaded={}/{} spare={}/{} depot={}/{} free={}/{} above={} magazines={}/{}/{} meta={}",
+                "{label}-class size={size} req={} req_slot={} free_whole={} regions={} carved={} committed={} huge_part={} resident={} live={} loaded={}/{} spare={}/{} depot={}/{} free={}/{} above={} magazines={}/{}/{} meta={}",
+                snap.req[index],
+                snap.req_slot[index],
+                c.free_whole,
                 c.regions,
                 c.carved,
                 c.committed,
@@ -542,6 +597,16 @@ extern "C" fn finish() {
     let sampler = unsafe { &mut *SAMPLER };
     sampler.sample();
     Sampler::dump(&mut sampler.out, "peak", &sampler.peak);
+    for (op, row) in PROBE.iter().enumerate() {
+        for (b, n) in row.iter().enumerate() {
+            let n = n.load(Relaxed);
+            if n != 0 {
+                let _ = writeln!(sampler.out, "probe op={op} size_log2={b} count={n}");
+            }
+        }
+    }
+    let peak_rss = sampler.peak_rss;
+    Sampler::dump(&mut sampler.out, "peakrss", &peak_rss);
     Sampler::dump(&mut sampler.out, "final", &sampler.walk.snap);
     // The sampler's own memory, which a whole-process account (memacct, acct.py) leaves out.
     // SAFETY: as above; this reads the pointer, not through it.
@@ -589,6 +654,11 @@ extern "C" fn start() {
         s.statm = statm;
         s.start_ms = now_ms();
         s.interval_ms = env_num(c"ASMALLOC_MEMSTAT_MS", 10).max(1);
+        PROBE_SIZE.store(env_num(c"ASMALLOC_MEMSTAT_PROBE", 0) as usize, Relaxed);
+        if env_num(c"ASMALLOC_MEMSTAT_THP", 0) != 0 {
+            // SAFETY: a literal path.
+            s.rollup = libc::open(c"/proc/self/smaps_rollup".as_ptr(), libc::O_RDONLY | libc::O_CLOEXEC);
+        }
         SAMPLER = state;
     }
     let cpu = env_num(c"ASMALLOC_MEMSTAT_CPU", 14) as usize;
@@ -613,3 +683,105 @@ extern "C" fn start() {
 #[used]
 #[unsafe(link_section = ".init_array")]
 static START: extern "C" fn() = start;
+
+/// Bytes the program holds, by the class of the layout it asked with (the last entry: layouts
+/// with no class). Kept by [`Counting`], the global allocator of the `asmalloc-memstat` build.
+static REQ: [std::sync::atomic::AtomicI64; CLASSES] = [const { std::sync::atomic::AtomicI64::new(0) }; CLASSES];
+
+/// What the sampler has learned of the heap, for [`slot_index`].
+static HEAP_BASE: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+static REGION_SHIFT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+static REGION_CLASS: [std::sync::atomic::AtomicU8; MAX_REGIONS] =
+    [const { std::sync::atomic::AtomicU8::new(0) }; MAX_REGIONS];
+static REQ_SLOT: [std::sync::atomic::AtomicI64; CLASSES] = [const { std::sync::atomic::AtomicI64::new(0) }; CLASSES];
+
+/// The class of the slot at `ptr`, as the sampler last saw its region, or the last entry.
+fn slot_index(ptr: *mut u8) -> usize {
+    let (base, shift) = (HEAP_BASE.load(Relaxed), REGION_SHIFT.load(Relaxed));
+    if base == 0 || ptr.addr() < base {
+        return CLASSES - 1;
+    }
+    match REGION_CLASS.get((ptr.addr() - base) >> shift).map_or(0, |c| c.load(Relaxed)) {
+        0 => CLASSES - 1,
+        c => c as usize - 1,
+    }
+}
+
+static PROBE_SIZE: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+/// [op][log2 size]: op 0 alloc, 1 alloc_zeroed, 2 realloc result, 3 dealloc, 4 realloc source.
+static PROBE: [[std::sync::atomic::AtomicU64; 40]; 5] =
+    [const { [const { std::sync::atomic::AtomicU64::new(0) }; 40] }; 5];
+
+fn probe(op: usize, ptr: *mut u8, size: usize) {
+    let want = PROBE_SIZE.load(Relaxed);
+    if want == 0 {
+        return;
+    }
+    let i = slot_index(ptr);
+    if i < CLASSES - 1 && Class::from_index(i as u8).map_or(0, Class::size) == want {
+        PROBE[op][(usize::BITS - size.max(1).leading_zeros()) as usize % 40].fetch_add(1, Relaxed);
+    }
+}
+
+/// Blocks the program holds in slots of the probed class, as far as the probe saw them.
+fn probe_live() -> i64 {
+    let sum = |op: usize| PROBE[op].iter().map(|n| n.load(Relaxed) as i64).sum::<i64>();
+    sum(0) + sum(1) + sum(2) - sum(3) - sum(4)
+}
+
+fn req_index(layout: std::alloc::Layout) -> usize {
+    Class::of_layout(layout).map_or(CLASSES - 1, |c| c.index() as usize)
+}
+
+/// asmalloc, counting what the program asks for by class, so that a sample can set the bytes
+/// asked for against the slots that hold them.
+pub struct Counting;
+
+// SAFETY: every call goes to asmalloc unchanged; the counting touches no block.
+unsafe impl std::alloc::GlobalAlloc for Counting {
+    unsafe fn alloc(&self, layout: std::alloc::Layout) -> *mut u8 {
+        // SAFETY: the caller's promise, passed on.
+        let p = unsafe { asmalloc::Asmalloc.alloc(layout) };
+        if !p.is_null() {
+            REQ[req_index(layout)].fetch_add(layout.size() as i64, Relaxed);
+            REQ_SLOT[slot_index(p)].fetch_add(layout.size() as i64, Relaxed);
+            probe(0, p, layout.size());
+        }
+        p
+    }
+
+    unsafe fn alloc_zeroed(&self, layout: std::alloc::Layout) -> *mut u8 {
+        // SAFETY: the caller's promise, passed on.
+        let p = unsafe { asmalloc::Asmalloc.alloc_zeroed(layout) };
+        if !p.is_null() {
+            REQ[req_index(layout)].fetch_add(layout.size() as i64, Relaxed);
+            REQ_SLOT[slot_index(p)].fetch_add(layout.size() as i64, Relaxed);
+            probe(1, p, layout.size());
+        }
+        p
+    }
+
+    unsafe fn dealloc(&self, ptr: *mut u8, layout: std::alloc::Layout) {
+        REQ[req_index(layout)].fetch_sub(layout.size() as i64, Relaxed);
+        REQ_SLOT[slot_index(ptr)].fetch_sub(layout.size() as i64, Relaxed);
+        probe(3, ptr, layout.size());
+        // SAFETY: the caller's promise, passed on.
+        unsafe { asmalloc::Asmalloc.dealloc(ptr, layout) }
+    }
+
+    unsafe fn realloc(&self, ptr: *mut u8, layout: std::alloc::Layout, new: usize) -> *mut u8 {
+        // SAFETY: the caller's promise, passed on.
+        let p = unsafe { asmalloc::Asmalloc.realloc(ptr, layout, new) };
+        if !p.is_null() {
+            REQ[req_index(layout)].fetch_sub(layout.size() as i64, Relaxed);
+            REQ_SLOT[slot_index(ptr)].fetch_sub(layout.size() as i64, Relaxed);
+            probe(4, ptr, layout.size());
+            REQ_SLOT[slot_index(p)].fetch_add(new as i64, Relaxed);
+            probe(2, p, new);
+            // SAFETY: the caller promises that `new` with the old alignment is a valid layout.
+            let next = unsafe { std::alloc::Layout::from_size_align_unchecked(new, layout.align()) };
+            REQ[req_index(next)].fetch_add(new as i64, Relaxed);
+        }
+        p
+    }
+}
