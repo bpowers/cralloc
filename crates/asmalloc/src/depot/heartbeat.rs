@@ -10,8 +10,8 @@
 //!   shared depot stack the call's exchange pushed a magazine with objects on, while that stack
 //!   holds more than its target, a magazine is popped and its objects go back to the source, as
 //!   many as the exchange pushed there, whatever the rules before it did (they ran within what
-//!   those objects left of the budget below), unless a rule turned away earlier went first; the
-//!   empty magazines go to the shared empty stack.
+//!   those objects left of the budget below, or, if a rule turned away earlier went first, within
+//!   the whole budget); the empty magazines go to the shared empty stack.
 //!   Then the same, within the budget, for what the heartbeat's own sweep and drain pushed on
 //!   shared stacks; what the budget leaves over a target, the shed takes back over the
 //!   heartbeats that follow. Only a push makes a stack deeper. A domain's stack needs no such
@@ -50,11 +50,12 @@
 //! full one would fit in what is left of it, after the objects of the exchange's pushes that left
 //! a shared stack over its target are set aside for the launder over target. A rule asks for room
 //! only once it has found work. One that finds no room waits for a later slow path; the age limit
-//! and the sweep, which only their CPU's slow paths run, go first at the next one, which then
-//! launders over target only within what they leave. Only when the exchange pushes more than
-//! the budget, which takes a thread moved to another CPU while it exchanges, does the call
-//! launder more. So a `free` launders at most one of the largest magazines, 1,022 objects, and a
-//! `malloc` that much besides its fill. A
+//! and the sweep, which only their CPU's slow paths run, go first at the next one, with the
+//! whole budget, and that call still launders its own pushes over target. So a slow path
+//! launders at most one of the largest magazines, 1,022 objects, besides a `malloc`'s fill, and
+//! twice that on a call that carries a rule turned away, which happens at most once an interval
+//! for each class and rule; and more only when the exchange pushes more than one magazine past
+//! a target, which takes a thread moved to another CPU while it exchanges. A
 //! launder sets one bitmap word per group of neighbours with one atomic OR, or one per object
 //! when they are scattered. A sweep step also pushes the rest of one spare stack, at most a few
 //! magazines, to the depot; for a class with stock it instead returns one magazine above the
@@ -421,9 +422,13 @@ impl<O: Os, R: Routines, S: Source> Cache<'_, O, R, S> {
                 _ => {}
             }
         }
-        // Last, so that it sees what this heartbeat's own sweep and drain parked.
+        // Last, so that it sees what this heartbeat's own sweep and drain parked. A call
+        // launders its own pushes even after a carried rule spent the budget, so that a CPU
+        // whose every exchange overflows keeps the stack at its target: one launder a push
+        // never catches up with a push it skipped. Such a call launders up to two of the
+        // largest magazines, at most once an interval per class.
         self.reserved.set(0);
-        self.launder_overflow(pushed, &clock, first);
+        self.launder_overflow(pushed, &clock, false);
         // Then, within the budget, as many as this heartbeat's own sweep and drain pushed on
         // shared stacks. What the budget leaves over a target the shed takes back later.
         let parked = self.overflowed.take();
@@ -440,11 +445,21 @@ impl<O: Os, R: Routines, S: Source> Cache<'_, O, R, S> {
         again: Option<SmallClass>,
         clock: &Clock<'_, O>,
     ) {
-        if self.tuning.age_limit
-            && let (Some(cpu), Some(activity)) = (chores.cpu, activity)
-            && !self.sweep_step(cpu, looking.is_some(), clock)
-            && let Some(class) = again.or_else(|| nth_class(activity))
-        {
+        if !self.tuning.age_limit {
+            return;
+        }
+        let (Some(cpu), Some(activity)) = (chores.cpu, activity) else {
+            return;
+        };
+        if self.sweep_step(cpu, looking.is_some(), clock) {
+            // The sweep laundered, which is this heartbeat's step; an age take it carried
+            // waits for the next.
+            if let Some(class) = again {
+                self.defer_age(cpu, class);
+            }
+            return;
+        }
+        if let Some(class) = again.or_else(|| nth_class(activity)) {
             let _ = self.age_look(cpu, class, clock);
         }
     }

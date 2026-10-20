@@ -270,10 +270,7 @@ impl<'a, O: Os, R: Routines, S: Source> Cache<'a, O, R, S> {
             return false;
         }
         if !self.may_launder(class) {
-            // The next slow path of this CPU takes it first (`Sweep`).
-            let word = slab.sweep();
-            let deferred = (class.ordinal() as u64 + 1) << AGE_DEFERRED_SHIFT;
-            word.store(word.load(Relaxed) & !AGE_DEFERRED | deferred, Relaxed);
+            self.defer_age(cpu, class);
             return false;
         }
         let taken = seen.level > 0 && self.reclaim(class, seen);
@@ -342,6 +339,14 @@ impl<'a, O: Os, R: Routines, S: Source> Cache<'a, O, R, S> {
             word.store(sweep.undeferred().0, Relaxed);
         }
         deferred
+    }
+
+    /// Records that the age limit found `class`'s magazine on `cpu` old and could not take it,
+    /// so that the CPU's next slow path takes it first (`Sweep`).
+    pub(super) fn defer_age(&self, cpu: Cpu, class: SmallClass) {
+        let word = self.slab(cpu).sweep();
+        let deferred = (class.ordinal() as u64 + 1) << AGE_DEFERRED_SHIFT;
+        word.store(word.load(Relaxed) & !AGE_DEFERRED | deferred, Relaxed);
     }
 
     /// Whether a slow path's budget turned away one of `cpu`'s rules, which the next heartbeat
