@@ -1456,6 +1456,16 @@ heartbeat as it was.
   each full magazine it takes back, at a quarter of the frequency it reached it before. Nothing
   measured shows a cost; one guaranteed full spare per class in use (64 KiB of objects per class
   and CPU at most) is the follow-up to try if a job does.
+- **Memory after a peak goes back more slowly.** Found on the recheck after review (`worst.sh`,
+  one run each, the same in both branch builds): burst-idle holds 90.6, 30.2 and 4.9 MiB at 2, 6
+  and 12 s after freeing 218 MiB, against main's 68.0, 21.3 and 1.3; the phase change 11.2
+  against 7.8 MiB at 8 s. A loaded or parked magazine of scattered 8-byte objects pins up to
+  1,022 pages, four times what one of 254 did, and the rules return a magazine at a time.
+  Peaks are level.
+- **rpc log c64**, rechecked after review over twenty rounds: +1.3% [-1.8, +3.6] server
+  cycles a request, at the same instructions (82.69 against 82.73 G); `benchrun layout` puts
+  four layouts of the branch 1.7% apart (noise 0.7%), and the first build measured -0.7% at ten
+  rounds. Not resolved; the colder objects of larger fills are untested as a cause.
 - **Fills from sparse bitmaps are partial.** A fill stops after 256 claims, so in a fragmented
   heap a magazine may hold as few objects as before, and the exchange rate there is what it was.
 
