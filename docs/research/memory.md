@@ -2823,6 +2823,81 @@ and faults almost nothing when it returns, and a little less than half as much a
 a half. Over the cap it is spared for the first interval of the gap now, and faults a tenth
 less when it comes back.
 
+## A burst that is never given back: no slow path, no heartbeat
+
+2026-10-20, at main `2c61347`. In the after-the-peak probe (`workload quiet live=2M
+sizes=small secs=6 after=burst after_sizes=small`, native build, CPU 2), asmalloc sometimes
+holds all 215 MiB to the end instead of returning to about 20 MiB by 6 s. It is not a purge
+that fails; it is the design's stated limit, "a process in which every thread stays inside its
+magazines has no heartbeat at all", and the probe falls into it in most runs.
+
+- **How often.** 39 of 66 runs over two days held everything; the share drifted from 1 in 6 to
+  18 in 20 between sessions. With the opt-in background thread, 0 of 6 (20 MiB at 6 s).
+  Preloaded (C `free`), 0 of 10.
+- **Where the memory is.** In a run that holds it: 207 MiB free in the bitmaps and counted as
+  retained, 1.5 MiB parked in the depot, 0.25 loaded (`asmalloc-memstat`). Not a large slot,
+  not a frontier: a counting build (`bench/probes/app-faults/edits/decaycount.py`) shows the
+  heartbeats stop for good after the same 15,755 or 17,573 calls, about a second in, having
+  started three clocked passes. Runs that return memory make 110k to 125k heartbeats and
+  start one pass a second.
+- **Why.** The light work allocates 2,000 objects of twelve classes up to 256 bytes and frees
+  them, every millisecond: about 167 objects a class against magazines of 254. Once each
+  class's loaded magazine holds more than a burst's worth, every call is served on the fast
+  path, for ever. The rules that would move on (a magazine's age limit, the CPU's sweep, the
+  idle drain) all run from a slow path, of this thread or another, and there is no other. What
+  tips a run into that state I did not pin down: not the phase of the clock's interval (runs
+  that held everything began their first heartbeat at every phase), nor any `realloc` (the
+  light work makes none). The sizes here are all small; a 64 KiB allocation would be a large
+  call and do maintenance one call in sixteen.
+- **Is "never" realistic?** For a single thread, or a thread per core, whose steady work
+  allocates and frees fewer than a magazine's worth of each class per cycle, yes: a request
+  handler that allocates tens of objects a class does. Work that frees on another thread, grows
+  vectors, or touches large blocks enters slow paths all the time: the screening's programs
+  made 36k (tpchgen) to 840k (gix-hours) heartbeats a run; pulldown-cmark, single-threaded,
+  282.
+
+**Enforcing the cap where memory is freed (experiment, not for merging).** A free or launder
+that adds to the retained count takes a debt; at each growth step (2 MiB) of it, or at every
+call (*eager*), the freer purges what is over the 64 MiB cap from where the walk stands,
+within the growth payment's bound of 16,384 bitmap words a call. *Spare recent* skips regions
+released into within 2^28 ticks (about 60 ms). Probe, runs with no heartbeat, MiB held at the
+end: main 215; per step 147; eager 108; spare recent 215. Neither reaches the cap: the frees
+come in random order, so a page is wholly free only at the last frees, after most payments have
+walked past it, and the parked objects left in magazines and the depot (under 2 MiB of
+objects) pin a page each, a whole 2 MiB unit in the huge-page part. Those are moved only by the
+heartbeat's rules. Sparing recent memory spares all of a burst, since all of it is recent.
+
+What it costs where large memory is freed and claimed again within milliseconds (preloaded,
+three rounds, medians; diagnostic builds):
+
+| | faults | kernel Gcycles | Gcycles | `madvise` | peak RSS MiB |
+|---|---:|---:|---:|---:|---:|
+| tpchgen: main / per step / eager / spare recent | 712k / 853k / 857k / 718k | 2.57 / 3.14 / 2.80 / 2.27 | 26.6 / 27.3 / 26.6 / 26.3 | 9.5k / 21k / 24k / 10k | 575 / 517 / 504 / 565 |
+| gix-hours | 990k / 1,023k / 1,006k / 1,017k | 3.51 / 6.93 / 8.09 / 4.17 | 49.4 / 72.1 / 691 / 59.9 | 9.6k / 138k / 137k / 29k | 2,928 / 2,925 / 2,923 / 2,937 |
+| datafusion | 245k / 436k / 439k / 291k | 2.15 / 3.05 / 3.10 / 2.38 | 23.1 / 24.4 / 24.1 / 25.7 | 3.5k / 9.1k / 8.9k / 3.8k | 438 / 327 / 339 / 394 |
+| pulldown-cmark | level | | | | |
+
+Per step costs gix-hours 46% more cycles and datafusion 78% more faults; eager makes gix-hours
+fourteen times slower (17.7 s), walking its fragmented bitmaps on every launder. Sparing recent
+memory removes most of it (gix-hours +21% cycles, datafusion +19% faults) and also removes the
+benefit on the probe.
+
+**A heartbeat from `realloc` moves.** Counted per run (C `realloc` that moves a block):
+tpchgen 45k small and 6.6k large, gix-hours 40.7M small, datafusion 210k, ruff check 693k,
+pulldown-cmark 2.6k; the probe 420, all before the burst. The programs that move blocks already
+make heartbeats by the tens of thousands, and the probe's light work makes no moves after the
+drop, so a heartbeat from moves would not have helped. Not built.
+
+**Options.** (1) Keep the limit and say so in the probe and the design: a program whose
+steady work fits its magazines keeps what it held when it went quiet unless it starts the
+background thread; the probe should report how many runs had no heartbeat. (2) A heartbeat
+that cannot be skipped: a slow path forced once in N fast-path calls costs the fast path, which
+the design rules out; forcing it instead when a slow path installs a magazine (a magazine
+installed with fewer than a burst's worth of room either way) only delays the state. (3) The
+background thread on by default, which the design opted against. (4) The cap enforced on the
+free side: bounded by the parked objects, not by the cap, and it thrashes where memory is
+reused unless it spares recent memory, which spares a burst too.
+
 ## Reproducing
 
 ```
@@ -2896,4 +2971,11 @@ scripts/measure --both-l3 $P/csmix.sh ruff-check 8 main=$APPF_OUT/lib/main-d.so 
 python3 -I $P/csall.py main fix        # context switches by reason
 scripts/measure --both-l3 scripts/memlimit -m 8G -- python3 -I $P/srv.py $APPF_OUT/srv.jsonl \
   --rounds 5 --libs main=$APPF_OUT/lib/main-d.so,fix=$APPF_OUT/lib/fix.so
+# A burst that is never given back: counting builds (heartbeats, decay steps, realloc moves),
+# preload and native (natbuild.sh: variant.sh, then the workloads against the variant's crates).
+P=bench/probes/app-faults; E=$P/edits
+scripts/heavy $P/variant.sh x-base --diag $E/decaycount.py
+scripts/heavy $P/variant.sh x-fc --diag $E/decaycount.py $E/freecap.py    # + freeeager.py, freeold.py
+BENCH_CPUS=2 bench/target/<label>/release/workload quiet live=2M sizes=small secs=6 \
+  after=burst after_sizes=small            # the DIAG counts go to stderr at exit
 ```
