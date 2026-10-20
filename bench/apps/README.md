@@ -114,9 +114,20 @@ A server job reports, per group of segments: the rate achieved, latency p50, p90
 p99.9 and max, requests that missed their slot, errors, the server's cycles, instructions, CPU
 time and page faults per request, and its peak resident set; and over the run, the peak under
 load, the curve, the cgroup peak and the THP counters. It ranks by cycles per request at 70%
-(`s70`). At 70% every allocator sees millisecond queueing episodes when tokio parks its
-workers, so the tails there partly rank the runtime; the 30% tails are the cleaner comparison
-of allocators.
+(`s70`).
+
+**Idle states.** Between requests a server's cores go idle, and the deepest state on the
+reference machine (C3) takes about 350 us to leave. A faster allocator leaves more idle time,
+hence more C3, and with the states left alone the 70% tail ranks the machine's idle states
+and the runtime's parking, not the allocator: p99.9 of 1 to 7 ms for every allocator, with
+the slowest allocator's often the best (`docs/research/server-latency.md`). So by default the
+runner holds the server's cores out of deep idle while the server runs, the same way for
+every allocator: a spinning thread at `SCHED_IDLE` on each of its CPUs' SMT siblings (it
+needs no root, which disabling the state would). p99.9 then falls to tens of microseconds.
+The spinner shares the core, so the server's cycles per request rise (by a third on the
+order service) and its saturated rate falls, alike for every allocator. Every run records
+which way it ran (`idle_states`); `--idle-states free` leaves the states alone, and its
+tails measure the machine as much as the allocator.
 
 `benchrun report` prints a table per server: latency and work at each rate, and memory under
 load, in the silences and after the connections close.
