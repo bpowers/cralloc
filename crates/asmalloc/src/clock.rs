@@ -54,7 +54,7 @@ const _: () = assert!(
 );
 
 /// The count of intervals and when the last step was taken (see the module documentation).
-pub(crate) struct Counted {
+pub struct Counted {
     word: AtomicU64,
     /// One more than the count at which `maintain` last ran a round, zero for never: what
     /// limits it to one round an interval (design: "Heartbeat").
@@ -261,7 +261,7 @@ mod tests {
         assert_eq!(r.time, 0);
         assert!(r.next.is_none());
         let r = read(0, 5 * INTERVAL);
-        assert_eq!(r.next, Some(pack(1, (5 * INTERVAL >> UNIT_SHIFT) as u32)));
+        assert_eq!(r.next, Some(pack(1, ((5 * INTERVAL) >> UNIT_SHIFT) as u32)));
         assert_eq!(r.time, INTERVAL);
     }
 }
