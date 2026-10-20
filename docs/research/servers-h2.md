@@ -77,3 +77,65 @@ MiB in 10 s).
   payload, generated like `log50.bin`, and `rpc-server bench`. The generator already handles a
   streamed response over HTTP/2: it completes a request at the stream's end. Half a day.
 - **The proxy and meilisearch**, next.
+
+## lean-slow on these jobs
+
+Measured 2026-10-20 afternoon: branch `lean-slow` at `d35a919` (the lean slow path, and the
+loaded magazine left half full on a swap that reverses the last), merged into main `60e8d87`
+on a throwaway branch and built as a second asmalloc beside main's, for the four jobs above
+and axum over HTTP/1.1. The suite's day with cores held, three rounds, four allocators in a
+new random order each round; then, at 70% and cores held, two runs each of the slow-path
+counts (`probe-counts` cherry-picked onto both builds) and of per-thread counters. No run
+invalid. Raw results: `docs/research/data/servers-lean-2026-10-20.jsonl.gz`.
+
+Cycles per request at 70% (± under 2.5%), p99.9 at 70% in us, saturated rate in thousands:
+
+| Job | asmalloc main | asmalloc lean-slow | jemalloc | tcmalloc per-CPU |
+|---|---|---|---|---|
+| connect log, gRPC/HTTP/2 | 136.1k, 41, 181 | **130.4k**, 41, 189 | 140.2k, 40, 174 | 132.2k, 39, 185 |
+| connect log, Connect/HTTP/2 | 135.3k, 40, 187 | **128.6k**, 44, 191 | 137.1k, 40, 176 | 130.7k, 40, 188 |
+| orders axum, HTTP/2 | 64.0k, 54, 306 | **60.5k**, 43, 303 | 61.1k, 42, 304 | 60.6k, 43, 304 |
+| orders axum, HTTP/1.1 | 80.4k, 33, 328 | **68.8k**, 25, 383 | 69.1k, 25, 382 | 69.9k, 25, 375 |
+| mini-redis | 38.3k, 24, 688 | 36.1k, 23, 723 | 36.2k, 23, 736 | **36.0k**, 23, 735 |
+
+lean-slow is the best or level with the best on every job: 6 to 7% under jemalloc on the
+log service, level with it on axum and mini-redis, and 14 to 15% under main on axum over
+HTTP/1.1. Memory does not move (peaks within 0.2 MiB of main's).
+
+**Slow paths per request at 70%** (two runs each):
+
+| Job | main: swaps with spares | main: depot round trips | main: fill and launder | lean-slow: all slow paths |
+|---|---|---|---|---|
+| gRPC/HTTP/2 | 1.5 to 1.9 | 3.7 to 3.9 | 0.17 to 0.18 each | under 0.0001 |
+| Connect/HTTP/2 | 0.9 to 1.2 | 3.0 to 3.4 | 0.13 to 0.15 | under 0.0002 |
+| axum HTTP/2 | 0.39 to 0.40 | 0.73 | 0.04 | 0.0001 |
+| axum HTTP/1.1 | 6.1 to 6.3 | 2.2 | 0.27 | under 0.00001 |
+| mini-redis | 1.8 to 1.9 | 0.002 to 0.003 | 0.06 | 0.0001 |
+
+(Counted each way; allocation and free slow paths are equal on main. On lean-slow the whole
+8 s window holds 0 to 312 slow paths against 0.5 to 3.8 million requests.)
+
+**The reversal rule removes the depot round trips too, not only the swaps with spares.** On
+main, gRPC over HTTP/2 makes its depot round trips in 640 B (0.8 a request), 256 B (0.6),
+32 B (0.5), 5,120 B (0.5), 24 KiB (0.5), 48 B (0.3), 24 B (0.3) and 40 B (0.2); on lean-slow
+none of them takes a slow path more than once in 10,000 requests. So the swings fit in a
+half-full magazine even where the magazine is small. Allocations per request by class (a
+build that counts them, below), against the class's magazine capacity: 640 B 5 a request
+(capacity 62), 5,120 B 2 (6), 20 KiB 1 (2), 24 KiB 2 (2), 256 B 50 (254), 128 B 51 (510),
+48 B 50 (1,022). Even the 24 KiB class, which allocates as many objects a request as its
+magazine holds, stays in its magazine once that starts half full: its objects are freed
+before the next are allocated, so its swing is one or two, not the request's count. Earned
+room has nothing to act on in these servers once the reversal rule is in.
+
+**Per thread**, at 70% with cores held, user cycles a request (kernel within about 3k in every
+case; the extra on main is all in the workers and all user mode): gRPC/HTTP/2 main 120.5k,
+lean-slow 106.0k, jemalloc 116.3k, tcmalloc 108.5k; Connect/HTTP/2 113.3k, 104.0k, 114.0k,
+106.7k; axum HTTP/2 57.6k, 52.6k, 51.6k, 52.8k; axum HTTP/1.1 58.1k, 41.2k, 40.4k, 42.2k;
+mini-redis 8.7k, 6.4k, 6.4k, 6.4k. lean-slow's user instructions match jemalloc's to within
+3% on axum and mini-redis and are 4 to 5% lower on the log service.
+
+Method notes: the second build was `bench/target/asmalloc-lean`, a hand-built entry in
+`allocators.toml` (`build = "asmalloc-lean"`, not committed). The size counts come from a
+throwaway `asmalloc-sizes` feature of bench-alloc that wraps asmalloc and adds one relaxed
+atomic per call into a table `BENCH_SIZE_COUNTS`, read by `run.py sizes` and summed by
+`sizesum.py`; its counts are exact, its timing is not meant to be.

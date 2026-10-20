@@ -8,6 +8,9 @@ siblings) unless --free. Over the measured segment it runs one of:
   trace   perf trace -s (system call summary)
   probe   the slow-path counters of a probe-counts build (probesum.py), read from the
           server's memory at the start and end of the segment
+  sizes   allocations and frees by class (sizesum.py) of a build whose bench-alloc counts
+          them into `BENCH_SIZE_COUNTS` (an `asmalloc-sizes` feature on a throwaway branch;
+          docs/research/servers-h2.md says how it was built)
 
   run.py MODE --server NAME --allocs BUILD,... --rounds N --out DIR [--free] [--pin]
          [--rate 280000] [--secs 8]
@@ -34,9 +37,9 @@ EVENTS = ("cycles:u,cycles:k,instructions:u,instructions:k,task-clock,context-sw
           "cpu-migrations,page-faults")
 
 
-def probe_reader(pid, binary):
+def probe_reader(pid, binary, symbol="ASMALLOC_PROBE_COUNTS"):
     nm = subprocess.run(["nm", "-S", str(binary)], capture_output=True, text=True).stdout
-    sym = [l.split() for l in nm.splitlines() if l.endswith(" ASMALLOC_PROBE_COUNTS")]
+    sym = [l.split() for l in nm.splitlines() if l.endswith(" " + symbol)]
     value, size = int(sym[0][0], 16), int(sym[0][1], 16)
     real = os.path.realpath(binary)
     base = None
@@ -115,7 +118,8 @@ def run(mode, server, build, rnd, args, out):
                                stdout=subprocess.PIPE, text=True)
         perf = None
         result = None
-        reader = probe_reader(srv.pid, binary) if mode == "probe" else None
+        reader = {"probe": lambda: probe_reader(srv.pid, binary),
+                  "sizes": lambda: probe_reader(srv.pid, binary, "BENCH_SIZE_COUNTS")}.get(mode, lambda: None)()
         before = None
         for line in gen.stdout:
             if line.startswith("MARK") and line.split()[3:4] == ["m"]:
@@ -138,7 +142,7 @@ def run(mode, server, build, rnd, args, out):
                     perf.send_signal(signal.SIGINT)
                 if reader and before:
                     after = reader()
-                    (out / f"{tag}.probe.json").write_text(json.dumps({i: b - a for i, (a, b) in enumerate(zip(before, after)) if b != a}))
+                    (out / f"{tag}.{mode}.json").write_text(json.dumps({i: b - a for i, (a, b) in enumerate(zip(before, after)) if b != a}))
             elif line.startswith("RESULT"):
                 result = line[7:].strip()
         gen.wait()
@@ -156,7 +160,7 @@ def run(mode, server, build, rnd, args, out):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("mode", choices=["stat", "record", "trace", "probe"])
+    ap.add_argument("mode", choices=["stat", "record", "trace", "probe", "sizes"])
     ap.add_argument("--server", default="actix", choices=sorted(SERVERS))
     ap.add_argument("--allocs", default="asmalloc,je")
     ap.add_argument("--rounds", type=int, default=2)
