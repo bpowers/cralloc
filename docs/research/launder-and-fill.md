@@ -2047,3 +2047,57 @@ One-way flows, five interleaved rounds against main: the pipelines are level (t2
 small +0.7%, mixed -0.5%, x2 split -1.0%, x3 -0.3%, x4 +0.1%, t8 -0.6%, mpmc p1c3 -1.2%,
 p4c4 -0.4%), the split pipeline keeps the lean slow path's -4.6%, and the tree (-2.8%) and JSON
 (+1.1%) are within what placement moves them.
+
+### Only on evidence of a lock (2026-10-20)
+
+Review found the rule above centring every swap that reversed the last one, including the turn
+of a swing longer than a magazine, which half a magazine cannot absorb. It now centres only a
+swap that reverses a swap which itself reversed the one before (a, f, a), and backs off
+exponentially when a centred swap does not help: one followed by a reversal, at once or after a
+single swap the same way, is a failure, and after the j-th in a row the next 2^(j-1) lock swaps
+stay plain, at most 64 (`depot/stock.rs`, `plan_swap`). The single same-way swap matters: a
+swing between half a magazine and a whole one runs out of its half, swaps once more, then turns,
+and counting that swap as a run that cleared the failures cost three swaps a repetition where
+plain swaps take two (300 against 200 slow paths per 100 repetitions, in the table below's
+setup, before the change).
+
+Slow paths per 100 repetitions of a swing on one CPU (allocate the amplitude, free it newest or
+oldest first; `depot/rules.rs`, `swing`), rule on / off, the same for both orders of freeing and
+for the 8, 64 and 1,024-byte classes:
+
+| swing, magazines | 0.25 | 0.5 to 0.75 | 1 to 1.5 | 2 to 2.5 | 4 |
+|---|---:|---:|---:|---:|---:|
+| on | 0 | 203 | 400 | 600 | 1000 |
+| off | 200 | 200 | 400 | 600 | 1000 |
+
+The 1.5% between half a magazine and a whole one is the backoff's retry, one in 65 lock swaps;
+`the_swing_rule_pays_for_itself` holds it under 2%. Fills and launders are the same or fewer
+with the rule on.
+
+`burst` (the workload, `bench/workloads`), five interleaved rounds against main (c4a9c17),
+median cycles per operation, main / lean: 8-byte class at 0.75, 1.1 and 2.5 magazines 3.669 /
+3.666, 4.034 / 4.052, 4.003 / 4.018; 64-byte class 3.667 / 3.667, 4.125 / 4.118, 4.129 / 4.129.
+Level: every difference is within the runs' spread.
+
+burst-idle, every 250 ms sample, three runs, medians, MiB:
+
+| s after the free | 1.5 | 2.5 | 3.5 | 4.5 | 6.5 | 8.5 | 10.5 | 11.9 | mean |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| main | 215.0 | 68.2 | 51.4 | 39.3 | 22.9 | 12.9 | 6.9 | 4.9 | 55.5 |
+| lean | 215.0 | 68.2 | 50.7 | 38.7 | 20.9 | 10.9 | 4.9 | 2.9 | 54.3 |
+
+Peaks 216 MiB for both.
+
+The servers suite's three original jobs, lean-slow at 61e9442 merged with main c4a9c17, against
+main and jemalloc, three interleaved sessions; server cycles per request at 70% of the
+saturated rate (medians), and connect-rust's saturated rate:
+
+| Job | lean-slow | main | jemalloc |
+|---|---:|---:|---:|
+| orders axum, cycles/req at s70 | 68.5k | 79.4k | 70.0k |
+| orders actix, cycles/req at s70 | 56.3k | 64.3k | 57.6k |
+| connect log, cycles/req at s70 | 119.3k | 125.9k | 131.2k |
+| connect log, saturated, k req/s | 207.5 | 194.9 | 189.4 |
+
+No lean-slow connect process ran slow (cycles per request within 0.1% across runs). The servers
+keep the gain the first version of the rule had.
