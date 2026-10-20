@@ -458,8 +458,11 @@ neither pays for the move.
 
 Half a magazine cannot absorb a swing longer than that, and a swing between half a
 magazine and a whole one would be centred at every turn without ever fitting. So the rule
-backs off. A centred swap that is followed by another reversal has failed, and each
-failure in a row doubles the number of the swaps after it that stay plain, up to a bound.
+backs off. A centred swap has failed if another swap of that class on that CPU follows it
+within an interval, whichever way: a reversal is a swing the half did not hold, and a
+second swap the same way is the long leg of one. Each failure in a row doubles the number
+of the swaps after it that stay plain, up to a bound, and only an interval without a swap
+clears the count.
 A swing the rule cannot help then pays for an occasional retry and nothing else, and one
 that changes into a swing it can help is centred at the next retry.
 
