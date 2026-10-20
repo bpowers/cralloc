@@ -182,7 +182,13 @@ impl<'a, O: Os> Back<'a, O> {
             return 0;
         };
         // With `x-carve-own-first`, a domain carves its own before it reuses another's.
-        let carve_first = cfg!(feature = "x-carve-own-first") && host.domain.is_some() && !own_only;
+        // With `x-cap-relax`, only while retained memory is within the cap: past it, carving
+        // would hold another domain's free memory and new memory both.
+        let carve_first = cfg!(feature = "x-carve-own-first")
+            && host.domain.is_some()
+            && !own_only
+            && (!cfg!(feature = "x-cap-relax")
+                || self.retained() <= super::policy::retained_cap(self.space.plan().geometry()));
         host.own_only = own_only || carve_first;
         let len = out.positions();
         let mut got = self.claim_into(&host, class, out, 0, domain);

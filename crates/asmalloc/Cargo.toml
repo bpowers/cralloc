@@ -49,6 +49,8 @@ x-carve-own-first = []
 x-peek = ["x-own-fill-first"]
 # `x-home` (with `x-peek`): also pop it first when its top object lives in the domain's memory.
 x-home = ["x-peek"]
+# `x-cap-relax` (with `x-carve-own-first`): carve first only while retained memory is within the cap.
+x-cap-relax = ["x-carve-own-first"]
 
 [dependencies]
 
