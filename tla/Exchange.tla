@@ -14,7 +14,12 @@
      the marker    an abstract drainer marks a cid's slab word and spare
                    heads, and later takes what it displaced or backs out;
      no cid        a routine may find the thread's cid out of range. The call
-                   is then served from the back end and touches no slab.
+                   is then served from the back end and touches no slab;
+     centring      a swap may leave its magazine half full instead (slow.rs,
+                   "Half full on a reversal"): it takes the loaded magazine
+                   out, storing Zero, copies part of one held magazine into
+                   the other, and installs one expecting Zero. Any swap may
+                   do it here, since the rule that picks them is a hint.
 
    Magazines hold sets of objects. The depot and the back end are atomic
    here; Depot.tla, Summary.tla and Purge.tla model them. *)
@@ -28,7 +33,8 @@ CONSTANTS
     Cap,        \* objects per magazine
     MaxDepth,   \* calls in progress per thread: 1 is no signal handler
     SpareMax,   \* spare magazines of each kind a cid may keep
-    BadCid      \* TRUE: a thread may find its cid out of range
+    BadCid,     \* TRUE: a thread may find its cid out of range
+    BlindCentre \* TRUE: a centring installs without expecting Zero (a flaw)
 
 \* Cids, magazines and objects are sets of model values, so TLC can treat
 \* them as interchangeable.
@@ -74,8 +80,9 @@ At(t, l) == Depth(t) > 0 /\ Top(t).pc = l
 SomeCid == Cids \cup (IF BadCid THEN {NoCid} ELSE {})
 
 IsMag(w) == w \in Mags
+\* hm: the magazine the call holds; om: the loaded one a centring took out.
 Frame(op, o) == [op |-> op, pc |-> IF op = "alloc" THEN "a_fast" ELSE "f_fast",
-                 o |-> o, hm |-> Zero]
+                 o |-> o, hm |-> Zero, om |-> Zero]
 
 ----------------------------------------------------------------------------
 (* Calls, from the program or from a signal handler *)
@@ -283,6 +290,81 @@ FLaunder(t) ==
     /\ UNCHANGED <<slab, spFull, spEmpty, spMark, drained, depot, user, stack>>
 
 ----------------------------------------------------------------------------
+(* Centring: the swap that leaves its magazine half full *)
+
+\* The take: the store-if-equal routine replaces an empty loaded magazine (for
+\* an allocation) or a full one (for a free) with Zero, and the call holds it.
+\* Where it would not match, the call goes on as a plain install does.
+CentreTake(t) ==
+    /\ At(t, "a_ins") \/ At(t, "f_ins")
+    /\ LET f == Top(t) IN
+       \E c \in Cids :
+        /\ IsMag(slab[c])
+        /\ IF f.pc = "a_ins"
+           THEN mag[slab[c]] = {} /\ Cardinality(mag[f.hm]) >= 2
+           ELSE Cardinality(mag[slab[c]]) = Cap /\ Cap >= 2
+        /\ slab' = [slab EXCEPT ![c] = Zero]
+        /\ SetTop(t, [f EXCEPT !.om = slab[c],
+                               !.pc = IF f.pc = "a_ins" THEN "a_copy" ELSE "f_copy"])
+    /\ UNCHANGED <<spFull, spEmpty, spMark, drained, depot, mag, back, user>>
+
+\* The copy: part of the objects of the magazine that has them goes to the
+\* other. Both are the call's own, so this is no commit.
+CentreCopy(t) ==
+    /\ At(t, "a_copy") \/ At(t, "f_copy")
+    /\ LET f == Top(t)
+           from == IF f.pc = "a_copy" THEN f.hm ELSE f.om
+           into == IF f.pc = "a_copy" THEN f.om ELSE f.hm IN
+       \E S \in SUBSET mag[from] :
+        /\ S # {} /\ S # mag[from]
+        /\ mag' = [mag EXCEPT ![from] = @ \ S, ![into] = S]
+        /\ Goto(t, IF f.pc = "a_copy" THEN "a_cins" ELSE "f_cins")
+    /\ UNCHANGED <<slab, spFull, spEmpty, spMark, drained, depot, back, user>>
+
+\* The install, expecting Zero. On success the magazine taken out is retired
+\* as a displaced one is, and the call retries on its fast path. On the
+\* marker both magazines are put away and the call retries. On another
+\* magazine, which a call that ran meanwhile installed, or with no cid, the
+\* call is served from the one it meant to install, which goes to the depot,
+\* and the one taken out is put away.
+CentreInstall(t) ==
+    /\ At(t, "a_cins") \/ At(t, "f_cins")
+    /\ LET f == Top(t)
+           alloc == f.pc = "a_cins" IN
+       \E c \in SomeCid :
+        IF c # NoCid /\ (slab[c] = Zero \/ BlindCentre)
+        THEN /\ slab' = [slab EXCEPT ![c] = f.hm]
+             /\ SetTop(t, [f EXCEPT !.hm = f.om, !.om = Zero,
+                                    !.pc = IF alloc THEN "a_retire" ELSE "f_retire"])
+             /\ UNCHANGED <<mag, user>>
+        ELSE IF c # NoCid /\ slab[c] = Marker
+        THEN /\ Goto(t, IF alloc THEN "a_cback" ELSE "f_cback")
+             /\ UNCHANGED <<slab, mag, user>>
+        ELSE IF alloc
+        THEN \E o \in mag[f.hm] :
+                /\ mag' = [mag EXCEPT ![f.hm] = @ \ {o}]
+                /\ user' = user \cup {o}
+                /\ Goto(t, "c_serve")
+                /\ UNCHANGED slab
+        ELSE /\ mag' = [mag EXCEPT ![f.hm] = @ \cup {f.o}]
+             /\ SetTop(t, [f EXCEPT !.o = NoObj, !.pc = "c_serve"])
+             /\ UNCHANGED <<slab, user>>
+    /\ UNCHANGED <<spFull, spEmpty, spMark, drained, depot, back>>
+
+\* Put away the magazine a failed centring took out, then go on with the one
+\* it meant to install: put it away and retry (a_back, f_back), or send it to
+\* the depot (to_depot).
+CentrePut(t) ==
+    /\ At(t, "a_cback") \/ At(t, "f_cback") \/ At(t, "c_serve")
+    /\ LET f == Top(t) IN
+        /\ PutAway(f.om, mag[f.om] # {})
+        /\ SetTop(t, [f EXCEPT !.om = Zero,
+                               !.pc = CASE f.pc = "a_cback" -> "a_back"
+                                        [] f.pc = "f_cback" -> "f_back"
+                                        [] OTHER -> "to_depot"])
+    /\ UNCHANGED <<slab, spMark, drained, mag, back, user>>
+
+----------------------------------------------------------------------------
 (* The drainer, as an environment. Drain.tla models it in full. *)
 
 DrainMark(c) ==
@@ -306,6 +388,7 @@ DrainTake(c) ==
 Step(t) ==
     \/ AFast(t) \/ ADirect(t) \/ AGet(t) \/ AFill(t) \/ AInstall(t) \/ APut(t) \/ ToDepot(t)
     \/ FFast(t) \/ FDirect(t) \/ FGet(t) \/ FInstall(t) \/ FPut(t) \/ FLaunder(t)
+    \/ CentreTake(t) \/ CentreCopy(t) \/ CentreInstall(t) \/ CentrePut(t)
 
 Next ==
     \/ \E t \in Threads : Call(t) \/ Step(t)
@@ -328,6 +411,7 @@ MagPlaces(m) ==
   \cup {<<"drained", c>> : c \in {c \in Cids : m \in drained[c]}}
   \cup (IF m \in depot THEN {<<"depot">>} ELSE {})
   \cup {<<"held", x>> : x \in {x \in Live(Frames) : Fr(x).hm = m}}
+  \cup {<<"taken", x>> : x \in {x \in Live(Frames) : Fr(x).om = m}}
 
 ObjPlaces(o) ==
        {<<"mag", m>> : m \in {m \in Mags : o \in mag[m]}}
@@ -350,6 +434,8 @@ Usable ==
     /\ \A x \in Live(Frames) :
         /\ Fr(x).pc = "a_ins" => mag[Fr(x).hm] # {}
         /\ Fr(x).pc = "f_ins" => Cardinality(mag[Fr(x).hm]) < Cap
+        /\ Fr(x).pc = "a_cins" => mag[Fr(x).hm] # {}
+        /\ Fr(x).pc = "f_cins" => Cardinality(mag[Fr(x).hm]) < Cap
 
 \* No thread ever waits: a call in progress always has a step it can take,
 \* whatever the other threads and the drainer are doing.

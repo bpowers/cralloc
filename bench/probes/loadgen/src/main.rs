@@ -28,12 +28,22 @@
 //! loop). `--pid` samples the server's resident set every `--sample-ms` (default 10) into
 //! `--mem` as `ms,rss_kib,file_kib`.
 //!
+//! `--proto h2` speaks HTTP/2 over cleartext with prior knowledge: `--conns` connections,
+//! each carrying up to `--streams` requests at once (src/h2.rs). The same request options.
+//!
+//! `--proto resp` speaks the Redis protocol instead of HTTP: `--requests FILE` holds RESP
+//! commands written back to back, which the connections send in turn (each thread starting
+//! at its own place in the list); a reply is a success unless it is an error. `--path`,
+//! `--content-type`, `--header` and `--body` are HTTP's.
+//!
 //! Exit status: 0 for a clean run; 1 when any request failed, a connection broke or a response
 //! arrived that no request was waiting for (the summary is still printed); 2 for bad usage or a
 //! connection that could not be opened.
 
+mod h2;
 mod http;
 mod plan;
+mod resp;
 mod stats;
 mod worker;
 
@@ -53,6 +63,9 @@ struct Opts {
     content_type: String,
     headers: Vec<String>,
     body: Vec<u8>,
+    proto: worker::Proto,
+    requests: Option<PathBuf>,
+    streams: usize,
     conns: usize,
     threads: usize,
     cpus: Vec<usize>,
@@ -71,7 +84,7 @@ struct Opts {
 }
 
 const USAGE: &str = "usage: loadgen --addr HOST:PORT --plan PLAN [--path P] [--content-type T] [--header 'K: V']... \
-[--body FILE] [--conns 64] [--threads 4] [--cpus LIST] [--aux-cpu N] [--spacing uniform|poisson] [--seed N] \
+[--body FILE] [--proto http|h2|resp] [--streams 8] [--requests FILE] [--conns 64] [--threads 4] [--cpus LIST] [--aux-cpu N] [--spacing uniform|poisson] [--seed N] \
 [--pid PID] [--sample-ms 10] [--head-ms 50] [--drain-s 5] [--label TEXT] [--json FILE] [--raw FILE] [--mem FILE]";
 
 fn die(msg: &str) -> ! {
@@ -101,6 +114,9 @@ fn parse_opts() -> Opts {
         content_type: String::new(),
         headers: Vec::new(),
         body: Vec::new(),
+        proto: worker::Proto::Http,
+        requests: None,
+        streams: 8,
         conns: 64,
         threads: 4,
         cpus: Vec::new(),
@@ -140,6 +156,16 @@ fn parse_opts() -> Opts {
             "--content-type" => o.content_type = v,
             "--header" => o.headers.push(v),
             "--body" => o.body = std::fs::read(&v).unwrap_or_else(|e| die(&format!("{v}: {e}"))),
+            "--proto" => {
+                o.proto = match v.as_str() {
+                    "http" => worker::Proto::Http,
+                    "resp" => worker::Proto::Resp,
+                    "h2" => worker::Proto::H2,
+                    _ => die("--proto is http, h2 or resp"),
+                }
+            }
+            "--requests" => o.requests = Some(v.into()),
+            "--streams" => o.streams = (num(&v) as usize).max(1),
             "--conns" => o.conns = num(&v) as usize,
             "--threads" => o.threads = num(&v) as usize,
             "--cpus" => o.cpus = cpu_list(&v),
@@ -216,7 +242,22 @@ fn sample_memory(pid: u32, every: Duration, start: Instant, stop: Arc<AtomicBool
 
 fn main() {
     let o = parse_opts();
-    let request = http::request(&o.host, &o.path, &o.content_type, &o.headers, &o.body);
+    let h2_request = (o.proto == worker::Proto::H2)
+        .then(|| h2::request(&o.host, &o.path, &o.content_type, &o.headers, &o.body, o.streams));
+    let requests = match (o.proto, &o.requests) {
+        (worker::Proto::Http, None) => vec![http::request(&o.host, &o.path, &o.content_type, &o.headers, &o.body)],
+        (worker::Proto::Resp, Some(p)) => {
+            let b = std::fs::read(p).unwrap_or_else(|e| die(&format!("{}: {e}", p.display())));
+            let v = resp::split(&b).unwrap_or_else(|e| die(&format!("{}: {e}", p.display())));
+            if v.is_empty() {
+                die(&format!("{}: no commands", p.display()));
+            }
+            v
+        }
+        (worker::Proto::H2, None) => Vec::new(),
+        (worker::Proto::Http | worker::Proto::H2, Some(_)) => die("--requests is for --proto resp"),
+        (worker::Proto::Resp, None) => die("--proto resp needs --requests FILE"),
+    };
     // Connections are opened before the start, so it is set far enough ahead for that.
     let start = Instant::now() + Duration::from_millis(300 + 2 * o.conns as u64);
     let start_mono_ns = monotonic_ns() + start.saturating_duration_since(Instant::now()).as_nanos() as u64;
@@ -240,7 +281,9 @@ fn main() {
                 let conns = o.conns / o.threads + usize::from(t < o.conns % o.threads);
                 let cfg = worker::Config {
                     addr: o.addr,
-                    request: &request,
+                    requests: &requests,
+                    proto: o.proto,
+                    h2: h2_request.as_ref(),
                     segs: &o.segs,
                     conns,
                     threads: o.threads,

@@ -2,11 +2,11 @@
 //!
 //!   benchrun build  [--allocators a,b]
 //!   benchrun build-apps [--apps a,b] [--allocators a,b]
-//!   benchrun run    [--suite quick|full|backend|apps] [--rounds N] [--only TEXT] [--allocators a,b]
+//!   benchrun run    [--suite quick|full|backend|apps|servers|servers-sat] [--rounds N] [--only TEXT] [--allocators a,b]
 //!                   [--out FILE] [--seed N] [--max-busy CPUS] [--gate-wait SECONDS]
-//!                   [--runner-cpus LIST] [--sample-ms N] [--mem-cap SIZE] [--no-warm]
+//!                   [--runner-cpus LIST] [--sample-ms N] [--mem-cap SIZE] [--no-warm] [--idle-states held|free]
 //!   benchrun report FILE... [--detail] [--ref NAME] [--only TEXT] [--quiet-only] [--steady-only]
-//!   benchrun list   [--suite quick|full|backend|apps]
+//!   benchrun list   [--suite quick|full|backend|apps|servers|servers-sat]
 //!   benchrun layout --only TEXT|--group NAME [--suite S] [--allocators a,b] [--layouts L,...]
 //!                   [--rounds N] [--no-build] [run's other options]
 //!
@@ -23,6 +23,8 @@ mod layout;
 mod paths;
 mod report;
 mod run;
+mod serve;
+mod served;
 mod stats;
 mod suite;
 mod sys;
@@ -106,11 +108,18 @@ fn jobs(f: &Flags) -> (String, Vec<suite::Job>) {
             "full" => suite::full(),
             "backend" => suite::backend(),
             "apps" => suite::apps(),
-            _ => die("--suite must be quick, full, backend or apps, or several of them joined by commas"),
+            "servers" => suite::servers(),
+            "servers-sat" => suite::servers_sat(),
+            _ => die(
+                "--suite must be quick, full, backend, apps, servers or servers-sat, or several of them joined by commas",
+            ),
         };
         let chosen = js.into_iter().filter(|j| {
             f.get("group").is_none_or(|g| j.group == g)
-                && f.get("only").is_none_or(|only| only.split(',').any(|o| j.id.contains(o)))
+                && f.get("only").is_none_or(|only| {
+                    // A text that starts with `=` names one job exactly.
+                    only.split(',').any(|o| o.strip_prefix('=').map_or(j.id.contains(o), |exact| j.id == exact))
+                })
         });
         for j in chosen {
             match v.iter().find(|k| k.id == j.id && k.mode == j.mode) {
@@ -205,11 +214,12 @@ fn asmalloc_builds(names: &[(String, String)]) -> impl Iterator<Item = &String> 
     names.iter().filter(|(_, feat)| feat.starts_with("asmalloc")).map(|(name, _)| name)
 }
 
-/// `benchrun build-apps`: every program of the apps suite (or `--apps`), once per allocator,
-/// with a table of what each build took and the disk each program uses.
+/// `benchrun build-apps`: every program of the apps and servers suites (or `--apps`), once per
+/// allocator, with a table of what each build took and the disk each program uses; and the
+/// servers' load generator, once, with glibc.
 fn build_apps(f: &Flags, p: &Paths) {
     let mut programs: Vec<&'static str> = Vec::new();
-    for j in suite::apps() {
+    for j in suite::apps().into_iter().chain(suite::servers()) {
         if let Some(a) = j.program.app()
             && !programs.contains(&a)
         {
@@ -226,6 +236,8 @@ fn build_apps(f: &Flags, p: &Paths) {
     let _lock = paths::lock_baselines(&p.baselines).unwrap_or_else(|e| die(&e));
     let names = native_builds(f, p);
     let cpus = build_cpus();
+    eprintln!("== building the load generator");
+    apps::build_loadgen(p, &cpus).unwrap_or_else(|e| die(&e));
     let mut summary = Vec::new();
     for program in &programs {
         apps::check_lock(p, program).unwrap_or_else(|e| die(&e));
@@ -309,6 +321,11 @@ fn run_options(f: &Flags, p: &Paths, suite: String, default_rounds: usize) -> ru
         max_busy: f.num("max-busy", 1.0),
         gate_wait: Duration::from_secs(f.num("gate-wait", 900)),
         warm: !f.has("no-warm"),
+        hold_idle: match f.get("idle-states") {
+            None | Some("held") => true,
+            Some("free") => false,
+            Some(_) => die("--idle-states: held or free"),
+        },
         suite,
     }
 }

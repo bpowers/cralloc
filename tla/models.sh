@@ -9,7 +9,8 @@ run Rseq Rseq_norestart  violates SlabInvariant
 run Rseq Rseq_sharedcid  violates SlabInvariant
 
 # 2. Magazine exchange in the slow path
-run Exchange Exchange  ok
+run Exchange Exchange                ok
+run Exchange Exchange_centre_blind  violates OneOwner
 
 # 3. Drain of an idle slab, and its repair after fork
 run Drain Drain_v1              violates NoDouble

@@ -26,10 +26,12 @@ const QUIET: Tuning = Tuning {
     depot_target: usize::MAX / 2,
     domain_cap: usize::MAX / 4,
     look_every: super::LOOK_EVERY,
+    beat_shift: super::heartbeat::BEAT_SHIFT,
     refresh_every: 0,
     age_limit: false,
     shed_unused: false,
     stock: false,
+    centre_swings: true,
 };
 
 /// Small classes whose magazines hold two objects, largest first, so a few calls cross many
@@ -40,6 +42,13 @@ fn tiny(n: usize) -> SmallClass {
         .collect();
     classes.reverse();
     classes[n]
+}
+
+/// A stock word's credits, both kinds, as one number: zero for none.
+fn credits_of(word: usize) -> u64 {
+    let stock = super::stock::Stock(word as u64);
+    (stock.credit(crate::front::Spare::Full) as u64) << 32
+        | stock.credit(crate::front::Spare::Empty) as u64
 }
 
 fn cpu(rig: &TestRig, n: i32) -> Cpu {
@@ -107,8 +116,11 @@ fn emptied_after_falling_out_of_use(age_limit: bool) -> Option<u64> {
     let rig: TestRig = Rig::new(&[idle, busy], 64, Tuning { age_limit, ..QUIET });
     let machine = SimCpu::new(0);
     let cache = rig.cache(&machine);
-    // A loaded magazine with an object in it, and a full spare.
-    let held: Vec<_> = (0..5).filter_map(|_| cache.alloc(idle)).collect();
+    // A loaded magazine with an object in it, and a full spare: objects made on CPU 1 and
+    // freed on CPU 0, one way, so that no swap reverses and leaves a magazine half full.
+    let one = SimCpu::new(1);
+    let maker = rig.cache(&one);
+    let held: Vec<_> = (0..5).filter_map(|_| maker.alloc(idle)).collect();
     for object in held {
         cache.free(idle, object);
     }
@@ -290,9 +302,13 @@ fn a_stack_in_use_after(
     silence: u64,
 ) -> (Vec<usize>, Vec<usize>) {
     let (used, busy) = (tiny(0), tiny(1));
+    // The busy class's swing, three objects over magazines of two, is what makes the slow
+    // paths and so the heartbeats here; left half full now and then, its magazines would change
+    // how often, and the shed, not that, is the subject.
     let tuning = Tuning {
         max_spares: 0,
         shed_unused,
+        centre_swings: false,
         ..QUIET
     };
     let rig: TestRig = Rig::new(&[used, busy], 64, tuning);
@@ -1141,7 +1157,7 @@ fn bursts(stock: bool, alloc: i32, free: i32, burst: usize, rounds: usize, credi
     for n in 0..2 {
         let slab = rig.slabs().slab(cpu(&rig, n));
         // The credits: a CPU that sent magazines away may have its marks set.
-        seen.stock[n as usize] = slab.stock(class).load(Relaxed).addr() as u64 & 0x0fff_ffff;
+        seen.stock[n as usize] = credits_of(slab.stock(class).load(Relaxed).addr());
     }
     rig.census(&[], false);
     seen
@@ -1247,7 +1263,7 @@ fn stock_unused_for_an_interval_goes_back() {
         }
     }
     assert_eq!(
-        slab.stock(bursty).load(Relaxed).addr() & 0x0fff_ffff,
+        credits_of(slab.stock(bursty).load(Relaxed).addr()),
         0,
         "no credit left"
     );
@@ -1789,19 +1805,25 @@ fn a_rule_the_budget_turns_away_waits_for_the_next_slow_path() {
     let class = SmallClass::from_ordinal(0).unwrap();
     let capacity = class.magazine().capacity();
     assert_eq!(capacity, super::LAUNDER_BUDGET);
+    // A heartbeat on every slow path, so that the sweep begins at the first: the budget, not the
+    // pace, is what this checks.
     let tuning = Tuning {
         refresh_every: 1,
         age_limit: true,
         look_every: 1,
+        beat_shift: 0,
         max_spares: 2,
         ..QUIET
     };
     let rig: Rig<SimOs<Roomy>, 2> = Rig::with_os(SimOs::new(), &[class], 4 * capacity, tuning);
     let machine = SimCpu::new(0);
     let cache = rig.cache(&machine);
-    // One slow path loads a filled magazine and begins the sweep at the first class; the
-    // frees then fill the loaded magazine back up to one short of full.
-    let held: Vec<NonNull<u8>> = (0..capacity).filter_map(|_| cache.alloc(class)).collect();
+    // Objects from the source, freed on CPU 0: its first slow path loads a magazine and begins
+    // the sweep at the first class, and the frees fill the loaded magazine up to one short of
+    // full. Only frees, so that no swap reverses and leaves a magazine half full.
+    let held: Vec<NonNull<u8>> = (0..capacity)
+        .filter_map(|_| rig.source.alloc_one(class))
+        .collect();
     assert_eq!(held.len(), capacity);
     let mut held = held.into_iter();
     for object in held.by_ref().take(capacity - 1) {
@@ -1852,6 +1874,69 @@ fn a_rule_the_budget_turns_away_waits_for_the_next_slow_path() {
         "the sweep, not the refresh"
     );
     assert!(!spares(), "the sweep took the spares");
+}
+
+/// At the real pace, where the smallest class's exchanges beat on one in four, a rule the
+/// budget turned away does not wait for the next beat: the CPU's next slow path beats at once,
+/// and the rule does its work there. The refresh of every displaced magazine spends each
+/// call's budget, so the sweep, once due on the class, is turned away at a paced beat.
+#[test]
+fn a_rule_the_budget_turns_away_runs_at_the_next_slow_path_whatever_the_pace() {
+    let class = SmallClass::from_ordinal(0).unwrap();
+    let capacity = class.magazine().capacity();
+    let tuning = Tuning {
+        refresh_every: 1,
+        age_limit: true,
+        look_every: 1,
+        max_spares: 2,
+        ..QUIET
+    };
+    assert_eq!(tuning.beat_shift, super::heartbeat::BEAT_SHIFT);
+    let rig: Rig<SimOs<Roomy>, 2> = Rig::with_os(SimOs::new(), &[class], 8 * capacity, tuning);
+    let machine = SimCpu::new(0);
+    let cache = rig.cache(&machine);
+    let cpu = rig.slabs().cpu(0).unwrap();
+    let slab = rig.slabs().slab(cpu);
+    // A full spare for the sweep to take.
+    let spare = cache.area().create(class.magazine()).unwrap();
+    assert_eq!(rig.source.fill(class, spare.objects()), capacity);
+    spare.set_level(capacity);
+    let mut stale = false;
+    assert!(
+        cache
+            .spare_push(class, Spare::Full, spare, &mut stale)
+            .is_ok()
+    );
+    let spares = || {
+        !slab
+            .field(Field::spare(class, Spare::Full))
+            .load(Relaxed)
+            .is_null()
+    };
+    // Only frees, of objects from the source, so that no swap reverses; each step frees until
+    // one slow path has run.
+    let mut steps = Vec::new();
+    while spares() && steps.len() < 64 {
+        let (activity, beats, laundered) = (slab.activity(), slab.beats(), rig.source.laundered());
+        while slab.activity() == activity {
+            cache.free(class, rig.source.alloc_one(class).unwrap());
+        }
+        let paced = slab.activity() >> super::heartbeat::BEAT_SHIFT
+            != activity >> super::heartbeat::BEAT_SHIFT;
+        let laundered = rig.source.laundered() - laundered;
+        assert!(laundered <= 2 * capacity, "one call laundered {laundered}");
+        steps.push((paced, slab.beats() - beats, laundered, spares()));
+    }
+    assert!(!spares(), "the sweep never took the spare: {steps:?}");
+    let [.., turned_away, next] = steps[..] else {
+        panic!("{steps:?}")
+    };
+    // The sweep was due at a paced beat whose refresh spent the budget...
+    assert_eq!(turned_away, (true, 1, capacity, true), "{steps:?}");
+    // ...and ran at the next slow path, which beat although the pace did not ask for it; that
+    // call's refresh waited for it, within the budget.
+    assert_eq!(next, (false, 1, capacity, false), "{steps:?}");
+    rig.census(&[], false);
 }
 
 /// A heap whose CPUs `width` at a time share a cache domain, with room for many of the largest
@@ -1988,4 +2073,166 @@ fn a_free_only_phase_keeps_the_shared_stack_at_its_target() {
             target / per
         );
     }
+}
+
+/// What a CPU's work in one class did over its last 100 repetitions of a swing.
+#[derive(Debug)]
+struct Swung {
+    slow: usize,
+    fills: usize,
+    laundered: usize,
+}
+
+/// A CPU that allocates `amplitude` objects of `class` and frees them, newest first (`fifo`
+/// false) or oldest first, 400 times, with the swing rule on or off.
+fn swing(class: SmallClass, amplitude: usize, centre: bool, fifo: bool) -> Swung {
+    use std::collections::VecDeque;
+    let capacity = class.magazine().capacity();
+    let tuning = Tuning {
+        centre_swings: centre,
+        ..Tuning::DEFAULT
+    };
+    let rig: Rig<SimOs<Roomy>, 2> = Rig::with_os(
+        SimOs::new(),
+        &[class],
+        16 * capacity + 8 * amplitude,
+        tuning,
+    );
+    let machine = SimCpu::new(0);
+    let cache = rig.cache(&machine);
+    let slab = rig.slabs().slab(rig.slabs().cpu(0).unwrap());
+    cache.free(class, rig.source.alloc_one(class).unwrap());
+    let mut held = VecDeque::new();
+    let repetitions = 400;
+    let (mut slow, mut fills, mut laundered) = (0, 0, 0);
+    for repetition in 0..repetitions {
+        if repetition == repetitions - 100 {
+            slow = 0;
+            fills = rig.source.fills();
+            laundered = rig.source.laundered();
+        }
+        for _ in 0..amplitude {
+            let before = slab.activity();
+            held.push_back(cache.alloc(class).unwrap());
+            slow += usize::from(slab.activity() != before);
+        }
+        while let Some(object) = if fifo {
+            held.pop_front()
+        } else {
+            held.pop_back()
+        } {
+            let before = slab.activity();
+            cache.free(class, object);
+            slow += usize::from(slab.activity() != before);
+        }
+    }
+    rig.census(&[], false);
+    Swung {
+        slow,
+        fills: rig.source.fills() - fills,
+        laundered: rig.source.laundered() - laundered,
+    }
+}
+
+/// The swing rule's bar: across swings from a quarter of a magazine to four, newest or oldest
+/// freed first, the rule never takes more than 2% more slow paths than the plain swaps do, and
+/// a swing under half a magazine stops taking them.
+fn the_swing_rule_pays_for_itself(sizes: &[usize]) {
+    use crate::classes::Class;
+    let swings = [
+        (1, 4),
+        (1, 2),
+        (5, 8),
+        (3, 4),
+        (1, 1),
+        (9, 8),
+        (3, 2),
+        (2, 1),
+        (5, 2),
+        (4, 1),
+    ];
+    for &size in sizes {
+        let class = Class::of_size(size).unwrap().small().unwrap();
+        let capacity = class.magazine().capacity();
+        for (num, den) in swings {
+            let amplitude = (capacity * num / den + 3).max(2);
+            for fifo in [false, true] {
+                let on = swing(class, amplitude, true, fifo);
+                let off = swing(class, amplitude, false, fifo);
+                let row = std::format!("{size} bytes, {num}/{den}, fifo {fifo}: {on:?} {off:?}");
+                assert!(50 * on.slow <= 51 * off.slow, "{row}");
+                assert!(
+                    on.fills <= off.fills && on.laundered <= off.laundered,
+                    "{row}"
+                );
+                if 2 * amplitude < capacity {
+                    assert_eq!(on.slow, 0, "{row}");
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn the_swing_rule_pays_for_itself_in_one_class() {
+    the_swing_rule_pays_for_itself(&[1024]);
+}
+
+#[test]
+#[cfg(not(debug_assertions))]
+#[ignore = "slow: run with scripts/gate --all, optimized"]
+fn the_swing_rule_pays_for_itself_in_the_small_classes() {
+    the_swing_rule_pays_for_itself(&[8, 64, 1024]);
+}
+
+/// A slow path that is not a beat, and drains its own slab where a fork left the parent's
+/// marker, launders what the drain parks over a shared stack's target only within the budget:
+/// the rest waits for the shed. (A drain empties every class, and here the shared stacks of
+/// two classes hold dozens of magazines past their targets.)
+#[test]
+fn a_drain_between_beats_launders_within_the_budget() {
+    let small = SmallClass::from_ordinal(0).unwrap();
+    let next = SmallClass::from_ordinal(1).unwrap();
+    let capacity = small.magazine().capacity();
+    assert_eq!(capacity, super::LAUNDER_BUDGET);
+    // No call beats by pace, so the drain is the call's own, between beats.
+    let tuning = Tuning {
+        beat_shift: 40,
+        ..Tuning::DEFAULT
+    };
+    let rig: Rig<SimOs<Roomy>, 2> =
+        Rig::with_os(SimOs::new(), &[small, next], 80 * capacity, tuning);
+    let machine = SimCpu::new(0);
+    let cache = rig.cache(&machine);
+    // Spares and depot stacks of both classes, filled one way from CPU 0.
+    for class in [small, next] {
+        let n = 40 * class.magazine().capacity() + 7;
+        let held: Vec<_> = (0..n).filter_map(|_| rig.source.alloc_one(class)).collect();
+        for object in held {
+            cache.free(class, object);
+        }
+    }
+    rig.census(&[], false);
+    // A fork cut a parent's drain of CPU 0 off after its first exchange: the hot word of the
+    // first class holds the parent's marker.
+    let generation = cache.generation().unwrap();
+    let cpu = rig.slabs().cpu(0).unwrap();
+    rig.slabs()
+        .slab(cpu)
+        .field(Field::hot(small))
+        .store(generation.marker(), Relaxed);
+    // SAFETY: one thread, and no allocator call in flight.
+    unsafe { rig.os().wipe_for_fork() };
+    let child = SimCpu::new(0);
+    let cache = rig.cache(&child);
+    let before = rig.source.laundered();
+    cache.free(small, rig.source.alloc_one(small).unwrap());
+    let laundered = rig.source.laundered() - before;
+    assert!(
+        laundered <= super::LAUNDER_BUDGET,
+        "one call laundered {laundered}"
+    );
+    // Lossy: the marker written over the hot word stands for the parent's drain, which took
+    // the magazine that was there.
+    rig.census(&[], true);
 }
