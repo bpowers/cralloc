@@ -160,7 +160,11 @@ less.
 2. **Memory.** No more resident memory than the leanest incumbent on the same workload,
    which our baselines show is usually jemalloc. Low fragmentation from segregated size classes and from preferring
    partly used memory over fresh memory. Memory the program has stopped using goes back to
-   the OS within seconds, and the memory parked in caches is bounded.
+   the OS within seconds, and the memory parked in caches is bounded. Memory is judged
+   where it costs something: on heaps of hundreds of megabytes to gigabytes, as a
+   proportion of the heap. A fixed cost of megabytes, or tens of megabytes, is spent freely
+   when it buys speed or fewer system calls on such heaps, and the peak of a heap of a few
+   megabytes is not something we tune.
 3. **One heap, three interfaces.** `GlobalAlloc`, `Allocator` and the C ABI share one heap,
    and C code can free what Rust allocated.
 4. **Verified.** The assembly is proved against a machine model. Size-class and layout
@@ -665,11 +669,12 @@ Five rules hold at every tier.
   an interval did not use goes back, a step at a time, so shrinking is slower than
   growing, and a workload that alternates does not pay for the same growth every interval.
 - **Parked memory has an allowance.** What all these buffers hold together may be at most
-  a fixed fraction of the heap in use, with a floor of a few megabytes below which the
+  a fixed fraction of the heap in use, with a floor of tens of megabytes below which the
   fraction does not apply. While the process is over its allowance nothing grows, and the
   rules that shed do not wait for the clock. Evidence says which buffers earn room; the
-  allowance says how much room there is to earn, and it is what makes the same rules right
-  for a heap of two megabytes and one of two gigabytes. Each CPU's sweep publishes what its
+  allowance says how much room there is to earn. The floor is generous on purpose: a heap
+  under it is small enough that what it parks does not matter (see "Goals"), and above it
+  the fraction keeps what is parked in proportion to the heap. Each CPU's sweep publishes what its
   slab holds, and once an interval a heartbeat adds those to what the depot holds and
   compares the sum with the heap, so no slow path updates a shared count.
 - **The bounds on work, and the interval, are constants.** How much one call may launder,
