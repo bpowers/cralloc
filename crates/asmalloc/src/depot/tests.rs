@@ -960,10 +960,11 @@ fn maintain_drains_a_cpu_busy_on_fast_paths_at_most_once_an_interval() {
             drains.push(rig.os().ticks());
         }
     }
-    // The activity counter counts the bytes a full magazine holds for each exchange: one slow
-    // path to start, and a refill after each drain but perhaps the last, which can fall in the
-    // last step.
+    // The activity counter counts the bytes a full magazine holds for each exchange: one
+    // slow path to start, and a refill after each drain but perhaps the last, which can fall
+    // in the last step.
     let exchange = (busy.magazine().capacity() * busy.size()) as u64;
+    assert_eq!(slab.activity() % exchange, 0);
     let refills = slab.activity() / exchange - 1;
     assert!(
         refills == drains.len() as u64 || refills + 1 == drains.len() as u64,

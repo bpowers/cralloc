@@ -15,14 +15,14 @@ milliseconds after a silence paid for maintenance the silence skipped.
   being returned one `madvise` a page even when adjacent: 1,281 calls for 289 runs on the
   connect-rust server. A call costs about 2 us in a process whose other threads run, and
   0.05 us a page, so the walk now returns up to 64 adjacent pages a call, and leaves runs
-  shorter than 8 pages to one pass in 16. datafusion's calls fall by half (3,900 to 1,900);
+  shorter than 4 pages to one pass in 8 (the call counts below were taken with 8 and 16, the
+  first setting, which left too much memory waiting; see "Memory after a peak"). datafusion's calls fall by half (3,900 to 1,900);
   tpchgen's and gix-hours' by 7 to 10%, because nearly all of theirs return large blocks
   (hundreds of kilobytes to megabytes a call), which this does not touch.
-- **The price is memory that waits.** On burst-idle (218 MiB freed at random) the branch
-  holds 122 MiB three seconds after the free where main holds 68, and 9.0 MiB at twelve
-  seconds where main holds 4.9; both reach 2.8 MiB by twenty. phase is level within 1.6 MiB
-  throughout. Single free pages between live ones go back within about sixteen intervals
-  instead of two.
+- **The price is memory a pass or two late.** On burst-idle (218 MiB freed at random) the
+  branch, as finally set, holds 109 MiB three seconds after the free where main holds 68, and
+  3.7 MiB at twelve seconds where main holds 4.9. phase is level within 1.6 MiB throughout.
+  Single free pages between live ones go back within about eight intervals instead of two.
 - **Maintenance during silences gives memory back and, on the order service, costs the next
   burst.** With `maintain` called through the silences (the new `asmalloc-tokio` task, or the
   background thread) the connect-rust server goes from 8.9 to 6.2 MiB after its clients leave,
@@ -94,13 +94,17 @@ are single pages.
 The walk now joins the purgeable units below the one it reaches into a run, up to 64 pages
 (`PURGE_MAX_RUN_PAGES`), and returns it with one claim and one call; units of the huge-page
 part are already whole huge pages and are not joined. The clocked pass takes only runs of at
-least 8 pages (`PURGE_MIN_RUN_PAGES`), where a call costs within about twice the asymptote
-per page; one pass in 16 (`PURGE_ANY_RUN_EVERY`) takes runs of any length, with a goal of
-everything it finds, so a single free page goes back within about sixteen intervals and a long
-run within one. Growth over the cap and `collect` take any run, as before. The pass word
+least 4 pages (`PURGE_MIN_RUN_PAGES`), a quarter of a one-page call's cost a page; one pass in
+8 (`PURGE_ANY_RUN_EVERY`) takes runs of any length, with a goal of everything it finds, so a
+single free page goes back within about eight intervals and a long run within one. The first
+setting, runs of 8 and one pass in 16, left the after-peak tail at twice main's and failed the
+preload test that the background thread returns a quiet program's memory (27 MiB of 163 left
+after 12 s, against a bound of 20); 4 and 8 pass it. Growth over the cap and `collect` take any run, as before. The pass word
 carries which kind of pass it is.
 
-Calls a run, main against the branch (strace -c, two runs each):
+Calls a run, main against the branch with runs of 8 and any-run every 16 (strace -c, two
+runs each); with 4 and 8 the burst starts' counts are what the any-run passes add, at most one
+pass in eight:
 
 | program | main | branch |
 |---|---|---|
@@ -118,22 +122,23 @@ the large path's frees and moves, which this does not change.
 Anonymous resident MiB after the peak, sampled every 250 ms, median of three runs per build
 (five for burst-idle), main and branch interleaved; burst-idle watched for 24 s instead of
 the usual 12. `var48` is a build with runs of 4 pages and any-run passes every 8th, for
-comparison (two runs).
+comparison (two runs). var48 is what the branch now ships.
 
 | burst-idle (218 MiB freed) | 1 s | 2 s | 3 s | 4 s | 6 s | 8 s | 12 s | 16 s | 20 s |
 |---|---|---|---|---|---|---|---|---|---|
 | main | 215 | 109 | 68 | 51 | 30 | 15.4 | 4.9 | 2.8 | 2.8 |
-| branch (8, 16) | 215 | 140 | 122 | 68 | 36 | 19.5 | 9.0 | 9.0 | 2.8 |
-| var48 (4, 8) | 215 | 132 | 109 | 68 | 36 | 19.8 | 3.7 | 3.7 | 3.7 |
+| branch, first setting (8, 16) | 215 | 140 | 122 | 68 | 36 | 19.5 | 9.0 | 9.0 | 2.8 |
+| branch as shipped (4, 8) | 215 | 132 | 109 | 68 | 36 | 19.8 | 3.7 | 3.7 | 3.7 |
 
 | phase (eight CPUs, then one) | 1 s | 2 s | 3 s | 4 s | 6 s | 8 s | 12 s |
 |---|---|---|---|---|---|---|---|
 | main | 51.6 | 41.9 | 31.4 | 27.4 | 17.6 | 11.3 | 11.3 |
 | branch | 51.1 | 42.8 | 33.0 | 27.3 | 17.9 | 11.2 | 11.2 |
 
-The tail (9 MiB from 12 to 16 s) is the short runs waiting for the any-run pass; var48 takes
-it at the eighth interval. The lag at 2 to 4 s is not the short runs (var48 shows nearly the
-same) and is not explained; it is a pass late, and gone by 6 s.
+With the first setting the tail (9 MiB from 12 to 16 s) was the short runs waiting for the
+any-run pass; with 4 and 8 it goes at the eighth interval. The lag at 2 to 4 s is not the short
+runs (both settings show it) and is not explained; it is a pass late, and gone by 6 s. phase
+was measured with the first setting only.
 
 ## Maintenance during silences: nothing, the thread, the task
 
@@ -185,9 +190,8 @@ parent's stood (`crates/asmalloc/src/heap/background.rs`, `crates/asmalloc-tokio
   start to jemalloc's within 0.4 request-ms and cut the clocked pass's calls by an order of
   magnitude where it makes them (axum 337 to 8 in the burst starts; the connect-rust server
   443 to 43 a run), for memory that comes back a pass or two later after a peak.
-- **Runs of 4 and any-run every 8th pass** (`var48`) take the after-peak tail (9 to 3.7 MiB at
-  12 s) at about 1.7 times the cost a page of a run of 8; worth it if the tail matters more
-  than the calls.
+- **Find the pass that is late at 2 to 4 s after a peak** (109 against main's 68 MiB at 3 s
+  on burst-idle) before tuning the run lengths further.
 - **Make maintenance during silences gentler before recommending it for servers.** As built,
   the task and the thread empty a busy server's caches in the second interval of each
   silence, which on the order service makes the next burst start six times dearer for 1 to 2

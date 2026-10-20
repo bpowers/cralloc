@@ -53,14 +53,16 @@ pub const FILL_CLAIMS: usize = 256;
 /// words for the smallest classes, from holding up the allocations that want them.
 pub const PURGE_MAX_RUN_PAGES: u32 = 64;
 
-/// The clocked pass returns a run of free pages only if it has at least this many: 8. A call
-/// for fewer costs more than twice as much a page as a long one, and a short run is the kind a
-/// burst's next allocations land on. Growth over the cap and `collect` take any run.
-pub const PURGE_MIN_RUN_PAGES: u32 = 8;
+/// The clocked pass returns a run of free pages only if it has at least this many: 4. A call
+/// for one page costs four times as much a page as one for four, and a short run is the kind a
+/// burst's next allocations land on. Growth over the cap and `collect` take any run. Runs of 8
+/// saved few more calls and left twice the memory waiting after a peak
+/// (`docs/research/burst-start.md`).
+pub const PURGE_MIN_RUN_PAGES: u32 = 4;
 
-/// One clocked pass in this many takes runs of any length: 16, so a single free page goes back
-/// within about sixteen intervals of the program going quiet, and a long run within one.
-pub const PURGE_ANY_RUN_EVERY: u64 = 16;
+/// One clocked pass in this many takes runs of any length: 8, so a single free page goes back
+/// within about eight intervals of the program going quiet, and a long run within one.
+pub const PURGE_ANY_RUN_EVERY: u64 = 8;
 
 /// How much bitmap a heartbeat's step of a decay pass may read, in words: 256 words, 2 KiB.
 /// Each word covers 64 slots, so this is one 4 KiB page of 8-byte slots read eight times over,
