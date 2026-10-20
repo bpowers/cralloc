@@ -55,4 +55,4 @@ the CPU misses and its slow path may install its own magazine, or a drain may pu
 there; the install then finds a word that is not zero and stores nothing, and the thread retires
 or serves from the two magazines it still holds, as a failed install does.
 
-Reviewed: f41dbf9
+Reviewed: 82e8b03
