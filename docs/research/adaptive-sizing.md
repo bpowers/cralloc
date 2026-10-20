@@ -234,6 +234,66 @@ ones on large heaps, which a checkpoint that asks only "is parked memory under t
 gives with no accounting of regret. Build that first, and add the division by regret only if a
 measurement asks for it.
 
+### Moving several magazines per compare-and-swap
+
+What the rival of finding 5 asks of the depot stack (`depot/stack.rs`). (Inferred; not built.)
+Today the head is the top magazine's number and a version that goes up once for each push and
+each pop. Slot 0 of a magazine on the stack holds the number below it and the stack's count
+through it. A pop follows only the head's number, and a compare-and-swap that succeeds means no
+push or pop completed since the head was read, so the top's link is the one its pusher wrote.
+There are two ways to move four at once, and the first is the one to take.
+
+- **A bundle as one stack element.** Link the four through a second word and push the first as
+  one element, weighted by the bundle's objects. The stack's protocol and its ABA argument do
+  not change: a pop still reads one link. The second link has a home already. The last slot
+  records the level in its low half and a spare stack's depth in its high half
+  (`depot/magazine.rs`, `Record`), and the depth is unused while a magazine is off a spare
+  stack (`set_level` writes it as zero). The link is written while the thread holds the bundle,
+  never changes on the stack, and is read only after the pop, which is the rule finding 1
+  turned on: contents are read after ownership. What it does need: caps and targets stated in
+  bundles (a 64-byte class's domain cap is two 254-object magazines today, less than one
+  bundle), and the rules that take one magazine (the shed, the launder over target) must pop a
+  bundle, take one and push the rest back.
+- **A chain of the top `k` through slot 0.** The ABA argument is the same in kind: one step of
+  the version for each operation, and success still means every link walked was its pusher's.
+  It adds two obligations. The pop now follows `k - 1` links before it owns anything, and a
+  magazine another thread has taken may hold a spare stack's address in slot 0, so each number
+  must pass `Area::by_id` before it is followed; a failure there means the head is stale and
+  the pop tries again, never the abort that today's pop keeps for a head that names no
+  magazine. And links carry cumulative counts, so a chain push must rewrite all `k` links on
+  each try, which is harmless because they are still private.
+
+### What matters for interactive servers
+
+The owner's priority is interactive servers on tokio: requests of mixed sizes, tasks that move
+between workers, bursts and idle gaps, heaps of hundreds of MiB. Which findings matter there.
+(Inferred. None of it is measured at that heap size: the suite's RPC jobs have heaps of 6 to
+14 MiB.)
+
+- **The return side matters most** ("The ranking": pacing counted in slow paths, and the
+  absolute retained cap). In an idle gap every worker parks, so there is no slow path, no
+  heartbeat, and nothing goes back until traffic resumes (`docs/design.md`, "Heartbeat").
+  tokio's `Builder::on_thread_park` is the idle hook that section mentions, provided `maintain`
+  limits its own rate. After a burst, a heap of hundreds of MiB is over the 64 MiB cap
+  (`back/policy.rs`, `RETAINED_CAP_HUGE_PAGES`), so the next burst's growth always pays for
+  purging. A page is held about 5 s, so bursts a few seconds to tens of seconds apart fault
+  back what was returned: 400 MiB is about 58 ms of small-page faults a burst. This is the one
+  place where the note's price is the right tool, and the note defers it ("if a server shows
+  refaults"). For this workload it belongs first.
+- **Reach matters next** (finding 5). Mixed sizes live in classes above 128 bytes, where
+  neither segments nor the rival adapts anything. A loaded magazine there holds up to 64 KiB
+  of objects for each class and CPU: up to 2.8 MiB a CPU if every class is warm, about 90 MiB
+  on 32 workers, which is not noise even at hundreds of MiB. The cheap lever is a fill that
+  starts small and doubles, per class and CPU, which needs no new mechanism.
+- **The capacity's signal and the small-heap memory bar stop mattering** (findings 2 and 3,
+  "The theory"). Tasks that move between workers give each CPU both allocations and frees of a
+  class, so the loaded magazine absorbs most of the traffic; the RPC jobs are level within 1%
+  at 254 slots, at 1,024 and with stock (`launder-and-fill.md`, "Neighbours" and "Time and
+  memory"). At hundreds of MiB the 0.5 to 3 MiB is under 1%, so segments against bundles is a
+  question of throughput only, and a small one.
+- Finding 1 matters only if segments are built. The work bounds matter as the note says: a
+  server's tail latency is the worst single call.
+
 ## What the prior art does
 
 Every adaptive mechanism found has the same shape: a regret signal grows the buffer by a step,
