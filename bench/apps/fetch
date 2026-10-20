@@ -1,0 +1,43 @@
+#!/usr/bin/env bash
+# Fetch or generate the inputs of the programs named (default: every program), each into
+# its own directory under the data directory, and verify them. Nothing the programs read at
+# run time comes from the network.
+#
+#   bench/apps/fetch [program ...]
+#
+# The data directory is $BENCH_APPS_DATA, by default bench/apps/target of the main checkout
+# (the parent of the git directory every worktree shares), so that worktrees share one copy
+# and removing a worktree loses nothing. It is gitignored.
+#
+# A program's inputs are made by <program>/fetch.sh DEST, which must leave DEST complete and
+# verified, or fail. It runs only when DEST/.done is missing or older than the script, so a
+# fetch that stopped half way is redone. Generators that are Rust programs are built by
+# fetch.sh itself, through scripts/heavy.
+set -euo pipefail
+
+here=$(cd "$(dirname "$0")" && pwd)
+main=$(dirname "$(git -C "$here" rev-parse --path-format=absolute --git-common-dir)")
+data=${BENCH_APPS_DATA:-$main/bench/apps/target}
+export BENCH_APPS_DATA="$data"
+export BENCH_APPS_HEAVY="$here/../../scripts/heavy"
+
+programs=("$@")
+if [ ${#programs[@]} -eq 0 ]; then
+  for f in "$here"/*/fetch.sh; do programs+=("$(basename "$(dirname "$f")")"); done
+fi
+
+for p in "${programs[@]}"; do
+  script="$here/$p/fetch.sh"
+  [ -x "$script" ] || { echo "fetch: $p has no executable fetch.sh" >&2; exit 2; }
+  dest="$data/inputs/$p"
+  if [ -e "$dest/.done" ] && [ "$dest/.done" -nt "$script" ]; then
+    echo "== $p: inputs are in $dest"
+    continue
+  fi
+  echo "== $p: making inputs in $dest"
+  rm -rf "$dest"
+  mkdir -p "$dest"
+  "$script" "$dest"
+  touch "$dest/.done"
+  echo "== $p: $(du -sh "$dest" | cut -f1) in $dest"
+done

@@ -37,9 +37,12 @@ asmalloc-domains = ["asmalloc", "asmalloc/internals"]
 # what a Rust service that depends on it gets.
 je = ["dep:tikv-jemallocator"]
 tc = []       # google/tcmalloc, as `tcmalloc-better` calls it (sized delete)
+# The `snmalloc-rs` crate itself, default features: the snmalloc it bundles, built with cmake.
+sn = ["dep:snmalloc-rs"]
 
 [dependencies]
 libc.workspace = true
 tikv-jemallocator = { version = "0.6", optional = true }
 mimalloc = { version = "0.1.52", optional = true }
 asmalloc = { path = "../../crates/asmalloc", optional = true }
+snmalloc-rs = { version = "0.7.6", optional = true }

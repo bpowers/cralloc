@@ -3,7 +3,7 @@
 # workload compiles the same dependency versions.
 [workspace]
 resolver = "3"
-members = ["alloc", "backend", "harness", "workloads", "rpc", "runner"]
+members = ["alloc", "apps/common", "backend", "harness", "workloads", "rpc", "runner"]
 
 [workspace.package]
 edition = "2024"

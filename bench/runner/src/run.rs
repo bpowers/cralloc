@@ -18,6 +18,8 @@ use std::time::{Duration, Instant, SystemTime};
 pub struct Options {
     pub bench_dir: PathBuf,
     pub baselines: PathBuf,
+    /// The apps suite's inputs and shared build directory (`paths::Paths::apps_data`).
+    pub apps_data: PathBuf,
     pub out: PathBuf,
     /// The session's capped scope; every process the session starts runs in a group of it.
     pub scope: Scope,
@@ -69,6 +71,22 @@ fn rust_bin(bench_dir: &Path, build: &str, bin: &str) -> PathBuf {
     bench_dir.join("target").join(build).join("release").join(bin)
 }
 
+/// Where `benchrun build-apps` puts a program's driver built for one allocator: a cargo
+/// target directory of its own per build and program, which holds only the final binary
+/// (the compiled dependencies are in the shared build directory under `apps_data`).
+pub fn app_target(bench_dir: &Path, build: &str, program: &str) -> PathBuf {
+    bench_dir.join("target").join(build).join("apps").join(program)
+}
+
+pub fn app_bin(bench_dir: &Path, build: &str, program: &str) -> PathBuf {
+    app_target(bench_dir, build, program).join("release").join(program)
+}
+
+/// The only variables of the runner's environment a program of the apps suite sees. Real
+/// programs read many (ruff's `RUFF_*`, `RAYON_NUM_THREADS`, `TOKIO_WORKER_THREADS`,
+/// `RUST_LOG`), and none of them may differ between runs.
+const APP_ENV: &[&str] = &["PATH", "HOME", "USER", "LANG"];
+
 /// The command line and environment for one run.
 fn command(job: &Job, a: &Allocator, o: &Options, scratch: &Path) -> (Vec<String>, Vec<(String, String)>) {
     let cbench = o.baselines.join("cbench");
@@ -77,10 +95,20 @@ fn command(job: &Job, a: &Allocator, o: &Options, scratch: &Path) -> (Vec<String
         (Program::Rust(b), Mode::Native) => rust_bin(&o.bench_dir, &a.build_name().unwrap(), b),
         (Program::Rust(b), Mode::Preload) => rust_bin(&o.bench_dir, &a.preload_build_name(), b),
         (Program::C(p), _) => cbench.join(p),
+        (Program::App(p), _) => app_bin(&o.bench_dir, &a.build_name().unwrap(), p),
     };
+    let inputs = job.program.app().map(|p| o.apps_data.join("inputs").join(p).display().to_string());
     let mut argv = vec![program.display().to_string()];
-    argv.extend(job.args.iter().map(|s| s.replace("{cbench}", &cb)));
-    let mut env: Vec<(String, String)> = std::env::vars().filter(|(k, _)| !scrubbed(k)).collect();
+    argv.extend(job.args.iter().map(|s| {
+        let s = s.replace("{cbench}", &cb);
+        match &inputs {
+            Some(dir) => s.replace("{inputs}", dir),
+            None => s,
+        }
+    }));
+    let mut env: Vec<(String, String)> = std::env::vars()
+        .filter(|(k, _)| !scrubbed(k) && (job.program.app().is_none() || APP_ENV.contains(&k.as_str())))
+        .collect();
     env.extend(a.env.iter().map(|(k, v)| (k.clone(), v.clone())));
     env.push(("BENCH_CPUS".into(), bench_harness::Cpus(job.cpus.clone()).to_list()));
     if job.mode == Mode::Preload {
@@ -613,11 +641,13 @@ fn rseq_offsets(o: &Options, allocs: &[Allocator], jobs: &[Job]) -> Result<Value
         let mut files: Vec<PathBuf> = Vec::new();
         if let Some(build) = a.build_name() {
             for j in jobs.iter().filter(|j| j.mode == Mode::Native) {
-                if let Program::Rust(b) = j.program {
-                    let f = rust_bin(&o.bench_dir, &build, b);
-                    if f.exists() && !files.contains(&f) {
-                        files.push(f);
-                    }
+                let f = match j.program {
+                    Program::Rust(b) => rust_bin(&o.bench_dir, &build, b),
+                    Program::App(p) => app_bin(&o.bench_dir, &build, p),
+                    Program::C(_) => continue,
+                };
+                if f.exists() && !files.contains(&f) {
+                    files.push(f);
                 }
             }
         }
