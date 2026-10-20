@@ -129,9 +129,12 @@ pub struct Tuning {
     /// shared stack instead; the rest of `depot_target` is the shared stack's target, over
     /// which the heartbeat launders (`heartbeat.rs`).
     pub domain_cap: usize,
-    /// How many of its own slow paths a CPU makes between looks for an idle slab, and between
+    /// How many of its own heartbeats a CPU makes between looks for an idle slab, and between
     /// looks at a depot stack that no slow path is serving.
     pub look_every: u64,
+    /// `log2` of the bytes of objects a CPU's slow paths move for each heartbeat
+    /// ([`heartbeat::BEAT_SHIFT`]); zero beats on every slow path.
+    pub beat_shift: u32,
     /// One retiring full magazine in this many is laundered (`slow.rs`); zero for none.
     pub refresh_every: u64,
     /// Whether a slow path takes back a magazine its CPU has had loaded for an interval
@@ -153,6 +156,7 @@ impl Tuning {
         depot_target: DEPOT_TARGET,
         domain_cap: DOMAIN_CAP,
         look_every: LOOK_EVERY,
+        beat_shift: heartbeat::BEAT_SHIFT,
         refresh_every: REFRESH_EVERY,
         age_limit: true,
         shed_unused: true,

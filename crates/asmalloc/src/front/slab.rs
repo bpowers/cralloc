@@ -16,7 +16,8 @@
 //! or 16 to 23. `front` asserts the rule for everything the crate places itself. One class to a
 //! chunk keeps the word's address one shift from the class index, where two to a chunk cost a
 //! run-time-size pair two cycles of arithmetic. The cold part follows on its own cache lines:
-//! the activity counter, the drain claim, the count of full magazines the CPU's frees have
+//! the activity counter (bytes its slow paths moved), the count of its heartbeats, the drain
+//! claim, the count of full magazines the CPU's frees have
 //! retired, where the age limit's sweep of the spare stacks is, and the classes that may keep
 //! stock; then, on lines of their own that only this CPU's slow paths touch, per class a stamp
 //! of when the loaded magazine was loaded; and on a line of its own the idle check's last
@@ -123,6 +124,8 @@ pub struct Slab {
     /// A chunk per class: its full head, its empty head, its hot word, and its stock word.
     fields: [AtomicPtr<u8>; FIELDS],
     activity: AtomicU64,
+    /// The heartbeats this CPU's slow paths have run: the turn of the rotating chores.
+    beats: AtomicU64,
     claim: AtomicU64,
     retired: AtomicU64,
     sweep: AtomicU64,
@@ -162,6 +165,7 @@ impl Slab {
         Slab {
             fields: [const { AtomicPtr::new(ptr::null_mut()) }; FIELDS],
             activity: AtomicU64::new(0),
+            beats: AtomicU64::new(0),
             claim: AtomicU64::new(0),
             retired: AtomicU64::new(0),
             sweep: AtomicU64::new(0),
@@ -197,12 +201,24 @@ impl Slab {
         })
     }
 
-    /// Counts one slow-path entry on this slab's CPU, and returns the new count. A hint for
-    /// the idle check, so a lost increment does no harm.
+    /// Adds `bytes` moved by a slow path of this slab's CPU to its activity counter, and
+    /// returns the counter before and after. A hint for the idle check and the heartbeat's pace
+    /// (`depot::heartbeat`), kept with a load and a store: a lost update moves a beat or a drain
+    /// a little, and does no harm.
     #[inline]
-    pub fn note_activity(&self) -> u64 {
-        let next = self.activity.load(Ordering::Relaxed).wrapping_add(1);
-        self.activity.store(next, Ordering::Relaxed);
+    pub fn note_activity(&self, bytes: u64) -> (u64, u64) {
+        let before = self.activity.load(Ordering::Relaxed);
+        let after = before.wrapping_add(bytes);
+        self.activity.store(after, Ordering::Relaxed);
+        (before, after)
+    }
+
+    /// Counts one heartbeat of this slab's CPU, and returns the new count: the heartbeat's turn.
+    /// A hint, kept with a load and a store, as the activity counter is.
+    #[inline]
+    pub fn note_beat(&self) -> u64 {
+        let next = self.beats.load(Ordering::Relaxed).wrapping_add(1);
+        self.beats.store(next, Ordering::Relaxed);
         next
     }
 

@@ -6,11 +6,21 @@
 writes for the lifetime of the returned reference, and not accessed non-atomically while the
 reference is used.
 
-**Invariant of `Magazine`.** `base` is the magazine area's base pointer advanced by an offset
-that `admits` accepted against the committed mark when the handle was made: at or past the
-first unit of the area, a multiple of the magazine's size, and with the whole magazine inside
-the first `committed` bytes of the area. Only `Area::magazine_at` builds a `Magazine`, and it checks
-exactly this. `Magazine` has no public constructor and its fields are private.
+**Invariant of `Magazine`.** The handle is one word: `base() | size.ordinal()`, where `base()`
+is the magazine area's base pointer advanced by an offset that `admits` accepted against the
+committed mark when the handle was made: at or past the first unit of the area, a multiple of
+the magazine's size, and with the whole magazine inside the first `committed` bytes of the area.
+Only `Area::magazine_at` builds a `Magazine`, and it checks exactly this. `Magazine` has no
+public constructor and its field is private.
+
+**Reading the word back.** The offset is a multiple of the magazine's size, which is at least
+`UNIT` (32 bytes), and the area's base is aligned to the region size, so the base's low five
+bits are clear and the ordinal (below `MagazineSize::COUNT`, at most 32 by a compile-time
+assertion) occupies them alone. `base()` clears those bits and gets back the base exactly
+(non-zero, since the base is past the area's first unit; the `NonZeroUsize` fallback is never
+taken), and `size()` reads the ordinal back with `MagazineSize::from_ordinal`, whose fallback to
+the smallest size is never taken and would in any case only shrink the slots reached. Both
+derive their pointer from the stored one with `map_addr`, so they keep its provenance.
 
 **The binding.** An `Area` pairs a `Space` with the `Depot` whose `carved` and `committed`
 counters describe that space's magazine area. It is made only by `Cache::with_tuning`, whose
@@ -32,7 +42,7 @@ carve the same magazines.
   `Space`, and so the OS value that owns the reservation (a `SpaceCell` unmaps only when dropped,
   which needs `&mut` and so no live `Space`). Nothing in the crate purges or unmaps the magazine
   area while a `Space` exists. The returned reference borrows the handle, so it lives no longer.
-- *Provenance.* `base` comes from `Space::magazines()` through `map_addr`, so it carries the
+- *Provenance.* `base()` comes from `Space::magazines()` through `map_addr`, so it carries the
   reservation's provenance.
 - *Aligned.* The area is aligned to the region size (`Plan::magazines_offset`), which
   `Geometry::try_new` requires to be at least the largest magazine at every region size the

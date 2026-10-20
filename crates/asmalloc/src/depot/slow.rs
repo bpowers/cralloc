@@ -59,6 +59,14 @@ enum Obtained<'a> {
     NoMagazine,
 }
 
+/// The bytes of objects a full magazine of `class` holds: what one exchange moves.
+fn magazine_bytes(class: SmallClass) -> usize {
+    class.magazine().capacity() * class.size()
+}
+
+// Returned in registers, not through memory (see `Magazine`).
+const _: () = assert!(size_of::<Obtained<'_>>() <= 16);
+
 /// One full magazine in this many that a CPU's frees retire is laundered instead of kept, by
 /// default. Each costs a launder now and a fill later, and in a fragmented heap the fill's
 /// search of the bitmaps dominates. One in 32 kept nearly all of one in eight's effect on
@@ -254,14 +262,13 @@ impl<'a, O: Os, R: Routines, S: Source> Cache<'a, O, R, S> {
             if let Seen::Live = seen {
                 return self.serve_alloc(class, held);
             }
+            let level = held.level();
             // SAFETY: DEPOT-SLOW-01.
-            let installed = unsafe {
-                self.routines
-                    .store_if_equal(field, word, held.word(held.level()))
-            };
+            let installed = unsafe { self.routines.store_if_equal(field, word, held.word(level)) };
             match installed {
                 StoreIfEqual::Stored => {
                     chores.installed = true;
+                    chores.moved = magazine_bytes(class);
                     if let Seen::Loaded(old, _) = seen {
                         old.set_level(0);
                         self.retire(class, Spare::Empty, old, &mut chores.stale);
@@ -327,6 +334,7 @@ impl<'a, O: Os, R: Routines, S: Source> Cache<'a, O, R, S> {
             match installed {
                 StoreIfEqual::Stored => {
                     chores.installed = true;
+                    chores.moved = magazine_bytes(class);
                     if let Seen::Loaded(old, level) = seen {
                         old.set_level(level);
                         if self.refreshes(cpu) && self.may_launder(class) && !self.has_deferred(cpu)

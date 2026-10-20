@@ -121,7 +121,7 @@ impl Stack {
                 Release,
             );
             let new = Packed {
-                number: magazine.id().get(),
+                number: area.id(&magazine).get(),
                 high: head.high.wrapping_add(1),
             };
             // Sequentially consistent so that the hint of which stacks hold magazines, which

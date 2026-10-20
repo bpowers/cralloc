@@ -174,7 +174,9 @@ fn a_cpu_busy_on_fast_paths_is_drained_at_most_once_an_interval() {
         }
     }
     // Each drain costs CPU 0 one slow path, to load a magazine again, and nothing else does.
-    assert_eq!(slab.activity(), 1 + drains.len() as u64);
+    // The activity counter counts the bytes a full magazine holds for each exchange.
+    let exchange = (busy.magazine().capacity() * busy.size()) as u64;
+    assert_eq!(slab.activity(), (1 + drains.len() as u64) * exchange);
     assert!(drains.len() >= intervals as usize / 2, "{drains:?}");
     for pair in drains.windows(2) {
         assert!(
@@ -781,7 +783,9 @@ fn maintain_drains_a_cpu_busy_on_fast_paths_at_most_once_an_interval() {
             drains.push(rig.os().ticks());
         }
     }
-    assert_eq!(slab.activity(), 1 + drains.len() as u64);
+    // The activity counter counts the bytes a full magazine holds for each exchange.
+    let exchange = (busy.magazine().capacity() * busy.size()) as u64;
+    assert_eq!(slab.activity(), (1 + drains.len() as u64) * exchange);
     assert!(drains.len() >= intervals as usize / 2 - 1, "{drains:?}");
     for pair in drains.windows(2) {
         assert!(

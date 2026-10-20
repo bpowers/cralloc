@@ -26,6 +26,7 @@ const QUIET: Tuning = Tuning {
     depot_target: usize::MAX / 2,
     domain_cap: usize::MAX / 4,
     look_every: super::LOOK_EVERY,
+    beat_shift: super::heartbeat::BEAT_SHIFT,
     refresh_every: 0,
     age_limit: false,
     shed_unused: false,
@@ -1714,10 +1715,13 @@ fn a_rule_the_budget_turns_away_waits_for_the_next_slow_path() {
     let class = SmallClass::from_ordinal(0).unwrap();
     let capacity = class.magazine().capacity();
     assert_eq!(capacity, super::LAUNDER_BUDGET);
+    // A heartbeat on every slow path, so that the sweep begins at the first: the budget, not the
+    // pace, is what this checks.
     let tuning = Tuning {
         refresh_every: 1,
         age_limit: true,
         look_every: 1,
+        beat_shift: 0,
         max_spares: 2,
         ..QUIET
     };
