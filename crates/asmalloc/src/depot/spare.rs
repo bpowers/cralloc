@@ -209,9 +209,13 @@ mod tests {
             .map(|c| spare_limit(tuning, c, Spare::Full) * c.magazine().capacity() * c.size())
             .sum();
         assert!(total <= SPARE_BUDGET, "{total}");
-        // The smallest classes get the most; the largest get none.
+        // The smallest class gets the most, two of its 8 KiB of objects in a 23 KiB share; a
+        // class whose magazine holds more than its share gets none.
         let smallest = SmallClass::from_ordinal(0).unwrap();
-        assert_eq!(spare_limit(tuning, smallest, Spare::Full), MAX_SPARES);
+        assert_eq!(spare_limit(tuning, smallest, Spare::Full), 2);
+        let sixty_four = SmallClass::from_ordinal(7).unwrap();
+        assert_eq!(sixty_four.size(), 64);
+        assert_eq!(spare_limit(tuning, sixty_four, Spare::Full), 0);
         let largest = SmallClass::from_ordinal(SMALL_COUNT - 1).unwrap();
         assert_eq!(spare_limit(tuning, largest, Spare::Full), 0);
         assert!(SmallClass::all().all(|c| spare_limit(tuning, c, Spare::Empty) == MAX_SPARES));

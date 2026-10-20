@@ -137,6 +137,35 @@ fn launder_then_fill_reuses_the_lowest_free_slots_first() {
     assert_eq!(rest[30], slots[199].wrapping_add(64));
 }
 
+/// A fill bounded in claims takes what that many words hold and stops, short of what was
+/// asked when the words are sparse, without carving; a bound the bitmaps do not reach changes
+/// nothing, and a fill that finds the bitmaps empty still carves.
+#[test]
+fn a_fill_within_its_claims_stops_short_on_sparse_words_and_carves_only_when_they_run_out() {
+    let state = state::<Standard>();
+    let back = state.get_or_reserve().unwrap();
+    let class = small(8);
+    let slots = fill(&back, class, 64 * 64);
+    // One free slot in each of 64 words.
+    let freed: Vec<*mut u8> = slots.iter().step_by(64).copied().collect();
+    // SAFETY: the test holds these slots.
+    unsafe { back.launder(class, &freed) };
+    let mut out = std::vec![core::ptr::null_mut(); 100];
+    let got = back.fill_within(class, &mut out[..], 10);
+    assert_eq!(got, 10, "one slot from each of ten words");
+    assert_eq!(&out[..10], &freed[..10]);
+    // A bound the free slots run out under: the rest comes from a carve.
+    let mut out = std::vec![core::ptr::null_mut(); 100];
+    assert_eq!(back.fill_within(class, &mut out[..], 64), 100);
+    assert_eq!(&out[..54], &freed[10..]);
+    let end = slots[slots.len() - 1];
+    assert_eq!(out[54], end.wrapping_add(8));
+    // Nothing free at all: the smallest bound still carves.
+    let mut out = std::vec![core::ptr::null_mut(); 100];
+    assert_eq!(back.fill_within(class, &mut out[..], 1), 100);
+    assert_eq!(out[0], end.wrapping_add(47 * 8));
+}
+
 #[test]
 #[should_panic(expected = "double free")]
 fn a_double_free_aborts() {
@@ -3725,7 +3754,7 @@ mod review {
 
     /// A batch of distinct slots in one of the shapes a launder meets, drawn from `pool`.
     fn batch(rng: &mut Rng, pool: &[*mut u8]) -> Vec<*mut u8> {
-        let len = 1 + rng.below(254);
+        let len = 1 + rng.below(crate::classes::MagazineSize::MAX.capacity());
         let mut picked = BTreeSet::new();
         match rng.below(4) {
             // A dense run, ascending or descending.
@@ -3735,9 +3764,10 @@ mod review {
             }
             // Shuffled among a few neighbouring words.
             1 => {
-                let start = rng.below(pool.len() - 600);
+                let span = 600.max(2 * len);
+                let start = rng.below(pool.len() - span);
                 while picked.len() < len {
-                    picked.insert(start + rng.below(600));
+                    picked.insert(start + rng.below(span));
                 }
             }
             // Scattered over the pool, both regions.

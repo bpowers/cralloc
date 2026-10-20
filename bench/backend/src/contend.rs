@@ -1,14 +1,14 @@
 //! asmalloc's back-end fill and launder with several threads on one class at once: what a
 //! program whose threads all refill the same size class pays.
 //!
-//!   backcontend run [threads=8] [class=16] [every=1] [batch=254] [rounds=2000] [pool=65536]
+//!   backcontend run [threads=8] [class=16] [every=1] [batch=1022] [rounds=2000] [pool=65536]
 //!
 //! The benchmark keeps a heap of its own (a `back::State` over the real OS). It carves `pool`
 //! objects of the class and launders one in `every` of them (`every=1`: all of them, so the
 //! words are dense; `every=8`: one free slot in 8, a fragmented heap), holding the rest. Then
 //! `threads` threads, thread `i` pinned to the `i`-th CPU of `BENCH_CPUS` (wrapping, so twice
 //! as many threads as CPUs puts two on each), each repeat `rounds` times: fill a magazine's
-//! worth (`batch`, 254 being a 16-byte class's magazine) and launder it again in the order a
+//! worth (`batch`, 1022 being a 16-byte class's magazine) and launder it again in the order a
 //! magazine is popped (last filled first). Every thread starts together and works on the same
 //! free slots, lowest address first, as fillers of one class do.
 //!
@@ -51,7 +51,7 @@ fn main() {
     let threads = args.usize("threads", 8);
     let size = args.usize("class", 16);
     let every = args.usize("every", 1);
-    let batch = args.usize("batch", 254);
+    let batch = args.usize("batch", 1022);
     let rounds = args.usize("rounds", 2000);
     let pool = args.usize("pool", 65536);
     let cpus = Cpus::from_env();

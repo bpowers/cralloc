@@ -92,6 +92,27 @@ pub const DEPOT_TARGET: usize = 128 << 10;
 /// "Domain stacks and a shared stack").
 pub const DOMAIN_CAP: usize = DEPOT_TARGET / 4;
 
+/// The most objects one slow path launders: as many as the largest magazine holds, 1,022.
+///
+/// The rules that launder were each allowed a magazine a slow path, which bounded the work
+/// while a magazine held at most 254 objects; at four times that, the four or so magazines a
+/// slow path could launder would make one `malloc` or `free` four times as long. So a slow path
+/// counts the objects it launders, and a rule that may wait (the refresh, the age limit and the
+/// sweep, the shed, and the launder over target of what the heartbeat's own sweep and drain
+/// pushed) launders a magazine only if the magazine could be full and still keep the count
+/// within this budget, after setting aside the objects of each push of the call's exchange that
+/// left a shared stack over its target. Those the heartbeat launders last, one magazine for
+/// each such push, so that the stack never gains on the rate at which magazines arrive
+/// (`heartbeat.rs`). A rule looks for work before it asks for room. When the age limit or the
+/// sweep, which only the CPU's own slow paths run, finds work and no room, the CPU's next slow
+/// path gives it the whole budget first (`age.rs`, `Sweep`), so a CPU whose every exchange
+/// overflows still runs them, and still launders its own pushes over target after it: such a
+/// call launders up to two of the largest magazines, at most once an interval per class and
+/// rule. What the shed and the launder of the heartbeat's own pushes leave, later slow paths
+/// and the shed take back. For classes of 254 objects or fewer a magazine, the budget is four
+/// magazines, about what a slow path could launder before.
+pub const LAUNDER_BUDGET: usize = MagazineSize::MAX.capacity();
+
 /// The limits on memory parked in caches, how often the heartbeat looks around, and which of
 /// the rules that return parked objects are on. Constants in the allocator; tests change them
 /// to reach every path with small magazines and few slow paths, and to show what each rule
@@ -179,6 +200,10 @@ pub struct Depot {
     /// Magazines made, for audits.
     #[cfg(test)]
     created: std::sync::atomic::AtomicUsize,
+    /// Magazines asked for that the area had no room for, for tests that must exercise the
+    /// magazines rather than the back end's direct path.
+    #[cfg(test)]
+    refused: std::sync::atomic::AtomicUsize,
 }
 
 /// The pools of stacks: one per cache domain and the shared one.
@@ -288,7 +313,11 @@ const _: () = assert!(
                     + 2
                     + lines(
                         size_of::<domain::Domains>()
-                            + if cfg!(test) { size_of::<usize>() } else { 0 }
+                            + if cfg!(test) {
+                                2 * size_of::<usize>()
+                            } else {
+                                0
+                            }
                     ))
 );
 
@@ -311,6 +340,8 @@ impl Depot {
             topology: domain::Domains::new(),
             #[cfg(test)]
             created: std::sync::atomic::AtomicUsize::new(0),
+            #[cfg(test)]
+            refused: std::sync::atomic::AtomicUsize::new(0),
         }
     }
 
@@ -347,6 +378,12 @@ impl Depot {
     /// The stack of empty magazines of `size` in `pool`.
     pub(crate) fn empty(&self, pool: Pool, size: MagazineSize) -> &Stack {
         &self.pool(pool).empty[size.ordinal() % MagazineSize::COUNT]
+    }
+
+    /// How many magazines the area could not make, for want of room or of memory.
+    #[cfg(test)]
+    pub(crate) fn refused_magazines(&self) -> usize {
+        self.refused.load(std::sync::atomic::Ordering::Relaxed)
     }
 
     /// How many cache domains the stacks are kept for: 1 until start-up has found more.
@@ -394,14 +431,23 @@ pub struct Cache<'a, O: Os, R: Routines, S: Source> {
     /// look at their targets (`heartbeat.rs`). A view lasts one call, so this is the call's,
     /// not the thread's.
     overflowed: Cell<Overflow>,
+    /// The objects this view's slow path has laundered, against [`LAUNDER_BUDGET`]. Each slow
+    /// path starts it again from zero.
+    laundered: Cell<usize>,
+    /// The objects its exchange pushed on shared stacks, which the heartbeat's launder over
+    /// target may yet take back, set aside from the budget while the other rules run.
+    reserved: Cell<usize>,
 }
 
 /// The shared stacks a call pushed magazines with objects on: their classes, one bit per
-/// ordinal, and how many magazines in all.
+/// ordinal, how many magazines in all, and how many objects in those that left their stack over
+/// its target.
 #[derive(Clone, Copy, Default, Debug)]
 pub(super) struct Overflow {
     pub(super) classes: u64,
     pub(super) magazines: u32,
+    /// The objects in those magazines.
+    pub(super) objects: usize,
 }
 
 impl<'a, O: Os, R: Routines, S: Source> Cache<'a, O, R, S> {
@@ -437,6 +483,8 @@ impl<'a, O: Os, R: Routines, S: Source> Cache<'a, O, R, S> {
             source,
             tuning,
             overflowed: Cell::new(Overflow::default()),
+            laundered: Cell::new(0),
+            reserved: Cell::new(0),
         }
     }
 
@@ -536,14 +584,20 @@ impl<'a, O: Os, R: Routines, S: Source> Cache<'a, O, R, S> {
     fn to_shared(&self, class: SmallClass, magazine: Magazine<'_>) -> bool {
         let level = magazine.level() as u32;
         if level > 0 {
-            let contended = self
-                .depot
-                .full(Pool::Shared, class)
-                .push(self.area, magazine, level);
+            let stack = self.depot.full(Pool::Shared, class);
+            let contended = stack.push(self.area, magazine, level);
+            // Only a push that left the stack over its target will be laundered, so only its
+            // objects are set aside from the budget; the head and top link are the ones the push
+            // just wrote.
+            let over =
+                stack.count(self.area, class.magazine()) as usize > self.shared_target(class);
             let seen = self.overflowed.get();
             self.overflowed.set(Overflow {
                 classes: seen.classes | 1 << (class.ordinal() % SMALL_COUNT),
                 magazines: seen.magazines.saturating_add(1),
+                objects: seen
+                    .objects
+                    .saturating_add(if over { level as usize } else { 0 }),
             });
             contended
         } else {
@@ -570,7 +624,25 @@ impl<'a, O: Os, R: Routines, S: Source> Cache<'a, O, R, S> {
             self.source.take_back(class, objects);
         }
         magazine.set_level(0);
+        self.laundered
+            .set(self.laundered.get().saturating_add(level));
         level
+    }
+
+    /// Whether a rule that may wait has room in this slow path's budget to launder a magazine
+    /// of `class`, full or not ([`LAUNDER_BUDGET`]), beside what is set aside.
+    fn may_launder(&self, class: SmallClass) -> bool {
+        self.laundered
+            .get()
+            .saturating_add(self.reserved.get())
+            .saturating_add(class.magazine().capacity())
+            <= LAUNDER_BUDGET
+    }
+
+    /// Starts a slow path's count of the objects it launders.
+    fn begin_slow_path(&self) {
+        self.laundered.set(0);
+        self.reserved.set(0);
     }
 
     /// Pops one magazine of `class` from its stack in `pool` and launders it; the empty

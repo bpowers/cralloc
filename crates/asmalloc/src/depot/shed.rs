@@ -260,6 +260,11 @@ impl<O: Os, R: Routines, S: Source> Cache<'_, O, R, S> {
         }
         let start = (half % SMALL_COUNT as u64) as u32;
         let ordinal = (owing.rotate_right(start).trailing_zeros() + start) % u64::BITS;
+        // A debt waits for a heartbeat with room in its budget (`LAUNDER_BUDGET`).
+        if SmallClass::from_ordinal(ordinal as usize).is_some_and(|class| !self.may_launder(class))
+        {
+            return;
+        }
         self.shed_in(pool, ordinal as usize);
     }
 

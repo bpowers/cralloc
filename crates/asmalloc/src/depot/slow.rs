@@ -168,8 +168,8 @@ impl<'a, O: Os, R: Routines, S: Source> Cache<'a, O, R, S> {
     }
 
     /// Fills an empty magazine this thread holds from the source, in one call; returns its
-    /// new level. The source fills from the top (see [`Source::fill`]); a short fill, which
-    /// happens only when the heap is out of memory, is moved down to the bottom slots.
+    /// new level. The source fills from the top (see [`Source::fill`]); a short fill, from
+    /// sparse bitmaps or a heap out of memory, is moved down to the bottom slots.
     fn fill(&self, class: SmallClass, magazine: &Magazine) -> usize {
         let slots = magazine.objects();
         let capacity = slots.len();
@@ -218,6 +218,7 @@ impl<'a, O: Os, R: Routines, S: Source> Cache<'a, O, R, S> {
     /// The slow path of an allocation, then the heartbeat. Where the pop routine sends a
     /// thread whose CPU has no magazine with objects for `class`.
     pub fn alloc_slow(&self, class: SmallClass) -> Option<NonNull<u8>> {
+        self.begin_slow_path();
         let mut chores = Chores::default();
         let object = self.exchange_for_alloc(class, &mut chores);
         self.heartbeat(Some(class), chores);
@@ -287,6 +288,7 @@ impl<'a, O: Os, R: Routines, S: Source> Cache<'a, O, R, S> {
     /// The slow path of a free, then the heartbeat. Where the push routine sends a thread
     /// whose CPU has no magazine with room for `class`.
     pub fn free_slow(&self, class: SmallClass, object: NonNull<u8>) {
+        self.begin_slow_path();
         let mut chores = Chores::default();
         self.exchange_for_free(class, object, &mut chores);
         self.heartbeat(Some(class), chores);
@@ -327,10 +329,15 @@ impl<'a, O: Os, R: Routines, S: Source> Cache<'a, O, R, S> {
                     chores.installed = true;
                     if let Seen::Loaded(old, level) = seen {
                         old.set_level(level);
-                        if self.refreshes(cpu) {
+                        let due = self.refreshes(cpu);
+                        if due && self.may_launder(class) && !self.has_deferred(cpu) {
                             self.launder_held(class, &old);
                             self.retire(class, Spare::Empty, old, &mut chores.stale);
                         } else {
+                            if due {
+                                // Postponed to the next retirement, not skipped.
+                                self.slab(cpu).uncount_retired();
+                            }
                             self.retire(class, Spare::Full, old, &mut chores.stale);
                         }
                     }

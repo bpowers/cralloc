@@ -31,8 +31,8 @@
 //! full magazine of the class holds) stays within [`room`]: the CPU's spare budget less what the
 //! fixed limits could already park in full spares ([`parked_full`]). So a CPU's full spares,
 //! fixed and stock together, never hold more than the spare budget, which the fixed limits
-//! alone, splitting it evenly over every class, cannot reach: 139 KiB of 1 MiB with the
-//! allocator's limits, since most classes' magazines are bigger than their share. Stock lets the
+//! alone, splitting it evenly over every class, cannot reach: 32 KiB of 1 MiB with the
+//! allocator's limits, since nearly every class's magazine is bigger than its share. Stock lets the
 //! classes in use take the share of those that are not. Empty stock has a room of the same size
 //! of its own, counted the same way, so its memory is at most that room's worth of pointers.
 //! When the room is spent, the next magazine of any class goes to the depot as it does today,
@@ -82,9 +82,9 @@ use core::ptr;
 use core::sync::atomic::Ordering::{Acquire, Relaxed};
 
 /// The objects, in bytes, of every class's fixed number of full spares: what the fixed limits
-/// let one CPU park in full spares: 139 KiB with the allocator's limits, since a budget of 1 MiB
-/// split evenly over the classes leaves most classes' magazines too big for any spare, and the
-/// smallest classes four.
+/// let one CPU park in full spares: 32 KiB with the allocator's limits, since a budget of 1 MiB
+/// split evenly over the classes, 23 KiB each, leaves every class's magazine too big for any
+/// spare but the 8-byte class's two and the 16-byte class's one.
 pub const fn parked_full(tuning: Tuning) -> usize {
     let mut total = 0usize;
     let mut ordinal = 0;
@@ -102,7 +102,7 @@ const fn weight(class: SmallClass) -> usize {
 }
 
 /// The bytes of stock of each kind one CPU may hold: its spare budget less what the fixed
-/// limits could park in full spares. 885 KiB with the allocator's limits, worked out at compile
+/// limits could park in full spares. 992 KiB with the allocator's limits, worked out at compile
 /// time for them, since the sum takes a division for each class.
 pub fn room(tuning: Tuning) -> usize {
     const DEFAULT: usize = room_of(Tuning::DEFAULT);

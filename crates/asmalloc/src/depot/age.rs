@@ -127,11 +127,23 @@ impl Stamp {
 /// 2^[`TICK_SHIFT`] ticks (bits 32 to 63), whether one has begun (bit 16), and the ordinal of the
 /// next class to sweep (bits 0 to 7), the class count once the sweep is done. Zero is no sweep
 /// yet; the first clocked heartbeat begins one.
+///
+/// The same word records what the launder budget turned away (`super::LAUNDER_BUDGET`): bit 17,
+/// that the sweep had a magazine to launder and no room; bits 8 to 15, the ordinal plus one of
+/// a class whose magazine the age limit found old and had no room to take. The next slow path of
+/// the CPU gives those rules the budget first (`heartbeat.rs`), so a CPU whose every exchange
+/// spends the budget still runs them.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(super) struct Sweep(pub(super) u64);
 
 const SWEEP_BEGUN: u64 = 1 << 16;
 const SWEEP_CURSOR: u64 = 0xff;
+const SWEEP_DEFERRED: u64 = 1 << 17;
+const AGE_DEFERRED_SHIFT: u32 = 8;
+const AGE_DEFERRED: u64 = 0xff << AGE_DEFERRED_SHIFT;
+/// The bits that record a rule the budget turned away, which a new sweep keeps.
+const DEFERRED: u64 = SWEEP_DEFERRED | AGE_DEFERRED;
+const _: () = assert!(SMALL_COUNT < 0xff);
 const _: () = assert!(SMALL_COUNT as u64 <= SWEEP_CURSOR);
 
 impl Sweep {
@@ -149,6 +161,21 @@ impl Sweep {
     /// The sweep after the class it named.
     pub(super) fn advanced(self) -> Sweep {
         Sweep(self.0 + 1)
+    }
+
+    /// What the budget turned away: whether the sweep did, and the class whose old magazine the
+    /// age limit could not take.
+    pub(super) fn deferred(self) -> (bool, Option<SmallClass>) {
+        let age = ((self.0 & AGE_DEFERRED) >> AGE_DEFERRED_SHIFT) as usize;
+        (
+            self.0 & SWEEP_DEFERRED != 0,
+            age.checked_sub(1).and_then(SmallClass::from_ordinal),
+        )
+    }
+
+    /// This sweep with nothing recorded as turned away.
+    pub(super) fn undeferred(self) -> Sweep {
+        Sweep(self.0 & !DEFERRED)
     }
 
     /// What a heartbeat with the clock at `now` makes of a sweep that is not under way: a new
@@ -239,6 +266,13 @@ impl<'a, O: Os, R: Routines, S: Source> Cache<'a, O, R, S> {
             Age::Young => return false,
             Age::Old => {}
         }
+        if seen.level == 0 {
+            return false;
+        }
+        if !self.may_launder(class) {
+            self.defer_age(cpu, class);
+            return false;
+        }
         let taken = seen.level > 0 && self.reclaim(class, seen);
         if taken {
             stamp.store(0, Relaxed);
@@ -254,7 +288,7 @@ impl<'a, O: Os, R: Routines, S: Source> Cache<'a, O, R, S> {
         let sweep = Sweep(word.load(Relaxed));
         let Some(ordinal) = sweep.next() else {
             if looking && let Some(next) = sweep.due(clock.now()) {
-                word.store(next.0, Relaxed);
+                word.store(next.0 | sweep.0 & DEFERRED, Relaxed);
             }
             return false;
         };
@@ -262,6 +296,17 @@ impl<'a, O: Os, R: Routines, S: Source> Cache<'a, O, R, S> {
             word.store(sweep.advanced().0, Relaxed);
             return false;
         };
+        // A class with full spares, which the sweep launders one of, waits on the class for a
+        // heartbeat with room in its budget (`LAUNDER_BUDGET`), and asks the next one to make
+        // room. A class with none is swept whatever the budget: its step launders nothing.
+        let head = self
+            .slab(cpu)
+            .field(Field::spare(class, Spare::Full))
+            .load(Acquire);
+        if !head.is_null() && !is_marker(head.addr()) && !self.may_launder(class) {
+            word.store(sweep.0 | SWEEP_DEFERRED, Relaxed);
+            return false;
+        }
         match self.sweep_stock(cpu, class) {
             Swept::Plain => {
                 // A stack deeper than its fixed limit (stock whose word a race lost) is not
@@ -282,6 +327,32 @@ impl<'a, O: Os, R: Routines, S: Source> Cache<'a, O, R, S> {
                 laundered
             }
         }
+    }
+
+    /// What the launder budget turned away at `cpu`'s last slow paths (see [`Sweep`]), cleared:
+    /// whether the sweep was, and the class whose old magazine the age limit could not take.
+    pub(super) fn take_deferred(&self, cpu: Cpu) -> (bool, Option<SmallClass>) {
+        let word = self.slab(cpu).sweep();
+        let sweep = Sweep(word.load(Relaxed));
+        let deferred = sweep.deferred();
+        if deferred != (false, None) {
+            word.store(sweep.undeferred().0, Relaxed);
+        }
+        deferred
+    }
+
+    /// Records that the age limit found `class`'s magazine on `cpu` old and could not take it,
+    /// so that the CPU's next slow path takes it first (`Sweep`).
+    pub(super) fn defer_age(&self, cpu: Cpu, class: SmallClass) {
+        let word = self.slab(cpu).sweep();
+        let deferred = (class.ordinal() as u64 + 1) << AGE_DEFERRED_SHIFT;
+        word.store(word.load(Relaxed) & !AGE_DEFERRED | deferred, Relaxed);
+    }
+
+    /// Whether a slow path's budget turned away one of `cpu`'s rules, which the next heartbeat
+    /// runs first: the refresh, which would spend the budget before it, waits.
+    pub(super) fn has_deferred(&self, cpu: Cpu) -> bool {
+        Sweep(self.slab(cpu).sweep().load(Relaxed)).deferred() != (false, None)
     }
 
     /// Takes the current CPU's stack of full spares of `class`, if its head is still the one

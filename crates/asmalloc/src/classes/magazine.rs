@@ -22,11 +22,12 @@ pub const SLOT_BYTES: usize = crate::spec::WORD_BYTES;
 /// The most bytes of objects a magazine holds, unless that would leave it fewer than
 /// `MagazineSize::MIN` slots.
 ///
-/// It bounds the memory one cached magazine can pin against the cost of exchanging magazines,
-/// and gives 254-object magazines up to 256-byte classes and two-object magazines from 16 KiB.
-/// Halving it from 128 KiB brought the mixed-size pipeline down to jemalloc's memory for a few
-/// percent on that job and no resolvable cost elsewhere, since classes up to 256 bytes keep
-/// their magazines (`docs/research/memory.md`, "Magazine budget").
+/// It bounds the memory one cached magazine can pin against the cost of exchanging magazines.
+/// With [`MagazineSize::MAX`] it is the whole rule for a class's magazine: up to 64 KiB of
+/// objects, at most 1,024 slots, at least 4. That gives 1,022-object magazines up to 64-byte
+/// classes, 254 objects to 256-byte ones and two objects from 16 KiB. Halving the budget from
+/// 128 KiB brought the mixed-size pipeline down to jemalloc's memory for a few percent on that
+/// job and no resolvable cost elsewhere (`docs/research/memory.md`, "Magazine budget").
 pub const MAGAZINE_BUDGET: usize = 64 << 10;
 
 /// The low bits of a marker: a marker is `(generation << MARKER_SHIFT) | MARKER`.
@@ -92,9 +93,17 @@ impl Marker {
 }
 
 const MIN_LOG2: u8 = 2;
-const MAX_LOG2: u8 = 8;
+/// `log2` of the most slots a magazine has: 1,024, so that the smallest classes' magazines hold
+/// what a 64-byte class's does, 64 KiB of objects, and no more objects than that. Up to 1,024
+/// slots, larger magazines halved sh8bench's gap and took 10 to 18% off the cross-thread
+/// pipelines; past it the cross-thread gains stopped while the memory parked in loaded
+/// magazines, and the work one slow path does with one, kept doubling
+/// (`docs/research/launder-and-fill.md`, "Magazines of up to 1,024 slots"). The routines accept
+/// up to `2^MAG_LOG_MAX` slots.
+const MAX_LOG2: u8 = 10;
+const _: () = assert!(MAX_LOG2 as u32 <= crate::spec::MAG_LOG_MAX);
 
-/// A magazine size: a power-of-two number of slots, from 4 to 256.
+/// A magazine size: a power-of-two number of slots, from 4 to 1,024.
 ///
 /// Four is the least for which the two tests above work: with two slots the mask is zero.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
@@ -105,7 +114,7 @@ impl MagazineSize {
     /// The smallest magazine: 4 slots, 2 objects.
     pub(crate) const MIN: MagazineSize = MagazineSize(MIN_LOG2);
 
-    /// The largest magazine: 256 slots, 254 objects, 2 KiB.
+    /// The largest magazine: 1,024 slots, 1,022 objects, 8 KiB.
     pub(crate) const MAX: MagazineSize = MagazineSize(MAX_LOG2);
 
     /// The number of magazine sizes.
@@ -224,6 +233,12 @@ mod tests {
                 256 => spec::MAG_MASK_256,
                 512 => spec::MAG_MASK_512,
                 1024 => spec::MAG_MASK_1024,
+                2048 => spec::MAG_MASK_2048,
+                4096 => spec::MAG_MASK_4096,
+                8192 => spec::MAG_MASK_8192,
+                16384 => spec::MAG_MASK_16384,
+                32768 => spec::MAG_MASK_32768,
+                65536 => spec::MAG_MASK_65536,
                 n => panic!("no proved mask for {n} slots"),
             };
             assert_eq!(size.mask(), proved as usize, "{} slots", size.slots());
@@ -280,7 +295,7 @@ mod tests {
         assert_eq!(MagazineSize::all().count(), MagazineSize::COUNT);
         assert_eq!(MagazineSize::from_slots(2), None);
         assert_eq!(MagazineSize::from_slots(12), None);
-        assert_eq!(MagazineSize::from_slots(512), None);
+        assert_eq!(MagazineSize::from_slots(2048), None);
         assert_eq!(MagazineSize::from_ordinal(MagazineSize::COUNT), None);
     }
 
@@ -288,7 +303,7 @@ mod tests {
     fn the_tests_pick_out_the_boundary_slots() {
         for size in MagazineSize::all() {
             let n = size.slots();
-            for base in [0x7f00_0000_0000usize, 0x1234_5000, size.bytes() * 3] {
+            for base in [0x7f00_0000_0000usize, 0x1234_0000, size.bytes() * 3] {
                 for slot in 0..n {
                     let word = base + slot * SLOT_BYTES;
                     assert_eq!(size.slot_of(word), slot);
@@ -315,5 +330,7 @@ mod tests {
         assert_eq!(MagazineSize::for_class_size(8), MagazineSize::MAX);
         assert_eq!(MagazineSize::for_class_size(1 << 20), MagazineSize::MIN);
         assert_eq!(MagazineSize::for_class_size(1024).slots(), 64);
+        assert_eq!(MagazineSize::for_class_size(64).slots(), 1024);
+        assert_eq!(MagazineSize::for_class_size(80).slots(), 512);
     }
 }

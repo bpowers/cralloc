@@ -1694,3 +1694,223 @@ fn a_deep_stack_without_credit_goes_back_a_magazine_a_call() {
     assert!(most <= 4 * 2, "one call laundered {most} objects");
     rig.census(&[], false);
 }
+
+/// A heap whose magazine area holds some 127 of the largest magazines (8 KiB each), for the
+/// rules' bounds on work with the smallest classes' magazines of 1,022 objects.
+enum Roomy {}
+
+impl crate::os::sim::Shape for Roomy {
+    const GEOMETRY: crate::space::Geometry =
+        crate::space::Geometry::new(6, 8, 13, 13, 256, 128, MagazineSize::MAX);
+}
+
+/// One slow path launders at most `LAUNDER_BUDGET` objects, and a rule the budget turns away
+/// does its work at a later slow path. Here a free retires a full magazine of the smallest
+/// class (1,022 objects) and refreshes it, which spends the budget, while the sweep, due on the
+/// same class in the same heartbeat, wants to launder a full spare: without the budget that
+/// call would launder two magazines.
+#[test]
+fn a_rule_the_budget_turns_away_waits_for_the_next_slow_path() {
+    let class = SmallClass::from_ordinal(0).unwrap();
+    let capacity = class.magazine().capacity();
+    assert_eq!(capacity, super::LAUNDER_BUDGET);
+    let tuning = Tuning {
+        refresh_every: 1,
+        age_limit: true,
+        look_every: 1,
+        max_spares: 2,
+        ..QUIET
+    };
+    let rig: Rig<SimOs<Roomy>, 2> = Rig::with_os(SimOs::new(), &[class], 4 * capacity, tuning);
+    let machine = SimCpu::new(0);
+    let cache = rig.cache(&machine);
+    // One slow path loads a filled magazine and begins the sweep at the first class; the
+    // frees then fill the loaded magazine back up to one short of full.
+    let held: Vec<NonNull<u8>> = (0..capacity).filter_map(|_| cache.alloc(class)).collect();
+    assert_eq!(held.len(), capacity);
+    let mut held = held.into_iter();
+    for object in held.by_ref().take(capacity - 1) {
+        cache.free(class, object);
+    }
+    // A full spare for the sweep to take.
+    let spare = cache.area().create(class.magazine()).unwrap();
+    assert_eq!(rig.source.fill(class, spare.objects()), capacity);
+    spare.set_level(capacity);
+    let mut stale = false;
+    assert!(
+        cache
+            .spare_push(class, Spare::Full, spare, &mut stale)
+            .is_ok()
+    );
+    let cpu = rig.slabs().cpu(0).unwrap();
+    let spare_head = || {
+        rig.slabs()
+            .slab(cpu)
+            .field(Field::spare(class, Spare::Full))
+            .load(Relaxed)
+    };
+    let spares = || !spare_head().is_null();
+    assert!(spares());
+    // The last free fills the loaded magazine; the next one exchanges it and refreshes it.
+    cache.free(class, held.next().unwrap());
+    let extra = rig.source.alloc_one(class).unwrap();
+    let before = rig.source.laundered();
+    cache.free(class, extra);
+    assert_eq!(
+        rig.source.laundered() - before,
+        capacity,
+        "the refresh alone"
+    );
+    assert!(spares(), "the sweep waited");
+    // The CPU's next slow path runs the sweep first. Frees fill the new loaded magazine; the one
+    // that finds it full exchanges it, the refresh waits for the sweep, and the sweep takes
+    // the spare stack, laundering its top.
+    for _ in 0..capacity - 1 {
+        cache.free(class, rig.source.alloc_one(class).unwrap());
+    }
+    let extra = rig.source.alloc_one(class).unwrap();
+    let before = rig.source.laundered();
+    cache.free(class, extra);
+    assert_eq!(
+        rig.source.laundered() - before,
+        capacity,
+        "the sweep, not the refresh"
+    );
+    assert!(!spares(), "the sweep took the spares");
+}
+
+/// A heap whose CPUs `width` at a time share a cache domain, with room for many of the largest
+/// magazines.
+fn roomy<const N: usize>(width: u32, classes: &[SmallClass], count: usize) -> Rig<SimOs<Roomy>, N> {
+    let os = SimOs::new();
+    os.set_topology(crate::os::sim::SimTopology::Blocks(width));
+    Rig::with_os(os, classes, count, Tuning::DEFAULT)
+}
+
+/// Whether CPU `n` of `rig` has a magazine of `class` loaded.
+fn loaded_on<const N: usize>(rig: &Rig<SimOs<Roomy>, N>, n: i32, class: SmallClass) -> bool {
+    let word = rig
+        .slabs()
+        .slab(rig.slabs().cpu(n).unwrap())
+        .field(Field::hot(class))
+        .load(Relaxed);
+    !word.is_null() && !crate::classes::is_marker(word.addr())
+}
+
+/// CPU 0, in one cache domain, uses the smallest class once, then frees what CPU 1, in another,
+/// allocates of a class with two-object magazines, for three intervals. With `ahead`, CPU 1
+/// allocates everything first, so that every magazine CPU 0 retires goes past the shared stack's
+/// target; without, the two take turns, and the shared stack stays under it. Whether CPU 0
+/// still had the smallest class's magazine loaded at the end, and whether its sweep went round
+/// every class.
+fn idle_magazine_left_loaded(ahead: bool) -> (bool, bool) {
+    let (idle, flow) = (SmallClass::from_ordinal(0).unwrap(), tiny(0));
+    let steps = 24;
+    let per_step = 128;
+    let rig: Rig<SimOs<Roomy>, 2> = roomy(1, &[idle, flow], steps * per_step + 16);
+    let (zero, one) = (SimCpu::new(0), SimCpu::new(1));
+    let (frees, allocs) = (rig.cache(&zero), rig.cache(&one));
+    let object = frees.alloc(idle).unwrap();
+    frees.free(idle, object);
+    assert!(loaded_on(&rig, 0, idle));
+    let mut ahead_of_time: Vec<NonNull<u8>> = Vec::new();
+    if ahead {
+        ahead_of_time = (0..steps * per_step)
+            .filter_map(|_| allocs.alloc(flow))
+            .collect();
+        assert_eq!(ahead_of_time.len(), steps * per_step);
+    }
+    let sweep = rig.slabs().slab(rig.slabs().cpu(0).unwrap()).sweep();
+    let mut swept = false;
+    for _ in 0..steps {
+        rig.os().advance_clock(IDLE_TICKS / 8);
+        for _ in 0..per_step {
+            let object = match ahead_of_time.pop() {
+                Some(object) => object,
+                None => allocs.alloc(flow).unwrap(),
+            };
+            frees.free(flow, object);
+            // The sweep's cursor, in the word's low byte, at the class count: done.
+            swept |= (sweep.load(Relaxed) & 0xff) as usize == crate::classes::SMALL_COUNT;
+        }
+    }
+    (loaded_on(&rig, 0, idle), swept)
+}
+
+/// Review of the launder budget: a CPU whose every slow path pushed a magazine on a shared
+/// stack set the magazine's objects aside from the budget, over target or not, so its age limit
+/// never had room for a magazine of the smallest class, and one it had stopped using stayed
+/// loaded for good. Now only a push that leaves the stack over its target is set aside.
+#[test]
+fn a_cpu_whose_pushes_stay_under_target_still_takes_back_an_idle_magazine() {
+    assert_eq!(idle_magazine_left_loaded(false), (false, true));
+}
+
+/// Review of the launder budget: where every push does leave the shared stack over its target,
+/// the age limit finds the old magazine and no room on every slow path; the next slow path then
+/// gives it the budget first.
+#[test]
+fn a_cpu_whose_pushes_overflow_still_takes_back_an_idle_magazine() {
+    assert_eq!(idle_magazine_left_loaded(true), (false, true));
+}
+
+/// CPU 0 frees `class` and nothing else for `intervals`, `magazines` full magazines an eighth
+/// of an interval, its objects straight from the source. Returns the shared stack's target and
+/// the deepest it was in the second half, in objects.
+fn shared_stack_in_a_free_only_phase(
+    class: SmallClass,
+    intervals: usize,
+    magazines: usize,
+) -> (usize, usize) {
+    let per = class.magazine().capacity();
+    let rig: Rig<SimOs<Roomy>, 2> = roomy(2, &[tiny(1), class], 128 * per);
+    let zero = SimCpu::new(0);
+    let cache = rig.cache(&zero);
+    let target = cache.shared_target(class);
+    let mut deepest = 0;
+    for step in 0..intervals * 8 {
+        rig.os().advance_clock(IDLE_TICKS / 8);
+        for _ in 0..magazines * per {
+            cache.free(class, rig.source.alloc_one(class).unwrap());
+        }
+        if step >= intervals * 4 {
+            deepest = deepest.max(in_pool_roomy(&rig, Pool::Shared, class));
+        }
+    }
+    (target, deepest)
+}
+
+fn in_pool_roomy<const N: usize>(
+    rig: &Rig<SimOs<Roomy>, N>,
+    pool: Pool,
+    class: SmallClass,
+) -> usize {
+    let machine = SimCpu::new(0);
+    let cache = rig.cache(&machine);
+    rig.depot
+        .full(pool, class)
+        .count(cache.area(), class.magazine()) as usize
+}
+
+/// Review of the launder budget: on a CPU that only frees, every exchange pushes past the
+/// shared stack's target, and each call that ran a rule the budget had turned away skipped its
+/// own launder over target, which takes one magazine a push and so never caught up: the stack
+/// levelled at three to five times its target. A call launders its own push even after such a
+/// rule. The 16-byte stack then stays at its target; the 8-byte one, whose CPU keeps two full
+/// spares, also holds what the sweep sends on from them, within its budget, until the shed
+/// takes it back.
+#[test]
+fn a_free_only_phase_keeps_the_shared_stack_at_its_target() {
+    for ordinal in [0, 1] {
+        let class = SmallClass::from_ordinal(ordinal).unwrap();
+        let per = class.magazine().capacity();
+        let (target, deepest) = shared_stack_in_a_free_only_phase(class, 24, 4);
+        assert!(
+            deepest <= target * 5 / 2,
+            "class {}: the shared stack reached {} magazines against a target of {}",
+            class.size(),
+            deepest / per,
+            target / per
+        );
+    }
+}

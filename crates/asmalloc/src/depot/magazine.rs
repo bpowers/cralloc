@@ -303,6 +303,14 @@ impl<'a, O: Os> Area<'a, O> {
         self.space
     }
 
+    /// Counts a magazine the area could not make, for tests.
+    fn refuse(&self) {
+        #[cfg(test)]
+        self.depot
+            .refused
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    }
+
     /// A new, empty magazine of `size`, or `None` if the area is used up or cannot be made
     /// writable. Its memory is fresh, so it reads as an empty magazine.
     pub(crate) fn create(&self, size: MagazineSize) -> Option<Magazine<'a>> {
@@ -311,6 +319,7 @@ impl<'a, O: Os> Area<'a, O> {
         let start = loop {
             let start = (Self::start() + carved).next_multiple_of(bytes);
             if start + bytes > self.end() {
+                self.refuse();
                 return None;
             }
             match self.depot.growth.carved.compare_exchange(
@@ -324,6 +333,7 @@ impl<'a, O: Os> Area<'a, O> {
             }
         };
         if !self.commit_to(start + bytes) {
+            self.refuse();
             return None;
         }
         let magazine = self.magazine_at(start, size)?;

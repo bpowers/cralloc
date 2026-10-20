@@ -64,7 +64,8 @@ pub(super) fn every_plan_fits_its_regions(geometry: Geometry) {
 
 /// In every plan the object regions, the magazine area, the metadata blocks and the process page
 /// are disjoint and in that order; each starts on a page and is whole pages; and the magazine
-/// area is aligned to the region size and holds the largest magazine.
+/// area is aligned to the region size, and a region is at least the largest magazine, so the
+/// area aligns every magazine to its own size and holds one.
 pub(super) fn plans_keep_their_parts_apart(geometry: Geometry) {
     let plan = any_plan(geometry);
     let region = any_object_region(plan);
@@ -76,6 +77,7 @@ pub(super) fn plans_keep_their_parts_apart(geometry: Geometry) {
     let magazines = plan.magazines_offset();
     assert!(plan.objects_end() <= magazines);
     assert!(magazines & (plan.region_size() - 1) == 0);
+    assert!(plan.region_size() >= geometry.max_magazine().bytes());
     assert!(plan.magazine_area_size() >= geometry.max_magazine().bytes());
 
     let metadata = plan.metadata_offset(region);
