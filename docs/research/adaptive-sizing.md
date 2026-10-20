@@ -5,7 +5,9 @@ code changed and nothing was timed. Prior art was read from the sources in `thir
 (tcmalloc f3c6669a, mimalloc 3.5.3, Go) and from fresh checkouts and papers (jemalloc `dev`
 975f3b0, illumos `kmem.c`, FreeBSD `uma_core.c`, Linux 7.2.9 and master, snmalloc, glibc
 2.43, scudo, rpmalloc). Appendix A lists our constants, Appendix B the prior art in detail,
-Appendix C the sources.
+Appendix C the sources. Reviewed the same day by an agent that did not write it ("Review",
+after the summary): statements about other systems that the review found wrong or imprecise
+are corrected in place, and passages whose reasoning it disputes are marked "Disputed".
 
 The question: raising one constant, the largest magazine, from 254 to 1,024 slots was worth 5
 to 20% on many jobs for 1 to 3 MiB on small heaps (`launder-and-fill.md`, "Magazines of up to
@@ -23,9 +25,11 @@ and one exchange rate between memory held and time spent.
    checkpoint where a cheap slow path, with no shared state, decides whether to go on into the
    next segment or to exchange. The effective capacity of each CPU's magazine of each class is
    then a slow-path decision in steps of `m`. This is new as far as we found: tcmalloc pays for
-   adjustable capacity with a capacity field the fast path reads on every call; Bonwick, UMA
-   and Linux sheaves change a size for the whole cache under a lock. It needs the routines'
-   precondition restated and its checkpoint cost measured ("Segmented magazines", below).
+   adjustable capacity with an index and a capacity packed into one word, an instruction or two
+   on every push; Bonwick, UMA and Linux sheaves change a size for the whole cache under a lock.
+   It needs the routines' precondition restated and its checkpoint cost measured ("Segmented
+   magazines", below). *[Disputed: as described the checkpoint is unsound, and it needs new
+   routines; "Review", findings 1, 4 and 5.]*
 2. **One exchange rate works only if a parked object is priced by the page it pins, and it
    cannot bound a peak.** The rate our purge implies (a 4 KiB page kept about 1.5 s to save
    its 566 ns refault, about 400 cycles per KiB-second) prescribes, by the economic order
@@ -36,7 +40,8 @@ and one exchange rate between memory held and time spent.
    memory limit, the JVM's time ratio, tcmalloc's per-CPU budget) states a bound on space and
    lets the mechanism spend it; none prices space. So the knob should be a budget, divided
    among buffers by their regret, with the exchange rate used only where time is the point:
-   how long idle memory is kept.
+   how long idle memory is kept. *[Disputed: the assumed rate, and what follows from "it cannot
+   bound a peak"; "Review", "The theory".]*
 3. **The tiers are in series, so sizing them one at a time moves the others.** The 1,024-slot
    change cut the depot stacks and spares of the classes up to 64 bytes, counted in magazines,
    by four: a domain stack now holds about one magazine of a 64-byte class, and no class from
@@ -57,6 +62,177 @@ dropping the even split; the magazine's effective capacity, by segments, with th
 the depot's shared target, by ghost hits. Not worth adapting: the interval, the purge's quarter
 and the cap, the huge-page thresholds, headroom, the work bounds, the look and heartbeat
 pacing, commit-ahead. The refresh rule should be judged for removal rather than tuned.
+*[Disputed: the signal and the list; "Review", findings 2 and 3 and "The ranking".]*
+
+## Review, 2026-10-19
+
+An adversarial review by an agent that did not write the note, made the same day at `d6d79a6`.
+Reading and reasoning only: nothing was built, run or timed. The statements about other
+systems were checked against tcmalloc f3c6669a and Go in `third_party/` and against fresh
+copies of jemalloc `dev` 975f3b0 and 5.3.0, illumos `kmem.c`, FreeBSD `uma_core.c`, Linux 7.0,
+7.2 and master with the commit messages, and the Bonwick and Adams paper. The proposals were
+checked against `docs/design.md`, `lean/Asmalloc/Spec/Slab.lean`, `classes/magazine.rs`,
+`depot/{slow, heartbeat, stock, spare, stack, magazine}.rs`, `launder-and-fill.md` and
+`memory.md`. "Verified" means read in the source; "inferred" is the reviewer's reasoning.
+Statements of fact found wrong or imprecise are corrected in place and listed under "What was
+checked"; the note's arguments stand as written, marked "Disputed" where a finding contests
+them.
+
+### Findings that change the design
+
+1. **The segment checkpoint, as described, can hand one object out twice.** (Inferred from the
+   code; sure.) It writes or reads a slot of the loaded magazine from the slow path, outside a
+   sequence, and then moves the word with store-if-equal. That races with other threads on the
+   same CPU.
+   - Free: A reads the word at slot `km - 1` and is preempted. B crosses the same boundary and
+     commits. A writes its object over B's in slot `km + 1`, fails the compare, retries and
+     pushes again. A's object is cached twice and B's is lost.
+   - Allocation: A reads the object in slot `km - 2` and is preempted. B pops it, frees two
+     objects and pops one, so the word is `km + 1` again. A's compare succeeds and returns an
+     object B holds.
+
+   Every slow path today reads a magazine's contents only after it owns the magazine
+   (`depot/slow.rs`: an install displaces a whole magazine, and `serve_free`, `fill` and the
+   launders act on held ones), so store-if-equal has never had to guard contents. The
+   checkpoint needs two new routines, a push and a pop across the gap inside a sequence: new
+   Lean work, not reuse. The other way round, the pop and push proofs need no redoing: the
+   specification states its invariant on the window of the mask (`SlotOk`, `Exclusive` and
+   `Mag.ofWord` in `lean/Asmalloc/Spec/Slab.lean`, all in terms of `slotsOf mask`), and a
+   segment inside a larger magazine satisfies it as it stands. The work moves to the Rust slow
+   paths, the twins, Kani and TLA+.
+2. **The proposed signal does not fire where the magazine's size pays.** (Verified from our own
+   measurements.) The note has a checkpoint go on only while exchanges "round-trip under
+   contention". Stock already uses that signal, and it left the pipelines, the tree and JSON
+   level (`launder-and-fill.md`, "Neighbours"). Magazines of 1,024 slots moved those jobs by 4
+   to 20% (the same note, "Time and memory"), and magazines of 128 slots cost the pipelines 16
+   to 20% (`memory.md`, "What is left, and proposals"). A pipeline is a one-way flow on each of
+   its CPUs, and the tree and JSON never contend. So rule 2 of "What to adapt first" keeps
+   sh8bench and returns the pipelines to main's time as well as main's peak; its "Expected"
+   line states only the peak. The cause: our magazine is the transfer batch as well as a
+   buffer. Round trips size a buffer. The rate of flow sizes a batch, which is what the note's
+   own order-quantity formula says.
+3. **The prior art does not teach "a round trip, not a miss".** (Verified.)
+   - Linux grows `high` on every refill from the zone, and still does in 7.2 (`nr_pcp_alloc`:
+     "If we had larger pcp->high, we could avoid to allocate from zone"). Its author saw the
+     case of a CPU that only allocates, judged that it "isn't a severe issue, because there are
+     no idle pages in this case", and rejected growing on the free side instead, because idle
+     pages would then be hard to free (commit 51a755c56dc0). 6ccdcb6d3a74 is the last patch of
+     the same series and detects runs of high-order frees; the 30% regression was that
+     detector firing early.
+   - tcmalloc's sentence is quoted rightly (`UpdateCapacity`) but covers only capacity above
+     two batches. Below that any miss grows a class, and the number of objects moved doubles
+     on successive misses in one direction, to half the capacity
+     (`TargetOverflowRefillCount`).
+   - jemalloc `dev` doubles the fill on every refill of an empty bin
+     (`tcache_ncached_fill_after_refill`) and never adapts capacity. Bonwick and UMA count
+     contention in either direction, and `kmem.c` describes the magazine's size as "a higher
+     transfer rate with the depot".
+
+   Three systems adapt the size of a transfer apart from the capacity, on runs in one
+   direction. The note records each and draws nothing from them.
+4. **The checkpoint's cost and its heartbeat cannot both be as stated.** (Numbers verified;
+   conclusion inferred.) The estimate of 30 to 100 cycles assumes no heartbeat; "restores the
+   heartbeat's frequency" assumes one. sh8bench's exchange carries 400 cycles of glue,
+   heartbeat included (`launder-and-fill.md`, "One L3"), and reading the clock on every
+   heartbeat cost a two-thread pipeline 3% (`depot/heartbeat.rs`, `Clock`). From the pipeline
+   rows (3.77 ns an allocation, 9.8% faster with a slow path every 1,022 calls instead of every
+   254, for the allocation and for its free, at 4.3 to 5.5 GHz), an uncontended slow path
+   there costs about 300 cycles all in. A checkpoint must be far under that to keep the gain.
+5. **Other costs of segments.** (Inferred.)
+   - Reach. Only classes up to 128 bytes have magazines of more than 256 slots. From 160 bytes
+     up the 64 KiB byte budget stays a constant, and halving it is what took the mixed
+     pipeline from 7.07 to 5.12 MiB.
+   - A fill can already stop at any level (`Cache::fill`), so the allocating half of an
+     adaptive capacity needs no segments.
+   - Each interior boundary gives one level two words (the top of one segment, the bottom of
+     the next), and an install must choose by the direction of the request. Fills and launders
+     take one contiguous slice of slots today.
+   - The byte limits of spares, stock and the depot count full magazines (`spare_limit`,
+     `stock::weight`, the depot's caps) and overcount part-full ones by up to four.
+   - A rival to measure against: magazines of 256 slots, adaptive spares, and a depot push and
+     pop that move four linked magazines with one compare-and-swap. It has the same slow paths
+     and the same atomic instructions per object, no new assembly and no empty slots, and it
+     makes items 1 and 2 of "What to adapt first" one mechanism. What separates the two is
+     whether the gain of 1,024 slots came from fewer entries to the slow path or from less
+     traffic at the depot; that has not been measured.
+
+### The theory
+
+The arithmetic checks: 400 and 85 cycles per KiB-second, 32,000 and 1,400 objects, 2 s. The
+inputs do not. (Inferred, from numbers verified in our notes.)
+
+- The assumed rate is a million objects a second. The pipelines run near 2.6 x 10^8 (3.77 ns an
+  allocation) and sh8bench over 10^8 on each CPU. At 10^8 the formula gives 14,000 objects at
+  the price of a page and 320,000 at the object's own bytes. "1,022 sits there" comes from the
+  assumed rate.
+- The purge holds an idle page nearer 5 s than 1.5 (two intervals, then a quarter a pass),
+  which puts the price near 120.
+- At 400 cycles per KiB-second, 1 MiB costs a hundredth of a percent of a core. We reject 1
+  MiB on a 2 MiB heap for a 10% gain. No price near the purge's explains our choices: the
+  memory goal is a ratio to jemalloc.
+- Ski rental's time falls with the class size, since a magazine's refill costs by the object
+  and its bytes are the object's: about 16 s at 8 bytes, 2 s at 64, an eighth of a second at 1
+  KiB. "The interval is roughly what ski rental would give" holds at one size.
+
+That a price cannot bound a peak is right. "So the knob should be a budget" does not follow as
+stated, because today's constants are budgets already. The cost we object to is relative: 0.5
+to 3 MiB on heaps of 2 to 8 MiB, under 2% on every heap over 10 MiB (`launder-and-fill.md`,
+"What it costs"). What follows is a budget in proportion to live memory, with a floor, which
+the note mentions once as a possibility. Dividing a budget by regret is itself a price, the
+one at which demand meets the budget, so the choice is not between the two. Of the knobs cited
+in support, the JVM's time ratio is the counterexample: it bounds time, lets space float, and
+drifts. GOGC is a proportion with a floor of 4 MiB (`mgcpacer.go`, `defaultHeapMinimum`).
+
+### The ranking
+
+- Item 1 removes the guaranteed spare that keeps an uncontended thread at a magazine's boundary
+  from reaching the depot on every second call. Classes of 24 to 128 bytes already lack it
+  (`launder-and-fill.md`, "What it costs"). Keep a floor of one full and one empty spare for a
+  class in use.
+- The capacity has no rule for shrinking. A signal that vanishes once the capacity suffices
+  makes it saw once an interval. Checkpoints offer a better measure: the crossings counted at
+  each boundary are the misses each smaller capacity would have had.
+- Item 3 has no bound: phases of allocation and of freeing longer than an interval raise the
+  target toward the whole swing.
+- Wrong to leave constant: pacing counted in slow paths, which becomes a function of the
+  adapted capacity; the retained cap, an absolute 64 MiB; the magazine's byte budget above 128
+  bytes. A measurement made after the note, not the reviewer's, looks like a first case of the
+  pacing: burst then idle held 90.6, 30.2 and 4.9 MiB at 2, 6 and 12 s with 1,024 slots against
+  68.0, 21.3 and 1.3 with 254, at level peaks. Its cause was open when this was written.
+
+### What was checked
+
+- **Right, verified.** tcmalloc's resizing rules, periods, thresholds and 1.5 MiB; jemalloc
+  `dev`'s fill and retention rules, 5.3's, and decay; illumos's table, its 3 failed `tryenter`s
+  in 15 s, and that it only grows; UMA's bucket growth and working set; Linux's bounds, batch
+  scaling and decay; sheaves; Go's constants; that G1's default doubled.
+- **Corrected in place.** jemalloc removed eight options, not six, and 5.3 lowers its divisor
+  at the bin's next visit, not straight after an underflow; its HPA is off by default, with no
+  "experimental" label found. Linux: when a refill and a free raise `high`, which commit did
+  what, and that the decay does not run on isolated CPUs (it never did; nothing stopped).
+  tcmalloc's capacity shares the index's word, so it costs no load. tcmalloc's background
+  resize grows the classes most often refused room, not the most-missing. illumos reaps on a
+  few calls besides memory pressure. UMA's bucket size drops by one on every reclaim. A sheaf's
+  capacity of 28 is 26 rounded up. The G1 default changed under two issue numbers.
+- **Not checked.** The ASPLOS 2024 and OSDI 2021 numbers, LLAMA, snmalloc's branch, scudo,
+  rpmalloc, glibc, mimalloc, TMO, ZGC, and whether segmented magazines are new.
+- **Missing.** Cliffhanger (Cidon et al., NSDI 2016) divides a fixed memory budget among a
+  cache's queues: a miss that hits a queue's shadow queue gives that queue a fixed credit taken
+  from another queue chosen at random, which climbs the hit-rate curves by their local slopes
+  with no curve ever built. It is the worked-out form of "a budget divided by regret". Checked
+  against a published summary of the paper, not the paper's own text.
+
+### The reviewer's rule, and the objection to it
+
+Parked memory may be a set fraction of live memory, with a floor. A buffer grows while its
+misses in the last interval cost more than its bytes at the going price, and returns what it
+did not use; the price rises while the total is over.
+
+The strongest objection: the 10 to 20% lives on heaps of 2 to 8 MiB, where a budget in
+proportion is smallest. The rule then mostly yields small magazines on small heaps and large
+ones on large heaps, which a checkpoint that asks only "is parked memory under the fraction?"
+gives with no accounting of regret. Build that first, and add the division by regret only if a
+measurement asks for it.
 
 ## What the prior art does
 
@@ -72,8 +248,8 @@ What differs is the signal, the window, and whether a total is shared.
 | jemalloc `dev` tcache | fill count and retention per bin | a refill of an empty bin doubles the fill | a GC visit with low water above zero halves it; retention = used + a quarter | 2 x slab objects, 20 to 200 |
 | jemalloc decay | dirty pages | none (reuse) | a 10 s smootherstep curve over 200 epochs | none |
 | Bonwick kmem | magazine size for the whole cache | more than 3 failed `tryenter`s on the depot lock in 15 s | never; the depot's working set (min over 15 s) is reaped under memory pressure | a table of 9 sizes |
-| FreeBSD UMA | bucket size | +1 each time the zone lock is found held | -1 on trim, halved on severe shortage | 254 |
-| Linux per-CPU pages | `high` | +batch on each refill | -1/8 a second | `high_min` to managed/8 per CPU; memory pressure overrides |
+| FreeBSD UMA | bucket size | +1 each time the zone lock is found held | -1 on each reclaim, halfway to the minimum when the per-CPU caches are drained | 254 |
+| Linux per-CPU pages | `high` | +a scaled batch on each refill from the zone; a run of frees raises it to hold the run | -1/8 a second at most | `high_min` to managed/8 per CPU; memory pressure overrides |
 | scudo | release threshold | half the pending delta | halves when a release frees more than last time | half a group |
 | snmalloc (unmerged) | large-object cache per size | consecutive misses exceed flushes in an epoch | flushes exceed misses: by half the difference | none |
 | Go scavenger | retained pages | heap goal x 1.1 | the heap goal; 1% of CPU | GOMEMLIMIT |
@@ -91,9 +267,12 @@ Six things the prior art teaches.
 - **The useful regret signal is a round trip, not a miss.** A miss on a one-way flow says
   nothing a bigger buffer would fix. tcmalloc grows past two batches only on an overflow
   followed by an underflow, and calls it "the only case when we could benefit from larger
-  capacity". Linux's per-CPU lists learned this the hard way: a CPU that only allocates grows
-  `high` to its maximum, and two follow-up fixes, one a 30% regression, came from counting
-  frees. Our stock already requires a round trip.
+  capacity". On Linux's per-CPU lists a CPU that only allocates grows `high` to its maximum,
+  which its author saw and judged harmless; the series' last patch counted consecutive frees
+  to detect runs of high-order frees sooner, and a 2025 fix raised its threshold after a 30%
+  regression. Our stock already requires a round trip. *[Disputed: Linux grows on a plain
+  miss by design, and tcmalloc's rule covers only capacity past two batches; "Review",
+  finding 3.]*
 - **Contention is the cost signal everyone uses for a shared tier**, because it is free to
   observe: Bonwick and UMA on their locks, our stock on a failed compare-and-swap.
 - **One-way ratchets fail.** glibc's mmap threshold and rpmalloc 1.3's thread cache only
@@ -101,14 +280,15 @@ Six things the prior art teaches.
   useful".
 - **Learned models did not survive; static proxies and simple feedback did.** LLAMA's learned
   lifetimes (ASPLOS 2020) became a fixed span-capacity threshold in tcmalloc (ASPLOS 2024:
-  +1.0% throughput, -0.8% memory). jemalloc's `dev` branch just replaced six tcache options
+  +1.0% throughput, -0.8% memory). jemalloc's `dev` branch just replaced eight tcache options
   with doubling and halving rules. No published allocator autotuner runs in production; Google
   tunes by fleet A/B experiments and Meta by hand per service.
 - **One knob works when it is a ratio with a meaning, measured costs fill in the model, and a
   hard cap stands behind it.** GOGC is a heap ratio, and the pacer measures allocation and scan
   rates to turn it into CPU; the memory limit was added because a ratio cannot stop a spike,
   and a 50% CPU cap was added so the limit cannot spiral. G1's time ratio, calibrated while the
-  heap never shrank, shrank it too far once it could (JDK-8238687 doubled the default). ZGC's
+  heap never shrank, shrank it too far once it could (JDK-8238687, with JDK-8247843, doubled
+  the default). ZGC's
   new intensity knob leaves its mapping to CPU "intentionally unspecified". Go keeps two
   separate implicit rates (retain 10% over the goal; spend 1% of CPU scavenging) and never
   unifies them.
@@ -167,10 +347,13 @@ dense or scattered (`back::class`, `SCATTERED`; `back::group`, `JUDGE`), which i
 measure of the pinning factor after the fact. The same arithmetic for a parked magazine of 64
 KiB whose refill costs about 50,000 cycles gives `T` of about 2 s, close to the one interval
 we use; the interval is roughly what ski rental would give and is not worth adapting.
+*[Disputed: the rate of a million objects a second is a hundredth of the measured jobs', and
+the interval matches at one class size only; "Review", "The theory".]*
 
 What one rate cannot do is bound the peak. A pipeline that runs for a tenth of a second has
 almost no byte-seconds to weigh against its exchanges, so a price says to hold everything,
-while our goal is jemalloc's peak. That needs a budget.
+while our goal is jemalloc's peak. That needs a budget. *[Disputed: what follows is a budget
+in proportion to live memory; "Review", "The theory".]*
 
 ## Segmented magazines
 
@@ -192,7 +375,9 @@ already has, or it exchanges as today. When an allocation fails at an interior b
 free slot `k*m + 1`), it takes the object at `k*m - 2` and moves the word to `k*m - 2`. The
 write before the commit is the free routine's own pattern, so a drain that takes the magazine
 in between leaves the thread holding its object, as a failed push does now. No shared state is
-touched and no atomic instruction is executed.
+touched and no atomic instruction is executed. *[Disputed: outside a sequence both steps race
+with another thread on the same CPU, and store-if-equal does not guard a slot's contents;
+"Review", finding 1.]*
 
 So each CPU's magazine of each class has an effective capacity, a multiple of `m`, that the
 slow path chooses at every checkpoint: go on, or retire the magazine as it is. The fast path's
@@ -201,7 +386,8 @@ instructions do not change; its constant does. What changes elsewhere:
 - The routines' precondition says "a magazine of the class's size"; it would say "a magazine of
   a multiple of the mask's size". The Lean proofs bound every access within the `m`-aligned
   window of the word, which lies inside the magazine, so they should carry over, but they must
-  be redone.
+  be redone. *[Disputed: the specification is already stated on the mask's window, so these
+  proofs stand; the new work is the checkpoint's routines; "Review", finding 1.]*
 - Every slow-path count of a magazine's objects (the level in the word, fills, launders, drains,
   the age limit, the depot's depth) must skip the empty slots. That is arithmetic on fixed
   positions.
@@ -212,7 +398,7 @@ instructions do not change; its constant does. What changes elsewhere:
 - A checkpoint costs a call to the slow path and one routine, perhaps 30 to 100 cycles, against
   about 1,600 for a contended exchange. That estimate is the first thing to measure. It also
   restores the heartbeat's frequency for the smallest classes, which the larger magazines cut
-  by four.
+  by four. *[Disputed: the estimate leaves the heartbeat out; "Review", finding 4.]*
 
 With `m` = 256 and `n` = 1,024 (or 4,096, where sh8bench, the tree and JSON kept gaining),
 the slow path could keep the full size where magazines round-trip under contention and stop at
@@ -223,8 +409,9 @@ and frees)". The physical magazine costs 8 KiB of slots whatever its effective s
 magazine area is never returned, so that is a fixed cost per magazine made.
 
 Two other ways were considered and are worse. A capacity field the fast path reads, as
-tcmalloc packs `current` and `remaining_capacity` into one 32-bit header, costs a load or more
-instructions on every call. Changing a class's mask at run time (the C path reads it from a
+tcmalloc packs `current` and `remaining_capacity` into one 32-bit header, costs no load of its
+own but an index in place of a pointer and an instruction or two on every push. Changing a
+class's mask at run time (the C path reads it from a
 table) needs every magazine of the class on every CPU to match it, which takes a drain of every
 slab, and the Rust path's mask is an immediate.
 
@@ -233,7 +420,8 @@ slab, and the Rust path's mask is an immediate.
 - **A peak is not an integral.** See above. Our memory goal and the cgroup limits programs run
   under are peaks. Keep a space budget (the CPU's spare budget, the depot targets, the retained
   cap), possibly as a fraction of live memory with a floor, as GOGC is; divide it by regret; use
-  a time constant only for how long idle memory is kept.
+  a time constant only for how long idle memory is kept. *[Disputed in part: "Review", "The
+  theory".]*
 - **Regret on the memory side is not local.** A parked object costs the page it pins, which
   depends on where its neighbours are, and is known only when it is laundered or purged. A
   refault after a purge is visible only as a fill reaching a page purged earlier. Both can be
@@ -255,10 +443,13 @@ slab, and the Rust path's mask is an immediate.
   interval needs a floor or a slower decay.
 - **Signals that disappear.** Our heartbeats come from slow paths, and the larger magazines
   made them four times rarer for the smallest classes; a perfectly sized buffer produces no
-  misses at all. Linux's decay stopped on NOHZ-full CPUs for the same reason. Segment
+  misses at all. Linux's decay does not run on isolated CPUs for the same reason. Segment
   checkpoints and `maintain` both help.
 
 ## What to adapt first
+
+*[Disputed: the signal of item 2, the missing floor in item 1, the missing bound in item 3,
+and three entries of the list that follows; "Review", findings 2 and 3 and "The ranking".]*
 
 1. **A CPU's spares.** Extend stock's rule to every class and drop the even split of
    `SPARE_BUDGET` over 44 classes and the `MAX_SPARES` cap: credit on a round trip that met
@@ -391,9 +582,10 @@ All resizing runs in one background loop, `MallocExtension_Internal_ProcessBackg
   CPU's budget, 1.5 MiB (`kMaxCpuCacheSize`). Refills ramp by `batch << successive`, up to half
   the capacity. Shrinking is by stealing one slot at a time once a class's quiescent ticks
   reach a size-dependent score, "based solely on intuition, common sense and benchmarking".
-  Every 2 s `ResizeSizeClasses` grows the 5 most-missing classes of up to 10 CPUs at the
-  others' expense, with the CPU stopped. Every 5 s `ShuffleCpuCaches` lets the 5 most-missing
-  CPUs steal 5% of the limit from CPUs with under 80% of their misses and over 20% of the limit.
+  Every 2 s `ResizeSizeClasses` grows the 5 classes most often refused room, on up to 10 CPUs,
+  at the others' expense, with the CPU stopped. Every 5 s `ShuffleCpuCaches` lets the 5
+  most-missing CPUs steal 5% of the limit from CPUs with under 80% of their misses and over 20%
+  of the limit.
   Every 30 s `TryDrainingCaches` empties a CPU unchanged and missless since the last look. Every
   29 s the per-class maximums and the slab size are resized, which stops and drains every CPU;
   the slab grows when overflows exceed 0.9 of underflows and shrinks below 0.4, and its resize
@@ -425,18 +617,19 @@ All resizing runs in one background loop, `MallocExtension_Internal_ProcessBackg
   2026): capacity fixed at 2 x slab objects in 20 to 200 (large bins 20). A refill of an empty
   bin doubles the fill, to half the capacity; a GC visit where the bin never emptied halves it,
   to 2. After GC a bin keeps `used + max(1, used/4)` where `used = ncached - low_water`, so an
-  idle bin drops to 2 at once. Overflow halves retention. GC is an event every 64 KiB of the
-  thread's allocation or free, at most every 10 ms. It replaced six options to simplify the
-  configuration.
+  idle bin drops to 2 at once; a refill raises retention to at least twice what it filled.
+  Overflow halves retention. GC is an event every 64 KiB of the thread's allocation or free, at
+  most every 10 ms. It replaced eight options to simplify the configuration.
 - **tcache, 5.3**: `lg_fill_div` raised at a visit with low water above zero (flushing three
-  quarters of it), lowered after an underflow; one bin per 64 KiB event.
+  quarters of it), lowered at the next visit after a refill that found the bin empty; one bin
+  per 64 KiB event.
 - **Decay** (`decay.c`, `pac.c`): pages dirtied in each of 200 epochs of `dirty_decay_ms` (10
   s) are allowed to stay with a smootherstep weight; jitter keeps arenas out of lockstep.
   Without background threads the clock is read every thousand or so arena events; with them,
   the thread sleeps until 1,024 pages would be purged, at least 100 ms. It replaced ratio-based
   purging. Fails on phases longer than the window; an idle process never purges.
-- **HPA**: experimental and off. A peak-demand window modelled on tcmalloc was added in 2025
-  and reverted three months later without a stated reason.
+- **HPA**: off by default. A peak-demand window modelled on tcmalloc was added in 2025 and
+  reverted about three months later without a stated reason.
 - **Failure modes**: an idle thread keeps its cache; a consumer thread converges to flushing
   nearly the whole bin, under the bin lock, at every overflow.
 
@@ -448,14 +641,16 @@ All resizing runs in one background loop, `MallocExtension_Internal_ProcessBackg
   rounds), while the object is under the row's limit. Grows only; only allocation contention
   is counted; each resize discards every cached object.
 - **Depot working set**: each list keeps its minimum; every 15 s the old minimum becomes the
-  reap limit, and a reap frees what was unused for the whole previous interval. It runs only
-  under memory pressure, so idle depot memory is never returned otherwise.
+  reap limit, and a reap frees what was unused for the whole previous interval. It runs under
+  memory pressure and on a few explicit calls (`kmem_cache_reap_soon`, the identifier-space
+  reap, the defragmentation scan), so idle depot memory is otherwise kept.
 
 ### FreeBSD UMA (`uma_core.c`)
 
 - **Bucket size**: from a table by item size (up to 254 entries); `+1` each time
   `zone_domain_lock` finds the lock held (2013: "only grow the bucket size when we face
-  contention ... grow more slowly"); `-1` on trim, halfway to the minimum on severe shortage.
+  contention ... grow more slowly"); `-1` on every reclaim, trim or drain, and halfway to the
+  minimum when the per-CPU caches are drained.
 - **Working set** (`zone_domain_update_wss`, every 20 s, "constants ... somewhat arbitrary"):
   `wss = max(3/4 wss, imax - bimin)`, the largest allocation batch; a long-term minimum by a
   1/256 moving average. Trim under pressure to the working set; after 15 minutes with no
@@ -466,16 +661,21 @@ All resizing runs in one background loop, `MallocExtension_Internal_ProcessBackg
 ### Linux (`mm/page_alloc.c`, `mm/slub.c`)
 
 - **Per-CPU page lists** (Huang Ying, 2023): `high` from `high_min` (the low watermark per CPU)
-  to `high_max` (managed pages / 8 per CPU). Each refill adds a batch (`nr_pcp_alloc`); the
-  refill grows by `batch << alloc_factor` on consecutive refills, to `CONFIG_PCP_BATCH_SCALE_MAX`
-  = 5, chosen from a 100 us latency budget; every free halves the factor. `decay_pcp_high`
-  takes an eighth a second ("kind of arbitrary"). Below the high watermark, growth stops and
-  frees lower `high`. Kbuild: 3.5 to 5% faster, zone-lock contention from 11 to 14% down to
-  0.5%, up to 18.4% more memory. Failures: a CPU that only allocates grows to the maximum; the
-  fix for it made high-order frees fire too eagerly (iperf3 -30% at 64 pairs, fixed in 2025);
-  decay rides on the vmstat worker and stopped on NOHZ-full CPUs.
-- **Sheaves** (2025, default in 7.0): capacity by object size (4, 12, 28 or 60), a main and a
-  spare per CPU, a barn of 10 full and 10 empty per node. Nothing adapts; no timed drain.
+  to `high_max` (managed pages / 8 per CPU). Each refill from the zone adds the scaled batch
+  (`nr_pcp_alloc`), and a free that finds the list at `high` raises `high` to hold the run of
+  frees and a batch (`nr_pcp_high`); the refill grows by `batch << alloc_factor` on consecutive
+  refills, to `CONFIG_PCP_BATCH_SCALE_MAX` = 5, chosen from a 100 us latency budget; every free
+  halves the factor. `decay_pcp_high` takes up to an eighth a second ("kind of arbitrary").
+  Below the high watermark, growth stops and frees lower `high`. Kbuild: 3.5 to 5% faster,
+  zone-lock contention from 11 to 14% down to 0.5 to 1%, up to 18.4% more memory. A CPU that
+  only allocates grows to the maximum, which the author saw and accepted because no pages sit
+  idle there. The series' last patch (6ccdcb6d3a74) counts consecutive frees to drain
+  high-order pages sooner; it fired too eagerly (iperf3 -30% from 32 to 64 pairs; c544a952ba61
+  raised its threshold in 2025). Decay rides on the vmstat worker, which does not run on
+  isolated CPUs.
+- **Sheaves** (2025, default in 7.0): capacity by object size (4, 12, 28 or 60, the 28 being
+  26 rounded up to an allocation size), a main and a spare per CPU, a barn of 10 full and 10
+  empty per node. Nothing adapts; no timed drain.
 
 ### Others
 
@@ -512,7 +712,8 @@ All resizing runs in one background loop, `MallocExtension_Internal_ProcessBackg
   chunks that were dense in the current or last GC cycle (a working set of one cycle).
 - **JVM**: Parallel GC's goals in order (pause, then `GCTimeRatio` 99, then footprint) with
   growth of 20% and shrink of 5%; the footprint goal is rarely reached and heaps drift to the
-  maximum. G1 resizing at every GC (JDK-8238687, 2025) doubled `GCTimeRatio` from 12 to 24
+  maximum. G1 resizing at every GC (JDK-8238687 with JDK-8247843, 2025) doubled `GCTimeRatio`
+  from 12 to 24
   because the old value shrank heaps too far once shrinking was real. ZGC's adaptive sizing (JEP
   546) targets GC CPU, rejects a residency knob because CPU cost varies widely at a residency,
   and leaves its mapping unspecified.
@@ -540,3 +741,16 @@ Zhou et al., "Characterizing a memory allocator at warehouse scale", ASPLOS 2024
 (pacer) and 48409 (memory limit); JEP 546, draft JEP 8359211, JDK-8238687; Karlin et al.,
 "Competitive snoopy caching", Algorithmica 1988; Megiddo and Modha, ARC, FAST 2003; Denning,
 "The working set model", CACM 1968; Chiu and Jain 1989.
+
+Read for the review, besides the above. Local: `third_party/tcmalloc/tcmalloc/common.h`;
+`third_party/go/src/runtime/mgcpacer.go` (`defaultHeapMinimum`). Fetched: jemalloc `dev`
+975f3b0 (`include/jemalloc/internal/{tcache.h, tcache_inlines.h, tcache_ncached_target.h,
+pac.h}`, `src/{tcache.c, jemalloc.c}`, `ChangeLog`) with commits d13fe91a, ad108d50 and
+27d7960c, and tag 5.3.0 (`src/tcache.c`); illumos `uts/common/os/{kmem.c, vm_pageout.c}` and
+`sys/kmem_impl.h`; FreeBSD `sys/vm/{uma_core.c, uma_int.h}` with commits fc03d22b177f and
+2760658b211c; Linux `mm/{page_alloc.c, slub.c, vmstat.c, Kconfig}` at v7.0, v7.2 and master,
+with the commits above and ca71fe1ad922 (the series' cover letter), be5e015d107d,
+148f95f75c51 and e47c897a2949; Bonwick and Adams, sections 3.4, 3.7 and 6.1; JDK-8247843 and
+the integration of 8238687 on the hotspot-dev list, July 2025; Cidon et al., "Cliffhanger:
+scaling performance cliffs in web memory caches", NSDI 2016, through the summary at
+blog.acolyer.org (24 March 2016).
