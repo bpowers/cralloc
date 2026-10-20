@@ -78,7 +78,17 @@ fn word<'a>(page: NonNull<u8>) -> &'a AtomicU64 {
 
 /// Readies the magazine area and the drain, once per process; later calls return at once.
 /// `false` if the generation page cannot be committed, in which case no magazine can be made.
+/// Every slow path asks, so the answer once ready is one load, inline, and the work is out of
+/// line.
+#[inline(always)]
 pub(super) fn prepare<O: Os>(depot: &Depot, area: Area<'_, O>) -> bool {
+    depot.common.status.load(Acquire) & READY != 0 || prepare_first(depot, area)
+}
+
+/// [`prepare`] before the process is ready.
+#[cold]
+#[inline(never)]
+fn prepare_first<O: Os>(depot: &Depot, area: Area<'_, O>) -> bool {
     if depot.common.status.load(Acquire) & READY != 0 {
         return true;
     }
@@ -124,6 +134,7 @@ pub(super) fn current<O: Os>(depot: &Depot, area: Area<'_, O>) -> Option<Generat
 impl<O: Os, R: Routines, S: Source> Cache<'_, O, R, S> {
     /// Readies the magazine area and the drain if no slow path has yet. `false` if the
     /// magazine area cannot be used, so magazines cannot be had.
+    #[inline(always)]
     pub(super) fn prepare(&self) -> bool {
         prepare(self.depot, self.area)
     }

@@ -579,12 +579,14 @@ fn contended_round_trips_earn_stock(bounds: Bounds) -> usize {
             for n in 0..2 {
                 let cpu = world.rig.slabs().cpu(n).unwrap();
                 let slab = world.rig.slabs().slab(cpu);
-                let word = slab.stock(tiny_class()).load(Ordering::Relaxed).addr();
-                if word & 0x0fff_ffff == 0 {
+                let word = slab.stock(tiny_class()).load(Ordering::Relaxed).addr() as u64;
+                let stock = super::stock::Stock(word);
+                let (full, empty) = (stock.credit(Spare::Full), stock.credit(Spare::Empty));
+                if full == 0 && empty == 0 {
                     continue;
                 }
                 earned.fetch_add(1, Ordering::SeqCst);
-                if word & 0x3fff == 0 {
+                if full == 0 {
                     // Credit for empty stock alone keeps nothing (`stock.rs`).
                     continue;
                 }
@@ -1059,6 +1061,83 @@ fn a_fence_aborts_the_sequence_in_flight_on_its_cpu() {
 /// over a drainer's marker (two preemptions) or a fork takes a drainer mid-drain (one
 /// preemption and a fork); deliberately broken drains, back-outs and claim checks pass the
 /// quick runs and fail the full ones.
+/// CPU 0 about to leave a magazine half full: its next swap of the tiny class goes `way` and is
+/// evidence of a lock. For an allocation, its loaded magazine is empty and a full spare waits;
+/// for a free, its loaded magazine is full and an empty spare waits.
+fn centring_world(way: super::stock::Swap, migrations: usize) -> World {
+    let world = World::new(8, migrations);
+    let machine = world.machine(THREADS - 1, 0);
+    for _ in 0..4 {
+        let object = world.rig.source.alloc_one(tiny_class()).unwrap();
+        world.user.lock().unwrap().push(object.addr().get());
+    }
+    // Three frees fill a magazine and swap it for an empty one, which the third fills by one; an
+    // allocation empties it. For a free, the next allocation swaps it for the full spare and
+    // takes one object, which a free puts back.
+    world.run(&machine, &[Op::Free, Op::Free, Op::Free, Op::Alloc]);
+    let cache = world.rig.cache(&machine);
+    if way == super::stock::Swap::Free {
+        world.run(&machine, &[Op::Alloc, Op::Free]);
+        // A second empty magazine, in the depot, for another thread's free to install while
+        // the centring thread holds the spare.
+        let size = tiny_class().magazine();
+        let spare = cache.area().create(size).unwrap();
+        world
+            .rig
+            .depot
+            .empty(Pool::Shared, size)
+            .push(cache.area(), spare, 1);
+    }
+    let cpu = world.rig.slabs().cpu(0).unwrap();
+    cache.prime_lock(cpu, tiny_class(), way);
+    world
+}
+
+/// A swap that leaves its magazine half full takes the loaded magazine out of the slab, copies
+/// half between the two it then holds, and installs one expecting the word it emptied
+/// (`slow.rs`, "Half full on a reversal"; `Exchange.tla`, `CentreTake` to `CentrePut`).
+/// Against a drain of its CPU, or another thread on the same CPU that takes slow paths of its
+/// own, under every schedule, every magazine and object keeps one owner: the install's failure
+/// arms retire or serve from both magazines, and nothing is lost.
+fn centring_keeps_one_owner(
+    way: super::stock::Swap,
+    drains: bool,
+    bounds: Bounds,
+    migrations: usize,
+) {
+    // The other thread's first call on a slot the centring has emptied installs a magazine of
+    // its own only if it allocates: a free there serves the object without one.
+    let (ops, other): (&[Op], &[Op]) = match way {
+        super::stock::Swap::Alloc => (
+            &[Op::Alloc, Op::Free, Op::Free],
+            &[Op::Free, Op::Alloc, Op::Alloc],
+        ),
+        super::stock::Swap::Free => (
+            &[Op::Free, Op::Alloc, Op::Alloc],
+            &[Op::Alloc, Op::Free, Op::Alloc],
+        ),
+    };
+    let found = explore(
+        bounds,
+        2,
+        || centring_world(way, migrations),
+        |world, me| {
+            let machine = world.machine(me, 0);
+            if me == 0 {
+                world.run(&machine, ops);
+            } else if drains {
+                let cpu = world.rig.slabs().cpu(0).unwrap();
+                world.rig.cache(&machine).drain(cpu);
+            } else {
+                world.run(&machine, other);
+            }
+        },
+        |_| {},
+        |world, _| world.check(false),
+    );
+    report("centring keeps one owner", found);
+}
+
 mod run {
     use super::*;
 
@@ -1342,5 +1421,29 @@ mod run {
     #[ignore = "slow: run with scripts/gate --all, optimized"]
     fn a_settle_and_a_new_debt_leave_the_debt_marked_fully() {
         super::a_settle_and_a_new_debt_leave_the_debt_marked(Bounds::preemptions(2));
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn centring_keeps_one_owner_quickly() {
+        use super::super::stock::Swap;
+        for way in [Swap::Alloc, Swap::Free] {
+            for drains in [false, true] {
+                super::centring_keeps_one_owner(way, drains, Bounds::preemptions(1), 0);
+            }
+        }
+    }
+
+    #[test]
+    #[cfg(not(debug_assertions))]
+    #[ignore = "slow: run with scripts/gate --all, optimized"]
+    fn centring_keeps_one_owner_fully() {
+        use super::super::stock::Swap;
+        for way in [Swap::Alloc, Swap::Free] {
+            for drains in [false, true] {
+                super::centring_keeps_one_owner(way, drains, Bounds::preemptions(2), 0);
+                super::centring_keeps_one_owner(way, drains, Bounds::preemptions(1), 1);
+            }
+        }
     }
 }
