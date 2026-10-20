@@ -1362,3 +1362,275 @@ decision LLVM makes in serde_json (JSON). Building the workloads with every func
 would stop the allocator's code size from moving workload functions, so sessions and
 allocators compare on the same workload layout; it changes every job's numbers, so it is a
 decision for the suite, not made here.
+
+# Objects kept in the cache domain that last used them (2026-10-19)
+
+The back end does not know about cache domains: a fill takes the class's lowest free slots,
+whoever freed them. "sh8bench, accounted" found that this, with magazines popped from the
+shared depot stack that the other domain pushed, is most of what two L3s add to sh8bench. This
+section measures what keeping objects in their domain is worth and what it costs, with a
+throwaway prototype on branch `exp-domain-regions`. No allocator code on main changed.
+
+## Summary
+
+- **Domain-affine fills alone buy little.** A carving region per class and domain, with fills
+  that prefer their own domain's free slots and carve only when the class has none anywhere,
+  takes sh8bench on two L3s from 0.390 to 0.373 s (cycles a call 15.6 to 14.8) and leaves the
+  objects crossing between L3s nearly where they were. A domain without free slots of its own
+  reuses the other's, and the shared stack still hands it the other domain's magazines.
+- **A pair of rules buys a quarter.** Carving in its own domain before reusing another
+  domain's free slots, and refilling from its own domain's free slots before popping a
+  magazine another domain pushed (unless that magazine's objects live in its domain's
+  memory), takes sh8bench to 0.297 s and 10.8 cycles a call (mimalloc 0.256 s, 9.8). Fills
+  from the other L3's cache fall from 0.022 a call to 0.003, from DRAM from 0.029 to 0.008.
+  Three independent pipelines over two L3s run 13% faster, four 9%; flows between the L3s
+  2 to 4%. On one L3 nothing moves.
+- **The price is memory.** Peaks rise 4 to 9% on the C programs that use both L3s, and by 1
+  to 1.6 MiB on the suite's jobs across them. Each domain in
+  use pays for a region per class, so the small-heap floor grows with domains: mpmc 4+4
+  peaks at 8.7, 10.8 and 13.4 MiB with two, four and eight domains, against 8.3, 8.9 and
+  10.5. And load that moves from one domain to another holds both domains' memory: 402 MiB
+  against 247 (jemalloc 249) when the first domain's holes are pinned by fragmentation.
+  Carving first only while retained memory is within the cap bounds that by the cap: 308 MiB,
+  at the same speed elsewhere.
+
+## Method
+
+Builds, each from `git archive` of its commit, with the same workload sources:
+
+- **base**: main (`515412e`) with magazines of up to 1,024 slots (`MAX_LOG2` 10), as the branch
+  in progress will have them.
+- **dom**: base plus the direction proposed. Each small class has a carving region per
+  domain (a carving word per domain, and one bit per region in a mask per domain, set when the
+  region is assigned). A fill searches the class's summary tree for its own domain's regions
+  first (the class-level word masked by its domain's bits), then any region, and carves in
+  its own domain's region only when nothing is free anywhere.
+- **domcph** ("strict"): a fill takes its own domain's free slots, then carves in its own
+  region, and takes other domains' free slots only if carving fails. And in the depot, a slow
+  path whose domain stack is empty fills from its domain's own free slots before it pops the
+  shared stack, unless the magazine on top of the shared stack was pushed by its own domain or
+  its top object lies in a region of its domain; this applies only with more than one domain.
+- **domrh** ("cap"): as strict, but carving comes before other domains' free slots only while
+  retained memory is within the cap (64 MiB); past it a fill takes them first, as dom does.
+- Intermediate builds are named where used: **domp** is dom's fills with the depot rule
+  judged by the pusher alone.
+
+Preloaded C programs under `scripts/measure --both-l3`, the builds and placements in a new
+random order each round, each run in a capped cgroup of its own. Placements: CPUs 0-3 and
+8-11 (two L3s), 0-7 (one). Counters are system-wide on the run's CPUs, per CPU
+(`perf stat -a -C -A`): cycles, instructions, `ls_dmnd_fills_from_sys.near_cache` (fills from
+the other L3's cache) and `.dram_io_near`; per call for sh8bench is over its 874M `malloc` and
+`free` calls. Wall time on two L3s depends on how the scheduler spreads the threads over the
+L3s, so the share of cycles each L3 ran was recorded and cycles a call is the steadier
+figure. Software counts come from builds with `x-count`, which count where fills take
+objects and which shared-stack pops took another domain's magazine (by a tag the pusher
+writes), written at exit. Rust jobs with `benchrun run`, rounds interleaved, medians and the
+per-round ratio to base. Memory probes with `bench/probes/memory/worst.sh` and `acct.sh`;
+more domains than L3s with `ASMALLOC_DOMAIN_WIDTH` (width 2 makes four domains of CPUs 0-3
+and 8-11, width 1 eight). The moved-load case is a new workload, `workload shift` (on the
+experiment branch): threads on CPUs 0-3 each allocate 500k objects of the small mix (218 MiB
+in all), free 90% of them (or all) in random order and wait; then threads on 8-11 each
+allocate and free 500k objects of the same mix, over and over, for 8 s.
+
+## sh8bench
+
+Medians, 12 runs (base, strict, mimalloc), 18 (dom), 6 (the rest):
+
+| | base | dom | domp | strict | cap | mimalloc |
+|---|---:|---:|---:|---:|---:|---:|
+| two L3s, s | 0.390 | 0.373 | 0.324 | 0.297 | 0.295 | 0.256 |
+| cycles a call | 15.6 | 14.8 | 12.3 | 10.8 | 10.7 | 9.8 |
+| fills from the other L3's cache a call | 0.022 | 0.019 | 0.008 | 0.003 | 0.003 | 0.006 |
+| fills from DRAM a call | 0.029 | 0.025 | 0.014 | 0.008 | 0.007 | 0.004 |
+| peak MiB | 137 | 137 | 139 | 147 | 143 | 221 |
+| one L3, s | 0.230 | 0.236 | 0.237 | 0.232 | 0.238 | 0.200 |
+| cycles a call | 9.94 | 10.02 | 10.10 | 9.95 | 10.19 | 9.12 |
+
+Instructions are 40.6 to 40.9 a call in every build. Where the objects come from, millions per
+run on two L3s (medians of three, `x-count`):
+
+| | base | dom | strict |
+|---|---:|---:|---:|
+| objects filled from free slots / carved | 31.9 / 2.2 | 31.9 / 2.2 | 41.9 / 2.8 |
+| of which from another domain's regions | (all mixed) | 5.8 | 0 |
+| magazines popped from the shared stack | 39.7k | 39.6k | 25.6k |
+| of which another domain pushed, magazines (objects) | 24.1k (17.7) | 22.2k (16.5) | 2.9k (2.7) |
+| objects laundered | 32.8 | 34.3 | 43.9 |
+
+- In dom, the second domain takes a third of its fills from the first domain's regions: the
+  main thread's ten million 8-byte blocks are carved in its domain, and a domain with no free
+  slots of its own takes the other's before it carves. Those objects then travel both ways
+  through one region. The shared stack goes on handing each domain the other's bursts.
+- Strict carving without the depot rule (14.3 cycles a call, one session of six rounds) and the
+  depot rule on dom's fills (domp, 12.3) each
+  take a part; together they remove nearly all crossing. What is left, 2.7M objects in
+  magazines the other domain pushed, is magazines popped after the domain's own free slots
+  ran out.
+- The depot rule costs launders: a burst that overflows to the shared stack is laundered there
+  and filled back from the bitmaps (44M objects against 33M), which on one L3 would cost 3%,
+  so it is off with one domain. Judged by the pusher alone it also cost the packed runs of
+  xmalloc-test 7% and the split pipelines 3 to 4%, where the magazines are the popper's own
+  objects coming back from another domain; the peek at the top magazine's pusher and its top
+  object's home fixes both.
+- Judging a magazine by its objects' home needs strict carving. On dom's fills a domain's
+  objects lie in both domains' regions, the home says nothing, and mpmc 4+4 ran 14% slower.
+
+## Other programs
+
+C programs, medians (four to six rounds; xmalloc-test by placement mode, since its threads
+land all in one L3 or spread, for every build):
+
+| Program | Placement | base | dom | strict | cap | peak MiB base / dom / strict / cap |
+|---|---|---:|---:|---:|---:|---|
+| larson 8, M ops/s | two L3s | 446 | 454 | 451 | 457 | 86 / 87 / 94 / 93 |
+| | one L3 | 608 | 605 | 609 | | 102 / 102 / 101 / |
+| mstress 8, s | two L3s | 0.256 | 0.253 | 0.249 | 0.250 | 150 / 151 / 156 / 155 |
+| | one L3 | 0.250 | 0.251 | 0.251 | 0.250 | 152 / 152 / 152 / 152 |
+| xmalloc-test 4+4, M frees/s | two L3s, packed | 935-1004 | 949-1001 | 931-953 | | |
+| | two L3s, spread | 563-579 | 561-638 | 582-693 | | |
+| | one L3 | 1270 | 1259 | 1266 | 1272 | 46 / 46 / 39 / 45 |
+
+Suite jobs that span both L3s, ns per allocation (per task for spawn), median of 8 to 12
+rounds; per-round ratio to base, median and range; cgroup peak MiB:
+
+| Job | base | dom / base | strict / base | cap / base | peak base / dom / strict / cap |
+|---|---:|---:|---:|---:|---|
+| pipeline t2 split all-alloc | 10.71 | 1.000 (0.99-1.03) | 0.979 (0.96-1.01) | 0.983 (0.95-0.99) | 3.5 / 3.5 / 3.5 / 3.5 |
+| pipeline t2 split free-only | 10.82 | 0.995 (0.97-1.02) | 0.985 (0.97-1.00) | 0.973 (0.96-0.98) | 3.5 / 3.5 / 3.5 / 3.6 |
+| pipeline t8 both | 4.188 | 1.002 (0.99-1.01) | 0.999 (0.99-1.00) | 0.999 (1.00-1.00) | 10.6 / 10.7 / 12.2 / 12.3 |
+| pipeline t2 x2 split | 3.869 | 0.972 (0.92-1.03) | 0.974 (0.93-0.98) | 0.974 (0.93-1.00) | 4.9 / 5.2 / 5.2 / 5.2 |
+| pipeline t2 x3 both | 4.355 | 0.971 (0.96-0.99) | 0.870 (0.86-0.89) | 0.875 (0.86-0.89) | 6.8 / 7.0 / 7.5 / 7.5 |
+| pipeline t2 x4 both | 4.535 | 0.986 (0.98-1.07) | 0.905 (0.89-0.96) | 0.910 (0.89-0.93) | 8.5 / 8.7 / 9.7 / 9.7 |
+| exchange t2 split | 12.99 | 0.999 (0.98-1.01) | 0.961 (0.95-1.02) | 0.956 (0.93-0.97) | 3.5 / 3.9 / 4.7 / 4.8 |
+| exchange t8 both | 2.622 | 1.000 (0.99-1.01) | 1.005 (0.99-1.01) | 1.001 (0.99-1.01) | 9.2 / 9.5 / 10.8 / 10.8 |
+| mpmc p4 c4 both | 4.306 | 1.003 (0.96-1.03) | 0.992 (0.95-1.01) | 0.986 (0.97-1.02) | 8.5 / 8.4 / 8.6 / 8.7 |
+| forkjoin t8 both | 3.665 | 1.012 (0.91-1.03) | 1.011 (0.91-1.07) | 1.016 (1.01-1.02) | 19.6 / 20.0 / 21.1 / 21.1 |
+| spawn t8 both | 246.0 | 0.996 (0.99-1.03) | 0.988 (0.96-1.02) | 0.996 (0.97-1.01) | 6.4 / 7.1 / 6.7 / 6.7 |
+
+On one L3 (CPUs 0-3 or one CPU, four rounds), strict is within 1% of base on every local
+pipeline, exchange, mpmc, forkjoin, spawn, churn (1k and 100k live), BTreeMap and tree job,
+at the same peaks. Cap costs the local pipelines 1 to 2% and sh8bench on one L3 2.5% of
+cycles: the prototype reads the retained tallies, two lines other threads write, on every
+fill.
+
+## Memory
+
+`worst.sh`, cgroup peak MiB, median of three (base / dom / strict): burst-idle 216.0 / 216.0
+/ 216.0, phase 44.1 / 47.8 / 51.1, many CPUs few classes 7.0 / 6.5 / 7.2, many classes few
+CPUs 15.9 / 15.9 / 15.9, many threads few CPUs 14.2 / 14.7 / 15.0, sparse 3.5 / 3.5 / 3.7 and
+33.1 / 33.2 / 33.2, tiny 0.7. The phase case uses every small class on eight CPUs over two
+L3s, so each class has a region per domain: page tables 0.73 MiB against 1.23, and resident
+memory 2, 4, 6 and 8 s after the peak 31.0, 17.4, 13.1, 8.6 MiB against 37.5, 26.2, 16.0,
+10.2.
+
+The small-heap jobs of "Small heaps" (`memory.md`), cgroup peak MiB, median of three, base /
+dom / strict, with the machine's two domains, four and eight:
+
+| Job | two domains | four | eight |
+|---|---|---|---|
+| mpmc 4+4 | 8.30 / 8.46 / 8.66 | 8.87 / 9.86 / 10.79 | 10.48 / 11.80 / 13.41 |
+| spawn t4 | 3.38 / 3.21 / 3.16 | 3.06 / 3.48 / 3.57 | 2.92 / 4.19 / 3.77 |
+| pipeline t2 small | 2.98 / 3.04 / 3.19 | 3.13 / 2.93 / 2.88 | 3.61 / 3.68 / 3.68 |
+| pipeline t2 mixed | 5.66 / 5.99 / 5.86 | 5.93 / 5.93 / 6.09 | 7.71 / 7.54 / 7.64 |
+| churn 1k, tiny | level | level | level |
+
+Cap, in a session of its own, matched strict on mpmc 4+4 (8.60, 10.77, 13.34) and was within
+0.5 MiB of it on the rest: small heaps are under the cap. Base also grows with
+domains, from the depot's stacks per domain; a domain-affine back end adds a region per class
+and domain in use, about 16 KiB of page tables and metadata each, and the objects each domain
+parks in its own regions.
+
+## The moved load
+
+`workload shift`, cgroup peak MiB, anonymous resident memory at the end of the second
+domain's eight seconds, and the second domain's nanoseconds per object after its first round;
+medians of two or three runs:
+
+| Kept by the first domain | | base | dom | strict | cap | jemalloc | mimalloc |
+|---|---|---:|---:|---:|---:|---:|---:|
+| 10% | peak | 247 | 243 | 402 | 308 | 249 | 279 |
+| | at 8 s | 244 | 241 | 399 | 306 | 183 | 254 |
+| | ns per object | 27.5 | 31.5 | 26.5 | 39.5 | 31.8 | 49.4 |
+| none | peak | 223 | 223 | 334 | 288 | 222 | 262 |
+| | at 8 s | 220 | 219 | 253 | 261 | 5 | 228 |
+| | ns per object | 26.5 | 27.5 | 26.5 | 35.6 | 31.9 | 36.7 |
+
+- **Strict** carves the second domain's heap beside the first domain's holes. With 10% kept at
+  random every page of the first heap keeps a live object, so nothing can be purged and the
+  extra 155 MiB stays as long as those objects live. With none kept, the purge takes most of
+  it back within two intervals (328 MiB at 1 s, 268 at 2 s, 253 from 3 s).
+- **Cap** reuses the first domain's holes until retained memory is down to the cap, then
+  carves: the counters show 0.9M objects carved where strict carved 2.0M and base 0.25M. What
+  it holds beyond base is about the cap.
+- **dom and cap make the second domain slower**, by up to 15% and 45% an object. Its magazines
+  then mix objects of two regions of a class (its own and the first domain's), and a launder's
+  fast check covers one region at a time: `launder_held` went from 17% to 36% of the
+  process's instructions (18% more in all). Strict keeps each domain's objects in its own
+  regions and is as fast as base.
+- **More domains** (four and eight, by the width override) change none of the peaks, which
+  depend on the split between the two groups of threads, but slow dom's second domain further
+  (41.9 and 45.8 ns per object), as its threads spread over more regions.
+
+## What it would take
+
+What the prototype leaves out: large classes and the single-slot path of a thread without a
+CPU stay domain-blind (domain 0); domains fold into 16 for regions; the pusher's tag is a side
+table by magazine number, not the magazine's record; cap reads the retained tallies on every
+fill; the launder is unchanged; and no proof, model or ledger entry was touched. A design
+would touch:
+
+- **The mapping from class and domain to regions.** A carving word per class and domain
+  (`ClassState::carving`), and which domain a region belongs to: a mask per domain over the
+  regions, written once at assignment by the thread that took the region from the table
+  (before the carving word names it; the first prototype set it before the table's
+  compare-and-swap and a loser cleared the winner's bit). Domains need a bound for regions:
+  44 small classes times the 64 domains the depot keeps apart is 2,816 of the 3,940 regions,
+  and every domain in use raises the floor. Folding to eight would leave larger machines
+  sharing regions between domains, as the depot folds beyond 64.
+- **How a fill finds another domain's free slots.** No new tree: the class summary words
+  masked by the domain's bits pick the region, and the fallback is today's search.
+  `tla/Summary.tla` lets a search follow any set bit, so the order changes no protocol. The
+  design's rule that a fill carves only when the class has nothing free anywhere becomes:
+  nothing free in its own domain, and, within the cap, before another domain's.
+- **The launder.** A magazine can hold objects of several regions of its class; the fast
+  check must keep two at hand, or a domain that reuses another's memory pays 15 to 45% an
+  object.
+- **The depot.** A magazine pushed to the shared stack records its pusher's domain (the record
+  slot has room beside the level and depth), and a slow path reads the shared head and the top
+  magazine's record and top object before choosing. These are reads of lines a pop reads
+  anyway; `tla/Depot.tla` is unchanged, since the choice is a hint. The rule applies only with
+  more than one domain.
+- **The purge walk and frontier words** are per region already; more regions only raise the
+  walk's bound. Growth past the cap pays as now, and in a domain that carves beside another's
+  free memory it now pays from that memory, which is why the cap bounds the moved load.
+- **Origins** stay per class; a class's regions in several domains share an origin, which is
+  harmless because each domain's cores touch mostly their own.
+- **The huge-page threshold** is per region, and a class that has filled a region before gets
+  huge pages at once; with a region per domain, a dense class split over N domains reaches the
+  threshold N times later and spends that much longer on small pages.
+- **Proofs and models.** Kani's size checks of the back end's state; the assignment explorer
+  (`assign_review`) and the back end's model test, which assume one carving region per class;
+  the design's text on fills and on the depot. `Summary.tla`, `Purge.tla` and `Depot.tla` need
+  no change.
+- **The cap check** must be cheap, for example a flag the heartbeat sets once an interval.
+
+## Recommendation
+
+Do not build the direction as first stated: it buys 4% on sh8bench across two L3s, under the
+bar, and makes a moved load slower. Build it with both rules and the cap, if servers with many
+L3s are to be a target: 24% on sh8bench (31% of its cycles), 9 to 13% on independent work
+spread over L3s, nothing lost on one L3, for 4 to 10% higher peaks across L3s, a floor that
+grows with the domains in use, and up to the cap of memory held when load moves between
+domains. The sentence for the design:
+
+> Each small class carves from a region of its own in each cache domain. A fill takes free
+> slots from its own domain's regions first; then, while retained memory is within the cap, it
+> carves in its own domain's region before it takes another domain's free slots, and past the
+> cap it takes them first. A slow path whose domain stack is empty refills from its own
+> domain's free slots before it pops a magazine another domain pushed onto the shared stack,
+> unless that magazine's objects live in its domain's memory.
+
+Least certain: whether the depot rule's tests (the pusher, the top object's home) hold up
+beyond these programs, for instance flows among three or more domains, which were not timed;
+and the wall times on two L3s, which depend on how the scheduler spreads threads (the cycles
+a call agree with them).
