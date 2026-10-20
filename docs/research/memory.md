@@ -2583,6 +2583,226 @@ mstress, +2.6% [+0.7, +4.7] at the same faults. The maintain row's main figures 
 
 The period probe at 1.5 s is level (44 and 37 faults a re-allocation).
 
+## Faults and system calls in real programs
+
+2026-10-19, at main `6302b96` and the branch `app-faults`. The screening of real Rust programs
+(`rust-bench-candidates.md`) left two leads: far more page faults, `madvise` and `mprotect`
+calls than the incumbents where mid-size blocks grow (tpchgen, gix-hours), and lost wall time
+with many context switches in parallel ruff check. Both are explained.
+
+- **`mprotect` grew linearly with the heap.** A region committed a fixed 64 KiB past each
+  carve, so a large class paid one call for nearly every new slot and a small class one per
+  64 KiB: 32,000 calls a run in gix-hours, 2,300 in ruff, 1,600 in tpchgen. Each takes the
+  memory-map lock for writing, and the region's mapping, which every page fault in that
+  region needs. In ruff about 190 of a typical run's 400 context switches were page faults and
+  `mprotect` calls queued on that lock; in gix-hours the threads spent 2.6 s in all blocked
+  inside `mprotect` (81 µs a call, against about 1 µs uncontended). **Fixed**: a commit now
+  runs ahead by as much as the region has committed, between 64 KiB and 64 MiB (`policy::
+  commit_ahead`), so the calls grow with the logarithm of each region. The lock waits in
+  ruff fall to about 30, gix-hours spends 40 ms in `mprotect`. No memory moves; the cost is
+  commit charge under strict overcommit, at most a region's use or 64 MiB.
+- **Large-slot memory is returned and claimed again within milliseconds.** Two rules do it,
+  and they are what the `madvise` calls and the excess faults are. A large block that grows
+  out of its slot moves and gives the old slot back, piece by piece, whenever free large
+  memory is over the 16 MiB kept-grown budget; the next buffer growing through that class
+  claims the same slot and faults it back (tpchgen: 6,900 of its 9,400 calls, and about 70%
+  of its faults). And growth over the 64 MiB cap pays by purging free memory from wherever
+  the walk stands, frontiers or not, which in a program whose buffers climb through the large
+  classes is the slots the next buffers take (gix-hours 6,450 calls, datafusion 3,000). Of
+  what came back, 81% did so within a millisecond in tpchgen, 52% in gix-hours and 17% in
+  datafusion; 86 to 100% within 60 ms. **Not fixed**: each fix holds memory, and the rules say what to hold. Options and
+  their costs are below.
+- **The wall time of parallel ruff is the program's own.** Its runs are bimodal under every
+  allocator (0.56 or 0.75 s; glibc 0.70 to 0.95), the slow ones with hundreds of rayon yields
+  and preemptions more. Over 40 runs here asmalloc on main was mostly fast; the screening's
+  five slow runs were mostly the program. The lock waits were real, and the fix removes them.
+- **Reserving and committing costs nothing measurable once the calls are logarithmic.** A
+  build that maps the whole reservation readable and writable and never calls `mprotect`
+  is level with the fix on every program.
+- **The servers show the pattern at a smaller scale.** actix's order service made 1,670
+  `mprotect` calls under load, 300 with the fix, and its context switches fell from 222 to
+  138 (jemalloc 143), at level throughput and tail latency. Neither service returns memory
+  it reuses: about 50 `madvise` calls, and half jemalloc's faults.
+
+### Method
+
+The programs, inputs and pinning are the screening's (`bench/probes/rust-screen/candidates.py`),
+run from its built tree with the library preloaded: CPUs 0-3 and 8-11 for parallel programs, CPU
+2 for pulldown-cmark, a 300 ms spin before each run. `bench/probes/app-faults/` holds the tools.
+`bench.py` interleaves libraries in a fresh order each round and records `perf stat`'s user and
+kernel cycles, CPU time, faults and context switches, the wall time from inside `perf stat`, and
+the peak resident set from `/usr/bin/time`. Each variant is the branch's source with one rule
+changed by a script in `edits/`, built by `variant.sh`.
+
+**Call sites.** `diag.patch` (against `6302b96`, never for main) marks the OS calls and the back
+end's functions between a rule and the call `#[track_caller]`, so each `mprotect`, `madvise`
+and `mincore` is counted by the source line of the rule that asked, with its bytes and the
+cycle-counter time it took, and prints the table at exit. It also counts revivals: pages of a
+free slot that a purge had marked clean and a claim then took again, with the time since the
+region's last purge. For large slots this includes pages never written since their carve
+(marked clean too), so it is an upper bound of refaults. `strace -k` gave the same split but
+slows the programs fifty-fold, which multiplies the clocked passes, so its counts are not used.
+
+**Context switches.** `perf record -e context-switches -c 1 -g` (tracepoints are root's here),
+each switch classified by its kernel stack: a fault waiting for the memory-map lock
+(`rwsem_down_read_slowpath` under `do_user_addr_fault`), `mprotect` waiting for it for
+writing, `mprotect` waiting for a mapping's readers (`__vma_start_write`), futex, preemption,
+`sched_yield` (`csall.py`).
+
+### Where the calls come from
+
+One run each of main with the diagnostic patch. Calls by the rule that made them:
+
+| | tpchgen | gix-hours | datafusion | ruff check | pulldown-cmark |
+|---|---:|---:|---:|---:|---:|
+| `mprotect`: carve of a large slot | 922 | 18,667 | 2,057 | 279 | 2 |
+| `mprotect`: carve for a fill | 594 | 13,228 | 359 | 1,846 | 62 |
+| `mprotect`: a new region's metadata and first slot | 133 | 134 | 163 | 105 | 49 |
+| `madvise`: a move gives back the outgrown slot | 6,881 | 3,811 | 244 | 8 | 57 |
+| `madvise`: growth over the cap | 1,171 | 6,450 | 3,016 | 0 | 11 |
+| `madvise`: a move purges the destination under zero pages | 1,055 | 9 | 6 | 0 | 0 |
+| `madvise`: free of a slot advised for huge pages, past the budget | 59 | 9 | 48 | 0 | 1 |
+| `madvise`: tail of a block that shrinks in place | 0 | 0 | 0 | 478 | 0 |
+| `madvise`: huge-page advice (regions, grown blocks) | 310 | 112 | 190 | 76 | 42 |
+| clocked decay pass | 0 | 0 | 0 | 0 | 0 |
+| pages of purged large slots claimed again, MiB | 1,840 | 573 | 500 | 7 | 4 |
+
+The clocked pass, the rule built for idle memory, made no calls: none of these runs is long or
+quiet enough. What growth over the cap purged, by class, was 32 KiB to 4 MiB slots in
+datafusion (450 MiB) and 64 KiB to 16 MiB in gix-hours (960 MiB); in pulldown-cmark it was the
+128 to 512 MiB slots of its input buffers (1,000 MiB), which nothing claimed again.
+
+### What each rule costs, by experiment
+
+Variants of main, three rounds each (medians): every purge refused (`nopurge`), a move keeping
+the slot it leaves (`keepmove`), growth never paying (`nogrow`):
+
+| | faults | kernel Gcycles | peak RSS MiB |
+|---|---:|---:|---:|
+| tpchgen: main / nopurge / keepmove / nogrow | 709k / 186k / 221k / 700k | 2.25 / 1.07 / 1.21 / 2.22 | 573 / 718 / 654 / 618 |
+| gix-hours: main / nopurge / keepmove / nogrow | 997k / 818k / 942k / 880k | 3.39 / 2.84 / 3.25 / 2.95 | 2,933 / 3,251 / 2,935 / 3,237 |
+| datafusion: main / nopurge / keepmove / nogrow | 249k / 146k / 243k / 163k | 2.19 / 1.67 / 2.14 / 1.71 | 447 / 655 / 446 / 569 |
+
+So the moves' give-back is tpchgen's problem and growth's purge is gix-hours' and
+datafusion's. Raising the kept-grown budget to 64 MiB did nothing for tpchgen (645k faults);
+256 MiB did (234k, 633 MiB): the budget counts every free large slot, and ordinary frees,
+which are always kept, fill it.
+
+### The fix, and the options, five rounds interleaved
+
+Medians of five rounds. *fix* is the branch (commit-ahead); *keep* adds: a move keeps the slot
+it leaves whenever that slot alone is within the kept-grown budget (16 MiB), resident and
+counted; *idle* adds: growth over the cap purges only above the frontiers, as the clocked pass
+does; *rw* maps the reservation readable and writable and never calls `mprotect`.
+
+| | wall s | Gcycles | kernel G | CPU s | faults | switches | peak RSS MiB |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| **tpchgen** main | 1.36 | 26.5 | 2.49 | 4.89 | 704k | 1,449 | 572 |
+| fix | 1.47 | 26.0 | 2.36 | 4.69 | 709k | 857 | 577 |
+| fix+keep | 1.52 | 25.0 | 1.23 | 4.52 | 219k | 1,151 | 630 |
+| fix+idle | 1.62 | 26.3 | 2.27 | 4.84 | 701k | 1,258 | 628 |
+| fix+keep+idle | 1.60 | 24.9 | 1.13 | 4.48 | 203k | 1,336 | 709 |
+| rw | 1.61 | 26.2 | 2.29 | 4.73 | 709k | 1,443 | 584 |
+| jemalloc / glibc | 1.61 / 1.37 | 25.2 / 24.6 | 1.00 / 1.27 | 4.56 / 4.49 | 182k / 273k | 1,287 / 1,012 | 558 / 525 |
+| **gix-hours** main | 2.30 | 47.9 | 3.44 | 8.78 | 997k | 13,726 | 2,934 |
+| fix | 1.96 | 48.5 | 3.36 | 8.95 | 993k | 14,386 | 2,931 |
+| fix+keep | 2.01 | 49.0 | 3.26 | 9.14 | 926k | 12,843 | 2,935 |
+| fix+idle | 1.42 | 49.0 | 3.01 | 9.13 | 879k | 10,881 | 3,228 |
+| fix+keep+idle | 1.28 | 49.1 | 2.84 | 9.16 | 816k | 29,361 | 3,241 |
+| rw | 1.46 | 49.2 | 3.55 | 9.16 | 981k | 28,161 | 2,936 |
+| jemalloc / glibc | 2.15 / 1.47 | 50.0 / 54.4 | 3.46 / 2.69 | 9.22 / 10.04 | 819k / 688k | 12,633 / 22,542 | 3,169 / 2,671 |
+| **datafusion** main | 1.08 | 23.3 | 2.18 | 4.30 | 249k | 16,583 | 450 |
+| fix | 1.04 | 24.6 | 2.49 | 4.58 | 245k | 14,006 | 442 |
+| fix+keep | 0.98 | 25.5 | 2.42 | 4.72 | 234k | 14,316 | 476 |
+| fix+idle | 1.01 | 23.8 | 1.92 | 4.41 | 162k | 14,123 | 568 |
+| fix+keep+idle | 1.03 | 23.7 | 1.78 | 4.40 | 149k | 13,471 | 572 |
+| rw | 1.01 | 25.7 | 2.55 | 4.76 | 249k | 14,226 | 443 |
+| jemalloc / glibc | 0.99 / 1.08 | 23.5 / 24.2 | 2.02 / 2.54 | 4.39 / 4.50 | 184k / 287k | 14,254 / 21,760 | 674 / 429 |
+| **pulldown-cmark** main | 0.927 | 5.14 | 0.47 | 0.92 | 85.8k | 10 | 541 |
+| fix | 0.918 | 5.09 | 0.46 | 0.92 | 85.8k | 9 | 541 |
+| fix+keep | 0.926 | 5.14 | 0.54 | 0.92 | 85.8k | 11 | 541 |
+| fix+idle | 0.927 | 5.09 | 0.44 | 0.92 | 84.9k | 11 | 664 |
+| jemalloc / glibc | 1.035 / 0.964 | 5.75 / 5.34 | 0.96 / 0.71 | 1.04 / 0.96 | 269k / 171k | 11 / 13 | 543 / 541 |
+| **ruff check** main | 0.627 | 11.19 | 0.44 | 2.06 | 51.3k | 685 | 382 |
+| fix | 0.570 | 11.19 | 0.42 | 2.06 | 52.4k | 213 | 388 |
+| fix+keep / fix+idle | 0.560 / 0.602 | 11.15 / 11.13 | 0.41 / 0.41 | 2.05 / 2.04 | 51.2k / 51.3k | 249 / 564 | 386 / 383 |
+| rw | 0.594 | 11.13 | 0.40 | 2.05 | 51.5k | 1,059 | 383 |
+| jemalloc / glibc | 0.600 / 0.725 | 11.37 / 12.43 | 0.51 / 0.53 | 2.09 / 2.29 | 96.6k / 102k | 307 / 522 | 380 / 400 |
+
+`mprotect` calls with the fix (diagnostic builds, one run each): tpchgen 478, gix-hours 740,
+datafusion 500, ruff 510, pulldown-cmark 117.
+
+Reading it:
+
+- **Wall time of the parallel programs is bimodal and mostly not ours.** tpchgen (1.25 or
+  1.65 s) and gix-hours (1.3 or 2.3 s) have two modes under every allocator, and their fast
+  mode uses more cycles and CPU time, not fewer; ruff likewise. Rank them by kernel cycles,
+  faults and switches. With that caution: gix-hours on main was in its slow mode in 11 of 13
+  runs (2.15 to 2.33 s), with the fix in 4 of 13 and between modes (1.4 to 1.8 s) in 4; it is the program whose threads
+  were blocked longest in `mprotect`, so the fix plausibly changes its schedule. Not
+  established.
+- **The fix** cuts the calls three- to forty-fold, the lock waits, and in ruff context
+  switches by two thirds. Cycles, faults and memory are level. The backend suite is level
+  but for `pipeline t2 sizes=large`, 2.4% slower in two sessions (60.9 against 59.4 ns); the
+  branch's own default layout under `benchrun layout` measured 59.45 with a 1% spread across
+  layouts, so it is placement, not the change. Memory probes (the peaks of the suite's memory
+  jobs, and after the peak) are identical.
+- **keep** takes tpchgen's faults from 704k to 219k and its kernel cycles from 2.5 to 1.2 G,
+  under jemalloc's and glibc's, for 58 MiB (10%) of peak: 630 MiB against jemalloc's 558.
+  Elsewhere it is level, but 7% fewer faults in gix-hours.
+- **idle** takes datafusion's faults from 249k to 162k and kernel cycles by 12%, and gix-hours'
+  by 12% and 10%, for 118 MiB (26%) of datafusion's peak, still under jemalloc's 674, and
+  300 MiB (10%) of gix-hours', 2% over jemalloc's. But pulldown-cmark, which its frees do not
+  bring back, goes from 541 to 664 MiB against jemalloc's 543: its input buffers were claimed
+  in the last interval, so the frontier protects them, and growth is no longer allowed to
+  take them. As built it fails the memory bar.
+- **rw** is level with the fix; it leaves the faults and the `madvise` calls where they were.
+
+### What the rules could use to hold on
+
+Both returns are of memory claimed again within milliseconds to tens of milliseconds, far below
+the clock's interval of a second, and the frontier cannot tell it apart: a large class has few
+slots to a region, and the slot a growing block leaves was claimed in this interval by that
+very block, so the frontier always covers it. In pulldown-cmark the same evidence covers a
+slot that nothing will claim for hundreds of milliseconds. Evidence that would separate them:
+
+1. **A free slot's age.** A large slot's size word, written only by its holder, could take the
+   time of the free; growth's purge would skip slots freed within a fraction of an interval
+   (say a sixteenth, 60 ms, which covers 86 to 100% of the revivals above). pulldown-cmark's
+   input buffers wait longer than that between free and reuse, so growth would still take
+   them. A mechanism of moderate size, and a design decision: the cap's rule is that growth
+   pays now.
+2. **Reuse of freed slots, not carves.** A frontier written only by claims of freed slots
+   would say "this class reuses what it frees"; carves would stop counting. A second word per
+   region, and a change to what the frontier means.
+3. **A larger kept budget for moves, counted apart from ordinary frees** (keep, above, is the
+   simplest form): costs about 10% of tpchgen's peak, which is then 13% over jemalloc's.
+
+### Smaller findings
+
+- The order services (`bench/probes/app-faults/srv.py`, the screening's axum and actix
+  servers on CPUs 0-3 under oha on 8-11, 400k requests, five rounds): actix 1,670 `mprotect`
+  calls on main and 300 with the fix, context switches 222 and 138, throughput 468k and 471k
+  requests a second, p99 0.175 and 0.174 ms, p99.9 0.248 and 0.255 ms (jemalloc 465k, 0.171,
+  0.228). axum level likewise (347k and 330k against jemalloc's 341k, within its run-to-run
+  spread; its process exits without running the diagnostic's report). asmalloc faults half as
+  often as jemalloc in both and makes about 50 `madvise` calls a run. Closed-loop and
+  saturated, so this says nothing about tail latency at a fixed load.
+- A single slow call: on main an `mprotect` took 35 to 80 µs on average in the parallel
+  programs, nearly all of it waiting for the lock, and held the lock against every faulting
+  thread while it ran. With the fix there are a few hundred a run. Growth over the cap may
+  walk up to 16,384 bitmap words and make many `madvise` calls in one allocation; its worst
+  call was not measured.
+- After the peak (`memrun.sh ... quiet live=2M sizes=small secs=12 after=burst
+  after_sizes=small`): in 3 of 8 runs, on main and on the branch alike, asmalloc held 215 MiB
+  to the end instead of returning to 3 MiB. Not investigated; it is not this change.
+
+**Design text.** "Address space" says a region becomes writable "in steps, each a single
+`mprotect` that extends the writable prefix well ahead of what is in use". It could say: by as
+much as the region has made writable already, up to 64 MiB, so the number of calls grows with
+the logarithm of the region's use; each call takes the memory-map lock for writing, which
+page faults in the region wait for.
+
 **A working set that comes and goes on a period longer than the interval.** `workload period
 live=N sizes=small cycles=4 gap_ms=G after=burst after_sizes=s64`: allocate N objects and
 write them, free them in random order, run burst-idle's light work for G ms, four times. MiB
@@ -2662,4 +2882,18 @@ BENCH_CPUS=2 BENCH_EVENTS=dtlb_miss=0xff45,walk_4k=0x1045,walk_2m=0x4045 scripts
   taskset -c 2 bench/target/asmalloc/release/workload map kind=btree n=1M reps=5
 BENCH_CPUS=2 scripts/memlimit -m 4G -- taskset -c 2 \
   python3 -I bench/probes/memory/thp-off.py bench/target/asmalloc/release/workload tree depth=18 reps=4
+# Faults and system calls in real programs: the screening's built tree, and a scratch directory.
+export RUST_SCREEN_ROOT=<the screening's target/rust-screen> APPF_OUT=/tmp/app-faults
+P=bench/probes/app-faults
+scripts/heavy $P/variant.sh main-d --diag $P/edits/oldcommit.py $P/edits/diag2.py   # counts by call site
+scripts/heavy $P/variant.sh fix                                                     # the branch
+scripts/heavy $P/variant.sh keep $P/edits/keepsmall.py    # likewise idle (idlegrow.py), rw (rw.py), ...
+scripts/measure --both-l3 scripts/memlimit -m 8G -- python3 -I $P/bench.py $APPF_OUT/runs.jsonl \
+  --rounds 5 --progs tpchgen,gix-hours,datafusion,pulldown-cmark,ruff-check \
+  --libs main=$APPF_OUT/lib/main-d.so,fix=$APPF_OUT/lib/fix.so,glibc=-
+python3 -I $P/summ.py $APPF_OUT/runs.jsonl
+scripts/measure --both-l3 $P/csmix.sh ruff-check 8 main=$APPF_OUT/lib/main-d.so fix=$APPF_OUT/lib/fix.so
+python3 -I $P/csall.py main fix        # context switches by reason
+scripts/measure --both-l3 scripts/memlimit -m 8G -- python3 -I $P/srv.py $APPF_OUT/srv.jsonl \
+  --rounds 5 --libs main=$APPF_OUT/lib/main-d.so,fix=$APPF_OUT/lib/fix.so
 ```
