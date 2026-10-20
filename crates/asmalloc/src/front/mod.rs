@@ -257,10 +257,12 @@ struct PlacedMasks {
 // here. For what others place it rests on alignment: the kernel requires a thread's
 // `struct rseq` to be 32-byte aligned (`include/uapi/linux/rseq.h`), and the routines touch
 // only its `cpu_id` (read) and `rseq_cs` (written), at bytes 4 to 15 of their 32-byte chunk,
-// never `node_id` or `mm_cid`; and the executable's copy of glibc's `__rseq_offset` is an
-// 8-byte word as aligned as glibc's own, 16 bytes on the glibc measured. What is not covered is
-// listed in that section: a GOT slot, an only 8-aligned `__rseq_offset`, and the tables' wrapped
-// entries (sizes above 16 KiB, sized frees of 2 KiB and up, the region table's top half).
+// never `node_id` or `mm_cid`; the executable's copy of glibc's `__rseq_offset` is an 8-byte
+// word as aligned as glibc's own, 16 bytes on the glibc measured; and the routines that would
+// otherwise read the variable's address from its GOT slot, which is only 8-aligned, read it from
+// a 16-aligned word of their own (the generator's `gotLines`). What is not covered is listed in
+// that section: an only 8-aligned `__rseq_offset`, and the tables' wrapped entries (sizes above
+// 16 KiB, sized frees of 2 KiB and up, the region table's top half).
 // `rseq_offset_check` (tests) and `scripts/rseq-offset-check` look at the linked binaries.
 
 /// Whether page offset `b` is a byte of some small class's hot word.

@@ -8,7 +8,7 @@ public import Asmalloc.Proof.Framework.Registration
 The pop and push inline (`x86_64_inline`), an `asm!` block of 13 fused
 micro-ops; the slow path's store-if-equal and spare-stack push and pop,
 out of line (`x86_64`); and the CPU number, inline. Each in two forms: reading
-`__rseq_offset` through its GOT slot (the default, which links anywhere), or
+`__rseq_offset` through a word holding its address (`movGot`, the default, which links anywhere), or
 directly (`direct`, which links only in an executable), which the crate's
 cargo feature `executable` selects, and musl always does: there the word is
 the crate's own (`VG.X86_64.ownRseqArea`), and a musl build of the crate is

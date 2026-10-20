@@ -1,0 +1,32 @@
+#!/usr/bin/env bash
+# Format and lint the drivers of the programs named (default: every program). Each program
+# is a workspace of its own, so `cargo fmt` and `cargo clippy` in bench/ do not reach them;
+# bench/apps/common is a member of the bench workspace and is checked there.
+#
+#   bench/apps/check [program ...]
+#
+# Clippy checks each program's crates once, in the program's shared build directory (see
+# README.md), through scripts/heavy.
+set -euo pipefail
+
+here=$(cd "$(dirname "$0")" && pwd)
+main=$(dirname "$(git -C "$here" rev-parse --path-format=absolute --git-common-dir)")
+data=${BENCH_APPS_DATA:-$main/bench/apps/target}
+
+programs=("$@")
+if [ ${#programs[@]} -eq 0 ]; then
+  for f in "$here"/*/Cargo.toml; do
+    d=$(basename "$(dirname "$f")")
+    [ "$d" = common ] || programs+=("$d")
+  done
+fi
+
+for p in "${programs[@]}"; do
+  echo "== $p"
+  (
+    cd "$here/$p"
+    cargo fmt --check
+    CARGO_BUILD_BUILD_DIR="$data/build/$p" "$here/../../scripts/heavy" \
+      cargo clippy --locked --quiet --target-dir "$data/build/$p/clippy" -- -D warnings
+  )
+done

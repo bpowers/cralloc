@@ -259,11 +259,17 @@ def sample64 : Prog isa := .block [
   some "the offset 2147483648 from VG_TABLE does not fit in 32 bits"
 
 -- A compile-time constant as an immediate or a symbol's offset, and a GOT
--- load: each refers to the operand by name.
+-- load: each refers to the operand by name. The GOT load reads a 16-aligned
+-- word of its own, in relocated read-only data, that holds the symbol's address.
 #guard text (printer.function (.block [.alu32 .test .rcx (.immP "mask"),
     .leaSym .r9 "SLABS" 8 (some "off"), .movGot .rdx "rs", .mov .rax (.imm 1)] : Prog isa)) ==
   ["test ecx, <mask>", "lea r9, [rip + <SLABS> + 8 + <off>]",
-    "mov rdx, QWORD PTR [rip + <rs>@GOTPCREL]", "mov rax, 1", "ret"]
+    ".pushsection .data.rel.ro.asmalloc_got,\"aw\",@progbits", ".balign 16", "8:",
+    ".quad <rs>", ".popsection", "mov rdx, QWORD PTR [rip + 8b]", "mov rax, 1", "ret"]
+#guard Instr.asm (.movGot .rdx "rs") ==
+  [".pushsection .data.rel.ro.asmalloc_got,\"aw\",@progbits", ".balign 16", "8:",
+    ".quad rs", ".popsection", "mov rdx, QWORD PTR [rip + 8b]"]
+#guard (printer.function (.block [.movGot .rdx "rs"] : Prog isa)).flatMap Line.refs == ["rs"]
 #guard text (printer.function (.block [.movSym .rdx "rs"] : Prog isa)) ==
   ["mov rdx, QWORD PTR [rip + <rs>]", "ret"]
 -- A function selected by a `cfg` predicate: one condition, or any of several, holding or not.
@@ -367,7 +373,12 @@ def rseqSample : Prog isa := .rseq
 
 #guard text (printer.function rseqSample) == [
   "5:",
-  "mov rdx, QWORD PTR [rip + <rs>@GOTPCREL]",
+  ".pushsection .data.rel.ro.asmalloc_got,\"aw\",@progbits",
+  ".balign 16",
+  "8:",
+  ".quad <rs>",
+  ".popsection",
+  "mov rdx, QWORD PTR [rip + 8b]",
   "mov rdx, QWORD PTR [rdx]",
   "lea r10, [rip + 3f]",
   "mov QWORD PTR fs:[rdx+8], r10",
@@ -405,7 +416,7 @@ def rseqSample : Prog isa := .rseq
 
 -- Without stubs, as inline: the branch goes to the target itself.
 #guard inlineTarget.printer.stubExits == false
-#guard ((text (Printer.lower { printer with stubExits := false } rseqSample 0).1).take 10).drop 8 ==
+#guard ((text (Printer.lower { printer with stubExits := false } rseqSample 0).1).take 15).drop 13 ==
   ["jae <slow>", "mov rcx, QWORD PTR [r9+r8*1]"]
 #guard (Printer.lower { printer with stubExits := false } rseqSample 0).2.1 == []
 

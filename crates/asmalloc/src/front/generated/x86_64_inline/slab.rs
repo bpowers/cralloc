@@ -19,7 +19,7 @@ pub(crate) unsafe fn slab_pop(word: usize, mask: usize) -> usize {
     let ret: usize;
     unsafe {
         core::arch::asm!(
-            "5:\nmov r10, QWORD PTR [rip + {__rseq_offset}@GOTPCREL]\nmov r10, QWORD PTR [r10]\nlea r11, [rip + 3f]\nmov QWORD PTR fs:[r10+8], r11\n6:\nmov r8d, DWORD PTR fs:[r10+4]\ncmp r8d, 8192\njae 20f\nshl r8, 12\nmov rcx, QWORD PTR [rdi+r8*1]\ntest ecx, esi\nje 21f\nmov rax, QWORD PTR [rcx-8]\nlea rcx, [rcx-8]\nmov QWORD PTR [rdi+r8*1], rcx\n7:\n.pushsection __rseq_cs, \"aw\"\n.balign 32\n3:\n.long 0, 0\n.quad 6b, 7b - 6b, 4f\n.popsection\n.pushsection .text.unlikely, \"ax\"\n.byte 0x0f, 0xb9, 0x3d\n.long 0x53053053\n4:\njmp 5b\n20:\nmov eax, 0\njmp 7b\n21:\nmov eax, 0\njmp 7b\n.popsection",
+            "5:\n.pushsection .data.rel.ro.asmalloc_got,\"aw\",@progbits\n.balign 16\n8:\n.quad {__rseq_offset}\n.popsection\nmov r10, QWORD PTR [rip + 8b]\nmov r10, QWORD PTR [r10]\nlea r11, [rip + 3f]\nmov QWORD PTR fs:[r10+8], r11\n6:\nmov r8d, DWORD PTR fs:[r10+4]\ncmp r8d, 8192\njae 20f\nshl r8, 12\nmov rcx, QWORD PTR [rdi+r8*1]\ntest ecx, esi\nje 21f\nmov rax, QWORD PTR [rcx-8]\nlea rcx, [rcx-8]\nmov QWORD PTR [rdi+r8*1], rcx\n7:\n.pushsection __rseq_cs, \"aw\"\n.balign 32\n3:\n.long 0, 0\n.quad 6b, 7b - 6b, 4f\n.popsection\n.pushsection .text.unlikely, \"ax\"\n.byte 0x0f, 0xb9, 0x3d\n.long 0x53053053\n4:\njmp 5b\n20:\nmov eax, 0\njmp 7b\n21:\nmov eax, 0\njmp 7b\n.popsection",
             in("rdi") word,
             in("rsi") mask,
             lateout("rax") ret,
@@ -82,7 +82,7 @@ pub(crate) unsafe fn slab_pop(word: usize, mask: usize) -> usize {
 pub(crate) unsafe fn slab_push(word: usize, mask: usize, p: usize) -> bool {
     unsafe {
         core::arch::asm!(
-            "5:\nmov r10, QWORD PTR [rip + {__rseq_offset}@GOTPCREL]\nmov r10, QWORD PTR [r10]\nlea r11, [rip + 3f]\nmov QWORD PTR fs:[r10+8], r11\n6:\nmov r8d, DWORD PTR fs:[r10+4]\ncmp r8d, 8192\njae {miss}\nshl r8, 12\nmov rcx, QWORD PTR [rdi+r8*1]\nlea rax, [rcx+8]\ntest eax, esi\nje {miss}\nmov QWORD PTR [rcx], rdx\nmov QWORD PTR [rdi+r8*1], rax\n7:\n.pushsection __rseq_cs, \"aw\"\n.balign 32\n3:\n.long 0, 0\n.quad 6b, 7b - 6b, 4f\n.popsection\n.pushsection .text.unlikely, \"ax\"\n.byte 0x0f, 0xb9, 0x3d\n.long 0x53053053\n4:\njmp 5b\n.popsection",
+            "5:\n.pushsection .data.rel.ro.asmalloc_got,\"aw\",@progbits\n.balign 16\n8:\n.quad {__rseq_offset}\n.popsection\nmov r10, QWORD PTR [rip + 8b]\nmov r10, QWORD PTR [r10]\nlea r11, [rip + 3f]\nmov QWORD PTR fs:[r10+8], r11\n6:\nmov r8d, DWORD PTR fs:[r10+4]\ncmp r8d, 8192\njae {miss}\nshl r8, 12\nmov rcx, QWORD PTR [rdi+r8*1]\nlea rax, [rcx+8]\ntest eax, esi\nje {miss}\nmov QWORD PTR [rcx], rdx\nmov QWORD PTR [rdi+r8*1], rax\n7:\n.pushsection __rseq_cs, \"aw\"\n.balign 32\n3:\n.long 0, 0\n.quad 6b, 7b - 6b, 4f\n.popsection\n.pushsection .text.unlikely, \"ax\"\n.byte 0x0f, 0xb9, 0x3d\n.long 0x53053053\n4:\njmp 5b\n.popsection",
             in("rdi") word,
             in("rsi") mask,
             in("rdx") p,
@@ -147,9 +147,7 @@ pub(crate) unsafe fn current_cpu() -> u32 {
     let ret: u32;
     unsafe {
         core::arch::asm!(
-            r"mov rax, QWORD PTR [rip + {__rseq_offset}@GOTPCREL]
-mov rax, QWORD PTR [rax]
-mov eax, DWORD PTR fs:[rax+4]",
+            ".pushsection .data.rel.ro.asmalloc_got,\"aw\",@progbits\n.balign 16\n8:\n.quad {__rseq_offset}\n.popsection\nmov rax, QWORD PTR [rip + 8b]\nmov rax, QWORD PTR [rax]\nmov eax, DWORD PTR fs:[rax+4]",
             lateout("rax") ret,
             __rseq_offset = sym crate::front::__rseq_offset,
             options(nostack),

@@ -84,6 +84,12 @@ feature = "tc"
 preload = "{baselines}/tcmalloc/libtcmalloc.so"
 expect = { allocator = "tcmalloc", mode = "per-thread", library = "executable" }
 
+# Native: the `snmalloc-rs` crate as shipped, which some Rust projects use. No preload entry.
+[[allocator]]
+name = "snmalloc"
+feature = "sn"
+expect = { allocator = "snmalloc", library = "executable" }
+
 [[allocator]]
 name = "mimalloc-ctl"
 same_as = "mimalloc"

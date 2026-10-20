@@ -11,6 +11,11 @@
 //! the next `dealloc`, which passes the new size, would return it to the wrong class. That
 //! is why `realloc` here is not tcmalloc's C `realloc`, which keeps a block in place when it
 //! shrinks by less than half.
+//!
+//! It may not stay in place when it shrinks, either. tcmalloc records the requested size of
+//! a sampled allocation and aborts when a sized delete passes less ("Mismatched-size-delete
+//! of 9948 bytes (expected 12288 bytes)"): ruff and boa, which shrink buffers with
+//! `shrink_to_fit`, aborted in most runs until 2026-10-19. So only growth stays in place.
 use std::alloc::{GlobalAlloc, Layout};
 use std::ffi::{c_int, c_void};
 
@@ -57,7 +62,11 @@ unsafe impl GlobalAlloc for Tcmalloc {
     }
     unsafe fn realloc(&self, p: *mut u8, l: Layout, new_size: usize) -> *mut u8 {
         let usable = unsafe { TCMallocInternalMallocSize(p.cast()) };
-        if l.align() <= MIN_ALIGN && new_size <= usable && unsafe { nallocx(new_size, 0) } == usable {
+        if l.align() <= MIN_ALIGN
+            && new_size >= l.size()
+            && new_size <= usable
+            && unsafe { nallocx(new_size, 0) } == usable
+        {
             return p;
         }
         // SAFETY: the caller guarantees new_size is a valid size for this alignment.

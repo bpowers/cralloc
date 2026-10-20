@@ -156,7 +156,7 @@ def stackPop : Prog isa := .rseq arm (
 
 /-! ## The CPU number
 
-Not a restartable sequence: `__rseq_offset` through its GOT slot, then the
+Not a restartable sequence: `__rseq_offset` through a word holding its address, then the
 rseq area's `cpu_id` through `fs`, zero-extended into `rax`. -/
 
 /-- `current_cpu()`. -/
@@ -168,7 +168,7 @@ def currentCpu : Prog isa := .block [
 /-! ## In an executable
 
 An executable may read `__rseq_offset` directly (`movSym`, one load) rather
-than through its GOT slot (`movGot` and a load): the linker copies the
+than through a word holding its address (`movGot` and a load): the linker copies the
 variable into the executable before any code of the program runs. A shared
 library cannot, so the GOT form is the default and this the cargo feature
 `executable`'s. The routines are the same but for that. -/

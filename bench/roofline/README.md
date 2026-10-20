@@ -105,6 +105,19 @@ reads the baseline libraries from the main checkout's `bench/baselines/out` (bui
 `bench/baselines/build.sh`); `RF_ALLOCS` and `RF_BUILDS` narrow it. The stand-in allocator is
 single-threaded and never returns memory; it exists only to put the routines behind `malloc`.
 
+Linking a C program with the static library (`static/`, or any crate that invokes
+`export_c_abi!` as a `staticlib`) against static glibc with lld needs `-lgcc` before the library:
+
+```
+cc -static -fuse-ld=lld prog.c -lgcc libcentry_static.a
+```
+
+The library carries Rust's `compiler_builtins`, prebuilt with unwind tables that name
+`rust_eh_personality`, which a `no_std` library does not define. GNU ld takes the soft-float
+routines static glibc needs (`__multf3`, `__addtf3`, ...) from `libgcc.a`, which follows `libc.a`;
+lld takes them from the first archive on the line that defines them, ours, and then needs the
+personality. `-Wl,--gc-sections` does not help. Dynamic links do not need those routines.
+
 ## rust-alloc
 
 mimalloc is linked from a static library built from the local checkout (not committed):

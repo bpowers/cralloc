@@ -100,6 +100,31 @@ def ShiftxOp.name : ShiftxOp → String
 def Cond.name : Cond → String
   | .e => "e" | .ne => "ne" | .b => "b" | .ae => "ae"
 
+/-- The lines of `movGot`, with `sym` the text that names the symbol: a word of the routine's
+own, holding the symbol's address, and a load of it. This is the global offset table's slot
+done by hand. The assembler emits an absolute 64-bit relocation for the word (`R_X86_64_64`),
+which the linker resolves (a static link) or leaves to the dynamic linker, which fills the word
+in the same pass, before any code of the program runs, in which it would fill a GOT slot; the
+section is relocated read-only data, which RELRO then maps read-only. So the load reads the
+symbol's address and never faults, as `exec` says.
+
+The word is ours to place, which a GOT slot is not: a routine loads it on every call, right
+after the previous call's last store, to a slab's hot word at bytes 24 to 31 of a 32-byte chunk
+(`front`, in the crate). Zen 5 can hold a load whose bytes overlap a store in flight in the low
+12 bits of their addresses (docs/research/zen5-roofline.md, section 16), and a GOT slot is only
+8-aligned. A 16-aligned word never overlaps those bytes. The label `8` is local to these lines:
+the load names the word defined just before it. -/
+def gotLines (d : Reg) (sym : Piece) : List Line :=
+  [".pushsection .data.rel.ro.asmalloc_got,\"aw\",@progbits", ".balign 16", "8:"].map .text ++
+  [.ops [.text ".quad ", sym], .text ".popsection",
+    .text s!"mov {d.name}, QWORD PTR [rip + 8b]"]
+
+/-- The text of a line with each operand written as its name. -/
+def Line.plain : Line → String
+  | .text s => s
+  | .call n => n
+  | .ops ps => String.join (ps.map fun | .text s => s | .ref n => n)
+
 def Instr.asm : Instr → List String
   | .mov d s => [s!"mov {d.name}, {s.str}"]
   | .store m r => [s!"mov {m.str}, {r.name}"]
@@ -127,7 +152,7 @@ def Instr.asm : Instr → List String
   | .movImm64 d v => [s!"movabs {d.name}, {v.toInt}"]
   | .leaSym d name off offP =>
     [s!"lea {d.name}, [rip + {name}{symOffset off}{(offP.map (" + {" ++ · ++ "}")).getD ""}]"]
-  | .movGot d name => [s!"mov {d.name}, QWORD PTR [rip + {name}@GOTPCREL]"]
+  | .movGot d name => (gotLines d (.text name)).map Line.plain
   | .movSym d name => [s!"mov {d.name}, QWORD PTR [rip + {name}]"]
   | .leaRseqCs d => [s!"lea {d.name}, [rip + 3f]"]
   | .lea d m => [s!"lea {d.name}, {m.addr}"]
@@ -180,7 +205,7 @@ def Instr.lines : Instr → List Line
   | .leaSym d name off offP =>
     [.ops ([.text s!"lea {d.name}, [rip + ", .ref name, .text (symOffset off)] ++
       (match offP with | some p => [.text " + ", .ref p] | none => []) ++ [.text "]"])]
-  | .movGot d name => [.ops [.text s!"mov {d.name}, QWORD PTR [rip + ", .ref name, .text "@GOTPCREL]"]]
+  | .movGot d name => gotLines d (.ref name)
   | .movSym d name => [.ops [.text s!"mov {d.name}, QWORD PTR [rip + ", .ref name, .text "]"]]
   | .mov d (.immP n) => [.ops [.text s!"mov {d.name}, ", .ref n]]
   | .alu op d (.immP n) => [.ops [.text s!"{op.name} {d.name}, ", .ref n]]

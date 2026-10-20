@@ -144,14 +144,38 @@ pub const fn kept_grown(geometry: Geometry) -> usize {
     KEPT_GROWN_HUGE_PAGES * geometry.huge_page_size()
 }
 
-/// In the small-page part of a region, each commit makes this many pages writable beyond what
-/// the carve that asked for it needs: 16, or 64 KiB. `mprotect` costs about a microsecond, so
-/// this makes it rare without charging much address space against strict overcommit.
+/// In the small-page part of a region, each commit makes at least this many pages writable
+/// beyond what the carve that asked for it needs: 16, or 64 KiB.
 pub const COMMIT_AHEAD_PAGES: usize = 16;
 
-/// In the huge-page part, each commit makes writable whole huge pages, this many beyond what
-/// the carve needs: 1, or 2 MiB, so growth faults a huge page at a time.
+/// In the huge-page part, each commit makes writable whole huge pages, at least this many beyond
+/// what the carve needs: 1, or 2 MiB, so growth faults a huge page at a time.
 pub const COMMIT_AHEAD_HUGE_PAGES: usize = 1;
+
+/// The most a commit makes writable beyond what its carve needs, in huge pages: 32, or 64 MiB.
+/// Between the least above and this, a commit goes as far ahead as the region has committed
+/// already, so a region that grows commits about twice as much at each step and the number
+/// of `mprotect` calls grows with the logarithm of the region's use. Each call takes the
+/// process's memory-map lock for writing and the region's mapping with it, which stops every
+/// page fault in that region and every other change to the address space until it is done:
+/// at 64 KiB a step a parallel program growing its heap made thousands of calls a second and
+/// its threads queued behind them (`docs/research/memory.md`, "Faults and system calls in real
+/// programs"). The bound keeps what is writable and never touched, which costs commit charge
+/// under strict overcommit but no memory, to at most the region's use or 64 MiB.
+pub const COMMIT_AHEAD_MAX_HUGE_PAGES: usize = 32;
+
+/// How many pages a commit makes writable beyond what its carve needs, in a region with
+/// `used` pages committed above its origin: `used`, within `least` and `most`.
+#[inline(always)]
+pub const fn commit_ahead(used: u32, least: u32, most: u32) -> u32 {
+    if used < least {
+        least
+    } else if used > most {
+        most
+    } else {
+        used
+    }
+}
 
 /// The retained-memory cap in bytes for a geometry.
 #[inline(always)]

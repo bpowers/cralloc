@@ -66,6 +66,10 @@ Limits worth knowing:
 - A program that locks its memory with `mlockall` needs an unlimited `memlock` limit or
   the capability that lifts it: the heap's address-space reservation counts against the
   limit even though nothing in it is resident.
+- A C program that links asmalloc's static library against static glibc with lld needs
+  `-lgcc` before the library on the link line. Otherwise lld takes glibc's 128-bit float
+  helpers from the Rust runtime inside the library, whose unwind tables name a symbol that
+  only a Rust program defines.
 - One copy per process: two copies have separate heaps and cannot free each other's blocks.
 - The first allocation that cannot be served from a cache reads a few files under
   `/sys/devices/system/cpu` to learn which CPUs share a cache, and never reads them again. A

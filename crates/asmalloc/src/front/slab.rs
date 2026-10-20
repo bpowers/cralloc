@@ -252,6 +252,14 @@ impl Slab {
         count
     }
 
+    /// Takes back the last count of [`Slab::count_retired`], so that the refresh it made due
+    /// falls on the next retirement instead. A hint, as the count is.
+    #[inline]
+    pub(crate) fn uncount_retired(&self) {
+        let count = self.retired.load(Ordering::Relaxed).wrapping_sub(1);
+        self.retired.store(count, Ordering::Relaxed);
+    }
+
     /// Where the age limit's sweep of this slab's spare stacks is, and when it began
     /// (`depot::age`). A hint, written with single stores by this CPU's slow paths.
     #[inline]

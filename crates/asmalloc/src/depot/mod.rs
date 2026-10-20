@@ -105,11 +105,12 @@ pub const DOMAIN_CAP: usize = DEPOT_TARGET / 4;
 /// each such push, so that the stack never gains on the rate at which magazines arrive
 /// (`heartbeat.rs`). A rule looks for work before it asks for room. When the age limit or the
 /// sweep, which only the CPU's own slow paths run, finds work and no room, the CPU's next slow
-/// path gives it the budget first and launders over target with what is left (`age.rs`,
-/// `Sweep`), so a CPU whose every exchange overflows still runs them. What the shed and the
-/// launder over target leave, later slow paths and the shed take back. For classes of 254
-/// objects or fewer a magazine, the budget is four magazines, about what a slow path could
-/// launder before.
+/// path gives it the whole budget first (`age.rs`, `Sweep`), so a CPU whose every exchange
+/// overflows still runs them, and still launders its own pushes over target after it: such a
+/// call launders up to two of the largest magazines, at most once an interval per class and
+/// rule. What the shed and the launder of the heartbeat's own pushes leave, later slow paths
+/// and the shed take back. For classes of 254 objects or fewer a magazine, the budget is four
+/// magazines, about what a slow path could launder before.
 pub const LAUNDER_BUDGET: usize = MagazineSize::MAX.capacity();
 
 /// The limits on memory parked in caches, how often the heartbeat looks around, and which of

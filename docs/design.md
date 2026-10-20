@@ -248,8 +248,13 @@ classes lightly has one partly used page per class, and each hot class needs its
 entries. The huge-page policy below is built around this.
 
 A region becomes writable in steps, each a single `mprotect` that extends the writable
-prefix well ahead of what is in use. Under strict overcommit the commit charge is the
-writable prefix, not the reservation.
+prefix by about as much as the region has made writable already, from a few pages at first
+to at most 64 MiB a step. Each call holds the kernel's lock on the process's address space
+and on the region's mapping, and page faults in the region and every other mapping change
+wait behind it, so the number of calls must grow with the logarithm of a region's use and
+not with the use itself. If the OS refuses a step, the region asks for the smallest one
+instead. Under strict overcommit the commit charge is the writable prefix, not the
+reservation: at most about twice what a region has used.
 
 The rest of the reservation holds metadata: each region's bitmaps at an address computed
 from the region number, and an array of magazines. A small class's region keeps its
@@ -309,8 +314,8 @@ A **magazine** is a block of 8-byte slots, a power of two in size and aligned to
 Slot 0 is a link word used by the depot, the last slot holds the fill level while the
 magazine is not loaded, and the slots between hold pointers to free objects. Magazines are
 numbered blocks in one array in the metadata area; they are created by advancing a counter
-and are never unmapped. Their size falls as the class size rises, from 256 slots to 4, so no
-magazine holds more than about 64 KiB of objects.
+and are never unmapped. Their size falls as the class size rises, from 1,024 slots to 4, so
+no magazine holds more than about 64 KiB of objects.
 
 The slab word for a class is the address of the next free slot in the loaded magazine.
 Because a magazine is aligned to its size, the low bits of that address are the slot
@@ -339,7 +344,7 @@ may change):
 
 ```asm
                                       ; rdi: SLABS + CLASS*8, esi: the class's mask
-    mov   r10, [rip + __rseq_offset@GOTPCREL]
+    mov   r10, [rip + word]           ; the address of __rseq_offset, from a word of our own
     mov   r10, [r10]                  ; where glibc put this thread's rseq area
     lea   r11, [rip + descriptor]
     mov   fs:[r10 + 8], r11           ; arm: tell the OS which sequence we are in
@@ -363,7 +368,10 @@ size.
 
 An executable can read `__rseq_offset` with one load instead of two, because the linker
 gives it its own copy of the variable; that saves a cycle per pair, and a cargo feature
-selects it. A shared library must go through the indirection shown.
+selects it. A shared library must go through the indirection shown. The linker would give it
+a slot in its offset table for that, wherever the slot happens to fall; each routine instead
+reads the variable's address from a 16-aligned word emitted with it, which the loader fills
+as it would have filled the slot, so the load never shares a page offset with a hot word.
 
 If the thread is preempted, migrated or signalled anywhere between `start` and `end`, the OS
 resumes it at an abort handler that jumps back to the arming store. Nothing before the last
@@ -420,19 +428,14 @@ it fails because the word is a live marker, or because the thread has no valid C
 the slow path serves the request from the magazine it is holding and sends that magazine to
 the depot, so it never waits. The free side is symmetric with an empty magazine.
 
-Each CPU keeps a few spare full and empty magazines per class, in stacks whose heads live
-in the cold part of the slab and are updated by single-store routines. A thread that
-oscillates around a magazine boundary swaps locally without touching shared state. The
-spares of one CPU are limited by a byte budget, and each class by a small fixed share of it.
-
-A CPU may keep spares of a class past that share, as stock, where sending them away costs
-time and brings them straight back: a thread that frees a burst far larger than its spares
-and then allocates it again, on a depot stack that other CPUs are using. Sending a magazine
-to the depot because the spares are full marks the class, and taking one of that kind back
-earns the class room for one more spare if either trip had a compare-and-swap fail. A flow
-that goes one way never takes back what it sent, and an exchange on a quiet stack is cheap,
-so neither earns any. A CPU's stock is bounded by the byte budget less what the fixed
-shares can park, so its spares never hold more than the budget.
+Each CPU keeps spare full and empty magazines per class, in stacks whose heads live in the
+cold part of the slab and are updated by single-store routines. A thread that oscillates
+around a magazine boundary swaps with a spare and touches no shared state. The swap is the
+commonest slow path and is kept to the three sequences it needs: take a spare, install it,
+park the old magazine. How many spares a class may keep on a CPU is not fixed. It starts
+at one full and one empty and is earned from there, on the evidence and within the
+allowance that "Sizing from evidence" describes, and a trip to the depot moves as many
+magazines as the class has earned.
 
 Every step is one commit. Between steps all shared state is valid and whatever the thread
 holds is private to it. This is what makes the slow path safe to interrupt with a signal
@@ -454,9 +457,14 @@ link is harmless, and the counter means a stale head is accepted only if exactly
 and pops intervene during one attempt.
 
 Exchanging through the depot is how objects move between CPUs. A thread that only frees
-fills magazines and pushes them; a thread that only allocates pops them. The cost is two
-atomic instructions per magazine and no work per object, however frees and allocations are
-spread across threads.
+fills magazines and pushes them; a thread that only allocates pops them. An element of a
+stack is a bundle of one or more magazines of a class, linked to each other through a word
+of their last slot that is otherwise unused while a magazine is off a CPU's spare stacks.
+The links are written while the pushing thread still owns the bundle and read only after a
+pop has taken it, so the stack's protocol is the one for single magazines. A trip costs
+two atomic instructions however many magazines it moves, and no work per object, however
+frees and allocations are spread across threads. A rule that wants one magazine of a
+bundle pops the bundle, takes one and pushes the rest back.
 
 Magazines stay in the cache domain that freed them. An object's cache lines live where it
 was last used, and a magazine handed to a CPU under another last-level cache brings objects
@@ -473,7 +481,8 @@ grow with the number of domains, and a flow between two domains cannot stall beh
 that happens to hold the class.
 
 Each class has a target for the bytes its depot stacks hold in a process that runs in one
-domain. A domain stack's cap is a quarter of it and the shared stack's target is the rest.
+domain, set at run time (see "Sizing from evidence"). A domain stack's cap is a quarter of
+it and the shared stack's target is the rest.
 A domain stack cannot pass its cap, the heartbeat launders the shared stack while it is over
 its target, and every stack gives up whatever it did not need during an interval (see
 "Returning memory"). A class in use on N domains parks at most N caps and the shared target.
@@ -492,10 +501,15 @@ been touched.
   walking down from the top again. When it meets another fill at a word (the word changed
   under it, or was emptied before it arrived), it moves on past that group of 64 words, so
   fills of one class on different CPUs part after a few collisions instead of contending
-  for every word; they stay near the bottom of the heap. If no region of the class has a
+  for every word; they stay near the bottom of the heap. A fill takes at most the class's
+  fill size on that CPU, which starts small and grows with use (see "Sizing from
+  evidence"). It claims from a bounded
+  number of words and then hands out what it has, so in a heap whose free objects are
+  scattered one to a word it returns a partly filled magazine instead of searching on, and
+  no call pays for more than that many claims. If no region of the class has a
   free object, which only a search from the top may conclude, the fill carves from the last
   region's watermark with one atomic add, and when that region is exhausted it assigns a
-  new one to the class.
+  new one to the class. It never carves while free objects remain.
 - **Laundering a magazine** groups its pointers by bitmap word and sets each word's bits
   with one atomic OR. A magazine whose objects are scattered, each in a word of its own, has
   nothing to group: once a batch shows that, each remaining object gets one atomic bit-set
@@ -525,13 +539,27 @@ magazine, and the prefetchers would lose the stream each time.
 
 ### Heartbeat
 
-Every entry to a slow path does a bounded amount of maintenance before it returns: one step
-of purging, one look at a class of its own slab, one look for an idle cache, and at most one
-magazine laundered for each rule that launders. A large allocation or free counts as a slow
-path, but does the maintenance on one call in sixteen: a program that moves large blocks
-makes such calls far more often than the maintenance needs to run. By default there is no background thread and no timer. The work is done in units
-small enough that no single call pays much. This is mimalloc's pacing applied to a per-CPU
-design.
+Slow paths do the allocator's maintenance, a bounded amount at a time. It is paced by what
+moves, not by calls: a slow path adds what it moved between a magazine and anything beyond
+it to a count in its CPU's slab, and runs the maintenance, a heartbeat, when the count
+passes a threshold. A swap with a spare is then its three sequences and nothing more, and
+the rate of maintenance does not change when a class's magazines, its trips to the depot or
+its fills change size. A large allocation or free counts as a slow path, and beats on one
+call in sixteen: a program that moves large blocks makes such calls far more often than the
+maintenance needs to run. By default there is no background thread and no timer. The work
+is done in units small enough that no single call pays much. This is mimalloc's pacing
+applied to a per-CPU design.
+
+A heartbeat does one step of purging, one look at a class of its own slab, one look for an
+idle cache, and laundering within a budget of one of the largest magazines. The rules that
+launder share that budget. A rule that finds work and no room waits for a later heartbeat.
+The rules that only a CPU's own slow paths run for it, the age limit and the sweep, would
+wait for ever on a CPU whose every exchange spends the budget, so one that was turned away
+goes first at that CPU's next heartbeat. One launder is not paced and not budgeted: a
+magazine that a call's own exchange pushed past a shared depot stack's target is laundered
+on that call, so that the stack cannot gain on what arrives. A call therefore launders at
+most one of the largest magazines, or two when it also carries a rule that was turned away,
+which happens at most once an interval for each class and rule.
 
 How often a slow path runs depends on how hard the process allocates, so anything that
 should happen at a rate in time reads the CPU's cycle counter, which costs no system call,
@@ -545,6 +573,16 @@ stays inside its magazines has no heartbeat at all. It keeps what it held when i
 quiet: the free memory not yet purged, its parked objects, and the pages those pin. That
 lasts until a slow path runs or the program calls `collect`.
 
+Going quiet is where steady work on one thread ends up, not a corner case. A swing of
+allocations and frees smaller than a magazine settles, after a few swaps, into a loaded
+magazine that holds exactly one swing, and never leaves it. A program that frees a burst
+and then works lightly on the thread that freed it kept the whole burst in more than half
+of its runs (`docs/research/memory.md`). Programs whose threads free each other's objects,
+or grow buffers, enter slow paths constantly and are not affected. Nothing on the freeing
+path can stand in for the clock here: a free cannot tell memory that is idle from memory
+about to be reused, and purging on a level makes the programs that reuse it fault it
+straight back.
+
 A program that cannot accept that asks for a background thread. The thread is opt-in, so
 that the default stays free of hidden threads, and it buys nothing on the fast path, which
 stays as it is. Once an interval it calls `maintain`, which does for the whole heap what the
@@ -553,13 +591,82 @@ shedding, and the clocked purge. A slab it drains has its magazines laundered, n
 in the depot: a CPU that is busy only on fast paths would otherwise take them straight back,
 and their scattered objects would go on pinning pages. It is an ordinary thread of the process, started by the
 layer that has a thread library to start it with: a function behind a cargo feature for a
-Rust program, an environment variable for the preload library. A program with an idle hook
-of its own can call `maintain` from there and needs no thread. The child of a fork does not
+Rust program, an environment variable for the preload library. The child of a fork does not
 inherit the thread.
+
+A program with an idle hook of its own calls `maintain` from there and needs no thread. An
+async runtime's hook for a worker that is about to park is such a place, and the right
+one for a server: the heap is maintained whenever a worker runs out of work, which is when
+it has the time, and a server that falls silent after a burst gives the burst back.
+`maintain` limits its own rate, returning at once unless an interval has passed since the
+last heartbeat or the last call, so a hook may call it every time.
 
 Objects mostly circulate through magazines and the depot without touching the bitmaps. They
 reach the bitmaps when a class's shared depot stack is over its target, and through the rules under
 "Returning memory" that keep parked objects from pinning the heap.
+
+### Sizing from evidence
+
+Every buffer in the allocator stands between a cheap tier and a dearer one. A loaded
+magazine stands between the fast path and a swap with a spare; a CPU's spares between that
+swap and a trip to the depot; the depot between two atomic instructions and the bitmaps;
+free memory that is still resident between the bitmaps and the kernel. A fixed size for
+any of them is one answer to a question whose answer depends on the program, so the sizes
+are set at run time. The fast path pays nothing for it: a magazine's size is fixed per
+class, and everything that adapts is read and written by slow paths.
+`docs/research/adaptive-sizing.md` has the prior art and the measurements.
+
+Five rules hold at every tier.
+
+- **A buffer has two sizes, and each has its own evidence.** Its capacity is how far the
+  program can swing between allocating and freeing without leaving the tier. The evidence
+  for more capacity is a swing that came back: something sent to the dearer tier and
+  fetched again within an interval. Its batch is how much moves in one trip when the
+  program is not swinging but flowing one way, as when one thread allocates what another
+  frees. The evidence for a larger batch is a run of trips in the same direction. The two
+  must not be confused. A flow never takes back what it sent, so evidence of swings never
+  sees it, and flows are where a larger batch pays most: the whole gain of larger
+  magazines on them is fewer trips to the depot.
+- **Each tier is counted in the unit the next one moves.** A fill is a number of objects, a
+  class's spares are a number of magazines, a trip to the depot is a number of magazines,
+  and the depot's targets are bytes of whole bundles. No tier can then be sized so that
+  the one above it cannot use what it holds.
+- **Grow on evidence, at once; shrink on the clock.** A batch doubles when its evidence
+  appears and a capacity grows by one step. Nothing shrinks because a level is high. What
+  an interval did not use goes back, a step at a time, so shrinking is slower than
+  growing, and a workload that alternates does not pay for the same growth every interval.
+- **Parked memory has an allowance.** What all these buffers hold together may be at most
+  a fixed fraction of the heap in use, with a floor of a few megabytes below which the
+  fraction does not apply. While the process is over its allowance nothing grows, and the
+  rules that shed do not wait for the clock. Evidence says which buffers earn room; the
+  allowance says how much room there is to earn, and it is what makes the same rules right
+  for a heap of two megabytes and one of two gigabytes. Each CPU's sweep publishes what its
+  slab holds, and once an interval a heartbeat adds those to what the depot holds and
+  compares the sum with the heap, so no slow path updates a shared count.
+- **The bounds on work, and the interval, are constants.** How much one call may launder,
+  purge or fill, and how long an interval is, bound latency. They are not adapted.
+
+What adapts:
+
+- **The size of a fill.** A fill from the bitmaps starts at a few objects for a class on a
+  CPU and doubles each time that class fills again within an interval, up to the
+  magazine's size. A loaded magazine that the age limit takes back with filled objects it
+  never handed out halves it. A class a CPU uses lightly then parks a few objects there
+  and not a magazine's worth, which matters most on a machine with many CPUs and for the
+  classes whose magazine is tens of kilobytes; a class it uses heavily reaches full fills
+  after a handful of slow paths.
+- **A class's room on a CPU, and the size of its depot trips.** Each class on each CPU has
+  a number of magazines it may hold beside the loaded one. It earns one more when a
+  magazine it sent to the depot is fetched back within an interval, and it doubles, up to
+  a small maximum, when a trip to the depot follows another in the same direction with
+  none the other way between them. A trip then moves everything the class holds beyond
+  what it keeps, as one bundle: a CPU that frees sends its full spares and takes as many
+  empty ones, and a CPU that allocates does the reverse. Between trips the thread swaps
+  with its own spares. Room that an interval did not use goes back through the sweep, a
+  magazine a heartbeat.
+- **The depot's target** for a class rises when a slow path has to fill from the bitmaps
+  within an interval of a magazine of that class having been laundered for being over the
+  target, and falls with the depth the stacks did not need during an interval.
 
 ### Returning memory and huge pages
 
@@ -577,7 +684,7 @@ rule that returns it (`docs/research/memory.md` has the measurements behind them
 | The tail of a large block that shrinks in place; the pages behind a move made in pieces | The resize (see "Large objects") | At once |
 | Objects in a magazine that stays loaded | A slow path of the same CPU launders it | Once it has been loaded for an interval |
 | Objects in a CPU's full spares | That CPU's sweep launders one magazine and sends the rest to the depot | Once an interval |
-| Objects in a CPU's stock | The sweep takes the depth not needed during an interval off the class's room and returns what lies above the new limit; the idle drain takes it with the slab | A magazine a heartbeat, from the interval after its last use |
+| Spares beyond the room a class still needs on a CPU | The sweep takes the depth not needed during an interval off the class's room and returns what lies above the new limit; the idle drain takes it with the slab | A magazine a heartbeat, from the interval after its last use |
 | Objects in a depot stack | A heartbeat launders a magazine from the shared stack. Every stack sheds what it did not need, and each periodic look visits every stack of one other domain whose own CPUs have not looked this interval, the domains in rotation over those that hold magazines, so a domain that goes quiet sheds within a few intervals | While the shared stack is over its target, and for the depth a stack did not need during an interval |
 | Objects in steady circulation | The free that retires a full magazine launders it instead | One retirement in every few |
 | The slab of a CPU the process no longer runs on | The idle drain sends its magazines to the depot (see "Process lifecycle") | After an interval with no slow path there |
@@ -605,7 +712,7 @@ Five rules stand behind the table.
   it above the cap, in bounded steps spread over the heartbeats that follow. It never takes
   pages below a frontier, however high the count. Those are the pages the next fills take,
   and purging them only makes the program fault them back. What two intervals did not need
-  goes back, which is the rule the depot stacks, the spares and stock follow too. A
+  goes back, which is the rule the depot stacks and the spares follow too. A
   frontier is a hint: a wrong one costs a purge too many or too few, never a page in use,
   because the purge is a claim.
 - **Retained memory is counted, and growth pays for it.** The back end keeps an estimate

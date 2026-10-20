@@ -3,7 +3,9 @@
 Workload benchmarks that compare allocators on whole programs: cross-thread patterns, a
 work-stealing pool, an RPC server, single-threaded allocation-heavy shapes, and selected
 mimalloc-bench programs. Results and what they mean are in `docs/research/baselines.md`.
-The fast-path microbenchmarks are in `roofline/` and `docs/research/zen5-roofline.md`.
+The fast-path microbenchmarks are in `roofline/` and `docs/research/zen5-roofline.md`. Real
+Rust programs (ruff, DataFusion, boa) are the `apps` suite, with their own build step and
+inputs: see `apps/README.md`.
 
 Everything here is x86-64 Linux only and needs `perf_event_open` for hardware counters
 (`/proc/sys/kernel/perf_event_paranoid` of 2 or lower for user-space counts; the runner also
@@ -86,6 +88,7 @@ cannot be rebuilt under a session.
 | `backend/` | `backbench`: asmalloc's back-end launder and fill on their own, per class and pointer order. |
 | `workloads/` | The `workload` binary: cross-thread, work-stealing and single-threaded workloads. |
 | `rpc/` | connect-rust's echo and log-ingest benchmarks as `rpc-server` (allocator under test) and `rpc-client` (fixed). See `rpc/README.md`. |
+| `apps/` | Real Rust programs, each a workspace of its own with a driver; the `apps` suite, built by `benchrun build-apps`. See `apps/README.md`. |
 | `runner/` | `benchrun`: builds, runs and reports. Jobs are defined in `runner/src/suite.rs`. |
 | `roofline/` | Fast-path microbenchmarks, each a cargo project of its own. See `roofline/README.md`. |
 | `probes/` | Standalone programs that each check one assumption about the kernel, glibc or Rust. See `probes/README.md`. |
@@ -105,7 +108,10 @@ cannot be rebuilt under a session.
    one, and what the process must report about itself (`expect`). A preload library must
    also be recognisable by `baselines/probe.c`, which tells allocators apart by the symbols
    they export.
-3. `benchrun build`.
+3. Forward the feature in the `[features]` of every `apps/<program>/Cargo.toml`, and pin the
+   allocator's crates in each program's lock file to the versions in `Cargo.lock`
+   (`benchrun build-apps` checks both).
+4. `benchrun build`, and `benchrun build-apps`.
 
 ## Method
 

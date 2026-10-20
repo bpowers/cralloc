@@ -14,6 +14,7 @@
 //! | `asmalloc` | `asmalloc::Asmalloc`, `executable` feature | itself | its `dealloc` |
 //! | `je` | `tikv-jemallocator` 0.6 itself, default features | itself | `sdallocx` |
 //! | `tc` | google/tcmalloc, static | as `tcmalloc-better` 0.1.19 | `TCMallocInternalDeleteSizedAligned` |
+//! | `sn` | `snmalloc-rs` 0.7 itself, default features (cmake build of its bundled snmalloc) | itself | `sn_rust_dealloc` |
 //!
 //! `je` is exactly what a service that depends on `tikv-jemallocator` gets: jemalloc built by
 //! `tikv-jemalloc-sys`, static and with the `_rjem_` prefix, so C code in the process keeps
@@ -74,6 +75,14 @@ use tc as chosen;
 #[global_allocator]
 static GLOBAL: tc::Tcmalloc = tc::Tcmalloc;
 
+#[cfg(feature = "sn")]
+mod sn;
+#[cfg(feature = "sn")]
+use sn as chosen;
+#[cfg(feature = "sn")]
+#[global_allocator]
+static GLOBAL: snmalloc_rs::SnMalloc = snmalloc_rs::SnMalloc;
+
 // build.rs sets `bench_system` when no allocator feature is chosen.
 #[cfg(bench_system)]
 mod system;
@@ -98,7 +107,7 @@ pub fn init() {
 /// What the running process can tell about its allocator.
 #[derive(Clone, Debug)]
 pub struct Description {
-    /// The allocator family: glibc, mimalloc, mimalloc-sized, jemalloc or tcmalloc.
+    /// The allocator family: glibc, mimalloc, mimalloc-sized, jemalloc, tcmalloc or snmalloc.
     pub allocator: &'static str,
     /// A mode the allocator chose at run time, where it has one: tcmalloc's "per-cpu" or
     /// "per-thread". Empty otherwise.

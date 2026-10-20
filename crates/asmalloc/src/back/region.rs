@@ -47,7 +47,8 @@
 
 use super::layout::{Grow, Hints, Layout, Recorded, Unit};
 use super::policy::{
-    COMMIT_AHEAD_HUGE_PAGES, COMMIT_AHEAD_PAGES, grown_huge, huge_after, wants_huge,
+    COMMIT_AHEAD_HUGE_PAGES, COMMIT_AHEAD_MAX_HUGE_PAGES, COMMIT_AHEAD_PAGES, commit_ahead,
+    grown_huge, huge_after, wants_huge,
 };
 use super::tree::{self, Host};
 use super::word::{BITS, Word, bits_in_word};
@@ -112,18 +113,33 @@ pub(crate) fn commit_first<H: Host>(host: &H, region: RegionId) -> Option<u32> {
     commit_to(host, region, Grow::unpack(0), need)
 }
 
-/// Makes the region writable up to at least page `need`, and the leaf bitmap with it. Returns
-/// the new number of committed pages, or `None` if the OS refused.
+/// Makes the region writable up to at least page `need`, and the leaf bitmap with it, running
+/// ahead by as much as the region has committed (`policy::commit_ahead`). If the OS refuses
+/// that much, as it may under strict overcommit or a limit on memory, it tries again with the
+/// least run ahead. Returns the new number of committed pages, or `None` if the OS refused.
 fn commit_to<H: Host>(host: &H, region: RegionId, now: Grow, need: u32) -> Option<u32> {
     let layout = host.layout();
-    let pages = layout.region_pages();
     let huge = switch_to_huge(host, region, need);
-    let page = layout.page_size();
+    let used = now.committed.saturating_sub(layout.origin_page());
+    let far = commit_target(layout, huge, need, used);
+    let near = commit_target(layout, huge, need, 0);
+    match commit_range(host, region, now, far) {
+        None if near < far => commit_range(host, region, now, near),
+        done => done,
+    }
+}
+
+/// The page a commit for a carve that needs pages up to `need` makes the region writable up
+/// to, in a region with `used` pages committed above its origin and its huge-page part, if it
+/// has one, starting at page `huge`.
+fn commit_target(layout: &Layout, huge: Option<u32>, need: u32, used: u32) -> u32 {
+    let most = COMMIT_AHEAD_MAX_HUGE_PAGES as u32 * layout.huge_pages();
     let target = match huge {
         Some(from) if need > from => {
-            layout.huge_ceil(need) + COMMIT_AHEAD_HUGE_PAGES as u32 * layout.huge_pages()
+            let least = COMMIT_AHEAD_HUGE_PAGES as u32 * layout.huge_pages();
+            layout.huge_ceil(need) + layout.huge_ceil(commit_ahead(used, least, most))
         }
-        _ => need + COMMIT_AHEAD_PAGES as u32,
+        _ => need + commit_ahead(used, COMMIT_AHEAD_PAGES as u32, most),
     };
     // A small-page commit never runs into the huge-page part, whose pages are committed and
     // faulted whole, nor, before the region has one, past the threshold where it will start.
@@ -132,7 +148,14 @@ fn commit_to<H: Host>(host: &H, region: RegionId, now: Grow, need: u32) -> Optio
         Some(from) if need <= from => target.min(from),
         _ => target,
     };
-    let target = target.min(pages);
+    target.min(layout.region_pages())
+}
+
+/// Makes the region writable from what `now` says is committed up to page `target`, and the
+/// leaf bitmap with it. Returns `target`, or `None` if the OS refused.
+fn commit_range<H: Host>(host: &H, region: RegionId, now: Grow, target: u32) -> Option<u32> {
+    let layout = host.layout();
+    let page = layout.page_size();
     // Nothing below the class's origin holds a slot, so it is never made writable.
     let from = now.committed.max(layout.origin_page());
     let start = from as usize * page;

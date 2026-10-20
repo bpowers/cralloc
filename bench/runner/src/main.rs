@@ -1,18 +1,20 @@
 //! The benchmark runner.
 //!
 //!   benchrun build  [--allocators a,b]
-//!   benchrun run    [--suite quick|full|backend] [--rounds N] [--only TEXT] [--allocators a,b]
+//!   benchrun build-apps [--apps a,b] [--allocators a,b]
+//!   benchrun run    [--suite quick|full|backend|apps] [--rounds N] [--only TEXT] [--allocators a,b]
 //!                   [--out FILE] [--seed N] [--max-busy CPUS] [--gate-wait SECONDS]
 //!                   [--runner-cpus LIST] [--sample-ms N] [--mem-cap SIZE] [--no-warm]
 //!   benchrun report FILE... [--detail] [--ref NAME] [--only TEXT] [--quiet-only] [--steady-only]
-//!   benchrun list   [--suite quick|full|backend]
+//!   benchrun list   [--suite quick|full|backend|apps]
 //!   benchrun layout --only TEXT|--group NAME [--suite S] [--allocators a,b] [--layouts L,...]
 //!                   [--rounds N] [--no-build] [run's other options]
 //!
 //! `--suite` takes several suites joined by commas, `--only` several texts, and `run`, `list`
 //! and `layout` take `--group NAME` (for example `single-thread`).
 //!
-//! See bench/README.md.
+//! See bench/README.md, and bench/apps/README.md for the apps suite.
+mod apps;
 mod cap;
 mod clock;
 mod config;
@@ -103,7 +105,8 @@ fn jobs(f: &Flags) -> (String, Vec<suite::Job>) {
             "quick" => suite::quick(),
             "full" => suite::full(),
             "backend" => suite::backend(),
-            _ => die("--suite must be quick, full or backend, or several of them joined by commas"),
+            "apps" => suite::apps(),
+            _ => die("--suite must be quick, full, backend or apps, or several of them joined by commas"),
         };
         let chosen = js.into_iter().filter(|j| {
             f.get("group").is_none_or(|g| j.group == g)
@@ -150,15 +153,9 @@ fn build(f: &Flags, p: &Paths) {
     let dir = &p.bench;
     let _lock = paths::lock_baselines(&p.baselines).unwrap_or_else(|e| die(&e));
     let cpus = build_cpus();
-    let mut names: Vec<(String, String)> = vec![("glibc".into(), String::new())];
+    let names = native_builds(f, p);
     let mut preload_packages: Vec<String> = Vec::new();
     for a in allocators(f, p) {
-        if let (Some(b), Some(feat)) = (a.build_name(), a.feature.clone())
-            && a.build.is_none()
-            && !names.iter().any(|(n, _)| *n == b)
-        {
-            names.push((b, feat));
-        }
         if let Some(pkg) = a.preload_build.clone()
             && !preload_packages.contains(&pkg)
         {
@@ -179,26 +176,92 @@ fn build(f: &Flags, p: &Paths) {
     for (name, feat) in &names {
         build_workloads(p, name, feat, None);
     }
-    check_rseq_offsets(p, &names);
-}
-
-/// Runs `scripts/rseq-offset-check` on the asmalloc builds just made, and stops if one loads its
-/// rseq offset at a hot word's page offset (docs/research/zen5-roofline.md, section 16): every
-/// allocation of that class could wait on the previous one, so no session should run on it.
-/// `run` checks again and records the offsets in its session record.
-fn check_rseq_offsets(p: &Paths, names: &[(String, String)]) {
-    let mut files: Vec<PathBuf> = names
-        .iter()
-        .filter(|(_, feat)| feat.starts_with("asmalloc"))
-        .flat_map(|(name, _)| {
+    let mut files: Vec<PathBuf> = asmalloc_builds(&names)
+        .flat_map(|name| {
             ["workload", "rpc-server"].map(|bin| p.bench.join("target").join(name).join("release").join(bin))
         })
-        .filter(|f| f.exists())
         .collect();
-    let lib = p.bench.join("../target/release/libasmalloc_preload.so");
-    if lib.exists() {
-        files.push(lib);
+    files.push(p.bench.join("../target/release/libasmalloc_preload.so"));
+    check_rseq_offsets(p, files);
+}
+
+/// The native builds `build` and `build-apps` make: (build directory name, bench-alloc
+/// feature), glibc first, one for each allocator chosen that has a feature and is not built
+/// by hand.
+fn native_builds(f: &Flags, p: &Paths) -> Vec<(String, String)> {
+    let mut names: Vec<(String, String)> = vec![("glibc".into(), String::new())];
+    for a in allocators(f, p) {
+        if let (Some(b), Some(feat)) = (a.build_name(), a.feature.clone())
+            && a.build.is_none()
+            && !names.iter().any(|(n, _)| *n == b)
+        {
+            names.push((b, feat));
+        }
     }
+    names
+}
+
+fn asmalloc_builds(names: &[(String, String)]) -> impl Iterator<Item = &String> {
+    names.iter().filter(|(_, feat)| feat.starts_with("asmalloc")).map(|(name, _)| name)
+}
+
+/// `benchrun build-apps`: every program of the apps suite (or `--apps`), once per allocator,
+/// with a table of what each build took and the disk each program uses.
+fn build_apps(f: &Flags, p: &Paths) {
+    let mut programs: Vec<&'static str> = Vec::new();
+    for j in suite::apps() {
+        if let Some(a) = j.program.app()
+            && !programs.contains(&a)
+        {
+            programs.push(a);
+        }
+    }
+    if let Some(list) = f.get("apps") {
+        let want: Vec<&str> = list.split(',').collect();
+        if let Some(w) = want.iter().find(|w| !programs.contains(w)) {
+            die(&format!("--apps: no program {w} in the apps suite"));
+        }
+        programs.retain(|a| want.contains(a));
+    }
+    let _lock = paths::lock_baselines(&p.baselines).unwrap_or_else(|e| die(&e));
+    let names = native_builds(f, p);
+    let cpus = build_cpus();
+    let mut summary = Vec::new();
+    for program in &programs {
+        apps::check_lock(p, program).unwrap_or_else(|e| die(&e));
+        for (name, feat) in &names {
+            eprintln!("== building {program} for {name}");
+            let b = apps::build(p, program, name, feat, &cpus).unwrap_or_else(|e| die(&e));
+            summary.push((*program, b));
+        }
+    }
+    eprintln!("\n{:<12} {:<16} {:>9} {:>11} {:>10}", "program", "build", "seconds", "CPU seconds", "binary MB");
+    for (program, b) in &summary {
+        eprintln!(
+            "{program:<12} {:<16} {:>9.0} {:>11.0} {:>10.1}",
+            b.build,
+            b.seconds,
+            b.cpu_seconds,
+            b.binary_bytes as f64 / 1e6
+        );
+    }
+    eprintln!("\nshared build directories ({}):", p.apps_data.join("build").display());
+    for program in &programs {
+        eprintln!("{program:<12} {:>8.2} GB", apps::disk_use(&p.apps_data.join("build").join(program)) as f64 / 1e9);
+    }
+    let files: Vec<PathBuf> = asmalloc_builds(&names)
+        .flat_map(|name| programs.iter().map(|program| run::app_bin(&p.bench, name, program)))
+        .collect();
+    check_rseq_offsets(p, files);
+}
+
+/// Runs `scripts/rseq-offset-check` on the asmalloc builds just made (those of `files` that
+/// exist), and stops if one loads its rseq offset at a hot word's page offset
+/// (docs/research/zen5-roofline.md, section 16): every allocation of that class could wait on
+/// the previous one, so no session should run on it. `run` checks again and records the
+/// offsets in its session record.
+fn check_rseq_offsets(p: &Paths, mut files: Vec<PathBuf>) {
+    files.retain(|f| f.exists());
     if files.is_empty() {
         return;
     }
@@ -234,6 +297,7 @@ fn run_options(f: &Flags, p: &Paths, suite: String, default_rounds: usize) -> ru
     run::Options {
         bench_dir: p.bench.clone(),
         baselines: p.baselines.clone(),
+        apps_data: p.apps_data.clone(),
         out,
         scope,
         mem_cap,
@@ -260,6 +324,11 @@ fn layout(f: &Flags, p: &Paths) {
     let (suite, js) = jobs(f);
     if js.is_empty() {
         die("no job of the suite matches --only and --group");
+    }
+    // Other rustflags would make every crate of a program compile again, in the build
+    // directory all its builds share.
+    if let Some(j) = js.iter().find(|j| j.program.app().is_some()) {
+        die(&format!("{}: layout builds the workloads only, not the apps suite's programs", j.id));
     }
     let layouts = layout::parse(f.get("layouts").unwrap_or(layout::DEFAULT)).unwrap_or_else(|e| die(&e));
     let all = allocators(f, p);
@@ -306,6 +375,7 @@ fn main() {
     let p = Paths::new();
     match cmd.as_str() {
         "build" => build(&f, &p),
+        "build-apps" => build_apps(&f, &p),
         "list" => {
             let (_, js) = jobs(&f);
             let allocs = allocators(&f, &p);
@@ -344,6 +414,6 @@ fn main() {
                 steady_only: f.has("steady-only"),
             });
         }
-        _ => die("usage: benchrun <build|run|report|list|layout> [options]; see bench/README.md"),
+        _ => die("usage: benchrun <build|build-apps|run|report|list|layout> [options]; see bench/README.md"),
     }
 }

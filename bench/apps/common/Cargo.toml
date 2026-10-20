@@ -1,0 +1,14 @@
+[package]
+name = "bench-app"
+version = "0.0.0"
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+# What every program's driver shares: the allocator under test (bench-alloc, chosen by
+# feature), the counters, and the result line the runner reads. A member of the bench
+# workspace, so that its lints run there; each program's workspace depends on it by path.
+# See ../README.md.
+[dependencies]
+bench-alloc.workspace = true
+bench-harness.workspace = true

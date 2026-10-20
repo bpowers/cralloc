@@ -31,7 +31,7 @@ the best incumbent's fell from 0.889 to 0.865.
   to 48% ahead.
 - **Single-threaded churn, 100 to 10M live objects:** ahead 9 to 34%.
 - **One Vec grown to 256 MiB:** 48% ahead. **Box tree:** level with mimalloc (3% ahead at
-  `a92d51a`).
+  `a92d51a`; the difference is where the workload's own code landed, section 4).
 - **Work stealing:** rayon 20% ahead at four threads, 2% at eight.
 
 Where asmalloc is behind (section 9 has the causes):
@@ -236,15 +236,18 @@ did, the move is not attributed.
 | `churn live=10k`, cycles/op; espresso, s; `rpc echo c64`, server cycles/req | 31.48; 2.316; 46816 | 28.00; 2.239; 45699 | ahead 21%, ahead 29%; behind 4%, behind under 1%; behind 3%, level | Small classes start on pages of their own (`a76b222`, section 15), measured at -11.6%, -3.3% and -2.3%: their first pages no longer share the data TLB's sets. |
 | Cross-thread: pipeline t4, exchange t4 and t8, mpmc p1 c3 and p3 c1 (both shapes), ns/alloc | 3.172; 2.350, 2.996; 5.237, 5.361; 4.842, 4.876 | 3.006; 2.175, 2.626; 4.947, 5.000; 4.665, 4.683 | ahead in both sessions | 3.5 to 6% faster at the same clock (exchange t8 12% in all runs, half of it the clock). Not attributed. |
 | Churn, 1k, 100k and 100k mixed sizes, cycles/op | 23.97, 46.51, 87.47 | 23.24, 44.09, 85.28 | ahead in both, by 2 to 5 points more now | 3.1, 5.2 and 2.5% fewer cycles. Not attributed. |
-| Split pipeline, both shapes, ns/alloc | 11.54, 12.54 | 12.03, 12.03 | ahead 38, 51%; ahead 34, 49% | 4.6 and 4.4% slower at the same clock; all-alloc takes 5% more cycles and 0.9% more instructions. Six of asmalloc's ten free-only runs at `a92d51a` ran at 4.4 GHz, so its median then (12.54) was a cold run's, and part of the 14% that session reported for it (section 13) was the clock. Not attributed. |
-| `tree depth=20`, cycles/node | 43.25 | 44.56 | ahead 3%, level | 3.0% more cycles, with 1.1% more instructions. Not attributed. |
-| JSON 32 MiB, cycles/byte, native; preloaded | 16.19; 17.12 | 16.63; 17.29 | behind 1, 5%; behind 2, 7% | 2.7 and 1.0% more cycles at 0.4 and 0.5% more instructions. Not attributed; the job carries a few percent of code layout (section 14). |
+| Split pipeline, both shapes, ns/alloc | 11.54, 12.54 | 12.03, 12.03 | ahead 38, 51%; ahead 34, 49% | 4.6 and 4.4% slower at the same clock; all-alloc takes 5% more cycles and 0.9% more instructions. Six of asmalloc's ten free-only runs at `a92d51a` ran at 4.4 GHz, so its median then (12.54) was a cold run's, and part of the 14% that session reported for it (section 13) was the clock. It came with the classes' origins (`a76b222`): 11.45 and 11.42 ns before, 12.00 and 12.08 after, at the same instructions and with fifty times fewer page walks. The mechanism is not found (same note as the tree's row). |
+| `tree depth=20`, cycles/node | 43.25 | 44.56 | ahead 3%, level | 3.0% more cycles, with 1.1% more instructions. Where the workload's code landed: all the added cycles are in the walk, which runs no allocator code; its 72-byte recursive function began a 64-byte line in this session's build, which leaves its return alone in the next line. With every function 64-aligned the two commits run 44.21 and 44.25. The instructions are stock's and the frontier's bookkeeping on each magazine exchange and fill, 0.1% of the job's cycles (`launder-and-fill.md`, "The tree and JSON jobs between `a92d51a` and `e96086d`"). |
+| JSON 32 MiB, cycles/byte, native; preloaded | 16.19; 17.12 | 16.63; 17.29 | behind 1, 5%; behind 2, 7% | 2.7 and 1.0% more cycles at 0.4 and 0.5% more instructions. An inlining decision in the workload: with the lookup tables moved 2048 bytes into their pages (`c3c4676`), LLVM inlines the free at more of serde_json's call sites and `Value::deserialize` grows by a tenth; the same commit without the padding has the old code and the old time. The padding keeps fast-path loads off the hot words' page offsets and stays (same note). |
 | `mpmc p4 c4`, ns/alloc | 4.991 | 4.635 | ahead 41%, ahead 39% | The clock: six of asmalloc's ten runs then ran at 4.4 to 4.8 GHz. Its three runs then at 5.59 GHz took 4.41 to 4.49 ns, against 4.55 to 4.65 now at the same clock: about 3% slower. Not attributed. |
 | `rpc log c256`, cgroup peak; faults | 11.7 MiB; 5,188 | 13.8 MiB; 3,258 | over glibc 23%, now 47%; under jemalloc 20%, now level | The frontier (`74df709`, `memory.md`, "The clocked pass spares what fills reach"): the clocked purge takes only free pages that no fill reached for an interval. Its note measured the faults, 5,310 to 3,060; the peak is the memory it keeps, which the note did not measure. On `rpc log c64` and `rpc echo c64`, peaks rose 0.1 to 0.2 MiB and faults fell from 2,712 to 1,852 and 1,404 to 1,138. |
 | Small cross-thread heaps: mpmc p1 c3, exchange t4, pipelines t4 and t8, cgroup peak MiB | 3.1, 3.7, 4.0, 7.7 | 3.5, 4.0, 4.2, 8.0 | | Not attributed. Others fell by as much: the pipelines of two threads (2.2 to 2.0 MiB for small objects; 2.6 to 2.5 split), churn with 1k live objects (0.91 to 0.75). |
 
 Instructions: in the measured phases, most small-object jobs retire 0.2 to 1.5% more
-instructions than at `a92d51a`, and the churn jobs with 10k or fewer live objects the same.
+instructions than at `a92d51a`, and the churn jobs with 10k or fewer live objects the same. The
+added instructions are stock's (60 to 80 on each magazine exchange) and the frontier's (about
+100 and a compare-and-swap on each fill that reaches higher than the last); jobs that never
+leave the magazines run neither.
 
 **xmalloc-test is still bimodal**, and its medians do not compare. asmalloc landed in its fast
 mode in nine of ten runs (722 to 740 Mfrees/s) against three of ten at `a92d51a` (739 to
