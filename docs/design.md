@@ -160,7 +160,11 @@ less.
 2. **Memory.** No more resident memory than the leanest incumbent on the same workload,
    which our baselines show is usually jemalloc. Low fragmentation from segregated size classes and from preferring
    partly used memory over fresh memory. Memory the program has stopped using goes back to
-   the OS within seconds, and the memory parked in caches is bounded.
+   the OS within seconds, and the memory parked in caches is bounded. Memory is judged
+   where it costs something: on heaps of hundreds of megabytes to gigabytes, as a
+   proportion of the heap. A fixed cost of megabytes, or tens of megabytes, is spent freely
+   when it buys speed or fewer system calls on such heaps, and the peak of a heap of a few
+   megabytes is not something we tune.
 3. **One heap, three interfaces.** `GlobalAlloc`, `Allocator` and the C ABI share one heap,
    and C code can free what Rust allocated.
 4. **Verified.** The assembly is proved against a machine model. Size-class and layout
@@ -431,8 +435,8 @@ the depot, so it never waits. The free side is symmetric with an empty magazine.
 Each CPU keeps spare full and empty magazines per class, in stacks whose heads live in the
 cold part of the slab and are updated by single-store routines. A thread that oscillates
 around a magazine boundary swaps with a spare and touches no shared state. The swap is the
-commonest slow path and is kept to the three sequences it needs: take a spare, install it,
-park the old magazine. How many spares a class may keep on a CPU is not fixed. It starts
+commonest slow path, so it carries nothing it does not need: its handles are single words
+that travel in registers, and it runs no maintenance of its own. How many spares a class may keep on a CPU is not fixed. It starts
 at one full and one empty and is earned from there, on the evidence and within the
 allowance that "Sizing from evidence" describes, and a trip to the depot moves as many
 magazines as the class has earned.
@@ -442,11 +446,22 @@ Work that swings both ways from where it started, a few allocations of a class a
 more frees than that, then crosses the far end of the new magazine, and so does every
 repetition after it: two swaps each time, for as long as the work is steady. A server
 whose requests do this ran several percent slower in the processes where its first
-magazines happened to land that way (`docs/research/rpc-slow-mode.md`). So a swap that
-reverses the previous swap of that class on that CPU is taken as evidence of a swing, and
-the slow path then leaves the loaded magazine half full, by moving half of one magazine's
-objects into the other while it holds both. A swing of less than half a magazine never
-leaves the loaded magazine again. A flow never reverses, so it never pays for the move.
+magazines happened to land that way (`docs/research/rpc-slow-mode.md`). So two reversals
+in a row, a swap that reverses a swap of that class on that CPU which itself reversed the
+one before, are taken as evidence of such a lock, and the slow path then leaves the loaded
+magazine half full: it takes the loaded magazine out of the slab and moves half of one
+magazine's objects into the other while it holds both. A swing of less than half a
+magazine never leaves the loaded magazine again, and servers whose requests swing this way
+then take almost no slow paths at all (`docs/research/servers-h2.md`). A flow never
+reverses, and a swing longer than a magazine reverses once at each turn, not twice, so
+neither pays for the move.
+
+Half a magazine cannot absorb a swing longer than that, and a swing between half a
+magazine and a whole one would be centred at every turn without ever fitting. So the rule
+backs off. A centred swap that is followed by another reversal has failed, and each
+failure in a row doubles the number of the swaps after it that stay plain, up to a bound.
+A swing the rule cannot help then pays for an occasional retry and nothing else, and one
+that changes into a swing it can help is centred at the next retry.
 
 Every step is one commit. Between steps all shared state is valid and whatever the thread
 holds is private to it. This is what makes the slow path safe to interrupt with a signal
@@ -551,9 +566,9 @@ magazine, and the prefetchers would lose the stream each time.
 ### Heartbeat
 
 Slow paths do the allocator's maintenance, a bounded amount at a time. It is paced by what
-moves, not by calls: a slow path adds what it moved between a magazine and anything beyond
+moves, not by calls: a slow path adds the bytes it moved between a magazine and anything beyond
 it to a count in its CPU's slab, and runs the maintenance, a heartbeat, when the count
-passes a threshold. A swap with a spare is then its three sequences and nothing more, and
+passes a threshold. A swap with a spare then does no maintenance of its own, and
 the rate of maintenance does not change when a class's magazines, its trips to the depot or
 its fills change size. A large allocation or free counts as a slow path, and beats on one
 call in sixteen: a program that moves large blocks makes such calls far more often than the
@@ -566,7 +581,7 @@ idle cache, and laundering within a budget of one of the largest magazines. The 
 launder share that budget. A rule that finds work and no room waits for a later heartbeat.
 The rules that only a CPU's own slow paths run for it, the age limit and the sweep, would
 wait for ever on a CPU whose every exchange spends the budget, so one that was turned away
-goes first at that CPU's next heartbeat. One launder is not paced and not budgeted: a
+goes first at that CPU's next slow path, which runs a heartbeat whatever the count. One launder is not paced and not budgeted: a
 magazine that a call's own exchange pushed past a shared depot stack's target is laundered
 on that call, so that the stack cannot gain on what arrives. A call therefore launders at
 most one of the largest magazines, or two when it also carries a rule that was turned away,
@@ -617,7 +632,10 @@ Rust program, an environment variable for the preload library. The child of a fo
 inherit the thread.
 
 A program with a timer of its own calls `maintain` from it and needs no thread. In an
-async runtime that is a task that wakes once an interval. It costs one wake-up a second,
+async runtime that is a task that wakes once an interval, and we ship one for tokio, in a
+crate of its own because the allocator has no dependencies. Both are offered because
+neither fits every program: a server without an async runtime has no timer to borrow, and
+one that must stay single-threaded cannot take the thread. The task costs one wake-up a second,
 it runs while a server is silent, which is when a burst's memory should go back, and it
 takes that work off the first requests of the next burst. `maintain` limits its own rate,
 returning at once unless an interval has passed since it last ran, so it is harmless to
@@ -662,11 +680,12 @@ Five rules hold at every tier.
   an interval did not use goes back, a step at a time, so shrinking is slower than
   growing, and a workload that alternates does not pay for the same growth every interval.
 - **Parked memory has an allowance.** What all these buffers hold together may be at most
-  a fixed fraction of the heap in use, with a floor of a few megabytes below which the
+  a fixed fraction of the heap in use, with a floor of tens of megabytes below which the
   fraction does not apply. While the process is over its allowance nothing grows, and the
   rules that shed do not wait for the clock. Evidence says which buffers earn room; the
-  allowance says how much room there is to earn, and it is what makes the same rules right
-  for a heap of two megabytes and one of two gigabytes. Each CPU's sweep publishes what its
+  allowance says how much room there is to earn. The floor is generous on purpose: a heap
+  under it is small enough that what it parks does not matter (see "Goals"), and above it
+  the fraction keeps what is parked in proportion to the heap. Each CPU's sweep publishes what its
   slab holds, and once an interval a heartbeat adds those to what the depot holds and
   compares the sum with the heap, so no slow path updates a shared count.
 - **The bounds on work, and the interval, are constants.** How much one call may launder,

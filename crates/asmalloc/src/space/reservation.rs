@@ -37,14 +37,23 @@ use core::sync::atomic::{AtomicPtr, AtomicUsize, Ordering};
 
 /// A live reservation obtained from `os`.
 ///
-/// Invariant: the `plan.size()` bytes at `base` are one reservation that `os` returned and that
-/// has not been unmapped, and `base` is aligned to the plan's region size. Only
+/// Invariant: the `plan().size()` bytes at `base` are one reservation that `os` returned and
+/// that has not been unmapped, and `base` is aligned to the plan's region size. Only
 /// [`Space::reserve`] and [`SpaceCell`] make one, and only the unsafe [`Space::unmap`] and the
 /// cell's drop end it. The borrow of `os` keeps the OS value, and so the memory, alive for as
 /// long as the `Space` exists.
+///
+/// Every field is a whole word. Every slow path makes a `Space` from the published word and
+/// copies it around, and a [`Plan`], whose geometry is eleven bytes of odd-sized fields, was
+/// written a few bytes at a time and read back eight at a time: a load that spans several
+/// stores waits for all of them to retire instead of taking its value from the store buffer,
+/// which cost each slow path about fifty cycles. So a `Space` keeps only the region shift, and
+/// [`Space::plan`] rebuilds the plan from the geometry, which is a constant of the OS, and the
+/// shift, which folds to arithmetic on one register.
 pub struct Space<'os, O: Os> {
     base: NonNull<u8>,
-    plan: Plan,
+    /// `log2` of the region size: the plan's, kept as a whole word (see above).
+    region_shift: usize,
     os: &'os O,
     /// The first region's metadata block: worked out once, since every operation on the
     /// bitmaps reaches its words through it.
@@ -61,7 +70,7 @@ impl<O: Os> Copy for Space<'_, O> {}
 
 impl<O: Os> PartialEq for Space<'_, O> {
     fn eq(&self, other: &Self) -> bool {
-        self.base == other.base && self.plan == other.plan
+        self.base == other.base && self.region_shift == other.region_shift
     }
 }
 
@@ -71,7 +80,7 @@ impl<O: Os> fmt::Debug for Space<'_, O> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Space")
             .field("base", &self.base)
-            .field("region_shift", &self.plan.region_shift())
+            .field("region_shift", &self.region_shift)
             .finish()
     }
 }
@@ -83,7 +92,7 @@ impl<'os, O: Os> Space<'os, O> {
         let metadata = base.map_addr(|base| base.saturating_add(plan.metadata_start()));
         Space {
             base,
-            plan,
+            region_shift: plan.region_shift() as usize,
             os,
             metadata,
         }
@@ -119,10 +128,12 @@ impl<'os, O: Os> Space<'os, O> {
         self.base
     }
 
-    /// The layout, including the region size this reservation got.
+    /// The layout, including the region size this reservation got: the OS's geometry with this
+    /// reservation's region shift. Every `Space` is made on `O::GEOMETRY`, by
+    /// [`Space::reserve`] and [`SpaceCell`], whose plans come from it.
     #[inline(always)]
     pub fn plan(&self) -> Plan {
-        self.plan
+        Plan::new(O::GEOMETRY, self.region_shift as u8)
     }
 
     #[inline(always)]
@@ -135,7 +146,7 @@ impl<'os, O: Os> Space<'os, O> {
     /// Where a pointer falls, if it is inside an object region.
     #[inline(always)]
     pub fn locate(&self, ptr: *const u8) -> Option<Location> {
-        self.plan
+        self.plan()
             .locate(ptr.addr().wrapping_sub(self.base.addr().get()))
     }
 
@@ -145,7 +156,7 @@ impl<'os, O: Os> Space<'os, O> {
     #[inline(always)]
     pub fn pointer(&self, address: usize) -> Option<NonNull<u8>> {
         let offset = address.wrapping_sub(self.base.addr().get());
-        if offset < self.plan.size() {
+        if offset < self.plan().size() {
             Some(self.at(offset))
         } else {
             None
@@ -157,7 +168,7 @@ impl<'os, O: Os> Space<'os, O> {
     #[inline(always)]
     pub fn region(&self, region: RegionId) -> NonNull<u8> {
         self.check_region(region);
-        self.at(self.plan.region_offset(region))
+        self.at(self.plan().region_offset(region))
     }
 
     /// Slot `index` of `class` in `region`. Aborts unless the slot lies wholly inside the region
@@ -165,17 +176,17 @@ impl<'os, O: Os> Space<'os, O> {
     #[inline(always)]
     pub fn slot(&self, region: RegionId, class: Class, index: u32) -> NonNull<u8> {
         self.check_region(region);
-        if !self.plan.slot_fits(class, index) {
+        if !self.plan().slot_fits(class, index) {
             self.os.abort("a slot index outside its region");
         }
-        self.at(self.plan.slot_offset(region, class, index))
+        self.at(self.plan().slot_offset(region, class, index))
     }
 
     /// A region's metadata block, [`Plan::metadata_size`] bytes.
     #[inline(always)]
     pub fn metadata(&self, region: RegionId) -> NonNull<u8> {
         self.check_region(region);
-        let offset = region.index() << self.plan.metadata_shift();
+        let offset = region.index() << self.plan().metadata_shift();
         self.metadata.map_addr(|start| start.saturating_add(offset))
     }
 
@@ -186,25 +197,25 @@ impl<'os, O: Os> Space<'os, O> {
     #[inline(always)]
     pub fn metadata_at(&self, region: RegionId, offset: usize) -> *mut u8 {
         self.check_region(region);
-        let at = (region.index() << self.plan.metadata_shift()).wrapping_add(offset);
+        let at = (region.index() << self.plan().metadata_shift()).wrapping_add(offset);
         self.metadata.as_ptr().wrapping_byte_add(at)
     }
 
     /// The magazine area, [`Plan::magazine_area_size`] bytes, aligned to the region size.
     #[inline(always)]
     pub fn magazines(&self) -> NonNull<u8> {
-        self.at(self.plan.magazines_offset())
+        self.at(self.plan().magazines_offset())
     }
 
     /// The process page, one page that a child forked after [`Os::wipe_on_fork`] marked it reads
     /// as zero.
     #[inline(always)]
     pub fn process_page(&self) -> NonNull<u8> {
-        self.at(self.plan.process_page_offset())
+        self.at(self.plan().process_page_offset())
     }
 
     fn check_region(&self, region: RegionId) {
-        if region.index() >= self.plan.objects() {
+        if region.index() >= self.plan().objects() {
             self.os.abort("a region id outside the heap");
         }
     }
@@ -214,7 +225,7 @@ impl<'os, O: Os> Space<'os, O> {
     pub fn is_callable_range(&self, start: NonNull<u8>, len: usize) -> bool {
         let page = O::GEOMETRY.page_size();
         let offset = start.addr().get().wrapping_sub(self.base.addr().get());
-        let size = self.plan.size();
+        let size = self.plan().size();
         // The base is region-aligned, so an aligned offset is an aligned address.
         len != 0 && offset < size && len <= size - offset && (offset | len) & (page - 1) == 0
     }
@@ -294,7 +305,7 @@ impl<'os, O: Os> Space<'os, O> {
         // SAFETY: RESERVATION-03. the whole reservation is a page-aligned, non-empty range of itself (the plan's
         // size is a whole number of pages), live by the invariant; the caller promises that
         // nothing uses it afterwards.
-        unsafe { self.os.unmap(self.base, self.plan.size()) }
+        unsafe { self.os.unmap(self.base, self.plan().size()) }
     }
 }
 
@@ -455,7 +466,7 @@ impl<O: Os> Drop for SpaceCell<O> {
 
 /// The published word for a space: `base | region_shift`.
 fn encode<O: Os>(space: Space<'_, O>) -> *mut u8 {
-    let shift = space.plan.region_shift() as usize;
+    let shift = space.plan().region_shift() as usize;
     space.base.as_ptr().map_addr(|base| pack(base, shift))
 }
 

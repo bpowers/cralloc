@@ -40,6 +40,10 @@ pub struct Options {
     /// Bring each run's CPUs to their warm clock before it starts (`clock.rs`); off only to
     /// measure what that changes.
     pub warm: bool,
+    /// Hold a server's cores out of deep idle states while it runs (`serve::Spinners`); off
+    /// only with `--idle-states free`, whose latency tails measure the machine's idle states
+    /// as much as the allocator.
+    pub hold_idle: bool,
     pub suite: String,
 }
 
@@ -87,6 +91,19 @@ pub fn app_bin(bench_dir: &Path, build: &str, program: &str) -> PathBuf {
 /// `RUST_LOG`), and none of them may differ between runs.
 const APP_ENV: &[&str] = &["PATH", "HOME", "USER", "LANG"];
 
+/// `s` with `{inputs}` replaced by the job's input directory and `{app}` by its program's
+/// source directory, where it has them.
+pub fn expand(s: &str, job: &Job, o: &Options) -> String {
+    let mut s = s.to_string();
+    if let Some(i) = job.inputs() {
+        s = s.replace("{inputs}", &o.apps_data.join("inputs").join(i).display().to_string());
+    }
+    if let Some(p) = job.program.app() {
+        s = s.replace("{app}", &o.bench_dir.join("apps").join(p).display().to_string());
+    }
+    s
+}
+
 /// The command line and environment for one run.
 fn command(job: &Job, a: &Allocator, o: &Options, scratch: &Path) -> (Vec<String>, Vec<(String, String)>) {
     let cbench = o.baselines.join("cbench");
@@ -97,15 +114,8 @@ fn command(job: &Job, a: &Allocator, o: &Options, scratch: &Path) -> (Vec<String
         (Program::C(p), _) => cbench.join(p),
         (Program::App(p), _) => app_bin(&o.bench_dir, &a.build_name().unwrap(), p),
     };
-    let inputs = job.program.app().map(|p| o.apps_data.join("inputs").join(p).display().to_string());
     let mut argv = vec![program.display().to_string()];
-    argv.extend(job.args.iter().map(|s| {
-        let s = s.replace("{cbench}", &cb);
-        match &inputs {
-            Some(dir) => s.replace("{inputs}", dir),
-            None => s,
-        }
-    }));
+    argv.extend(job.args.iter().map(|s| expand(&s.replace("{cbench}", &cb), job, o)));
     let mut env: Vec<(String, String)> = std::env::vars()
         .filter(|(k, _)| !scrubbed(k) && (job.program.app().is_none() || APP_ENV.contains(&k.as_str())))
         .collect();
@@ -123,14 +133,14 @@ fn command(job: &Job, a: &Allocator, o: &Options, scratch: &Path) -> (Vec<String
 
 /// What a running process looked like at one instant, for the windows a driver marks.
 #[derive(Clone)]
-struct Snapshot {
-    at: Instant,
-    counters: Sample,
-    stat: ProcStat,
+pub struct Snapshot {
+    pub at: Instant,
+    pub counters: Sample,
+    pub stat: ProcStat,
 }
 
 impl Snapshot {
-    fn take(c: &Child) -> Snapshot {
+    pub fn take(c: &Child) -> Snapshot {
         Snapshot { at: Instant::now(), counters: c.read_counters(), stat: ProcStat::read(c.pid) }
     }
 }
@@ -144,6 +154,8 @@ struct Outcome {
     stdout_tail: Vec<String>,
     driver: Option<Value>,
     window: Option<Value>,
+    /// What the open load generator saw and the server's state at each of its marks.
+    load: Option<crate::serve::Loaded>,
     error: Option<String>,
 }
 
@@ -159,6 +171,7 @@ impl Outcome {
             stdout_tail: vec![],
             driver: None,
             window: None,
+            load: None,
             error: Some(error),
         }
     }
@@ -173,9 +186,9 @@ struct Groups {
 impl Groups {
     fn create(job: &Job, o: &Options, seq: usize) -> std::io::Result<Groups> {
         let run = o.scope.group(&format!("run-{seq}"), o.mem_cap)?;
-        let driver = match job.driver {
-            Some(_) => Some(o.scope.group(&format!("driver-{seq}"), cap::DRIVER)?),
-            None => None,
+        let driver = match job.driver.is_some() || job.load.is_some() {
+            true => Some(o.scope.group(&format!("driver-{seq}"), cap::DRIVER)?),
+            false => None,
         };
         Ok(Groups { run, driver })
     }
@@ -284,6 +297,30 @@ fn execute(job: &Job, argv: &[String], env: &[(String, String)], scratch: &Path,
         }
         child.signal(libc::SIGTERM);
     }
+    let mut load = None;
+    if let Some(l) = &job.load {
+        let mut addr = None;
+        while addr.is_none() {
+            match child.lines.recv_timeout(deadline.saturating_duration_since(Instant::now())) {
+                Ok((_, line)) => match line.strip_prefix("BENCH_LISTEN ") {
+                    Some(a) => addr = Some(a.trim().to_string()),
+                    None => keep(line, &mut tail),
+                },
+                Err(_) => break,
+            }
+        }
+        match addr {
+            None => error = Some("server never printed BENCH_LISTEN".to_string()),
+            Some(addr) => {
+                let dprocs = g.driver.as_ref().expect("a job with a load has a driver cgroup").procs();
+                match crate::serve::drive(job, l, &addr, &child, o, &dprocs, scratch, deadline) {
+                    Ok(r) => load = Some(r),
+                    Err(e) => error = Some(e),
+                }
+            }
+        }
+        child.signal(libc::SIGTERM);
+    }
 
     let mut timed_out = false;
     // Read the measured process's output until it closes stdout or the deadline passes.
@@ -313,7 +350,7 @@ fn execute(job: &Job, argv: &[String], env: &[(String, String)], scratch: &Path,
     let memory = sampler.stop();
     let counters = child.read_counters();
     let exit = child.reap();
-    Outcome { exit, timed_out, counters, memory, result, stdout_tail: tail, driver: driver_result, window, error }
+    Outcome { exit, timed_out, counters, memory, result, stdout_tail: tail, driver: driver_result, window, load, error }
 }
 
 fn parse_after(lines: &[String], key: &str) -> Option<f64> {
@@ -404,7 +441,14 @@ fn run_one(job: &Job, a: &Allocator, cx: &Context, clock: &mut Clock) -> Value {
     // before the interference baseline, so that its spin on the job's CPUs is not counted
     // as foreign work there.
     let warmup: Option<Warmup> = (cx.o.warm && groups.is_ok()).then(|| clock.warm(&job.cpus));
+    // After the gate and the warm-up, which want the siblings idle; it stops when the run ends.
+    let spinners = (job.load.is_some() && cx.o.hold_idle).then(|| crate::serve::Spinners::start(&job.cpus));
+    let idle_states = match &spinners {
+        Some(s) => format!("held out of deep idle by spinners on {}", bench_harness::Cpus(s.cpus.clone()).to_list()),
+        None => "free".to_string(),
+    };
     let t0 = CpuTimes::read();
+    let vm = sys::Vmstat::read();
     let started = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap().as_secs_f64();
     let (out, usage, driver_usage) = match groups {
         Ok(g) => {
@@ -414,6 +458,7 @@ fn run_one(job: &Job, a: &Allocator, cx: &Context, clock: &mut Clock) -> Value {
         Err(e) => (Outcome::not_started(format!("creating the run's cgroup: {e}")), None, None),
     };
     let busy = CpuTimes::read().busy_since(&t0);
+    drop(spinners);
 
     // What the process says it ran with: its own report when native, the probe when
     // preloaded.
@@ -492,8 +537,19 @@ fn run_one(job: &Job, a: &Allocator, cx: &Context, clock: &mut Clock) -> Value {
         let busy = w["task_clock_ns"].as_f64().unwrap_or(0.0) / w["wall_ns"].as_f64().unwrap_or(1.0);
         extra.insert("server_cpus_busy".into(), busy.into());
     }
+    let (served, served_primary) = match (&out.load, &job.load) {
+        (Some(l), Some(jl)) => {
+            let (v, p) = crate::serve::summarize(l, &out.memory, jl.rank);
+            (Some(v), p)
+        }
+        _ => (None, None),
+    };
     let primary = match &job.metric {
         Metric::Reported => out.result.as_ref().and_then(|r| r.get("primary")).filter(|p| !p.is_null()).cloned(),
+        Metric::Served => served_primary.map(|v| {
+            let name = format!("server cycles/req at {}", job.load.as_ref().map_or("", |l| l.rank));
+            json!({ "name": name, "value": v, "better": "lower" })
+        }),
         Metric::ServerCycles => extra
             .get("server_cycles_per_req")
             .map(|v| json!({ "name": "server cycles/req", "value": v, "better": "lower" })),
@@ -553,6 +609,9 @@ fn run_one(job: &Job, a: &Allocator, cx: &Context, clock: &mut Clock) -> Value {
         "workload": out.result,
         "driver": out.driver,
         "window": out.window,
+        "served": served,
+        "idle_states": job.load.as_ref().map(|_| idle_states),
+        "vmstat": vm.delta(),
         "clock": {
             "ghz": run_clock.map(|c| c.0),
             "over": run_clock.map(|c| c.1),
@@ -725,6 +784,7 @@ fn header(o: &Options, allocs: &[Allocator], jobs: &[Job], session: &str, rseq: 
         "rollup_ms": o.rollup_ms,
         "max_busy": o.max_busy,
         "warm": o.warm,
+        "hold_idle": o.hold_idle,
         "nominal_mhz": sys::read_trim("/sys/devices/system/cpu/cpu0/acpi_cppc/nominal_freq"),
         "mem_cap": o.mem_cap,
         "driver_mem_cap": cap::DRIVER,

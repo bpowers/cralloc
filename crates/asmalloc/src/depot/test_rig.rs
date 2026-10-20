@@ -35,18 +35,21 @@ pub(crate) fn tiny_class() -> SmallClass {
 }
 
 /// Limits under which every path is reachable with the tiny class: spares on both stacks, a
-/// depot target of one magazine, a look for an idle slab on every slow path, every rule that
-/// returns parked objects on, and every other retiring full magazine refreshed.
+/// depot target of one magazine, a heartbeat and a look for an idle slab on every slow path,
+/// every rule that returns parked objects on, and every other retiring full magazine
+/// refreshed.
 pub(crate) const TIGHT: Tuning = Tuning {
     spare_budget: usize::MAX / 2,
     max_spares: 1,
     depot_target: 2 * (32 << 10),
     domain_cap: 32 << 10,
     look_every: 1,
+    beat_shift: 0,
     refresh_every: 2,
     age_limit: true,
     shed_unused: true,
     stock: false,
+    centre_swings: true,
 };
 
 /// A fake object: an address that is never dereferenced.
@@ -308,8 +311,11 @@ impl<O: Os, const N: usize> Rig<O, N> {
         let mut magazines = BTreeMap::new();
         let mut objects: BTreeMap<usize, String> = BTreeMap::new();
         let mut place_magazine = |magazine: &Magazine, level: usize, place: String| {
-            if let Some(other) = magazines.insert(magazine.id(), place.clone()) {
-                panic!("{:?} is in two places: {other} and {place}", magazine.id());
+            if let Some(other) = magazines.insert(area.id(magazine), place.clone()) {
+                panic!(
+                    "{:?} is in two places: {other} and {place}",
+                    area.id(magazine)
+                );
             }
             for i in 1..=level {
                 let address = magazine.object(i).addr();

@@ -59,6 +59,9 @@ pub enum Metric {
     /// driver, on as many CPUs as the server, can be the bottleneck, so the rate is not the
     /// ranking.
     ServerCycles,
+    /// For a server under an open load: its cycles (all threads, user and kernel) per
+    /// request over the load's ranking group, at a fixed request rate.
+    Served,
     /// The process's wall time in seconds; lower is better.
     Wall,
     /// The number after `key` in the program's stdout, scaled by `scale`.
@@ -74,6 +77,36 @@ pub struct Driver {
     pub cpus: Vec<usize>,
 }
 
+/// A server job's load: the suite's open-loop generator (bench/probes/loadgen, built with
+/// glibc by `build-apps`) on CPUs of its own, sending one request on a plan of segments. The
+/// runner snapshots the server's counters at every segment the generator marks, samples its
+/// memory throughout, and stops it when the generator is done.
+#[derive(Clone, Debug)]
+pub struct OpenLoad {
+    pub path: &'static str,
+    pub content_type: &'static str,
+    pub headers: Vec<&'static str>,
+    /// The request body's file; `{inputs}` and `{app}` are replaced as in arguments.
+    pub body: &'static str,
+    pub conns: usize,
+    pub threads: usize,
+    pub cpus: Vec<usize>,
+    /// loadgen's plan, `NAME:KIND:SECS,...`.
+    pub plan: String,
+    /// The segment group whose server cycles per request rank the allocators.
+    pub rank: &'static str,
+    /// The directory under the apps inputs that `{inputs}` names, for a server that is not a
+    /// program of the apps suite.
+    pub inputs: Option<&'static str>,
+    /// The generator's protocol: `http` (HTTP/1.1), `h2` (HTTP/2, prior knowledge, `conns`
+    /// connections of `streams` concurrent streams each) or `resp`.
+    pub proto: &'static str,
+    pub streams: usize,
+    /// For a protocol other than HTTP, the file of commands it sends in turn (`{inputs}` and
+    /// `{app}` replaced); the HTTP fields above are then unused.
+    pub requests: Option<&'static str>,
+}
+
 #[derive(Clone, Debug)]
 pub struct Job {
     /// Stable identifier: results are grouped by it.
@@ -85,8 +118,17 @@ pub struct Job {
     /// Affinity of the measured process; also its `BENCH_CPUS`, in this order.
     pub cpus: Vec<usize>,
     pub driver: Option<Driver>,
+    pub load: Option<OpenLoad>,
     pub metric: Metric,
     pub timeout_s: u64,
+}
+
+impl Job {
+    /// The directory under the apps inputs that `{inputs}` names: the program's own, or the
+    /// one its load names.
+    pub fn inputs(&self) -> Option<&'static str> {
+        self.program.app().or_else(|| self.load.as_ref().and_then(|l| l.inputs))
+    }
 }
 
 fn local(n: usize) -> Vec<usize> {
@@ -116,6 +158,7 @@ fn rust(group: &'static str, id: String, mode: Mode, a: &str, cpus: Vec<usize>, 
         args: args(a),
         cpus,
         driver: None,
+        load: None,
         metric: Metric::Reported,
         timeout_s,
     }
@@ -130,6 +173,7 @@ fn cprog(id: &str, prog: &'static str, a: &str, cpus: Vec<usize>, metric: Metric
         args: args(a),
         cpus,
         driver: None,
+        load: None,
         metric,
         timeout_s,
     }
@@ -148,6 +192,7 @@ fn rpc(service: &str, label: &str, client_args: &str) -> Job {
             args: [service.to_string(), "addr={addr}".to_string()].into_iter().chain(args(client_args)).collect(),
             cpus: L3B.to_vec(),
         }),
+        load: None,
         metric: Metric::ServerCycles,
         timeout_s: 120,
     }
@@ -419,13 +464,14 @@ fn app(id: &str, program: &'static str, a: &str, cpus: Vec<usize>, timeout_s: u6
         args: args(a),
         cpus,
         driver: None,
+        load: None,
         metric: Metric::Reported,
         timeout_s,
     }
 }
 
 /// Real Rust programs on pinned inputs, each with the allocator as its global allocator
-/// (bench/apps/README.md). Each ranks by the wall time of its work, in seconds.
+/// (bench/apps/README.md). Each ranks by the cycles of all its threads over its work.
 pub fn apps() -> Vec<Job> {
     // Each V8 benchmark gets about the same time, as base.js's one second each gives them:
     // 0.6 s each with the glibc build, about 8 s in all with parsing the files.
@@ -448,6 +494,167 @@ pub fn apps() -> Vec<Job> {
         ),
         app("boa v8", "boa", &format!("v8 dir={{inputs}}/v8 counts={V8_COUNTS}"), vec![SINGLE], 120),
     ]
+}
+
+/// A server's day at two fixed request rates, about 30% and 70% of the slowest allocator's
+/// saturated rate: fill the server's caches and pools under closed-loop load, measure the
+/// saturated rate, hold each fixed rate, then let load come and go, and close the connections
+/// and watch the idle server. Every fixed-rate segment after a closed one starts with a
+/// second that is left out, so the backlog of the closed loop does not land in it. The
+/// silences are long enough for several of an allocator's clocked steps.
+fn day(r30: u32, r70: u32) -> String {
+    let mut segs = vec![
+        "_fill:closed:2".to_string(),
+        "sat:closed:4".into(),
+        format!("_w30:{r30}:1"),
+        format!("s30:{r30}:6"),
+        format!("_w70:{r70}:1"),
+        format!("s70:{r70}:6"),
+    ];
+    for _ in 0..3 {
+        segs.push("off:off:3".into());
+        segs.push(format!("on:{r70}:2"));
+    }
+    segs.push("idle:close:10".into());
+    segs.join(",")
+}
+
+/// Only the saturated rate, to choose a server's fixed rates (`--suite servers-sat`).
+const SAT: &str = "_fill:closed:2,sat:closed:5";
+
+/// The servers, each in one L3 domain and its load generator in the other.
+struct Served {
+    id: &'static str,
+    program: Program,
+    args: &'static str,
+    load: OpenLoad,
+    /// The fixed rates of its day, requests per second; see `day`.
+    rates: (u32, u32),
+}
+
+fn served() -> Vec<Served> {
+    let order = |path| OpenLoad {
+        path,
+        content_type: "application/json",
+        headers: vec![],
+        body: "{app}/order.json",
+        conns: 64,
+        threads: 4,
+        cpus: L3B.to_vec(),
+        plan: String::new(),
+        rank: "s70",
+        inputs: None,
+        proto: "http",
+        streams: 1,
+        requests: None,
+    };
+    // HTTP/2: eight connections of eight streams, the same 64 requests at once as HTTP/1.1's
+    // 64 connections.
+    let h2 = |l: OpenLoad| OpenLoad { proto: "h2", conns: 8, streams: 8, ..l };
+    let connect = |content_type, headers, body| OpenLoad {
+        path: "/bench.v1.LogIngestService/Ingest",
+        content_type,
+        headers,
+        body,
+        inputs: Some("connect"),
+        ..order("")
+    };
+    vec![
+        // connect-rust's log-ingest service (bench/rpc), a 50-record batch per request in
+        // the Connect protocol over HTTP/1.1.
+        Served {
+            id: "connect log",
+            program: Program::Rust("rpc-server"),
+            args: "log",
+            load: connect("application/proto", vec!["Connect-Protocol-Version: 1"], "{inputs}/log50.bin"),
+            // The slowest is snmalloc at 122k req/s (closed loop, 2026-10-20), half the others'
+            // 216k to 256k; glibc is next slowest.
+            rates: (36_000, 85_000),
+        },
+        // The same service over HTTP/2: gRPC, as connect-rust's own log_bench drives it, and
+        // the Connect protocol.
+        Served {
+            id: "connect log grpc h2",
+            program: Program::Rust("rpc-server"),
+            args: "log",
+            load: h2(connect("application/grpc", vec!["te: trailers"], "{inputs}/log50.grpc")),
+            // Slowest snmalloc 89k req/s, then glibc 146k; the others 174k to 192k (2026-10-20).
+            rates: (27_000, 63_000),
+        },
+        Served {
+            id: "connect log h2",
+            program: Program::Rust("rpc-server"),
+            args: "log",
+            load: h2(connect("application/proto", vec!["Connect-Protocol-Version: 1"], "{inputs}/log50.bin")),
+            // Slowest snmalloc 91k req/s, then glibc 148k; the others 172k to 194k.
+            rates: (27_000, 63_000),
+        },
+        Served {
+            id: "orders axum h2",
+            program: Program::App("orders"),
+            args: "axum",
+            load: h2(order("/orders")),
+            // Slowest glibc 237k req/s; the others 299k to 306k.
+            rates: (71_000, 166_000),
+        },
+        // The slowest at saturation is glibc, 335k req/s on axum and 403k on actix.
+        Served {
+            id: "orders axum",
+            program: Program::App("orders"),
+            args: "axum",
+            load: order("/orders"),
+            rates: (100_000, 235_000),
+        },
+        Served {
+            id: "orders actix",
+            program: Program::App("orders"),
+            args: "actix",
+            load: order("/orders"),
+            rates: (120_000, 280_000),
+        },
+        // The control: tokio's mini-redis, alternate SET and GET over 100k keys (Redis
+        // protocol).
+        Served {
+            id: "miniredis",
+            program: Program::App("miniredis"),
+            args: "serve",
+            load: OpenLoad { proto: "resp", requests: Some("{inputs}/commands.resp"), ..order("") },
+            // Slowest asmalloc 680k req/s; the others 717k to 741k.
+            rates: (204_000, 476_000),
+        },
+    ]
+}
+
+fn server_job(s: Served, plan: String, rank: &'static str, suffix: &str) -> Job {
+    Job {
+        id: format!("{}{suffix}", s.id),
+        group: "servers",
+        mode: Mode::Native,
+        program: s.program,
+        args: args(s.args),
+        cpus: L3A.to_vec(),
+        driver: None,
+        load: Some(OpenLoad { plan, rank, ..s.load }),
+        metric: Metric::Served,
+        timeout_s: 120,
+    }
+}
+
+/// Servers under an open load, ranked by cycles per request at a fixed rate, with latency,
+/// memory under load and after it (bench/apps/README.md, "Servers").
+pub fn servers() -> Vec<Job> {
+    served()
+        .into_iter()
+        .map(|s| {
+            let plan = day(s.rates.0, s.rates.1);
+            server_job(s, plan, "s70", "")
+        })
+        .collect()
+}
+
+/// Each server's saturated rate alone, closed loop.
+pub fn servers_sat() -> Vec<Job> {
+    served().into_iter().map(|s| server_job(s, SAT.into(), "sat", " sat")).collect()
 }
 
 /// Every CPU any job may use.

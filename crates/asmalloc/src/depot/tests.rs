@@ -8,10 +8,10 @@
 //! object is in exactly one place.
 
 use super::test_rig::{Rig, SimCpu, Small, TIGHT, tiny_class};
-use super::{Drained, IDLE_TICKS, Tuning};
+use super::{Drained, IDLE_TICKS, Source, Tuning};
 use crate::classes::{Class, SmallClass};
 use crate::front::check::interrupt_at;
-use crate::front::{Cpu, Routines};
+use crate::front::{Cpu, Routines, Spare};
 use crate::os::Os;
 use crate::os::sim::{Call, Faults, SimOs};
 use core::cell::RefCell;
@@ -139,6 +139,103 @@ fn cpu_0_is_empty(rig: &TestRig) -> bool {
     })
 }
 
+/// A swing that straddles a magazine's end, two allocations and then two frees from a level of
+/// one, crossed both ends on every repetition when every swap installed a magazine at its end:
+/// two slow paths a repetition for as long as it ran. The swaps alternate, and the one that
+/// reverses a reversal (the third) leaves the loaded magazine half full; the swing then stays
+/// inside it: no slow path after the first few repetitions.
+#[test]
+fn a_swing_across_a_magazines_end_stops_taking_slow_paths_after_the_reversal() {
+    let class = SmallClass::from_ordinal(0).unwrap();
+    let rig: TestRig = Rig::new(&[class], 4 * class.magazine().capacity(), Tuning::DEFAULT);
+    let machine = SimCpu::new(0);
+    let cache = rig.cache(&machine);
+    let slab = rig.slabs().slab(cpu(&rig, 0));
+    // A free loads an empty magazine at a level of one.
+    cache.free(class, rig.source.alloc_one(class).unwrap());
+    let mut held = Vec::new();
+    let mut slow_paths = Vec::new();
+    for _ in 0..20 {
+        let before = slab.activity();
+        for _ in 0..2 {
+            held.push(cache.alloc(class).unwrap());
+        }
+        for object in held.drain(..).rev() {
+            cache.free(class, object);
+        }
+        slow_paths.push(slab.activity() != before);
+    }
+    assert!(
+        slow_paths[4..].iter().all(|&slow| !slow),
+        "slow paths in each repetition: {slow_paths:?}"
+    );
+    rig.census(&[], false);
+}
+
+/// A CPU whose slow paths are all swaps with its own spares, each of which moves less than a
+/// heartbeat's bytes, counts each swap's magazine towards its next beat, so it still beats, and
+/// still counts as active: another CPU's idle checks, which look at it on every one of their
+/// heartbeats, never drain it while it swaps.
+#[test]
+fn a_cpu_that_only_swaps_with_its_spares_beats_and_is_not_drained() {
+    let small = SmallClass::from_ordinal(0).unwrap();
+    // Without the refresh, which launders one displaced magazine in so many, the sweep, which
+    // launders a full spare an interval, and the swing rule, which would leave these swings'
+    // magazines half full, every slow path is a swap.
+    let tuning = Tuning {
+        look_every: 1,
+        refresh_every: 0,
+        age_limit: false,
+        centre_swings: false,
+        ..Tuning::DEFAULT
+    };
+    let rig: TestRig = Rig::new(&[small, tiny_class()], 8192, tuning);
+    let machine = SimCpu::new(0);
+    let cache = rig.cache(&machine);
+    let slab = rig.slabs().slab(cpu(&rig, 0));
+    // A burst a little over a magazine, allocated and freed in reverse: once the first two have
+    // stocked the spares, one swap with a full spare and one with an empty spare each time.
+    let burst = small.magazine().capacity() + 100;
+    let exchange = (small.magazine().capacity() * small.size()) as u64;
+    assert!(exchange < super::heartbeat::BEAT_BYTES);
+    let swing = || {
+        let held: Vec<_> = (0..burst).filter_map(|_| cache.alloc(small)).collect();
+        assert_eq!(held.len(), burst);
+        for object in held.into_iter().rev() {
+            cache.free(small, object);
+        }
+    };
+    swing();
+    swing();
+    let (beats, steps) = (slab.beats(), 8);
+    let source = || (rig.source.fills(), rig.source.laundered());
+    let spares = || {
+        let depth = |kind| cache.spare_depth(small, kind);
+        (depth(Spare::Full), depth(Spare::Empty))
+    };
+    let mut drained = 0;
+    for _ in 0..4 * steps {
+        rig.os().advance_clock(IDLE_TICKS / steps);
+        for _ in 0..8 {
+            let before = (slab.activity(), source(), spares());
+            swing();
+            assert_eq!(
+                slab.activity() - before.0,
+                2 * exchange,
+                "two swaps' magazines"
+            );
+            assert_eq!((source(), spares()), (before.1, before.2), "only swaps");
+        }
+        let fences = rig.os().calls(Call::Fence);
+        heartbeats_on_cpu_1(&rig);
+        if rig.os().calls(Call::Fence) > fences && rig.os().last_fence() == Some(0) {
+            drained += 1;
+        }
+    }
+    assert!(slab.beats() > beats, "the swaps beat");
+    assert_eq!(drained, 0, "a CPU busy swapping was drained");
+}
+
 /// A CPU that allocates and frees only on fast paths never moves its activity counter, however
 /// busy it is, while another CPU's heartbeats look at it many times an interval. It is drained,
 /// and refills, but never twice within an interval: counted in looks rather than time, it was
@@ -174,7 +271,9 @@ fn a_cpu_busy_on_fast_paths_is_drained_at_most_once_an_interval() {
         }
     }
     // Each drain costs CPU 0 one slow path, to load a magazine again, and nothing else does.
-    assert_eq!(slab.activity(), 1 + drains.len() as u64);
+    // The activity counter counts the bytes a full magazine holds for each exchange.
+    let exchange = (busy.magazine().capacity() * busy.size()) as u64;
+    assert_eq!(slab.activity(), (1 + drains.len() as u64) * exchange);
     assert!(drains.len() >= intervals as usize / 2, "{drains:?}");
     for pair in drains.windows(2) {
         assert!(
@@ -861,9 +960,11 @@ fn maintain_drains_a_cpu_busy_on_fast_paths_at_most_once_an_interval() {
             drains.push(rig.os().ticks());
         }
     }
-    // One slow path to start, and a refill after each drain but perhaps the last, which can
-    // fall in the last step.
-    let refills = slab.activity() - 1;
+    // The activity counter counts the bytes a full magazine holds for each exchange: one slow
+    // path to start, and a refill after each drain but perhaps the last, which can fall in the
+    // last step.
+    let exchange = (busy.magazine().capacity() * busy.size()) as u64;
+    let refills = slab.activity() / exchange - 1;
     assert!(
         refills == drains.len() as u64 || refills + 1 == drains.len() as u64,
         "{refills} refills after {} drains",
@@ -978,4 +1079,49 @@ fn a_fork_the_thread_does_not_survive_at_every_step_of_maintain_duplicates_nothi
         at += STRIDE;
     }
     assert!(at > 20, "maintain has {at} switch points");
+}
+
+/// `move_top_into` moves the top of one magazine, in order, to the bottom of another, sets both
+/// levels, and cuts what it is asked to move to what the levels and capacity allow.
+#[test]
+fn moving_the_top_of_a_magazine_keeps_its_order_and_both_levels() {
+    let class = tiny_class();
+    let capacity = class.magazine().capacity();
+    let rig: TestRig = Rig::new(&[class], 64, TIGHT);
+    let machine = SimCpu::new(0);
+    let cache = rig.cache(&machine);
+    let area = cache.area();
+    let fill = |magazine: &super::magazine::Magazine<'_>, level: usize, first: usize| {
+        for slot in 1..=level {
+            magazine.set_object(slot, super::test_rig::object(class, first + slot));
+        }
+        magazine.set_level(level);
+    };
+    let contents = |magazine: &super::magazine::Magazine<'_>| -> Vec<usize> {
+        magazine.objects()[..magazine.level()]
+            .iter()
+            .map(|slot| slot.load(Relaxed).addr())
+            .collect()
+    };
+    let wanted = |range: core::ops::RangeInclusive<usize>| -> Vec<usize> {
+        range
+            .map(|n| super::test_rig::object(class, n).addr().get())
+            .collect()
+    };
+    let from = area.create(class.magazine()).unwrap();
+    let to = area.create(class.magazine()).unwrap();
+    for level in 0..=capacity {
+        for n in 0..=capacity + 1 {
+            fill(&from, level, 0);
+            fill(&to, capacity, 100);
+            from.move_top_into(level, &to, n);
+            let moved = n.min(level);
+            assert_eq!(contents(&from), wanted(1..=level - moved), "{level} {n}");
+            assert_eq!(
+                contents(&to),
+                wanted(level - moved + 1..=level),
+                "{level} {n}"
+            );
+        }
+    }
 }

@@ -1,0 +1,36 @@
+# mini-redis, tokio's teaching Redis server, as the servers suite's control. See ../README.md.
+[workspace]
+resolver = "3"
+
+[package]
+name = "app-miniredis"
+version = "0.0.0"
+edition = "2024"
+license = "Apache-2.0 OR BSD-3-Clause"
+publish = false
+
+[[bin]]
+name = "miniredis"
+path = "src/main.rs"
+
+# The allocator under test, by the bench-alloc feature of its entry in ../../allocators.toml
+# (none: glibc). Every program forwards the same set; see ../README.md.
+[features]
+mi = ["bench-alloc/mi"]
+mi-sized = ["bench-alloc/mi-sized"]
+mi-crate = ["bench-alloc/mi-crate"]
+asmalloc = ["bench-alloc/asmalloc"]
+je = ["bench-alloc/je"]
+tc = ["bench-alloc/tc"]
+sn = ["bench-alloc/sn"]
+
+[dependencies]
+bench-alloc = { path = "../../alloc" }
+bench-app = { path = "../common" }
+mini-redis = "=0.4.1"
+tokio = { version = "1", features = ["full"] }
+
+# mini-redis has no release profile of its own: the suite's (fat LTO, one unit).
+[profile.release]
+lto = "fat"
+codegen-units = 1
