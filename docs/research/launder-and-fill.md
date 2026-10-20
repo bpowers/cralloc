@@ -2011,3 +2011,36 @@ Memory after a peak (`burst-idle`, every 250 ms sample, three runs each): identi
 sample, from 215 MiB through 68, 51, 39 down to 4.9 MiB at 11.75 s, and the peaks 216 MiB both.
 Its light traffic after the burst is a 64-byte class, which beats on every exchange either way,
 so it does not test the 8 and 16-byte classes' slower pace.
+
+## Half full on a reversal
+
+The swap that reverses its CPU's last swap of a class leaves the loaded magazine half full
+(`depot/slow.rs`, "Half full on a reversal"): the loaded magazine is taken out of the slab with
+store-if-equal (zero), half of one magazine's objects are copied into the other while the thread
+holds both, and the half-full one is installed with store-if-equal expecting zero. One sequence
+more than a plain swap, and no spare needed; a flow never reverses and never pays it. The
+experiment it replaces (`docs/research/rpc-slow-mode.md`, ce47dab) moved the half through the
+push and pop routines after the install.
+
+The servers suite (`--suite servers`), lean-slow at 305a88a merged with main a907f27, against
+main (a907f27) and jemalloc, three interleaved rounds of all three jobs and five more of
+connect-rust for the two asmalloc builds; server cycles per request at 70% of the saturated
+rate (medians), and connect-rust's saturated rate:
+
+| Job | lean-slow | main | jemalloc |
+|---|---:|---:|---:|
+| orders axum, cycles/req at s70 | 67.9k | 78.6k | 68.4k |
+| orders actix, cycles/req at s70 | 56.1k | 69.6k | 56.1k |
+| connect log, cycles/req at s70 (8 / 8 / 3 runs) | 121.4k | 133.9k | 130.6k |
+| connect log, saturated, k req/s | 203.9 (203.1 to 204.5) | 185.7 (181.4 to 198.6) | 188.9 |
+
+No connect-rust process of lean-slow ran slow; main's eight spread over 17k req/s. The runner's
+connect job saturates lower than the experiment's `serve.py` setup (246k against 238k there),
+so the comparison is within this table. The lean slow path alone, without this rule, measured
+the same cycles per request as main on the order services (coordinator's measurement): the gain
+is the rule's, by taking the swaps away rather than making them cheaper.
+
+One-way flows, five interleaved rounds against main: the pipelines are level (t2 s64 -0.6%,
+small +0.7%, mixed -0.5%, x2 split -1.0%, x3 -0.3%, x4 +0.1%, t8 -0.6%, mpmc p1c3 -1.2%,
+p4c4 -0.4%), the split pipeline keeps the lean slow path's -4.6%, and the tree (-2.8%) and JSON
+(+1.1%) are within what placement moves them.
