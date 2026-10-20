@@ -1004,7 +1004,7 @@ fn a_pass_resumes_where_the_walk_stands() {
         .purge_at
         .store(region(lows[0]) as u32 + 1, Relaxed);
     os.advance_clock(DECAY_TICKS);
-    back.decay_pass(&|| os.ticks());
+    back.decay_pass(&|| back.now());
     // The pass began there, emptied that region, went on from the top of the heap with the
     // rest of its quarter, and stopped long before the bottom of the higher class's lowest
     // region. A pass from the top would have spent its quarter on the higher class alone.
@@ -1030,12 +1030,14 @@ fn floor_at<O: Os>(back: &Back<'_, O>, p: *mut u8) -> u32 {
     super::region::floor(&host, location.region, back.epoch())
 }
 
-/// Moves the clock `intervals` on and lets the back end see it, as a heartbeat would, without
-/// stepping or starting a pass.
+/// Moves the clock `intervals` on, an interval at a time, and lets the back end see each, as
+/// heartbeats would, without stepping or starting a pass.
 fn tick<S: Shape>(back: &Back<'_, Sim<S>>, intervals: u64) {
     let os = back.space().os();
-    os.advance_clock(intervals * DECAY_TICKS);
-    back.note_epoch(os.ticks());
+    for _ in 0..intervals {
+        os.advance_clock(DECAY_TICKS);
+        back.note_epoch(back.now());
+    }
 }
 
 /// The page past the end of the `size`-byte slot at `p`, counted from its region's start: what
@@ -1054,7 +1056,7 @@ fn a_frontier_lives_two_intervals_of_the_clock() {
     let state = state::<Standard>();
     let back = state.get_or_reserve().unwrap();
     let class = small(1024);
-    back.note_epoch(state.os().ticks());
+    back.note_epoch(back.now());
     let slots = fill(&back, class, 64);
     let past = |p: *mut u8| page_past(&back, p, 1024);
     let top = past(slots[63]);
@@ -1079,12 +1081,15 @@ fn a_frontier_lives_two_intervals_of_the_clock() {
     assert_eq!(floor_at(&back, slots[0]), past(slots[7]));
     tick(&back, 1);
     assert_eq!(floor_at(&back, slots[0]), 0);
-    // Three intervals with no heartbeat: the first heartbeat after them reads the clock.
+    // Three intervals with no heartbeat count as one (`crate::clock`): the first heartbeat
+    // after them finds the claim made before them in the last interval, not gone.
     let low = fill(&back, class, 8);
     // SAFETY: as above.
     unsafe { back.launder(class, &low) };
     state.os().advance_clock(3 * DECAY_TICKS);
     back.heartbeat();
+    assert_eq!(floor_at(&back, slots[0]), past(slots[7]));
+    tick(&back, 1);
     assert_eq!(floor_at(&back, slots[0]), 0);
     // A large class's.
     let big = large(64 << 10);
@@ -3544,8 +3549,12 @@ mod review {
         }
         // SAFETY: the test holds these slots, or passes a bad one to see the abort.
         unsafe { back.launder(class, &slots) };
-        os.advance_clock(100 * DECAY_TICKS);
-        beat(&back);
+        // Intervals in which heartbeats run, so that the fill's frontier ages out; a silence
+        // would count as one (`crate::clock`).
+        for _ in 0..3 {
+            os.advance_clock(DECAY_TICKS);
+            beat(&back);
+        }
         assert!(!pass_under_way(&state));
         let left = back.retained();
         assert!(left > 0 && left < total);
@@ -3611,8 +3620,10 @@ mod review {
         unsafe { back.launder(class, &slots) };
         // The pass began just now: one that stays unpublished for an interval is another
         // matter (`a_pass_whose_starter_vanished_before_publishing_ends_some_day`).
-        state.os().advance_clock(7 * DECAY_TICKS);
-        let started = (7 * DECAY_TICKS) | 1;
+        // Two intervals in which heartbeats ran, so that the fill's frontier is gone, then
+        // the counted time, which the decay word is stamped in.
+        super::tick(&back, 2);
+        let started = back.now() | 1;
         let stale = Pass {
             tag: Pass::tag_of(started) ^ 1,
             lap: 0,

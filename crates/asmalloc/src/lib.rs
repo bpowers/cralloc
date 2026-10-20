@@ -129,6 +129,7 @@ pub mod c;
 #[doc(hidden)]
 pub mod front;
 
+mod clock;
 mod heap;
 mod lined;
 /// The constants of the specification the routines were proved against, as the Lean emitter

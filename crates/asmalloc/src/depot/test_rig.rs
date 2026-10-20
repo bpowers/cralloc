@@ -65,6 +65,7 @@ pub(crate) struct TestSource {
     fills: AtomicUsize,
     laundered: AtomicUsize,
     universe: BTreeSet<usize>,
+    clock: crate::clock::Counted,
 }
 
 impl TestSource {
@@ -89,6 +90,7 @@ impl TestSource {
             fills: AtomicUsize::new(0),
             laundered: AtomicUsize::new(0),
             universe,
+            clock: crate::clock::Counted::new(),
         }
     }
 
@@ -153,6 +155,10 @@ impl TestSource {
 }
 
 impl Source for TestSource {
+    fn clock(&self) -> &crate::clock::Counted {
+        &self.clock
+    }
+
     fn fill(&self, class: SmallClass, slots: &[core::sync::atomic::AtomicPtr<u8>]) -> usize {
         self.fills.fetch_add(1, Ordering::Relaxed);
         let mut count = 0;

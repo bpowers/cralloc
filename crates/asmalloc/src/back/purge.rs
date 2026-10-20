@@ -341,9 +341,20 @@ impl<O: Os> Back<'_, O> {
         }
     }
 
+    /// The counted time (`crate::clock`): what every clocked rule of the heap reads, the
+    /// depot's included. May take a step of the count.
+    pub fn now(&self) -> u64 {
+        self.state.decay.clock.now(self.space.os())
+    }
+
+    /// The counted intervals, for the depot's clock to read its time from.
+    pub(crate) fn clock(&self) -> &crate::clock::Counted {
+        &self.state.decay.clock
+    }
+
     /// The maintenance a slow path does on its way out: one step of decay.
     pub fn heartbeat(&self) {
-        self.heartbeat_with(&|| self.space.os().ticks());
+        self.heartbeat_with(&|| self.now());
     }
 
     /// [`Back::heartbeat`] for a caller that keeps its own reading of the clock: `now` is
@@ -445,7 +456,7 @@ impl<O: Os> Back<'_, O> {
                 // only steppers end passes. So a pass that is still unpublished an interval
                 // after it began is ended here, and the next interval starts a fresh one. A
                 // clock behind the start re-stamps it, so that its age can be told.
-                let now = self.space.os().ticks() & !ACTIVE;
+                let now = self.now() & !ACTIVE;
                 let age = now.wrapping_sub(seen & !ACTIVE);
                 if age >= 1 << 63 {
                     let _ = state
@@ -463,7 +474,7 @@ impl<O: Os> Back<'_, O> {
             if pass.pages == 0 || self.went_round(pass) {
                 // The goal is met or the walk has gone round. End the pass this thread saw,
                 // and only that one.
-                let now = self.space.os().ticks();
+                let now = self.now();
                 self.note_epoch(now);
                 let now = now & !ACTIVE;
                 let _ = state
@@ -482,7 +493,7 @@ impl<O: Os> Back<'_, O> {
             if finished {
                 // A long lap goes region by region, so the interval number lags the clock by
                 // at most the walk of one region.
-                self.note_epoch(self.space.os().ticks());
+                self.note_epoch(self.now());
             }
             let done = (purged / page).min(u32::MAX as usize) as u32;
             if done != 0 {

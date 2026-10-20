@@ -47,7 +47,7 @@ use core::sync::atomic::Ordering::{Acquire, Relaxed};
 impl<O: Os, R: Routines, S: Source> Cache<'_, O, R, S> {
     /// One round of the clocked maintenance for the whole heap (see the module documentation).
     pub fn maintain(&self) {
-        let clock = Clock::new(self.os());
+        let clock = Clock::new(self.os(), self.source.clock());
         if generation::drains_enabled(self.depot) {
             let count = self.depot.common.cpus.load(Acquire);
             for index in 0..count {

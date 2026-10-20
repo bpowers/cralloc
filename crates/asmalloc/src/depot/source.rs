@@ -33,9 +33,14 @@ pub trait Source {
     /// Takes back one object of `class`, from a thread that cannot use a magazine.
     fn free_one(&self, class: SmallClass, object: NonNull<u8>);
 
+    /// The count of intervals the heartbeat's clock reads its time from (`crate::clock`), one
+    /// for the whole heap, so that the depot's rules and the source's purge tell the same
+    /// time.
+    fn clock(&self) -> &crate::clock::Counted;
+
     /// One bounded step of returning free memory to the OS, as the heartbeat paces it. `now`
-    /// reads the heartbeat's clock ([`crate::os::Os::ticks`]), the same value for the whole
-    /// heartbeat; the source calls it only if a decision needs the time.
+    /// reads the heartbeat's clock (the counted time of [`Source::clock`]), the same value for
+    /// the whole heartbeat; the source calls it only if a decision needs the time.
     fn purge_step(&self, now: &dyn Fn() -> u64);
 
     /// What the purge steps of an interval would do, in one call, for `Cache::maintain`: the

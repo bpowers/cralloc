@@ -191,6 +191,8 @@ struct Clocked {
     /// (`layout::Frontier`). Written by the first heartbeat of each interval that reads the
     /// clock (`purge`), so once an interval; zero until the first heartbeat.
     epoch: AtomicU64,
+    /// The count of intervals every clocked rule reads its time from (`crate::clock`).
+    clock: crate::clock::Counted,
 }
 
 /// What the steps of the purge walk share (`purge`).
@@ -247,6 +249,7 @@ impl<O: Os> State<O> {
             decay: Lined::new(Clocked {
                 word: AtomicU64::new(0),
                 epoch: AtomicU64::new(0),
+                clock: crate::clock::Counted::new(),
             }),
             walk: Lined::new(Walk {
                 purge_at: AtomicU32::new(0),
