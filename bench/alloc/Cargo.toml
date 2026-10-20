@@ -28,6 +28,10 @@ memacct = []
 # asmalloc with its background thread, which `init` starts (asmalloc's `background` feature).
 # A measurement option on top of the asmalloc feature: build.rs does not count it.
 asmalloc-background = ["asmalloc", "asmalloc/background"]
+# asmalloc with slow-path counters (crates/asmalloc/src/probe.rs), for an investigation.
+asmalloc-probe = ["asmalloc", "asmalloc/probe-counts"]
+asmalloc-center = ["asmalloc", "asmalloc/probe-center"]
+asmalloc-spares = ["asmalloc", "asmalloc/probe-spares"]
 # asmalloc with its cache domains split by `ASMALLOC_DOMAIN_WIDTH=<n>` (CPUs n*k to n*k+n-1 in
 # domain k) instead of by L3, which `init` applies; for measuring the depot with more domains
 # than the machine has. A measurement option on top of the asmalloc feature, never a build

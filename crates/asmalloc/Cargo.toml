@@ -37,6 +37,12 @@ background = []
 # The `Allocator` trait for `Asmalloc` (and `SimHeap`). The trait is stable from Rust 1.100, so
 # until then this needs a nightly toolchain.
 allocator-api = []
+# Slow-path counters for an investigation (src/probe.rs). Not for merging.
+probe-counts = []
+# Centre the loaded magazine after a swap that reverses the last one (an experiment).
+probe-center = ["probe-counts"]
+# Eight times the spare budget (an experiment).
+probe-spares = ["probe-counts"]
 
 [dependencies]
 

@@ -19,7 +19,11 @@ use crate::os::Os;
 use core::sync::atomic::Ordering::Acquire;
 
 /// The bytes of objects one CPU may keep in spare magazines, over all classes, by default.
+#[cfg(not(feature = "probe-spares"))]
 pub const SPARE_BUDGET: usize = 1 << 20;
+/// Eight times the spares, for the experiment of the `probe-spares` feature.
+#[cfg(feature = "probe-spares")]
+pub const SPARE_BUDGET: usize = 8 << 20;
 
 /// The most magazines one spare stack holds, by default.
 ///
@@ -167,6 +171,9 @@ impl<'a, O: Os, R: Routines, S: Source> Cache<'a, O, R, S> {
         if depth >= limit && !self.stock_admits(class, kind, depth - limit) {
             return Err(magazine);
         }
+        if depth >= limit {
+            probe!(self.routines.cpu(), class, StockAdmit);
+        }
         magazine.set_record(Record {
             level: magazine.level(),
             depth,
@@ -191,9 +198,19 @@ impl<'a, O: Os, R: Routines, S: Source> Cache<'a, O, R, S> {
         magazine: Magazine<'a>,
         stale: &mut bool,
     ) {
-        if let Err(magazine) = self.spare_push(class, kind, magazine, stale) {
-            let contended = self.to_depot(class, magazine);
-            self.note_sent(class, kind, contended);
+        match self.spare_push(class, kind, magazine, stale) {
+            Ok(()) => match kind {
+                Spare::Full => probe!(self.routines.cpu(), class, RetireFullSpare),
+                Spare::Empty => probe!(self.routines.cpu(), class, RetireEmptySpare),
+            },
+            Err(magazine) => {
+                match kind {
+                    Spare::Full => probe!(self.routines.cpu(), class, RetireFullDepot),
+                    Spare::Empty => probe!(self.routines.cpu(), class, RetireEmptyDepot),
+                }
+                let contended = self.to_depot(class, magazine);
+                self.note_sent(class, kind, contended);
+            }
         }
     }
 }
