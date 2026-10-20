@@ -159,6 +159,22 @@ def busy(before, after, cpus):
     return round(len(cpus) * used / total, 3) if total else None
 
 
+def cstates(cpus=(0, 1, 2, 3)):
+    """Entries into and time in each idle state, summed over the server's CPUs."""
+    out = {}
+    for c in cpus:
+        base = Path(f"/sys/devices/system/cpu/cpu{c}/cpuidle")
+        for st in sorted(base.glob("state*")):
+            name = (st / "name").read_text().strip()
+            u, t = out.get(name, (0, 0))
+            out[name] = (u + int((st / "usage").read_text()), t + int((st / "time").read_text()))
+    return out
+
+
+def cstate_delta(a, b):
+    return {k: {"entries": b[k][0] - a[k][0], "us": b[k][1] - a[k][1]} for k in a}
+
+
 def parse_perf(path):
     vals, mux = {}, []
     for line in Path(path).read_text().splitlines():
@@ -245,6 +261,7 @@ def one_run(server, alloc, rnd, segs, outdir, wrap="", record=""):
         rec["realtime_minus_monotonic_ns"] = time.time_ns() - time.monotonic_ns()
         g = subprocess.Popen(gen, stdout=subprocess.PIPE, stderr=open(d / "gen.err", "w"), text=True)
         result, marks = None, []
+        idle_at, idle_states = {}, {}
         for line in g.stdout:
             if line.startswith("MARK"):
                 f = line.split()
@@ -253,6 +270,8 @@ def one_run(server, alloc, rnd, segs, outdir, wrap="", record=""):
                 for label in stops.get(idx, []):
                     if label in perfs:
                         perfs[label][0].send_signal(signal.SIGINT)
+                    if label in idle_at:
+                        idle_states[label] = cstate_delta(idle_at.pop(label), cstates())
                 if record and idx == 0:
                     p = subprocess.Popen(["taskset", "-c", AUX_CPU, "perf", "record", "-o", str(d / "perf.data")]
                                          + record.split() + ["-p", str(pid)],
@@ -267,6 +286,7 @@ def one_run(server, alloc, rnd, segs, outdir, wrap="", record=""):
                                           "-e", EVENTS, "-p", str(pid)],
                                          stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
                     perfs[label] = (p, out, time.monotonic())
+                    idle_at[label] = cstates()
             elif line.startswith("RESULT "):
                 result = json.loads(line[7:])
         g.wait()
@@ -277,6 +297,7 @@ def one_run(server, alloc, rnd, segs, outdir, wrap="", record=""):
             p.wait(timeout=60)
         rec["perf"] = {label: parse_perf(out) for label, (p, out, t0) in perfs.items()
                        if label != "record" and out.exists()}
+        rec["cstates"] = idle_states
         rec["gen_rc"] = g.returncode
         rec["summary"] = result
         rec["marks"] = marks
