@@ -1,0 +1,17 @@
+[package]
+name = "asmalloc-tokio"
+version = "0.1.0"
+description = "Runs asmalloc's maintenance from a task on a tokio runtime"
+edition.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+asmalloc = { path = "../asmalloc" }
+tokio = { version = "1.48", default-features = false, features = ["rt", "time"] }
+
+[dev-dependencies]
+tokio = { version = "1.48", default-features = false, features = ["rt", "rt-multi-thread", "time", "macros", "test-util"] }
+
+[lints]
+workspace = true

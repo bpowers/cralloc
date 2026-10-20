@@ -68,22 +68,26 @@ impl Asmalloc {
     /// One round of the heap's clocked maintenance, which otherwise runs only on slow paths:
     /// drains the magazines of every CPU that has taken no slow path for an interval (about a
     /// second; one `membarrier` each), launders what the depot's stacks did not need during
-    /// the last interval, and takes the purge pass that is due to its end. It respects the
-    /// clock as the slow paths do, so calling it more often than about once a second does next
-    /// to nothing, and it is not [`Asmalloc::collect`], which empties every cache at once.
+    /// the last interval, and takes the purge pass that is due to its end. It runs one round
+    /// in each interval and returns at once for every other call, after one clock read, so it
+    /// may be called as often as a caller likes; it is not [`Asmalloc::collect`], which
+    /// empties every cache at once. Intervals are counted, not read off the clock: a call is
+    /// what counts the intervals of a silence, so with nothing calling it a silence of any
+    /// length ages the heap by one interval.
     ///
     /// A process whose threads all stay inside their loaded magazines never takes a slow
     /// path, and keeps what it held when it went quiet until something calls this. The
     /// `background` feature's `Asmalloc::start_background` calls it from a thread of its
-    /// own; a program with an idle hook can call it from there instead. It never waits, and
-    /// any thread may call it at any time.
+    /// own; the `asmalloc-tokio` crate from a task on a tokio runtime. It never waits, and any
+    /// thread may call it at any time.
     pub fn maintain() {
         process().maintain();
     }
 
-    /// How long the background thread sleeps between calls of [`Asmalloc::maintain`]: under
-    /// the shortest interval the clock gives on a plausible machine (`depot::IDLE_TICKS`, 0.7 s
-    /// at 6 GHz), so that every interval gets a call.
+    /// How long the background thread, or a timer, sleeps between calls of
+    /// [`Asmalloc::maintain`]: under the shortest interval the clock gives on a plausible
+    /// machine (`depot::IDLE_TICKS`, 0.7 s at 6 GHz), so that every interval gets a call.
+    /// `maintain` runs one round an interval, so the calls in between cost a clock read.
     #[doc(hidden)]
     pub const MAINTAIN_EVERY: core::time::Duration = core::time::Duration::from_millis(500);
 

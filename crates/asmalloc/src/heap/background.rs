@@ -22,7 +22,9 @@ static STARTED: AtomicU32 = AtomicU32::new(0);
 
 impl Asmalloc {
     /// Starts the background thread that calls [`Asmalloc::maintain`] about twice a second,
-    /// so that the heap returns idle memory even when no thread takes a slow path. The thread
+    /// so that the heap returns idle memory even when no thread takes a slow path. `maintain`
+    /// runs one round an interval and returns at once otherwise; its clock read is what counts
+    /// the intervals of a silence (`crate::clock`). The thread
     /// is named `asmalloc`, is detached, and runs until the process exits.
     ///
     /// Call it once, early in `main`. A second call, from any thread, returns `Ok` and starts
