@@ -184,6 +184,74 @@ pub fn refill(args: &Args) {
     report("end", start);
 }
 
+/// EXPERIMENT (domain-affine back end): load that moves from one cache domain to another.
+/// The first `threads` CPUs of `BENCH_CPUS` (group A) each allocate `live` objects (`sizes`)
+/// and write them, then free all but `keep` percent in random order and wait. Then the next
+/// `threads` CPUs (group B) each, for `secs` seconds, allocate `live` objects of the same
+/// sizes, write them and free them in random order, over and over. Reports memory every
+/// 250 ms, and B's nanoseconds per object for each round (`SHIFT` lines). A's kept objects are
+/// freed at the end.
+pub fn shift(args: &Args) {
+    let cpus = Cpus::from_env();
+    let threads = args.usize("threads", 4);
+    let (live, keep, mix) = (args.usize("live", 500_000), args.num("keep", 10), size_mix(args));
+    let secs = args.num("secs", 8);
+    let start = Instant::now();
+    report("start", start);
+    let built = Barrier::new(threads + 1);
+    let kept: Vec<Vec<(usize, usize)>> = std::thread::scope(|s| {
+        let handles: Vec<_> = (0..threads)
+            .map(|i| {
+                let (cpus, built) = (&cpus, &built);
+                s.spawn(move || {
+                    cpus.pin(i);
+                    let mut rng = Rng::new(11 + i as u64);
+                    let mut objects: Vec<_> = (0..live).map(|_| make(mix.sample(&mut rng))).collect();
+                    for k in (1..objects.len()).rev() {
+                        objects.swap(k, rng.below(k as u64 + 1) as usize);
+                    }
+                    let held = objects.split_off(objects.len() - objects.len() * keep as usize / 100);
+                    objects.into_iter().for_each(drop_one);
+                    built.wait();
+                    // Addresses, so the vector can leave the thread.
+                    held.into_iter().map(|(p, n)| (p as usize, n)).collect()
+                })
+            })
+            .collect();
+        built.wait();
+        handles.into_iter().map(|h| h.join().unwrap()).collect()
+    });
+    report("freed", start);
+    let begin = Instant::now();
+    std::thread::scope(|s| {
+        for i in 0..threads {
+            let cpus = &cpus;
+            s.spawn(move || {
+                cpus.pin(threads + i);
+                let mut rng = Rng::new(101 + i as u64);
+                let mut round = 0;
+                while begin.elapsed() < Duration::from_secs(secs) {
+                    let t = Instant::now();
+                    let mut objects: Vec<_> = (0..live).map(|_| make(mix.sample(&mut rng))).collect();
+                    for k in (1..objects.len()).rev() {
+                        objects.swap(k, rng.below(k as u64 + 1) as usize);
+                    }
+                    objects.into_iter().for_each(drop_one);
+                    let ns = t.elapsed().as_nanos() as f64 / live as f64;
+                    println!("SHIFT thread={i} round={round} t_ms={} ns_per_object={ns:.1}", start.elapsed().as_millis());
+                    round += 1;
+                }
+            });
+        }
+        while begin.elapsed() < Duration::from_secs(secs) {
+            std::thread::sleep(Duration::from_millis(250));
+            report("after", start);
+        }
+    });
+    kept.into_iter().flatten().for_each(|(p, n)| drop_one((p as *mut u8, n)));
+    report("end", start);
+}
+
 pub fn period(args: &Args) {
     Cpus::from_env().pin(0);
     let start = Instant::now();

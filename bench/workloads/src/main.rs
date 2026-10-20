@@ -38,6 +38,7 @@ fn main() {
         "tiny" => mem::tiny(&args),
         "period" => mem::period(&args),
         "refill" => mem::refill(&args),
+        "shift" => mem::shift(&args),
         // A probe of the slow paths' stack depth; not part of any suite.
         "stack" => stack::stack(&args),
         _ => {
