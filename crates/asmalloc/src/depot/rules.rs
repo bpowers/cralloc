@@ -1762,11 +1762,94 @@ fn a_rule_the_budget_turns_away_waits_for_the_next_slow_path() {
         "the refresh alone"
     );
     assert!(spares(), "the sweep waited");
-    // The next slow path has the budget, and the sweep takes the spare.
+    // The CPU's next slow path runs the sweep first. Frees fill the new loaded magazine; the one
+    // that finds it full exchanges it, the refresh waits for the sweep, and the sweep takes
+    // the spare stack, laundering its top.
+    for _ in 0..capacity - 1 {
+        cache.free(class, rig.source.alloc_one(class).unwrap());
+    }
+    let extra = rig.source.alloc_one(class).unwrap();
     let before = rig.source.laundered();
-    let clock = super::heartbeat::Clock::new(rig.os());
-    cache.begin_slow_path();
-    assert!(cache.sweep_step(cpu, true, &clock));
-    assert_eq!(rig.source.laundered() - before, capacity);
-    assert!(!spares());
+    cache.free(class, extra);
+    assert_eq!(
+        rig.source.laundered() - before,
+        capacity,
+        "the sweep, not the refresh"
+    );
+    assert!(!spares(), "the sweep took the spares");
+}
+
+/// A heap whose CPUs `width` at a time share a cache domain, with room for many of the largest
+/// magazines.
+fn roomy<const N: usize>(width: u32, classes: &[SmallClass], count: usize) -> Rig<SimOs<Roomy>, N> {
+    let os = SimOs::new();
+    os.set_topology(crate::os::sim::SimTopology::Blocks(width));
+    Rig::with_os(os, classes, count, Tuning::DEFAULT)
+}
+
+/// Whether CPU `n` of `rig` has a magazine of `class` loaded.
+fn loaded_on<const N: usize>(rig: &Rig<SimOs<Roomy>, N>, n: i32, class: SmallClass) -> bool {
+    let word = rig
+        .slabs()
+        .slab(rig.slabs().cpu(n).unwrap())
+        .field(Field::hot(class))
+        .load(Relaxed);
+    !word.is_null() && !crate::classes::is_marker(word.addr())
+}
+
+/// CPU 0, in one cache domain, uses the smallest class once, then frees what CPU 1, in another,
+/// allocates of a class with two-object magazines, for three intervals. With `ahead`, CPU 1
+/// allocates everything first, so that every magazine CPU 0 retires goes past the shared stack's
+/// target; without, the two take turns, and the shared stack stays under it. Whether CPU 0
+/// still had the smallest class's magazine loaded at the end, and whether its sweep went round
+/// every class.
+fn idle_magazine_left_loaded(ahead: bool) -> (bool, bool) {
+    let (idle, flow) = (SmallClass::from_ordinal(0).unwrap(), tiny(0));
+    let steps = 24;
+    let per_step = 128;
+    let rig: Rig<SimOs<Roomy>, 2> = roomy(1, &[idle, flow], steps * per_step + 16);
+    let (zero, one) = (SimCpu::new(0), SimCpu::new(1));
+    let (frees, allocs) = (rig.cache(&zero), rig.cache(&one));
+    let object = frees.alloc(idle).unwrap();
+    frees.free(idle, object);
+    assert!(loaded_on(&rig, 0, idle));
+    let mut ahead_of_time: Vec<NonNull<u8>> = Vec::new();
+    if ahead {
+        ahead_of_time = (0..steps * per_step)
+            .filter_map(|_| allocs.alloc(flow))
+            .collect();
+        assert_eq!(ahead_of_time.len(), steps * per_step);
+    }
+    let sweep = rig.slabs().slab(rig.slabs().cpu(0).unwrap()).sweep();
+    let mut swept = false;
+    for _ in 0..steps {
+        rig.os().advance_clock(IDLE_TICKS / 8);
+        for _ in 0..per_step {
+            let object = match ahead_of_time.pop() {
+                Some(object) => object,
+                None => allocs.alloc(flow).unwrap(),
+            };
+            frees.free(flow, object);
+            // The sweep's cursor, in the word's low byte, at the class count: done.
+            swept |= (sweep.load(Relaxed) & 0xff) as usize == crate::classes::SMALL_COUNT;
+        }
+    }
+    (loaded_on(&rig, 0, idle), swept)
+}
+
+/// Review of the launder budget: a CPU whose every slow path pushed a magazine on a shared
+/// stack set the magazine's objects aside from the budget, over target or not, so its age limit
+/// never had room for a magazine of the smallest class, and one it had stopped using stayed
+/// loaded for good. Now only a push that leaves the stack over its target is set aside.
+#[test]
+fn a_cpu_whose_pushes_stay_under_target_still_takes_back_an_idle_magazine() {
+    assert_eq!(idle_magazine_left_loaded(false), (false, true));
+}
+
+/// Review of the launder budget: where every push does leave the shared stack over its target,
+/// the age limit finds the old magazine and no room on every slow path; the next slow path then
+/// gives it the budget first.
+#[test]
+fn a_cpu_whose_pushes_overflow_still_takes_back_an_idle_magazine() {
+    assert_eq!(idle_magazine_left_loaded(true), (false, true));
 }

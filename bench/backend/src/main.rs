@@ -19,7 +19,7 @@
 //! - `desc`: descending, as a magazine filled in ascending order is popped and freed in order.
 //! - `two`: two descending streams interleaved, each from its own bitmap word: what laundered
 //!   magazines of a parsed and dropped JSON document look like.
-//! - `block`: shuffled within each 256 objects, a magazine's worth.
+//! - `block`: shuffled within each batch, a magazine's worth.
 //! - `scatter`: shuffled across the whole pool, as a `BTreeMap` dropped in key order frees.
 //! - `spread`: shuffled across the whole pool, then each batch sorted: scattered slots that a
 //!   magazine holds in address order.
@@ -267,7 +267,7 @@ fn order(name: &str, pool: &[*mut u8], batch: usize, rng: &mut Rng) -> Vec<*mut 
                 block.copy_from_slice(&mixed);
             }
         }
-        "block" => v.chunks_mut(256).for_each(|block| shuffle(block, rng)),
+        "block" => v.chunks_mut(batch).for_each(|block| shuffle(block, rng)),
         "scatter" => shuffle(&mut v, rng),
         "spread" => {
             shuffle(&mut v, rng);

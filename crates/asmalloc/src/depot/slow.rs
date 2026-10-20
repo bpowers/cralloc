@@ -329,7 +329,8 @@ impl<'a, O: Os, R: Routines, S: Source> Cache<'a, O, R, S> {
                     chores.installed = true;
                     if let Seen::Loaded(old, level) = seen {
                         old.set_level(level);
-                        if self.refreshes(cpu) && self.may_launder(class) {
+                        if self.refreshes(cpu) && self.may_launder(class) && !self.has_deferred(cpu)
+                        {
                             self.launder_held(class, &old);
                             self.retire(class, Spare::Empty, old, &mut chores.stale);
                         } else {

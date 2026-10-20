@@ -131,6 +131,13 @@ impl<S: Shape> SimHeap<S> {
         SimHeap::with_os(SimOs::new())
     }
 
+    /// How many magazines the heap's magazine area could not make, so that a test meant to
+    /// exercise the magazines can check that none of its calls went to the back end instead.
+    #[cfg(test)]
+    pub(crate) fn refused_magazines(&self) -> usize {
+        self.heap.depot.refused_magazines()
+    }
+
     /// A heap over `os`, not yet started.
     pub fn with_os(os: SimOs<S>) -> SimHeap<S> {
         SimHeap {

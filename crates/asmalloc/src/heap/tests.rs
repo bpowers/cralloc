@@ -298,9 +298,10 @@ fn a_simulated_heap_exchanges_magazines() {
         bursts(&heap, 48, 1100, 2);
         return;
     }
-    // Past the largest magazine, 1,022 objects, so that every class exchanges.
+    // Past the largest magazine, so that every class exchanges.
+    let burst = 2 * crate::classes::MagazineSize::MAX.capacity() + 100;
     for size in [8, 48, 512, MAX_SMALL_SIZE] {
-        bursts(&heap, size, 2500, 40);
+        bursts(&heap, size, burst, 40);
     }
 }
 
@@ -541,6 +542,9 @@ fn blocks_have_one_owner_while_threads_churn_and_drains_run(rounds: usize) {
             )
         });
         drop(held);
+        // Every call went through magazines: none was served from the back end because the
+        // magazine area ran out.
+        assert_eq!(heap.refused_magazines(), 0);
     }
 }
 
@@ -1057,6 +1061,9 @@ fn blocks_have_one_owner_while_threads_churn_and_the_clock_runs() {
             );
             done.store(true, std::sync::atomic::Ordering::Relaxed);
         });
+        // Every call went through magazines: none was served from the back end because the
+        // magazine area ran out.
+        assert_eq!(heap.refused_magazines(), 0);
     }
 }
 
@@ -1089,8 +1096,10 @@ mod process {
 
     #[test]
     fn the_process_heap_exchanges_magazines() {
+        // Past the largest magazine, so that every class exchanges.
+        let burst = 2 * crate::classes::MagazineSize::MAX.capacity() + 100;
         for size in [8, 48, 512, MAX_SMALL_SIZE] {
-            bursts(&Asmalloc, size, 600, 40);
+            bursts(&Asmalloc, size, burst, 40);
         }
     }
 

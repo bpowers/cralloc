@@ -1328,14 +1328,30 @@ the work. They are now counted in work.
   waits for a later slow path; what a drain parks over a target and the budget leaves, the shed
   takes back. For classes of 254 objects or fewer that is four magazines, as before.
 
-**Rates.** The launder over target stays one magazine per push. The refresh counts every
-retirement and is skipped only when the budget is spent in the same call, which takes a second
-install in one call. The age limit, the sweep and the shed act once an interval per class and
-retry at every heartbeat; a CPU whose every exchange pushes past a target leaves them to its
-other slow paths and to other CPUs. Fewer exchanges do mean fewer heartbeats for the smallest
-classes: the age look's rotation over 44 classes takes four times as many of that class's
-operations as before. The interval-paced rules depend on there being slow paths at all, as
-they did before; `maintain` covers a program that has none.
+**Rates.** The launder over target stays one magazine per push past a target. The refresh
+counts every retirement and is skipped when the budget is already spent in the same call or a
+rule is waiting for it (below). The shed acts on debts any CPU can pay. The age limit and the
+sweep are per slab: only their own CPU's slow paths run them, and the idle drain skips a busy
+CPU. So each looks for work before it asks for room, and when it finds work and no room it
+records that in the slab's sweep word; the CPU's next slow path gives it the budget first and
+launders over target only with what it leaves (`depot/age.rs`, `Sweep`). Only the objects of a
+push that left a shared stack over its target are set aside from the budget.
+
+*Corrected after review (2026-10-19).* The first version set aside every object an exchange
+pushed on a shared stack, over target or not, and gated the age limit and the sweep before they
+looked for work, so a CPU whose every slow path pushed on a shared stack never ran either: in a
+two-domain pipeline of a two-object class, an idle magazine of the smallest class stayed loaded
+on the freeing CPU for 60 intervals and its sweep reached 4 classes of 44 (on main, emptied in
+1.1 intervals). An earlier version of this note said such a CPU leaves those rules to other
+CPUs; it cannot. Two tests now run that pipeline for three intervals, with the shared stack
+under its target and with every push over it, and require the idle magazine taken back and the
+sweep round every class (`depot/rules.rs`). A launder over target that a waiting rule took the
+budget from leaves its stack one magazine over its target until the shed takes it back.
+
+Fewer exchanges do mean fewer heartbeats for the smallest classes: the age look's rotation over
+44 classes takes four times as many of that class's operations as before. The interval-paced
+rules depend on there being slow paths at all, as they did before; `maintain` covers a program
+that has none.
 
 **The worst single call**, from `backbench` per-object costs on CPU 2 (8-byte class, medians of
 three rounds), times the most one call can do: main, a fill of 254 and three launders of 254;
@@ -1457,6 +1473,10 @@ heartbeat as it was.
   the next, and the sweep laundered addresses past the first region's last slot, which the back
   end rightly refused. The bench now checks that its slots are contiguous and says which size
   does not fit; 32 MiB is the largest for the 8-byte class.
+- **The test shape ran out of magazines.** `Standard`, which the stress tests, Miri and the
+  fuzzer use, had room for 127 of the largest magazines, and two one-owner stress tests served
+  1,520 and 69,673 calls from the back end because none could be made. It now has 16 magazine
+  regions (255), and those tests require that no magazine was refused.
 - The routines and their proofs needed nothing: the masks are 32 bits, the Lean specification and
   the generated constants already cover 4 to 2^16 slots, and Kani's marker harness checks every
   mask from 2^2 to 2^16. No generated file changed.

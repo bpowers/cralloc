@@ -70,7 +70,9 @@ pub trait Shape: 'static {
 }
 
 /// The shape for tests, Miri and fuzzing: 4 KiB pages, 64 KiB huge pages, regions of 256 KiB
-/// (128 KiB at the floor), 244 object regions (enough for every class), 4 magazine regions,
+/// (128 KiB at the floor), 232 object regions (enough for every class), 16 magazine regions
+/// (2 MiB at the floor: 255 of the largest magazines, which hold 1,022 objects each, so that
+/// the tests that churn many threads through many classes never run out),
 /// 64 MiB of address space that the host commits only as it is touched.
 ///
 /// The pages are host pages, so natively the simulator's memory is guarded: touching a page the
@@ -81,7 +83,7 @@ pub trait Shape: 'static {
 pub enum Standard {}
 
 impl Shape for Standard {
-    const GEOMETRY: Geometry = Geometry::new(12, 16, 18, 17, 256, 4, MagazineSize::MAX);
+    const GEOMETRY: Geometry = Geometry::new(12, 16, 18, 17, 256, 16, MagazineSize::MAX);
 }
 
 /// The shape for native tests of large classes: 4 KiB pages, 64 KiB huge pages, regions of

@@ -34,9 +34,11 @@ carve the same magazines.
   area while a `Space` exists. The returned reference borrows the handle, so it lives no longer.
 - *Provenance.* `base` comes from `Space::magazines()` through `map_addr`, so it carries the
   reservation's provenance.
-- *Aligned.* The area is aligned to `Geometry::magazine_area_align`, at least the largest
-  magazine, and the offset is a multiple of the magazine's size, so the base is aligned to the
-  magazine's size (at least 32) and every slot to 8.
+- *Aligned.* The area is aligned to the region size (`Plan::magazines_offset`), which
+  `Geometry::try_new` requires to be at least the largest magazine at every region size the
+  geometry allows (`space::verify`, `plans_keep_their_parts_apart`), and the offset is a multiple
+  of the magazine's size, so the base is aligned to the magazine's size (at least 32) and every
+  slot to 8.
 - *No non-atomic access.* Every access to magazine memory in the crate is atomic: this
   function's views, `Magazine::objects`' slice (MAGAZINE-02), through which the back end's
   fill and launder store and load with relaxed atomics, the twins' (`front/twin.rs`), and the
