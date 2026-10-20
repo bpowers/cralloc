@@ -4,7 +4,8 @@ Workload benchmarks that compare allocators on whole programs: cross-thread patt
 work-stealing pool, an RPC server, single-threaded allocation-heavy shapes, and selected
 mimalloc-bench programs. Results and what they mean are in `docs/research/baselines.md`.
 The fast-path microbenchmarks are in `roofline/` and `docs/research/zen5-roofline.md`. Real
-Rust programs (ruff, DataFusion, boa) are the `apps` suite, with their own build step and
+Rust programs are the `servers` suite (connect-rust, axum and actix-web services under an
+open load) and the `apps` suite (ruff, DataFusion, boa), with their own build step and
 inputs: see `apps/README.md`.
 
 Everything here is x86-64 Linux only and needs `perf_event_open` for hardware counters
@@ -88,7 +89,8 @@ cannot be rebuilt under a session.
 | `backend/` | `backbench`: asmalloc's back-end launder and fill on their own, per class and pointer order. |
 | `workloads/` | The `workload` binary: cross-thread, work-stealing and single-threaded workloads. |
 | `rpc/` | connect-rust's echo and log-ingest benchmarks as `rpc-server` (allocator under test) and `rpc-client` (fixed). See `rpc/README.md`. |
-| `apps/` | Real Rust programs, each a workspace of its own with a driver; the `apps` suite, built by `benchrun build-apps`. See `apps/README.md`. |
+| `apps/` | Real Rust programs, each a workspace of its own with a driver; the `apps` and `servers` suites, built by `benchrun build-apps`. See `apps/README.md`. |
+| `probes/loadgen/` | The servers' open-loop HTTP/1.1 load generator: latency from when each request was due. |
 | `runner/` | `benchrun`: builds, runs and reports. Jobs are defined in `runner/src/suite.rs`. |
 | `roofline/` | Fast-path microbenchmarks, each a cargo project of its own. See `roofline/README.md`. |
 | `probes/` | Standalone programs that each check one assumption about the kernel, glibc or Rust. See `probes/README.md`. |

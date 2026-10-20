@@ -1,0 +1,42 @@
+# The order service from the screening (bench/probes/rust-screen/servers) on axum and on
+# actix-web, as a server driven by the suite's load generator. See ../README.md.
+[workspace]
+resolver = "3"
+
+[package]
+name = "app-orders"
+version = "0.0.0"
+edition = "2024"
+license = "Apache-2.0 OR BSD-3-Clause"
+publish = false
+
+[[bin]]
+name = "orders"
+path = "src/main.rs"
+
+# The allocator under test, by the bench-alloc feature of its entry in ../../allocators.toml
+# (none: glibc). Every program forwards the same set; see ../README.md.
+[features]
+mi = ["bench-alloc/mi"]
+mi-sized = ["bench-alloc/mi-sized"]
+mi-crate = ["bench-alloc/mi-crate"]
+asmalloc = ["bench-alloc/asmalloc"]
+je = ["bench-alloc/je"]
+tc = ["bench-alloc/tc"]
+sn = ["bench-alloc/sn"]
+
+[dependencies]
+bench-alloc = { path = "../../alloc" }
+bench-app = { path = "../common" }
+# The versions the screening ran (its lock file seeds this one).
+axum = "0.8.9"
+actix-web = "4.17.0"
+tokio = { version = "1.54.0", features = ["full"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1.0.154"
+
+# Not a released program, so no profile of its own: the suite's, which asmalloc's design
+# recommends to every user (fat LTO, one unit), the same for every allocator.
+[profile.release]
+lto = "fat"
+codegen-units = 1

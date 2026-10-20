@@ -82,3 +82,36 @@ pub fn cpu_model() -> String {
         .find_map(|l| l.strip_prefix("model name").and_then(|r| r.split(':').nth(1)).map(|m| m.trim().to_string()))
         .unwrap_or_default()
 }
+
+/// The machine's transparent-huge-page and compaction counters (`/proc/vmstat`), whose change
+/// over a run shows whether it got huge pages and what the kernel did to provide them. They
+/// are machine-wide, so they include other processes' activity; on a quiet machine that is
+/// little.
+pub struct Vmstat(Vec<(String, u64)>);
+
+impl Vmstat {
+    pub fn read() -> Vmstat {
+        let text = std::fs::read_to_string("/proc/vmstat").unwrap_or_default();
+        Vmstat(
+            text.lines()
+                .filter(|l| l.starts_with("thp_") || l.starts_with("compact_"))
+                .filter_map(|l| {
+                    let (k, v) = l.split_once(' ')?;
+                    Some((k.to_string(), v.trim().parse().ok()?))
+                })
+                .collect(),
+        )
+    }
+
+    /// The counters that changed since this reading, by name.
+    pub fn delta(&self) -> serde_json::Value {
+        let mut m = serde_json::Map::new();
+        for (k, v) in Vmstat::read().0 {
+            let before = self.0.iter().find(|(b, _)| *b == k).map_or(0, |(_, x)| *x);
+            if v != before {
+                m.insert(k, v.saturating_sub(before).into());
+            }
+        }
+        serde_json::Value::Object(m)
+    }
+}
