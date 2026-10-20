@@ -94,6 +94,25 @@ extern crate alloc;
 #[cfg(any(test, feature = "background"))]
 extern crate std;
 
+/// Counts a slow-path event in the `probe-counts` build; nothing otherwise.
+macro_rules! probe {
+    ($cpu:expr, $class:expr, $kind:ident) => {{
+        #[cfg(feature = "probe-counts")]
+        {
+            crate::probe::count($cpu, $class, crate::probe::Kind::$kind);
+        }
+    }};
+    ($cpu:expr, $class:expr, $kind:ident, $n:expr) => {{
+        #[cfg(feature = "probe-counts")]
+        {
+            crate::probe::add($cpu, $class, crate::probe::Kind::$kind, $n as u64);
+        }
+    }};
+}
+
+#[cfg(feature = "probe-counts")]
+pub mod probe;
+
 #[cfg(feature = "internals")]
 #[doc(hidden)]
 pub mod back;

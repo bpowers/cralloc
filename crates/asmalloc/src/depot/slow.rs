@@ -104,6 +104,7 @@ impl<'a, O: Os, R: Routines, S: Source> Cache<'a, O, R, S> {
     fn obtain_empty(&self, class: SmallClass, stale: &mut bool) -> Option<Magazine<'a>> {
         if let Some(magazine) = self.spare_pop(class, Spare::Empty, stale) {
             if magazine.level() == 0 {
+                probe!(self.routines.cpu(), class, EmptySpare);
                 return Some(magazine);
             }
             self.to_depot(class, magazine);
@@ -114,9 +115,11 @@ impl<'a, O: Os, R: Routines, S: Source> Cache<'a, O, R, S> {
                 self.depot.empty(pool, size).pop_noting(self.area, size)
             {
                 self.note_return(class, Spare::Empty, contended);
+                probe!(self.routines.cpu(), class, EmptyDepot);
                 return Some(magazine);
             }
         }
+        probe!(self.routines.cpu(), class, EmptyMade);
         self.area.create(size)
     }
 
@@ -125,16 +128,19 @@ impl<'a, O: Os, R: Routines, S: Source> Cache<'a, O, R, S> {
     fn obtain_full(&self, class: SmallClass, chores: &mut Chores) -> Obtained<'a> {
         if let Some(magazine) = self.spare_pop(class, Spare::Full, &mut chores.stale) {
             if magazine.level() > 0 {
+                probe!(self.routines.cpu(), class, AllocSpare);
                 return Obtained::Magazine(magazine);
             }
             self.to_depot(class, magazine);
         }
         if let Some(magazine) = self.pop_full(class, &mut chores.tried) {
+            probe!(self.routines.cpu(), class, AllocDepot);
             return Obtained::Magazine(magazine);
         }
         let Some(magazine) = self.obtain_empty(class, &mut chores.stale) else {
             return Obtained::NoMagazine;
         };
+        probe!(self.routines.cpu(), class, AllocFill);
         if self.fill(class, &magazine) == 0 {
             self.retire(class, Spare::Empty, magazine, &mut chores.stale);
             return Obtained::OutOfMemory;
@@ -218,6 +224,7 @@ impl<'a, O: Os, R: Routines, S: Source> Cache<'a, O, R, S> {
     /// The slow path of an allocation, then the heartbeat. Where the pop routine sends a
     /// thread whose CPU has no magazine with objects for `class`.
     pub fn alloc_slow(&self, class: SmallClass) -> Option<NonNull<u8>> {
+        probe!(self.routines.cpu(), class, AllocSlow);
         self.begin_slow_path();
         let mut chores = Chores::default();
         let object = self.exchange_for_alloc(class, &mut chores);
@@ -262,8 +269,18 @@ impl<'a, O: Os, R: Routines, S: Source> Cache<'a, O, R, S> {
             match installed {
                 StoreIfEqual::Stored => {
                     chores.installed = true;
+                    probe!(Some(cpu), class, AllocInstalledLevel, held.level());
                     if let Seen::Loaded(old, _) = seen {
                         old.set_level(0);
+                        #[cfg(feature = "probe-center")]
+                        if crate::probe::reversed(Some(cpu), class, 1) {
+                            let moved = self.center_alloc(class, &old, held.level() / 2);
+                            if moved > 0 {
+                                old.set_level(moved);
+                                self.retire(class, Spare::Full, old, &mut chores.stale);
+                                continue;
+                            }
+                        }
                         self.retire(class, Spare::Empty, old, &mut chores.stale);
                     }
                 }
@@ -278,6 +295,39 @@ impl<'a, O: Os, R: Routines, S: Source> Cache<'a, O, R, S> {
         }
     }
 
+    /// Moves up to `n` objects out of the loaded magazine of the thread's CPU into `old`, which
+    /// this thread holds empty, so that the loaded one is left half full; returns how many.
+    #[cfg(feature = "probe-center")]
+    fn center_alloc(&self, class: SmallClass, old: &Magazine, n: usize) -> usize {
+        let mut moved = 0;
+        while moved < n {
+            let Some(object) = self.routines.pop(class) else {
+                break;
+            };
+            moved += 1;
+            old.set_object(moved, object);
+        }
+        moved
+    }
+
+    /// Moves up to half of the `level` objects of `old`, a full magazine this thread holds,
+    /// into the loaded magazine of the thread's CPU; returns how many `old` keeps.
+    #[cfg(feature = "probe-center")]
+    fn center_free(&self, class: SmallClass, old: &Magazine, level: usize) -> usize {
+        let mut level = level;
+        let keep = level - level / 2;
+        while level > keep {
+            let Some(object) = NonNull::new(old.object(level)) else {
+                break;
+            };
+            if !self.routines.push(class, object) {
+                break;
+            }
+            level -= 1;
+        }
+        level
+    }
+
     /// Frees an object of `class`: the push routine, then the slow path if it fails.
     pub fn free(&self, class: SmallClass, object: NonNull<u8>) {
         if !self.routines.push(class, object) {
@@ -288,6 +338,7 @@ impl<'a, O: Os, R: Routines, S: Source> Cache<'a, O, R, S> {
     /// The slow path of a free, then the heartbeat. Where the push routine sends a thread
     /// whose CPU has no magazine with room for `class`.
     pub fn free_slow(&self, class: SmallClass, object: NonNull<u8>) {
+        probe!(self.routines.cpu(), class, FreeSlow);
         self.begin_slow_path();
         let mut chores = Chores::default();
         self.exchange_for_free(class, object, &mut chores);
@@ -328,6 +379,13 @@ impl<'a, O: Os, R: Routines, S: Source> Cache<'a, O, R, S> {
                 StoreIfEqual::Stored => {
                     chores.installed = true;
                     if let Seen::Loaded(old, level) = seen {
+                        probe!(Some(cpu), class, FreeDisplacedLevel, level);
+                        #[cfg(feature = "probe-center")]
+                        let level = if crate::probe::reversed(Some(cpu), class, 2) {
+                            self.center_free(class, &old, level)
+                        } else {
+                            level
+                        };
                         old.set_level(level);
                         let due = self.refreshes(cpu);
                         if due && self.may_launder(class) && !self.has_deferred(cpu) {
