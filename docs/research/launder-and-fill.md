@@ -1373,6 +1373,15 @@ throwaway prototype on branch `exp-domain-regions`. No allocator code on main ch
 
 ## Summary
 
+Judged by the Rust workloads (the suite's jobs that span both L3s, eight to twelve
+interleaved rounds): the gain is not confined to sh8bench, but it is confined to one shape.
+Independent work spread over the L3s gains: three two-thread pipelines 13%, four 9%, two 2.6%.
+Flows between the L3s gain 2 to 4% (split pipelines, exchange). mpmc 4+4, exchange t8,
+pipeline t8, forkjoin and spawn are level. Peaks rise 0.3 to 1.6 MiB on those jobs (exchange
+t2 split 3.5 to 4.7 MiB, exchange t8 9.2 to 10.8, pipeline t8 10.6 to 12.2), which matters
+against the jemalloc bar on small heaps. On one L3 nothing moves. The C-program figures below
+(sh8bench 24%) are larger but are not the measure to steer by.
+
 - **Domain-affine fills alone buy little.** A carving region per class and domain, with fills
   that prefer their own domain's free slots and carve only when the class has none anywhere,
   takes sh8bench on two L3s from 0.390 to 0.373 s (cycles a call 15.6 to 14.8) and leaves the
@@ -1616,12 +1625,14 @@ would touch:
 
 ## Recommendation
 
-Do not build the direction as first stated: it buys 4% on sh8bench across two L3s, under the
-bar, and makes a moved load slower. Build it with both rules and the cap, if servers with many
-L3s are to be a target: 24% on sh8bench (31% of its cycles), 9 to 13% on independent work
-spread over L3s, nothing lost on one L3, for 4 to 10% higher peaks across L3s, a floor that
-grows with the domains in use, and up to the cap of memory held when load moves between
-domains. The sentence for the design:
+Do not build the direction as first stated: on the Rust jobs across two L3s it is level
+(within 3% everywhere), and it makes a moved load slower. With both rules and the cap the
+Rust jobs gain 9 to 13% where independent work is spread over the L3s and 2 to 4% on flows
+between them, nothing elsewhere and nothing on one L3. The costs: peaks 0.3 to 1.6 MiB higher
+on those jobs, a floor that grows with the domains in use, and up to the cap of memory held
+when load moves between domains. That is a narrow gain for a design change that touches the
+back end, the launder and the depot. Build it only if work spread over many L3s is to be a
+target; otherwise leave it. If it is built, the sentence for the design:
 
 > Each small class carves from a region of its own in each cache domain. A fill takes free
 > slots from its own domain's regions first; then, while retained memory is within the cap, it
