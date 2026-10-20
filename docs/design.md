@@ -314,8 +314,8 @@ A **magazine** is a block of 8-byte slots, a power of two in size and aligned to
 Slot 0 is a link word used by the depot, the last slot holds the fill level while the
 magazine is not loaded, and the slots between hold pointers to free objects. Magazines are
 numbered blocks in one array in the metadata area; they are created by advancing a counter
-and are never unmapped. Their size falls as the class size rises, from 256 slots to 4, so no
-magazine holds more than about 64 KiB of objects.
+and are never unmapped. Their size falls as the class size rises, from 1,024 slots to 4, so
+no magazine holds more than about 64 KiB of objects.
 
 The slab word for a class is the address of the next free slot in the loaded magazine.
 Because a magazine is aligned to its size, the low bits of that address are the slot
@@ -432,6 +432,8 @@ Each CPU keeps a few spare full and empty magazines per class, in stacks whose h
 in the cold part of the slab and are updated by single-store routines. A thread that
 oscillates around a magazine boundary swaps locally without touching shared state. The
 spares of one CPU are limited by a byte budget, and each class by a small fixed share of it.
+A class whose full magazine is larger than its share keeps no full spare by right, and
+relies on the stock described next.
 
 A CPU may keep spares of a class past that share, as stock, where sending them away costs
 time and brings them straight back: a thread that frees a burst far larger than its spares
@@ -500,10 +502,13 @@ been touched.
   walking down from the top again. When it meets another fill at a word (the word changed
   under it, or was emptied before it arrived), it moves on past that group of 64 words, so
   fills of one class on different CPUs part after a few collisions instead of contending
-  for every word; they stay near the bottom of the heap. If no region of the class has a
+  for every word; they stay near the bottom of the heap. A fill claims from a bounded
+  number of words and then hands out what it has, so in a heap whose free objects are
+  scattered one to a word it returns a partly filled magazine instead of searching on, and
+  no call pays for more than that many claims. If no region of the class has a
   free object, which only a search from the top may conclude, the fill carves from the last
   region's watermark with one atomic add, and when that region is exhausted it assigns a
-  new one to the class.
+  new one to the class. It never carves while free objects remain.
 - **Laundering a magazine** groups its pointers by bitmap word and sets each word's bits
   with one atomic OR. A magazine whose objects are scattered, each in a word of its own, has
   nothing to group: once a batch shows that, each remaining object gets one atomic bit-set
@@ -534,8 +539,15 @@ magazine, and the prefetchers would lose the stream each time.
 ### Heartbeat
 
 Every entry to a slow path does a bounded amount of maintenance before it returns: one step
-of purging, one look at a class of its own slab, one look for an idle cache, and at most one
-magazine laundered for each rule that launders. A large allocation or free counts as a slow
+of purging, one look at a class of its own slab, one look for an idle cache, and laundering
+within a budget of one of the largest magazines. The rules that launder share that budget,
+after the call sets aside what its own exchange pushed past a shared depot stack's target:
+those magazines it launders whatever the rules did, so the stack cannot gain on what
+arrives. A rule that finds work and no room waits for a later slow path. The rules that
+only a CPU's own slow paths run for it, the age limit and the sweep, would wait for ever on
+a CPU whose every exchange spends the budget, so one that was turned away goes first at
+that CPU's next slow path, and that call launders up to two of the largest magazines; it
+happens at most once an interval for each class and rule. A large allocation or free counts as a slow
 path, but does the maintenance on one call in sixteen: a program that moves large blocks
 makes such calls far more often than the maintenance needs to run. By default there is no background thread and no timer. The work is done in units
 small enough that no single call pays much. This is mimalloc's pacing applied to a per-CPU
