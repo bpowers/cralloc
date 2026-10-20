@@ -1357,11 +1357,99 @@ fn the_clocked_pass_spares_what_fills_reuse() {
                 .all(|&p| !os.is_purged(NonNull::new(p).unwrap(), 1024))
         );
     }
-    // The program stops reusing them: two passes later, they go.
+    // The program stops reusing them: two passes later the runs of eight pages or more go,
+    // and the shorter ones by the next pass that takes any run.
     for _ in 0..3 {
         os.advance_clock(DECAY_TICKS);
         beat(&back);
     }
+    let page = Standard::GEOMETRY.page_size();
+    assert!(back.retained() < super::policy::PURGE_MIN_RUN_PAGES as usize * page);
+    for _ in 0..super::policy::PURGE_ANY_RUN_EVERY {
+        os.advance_clock(DECAY_TICKS);
+        beat(&back);
+    }
+    assert_eq!(back.retained(), 0);
+}
+
+/// Adjacent free pages go back in one call each run, up to `PURGE_MAX_RUN_PAGES`, not one call
+/// a page: a call costs about the same whatever it returns.
+#[test]
+fn the_clocked_pass_returns_a_run_of_free_pages_in_one_call() {
+    let state = state::<Standard>();
+    let back = state.get_or_reserve().unwrap();
+    let os = state.os();
+    let class = small(1024);
+    let per_page = Standard::GEOMETRY.page_size() / 1024;
+    let pages = 256;
+    let slots = fill(&back, class, pages * per_page);
+    for &p in &slots {
+        paint(p, 1024, 9);
+    }
+    // SAFETY: the test holds these slots and gives them up.
+    unsafe { back.launder(class, &slots) };
+    forget_reuse(&back);
+    let before = os.calls(Call::Purge);
+    // A pass takes a quarter of what is retained, so the run is cut once a pass.
+    let intervals = 12;
+    for _ in 0..intervals {
+        os.advance_clock(DECAY_TICKS);
+        beat(&back);
+    }
+    assert_eq!(back.retained(), 0);
+    let calls = os.calls(Call::Purge) - before;
+    let most = (pages / super::policy::PURGE_MAX_RUN_PAGES as usize + 2 * intervals) as u64;
+    assert!(
+        calls <= most,
+        "{calls} calls for {pages} adjacent free pages"
+    );
+}
+
+/// Free pages between live ones, each a run of one, wait for the pass that takes any run, one
+/// in `PURGE_ANY_RUN_EVERY`, and then go back.
+#[test]
+fn single_free_pages_wait_for_the_pass_that_takes_any_run() {
+    use super::policy::PURGE_ANY_RUN_EVERY;
+    let state = state::<Standard>();
+    let back = state.get_or_reserve().unwrap();
+    let os = state.os();
+    let class = small(1024);
+    let per_page = Standard::GEOMETRY.page_size() / 1024;
+    // Pages of the small-page part only: a huge page with live slots on it is never split.
+    let pages = small_part(&back, class) / per_page;
+    let slots = fill(&back, class, pages * per_page);
+    for &p in &slots {
+        paint(p, 1024, 9);
+    }
+    // Every other page's slots go back; the rest stay live.
+    let freed: Vec<*mut u8> = slots
+        .chunks(per_page)
+        .step_by(2)
+        .flatten()
+        .copied()
+        .collect();
+    // SAFETY: the test holds these slots and gives them up.
+    unsafe { back.launder(class, &freed) };
+    forget_reuse(&back);
+    let retained = back.retained();
+    assert_eq!(retained, freed.len() * 1024);
+    let mut purged_at = None;
+    for interval in 0..2 * PURGE_ANY_RUN_EVERY {
+        os.advance_clock(DECAY_TICKS);
+        beat(&back);
+        if purged_at.is_none() && back.retained() < retained {
+            purged_at = Some(interval);
+        }
+    }
+    let at = purged_at.expect("single pages went back some day");
+    assert!(
+        at + 1 >= PURGE_ANY_RUN_EVERY / 2,
+        "single pages went back after {at} intervals"
+    );
+    assert!(
+        at <= PURGE_ANY_RUN_EVERY + 1,
+        "single pages waited {at} intervals"
+    );
     assert_eq!(back.retained(), 0);
 }
 
@@ -3664,6 +3752,7 @@ mod review {
             tag: Pass::tag_of(started) ^ 1,
             lap: 0,
             pages: 0,
+            any: false,
         };
         state.walk.pass.store(stale.pack(), Relaxed);
         state.decay.word.store(started, Relaxed);
@@ -3679,6 +3768,7 @@ mod review {
             tag: Pass::tag_of(started),
             lap: state.walk.laps.load(Relaxed) as u16,
             pages: 16,
+            any: false,
         };
         state.walk.pass.store(goal.pack(), Relaxed);
         beat(&back);

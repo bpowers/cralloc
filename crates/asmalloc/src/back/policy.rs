@@ -46,6 +46,22 @@ pub const DECAY_FLOOR_HUGE_PAGES: usize = 1;
 /// Dense words fill a whole magazine in sixteen claims.
 pub const FILL_CLAIMS: usize = 256;
 
+/// The most pages a purge returns in one call: 64, 256 KiB. Adjacent free pages go back
+/// together, since a call costs about the same whatever it returns (about 2 us in a process
+/// whose other threads are running, for its TLB shootdowns, against 0.05 us a page:
+/// `docs/research/burst-start.md`); the bound keeps one call's claims, a few hundred bitmap
+/// words for the smallest classes, from holding up the allocations that want them.
+pub const PURGE_MAX_RUN_PAGES: u32 = 64;
+
+/// The clocked pass returns a run of free pages only if it has at least this many: 8. A call
+/// for fewer costs more than twice as much a page as a long one, and a short run is the kind a
+/// burst's next allocations land on. Growth over the cap and `collect` take any run.
+pub const PURGE_MIN_RUN_PAGES: u32 = 8;
+
+/// One clocked pass in this many takes runs of any length: 16, so a single free page goes back
+/// within about sixteen intervals of the program going quiet, and a long run within one.
+pub const PURGE_ANY_RUN_EVERY: u64 = 16;
+
 /// How much bitmap a heartbeat's step of a decay pass may read, in words: 256 words, 2 KiB.
 /// Each word covers 64 slots, so this is one 4 KiB page of 8-byte slots read eight times over,
 /// or a few hundred pages of larger ones. A step always finishes the unit it started, so a

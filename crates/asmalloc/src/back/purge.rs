@@ -121,10 +121,11 @@
 //! the frontiers.
 
 use super::Back;
+use super::layout::Unit;
 use super::layout::{Hints, Step};
 use super::policy::{
-    DECAY_TICKS, PURGE_CAP_WORDS, PURGE_STEP_WORDS, decay_goal, growth_goal, growth_step,
-    retained_cap,
+    DECAY_TICKS, PURGE_ANY_RUN_EVERY, PURGE_CAP_WORDS, PURGE_MAX_RUN_PAGES, PURGE_MIN_RUN_PAGES,
+    PURGE_STEP_WORDS, decay_goal, growth_goal, growth_step, retained_cap,
 };
 use super::region::{self, Purge};
 use super::tree::Host;
@@ -191,9 +192,15 @@ pub(crate) struct Pass {
     /// The low bits of the lap count when the pass began; the pass ends when they differ and
     /// the walk is back where it began.
     pub(crate) lap: u16,
-    /// Pages the pass may still purge.
+    /// Pages the pass may still purge, below 2^31.
     pub(crate) pages: u32,
+    /// The pass takes runs of free pages of any length, not only long ones
+    /// ([`super::policy::PURGE_ANY_RUN_EVERY`]).
+    pub(crate) any: bool,
 }
+
+/// The pass word's flag for a pass that takes runs of any length, above its pages.
+const ANY: u64 = 1 << 31;
 
 /// Which free pages a purge walk may take.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -201,6 +208,10 @@ pub(crate) enum Scope {
     /// Only units that start at or above their region's frontier (`region::floor`): pages
     /// that no fill of the last two intervals reached. What the clocked pass takes.
     Idle,
+    /// As `Idle`, in runs of any length: what the clocked pass takes once in
+    /// [`super::policy::PURGE_ANY_RUN_EVERY`]. `Idle` takes runs of at least
+    /// [`super::policy::PURGE_MIN_RUN_PAGES`].
+    IdleAnyRun,
     /// Every free unit: what growth over the cap and `trim` take.
     All,
 }
@@ -219,12 +230,16 @@ impl Pass {
         Pass {
             tag: (word >> 48) as u16,
             lap: (word >> 32) as u16,
-            pages: word as u32,
+            pages: (word & (ANY - 1)) as u32,
+            any: word & ANY != 0,
         }
     }
 
     pub(crate) const fn pack(self) -> u64 {
-        (self.tag as u64) << 48 | (self.lap as u64) << 32 | self.pages as u64
+        (self.tag as u64) << 48
+            | (self.lap as u64) << 32
+            | (self.pages as u64 & (ANY - 1))
+            | if self.any { ANY } else { 0 }
     }
 }
 
@@ -428,7 +443,14 @@ impl<O: Os> Back<'_, O> {
                     return None;
                 }
                 let over = retained.saturating_sub(retained_cap(geometry));
-                let goal = decay_goal(geometry, retained).max(over);
+                // The pass that takes runs of any length takes all it finds: the short runs the
+                // passes before it left have waited long enough.
+                let any = self.epoch().is_multiple_of(PURGE_ANY_RUN_EVERY);
+                let goal = if any {
+                    retained
+                } else {
+                    decay_goal(geometry, retained).max(over)
+                };
                 // From where the walk stands: a pass that started at the top every time spent
                 // its goal on the regions above whatever a quiet program revived each interval,
                 // and never reached the free pages of the lowest regions. The pass word is
@@ -439,6 +461,7 @@ impl<O: Os> Back<'_, O> {
                     tag: Pass::tag_of(word),
                     lap: state.walk.laps.load(Relaxed) as u16,
                     pages: pages_of(goal, page),
+                    any,
                 };
                 state.walk.pass.store(pass.pack(), Release);
                 seen = word;
@@ -487,8 +510,15 @@ impl<O: Os> Back<'_, O> {
                 return Some(seen);
             }
             let limit = pass.pages as usize * page;
-            let (read, purged, finished) =
-                self.purge_step(PURGE_STEP_WORDS - spent, limit, Scope::Idle);
+            let (read, purged, finished) = self.purge_step(
+                PURGE_STEP_WORDS - spent,
+                limit,
+                if pass.any {
+                    Scope::IdleAnyRun
+                } else {
+                    Scope::Idle
+                },
+            );
             spent += read;
             if finished {
                 // A long lap goes region by region, so the interval number lags the clock by
@@ -629,8 +659,14 @@ impl<O: Os> Back<'_, O> {
             0
         };
         let floor = match scope {
-            Scope::Idle => region::floor(&host, region, self.epoch()),
+            Scope::Idle | Scope::IdleAnyRun => region::floor(&host, region, self.epoch()),
             Scope::All => 0,
+        };
+        // A call costs about the same whatever it returns, so the clocked pass leaves short
+        // runs for a later pass, which takes runs of any length once in a while.
+        let min_run = match scope {
+            Scope::Idle => PURGE_MIN_RUN_PAGES,
+            Scope::IdleAnyRun | Scope::All => 1,
         };
         if cursor != 0 && cursor <= floor {
             // Everything the cursor has left is below the frontier.
@@ -669,12 +705,22 @@ impl<O: Os> Back<'_, O> {
                     0
                 }
                 Step::Unit(unit) => {
-                    let (outcome, words) = region::purge_unit(&host, region, unit);
+                    // The run of purgeable units that ends at this one, down to the floor.
+                    let (run, words) =
+                        self.run_below(&host, region, unit, carved, huge_from, floor);
                     read += words;
-                    if let Purge::Done(bytes) = outcome {
-                        purged += bytes;
+                    match run {
+                        Some(run) if run.end - run.start < min_run => run.start,
+                        Some(run) => {
+                            let (outcome, words) = region::purge_unit(&host, region, run);
+                            read += words;
+                            if let Purge::Done(bytes) = outcome {
+                                purged += bytes;
+                            }
+                            run.start
+                        }
+                        None => unit.start,
                     }
-                    unit.start
                 }
             };
             if resume {
@@ -690,9 +736,51 @@ impl<O: Os> Back<'_, O> {
     }
 }
 
+impl<O: Os> Back<'_, O> {
+    /// The run of adjacent purgeable units (`region::purgeable_unit`) that ends with `unit`,
+    /// extended down while the next unit below is purgeable, starts at or above `floor`, and
+    /// keeps the run within [`PURGE_MAX_RUN_PAGES`]; `None` if `unit` itself is not
+    /// purgeable. Units of the huge-page part are whole huge pages already and are not joined.
+    /// Reads only; returns the run and the leaf words read.
+    fn run_below<H: Host>(
+        &self,
+        host: &H,
+        region: RegionId,
+        unit: Unit,
+        carved: u32,
+        huge_from: Option<u32>,
+        floor: u32,
+    ) -> (Option<Unit>, usize) {
+        let (ok, mut read) = region::purgeable_unit(host, region, unit);
+        if !ok {
+            return (None, read);
+        }
+        let mut run = unit;
+        if huge_from.is_some_and(|huge| unit.end > huge) {
+            return (Some(run), read);
+        }
+        let layout = *host.layout();
+        while let Step::Unit(next) = layout.unit_below(carved, huge_from, run.start) {
+            if next.end != run.start
+                || next.start < floor
+                || run.end - next.start > PURGE_MAX_RUN_PAGES
+            {
+                break;
+            }
+            let (ok, words) = region::purgeable_unit(host, region, next);
+            read += words;
+            if !ok {
+                break;
+            }
+            run.start = next.start;
+        }
+        (Some(run), read)
+    }
+}
+
 /// A goal of `bytes` as the pass word holds it: whole pages, at least one.
 fn pages_of(bytes: usize, page: usize) -> u32 {
-    bytes.div_ceil(page).clamp(1, u32::MAX as usize) as u32
+    bytes.div_ceil(page).clamp(1, (ANY - 1) as usize) as u32
 }
 
 /// Moves a region's purge cursor from `from` to `to`, unless another purger has moved it.

@@ -248,7 +248,9 @@ fn a_pass_word_round_trips() {
         tag: kani::any(),
         lap: kani::any(),
         pages: kani::any(),
+        any: kani::any(),
     };
+    kani::assume(pass.pages < 1 << 31);
     assert!(Pass::unpack(pass.pack()) == pass);
     let word: u64 = kani::any();
     assert!(Pass::unpack(word).pack() == word);

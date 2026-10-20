@@ -868,6 +868,24 @@ pub(crate) fn purge_unit<H: Host>(host: &H, region: RegionId, unit: Unit) -> (Pu
     (Purge::Done(cleaned * page), read)
 }
 
+/// Whether a unit could be purged now and would return something: not every page is already
+/// clean, and every slot touching it is free. A look that claims nothing, as `purge_unit`
+/// makes before claiming; returns it and the leaf words read.
+pub(crate) fn purgeable_unit<H: Host>(host: &H, region: RegionId, unit: Unit) -> (bool, usize) {
+    if all_clean(host, region, unit) {
+        return (false, 1);
+    }
+    let (first, last) = host.layout().touching(unit);
+    let (low, high) = (first / BITS, last / BITS);
+    for w in low..=high {
+        let mask = bits_in_word(w, first, last);
+        if tree::word(host, tree::Node::leaf(region, w)).load() & mask != mask {
+            return (false, (w - low + 1) as usize);
+        }
+    }
+    (true, (high - low + 1) as usize)
+}
+
 /// Whether every page of a unit is marked clean.
 fn all_clean<H: Host>(host: &H, region: RegionId, unit: Unit) -> bool {
     let layout = host.layout();
