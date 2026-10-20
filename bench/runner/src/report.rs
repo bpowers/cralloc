@@ -462,4 +462,5 @@ pub fn report(o: &Options) {
             println!("  {k}: {} [{}, {}]", pct(*r), pct(ci.0), pct(ci.1));
         }
     }
+    crate::served::report(&o.files, o.filter.as_deref());
 }
