@@ -562,6 +562,238 @@ Not worth adapting, for now:
 - The implied exchange rate rests on two measured costs and an assumed rate of use; it is an
   order of magnitude, not a value.
 
+## Segmented magazines, measured (2026-10-19)
+
+A throwaway prototype on branch `segments-proto` (c573841, from d6d79a6), timed against
+d6d79a6 unmodified ("base", magazines of up to 1,024 slots). Answers first:
+
+- **The gain of 1,024 slots is depot traffic, not slow-path entries.** Policy A, segments of
+  256 slots always going on, enters a slow path as often as 254-slot magazines do but goes to
+  the depot as often as 1,024-slot ones; it keeps most of the gain (table below).
+- **A checkpoint costs 62 to 67 cycles** (136 instructions, one branch miss), against 262 to
+  344 for a local spare swap today without its heartbeat and 365 to 425 with it.
+- **m = 256 on 1,024 is not free:** against base it is 1 to 3% slower on the cross-thread
+  pipelines, which crosses the stop line we set. **m = 1,024 on 4,096** has as many
+  checkpoints as base has exchanges and kept 4,096's gains on the tree, JSON and sh8bench.
+- **Policy B never goes on where the size pays:** no checkpoint of the tree, JSON, BTreeMap,
+  the two-thread pipelines or mpmc went on. Policy C was built but not timed.
+- **The Lean statements carry over unchanged**, and no routine is new.
+
+### How the prototype does it
+
+Every knob is a build-time variable; with none set the code behaves as on base.
+
+- **Geometry.** A magazine of `n` slots gets the routine mask of `m = min(n, M)` slots; slots
+  `km - 1` and `km` at each interior boundary hold nothing. Every class with more than `M`
+  slots is segmented, so with `M = 256` the 80 to 128-byte classes (512 slots) are too.
+  Counts of objects (`capacity`, levels, depot depths, spare limits, `LAUNDER_BUDGET`) count
+  objects, so they fell into place once `capacity()` and the level-to-slot maps knew segments.
+- **The checkpoint touches no slot outside a sequence.** At a free that finds the word at the
+  top of a full segment (slot `km - 1`), the slow path moves the word to the first slot of the
+  next (`km + 1`) with store-if-equal and retries the ordinary push; an allocation at `km + 1`
+  moves it to `km - 1` and retries the pop. Both words name the same level, so a store-if-equal
+  that succeeds after any interleaving only changes how the current state is written; a thread
+  preempted between its read and its store either finds the word changed and retries, or
+  re-expresses the state it finds. This is sound with any number of threads per CPU, unlike the
+  write-then-commit version above (review finding on the checkpoint). It costs one sequence
+  more than a fused "cross and pop" routine would, so 62 cycles is an upper bound for that
+  routine.
+- **It runs before the slow path builds anything.** The first version ran inside the slow path
+  and cost 110 cycles and 330 instructions; two thirds of its samples sat on one load, where
+  the entry builds the back end's handle on the stack byte by byte and reads it back eight bytes
+  at a time, a store-forwarding stall. Every slow path pays that stall today (an aside worth
+  fixing on its own).
+- **No heartbeat, no clock** at a checkpoint under policy A. The heartbeat runs on exchanges
+  only, as on base, so the rules that return memory (age limit, sweep, shed, refresh, idle
+  drain, purge steps) are paced as on base: four times rarer for the smallest classes than at
+  254 slots. Under policy C a checkpoint reads the clock: about 50 cycles more.
+- **Fill and launder.** A fill writes objects straight into their segmented slots (a sink of its
+  own in `back::class`). A launder takes slots 1 up to the top object, boundary slots included:
+  nothing ever writes them, so they read null, and the back end skips nulls on the branch its
+  dense loop already leaves by. A first version compacted the magazine before laundering; its
+  division per object cost the tree 6%, a cost of the prototype and not of the idea.
+- **Policy state.** B reads the class's stock word (credit of either kind). C keeps a stamp per
+  CPU and class, written at checkpoints and installs, in a static of its own: the slab has no
+  room below the masks' page offset (1,984 of 2,048 bytes used).
+
+### The cost of a checkpoint
+
+`workload burst`: 1,000 objects of one class allocated, then freed in reverse, 20,000 times,
+on CPU 2, seven interleaved rounds. With `m = 256` that is exactly three checkpoints each way
+per burst (counting build), and base never leaves its magazine.
+
+| Build | 8 B, cycles/op | 32 B | slow paths per burst |
+|---|---:|---:|---|
+| base, 1,024 slots | 3.67 | 3.66 | none |
+| policy A, m = 256 | 3.86 | 3.85 | 6 checkpoints |
+| 254 slots | 4.80 | 4.96 | 6 local spare swaps |
+| 254 slots, no heartbeat | 4.46 | 4.70 | 6 local spare swaps |
+
+Per slow path: a checkpoint 62 (8 B) and 67 (32 B) cycles; a local spare swap 365 and 425,
+of which the heartbeat is about 100 and 80. A swap without its heartbeat still pays the entry's
+stall, the spare stack's pop and push with their depth and stock bookkeeping, and the
+store-if-equal: three sequences and a few hundred instructions.
+
+### Policy A against 254 and 1,024 slots
+
+Five interleaved rounds; change against "u256" (the prototype with magazines of up to 256
+slots, everything else as base), median of per-round ratios, and cgroup peak MiB.
+
+| Job | u256 | base (1,024) | policy A (256 on 1,024) | peak u256 / base / A |
+|---|---:|---:|---:|---|
+| pipeline t2 s64 | 3.79 ns | -21.0% | -22.1% | 1.4 / 1.5 / 1.5 |
+| pipeline t2 small | 3.79 ns | -9.8% | -8.6% | 2.0 / 2.9 / 3.0 |
+| pipeline t2 mixed | 11.2 ns | -4.3% | -3.6% | 4.8 / 5.7 / 5.7 |
+| pipeline t2 small, split | 12.0 ns | -9.9% | -12.0% | 2.5 / 3.5 / 3.5 |
+| pipeline t2 x2 split / x3 / x4 | 4.54 / 5.36 / 5.44 | -14.4 / -18.1 / -16.5% | -12.4 / -16.2 / -15.1% | 6.1 / 8.4 / 8.3 (x4) |
+| pipeline t8 | 4.18 | +0.1% | +0.1% | 8.0 / 10.7 / 10.7 |
+| exchange t2 local / split / t8 | 4.16 / 13.8 / 2.64 | -8.1 / -4.8 / -0.9% | -6.5 / -5.0 / -0.6% | |
+| mpmc p1c3 / p3c1 / p4c4 | 5.10 / 4.68 / 4.66 | -6.1 / -2.8 / -8.5% | +2.3 / -1.2 / -6.8% | 3.2 / 4.1 / 4.2 (p1c3) |
+| tree depth 20, cycles/node | 44.0 | -7.5% | -7.4% | 50.2 all |
+| JSON 32 MiB | 17.4 | -6.4% | -3.6% | 350 all |
+| sh8bench (preload), s | 0.512 | -25.6% | -18.7% | 128 / 124 / 127 |
+
+The prototype with 1,024 slots and its code changes (the control) ran -5.3% on JSON against
+base's -6.4%, and within 1.5 points of base on the pipelines, so differences of two points
+between columns are within what code placement moves; mpmc p1c3 ranged from -4.5 to +13.7% for
+policy A. The pattern is not: policy A keeps 85 to 100% of the gain on the pipelines and the
+tree, 55 to 75% on JSON and sh8bench, and every peak is base's, since the depot sees full
+magazines.
+
+Slow-path entries per job, from the counting builds: the tree enters 165,000 times at 254
+slots, 41,000 at 1,024, and 41,000 plus 124,000 checkpoints under policy A; the two-thread
+pipeline 87,000, 43,000, and 43,000 plus 43,000. On the tree the 124,000 extra exchanges of 254
+slots cost about 65M cycles, some 500 each, against 8M for as many checkpoints: what larger
+magazines saved is the exchange's work, not the entry.
+
+**What this predicts for the rival** (254-slot magazines, adaptive spares, several magazines per
+depot compare-and-swap): its local spare swap has the same shape as a checkpoint, a slow path
+with no shared write, so policy A's column is its ceiling. It reaches it only if a local swap
+costs about what a checkpoint does. Today's swap costs 260 to 345 cycles before its heartbeat;
+at one per 254 operations each side, the 200 cycles over a checkpoint are about 0.8 cycles per
+operation, roughly half the 1,024-slot gain on the two-thread pipelines (about 19 cycles per
+object each side). The glue is most of it: the heartbeat (80 to 100 cycles), the entry's
+store-forwarding stall (about 50), and the spare bookkeeping. A lean swap of three sequences
+(stack pop, store-if-equal, stack push) and one branch miss should cost 80 to 100 cycles, which
+would bring the rival within a point of policy A. That is an estimate; only the checkpoint and
+today's swap were timed.
+
+### Shapes (part 1 and 2)
+
+Five interleaved rounds against base, median change; peak MiB. "u4096" is magazines of up to
+4,096 slots unsegmented (8 and 16-byte classes; 24 and 32 bytes get 2,048). At 4,096 the
+launder budget is the largest magazine's capacity, so the worst call launders four times what
+it does on base; nothing else was changed.
+
+| Job | m = 256 on 1,024 | u4096 | m = 256 on 4,096 | m = 1,024 on 4,096 | peak base / 4,096 |
+|---|---:|---:|---:|---:|---|
+| pipeline t2 small | +1.2% | -0.8% | +0.1% | -0.8% | 3.0 / 3.5 |
+| pipeline t2 x2 split / x3 / x4 | +1.7 / +3.0 / +1.8% | -1.8 / -1.8 / 0.0% | +0.2 / +0.3 / +0.2% | -1.7 / +0.2 / -0.9% | 8.4 / 10.0 (x4) |
+| pipeline t8 | 0.0% | -0.4% | -0.1% | -0.3% | 10.7 / 12.0 |
+| exchange t2 local | +1.1% | -1.6% | -0.1% | -1.3% | 2.9 / 3.5 |
+| mpmc p4c4 | +1.8% | -1.3% | -1.1% | -0.7% | 8.7 / 10.0 to 10.4 |
+| tree depth 20 | 0.0% | -4.2% | -1.6% | -3.4% | 50 |
+| JSON 32 MiB | +0.9% | -0.2% | +2.0% | -2.7% | 354 |
+| BTreeMap / HashMap 1M | +0.5 / +0.8% | -0.1 / -0.3% | +0.2 / +0.6% | -0.6 / -0.3% | |
+| churn 1k / 100k / 1M | 0.0 / 0.0 / +1.0% | within 1% | within 1% | within 1% | |
+| forkjoin t4 / t8, spawn t4 / t8 | within ±1.1% | within ±1.6% | within ±1.6% | within ±1% | |
+| rpc log c64, server cycles/req | -0.7% | -1.3% | +3.1% | 0.0% | 9.4 / 9.8 |
+| sh8bench / larson (preload) | -1.6 / +0.7% | -9.8 / +1.2% | -9.8 / +3.2% | -11.3 / +0.7% | 127 / 124 |
+
+Checkpoints per job (counting builds): `m = 256` makes about one per exchange on the
+cross-thread jobs and three per 1,016 objects on one-way runs; `m = 1,024` on 4,096 makes 5 to
+15 times fewer, as many as base's exchanges or fewer. Measured extra cycles of `m = 256` over
+its control matched checkpoints times 62 on the single-threaded jobs (tree -7M against 8M
+predicted) and exceeded it two to five times on the cross-thread jobs, which sum the cycles of
+threads that wait on each other.
+
+Memory probes (`worst.sh`, one run each): every shape within 0.5 MiB of base on burst-idle,
+classes-few-cpus, sparse and tiny; `phase` 48.6 base, 50.6 (256 on 1,024), 47.5 (u4096), 53.9
+and 53.5 (the segmented 4,096 shapes); cpus-few-classes 7.0, 7.5, 6.7, 7.5, 9.5.
+
+### Policy B
+
+How often each job's checkpoints went on under policy B (`m = 256`, counting builds):
+
+| Job | went on | stopped |
+|---|---:|---:|
+| tree, JSON, BTreeMap | 0 | 82,560; 61,620; 19,659 |
+| pipelines t2 (all sizes, local and split), x2, x3, x4 | 0 | all |
+| mpmc p1c3, p3c1, p4c4 | 0 | all |
+| pipeline t8 | 53,022 | 68,374 |
+| exchange t2 local / split / t8 | 5,989 / 4,495 / 9,523 | 24,289 / 26,314 / 18,388 |
+
+The reviewer was right: a contended round trip fires only where flows cross many CPUs, and
+never on the one-way pipelines or on single-threaded jobs, where the size pays. Under B those
+jobs behave as with 254-slot magazines. A rule that sizes the transfer by one-way runs (grow
+on successive exchanges in the same direction) is what these jobs ask for. Policy C was built
+(`pc1`, `pc10`) but not timed: the answer above decided the design first.
+
+### What carries over, and what a real build must touch
+
+- **Lean.** Nothing to redo. The routine's abstract magazine is the `m`-slot aligned window
+  around its word (`slotsOf mask`, `magBase`, `Mag.ofWord` in `Spec/Slab.lean`); the
+  precondition asks that window to be a magazine apart from the slabs and from every other slab
+  word's window. A segment of an `n`-slot magazine is exactly such a window, so with `m` for `n`
+  the statements and proofs hold as they are. What changes is the Rust side's slab invariant
+  ("slots 1 to `s - 1` hold objects" becomes "every slot below `s` but the boundary pairs") and
+  the contracts that cite it: `Routines::store_if_equal` and DEPOT-SLOW-01, AGE-01, SPARE-01,
+  MAGAZINE-02 (the object slice now spans boundary slots). A fused cross-and-step routine would
+  be new Lean work; the prototype does without one.
+- **Geometry and counts.** `MagazineSize` (capacity, mask, slot-to-object and level-to-word
+  maps), `front::MASK_TABLE`, `Magazine::{objects, object, set_object, word}`, `Area::loaded`,
+  the record's clamp. Spare limits, stock weights, empty caps, shared targets and
+  `LAUNDER_BUDGET` follow `capacity()`.
+- **The exchange loop.** Without the checkpoint, `exchange_for_alloc` and `exchange_for_free`
+  spin forever at an interior boundary (their "the routine should succeed now" retries see a
+  level that is neither empty nor full), so the checkpoint is not optional anywhere a word can
+  reach a boundary: the drain, the age limit and a stopped policy all leave words there.
+- **Fill, launder, drain.** `Source::fill`'s contract (positions are not contiguous) and both
+  implementations, the short-fill move, `launder_held`, and the back end's null skip or an
+  equivalent. The drain, the age limit's take and the sweep go through `Area::loaded` and
+  `launder_held` and needed nothing more.
+- **Kani and tests.** `classes/verify.rs` (the slot tests mean empty and full),
+  `depot/verify.rs` (words and levels round-trip), the twins (they take the mask from
+  `MagazineSize`), three unit tests that pin the mask to the magazine size, one rules test that
+  assumes a free fills a whole magazine, and the test rig's regions, which must hold the largest
+  magazine (32 KiB at 4,096 slots).
+- **Policy state.** No room in the slab's cold part for a per-class stamp; it must share the
+  stock word or the age stamp.
+- **Work bounds at 4,096.** With the budget at one magazine the worst call launders 4,094
+  objects. Laundering one segment per slow path keeps today's bound and fits the code: the
+  launder already takes a slot range, and the rules that wait for room would wait for a
+  segment's room. The fill is already bounded in claims, not objects.
+
+### A thread that oscillates across an interior boundary
+
+The two words for a boundary level give the boundary hysteresis: a thread whose level moves
+by one around it crosses once and then stays on the side it crossed to. A swing of two
+straddling the boundary (level `L - 1` to `L + 1` and back) crosses on every swing, one
+checkpoint per two operations, about 30 cycles an operation. Today's magazine ends have the
+same worst case at the cost of a spare swap, at a quarter (or, at 4,096, a sixteenth) as many
+levels. A guard: count reversals at one boundary in the slab, and on the second take the
+magazine out with store-if-equal, move half a segment's objects into a spare magazine, and put
+it back half a segment from the boundary; that bounds the rate to one move of 127 pointers per
+127 operations. Not built: the `osc` probe that should have measured the worst case lands on a
+boundary only in some runs (the runtime's own start-up allocations shift the level), and in
+the runs that missed, all builds were equal.
+
+### Where these numbers may mislead
+
+- **Code placement.** `benchrun layout` refused every build of this prototype it made: in two
+  of its four placements the GOT slot of `__rseq_offset`, which the out-of-line routines read
+  (the store-if-equal the checkpoint uses among them), shares a hot word's page offset. `run`
+  does not check hand-built entries, and in the shapes session the control, u4096 and the
+  `m = 1,024` shape had that collision (base, `m = 256` and u256 did not; the question-2 runs
+  used padded, clear builds of the control and u256). Their exchanges paid for it, so u4096's
+  and `m = 1,024`'s gains are if anything understated. No layout check was completed.
+- **Five rounds.** Several cross-thread jobs have per-round ranges wider than the differences
+  (mpmc p1c3, sh8bench, larson); the control moved JSON by five points between sessions.
+- **u256 is not main.** It is this branch with 256-slot magazines, so it carries the branch's
+  work bounds and launder rules.
+- **Counting runs** ran on the heavy cores, on one L3, so cross-L3 jobs' counts are for one
+  domain.
+
 ## Appendix A: our constants
 
 Unit, the buffer each sizes and between which tiers, what adapts it now, and what
