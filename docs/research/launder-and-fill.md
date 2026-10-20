@@ -1276,3 +1276,187 @@ Against main (eafb661), five runner rounds on two L3s and six by hand on one: sh
 and 127 MiB); xmalloc-test, exchange split, rpc echo and both rpc log jobs level in time and peak;
 larson 2 to 4% lower in both placements, within the ranges (one L3 618 to 641 against 616 to
 625 M ops/s); the phase probe 46.7 and 45.4 against 47.7 and 52.8 MiB, tiny 0.5 MiB.
+
+# Magazines of up to 1,024 slots (2026-10-19)
+
+A magazine held at most 254 objects whatever the class, so the classes up to 64 bytes held 2 to
+16 KiB of objects in one while the byte budget allowed 64 KiB. "main" is e96086d (code identical
+to 36dd48b); "branch" is the change below.
+
+## The rule
+
+A class's magazine is the most slots whose objects fit in 64 KiB, at most 1,024 slots and at
+least 4 (`classes::magazine`, `MAX_LOG2`): 1,022 objects for every class up to 64 bytes, 510 for
+80 to 128, 254 for 160 to 256 bytes, as before from there. Every class up to 64 bytes now holds
+what a 256-byte class's magazine held already.
+
+**Sizes measured first**, each a constant change at e96086d run against main in the runner
+(three to five rounds; sh8bench seven): 512, 1,024, 2,048, 4,096 slots and 8,192 (the byte
+budget alone). Change against main, and cgroup peak MiB:
+
+| Job | main | 512 | 1,024 | 2,048 | 4,096 | 8,192 |
+|---|---|---|---|---|---|---|
+| sh8bench, two L3s (main 0.51 s) | 128 | -15% | -24% | -28% | -32% | -33% |
+| tree depth 20 | 50 | -5% | -6% | -9% | -10% | -11% |
+| pipeline t2 local; peak | 2.0 | -7.5%; 2.5 | -10%; 3.0 | -10%; 3.1 | -11%; 3.2 | -10%; 3.3 |
+| pipeline t2 x3 both; peak | 4.7 | -12%; 5.7 | -18%; 7.0 | -19%; 7.5 | -20%; 8.1 | -19%; 8.2 |
+| forkjoin t8; peak | 17.5 | -2%; 18.5 | -4%; 19.6 | -4%; 19.9 | -4%; 20.1 | -4%; 20.1 |
+| pipeline t8; peak (time level) | 7.8 | 9.5 | 10.8 | 11.5 | 12.0 | 12.2 |
+| rpc log c64, time | | | +1.3% | +3.2% | +2.4% | +1.6% |
+
+Cross-thread jobs take nearly all their gain by 1,024 slots; sh8bench, the tree and JSON go on
+gaining to 4,096 and beyond, while the memory parked in loaded magazines, and the work one slow
+path does with one, double with each step. 1,024 was chosen: it gives the smallest classes what
+the 256-byte class already had, so it adds no new kind of cost.
+
+## Bounded work per call
+
+The bounds on a slow path were counted in magazines: a fill filled one, and a heartbeat
+laundered up to about four. Four times the objects a magazine would have made them four times
+the work. They are now counted in work.
+
+- **A fill claims from at most 256 bitmap words** (`back::policy::FILL_CLAIMS`,
+  `Back::fill_within`) and hands out what it has. From words with one free slot each that is
+  256 objects, what a 254-object magazine cost; denser words fill a whole magazine (dense ones in
+  16 claims). A fill that runs out of free slots still carves the rest.
+- **A slow path launders at most 1,022 objects by its own choice** (`depot::LAUNDER_BUDGET`):
+  the refresh, the age limit or sweep, the shed, and the launder over target of what the
+  heartbeat's own sweep and drain pushed each launder a magazine only while a full one of its
+  class fits in what is left, after setting aside the objects the exchange pushed past a shared
+  stack's target. Those are laundered last in the heartbeat, one magazine per push, whatever the
+  rules did, so a shared stack still sheds magazines as fast as they arrive. A rule turned away
+  waits for a later slow path; what a drain parks over a target and the budget leaves, the shed
+  takes back. For classes of 254 objects or fewer that is four magazines, as before.
+
+**Rates.** The launder over target stays one magazine per push. The refresh counts every
+retirement and is skipped only when the budget is spent in the same call, which takes a second
+install in one call. The age limit, the sweep and the shed act once an interval per class and
+retry at every heartbeat; a CPU whose every exchange pushes past a target leaves them to its
+other slow paths and to other CPUs. Fewer exchanges do mean fewer heartbeats for the smallest
+classes: the age look's rotation over 44 classes takes four times as many of that class's
+operations as before. The interval-paced rules depend on there being slow paths at all, as
+they did before; `maintain` covers a program that has none.
+
+**The worst single call**, from `backbench` per-object costs on CPU 2 (8-byte class, medians of
+three rounds), times the most one call can do: main, a fill of 254 and three launders of 254;
+branch, a fill of 256 claims and 1,022 laundered.
+
+| Case, cycles per object (main / branch) | main, per call | branch, per call | ratio |
+|---|---:|---:|---:|
+| fill, one free slot a word: 98 / 103 | 25K | 26K | 1.05 |
+| scattered launder, small heap (16 KiB bitmap): 27 / 23.5 | 21K a magazine | 24K | |
+| scattered launder, 8 MiB bitmap (64M slots): 112 / 74 | 28K a magazine | 76K | |
+| scattered launder, 32 MiB bitmap (256M slots): 199 / 197 | 51K a magazine | 201K | |
+| worst call, small heap: fill and launders | 88K | 50K | 0.57 |
+| worst call, 8 MiB bitmap | 110K | 102K | 0.93 |
+| worst call, 32 MiB bitmap | 177K | 228K | 1.29 |
+
+So the worst call is at most 1.3 times main's, about 41 us at 5.5 GHz, on a class with a quarter
+of a billion live objects. With the bounds counted in magazines it would have been about 911K
+cycles there (a fill of 1,022 and four launders), five times. A batch of 1,022 launders faster
+per object than one of 254 where the bitmap fits the caches (the per-call costs are spread
+further), which is why the middle row went down.
+
+## Method
+
+The runner, interleaved, main against the branch (and against the plain constant change, m1k,
+while the bounds were developed): C programs seven rounds, cross-thread and single-threaded jobs
+five, the RPC jobs ten (two sessions of five). sh8bench on one L3 by hand, six rounds,
+`taskset 0-7`, a 400 ms spin on those CPUs before each run. Memory probes `worst.sh`, one run
+each. `backbench` on CPU 2 under the measurement lock.
+
+## Time and memory
+
+Change against main (median of per-round ratios), and cgroup peak MiB, main to branch; jemalloc's
+peak from the e96086d full session:
+
+| Job | main | change | peak main / branch | jemalloc peak |
+|---|---:|---:|---|---:|
+| sh8bench, two L3s, s | 0.512 | -22.4% | 128.9 / 128.5 | 162.6 |
+| sh8bench, one L3, s | 0.279 | -14% | | |
+| tree depth 20, cycles/node | 43.5 | -7.0% | 50.2 / 50.2 | 66.7 |
+| JSON 32 MiB native / preloaded | 17.8 / 18.5 | -5.4% / -3.9% | 349.5 / 349.7 | 361.2 |
+| BTreeMap 1M | 916 | -1.0% | 123.2 / 123.5 | 125.2 |
+| churn 100k native / preloaded | 44.1 / 49.9 | -3.7% / -3.9% | 12.0 / 12.2 | 11.7 |
+| churn 1M | 104.8 | -1.7% | 110.2 / 110.2 | 110.2 |
+| churn 1k | 23.2 | +0.2% | 0.8 / 1.0 | 0.7 |
+| pipeline t2 s64 | 3.76 | -19.9% | 1.2 / 1.5 | 1.4 |
+| pipeline t2 small, all-alloc / free-only | 3.77 / 3.77 | -9.8% / -9.6% | 2.0 / 3.0 | 1.8 |
+| pipeline t2 small, preloaded | 3.97 | -6.8% | 2.2 / 2.4 | 1.9 |
+| pipeline t2 mixed | 11.32 | -3.1% | 4.7 / 5.7 | 5.1 |
+| pipeline t2 split, all-alloc / free-only | 12.14 / 11.98 | -12.0% / -10.4% | 2.5 / 3.5 | 1.8 |
+| pipeline t2 x2 local / split | 4.06 / 4.59 | -11.4% / -14.8% | 3.4 / 4.5, 3.5 / 5.0 | 3.2 |
+| pipeline t2 x3 / x4 | 5.29 / 5.42 | -17.7% / -16.0% | 4.7 / 6.8, 5.8 / 8.5 | 4.7, 6.0 |
+| pipeline t4 / t8 | 3.02 / 4.18 | -0.1% / +0.1% | 4.0 / 5.2, 7.8 / 10.8 | 3.7, 6.6 |
+| exchange t2 local / split | 4.16 / 13.78 | -8.2% / -5.4% | 2.2 / 2.9, 2.8 / 3.5 | 2.4, 2.3 |
+| exchange t8 | 2.64 | -1.3% | 6.8 / 9.4 | 8.9 |
+| mpmc p1 c3, all-alloc / free-only | 4.91 / 4.94 | -5.6% / -4.5% | 3.2 / 4.2 | 2.2 |
+| mpmc p3 c1, all-alloc / free-only | 4.62 / 4.67 | -2.7% / -2.6% | 3.5 / 5.0 | 3.2 |
+| mpmc p4 c4 (see below) | 5.06 | -3.6% | 6.1 / 8.2 | 4.7 |
+| forkjoin t4 / t8 | 3.46 / 3.83 | -1.4% / -5.8% | 15.4 / 16.5, 17.7 / 19.5 | 31.0, 22.6 |
+| larson / larson-sized, M ops/s | 464 / 460 | +1.9% / -0.8% (ranges -6 to +5) | 76 / 78 | 90, 88 |
+| mstress, s | 0.263 | -0.7% | 139.0 / 140.9 | 145.0 |
+| xmalloc-test, M frees/s, fast mode | 725 to 735 | 924 to 976 (+28%) | 36.6 / 35.5 | 53.6 |
+| rpc echo c64, server cycles/req | 45.7k | -0.2% [-2, +1] | 5.8 / 6.3 | 5.8 |
+| rpc log c64 | 124.4k | -0.7% [-2, +2] | 8.8 / 9.3 | 9.6 |
+| rpc log c256 | 120.6k | +0.2% [-2, +2] | 14.2 / 14.5 | 14.1 |
+
+xmalloc-test is bimodal for every build by where the scheduler puts its threads: main ran 407
+and 431 twice and about 730 five times, the branch 562 once and 924 to 976 six times. The RPC
+jobs, which looked 1 to 3% slower at three rounds with the larger constant changes, are level at
+ten.
+
+The memory probes are level: burst-idle 215.8 / 216.3, phase 49.0 / 49.0, cpus-few-classes
+6.7 / 7.2, classes-few-cpus 15.7 / 16.1, threads-few-cpus 15.7 / 16.0, sparse 3.5 and 33.2 both,
+tiny 0.7 both.
+
+**mpmc p4 c4 is bimodal by code layout.** One version of the branch, with the same source in
+every build, gave 4.98 ns (default), 4.20 (loops aligned), 4.21 and 4.94 (two link orders) under
+`benchrun layout`, and two builds of it whose sources differed only in a doc comment ran 4.2 and
+4.9 in every session, the slow one at 1.2% more instructions. Under `benchrun layout` the final
+branch runs 4.19 to 4.40 and main 4.58 to 4.63, while the runner's builds above gave 4.92 and
+5.06. So the larger magazines are worth about 8% on this job, and its speed otherwise depends on
+where the code lands. The cause is not found: the profile puts 92% of cycles in the workload's
+loop with the inlined fast paths, the same instructions moved by 32 bytes. Variants of the budget
+compared on this job while the bounds were developed (where in the heartbeat the launder over
+target runs, whether it brings stacks down to their targets, one or two magazines of budget)
+moved with the layout rather than the variant; the choices above are the ones that keep the
+heartbeat as it was.
+
+## What it costs
+
+- **Memory in flight.** Loaded magazines of the smallest classes hold up to 64 KiB of objects
+  each, per CPU and class in use, and their slots 8 KiB. Small cross-thread heaps grow by 0.5 to
+  3 MiB and go over jemalloc's peak (pipeline t2 3.0 against 1.8, x4 8.5 against 6.0, pipeline
+  t8 10.8 against 6.6, mpmc p4 c4 8.2 against 4.7); forkjoin grows 1.1 to 1.8 MiB and stays well
+  under jemalloc's 31 and 23 MiB. Every other heap over 10 MiB moves by under 2% (mstress 1.9
+  MiB of 139, the rest 0.3 MiB or less).
+- **Fixed full spares.** A CPU's spare budget is split evenly over the 44 classes, about 23 KiB
+  each, and a class keeps a full spare only if its magazine fits that share. With 1,022-object
+  magazines the 8-byte class keeps two (was four), the 16-byte one (was four), and 24 to 128
+  bytes none (24 to 80 kept one to three). Every full magazine those classes retire goes to the
+  depot unless stock covers it, and stock is earned only by round trips that met contention. A
+  thread that oscillates around a magazine boundary in those classes now reaches the depot for
+  each full magazine it takes back, at a quarter of the frequency it reached it before. Nothing
+  measured shows a cost; one guaranteed full spare per class in use (64 KiB of objects per class
+  and CPU at most) is the follow-up to try if a job does.
+- **Fills from sparse bitmaps are partial.** A fill stops after 256 claims, so in a fragmented
+  heap a magazine may hold as few objects as before, and the exchange rate there is what it was.
+
+## Also found
+
+- **The geometry did not require a region to hold the largest magazine.** The magazine area is
+  aligned only to the region size, and with 8 KiB magazines the test rig's 4 KiB regions put
+  magazines out of alignment, which the slot tests then misread ("a slab word names something
+  that is not a magazine"). `Geometry::try_new` now requires the smallest region to be at least
+  the largest magazine, and the rig uses 8 KiB regions. The design's regions are 2 MiB at the
+  floor.
+- **backbench's 64 MiB bitmap case aborted on main.** The sweep names its slots as
+  `base + index * size`, which holds only within one region; since small classes start at an
+  origin a few pages in, 2^29 slots of 8 bytes no longer fit one region, the carve spilled into
+  the next, and the sweep laundered addresses past the first region's last slot, which the back
+  end rightly refused. The bench now checks that its slots are contiguous and says which size
+  does not fit; 32 MiB is the largest for the 8-byte class.
+- The routines and their proofs needed nothing: the masks are 32 bits, the Lean specification and
+  the generated constants already cover 4 to 2^16 slots, and Kani's marker harness checks every
+  mask from 2^2 to 2^16. No generated file changed.
