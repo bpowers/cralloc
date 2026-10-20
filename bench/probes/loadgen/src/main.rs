@@ -27,6 +27,10 @@
 //! latency in ns (u64), segment index (u16), flags (u16: 1 missed its slot, 2 error, 4 closed
 //! loop). `--pid` samples the server's resident set every `--sample-ms` (default 10) into
 //! `--mem` as `ms,rss_kib,file_kib`.
+//!
+//! Exit status: 0 for a clean run; 1 when any request failed, a connection broke or a response
+//! arrived that no request was waiting for (the summary is still printed); 2 for bad usage or a
+//! connection that could not be opened.
 
 mod http;
 mod plan;
@@ -306,6 +310,15 @@ fn main() {
         std::fs::write(p, format!("{summary}\n")).unwrap_or_else(|e| die(&format!("{}: {e}", p.display())));
     }
     println!("RESULT {summary}");
+    // A run with failed requests, broken connections or stray responses measured something
+    // other than the plan; say so in the exit status, after the summary that shows what.
+    let errors = recs.iter().filter(|r| r.flags & worker::ERROR != 0).count();
+    if errors > 0 || reconnects > 0 || unexpected > 0 {
+        eprintln!(
+            "loadgen: untrustworthy run: {errors} errors, {reconnects} reconnects, {unexpected} unexpected responses"
+        );
+        exit(1);
+    }
 }
 
 /// CLOCK_MONOTONIC, which other tools (perf, Python's time.monotonic_ns) can line up with.
