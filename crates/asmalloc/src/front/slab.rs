@@ -222,6 +222,12 @@ impl Slab {
         next
     }
 
+    /// The count of heartbeats.
+    #[cfg(test)]
+    pub(crate) fn beats(&self) -> u64 {
+        self.beats.load(Ordering::Relaxed)
+    }
+
     /// The activity counter.
     #[inline]
     pub fn activity(&self) -> u64 {

@@ -139,6 +139,48 @@ fn cpu_0_is_empty(rig: &TestRig) -> bool {
     })
 }
 
+/// A CPU whose slow paths are all swaps with its own spares, each of which moves less than a
+/// heartbeat's bytes, still beats, and still counts as active: another CPU's idle checks, which
+/// look at it on every one of their heartbeats, never drain it while it swaps.
+#[test]
+fn a_cpu_that_only_swaps_with_its_spares_beats_and_is_not_drained() {
+    let small = SmallClass::from_ordinal(0).unwrap();
+    let tuning = Tuning {
+        look_every: 1,
+        ..Tuning::DEFAULT
+    };
+    let rig: TestRig = Rig::new(&[small, tiny_class()], 8192, tuning);
+    let machine = SimCpu::new(0);
+    let cache = rig.cache(&machine);
+    let slab = rig.slabs().slab(cpu(&rig, 0));
+    // A burst a little over a magazine, allocated and freed in reverse: two swaps with the
+    // spares each time, once the first has stocked them.
+    let burst = small.magazine().capacity() + 100;
+    let swing = || {
+        let held: Vec<_> = (0..burst).filter_map(|_| cache.alloc(small)).collect();
+        assert_eq!(held.len(), burst);
+        for object in held.into_iter().rev() {
+            cache.free(small, object);
+        }
+    };
+    swing();
+    let (beats, steps) = (slab.beats(), 8);
+    let mut drained = 0;
+    for _ in 0..4 * steps {
+        rig.os().advance_clock(IDLE_TICKS / steps);
+        for _ in 0..8 {
+            swing();
+        }
+        let fences = rig.os().calls(Call::Fence);
+        heartbeats_on_cpu_1(&rig);
+        if rig.os().calls(Call::Fence) > fences && rig.os().last_fence() == Some(0) {
+            drained += 1;
+        }
+    }
+    assert!(slab.beats() > beats, "the swaps beat");
+    assert_eq!(drained, 0, "a CPU busy swapping was drained");
+}
+
 /// A CPU that allocates and frees only on fast paths never moves its activity counter, however
 /// busy it is, while another CPU's heartbeats look at it many times an interval. It is drained,
 /// and refills, but never twice within an interval: counted in looks rather than time, it was
