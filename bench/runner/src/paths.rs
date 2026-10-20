@@ -13,6 +13,11 @@ pub struct Paths {
     /// Where `run` writes results by default (`BENCH_RESULTS`, or `bench/results` of the main
     /// checkout).
     pub results: PathBuf,
+    /// The programs of the apps suite: their inputs (`inputs/<program>`, made by
+    /// `apps/fetch`) and the cargo build directory each program's dependencies are compiled
+    /// in once for every allocator and checkout (`build/<program>`). `BENCH_APPS_DATA`, or
+    /// `bench/apps/target` of the main checkout.
+    pub apps_data: PathBuf,
 }
 
 impl Paths {
@@ -23,6 +28,7 @@ impl Paths {
         Paths {
             baselines: var("BENCH_BASELINES", shared.join("baselines/out")),
             results: var("BENCH_RESULTS", shared.join("results")),
+            apps_data: var("BENCH_APPS_DATA", shared.join("apps/target")),
             bench,
         }
     }

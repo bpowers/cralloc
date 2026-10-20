@@ -1,0 +1,53 @@
+# DataFusion running the 22 TPC-H queries on Parquet files, as datafusion-cli runs them. See
+# ../README.md.
+[workspace]
+resolver = "3"
+
+[package]
+name = "app-datafusion"
+version = "0.0.0"
+edition = "2024"
+license = "Apache-2.0 OR BSD-3-Clause"
+publish = false
+
+[[bin]]
+name = "datafusion"
+path = "src/main.rs"
+
+# The allocator under test, by the bench-alloc feature of its entry in ../../allocators.toml
+# (none: glibc). Every program forwards the same set; see ../README.md.
+[features]
+mi = ["bench-alloc/mi"]
+mi-sized = ["bench-alloc/mi-sized"]
+mi-crate = ["bench-alloc/mi-crate"]
+asmalloc = ["bench-alloc/asmalloc"]
+je = ["bench-alloc/je"]
+tc = ["bench-alloc/tc"]
+sn = ["bench-alloc/sn"]
+
+[dependencies]
+bench-alloc = { path = "../../alloc" }
+bench-app = { path = "../common" }
+# With the features datafusion-cli 55.2.0 enables, so that the engine is the one the shipped
+# command-line tool runs.
+datafusion = { version = "=55.2.0", default-features = false, features = [
+  "avro",
+  "compression",
+  "crypto_expressions",
+  "datetime_expressions",
+  "encoding_expressions",
+  "nested_expressions",
+  "parquet",
+  "parquet_encryption",
+  "recursive_protection",
+  "regex_expressions",
+  "sql",
+  "unicode_expressions",
+] }
+# datafusion-cli's `#[tokio::main]` runtime.
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+
+# DataFusion's own release profile at 55.2.0, without `strip`, which changes no code.
+[profile.release]
+codegen-units = 1
+lto = true

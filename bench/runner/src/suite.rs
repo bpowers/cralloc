@@ -33,6 +33,20 @@ pub enum Program {
     Rust(&'static str),
     /// A C benchmark program from bench/baselines/out/cbench.
     C(&'static str),
+    /// A real program's driver, bench/apps/<name>, built once per allocator by `benchrun
+    /// build-apps`; native runs only. `{inputs}` in its arguments is the program's input
+    /// directory, which `bench/apps/fetch` fills.
+    App(&'static str),
+}
+
+impl Program {
+    /// The program of the apps suite this job runs, if it is one.
+    pub fn app(&self) -> Option<&'static str> {
+        match self {
+            Program::App(name) => Some(name),
+            _ => None,
+        }
+    }
 }
 
 /// Which number decides the ranking.
@@ -393,6 +407,44 @@ pub fn backend() -> Vec<Job> {
             one(),
             60,
         ),
+    ]
+}
+
+fn app(id: &str, program: &'static str, a: &str, cpus: Vec<usize>, timeout_s: u64) -> Job {
+    Job {
+        id: id.to_string(),
+        group: "apps",
+        mode: Mode::Native,
+        program: Program::App(program),
+        args: args(a),
+        cpus,
+        driver: None,
+        metric: Metric::Reported,
+        timeout_s,
+    }
+}
+
+/// Real Rust programs on pinned inputs, each with the allocator as its global allocator
+/// (bench/apps/README.md). Each ranks by the wall time of its work, in seconds.
+pub fn apps() -> Vec<Job> {
+    // Each V8 benchmark gets about the same time, as base.js's one second each gives them:
+    // 0.6 s each with the glibc build, about 8 s in all with parsing the files.
+    const V8_COUNTS: &str = "Richards:90,DeltaBlue:33,Encrypt:40,Decrypt:2,RayTrace:5,Earley:35,Boyer:2,RegExp:1,\
+                             Splay:170,NavierStokes:4";
+    vec![
+        // Home Assistant passes its own ruff release's checks: no diagnostics. Four threads,
+        // as a CI runner has; on eight the check takes about a second.
+        app("ruff check ha-core t4", "ruff", "check root={inputs}/ha-core expect=0", local(4), 120),
+        // Scale factor 3, about 3 s on eight threads. The queries' constants are the ones for
+        // scale factor 1, which leaves query 11 with no rows here.
+        app(
+            "datafusion tpch sf3 t8",
+            "datafusion",
+            "tpch data={inputs}/sf3 expect=4,100,10,5,5,1,4,2,175,20,0,2,43,1,1,26798,1,100,1,556,100,7",
+            both(),
+            120,
+        ),
+        app("boa v8", "boa", &format!("v8 dir={{inputs}}/v8 counts={V8_COUNTS}"), vec![SINGLE], 120),
     ]
 }
 

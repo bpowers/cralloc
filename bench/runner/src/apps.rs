@@ -1,0 +1,134 @@
+//! Builds the programs of the apps suite (bench/apps), once per allocator.
+//!
+//! Each program is a cargo workspace of its own, with its own lock file, whose driver links
+//! bench-alloc and forwards its allocator features. Building it for every allocator from
+//! scratch would compile the whole program each time. Instead every build of a program
+//! shares one cargo build directory (`<apps data>/build/<program>`): the program's crates do
+//! not depend on bench-alloc, so they compile once and every later build reuses them, and
+//! each allocator's build compiles only bench-alloc, the driver crates and its allocator,
+//! then links, with the program's own release profile (LTO included). The binary lands in a
+//! target directory of its own per allocator and checkout (`run::app_target`). The result is
+//! the binary a from-scratch build with that feature makes.
+//!
+//! Builds of one program from several checkouts share the build directory too; cargo locks
+//! it, so they take turns.
+use crate::paths::Paths;
+use std::collections::BTreeMap;
+use std::path::Path;
+use std::process::Command;
+use std::time::Instant;
+
+/// The allocator crates whose versions decide what an allocator is. A program's lock file
+/// must pin each to the version bench/Cargo.lock pins, or the program would measure another
+/// build of the allocator than the workloads do.
+const ALLOCATOR_CRATES: &[&str] =
+    &["tikv-jemallocator", "tikv-jemalloc-sys", "mimalloc", "libmimalloc-sys", "snmalloc-rs", "snmalloc-sys"];
+
+/// Each package's versions in a Cargo.lock.
+fn locked_versions(lock: &Path) -> Result<BTreeMap<String, Vec<String>>, String> {
+    #[derive(serde::Deserialize)]
+    struct Lock {
+        package: Vec<Package>,
+    }
+    #[derive(serde::Deserialize)]
+    struct Package {
+        name: String,
+        version: String,
+    }
+    let text = std::fs::read_to_string(lock).map_err(|e| format!("{}: {e}", lock.display()))?;
+    let l: Lock = toml::from_str(&text).map_err(|e| format!("{}: {e}", lock.display()))?;
+    let mut m: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    for p in l.package {
+        m.entry(p.name).or_default().push(p.version);
+    }
+    Ok(m)
+}
+
+/// Checks that `program`'s lock file pins every allocator crate as bench/Cargo.lock does.
+pub fn check_lock(p: &Paths, program: &str) -> Result<(), String> {
+    let bench = locked_versions(&p.bench.join("Cargo.lock"))?;
+    let app_lock = p.bench.join("apps").join(program).join("Cargo.lock");
+    let app = locked_versions(&app_lock)?;
+    let mut wrong = Vec::new();
+    for c in ALLOCATOR_CRATES {
+        let want = bench.get(*c);
+        let got = app.get(*c);
+        if want != got {
+            wrong.push(format!("{c}: bench/Cargo.lock has {want:?}, {} has {got:?}", app_lock.display()));
+        }
+    }
+    if wrong.is_empty() {
+        Ok(())
+    } else {
+        Err(format!(
+            "{program}: its lock file pins other allocator versions than the workloads'; set them with \
+             `cargo update -p NAME --precise VERSION` in bench/apps/{program}:\n  {}",
+            wrong.join("\n  ")
+        ))
+    }
+}
+
+/// What one build took.
+pub struct Built {
+    pub build: String,
+    /// Wall time; on a shared machine it depends on what else runs.
+    pub seconds: f64,
+    /// CPU time of every process the build ran (user and system), which does not.
+    pub cpu_seconds: f64,
+    pub binary_bytes: u64,
+}
+
+/// Builds `program` with bench-alloc's `feature` ("" for glibc) into the target directory of
+/// `build`, sharing the program's build directory.
+pub fn build(p: &Paths, program: &str, build: &str, feature: &str, cpus: &str) -> Result<Built, String> {
+    let dir = p.bench.join("apps").join(program);
+    let target = crate::run::app_target(&p.bench, build, program);
+    let mut c = Command::new("nice");
+    c.args(["taskset", "-c", cpus, "cargo", "build", "--release", "--locked"]);
+    c.arg("--target-dir").arg(&target);
+    if !feature.is_empty() {
+        c.args(["--features", feature]);
+    }
+    c.env("CARGO_BUILD_BUILD_DIR", p.apps_data.join("build").join(program));
+    // Flags from the environment would change every crate's fingerprint, and the program
+    // would no longer be built with its own profile alone.
+    c.env_remove("RUSTFLAGS").env_remove("CARGO_ENCODED_RUSTFLAGS");
+    c.env("BENCH_BASELINES", &p.baselines);
+    c.current_dir(&dir);
+    let t0 = Instant::now();
+    let cpu0 = children_cpu_seconds();
+    let st = c.status().map_err(|e| format!("cargo: {e}"))?;
+    if !st.success() {
+        return Err(format!("{program}: build for {build} failed"));
+    }
+    let bin = crate::run::app_bin(&p.bench, build, program);
+    let binary_bytes = std::fs::metadata(&bin).map_err(|e| format!("{}: {e}", bin.display()))?.len();
+    Ok(Built {
+        build: build.to_string(),
+        seconds: t0.elapsed().as_secs_f64(),
+        cpu_seconds: children_cpu_seconds() - cpu0,
+        binary_bytes,
+    })
+}
+
+/// User and system time of this process's waited-for descendants.
+fn children_cpu_seconds() -> f64 {
+    // SAFETY: rusage is plain data that getrusage fills.
+    let mut u: libc::rusage = unsafe { std::mem::zeroed() };
+    // SAFETY: a valid pointer to a rusage.
+    unsafe { libc::getrusage(libc::RUSAGE_CHILDREN, &mut u) };
+    let t = |v: libc::timeval| v.tv_sec as f64 + v.tv_usec as f64 / 1e6;
+    t(u.ru_utime) + t(u.ru_stime)
+}
+
+/// Bytes under `dir`, as `du` counts them (allocated blocks); 0 if it does not exist.
+pub fn disk_use(dir: &Path) -> u64 {
+    Command::new("du")
+        .args(["-s", "--block-size=1"])
+        .arg(dir)
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .and_then(|o| String::from_utf8(o.stdout).ok()?.split_whitespace().next()?.parse().ok())
+        .unwrap_or(0)
+}

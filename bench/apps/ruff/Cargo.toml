@@ -1,0 +1,48 @@
+# ruff checking Home Assistant's core repository with that repository's own configuration,
+# as its CI does. See ../README.md and README.md.
+[workspace]
+resolver = "3"
+
+[package]
+name = "app-ruff"
+version = "0.0.0"
+edition = "2024"
+license = "Apache-2.0 OR BSD-3-Clause"
+publish = false
+
+[[bin]]
+name = "ruff"
+path = "src/main.rs"
+
+# The allocator under test, by the bench-alloc feature of its entry in ../../allocators.toml
+# (none: glibc). Every program forwards the same set; see ../README.md.
+[features]
+mi = ["bench-alloc/mi"]
+mi-sized = ["bench-alloc/mi-sized"]
+mi-crate = ["bench-alloc/mi-crate"]
+asmalloc = ["bench-alloc/asmalloc"]
+je = ["bench-alloc/je"]
+tc = ["bench-alloc/tc"]
+sn = ["bench-alloc/sn"]
+
+[dependencies]
+bench-alloc = { path = "../../alloc" }
+bench-app = { path = "../common" }
+# The release Home Assistant 2026.10.2 pins in requirements_test_pre_commit.txt. The `ruff`
+# crate's main.rs is argument parsing, a call to `ruff::run` and the global allocator; this
+# driver makes the same call.
+ruff = { git = "https://github.com/astral-sh/ruff", tag = "0.16.9" }
+clap = "4"
+libc = "0.2"
+
+# ruff's own release profile at 0.16.9, which its release binaries are built with.
+[profile.release]
+lto = "fat"
+codegen-units = 16
+
+[profile.release.package.ruff_python_parser]
+codegen-units = 1
+[profile.release.package.ruff_python_ast]
+codegen-units = 1
+[profile.release.package.salsa]
+codegen-units = 1
