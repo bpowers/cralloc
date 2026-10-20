@@ -7,7 +7,10 @@ Kani does not cover these blocks. It does cover the address arithmetic they depe
 **The `Space` invariant.** The `plan.size()` bytes at `base` are one reservation that `os` (the
 value the `Space` borrows) returned and that has not been unmapped, and `base` is aligned to the
 plan's region size, which is the size the reservation got (regions shrink, keeping their number,
-when the OS refuses the largest).
+when the OS refuses the largest). A `Space` stores the plan's region shift and rebuilds the plan
+as `Plan::new(O::GEOMETRY, shift)` (`Space::plan`); every plan it is built from is
+`O::GEOMETRY.plan(shift)`, which is that same value, so "the plan" below is one plan whichever
+way it is read.
 
 Three places construct a `Space`:
 

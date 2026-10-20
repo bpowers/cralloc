@@ -258,7 +258,7 @@ impl<'a, O: Os, R: Routines, S: Source> Cache<'a, O, R, S> {
             return false;
         };
         let stamp = slab.stamp(class);
-        match Stamp(stamp.load(Relaxed)).age(seen.magazine.id(), clock.now()) {
+        match Stamp(stamp.load(Relaxed)).age(self.area.id(&seen.magazine), clock.now()) {
             Age::Unstamped(fresh) => {
                 stamp.store(fresh.0, Relaxed);
                 return false;

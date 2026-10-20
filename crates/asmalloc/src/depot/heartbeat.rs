@@ -1,12 +1,20 @@
-//! The heartbeat: the bounded maintenance every slow path does before it returns.
+//! The heartbeat: bounded maintenance done by slow paths, paced by what they move.
 //!
-//! A large allocation or free counts as a slow path, and does the chores below on one in
-//! [`LONE_EVERY`] of them ([`Cache::lone_heartbeat`]). There is no timer, so maintenance happens at a rate set by
-//! allocation activity, in units small enough that no single call pays much; a program that
-//! wants it paced by time instead runs `maintain` (`maintain.rs`) from a thread of its own.
-//! The clock is read at most once per heartbeat, and only when a decision needs it.
+//! Each slow path that installs a magazine adds the bytes of objects a full magazine of its
+//! class holds to its CPU's activity counter, and runs the chores below when the counter passes
+//! a multiple of [`BEAT_BYTES`]; a slow path whose CPU has a rule the launder budget turned away
+//! runs them at once. A large allocation or free adds a [`LONE_EVERY`]th of that, so that one in
+//! that many beats when nothing else moves ([`Cache::lone_heartbeat`]). Between beats a slow
+//! path does only what answers for its own call (`Cache::between_beats`): the stamp of the
+//! magazine it installed, the depths of the depot stacks it tried, a drain of its own slab where
+//! it met another generation's marker, and the launder over target of its own pushes below.
+//! There is no timer, so maintenance happens at a rate set by allocation activity, in units
+//! small enough that no single call pays much; a program that wants it paced by time instead
+//! runs `maintain` (`maintain.rs`) from a thread of its own. The clock is read at most once per
+//! heartbeat, and only when a decision needs it.
 //!
-//! - **Launder over target.** Last in the heartbeat, after its own sweep and drain: for each
+//! - **Launder over target.** On every slow path, beat or not, and last in a heartbeat, after
+//!   its own sweep and drain: for each
 //!   shared depot stack the call's exchange pushed a magazine with objects on, while that stack
 //!   holds more than its target, a magazine is popped and its objects go back to the source, as
 //!   many as the exchange pushed there, whatever the rules before it did (they ran within what
@@ -17,7 +25,7 @@
 //!   heartbeats that follow. Only a push makes a stack deeper. A domain's stack needs no such
 //!   rule: its cap keeps it within bounds.
 //! - **Shed what was not needed** (`shed.rs`). A note of the depth of each stack the slow path
-//!   tried to pop, and on every [`LOOK_EVERY`]th slow path of a CPU a look at one class's stacks
+//!   tried to pop, and on every [`LOOK_EVERY`]th heartbeat of a CPU a look at one class's stacks
 //!   in its own domain and the shared pool, the classes in turn, and at one stack held by
 //!   another domain, in rotation (`held.rs`), each of which starts a new interval for the stack
 //!   it looks at; then at most one magazine laundered from a stack that owes. So a domain whose
@@ -27,9 +35,11 @@
 //!   which takes and launders the magazine loaded there if it has been loaded for an interval,
 //!   or launders one full spare of a class with nothing loaded.
 //! - **Purge.** One [`Source::purge_step`].
-//! - **Idle check.** Each slow path on a CPU counts itself in that CPU's activity counter, and
-//!   every [`LOOK_EVERY`] of them it looks at one other CPU's slab, chosen from the count, so
-//!   that a CPU's looks go round every CPU number a slow path has run on. A slab is idle when
+//! - **Idle check.** Each slow path on a CPU moves that CPU's activity counter, and every
+//!   [`LOOK_EVERY`]th heartbeat looks at one other CPU's slab, chosen from the count of
+//!   heartbeats, so that a CPU's looks go round every CPU number a slow path has run on. A
+//!   slab whose slow paths are all swaps with its spares moves its counter all the same. A slab
+//!   is idle when
 //!   its counter has not moved for [`IDLE_TICKS`] of the clock ([`Os::ticks`]). Each look
 //!   compares the counter with the slab's [`Sighting`], the counter value last seen there and
 //!   when: a changed counter is recorded with the time now; an unchanged one is drained if the
@@ -76,7 +86,8 @@
 //! domain's stack is full or empty; a push that finds its domain's stack empty also sets that
 //! stack's bit in the sets of what the domains hold, if it is clear. Laundering and purging
 //! write shared state only when there is something to give back. Within its own slab, the
-//! activity counter, the refresh count and the sweep share a line that other CPUs only read;
+//! activity counter, the count of heartbeats, the refresh count and the sweep share a line that
+//! other CPUs only read;
 //! the stamps have lines of their own; the sighting, which other CPUs write, has its own line.
 //!
 //! **A drain that finds the slab busy.** The look that marks a sighting drained is the only one
@@ -126,16 +137,16 @@ pub(super) const IDLE_SHIFT: u32 = 32;
 /// it is long next to the microseconds between heartbeats.
 pub const IDLE_TICKS: u64 = 1 << IDLE_SHIFT;
 
-/// How many of its own slow paths a CPU makes between looks at another CPU's slab, by default.
+/// How many of its own heartbeats a CPU makes between looks at another CPU's slab, by default.
 /// A look reads that slab's cold line and the clock, and sometimes writes the line; doing it on
-/// one slow path in sixteen keeps that off the slow path's cost, and a CPU still looks at every
+/// one heartbeat in sixteen keeps that off the heartbeat's cost, and a CPU still looks at every
 /// slab many times an interval while it allocates at any appreciable rate.
 pub const LOOK_EVERY: u64 = 16;
 
-/// A large allocation or free does its heartbeat's chores on one count of its CPU's activity
-/// in this many: 16. Large blocks are seldom allocated at a rate that would starve the chores,
-/// and a program that only moves large blocks still gets a heartbeat every few calls. A power
-/// of two dividing [`LOOK_EVERY`], so that some of those heartbeats are looks.
+/// A large allocation or free counts this fraction of [`BEAT_BYTES`] towards its CPU's next
+/// heartbeat: one in 16 beats when only large blocks move. Large blocks are seldom allocated at
+/// a rate that would starve the chores, and a program that only moves large blocks still gets a
+/// heartbeat every few calls. A power of two dividing [`LOOK_EVERY`] and `BEAT_BYTES`.
 pub const LONE_EVERY: u64 = 16;
 
 const _: () = assert!(LOOK_EVERY.is_multiple_of(LONE_EVERY));
@@ -270,6 +281,10 @@ pub(super) struct Chores {
     pub(super) tried: Tried,
     /// Its purge step is already taken.
     pub(super) purged: bool,
+    /// The bytes of objects a full magazine of the class holds, if it installed a magazine:
+    /// an exchange moves one magazine between tiers, which paces the heartbeat (see
+    /// [`BEAT_BYTES`]).
+    pub(super) moved: usize,
 }
 
 /// The depot stacks of a class that a slow path tried to pop, in order: its domain's and,
@@ -318,24 +333,57 @@ pub struct LoneTurn {
 /// when the chores are due.
 pub fn lone_count<R: Routines>(depot: &Depot, routines: &R) -> Lone {
     let cpu = routines.cpu();
-    let activity = cpu.map(|cpu| count(depot, routines, cpu));
-    if activity.is_some_and(|activity| !activity.is_multiple_of(LONE_EVERY)) {
-        return Lone::Counted;
-    }
-    // The chores take turns by count, the classes and the CPUs looked at in rotation, so they
-    // turn once per beat, not once per count, or they would visit a fraction of each.
-    Lone::Beat(LoneTurn {
-        cpu,
-        turn: activity.map(|activity| activity / LONE_EVERY),
-    })
+    let turn = match cpu {
+        // A sixteenth of a beat's bytes: a CPU that only moves large blocks beats on one call
+        // in sixteen, and one that also exchanges magazines counts them towards the same beat.
+        Some(cpu) => match count(depot, routines, cpu, BEAT_BYTES / LONE_EVERY, BEAT_SHIFT) {
+            Some(turn) => Some(turn),
+            None => return Lone::Counted,
+        },
+        None => None,
+    };
+    Lone::Beat(LoneTurn { cpu, turn })
 }
 
-/// Counts a slow path of `cpu` in its slab's activity counter, and returns the count.
-fn count<R: Routines>(depot: &Depot, routines: &R, cpu: Cpu) -> u64 {
+/// `log2` of [`BEAT_BYTES`].
+pub(super) const BEAT_SHIFT: u32 = 15;
+
+/// The bytes of objects a CPU's slow paths move between tiers for each heartbeat: 32 KiB.
+///
+/// Maintenance is paced by what moves, not by calls. A slow path that installs a magazine adds
+/// the bytes a full magazine of its class holds to its CPU's activity counter, and the
+/// heartbeat's chores run when the counter passes a multiple of this. A call was never a fixed
+/// amount of work: a class whose magazines hold two objects reached a slow path every two, one
+/// whose magazines hold 1,022 every 1,022, and a swap with a spare that does nothing else costs
+/// less than the chores would add to it. Bytes rather than objects, because what the chores
+/// return is memory, and magazines are already sized in bytes (`MAGAZINE_BUDGET`).
+///
+/// 32 KiB is the most for which the clocked rules still act within the times the rules tests
+/// assert (`rules.rs`): their busy CPUs exchange magazines of two objects of 24 to 32 KiB, so
+/// one exchange must still be a beat, and at 64 KiB a quiet domain's stacks went back after 8.4
+/// intervals instead of within 7. At 32 KiB every class from 32 bytes up beats on each exchange,
+/// as before; the 8 and 16-byte classes, whose swaps with spares are the commonest, beat on one
+/// in four and one in two. Measured in `docs/research/launder-and-fill.md`, "A lean slow path".
+pub const BEAT_BYTES: u64 = 1 << BEAT_SHIFT;
+
+/// Adds `bytes` moved by a slow path of `cpu` to its slab's activity counter and, if the
+/// counter passed a multiple of [`BEAT_BYTES`], counts a heartbeat and returns its turn: the
+/// number of heartbeats the CPU has run, so that the chores that go round the classes and the
+/// CPUs take every turn whatever a call moves. Every call moves the activity counter, so the
+/// idle check sees a CPU busy on slow paths of any kind as active.
+fn count<R: Routines>(
+    depot: &Depot,
+    routines: &R,
+    cpu: Cpu,
+    bytes: u64,
+    shift: u32,
+) -> Option<u64> {
     if depot.common.cpus.load(Relaxed) <= cpu.index() {
         depot.common.cpus.fetch_max(cpu.index() + 1, Relaxed);
     }
-    routines.slabs().slab(cpu).note_activity()
+    let slab = routines.slabs().slab(cpu);
+    let (before, after) = slab.note_activity(bytes.max(1));
+    (after >> shift != before >> shift).then(|| slab.note_beat())
 }
 
 impl<O: Os, R: Routines, S: Source> Cache<'_, O, R, S> {
@@ -356,14 +404,61 @@ impl<O: Os, R: Routines, S: Source> Cache<'_, O, R, S> {
         self.beat(None, chores, turn.turn);
     }
 
-    /// One heartbeat, after a slow path that served `served`, if it served a small class.
+    /// What follows a slow path that served `served`, if it served a small class: its own
+    /// duties, and the heartbeat's chores when its CPU's activity has passed a multiple of
+    /// [`BEAT_BYTES`]. A thread with no valid CPU has no counter, and beats every time.
     pub(super) fn heartbeat(&self, served: Option<SmallClass>, chores: Chores) {
-        let activity = chores.cpu.map(|cpu| count(self.depot, &self.routines, cpu));
-        self.beat(served, chores, activity);
+        let Some(cpu) = chores.cpu else {
+            return self.beat(served, chores, None);
+        };
+        match count(
+            self.depot,
+            &self.routines,
+            cpu,
+            chores.moved as u64,
+            self.tuning.beat_shift,
+        ) {
+            Some(turn) => self.beat(served, chores, Some(turn)),
+            // A rule of this CPU's that an earlier call's budget turned away runs at its next
+            // slow path, as the budget promises (`LAUNDER_BUDGET`), whatever the pace: it is once
+            // an interval per class, and the refresh waits for it.
+            None if self.tuning.age_limit && self.has_deferred(cpu) => {
+                let turn = self.slab(cpu).note_beat();
+                self.beat(served, chores, Some(turn));
+            }
+            None => self.between_beats(served, chores, cpu),
+        }
+    }
+
+    /// The duties of a slow path that are not the heartbeat's to pace, because they answer for
+    /// what this call did: the stamp of a magazine it installed, the depths of the depot stacks
+    /// it tried (the low-water marks the shed reads), a drain of its own slab where it met
+    /// another generation's marker, and the launder over target of what it pushed on shared
+    /// stacks, one magazine for each push that left a stack over its target, which bounds the
+    /// stacks whatever the pace.
+    fn between_beats(&self, served: Option<SmallClass>, chores: Chores, cpu: Cpu) {
+        if let (Some(class), true) = (served, chores.installed) {
+            self.unstamp(cpu, class);
+        }
+        let clock = Clock::new(self.os());
+        if let Some(class) = served
+            && self.tuning.shed_unused
+        {
+            for pool in chores.tried.pools() {
+                self.note_depth(pool, class, &clock);
+            }
+        }
+        if chores.stale && generation::drains_enabled(self.depot) {
+            self.drain(cpu);
+        }
+        let pushed = self.overflowed.take();
+        if pushed.magazines > 0 {
+            self.launder_overflow(pushed, &clock, false);
+        }
     }
 
     /// The chores of a heartbeat. `activity` is its turn, which picks the class and the CPU
-    /// that the rotating chores look at: for a small slow path, the count of its CPU's activity.
+    /// that the rotating chores look at: the number of beats its CPU's activity counter holds.
     fn beat(&self, served: Option<SmallClass>, chores: Chores, activity: Option<u64>) {
         let clock = Clock::new(self.os());
         // A rule of this CPU's that an earlier slow path's budget turned away goes first, and

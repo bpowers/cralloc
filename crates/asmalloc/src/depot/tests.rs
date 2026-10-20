@@ -8,7 +8,7 @@
 //! object is in exactly one place.
 
 use super::test_rig::{Rig, SimCpu, Small, TIGHT, tiny_class};
-use super::{Drained, IDLE_TICKS, Tuning};
+use super::{Drained, IDLE_TICKS, Source, Tuning};
 use crate::classes::{Class, SmallClass};
 use crate::front::check::interrupt_at;
 use crate::front::{Cpu, Routines};
@@ -139,6 +139,108 @@ fn cpu_0_is_empty(rig: &TestRig) -> bool {
     })
 }
 
+/// A swing that straddles a magazine's end, two allocations and then two frees from a level of
+/// one, crossed both ends on every repetition when every swap installed a magazine at its end:
+/// two slow paths a repetition for as long as it ran. The swap that reverses the last leaves
+/// the loaded magazine half full, and the swing then stays inside it: no slow path after the
+/// first few repetitions.
+#[test]
+fn a_swing_across_a_magazines_end_stops_taking_slow_paths_after_the_reversal() {
+    let class = SmallClass::from_ordinal(0).unwrap();
+    let rig: TestRig = Rig::new(&[class], 4 * class.magazine().capacity(), Tuning::DEFAULT);
+    let machine = SimCpu::new(0);
+    let cache = rig.cache(&machine);
+    let slab = rig.slabs().slab(cpu(&rig, 0));
+    // A free loads an empty magazine at a level of one.
+    cache.free(class, rig.source.alloc_one(class).unwrap());
+    let mut held = Vec::new();
+    let mut slow_paths = Vec::new();
+    for _ in 0..20 {
+        let before = slab.activity();
+        for _ in 0..2 {
+            held.push(cache.alloc(class).unwrap());
+        }
+        for object in held.drain(..).rev() {
+            cache.free(class, object);
+        }
+        slow_paths.push(slab.activity() != before);
+    }
+    assert!(
+        slow_paths[4..].iter().all(|&slow| !slow),
+        "slow paths in each repetition: {slow_paths:?}"
+    );
+    rig.census(&[], false);
+}
+
+/// The evidence of a swing is a swap that reverses the last of its class on its CPU: a flow
+/// that goes one way never shows it, so it never pays for moving objects between magazines.
+#[test]
+fn only_a_swap_that_reverses_the_last_is_a_reversal() {
+    use super::stock::Swap;
+    let class = SmallClass::from_ordinal(0).unwrap();
+    let rig: TestRig = Rig::new(&[class], 64, Tuning::DEFAULT);
+    let machine = SimCpu::new(0);
+    let cache = rig.cache(&machine);
+    let cpu = cpu(&rig, 0);
+    let ways = [
+        (Swap::Free, false),
+        (Swap::Free, false),
+        (Swap::Free, false),
+        (Swap::Alloc, true),
+        (Swap::Alloc, false),
+        (Swap::Free, true),
+        (Swap::Alloc, true),
+    ];
+    for (way, reversed) in ways {
+        assert_eq!(cache.note_swap(cpu, class, way), reversed, "{way:?}");
+    }
+    // Each class keeps its own direction.
+    let other = SmallClass::from_ordinal(1).unwrap();
+    assert!(!cache.note_swap(cpu, other, Swap::Alloc));
+}
+
+/// A CPU whose slow paths are all swaps with its own spares, each of which moves less than a
+/// heartbeat's bytes, still beats, and still counts as active: another CPU's idle checks, which
+/// look at it on every one of their heartbeats, never drain it while it swaps.
+#[test]
+fn a_cpu_that_only_swaps_with_its_spares_beats_and_is_not_drained() {
+    let small = SmallClass::from_ordinal(0).unwrap();
+    let tuning = Tuning {
+        look_every: 1,
+        ..Tuning::DEFAULT
+    };
+    let rig: TestRig = Rig::new(&[small, tiny_class()], 8192, tuning);
+    let machine = SimCpu::new(0);
+    let cache = rig.cache(&machine);
+    let slab = rig.slabs().slab(cpu(&rig, 0));
+    // A burst a little over a magazine, allocated and freed in reverse: two swaps with the
+    // spares each time, once the first has stocked them.
+    let burst = small.magazine().capacity() + 100;
+    let swing = || {
+        let held: Vec<_> = (0..burst).filter_map(|_| cache.alloc(small)).collect();
+        assert_eq!(held.len(), burst);
+        for object in held.into_iter().rev() {
+            cache.free(small, object);
+        }
+    };
+    swing();
+    let (beats, steps) = (slab.beats(), 8);
+    let mut drained = 0;
+    for _ in 0..4 * steps {
+        rig.os().advance_clock(IDLE_TICKS / steps);
+        for _ in 0..8 {
+            swing();
+        }
+        let fences = rig.os().calls(Call::Fence);
+        heartbeats_on_cpu_1(&rig);
+        if rig.os().calls(Call::Fence) > fences && rig.os().last_fence() == Some(0) {
+            drained += 1;
+        }
+    }
+    assert!(slab.beats() > beats, "the swaps beat");
+    assert_eq!(drained, 0, "a CPU busy swapping was drained");
+}
+
 /// A CPU that allocates and frees only on fast paths never moves its activity counter, however
 /// busy it is, while another CPU's heartbeats look at it many times an interval. It is drained,
 /// and refills, but never twice within an interval: counted in looks rather than time, it was
@@ -174,7 +276,9 @@ fn a_cpu_busy_on_fast_paths_is_drained_at_most_once_an_interval() {
         }
     }
     // Each drain costs CPU 0 one slow path, to load a magazine again, and nothing else does.
-    assert_eq!(slab.activity(), 1 + drains.len() as u64);
+    // The activity counter counts the bytes a full magazine holds for each exchange.
+    let exchange = (busy.magazine().capacity() * busy.size()) as u64;
+    assert_eq!(slab.activity(), (1 + drains.len() as u64) * exchange);
     assert!(drains.len() >= intervals as usize / 2, "{drains:?}");
     for pair in drains.windows(2) {
         assert!(
@@ -781,7 +885,9 @@ fn maintain_drains_a_cpu_busy_on_fast_paths_at_most_once_an_interval() {
             drains.push(rig.os().ticks());
         }
     }
-    assert_eq!(slab.activity(), 1 + drains.len() as u64);
+    // The activity counter counts the bytes a full magazine holds for each exchange.
+    let exchange = (busy.magazine().capacity() * busy.size()) as u64;
+    assert_eq!(slab.activity(), (1 + drains.len() as u64) * exchange);
     assert!(drains.len() >= intervals as usize / 2 - 1, "{drains:?}");
     for pair in drains.windows(2) {
         assert!(

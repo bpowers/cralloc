@@ -122,7 +122,9 @@ const fn room_of(tuning: Tuning) -> usize {
 /// 55 empty; zero when no pop was seen); and the marks of a magazine sent to the depot and not
 /// yet matched by one taken back (bits 56 and 57 full: sent, and its push contended; 58 and 59
 /// empty). Bit 60 says the sweep has settled the class's credit in its current visit and is
-/// returning what is above the new limit. All zero is no stock and no mark.
+/// returning what is above the new limit. Bits 61 and 62 are not stock's: they record the
+/// direction of the class's last swap on the CPU (`slow.rs`, [`Swap`]). All zero is no stock,
+/// no mark and no swap.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
 pub(super) struct Stock(pub(super) u64);
 
@@ -130,6 +132,18 @@ const FIELD: u32 = 14;
 const MAX: u64 = (1 << FIELD) - 1;
 const LOW: u32 = 2 * FIELD;
 const SETTLING: u64 = 1 << 60;
+/// A swap of the class has been recorded on this CPU.
+const SWAPPED: u64 = 1 << 61;
+/// The last swap recorded was a free's.
+const FREED: u64 = 1 << 62;
+
+/// Which way a swap went: an allocation's, which installs a magazine with objects, or a
+/// free's, which installs an empty one.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(super) enum Swap {
+    Alloc,
+    Free,
+}
 
 const fn shift(kind: Spare) -> u32 {
     match kind {
@@ -476,6 +490,26 @@ impl<'a, O: Os, R: Routines, S: Source> Cache<'a, O, R, S> {
             laundered = self.take_spares_keeping(cpu, class, keep);
         }
         Swept::Stocked { laundered, more }
+    }
+
+    /// Records a swap of `class` on `cpu` that went `way`, and says whether it reverses the
+    /// last one recorded there: evidence that the CPU's work in the class swings both ways
+    /// across a magazine's end. A hint in the stock word, as stock's own marks are: a lost or
+    /// misplaced update (a thread preempted between the load and the store, or one that moved
+    /// to another CPU) only makes one swap leave its magazine at an end or half full when the
+    /// other would have been right. Writes the word only when the direction changes, so a flow
+    /// that goes one way writes it once.
+    pub(super) fn note_swap(&self, cpu: Cpu, class: SmallClass, way: Swap) -> bool {
+        let word = self.slab(cpu).stock(class);
+        let now = word.load(Relaxed).addr() as u64;
+        let freed = way == Swap::Free;
+        let next = now | SWAPPED | if freed { FREED } else { 0 };
+        let next = if freed { next } else { next & !FREED };
+        if next == now {
+            return false;
+        }
+        word.store(ptr::without_provenance_mut(next as usize), Relaxed);
+        now & SWAPPED != 0
     }
 
     /// How many full spares of `class` `cpu`'s stack may hold: its fixed limit and its credit.

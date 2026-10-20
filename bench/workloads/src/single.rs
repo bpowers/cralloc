@@ -382,6 +382,51 @@ pub fn tree(args: &Args) {
         .emit();
 }
 
+/// `burst` objects of `size` bytes allocated, then freed in the reverse order, `reps` times,
+/// with nothing else in the loop. A burst larger than a magazine walks the loaded magazine's
+/// word across its ends, so each repetition makes a fixed number of slow paths, swaps with the
+/// CPU's spares while they have room and exchanges with the depot past it; one that fits in a
+/// magazine makes none. The difference over the slow paths made is what one costs.
+pub fn burst(args: &Args) {
+    pin_main();
+    let size = args.usize("size", 8);
+    let burst = args.usize("burst", 1000);
+    let reps = args.usize("reps", 20_000);
+    let counters = Counters::region();
+    // SAFETY: a non-zero size and an alignment of 8.
+    let lay = unsafe { Layout::from_size_align_unchecked(size, 8) };
+    let mut held: Vec<*mut u8> = Vec::with_capacity(burst);
+    // One burst first, outside the measured phase, so that the phase starts with magazines.
+    for _ in 0..burst {
+        // SAFETY: as above.
+        held.push(unsafe { alloc(lay) });
+    }
+    while let Some(p) = held.pop() {
+        // SAFETY: allocated with `lay` above.
+        unsafe { dealloc(p, lay) };
+    }
+    let m = Measure::start(&counters);
+    for _ in 0..reps {
+        for _ in 0..burst {
+            // SAFETY: as above.
+            let p = unsafe { alloc(lay) };
+            black_box(p);
+            held.push(p);
+        }
+        while let Some(p) = held.pop() {
+            // SAFETY: allocated with `lay` above, and freed once.
+            unsafe { dealloc(p, lay) };
+        }
+    }
+    let run = m.stop();
+    let ops = (2 * reps * burst) as u64;
+    Report::new("burst", args)
+        .phase("run", &run)
+        .metric("ops", ops)
+        .primary("cycles/op", cycles(&run) / ops as f64, Better::Lower)
+        .emit();
+}
+
 pub fn vecgrow(args: &Args) {
     pin_main();
     let vecs = args.usize("vecs", 1);

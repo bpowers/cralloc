@@ -22,6 +22,24 @@
 //! both name the same magazine, which then is on the current CPU, so the install displaces
 //! exactly what the slow path decided to displace.
 //!
+//! **Half full on a reversal.** A swap installs a magazine at one of its ends: full for an
+//! allocation, empty for a free. Work that swings both ways across a magazine's end, a few
+//! allocations and then as many frees, then crosses the far end of the new magazine too, and
+//! does on every repetition: two swaps each, for as long as the work is steady
+//! (`docs/research/rpc-slow-mode.md`). So each CPU records which way its last swap of each class
+//! went, a hint in the class's stock word ([`Cache::note_swap`]), and a swap that reverses it is
+//! taken as evidence of a swing: the slow path leaves the loaded magazine half full. It takes
+//! the loaded magazine out of the slab with store-if-equal, storing zero, so that both
+//! magazines are its own; moves half of one's objects into the other, a copy between two
+//! magazines nobody else can reach; and installs the half full one with store-if-equal,
+//! expecting zero. Each step is one commit, and between them everything the thread holds is
+//! private. If the install finds the word changed (a thread that took the slow path meanwhile
+//! and installed its own, a drain's marker, a move to another CPU), the thread still holds both
+//! magazines and retires them or serves from them as a failed install does. No spare is needed:
+//! the loaded magazine itself receives or gives the half. A swing of less than half a magazine
+//! then never leaves it. A flow never reverses, so it never pays: one more store-if-equal and a
+//! copy of half a magazine fall only on a reversing swap.
+//!
 //! **Refresh.** One full magazine in [`REFRESH_EVERY`] that a free displaces is laundered and
 //! retired empty instead of going to the spares or the depot, so the objects in steady
 //! circulation are gradually replaced by the lowest free ones, and the pages their predecessors
@@ -30,12 +48,25 @@
 
 use super::heartbeat::{Chores, Tried};
 use super::magazine::Magazine;
+use super::stock::Swap;
 use super::{Cache, Pool, Source};
 use crate::classes::{SmallClass, is_marker};
 use crate::front::{Cpu, Field, Routines, Spare, StoreIfEqual};
 use crate::os::Os;
-use core::ptr::NonNull;
+use core::ptr::{self, NonNull};
 use core::sync::atomic::Ordering::{Acquire, Relaxed};
+
+/// What a swap that may leave its magazine half full did (`centre_for_alloc`,
+/// `centre_for_free`).
+enum Centring<'a, T> {
+    /// Not a reversal, or nothing to centre: the exchange goes on as usual with these.
+    Skipped(Seen<'a>, Magazine<'a>),
+    /// It installed a magazine, or found the slab changed; the slow path tries the routine
+    /// again.
+    Again,
+    /// It served the request itself.
+    Finished(T),
+}
 
 /// What a slab word read without protection holds.
 enum Seen<'a> {
@@ -58,6 +89,14 @@ enum Obtained<'a> {
     /// No magazine can be had at all: serve the request from the source directly.
     NoMagazine,
 }
+
+/// The bytes of objects a full magazine of `class` holds: what one exchange moves.
+fn magazine_bytes(class: SmallClass) -> usize {
+    class.magazine().capacity() * class.size()
+}
+
+// Returned in registers, not through memory (see `Magazine`).
+const _: () = assert!(size_of::<Obtained<'_>>() <= 16);
 
 /// One full magazine in this many that a CPU's frees retire is laundered instead of kept, by
 /// default. Each costs a launder now and a fill later, and in a fragmented heap the fill's
@@ -254,14 +293,20 @@ impl<'a, O: Os, R: Routines, S: Source> Cache<'a, O, R, S> {
             if let Seen::Live = seen {
                 return self.serve_alloc(class, held);
             }
+            let reversed = self.note_swap(cpu, class, Swap::Alloc);
+            let (seen, held) =
+                match self.centre_for_alloc(class, word, seen, held, reversed, chores) {
+                    Centring::Skipped(seen, held) => (seen, held),
+                    Centring::Again => continue,
+                    Centring::Finished(object) => return object,
+                };
+            let level = held.level();
             // SAFETY: DEPOT-SLOW-01.
-            let installed = unsafe {
-                self.routines
-                    .store_if_equal(field, word, held.word(held.level()))
-            };
+            let installed = unsafe { self.routines.store_if_equal(field, word, held.word(level)) };
             match installed {
                 StoreIfEqual::Stored => {
                     chores.installed = true;
+                    chores.moved = magazine_bytes(class);
                     if let Seen::Loaded(old, _) = seen {
                         old.set_level(0);
                         self.retire(class, Spare::Empty, old, &mut chores.stale);
@@ -322,24 +367,22 @@ impl<'a, O: Os, R: Routines, S: Source> Cache<'a, O, R, S> {
             if let Seen::Live = seen {
                 return self.serve_free(class, held, object);
             }
+            let reversed = self.note_swap(cpu, class, Swap::Free);
+            let (seen, held) =
+                match self.centre_for_free(class, word, seen, held, object, reversed, chores) {
+                    Centring::Skipped(seen, held) => (seen, held),
+                    Centring::Again => continue,
+                    Centring::Finished(()) => return,
+                };
             // SAFETY: DEPOT-SLOW-01.
             let installed = unsafe { self.routines.store_if_equal(field, word, held.word(0)) };
             match installed {
                 StoreIfEqual::Stored => {
                     chores.installed = true;
+                    chores.moved = magazine_bytes(class);
                     if let Seen::Loaded(old, level) = seen {
                         old.set_level(level);
-                        let due = self.refreshes(cpu);
-                        if due && self.may_launder(class) && !self.has_deferred(cpu) {
-                            self.launder_held(class, &old);
-                            self.retire(class, Spare::Empty, old, &mut chores.stale);
-                        } else {
-                            if due {
-                                // Postponed to the next retirement, not skipped.
-                                self.slab(cpu).uncount_retired();
-                            }
-                            self.retire(class, Spare::Full, old, &mut chores.stale);
-                        }
+                        self.retire_displaced(cpu, class, old, chores);
                     }
                 }
                 StoreIfEqual::Mismatch(now) if self.is_live(now) => {
@@ -351,5 +394,180 @@ impl<'a, O: Os, R: Routines, S: Source> Cache<'a, O, R, S> {
                 StoreIfEqual::NoCpu => return self.serve_free(class, held, object),
             }
         }
+    }
+
+    /// Retires a magazine with objects that a free's install displaced, now this thread's, with
+    /// its level recorded: laundered and retired empty if it is the one in [`REFRESH_EVERY`]
+    /// to refresh and the budget has room, else to the spares or the depot.
+    fn retire_displaced(
+        &self,
+        cpu: Cpu,
+        class: SmallClass,
+        old: Magazine<'a>,
+        chores: &mut Chores,
+    ) {
+        let due = self.refreshes(cpu);
+        if due && self.may_launder(class) && !self.has_deferred(cpu) {
+            self.launder_held(class, &old);
+            self.retire(class, Spare::Empty, old, &mut chores.stale);
+        } else {
+            if due {
+                // Postponed to the next retirement, not skipped.
+                self.slab(cpu).uncount_retired();
+            }
+            self.retire(class, Spare::Full, old, &mut chores.stale);
+        }
+    }
+
+    /// The swap of an allocation that reverses its CPU's last swap of `class` (see the module
+    /// documentation, "Half full on a reversal"): the loaded magazine, read as `word` and empty,
+    /// is taken out with the store-if-equal routine, the top half of `held` is moved into it,
+    /// and `held` is installed half full in its place. Skipped, giving back what it was given,
+    /// unless the swap reverses the last one, the word names a magazine and `held` has two
+    /// objects or more.
+    fn centre_for_alloc(
+        &self,
+        class: SmallClass,
+        word: *mut u8,
+        seen: Seen<'a>,
+        held: Magazine<'a>,
+        reversed: bool,
+        chores: &mut Chores,
+    ) -> Centring<'a, Option<NonNull<u8>>> {
+        let level = held.level();
+        let old = match seen {
+            Seen::Loaded(old, _) if reversed && level >= 2 => old,
+            seen => return Centring::Skipped(seen, held),
+        };
+        let field = Field::hot(class);
+        // SAFETY: DEPOT-SLOW-02. Zero keeps the slab invariant.
+        let taken = unsafe { self.routines.store_if_equal(field, word, ptr::null_mut()) };
+        match taken {
+            StoreIfEqual::Stored => {}
+            StoreIfEqual::Mismatch(now) if self.is_live(now) => {
+                return Centring::Finished(self.serve_alloc(class, held));
+            }
+            StoreIfEqual::Mismatch(_) => {
+                self.retire(class, Spare::Full, held, &mut chores.stale);
+                return Centring::Again;
+            }
+            StoreIfEqual::NoCpu => return Centring::Finished(self.serve_alloc(class, held)),
+        }
+        // Both are this thread's now: `old`, empty, out of the slab, and `held`.
+        let half = level / 2;
+        held.move_top_into(level, &old, half);
+        // SAFETY: DEPOT-SLOW-01.
+        let installed = unsafe {
+            self.routines
+                .store_if_equal(field, ptr::null_mut(), held.word(level - half))
+        };
+        match installed {
+            StoreIfEqual::Stored => {
+                chores.installed = true;
+                chores.moved = magazine_bytes(class);
+                self.retire(class, Spare::Full, old, &mut chores.stale);
+                Centring::Again
+            }
+            StoreIfEqual::Mismatch(now) if self.is_live(now) => {
+                self.retire(class, Spare::Full, old, &mut chores.stale);
+                Centring::Finished(self.serve_alloc(class, held))
+            }
+            StoreIfEqual::Mismatch(_) => {
+                self.retire(class, Spare::Full, held, &mut chores.stale);
+                self.retire(class, Spare::Full, old, &mut chores.stale);
+                Centring::Again
+            }
+            StoreIfEqual::NoCpu => {
+                self.retire(class, Spare::Full, old, &mut chores.stale);
+                Centring::Finished(self.serve_alloc(class, held))
+            }
+        }
+    }
+
+    /// The swap of a free that reverses its CPU's last swap of `class`: the loaded magazine,
+    /// read as `word` and full, is taken out with the store-if-equal routine, its top half is
+    /// moved into `held`, which is empty, and `held` is installed half full in its place; the
+    /// other half retires as any displaced magazine does. Skipped as for an allocation.
+    #[allow(clippy::too_many_arguments)]
+    fn centre_for_free(
+        &self,
+        class: SmallClass,
+        word: *mut u8,
+        seen: Seen<'a>,
+        held: Magazine<'a>,
+        object: NonNull<u8>,
+        reversed: bool,
+        chores: &mut Chores,
+    ) -> Centring<'a, ()> {
+        let (old, level) = match seen {
+            Seen::Loaded(old, level) if reversed && level >= 2 => (old, level),
+            seen => return Centring::Skipped(seen, held),
+        };
+        let Some(cpu) = chores.cpu else {
+            return Centring::Skipped(Seen::Loaded(old, level), held);
+        };
+        let field = Field::hot(class);
+        // SAFETY: DEPOT-SLOW-02. Zero keeps the slab invariant.
+        let taken = unsafe { self.routines.store_if_equal(field, word, ptr::null_mut()) };
+        match taken {
+            StoreIfEqual::Stored => {}
+            StoreIfEqual::Mismatch(now) if self.is_live(now) => {
+                self.serve_free(class, held, object);
+                return Centring::Finished(());
+            }
+            StoreIfEqual::Mismatch(_) => {
+                self.retire(class, Spare::Empty, held, &mut chores.stale);
+                return Centring::Again;
+            }
+            StoreIfEqual::NoCpu => {
+                self.serve_free(class, held, object);
+                return Centring::Finished(());
+            }
+        }
+        // Both are this thread's now: `old`, full, out of the slab, and `held`, empty.
+        let half = level / 2;
+        old.move_top_into(level, &held, half);
+        // SAFETY: DEPOT-SLOW-01.
+        let installed = unsafe {
+            self.routines
+                .store_if_equal(field, ptr::null_mut(), held.word(half))
+        };
+        match installed {
+            StoreIfEqual::Stored => {
+                chores.installed = true;
+                chores.moved = magazine_bytes(class);
+                self.retire_displaced(cpu, class, old, chores);
+                Centring::Again
+            }
+            StoreIfEqual::Mismatch(now) if self.is_live(now) => {
+                self.retire(class, Spare::Full, old, &mut chores.stale);
+                self.serve_free_into(class, held, half, object);
+                Centring::Finished(())
+            }
+            StoreIfEqual::Mismatch(_) => {
+                self.retire(class, Spare::Full, held, &mut chores.stale);
+                self.retire(class, Spare::Full, old, &mut chores.stale);
+                Centring::Again
+            }
+            StoreIfEqual::NoCpu => {
+                self.retire(class, Spare::Full, old, &mut chores.stale);
+                self.serve_free_into(class, held, half, object);
+                Centring::Finished(())
+            }
+        }
+    }
+
+    /// Serves a free with a magazine this thread holds at `level`, below its capacity, and
+    /// sends it to the depot.
+    fn serve_free_into(
+        &self,
+        class: SmallClass,
+        magazine: Magazine,
+        level: usize,
+        object: NonNull<u8>,
+    ) {
+        magazine.set_object(level + 1, object);
+        magazine.set_level(level + 1);
+        self.to_depot(class, magazine);
     }
 }

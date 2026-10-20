@@ -29,6 +29,8 @@ fn main() {
         "map" => single::map(&args),
         "largepair" => single::largepair(&args),
         "tree" => single::tree(&args),
+        // The cost of a slow path; not part of any suite.
+        "burst" => single::burst(&args),
         "vecgrow" => single::vecgrow(&args),
         "json" => single::json(&args),
         // Memory shapes for docs/research/memory.md; not part of any suite.
