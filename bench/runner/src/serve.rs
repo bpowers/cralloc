@@ -37,10 +37,8 @@ pub struct Spinners {
 
 impl Spinners {
     pub fn start(server_cpus: &[usize]) -> Spinners {
-        let cpus: Vec<usize> = server_cpus
-            .iter()
-            .flat_map(|&c| crate::sys::siblings(c).into_iter().filter(move |&s| s != c))
-            .collect();
+        let cpus: Vec<usize> =
+            server_cpus.iter().flat_map(|&c| crate::sys::siblings(c).into_iter().filter(move |&s| s != c)).collect();
         let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
         let threads = cpus
             .iter()
