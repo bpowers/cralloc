@@ -159,6 +159,38 @@ def busy(before, after, cpus):
     return round(len(cpus) * used / total, 3) if total else None
 
 
+PROBE_SYMBOL = "ASMALLOC_PROBE_COUNTS"
+
+
+def probe_reader(pid, binary):
+    """A function that reads the probe build's slow-path counters out of the server's memory,
+    or None for a build without them (crates/asmalloc/src/probe.rs)."""
+    nm = subprocess.run(["nm", "-S", binary], capture_output=True, text=True).stdout
+    sym = [l.split() for l in nm.splitlines() if l.endswith(" " + PROBE_SYMBOL)]
+    if not sym:
+        return None
+    value, size = int(sym[0][0], 16), int(sym[0][1], 16)
+    real = os.path.realpath(binary)
+    base = None
+    for line in Path(f"/proc/{pid}/maps").read_text().splitlines():
+        f = line.split()
+        if len(f) >= 6 and f[5] == real and int(f[2], 16) == 0:
+            base = int(f[0].split("-")[0], 16)
+            break
+    if base is None:
+        return None
+
+    def read():
+        with open(f"/proc/{pid}/mem", "rb") as m:
+            m.seek(base + value)
+            return struct.unpack(f"<{size // 8}Q", m.read(size))
+    return read
+
+
+def probe_delta(a, b):
+    return {str(i): y - x for i, (x, y) in enumerate(zip(a, b)) if y != x}
+
+
 def cstates(cpus=(0, 1, 2, 3)):
     """Entries into and time in each idle state, summed over the server's CPUs."""
     out = {}
@@ -202,8 +234,10 @@ def vm_hwm(pid):
 
 
 def one_run(server, alloc, rnd, segs, outdir, wrap="", record=""):
-    spec, a = SERVERS[server], ALLOCS[alloc]
-    tag = f"{rnd:02d}-{alloc}"
+    spec = SERVERS[server]
+    # `build:NAME` is a native build of the server in bench/target/NAME, for experiments.
+    a = ALLOCS[alloc] if alloc in ALLOCS else {"preload": "", "build": alloc.split(":", 1)[1], "env": {}}
+    tag = f"{rnd:02d}-{alloc.replace(':', '-')}"
     d = outdir / server / tag
     d.mkdir(parents=True, exist_ok=True)
     env = dict(spec.get("env", {}), **a["env"])
@@ -262,6 +296,8 @@ def one_run(server, alloc, rnd, segs, outdir, wrap="", record=""):
         g = subprocess.Popen(gen, stdout=subprocess.PIPE, stderr=open(d / "gen.err", "w"), text=True)
         result, marks = None, []
         idle_at, idle_states = {}, {}
+        probe = probe_reader(pid, binary) if spec.get("native") else None
+        probe_at, probe_counts = {}, {}
         for line in g.stdout:
             if line.startswith("MARK"):
                 f = line.split()
@@ -272,6 +308,8 @@ def one_run(server, alloc, rnd, segs, outdir, wrap="", record=""):
                         perfs[label][0].send_signal(signal.SIGINT)
                     if label in idle_at:
                         idle_states[label] = cstate_delta(idle_at.pop(label), cstates())
+                    if label in probe_at:
+                        probe_counts[label] = probe_delta(probe_at.pop(label), probe())
                 if record and idx == 0:
                     p = subprocess.Popen(["taskset", "-c", AUX_CPU, "perf", "record", "-o", str(d / "perf.data")]
                                          + record.split() + ["-p", str(pid)],
@@ -287,6 +325,8 @@ def one_run(server, alloc, rnd, segs, outdir, wrap="", record=""):
                                          stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
                     perfs[label] = (p, out, time.monotonic())
                     idle_at[label] = cstates()
+                    if probe:
+                        probe_at[label] = probe()
             elif line.startswith("RESULT "):
                 result = json.loads(line[7:])
         g.wait()
@@ -298,6 +338,8 @@ def one_run(server, alloc, rnd, segs, outdir, wrap="", record=""):
         rec["perf"] = {label: parse_perf(out) for label, (p, out, t0) in perfs.items()
                        if label != "record" and out.exists()}
         rec["cstates"] = idle_states
+        if probe_counts:
+            rec["probe"] = probe_counts
         rec["gen_rc"] = g.returncode
         rec["summary"] = result
         rec["marks"] = marks

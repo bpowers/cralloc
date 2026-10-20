@@ -14,7 +14,7 @@
 #[unsafe(naked)]
 pub(crate) unsafe extern "sysv64" fn slab_cas(offset: usize, expected: usize, new: usize) -> usize {
     core::arch::naked_asm!(
-        "5:\n.pushsection .data.rel.ro.asmalloc_got,\"aw\",@progbits\n.balign 16\n8:\n.quad {__rseq_offset}\n.popsection\nmov r10, QWORD PTR [rip + 8b]\nmov r10, QWORD PTR [r10]\nlea r11, [rip + 3f]\nmov QWORD PTR fs:[r10+8], r11\n6:\nmov r8d, DWORD PTR fs:[r10+4]\ncmp r8d, 8192\njae 20f\nshl r8, 12\nmov r9d, edi\nand r9d, 4088\nadd r8, r9\nlea r9, [rip + {SLABS}]\nmov rax, QWORD PTR [r9+r8*1]\ncmp rax, rsi\njne 7f\nmov QWORD PTR [r9+r8*1], rdx\n7:\n.pushsection __rseq_cs, \"aw\"\n.balign 32\n3:\n.long 0, 0\n.quad 6b, 7b - 6b, 4f\n.popsection\n.pushsection .text.unlikely, \"ax\"\n.byte 0x0f, 0xb9, 0x3d\n.long 0x53053053\n4:\njmp 5b\n20:\nmov eax, 2\njmp 7b\n.popsection\nret\n.p2align 6",
+        ".cfi_startproc\n5:\n.pushsection .data.rel.ro.asmalloc_got,\"aw\",@progbits\n.balign 16\n8:\n.quad {__rseq_offset}\n.popsection\nmov r10, QWORD PTR [rip + 8b]\nmov r10, QWORD PTR [r10]\nlea r11, [rip + 3f]\nmov QWORD PTR fs:[r10+8], r11\n6:\nmov r8d, DWORD PTR fs:[r10+4]\ncmp r8d, 8192\njae 20f\nshl r8, 12\nmov r9d, edi\nand r9d, 4088\nadd r8, r9\nlea r9, [rip + {SLABS}]\nmov rax, QWORD PTR [r9+r8*1]\ncmp rax, rsi\njne 7f\nmov QWORD PTR [r9+r8*1], rdx\n7:\n.pushsection __rseq_cs, \"aw\"\n.balign 32\n3:\n.long 0, 0\n.quad 6b, 7b - 6b, 4f\n.popsection\n.pushsection .text.unlikely, \"ax\"\n.byte 0x0f, 0xb9, 0x3d\n.long 0x53053053\n4:\njmp 5b\n20:\nmov eax, 2\njmp 7b\n.popsection\nret\n.cfi_endproc\n.p2align 6",
         __rseq_offset = sym crate::front::__rseq_offset,
         SLABS = sym crate::front::SLABS,
     )
@@ -35,7 +35,7 @@ pub(crate) unsafe extern "sysv64" fn slab_cas(offset: usize, expected: usize, ne
 #[unsafe(naked)]
 pub(crate) unsafe extern "sysv64" fn slab_stack_push(offset: usize, magazine: usize) -> usize {
     core::arch::naked_asm!(
-        "5:\n.pushsection .data.rel.ro.asmalloc_got,\"aw\",@progbits\n.balign 16\n8:\n.quad {__rseq_offset}\n.popsection\nmov r10, QWORD PTR [rip + 8b]\nmov r10, QWORD PTR [r10]\nlea r11, [rip + 3f]\nmov QWORD PTR fs:[r10+8], r11\n6:\nmov r8d, DWORD PTR fs:[r10+4]\ncmp r8d, 8192\njae 20f\nshl r8, 12\nmov r9d, edi\nand r9d, 4088\nadd r8, r9\nlea r9, [rip + {SLABS}]\nmov rax, QWORD PTR [r9+r8*1]\ntest eax, 1\njne 7f\nmov QWORD PTR [rsi], rax\nmov QWORD PTR [r9+r8*1], rsi\n7:\n.pushsection __rseq_cs, \"aw\"\n.balign 32\n3:\n.long 0, 0\n.quad 6b, 7b - 6b, 4f\n.popsection\n.pushsection .text.unlikely, \"ax\"\n.byte 0x0f, 0xb9, 0x3d\n.long 0x53053053\n4:\njmp 5b\n20:\nmov eax, 2\njmp 7b\n.popsection\nret\n.p2align 6",
+        ".cfi_startproc\n5:\n.pushsection .data.rel.ro.asmalloc_got,\"aw\",@progbits\n.balign 16\n8:\n.quad {__rseq_offset}\n.popsection\nmov r10, QWORD PTR [rip + 8b]\nmov r10, QWORD PTR [r10]\nlea r11, [rip + 3f]\nmov QWORD PTR fs:[r10+8], r11\n6:\nmov r8d, DWORD PTR fs:[r10+4]\ncmp r8d, 8192\njae 20f\nshl r8, 12\nmov r9d, edi\nand r9d, 4088\nadd r8, r9\nlea r9, [rip + {SLABS}]\nmov rax, QWORD PTR [r9+r8*1]\ntest eax, 1\njne 7f\nmov QWORD PTR [rsi], rax\nmov QWORD PTR [r9+r8*1], rsi\n7:\n.pushsection __rseq_cs, \"aw\"\n.balign 32\n3:\n.long 0, 0\n.quad 6b, 7b - 6b, 4f\n.popsection\n.pushsection .text.unlikely, \"ax\"\n.byte 0x0f, 0xb9, 0x3d\n.long 0x53053053\n4:\njmp 5b\n20:\nmov eax, 2\njmp 7b\n.popsection\nret\n.cfi_endproc\n.p2align 6",
         __rseq_offset = sym crate::front::__rseq_offset,
         SLABS = sym crate::front::SLABS,
     )
@@ -56,7 +56,7 @@ pub(crate) unsafe extern "sysv64" fn slab_stack_push(offset: usize, magazine: us
 #[unsafe(naked)]
 pub(crate) unsafe extern "sysv64" fn slab_stack_push(offset: usize, magazine: usize) -> usize {
     core::arch::naked_asm!(
-        "5:\nmov r10, QWORD PTR [rip + {__rseq_offset}]\nlea r11, [rip + 3f]\nmov QWORD PTR fs:[r10+8], r11\n6:\nmov r8d, DWORD PTR fs:[r10+4]\ncmp r8d, 8192\njae 20f\nshl r8, 12\nmov r9d, edi\nand r9d, 4088\nadd r8, r9\nlea r9, [rip + {SLABS}]\nmov rax, QWORD PTR [r9+r8*1]\ntest eax, 1\njne 7f\nmov QWORD PTR [rsi], rax\nmov QWORD PTR [r9+r8*1], rsi\n7:\n.pushsection __rseq_cs, \"aw\"\n.balign 32\n3:\n.long 0, 0\n.quad 6b, 7b - 6b, 4f\n.popsection\n.pushsection .text.unlikely, \"ax\"\n.byte 0x0f, 0xb9, 0x3d\n.long 0x53053053\n4:\njmp 5b\n20:\nmov eax, 2\njmp 7b\n.popsection\nret\n.p2align 6",
+        ".cfi_startproc\n5:\nmov r10, QWORD PTR [rip + {__rseq_offset}]\nlea r11, [rip + 3f]\nmov QWORD PTR fs:[r10+8], r11\n6:\nmov r8d, DWORD PTR fs:[r10+4]\ncmp r8d, 8192\njae 20f\nshl r8, 12\nmov r9d, edi\nand r9d, 4088\nadd r8, r9\nlea r9, [rip + {SLABS}]\nmov rax, QWORD PTR [r9+r8*1]\ntest eax, 1\njne 7f\nmov QWORD PTR [rsi], rax\nmov QWORD PTR [r9+r8*1], rsi\n7:\n.pushsection __rseq_cs, \"aw\"\n.balign 32\n3:\n.long 0, 0\n.quad 6b, 7b - 6b, 4f\n.popsection\n.pushsection .text.unlikely, \"ax\"\n.byte 0x0f, 0xb9, 0x3d\n.long 0x53053053\n4:\njmp 5b\n20:\nmov eax, 2\njmp 7b\n.popsection\nret\n.cfi_endproc\n.p2align 6",
         __rseq_offset = sym crate::front::__rseq_offset,
         SLABS = sym crate::front::SLABS,
     )
@@ -76,7 +76,7 @@ pub(crate) unsafe extern "sysv64" fn slab_stack_push(offset: usize, magazine: us
 #[unsafe(naked)]
 pub(crate) unsafe extern "sysv64" fn slab_stack_pop(offset: usize) -> usize {
     core::arch::naked_asm!(
-        "5:\n.pushsection .data.rel.ro.asmalloc_got,\"aw\",@progbits\n.balign 16\n8:\n.quad {__rseq_offset}\n.popsection\nmov r10, QWORD PTR [rip + 8b]\nmov r10, QWORD PTR [r10]\nlea r11, [rip + 3f]\nmov QWORD PTR fs:[r10+8], r11\n6:\nmov r8d, DWORD PTR fs:[r10+4]\ncmp r8d, 8192\njae 20f\nshl r8, 12\nmov r9d, edi\nand r9d, 4088\nadd r8, r9\nlea r9, [rip + {SLABS}]\nmov rax, QWORD PTR [r9+r8*1]\ntest eax, 1\njne 7f\ntest rax, rax\nje 7f\nmov rcx, QWORD PTR [rax]\nmov QWORD PTR [r9+r8*1], rcx\n7:\n.pushsection __rseq_cs, \"aw\"\n.balign 32\n3:\n.long 0, 0\n.quad 6b, 7b - 6b, 4f\n.popsection\n.pushsection .text.unlikely, \"ax\"\n.byte 0x0f, 0xb9, 0x3d\n.long 0x53053053\n4:\njmp 5b\n20:\nmov eax, 2\njmp 7b\n.popsection\nret\n.p2align 6",
+        ".cfi_startproc\n5:\n.pushsection .data.rel.ro.asmalloc_got,\"aw\",@progbits\n.balign 16\n8:\n.quad {__rseq_offset}\n.popsection\nmov r10, QWORD PTR [rip + 8b]\nmov r10, QWORD PTR [r10]\nlea r11, [rip + 3f]\nmov QWORD PTR fs:[r10+8], r11\n6:\nmov r8d, DWORD PTR fs:[r10+4]\ncmp r8d, 8192\njae 20f\nshl r8, 12\nmov r9d, edi\nand r9d, 4088\nadd r8, r9\nlea r9, [rip + {SLABS}]\nmov rax, QWORD PTR [r9+r8*1]\ntest eax, 1\njne 7f\ntest rax, rax\nje 7f\nmov rcx, QWORD PTR [rax]\nmov QWORD PTR [r9+r8*1], rcx\n7:\n.pushsection __rseq_cs, \"aw\"\n.balign 32\n3:\n.long 0, 0\n.quad 6b, 7b - 6b, 4f\n.popsection\n.pushsection .text.unlikely, \"ax\"\n.byte 0x0f, 0xb9, 0x3d\n.long 0x53053053\n4:\njmp 5b\n20:\nmov eax, 2\njmp 7b\n.popsection\nret\n.cfi_endproc\n.p2align 6",
         __rseq_offset = sym crate::front::__rseq_offset,
         SLABS = sym crate::front::SLABS,
     )
@@ -96,7 +96,7 @@ pub(crate) unsafe extern "sysv64" fn slab_stack_pop(offset: usize) -> usize {
 #[unsafe(naked)]
 pub(crate) unsafe extern "sysv64" fn slab_stack_pop(offset: usize) -> usize {
     core::arch::naked_asm!(
-        "5:\nmov r10, QWORD PTR [rip + {__rseq_offset}]\nlea r11, [rip + 3f]\nmov QWORD PTR fs:[r10+8], r11\n6:\nmov r8d, DWORD PTR fs:[r10+4]\ncmp r8d, 8192\njae 20f\nshl r8, 12\nmov r9d, edi\nand r9d, 4088\nadd r8, r9\nlea r9, [rip + {SLABS}]\nmov rax, QWORD PTR [r9+r8*1]\ntest eax, 1\njne 7f\ntest rax, rax\nje 7f\nmov rcx, QWORD PTR [rax]\nmov QWORD PTR [r9+r8*1], rcx\n7:\n.pushsection __rseq_cs, \"aw\"\n.balign 32\n3:\n.long 0, 0\n.quad 6b, 7b - 6b, 4f\n.popsection\n.pushsection .text.unlikely, \"ax\"\n.byte 0x0f, 0xb9, 0x3d\n.long 0x53053053\n4:\njmp 5b\n20:\nmov eax, 2\njmp 7b\n.popsection\nret\n.p2align 6",
+        ".cfi_startproc\n5:\nmov r10, QWORD PTR [rip + {__rseq_offset}]\nlea r11, [rip + 3f]\nmov QWORD PTR fs:[r10+8], r11\n6:\nmov r8d, DWORD PTR fs:[r10+4]\ncmp r8d, 8192\njae 20f\nshl r8, 12\nmov r9d, edi\nand r9d, 4088\nadd r8, r9\nlea r9, [rip + {SLABS}]\nmov rax, QWORD PTR [r9+r8*1]\ntest eax, 1\njne 7f\ntest rax, rax\nje 7f\nmov rcx, QWORD PTR [rax]\nmov QWORD PTR [r9+r8*1], rcx\n7:\n.pushsection __rseq_cs, \"aw\"\n.balign 32\n3:\n.long 0, 0\n.quad 6b, 7b - 6b, 4f\n.popsection\n.pushsection .text.unlikely, \"ax\"\n.byte 0x0f, 0xb9, 0x3d\n.long 0x53053053\n4:\njmp 5b\n20:\nmov eax, 2\njmp 7b\n.popsection\nret\n.cfi_endproc\n.p2align 6",
         __rseq_offset = sym crate::front::__rseq_offset,
         SLABS = sym crate::front::SLABS,
     )

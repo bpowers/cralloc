@@ -8,9 +8,11 @@
 #[unsafe(naked)]
 pub(crate) unsafe extern "sysv64" fn vg_selftest_add(a: u64, b: u64) -> u64 {
     core::arch::naked_asm!(
-        r"mov rax, rdi
+        r".cfi_startproc
+mov rax, rdi
 add rax, rsi
 ret
+.cfi_endproc
 .p2align 6",
     )
 }

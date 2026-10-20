@@ -357,6 +357,24 @@ def operandText (a : Artifact) (n : String) : String :=
   | some (.const e) => s!"const {e}"
   | none => ""
 
+/-- `lines` wrapped in the printer's unwind directives, if the function they
+print never moves the stack pointer: it calls nothing, pushes and pops
+nothing, and names the stack pointer in no instruction. Otherwise `lines`
+unchanged, with no unwind information. The check is on the printed text, so
+it holds of what the assembler is given, whatever the code's structure. The
+directives cover the function's own section only: code it places elsewhere
+(`.pushsection`, the abort handler of a restartable sequence and its exits)
+has none, which costs a profiler its call chain there and nothing else. -/
+def unwindLines {M : ISA} (p : Printer M) (lines : List Line) : List Line :=
+  let leaf := lines.all fun
+    | .call _ => false
+    | l =>
+      let t := lineText p.call l
+      !((t.splitOn "rsp").length > 1 || (t.splitOn "esp").length > 1 ||
+        (t.splitOn "push ").length > 1 || (t.splitOn "pop ").length > 1 ||
+        (t.splitOn "call").length > 1)
+  if leaf then p.unwindStart.map .text ++ lines ++ p.unwindEnd.map .text else lines
+
 /-- One artifact as a Rust naked function; `moduleOf` gives the module of
 each function it calls. The printer's `funcAlign` comes last, after the
 return (`Printer.function`) and any directives that follow it. -/
@@ -366,7 +384,7 @@ where
   /-- `function a`, given `a`'s printed code `lines`
   (`a.target.printer.function a.code`). -/
   functionOf (a : Artifact) (lines : List Line) (moduleOf : String → String) : String :=
-  let body := lines ++ a.target.printer.funcAlign.map .text
+  let body := unwindLines a.target.printer lines ++ a.target.printer.funcAlign.map .text
   let callees := dedup (body.filterMap fun | .call n => some n | _ => none)
   let refs := dedup (body.flatMap Line.refs)
   cfgAttr a.cfg ++ featuresConst a.name a.features ++
@@ -663,7 +681,7 @@ def macroOperand (text : String) : String :=
 /-- A copy of `a`, whose printed code is `lines`, defined as the C symbol
 `sym` (see above). -/
 def exportFunction (a : Artifact) (lines : List Line) (sym : String) : String :=
-  let body := lines ++ a.target.printer.funcAlign.map .text
+  let body := unwindLines a.target.printer lines ++ a.target.printer.funcAlign.map .text
   let refs := dedup (body.flatMap Line.refs)
   "        #[unsafe(naked)]\n" ++
   "        #[unsafe(no_mangle)]\n" ++
