@@ -24,6 +24,8 @@ asmalloc = ["bench-alloc/asmalloc"]
 je = ["bench-alloc/je"]
 tc = ["bench-alloc/tc"]
 sn = ["bench-alloc/sn"]
+asmalloc-probe = ["bench-alloc/asmalloc-probe"]
+asmalloc-center = ["bench-alloc/asmalloc-center"]
 
 [dependencies]
 bench-alloc = { path = "../../alloc" }
