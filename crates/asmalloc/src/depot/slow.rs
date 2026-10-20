@@ -115,7 +115,8 @@ impl<'a, O: Os, R: Routines, S: Source> Cache<'a, O, R, S> {
             {
                 #[cfg(feature = "x-count")]
                 if let Pool::Shared = pool {
-                    use crate::xcount::{Event, add, from_other};
+                    use crate::xcount::{Event, add};
+                    use crate::xtag::from_other;
                     let d = self.here().index();
                     add(d, Event::PopEmptyShared, 1);
                     if from_other(magazine.id().get(), d) {
@@ -171,7 +172,8 @@ impl<'a, O: Os, R: Routines, S: Source> Cache<'a, O, R, S> {
             {
                 #[cfg(feature = "x-count")]
                 {
-                    use crate::xcount::{Event, add, from_other};
+                    use crate::xcount::{Event, add};
+                    use crate::xtag::from_other;
                     let d = self.here().index();
                     match pool {
                         Pool::Shared => {
@@ -204,6 +206,15 @@ impl<'a, O: Os, R: Routines, S: Source> Cache<'a, O, R, S> {
             #[cfg(feature = "x-count")]
             crate::xcount::add(self.here().index(), crate::xcount::Event::PopDomain, 1);
             self.note_return(class, Spare::Full, contended);
+            return Some(Obtained::Magazine(magazine));
+        }
+        // With `x-peek`, a shared stack whose top magazine this domain pushed is popped as
+        // usual: its objects are the domain's own.
+        #[cfg(feature = "x-peek")]
+        if let Some(top) = self.depot.full(Pool::Shared, class).top()
+            && !crate::xtag::from_other(top, self.here().index())
+            && let Some(magazine) = self.pop_full(class, &mut chores.tried)
+        {
             return Some(Obtained::Magazine(magazine));
         }
         let Some(magazine) = self.obtain_empty(class, &mut chores.stale) else {

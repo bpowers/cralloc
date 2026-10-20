@@ -3,7 +3,6 @@
 //! relaxed add on a line of the domain's own, so a counting build is for counts, not times.
 
 use core::sync::atomic::AtomicU64;
-use core::sync::atomic::AtomicU8;
 use core::sync::atomic::Ordering::Relaxed;
 
 /// Domains counted apart; others fold in.
@@ -51,26 +50,10 @@ struct Line([AtomicU64; 16]);
 
 static COUNTS: [Line; DOMAINS] = [const { Line([const { AtomicU64::new(0) }; 16]) }; DOMAINS];
 
-/// The domain plus one that last pushed each magazine to a shared stack, by magazine number.
-static PUSHER: [AtomicU8; 1 << 20] = [const { AtomicU8::new(0) }; 1 << 20];
-
 /// Adds `n` to `event` of `domain`.
 #[inline]
 pub fn add(domain: usize, event: Event, n: u64) {
     COUNTS[domain % DOMAINS].0[event as usize].fetch_add(n, Relaxed);
-}
-
-/// Records that `domain` pushed magazine `id` to a shared stack.
-#[inline]
-pub fn pushed(id: u32, domain: usize) {
-    PUSHER[id as usize % PUSHER.len()].store((domain % DOMAINS) as u8 + 1, Relaxed);
-}
-
-/// Whether magazine `id`, popped from a shared stack by `domain`, was pushed by another.
-#[inline]
-pub fn from_other(id: u32, domain: usize) -> bool {
-    let p = PUSHER[id as usize % PUSHER.len()].load(Relaxed);
-    p != 0 && p as usize - 1 != domain % DOMAINS
 }
 
 /// Every count, `[domain][event]`.

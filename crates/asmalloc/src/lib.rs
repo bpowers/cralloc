@@ -134,6 +134,8 @@ mod lined;
 #[cfg(feature = "x-count")]
 #[doc(hidden)]
 pub mod xcount;
+#[cfg(any(feature = "x-count", feature = "x-own-fill-first"))]
+mod xtag;
 /// The constants of the specification the routines were proved against, as the Lean emitter
 /// writes them, for every target: the layout the Rust side builds from or asserts against.
 #[path = "front/generated/constants.rs"]

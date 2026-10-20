@@ -535,13 +535,11 @@ impl<'a, O: Os, R: Routines, S: Source> Cache<'a, O, R, S> {
     /// contention.
     fn to_shared(&self, class: SmallClass, magazine: Magazine<'_>) -> bool {
         let level = magazine.level() as u32;
+        #[cfg(any(feature = "x-count", feature = "x-own-fill-first"))]
+        crate::xtag::pushed(magazine.id().get(), self.here().index());
         #[cfg(feature = "x-count")]
-        {
-            let d = self.here().index();
-            crate::xcount::pushed(magazine.id().get(), d);
-            if level > 0 {
-                crate::xcount::add(d, crate::xcount::Event::PushShared, 1);
-            }
+        if level > 0 {
+            crate::xcount::add(self.here().index(), crate::xcount::Event::PushShared, 1);
         }
         if level > 0 {
             let contended = self

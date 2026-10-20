@@ -189,6 +189,13 @@ impl Stack {
         }
     }
 
+    /// EXPERIMENT: the number of the magazine on top, as of a moment during the call, without
+    /// taking it; `None` for an empty stack. A hint.
+    pub(crate) fn top(&self) -> Option<u32> {
+        let number = Packed::from_word(self.head.load(Relaxed)).number;
+        (number != 0).then_some(number)
+    }
+
     /// The stack's count, as of a moment during the call: the count in the top magazine's
     /// link, objects or magazines as its pushes counted. A hint for the depot's targets.
     pub(crate) fn count<O: Os>(&self, area: Area<'_, O>, size: MagazineSize) -> u32 {

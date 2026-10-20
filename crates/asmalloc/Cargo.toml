@@ -45,6 +45,8 @@ x-no-affinity = []
 x-own-fill-first = []
 # `x-carve-own-first`: a fill carves in its own domain before it reuses another domain's free slots.
 x-carve-own-first = []
+# `x-peek` (with `x-own-fill-first`): pop the shared stack first when its top magazine is the domain's own.
+x-peek = ["x-own-fill-first"]
 
 [dependencies]
 
