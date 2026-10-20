@@ -1333,9 +1333,10 @@ counts every retirement and is skipped when the budget is already spent in the s
 rule is waiting for it (below). The shed acts on debts any CPU can pay. The age limit and the
 sweep are per slab: only their own CPU's slow paths run them, and the idle drain skips a busy
 CPU. So each looks for work before it asks for room, and when it finds work and no room it
-records that in the slab's sweep word; the CPU's next slow path gives it the budget first and
-launders over target only with what it leaves (`depot/age.rs`, `Sweep`). Only the objects of a
-push that left a shared stack over its target are set aside from the budget.
+records that in the slab's sweep word; the CPU's next slow path gives it the whole budget first
+and then still launders its own pushes over target (`depot/age.rs`, `Sweep`). Only the objects
+of a push that left a shared stack over its target are set aside from the budget. A refresh due
+on a call that cannot launder is postponed to the next retirement.
 
 *Corrected after review (2026-10-19).* The first version set aside every object an exchange
 pushed on a shared stack, over target or not, and gated the age limit and the sweep before they
@@ -1345,8 +1346,19 @@ on the freeing CPU for 60 intervals and its sweep reached 4 classes of 44 (on ma
 1.1 intervals). An earlier version of this note said such a CPU leaves those rules to other
 CPUs; it cannot. Two tests now run that pipeline for three intervals, with the shared stack
 under its target and with every push over it, and require the idle magazine taken back and the
-sweep round every class (`depot/rules.rs`). A launder over target that a waiting rule took the
-budget from leaves its stack one magazine over its target until the shed takes it back.
+sweep round every class (`depot/rules.rs`).
+
+*Corrected after the second review.* That version let a call that carried a turned-away rule
+skip its own launder over target. On a CPU that only frees, where every exchange pushes past
+the target, the launder takes one magazine a push and never caught up: the shared stack
+levelled at 19 to 25 magazines against a target of 6 for the 16-byte class and 36 to 58
+against 12 for the 8-byte class, for hundreds of intervals, where main holds it at target. A
+call now launders its own pushes whatever the carried rule spent. The 16-byte stack stays at its
+target; the 8-byte one sits at 16 to 29 magazines against 12, the rest being what the sweep
+sends on from the CPU's two full spares, until the shed takes it back. A test runs that phase for both classes and bounds
+the stack at two and a half times its target (`a_free_only_phase_keeps_the_shared_stack_at_its_target`).
+The price is a worst call of two of the largest magazines, on a call that carries a rule, which
+happens at most once an interval per class and rule (below).
 
 Fewer exchanges do mean fewer heartbeats for the smallest classes: the age look's rotation over
 44 classes takes four times as many of that class's operations as before. The interval-paced
@@ -1368,7 +1380,11 @@ branch, a fill of 256 claims and 1,022 laundered.
 | worst call, 32 MiB bitmap | 177K | 228K | 1.29 |
 
 So the worst call is at most 1.3 times main's, about 41 us at 5.5 GHz, on a class with a quarter
-of a billion live objects. With the bounds counted in magazines it would have been about 911K
+of a billion live objects. A call that carries a rule the budget turned away and also launders
+its own push launders two of the largest magazines: 48K cycles on the small heap, 151K on the
+8 MiB bitmap and 388K on the 32 MiB one (rechecked after the second review: 23.5, 74 and 190
+cycles an object), 0.55, 1.4 and 2.2 times main's worst, at most once an interval for each class
+and rule. With the bounds counted in magazines it would have been about 911K
 cycles there (a fill of 1,022 and four launders), five times. A batch of 1,022 launders faster
 per object than one of 254 where the bitmap fits the caches (the per-call costs are spread
 further), which is why the middle row went down.
