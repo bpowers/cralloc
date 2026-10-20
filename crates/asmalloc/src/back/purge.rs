@@ -712,8 +712,9 @@ impl<O: Os> Back<'_, O> {
                     match run {
                         Some(run) if run.end - run.start < min_run => run.start,
                         Some(run) => {
-                            let (outcome, words) = region::purge_unit(&host, region, run);
-                            read += words;
+                            // Its look before claiming reads the words `run_below` just read
+                            // and counted; counting them twice halved what a step could purge.
+                            let (outcome, _) = region::purge_unit(&host, region, run);
                             if let Purge::Done(bytes) = outcome {
                                 purged += bytes;
                             }
