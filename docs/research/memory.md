@@ -2898,6 +2898,107 @@ background thread on by default, which the design opted against. (4) The cap enf
 free side: bounded by the parked objects, not by the cap, and it thrashes where memory is
 reused unless it spares recent memory, which spares a burst too.
 
+## DataFusion's peak against jemalloc's: large free slots held between queries
+
+2026-10-20, at main `af45917`, the apps suite's DataFusion (TPC-H SF3, four threads on CPUs
+0-3, tokio) and ruff jobs, each with the allocator linked in, run by hand as the suite runs
+them, each in a cgroup of its own.
+
+**The gap is free memory in large classes, held from one query to the next.** At asmalloc's
+peak the program holds about what it asked for. What jemalloc does not hold is 420 MiB of whole
+free pages in large-class slots that earlier queries freed and that the next query, whose blocks
+fall in other classes, cannot use. Nothing returns them inside the run: growth over the 64 MiB
+cap purges only as much as it grows, and the clocked pass takes a quarter of what lies above the
+frontiers once a second, while the queries take about 150 ms each. jemalloc keeps a similar
+amount of dirty memory, but any size can reuse it. Returning large slots that no release has
+touched for about 60 ms takes DataFusion from 1,215 to 830 MiB, under jemalloc's 860, for 18%
+more faults and 1.5% more time; ruff goes from 41 to 33 MiB against jemalloc's 39.
+
+**Method.** The sampler (`bench/alloc/src/memstat.rs`, feature `asmalloc-memstat`, which the
+two apps now forward) walks the heap every 20 ms. It now also keeps the sample with the largest
+resident set, counts per class the free bytes on pages lying wholly in a run of free slots
+(purgeable), records AnonHugePages, and wraps the global allocator to count the bytes the
+program asked for, by the class of the layout. `ASMALLOC_MEMSTAT_PROBE=<slot size>` adds a
+histogram of the sizes asked for in slots of that class and, in every sample, the blocks held
+there. For jemalloc, `JEMALLOC_MEMSTAT=<file>` (`bench/alloc/src/je.rs`) samples its arena
+statistics at the largest resident set: active, dirty and muzzy pages (tikv-jemallocator is
+built without statistics, so `stats.allocated` and the like read as unavailable). Peaks are
+cgroup peaks of the program alone (`bench/probes/memory/incg.sh`). A run with the sampler peaks
+higher (its own buffers are 33 MiB), so the peaks in the tables are from plain builds.
+
+**At asmalloc's peak** (DataFusion, 3.28 s into 3.5, resident 1,207 MiB, heap 1,139 MiB; the
+rest is the binary, libraries and stacks):
+
+| Where | MiB |
+|---|---:|
+| slots the program holds, resident | 659 |
+| of which slot rounding and room (64 KiB requests take 80 KiB slots, since the stagger's 4 KiB of room tips them over; only touched pages are resident) | under 10 |
+| free in the bitmaps, resident | 421 |
+| of which on wholly free pages: 160 KiB class 144, 20 MiB 137, 10 MiB 69, 1.25 MiB 23, 32 KiB 17, others 30 | 420 |
+| parked in magazines and the depot | 5 |
+| metadata, magazine area, slabs | 2 |
+| AnonHugePages | 0 |
+| the retained count, against a cap of 64 | 421 |
+
+Free slots on pages shared with live ones, kept grown slots and huge-page tails are all
+negligible. The wrapper counts 509 MiB asked for; the 80 KiB class holds 2,800 more blocks that
+it attributes to no class it prints (the probe counts them held, 2,805 at that moment), so the
+held slots match what was asked within a few percent. Over the run the free memory is 250 to
+340 MiB from the first second and rises to 550 in the last queries, while the live set swings
+between 30 and 600 MiB from query to query.
+
+jemalloc at its largest resident set: 938 MiB resident, 334 MiB dirty, 1,062 MiB of active
+pages (active extents not all touched). It holds less free memory than asmalloc, and what it
+holds serves any size: it wins by holding less, not by packing tighter.
+
+**Ruff**, at asmalloc's largest resident set (44 MiB of heap): held 15.1 MiB (asked for 12.5),
+free and resident 20.8 MiB (18.8 on wholly free pages, most in large classes), parked 6.4
+(loaded 3.5, depot 2.6, spares 0.4), metadata and magazine area 1.5. jemalloc: 20 MiB active,
+22 MiB dirty. Its 6 MiB gap is the parked objects, the magazine budget's floor, and about
+2.5 MiB of slot rounding; the large classes' free memory is level with jemalloc's dirty pages.
+
+**An experiment: large free slots go back once idle for a short time** (edits
+`bench/probes/app-faults/edits/freecap.py` and `largeidle.py`; not for merging). Every release
+stamps its region with the time. A heartbeat that finds 8 ms gone since the last such pass walks
+the heap once, within the growth payment's bound, and purges the free units of large-class
+regions that no release has touched for 2^28 ticks, about 60 ms (`largeidle2.py`: about
+250 ms). Small classes are left as they are.
+
+| | peak MiB | faults | time s |
+|---|---:|---:|---:|
+| DataFusion: main (8 runs) | 1,199 to 1,231; one run 929 | 912k to 958k | 3.40 to 3.51 |
+| hold 60 ms (8 runs) | 826 to 833 | 1.08M to 1.11M | 3.47 to 3.55 |
+| hold 250 ms (4 runs) | 1,022 to 1,076 | 948k to 956k | 3.44 to 3.49 |
+| jemalloc (4 runs) | 857 to 879 | 1.02M to 1.04M | 3.59 to 3.63 |
+| ruff, medians of 5: main / hold 60 ms / jemalloc | 40.6 / 32.7 / 38.5 | 17.0k / 16.8k / 11.1k | 1.079 / 1.076 / 1.113 |
+
+Preloaded on the screening's programs (three rounds): datafusion SF1 faults 242k to 291k and
+peak 454 to 404 MiB; tpchgen, gix-hours and ruff level; pulldown-cmark 0.6 Gcycles of kernel
+time against 0.5. Backend suite (three rounds): level but `tree depth=18`, 37.2 to 41.7 cycles a
+node (+12%), and `vecgrow 1x1Mi` +4%. The prototype reads the clock on every heartbeat and walks
+the heap every 8 ms whether or not anything large was freed, which a built rule need not do;
+the tree job's cost is most likely that.
+
+**Options.**
+
+1. **Hold large free slots for a short time, then return them** (the experiment). Recovers the
+   whole gap on DataFusion and ruff, for 18% more faults on DataFusion. Needs a release time
+   per region (a word each, all-zero valid) and a pass driven by the clock at a finer step than
+   the interval, for large classes only. The hold is the window of reuse that the tpchgen and
+   gix-hours revivals measured (86 to 100% within 60 ms); 250 ms recovers a third of the gap at
+   no fault cost. A design decision: "the clock says idle" at tens of milliseconds for large
+   slots.
+2. **Let growth over the cap pay for everything over it**, not only its own growth. Simple,
+   but it purges what the next query reuses, as growth's purges in gix-hours and datafusion did
+   ("Faults and system calls in real programs"), and it bounds nothing while nothing grows.
+3. **Let large free memory serve other large classes**, as jemalloc's extents do. Removes the
+   cause rather than the symptom; a large change to the address-space design.
+
+For a long-running tokio service the first matters most: a request mix that changes which large
+classes are in use holds the last mix's free large slots until the second-scale clock returns
+them, and its peak is the sum of two mixes. Ruff's remaining few megabytes are the magazine
+budget, a floor we chose.
+
 ## Reproducing
 
 ```
