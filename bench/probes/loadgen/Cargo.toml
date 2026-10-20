@@ -1,0 +1,15 @@
+[package]
+name = "loadgen"
+version = "0.1.0"
+edition = "2024"
+publish = false
+description = "An open-loop HTTP/1.1 load generator that measures latency from when each request was due"
+
+[workspace]
+
+[dependencies]
+libc = "0.2"
+mio = { version = "1", features = ["net", "os-poll"] }
+
+[profile.release]
+debug = 1
