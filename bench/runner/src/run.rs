@@ -40,6 +40,10 @@ pub struct Options {
     /// Bring each run's CPUs to their warm clock before it starts (`clock.rs`); off only to
     /// measure what that changes.
     pub warm: bool,
+    /// Hold a server's cores out of deep idle states while it runs (`serve::Spinners`); off
+    /// only with `--idle-states free`, whose latency tails measure the machine's idle states
+    /// as much as the allocator.
+    pub hold_idle: bool,
     pub suite: String,
 }
 
@@ -437,6 +441,12 @@ fn run_one(job: &Job, a: &Allocator, cx: &Context, clock: &mut Clock) -> Value {
     // before the interference baseline, so that its spin on the job's CPUs is not counted
     // as foreign work there.
     let warmup: Option<Warmup> = (cx.o.warm && groups.is_ok()).then(|| clock.warm(&job.cpus));
+    // After the gate and the warm-up, which want the siblings idle; it stops when the run ends.
+    let spinners = (job.load.is_some() && cx.o.hold_idle).then(|| crate::serve::Spinners::start(&job.cpus));
+    let idle_states = match &spinners {
+        Some(s) => format!("held out of deep idle by spinners on {}", bench_harness::Cpus(s.cpus.clone()).to_list()),
+        None => "free".to_string(),
+    };
     let t0 = CpuTimes::read();
     let vm = sys::Vmstat::read();
     let started = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap().as_secs_f64();
@@ -448,6 +458,7 @@ fn run_one(job: &Job, a: &Allocator, cx: &Context, clock: &mut Clock) -> Value {
         Err(e) => (Outcome::not_started(format!("creating the run's cgroup: {e}")), None, None),
     };
     let busy = CpuTimes::read().busy_since(&t0);
+    drop(spinners);
 
     // What the process says it ran with: its own report when native, the probe when
     // preloaded.
@@ -599,6 +610,7 @@ fn run_one(job: &Job, a: &Allocator, cx: &Context, clock: &mut Clock) -> Value {
         "driver": out.driver,
         "window": out.window,
         "served": served,
+        "idle_states": job.load.as_ref().map(|_| idle_states),
         "vmstat": vm.delta(),
         "clock": {
             "ghz": run_clock.map(|c| c.0),
@@ -772,6 +784,7 @@ fn header(o: &Options, allocs: &[Allocator], jobs: &[Job], session: &str, rseq: 
         "rollup_ms": o.rollup_ms,
         "max_busy": o.max_busy,
         "warm": o.warm,
+        "hold_idle": o.hold_idle,
         "nominal_mhz": sys::read_trim("/sys/devices/system/cpu/cpu0/acpi_cppc/nominal_freq"),
         "mem_cap": o.mem_cap,
         "driver_mem_cap": cap::DRIVER,

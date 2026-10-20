@@ -4,7 +4,7 @@
 //!   benchrun build-apps [--apps a,b] [--allocators a,b]
 //!   benchrun run    [--suite quick|full|backend|apps|servers|servers-sat] [--rounds N] [--only TEXT] [--allocators a,b]
 //!                   [--out FILE] [--seed N] [--max-busy CPUS] [--gate-wait SECONDS]
-//!                   [--runner-cpus LIST] [--sample-ms N] [--mem-cap SIZE] [--no-warm]
+//!                   [--runner-cpus LIST] [--sample-ms N] [--mem-cap SIZE] [--no-warm] [--idle-states held|free]
 //!   benchrun report FILE... [--detail] [--ref NAME] [--only TEXT] [--quiet-only] [--steady-only]
 //!   benchrun list   [--suite quick|full|backend|apps|servers|servers-sat]
 //!   benchrun layout --only TEXT|--group NAME [--suite S] [--allocators a,b] [--layouts L,...]
@@ -318,6 +318,11 @@ fn run_options(f: &Flags, p: &Paths, suite: String, default_rounds: usize) -> ru
         max_busy: f.num("max-busy", 1.0),
         gate_wait: Duration::from_secs(f.num("gate-wait", 900)),
         warm: !f.has("no-warm"),
+        hold_idle: match f.get("idle-states") {
+            None | Some("held") => true,
+            Some("free") => false,
+            Some(_) => die("--idle-states: held or free"),
+        },
         suite,
     }
 }

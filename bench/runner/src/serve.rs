@@ -17,6 +17,59 @@ use serde_json::{Map, Value, json};
 use std::path::Path;
 use std::time::{Duration, Instant};
 
+/// Keeps a server's cores out of deep idle states for as long as it lives: one spinning
+/// thread on the SMT sibling of each of the server's CPUs, at `SCHED_IDLE`, so that it gives
+/// way to anything else on that hardware thread.
+///
+/// Why: at a fixed rate a server's cores go idle between requests, and the deepest state on
+/// the reference machine (C3) takes about 350 us to leave. A faster allocator leaves more
+/// idle time, so more of it in C3, and the latency tail then ranks the idle states, not the
+/// allocator: with the cores held out of C3, p99.9 at 70% fell from 2 to 4 ms to 30 to 110 us
+/// for every allocator (docs/research/server-latency.md). Disabling the state itself needs
+/// root; a busy sibling holds its core in C0 the same way for every allocator. The spinner
+/// shares the core, which raises medians by a few microseconds; every run's record says which
+/// way it ran (`idle_states`).
+pub struct Spinners {
+    stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    threads: Vec<std::thread::JoinHandle<()>>,
+    pub cpus: Vec<usize>,
+}
+
+impl Spinners {
+    pub fn start(server_cpus: &[usize]) -> Spinners {
+        let cpus: Vec<usize> = server_cpus
+            .iter()
+            .flat_map(|&c| crate::sys::siblings(c).into_iter().filter(move |&s| s != c))
+            .collect();
+        let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let threads = cpus
+            .iter()
+            .map(|&cpu| {
+                let stop = stop.clone();
+                std::thread::spawn(move || {
+                    bench_harness::cpus::pin_to(&[cpu]);
+                    let p = libc::sched_param { sched_priority: 0 };
+                    // SAFETY: a plain system call on the calling thread with a valid param.
+                    unsafe { libc::sched_setscheduler(0, libc::SCHED_IDLE, &p) };
+                    while !stop.load(std::sync::atomic::Ordering::Relaxed) {
+                        std::hint::spin_loop();
+                    }
+                })
+            })
+            .collect();
+        Spinners { stop, threads, cpus }
+    }
+}
+
+impl Drop for Spinners {
+    fn drop(&mut self) {
+        self.stop.store(true, std::sync::atomic::Ordering::Relaxed);
+        for t in self.threads.drain(..) {
+            let _ = t.join();
+        }
+    }
+}
+
 /// One mark of the generator, with the server's state when the runner read it.
 pub struct Mark {
     /// The segment that begins here; `None` at the end of the plan.
