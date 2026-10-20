@@ -132,6 +132,11 @@ structure Printer (M : ISA) where
   start (see the module docs). They come after its return, so any padding
   they insert is never executed. -/
   funcAlign : List String := []
+  /-- Assembler directives that open and close a function's unwind
+  information, for a function that never moves the stack pointer
+  (`Rust.unwindLines`); empty on a target that emits none. -/
+  unwindStart : List String := []
+  unwindEnd : List String := []
   /-- The lines just before a restartable sequence's abort handler, which
   must end with the signature the C library registers its area with; `none`
   on a target that cannot print a restartable sequence (`Rust.checkRseq`). -/

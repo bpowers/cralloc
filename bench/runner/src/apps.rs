@@ -111,6 +111,24 @@ pub fn build(p: &Paths, program: &str, build: &str, feature: &str, cpus: &str) -
     })
 }
 
+/// The servers' load generator, built once with glibc from its own lock file: it is never the
+/// program under test.
+pub fn loadgen_bin(bench: &Path) -> std::path::PathBuf {
+    bench.join("target/loadgen/release/loadgen")
+}
+
+pub fn build_loadgen(p: &Paths, cpus: &str) -> Result<(), String> {
+    let st = Command::new("nice")
+        .args(["taskset", "-c", cpus, "cargo", "build", "--release", "--locked", "--target-dir"])
+        .arg(p.bench.join("target/loadgen"))
+        .env_remove("RUSTFLAGS")
+        .env_remove("CARGO_ENCODED_RUSTFLAGS")
+        .current_dir(p.bench.join("probes/loadgen"))
+        .status()
+        .map_err(|e| format!("cargo: {e}"))?;
+    if st.success() { Ok(()) } else { Err("the load generator's build failed".into()) }
+}
+
 /// User and system time of this process's waited-for descendants.
 fn children_cpu_seconds() -> f64 {
     // SAFETY: rusage is plain data that getrusage fills.
@@ -138,7 +156,9 @@ mod tests {
     use crate::paths::Paths;
 
     fn programs() -> Vec<&'static str> {
-        let mut v: Vec<&'static str> = crate::suite::apps().iter().filter_map(|j| j.program.app()).collect();
+        let mut v: Vec<&'static str> =
+            crate::suite::apps().iter().chain(&crate::suite::servers()).filter_map(|j| j.program.app()).collect();
+        v.sort();
         v.dedup();
         v
     }

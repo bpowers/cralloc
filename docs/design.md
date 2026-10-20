@@ -437,6 +437,17 @@ at one full and one empty and is earned from there, on the evidence and within t
 allowance that "Sizing from evidence" describes, and a trip to the depot moves as many
 magazines as the class has earned.
 
+A swap installs a magazine at one of its ends: full for an allocation, empty for a free.
+Work that swings both ways from where it started, a few allocations of a class and then
+more frees than that, then crosses the far end of the new magazine, and so does every
+repetition after it: two swaps each time, for as long as the work is steady. A server
+whose requests do this ran several percent slower in the processes where its first
+magazines happened to land that way (`docs/research/rpc-slow-mode.md`). So a swap that
+reverses the previous swap of that class on that CPU is taken as evidence of a swing, and
+the slow path then leaves the loaded magazine half full, by moving half of one magazine's
+objects into the other while it holds both. A swing of less than half a magazine never
+leaves the loaded magazine again. A flow never reverses, so it never pays for the move.
+
 Every step is one commit. Between steps all shared state is valid and whatever the thread
 holds is private to it. This is what makes the slow path safe to interrupt with a signal
 handler that allocates, and safe to abandon at any instruction in a forked child.
@@ -565,6 +576,17 @@ How often a slow path runs depends on how hard the process allocates, so anythin
 should happen at a rate in time reads the CPU's cycle counter, which costs no system call,
 and acts once about a second has passed since it last did. "An interval" below means that.
 
+Intervals are counted, not computed from the clock. The count steps by one when a heartbeat
+finds that a second has passed since the last step, however long ago that was, so a
+process that was silent for a minute has aged everything it holds by one interval, not
+sixty. The evidence the rules act on is that something went unused while the program was
+running, and a silence is not that. Counted by the clock alone, the first requests after a
+silence find every cache marked idle and pay to tear down what they are about to use: a
+server driven in bursts spent the first milliseconds of each burst purging single pages
+and draining other CPUs' slabs (`docs/research/server-latency.md`). Memory that should go
+back during a silence needs something that runs during it, which is what the rest of this
+section is about.
+
 Nothing runs on the fast path, so a thread whose allocations and frees are all served by
 its loaded magazines never runs a heartbeat. Other threads cover for it: any slow path
 maintains the shared structures, and the idle check drains a slab that has had no slow path
@@ -594,12 +616,17 @@ layer that has a thread library to start it with: a function behind a cargo feat
 Rust program, an environment variable for the preload library. The child of a fork does not
 inherit the thread.
 
-A program with an idle hook of its own calls `maintain` from there and needs no thread. An
-async runtime's hook for a worker that is about to park is such a place, and the right
-one for a server: the heap is maintained whenever a worker runs out of work, which is when
-it has the time, and a server that falls silent after a burst gives the burst back.
-`maintain` limits its own rate, returning at once unless an interval has passed since the
-last heartbeat or the last call, so a hook may call it every time.
+A program with a timer of its own calls `maintain` from it and needs no thread. In an
+async runtime that is a task that wakes once an interval, and we ship one for tokio, in a
+crate of its own because the allocator has no dependencies. Both are offered because
+neither fits every program: a server without an async runtime has no timer to borrow, and
+one that must stay single-threaded cannot take the thread. The task costs one wake-up a second,
+it runs while a server is silent, which is when a burst's memory should go back, and it
+takes that work off the first requests of the next burst. `maintain` limits its own rate,
+returning at once unless an interval has passed since it last ran, so it is harmless to
+call it more often, as from a hook that runs when a worker is about to park. Such a hook
+does not replace the timer: a worker parks once at the start of a silence, and nothing
+calls the hook again until the silence is over.
 
 Objects mostly circulate through magazines and the depot without touching the bitmaps. They
 reach the bitmaps when a class's shared depot stack is over its target, and through the rules under
@@ -626,7 +653,9 @@ Five rules hold at every tier.
   frees. The evidence for a larger batch is a run of trips in the same direction. The two
   must not be confused. A flow never takes back what it sent, so evidence of swings never
   sees it, and flows are where a larger batch pays most: the whole gain of larger
-  magazines on them is fewer trips to the depot.
+  magazines on them is fewer trips to the depot. A third kind of evidence, a swap that
+  reverses the last one, sets no size at all but where a new magazine starts (see "Slow
+  path: exchanging magazines").
 - **Each tier is counted in the unit the next one moves.** A fill is a number of objects, a
   class's spares are a number of magazines, a trip to the depot is a number of magazines,
   and the depot's targets are bytes of whole bundles. No tier can then be sized so that

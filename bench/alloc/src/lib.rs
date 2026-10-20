@@ -51,13 +51,16 @@ static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 mod asm;
 #[cfg(feature = "asmalloc")]
 use asm as chosen;
-#[cfg(feature = "asmalloc")]
+#[cfg(all(feature = "asmalloc", not(feature = "asmalloc-memstat")))]
 #[global_allocator]
 static GLOBAL: asmalloc::Asmalloc = asmalloc::Asmalloc;
 #[cfg(feature = "asmalloc-memstat")]
-mod memstat;
+#[global_allocator]
+static GLOBAL: memstat::Counting = memstat::Counting;
 #[cfg(feature = "memacct")]
 mod memacct;
+#[cfg(feature = "asmalloc-memstat")]
+mod memstat;
 
 #[cfg(feature = "je")]
 mod je;
@@ -96,6 +99,8 @@ pub const NAME: &str = chosen::NAME;
 /// thread, with the `asmalloc-background` feature, and the cache domains of
 /// `ASMALLOC_DOMAIN_WIDTH`, with `asmalloc-domains`. Nothing for any other build.
 pub fn init() {
+    #[cfg(feature = "je")]
+    je::start_stats();
     #[cfg(feature = "asmalloc-background")]
     asmalloc::Asmalloc::start_background().expect("asmalloc's background thread starts");
     #[cfg(feature = "asmalloc-domains")]

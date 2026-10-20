@@ -226,6 +226,15 @@ def printer : Printer isa where
   relative to them is fixed by the function alone: a change to other code
   cannot move them, and with them its performance. -/
   funcAlign := [".p2align 6"]
+  /- A function that neither calls nor touches the stack pointer keeps the
+  return address at the stack pointer from its first instruction to its
+  last, which is exactly what `.cfi_startproc` with no other directive says
+  (the System V x86-64 CIE: the frame address is the stack pointer plus 8,
+  the return address 8 below it). So a profiler or debugger can unwind out
+  of it to its caller. Rust gives a naked function no unwind information of
+  its own. -/
+  unwindStart := [".cfi_startproc"]
+  unwindEnd := [".cfi_endproc"]
   /- glibc registers its threads' rseq areas with the signature `0x53053053`
   on x86 (`RSEQ_SIG`, sysdeps/unix/sysv/linux/x86/bits/rseq.h), which the
   kernel requires in the four bytes before an abort handler. The three bytes
