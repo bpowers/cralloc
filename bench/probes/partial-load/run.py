@@ -8,8 +8,11 @@ siblings) unless --free. Over the measured segment it runs one of:
   trace   perf trace -s (system call summary)
   probe   the slow-path counters of a probe-counts build (probesum.py), read from the
           server's memory at the start and end of the segment
+  sizes   allocations and frees by class (sizesum.py) of a build whose bench-alloc counts
+          them into `BENCH_SIZE_COUNTS` (an `asmalloc-sizes` feature on a throwaway branch;
+          docs/research/servers-h2.md says how it was built)
 
-  run.py MODE --server actix|axum --allocs BUILD,... --rounds N --out DIR [--free] [--pin]
+  run.py MODE --server NAME --allocs BUILD,... --rounds N --out DIR [--free] [--pin]
          [--rate 280000] [--secs 8]
 
 A BUILD is a directory under bench/target/ holding apps/orders (from `benchrun build-apps`,
@@ -34,9 +37,9 @@ EVENTS = ("cycles:u,cycles:k,instructions:u,instructions:k,task-clock,context-sw
           "cpu-migrations,page-faults")
 
 
-def probe_reader(pid, binary):
+def probe_reader(pid, binary, symbol="ASMALLOC_PROBE_COUNTS"):
     nm = subprocess.run(["nm", "-S", str(binary)], capture_output=True, text=True).stdout
-    sym = [l.split() for l in nm.splitlines() if l.endswith(" ASMALLOC_PROBE_COUNTS")]
+    sym = [l.split() for l in nm.splitlines() if l.endswith(" " + symbol)]
     value, size = int(sym[0][0], 16), int(sym[0][1], 16)
     real = os.path.realpath(binary)
     base = None
@@ -53,8 +56,31 @@ def probe_reader(pid, binary):
     return read
 
 
+INPUTS = Path(os.environ.get("BENCH_APPS_DATA", "/home/bpowers/src/asmalloc/bench/apps/target")) / "inputs"
+ORDER = ["--path", "/orders", "--content-type", "application/json", "--body", str(B / "apps/orders/order.json")]
+LOG = ["--path", "/bench.v1.LogIngestService/Ingest"]
+CONNECT = LOG + ["--content-type", "application/proto", "--header", "Connect-Protocol-Version: 1",
+                 "--body", str(INPUTS / "connect/log50.bin")]
+GRPC = LOG + ["--content-type", "application/grpc", "--header", "te: trailers", "--body",
+              str(INPUTS / "connect/log50.grpc")]
+H2 = ["--proto", "h2", "--conns", "8", "--streams", "8"]
+H1 = ["--conns", "64"]
+# name: (binary under bench/target/<build>/, its arguments, the generator's request arguments)
+SERVERS = {
+    "actix": ("apps/orders/release/orders", ["actix"], H1 + ORDER),
+    "axum": ("apps/orders/release/orders", ["axum"], H1 + ORDER),
+    "axum-h2": ("apps/orders/release/orders", ["axum"], H2 + ORDER),
+    "connect": ("release/rpc-server", ["log"], H1 + CONNECT),
+    "connect-h2": ("release/rpc-server", ["log"], H2 + CONNECT),
+    "grpc-h2": ("release/rpc-server", ["log"], H2 + GRPC),
+    "miniredis": ("apps/miniredis/release/miniredis", ["serve"],
+                  H1 + ["--proto", "resp", "--requests", str(INPUTS / "miniredis/commands.resp")]),
+}
+
+
 def server_bin(build, server):
-    return B / "target" / build / "apps/orders/release/orders", [server]
+    rel, sargs, _ = SERVERS[server]
+    return B / "target" / build / rel, sargs
 
 
 def run(mode, server, build, rnd, args, out):
@@ -62,7 +88,9 @@ def run(mode, server, build, rnd, args, out):
     tag = f"{server}-{build}-{rnd}{'-free' if args.free else ''}{'-pin' if args.pin else ''}"
     so = open(out / f"{tag}.server.out", "w+")
     srv = subprocess.Popen(["taskset", "-c", "0-3", str(binary)] + sargs, stdout=so, stderr=subprocess.STDOUT,
-                           env={"PATH": os.environ["PATH"], "HOME": os.environ["HOME"]})
+                           env=dict({"PATH": os.environ["PATH"], "HOME": os.environ["HOME"], "BENCH_CPUS": "0-3"},
+                               # tcmalloc runs its per-CPU caches only with glibc's rseq off.
+                               **({"GLIBC_TUNABLES": "glibc.pthread.rseq=0"} if build == "tc" else {})))
     spin = []
     if not args.free:
         for c in (16, 17, 18, 19):
@@ -85,13 +113,13 @@ def run(mode, server, build, rnd, args, out):
             for cpu, tid in zip((0, 1, 2, 3), tids):
                 subprocess.run(["taskset", "-p", "-c", str(cpu), str(tid)], stdout=subprocess.DEVNULL, check=True)
         plan = f"_fill:closed:2,_w:{args.rate}:2,m:{args.rate}:{args.secs}"
-        gen = subprocess.Popen([str(LOADGEN), "--addr", addr, "--path", "/orders", "--content-type",
-                                "application/json", "--body", str(B / "apps/orders/order.json"), "--conns", "64",
-                                "--threads", "4", "--cpus", "8-11", "--plan", plan],
+        gen = subprocess.Popen([str(LOADGEN), "--addr", addr] + SERVERS[server][2]
+                               + ["--threads", "4", "--cpus", "8-11", "--plan", plan],
                                stdout=subprocess.PIPE, text=True)
         perf = None
         result = None
-        reader = probe_reader(srv.pid, binary) if mode == "probe" else None
+        reader = {"probe": lambda: probe_reader(srv.pid, binary),
+                  "sizes": lambda: probe_reader(srv.pid, binary, "BENCH_SIZE_COUNTS")}.get(mode, lambda: None)()
         before = None
         for line in gen.stdout:
             if line.startswith("MARK") and line.split()[3:4] == ["m"]:
@@ -114,7 +142,7 @@ def run(mode, server, build, rnd, args, out):
                     perf.send_signal(signal.SIGINT)
                 if reader and before:
                     after = reader()
-                    (out / f"{tag}.probe.json").write_text(json.dumps({i: b - a for i, (a, b) in enumerate(zip(before, after)) if b != a}))
+                    (out / f"{tag}.{mode}.json").write_text(json.dumps({i: b - a for i, (a, b) in enumerate(zip(before, after)) if b != a}))
             elif line.startswith("RESULT"):
                 result = line[7:].strip()
         gen.wait()
@@ -132,8 +160,8 @@ def run(mode, server, build, rnd, args, out):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("mode", choices=["stat", "record", "trace", "probe"])
-    ap.add_argument("--server", default="actix")
+    ap.add_argument("mode", choices=["stat", "record", "trace", "probe", "sizes"])
+    ap.add_argument("--server", default="actix", choices=sorted(SERVERS))
     ap.add_argument("--allocs", default="asmalloc,je")
     ap.add_argument("--rounds", type=int, default=2)
     ap.add_argument("--rate", default="280000")

@@ -98,6 +98,13 @@ pub struct OpenLoad {
     /// The directory under the apps inputs that `{inputs}` names, for a server that is not a
     /// program of the apps suite.
     pub inputs: Option<&'static str>,
+    /// The generator's protocol: `http` (HTTP/1.1), `h2` (HTTP/2, prior knowledge, `conns`
+    /// connections of `streams` concurrent streams each) or `resp`.
+    pub proto: &'static str,
+    pub streams: usize,
+    /// For a protocol other than HTTP, the file of commands it sends in turn (`{inputs}` and
+    /// `{app}` replaced); the HTTP fields above are then unused.
+    pub requests: Option<&'static str>,
 }
 
 #[derive(Clone, Debug)]
@@ -537,6 +544,20 @@ fn served() -> Vec<Served> {
         plan: String::new(),
         rank: "s70",
         inputs: None,
+        proto: "http",
+        streams: 1,
+        requests: None,
+    };
+    // HTTP/2: eight connections of eight streams, the same 64 requests at once as HTTP/1.1's
+    // 64 connections.
+    let h2 = |l: OpenLoad| OpenLoad { proto: "h2", conns: 8, streams: 8, ..l };
+    let connect = |content_type, headers, body| OpenLoad {
+        path: "/bench.v1.LogIngestService/Ingest",
+        content_type,
+        headers,
+        body,
+        inputs: Some("connect"),
+        ..order("")
     };
     vec![
         // connect-rust's log-ingest service (bench/rpc), a 50-record batch per request in
@@ -545,17 +566,36 @@ fn served() -> Vec<Served> {
             id: "connect log",
             program: Program::Rust("rpc-server"),
             args: "log",
-            load: OpenLoad {
-                path: "/bench.v1.LogIngestService/Ingest",
-                content_type: "application/proto",
-                headers: vec!["Connect-Protocol-Version: 1"],
-                body: "{inputs}/log50.bin",
-                inputs: Some("connect"),
-                ..order("")
-            },
+            load: connect("application/proto", vec!["Connect-Protocol-Version: 1"], "{inputs}/log50.bin"),
             // The slowest is snmalloc at 122k req/s (closed loop, 2026-10-20), half the others'
             // 216k to 256k; glibc is next slowest.
             rates: (36_000, 85_000),
+        },
+        // The same service over HTTP/2: gRPC, as connect-rust's own log_bench drives it, and
+        // the Connect protocol.
+        Served {
+            id: "connect log grpc h2",
+            program: Program::Rust("rpc-server"),
+            args: "log",
+            load: h2(connect("application/grpc", vec!["te: trailers"], "{inputs}/log50.grpc")),
+            // Slowest snmalloc 89k req/s, then glibc 146k; the others 174k to 192k (2026-10-20).
+            rates: (27_000, 63_000),
+        },
+        Served {
+            id: "connect log h2",
+            program: Program::Rust("rpc-server"),
+            args: "log",
+            load: h2(connect("application/proto", vec!["Connect-Protocol-Version: 1"], "{inputs}/log50.bin")),
+            // Slowest snmalloc 91k req/s, then glibc 148k; the others 172k to 194k.
+            rates: (27_000, 63_000),
+        },
+        Served {
+            id: "orders axum h2",
+            program: Program::App("orders"),
+            args: "axum",
+            load: h2(order("/orders")),
+            // Slowest glibc 237k req/s; the others 299k to 306k.
+            rates: (71_000, 166_000),
         },
         // The slowest at saturation is glibc, 335k req/s on axum and 403k on actix.
         Served {
@@ -571,6 +611,16 @@ fn served() -> Vec<Served> {
             args: "actix",
             load: order("/orders"),
             rates: (120_000, 280_000),
+        },
+        // The control: tokio's mini-redis, alternate SET and GET over 100k keys (Redis
+        // protocol).
+        Served {
+            id: "miniredis",
+            program: Program::App("miniredis"),
+            args: "serve",
+            load: OpenLoad { proto: "resp", requests: Some("{inputs}/commands.resp"), ..order("") },
+            // Slowest asmalloc 680k req/s; the others 717k to 741k.
+            rates: (204_000, 476_000),
         },
     ]
 }

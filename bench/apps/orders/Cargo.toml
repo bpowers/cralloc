@@ -29,7 +29,8 @@ sn = ["bench-alloc/sn"]
 bench-alloc = { path = "../../alloc" }
 bench-app = { path = "../common" }
 # The versions the screening ran (its lock file seeds this one).
-axum = "0.8.9"
+# HTTP/2 as well as HTTP/1.1 (prior knowledge over cleartext, as the h2 jobs speak it).
+axum = { version = "0.8.9", features = ["http2"] }
 actix-web = "4.17.0"
 tokio = { version = "1.54.0", features = ["full"] }
 serde = { version = "1", features = ["derive"] }

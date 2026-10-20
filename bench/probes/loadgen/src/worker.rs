@@ -6,8 +6,8 @@
 //! its latency still counts from when it was due: a stall in the server is charged to every
 //! request it holds up, not only to the one it was serving.
 
-use crate::http;
 use crate::plan::{self, Arrivals, Kind, Segment, Spacing};
+use crate::{http, resp};
 use mio::net::TcpStream;
 use mio::{Events, Interest, Poll, Token};
 use std::io::{self, ErrorKind, Read, Write};
@@ -43,12 +43,27 @@ struct Conn {
     buf: Vec<u8>,
     /// Bytes of the request written so far, while a write is pending.
     wpos: Option<usize>,
+    /// Which of the requests it is sending.
+    req: usize,
     inflight: Option<Inflight>,
+}
+
+/// The protocol: how to find where a response ends.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Proto {
+    Http,
+    Resp,
+    H2,
 }
 
 pub struct Config<'a> {
     pub addr: SocketAddr,
-    pub request: &'a [u8],
+    /// The requests, sent in turn: each thread starts at its own place in the list and takes
+    /// the next for each request it sends. HTTP sends one.
+    pub requests: &'a [Vec<u8>],
+    pub proto: Proto,
+    /// For HTTP/2, the request and the streams per connection.
+    pub h2: Option<&'a crate::h2::Request>,
     pub segs: &'a [Segment],
     pub conns: usize,
     pub threads: usize,
@@ -80,6 +95,8 @@ struct Driver<'a> {
     idle: Vec<usize>,
     recs: Vec<Rec>,
     counters: Counters,
+    /// The next request to send.
+    next: usize,
 }
 
 impl<'a> Driver<'a> {
@@ -100,11 +117,13 @@ impl<'a> Driver<'a> {
     fn send(&mut self, i: usize, f: Inflight) {
         self.conns[i].inflight = Some(f);
         self.conns[i].wpos = Some(0);
+        self.conns[i].req = self.next;
+        self.next = (self.next + 1) % self.cfg.requests.len();
         self.write(i);
     }
 
     fn write(&mut self, i: usize) {
-        let req = self.cfg.request;
+        let req = &self.cfg.requests[self.conns[i].req];
         let c = &mut self.conns[i];
         let (Some(s), Some(mut at)) = (c.stream.as_mut(), c.wpos) else { return };
         loop {
@@ -168,7 +187,11 @@ impl<'a> Driver<'a> {
         }
         let now = self.now();
         loop {
-            match http::parse(&self.conns[i].buf) {
+            let parsed = match self.cfg.proto {
+                Proto::Http | Proto::H2 => http::parse(&self.conns[i].buf),
+                Proto::Resp => resp::parse(&self.conns[i].buf),
+            };
+            match parsed {
                 http::Parse::Incomplete => return,
                 http::Parse::Bad => {
                     self.fail(i);
@@ -204,15 +227,19 @@ impl<'a> Driver<'a> {
 
 /// Runs this thread's share of the plan; returns every request it finished or gave up on.
 pub fn run(cfg: &Config) -> io::Result<(Vec<Rec>, Counters)> {
+    if let Some(r) = cfg.h2 {
+        return crate::h2::run(cfg, r);
+    }
     let mut d = Driver {
         cfg,
         poll: Poll::new()?,
         conns: (0..cfg.conns)
-            .map(|_| Conn { stream: None, buf: Vec::with_capacity(16 << 10), wpos: None, inflight: None })
+            .map(|_| Conn { stream: None, buf: Vec::with_capacity(16 << 10), wpos: None, req: 0, inflight: None })
             .collect(),
         idle: (0..cfg.conns).rev().collect(),
         recs: Vec::new(),
         counters: Counters::default(),
+        next: cfg.thread * cfg.requests.len() / cfg.threads.max(1),
     };
     for i in 0..cfg.conns {
         d.attach(i)?;
