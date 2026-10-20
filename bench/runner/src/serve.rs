@@ -106,12 +106,25 @@ pub fn drive(
         argv.push(v);
     };
     arg("--addr", addr.to_string());
-    arg("--path", l.path.to_string());
-    arg("--content-type", l.content_type.to_string());
-    for h in &l.headers {
-        arg("--header", h.to_string());
+    match l.requests {
+        // Another protocol: commands from a file, sent in turn.
+        Some(file) => {
+            arg("--proto", l.proto.to_string());
+            arg("--requests", expand(file, job, o));
+        }
+        None => {
+            if l.proto != "http" {
+                arg("--proto", l.proto.to_string());
+                arg("--streams", l.streams.to_string());
+            }
+            arg("--path", l.path.to_string());
+            arg("--content-type", l.content_type.to_string());
+            for h in &l.headers {
+                arg("--header", h.to_string());
+            }
+            arg("--body", expand(l.body, job, o));
+        }
     }
-    arg("--body", expand(l.body, job, o));
     arg("--conns", l.conns.to_string());
     arg("--threads", l.threads.to_string());
     arg("--cpus", cpus);

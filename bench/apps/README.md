@@ -16,6 +16,12 @@ four of the other:
 | `connect log` | connect-rust's log-ingest service (`bench/rpc`): a 50-record protobuf batch per request, Connect protocol over HTTP/1.1 | tokio, workers pinned | decode and walk a batch: many small blocks freed on the thread that made them |
 | `orders axum` | the screening's order service (`orders/`): parse a JSON order, price it, keep the last 100k in a sharded map | axum on tokio, work stealing | a cache: blocks freed by whichever worker evicts them, often another |
 | `orders actix` | the same service on actix-web | one single-threaded runtime per worker | the same, with requests pinned to a worker |
+| `connect log grpc h2`, `connect log h2` | the log-ingest service over HTTP/2: gRPC (as connect-rust's own log_bench drives it) and the Connect protocol | tokio, a connection task between the socket and the handlers | frames, header blocks and bodies made by one task and freed by another |
+| `orders axum h2` | the axum order service over HTTP/2 | the same | the same |
+| `miniredis` | tokio's mini-redis 0.4.1, alternate SET and GET over 100k keys (Redis protocol) | tokio, one `Mutex<HashMap>` | the control: values of 32 to 512 bytes replaced in place |
+
+HTTP/2 jobs use eight connections of eight streams each: the same 64 requests at once as the
+HTTP/1.1 jobs' 64 connections.
 
 Batch programs (`--suite apps`):
 
@@ -83,7 +89,8 @@ scripts/measure --both-l3 ./target/release/benchrun run --suite apps --rounds 5
 takes everything it takes for the other suites (`bench/README.md`). Every run is capped at
 `--mem-cap` (default 4 GiB), and a run that reaches it is invalid. A server session takes
 about 45 s a run, so split it into sessions of a few minutes with gaps between them: a
-measurement on both L3 domains pauses everyone's builds.
+measurement on both L3 domains pauses everyone's builds. `--only` takes `=NAME` for one job
+exactly (`--only "=connect log"` without the HTTP/2 jobs whose names contain it).
 
 ## Servers
 
@@ -92,7 +99,10 @@ starts the load generator, `bench/probes/loadgen`, on the other L3 domain. The g
 open loop: requests come due on a fixed schedule whatever the server does, each connection
 carries one at a time, and latency runs from when a request was due to when its response
 arrived, so a stall shows as latency, and as requests that missed their slot, not as fewer
-requests. It is built once with glibc (`build-apps`) and never changes.
+requests. It is built once with glibc (`build-apps`) and never changes. It speaks HTTP/1.1,
+HTTP/2 over cleartext with prior knowledge (a set number of connections, each with a set
+number of concurrent streams; a gRPC response must also carry `grpc-status: 0`), and the
+Redis protocol (a file of commands sent in turn).
 
 The generator runs a plan of segments, the same for every allocator, a server's day
 (`day` in `bench/runner/src/suite.rs`): two seconds of closed-loop load to fill the server's
