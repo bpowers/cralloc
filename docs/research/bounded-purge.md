@@ -71,6 +71,28 @@ heartbeat or growth payment on a slow path took more than half a microsecond, be
 Its free memory never goes over the floors at s70, so nothing is purged on its slow paths.
 Server cycles a request were 68.1k to 68.5k before and 67.9k to 68.0k after.
 
+## After the review's fixes
+
+The review's fixes changed what a step returns: a live or all-clean slot is passed at one look,
+a piece is cut below the slot's clean top and in whole huge pages for a class of a huge page or
+more, and a growth payment whose walk returns nothing leaves nothing owed. On `c6ec131`,
+DataFusion, six rounds interleaved with jemalloc. Each step of 250 us or more also read its
+thread's CPU time (`edits/steptime2.py`):
+
+| | hold's look 2 MiB (as built) | hold's look 0.5 MiB | jemalloc |
+|---|---:|---:|---:|
+| cgroup peak MiB | 853 to 865 | 859 to 960 (two runs over 880) | 853 to 871 |
+| Gcycles (median) | 70.33 | 70.11 | 72.26 |
+| steps of 0.25 ms or more, a run | 1 to 5 | 1 to 5 | |
+| longest step on its CPU | 0.43 ms | 0.72 ms | |
+
+With the hold's look at 0.5 MiB, two runs in six peaked over jemalloc (888 and 960 MiB), so
+the look stays at 2 MiB. What is left over 0.25 ms is about one to five steps a run. All but
+three spent all their time on their CPU, 0.23 to 0.43 ms, nearly all of it in growth
+payments, whose walk may read up to `PURGE_CAP_WORDS` (16,384 bitmap words) for a payment of
+at most 128 pages. Those are ours. The other three took about 3 ms of wall time and 0.06 to
+0.55 ms of CPU: preemption, with four threads on four CPUs.
+
 ## Method
 
 `edits/steptime.py` wraps `Back::heartbeat_with` and `Back::pay_growth` with the cycle counter
