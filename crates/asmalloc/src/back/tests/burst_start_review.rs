@@ -1,12 +1,13 @@
-//! Failing tests from the review of `burst-start` (counted intervals, purging by runs,
-//! `maintain` limiting its own rate).
+//! Tests from the review of `burst-start` (counted intervals, purging by runs, `maintain`
+//! limiting its own rate) and of its fixes: when a clocked pass is due, its steps, and the
+//! floor of the allowance.
 //!
-//! Both model a process in which `maintain` is the only thing that runs: a caller every half
-//! interval, as the background thread and the tokio task are, with the round's own work taking
-//! half a millisecond of the clock between its one clock read (`depot::heartbeat::Clock`
-//! caches it) and the end of its purge pass, which stamps the decay word with a fresh read.
-//! The simulated clock does not move by itself, which is why the tests that run `maintain`
-//! over the simulated heap do not see this.
+//! The first two model a process in which `maintain` is the only thing that runs: a caller
+//! every half interval, as the background thread and the tokio task are, with the round's own
+//! work taking half a millisecond of the clock between its one clock read
+//! (`depot::heartbeat::Clock` caches it) and the end of its purge pass, which stamps the decay
+//! word with a fresh read. The simulated clock does not move by itself, which is why the tests
+//! that run `maintain` over the simulated heap did not see it.
 
 use super::*;
 use core::sync::atomic::Ordering::Relaxed;
@@ -200,4 +201,71 @@ fn the_pass_in_steps_is_bounded_steps() {
         !back.decay_pass_step(&|| now),
         "a second pass in the interval"
     );
+}
+
+/// The floor of the allowance (`policy::allowance_floor`): a heap whose retained memory is
+/// under it keeps it through any silence, with no purge call at all.
+#[test]
+fn a_silence_under_the_floor_returns_nothing() {
+    use super::super::policy::allowance_floor;
+    let state = floored_state::<Standard>();
+    let back = state.get_or_reserve().unwrap();
+    let os = state.os();
+    let class = small(1024);
+    let page = Standard::GEOMETRY.page_size();
+    let floor = allowance_floor(Standard::GEOMETRY);
+    let slots = fill(&back, class, floor / 2 / 1024);
+    for &p in &slots {
+        paint(p, 1024, 9);
+    }
+    // SAFETY: the test holds these slots and gives them up.
+    unsafe { back.launder(class, &slots) };
+    forget_reuse(&back);
+    let (retained, calls) = (back.retained(), os.calls(Call::Purge));
+    assert!(retained >= floor / 2 - page);
+    for _ in 0..4 * super::super::policy::PURGE_ANY_RUN_EVERY {
+        os.advance_clock(DECAY_TICKS);
+        beat(&back);
+        let now = back.now();
+        while back.decay_pass_step(&|| now) {}
+    }
+    assert_eq!(back.retained(), retained);
+    assert_eq!(
+        os.calls(Call::Purge),
+        calls,
+        "a pass under the floor purged"
+    );
+}
+
+/// Above the floor the clocked passes take retained memory down to the floor and stop there,
+/// within a run; `trim`, which `collect` and `malloc_trim` call, still returns all of it.
+#[test]
+fn the_passes_stop_at_the_floor_and_trim_goes_below_it() {
+    use super::super::policy::{PURGE_ANY_RUN_EVERY, PURGE_MAX_RUN_PAGES, allowance_floor};
+    let state = floored_state::<Standard>();
+    let back = state.get_or_reserve().unwrap();
+    let os = state.os();
+    let class = small(1024);
+    let page = Standard::GEOMETRY.page_size();
+    let floor = allowance_floor(Standard::GEOMETRY);
+    let slots = fill(&back, class, 4 * floor / 1024);
+    for &p in &slots {
+        paint(p, 1024, 9);
+    }
+    // SAFETY: the test holds these slots and gives them up.
+    unsafe { back.launder(class, &slots) };
+    forget_reuse(&back);
+    assert!(back.retained() > 3 * floor);
+    for _ in 0..4 * PURGE_ANY_RUN_EVERY {
+        os.advance_clock(DECAY_TICKS);
+        beat(&back);
+    }
+    let retained = back.retained();
+    let run = PURGE_MAX_RUN_PAGES as usize * page;
+    assert!(
+        retained + run >= floor && retained <= floor + run,
+        "{retained} bytes retained against a floor of {floor}"
+    );
+    back.trim();
+    assert_eq!(back.retained(), 0, "trim left memory the floor would keep");
 }

@@ -1027,8 +1027,10 @@ fn maintain_brings_a_quiet_heap_down_to_what_collect_leaves() {
     // earlier walk that began every pass at the top left the bottom of the lowest region
     // resident for ever, under a slack of two huge pages that hid it.
     let geometry = <Shape as crate::os::sim::Shape>::GEOMETRY;
+    // The passes stop at the floor, which `collect` does not keep.
     let cap = crate::back::policy::retained_cap(geometry);
-    let left = cap as f64 * 0.75f64.powi(intervals - 5);
+    let floor = crate::back::policy::allowance_floor(geometry);
+    let left = floor as f64 + (cap - floor) as f64 * 0.75f64.powi(intervals - 5);
     assert!(
         maintained <= collected + left as usize,
         "after {intervals} intervals of maintain: {maintained} bytes resident, collect leaves \
