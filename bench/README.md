@@ -157,14 +157,19 @@ cannot be rebuilt under a session.
   inside, preloaded ones through `baselines/probe.c`. Runs that disagree, fail, or time out
   are recorded as invalid and left out of reports.
 - **Other work on the job's CPUs.** The gate waits for a quiet machine before a run, but
-  other work can still land on the job's CPUs during it. The runner takes each CPU's task
-  time from `/proc/schedstat` (exact, where `/proc/stat` samples at the tick and undercounts
-  a CPU that idles often) and subtracts the process's own CPU time. For a server it does
-  this over every counted segment of the plan, and more than 0.1 CPUs of other work in any
-  one segment makes the run invalid. For any other job it does it over the whole run, with a
-  limit of 0.25 CPUs. Quiet runs measure at most 0.06 per segment, and 0.03 over a run
-  (0.1 for the RPC jobs). The results are `interference.foreign_by_segment` and
-  `interference.foreign_task_cpus`.
+  other work can still land on the job's CPUs during it. The runner sets the time those CPUs
+  spent running tasks against the process's own task clock (every thread and child process).
+  The CPUs' time comes from two clocks, each wrong in its own regime: /proc/schedstat's run
+  queue time, which is added only when a task is switched out (so a worker that runs through
+  a mark is counted in the next segment), and the time not idle in /proc/stat, whose idle
+  time this kernel samples at the tick (so a CPU that idles often reads up to half a CPU off
+  either way). The runner takes the smaller, since real other work shows in both, and leaves
+  out each CPU's `ksoftirqd`, which runs the server's own deferred network work. For a server
+  it does this over every counted segment of the plan, and more than 0.1 CPUs of other work in
+  any one segment makes the run invalid; for any other job, over the whole run, with a limit
+  of 0.25 CPUs. Quiet server segments measure at most 0.06, quiet runs of the quick suite at
+  most 0.1; three seconds of one busy CPU, 0.55 to 0.97 in its segment. The results are
+  `interference.foreign_by_segment` and `interference.foreign_task_cpus`.
 - **Control.** `mimalloc-ctl` is mimalloc under a second name and from its own build
   directory, run as if it were another allocator. The report compares it with mimalloc on
   every job, pairing runs from the same round, with a 95% bootstrap interval of the median

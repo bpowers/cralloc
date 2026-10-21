@@ -123,23 +123,18 @@ pub struct Loaded {
 }
 
 /// Other work on the server's CPUs in each counted segment, in CPUs: the task time of those
-/// CPUs (`sys::task_ns`) less the server's own (its task clock, every thread), over the
-/// segment's length. Segments whose names begin with `_` are not counted, and are left out.
+/// CPUs (`sys::TaskTime`) less the server's own (its task clock, every thread and worker
+/// process), over the segment's length. Segments whose names begin with `_` are not counted,
+/// and are left out.
 pub fn foreign(l: &Loaded, cpus: &[usize]) -> Vec<(String, f64)> {
     l.marks
         .windows(2)
         .filter(|w| w[0].segment.is_some() && !w[0].name.starts_with('_'))
         .map(|w| {
             let (a, b) = (&w[0].snap, &w[1].snap);
-            let on_cpus: u64 = cpus
-                .iter()
-                .map(|&c| {
-                    b.cpu_task.get(c).copied().unwrap_or(0).saturating_sub(a.cpu_task.get(c).copied().unwrap_or(0))
-                })
-                .sum();
             let own = b.counters.since(&a.counters).get("task_clock_ns").unwrap_or(0);
-            let ns = b.at.duration_since(a.at).as_nanos().max(1) as f64;
-            (w[0].name.clone(), (on_cpus as f64 - own as f64) / ns)
+            let ns = b.at.duration_since(a.at).as_nanos() as u64;
+            (w[0].name.clone(), b.cpu_task.foreign_since(&a.cpu_task, cpus, own, ns))
         })
         .collect()
 }
@@ -262,7 +257,9 @@ pub fn summarize(l: &Loaded, memory: &[MemSample], rank: &str) -> (Value, Option
             cycles += d.get("cycles").unwrap_or(0);
             instructions += d.get("instructions").unwrap_or(0);
             task_ns += d.get("task_clock_ns").unwrap_or(0);
-            faults += w[1].snap.stat.minflt - w[0].snap.stat.minflt;
+            // The counter follows forks, so a server's worker processes are counted; the
+            // process's own count is the fallback.
+            faults += d.get("page_faults").unwrap_or(w[1].snap.stat.minflt - w[0].snap.stat.minflt);
             ms += w[1].t_ms - w[0].t_ms;
             rss_max = rss_max.max(rss_in(w[0].t_ms, w[1].t_ms).max().unwrap_or(0));
         }

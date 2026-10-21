@@ -105,6 +105,19 @@ pub struct OpenLoad {
     /// For a protocol other than HTTP, the file of commands it sends in turn (`{inputs}` and
     /// `{app}` replaced); the HTTP fields above are then unused.
     pub requests: Option<&'static str>,
+    /// For a proxy: the server it forwards to, started first. `{upstream}` in the job's
+    /// arguments is replaced by its address.
+    pub upstream: Option<Upstream>,
+}
+
+/// The upstream of a proxy job: a binary of bench/probes/loadgen (built with glibc beside the
+/// generator, never the program under test), run on CPUs of its own in the generator's
+/// cgroup, which prints `BENCH_LISTEN addr` when it is ready and runs until killed.
+#[derive(Clone, Debug)]
+pub struct Upstream {
+    pub bin: &'static str,
+    pub args: Vec<&'static str>,
+    pub cpus: Vec<usize>,
 }
 
 #[derive(Clone, Debug)]
@@ -547,6 +560,7 @@ fn served() -> Vec<Served> {
         proto: "http",
         streams: 1,
         requests: None,
+        upstream: None,
     };
     // HTTP/2: eight connections of eight streams, the same 64 requests at once as HTTP/1.1's
     // 64 connections.
@@ -611,6 +625,21 @@ fn served() -> Vec<Served> {
             args: "actix",
             load: order("/orders"),
             rates: (120_000, 280_000),
+        },
+        // Sōzu, the reverse proxy, forwarding the order service's POST to an upstream on
+        // loopback (bench/probes/loadgen's `upstream`, 4 KiB answers) on three CPUs of the
+        // generator's L3, which two of them already keep up with. One worker process a CPU.
+        Served {
+            id: "sozu proxy",
+            program: Program::App("sozu"),
+            args: "proxy upstream={upstream}",
+            load: OpenLoad {
+                body: "{app}/../orders/order.json",
+                upstream: Some(Upstream { bin: "upstream", args: vec!["--body", "4096"], cpus: vec![12, 13, 14] }),
+                ..order("/orders")
+            },
+            // Every allocator saturates at 265k to 276k req/s, snmalloc slowest (2026-10-21).
+            rates: (80_000, 186_000),
         },
         // The control: tokio's mini-redis, alternate SET and GET over 100k keys (Redis
         // protocol).
@@ -705,6 +734,7 @@ fn large() -> Vec<Large> {
         proto: "http",
         streams: 1,
         requests: None,
+        upstream: None,
     };
     let mut v = Vec::new();
     // 70% of the slowest saturated rate, mimalloc's: 348k, 349k and 355k req/s.

@@ -1,0 +1,56 @@
+# Sōzu, Clever Cloud's HTTP reverse proxy, in front of an upstream on loopback, as a server
+# driven by the suite's load generator. See ../README.md and src/main.rs.
+[workspace]
+resolver = "3"
+
+[package]
+name = "app-sozu"
+version = "0.0.0"
+edition = "2024"
+# src/worker.rs is copied from Sōzu, whose binary is AGPL-3.0.
+license = "AGPL-3.0"
+publish = false
+
+[[bin]]
+name = "sozu"
+path = "src/main.rs"
+
+# The allocator under test, by the bench-alloc feature of its entry in ../../allocators.toml
+# (none: glibc). Every program forwards the same set; see ../README.md.
+[features]
+mi = ["bench-alloc/mi"]
+mi-sized = ["bench-alloc/mi-sized"]
+mi-crate = ["bench-alloc/mi-crate"]
+asmalloc = ["bench-alloc/asmalloc"]
+je = ["bench-alloc/je"]
+tc = ["bench-alloc/tc"]
+sn = ["bench-alloc/sn"]
+# Not an allocator: the live-bytes count, for resident over live (../../alloc/src/live.rs).
+live-bytes = ["bench-alloc/live-bytes"]
+
+[dependencies]
+bench-alloc = { path = "../../alloc" }
+bench-app = { path = "../common" }
+# The release, without its default jemalloc (the allocator is the suite's) and with its
+# default TLS backend.
+sozu = { version = "=2.3.3", default-features = false, features = ["crypto-ring"] }
+# The versions Sōzu 2.3.3 locks, for the worker entry copied into src/worker.rs.
+sozu-lib = "=2.3.3"
+sozu-command-lib = "=2.3.3"
+mio = "1"
+nix = { version = "0.31", features = ["signal"] }
+libc = "0.2"
+log = "0.4"
+thiserror = "2"
+clap = { version = "4", features = ["derive"] }
+
+# Sōzu's logging macros test its binary's logging features, which this binary does not have.
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(feature, values("logs-debug", "logs-trace"))'] }
+
+# The release profile of Sōzu's repository at 2.3.3 (its workspace manifest, which the crate
+# does not ship).
+[profile.release]
+lto = true
+codegen-units = 1
+debug = true
