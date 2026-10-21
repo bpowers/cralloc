@@ -115,8 +115,9 @@ without a call if nothing is left: the range purged is a subrange of the one the
 up, so the precondition still holds for it. It returns `true` only when the range it was
 given went back whole, which BACK-CLASS-03 relies on before marking a slot zero. Its
 callers and why their ranges are given up are BACK-CLASS-02 (the tail of an object that
-shrank in place) and BACK-CLASS-03 (the part of a moving object already copied) in
-`class-safety.md`.
+shrank in place), BACK-CLASS-03 (the part of a moving object already copied) and
+BACK-CLASS-05 (`unspill`: a huge page of a block that grew in place, whose bytes are first
+copied aside and copied back after) in `class-safety.md`.
 
 **Review.** 2026-10-17, fresh adversarial reviewer: the protocol was accepted; three gaps were
 found in the argument: exclusivity under a double free, the huge-page part not covered by the

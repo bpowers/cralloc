@@ -743,8 +743,14 @@ impl<O: Os> Back<'_, O> {
                     // The run of purgeable units that ends at this one, down to the floor.
                     // Within what the step may still purge and read, so that a run does not
                     // carry the step far past its goal or its budget.
+                    // Never cut to under `min_run`, or a step with a few pages of its goal
+                    // left would count every run it met short and step over it: it may go
+                    // past its goal by up to `min_run - 1` pages instead.
                     let page = layout.page_size();
-                    let pages = limit.saturating_sub(purged).div_ceil(page).max(1);
+                    let pages = limit
+                        .saturating_sub(purged)
+                        .div_ceil(page)
+                        .max(min_run as usize);
                     let room = Room {
                         floor,
                         pages: (pages.min(PURGE_MAX_RUN_PAGES as usize)) as u32,

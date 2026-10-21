@@ -269,3 +269,59 @@ fn the_passes_stop_at_the_floor_and_trim_goes_below_it() {
     back.trim();
     assert_eq!(back.retained(), 0, "trim left memory the floor would keep");
 }
+
+/// Second review. A pass whose goal has one to three pages left must still take them from a
+/// long run, or stop. As built, a run is cut to what the goal has left before the test for
+/// short runs, so every run the walk meets from then on is cut to under
+/// `PURGE_MIN_RUN_PAGES`, counted as a short run and stepped over: the pass walks the rest of
+/// its lap past long free runs, purging nothing, and ends only when it has gone round.
+#[test]
+fn a_pass_a_few_pages_short_of_its_goal_does_not_step_over_long_runs() {
+    use super::super::policy::decay_goal;
+    use crate::classes::MagazineSize;
+    use crate::os::sim::Shape;
+    use crate::space::Geometry;
+    /// As in `the_tail_of_a_run_the_cap_cut_goes_with_it`: a small-page part of 256 pages and
+    /// a pass's goal of at least a huge page, 128 pages.
+    enum Wide {}
+    impl Shape for Wide {
+        const GEOMETRY: Geometry = Geometry::new(12, 19, 22, 19, 256, 1, MagazineSize::MAX);
+    }
+    let state = state::<Wide>();
+    let back = state.get_or_reserve().unwrap();
+    let os = state.os();
+    let class = small(1024);
+    let page = Wide::GEOMETRY.page_size();
+    let per_page = page / 1024;
+    let pages = small_part(&back, class) / per_page;
+    let slots = fill(&back, class, pages * per_page);
+    for &p in &slots {
+        paint(p, 1024, 9);
+    }
+    // From the top down: a live page, a free run two pages short of the goal, a live page,
+    // and a free run of 40 pages.
+    let (upper, lower) = (126, 40);
+    assert!(pages > upper + lower + 3, "{pages}");
+    let top = pages - 1;
+    let high = &slots[(top - upper) * per_page..top * per_page];
+    let low = &slots[(top - upper - 1 - lower) * per_page..(top - upper - 1) * per_page];
+    // SAFETY: the test holds these slots and gives them up.
+    unsafe { back.launder(class, high) };
+    // SAFETY: as above.
+    unsafe { back.launder(class, low) };
+    forget_reuse(&back);
+    let retained = back.retained();
+    assert_eq!(retained, (upper + lower) * page);
+    let goal = decay_goal(Wide::GEOMETRY, retained);
+    assert_eq!(goal, (upper + 2) * page);
+    os.advance_clock(DECAY_TICKS);
+    beat(&back);
+    assert!(!pass_under_way(&state));
+    let purged = retained - back.retained();
+    assert!(
+        purged >= goal,
+        "the pass purged {} pages of a goal of {} and walked past a free run of {lower}",
+        purged / page,
+        goal / page
+    );
+}

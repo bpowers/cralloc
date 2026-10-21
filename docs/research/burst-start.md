@@ -245,8 +245,15 @@ waiting for the any-run pass.
 
 Other fixes: `maintain` no longer stands aside for recent heartbeats; the counted clock reads
 its word before the cycle counter, so a stalled reader cannot re-stamp a newer step backwards;
-a run stops at what its step may still purge and read and at 64 bitmap words; the short tail
-of a run that a cap cut goes with it.
+a run stops at what its step may still purge and read and at 64 bitmap words, but is never
+cut to under the shortest run the pass takes (or a pass a few pages short of its goal stepped
+over every run it met); the short tail of a run that a cap cut goes with it.
+
+Two things the stepped `maintain` leaves as they are, since neither loses anything. Two
+callers taking one round's steps at once can skip its shedding for an interval: the second
+can take the first shed step before the first has finished the looks that set the debts. And
+an idle drain can come an interval late, because each step reads the clock for itself and a
+slab's sighting may fall either side of the step that reads it.
 
 **`maintain` in steps.** `Asmalloc::maintain_step` takes one bounded step of the interval's
 round and says whether more remains; `maintain` loops over it, and the tokio task yields
