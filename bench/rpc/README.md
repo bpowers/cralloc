@@ -7,6 +7,13 @@ A port of connect-rust's `echo_bench` and `log_bench` (github.com/connectrpc/con
 - `rpc-server <echo|log>`: `echo_server.rs` and `log_server.rs` in one binary, on a tokio
   runtime whose workers are pinned to `BENCH_CPUS`. The log handler walks every field of a
   50-record batch through buffa's zero-copy views; the echo handler copies one string.
+- `rpc-server store [keep=N]`: written for the suite, not part of connect-rust's benchmarks
+  (`src/store.rs`): connect-rust's log-ingest service keeping every record it is sent, the
+  latest `keep` of them (a million by default, about 1.4 GiB), and its bench service's
+  `ServerStream` tailing them, each record turned into a `BenchResponse`. It starts with the
+  store full. Its load, `store.http` in the connect inputs, is written by
+  `probes/loadgen/connect_store_requests.py`: ingests of 50 new records alternating with tails
+  of the latest 100, over HTTP/1.1 in the Connect protocol, streaming for the tail.
 - `rpc-client <echo|log> addr=...`: the load loops of `echo_bench.rs` (one pooled
   `HttpClient`) and `log_bench.rs` (`conns` HTTP/2 connections), against one server, at one
   concurrency. It marks the measurement window on stdout so the runner can count the
