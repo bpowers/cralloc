@@ -6,9 +6,9 @@ its cores held out of deep idle, over 400k Hacker News items it indexes as it st
 generator on 8-11, 128 connections, searches for one to three title words with a batch of 50
 updated items every 200th request. The large-heap day at 930 req/s (70% of mimalloc's
 saturated 1,328; asmalloc saturates at 1,413, jemalloc 1,372), three rounds as separate
-sessions. No run invalid, none with other work on the server's CPUs. tcmalloc is left out
-(it aborts while indexing; see the README). Raw results:
-`docs/research/data/servers-meilisearch-2026-10-21.jsonl.gz`.
+sessions. No run invalid, none with other work on the server's CPUs. tcmalloc was left out of
+these, and measured in a second session once its wrapper was fixed ("tcmalloc", below). Raw
+results of both: `docs/research/data/servers-meilisearch-2026-10-21.jsonl.gz`.
 
 ## Heap and mapped store
 
@@ -56,6 +56,33 @@ and 378; mmap and munmap 16 for each (Meilisearch's own threads and maps).
 - **mimalloc puts the heap in huge pages** (1.4 of its 1.7 GiB), and holds twice the others.
   asmalloc has 38 MiB in huge pages: its classes over 1 KiB get none, and Meilisearch's
   indexing buffers are large.
+
+## tcmalloc
+
+tcmalloc aborted in every start, while the server indexed: "Mismatched-size-delete of 8 bytes
+(expected 2 bytes)", for a sampled allocation made in charabia's `LowercaseNormalizer` and
+freed in milli's `DocumentTokenizer::tokenize_document`. The program was not at fault. The
+suite's tcmalloc wrapper (`bench/alloc/src/tc.rs`) kept a block in place when `realloc` grew it
+within its size class, and tcmalloc checks a sampled block's sized free against the size first
+requested: a 2-byte string grown to 8 in place and freed as 8 fails that check. A throwaway
+build whose `realloc` always copies started cleanly three times out of three, and the wrapper as
+it was aborted three times out of three. The wrapper now copies on every `realloc`, as the
+`tcmalloc-better` crate it follows does. With it, tcmalloc's check (on sampled blocks only)
+found no free whose size differed from the allocation's in three starts and nine runs, so
+there is no sign of one that could put a block in the wrong asmalloc class.
+
+A second session, three rounds with all four allocators (tcmalloc saturates at 1,423 req/s, so
+the rate stays 930):
+
+| Allocator | cycles/req | p99.9 ms | faults/req | heap at 70%, MiB | heap idle, MiB | resident over live |
+|---|---|---|---|---|---|---|
+| asmalloc | 17.1M | 44 | 88 | 691 to 945 | 737 to 905 | 3.4 |
+| tcmalloc per-CPU | 17.3M | 48 | 0.1 | 935 to 985 | 929 to 939 | 3.6 |
+| jemalloc | 17.7M | 52 | 42 | 723 to 772 | 735 to 758 | 2.8 |
+| mimalloc | 18.3M | 54 | 27 | 1,470 to 1,673 | 1,492 to 1,680 | 5.9 |
+
+The first session's order and margins hold. tcmalloc faults almost never: it keeps what it
+took and returns none of it, so its heap is steady at about 0.95 GiB.
 
 ## Method notes
 

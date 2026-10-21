@@ -153,10 +153,7 @@ anonymous memory, from the rollups) and `largesum.py --heap` puts over live. The
 (`meilisearch/src/main.rs`) starts the server through Meilisearch's library as its `main` does.
 Meilisearch links jemalloc with its `malloc` override, which would take every C allocation
 whatever the global allocator, so `meilisearch/no-jemalloc` is an empty crate patched in its
-place. tcmalloc is left out: it aborts while the server indexes, on a sized delete of 8 bytes
-of a sampled 2-byte allocation made in Meilisearch's tokenizer. Whether the program frees with
-the wrong size or the tcmalloc wrapper's in-place `realloc` growth makes it look so is not
-settled.
+place.
 
 **A proxy.** Sōzu forwards to an upstream the runner starts first, on three CPUs of the
 generator's L3 domain (two of them already keep up): `upstream`, a binary of

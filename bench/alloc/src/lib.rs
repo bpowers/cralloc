@@ -23,9 +23,9 @@
 //!
 //! `mimalloc` and `tikv-jemallocator` also route `realloc` and `alloc_zeroed` to the
 //! allocator's own functions. `tcmalloc-better` uses the generic fallbacks (allocate, copy,
-//! free; allocate, memset); the `tc` wrapper keeps the memset but resizes in place when the
-//! size class allows, so that tcmalloc is not judged by a wrapper's shortcut (see tc.rs for
-//! why it cannot simply call tcmalloc's `realloc`).
+//! free; allocate, memset), and so does the `tc` wrapper: tcmalloc's own `realloc` is
+//! `malloc`'s family, and a block grown or shrunk in place trips tcmalloc's check of a sampled
+//! block's size at a sized free (see tc.rs).
 //!
 //! Every allocator module provides `NAME`, the allocator family a run must report, and
 //! `entry()` and `version()` for [`describe`]. Adding one is a module, the four lines below

@@ -781,7 +781,7 @@ fn large() -> Vec<Large> {
 }
 
 /// 70% of the slowest allocator's saturated rate on `meilisearch hn`: mimalloc's 1,328 req/s
-/// (asmalloc 1,413, jemalloc 1,372; tcmalloc aborts, see bench/apps/README.md).
+/// (asmalloc 1,413, jemalloc 1,372, tcmalloc 1,423).
 const MEILISEARCH_R70: u32 = 930;
 
 fn large_job(l: Large, plan: String, rank: &'static str, suffix: &str) -> Job {
