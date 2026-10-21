@@ -685,7 +685,9 @@ struct Large {
 }
 
 /// The large-heap servers, each at three live sizes of about 0.5, 2 and 4 GiB: the order
-/// service keeping its last `keep` orders (about 1.9 KiB live an order), and mini-redis
+/// service keeping its last `keep` orders (about 1.9 KiB live an order) in tables sized for
+/// them from the start, so that the job measures steady churn and not the tables' one
+/// doubling (that is `servers_doubling`), and mini-redis
 /// preloaded with `preload` keys (about 1.1 KiB live a key) and churned by overwrites of mixed
 /// sizes, some with an expiry.
 fn large() -> Vec<Large> {
@@ -712,7 +714,7 @@ fn large() -> Vec<Large> {
         v.push(Large {
             id: format!("orders axum cache {size}"),
             program: Program::App("orders"),
-            args: format!("axum keep={keep}"),
+            args: format!("axum keep={keep} presize=1"),
             load: order.clone(),
             fill_s,
             r70,
@@ -762,6 +764,25 @@ pub fn servers_large() -> Vec<Job> {
         })
         .collect()
 }
+
+/// The order service at 4 GiB with tables that are not pre-sized, so that each of its 64
+/// shard tables doubles once under churn, long after the store is full, rehashing every entry
+/// under the shard's lock (docs/research/servers-large.md, "The 4 GiB tail"). The load is a
+/// fixed rate from the start, so that the doublings come at the same order count, and so the
+/// same moment, for every allocator, inside the measured segment `dbl`. The server reports
+/// each doubling's time and page faults; the runner, the latency, faults and resident set
+/// over `dbl`.
+pub fn servers_doubling() -> Vec<Job> {
+    let l = large().into_iter().find(|l| l.id == "orders axum cache 4G").expect("the 4 GiB order service");
+    let plan = format!("_fill:{r}:{DOUBLING_FILL_S},dbl:{r}:{DOUBLING_S},idle:close:5", r = l.r70);
+    let l = Large { id: "orders axum doubling 4G".into(), args: "axum keep=2250000".into(), ..l };
+    vec![large_job(l, plan, "dbl", "")]
+}
+
+/// The doublings come after about 14.4M orders: at 248k req/s, 58 to 60 s in for asmalloc and
+/// jemalloc alike, so 14 to 16 s into the segment.
+const DOUBLING_FILL_S: u32 = 44;
+const DOUBLING_S: u32 = 28;
 
 /// Each large-heap server's saturated rate, after its heap is filled.
 pub fn servers_large_sat() -> Vec<Job> {

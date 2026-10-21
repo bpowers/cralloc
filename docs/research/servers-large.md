@@ -94,14 +94,14 @@ Found with the open-loop generator's per-request records (`run.py plain --raw`,
   double during the minute too, but each stall stays short enough that p99.9 does not move
   (29 us in the same probe).
 - **What is ours in it.** A profile of the burst (perf record, cycles) puts about 0.56 ms of
-  each table's doubling in the rehash under asmalloc against 0.39 ms under jemalloc; the
-  difference is page faults (23 ms against 14 ms over the 64 tables): asmalloc places each
-  2.2 MB table in fresh memory, touched 4 KiB at a time, where jemalloc reuses part of what
-  it freed. That makes asmalloc's stalls a little longer and is why its p99.9 sits above
-  jemalloc's in this job. The madvise and mprotect calls asmalloc makes in the burst take 3
-  to 11 us each under strace, under 1% of the stall time. No slow requests point to a
-  heartbeat: asmalloc's slow requests outside events of ten or more number 130 to 140 in the
-  minute.
+  each table's doubling in the rehash under asmalloc against 0.39 ms under jemalloc, most of
+  the difference in the kernel's page-fault path (23 ms against 14 ms over the 64 tables).
+  The doubling job below measures it directly: every allocator takes the same 545 faults a
+  table (each 2.2 MB table is fresh memory touched 4 KiB at a time), and asmalloc's
+  doublings take longer, so each fault costs it more, not that it takes more of them. The
+  madvise calls asmalloc makes in the burst take 3 to 11 us each under strace. No slow
+  requests point to a heartbeat: asmalloc's slow requests outside events of ten or more
+  number 130 to 140 in the minute.
 - **The rest** (3 to 7% of slow requests) is common to all allocators: stalls of 0.2 to 1.2
   ms every 1.024 s in the first 15 to 25 s of the minute, cause not found.
 - **mimalloc** has the same burst with longer stalls (3.4 ms median) and stalls of 10 to 25
@@ -115,8 +115,62 @@ a large block, but it would help only if a free slot of the new size were held; 
 freed tables are half the size of the new ones.
 
 The tail measures a one-off event of the program, timed by its hash state and the length of
-the fill. Pre-sizing each shard to twice its share of `keep` would take it out of the minute
-and leave the job measuring steady churn; that is a change of job, not made here.
+the fill. The large-heap order-service jobs now pre-size each shard to twice its share of
+`keep`, and the doubling is a job of its own (next section).
+
+## Pre-sized tables, and the doubling as a job
+
+Measured 2026-10-21 on branch `servers-doubling`, allocator code as at `4ba5734`, the same
+way as above (three rounds of the pre-sized jobs, five of the doubling job). One round of the
+0.5 GiB job was disturbed by other work on the server's CPUs (`foreign_on_job_cpus` up to
+1.06 against 0.30 from the idle spinners, every allocator but mimalloc slowed) and was
+replaced by a fourth. Raw results: `docs/research/data/servers-doubling-2026-10-21.jsonl.gz`.
+
+**Pre-sized**, cycles per request and p99.9 at 70%, resident over live at the start and end
+of the minute and after the load stops:
+
+| Job | asmalloc | jemalloc | tcmalloc per-CPU | mimalloc |
+|---|---|---|---|---|
+| orders 0.5 GiB | 67.8k, 26; 1.100, 1.100, 1.101 | 69.8k, 26; 1.106, 1.106, 1.107 | 69.5k, 25; 1.113, 1.114, 1.114 | 73.6k, 40; 1.187, 1.199, 1.200 |
+| orders 2 GiB | 68.1k, 26; 1.080, 1.080, 1.080 | 70.0k, 26; 1.097, 1.097, 1.097 | 69.9k, 26; 1.098, 1.098, 1.099 | 73.2k, 47; 1.155, 1.156, 1.156 |
+| orders 4 GiB | 68.2k, 26; 1.074, 1.074, 1.074 | 70.1k, 27; 1.095, 1.095, 1.095 | 69.7k, 26; 1.096, 1.096, 1.096 | 73.0k, 86; 1.151, 1.152, 1.152 |
+
+The 4 GiB tail is gone (26 to 27 us, mimalloc 86), the resident set no longer steps up in
+the minute, and asmalloc now holds the least over live at every size, 0.6 to 2.1 points
+under jemalloc, and is fastest at every size, by 2.2 to 2.6% over the next.
+
+**The doubling job** (`--suite servers-doubling`, `orders axum doubling 4G`): the 4 GiB order
+service with tables that are not pre-sized, driven at 248k req/s from the start so that the
+64 doublings come at the same order count for every allocator, 14 to 16 s into the measured
+28-second segment `dbl`. The server times each doubling (the lock hold) and counts the page
+faults its thread takes in it; the runner gives the latency, faults and resident rise over
+`dbl` (`bench/probes/partial-load/doublesum.py`). Medians of five:
+
+| Allocator | doubling, median ms | doubling, max ms | faults a doubling | p99.9 us | max us | missed | resident rise MiB | direct compactions |
+|---|---|---|---|---|---|---|---|---|
+| jemalloc | 0.59 | 0.68 | 546 | 219 | 2,239 | 5,251 | 95 | 0 |
+| tcmalloc per-CPU | 0.59 | 0.78 | 545 | 209 | 1,921 | 4,455 | 137 | 0 |
+| asmalloc | 0.65 | 1.43 | 545 | 282 | 2,055 | 7,483 | 90 | 298 |
+| mimalloc | 0.74 | 22.57 | 546 | 18,707 | 22,598 | 61,407 | 82 | 634 |
+
+- asmalloc's doublings are 10% slower at the median and twice as slow at the worst, with the
+  same faults. It is not huge pages: with them turned off for the server
+  (`run.py --no-thp`, three runs each) asmalloc's doublings took 0.74 to 0.81 ms (max 1.24 to
+  1.35) against 0.77 to 0.79 (max 1.32 to 1.58) with them on, and jemalloc's 0.74 (max 0.85)
+  either way.
+- During the doublings asmalloc commits address space: in the traced run above, 8 `mprotect`
+  calls in the minute, all in the doubling window, two of them taking 174 and 337 us under strace. An `mprotect`
+  takes the address space's lock for writing, which holds up the page faults of every other
+  thread, and the doublings are faulting at that moment. That fits the longer worst
+  doublings; the 10% at the median is not explained yet.
+- The hold on free large slots, merged since (`8aec365`), does not move it: five more runs
+  on that main gave asmalloc 0.64 ms median and 1.26 ms max with the same 545 faults
+  (jemalloc 0.60 and 0.73 alongside). The tables freed are half the size of the new ones, so
+  no held slot fits.
+- mimalloc gives its tables huge pages, and its doublings wait in direct compaction: 21 to 27
+  ms at the worst.
+- The resident rise is the new tables less the old (about 70 MiB) plus what each allocator
+  keeps of the freed old tables and of its own growth.
 
 ## Huge pages
 

@@ -112,8 +112,10 @@ fn jobs(f: &Flags) -> (String, Vec<suite::Job>) {
             "servers-sat" => suite::servers_sat(),
             "servers-large" => suite::servers_large(),
             "servers-large-sat" => suite::servers_large_sat(),
+            "servers-doubling" => suite::servers_doubling(),
             _ => die(
-                "--suite must be quick, full, backend, apps, servers, servers-sat, servers-large or servers-large-sat, \
+                "--suite must be quick, full, backend, apps, servers, servers-sat, servers-large, servers-large-sat \
+                 or servers-doubling, \
                  or several of them joined by commas",
             ),
         };
