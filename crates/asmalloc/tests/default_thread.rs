@@ -120,11 +120,13 @@ fn silence() -> Report {
     }
 }
 
-/// Small allocations and frees for `seconds`, a few a millisecond: slow paths in several
-/// intervals, so that the look at the level once an interval runs.
+/// Small allocations and frees for `seconds`, 64 KiB every 100 ms: slow paths in several
+/// intervals, so that the look at the level once an interval runs, and too little to cross
+/// another eighth of the floor (4 MiB) of frees, which is what retried a start before the
+/// look did.
 fn light_work(seconds: u64) {
     for _ in 0..seconds * 10 {
-        drop(burst(1));
+        drop((0..1024).map(|i| Box::new([i as u8; 64])).collect::<Vec<Block>>());
         thread::sleep(Duration::from_millis(100));
     }
 }
@@ -207,7 +209,14 @@ fn child(mode: &str) {
             wait.recv().unwrap();
         }
         "tls" => {
-            BIG.with(|big| big.as_array_of_cells()[std::hint::black_box(7)].set(1));
+            // Written and read through `black_box`, so that the data is not optimized away.
+            let at = std::hint::black_box(12345);
+            let byte = BIG.with(|big| {
+                let cells = big.as_array_of_cells();
+                cells[at].set(7);
+                std::hint::black_box(cells)[at].get()
+            });
+            println!("tls_byte {byte}");
             worker_frees(|| {}, || {});
         }
         "failed" => {
