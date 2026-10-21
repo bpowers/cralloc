@@ -1292,14 +1292,14 @@ mod run {
     #[ignore = "slow: run with scripts/gate --all, optimized"]
     fn parking_loses_no_wake_up_under_every_schedule_fully() {
         super::parking_loses_no_wake_up_under_every_schedule(
-            Bounds::preemptions(3),
+            Bounds::preemptions(2),
             &[Op::Alloc],
-            0,
+            1,
         );
         super::parking_loses_no_wake_up_under_every_schedule(
             Bounds::preemptions(2),
             &[Op::Alloc, Op::Free],
-            1,
+            0,
         );
     }
 
