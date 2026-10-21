@@ -143,6 +143,11 @@ tails measure the machine as much as the allocator.
 `benchrun report` prints a table per server: latency and work at each rate, and memory under
 load, in the silences and after the connections close.
 
+**A streaming store.** `connect store 1M` (in `servers-large`) is connect-rust's server as a log
+store (`bench/rpc`, `rpc-server store`): a million owned log records, about 1.4 GiB, of which
+every other request replaces 50 and every other one streams the latest 100 back as a server
+stream.
+
 **A search engine.** `meilisearch hn` (in `servers-large`) is Meilisearch 1.55.0 over 400k Hacker
 News items, the dataset of Meilisearch's own benchmark: it indexes them as it starts, before
 it listens, then serves searches of one to three title words from 128 connections while every

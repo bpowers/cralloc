@@ -10,6 +10,7 @@ pub mod connect;
 #[rustfmt::skip]
 #[path = "generated/buffa/mod.rs"]
 pub mod proto;
+pub mod store;
 
 use bench_harness::Cpus;
 use buffa::Map;
@@ -90,7 +91,12 @@ impl connect::bench::v1::LogIngestService for LogIngestImpl {
 
 /// From lib.rs: a string-heavy log batch of `n` records (about 15 KB encoded for 50).
 pub fn log_request(n: usize) -> LogRequest {
-    let records = (0..n)
+    LogRequest { records: log_records(0, n), ..Default::default() }
+}
+
+/// Records `start` to `start + n` of that batch's pattern, numbered on so that they differ.
+pub fn log_records(start: usize, n: usize) -> Vec<LogRecord> {
+    (start..start + n)
         .map(|i| {
             let mut labels = Map::default();
             for j in 0..6 {
@@ -120,6 +126,5 @@ pub fn log_request(n: usize) -> LogRequest {
                 ..Default::default()
             }
         })
-        .collect();
-    LogRequest { records, ..Default::default() }
+        .collect()
 }

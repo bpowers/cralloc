@@ -777,8 +777,23 @@ fn large() -> Vec<Large> {
         fill_s: 5,
         r70: MEILISEARCH_R70,
     });
+    // connect-rust's services as a log store holding a million records (bench/rpc/src/store.rs):
+    // every other request ingests 50 new records (the oldest go), every other one tails the
+    // 100 most recent as a server stream, in the Connect protocol over HTTP/1.1.
+    v.push(Large {
+        id: "connect store 1M".into(),
+        program: Program::Rust("rpc-server"),
+        args: "store keep=1000000".into(),
+        load: OpenLoad { requests: Some("{inputs}/store.http"), inputs: Some("connect"), ..order.clone() },
+        fill_s: 3,
+        r70: STORE_R70,
+    });
     v
 }
+
+/// 70% of the slowest allocator's saturated rate on `connect store 1M`: mimalloc's 51,840
+/// req/s (asmalloc 64,062, jemalloc 59,197, tcmalloc 56,361; 2026-10-21).
+const STORE_R70: u32 = 36_300;
 
 /// 70% of the slowest allocator's saturated rate on `meilisearch hn`: mimalloc's 1,328 req/s
 /// (asmalloc 1,413, jemalloc 1,372, tcmalloc 1,423).
