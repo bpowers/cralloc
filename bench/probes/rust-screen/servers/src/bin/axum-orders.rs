@@ -22,7 +22,7 @@ static GLOBAL: asmalloc::Asmalloc = asmalloc::Asmalloc;
 async fn main() {
     #[cfg(feature = "asmalloc")]
     match std::env::var("ORDERS_MAINTAIN").as_deref() {
-        Ok("task") => drop(asmalloc_tokio::spawn_maintenance()),
+        Ok("task") => drop(asmalloc_tokio::spawn_maintenance().expect("a runtime with a timer")),
         Ok("thread") => asmalloc::Asmalloc::start_background().expect("asmalloc's background thread starts"),
         _ => {}
     }

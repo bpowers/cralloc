@@ -197,8 +197,9 @@ impl Source for TestSource {
         self.purges.fetch_add(1, Ordering::Relaxed);
     }
 
-    fn purge_pass(&self, _: &dyn Fn() -> u64) {
+    fn purge_pass_step(&self, _: &dyn Fn() -> u64) -> bool {
         self.passes.fetch_add(1, Ordering::Relaxed);
+        false
     }
 }
 

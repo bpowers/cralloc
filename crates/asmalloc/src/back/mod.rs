@@ -212,6 +212,9 @@ struct Walk {
     /// The pass under way: its tag, the lap it began in and what it may still purge
     /// (`purge::Pass`).
     pass: AtomicU64,
+    /// How many clocked passes have started, which picks the ones that take runs of any length
+    /// (`policy::PURGE_ANY_RUN_EVERY`).
+    passes: AtomicU32,
     /// One past the highest region ever about to be given to a class, zero for none: the walk
     /// goes round regions below it only. Classes take the lowest unassigned regions and runs
     /// come from the top, so in a heap of a hundred class regions a lap reads a hundred table
@@ -260,6 +263,7 @@ impl<O: Os> State<O> {
                 laps: AtomicU32::new(0),
                 pass_from: AtomicU32::new(0),
                 pass: AtomicU64::new(0),
+                passes: AtomicU32::new(0),
                 top: AtomicU32::new(0),
             }),
             run_sizes: Lined::new([const { AtomicUsize::new(0) }; MAX_REGIONS]),

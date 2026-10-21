@@ -2,8 +2,10 @@
 //! heartbeat's look, the count's wrap, a look abandoned part way, what a free writes, the
 //! walk's cursor, the frees that stamp and those that do not, and `maintain`'s pass.
 
-use super::super::hold::{Reach, fine_read, held_long};
-use super::super::policy::{FINE_TICKS, HOLD_STEPS, PURGE_MAX_RUN_PAGES, hold_beat, hold_floor};
+use super::super::hold::{Reach, fine_read, held_for};
+use super::super::policy::{
+    FINE_TICKS, HOLD_STEPS, PURGE_MAINTAIN_STEP_PAGES, PURGE_MAX_RUN_PAGES, hold_beat, hold_floor,
+};
 use super::super::word::Word;
 use super::*;
 
@@ -136,15 +138,18 @@ fn stamps_age_by_wrapping_difference() {
     let stamp = |count: u32| 1u64 << 32 | u64::from(count);
     for base in [0, 1 << 31, u32::MAX - 3] {
         let at = |steps: u32| base.wrapping_add(steps);
-        assert!(!held_long(stamp(base), at(0)));
-        assert!(!held_long(stamp(base), at(HOLD_STEPS - 1)));
-        assert!(held_long(stamp(base), at(HOLD_STEPS)));
-        assert!(held_long(stamp(base), at(1 << 31)));
-        assert!(held_long(stamp(base), at((1 << 31) + 1)));
-        assert!(held_long(stamp(base), at(u32::MAX - HOLD_STEPS)));
+        assert!(!held_for(stamp(base), at(0), HOLD_STEPS));
+        assert!(!held_for(stamp(base), at(HOLD_STEPS - 1), HOLD_STEPS));
+        assert!(held_for(stamp(base), at(HOLD_STEPS), HOLD_STEPS));
+        assert!(held_for(stamp(base), at(1 << 31), HOLD_STEPS));
+        assert!(held_for(stamp(base), at((1 << 31) + 1), HOLD_STEPS));
+        assert!(held_for(stamp(base), at(u32::MAX - HOLD_STEPS), HOLD_STEPS));
         // Ahead of the count, by a free that read it after the look.
-        assert!(!held_long(stamp(at(1)), at(0)));
-        assert!(!held_long(stamp(at(HOLD_STEPS)), at(0)));
+        assert!(!held_for(stamp(at(1)), at(0), HOLD_STEPS));
+        assert!(!held_for(stamp(at(HOLD_STEPS)), at(0), HOLD_STEPS));
+        // A shorter hold, as `maintain` takes in a silence.
+        assert!(!held_for(stamp(base), at(1), 2));
+        assert!(held_for(stamp(base), at(2), 2));
     }
 }
 
@@ -409,8 +414,13 @@ fn the_walk_gets_past_live_slots_across_looks() {
     let count = back.hold_count().wrapping_add(HOLD_STEPS);
     let mut calls = 0;
     loop {
-        let (read, purged, done) =
-            back.hold_region(region.index(), count, usize::MAX, 4, Reach::Beat);
+        let (read, purged, done) = back.hold_region(
+            region.index(),
+            count,
+            usize::MAX,
+            4,
+            Reach::beat(Native::GEOMETRY),
+        );
         calls += 1;
         if purged != 0 {
             assert_eq!(purged, size);
@@ -474,20 +484,74 @@ fn only_frees_that_leave_a_slot_resident_stamp_it() {
     );
 }
 
-/// `maintain`'s pass, in a silence, returns everything over the floor at once, whatever the
-/// stamps say.
+/// One round of `maintain`'s looks, after a counted interval's silence: steps until one says
+/// there is no more. Returns the most one step returned.
+fn maintain_round<O: Os>(back: &Back<'_, O>, os: &SimOs<Native>) -> usize {
+    os.advance_clock(DECAY_TICKS);
+    let mut largest = 0;
+    loop {
+        let before = back.retained_large();
+        let more = back.hold_maintain_step(&|| back.now());
+        largest = largest.max(before.saturating_sub(back.retained_large()));
+        if !more {
+            return largest;
+        }
+    }
+}
+
+/// In a silence `maintain`'s looks are what step the fine count, once a round: the first
+/// round's look takes the whole hold and returns nothing, and the second takes a stamp from
+/// before the first look as old and returns everything over the floor, a bounded step at a
+/// time.
 #[test]
 #[cfg_attr(miri, ignore)]
-fn the_quiet_pass_returns_everything_over_the_floor() {
+fn maintain_returns_a_quiet_programs_held_slots_at_its_second_round() {
     let state = state::<Native>();
     let back = state.get_or_reserve().unwrap();
     let os = state.os();
     let class = large(256 << 10);
     let (_blocks, top) = free_twice_the_floor(&back, os, class);
-    os.advance_clock(3 * DECAY_TICKS);
-    back.return_held(&|| back.now());
+    let freed = back.retained_large();
+    maintain_round(&back, os);
+    assert_eq!(back.retained_large(), freed, "the first round holds them");
+    let largest = maintain_round(&back, os);
+    let page = Native::GEOMETRY.page_size();
+    assert!(largest <= (PURGE_MAINTAIN_STEP_PAGES + PURGE_MAX_RUN_PAGES) as usize * page);
     let floor = hold_floor(Native::GEOMETRY);
     let left = back.retained_large();
     assert!(left <= floor && left + class.size() > floor, "{left}");
+    back.free(top, class);
+}
+
+/// Where heartbeats step the fine count, `maintain`'s looks, an interval apart, hold slots as
+/// the heartbeats' do: a free shortly before a look is not taken.
+#[test]
+#[cfg_attr(miri, ignore)]
+fn maintain_holds_a_busy_programs_slots_for_the_hold() {
+    let state = state::<Native>();
+    let back = state.get_or_reserve().unwrap();
+    let os = state.os();
+    let class = large(256 << 10);
+    let maintain = || {
+        os.advance_clock(FINE_TICKS);
+        let count = back.hold_count();
+        while back.hold_maintain_step(&|| back.now()) {}
+        assert_ne!(
+            back.hold_count(),
+            count,
+            "the look's own reading stepped the count"
+        );
+    };
+    maintain();
+    // An interval of heartbeats, a fine step apart, then frees, and a few more heartbeats.
+    beat_for(&back, os, (DECAY_TICKS / FINE_TICKS) as u32, FINE_TICKS);
+    let (_blocks, top) = free_twice_the_floor(&back, os, class);
+    let freed = back.retained_large();
+    beat_for(&back, os, 10, FINE_TICKS);
+    maintain();
+    assert_eq!(back.retained_large(), freed, "held for the hold");
+    beat_for(&back, os, HOLD_STEPS, FINE_TICKS);
+    beat_until_still(&back, 1000);
+    assert!(back.retained_large() <= hold_floor(Native::GEOMETRY));
     back.free(top, class);
 }

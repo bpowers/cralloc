@@ -22,5 +22,9 @@ asmalloc-tokio = { path = "../../../../crates/asmalloc-tokio", optional = true }
 # src/bin/axum-orders.rs).
 asmalloc = ["dep:asmalloc", "dep:asmalloc-tokio"]
 
+[[bin]]
+name = "maintain-steps"
+required-features = ["asmalloc"]
+
 [profile.release]
 debug = 1

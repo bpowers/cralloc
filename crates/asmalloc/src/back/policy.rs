@@ -53,6 +53,12 @@ pub const FILL_CLAIMS: usize = 256;
 /// words for the smallest classes, from holding up the allocations that want them.
 pub const PURGE_MAX_RUN_PAGES: u32 = 64;
 
+/// The most bitmap words a run's looks read, and so about the most its purge claims at once:
+/// 64. A claim holds its words through the `madvise`, and a fill that meets them moves on and
+/// may carve instead; for the smallest classes, eight words to a page, this keeps a run to 8
+/// pages.
+pub const PURGE_MAX_RUN_WORDS: usize = 64;
+
 /// The clocked pass returns a run of free pages only if it has at least this many: 4. A call
 /// for one page costs four times as much a page as one for four, and a short run is the kind a
 /// burst's next allocations land on. Growth over the cap and `collect` take any run. Runs of 8
@@ -69,6 +75,19 @@ pub const PURGE_ANY_RUN_EVERY: u64 = 8;
 /// or a few hundred pages of larger ones. A step always finishes the unit it started, so a
 /// huge-page unit of small slots may read more.
 pub const PURGE_STEP_WORDS: usize = 256;
+
+/// How much bitmap one of `maintain`'s steps of the clocked pass may read, in words: 64, a
+/// quarter of a heartbeat's step. `maintain`'s caller may be an async runtime's worker that
+/// yields between steps, and a step should hold it for tens of microseconds; a heartbeat's
+/// step is paid for by a slow path that already did far more.
+pub const PURGE_MAINTAIN_STEP_WORDS: usize = 64;
+
+/// How many pages one of `maintain`'s steps of the clocked pass may purge before it stops, in
+/// 4 KiB pages: 128, half a MiB. A `madvise` costs about 0.4 us a call and 0.1 us a resident
+/// page alone, and a few microseconds a call more with other threads to shoot down
+/// (`docs/research/burst-start.md`). Checked between units, so a step that meets a unit
+/// larger than this, one slot of a large class, purges that whole slot.
+pub const PURGE_MAINTAIN_STEP_PAGES: u32 = 128;
 
 /// How much bitmap a step of growth over the cap may read while it purges, in words: 16384,
 /// 128 KiB. The bound keeps one call from paying for a whole heap; the clocked pass and later

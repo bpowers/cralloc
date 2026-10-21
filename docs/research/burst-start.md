@@ -184,6 +184,41 @@ counted clock and so steps the count through a silence; the child of a fork has 
 thread nor a runtime's task, and its count, a copy of the parent's word, goes on from where the
 parent's stood (`crates/asmalloc/src/heap/background.rs`, `crates/asmalloc-tokio`).
 
+## After merging main's pacing by bytes (0483439)
+
+Main now paces the heartbeat by the bytes a CPU moves (`BEAT_BYTES`), so a server in steady
+state takes almost no heartbeats, and its burst starts no longer run the deferred maintenance
+on main either. Rerun on the merged branch (`e761006`), two rounds, same pattern:
+
+| axum order service | burst start, extra request-ms | first 0.5 ms p50 us | kcycles/request at 90k | resident 10 s after the clients leave, MiB |
+|---|---|---|---|---|
+| main 0483439 | 3.4 | 33 | 69.1 | 202.8 |
+| merged, nothing | 3.3 | 37 | 68.1 | 202.8 |
+| merged, thread | 15.5 | 279 | 68.1 | 201.1 |
+| merged, task | 18.3 | 337 | 69.1 | 201.0 |
+| jemalloc | 3.2 | 34 | 68.9 | 203.9 |
+
+| connect-rust server | burst start, extra request-ms | kcycles/request at 63k | resident 10 s after, MiB |
+|---|---|---|---|
+| merged, nothing | 2.3 | 98.4 | 9.9 |
+| merged, thread | 3.7 | 98.6 | 6.0 |
+| merged, task | 2.9 | 98.3 | 6.1 |
+
+So on these servers the pacing alone now removes the burst-start maintenance, and counted
+intervals add nothing measurable there; they still keep any heartbeat that does run after a
+silence from finding everything a minute old. What the merge leaves as it was: maintenance
+during silences gives the RPC server's memory back (9.9 to 6 MiB) at no cost, and costs the
+order service's next burst five times jemalloc's for 1.8 MiB. The task cost the busy order
+service 1.5% more cycles a request at 90k in these two rounds, the thread nothing; within the
+rounds' spread of about 2%. The memory curves and call counts above were taken before the
+merge and not rerun.
+
+How the two meet in the code: `beat` (now run when the moved-bytes count passes its step,
+or for a deferred rule) notes the counted interval for `maintain`, and `between_beats`, which
+runs a slow path's own chores without the heartbeat's, reads the counted clock like every
+other rule and does not count as a heartbeat. So under the byte pacing `maintain` sees a heap
+whose slow paths are rare as unmaintained and does its round, which is what it is for.
+
 ## Options
 
 - **Keep counted intervals and runs as built.** Together they bring the order service's burst

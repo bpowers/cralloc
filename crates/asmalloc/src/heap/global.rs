@@ -84,6 +84,15 @@ impl Asmalloc {
         process().maintain();
     }
 
+    /// One bounded step of [`Asmalloc::maintain`]'s round: one slab's idle look, the looks at
+    /// the depot's stacks, one magazine laundered, or one step of the purge pass, each a few
+    /// microseconds to tens of microseconds. Returns whether the round has more steps; `false`
+    /// at once when this interval's round is done. For a caller that must not hold its thread
+    /// for a whole round, such as a task on an async runtime, which yields between steps.
+    pub fn maintain_step() -> bool {
+        process().maintain_step()
+    }
+
     /// How long the background thread, or a timer, sleeps between calls of
     /// [`Asmalloc::maintain`]: under the shortest interval the clock gives on a plausible
     /// machine (`depot::IDLE_TICKS`, 0.7 s at 6 GHz), so that every interval gets a call.

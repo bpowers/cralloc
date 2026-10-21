@@ -42,10 +42,13 @@
 //! bounded walk each look and still gets to them. A region the look walked from its top to its
 //! bottom loses its stamp, so later looks pass it at a load until the next free.
 //!
-//! **Maintain.** `maintain` runs only in a silence of an interval or more, which is longer
-//! than any hold: it returns everything over the floor in stamped regions, in one lap, whatever
-//! their stamps say, so a quiet program's background thread or timer gets back what its
-//! heartbeats would have.
+//! **Maintain.** `maintain`'s round takes looks too, before its clocked pass, a step at a
+//! time within the bounds of that pass's steps, until one returns nothing or the floor is
+//! reached. It runs once a counted interval whether heartbeats run or not, and in a silence its
+//! own readings are what step the fine count, once an interval, so its looks take a stamp as
+//! old once it is from before the last look's count (`Back::maintain_hold`): a quiet program's
+//! background thread or task returns its held large slots within two rounds, while in a busy
+//! program `maintain` holds them as the heartbeats do.
 //!
 //! **How long.** One hold for every large class, [`HOLD_STEPS`]. A hold that adapted per
 //! class (doubling when a slot was claimed soon after the hold purged its region, halving on
@@ -68,12 +71,15 @@
 use super::Back;
 use super::host::ClassHost;
 use super::layout::Hints;
-use super::policy::{self, HOLD_STEPS, PURGE_STEP_WORDS, hold_floor};
+use super::policy::{
+    self, HOLD_STEPS, PURGE_MAINTAIN_STEP_PAGES, PURGE_MAINTAIN_STEP_WORDS, PURGE_STEP_WORDS,
+    hold_floor,
+};
 use super::purge::Scope;
 use super::tree::Host;
 use super::word::Word;
 use crate::os::Os;
-use crate::space::{RegionId, RegionTag};
+use crate::space::{Geometry, RegionId, RegionTag};
 use core::sync::atomic::Ordering::Relaxed;
 use core::sync::atomic::{AtomicU32, AtomicU64};
 
@@ -150,6 +156,9 @@ pub(crate) struct Hold {
     looked: AtomicU32,
     /// Where the next look's walk starts: a region number plus one; zero for the top.
     at: AtomicU32,
+    /// `maintain`'s last look: the fine count it looked at plus one (zero for none) in the
+    /// high half, and the hold it took, in fine steps, in the low half (`Back::maintain_hold`).
+    maintained: AtomicU64,
 }
 
 impl Hold {
@@ -158,6 +167,7 @@ impl Hold {
             fine: Fine::new(),
             looked: AtomicU32::new(0),
             at: AtomicU32::new(0),
+            maintained: AtomicU64::new(0),
         }
     }
 }
@@ -168,21 +178,43 @@ const fn stamp_of(count: u32) -> u64 {
     1 << 32 | count as u64
 }
 
-/// Whether a region stamped `stamp` has been held long at fine count `count`: the count is at
-/// least [`HOLD_STEPS`] past the stamp, and the stamp is not up to a hold ahead of the count,
+/// Whether a region stamped `stamp` has been held for `steps` at fine count `count`: the count
+/// is at least `steps` past the stamp, and the stamp is not up to a hold ahead of the count,
 /// which a free that read the count after the look did writes.
-pub(crate) const fn held_long(stamp: u64, count: u32) -> bool {
+pub(crate) const fn held_for(stamp: u64, count: u32, steps: u32) -> bool {
     let age = count.wrapping_sub(stamp as u32);
-    age >= HOLD_STEPS && age.wrapping_neg() > HOLD_STEPS
+    age >= steps && age.wrapping_neg() > HOLD_STEPS
 }
 
-/// What a look may take.
+/// What a look may take: regions held for `steps` fine steps, within `bytes` returned and
+/// `words` of bitmap read.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub(super) enum Reach {
-    /// A heartbeat's: regions held long, within the bounds of a heartbeat.
-    Beat,
-    /// `maintain`'s, in a silence: every stamped region, in one lap.
-    Quiet,
+pub(super) struct Reach {
+    pub(super) steps: u32,
+    pub(super) bytes: usize,
+    pub(super) words: usize,
+}
+
+impl Reach {
+    /// A heartbeat's look: the hold, within [`policy::hold_beat`] and a heartbeat's step of
+    /// bitmap.
+    pub(super) const fn beat(geometry: Geometry) -> Reach {
+        Reach {
+            steps: HOLD_STEPS,
+            bytes: policy::hold_beat(geometry),
+            words: PURGE_STEP_WORDS,
+        }
+    }
+
+    /// One of `maintain`'s steps: a hold of `steps`, within what a step of its clocked pass may
+    /// do (`policy::PURGE_MAINTAIN_STEP_PAGES`, `policy::PURGE_MAINTAIN_STEP_WORDS`).
+    pub(super) const fn maintain(geometry: Geometry, steps: u32) -> Reach {
+        Reach {
+            steps,
+            bytes: PURGE_MAINTAIN_STEP_PAGES as usize * geometry.page_size(),
+            words: PURGE_MAINTAIN_STEP_WORDS,
+        }
+    }
 }
 
 impl<O: Os> Back<'_, O> {
@@ -208,32 +240,73 @@ impl<O: Os> Back<'_, O> {
         let hold = &self.state.hold;
         hold.fine.note(time);
         let count = hold.fine.count();
-        let looked = hold.looked.load(Relaxed);
-        if looked == count {
+        if hold.looked.load(Relaxed) == count {
             return;
         }
-        // One look a step: a heartbeat that loses the race leaves it to the winner.
-        if hold
-            .looked
-            .compare_exchange(looked, count, Relaxed, Relaxed)
-            .is_err()
-        {
-            return;
-        }
-        if self.hold_look(count, Reach::Beat) {
-            let _ = hold
-                .looked
-                .compare_exchange(count, count.wrapping_sub(1), Relaxed, Relaxed);
-        }
+        self.hold_take_look(count, |back| Reach::beat(back.space.plan().geometry()));
     }
 
-    /// `maintain`'s part of the hold: returns the free units of every stamped large-class
-    /// region down to the floor, in one lap, whatever the stamps say (see the module
-    /// documentation).
-    pub fn return_held(&self, now: &dyn Fn() -> u64) {
+    /// One of `maintain`'s steps of the hold: reads the counted time through `now`, which may
+    /// step the fine count, and takes the look if the count has moved since the last one (or
+    /// that one left more to do), with the hold `maintain_hold` gives. Whether the look returned
+    /// something and stopped at its bound with more over the floor, so that another step would
+    /// return more.
+    pub fn hold_maintain_step(&self, now: &dyn Fn() -> u64) -> bool {
         let hold = &self.state.hold;
         hold.fine.note(now());
-        let _ = self.hold_look(hold.fine.count(), Reach::Quiet);
+        let count = hold.fine.count();
+        if hold.looked.load(Relaxed) == count {
+            return false;
+        }
+        self.hold_take_look(count, |back| {
+            Reach::maintain(back.space.plan().geometry(), back.maintain_hold(count))
+        })
+    }
+
+    /// Takes the look at fine count `count`, unless another caller has, with the reach `reach`
+    /// gives once it is taken; if the look stops at a bound with more to return, leaves it for
+    /// the next caller to carry on. Whether it did.
+    fn hold_take_look(&self, count: u32, reach: impl FnOnce(&Self) -> Reach) -> bool {
+        let looked = &self.state.hold.looked;
+        let seen = looked.load(Relaxed);
+        // One look a step: a caller that loses the race leaves it to the winner.
+        if seen == count
+            || looked
+                .compare_exchange(seen, count, Relaxed, Relaxed)
+                .is_err()
+        {
+            return false;
+        }
+        let more = self.hold_look(count, reach(self));
+        if more {
+            let _ = looked.compare_exchange(count, count.wrapping_sub(1), Relaxed, Relaxed);
+        }
+        more
+    }
+
+    /// The hold for `maintain`'s look at fine count `count`. `maintain` runs once a counted
+    /// interval whether or not heartbeats run, and in a silence its readings are what step the
+    /// fine count, one step an interval, so a hold of [`HOLD_STEPS`] would last a minute there.
+    /// So it takes the smaller of the hold and the steps since its last look plus one: a stamp
+    /// that old was written before the reading that stepped the count to the one that look
+    /// saw, so before that look, an interval or more ago in a silence. Where heartbeats step
+    /// the count, the steps since its last look are many, and it takes the hold. The first look
+    /// takes the hold. Looks that carry one on at the same count take what it took.
+    fn maintain_hold(&self, count: u32) -> u32 {
+        let word = &self.state.hold.maintained;
+        let seen = word.load(Relaxed);
+        let (last, steps) = ((seen >> 32) as u32, seen as u32);
+        let here = count.wrapping_add(1);
+        if last == here && last != 0 {
+            return steps;
+        }
+        let steps = if last == 0 {
+            HOLD_STEPS
+        } else {
+            count.wrapping_sub(last).wrapping_add(2).min(HOLD_STEPS)
+        };
+        word.store(u64::from(here) << 32 | u64::from(steps), Relaxed);
+        steps
     }
 
     /// One look at fine count `count`: over the floor, walks the large classes' regions from
@@ -249,10 +322,7 @@ impl<O: Os> Back<'_, O> {
         if over == 0 {
             return false;
         }
-        let (goal, budget) = match reach {
-            Reach::Beat => (over.min(policy::hold_beat(geometry)), PURGE_STEP_WORDS),
-            Reach::Quiet => (over, usize::MAX),
-        };
+        let (goal, budget) = (over.min(reach.bytes), reach.words);
         let top = self.walk_regions();
         let at = &self.state.hold.at;
         let seen = at.load(Relaxed) as usize;
@@ -314,7 +384,7 @@ impl<O: Os> Back<'_, O> {
         };
         let word = host.meta(region, at);
         let stamp = word.load();
-        if stamp == 0 || (reach == Reach::Beat && !held_long(stamp, count)) {
+        if stamp == 0 || !held_for(stamp, count, reach.steps) {
             return (1, 0, true);
         }
         if self.purgeable(region).is_none() {
