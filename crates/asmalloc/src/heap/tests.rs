@@ -1135,23 +1135,28 @@ mod hold {
     }
 
     /// `maintain`, in a silence, returns a quiet program's free large blocks down to the floor
-    /// at its first round, which the clocked pass alone would take several intervals to do.
+    /// at its second round: the first takes the whole hold, as no earlier round looked. The
+    /// clocked pass alone, which runs in the same rounds, returns at most a quarter of what is
+    /// retained a round, and nothing the last two intervals' claims reached.
     #[test]
     #[cfg_attr(miri, ignore)]
     fn maintain_returns_a_quiet_programs_free_large_blocks() {
         let heap = SimHeap::<Native>::new();
         let freed = free_a_phase(&heap);
         let back = heap.heap.back().unwrap();
-        let mut rounds = 0;
-        while back.retained_large() == freed {
-            rounds += 1;
-            assert!(rounds < 8, "maintain never acted");
+        let floor = allowance_floor(Native::GEOMETRY);
+        let round = || {
             heap.os().advance_clock(crate::depot::IDLE_TICKS);
             heap.maintain();
-        }
-        let left = back.retained_large();
-        let floor = allowance_floor(Native::GEOMETRY);
-        assert!(left <= floor, "{left} left over a floor of {floor}");
+            back.retained_large()
+        };
+        let first = round();
+        assert!(
+            first > floor + (freed - floor) / 2,
+            "{first} left after the first round"
+        );
+        let second = round();
+        assert!(second <= floor, "{second} left over a floor of {floor}");
     }
 }
 

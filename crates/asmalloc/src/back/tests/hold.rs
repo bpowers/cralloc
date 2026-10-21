@@ -556,3 +556,88 @@ fn maintain_holds_a_busy_programs_slots_for_the_hold() {
     assert!(back.retained_large() <= allowance_floor(Native::GEOMETRY));
     back.free(top, class);
 }
+
+/// As `maintain_holds_a_busy_programs_slots_for_the_hold`, with a round whose purge
+/// phase lasts a few fine steps (its clocked pass has work), so that `maintain` takes more
+/// than one look in the round. The later looks must hold slots as the first did.
+#[test]
+#[cfg_attr(miri, ignore)]
+fn a_long_maintain_round_holds_a_busy_programs_slots() {
+    let state = state::<Native>();
+    let back = state.get_or_reserve().unwrap();
+    let os = state.os();
+    let class = large(256 << 10);
+    let step = || {
+        os.advance_clock(FINE_TICKS);
+        while back.hold_maintain_step(&|| back.now()) {}
+    };
+    step();
+    beat_for(&back, os, (DECAY_TICKS / FINE_TICKS) as u32, FINE_TICKS);
+    let (_blocks, top) = free_twice_the_floor(&back, os, class);
+    let freed = back.retained_large();
+    beat_for(&back, os, 10, FINE_TICKS);
+    step();
+    assert_eq!(
+        back.retained_large(),
+        freed,
+        "the round's first look holds them"
+    );
+    // The same round, 2 ms on: `maintain_step` calls the hold's step before each step of the
+    // clocked pass.
+    step();
+    assert_eq!(
+        back.retained_large(),
+        freed,
+        "the round's second look returned slots freed 12 steps ago"
+    );
+    back.free(top, class);
+}
+
+/// "A region walked from its top to its bottom loses its stamp, so later looks
+/// pass it at a load". A region with more slots than one look's budget of words is never
+/// walked whole in one look, so its stamp stays and every lap walks it again.
+#[test]
+#[cfg_attr(miri, ignore)]
+fn a_region_larger_than_a_looks_budget_loses_its_stamp() {
+    let state = state::<Native>();
+    let back = state.get_or_reserve().unwrap();
+    let os = state.os();
+    let class = large(64 << 10);
+    let size = class.size();
+    let blocks: Vec<_> = (0..12)
+        .map(|_| back.alloc(class, size).unwrap().ptr)
+        .collect();
+    let region = back.space().locate(blocks[0].as_ptr()).unwrap().region;
+    for b in &blocks {
+        assert_eq!(back.space().locate(b.as_ptr()).unwrap().region, region);
+        paint(b.as_ptr(), size, 7);
+    }
+    beat_for(&back, os, 2, FINE_TICKS);
+    for b in &blocks {
+        back.free(*b, class);
+    }
+    assert_ne!(back.hold_stamp_at(blocks[0].as_ptr()), 0);
+    let count = back.hold_count().wrapping_add(HOLD_STEPS);
+    // Looks of 4 words on a region of 12 slots, as looks of 256 words on one of more than 256.
+    let (mut laps, mut words) = (0, 0);
+    for _ in 0..1000 {
+        let (read, _, done) = back.hold_region(
+            region.index(),
+            count,
+            usize::MAX,
+            4,
+            Reach::beat(Native::GEOMETRY),
+        );
+        words += read;
+        laps += usize::from(done);
+        if back.hold_stamp_at(blocks[0].as_ptr()) == 0 {
+            break;
+        }
+    }
+    assert_eq!(back.retained_large(), 0, "everything was returned");
+    assert_eq!(
+        back.hold_stamp_at(blocks[0].as_ptr()),
+        0,
+        "still stamped after {laps} walks of the region, {words} words read"
+    );
+}

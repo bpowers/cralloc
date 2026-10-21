@@ -39,16 +39,19 @@
 //! heartbeat to carry on at once; one that found nothing to return waits for the next step.
 //! The walk of a region uses the region's own purge cursor (`layout::Hints`), the one every
 //! purger carries on from, so a region whose slots above its free ones are live costs a
-//! bounded walk each look and still gets to them. A region the look walked from its top to its
-//! bottom loses its stamp, so later looks pass it at a load until the next free.
+//! bounded walk each look and still gets to them. A region whose walk, in one look or several,
+//! went from its top to its bottom with no free meanwhile loses its stamp, so later looks pass
+//! it at a load until the next free.
 //!
 //! **Maintain.** `maintain`'s round takes looks too, before its clocked pass, a step at a
 //! time within the bounds of that pass's steps, until one returns nothing or the floor is
 //! reached. It runs once a counted interval whether heartbeats run or not, and in a silence its
-//! own readings are what step the fine count, once an interval, so its looks take a stamp as
-//! old once it is from before the last look's count (`Back::maintain_hold`): a quiet program's
-//! background thread or task returns its held large slots within two rounds, while in a busy
-//! program `maintain` holds them as the heartbeats do.
+//! own readings are what step the fine count, about once an interval, so a round decides its
+//! hold once, at its first look: the hold, or less if the count has moved fewer steps since the
+//! last look of an earlier round, in which case it takes a stamp as old once it is from before
+//! that look (`Back::maintain_hold`). A quiet program's background thread or task returns its
+//! held large slots at its second round, while in a busy program `maintain` holds them as the
+//! heartbeats do.
 //!
 //! **How long.** One hold for every large class, [`HOLD_STEPS`]. A hold that adapted per
 //! class (doubling when a slot was claimed soon after the hold purged its region, halving on
@@ -156,9 +159,12 @@ pub(crate) struct Hold {
     looked: AtomicU32,
     /// Where the next look's walk starts: a region number plus one; zero for the top.
     at: AtomicU32,
-    /// `maintain`'s last look: the fine count it looked at plus one (zero for none) in the
-    /// high half, and the hold it took, in fine steps, in the low half (`Back::maintain_hold`).
+    /// `maintain`'s hold for the round under way: the counted interval of the round plus one
+    /// (zero for none) in the high half, and the hold, in fine steps, in the low half
+    /// (`Back::maintain_hold`).
     maintained: AtomicU64,
+    /// The fine count at `maintain`'s latest look, plus one; zero for none.
+    maintain_looked: AtomicU32,
 }
 
 impl Hold {
@@ -168,6 +174,7 @@ impl Hold {
             looked: AtomicU32::new(0),
             at: AtomicU32::new(0),
             maintained: AtomicU64::new(0),
+            maintain_looked: AtomicU32::new(0),
         }
     }
 }
@@ -177,6 +184,11 @@ impl Hold {
 const fn stamp_of(count: u32) -> u64 {
     1 << 32 | count as u64
 }
+
+/// Set in a stamp by the look that starts a walk of the region from its top: the walk that
+/// reaches the region's bottom with the stamp unchanged clears it, however many looks the
+/// walk took. A free writes a stamp without it, so a free during the walk keeps the stamp.
+const WALKED_FROM_TOP: u64 = 1 << 33;
 
 /// Whether a region stamped `stamp` has been held for `steps` at fine count `count`: the count
 /// is at least `steps` past the stamp, and the stamp is not up to a hold ahead of the count,
@@ -284,28 +296,34 @@ impl<O: Os> Back<'_, O> {
         more
     }
 
-    /// The hold for `maintain`'s look at fine count `count`. `maintain` runs once a counted
-    /// interval whether or not heartbeats run, and in a silence its readings are what step the
-    /// fine count, one step an interval, so a hold of [`HOLD_STEPS`] would last a minute there.
-    /// So it takes the smaller of the hold and the steps since its last look plus one: a stamp
-    /// that old was written before the reading that stepped the count to the one that look
-    /// saw, so before that look, an interval or more ago in a silence. Where heartbeats step
-    /// the count, the steps since its last look are many, and it takes the hold. The first look
-    /// takes the hold. Looks that carry one on at the same count take what it took.
+    /// The hold for `maintain`'s look at fine count `count`, decided once a round. `maintain`
+    /// runs a round once a counted interval whether or not heartbeats run, and in a silence its
+    /// readings are what step the fine count, about one step a round, so a hold of
+    /// [`HOLD_STEPS`] would last a minute there. So a round takes the smaller of the hold and
+    /// the steps since the last look of an earlier round, plus one: a stamp that old was
+    /// written before the reading that stepped the count to the one that look saw, so before
+    /// that round, an interval or more ago in a silence. Where heartbeats step the count, the
+    /// steps since are many, and it takes the hold. The first round takes the hold. Every look
+    /// of a round takes what the round's first did, so a round that lasts more than a fine step
+    /// does not hold for a step or two from its own earlier look.
     fn maintain_hold(&self, count: u32) -> u32 {
-        let word = &self.state.hold.maintained;
-        let seen = word.load(Relaxed);
-        let (last, steps) = ((seen >> 32) as u32, seen as u32);
-        let here = count.wrapping_add(1);
-        if last == here && last != 0 {
-            return steps;
-        }
-        let steps = if last == 0 {
-            HOLD_STEPS
+        let hold = &self.state.hold;
+        let round = self.state.decay.clock.count().wrapping_add(1);
+        let seen = hold.maintained.load(Relaxed);
+        let steps = if (seen >> 32) as u32 == round && round != 0 {
+            seen as u32
         } else {
-            count.wrapping_sub(last).wrapping_add(2).min(HOLD_STEPS)
+            let last = hold.maintain_looked.load(Relaxed);
+            let steps = if last == 0 {
+                HOLD_STEPS
+            } else {
+                count.wrapping_sub(last).wrapping_add(2).min(HOLD_STEPS)
+            };
+            hold.maintained
+                .store(u64::from(round) << 32 | u64::from(steps), Relaxed);
+            steps
         };
-        word.store(u64::from(here) << 32 | u64::from(steps), Relaxed);
+        hold.maintain_looked.store(count.wrapping_add(1), Relaxed);
         steps
     }
 
@@ -394,11 +412,21 @@ impl<O: Os> Back<'_, O> {
             let _ = word.compare_exchange(stamp, 0);
             return (1, 0, true);
         }
-        // A walk that starts below the top leaves the units above the cursor unlooked at,
-        // where a slot freed since the cursor passed may lie: the stamp stays for the next.
-        let whole = Hints::unpack(host.hints(region).load()).cursor == 0;
+        // A walk that starts below the top leaves the units above the cursor unlooked at, where
+        // a slot freed since the cursor passed may lie, so only a walk that began at the top
+        // clears the stamp when it reaches the bottom, in this look or a later one. A free
+        // since rewrites the stamp, and the compare-and-swap then fails.
+        let mut stamp = stamp;
+        if stamp & WALKED_FROM_TOP == 0
+            && Hints::unpack(host.hints(region).load()).cursor == 0
+            && word
+                .compare_exchange(stamp, stamp | WALKED_FROM_TOP)
+                .is_ok()
+        {
+            stamp |= WALKED_FROM_TOP;
+        }
         let (bytes, read, done) = self.purge_region(class, region, budget, limit, true, Scope::All);
-        if done && whole {
+        if done && stamp & WALKED_FROM_TOP != 0 {
             let _ = word.compare_exchange(stamp, 0);
         }
         (read, bytes, done)
