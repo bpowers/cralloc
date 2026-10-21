@@ -237,10 +237,16 @@ decides only which cache domain's depot stacks a CPU uses; no safety argument re
 **Preconditions.** `word` is the address of a live, 4-byte aligned word that the process only
 accesses atomically; `timeout` is null or the address of a live `struct timespec`.
 
-**Proof.** `word` comes from `&AtomicU32`, so it is live for the call and aligned to 4, and
-Rust gives it no non-atomic access while the reference exists. futex(2) with
-`FUTEX_WAIT_PRIVATE` reads the word once, atomically, compares it with `expected`, and sleeps
-or returns; it writes no user memory. Its fourth argument is a relative timeout, read once:
+**Proof.** `word` comes from `&AtomicU64`, so it is live for the call and aligned to 8, and
+Rust gives it no non-atomic access while the reference exists. The kernel takes its first four
+bytes as the futex word: on x86-64, which is little-endian, the 64-bit word's low half. Other
+threads change the whole 64-bit word with atomic instructions; a 32-bit atomic read of half of
+it is atomic too on x86-64 (an aligned access within one 8-byte word), and sees either the old
+or the new low half. `expected` is passed truncated to its low 32 bits, the half the kernel
+compares. futex(2) with `FUTEX_WAIT_PRIVATE` reads the word once, atomically, compares it with
+`expected`, and sleeps or returns; it writes no user memory. A change of the high half only (the
+generation's key) does not stop a wait that is about to begin; the callers wait only for changes
+of the state or the level bit, which are in the low half (`thread_word`, asserted there). Its fourth argument is a relative timeout, read once:
 `Timespec` is `#[repr(C)]` `{ i64, i64 }`, x86-64's `struct timespec`, with nanoseconds under
 10^9 by construction, and it lives on the caller's stack for the call. `FUTEX_WAKE_PRIVATE`
 uses the address only as a key and touches no memory; the arguments after the count are
@@ -248,10 +254,31 @@ ignored. Errors (the word differed, a timeout, a signal, an invalid argument) ar
 `rax` and dropped: the callers look at the word again after every return. Neither call
 changes a mapping, a protection or a disposition.
 
+## KERNEL-12: glibc's `__libc_single_threaded`
+
+**Blocks.** The `extern` block that declares `static __libc_single_threaded: u8` (only with the
+`background` feature, on `target_env = "gnu"`), and the volatile read of it in
+`threads::more_than_one`.
+
+**Preconditions.** The symbol exists with that type in the C library the program links; the
+read is of a valid, initialized byte.
+
+**Proof.** glibc 2.32 and later export `__libc_single_threaded` as a `char` (`<sys/single_threaded.h>`),
+which the platform's glibc (2.43) does; a `u8` has the same size, alignment and every bit
+pattern valid, so any value read is a valid `u8`. The declaration is linked against the C
+library (`#[link(name = "c")]`), which a build with the feature links anyway for
+`pthread_create`. The variable is a static of the library, live for the whole process. glibc
+writes it from the thread that creates a thread, with a plain store, so a concurrent read is a
+data race in the C model; the read is a volatile one-byte load, which on x86-64 is one `mov`
+that sees the old or the new byte and no other, and the value is used only as a hint for when
+to create the background thread: a stale `true` delays the thread to the next look at the level,
+a stale `false` cannot occur once a thread has been created, since glibc never stores `true`
+again (measured on 2.43, including in fork children, `docs/research/default-thread.md`).
+
 ## KERNEL-07: `unsafe impl Os for LinuxOs`
 
 The comment above the impl maps each promise of the `Os` trait to the kernel behaviour that
-provides it, and KERNEL-01 to KERNEL-06 and KERNEL-09 to KERNEL-11 cover the individual calls. The promises not covered by a
+provides it, and KERNEL-01 to KERNEL-06 and KERNEL-09 to KERNEL-12 cover the individual calls. The promises not covered by a
 single call:
 
 - *Valid until unmapped or dropped.* Reservations are mappings of the process. Dropping a

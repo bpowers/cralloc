@@ -73,14 +73,21 @@ are valid for the calls. The new thread runs `run` with a null argument, which i
   program's unwinding panic cannot start in allocator code.
 - I5. `pthread_setname_np` and `pthread_detach` are called only after `create` returned 0,
   with the identifier it stored; a name of 8 bytes and NUL is under the 16-byte limit.
+- I6. A first `create` with the attribute that `EINVAL` refused (glibc does when the stack
+  cannot hold the program's static thread-local data) created no thread and stored nothing
+  that is used; the second `create` passes a null attribute, which `pthread_create` takes as
+  the defaults, with the same `thread`, `run` and argument, under the same mask, and only
+  after `attr` was destroyed, so nothing destroyed is passed.
 
 **Proof.** By I1 the call creates an ordinary thread of the C library. By I2 every pointer
 passed is valid for what the call does with it. By I3 the new thread has every program signal
 blocked, so a handler never runs on it and process-directed signals go to the program's
 threads, while the caller's mask is unchanged after the call. By I4 the thread never returns
 into the C library with a value it would interpret, and never unwinds through an `extern "C"`
-frame. By I5 the name and detach are made on a live thread. A failure of `create` returns its
-error, leaves the caller's mask as it was, and starts nothing.
+frame. By I5 the name and detach are made on a live thread. By I6 the retry is a second
+ordinary call with valid arguments, made only after a failure that created nothing. A failure
+of `create`, or of both, returns its error, leaves the caller's mask as it was, and starts
+nothing.
 
 Re-entry: `pthread_create` allocates (the new thread's TLS and stack bookkeeping), which comes
 back into the allocator through the C interface or the Rust one. The caller holds nothing
