@@ -631,7 +631,10 @@ a program with one thread never gets one, because it may depend on staying that 
 evidence of a second thread is the C library's own record that one was created; a library
 that keeps no such record leaves a free made by a thread other than the first as the
 evidence. Which thread happens to free the memory must not matter where the library can
-say. The condition is a level and not an event. It is looked at when free memory rises
+say. The library's record survives a fork, and a fork child begins with one thread
+whatever its parent had, so in a fork child the evidence is again a free by a thread other
+than its first: a child is the process most likely to depend on having one thread, and
+keeping some memory there is the cheaper mistake. The condition is a level and not an event. It is looked at when free memory rises
 over the floor, and again once an interval for as long as it stays there, so a moment at
 which the thread could not be created only delays it. The thread buys nothing on
 the fast path, which stays as it is. Once an interval it calls `maintain`, which does for
