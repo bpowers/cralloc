@@ -1,6 +1,6 @@
 # Burst start: counted intervals, purging by runs, and maintenance from a timer
 
-Measured 2026-10-20 and 21 on branch `burst-start` (final runs at `b2d9edc`) against main at `b17c5e2`, on the reference host
+Measured 2026-10-20 and 21 on branch `burst-start` (runs at `b2d9edc`, after merging main at `e761006`, and after the review at `1f3703a`) against main at `b17c5e2` and `0483439`, on the reference host
 (Ryzen 9950X, Linux 7.2.9). Follows `server-latency.md`, which found that the first
 milliseconds after a silence paid for maintenance the silence skipped.
 
@@ -19,18 +19,19 @@ milliseconds after a silence paid for maintenance the silence skipped.
   first setting, which left too much memory waiting; see "Memory after a peak"). datafusion's calls fall by half (3,900 to 1,900);
   tpchgen's and gix-hours' by 7 to 10%, because nearly all of theirs return large blocks
   (hundreds of kilobytes to megabytes a call), which this does not touch.
-- **The price is memory a pass or two late.** On burst-idle (218 MiB freed at random) the
-  branch, as finally set, holds 109 MiB three seconds after the free where main holds 68, and
-  3.7 MiB at twelve seconds where main holds 4.9. phase is level within 1.6 MiB throughout.
-  Single free pages between live ones go back within about eight intervals instead of two.
+- **The price is short runs that go back later.** On burst-idle (218 MiB freed at random) the
+  branch after the review holds what main does up to 8 s (67 against 68 MiB at 3 s; before the
+  review's fix to when a pass is due, 109), and 8.6 against 3.9 MiB at 12 s, the short runs
+  waiting for the pass that takes them. Single free pages between live ones go back within
+  about eight passes instead of two.
 - **Maintenance during silences gives memory back and, on the order service, costs the next
   burst.** With `maintain` called through the silences (the new `asmalloc-tokio` task, or the
   background thread) the connect-rust server goes from 8.9 to 6.2 MiB after its clients leave,
   at no cost to its bursts; the order service gives back 1 to 2 MiB of 202 (its live data is
-  180 MiB) and its burst start costs 20 to 27 request-ms instead of 3.9, because the silence's
-  maintenance empties the caches and returns the pages the next burst then refaults. While
-  the servers are busy neither costs anything measurable: `maintain` now leaves a heap whose
-  heartbeats are running to them.
+  180 MiB) and, after the review fixes, its burst start costs 5.3 to 5.7 request-ms instead of
+  3.6 (15 to 27 before them), because the silence's maintenance empties the caches and returns
+  the pages the next burst then refaults. While the servers are busy neither costs anything
+  measurable. See "Review fixes" for what changed.
 
 ## Counted intervals
 
@@ -49,7 +50,9 @@ Each rule has a test that a long silence after its evidence ages it by at most o
 interval, and each of those tests fails with the raw clock in place of the counted time; the
 tests that the rules act within their intervals while heartbeats keep coming pass unchanged.
 `maintain` now runs one round in each counted interval and returns at once otherwise, so a
-timer or a hook may call it freely; its clock read is what counts a silence's intervals.
+timer or a hook may call it freely; its clock read is what counts a silence's intervals. A
+clocked pass is due once in each counted interval, by the interval's number (see "Review
+fixes").
 
 What the burst start still pays on the branch: the sweep and any age look or drain whose
 interval falls due at the first heartbeat after the silence, as it would have one interval
@@ -95,8 +98,9 @@ The walk now joins the purgeable units below the one it reaches into a run, up t
 (`PURGE_MAX_RUN_PAGES`), and returns it with one claim and one call; units of the huge-page
 part are already whole huge pages and are not joined. The clocked pass takes only runs of at
 least 4 pages (`PURGE_MIN_RUN_PAGES`), a quarter of a one-page call's cost a page; one pass in
-8 (`PURGE_ANY_RUN_EVERY`) takes runs of any length, with a goal of everything it finds, so a
-single free page goes back within about eight intervals and a long run within one. The first
+8 (`PURGE_ANY_RUN_EVERY`, counted in passes) takes runs of any length, with the same goal as
+any other pass, so a single free page goes back within about eight passes and a long run
+within one. The first
 setting, runs of 8 and one pass in 16, left the after-peak tail at twice main's and failed the
 preload test that the background thread returns a quiet program's memory (27 MiB of 163 left
 after 12 s, against a bound of 20); 4 and 8 pass it. Growth over the cap and `collect` take any run, as before. The pass word
@@ -165,11 +169,11 @@ interleaved.
 | branch, task | 3.0 | 64 | 101.4 | 8.4 / 6.2 |
 
 Cycles per request at a fixed rate differ by under 1% on axum and 2% on the RPC server, inside
-the rounds' spread: the task and the thread cost a busy server nothing measurable. That needed
-a change: as first written, `maintain` ran one round every interval whatever the heartbeats
-were doing, and a timer then cost the busy axum server 2.5% more cycles a request. Now a
-heartbeat notes the counted interval it ran in, and `maintain` returns at once if one ran in
-this interval or the last.
+the rounds' spread: the task and the thread cost a busy server nothing measurable. (An
+earlier version made `maintain` stand aside for a heap whose heartbeats had run recently,
+after one run in which a timer cost the busy axum server 2.5% more cycles a request; the
+review removed that, since a heartbeat does a small part of a round, and the reruns below show
+no such cost.)
 
 What the order service's bursts pay for: with the task its eight bursts took 480 page faults
 against 100 with nothing, and strace shows the work moved from the bursts (none in their first
@@ -213,11 +217,77 @@ service 1.5% more cycles a request at 90k in these two rounds, the thread nothin
 rounds' spread of about 2%. The memory curves and call counts above were taken before the
 merge and not rerun.
 
-How the two meet in the code: `beat` (now run when the moved-bytes count passes its step,
-or for a deferred rule) notes the counted interval for `maintain`, and `between_beats`, which
-runs a slow path's own chores without the heartbeat's, reads the counted clock like every
-other rule and does not count as a heartbeat. So under the byte pacing `maintain` sees a heap
-whose slow paths are rare as unmaintained and does its round, which is what it is for.
+How the two meet in the code: `beat` (run when the moved-bytes count passes its step, or for
+a deferred rule) and `between_beats`, which runs a slow path's own chores without the
+heartbeat's, both read the counted clock like every other rule.
+
+## Review fixes (d94ce12 to f50d725)
+
+A review found that, with `maintain` the only caller, a clocked pass started only every other
+interval. A round reads the counted time once, at the interval's step, and the pass it runs
+ends on a fresh reading a little later; the next round, at the next step, was then less than
+an interval after that end, so it waited, and with a silence counted as one interval it waited
+for good when the beats came an interval or more apart. A pass is now due once in each counted
+interval, by the interval's number. The any-run pass was chosen by the interval's number and
+could fall always on the skipped intervals; it is now one pass in eight, counted in passes,
+with the same goal as any other pass rather than all that is retained. The same fix moved the
+after-peak curve back to main's (burst-idle, anonymous MiB, two runs each, interleaved, at
+f50d725's parent):
+
+| burst-idle (218 MiB freed) | 2 s | 3 s | 4 s | 6 s | 8 s | 12 s | 16 s | 24 s |
+|---|---|---|---|---|---|---|---|---|
+| main 0483439 | 100 | 68 | 51 | 30 | 15.9 | 3.9 | 2.8 | 2.8 |
+| branch, fixed | 120 | 67 | 51 | 27 | 13.3 | 8.6 | 5.9 | 3.9 |
+| branch, fixed, background thread | 69 | 53 | 40 | 22 | 11.9 | 4.8 | 2.3 | 1.6 |
+
+So the lag at 3 s in "Memory after a peak" was this. The tail from 12 s is the short runs
+waiting for the any-run pass.
+
+Other fixes: `maintain` no longer stands aside for recent heartbeats; the counted clock reads
+its word before the cycle counter, so a stalled reader cannot re-stamp a newer step backwards;
+a run stops at what its step may still purge and read and at 64 bitmap words; the short tail
+of a run that a cap cut goes with it.
+
+**`maintain` in steps.** `Asmalloc::maintain_step` takes one bounded step of the interval's
+round and says whether more remains; `maintain` loops over it, and the tokio task yields
+between steps. Timed one step at a time (`maintain-steps` in `bench/probes/rust-screen/servers`,
+four threads free about 160 MiB, then rounds every half second; idle, and with the four threads
+allocating in their caches):
+
+| | steps | p50 | p99 | p99.9 | max |
+|---|---|---|---|---|---|
+| purge step the size of a heartbeat's (dd63b05), idle | 494 | 1.9 us | 107 us | 193 us | 981 us |
+| purge step the size of a heartbeat's (dd63b05), busy | 445 | 0.1 us | 131 us | 544 us | 1,056 us |
+| purge step bounded for `maintain` (1f3703a), idle | 1,186 | 7.7 us | 78 us | 258 us | 408 us |
+| purge step bounded for `maintain` (1f3703a), busy | 1,725 | 1.2 us | 35 us | 210 us | 316 us |
+
+`maintain`'s purge step reads at most 64 bitmap words and stops after 128 pages
+(`PURGE_MAINTAIN_STEP_WORDS`, `PURGE_MAINTAIN_STEP_PAGES`), checked between units. Traced
+against `madvise` and `membarrier`, every step over 250 us is one `madvise` of a single free
+slot of a large class (2,560 pages, 10 MiB, 0.15 us a page), which is one unit and cannot be
+split without holding its claim across steps. Drains take up to about 190 us (a fence and a
+slab's magazines laundered), and a shed step, one magazine laundered, 50 to 100 us after a
+burst.
+
+**Nothing, the thread, the task, rerun** (1f3703a, two rounds each, same pattern as above):
+
+| axum order service | burst start, extra request-ms | first 0.5 ms p50 us | kcycles/request at 90k | at 215k | resident during silences / 10 s after the clients leave, MiB |
+|---|---|---|---|---|---|
+| main 0483439 | 3.5 | 35 | 67.9 | 63.3 | 198.8 / 198.8 |
+| nothing | 3.6 | 40 | 67.8 | 63.1 | 198.8 / 198.8 |
+| thread | 5.7 | 101 | 67.7 | 62.5 | 198.0 / 197.1 |
+| task | 5.3 | 93 | 68.5 | 63.5 | 198.0 / 197.1 |
+| jemalloc | 3.4 | 37 | 68.8 | 63.6 | 200.1 / 200.1 |
+
+| connect-rust server | burst start, extra request-ms | kcycles/request at 63k | resident during silences / 10 s after, MiB |
+|---|---|---|---|
+| nothing | 2.5 | 97.7 | 5.3 / 5.4 |
+| thread | 3.3 | 97.6 | 3.7 / 1.5 |
+| task | 3.1 | 98.0 | 3.8 / 1.6 |
+
+The silence's maintenance now costs the order service's burst start about 2 request-ms, not
+12 to 15. The idle server's CPU over the 10 s after its clients leave is 5 ms for the thread
+and 10 ms for the task.
 
 ## Options
 
@@ -225,8 +295,6 @@ whose slow paths are rare as unmaintained and does its round, which is what it i
   start to jemalloc's within 0.4 request-ms and cut the clocked pass's calls by an order of
   magnitude where it makes them (axum 337 to 8 in the burst starts; the connect-rust server
   443 to 43 a run), for memory that comes back a pass or two later after a peak.
-- **Find the pass that is late at 2 to 4 s after a peak** (109 against main's 68 MiB at 3 s
-  on burst-idle) before tuning the run lengths further.
 - **Make maintenance during silences gentler before recommending it for servers.** As built,
   the task and the thread empty a busy server's caches in the second interval of each
   silence, which on the order service makes the next burst start six times dearer for 1 to 2
@@ -234,8 +302,6 @@ whose slow paths are rare as unmaintained and does its round, which is what it i
   silence rather than one; or have its drains park in the depot instead of laundering, so a
   burst refills from magazines rather than the bitmaps, and leave the memory to the purge.
   Each needs measuring on both servers; neither changes the busy case.
-- **The design's "Heartbeat" section** should say that `maintain` leaves a heap whose
-  heartbeats ran in this interval or the last to them, as built.
 - **tpchgen's and gix-hours' `madvise` calls** come from the large path (blocks of 48 KiB to
   1.5 MiB freed or moved), which this work does not touch; the large-slot hold being built
   elsewhere (`large-hold`) is where they would fall.
