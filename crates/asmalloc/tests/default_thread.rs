@@ -246,6 +246,26 @@ fn child(mode: &str) {
             // in `main` instead.
             unreachable!()
         }
+        "steady" => {
+            // Not a case: for the research note, the thread's wake-ups while a program works
+            // steadily, light work on two threads for 20 s after a burst started the thread.
+            worker_frees(|| {}, || {});
+            let status = allocator_thread();
+            let switches = || {
+                status
+                    .as_ref()
+                    .and_then(|file| field(file, b"\nvoluntary_ctxt_switches:"))
+            };
+            let other = thread::spawn(|| light_work(22));
+            thread::sleep(Duration::from_secs(2));
+            let before = switches();
+            light_work(20);
+            let after = switches();
+            other.join().unwrap();
+            if let (Some(before), Some(after)) = (before, after) {
+                println!("steady_wakes_per_10s {}", (after - before) / 2);
+            }
+        }
         "fork" => {
             worker_frees(|| {}, || {});
             silence().print("");

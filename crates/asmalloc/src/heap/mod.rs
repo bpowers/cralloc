@@ -296,8 +296,9 @@ impl<'a, O: Os, R: Routines + Copy> Bound<'a, O, R> {
     /// be the C library under its own locks (design: "Heartbeat").
     #[inline]
     fn after_rust_slow_path(self, seen: Snapshot) {
-        if let Some(start) = self.heap.start
-            && seen.wanted()
+        // The snapshot first: it is in a register, and the hook is a load from the heap.
+        if seen.wanted()
+            && let Some(start) = self.heap.start
         {
             start();
         }
@@ -468,11 +469,23 @@ impl<'a, O: Os, R: Routines + Copy> Bound<'a, O, R> {
             },
             crate::depot::Lone::Counted => {
                 let seen = self.word().load();
-                match self.heap.started() {
-                    Some(back) if seen.needs_attention() => self.cache(&back).attend_thread(),
-                    _ => seen,
+                if seen.needs_attention() {
+                    self.attend_thread(seen)
+                } else {
+                    seen
                 }
             }
+        }
+    }
+
+    /// The cold look at the background thread's word, for a large call that did not beat and
+    /// found it asking for one.
+    #[cold]
+    #[inline(never)]
+    fn attend_thread(self, seen: Snapshot) -> Snapshot {
+        match self.heap.started() {
+            Some(back) => self.cache(&back).attend_thread(),
+            None => seen,
         }
     }
 

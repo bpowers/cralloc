@@ -323,7 +323,8 @@ impl<O: Os> Back<'_, O> {
             // Whoever raises the count past the floor has the line already: an add that
             // crosses an eighth of the floor looks at the whole count, and over the floor asks
             // a slow path to look at the level (`crate::thread_word`).
-            let step = allowance_floor(self.space.plan().geometry()) / 8;
+            // Every space is made on the OS's geometry, so the step is a constant.
+            let step = const { allowance_floor(O::GEOMETRY) / 8 };
             if crate::thread_word::crosses(old, bytes, step) && self.over_floor() {
                 self.state.thread.raise_level(true);
             }
