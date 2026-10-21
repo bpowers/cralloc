@@ -3,7 +3,9 @@
 //! naming the page where the last piece began; what an allocation of a slot half returned
 //! sees; and the heartbeat's step of the clocked pass, capped in pages.
 
-use super::super::policy::{DECAY_TICKS, PURGE_STEP_PAGES, allowance_floor, retained_cap};
+use super::super::policy::{
+    DECAY_TICKS, PURGE_STEP_PAGES, allowance_floor, growth_step, retained_cap,
+};
 use super::super::purge::Scope;
 use super::*;
 
@@ -171,6 +173,29 @@ fn a_growth_payment_returns_at_most_a_steps_pages() {
         paid > cap,
         "the debt a carve left was paid by the next: {paid}"
     );
+    // What is still owed the heartbeats pay, a step each.
+    let owing = || {
+        back.state
+            .growth
+            .load(core::sync::atomic::Ordering::Relaxed)
+    };
+    assert!(
+        owing() >= growth_step(Native::GEOMETRY),
+        "the carves left {} owed",
+        owing()
+    );
+    let mut beats = 0;
+    while owing() >= growth_step(Native::GEOMETRY) {
+        let before = back.retained_large();
+        back.heartbeat();
+        let returned = before - back.retained_large();
+        assert!(
+            returned > 0 && returned <= cap,
+            "one heartbeat paid {returned}"
+        );
+        beats += 1;
+        assert!(beats < 100);
+    }
     for p in carved {
         back.free(p, big);
     }
