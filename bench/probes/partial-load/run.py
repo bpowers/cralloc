@@ -3,6 +3,9 @@
 loadgen, with the server's cores held out of deep idle (SCHED_IDLE spinners on the SMT
 siblings) unless --free. Over the measured segment it runs one of:
 
+  plain   nothing (with --raw, the request records alone)
+  madvise every memory system call with its time and duration (strace -ttt -T), to line
+          up with --raw's slow requests (stalls.py --calls)
   stat    perf stat --per-thread, user and kernel separately (statsum.py sums it per request)
   record  perf record -g (call graphs) into DIR/<tag>.data
   trace   perf trace -s (system call summary)
@@ -93,7 +96,16 @@ def run(mode, server, build, rnd, args, out):
     binary, sargs = server_bin(build, server)
     tag = f"{server}-{build}-{rnd}{'-free' if args.free else ''}{'-pin' if args.pin else ''}"
     so = open(out / f"{tag}.server.out", "w+")
-    srv = subprocess.Popen(["taskset", "-c", "0-3", str(binary)] + sargs, stdout=so, stderr=subprocess.STDOUT,
+    # The madvise mode starts the server under strace, which with --seccomp-bpf stops only at
+    # the calls it records (attached to a running server it stops at every call, and the
+    # server falls behind); the wall and monotonic clocks are written together so that the
+    # calls can be lined up with the requests.
+    traced = []
+    if mode == "madvise":
+        (out / f"{tag}.clocks").write_text(f"{time.time()} {time.monotonic_ns()}\n")
+        traced = ["strace", "-f", "--seccomp-bpf", "-ttt", "-T", "-e", "trace=madvise,mprotect,mmap,munmap",
+                  "-o", str(out / f"{tag}.madvise")]
+    srv = subprocess.Popen(["taskset", "-c", "0-3"] + traced + [str(binary)] + sargs, stdout=so, stderr=subprocess.STDOUT,
                            env=dict({"PATH": os.environ["PATH"], "HOME": os.environ["HOME"], "BENCH_CPUS": "0-3"},
                                # tcmalloc runs its per-CPU caches only with glibc's rseq off.
                                **({"GLIBC_TUNABLES": "glibc.pthread.rseq=0"} if build == "tc" else {})))
@@ -102,6 +114,7 @@ def run(mode, server, build, rnd, args, out):
         for c in (16, 17, 18, 19):
             spin.append(subprocess.Popen(["chrt", "--idle", "0", "taskset", "-c", str(c), "sh", "-c",
                                           "while :; do :; done"]))
+    pid = srv.pid
     try:
         addr = None
         for _ in range(400):
@@ -112,21 +125,25 @@ def run(mode, server, build, rnd, args, out):
             if addr:
                 break
             time.sleep(0.02)
+        pid = srv.pid
+        if traced:
+            pid = int(Path(f"/proc/{srv.pid}/task/{srv.pid}/children").read_text().split()[0])
         if args.pin:
             # One worker per CPU, fixed, so that no worker migrates.
-            tids = sorted(int(t) for t in os.listdir(f"/proc/{srv.pid}/task")
-                          if Path(f"/proc/{srv.pid}/task/{t}/comm").read_text().startswith("actix-rt"))
+            tids = sorted(int(t) for t in os.listdir(f"/proc/{pid}/task")
+                          if Path(f"/proc/{pid}/task/{t}/comm").read_text().startswith("actix-rt"))
             for cpu, tid in zip((0, 1, 2, 3), tids):
                 subprocess.run(["taskset", "-p", "-c", str(cpu), str(tid)], stdout=subprocess.DEVNULL, check=True)
-        plan = f"_fill:closed:{args.fill},_w:{args.rate}:2,m:{args.rate}:{args.secs}"
+        plan = args.plan or f"_fill:closed:{args.fill},_w:{args.rate}:2,m:{args.rate}:{args.secs}"
         gen = subprocess.Popen([str(LOADGEN), "--addr", addr] + SERVERS[server][2]
                                + ["--threads", "4", "--cpus", "8-11", "--plan", plan]
-                               + (["--raw", str(out / f"{tag}.raw")] if args.raw else []),
+                               + (["--raw", str(out / f"{tag}.raw"), "--pid", str(pid), "--mem",
+                                   str(out / f"{tag}.mem")] if args.raw else []),
                                stdout=subprocess.PIPE, text=True)
         perf = None
         result = None
-        reader = {"probe": lambda: probe_reader(srv.pid, binary),
-                  "sizes": lambda: probe_reader(srv.pid, binary, "BENCH_SIZE_COUNTS")}.get(mode, lambda: None)()
+        reader = {"probe": lambda: probe_reader(pid, binary),
+                  "sizes": lambda: probe_reader(pid, binary, "BENCH_SIZE_COUNTS")}.get(mode, lambda: None)()
         before = None
         for line in gen.stdout:
             if line.startswith("MARK") and line.split()[3:4] == ["m"]:
@@ -134,22 +151,23 @@ def run(mode, server, build, rnd, args, out):
                     before = reader()
                 if mode == "stat":
                     perf = subprocess.Popen(["taskset", "-c", "15", "perf", "stat", "-x,", "--per-thread", "-e",
-                                             EVENTS, "-p", str(srv.pid), "-o", str(out / f"{tag}.stat")],
+                                             EVENTS, "-p", str(pid), "-o", str(out / f"{tag}.stat")],
                                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
                 elif mode == "record":
                     perf = subprocess.Popen(["taskset", "-c", "15", "perf", "record", "-g", "-F", "4999", "-p",
-                                             str(srv.pid), "-o", str(out / f"{tag}.data")],
+                                             str(pid), "-o", str(out / f"{tag}.data")],
                                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
                 elif mode == "syscalls":
                     perf = subprocess.Popen(["taskset", "-c", "15", "strace", "-c", "-f", "-e",
-                                             "trace=madvise,mprotect,mmap,munmap,mremap,brk", "-p", str(srv.pid),
+                                             "trace=madvise,mprotect,mmap,munmap,mremap,brk", "-p", str(pid),
                                              "-o", str(out / f"{tag}.syscalls")],
                                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
                 elif mode == "trace":
-                    perf = subprocess.Popen(["taskset", "-c", "15", "perf", "trace", "-s", "-p", str(srv.pid),
+                    perf = subprocess.Popen(["taskset", "-c", "15", "perf", "trace", "-s", "-p", str(pid),
                                              "-o", str(out / f"{tag}.trace")],
                                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
             elif line.startswith("MARK") and line.split()[2] == "end":
+                (out / f"{tag}.smaps").write_text(Path(f"/proc/{pid}/smaps_rollup").read_text())
                 if perf:
                     perf.send_signal(signal.SIGINT)
                 if reader and before:
@@ -166,13 +184,16 @@ def run(mode, server, build, rnd, args, out):
         for p in spin:
             p.kill()
             p.wait()
-        srv.send_signal(signal.SIGTERM)
+        if traced and pid != srv.pid:
+            os.kill(pid, signal.SIGTERM)
+        else:
+            srv.send_signal(signal.SIGTERM)
         srv.wait(timeout=20)
 
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("mode", choices=["stat", "record", "trace", "probe", "sizes", "syscalls"])
+    ap.add_argument("mode", choices=["plain", "madvise", "stat", "record", "trace", "probe", "sizes", "syscalls"])
     ap.add_argument("--server", default="actix", choices=sorted(SERVERS))
     ap.add_argument("--allocs", default="asmalloc,je")
     ap.add_argument("--rounds", type=int, default=2)
@@ -181,7 +202,9 @@ def main():
     ap.add_argument("--fill", default="2", help="seconds of closed-loop load before the fixed rate")
     ap.add_argument("--free", action="store_true")
     ap.add_argument("--pin", action="store_true")
-    ap.add_argument("--raw", action="store_true", help="keep every request (loadgen --raw) in DIR/<tag>.raw")
+    ap.add_argument("--raw", action="store_true",
+                    help="keep every request (loadgen --raw) in DIR/<tag>.raw and the resident set in DIR/<tag>.mem")
+    ap.add_argument("--plan", help="the generator's whole plan; the measured segment must be named m")
     ap.add_argument("--out", required=True)
     args = ap.parse_args()
     out = Path(args.out)
