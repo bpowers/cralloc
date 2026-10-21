@@ -89,8 +89,10 @@
 //! the two (`policy::growth_goal`), within `policy::PURGE_CAP_WORDS` of bitmap and one circuit
 //! of the heap from where the walk stands, frontiers or not ([`Scope::All`]): growth is
 //! resident memory the program asked for now, and paying for it is what keeps memory within
-//! the cap of what is live. The debt is cleared whatever the walk returned, so a heap whose
-//! free memory is all fragmentation pays one bounded walk per step of growth. A program that
+//! the cap of what is live. A payment returns at most `policy::PURGE_STEP_PAGES`, since it
+//! runs on a request's slow path; what it owes past that stays on the debt for the next carve.
+//! Otherwise the debt is cleared whatever the walk returned, so a heap whose free memory is
+//! all fragmentation pays one bounded walk per step of growth. A program that
 //! frees and reuses the same classes never grows and never purges on its own traffic; one that
 //! frees class X and then grows class Y purges X as Y grows.
 //!
@@ -109,7 +111,21 @@
 //! huge pages in the huge-page part, so a huge page is never split. At the top of a region
 //! with a huge-page part it first carves the rest of the unit that holds the watermark
 //! (`region::top_up`), so that the part of that huge page the fault made resident beyond the
-//! watermark can go with the rest. Each region keeps its own cursor in its `Hints`, and the
+//! watermark can go with the rest.
+//!
+//! **Pieces.** A unit of the small-page part is the pages of the slots it covers, so one
+//! large slot is a unit as long as the slot: tens of megabytes. A purge step that may return
+//! fewer pages than a unit holds takes its top part (`piece`), claiming the slot as a whole
+//! purge does, and releases it; the cursor then names the page the piece began at, and the
+//! next step's unit is the rest of the slot below it. The retained count drops by what each
+//! piece cleaned. A piece sets the slot's zero bit only if it leaves every page of the slot
+//! clean (`region::purge_unit`), so an allocation of a slot that is partly returned is not
+//! taken for zero: it gets the pages a piece returned as zero, and the rest as its last
+//! tenant left them. So every step on a request's slow path returns a bounded amount whatever
+//! the slot sizes: a heartbeat's step of the clocked pass `policy::PURGE_STEP_PAGES`, the
+//! hold's look `policy::hold_beat`, a growth payment `PURGE_STEP_PAGES`.
+//!
+//! Each region keeps its own cursor in its `Hints`, and the
 //! walk over regions is one word in the state that every purger carries on from: the clocked
 //! pass, the cap's purge on growth. The hold on free large slots (`hold`) carries on from the
 //! regions' cursors too, over a position of its own among the large classes' regions. It goes round only the regions below the highest ever
@@ -331,7 +347,14 @@ impl<O: Os> Back<'_, O> {
     fn pay_growth(&self, step: usize) {
         let geometry = self.space.plan().geometry();
         let debt = self.state.growth.swap(0, Relaxed);
-        let goal = growth_goal(debt, self.retained(), retained_cap(geometry), step);
+        let owed = growth_goal(debt, self.retained(), retained_cap(geometry), step);
+        // A payment runs on the slow path of the request that carved, so it returns at most
+        // what a heartbeat's step may: a carve of one large slot can owe tens of megabytes.
+        // The rest stays owed, for the next carve to pay a step of.
+        let goal = owed.min(PURGE_STEP_PAGES as usize * geometry.page_size());
+        if owed > goal {
+            self.state.growth.fetch_add(owed - goal, Relaxed);
+        }
         // One circuit of the heap from wherever the shared walk stands, counted in regions
         // finished: the lap count says nothing here, since the walk may stand one region from
         // the bottom with everything purgeable above it. Frontiers or not: this is growth the

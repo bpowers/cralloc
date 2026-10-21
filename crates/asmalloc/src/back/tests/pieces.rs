@@ -3,7 +3,7 @@
 //! naming the page where the last piece began; what an allocation of a slot half returned
 //! sees; and the heartbeat's step of the clocked pass, capped in pages.
 
-use super::super::policy::{DECAY_TICKS, PURGE_STEP_PAGES, allowance_floor};
+use super::super::policy::{DECAY_TICKS, PURGE_STEP_PAGES, allowance_floor, retained_cap};
 use super::super::purge::Scope;
 use super::*;
 
@@ -136,4 +136,42 @@ fn a_heartbeats_step_of_the_clocked_pass_is_capped_in_pages() {
     assert!(total > cap, "the clocked pass returned {total}");
     assert!(largest <= cap, "one heartbeat returned {largest}");
     back.free(top, class);
+}
+
+/// A carve that owes more growth than a step's pages pays at most a step's pages on its own
+/// slow path; the rest stays owed and the next carve pays it.
+#[test]
+#[cfg_attr(miri, ignore)]
+fn a_growth_payment_returns_at_most_a_steps_pages() {
+    let state = state::<Native>();
+    let back = state.get_or_reserve().unwrap();
+    let freed = large(256 << 10);
+    let size = freed.size();
+    let n = 4 * retained_cap(Native::GEOMETRY) / size;
+    let blocks: Vec<_> = (0..n)
+        .map(|_| back.alloc(freed, size).unwrap().ptr)
+        .collect();
+    for b in &blocks {
+        paint(b.as_ptr(), size, 7);
+        back.free(*b, freed);
+    }
+    let cap = PURGE_STEP_PAGES as usize * Native::GEOMETRY.page_size();
+    let big = large(700 << 10);
+    assert!(big.size() > cap);
+    let mut carved = Vec::new();
+    let mut paid = 0;
+    for _ in 0..3 {
+        let before = back.retained_large();
+        carved.push(back.alloc(big, big.size()).unwrap().ptr);
+        let returned = before - back.retained_large();
+        assert!(returned <= cap, "one carve paid {returned}");
+        paid += returned;
+    }
+    assert!(
+        paid > cap,
+        "the debt a carve left was paid by the next: {paid}"
+    );
+    for p in carved {
+        back.free(p, big);
+    }
 }
