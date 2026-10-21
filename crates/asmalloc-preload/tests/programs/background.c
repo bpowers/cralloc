@@ -15,6 +15,9 @@
 //                               child that creates one of its own
 //        background quiet SECS  idle, in a process that created a thread first, so that the
 //                               allocator's default thread exists
+//        background silent SECS creates a thread, frees a burst, and then does nothing at all
+//                               for SECS seconds: what the allocator's thread does in a
+//                               silent process is all that happens
 //        background trickle SECS
 //                               idle, plus a few slow paths every half second (40 blocks of
 //                               8 KiB held together and freed), as a server answering a
@@ -210,6 +213,13 @@ static void sleep_ms(long ms) {
 int main(int argc, char **argv) {
     if (argc > 1 && strcmp(argv[1], "threads") == 0) return threads_mode();
     if (argc > 1 && strcmp(argv[1], "spawn") == 0) return spawn_mode();
+    if (argc > 2 && strcmp(argv[1], "silent") == 0) {
+        one_thread();
+        burst(1600000);
+        sleep_ms(atol(argv[2]) * 1000);
+        printf("end %ld\n", anon_kib() / 1024);
+        return 0;
+    }
     if (argc > 2 && strcmp(argv[1], "exit") == 0) {
         atexit(at_exit);
         burst(200000);
@@ -241,6 +251,7 @@ int main(int argc, char **argv) {
         printf("freed %ld end %ld\n", freed / 1024, anon_kib() / 1024);
         return 0;
     }
-    fprintf(stderr, "usage: background threads | spawn | exit MS | idle SECS | quiet SECS | trickle SECS\n");
+    fprintf(stderr, "usage: background threads | spawn | exit MS | idle SECS | quiet SECS | silent SECS | "
+                    "trickle SECS\n");
     return 2;
 }
