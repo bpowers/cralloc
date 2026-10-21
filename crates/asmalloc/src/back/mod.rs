@@ -38,6 +38,7 @@ mod class;
 
 pub use class::{Descending, Sink, SlotPointer};
 mod group;
+mod hold;
 mod host;
 mod inspect;
 mod layout;
@@ -102,6 +103,8 @@ pub struct State<O: Os> {
     headers: Lined<Headers>,
     /// Each region's frontier, for small classes (`host::Frontiers`).
     frontiers: Lined<Frontiers>,
+    /// The hold on free large slots: its fine count and when the next hold ends (`hold`).
+    hold: Lined<hold::Hold>,
 }
 
 /// Bytes of free slots in the bitmaps believed to be resident, for small classes and large
@@ -234,7 +237,8 @@ const _: () = {
         + 5
         + lines(size_of::<[AtomicUsize; MAX_REGIONS]>())
         + lines(size_of::<[[u64; 2]; MAX_REGIONS]>())
-        + lines(size_of::<[u64; MAX_REGIONS]>());
+        + lines(size_of::<[u64; MAX_REGIONS]>())
+        + lines(size_of::<hold::Hold>());
     assert!(
         size_of::<State<crate::os::linux::LinuxOs>>()
             == size_of::<[ClassState; COUNT]>() + LINE * groups
@@ -271,6 +275,7 @@ impl<O: Os> State<O> {
             run_sizes: Lined::new([const { AtomicUsize::new(0) }; MAX_REGIONS]),
             headers: Lined::new([const { RegionHeader::new() }; MAX_REGIONS]),
             frontiers: Lined::new([const { word::Atomic::zero() }; MAX_REGIONS]),
+            hold: Lined::new(hold::Hold::new()),
         }
     }
 

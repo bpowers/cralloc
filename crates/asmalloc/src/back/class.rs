@@ -347,9 +347,10 @@ impl<'a, O: Os> Back<'a, O> {
     /// For a large slot the program is freeing and still holds: if it is advised for huge
     /// pages because its object grew, and keeping it would take retained large-slot memory
     /// past its budget (`keep_grown`), returns its pages to the OS first and takes the advice
-    /// back. Returns the bytes still to count as retained once the slot is released: none if
+    /// back. Returns the bytes still to count as retained once the slot is released, none if
     /// it was purged or kept (a kept slot is counted already), else its charge
-    /// (`region::charge`). Aborts as `launder` does, and if the slot is free already.
+    /// (`region::charge`); and whether it stays resident, for the hold (`hold`). Aborts as
+    /// `launder` does, and if the slot is free already.
     ///
     /// An advised slot kept within the budget is released resident and counted, with its
     /// advice, for a buffer grown again to land on; the next block that is allocated in it
@@ -361,10 +362,11 @@ impl<'a, O: Os> Back<'a, O> {
         region: RegionId,
         slot: u32,
         class: Class,
-    ) -> usize {
+    ) -> (usize, bool) {
+        let resident = |charge: usize| (charge, charge != 0);
         // Only a slot that holds a whole huge page can have been advised.
         if class.size() < self.space.plan().geometry().huge_page_size() {
-            return region::charge(host, region, slot);
+            return resident(region::charge(host, region, slot));
         }
         let (word, bit) = position(slot);
         // The slot's bit is clear while the program holds it. If it is set, this is a second
@@ -375,10 +377,10 @@ impl<'a, O: Os> Back<'a, O> {
         }
         let charge = region::charge(host, region, slot);
         if !region::recorded(host, region, slot).is_some_and(|r| r.huge) {
-            return charge;
+            return resident(charge);
         }
         if self.keep_grown(class, charge) {
-            return 0;
+            return (0, true);
         }
         // SAFETY: BACK-CLASS-01 in docs/safety/asmalloc/back/class-safety.md. The program is
         // freeing the slot and has not been given it back, its bit was clear a moment ago,
@@ -388,9 +390,9 @@ impl<'a, O: Os> Back<'a, O> {
         // A failed purge leaves the slot as it was; its pages are counted as a free counts
         // them.
         if purged {
-            0
+            (0, false)
         } else {
-            region::charge(host, region, slot)
+            resident(region::charge(host, region, slot))
         }
     }
 
@@ -400,10 +402,13 @@ impl<'a, O: Os> Back<'a, O> {
     /// it is still resident. The heap above beats
     /// the heart for a large free, as it does for a large allocation (`Cache::lone_heartbeat`).
     fn free_slot(&self, host: &ClassHost<'a, O>, class: Class, region: RegionId, slot: u32) {
-        let charge = self.purge_before_release(host, region, slot, class);
+        let (charge, resident) = self.purge_before_release(host, region, slot, class);
         let (word, bit) = position(slot);
         tree::release_one(host, region, word, bit);
         self.retain(class, charge);
+        if resident {
+            self.hold_stamp(host, region);
+        }
     }
 
     /// The region and slot of a pointer the caller says is a handed-out slot of `class`, or an
@@ -915,6 +920,7 @@ impl<'a, O: Os> Back<'a, O> {
                 if keep {
                     // As a plain free leaves it: resident, advice and all, and counted already.
                     self.release_all(class, &[from.as_ptr()], false);
+                    self.hold_stamp(&host, region);
                     self.heartbeat();
                     return;
                 }
@@ -929,6 +935,9 @@ impl<'a, O: Os> Back<'a, O> {
                 region::unadvise(&host, region, index);
                 self.release_all(class, &[from.as_ptr()], false);
                 self.retain(class, charge);
+                if charge != 0 {
+                    self.hold_stamp(&host, region);
+                }
                 self.heartbeat();
             }
             None => self.free_run(from),
