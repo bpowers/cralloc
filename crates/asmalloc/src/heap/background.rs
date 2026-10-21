@@ -3,15 +3,24 @@
 //! [`Asmalloc::maintain`]'s steps, sleeps an interval between them, and parks while the
 //! process is quiet (`depot::thread`; design: "Heartbeat").
 //!
-//! **When it starts.** By default, when a heartbeat finds the heap over the floor of the
-//! allowance and the calling thread not the process's first, the next slow path that came
-//! through the Rust interface creates it ([`start_wanted`]), unless the calling thread has a
-//! signal blocked or is on a signal stack, the marks of a handler, in which case a heartbeat
-//! of a later interval wants it again. The C interface never creates it from a slow path: its
-//! caller may be the C library under its own locks. The preload library creates it when the
-//! program creates its first thread ([`Asmalloc::start_dormant`]). [`Asmalloc::start_background`]
-//! starts it whatever the conditions. `ASMALLOC_BACKGROUND=0` turns the default off, as does a
-//! build without the feature and a process that calls `maintain` itself.
+//! **When it starts.** By default, once free memory is over the floor of the allowance and the
+//! program has created a thread of its own, a slow path that came through the Rust interface
+//! creates it ([`start_wanted`]; the condition is a level, looked at as `crate::thread_word`
+//! describes). Not if the calling thread has a signal blocked or is on a signal stack, the
+//! marks of a handler: the look once an interval wants it again. The C interface never creates
+//! it from a slow path: its caller may be the C library under its own locks. The preload
+//! library creates it when the program creates its first thread ([`Asmalloc::start_dormant`]).
+//! [`Asmalloc::start_background`] starts it whatever the conditions. `ASMALLOC_BACKGROUND=0`
+//! turns the default off, as does a build without the feature and a process that calls
+//! `maintain` itself.
+//!
+//! **Limits.** A Rust program that keeps a signal blocked in every thread (one that waits for
+//! signals on a thread of its own with `sigwait`, say) never passes the test, and starts the
+//! thread itself. A handler installed with `SA_NODEFER` and no alternate stack has neither
+//! mark and passes it. A thread with no rseq registration has no activity counter, so the
+//! thread does not see it work; it takes a slow path on every call, so it wakes a parked
+//! thread all the same. Where the C library keeps no record of threads created (musl), the
+//! evidence is that the thread at the crossing is not the process's first.
 //!
 //! **What remains.** A slow path through the Rust interface may still be a Rust callback that
 //! the C library runs under one of its locks (the loader's, in a backtrace, say), whose thread
@@ -57,6 +66,13 @@ struct SignalStack {
 /// `pthread_attr_t`: 56 bytes in glibc and in musl on x86-64, aligned to 8.
 #[repr(C, align(8))]
 struct Attr([u8; 56]);
+
+/// `pthread_create`'s error for attributes it cannot honour, such as a stack too small for
+/// the program's static thread-local data.
+const EINVAL: c_int = 22;
+/// What a start reports when the heap could not start, so that there is no generation to key
+/// the thread's word with: `ENOMEM`.
+const ENOMEM: i32 = 12;
 
 const SIG_BLOCK: c_int = 0;
 const SIG_SETMASK: c_int = 2;
@@ -139,7 +155,10 @@ pub(super) fn start_wanted() {
         return;
     }
     if !signals_quiet() {
-        // Perhaps a handler: a heartbeat of a later interval wants it again.
+        // Perhaps a handler, or a program that keeps a signal blocked in this thread: the
+        // look at the level once an interval wants it again, on whichever thread then takes
+        // a slow path. A program that keeps a signal blocked in every thread never passes, and
+        // starts the thread itself (`Asmalloc::start_background`).
         heap.claim_thread(WANTED, NONE);
         return;
     }
@@ -151,7 +170,9 @@ pub(super) fn start_wanted() {
     }
 }
 
-/// Whether the calling thread has no signal blocked and is not on a signal stack.
+/// Whether the calling thread has no signal blocked and is not on a signal stack: the marks of
+/// a signal handler, in which creating a thread is not safe. A limit: a handler installed with
+/// `SA_NODEFER` and no alternate stack has neither mark, and passes.
 fn signals_quiet() -> bool {
     let mut mask = SigSet([0; 16]);
     let mut stack = SignalStack {
@@ -169,7 +190,10 @@ fn signals_quiet() -> bool {
 }
 
 /// Creates the thread with `create`, with every signal blocked and a small stack, names it
-/// `asmalloc` and detaches it; the caller's mask is put back after.
+/// `asmalloc` and detaches it; the caller's mask is put back after. The C library refuses the
+/// small stack (`EINVAL`) when the program's static thread-local data does not fit in it, as
+/// glibc places that data on the stack; the thread is then created once more with the
+/// library's default attributes.
 ///
 /// # Safety
 ///
@@ -190,7 +214,7 @@ unsafe fn spawn(create: CreateThread) -> Result<(), StartError> {
         if attributed {
             pthread_attr_setstacksize(&mut attr, STACK);
         }
-        let made = create(
+        let mut made = create(
             &mut thread,
             if attributed {
                 ptr::from_ref(&attr).cast()
@@ -202,6 +226,9 @@ unsafe fn spawn(create: CreateThread) -> Result<(), StartError> {
         );
         if attributed {
             pthread_attr_destroy(&mut attr);
+            if made == EINVAL {
+                made = create(&mut thread, ptr::null(), run, ptr::null_mut());
+            }
         }
         pthread_sigmask(SIG_SETMASK, &old, ptr::null_mut());
         if made != 0 {
@@ -234,6 +261,7 @@ impl Asmalloc {
         let heap = process();
         // SAFETY: BACKGROUND-03; the C library's own `pthread_create`.
         heap.start_thread(AWAKE, |create| unsafe { spawn(create) }, pthread_create)
+            .map_err(|error| error.unwrap_or(StartError(ENOMEM)))
     }
 
     /// For the preload library: creates the thread at the program's first `pthread_create`,

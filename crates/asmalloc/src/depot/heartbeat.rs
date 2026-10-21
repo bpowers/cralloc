@@ -400,25 +400,22 @@ fn count<R: Routines>(
 impl<O: Os, R: Routines, S: Source> Cache<'_, O, R, S> {
     /// The heartbeat of a large allocation or free, both halves (see [`lone_count`]).
     pub fn lone_heartbeat(&self) {
-        if let Lone::Beat(turn) = lone_count(self.depot, &self.routines) {
-            self.lone_beat(turn);
+        match lone_count(self.depot, &self.routines) {
+            Lone::Beat(turn) => self.lone_beat(turn),
+            Lone::Counted => self.after_slow_path(),
         }
     }
 
-    /// The chores of a large allocation or free's heartbeat that [`lone_count`] found due.
-    /// A large allocation or free that does not beat: it still wakes a parked thread.
-    pub fn lone_wake(&self) {
-        self.wake_if_parked();
-    }
-
+    /// The chores of a large allocation or free's heartbeat that [`lone_count`] found due,
+    /// then the look at the background thread's word that ends every slow path.
     pub fn lone_beat(&self, turn: LoneTurn) {
-        self.wake_if_parked();
         self.begin_slow_path();
         let chores = Chores {
             cpu: turn.cpu,
             ..Chores::default()
         };
         self.beat(None, chores, turn.turn);
+        self.after_slow_path();
     }
 
     /// What follows a slow path that served `served`, if it served a small class: its own
@@ -428,7 +425,7 @@ impl<O: Os, R: Routines, S: Source> Cache<'_, O, R, S> {
         self.paced(served, chores);
         // After the call's exchange and its count: see `thread`, "Parking without losing a
         // wake-up".
-        self.wake_if_parked();
+        self.after_slow_path();
     }
 
     fn paced(&self, served: Option<SmallClass>, chores: Chores) {

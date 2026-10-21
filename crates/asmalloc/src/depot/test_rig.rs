@@ -65,8 +65,8 @@ pub(crate) struct TestSource {
     out: Mutex<BTreeSet<usize>>,
     purges: AtomicUsize,
     passes: AtomicUsize,
-    /// What [`Source::over_floor`] answers; tests set it.
-    pub over_floor: core::sync::atomic::AtomicBool,
+    /// How many of the next purge steps of `maintain` report memory returned; tests set it.
+    pub returning: AtomicUsize,
     /// The background thread's word.
     pub thread: crate::thread_word::ThreadWord,
     fills: AtomicUsize,
@@ -94,7 +94,7 @@ impl TestSource {
             out: Mutex::new(BTreeSet::new()),
             purges: AtomicUsize::new(0),
             passes: AtomicUsize::new(0),
-            over_floor: core::sync::atomic::AtomicBool::new(false),
+            returning: AtomicUsize::new(0),
             thread: crate::thread_word::ThreadWord::new(),
             fills: AtomicUsize::new(0),
             laundered: AtomicUsize::new(0),
@@ -203,17 +203,22 @@ impl Source for TestSource {
         self.purges.fetch_add(1, Ordering::Relaxed);
     }
 
-    fn over_floor(&self) -> bool {
-        self.over_floor.load(Ordering::Relaxed)
-    }
-
     fn thread(&self) -> &crate::thread_word::ThreadWord {
         &self.thread
     }
 
-    fn purge_pass_step(&self, _: &dyn Fn() -> u64) -> bool {
+    fn purge_pass_step(&self, _: &dyn Fn() -> u64) -> super::PurgeStep {
         self.passes.fetch_add(1, Ordering::Relaxed);
-        false
+        let left = self.returning.load(Ordering::Relaxed);
+        let returned = left > 0
+            && self
+                .returning
+                .compare_exchange(left, left - 1, Ordering::Relaxed, Ordering::Relaxed)
+                .is_ok();
+        super::PurgeStep {
+            more: false,
+            returned,
+        }
     }
 }
 

@@ -143,8 +143,11 @@ struct Sleeps {
     timed: AtomicU64,
     wakes: AtomicU64,
     fences: AtomicU64,
-    /// The calling thread's ID as [`Os::ids`] gives it; the process's is 1.
-    thread: core::sync::atomic::AtomicU32,
+    /// The C library's record that the program has created a thread, as [`SimOs::set_threads`]
+    /// sets it; a fork leaves it as it is, as glibc's.
+    threads: core::sync::atomic::AtomicBool,
+    /// Whether the calling thread is not the process's first ([`SimOs::set_other_thread`]).
+    other_thread: core::sync::atomic::AtomicBool,
 }
 
 /// The CPU topology a [`SimOs`] reports through [`Os::topology`]. Its CPUs are the simulated
@@ -260,7 +263,8 @@ impl<S: Shape> SimOs<S> {
                 timed: AtomicU64::new(0),
                 wakes: AtomicU64::new(0),
                 fences: AtomicU64::new(0),
-                thread: core::sync::atomic::AtomicU32::new(1),
+                threads: core::sync::atomic::AtomicBool::new(false),
+                other_thread: core::sync::atomic::AtomicBool::new(false),
             },
             shape: PhantomData,
         }
@@ -284,9 +288,16 @@ impl<S: Shape> SimOs<S> {
         self.sleeps.fences.load(Ordering::Acquire)
     }
 
-    /// Sets the thread ID [`Os::ids`] reports; 1, the default, is the process's first thread.
-    pub fn set_thread_id(&self, id: u32) {
-        self.sleeps.thread.store(id, Ordering::Release);
+    /// Sets the C library's record that the program has created a thread of its own, which
+    /// [`Os::more_than_one_thread`] answers outside a fork child.
+    pub fn set_threads(&self, created: bool) {
+        self.sleeps.threads.store(created, Ordering::Release);
+    }
+
+    /// Sets whether the calling thread is not the process's first, which
+    /// [`Os::more_than_one_thread`] answers in a fork child.
+    pub fn set_other_thread(&self, other: bool) {
+        self.sleeps.other_thread.store(other, Ordering::Release);
     }
 
     /// Moves the clock that [`Os::ticks`] reads forward by `ticks`. It starts at zero and moves
@@ -370,6 +381,8 @@ impl<S: Shape> SimOs<S> {
             // that nothing touches it meanwhile.
             unsafe { self.memory.zero(index << self.page_shift(), page) };
         }
+        // The thread that forked is the child's only one, and so its first.
+        self.sleeps.other_thread.store(false, Ordering::Release);
     }
 
     fn page_shift(&self) -> u32 {
@@ -733,7 +746,7 @@ unsafe impl<S: Shape> Os for SimOs<S> {
         }
     }
 
-    fn wait(&self, _: &core::sync::atomic::AtomicU32, _: u32, timeout_ns: Option<u64>) {
+    fn wait(&self, _: &core::sync::atomic::AtomicU64, _: u64, timeout_ns: Option<u64>) {
         let count = match timeout_ns {
             Some(_) => &self.sleeps.timed,
             None => &self.sleeps.waits,
@@ -741,12 +754,16 @@ unsafe impl<S: Shape> Os for SimOs<S> {
         count.fetch_add(1, Ordering::AcqRel);
     }
 
-    fn wake(&self, _: &core::sync::atomic::AtomicU32) {
+    fn wake(&self, _: &core::sync::atomic::AtomicU64) {
         self.sleeps.wakes.fetch_add(1, Ordering::AcqRel);
     }
 
-    fn ids(&self) -> (u32, u32) {
-        (self.sleeps.thread.load(Ordering::Acquire), 1)
+    fn more_than_one_thread(&self, forked: bool) -> bool {
+        if forked {
+            self.sleeps.other_thread.load(Ordering::Acquire)
+        } else {
+            self.sleeps.threads.load(Ordering::Acquire)
+        }
     }
 
     fn fence(&self, cpu: u32) -> Result<(), OsError> {

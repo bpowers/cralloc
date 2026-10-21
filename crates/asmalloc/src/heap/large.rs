@@ -36,6 +36,7 @@ use crate::classes::Class;
 use crate::front::Routines;
 use crate::os::Os;
 use crate::space::Plan;
+use crate::thread_word::Snapshot;
 use core::alloc::Layout;
 use core::ptr::NonNull;
 
@@ -294,7 +295,8 @@ impl<O: Os, R: Routines + Copy> Bound<'_, O, R> {
         self.alloc_large_slow_using(layout, layout.size(), zero)
     }
 
-    /// [`Heap::alloc_large_using`] as the slow path it counts as.
+    /// [`Heap::alloc_large_using`] as the slow path it counts as, for a call through the Rust
+    /// interface: the block, a heartbeat, and the background thread's start if it is wanted.
     pub(crate) fn alloc_large_slow_using(
         self,
         layout: Layout,
@@ -302,19 +304,21 @@ impl<O: Os, R: Routines + Copy> Bound<'_, O, R> {
         zero: Zero,
     ) -> Option<Grant> {
         let grant = self.heap().alloc_large_using(layout, used, zero);
-        self.heartbeat();
+        let seen = self.heartbeat();
+        self.after_rust_slow_path(seen);
         grant
     }
 
-    /// [`Heap::free_large`] as the slow path it counts as: the free, then a heartbeat.
+    /// [`Heap::free_large`] as the slow path it counts as: the free, then a heartbeat. Returns
+    /// the background thread's word as the heartbeat left it.
     ///
     /// # Safety
     ///
     /// As for [`Heap::free_large`].
-    pub(crate) unsafe fn free_large_slow(self, ptr: NonNull<u8>) {
+    pub(crate) unsafe fn free_large_slow(self, ptr: NonNull<u8>) -> Snapshot {
         // SAFETY: the caller gives up the large block.
         unsafe { self.heap().free_large(ptr) };
-        self.heartbeat();
+        self.heartbeat()
     }
 
     /// Resizes the block at `ptr` from `old` to `new`, in place when the next free will still

@@ -37,6 +37,7 @@
 mod class;
 
 pub use class::{Descending, Sink, SlotPointer};
+pub use purge::PassStep;
 mod group;
 mod hold;
 mod host;

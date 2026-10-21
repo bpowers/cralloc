@@ -78,7 +78,7 @@ use super::policy::{
     self, HOLD_STEPS, PURGE_MAINTAIN_STEP_PAGES, PURGE_MAINTAIN_STEP_WORDS, PURGE_STEP_WORDS,
     allowance_floor,
 };
-use super::purge::Scope;
+use super::purge::{PassStep, Scope};
 use super::tree::Host;
 use super::word::Word;
 use crate::os::Os;
@@ -265,15 +265,15 @@ impl<O: Os> Back<'_, O> {
 
     /// One of `maintain`'s steps of the hold: reads the counted time through `now`, which may
     /// step the fine count, and takes the look if the count has moved since the last one (or
-    /// that one left more to do), with the hold `maintain_hold` gives. Whether the look returned
-    /// something and stopped at its bound with more over the floor, so that another step would
-    /// return more.
-    pub fn hold_maintain_step(&self, now: &dyn Fn() -> u64) -> bool {
+    /// that one left more to do), with the hold `maintain_hold` gives. Says what the look
+    /// returned, and whether it stopped at its bound with more over the floor, so that another
+    /// step would return more.
+    pub fn hold_maintain_step(&self, now: &dyn Fn() -> u64) -> PassStep {
         let hold = &self.state.hold;
         hold.fine.note(now());
         let count = hold.fine.count();
         if hold.looked.load(Relaxed) == count {
-            return false;
+            return PassStep::default();
         }
         self.hold_take_look(count, |back| {
             Reach::maintain(back.space.plan().geometry(), back.maintain_hold(count))
@@ -282,8 +282,8 @@ impl<O: Os> Back<'_, O> {
 
     /// Takes the look at fine count `count`, unless another caller has, with the reach `reach`
     /// gives once it is taken; if the look stops at a bound with more to return, leaves it for
-    /// the next caller to carry on. Whether it did.
-    fn hold_take_look(&self, count: u32, reach: impl FnOnce(&Self) -> Reach) -> bool {
+    /// the next caller to carry on. What the look did, if it took it.
+    fn hold_take_look(&self, count: u32, reach: impl FnOnce(&Self) -> Reach) -> PassStep {
         let looked = &self.state.hold.looked;
         let seen = looked.load(Relaxed);
         // One look a step: a caller that loses the race leaves it to the winner.
@@ -292,13 +292,13 @@ impl<O: Os> Back<'_, O> {
                 .compare_exchange(seen, count, Relaxed, Relaxed)
                 .is_err()
         {
-            return false;
+            return PassStep::default();
         }
-        let more = self.hold_look(count, reach(self));
-        if more {
+        let step = self.hold_look(count, reach(self));
+        if step.more {
             let _ = looked.compare_exchange(count, count.wrapping_sub(1), Relaxed, Relaxed);
         }
-        more
+        step
     }
 
     /// The hold for `maintain`'s look at fine count `count`, decided at a round's first look.
@@ -334,18 +334,18 @@ impl<O: Os> Back<'_, O> {
 
     /// One look at fine count `count`: over the floor, walks the large classes' regions from
     /// where the last look stopped and purges what `reach` allows (see the module
-    /// documentation). Returns whether it stopped at a bound after returning something, with
-    /// more over the floor.
+    /// documentation). Returns what it returned, and whether it stopped at a bound after
+    /// returning something, with more over the floor.
     #[cold]
     #[inline(never)]
-    fn hold_look(&self, count: u32, reach: Reach) -> bool {
+    fn hold_look(&self, count: u32, reach: Reach) -> PassStep {
         let geometry = self.space.plan().geometry();
         // The tallies are read once a step: frees and claims write their lines.
         let over = self
             .retained_large()
             .saturating_sub(allowance_floor(geometry));
         if over == 0 {
-            return false;
+            return PassStep::default();
         }
         let (goal, budget) = (over.min(reach.bytes), reach.words);
         let top = self.walk_regions();
@@ -375,7 +375,10 @@ impl<O: Os> Back<'_, O> {
         if top != 0 && next != seen {
             at.store(next as u32, Relaxed);
         }
-        stopped && purged != 0 && purged < over
+        PassStep {
+            more: stopped && purged != 0 && purged < over,
+            returned: purged,
+        }
     }
 
     /// The look's work on region `index`: if it is a large class's and its stamp is one

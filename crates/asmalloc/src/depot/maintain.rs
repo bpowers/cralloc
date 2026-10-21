@@ -68,18 +68,14 @@ const PURGE: u32 = REPEATED;
 pub struct Stepped {
     /// The round has more steps.
     pub more: bool,
-    /// The step drained a slab or laundered a debt. A purge step's work shows instead in the
-    /// retained count, which a pass takes down to the floor.
+    /// The step drained a slab, laundered a debt, or returned memory to the OS: what the
+    /// background thread counts as work (`thread`).
     pub work: bool,
 }
 
 impl Stepped {
     const MORE: Stepped = Stepped {
         more: true,
-        work: false,
-    };
-    const DONE: Stepped = Stepped {
-        more: false,
         work: false,
     };
 }
@@ -98,16 +94,21 @@ impl<O: Os, R: Routines, S: Source> Cache<'_, O, R, S> {
     /// pass. Callers may take steps concurrently: each idle look and each shed is handed to one
     /// of them, and the purge's steps are the purge's own.
     pub fn maintain_step(&self) -> bool {
-        self.maintain_step_with_work().more
+        self.maintain_step_with_work().is_some_and(|step| step.more)
     }
 
-    /// [`Cache::maintain_step`], saying also whether the step did work: drained a slab or
-    /// laundered a debt. The background thread parks only after a round that did none.
-    pub fn maintain_step_with_work(&self) -> Stepped {
+    /// [`Cache::maintain_step`], saying also whether the step did work. `None` if it took no
+    /// step, because this interval's round is done: a call that the rate limit turned away,
+    /// which says nothing about whether there is work (`thread`).
+    pub fn maintain_step_with_work(&self) -> Option<Stepped> {
         let counted = self.source.clock();
-        let Some(Step { round, index }) = counted.take_step(self.os()) else {
-            return Stepped::DONE;
-        };
+        let Step { round, index } = counted.take_step(self.os())?;
+        Some(self.maintain_step_of(round, index))
+    }
+
+    /// Step `index` of round `round`.
+    fn maintain_step_of(&self, round: u32, index: u32) -> Stepped {
+        let counted = self.source.clock();
         let clock = Clock::new(self.os(), counted);
         if index < DEPTHS {
             let cpus = self.depot.common.cpus.load(Acquire).min(DEPTHS as usize) as u32;
@@ -149,10 +150,13 @@ impl<O: Os, R: Routines, S: Source> Cache<'_, O, R, S> {
                 work: shed,
             };
         }
-        if self.source.purge_pass_step(&|| clock.now()) {
-            return Stepped::MORE;
+        let purged = self.source.purge_pass_step(&|| clock.now());
+        if !purged.more {
+            counted.jump(round, PURGE, DONE);
         }
-        counted.jump(round, PURGE, DONE);
-        Stepped::DONE
+        Stepped {
+            more: purged.more,
+            work: purged.returned,
+        }
     }
 }

@@ -235,5 +235,5 @@ pub(crate) fn c_alloc_small(class: SmallClass) -> *mut u8 {
 pub(crate) unsafe fn c_free_small(class: SmallClass, object: NonNull<u8>) {
     publish_masks();
     // SAFETY: GLOBAL-04.
-    unsafe { process().free_slow(class, object) }
+    let _ = unsafe { process().free_slow(class, object) };
 }

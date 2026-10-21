@@ -179,7 +179,7 @@ fn the_pass_in_steps_is_bounded_steps() {
     let (mut steps, mut most, mut widest) = (0, 0, 0);
     loop {
         let (calls, held) = (os.calls(Call::Purge), back.retained());
-        let more = back.decay_pass_step(&|| now);
+        let more = back.decay_pass_step(&|| now).more;
         steps += 1;
         most = most.max(os.calls(Call::Purge) - calls);
         widest = widest.max(held.saturating_sub(back.retained()) / page);
@@ -198,7 +198,7 @@ fn the_pass_in_steps_is_bounded_steps() {
     );
     assert!(back.retained() < retained, "the steps purged nothing");
     assert!(
-        !back.decay_pass_step(&|| now),
+        !back.decay_pass_step(&|| now).more,
         "a second pass in the interval"
     );
 }
@@ -227,7 +227,7 @@ fn a_silence_under_the_floor_returns_nothing() {
         os.advance_clock(DECAY_TICKS);
         beat(&back);
         let now = back.now();
-        while back.decay_pass_step(&|| now) {}
+        while back.decay_pass_step(&|| now).more {}
     }
     assert_eq!(back.retained(), retained);
     assert_eq!(
@@ -326,16 +326,16 @@ fn a_pass_a_few_pages_short_of_its_goal_does_not_step_over_long_runs() {
     );
 }
 
-/// The add that takes the retained count over the floor marks the background thread's word
-/// (`crate::thread_word`): laundering up to the floor on a thread that is not the process's
-/// first wants nothing, and the launder that crosses it wants a thread.
+/// The add that takes the retained count over the floor asks for a look at the level
+/// (`crate::thread_word`): laundering up to the floor asks nothing, the launder that crosses it
+/// sets the level bit, and a slow path's look then wants a thread if the program has one of its
+/// own. Under the floor, the clocked pass's look asks nothing; over it, it asks again.
 #[test]
-fn the_add_that_crosses_the_floor_wants_the_thread() {
+fn the_add_that_crosses_the_floor_asks_for_a_look_at_the_level() {
     use super::super::policy::allowance_floor;
-    use crate::thread_word::{NONE, WANTED};
+    use crate::thread_word::{NONE, Process, Snapshot, WANTED};
     let state = floored_state::<Standard>();
     let back = state.get_or_reserve().unwrap();
-    state.os().set_thread_id(2);
     let class = small(1024);
     let floor = allowance_floor(Standard::GEOMETRY);
     let slots = fill(&back, class, 2 * floor / 1024);
@@ -343,9 +343,19 @@ fn the_add_that_crosses_the_floor_wants_the_thread() {
     // SAFETY: the test holds these slots and gives them up.
     unsafe { back.launder(class, under) };
     assert!(!back.over_floor());
-    assert_eq!(back.thread().state.load(Relaxed), NONE);
+    assert_eq!(back.thread().load(), Snapshot(0));
     // SAFETY: as above.
     unsafe { back.launder(class, over) };
     assert!(back.over_floor());
-    assert_eq!(back.thread().state.load(Relaxed), WANTED);
+    assert!(back.thread().load().level());
+    let key = 1 << 40;
+    let seen = back.thread().attend(state.os(), Process { key, forked: false });
+    assert_eq!(seen, Snapshot(key | NONE), "no thread of the program's own");
+    state.os().set_threads(true);
+    // The look once an interval asks again while the heap stays over the floor.
+    state.os().advance_clock(2 * DECAY_TICKS);
+    back.heartbeat();
+    assert!(back.thread().load().level());
+    let seen = back.thread().attend(state.os(), Process { key, forked: false });
+    assert_eq!(seen, Snapshot(key | WANTED));
 }

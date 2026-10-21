@@ -43,16 +43,22 @@ pub trait Source {
     /// the whole heartbeat; the source calls it only if a decision needs the time.
     fn purge_step(&self, now: &dyn Fn() -> u64);
 
-    /// One bounded step of the clocked pass that is under way or due, for `Cache::maintain`;
-    /// whether the pass has more to do. Called until it says no, it does what the purge steps
-    /// of an interval would, and never goes on into a later pass.
-    fn purge_pass_step(&self, now: &dyn Fn() -> u64) -> bool;
-
-    /// Whether the memory the heap retains is over the floor of the allowance, below which
-    /// the clocked purge leaves it alone: what the background thread's start waits for, and
-    /// what keeps it from parking.
-    fn over_floor(&self) -> bool;
+    /// One bounded step of the clocked pass that is under way or due, for `Cache::maintain`:
+    /// whether the pass has more to do, and whether the step returned memory. Called until it
+    /// says no more, it does what the purge steps of an interval would, and never goes on into
+    /// a later pass.
+    fn purge_pass_step(&self, now: &dyn Fn() -> u64) -> PurgeStep;
 
     /// The background thread's word (`crate::thread_word`).
     fn thread(&self) -> &crate::thread_word::ThreadWord;
+}
+
+/// What one of `maintain`'s purge steps did ([`Source::purge_pass_step`]).
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub struct PurgeStep {
+    /// Another step would do more.
+    pub more: bool,
+    /// The step returned memory that had been resident: work, which keeps the background
+    /// thread from parking (`thread`).
+    pub returned: bool,
 }

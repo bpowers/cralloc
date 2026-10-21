@@ -67,10 +67,9 @@ use crate::classes::{Class, SmallClass};
 use crate::depot::{Cache, Depot, thread};
 use crate::front::Routines;
 use crate::os::Os;
-use crate::thread_word::{self, ThreadWord};
+use crate::thread_word::{self, AWAKE, Snapshot, ThreadWord};
 use core::alloc::Layout;
 use core::ptr::{self, NonNull};
-use core::sync::atomic::Ordering::{Acquire, Relaxed};
 
 /// The back end and the depot of one heap. All zero but the OS value, so it can be a static.
 pub(crate) struct Heap<O: Os> {
@@ -273,8 +272,8 @@ impl<'a, O: Os, R: Routines + Copy> Bound<'a, O, R> {
     #[cold]
     #[inline(never)]
     fn rust_alloc_slow(self, class: SmallClass) -> *mut u8 {
-        let object = self.alloc_slow(class);
-        self.after_rust_slow_path();
+        let (object, seen) = self.alloc_slow_seeing(class);
+        self.after_rust_slow_path(seen);
         object
     }
 
@@ -287,18 +286,18 @@ impl<'a, O: Os, R: Routines + Copy> Bound<'a, O, R> {
     #[inline(never)]
     unsafe fn rust_free_slow(self, class: SmallClass, object: NonNull<u8>) {
         // SAFETY: passed through.
-        unsafe { self.free_slow(class, object) };
-        self.after_rust_slow_path();
+        let seen = unsafe { self.free_slow(class, object) };
+        self.after_rust_slow_path(seen);
     }
 
-    /// Starts the background thread if the retained count crossed the floor, after a slow
-    /// path that came through the Rust interface: one load of the thread's word. The C
-    /// interface never starts it from a slow path, since its caller may be the C library under
-    /// its own locks (design: "Heartbeat").
+    /// Starts the background thread if it is wanted, after a slow path that came through the
+    /// Rust interface, from `seen`, the background thread's word as that slow path's one load
+    /// read or left it. The C interface never starts it from a slow path, since its caller may
+    /// be the C library under its own locks (design: "Heartbeat").
     #[inline]
-    fn after_rust_slow_path(self) {
+    fn after_rust_slow_path(self, seen: Snapshot) {
         if let Some(start) = self.heap.start
-            && self.word().state.load(Relaxed) == thread_word::WANTED
+            && seen.wanted()
         {
             start();
         }
@@ -317,13 +316,9 @@ impl<'a, O: Os, R: Routines + Copy> Bound<'a, O, R> {
     fn alloc_other(self, layout: Layout) -> *mut u8 {
         match small(layout) {
             Some(class) => self.alloc_small(class),
-            None => {
-                let block = self
-                    .alloc_large_slow(layout, Zero::No)
-                    .map_or(ptr::null_mut(), |grant| grant.ptr.as_ptr());
-                self.after_rust_slow_path();
-                block
-            }
+            None => self
+                .alloc_large_slow(layout, Zero::No)
+                .map_or(ptr::null_mut(), |grant| grant.ptr.as_ptr()),
         }
     }
 
@@ -413,8 +408,8 @@ impl<'a, O: Os, R: Routines + Copy> Bound<'a, O, R> {
             None => {
                 // SAFETY: a layout with no small class describes a large block (GLOBAL-03),
                 // which the caller gives up.
-                unsafe { self.free_large_slow(object) };
-                self.after_rust_slow_path();
+                let seen = unsafe { self.free_large_slow(object) };
+                self.after_rust_slow_path(seen);
             }
         }
     }
@@ -423,81 +418,107 @@ impl<'a, O: Os, R: Routines + Copy> Bound<'a, O, R> {
     #[cold]
     #[inline(never)]
     pub(crate) fn alloc_slow(self, class: SmallClass) -> *mut u8 {
-        let Some(back) = self.heap.start() else {
-            return ptr::null_mut();
-        };
-        self.cache(&back)
-            .alloc_slow(class)
-            .map_or(ptr::null_mut(), NonNull::as_ptr)
+        self.alloc_slow_seeing(class).0
     }
 
-    /// The slow path of a small free.
+    /// [`Bound::alloc_slow`], and the background thread's word as the slow path left it.
+    fn alloc_slow_seeing(self, class: SmallClass) -> (*mut u8, Snapshot) {
+        let Some(back) = self.heap.start() else {
+            return (ptr::null_mut(), Snapshot(0));
+        };
+        let cache = self.cache(&back);
+        let object = cache
+            .alloc_slow(class)
+            .map_or(ptr::null_mut(), NonNull::as_ptr);
+        (object, cache.thread_seen())
+    }
+
+    /// The slow path of a small free. Returns the background thread's word as the slow path
+    /// left it.
     ///
     /// # Safety
     ///
     /// `object` is a block of `class` this heap handed out, which the caller owns and gives up.
     #[cold]
     #[inline(never)]
-    pub(crate) unsafe fn free_slow(self, class: SmallClass, object: NonNull<u8>) {
+    pub(crate) unsafe fn free_slow(self, class: SmallClass, object: NonNull<u8>) -> Snapshot {
         let Some(back) = self.heap.started() else {
             self.heap.os().abort("free of a block when no heap exists");
         };
-        self.cache(&back).free_slow(class, object);
+        let cache = self.cache(&back);
+        cache.free_slow(class, object);
+        cache.thread_seen()
     }
 
     /// The heartbeat of a slow path that served no small class: a large allocation or free.
-    /// It counts the slow path first, and builds what the chores need only when they are due.
+    /// It counts the slow path first, and builds what the chores need only when they are due:
+    /// on the other calls it loads the background thread's word itself, and builds them only
+    /// if the word asks for a look. Returns the word as it left it.
     #[cold]
     #[inline(never)]
-    pub(crate) fn heartbeat(self) {
+    pub(crate) fn heartbeat(self) -> Snapshot {
         match crate::depot::lone_count(&self.heap.depot, &self.routines) {
-            crate::depot::Lone::Beat(turn) => {
-                if let Some(back) = self.heap.started() {
-                    self.cache(&back).lone_beat(turn);
+            crate::depot::Lone::Beat(turn) => match self.heap.started() {
+                Some(back) => {
+                    let cache = self.cache(&back);
+                    cache.lone_beat(turn);
+                    cache.thread_seen()
                 }
-            }
-            // A large call that does not beat still wakes a parked thread.
+                None => self.word().load(),
+            },
             crate::depot::Lone::Counted => {
-                if let Some(back) = self.heap.started() {
-                    self.cache(&back).lone_wake();
+                let seen = self.word().load();
+                match self.heap.started() {
+                    Some(back) if seen.needs_attention() => self.cache(&back).attend_thread(),
+                    _ => seen,
                 }
             }
         }
     }
 
     /// The background thread's life once started: rounds of `maintain` a step at a time, then
-    /// a sleep of an interval, or a park until a slow path wakes it (`depot::thread`). A
-    /// dormant thread first waits for an add to cross the floor (`crate::thread_word`). Never
-    /// returns.
+    /// a sleep, or a park until a slow path wakes it (`depot::thread`). A dormant thread waits
+    /// until free memory is over the floor, and looks at the level itself each time before it
+    /// waits, so that a heap already over the floor when it was created does not wait for a
+    /// crossing that has passed. Never returns.
     pub(crate) fn run_thread(self, every_ns: u64) -> ! {
-        let word = &self.word().state;
+        let word = self.word();
+        let os = self.heap.os();
         let mut seen = thread::Seen::default();
+        let mut key = 0;
         loop {
-            let state = word.load(Acquire);
-            if state == thread_word::DORMANT || state == thread_word::PARKED {
-                self.heap.os().wait(word, state, None);
-                continue;
-            }
+            let now = word.load();
             let Some(back) = self.heap.started() else {
-                self.heap.os().wait(word, state, Some(every_ns));
+                os.wait(word.futex(), now.0, Some(every_ns));
                 continue;
             };
             let cache = self.cache(&back);
-            let mut work = false;
-            loop {
-                let step = cache.maintain_step_with_work();
-                work |= step.work;
+            if key == 0 {
+                key = cache.thread_key();
+            }
+            match now.state() {
+                thread_word::DORMANT => {
+                    if !(back.over_floor() && word.claim(key, thread_word::DORMANT, AWAKE)) {
+                        os.wait(word.futex(), now.0, None);
+                    }
+                    continue;
+                }
+                thread_word::PARKED => {
+                    os.wait(word.futex(), now.0, None);
+                    continue;
+                }
+                _ => {}
+            }
+            let mut round = None;
+            while let Some(step) = cache.maintain_step_with_work() {
+                round = Some(round.unwrap_or(false) | step.work);
                 if !step.more {
                     break;
                 }
             }
-            match cache.rest(&mut seen, work) {
-                thread::Rest::Park => self.heap.os().wait(word, thread_word::PARKED, None),
-                thread::Rest::Sleep => {
-                    self.heap
-                        .os()
-                        .wait(word, word.load(Relaxed), Some(every_ns))
-                }
+            match cache.rest(&mut seen, key, round) {
+                thread::Rest::Park => os.wait(word.futex(), key | thread_word::PARKED, None),
+                thread::Rest::Sleep => os.wait(word.futex(), word.load().0, Some(every_ns)),
             }
         }
     }
@@ -524,26 +545,38 @@ impl<'a, O: Os, R: Routines + Copy> Bound<'a, O, R> {
         }
     }
 
+    /// This process's generation as the background thread's word keys it, starting the heap
+    /// and readying the magazine area if no slow path has; `None` if either cannot be done.
+    fn thread_key(self) -> Option<u64> {
+        let back = self.heap.start()?;
+        let key = self.cache(&back).thread_key();
+        (key != 0).then_some(key)
+    }
+
     /// Moves the background thread's word from `from` to `to` for this process; whether it
     /// moved.
-    pub(crate) fn claim_thread(self, from: u32, to: u32) -> bool {
-        self.word().claim_for(self.heap.os(), from, to)
+    pub(crate) fn claim_thread(self, from: u64, to: u64) -> bool {
+        self.thread_key()
+            .is_some_and(|key| self.word().claim(key, from, to))
     }
 
     /// Starts the background thread in state `to` (running, or dormant until the floor) with
     /// `spawn(create)`, unless one is already running in this process. A failure to create
-    /// it leaves the default off, so that nothing tries again.
+    /// it leaves the default off, so that nothing tries again. `Err(None)` if the process has
+    /// no generation to key the word with, which only a heap that could not start lacks.
     pub(crate) fn start_thread<C, E>(
         self,
-        to: u32,
+        to: u64,
         spawn: impl FnOnce(C) -> Result<(), E>,
         create: C,
-    ) -> Result<(), E> {
-        if !self.word().claim_start(self.heap.os(), to) {
+    ) -> Result<(), Option<E>> {
+        let key = self.thread_key().ok_or(None)?;
+        if !self.word().claim_start(self.heap.os(), key, to) {
             return Ok(());
         }
-        spawn(create).inspect_err(|_| {
-            self.claim_thread(to, thread_word::OFF);
+        spawn(create).map_err(|error| {
+            self.word().claim(key, to, thread_word::OFF);
+            Some(error)
         })
     }
 

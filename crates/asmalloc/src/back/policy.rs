@@ -84,6 +84,11 @@ pub const PURGE_MIN_RUN_PAGES: u32 = 4;
 /// within about eight intervals of the program going quiet, and a long run within one.
 pub const PURGE_ANY_RUN_EVERY: u64 = 8;
 
+/// The counted intervals a claim's frontier keeps the clocked pass off the pages below it: 2,
+/// the interval of the claim and the next (`layout::FrontierFormat::floor`, whose test holds
+/// it to this).
+pub const FRONTIER_INTERVALS: u64 = 2;
+
 /// How much bitmap a heartbeat's step of a decay pass may read, in words: 256 words, 2 KiB.
 /// Each word covers 64 slots, so this is one 4 KiB page of 8-byte slots read eight times over,
 /// or a few hundred pages of larger ones. A step always finishes the unit it started, so a

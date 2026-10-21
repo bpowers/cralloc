@@ -8,7 +8,7 @@ use super::syscall::{Reg, int, nr, result, syscall};
 use crate::os::{HugePages, Os, OsError, Topology};
 use crate::space::Geometry;
 use core::ptr::{self, NonNull};
-use core::sync::atomic::AtomicU32;
+use core::sync::atomic::AtomicU64;
 
 const PROT_NONE: usize = 0;
 const PROT_READ: usize = 1;
@@ -458,22 +458,23 @@ unsafe impl Os for LinuxOs {
         membarrier(MEMBARRIER_CMD_PRIVATE_EXPEDITED_RSEQ, 0, 0)
     }
 
-    fn wait(&self, word: &AtomicU32, expected: u32, timeout_ns: Option<u64>) {
+    fn wait(&self, word: &AtomicU64, expected: u64, timeout_ns: Option<u64>) {
         let timeout = timeout_ns.map(|ns| Timespec {
             seconds: (ns / 1_000_000_000) as i64,
             nanoseconds: (ns % 1_000_000_000) as i64,
         });
         let timeout = timeout.as_ref().map_or(ptr::null(), ptr::from_ref);
-        // SAFETY: KERNEL-11. The word is a live, aligned `AtomicU32` the kernel only reads; the
-        // timeout is null or a live `Timespec` it only reads. An error (the word differed, a
-        // timeout, a signal) is the caller's cue to look at the word again.
+        // SAFETY: KERNEL-11. The word is a live `AtomicU64`, aligned to 8, whose first four
+        // bytes, its low half on x86-64, the kernel reads as one 32-bit word and writes
+        // nothing; the timeout is null or a live `Timespec` it only reads. An error (the word
+        // differed, a timeout, a signal) is the caller's cue to look at the word again.
         let _ = unsafe {
             syscall(
                 nr::FUTEX,
                 [
                     ptr::from_ref(word).cast_mut().cast(),
                     int(FUTEX_WAIT_PRIVATE),
-                    int(expected as usize),
+                    int(expected as u32 as usize),
                     timeout.cast_mut().cast(),
                     int(0),
                     int(0),
@@ -482,7 +483,7 @@ unsafe impl Os for LinuxOs {
         };
     }
 
-    fn wake(&self, word: &AtomicU32) {
+    fn wake(&self, word: &AtomicU64) {
         // SAFETY: KERNEL-11. A wake uses the word's address as a key and reads nothing.
         let _ = unsafe {
             syscall(
@@ -499,14 +500,8 @@ unsafe impl Os for LinuxOs {
         };
     }
 
-    fn ids(&self) -> (u32, u32) {
-        // SAFETY: KERNEL-06. gettid and getpid take nothing and change nothing.
-        unsafe {
-            (
-                int_call(nr::GETTID, 0, 0, 0) as u32,
-                int_call(nr::GETPID, 0, 0, 0) as u32,
-            )
-        }
+    fn more_than_one_thread(&self, forked: bool) -> bool {
+        threads::more_than_one(forked)
     }
 
     fn random(&self) -> u64 {
@@ -565,6 +560,52 @@ unsafe impl Os for LinuxOs {
             // function's purpose; it is reached only if the signal did not end it.
             unsafe { int_call(nr::EXIT_GROUP, 127, 0, 0) };
         }
+    }
+}
+
+/// [`Os::more_than_one_thread`]: the evidence the background thread's default start waits for.
+#[cfg(feature = "background")]
+mod threads {
+    use super::{int_call, nr};
+
+    /// Whether the calling thread is not the process's first: the evidence in a fork child and
+    /// where the C library keeps no record. A limit: such a process whose first thread frees
+    /// the memory is not seen to have others.
+    fn not_the_first() -> bool {
+        // SAFETY: KERNEL-06. gettid and getpid take nothing and change nothing.
+        unsafe { int_call(nr::GETTID, 0, 0, 0) != int_call(nr::GETPID, 0, 0, 0) }
+    }
+
+    #[cfg(target_env = "gnu")]
+    pub(super) fn more_than_one(forked: bool) -> bool {
+        // SAFETY: KERNEL-12.
+        #[link(name = "c")]
+        unsafe extern "C" {
+            /// glibc's record (2.32 and later) that the process has not created a thread: true
+            /// at start, false from the first `pthread_create` on. It is never set again, not
+            /// even in a fork child (measured on 2.43), so it holds only outside one.
+            static __libc_single_threaded: u8;
+        }
+        if forked {
+            return not_the_first();
+        }
+        // SAFETY: KERNEL-12. A byte the C library defines, and writes only as it creates a
+        // thread; a volatile read takes whatever it holds.
+        unsafe { core::ptr::read_volatile(&raw const __libc_single_threaded) == 0 }
+    }
+
+    #[cfg(not(target_env = "gnu"))]
+    pub(super) fn more_than_one(_: bool) -> bool {
+        not_the_first()
+    }
+}
+
+/// [`Os::more_than_one_thread`] without the background thread: nothing wants one, and no C
+/// library symbol is referenced.
+#[cfg(not(feature = "background"))]
+mod threads {
+    pub(super) fn more_than_one(_: bool) -> bool {
+        false
     }
 }
 
