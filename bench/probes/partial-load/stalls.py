@@ -62,13 +62,26 @@ if a.calls:
     tag = a.raw[: -len(".raw")]
     wall0, mono0 = open(tag + ".clocks").read().split()
     start = json.loads(open(tag + ".result.json").read())["start_mono_ns"]
+    # A call another thread interrupted is split over an `<unfinished ...>` line, which has its
+    # start, and a `<... resumed>` line, which has its duration.
+    pending = {}
     for line in open(tag + ".madvise"):
         f = line.split()
-        if len(f) < 3 or "(" not in f[2] or not f[-1].startswith("<"):
+        if len(f) < 3:
             continue
-        at = (float(f[1]) - float(wall0)) * 1e9 + int(mono0) - start
-        took = float(f[-1].strip("<>")) * 1e9
-        calls.append((at, at + took, f[2].split("(")[0]))
+        if "<unfinished" in line:
+            pending[f[0]] = (float(f[1]), f[2].split("(")[0])
+            continue
+        if "resumed>" in line:
+            if f[0] not in pending or not f[-1].startswith("<"):
+                continue
+            t, name = pending.pop(f[0])
+        elif "(" in f[2] and f[-1].startswith("<"):
+            t, name = float(f[1]), f[2].split("(")[0]
+        else:
+            continue
+        at = (t - float(wall0)) * 1e9 + int(mono0) - start
+        calls.append((at, at + float(f[-1].strip("<>")) * 1e9, name))
     calls.sort()
     t_first, t_last = due[0], due[-1]
     inside = [c for c in calls if t_first <= c[0] <= t_last]

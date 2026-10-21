@@ -87,6 +87,14 @@ SERVERS = {
 }
 
 
+def no_thp():
+    """Turns transparent huge pages off for the server (PR_SET_THP_DISABLE, inherited across
+    exec), so that a run can show what huge pages and the compaction behind them cost."""
+    import ctypes
+    if ctypes.CDLL(None, use_errno=True).prctl(41, 1, 0, 0, 0) != 0:
+        raise OSError(ctypes.get_errno(), "prctl(PR_SET_THP_DISABLE)")
+
+
 def server_bin(build, server):
     rel, sargs, _ = SERVERS[server]
     return B / "target" / build / rel, sargs
@@ -94,7 +102,7 @@ def server_bin(build, server):
 
 def run(mode, server, build, rnd, args, out):
     binary, sargs = server_bin(build, server)
-    tag = f"{server}-{build}-{rnd}{'-free' if args.free else ''}{'-pin' if args.pin else ''}"
+    tag = f"{server}-{build}-{rnd}{'-free' if args.free else ''}{'-pin' if args.pin else ''}{'-nothp' if args.no_thp else ''}"
     so = open(out / f"{tag}.server.out", "w+")
     # The madvise mode starts the server under strace, which with --seccomp-bpf stops only at
     # the calls it records (attached to a running server it stops at every call, and the
@@ -106,6 +114,7 @@ def run(mode, server, build, rnd, args, out):
         traced = ["strace", "-f", "--seccomp-bpf", "-ttt", "-T", "-e", "trace=madvise,mprotect,mmap,munmap",
                   "-o", str(out / f"{tag}.madvise")]
     srv = subprocess.Popen(["taskset", "-c", "0-3"] + traced + [str(binary)] + sargs, stdout=so, stderr=subprocess.STDOUT,
+                           preexec_fn=no_thp if args.no_thp else None,
                            env=dict({"PATH": os.environ["PATH"], "HOME": os.environ["HOME"], "BENCH_CPUS": "0-3"},
                                # tcmalloc runs its per-CPU caches only with glibc's rseq off.
                                **({"GLIBC_TUNABLES": "glibc.pthread.rseq=0"} if build == "tc" else {})))
@@ -205,6 +214,7 @@ def main():
     ap.add_argument("--raw", action="store_true",
                     help="keep every request (loadgen --raw) in DIR/<tag>.raw and the resident set in DIR/<tag>.mem")
     ap.add_argument("--plan", help="the generator's whole plan; the measured segment must be named m")
+    ap.add_argument("--no-thp", action="store_true", help="run the server with transparent huge pages off")
     ap.add_argument("--out", required=True)
     args = ap.parse_args()
     out = Path(args.out)

@@ -223,6 +223,7 @@ dependencies = [
  "axum",
  "bench-alloc",
  "bench-app",
+ "libc",
  "serde",
  "serde_json",
  "tokio",

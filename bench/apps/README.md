@@ -153,7 +153,13 @@ its own with `--mem-cap` sized to it (3, 7 and 12 GiB). The denominator is the p
 live bytes: build the servers with `bench-alloc`'s `live-bytes` feature (asmalloc with a
 counter of requested bytes, never a build that is compared) and add it as an allocator entry
 with `build = "live-bytes"`; the runner reads its count at every mark (`marks_ms`), and
-`bench/probes/partial-load/largesum.py` puts each allocator's resident set over it.
+`bench/probes/partial-load/largesum.py` puts each allocator's resident set over it. The
+order service runs here with `presize=1`, its tables sized for twice `keep` from the start:
+otherwise each of its 64 shard tables doubles once under churn, long after the store is full,
+and that one event decides the 4 GiB tail. The doubling is a job of its own
+(`--suite servers-doubling`): tables not pre-sized, a fixed rate from the start so that the
+doublings fall inside the measured segment for every allocator, and the server's report of
+each doubling's time and page faults (`doublesum.py`).
 
 ## How a program is built
 
