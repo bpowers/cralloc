@@ -225,10 +225,7 @@ impl ThreadWord {
                 state => (state, false),
             };
             let next = Snapshot(key | state);
-            match self
-                .word
-                .compare_exchange(seen.0, next.0, SeqCst, Relaxed)
-            {
+            match self.word.compare_exchange(seen.0, next.0, SeqCst, Relaxed) {
                 Ok(_) => {
                     if wake {
                         os.wake(self.futex());
@@ -273,12 +270,10 @@ impl ThreadWord {
                 DORMANT if to == AWAKE => (AWAKE, false),
                 _ => return false,
             };
-            match self.word.compare_exchange(
-                seen.0,
-                key | next | (seen.0 & LEVEL),
-                SeqCst,
-                Relaxed,
-            ) {
+            match self
+                .word
+                .compare_exchange(seen.0, key | next | (seen.0 & LEVEL), SeqCst, Relaxed)
+            {
                 Ok(_) => {
                     if !create {
                         os.wake(self.futex());

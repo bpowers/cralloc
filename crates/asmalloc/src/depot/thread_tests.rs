@@ -128,7 +128,9 @@ fn a_round_that_returns_memory_starts_the_count_again() {
     one_slow_path(&rig);
     started(&rig);
     let thread = rig.cache(&keeper);
-    rig.source.returning.store(5, core::sync::atomic::Ordering::Relaxed);
+    rig.source
+        .returning
+        .store(5, core::sync::atomic::Ordering::Relaxed);
     let mut seen = Seen::default();
     let busy = rounds_until_parked(&rig, &thread, &mut seen, 2, 64);
     assert!(quiet > QUIET_ROUNDS, "{quiet}");
@@ -362,7 +364,11 @@ fn a_fork_child_reads_its_parents_word_as_stale() {
     // Over the floor, the child wants a thread only when a thread of its own crosses it.
     word.raise_level(true);
     slow_path_end(&rig);
-    assert_eq!(word.load(), Snapshot(child | NONE), "the child's first thread");
+    assert_eq!(
+        word.load(),
+        Snapshot(child | NONE),
+        "the child's first thread"
+    );
     rig.os().set_other_thread(true);
     word.raise_level(true);
     slow_path_end(&rig);
@@ -378,7 +384,11 @@ fn a_fork_child_reads_its_parents_word_as_stale() {
     assert!(!word.load().level());
     word.raise_level(false);
     slow_path_end(&rig);
-    assert_eq!(word.load(), Snapshot(grandchild | NONE), "the grandchild's first thread");
+    assert_eq!(
+        word.load(),
+        Snapshot(grandchild | NONE),
+        "the grandchild's first thread"
+    );
     rig.os().set_other_thread(true);
     word.raise_level(true);
     slow_path_end(&rig);

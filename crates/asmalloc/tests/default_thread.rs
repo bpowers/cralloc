@@ -126,7 +126,11 @@ fn silence() -> Report {
 /// look did.
 fn light_work(seconds: u64) {
     for _ in 0..seconds * 10 {
-        drop((0..1024).map(|i| Box::new([i as u8; 64])).collect::<Vec<Block>>());
+        drop(
+            (0..1024)
+                .map(|i| Box::new([i as u8; 64]))
+                .collect::<Vec<Block>>(),
+        );
         thread::sleep(Duration::from_millis(100));
     }
 }
@@ -343,18 +347,34 @@ fn no_thread(report: &BTreeMap<String, u64>) -> Result<(), String> {
 
 const CASES: &[Case] = &[
     // A worker frees a burst: the thread starts, returns it, parks, and stays parked.
-    Case { mode: "worker", env: &[], check: returned },
+    Case {
+        mode: "worker",
+        env: &[],
+        check: returned,
+    },
     // Review finding 2: the main thread frees what a worker allocated. musl keeps no record of
     // threads created, and there the evidence is a thread other than the first: a limit.
     Case {
         mode: "mainfrees",
         env: &[],
-        check: if cfg!(target_env = "musl") { no_thread } else { returned },
+        check: if cfg!(target_env = "musl") {
+            no_thread
+        } else {
+            returned
+        },
     },
     // Review finding 3: the freeing thread has a signal blocked at the crossing, not after.
-    Case { mode: "sigmask", env: &[], check: returned },
+    Case {
+        mode: "sigmask",
+        env: &[],
+        check: returned,
+    },
     // Review finding 3: the burst is freed before the second thread exists.
-    Case { mode: "late", env: &[], check: returned },
+    Case {
+        mode: "late",
+        env: &[],
+        check: returned,
+    },
     // Review finding 1: a fragmented heap over the floor; the thread parks and stays parked.
     Case {
         mode: "frag",
@@ -366,10 +386,26 @@ const CASES: &[Case] = &[
         },
     },
     // Review finding 4: static thread-local data the small stack cannot hold.
-    Case { mode: "tls", env: &[], check: returned },
-    Case { mode: "off", env: &[("ASMALLOC_BACKGROUND", "0")], check: no_thread },
-    Case { mode: "maintain", env: &[], check: no_thread },
-    Case { mode: "single", env: &[], check: no_thread },
+    Case {
+        mode: "tls",
+        env: &[],
+        check: returned,
+    },
+    Case {
+        mode: "off",
+        env: &[("ASMALLOC_BACKGROUND", "0")],
+        check: no_thread,
+    },
+    Case {
+        mode: "maintain",
+        env: &[],
+        check: no_thread,
+    },
+    Case {
+        mode: "single",
+        env: &[],
+        check: no_thread,
+    },
     Case {
         mode: "failed",
         env: &[],
@@ -387,14 +423,26 @@ const CASES: &[Case] = &[
         env: &[],
         check: |report| {
             returned(report)?;
-            expect(get(report, "child_status")? == 0, "the child failed", report)?;
+            expect(
+                get(report, "child_status")? == 0,
+                "the child failed",
+                report,
+            )?;
             expect(
                 get(report, "child_first_thread")? == 0,
                 "the child's first thread got a thread",
                 report,
             )?;
-            expect(get(report, "child_thread")? == 1, "no thread in the child", report)?;
-            expect(get(report, "child_rss_mib")? < 72, "the child kept its burst", report)
+            expect(
+                get(report, "child_thread")? == 1,
+                "no thread in the child",
+                report,
+            )?;
+            expect(
+                get(report, "child_rss_mib")? < 72,
+                "the child kept its burst",
+                report,
+            )
         },
     },
 ];
@@ -411,7 +459,9 @@ fn main() {
         return;
     }
     let args: Vec<String> = std::env::args().skip(1).collect();
-    let ignored = args.iter().any(|a| a == "--ignored" || a == "--include-ignored");
+    let ignored = args
+        .iter()
+        .any(|a| a == "--ignored" || a == "--include-ignored");
     let filters: Vec<&String> = args.iter().filter(|a| !a.starts_with('-')).collect();
     if args.iter().any(|a| a == "--list") {
         for case in CASES {
@@ -425,7 +475,10 @@ fn main() {
         .collect();
     if !ignored {
         for case in &chosen {
-            println!("test {} ... ignored, slow: run with scripts/gate --all", case.mode);
+            println!(
+                "test {} ... ignored, slow: run with scripts/gate --all",
+                case.mode
+            );
         }
         println!(
             "\ntest result: ok. 0 passed; 0 failed; {} ignored; 0 measured; 0 filtered out",
@@ -438,7 +491,9 @@ fn main() {
         .iter()
         .map(|case| {
             let mut command = Command::new(&exe);
-            command.env(MODE, case.mode).env_remove("ASMALLOC_BACKGROUND");
+            command
+                .env(MODE, case.mode)
+                .env_remove("ASMALLOC_BACKGROUND");
             for (key, value) in case.env {
                 command.env(key, value);
             }

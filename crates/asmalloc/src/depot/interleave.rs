@@ -1163,7 +1163,13 @@ fn parking_world(migrations: usize) -> Parking {
     let machine = world.machine(1, 1);
     let cache = world.rig.cache(&machine);
     let key = cache.thread_key();
-    assert!(world.rig.source.thread.claim_start(world.rig.os(), key, AWAKE));
+    assert!(
+        world
+            .rig
+            .source
+            .thread
+            .claim_start(world.rig.os(), key, AWAKE)
+    );
     let mut seen = super::thread::Seen::default();
     let mut ready = false;
     for _ in 0..4 * super::thread::QUIET_ROUNDS {
@@ -1235,7 +1241,11 @@ fn parking_loses_no_wake_up_under_every_schedule(bounds: Bounds, ops: &[Op], mig
             }
             match word.state_for(parking.key) {
                 PARKED => {
-                    assert_eq!(rest, Rest::Park, "a word parked behind a thread that sleeps");
+                    assert_eq!(
+                        rest,
+                        Rest::Park,
+                        "a word parked behind a thread that sleeps"
+                    );
                     assert!(slabs_empty(world), "parked with a magazine in a slab");
                 }
                 AWAKE => {
@@ -1254,8 +1264,14 @@ fn parking_loses_no_wake_up_under_every_schedule(bounds: Bounds, ops: &[Op], mig
         },
     );
     report("parking", found);
-    assert!(parked.load(Ordering::SeqCst) > 0, "no schedule decided to park");
-    assert!(woken.load(Ordering::SeqCst) > 0, "no schedule woke the thread");
+    assert!(
+        parked.load(Ordering::SeqCst) > 0,
+        "no schedule decided to park"
+    );
+    assert!(
+        woken.load(Ordering::SeqCst) > 0,
+        "no schedule woke the thread"
+    );
 }
 
 mod run {

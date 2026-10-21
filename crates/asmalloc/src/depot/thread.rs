@@ -114,7 +114,9 @@ impl<O: Os, R: Routines, S: Source> Cache<'_, O, R, S> {
     /// The cold look at the word, for a slow path that loaded it elsewhere (a large one that
     /// did not beat) and found that it asks for one.
     pub fn attend_thread(&self) -> Snapshot {
-        self.source.thread().attend(self.os(), self.thread_process())
+        self.source
+            .thread()
+            .attend(self.os(), self.thread_process())
     }
 
     /// This process's generation as the thread's word keys it, readying the magazine area if
@@ -123,7 +125,8 @@ impl<O: Os, R: Routines, S: Source> Cache<'_, O, R, S> {
         if !self.prepare() {
             return 0;
         }
-        self.generation().map_or(0, |generation| key_of(generation.get()))
+        self.generation()
+            .map_or(0, |generation| key_of(generation.get()))
     }
 
     /// The key, and whether this process is a fork child: known once the key has been had,

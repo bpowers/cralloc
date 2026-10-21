@@ -349,13 +349,17 @@ fn the_add_that_crosses_the_floor_asks_for_a_look_at_the_level() {
     assert!(back.over_floor());
     assert!(back.thread().load().level());
     let key = 1 << 40;
-    let seen = back.thread().attend(state.os(), Process { key, forked: false });
+    let seen = back
+        .thread()
+        .attend(state.os(), Process { key, forked: false });
     assert_eq!(seen, Snapshot(key | NONE), "no thread of the program's own");
     state.os().set_threads(true);
     // The look once an interval asks again while the heap stays over the floor.
     state.os().advance_clock(2 * DECAY_TICKS);
     back.heartbeat();
     assert!(back.thread().load().level());
-    let seen = back.thread().attend(state.os(), Process { key, forked: false });
+    let seen = back
+        .thread()
+        .attend(state.os(), Process { key, forked: false });
     assert_eq!(seen, Snapshot(key | WANTED));
 }
