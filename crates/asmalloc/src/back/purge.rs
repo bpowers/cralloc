@@ -90,7 +90,10 @@
 //! of the heap from where the walk stands, frontiers or not ([`Scope::All`]): growth is
 //! resident memory the program asked for now, and paying for it is what keeps memory within
 //! the cap of what is live. A payment returns at most `policy::PURGE_STEP_PAGES`, since it
-//! runs on a request's slow path; what it owes past that stays on the debt for the next carve.
+//! runs on a request's slow path; what it owes past that stays on the debt, and the next
+//! heartbeats pay it, a step each. Paid at once on the carve, a slot of tens of megabytes made
+//! one request return as much (2 ms on DataFusion); left for the next carve alone, it was paid
+//! too late, and DataFusion's peak rose by 30 to 80 MiB.
 //! Otherwise the debt is cleared whatever the walk returned, so a heap whose free memory is
 //! all fragmentation pays one bounded walk per step of growth. A program that
 //! frees and reuses the same classes never grows and never purges on its own traffic; one that
@@ -350,7 +353,7 @@ impl<O: Os> Back<'_, O> {
         let owed = growth_goal(debt, self.retained(), retained_cap(geometry), step);
         // A payment runs on the slow path of the request that carved, so it returns at most
         // what a heartbeat's step may: a carve of one large slot can owe tens of megabytes.
-        // The rest stays owed, for the next carve to pay a step of.
+        // The rest stays owed, for the next heartbeats and carves to pay a step each of.
         let goal = owed.min(PURGE_STEP_PAGES as usize * geometry.page_size());
         if owed > goal {
             self.state.growth.fetch_add(owed - goal, Relaxed);
@@ -427,6 +430,16 @@ impl<O: Os> Back<'_, O> {
             StepSize::HEARTBEAT,
         );
         self.hold_beat(read.get().unwrap_or_else(now));
+        // Growth a carve owed past what its own payment could take, a step at a time: the
+        // payment that keeps memory within the cap of what is live, spread over slow paths.
+        // Not while a clocked pass is under way: its goal, set when it began, already counts
+        // what is over the cap, and both paying it would take the count below the cap.
+        let step = growth_step(self.space.plan().geometry());
+        if self.state.decay.word.load(Relaxed) & ACTIVE == 0
+            && self.state.growth.load(Relaxed) >= step
+        {
+            self.pay_growth(step);
+        }
     }
 
     /// The clocked pass the heartbeats of an interval would take, in one call: starts a pass
