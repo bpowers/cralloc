@@ -124,8 +124,9 @@ use super::Back;
 use super::layout::Unit;
 use super::layout::{Hints, Step};
 use super::policy::{
-    DECAY_TICKS, PURGE_ANY_RUN_EVERY, PURGE_CAP_WORDS, PURGE_MAX_RUN_PAGES, PURGE_MAX_RUN_WORDS,
-    PURGE_MIN_RUN_PAGES, PURGE_STEP_WORDS, decay_goal, growth_goal, growth_step, retained_cap,
+    DECAY_TICKS, PURGE_ANY_RUN_EVERY, PURGE_CAP_WORDS, PURGE_MAINTAIN_STEP_PAGES,
+    PURGE_MAINTAIN_STEP_WORDS, PURGE_MAX_RUN_PAGES, PURGE_MAX_RUN_WORDS, PURGE_MIN_RUN_PAGES,
+    PURGE_STEP_WORDS, decay_goal, growth_goal, growth_step, retained_cap,
 };
 use super::region::{self, Purge};
 use super::tree::Host;
@@ -380,7 +381,7 @@ impl<O: Os> Back<'_, O> {
     /// [`Back::heartbeat`] for a caller that keeps its own reading of the clock: `now` is
     /// called only when the step needs the time.
     pub fn heartbeat_with(&self, now: &dyn Fn() -> u64) {
-        let _ = self.decay_step(now);
+        let _ = self.decay_step(now, StepSize::HEARTBEAT);
     }
 
     /// The clocked pass the heartbeats of an interval would take, in one call: starts a pass
@@ -390,16 +391,18 @@ impl<O: Os> Back<'_, O> {
     /// pass, so it reads at most one lap of the bitmaps. Between passes it costs what a
     /// heartbeat's step costs: a load and a clock read.
     pub fn decay_pass(&self, now: &dyn Fn() -> u64) {
-        let Some(pass) = self.decay_step(now) else {
+        let Some(pass) = self.decay_step(now, StepSize::HEARTBEAT) else {
             return;
         };
-        while self.decay_step(now) == Some(pass) {}
+        while self.decay_step(now, StepSize::HEARTBEAT) == Some(pass) {}
     }
 
     /// One bounded step of the clocked pass under way or due, for `maintain`'s steps: whether
-    /// the pass has more to do.
+    /// the pass has more to do. Smaller than a heartbeat's step, in bitmap read and in pages
+    /// purged (`StepSize::MAINTAIN`), so that a caller that yields between steps holds its
+    /// thread for tens of microseconds.
     pub fn decay_pass_step(&self, now: &dyn Fn() -> u64) -> bool {
-        self.decay_step(now).is_some()
+        self.decay_step(now, StepSize::MAINTAIN).is_some()
     }
 
     /// One heartbeat's part of the clocked pass: starts a pass if the counted interval is later
@@ -408,7 +411,7 @@ impl<O: Os> Back<'_, O> {
     /// so the next one is due in the next interval. Returns the decay word of the pass it stepped if it
     /// stopped at its budget with the pass still under way, so that more steps would do more;
     /// `None` otherwise.
-    fn decay_step(&self, now: &dyn Fn() -> u64) -> Option<u64> {
+    fn decay_step(&self, now: &dyn Fn() -> u64, size: StepSize) -> Option<u64> {
         let state = self.state;
         let geometry = self.space.plan().geometry();
         let page = geometry.page_size();
@@ -483,7 +486,7 @@ impl<O: Os> Back<'_, O> {
             Decay::Step => {}
         }
         let tag = Pass::tag_of(seen);
-        let mut spent = 0;
+        let (mut spent, mut freed) = (0, 0);
         loop {
             let pass = Pass::unpack(state.walk.pass.load(Acquire));
             if pass.tag != tag {
@@ -520,12 +523,12 @@ impl<O: Os> Back<'_, O> {
                     .compare_exchange(seen, now, Release, Relaxed);
                 return None;
             }
-            if spent >= PURGE_STEP_WORDS {
+            if spent >= size.words || freed >= size.pages {
                 return Some(seen);
             }
-            let limit = pass.pages as usize * page;
+            let limit = pass.pages.min(size.pages - freed) as usize * page;
             let (read, purged, finished) = self.purge_step(
-                PURGE_STEP_WORDS - spent,
+                size.words - spent,
                 limit,
                 if pass.any {
                     Scope::IdleAnyRun
@@ -540,6 +543,7 @@ impl<O: Os> Back<'_, O> {
                 self.note_epoch(self.now());
             }
             let done = (purged / page).min(u32::MAX as usize) as u32;
+            freed = freed.saturating_add(done);
             if done != 0 {
                 // Lower this pass's goal, and no other's.
                 let mut word = state.walk.pass.load(Acquire);
@@ -798,6 +802,27 @@ impl<O: Os> Back<'_, O> {
         }
         (Some(run), read)
     }
+}
+
+/// How much one step of the clocked pass may do: bitmap words read and pages purged, each
+/// checked between units, so a step finishes the unit it is on.
+#[derive(Clone, Copy)]
+struct StepSize {
+    words: usize,
+    pages: u32,
+}
+
+impl StepSize {
+    /// A heartbeat's step, bounded by the bitmap it reads.
+    const HEARTBEAT: StepSize = StepSize {
+        words: PURGE_STEP_WORDS,
+        pages: u32::MAX,
+    };
+    /// A step of `maintain`'s (`policy::PURGE_MAINTAIN_STEP_WORDS`).
+    const MAINTAIN: StepSize = StepSize {
+        words: PURGE_MAINTAIN_STEP_WORDS,
+        pages: PURGE_MAINTAIN_STEP_PAGES,
+    };
 }
 
 /// How far a run may extend: down to the floor, pages, and bitmap words read.

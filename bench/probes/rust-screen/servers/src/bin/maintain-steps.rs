@@ -7,7 +7,8 @@
 //!                                 madvise shoots down their TLBs too
 //!
 //! Prints, per round, the steps it took, its total time and its longest step, then the
-//! distribution of every step's time.
+//! distribution of every step's time. With `STEP_LOG` set, also each step over 50 us with its
+//! wall-clock start, to line up with a trace of the madvise and membarrier calls.
 
 use asmalloc::Asmalloc;
 use std::sync::atomic::{AtomicBool, Ordering::Relaxed};
@@ -29,6 +30,8 @@ fn next(s: &mut u64) -> u64 {
 
 fn main() {
     let busy = std::env::args().nth(1).as_deref() == Some("busy");
+    // Each step over 50 us with its wall-clock start, to line up with a trace of system calls.
+    let log = std::env::var_os("STEP_LOG").is_some();
     let stop = Arc::new(AtomicBool::new(false));
     let freed = Arc::new(Barrier::new(THREADS + 1));
     let workers: Vec<_> = (0..THREADS)
@@ -63,9 +66,14 @@ fn main() {
         let start = Instant::now();
         let (mut count, mut longest) = (0, Duration::ZERO);
         loop {
+            let wall = std::time::SystemTime::now();
             let before = Instant::now();
             let more = Asmalloc::maintain_step();
             let took = before.elapsed();
+            if log && took > Duration::from_micros(50) {
+                let at = wall.duration_since(std::time::UNIX_EPOCH).unwrap().as_secs_f64();
+                println!("long step {count} at {at:.6} took {:.1} us", took.as_secs_f64() * 1e6);
+            }
             count += 1;
             longest = longest.max(took);
             steps.push(took);

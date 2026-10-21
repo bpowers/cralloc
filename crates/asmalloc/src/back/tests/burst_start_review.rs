@@ -151,11 +151,15 @@ fn heartbeats_an_interval_or_two_apart_start_a_pass_each_time() {
 }
 
 /// The clocked pass taken a step at a time, as `maintain`'s steps take it: a pass over a large
-/// retained heap is many steps, none of which makes more purge calls than a step's budget of
-/// bitmap words allows, and the pass ends without a second starting in the interval.
+/// retained heap is many steps, none of which makes more purge calls than its budget of bitmap
+/// words allows or purges more than its pages and one run past them, and the pass ends without
+/// a second starting in the interval.
 #[test]
 fn the_pass_in_steps_is_bounded_steps() {
-    use super::super::policy::PURGE_STEP_WORDS;
+    use super::super::policy::{
+        PURGE_MAINTAIN_STEP_PAGES, PURGE_MAINTAIN_STEP_WORDS, PURGE_MAX_RUN_PAGES,
+    };
+    let page = Standard::GEOMETRY.page_size();
     let state = state::<Standard>();
     let back = state.get_or_reserve().unwrap();
     let os = state.os();
@@ -171,20 +175,25 @@ fn the_pass_in_steps_is_bounded_steps() {
     let retained = back.retained();
     os.advance_clock(DECAY_TICKS);
     let now = back.now();
-    let (mut steps, mut most) = (0, 0);
+    let (mut steps, mut most, mut widest) = (0, 0, 0);
     loop {
-        let before = os.calls(Call::Purge);
+        let (calls, held) = (os.calls(Call::Purge), back.retained());
         let more = back.decay_pass_step(&|| now);
         steps += 1;
-        most = most.max(os.calls(Call::Purge) - before);
+        most = most.max(os.calls(Call::Purge) - calls);
+        widest = widest.max(held.saturating_sub(back.retained()) / page);
         if !more {
             break;
         }
     }
     assert!(steps > 1, "a pass over {retained} bytes took one step");
     assert!(
-        most <= PURGE_STEP_WORDS as u64,
+        most <= PURGE_MAINTAIN_STEP_WORDS as u64,
         "a step made {most} purge calls"
+    );
+    assert!(
+        widest > 0 && widest < (PURGE_MAINTAIN_STEP_PAGES + PURGE_MAX_RUN_PAGES) as usize,
+        "a step purged {widest} pages"
     );
     assert!(back.retained() < retained, "the steps purged nothing");
     assert!(

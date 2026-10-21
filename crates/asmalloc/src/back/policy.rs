@@ -76,6 +76,19 @@ pub const PURGE_ANY_RUN_EVERY: u64 = 8;
 /// huge-page unit of small slots may read more.
 pub const PURGE_STEP_WORDS: usize = 256;
 
+/// How much bitmap one of `maintain`'s steps of the clocked pass may read, in words: 64, a
+/// quarter of a heartbeat's step. `maintain`'s caller may be an async runtime's worker that
+/// yields between steps, and a step should hold it for tens of microseconds; a heartbeat's
+/// step is paid for by a slow path that already did far more.
+pub const PURGE_MAINTAIN_STEP_WORDS: usize = 64;
+
+/// How many pages one of `maintain`'s steps of the clocked pass may purge before it stops, in
+/// 4 KiB pages: 128, half a MiB. A `madvise` costs about 0.4 us a call and 0.1 us a resident
+/// page alone, and a few microseconds a call more with other threads to shoot down
+/// (`docs/research/burst-start.md`). Checked between units, so a step that meets a unit
+/// larger than this, one slot of a large class, purges that whole slot.
+pub const PURGE_MAINTAIN_STEP_PAGES: u32 = 128;
+
 /// How much bitmap a step of growth over the cap may read while it purges, in words: 16384,
 /// 128 KiB. The bound keeps one call from paying for a whole heap; the clocked pass and later
 /// steps finish the job.
