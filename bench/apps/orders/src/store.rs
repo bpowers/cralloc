@@ -1,6 +1,6 @@
 //! The order service the axum and actix-web servers share (copied from
 //! bench/probes/rust-screen/servers, where the screening ran it): POST /orders parses an order,
-//! prices it, keeps it in a sharded in-memory store that holds the most recent `KEEP` orders,
+//! prices it, keeps it in a sharded in-memory store that holds the most recent `keep` orders,
 //! and answers with the stored order as JSON. Old orders are dropped by whichever worker
 //! inserts the order that displaces them, so blocks cross threads as they do in a cache.
 use serde::{Deserialize, Serialize};
@@ -8,6 +8,7 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
+/// How many orders the store holds by default (about 200 MiB resident).
 pub const KEEP: u64 = 100_000;
 const SHARDS: usize = 64;
 
@@ -39,11 +40,19 @@ pub struct Order {
 pub struct Store {
     shards: Vec<Mutex<HashMap<u64, Arc<Order>>>>,
     next: AtomicU64,
+    keep: u64,
+}
+
+impl Store {
+    /// A store that holds the most recent `keep` orders.
+    pub fn new(keep: u64) -> Self {
+        Store { shards: (0..SHARDS).map(|_| Mutex::new(HashMap::new())).collect(), next: AtomicU64::new(0), keep }
+    }
 }
 
 impl Default for Store {
     fn default() -> Self {
-        Store { shards: (0..SHARDS).map(|_| Mutex::new(HashMap::new())).collect(), next: AtomicU64::new(0) }
+        Store::new(KEEP)
     }
 }
 
@@ -58,8 +67,8 @@ impl Store {
             Arc::new(Order { id, customer: new.customer, items: new.items, total_cents, note: new.note, summary });
         let body = serde_json::to_string(&*order).expect("serialise");
         self.shards[id as usize % SHARDS].lock().unwrap().insert(id, order);
-        if id >= KEEP {
-            let old = id - KEEP;
+        if id >= self.keep {
+            let old = id - self.keep;
             let gone = self.shards[old as usize % SHARDS].lock().unwrap().remove(&old);
             drop(gone);
         }

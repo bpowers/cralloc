@@ -110,8 +110,11 @@ fn jobs(f: &Flags) -> (String, Vec<suite::Job>) {
             "apps" => suite::apps(),
             "servers" => suite::servers(),
             "servers-sat" => suite::servers_sat(),
+            "servers-large" => suite::servers_large(),
+            "servers-large-sat" => suite::servers_large_sat(),
             _ => die(
-                "--suite must be quick, full, backend, apps, servers or servers-sat, or several of them joined by commas",
+                "--suite must be quick, full, backend, apps, servers, servers-sat, servers-large or servers-large-sat, \
+                 or several of them joined by commas",
             ),
         };
         let chosen = js.into_iter().filter(|j| {

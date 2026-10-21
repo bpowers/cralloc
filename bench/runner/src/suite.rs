@@ -657,6 +657,123 @@ pub fn servers_sat() -> Vec<Job> {
     served().into_iter().map(|s| server_job(s, SAT.into(), "sat", " sat")).collect()
 }
 
+/// A large-heap server's day: fill its heap with `fill_s` seconds of closed-loop load (its
+/// requests build the live set), measure the saturated rate, then hold 70% of the slowest
+/// allocator's saturated rate for a minute in six marked pieces of ten seconds, so that the
+/// resident set and the program's live bytes are read every ten seconds while the heap churns;
+/// then bursts after silences, and the connections close while the idle server is watched.
+fn large_day(fill_s: u32, r70: u32) -> String {
+    let mut segs = vec![format!("_fill:closed:{fill_s}"), "sat:closed:4".into(), format!("_w70:{r70}:2")];
+    segs.extend((0..6).map(|_| format!("s70:{r70}:10")));
+    for _ in 0..3 {
+        segs.push("off:off:3".into());
+        segs.push(format!("on:{r70}:2"));
+    }
+    segs.push("idle:close:10".into());
+    segs.join(",")
+}
+
+/// A large-heap server: its id, program, arguments, request, the closed-loop seconds that fill
+/// its heap, and its 70% rate.
+struct Large {
+    id: String,
+    program: Program,
+    args: String,
+    load: OpenLoad,
+    fill_s: u32,
+    r70: u32,
+}
+
+/// The large-heap servers, each at three live sizes of about 0.5, 2 and 4 GiB: the order
+/// service keeping its last `keep` orders (about 1.9 KiB live an order), and mini-redis
+/// preloaded with `preload` keys (about 1.1 KiB live a key) and churned by overwrites of mixed
+/// sizes, some with an expiry.
+fn large() -> Vec<Large> {
+    let order = OpenLoad {
+        path: "/orders",
+        content_type: "application/json",
+        headers: vec![],
+        body: "{app}/order.json",
+        conns: 64,
+        threads: 4,
+        cpus: L3B.to_vec(),
+        plan: String::new(),
+        rank: "s70",
+        inputs: None,
+        proto: "http",
+        streams: 1,
+        requests: None,
+    };
+    let mut v = Vec::new();
+    // 70% of the slowest saturated rate, mimalloc's: 348k, 349k and 355k req/s.
+    for (size, keep, fill_s, r70) in
+        [("0.5G", 280_000, 3, 243_000), ("2G", 1_120_000, 6, 244_000), ("4G", 2_250_000, 10, 248_000)]
+    {
+        v.push(Large {
+            id: format!("orders axum cache {size}"),
+            program: Program::App("orders"),
+            args: format!("axum keep={keep}"),
+            load: order.clone(),
+            fill_s,
+            r70,
+        });
+    }
+    // 70% of the slowest saturated rate: tcmalloc's 672k, then asmalloc's 664k and 660k req/s.
+    for (size, keys, file, r70) in [
+        ("0.5G", 450_000, "{inputs}/churn-450000.resp", 470_000),
+        ("2G", 1_800_000, "{inputs}/churn-1800000.resp", 465_000),
+        ("4G", 3_600_000, "{inputs}/churn-3600000.resp", 462_000),
+    ] {
+        v.push(Large {
+            id: format!("miniredis churn {size}"),
+            program: Program::App("miniredis"),
+            args: format!("serve preload={keys}"),
+            load: OpenLoad { proto: "resp", requests: Some(file), inputs: None, ..order.clone() },
+            fill_s: 2,
+            r70,
+        });
+    }
+    v
+}
+
+fn large_job(l: Large, plan: String, rank: &'static str, suffix: &str) -> Job {
+    Job {
+        id: format!("{}{suffix}", l.id),
+        group: "servers-large",
+        mode: Mode::Native,
+        program: l.program,
+        args: args(&l.args),
+        cpus: L3A.to_vec(),
+        driver: None,
+        load: Some(OpenLoad { plan, rank, ..l.load }),
+        metric: Metric::Served,
+        timeout_s: 300,
+    }
+}
+
+/// Servers holding 0.5 to 4 GiB live while they serve (bench/apps/README.md, "Servers").
+/// Run each size as a session of its own with `--mem-cap` sized to it.
+pub fn servers_large() -> Vec<Job> {
+    large()
+        .into_iter()
+        .map(|l| {
+            let plan = large_day(l.fill_s, l.r70);
+            large_job(l, plan, "s70", "")
+        })
+        .collect()
+}
+
+/// Each large-heap server's saturated rate, after its heap is filled.
+pub fn servers_large_sat() -> Vec<Job> {
+    large()
+        .into_iter()
+        .map(|l| {
+            let plan = format!("_fill:closed:{},sat:closed:5", l.fill_s);
+            large_job(l, plan, "sat", " sat")
+        })
+        .collect()
+}
+
 /// Every CPU any job may use.
 pub fn measurement_cpus() -> Vec<usize> {
     both()

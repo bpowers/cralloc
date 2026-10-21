@@ -76,6 +76,44 @@ pub struct Mark {
     /// When the runner saw the mark, in ms since the server started (the sampler's clock).
     pub t_ms: f64,
     pub snap: Snapshot,
+    /// The program's live bytes, from a build that counts them (`LiveBytes`).
+    pub live: Option<i64>,
+}
+
+/// Reads the live-bytes count of a server built with bench-alloc's `live-bytes` (its
+/// `BENCH_LIVE_BYTES` table: 64 counters at a 64-byte stride) out of its memory.
+pub struct LiveBytes {
+    pid: i32,
+    at: u64,
+}
+
+impl LiveBytes {
+    /// The reader for `pid`, if its executable has the table.
+    pub fn of(pid: i32) -> Option<LiveBytes> {
+        let exe = std::fs::read_link(format!("/proc/{pid}/exe")).ok()?;
+        let nm = std::process::Command::new("nm").arg(&exe).output().ok()?;
+        let text = String::from_utf8_lossy(&nm.stdout);
+        let value = text.lines().find(|l| l.ends_with(" BENCH_LIVE_BYTES"))?.split_whitespace().next()?;
+        let value = u64::from_str_radix(value, 16).ok()?;
+        // The executable's first mapping, at file offset 0, is where its addresses start.
+        let maps = std::fs::read_to_string(format!("/proc/{pid}/maps")).ok()?;
+        let base = maps.lines().find_map(|l| {
+            let f: Vec<&str> = l.split_whitespace().collect();
+            (f.len() >= 6 && std::path::Path::new(f[5]) == exe && f[2] == "00000000")
+                .then(|| u64::from_str_radix(f[0].split('-').next()?, 16).ok())
+                .flatten()
+        })?;
+        Some(LiveBytes { pid, at: base + value })
+    }
+
+    pub fn read(&self) -> Option<i64> {
+        use std::io::{Read, Seek, SeekFrom};
+        let mut f = std::fs::File::open(format!("/proc/{}/mem", self.pid)).ok()?;
+        f.seek(SeekFrom::Start(self.at)).ok()?;
+        let mut b = [0u8; 64 * 64];
+        f.read_exact(&mut b).ok()?;
+        Some(b.chunks(64).map(|c| i64::from_ne_bytes(c[..8].try_into().unwrap())).sum())
+    }
 }
 
 /// What one run under load produced.
@@ -142,6 +180,7 @@ pub fn drive(
     let generator = Child::spawn(&spec).map_err(|e| format!("spawn {}: {e}", argv[0]))?;
     let mut marks = Vec::new();
     let mut result = None;
+    let live = LiveBytes::of(server.pid);
     while let Ok((_, line)) = generator.lines.recv_timeout(deadline.saturating_duration_since(Instant::now())) {
         if let Some(rest) = line.strip_prefix("MARK ") {
             // Read first: the counters should change as little as possible after the mark.
@@ -153,7 +192,7 @@ pub fn drive(
                 Some(i) => (i.parse().ok(), f.get(2).unwrap_or(&"").to_string()),
                 None => (None, String::new()),
             };
-            marks.push(Mark { segment, name, t_ms, snap });
+            marks.push(Mark { segment, name, t_ms, snap, live: live.as_ref().and_then(LiveBytes::read) });
         } else if let Some(j) = line.strip_prefix("RESULT ") {
             result = serde_json::from_str(j).ok();
         }
@@ -235,7 +274,14 @@ pub fn summarize(l: &Loaded, memory: &[MemSample], rank: &str) -> (Value, Option
             next = t0 + ((m.t_ms - t0) / CURVE_MS).floor() * CURVE_MS + CURVE_MS;
         }
     }
-    let marks: Vec<Value> = l.marks.iter().map(|m| json!([((m.t_ms - t0) * 10.0).round() / 10.0, m.name])).collect();
+    let marks: Vec<Value> = l
+        .marks
+        .iter()
+        .map(|m| match m.live {
+            Some(live) => json!([((m.t_ms - t0) * 10.0).round() / 10.0, m.name, live]),
+            None => json!([((m.t_ms - t0) * 10.0).round() / 10.0, m.name]),
+        })
+        .collect();
     // Under load: every segment that sends requests. After: from the last silence or close.
     let loaded_max = l
         .marks

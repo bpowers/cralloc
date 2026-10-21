@@ -51,9 +51,14 @@ static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 mod asm;
 #[cfg(feature = "asmalloc")]
 use asm as chosen;
-#[cfg(all(feature = "asmalloc", not(feature = "asmalloc-memstat")))]
+#[cfg(all(feature = "asmalloc", not(feature = "asmalloc-memstat"), not(feature = "live-bytes")))]
 #[global_allocator]
 static GLOBAL: asmalloc::Asmalloc = asmalloc::Asmalloc;
+#[cfg(feature = "live-bytes")]
+mod live;
+#[cfg(feature = "live-bytes")]
+#[global_allocator]
+static GLOBAL: live::Counting = live::Counting;
 #[cfg(feature = "asmalloc-memstat")]
 #[global_allocator]
 static GLOBAL: memstat::Counting = memstat::Counting;
