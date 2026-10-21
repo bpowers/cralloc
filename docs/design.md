@@ -762,7 +762,7 @@ rule that returns it (`docs/research/memory.md` has the measurements behind them
 |---|---|---|
 | Free slots in the bitmaps, on pages with nothing live on them, above what fills reached in the last two intervals | The clocked purge | Once an interval while more than the floor is retained: up to a quarter of the retained memory, or all of it above the cap, in runs of adjacent pages, carrying on round the heap from where the last pass stopped |
 | Free slots of large classes, above the floor | Heartbeats, a bounded amount each; `maintain` in a silence | Once their region has gone a short hold without a free that left a slot resident |
-| The same, whether fills reached it or not, while more than the cap is retained and the heap grows somewhere else | The carve that grows it returns as much as it takes | At that carve, within a bound on its work |
+| The same, whether fills reached it or not, while more than the cap is retained and the heap grows somewhere else | The carve that grows it owes as much as it takes: it returns a bounded part, and heartbeats return the rest | At that carve and the heartbeats after it, a bounded step each |
 | A large block left behind by a move, or one that grew and is freed, beyond a small budget of such memory | The move or the free (see "Large objects") | Before it releases the slot |
 | The tail of a large block that shrinks in place; the pages behind a move made in pieces | The resize (see "Large objects") | At once |
 | Objects in a magazine that stays loaded | A slow path of the same CPU launders it | Once it has been loaded for an interval |
@@ -775,7 +775,7 @@ rule that returns it (`docs/research/memory.md` has the measurements behind them
 | Free slots on pages that also hold live objects | Nothing: that is fragmentation, and it stays counted | Never |
 | All of the above, without waiting for the clock | `collect`, and `malloc_trim` in C | When the program calls it |
 
-Eight rules stand behind the table.
+Nine rules stand behind the table.
 
 - **Purge late, and only what fills did not reach.** Purging claims the bits of every
   object that overlaps a range of pages, exactly as an allocation would. If all of them
@@ -809,6 +809,17 @@ Eight rules stand behind the table.
   them. A server driven in bursts spent the first milliseconds of each burst returning
   single pages it was about to refill (`docs/research/burst-start.md`). Growth over the
   cap, and `collect`, take runs of any length.
+- **A step on a request's slow path is bounded, whatever the unit.** A request that
+  returns memory delays every request queued behind it on that worker, so a millisecond
+  spent there once a second is the server's tail. Every step a slow path takes, of the
+  clocked pass, of the hold or of a growth payment, therefore returns at most a fixed
+  amount of memory. A free large slot bigger than that goes back in pieces, a step each,
+  from its top down, each piece claiming and releasing the slot as a whole purge does. The
+  slot counts as zero only once every page of it has gone, so a request for zeroed memory
+  that takes one partly returned zeroes it, as it would any other. In a class of a huge page or more a piece is whole
+  huge pages, so a purge does not split the pages it leaves behind
+  (`docs/research/bounded-purge.md`). `collect` and `malloc_trim` are the program's own
+  calls and are not bounded.
 - **Free large slots do not wait for the frontier.** A large class's region serves one
   size, so a program that frees blocks of many large sizes between phases of its work
   holds them all, class by class, for the two intervals the frontier rule waits. A query
@@ -841,7 +852,9 @@ Eight rules stand behind the table.
   frees a great deal of one size and then allocates as much of another would hold both. So
   while the count is over a cap, growth is paid for: memory carved past a watermark is
   matched by an equal purge of retained memory, from wherever the purge walk stands and
-  whether or not fills still reach it, a step at a time and within a bound on the work.
+  whether or not fills still reach it. The carve returns one bounded step of that and
+  leaves the rest owed; the heartbeats that follow pay it a step each, and a debt whose
+  walk finds nothing to return is dropped rather than walked for again.
   This is the one place a frontier is ignored: the program is growing now, and holding
   both is what the cap exists to stop. Taking back pages that a purge returned is reuse,
   not growth, and is not charged; charging it sets the allocator purging what it is about
