@@ -18,6 +18,7 @@ four of the other:
 | `orders actix` | the same service on actix-web | one single-threaded runtime per worker | the same, with requests pinned to a worker |
 | `connect log grpc h2`, `connect log h2` | the log-ingest service over HTTP/2: gRPC (as connect-rust's own log_bench drives it) and the Connect protocol | tokio, a connection task between the socket and the handlers | frames, header blocks and bodies made by one task and freed by another |
 | `orders axum h2` | the axum order service over HTTP/2 | the same | the same |
+| `sozu proxy` | Sōzu 2.3.3, Clever Cloud's reverse proxy, forwarding the order service's POST to an upstream on loopback that answers 4 KiB | four single-threaded worker processes (Sōzu's own model), mio | a proxy: requests parsed and rewritten through pooled buffers, little else allocated |
 | `miniredis` | tokio's mini-redis 0.4.1, alternate SET and GET over 100k keys (Redis protocol) | tokio, one `Mutex<HashMap>` | the control: values of 32 to 512 bytes replaced in place |
 
 HTTP/2 jobs use eight connections of eight streams each: the same 64 requests at once as the
@@ -141,6 +142,18 @@ tails measure the machine as much as the allocator.
 
 `benchrun report` prints a table per server: latency and work at each rate, and memory under
 load, in the silences and after the connections close.
+
+**A proxy.** Sōzu forwards to an upstream the runner starts first, on three CPUs of the
+generator's L3 domain (two of them already keep up): `upstream`, a binary of
+`bench/probes/loadgen` built with glibc, which answers every request with the same response.
+The proxy's driver (`sozu/src/main.rs`) runs Sōzu's own main process, which forks a worker
+process a CPU, each re-running the driver's binary as Sōzu's worker (Sōzu's library keeps
+that entry private, so the driver carries a verbatim copy of the one function,
+`sozu/src/worker.rs`); so the counters, which
+follow forks, count every process, and memory is summed over the processes of the run's
+cgroup (the executable's shared pages once). Sōzu's command library compiles protobuf with
+`protoc` at build time; `sozu/fetch.sh` fetches a pinned release of it, and `build-apps` puts
+a program's `<inputs>/bin` first on PATH.
 
 **Large heaps** (`--suite servers-large`, rates from `servers-large-sat`). The same servers
 holding about 0.5, 2 and 4 GiB live while they serve, so that memory can be judged as a

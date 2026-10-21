@@ -94,6 +94,14 @@ pub fn build(p: &Paths, program: &str, build: &str, feature: &str, cpus: &str) -
     // would no longer be built with its own profile alone.
     c.env_remove("RUSTFLAGS").env_remove("CARGO_ENCODED_RUSTFLAGS");
     c.env("BENCH_BASELINES", &p.baselines);
+    // Build tools a program's fetch script provides (Sōzu's protoc) come first on PATH.
+    let tools = p.apps_data.join("inputs").join(program).join("bin");
+    if tools.is_dir() {
+        let path = std::env::var_os("PATH").unwrap_or_default();
+        let joined = std::env::join_paths(std::iter::once(tools).chain(std::env::split_paths(&path)))
+            .map_err(|e| format!("PATH: {e}"))?;
+        c.env("PATH", joined);
+    }
     c.current_dir(&dir);
     let t0 = Instant::now();
     let cpu0 = children_cpu_seconds();
