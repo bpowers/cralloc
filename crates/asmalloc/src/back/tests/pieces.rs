@@ -26,7 +26,8 @@ fn free_slot_below_a_live_one<O: Os>(
     (low, high, region)
 }
 
-/// Purges a step of at most `pages` pages from the region's cursor; the bytes it returned.
+/// Purges a step of at most `pages` pages from the region's cursor, or of a huge page in a
+/// class of a huge page or more; the bytes it returned.
 fn step<O: Os>(
     back: &Back<'_, O>,
     class: Class,
@@ -34,10 +35,16 @@ fn step<O: Os>(
     pages: usize,
 ) -> usize {
     let page = Native::GEOMETRY.page_size();
+    let huge = Native::GEOMETRY.huge_page_size();
     let (purged, _, _) =
         back.purge_region(class, region, usize::MAX, pages * page, true, Scope::All);
+    let most = if class.size() >= huge {
+        (pages * page).max(huge)
+    } else {
+        pages * page
+    };
     assert!(
-        purged <= pages * page,
+        purged <= most,
         "a step of {pages} pages returned {purged} bytes"
     );
     purged
@@ -199,4 +206,236 @@ fn a_growth_payment_returns_at_most_a_steps_pages() {
     for p in carved {
         back.free(p, big);
     }
+}
+
+/// The words a walk reads to get past live large slots when the step has one
+/// page left to return. A live slot used to cost one word.
+#[test]
+#[cfg_attr(miri, ignore)]
+fn a_walk_passes_a_live_slot_at_a_look() {
+    let state = state::<Native>();
+    let back = state.get_or_reserve().unwrap();
+    let class = large(256 << 10);
+    let size = class.size();
+    let page = Native::GEOMETRY.page_size();
+    let low = back.alloc(class, size).unwrap().ptr;
+    let region = back.space().locate(low.as_ptr()).unwrap().region;
+    let mut live = Vec::new();
+    loop {
+        let b = back.alloc(class, size).unwrap().ptr;
+        if back.space().locate(b.as_ptr()).unwrap().region != region {
+            back.free(b, class);
+            break;
+        }
+        paint(b.as_ptr(), size, 7);
+        live.push(b);
+    }
+    paint(low.as_ptr(), size, 7);
+    back.free(low, class);
+    let (purged, read, _) = back.purge_region(class, region, usize::MAX, page, false, Scope::All);
+    // A piece of a class of a huge page or more is a whole huge page at least.
+    assert_eq!(purged, Native::GEOMETRY.huge_page_size());
+    assert!(
+        read <= 4 * (live.len() + 1),
+        "{read} words to pass {} live slots of {} pages",
+        live.len(),
+        size / page
+    );
+}
+
+/// Random allocations, writes, resizes in place, frees and purge steps of random
+/// sizes over two large classes. A block handed out as zeroed must read as zero over its
+/// whole room.
+#[test]
+#[ignore = "slow: run with scripts/gate --all"]
+fn a_zeroed_block_reads_as_zero_whatever_the_pieces() {
+    let state = state::<Native>();
+    let back = state.get_or_reserve().unwrap();
+    let os = state.os();
+    let page = Native::GEOMETRY.page_size();
+    let classes = [large(64 << 10), large(256 << 10)];
+    let mut seed = 0x9e37_79b9_7f4a_7c15u64;
+    let mut rand = |n: usize| {
+        seed = seed
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
+        ((seed >> 33) as usize) % n
+    };
+    // (pointer, class, size)
+    let mut held: Vec<(NonNull<u8>, Class, usize)> = Vec::new();
+    let mut regions = std::collections::BTreeSet::new();
+    let (mut zeroed, mut pieces) = (0, 0);
+    for round in 0..200_000 {
+        match rand(10) {
+            0..=2 if held.len() < 24 => {
+                let class = classes[rand(2)];
+                let size = class.size() - rand(class.size() / 2);
+                let block = if rand(2) == 0 {
+                    back.alloc(class, size)
+                } else {
+                    back.alloc_staggered(class, size)
+                }
+                .unwrap();
+                let room = back.room(block.ptr.as_ptr()).unwrap();
+                if block.zeroed {
+                    zeroed += 1;
+                    assert!(
+                        painted(block.ptr.as_ptr(), room, 0),
+                        "round {round}: a block of {class:?} handed out as zero is not"
+                    );
+                }
+                assert!(block.len >= size && block.len <= room);
+                paint(block.ptr.as_ptr(), block.len, 0xab);
+                let region = back.space().locate(block.ptr.as_ptr()).unwrap().region;
+                regions.insert((class.index(), region.index()));
+                held.push((block.ptr, class, size));
+            }
+            3..=4 if !held.is_empty() => {
+                let (ptr, class, _) = held.swap_remove(rand(held.len()));
+                back.free(ptr, class);
+            }
+            5 if !held.is_empty() => {
+                let at = rand(held.len());
+                let (ptr, _, _) = held[at];
+                let room = back.room(ptr.as_ptr()).unwrap();
+                let size = 1 + rand(room);
+                // SAFETY: the test holds the block and gives up what is past `size`.
+                unsafe { back.resize_in_place(ptr, size) };
+                let len = back.usable_size(ptr.as_ptr()).unwrap();
+                assert!(len >= size && len <= room);
+                paint(ptr.as_ptr(), len, 0xcd);
+                held[at].2 = size;
+            }
+            6..=8 if !regions.is_empty() => {
+                let &(class, region) = regions.iter().nth(rand(regions.len())).unwrap();
+                let class = classes
+                    .iter()
+                    .copied()
+                    .find(|c| c.index() == class)
+                    .unwrap();
+                let region = back.space().plan().region(region).unwrap();
+                let limit = (1 + rand(40)) * page;
+                let (purged, _, _) =
+                    back.purge_region(class, region, 1 + rand(64), limit, rand(4) != 0, Scope::All);
+                pieces += usize::from(purged != 0);
+            }
+            _ => {
+                os.advance_clock(DECAY_TICKS / 16);
+                back.heartbeat();
+            }
+        }
+    }
+    assert!(
+        zeroed > 100 && pieces > 1000,
+        "{zeroed} zeroed, {pieces} pieces"
+    );
+    for (ptr, class, _) in held {
+        back.free(ptr, class);
+    }
+}
+
+/// In a class of a huge page or more, a piece starts at a huge-page boundary and is a huge page
+/// at least, however few pages the step may return: a slot kept with its huge-page advice is
+/// never left with a huge page partly returned.
+#[test]
+#[cfg_attr(miri, ignore)]
+fn pieces_of_a_class_of_huge_pages_are_whole_huge_pages() {
+    let state = state::<Native>();
+    let back = state.get_or_reserve().unwrap();
+    let os = state.os();
+    let class = large(256 << 10);
+    let huge = Native::GEOMETRY.huge_page_size();
+    assert!(class.size() >= 2 * huge);
+    let (low, high, region) = free_slot_below_a_live_one(&back, class);
+    let base = back.space().region(region).addr().get();
+    let mut pieces = 0;
+    while back.retained_large() > 0 {
+        let before = back.retained_large();
+        let purged = step(&back, class, region, 1);
+        assert!(purged == 0 || purged == huge, "a piece of {purged} bytes");
+        pieces += usize::from(purged != 0);
+        assert!(pieces <= class.size() / huge);
+        // The slot's pages from its top down to the last piece's start are all returned, and
+        // that start is a huge-page boundary.
+        let left = before - purged;
+        let end = low.addr().get() + class.size();
+        let start = end - (class.size() - left.min(class.size()));
+        assert_eq!((start - base) % huge, 0);
+        // SAFETY: the slot is free and nothing else uses the simulated heap meanwhile.
+        let gone = unsafe { os.is_purged(NonNull::new(start as *mut u8).unwrap(), end - start) };
+        assert!(gone);
+    }
+    assert_eq!(pieces, class.size() / huge);
+    back.free(high, class);
+}
+
+/// A tenant that takes a slot between pieces, staggered and smaller than the slot, then grows
+/// in place and is freed: the walk carries on below its cursor, a later walk from the top takes
+/// what the tenant wrote, and the slot is handed out as zero only once every page is back,
+/// and then reads as zero over its whole room.
+#[test]
+#[cfg_attr(miri, ignore)]
+fn a_staggered_tenant_between_pieces_leaves_no_false_zero() {
+    let state = state::<Native>();
+    let back = state.get_or_reserve().unwrap();
+    let class = large(256 << 10);
+    let size = class.size();
+    let huge = Native::GEOMETRY.huge_page_size();
+    let (low, high, region) = free_slot_below_a_live_one(&back, class);
+    assert_eq!(step(&back, class, region, 1), huge);
+    let tenant = back.alloc_staggered(class, size / 3).unwrap();
+    assert!(!tenant.zeroed);
+    assert_eq!(
+        back.space().locate(tenant.ptr.as_ptr()).unwrap().region,
+        region
+    );
+    paint(tenant.ptr.as_ptr(), tenant.len, 9);
+    // SAFETY: the test holds the block; it grows within its room.
+    unsafe { back.resize_in_place(tenant.ptr, size / 2) };
+    let len = back.usable_size(tenant.ptr.as_ptr()).unwrap();
+    paint(tenant.ptr.as_ptr(), len, 9);
+    back.free(tenant.ptr, class);
+    // Walks until nothing is retained, from the cursor and then from the top.
+    let mut steps = 0;
+    while back.retained_large() > 0 {
+        step(&back, class, region, 1);
+        steps += 1;
+        assert!(steps < 100);
+    }
+    let again = back.alloc(class, size).unwrap();
+    assert_eq!(again.ptr, low);
+    assert!(again.zeroed, "every page is back");
+    let room = back.room(again.ptr.as_ptr()).unwrap();
+    assert!(painted(again.ptr.as_ptr(), room, 0));
+    back.free(again.ptr, class);
+    back.free(high, class);
+}
+
+/// A growth payment whose walk returns nothing, over a cap that free slots on pages with live
+/// neighbours hold up, leaves nothing owed: the heartbeats after it do not walk again.
+#[test]
+#[cfg_attr(miri, ignore)]
+fn a_growth_payment_that_returns_nothing_leaves_nothing_owed() {
+    let state = state::<Native>();
+    let back = state.get_or_reserve().unwrap();
+    let small = super::small(1024);
+    let n = 4 * retained_cap(Native::GEOMETRY) / 1024;
+    let objects = fill(&back, small, n);
+    assert_eq!(objects.len(), n);
+    // Every other object freed: every page keeps a live neighbour, so nothing can be purged.
+    let freed: Vec<*mut u8> = objects.iter().step_by(2).copied().collect();
+    let kept: Vec<*mut u8> = objects.iter().skip(1).step_by(2).copied().collect();
+    // SAFETY: the test holds these objects and gives them up.
+    unsafe { back.launder(small, &freed) };
+    assert!(back.retained() > retained_cap(Native::GEOMETRY));
+    let big = large(700 << 10);
+    let block = back.alloc(big, big.size()).unwrap();
+    let owing = back
+        .state
+        .growth
+        .load(core::sync::atomic::Ordering::Relaxed);
+    assert!(owing < growth_step(Native::GEOMETRY), "{owing} still owed");
+    back.free(block.ptr, big);
+    // SAFETY: as above.
+    unsafe { back.launder(small, &kept) };
 }

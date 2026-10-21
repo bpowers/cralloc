@@ -641,3 +641,50 @@ fn a_region_larger_than_a_looks_budget_loses_its_stamp() {
         "still stamped after {laps} walks of the region, {words} words read"
     );
 }
+
+/// A `maintain` round under way when the counted interval steps
+/// becomes a new round, whose hold is measured from the look a fine step earlier.
+#[test]
+#[cfg_attr(miri, ignore)]
+fn a_maintain_round_across_an_interval_holds_a_busy_programs_slots() {
+    let state = state::<Native>();
+    let back = state.get_or_reserve().unwrap();
+    let os = state.os();
+    let class = large(256 << 10);
+    let step = || {
+        os.advance_clock(FINE_TICKS);
+        while back.hold_maintain_step(&|| back.now()) {}
+    };
+    step();
+    let per = (DECAY_TICKS / FINE_TICKS) as u32;
+    beat_for(&back, os, per, FINE_TICKS);
+    // To just after a counted interval begins, then to 20 fine steps before the next.
+    let interval = back.clock().count();
+    while back.clock().count() == interval {
+        beat_for(&back, os, 1, FINE_TICKS);
+    }
+    beat_for(&back, os, per - 20, FINE_TICKS);
+    let (_blocks, top) = free_twice_the_floor(&back, os, class);
+    let freed = back.retained_large();
+    beat_for(&back, os, 6, FINE_TICKS);
+    let interval = back.clock().count();
+    // A round whose purge phase lasts 16 fine steps (32 ms), the hold's step before each of
+    // the clocked pass's, as `maintain_step` takes them. The slots were freed under 30 steps
+    // ago.
+    for i in 0..16 {
+        step();
+        assert_eq!(
+            back.retained_large(),
+            freed,
+            "step {i}: returned, counted interval {} then {}",
+            interval,
+            back.clock().count()
+        );
+    }
+    assert_ne!(
+        back.clock().count(),
+        interval,
+        "the probe crossed an interval"
+    );
+    back.free(top, class);
+}
