@@ -315,8 +315,13 @@ fn no_thread(report: &BTreeMap<String, u64>) -> Result<(), String> {
 const CASES: &[Case] = &[
     // A worker frees a burst: the thread starts, returns it, parks, and stays parked.
     Case { mode: "worker", env: &[], check: returned },
-    // Review finding 2: the main thread frees what a worker allocated.
-    Case { mode: "mainfrees", env: &[], check: returned },
+    // Review finding 2: the main thread frees what a worker allocated. musl keeps no record of
+    // threads created, and there the evidence is a thread other than the first: a limit.
+    Case {
+        mode: "mainfrees",
+        env: &[],
+        check: if cfg!(target_env = "musl") { no_thread } else { returned },
+    },
     // Review finding 3: the freeing thread has a signal blocked at the crossing, not after.
     Case { mode: "sigmask", env: &[], check: returned },
     // Review finding 3: the burst is freed before the second thread exists.
