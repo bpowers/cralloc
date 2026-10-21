@@ -115,11 +115,10 @@ sub("crates/asmalloc/src/back/hold.rs",
     "        stopped && purged != 0 && purged < over\n")
 sub("crates/asmalloc/src/os/linux/mod.rs", "mod syscall;\n", "mod syscall;\npub(crate) mod holdtime;\n")
 sub("crates/asmalloc/src/back/hold.rs",
-    "        if self.hold_look(count, Reach::Beat) {\n",
+    "        let more = self.hold_look(count, reach(self));\n",
     "        let t0 = crate::os::linux::holdtime::now();\n"
-    "        let more = self.hold_look(count, Reach::Beat);\n"
+    "        let more = self.hold_look(count, reach(self));\n"
     "        crate::os::linux::holdtime::note(\n"
     "            crate::os::linux::holdtime::now() - t0,\n"
     "            crate::os::linux::holdtime::LAST.swap(0, core::sync::atomic::Ordering::Relaxed) as usize,\n"
-    "        );\n"
-    "        if more {\n")
+    "        );\n")
