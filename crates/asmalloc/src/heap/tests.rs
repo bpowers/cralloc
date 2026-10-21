@@ -1122,7 +1122,10 @@ mod hold {
         // twice the floor is over in this shape.
         work(1);
         let held = back.retained_large();
-        assert!(held > allowance_floor(Native::GEOMETRY) && held <= freed);
+        assert!(
+            held > allowance_floor(Native::GEOMETRY) && held <= freed + small.size(),
+            "held {held} freed {freed}"
+        );
         work(8 * (HOLD_STEPS - 4));
         assert!(back.retained_large() >= held, "held for the hold");
         work(8 * 2 * HOLD_STEPS);

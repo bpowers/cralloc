@@ -127,7 +127,8 @@ use super::layout::{Hints, Step};
 use super::policy::{
     DECAY_TICKS, PURGE_ANY_RUN_EVERY, PURGE_CAP_WORDS, PURGE_MAINTAIN_STEP_PAGES,
     PURGE_MAINTAIN_STEP_WORDS, PURGE_MAX_RUN_PAGES, PURGE_MAX_RUN_WORDS, PURGE_MIN_RUN_PAGES,
-    PURGE_STEP_WORDS, allowance_floor, decay_goal, growth_goal, growth_step, retained_cap,
+    PURGE_STEP_PAGES, PURGE_STEP_WORDS, allowance_floor, decay_goal, growth_goal, growth_step,
+    retained_cap,
 };
 use super::region::{self, Purge};
 use super::tree::Host;
@@ -768,6 +769,15 @@ impl<O: Os> Back<'_, O> {
                         pages: (pages.min(PURGE_MAX_RUN_PAGES as usize)) as u32,
                         words: budget.saturating_sub(read).clamp(1, PURGE_MAX_RUN_WORDS),
                     };
+                    // Cut to what the step may still purge, not to a run's length: a run's
+                    // bound keeps a call's claims of many slots short, and a piece of one
+                    // large slot claims one.
+                    let unit = piece(
+                        unit,
+                        pages.min(u32::MAX as usize) as u32,
+                        min_run,
+                        huge_from,
+                    );
                     let (run, words) = self.run_below(&host, region, unit, carved, huge_from, room);
                     read += words;
                     match run {
@@ -853,10 +863,10 @@ struct StepSize {
 }
 
 impl StepSize {
-    /// A heartbeat's step, bounded by the bitmap it reads.
+    /// A heartbeat's step (`policy::PURGE_STEP_WORDS`, `policy::PURGE_STEP_PAGES`).
     const HEARTBEAT: StepSize = StepSize {
         words: PURGE_STEP_WORDS,
-        pages: u32::MAX,
+        pages: PURGE_STEP_PAGES,
     };
     /// A step of `maintain`'s (`policy::PURGE_MAINTAIN_STEP_WORDS`).
     const MAINTAIN: StepSize = StepSize {
@@ -871,6 +881,24 @@ struct Room {
     floor: u32,
     pages: u32,
     words: usize,
+}
+
+/// The part of `unit` a step may purge when it may purge `pages` more: its top `pages`, or all
+/// of it if what would be left below is shorter than `min_run` (that tail would wait for a
+/// pass that takes short runs). A unit of the small-page part is the pages of one or more
+/// slots, so a large slot is a unit as long as the slot, and a step that took it whole could
+/// return any amount; cut, its next piece is the unit `Layout::unit_below` gives below the
+/// cursor, which names the page this piece began at. A unit of the huge-page part is one huge
+/// page, which is returned whole or not at all.
+fn piece(unit: Unit, pages: u32, min_run: u32, huge_from: Option<u32>) -> Unit {
+    if huge_from.is_some_and(|huge| unit.end > huge) || unit.end - unit.start <= pages {
+        return unit;
+    }
+    let start = unit.end - pages;
+    if start - unit.start < min_run {
+        return unit;
+    }
+    Unit { start, ..unit }
 }
 
 /// A goal of `bytes` as the pass word holds it: whole pages, at least one.
