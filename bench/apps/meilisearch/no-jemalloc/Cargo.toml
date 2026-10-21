@@ -1,0 +1,11 @@
+# In place of tikv-jemallocator 0.7 for Meilisearch's library, which names it as a dependency
+# but uses it only in its own `main` and tests: no jemalloc, and so no `malloc` override.
+[package]
+name = "tikv-jemallocator"
+version = "0.7.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+publish = false
+
+[features]
+override_allocator_on_supported_platforms = []

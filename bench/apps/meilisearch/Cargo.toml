@@ -1,0 +1,56 @@
+# Meilisearch, the search engine, serving searches over Hacker News while it indexes updates,
+# as a server driven by the suite's load generator. See ../README.md and src/main.rs.
+[workspace]
+resolver = "3"
+
+[package]
+name = "app-meilisearch"
+version = "0.0.0"
+edition = "2024"
+license = "MIT"
+publish = false
+
+[[bin]]
+name = "meilisearch"
+path = "src/main.rs"
+
+# The allocator under test, by the bench-alloc feature of its entry in ../../allocators.toml
+# (none: glibc). Every program forwards the same set; see ../README.md.
+[features]
+mi = ["bench-alloc/mi"]
+mi-sized = ["bench-alloc/mi-sized"]
+mi-crate = ["bench-alloc/mi-crate"]
+asmalloc = ["bench-alloc/asmalloc"]
+je = ["bench-alloc/je"]
+tc = ["bench-alloc/tc"]
+sn = ["bench-alloc/sn"]
+# Not an allocator: the live-bytes count, for resident over live (../../alloc/src/live.rs).
+live-bytes = ["bench-alloc/live-bytes"]
+
+[dependencies]
+bench-alloc = { path = "../../alloc" }
+bench-app = { path = "../common" }
+# The release, with its default features but the dashboard, whose build downloads it.
+meilisearch = { git = "https://github.com/meilisearch/meilisearch", tag = "v1.55.0", default-features = false }
+meilisearch-types = { git = "https://github.com/meilisearch/meilisearch", tag = "v1.55.0", features = ["all-tokenizations"] }
+# The versions Meilisearch 1.55.0 locks, for the parts of its `main` the driver copies.
+actix-web = { version = "4", default-features = false, features = ["macros"] }
+anyhow = "1"
+clap = { version = "4", features = ["derive", "env"] }
+tokio = { version = "1", features = ["full"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["json"] }
+
+[patch.crates-io]
+# Meilisearch's own patch, from its workspace manifest.
+heed = { git = "https://github.com/meilisearch/heed", branch = "mutexify-open-dbi", version = "0.22.1" }
+# Meilisearch links jemalloc with its `malloc` override on, which would serve the C
+# allocations whatever the global allocator; this empty crate takes its place.
+tikv-jemallocator = { path = "no-jemalloc" }
+
+# Meilisearch's release profile at 1.55.0 (its workspace manifest).
+[profile.release]
+codegen-units = 1
+
+[profile.release.package.heed]
+debug-assertions = true

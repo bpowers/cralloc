@@ -122,6 +122,23 @@ pub struct Loaded {
     pub result: Value,
 }
 
+/// Other work on the server's CPUs in each counted segment, in CPUs: the task time of those
+/// CPUs (`sys::TaskTime`) less the server's own (its task clock, every thread and worker
+/// process), over the segment's length. Segments whose names begin with `_` are not counted,
+/// and are left out.
+pub fn foreign(l: &Loaded, cpus: &[usize]) -> Vec<(String, f64)> {
+    l.marks
+        .windows(2)
+        .filter(|w| w[0].segment.is_some() && !w[0].name.starts_with('_'))
+        .map(|w| {
+            let (a, b) = (&w[0].snap, &w[1].snap);
+            let own = b.counters.since(&a.counters).get("task_clock_ns").unwrap_or(0);
+            let ns = b.at.duration_since(a.at).as_nanos() as u64;
+            (w[0].name.clone(), b.cpu_task.foreign_since(&a.cpu_task, cpus, own, ns))
+        })
+        .collect()
+}
+
 /// Starts the generator against `addr`, records the server at each of its marks, and waits for
 /// it to finish. Fails when the generator says the run cannot be trusted (its exit status) or
 /// gives no result.
@@ -240,7 +257,9 @@ pub fn summarize(l: &Loaded, memory: &[MemSample], rank: &str) -> (Value, Option
             cycles += d.get("cycles").unwrap_or(0);
             instructions += d.get("instructions").unwrap_or(0);
             task_ns += d.get("task_clock_ns").unwrap_or(0);
-            faults += w[1].snap.stat.minflt - w[0].snap.stat.minflt;
+            // The counter follows forks, so a server's worker processes are counted; the
+            // process's own count is the fallback.
+            faults += d.get("page_faults").unwrap_or(w[1].snap.stat.minflt - w[0].snap.stat.minflt);
             ms += w[1].t_ms - w[0].t_ms;
             rss_max = rss_max.max(rss_in(w[0].t_ms, w[1].t_ms).max().unwrap_or(0));
         }
@@ -263,13 +282,20 @@ pub fn summarize(l: &Loaded, memory: &[MemSample], rank: &str) -> (Value, Option
         groups.insert(name.clone(), gj);
     }
     // The curve, from the first mark to the last sample (after the end of the plan the
-    // server is stopped, so it ends shortly after the last mark).
+    // server is stopped, so it ends shortly after the last mark): the resident set, and the
+    // anonymous part of it from the last rollup (once a second), which for a server that maps
+    // its store (Meilisearch) is what the allocator holds.
     let t0 = l.marks.first().map_or(0.0, |m| m.t_ms);
     let mut curve = Vec::new();
     let mut next = t0;
-    for m in memory.iter().filter(|m| m.t_ms >= t0) {
+    let mut anon = memory.iter().find_map(|m| m.rollup).map_or(0, |r| r.anonymous);
+    for m in memory.iter() {
+        anon = m.rollup.map_or(anon, |r| r.anonymous);
+        if m.t_ms < t0 {
+            continue;
+        }
         if m.t_ms >= next {
-            curve.push(json!([((m.t_ms - t0) * 10.0).round() / 10.0, m.rss / 1024]));
+            curve.push(json!([((m.t_ms - t0) * 10.0).round() / 10.0, m.rss / 1024, anon / 1024]));
             // The first sample in each 250 ms step of the grid that starts at the first mark.
             next = t0 + ((m.t_ms - t0) / CURVE_MS).floor() * CURVE_MS + CURVE_MS;
         }

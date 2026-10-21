@@ -137,13 +137,29 @@ pub struct Snapshot {
     pub at: Instant,
     pub counters: Sample,
     pub stat: ProcStat,
+    /// Every CPU's task time, to find other work on the server's CPUs.
+    pub cpu_task: sys::TaskTime,
 }
 
 impl Snapshot {
     pub fn take(c: &Child) -> Snapshot {
-        Snapshot { at: Instant::now(), counters: c.read_counters(), stat: ProcStat::read(c.pid) }
+        Snapshot {
+            at: Instant::now(),
+            counters: c.read_counters(),
+            stat: ProcStat::read(c.pid),
+            cpu_task: sys::TaskTime::read(),
+        }
     }
 }
+
+/// The most other work a server's CPUs may carry, in CPUs, averaged over any one counted
+/// segment of its plan, before the run is invalid. Other work there takes the server's cores
+/// and caches, and comes and goes, so it moves one allocator's run and not the next. Quiet
+/// runs measured at most 0.06 in a segment; three seconds of one busy CPU, 0.55 to 0.97.
+const FOREIGN_LIMIT: f64 = 0.1;
+/// The same for a job without a load plan, over the process's whole life. Quiet runs of the
+/// quick suite measured at most 0.1.
+const FOREIGN_LIMIT_LIFE: f64 = 0.25;
 
 struct Outcome {
     exit: Exit,
@@ -202,6 +218,21 @@ fn parse_result(line: &str) -> Option<Value> {
 fn execute(job: &Job, argv: &[String], env: &[(String, String)], scratch: &Path, o: &Options, g: &Groups) -> Outcome {
     let timeout = Duration::from_secs(job.timeout_s);
     let procs = g.run.procs();
+    // A proxy's upstream first: the proxy is started with its address.
+    let mut upstream = None;
+    let mut argv = argv.to_vec();
+    if let Some(u) = job.load.as_ref().and_then(|l| l.upstream.as_ref()) {
+        match start_upstream(u, g, scratch, &o.bench_dir) {
+            Ok((child, addr)) => {
+                for a in &mut argv {
+                    *a = a.replace("{upstream}", &addr);
+                }
+                upstream = Some(child);
+            }
+            Err(e) => return Outcome::not_started(e),
+        }
+    }
+    let argv = &argv[..];
     let spec = Spec { argv, env, cpus: &job.cpus, stderr: &scratch.join("stderr.txt"), count: true, cgroup: &procs };
     let child = match Child::spawn(&spec) {
         Ok(c) => c,
@@ -209,6 +240,7 @@ fn execute(job: &Job, argv: &[String], env: &[(String, String)], scratch: &Path,
     };
     let sampler = Sampler::start(
         child.pid,
+        procs.clone(),
         child.started,
         Duration::from_millis(o.sample_ms),
         Duration::from_millis(o.rollup_ms),
@@ -350,7 +382,43 @@ fn execute(job: &Job, argv: &[String], env: &[(String, String)], scratch: &Path,
     let memory = sampler.stop();
     let counters = child.read_counters();
     let exit = child.reap();
+    if let Some(u) = upstream {
+        u.signal(libc::SIGKILL);
+        u.reap();
+    }
     Outcome { exit, timed_out, counters, memory, result, stdout_tail: tail, driver: driver_result, window, load, error }
+}
+
+/// Starts a proxy job's upstream and waits for its address.
+fn start_upstream(
+    u: &crate::suite::Upstream,
+    g: &Groups,
+    scratch: &Path,
+    bench: &Path,
+) -> Result<(Child, String), String> {
+    let bin = bench.join("target/loadgen/release").join(u.bin);
+    let mut argv = vec![bin.display().to_string()];
+    argv.extend(u.args.iter().map(|s| s.to_string()));
+    let env: Vec<(String, String)> = std::env::vars().filter(|(k, _)| !scrubbed(k)).collect();
+    let procs = g.driver.as_ref().expect("a job with a load has a driver cgroup").procs();
+    let spec = Spec {
+        argv: &argv,
+        env: &env,
+        cpus: &u.cpus,
+        stderr: &scratch.join("upstream-stderr.txt"),
+        count: false,
+        cgroup: &procs,
+    };
+    let child = Child::spawn(&spec).map_err(|e| format!("spawn upstream {}: {e}", argv[0]))?;
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while let Ok((_, l)) = child.lines.recv_timeout(deadline.saturating_duration_since(Instant::now())) {
+        if let Some(a) = l.strip_prefix("BENCH_LISTEN ") {
+            return Ok((child, a.trim().to_string()));
+        }
+    }
+    child.signal(libc::SIGKILL);
+    child.reap();
+    Err(format!("the upstream {} never printed BENCH_LISTEN", u.bin))
 }
 
 fn parse_after(lines: &[String], key: &str) -> Option<f64> {
@@ -376,8 +444,10 @@ fn memory_json(samples: &[MemSample], reported_peak: Option<u64>, o: &Options) -
     let rmean = |f: fn(&Rollup) -> u64| {
         if rollups.is_empty() { 0.0 } else { rollups.iter().map(f).sum::<u64>() as f64 / rollups.len() as f64 }
     };
+    // A process's own peak covers it alone; a run of several processes has only the sampled one.
+    let several = samples.iter().any(|s| s.procs > 1);
     let (peak, peak_source) = match reported_peak {
-        Some(p) if p > 0 => (p, "process"),
+        Some(p) if p > 0 && !several => (p, "process"),
         _ => (max(|s| s.hwm), "sampler"),
     };
     let mean =
@@ -448,6 +518,7 @@ fn run_one(job: &Job, a: &Allocator, cx: &Context, clock: &mut Clock) -> Value {
         None => "free".to_string(),
     };
     let t0 = CpuTimes::read();
+    let task0 = sys::TaskTime::read();
     let vm = sys::Vmstat::read();
     let started = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap().as_secs_f64();
     let (out, usage, driver_usage) = match groups {
@@ -458,7 +529,13 @@ fn run_one(job: &Job, a: &Allocator, cx: &Context, clock: &mut Clock) -> Value {
         Err(e) => (Outcome::not_started(format!("creating the run's cgroup: {e}")), None, None),
     };
     let busy = CpuTimes::read().busy_since(&t0);
+    let task1 = sys::TaskTime::read();
     drop(spinners);
+    // Other work on the job's CPUs over the process's life, as `serve::foreign` counts it for
+    // a server's segments: their task time less the process's own task clock (every thread
+    // and child), or its CPU time without one.
+    let own = out.counters.get("task_clock_ns").unwrap_or(out.exit.utime_ns + out.exit.stime_ns);
+    let foreign_life = task1.foreign_since(&task0, &job.cpus, own, out.exit.wall_ns);
 
     // What the process says it ran with: its own report when native, the probe when
     // preloaded.
@@ -536,6 +613,19 @@ fn run_one(job: &Job, a: &Allocator, cx: &Context, clock: &mut Clock) -> Value {
         }
         let busy = w["task_clock_ns"].as_f64().unwrap_or(0.0) / w["wall_ns"].as_f64().unwrap_or(1.0);
         extra.insert("server_cpus_busy".into(), busy.into());
+    }
+    if out.load.is_none() && foreign_life > FOREIGN_LIMIT_LIFE {
+        problems.push(format!(
+            "other work on the job's CPUs: {foreign_life:.2} CPUs over the run (limit {FOREIGN_LIMIT_LIFE})"
+        ));
+    }
+    let foreign = out.load.as_ref().map(|l| crate::serve::foreign(l, &job.cpus)).unwrap_or_default();
+    if let Some((name, cpus)) = foreign.iter().max_by(|a, b| a.1.total_cmp(&b.1))
+        && *cpus > FOREIGN_LIMIT
+    {
+        problems.push(format!(
+            "other work on the server's CPUs: {cpus:.2} CPUs over segment {name} (limit {FOREIGN_LIMIT})"
+        ));
     }
     let (served, served_primary) = match (&out.load, &job.load) {
         (Some(l), Some(jl)) => {
@@ -625,6 +715,8 @@ fn run_one(job: &Job, a: &Allocator, cx: &Context, clock: &mut Clock) -> Value {
             // process's own CPU time, both over its lifetime. Jiffies, so coarse.
             "foreign_on_job_cpus": sys::busy_sum(&busy, &job.cpus.iter().copied().collect())
                 - (out.exit.utime_ns + out.exit.stime_ns) as f64 / out.exit.wall_ns.max(1) as f64,
+            "foreign_task_cpus": (foreign_life * 1e3).round() / 1e3,
+            "foreign_by_segment": foreign.iter().map(|(n, c)| json!([n, (c * 1e3).round() / 1e3])).collect::<Vec<_>>(),
             "gate": cx.gate,
         },
         "stderr_tail": stderr_tail,

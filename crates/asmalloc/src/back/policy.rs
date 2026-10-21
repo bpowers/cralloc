@@ -90,6 +90,17 @@ pub const PURGE_ANY_RUN_EVERY: u64 = 8;
 /// huge-page unit of small slots may read more.
 pub const PURGE_STEP_WORDS: usize = 256;
 
+/// How many pages a heartbeat's step of a decay pass may purge, in 4 KiB pages: 128, half a
+/// MiB, checked between units and within a unit that is one large slot, which a step returns
+/// a piece at a time (`purge`). A heartbeat runs on a request's slow path, and at about
+/// 0.15 us a page and a few microseconds a call (`docs/research/burst-start.md`) this is some
+/// 20 to 30 us. Without it one step made 4 `madvise` calls over 7,685 pages, about 1 ms. In a
+/// class of a huge page or more a piece is a whole huge page at least, 512 pages, so that a
+/// slot kept with its huge-page advice is not left with one partly returned, which stays
+/// charged whole (`region`, "Huge pages for grown blocks"); the hold's look and a growth
+/// payment are raised the same way.
+pub const PURGE_STEP_PAGES: u32 = 128;
+
 /// How much bitmap one of `maintain`'s steps of the clocked pass may read, in words: 64, a
 /// quarter of a heartbeat's step. `maintain`'s caller may be an async runtime's worker that
 /// yields between steps, and a step should hold it for tens of microseconds; a heartbeat's
@@ -226,6 +237,38 @@ pub const fn commit_ahead(used: u32, least: u32, most: u32) -> u32 {
     } else {
         used
     }
+}
+
+/// A step of the hold's fine count (`hold::Fine`), in ticks of the cycle counter: 2^23,
+/// about 2 ms. A reading of the counted clock steps the count by at most one, so across a
+/// silence a hold ages by one step, not by the silence.
+pub const FINE_TICKS: u64 = 1 << 23;
+
+/// How many fine steps a large-class region must go without a free that leaves a slot resident
+/// before its free slots may go back to the OS: 64, about 125 ms for a program that beats at
+/// least once a fine step (`hold`). Long enough for most of the reuse that
+/// follows a free (86 to 100% of the large slots taken again after a purge were taken within
+/// 60 ms in tpchgen, gix-hours and datafusion, `docs/research/memory.md`, "Faults and system
+/// calls in real programs"); short next to the clocked pass's second, which let DataFusion
+/// hold every query's free large slots on top of the next query's ("DataFusion's peak against
+/// jemalloc's"). On DataFusion 125 ms held the peak lower than 60 ms (842 against 848 MiB)
+/// with fewer faults (+14% against +19% over no hold); 250 ms let it back up to 1,075 MiB, as
+/// its queries' free blocks outlived the hold of the next (`docs/research/large-hold.md`).
+pub const HOLD_STEPS: u32 = 64;
+
+/// The most a heartbeat's look at the hold returns, in huge pages: 1, or 2 MiB, checked between
+/// units. A large class's unit is at most a slot, so a look that meets a slot larger than the
+/// rest of this returns that whole slot: DataFusion's longest look, about a millisecond,
+/// returned one slot of 34 MiB (`docs/research/large-hold.md`). The look runs on whichever slow
+/// path took the heartbeat, so this bounds what a request pays for it, as a step of the clocked
+/// pass bounds its walk; a look that stops here with more over the floor has the next heartbeat
+/// carry on. The growth step and a moving block's piece return the same at a time.
+pub const HOLD_BEAT_HUGE_PAGES: usize = 1;
+
+/// The bound of [`HOLD_BEAT_HUGE_PAGES`] in bytes for a geometry.
+#[inline(always)]
+pub const fn hold_beat(geometry: Geometry) -> usize {
+    HOLD_BEAT_HUGE_PAGES * geometry.huge_page_size()
 }
 
 /// The retained-memory cap in bytes for a geometry.

@@ -112,8 +112,10 @@ fn jobs(f: &Flags) -> (String, Vec<suite::Job>) {
             "servers-sat" => suite::servers_sat(),
             "servers-large" => suite::servers_large(),
             "servers-large-sat" => suite::servers_large_sat(),
+            "servers-doubling" => suite::servers_doubling(),
             _ => die(
-                "--suite must be quick, full, backend, apps, servers, servers-sat, servers-large or servers-large-sat, \
+                "--suite must be quick, full, backend, apps, servers, servers-sat, servers-large, servers-large-sat \
+                 or servers-doubling, \
                  or several of them joined by commas",
             ),
         };
@@ -222,7 +224,7 @@ fn asmalloc_builds(names: &[(String, String)]) -> impl Iterator<Item = &String> 
 /// servers' load generator, once, with glibc.
 fn build_apps(f: &Flags, p: &Paths) {
     let mut programs: Vec<&'static str> = Vec::new();
-    for j in suite::apps().into_iter().chain(suite::servers()) {
+    for j in suite::apps().into_iter().chain(suite::servers()).chain(suite::servers_large()) {
         if let Some(a) = j.program.app()
             && !programs.contains(&a)
         {
@@ -232,7 +234,7 @@ fn build_apps(f: &Flags, p: &Paths) {
     if let Some(list) = f.get("apps") {
         let want: Vec<&str> = list.split(',').collect();
         if let Some(w) = want.iter().find(|w| !programs.contains(w)) {
-            die(&format!("--apps: no program {w} in the apps suite"));
+            die(&format!("--apps: no program {w} in the apps or servers suites"));
         }
         programs.retain(|a| want.contains(a));
     }

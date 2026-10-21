@@ -13,7 +13,7 @@ use std::ffi::CString;
 use std::fs::File;
 use std::io::{self, BufRead, BufReader};
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{Receiver, channel};
@@ -243,9 +243,16 @@ pub struct MemSample {
     pub rss: u64,
     pub hwm: u64,
     pub rollup: Option<Rollup>,
+    /// How many processes the sample summed.
+    pub procs: usize,
 }
 
-/// Samples a process's memory on a thread of its own until stopped.
+/// Samples a process's memory on a thread of its own until stopped, over every process of its
+/// cgroup, so that a server that forks workers (Sōzu) is counted whole. With one process, its
+/// resident set and peak. With several, which share the executable's pages, each process's
+/// resident set less its file-backed and shared pages, plus the largest of those once: the
+/// anonymous memory of all of them and the executable counted once; the peak is then the
+/// largest such sum sampled. Rollups are summed, so their proportional set is exact.
 ///
 /// `smaps_rollup` walks the page tables under the process's `mmap_lock`, which for a
 /// large heap takes milliseconds and delays the process's own `munmap` and `mprotect`. So
@@ -256,21 +263,37 @@ pub struct Sampler {
 }
 
 impl Sampler {
-    pub fn start(pid: i32, since: Instant, interval: Duration, rollup_every: Duration) -> Sampler {
+    pub fn start(pid: i32, procs: PathBuf, since: Instant, interval: Duration, rollup_every: Duration) -> Sampler {
         let stop = Arc::new(AtomicBool::new(false));
         let s = stop.clone();
         let handle = std::thread::spawn(move || {
             let mut v = Vec::new();
             let mut next_rollup = Instant::now();
             while !s.load(Ordering::Acquire) {
-                let rss = bench_harness::mem::rss_of(pid).unwrap_or(0);
+                let mut pids: Vec<i32> = std::fs::read_to_string(&procs)
+                    .unwrap_or_default()
+                    .lines()
+                    .filter_map(|l| l.trim().parse().ok())
+                    .collect();
+                if pids.is_empty() {
+                    pids.push(pid);
+                }
+                let (rss, hwm) = if pids.len() == 1 {
+                    let rss = bench_harness::mem::rss_of(pids[0]).unwrap_or(0);
+                    (rss, bench_harness::mem::vm_hwm(pids[0]).unwrap_or(0))
+                } else {
+                    let parts: Vec<(u64, u64)> = pids.iter().filter_map(|&p| statm(p)).collect();
+                    let shared = parts.iter().map(|p| p.1).max().unwrap_or(0);
+                    let rss = parts.iter().map(|p| p.0.saturating_sub(p.1)).sum::<u64>() + shared;
+                    (rss, v.iter().map(|s: &MemSample| s.rss).max().unwrap_or(0).max(rss))
+                };
                 if rss > 0 {
-                    let rollup = if Instant::now() >= next_rollup { Rollup::read(pid) } else { None };
+                    let rollup = if Instant::now() >= next_rollup { Rollup::sum(&pids) } else { None };
                     if rollup.is_some() {
                         next_rollup = Instant::now() + rollup_every;
                     }
-                    let hwm = bench_harness::mem::vm_hwm(pid).unwrap_or(0);
-                    v.push(MemSample { t_ms: since.elapsed().as_secs_f64() * 1e3, rss, hwm, rollup });
+                    let procs = pids.len();
+                    v.push(MemSample { t_ms: since.elapsed().as_secs_f64() * 1e3, rss, hwm, rollup, procs });
                 }
                 std::thread::park_timeout(interval);
             }
@@ -284,6 +307,13 @@ impl Sampler {
         self.handle.thread().unpark();
         self.handle.join().unwrap_or_default()
     }
+}
+
+/// A process's resident and shared (file-backed and shmem) bytes, from `statm`.
+fn statm(pid: i32) -> Option<(u64, u64)> {
+    let s = std::fs::read_to_string(format!("/proc/{pid}/statm")).ok()?;
+    let mut f = s.split_whitespace().skip(1).map(|x| x.parse::<u64>().ok());
+    Some((f.next()?? * 4096, f.next()?? * 4096))
 }
 
 /// CPU time and faults of a live process, from /proc/<pid>/stat.

@@ -37,6 +37,8 @@ actix-web = "4.17.0"
 tokio = { version = "1.54.0", features = ["full"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1.0.154"
+# getrusage, for the page faults of a table's rehash.
+libc = "0.2"
 
 # Not a released program, so no profile of its own: the suite's, which asmalloc's design
 # recommends to every user (fat LTO, one unit), the same for every allocator.

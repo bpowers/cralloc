@@ -38,6 +38,7 @@ mod class;
 
 pub use class::{Descending, Sink, SlotPointer};
 mod group;
+mod hold;
 mod host;
 mod inspect;
 mod layout;
@@ -105,6 +106,8 @@ pub struct State<O: Os> {
     /// The background thread's word (`crate::thread_word`): read by every slow path, written
     /// a few times in a process's life.
     thread: Lined<crate::thread_word::ThreadWord>,
+    /// The hold on free large slots: its fine count and when the next hold ends (`hold`).
+    hold: Lined<hold::Hold>,
 }
 
 /// Bytes of free slots in the bitmaps believed to be resident, for small classes and large
@@ -237,7 +240,8 @@ const _: () = {
         + 6
         + lines(size_of::<[AtomicUsize; MAX_REGIONS]>())
         + lines(size_of::<[[u64; 2]; MAX_REGIONS]>())
-        + lines(size_of::<[u64; MAX_REGIONS]>());
+        + lines(size_of::<[u64; MAX_REGIONS]>())
+        + lines(size_of::<hold::Hold>());
     assert!(
         size_of::<State<crate::os::linux::LinuxOs>>()
             == size_of::<[ClassState; COUNT]>() + LINE * groups
@@ -275,6 +279,7 @@ impl<O: Os> State<O> {
             headers: Lined::new([const { RegionHeader::new() }; MAX_REGIONS]),
             frontiers: Lined::new([const { word::Atomic::zero() }; MAX_REGIONS]),
             thread: Lined::new(crate::thread_word::ThreadWord::new()),
+            hold: Lined::new(hold::Hold::new()),
         }
     }
 
@@ -338,7 +343,12 @@ impl<O: Os> fmt::Debug for Back<'_, O> {
 /// A slot handed out by [`Back::alloc`].
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct Block {
-    /// The slot's first byte. The whole slot, the class size, is the caller's.
+    /// The block's first byte: the slot's, or past it by the stagger. The block's `len` bytes
+    /// are the caller's, and a large block's caller writes nothing past them: the pages of the
+    /// slot past its recorded size (the size asked for, or one it was resized to), counted
+    /// from the stagger and rounded up to a page (`region::extent_of`), keep their clean bits,
+    /// and a later tenant is told the slot is zero, and skips zeroing it, on the strength of
+    /// them (`region::settle_slot`, `region::purge_unit`).
     pub ptr: NonNull<u8>,
     /// Whether the slot is known to read as zero: never used, or purged since it was last
     /// used. Only large classes track purged slots, so a reused small slot says `false`.

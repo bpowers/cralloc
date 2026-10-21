@@ -18,6 +18,30 @@ pub fn request(host: &str, path: &str, content_type: &str, headers: &[String], b
     v
 }
 
+/// A file of whole requests written back to back (`--requests` with HTTP), each a head and a
+/// body of its `Content-Length`, split into the requests.
+pub fn split(mut b: &[u8]) -> Result<Vec<Vec<u8>>, String> {
+    let mut v = Vec::new();
+    while !b.is_empty() {
+        let head = find(b, b"\r\n\r\n").ok_or_else(|| format!("request {} has no end of head", v.len() + 1))? + 4;
+        let mut body = 0;
+        for line in b[..head].split(|&x| x == b'\n').map(|l| l.strip_suffix(b"\r").unwrap_or(l)) {
+            if let Some(n) = header_value(line, b"content-length") {
+                body = std::str::from_utf8(n)
+                    .ok()
+                    .and_then(|s| s.parse::<usize>().ok())
+                    .ok_or_else(|| format!("request {}: bad Content-Length", v.len() + 1))?;
+            }
+        }
+        if b.len() < head + body {
+            return Err(format!("request {} is cut short", v.len() + 1));
+        }
+        v.push(b[..head + body].to_vec());
+        b = &b[head + body..];
+    }
+    Ok(v)
+}
+
 #[derive(Debug, PartialEq, Eq)]
 pub enum Parse {
     /// More bytes are needed.
@@ -119,6 +143,16 @@ fn chunked_end(b: &[u8]) -> Option<Option<usize>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn splits_a_file_of_requests() {
+        let f = b"POST /a HTTP/1.1\r\nContent-Length: 2\r\n\r\n{}GET /b HTTP/1.1\r\nHost: h\r\n\r\n";
+        let v = split(f).unwrap();
+        assert_eq!(v.len(), 2);
+        assert!(v[0].ends_with(b"{}"));
+        assert!(v[1].starts_with(b"GET /b"));
+        assert!(split(b"POST /a HTTP/1.1\r\nContent-Length: 9\r\n\r\n{}").is_err());
+    }
 
     #[test]
     fn content_length() {

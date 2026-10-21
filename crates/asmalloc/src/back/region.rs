@@ -25,8 +25,10 @@
 //!   (`crates/asmalloc-preload/tests/programs/thp_partial.c`: purging half of each huge page of
 //!   64 MiB halved RSS, 67 to 35 MiB, but took the charge only to 56). It is bounded at under
 //!   two huge pages a shrink, the huge pages at the shrink's two ends, and `mark_clean` marks
-//!   those pages clean, so the retained count does not see them. A purge of a free slot needs
-//!   no rule of its own: it returns the slot's pages whole.
+//!   those pages clean, so the retained count does not see them. A purge of a free slot may
+//!   return it in pieces across steps (`purge::piece`); in a class of a huge page or more the
+//!   pieces start at huge-page boundaries and are a huge page at least, so a slot kept with
+//!   its advice is never left with a huge page partly returned.
 //! - **Clean bits** say a page has not been written since it was carved or last purged. Only a
 //!   purge and the first claim of a carved slot set them (`mark_fresh`, for the pages past its
 //!   block); a claim and anything that widens a held block clear them under what it may write
@@ -864,6 +866,24 @@ pub(crate) fn purge_unit<H: Host>(host: &H, region: RegionId, unit: Unit) -> (Pu
         let old = host.meta(region, layout.clean_word(w)).fetch_or(mask);
         cleaned += (mask & !old).count_ones() as usize;
     }
+    // A unit that covers only part of a slot (a piece of a large slot, which the purge walk
+    // returns across steps) leaves the slot's zero bit as it was, unless this piece leaves
+    // every page of the slot clean: a free slot of whole pages, all of them clean, reads as
+    // zero. Pages the claim of an earlier tenant wrote had their clean bits cleared then, so
+    // a slot taken and freed between pieces is not taken for zero. The bit is written under
+    // the claim this thread holds.
+    for slot in [first, last] {
+        if (inside..end).contains(&slot) {
+            continue;
+        }
+        if let (Some(at), Some(whole)) = (layout.zero_word(slot / BITS), layout.slot_unit(slot))
+            && whole.start as usize * page == layout.slot_bytes(slot)
+            && whole.end as usize * page == layout.slot_bytes(slot + 1)
+            && all_clean(host, region, whole)
+        {
+            host.meta(region, at).fetch_or(1u64 << (slot % BITS));
+        }
+    }
     release_range(host, region, first, last, low, high + 1);
     (Purge::Done(cleaned * page), read)
 }
@@ -884,6 +904,27 @@ pub(crate) fn purgeable_unit<H: Host>(host: &H, region: RegionId, unit: Unit) ->
         }
     }
     (true, (high - low + 1) as usize)
+}
+
+/// Where the clean top of a unit begins: the lowest page `p` of the unit such that pages
+/// `p..unit.end` are all marked clean, `unit.end` if its last page is not. Returns it and the
+/// clean words read. A piece of a large slot is cut below it, so that what an earlier piece
+/// returned is not walked again (`purge::piece`).
+pub(crate) fn clean_top<H: Host>(host: &H, region: RegionId, unit: Unit) -> (u32, usize) {
+    let layout = host.layout();
+    let (mut end, mut read) = (unit.end, 0);
+    while end > unit.start {
+        let w = (end - 1) / BITS;
+        let low = (w * BITS).max(unit.start);
+        let mask = bits_in_word(w, low, end - 1);
+        let dirty = !host.meta(region, layout.clean_word(w)).load() & mask;
+        read += 1;
+        if dirty != 0 {
+            return (w * BITS + (BITS - 1 - dirty.leading_zeros()) + 1, read);
+        }
+        end = low;
+    }
+    (unit.start, read)
 }
 
 /// Whether every page of a unit is marked clean.

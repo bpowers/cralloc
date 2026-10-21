@@ -20,6 +20,17 @@ impl Rollup {
         Some(Rollup::parse(&text))
     }
 
+    /// The sum over several processes, those that could be read; `None` if none could.
+    pub fn sum(pids: &[i32]) -> Option<Rollup> {
+        pids.iter().filter_map(|&p| Rollup::read(p)).reduce(|a, b| Rollup {
+            rss: a.rss + b.rss,
+            pss: a.pss + b.pss,
+            anonymous: a.anonymous + b.anonymous,
+            anon_huge: a.anon_huge + b.anon_huge,
+            private_dirty: a.private_dirty + b.private_dirty,
+        })
+    }
+
     pub fn parse(text: &str) -> Rollup {
         let mut r = Rollup::default();
         for line in text.lines() {

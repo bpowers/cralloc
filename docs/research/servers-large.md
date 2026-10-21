@@ -55,20 +55,146 @@ end of the minute at 70%, and 9.75 s after the connections closed (medians of th
   On mini-redis nobody gives anything back.
 - **A peak after preload.** On mini-redis 0.5 GiB asmalloc's peak is 1.19 times live, right
   after the preload (16 connections writing 450k keys); it returns that within the first
-  seconds of churn and settles at 1.10. The others peak later, at what they hold in steady
-  state. The cgroup peak, not the steady state, is what a memory limit has to cover.
+  seconds of churn and settles at 1.10. The extra is memory the preload freed, retained until
+  the clocked purge returns it: the resident set falls by about half the excess each second
+  (553, 533, 523, 518, 516, 513 MiB), as designed. The others peak later, at what they hold in
+  steady state. The cgroup peak, not the steady state, is what a memory limit has to cover.
 - **Cycles per request.** asmalloc is fastest on the order service at every size (1% under
   jemalloc, 7% under mimalloc) and level on mini-redis, where all four are within 2% and
   mimalloc is ahead by 1 to 1.5%. Heap size barely moves anyone's cycles.
 - **Tails.** p99.9 is 23 to 28 us for every allocator except mimalloc on the order service,
   until the order service reaches 4 GiB, where everyone's tail grows (95 to 165 us; mimalloc
   758 us) and requests miss their slot (7k to 28k of about 15M). asmalloc's is second-worst
-  there. Faults per request grow with the heap on the order service (0.0008 to 0.0024) for
-  everyone alike; the 4 GiB tail is not explained here and is the next thing to look at.
+  there. The cause is the order service's own hash tables doubling, once, during that minute
+  ("The 4 GiB tail" below).
 - **Memory system calls** are rare for every allocator. From `run.py syscalls` (strace -c
-  over 8 s at the 2 GiB size, outside the timed runs), per 1,000 requests: asmalloc 0.48
-  madvise on the order service and 0.05 on mini-redis; jemalloc none and 0.06; mimalloc and
-  tcmalloc none. mprotect, mmap, munmap, mremap and brk are zero for everyone.
+  over 8 s at the 2 GiB size, starting 2 s after the fill, outside the timed runs), per 1,000
+  requests: asmalloc 0.48 madvise on the order service and 0.05 on mini-redis; jemalloc none
+  and 0.06; mimalloc and tcmalloc none. mprotect, mmap, munmap, mremap and brk are zero for
+  everyone. asmalloc's are the purge after the fill: traced with timestamps over the suite's
+  plan at 4 GiB, it made 2,100 madvise calls in the fill and none in the minute at 70%
+  except 55 while the tables doubled.
+
+## The 4 GiB tail
+
+Found with the open-loop generator's per-request records (`run.py plain --raw`,
+`stalls.py`), the suite's plan up to its minute at 70% at 248k req/s, one run each.
+
+- **Nine tenths of the slow requests are one event.** Of the requests over 60 us in the
+  minute, 93 to 96% fall in a burst of 59 to 67 stalls of about 2 ms each, inside 2 to 3
+  seconds, for every allocator (asmalloc 30k slow requests, jemalloc 27k, tcmalloc 37k). At
+  the same moment the resident set rises by 130 MiB and the live count by 70 MiB.
+- **The burst is the order service's 64 shard tables doubling.** Each shard is a `HashMap`
+  behind a mutex holding 35k orders. Inserts and removes leave the table's growth allowance
+  falling; once it runs out, a table more than half full doubles (65,536 to 131,072
+  buckets), rehashing every entry while its shard's lock is held. The other workers that
+  need that shard block on the mutex, and every connection they serve waits. The shards
+  fill in step, so all 64 double within seconds, once, after several generations of
+  orders, and then the tables sit at a quarter full. At 2 GiB the tables, half the size,
+  double during the minute too, but each stall stays short enough that p99.9 does not move
+  (29 us in the same probe).
+- **What is ours in it.** A profile of the burst (perf record, cycles) puts about 0.56 ms of
+  each table's doubling in the rehash under asmalloc against 0.39 ms under jemalloc, most of
+  the difference in the kernel's page-fault path (23 ms against 14 ms over the 64 tables).
+  The doubling job below measures it directly: every allocator takes the same 545 faults a
+  table (each 2.2 MB table is fresh memory touched 4 KiB at a time), and asmalloc's
+  doublings take longer, so each fault costs it more, not that it takes more of them. The
+  madvise calls asmalloc makes in the burst take 3 to 11 us each under strace. No slow
+  requests point to a heartbeat: asmalloc's slow requests outside events of ten or more
+  number 130 to 140 in the minute.
+- **The rest** (3 to 7% of slow requests) is common to all allocators: stalls of 0.2 to 1.2
+  ms every 1.024 s in the first 15 to 25 s of the minute, cause not found.
+- **mimalloc** has the same burst with longer stalls (3.4 ms median) and stalls of 10 to 25
+  ms beside it. Its runs have 1,000 to 1,600 direct compactions each against none for the
+  others (bar one asmalloc run): its huge-page faults wait for the kernel to compact memory,
+  on a machine whose free memory is about 2 GiB with the rest in page cache.
+
+The two branches being reworked: purging by runs with bounded steps does not touch this (no
+purge runs in the minute). A hold on large free slots is in the same path, the placement of
+a large block, but it would help only if a free slot of the new size were held; here the
+freed tables are half the size of the new ones.
+
+The tail measures a one-off event of the program, timed by its hash state and the length of
+the fill. The large-heap order-service jobs now pre-size each shard to twice its share of
+`keep`, and the doubling is a job of its own (next section).
+
+## Pre-sized tables, and the doubling as a job
+
+Measured 2026-10-21 on branch `servers-doubling`, allocator code as at `4ba5734`, the same
+way as above (three rounds of the pre-sized jobs, five of the doubling job). One round of the
+0.5 GiB job was disturbed by other work on the server's CPUs (`foreign_on_job_cpus` up to
+1.06 against 0.30 from the idle spinners, every allocator but mimalloc slowed) and was
+replaced by a fourth. Raw results: `docs/research/data/servers-doubling-2026-10-21.jsonl.gz`.
+
+**Pre-sized**, cycles per request and p99.9 at 70%, resident over live at the start and end
+of the minute and after the load stops:
+
+| Job | asmalloc | jemalloc | tcmalloc per-CPU | mimalloc |
+|---|---|---|---|---|
+| orders 0.5 GiB | 67.8k, 26; 1.100, 1.100, 1.101 | 69.8k, 26; 1.106, 1.106, 1.107 | 69.5k, 25; 1.113, 1.114, 1.114 | 73.6k, 40; 1.187, 1.199, 1.200 |
+| orders 2 GiB | 68.1k, 26; 1.080, 1.080, 1.080 | 70.0k, 26; 1.097, 1.097, 1.097 | 69.9k, 26; 1.098, 1.098, 1.099 | 73.2k, 47; 1.155, 1.156, 1.156 |
+| orders 4 GiB | 68.2k, 26; 1.074, 1.074, 1.074 | 70.1k, 27; 1.095, 1.095, 1.095 | 69.7k, 26; 1.096, 1.096, 1.096 | 73.0k, 86; 1.151, 1.152, 1.152 |
+
+The 4 GiB tail is gone (26 to 27 us, mimalloc 86), the resident set no longer steps up in
+the minute, and asmalloc now holds the least over live at every size, 0.6 to 2.1 points
+under jemalloc, and is fastest at every size, by 2.2 to 2.6% over the next.
+
+**The doubling job** (`--suite servers-doubling`, `orders axum doubling 4G`): the 4 GiB order
+service with tables that are not pre-sized, driven at 248k req/s from the start so that the
+64 doublings come at the same order count for every allocator, 14 to 16 s into the measured
+28-second segment `dbl`. The server times each doubling (the lock hold) and counts the page
+faults its thread takes in it; the runner gives the latency, faults and resident rise over
+`dbl` (`bench/probes/partial-load/doublesum.py`). Medians of five:
+
+| Allocator | doubling, median ms | doubling, max ms | faults a doubling | p99.9 us | max us | missed | resident rise MiB | direct compactions |
+|---|---|---|---|---|---|---|---|---|
+| jemalloc | 0.59 | 0.68 | 546 | 219 | 2,239 | 5,251 | 95 | 0 |
+| tcmalloc per-CPU | 0.59 | 0.78 | 545 | 209 | 1,921 | 4,455 | 137 | 0 |
+| asmalloc | 0.65 | 1.43 | 545 | 282 | 2,055 | 7,483 | 90 | 298 |
+| mimalloc | 0.74 | 22.57 | 546 | 18,707 | 22,598 | 61,407 | 82 | 634 |
+
+- asmalloc's doublings are 10% slower at the median and twice as slow at the worst, with the
+  same faults. It is not huge pages: with them turned off for the server
+  (`run.py --no-thp`, three runs each) asmalloc's doublings took 0.74 to 0.81 ms (max 1.24 to
+  1.35) against 0.77 to 0.79 (max 1.32 to 1.58) with them on, and jemalloc's 0.74 (max 0.85)
+  either way.
+- During the doublings asmalloc commits address space: in the traced run above, 8 `mprotect`
+  calls in the minute, all in the doubling window, two of them taking 174 and 337 us under strace. An `mprotect`
+  takes the address space's lock for writing, which holds up the page faults of every other
+  thread, and the doublings are faulting at that moment. That fits the longer worst
+  doublings; the 10% at the median is not explained yet.
+- The hold on free large slots, merged since (`8aec365`), does not move it: five more runs
+  on that main gave asmalloc 0.64 ms median and 1.26 ms max with the same 545 faults
+  (jemalloc 0.60 and 0.73 alongside). The tables freed are half the size of the new ones, so
+  no held slot fits.
+- mimalloc gives its tables huge pages, and its doublings wait in direct compaction: 21 to 27
+  ms at the worst.
+- The resident rise is the new tables less the old (about 70 MiB) plus what each allocator
+  keeps of the freed old tables and of its own growth.
+
+## Huge pages
+
+Huge-page-backed memory over resident at its peak under load (the anonymous memory in
+transparent huge pages; the machine runs THP in `madvise` mode), three rounds:
+
+| Job | asmalloc | mimalloc | jemalloc, tcmalloc |
+|---|---|---|---|
+| orders 0.5 GiB | 0.72 | 1.00 | 0 |
+| orders 2 GiB | 0.89 | 0.91 to 1.00 | 0 |
+| orders 4 GiB | 0.39, 0.92, 0.93 | 0.47, 0.96, 0.99 | 0 |
+| miniredis 0.5 GiB | 0 | 0.99 | 0 |
+| miniredis 2 GiB | 0.12 | 0.81 to 1.00 | 0 |
+| miniredis 4 GiB | 0.17 | 0.66 to 0.92 | 0 |
+
+- jemalloc and tcmalloc do not ask for huge pages, so in `madvise` mode they get none.
+- asmalloc marks a class's region for huge pages only past its first 16 MiB and only for
+  classes of 1 KiB and under (`back/policy.rs`). Mini-redis's values are log-uniform from 64
+  B to 4 KiB, so most of its bytes are in classes that never get huge pages.
+- Coverage varies between runs with the machine's free memory: the low runs at 4 GiB had
+  hundreds of direct compactions and THP faults that fell back to small pages.
+- It does not decide cycles per request here: asmalloc is fastest on the order service with
+  less coverage than mimalloc, and on mini-redis, where mimalloc's coverage is far higher,
+  mimalloc is ahead by 1 to 1.5%.
 
 ## Before the reversal rule landed
 
@@ -93,4 +219,5 @@ builds.
 - The load generator keeps a 20-byte record of every request, plus the command list (up to
   hundreds of MiB here); its cap is now 3 GiB (`bench/runner/src/cap.rs`).
 - Summaries: `bench/probes/partial-load/largesum.py` (this table), `syssum.py` (the system
-  calls), `timeline.py` (latency over time from a `--raw` record).
+  calls), `timeline.py` (latency over time from a `--raw` record), `stalls.py` (slow
+  requests grouped into stalls, lined up with timed system calls from `run.py madvise`).

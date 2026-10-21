@@ -89,8 +89,13 @@
 //! the two (`policy::growth_goal`), within `policy::PURGE_CAP_WORDS` of bitmap and one circuit
 //! of the heap from where the walk stands, frontiers or not ([`Scope::All`]): growth is
 //! resident memory the program asked for now, and paying for it is what keeps memory within
-//! the cap of what is live. The debt is cleared whatever the walk returned, so a heap whose
-//! free memory is all fragmentation pays one bounded walk per step of growth. A program that
+//! the cap of what is live. A payment returns at most `policy::PURGE_STEP_PAGES`, since it
+//! runs on a request's slow path; what it owes past that stays on the debt, and the next
+//! heartbeats pay it, a step each. Paid at once on the carve, a slot of tens of megabytes made
+//! one request return as much (2 ms on DataFusion); left for the next carve alone, it was paid
+//! too late, and DataFusion's peak rose by 30 to 80 MiB.
+//! Otherwise the debt is cleared whatever the walk returned, so a heap whose free memory is
+//! all fragmentation pays one bounded walk per step of growth. A program that
 //! frees and reuses the same classes never grows and never purges on its own traffic; one that
 //! frees class X and then grows class Y purges X as Y grows.
 //!
@@ -109,9 +114,24 @@
 //! huge pages in the huge-page part, so a huge page is never split. At the top of a region
 //! with a huge-page part it first carves the rest of the unit that holds the watermark
 //! (`region::top_up`), so that the part of that huge page the fault made resident beyond the
-//! watermark can go with the rest. Each region keeps its own cursor in its `Hints`, and the
+//! watermark can go with the rest.
+//!
+//! **Pieces.** A unit of the small-page part is the pages of the slots it covers, so one
+//! large slot is a unit as long as the slot: tens of megabytes. A purge step that may return
+//! fewer pages than a unit holds takes its top part (`piece`), claiming the slot as a whole
+//! purge does, and releases it; the cursor then names the page the piece began at, and the
+//! next step's unit is the rest of the slot below it. The retained count drops by what each
+//! piece cleaned. A piece sets the slot's zero bit only if it leaves every page of the slot
+//! clean (`region::purge_unit`), so an allocation of a slot that is partly returned is not
+//! taken for zero: it gets the pages a piece returned as zero, and the rest as its last
+//! tenant left them. So every step on a request's slow path returns a bounded amount whatever
+//! the slot sizes: a heartbeat's step of the clocked pass `policy::PURGE_STEP_PAGES`, the
+//! hold's look `policy::hold_beat`, a growth payment `PURGE_STEP_PAGES`.
+//!
+//! Each region keeps its own cursor in its `Hints`, and the
 //! walk over regions is one word in the state that every purger carries on from: the clocked
-//! pass, the cap's purge on growth. It goes round only the regions below the highest ever
+//! pass, the cap's purge on growth. The hold on free large slots (`hold`) carries on from the
+//! regions' cursors too, over a position of its own among the large classes' regions. It goes round only the regions below the highest ever
 //! given to a class (`Walk::top`), so a lap costs the class regions, not the reservation. A count of completed laps and the position a pass began
 //! at let a decay pass see that the walk has gone round even when another caller took the
 //! step that finished the lap. All of these are hints: two purgers on the same unit are safe because each purge is a
@@ -126,7 +146,8 @@ use super::layout::{Hints, Step};
 use super::policy::{
     DECAY_TICKS, PURGE_ANY_RUN_EVERY, PURGE_CAP_WORDS, PURGE_MAINTAIN_STEP_PAGES,
     PURGE_MAINTAIN_STEP_WORDS, PURGE_MAX_RUN_PAGES, PURGE_MAX_RUN_WORDS, PURGE_MIN_RUN_PAGES,
-    PURGE_STEP_WORDS, allowance_floor, decay_goal, growth_goal, growth_step, retained_cap,
+    PURGE_STEP_PAGES, PURGE_STEP_WORDS, allowance_floor, decay_goal, growth_goal, growth_step,
+    retained_cap,
 };
 use super::region::{self, Purge};
 use super::tree::Host;
@@ -340,7 +361,10 @@ impl<O: Os> Back<'_, O> {
     fn pay_growth(&self, step: usize) {
         let geometry = self.space.plan().geometry();
         let debt = self.state.growth.swap(0, Relaxed);
-        let goal = growth_goal(debt, self.retained(), retained_cap(geometry), step);
+        let owed = growth_goal(debt, self.retained(), retained_cap(geometry), step);
+        // A payment runs on the slow path of the request that carved, so it returns at most
+        // what a heartbeat's step may: a carve of one large slot can owe tens of megabytes.
+        let goal = owed.min(PURGE_STEP_PAGES as usize * geometry.page_size());
         // One circuit of the heap from wherever the shared walk stands, counted in regions
         // finished: the lap count says nothing here, since the walk may stand one region from
         // the bottom with everything purgeable above it. Frontiers or not: this is growth the
@@ -354,10 +378,17 @@ impl<O: Os> Back<'_, O> {
             purged += bytes;
             finished += usize::from(done);
         }
+        // The rest stays owed, for the next heartbeats and carves to pay a step each of, if
+        // this walk found anything to return. If not, the debt is cleared, as it always was:
+        // a heap over the cap by fragmentation would otherwise owe a walk that returns nothing
+        // on every heartbeat until the debt ran out.
+        if owed > goal && purged != 0 {
+            self.state.growth.fetch_add(owed - goal, Relaxed);
+        }
     }
 
     /// The regions the walk goes round: those below the highest ever given to a class.
-    fn walk_regions(&self) -> usize {
+    pub(super) fn walk_regions(&self) -> usize {
         (self.state.walk.top.load(Relaxed) as usize).min(self.space.plan().objects())
     }
 
@@ -401,7 +432,28 @@ impl<O: Os> Back<'_, O> {
     /// [`Back::heartbeat`] for a caller that keeps its own reading of the clock: `now` is
     /// called only when the step needs the time.
     pub fn heartbeat_with(&self, now: &dyn Fn() -> u64) {
-        let _ = self.decay_step(now, StepSize::HEARTBEAT);
+        // The hold's fine count steps on the reading the decay step makes between passes, so
+        // that the hold reads the clock itself only while a pass is under way (`hold`).
+        let read = core::cell::Cell::new(None);
+        let _ = self.decay_step(
+            &|| {
+                let time = now();
+                read.set(Some(time));
+                time
+            },
+            StepSize::HEARTBEAT,
+        );
+        self.hold_beat(read.get().unwrap_or_else(now));
+        // Growth a carve owed past what its own payment could take, a step at a time: the
+        // payment that keeps memory within the cap of what is live, spread over slow paths.
+        // Not while a clocked pass is under way: its goal, set when it began, already counts
+        // what is over the cap, and both paying it would take the count below the cap.
+        let step = growth_step(self.space.plan().geometry());
+        if self.state.decay.word.load(Relaxed) & ACTIVE == 0
+            && self.state.growth.load(Relaxed) >= step
+        {
+            self.pay_growth(step);
+        }
     }
 
     /// The clocked pass the heartbeats of an interval would take, in one call: starts a pass
@@ -660,7 +712,7 @@ impl<O: Os> Back<'_, O> {
     }
 
     /// The class of a region the walk should look at: a class region whose summary bit is set.
-    fn purgeable(&self, region: RegionId) -> Option<Class> {
+    pub(super) fn purgeable(&self, region: RegionId) -> Option<Class> {
         let RegionTag::Class(class) = self.state.table.get(region) else {
             return None;
         };
@@ -681,7 +733,7 @@ impl<O: Os> Back<'_, O> {
     /// (`region::floor`, read once a call): a unit that starts below it is left, with the
     /// rest of the region under it. Returns the bytes purged, the words read, and whether the
     /// walk reached the bottom, or the frontier.
-    fn purge_region(
+    pub(super) fn purge_region(
         &self,
         class: Class,
         region: RegionId,
@@ -767,25 +819,68 @@ impl<O: Os> Back<'_, O> {
                         pages: (pages.min(PURGE_MAX_RUN_PAGES as usize)) as u32,
                         words: budget.saturating_sub(read).clamp(1, PURGE_MAX_RUN_WORDS),
                     };
-                    let (run, words) = self.run_below(&host, region, unit, carved, huge_from, room);
-                    read += words;
-                    match run {
-                        Some(run)
-                            if run.end - run.start < min_run && below_purged != Some(run.end) =>
-                        {
-                            run.start
-                        }
-                        Some(run) => {
-                            // Its look before claiming reads the words `run_below` just read
-                            // and counted; counting them twice halved what a step could purge.
-                            let (outcome, _) = region::purge_unit(&host, region, run);
-                            if let Purge::Done(bytes) = outcome {
-                                purged += bytes;
-                                below_purged = Some(run.start);
+                    // A unit longer than the step may still return is one large slot (a
+                    // unit of the small-page part is the pages of the slots it covers). Cut
+                    // to what the step may still purge, not to a run's length: a run's bound
+                    // keeps a call's claims of many slots short, and a piece of one slot
+                    // claims one. In whole huge pages for a class of a huge page or more, so
+                    // that a slot that kept its huge-page advice is not left with a huge page
+                    // partly unmapped, which stays charged whole.
+                    let huge = layout.huge_pages();
+                    let granule = if layout.size() >= huge as usize * page {
+                        huge
+                    } else {
+                        1
+                    };
+                    let most = (pages.min(u32::MAX as usize) as u32).max(granule);
+                    if huge_from.is_none_or(|from| unit.end <= from) && unit.end - unit.start > most
+                    {
+                        // The whole slot first: a slot that is not free, or all clean, is
+                        // passed at a look, not a piece at a time; and a piece is cut below
+                        // the slot's clean top, what earlier pieces returned.
+                        let (ok, words) = region::purgeable_unit(&host, region, unit);
+                        read += words;
+                        if !ok {
+                            unit.start
+                        } else {
+                            let (top, words) = region::clean_top(&host, region, unit);
+                            read += words;
+                            if top <= unit.start {
+                                // Another purger cleaned the rest since the look.
+                                unit.start
+                            } else {
+                                let cut = piece(Unit { end: top, ..unit }, most, min_run, granule);
+                                let (outcome, _) = region::purge_unit(&host, region, cut);
+                                if let Purge::Done(bytes) = outcome {
+                                    purged += bytes;
+                                    below_purged = Some(cut.start);
+                                }
+                                cut.start
                             }
-                            run.start
                         }
-                        None => unit.start,
+                    } else {
+                        let (run, words) =
+                            self.run_below(&host, region, unit, carved, huge_from, room);
+                        read += words;
+                        match run {
+                            Some(run)
+                                if run.end - run.start < min_run
+                                    && below_purged != Some(run.end) =>
+                            {
+                                run.start
+                            }
+                            Some(run) => {
+                                // Its look before claiming reads the words `run_below` just read
+                                // and counted; counting them twice halved what a step could purge.
+                                let (outcome, _) = region::purge_unit(&host, region, run);
+                                if let Purge::Done(bytes) = outcome {
+                                    purged += bytes;
+                                    below_purged = Some(run.start);
+                                }
+                                run.start
+                            }
+                            None => unit.start,
+                        }
                     }
                 }
             };
@@ -852,10 +947,10 @@ struct StepSize {
 }
 
 impl StepSize {
-    /// A heartbeat's step, bounded by the bitmap it reads.
+    /// A heartbeat's step (`policy::PURGE_STEP_WORDS`, `policy::PURGE_STEP_PAGES`).
     const HEARTBEAT: StepSize = StepSize {
         words: PURGE_STEP_WORDS,
-        pages: u32::MAX,
+        pages: PURGE_STEP_PAGES,
     };
     /// A step of `maintain`'s (`policy::PURGE_MAINTAIN_STEP_WORDS`).
     const MAINTAIN: StepSize = StepSize {
@@ -870,6 +965,22 @@ struct Room {
     floor: u32,
     pages: u32,
     words: usize,
+}
+
+/// The piece of `unit`, one large slot below its clean top, that a step may purge when it may
+/// purge `pages` more: its top `pages`, starting at a multiple of `granule` pages, or all of it
+/// if what would be left below is shorter than `min_run` (that tail would wait for a pass that
+/// takes short runs). The cursor then names the page the piece began at, and the next step's
+/// unit (`Layout::unit_below`) is the rest of the slot below it.
+fn piece(unit: Unit, pages: u32, min_run: u32, granule: u32) -> Unit {
+    if unit.end - unit.start <= pages {
+        return unit;
+    }
+    let start = (unit.end - pages) & !(granule - 1);
+    if start <= unit.start || start - unit.start < min_run {
+        return unit;
+    }
+    Unit { start, ..unit }
 }
 
 /// A goal of `bytes` as the pass word holds it: whole pages, at least one.

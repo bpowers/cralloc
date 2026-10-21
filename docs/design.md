@@ -761,7 +761,8 @@ rule that returns it (`docs/research/memory.md` has the measurements behind them
 | What holds the memory | What returns it | When |
 |---|---|---|
 | Free slots in the bitmaps, on pages with nothing live on them, above what fills reached in the last two intervals | The clocked purge | Once an interval while more than the floor is retained: up to a quarter of the retained memory, or all of it above the cap, in runs of adjacent pages, carrying on round the heap from where the last pass stopped |
-| The same, whether fills reached it or not, while more than the cap is retained and the heap grows somewhere else | The carve that grows it returns as much as it takes | At that carve, within a bound on its work |
+| Free slots of large classes, above the floor | Heartbeats, a bounded amount each; `maintain` in a silence | Once their region has gone a short hold without a free that left a slot resident |
+| The same, whether fills reached it or not, while more than the cap is retained and the heap grows somewhere else | The carve that grows it owes as much as it takes: it returns a bounded part, and heartbeats return the rest | At that carve and the heartbeats after it, a bounded step each |
 | A large block left behind by a move, or one that grew and is freed, beyond a small budget of such memory | The move or the free (see "Large objects") | Before it releases the slot |
 | The tail of a large block that shrinks in place; the pages behind a move made in pieces | The resize (see "Large objects") | At once |
 | Objects in a magazine that stays loaded | A slow path of the same CPU launders it | Once it has been loaded for an interval |
@@ -774,7 +775,7 @@ rule that returns it (`docs/research/memory.md` has the measurements behind them
 | Free slots on pages that also hold live objects | Nothing: that is fragmentation, and it stays counted | Never |
 | All of the above, without waiting for the clock | `collect`, and `malloc_trim` in C | When the program calls it |
 
-Seven rules stand behind the table.
+Nine rules stand behind the table.
 
 - **Purge late, and only what fills did not reach.** Purging claims the bits of every
   object that overlaps a range of pages, exactly as an allocation would. If all of them
@@ -808,6 +809,32 @@ Seven rules stand behind the table.
   them. A server driven in bursts spent the first milliseconds of each burst returning
   single pages it was about to refill (`docs/research/burst-start.md`). Growth over the
   cap, and `collect`, take runs of any length.
+- **A step on a request's slow path is bounded, whatever the unit.** A request that
+  returns memory delays every request queued behind it on that worker, so a millisecond
+  spent there once a second is the server's tail. Every step a slow path takes, of the
+  clocked pass, of the hold or of a growth payment, therefore returns at most a fixed
+  amount of memory. A free large slot bigger than that goes back in pieces, a step each,
+  from its top down, each piece claiming and releasing the slot as a whole purge does. The
+  slot counts as zero only once every page of it has gone, so a request for zeroed memory
+  that takes one partly returned zeroes it, as it would any other. In a class of a huge page or more a piece is whole
+  huge pages, so a purge does not split the pages it leaves behind
+  (`docs/research/bounded-purge.md`). `collect` and `malloc_trim` are the program's own
+  calls and are not bounded.
+- **Free large slots do not wait for the frontier.** A large class's region serves one
+  size, so a program that frees blocks of many large sizes between phases of its work
+  holds them all, class by class, for the two intervals the frontier rule waits. A query
+  engine held a third of its peak this way between queries
+  (`docs/research/large-hold.md`). So free large slots follow a shorter clock. A large
+  free that leaves its slot resident stamps its region with a fine count, which steps
+  every couple of milliseconds that a heartbeat observes and at most one step for each
+  reading of the clock, so that a silence ages a hold by one step, as it ages everything
+  else by one interval. Once a region has gone a hold of some tens of steps without such a
+  free, heartbeats return its free slots, a bounded amount for each heartbeat, while the
+  free large memory that is still resident exceeds the floor, and only down to it. The
+  hold is a constant found by measurement: a shorter one returns memory that is about to
+  be reused and pays for it in faults, a longer one keeps the peak, and a hold that
+  adapted for each class did no better than the constant. `maintain` takes the same
+  bounded looks once an interval, and in a silence returns held slots at its second round.
 - **Under a floor, the clock returns nothing.** While the retained memory totals no more
   than the floor of the allowance (see "Sizing from evidence") the clocked pass does not
   run, and above it a pass stops at the floor. A few tens of megabytes kept by a process
@@ -825,7 +852,9 @@ Seven rules stand behind the table.
   frees a great deal of one size and then allocates as much of another would hold both. So
   while the count is over a cap, growth is paid for: memory carved past a watermark is
   matched by an equal purge of retained memory, from wherever the purge walk stands and
-  whether or not fills still reach it, a step at a time and within a bound on the work.
+  whether or not fills still reach it. The carve returns one bounded step of that and
+  leaves the rest owed; the heartbeats that follow pay it a step each, and a debt whose
+  walk finds nothing to return is dropped rather than walked for again.
   This is the one place a frontier is ignored: the program is growing now, and holding
   both is what the cap exists to stop. Taking back pages that a purge returned is reuse,
   not growth, and is not charged; charging it sets the allocator purging what it is about

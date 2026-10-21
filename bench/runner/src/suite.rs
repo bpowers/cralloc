@@ -105,6 +105,19 @@ pub struct OpenLoad {
     /// For a protocol other than HTTP, the file of commands it sends in turn (`{inputs}` and
     /// `{app}` replaced); the HTTP fields above are then unused.
     pub requests: Option<&'static str>,
+    /// For a proxy: the server it forwards to, started first. `{upstream}` in the job's
+    /// arguments is replaced by its address.
+    pub upstream: Option<Upstream>,
+}
+
+/// The upstream of a proxy job: a binary of bench/probes/loadgen (built with glibc beside the
+/// generator, never the program under test), run on CPUs of its own in the generator's
+/// cgroup, which prints `BENCH_LISTEN addr` when it is ready and runs until killed.
+#[derive(Clone, Debug)]
+pub struct Upstream {
+    pub bin: &'static str,
+    pub args: Vec<&'static str>,
+    pub cpus: Vec<usize>,
 }
 
 #[derive(Clone, Debug)]
@@ -547,6 +560,7 @@ fn served() -> Vec<Served> {
         proto: "http",
         streams: 1,
         requests: None,
+        upstream: None,
     };
     // HTTP/2: eight connections of eight streams, the same 64 requests at once as HTTP/1.1's
     // 64 connections.
@@ -611,6 +625,21 @@ fn served() -> Vec<Served> {
             args: "actix",
             load: order("/orders"),
             rates: (120_000, 280_000),
+        },
+        // Sōzu, the reverse proxy, forwarding the order service's POST to an upstream on
+        // loopback (bench/probes/loadgen's `upstream`, 4 KiB answers) on three CPUs of the
+        // generator's L3, which two of them already keep up with. One worker process a CPU.
+        Served {
+            id: "sozu proxy",
+            program: Program::App("sozu"),
+            args: "proxy upstream={upstream}",
+            load: OpenLoad {
+                body: "{app}/../orders/order.json",
+                upstream: Some(Upstream { bin: "upstream", args: vec!["--body", "4096"], cpus: vec![12, 13, 14] }),
+                ..order("/orders")
+            },
+            // Every allocator saturates at 265k to 276k req/s, snmalloc slowest (2026-10-21).
+            rates: (80_000, 186_000),
         },
         // The control: tokio's mini-redis, alternate SET and GET over 100k keys (Redis
         // protocol).
@@ -685,7 +714,9 @@ struct Large {
 }
 
 /// The large-heap servers, each at three live sizes of about 0.5, 2 and 4 GiB: the order
-/// service keeping its last `keep` orders (about 1.9 KiB live an order), and mini-redis
+/// service keeping its last `keep` orders (about 1.9 KiB live an order) in tables sized for
+/// them from the start, so that the job measures steady churn and not the tables' one
+/// doubling (that is `servers_doubling`), and mini-redis
 /// preloaded with `preload` keys (about 1.1 KiB live a key) and churned by overwrites of mixed
 /// sizes, some with an expiry.
 fn large() -> Vec<Large> {
@@ -703,6 +734,7 @@ fn large() -> Vec<Large> {
         proto: "http",
         streams: 1,
         requests: None,
+        upstream: None,
     };
     let mut v = Vec::new();
     // 70% of the slowest saturated rate, mimalloc's: 348k, 349k and 355k req/s.
@@ -712,7 +744,7 @@ fn large() -> Vec<Large> {
         v.push(Large {
             id: format!("orders axum cache {size}"),
             program: Program::App("orders"),
-            args: format!("axum keep={keep}"),
+            args: format!("axum keep={keep} presize=1"),
             load: order.clone(),
             fill_s,
             r70,
@@ -733,8 +765,24 @@ fn large() -> Vec<Large> {
             r70,
         });
     }
+    // Meilisearch over 400k Hacker News items (about 1 GiB of heap and 3 GiB of mapped
+    // store), searched by 128 connections while it indexes a batch of updates every 200
+    // requests (bench/apps/meilisearch/fetch.sh). Its start indexes the items, before it
+    // listens.
+    v.push(Large {
+        id: "meilisearch hn".into(),
+        program: Program::App("meilisearch"),
+        args: "serve data={inputs}".into(),
+        load: OpenLoad { requests: Some("{inputs}/requests.http"), conns: 128, ..order.clone() },
+        fill_s: 5,
+        r70: MEILISEARCH_R70,
+    });
     v
 }
+
+/// 70% of the slowest allocator's saturated rate on `meilisearch hn`: mimalloc's 1,328 req/s
+/// (asmalloc 1,413, jemalloc 1,372, tcmalloc 1,423).
+const MEILISEARCH_R70: u32 = 930;
 
 fn large_job(l: Large, plan: String, rank: &'static str, suffix: &str) -> Job {
     Job {
@@ -762,6 +810,25 @@ pub fn servers_large() -> Vec<Job> {
         })
         .collect()
 }
+
+/// The order service at 4 GiB with tables that are not pre-sized, so that each of its 64
+/// shard tables doubles once under churn, long after the store is full, rehashing every entry
+/// under the shard's lock (docs/research/servers-large.md, "The 4 GiB tail"). The load is a
+/// fixed rate from the start, so that the doublings come at the same order count, and so the
+/// same moment, for every allocator, inside the measured segment `dbl`. The server reports
+/// each doubling's time and page faults; the runner, the latency, faults and resident set
+/// over `dbl`.
+pub fn servers_doubling() -> Vec<Job> {
+    let l = large().into_iter().find(|l| l.id == "orders axum cache 4G").expect("the 4 GiB order service");
+    let plan = format!("_fill:{r}:{DOUBLING_FILL_S},dbl:{r}:{DOUBLING_S},idle:close:5", r = l.r70);
+    let l = Large { id: "orders axum doubling 4G".into(), args: "axum keep=2250000".into(), ..l };
+    vec![large_job(l, plan, "dbl", "")]
+}
+
+/// The doublings come after about 14.4M orders: at 248k req/s, 58 to 60 s in for asmalloc and
+/// jemalloc alike, so 14 to 16 s into the segment.
+const DOUBLING_FILL_S: u32 = 44;
+const DOUBLING_S: u32 = 28;
 
 /// Each large-heap server's saturated rate, after its heap is filled.
 pub fn servers_large_sat() -> Vec<Job> {
