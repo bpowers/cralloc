@@ -84,7 +84,7 @@ thread's CPU time (`edits/steptime2.py`):
 | cgroup peak MiB | 853 to 865 | 859 to 960 (two runs over 880) | 853 to 871 |
 | Gcycles (median) | 70.33 | 70.11 | 72.26 |
 | steps of 0.25 ms or more, a run | 1 to 5 | 1 to 5 | |
-| longest step on its CPU | 0.43 ms | 0.72 ms | |
+| longest step not preempted | 0.43 ms | 0.36 ms | |
 
 With the hold's look at 0.5 MiB, two runs in six peaked over jemalloc (888 and 960 MiB), so
 the look stays at 2 MiB. What is left over 0.25 ms is about one to five steps a run. All but
