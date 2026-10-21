@@ -86,6 +86,16 @@ pub struct Rehash {
     pub ns: u64,
     /// Minor page faults the inserting thread took during it.
     pub faults: u64,
+    /// When it started, CLOCK_MONOTONIC ns, and on which thread: to line it up with traces.
+    pub start_ns: u64,
+    pub tid: u64,
+    /// The inserting thread's CPU time during it: the rest of `ns` it spent off its CPU.
+    pub cpu_ns: u64,
+    /// Voluntary and involuntary context switches the thread took during it.
+    pub vcsw: u64,
+    pub ivcsw: u64,
+    /// The cycle counter at its start, to line it up with an allocator's own timed events.
+    pub tsc: u64,
 }
 
 static REHASHES: Mutex<Vec<Rehash>> = Mutex::new(Vec::new());
@@ -95,14 +105,23 @@ pub fn rehashes() -> Vec<Rehash> {
     REHASHES.lock().unwrap().clone()
 }
 
-fn thread_faults() -> u64 {
+/// The calling thread's minor faults, voluntary and involuntary context switches.
+fn thread_usage() -> (u64, u64, u64) {
     let mut u = std::mem::MaybeUninit::<libc::rusage>::uninit();
     // SAFETY: getrusage writes one rusage.
     if unsafe { libc::getrusage(libc::RUSAGE_THREAD, u.as_mut_ptr()) } != 0 {
-        return 0;
+        return (0, 0, 0);
     }
     // SAFETY: initialised by the successful call.
-    unsafe { u.assume_init() }.ru_minflt as u64
+    let u = unsafe { u.assume_init() };
+    (u.ru_minflt as u64, u.ru_nvcsw as u64, u.ru_nivcsw as u64)
+}
+
+fn clock_ns(clock: libc::clockid_t) -> u64 {
+    let mut t = libc::timespec { tv_sec: 0, tv_nsec: 0 };
+    // SAFETY: clock_gettime writes one timespec.
+    unsafe { libc::clock_gettime(clock, &mut t) };
+    t.tv_sec as u64 * 1_000_000_000 + t.tv_nsec as u64
 }
 
 impl Shard {
@@ -112,16 +131,24 @@ impl Shard {
             self.map.insert(id, order);
             return;
         }
-        let (t, f) = (Instant::now(), thread_faults());
+        // SAFETY: rdtsc has no preconditions.
+        let tsc = unsafe { core::arch::x86_64::_rdtsc() };
+        let (start_ns, cpu) = (clock_ns(libc::CLOCK_MONOTONIC), clock_ns(libc::CLOCK_THREAD_CPUTIME_ID));
+        let (t, (f, v, i)) = (Instant::now(), thread_usage());
         self.map.insert(id, order);
-        let (ns, faults) = (t.elapsed().as_nanos() as u64, thread_faults() - f);
+        let ns = t.elapsed().as_nanos() as u64;
+        let cpu_ns = clock_ns(libc::CLOCK_THREAD_CPUTIME_ID) - cpu;
+        let (f2, v2, i2) = thread_usage();
+        let (faults, vcsw, ivcsw) = (f2 - f, v2 - v, i2 - i);
+        // SAFETY: gettid has no preconditions.
+        let tid = unsafe { libc::gettid() } as u64;
         let capacity = self.map.capacity();
         if capacity == self.map.len() {
             return; // the insert took a deleted slot, with no rehash
         }
         let grew = capacity > self.full;
         self.full = capacity;
-        REHASHES.lock().unwrap().push(Rehash { grew, capacity, ns, faults });
+        REHASHES.lock().unwrap().push(Rehash { grew, capacity, ns, faults, start_ns, tid, cpu_ns, vcsw, ivcsw, tsc });
     }
 }
 
