@@ -99,7 +99,7 @@ fn headers_round_trip() {
 /// first, each with a bit for every word below and ending in one top word; the clean bitmap,
 /// covering every page; the leaf bitmap, covering every slot, last and less than a page after
 /// the rest; committed at assignment up to the leaf bitmap. A large class's block: its header
-/// (two words, `header_word` zero) alone on a line where the block has room; the summary
+/// (`HEADER_WORDS` words, `header_word` zero) alone on a line where the block has room; the summary
 /// levels; the leaf, zero and clean bitmaps; a size word for every slot; committed whole at
 /// assignment. The sections do not overlap.
 pub(super) fn layouts_fit(plan: Plan) {
@@ -127,7 +127,7 @@ pub(super) fn layouts_fit(plan: Plan) {
             } else {
                 layout.tree_word(0, 0)
             };
-            assert!(first == line || first == 2);
+            assert!(first == line || first == super::layout::HEADER_WORDS);
             first
         }
         None => {

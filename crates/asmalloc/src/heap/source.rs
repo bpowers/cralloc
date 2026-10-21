@@ -39,6 +39,9 @@ impl<O: Os> Source for Back<'_, O> {
     }
 
     fn purge_pass(&self, now: &dyn Fn() -> u64) {
+        // The hold first: what it returns down to its floor is then not in the count the
+        // clocked pass takes its goal from.
+        self.return_held(now);
         self.decay_pass(now);
     }
 }

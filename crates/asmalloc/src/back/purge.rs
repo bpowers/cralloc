@@ -111,7 +111,8 @@
 //! (`region::top_up`), so that the part of that huge page the fault made resident beyond the
 //! watermark can go with the rest. Each region keeps its own cursor in its `Hints`, and the
 //! walk over regions is one word in the state that every purger carries on from: the clocked
-//! pass, the cap's purge on growth. It goes round only the regions below the highest ever
+//! pass, the cap's purge on growth. The hold on free large slots (`hold`) carries on from the
+//! regions' cursors too, over a position of its own among the large classes' regions. It goes round only the regions below the highest ever
 //! given to a class (`Walk::top`), so a lap costs the class regions, not the reservation. A count of completed laps and the position a pass began
 //! at let a decay pass see that the walk has gone round even when another caller took the
 //! step that finished the lap. All of these are hints: two purgers on the same unit are safe because each purge is a
@@ -376,15 +377,15 @@ impl<O: Os> Back<'_, O> {
     /// [`Back::heartbeat`] for a caller that keeps its own reading of the clock: `now` is
     /// called only when the step needs the time.
     pub fn heartbeat_with(&self, now: &dyn Fn() -> u64) {
-        // The hold's fine count steps on the reading the decay step makes, when it makes one,
-        // so that the hold costs no clock read of its own.
+        // The hold's fine count steps on the reading the decay step makes between passes, so
+        // that the hold reads the clock itself only while a pass is under way (`hold`).
         let read = core::cell::Cell::new(None);
         let _ = self.decay_step(&|| {
             let time = now();
             read.set(Some(time));
             time
         });
-        self.hold_step(read.get(), now);
+        self.hold_beat(read.get().unwrap_or_else(now));
     }
 
     /// The clocked pass the heartbeats of an interval would take, in one call: starts a pass

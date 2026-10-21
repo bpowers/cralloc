@@ -28,8 +28,9 @@
 //! those read together, and is committed whole at assignment (its leaf bitmap is small):
 //!
 //! ```text
-//! word 0                      header: Grow (watermark, committed pages), then Hints (start of
-//!                             the huge-page part, purge cursor), on a line of its own
+//! word 0                      header: Grow (watermark, committed pages), Hints (start of the
+//!                             huge-page part, purge cursor), then the hold's stamp (`hold`), on
+//!                             a line of its own
 //! ...                         summary levels height down to 1
 //! ...                         leaf bitmap
 //! ...                         zero bitmap: one bit per slot, set means free and known to read
@@ -56,8 +57,9 @@ pub(crate) const MAX_LEVELS: usize = 5;
 /// Bytes per metadata word.
 pub(crate) const WORD_BYTES: usize = 8;
 
-/// A large class's header words at the start of its block: `Grow`, then `Hints`.
-const HEADER_WORDS: u32 = 2;
+/// A large class's header words at the start of its block: `Grow`, `Hints`, then the hold's
+/// stamp.
+pub(crate) const HEADER_WORDS: u32 = 3;
 
 /// Words in a cache line.
 const LINE_WORDS: u32 = (crate::lined::LINE / WORD_BYTES) as u32;
@@ -609,6 +611,13 @@ impl Layout {
     #[inline(always)]
     pub(crate) const fn header_word(&self) -> Option<u32> {
         if self.sizes == 0 { None } else { Some(0) }
+    }
+
+    /// Word offset of the region's stamp for the hold on free large slots (`hold`), in the
+    /// header after `Hints`, for a large class; `None` for a small class, which has none.
+    #[inline(always)]
+    pub(crate) const fn hold_word(&self) -> Option<u32> {
+        if self.sizes == 0 { None } else { Some(2) }
     }
 
     /// Word offset of the size word of slot `slot`, if the class records sizes (large classes).

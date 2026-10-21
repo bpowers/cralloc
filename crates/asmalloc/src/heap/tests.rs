@@ -1067,6 +1067,92 @@ fn blocks_have_one_owner_while_threads_churn_and_the_clock_runs() {
     }
 }
 
+/// The hold on free large slots (`back::hold`) through the heap, whose large calls beat the
+/// heart one in sixteen.
+mod hold {
+    use super::*;
+    use crate::back::policy::{FINE_TICKS, HOLD_STEPS, hold_floor};
+    use crate::os::sim::{Native, Shape as _};
+
+    /// Allocates, writes and frees twice the hold's floor in blocks of 256 KiB. Returns the
+    /// heap's free large memory then.
+    fn free_a_phase(heap: &SimHeap<Native>) -> usize {
+        let big = layout(256 << 10, 8);
+        let n = 2 * hold_floor(Native::GEOMETRY) / big.size();
+        // SAFETY: a valid layout; each block is written within its size and freed once.
+        unsafe {
+            let blocks: Vec<*mut u8> = (0..n).map(|_| heap.alloc(big)).collect();
+            for &b in &blocks {
+                b.write_bytes(7, big.size());
+            }
+            for &b in &blocks {
+                heap.dealloc(b, big);
+            }
+        }
+        let freed = heap.heap.back().unwrap().retained_large();
+        assert!(freed >= 2 * hold_floor(Native::GEOMETRY));
+        freed
+    }
+
+    /// A phase's free blocks are held while the next phase works in another large class, and
+    /// go back down to the floor once their hold has ended, counted in the steps the next
+    /// phase's heartbeats take.
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn a_phases_free_large_blocks_go_back_while_the_next_runs() {
+        let heap = SimHeap::<Native>::new();
+        let freed = free_a_phase(&heap);
+        let back = heap.heap.back().unwrap();
+        let small = layout(64 << 10, 8);
+        // Two large calls an iteration, so a heartbeat every eight, a fine step apart.
+        let work = |iterations: u32| {
+            for _ in 0..iterations {
+                heap.os().advance_clock(FINE_TICKS / 8);
+                // SAFETY: a valid layout; written within its size and freed once.
+                unsafe {
+                    let p = heap.alloc(small);
+                    p.write_bytes(3, small.size());
+                    heap.dealloc(p, small);
+                }
+            }
+        };
+        // The first carve in the new class pays its growth against the retained cap, which
+        // twice the floor is over in this shape.
+        work(1);
+        let held = back.retained_large();
+        assert!(held > hold_floor(Native::GEOMETRY) && held <= freed);
+        work(8 * (HOLD_STEPS - 4));
+        assert!(back.retained_large() >= held, "held for the hold");
+        work(8 * 2 * HOLD_STEPS);
+        let left = back.retained_large();
+        let floor = hold_floor(Native::GEOMETRY);
+        assert!(
+            left <= floor + small.size(),
+            "{left} left over a floor of {floor}"
+        );
+    }
+
+    /// `maintain`, in a silence, returns a quiet program's free large blocks down to the floor
+    /// at its first round, which the clocked pass alone would take several intervals to do.
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn maintain_returns_a_quiet_programs_free_large_blocks() {
+        let heap = SimHeap::<Native>::new();
+        let freed = free_a_phase(&heap);
+        let back = heap.heap.back().unwrap();
+        let mut rounds = 0;
+        while back.retained_large() == freed {
+            rounds += 1;
+            assert!(rounds < 8, "maintain never acted");
+            heap.os().advance_clock(crate::depot::IDLE_TICKS);
+            heap.maintain();
+        }
+        let left = back.retained_large();
+        let floor = hold_floor(Native::GEOMETRY);
+        assert!(left <= floor, "{left} left over a floor of {floor}");
+    }
+}
+
 #[cfg(all(target_os = "linux", target_arch = "x86_64", not(miri)))]
 mod process {
     use super::*;
