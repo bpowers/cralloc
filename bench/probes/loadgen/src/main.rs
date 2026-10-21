@@ -28,6 +28,9 @@
 //! loop). `--pid` samples the server's resident set every `--sample-ms` (default 10) into
 //! `--mem` as `ms,rss_kib,file_kib`.
 //!
+//! With HTTP/1.1, `--requests FILE` instead holds whole requests (head and body) written back
+//! to back, sent in turn as RESP commands are, in place of the one request the options build.
+//!
 //! `--proto h2` speaks HTTP/2 over cleartext with prior knowledge: `--conns` connections,
 //! each carrying up to `--streams` requests at once (src/h2.rs). The same request options.
 //!
@@ -254,8 +257,16 @@ fn main() {
             }
             v
         }
+        (worker::Proto::Http, Some(p)) => {
+            let b = std::fs::read(p).unwrap_or_else(|e| die(&format!("{}: {e}", p.display())));
+            let v = http::split(&b).unwrap_or_else(|e| die(&format!("{}: {e}", p.display())));
+            if v.is_empty() {
+                die(&format!("{}: no requests", p.display()));
+            }
+            v
+        }
         (worker::Proto::H2, None) => Vec::new(),
-        (worker::Proto::Http | worker::Proto::H2, Some(_)) => die("--requests is for --proto resp"),
+        (worker::Proto::H2, Some(_)) => die("--requests is for --proto http or resp"),
         (worker::Proto::Resp, None) => die("--proto resp needs --requests FILE"),
     };
     // Connections are opened before the start, so it is set far enough ahead for that.

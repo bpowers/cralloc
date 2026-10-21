@@ -282,13 +282,20 @@ pub fn summarize(l: &Loaded, memory: &[MemSample], rank: &str) -> (Value, Option
         groups.insert(name.clone(), gj);
     }
     // The curve, from the first mark to the last sample (after the end of the plan the
-    // server is stopped, so it ends shortly after the last mark).
+    // server is stopped, so it ends shortly after the last mark): the resident set, and the
+    // anonymous part of it from the last rollup (once a second), which for a server that maps
+    // its store (Meilisearch) is what the allocator holds.
     let t0 = l.marks.first().map_or(0.0, |m| m.t_ms);
     let mut curve = Vec::new();
     let mut next = t0;
-    for m in memory.iter().filter(|m| m.t_ms >= t0) {
+    let mut anon = memory.iter().find_map(|m| m.rollup).map_or(0, |r| r.anonymous);
+    for m in memory.iter() {
+        anon = m.rollup.map_or(anon, |r| r.anonymous);
+        if m.t_ms < t0 {
+            continue;
+        }
         if m.t_ms >= next {
-            curve.push(json!([((m.t_ms - t0) * 10.0).round() / 10.0, m.rss / 1024]));
+            curve.push(json!([((m.t_ms - t0) * 10.0).round() / 10.0, m.rss / 1024, anon / 1024]));
             // The first sample in each 250 ms step of the grid that starts at the first mark.
             next = t0 + ((m.t_ms - t0) / CURVE_MS).floor() * CURVE_MS + CURVE_MS;
         }

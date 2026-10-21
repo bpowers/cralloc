@@ -82,6 +82,8 @@ SERVERS = {
     "cache-2G": ("apps/orders/release/orders", ["axum", "keep=1120000"], H1 + ORDER),
     "miniredis-2G": ("apps/miniredis/release/miniredis", ["serve", "preload=1800000"],
                      H1 + ["--proto", "resp", "--requests", str(INPUTS / "miniredis/churn-1800000.resp")]),
+    "meilisearch": ("apps/meilisearch/release/meilisearch", ["serve", f"data={INPUTS / 'meilisearch'}"],
+                    ["--conns", "128", "--requests", str(INPUTS / "meilisearch/requests.http")]),
     "miniredis": ("apps/miniredis/release/miniredis", ["serve"],
                   H1 + ["--proto", "resp", "--requests", str(INPUTS / "miniredis/commands.resp")]),
 }
@@ -126,7 +128,9 @@ def run(mode, server, build, rnd, args, out):
     pid = srv.pid
     try:
         addr = None
-        for _ in range(400):
+        # Up to five minutes: Meilisearch indexes its items before it listens.
+        deadline = time.time() + 300
+        while time.time() < deadline:
             so.seek(0)
             for line in so.read().splitlines():
                 if line.startswith("BENCH_LISTEN"):

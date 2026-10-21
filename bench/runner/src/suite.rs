@@ -765,8 +765,24 @@ fn large() -> Vec<Large> {
             r70,
         });
     }
+    // Meilisearch over 400k Hacker News items (about 1 GiB of heap and 3 GiB of mapped
+    // store), searched by 128 connections while it indexes a batch of updates every 200
+    // requests (bench/apps/meilisearch/fetch.sh). Its start indexes the items, before it
+    // listens.
+    v.push(Large {
+        id: "meilisearch hn".into(),
+        program: Program::App("meilisearch"),
+        args: "serve data={inputs}".into(),
+        load: OpenLoad { requests: Some("{inputs}/requests.http"), conns: 128, ..order.clone() },
+        fill_s: 5,
+        r70: MEILISEARCH_R70,
+    });
     v
 }
+
+/// 70% of the slowest allocator's saturated rate on `meilisearch hn`: mimalloc's 1,328 req/s
+/// (asmalloc 1,413, jemalloc 1,372; tcmalloc aborts, see bench/apps/README.md).
+const MEILISEARCH_R70: u32 = 930;
 
 fn large_job(l: Large, plan: String, rank: &'static str, suffix: &str) -> Job {
     Job {
