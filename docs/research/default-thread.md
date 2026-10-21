@@ -49,7 +49,7 @@ had gone three without one, and the seconds of silence that took (a typical run)
 | case | thread | parked after, s | wake-ups once parked | RssAnon, MiB |
 |---|---|---|---|---|
 | a worker frees 128 MiB | yes | 17 | 0 | 31 |
-| the main thread frees what a worker allocated | yes | 18 | 0 | 31 |
+| the main thread frees what a worker allocated | yes | 18 | 0 | 35 |
 | a worker allocates 384 MiB of 64-byte objects and frees every other one | yes | 20 | 0 | 410 |
 | fork child of a parked parent, its first thread frees 128 MiB | no | | | |
 | the same child, then a thread of its own frees 128 MiB | yes | 18 | 0 | 32 |
@@ -77,9 +77,11 @@ than its first as the evidence.
 
 The thread does not park while slow paths run: each round compares the slabs' activity
 counters, and any change starts its count again. Awake, it sleeps `MAINTAIN_EVERY` (500 ms)
-between calls, so it wakes twice a second. The axum order service was not run again; its
-measurement below is from before the review, and the rule that keeps a working program's thread
-awake did not change.
+between calls, so it wakes twice a second. Measured with the `steady` mode of
+`tests/default_thread.rs` (a worker frees 128 MiB, then two threads allocate and free 64 KiB
+every 100 ms for 20 s): 20 wake-ups in 10 s of that work, and parked 14 s into the silence after
+it. The axum order service was not run again (the shared measurement lock was held by server
+runs throughout); its numbers below are from before the review.
 
 ## Large blocks on the slow path (after the review)
 
