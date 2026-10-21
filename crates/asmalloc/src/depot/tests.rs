@@ -812,35 +812,6 @@ fn trace(rig: &TestRig) -> Trace {
     }
 }
 
-/// Lets the heartbeats that `park_on_cpu_0` ran fall two counted intervals behind, so that the
-/// next `maintain` finds the heap quiet: `maintain` leaves a heap whose heartbeats ran in this
-/// interval or the last to them, and its own call is what steps the count through a silence.
-fn past_the_heartbeats(rig: &TestRig) {
-    rig.os().advance_clock(IDLE_TICKS);
-    rig.cache(&SimCpu::new(1)).maintain();
-    rig.os().advance_clock(IDLE_TICKS);
-}
-
-/// While heartbeats keep coming, `maintain` does nothing at all: a timer that calls it costs a
-/// busy heap one clock read a call.
-#[test]
-fn maintain_leaves_a_heap_whose_heartbeats_run_to_them() {
-    let rig = rig(12, TIGHT);
-    let machine = SimCpu::new(1);
-    let cache = rig.cache(&machine);
-    for _ in 0..8 {
-        park_on_cpu_0(&rig, 3);
-        cache.maintain();
-        rig.os().advance_clock(IDLE_TICKS / 2);
-    }
-    assert_eq!(rig.source.passes(), 0);
-    assert_eq!(rig.os().calls(Call::Fence), 0);
-    // Quiet for two intervals, it does its round.
-    past_the_heartbeats(&rig);
-    cache.maintain();
-    assert_eq!(rig.source.passes(), 1);
-}
-
 /// A quiet heap, with no slow path anywhere: `maintain` once an interval drains the idle slab
 /// (laundering what it takes) an interval after its first look, and the depot sheds what it held
 /// at the first look in the interval after the last one in which its stack was empty, so that
@@ -854,7 +825,6 @@ fn maintain_returns_what_a_quiet_heap_parked() {
     let steps = rig.source.purges();
     let keeper = SimCpu::new(1);
     let cache = rig.cache(&keeper);
-    past_the_heartbeats(&rig);
     cache.maintain();
     assert_eq!(
         rig.os().calls(Call::Fence),
@@ -887,7 +857,6 @@ fn maintain_twice_in_an_interval_changes_nothing_the_second_time() {
     let cache = rig.cache(&keeper);
     let mut changed = 0;
     for _ in 0..4 {
-        past_the_heartbeats(&rig);
         let before = trace(&rig);
         cache.maintain();
         let first = trace(&rig);
@@ -971,9 +940,7 @@ fn maintain_drains_a_cpu_busy_on_fast_paths_at_most_once_an_interval() {
         "{refills} refills after {} drains",
         drains.len()
     );
-    // A drain's refill is a slow path, whose heartbeat makes `maintain` leave the heap alone
-    // for that interval and the next: a drain every third interval.
-    assert!(drains.len() >= intervals as usize / 3 - 1, "{drains:?}");
+    assert!(drains.len() >= intervals as usize / 2 - 1, "{drains:?}");
     for pair in drains.windows(2) {
         assert!(
             pair[1] - pair[0] >= IDLE_TICKS,
@@ -1001,7 +968,6 @@ fn maintain_without_drains_sheds_the_depot() {
         .map(|pool| rig.depot.full(pool, class).count(area, class.magazine()))
     };
     assert!(parked()[0] > 0, "{:?}", parked());
-    past_the_heartbeats(&rig);
     for _ in 0..3 {
         keeper.maintain();
         rig.os().advance_clock(IDLE_TICKS);
@@ -1020,7 +986,6 @@ fn fork_in_maintain_at(at: usize, survives: bool) -> bool {
     let rig = rig(12, TIGHT);
     park_on_cpu_0(&rig, 8);
     let keeper = SimCpu::new(1);
-    past_the_heartbeats(&rig);
     rig.cache(&keeper).maintain();
     rig.os().advance_clock(IDLE_TICKS);
     let fork = || {

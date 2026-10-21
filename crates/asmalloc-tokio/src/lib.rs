@@ -60,4 +60,19 @@ mod tests {
         handle.abort();
         assert!(handle.await.unwrap_err().is_cancelled());
     }
+
+    /// Review of `burst-start`: on a runtime built without its timer (`enable_time`), the call
+    /// returns a handle as if all were well and the task dies at its first poll, so the
+    /// program gets no maintenance and no sign of it. This test fails as the crate stands.
+    #[test]
+    fn a_runtime_without_a_timer_is_refused_at_the_call_not_silently_in_the_task() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap();
+        let outcome = runtime.block_on(async { super::spawn_maintenance().await });
+        assert!(
+            !outcome.is_err_and(|error| error.is_panic()),
+            "the task panicked out of sight"
+        );
+    }
 }

@@ -1,11 +1,9 @@
 //! `maintain`: the middle tier's share of one round of the clocked maintenance for the whole
-//! heap, for a background thread or a program's timer. It does at once what the heartbeats of
-//! an interval would have done, where they are not running: it returns at once, after one
-//! clock read and a load or two, if a heartbeat ran in this counted interval or the one before
-//! (`crate::clock`), or if a round already ran in this one. So a timer or a hook may call it
-//! freely; a heap busy on its slow paths pays nothing for it, and a silence is maintained from
-//! its second interval on. Its clock read is also what steps the count through a silence, so
-//! with a timer calling it, intervals pass in wall time.
+//! heap, for a background thread or a program's timer. It does what the heartbeats of an
+//! interval would have done. It runs one round in each counted interval (`crate::clock`) and
+//! returns at once, after one clock read and a load, for every other call in it, so a timer or
+//! a hook may call it freely. Its clock read is also what steps the count through a silence,
+//! so with a timer calling it, intervals pass in wall time.
 //!
 //! 1. **The idle look at every slab** a slow path has used ([`Cache::idle_look`]): a slab whose
 //!    activity counter has stood still for an interval is drained, including one busy only on

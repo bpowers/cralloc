@@ -25,6 +25,12 @@
 //! counter a little behind) re-stamps the step without counting one, so the interval runs from
 //! the new time, as the rules already allow for.
 //!
+//! **Limit.** The cycle counters of all CPUs are taken to agree to well within an interval, as
+//! they do on current x86-64 machines (an invariant, synchronized TSC). Counters that differ by
+//! more than an interval make readings from different CPUs step the count, or re-stamp it, at
+//! each other's expense; the rules then run early or late, which costs memory or work and
+//! nothing else.
+//!
 //! Anything that calls [`Counted::now`] may take a step: every heartbeat and `maintain`. A
 //! process with a background thread or a timer calling `maintain` therefore counts its
 //! silences in wall time, as before.
@@ -59,9 +65,6 @@ pub struct Counted {
     /// One more than the count at which `maintain` last ran a round, zero for never: what
     /// limits it to one round an interval (design: "Heartbeat").
     maintained: AtomicU64,
-    /// One more than the count at which a heartbeat last ran, zero for never: `maintain`
-    /// leaves a heap whose heartbeats are running to them.
-    beaten: AtomicU64,
 }
 
 /// What a reading of the word and the clock decides.
@@ -120,51 +123,40 @@ impl Counted {
         Counted {
             word: AtomicU64::new(0),
             maintained: AtomicU64::new(0),
-            beaten: AtomicU64::new(0),
         }
     }
 
     /// The counted time, in ticks, taking a step if an interval has passed since the last.
     /// One load, and a compare-and-swap about once an interval.
     pub(crate) fn now<O: Os + ?Sized>(&self, os: &O) -> u64 {
-        let ticks = os.ticks();
-        let mut word = self.word.load(Relaxed);
         loop {
-            let reading = read(word, ticks);
+            // The word before the clock, and both again after a failed compare-and-swap: a
+            // reading taken before another reader's step and compared after it would look like
+            // a clock that went back, re-stamp the step to the older time, and let the next
+            // reader step again, two steps for one interval.
+            let word = self.word.load(Relaxed);
+            let reading = read(word, os.ticks());
             let Some(next) = reading.next else {
                 return reading.time;
             };
-            // A failure means another reader stepped or re-stamped: read its word again, which
-            // is at most one step on.
-            match self.word.compare_exchange(word, next, Relaxed, Relaxed) {
-                Ok(_) => return reading.time,
-                Err(found) => word = found,
+            if self
+                .word
+                .compare_exchange(word, next, Relaxed, Relaxed)
+                .is_ok()
+            {
+                return reading.time;
             }
         }
     }
 
-    /// Notes that a heartbeat ran in the interval the count is in. A load, and a store once an
-    /// interval.
-    pub(crate) fn note_beat(&self) {
-        let mark = self.count() as u64 + 1;
-        if self.beaten.load(Relaxed) != mark {
-            self.beaten.store(mark, Relaxed);
-        }
-    }
-
-    /// Whether a round of `maintain` is due: no heartbeat ran in this interval or the one
-    /// before, so that the heap's own maintenance is not running, and no round has run in this
-    /// interval. The caller that gets `true` has claimed the round, with one compare-and-swap,
-    /// so of callers in one interval at most one runs it. Reads the counted time first, so a
-    /// call is what steps the count through a silence. A heap busy on its slow paths is left
-    /// to its heartbeats, and a silence is maintained from its second interval on.
+    /// Whether a round of `maintain` is due: none has run in the interval the count is in. The
+    /// caller that gets `true` has claimed the round, with one compare-and-swap, so of callers
+    /// in one interval at most one runs it. Reads the counted time first, so a call is what
+    /// steps the count through a silence. Heartbeats do not count: one does a small part of
+    /// what a round does, so that one ran says nothing about whether the round's work is done.
     pub(crate) fn claim_round<O: Os + ?Sized>(&self, os: &O) -> bool {
         let _ = self.now(os);
         let round = self.count() as u64 + 1;
-        let beaten = self.beaten.load(Relaxed);
-        if beaten != 0 && beaten + 1 >= round {
-            return false;
-        }
         let last = self.maintained.load(Relaxed);
         last != round
             && self

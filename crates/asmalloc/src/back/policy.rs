@@ -53,6 +53,12 @@ pub const FILL_CLAIMS: usize = 256;
 /// words for the smallest classes, from holding up the allocations that want them.
 pub const PURGE_MAX_RUN_PAGES: u32 = 64;
 
+/// The most bitmap words a run's looks read, and so about the most its purge claims at once:
+/// 64. A claim holds its words through the `madvise`, and a fill that meets them moves on and
+/// may carve instead; for the smallest classes, eight words to a page, this keeps a run to 8
+/// pages.
+pub const PURGE_MAX_RUN_WORDS: usize = 64;
+
 /// The clocked pass returns a run of free pages only if it has at least this many: 4. A call
 /// for one page costs four times as much a page as one for four, and a short run is the kind a
 /// burst's next allocations land on. Growth over the cap and `collect` take any run. Runs of 8

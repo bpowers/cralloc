@@ -124,8 +124,8 @@ use super::Back;
 use super::layout::Unit;
 use super::layout::{Hints, Step};
 use super::policy::{
-    DECAY_TICKS, PURGE_ANY_RUN_EVERY, PURGE_CAP_WORDS, PURGE_MAX_RUN_PAGES, PURGE_MIN_RUN_PAGES,
-    PURGE_STEP_WORDS, decay_goal, growth_goal, growth_step, retained_cap,
+    DECAY_TICKS, PURGE_ANY_RUN_EVERY, PURGE_CAP_WORDS, PURGE_MAX_RUN_PAGES, PURGE_MAX_RUN_WORDS,
+    PURGE_MIN_RUN_PAGES, PURGE_STEP_WORDS, decay_goal, growth_goal, growth_step, retained_cap,
 };
 use super::region::{self, Purge};
 use super::tree::Host;
@@ -153,7 +153,12 @@ pub(crate) enum Decay {
     Step,
 }
 
-/// The decision for a decay word read as `word` with the clock at `now`.
+/// The decision for a decay word read as `word` with the clock at `now`: a pass is due once
+/// in each counted interval (`crate::clock`), the first time a reading falls in an interval
+/// later than the word's. Due by the interval's number, not by an interval of time since the
+/// word: a pass that ended a little after the start of its interval would otherwise not be an
+/// interval old at the start of the next, and with readings an interval apart (a `maintain`
+/// once an interval, or heartbeats that far apart) passes would come every other interval.
 pub(crate) const fn decay_look(word: u64, now: u64) -> Decay {
     if word & ACTIVE != 0 {
         return Decay::Step;
@@ -162,7 +167,7 @@ pub(crate) const fn decay_look(word: u64, now: u64) -> Decay {
     let since = now.wrapping_sub(word);
     if since >= 1 << 63 {
         Decay::Restamp(now)
-    } else if since >= DECAY_TICKS {
+    } else if now / DECAY_TICKS > word / DECAY_TICKS {
         Decay::Start(now | ACTIVE)
     } else {
         Decay::Wait
@@ -369,7 +374,6 @@ impl<O: Os> Back<'_, O> {
 
     /// The maintenance a slow path does on its way out: one step of decay.
     pub fn heartbeat(&self) {
-        self.state.decay.clock.note_beat();
         self.heartbeat_with(&|| self.now());
     }
 
@@ -444,14 +448,17 @@ impl<O: Os> Back<'_, O> {
                     return None;
                 }
                 let over = retained.saturating_sub(retained_cap(geometry));
-                // The pass that takes runs of any length takes all it finds: the short runs the
-                // passes before it left have waited long enough.
-                let any = self.epoch().is_multiple_of(PURGE_ANY_RUN_EVERY);
-                let goal = if any {
-                    retained
-                } else {
-                    decay_goal(geometry, retained).max(over)
-                };
+                let goal = decay_goal(geometry, retained).max(over);
+                // One pass in `PURGE_ANY_RUN_EVERY` takes runs of any length, counted by
+                // passes, not by the interval's number, which a pass that comes every other
+                // interval could miss for ever. The count is a hint: a lost update moves the
+                // pass that takes short runs by one.
+                let any = state
+                    .walk
+                    .passes
+                    .fetch_add(1, Relaxed)
+                    .wrapping_add(1)
+                    .is_multiple_of(PURGE_ANY_RUN_EVERY as u32);
                 // From where the walk stands: a pass that started at the top every time spent
                 // its goal on the regions above whatever a quiet program revived each interval,
                 // and never reached the free pages of the lowest regions. The pass word is
@@ -707,8 +714,16 @@ impl<O: Os> Back<'_, O> {
                 }
                 Step::Unit(unit) => {
                     // The run of purgeable units that ends at this one, down to the floor.
+                    // Within what the step may still purge and read, so that a run does not
+                    // carry the step far past its goal or its budget.
+                    let page = layout.page_size();
+                    let pages = limit.saturating_sub(purged).div_ceil(page).max(1);
+                    let room = Room {
+                        pages: (pages.min(PURGE_MAX_RUN_PAGES as usize)) as u32,
+                        words: budget.saturating_sub(read).clamp(1, PURGE_MAX_RUN_WORDS),
+                    };
                     let (run, words) =
-                        self.run_below(&host, region, unit, carved, huge_from, floor);
+                        self.run_below(&host, region, unit, carved, huge_from, floor, room);
                     read += words;
                     match run {
                         Some(run) if run.end - run.start < min_run => run.start,
@@ -740,8 +755,9 @@ impl<O: Os> Back<'_, O> {
 
 impl<O: Os> Back<'_, O> {
     /// The run of adjacent purgeable units (`region::purgeable_unit`) that ends with `unit`,
-    /// extended down while the next unit below is purgeable, starts at or above `floor`, and
-    /// keeps the run within [`PURGE_MAX_RUN_PAGES`]; `None` if `unit` itself is not
+    /// extended down while the next unit below is purgeable, starts at or above `floor`, keeps
+    /// the run within `room.pages` and the bitmap words its looks read within `room.words`
+    /// (the words its purge then claims, about as many); `None` if `unit` itself is not
     /// purgeable. Units of the huge-page part are whole huge pages already and are not joined.
     /// Reads only; returns the run and the leaf words read.
     fn run_below<H: Host>(
@@ -752,6 +768,7 @@ impl<O: Os> Back<'_, O> {
         carved: u32,
         huge_from: Option<u32>,
         floor: u32,
+        room: Room,
     ) -> (Option<Unit>, usize) {
         let (ok, mut read) = region::purgeable_unit(host, region, unit);
         if !ok {
@@ -763,21 +780,25 @@ impl<O: Os> Back<'_, O> {
         }
         let layout = *host.layout();
         while let Step::Unit(next) = layout.unit_below(carved, huge_from, run.start) {
-            if next.end != run.start
-                || next.start < floor
-                || run.end - next.start > PURGE_MAX_RUN_PAGES
-            {
+            if next.end != run.start || next.start < floor || run.end - next.start > room.pages {
                 break;
             }
             let (ok, words) = region::purgeable_unit(host, region, next);
             read += words;
-            if !ok {
+            if !ok || read > room.words {
                 break;
             }
             run.start = next.start;
         }
         (Some(run), read)
     }
+}
+
+/// How far a run may extend: pages, and bitmap words read.
+#[derive(Clone, Copy)]
+struct Room {
+    pages: u32,
+    words: usize,
 }
 
 /// A goal of `bytes` as the pass word holds it: whole pages, at least one.

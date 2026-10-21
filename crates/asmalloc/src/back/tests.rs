@@ -5359,3 +5359,6 @@ mod retained_reading {
         assert!(read > 4 * MIB as isize, "{read}");
     }
 }
+
+/// The review of counted intervals, purging by runs and `maintain`'s rate limit.
+mod burst_start_review;
