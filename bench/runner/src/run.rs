@@ -137,13 +137,30 @@ pub struct Snapshot {
     pub at: Instant,
     pub counters: Sample,
     pub stat: ProcStat,
+    /// Every CPU's task time (`sys::task_ns`), to find other work on the server's CPUs.
+    pub cpu_task: Vec<u64>,
 }
 
 impl Snapshot {
     pub fn take(c: &Child) -> Snapshot {
-        Snapshot { at: Instant::now(), counters: c.read_counters(), stat: ProcStat::read(c.pid) }
+        Snapshot {
+            at: Instant::now(),
+            counters: c.read_counters(),
+            stat: ProcStat::read(c.pid),
+            cpu_task: sys::task_ns(),
+        }
     }
 }
+
+/// The most other work a server's CPUs may carry, in CPUs, averaged over any one counted
+/// segment of its plan, before the run is invalid. Other work there takes the server's cores
+/// and caches, and comes and goes, so it moves one allocator's run and not the next. Quiet
+/// runs measured at most 0.06 in a segment; three seconds of one busy CPU, 0.2 to 0.9.
+const FOREIGN_LIMIT: f64 = 0.1;
+/// The same for a job without a load plan, over the process's whole life. Quiet runs of the
+/// quick suite measured at most 0.03, except the RPC jobs at 0.1 (work on the server's CPUs
+/// that its own CPU time does not count, the same in every run).
+const FOREIGN_LIMIT_LIFE: f64 = 0.25;
 
 struct Outcome {
     exit: Exit,
@@ -448,6 +465,7 @@ fn run_one(job: &Job, a: &Allocator, cx: &Context, clock: &mut Clock) -> Value {
         None => "free".to_string(),
     };
     let t0 = CpuTimes::read();
+    let task0 = sys::task_ns();
     let vm = sys::Vmstat::read();
     let started = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap().as_secs_f64();
     let (out, usage, driver_usage) = match groups {
@@ -458,7 +476,14 @@ fn run_one(job: &Job, a: &Allocator, cx: &Context, clock: &mut Clock) -> Value {
         Err(e) => (Outcome::not_started(format!("creating the run's cgroup: {e}")), None, None),
     };
     let busy = CpuTimes::read().busy_since(&t0);
+    let task1 = sys::task_ns();
     drop(spinners);
+    // Other work on the job's CPUs over the process's life, as `serve::foreign` counts it for
+    // a server's segments: their task time less the process's own CPU time.
+    let on_cpus: u64 =
+        job.cpus.iter().map(|&c| task1.get(c).unwrap_or(&0).saturating_sub(*task0.get(c).unwrap_or(&0))).sum();
+    let foreign_life =
+        (on_cpus as f64 - (out.exit.utime_ns + out.exit.stime_ns) as f64) / out.exit.wall_ns.max(1) as f64;
 
     // What the process says it ran with: its own report when native, the probe when
     // preloaded.
@@ -536,6 +561,19 @@ fn run_one(job: &Job, a: &Allocator, cx: &Context, clock: &mut Clock) -> Value {
         }
         let busy = w["task_clock_ns"].as_f64().unwrap_or(0.0) / w["wall_ns"].as_f64().unwrap_or(1.0);
         extra.insert("server_cpus_busy".into(), busy.into());
+    }
+    if out.load.is_none() && foreign_life > FOREIGN_LIMIT_LIFE {
+        problems.push(format!(
+            "other work on the job's CPUs: {foreign_life:.2} CPUs over the run (limit {FOREIGN_LIMIT_LIFE})"
+        ));
+    }
+    let foreign = out.load.as_ref().map(|l| crate::serve::foreign(l, &job.cpus)).unwrap_or_default();
+    if let Some((name, cpus)) = foreign.iter().max_by(|a, b| a.1.total_cmp(&b.1))
+        && *cpus > FOREIGN_LIMIT
+    {
+        problems.push(format!(
+            "other work on the server's CPUs: {cpus:.2} CPUs over segment {name} (limit {FOREIGN_LIMIT})"
+        ));
     }
     let (served, served_primary) = match (&out.load, &job.load) {
         (Some(l), Some(jl)) => {
@@ -625,6 +663,8 @@ fn run_one(job: &Job, a: &Allocator, cx: &Context, clock: &mut Clock) -> Value {
             // process's own CPU time, both over its lifetime. Jiffies, so coarse.
             "foreign_on_job_cpus": sys::busy_sum(&busy, &job.cpus.iter().copied().collect())
                 - (out.exit.utime_ns + out.exit.stime_ns) as f64 / out.exit.wall_ns.max(1) as f64,
+            "foreign_task_cpus": (foreign_life * 1e3).round() / 1e3,
+            "foreign_by_segment": foreign.iter().map(|(n, c)| json!([n, (c * 1e3).round() / 1e3])).collect::<Vec<_>>(),
             "gate": cx.gate,
         },
         "stderr_tail": stderr_tail,

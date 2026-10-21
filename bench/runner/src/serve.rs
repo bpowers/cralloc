@@ -122,6 +122,28 @@ pub struct Loaded {
     pub result: Value,
 }
 
+/// Other work on the server's CPUs in each counted segment, in CPUs: the task time of those
+/// CPUs (`sys::task_ns`) less the server's own (its task clock, every thread), over the
+/// segment's length. Segments whose names begin with `_` are not counted, and are left out.
+pub fn foreign(l: &Loaded, cpus: &[usize]) -> Vec<(String, f64)> {
+    l.marks
+        .windows(2)
+        .filter(|w| w[0].segment.is_some() && !w[0].name.starts_with('_'))
+        .map(|w| {
+            let (a, b) = (&w[0].snap, &w[1].snap);
+            let on_cpus: u64 = cpus
+                .iter()
+                .map(|&c| {
+                    b.cpu_task.get(c).copied().unwrap_or(0).saturating_sub(a.cpu_task.get(c).copied().unwrap_or(0))
+                })
+                .sum();
+            let own = b.counters.since(&a.counters).get("task_clock_ns").unwrap_or(0);
+            let ns = b.at.duration_since(a.at).as_nanos().max(1) as f64;
+            (w[0].name.clone(), (on_cpus as f64 - own as f64) / ns)
+        })
+        .collect()
+}
+
 /// Starts the generator against `addr`, records the server at each of its marks, and waits for
 /// it to finish. Fails when the generator says the run cannot be trusted (its exit status) or
 /// gives no result.

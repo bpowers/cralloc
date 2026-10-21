@@ -42,6 +42,28 @@ impl CpuTimes {
     }
 }
 
+/// Nanoseconds each CPU has spent running tasks, indexed by CPU: the run queue's CPU time in
+/// /proc/schedstat (the seventh number of a `cpuN` line), which sums the same runtime a task's
+/// own task clock counts, so the two can be subtracted. /proc/stat's user and system time
+/// cannot be: they are sampled at the tick, and a CPU that goes idle and wakes often, as a
+/// server's does at partial load, is undercounted by half a CPU and more. Interrupt time is
+/// in neither.
+pub fn task_ns() -> Vec<u64> {
+    let text = std::fs::read_to_string("/proc/schedstat").unwrap_or_default();
+    let mut v = Vec::new();
+    for line in text.lines() {
+        let Some(rest) = line.strip_prefix("cpu") else { continue };
+        let mut it = rest.split_whitespace();
+        let Some(id) = it.next().and_then(|s| s.parse::<usize>().ok()) else { continue };
+        let Some(ns) = it.nth(6).and_then(|s| s.parse::<u64>().ok()) else { continue };
+        if v.len() <= id {
+            v.resize(id + 1, 0);
+        }
+        v[id] = ns;
+    }
+    v
+}
+
 /// Sum of busy fractions over `cpus`: how many CPUs' worth of work ran there.
 pub fn busy_sum(busy: &[f64], cpus: &BTreeSet<usize>) -> f64 {
     cpus.iter().map(|&c| busy.get(c).copied().unwrap_or(0.0)).sum()
