@@ -1405,6 +1405,53 @@ fn the_clocked_pass_returns_a_run_of_free_pages_in_one_call() {
     );
 }
 
+/// A run of free pages a little longer than `PURGE_MAX_RUN_PAGES` goes back whole in the first
+/// pass: the cap cuts it into a full run and a tail shorter than `PURGE_MIN_RUN_PAGES`, and the
+/// tail, directly below a run just purged, does not wait for the pass that takes any run.
+#[test]
+fn the_tail_of_a_run_the_cap_cut_goes_with_it() {
+    use super::policy::{PURGE_MAX_RUN_PAGES, PURGE_MIN_RUN_PAGES};
+    use crate::classes::MagazineSize;
+    use crate::os::sim::Shape;
+    use crate::space::Geometry;
+    /// 4 KiB pages, huge pages of 512 KiB and regions of 4 MiB: a small-page part of 256 pages
+    /// holds a run longer than the cap, and a pass's goal (`policy::decay_goal`, at least a
+    /// huge page) takes all of it.
+    enum Wide {}
+    impl Shape for Wide {
+        const GEOMETRY: Geometry = Geometry::new(12, 19, 22, 19, 256, 1, MagazineSize::MAX);
+    }
+    let state = state::<Wide>();
+    let back = state.get_or_reserve().unwrap();
+    let os = state.os();
+    let class = small(1024);
+    let per_page = Wide::GEOMETRY.page_size() / 1024;
+    let pages = small_part(&back, class) / per_page;
+    let run = (PURGE_MAX_RUN_PAGES + PURGE_MIN_RUN_PAGES / 2) as usize;
+    assert!(pages > run + 2);
+    let slots = fill(&back, class, pages * per_page);
+    for &p in &slots {
+        paint(p, 1024, 9);
+    }
+    // Pages 1 to `run`, between live pages.
+    let freed = &slots[per_page..(run + 1) * per_page];
+    // SAFETY: the test holds these slots and gives them up.
+    unsafe { back.launder(class, freed) };
+    forget_reuse(&back);
+    assert_eq!(back.retained(), freed.len() * 1024);
+    os.advance_clock(DECAY_TICKS);
+    beat(&back);
+    assert_eq!(
+        back.state
+            .walk
+            .passes
+            .load(core::sync::atomic::Ordering::Relaxed),
+        1,
+        "not the pass that takes any run"
+    );
+    assert_eq!(back.retained(), 0, "the tail of the run waited");
+}
+
 /// Free pages between live ones, each a run of one, wait for the pass that takes any run, one
 /// in `PURGE_ANY_RUN_EVERY`, and then go back.
 #[test]

@@ -702,6 +702,9 @@ impl<O: Os> Back<'_, O> {
             read += words;
         }
         let mut first = true;
+        // Where the last run this call purged began: a run that ends there is the tail of a
+        // longer one that the cap on a run's length cut, and goes whatever its length.
+        let mut below_purged = None;
         let done = loop {
             // Not before the first unit: the look above may have spent the whole budget, and
             // a call that then gave up would leave the cursor at the top for the next call to
@@ -736,13 +739,18 @@ impl<O: Os> Back<'_, O> {
                     let (run, words) = self.run_below(&host, region, unit, carved, huge_from, room);
                     read += words;
                     match run {
-                        Some(run) if run.end - run.start < min_run => run.start,
+                        Some(run)
+                            if run.end - run.start < min_run && below_purged != Some(run.end) =>
+                        {
+                            run.start
+                        }
                         Some(run) => {
                             // Its look before claiming reads the words `run_below` just read
                             // and counted; counting them twice halved what a step could purge.
                             let (outcome, _) = region::purge_unit(&host, region, run);
                             if let Purge::Done(bytes) = outcome {
                                 purged += bytes;
+                                below_purged = Some(run.start);
                             }
                             run.start
                         }
