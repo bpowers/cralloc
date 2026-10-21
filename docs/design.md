@@ -631,7 +631,10 @@ a program with one thread never gets one, because it may depend on staying that 
 evidence of a second thread is the C library's own record that one was created; a library
 that keeps no such record leaves a free made by a thread other than the first as the
 evidence. Which thread happens to free the memory must not matter where the library can
-say. The condition is a level and not an event. It is looked at when free memory rises
+say. The library's record survives a fork, and a fork child begins with one thread
+whatever its parent had, so in a fork child the evidence is again a free by a thread other
+than its first: a child is the process most likely to depend on having one thread, and
+keeping some memory there is the cheaper mistake. The condition is a level and not an event. It is looked at when free memory rises
 over the floor, and again once an interval for as long as it stays there, so a moment at
 which the thread could not be created only delays it. The thread buys nothing on
 the fast path, which stays as it is. Once an interval it calls `maintain`, which does for
@@ -659,6 +662,23 @@ path nothing. A program that is working, even one that never leaves its magazine
 the thread awake, because each round's drain sends its CPUs to their slow paths. Where
 slabs cannot be drained (see "Process lifecycle") nothing would send a resuming program to
 a slow path, so there the thread keeps to its timed sleep and never parks.
+
+While the thread runs, returning memory is its work and not a slow path's. A request that
+returns memory makes every request queued behind it on that worker wait, and a server
+whose tables grew by doubling had its slowest doublings set by the purge steps that
+happened to fall on them, not by the copy (`docs/research/doubling-tail.md`). So a slow
+path that finds such work due, a hold that has matured, growth over the cap to be paid
+for, an interval's pass, does none of it. It records what is due and, if the thread is
+asleep, wakes it. The thread takes the same bounded steps under the same rules until
+nothing is due, and sleeps no longer than the next piece of work has to wait, which for a
+hold is milliseconds. What goes back, and when to within those milliseconds, is unchanged.
+The thread starts when free memory first passes the floor, and nothing is returned below
+the floor, so in a program that has the thread a request's slow path does not return
+memory at all. Slow paths keep the work where there is no thread: a program with one
+thread, one that turned the thread off, one in which it could not be created. That is why
+every step stays bounded (see "Returning memory and huge pages"). And the bound on
+retained memory must not rest on the scheduler: when growth has gone unpaid past a limit,
+because the thread has not run, the carve pays a step itself.
 
 It is an ordinary thread of the process, created through the C library by the layer that
 links one, not by the allocator with a bare system call. A bare thread could be created
@@ -842,7 +862,8 @@ Nine rules stand behind the table.
   that takes one partly returned zeroes it, as it would any other. In a class of a huge page or more a piece is whole
   huge pages, so a purge does not split the pages it leaves behind
   (`docs/research/bounded-purge.md`). `collect` and `malloc_trim` are the program's own
-  calls and are not bounded.
+  calls and are not bounded. Where the background thread runs, a slow path takes none of
+  these steps and the thread takes them all (see "Heartbeat").
 - **Free large slots do not wait for the frontier.** A large class's region serves one
   size, so a program that frees blocks of many large sizes between phases of its work
   holds them all, class by class, for the two intervals the frontier rule waits. A query

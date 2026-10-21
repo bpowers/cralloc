@@ -72,6 +72,16 @@ if command -v systemd-run >/dev/null 2>&1 \
   fi
   exit "$status"
 else
-  echo "memlimit: systemd-run unavailable; falling back to prlimit --as (weaker)" >&2
+  # The fallback caps address space, not memory. asmalloc sizes its regions from the address
+  # space it may reserve, so under this limit it runs with smaller regions and places large
+  # blocks differently: fine for a test, wrong for a measurement, and the bench runner refuses
+  # to measure under it. The usual cause is an environment without the session's systemd
+  # (DBUS_SESSION_BUS_ADDRESS, XDG_RUNTIME_DIR): pass the environment through to this script
+  # and strip it inside, after the cap (`memlimit -- env -i ... command`).
+  {
+    echo "memlimit: WARNING: systemd-run unavailable; falling back to prlimit --as=$MEM."
+    echo "memlimit: WARNING: this limits address space, not memory, and asmalloc shrinks its"
+    echo "memlimit: WARNING: regions to fit it. Do not time anything under it."
+  } >&2
   exec prlimit --as="$(to_bytes "$MEM")" -- timeout --signal=TERM --kill-after=30s "$TIMEOUT" "$@"
 fi

@@ -7,7 +7,9 @@
 //! for twice that from the start, so that they never double while it serves (store.rs). The
 //! result line reports the tables' rehashes: for the doublings to the largest size reached,
 //! their number, median and largest time, and median page faults; and how many rehashed in
-//! place.
+//! place. On stderr, a `REHASH` line for every rehash (its start on the monotonic clock and
+//! the cycle counter, its thread, wall and CPU time, faults and context switches), for
+//! lining doublings up with traces (bench/probes/doubling-tail).
 //!
 //! axum runs on hyper and a multi-threaded tokio runtime with work stealing; actix-web runs one
 //! single-threaded runtime per worker thread, so blocks cross threads only through the shared
@@ -40,6 +42,13 @@ fn main() {
 
 fn report_rehashes(d: &mut Driver) {
     let all = store::rehashes();
+    // Every rehash, for lining doublings up with traces of the run.
+    for r in &all {
+        eprintln!(
+            "REHASH grew={} capacity={} start_ns={} ns={} cpu_ns={} faults={} vcsw={} ivcsw={} tid={} tsc={}",
+            r.grew as u8, r.capacity, r.start_ns, r.ns, r.cpu_ns, r.faults, r.vcsw, r.ivcsw, r.tid, r.tsc
+        );
+    }
     let top = all.iter().filter(|r| r.grew).map(|r| r.capacity).max().unwrap_or(0);
     let mut last: Vec<_> = all.iter().filter(|r| r.grew && r.capacity == top).collect();
     last.sort_by_key(|r| r.ns);
