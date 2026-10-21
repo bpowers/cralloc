@@ -47,8 +47,8 @@
 //! time within the bounds of that pass's steps, until one returns nothing or the floor is
 //! reached. It runs once a counted interval whether heartbeats run or not, and in a silence its
 //! own readings are what step the fine count, about once an interval, so a round decides its
-//! hold once, at its first look: the hold, or less if the count has moved fewer steps since the
-//! last look of an earlier round, in which case it takes a stamp as old once it is from before
+//! hold once, at its first look: the hold, unless the count has moved only the few steps its
+//! own readings make since the first look of the round before, and then a stamp from before
 //! that look (`Back::maintain_hold`). A quiet program's background thread or task returns its
 //! held large slots at its second round, while in a busy program `maintain` holds them as the
 //! heartbeats do.
@@ -163,7 +163,7 @@ pub(crate) struct Hold {
     /// (zero for none) in the high half, and the hold, in fine steps, in the low half
     /// (`Back::maintain_hold`).
     maintained: AtomicU64,
-    /// The fine count at `maintain`'s latest look, plus one; zero for none.
+    /// The fine count at the first look of `maintain`'s latest round, plus one; zero for none.
     maintain_looked: AtomicU32,
 }
 
@@ -184,6 +184,11 @@ impl Hold {
 const fn stamp_of(count: u32) -> u64 {
     1 << 32 | count as u64
 }
+
+/// The most fine steps between the first looks of two of `maintain`'s rounds that `maintain`'s
+/// own readings make in a silence: one a round, and a few more for a round whose purge phase
+/// lasts several fine steps (`Back::maintain_hold`). Heartbeats make hundreds an interval.
+const QUIET_STEPS: u32 = 4;
 
 /// Set in a stamp by the look that starts a walk of the region from its top: the walk that
 /// reaches the region's bottom with the stamp unchanged clears it, however many looks the
@@ -296,33 +301,33 @@ impl<O: Os> Back<'_, O> {
         more
     }
 
-    /// The hold for `maintain`'s look at fine count `count`, decided once a round. `maintain`
-    /// runs a round once a counted interval whether or not heartbeats run, and in a silence its
-    /// readings are what step the fine count, about one step a round, so a hold of
-    /// [`HOLD_STEPS`] would last a minute there. So a round takes the smaller of the hold and
-    /// the steps since the last look of an earlier round, plus one: a stamp that old was
-    /// written before the reading that stepped the count to the one that look saw, so before
-    /// that round, an interval or more ago in a silence. Where heartbeats step the count, the
-    /// steps since are many, and it takes the hold. The first round takes the hold. Every look
-    /// of a round takes what the round's first did, so a round that lasts more than a fine step
-    /// does not hold for a step or two from its own earlier look.
+    /// The hold for `maintain`'s look at fine count `count`, decided at a round's first look.
+    /// `maintain` runs a round once a counted interval whether or not heartbeats run, and in a
+    /// silence its own readings are what step the fine count, about one step a round, so a
+    /// hold of [`HOLD_STEPS`] would last a minute there. So where the count has moved no more
+    /// than [`QUIET_STEPS`] since the first look of the round before, which only `maintain`'s
+    /// readings do, a round takes the steps since plus one: a stamp that old was written before
+    /// the reading that stepped the count to the one that look saw, so before that round, an
+    /// interval or more ago. Where heartbeats step the count, it takes the hold: a round that
+    /// began a few steps after the last (one that ran on into the next counted interval, where
+    /// rounds are counted) is not taken for a silence. The first round takes the hold. Every
+    /// look of a round takes what its first did.
     fn maintain_hold(&self, count: u32) -> u32 {
         let hold = &self.state.hold;
         let round = self.state.decay.clock.count().wrapping_add(1);
         let seen = hold.maintained.load(Relaxed);
-        let steps = if (seen >> 32) as u32 == round && round != 0 {
-            seen as u32
+        if (seen >> 32) as u32 == round && round != 0 {
+            return seen as u32;
+        }
+        let last = hold.maintain_looked.load(Relaxed);
+        let since = count.wrapping_sub(last.wrapping_sub(1));
+        let steps = if last != 0 && since <= QUIET_STEPS {
+            since + 1
         } else {
-            let last = hold.maintain_looked.load(Relaxed);
-            let steps = if last == 0 {
-                HOLD_STEPS
-            } else {
-                count.wrapping_sub(last).wrapping_add(2).min(HOLD_STEPS)
-            };
-            hold.maintained
-                .store(u64::from(round) << 32 | u64::from(steps), Relaxed);
-            steps
+            HOLD_STEPS
         };
+        hold.maintained
+            .store(u64::from(round) << 32 | u64::from(steps), Relaxed);
         hold.maintain_looked.store(count.wrapping_add(1), Relaxed);
         steps
     }

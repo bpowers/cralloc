@@ -4,8 +4,7 @@
 
 use super::super::hold::{Reach, fine_read, held_for};
 use super::super::policy::{
-    FINE_TICKS, HOLD_STEPS, PURGE_MAINTAIN_STEP_PAGES, PURGE_MAX_RUN_PAGES, allowance_floor,
-    hold_beat,
+    FINE_TICKS, HOLD_STEPS, PURGE_MAINTAIN_STEP_PAGES, allowance_floor, hold_beat,
 };
 use super::super::word::Word;
 use super::*;
@@ -73,9 +72,10 @@ fn free_slots<O: Os>(
     (blocks, top)
 }
 
-/// The most one heartbeat's look returns: its bound, and the rest of the run it is on.
+/// The most one heartbeat's look returns: its bound, whatever the units (a large slot is
+/// returned in pieces).
 fn beat_bound() -> usize {
-    hold_beat(Native::GEOMETRY) + PURGE_MAX_RUN_PAGES as usize * Native::GEOMETRY.page_size()
+    hold_beat(Native::GEOMETRY)
 }
 
 /// Runs the hold to its end from the frees of `free_twice_the_floor` and checks what it
@@ -517,7 +517,7 @@ fn maintain_returns_a_quiet_programs_held_slots_at_its_second_round() {
     assert_eq!(back.retained_large(), freed, "the first round holds them");
     let largest = maintain_round(&back, os);
     let page = Native::GEOMETRY.page_size();
-    assert!(largest <= (PURGE_MAINTAIN_STEP_PAGES + PURGE_MAX_RUN_PAGES) as usize * page);
+    assert!(largest <= PURGE_MAINTAIN_STEP_PAGES as usize * page);
     let floor = allowance_floor(Native::GEOMETRY);
     let left = back.retained_large();
     assert!(left <= floor && left + class.size() > floor, "{left}");
@@ -640,4 +640,51 @@ fn a_region_larger_than_a_looks_budget_loses_its_stamp() {
         0,
         "still stamped after {laps} walks of the region, {words} words read"
     );
+}
+
+/// A `maintain` round under way when the counted interval steps
+/// becomes a new round, whose hold is measured from the look a fine step earlier.
+#[test]
+#[cfg_attr(miri, ignore)]
+fn a_maintain_round_across_an_interval_holds_a_busy_programs_slots() {
+    let state = state::<Native>();
+    let back = state.get_or_reserve().unwrap();
+    let os = state.os();
+    let class = large(256 << 10);
+    let step = || {
+        os.advance_clock(FINE_TICKS);
+        while back.hold_maintain_step(&|| back.now()) {}
+    };
+    step();
+    let per = (DECAY_TICKS / FINE_TICKS) as u32;
+    beat_for(&back, os, per, FINE_TICKS);
+    // To just after a counted interval begins, then to 20 fine steps before the next.
+    let interval = back.clock().count();
+    while back.clock().count() == interval {
+        beat_for(&back, os, 1, FINE_TICKS);
+    }
+    beat_for(&back, os, per - 20, FINE_TICKS);
+    let (_blocks, top) = free_twice_the_floor(&back, os, class);
+    let freed = back.retained_large();
+    beat_for(&back, os, 6, FINE_TICKS);
+    let interval = back.clock().count();
+    // A round whose purge phase lasts 16 fine steps (32 ms), the hold's step before each of
+    // the clocked pass's, as `maintain_step` takes them. The slots were freed under 30 steps
+    // ago.
+    for i in 0..16 {
+        step();
+        assert_eq!(
+            back.retained_large(),
+            freed,
+            "step {i}: returned, counted interval {} then {}",
+            interval,
+            back.clock().count()
+        );
+    }
+    assert_ne!(
+        back.clock().count(),
+        interval,
+        "the probe crossed an interval"
+    );
+    back.free(top, class);
 }

@@ -86,6 +86,17 @@ pub const PURGE_ANY_RUN_EVERY: u64 = 8;
 /// huge-page unit of small slots may read more.
 pub const PURGE_STEP_WORDS: usize = 256;
 
+/// How many pages a heartbeat's step of a decay pass may purge, in 4 KiB pages: 128, half a
+/// MiB, checked between units and within a unit that is one large slot, which a step returns
+/// a piece at a time (`purge`). A heartbeat runs on a request's slow path, and at about
+/// 0.15 us a page and a few microseconds a call (`docs/research/burst-start.md`) this is some
+/// 20 to 30 us. Without it one step made 4 `madvise` calls over 7,685 pages, about 1 ms. In a
+/// class of a huge page or more a piece is a whole huge page at least, 512 pages, so that a
+/// slot kept with its huge-page advice is not left with one partly returned, which stays
+/// charged whole (`region`, "Huge pages for grown blocks"); the hold's look and a growth
+/// payment are raised the same way.
+pub const PURGE_STEP_PAGES: u32 = 128;
+
 /// How much bitmap one of `maintain`'s steps of the clocked pass may read, in words: 64, a
 /// quarter of a heartbeat's step. `maintain`'s caller may be an async runtime's worker that
 /// yields between steps, and a step should hold it for tens of microseconds; a heartbeat's
