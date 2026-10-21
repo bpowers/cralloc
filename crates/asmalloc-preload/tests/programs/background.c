@@ -220,6 +220,15 @@ int main(int argc, char **argv) {
         printf("end %ld\n", anon_kib() / 1024);
         return 0;
     }
+    // The burst is freed before the program's first thread exists: the thread is created
+    // dormant with the heap already over the floor, and must look at the level itself.
+    if (argc > 2 && strcmp(argv[1], "late") == 0) {
+        burst(1600000);
+        one_thread();
+        sleep_ms(atol(argv[2]) * 1000);
+        printf("end %ld\n", anon_kib() / 1024);
+        return 0;
+    }
     if (argc > 2 && strcmp(argv[1], "exit") == 0) {
         atexit(at_exit);
         burst(200000);

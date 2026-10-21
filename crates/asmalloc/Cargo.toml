@@ -39,6 +39,11 @@ background = []
 # until then this needs a nightly toolchain.
 allocator-api = []
 
+[[test]]
+# Each case runs in a process of its own, made by the test binary itself (see the file).
+name = "default_thread"
+harness = false
+
 [dependencies]
 
 [lints]

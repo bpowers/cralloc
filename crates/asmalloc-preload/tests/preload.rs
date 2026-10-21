@@ -583,3 +583,28 @@ fn a_process_without_rseq_is_served_fully() {
     });
     assert!(out.contains("bad 0"), "{out}");
 }
+
+/// A program that frees its burst before it creates its first thread: the thread is created
+/// dormant with the heap already over the floor, looks at the level before it first waits, and
+/// returns the burst as it does when the thread was created first (`silent`). Review finding 3.
+#[test]
+#[ignore = "slow: run with scripts/gate --all"]
+fn a_burst_freed_before_the_first_thread_goes_back() {
+    let exe = program("background.c");
+    let end = |mode: &str| {
+        let mut command = Command::new(&exe);
+        command.args([mode, "12"]).env_remove("ASMALLOC_BACKGROUND");
+        let out = run(true, &mut command);
+        assert!(out.status.success(), "{:?}", out.status);
+        let text = String::from_utf8_lossy(&out.stdout).into_owned();
+        text.split_whitespace()
+            .filter_map(|word| word.parse::<u64>().ok())
+            .next()
+            .unwrap()
+    };
+    let (silent, late) = (end("silent"), end("late"));
+    assert!(
+        late < silent + 16,
+        "thread first {silent} MiB after 12 s; burst first {late} MiB"
+    );
+}
