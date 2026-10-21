@@ -4,7 +4,8 @@
 
 use super::super::hold::{Reach, fine_read, held_for};
 use super::super::policy::{
-    FINE_TICKS, HOLD_STEPS, PURGE_MAINTAIN_STEP_PAGES, PURGE_MAX_RUN_PAGES, hold_beat, hold_floor,
+    FINE_TICKS, HOLD_STEPS, PURGE_MAINTAIN_STEP_PAGES, PURGE_MAX_RUN_PAGES, allowance_floor,
+    hold_beat,
 };
 use super::super::word::Word;
 use super::*;
@@ -43,7 +44,7 @@ fn free_twice_the_floor<O: Os>(
     os: &SimOs<Native>,
     class: Class,
 ) -> (Vec<NonNull<u8>>, NonNull<u8>) {
-    free_slots(back, os, class, 2 * hold_floor(Native::GEOMETRY))
+    free_slots(back, os, class, 2 * allowance_floor(Native::GEOMETRY))
 }
 
 /// As [`free_twice_the_floor`], for `bytes` of slots.
@@ -91,7 +92,7 @@ fn hold_then_return<O: Os>(back: &Back<'_, O>, os: &SimOs<Native>, class: Class)
     assert!(first <= beat_bound(), "one beat returned {first}");
     let (_, largest) = beat_until_still(back, 1000);
     assert!(largest <= beat_bound(), "one beat returned {largest}");
-    let floor = hold_floor(Native::GEOMETRY);
+    let floor = allowance_floor(Native::GEOMETRY);
     let left = back.retained_large();
     assert!(
         left <= floor && left + class.size() > floor,
@@ -266,7 +267,7 @@ fn an_abandoned_look_is_taken_up_at_the_next_step() {
     assert_eq!(back.retained_large(), freed, "that step's look is lost");
     beat_for(&back, os, 1, FINE_TICKS);
     beat_until_still(&back, 1000);
-    assert!(back.retained_large() <= hold_floor(Native::GEOMETRY));
+    assert!(back.retained_large() <= allowance_floor(Native::GEOMETRY));
     back.free(top, class);
 }
 
@@ -316,7 +317,7 @@ fn a_look_leaves_a_small_class_region_alone() {
     let (_blocks, top) = free_twice_the_floor(&back, os, large_class);
     beat_for(&back, os, HOLD_STEPS, FINE_TICKS);
     beat_until_still(&back, 1000);
-    assert!(back.retained_large() <= hold_floor(Native::GEOMETRY));
+    assert!(back.retained_large() <= allowance_floor(Native::GEOMETRY));
     assert_eq!((header.grow.load(), header.hints.load()), before);
     back.free(top, large_class);
     // SAFETY: the test's objects, given back once.
@@ -330,7 +331,7 @@ fn a_look_returns_from_every_class_down_to_the_floor() {
     let state = state::<Native>();
     let back = state.get_or_reserve().unwrap();
     let os = state.os();
-    let floor = hold_floor(Native::GEOMETRY);
+    let floor = allowance_floor(Native::GEOMETRY);
     let (a, b) = (large(256 << 10), large(128 << 10));
     let (from_a, top_a) = free_slots(&back, os, a, 3 * floor / 2);
     let (from_b, top_b) = free_slots(&back, os, b, 3 * floor / 2);
@@ -517,7 +518,7 @@ fn maintain_returns_a_quiet_programs_held_slots_at_its_second_round() {
     let largest = maintain_round(&back, os);
     let page = Native::GEOMETRY.page_size();
     assert!(largest <= (PURGE_MAINTAIN_STEP_PAGES + PURGE_MAX_RUN_PAGES) as usize * page);
-    let floor = hold_floor(Native::GEOMETRY);
+    let floor = allowance_floor(Native::GEOMETRY);
     let left = back.retained_large();
     assert!(left <= floor && left + class.size() > floor, "{left}");
     back.free(top, class);
@@ -552,6 +553,6 @@ fn maintain_holds_a_busy_programs_slots_for_the_hold() {
     assert_eq!(back.retained_large(), freed, "held for the hold");
     beat_for(&back, os, HOLD_STEPS, FINE_TICKS);
     beat_until_still(&back, 1000);
-    assert!(back.retained_large() <= hold_floor(Native::GEOMETRY));
+    assert!(back.retained_large() <= allowance_floor(Native::GEOMETRY));
     back.free(top, class);
 }

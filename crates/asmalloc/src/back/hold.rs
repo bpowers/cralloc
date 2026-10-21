@@ -15,7 +15,7 @@
 //! fine count ([`Fine`]). Once the fine count has passed [`HOLD_STEPS`] steps beyond a region's
 //! stamp, the region's free slots may go back. They go back only while free large memory
 //! believed resident, in every large class together (`Back::retained_large`), is over the floor
-//! (`policy::hold_floor`), and only down to it. So the hold is per region, and the floor is on
+//! (`policy::allowance_floor`), and only down to it. So the hold is per region, and the floor is on
 //! all of it.
 //!
 //! **Time is counted.** The fine count steps when a heartbeat's reading of the counted clock
@@ -73,7 +73,7 @@ use super::host::ClassHost;
 use super::layout::Hints;
 use super::policy::{
     self, HOLD_STEPS, PURGE_MAINTAIN_STEP_PAGES, PURGE_MAINTAIN_STEP_WORDS, PURGE_STEP_WORDS,
-    hold_floor,
+    allowance_floor,
 };
 use super::purge::Scope;
 use super::tree::Host;
@@ -318,7 +318,9 @@ impl<O: Os> Back<'_, O> {
     fn hold_look(&self, count: u32, reach: Reach) -> bool {
         let geometry = self.space.plan().geometry();
         // The tallies are read once a step: frees and claims write their lines.
-        let over = self.retained_large().saturating_sub(hold_floor(geometry));
+        let over = self
+            .retained_large()
+            .saturating_sub(allowance_floor(geometry));
         if over == 0 {
             return false;
         }

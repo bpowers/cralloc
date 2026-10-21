@@ -1073,14 +1073,14 @@ fn blocks_have_one_owner_while_threads_churn_and_the_clock_runs() {
 /// heart one in sixteen.
 mod hold {
     use super::*;
-    use crate::back::policy::{FINE_TICKS, HOLD_STEPS, hold_floor};
+    use crate::back::policy::{FINE_TICKS, HOLD_STEPS, allowance_floor};
     use crate::os::sim::{Native, Shape as _};
 
     /// Allocates, writes and frees twice the hold's floor in blocks of 256 KiB. Returns the
     /// heap's free large memory then.
     fn free_a_phase(heap: &SimHeap<Native>) -> usize {
         let big = layout(256 << 10, 8);
-        let n = 2 * hold_floor(Native::GEOMETRY) / big.size();
+        let n = 2 * allowance_floor(Native::GEOMETRY) / big.size();
         // SAFETY: a valid layout; each block is written within its size and freed once.
         unsafe {
             let blocks: Vec<*mut u8> = (0..n).map(|_| heap.alloc(big)).collect();
@@ -1092,7 +1092,7 @@ mod hold {
             }
         }
         let freed = heap.heap.back().unwrap().retained_large();
-        assert!(freed >= 2 * hold_floor(Native::GEOMETRY));
+        assert!(freed >= 2 * allowance_floor(Native::GEOMETRY));
         freed
     }
 
@@ -1122,12 +1122,12 @@ mod hold {
         // twice the floor is over in this shape.
         work(1);
         let held = back.retained_large();
-        assert!(held > hold_floor(Native::GEOMETRY) && held <= freed);
+        assert!(held > allowance_floor(Native::GEOMETRY) && held <= freed);
         work(8 * (HOLD_STEPS - 4));
         assert!(back.retained_large() >= held, "held for the hold");
         work(8 * 2 * HOLD_STEPS);
         let left = back.retained_large();
-        let floor = hold_floor(Native::GEOMETRY);
+        let floor = allowance_floor(Native::GEOMETRY);
         assert!(
             left <= floor + small.size(),
             "{left} left over a floor of {floor}"
@@ -1150,7 +1150,7 @@ mod hold {
             heap.maintain();
         }
         let left = back.retained_large();
-        let floor = hold_floor(Native::GEOMETRY);
+        let floor = allowance_floor(Native::GEOMETRY);
         assert!(left <= floor, "{left} left over a floor of {floor}");
     }
 }

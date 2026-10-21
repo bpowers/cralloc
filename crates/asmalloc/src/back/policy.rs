@@ -241,19 +241,6 @@ pub const FINE_TICKS: u64 = 1 << 23;
 /// its queries' free blocks outlived the hold of the next (`docs/research/large-hold.md`).
 pub const HOLD_STEPS: u32 = 64;
 
-/// The hold returns nothing while free large slots believed resident total at most this many
-/// huge pages, and above it returns only what is over it: 16, or 32 MiB. A small process
-/// never pays the returns and the faults that take its memory back; tens of megabytes are a
-/// constant next to the heaps of hundreds of megabytes and more that the hold is for
-/// (`docs/design.md`, "Goals").
-pub const HOLD_FLOOR_HUGE_PAGES: usize = 16;
-
-/// The floor of [`HOLD_FLOOR_HUGE_PAGES`] in bytes for a geometry.
-#[inline(always)]
-pub const fn hold_floor(geometry: Geometry) -> usize {
-    HOLD_FLOOR_HUGE_PAGES * geometry.huge_page_size()
-}
-
 /// The most a heartbeat's look at the hold returns, in huge pages: 1, or 2 MiB, checked between
 /// units. A large class's unit is at most a slot, so a look that meets a slot larger than the
 /// rest of this returns that whole slot: DataFusion's longest look, about a millisecond,
