@@ -1,12 +1,13 @@
-//! Failing tests from the review of `burst-start` (counted intervals, purging by runs,
-//! `maintain` limiting its own rate).
+//! Tests from the review of `burst-start` (counted intervals, purging by runs, `maintain`
+//! limiting its own rate) and of its fixes: when a clocked pass is due, its steps, and the
+//! floor of the allowance.
 //!
-//! Both model a process in which `maintain` is the only thing that runs: a caller every half
-//! interval, as the background thread and the tokio task are, with the round's own work taking
-//! half a millisecond of the clock between its one clock read (`depot::heartbeat::Clock`
-//! caches it) and the end of its purge pass, which stamps the decay word with a fresh read.
-//! The simulated clock does not move by itself, which is why the tests that run `maintain`
-//! over the simulated heap do not see this.
+//! The first two model a process in which `maintain` is the only thing that runs: a caller
+//! every half interval, as the background thread and the tokio task are, with the round's own
+//! work taking half a millisecond of the clock between its one clock read
+//! (`depot::heartbeat::Clock` caches it) and the end of its purge pass, which stamps the decay
+//! word with a fresh read. The simulated clock does not move by itself, which is why the tests
+//! that run `maintain` over the simulated heap did not see it.
 
 use super::*;
 use core::sync::atomic::Ordering::Relaxed;
@@ -199,5 +200,128 @@ fn the_pass_in_steps_is_bounded_steps() {
     assert!(
         !back.decay_pass_step(&|| now),
         "a second pass in the interval"
+    );
+}
+
+/// The floor of the allowance (`policy::allowance_floor`): a heap whose retained memory is
+/// under it keeps it through any silence, with no purge call at all.
+#[test]
+fn a_silence_under_the_floor_returns_nothing() {
+    use super::super::policy::allowance_floor;
+    let state = floored_state::<Standard>();
+    let back = state.get_or_reserve().unwrap();
+    let os = state.os();
+    let class = small(1024);
+    let page = Standard::GEOMETRY.page_size();
+    let floor = allowance_floor(Standard::GEOMETRY);
+    let slots = fill(&back, class, floor / 2 / 1024);
+    for &p in &slots {
+        paint(p, 1024, 9);
+    }
+    // SAFETY: the test holds these slots and gives them up.
+    unsafe { back.launder(class, &slots) };
+    forget_reuse(&back);
+    let (retained, calls) = (back.retained(), os.calls(Call::Purge));
+    assert!(retained >= floor / 2 - page);
+    for _ in 0..4 * super::super::policy::PURGE_ANY_RUN_EVERY {
+        os.advance_clock(DECAY_TICKS);
+        beat(&back);
+        let now = back.now();
+        while back.decay_pass_step(&|| now) {}
+    }
+    assert_eq!(back.retained(), retained);
+    assert_eq!(
+        os.calls(Call::Purge),
+        calls,
+        "a pass under the floor purged"
+    );
+}
+
+/// Above the floor the clocked passes take retained memory down to the floor and stop there,
+/// within a run; `trim`, which `collect` and `malloc_trim` call, still returns all of it.
+#[test]
+fn the_passes_stop_at_the_floor_and_trim_goes_below_it() {
+    use super::super::policy::{PURGE_ANY_RUN_EVERY, PURGE_MAX_RUN_PAGES, allowance_floor};
+    let state = floored_state::<Standard>();
+    let back = state.get_or_reserve().unwrap();
+    let os = state.os();
+    let class = small(1024);
+    let page = Standard::GEOMETRY.page_size();
+    let floor = allowance_floor(Standard::GEOMETRY);
+    let slots = fill(&back, class, 4 * floor / 1024);
+    for &p in &slots {
+        paint(p, 1024, 9);
+    }
+    // SAFETY: the test holds these slots and gives them up.
+    unsafe { back.launder(class, &slots) };
+    forget_reuse(&back);
+    assert!(back.retained() > 3 * floor);
+    for _ in 0..4 * PURGE_ANY_RUN_EVERY {
+        os.advance_clock(DECAY_TICKS);
+        beat(&back);
+    }
+    let retained = back.retained();
+    let run = PURGE_MAX_RUN_PAGES as usize * page;
+    assert!(
+        retained + run >= floor && retained <= floor + run,
+        "{retained} bytes retained against a floor of {floor}"
+    );
+    back.trim();
+    assert_eq!(back.retained(), 0, "trim left memory the floor would keep");
+}
+
+/// Second review. A pass whose goal has one to three pages left must still take them from a
+/// long run, or stop. As built, a run is cut to what the goal has left before the test for
+/// short runs, so every run the walk meets from then on is cut to under
+/// `PURGE_MIN_RUN_PAGES`, counted as a short run and stepped over: the pass walks the rest of
+/// its lap past long free runs, purging nothing, and ends only when it has gone round.
+#[test]
+fn a_pass_a_few_pages_short_of_its_goal_does_not_step_over_long_runs() {
+    use super::super::policy::decay_goal;
+    use crate::classes::MagazineSize;
+    use crate::os::sim::Shape;
+    use crate::space::Geometry;
+    /// As in `the_tail_of_a_run_the_cap_cut_goes_with_it`: a small-page part of 256 pages and
+    /// a pass's goal of at least a huge page, 128 pages.
+    enum Wide {}
+    impl Shape for Wide {
+        const GEOMETRY: Geometry = Geometry::new(12, 19, 22, 19, 256, 1, MagazineSize::MAX);
+    }
+    let state = state::<Wide>();
+    let back = state.get_or_reserve().unwrap();
+    let os = state.os();
+    let class = small(1024);
+    let page = Wide::GEOMETRY.page_size();
+    let per_page = page / 1024;
+    let pages = small_part(&back, class) / per_page;
+    let slots = fill(&back, class, pages * per_page);
+    for &p in &slots {
+        paint(p, 1024, 9);
+    }
+    // From the top down: a live page, a free run two pages short of the goal, a live page,
+    // and a free run of 40 pages.
+    let (upper, lower) = (126, 40);
+    assert!(pages > upper + lower + 3, "{pages}");
+    let top = pages - 1;
+    let high = &slots[(top - upper) * per_page..top * per_page];
+    let low = &slots[(top - upper - 1 - lower) * per_page..(top - upper - 1) * per_page];
+    // SAFETY: the test holds these slots and gives them up.
+    unsafe { back.launder(class, high) };
+    // SAFETY: as above.
+    unsafe { back.launder(class, low) };
+    forget_reuse(&back);
+    let retained = back.retained();
+    assert_eq!(retained, (upper + lower) * page);
+    let goal = decay_goal(Wide::GEOMETRY, retained);
+    assert_eq!(goal, (upper + 2) * page);
+    os.advance_clock(DECAY_TICKS);
+    beat(&back);
+    assert!(!pass_under_way(&state));
+    let purged = retained - back.retained();
+    assert!(
+        purged >= goal,
+        "the pass purged {} pages of a goal of {} and walked past a free run of {lower}",
+        purged / page,
+        goal / page
     );
 }

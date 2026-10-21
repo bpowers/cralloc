@@ -141,8 +141,8 @@ const FREED: u64 = 1 << 62;
 const REVERSED: u64 = 1 << 63;
 /// The last swap recorded left its magazine half full.
 const CENTRED: u64 = 1 << 54;
-/// The last swap recorded went the same way as a half-full swap just before it.
-const AFTER_CENTRED: u64 = 1 << 55;
+/// The sweep has visited the class since that half-full swap, and no swap has followed.
+const SILENT: u64 = 1 << 55;
 /// Half-full swaps in a row that did not absorb a swing.
 const FAILS_AT: u32 = 44;
 const FAILS: u64 = 0b111 << FAILS_AT;
@@ -151,7 +151,7 @@ const SKIP_AT: u32 = 47;
 const SKIP: u64 = 0x7f << SKIP_AT;
 /// The most such swaps left plain in a row: after the seventh failure, one try in 65.
 const MAX_SKIP: u64 = 64;
-const SWING: u64 = SWAPPED | FREED | REVERSED | CENTRED | AFTER_CENTRED | FAILS | SKIP;
+const SWING: u64 = SWAPPED | FREED | REVERSED | CENTRED | SILENT | FAILS | SKIP;
 const _: () = assert!(LOW + 2 * FIELD <= FAILS_AT && SKIP_AT + 7 <= 54 && MAX_SKIP <= 0x7f);
 
 /// What a swap of a class is to do, worked out from the class's swing state before the
@@ -160,7 +160,7 @@ const _: () = assert!(LOW + 2 * FIELD <= FAILS_AT && SKIP_AT + 7 <= 54 && MAX_SK
 pub(super) struct SwapPlan {
     /// Leave the loaded magazine half full.
     pub(super) centre: bool,
-    /// The stock word to record after a plain install, and after a half-full one.
+    /// The swing bits to record after a plain install, and after a half-full one.
     plain: u64,
     centred: u64,
 }
@@ -185,28 +185,24 @@ impl SwapPlan {
 /// (`slow.rs`). A reversal that follows a run of swaps the same way is the turn of a swing
 /// longer than a magazine, which half a magazine cannot absorb; it stays plain.
 ///
-/// A half-full swap that a reversal follows, at once or after one swap the same way, did not
-/// absorb the swing: one between half a magazine and a whole one, say, fits at neither end nor
-/// in the middle, and runs out of the half and then turns. After the `j`-th such failure in a
-/// row, the next `2^(j - 1)` swaps with evidence of a lock stay plain, at most [`MAX_SKIP`], and
-/// then the rule tries again. A half-full swap followed by a run, two swaps or more the same
-/// way, or by no swap at all until the sweep's next visit ([`settle_swing`]), absorbed it, and
-/// clears the count. Failures count in a row, not in all, because a server's level also
-/// wanders, as other threads free what this one made, and one wander that ends at the other end
-/// must not stop the rule.
+/// A half-full swap absorbed its swing only if no swap of the class follows it on the CPU for
+/// a whole interval of the sweep's ([`settle_swing`]), which then clears the failures. Any swap before
+/// that is a failure, whichever way it goes: a reversal is a swing that fits at neither end nor
+/// in the middle, and a swap the same way is the long leg of a swing the half could not hold
+/// (a compound pattern, two swings of different sizes, makes such legs, and treating them as
+/// absorbed retried the rule every repetition). After the `j`-th failure in a row, the next
+/// `2^(j - 1)` swaps with evidence of a lock stay plain, at most [`MAX_SKIP`], and then the rule
+/// tries again. A swing the rule absorbs takes no slow path at all, so the sweep finds its
+/// class silent within an interval.
 pub(super) fn plan_swap(word: u64, way: Swap, allowed: bool) -> SwapPlan {
     let freed = way == Swap::Free;
     let reversal = word & SWAPPED != 0 && (word & FREED != 0) != freed;
     let lock = reversal && word & REVERSED != 0;
     let mut fails = (word & FAILS) >> FAILS_AT;
     let mut skip = (word & SKIP) >> SKIP_AT;
-    let pending = word & (CENTRED | AFTER_CENTRED) != 0;
-    if pending && reversal {
+    if word & CENTRED != 0 {
         fails = (fails + 1).min(FAILS >> FAILS_AT);
         skip = (1u64 << (fails - 1)).min(MAX_SKIP);
-    } else if word & AFTER_CENTRED != 0 {
-        fails = 0;
-        skip = 0;
     }
     let mut centre = false;
     if lock && allowed {
@@ -216,15 +212,9 @@ pub(super) fn plan_swap(word: u64, way: Swap, allowed: bool) -> SwapPlan {
             centre = true;
         }
     }
-    let plain = word & !SWING
-        | SWAPPED
+    let plain = SWAPPED
         | if freed { FREED } else { 0 }
         | if reversal { REVERSED } else { 0 }
-        | if word & CENTRED != 0 && !reversal {
-            AFTER_CENTRED
-        } else {
-            0
-        }
         | fails << FAILS_AT
         | skip << SKIP_AT;
     SwapPlan {
@@ -234,13 +224,23 @@ pub(super) fn plan_swap(word: u64, way: Swap, allowed: bool) -> SwapPlan {
     }
 }
 
-/// The swing state after the sweep's visit: a half-full swap that no reversal has followed
-/// since absorbed what it was for, so the failures are forgotten.
+/// The swing state after the sweep's visit. A half-full swap that no swap has followed from
+/// one visit to the next absorbed what it was for, so the failures are forgotten. One visit is
+/// not enough: the sweep steps in a slow path's heartbeat, often the very call that centred,
+/// and "no swap since" is then true of any swing.
 pub(super) fn settle_swing(word: u64) -> u64 {
-    if word & (CENTRED | AFTER_CENTRED) == 0 {
-        return word;
+    if word & CENTRED == 0 {
+        word
+    } else if word & SILENT == 0 {
+        word | SILENT
+    } else {
+        word & !(CENTRED | SILENT | FAILS | SKIP)
     }
-    word & !(CENTRED | AFTER_CENTRED | FAILS | SKIP)
+}
+
+/// `word` with its swing bits replaced by `swing`'s, and everything else as it is.
+fn with_swing(word: u64, swing: u64) -> u64 {
+    word & !SWING | swing & SWING
 }
 
 /// Which way a swap went: an allocation's, which installs a magazine with objects, or a
@@ -611,12 +611,16 @@ impl<'a, O: Os, R: Routines, S: Source> Cache<'a, O, R, S> {
     /// one swap leave its magazine at an end or half full when the other would have been
     /// right. Writes the word only when it changes, so a flow that goes one way writes it once.
     pub(super) fn record_swap(&self, cpu: Cpu, class: SmallClass, plan: SwapPlan) {
+        // The swing bits only, into the word as it is now: during the install (up to three
+        // sequences and a copy) another thread on the CPU or a signal handler may have changed
+        // its credits, low-water marks, sent marks or the settling bit.
         let now = self.stock(cpu, class);
-        let next = Stock(if plan.centre {
+        let swing = if plan.centre {
             plan.centred
         } else {
             plan.plain
-        });
+        };
+        let next = Stock(with_swing(now.0, swing));
         if next != now {
             self.set_stock(cpu, class, next);
         }
@@ -670,7 +674,6 @@ pub(super) fn credits(full: u32, empty: u32) -> *mut u8 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::vec;
     use std::vec::Vec;
 
     /// The swing rule's decisions for a sequence of swaps, each recorded as its install would
@@ -681,11 +684,14 @@ mod tests {
         for &way in ways {
             let plan = plan_swap(word, way, true);
             out.push(plan.centre);
-            word = if plan.centre {
-                plan.centred
-            } else {
-                plan.plain
-            };
+            word = with_swing(
+                word,
+                if plan.centre {
+                    plan.centred
+                } else {
+                    plan.plain
+                },
+            );
         }
         // Stock's own fields are untouched.
         assert_eq!(Stock(word).credit(Spare::Full), 3);
@@ -741,37 +747,67 @@ mod tests {
     }
 
     #[test]
-    fn a_centring_that_absorbs_clears_the_failures() {
-        // Centred at the third, fifth and eighth swaps (failing twice), then a run of two
-        // swaps the same way as the last centred swap: the failures are cleared, and the next
-        // lock (a reversal after a reversal) centres at once.
-        let mut ways = vec![A, F, A, F, A, F, A, F];
-        let before = centred(&ways);
-        assert_eq!(before.iter().filter(|&&c| c).count(), 3);
-        assert!(*before.last().unwrap());
-        ways.extend([F, F, A, F]);
-        let after = centred(&ways);
-        assert!(after[ways.len() - 1], "{after:?}");
-        // So does the sweep's visit with no swap since the centred one.
+    fn any_swap_after_a_centred_one_is_a_failure() {
+        // Centred at the third swap; a run the same way follows, the long leg of a swing the
+        // half could not hold. That is a failure: the next lock swap (the seventh, reversing
+        // the reversal at the sixth) stays plain, and the one after it centres.
+        let ways = [A, F, A, A, A, F, A, F, A];
+        assert_eq!(
+            centred(&ways),
+            [false, false, true, false, false, false, false, true, false]
+        );
+    }
+
+    #[test]
+    fn only_the_sweeps_visit_after_silence_clears_the_failures() {
         let mut word = 0;
         for way in [A, F, A, F, A] {
             let plan = plan_swap(word, way, true);
-            word = if plan.centre {
-                plan.centred
-            } else {
-                plan.plain
-            };
+            word = with_swing(
+                word,
+                if plan.centre {
+                    plan.centred
+                } else {
+                    plan.plain
+                },
+            );
         }
+        assert!(word & CENTRED != 0, "the fifth swap centred");
         assert!(!plan_swap(word, F, true).centre, "a failure backs off");
-        let settled = settle_swing(word);
+        let once = settle_swing(word);
+        assert!(
+            !plan_swap(once, F, true).centre,
+            "one visit is not an interval"
+        );
+        let settled = settle_swing(once);
         assert!(
             plan_swap(settled, F, true).centre,
-            "the sweep cleared the failures"
+            "an interval of silence cleared the failures"
         );
         assert!(
             !plan_swap(settled, F, false).centre,
             "the rule off never centres"
         );
+        // A visit after a swap followed the centred one clears nothing: that swap has already
+        // counted its failure.
+        let failed = with_swing(word, plan_swap(word, F, true).plain);
+        assert_eq!(settle_swing(failed), failed);
+    }
+
+    #[test]
+    fn recording_a_swap_keeps_what_others_wrote_meanwhile() {
+        let planned = credits(3, 2).addr() as u64;
+        let plan = plan_swap(planned, A, true);
+        // Between the plan and the record, another thread on the CPU changed the credits, a
+        // low-water mark, a sent mark and the settling bit.
+        let meanwhile = Stock(credits(5, 1).addr() as u64)
+            .popped(Spare::Full, 4)
+            .with_settling(true)
+            .0
+            | marks(Spare::Empty).0;
+        let recorded = with_swing(meanwhile, plan.plain);
+        assert_eq!(recorded & !SWING, meanwhile & !SWING);
+        assert_eq!(recorded & SWING, plan.plain);
     }
 
     #[test]

@@ -2235,3 +2235,165 @@ fn a_drain_between_beats_launders_within_the_budget() {
     // the magazine that was there.
     rig.census(&[], true);
 }
+
+/// Slow paths in the last quarter of 400 repetitions of `pattern`, phases of (allocate `a`,
+/// free the newest `f`), on one CPU loaded at level `start`, with the swing rule on or off.
+#[cfg(not(debug_assertions))]
+fn compound_swing(
+    class: SmallClass,
+    start: usize,
+    pattern: &[(usize, usize)],
+    centre: bool,
+) -> usize {
+    let capacity = class.magazine().capacity();
+    let tuning = Tuning {
+        centre_swings: centre,
+        ..Tuning::DEFAULT
+    };
+    let rig: Rig<SimOs<Roomy>, 2> = Rig::with_os(SimOs::new(), &[class], 64 * capacity, tuning);
+    let machine = SimCpu::new(0);
+    let cache = rig.cache(&machine);
+    let slab = rig.slabs().slab(rig.slabs().cpu(0).unwrap());
+    for _ in 0..start {
+        cache.free(class, rig.source.alloc_one(class).unwrap());
+    }
+    let mut held = Vec::new();
+    let repetitions = 400;
+    let mut slow = 0;
+    for repetition in 0..repetitions {
+        if repetition == repetitions - repetitions / 4 {
+            slow = 0;
+        }
+        for &(allocs, frees) in pattern {
+            for _ in 0..allocs {
+                let before = slab.activity();
+                held.push(cache.alloc(class).unwrap());
+                slow += usize::from(slab.activity() != before);
+            }
+            for _ in 0..frees.min(held.len()) {
+                let before = slab.activity();
+                cache.free(class, held.pop().unwrap());
+                slow += usize::from(slab.activity() != before);
+            }
+        }
+    }
+    for object in held {
+        cache.free(class, object);
+    }
+    rig.census(&[], false);
+    slow
+}
+
+/// Slow paths of `pattern`, summed over every level the CPU's magazine may start at. Where a
+/// pattern's swaps fall depends on its level's phase against the magazines' ends, which plain
+/// swaps keep and a half-full swap moves by half a magazine; so one starting level measures
+/// the luck of its phase, and the sum over all of them what the rule costs.
+#[cfg(not(debug_assertions))]
+fn compound_over_phases(class: SmallClass, pattern: &[(usize, usize)], centre: bool) -> usize {
+    (0..class.magazine().capacity())
+        .map(|start| compound_swing(class, start, pattern, centre))
+        .sum()
+}
+
+/// The rule on takes at most `percent` more slow paths than off for `pattern`, over phases.
+#[cfg(not(debug_assertions))]
+fn compound_within(class: SmallClass, pattern: &[(usize, usize)], percent: usize) {
+    let on = compound_over_phases(class, pattern, true);
+    let off = compound_over_phases(class, pattern, false);
+    assert!(
+        100 * on <= (100 + percent) * off,
+        "{} bytes, {pattern:?}: on {on}, off {off} over phases",
+        class.size()
+    );
+}
+
+/// Two swings of different sizes in each repetition, the review of ff7c39b's worst cases
+/// (1,024-byte class, magazines of 62): while a run after a half-full swap counted as absorbed,
+/// the rule retried them every repetition. From a single starting level they also measured the
+/// luck of its phase (`compound_over_phases`).
+#[test]
+#[cfg(not(debug_assertions))]
+#[ignore = "slow: run with scripts/gate --all, optimized"]
+fn the_swing_rule_pays_for_itself_on_two_sizes() {
+    let class = crate::classes::Class::of_size(1024)
+        .unwrap()
+        .small()
+        .unwrap();
+    assert_eq!(class.magazine().capacity(), 62);
+    for pattern in [
+        &[(112, 112), (224, 224)][..],
+        &[(158, 79), (79, 158)],
+        &[(81, 81), (162, 162)],
+        &[(112, 112), (37, 37)],
+    ] {
+        compound_within(class, pattern, 2);
+    }
+    // Above the bar, at 3.4%: the rule's retries, one in 65 lock swaps, each move the phase,
+    // and this pattern's are not paid back (reported with the change, not special-cased).
+    compound_within(class, &[(34, 34), (68, 68)], 4);
+}
+
+/// The review's wide sweep over phases: amplitudes from a sixteenth of a magazine to three
+/// magazines, one size and three two-size patterns. 185 of the 192 are within 2%; seven, a
+/// swing near half a magazine with one twice its size (31/62, 34/68, 38/76) or a swing near a
+/// magazine with one a third its size (62/20 to 73/24), are 2.1 to 3.4% over, the cost of the
+/// rule's retries moving the phase. They are held here at 4%.
+#[test]
+#[cfg(not(debug_assertions))]
+#[ignore = "slow: run with scripts/gate --all, optimized"]
+fn the_swing_rule_pays_for_itself_on_two_sizes_widely() {
+    let class = crate::classes::Class::of_size(1024)
+        .unwrap()
+        .small()
+        .unwrap();
+    let capacity = class.magazine().capacity();
+    for sixteenths in 1..=48 {
+        let amplitude = (capacity * sixteenths / 16).max(1);
+        for pattern in [
+            std::vec![(amplitude, amplitude)],
+            std::vec![(amplitude, amplitude / 2), (amplitude / 2, amplitude)],
+            std::vec![(amplitude, amplitude), (amplitude / 3, amplitude / 3)],
+            std::vec![(amplitude, amplitude), (2 * amplitude, 2 * amplitude)],
+        ] {
+            compound_within(class, &pattern, 4);
+        }
+    }
+}
+
+/// After a long stretch of a swing the rule cannot absorb has taken the backoff to its longest,
+/// a quarter-magazine swing is still centred within the backoff's bound (64 lock swaps, two a
+/// repetition), and then takes no slow path.
+#[test]
+fn a_swing_the_rule_can_absorb_is_centred_after_a_long_failing_stretch() {
+    let class = crate::classes::Class::of_size(1024)
+        .unwrap()
+        .small()
+        .unwrap();
+    let capacity = class.magazine().capacity();
+    let rig: Rig<SimOs<Roomy>, 2> =
+        Rig::with_os(SimOs::new(), &[class], 64 * capacity, Tuning::DEFAULT);
+    let machine = SimCpu::new(0);
+    let cache = rig.cache(&machine);
+    let slab = rig.slabs().slab(rig.slabs().cpu(0).unwrap());
+    cache.free(class, rig.source.alloc_one(class).unwrap());
+    let mut held = Vec::new();
+    let mut swing = |amplitude: usize, repetitions: usize| -> Vec<bool> {
+        (0..repetitions)
+            .map(|_| {
+                let before = slab.activity();
+                for _ in 0..amplitude {
+                    held.push(cache.alloc(class).unwrap());
+                }
+                while let Some(object) = held.pop() {
+                    cache.free(class, object);
+                }
+                slab.activity() != before
+            })
+            .collect()
+    };
+    swing(capacity * 3 / 4, 2000);
+    let after = swing(capacity / 4, 200);
+    let last = after.iter().rposition(|&slow| slow).map_or(0, |i| i + 1);
+    assert!(last <= 40, "slow paths until repetition {last}: {after:?}");
+    rig.census(&[], false);
+}

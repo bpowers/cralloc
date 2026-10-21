@@ -142,6 +142,19 @@ tails measure the machine as much as the allocator.
 `benchrun report` prints a table per server: latency and work at each rate, and memory under
 load, in the silences and after the connections close.
 
+**Large heaps** (`--suite servers-large`, rates from `servers-large-sat`). The same servers
+holding about 0.5, 2 and 4 GiB live while they serve, so that memory can be judged as a
+ratio: the order service keeping its last `keep` orders, and mini-redis preloaded with
+`preload` keys before it listens, then churned by overwrites of log-uniform 64 B to 4 KiB
+values, one in ten with an expiry (`miniredis/fetch.sh`). Their day fills the heap with
+closed-loop load, measures the saturated rate, then holds 70% for a minute in six marked
+ten-second pieces, then the bursts and the idle close as above. Run each size as a session of
+its own with `--mem-cap` sized to it (3, 7 and 12 GiB). The denominator is the program's own
+live bytes: build the servers with `bench-alloc`'s `live-bytes` feature (asmalloc with a
+counter of requested bytes, never a build that is compared) and add it as an allocator entry
+with `build = "live-bytes"`; the runner reads its count at every mark (`marks_ms`), and
+`bench/probes/partial-load/largesum.py` puts each allocator's resident set over it.
+
 ## How a program is built
 
 Each program is a cargo workspace of its own in `<program>/`: a driver crate with the

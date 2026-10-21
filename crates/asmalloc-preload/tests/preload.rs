@@ -469,14 +469,18 @@ fn a_quiet_program_gets_its_memory_back(mode: &str) {
         assert_eq!(numbers.len(), 2, "{text}");
         (numbers[0], numbers[1])
     };
+    // The clocked pass keeps the floor of the allowance (32 MiB, `ALLOWANCE_FLOOR_HUGE_PAGES`
+    // in asmalloc's policy), so the thread takes what is above it, less a few MiB of the
+    // program's own.
+    const FLOOR_MIB: u64 = 32;
     let (freed, off) = measure(false);
     let (_, on) = measure(true);
     assert!(
-        on * 8 < freed,
+        on < FLOOR_MIB + freed / 16,
         "{mode}: freed {freed} MiB, {on} MiB with the thread after 12 s"
     );
     assert!(
-        on * 4 < off,
+        (on - FLOOR_MIB.min(on)) * 8 < off - FLOOR_MIB.min(off),
         "{mode}: {off} MiB without the thread, {on} with it"
     );
 }

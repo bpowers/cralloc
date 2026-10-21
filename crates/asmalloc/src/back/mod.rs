@@ -196,6 +196,10 @@ struct Clocked {
     epoch: AtomicU64,
     /// The count of intervals every clocked rule reads its time from (`crate::clock`).
     clock: crate::clock::Counted,
+    /// For tests of the clocked pass's mechanics on heaps smaller than the floor: the pass
+    /// acts as if the floor were zero.
+    #[cfg(test)]
+    unfloored: core::sync::atomic::AtomicBool,
 }
 
 /// What the steps of the purge walk share (`purge`).
@@ -257,6 +261,8 @@ impl<O: Os> State<O> {
                 word: AtomicU64::new(0),
                 epoch: AtomicU64::new(0),
                 clock: crate::clock::Counted::new(),
+                #[cfg(test)]
+                unfloored: core::sync::atomic::AtomicBool::new(false),
             }),
             walk: Lined::new(Walk {
                 purge_at: AtomicU32::new(0),

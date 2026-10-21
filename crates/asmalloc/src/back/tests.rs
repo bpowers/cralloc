@@ -19,7 +19,19 @@ use std::vec::Vec;
 
 type Sim<S = Standard> = SimOs<S>;
 
+/// A back end whose clocked pass has no floor: most of these tests drive the pass over heaps
+/// smaller than the floor (`policy::allowance_floor`), whose own tests use [`floored_state`].
 fn state<S: Shape>() -> Box<State<Sim<S>>> {
+    let state = floored_state::<S>();
+    state
+        .decay
+        .unfloored
+        .store(true, core::sync::atomic::Ordering::Relaxed);
+    state
+}
+
+/// A back end as the process has it, with the clocked pass's floor.
+fn floored_state<S: Shape>() -> Box<State<Sim<S>>> {
     Box::new(State::new(Sim::<S>::new()))
 }
 

@@ -458,8 +458,11 @@ neither pays for the move.
 
 Half a magazine cannot absorb a swing longer than that, and a swing between half a
 magazine and a whole one would be centred at every turn without ever fitting. So the rule
-backs off. A centred swap that is followed by another reversal has failed, and each
-failure in a row doubles the number of the swaps after it that stay plain, up to a bound.
+backs off. A centred swap has failed if another swap of that class on that CPU follows it
+within an interval, whichever way: a reversal is a swing the half did not hold, and a
+second swap the same way is the long leg of one. Each failure in a row doubles the number
+of the swaps after it that stay plain, up to a bound, and only an interval without a swap
+clears the count.
 A swing the rule cannot help then pays for an occasional retry and nothing else, and one
 that changes into a swing it can help is centred at the next retry.
 
@@ -572,7 +575,7 @@ passes a threshold. A swap with a spare then does no maintenance of its own, and
 the rate of maintenance does not change when a class's magazines, its trips to the depot or
 its fills change size. A large allocation or free counts as a slow path, and beats on one
 call in sixteen: a program that moves large blocks makes such calls far more often than the
-maintenance needs to run. By default there is no background thread and no timer. The work
+maintenance needs to run. The work
 is done in units small enough that no single call pays much. This is mimalloc's pacing
 applied to a per-CPU design.
 
@@ -620,24 +623,58 @@ path can stand in for the clock here: a free cannot tell memory that is idle fro
 about to be reused, and purging on a level makes the programs that reuse it fault it
 straight back.
 
-A program that cannot accept that asks for a background thread. The thread is opt-in, so
-that the default stays free of hidden threads, and it buys nothing on the fast path, which
-stays as it is. Once an interval it calls `maintain`, which does for the whole heap what the
-heartbeats of an interval would have done: the idle check on every slab, each depot stack's
-shedding, and the clocked purge. A slab it drains has its magazines laundered, not parked
-in the depot: a CPU that is busy only on fast paths would otherwise take them straight back,
-and their scattered objects would go on pinning pages. It is an ordinary thread of the process, started by the
-layer that has a thread library to start it with: a function behind a cargo feature for a
-Rust program, an environment variable for the preload library. The child of a fork does not
-inherit the thread.
+So there is a background thread, and by default it starts itself, once two things are
+true together: the process holds more free and parked memory than the floor of the
+allowance (see "Sizing from evidence"), and it already has more than one thread. A small
+program's thread never runs, because the program holds nothing worth returning, and a
+program with one thread never gets one, because it may depend on staying that way. The thread buys nothing on
+the fast path, which stays as it is. Once an interval it calls `maintain`, which does for
+the whole heap what the heartbeats of an interval would have done: the idle check on every
+slab, each depot stack's shedding, and the clocked purge, in bounded steps. A slab it
+drains has its magazines laundered, not parked in the depot: a CPU that is busy only on
+fast paths would otherwise take them straight back, and their scattered objects would go
+on pinning pages.
 
-A program with a timer of its own calls `maintain` from it and needs no thread. In an
-async runtime that is a task that wakes once an interval, and we ship one for tokio, in a
-crate of its own because the allocator has no dependencies. Both are offered because
-neither fits every program: a server without an async runtime has no timer to borrow, and
-one that must stay single-threaded cannot take the thread. The task costs one wake-up a second,
+The thread sleeps while there is nothing for it to do. When a round finds no work, and no
+slow path has run anywhere since the round before, the thread parks on a word with no
+timeout, and a process that has gone silent is not woken by its allocator at all. By then
+its rounds have drained every slab, so the first allocation or free after the silence
+takes a slow path, and a slow path that finds the word set clears it and wakes the thread.
+That costs each slow path one load of a word that is otherwise not written, and the fast
+path nothing. A program that is working, even one that never leaves its magazines, keeps
+the thread awake, because each round's drain sends its CPUs to their slow paths. Where
+slabs cannot be drained (see "Process lifecycle") nothing would send a resuming program to
+a slow path, so there the thread keeps to its timed sleep and never parks.
+
+It is an ordinary thread of the process, created through the C library by the layer that
+links one, not by the allocator with a bare system call. A bare thread could be created
+anywhere a slow path runs, but the C library would not know it, and what the library does
+to every thread, a change of credentials above all, would pass it by. The price is that
+creating a thread through the library is not safe everywhere a slow path runs: not in a
+signal handler, and not inside the library's own locked sections, which is where its
+allocations for a new thread or a newly loaded object come from. So the two layers choose
+their moment differently. In a Rust program the thread is created on a heartbeat of a
+call that came through the Rust interface, which the C library does not use, and only if
+the calling thread has no signal blocked and is not on a signal stack, the marks of a
+handler; otherwise a later heartbeat tries. The preload library, whose caller may always
+be the C library, creates the thread when the program creates its own first thread, a
+moment that is safe by construction, and leaves it parked until a slow path finds the heap
+over the floor. A program can turn the thread off, with a cargo feature or an environment
+variable, and can start it itself whatever the conditions say. If the thread cannot be
+created the allocator carries on without it. A process under a system-call filter that kills on thread
+creation, which no allocator can detect, must turn it off. The child of a fork does not
+inherit the thread and starts its own on the same conditions.
+
+A program with a timer of its own can call `maintain` from it instead, and a process that
+calls `maintain` does not get the thread by default. In an async runtime that is a task
+that wakes once an interval, and we ship one for tokio, in a crate of its own because the
+allocator has no dependencies. Both are offered because neither fits every program: a
+server without an async runtime has no timer to borrow, and one that must stay
+single-threaded cannot take the thread. The task costs one wake-up a second,
 it runs while a server is silent, which is when a burst's memory should go back, and it
-takes that work off the first requests of the next burst. `maintain` limits its own rate,
+takes that work off the first requests of the next burst. A round of maintenance is
+taken in bounded steps, and the task yields to the runtime between them, so a runtime
+with one thread is not held up by it. `maintain` limits its own rate,
 returning at once unless an interval has passed since it last ran, so it is harmless to
 call it more often, as from a hook that runs when a worker is about to park. Such a hook
 does not replace the timer: a worker parks once at the start of a silence, and nothing
@@ -723,7 +760,7 @@ rule that returns it (`docs/research/memory.md` has the measurements behind them
 
 | What holds the memory | What returns it | When |
 |---|---|---|
-| Free slots in the bitmaps, on pages with nothing live on them, above what fills reached in the last two intervals | The clocked purge | Once an interval: up to a quarter of the retained memory, or all of it above the cap, carrying on round the heap from where the last pass stopped |
+| Free slots in the bitmaps, on pages with nothing live on them, above what fills reached in the last two intervals | The clocked purge | Once an interval while more than the floor is retained: up to a quarter of the retained memory, or all of it above the cap, in runs of adjacent pages, carrying on round the heap from where the last pass stopped |
 | The same, whether fills reached it or not, while more than the cap is retained and the heap grows somewhere else | The carve that grows it returns as much as it takes | At that carve, within a bound on its work |
 | A large block left behind by a move, or one that grew and is freed, beyond a small budget of such memory | The move or the free (see "Large objects") | Before it releases the slot |
 | The tail of a large block that shrinks in place; the pages behind a move made in pieces | The resize (see "Large objects") | At once |
@@ -737,7 +774,7 @@ rule that returns it (`docs/research/memory.md` has the measurements behind them
 | Free slots on pages that also hold live objects | Nothing: that is fragmentation, and it stays counted | Never |
 | All of the above, without waiting for the clock | `collect`, and `malloc_trim` in C | When the program calls it |
 
-Five rules stand behind the table.
+Seven rules stand behind the table.
 
 - **Purge late, and only what fills did not reach.** Purging claims the bits of every
   object that overlaps a range of pages, exactly as an allocation would. If all of them
@@ -760,6 +797,23 @@ Five rules stand behind the table.
   goes back, which is the rule the depot stacks and the spares follow too. A
   frontier is a hint: a wrong one costs a purge too many or too few, never a page in use,
   because the purge is a claim.
+- **Purge in runs, and let short runs wait.** Returning memory costs a system call and a
+  round of interrupts to the other CPUs for each call, whatever its size, so a pass
+  returns adjacent free pages together, as one claim and one call, up to a bound on the
+  length of a run that also bounds how long a claim is held. A single free page among
+  live ones is the dearest memory to return and the likeliest to be refilled, since fills
+  take the lowest free slots. So most passes take only runs of at least a few pages, and
+  one pass in every few takes a run of any length: scattered pages that stay free that
+  long do go back, and a program that reuses them in the meantime never paid to return
+  them. A server driven in bursts spent the first milliseconds of each burst returning
+  single pages it was about to refill (`docs/research/burst-start.md`). Growth over the
+  cap, and `collect`, take runs of any length.
+- **Under a floor, the clock returns nothing.** While the retained memory totals no more
+  than the floor of the allowance (see "Sizing from evidence") the clocked pass does not
+  run, and above it a pass stops at the floor. A few tens of megabytes kept by a process
+  is a price we pay freely (see "Goals"); returning them buys a small process nothing it
+  will notice, and costs it the calls and then the faults when its next burst arrives.
+  `collect` is not floored.
 - **Retained memory is counted, and growth pays for it.** The back end keeps an estimate
   of the free memory it holds that is still resident, small and large classes together.
   Frees and laundered magazines raise it; only reuse and purging lower it, and it is never

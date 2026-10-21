@@ -25,6 +25,9 @@ asmalloc-memstat = ["asmalloc", "asmalloc/internals", "memacct"]
 # Every resident page of the process at exit, for any allocator (src/memacct.rs). Not an
 # allocator: build.rs does not count it.
 memacct = []
+# asmalloc with the program's live bytes counted (src/live.rs), the denominator of resident
+# over live. A measurement option on top of the asmalloc feature: build.rs does not count it.
+live-bytes = ["asmalloc"]
 # asmalloc with its background thread, which `init` starts (asmalloc's `background` feature).
 # A measurement option on top of the asmalloc feature: build.rs does not count it.
 asmalloc-background = ["asmalloc", "asmalloc/background"]

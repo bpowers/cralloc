@@ -16,6 +16,16 @@ use crate::space::Geometry;
 /// leave resident above what is live. The clocked pass returns memory in the ordinary case.
 pub const RETAINED_CAP_HUGE_PAGES: usize = 32;
 
+/// The floor of the allowance, in huge pages: 16, or 32 MiB. Memory up to this much is spent
+/// freely: the clocked pass leaves retained memory alone while it totals no more than the
+/// floor, and stops at the floor when above it. Tens of megabytes cost a server nothing that
+/// matters, and returning them costs `madvise` calls and the refaults of the next burst
+/// (`docs/research/burst-start.md`). The same floor is what the default background thread's
+/// start waits for, since below it the thread would have nothing to do, and what the
+/// allowance for holding large slots starts from. `collect` (and `malloc_trim`) and growth
+/// over the cap are not floored.
+pub const ALLOWANCE_FLOOR_HUGE_PAGES: usize = 16;
+
 /// Growth is charged against the cap in steps of this many huge pages: 1, or 2 MiB. Each step
 /// of carving, while retained memory is over the cap, pays for at most one bounded purge
 /// walk, so a heap whose free memory is all fragmentation pays one walk per step of growth.
@@ -263,6 +273,12 @@ pub const fn hold_beat(geometry: Geometry) -> usize {
 #[inline(always)]
 pub const fn retained_cap(geometry: Geometry) -> usize {
     RETAINED_CAP_HUGE_PAGES * geometry.huge_page_size()
+}
+
+/// The floor of the allowance in bytes for a geometry (`ALLOWANCE_FLOOR_HUGE_PAGES`).
+#[inline(always)]
+pub const fn allowance_floor(geometry: Geometry) -> usize {
+    ALLOWANCE_FLOOR_HUGE_PAGES * geometry.huge_page_size()
 }
 
 /// The growth step in bytes for a geometry.

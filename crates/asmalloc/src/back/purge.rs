@@ -127,7 +127,7 @@ use super::layout::{Hints, Step};
 use super::policy::{
     DECAY_TICKS, PURGE_ANY_RUN_EVERY, PURGE_CAP_WORDS, PURGE_MAINTAIN_STEP_PAGES,
     PURGE_MAINTAIN_STEP_WORDS, PURGE_MAX_RUN_PAGES, PURGE_MAX_RUN_WORDS, PURGE_MIN_RUN_PAGES,
-    PURGE_STEP_WORDS, decay_goal, growth_goal, growth_step, retained_cap,
+    PURGE_STEP_WORDS, allowance_floor, decay_goal, growth_goal, growth_step, retained_cap,
 };
 use super::region::{self, Purge};
 use super::tree::Host;
@@ -256,6 +256,15 @@ impl<O: Os> Back<'_, O> {
     #[inline]
     pub fn retained(&self) -> usize {
         self.clamped(false).saturating_add(self.clamped(true))
+    }
+
+    /// What the clocked pass leaves retained (`policy::allowance_floor`).
+    fn floor(&self) -> usize {
+        #[cfg(test)]
+        if self.state.decay.unfloored.load(Relaxed) {
+            return 0;
+        }
+        allowance_floor(self.space.plan().geometry())
     }
 
     /// The part of [`Back::retained`] in large classes.
@@ -450,9 +459,11 @@ impl<O: Os> Back<'_, O> {
             }
             Decay::Start(word) => {
                 let retained = self.retained();
-                if retained == 0 {
+                let floor = self.floor();
+                if retained <= floor {
                     // A pass with nothing to do, ended as it starts, so that the heartbeats
-                    // of the next interval wait instead of reading the count.
+                    // of the next interval wait instead of reading the count: nothing is
+                    // retained, or no more than the floor, which is spent freely.
                     let _ =
                         state
                             .decay
@@ -469,7 +480,10 @@ impl<O: Os> Back<'_, O> {
                     return None;
                 }
                 let over = retained.saturating_sub(retained_cap(geometry));
-                let goal = decay_goal(geometry, retained).max(over);
+                // Stops at the floor, unless the cap asks for more.
+                let goal = decay_goal(geometry, retained)
+                    .min(retained - floor)
+                    .max(over);
                 // One pass in `PURGE_ANY_RUN_EVERY` takes runs of any length, counted by
                 // passes, not by the interval's number, which a pass that comes every other
                 // interval could miss for ever. The count is a hint: a lost update moves the
@@ -741,8 +755,14 @@ impl<O: Os> Back<'_, O> {
                     // The run of purgeable units that ends at this one, down to the floor.
                     // Within what the step may still purge and read, so that a run does not
                     // carry the step far past its goal or its budget.
+                    // Never cut to under `min_run`, or a step with a few pages of its goal
+                    // left would count every run it met short and step over it: it may go
+                    // past its goal by up to `min_run - 1` pages instead.
                     let page = layout.page_size();
-                    let pages = limit.saturating_sub(purged).div_ceil(page).max(1);
+                    let pages = limit
+                        .saturating_sub(purged)
+                        .div_ceil(page)
+                        .max(min_run as usize);
                     let room = Room {
                         floor,
                         pages: (pages.min(PURGE_MAX_RUN_PAGES as usize)) as u32,

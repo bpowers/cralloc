@@ -1,6 +1,9 @@
 //! The order service as a server for the load generator, on one of two frameworks:
 //!
-//!   orders <axum|actix>
+//!   orders <axum|actix> [keep=N]
+//!
+//! The store holds the most recent `keep` orders (default 100,000), so `keep` sets the live
+//! heap the server holds while it serves: about 1 KiB an order.
 //!
 //! axum runs on hyper and a multi-threaded tokio runtime with work stealing; actix-web runs one
 //! single-threaded runtime per worker thread, so blocks cross threads only through the shared
@@ -16,14 +19,15 @@ use store::{NewOrder, Store};
 
 fn main() {
     let d = Driver::start("orders");
+    let keep = d.args.num("keep", store::KEEP);
     // Bound here, before either framework starts, so that the address can be announced the
     // same way for both.
     let listener = TcpListener::bind("127.0.0.1:0").unwrap_or_else(|e| fail(&format!("bind: {e}")));
     let addr = listener.local_addr().unwrap_or_else(|e| fail(&format!("local addr: {e}")));
     match d.job.as_str() {
-        "axum" => axum_serve(listener, addr),
-        "actix" => actix_serve(listener, addr),
-        _ => fail("usage: orders <axum|actix>"),
+        "axum" => axum_serve(listener, addr, keep),
+        "actix" => actix_serve(listener, addr, keep),
+        _ => fail("usage: orders <axum|actix> [keep=N]"),
     }
     d.finish_server();
 }
@@ -33,14 +37,14 @@ fn announce(addr: std::net::SocketAddr) {
 }
 
 #[tokio::main]
-async fn axum_serve(listener: TcpListener, addr: std::net::SocketAddr) {
+async fn axum_serve(listener: TcpListener, addr: std::net::SocketAddr, keep: u64) {
     use axum::extract::State;
     use axum::routing::post;
     use axum::{Json, Router};
     async fn create(State(store): State<Arc<Store>>, Json(new): Json<NewOrder>) -> String {
         store.create(new)
     }
-    let store = Arc::new(Store::default());
+    let store = Arc::new(Store::new(keep));
     let app = Router::new().route("/orders", post(create)).with_state(store);
     listener.set_nonblocking(true).unwrap_or_else(|e| fail(&format!("nonblocking: {e}")));
     let listener = tokio::net::TcpListener::from_std(listener).unwrap_or_else(|e| fail(&format!("listener: {e}")));
@@ -56,12 +60,12 @@ async fn axum_serve(listener: TcpListener, addr: std::net::SocketAddr) {
 }
 
 #[actix_web::main]
-async fn actix_serve(listener: TcpListener, addr: std::net::SocketAddr) {
+async fn actix_serve(listener: TcpListener, addr: std::net::SocketAddr, keep: u64) {
     use actix_web::{App, HttpServer, web};
     async fn create(store: web::Data<Store>, new: web::Json<NewOrder>) -> String {
         store.create(new.into_inner())
     }
-    let store = web::Data::new(Store::default());
+    let store = web::Data::new(Store::new(keep));
     // actix-web stops gracefully on SIGTERM by itself. Its defaults close a connection that
     // has been idle for 5 s and one whose request has not arrived within 5 s of its accept;
     // under the generator's plan some of the 64 pooled connections were closed that way and

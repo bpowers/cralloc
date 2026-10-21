@@ -8,6 +8,8 @@ siblings) unless --free. Over the measured segment it runs one of:
   trace   perf trace -s (system call summary)
   probe   the slow-path counters of a probe-counts build (probesum.py), read from the
           server's memory at the start and end of the segment
+  syscalls  strace -c of the memory system calls (madvise, mprotect, mmap, munmap, mremap, brk);
+          strace slows each call it sees, so time these runs for nothing else
   sizes   allocations and frees by class (sizesum.py) of a build whose bench-alloc counts
           them into `BENCH_SIZE_COUNTS` (an `asmalloc-sizes` feature on a throwaway branch;
           docs/research/servers-h2.md says how it was built)
@@ -73,6 +75,10 @@ SERVERS = {
     "connect": ("release/rpc-server", ["log"], H1 + CONNECT),
     "connect-h2": ("release/rpc-server", ["log"], H2 + CONNECT),
     "grpc-h2": ("release/rpc-server", ["log"], H2 + GRPC),
+    "cache-4G": ("apps/orders/release/orders", ["axum", "keep=2250000"], H1 + ORDER),
+    "cache-2G": ("apps/orders/release/orders", ["axum", "keep=1120000"], H1 + ORDER),
+    "miniredis-2G": ("apps/miniredis/release/miniredis", ["serve", "preload=1800000"],
+                     H1 + ["--proto", "resp", "--requests", str(INPUTS / "miniredis/churn-1800000.resp")]),
     "miniredis": ("apps/miniredis/release/miniredis", ["serve"],
                   H1 + ["--proto", "resp", "--requests", str(INPUTS / "miniredis/commands.resp")]),
 }
@@ -112,9 +118,10 @@ def run(mode, server, build, rnd, args, out):
                           if Path(f"/proc/{srv.pid}/task/{t}/comm").read_text().startswith("actix-rt"))
             for cpu, tid in zip((0, 1, 2, 3), tids):
                 subprocess.run(["taskset", "-p", "-c", str(cpu), str(tid)], stdout=subprocess.DEVNULL, check=True)
-        plan = f"_fill:closed:2,_w:{args.rate}:2,m:{args.rate}:{args.secs}"
+        plan = f"_fill:closed:{args.fill},_w:{args.rate}:2,m:{args.rate}:{args.secs}"
         gen = subprocess.Popen([str(LOADGEN), "--addr", addr] + SERVERS[server][2]
-                               + ["--threads", "4", "--cpus", "8-11", "--plan", plan],
+                               + ["--threads", "4", "--cpus", "8-11", "--plan", plan]
+                               + (["--raw", str(out / f"{tag}.raw")] if args.raw else []),
                                stdout=subprocess.PIPE, text=True)
         perf = None
         result = None
@@ -132,6 +139,11 @@ def run(mode, server, build, rnd, args, out):
                 elif mode == "record":
                     perf = subprocess.Popen(["taskset", "-c", "15", "perf", "record", "-g", "-F", "4999", "-p",
                                              str(srv.pid), "-o", str(out / f"{tag}.data")],
+                                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                elif mode == "syscalls":
+                    perf = subprocess.Popen(["taskset", "-c", "15", "strace", "-c", "-f", "-e",
+                                             "trace=madvise,mprotect,mmap,munmap,mremap,brk", "-p", str(srv.pid),
+                                             "-o", str(out / f"{tag}.syscalls")],
                                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
                 elif mode == "trace":
                     perf = subprocess.Popen(["taskset", "-c", "15", "perf", "trace", "-s", "-p", str(srv.pid),
@@ -160,14 +172,16 @@ def run(mode, server, build, rnd, args, out):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("mode", choices=["stat", "record", "trace", "probe", "sizes"])
+    ap.add_argument("mode", choices=["stat", "record", "trace", "probe", "sizes", "syscalls"])
     ap.add_argument("--server", default="actix", choices=sorted(SERVERS))
     ap.add_argument("--allocs", default="asmalloc,je")
     ap.add_argument("--rounds", type=int, default=2)
     ap.add_argument("--rate", default="280000")
     ap.add_argument("--secs", default="8")
+    ap.add_argument("--fill", default="2", help="seconds of closed-loop load before the fixed rate")
     ap.add_argument("--free", action="store_true")
     ap.add_argument("--pin", action="store_true")
+    ap.add_argument("--raw", action="store_true", help="keep every request (loadgen --raw) in DIR/<tag>.raw")
     ap.add_argument("--out", required=True)
     args = ap.parse_args()
     out = Path(args.out)
