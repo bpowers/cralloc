@@ -575,7 +575,7 @@ passes a threshold. A swap with a spare then does no maintenance of its own, and
 the rate of maintenance does not change when a class's magazines, its trips to the depot or
 its fills change size. A large allocation or free counts as a slow path, and beats on one
 call in sixteen: a program that moves large blocks makes such calls far more often than the
-maintenance needs to run. By default there is no background thread and no timer. The work
+maintenance needs to run. The work
 is done in units small enough that no single call pays much. This is mimalloc's pacing
 applied to a per-CPU design.
 
@@ -623,22 +623,42 @@ path can stand in for the clock here: a free cannot tell memory that is idle fro
 about to be reused, and purging on a level makes the programs that reuse it fault it
 straight back.
 
-A program that cannot accept that asks for a background thread. The thread is opt-in, so
-that the default stays free of hidden threads, and it buys nothing on the fast path, which
-stays as it is. Once an interval it calls `maintain`, which does for the whole heap what the
-heartbeats of an interval would have done: the idle check on every slab, each depot stack's
-shedding, and the clocked purge. A slab it drains has its magazines laundered, not parked
-in the depot: a CPU that is busy only on fast paths would otherwise take them straight back,
-and their scattered objects would go on pinning pages. It is an ordinary thread of the process, started by the
-layer that has a thread library to start it with: a function behind a cargo feature for a
-Rust program, an environment variable for the preload library. The child of a fork does not
-inherit the thread.
+So there is a background thread, and by default it starts itself. A heartbeat starts it
+the first time it finds two things together: the process holds more free and parked memory
+than the floor of the allowance (see "Sizing from evidence"), and the calling thread is not
+the process's first, so the process already has more than one thread. A small program
+never gets the thread, because it holds nothing worth returning, and neither does a
+program with one thread, which may depend on staying that way. The thread buys nothing on
+the fast path, which stays as it is. Once an interval it calls `maintain`, which does for
+the whole heap what the heartbeats of an interval would have done: the idle check on every
+slab, each depot stack's shedding, and the clocked purge, in bounded steps. A slab it
+drains has its magazines laundered, not parked in the depot: a CPU that is busy only on
+fast paths would otherwise take them straight back, and their scattered objects would go
+on pinning pages.
 
-A program with a timer of its own calls `maintain` from it and needs no thread. In an
-async runtime that is a task that wakes once an interval, and we ship one for tokio, in a
-crate of its own because the allocator has no dependencies. Both are offered because
-neither fits every program: a server without an async runtime has no timer to borrow, and
-one that must stay single-threaded cannot take the thread. The task costs one wake-up a second,
+The thread sleeps while there is nothing for it to do. When a round finds no work, and no
+slow path has run anywhere since the round before, the thread parks on a word with no
+timeout, and a process that has gone silent is not woken by its allocator at all. By then
+its rounds have drained every slab, so the first allocation or free after the silence
+takes a slow path, and a slow path that finds the word set clears it and wakes the thread.
+That costs each slow path one load of a word that is otherwise not written, and the fast
+path nothing. A program that is working, even one that never leaves its magazines, keeps
+the thread awake, because each round's drain sends its CPUs to their slow paths.
+
+It is an ordinary thread of the process, started by the layer that has a thread library to
+start it with: the standard library for a Rust program, the C library for the preload
+library. A program can turn it off, with a cargo feature or an environment variable, and
+can start it itself whatever the two conditions say. If the thread cannot be created the
+allocator carries on without it. A process under a system-call filter that kills on thread
+creation, which no allocator can detect, must turn it off. The child of a fork does not
+inherit the thread and starts its own on the same conditions.
+
+A program with a timer of its own can call `maintain` from it instead, and a process that
+calls `maintain` does not get the thread by default. In an async runtime that is a task
+that wakes once an interval, and we ship one for tokio, in a crate of its own because the
+allocator has no dependencies. Both are offered because neither fits every program: a
+server without an async runtime has no timer to borrow, and one that must stay
+single-threaded cannot take the thread. The task costs one wake-up a second,
 it runs while a server is silent, which is when a burst's memory should go back, and it
 takes that work off the first requests of the next burst. `maintain` limits its own rate,
 returning at once unless an interval has passed since it last ran, so it is harmless to
