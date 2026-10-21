@@ -30,10 +30,10 @@ executable = []
 # binary built alongside it.
 c-abi = []
 # The background thread (design: "Heartbeat"): it starts by default once the heap holds more
-# than the floor of the allowance and the process has more than one thread, and parks while the
-# process is quiet; `Asmalloc::start_background` starts it at once. It is created with the C
-# library's `pthread_create`, so the crate links the C library with it; a build for a program
-# without one turns default features off.
+# than the floor of the allowance and the program has created a thread of its own, and parks
+# while the process is quiet; `Asmalloc::start_background` starts it at once. It is created with
+# the C library's `pthread_create`, so the crate links the C library with it; a build for a
+# program without one turns default features off.
 background = []
 # The `Allocator` trait for `Asmalloc` (and `SimHeap`). The trait is stable from Rust 1.100, so
 # until then this needs a nightly toolchain.

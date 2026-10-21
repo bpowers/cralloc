@@ -30,8 +30,8 @@
 //! so a program whose threads all stay inside their caches would keep what it held when it
 //! went quiet. The `background` feature, on by default, adds a thread that maintains the heap
 //! during silences: it starts by default once the heap holds more than the floor of the
-//! allowance (32 MiB) and the process has more than one thread, and parks while the process is
-//! quiet. `ASMALLOC_BACKGROUND=0` turns it off, and `Asmalloc::start_background` starts it at
+//! allowance (32 MiB) and the program has created a thread of its own, and parks while the
+//! process is quiet. `ASMALLOC_BACKGROUND=0` turns it off, and `Asmalloc::start_background` starts it at
 //! once. [`Asmalloc::maintain`] runs one round of the maintenance for a program with a timer of
 //! its own, which then gets no default thread:
 //!
