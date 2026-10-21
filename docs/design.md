@@ -625,9 +625,15 @@ straight back.
 
 So there is a background thread, and by default it starts itself, once two things are
 true together: the process holds more free and parked memory than the floor of the
-allowance (see "Sizing from evidence"), and it already has more than one thread. A small
-program's thread never runs, because the program holds nothing worth returning, and a
-program with one thread never gets one, because it may depend on staying that way. The thread buys nothing on
+allowance (see "Sizing from evidence"), and the program has created a thread of its own. A
+small program's thread never runs, because the program holds nothing worth returning, and
+a program with one thread never gets one, because it may depend on staying that way. The
+evidence of a second thread is the C library's own record that one was created; a library
+that keeps no such record leaves a free made by a thread other than the first as the
+evidence. Which thread happens to free the memory must not matter where the library can
+say. The condition is a level and not an event. It is looked at when free memory rises
+over the floor, and again once an interval for as long as it stays there, so a moment at
+which the thread could not be created only delays it. The thread buys nothing on
 the fast path, which stays as it is. Once an interval it calls `maintain`, which does for
 the whole heap what the heartbeats of an interval would have done: the idle check on every
 slab, each depot stack's shedding, and the clocked purge, in bounded steps. A slab it
@@ -635,9 +641,17 @@ drains has its magazines laundered, not parked in the depot: a CPU that is busy 
 fast paths would otherwise take them straight back, and their scattered objects would go
 on pinning pages.
 
-The thread sleeps while there is nothing for it to do. When a round finds no work, and no
-slow path has run anywhere since the round before, the thread parks on a word with no
-timeout, and a process that has gone silent is not woken by its allocator at all. By then
+The thread sleeps while there is nothing for it to do. Its rules act on what one interval
+or several left unused, so a round that finds nothing does not show that the next will:
+a slab drained in one interval is shed in the next, what was shed is purged when its
+frontier has aged, and scattered pages wait for the pass that takes runs of any length.
+So the thread parks when its rounds have found no work for as many intervals in a row as
+the longest of those waits, and no slow path has run anywhere in that time. It then waits
+on a word with no timeout, and a process that has gone silent is not woken by its
+allocator at all. How much memory the process still holds is not part of the rule. A heap
+can hold more than the floor in free slots on pages that also hold live objects, which no
+round can return, and a thread that stayed awake for those would wake for ever and return
+nothing. By then
 its rounds have drained every slab, so the first allocation or free after the silence
 takes a slow path, and a slow path that finds the word set clears it and wakes the thread.
 That costs each slow path one load of a word that is otherwise not written, and the fast
@@ -656,14 +670,23 @@ allocations for a new thread or a newly loaded object come from. So the two laye
 their moment differently. In a Rust program the thread is created on a heartbeat of a
 call that came through the Rust interface, which the C library does not use, and only if
 the calling thread has no signal blocked and is not on a signal stack, the marks of a
-handler; otherwise a later heartbeat tries. The preload library, whose caller may always
+handler; otherwise the next look at the level tries again. A Rust program that keeps a
+signal blocked in every thread never passes that test, and starts the thread itself. The
+preload library, whose caller may always
 be the C library, creates the thread when the program creates its own first thread, a
-moment that is safe by construction, and leaves it parked until a slow path finds the heap
-over the floor. A program can turn the thread off, with a cargo feature or an environment
-variable, and can start it itself whatever the conditions say. If the thread cannot be
-created the allocator carries on without it. A process under a system-call filter that kills on thread
-creation, which no allocator can detect, must turn it off. The child of a fork does not
-inherit the thread and starts its own on the same conditions.
+moment that is safe by construction, and leaves it dormant until the heap is over the
+floor: the thread looks at the level before it first sleeps, and the free that takes the
+heap over the floor wakes it. A program can turn the thread off, with a cargo feature or
+an environment variable, and can start it itself whatever the conditions say. The thread
+asks for a small stack, and takes the C library's default where the library refuses that,
+as it does when the program's thread-local data does not fit. If the thread cannot be
+created at all the allocator carries on without it. A process under a system-call filter
+that kills on thread creation, which no allocator can detect, must turn it off. The child
+of a fork does not inherit the thread and starts its own on the same conditions, its own
+first thread included. The word that says whether the thread exists also names the
+generation it belongs to (see "Process lifecycle"), so that claiming the right to create
+it is one atomic instruction, a fork child reads its parent's word as stale, and a child
+that shares its parent's memory is not taken for a new process.
 
 A program with a timer of its own can call `maintain` from it instead, and a process that
 calls `maintain` does not get the thread by default. In an async runtime that is a task
