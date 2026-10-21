@@ -834,13 +834,18 @@ impl<O: Os> Back<'_, O> {
                         } else {
                             let (top, words) = region::clean_top(&host, region, unit);
                             read += words;
-                            let cut = piece(Unit { end: top, ..unit }, most, min_run, granule);
-                            let (outcome, _) = region::purge_unit(&host, region, cut);
-                            if let Purge::Done(bytes) = outcome {
-                                purged += bytes;
-                                below_purged = Some(cut.start);
+                            if top <= unit.start {
+                                // Another purger cleaned the rest since the look.
+                                unit.start
+                            } else {
+                                let cut = piece(Unit { end: top, ..unit }, most, min_run, granule);
+                                let (outcome, _) = region::purge_unit(&host, region, cut);
+                                if let Purge::Done(bytes) = outcome {
+                                    purged += bytes;
+                                    below_purged = Some(cut.start);
+                                }
+                                cut.start
                             }
-                            cut.start
                         }
                     } else {
                         let (run, words) =
