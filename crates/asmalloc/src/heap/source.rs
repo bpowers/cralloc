@@ -12,6 +12,10 @@ use core::ptr::NonNull;
 use core::sync::atomic::AtomicPtr;
 
 impl<O: Os> Source for Back<'_, O> {
+    fn clock(&self) -> &crate::clock::Counted {
+        Back::clock(self)
+    }
+
     fn fill(&self, class: SmallClass, slots: &[AtomicPtr<u8>]) -> usize {
         Back::fill_within(self, class, &mut Descending(slots), FILL_CLAIMS)
     }
@@ -34,7 +38,7 @@ impl<O: Os> Source for Back<'_, O> {
         self.heartbeat_with(now);
     }
 
-    fn purge_pass(&self, now: &dyn Fn() -> u64) {
-        self.decay_pass(now);
+    fn purge_pass_step(&self, now: &dyn Fn() -> u64) -> bool {
+        self.decay_pass_step(now)
     }
 }

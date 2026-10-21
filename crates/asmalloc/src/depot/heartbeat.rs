@@ -236,15 +236,21 @@ impl Sighting {
 /// check, a look at a depot stack for a new interval, or an age look that finds a magazine
 /// loaded. Reading the timestamp counter on every heartbeat cost a two-thread pipeline about
 /// 3% of its time.
+///
+/// The time is the heap's counted time (`crate::clock`), not the cycle counter's: a silence
+/// ages what the rules look at by one interval, however long it lasted. Reading it may take a
+/// step of the count.
 pub(super) struct Clock<'a, O: Os> {
     os: &'a O,
+    counted: &'a crate::clock::Counted,
     now: Cell<Option<u64>>,
 }
 
 impl<'a, O: Os> Clock<'a, O> {
-    pub(super) fn new(os: &'a O) -> Self {
+    pub(super) fn new(os: &'a O, counted: &'a crate::clock::Counted) -> Self {
         Clock {
             os,
+            counted,
             now: Cell::new(None),
         }
     }
@@ -254,7 +260,7 @@ impl<'a, O: Os> Clock<'a, O> {
         match self.now.get() {
             Some(now) => now,
             None => {
-                let now = self.os.ticks();
+                let now = self.counted.now(self.os);
                 self.now.set(Some(now));
                 now
             }
@@ -452,7 +458,7 @@ impl<O: Os, R: Routines, S: Source> Cache<'_, O, R, S> {
         if let (Some(class), true) = (served, chores.installed) {
             self.unstamp(cpu, class);
         }
-        let clock = Clock::new(self.os());
+        let clock = Clock::new(self.os(), self.source.clock());
         if let Some(class) = served
             && self.tuning.shed_unused
         {
@@ -478,7 +484,7 @@ impl<O: Os, R: Routines, S: Source> Cache<'_, O, R, S> {
     /// The chores of a heartbeat. `activity` is its turn, which picks the class and the CPU
     /// that the rotating chores look at: the number of beats its CPU's activity counter holds.
     fn beat(&self, served: Option<SmallClass>, chores: Chores, activity: Option<u64>) {
-        let clock = Clock::new(self.os());
+        let clock = Clock::new(self.os(), self.source.clock());
         // A rule of this CPU's that an earlier slow path's budget turned away goes first, and
         // this call's launder over target waits for what the rule leaves of the budget: the
         // rules are once an interval per class and per slab, and nothing else runs them for a

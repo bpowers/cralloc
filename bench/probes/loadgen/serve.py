@@ -62,6 +62,10 @@ ALLOCS = {
                     "env": {"ASMALLOC_BACKGROUND": "1"}},
 }
 DEFAULT_ALLOCS = "glibc,jemalloc,mimalloc,tcmalloc,asmalloc"
+# More configurations from the environment, as JSON: {"name": {"bin": PATH, "env": {...},
+# "preload": PATH}}. "bin" replaces the server binary (a build with an allocator linked in).
+ALLOCS.update({k: {"preload": "", "build": None, "env": {}, **v}
+               for k, v in json.loads(os.environ.get("SERVE_EXTRA_ALLOCS", "{}")).items()})
 
 ORDER = str(REPO / "bench" / "probes" / "rust-screen" / "servers" / "order.json")
 SERVERS = {
@@ -244,7 +248,7 @@ def one_run(server, alloc, rnd, segs, outdir, wrap="", record=""):
     if spec.get("native"):
         binary = str(REPO / "bench" / "target" / a["build"] / "release" / "rpc-server")
     else:
-        binary = spec["bin"]
+        binary = a.get("bin") or spec["bin"]
         if a["preload"]:
             env["LD_PRELOAD"] = a["preload"]
     argv = [str(MEMLIMIT), "-m", "4G", "-t", "15m", "--"] + wrap.format(dir=d).split() \

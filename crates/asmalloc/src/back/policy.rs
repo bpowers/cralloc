@@ -16,6 +16,16 @@ use crate::space::Geometry;
 /// leave resident above what is live. The clocked pass returns memory in the ordinary case.
 pub const RETAINED_CAP_HUGE_PAGES: usize = 32;
 
+/// The floor of the allowance, in huge pages: 16, or 32 MiB. Memory up to this much is spent
+/// freely: the clocked pass leaves retained memory alone while it totals no more than the
+/// floor, and stops at the floor when above it. Tens of megabytes cost a server nothing that
+/// matters, and returning them costs `madvise` calls and the refaults of the next burst
+/// (`docs/research/burst-start.md`). The same floor is what the default background thread's
+/// start waits for, since below it the thread would have nothing to do, and what the
+/// allowance for holding large slots starts from. `collect` (and `malloc_trim`) and growth
+/// over the cap are not floored.
+pub const ALLOWANCE_FLOOR_HUGE_PAGES: usize = 16;
+
 /// Growth is charged against the cap in steps of this many huge pages: 1, or 2 MiB. Each step
 /// of carving, while retained memory is over the cap, pays for at most one bounded purge
 /// walk, so a heap whose free memory is all fragmentation pays one walk per step of growth.
@@ -46,11 +56,48 @@ pub const DECAY_FLOOR_HUGE_PAGES: usize = 1;
 /// Dense words fill a whole magazine in sixteen claims.
 pub const FILL_CLAIMS: usize = 256;
 
+/// The most pages a purge returns in one call: 64, 256 KiB. Adjacent free pages go back
+/// together, since a call costs about the same whatever it returns (about 2 us in a process
+/// whose other threads are running, for its TLB shootdowns, against 0.05 us a page:
+/// `docs/research/burst-start.md`); the bound keeps one call's claims, a few hundred bitmap
+/// words for the smallest classes, from holding up the allocations that want them.
+pub const PURGE_MAX_RUN_PAGES: u32 = 64;
+
+/// The most bitmap words a run's looks read, and so about the most its purge claims at once:
+/// 64. A claim holds its words through the `madvise`, and a fill that meets them moves on and
+/// may carve instead; for the smallest classes, eight words to a page, this keeps a run to 8
+/// pages.
+pub const PURGE_MAX_RUN_WORDS: usize = 64;
+
+/// The clocked pass returns a run of free pages only if it has at least this many: 4. A call
+/// for one page costs four times as much a page as one for four, and a short run is the kind a
+/// burst's next allocations land on. Growth over the cap and `collect` take any run. Runs of 8
+/// saved few more calls and left twice the memory waiting after a peak
+/// (`docs/research/burst-start.md`).
+pub const PURGE_MIN_RUN_PAGES: u32 = 4;
+
+/// One clocked pass in this many takes runs of any length: 8, so a single free page goes back
+/// within about eight intervals of the program going quiet, and a long run within one.
+pub const PURGE_ANY_RUN_EVERY: u64 = 8;
+
 /// How much bitmap a heartbeat's step of a decay pass may read, in words: 256 words, 2 KiB.
 /// Each word covers 64 slots, so this is one 4 KiB page of 8-byte slots read eight times over,
 /// or a few hundred pages of larger ones. A step always finishes the unit it started, so a
 /// huge-page unit of small slots may read more.
 pub const PURGE_STEP_WORDS: usize = 256;
+
+/// How much bitmap one of `maintain`'s steps of the clocked pass may read, in words: 64, a
+/// quarter of a heartbeat's step. `maintain`'s caller may be an async runtime's worker that
+/// yields between steps, and a step should hold it for tens of microseconds; a heartbeat's
+/// step is paid for by a slow path that already did far more.
+pub const PURGE_MAINTAIN_STEP_WORDS: usize = 64;
+
+/// How many pages one of `maintain`'s steps of the clocked pass may purge before it stops, in
+/// 4 KiB pages: 128, half a MiB. A `madvise` costs about 0.4 us a call and 0.1 us a resident
+/// page alone, and a few microseconds a call more with other threads to shoot down
+/// (`docs/research/burst-start.md`). Checked between units, so a step that meets a unit
+/// larger than this, one slot of a large class, purges that whole slot.
+pub const PURGE_MAINTAIN_STEP_PAGES: u32 = 128;
 
 /// How much bitmap a step of growth over the cap may read while it purges, in words: 16384,
 /// 128 KiB. The bound keeps one call from paying for a whole heap; the clocked pass and later
@@ -181,6 +228,12 @@ pub const fn commit_ahead(used: u32, least: u32, most: u32) -> u32 {
 #[inline(always)]
 pub const fn retained_cap(geometry: Geometry) -> usize {
     RETAINED_CAP_HUGE_PAGES * geometry.huge_page_size()
+}
+
+/// The floor of the allowance in bytes for a geometry (`ALLOWANCE_FLOOR_HUGE_PAGES`).
+#[inline(always)]
+pub const fn allowance_floor(geometry: Geometry) -> usize {
+    ALLOWANCE_FLOOR_HUGE_PAGES * geometry.huge_page_size()
 }
 
 /// The growth step in bytes for a geometry.

@@ -182,9 +182,9 @@ pub(super) fn layouts_fit(plan: Plan) {
 }
 
 /// The decay word: a pass under way is stepped whatever the clock says. Otherwise a pass
-/// starts exactly when the clock is an interval or more past the word's time; a clock behind
-/// the word re-stamps it with the time now, after which a pass starts one interval later; and
-/// the word that starts a pass is marked active and keeps the time.
+/// starts exactly when the clock is in a later interval than the word's time; a clock behind
+/// the word re-stamps it with the time now, after which a pass starts in the next interval;
+/// and the word that starts a pass is marked active and keeps the time.
 #[kani::proof]
 fn a_decay_pass_starts_only_after_an_interval() {
     use super::policy::DECAY_TICKS;
@@ -198,19 +198,22 @@ fn a_decay_pass_starts_only_after_an_interval() {
             assert!(word & 1 == 0 && next & 1 == 1);
             assert!(next | 1 == now | 1);
             assert!(decay_look(next, kani::any()) == Decay::Step);
-            assert!(since >= DECAY_TICKS && since < 1 << 63);
+            assert!(since < 1 << 63 && (now & !1) / DECAY_TICKS > word / DECAY_TICKS);
         }
         Decay::Restamp(next) => {
             assert!(word & 1 == 0 && since >= 1 << 63);
             assert!(next == now & !1);
-            // From the new stamp the wait is one interval, wherever the clock goes forward.
+            // From the new stamp a pass waits for the next interval, wherever the clock goes
+            // forward.
             assert!(decay_look(next, now) == Decay::Wait);
-            assert!(
-                decay_look(next, now.wrapping_add(DECAY_TICKS))
-                    == Decay::Start(now.wrapping_add(DECAY_TICKS) | 1)
-            );
+            let later = now.wrapping_add(DECAY_TICKS);
+            if later > now {
+                assert!(decay_look(next, later) == Decay::Start(later | 1));
+            }
         }
-        Decay::Wait => assert!(word & 1 == 0 && since < DECAY_TICKS),
+        Decay::Wait => assert!(
+            word & 1 == 0 && since < 1 << 63 && (now & !1) / DECAY_TICKS <= word / DECAY_TICKS
+        ),
     }
     // A pass that has just ended at `now` does not start again at once.
     assert!(decay_look(now & !1, now) == Decay::Wait);
@@ -248,7 +251,9 @@ fn a_pass_word_round_trips() {
         tag: kani::any(),
         lap: kani::any(),
         pages: kani::any(),
+        any: kani::any(),
     };
+    kani::assume(pass.pages < 1 << 31);
     assert!(Pass::unpack(pass.pack()) == pass);
     let word: u64 = kani::any();
     assert!(Pass::unpack(word).pack() == word);

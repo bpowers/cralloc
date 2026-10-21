@@ -13,6 +13,18 @@ actix-web = "4.17.0"
 tokio = { version = "1.54.0", features = ["full"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1.0.154"
+asmalloc = { path = "../../../../crates/asmalloc", features = ["executable", "background"], optional = true }
+asmalloc-tokio = { path = "../../../../crates/asmalloc-tokio", optional = true }
+
+[features]
+# asmalloc as the global allocator, for measuring it without preloading; with it, the axum
+# server's ORDERS_MAINTAIN picks how asmalloc's maintenance runs between bursts (see
+# src/bin/axum-orders.rs).
+asmalloc = ["dep:asmalloc", "dep:asmalloc-tokio"]
+
+[[bin]]
+name = "maintain-steps"
+required-features = ["asmalloc"]
 
 [profile.release]
 debug = 1

@@ -15,7 +15,15 @@ path = "src/bin/server.rs"
 name = "rpc-client"
 path = "src/bin/client.rs"
 
+[features]
+# With asmalloc as the global allocator: BENCH_MAINTAIN=task runs its maintenance from a task
+# on the server's runtime (asmalloc-tokio), BENCH_MAINTAIN=thread from asmalloc's background
+# thread (src/bin/server.rs).
+maintenance = ["dep:asmalloc", "dep:asmalloc-tokio"]
+
 [dependencies]
+asmalloc = { path = "../../crates/asmalloc", features = ["background"], optional = true }
+asmalloc-tokio = { path = "../../crates/asmalloc-tokio", optional = true }
 bench-alloc.workspace = true
 bench-harness.workspace = true
 buffa = { version = "=0.9.2", features = ["json"] }

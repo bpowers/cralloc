@@ -188,6 +188,60 @@ fn a_class_in_steady_use_is_refilled_at_most_once_an_interval() {
     assert_eq!(refills_of_a_class_in_steady_use(false, intervals), 0);
 }
 
+/// CPU 0 runs another class's slow paths for `ticks` of the clock, in eighths.
+fn busy_for(
+    rig: &TestRig,
+    cache: &Cache<'_, SimOs<Small>, Twin<'_, &SimCpu>, TestSource>,
+    ticks: u64,
+) {
+    let busy = tiny(1);
+    for _ in 0..8 {
+        rig.os().advance_clock(ticks / 8);
+        for _ in 0..40 {
+            churn(cache, busy, 3);
+        }
+    }
+}
+
+/// A silence counts as one interval (`crate::clock`): a magazine an age look stamped just
+/// past the middle of an interval, before a long silence, is still young a quarter interval
+/// after it, and is taken within the two intervals the rule promises once slow paths keep
+/// coming. Read off the cycle counter, the first age look after the silence took it. (The
+/// sweep of full spares is not what this tests: it runs once an interval, so a sweep due at the
+/// next interval is due at the first heartbeat after a silence, as it would have been.)
+#[test]
+fn a_silence_ages_a_loaded_magazine_by_at_most_one_interval() {
+    let idle = tiny(0);
+    let rig: TestRig = Rig::new(
+        &[idle, tiny(1)],
+        64,
+        Tuning {
+            age_limit: true,
+            ..QUIET
+        },
+    );
+    let machine = SimCpu::new(0);
+    let cache = rig.cache(&machine);
+    busy_for(&rig, &cache, IDLE_TICKS / 2);
+    let object = cache.alloc(idle).unwrap();
+    let other = cache.alloc(idle).unwrap();
+    cache.free(idle, other);
+    assert!(is_loaded(&rig, 0, idle));
+    // Age looks go round the classes and stamp the loaded magazine.
+    busy_for(&rig, &cache, IDLE_TICKS / 8);
+    assert!(is_loaded(&rig, 0, idle));
+    rig.os().advance_clock(50 * IDLE_TICKS);
+    busy_for(&rig, &cache, IDLE_TICKS / 4);
+    assert!(
+        is_loaded(&rig, 0, idle),
+        "taken by the first age looks after a silence"
+    );
+    busy_for(&rig, &cache, 2 * IDLE_TICKS);
+    assert!(!is_loaded(&rig, 0, idle));
+    cache.free(idle, object);
+    rig.census(&[], false);
+}
+
 /// The objects in `class`'s depot stack.
 fn in_depot(rig: &TestRig, class: SmallClass) -> usize {
     let machine = SimCpu::new(0);
@@ -237,6 +291,16 @@ fn an_idle_depot_stack_is_laundered() {
 /// interval for `intervals`, with another class's slow paths beating in between: the stack's
 /// depth before each round, and how many of each round's allocations the stack could serve.
 fn a_stack_in_use(shed_unused: bool, intervals: usize) -> (Vec<usize>, Vec<usize>) {
+    a_stack_in_use_after(shed_unused, intervals, 0)
+}
+
+/// [`a_stack_in_use`] with a silence of `silence` ticks, no slow path anywhere, after each
+/// round's interval.
+fn a_stack_in_use_after(
+    shed_unused: bool,
+    intervals: usize,
+    silence: u64,
+) -> (Vec<usize>, Vec<usize>) {
     let (used, busy) = (tiny(0), tiny(1));
     // The busy class's swing, three objects over magazines of two, is what makes the slow
     // paths and so the heartbeats here; left half full now and then, its magazines would change
@@ -272,9 +336,19 @@ fn a_stack_in_use(shed_unused: bool, intervals: usize) -> (Vec<usize>, Vec<usize
                 churn(&cache, busy, 3);
             }
         }
+        rig.os().advance_clock(silence);
     }
     rig.census(&[], false);
     (depths, served)
+}
+
+/// A long silence between the rounds of `a_stack_in_use` changes nothing: the stack still keeps
+/// the depth its rounds use, since the interval before a silence is the only one it ages by.
+#[test]
+fn a_silence_between_rounds_does_not_shed_a_stack_in_use() {
+    let (plain, _) = a_stack_in_use(true, 6);
+    let (silent, _) = a_stack_in_use_after(true, 6, 50 * IDLE_TICKS);
+    assert_eq!(plain, silent);
 }
 
 #[test]

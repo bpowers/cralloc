@@ -191,6 +191,12 @@ struct Clocked {
     /// (`layout::Frontier`). Written by the first heartbeat of each interval that reads the
     /// clock (`purge`), so once an interval; zero until the first heartbeat.
     epoch: AtomicU64,
+    /// The count of intervals every clocked rule reads its time from (`crate::clock`).
+    clock: crate::clock::Counted,
+    /// For tests of the clocked pass's mechanics on heaps smaller than the floor: the pass
+    /// acts as if the floor were zero.
+    #[cfg(test)]
+    unfloored: core::sync::atomic::AtomicBool,
 }
 
 /// What the steps of the purge walk share (`purge`).
@@ -207,6 +213,9 @@ struct Walk {
     /// The pass under way: its tag, the lap it began in and what it may still purge
     /// (`purge::Pass`).
     pass: AtomicU64,
+    /// How many clocked passes have started, which picks the ones that take runs of any length
+    /// (`policy::PURGE_ANY_RUN_EVERY`).
+    passes: AtomicU32,
     /// One past the highest region ever about to be given to a class, zero for none: the walk
     /// goes round regions below it only. Classes take the lowest unassigned regions and runs
     /// come from the top, so in a heap of a hundred class regions a lap reads a hundred table
@@ -247,12 +256,16 @@ impl<O: Os> State<O> {
             decay: Lined::new(Clocked {
                 word: AtomicU64::new(0),
                 epoch: AtomicU64::new(0),
+                clock: crate::clock::Counted::new(),
+                #[cfg(test)]
+                unfloored: core::sync::atomic::AtomicBool::new(false),
             }),
             walk: Lined::new(Walk {
                 purge_at: AtomicU32::new(0),
                 laps: AtomicU32::new(0),
                 pass_from: AtomicU32::new(0),
                 pass: AtomicU64::new(0),
+                passes: AtomicU32::new(0),
                 top: AtomicU32::new(0),
             }),
             run_sizes: Lined::new([const { AtomicUsize::new(0) }; MAX_REGIONS]),

@@ -19,7 +19,19 @@ use std::vec::Vec;
 
 type Sim<S = Standard> = SimOs<S>;
 
+/// A back end whose clocked pass has no floor: most of these tests drive the pass over heaps
+/// smaller than the floor (`policy::allowance_floor`), whose own tests use [`floored_state`].
 fn state<S: Shape>() -> Box<State<Sim<S>>> {
+    let state = floored_state::<S>();
+    state
+        .decay
+        .unfloored
+        .store(true, core::sync::atomic::Ordering::Relaxed);
+    state
+}
+
+/// A back end as the process has it, with the clocked pass's floor.
+fn floored_state<S: Shape>() -> Box<State<Sim<S>>> {
     Box::new(State::new(Sim::<S>::new()))
 }
 
@@ -1004,7 +1016,7 @@ fn a_pass_resumes_where_the_walk_stands() {
         .purge_at
         .store(region(lows[0]) as u32 + 1, Relaxed);
     os.advance_clock(DECAY_TICKS);
-    back.decay_pass(&|| os.ticks());
+    back.decay_pass(&|| back.now());
     // The pass began there, emptied that region, went on from the top of the heap with the
     // rest of its quarter, and stopped long before the bottom of the higher class's lowest
     // region. A pass from the top would have spent its quarter on the higher class alone.
@@ -1030,12 +1042,50 @@ fn floor_at<O: Os>(back: &Back<'_, O>, p: *mut u8) -> u32 {
     super::region::floor(&host, location.region, back.epoch())
 }
 
-/// Moves the clock `intervals` on and lets the back end see it, as a heartbeat would, without
-/// stepping or starting a pass.
+/// Moves the clock `intervals` on, an interval at a time, and lets the back end see each, as
+/// heartbeats would, without stepping or starting a pass.
 fn tick<S: Shape>(back: &Back<'_, Sim<S>>, intervals: u64) {
     let os = back.space().os();
-    os.advance_clock(intervals * DECAY_TICKS);
-    back.note_epoch(os.ticks());
+    for _ in 0..intervals {
+        os.advance_clock(DECAY_TICKS);
+        back.note_epoch(back.now());
+    }
+}
+
+/// A silence counts as one interval (`crate::clock`): memory a fill reached half an interval
+/// before a long silence is still inside its region's frontier when the heartbeats after the
+/// silence start a clocked pass, so the pass leaves it for the burst that follows; heartbeats
+/// over the intervals after that return it as before. Read off the cycle counter, the first
+/// pass after the silence found every frontier gone and purged it all.
+#[test]
+fn a_silence_ages_a_frontier_by_at_most_one_interval() {
+    let state = state::<Standard>();
+    let back = state.get_or_reserve().unwrap();
+    let os = state.os();
+    let class = small(1024);
+    tick(&back, 1);
+    os.advance_clock(DECAY_TICKS / 2);
+    beat(&back);
+    let slots = fill(&back, class, 256);
+    for &p in &slots {
+        paint(p, 1024, 3);
+    }
+    // SAFETY: the test holds these slots and gives them up.
+    unsafe { back.launder(class, &slots) };
+    let purges = os.calls(Call::Purge);
+    os.advance_clock(50 * DECAY_TICKS);
+    beat(&back);
+    assert_eq!(
+        os.calls(Call::Purge),
+        purges,
+        "purged what the last interval reached"
+    );
+    for _ in 0..3 {
+        os.advance_clock(DECAY_TICKS);
+        beat(&back);
+    }
+    assert!(os.calls(Call::Purge) > purges);
+    assert!(back.retained() < 256 * 1024);
 }
 
 /// The page past the end of the `size`-byte slot at `p`, counted from its region's start: what
@@ -1054,7 +1104,7 @@ fn a_frontier_lives_two_intervals_of_the_clock() {
     let state = state::<Standard>();
     let back = state.get_or_reserve().unwrap();
     let class = small(1024);
-    back.note_epoch(state.os().ticks());
+    back.note_epoch(back.now());
     let slots = fill(&back, class, 64);
     let past = |p: *mut u8| page_past(&back, p, 1024);
     let top = past(slots[63]);
@@ -1079,12 +1129,15 @@ fn a_frontier_lives_two_intervals_of_the_clock() {
     assert_eq!(floor_at(&back, slots[0]), past(slots[7]));
     tick(&back, 1);
     assert_eq!(floor_at(&back, slots[0]), 0);
-    // Three intervals with no heartbeat: the first heartbeat after them reads the clock.
+    // Three intervals with no heartbeat count as one (`crate::clock`): the first heartbeat
+    // after them finds the claim made before them in the last interval, not gone.
     let low = fill(&back, class, 8);
     // SAFETY: as above.
     unsafe { back.launder(class, &low) };
     state.os().advance_clock(3 * DECAY_TICKS);
     back.heartbeat();
+    assert_eq!(floor_at(&back, slots[0]), past(slots[7]));
+    tick(&back, 1);
     assert_eq!(floor_at(&back, slots[0]), 0);
     // A large class's.
     let big = large(64 << 10);
@@ -1316,11 +1369,146 @@ fn the_clocked_pass_spares_what_fills_reuse() {
                 .all(|&p| !os.is_purged(NonNull::new(p).unwrap(), 1024))
         );
     }
-    // The program stops reusing them: two passes later, they go.
+    // The program stops reusing them: two passes later the runs of eight pages or more go,
+    // and the shorter ones by the next pass that takes any run.
     for _ in 0..3 {
         os.advance_clock(DECAY_TICKS);
         beat(&back);
     }
+    let page = Standard::GEOMETRY.page_size();
+    assert!(back.retained() < super::policy::PURGE_MIN_RUN_PAGES as usize * page);
+    for _ in 0..super::policy::PURGE_ANY_RUN_EVERY {
+        os.advance_clock(DECAY_TICKS);
+        beat(&back);
+    }
+    assert_eq!(back.retained(), 0);
+}
+
+/// Adjacent free pages go back in one call each run, up to `PURGE_MAX_RUN_PAGES`, not one call
+/// a page: a call costs about the same whatever it returns.
+#[test]
+fn the_clocked_pass_returns_a_run_of_free_pages_in_one_call() {
+    let state = state::<Standard>();
+    let back = state.get_or_reserve().unwrap();
+    let os = state.os();
+    let class = small(1024);
+    let per_page = Standard::GEOMETRY.page_size() / 1024;
+    let pages = 256;
+    let slots = fill(&back, class, pages * per_page);
+    for &p in &slots {
+        paint(p, 1024, 9);
+    }
+    // SAFETY: the test holds these slots and gives them up.
+    unsafe { back.launder(class, &slots) };
+    forget_reuse(&back);
+    let before = os.calls(Call::Purge);
+    // A pass takes a quarter of what is retained, so the run is cut once a pass.
+    let intervals = 12;
+    for _ in 0..intervals {
+        os.advance_clock(DECAY_TICKS);
+        beat(&back);
+    }
+    assert_eq!(back.retained(), 0);
+    let calls = os.calls(Call::Purge) - before;
+    let most = (pages / super::policy::PURGE_MAX_RUN_PAGES as usize + 2 * intervals) as u64;
+    assert!(
+        calls <= most,
+        "{calls} calls for {pages} adjacent free pages"
+    );
+}
+
+/// A run of free pages a little longer than `PURGE_MAX_RUN_PAGES` goes back whole in the first
+/// pass: the cap cuts it into a full run and a tail shorter than `PURGE_MIN_RUN_PAGES`, and the
+/// tail, directly below a run just purged, does not wait for the pass that takes any run.
+#[test]
+fn the_tail_of_a_run_the_cap_cut_goes_with_it() {
+    use super::policy::{PURGE_MAX_RUN_PAGES, PURGE_MIN_RUN_PAGES};
+    use crate::classes::MagazineSize;
+    use crate::os::sim::Shape;
+    use crate::space::Geometry;
+    /// 4 KiB pages, huge pages of 512 KiB and regions of 4 MiB: a small-page part of 256 pages
+    /// holds a run longer than the cap, and a pass's goal (`policy::decay_goal`, at least a
+    /// huge page) takes all of it.
+    enum Wide {}
+    impl Shape for Wide {
+        const GEOMETRY: Geometry = Geometry::new(12, 19, 22, 19, 256, 1, MagazineSize::MAX);
+    }
+    let state = state::<Wide>();
+    let back = state.get_or_reserve().unwrap();
+    let os = state.os();
+    let class = small(1024);
+    let per_page = Wide::GEOMETRY.page_size() / 1024;
+    let pages = small_part(&back, class) / per_page;
+    let run = (PURGE_MAX_RUN_PAGES + PURGE_MIN_RUN_PAGES / 2) as usize;
+    assert!(pages > run + 2);
+    let slots = fill(&back, class, pages * per_page);
+    for &p in &slots {
+        paint(p, 1024, 9);
+    }
+    // Pages 1 to `run`, between live pages.
+    let freed = &slots[per_page..(run + 1) * per_page];
+    // SAFETY: the test holds these slots and gives them up.
+    unsafe { back.launder(class, freed) };
+    forget_reuse(&back);
+    assert_eq!(back.retained(), freed.len() * 1024);
+    os.advance_clock(DECAY_TICKS);
+    beat(&back);
+    assert_eq!(
+        back.state
+            .walk
+            .passes
+            .load(core::sync::atomic::Ordering::Relaxed),
+        1,
+        "not the pass that takes any run"
+    );
+    assert_eq!(back.retained(), 0, "the tail of the run waited");
+}
+
+/// Free pages between live ones, each a run of one, wait for the pass that takes any run, one
+/// in `PURGE_ANY_RUN_EVERY`, and then go back.
+#[test]
+fn single_free_pages_wait_for_the_pass_that_takes_any_run() {
+    use super::policy::PURGE_ANY_RUN_EVERY;
+    let state = state::<Standard>();
+    let back = state.get_or_reserve().unwrap();
+    let os = state.os();
+    let class = small(1024);
+    let per_page = Standard::GEOMETRY.page_size() / 1024;
+    // Pages of the small-page part only: a huge page with live slots on it is never split.
+    let pages = small_part(&back, class) / per_page;
+    let slots = fill(&back, class, pages * per_page);
+    for &p in &slots {
+        paint(p, 1024, 9);
+    }
+    // Every other page's slots go back; the rest stay live.
+    let freed: Vec<*mut u8> = slots
+        .chunks(per_page)
+        .step_by(2)
+        .flatten()
+        .copied()
+        .collect();
+    // SAFETY: the test holds these slots and gives them up.
+    unsafe { back.launder(class, &freed) };
+    forget_reuse(&back);
+    let retained = back.retained();
+    assert_eq!(retained, freed.len() * 1024);
+    let mut purged_at = None;
+    for interval in 0..2 * PURGE_ANY_RUN_EVERY {
+        os.advance_clock(DECAY_TICKS);
+        beat(&back);
+        if purged_at.is_none() && back.retained() < retained {
+            purged_at = Some(interval);
+        }
+    }
+    let at = purged_at.expect("single pages went back some day");
+    assert!(
+        at + 1 >= PURGE_ANY_RUN_EVERY / 2,
+        "single pages went back after {at} intervals"
+    );
+    assert!(
+        at <= PURGE_ANY_RUN_EVERY + 1,
+        "single pages waited {at} intervals"
+    );
     assert_eq!(back.retained(), 0);
 }
 
@@ -3544,8 +3732,12 @@ mod review {
         }
         // SAFETY: the test holds these slots, or passes a bad one to see the abort.
         unsafe { back.launder(class, &slots) };
-        os.advance_clock(100 * DECAY_TICKS);
-        beat(&back);
+        // Intervals in which heartbeats run, so that the fill's frontier ages out; a silence
+        // would count as one (`crate::clock`).
+        for _ in 0..3 {
+            os.advance_clock(DECAY_TICKS);
+            beat(&back);
+        }
         assert!(!pass_under_way(&state));
         let left = back.retained();
         assert!(left > 0 && left < total);
@@ -3611,12 +3803,15 @@ mod review {
         unsafe { back.launder(class, &slots) };
         // The pass began just now: one that stays unpublished for an interval is another
         // matter (`a_pass_whose_starter_vanished_before_publishing_ends_some_day`).
-        state.os().advance_clock(7 * DECAY_TICKS);
-        let started = (7 * DECAY_TICKS) | 1;
+        // Two intervals in which heartbeats ran, so that the fill's frontier is gone, then
+        // the counted time, which the decay word is stamped in.
+        super::tick(&back, 2);
+        let started = back.now() | 1;
         let stale = Pass {
             tag: Pass::tag_of(started) ^ 1,
             lap: 0,
             pages: 0,
+            any: false,
         };
         state.walk.pass.store(stale.pack(), Relaxed);
         state.decay.word.store(started, Relaxed);
@@ -3632,6 +3827,7 @@ mod review {
             tag: Pass::tag_of(started),
             lap: state.walk.laps.load(Relaxed) as u16,
             pages: 16,
+            any: false,
         };
         state.walk.pass.store(goal.pack(), Relaxed);
         beat(&back);
@@ -5222,3 +5418,6 @@ mod retained_reading {
         assert!(read > 4 * MIB as isize, "{read}");
     }
 }
+
+/// The review of counted intervals, purging by runs and `maintain`'s rate limit.
+mod burst_start_review;

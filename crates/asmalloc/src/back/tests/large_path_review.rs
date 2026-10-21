@@ -328,20 +328,14 @@ fn an_empty_pass_ends_at_once_and_the_next_is_an_interval_later() {
     for &p in &slots {
         paint(p, 1024, 9);
     }
+    // Five intervals of the clock with no heartbeat are the first counted interval
+    // (`crate::clock`), so the decay word holds the counted time, one interval.
     os.advance_clock(5 * DECAY_TICKS);
     back.heartbeat();
-    assert_eq!(
-        word(),
-        5 * DECAY_TICKS,
-        "the empty pass ended when it began"
-    );
+    assert_eq!(word(), DECAY_TICKS, "the empty pass ended when it began");
     os.advance_clock(DECAY_TICKS / 2);
     beat(&back);
-    assert_eq!(
-        word(),
-        5 * DECAY_TICKS,
-        "nothing is due inside the interval"
-    );
+    assert_eq!(word(), DECAY_TICKS, "nothing is due inside the interval");
     // SAFETY: the test holds these slots and gives them up.
     unsafe { back.launder(class, &slots) };
     assert_eq!(back.retained(), 256 * 1024);
@@ -350,7 +344,7 @@ fn an_empty_pass_ends_at_once_and_the_next_is_an_interval_later() {
     os.advance_clock(DECAY_TICKS / 2 - 1);
     beat(&back);
     assert_eq!(os.calls(Call::Purge), purges, "purged inside the interval");
-    assert_eq!(word(), 5 * DECAY_TICKS);
+    assert_eq!(word(), DECAY_TICKS);
     os.advance_clock(1);
     beat(&back);
     assert!(os.calls(Call::Purge) > purges, "the pass an interval later");

@@ -5,9 +5,14 @@
 **Preconditions** (`Host::purge`, which for the heap is `Space::purge`). No thread reads or
 writes the range during the call, and nothing in it is needed afterwards.
 
-**The range.** Pages `unit.start..unit.end` of the region, from `Layout::unit_below`; the walk
-in `back/purge.rs` is `purge_unit`'s only caller. `unit.end` is at most `carved_pages(carved)`:
-the pages lie wholly below the watermark as read before the step. What supports that, and how
+**The range.** Pages `unit.start..unit.end` of the region: a run of units from
+`Layout::unit_below`, which the walk in `back/purge.rs` (`purge_unit`'s only caller) builds in
+`run_below` by starting at one unit and extending it down by the next unit `unit_below` gives
+while that unit ends where the run starts. Every page of the run is then a page of some unit
+`unit_below` returned for the same watermark reading, so the run, like each of its units, lies
+wholly below the watermark as read before the step: its end is the first unit's end, which is
+at most `carved_pages(carved)`. A run of one unit is the unit itself, the case the evidence
+below was written for; a longer run is a union of such units. What supports that, and how
 far each piece of evidence reaches:
 
 - Kani's `purge_steps_move_down_within_one_part` (in `verify_slow.rs`, so on demand, not in
@@ -32,7 +37,8 @@ this under interleaving.
 **Proof.**
 
 1. *Every slot that touches the range is held by this thread.* `touching(unit)` gives slots
-   `first..=last`, defined as `(start / size, (end - 1) / size)`; `Divisor::divide` is proved
+   `first..=last`, defined as `(start / size, (end - 1) / size)` for any range of pages, a run
+   as much as a unit; `Divisor::divide` is proved
    exact for every input (`classes::verify`, `classes::verify_slow`), so these are exactly the
    slots that overlap the pages. Kani proves it outright on the tiny heap's regions
    (`units_touch_exactly_their_slots_on_the_tiny_heap`, every class, watermark, cursor and
@@ -109,8 +115,9 @@ without a call if nothing is left: the range purged is a subrange of the one the
 up, so the precondition still holds for it. It returns `true` only when the range it was
 given went back whole, which BACK-CLASS-03 relies on before marking a slot zero. Its
 callers and why their ranges are given up are BACK-CLASS-02 (the tail of an object that
-shrank in place) and BACK-CLASS-03 (the part of a moving object already copied) in
-`class-safety.md`.
+shrank in place), BACK-CLASS-03 (the part of a moving object already copied) and
+BACK-CLASS-05 (`unspill`: a huge page of a block that grew in place, whose bytes are first
+copied aside and copied back after) in `class-safety.md`.
 
 **Review.** 2026-10-17, fresh adversarial reviewer: the protocol was accepted; three gaps were
 found in the argument: exclusivity under a double free, the huge-page part not covered by the

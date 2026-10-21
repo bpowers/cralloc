@@ -403,7 +403,11 @@ fn aged_world(migrations: usize) -> World {
     let cache = world.rig.cache(&machine);
     let cpu = world.rig.slabs().cpu(0).unwrap();
     // Stamps the loaded magazine now, if its install did not.
-    cache.age_look(cpu, tiny_class(), &Clock::new(world.rig.os()));
+    cache.age_look(
+        cpu,
+        tiny_class(),
+        &Clock::new(world.rig.os(), world.rig.source.clock()),
+    );
     world.rig.os().advance_clock(2 * IDLE_TICKS);
     world
 }
@@ -414,7 +418,11 @@ fn aged_world(migrations: usize) -> World {
 fn age_looks(world: &World, machine: &CheckCpu<'_>, taken: &AtomicUsize) {
     let cache = world.rig.cache(machine);
     let cpu = world.rig.slabs().cpu(0).unwrap();
-    let hot = cache.age_look(cpu, tiny_class(), &Clock::new(world.rig.os()));
+    let hot = cache.age_look(
+        cpu,
+        tiny_class(),
+        &Clock::new(world.rig.os(), world.rig.source.clock()),
+    );
     let spares = cache.take_spares(cpu, tiny_class());
     taken.fetch_add(usize::from(hot) + usize::from(spares), Ordering::SeqCst);
 }

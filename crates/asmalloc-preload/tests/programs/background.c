@@ -10,6 +10,10 @@
 //                               does light work, one object at a time, that never leaves the
 //                               allocator's caches, and prints the anonymous resident memory
 //                               after the frees and at the end, in MiB
+//        background trickle SECS
+//                               idle, plus a few slow paths every half second (40 blocks of
+//                               8 KiB held together and freed), as a server answering a
+//                               health check makes
 #include <dirent.h>
 #include <pthread.h>
 #include <signal.h>
@@ -118,6 +122,17 @@ static void pairs(uint64_t *s) {
     for (int i = 0; i < 2000; i++) free(malloc(sizes[next(s) % 12]));
 }
 
+// A few slow paths: blocks too large for the magazines to hold forty of.
+static void trickle(void) {
+    void *held[40];
+    for (int i = 0; i < 40; i++) {
+        held[i] = malloc(8192);
+        if (!held[i]) abort();
+        memset(held[i], 2, 8192);
+    }
+    for (int i = 0; i < 40; i++) free(held[i]);
+}
+
 static volatile int stop;
 
 static void *worker(void *arg) {
@@ -157,8 +172,10 @@ int main(int argc, char **argv) {
         puts("exit while maintaining");
         exit(0);
     }
-    if (argc > 2 && strcmp(argv[1], "idle") == 0) {
+    int trickling = argc > 2 && strcmp(argv[1], "trickle") == 0;
+    if (argc > 2 && (trickling || strcmp(argv[1], "idle") == 0)) {
         long secs = atol(argv[2]);
+        long rounds = 0;
         size_t n = 1600000;
         uint64_t s = 3;
         burst(n);
@@ -167,12 +184,14 @@ int main(int argc, char **argv) {
         clock_gettime(CLOCK_MONOTONIC, &start);
         do {
             pairs(&s);
+            // About every half second: each round sleeps a millisecond and works for a little.
+            if (trickling && ++rounds % 450 == 0) trickle();
             sleep_ms(1);
             clock_gettime(CLOCK_MONOTONIC, &now);
         } while (now.tv_sec - start.tv_sec < secs);
         printf("freed %ld end %ld\n", freed / 1024, anon_kib() / 1024);
         return 0;
     }
-    fprintf(stderr, "usage: background threads | exit MS | idle SECS\n");
+    fprintf(stderr, "usage: background threads | exit MS | idle SECS | trickle SECS\n");
     return 2;
 }
