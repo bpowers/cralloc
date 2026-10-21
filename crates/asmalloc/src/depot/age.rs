@@ -296,8 +296,8 @@ impl<'a, O: Os, R: Routines, S: Source> Cache<'a, O, R, S> {
             word.store(sweep.advanced().0, Relaxed);
             return false;
         };
-        // Once an interval for each class: a half-full swap that no swap has followed since
-        // absorbed its swing (`stock::settle_swing`).
+        // Once an interval for each class: a half-full swap that no swap has followed for a
+        // whole interval absorbed its swing (`stock::settle_swing`).
         if self.routines.cpu() == Some(cpu) {
             self.settle_swing(cpu, class);
         }

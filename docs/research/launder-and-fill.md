@@ -2101,3 +2101,29 @@ saturated rate (medians), and connect-rust's saturated rate:
 
 No lean-slow connect process ran slow (cycles per request within 0.1% across runs). The servers
 keep the gain the first version of the rule had.
+
+### Any swap after a centred one is a failure (2026-10-20)
+
+Review of ff7c39b found compound swings, two swings of different sizes in a repetition,
+defeating the backoff: a run the same way after a centred swap counted as absorbed and cleared
+the failures, so the rule retried every repetition (1,024-byte class, magazines of 62, slow
+paths in the last 100 of 400 repetitions, rule on / off: (112,112),(224,224) from level 61,
+1200 / 800; (158,79),(79,158), 1000 / 600). Now any swap of the class on the CPU after a
+centred one is a failure, and only silence clears the count: the sweep's visit marks a class
+whose last swap was centred, and the next visit, an interval later, clears the failures if no
+swap came between. One visit is not enough, since the sweep steps in a slow path's heartbeat,
+often the call that centred.
+
+A single starting level measures luck as well as the rule. Plain swaps keep the level's phase
+against the magazines' ends, and a centred swap moves it by half a magazine, after which the
+spares hold partial magazines and the phase stays moved; the same pattern costs 600, 800 or
+1,000 slow paths by the level it starts from, with the rule off. Summed over all 62 starting
+levels (`compound_over_phases` in `depot/rules.rs`), on / off: (81,81),(162,162) +0.9%;
+(112,112),(224,224) +0.2%; (158,79),(79,158) +0.1%; (112,112),(37,37) +0.4%. Over the review's
+sweep (amplitudes from a sixteenth of a magazine to three, one size and three two-size
+patterns), 185 of 192 patterns are within 2%. Seven are 2.1 to 3.4% over: a swing near half a
+magazine with one twice its size ((31,31),(62,62) +3.0%, (34,34),(68,68) +3.4%,
+(38,38),(76,76) +2.4%) and a swing near a magazine with one a third its size ((62,62),(20,20)
+to (73,73),(24,24), +2.1 to +3.1%), the rule's retries moving the phase without paying it
+back. The single-swing table above is unchanged, and after 2,000 repetitions of a swing the
+rule cannot absorb, a quarter-magazine swing is centred within 40 repetitions.

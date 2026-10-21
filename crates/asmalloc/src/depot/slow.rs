@@ -30,8 +30,9 @@
 //! class went, a hint in the class's stock word ([`Cache::plan_swap`]). A swap that reverses a
 //! swap which itself reversed the one before is evidence of such a lock, and the slow path
 //! leaves the loaded magazine half full; a reversal after a run of swaps one way is the turn of
-//! a longer swing, and stays plain. A half-full swap that the next swap reverses at once did not
-//! help, and the rule backs off, exponentially, before it tries again (`stock::plan_swap`). It takes
+//! a longer swing, and stays plain. A half-full swap that any swap of the class follows before
+//! an interval of silence did not help, and the rule backs off, exponentially, before it tries
+//! again (`stock::plan_swap`). It takes
 //! the loaded magazine out of the slab with store-if-equal, storing zero, so that both
 //! magazines are its own; moves half of one's objects into the other, a copy between two
 //! magazines nobody else can reach; and installs the half full one with store-if-equal,
