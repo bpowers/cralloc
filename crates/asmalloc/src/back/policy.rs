@@ -244,8 +244,10 @@ pub const fn hold_floor(geometry: Geometry) -> usize {
     HOLD_FLOOR_HUGE_PAGES * geometry.huge_page_size()
 }
 
-/// The most a heartbeat's look at the hold returns, in huge pages: 1, or 2 MiB, finishing the
-/// run it is on (`PURGE_MAX_RUN_PAGES`), so at most 2.25 MiB. The look runs on whichever slow
+/// The most a heartbeat's look at the hold returns, in huge pages: 1, or 2 MiB, checked between
+/// units. A large class's unit is at most a slot, so a look that meets a slot larger than the
+/// rest of this returns that whole slot: DataFusion's longest look, about a millisecond,
+/// returned one slot of 34 MiB (`docs/research/large-hold.md`). The look runs on whichever slow
 /// path took the heartbeat, so this bounds what a request pays for it, as a step of the clocked
 /// pass bounds its walk; a look that stops here with more over the floor has the next heartbeat
 /// carry on. The growth step and a moving block's piece return the same at a time.
