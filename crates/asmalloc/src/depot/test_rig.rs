@@ -65,6 +65,10 @@ pub(crate) struct TestSource {
     out: Mutex<BTreeSet<usize>>,
     purges: AtomicUsize,
     passes: AtomicUsize,
+    /// What [`Source::over_floor`] answers; tests set it.
+    pub over_floor: core::sync::atomic::AtomicBool,
+    /// The background thread's word.
+    pub thread: crate::thread_word::ThreadWord,
     fills: AtomicUsize,
     laundered: AtomicUsize,
     universe: BTreeSet<usize>,
@@ -90,6 +94,8 @@ impl TestSource {
             out: Mutex::new(BTreeSet::new()),
             purges: AtomicUsize::new(0),
             passes: AtomicUsize::new(0),
+            over_floor: core::sync::atomic::AtomicBool::new(false),
+            thread: crate::thread_word::ThreadWord::new(),
             fills: AtomicUsize::new(0),
             laundered: AtomicUsize::new(0),
             universe,
@@ -195,6 +201,14 @@ impl Source for TestSource {
 
     fn purge_step(&self, _: &dyn Fn() -> u64) {
         self.purges.fetch_add(1, Ordering::Relaxed);
+    }
+
+    fn over_floor(&self) -> bool {
+        self.over_floor.load(Ordering::Relaxed)
+    }
+
+    fn thread(&self) -> &crate::thread_word::ThreadWord {
+        &self.thread
     }
 
     fn purge_pass_step(&self, _: &dyn Fn() -> u64) -> bool {

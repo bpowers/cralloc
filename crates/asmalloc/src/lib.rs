@@ -27,10 +27,13 @@
 //! ([`stats`]).
 //!
 //! The heap's maintenance (returning idle memory, emptying idle caches) runs on its slow paths,
-//! so a program whose threads all stay inside their caches never runs it and keeps what it
-//! held when it went quiet. [`Asmalloc::maintain`] runs one round of it for the whole heap, for
-//! a program with an idle hook of its own. The `background` feature adds
-//! `Asmalloc::start_background`, which starts a thread that calls it about twice a second:
+//! so a program whose threads all stay inside their caches would keep what it held when it
+//! went quiet. The `background` feature, on by default, adds a thread that maintains the heap
+//! during silences: it starts by default once the heap holds more than the floor of the
+//! allowance (32 MiB) and the process has more than one thread, and parks while the process is
+//! quiet. `ASMALLOC_BACKGROUND=0` turns it off, and `Asmalloc::start_background` starts it at
+//! once. [`Asmalloc::maintain`] runs one round of the maintenance for a program with a timer of
+//! its own, which then gets no default thread:
 //!
 //! ```ignore
 //! fn main() {
@@ -91,7 +94,7 @@ compile_error!("asmalloc supports 64-bit targets only");
 
 #[cfg(any(test, kani, feature = "sim"))]
 extern crate alloc;
-#[cfg(any(test, feature = "background"))]
+#[cfg(test)]
 extern crate std;
 
 #[cfg(feature = "internals")]
@@ -142,9 +145,25 @@ mod lined;
 #[rustfmt::skip]
 pub(crate) mod spec;
 pub mod stats;
+pub(crate) mod thread_word;
 
 #[cfg(all(target_os = "linux", target_arch = "x86_64", not(miri), not(kani)))]
 pub use heap::Asmalloc;
+
+/// The background thread's controls (feature `background`, on by default): what the
+/// environment asks for, and the error of a failed start. See `Asmalloc::start_background`.
+#[cfg(all(
+    feature = "background",
+    target_os = "linux",
+    target_arch = "x86_64",
+    not(miri),
+    not(kani)
+))]
+pub mod background {
+    #[doc(hidden)]
+    pub use crate::heap::background::CreateThread;
+    pub use crate::heap::background::{Choice, StartError, choice};
+}
 #[cfg(any(test, feature = "sim"))]
 #[doc(hidden)]
 pub use heap::{SimAsmalloc, SimHeap};

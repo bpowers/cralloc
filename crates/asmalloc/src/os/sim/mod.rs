@@ -131,7 +131,20 @@ pub struct SimOs<S: Shape = Standard> {
     clock: AtomicU64,
     cpus: Cpus<SIM_THREADS>,
     topology: AtomicU64,
+    /// What the background thread's calls did: waits, wakes, and fences of every CPU.
+    sleeps: Sleeps,
     shape: PhantomData<fn() -> S>,
+}
+
+/// The simulated [`Os::wait`], [`Os::wake`] and [`Os::fence_all`]: counted, and a wait
+/// returns at once, so that a test drives the thread's loop one step at a time.
+struct Sleeps {
+    waits: AtomicU64,
+    timed: AtomicU64,
+    wakes: AtomicU64,
+    fences: AtomicU64,
+    /// The calling thread's ID as [`Os::ids`] gives it; the process's is 1.
+    thread: core::sync::atomic::AtomicU32,
 }
 
 /// The CPU topology a [`SimOs`] reports through [`Os::topology`]. Its CPUs are the simulated
@@ -242,8 +255,38 @@ impl<S: Shape> SimOs<S> {
             clock: AtomicU64::new(0),
             cpus: Cpus::new(),
             topology: AtomicU64::new(0),
+            sleeps: Sleeps {
+                waits: AtomicU64::new(0),
+                timed: AtomicU64::new(0),
+                wakes: AtomicU64::new(0),
+                fences: AtomicU64::new(0),
+                thread: core::sync::atomic::AtomicU32::new(1),
+            },
             shape: PhantomData,
         }
+    }
+
+    /// How many [`Os::wait`] calls there have been without a timeout, and with one.
+    pub fn waits(&self) -> (u64, u64) {
+        (
+            self.sleeps.waits.load(Ordering::Acquire),
+            self.sleeps.timed.load(Ordering::Acquire),
+        )
+    }
+
+    /// How many [`Os::wake`] calls there have been.
+    pub fn wakes(&self) -> u64 {
+        self.sleeps.wakes.load(Ordering::Acquire)
+    }
+
+    /// How many [`Os::fence_all`] calls have succeeded.
+    pub fn fences_of_all(&self) -> u64 {
+        self.sleeps.fences.load(Ordering::Acquire)
+    }
+
+    /// Sets the thread ID [`Os::ids`] reports; 1, the default, is the process's first thread.
+    pub fn set_thread_id(&self, id: u32) {
+        self.sleeps.thread.store(id, Ordering::Release);
     }
 
     /// Moves the clock that [`Os::ticks`] reads forward by `ticks`. It starts at zero and moves
@@ -679,6 +722,31 @@ unsafe impl<S: Shape> Os for SimOs<S> {
         self.faults.enter(Call::RegisterFence)?;
         self.fence_registered.store(true, Ordering::Release);
         Ok(())
+    }
+
+    fn fence_all(&self) -> Result<(), OsError> {
+        if self.fence_registered() {
+            self.sleeps.fences.fetch_add(1, Ordering::AcqRel);
+            Ok(())
+        } else {
+            Err(OsError::EPERM)
+        }
+    }
+
+    fn wait(&self, _: &core::sync::atomic::AtomicU32, _: u32, timeout_ns: Option<u64>) {
+        let count = match timeout_ns {
+            Some(_) => &self.sleeps.timed,
+            None => &self.sleeps.waits,
+        };
+        count.fetch_add(1, Ordering::AcqRel);
+    }
+
+    fn wake(&self, _: &core::sync::atomic::AtomicU32) {
+        self.sleeps.wakes.fetch_add(1, Ordering::AcqRel);
+    }
+
+    fn ids(&self) -> (u32, u32) {
+        (self.sleeps.thread.load(Ordering::Acquire), 1)
     }
 
     fn fence(&self, cpu: u32) -> Result<(), OsError> {

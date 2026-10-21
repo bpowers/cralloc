@@ -26,6 +26,10 @@ pub const RETAINED_CAP_HUGE_PAGES: usize = 32;
 /// over the cap are not floored.
 pub const ALLOWANCE_FLOOR_HUGE_PAGES: usize = 16;
 
+// A pass's goal is what is retained above the floor, raised to what is over the cap, which
+// stops at the floor only while the floor is under the cap.
+const _: () = assert!(ALLOWANCE_FLOOR_HUGE_PAGES < RETAINED_CAP_HUGE_PAGES);
+
 /// Growth is charged against the cap in steps of this many huge pages: 1, or 2 MiB. Each step
 /// of carving, while retained memory is over the cap, pays for at most one bounded purge
 /// walk, so a heap whose free memory is all fragmentation pays one walk per step of growth.

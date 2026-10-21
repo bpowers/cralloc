@@ -325,3 +325,27 @@ fn a_pass_a_few_pages_short_of_its_goal_does_not_step_over_long_runs() {
         goal / page
     );
 }
+
+/// The add that takes the retained count over the floor marks the background thread's word
+/// (`crate::thread_word`): laundering up to the floor on a thread that is not the process's
+/// first wants nothing, and the launder that crosses it wants a thread.
+#[test]
+fn the_add_that_crosses_the_floor_wants_the_thread() {
+    use super::super::policy::allowance_floor;
+    use crate::thread_word::{NONE, WANTED};
+    let state = floored_state::<Standard>();
+    let back = state.get_or_reserve().unwrap();
+    state.os().set_thread_id(2);
+    let class = small(1024);
+    let floor = allowance_floor(Standard::GEOMETRY);
+    let slots = fill(&back, class, 2 * floor / 1024);
+    let (under, over) = slots.split_at(floor / 1024);
+    // SAFETY: the test holds these slots and gives them up.
+    unsafe { back.launder(class, under) };
+    assert!(!back.over_floor());
+    assert_eq!(back.thread().state.load(Relaxed), NONE);
+    // SAFETY: as above.
+    unsafe { back.launder(class, over) };
+    assert!(back.over_floor());
+    assert_eq!(back.thread().state.load(Relaxed), WANTED);
+}

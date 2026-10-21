@@ -257,6 +257,11 @@ impl<O: Os> Back<'_, O> {
         self.clamped(false).saturating_add(self.clamped(true))
     }
 
+    /// Whether retained memory is over the floor that the clocked pass leaves alone.
+    pub fn over_floor(&self) -> bool {
+        self.retained() > self.floor()
+    }
+
     /// What the clocked pass leaves retained (`policy::allowance_floor`).
     fn floor(&self) -> usize {
         #[cfg(test)]
@@ -284,7 +289,13 @@ impl<O: Os> Back<'_, O> {
     pub(super) fn retain(&self, class: Class, bytes: usize) {
         if bytes != 0 {
             let tally = self.state.retained.added.of(!class.is_small());
-            tally.fetch_add(bytes, SeqCst);
+            let old = tally.fetch_add(bytes, SeqCst);
+            // Whoever raises the count past the floor has the line already: an add that
+            // crosses an eighth of the floor looks at the whole count (`crate::thread_word`).
+            let step = allowance_floor(self.space.plan().geometry()) / 8;
+            if crate::thread_word::crosses(old, bytes, step) && self.over_floor() {
+                self.state.thread.crossed(self.space.os());
+            }
         }
     }
 

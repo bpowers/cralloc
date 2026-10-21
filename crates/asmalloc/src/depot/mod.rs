@@ -57,6 +57,7 @@ mod stock;
 pub(crate) mod test_rig;
 #[cfg(test)]
 mod tests;
+pub mod thread;
 #[cfg(kani)]
 mod verify;
 
@@ -66,6 +67,7 @@ pub use generation::Generation;
 pub use heartbeat::{IDLE_TICKS, LOOK_EVERY, Lone, LoneTurn, lone_count};
 pub use inspect::inspect;
 pub(crate) use magazine::{Area, Magazine, UNIT};
+pub use maintain::Stepped;
 pub use slow::REFRESH_EVERY;
 pub use source::Source;
 pub use spare::{MAX_SPARES, SPARE_BUDGET, spare_limit};

@@ -229,10 +229,29 @@ outside `buf`.
 that a program that enters a seccomp sandbox afterwards never makes these calls. What it reads
 decides only which cache domain's depot stacks a CPU uses; no safety argument rests on it.
 
+## KERNEL-11: `futex` in `wait` and `wake`
+
+**Blocks.** `syscall(FUTEX, [word, FUTEX_WAIT_PRIVATE, expected, timeout, 0, 0])` and
+`syscall(FUTEX, [word, FUTEX_WAKE_PRIVATE, 1, 0, 0, 0])`.
+
+**Preconditions.** `word` is the address of a live, 4-byte aligned word that the process only
+accesses atomically; `timeout` is null or the address of a live `struct timespec`.
+
+**Proof.** `word` comes from `&AtomicU32`, so it is live for the call and aligned to 4, and
+Rust gives it no non-atomic access while the reference exists. futex(2) with
+`FUTEX_WAIT_PRIVATE` reads the word once, atomically, compares it with `expected`, and sleeps
+or returns; it writes no user memory. Its fourth argument is a relative timeout, read once:
+`Timespec` is `#[repr(C)]` `{ i64, i64 }`, x86-64's `struct timespec`, with nanoseconds under
+10^9 by construction, and it lives on the caller's stack for the call. `FUTEX_WAKE_PRIVATE`
+uses the address only as a key and touches no memory; the arguments after the count are
+ignored. Errors (the word differed, a timeout, a signal, an invalid argument) are returned in
+`rax` and dropped: the callers look at the word again after every return. Neither call
+changes a mapping, a protection or a disposition.
+
 ## KERNEL-07: `unsafe impl Os for LinuxOs`
 
 The comment above the impl maps each promise of the `Os` trait to the kernel behaviour that
-provides it, and KERNEL-01 to KERNEL-06, KERNEL-09 and KERNEL-10 cover the individual calls. The promises not covered by a
+provides it, and KERNEL-01 to KERNEL-06 and KERNEL-09 to KERNEL-11 cover the individual calls. The promises not covered by a
 single call:
 
 - *Valid until unmapped or dropped.* Reservations are mappings of the process. Dropping a

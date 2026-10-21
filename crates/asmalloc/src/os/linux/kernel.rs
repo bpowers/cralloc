@@ -8,6 +8,7 @@ use super::syscall::{Reg, int, nr, result, syscall};
 use crate::os::{HugePages, Os, OsError, Topology};
 use crate::space::Geometry;
 use core::ptr::{self, NonNull};
+use core::sync::atomic::AtomicU32;
 
 const PROT_NONE: usize = 0;
 const PROT_READ: usize = 1;
@@ -33,6 +34,9 @@ const STDERR: usize = 2;
 const AT_FDCWD: usize = -100isize as usize;
 const O_RDONLY: usize = 0;
 const O_CLOEXEC: usize = 0o2_000_000;
+/// `futex` operations on a word private to the process.
+const FUTEX_WAIT_PRIVATE: usize = 128;
+const FUTEX_WAKE_PRIVATE: usize = 1 | 128;
 /// The kernel's `sigset_t` is one 64-bit word on x86-64.
 const SIGSET_SIZE: usize = 8;
 
@@ -44,6 +48,13 @@ struct KernelSigaction {
     flags: u64,
     restorer: usize,
     mask: u64,
+}
+
+/// The kernel's `struct timespec` on x86-64: two 64-bit fields.
+#[repr(C)]
+struct Timespec {
+    seconds: i64,
+    nanoseconds: i64,
 }
 
 /// The operating system, through raw Linux system calls on x86-64.
@@ -441,6 +452,61 @@ unsafe impl Os for LinuxOs {
             MEMBARRIER_CMD_FLAG_CPU,
             cpu,
         )
+    }
+
+    fn fence_all(&self) -> Result<(), OsError> {
+        membarrier(MEMBARRIER_CMD_PRIVATE_EXPEDITED_RSEQ, 0, 0)
+    }
+
+    fn wait(&self, word: &AtomicU32, expected: u32, timeout_ns: Option<u64>) {
+        let timeout = timeout_ns.map(|ns| Timespec {
+            seconds: (ns / 1_000_000_000) as i64,
+            nanoseconds: (ns % 1_000_000_000) as i64,
+        });
+        let timeout = timeout.as_ref().map_or(ptr::null(), ptr::from_ref);
+        // SAFETY: KERNEL-11. The word is a live, aligned `AtomicU32` the kernel only reads; the
+        // timeout is null or a live `Timespec` it only reads. An error (the word differed, a
+        // timeout, a signal) is the caller's cue to look at the word again.
+        let _ = unsafe {
+            syscall(
+                nr::FUTEX,
+                [
+                    ptr::from_ref(word).cast_mut().cast(),
+                    int(FUTEX_WAIT_PRIVATE),
+                    int(expected as usize),
+                    timeout.cast_mut().cast(),
+                    int(0),
+                    int(0),
+                ],
+            )
+        };
+    }
+
+    fn wake(&self, word: &AtomicU32) {
+        // SAFETY: KERNEL-11. A wake uses the word's address as a key and reads nothing.
+        let _ = unsafe {
+            syscall(
+                nr::FUTEX,
+                [
+                    ptr::from_ref(word).cast_mut().cast(),
+                    int(FUTEX_WAKE_PRIVATE),
+                    int(1),
+                    int(0),
+                    int(0),
+                    int(0),
+                ],
+            )
+        };
+    }
+
+    fn ids(&self) -> (u32, u32) {
+        // SAFETY: KERNEL-06. gettid and getpid take nothing and change nothing.
+        unsafe {
+            (
+                int_call(nr::GETTID, 0, 0, 0) as u32,
+                int_call(nr::GETPID, 0, 0, 0) as u32,
+            )
+        }
     }
 
     fn random(&self) -> u64 {

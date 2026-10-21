@@ -14,7 +14,26 @@ use core::alloc::{GlobalAlloc, Layout};
 use core::ptr::{self, NonNull};
 
 /// The heap. Its slab array is `front::SLABS`, which only [`Real`] writes.
-static HEAP: Heap<LinuxOs> = Heap::new(LinuxOs);
+static HEAP: Heap<LinuxOs> = Heap::starting_with(LinuxOs, START);
+
+/// What starts the background thread when a heartbeat wants one (`background`).
+#[cfg(feature = "background")]
+const START: Option<fn()> = Some(super::background::start_wanted);
+#[cfg(not(feature = "background"))]
+const START: Option<fn()> = None;
+
+/// Notes that the program maintains the heap itself, so it gets no default thread.
+#[inline]
+fn opt_out() {
+    #[cfg(feature = "background")]
+    {
+        use core::sync::atomic::Ordering::Relaxed;
+        let opted = &super::background::OPTED_OUT;
+        if !opted.load(Relaxed) {
+            opted.store(true, Relaxed);
+        }
+    }
+}
 
 /// The process's heap with its routines: everything below runs on this.
 #[inline(always)]
@@ -81,6 +100,7 @@ impl Asmalloc {
     /// own; the `asmalloc-tokio` crate from a task on a tokio runtime. It never waits, and any
     /// thread may call it at any time.
     pub fn maintain() {
+        opt_out();
         process().maintain();
     }
 
@@ -90,6 +110,7 @@ impl Asmalloc {
     /// at once when this interval's round is done. For a caller that must not hold its thread
     /// for a whole round, such as a task on an async runtime, which yields between steps.
     pub fn maintain_step() -> bool {
+        opt_out();
         process().maintain_step()
     }
 

@@ -27,6 +27,7 @@ use crate::space::Geometry;
 use core::fmt;
 use core::num::NonZeroI32;
 use core::ptr::NonNull;
+use core::sync::atomic::AtomicU32;
 
 /// A failed OS call, with the `errno` it reported.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -173,6 +174,26 @@ pub unsafe trait Os: Sync {
     /// offline or does not exist has no sequence in flight, so fencing it succeeds at once.
     /// Fails unless [`Os::register_fence`] succeeded, and may fail for want of memory.
     fn fence(&self, cpu: u32) -> Result<(), OsError>;
+
+    /// A full memory barrier on every CPU that runs one of the process's threads, before the
+    /// call returns (`MEMBARRIER_CMD_PRIVATE_EXPEDITED_RSEQ` without a CPU): whatever another
+    /// thread stored before its own barrier the caller sees, and whatever that thread loads
+    /// after it sees what the caller stored before the call. Fails unless
+    /// [`Os::register_fence`] succeeded, and may fail for want of memory.
+    fn fence_all(&self) -> Result<(), OsError>;
+
+    /// Waits while `word` holds `expected`, for at most `timeout_ns` nanoseconds if given
+    /// (`FUTEX_WAIT_PRIVATE`). Returns at once if the word differs, and otherwise on a
+    /// [`Os::wake`], at the timeout, on a signal, or for no reason: the caller looks at the word
+    /// again. Never fails visibly.
+    fn wait(&self, word: &AtomicU32, expected: u32, timeout_ns: Option<u64>);
+
+    /// Wakes a thread waiting on `word` in [`Os::wait`], if there is one (`FUTEX_WAKE_PRIVATE`).
+    fn wake(&self, word: &AtomicU32);
+
+    /// The calling thread's ID and the process's, which are equal on the process's first
+    /// thread.
+    fn ids(&self) -> (u32, u32);
 
     /// A random number. It names a process generation, so it should differ from the parent's
     /// with overwhelming probability; it need not be fit for cryptography. Never fails: if the

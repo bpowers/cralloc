@@ -41,4 +41,12 @@ impl<O: Os> Source for Back<'_, O> {
     fn purge_pass_step(&self, now: &dyn Fn() -> u64) -> bool {
         self.decay_pass_step(now)
     }
+
+    fn over_floor(&self) -> bool {
+        self.over_floor()
+    }
+
+    fn thread(&self) -> &crate::thread_word::ThreadWord {
+        Back::thread(self)
+    }
 }

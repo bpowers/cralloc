@@ -47,4 +47,12 @@ pub trait Source {
     /// whether the pass has more to do. Called until it says no, it does what the purge steps
     /// of an interval would, and never goes on into a later pass.
     fn purge_pass_step(&self, now: &dyn Fn() -> u64) -> bool;
+
+    /// Whether the memory the heap retains is over the floor of the allowance, below which
+    /// the clocked purge leaves it alone: what the background thread's start waits for, and
+    /// what keeps it from parking.
+    fn over_floor(&self) -> bool;
+
+    /// The background thread's word (`crate::thread_word`).
+    fn thread(&self) -> &crate::thread_word::ThreadWord;
 }
