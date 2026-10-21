@@ -77,7 +77,7 @@ const ATTENTION: u64 = PARKED | LEVEL;
 /// marker's low bits (`classes::MARKER_SHIFT`).
 pub const KEY_SHIFT: u32 = crate::classes::MARKER_SHIFT;
 
-const _: () = assert!(STATE | LEVEL < 1 << KEY_SHIFT);
+const _: () = assert!(STATE < 1 << KEY_SHIFT && LEVEL < 1 << KEY_SHIFT);
 const _: () = assert!(PARKED & (NONE | WANTED | AWAKE | DORMANT | OFF) == 0);
 
 /// The key of a generation in marker form (`depot::Generation::get`): its bits from
