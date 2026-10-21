@@ -1,13 +1,15 @@
 #!/usr/bin/env python3
 """Per-doubling breakdown of probe.py runs:
 
-  analyze.py DIR [--each] [--perf] [--strace]
+  analyze.py DIR [--each [--slow MS]] [--perf]
 
 For every run in DIR: the doublings to the largest capacity, each with its wall and CPU time,
 time off CPU, faults and context switches, and the machine's direct compactions and remote TLB
-flushes around it (from the vmstat sampler). With --strace, the memory system calls of the
-doubling's thread during it, and of other threads. With --perf, where its on-CPU cycles went,
-by the sampled call chains of the doubling's thread inside its window.
+flushes around it (from the vmstat sampler). For a probe build, the allocator's timed events
+on the doubling's CPU inside it: its table's allocation and free, the heartbeats they ran,
+and the system calls and purge steps inside those. With --perf, where its on-CPU cycles went,
+by the sampled call chains of the doubling's thread inside its window. A table per build of
+medians and extremes ends the output; --each lists every doubling (over --slow ms).
 """
 import argparse
 import re
@@ -43,24 +45,6 @@ def delta(rows, a, b, key):
     if not before or not after:
         return None
     return after[0].get(key, 0) - before[-1].get(key, 0)
-
-
-SYSCALL = re.compile(r"^(\d+)\s+(\d+)\.(\d+)\s+(\w+)\((.*)\)\s+=\s+(\S+).*<([\d.]+)>")
-
-
-def strace_calls(path, clocks):
-    real0, mono0 = (int(x) for x in clocks.read_text().split())
-    calls = []
-    if not path.exists():
-        return calls
-    for line in open(path):
-        m = SYSCALL.match(line)
-        if not m:
-            continue
-        tid, s, ns, name, argstr, ret, dur = m.groups()
-        t = int(s) * 10**9 + int(ns.ljust(9, "0")[:9]) - real0 + mono0
-        calls.append((t, int(tid), name, argstr, ret, float(dur) * 1e9))
-    return calls
 
 
 def classify(chain):
@@ -163,7 +147,6 @@ def main():
     ap.add_argument("dir")
     ap.add_argument("--each", action="store_true")
     ap.add_argument("--perf", action="store_true")
-    ap.add_argument("--strace", action="store_true")
     ap.add_argument("--slow", type=float, default=0.0, help="detail only doublings over this many ms")
     args = ap.parse_args()
     d = Path(args.dir)
@@ -173,7 +156,6 @@ def main():
         build = tag.rsplit("-", 1)[0]
         rs = rehashes(err)
         vm = vmstat(d / f"{tag}.vmstat")
-        calls = strace_calls(d / f"{tag}.strace", d / f"{tag}.clocks") if args.strace else []
         samples = perf_samples(d / f"{tag}.perf.data") if args.perf else []
         ev = events(d / f"{tag}.events")
         rate = tsc_rate(rs) if ev else None
@@ -186,8 +168,6 @@ def main():
             r["compact"] = delta(vm, a - 5_000_000, b + 5_000_000, "compact_stall")
             r["tlbflush"] = delta(vm, a - 5_000_000, b + 5_000_000, "tlb_remote_flush")
             by_build[build].append(r)
-            mine = [c for c in calls if c[1] == r["tid"] and a <= c[0] <= b]
-            others = [c for c in calls if c[1] != r["tid"] and a <= c[0] <= b]
             cs = [s for s in samples if s[1] == r["tid"] and a <= s[0] <= b]
             if samples:
                 perf_n += 1
@@ -214,10 +194,6 @@ def main():
                       f" ivcsw={r['ivcsw']} compact={r['compact']} tlbflush={r['tlbflush']}")
                 for e in r.get("mine_ev", []):
                     print(f"     ev +{(e[0] - r['tsc']) / rate / 1e3:7.1f}us cpu{e[3]} {KINDS[e[2]]} {e[1] / rate / 1e3:.1f}us arg={e[4]}")
-                for c in mine:
-                    print(f"     self  +{(c[0] - a) / 1e3:7.1f}us {c[2]}({c[3][:60]}) = {c[4]} {c[5] / 1e3:.1f}us")
-                for c in others:
-                    print(f"     other +{(c[0] - a) / 1e3:7.1f}us tid={c[1]} {c[2]}({c[3][:50]}) {c[5] / 1e3:.1f}us")
                 if cs:
                     cnt = Counter(classify(s[3]) for s in cs if s[2].startswith("cycles"))
                     sw = [s for s in cs if s[2].startswith("context")]
