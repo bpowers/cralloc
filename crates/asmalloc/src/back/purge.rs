@@ -396,10 +396,16 @@ impl<O: Os> Back<'_, O> {
         while self.decay_step(now) == Some(pass) {}
     }
 
-    /// One heartbeat's part of the clocked pass: starts a pass if an interval has gone by
-    /// since the last ended and anything is retained, and takes one bounded step of the pass
-    /// under way. A pass that is due finds nothing retained is ended as it starts, so the next
-    /// one is due an interval later. Returns the decay word of the pass it stepped if it
+    /// One bounded step of the clocked pass under way or due, for `maintain`'s steps: whether
+    /// the pass has more to do.
+    pub fn decay_pass_step(&self, now: &dyn Fn() -> u64) -> bool {
+        self.decay_step(now).is_some()
+    }
+
+    /// One heartbeat's part of the clocked pass: starts a pass if the counted interval is later
+    /// than the last pass's and anything is retained (`decay_look`), and takes one bounded step
+    /// of the pass under way. A pass that is due finds nothing retained is ended as it starts,
+    /// so the next one is due in the next interval. Returns the decay word of the pass it stepped if it
     /// stopped at its budget with the pass still under way, so that more steps would do more;
     /// `None` otherwise.
     fn decay_step(&self, now: &dyn Fn() -> u64) -> Option<u64> {
@@ -719,11 +725,11 @@ impl<O: Os> Back<'_, O> {
                     let page = layout.page_size();
                     let pages = limit.saturating_sub(purged).div_ceil(page).max(1);
                     let room = Room {
+                        floor,
                         pages: (pages.min(PURGE_MAX_RUN_PAGES as usize)) as u32,
                         words: budget.saturating_sub(read).clamp(1, PURGE_MAX_RUN_WORDS),
                     };
-                    let (run, words) =
-                        self.run_below(&host, region, unit, carved, huge_from, floor, room);
+                    let (run, words) = self.run_below(&host, region, unit, carved, huge_from, room);
                     read += words;
                     match run {
                         Some(run) if run.end - run.start < min_run => run.start,
@@ -755,7 +761,7 @@ impl<O: Os> Back<'_, O> {
 
 impl<O: Os> Back<'_, O> {
     /// The run of adjacent purgeable units (`region::purgeable_unit`) that ends with `unit`,
-    /// extended down while the next unit below is purgeable, starts at or above `floor`, keeps
+    /// extended down while the next unit below is purgeable, starts at or above `room.floor`, keeps
     /// the run within `room.pages` and the bitmap words its looks read within `room.words`
     /// (the words its purge then claims, about as many); `None` if `unit` itself is not
     /// purgeable. Units of the huge-page part are whole huge pages already and are not joined.
@@ -767,7 +773,6 @@ impl<O: Os> Back<'_, O> {
         unit: Unit,
         carved: u32,
         huge_from: Option<u32>,
-        floor: u32,
         room: Room,
     ) -> (Option<Unit>, usize) {
         let (ok, mut read) = region::purgeable_unit(host, region, unit);
@@ -780,7 +785,8 @@ impl<O: Os> Back<'_, O> {
         }
         let layout = *host.layout();
         while let Step::Unit(next) = layout.unit_below(carved, huge_from, run.start) {
-            if next.end != run.start || next.start < floor || run.end - next.start > room.pages {
+            if next.end != run.start || next.start < room.floor || run.end - next.start > room.pages
+            {
                 break;
             }
             let (ok, words) = region::purgeable_unit(host, region, next);
@@ -794,9 +800,10 @@ impl<O: Os> Back<'_, O> {
     }
 }
 
-/// How far a run may extend: pages, and bitmap words read.
+/// How far a run may extend: down to the floor, pages, and bitmap words read.
 #[derive(Clone, Copy)]
 struct Room {
+    floor: u32,
     pages: u32,
     words: usize,
 }

@@ -62,9 +62,31 @@ const _: () = assert!(
 /// The count of intervals and when the last step was taken (see the module documentation).
 pub struct Counted {
     word: AtomicU64,
-    /// One more than the count at which `maintain` last ran a round, zero for never: what
-    /// limits it to one round an interval (design: "Heartbeat").
+    /// The round of `maintain` under way or last run, and its next step: one more than the
+    /// count it belongs to in the high 32 bits, zero for never, and the step in the low 32
+    /// (`depot::maintain`). What limits `maintain` to one round an interval and lets callers
+    /// take its steps one at a time.
     maintained: AtomicU64,
+}
+
+/// A round of `maintain` and one of its steps: what [`Counted::take_step`] hands a caller.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) struct Step {
+    /// One more than the count the round belongs to.
+    pub(crate) round: u32,
+    /// The step, in the numbering of `depot::maintain`.
+    pub(crate) index: u32,
+}
+
+/// Steps at or past this are repeated by every caller until one moves the round on with
+/// [`Counted::jump`], instead of being handed out once each.
+pub(crate) const REPEATED: u32 = 1 << 30;
+
+/// The step of a round that has nothing left to do.
+pub(crate) const DONE: u32 = u32::MAX;
+
+const fn round_word(round: u32, index: u32) -> u64 {
+    (round as u64) << 32 | index as u64
 }
 
 /// What a reading of the word and the clock decides.
@@ -149,20 +171,55 @@ impl Counted {
         }
     }
 
-    /// Whether a round of `maintain` is due: none has run in the interval the count is in. The
-    /// caller that gets `true` has claimed the round, with one compare-and-swap, so of callers
-    /// in one interval at most one runs it. Reads the counted time first, so a call is what
-    /// steps the count through a silence. Heartbeats do not count: one does a small part of
-    /// what a round does, so that one ran says nothing about whether the round's work is done.
-    pub(crate) fn claim_round<O: Os + ?Sized>(&self, os: &O) -> bool {
+    /// The next step of `maintain` for this caller, or `None` if the round of the interval the
+    /// count is in is done. The first caller in a new counted interval starts its round at step
+    /// 0; a step below [`REPEATED`] is handed to one caller each, with one compare-and-swap; a
+    /// step at or above it is handed to every caller until one moves the round on. Reads the
+    /// counted time first, so a call is what steps the count through a silence. Heartbeats do
+    /// not count: one does a small part of what a round does, so that one ran says nothing about
+    /// whether the round's work is done.
+    pub(crate) fn take_step<O: Os + ?Sized>(&self, os: &O) -> Option<Step> {
         let _ = self.now(os);
-        let round = self.count() as u64 + 1;
-        let last = self.maintained.load(Relaxed);
-        last != round
-            && self
+        let round = self.count().wrapping_add(1);
+        loop {
+            let word = self.maintained.load(Relaxed);
+            let (was, index) = ((word >> 32) as u32, word as u32);
+            let next = if was != round {
+                round_word(round, 1)
+            } else if index == DONE {
+                return None;
+            } else if index >= REPEATED {
+                return Some(Step { round, index });
+            } else {
+                round_word(round, index + 1)
+            };
+            if self
                 .maintained
-                .compare_exchange(last, round, Relaxed, Relaxed)
+                .compare_exchange(word, next, Relaxed, Relaxed)
                 .is_ok()
+            {
+                let index = if was != round { 0 } else { index };
+                return Some(Step { round, index });
+            }
+        }
+    }
+
+    /// Moves round `round` from step `from` to step `to`, if it is still there: a phase of
+    /// `maintain` that is over skips the steps it did not need.
+    pub(crate) fn jump(&self, round: u32, from: u32, to: u32) {
+        let _ = self.maintained.compare_exchange(
+            round_word(round, from),
+            round_word(round, to),
+            Relaxed,
+            Relaxed,
+        );
+    }
+
+    /// Whether this call starts a round of `maintain`, for tests that run a round's parts by
+    /// hand.
+    #[cfg(test)]
+    pub(crate) fn claim_round<O: Os + ?Sized>(&self, os: &O) -> bool {
+        self.take_step(os).is_some_and(|step| step.index == 0)
     }
 
     /// The count of intervals, without reading the clock.

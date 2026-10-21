@@ -106,3 +106,89 @@ fn maintain_alone_returns_single_free_pages_whenever_it_began() {
         );
     }
 }
+
+/// Heartbeats an interval or two apart, each a short run of them as a slow path makes, start a
+/// pass at each run of them: with passes due by the interval's number, a pass that ended a
+/// little after its interval began does not hold the next one back. As first built, beats an
+/// interval apart started a pass every other time.
+#[test]
+fn heartbeats_an_interval_or_two_apart_start_a_pass_each_time() {
+    let state = state::<Standard>();
+    let back = state.get_or_reserve().unwrap();
+    let os = state.os();
+    let class = small(1024);
+    let per_page = Standard::GEOMETRY.page_size() / 1024;
+    let slots = fill(&back, class, 2560 * per_page);
+    for &p in &slots {
+        paint(p, 1024, 9);
+    }
+    // SAFETY: the test holds these slots and gives them up.
+    unsafe { back.launder(class, &slots) };
+    forget_reuse(&back);
+    let (mut idle, mut missed) = (0, 0);
+    for visit in 0..40 {
+        os.advance_clock(DECAY_TICKS * (1 + visit % 2));
+        if back.retained() == 0 {
+            break;
+        }
+        let before = state.decay.word.load(Relaxed);
+        let passes = state.walk.passes.load(Relaxed);
+        // One beat: its clock read, cached as `depot::heartbeat::Clock` caches it, then the
+        // clock moving under its work, so that a pass it ends ends on a fresh, later reading.
+        let cached = back.now();
+        os.advance_clock(WORK);
+        back.heartbeat_with(&|| cached);
+        if before & 1 == 0 {
+            idle += 1;
+            missed += usize::from(state.walk.passes.load(Relaxed) == passes);
+        }
+    }
+    assert!(idle >= 3, "only {idle} beats found no pass under way");
+    assert_eq!(
+        missed, 0,
+        "{missed} of {idle} beats between passes started none"
+    );
+}
+
+/// The clocked pass taken a step at a time, as `maintain`'s steps take it: a pass over a large
+/// retained heap is many steps, none of which makes more purge calls than a step's budget of
+/// bitmap words allows, and the pass ends without a second starting in the interval.
+#[test]
+fn the_pass_in_steps_is_bounded_steps() {
+    use super::super::policy::PURGE_STEP_WORDS;
+    let state = state::<Standard>();
+    let back = state.get_or_reserve().unwrap();
+    let os = state.os();
+    let class = small(1024);
+    let per_page = Standard::GEOMETRY.page_size() / 1024;
+    let slots = fill(&back, class, 2560 * per_page);
+    for &p in &slots {
+        paint(p, 1024, 9);
+    }
+    // SAFETY: the test holds these slots and gives them up.
+    unsafe { back.launder(class, &slots) };
+    forget_reuse(&back);
+    let retained = back.retained();
+    os.advance_clock(DECAY_TICKS);
+    let now = back.now();
+    let (mut steps, mut most) = (0, 0);
+    loop {
+        let before = os.calls(Call::Purge);
+        let more = back.decay_pass_step(&|| now);
+        steps += 1;
+        most = most.max(os.calls(Call::Purge) - before);
+        if !more {
+            break;
+        }
+    }
+    assert!(steps > 1, "a pass over {retained} bytes took one step");
+    assert!(
+        most <= PURGE_STEP_WORDS as u64,
+        "a step made {most} purge calls"
+    );
+    assert!(back.retained() < retained, "the steps purged nothing");
+    assert!(
+        !back.decay_pass_step(&|| now),
+        "a second pass in the interval"
+    );
+}

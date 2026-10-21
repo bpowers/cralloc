@@ -19,12 +19,17 @@
 //!    new interval for each that is due and sets what it owes, and then the whole of every
 //!    debt laundered. A domain's stack whose hint a fork cut off is left to `collect` and to
 //!    its own domain's heartbeats.
-//! 3. **The clocked purge** ([`Source::purge_pass`]): the pass that is under way or due, run
-//!    to its end.
+//! 3. **The clocked purge** ([`Source::purge_pass_step`]): the pass that is under way or due,
+//!    run to its end.
+//!
+//! **Steps.** A round is taken a bounded step at a time ([`Cache::maintain_step`]), so that a
+//! caller on an async runtime's worker can yield between them: one slab's idle look, the looks
+//! at the stacks, one magazine shed, or one step of the purge pass (`PURGE_STEP_WORDS` of
+//! bitmap). `maintain` takes the steps of a round one after another.
 //!
 //! The thread that calls it counts no activity on its own CPU and runs no age look there:
 //! `maintain` is not a slow path, and if it counted, the slab of the CPU it happens to run on
-//! would never look idle. The clock is read once.
+//! would never look idle. The clock is read once a step.
 //!
 //! **Work.** Bounded by the heap's bookkeeping, not its memory: a look at each slab in use (a
 //! load or two, and a compare-and-swap when its counter moved), at most one drain each (a
@@ -42,41 +47,80 @@ use super::drain::Disposal;
 use super::heartbeat::Clock;
 use super::{Cache, Pool, Source, generation};
 use crate::classes::{SMALL_COUNT, SmallClass};
+use crate::clock::{DONE, REPEATED, Step};
 use crate::front::Routines;
 use crate::os::Os;
 use core::sync::atomic::Ordering::{Acquire, Relaxed};
+
+/// The steps of a round, by number. The idle looks are steps `0..` the number of CPUs a slow
+/// path has used, one slab each; then one step for the looks at the depot's stacks; then a
+/// magazine of debt laundered a step, at most [`SHED_STEPS`] of them; then the clocked pass, a
+/// step at a time, until it ends.
+const DEPTHS: u32 = 1 << 16;
+const SHED: u32 = DEPTHS + 1;
+/// The most magazines one round sheds: a bound against looks from busy CPUs that keep starting
+/// debts while it sheds. What a round leaves, the next round or the heartbeats take.
+const SHED_STEPS: u32 = 4096;
+const PURGE: u32 = REPEATED;
 
 impl<O: Os, R: Routines, S: Source> Cache<'_, O, R, S> {
     /// One round of the clocked maintenance for the whole heap (see the module documentation),
     /// unless a round has already run in this interval: then it returns at once, so a timer
     /// or a hook may call it as often as it likes.
     pub fn maintain(&self) {
-        if !self.source.clock().claim_round(self.os()) {
-            return;
-        }
-        let clock = Clock::new(self.os(), self.source.clock());
-        if generation::drains_enabled(self.depot) {
-            let count = self.depot.common.cpus.load(Acquire);
-            for index in 0..count {
-                if let Some(cpu) = self.routines.slabs().cpu(index as i32) {
-                    self.idle_look(cpu, clock.now(), Disposal::Launder);
-                }
+        while self.maintain_step() {}
+    }
+
+    /// One bounded step of the round of the counted interval the clock is in; whether the
+    /// round has more steps. A step is one slab's idle look (with at most one drain), the
+    /// looks at the depot's stacks, one magazine of debt laundered, or one step of the clocked
+    /// pass. Callers may take steps concurrently: each idle look and each shed is handed to one
+    /// of them, and the purge's steps are the purge's own.
+    pub fn maintain_step(&self) -> bool {
+        let counted = self.source.clock();
+        let Some(Step { round, index }) = counted.take_step(self.os()) else {
+            return false;
+        };
+        let clock = Clock::new(self.os(), counted);
+        if index < DEPTHS {
+            let cpus = self.depot.common.cpus.load(Acquire).min(DEPTHS as usize) as u32;
+            if generation::drains_enabled(self.depot)
+                && index < cpus
+                && let Some(cpu) = self.routines.slabs().cpu(index as i32)
+            {
+                self.idle_look(cpu, clock.now(), Disposal::Launder);
             }
+            if index + 1 >= cpus || !generation::drains_enabled(self.depot) {
+                counted.jump(round, index + 1, DEPTHS);
+            }
+            return true;
         }
-        if self.tuning.shed_unused {
-            for pool in self.depot.pools() {
-                let held = match pool {
-                    Pool::Domain(domain) => self.depot.held(domain).load(Relaxed),
-                    Pool::Shared => u64::MAX,
-                };
-                for class in SmallClass::all() {
-                    if held & 1 << (class.ordinal() % SMALL_COUNT) != 0 {
-                        self.look_at_depth(pool, class, clock.now());
+        if index == DEPTHS {
+            if self.tuning.shed_unused {
+                for pool in self.depot.pools() {
+                    let held = match pool {
+                        Pool::Domain(domain) => self.depot.held(domain).load(Relaxed),
+                        Pool::Shared => u64::MAX,
+                    };
+                    for class in SmallClass::all() {
+                        if held & 1 << (class.ordinal() % SMALL_COUNT) != 0 {
+                            self.look_at_depth(pool, class, clock.now());
+                        }
                     }
                 }
             }
-            self.shed_all();
+            return true;
         }
-        self.source.purge_pass(&|| clock.now());
+        if index < PURGE {
+            if index >= SHED + SHED_STEPS || !self.tuning.shed_unused || !self.shed_one() {
+                counted.jump(round, index + 1, PURGE);
+            }
+            return true;
+        }
+        if self.source.purge_pass_step(&|| clock.now()) {
+            return true;
+        }
+        counted.jump(round, PURGE, DONE);
+        false
     }
 }

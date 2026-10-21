@@ -437,10 +437,23 @@ fn a_process_exits_while_the_background_thread_runs_fully() {
 #[test]
 #[ignore = "slow: run with scripts/gate --all"]
 fn the_background_thread_returns_a_quiet_programs_memory() {
+    a_quiet_program_gets_its_memory_back("idle");
+}
+
+/// The same with a trickle of slow paths, a few every half second, as a health check makes:
+/// their heartbeats do a small part of what a round of `maintain` does, so the thread runs
+/// its rounds whatever the heartbeats did.
+#[test]
+#[ignore = "slow: run with scripts/gate --all"]
+fn the_background_thread_returns_a_trickling_programs_memory() {
+    a_quiet_program_gets_its_memory_back("trickle");
+}
+
+fn a_quiet_program_gets_its_memory_back(mode: &str) {
     let exe = program("background.c");
     let measure = |on: bool| {
         let mut command = Command::new(&exe);
-        command.args(["idle", "12"]);
+        command.args([mode, "12"]);
         if on {
             command.env("ASMALLOC_BACKGROUND", "1");
         } else {
@@ -460,9 +473,12 @@ fn the_background_thread_returns_a_quiet_programs_memory() {
     let (_, on) = measure(true);
     assert!(
         on * 8 < freed,
-        "freed {freed} MiB, {on} MiB with the thread after 12 s"
+        "{mode}: freed {freed} MiB, {on} MiB with the thread after 12 s"
     );
-    assert!(on * 4 < off, "{off} MiB without the thread, {on} with it");
+    assert!(
+        on * 4 < off,
+        "{mode}: {off} MiB without the thread, {on} with it"
+    );
 }
 
 #[test]

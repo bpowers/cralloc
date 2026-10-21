@@ -43,8 +43,8 @@ pub trait Source {
     /// the whole heartbeat; the source calls it only if a decision needs the time.
     fn purge_step(&self, now: &dyn Fn() -> u64);
 
-    /// What the purge steps of an interval would do, in one call, for `Cache::maintain`: the
-    /// rest of the clocked pass under way or due, and no later one. Its work is bounded by the
-    /// source's own bookkeeping, not by the memory it holds.
-    fn purge_pass(&self, now: &dyn Fn() -> u64);
+    /// One bounded step of the clocked pass that is under way or due, for `Cache::maintain`;
+    /// whether the pass has more to do. Called until it says no, it does what the purge steps
+    /// of an interval would, and never goes on into a later pass.
+    fn purge_pass_step(&self, now: &dyn Fn() -> u64) -> bool;
 }

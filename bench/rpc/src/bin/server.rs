@@ -28,7 +28,7 @@ fn main() {
     rt.block_on(async {
         #[cfg(feature = "maintenance")]
         if std::env::var("BENCH_MAINTAIN").as_deref() == Ok("task") {
-            drop(asmalloc_tokio::spawn_maintenance());
+            drop(asmalloc_tokio::spawn_maintenance().expect("a runtime with a timer"));
         }
         let bound = connectrpc::server::Server::bind("127.0.0.1:0").await.expect("bind");
         println!("BENCH_LISTEN {}", bound.local_addr().expect("local addr"));

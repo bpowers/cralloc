@@ -419,6 +419,15 @@ impl<'a, O: Os, R: Routines + Copy> Bound<'a, O, R> {
         }
     }
 
+    /// One bounded step of the round of maintenance, as `Cache::maintain_step`; whether the
+    /// round has more. `false` before the heap has started.
+    pub(crate) fn maintain_step(self) -> bool {
+        match self.heap.started() {
+            Some(back) => self.cache(&back).maintain_step(),
+            None => false,
+        }
+    }
+
     /// Drains the slab of CPU number `cpu` now, as the heartbeat's idle check would once it had
     /// been quiet for an interval, and says how the drain ended. `None` if the heap has not
     /// started or the slab array has no such CPU.
