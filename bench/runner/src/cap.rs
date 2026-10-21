@@ -26,8 +26,10 @@ pub const MAX: u64 = 16 << 30;
 /// (churn with 10M live objects; docs/research/baselines.md), so this leaves three times that
 /// for an allocator that is worse but working, and fails one that has run away.
 pub const DEFAULT_RUN: u64 = 4 << 30;
-/// The RPC load generator, which always uses glibc and needs tens of MiB.
-pub const DRIVER: u64 = 1 << 30;
+/// The load generator, which always uses glibc. The open-loop generator keeps a record of
+/// every request (20 bytes each: a minute at 450k req/s is over 500 MiB) and its list of
+/// commands (hundreds of MiB for the large-heap mini-redis jobs).
+pub const DRIVER: u64 = 3 << 30;
 /// The runner itself: its samples and results are small.
 const RUNNER: u64 = 1 << 30;
 

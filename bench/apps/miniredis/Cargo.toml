@@ -23,11 +23,14 @@ asmalloc = ["bench-alloc/asmalloc"]
 je = ["bench-alloc/je"]
 tc = ["bench-alloc/tc"]
 sn = ["bench-alloc/sn"]
+# Not an allocator: the live-bytes count, for resident over live (../../alloc/src/live.rs).
+live-bytes = ["bench-alloc/live-bytes"]
 
 [dependencies]
 bench-alloc = { path = "../../alloc" }
 bench-app = { path = "../common" }
 mini-redis = "=0.4.1"
+bytes = "1"
 tokio = { version = "1", features = ["full"] }
 
 # mini-redis has no release profile of its own: the suite's (fat LTO, one unit).
