@@ -4,8 +4,7 @@
 
 use super::super::hold::{Reach, fine_read, held_for};
 use super::super::policy::{
-    FINE_TICKS, HOLD_STEPS, PURGE_MAINTAIN_STEP_PAGES, PURGE_MAX_RUN_PAGES, allowance_floor,
-    hold_beat,
+    FINE_TICKS, HOLD_STEPS, PURGE_MAINTAIN_STEP_PAGES, allowance_floor, hold_beat,
 };
 use super::super::word::Word;
 use super::*;
@@ -73,9 +72,10 @@ fn free_slots<O: Os>(
     (blocks, top)
 }
 
-/// The most one heartbeat's look returns: its bound, and the rest of the run it is on.
+/// The most one heartbeat's look returns: its bound, whatever the units (a large slot is
+/// returned in pieces).
 fn beat_bound() -> usize {
-    hold_beat(Native::GEOMETRY) + PURGE_MAX_RUN_PAGES as usize * Native::GEOMETRY.page_size()
+    hold_beat(Native::GEOMETRY)
 }
 
 /// Runs the hold to its end from the frees of `free_twice_the_floor` and checks what it
@@ -517,7 +517,7 @@ fn maintain_returns_a_quiet_programs_held_slots_at_its_second_round() {
     assert_eq!(back.retained_large(), freed, "the first round holds them");
     let largest = maintain_round(&back, os);
     let page = Native::GEOMETRY.page_size();
-    assert!(largest <= (PURGE_MAINTAIN_STEP_PAGES + PURGE_MAX_RUN_PAGES) as usize * page);
+    assert!(largest <= PURGE_MAINTAIN_STEP_PAGES as usize * page);
     let floor = allowance_floor(Native::GEOMETRY);
     let left = back.retained_large();
     assert!(left <= floor && left + class.size() > floor, "{left}");
