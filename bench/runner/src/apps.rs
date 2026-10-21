@@ -34,11 +34,14 @@ fn locked_versions(lock: &Path) -> Result<BTreeMap<String, Vec<String>>, String>
     struct Package {
         name: String,
         version: String,
+        source: Option<String>,
     }
     let text = std::fs::read_to_string(lock).map_err(|e| format!("{}: {e}", lock.display()))?;
     let l: Lock = toml::from_str(&text).map_err(|e| format!("{}: {e}", lock.display()))?;
     let mut m: BTreeMap<String, Vec<String>> = BTreeMap::new();
-    for p in l.package {
+    // Only crates from a registry or git: a program may put an empty crate of its own in an
+    // allocator crate's place (Meilisearch's jemalloc, `apps/meilisearch/no-jemalloc`).
+    for p in l.package.into_iter().filter(|p| p.source.is_some()) {
         m.entry(p.name).or_default().push(p.version);
     }
     Ok(m)
@@ -164,8 +167,12 @@ mod tests {
     use crate::paths::Paths;
 
     fn programs() -> Vec<&'static str> {
-        let mut v: Vec<&'static str> =
-            crate::suite::apps().iter().chain(&crate::suite::servers()).filter_map(|j| j.program.app()).collect();
+        let mut v: Vec<&'static str> = crate::suite::apps()
+            .iter()
+            .chain(&crate::suite::servers())
+            .chain(&crate::suite::servers_large())
+            .filter_map(|j| j.program.app())
+            .collect();
         v.sort();
         v.dedup();
         v

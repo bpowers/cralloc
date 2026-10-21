@@ -143,6 +143,21 @@ tails measure the machine as much as the allocator.
 `benchrun report` prints a table per server: latency and work at each rate, and memory under
 load, in the silences and after the connections close.
 
+**A search engine.** `meilisearch hn` (in `servers-large`) is Meilisearch 1.55.0 over 400k Hacker
+News items, the dataset of Meilisearch's own benchmark: it indexes them as it starts, before
+it listens, then serves searches of one to three title words from 128 connections while every
+200th request is a batch of 50 updated items, which it indexes in the background. Its store is
+a memory-mapped LMDB file of about 3 GiB in a fresh directory under its inputs each run; its
+heap, about 1 GiB, is the allocator's part, which the runner's curve gives separately (the
+anonymous memory, from the rollups) and `largesum.py --heap` puts over live. The driver
+(`meilisearch/src/main.rs`) starts the server through Meilisearch's library as its `main` does.
+Meilisearch links jemalloc with its `malloc` override, which would take every C allocation
+whatever the global allocator, so `meilisearch/no-jemalloc` is an empty crate patched in its
+place. tcmalloc is left out: it aborts while the server indexes, on a sized delete of 8 bytes
+of a sampled 2-byte allocation made in Meilisearch's tokenizer. Whether the program frees with
+the wrong size or the tcmalloc wrapper's in-place `realloc` growth makes it look so is not
+settled.
+
 **A proxy.** Sōzu forwards to an upstream the runner starts first, on three CPUs of the
 generator's L3 domain (two of them already keep up): `upstream`, a binary of
 `bench/probes/loadgen` built with glibc, which answers every request with the same response.
