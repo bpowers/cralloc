@@ -623,12 +623,11 @@ path can stand in for the clock here: a free cannot tell memory that is idle fro
 about to be reused, and purging on a level makes the programs that reuse it fault it
 straight back.
 
-So there is a background thread, and by default it starts itself. A heartbeat starts it
-the first time it finds two things together: the process holds more free and parked memory
-than the floor of the allowance (see "Sizing from evidence"), and the calling thread is not
-the process's first, so the process already has more than one thread. A small program
-never gets the thread, because it holds nothing worth returning, and neither does a
-program with one thread, which may depend on staying that way. The thread buys nothing on
+So there is a background thread, and by default it starts itself, once two things are
+true together: the process holds more free and parked memory than the floor of the
+allowance (see "Sizing from evidence"), and it already has more than one thread. A small
+program's thread never runs, because the program holds nothing worth returning, and a
+program with one thread never gets one, because it may depend on staying that way. The thread buys nothing on
 the fast path, which stays as it is. Once an interval it calls `maintain`, which does for
 the whole heap what the heartbeats of an interval would have done: the idle check on every
 slab, each depot stack's shedding, and the clocked purge, in bounded steps. A slab it
@@ -643,13 +642,26 @@ its rounds have drained every slab, so the first allocation or free after the si
 takes a slow path, and a slow path that finds the word set clears it and wakes the thread.
 That costs each slow path one load of a word that is otherwise not written, and the fast
 path nothing. A program that is working, even one that never leaves its magazines, keeps
-the thread awake, because each round's drain sends its CPUs to their slow paths.
+the thread awake, because each round's drain sends its CPUs to their slow paths. Where
+slabs cannot be drained (see "Process lifecycle") nothing would send a resuming program to
+a slow path, so there the thread keeps to its timed sleep and never parks.
 
-It is an ordinary thread of the process, started by the layer that has a thread library to
-start it with: the standard library for a Rust program, the C library for the preload
-library. A program can turn it off, with a cargo feature or an environment variable, and
-can start it itself whatever the two conditions say. If the thread cannot be created the
-allocator carries on without it. A process under a system-call filter that kills on thread
+It is an ordinary thread of the process, created through the C library by the layer that
+links one, not by the allocator with a bare system call. A bare thread could be created
+anywhere a slow path runs, but the C library would not know it, and what the library does
+to every thread, a change of credentials above all, would pass it by. The price is that
+creating a thread through the library is not safe everywhere a slow path runs: not in a
+signal handler, and not inside the library's own locked sections, which is where its
+allocations for a new thread or a newly loaded object come from. So the two layers choose
+their moment differently. In a Rust program the thread is created on a heartbeat of a
+call that came through the Rust interface, which the C library does not use, and only if
+the calling thread has no signal blocked and is not on a signal stack, the marks of a
+handler; otherwise a later heartbeat tries. The preload library, whose caller may always
+be the C library, creates the thread when the program creates its own first thread, a
+moment that is safe by construction, and leaves it parked until a slow path finds the heap
+over the floor. A program can turn the thread off, with a cargo feature or an environment
+variable, and can start it itself whatever the conditions say. If the thread cannot be
+created the allocator carries on without it. A process under a system-call filter that kills on thread
 creation, which no allocator can detect, must turn it off. The child of a fork does not
 inherit the thread and starts its own on the same conditions.
 
