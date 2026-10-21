@@ -207,7 +207,7 @@ pub struct Depot {
     topology: domain::Domains,
     /// Magazines made, for audits.
     #[cfg(test)]
-    created: std::sync::atomic::AtomicUsize,
+    pub(crate) created: std::sync::atomic::AtomicUsize,
     /// Magazines asked for that the area had no room for, for tests that must exercise the
     /// magazines rather than the back end's direct path.
     #[cfg(test)]
