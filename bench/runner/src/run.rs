@@ -897,6 +897,16 @@ fn header(o: &Options, allocs: &[Allocator], jobs: &[Job], session: &str, rseq: 
 }
 
 pub fn session(o: &Options, allocs: &[Allocator], jobs: &[Job]) -> std::io::Result<()> {
+    // asmalloc sizes its regions from the address space it may reserve, so under a finite
+    // limit it runs with smaller regions and places large blocks differently: the measurement
+    // would be of another allocator. scripts/memlimit sets such a limit when it cannot reach
+    // systemd; the runner caps memory with cgroups of its own and never needs one.
+    if let Some(limit) = sys::address_space_limit() {
+        return Err(std::io::Error::other(format!(
+            "refusing to measure under an address-space limit (RLIMIT_AS {limit} bytes): \
+             asmalloc would shrink its regions to fit it"
+        )));
+    }
     let rseq = rseq_offsets(o, allocs, jobs).map_err(std::io::Error::other)?;
     bench_harness::cpus::pin_to(&o.runner_cpus);
     if let Some(p) = o.out.parent() {
