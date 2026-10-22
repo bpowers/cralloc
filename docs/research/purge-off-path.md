@@ -7,44 +7,38 @@ The design is "Heartbeat", from "While the thread runs, returning memory is its 
 
 ## Summary
 
-Second round (after the review, main `040033a` merged; "Second round" below):
+The build that ships is the branch's last commit: the review's fixes, main `040033a` merged,
+and no yield. In the second round below it is the one measured as `asmalloc-noyield`; the
+build measured there as `asmalloc` is the same code with a `sched_yield` after each of the
+thread's steps, which was tried and taken out.
 
+- **Requests no longer return memory while the thread runs.** The order service's slowest
+  doublings were the purge steps that fell on them; they are gone: p90 under jemalloc's in
+  both rounds (0.794 and 0.827 ms against 0.828 and 0.826; main 0.839 and 0.852). The log
+  store's burst after a silence takes 0.50 to 0.60 ms for its slowest request in the first
+  5 ms against main's 0.68 to 0.93: the pass is off request paths, and what is left, about
+  0.2 ms over the thread-off build, is the idle drains. (Both measured with the yield build;
+  the yield changes only when the thread runs, not what a request does.)
+- **DataFusion's peak holds**: 0 runs of 20 over 880 MiB (848 to 860), as on main; in the
+  first round's six benchrun runs, cgroup peak and cycles level with main's. The thread waits 87 ms a run for a CPU
+  behind DataFusion's four workers and wakes about 450 times a run.
+- **Total work does not grow**: the same `madvise` calls move to the thread (DataFusion's
+  kernel cycles 5.98 G against 6.02 in the first round; the doubling server's CPU time 1%
+  under main's; each one build's).
+- **Meilisearch is not resolved.** No p99.9 regression is shown: medians level (45.4 ms
+  against main's 45.8), and every server thread's run-queue wait is the same in every build.
+  But the shipping build has the widest p99.9 spread over six runs (36 to 53 ms against
+  main's 42 to 47), its p99 is above main's in both sessions (by 2.8 ms in the first, 0.7 in
+  the second), unexplained, and main itself moved between the sessions (p99.9 37 to 41,
+  then 42 to 47, with its floor change), so the rounds cannot be pooled. Main's thread
+  already runs bursts of 3 to 13 ms there; the branch's run 12 to 16. The thread wakes 25
+  times a second at 70% load instead of 2 and does about 10 ms of work a second; cycles a
+  request are level (one build's each).
 - **A yield after each of the thread's steps was tried and taken out.** With four workers on
   DataFusion's four CPUs every yield handed a worker a whole slice: the thread waited about
-  460 ms a run behind them, its holds and payments came late, and 10 runs of 20 peaked 40 to
-  180 MiB over (none without the yields, none on main). On Meilisearch it changed neither the
-  tail nor the workers' run-queue wait. Do not try it again without a way past that.
-- **Meilisearch's tail is level with main's**: p99.9 at 70% 44.7 ms against 45.8 (main's
-  moved from 37 to 41 to 42 to 47 with its floor change), and every thread's run-queue wait
-  is the same in every build. The first round's 6 ms did not reproduce.
-- **The log store's burst after a silence** takes 0.50 to 0.60 ms for its slowest request in
-  the first 5 ms against main's 0.68 to 0.93: the pass is off request paths. The idle drains
-  are what is left, about 0.2 ms over the thread-off build.
-- The doubling and DataFusion hold: 0.780 / 0.827 / 0.916 ms against main's 0.779 / 0.852 /
-  1.103; cgroup peak 867 against 868 MiB.
-
-First round:
-
-- **The doubling tail is gone at p90 and mostly at the maximum.** A table doubling of the
-  order service takes 0.770 / 0.794 / 0.889 ms (median, p90, max of 192) against main's
-  0.766 / 0.839 / 0.905 and jemalloc's 0.737 / 0.828 / 0.860. The p90 is now under
-  jemalloc's; the slowest doubling, 30 us over jemalloc's, had three faults more than the rest
-  and no allocator work in it.
-- **DataFusion's peak is unchanged, after one fix.** The cgroup peak is 864 to 866 MiB
-  against main's 860 to 876 and jemalloc's 833 to 872, with 0.1% fewer cycles than main
-  (69.66 against 69.76 G) and the same kernel cycles. The first build peaked 180 MiB higher
-  in about one run in five; see "What DataFusion found".
-- **Total work does not grow.** The same `madvise` calls move to the thread: DataFusion's
-  kernel cycles are 5.98 G against main's 6.02, and the doubling server's CPU time over its
-  run 1% less than main's.
-- **On the large-heap servers the work moves and the tails do not improve.** The log store is
-  unchanged (it returns almost nothing). On Meilisearch the thread now does about 9 ms of
-  work a second at 70% load and wakes 21 times a second instead of 2; cycles a request are
-  the same (17.04 M against 17.02), but page faults a request are 7% higher (90 against
-  85, ranges overlapping) and p99.9 at 70% is 46 ms against 40 (39 to 52 against 37 to 41
-  over six runs). The burst after the silence and memory at rest are unchanged. The thread
-  runs on the server's own CPUs, and when it takes a pass back to back it holds one of them
-  for milliseconds; see "Limits".
+  460 ms a run, its holds and payments came late, and 10 runs of 20 peaked 40 to 180 MiB
+  over. On Meilisearch it changed neither the tail nor the workers' wait. Do not try it again
+  without a way past that.
 
 ## What changed
 
@@ -71,9 +65,10 @@ until none would do more, between the steps of its round and after it.
   thread if retained memory is over the cap, and otherwise drops the debt as a payment under
   the cap would. Past `GROWTH_UNPAID_HUGE_PAGES` (16 MiB) unpaid, growers and heartbeats pay a
   step each, as they do without a thread.
-- **A fork child** that inherited a running thread's word treats it as running until work
-  first comes due; the cold look then sees the word is another process's, makes it the
-  child's, and the slow path does the work.
+- **A fork child** begins with no thread: the draw of its generation makes the inherited
+  word its own. A pass nobody steps goes back to the slow paths an interval after it began,
+  and growth past the limit is paid by slow paths whether a pass is under way or not, so no
+  bound rests on a thread running.
 - Where there is no thread (one thread, `ASMALLOC_BACKGROUND=0`, a failed start, default
   features off) nothing changes.
 
@@ -180,9 +175,10 @@ close, none in the last 10 s.
 
 ## Second round: after the review, the merge with main, and a yield after each step
 
-2026-10-22, the branch at `7aaee31` (main `040033a` merged; the review of `26cc261` answered)
-against main `040033a`, the branch without the yields (`asmalloc-noyield`, the same commit
-with `yield_cpu` taken out of `depot/thread.rs` by `build-at.sh`), and jemalloc. The yield:
+2026-10-22, against main `040033a` and jemalloc: the branch at `7aaee31` (main `040033a`
+merged; the review of `26cc261` answered) as `asmalloc`, with a yield after each of the
+thread's steps, and the same commit without the yields as `asmalloc-noyield`
+(`build-at.sh`), which is the code that ships (`55b91cf` took the yields out). The yield:
 the thread calls `sched_yield` after each bounded step of its round and of the purges, so that
 a program thread waiting for its CPU waits at most a step.
 
@@ -192,18 +188,18 @@ branch's last commit). `dftrace.py`, 20 runs each:
 | build | peak RssAnon, runs over 880 MiB | thread run-queue wait a run, median | thread's involuntary switches a run |
 |---|---:|---:|---:|
 | main | 0 of 20 | 0.6 ms | 0 |
-| branch, no yield | 0 of 20 (848 to 860) | 87 ms | 35 |
-| branch, yield | 10 of 20 (902 to 1,039) | 462 ms | 390 |
+| shipping build (no yield) | 0 of 20 (848 to 860) | 87 ms | 35 |
+| yield build | 10 of 20 (902 to 1,039) | 462 ms | 390 |
 
 With four workers on four CPUs every yield hands a worker a whole slice before the thread
 comes back, and the holds and payments it owes wait behind them, about half a second a run.
-benchrun's six rounds (where the branch had one run at 1,049 MiB and main one at 1,022)
-agree in median: cgroup peak 867 against main's 868 and jemalloc's 863; Gcycles 69.71
-against 69.73 (one build's; kernel 5.88 against 5.84).
+benchrun's six rounds, of the yield build (one run at 1,049 MiB, main one at 1,022), agree
+in median: cgroup peak 867 against main's 868 and jemalloc's 863; Gcycles 69.71 against
+69.73 (one build's; kernel 5.88 against 5.84).
 
-**Meilisearch: no difference to explain this session.** Six rounds each, at 70%:
+**Meilisearch: not resolved.** Six rounds each, at 70%:
 
-| | main | branch | branch, no yield | jemalloc |
+| | main | yield build | shipping build (no yield) | jemalloc |
 |---|---|---|---|---|
 | p50 / p99 / p99.9, ms | 1.76 / 28.6 / 45.8 | 1.78 / 30.9 / 44.7 | 1.75 / 29.3 / 45.4 | 2.03 / 35.7 / 54.3 |
 | p99.9 range, ms | 42 to 47 | 44 to 48 | 36 to 53 | 50 to 59 |
@@ -214,17 +210,21 @@ against 69.73 (one build's; kernel 5.88 against 5.84).
 | thread's CPU in 2 ms, p99 | 0 | 0.32 ms | 0.66 ms | |
 
 Main's p99.9 was 37 to 41 ms in the first round and is 42 to 47 now, with main's floor
-change merged; the branch's is level with it either way, and the yield halves the thread's
-CPU in any 2 ms at p99 without moving the workers' wait (the per-2-ms wait summed over every
-server thread, from `schedtrace.py`, every 2 ms; `schedsum.py`). So the first round's 6 ms
-did not reproduce, and these traces do not show the thread delaying the workers.
+change merged, so the sessions cannot be pooled. The shipping build's median is level with
+main's, and every server thread's run-queue wait (summed per 2 ms over every server thread,
+from `schedtrace.py`; `schedsum.py`) is the same in every build, so these traces do not show
+the thread delaying the workers. Not resolved: the shipping build's p99.9 spread is the
+widest of the asmalloc builds (36 to 53 ms), and its p99 is 0.7 ms above main's, as it was
+2.8 ms above in the first round. The thread's longest run on a CPU without a break, by 2 ms samples: main's
+3 to 13 ms, the shipping build's 12 to 16, the yield build's 12 to 14. The yield halved the
+thread's CPU in any 2 ms at p99 and moved neither the tail nor the workers' wait.
 
-**Doubling** (three rounds, 192 doublings): branch 0.780 / 0.827 / 0.916 ms (median, p90,
+**Doubling** (three rounds, 192 doublings, the yield build): 0.780 / 0.827 / 0.916 ms (median, p90,
 max), main 0.779 / 0.852 / 1.103, jemalloc 0.758 / 0.826 / 0.850.
 
 **The log store's burst after a silence** (diagnostic builds, `default-thread/burst.py`,
-three rounds; the slowest request of the first 5 ms): main 0.93, 0.68, 0.89 ms; the branch
-0.57, 0.60, 0.50; the branch with the thread off 0.31, 0.98, 0.44. Main's request paths read
+three rounds, the yield build's diagnostic copy; the slowest request of the first 5 ms):
+main 0.93, 0.68, 0.89 ms; the branch 0.57, 0.60, 0.50; the branch with the thread off 0.31, 0.98, 0.44. Main's request paths read
 5.5k to 6.7k bitmap words of a pass in those 5 ms; the branch's none (the thread reads 20k to
 30k). What is left over the thread-off build comes at the burst's first requests, after a
 silence in which the thread drained the four slabs (4 drains, as on main): the slow paths
@@ -233,24 +233,22 @@ that refill them. The pass is off request paths; the idle drains are what remain
 ## Limits
 
 - **The thread shares the program's CPUs.** It is created by a program thread and inherits
-  its affinity; a server pinned to four CPUs gets the purge work on those four. A heartbeat's
-  step cost the request that took it up to half a millisecond; the thread's pass, taken in
-  bounded steps back to back, holds one CPU for milliseconds, and every request queued on the
-  worker it displaced waits. Meilisearch's p99.9 at 70% (requests of tens of ms, with
-  indexing beside them) is 6 ms worse in median; the doubling's own time and DataFusion are
-  better or unchanged. Running the thread at a lower priority, or yielding between its steps,
-  would trade that against how promptly it returns memory under saturation: a design question,
-  not built.
-- **Page faults on Meilisearch are 7% higher in median**, within the runs' spread. A
-  candidate: the thread takes an interval's pass to its end as soon as it starts, where
-  heartbeats spread it over the interval, so the pass sees less of the interval's frontiers.
-  Not measured apart.
+  its affinity; a server pinned to four CPUs gets the purge work on those four, in bounded
+  steps that it may take back to back. On Meilisearch that is not shown to cost the tail
+  (see "Meilisearch: not resolved"). Yielding after each step was measured and taken out
+  (DataFusion's peak); a lower priority was rejected before it was built, for the same
+  reason: under saturation the thread would wait too long for its turn.
+- **Page faults on Meilisearch** were 7% higher in median in the first round, within the
+  runs' spread, and 1% lower in the second. A candidate for the first: the thread takes an
+  interval's pass to its end as soon as it starts, where heartbeats spread it over the
+  interval. Not measured apart.
 - **Wake-ups.** A slow path makes the futex call when work it made due finds the thread
   asleep: once an interval for the pass, once a hold's end or a look the thread planned, once
-  a step (2 MiB) of growth over the cap. Meilisearch's 21 a second cost its requests about
+  a step (2 MiB) of growth over the cap. Meilisearch's 25 a second cost its requests about
   that many system calls.
-- **A fork child** of a process whose thread ran leaves its work to that thread until work
-  first comes due, then takes it back; a grower in it wakes nobody (the back end cannot tell
-  generations) and pays once 16 MiB is unpaid.
+- **The idle drains** stay: after a silence the first requests refill the slabs the thread
+  drained, about 0.2 ms on the log store's slowest request. Left as it is.
+- **The stamp's retry** (`hold_stamp`, a look's write between a free's load and its
+  compare-and-swap) has no test: the region's stamp word is not on the checker's atomics.
 - **A program that keeps no heartbeat going** (all on fast paths) wakes the thread only by its
   rounds, as before.

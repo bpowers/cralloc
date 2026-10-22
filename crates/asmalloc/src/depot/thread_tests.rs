@@ -426,6 +426,7 @@ fn a_fork_child_of_an_awake_parent_sees_its_own_crossings() {
     one_slow_path(&rig);
     let parent = started(&rig);
     let word = &rig.source.thread;
+    word.raise_level();
     // SAFETY: nothing else runs.
     unsafe { rig.os().wipe_for_fork() };
     let keeper = SimCpu::new(1);
@@ -433,8 +434,8 @@ fn a_fork_child_of_an_awake_parent_sees_its_own_crossings() {
     assert_ne!(child, parent);
     assert_eq!(
         word.load(),
-        Snapshot(child | NONE),
-        "the child began with a thread"
+        Snapshot(child | NONE | LEVEL),
+        "the child began with a thread, or lost the level"
     );
     rig.os().set_other_thread(true);
     word.raise_level();

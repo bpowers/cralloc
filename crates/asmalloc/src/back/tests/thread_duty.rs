@@ -486,12 +486,21 @@ fn a_pass_the_thread_leaves_is_the_heartbeats_after_an_interval() {
     os.advance_clock(DECAY_TICKS);
     back.heartbeat();
     assert!(pass_under_way(&state), "no pass was started");
-    let purges = os.calls(Call::Purge);
+    // The thread sleeps, and does not come to step the pass.
+    asleep(&back);
+    let (purges, wakes) = (os.calls(Call::Purge), os.wakes());
     for _ in 0..BEATS {
         back.heartbeat();
     }
     assert_eq!(os.calls(Call::Purge), purges, "stepped before an interval");
+    assert_eq!(os.wakes(), wakes, "woken before an interval");
     os.advance_clock(DECAY_TICKS);
+    back.heartbeat();
+    assert_eq!(
+        os.wakes(),
+        wakes + 1,
+        "the overdue pass did not wake the thread"
+    );
     for _ in 0..BEATS {
         back.heartbeat();
     }

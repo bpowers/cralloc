@@ -317,7 +317,9 @@ impl<O: Os> Back<'_, O> {
         // thread's plan clears that look and then reads the stamps, so one of the two sees the
         // other's write (`plan_hold`). Until the word is this stamp: a failure may be a look's
         // own write (its mark of a walk from the top, or the stamp it clears at the bottom),
-        // which would leave a slot freed resident in a region with no stamp.
+        // which would leave a slot freed resident in a region with no stamp. No test reaches
+        // the retry: the region's stamp word is not on the interleaving checker's atomics, so
+        // no exploration can put a look's write between this load and the compare-and-swap.
         let mut seen = word.load();
         while seen != stamp {
             match word.compare_exchange(seen, stamp) {
