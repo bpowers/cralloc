@@ -3,7 +3,9 @@
 Runs the job's recorded command line for each allocator, interleaved, under `perf stat` (user
 and kernel cycles, instructions, faults, context switches, dTLB walks, L2 misses) pinned as the
 suite pins it, then once under `strace -c -f` for the system calls. Prints medians. Run it under
-scripts/measure (--both-l3 when the job uses CPUs 8 and up); each run is memory capped."""
+scripts/measure (--both-l3 when the job uses CPUs 8 and up); each run is memory capped and
+ends after three minutes. Only for jobs whose command line is the whole job: it refuses a
+server job, whose load comes from the runner's client."""
 import argparse
 import json
 import os
@@ -37,7 +39,7 @@ def env_for(alloc, cpus):
 
 def perf(rec):
     with tempfile.NamedTemporaryFile("r", suffix=".csv") as out:
-        cmd = [f"{ME}/scripts/memlimit", "-m", "6G", "-t", "10m", "--", "perf", "stat", "-x,",
+        cmd = [f"{ME}/scripts/memlimit", "-m", "6G", "-t", "3m", "--", "perf", "stat", "-x,",
                "-o", out.name, "-e", ",".join(EVENTS), "taskset", "-c", rec["cpus"]] + rec["argv"]
         subprocess.run(cmd, env=env_for(rec["allocator"], rec["cpus"]), stdout=subprocess.DEVNULL,
                        stderr=subprocess.DEVNULL, check=False)
@@ -51,7 +53,7 @@ def perf(rec):
 
 def strace(rec):
     with tempfile.NamedTemporaryFile("r", suffix=".txt") as out:
-        cmd = [f"{ME}/scripts/memlimit", "-m", "6G", "-t", "10m", "--", "strace", "-c", "-f",
+        cmd = [f"{ME}/scripts/memlimit", "-m", "6G", "-t", "3m", "--", "strace", "-c", "-f",
                "-o", out.name, "taskset", "-c", rec["cpus"]] + rec["argv"]
         subprocess.run(cmd, env=env_for(rec["allocator"], rec["cpus"]), stdout=subprocess.DEVNULL,
                        stderr=subprocess.DEVNULL, check=False)
@@ -74,6 +76,10 @@ def main():
     a.job = a.job.replace("%", " ")
     allocs = a.allocs.split(",")
     recs = runs_of(a.results, a.job, allocs)
+    # A server's command line alone is the server with no client: it would sleep until the
+    # timeout and measure nothing. Diagnose server jobs through the runner instead.
+    if any(r.get("driver") or "server" in os.path.basename(r["argv"][0]) for r in recs.values()):
+        raise SystemExit(f"{a.job} is a server job: its command line has no load; use the runner")
     stats = defaultdict(lambda: defaultdict(list))
     for _ in range(a.rounds):
         for alloc in allocs:
