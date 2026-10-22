@@ -4,12 +4,26 @@ each allocator (the mean over the runs given), and the share of the server's cyc
 
   summarize.py JSON...     (where-*.json and misses-*.json files, any order)
 
-Rows group where.py's categories; a category that is the allocator's in one allocator's runs
+Each run's shares are scaled to the runner's cycles a request over the whole 70% segment of the
+same run (its run.jsonl beside the JSON). Rows group where.py's categories; a category that is the allocator's in one allocator's runs
 and absent in the other's reads as zero there.
 """
 import collections
 import json
 import sys
+from pathlib import Path
+
+
+def runner_cycles(where_json):
+    """The runner's server cycles a request over the whole 70% segment of the same run."""
+    p = Path(where_json).parent / "run.jsonl"
+    if not p.exists():
+        return None
+    for line in p.open():
+        g = json.loads(line).get("served", {}).get("groups", {}).get("s70")
+        if g:
+            return g["server"]["cycles_per_req"]
+    return None
 
 ROWS = [
     ("fast path: allocate", lambda c: c in ("asmalloc: fast: alloc", "jemalloc: fast: alloc")),
@@ -53,6 +67,13 @@ def main():
         j = json.load(open(f))
         alloc = j["alloc"].replace("-dbg", "").replace("-prof", "")
         if "categories" in j:
+            # Shares from the recording's window, scaled to the run's cycles a request over its
+            # whole 70% segment: a window of a few seconds of Meilisearch holds more or less
+            # indexing than the minute does.
+            j["scale"] = 1.0
+            rc = runner_cycles(f)
+            if rc:
+                j["scale"] = rc / (j["cycles"] / j["requests"])
             where[(j["job"], alloc)].append(j)
         elif "per_request" in j:
             misses[(j["job"], alloc)].append(j)
@@ -68,9 +89,9 @@ def main():
             acc = collections.Counter()
             total = 0.0
             for r in runs:
-                total += r["cycles"] / r["requests"]
+                total += r["scale"] * r["cycles"] / r["requests"]
                 for c, w in r["categories"].items():
-                    acc[row_of(c)] += w / r["requests"]
+                    acc[row_of(c)] += r["scale"] * w / r["requests"]
             n = len(runs)
             tables[a] = ({k: v / n for k, v in acc.items()}, total / n, n)
         printed_total = False
