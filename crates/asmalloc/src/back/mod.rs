@@ -37,6 +37,8 @@
 mod class;
 
 pub use class::{Descending, Sink, SlotPointer};
+pub(crate) use hold::MAINTAIN_HOLD_ROUNDS;
+pub use purge::PassStep;
 mod group;
 mod hold;
 mod host;
@@ -103,6 +105,9 @@ pub struct State<O: Os> {
     headers: Lined<Headers>,
     /// Each region's frontier, for small classes (`host::Frontiers`).
     frontiers: Lined<Frontiers>,
+    /// The background thread's word (`crate::thread_word`): read by every slow path, written
+    /// a few times in a process's life.
+    thread: Lined<crate::thread_word::ThreadWord>,
     /// The hold on free large slots: its fine count and when the next hold ends (`hold`).
     hold: Lined<hold::Hold>,
 }
@@ -234,7 +239,7 @@ const _: () = {
     use core::mem::size_of;
     let groups = lines(size_of::<SpaceCell<crate::os::linux::LinuxOs>>())
         + lines(size_of::<RegionTable>())
-        + 5
+        + 6
         + lines(size_of::<[AtomicUsize; MAX_REGIONS]>())
         + lines(size_of::<[[u64; 2]; MAX_REGIONS]>())
         + lines(size_of::<[u64; MAX_REGIONS]>())
@@ -275,8 +280,15 @@ impl<O: Os> State<O> {
             run_sizes: Lined::new([const { AtomicUsize::new(0) }; MAX_REGIONS]),
             headers: Lined::new([const { RegionHeader::new() }; MAX_REGIONS]),
             frontiers: Lined::new([const { word::Atomic::zero() }; MAX_REGIONS]),
+            thread: Lined::new(crate::thread_word::ThreadWord::new()),
             hold: Lined::new(hold::Hold::new()),
         }
+    }
+
+    /// The background thread's word.
+    #[inline(always)]
+    pub fn thread(&self) -> &crate::thread_word::ThreadWord {
+        &self.thread
     }
 
     /// The OS.
@@ -362,6 +374,12 @@ impl<'a, O: Os> Back<'a, O> {
     #[inline(always)]
     pub fn space(&self) -> Space<'a, O> {
         self.space
+    }
+
+    /// The background thread's word.
+    #[inline(always)]
+    pub fn thread(&self) -> &'a crate::thread_word::ThreadWord {
+        self.state.thread()
     }
 
     /// The class-of-region table.

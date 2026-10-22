@@ -57,6 +57,7 @@ mod stock;
 pub(crate) mod test_rig;
 #[cfg(test)]
 mod tests;
+pub mod thread;
 #[cfg(kani)]
 mod verify;
 
@@ -66,8 +67,9 @@ pub use generation::Generation;
 pub use heartbeat::{IDLE_TICKS, LOOK_EVERY, Lone, LoneTurn, lone_count};
 pub use inspect::inspect;
 pub(crate) use magazine::{Area, Magazine, UNIT};
+pub use maintain::Stepped;
 pub use slow::REFRESH_EVERY;
-pub use source::Source;
+pub use source::{PurgeStep, Source};
 pub use spare::{MAX_SPARES, SPARE_BUDGET, spare_limit};
 pub(crate) use stack::Stack;
 
@@ -302,6 +304,9 @@ struct Common {
     status: AtomicU64,
     /// One more than the largest CPU number a slow path has run on.
     cpus: AtomicUsize,
+    /// Whether a generation has been drawn in this process or an ancestor, and whether this
+    /// process is a fork child (`generation.rs`). Ordinary memory, inherited by a fork.
+    lineage: AtomicU64,
 }
 
 // Each group of words on lines of its own (`crate::lined`): a pool is a line per class, a line
@@ -342,6 +347,7 @@ impl Depot {
             common: Lined::new(Common {
                 status: AtomicU64::new(0),
                 cpus: AtomicUsize::new(0),
+                lineage: AtomicU64::new(0),
             }),
             owing_domains: Lined::new(AtomicU64::new(0)),
             held_domains: Lined::new(AtomicU64::new(0)),
@@ -445,6 +451,9 @@ pub struct Cache<'a, O: Os, R: Routines, S: Source> {
     /// The objects its exchange pushed on shared stacks, which the heartbeat's launder over
     /// target may yet take back, set aside from the budget while the other rules run.
     reserved: Cell<usize>,
+    /// The background thread's word as this view's slow path last read or left it
+    /// (`thread.rs`).
+    thread_seen: Cell<crate::thread_word::Snapshot>,
 }
 
 /// The shared stacks a call pushed magazines with objects on: their classes, one bit per
@@ -493,6 +502,7 @@ impl<'a, O: Os, R: Routines, S: Source> Cache<'a, O, R, S> {
             overflowed: Cell::new(Overflow::default()),
             laundered: Cell::new(0),
             reserved: Cell::new(0),
+            thread_seen: Cell::new(crate::thread_word::Snapshot(0)),
         }
     }
 

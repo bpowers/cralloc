@@ -296,6 +296,31 @@ The silence's maintenance now costs the order service's burst start about 2 requ
 12 to 15. The idle server's CPU over the 10 s after its clients leave is 5 ms for the thread
 and 10 ms for the task.
 
+## The floor (af04801)
+
+The clocked pass now leaves retained memory alone while it totals no more than the floor of
+the allowance (`ALLOWANCE_FLOOR_HUGE_PAGES`, 32 MiB), and stops at the floor above it.
+burst-idle, anonymous MiB, two runs each, interleaved, at ec47910:
+
+| burst-idle (218 MiB freed) | 2 s | 3 s | 4 s | 6 s | 8 s | 12 s | 24 s |
+|---|---|---|---|---|---|---|---|
+| main 0483439 | 100 | 72 | 54 | 31 | 16.3 | 4.2 | 3.6 |
+| floor | 123 | 63 | 47 | 32.4 | 32.4 | 32.4 | 32.4 |
+| floor, background thread | 70 | 52 | 38 | 34.1 | 34.1 | 34.1 | 34.2 |
+
+It settles at the floor from 6 s on. On the axum order service (one round) the floor does not
+make maintenance during silences cheaper for the next burst: the burst start costs 3.6
+request-ms with nothing, 6.5 with the thread and 7.0 with the task (5.7 and 5.3 without the
+floor, within one round's spread), and the server holds 204 MiB where main holds 199. What the
+silence's maintenance costs the next burst is its drains, which empty the caches the burst then
+refills, not its purges.
+
+The floor is read against the whole retained count, which includes free slots on pages that
+also hold live objects. A heap with more than a floor of such fragmentation is over the floor
+for good, and every wholly free page goes back as before the floor: the old behaviour, not a
+regression. The remedy belongs with the allowance: measure against what a pass could return,
+remembering what a full lap could not.
+
 ## Options
 
 - **Keep counted intervals and runs as built.** Together they bring the order service's burst

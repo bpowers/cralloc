@@ -126,9 +126,40 @@ pub(super) fn current<O: Os>(depot: &Depot, area: Area<'_, O>) -> Option<Generat
     }
     let drawn = Generation::from_random(area.space().os().random());
     match word.compare_exchange(0, drawn.get(), AcqRel, Acquire) {
-        Ok(_) => Some(drawn),
+        Ok(_) => {
+            note_drawn(depot);
+            Some(drawn)
+        }
         Err(now) => Generation::from_word(now),
     }
+}
+
+/// A generation has been drawn in this process or an ancestor (`Common::lineage`).
+const DRAWN: u64 = 1;
+/// This process is a fork child: it drew a generation where one had been drawn before.
+const FORKED: u64 = 2;
+
+/// Records a draw that installed a generation. The lineage word is ordinary memory, which a
+/// fork child inherits, while the generation's page is wiped: a process that installs a
+/// generation where one was drawn before is a fork child, or a child of one. A child that
+/// shares its parent's memory (`vfork`, `CLONE_VM`) shares the generation, draws none, and is
+/// not taken for one. A limit: a fork between the install and this record leaves a child that
+/// does not know it is one; and where the page cannot be wiped, a child keeps its parent's
+/// generation and is not known either (drains are off there).
+fn note_drawn(depot: &Depot) {
+    let lineage = &depot.common.lineage;
+    let bit = if lineage.load(Acquire) & DRAWN != 0 {
+        FORKED
+    } else {
+        DRAWN
+    };
+    lineage.fetch_or(bit, AcqRel);
+}
+
+/// Whether this process is a fork child (see [`note_drawn`]): known once its first slow path
+/// has drawn its generation.
+pub(super) fn forked(depot: &Depot) -> bool {
+    depot.common.lineage.load(Acquire) & FORKED != 0
 }
 
 impl<O: Os, R: Routines, S: Source> Cache<'_, O, R, S> {

@@ -10,6 +10,14 @@
 //                               does light work, one object at a time, that never leaves the
 //                               allocator's caches, and prints the anonymous resident memory
 //                               after the frees and at the end, in MiB
+//        background spawn       creates and joins one thread, then prints how many threads
+//                               named `asmalloc` the process has, and the same for a forked
+//                               child that creates one of its own
+//        background quiet SECS  idle, in a process that created a thread first, so that the
+//                               allocator's default thread exists
+//        background silent SECS creates a thread, frees a burst, and then does nothing at all
+//                               for SECS seconds: what the allocator's thread does in a
+//                               silent process is all that happens
 //        background trickle SECS
 //                               idle, plus a few slow paths every half second (40 blocks of
 //                               8 KiB held together and freed), as a server answering a
@@ -32,10 +40,11 @@ static uint64_t next(uint64_t *s) {
     return *s;
 }
 
-// Threads other than the calling one, and how many of them block every signal the C library
-// lets a program block (the mask sigfillset gives, less SIGKILL and SIGSTOP, which the kernel
-// never blocks). A thread may block more: glibc blocks everything while a new thread starts.
-static void others(int *count, int *blocking) {
+// Threads other than the calling one, named `name` if it is not null, and how many of them
+// block every signal the C library lets a program block (the mask sigfillset gives, less
+// SIGKILL and SIGSTOP, which the kernel never blocks). A thread may block more: glibc blocks
+// everything while a new thread starts, and while a joined one finishes leaving.
+static void others_named(const char *name, int *count, int *blocking) {
     uint64_t want = 0;
     {
         sigset_t all;
@@ -52,11 +61,23 @@ static void others(int *count, int *blocking) {
     struct dirent *entry;
     while ((entry = readdir(dir))) {
         if (entry->d_name[0] == '.' || atoi(entry->d_name) == me) continue;
-        ++*count;
         char path[128], line[256];
         snprintf(path, sizeof path, "/proc/self/task/%s/status", entry->d_name);
         FILE *status = fopen(path, "r");
-        if (!status) continue;
+        if (!status) {
+            if (!name) ++*count;
+            continue;
+        }
+        if (name) {
+            // The first line is `Name:\t<name>`.
+            char want_line[64];
+            snprintf(want_line, sizeof want_line, "Name:\t%s\n", name);
+            if (!fgets(line, sizeof line, status) || strcmp(line, want_line) != 0) {
+                fclose(status);
+                continue;
+            }
+        }
+        ++*count;
         while (fgets(line, sizeof line, status))
             // The mask in hex, highest signal first.
             if (strncmp(line, "SigBlk:", 7) == 0 && (strtoull(line + 7, NULL, 16) & want) == want)
@@ -64,6 +85,34 @@ static void others(int *count, int *blocking) {
         fclose(status);
     }
     closedir(dir);
+}
+
+static void others(int *count, int *blocking) { others_named(NULL, count, blocking); }
+
+static void *nothing(void *arg) { return arg; }
+
+static void one_thread(void) {
+    pthread_t t;
+    if (pthread_create(&t, NULL, nothing, NULL) != 0 || pthread_join(t, NULL) != 0) abort();
+}
+
+static int spawn_mode(void) {
+    int count, blocking;
+    one_thread();
+    others_named("asmalloc", &count, &blocking);
+    printf("other threads %d, blocking every signal %d\n", count, blocking);
+    fflush(stdout);
+    pid_t child = fork();
+    if (child == 0) {
+        one_thread();
+        others_named("asmalloc", &count, &blocking);
+        printf("child: other threads %d\n", count);
+        exit(0);
+    }
+    int status = 0;
+    if (waitpid(child, &status, 0) != child || !WIFEXITED(status) || WEXITSTATUS(status) != 0)
+        return 1;
+    return 0;
 }
 
 static int threads_mode(void) {
@@ -163,6 +212,23 @@ static void sleep_ms(long ms) {
 
 int main(int argc, char **argv) {
     if (argc > 1 && strcmp(argv[1], "threads") == 0) return threads_mode();
+    if (argc > 1 && strcmp(argv[1], "spawn") == 0) return spawn_mode();
+    if (argc > 2 && strcmp(argv[1], "silent") == 0) {
+        one_thread();
+        burst(1600000);
+        sleep_ms(atol(argv[2]) * 1000);
+        printf("end %ld\n", anon_kib() / 1024);
+        return 0;
+    }
+    // The burst is freed before the program's first thread exists: the thread is created
+    // dormant with the heap already over the floor, and must look at the level itself.
+    if (argc > 2 && strcmp(argv[1], "late") == 0) {
+        burst(1600000);
+        one_thread();
+        sleep_ms(atol(argv[2]) * 1000);
+        printf("end %ld\n", anon_kib() / 1024);
+        return 0;
+    }
     if (argc > 2 && strcmp(argv[1], "exit") == 0) {
         atexit(at_exit);
         burst(200000);
@@ -173,7 +239,9 @@ int main(int argc, char **argv) {
         exit(0);
     }
     int trickling = argc > 2 && strcmp(argv[1], "trickle") == 0;
-    if (argc > 2 && (trickling || strcmp(argv[1], "idle") == 0)) {
+    int threaded = argc > 2 && strcmp(argv[1], "quiet") == 0;
+    if (threaded) one_thread();
+    if (argc > 2 && (trickling || threaded || strcmp(argv[1], "idle") == 0)) {
         long secs = atol(argv[2]);
         long rounds = 0;
         size_t n = 1600000;
@@ -192,6 +260,7 @@ int main(int argc, char **argv) {
         printf("freed %ld end %ld\n", freed / 1024, anon_kib() / 1024);
         return 0;
     }
-    fprintf(stderr, "usage: background threads | exit MS | idle SECS | trickle SECS\n");
+    fprintf(stderr, "usage: background threads | spawn | exit MS | idle SECS | quiet SECS | silent SECS | "
+                    "trickle SECS\n");
     return 2;
 }

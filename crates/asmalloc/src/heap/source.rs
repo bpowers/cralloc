@@ -4,9 +4,9 @@
 //! place (`back::Descending`, `back::SlotPointer`).
 
 use crate::back::policy::FILL_CLAIMS;
-use crate::back::{Back, Descending};
+use crate::back::{Back, Descending, PassStep};
 use crate::classes::SmallClass;
-use crate::depot::Source;
+use crate::depot::{PurgeStep, Source};
 use crate::os::Os;
 use core::ptr::NonNull;
 use core::sync::atomic::AtomicPtr;
@@ -38,9 +38,22 @@ impl<O: Os> Source for Back<'_, O> {
         self.heartbeat_with(now);
     }
 
-    fn purge_pass_step(&self, now: &dyn Fn() -> u64) -> bool {
+    fn purge_pass_step(&self, now: &dyn Fn() -> u64) -> PurgeStep {
         // The hold first: what it returns down to its floor is then not in the count the
         // clocked pass takes its goal from.
-        self.hold_maintain_step(now) || self.decay_pass_step(now)
+        let hold = self.hold_maintain_step(now);
+        let pass = if hold.more {
+            PassStep::default()
+        } else {
+            self.decay_pass_step(now)
+        };
+        PurgeStep {
+            more: hold.more || pass.more,
+            returned: hold.returned != 0 || pass.returned != 0,
+        }
+    }
+
+    fn thread(&self) -> &crate::thread_word::ThreadWord {
+        Back::thread(self)
     }
 }

@@ -1146,8 +1146,162 @@ fn centring_keeps_one_owner(
     report("centring keeps one owner", found);
 }
 
+/// A heap whose background thread, on CPU 1, has run quiet rounds enough to park, with every
+/// slab drained, and a mutator about to resume on CPU 0: the park protocol's world
+/// (`thread.rs`).
+struct Parking {
+    world: World,
+    key: u64,
+    seen: Mutex<super::thread::Seen>,
+    rest: Mutex<Option<super::thread::Rest>>,
+}
+
+fn parking_world(migrations: usize) -> Parking {
+    use crate::thread_word::AWAKE;
+    let world = World::new(6, migrations);
+    world.populate();
+    let machine = world.machine(1, 1);
+    let cache = world.rig.cache(&machine);
+    let key = cache.thread_key();
+    assert!(
+        world
+            .rig
+            .source
+            .thread
+            .claim_start(world.rig.os(), key, AWAKE)
+    );
+    let mut seen = super::thread::Seen::default();
+    let mut ready = false;
+    for _ in 0..4 * super::thread::QUIET_ROUNDS {
+        world.rig.os().advance_clock(IDLE_TICKS);
+        cache.maintain();
+        if cache.first_look(&mut seen, false).is_some() {
+            ready = true;
+            break;
+        }
+    }
+    assert!(ready, "the thread never came to its look before parking");
+    Parking {
+        world,
+        key,
+        seen: Mutex::new(seen),
+        rest: Mutex::new(None),
+    }
+}
+
+/// Whether every slab holds no magazine: what a parked thread relies on.
+fn slabs_empty(world: &World) -> bool {
+    use crate::classes::is_marker;
+    world.rig.slabs().cpus().all(|cpu| {
+        let slab = world.rig.slabs().slab(cpu);
+        crate::front::Slab::drained_fields().all(|field| {
+            let word = crate::front::sync::quiet(slab.field(field)).load(Ordering::SeqCst);
+            word.is_null() || is_marker(word.addr())
+        })
+    })
+}
+
+/// The thread's decision (its look, the store of `PARKED`, the fence and the second look)
+/// races a mutator that resumes on CPU 0 with `ops`, whose slow paths count their activity,
+/// install magazines and load the word, in every order the bounds allow, the mutator's wake
+/// racing the thread's park and back-out. No wake-up is lost: a word left parked means every
+/// slab is empty, so the next call takes a slow path and finds it; a thread that decided to
+/// park on a word a slow path then moved was woken. The check names every state of the word,
+/// so that a state added to it must be added here.
+fn parking_loses_no_wake_up_under_every_schedule(bounds: Bounds, ops: &[Op], migrations: usize) {
+    use super::thread::Rest;
+    use crate::thread_word::{AWAKE, DORMANT, NONE, OFF, PARKED, WANTED};
+    let parked = AtomicUsize::new(0);
+    let woken = AtomicUsize::new(0);
+    let found = explore(
+        bounds,
+        2,
+        || parking_world(migrations),
+        |parking, me| {
+            let world = &parking.world;
+            if me == 0 {
+                world.run(&world.machine(0, 0), ops);
+            } else {
+                let machine = world.machine(1, 1);
+                let cache = world.rig.cache(&machine);
+                let mut seen = parking.seen.lock().unwrap();
+                let rest = cache.rest(&mut seen, parking.key, Some(false));
+                *parking.rest.lock().unwrap() = Some(rest);
+            }
+        },
+        |_| {},
+        |parking, _| {
+            let world = &parking.world;
+            world.check(false);
+            let rest = parking.rest.lock().unwrap().unwrap();
+            let word = world.rig.source.thread.load();
+            let wakes = world.rig.os().wakes();
+            if rest == Rest::Park {
+                parked.fetch_add(1, Ordering::SeqCst);
+            }
+            match word.state_for(parking.key) {
+                PARKED => {
+                    assert_eq!(
+                        rest,
+                        Rest::Park,
+                        "a word parked behind a thread that sleeps"
+                    );
+                    assert!(slabs_empty(world), "parked with a magazine in a slab");
+                }
+                AWAKE => {
+                    if rest == Rest::Park {
+                        assert!(wakes > 0, "the thread waits on a word nobody woke");
+                    }
+                    if wakes > 0 {
+                        woken.fetch_add(1, Ordering::SeqCst);
+                    }
+                }
+                state @ (NONE | WANTED | DORMANT | OFF) => {
+                    panic!("the race left the word in state {state}")
+                }
+                state => panic!("a state this scenario does not know: {state}"),
+            }
+        },
+    );
+    report("parking", found);
+    assert!(
+        parked.load(Ordering::SeqCst) > 0,
+        "no schedule decided to park"
+    );
+    assert!(
+        woken.load(Ordering::SeqCst) > 0,
+        "no schedule woke the thread"
+    );
+}
+
 mod run {
     use super::*;
+
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn parking_loses_no_wake_up_under_every_schedule_quickly() {
+        super::parking_loses_no_wake_up_under_every_schedule(
+            Bounds::preemptions(1),
+            &[Op::Alloc],
+            0,
+        );
+    }
+
+    #[test]
+    #[cfg(not(debug_assertions))]
+    #[ignore = "slow: run with scripts/gate --all, optimized"]
+    fn parking_loses_no_wake_up_under_every_schedule_fully() {
+        super::parking_loses_no_wake_up_under_every_schedule(
+            Bounds::preemptions(2),
+            &[Op::Alloc],
+            1,
+        );
+        super::parking_loses_no_wake_up_under_every_schedule(
+            Bounds::preemptions(2),
+            &[Op::Alloc, Op::Free],
+            0,
+        );
+    }
 
     #[test]
     #[cfg_attr(miri, ignore)]

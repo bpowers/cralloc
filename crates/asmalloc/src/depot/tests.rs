@@ -1091,3 +1091,7 @@ fn moving_the_top_of_a_magazine_keeps_its_order_and_both_levels() {
         }
     }
 }
+
+/// The background thread's word (`thread`).
+#[path = "thread_tests.rs"]
+mod thread_tests;

@@ -1100,6 +1100,14 @@ mod tests {
         };
         assert_eq!(format.unpack(format.pack(frontier)), frontier);
         assert_eq!(format.floor(0, 0), 0);
+        // A claim's frontier holds for `FRONTIER_INTERVALS` intervals, its own included, which
+        // the background thread's quiet rounds are sized from.
+        use super::super::policy::FRONTIER_INTERVALS;
+        let word = format.record(0, 40, 9).unwrap();
+        for epoch in 40..40 + FRONTIER_INTERVALS {
+            assert_eq!(format.floor(word, epoch), 9, "{epoch}");
+        }
+        assert_eq!(format.floor(word, 40 + FRONTIER_INTERVALS), 0);
         for huge in [false, true] {
             let recorded = Recorded {
                 size: 1 << 32,

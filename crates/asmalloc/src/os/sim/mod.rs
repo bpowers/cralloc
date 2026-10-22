@@ -131,7 +131,23 @@ pub struct SimOs<S: Shape = Standard> {
     clock: AtomicU64,
     cpus: Cpus<SIM_THREADS>,
     topology: AtomicU64,
+    /// What the background thread's calls did: waits, wakes, and fences of every CPU.
+    sleeps: Sleeps,
     shape: PhantomData<fn() -> S>,
+}
+
+/// The simulated [`Os::wait`], [`Os::wake`] and [`Os::fence_all`]: counted, and a wait
+/// returns at once, so that a test drives the thread's loop one step at a time.
+struct Sleeps {
+    waits: AtomicU64,
+    timed: AtomicU64,
+    wakes: AtomicU64,
+    fences: AtomicU64,
+    /// The C library's record that the program has created a thread, as [`SimOs::set_threads`]
+    /// sets it; a fork leaves it as it is, as glibc's.
+    threads: core::sync::atomic::AtomicBool,
+    /// Whether the calling thread is not the process's first ([`SimOs::set_other_thread`]).
+    other_thread: core::sync::atomic::AtomicBool,
 }
 
 /// The CPU topology a [`SimOs`] reports through [`Os::topology`]. Its CPUs are the simulated
@@ -242,8 +258,46 @@ impl<S: Shape> SimOs<S> {
             clock: AtomicU64::new(0),
             cpus: Cpus::new(),
             topology: AtomicU64::new(0),
+            sleeps: Sleeps {
+                waits: AtomicU64::new(0),
+                timed: AtomicU64::new(0),
+                wakes: AtomicU64::new(0),
+                fences: AtomicU64::new(0),
+                threads: core::sync::atomic::AtomicBool::new(false),
+                other_thread: core::sync::atomic::AtomicBool::new(false),
+            },
             shape: PhantomData,
         }
+    }
+
+    /// How many [`Os::wait`] calls there have been without a timeout, and with one.
+    pub fn waits(&self) -> (u64, u64) {
+        (
+            self.sleeps.waits.load(Ordering::Acquire),
+            self.sleeps.timed.load(Ordering::Acquire),
+        )
+    }
+
+    /// How many [`Os::wake`] calls there have been.
+    pub fn wakes(&self) -> u64 {
+        self.sleeps.wakes.load(Ordering::Acquire)
+    }
+
+    /// How many [`Os::fence_all`] calls have succeeded.
+    pub fn fences_of_all(&self) -> u64 {
+        self.sleeps.fences.load(Ordering::Acquire)
+    }
+
+    /// Sets the C library's record that the program has created a thread of its own, which
+    /// [`Os::more_than_one_thread`] answers outside a fork child.
+    pub fn set_threads(&self, created: bool) {
+        self.sleeps.threads.store(created, Ordering::Release);
+    }
+
+    /// Sets whether the calling thread is not the process's first, which
+    /// [`Os::more_than_one_thread`] answers in a fork child.
+    pub fn set_other_thread(&self, other: bool) {
+        self.sleeps.other_thread.store(other, Ordering::Release);
     }
 
     /// Moves the clock that [`Os::ticks`] reads forward by `ticks`. It starts at zero and moves
@@ -327,6 +381,8 @@ impl<S: Shape> SimOs<S> {
             // that nothing touches it meanwhile.
             unsafe { self.memory.zero(index << self.page_shift(), page) };
         }
+        // The thread that forked is the child's only one, and so its first.
+        self.sleeps.other_thread.store(false, Ordering::Release);
     }
 
     fn page_shift(&self) -> u32 {
@@ -679,6 +735,35 @@ unsafe impl<S: Shape> Os for SimOs<S> {
         self.faults.enter(Call::RegisterFence)?;
         self.fence_registered.store(true, Ordering::Release);
         Ok(())
+    }
+
+    fn fence_all(&self) -> Result<(), OsError> {
+        if self.fence_registered() {
+            self.sleeps.fences.fetch_add(1, Ordering::AcqRel);
+            Ok(())
+        } else {
+            Err(OsError::EPERM)
+        }
+    }
+
+    fn wait(&self, _: &core::sync::atomic::AtomicU64, _: u64, timeout_ns: Option<u64>) {
+        let count = match timeout_ns {
+            Some(_) => &self.sleeps.timed,
+            None => &self.sleeps.waits,
+        };
+        count.fetch_add(1, Ordering::AcqRel);
+    }
+
+    fn wake(&self, _: &core::sync::atomic::AtomicU64) {
+        self.sleeps.wakes.fetch_add(1, Ordering::AcqRel);
+    }
+
+    fn more_than_one_thread(&self, forked: bool) -> bool {
+        if forked {
+            self.sleeps.other_thread.load(Ordering::Acquire)
+        } else {
+            self.sleeps.threads.load(Ordering::Acquire)
+        }
     }
 
     fn fence(&self, cpu: u32) -> Result<(), OsError> {

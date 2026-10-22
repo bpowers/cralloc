@@ -492,7 +492,7 @@ fn maintain_round<O: Os>(back: &Back<'_, O>, os: &SimOs<Native>) -> usize {
     let mut largest = 0;
     loop {
         let before = back.retained_large();
-        let more = back.hold_maintain_step(&|| back.now());
+        let more = back.hold_maintain_step(&|| back.now()).more;
         largest = largest.max(before.saturating_sub(back.retained_large()));
         if !more {
             return largest;
@@ -536,7 +536,7 @@ fn maintain_holds_a_busy_programs_slots_for_the_hold() {
     let maintain = || {
         os.advance_clock(FINE_TICKS);
         let count = back.hold_count();
-        while back.hold_maintain_step(&|| back.now()) {}
+        while back.hold_maintain_step(&|| back.now()).more {}
         assert_ne!(
             back.hold_count(),
             count,
@@ -569,7 +569,7 @@ fn a_long_maintain_round_holds_a_busy_programs_slots() {
     let class = large(256 << 10);
     let step = || {
         os.advance_clock(FINE_TICKS);
-        while back.hold_maintain_step(&|| back.now()) {}
+        while back.hold_maintain_step(&|| back.now()).more {}
     };
     step();
     beat_for(&back, os, (DECAY_TICKS / FINE_TICKS) as u32, FINE_TICKS);
@@ -653,7 +653,7 @@ fn a_maintain_round_across_an_interval_holds_a_busy_programs_slots() {
     let class = large(256 << 10);
     let step = || {
         os.advance_clock(FINE_TICKS);
-        while back.hold_maintain_step(&|| back.now()) {}
+        while back.hold_maintain_step(&|| back.now()).more {}
     };
     step();
     let per = (DECAY_TICKS / FINE_TICKS) as u32;

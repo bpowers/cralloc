@@ -26,6 +26,10 @@ pub const RETAINED_CAP_HUGE_PAGES: usize = 32;
 /// over the cap are not floored.
 pub const ALLOWANCE_FLOOR_HUGE_PAGES: usize = 16;
 
+// A pass's goal is what is retained above the floor, raised to what is over the cap, which
+// stops at the floor only while the floor is under the cap.
+const _: () = assert!(ALLOWANCE_FLOOR_HUGE_PAGES < RETAINED_CAP_HUGE_PAGES);
+
 /// Growth is charged against the cap in steps of this many huge pages: 1, or 2 MiB. Each step
 /// of carving, while retained memory is over the cap, pays for at most one bounded purge
 /// walk, so a heap whose free memory is all fragmentation pays one walk per step of growth.
@@ -79,6 +83,11 @@ pub const PURGE_MIN_RUN_PAGES: u32 = 4;
 /// One clocked pass in this many takes runs of any length: 8, so a single free page goes back
 /// within about eight intervals of the program going quiet, and a long run within one.
 pub const PURGE_ANY_RUN_EVERY: u64 = 8;
+
+/// The counted intervals a claim's frontier keeps the clocked pass off the pages below it: 2,
+/// the interval of the claim and the next (`layout::FrontierFormat::floor`, whose test holds
+/// it to this).
+pub const FRONTIER_INTERVALS: u64 = 2;
 
 /// How much bitmap a heartbeat's step of a decay pass may read, in words: 256 words, 2 KiB.
 /// Each word covers 64 slots, so this is one 4 KiB page of 8-byte slots read eight times over,

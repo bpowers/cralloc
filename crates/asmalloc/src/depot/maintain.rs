@@ -63,6 +63,23 @@ const SHED: u32 = DEPTHS + 1;
 const SHED_STEPS: u32 = 4096;
 const PURGE: u32 = REPEATED;
 
+/// What one step of `maintain` did.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct Stepped {
+    /// The round has more steps.
+    pub more: bool,
+    /// The step drained a slab, laundered a debt, or returned memory to the OS: what the
+    /// background thread counts as work (`thread`).
+    pub work: bool,
+}
+
+impl Stepped {
+    const MORE: Stepped = Stepped {
+        more: true,
+        work: false,
+    };
+}
+
 impl<O: Os, R: Routines, S: Source> Cache<'_, O, R, S> {
     /// One round of the clocked maintenance for the whole heap (see the module documentation),
     /// unless a round has already run in this interval: then it returns at once, so a timer
@@ -77,23 +94,35 @@ impl<O: Os, R: Routines, S: Source> Cache<'_, O, R, S> {
     /// pass. Callers may take steps concurrently: each idle look and each shed is handed to one
     /// of them, and the purge's steps are the purge's own.
     pub fn maintain_step(&self) -> bool {
+        self.maintain_step_with_work().is_some_and(|step| step.more)
+    }
+
+    /// [`Cache::maintain_step`], saying also whether the step did work. `None` if it took no
+    /// step, because this interval's round is done: a call that the rate limit turned away,
+    /// which says nothing about whether there is work (`thread`).
+    pub fn maintain_step_with_work(&self) -> Option<Stepped> {
         let counted = self.source.clock();
-        let Some(Step { round, index }) = counted.take_step(self.os()) else {
-            return false;
-        };
+        let Step { round, index } = counted.take_step(self.os())?;
+        Some(self.maintain_step_of(round, index))
+    }
+
+    /// Step `index` of round `round`.
+    fn maintain_step_of(&self, round: u32, index: u32) -> Stepped {
+        let counted = self.source.clock();
         let clock = Clock::new(self.os(), counted);
         if index < DEPTHS {
             let cpus = self.depot.common.cpus.load(Acquire).min(DEPTHS as usize) as u32;
+            let mut work = false;
             if generation::drains_enabled(self.depot)
                 && index < cpus
                 && let Some(cpu) = self.routines.slabs().cpu(index as i32)
             {
-                self.idle_look(cpu, clock.now(), Disposal::Launder);
+                work = self.idle_look(cpu, clock.now(), Disposal::Launder);
             }
             if index + 1 >= cpus || !generation::drains_enabled(self.depot) {
                 counted.jump(round, index + 1, DEPTHS);
             }
-            return true;
+            return Stepped { more: true, work };
         }
         if index == DEPTHS {
             if self.tuning.shed_unused {
@@ -109,18 +138,25 @@ impl<O: Os, R: Routines, S: Source> Cache<'_, O, R, S> {
                     }
                 }
             }
-            return true;
+            return Stepped::MORE;
         }
         if index < PURGE {
-            if index >= SHED + SHED_STEPS || !self.tuning.shed_unused || !self.shed_one() {
+            let shed = index < SHED + SHED_STEPS && self.tuning.shed_unused && self.shed_one();
+            if !shed {
                 counted.jump(round, index + 1, PURGE);
             }
-            return true;
+            return Stepped {
+                more: true,
+                work: shed,
+            };
         }
-        if self.source.purge_pass_step(&|| clock.now()) {
-            return true;
+        let purged = self.source.purge_pass_step(&|| clock.now());
+        if !purged.more {
+            counted.jump(round, PURGE, DONE);
         }
-        counted.jump(round, PURGE, DONE);
-        false
+        Stepped {
+            more: purged.more,
+            work: purged.returned,
+        }
     }
 }

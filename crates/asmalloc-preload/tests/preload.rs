@@ -374,8 +374,35 @@ fn a_process_exits_while_threads_allocate() {
     assert!(out.contains("exit while allocating"), "{out}");
 }
 
-/// `ASMALLOC_BACKGROUND` starts the allocator's thread, with every signal blocked in it, for
-/// any value but empty and `0`; a forked child has no such thread.
+/// By default the library creates the allocator's thread, with every signal blocked in it, when
+/// the program creates its first thread, and a forked child creates its own the same way;
+/// `ASMALLOC_BACKGROUND=0` turns that off.
+#[test]
+fn the_default_thread_comes_with_the_programs_first_thread() {
+    let exe = program("background.c");
+    for (value, threads) in [(None, 1), (Some("0"), 0)] {
+        let mut command = Command::new(&exe);
+        command.arg("spawn");
+        match value {
+            Some(value) => command.env("ASMALLOC_BACKGROUND", value),
+            None => command.env_remove("ASMALLOC_BACKGROUND"),
+        };
+        let out = run(true, &mut command);
+        assert!(out.status.success(), "{:?}", out.status);
+        assert_eq!(
+            String::from_utf8_lossy(&out.stdout),
+            format!(
+                "other threads {threads}, blocking every signal {threads}\nchild: other threads \
+                 {threads}\n"
+            ),
+            "ASMALLOC_BACKGROUND={value:?}"
+        );
+    }
+}
+
+/// `ASMALLOC_BACKGROUND` starts the allocator's thread before `main`, with every signal blocked
+/// in it, for any value but empty and `0`; a program that creates no thread gets none by
+/// default; and a forked child has no such thread.
 #[test]
 fn the_background_thread_starts_when_asked_and_not_in_a_child() {
     let exe = program("background.c");
@@ -437,7 +464,7 @@ fn a_process_exits_while_the_background_thread_runs_fully() {
 #[test]
 #[ignore = "slow: run with scripts/gate --all"]
 fn the_background_thread_returns_a_quiet_programs_memory() {
-    a_quiet_program_gets_its_memory_back("idle");
+    a_quiet_program_gets_its_memory_back("idle", false);
 }
 
 /// The same with a trickle of slow paths, a few every half second, as a health check makes:
@@ -446,19 +473,29 @@ fn the_background_thread_returns_a_quiet_programs_memory() {
 #[test]
 #[ignore = "slow: run with scripts/gate --all"]
 fn the_background_thread_returns_a_trickling_programs_memory() {
-    a_quiet_program_gets_its_memory_back("trickle");
+    a_quiet_program_gets_its_memory_back("trickle", false);
 }
 
-fn a_quiet_program_gets_its_memory_back(mode: &str) {
+/// The default thread, in a program that created a thread and then went quiet, returns what
+/// the heap holds over the floor: the dormant thread wakes at a heartbeat over the floor.
+#[test]
+#[ignore = "slow: run with scripts/gate --all"]
+fn the_default_thread_returns_a_quiet_programs_memory() {
+    a_quiet_program_gets_its_memory_back("quiet", true);
+}
+
+/// Runs `mode` for 12 s without the thread and with it: asked for by the environment, or, if
+/// `by_default`, the default thread with the variable unset.
+fn a_quiet_program_gets_its_memory_back(mode: &str, by_default: bool) {
     let exe = program("background.c");
     let measure = |on: bool| {
         let mut command = Command::new(&exe);
         command.args([mode, "12"]);
-        if on {
-            command.env("ASMALLOC_BACKGROUND", "1");
-        } else {
-            command.env_remove("ASMALLOC_BACKGROUND");
-        }
+        match (on, by_default) {
+            (false, _) => command.env("ASMALLOC_BACKGROUND", "0"),
+            (true, false) => command.env("ASMALLOC_BACKGROUND", "1"),
+            (true, true) => command.env_remove("ASMALLOC_BACKGROUND"),
+        };
         let out = run(true, &mut command);
         assert!(out.status.success(), "{:?}", out.status);
         let text = String::from_utf8_lossy(&out.stdout).into_owned();
@@ -545,4 +582,29 @@ fn a_process_without_rseq_is_served_fully() {
         c
     });
     assert!(out.contains("bad 0"), "{out}");
+}
+
+/// A program that frees its burst before it creates its first thread: the thread is created
+/// dormant with the heap already over the floor, looks at the level before it first waits, and
+/// returns the burst as it does when the thread was created first (`silent`). Review finding 3.
+#[test]
+#[ignore = "slow: run with scripts/gate --all"]
+fn a_burst_freed_before_the_first_thread_goes_back() {
+    let exe = program("background.c");
+    let end = |mode: &str| {
+        let mut command = Command::new(&exe);
+        command.args([mode, "12"]).env_remove("ASMALLOC_BACKGROUND");
+        let out = run(true, &mut command);
+        assert!(out.status.success(), "{:?}", out.status);
+        let text = String::from_utf8_lossy(&out.stdout).into_owned();
+        text.split_whitespace()
+            .filter_map(|word| word.parse::<u64>().ok())
+            .next()
+            .unwrap()
+    };
+    let (silent, late) = (end("silent"), end("late"));
+    assert!(
+        late < silent + 16,
+        "thread first {silent} MiB after 12 s; burst first {late} MiB"
+    );
 }

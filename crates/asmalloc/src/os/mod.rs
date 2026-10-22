@@ -27,6 +27,7 @@ use crate::space::Geometry;
 use core::fmt;
 use core::num::NonZeroI32;
 use core::ptr::NonNull;
+use core::sync::atomic::AtomicU64;
 
 /// A failed OS call, with the `errno` it reported.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -173,6 +174,31 @@ pub unsafe trait Os: Sync {
     /// offline or does not exist has no sequence in flight, so fencing it succeeds at once.
     /// Fails unless [`Os::register_fence`] succeeded, and may fail for want of memory.
     fn fence(&self, cpu: u32) -> Result<(), OsError>;
+
+    /// A full memory barrier on every CPU that runs one of the process's threads, before the
+    /// call returns (`MEMBARRIER_CMD_PRIVATE_EXPEDITED_RSEQ` without a CPU): whatever another
+    /// thread stored before its own barrier the caller sees, and whatever that thread loads
+    /// after it sees what the caller stored before the call. Fails unless
+    /// [`Os::register_fence`] succeeded, and may fail for want of memory.
+    fn fence_all(&self) -> Result<(), OsError>;
+
+    /// Waits while the low 32 bits of `word` hold the low 32 bits of `expected`, for at most
+    /// `timeout_ns` nanoseconds if given (`FUTEX_WAIT_PRIVATE` on the word's first four bytes,
+    /// its low half on x86-64). Returns at once if they differ, and otherwise on a
+    /// [`Os::wake`], at the timeout, on a signal, or for no reason: the caller looks at the word
+    /// again. Never fails visibly. Every change the caller waits for must change the low half.
+    fn wait(&self, word: &AtomicU64, expected: u64, timeout_ns: Option<u64>);
+
+    /// Wakes a thread waiting on `word` in [`Os::wait`], if there is one (`FUTEX_WAKE_PRIVATE`).
+    fn wake(&self, word: &AtomicU64);
+
+    /// The evidence that the program has created a thread of its own, which the background
+    /// thread's default start waits for. In a process that is not a fork child, the C
+    /// library's own record (glibc's `__libc_single_threaded`). In a fork child, whose copy of
+    /// that record still says what the parent did, and where the library keeps none (musl),
+    /// the weaker test: the calling thread is not the process's first. Without the background
+    /// thread's feature, `false`: nothing then wants a thread.
+    fn more_than_one_thread(&self, forked: bool) -> bool;
 
     /// A random number. It names a process generation, so it should differ from the parent's
     /// with overwhelming probability; it need not be fit for cryptography. Never fails: if the

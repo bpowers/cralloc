@@ -400,12 +400,14 @@ fn count<R: Routines>(
 impl<O: Os, R: Routines, S: Source> Cache<'_, O, R, S> {
     /// The heartbeat of a large allocation or free, both halves (see [`lone_count`]).
     pub fn lone_heartbeat(&self) {
-        if let Lone::Beat(turn) = lone_count(self.depot, &self.routines) {
-            self.lone_beat(turn);
+        match lone_count(self.depot, &self.routines) {
+            Lone::Beat(turn) => self.lone_beat(turn),
+            Lone::Counted => self.after_slow_path(),
         }
     }
 
-    /// The chores of a large allocation or free's heartbeat that [`lone_count`] found due.
+    /// The chores of a large allocation or free's heartbeat that [`lone_count`] found due,
+    /// then the look at the background thread's word that ends every slow path.
     pub fn lone_beat(&self, turn: LoneTurn) {
         self.begin_slow_path();
         let chores = Chores {
@@ -413,12 +415,20 @@ impl<O: Os, R: Routines, S: Source> Cache<'_, O, R, S> {
             ..Chores::default()
         };
         self.beat(None, chores, turn.turn);
+        self.after_slow_path();
     }
 
     /// What follows a slow path that served `served`, if it served a small class: its own
     /// duties, and the heartbeat's chores when its CPU's activity has passed a multiple of
     /// [`BEAT_BYTES`]. A thread with no valid CPU has no counter, and beats every time.
     pub(super) fn heartbeat(&self, served: Option<SmallClass>, chores: Chores) {
+        self.paced(served, chores);
+        // After the call's exchange and its count: see `thread`, "Parking without losing a
+        // wake-up".
+        self.after_slow_path();
+    }
+
+    fn paced(&self, served: Option<SmallClass>, chores: Chores) {
         let Some(cpu) = chores.cpu else {
             return self.beat(served, chores, None);
         };
@@ -639,11 +649,12 @@ impl<O: Os, R: Routines, S: Source> Cache<'_, O, R, S> {
     /// The idle check's look at `cpu`'s slab with the clock at `now`: records a counter that
     /// moved, and drains a slab whose counter has stood still for an interval, disposing of
     /// what the drain takes as `disposal` says. A slab no slow path has used is left alone.
-    pub(super) fn idle_look(&self, cpu: Cpu, now: u64, disposal: Disposal) {
+    /// Whether it drained the slab.
+    pub(super) fn idle_look(&self, cpu: Cpu, now: u64, disposal: Disposal) -> bool {
         let slab = self.slab(cpu);
         let activity = slab.activity();
         if activity == 0 {
-            return;
+            return false;
         }
         let seen = slab.seen().load(Relaxed);
         // A compare-and-swap, not a store, so that a look that read the sighting before
@@ -661,7 +672,7 @@ impl<O: Os, R: Routines, S: Source> Cache<'_, O, R, S> {
                     .compare_exchange(seen, marked.0, Relaxed, Relaxed)
                     .is_err()
                 {
-                    return;
+                    return false;
                 }
                 // A drain that did not happen leaves the slab to be tried again at once. A busy
                 // one leaves it to be tried an interval from now (see the module
@@ -675,9 +686,12 @@ impl<O: Os, R: Routines, S: Source> Cache<'_, O, R, S> {
                     let _ = slab
                         .seen()
                         .compare_exchange(marked.0, undo, Relaxed, Relaxed);
+                    return false;
                 }
+                return true;
             }
         }
+        false
     }
 }
 

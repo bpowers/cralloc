@@ -229,10 +229,59 @@ outside `buf`.
 that a program that enters a seccomp sandbox afterwards never makes these calls. What it reads
 decides only which cache domain's depot stacks a CPU uses; no safety argument rests on it.
 
+## KERNEL-11: `futex` in `wait` and `wake`
+
+**Blocks.** `syscall(FUTEX, [word, FUTEX_WAIT_PRIVATE, expected, timeout, 0, 0])` and
+`syscall(FUTEX, [word, FUTEX_WAKE_PRIVATE, 1, 0, 0, 0])`.
+
+**Preconditions.** `word` is the address of a live, 4-byte aligned word that the process only
+accesses atomically; `timeout` is null or the address of a live `struct timespec`.
+
+**Proof.** `word` comes from `&AtomicU64`, so it is live for the call and aligned to 8, and
+Rust gives it no non-atomic access while the reference exists. The kernel takes its first four
+bytes as the futex word: on x86-64, which is little-endian, the 64-bit word's low half. Other
+threads change the whole 64-bit word with atomic instructions; a 32-bit atomic read of half of
+it is atomic too on x86-64 (an aligned access within one 8-byte word), and sees either the old
+or the new low half. `expected` is passed truncated to its low 32 bits, the half the kernel
+compares. futex(2) with `FUTEX_WAIT_PRIVATE` reads the word once, atomically, compares it with
+`expected`, and sleeps or returns; it writes no user memory. A change of the high half only (the
+generation's key) does not stop a wait that is about to begin; the callers wait only for changes
+of the state or the level bit, which are in the low half (`thread_word`, asserted there). Its fourth argument is a relative timeout, read once:
+`Timespec` is `#[repr(C)]` `{ i64, i64 }`, x86-64's `struct timespec`, with nanoseconds under
+10^9 by construction, and it lives on the caller's stack for the call. `FUTEX_WAKE_PRIVATE`
+uses the address only as a key and touches no memory; the arguments after the count are
+ignored. Errors (the word differed, a timeout, a signal, an invalid argument) are returned in
+`rax` and dropped: the callers look at the word again after every return. Neither call
+changes a mapping, a protection or a disposition.
+
+## KERNEL-12: glibc's `__libc_single_threaded`
+
+**Blocks.** The `extern` block that declares `static __libc_single_threaded: AtomicU8` (only
+with the `background` feature, on `target_env = "gnu"`), and the relaxed load of it in
+`threads::more_than_one`.
+
+**Preconditions.** The symbol exists in the C library the program links, with a layout an
+`AtomicU8` may stand for, and every access to it is atomic or happens before the load.
+
+**Proof.** glibc 2.32 and later export `__libc_single_threaded` as a `char`
+(`<sys/single_threaded.h>`), which the platform's glibc (2.43) does. `AtomicU8` has the size,
+alignment and bit validity of `u8`, the same as a `char`, so the declaration names that byte and
+any value it holds is valid. The declaration is linked against the C library
+(`#[link(name = "c")]`), which a build with the feature links anyway for `pthread_create`. The
+variable is a static of the library, live for the whole process. glibc writes it with a plain
+one-byte store from the thread that creates a thread (and its own documentation allows it to
+store true again when it knows the process has one thread). On x86-64 a plain byte store and an
+atomic byte load are the same instructions as atomic ones, so the load sees the old or the new
+byte and nothing else; within Rust the access is an atomic load, which is defined. The value is
+only a hint for when to create the background thread. A stale or reset `true` makes the start
+more conservative: it waits for the next look at the level, or, if glibc reset it while the
+program had threads, for a later one. A `false` means a thread was created; the allocator's own
+thread is never created on that evidence before the program's.
+
 ## KERNEL-07: `unsafe impl Os for LinuxOs`
 
 The comment above the impl maps each promise of the `Os` trait to the kernel behaviour that
-provides it, and KERNEL-01 to KERNEL-06, KERNEL-09 and KERNEL-10 cover the individual calls. The promises not covered by a
+provides it, and KERNEL-01 to KERNEL-06 and KERNEL-09 to KERNEL-12 cover the individual calls. The promises not covered by a
 single call:
 
 - *Valid until unmapped or dropped.* Reservations are mappings of the process. Dropping a

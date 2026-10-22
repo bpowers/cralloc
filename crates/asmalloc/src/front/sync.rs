@@ -25,6 +25,19 @@ pub(crate) fn quiet<T>(atomic: &AtomicPtr<T>) -> &core::sync::atomic::AtomicPtr<
     &atomic.0
 }
 
+/// The plain `core` atomic inside an [`AtomicU64`], for a system call that names its address
+/// (a futex): the kernel reads the word, and the checker has nothing to switch at.
+#[cfg(not(test))]
+#[inline(always)]
+pub(crate) fn core_u64(atomic: &AtomicU64) -> &core::sync::atomic::AtomicU64 {
+    atomic
+}
+
+#[cfg(test)]
+pub(crate) fn core_u64(atomic: &AtomicU64) -> &core::sync::atomic::AtomicU64 {
+    &atomic.0
+}
+
 #[cfg(test)]
 pub(crate) use self::checked::{AtomicPtr, AtomicU64, AtomicUsize};
 
@@ -86,7 +99,7 @@ mod checked {
             /// The `core::sync::atomic` type of the same name, with a switch point before each
             /// operation.
             #[repr(transparent)]
-            pub(crate) struct $name(atomic::$name);
+            pub(crate) struct $name(pub(super) atomic::$name);
 
             // The two integer types share one list of operations; neither uses all of them.
             #[allow(dead_code)]

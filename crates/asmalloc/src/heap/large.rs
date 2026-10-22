@@ -294,7 +294,8 @@ impl<O: Os, R: Routines + Copy> Bound<'_, O, R> {
         self.alloc_large_slow_using(layout, layout.size(), zero)
     }
 
-    /// [`Heap::alloc_large_using`] as the slow path it counts as.
+    /// [`Heap::alloc_large_using`] as the slow path it counts as, for a call through the Rust
+    /// interface: the block, a heartbeat, and the background thread's start if it is wanted.
     pub(crate) fn alloc_large_slow_using(
         self,
         layout: Layout,
@@ -302,11 +303,12 @@ impl<O: Os, R: Routines + Copy> Bound<'_, O, R> {
         zero: Zero,
     ) -> Option<Grant> {
         let grant = self.heap().alloc_large_using(layout, used, zero);
-        self.heartbeat();
+        self.rust_heartbeat();
         grant
     }
 
-    /// [`Heap::free_large`] as the slow path it counts as: the free, then a heartbeat.
+    /// [`Heap::free_large`] as the slow path it counts as, for the C interface: the free, then
+    /// a heartbeat.
     ///
     /// # Safety
     ///

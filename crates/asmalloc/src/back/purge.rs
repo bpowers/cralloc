@@ -229,6 +229,15 @@ pub(crate) struct Pass {
 /// The pass word's flag for a pass that takes runs of any length, above its pages.
 const ANY: u64 = 1 << 31;
 
+/// What one of `maintain`'s steps of a purge did.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub struct PassStep {
+    /// Another step would do more.
+    pub more: bool,
+    /// The bytes it returned to the OS that had been resident.
+    pub returned: usize,
+}
+
 /// Which free pages a purge walk may take.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(crate) enum Scope {
@@ -278,6 +287,11 @@ impl<O: Os> Back<'_, O> {
         self.clamped(false).saturating_add(self.clamped(true))
     }
 
+    /// Whether retained memory is over the floor that the clocked pass leaves alone.
+    pub fn over_floor(&self) -> bool {
+        self.retained() > self.floor()
+    }
+
     /// What the clocked pass leaves retained (`policy::allowance_floor`).
     fn floor(&self) -> usize {
         #[cfg(test)]
@@ -305,7 +319,15 @@ impl<O: Os> Back<'_, O> {
     pub(super) fn retain(&self, class: Class, bytes: usize) {
         if bytes != 0 {
             let tally = self.state.retained.added.of(!class.is_small());
-            tally.fetch_add(bytes, SeqCst);
+            let old = tally.fetch_add(bytes, SeqCst);
+            // Whoever raises the count past the floor has the line already: an add that
+            // crosses an eighth of the floor looks at the whole count, and over the floor asks
+            // a slow path to look at the level (`crate::thread_word`).
+            // Every space is made on the OS's geometry, so the step is a constant.
+            let step = const { allowance_floor(O::GEOMETRY) / 8 };
+            if crate::thread_word::crosses(old, bytes, step) && self.over_floor() {
+                self.state.thread.raise_level();
+            }
         }
     }
 
@@ -462,8 +484,17 @@ impl<O: Os> Back<'_, O> {
     /// the pass has more to do. Smaller than a heartbeat's step, in bitmap read and in pages
     /// purged (`StepSize::MAINTAIN`), so that a caller that yields between steps holds its
     /// thread for tens of microseconds.
-    pub fn decay_pass_step(&self, now: &dyn Fn() -> u64) -> bool {
-        self.decay_step(now, StepSize::MAINTAIN).is_some()
+    pub fn decay_pass_step(&self, now: &dyn Fn() -> u64) -> PassStep {
+        let mut returned = 0;
+        let more = self
+            .decay_step_counting(now, StepSize::MAINTAIN, &mut returned)
+            .is_some();
+        PassStep { more, returned }
+    }
+
+    /// [`Back::decay_step_counting`], for a caller that does not count what it returned.
+    fn decay_step(&self, now: &dyn Fn() -> u64, size: StepSize) -> Option<u64> {
+        self.decay_step_counting(now, size, &mut 0)
     }
 
     /// One heartbeat's part of the clocked pass: starts a pass if the counted interval is later
@@ -471,8 +502,13 @@ impl<O: Os> Back<'_, O> {
     /// of the pass under way. A pass that is due finds nothing retained is ended as it starts,
     /// so the next one is due in the next interval. Returns the decay word of the pass it stepped if it
     /// stopped at its budget with the pass still under way, so that more steps would do more;
-    /// `None` otherwise.
-    fn decay_step(&self, now: &dyn Fn() -> u64, size: StepSize) -> Option<u64> {
+    /// `None` otherwise. Adds the bytes it returned that had been resident to `returned`.
+    fn decay_step_counting(
+        &self,
+        now: &dyn Fn() -> u64,
+        size: StepSize,
+        returned: &mut usize,
+    ) -> Option<u64> {
         let state = self.state;
         let geometry = self.space.plan().geometry();
         let page = geometry.page_size();
@@ -511,6 +547,10 @@ impl<O: Os> Back<'_, O> {
                             .compare_exchange(seen, word & !ACTIVE, Release, Relaxed);
                     return None;
                 }
+                // The once-an-interval look at the level: while the heap stays over the floor,
+                // a slow path is asked to look at the background thread's word again, so that
+                // a start refused for a passing reason is tried again (`crate::thread_word`).
+                state.thread.raise_level();
                 if state
                     .decay
                     .word
@@ -603,6 +643,7 @@ impl<O: Os> Back<'_, O> {
                 },
             );
             spent += read;
+            *returned += purged;
             if finished {
                 // A long lap goes region by region, so the interval number lags the clock by
                 // at most the walk of one region.
