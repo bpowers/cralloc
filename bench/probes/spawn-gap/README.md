@@ -59,6 +59,13 @@ the same length (glibc's speed on the spawn jobs depends on it).
   where functions lie (line and page offsets) in binaries.
 - `grpc-pstat.py`: the gRPC job driven by hand under `perf stat -p`. It counts 28% fewer cycles
   than benchrun and did not separate builds that benchrun does; kept as a warning, not a tool.
+- `padsweep.py BASE RESULTS...`: combines `benchrun layout --layouts pads` sessions: each
+  allocator's median per pad, mean and range over the pads, and each against BASE.
+- `sibling-switch.patch` (apply with `git apply`, revert before committing): the stride's
+  sibling count as a static that a constructor in bench-alloc sets from `BENCH_SIBLINGS`
+  before `main` (0 off, 999 whole magazines), so one binary runs every setting; give each
+  setting its own allocator entry with `build` the same and `env` the count, values of one
+  length.
 - `tokio-pad-queue.diff`: tokio 1.54.0 with the run queue's shared header cache-padded, for a
   local `[patch.crates-io]` (see the note).
 

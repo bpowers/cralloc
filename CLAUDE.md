@@ -109,3 +109,9 @@ Count cycles and instructions with hardware counters, pin to idle cores, and int
 things being compared. `docs/research/zen5-roofline.md` describes the method. A difference of
 a cycle or two on a fast path is a finding to explain, not noise: the cause is usually
 instruction selection or layout, and we fix it by construction.
+
+A server job can move by several percent with where the program's own code lands in the
+binary, which any change to the allocator's size shifts. Two builds of such a job are not
+compared by one number each: switch the behaviour at run time inside one binary, or compare
+means over a sweep of placements (`benchrun layout`). `docs/research/grpc-placement.md` says
+which jobs need this and why.
