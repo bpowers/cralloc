@@ -7,6 +7,37 @@
 //! The cross-thread workloads put the allocating thread on RF_CPU and the freeing thread on
 //! RF_CPU2 (default 3), and report the time each side spends working, per object. RF_BATCH
 //! (default 32) is the burst size and RF_PAIRS (default 3) the number of pairs in `x_cross_pairs`.
+//! RF_SINGLE_ONLY skips the cross-thread workloads. The second argument `sites` runs only the
+//! one-call functions `site_*`, kept for reading the code a call site gets.
+//!
+//! A build with `RA_PAD=N` (N bytes, at build time) places every single-thread workload's loop N
+//! bytes further on and changes nothing else, so that a comparison can be averaged over code
+//! placements: the inlined fast paths' cycles move by up to a cycle a pair with where the loop
+//! lands (`docs/research/fast-lookup.md`).
+
+const fn parse_pad(s: &str) -> usize {
+    let b = s.as_bytes();
+    let (mut i, mut n) = (0, 0);
+    while i < b.len() {
+        n = n * 10 + (b[i] - b'0') as usize;
+        i += 1;
+    }
+    n
+}
+
+/// The loop placement pad, `RA_PAD` at build time.
+const PAD: usize = parse_pad(match option_env!("RA_PAD") {
+    Some(s) => s,
+    None => "0",
+});
+
+/// `PAD` bytes of `nop`, run once at the top of each workload, so that its loop sits `PAD`
+/// bytes further on and nothing else changes.
+#[inline(always)]
+fn pad_here() {
+    unsafe { core::arch::asm!(".skip {n}, 0x90", n = const PAD, options(nomem, nostack, preserves_flags)) }
+}
+
 #[cfg(any(feature = "floor_tls", feature = "floor_heap"))]
 mod floors;
 #[cfg(feature = "slab")]
@@ -158,6 +189,7 @@ const L32: Layout = unsafe { Layout::from_size_align_unchecked(32, 8) };
 /// Allocate, write, free, with a layout known at compile time.
 #[inline(never)]
 fn pair_const(n: u64) -> u64 {
+    pad_here();
     let mut acc = 0u64;
     for i in 0..n {
         unsafe {
@@ -173,6 +205,7 @@ fn pair_const(n: u64) -> u64 {
 /// The same through `Box`, with the pointer escaping so the compiler cannot see through it.
 #[inline(never)]
 fn pair_box(n: u64) -> u64 {
+    pad_here();
     let mut acc = 0u64;
     for i in 0..n {
         let b = black_box(Box::new([i, 1, 2, 3]));
@@ -184,6 +217,7 @@ fn pair_box(n: u64) -> u64 {
 /// The same with a size only known at run time.
 #[inline(never)]
 fn pair_dyn(n: u64, size: usize) -> u64 {
+    pad_here();
     let mut acc = 0u64;
     for i in 0..n {
         unsafe {
@@ -197,9 +231,125 @@ fn pair_dyn(n: u64, size: usize) -> u64 {
     acc
 }
 
+/// 32 allocations of a size known only at run time, then 32 frees in allocation order.
+#[inline(never)]
+fn batch_dyn(n: u64, size: usize) -> u64 {
+    pad_here();
+    let mut acc = 0u64;
+    let mut v = [std::ptr::null_mut::<u64>(); 32];
+    for i in 0..n / 32 {
+        unsafe {
+            let l = Layout::from_size_align_unchecked(black_box(size), 8);
+            for s in v.iter_mut() {
+                let p = alloc(l) as *mut u64;
+                p.write(i);
+                *s = p;
+            }
+            for s in v.iter() {
+                acc = acc.wrapping_add(*s as u64);
+                dealloc(*s as *mut u8, l);
+            }
+        }
+    }
+    acc
+}
+
+/// Sizes in the proportions the server profile found (`server-profile.md`): mostly 16 and 24
+/// bytes, then 8, 32, 48, 128 and a tail to 448, in a fixed shuffled order of 64.
+const MIX: [usize; 64] = {
+    let counts: [(usize, usize); 11] = [
+        (16, 20), (24, 20), (8, 6), (32, 4), (48, 4), (128, 4), (64, 2), (96, 1), (256, 1),
+        (320, 1), (448, 1),
+    ];
+    let mut out = [0usize; 64];
+    let mut k = 0;
+    let mut i = 0;
+    while i < counts.len() {
+        let mut j = 0;
+        while j < counts[i].1 {
+            out[k] = counts[i].0;
+            k += 1;
+            j += 1;
+        }
+        i += 1;
+    }
+    // A fixed permutation: multiply by an odd number modulo 64.
+    let mut shuffled = [0usize; 64];
+    let mut m = 0;
+    while m < 64 {
+        shuffled[(m * 37 + 11) % 64] = out[m];
+        m += 1;
+    }
+    shuffled
+};
+
+/// Allocate and free one block at a time, cycling through `MIX`.
+#[inline(never)]
+fn pair_mix(n: u64) -> u64 {
+    pad_here();
+    let sizes = black_box(&MIX);
+    let mut acc = 0u64;
+    for i in 0..n {
+        unsafe {
+            let l = Layout::from_size_align_unchecked(sizes[(i % 64) as usize], 8);
+            let p = alloc(l) as *mut u64;
+            p.write(i);
+            acc = acc.wrapping_add(p as u64 ^ p.read());
+            dealloc(p as *mut u8, l);
+        }
+    }
+    acc
+}
+
+/// 32 allocations through `MIX`, then their 32 frees in allocation order.
+#[inline(never)]
+fn batch_mix(n: u64) -> u64 {
+    pad_here();
+    let sizes = black_box(&MIX);
+    let mut acc = 0u64;
+    let mut v = [(std::ptr::null_mut::<u64>(), 0usize); 32];
+    for i in 0..n / 32 {
+        unsafe {
+            for (k, s) in v.iter_mut().enumerate() {
+                let size = sizes[((i as usize) * 32 + k) % 64];
+                let p = alloc(Layout::from_size_align_unchecked(size, 8)) as *mut u64;
+                p.write(i);
+                *s = (p, size);
+            }
+            for &(p, size) in v.iter() {
+                acc = acc.wrapping_add(p as u64);
+                dealloc(p as *mut u8, Layout::from_size_align_unchecked(size, 8));
+            }
+        }
+    }
+    acc
+}
+
+/// One allocation of a run-time size, out of any loop, for reading the code a call site gets.
+#[inline(never)]
+#[no_mangle]
+pub fn site_alloc_one(size: usize) -> *mut u8 {
+    unsafe { alloc(Layout::from_size_align_unchecked(size, 8)) }
+}
+
+/// One free of a run-time size, out of any loop.
+#[inline(never)]
+#[no_mangle]
+pub fn site_free_one(p: *mut u8, size: usize) {
+    unsafe { dealloc(p, Layout::from_size_align_unchecked(size, 8)) }
+}
+
+/// One allocation of a constant size, out of any loop.
+#[inline(never)]
+#[no_mangle]
+pub fn site_alloc_const() -> *mut u8 {
+    unsafe { alloc(L32) }
+}
+
 /// 32 allocations, then 32 frees in allocation order.
 #[inline(never)]
 fn batch_const(n: u64) -> u64 {
+    pad_here();
     let mut acc = 0u64;
     let mut v = [std::ptr::null_mut::<u64>(); 32];
     for i in 0..n / 32 {
@@ -222,6 +372,7 @@ fn batch_const(n: u64) -> u64 {
 /// pseudo-random size in 16..=512.
 #[inline(never)]
 fn churn(n: u64) -> u64 {
+    pad_here();
     let mut live: Vec<(*mut u8, Layout)> = Vec::with_capacity(10_000);
     let mut x = 0x9E3779B97F4A7C15u64;
     let mut next = || {
@@ -285,6 +436,9 @@ fn single_thread(label: &str, filter: &str) {
     run("pair_box", &|| pair_box(n));
     run("pair_dyn", &|| pair_dyn(n, 32));
     run("batch_const", &|| batch_const(n));
+    run("batch_dyn", &|| batch_dyn(n, 32));
+    run("pair_mix", &|| pair_mix(n));
+    run("batch_mix", &|| batch_mix(n));
     run("churn", &|| churn(n));
 }
 
@@ -538,6 +692,15 @@ fn cross_thread(label: &str, filter: &str) {
 fn main() {
     let label = std::env::args().nth(1).unwrap_or_default();
     let filter = std::env::args().nth(2).unwrap_or_default();
+    if filter == "sites" {
+        let p = site_alloc_one(black_box(48));
+        site_free_one(p, black_box(48));
+        let q = site_alloc_const();
+        unsafe { dealloc(q, L32) };
+        return;
+    }
     single_thread(&label, &filter);
-    cross_thread(&label, &filter);
+    if std::env::var_os("RF_SINGLE_ONLY").is_none() {
+        cross_thread(&label, &filter);
+    }
 }

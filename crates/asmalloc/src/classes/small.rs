@@ -1,57 +1,8 @@
 //! Small classes: the ones cached in magazines.
 
-use super::{Class, MAX_SMALL_SIZE, MagazineSize, QUANTUM, SMALL_COUNT};
+use super::{Class, MAX_SMALL_SIZE, MagazineSize, SMALL_COUNT, lookup};
 use core::alloc::Layout;
 use core::num::NonZeroU8;
-
-/// The small class of every rounded size, by `(size - 1) / QUANTUM`: entry `j` is the class of
-/// `QUANTUM * (j + 1)` bytes, which serves every size from `QUANTUM * j + 1` up to that.
-static BY_SIZE: PlacedClasses = PlacedClasses {
-    _pad: [0; BY_SIZE_PAGE_OFFSET],
-    classes: {
-        let mut table = [SmallClass::of(Class::SMALLEST); MAX_SMALL_SIZE / QUANTUM];
-        let mut j = 0;
-        while j < table.len() {
-            table[j] = match Class::of_size(QUANTUM * (j + 1)) {
-                Some(class) => match class.small() {
-                    Some(small) => small,
-                    None => panic!("a size up to MAX_SMALL_SIZE has a large class"),
-                },
-                None => panic!("a size up to MAX_SMALL_SIZE has no class"),
-            };
-            j += 1;
-        }
-        table
-    },
-};
-
-/// Where [`BY_SIZE`]'s first entry lies within its page. An inlined allocation or free loads its
-/// entry right after the previous operation stored a slab's hot word, and on Zen 5 a load whose
-/// page offset overlaps a store still in flight can be held until that store is done; since the
-/// store's address comes from the previous lookup, a loop of them then runs one at a time
-/// (`docs/research/zen5-roofline.md`, section 16). From here, the entries of every size up to
-/// [`BY_SIZE_CLEAR`] bytes have page offsets past every slab field (`front` asserts it), and
-/// only larger sizes wrap round onto them.
-pub(crate) const BY_SIZE_PAGE_OFFSET: usize = 2048;
-
-/// The largest size whose [`BY_SIZE`] entry lies between [`BY_SIZE_PAGE_OFFSET`] and the end
-/// of its page.
-pub(crate) const BY_SIZE_CLEAR: usize = (4096 - BY_SIZE_PAGE_OFFSET) * QUANTUM;
-
-/// [`BY_SIZE`]'s table, [`BY_SIZE_PAGE_OFFSET`] bytes into a page-aligned static.
-#[repr(C, align(4096))]
-struct PlacedClasses {
-    _pad: [u8; BY_SIZE_PAGE_OFFSET],
-    classes: [SmallClass; MAX_SMALL_SIZE / QUANTUM],
-}
-
-const _: () = assert!(core::mem::offset_of!(PlacedClasses, classes) == BY_SIZE_PAGE_OFFSET);
-
-/// The address of the entry for `size` bytes, for the placement tests.
-#[cfg(test)]
-pub(crate) fn by_size_entry(size: usize) -> usize {
-    core::ptr::from_ref(&BY_SIZE.classes[(size - 1) / QUANTUM]).addr()
-}
 
 /// A class of at most `MAX_SMALL_SIZE` bytes.
 ///
@@ -99,7 +50,7 @@ impl SmallClass {
     }
 
     /// `class`, which is small.
-    const fn of(class: Class) -> SmallClass {
+    pub(super) const fn of(class: Class) -> SmallClass {
         match NonZeroU8::new((WORD_STRIDE * class.index() as usize + WORD_START) as u8) {
             Some(word) => SmallClass(word),
             None => panic!("a word position is never zero"),
@@ -137,7 +88,7 @@ impl SmallClass {
     pub(crate) fn of_nonzero_layout(layout: Layout) -> Option<SmallClass> {
         let less_one = layout.size().wrapping_sub(1) | (layout.align() - 1);
         if less_one < MAX_SMALL_SIZE {
-            Some(BY_SIZE.classes[less_one / QUANTUM])
+            Some(lookup::class_of(less_one))
         } else {
             None
         }
@@ -162,6 +113,20 @@ impl SmallClass {
     #[inline(always)]
     pub const fn size(self) -> usize {
         self.class().size()
+    }
+
+    /// The mask the routines test this class's slab word with, `magazine().mask()`, from a
+    /// table: one load, or a constant for a constant class.
+    #[inline(always)]
+    pub(crate) fn mask(self) -> usize {
+        lookup::mask(self) as usize
+    }
+
+    /// The slot size, [`SmallClass::size`], from a table: one load where the computation takes
+    /// several instructions and a branch, or a constant for a constant class.
+    #[inline(always)]
+    pub(crate) fn length(self) -> usize {
+        lookup::length(self) as usize
     }
 
     /// The size of this class's magazines.

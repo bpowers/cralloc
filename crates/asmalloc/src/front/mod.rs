@@ -154,7 +154,13 @@ impl Front {
     /// The address of a class's hot word in slab 0, which the routines take.
     #[inline(always)]
     pub(crate) fn word(&self, class: SmallClass) -> usize {
-        core::ptr::from_ref(&self.slabs).addr() + Field::hot(class).offset()
+        // An offset from the slabs' address rather than a sum of integers: LLVM knows the static
+        // is page-aligned and turns an integer sum into `or`, which a run-time class then pays
+        // for with a second instruction where one `lea` does.
+        core::ptr::from_ref(&self.slabs)
+            .cast::<u8>()
+            .wrapping_add(Field::hot(class).offset())
+            .addr()
     }
 
     /// The heap words the C frees read: the region shift and the base's region index,
@@ -226,29 +232,6 @@ const _: () = {
 #[cfg_attr(any(miri, kani), allow(dead_code))]
 pub static SLABS: Front = Front::new();
 
-/// The slot mask of each small class's magazines, indexed by the position of the class's hot word
-/// (`SmallClass::word`); zero for every other byte. The inlined routines are given their class's
-/// mask from here, so a constant class folds it to a constant; the generated C routines read the
-/// copy in [`SLABS`], at the same index, `MASK_DISP` bytes above the word.
-///
-/// An inlined routine with a class known only at run time loads its mask on every call, so the
-/// table sits at page offsets no slab field has, as the class lookup does
-/// (`classes::BY_SIZE_PAGE_OFFSET`).
-static MASKS: PlacedMasks = PlacedMasks {
-    _pad: [0; MASKS_PAGE_OFFSET],
-    masks: MASK_TABLE,
-};
-
-/// Where [`MASKS`] starts within its page.
-const MASKS_PAGE_OFFSET: usize = 2048;
-
-/// [`MASKS`]'s table, [`MASKS_PAGE_OFFSET`] bytes into a page-aligned static.
-#[repr(C, align(4096))]
-struct PlacedMasks {
-    _pad: [u8; MASKS_PAGE_OFFSET],
-    masks: [u32; MASK_COUNT],
-}
-
 // The page-offset rule (`docs/research/zen5-roofline.md`, section 16): a load whose bytes overlap,
 // in the low 12 bits of the address, a hot word that the previous call stored and that is still
 // in flight can wait for that store, and since the hot word's address comes from what the call
@@ -296,11 +279,11 @@ const fn clear_of_hot(at: usize, len: usize) -> bool {
 }
 
 const _: () = {
-    use crate::classes::{BY_SIZE_CLEAR, BY_SIZE_PAGE_OFFSET, QUANTUM};
+    use crate::classes::{
+        BY_SIZE_CLEAR, BY_SIZE_PAGE_OFFSET, LENGTHS_PAGE_OFFSET, MASKS_PAGE_OFFSET, QUANTUM,
+    };
     use crate::spec;
     assert!(SLAB_BYTES == 4096 && align_of::<Front>() == SLAB_BYTES);
-    assert!(align_of::<PlacedMasks>() == SLAB_BYTES);
-    assert!(offset_of!(PlacedMasks, masks) == MASKS_PAGE_OFFSET);
     // Others' placements: every `cpu_id` and `rseq_cs` of a 32-byte-aligned area, and every
     // 16-aligned 8-byte word.
     let mut at = 0;
@@ -311,7 +294,8 @@ const _: () = {
     }
     // The published words the C frees read.
     assert!(clear_of_hot(SHIFT_DISP % SLAB_BYTES, spec::MIRROR_BYTES));
-    // The masks, the C routines' copy and the inlined routines' table, at each class's position.
+    // The masks, the C routines' copy and the inlined routines' table, at each class's position,
+    // and the slot sizes the `Allocator` interface reads, by class index.
     let mut ordinal = 0;
     while ordinal < SMALL_COUNT {
         if let Some(class) = SmallClass::from_ordinal(ordinal) {
@@ -319,7 +303,11 @@ const _: () = {
                 (MASK_DISP + Field::hot(class).offset()) % SLAB_BYTES,
                 8
             ));
-            assert!(clear_of_hot(MASKS_PAGE_OFFSET + 4 * class.word(), 4));
+            assert!(clear_of_hot(MASKS_PAGE_OFFSET + 2 * class.word(), 2));
+            assert!(clear_of_hot(
+                LENGTHS_PAGE_OFFSET + 2 * class.class().index() as usize,
+                2
+            ));
         }
         ordinal += 1;
     }
@@ -349,12 +337,6 @@ const MASK_TABLE: [u32; MASK_COUNT] = {
     masks
 };
 
-/// The mask of a class's magazines.
-#[inline(always)]
-pub(crate) fn mask(class: SmallClass) -> u32 {
-    MASKS.masks[class.word()]
-}
-
 /// The last position with a mask, which [`publish_masks`] writes last and so checks first.
 const LAST_MASKED: usize = {
     let mut last = MASK_COUNT - 1;
@@ -381,22 +363,12 @@ pub(crate) fn publish_masks() {
 mod tests {
     use super::*;
 
-    #[test]
-    fn the_mask_table_holds_each_class_mask_at_its_words_position_and_zero_elsewhere() {
-        for class in SmallClass::all() {
-            assert_eq!(mask(class) as usize, class.magazine().mask());
-        }
-        let small = SmallClass::all().count();
-        assert_eq!(MASKS.masks.iter().filter(|&&m| m != 0).count(), small);
-        assert_eq!(MASKS.masks[0], 0);
-    }
-
     /// The placement the constant assertions describe, on the addresses the build gave: no
-    /// mask, and no class lookup entry up to `BY_SIZE_CLEAR` bytes, overlaps a hot word's page
-    /// offset.
+    /// mask, no slot size, and no class lookup entry up to `BY_SIZE_CLEAR` bytes, overlaps a hot
+    /// word's page offset.
     #[test]
     fn the_inlined_lookups_are_off_every_hot_words_page_offset() {
-        use crate::classes::{BY_SIZE_CLEAR, by_size_entry};
+        use crate::classes::{BY_SIZE_CLEAR, lookup_addresses as at};
         let hot: std::vec::Vec<usize> = SmallClass::all()
             .map(|class| Field::hot(class).offset() % SLAB_BYTES)
             .collect();
@@ -405,11 +377,11 @@ mod tests {
             hot.iter().all(|&word| at + len <= word || word + 8 <= at)
         };
         for class in SmallClass::all() {
-            let entry = core::ptr::from_ref(&MASKS.masks[class.word()]).addr();
-            assert!(clear(entry, 4), "{class:?}");
+            assert!(clear(at::mask(class), 2), "{class:?}");
+            assert!(clear(at::length(class), 2), "{class:?}");
         }
         for size in 1..=BY_SIZE_CLEAR {
-            assert!(clear(by_size_entry(size), 1), "{size}");
+            assert!(clear(at::class_byte(size), 1), "{size}");
         }
     }
 

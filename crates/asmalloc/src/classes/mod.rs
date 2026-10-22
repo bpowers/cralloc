@@ -25,6 +25,7 @@
 //! Everything here is a `const fn`, so a constant `Layout` folds to a constant class.
 
 mod divisor;
+mod lookup;
 mod magazine;
 mod small;
 #[cfg(kani)]
@@ -33,13 +34,16 @@ mod verify;
 mod verify_slow;
 
 pub use divisor::Divisor;
+#[cfg(test)]
+pub(crate) use lookup::addresses as lookup_addresses;
+pub(crate) use lookup::{
+    BY_SIZE_CLEAR, BY_SIZE_PAGE_OFFSET, LENGTHS_PAGE_OFFSET, MASKS_PAGE_OFFSET,
+};
 pub use magazine::{
     MAGAZINE_BUDGET, MARKER, MARKER_SHIFT, MagazineSize, Marker, SLOT_BYTES, is_marker,
 };
 pub use small::SmallClass;
-#[cfg(test)]
-pub(crate) use small::by_size_entry;
-pub(crate) use small::{BY_SIZE_CLEAR, BY_SIZE_PAGE_OFFSET, WORD_START, WORD_STRIDE};
+pub(crate) use small::{WORD_START, WORD_STRIDE};
 
 use core::alloc::Layout;
 use core::fmt;
