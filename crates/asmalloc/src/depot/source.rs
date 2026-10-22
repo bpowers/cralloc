@@ -38,10 +38,26 @@ pub trait Source {
     /// time.
     fn clock(&self) -> &crate::clock::Counted;
 
-    /// One bounded step of returning free memory to the OS, as the heartbeat paces it. `now`
-    /// reads the heartbeat's clock (the counted time of [`Source::clock`]), the same value for
-    /// the whole heartbeat; the source calls it only if a decision needs the time.
-    fn purge_step(&self, now: &dyn Fn() -> u64);
+    /// The heartbeat's part in returning free memory to the OS. `now` reads the heartbeat's
+    /// clock (the counted time of [`Source::clock`]), the same value for the whole heartbeat;
+    /// the source calls it only if a decision needs the time. `seen` is the background
+    /// thread's word as the slow path read it. Where slow paths return memory, one bounded step
+    /// of it. While the thread runs, none, and says whether work the thread does has just come
+    /// due, for a thread that sleeps, which the caller then wakes (`thread`).
+    fn purge_step(&self, now: &dyn Fn() -> u64, seen: crate::thread_word::Snapshot) -> bool;
+
+    /// One bounded step of each purge that slow paths take where there is no background
+    /// thread, for the thread, which takes them while it runs: whether another would do more
+    /// now, and whether this one returned memory.
+    fn thread_step(&self, now: &dyn Fn() -> u64) -> PurgeStep;
+
+    /// After the thread's steps: plans when it next has to look, where it can foresee that, for
+    /// the slow path that reaches the moment to wake it.
+    fn plan_thread(&self);
+
+    /// Whether purge work is due that the thread should do before it sleeps: its last look,
+    /// after it marked its word asleep (`crate::thread_word`, "Sleeping").
+    fn thread_due(&self, now: &dyn Fn() -> u64) -> bool;
 
     /// One bounded step of the clocked pass that is under way or due, for `Cache::maintain`:
     /// whether the pass has more to do, and whether the step returned memory. Called until it

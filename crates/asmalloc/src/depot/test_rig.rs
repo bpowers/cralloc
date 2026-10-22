@@ -67,6 +67,17 @@ pub(crate) struct TestSource {
     passes: AtomicUsize,
     /// How many of the next purge steps of `maintain` report memory returned; tests set it.
     pub returning: AtomicUsize,
+    /// How many of the next heartbeats' purge steps make work due that the background thread
+    /// does, while it runs; tests set it.
+    pub coming_due: AtomicUsize,
+    /// Work the background thread has to do, a step each: what a heartbeat made due while the
+    /// thread runs. Its operations offer the interleaving checker a switch, as the back end's
+    /// debt and counts would be read and written by the thread and the slow paths.
+    pub owing: crate::front::sync::AtomicUsize,
+    /// How many times the thread planned its next look.
+    plans: AtomicUsize,
+    /// How many of the thread's purge steps were taken.
+    thread_steps: AtomicUsize,
     /// The background thread's word.
     pub thread: crate::thread_word::ThreadWord,
     fills: AtomicUsize,
@@ -97,6 +108,10 @@ impl TestSource {
             purges: AtomicUsize::new(0),
             passes: AtomicUsize::new(0),
             returning: AtomicUsize::new(0),
+            coming_due: AtomicUsize::new(0),
+            owing: crate::front::sync::AtomicUsize::new(0),
+            plans: AtomicUsize::new(0),
+            thread_steps: AtomicUsize::new(0),
             thread: crate::thread_word::ThreadWord::new(),
             fills: AtomicUsize::new(0),
             laundered: AtomicUsize::new(0),
@@ -144,6 +159,16 @@ impl TestSource {
     /// How many times `maintain` has asked for a whole purge pass.
     pub(crate) fn passes(&self) -> usize {
         self.passes.load(Ordering::Relaxed)
+    }
+
+    /// How many times the thread planned its next look.
+    pub(crate) fn plans(&self) -> usize {
+        self.plans.load(Ordering::Relaxed)
+    }
+
+    /// How many of the thread's purge steps were taken.
+    pub(crate) fn thread_steps(&self) -> usize {
+        self.thread_steps.load(Ordering::Relaxed)
     }
 
     /// The objects of `class` the source holds.
@@ -211,8 +236,47 @@ impl Source for TestSource {
         self.give(class, object);
     }
 
-    fn purge_step(&self, _: &dyn Fn() -> u64) {
+    /// As the back end's: while the thread runs, a step makes work due if a test asked for
+    /// that, as a heartbeat starts a pass or steps the hold's count to its look, with a
+    /// sequentially consistent write, and says so, for the caller to wake the thread.
+    fn purge_step(&self, _: &dyn Fn() -> u64, seen: crate::thread_word::Snapshot) -> bool {
         self.purges.fetch_add(1, Ordering::Relaxed);
+        let left = self.coming_due.load(Ordering::Relaxed);
+        if seen.duty() == crate::thread_word::Duty::Slow || left == 0 {
+            return false;
+        }
+        self.coming_due.store(left - 1, Ordering::Relaxed);
+        self.owing.fetch_add(1, Ordering::SeqCst);
+        true
+    }
+
+    fn thread_step(&self, _: &dyn Fn() -> u64) -> super::PurgeStep {
+        self.thread_steps.fetch_add(1, Ordering::Relaxed);
+        let mut owing = self.owing.load(Ordering::SeqCst);
+        loop {
+            if owing == 0 {
+                return super::PurgeStep::default();
+            }
+            match self
+                .owing
+                .compare_exchange(owing, owing - 1, Ordering::SeqCst, Ordering::SeqCst)
+            {
+                Ok(_) => break,
+                Err(now) => owing = now,
+            }
+        }
+        super::PurgeStep {
+            more: owing > 1,
+            returned: true,
+        }
+    }
+
+    fn plan_thread(&self) {
+        self.plans.fetch_add(1, Ordering::Relaxed);
+    }
+
+    fn thread_due(&self, _: &dyn Fn() -> u64) -> bool {
+        self.owing.load(Ordering::SeqCst) != 0
     }
 
     fn thread(&self) -> &crate::thread_word::ThreadWord {

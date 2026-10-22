@@ -1274,8 +1274,232 @@ fn parking_loses_no_wake_up_under_every_schedule(bounds: Bounds, ops: &[Op], mig
     );
 }
 
+/// A heap whose background thread, on CPU 1, is awake with this interval's round done, about to
+/// sleep: the sleep protocol's world (`crate::thread_word`, "Sleeping"). `due` heartbeats of
+/// the mutator make work due that the thread does.
+struct Sleeping {
+    world: World,
+    key: u64,
+    asleep: Mutex<Option<Option<crate::thread_word::Snapshot>>>,
+}
+
+fn sleeping_world(due: usize) -> Sleeping {
+    use crate::thread_word::AWAKE;
+    let world = World::new(6, 0);
+    world.populate();
+    let machine = world.machine(1, 1);
+    let cache = world.rig.cache(&machine);
+    let key = cache.thread_key();
+    assert!(
+        world
+            .rig
+            .source
+            .thread
+            .claim_start(world.rig.os(), key, AWAKE)
+    );
+    cache.maintain();
+    world.rig.source.coming_due.store(due, Ordering::SeqCst);
+    Sleeping {
+        world,
+        key,
+        asleep: Mutex::new(None),
+    }
+}
+
+/// The thread's look before it waits (its mark, then its look for work) races `waker` on CPU 0,
+/// which makes work due that the thread does and wakes it its own way. No wake-up is lost: a
+/// thread that decided to wait on a word that still holds what it waits on, which the futex
+/// would sleep on until its timeout, has no work due. In the other schedules the thread found
+/// the work itself, or its word moved, so that the wait returns at once or the wake reaches it.
+fn sleeping_loses_no_wake_up_under_every_schedule(
+    name: &str,
+    bounds: Bounds,
+    due: usize,
+    waker: impl Fn(&World) + Sync,
+) {
+    let found_work = AtomicUsize::new(0);
+    let woken = AtomicUsize::new(0);
+    let found = explore(
+        bounds,
+        2,
+        || sleeping_world(due),
+        |sleeping, me| {
+            let world = &sleeping.world;
+            if me == 0 {
+                waker(world);
+            } else {
+                let machine = world.machine(1, 1);
+                let asleep = world.rig.cache(&machine).begin_sleep(sleeping.key);
+                *sleeping.asleep.lock().unwrap() = Some(asleep);
+            }
+        },
+        |_| {},
+        |sleeping, _| {
+            let world = &sleeping.world;
+            world.check(false);
+            let asleep = sleeping.asleep.lock().unwrap().unwrap();
+            let word = world.rig.source.thread.load();
+            let owing = world.rig.source.owing.load(Ordering::SeqCst);
+            match asleep {
+                // The futex compares the word's low half.
+                Some(waits) if waits.0 as u32 == word.0 as u32 => {
+                    assert_eq!(
+                        owing, 0,
+                        "the thread sleeps with work due and nobody to wake it"
+                    );
+                }
+                Some(_) => {
+                    woken.fetch_add(1, Ordering::SeqCst);
+                }
+                None => {
+                    found_work.fetch_add(1, Ordering::SeqCst);
+                }
+            }
+        },
+    );
+    report(name, found);
+    assert!(
+        found_work.load(Ordering::SeqCst) > 0,
+        "no schedule had the thread find the work"
+    );
+    assert!(
+        woken.load(Ordering::SeqCst) > 0,
+        "no schedule woke the thread"
+    );
+}
+
+/// As [`sleeping_loses_no_wake_up_under_every_schedule`], with the thread's whole turn
+/// (`Cache::thread_turn`: its steps, its look, its wait and its back-out) racing `waker`. The
+/// simulator's wait sleeps, as the futex does, if the word holds what it expects when it is
+/// called, until a wake. No schedule leaves the thread asleep with work due.
+fn a_turn_loses_no_wake_up_under_every_schedule(
+    name: &str,
+    bounds: Bounds,
+    due: usize,
+    waker: impl Fn(&World) + Sync,
+) {
+    let slept = AtomicUsize::new(0);
+    let found = explore(
+        bounds,
+        2,
+        || sleeping_world(due),
+        |sleeping, me| {
+            let world = &sleeping.world;
+            if me == 0 {
+                waker(world);
+            } else {
+                let machine = world.machine(1, 1);
+                let mut seen = super::thread::Seen::default();
+                let mut returned = false;
+                world
+                    .rig
+                    .cache(&machine)
+                    .thread_turn(&mut seen, sleeping.key, &mut returned, 1);
+            }
+        },
+        |_| {},
+        |sleeping, _| {
+            let world = &sleeping.world;
+            world.check(false);
+            if world.rig.os().blocked() {
+                slept.fetch_add(1, Ordering::SeqCst);
+                assert_eq!(
+                    world.rig.source.owing.load(Ordering::SeqCst),
+                    0,
+                    "the thread sleeps with work due and nobody to wake it: word {:#x}, waited on \
+                     {:?}, wakes {}",
+                    world.rig.source.thread.load().0,
+                    world.rig.os().last_timed_wait(),
+                    world.rig.os().wakes()
+                );
+            }
+        },
+    );
+    report(name, found);
+    assert!(
+        slept.load(Ordering::SeqCst) > 0,
+        "no schedule had the thread sleep"
+    );
+}
+
+/// What a grower does (`back::purge`, `Back::growth_due`): the debt added, sequentially
+/// consistent, and then the word read afresh, a sleeping thread's mark cleared and the thread
+/// woken.
+fn grower(world: &World) {
+    world.rig.source.owing.fetch_add(1, Ordering::SeqCst);
+    world.rig.source.thread.rouse_any(world.rig.os());
+}
+
+/// A slow path on CPU 0 whose heartbeat makes work due (`Sleeping`): with its load of the word
+/// before its exchange and the work made due after, and then the cold look at the word afresh,
+/// which wakes the thread (`Cache::rouse_thread`).
+fn heartbeat(world: &World) {
+    let machine = world.machine(0, 0);
+    let cache = world.rig.cache(&machine);
+    if let Some(object) = cache.alloc_slow(tiny_class()) {
+        world.user.lock().unwrap().push(object.addr().get());
+    }
+}
+
 mod run {
     use super::*;
+
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn sleeping_loses_no_wake_up_to_a_grower_quickly() {
+        super::sleeping_loses_no_wake_up_under_every_schedule(
+            "sleeping, a grower",
+            Bounds::preemptions(1),
+            0,
+            super::grower,
+        );
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn a_turn_loses_no_wake_up_quickly() {
+        super::a_turn_loses_no_wake_up_under_every_schedule(
+            "a turn, a grower",
+            Bounds::preemptions(1),
+            0,
+            super::grower,
+        );
+        super::a_turn_loses_no_wake_up_under_every_schedule(
+            "a turn, a heartbeat",
+            Bounds::preemptions(1),
+            1,
+            super::heartbeat,
+        );
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn sleeping_loses_no_wake_up_to_a_heartbeat_quickly() {
+        super::sleeping_loses_no_wake_up_under_every_schedule(
+            "sleeping, a heartbeat",
+            Bounds::preemptions(1),
+            1,
+            super::heartbeat,
+        );
+    }
+
+    #[test]
+    #[cfg(not(debug_assertions))]
+    #[ignore = "slow: run with scripts/gate --all, optimized"]
+    fn sleeping_loses_no_wake_up_under_every_schedule_fully() {
+        super::sleeping_loses_no_wake_up_under_every_schedule(
+            "sleeping, a grower",
+            Bounds::preemptions(3),
+            0,
+            super::grower,
+        );
+        super::sleeping_loses_no_wake_up_under_every_schedule(
+            "sleeping, a heartbeat",
+            Bounds::preemptions(2),
+            1,
+            super::heartbeat,
+        );
+    }
 
     #[test]
     #[cfg_attr(miri, ignore)]

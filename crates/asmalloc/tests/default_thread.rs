@@ -61,6 +61,25 @@ fn allocator_thread() -> Option<File> {
     })
 }
 
+/// The allocator's thread's directory under `/proc/self/task`, if the thread exists.
+fn allocator_task() -> Option<std::path::PathBuf> {
+    std::fs::read_dir("/proc/self/task").ok()?.find_map(|task| {
+        let path = task.ok()?.path();
+        let name = std::fs::read_to_string(path.join("comm")).ok()?;
+        (name.trim() == "asmalloc").then_some(path)
+    })
+}
+
+/// The nanoseconds a thread has run on a CPU, from its `schedstat`.
+fn run_ns(task: &std::path::Path) -> Option<u64> {
+    std::fs::read_to_string(task.join("schedstat"))
+        .ok()?
+        .split_whitespace()
+        .next()?
+        .parse()
+        .ok()
+}
+
 /// What a child reports, printed with `prefix` at the end of its run.
 struct Report {
     thread: bool,
@@ -270,6 +289,26 @@ fn child(mode: &str) {
                 println!("steady_wakes_per_10s {}", (after - before) / 2);
             }
         }
+        // Growth over the cap pays for itself, by the thread where it runs and by the slow paths
+        // where it does not: a worker frees a burst of 64-byte objects, which starts the thread,
+        // and the main thread at once grows a large class by as much, long before the clocked
+        // pass may take the burst's pages (they are inside its frontiers for two intervals).
+        "growth" | "growthoff" => {
+            worker_frees(|| {}, || {});
+            let task = allocator_task();
+            let ran = || task.as_ref().and_then(|task| run_ns(task));
+            let before = ran();
+            let me = File::open("/proc/self/status").unwrap();
+            let grown: Vec<Vec<u8>> = (0..512).map(|i| vec![i as u8; 256 << 10]).collect();
+            println!(
+                "grown_rss_mib {}",
+                field(&me, b"\nRssAnon:").unwrap_or(0) / 1024
+            );
+            if let (Some(before), Some(after)) = (before, ran()) {
+                println!("thread_ran_us {}", (after - before) / 1000);
+            }
+            drop(grown);
+        }
         // The parent's thread is awake at the fork, started by hand or by a worker's burst a
         // few seconds before: the child inherits `AWAKE` under the parent's key, which must not
         // hide the child's own crossings.
@@ -469,6 +508,38 @@ const CASES: &[Case] = &[
                 return Ok(());
             }
             no_thread(report)
+        },
+    },
+    // Growth over the cap paid by the thread, and with the thread off by the slow paths: 128
+    // MiB grown while 128 MiB freed is still resident ends within the cap (64 MiB), the
+    // unpaid limit (16 MiB) and the test's own memory of what is live, not with both.
+    Case {
+        mode: "growth",
+        env: &[],
+        check: |report| {
+            expect(get(report, "thread")? == 1, "no thread", report)?;
+            expect(
+                get(report, "thread_ran_us")? > 0,
+                "the thread did not run while the heap grew",
+                report,
+            )?;
+            expect(
+                get(report, "grown_rss_mib")? < 128 + 64 + 16 + 24,
+                "growth was not paid for",
+                report,
+            )
+        },
+    },
+    Case {
+        mode: "growthoff",
+        env: &[("ASMALLOC_BACKGROUND", "0")],
+        check: |report| {
+            no_thread(report)?;
+            expect(
+                get(report, "grown_rss_mib")? < 128 + 64 + 24,
+                "growth was not paid for",
+                report,
+            )
         },
     },
     // Fork children of a parent whose thread is awake (second review's finding).

@@ -116,6 +116,13 @@ pub(crate) fn switch_point() {
     }
 }
 
+/// Where a thread waits for another (a futex that sleeps): the checker runs another runnable
+/// thread, without counting a preemption. Does nothing outside a checker run, or when no other
+/// thread can run.
+pub(crate) fn wait_point() {
+    let _ = with_run(|run, me| run.yield_to_others(me));
+}
+
 /// A single-threaded interrupt: `action` runs at the `remaining`-th switch point from now.
 struct Interrupt {
     remaining: usize,
@@ -223,6 +230,39 @@ impl Run<'_> {
             *killed = true;
         }
         self.turn.notify_all();
+    }
+
+    /// A thread that cannot go on until another does (one asleep in a futex): the checker
+    /// runs another runnable thread, any of them, and this is no preemption, which the bound
+    /// counts only for a thread that could have continued. Returns at once if no other thread
+    /// can run.
+    fn yield_to_others(&self, me: usize) {
+        if thread::panicking() {
+            return;
+        }
+        let mut state = self.lock();
+        if state.killed[me] {
+            drop(state);
+            panic::resume_unwind(Box::new(Killed));
+        }
+        state.steps += 1;
+        if state.steps > self.bounds.max_steps {
+            let message = std::format!(
+                "an execution took more than {} steps: a thread may be waiting or livelocked",
+                self.bounds.max_steps
+            );
+            self.fail(&mut state, message);
+            drop(state);
+            panic::resume_unwind(Box::new(Killed));
+        }
+        let others: Vec<usize> = state.runnable().into_iter().filter(|&t| t != me).collect();
+        if others.is_empty() {
+            return;
+        }
+        let taken = state.pick(others.len());
+        state.running = others[taken];
+        self.turn.notify_all();
+        self.wait_turn(state, me);
     }
 
     fn switch(&self, me: usize) {
