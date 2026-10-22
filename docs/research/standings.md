@@ -7,6 +7,13 @@ suites of `bench/`: the kernel suite (`--suite full`), the apps and the servers;
 bounded purge) should move. The last kernel session was at `e96086d` (`baselines.md`), before
 commit-ahead, 1,024-slot magazines, the lean slow path and the reversal rule.
 
+**Read the RPC server rows with care (added 2026-10-22).** Each allocator's row is one build,
+and the jobs served by `rpc-server` (the connect, gRPC and RPC log jobs) move by 2.5 to 4% with
+where the service's own code lands in the binary, whatever the allocator
+(`grpc-placement.md`). A lead or a deficit of a few percent on those rows is inside that range
+until it has been measured over a sweep of placements. The tokio spawn rows are superseded by
+`spawn-gap.md`.
+
 ## Summary
 
 - **Kernel suite:** ahead of the best incumbent on 37 of 55 jobs, level on 3, behind on 15 (at
