@@ -7,6 +7,9 @@
 #   L3, whose cache heavy work shares) everything started through scripts/heavy is frozen
 #   while the command runs and thawed when it ends, and heavy work that arrives meanwhile
 #   waits. Either way, hold it for minutes, not hours: split a long session into pieces.
+#   After a --both-l3 session heavy work is owed a turn as long as the session ran, five
+#   minutes at most, and the next --both-l3 session waits for it: sessions queued back to
+#   back once kept every build and proof on the machine frozen for an hour and a half.
 #   ASMALLOC_LOCK_DIR  where the lock files live, default /tmp.
 #
 # `benchrun layout` takes the measurement lock itself: run it without this script.
@@ -27,14 +30,56 @@ if grep -q "$slice" /proc/self/cgroup 2>/dev/null; then
 fi
 unset ASMALLOC_HEAVY_SLICE
 
+# When heavy work's turn ends, in seconds since the epoch; written and read only under the
+# measurement lock.
+owed="$locks/asmalloc-heavy.owed"
+turn_max=300
+
+# Seconds of its turn that heavy work is still owed: nothing once the turn has passed, or
+# while no heavy work exists to take it.
+heavy_owed() {
+  local until=0 now cgroup
+  if [ -r "$owed" ]; then read -r until < "$owed" || true; fi
+  case "$until" in '' | *[!0-9]*) until=0 ;; esac
+  now=$(date +%s)
+  if [ "$until" -le "$now" ]; then echo 0; return; fi
+  cgroup=$(systemctl --user show -p ControlGroup --value "$slice" 2>/dev/null || true)
+  if [ -n "$cgroup" ] && grep -qx 'populated 1' "/sys/fs/cgroup$cgroup/cgroup.events" 2>/dev/null; then
+    echo $((until - now))
+  else
+    echo 0
+  fi
+}
+
+finish() {
+  systemctl --user thaw "$slice" 2>/dev/null || true
+  local now ran
+  now=$(date +%s)
+  ran=$((now - started))
+  if [ "$ran" -gt "$turn_max" ]; then ran=$turn_max; fi
+  echo $((now + ran)) > "$owed" 2>/dev/null || true
+}
+
 exec 7>>"$locks/asmalloc-measure.lock"
-flock -x 7
+if [ "$both" = 1 ]; then
+  # The wait is outside the lock, so a measurement that pauses nothing is not held up by it.
+  while :; do
+    flock -x 7
+    owes=$(heavy_owed)
+    if [ "$owes" -le 0 ]; then break; fi
+    flock -u 7
+    sleep "$owes"
+  done
+else
+  flock -x 7
+fi
 if [ "$both" = 1 ]; then
   # After the measurement lock, so heavy work is held back only while this one runs, not
   # while it queues behind another measurement.
   exec 8>>"$locks/asmalloc-heavy.turn"
   flock -x 8
-  trap 'systemctl --user thaw "$slice" 2>/dev/null || true' EXIT
+  started=$(date +%s)
+  trap finish EXIT
   trap 'exit 130' INT TERM HUP
   # Fails when no heavy work is running, which leaves nothing to pause.
   systemctl --user freeze "$slice" 2>/dev/null || true
