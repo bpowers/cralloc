@@ -856,6 +856,37 @@ pub fn servers_large_sat() -> Vec<Job> {
         .collect()
 }
 
+/// What asmalloc's default background thread does to a large-heap server
+/// (docs/research/default-thread-servers.md): the order service at 2 GiB, the log store and
+/// Meilisearch, each filled, then half a minute at 70% (`s70`, three ten-second pieces), a
+/// silence of 30 s with the connections open, long enough for the thread to drain and park,
+/// one burst at 70% marked in pieces so that its first 5 ms, the rest of its first 50 ms and
+/// of its first 500 ms are summarised apart (`b5`, `b50`, `b500`, then `b2`), and a minute
+/// after the connections close (`idle`).
+pub fn servers_thread() -> Vec<Job> {
+    let want = ["orders axum cache 2G", "connect store 1M", "meilisearch hn"];
+    large()
+        .into_iter()
+        .filter(|l| want.contains(&l.id.as_str()))
+        .map(|l| {
+            let r = l.r70;
+            let mut segs = vec![format!("_fill:closed:{}", l.fill_s), format!("_w70:{r}:2")];
+            segs.extend((0..3).map(|_| format!("s70:{r}:10")));
+            segs.extend([
+                "off:off:30".to_string(),
+                format!("b5:{r}:0.005"),
+                format!("b50:{r}:0.045"),
+                format!("b500:{r}:0.45"),
+                format!("b2:{r}:1.5"),
+                "idle:close:60".into(),
+            ]);
+            let mut job = large_job(l, segs.join(","), "s70", " thread");
+            job.group = "servers-thread";
+            job
+        })
+        .collect()
+}
+
 /// Every CPU any job may use.
 pub fn measurement_cpus() -> Vec<usize> {
     both()
