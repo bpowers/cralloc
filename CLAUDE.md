@@ -29,7 +29,10 @@ process light.
   before asking for a merge, and never add a slow step to it: a test or proof that takes
   more than a few seconds is marked slow and runs with `scripts/gate --all`, which you run
   before asking to merge a change to shared types or protocols. Benchmarks, the Lean check,
-  TLA+, Miri, fuzzing and the preload checks run on demand.
+  TLA+, Miri, fuzzing and the preload checks run on demand. The slow steps have time limits
+  that count the time heavy work spends paused for a measurement, so on a busy machine one
+  can time out (exit 124, or a proof marked FAILED with no failing check): rerun that step
+  alone with `ASMALLOC_TEST_TIMEOUT` or `KANI_TIMEOUT` raised before reading it as a failure.
 - The machine is shared. Stop only processes you started, by process ID; never kill by
   name (`pkill`, `killall`), since another teammate may be running the same tool.
 - Timed measurements do not share cores, or a cache, with anything else. Run every build,
