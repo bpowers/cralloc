@@ -238,3 +238,22 @@ DataFusion runs were made by hand in a cgroup of their own (`scripts/memlimit`, 
 spinning CPUs 0 to 3, under `scripts/measure --both-l3`. Meilisearch ran through `benchrun`
 with local `build` entries in `bench/allocators.toml` (not committed), one round of three
 builds a session. `HOLD_CEIL=1024` throughout.
+
+## DataFusion after the clocked pass's new floor
+
+2026-10-22. Main `b8ae757` (merged at `d8416c2`) changed the clocked pass: its goal is a
+quarter of what the last lap counted as returnable, down to the floor, with no term for what is
+over the cap. DataFusion's peak did not move: on main `69e00b7` against `3fdec1b`, six rounds
+interleaved with jemalloc, by the method above.
+
+| build | peak MiB | faults | Gcycles |
+|---|---:|---:|---:|
+| main `3fdec1b` | 854 to 871 | 1.03M to 1.05M | 70.2 to 71.3 |
+| main `69e00b7` | 853 to 867 | 1.02M to 1.05M | 70.3 to 70.7 |
+| jemalloc | 851 to 881 | 1.02M to 1.03M | 72.2 to 73.4 |
+
+The clocked pass returns nothing in DataFusion either way: its run is three and a half seconds of
+queries whose reuse keeps the frontiers high. With `creditdiag.py`, three runs of `69e00b7` and
+four of `3fdec1b`: the hold returned 1.66 to 1.77 GB a run (1.68 to 1.79 before), growth
+payments 1.03 to 1.16 GB (1.04 to 1.09), the clocked pass nothing in both. Cycles in this session
+were about 0.7 G higher for every build than in the sessions above.
