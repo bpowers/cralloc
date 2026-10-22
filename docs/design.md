@@ -803,7 +803,7 @@ rule that returns it (`docs/research/memory.md` has the measurements behind them
 
 | What holds the memory | What returns it | When |
 |---|---|---|
-| Free slots in the bitmaps, on pages with nothing live on them, above what fills reached in the last two intervals | The clocked purge | Once an interval while more than the floor could be returned: up to a quarter of the retained memory, or all of it above the cap, in runs of adjacent pages, carrying on round the heap from where the last pass stopped |
+| Free slots in the bitmaps, on pages with nothing live on them, above what fills reached in the last two intervals | The clocked purge | Once an interval while more than the floor could be returned: up to a quarter of what could be, and never past the floor, in runs of adjacent pages, carrying on round the heap from where the last pass stopped |
 | Free slots of large classes, above the floor | Heartbeats, a bounded amount each; `maintain` in a silence | Once their region has gone a short hold without a free that left a slot resident |
 | The same, whether fills reached it or not, while more than the cap is retained and the heap grows somewhere else | The carve that grows it owes as much as it takes: it returns a bounded part, and heartbeats return the rest | At that carve and the heartbeats after it, a bounded step each |
 | A large block left behind by a move, or one that grew and is freed, beyond a small budget of such memory | The move or the free (see "Large objects") | Before it releases the slot |
@@ -834,8 +834,8 @@ Nine rules stand behind the table.
   interval, and a reader takes a word from two or more intervals back as empty, so nothing
   has to age the words and only a thread that holds a claim in a region writes its word.
   Once an interval a pass carries on round the heap from where the last one stopped and
-  returns free pages above the frontiers: up to a quarter of the retained memory, or all of
-  it above the cap, in bounded steps spread over the heartbeats that follow. While the
+  returns free pages above the frontiers: up to a quarter of what the last lap found it
+  could return, in bounded steps spread over the heartbeats that follow. While the
   program runs it never takes pages below a frontier, however high the count. Those are the
   pages the next fills take, and purging them only makes the program fault them back. What
   two intervals did not need goes back, which is the rule the depot stacks and the spares
@@ -846,8 +846,8 @@ Nine rules stand behind the table.
   requests of the next burst to fault them back
   (`docs/research/default-thread-servers.md`). In a silence a pass takes what lies above
   the frontiers first, and goes below them only while more than the floor could still be
-  returned, from the top of each region down, so that what stays is the lowest pages, the
-  ones the next fills take. A frontier is a hint: a wrong one costs a purge too many or
+  returned, each region from its top down, so that what a region keeps is its lowest
+  pages, the ones its next fills take. A frontier is a hint: a wrong one costs a purge too many or
   too few, never a page in use, because the purge is a claim.
 - **Purge in runs, and let short runs wait.** Returning memory costs a system call and a
   round of interrupts to the other CPUs for each call, whatever its size, so a pass
@@ -896,7 +896,8 @@ Nine rules stand behind the table.
   bounded looks once an interval, and in a silence returns held slots at its second round.
 - **Under a floor, the clock returns nothing.** The floor of the allowance (see "Sizing
   from evidence") is measured against what a pass could return: resident pages with
-  nothing live on them. While that totals no more than the floor the clocked pass returns
+  nothing live on them, and while the program runs only those above the frontiers. While
+  that totals no more than the floor the clocked pass returns
   nothing, and above it a pass stops at the floor. It is not measured against all the free
   memory the heap retains. A large heap holds many times the floor in free slots on pages
   with live neighbours, which nothing can return, so by that measure the floor would never
@@ -923,12 +924,13 @@ Nine rules stand behind the table.
   both is what the cap exists to stop. Taking back pages that a purge returned is reuse,
   not growth, and is not charged; charging it sets the allocator purging what it is about
   to refill. That leaves a class that the clock had emptied free to refill while another's
-  freed memory is still resident; the clocked pass returns everything above the cap that
-  fills no longer reach, so that lasts about two intervals. Free objects on pages that
+  freed memory is still resident; the clocked pass returns what fills no longer reach, a
+  quarter of it an interval, so that lasts a few intervals. Free objects on pages that
   also hold live ones cannot be purged; that is fragmentation, and it stays counted. A
-  large heap can therefore sit over the cap for good. Its growth always pays and its idle
-  memory goes in one pass, but the memory it is reusing is left alone, which is why the
-  clocked pass does not take the count as licence to purge below a frontier. Objects
+  large heap can therefore sit over the cap for good. Its growth always pays, and what it
+  has stopped using goes back by the clock, but the memory it is reusing is left alone,
+  which is why the cap gives the clocked pass no licence: its goal is set by what it could
+  return and by the floor, and the cap acts only when the heap grows. Objects
   parked in magazines, spares and the depot are not free and are not in the count; the
   next rule handles them.
 - **Parked objects do not pin the heap.** An object parked in a magazine holds its page as
