@@ -116,21 +116,22 @@ pub(super) fn drains_enabled(depot: &Depot) -> bool {
 
 /// This process's generation, drawing one if there is none yet. `None` until [`prepare`] has
 /// succeeded.
-pub(super) fn current<O: Os>(depot: &Depot, area: Area<'_, O>) -> Option<Generation> {
+/// With it, whether this call installed it.
+pub(super) fn current<O: Os>(depot: &Depot, area: Area<'_, O>) -> (Option<Generation>, bool) {
     if depot.common.status.load(Acquire) & READY == 0 {
-        return None;
+        return (None, false);
     }
     let word = word(area.generation_page());
     if let Some(generation) = Generation::from_word(word.load(Acquire)) {
-        return Some(generation);
+        return (Some(generation), false);
     }
     let drawn = Generation::from_random(area.space().os().random());
     match word.compare_exchange(0, drawn.get(), AcqRel, Acquire) {
         Ok(_) => {
             note_drawn(depot);
-            Some(drawn)
+            (Some(drawn), true)
         }
-        Err(now) => Generation::from_word(now),
+        Err(now) => (Generation::from_word(now), false),
     }
 }
 
@@ -172,7 +173,21 @@ impl<O: Os, R: Routines, S: Source> Cache<'_, O, R, S> {
 
     /// This process's generation, drawing one if there is none yet; `None` before the first
     /// slow path has readied the magazine area.
+    ///
+    /// The draw in a fork child also makes the background thread's word, which the child
+    /// inherited and which may name its parent's thread, the child's: a child begins with no
+    /// thread, and its slow paths return memory until it starts one of its own
+    /// (`crate::thread_word`, "Whose duty").
     pub fn generation(&self) -> Option<Generation> {
-        current(self.depot, self.area)
+        let (generation, drawn) = current(self.depot, self.area);
+        if let Some(generation) = generation
+            && drawn
+            && forked(self.depot)
+        {
+            self.source
+                .thread()
+                .make_own(crate::thread_word::key_of(generation.get()));
+        }
+        generation
     }
 }

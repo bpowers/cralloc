@@ -4244,6 +4244,9 @@ mod hold;
 /// Purge steps bounded in pages whatever the unit: large slots returned in pieces.
 mod pieces;
 
+/// Returning memory while the background thread runs.
+mod thread_duty;
+
 /// Review of the move of the region headers into the back end's state, with the leaf bitmap
 /// last in the block (`host::RegionHeader`, `layout`).
 mod review_headers {

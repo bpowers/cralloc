@@ -38,8 +38,24 @@ impl<O: Os> Source for Back<'_, O> {
         self.free(object, class.class());
     }
 
-    fn purge_step(&self, now: &dyn Fn() -> u64) {
-        self.heartbeat_with(now);
+    fn purge_step(&self, now: &dyn Fn() -> u64, seen: crate::thread_word::Snapshot) -> bool {
+        self.heartbeat_for(now, seen)
+    }
+
+    fn thread_step(&self, now: &dyn Fn() -> u64) -> PurgeStep {
+        let step = self.thread_purge_steps(now);
+        PurgeStep {
+            more: step.more,
+            returned: step.returned != 0,
+        }
+    }
+
+    fn plan_thread(&self) {
+        self.plan_hold();
+    }
+
+    fn thread_due(&self, now: &dyn Fn() -> u64) -> bool {
+        self.purge_due(now)
     }
 
     fn purge_pass_step(&self, now: &dyn Fn() -> u64) -> PurgeStep {

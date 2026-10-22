@@ -137,6 +137,10 @@ def run(mode, build, rnd, args, out):
             perf.wait(timeout=120)
         read_probe(pid, binary, out / f"{tag}.events")
         (out / f"{tag}.maps").write_text(Path(f"/proc/{pid}/maps").read_text())
+        # The server's user and system CPU time over its life, all threads (fields 14 and 15
+        # of stat, in clock ticks), for the work the run cost, not only its latency.
+        stat = Path(f"/proc/{pid}/stat").read_text().rsplit(")", 1)[1].split()
+        (out / f"{tag}.cputime").write_text(f"utime_ticks={stat[11]} stime_ticks={stat[12]}\n")
         os.kill(pid, signal.SIGTERM)
         srv.wait(timeout=60)
         print(f"{tag}: gen exit {gen.returncode}, server exit {srv.returncode}", flush=True)

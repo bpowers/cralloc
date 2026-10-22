@@ -4,7 +4,7 @@
 use super::*;
 use crate::depot::Cache;
 use crate::depot::thread::{QUIET_ROUNDS, Rest, Seen};
-use crate::thread_word::{AWAKE, DORMANT, LEVEL, NONE, OFF, PARKED, Snapshot, WANTED};
+use crate::thread_word::{AWAKE, DORMANT, LEVEL, NONE, OFF, PARKED, SLEEPING, Snapshot, WANTED};
 
 /// One call of the thread's loop: the steps of the round of this interval, if one is due, and
 /// the decision after it. Returns the decision and whether a round ran.
@@ -417,22 +417,216 @@ fn a_child_that_shares_memory_is_not_a_new_process() {
     assert!(!rig.source.thread.claim_start(rig.os(), key, AWAKE));
 }
 
-/// A fork child whose parent's thread was awake inherits `AWAKE` under the parent's key: its
-/// crossings still ask for a look, and a thread of its own then wants one (second review).
+/// A fork child whose parent's thread was awake inherits `AWAKE` under the parent's key, and
+/// its generation's draw makes the word its own `NONE`: its crossings still ask for a look,
+/// and a thread of its own then wants one (second review).
 #[test]
 fn a_fork_child_of_an_awake_parent_sees_its_own_crossings() {
     let rig = rig(12, TIGHT);
     one_slow_path(&rig);
     let parent = started(&rig);
     let word = &rig.source.thread;
+    word.raise_level();
     // SAFETY: nothing else runs.
     unsafe { rig.os().wipe_for_fork() };
     let keeper = SimCpu::new(1);
     let child = rig.cache(&keeper).thread_key();
     assert_ne!(child, parent);
-    assert_eq!(word.load(), Snapshot(parent | AWAKE));
+    assert_eq!(
+        word.load(),
+        Snapshot(child | NONE | LEVEL),
+        "the child began with a thread, or lost the level"
+    );
     rig.os().set_other_thread(true);
     word.raise_level();
     slow_path_end(&rig);
     assert_eq!(word.load(), Snapshot(child | WANTED));
+}
+
+/// Two slow paths on CPU 0, an allocation's and a free's, each with its heartbeat whatever the
+/// magazines hold (under `TIGHT` every slow path beats).
+fn beating_slow_paths(rig: &TestRig) {
+    let user = SimCpu::new(0);
+    let program = rig.cache(&user);
+    let object = program.alloc_slow(tiny_class()).unwrap();
+    program.free_slow(tiny_class(), object);
+}
+
+/// The thread, awake and asleep in a timed wait, as `begin_sleep` leaves it once a round of
+/// this interval is done, for the thread on CPU 1.
+fn asleep(rig: &TestRig) -> u64 {
+    one_slow_path(rig);
+    let key = started(rig);
+    let keeper = SimCpu::new(1);
+    let thread = rig.cache(&keeper);
+    thread.maintain();
+    assert_eq!(
+        thread.begin_sleep(key),
+        Some(Snapshot(key | AWAKE | SLEEPING))
+    );
+    key
+}
+
+/// A heartbeat that makes work due that the thread does wakes the sleeping thread, once: the
+/// next slow path finds the mark gone and makes no call. The thread then finds the work in its
+/// look before it sleeps, takes it, and only then sleeps.
+#[test]
+fn a_sleeping_thread_is_woken_once_for_work_a_heartbeat_made_due() {
+    let rig = rig(12, TIGHT);
+    let key = asleep(&rig);
+    rig.source.coming_due.store(1, Relaxed);
+    beating_slow_paths(&rig);
+    assert_eq!(rig.os().wakes(), 1, "the work woke nobody");
+    assert_eq!(rig.source.thread.load(), Snapshot(key | AWAKE));
+    beating_slow_paths(&rig);
+    assert_eq!(rig.os().wakes(), 1, "an awake thread was woken again");
+    let keeper = SimCpu::new(1);
+    let thread = rig.cache(&keeper);
+    assert_eq!(thread.begin_sleep(key), None, "slept with work due");
+    assert_eq!(rig.source.thread.load(), Snapshot(key | AWAKE));
+    let plans = rig.source.plans();
+    assert!(thread.thread_steps(), "the work was not taken");
+    assert_eq!(rig.source.plans(), plans + 1);
+    assert_eq!(rig.source.owing.load(Relaxed), 0);
+    assert_eq!(
+        thread.begin_sleep(key),
+        Some(Snapshot(key | AWAKE | SLEEPING))
+    );
+}
+
+/// Work a heartbeat makes due while the thread is working wakes nobody: the thread finds it in
+/// its look before it sleeps.
+#[test]
+fn work_made_due_while_the_thread_works_is_found_before_it_sleeps() {
+    let rig = rig(12, TIGHT);
+    let key = asleep(&rig);
+    let keeper = SimCpu::new(1);
+    let thread = rig.cache(&keeper);
+    thread.end_sleep(key);
+    rig.source.coming_due.store(1, Relaxed);
+    beating_slow_paths(&rig);
+    assert_eq!(rig.os().wakes(), 0, "a working thread was woken");
+    assert_eq!(thread.begin_sleep(key), None, "slept with work due");
+    assert!(thread.thread_steps());
+    assert_eq!(
+        thread.begin_sleep(key),
+        Some(Snapshot(key | AWAKE | SLEEPING))
+    );
+}
+
+/// Without a thread at work, the slow paths return memory themselves and wake nobody, whatever
+/// comes due.
+#[test]
+fn without_a_running_thread_slow_paths_keep_the_work() {
+    for state in [NONE, DORMANT, OFF, WANTED] {
+        let rig = rig(12, TIGHT);
+        one_slow_path(&rig);
+        let keeper = SimCpu::new(1);
+        let key = rig.cache(&keeper).thread_key();
+        rig.source.thread.set(key | state | SLEEPING);
+        rig.source.coming_due.store(4, Relaxed);
+        let purges = rig.source.purges();
+        beating_slow_paths(&rig);
+        assert!(rig.source.purges() > purges);
+        assert_eq!(rig.os().wakes(), 0, "state {state}");
+        assert_eq!(rig.source.owing.load(Relaxed), 0, "state {state}");
+    }
+}
+
+/// A fork child whose parent's thread was asleep or working inherits the word, not the thread:
+/// the first time its heartbeat makes work due, the cold look finds the word another
+/// process's, makes it the child's `NONE` and wakes nobody, and the heartbeat takes its step
+/// after all; from then on the child's slow paths return memory themselves.
+#[test]
+fn a_fork_child_takes_back_the_work_its_parents_thread_had() {
+    for working in [false, true] {
+        let rig = rig(12, TIGHT);
+        let parent = asleep(&rig);
+        if working {
+            rig.source.thread.end_sleep(parent);
+        }
+        // SAFETY: nothing else runs.
+        unsafe { rig.os().wipe_for_fork() };
+        let keeper = SimCpu::new(1);
+        let child = rig.cache(&keeper).thread_key();
+        assert_ne!(child, parent);
+        rig.source.coming_due.store(1, Relaxed);
+        let purges = rig.source.purges();
+        beating_slow_paths(&rig);
+        assert_eq!(rig.os().wakes(), 0, "the child woke its parent's thread");
+        assert_eq!(rig.source.thread.load(), Snapshot(child | NONE));
+        assert!(
+            rig.source.purges() >= purges + 2,
+            "the heartbeat did not take its step after all"
+        );
+        rig.source.coming_due.store(1, Relaxed);
+        let owing = rig.source.owing.load(Relaxed);
+        beating_slow_paths(&rig);
+        assert_eq!(
+            rig.source.owing.load(Relaxed),
+            owing,
+            "work left to no thread"
+        );
+    }
+}
+
+/// A level does not wake a sleeping thread and does not take its mark: a waker that found the
+/// mark gone would take the thread for working and leave it asleep.
+#[test]
+fn a_level_keeps_a_sleeping_threads_mark() {
+    let rig = rig(12, TIGHT);
+    let key = asleep(&rig);
+    rig.source.thread.raise_level();
+    slow_path_end(&rig);
+    assert_eq!(rig.source.thread.load(), Snapshot(key | AWAKE | SLEEPING));
+    assert_eq!(rig.os().wakes(), 0);
+    rig.source.thread.rouse_any(rig.os());
+    assert_eq!(rig.source.thread.load(), Snapshot(key | AWAKE));
+    assert_eq!(rig.os().wakes(), 1);
+    rig.source.thread.rouse_any(rig.os());
+    assert_eq!(rig.os().wakes(), 1, "two wakes for one mark");
+}
+
+/// The thread does not sleep while this interval's round is still to run.
+#[test]
+fn the_thread_does_not_sleep_before_its_round() {
+    let rig = rig(12, TIGHT);
+    one_slow_path(&rig);
+    let key = started(&rig);
+    let keeper = SimCpu::new(1);
+    let thread = rig.cache(&keeper);
+    assert_eq!(thread.begin_sleep(key), None, "slept with a round due");
+    assert_eq!(rig.source.thread.load(), Snapshot(key | AWAKE));
+    thread.maintain();
+    assert!(thread.begin_sleep(key).is_some());
+}
+
+/// A turn of the thread's loop: its round, with a purge step after each of the round's steps;
+/// then a timed wait on the word it marked asleep, and the mark taken back.
+#[test]
+fn a_turn_steps_between_the_rounds_steps_and_sleeps_on_the_word_it_marked() {
+    let rig = rig(12, TIGHT);
+    one_slow_path(&rig);
+    let key = started(&rig);
+    let keeper = SimCpu::new(1);
+    let thread = rig.cache(&keeper);
+    let mut seen = Seen::default();
+    let mut returned = false;
+    let steps = rig.source.thread_steps();
+    thread.thread_turn(&mut seen, key, &mut returned, 1);
+    let taken = rig.source.thread_steps() - steps;
+    assert!(
+        taken >= 2,
+        "a round without a purge step between its steps: {taken}"
+    );
+    assert_eq!(
+        rig.os().last_timed_wait(),
+        Some((key | AWAKE | SLEEPING) as u32),
+        "the wait was not on the word marked asleep"
+    );
+    assert_eq!(
+        rig.source.thread.load(),
+        Snapshot(key | AWAKE),
+        "the mark was not taken back"
+    );
 }

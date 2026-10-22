@@ -36,6 +36,19 @@ const _: () = assert!(ALLOWANCE_FLOOR_HUGE_PAGES < RETAINED_CAP_HUGE_PAGES);
 /// A step costs at least a huge-page fault or 512 small ones, which dwarfs the walk.
 pub const GROWTH_STEP_HUGE_PAGES: usize = 1;
 
+// A grower that leaves the debt to the background thread wakes it once a step, when its add
+// crosses a multiple of the step (`thread_word::crosses`), which takes a power of two.
+const _: () = assert!(GROWTH_STEP_HUGE_PAGES.is_power_of_two());
+
+/// While the background thread pays for growth, the most growth that may stay unpaid before
+/// slow paths pay it again, growers and heartbeats a step each, in huge pages: 8, or 16 MiB.
+/// The thread is woken when a step of growth comes due and pays it within its wake-up's
+/// latency, so a debt this large means the thread has not run (starved, throttled, or busy
+/// with a long round), and the bound on retained memory must not rest on the scheduler
+/// (design: "Heartbeat"). It bounds retained memory to the cap and about this much more while
+/// the thread lags.
+pub const GROWTH_UNPAID_HUGE_PAGES: usize = 8;
+
 /// The decay interval in ticks of [`crate::os::Os::ticks`]: 2^32, about a second of the cycle
 /// counter at a few gigahertz, the same as the idle check's. A pass over the heap starts at
 /// most once an interval. A second is long next to the microseconds between heartbeats and
@@ -293,6 +306,13 @@ pub const fn allowance_floor(geometry: Geometry) -> usize {
 #[inline(always)]
 pub const fn growth_step(geometry: Geometry) -> usize {
     GROWTH_STEP_HUGE_PAGES * geometry.huge_page_size()
+}
+
+/// The most growth that may stay unpaid while the background thread pays for it
+/// ([`GROWTH_UNPAID_HUGE_PAGES`]), in bytes for a geometry.
+#[inline(always)]
+pub const fn growth_unpaid(geometry: Geometry) -> usize {
+    GROWTH_UNPAID_HUGE_PAGES * geometry.huge_page_size()
 }
 
 /// How much a grower that has just taken a growth debt of `debt` bytes purges, with
