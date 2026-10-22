@@ -23,6 +23,9 @@
 //!   bytes they copied.
 //! - `json`: parse a generated `size`-byte JSON document into `serde_json::Value` and drop
 //!   it, `reps` times.
+//! - `regrow`: the cost of one `realloc` of a small block moving one class up, from a growing
+//!   `Vec` (`pattern=vec from=128`) or `String` (`pattern=string to=1024`) against a control
+//!   that reserves the final capacity. Not part of any suite.
 use bench_harness::mem::rss_now;
 use bench_harness::report::{Measure, Phase};
 use bench_harness::{Args, Better, Counters, Cpus, Report, Rng, SizeMix};
@@ -576,6 +579,95 @@ fn generate_json(size: usize) -> String {
     }
     s.push(']');
     s
+}
+
+/// What one `regrow` iteration does: the growing form, which reallocates, and its control,
+/// which makes the same allocation, writes and free with the final capacity reserved up front.
+#[derive(Clone, Copy)]
+enum Regrow {
+    /// A `Vec<u8>` of `from` bytes, full, pushed one byte past its capacity: one `realloc` to
+    /// twice the size, as a buffer that outgrows its first guess does.
+    Vec { from: usize },
+    /// A `String` built eight bytes at a time to `to` bytes: a `realloc` at every power of two
+    /// from 16 bytes.
+    String { to: usize },
+}
+
+impl Regrow {
+    fn reallocs(self) -> usize {
+        match self {
+            Regrow::Vec { .. } => 1,
+            Regrow::String { to } => (to / 8).max(1).ilog2() as usize,
+        }
+    }
+
+    #[inline(never)]
+    fn run(self, iters: usize, control: bool) -> u64 {
+        let mut acc = 0u64;
+        match self {
+            Regrow::Vec { from } => {
+                for i in 0..iters {
+                    let mut v: Vec<u8> = Vec::with_capacity(if control { 2 * from } else { from });
+                    v.resize(from, i as u8);
+                    v.push(1);
+                    acc += black_box(&v).len() as u64;
+                }
+            }
+            Regrow::String { to } => {
+                for _ in 0..iters {
+                    let mut s = if control { String::with_capacity(to) } else { String::new() };
+                    for _ in 0..to / 8 {
+                        s.push_str(black_box("abcdefgh"));
+                    }
+                    acc += black_box(&s).len() as u64;
+                }
+            }
+        }
+        acc
+    }
+}
+
+/// `regrow`: the cost of one `realloc` of a small block that moves one class up, as a growing
+/// `Vec` or `String` makes it. Runs the growing form and its control (`Regrow`) in alternating
+/// phases, `rounds` of each, `iters` iterations a phase, and reports the difference per
+/// `realloc` in instructions and cycles: the call, the copy, and nothing else, since the
+/// control makes the same allocation, writes and free.
+pub fn regrow(args: &Args) {
+    pin_main();
+    let pattern = args.str("pattern", "vec");
+    let shape = match pattern.as_str() {
+        "vec" => Regrow::Vec { from: args.usize("from", 128) },
+        "string" => Regrow::String { to: args.usize("to", 1024) },
+        other => panic!("regrow: pattern={other} is not vec or string"),
+    };
+    let iters = args.usize("iters", 1_000_000);
+    let rounds = args.usize("rounds", 5);
+    let counters = Counters::region();
+    // Warms the magazines and the code before anything is counted.
+    black_box(shape.run(iters / 10 + 1, false) + shape.run(iters / 10 + 1, true));
+    let (mut grow, mut control) = (None, None);
+    for _ in 0..rounds {
+        let m = Measure::start(&counters);
+        black_box(shape.run(iters, false));
+        accumulate(&mut grow, m.stop());
+        let m = Measure::start(&counters);
+        black_box(shape.run(iters, true));
+        accumulate(&mut control, m.stop());
+    }
+    let (grow, control) = (grow.unwrap(), control.unwrap());
+    let calls = (rounds * iters * shape.reallocs()) as f64;
+    let per = |event: &str| {
+        let get = |p: &Phase| p.counters.get(event).unwrap_or(0) as f64;
+        (get(&grow) - get(&control)) / calls
+    };
+    Report::new("regrow", args)
+        .phase("grow", &grow)
+        .phase("control", &control)
+        .metric("reallocs", calls)
+        .metric("instructions/realloc", per("instructions"))
+        .metric("cycles/realloc", per("cycles"))
+        .primary("cycles/realloc", per("cycles"), Better::Lower)
+        .emit();
 }
 
 pub fn json(args: &Args) {

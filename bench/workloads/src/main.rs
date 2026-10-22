@@ -33,6 +33,8 @@ fn main() {
         "burst" => single::burst(&args),
         "vecgrow" => single::vecgrow(&args),
         "json" => single::json(&args),
+        // The cost of one small realloc; not part of any suite.
+        "regrow" => single::regrow(&args),
         // Memory shapes for docs/research/memory.md; not part of any suite.
         "quiet" => mem::quiet(&args),
         "touch" => mem::touch(&args),
