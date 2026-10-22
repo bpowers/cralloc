@@ -282,6 +282,9 @@ fn child(mode: &str) {
         "workerfork" => {
             worker_frees(|| {}, || {});
             thread::sleep(Duration::from_secs(5));
+            // Slow paths in the parent, whose look clears the level bit the parent's thread
+            // left: the child then inherits a plain `AWAKE`.
+            light_work(1);
             fork_and_free();
             return;
         }
