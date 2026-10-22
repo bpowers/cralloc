@@ -4,6 +4,7 @@
 use super::large::{HEADROOM, growth_rooms, shrink_moves_below_for};
 use crate::SimHeap;
 use crate::classes::{Class, MAX_SMALL_SIZE, SmallClass};
+use crate::depot::siblings::{SIBLINGS, stride};
 use crate::os::OsError;
 use crate::os::sim::{Call, Faults, SIM_THREADS, SimOs};
 use crate::space::Plan;
@@ -302,6 +303,75 @@ fn a_simulated_heap_exchanges_magazines() {
     let burst = 2 * crate::classes::MagazineSize::MAX.capacity() + 100;
     for size in [8, 48, 512, MAX_SMALL_SIZE] {
         bursts(&heap, size, burst, 40);
+    }
+}
+
+/// A fresh heap's first objects of a class smaller than a line, siblings made in a loop, are
+/// handed out a stride apart, so that none shares a cache line with the one before; the rest of
+/// the class's first magazine, and its next, filled in the same interval, are dense.
+#[test]
+fn a_fresh_heaps_first_objects_of_a_small_class_lie_on_lines_of_their_own() {
+    let heap = SimHeap::<Shape>::new();
+    let sizes: Vec<usize> = if cfg!(miri) {
+        [40].to_vec()
+    } else {
+        (8..64).step_by(8).collect()
+    };
+    for size in sizes {
+        let l = layout(size, 8);
+        let capacity = Class::of_size(size)
+            .and_then(Class::small)
+            .unwrap()
+            .magazine()
+            .capacity();
+        // SAFETY: a valid, non-empty layout.
+        let got: Vec<*mut u8> = (0..2 * capacity)
+            .map(|_| unsafe { heap.alloc(l) })
+            .collect();
+        assert!(got.iter().all(|p| !p.is_null()));
+        let siblings = SIBLINGS * stride(size).unwrap();
+        for pair in got[..=siblings].windows(2) {
+            let (low, high) = (pair[0].min(pair[1]).addr(), pair[0].max(pair[1]).addr());
+            assert_ne!((low + size - 1) / 64, high / 64, "{size}: {pair:?}");
+        }
+        for pair in got[siblings..].windows(2) {
+            assert_eq!(pair[1].addr() - pair[0].addr(), size, "{size}: {pair:?}");
+        }
+        for p in got {
+            // SAFETY: allocated above with `l`, freed once.
+            unsafe { heap.dealloc(p, l) };
+        }
+    }
+}
+
+/// A class opens one run at start-up whatever the cycle counter reads. On a machine up for
+/// more than an interval the clock's first reading steps its count from zero; if that came at
+/// the first heartbeat, every frontier the first fills recorded would read as an earlier
+/// interval's and the class would open a second run at once. Only the first magazine is
+/// strided, here as when the clock starts at zero.
+#[test]
+fn a_class_opens_one_run_at_start_whatever_the_clock_reads() {
+    for start in [0u64, 5 * crate::depot::IDLE_TICKS] {
+        let heap = SimHeap::<Shape>::new();
+        heap.os().advance_clock(start);
+        let size = 40;
+        let l = layout(size, 8);
+        let capacity = Class::of_size(size)
+            .and_then(Class::small)
+            .unwrap()
+            .magazine()
+            .capacity();
+        // SAFETY: a valid, non-empty layout.
+        let got: Vec<*mut u8> = (0..6 * capacity)
+            .map(|_| unsafe { heap.alloc(l) })
+            .collect();
+        let strided: Vec<usize> = got
+            .chunks(capacity)
+            .enumerate()
+            .filter(|(_, m)| m[1].addr().abs_diff(m[0].addr()) != size)
+            .map(|(i, _)| i)
+            .collect();
+        assert_eq!(strided, [0], "clock starts at {start:#x}");
     }
 }
 
@@ -1006,8 +1076,10 @@ fn resident<S: crate::os::sim::Shape>(heap: &SimHeap<S>) -> usize {
 /// magazines, so that no slow path runs. Without `maintain` the heap keeps what it held. With
 /// it once an interval, the idle slab is drained and laundered, the depot sheds, and the
 /// clocked purge returns what is free from the top down, a quarter of what is retained an
-/// interval once under the cap: resident memory comes down to what `collect` leaves, within
-/// what that rate leaves after the intervals run. A second call in an interval does nothing.
+/// interval once under the cap, and stops at the floor of what a purge could return: what a
+/// purge could still return comes down to the floor, and resident memory to what `collect`
+/// leaves, the floor, and the pages the light work's loaded magazines pin. A second call in an
+/// interval does nothing.
 #[test]
 #[cfg_attr(miri, ignore = "reads every simulated page dozens of times")]
 fn maintain_brings_a_quiet_heap_down_to_what_collect_leaves() {
@@ -1045,6 +1117,7 @@ fn maintain_brings_a_quiet_heap_down_to_what_collect_leaves() {
         assert_eq!(again, calls, "a second call in an interval did something");
     }
     let maintained = resident(&heap);
+    let returnable = heap.heap.back().unwrap().returnable().unwrap();
     heap.collect();
     let collected = resident(&heap);
     // Two intervals before the purge has what was parked (a look, then the drain and shed).
@@ -1055,15 +1128,24 @@ fn maintain_brings_a_quiet_heap_down_to_what_collect_leaves() {
     // stopped, so no free page waits behind the pages light work revives each interval: an
     // earlier walk that began every pass at the top left the bottom of the lowest region
     // resident for ever, under a slack of two huge pages that hid it.
+    //
+    // The passes stop at the floor of what a purge could return, which `collect` does not
+    // keep. The light work's loaded magazines hold objects the burst freed in random order,
+    // each on a page of its own, which no purge can return while they are cached and
+    // `collect` launders and returns; so the floor is checked on the count, and resident
+    // memory against what `collect` leaves only loosely.
     let geometry = <Shape as crate::os::sim::Shape>::GEOMETRY;
-    // The passes stop at the floor, which `collect` does not keep.
-    let cap = crate::back::policy::retained_cap(geometry);
     let floor = crate::back::policy::allowance_floor(geometry);
-    let left = floor as f64 + (cap - floor) as f64 * 0.75f64.powi(intervals - 5);
+    let run = crate::back::policy::PURGE_MAX_RUN_PAGES as usize * geometry.page_size();
     assert!(
-        maintained <= collected + left as usize,
+        returnable <= floor + run && returnable + run >= floor,
+        "after {intervals} intervals of maintain, {returnable} bytes a purge could return \
+         against a floor of {floor}"
+    );
+    assert!(
+        maintained <= collected + 2 * floor,
         "after {intervals} intervals of maintain: {maintained} bytes resident, collect leaves \
-         {collected}, the clocked rules allow {left:.0} more"
+         {collected}, the floor is {floor}"
     );
     assert!(quiet > 4 * maintained, "{quiet} {maintained}");
 }

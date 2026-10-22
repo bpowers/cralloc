@@ -31,7 +31,7 @@ fn sleeping<O: Os>(back: &Back<'_, O>) -> bool {
 fn thread_runs<O: Os>(back: &Back<'_, O>) -> usize {
     let before = back.retained();
     loop {
-        let step = back.purge_steps(&|| back.now());
+        let step = back.thread_purge_steps(&|| back.now());
         if !step.more {
             break;
         }

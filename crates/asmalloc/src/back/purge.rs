@@ -24,10 +24,31 @@
 //!
 //! **Decay** (`decay_step`, one call per heartbeat). Once an interval of the clock
 //! (`policy::DECAY_TICKS`) a pass starts where the walk stands with a goal: a quarter of the
-//! retained count (`policy::decay_goal`), or everything above the cap if that is more. Each
-//! heartbeat then does one bounded step of the walk until the goal is met or the walk has gone
-//! once round, back where the pass began a lap later. The goal is in bytes and the walk stops
-//! within one unit of it, whatever the slot size.
+//! retained count (`policy::decay_goal`), or everything above the cap if that is more, and
+//! never past the floor (below). Each heartbeat then does one bounded step of the walk until
+//! the goal is met or the walk has gone once round, back where the pass began a lap later. The
+//! goal is in bytes and the walk stops within one unit of it, whatever the slot size.
+//!
+//! **The floor** (`policy::allowance_floor`) is measured against what a purge could return:
+//! free pages with nothing live on them that are still resident. Not against the retained
+//! count, which also holds every free slot on a page with a live neighbour: a 1.4 GiB server
+//! retained 185 MiB, of which 1.4 MiB could be returned, so by the count the floor never
+//! applied, and the passes took the last free pages, which the next burst faulted straight
+//! back (`docs/research/default-thread-servers.md`). Every step of the walk adds up the free,
+//! resident pages it sees and leaves, purgeable whether or not its scope or goal let it take
+//! them, and the step that ends a lap (finishes the lowest region) makes that the count, and
+//! starts what has been purged since at zero ([`Back::returnable`]). A pass is held to the
+//! last lap's count less what has been purged since: while that is no more than the floor
+//! it returns nothing, and over it it stops at the floor. Until the first lap has ended there
+//! is no count, and a pass is held to the retained count, which is never less. A pass held to
+//! nothing still walks its lap, purging nothing, so that the next count is taken: a heap with
+//! nothing to return costs one walk of its bitmaps an interval, as a heap of fragmentation
+//! always has. The cheap test stays first: a due pass that finds no more than the floor
+//! retained ends as it starts, since no more could be returned. What a heartbeat's pass
+//! walks, it walks down to the frontiers, so while the program runs the count is of what lies
+//! above them, what such a pass could take; in a silence `maintain`'s passes walk every
+//! region whole. The count is a hint: a lap's steps race with frees, claims and the hold, and
+//! a count too high or too low costs a purge too many or too few for a lap.
 //!
 //! The pass takes only what the last two intervals did not reuse, whatever the count says.
 //! Fills and allocations take the lowest free slots of a region, so the highest slot claimed or
@@ -47,21 +68,38 @@
 //! another grows, is growth's to pay (below). What a burst over the cap that then goes quiet
 //! costs is time: its memory waits until no fill has reached it for an interval.
 //!
-//! A frontier word carries the number of its interval, the clock's time over the interval
-//! (`Clocked::epoch`), so nothing has to age the words: a reader in interval E takes a word of
-//! E whole, a word of E - 1 for its `now`, and anything older as nothing. A frontier
-//! therefore lives one to two intervals of the clock after the claim that set it, however late
-//! the passes are. The number is written by the first heartbeat of each interval that reads
-//! the clock: every heartbeat between passes, and a pass as it finishes each region and as it
-//! ends, so a long pass makes it lag by at most the walk of one region.
+//! A frontier word carries the number of its interval (`Clocked::epoch`), so nothing has to
+//! age the words: a reader in interval E takes a word of E whole, a word of E - 1 for its
+//! `now`, and anything older as nothing. The number is written by the first heartbeat of each
+//! interval that reads the clock: every heartbeat between passes, and a heartbeat's step of a
+//! pass as it finishes each region and as it ends, so a long pass makes it lag by at most the
+//! walk of one region.
+//!
+//! **Frontiers age while the program runs.** The number is not the clock's interval but a
+//! count of the intervals in which a heartbeat ran: a heartbeat in a later interval than the
+//! last counted counts one more, however many passed between (`epoch_after`). `maintain`
+//! never counts. A silence is not evidence that the program has stopped needing what it last
+//! used: the background thread's rounds step the counted clock through a quiet half minute,
+//! and by the clock every frontier would have aged, so that its passes returned the pages
+//! its own drains had just completed. So a frontier lives the interval of its claim and the
+//! next interval in which the program ran. In a silence (a whole interval of the clock since
+//! the last counted, [`Back::silent`], which only `maintain`'s readings can make) a step of
+//! `maintain`'s takes what lies above the frontiers and below them alike ([`Scope::Quiet`]),
+//! from the top of each region down, within a goal that stops at the floor, so what stays is
+//! the lowest pages of the regions the walk reached last, the ones the next fills take. A
+//! heartbeat's step never goes below a frontier: a heartbeat is the program running. Where
+//! nothing calls `maintain` the counted clock moves one interval at most in a silence
+//! (`crate::clock`), so there is no silence, and the first heartbeat after one counts one
+//! interval, as before.
 //!
 //! Regions are in the order classes were first used, so the order across them says nothing
 //! about reuse: the passes carry on round the heap instead of each starting at the top, which
 //! spent every pass's goal on the pages a quiet program revived each interval in the higher
 //! regions and left the free pages of the lowest resident for good. A heap whose free memory
 //! is all fragmentation costs one walk of its bitmaps an interval, in steps. Between passes a
-//! heartbeat reads the decay word and the clock, and the tallies only when a pass is due; a due pass that finds nothing retained
-//! ends as it starts, so the next is an interval later. A clock that has gone back (a resume,
+//! heartbeat reads the decay word and the clock, and the tallies only when a pass is due; a
+//! due pass that finds no more than the floor retained ends as it starts, so the next is an
+//! interval later. A clock that has gone back (a resume,
 //! a restored checkpoint) restarts the interval from the new time, so decay waits at most one
 //! interval for it. `decay_pass`, for the background thread's `maintain`, takes those steps in
 //! one call, until the pass it started or found has ended.
@@ -211,20 +249,27 @@ pub(crate) const fn decay_look(word: u64, now: u64) -> Decay {
     }
 }
 
-/// The interval number to store over `seen` for a clock reading `now`, or `None` to leave it:
-/// the clock's interval if that is later, so that a heartbeat that read the clock just before
-/// a boundary cannot take the number back over one that a later reading wrote (a pass step in
-/// that moment would read every current frontier as old). A clock more than an interval
-/// behind the number has gone back (a resume, a restored checkpoint), as the decay word's
-/// restamp allows for, and is taken as it is.
+/// The epoch word to store over `seen` for a heartbeat's clock reading `now`, or `None` to
+/// leave it. The word counts the intervals in which a heartbeat ran in its low half and holds
+/// the clock's interval of the last of them in its high half (`State::decay`). A reading in a
+/// later interval than the word's counts one more, however many intervals passed between, so
+/// that a silence ages a frontier by one interval at most. A reading in the word's interval or
+/// the one before leaves it, so that a heartbeat that read the clock just before a boundary
+/// cannot count that interval twice. A clock more than an interval behind the word has gone
+/// back (a resume, a restored checkpoint), as the decay word's restamp allows for: it is
+/// taken as it is and counts as a new interval.
 pub(crate) const fn epoch_after(seen: u64, now: u64) -> Option<u64> {
-    let epoch = now / DECAY_TICKS;
-    if epoch > seen || epoch.wrapping_add(1) < seen {
-        Some(epoch)
+    let interval = (now / DECAY_TICKS) & EPOCH_COUNT;
+    let last = seen >> 32;
+    if interval > last || interval.wrapping_add(1) < last {
+        Some(interval << 32 | (seen.wrapping_add(1) & EPOCH_COUNT))
     } else {
         None
     }
 }
+
+/// The low half of the epoch word: the count of intervals in which the program ran.
+const EPOCH_COUNT: u64 = u32::MAX as u64;
 
 /// A pass word: what the steppers of one decay pass share.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -239,10 +284,15 @@ pub(crate) struct Pass {
     /// The pass takes runs of free pages of any length, not only long ones
     /// ([`super::policy::PURGE_ANY_RUN_EVERY`]).
     pub(crate) any: bool,
+    /// The pass began with nothing to return over the floor: it walks a lap to count what a
+    /// purge could return, and purges nothing ("The floor" in the module documentation).
+    pub(crate) count: bool,
 }
 
 /// The pass word's flag for a pass that takes runs of any length, above its pages.
 const ANY: u64 = 1 << 31;
+/// The pass word's flag for a pass that only counts, below [`ANY`].
+const COUNT: u64 = 1 << 30;
 
 /// What one of `maintain`'s steps of a purge did.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
@@ -265,6 +315,26 @@ pub(crate) enum Scope {
     IdleAnyRun,
     /// Every free unit: what growth over the cap and `trim` take.
     All,
+    /// Every free unit, in runs of at least [`super::policy::PURGE_MIN_RUN_PAGES`]: what
+    /// `maintain`'s steps of the clocked pass take in a silence, while more than the floor
+    /// could be returned. From the top of each region down, so what lies above the frontiers
+    /// goes first and the lowest pages stay.
+    Quiet,
+    /// As `Quiet`, in runs of any length.
+    QuietAnyRun,
+}
+
+impl Scope {
+    /// The scope of a clocked pass's step: in a silence or not, a pass that takes runs of any
+    /// length or not.
+    const fn of_pass(quiet: bool, any: bool) -> Scope {
+        match (quiet, any) {
+            (false, false) => Scope::Idle,
+            (false, true) => Scope::IdleAnyRun,
+            (true, false) => Scope::Quiet,
+            (true, true) => Scope::QuietAnyRun,
+        }
+    }
 }
 
 impl Pass {
@@ -281,16 +351,18 @@ impl Pass {
         Pass {
             tag: (word >> 48) as u16,
             lap: (word >> 32) as u16,
-            pages: (word & (ANY - 1)) as u32,
+            pages: (word & (COUNT - 1)) as u32,
             any: word & ANY != 0,
+            count: word & COUNT != 0,
         }
     }
 
     pub(crate) const fn pack(self) -> u64 {
         (self.tag as u64) << 48
             | (self.lap as u64) << 32
-            | (self.pages as u64 & (ANY - 1))
+            | (self.pages as u64 & (COUNT - 1))
             | if self.any { ANY } else { 0 }
+            | if self.count { COUNT } else { 0 }
     }
 }
 
@@ -442,7 +514,7 @@ impl<O: Os> Back<'_, O> {
         let (mut spent, mut finished, mut purged) = (0, 0, 0);
         while purged < goal && spent < PURGE_CAP_WORDS && finished < regions {
             let (read, bytes, done) =
-                self.purge_step(PURGE_CAP_WORDS - spent, goal - purged, Scope::All);
+                self.purge_step(PURGE_CAP_WORDS - spent, goal - purged, Scope::All, false);
             spent += read;
             purged += bytes;
             finished += usize::from(done);
@@ -462,16 +534,35 @@ impl<O: Os> Back<'_, O> {
         (self.state.walk.top.load(Relaxed) as usize).min(self.space.plan().objects())
     }
 
-    /// The number of the clock's interval as the last heartbeat saw it, which claims record
-    /// their frontiers under and the clocked pass reads them by. One load from a line written
-    /// a few times an interval.
+    /// The count of intervals in which the program ran, as the last heartbeat saw it, which
+    /// claims record their frontiers under and the clocked pass reads them by. One load from a
+    /// line written a few times an interval.
     #[inline(always)]
     pub(super) fn epoch(&self) -> u64 {
-        self.state.decay.epoch.load(Relaxed)
+        self.state.decay.epoch.load(Relaxed) & EPOCH_COUNT
     }
 
-    /// Keeps the interval number current: the clock at `now` over the interval, if later
-    /// (`epoch_after`). Written once an interval, by the first heartbeat to see the new one.
+    /// Whether the process is in a silence at counted time `now`: a whole interval has passed
+    /// since the last one in which a heartbeat ran. Only `maintain`'s readings step the counted
+    /// clock that far without a heartbeat (`crate::clock`), so where nothing calls it there is
+    /// no silence.
+    pub(super) fn silent(&self, now: u64) -> bool {
+        let last = self.state.decay.epoch.load(Relaxed) >> 32;
+        (now / DECAY_TICKS) & EPOCH_COUNT >= last + 2
+    }
+
+    /// What a purge could still return by the count of the last lap: what that lap saw, less
+    /// what has been purged since. `None` until a lap has ended.
+    pub(crate) fn returnable(&self) -> Option<usize> {
+        let walk = &self.state.walk;
+        match walk.returnable.load(Relaxed) {
+            super::NO_LAP => None,
+            seen => Some(seen.saturating_sub(walk.returned.load(Relaxed))),
+        }
+    }
+
+    /// Counts a heartbeat's interval (`epoch_after`). Written once an interval, by the first
+    /// heartbeat to see the new one.
     pub(super) fn note_epoch(&self, now: u64) {
         let word = &self.state.decay.epoch;
         let mut seen = word.load(Relaxed);
@@ -534,6 +625,16 @@ impl<O: Os> Back<'_, O> {
     /// background thread, and what the thread does in a loop while it runs. Says whether
     /// another call would do more now, and what it returned.
     pub fn purge_steps(&self, now: &dyn Fn() -> u64) -> PassStep {
+        self.purge_steps_of(now, StepSize::HEARTBEAT)
+    }
+
+    /// [`Back::purge_steps`] for the background thread, which takes them while it runs: the
+    /// same bounds, but its readings are not the program running (`StepSize::THREAD`).
+    pub fn thread_purge_steps(&self, now: &dyn Fn() -> u64) -> PassStep {
+        self.purge_steps_of(now, StepSize::THREAD)
+    }
+
+    fn purge_steps_of(&self, now: &dyn Fn() -> u64, size: StepSize) -> PassStep {
         // The hold's fine count steps on the reading the decay step makes between passes, so
         // that the hold reads the clock itself only while a pass is under way (`hold`).
         let read = core::cell::Cell::new(None);
@@ -544,7 +645,7 @@ impl<O: Os> Back<'_, O> {
                 read.set(Some(time));
                 time
             },
-            StepSize::HEARTBEAT,
+            size,
             &mut returned,
         );
         let hold = self.hold_beat(read.get().unwrap_or_else(now));
@@ -675,13 +776,15 @@ impl<O: Os> Back<'_, O> {
         let mut seen = state.decay.word.load(Acquire);
         // `decay_look` steps a pass under way without the time, as the depot's heartbeat reads
         // the clock only when a decision needs it (`depot::heartbeat`, `Clock`: a read on every
-        // heartbeat cost a pipeline 3%). Between passes it reads the clock, which keeps the
-        // interval number current; a pass notes it as it finishes a region and as it ends. Only a pass that is
-        // due reads the retained count: its tallies are written by frees and claims, and
-        // reading them on every heartbeat took their lines from the threads writing them
-        // (`docs/research/memory.md`, "The cost of a large block, by cause").
+        // heartbeat cost a pipeline 3%). Between passes a heartbeat reads the clock, which
+        // counts its interval; a heartbeat's step notes it as it finishes a region and as the
+        // pass ends. `maintain`'s steps never do: its readings step the counted clock through a
+        // silence, and a silence must not age the frontiers. Only a pass that is due reads the
+        // retained count: its tallies are written by frees and claims, and reading them on every
+        // heartbeat took their lines from the threads writing them (`docs/research/memory.md`,
+        // "The cost of a large block, by cause").
         let time = if seen & ACTIVE != 0 { 0 } else { now() };
-        if seen & ACTIVE == 0 {
+        if seen & ACTIVE == 0 && size.heartbeat {
             self.note_epoch(time);
         }
         match decay_look(seen, time) {
@@ -703,6 +806,9 @@ impl<O: Os> Back<'_, O> {
         }
         let tag = Pass::tag_of(seen);
         let (mut spent, mut freed) = (0, 0);
+        // A step of `maintain`'s in a silence may go below the frontiers; a heartbeat's never
+        // does, since a heartbeat is the program running.
+        let quiet = !size.heartbeat && self.silent(now());
         loop {
             let pass = Pass::unpack(state.walk.pass.load(Acquire));
             if pass.tag != tag {
@@ -727,11 +833,13 @@ impl<O: Os> Back<'_, O> {
                 }
                 return None;
             }
-            if pass.pages == 0 || self.went_round(pass) {
+            if (pass.pages == 0 && !pass.count) || self.went_round(pass) {
                 // The goal is met or the walk has gone round. End the pass this thread saw,
                 // and only that one.
                 let now = self.now();
-                self.note_epoch(now);
+                if size.heartbeat {
+                    self.note_epoch(now);
+                }
                 let now = now & !ACTIVE;
                 let _ = state
                     .decay
@@ -746,15 +854,12 @@ impl<O: Os> Back<'_, O> {
             let (read, purged, finished) = self.purge_step(
                 size.words - spent,
                 limit,
-                if pass.any {
-                    Scope::IdleAnyRun
-                } else {
-                    Scope::Idle
-                },
+                Scope::of_pass(quiet, pass.any),
+                pass.count,
             );
             spent += read;
             *returned += purged;
-            if finished {
+            if finished && size.heartbeat {
                 // A long lap goes region by region, so the interval number lags the clock by
                 // at most the walk of one region.
                 self.note_epoch(self.now());
@@ -815,11 +920,15 @@ impl<O: Os> Back<'_, O> {
         {
             return false;
         }
+        // A quarter of what is retained, or what is over the cap if that is more, and never past
+        // the floor of what a purge could return, by the last lap's count (before the first lap
+        // has ended, by the retained count, which is never less). Nothing over the floor: the
+        // pass walks a lap to count, and returns nothing.
         let over = retained.saturating_sub(retained_cap(geometry));
-        // Stops at the floor, unless the cap asks for more.
+        let returnable = self.returnable().unwrap_or(retained);
         let goal = decay_goal(geometry, retained)
-            .min(retained - floor)
-            .max(over);
+            .max(over)
+            .min(returnable.saturating_sub(floor));
         // One pass in `PURGE_ANY_RUN_EVERY` takes runs of any length, counted by passes, not by
         // the interval's number, which a pass that comes every other interval could miss for
         // ever. The count is a hint: a lost update moves the pass that takes short runs by one.
@@ -841,8 +950,13 @@ impl<O: Os> Back<'_, O> {
         let pass = Pass {
             tag: Pass::tag_of(word),
             lap: state.walk.laps.load(Relaxed) as u16,
-            pages: pages_of(goal, geometry.page_size()),
+            pages: if goal == 0 {
+                0
+            } else {
+                pages_of(goal, geometry.page_size())
+            },
             any,
+            count: goal == 0,
         };
         state.walk.pass.store(pass.pack(), SeqCst);
         true
@@ -878,7 +992,15 @@ impl<O: Os> Back<'_, O> {
         for region in (0..plan.objects()).rev().filter_map(|i| plan.region(i)) {
             if let Some(class) = self.purgeable(region) {
                 purged += self
-                    .purge_region(class, region, usize::MAX, usize::MAX, false, Scope::All)
+                    .purge_region(
+                        class,
+                        region,
+                        usize::MAX,
+                        usize::MAX,
+                        false,
+                        Scope::All,
+                        false,
+                    )
                     .0;
             }
         }
@@ -887,9 +1009,18 @@ impl<O: Os> Back<'_, O> {
 
     /// One step of the walk: works on the region at the walk's position, and moves the
     /// position on if that region is done. Stops after `budget` words of bitmap or once it
-    /// has purged `limit` bytes, finishing the unit it is on. Returns the words of bitmap
-    /// read, at least one, the bytes purged, and whether it finished its region.
-    fn purge_step(&self, budget: usize, limit: usize, scope: Scope) -> (usize, usize, bool) {
+    /// has purged `limit` bytes, finishing the unit it is on, or with `counting`, walks on to
+    /// count once it has. What it sees a purge could return goes into the lap's count, and a
+    /// step that ends a lap makes that count the one the clocked pass is held to. Returns the
+    /// words of bitmap read, at least one, the bytes purged, and whether it finished its
+    /// region.
+    fn purge_step(
+        &self,
+        budget: usize,
+        limit: usize,
+        scope: Scope,
+        counting: bool,
+    ) -> (usize, usize, bool) {
         let plan = self.space.plan();
         let top = self.walk_regions();
         let seen = self.state.walk.purge_at.load(Relaxed);
@@ -903,20 +1034,26 @@ impl<O: Os> Back<'_, O> {
         let Some(region) = plan.region(index) else {
             return (1, 0, true);
         };
-        let (purged, read, done) = match self.purgeable(region) {
-            Some(class) => self.purge_region(class, region, budget, limit, true, scope),
-            None => (0, 1, true),
+        let (purged, read, done, found) = match self.purgeable(region) {
+            Some(class) => self.purge_region(class, region, budget, limit, true, scope, counting),
+            None => (0, 1, true, 0),
         };
+        let walk = &self.state.walk;
+        if found != 0 {
+            walk.seen.fetch_add(found, Relaxed);
+        }
         if done
-            && self
-                .state
-                .walk
+            && walk
                 .purge_at
                 .compare_exchange(seen, index as u32, Relaxed, Relaxed)
                 .is_ok()
             && index == 0
         {
-            self.state.walk.laps.fetch_add(1, Relaxed);
+            // The lap's count, and what has been purged since, start again. Steppers racing
+            // with this add to one lap or the other: the count is a hint.
+            walk.returnable.store(walk.seen.swap(0, Relaxed), Relaxed);
+            walk.returned.store(0, Relaxed);
+            walk.laps.fetch_add(1, Relaxed);
         }
         (read.max(1), purged, done)
     }
@@ -941,8 +1078,11 @@ impl<O: Os> Back<'_, O> {
     /// starts at the region's cursor and keeps it up to date; without, walks the whole region
     /// and leaves the cursor alone. With [`Scope::Idle`] the region is done at its frontier
     /// (`region::floor`, read once a call): a unit that starts below it is left, with the
-    /// rest of the region under it. Returns the bytes purged, the words read, and whether the
-    /// walk reached the bottom, or the frontier.
+    /// rest of the region under it. With `counting`, once it has purged `limit` bytes it walks
+    /// on within its budget, looking and purging nothing. Returns the bytes purged, the words
+    /// read, whether the walk reached the bottom, or the frontier, and the bytes of the free,
+    /// resident pages it saw and left: what a purge could still return.
+    #[allow(clippy::too_many_arguments)]
     pub(super) fn purge_region(
         &self,
         class: Class,
@@ -951,9 +1091,10 @@ impl<O: Os> Back<'_, O> {
         limit: usize,
         resume: bool,
         scope: Scope,
-    ) -> (usize, usize, bool) {
+        counting: bool,
+    ) -> (usize, usize, bool, usize) {
         let Some(host) = self.host(class) else {
-            return (0, 1, true);
+            return (0, 1, true, 0);
         };
         let layout = *host.layout();
         let hints = host.hints(region);
@@ -965,22 +1106,23 @@ impl<O: Os> Back<'_, O> {
         };
         let floor = match scope {
             Scope::Idle | Scope::IdleAnyRun => region::floor(&host, region, self.epoch()),
-            Scope::All => 0,
+            Scope::All | Scope::Quiet | Scope::QuietAnyRun => 0,
         };
         // A call costs about the same whatever it returns, so the clocked pass leaves short
         // runs for a later pass, which takes runs of any length once in a while.
         let min_run = match scope {
-            Scope::Idle => PURGE_MIN_RUN_PAGES,
-            Scope::IdleAnyRun | Scope::All => 1,
+            Scope::Idle | Scope::Quiet => PURGE_MIN_RUN_PAGES,
+            Scope::IdleAnyRun | Scope::QuietAnyRun | Scope::All => 1,
         };
         if cursor != 0 && cursor <= floor {
             // Everything the cursor has left is below the frontier.
             if resume {
                 set_cursor(hints, cursor, 0);
             }
-            return (0, 1, true);
+            return (0, 1, true, 0);
         }
-        let (mut purged, mut read) = (0, 0);
+        let page = layout.page_size();
+        let (mut purged, mut read, mut found) = (0, 0, 0);
         if cursor == 0 {
             // At the top of the region: bring the watermark up to the end of its huge page,
             // if that page could then be purged whole.
@@ -996,7 +1138,7 @@ impl<O: Os> Back<'_, O> {
             // Not before the first unit: the look above may have spent the whole budget, and
             // a call that then gave up would leave the cursor at the top for the next call to
             // do the same, for ever.
-            if !first && (read >= budget || purged >= limit) {
+            if !first && (read >= budget || (purged >= limit && !counting)) {
                 break false;
             }
             first = false;
@@ -1012,6 +1154,17 @@ impl<O: Os> Back<'_, O> {
                     read += 1;
                     0
                 }
+                Step::Unit(unit) if purged >= limit => {
+                    // Counting only.
+                    let (ok, words) = region::purgeable_unit(&host, region, unit);
+                    read += words;
+                    if ok {
+                        let (dirty, words) = region::dirty_pages(&host, region, unit);
+                        read += words;
+                        found += dirty * page;
+                    }
+                    unit.start
+                }
                 Step::Unit(unit) => {
                     // The run of purgeable units that ends at this one, down to the floor.
                     // Within what the step may still purge and read, so that a run does not
@@ -1019,7 +1172,6 @@ impl<O: Os> Back<'_, O> {
                     // Never cut to under `min_run`, or a step with a few pages of its goal
                     // left would count every run it met short and step over it: it may go
                     // past its goal by up to `min_run - 1` pages instead.
-                    let page = layout.page_size();
                     let pages = limit
                         .saturating_sub(purged)
                         .div_ceil(page)
@@ -1060,9 +1212,15 @@ impl<O: Os> Back<'_, O> {
                                 unit.start
                             } else {
                                 let cut = piece(Unit { end: top, ..unit }, most, min_run, granule);
+                                // What the piece leaves resident counts; the rest of the slot,
+                                // below it, is the next step's unit and counts then.
+                                let (dirty, words) = region::dirty_pages(&host, region, cut);
+                                read += words;
+                                found += dirty * page;
                                 let (outcome, _) = region::purge_unit(&host, region, cut);
                                 if let Purge::Done(bytes) = outcome {
                                     purged += bytes;
+                                    found = found.saturating_sub(bytes);
                                     below_purged = Some(cut.start);
                                 }
                                 cut.start
@@ -1072,6 +1230,12 @@ impl<O: Os> Back<'_, O> {
                         let (run, words) =
                             self.run_below(&host, region, unit, carved, huge_from, room);
                         read += words;
+                        // What the run leaves resident after this step counts toward the lap.
+                        if let Some(run) = run {
+                            let (dirty, words) = region::dirty_pages(&host, region, run);
+                            read += words;
+                            found += dirty * page;
+                        }
                         match run {
                             Some(run)
                                 if run.end - run.start < min_run
@@ -1085,6 +1249,7 @@ impl<O: Os> Back<'_, O> {
                                 let (outcome, _) = region::purge_unit(&host, region, run);
                                 if let Purge::Done(bytes) = outcome {
                                     purged += bytes;
+                                    found = found.saturating_sub(bytes);
                                     below_purged = Some(run.start);
                                 }
                                 run.start
@@ -1103,7 +1268,10 @@ impl<O: Os> Back<'_, O> {
             cursor = next;
         };
         self.unretain(class, purged);
-        (purged, read, done)
+        if purged != 0 {
+            self.state.walk.returned.fetch_add(purged, Relaxed);
+        }
+        (purged, read, done, found)
     }
 }
 
@@ -1154,6 +1322,9 @@ impl<O: Os> Back<'_, O> {
 struct StepSize {
     words: usize,
     pages: u32,
+    /// A heartbeat's step, which is the program running: it counts the interval
+    /// (`Back::note_epoch`) and never goes below the frontiers.
+    heartbeat: bool,
 }
 
 impl StepSize {
@@ -1161,11 +1332,20 @@ impl StepSize {
     const HEARTBEAT: StepSize = StepSize {
         words: PURGE_STEP_WORDS,
         pages: PURGE_STEP_PAGES,
+        heartbeat: true,
+    };
+    /// A step of the background thread's in the place of a heartbeat's: as large, but not
+    /// the program running, so that the thread's readings through a silence neither count
+    /// intervals toward a frontier's age nor keep a pass above the frontiers, as `maintain`'s.
+    const THREAD: StepSize = StepSize {
+        heartbeat: false,
+        ..StepSize::HEARTBEAT
     };
     /// A step of `maintain`'s (`policy::PURGE_MAINTAIN_STEP_WORDS`).
     const MAINTAIN: StepSize = StepSize {
         words: PURGE_MAINTAIN_STEP_WORDS,
         pages: PURGE_MAINTAIN_STEP_PAGES,
+        heartbeat: false,
     };
 }
 
@@ -1195,7 +1375,7 @@ fn piece(unit: Unit, pages: u32, min_run: u32, granule: u32) -> Unit {
 
 /// A goal of `bytes` as the pass word holds it: whole pages, at least one.
 fn pages_of(bytes: usize, page: usize) -> u32 {
-    bytes.div_ceil(page).clamp(1, (ANY - 1) as usize) as u32
+    bytes.div_ceil(page).clamp(1, (COUNT - 1) as usize) as u32
 }
 
 /// Moves a region's purge cursor from `from` to `to`, unless another purger has moved it.

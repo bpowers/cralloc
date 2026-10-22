@@ -37,7 +37,7 @@
 
 mod class;
 
-pub use class::{Descending, Sink, SlotPointer};
+pub use class::{Descending, Filled, Sink, SlotPointer};
 pub(crate) use hold::MAINTAIN_HOLD_ROUNDS;
 pub use purge::PassStep;
 mod group;
@@ -195,10 +195,12 @@ struct Clocked {
     /// The clocked pass: when the last one ended, or when the one under way began with the
     /// low bit set.
     word: AtomicU64,
-    /// The number of the clock's interval (the time over `policy::DECAY_TICKS`) as a heartbeat
-    /// last saw it: what a claim's frontier is recorded under and a pass reads frontiers by
-    /// (`layout::Frontier`). Written by the first heartbeat of each interval that reads the
-    /// clock (`purge`), so once an interval; zero until the first heartbeat.
+    /// The intervals in which the program ran, counted, and the clock's last such interval (the
+    /// time over `policy::DECAY_TICKS`), in the high half: the count is what a claim's frontier
+    /// is recorded under and a pass reads frontiers by (`layout::Frontier`), so a silence ages
+    /// no frontier (`purge`, "Frontiers age while the program runs"). Written by the first
+    /// heartbeat of each interval that reads the clock, so at most once an interval; never by
+    /// `maintain`. Zero until the first heartbeat.
     epoch: AtomicU64,
     /// The count of intervals every clocked rule reads its time from (`crate::clock`).
     clock: crate::clock::Counted,
@@ -207,6 +209,9 @@ struct Clocked {
     #[cfg(test)]
     unfloored: core::sync::atomic::AtomicBool,
 }
+
+/// [`Walk::returnable`] before the first lap has ended.
+const NO_LAP: usize = usize::MAX;
 
 /// What the steps of the purge walk share (`purge`).
 struct Walk {
@@ -225,6 +230,13 @@ struct Walk {
     /// How many clocked passes have started, which picks the ones that take runs of any length
     /// (`policy::PURGE_ANY_RUN_EVERY`).
     passes: AtomicU32,
+    /// The bytes of free, resident pages that the steps of the lap under way have seen, which a
+    /// purge could return (`purge`, "The floor").
+    seen: AtomicUsize,
+    /// What the last whole lap saw, [`NO_LAP`] until a lap has ended.
+    returnable: AtomicUsize,
+    /// The bytes purged since the last lap ended, by any purger.
+    returned: AtomicUsize,
     /// One past the highest region ever about to be given to a class, zero for none: the walk
     /// goes round regions below it only. Classes take the lowest unassigned regions and runs
     /// come from the top, so in a heap of a hundred class regions a lap reads a hundred table
@@ -276,6 +288,9 @@ impl<O: Os> State<O> {
                 pass_from: AtomicU32::new(0),
                 pass: AtomicU64::new(0),
                 passes: AtomicU32::new(0),
+                seen: AtomicUsize::new(0),
+                returnable: AtomicUsize::new(NO_LAP),
+                returned: AtomicUsize::new(0),
                 top: AtomicU32::new(0),
             }),
             run_sizes: Lined::new([const { AtomicUsize::new(0) }; MAX_REGIONS]),
@@ -306,10 +321,21 @@ impl<O: Os> State<O> {
 
     /// The back end over the heap, reserving the heap first if no thread has (see
     /// [`SpaceCell::get_or_reserve`]).
+    ///
+    /// Reads the clock and notes the interval before handing the back end out, so that the
+    /// first claims record their frontiers under the interval the clock is in. Left to the
+    /// first heartbeat, the interval number would still be zero for them, and on a machine up
+    /// for more than an interval the first reading steps the count past it: every class's
+    /// first frontier would then read as an earlier interval's, and its next fill would open a
+    /// second run (`Filled::opens_run`). A heap is reserved once; the threads that start it
+    /// together each read the clock once.
     pub fn get_or_reserve(&self) -> Result<Back<'_, O>, OsError> {
-        self.cell
+        let back = self
+            .cell
             .get_or_reserve()
-            .map(|space| Back { state: self, space })
+            .map(|space| Back { state: self, space })?;
+        back.note_epoch(back.now());
+        Ok(back)
     }
 }
 

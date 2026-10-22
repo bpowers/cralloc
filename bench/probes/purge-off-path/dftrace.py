@@ -63,11 +63,12 @@ def main():
                     rss = field(f"/proc/{pid}/status", "RssAnon:")
                     if tdir is None:
                         tdir = thread_dir(pid)
-                    run_ns = wait_ns = vol = None
+                    run_ns = wait_ns = vol = invol = None
                     if tdir:
                         run_ns, wait_ns, _ = (int(x) for x in open(f"{tdir}/schedstat").read().split())
                         vol = field(f"{tdir}/status", "voluntary_ctxt_switches:")
-                    trace.append([round(time.monotonic() - start, 4), rss, run_ns, wait_ns, vol])
+                        invol = field(f"{tdir}/status", "nonvoluntary_ctxt_switches:")
+                    trace.append([round(time.monotonic() - start, 4), rss, run_ns, wait_ns, vol, invol])
                 except OSError:
                     pass
             time.sleep(0.005)

@@ -15,8 +15,8 @@
 //!
 //! **When the thread parks.** Its rules act on what one interval or several left unused, so a
 //! round that finds nothing does not show that the next will: a slab drained in one interval
-//! is shed in the next, what was shed is purged when its frontier has aged, and scattered
-//! pages wait for the pass that takes runs of any length. So the thread parks only after
+//! is shed in the next, what was shed is purged once a lap has counted it over the floor, and
+//! scattered pages wait for the pass that takes runs of any length. So the thread parks only after
 //! [`QUIET_ROUNDS`] rounds in a row that did no work (no drain, no debt laundered, no memory
 //! returned) while no slow path ran anywhere (no slab's activity counter moved), and only when
 //! every slab in use holds no magazine and drains are on. A round is one that ran the steps of
@@ -41,7 +41,7 @@
 //! `interleave.rs` explores the store, fence and look against a racing slow path.
 
 use super::{Cache, Source, generation};
-use crate::back::policy::{FRONTIER_INTERVALS, PURGE_ANY_RUN_EVERY};
+use crate::back::policy::PURGE_ANY_RUN_EVERY;
 use crate::classes::is_marker;
 use crate::front::{Routines, Slab};
 use crate::os::Os;
@@ -49,14 +49,19 @@ use crate::thread_word::{Process, Snapshot, key_of};
 use core::sync::atomic::Ordering::Acquire;
 
 /// How many rounds in a row with no work and no slow path anywhere the thread waits before it
-/// parks: as many as the longest wait any of its rules imposes after the last slow path, which
-/// is the purge pass that takes runs of any length. The rounds counted begin at the round after
-/// the one that saw the last slow path, which may fall in that slow path's interval, and a
-/// claim's frontier keeps the pass off its pages for [`FRONTIER_INTERVALS`] intervals from
-/// there; after that, one pass in [`PURGE_ANY_RUN_EVERY`] takes the scattered pages. So the
-/// count must cover the frontier's intervals less the one the reset round may share with the
-/// slow path, and a whole period of the passes: 9.
-pub const QUIET_ROUNDS: u64 = FRONTIER_INTERVALS - 1 + PURGE_ANY_RUN_EVERY;
+/// parks: as many as the longest wait any of its rules imposes after the last work or slow
+/// path, which is the purge pass that takes runs of any length. A silence ages no frontier, so
+/// the pass does not wait for frontiers; it waits for its count. A pass is held to what the
+/// last whole lap counted, and a round's pass goes at most one lap, so the first lap counted
+/// wholly after the last work or slow path ends in the second round counted ([`LAP_ROUNDS`]),
+/// and the third round's pass is the first held to it. From there one pass in
+/// [`PURGE_ANY_RUN_EVERY`] takes the scattered pages. So the count must cover the rounds of
+/// that lap and a whole period of the passes: 10.
+pub const QUIET_ROUNDS: u64 = LAP_ROUNDS + PURGE_ANY_RUN_EVERY;
+
+/// The rounds counted after the last work or slow path before a lap that began after them has
+/// ended: the rest of the lap under way, then a whole one.
+const LAP_ROUNDS: u64 = 2;
 
 /// The rounds after the last slow path that the other aging rules take to act, counted as
 /// [`QUIET_ROUNDS`] is: the idle drain, whose sighting starts in the round that sees the slow
@@ -161,9 +166,15 @@ impl<O: Os, R: Routines, S: Source> Cache<'_, O, R, S> {
     /// between the steps of a round, so that a long round (a pass over a large heap, many
     /// magazines shed) does not hold up the hold's looks and growth's payments, which
     /// heartbeats take beside a pass where slow paths return memory.
+    ///
+    /// The thread yields its CPU after the step (`Os::yield_cpu`): it runs on the program's
+    /// CPUs, and a program thread waiting for this one should wait no longer than a slow
+    /// path's step took from the request that took it.
     pub fn thread_step(&self) -> super::PurgeStep {
         let counted = self.source.clock();
-        self.source.thread_step(&|| counted.now(self.os()))
+        let step = self.source.thread_step(&|| counted.now(self.os()));
+        self.os().yield_cpu();
+        step
     }
 
     /// The thread's timed sleep, before it waits: marks its word asleep, then looks once more

@@ -142,7 +142,7 @@ numbers below.
 | configuration | returned in the silence | faults, first 5 ms | slowest request, first 5 ms | extra waiting, first 5 ms |
 |---|---|---|---|---|
 | no drains, no purges anywhere | 0 | 3 to 10 | 0.27 to 0.51 ms | 2.8 to 6.4 request-ms |
-| drains, no purges anywhere | 0 | 21 to 28 | 0.49 to 0.58 ms | 6.8 to 8.8 |
+| drains, no purges anywhere | 0 | 21 to 28 | 0.53 to 0.58 ms | 6.8 to 8.8 |
 | purges, no drains | 0.1 to 0.3 MiB | 12 to 35 | 0.26 to 0.36 ms | 3.0 to 3.5 |
 | the default (drains and purges) | 4.2 to 4.5 MiB | 362 to 392 | 0.90 to 1.04 ms | 19 to 36 |
 
@@ -194,3 +194,52 @@ configuration above had one.
 Raw results: `docs/research/data/default-thread-burst-2026-10-21.jsonl.gz` (benchrun). The
 watcher's samples and the request records (about 860 MB) are under `bench/results/thread-burst/`
 of the main checkout.
+
+## The floor measured against what could be returned
+
+Measured 2026-10-21/22 on branch `floor-returnable` at `b8ae757` (main `0d751b0`, whose design
+states the rule), three rounds of the log store and Meilisearch and two of the order service,
+thread on (with a dummy variable as long as `ASMALLOC_BACKGROUND=0`) against off and jemalloc.
+The change: each lap of the purge walk counts the free, resident pages it sees, and a pass is
+held to that count, stopping at the 32 MiB floor; only intervals in which a heartbeat ran age a
+frontier; in a silence `maintain`'s passes may go below the frontiers while more than the floor
+could be returned.
+
+**The faults are gone; the burst start is still slower, now from the idle drains.** Log store,
+the burst's first 5 ms:
+
+| | thread on | thread off | jemalloc | thread on at `af9eb38` |
+|---|---|---|---|---|
+| faults | 21 to 27 | 0 to 9 | 18 to 98 | 362 to 392 |
+| slowest request | 0.68 to 0.86 ms | 0.29 to 0.39 ms | 0.32 to 0.41 ms | 0.90 to 1.04 ms |
+| extra waiting | 14 to 20 request-ms | 2.6 to 3.8 | 3.1 to 3.9 | 19 to 36 |
+
+- The thread now returns nothing in the silence. The lap's count is a few MiB, under the floor.
+- A diagnostic round on the same commit, with `maintain`'s drains switched off, matched the
+  thread-off level: slowest 0.29 ms, 2.8 request-ms, 14 faults. With the drains, 0.93 ms and
+  19 request-ms.
+- With the drains, the burst's first 5 ms claim from the bitmaps 3,240 times, against 789 with
+  the thread off. Every drained magazine is refilled from the bitmaps at once, on every CPU.
+- So what is left of the penalty is the idle drains' own. It is larger than in the drains-only run
+  before the change (0.53 to 0.58 ms), which I have not explained.
+
+Under load nothing moved: 355k cycles a request against 359k off (jemalloc 381k); p99.9 120
+against 127 us. The heap at rest is 1,419 MiB against 1,425 off. The thread parks 12.5 to 13 s
+into the silence and 13.5 s after the clients leave.
+
+**Meilisearch keeps its gain.** A minute after the clients leave its heap is 661 MiB with the
+thread (662 at `af9eb38`), 888 without, 658 for jemalloc. Ten seconds into the silence it is
+692 against 908. Its large free memory lies on whole pages, so the count is close to what is
+retained, and the floor keeps nothing more. In the burst's 50 to 500 ms, p99 was 13.9 ms with
+the thread, 19.6 without, 10.3 for jemalloc, all dominated by the indexing batch. Under load,
+16.97M cycles a request against 17.04M off. The thread parks 23 to 25 s into the silence.
+
+**The order service is unchanged.** 69.3k cycles a request against 69.0k off, p99.9 26 us, heap
+2,179 MiB against 2,178. Its thread still starts only at shutdown.
+
+**Silent processes** (`crates/asmalloc/tests/default_thread.rs`): all thirteen cases pass. A
+worker's freed 128 MiB burst goes back to 35 MiB resident, and the thread parks 18 to 20 s
+after the silence starts, then makes no wake-up. Before the change it parked at 17 to 20 s and
+the process ended at 31 to 35 MiB. The fragmented heap parks at 18 s.
+
+Raw results: `docs/research/data/floor-returnable-2026-10-22.jsonl.gz`.

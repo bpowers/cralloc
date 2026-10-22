@@ -105,7 +105,8 @@ def main():
                 for name, w in (("end of load", da), ("before burst", db)):
                     print(f"    last pass look ({name}): retained small {g(w, RET_SMALL) / MiB:.1f} MiB, large "
                           f"{g(w, RET_LARGE) / MiB:.1f} MiB, floor {g(w, FLOOR) / MiB:.0f} MiB, goal {g(w, GOAL) / MiB:.1f} MiB")
-                print(f"    faults in the silence {b['minflt'] - a['minflt']}")
+                print(f"    faults in the silence {b['minflt'] - a['minflt']}; pass words read: heartbeats {delta(da, db, 420)}, "
+                      f"maintain {delta(da, db, 421)}, quiet scope {delta(da, db, 424)}")
             # The burst, millisecond by millisecond.
             if fast and fast[0].get("diag") is not None:
                 base = at(fast, b0)
@@ -120,7 +121,8 @@ def main():
                           f"claims {sum(by_class(dx, dy, CLAIMS).values())}, returned {sum(by_class(dx, dy, RETURNED).values()) / 1024:.0f} KiB "
                           f"(pass {(delta(dx, dy, DECAY_IDLE) + delta(dx, dy, DECAY_ANY)) / 1024:.0f}, by maintain {delta(dx, dy, DECAY_MAINT) / 1024:.0f}, "
                           f"hold {delta(dx, dy, HOLD) / 1024:.0f}, growth {delta(dx, dy, GROWTH) / 1024:.0f}), drains {delta(dx, dy, DRAINS)}, "
-                          f"pass looks {delta(dx, dy, PASS_LOOKS)}")
+                          f"pass looks {delta(dx, dy, PASS_LOOKS)}; pass words read: heartbeats {delta(dx, dy, 420)} in "
+                          f"{delta(dx, dy, 422)} steps, maintain {delta(dx, dy, 421)} in {delta(dx, dy, 423)}, quiet scope {delta(dx, dy, 424)}")
                 line = []
                 for ms in range(-1, 8):
                     x, y = at(fast, b0 + ms * 1_000_000), at(fast, b0 + (ms + 1) * 1_000_000)

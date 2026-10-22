@@ -321,6 +321,20 @@ impl FrontierFormat {
         }
     }
 
+    /// Whether `word` records a claim of interval `epoch`, or of the next, which [`record`]
+    /// takes as the same interval. Every record names a page past a slot, never page zero, so
+    /// a word whose `now` is zero records nothing, whatever interval it names.
+    ///
+    /// [`record`]: FrontierFormat::record
+    #[inline(always)]
+    pub(crate) const fn claimed_in(self, word: u64, epoch: u64) -> bool {
+        let frontier = self.unpack(word);
+        let epoch = epoch & self.epoch_mask();
+        frontier.now != 0
+            && (frontier.epoch == epoch
+                || frontier.epoch == epoch.wrapping_add(1) & self.epoch_mask())
+    }
+
     /// The word after a claim in interval `epoch` has reached up to page `page`, or `None` if
     /// the word already says as much. A word of the next interval, which a claimer that read
     /// the interval number just before it moved finds, is raised as one of its own interval,

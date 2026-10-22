@@ -246,7 +246,8 @@ fn write_stderr(mut bytes: &[u8]) {
 ///
 /// # Safety
 ///
-/// As for [`syscall`]; the callers below are getpid, gettid, tgkill and exit_group.
+/// As for [`syscall`]; the callers below are getpid, gettid, tgkill, exit_group and
+/// sched_yield.
 unsafe fn int_call(number: usize, a: usize, b: usize, c: usize) -> usize {
     // SAFETY: KERNEL-06. passed through from the caller.
     unsafe { syscall(number, [int(a), int(b), int(c), int(0), int(0), int(0)]) }.addr()
@@ -498,6 +499,12 @@ unsafe impl Os for LinuxOs {
                 ],
             )
         };
+    }
+
+    fn yield_cpu(&self) {
+        // SAFETY: KERNEL-13. sched_yield takes nothing, reads and writes no memory, and only
+        // moves the calling thread to the back of its run queue.
+        let _ = unsafe { int_call(nr::SCHED_YIELD, 0, 0, 0) };
     }
 
     fn more_than_one_thread(&self, forked: bool) -> bool {

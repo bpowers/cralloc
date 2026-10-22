@@ -543,6 +543,9 @@ impl<'a, O: Os, R: Routines + Copy> Bound<'a, O, R> {
             let mut round = None;
             while let Some(step) = cache.maintain_step_with_work() {
                 round = Some(round.unwrap_or(false) | step.work);
+                // A bounded step on the program's CPUs: a thread waiting for this one runs
+                // next (`Cache::thread_step` yields after its own).
+                os.yield_cpu();
                 returned |= cache.thread_step().returned;
                 if !step.more {
                     break;

@@ -278,10 +278,21 @@ more conservative: it waits for the next look at the level, or, if glibc reset i
 program had threads, for a later one. A `false` means a thread was created; the allocator's own
 thread is never created on that evidence before the program's.
 
+## KERNEL-13: `sched_yield` in `yield_cpu`
+
+**Block.** `int_call(SCHED_YIELD, 0, 0, 0)`.
+
+**Proof.** sched_yield(2) takes no arguments (the zeros in the argument registers are
+ignored), reads and writes no user memory, and only moves the calling thread to the end of its
+run queue, so another runnable thread on the CPU runs first; it always returns 0 on Linux,
+and the result is dropped. It changes no mapping, protection, signal disposition or other
+state the allocator relies on. The background thread calls it between bounded steps, holding
+no claim and no magazine across it.
+
 ## KERNEL-07: `unsafe impl Os for LinuxOs`
 
 The comment above the impl maps each promise of the `Os` trait to the kernel behaviour that
-provides it, and KERNEL-01 to KERNEL-06 and KERNEL-09 to KERNEL-12 cover the individual calls. The promises not covered by a
+provides it, and KERNEL-01 to KERNEL-06 and KERNEL-09 to KERNEL-13 cover the individual calls. The promises not covered by a
 single call:
 
 - *Valid until unmapped or dropped.* Reservations are mappings of the process. Dropping a

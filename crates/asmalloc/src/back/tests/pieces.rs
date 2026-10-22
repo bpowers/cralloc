@@ -36,8 +36,15 @@ fn step<O: Os>(
 ) -> usize {
     let page = Native::GEOMETRY.page_size();
     let huge = Native::GEOMETRY.huge_page_size();
-    let (purged, _, _) =
-        back.purge_region(class, region, usize::MAX, pages * page, true, Scope::All);
+    let (purged, _, _, _) = back.purge_region(
+        class,
+        region,
+        usize::MAX,
+        pages * page,
+        true,
+        Scope::All,
+        false,
+    );
     let most = if class.size() >= huge {
         (pages * page).max(huge)
     } else {
@@ -232,7 +239,8 @@ fn a_walk_passes_a_live_slot_at_a_look() {
     }
     paint(low.as_ptr(), size, 7);
     back.free(low, class);
-    let (purged, read, _) = back.purge_region(class, region, usize::MAX, page, false, Scope::All);
+    let (purged, read, _, _) =
+        back.purge_region(class, region, usize::MAX, page, false, Scope::All, false);
     // A piece of a class of a huge page or more is a whole huge page at least.
     assert_eq!(purged, Native::GEOMETRY.huge_page_size());
     assert!(
@@ -315,8 +323,15 @@ fn a_zeroed_block_reads_as_zero_whatever_the_pieces() {
                     .unwrap();
                 let region = back.space().plan().region(region).unwrap();
                 let limit = (1 + rand(40)) * page;
-                let (purged, _, _) =
-                    back.purge_region(class, region, 1 + rand(64), limit, rand(4) != 0, Scope::All);
+                let (purged, _, _, _) = back.purge_region(
+                    class,
+                    region,
+                    1 + rand(64),
+                    limit,
+                    rand(4) != 0,
+                    Scope::All,
+                    false,
+                );
                 pieces += usize::from(purged != 0);
             }
             _ => {

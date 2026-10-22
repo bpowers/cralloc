@@ -192,6 +192,11 @@ pub unsafe trait Os: Sync {
     /// Wakes a thread waiting on `word` in [`Os::wait`], if there is one (`FUTEX_WAKE_PRIVATE`).
     fn wake(&self, word: &AtomicU64);
 
+    /// Gives up the CPU to a thread waiting for it, if one is, and returns at once otherwise
+    /// (`sched_yield`). The background thread calls it after each bounded step, so that what it
+    /// takes from a program thread on the same CPU is at most a step. Never fails visibly.
+    fn yield_cpu(&self);
+
     /// The evidence that the program has created a thread of its own, which the background
     /// thread's default start waits for. In a process that is not a fork child, the C
     /// library's own record (glibc's `__libc_single_threaded`). In a fork child, whose copy of

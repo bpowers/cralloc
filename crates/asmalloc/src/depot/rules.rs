@@ -1830,7 +1830,7 @@ fn a_rule_the_budget_turns_away_waits_for_the_next_slow_path() {
     }
     // A full spare for the sweep to take.
     let spare = cache.area().create(class.magazine()).unwrap();
-    assert_eq!(rig.source.fill(class, spare.objects()), capacity);
+    assert_eq!(rig.source.fill(class, spare.objects()).count, capacity);
     spare.set_level(capacity);
     let mut stale = false;
     assert!(
@@ -1898,7 +1898,7 @@ fn a_rule_the_budget_turns_away_runs_at_the_next_slow_path_whatever_the_pace() {
     let slab = rig.slabs().slab(cpu);
     // A full spare for the sweep to take.
     let spare = cache.area().create(class.magazine()).unwrap();
-    assert_eq!(rig.source.fill(class, spare.objects()), capacity);
+    assert_eq!(rig.source.fill(class, spare.objects()).count, capacity);
     spare.set_level(capacity);
     let mut stale = false;
     assert!(

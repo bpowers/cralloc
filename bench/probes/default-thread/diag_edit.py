@@ -63,6 +63,14 @@ pub const GOAL_SUM: usize = 406;
 /// `maintain`'s idle drains and sheds that did work.
 pub const DRAINS: usize = 410;
 pub const SHEDS: usize = 411;
+/// Bitmap words read and steps taken by the clocked pass, heartbeats' and `maintain`'s apart,
+/// and words read in a silence's scope and otherwise.
+pub const HB_WORDS: usize = 420;
+pub const MAINT_WORDS: usize = 421;
+pub const HB_STEPS: usize = 422;
+pub const MAINT_STEPS: usize = 423;
+pub const QUIET_WORDS: usize = 424;
+pub const LOUD_WORDS: usize = 425;
 
 #[unsafe(no_mangle)]
 pub static ASMALLOC_DIAG: [AtomicU64; N] = [const { AtomicU64::new(0) }; N];
@@ -164,8 +172,9 @@ sub("back/purge.rs", "    pub(super) fn purge_region(\n        &self,\n",
         limit: usize,
         resume: bool,
         scope: Scope,
-    ) -> (usize, usize, bool) {
-        let r = self.purge_region_inner(class, region, budget, limit, resume, scope);
+        counting: bool,
+    ) -> (usize, usize, bool, usize) {
+        let r = self.purge_region_inner(class, region, budget, limit, resume, scope, counting);
         crate::diag::add(crate::diag::RETURNED + class.index() as usize, r.0);
         r
     }
@@ -196,6 +205,12 @@ sub("back/purge.rs", "                // One pass in `PURGE_ANY_RUN_EVERY` takes
     "                // One pass in `PURGE_ANY_RUN_EVERY` takes runs of any length")
 sub("back/purge.rs", "    pub fn heartbeat_with(&self, now: &dyn Fn() -> u64) {\n",
     "    pub fn heartbeat_with(&self, now: &dyn Fn() -> u64) {\n        if crate::diag::nohbpurge() {\n            return;\n        }\n")
+# Bitmap words the clocked pass's steps read: heartbeats' and maintain's apart, and steps.
+sub("back/purge.rs", "            spent += read;\n            *returned += purged;\n",
+    "            spent += read;\n            *returned += purged;\n"
+    "            crate::diag::add(if size.heartbeat { crate::diag::HB_WORDS } else { crate::diag::MAINT_WORDS }, read);\n"
+    "            crate::diag::add(if size.heartbeat { crate::diag::HB_STEPS } else { crate::diag::MAINT_STEPS }, 1);\n"
+    "            crate::diag::add(if quiet { crate::diag::QUIET_WORDS } else { crate::diag::LOUD_WORDS }, read);\n")
 sub("back/hold.rs", "        let step = self.hold_look(count, reach(self));\n",
     "        let step = self.hold_look(count, reach(self));\n        crate::diag::add(crate::diag::HOLD, step.returned);\n")
 sub("heap/source.rs", "        let hold = self.hold_maintain_step(now);\n",

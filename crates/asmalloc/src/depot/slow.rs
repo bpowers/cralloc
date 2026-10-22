@@ -52,6 +52,7 @@
 
 use super::heartbeat::{Chores, Tried};
 use super::magazine::Magazine;
+use super::siblings;
 use super::stock::{Swap, SwapPlan};
 use super::{Cache, Pool, Source};
 use crate::classes::{SmallClass, is_marker};
@@ -212,18 +213,27 @@ impl<'a, O: Os, R: Routines, S: Source> Cache<'a, O, R, S> {
 
     /// Fills an empty magazine this thread holds from the source, in one call; returns its
     /// new level. The source fills from the top (see [`Source::fill`]); a short fill, from
-    /// sparse bitmaps or a heap out of memory, is moved down to the bottom slots.
+    /// sparse bitmaps or a heap out of memory, is moved down to the bottom slots. A fill that
+    /// does not continue a run of fills of its class hands its first objects out a stride
+    /// apart, if the class is smaller than a line (`siblings.rs`).
     fn fill(&self, class: SmallClass, magazine: &Magazine) -> usize {
         let slots = magazine.objects();
         let capacity = slots.len();
-        let level = self.source.fill(class, slots).min(capacity);
+        let filled = self.source.fill(class, slots);
+        let level = filled.count.min(capacity);
         if level < capacity
-            && let Some(filled) = slots.get(capacity - level..)
+            && let Some(top) = slots.get(capacity - level..)
         {
             // Upwards: each slot is read before anything is written over it.
-            for (to, from) in slots.iter().zip(filled) {
+            for (to, from) in slots.iter().zip(top) {
                 to.store(from.load(Relaxed), Relaxed);
             }
+        }
+        if filled.opens_run
+            && let Some(stride) = siblings::stride(class.size())
+            && let Some(objects) = slots.get(..level)
+        {
+            siblings::spread(objects, stride);
         }
         magazine.set_level(level);
         level

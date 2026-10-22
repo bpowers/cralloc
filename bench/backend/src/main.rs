@@ -86,7 +86,7 @@ impl Bench<'_> {
         while out.len() < n {
             let want = (n - out.len()).min(self.batch);
             let slots = &mut magazine[..want];
-            let filled = self.back.fill_within(self.class, &mut Descending(&atomic(slots)), self.claims);
+            let filled = self.back.fill_within(self.class, &mut Descending(&atomic(slots)), self.claims).count;
             assert!(filled > 0, "the back end ran out of memory");
             // A fill bounded in claims comes back short from sparse words, its objects in the
             // last slots.

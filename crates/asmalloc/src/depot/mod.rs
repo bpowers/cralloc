@@ -48,6 +48,7 @@ mod maintain;
 #[cfg(test)]
 mod rules;
 mod shed;
+pub(crate) mod siblings;
 mod slow;
 mod source;
 mod spare;
@@ -69,7 +70,7 @@ pub use inspect::inspect;
 pub(crate) use magazine::{Area, Magazine, UNIT};
 pub use maintain::Stepped;
 pub use slow::REFRESH_EVERY;
-pub use source::{PurgeStep, Source};
+pub use source::{Filled, PurgeStep, Source};
 pub use spare::{MAX_SPARES, SPARE_BUDGET, spare_limit};
 pub(crate) use stack::Stack;
 

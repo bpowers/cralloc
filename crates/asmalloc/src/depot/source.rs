@@ -16,11 +16,11 @@ use core::sync::atomic::AtomicPtr;
 /// free objects of the class asked for, each handed out once until it is taken back.
 pub trait Source {
     /// Fills the object slots of a magazine this thread holds with free objects of `class`,
-    /// up to its capacity, and returns how many, `n`. The objects go in the last `n` slots,
+    /// up to its capacity, and says how many, `n`. The objects go in the last `n` slots,
     /// lowest address last, so that the magazine, popped from the top, hands them out in
     /// ascending address order. A fill may stop short of the capacity once it has objects, to
     /// bound its work where free objects are sparse. Zero means there are none to be had.
-    fn fill(&self, class: SmallClass, slots: &[AtomicPtr<u8>]) -> usize;
+    fn fill(&self, class: SmallClass, slots: &[AtomicPtr<u8>]) -> Filled;
 
     /// Takes back free objects of `class`, each one this source handed out, from the object
     /// slots of a magazine this thread holds.
@@ -67,6 +67,17 @@ pub trait Source {
 
     /// The background thread's word (`crate::thread_word`).
     fn thread(&self) -> &crate::thread_word::ThreadWord;
+}
+
+/// What a fill did ([`Source::fill`]).
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub struct Filled {
+    /// How many objects it put in the magazine.
+    pub count: usize,
+    /// Whether the fill does not continue a run of fills of its class: none has taken objects
+    /// of the class from the source for an interval. A hint; the depot hands the objects of
+    /// such a fill out in an order that keeps siblings apart (`siblings.rs`).
+    pub opens_run: bool,
 }
 
 /// What one of `maintain`'s purge steps did ([`Source::purge_pass_step`]).

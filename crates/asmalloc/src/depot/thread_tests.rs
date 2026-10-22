@@ -478,9 +478,11 @@ fn a_sleeping_thread_is_woken_once_for_work_a_heartbeat_made_due() {
     let thread = rig.cache(&keeper);
     assert_eq!(thread.begin_sleep(key), None, "slept with work due");
     assert_eq!(rig.source.thread.load(), Snapshot(key | AWAKE));
-    let plans = rig.source.plans();
+    let (plans, yields) = (rig.source.plans(), rig.os().yields());
     assert!(thread.thread_steps(), "the work was not taken");
     assert_eq!(rig.source.plans(), plans + 1);
+    // A yield after the one step the work took.
+    assert_eq!(rig.os().yields(), yields + 1, "a step without a yield");
     assert_eq!(rig.source.owing.load(Relaxed), 0);
     assert_eq!(
         thread.begin_sleep(key),
