@@ -185,6 +185,11 @@ pub fn drive(
     arg("--cpus", cpus);
     arg("--plan", l.plan.clone());
     arg("--label", job.id.clone());
+    // Every request's record, for a probe that lines requests up with what the server did
+    // (bench/probes/default-thread): `BENCH_RAW_DIR/<server pid>.raw`. Large at high rates.
+    if let Some(dir) = std::env::var_os("BENCH_RAW_DIR") {
+        arg("--raw", Path::new(&dir).join(format!("{}.raw", server.pid)).display().to_string());
+    }
     let env: Vec<(String, String)> = std::env::vars().filter(|(k, _)| k == "PATH" || k == "HOME").collect();
     let spec = Spec {
         argv: &argv,
@@ -322,6 +327,7 @@ pub fn summarize(l: &Loaded, memory: &[MemSample], rank: &str) -> (Value, Option
         "curve_kib": curve,
         "marks_ms": marks,
         "generator": {
+            "start_mono_ns": l.result["start_mono_ns"],
             "reconnects": l.result["reconnects"],
             "unexpected_responses": l.result["unexpected_responses"],
             "segments": l.result["segments"],

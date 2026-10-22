@@ -120,6 +120,77 @@ The service stores each new order and drops the oldest, so its free memory stays
 the floor and the thread is never wanted until the process drops its store on SIGTERM. Both
 asmalloc columns are therefore the same program until then. Even so, the slowest request of
 the first 5 ms was 20 to 115 us longer in every "on" run than in every "off" run, with no page
-faults in either and no thread; the cause is not known. Take that as the spread to allow when
-reading the log store's first 5 ms, whose difference is several times larger and comes with
-the faults.
+faults in either and no thread. Most of that was the environment (next section).
+
+## The burst after a silence, diagnosed
+
+Measured 2026-10-21 on main at `af9eb38`, three rounds on the log store and two on
+Meilisearch. Scratch builds of the allocator (`bench/probes/default-thread/diag_edit.py`, not
+product code) export counters that the watcher reads from the server's memory every 250 ms and
+every millisecond around the burst: pages each claim found returned (by class), bytes returned
+(by class and by rule), drains, slow paths, and what each look at a due clocked pass read.
+Two-letter switches turn off `maintain`'s drains or its purges, and a third letter every purge
+a slow path's heartbeat takes. Every configuration ran with an environment of the same size: local entries of
+`bench/allocators.toml` (not committed) on builds made with `build.sh`, setting
+`ASMALLOC_DIAG` (`dp`, `-p`, `d-`, `dp-`, `d--`) and either `ASMALLOC_BACKGROUND=0` or a
+dummy `ASMALLOC_BACKGROUNX=0`.
+The load generator kept every request (`BENCH_RAW_DIR`). `burst.py` and `memsum.py` make the
+numbers below.
+
+**The penalty is page faults on what the drains handed to the purge.** On the log store:
+
+| configuration | returned in the silence | faults, first 5 ms | slowest request, first 5 ms | extra waiting, first 5 ms |
+|---|---|---|---|---|
+| no drains, no purges anywhere | 0 | 3 to 10 | 0.27 to 0.51 ms | 2.8 to 6.4 request-ms |
+| drains, no purges anywhere | 0 | 21 to 28 | 0.49 to 0.58 ms | 6.8 to 8.8 |
+| purges, no drains | 0.1 to 0.3 MiB | 12 to 35 | 0.26 to 0.36 ms | 3.0 to 3.5 |
+| the default (drains and purges) | 4.2 to 4.5 MiB | 362 to 392 | 0.90 to 1.04 ms | 19 to 36 |
+
+(Extra waiting is the latency above the steady median, summed over the requests due in the
+first 5 ms.) Of the extra waiting over the first row, about four fifths is the faults and the
+rest the drains.
+- The thread's clocked pass returns 4.3 MiB in every silence, as long runs. That memory comes
+  from the drains. Each idle CPU's magazines are laundered into the bitmaps, which completes
+  whole free pages, and the next pass returns them. Without drains the passes find almost
+  nothing (0.1 to 0.3 MiB).
+- The frontiers that should protect those pages do not, because the thread's rounds step the
+  counted clock through the silence. Two intervals in, every frontier has expired.
+- The burst takes it all back at once. In its first 2 ms, claims find about 1,130 returned
+  pages (4.4 MiB), and the process takes about 380 faults. They fall over some twenty small
+  classes, each CPU's first refill of each: 28 and 32 KiB most, then 256 B, 10 KiB, 224 B,
+  896 B, 1,792 B and 3,584 B. No large buffer is involved. The slowest requests are the first
+  dozen, each waiting about 0.9 ms behind those faults.
+
+**The floor reads fragmentation.** Through the load and the silence the clocked pass's looks
+read 185 to 189 MiB retained in small classes against the 32 MiB floor, and set goals of about
+125 MiB. The memstat build (thread off) shows that of 185 MiB free in the bitmaps, 1.4 MiB lies
+on wholly free pages. The other 183 MiB is free slots on pages with live neighbours, which no
+purge can return. So the store always reads as over the floor, and each pass returns whatever
+its scope admits. (The memstat build's thread never parked and never drained, so that build was
+used only for the account with the thread off.)
+
+**A slow path also purges at the burst's start.** At `af9eb38` every heartbeat still steps
+the clocked pass. A pass due at the first slow path after a silence purges pages whose frontier
+the silence let expire, on that request's path. With the thread off this returned 0.3 MiB on the
+log store and 33 to 52 MiB on Meilisearch. With the thread on but its purges switched off it
+returned 1.4 to 2.5 MiB on the store, which cost as much as the default, and 30 to 84 MiB on
+Meilisearch. With the thread doing its work, the pass found nothing left to return.
+
+**Meilisearch.** The floor's reading there is close to what can be returned. The large
+classes' free memory lies on whole pages, and small classes hold 5 to 17 MiB retained, about
+half of it returnable. The thread returned 224 to 283 MiB in the silence, through the hold and
+the clocked pass in different proportions from run to run, mostly slots of the 56 MiB class.
+The burst coincides with an indexing batch. In its first 50 ms every configuration's claims find
+20,000 to 25,000 returned pages of the 3.5 MiB class, which the hold returned under load. Its
+first five requests take 1 to 4 ms whatever the configuration, so the thread's silence costs
+nothing visible there. Without the thread, the burst's first slow path pays the purge instead.
+
+**The control for the order service.** Run with a dummy variable as long as
+`ASMALLOC_BACKGROUND=0`, "on" and "off" overlap: the slowest request of the first 5 ms took 132
+to 151 us on, 121 to 148 off. p99 there was still 10 to 25 us higher on (107 to 122 against 92
+to 98). The log store's difference holds with environments of the same size: every
+configuration above had one.
+
+Raw results: `docs/research/data/default-thread-burst-2026-10-21.jsonl.gz` (benchrun). The
+watcher's samples and the request records (about 860 MB) are under `bench/results/thread-burst/`
+of the main checkout.
