@@ -1,0 +1,64 @@
+diff --git a/bench/runner/src/launch.rs b/bench/runner/src/launch.rs
+index c7c0645..31a41d7 100644
+--- a/bench/runner/src/launch.rs
++++ b/bench/runner/src/launch.rs
+@@ -111,7 +111,16 @@ impl Child {
+             return Err(io::Error::other(format!("moving the child into {}: {e}", spec.cgroup.display())));
+         }
+         let counters = if spec.count {
+-            match Counters::open(PROCESS_EVENTS, Target::ChildBeforeExec(pid)) {
++            // Diagnostic (spawn-gap): raw events from BENCH_PROC_EVENTS, as name=config pairs.
++            let mut events: Vec<bench_harness::perf::Event> = PROCESS_EVENTS.to_vec();
++            if let Ok(list) = std::env::var("BENCH_PROC_EVENTS") {
++                for item in list.split(',').filter(|s| !s.is_empty()) {
++                    let (name, config) = item.split_once('=').expect("BENCH_PROC_EVENTS item is name=config");
++                    let config = u64::from_str_radix(config.trim_start_matches("0x"), 16).expect("hex config");
++                    events.push(bench_harness::perf::Event::Raw { name: Box::leak(name.to_string().into_boxed_str()), config });
++                }
++            }
++            match Counters::open(&events, Target::ChildBeforeExec(pid)) {
+                 Ok(c) => Some(c),
+                 Err(e) => {
+                     kill();
+diff --git a/bench/runner/src/serve.rs b/bench/runner/src/serve.rs
+index 25af9fc..ef95298 100644
+--- a/bench/runner/src/serve.rs
++++ b/bench/runner/src/serve.rs
+@@ -249,12 +249,18 @@ pub fn summarize(l: &Loaded, memory: &[MemSample], rank: &str) -> (Value, Option
+         // The server's counts over every segment of this name: from its mark to the next.
+         let (mut cycles, mut instructions, mut task_ns, mut faults, mut ms) = (0u64, 0u64, 0u64, 0u64, 0.0);
+         let mut rss_max = 0;
++        let mut extra: std::collections::BTreeMap<&str, u64> = Default::default();
+         for w in l.marks.windows(2) {
+             if w[0].segment.is_none() || &w[0].name != name {
+                 continue;
+             }
+             let d = w[1].snap.counters.since(&w[0].snap.counters);
+             cycles += d.get("cycles").unwrap_or(0);
++            for &(k, v) in &d.values {
++                if !["cycles", "instructions", "page_faults", "task_clock_ns"].contains(&k) {
++                    *extra.entry(k).or_default() += v;
++                }
++            }
+             instructions += d.get("instructions").unwrap_or(0);
+             task_ns += d.get("task_clock_ns").unwrap_or(0);
+             // The counter follows forks, so a server's worker processes are counted; the
+@@ -265,7 +271,7 @@ pub fn summarize(l: &Loaded, memory: &[MemSample], rank: &str) -> (Value, Option
+         }
+         let n = g["lat_us"]["n"].as_f64().unwrap_or(0.0);
+         let per = |x: u64| if n > 0.0 { Some(x as f64 / n) } else { None };
+-        let server = json!({
++        let mut server = json!({
+             "ms": ms,
+             "cycles_per_req": per(cycles),
+             "instructions_per_req": per(instructions),
+@@ -274,6 +280,9 @@ pub fn summarize(l: &Loaded, memory: &[MemSample], rank: &str) -> (Value, Option
+             "cpus_busy": if ms > 0.0 { task_ns as f64 / 1e6 / ms } else { 0.0 },
+             "rss_max": rss_max,
+         });
++        for (k, v) in &extra {
++            server[format!("{k}_per_req")] = json!(per(*v));
++        }
+         if name == rank {
+             primary = server["cycles_per_req"].as_f64();
+         }
