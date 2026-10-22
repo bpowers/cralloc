@@ -96,6 +96,8 @@ pub fn build(p: &Paths, program: &str, build: &str, feature: &str, cpus: &str) -
     // Flags from the environment would change every crate's fingerprint, and the program
     // would no longer be built with its own profile alone.
     c.env_remove("RUSTFLAGS").env_remove("CARGO_ENCODED_RUSTFLAGS");
+    // Nor does a layout's padding (`benchrun layout`), which builds the workloads only.
+    c.env_remove("BENCH_LAYOUT_PAD");
     c.env("BENCH_BASELINES", &p.baselines);
     // Build tools a program's fetch script provides (Sōzu's protoc) come first on PATH.
     let tools = p.apps_data.join("inputs").join(program).join("bin");

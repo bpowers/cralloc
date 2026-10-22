@@ -47,6 +47,9 @@ use mi_crate as chosen;
 #[global_allocator]
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
+#[cfg(bench_layout_pad)]
+mod pad;
+
 #[cfg(feature = "asmalloc")]
 mod asm;
 #[cfg(feature = "asmalloc")]
