@@ -14,6 +14,17 @@ where the service's own code lands in the binary, whatever the allocator
 until it has been measured over a sweep of placements. The tokio spawn rows are superseded by
 `spawn-gap.md`.
 
+Two of those jobs measured over a sweep of five placements (`benchrun layout --layouts pads`,
+main `040033a`, three one-round sessions each; k server cycles a request, others relative to
+asmalloc, positive is slower):
+
+| Job | asmalloc, mean (range over placements) | jemalloc | tcmalloc per-CPU | mimalloc |
+|---|---|---|---|---|
+| connect log grpc h2 | 129.9 (128.2 to 132.6) | +5.4% | +2.5% | |
+| rpc log c64 | 123.3 (122.1 to 125.1) | +3.9% | -0.9% | -0.8% |
+
+The sessions separate differences of 2.5% and more, not ones under 1%.
+
 ## Summary
 
 - **Kernel suite:** ahead of the best incumbent on 37 of 55 jobs, level on 3, behind on 15 (at
