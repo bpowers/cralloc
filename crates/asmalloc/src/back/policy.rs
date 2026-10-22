@@ -17,8 +17,8 @@ use crate::space::Geometry;
 pub const RETAINED_CAP_HUGE_PAGES: usize = 32;
 
 /// The floor of the allowance, in huge pages: 16, or 32 MiB. Memory up to this much is spent
-/// freely: the clocked pass leaves retained memory alone while it totals no more than the
-/// floor, and stops at the floor when above it. Tens of megabytes cost a server nothing that
+/// freely: the clocked pass returns nothing while what a purge could return (by the last
+/// lap's count, `purge`) totals no more than the floor, and stops at the floor when above it. Tens of megabytes cost a server nothing that
 /// matters, and returning them costs `madvise` calls and the refaults of the next burst
 /// (`docs/research/burst-start.md`). The same floor is what the default background thread's
 /// start waits for, since below it the thread would have nothing to do, and what the
@@ -26,8 +26,8 @@ pub const RETAINED_CAP_HUGE_PAGES: usize = 32;
 /// over the cap are not floored.
 pub const ALLOWANCE_FLOOR_HUGE_PAGES: usize = 16;
 
-// A pass's goal is what is retained above the floor, raised to what is over the cap, which
-// stops at the floor only while the floor is under the cap.
+// The floor is spent freely and the cap is what growth pays down to, so the floor must be the
+// lower: a heap kept at the floor is never over the cap by what the floor keeps.
 const _: () = assert!(ALLOWANCE_FLOOR_HUGE_PAGES < RETAINED_CAP_HUGE_PAGES);
 
 /// Growth is charged against the cap in steps of this many huge pages: 1, or 2 MiB. Each step
@@ -84,9 +84,10 @@ pub const PURGE_MIN_RUN_PAGES: u32 = 4;
 /// within about eight intervals of the program going quiet, and a long run within one.
 pub const PURGE_ANY_RUN_EVERY: u64 = 8;
 
-/// The counted intervals a claim's frontier keeps the clocked pass off the pages below it: 2,
-/// the interval of the claim and the next (`layout::FrontierFormat::floor`, whose test holds
-/// it to this).
+/// The intervals in which the program ran that a claim's frontier keeps the clocked pass off
+/// the pages below it: 2, the interval of the claim and the next one in which a heartbeat ran
+/// (`layout::FrontierFormat::floor`, whose test holds it to this). A silence counts as none
+/// (`purge`).
 pub const FRONTIER_INTERVALS: u64 = 2;
 
 /// How much bitmap a heartbeat's step of a decay pass may read, in words: 256 words, 2 KiB.

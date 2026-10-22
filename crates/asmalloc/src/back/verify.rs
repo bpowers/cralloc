@@ -242,7 +242,7 @@ fn growth_purges_the_smaller_of_its_debt_and_the_excess() {
     }
 }
 
-/// A pass word keeps its three parts apart, and a stepper can tell its pass from another: the
+/// A pass word keeps its parts apart, and a stepper can tell its pass from another: the
 /// tag of a pass's decay word is the only one it acts on.
 #[kani::proof]
 fn a_pass_word_round_trips() {
@@ -252,8 +252,9 @@ fn a_pass_word_round_trips() {
         lap: kani::any(),
         pages: kani::any(),
         any: kani::any(),
+        count: kani::any(),
     };
-    kani::assume(pass.pages < 1 << 31);
+    kani::assume(pass.pages < 1 << 30);
     assert!(Pass::unpack(pass.pack()) == pass);
     let word: u64 = kani::any();
     assert!(Pass::unpack(word).pack() == word);

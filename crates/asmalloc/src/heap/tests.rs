@@ -1006,8 +1006,10 @@ fn resident<S: crate::os::sim::Shape>(heap: &SimHeap<S>) -> usize {
 /// magazines, so that no slow path runs. Without `maintain` the heap keeps what it held. With
 /// it once an interval, the idle slab is drained and laundered, the depot sheds, and the
 /// clocked purge returns what is free from the top down, a quarter of what is retained an
-/// interval once under the cap: resident memory comes down to what `collect` leaves, within
-/// what that rate leaves after the intervals run. A second call in an interval does nothing.
+/// interval once under the cap, and stops at the floor of what a purge could return: what a
+/// purge could still return comes down to the floor, and resident memory to what `collect`
+/// leaves, the floor, and the pages the light work's loaded magazines pin. A second call in an
+/// interval does nothing.
 #[test]
 #[cfg_attr(miri, ignore = "reads every simulated page dozens of times")]
 fn maintain_brings_a_quiet_heap_down_to_what_collect_leaves() {
@@ -1045,6 +1047,7 @@ fn maintain_brings_a_quiet_heap_down_to_what_collect_leaves() {
         assert_eq!(again, calls, "a second call in an interval did something");
     }
     let maintained = resident(&heap);
+    let returnable = heap.heap.back().unwrap().returnable().unwrap();
     heap.collect();
     let collected = resident(&heap);
     // Two intervals before the purge has what was parked (a look, then the drain and shed).
@@ -1055,15 +1058,24 @@ fn maintain_brings_a_quiet_heap_down_to_what_collect_leaves() {
     // stopped, so no free page waits behind the pages light work revives each interval: an
     // earlier walk that began every pass at the top left the bottom of the lowest region
     // resident for ever, under a slack of two huge pages that hid it.
+    //
+    // The passes stop at the floor of what a purge could return, which `collect` does not
+    // keep. The light work's loaded magazines hold objects the burst freed in random order,
+    // each on a page of its own, which no purge can return while they are cached and
+    // `collect` launders and returns; so the floor is checked on the count, and resident
+    // memory against what `collect` leaves only loosely.
     let geometry = <Shape as crate::os::sim::Shape>::GEOMETRY;
-    // The passes stop at the floor, which `collect` does not keep.
-    let cap = crate::back::policy::retained_cap(geometry);
     let floor = crate::back::policy::allowance_floor(geometry);
-    let left = floor as f64 + (cap - floor) as f64 * 0.75f64.powi(intervals - 5);
+    let run = crate::back::policy::PURGE_MAX_RUN_PAGES as usize * geometry.page_size();
     assert!(
-        maintained <= collected + left as usize,
+        returnable <= floor + run && returnable + run >= floor,
+        "after {intervals} intervals of maintain, {returnable} bytes a purge could return \
+         against a floor of {floor}"
+    );
+    assert!(
+        maintained <= collected + 2 * floor,
         "after {intervals} intervals of maintain: {maintained} bytes resident, collect leaves \
-         {collected}, the clocked rules allow {left:.0} more"
+         {collected}, the floor is {floor}"
     );
     assert!(quiet > 4 * maintained, "{quiet} {maintained}");
 }
