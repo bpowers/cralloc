@@ -178,3 +178,74 @@ allocator cannot tell, when a block is made, that different threads will write i
 What would change the number: tokio padding `queue::Inner` (as #8622 did for the idle state),
 which helps every allocator, and the suite moving to tokio 1.54. With both, the spawn jobs
 would measure the allocator; until then they rank where these two blocks land.
+
+## The bench on tokio 1.54 (2026-10-22)
+
+Branch `spawn-gap-2` on main `b21e998`. The bench's lock file now takes tokio 1.54.0 for the
+workloads and connect-rust's server; the apps keep their own lock files (the order service was
+already on 1.54.0). Same method as above; server jobs by `benchrun`, the builds interleaved.
+
+**The bump costs asmalloc 3.6% on a gRPC server, and the run-queue headers are why.**
+`connect log grpc h2`, server cycles per request at s70, k (runs from four sessions; "padded"
+is tokio 1.54.0 with `queue::Inner` in tokio's own `CachePadded`, the diff in
+`bench/probes/spawn-gap/tokio-pad-queue.diff`):
+
+| Build | tokio 1.53.3 | tokio 1.54.0 | 1.54.0 padded |
+|---|---|---|---|
+| asmalloc | 129.1, 128.5, 128.0, 126.7, 128.0, 128.5, 129.6, 128.5, 126.6 | 134.2, 132.2, 132.8, 133.0, 133.0, 134.3, 133.0, 134.0, 131.4 | 130.2, 129.3, 129.2, 128.6, 128.6 |
+| jemalloc | 136.6, 134.9, 133.4, 134.6 | 136.7, 137.9, 136.3, 135.8, 136.3, 137.6 | 141.2, 140.5 |
+
+- Medians: asmalloc 128.5k on 1.53.3, 133.0k on 1.54.0, 129.2k padded. Padding the header
+  takes back about 85% of the loss; asmalloc then leads jemalloc's unpadded 1.54 by 5%.
+- Instructions per request are level across the versions (asmalloc 298.5k, 298.7k, 298.9k;
+  jemalloc 310.4k, 310.8k), so the loss is stalls, not added work in tokio. jemalloc moved
+  1.3% and padding costs it 3%.
+- The headers are placed identically in both versions (the same four 40-byte slots, from the
+  allocation trace). Under IBS the hand-run servers show no more L1-missing user loads on 1.54,
+  and the counted user-mode L1 fills and exclusive requests per request do not separate the
+  builds either: the cost is in the stores and locked operations on the headers that IBS load
+  sampling and those counters do not isolate. Why 1.54 exposes what 1.53.3 did not is not
+  established; the likeliest reading, unverified, is that 1.53.3's contended idle line throttled
+  the workers' searching and stealing, and with it padded they reach each other's queue
+  headers more often.
+
+**Spawn on 1.54**, all the standings' allocators, three interleaved rounds, ns per task
+(medians):
+
+| Allocator | t4 | t8 |
+|---|---:|---:|
+| asmalloc | 111.6 | 203.0 |
+| jemalloc | 94.5 | 176.7 |
+| tcmalloc per-thread | 95.9 | 177.2 |
+| tcmalloc per-CPU | 97.0 | 187.5 |
+| mimalloc / crate / sized | 97.0 / 97.4 / 97.7 | 188.5 / 187.4 / 188.3 |
+| glibc | 98.7 | 186.3 |
+| snmalloc | 139.9 | 191.0 |
+
+asmalloc is 18% and 15% behind the best. glibc no longer depends on its draw: across eight path
+lengths it ran 99.2 to 102.2 ns at t4 and 180.9 to 183.9 at t8 (two rounds each); on 1.53.3 the
+same sweep gave 192 to 227 at t8. The 1.53.3 standings' glibc figures (100 and 179) were one draw
+of a range that wide; any glibc figure for these jobs on 1.53.3 should be read as that range.
+
+**With the run-queue header padded** (spawn, three interleaved rounds, ns per task):
+
+| Allocator | t4 1.54 | t4 padded | t8 1.54 | t8 padded |
+|---|---:|---:|---:|---:|
+| asmalloc | 111.8 | 95.7 | 201.3 | 188.4 |
+| jemalloc | 94.6 | 94.3 | 178.6 | 175.9 |
+| mimalloc | 97.3 | 99.0 | 188.9 | 194.5 |
+| glibc | 99.0 | 107.2 | 185.8 | 191.3 |
+
+The padding helps asmalloc only; it costs glibc 3 to 8%, mimalloc 2 to 3%, and jemalloc 3% on
+the gRPC server. A patch to tokio would need to show more than this, and it is no fix for us
+to rely on. mimalloc, which also has a 40-byte class, does not lose on the unpadded header;
+its placement was not traced.
+
+**What a general rule would have to be.** The cost comes from four 40-byte objects made one
+after another by one thread and then written by four. A rule that kept them apart would have to
+put objects of a class made back to back on different lines, which spends a line per object on
+the classes below 64 bytes, or drop the classes that do not divide 64 (40 and 56), which costs
+up to 20% on objects of those sizes and leaves the 48-byte class, where two consecutive objects
+still share a line. Neither is a rule I would build on this evidence; the narrower facts are
+that the loss is 3.6% on one gRPC job and 15 to 18% on the spawn microbenchmark, and that
+tokio padding its header would remove it.
