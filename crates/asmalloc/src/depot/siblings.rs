@@ -7,23 +7,24 @@
 //! server 3.6% of its cycles and the spawn jobs 15 to 18% (`docs/research/spawn-gap.md`).
 //!
 //! So a magazine whose fill does not continue a run of fills of its class
-//! ([`Filled::opens_run`](super::Filled)), the class's first fill of an interval, hands out its
-//! first [`SIBLINGS`] objects on lines of their own: they are taken a [`stride`] apart, the
-//! fewest slots at which two objects of the class are sure to share no line, in passes that
-//! fill each other's gaps, and the rest of the magazine follows in ascending address order.
-//! No slot is skipped, and the bitmaps and frontiers are as the fill left them: only the order
-//! within the magazine changes.
+//! ([`Filled::opens_run`](super::Filled)), the class's first fill of an interval, hands its
+//! first [`SIBLINGS`] strides of objects out in `stride` passes of [`SIBLINGS`] each, the
+//! objects of a pass a [`stride`] apart, the fewest slots at which two objects of the class are
+//! sure to share no line; the passes fill each other's gaps, and the rest of the magazine
+//! follows in the fill's order. So 64 objects allocated one after another lie on lines of their
+//! own (192 objects are reordered for the 40-byte class, 512 for the 8-byte one). No slot is
+//! skipped, and the bitmaps and frontiers are as the fill left them: only the order within the
+//! magazine changes.
 //!
-//! Both bounds come from what the order costs. Objects handed out apart are touched apart: a
+//! The bounds come from what the order costs. Objects handed out apart are touched apart: a
 //! tree walked in the order it was built, or a request's own objects, take more lines and lose
 //! the hardware prefetchers' stream. A program that builds a structure fills again and again,
 //! so only the first magazine of its run is affected; strided on every fill, a tree's build and
 //! walk lost 47% and a JSON parse 6%. But a server whose small classes circulate through
 //! magazines, and refill about once an interval, keeps a strided magazine's order in its
 //! working set: with whole magazines strided, the RPC log jobs lost 2 to 3%, and 1 to 2% even
-//! with only each class's first fill strided. Strided over its first 64 strides, the first fill
-//! of each interval left them level, kept the spawn jobs' gain, and still puts tokio's headers
-//! on lines of their own (`spawn-gap.md`, "The rule, built").
+//! with only each class's first fill strided. `docs/research/spawn-gap.md`, "The rule, built",
+//! has what the bounds here cost.
 //!
 //! Only classes smaller than a line, where several objects share each line. Classes of one to
 //! two lines (80 to 112 bytes) put neighbours on a shared boundary line too, but no measured
@@ -33,7 +34,8 @@ use crate::lined::LINE;
 use core::sync::atomic::AtomicPtr;
 use core::sync::atomic::Ordering::Relaxed;
 
-/// How many objects one after another a fill that opens a run keeps on lines of their own.
+/// How many objects one after another a fill that opens a run keeps on lines of their own: the
+/// length of each of its `stride` passes.
 pub(crate) const SIBLINGS: usize = 64;
 
 /// How many slots apart two objects of `size` bytes must be to be sure of sharing no line, or
@@ -89,13 +91,15 @@ impl Strided {
     }
 }
 
-/// Reorders the objects of a magazine this thread holds, which a fill wrote in ascending
-/// address order from the top (`objects[len - 1]` is popped first), so that the first
-/// [`SIBLINGS`] strides of them are handed out `stride` positions apart (see [`Strided`]), and
-/// the rest as they were. Once at least two strides are reordered, no two objects handed out
-/// one after another among those, or between the last of them and the next, are fewer than
-/// `stride` positions apart, and so, the addresses being ascending and distinct slots of one
-/// class, they share no line. Fewer than that cannot be kept apart, and are left alone.
+/// Reorders the objects of a magazine this thread holds, which a fill wrote from the top
+/// (`objects[len - 1]` is popped first), so that the first [`SIBLINGS`] strides of them are
+/// handed out `stride` positions apart (see [`Strided`]), and the rest as they were. Once at
+/// least two strides are reordered, no two objects handed out one after another among those,
+/// or between the last of them and the next, are fewer than `stride` positions apart. A fill
+/// writes ascending addresses, so those are distinct slots at least `stride` apart and share no
+/// line, unless the fill moved past another filler and then took slots lower in the region
+/// (`tree::claim_next`): two positions a stride apart may then be neighbours. Fewer than two
+/// strides cannot be kept apart, and are left alone.
 ///
 /// In place, one cycle of the permutation at a time, each object moved once: the slow path runs
 /// on whatever stack the program called it from. A bit per position, 64 bytes, says which

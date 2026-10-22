@@ -146,6 +146,56 @@ fn a_fill_that_opens_a_run_hands_out_siblings_on_lines_of_their_own() {
     }
 }
 
+/// A fill that opens a run and comes back short (the source runs out) still hands
+/// out every object once, the siblings on lines of their own. Lengths near the capacity are the
+/// ones where a reorder over the wrong part of the magazine would mix in the stale copies the
+/// move down leaves above the level.
+#[test]
+fn a_short_fill_that_opens_a_run_hands_out_every_object_once() {
+    for class in SmallClass::all().filter(|c| c.size() < 64) {
+        let size = class.size();
+        let capacity = class.magazine().capacity();
+        let s = stride(size).unwrap();
+        for count in [
+            1,
+            s,
+            2 * s - 1,
+            2 * s,
+            2 * s + 1,
+            100,
+            capacity - SIBLINGS * s + 1,
+            capacity - 5,
+            capacity - 1,
+        ] {
+            let rig: TestRig = Rig::new(&[class], count, Tuning::DEFAULT);
+            let machine = SimCpu::new(0);
+            let cache = rig.cache(&machine);
+            let got: Vec<usize> = (0..count)
+                .map(|_| cache.alloc(class).unwrap().addr().get())
+                .collect();
+            assert!(
+                cache.alloc(class).is_none(),
+                "{size} {count}: the source is empty"
+            );
+            let mut sorted = got.clone();
+            sorted.sort_unstable();
+            let all: Vec<usize> = (0..count)
+                .map(|n| super::test_rig::object(class, n).addr().get())
+                .collect();
+            assert_eq!(sorted, all, "{size} {count}: every object once");
+            let strided = count.min(SIBLINGS * s);
+            if strided >= 2 * s {
+                for pair in got[..strided].windows(2) {
+                    assert!(
+                        !share_a_line(pair[0], pair[1], size),
+                        "{size} {count}: {pair:x?}"
+                    );
+                }
+            }
+        }
+    }
+}
+
 #[test]
 fn a_workload_keeps_every_magazine_and_object_in_one_place() {
     let rig = rig(12, TIGHT);

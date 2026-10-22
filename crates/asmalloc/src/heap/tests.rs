@@ -344,6 +344,37 @@ fn a_fresh_heaps_first_objects_of_a_small_class_lie_on_lines_of_their_own() {
     }
 }
 
+/// A class opens one run at start-up whatever the cycle counter reads. On a machine up for
+/// more than an interval the clock's first reading steps its count from zero; if that came at
+/// the first heartbeat, every frontier the first fills recorded would read as an earlier
+/// interval's and the class would open a second run at once. Only the first magazine is
+/// strided, here as when the clock starts at zero.
+#[test]
+fn a_class_opens_one_run_at_start_whatever_the_clock_reads() {
+    for start in [0u64, 5 * crate::depot::IDLE_TICKS] {
+        let heap = SimHeap::<Shape>::new();
+        heap.os().advance_clock(start);
+        let size = 40;
+        let l = layout(size, 8);
+        let capacity = Class::of_size(size)
+            .and_then(Class::small)
+            .unwrap()
+            .magazine()
+            .capacity();
+        // SAFETY: a valid, non-empty layout.
+        let got: Vec<*mut u8> = (0..6 * capacity)
+            .map(|_| unsafe { heap.alloc(l) })
+            .collect();
+        let strided: Vec<usize> = got
+            .chunks(capacity)
+            .enumerate()
+            .filter(|(_, m)| m[1].addr().abs_diff(m[0].addr()) != size)
+            .map(|(i, _)| i)
+            .collect();
+        assert_eq!(strided, [0], "clock starts at {start:#x}");
+    }
+}
+
 #[test]
 #[cfg_attr(miri, ignore)]
 fn a_simulated_heap_resizes_in_place_and_with_headroom() {

@@ -1249,7 +1249,10 @@ fn a_fill_opens_a_run_only_as_the_first_claim_of_its_region_in_an_interval() {
     tick(&back, 1);
     // SAFETY: as above.
     unsafe { back.launder(class, &again[..5]) };
-    let (_, opens) = fill_opens(20);
+    // 35 slots are free: 30 of the first 100 laundered, which the fills since have not taken,
+    // and these 5. A fill of 60 claims them and carves 25 in the same region, recording its
+    // reach twice.
+    let (_, opens) = fill_opens(60);
     assert!(opens, "claims and then a carve: the claims' record decides");
     let mut out = [core::ptr::null_mut(); 8];
     assert!(
@@ -1259,6 +1262,34 @@ fn a_fill_opens_a_run_only_as_the_first_claim_of_its_region_in_an_interval() {
     );
     let mut none: [*mut u8; 0] = [];
     assert!(!back.fill_within(small(56), &mut none[..], 1).opens_run);
+}
+
+/// A frontier word records a claim of an interval when it names that interval or the next one
+/// (a claimer that read the number just before it moved writes the next, and `record` takes
+/// it as current), and its `now` is a page past a slot; an older word, or the zero word of
+/// interval zero, records none.
+#[test]
+fn a_frontier_word_says_which_intervals_it_records_a_claim_of() {
+    let format = super::layout::FrontierFormat::of(1 << 20);
+    let mask = (1u64 << format.epoch_bits()) - 1;
+    assert!(!format.claimed_in(0, 0), "the zero word records nothing");
+    for epoch in [0, 1, 7, mask - 1, mask] {
+        let word = format.pack(super::layout::Frontier {
+            epoch,
+            now: 3,
+            last: 0,
+        });
+        assert!(format.claimed_in(word, epoch));
+        assert!(
+            format.claimed_in(word, epoch.wrapping_sub(1) & mask),
+            "the next interval's"
+        );
+        assert!(
+            !format.claimed_in(word, epoch.wrapping_add(1) & mask),
+            "the last interval's"
+        );
+        assert!(!format.claimed_in(word, epoch.wrapping_add(5) & mask));
+    }
 }
 
 /// A fill whose run of claims leaves one region for the next records the first region's
