@@ -160,6 +160,57 @@ request, three runs each way for the branch and for main), by whether the burst 
 indexing batch. Both threads park as before: last wake-up 22 s into the silence and after
 close, none in the last 10 s.
 
+## Second round: after the review, the merge with main, and a yield after each step
+
+2026-10-22, the branch at `7aaee31` (main `040033a` merged; the review of `26cc261` answered)
+against main `040033a`, the branch without the yields (`asmalloc-noyield`, the same commit
+with `yield_cpu` taken out of `depot/thread.rs` by `build-at.sh`), and jemalloc. The yield:
+the thread calls `sched_yield` after each bounded step of its round and of the purges, so that
+a program thread waiting for its CPU waits at most a step.
+
+**DataFusion: the yields cost the peak.** `dftrace.py`, 20 runs each:
+
+| build | peak RssAnon, runs over 880 MiB | thread run-queue wait a run, median | thread's involuntary switches a run |
+|---|---:|---:|---:|
+| main | 0 of 20 | 0.6 ms | 0 |
+| branch, no yield | 0 of 20 (848 to 860) | 87 ms | 35 |
+| branch, yield | 10 of 20 (902 to 1,039) | 462 ms | 390 |
+
+With four workers on four CPUs every yield hands a worker a whole slice before the thread
+comes back, and the holds and payments it owes wait behind them, about half a second a run.
+benchrun's six rounds (where the branch had one run at 1,049 MiB and main one at 1,022)
+agree in median: cgroup peak 867 against main's 868 and jemalloc's 863; Gcycles 69.71
+against 69.73 (one build's; kernel 5.88 against 5.84).
+
+**Meilisearch: no difference to explain this session.** Six rounds each, at 70%:
+
+| | main | branch | branch, no yield | jemalloc |
+|---|---|---|---|---|
+| p50 / p99 / p99.9, ms | 1.76 / 28.6 / 45.8 | 1.78 / 30.9 / 44.7 | 1.75 / 29.3 / 45.4 | 2.03 / 35.7 / 54.3 |
+| p99.9 range, ms | 42 to 47 | 44 to 48 | 36 to 53 | 50 to 59 |
+| kcycles a request | 16,945 | 16,982 | 16,985 | 17,517 |
+| page faults a request | 88.6 | 85.6 | 89.0 | 38.5 |
+| thread wake-ups / CPU ms a second | 2.0 / 0.0 | 23.4 / 9.7 | 24.8 / 9.6 | |
+| workers' run-queue wait in 2 ms, p99.9 (median of runs) | 41.4 ms | 42.2 ms | 43.0 ms | 44.5 ms |
+| thread's CPU in 2 ms, p99 | 0 | 0.32 ms | 0.66 ms | |
+
+Main's p99.9 was 37 to 41 ms in the first round and is 42 to 47 now, with main's floor
+change merged; the branch's is level with it either way, and the yield halves the thread's
+CPU in any 2 ms at p99 without moving the workers' wait (the per-2-ms wait summed over every
+server thread, from `schedtrace.py`, every 2 ms; `schedsum.py`). So the first round's 6 ms
+did not reproduce, and these traces do not show the thread delaying the workers.
+
+**Doubling** (three rounds, 192 doublings): branch 0.780 / 0.827 / 0.916 ms (median, p90,
+max), main 0.779 / 0.852 / 1.103, jemalloc 0.758 / 0.826 / 0.850.
+
+**The log store's burst after a silence** (diagnostic builds, `default-thread/burst.py`,
+three rounds; the slowest request of the first 5 ms): main 0.93, 0.68, 0.89 ms; the branch
+0.57, 0.60, 0.50; the branch with the thread off 0.31, 0.98, 0.44. Main's request paths read
+5.5k to 6.7k bitmap words of a pass in those 5 ms; the branch's none (the thread reads 20k to
+30k). What is left over the thread-off build comes at the burst's first requests, after a
+silence in which the thread drained the four slabs (4 drains, as on main): the slow paths
+that refill them. The pass is off request paths; the idle drains are what remains.
+
 ## Limits
 
 - **The thread shares the program's CPUs.** It is created by a program thread and inherits

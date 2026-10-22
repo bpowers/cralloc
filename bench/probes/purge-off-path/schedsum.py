@@ -26,7 +26,10 @@ for path in sys.argv[1:]:
 print("| build | pid | intervals | workers' wait us a 2 ms: p99 / p99.9 / max | thread ran us a 2 ms: p99 / max | thread's longest burst, ms |")
 print("|---|---:|---:|---|---|---:|")
 for (pid, exe), samples in sorted(runs.items(), key=lambda kv: kv[0][0]):
-    build = exe.split("/target/")[1].split("/")[0] if "/target/" in exe else exe
+    if "/target/" not in exe:
+        # The process had exited when its last sample read its executable.
+        continue
+    build = exe.split("/target/")[1].split("/")[0]
     waits, ran = [], []
     burst = longest = 0.0
     for a, b in zip(samples, samples[1:]):
