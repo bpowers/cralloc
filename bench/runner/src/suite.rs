@@ -887,6 +887,25 @@ pub fn servers_thread() -> Vec<Job> {
         .collect()
 }
 
+/// Meilisearch's tail at 70% alone (docs/research/meili-tail.md): filled as `servers-thread`
+/// fills it, then two minutes at 70% in twelve marked pieces of ten seconds (`s70`), and no
+/// silence or burst, so that a session spends its minutes on the steady tail.
+pub fn meili_tail() -> Vec<Job> {
+    large()
+        .into_iter()
+        .filter(|l| l.id == "meilisearch hn")
+        .map(|l| {
+            let r = l.r70;
+            let mut segs = vec![format!("_fill:closed:{}", l.fill_s), format!("_w70:{r}:2")];
+            segs.extend((0..12).map(|_| format!("s70:{r}:10")));
+            segs.push("idle:close:2".into());
+            let mut job = large_job(l, segs.join(","), "s70", " tail");
+            job.group = "meili-tail";
+            job
+        })
+        .collect()
+}
+
 /// Every CPU any job may use.
 pub fn measurement_cpus() -> Vec<usize> {
     both()
