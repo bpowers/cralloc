@@ -70,10 +70,12 @@ process light.
   hand in the allocator. The one exception is the system-call instruction in the OS
   interface, which has a ledger entry.
 - The allocator crate has no dependencies, not even on a C library: it makes its own system
-  calls. The exception is the background thread, which is created with the C library's
-  `pthread_create` behind the default `background` feature, so that the library knows the
-  thread exists; nothing else may call into a C library, and a build without default
-  features must not. Test, fuzz and benchmark crates may depend on what they need.
+  calls. The exception is the default `background` feature: it creates the background
+  thread through the C library, so that the library knows the thread exists, and reads
+  the environment with it. Nothing else may call a C library function, and a build without
+  default features refers only to what it must share with the library (`errno`, the rseq
+  offset) and what the compiler emits (`memcpy`, `memset`). Test, fuzz and benchmark crates
+  may depend on what they need.
 - Write good, clean Rust: small modules with one job, types that make wrong states hard to
   build, `unsafe` confined to a few well-named places.
 - Every `unsafe` block in code that ships (the allocator and the preload library, not the
