@@ -1,7 +1,7 @@
 //! Test equipment for the middle tier: a small heap shape, an object source, a simulated CPU,
 //! and a census that checks the TLA+ models' invariants on a quiescent heap.
 
-use super::{Cache, Depot, Magazine, Pool, Source, Tuning};
+use super::{Cache, Depot, Filled, Magazine, Pool, Source, Tuning};
 use crate::classes::{MagazineSize, SmallClass, is_marker};
 use crate::front::check::switch_point;
 use crate::front::{Field, Slab, Slabs, Spare, Twin};
@@ -73,6 +73,8 @@ pub(crate) struct TestSource {
     laundered: AtomicUsize,
     universe: BTreeSet<usize>,
     clock: crate::clock::Counted,
+    /// The counted interval of each class's last fill, by ordinal.
+    last_fill: Mutex<BTreeMap<usize, u32>>,
 }
 
 impl TestSource {
@@ -100,6 +102,7 @@ impl TestSource {
             laundered: AtomicUsize::new(0),
             universe,
             clock: crate::clock::Counted::new(),
+            last_fill: Mutex::new(BTreeMap::new()),
         }
     }
 
@@ -168,7 +171,7 @@ impl Source for TestSource {
         &self.clock
     }
 
-    fn fill(&self, class: SmallClass, slots: &[core::sync::atomic::AtomicPtr<u8>]) -> usize {
+    fn fill(&self, class: SmallClass, slots: &[core::sync::atomic::AtomicPtr<u8>]) -> Filled {
         self.fills.fetch_add(1, Ordering::Relaxed);
         let mut count = 0;
         for slot in slots.iter().rev() {
@@ -180,7 +183,16 @@ impl Source for TestSource {
                 None => break,
             }
         }
-        count
+        // As the back end tells it: a class's first fill of a counted interval opens a run.
+        let interval = self.clock.count();
+        let opens_run = count > 0
+            && self
+                .last_fill
+                .lock()
+                .unwrap()
+                .insert(class.ordinal(), interval)
+                != Some(interval);
+        Filled { count, opens_run }
     }
 
     fn take_back(&self, class: SmallClass, objects: &[core::sync::atomic::AtomicPtr<u8>]) {

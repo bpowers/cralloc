@@ -43,6 +43,22 @@ the same length (glibc's speed on the spawn jobs depends on it).
 - `serve.py BUILD MODE PLAN`: the order service on CPUs 0-3 and the load generator on 8-11 by
   hand, with `TRACE=` and `C2C=` as above (`MODE` `axum` or `axum-h2`).
 - `srv.py RESULTS...`: s70 medians from `benchrun` server results, with any extra counters.
+- `ab-build.sh [--trace] NAME=COMMIT...`: builds commits from `git archive` for benchrun's
+  `build = "asm-NAME"` entries (workloads, rpc-server, the order service, boa), or with
+  `--trace` the traced workloads and rpc-server into `bench/target/trc-NAME`. Under
+  `scripts/heavy`.
+- `rpc-headers.sh NAME...`: where tokio's run-queue headers land in a traced rpc-server, and
+  how many pairs share a line. Under `scripts/memlimit`.
+- `grpc-record.sh ALLOCATOR TAG [EVENTS]`: one benchrun run of connect log grpc h2 with
+  `perf record -a -C 0-3` over its s70 segment (`docs/research/grpc-placement.md`). Under
+  `scripts/measure --both-l3`.
+- `srvev.py RESULTS...`: a server group's counters per request, every run and the median,
+  including the raw events the runner hunks add (`BENCH_PROC_EVENTS=name=config,...`).
+- `symdiff.py EVENT A.data B.data`, `hotlines.py EVENT DATA PATTERN`, `symaddr.py BINS
+  PATTERN...`: samples by function in two recordings, by 64-byte line inside functions, and
+  where functions lie (line and page offsets) in binaries.
+- `grpc-pstat.py`: the gRPC job driven by hand under `perf stat -p`. It counts 28% fewer cycles
+  than benchrun and did not separate builds that benchrun does; kept as a warning, not a tool.
 - `tokio-pad-queue.diff`: tokio 1.54.0 with the run queue's shared header cache-padded, for a
   local `[patch.crates-io]` (see the note).
 

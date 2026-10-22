@@ -36,7 +36,7 @@
 
 mod class;
 
-pub use class::{Descending, Sink, SlotPointer};
+pub use class::{Descending, Filled, Sink, SlotPointer};
 pub(crate) use hold::MAINTAIN_HOLD_ROUNDS;
 pub use purge::PassStep;
 mod group;
@@ -320,10 +320,21 @@ impl<O: Os> State<O> {
 
     /// The back end over the heap, reserving the heap first if no thread has (see
     /// [`SpaceCell::get_or_reserve`]).
+    ///
+    /// Reads the clock and notes the interval before handing the back end out, so that the
+    /// first claims record their frontiers under the interval the clock is in. Left to the
+    /// first heartbeat, the interval number would still be zero for them, and on a machine up
+    /// for more than an interval the first reading steps the count past it: every class's
+    /// first frontier would then read as an earlier interval's, and its next fill would open a
+    /// second run (`Filled::opens_run`). A heap is reserved once; the threads that start it
+    /// together each read the clock once.
     pub fn get_or_reserve(&self) -> Result<Back<'_, O>, OsError> {
-        self.cell
+        let back = self
+            .cell
             .get_or_reserve()
-            .map(|space| Back { state: self, space })
+            .map(|space| Back { state: self, space })?;
+        back.note_epoch(back.now());
+        Ok(back)
     }
 }
 

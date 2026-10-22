@@ -6,7 +6,7 @@
 use crate::back::policy::FILL_CLAIMS;
 use crate::back::{Back, Descending, PassStep};
 use crate::classes::SmallClass;
-use crate::depot::{PurgeStep, Source};
+use crate::depot::{Filled, PurgeStep, Source};
 use crate::os::Os;
 use core::ptr::NonNull;
 use core::sync::atomic::AtomicPtr;
@@ -16,8 +16,12 @@ impl<O: Os> Source for Back<'_, O> {
         Back::clock(self)
     }
 
-    fn fill(&self, class: SmallClass, slots: &[AtomicPtr<u8>]) -> usize {
-        Back::fill_within(self, class, &mut Descending(slots), FILL_CLAIMS)
+    fn fill(&self, class: SmallClass, slots: &[AtomicPtr<u8>]) -> Filled {
+        let filled = Back::fill_within(self, class, &mut Descending(slots), FILL_CLAIMS);
+        Filled {
+            count: filled.count,
+            opens_run: filled.opens_run,
+        }
     }
 
     fn take_back(&self, class: SmallClass, objects: &[AtomicPtr<u8>]) {
