@@ -326,7 +326,7 @@ impl<O: Os> Back<'_, O> {
             // Every space is made on the OS's geometry, so the step is a constant.
             let step = const { allowance_floor(O::GEOMETRY) / 8 };
             if crate::thread_word::crosses(old, bytes, step) && self.over_floor() {
-                self.state.thread.raise_level(true);
+                self.state.thread.raise_level();
             }
         }
     }
@@ -550,7 +550,7 @@ impl<O: Os> Back<'_, O> {
                 // The once-an-interval look at the level: while the heap stays over the floor,
                 // a slow path is asked to look at the background thread's word again, so that
                 // a start refused for a passing reason is tried again (`crate::thread_word`).
-                state.thread.raise_level(false);
+                state.thread.raise_level();
                 if state
                     .decay
                     .word

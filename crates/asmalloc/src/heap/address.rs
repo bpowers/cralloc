@@ -144,7 +144,7 @@ pub(crate) mod process {
     pub(crate) fn alloc_large(size: usize, align: usize, zero: bool) -> *mut u8 {
         let heap = global::process();
         let block = heap.heap().alloc_large_aligned(size, align, zero);
-        let _ = heap.heartbeat();
+        heap.heartbeat();
         block.map_or(ptr::null_mut(), NonNull::as_ptr)
     }
 
@@ -154,7 +154,7 @@ pub(crate) mod process {
     pub(crate) fn alloc_large_grown(size: usize) -> *mut u8 {
         let heap = global::process();
         let block = heap.heap().alloc_large_grown(size);
-        let _ = heap.heartbeat();
+        heap.heartbeat();
         block.map_or(ptr::null_mut(), NonNull::as_ptr)
     }
 
@@ -167,7 +167,7 @@ pub(crate) mod process {
     #[cold]
     pub(crate) unsafe fn free_large(ptr: NonNull<u8>) {
         // SAFETY: the contract of `Bound::free_large_slow` is this function's, word for word.
-        let _ = unsafe { global::process().free_large_slow(ptr) };
+        unsafe { global::process().free_large_slow(ptr) }
     }
 
     /// Moves `len` bytes of the large block at `from` to `to` and frees `from`, a piece at a

@@ -270,6 +270,21 @@ fn child(mode: &str) {
                 println!("steady_wakes_per_10s {}", (after - before) / 2);
             }
         }
+        // The parent's thread is awake at the fork, started by hand or by a worker's burst a
+        // few seconds before: the child inherits `AWAKE` under the parent's key, which must not
+        // hide the child's own crossings.
+        "forkawake" => {
+            Asmalloc::start_background().unwrap();
+            drop(burst(1));
+            fork_and_free();
+            return;
+        }
+        "workerfork" => {
+            worker_frees(|| {}, || {});
+            thread::sleep(Duration::from_secs(5));
+            fork_and_free();
+            return;
+        }
         "fork" => {
             worker_frees(|| {}, || {});
             silence().print("");
@@ -295,6 +310,31 @@ fn child(mode: &str) {
         _ => panic!("unknown mode {mode}"),
     }
     silence().print("");
+}
+
+/// Forks; the child's second thread frees a 128 MiB burst, and the child reports with the
+/// prefix `child_`, the parent its child's status.
+fn fork_and_free() {
+    // SAFETY: the child goes on as an ordinary process; the other threads are idle.
+    let pid = unsafe { fork() };
+    if pid == 0 {
+        keep_a_thread();
+        worker_frees(|| {}, || {});
+        silence().print("child_");
+        std::process::exit(0);
+    }
+    let mut status = 0;
+    // SAFETY: a valid pointer for the status.
+    unsafe { waitpid(pid, &mut status, 0) };
+    println!("child_status {status}");
+}
+
+/// The child of a fork whose parent's thread was awake got its own thread and returned its
+/// burst.
+fn child_returned(report: &BTreeMap<String, u64>) -> Result<(), String> {
+    expect(get(report, "child_status")? == 0, "the child failed", report)?;
+    expect(get(report, "child_thread")? == 1, "no thread in the child", report)?;
+    expect(get(report, "child_rss_mib")? < 72, "the child kept its burst", report)
 }
 
 /// The modes that must not have a second thread before their burst: run before anything else
@@ -416,6 +456,9 @@ const CASES: &[Case] = &[
             no_thread(report)
         },
     },
+    // Fork children of a parent whose thread is awake (second review's finding).
+    Case { mode: "forkawake", env: &[], check: child_returned },
+    Case { mode: "workerfork", env: &[], check: child_returned },
     // A fork child of a parked parent: no thread for its first thread's frees, one once a
     // thread of its own frees, and the memory goes back.
     Case {

@@ -142,3 +142,12 @@ paths a repetition), five interleaved rounds: 4.027 cycles an operation at `ec47
   same interval gets no thread until a slow path in a later interval looks at the level again.
 - Where the generation's page cannot be wiped on fork (drains are off there too), a fork child
   keeps its parent's generation and reads the parent's word as its own.
+- A child that shares its parent's memory (`vfork`, `CLONE_VM`) shares its generation; a Rust
+  slow path there that finds the word wanted creates the thread in the child. Allocating in
+  such a child is a non-goal.
+- A program that runs both `start_background` and the tokio task can have the task take every
+  round of `maintain`; the thread then never sees a round, and never parks. The task wakes
+  once an interval anyway, so the cost is the thread's two wake-ups a second besides.
+- The schedule exploration of the park protocol is sequentially consistent: it checks the
+  order of the store, the second look and a slow path's install and load, not the fence. That
+  the fence gives that order on x86-64 rests on the argument in `depot/thread.rs`.

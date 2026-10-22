@@ -409,8 +409,8 @@ impl<'a, O: Os, R: Routines + Copy> Bound<'a, O, R> {
             None => {
                 // SAFETY: a layout with no small class describes a large block (GLOBAL-03),
                 // which the caller gives up.
-                let seen = unsafe { self.free_large_slow(object) };
-                self.after_rust_slow_path(seen);
+                unsafe { self.heap.free_large(object) };
+                self.rust_heartbeat();
             }
         }
     }
@@ -451,41 +451,55 @@ impl<'a, O: Os, R: Routines + Copy> Bound<'a, O, R> {
         cache.thread_seen()
     }
 
-    /// The heartbeat of a slow path that served no small class: a large allocation or free.
-    /// It counts the slow path first, and builds what the chores need only when they are due:
-    /// on the other calls it loads the background thread's word itself, and builds them only
-    /// if the word asks for a look. Returns the word as it left it.
+    /// The heartbeat of a slow path that served no small class: a large allocation or free
+    /// through the C interface. It counts the slow path first, and builds what the chores need
+    /// only when they are due: on the other calls it loads the background thread's word itself,
+    /// tests it with one mask, and builds them only if the word asks for a look.
     #[cold]
     #[inline(never)]
-    pub(crate) fn heartbeat(self) -> Snapshot {
+    pub(crate) fn heartbeat(self) {
+        self.lone_heartbeat(false);
+    }
+
+    /// [`Bound::heartbeat`] for a call through the Rust interface, which also creates the
+    /// background thread if the word leaves it wanted. The common path is the same: callers
+    /// look at nothing after it, so they call it last.
+    #[cold]
+    #[inline(never)]
+    pub(crate) fn rust_heartbeat(self) {
+        self.lone_heartbeat(true);
+    }
+
+    #[inline(always)]
+    fn lone_heartbeat(self, rust: bool) {
         match crate::depot::lone_count(&self.heap.depot, &self.routines) {
-            crate::depot::Lone::Beat(turn) => match self.heap.started() {
-                Some(back) => {
+            crate::depot::Lone::Beat(turn) => {
+                if let Some(back) = self.heap.started() {
                     let cache = self.cache(&back);
                     cache.lone_beat(turn);
-                    cache.thread_seen()
+                    if rust {
+                        self.after_rust_slow_path(cache.thread_seen());
+                    }
                 }
-                None => self.word().load(),
-            },
+            }
             crate::depot::Lone::Counted => {
-                let seen = self.word().load();
-                if seen.needs_attention() {
-                    self.attend_thread(seen)
-                } else {
-                    seen
+                if self.word().load().needs_attention() {
+                    self.attend_thread(rust);
                 }
             }
         }
     }
 
     /// The cold look at the background thread's word, for a large call that did not beat and
-    /// found it asking for one.
+    /// found it asking for one; through the Rust interface, the thread's start if it is wanted.
     #[cold]
     #[inline(never)]
-    fn attend_thread(self, seen: Snapshot) -> Snapshot {
-        match self.heap.started() {
-            Some(back) => self.cache(&back).attend_thread(),
-            None => seen,
+    fn attend_thread(self, rust: bool) {
+        if let Some(back) = self.heap.started() {
+            let seen = self.cache(&back).attend_thread();
+            if rust {
+                self.after_rust_slow_path(seen);
+            }
         }
     }
 

@@ -148,6 +148,11 @@ impl fmt::Display for StartError {
 impl core::error::Error for StartError {}
 
 /// The heap's start hook: a Rust-interface slow path found the thread wanted.
+///
+/// A limit: a child that shares its parent's memory (`vfork`, `CLONE_VM`) shares its
+/// generation, so a Rust slow path there that finds the word wanted creates the thread in the
+/// child. Allocating in such a child is outside what the allocator supports (design,
+/// "Non-Goals").
 pub(super) fn start_wanted() {
     let heap = process();
     if OPTED_OUT.load(Relaxed) || choice() == Choice::Off {
@@ -276,7 +281,14 @@ impl Asmalloc {
     #[doc(hidden)]
     pub unsafe fn start_dormant(create: CreateThread) {
         let state = match choice() {
-            Choice::Off => return,
+            Choice::Off => {
+                // So that no slow path finds the word wanted, and goes to the cold look, for
+                // the rest of the process: nothing here would act on it.
+                let heap = process();
+                heap.claim_thread(NONE, OFF);
+                heap.claim_thread(WANTED, OFF);
+                return;
+            }
             Choice::On => AWAKE,
             Choice::Default => DORMANT,
         };

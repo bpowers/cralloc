@@ -38,6 +38,7 @@ mod class;
 
 pub use class::{Descending, Sink, SlotPointer};
 pub use purge::PassStep;
+pub(crate) use hold::MAINTAIN_HOLD_ROUNDS;
 mod group;
 mod hold;
 mod host;

@@ -52,9 +52,9 @@ pub const QUIET_ROUNDS: u64 = FRONTIER_INTERVALS - 1 + PURGE_ANY_RUN_EVERY;
 /// stack's shed, which owes the low-water mark of the interval its first look starts at the
 /// next one; and the hold on large slots, which `maintain` takes at its second round in a
 /// silence.
-const IDLE_DRAIN_ROUNDS: u64 = 3;
-const SHED_ROUNDS: u64 = 2;
-const HOLD_ROUNDS: u64 = 2;
+const IDLE_DRAIN_ROUNDS: u64 = 2 + super::heartbeat::IDLE_TICKS.div_ceil(crate::clock::INTERVAL);
+const SHED_ROUNDS: u64 = 1 + (1u64 << super::heartbeat::IDLE_SHIFT).div_ceil(crate::clock::INTERVAL);
+const HOLD_ROUNDS: u64 = crate::back::MAINTAIN_HOLD_ROUNDS;
 
 const _: () = assert!(QUIET_ROUNDS + 1 >= IDLE_DRAIN_ROUNDS);
 const _: () = assert!(QUIET_ROUNDS + 1 >= SHED_ROUNDS);

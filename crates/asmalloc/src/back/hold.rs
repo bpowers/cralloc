@@ -190,6 +190,15 @@ const fn stamp_of(count: u32) -> u64 {
 /// lasts several fine steps (`Back::maintain_hold`). Heartbeats make hundreds an interval.
 const QUIET_STEPS: u32 = 4;
 
+/// How many of `maintain`'s rounds before this one a quiet round's hold reaches back: a stamp
+/// older than the previous round's first look goes (`Back::maintain_hold`, the steps since that
+/// look plus this).
+const ROUNDS_BACK: u32 = 1;
+
+/// The rounds of `maintain` after a silence begins by which its hold returns a large slot freed
+/// before it: the background thread's count of quiet rounds must cover them (`depot::thread`).
+pub(crate) const MAINTAIN_HOLD_ROUNDS: u64 = 1 + ROUNDS_BACK as u64;
+
 /// Set in a stamp by the look that starts a walk of the region from its top: the walk that
 /// reaches the region's bottom with the stamp unchanged clears it, however many looks the
 /// walk took. A free writes a stamp without it, so a free during the walk keeps the stamp.
@@ -322,7 +331,7 @@ impl<O: Os> Back<'_, O> {
         let last = hold.maintain_looked.load(Relaxed);
         let since = count.wrapping_sub(last.wrapping_sub(1));
         let steps = if last != 0 && since <= QUIET_STEPS {
-            since + 1
+            since + ROUNDS_BACK
         } else {
             HOLD_STEPS
         };

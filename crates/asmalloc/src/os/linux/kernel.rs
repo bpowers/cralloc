@@ -582,16 +582,15 @@ mod threads {
         #[link(name = "c")]
         unsafe extern "C" {
             /// glibc's record (2.32 and later) that the process has not created a thread: true
-            /// at start, false from the first `pthread_create` on. It is never set again, not
-            /// even in a fork child (measured on 2.43), so it holds only outside one.
-            static __libc_single_threaded: u8;
+            /// at start, false from the first `pthread_create` on. 2.43 never sets it again,
+            /// not even in a fork child, so it holds only outside one.
+            static __libc_single_threaded: core::sync::atomic::AtomicU8;
         }
         if forked {
             return not_the_first();
         }
-        // SAFETY: KERNEL-12. A byte the C library defines, and writes only as it creates a
-        // thread; a volatile read takes whatever it holds.
-        unsafe { core::ptr::read_volatile(&raw const __libc_single_threaded) == 0 }
+        // SAFETY: KERNEL-12. A byte the C library defines; read atomically.
+        unsafe { __libc_single_threaded.load(core::sync::atomic::Ordering::Relaxed) == 0 }
     }
 
     #[cfg(not(target_env = "gnu"))]

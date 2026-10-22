@@ -285,9 +285,7 @@ fn a_level_raised_while_the_thread_parks_is_not_lost() {
     ready_to_park!(rig, thread, key, seen);
     let activity = thread.first_look(&mut seen, false).unwrap();
     assert!(thread.mark_parked(key));
-    rig.source.thread.raise_level(true);
-    assert_eq!(rig.source.thread.load(), Snapshot(key | PARKED));
-    rig.source.thread.raise_level(false);
+    rig.source.thread.raise_level();
     assert_eq!(rig.source.thread.load(), Snapshot(key | PARKED | LEVEL));
     assert_eq!(thread.second_look(key, activity), Rest::Park);
     one_slow_path(&rig);
@@ -305,24 +303,24 @@ fn a_level_wants_or_wakes_the_thread_and_one_claim_creates_it() {
     let keeper = SimCpu::new(1);
     let key = rig.cache(&keeper).thread_key();
     let word = &rig.source.thread;
-    word.raise_level(true);
+    word.raise_level();
     slow_path_end(&rig);
     assert_eq!(word.load(), Snapshot(key | NONE), "no thread of its own");
     rig.os().set_threads(true);
-    word.raise_level(true);
+    word.raise_level();
     slow_path_end(&rig);
     assert_eq!(word.load(), Snapshot(key | WANTED));
     assert!(word.claim_start(rig.os(), key, DORMANT));
     assert!(!word.claim_start(rig.os(), key, DORMANT));
     slow_path_end(&rig);
     assert_eq!(rig.os().wakes(), 0, "a slow path woke a dormant thread");
-    word.raise_level(true);
+    word.raise_level();
     slow_path_end(&rig);
     assert_eq!(word.load(), Snapshot(key | AWAKE));
     assert_eq!(rig.os().wakes(), 1);
     assert!(!word.claim_start(rig.os(), key, AWAKE), "created twice");
     // A running thread's level is cleared and nothing else changes.
-    word.raise_level(false);
+    word.raise_level();
     slow_path_end(&rig);
     assert_eq!(word.load(), Snapshot(key | AWAKE));
     assert_eq!(rig.os().wakes(), 1);
@@ -362,7 +360,7 @@ fn a_fork_child_reads_its_parents_word_as_stale() {
     assert!(!word.claim(child, WANTED, AWAKE));
     assert_eq!(word.load(), Snapshot(child | NONE));
     // Over the floor, the child wants a thread only when a thread of its own crosses it.
-    word.raise_level(true);
+    word.raise_level();
     slow_path_end(&rig);
     assert_eq!(
         word.load(),
@@ -370,7 +368,7 @@ fn a_fork_child_reads_its_parents_word_as_stale() {
         "the child's first thread"
     );
     rig.os().set_other_thread(true);
-    word.raise_level(true);
+    word.raise_level();
     slow_path_end(&rig);
     assert_eq!(word.load(), Snapshot(child | WANTED));
     // The grandchild.
@@ -378,11 +376,9 @@ fn a_fork_child_reads_its_parents_word_as_stale() {
     unsafe { rig.os().wipe_for_fork() };
     let grandchild = rig.cache(&keeper).thread_key();
     assert_ne!(grandchild, child);
-    // The child's `WANTED` holds back a crossing's request, which only a word that reads no
-    // thread makes; the look once an interval asks whatever the word reads.
-    word.raise_level(true);
-    assert!(!word.load().level());
-    word.raise_level(false);
+    // The child's `WANTED`, the grandchild's parent's, does not hold back a crossing's request.
+    word.raise_level();
+    assert!(word.load().level());
     slow_path_end(&rig);
     assert_eq!(
         word.load(),
@@ -390,7 +386,7 @@ fn a_fork_child_reads_its_parents_word_as_stale() {
         "the grandchild's first thread"
     );
     rig.os().set_other_thread(true);
-    word.raise_level(true);
+    word.raise_level();
     slow_path_end(&rig);
     assert_eq!(word.load(), Snapshot(grandchild | WANTED));
 }
@@ -404,7 +400,7 @@ fn outside_a_fork_child_the_first_thread_may_want_the_thread() {
     let keeper = SimCpu::new(1);
     let key = rig.cache(&keeper).thread_key();
     rig.os().set_threads(true);
-    rig.source.thread.raise_level(true);
+    rig.source.thread.raise_level();
     slow_path_end(&rig);
     assert_eq!(rig.source.thread.load(), Snapshot(key | WANTED));
 }
@@ -419,4 +415,24 @@ fn a_child_that_shares_memory_is_not_a_new_process() {
     let keeper = SimCpu::new(1);
     assert_eq!(rig.cache(&keeper).thread_key(), key);
     assert!(!rig.source.thread.claim_start(rig.os(), key, AWAKE));
+}
+
+/// A fork child whose parent's thread was awake inherits `AWAKE` under the parent's key: its
+/// crossings still ask for a look, and a thread of its own then wants one (second review).
+#[test]
+fn a_fork_child_of_an_awake_parent_sees_its_own_crossings() {
+    let rig = rig(12, TIGHT);
+    one_slow_path(&rig);
+    let parent = started(&rig);
+    let word = &rig.source.thread;
+    // SAFETY: nothing else runs.
+    unsafe { rig.os().wipe_for_fork() };
+    let keeper = SimCpu::new(1);
+    let child = rig.cache(&keeper).thread_key();
+    assert_ne!(child, parent);
+    assert_eq!(word.load(), Snapshot(parent | AWAKE));
+    rig.os().set_other_thread(true);
+    word.raise_level();
+    slow_path_end(&rig);
+    assert_eq!(word.load(), Snapshot(child | WANTED));
 }

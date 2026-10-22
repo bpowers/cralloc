@@ -256,24 +256,27 @@ changes a mapping, a protection or a disposition.
 
 ## KERNEL-12: glibc's `__libc_single_threaded`
 
-**Blocks.** The `extern` block that declares `static __libc_single_threaded: u8` (only with the
-`background` feature, on `target_env = "gnu"`), and the volatile read of it in
+**Blocks.** The `extern` block that declares `static __libc_single_threaded: AtomicU8` (only
+with the `background` feature, on `target_env = "gnu"`), and the relaxed load of it in
 `threads::more_than_one`.
 
-**Preconditions.** The symbol exists with that type in the C library the program links; the
-read is of a valid, initialized byte.
+**Preconditions.** The symbol exists in the C library the program links, with a layout an
+`AtomicU8` may stand for, and every access to it is atomic or happens before the load.
 
-**Proof.** glibc 2.32 and later export `__libc_single_threaded` as a `char` (`<sys/single_threaded.h>`),
-which the platform's glibc (2.43) does; a `u8` has the same size, alignment and every bit
-pattern valid, so any value read is a valid `u8`. The declaration is linked against the C
-library (`#[link(name = "c")]`), which a build with the feature links anyway for
-`pthread_create`. The variable is a static of the library, live for the whole process. glibc
-writes it from the thread that creates a thread, with a plain store, so a concurrent read is a
-data race in the C model; the read is a volatile one-byte load, which on x86-64 is one `mov`
-that sees the old or the new byte and no other, and the value is used only as a hint for when
-to create the background thread: a stale `true` delays the thread to the next look at the level,
-a stale `false` cannot occur once a thread has been created, since glibc never stores `true`
-again (measured on 2.43, including in fork children, `docs/research/default-thread.md`).
+**Proof.** glibc 2.32 and later export `__libc_single_threaded` as a `char`
+(`<sys/single_threaded.h>`), which the platform's glibc (2.43) does. `AtomicU8` has the size,
+alignment and bit validity of `u8`, the same as a `char`, so the declaration names that byte and
+any value it holds is valid. The declaration is linked against the C library
+(`#[link(name = "c")]`), which a build with the feature links anyway for `pthread_create`. The
+variable is a static of the library, live for the whole process. glibc writes it with a plain
+one-byte store from the thread that creates a thread (and its own documentation allows it to
+store true again when it knows the process has one thread). On x86-64 a plain byte store and an
+atomic byte load are the same instructions as atomic ones, so the load sees the old or the new
+byte and nothing else; within Rust the access is an atomic load, which is defined. The value is
+only a hint for when to create the background thread. A stale or reset `true` makes the start
+more conservative: it waits for the next look at the level, or, if glibc reset it while the
+program had threads, for a later one. A `false` means a thread was created; the allocator's own
+thread is never created on that evidence before the program's.
 
 ## KERNEL-07: `unsafe impl Os for LinuxOs`
 

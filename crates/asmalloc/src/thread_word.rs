@@ -28,20 +28,23 @@
 //! a child that is process 1 of a new namespace can confuse it.
 //!
 //! **The level.** The back end does not know the generation, so it never decides anything: it
-//! sets [`LEVEL`] when an add to the retained count takes it over the floor (`crosses`) while
-//! the word reads no thread or a dormant one, and once an interval while the count stays over
-//! the floor (the decay pass's look, `back::purge`). The slow path's one load tests `PARKED`
-//! and `LEVEL` together, and only a word with either goes to [`ThreadWord::attend`], which
-//! knows the generation: it wakes a parked thread, and on a level wakes a dormant one or, with
-//! a thread of the program's own as evidence, wants one. The evidence is the C library's
-//! record that the program created a thread, except in a fork child, whose copy of that record
-//! says what its parent did: there it is a crossing made by a thread other than the child's
-//! first, so a child whose first thread frees the memory gets no thread by default. A hidden
-//! thread in a process that never created one is what the design promises not to do, and a
-//! fork child is the process likeliest to depend on having one thread. So a start refused for a passing
-//! reason is tried again about once an interval while the heap stays over the floor, never on
-//! every slow path. `WANTED` is not in that test: the Rust slow path reads it from the same
-//! load, and a C slow path never acts on it.
+//! sets [`LEVEL`] when an add to the retained count takes it over the floor (`crosses`), and
+//! once an interval while the count stays over the floor (the decay pass's look,
+//! `back::purge`), whatever the word reads. The slow path's one load tests `WANTED`, `PARKED`
+//! and `LEVEL` with one mask, and only a word with one of them goes to the cold look
+//! ([`ThreadWord::attend`]), which knows the generation: it wakes a parked thread, and on a
+//! level wakes a dormant one or, with a thread of the program's own as evidence, wants one; a
+//! Rust-interface slow path that leaves the word `WANTED` then creates the thread. The evidence
+//! is the C library's record that the program created a thread, except in a fork child, whose
+//! copy of that record says what its parent did: there it is a crossing made by a thread other
+//! than the child's first, so a child whose first thread frees the memory gets no thread by
+//! default. A hidden thread in a process that never created one is what the design promises
+//! not to do, and a fork child is the process likeliest to depend on having one thread. So a
+//! start refused for a passing reason is tried again about once an interval while the heap
+//! stays over the floor, never on every slow path. A C slow path never acts on `WANTED`; it
+//! finds the word so only until the next Rust-interface slow path, or, under the preload
+//! library, where nothing creates the thread from a slow path, not at all, since its first
+//! `pthread_create` leaves the word dormant or off.
 //!
 //! **The crossing.** The retained count is two tallies per kind (added, taken) on lines that
 //! every CPU freeing to the bitmaps writes; reading them is what the clocked pass avoids. So
@@ -55,30 +58,30 @@ use core::sync::atomic::Ordering::{Relaxed, SeqCst};
 
 /// No thread, and none wanted.
 pub const NONE: u64 = 0;
-/// Free memory is over the floor and the program has a thread of its own: a Rust-interface
-/// slow path creates the thread.
-pub const WANTED: u64 = 1;
 /// The thread runs rounds and sleeps with a timeout between them.
-pub const AWAKE: u64 = 2;
+pub const AWAKE: u64 = 1;
 /// The preload library's thread waits without a timeout until free memory is over the floor.
-pub const DORMANT: u64 = 3;
+pub const DORMANT: u64 = 2;
 /// No thread will be started by default.
-pub const OFF: u64 = 4;
-/// The thread waits without a timeout until a slow path wakes it. The only state with this
-/// bit, so that the slow path's test needs one mask.
+pub const OFF: u64 = 3;
+/// Free memory is over the floor and the program has a thread of its own: a Rust-interface
+/// slow path creates the thread. Its bit is in the slow path's mask; states 5 to 7 would be too.
+pub const WANTED: u64 = 4;
+/// The thread waits without a timeout until a slow path wakes it. Its bit is in the slow path's
+/// mask; states 9 to 15 would be too.
 pub const PARKED: u64 = 8;
 /// The state's bits.
 const STATE: u64 = 0xf;
 /// Free memory may be over the floor: a slow path that knows the generation should look.
 pub const LEVEL: u64 = 0x10;
-/// What sends a slow path to [`ThreadWord::attend`].
-const ATTENTION: u64 = PARKED | LEVEL;
+/// What sends a slow path to [`ThreadWord::attend`]: one mask, so one test.
+const ATTENTION: u64 = WANTED | PARKED | LEVEL;
 /// The generation's key starts here: a generation in marker form has its random bits above a
 /// marker's low bits (`classes::MARKER_SHIFT`).
 pub const KEY_SHIFT: u32 = crate::classes::MARKER_SHIFT;
 
 const _: () = assert!(STATE < 1 << KEY_SHIFT && LEVEL < 1 << KEY_SHIFT);
-const _: () = assert!(PARKED & (NONE | WANTED | AWAKE | DORMANT | OFF) == 0);
+const _: () = assert!(ATTENTION & (NONE | AWAKE | DORMANT | OFF) == 0);
 
 /// The key of a generation in marker form (`depot::Generation::get`): its bits from
 /// [`KEY_SHIFT`] up, never zero for a generation.
@@ -174,16 +177,15 @@ impl ThreadWord {
     }
 
     /// Asks a slow path that knows the generation to look at the level (see the module
-    /// documentation). On a `crossing` only while the word reads no thread or a dormant one,
-    /// of any generation: a running thread needs nothing, and a word that is another
-    /// generation's is put right by the look once an interval, which asks whatever the word
-    /// reads. A load, and a write only when the bit is clear.
-    pub fn raise_level(&self, crossing: bool) {
-        let seen = self.load();
-        if seen.level() || crossing && !matches!(seen.state(), NONE | DORMANT) {
-            return;
+    /// documentation), whatever the word reads: the back end cannot tell a running thread of
+    /// this process from one a fork child inherited with its parent's word, whose state means
+    /// nothing in the child. A load, and a write only when the bit is clear; with a thread
+    /// running, a crossing costs one slow path a cold look, once for each eighth of the floor
+    /// freed.
+    pub fn raise_level(&self) {
+        if !self.load().level() {
+            self.word.fetch_or(LEVEL, SeqCst);
         }
-        self.word.fetch_or(LEVEL, SeqCst);
     }
 
     /// The slow path's part, for `process` (whose key is zero if it has no generation yet,
@@ -225,6 +227,11 @@ impl ThreadWord {
                 state => (state, false),
             };
             let next = Snapshot(key | state);
+            if next == seen {
+                // `WANTED` with nothing else, on a C slow path: no write, so the line every
+                // slow path reads stays shared.
+                return seen;
+            }
             match self.word.compare_exchange(seen.0, next.0, SeqCst, Relaxed) {
                 Ok(_) => {
                     if wake {
@@ -241,6 +248,10 @@ impl ThreadWord {
     /// level bit; whether it moved. Another generation's word reads as `NONE`, and is replaced
     /// by this generation's `NONE` when it does not move.
     pub fn claim(&self, key: u64, from: u64, to: u64) -> bool {
+        if key == 0 {
+            // No generation: every word would read as another's, and be replaced.
+            return false;
+        }
         let mut seen = self.load();
         loop {
             let moves = seen.state_for(key) == from;
@@ -263,6 +274,9 @@ impl ThreadWord {
     /// this process is left as it is, except that a dormant one asked to run is woken. One
     /// compare-and-swap decides, so of two callers at once one creates the thread.
     pub fn claim_start<O: Os + ?Sized>(&self, os: &O, key: u64, to: u64) -> bool {
+        if key == 0 {
+            return false;
+        }
         let mut seen = self.load();
         loop {
             let (next, create) = match seen.state_for(key) {
