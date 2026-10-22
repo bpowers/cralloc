@@ -884,8 +884,15 @@ Nine rules stand behind the table.
   free, heartbeats return its free slots, a bounded amount for each heartbeat, while the
   free large memory that is still resident exceeds the floor, and only down to it. The
   hold is a constant found by measurement: a shorter one returns memory that is about to
-  be reused and pays for it in faults, a longer one keeps the peak, and a hold that
-  adapted for each class did no better than the constant. `maintain` takes the same
+  be reused and pays for it in faults, and a longer one keeps the peak. It stays a
+  constant because the two ways of doing better that were built did not. A hold that
+  learned a length for each region halved the faults of a program that takes its blocks
+  back a second after freeing them, changed neither its time nor its tail, and cost a
+  query engine a tenth of its peak. A long hold under which any growth pays for itself, by
+  returning as much free memory elsewhere, kept that peak only to within the cap and
+  removed fewer faults, for an account of every way memory becomes resident
+  (`docs/research/hold-credit.md`). The faults a short hold costs are cheap, and the peak
+  a long one costs is not. `maintain` takes the same
   bounded looks once an interval, and in a silence returns held slots at its second round.
 - **Under a floor, the clock returns nothing.** The floor of the allowance (see "Sizing
   from evidence") is measured against what a pass could return: resident pages with
