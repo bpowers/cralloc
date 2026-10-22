@@ -106,9 +106,12 @@
 //! count any slow path adds to and the thread pays down: once a step of growth, the grower
 //! wakes the thread if retained memory is over the cap, or drops the debt as a payment under the
 //! cap would; the thread takes the same steps a heartbeat would ([`Back::purge_steps`]) until
-//! none would do more. A grower that finds more than `policy::GROWTH_UNPAID_HUGE_PAGES` left
-//! unpaid by the growth before it pays a step itself, so that what the thread's lag can add
-//! to retained memory is bounded whatever the scheduler does.
+//! none would do more. While more than `policy::GROWTH_UNPAID_HUGE_PAGES` is left unpaid, the
+//! slow paths pay it as if there were no thread: a grower pays a step itself, and so does each
+//! heartbeat, so that what the thread's lag can add to retained memory is bounded whatever the
+//! scheduler does. A grower's step alone would not do: it pays half a megabyte while a carve
+//! may owe tens, and on DataFusion a thread that waited for a CPU behind the four that carved
+//! let the peak rise by 180 MiB in one run in five (`docs/research/purge-off-path.md`).
 //!
 //! A claim that makes purged pages resident again is reuse, not growth, though it raises
 //! resident memory as growth does. Charging it made the allocator chase its own tail: with
@@ -390,8 +393,9 @@ impl<O: Os> Back<'_, O> {
     /// step of growth, when the add crosses a multiple of the step, the grower wakes the thread
     /// if retained memory is over the cap, and otherwise drops the debt as a payment under the
     /// cap would. Unless more than [`policy::GROWTH_UNPAID_HUGE_PAGES`] of growth was unpaid
-    /// before this add: then the thread has not run, and the grower pays a step itself, so that
-    /// the bound on retained memory does not rest on the scheduler (design: "Heartbeat").
+    /// before this add: then the thread has not run, and the grower pays a step itself (and the
+    /// heartbeats too, `note_for_thread`), so that the bound on retained memory does not rest on
+    /// the scheduler (design: "Heartbeat").
     /// Out of line, because inlined into `alloc_at` it made the compiler keep the class's
     /// layout on the stack, and every large allocation paid 19 more stores and 18 more loads
     /// for it (4% on a pipeline of large objects; `docs/research/memory.md`, "Small heaps").
@@ -592,6 +596,13 @@ impl<O: Os> Back<'_, O> {
                 Decay::Start(word) => started = self.start_pass(seen, word),
                 _ => {}
             }
+        }
+        // Growth the thread has left unpaid past the limit is the slow paths' again, a step a
+        // heartbeat, as it is where there is no thread: a grower's step alone pays half a
+        // megabyte while a carve may owe tens, and the thread may be waiting for a CPU behind
+        // the very threads that carve. One load from a line only growers write.
+        if self.state.growth.load(Relaxed) >= growth_unpaid(self.space.plan().geometry()) {
+            let _ = self.pay_owed();
         }
         self.hold_note(time) || started
     }

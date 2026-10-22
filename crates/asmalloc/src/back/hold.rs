@@ -65,9 +65,11 @@
 //! that stamps a region when no look is planned sets one a hold ahead, and an add that takes
 //! free large memory over the floor, when the thread planned under it ([`NEXT_LEVEL`]), sets
 //! one at once. A planned look a free's stamp has since moved wakes the thread for nothing,
-//! and it plans again; a stamp already held that the look left (nothing in it could be
-//! returned) does not set the plan, and waits for the next look the thread takes for another
-//! reason, as a heartbeat's look would have left it.
+//! and it plans again. A region held already that keeps its stamp has not been walked to its
+//! bottom (a look stopped at its bound of bitmap, or at the floor), and sets the next look at
+//! the next step, as a heartbeat would take it: planning only from stamps still held let a
+//! look that stopped at its bound wait a whole hold or more, and DataFusion's peak rose by
+//! 180 MiB in one run in ten (`docs/research/purge-off-path.md`).
 //!
 //! **How long.** One hold for every large class, [`HOLD_STEPS`]. A hold that adapted per
 //! class (doubling when a slot was claimed soon after the hold purged its region, halving on
@@ -398,9 +400,11 @@ impl<O: Os> Back<'_, O> {
         }
     }
 
-    /// The fine steps from `count` until the soonest stamp of a large class's region that has
-    /// not been held for [`HOLD_STEPS`] yet has been, if any. A stamp held already is the
-    /// look's to take, or to leave, when the next look comes for another reason.
+    /// The fine steps from `count` until the next look: one, while a region held for
+    /// [`HOLD_STEPS`] keeps its stamp (the looks have not walked it to its bottom: a look that
+    /// stops at its bound of bitmap having returned nothing waits for the next step, as a
+    /// heartbeat's does), else until the soonest stamp not yet held for the hold will have
+    /// been; `None` with no stamp at all.
     fn hold_pending(&self, count: u32) -> Option<u32> {
         let plan = self.space.plan();
         (0..self.walk_regions())
@@ -422,7 +426,10 @@ impl<O: Os> Back<'_, O> {
                     // Ahead of the count: a free that read the count after it stepped.
                     Some(HOLD_STEPS + age.wrapping_neg())
                 } else {
-                    None
+                    // Held already, and the looks have not walked it to its bottom: a look
+                    // that stopped at its bound of bitmap, or at the floor. The next look is
+                    // at the next step, as a heartbeat's would be.
+                    Some(1)
                 }
             })
             .min()

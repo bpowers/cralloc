@@ -145,11 +145,9 @@ impl<O: Os, R: Routines, S: Source> Cache<'_, O, R, S> {
     /// leave to it, until none would do more, and then its plan for when it next has to look.
     /// Whether they returned memory, which is work for the rule that parks it.
     pub fn thread_steps(&self) -> bool {
-        let counted = self.source.clock();
-        let now = || counted.now(self.os());
         let mut returned = false;
         loop {
-            let step = self.source.thread_step(&now);
+            let step = self.thread_step();
             returned |= step.returned;
             if !step.more {
                 break;
@@ -157,6 +155,15 @@ impl<O: Os, R: Routines, S: Source> Cache<'_, O, R, S> {
         }
         self.source.plan_thread();
         returned
+    }
+
+    /// One of the purge steps that slow paths leave to the thread: what the thread takes
+    /// between the steps of a round, so that a long round (a pass over a large heap, many
+    /// magazines shed) does not hold up the hold's looks and growth's payments, which
+    /// heartbeats take beside a pass where slow paths return memory.
+    pub fn thread_step(&self) -> super::PurgeStep {
+        let counted = self.source.clock();
+        self.source.thread_step(&|| counted.now(self.os()))
     }
 
     /// The thread's timed sleep, before it waits: marks its word asleep, then looks once more

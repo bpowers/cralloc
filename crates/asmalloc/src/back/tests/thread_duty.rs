@@ -114,6 +114,29 @@ fn the_step_that_ends_a_hold_wakes_the_thread_and_returns_nothing_itself() {
     back.free(top.ptr, class);
 }
 
+/// A region held for the hold that keeps its stamp, as a look that stopped at its bound of
+/// bitmap leaves it, sets the thread's next look at the next step, as a heartbeat would take
+/// it, and not at the next stamp's end.
+#[test]
+#[cfg_attr(miri, ignore)]
+fn a_held_region_left_by_a_look_is_looked_at_the_next_step() {
+    let state = state::<Native>();
+    let back = state.get_or_reserve().unwrap();
+    let os = state.os();
+    asleep(&back);
+    let class = large(256 << 10);
+    let top = free_large(&back, os, class, 2 * allowance_floor(Native::GEOMETRY));
+    // The hold has passed without a heartbeat to look.
+    back.hold_set_count(back.hold_count().wrapping_add(HOLD_STEPS + 3));
+    back.plan_hold();
+    assert_eq!(os.wakes(), 0);
+    os.advance_clock(FINE_TICKS);
+    back.heartbeat();
+    assert_eq!(os.wakes(), 1, "the next step did not wake the thread");
+    assert!(thread_runs(&back) > 0);
+    back.free(top.ptr, class);
+}
+
 /// A thread that planned while free large memory was under the floor is woken by the free
 /// whose add takes it over, looks, finds nothing held long enough, and is woken again when the
 /// hold of those frees ends.

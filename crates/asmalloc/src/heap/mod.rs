@@ -543,6 +543,7 @@ impl<'a, O: Os, R: Routines + Copy> Bound<'a, O, R> {
             let mut round = None;
             while let Some(step) = cache.maintain_step_with_work() {
                 round = Some(round.unwrap_or(false) | step.work);
+                returned |= cache.thread_step().returned;
                 if !step.more {
                     break;
                 }

@@ -40,12 +40,13 @@ pub const GROWTH_STEP_HUGE_PAGES: usize = 1;
 // crosses a multiple of the step (`thread_word::crosses`), which takes a power of two.
 const _: () = assert!(GROWTH_STEP_HUGE_PAGES.is_power_of_two());
 
-/// While the background thread pays for growth, the most growth that may stay unpaid before a
-/// carve pays a step itself, in huge pages: 8, or 16 MiB. The thread is woken when a step of
-/// growth comes due and pays it within its wake-up's latency, so a debt this large means the
-/// thread has not run (starved, throttled, or busy with a long round), and the bound on
-/// retained memory must not rest on the scheduler (design: "Heartbeat"). It bounds retained
-/// memory to the cap and this much more while the thread lags.
+/// While the background thread pays for growth, the most growth that may stay unpaid before
+/// slow paths pay it again, growers and heartbeats a step each, in huge pages: 8, or 16 MiB.
+/// The thread is woken when a step of growth comes due and pays it within its wake-up's
+/// latency, so a debt this large means the thread has not run (starved, throttled, or busy
+/// with a long round), and the bound on retained memory must not rest on the scheduler
+/// (design: "Heartbeat"). It bounds retained memory to the cap and about this much more while
+/// the thread lags.
 pub const GROWTH_UNPAID_HUGE_PAGES: usize = 8;
 
 /// The decay interval in ticks of [`crate::os::Os::ticks`]: 2^32, about a second of the cycle
