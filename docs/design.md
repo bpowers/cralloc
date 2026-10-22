@@ -684,15 +684,23 @@ happened to fall on them, not by the copy (`docs/research/doubling-tail.md`). So
 path that finds such work due, a hold that has matured, growth over the cap to be paid
 for, an interval's pass, does none of it. It records what is due and, if the thread is
 asleep, wakes it. The thread takes the same bounded steps under the same rules until
-nothing is due, and sleeps no longer than the next piece of work has to wait, which for a
-hold is milliseconds. What goes back, and when to within those milliseconds, is unchanged.
+nothing is due. Before it sleeps it publishes when its next look at the holds falls due, in
+counted time, and the heartbeat whose reading of the clock reaches that wakes it. Counted
+time moves only when a slow path reads the clock, so a timer of the thread's own could not
+follow it, and in a silence would wake the thread for holds that cannot mature. What goes
+back, and when to within milliseconds, is unchanged.
 The thread starts when free memory first passes the floor, and nothing is returned below
 the floor, so in a program that has the thread a request's slow path does not return
 memory at all. Slow paths keep the work where there is no thread: a program with one
 thread, one that turned the thread off, one in which it could not be created. That is why
 every step stays bounded (see "Returning memory and huge pages"). And the bound on
-retained memory must not rest on the scheduler: when growth has gone unpaid past a limit,
-because the thread has not run, the carve pays a step itself.
+retained memory must not rest on the scheduler. A thread that is starved or throttled does
+not run, so when growth has gone unpaid past a limit the carves and heartbeats that find it
+pay a step each themselves, and a pass that nobody has stepped for an interval is the slow
+paths' again. The thread does not give up the CPU between its steps. Yielding after each
+one handed a busy worker a whole time slice every time, and the thread fell far enough
+behind on holds and payments to cost a query engine its peak in half its runs, while no
+server's tail moved (`docs/research/purge-off-path.md`).
 
 It is an ordinary thread of the process, created through the C library by the layer that
 links one, not by the allocator with a bare system call. A bare thread could be created
