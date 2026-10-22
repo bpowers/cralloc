@@ -38,9 +38,10 @@ real servers show the same thing.
   per stream. Serving 40 bytes as 48 removed 9 of 79 fills from L3 per request on HTTP/2 and
   moved cycles by 2%, within the runs' spread.
 - **Remedy: none in the allocator.** See the end.
-- **Later (2026-10-22): order, not spacing.** A fill that opens a run hands its first 64
-  objects out a stride apart; it takes back the spawn gap and leaves the rest level. See "The
-  rule, built", the last section.
+- **Later (2026-10-22): order, not spacing.** A fill that opens a run hands its first
+  objects out a stride apart; it takes back the spawn gap and moves no server measured. The
+  gRPC figures in this note moved with code placement as much as with the headers
+  (`grpc-placement.md`). See "The rule, built", the last section.
 
 ## Method
 
@@ -314,11 +315,15 @@ HTTP/2 order server). Not built.
 ## The rule, built (2026-10-22)
 
 Branch `sibling-stride` on main `7a82ea4`. **A fill that does not continue a run of fills of
-its class hands its first 64 objects out a stride apart, and the rest of the magazine in
-address order.** It takes back the spawn gap (t4 111.8 to 95.2 ns a task, t8 207.1 to 185.2),
-puts tokio's run-queue headers on lines of their own, and leaves every job that must be level
-level. On the gRPC server it moves cycles by less than builds of one rule differ from each
-other, so that job cannot confirm the gain there.
+its class hands its first 64 strides of objects out in `stride` passes of 64, the objects of a
+pass a stride apart, and the rest of the magazine in the fill's order**: 64 objects allocated
+one after another lie on lines of their own (192 objects are reordered for the 40-byte class,
+512 for the 8-byte one). It takes back the spawn gap (t4 111 to 96 ns a task, t8 202 to 186)
+and puts tokio's run-queue headers on lines of their own. With one binary and the stride
+switched at run time, it does not move the gRPC server, the RPC log jobs or churn: separating
+the headers is worth nothing measurable on `connect log grpc h2`. The "3.6% from the headers"
+of the section above, and every cross-build difference on that job in this section, were
+mostly where code landed (`grpc-placement.md`).
 
 **Where the evidence of a run lives.** The depot keeps none: the design's batch sizing ("a run
 of trips in the same direction") and its fill that doubles are not built, and the swing bits
@@ -329,20 +334,44 @@ records showed no claim of the current counted interval; only the first, since i
 makes any later one in the region read as claimed. No new state, no new write and no clock
 read: `reach` returns what it saw, and `Source::fill` passes it up. Per region, so per class
 for any class under 4 GiB, and across CPUs; two fills at the very start of an interval may both
-open a run. A server's reorders under the c256 RPC log load, counted with a gdb breakpoint:
-45 in the run, about one per class an interval.
+open a run. The interval is noted when the heap is reserved, so that a class's first fills do
+not record under interval zero and see the first heartbeat's step as a new interval, which on a
+machine up for more than an interval opened a second run at once (found in review). A server's
+reorders under the c256 RPC log load, counted with a gdb breakpoint: 45 in the run, about one
+per class an interval.
 
-**Why only 64 siblings.** Strided whole, the magazine of every run's first fill cost the RPC log
-server (connect-rust over HTTP/1.1) 2 to 3%, and so did whole magazines on each class's first
-fill only, 1 to 2% (the scratch's first-fill row already showed c256 +1.3%). A server's small
-classes circulate through magazines and refill about once an interval (the age limit), so a
-strided magazine's order stays in its working set, and a request's own objects then lie on
-more lines. Strided over its first 64 strides, the reorder left the RPC log jobs level in both
-forms. The first-fill form so limited lost what the gRPC server had shown, and the per-interval
-form kept it in that session; neither difference survived more builds (below).
+**The stride's own effect, one binary.** A diagnostic build (not committed) sets the number of
+siblings a pass keeps apart from the environment, read once before `main`; zero turns the
+stride off, and 999 strides the whole magazine. One binary, so one code layout, runs every data
+order; the values have equal length, so the environment does too. Interleaved, medians:
 
-Variants, interleaved with main, three rounds, medians (one session; ns a task and k server
-cycles a request):
+| Job | off | 4 | 16 | 64 | whole magazine |
+|---|---:|---:|---:|---:|---:|
+| spawn t4 (ns/task, 5 and 6 rounds) | 111.3, 111.3 | 96.2 | 95.7 | 95.8, 95.7 | 95.8 |
+| spawn t8 (ns/task, 5 rounds) | 202.4 | 202.6 | 186.3 | 187.6 | |
+| churn live=100 (cycles/op, 5 rounds) | 22.67 | 22.63 | 22.68 | 22.77 | |
+| rpc log c64 (k cycles/req, 6 rounds, two binaries) | 122.9, 121.9 | | 122.0 | 122.7, 122.4 | 121.9 |
+| rpc log c256 (same) | 119.4, 119.1 | | 121.0 | 119.8, 118.9 | 119.4 |
+| connect log grpc h2 (k cycles/req, 4 rounds) | 129.3 | | 129.0 | 130.1 | 129.3 |
+
+- The spawn jobs need at least as many siblings as workers: four separate t4's four headers
+  and not t8's eight. 16 is enough for both.
+- No setting moves rpc log or gRPC h2 beyond the runs' spread (about ±1%). The one outlier, 16
+  siblings on c256, ran 2.6% more instructions as well, which a placement of objects does not
+  explain. Striding whole magazines costs these servers nothing measurable either.
+- churn live=100 has occasional slow runs (24.51 with 4 siblings, 22.94 with the stride off):
+  a second mode that is not the stride's.
+
+**So the bound of 64 rests on nothing.** It was chosen from cross-build comparisons: whole
+magazines cost rpc log 2 to 3%, first fills only 1 to 2%, 64 strides nothing (table below). In
+one binary whole magazines are level too, so those costs were code placement, of the kind
+`grpc-placement.md` measures on the gRPC job. What does hold is the earlier scratch result that
+striding *every* fill costs walks of what was built (tree +47%, JSON +6%), which the run rule
+prevents. Whether to keep 64, use 16, or stride whole first magazines is open; nothing measured
+here tells them apart except that fewer than the worker count misses some headers.
+
+Variants built separately, interleaved with main, three rounds, medians (one session; these
+differences are now read as mostly placement):
 
 | Job | main | per interval, whole | first fill, whole | first fill, 64 strides |
 |---|---:|---:|---:|---:|
@@ -351,76 +380,72 @@ cycles a request):
 | rpc log c64 | 122.2 | 125.3 (+2.6%) | 123.5 (+1.0%) | 122.8 (+0.5%) |
 | rpc log c256 | 118.7 | 122.0 (+2.8%) | 121.1 (+2.0%) | 118.8 |
 
-A second session: rpc log c64 main 123.0, first fill 64 strides 122.5, per interval 64 strides
-121.8; c256 118.8, 118.7, 118.5.
-
-**Placement.** Traced builds (`diagnostics.patch`, `rpc-headers.sh`): in rpc-server, tokio's
-four headers are the first four 40-byte blocks the process allocates, so every variant's first
-fill covers them. On main they lie 40 bytes apart and four pairs share a line; on the branch
-they lie 120 bytes apart, at 0x050, 0x0c8, 0x140 and 0x1b8 past the class's first page, and
-none shares a line. The spawn workload's are the same four slots.
+**Placement of the headers.** Traced builds (`diagnostics.patch`, `rpc-headers.sh`): in
+rpc-server, tokio's four headers are the first four 40-byte blocks the process allocates, so
+every variant's first fill covers them. On main they lie 40 bytes apart and four pairs share a
+line; on the branch they lie 120 bytes apart, at 0x050, 0x0c8, 0x140 and 0x1b8 past the class's
+first page, and none shares a line. The spawn workload's are the same four slots.
 
 **The stride** is the briefed one: `64 / size` where the size divides 64, else
 `ceil(64 / size) + 1` (24: 4; 40, 48, 56: 3), the fewest slots at which two objects share no
 line wherever they start. At the classes' real alignment 48 and 56 bytes would need only 2.
 Passes run last first, so the first pass, and with it the siblings, ends a stride below the
-first object after them. The reorder is in place, one cycle of the permutation at a time with a
-bit per position (64 bytes of stack), since the slow path runs on the caller's stack and the
-scratch's copy took 8 KiB of it, more than the slow path's measured peak of about 6 KiB
-(`launder-and-fill.md`, "Stack").
+first object after them. A fill writes ascending addresses unless it moved past another filler
+and later took lower slots (`tree::claim_next`); then two objects a stride apart in the
+magazine can be neighbours. The reorder is in place, one cycle of the permutation at a time
+with a bit per position (64 bytes of stack), since the slow path runs on the caller's stack
+and the scratch's copy took 8 KiB of it, more than the slow path's measured peak of about
+6 KiB (`launder-and-fill.md`, "Stack").
 
-**Results**, the commit `741dc1d` (measured as `d0159ae`, which differs from it in one comment)
-against main, interleaved, three rounds unless noted, medians:
+**Against main, separate builds**, the commit `741dc1d` (measured as `d0159ae`, which differs
+from it in one comment), interleaved, medians; rounds as noted. Instructions are level on
+every job (the churn jobs to 0.01%).
 
 | Job | Metric | main | branch |
 |---|---|---:|---:|
-| spawn t4 local | ns/task | 111.8 | 95.2 (-14.9%) |
-| spawn t8 both | ns/task | 207.1 | 185.2 (-10.6%) |
+| spawn t4 local (3) | ns/task | 111.8 | 95.2 (-14.9%) |
+| spawn t8 both (3) | ns/task | 207.1 | 185.2 (-10.6%) |
 | connect log grpc h2 (14 runs, 4 sessions) | k cycles/req | 131.6 | 131.0 |
-| tree depth=20 | cycles/node | 40.76 | 40.69 |
-| json 32Mi | cycles/byte | 16.42 | 16.35 |
-| map btree 1M | cycles/entry | 915.0 | 912.2 |
-| map hash 1M | cycles/entry | 526.6 | 529.2 |
-| churn live=100 small (5 rounds) | cycles/op | 22.63 | 22.64 |
-| churn live=1k / 10k / 100k small | cycles/op | 23.23 / 27.97 / 41.55 | 23.25 / 27.92 / 41.73 |
-| churn live=1M small (5 rounds) | cycles/op | 101.4 | 100.9 |
-| churn live=10M small | cycles/op | 210.3 | 211.6 |
-| churn live=100k mixed | cycles/op | 83.47 | 82.82 |
-| rpc log c64 (5 rounds) | k cycles/req | 122.5 | 122.8 |
-| rpc log c256 | k cycles/req | 118.1 | 118.9 (+0.7%) |
-| boa v8 | G cycles | 44.51 | 44.63 |
-| orders axum, s70 | k cycles/req | 68.8 | 68.6 |
-| orders axum h2, s70 | k cycles/req | 59.7 | 59.8 |
-| connect store 1M, s70 | k cycles/req | 371.0 | 368.5 |
+| tree depth=20 (3) | cycles/node | 40.76 | 40.69 |
+| json 32Mi (3) | cycles/byte | 16.42 | 16.35 |
+| map btree 1M (3) | cycles/entry | 915.0 | 912.2 |
+| map hash 1M (3) | cycles/entry | 526.6 | 529.2 |
+| churn live=100 small (3, then 5) | cycles/op | 22.64, 22.63 | 23.03, 22.64 |
+| churn live=1k / 10k / 100k small (3) | cycles/op | 23.23 / 27.97 / 41.55 | 23.25 / 27.92 / 41.73 |
+| churn live=1M small (3, then 5) | cycles/op | 100.5, 101.4 | 102.8, 100.9 |
+| churn live=10M small (3) | cycles/op | 210.3 | 211.6 |
+| churn live=100k mixed (3) | cycles/op | 83.47 | 82.82 |
+| rpc log c64 (3, then 5) | k cycles/req | 120.9, 122.5 | 122.4, 122.8 |
+| rpc log c256 (3) | k cycles/req | 118.1 | 118.9 (+0.7%) |
+| boa v8 (3) | G cycles | 44.51 | 44.63 |
+| orders axum, s70 (3) | k cycles/req | 68.8 | 68.6 |
+| orders axum h2, s70 (3) | k cycles/req | 59.7 | 59.8 |
+| connect store 1M, s70 (3) | k cycles/req | 371.0 | 368.5 |
 
-Instructions are level on every job (the churn jobs to 0.01%). A first three-round session had
-churn live=100 at +1.7% and live=1M at +2.3%; five rounds each, above, put them level.
+rpc log c64's first session had all three branch runs above all three of main's (+1.2%); pooled
+over both sessions it is about +0.45%, and c256 +0.7% from one session, the sign of the
+whole-magazine cost above. The run-time switch puts both level, so I read these as placement,
+not as the stride's cost. churn live=100: 3 of the branch's 8 runs at or above 23.0 against 1 of
+main's 8, the second mode the switch also shows with the stride off.
 
-**The gRPC server.** Within each session the branch ran +1.5%, -0.3%, -0.5% and -1.4% against
-main. Builds of the same rule that differ only in code ran from -3.9% to +1.5% against main in
-the same sessions: one build of the per-interval 64-stride rule ran 1.5 to 3.9% below main in
-four sessions, and the commit with only its passes' order changed back to match that build ran
-like the commit. Instructions per request were level throughout (298k to 299k). So the job
-moves with where the allocator's code lands by about as much as the headers were worth here
-(padding them took 3.8k off 133.0k in the tokio 1.54 section), and these sessions cannot
-resolve the headers' share. The trace shows them separated.
+**Not established: a 12% churn slowdown.** A build that differed from the commit only in the
+order of the passes ran churn live=100 12% slower (25.4 against 22.6 cycles an op), with the
+same instructions and no more L1 fills, but 22.8M loads blocked by an older store
+(`ls_bad_status2.stli_other`, 0x0224) against 1M, in the workload's own loop and size sampler,
+and twenty times the op-cache misses. A change of pass order changes code layout as well as
+data order, the op-cache misses are a code effect, and no address was shown to alias a slab
+word, so the cause is open. The run-time switch, which holds code layout fixed, showed no such
+mode at any setting.
 
-**Found on the way: data placement and the slab's hot words.** That same order-only build ran
-churn live=100 12% slower than main and the commit (25.4 against 22.6 cycles an op), with the
-same instructions and no more L1 fills, but 22.8M loads blocked by a non-forwardable older store
-(`ls_bad_status2.stli_other`, 0x0224) against 1M, and twenty times the op-cache misses. The
-blocked loads fall in the workload's own loop and its size sampler, not in the allocator. The
-strided order hands out objects at regular page offsets, and which ones a program's hot data
-lands on decides whether its loads alias a slab hot word's page offset, the hazard the design
-keeps the allocator's own tables clear of ("Front end"). Any order can land on it; this one
-moved the dice. Not pursued further.
-
-**Method.** Builds from `git archive` of each commit with identical `bench/` sources
+**Method.** Separate builds from `git archive` of each commit with identical `bench/` sources
 (`bench/probes/spawn-gap/ab-build.sh`), listed as `build = "asm-NAME"` entries in a local,
 uncommitted `bench/allocators.toml`, names of equal length; `benchrun run` under
 `scripts/measure --both-l3`, builds interleaved in a new random order each round. The variant
 builds edited one line each of the branch: `region::reach` returning "the word is zero" for
-the first-fill form, and the slice `spread` is given for the 64-stride form. The reorder count:
-gdb on rpc-server with a breakpoint on `siblings::spread` under the c256 load. The blocked
-loads: `BENCH_EVENTS` on the churn job, and `perf record` of the same event. Raw results:
-`docs/research/data/sibling-stride-2026-10-22.jsonl.gz`.
+the first-fill form, and the slice `spread` is given for the 64-stride form. The run-time
+switch: the branch with the sibling count in a static that a constructor in `bench-alloc` sets
+from `BENCH_SIBLINGS`, and its cap raised to a whole magazine; `env` entries of one build. The
+reorder count: gdb on rpc-server with a breakpoint on `siblings::spread` under the c256 load.
+The blocked loads: `BENCH_EVENTS` on the churn job, and `perf record` of the same event. Raw
+results: `docs/research/data/sibling-stride-2026-10-22.jsonl.gz` and
+`docs/research/data/grpc-placement-2026-10-22.jsonl.gz`.
