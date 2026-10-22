@@ -248,4 +248,62 @@ the classes below 64 bytes, or drop the classes that do not divide 64 (40 and 56
 up to 20% on objects of those sizes and leaves the 48-byte class, where two consecutive objects
 still share a line. Neither is a rule I would build on this evidence; the narrower facts are
 that the loss is 3.6% on one gRPC job and 15 to 18% on the spawn microbenchmark, and that
-tokio padding its header would remove it.
+tokio padding its header would remove it. (A third option, order rather than spacing, follows.)
+
+## Siblings handed out a stride apart (2026-10-22, scratch)
+
+The coordinator's idea: objects of one class allocated one after another are the allocator's
+best evidence of siblings, and siblings handed to different threads are the systematic case of
+this false sharing; so hand out a small class's slots in strided order instead of neighbour by
+neighbour. Scratch builds only; the patches are in `bench/probes/spawn-gap/`.
+
+**The premise holds.** A refill claims the lowest free bitmap words (a run of up to 64 slots
+each) or carves a contiguous run, writes the slots into the magazine in ascending address
+order, and the magazine pops lowest address first (`back::Descending`). The depot asks for a
+whole magazine on every fill (1,022 objects for every class to 64 bytes), so there are no small
+first batches on this path, and the next fill resumes at the next free word: consecutive
+allocations of a class get consecutive slots across magazine boundaries too. tokio's four
+run-queue headers were consecutive slots of the 40-byte class.
+
+**What the scratch build does.** It leaves the bitmaps alone: after a fill, the depot reorders
+the magazine so that objects popped one after another lie `stride` slots apart, within units of
+64 strides (`interleave-scratch.patch`, `depot/slow.rs`). No slot is skipped and the frontier
+is unchanged; only the order within a fill differs. Classes under 64 bytes.
+
+**The stride must be larger than proposed for sizes that do not divide 64.** Objects `s` slots
+apart are sure to share no line only if `(s - 1) * size >= 64`, unless the size divides 64.
+With stride 2, 40-byte objects 80 bytes apart still share a line when they straddle (those at
+160 and 240 share the line at 192). So 64 / size for 8, 16 and 32 bytes, and ceil(64 / size) + 1
+for the others (24: 4; 40, 48 and 56: 3). The trace of the scratch build shows tokio's headers
+120 bytes apart, each on lines of its own.
+
+**Results**, interleaved with asmalloc, tokio 1.54, medians (runs per build in brackets):
+
+| Job | asmalloc | strided, units of 64 strides | units of 8 strides | first fill of each class only |
+|---|---:|---:|---:|---:|
+| connect log grpc h2, k cycles/req (2) | 133.0 | 129.2 | 129.4 | 128.4 |
+| spawn t4, ns/task (3) | 111.6 | 95.8 | 96.1 | 96.0 |
+| spawn t8, ns/task (3) | 203.0 | 186.4 | 185.4 | 187.2 |
+| tree depth=20, cycles/node (3) | 40.9 | 60.2 (+47%) | 46.4 (+12%) | 40.6 |
+| json 32Mi, cycles/byte (3) | 16.4 | 17.4 (+6%) | 17.6 (+7%) | 16.5 |
+| map btree 1M, cycles/entry (3) | 914 | 924 (+1%) | 924 (+1%) | not run |
+| map hash 1M, cycles/entry (3) | 531 | 536 (+1%) | 530 | not run |
+| churn small, 100 to 10M live, and mixed (1 to 3) | | level | | not run |
+| rpc log c64 / c256, k cycles/req (3) | 123.9 / 118.5 | 125.4 / 121.7 | | c256: 120.7 against 119.1 |
+| boa, Gcycles (3) | 44.3 | 45.1 (+1.7%) | | not run |
+
+- Every variant takes back the gRPC loss and the header part of the spawn gap.
+- Strided order on every fill costs whatever walks same-size objects in allocation order: the
+  tree's build-then-walk loses 47%, JSON 6%, the RPC log jobs 1 to 3%, boa 2%. Units of eight
+  strides cut the tree's loss to 12% and leave JSON's.
+- Strided order on each class's first fill only (`interleave-first-fill-scratch.patch`, a flag
+  per class for the process) keeps the whole gain and costs nothing measured on the tree, JSON
+  or the RPC log job. The runtime's structures are made at start-up, from the class's first
+  magazine. It misses sibling sets made later: a runtime built after the first fills, or
+  per-connection structures made in steady state. The jobs marked "not run" were not run for it;
+  it touches only the first 1,022 objects of each class, so it should not move them.
+
+**Classes between one and two lines** (80, 96, 112 bytes): neighbouring objects share a
+boundary line just as 40 to 56 do, and a stride of 2 would separate them. No measured case: IBS
+samples on those classes are few in these jobs (the 96-byte class: 2 HITM samples on the
+HTTP/2 order server). Not built.
