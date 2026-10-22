@@ -18,9 +18,9 @@ is "Heartbeat", from "So there is a background thread".
   thread-local data. Not in a process that never created a thread, nor in a fork child whose
   first thread frees (by design), nor with `ASMALLOC_BACKGROUND=0`, nor once creation failed,
   nor in a process that calls `maintain` itself.
-- **A large allocation and free pay 4 to 5 cycles a pair more than main** (1.6 to 1.9%), and 11
-  in a loop that alternates two large classes (4%); they paid 8 to 12 before the review's cost
-  was removed.
+- **A large allocation and free pay 1.5 to 2 cycles a pair more than main** (under 1%), and 7
+  in a loop that alternates two large classes (2.8%); they paid 8 to 12 before the reviews'
+  costs were removed.
 
 ## Silent process (after the review)
 
@@ -85,25 +85,32 @@ runs throughout); its numbers below are from before the review.
 
 ## Large blocks on the slow path (after the review)
 
-The review found that a large call that did not beat built a `Cache` to load the thread's
-word, 15 calls in 16. `workload largepair ops=400000`, an allocation and a free of a large
-block a pair, pinned to CPU 2, main (`f9ee162`) and the branch interleaved, six rounds,
-user cycles a pair (medians, ranges):
+The first review found that a large call that did not beat built a `Cache` to load the
+thread's word, 15 calls in 16. `workload largepair ops=400000`, an allocation and a free of a
+large block a pair, pinned to CPU 2, six interleaved rounds, user cycles a pair (medians,
+ranges), against main (`f9ee162`):
 
-| sizes | main | branch as reviewed, with the review's cost removed only in part | branch |
-|---|---|---|---|
-| 64 KiB | 256.7 (255.9 to 257.4) | 264.2 (263.9 to 265.3) | 261.8 (261.1 to 269.1) |
-| 1 MiB | 274.2 (273.8 to 278.8) | 284.2 (283.0 to 290.8) | 280.2 (279.4 to 282.1) |
-| 64 KiB and 1 MiB in turn | 264.2 (263.0 to 267.9) | 276.3 (276.0 to 277.6) | 274.5 (273.6 to 280.2) |
+| sizes | main | first fix (`147bdc8`) | branch (`ea67e41`) | branch without the crossing test |
+|---|---|---|---|---|
+| 64 KiB | 256.3 (255.7 to 258.8) | 261.8 | 257.8 (257.0 to 258.6) | 262.3 (262.0 to 264.3) |
+| 1 MiB | 275.0 (274.2 to 275.7) | 280.2 | 277.1 (276.7 to 277.6) | 278.5 (278.3 to 280.5) |
+| 64 KiB and 1 MiB in turn | 263.6 (262.9 to 268.3) | 274.5 | 270.9 (270.3 to 276.1) | 269.8 (269.4 to 270.4) |
 
-The middle column is this branch before the last change: a large call that does not beat
-loaded the word and then the heap's start, and the start hook was loaded before the snapshot
-was tested. The change loads the word alone, tests the parked and level bits in one mask, and
-keeps everything else in a cold function; the step that decides whether an add to the retained
-count looks at the whole count is a constant. What is left is about 32 instructions a pair:
-the add to the retained tally now returns its old value and tests a step (removing the test
-saves 12 a pair in a build made for the purpose), the load and test of the word, and the test
-of the snapshot for `WANTED` on the Rust side.
+The first fix loaded the word alone on a large call that did not beat. The callers still
+looked at the snapshot it returned for `WANTED`, so `alloc_large_slow_using` and the large
+free kept a frame around the heartbeat (the second review's disassembly). Now `WANTED` has a
+bit of its own in the one mask the slow path tests, the cold look creates the thread itself on
+a Rust call, and the callers look at nothing after the heartbeat. What is left, in instructions
+a pair: 23 (64 KiB), 29 (1 MiB) and 26 a size in turn. Of those, the test that decides whether
+an add to the retained tally crosses an eighth of the floor is 9 to 16 (the last column is a
+build without it), and the rest is the load and test of the word.
+
+The cycles do not follow the instructions. The build without the crossing test runs fewer
+instructions and is slower on single sizes, and the same on the alternating loop. So the
+second review's guess for the alternating row, that every fourth 1 MiB free crosses a 4 MiB
+step and reads the tallies in `over_floor`, is not it: taking the test out changes that row by
+a cycle. The 7 cycles that row pays, against 2 on single sizes, move with code placement and
+not with what the code does; I did not pin them down further.
 
 ## Before the review: servers and the 8-byte burst
 
