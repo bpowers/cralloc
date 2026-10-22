@@ -280,18 +280,8 @@ unsafe impl<S: Shape> GlobalAlloc for SimHeap<S> {
     }
 
     unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
-        let (Some(block), Ok(new)) = (
-            NonNull::new(ptr),
-            Layout::from_size_align(new_size, layout.align()),
-        ) else {
-            return ptr::null_mut();
-        };
-        self.with(|heap| {
-            // SAFETY: the trait method's own contract, for a block this heap returned;
-            // `new_size` is not zero, by `realloc`'s contract.
-            unsafe { heap.resize(block, layout, new, false) }
-                .map_or(ptr::null_mut(), |grant| grant.ptr.as_ptr())
-        })
+        // SAFETY: the trait method's own contract, for a block this heap returned.
+        self.with(|heap| unsafe { heap.realloc(ptr, layout, new_size) })
     }
 }
 

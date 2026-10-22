@@ -5,7 +5,10 @@ build in turn, ROUNDS times, then each build's median. Run it from anywhere unde
 `scripts/measure` (one CPU of the first L3, so no `--both-l3`); each run goes through
 `scripts/memlimit`.
 
-usage: regrow.py ROUNDS NAME=BINARY...
+usage: regrow.py ROUNDS NAME=BINARY[+PRELOAD]...
+
+With `+PRELOAD`, the binary runs with that library in `LD_PRELOAD`: the workload built for glibc
+then reaches the library's C `realloc` through Rust's `System` allocator.
 """
 import json
 import os
@@ -22,10 +25,14 @@ PATTERNS = [
 ]
 
 
-def run(binary, args, cpu):
+def run(build, args, cpu):
+    binary, _, preload = build.partition("+")
+    env = {**os.environ, "BENCH_CPUS": cpu, "MEMLIMIT_QUIET": "1"}
+    if preload:
+        env["LD_PRELOAD"] = os.path.abspath(preload)
     out = subprocess.run(
         [f"{ROOT}/scripts/memlimit", "-m", "1G", "-t", "5m", "--", binary, "regrow", *args],
-        env={**os.environ, "BENCH_CPUS": cpu, "MEMLIMIT_QUIET": "1"},
+        env=env,
         capture_output=True, text=True, check=True).stdout
     line = next(l for l in out.splitlines() if l.startswith("BENCH_RESULT "))
     metrics = json.loads(line.split(" ", 1)[1])["metrics"]

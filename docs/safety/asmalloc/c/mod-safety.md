@@ -3,7 +3,10 @@
 The C functions, and the `export_c_abi!` macro that exports them. F1 and F2 are stated in
 `slow-safety.md`.
 
-## MOD-01: the copy and the free in `realloc`
+## MOD-01: the copy and the free in `realloc_other`
+
+`realloc_other` is `realloc` for what its lean path (MOD-05) did not take, with the block
+`find` found and a size that is not zero; the lean path changed nothing before it.
 
 ```rust
 old.as_ptr().copy_to_nonoverlapping(new, kept.min(size));
@@ -60,7 +63,7 @@ succeeds, so the caller gives `ptr` up, and it is a block of the heap it owns by
 caller provides. The write happens only after the allocation succeeded, so on failure `*out`
 is untouched, as POSIX requires.
 
-## MOD-04: `process::resize_in_place_by_address(old, used, size)` in `realloc`
+## MOD-04: `process::resize_in_place_by_address(old, used, size)` in `realloc_other`
 
 **Precondition.** `old` is a live large block of the heap that the caller owns and is resizing.
 
@@ -69,16 +72,33 @@ is untouched, as POSIX requires.
 it to `size`: if the call keeps it in place, the caller gives up what lies past `size`, which
 C's `realloc` allows (the bytes past the new size are no longer the program's).
 
+## MOD-05: `process::resize_small(old, from, to, from.size().min(size))` in `realloc`
+
+**Preconditions** (`Bound::resize_small`, HEAP-07 in `heap/resize-safety.md`). `old` is a live
+block of class `from` that the heap handed out, which the caller owns and gives up if the call
+returns another block; `kept` is at most the size of `from` and of `to`.
+
+**Proof.** `realloc`'s contract: `ptr` is a block of the heap the caller owns, not null here.
+`find` returned `Found::Small(from)`, so by F1 and F2 (`slow-safety.md`) it is a slot of `from`,
+the class it was handed out as. `to` is the small class of `size` by C's rule (`small_class`),
+at least `size` bytes, so `kept = min(from.size(), size)` is at most both. When the call
+returns another block, `realloc` returns that block, a success, and the caller has given `ptr`
+up, as C's `realloc` does; when it returns `old` or `None`, nothing was given up, and `None`
+leads to `realloc_other` with the block untouched.
+
 ## MOD-03: the pass-through calls
 
 `free`, `free_aligned_sized` and `cfree` call `routines::free(ptr)`, and `free_sized` calls
-`routines::free_sized(ptr, size)`; `realloc` calls `free(ptr)` for a zero size; `reallocarray`
-calls `realloc(ptr, total)`.
+`routines::free_sized(ptr, size)`; `realloc` calls `free(ptr)` for a zero size, and
+`realloc_other` for what its lean path does not take; `reallocarray` calls
+`realloc(ptr, total)`.
 
 **Preconditions.** The callee's contract: the routines and `free` take null or a block of the
 heap the caller owns and gives up; `realloc` takes null or a block the caller owns.
 
-**Proof.** Each caller's own contract is the callee's, passed on unchanged: the sized frees and
+**Proof.** Each caller's own contract is the callee's, passed on unchanged (for
+`realloc_other`, with `old` the non-null `ptr`, `found` what `find` returned for it and `size`
+not zero, all as `realloc` checked them): the sized frees and
 `cfree` free exactly what `free` frees (their size and alignment arguments are ignored, so a
 wrong one from C cannot change which block or class is freed). `realloc(ptr, 0)` gives `ptr`
 up, which C17 permits and glibc does; the caller of `realloc` may not use `ptr` afterwards

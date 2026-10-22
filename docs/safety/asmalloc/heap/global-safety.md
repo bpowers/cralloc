@@ -15,9 +15,12 @@ alignment and at least the size, and slots are aligned to their class's alignmen
 is a slot of the layout's class or a run aligned as `alloc_run` was asked. Exclusivity: the
 back end hands each slot once until it is freed, and magazines hold each free object once (the
 slab invariant, `front/real-safety.md`). No unwinding: the allocator's paths never panic
-(aborts go through `Os::abort`, which does not return). `realloc` builds the new layout with
-`Layout::from_size_align`, returning null on an invalid size without touching the block;
-`Bound::resize` frees the old block only after copying (HEAP-04).
+(aborts go through `Os::abort`, which does not return). `realloc` is `Bound::realloc`
+(`heap/resize.rs`): its lean path keeps a small block whose new size has its class, or copies
+it into a block of the new class and frees it only after the copy (HEAP-07); everything else,
+and a lean path whose pop missed, which has changed nothing, goes to the general path, which
+builds the new layout with `Layout::from_size_align`, returning null on an invalid size
+without touching the block, and frees the old block only after copying (HEAP-04).
 
 ## GLOBAL-03: `unsafe impl Allocator for Asmalloc`
 
@@ -57,16 +60,18 @@ routine the slow path runs arms its own.
 
 ## GLOBAL-05: the frees and resizes of the `GlobalAlloc` and `Allocator` methods
 
-**Blocks.** `process().dealloc`, `.resize` (in `realloc`), `.deallocate`, `.grow` and `.shrink`.
+**Blocks.** `process().dealloc`, `.realloc`, `.deallocate`, `.grow` and `.shrink`.
 
 **Preconditions.** For `dealloc` and `deallocate`: the block is one this heap handed out, which
 the caller owns and gives up, and the layout fits it (its own, or one whose size lies between
-that and the length returned, with the same alignment). For `resize`, `grow` and `shrink`: the
+that and the length returned, with the same alignment). For `realloc`, `grow` and `shrink`: the
 same of the old block and layout, except that the caller gives the block up only if the call
-succeeds, and the new layout is not empty for `resize`.
+succeeds; for `realloc`, also that the new size is not zero and, rounded up to the layout's
+alignment, at most `isize::MAX`.
 
 **Proof.** These are the trait methods' own contracts (`GlobalAlloc::dealloc` and `realloc`,
-whose `new_size` is not zero; `Allocator::deallocate`, `grow`, `grow_zeroed` and `shrink`),
+whose `new_size` is not zero and does not overflow `isize` when rounded up to the alignment;
+`Allocator::deallocate`, `grow`, `grow_zeroed` and `shrink`),
 for a block this allocator returned. Every `Asmalloc` reaches `HEAP` through `process()`, so a
 block any handle returned is a block of the heap `process()` names.
 

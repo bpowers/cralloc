@@ -327,6 +327,11 @@ impl<O: Os, R: Routines + Copy> Bound<'_, O, R> {
     ///
     /// As for [`Bound::dealloc`] with `ptr` and `old`, except that the caller gives the block
     /// up only if the resize succeeds; `new` has a non-zero size.
+    ///
+    /// The general resize, for every case: the interfaces reach it only for what the lean path
+    /// (`resize.rs`) does not take, so it is out of line, and the lean path stays small.
+    #[cold]
+    #[inline(never)]
     pub(crate) unsafe fn resize(
         self,
         ptr: NonNull<u8>,

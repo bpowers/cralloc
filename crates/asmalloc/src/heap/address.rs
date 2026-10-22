@@ -128,7 +128,9 @@ impl<O: Os> Heap<O> {
 #[cfg(all(target_os = "linux", target_arch = "x86_64", not(miri), not(kani)))]
 pub(crate) mod process {
     use super::super::global;
+    use super::super::resize::Caller;
     use super::Found;
+    use crate::classes::SmallClass;
     use crate::os::Os;
     use core::ptr::{self, NonNull};
 
@@ -187,6 +189,25 @@ pub(crate) mod process {
             Some(back) => unsafe { back.move_large(from, to, len, false) },
             None => heap.os().abort("a move of a block when no heap exists"),
         }
+    }
+
+    /// The lean path of C's `realloc` (`Bound::resize_small`): the block at `ptr`, of class
+    /// `from`, resized to class `to` with its first `kept` bytes kept; `None`, having changed
+    /// nothing, when this CPU's magazine of `to` has no block to give.
+    ///
+    /// # Safety
+    ///
+    /// As for `Bound::resize_small`.
+    #[inline(always)]
+    pub(crate) unsafe fn resize_small(
+        ptr: NonNull<u8>,
+        from: SmallClass,
+        to: SmallClass,
+        kept: usize,
+    ) -> Option<NonNull<u8>> {
+        // SAFETY: the contract of `Bound::resize_small` is this function's, for the process's
+        // heap.
+        unsafe { global::process().resize_small(ptr, from, to, kept, Caller::C) }
     }
 
     /// See `Heap::resize_in_place_by_address`.

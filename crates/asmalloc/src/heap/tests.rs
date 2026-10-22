@@ -220,6 +220,58 @@ fn realloc_walk<H: Inspect>(heap: &H, top: usize, full: bool) {
     unsafe { heap.dealloc(p, layout(size, align)) };
 }
 
+/// The lean path of `realloc` (`resize.rs`): `count` blocks of `from` bytes, each grown to `to`
+/// bytes and then cut to `back` bytes, all live at once, so that the pops of the new classes
+/// run dry and the pushes of the old ones run full partway through, and both misses complete
+/// as the general path and the free's slow path would. Each resize keeps its block exactly
+/// when the new size has the block's class, carries the bytes both sizes cover, and hands out
+/// a block that no live block overlaps.
+fn small_regrowth<H: Inspect>(heap: &H, count: usize, from: usize, to: usize, back: usize) {
+    let class = |size: usize| SmallClass::of_nonzero_layout(layout(size, 8)).unwrap();
+    let mut blocks: Vec<*mut u8> = (0..count)
+        .map(|i| {
+            // SAFETY: a valid, non-empty layout; the block is filled whole.
+            let p = unsafe { heap.alloc(layout(from, 8)) };
+            assert!(!p.is_null());
+            // SAFETY: as above.
+            unsafe { fill(p, from, i as u8) };
+            p
+        })
+        .collect();
+    for (old, new) in [(from, to), (to, back)] {
+        let kept = old.min(new);
+        let mut live = std::collections::BTreeSet::new();
+        for (i, p) in blocks.iter_mut().enumerate() {
+            // SAFETY: `p` is live with this layout, and `new` is a valid size.
+            let q = unsafe { heap.realloc(*p, layout(old, 8), new) };
+            assert!(!q.is_null());
+            assert_eq!(q == *p, class(old) == class(new), "{old} -> {new}");
+            // SAFETY: the first `kept` bytes were carried over; `q` is `new` bytes long.
+            unsafe {
+                assert!(holds(q, kept, i as u8), "{old} -> {new}, block {i}");
+                fill(q, new, i as u8);
+            }
+            assert!(heap.contains(q));
+            assert!(
+                live.insert(q.addr()),
+                "{old} -> {new} handed out a live block"
+            );
+            *p = q;
+        }
+        let size = class(new).size();
+        let mut sorted: Vec<usize> = live.into_iter().collect();
+        sorted.sort_unstable();
+        assert!(
+            sorted.windows(2).all(|w| w[0] + size <= w[1]),
+            "overlapping blocks"
+        );
+    }
+    for p in blocks {
+        // SAFETY: each block is live with this layout and freed once.
+        unsafe { heap.dealloc(p, layout(back, 8)) };
+    }
+}
+
 /// Zeroed allocations read as zero, also when they reuse a block that was written.
 fn zeroed<H: GlobalAlloc>(heap: &H, sizes: &[usize]) {
     for &size in sizes {
@@ -380,6 +432,18 @@ fn a_class_opens_one_run_at_start_whatever_the_clock_reads() {
 fn a_simulated_heap_resizes_in_place_and_with_headroom() {
     let heap = SimHeap::<Shape>::new();
     realloc_walk(&heap, 8 << 20, false);
+}
+
+#[test]
+fn a_simulated_heap_moves_small_blocks_up_and_down_a_class() {
+    let heap = SimHeap::<Shape>::new();
+    // Past the 128-byte class's magazine of 512 and the 256-byte class's of 256, so that both
+    // the pop and the push miss along the way.
+    let count = if cfg!(miri) { 300 } else { 1200 };
+    small_regrowth(&heap, count, 128, 256, 200);
+    // The same class both ways: nothing moves.
+    small_regrowth(&heap, 64, 100, 112, 105);
+    small_regrowth(&heap, 64, 8, 16, 9);
 }
 
 #[test]
@@ -1319,6 +1383,13 @@ mod process {
         let plan = Asmalloc.plan().expect("the heap has started");
         let full = plan.region_shift() == plan.geometry().max_region_shift();
         realloc_walk(&Asmalloc, 32 << 20, full);
+    }
+
+    #[test]
+    fn the_process_heap_moves_small_blocks_up_and_down_a_class() {
+        small_regrowth(&Asmalloc, 1200, 128, 256, 200);
+        small_regrowth(&Asmalloc, 64, 100, 112, 105);
+        small_regrowth(&Asmalloc, 2000, 24, 40, 17);
     }
 
     #[test]

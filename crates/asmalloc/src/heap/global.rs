@@ -153,15 +153,8 @@ unsafe impl GlobalAlloc for Asmalloc {
     }
 
     unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
-        let (Some(block), Ok(new)) = (
-            NonNull::new(ptr),
-            Layout::from_size_align(new_size, layout.align()),
-        ) else {
-            return ptr::null_mut();
-        };
-        // SAFETY: GLOBAL-05; `new_size` is not zero, by `realloc`'s contract.
-        unsafe { process().resize(block, layout, new, false) }
-            .map_or(ptr::null_mut(), |grant| grant.ptr.as_ptr())
+        // SAFETY: GLOBAL-05.
+        unsafe { process().realloc(ptr, layout, new_size) }
     }
 }
 
