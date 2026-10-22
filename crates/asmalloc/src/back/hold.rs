@@ -156,7 +156,9 @@ impl Fine {
     /// The fine count.
     #[inline(always)]
     pub(crate) fn count(&self) -> u32 {
-        (self.word.load(Relaxed) >> 32) as u32
+        // Sequentially consistent, as the thread's look before it sleeps reads it after
+        // marking its word (`crate::thread_word`, "Sleeping"); on x86-64 a plain load.
+        (self.word.load(SeqCst) >> 32) as u32
     }
 
     /// Advances the count for a reading of the counted time `time` (at most one step). Returns
@@ -193,15 +195,17 @@ pub(crate) struct Hold {
     maintain_looked: AtomicU32,
     /// When the background thread should look next (see the module documentation, "The
     /// thread"): [`NEXT_AT`] with the fine count in the low half, [`NEXT_LEVEL`], or zero.
-    next: AtomicU64,
+    /// Checked by the interleaving explorations (`front::sync`): the thread's plan, frees and
+    /// crossings race on it.
+    next: crate::front::sync::AtomicU64,
 }
 
 /// In [`Hold::next`], with a fine count in the low half: the step of the count that reaches it
 /// wakes the thread for a look.
-const NEXT_AT: u64 = 1 << 32;
+pub(super) const NEXT_AT: u64 = 1 << 32;
 /// [`Hold::next`]: free large memory was at or under the floor when the thread planned, so no
 /// hold can return anything; a crossing of an add over the floor sets a look at once.
-const NEXT_LEVEL: u64 = 1 << 33;
+pub(super) const NEXT_LEVEL: u64 = 1 << 33;
 
 /// Whether the step of the fine count to `count` reaches the look `next` sets.
 const fn reached(next: u64, count: u32) -> bool {
@@ -228,7 +232,7 @@ impl Hold {
             at: AtomicU32::new(0),
             maintained: AtomicU64::new(0),
             maintain_looked: AtomicU32::new(0),
-            next: AtomicU64::new(0),
+            next: crate::front::sync::AtomicU64::new(0),
         }
     }
 }
@@ -309,12 +313,20 @@ impl<O: Os> Back<'_, O> {
         let word = host.meta(region, at);
         let count = self.state.hold.fine.count();
         let stamp = stamp_of(count);
-        let seen = word.load();
         // A compare-and-swap, not a store, and the thread's next look read after it: the
         // thread's plan clears that look and then reads the stamps, so one of the two sees the
-        // other's write (`plan_hold`). A failure is another free's stamp, which arms the look.
-        if seen != stamp && word.compare_exchange(seen, stamp).is_ok() {
-            self.hold_arm(count);
+        // other's write (`plan_hold`). Until the word is this stamp: a failure may be a look's
+        // own write (its mark of a walk from the top, or the stamp it clears at the bottom),
+        // which would leave a slot freed resident in a region with no stamp.
+        let mut seen = word.load();
+        while seen != stamp {
+            match word.compare_exchange(seen, stamp) {
+                Ok(_) => {
+                    self.hold_arm(count);
+                    return;
+                }
+                Err(now) => seen = now,
+            }
         }
     }
 
@@ -333,10 +345,16 @@ impl<O: Os> Back<'_, O> {
     /// over the floor, if the thread's plan was made under it, or knew of no stamp to wait for.
     pub(super) fn hold_level(&self) {
         let hold = &self.state.hold;
-        let seen = hold.next.load(SeqCst);
-        if seen == NEXT_LEVEL || seen == 0 {
+        let mut seen = hold.next.load(SeqCst);
+        // Until a look is set: a failure may be the thread's plan storing its wait for the
+        // level, made from a count read before this add (the exploration
+        // `the_threads_plan_keeps_a_crossings_look_under_every_schedule` found it).
+        while seen == NEXT_LEVEL || seen == 0 {
             let at = NEXT_AT | u64::from(hold.fine.count());
-            let _ = hold.next.compare_exchange(seen, at, SeqCst, Relaxed);
+            match hold.next.compare_exchange(seen, at, SeqCst, SeqCst) {
+                Ok(_) => return,
+                Err(now) => seen = now,
+            }
         }
     }
 
@@ -635,6 +653,16 @@ impl<O: Os> Back<'_, O> {
     /// Sets the fine count, as if it had stepped there at counted time zero.
     pub(super) fn hold_set_count(&self, count: u32) {
         self.state.hold.fine.word.store(pack(count, 0), Relaxed);
+    }
+
+    /// The thread's next look (`Hold::next`).
+    pub(super) fn hold_next(&self) -> u64 {
+        self.state.hold.next.load(SeqCst)
+    }
+
+    /// Sets the thread's next look.
+    pub(super) fn hold_set_next(&self, next: u64) {
+        self.state.hold.next.store(next, SeqCst);
     }
 
     /// The fine count at the last look (one less when it left more to do).

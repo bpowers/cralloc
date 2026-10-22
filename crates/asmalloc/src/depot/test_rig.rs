@@ -76,6 +76,8 @@ pub(crate) struct TestSource {
     pub owing: crate::front::sync::AtomicUsize,
     /// How many times the thread planned its next look.
     plans: AtomicUsize,
+    /// How many of the thread's purge steps were taken.
+    thread_steps: AtomicUsize,
     /// The background thread's word.
     pub thread: crate::thread_word::ThreadWord,
     fills: AtomicUsize,
@@ -109,6 +111,7 @@ impl TestSource {
             coming_due: AtomicUsize::new(0),
             owing: crate::front::sync::AtomicUsize::new(0),
             plans: AtomicUsize::new(0),
+            thread_steps: AtomicUsize::new(0),
             thread: crate::thread_word::ThreadWord::new(),
             fills: AtomicUsize::new(0),
             laundered: AtomicUsize::new(0),
@@ -161,6 +164,11 @@ impl TestSource {
     /// How many times the thread planned its next look.
     pub(crate) fn plans(&self) -> usize {
         self.plans.load(Ordering::Relaxed)
+    }
+
+    /// How many of the thread's purge steps were taken.
+    pub(crate) fn thread_steps(&self) -> usize {
+        self.thread_steps.load(Ordering::Relaxed)
     }
 
     /// The objects of `class` the source holds.
@@ -243,11 +251,20 @@ impl Source for TestSource {
     }
 
     fn thread_step(&self, _: &dyn Fn() -> u64) -> super::PurgeStep {
-        let owing = self.owing.load(Ordering::SeqCst);
-        if owing == 0 {
-            return super::PurgeStep::default();
+        self.thread_steps.fetch_add(1, Ordering::Relaxed);
+        let mut owing = self.owing.load(Ordering::SeqCst);
+        loop {
+            if owing == 0 {
+                return super::PurgeStep::default();
+            }
+            match self
+                .owing
+                .compare_exchange(owing, owing - 1, Ordering::SeqCst, Ordering::SeqCst)
+            {
+                Ok(_) => break,
+                Err(now) => owing = now,
+            }
         }
-        self.owing.fetch_sub(1, Ordering::SeqCst);
         super::PurgeStep {
             more: owing > 1,
             returned: true,

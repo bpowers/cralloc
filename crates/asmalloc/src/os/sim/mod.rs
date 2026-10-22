@@ -143,6 +143,11 @@ struct Sleeps {
     timed: AtomicU64,
     wakes: AtomicU64,
     yields: AtomicU64,
+    /// The low half of the word the last timed wait expected, plus one; zero for none.
+    expected: AtomicU64,
+    /// The last wait found the word as it expected, as a futex that sleeps does, and no wake
+    /// has come since.
+    blocked: core::sync::atomic::AtomicBool,
     fences: AtomicU64,
     /// The C library's record that the program has created a thread, as [`SimOs::set_threads`]
     /// sets it; a fork leaves it as it is, as glibc's.
@@ -264,6 +269,8 @@ impl<S: Shape> SimOs<S> {
                 timed: AtomicU64::new(0),
                 wakes: AtomicU64::new(0),
                 yields: AtomicU64::new(0),
+                expected: AtomicU64::new(0),
+                blocked: core::sync::atomic::AtomicBool::new(false),
                 fences: AtomicU64::new(0),
                 threads: core::sync::atomic::AtomicBool::new(false),
                 other_thread: core::sync::atomic::AtomicBool::new(false),
@@ -283,6 +290,21 @@ impl<S: Shape> SimOs<S> {
     /// How many [`Os::wake`] calls there have been.
     pub fn wakes(&self) -> u64 {
         self.sleeps.wakes.load(Ordering::Acquire)
+    }
+
+    /// The low half of the word the last timed [`Os::wait`] expected, which the futex compares:
+    /// a wait that finds the word so sleeps until its timeout or a wake.
+    pub fn last_timed_wait(&self) -> Option<u32> {
+        match self.sleeps.expected.load(Ordering::Acquire) {
+            0 => None,
+            e => Some((e - 1) as u32),
+        }
+    }
+
+    /// Whether the last [`Os::wait`] found the word as it expected, and so would sleep until a
+    /// wake or its timeout, and no [`Os::wake`] has come since.
+    pub fn blocked(&self) -> bool {
+        self.sleeps.blocked.load(Ordering::SeqCst)
     }
 
     /// How many [`Os::yield_cpu`] calls there have been.
@@ -753,7 +775,24 @@ unsafe impl<S: Shape> Os for SimOs<S> {
         }
     }
 
-    fn wait(&self, _: &core::sync::atomic::AtomicU64, _: u64, timeout_ns: Option<u64>) {
+    fn wait(&self, word: &core::sync::atomic::AtomicU64, expected: u64, timeout_ns: Option<u64>) {
+        let sleeps = word.load(Ordering::SeqCst) as u32 == expected as u32;
+        self.sleeps.blocked.store(sleeps, Ordering::SeqCst);
+        // A futex that sleeps waits for a wake: under the interleaving checker, the other
+        // threads run first, for a bounded while, and a wait no wake reached ends as a timeout
+        // would, with `blocked` left set for the check after the execution.
+        #[cfg(test)]
+        for _ in 0..64 {
+            if !self.sleeps.blocked.load(Ordering::SeqCst) {
+                break;
+            }
+            crate::front::check::wait_point();
+        }
+        if timeout_ns.is_some() {
+            self.sleeps
+                .expected
+                .store(u64::from(expected as u32) + 1, Ordering::Release);
+        }
         let count = match timeout_ns {
             Some(_) => &self.sleeps.timed,
             None => &self.sleeps.waits,
@@ -762,6 +801,7 @@ unsafe impl<S: Shape> Os for SimOs<S> {
     }
 
     fn wake(&self, _: &core::sync::atomic::AtomicU64) {
+        self.sleeps.blocked.store(false, Ordering::SeqCst);
         self.sleeps.wakes.fetch_add(1, Ordering::AcqRel);
     }
 

@@ -93,7 +93,9 @@ pub struct State<O: Os> {
     /// Bytes of free slots in the bitmaps believed to be resident (`purge`).
     retained: Retained,
     /// Bytes carved since a grower last checked the cap (`purge`).
-    growth: Lined<AtomicUsize>,
+    /// Checked by the interleaving explorations (`front::sync`): the background thread and the
+    /// growers race on it.
+    growth: Lined<crate::front::sync::AtomicUsize>,
     /// The clocked pass's word and the clock's interval number (`Clocked`).
     decay: Lined<Clocked>,
     /// The purge walk's position, its laps and the pass under way, which its steps write.
@@ -274,7 +276,7 @@ impl<O: Os> State<O> {
                 added: Lined::new(Tally::new()),
                 taken: Lined::new(Tally::new()),
             },
-            growth: Lined::new(AtomicUsize::new(0)),
+            growth: Lined::new(crate::front::sync::AtomicUsize::new(0)),
             decay: Lined::new(Clocked {
                 word: AtomicU64::new(0),
                 epoch: AtomicU64::new(0),

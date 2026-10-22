@@ -149,7 +149,13 @@
 //! heartbeat, so that what the thread's lag can add to retained memory is bounded whatever the
 //! scheduler does. A grower's step alone would not do: it pays half a megabyte while a carve
 //! may owe tens, and on DataFusion a thread that waited for a CPU behind the four that carved
-//! let the peak rise by 180 MiB in one run in five (`docs/research/purge-off-path.md`).
+//! let the peak rise by 180 MiB in one run in five (`docs/research/purge-off-path.md`). Past
+//! the limit they pay whether a pass is under way or not, and a pass still under way an
+//! interval after it began, which the thread has not stepped, is the heartbeats' again.
+//! The thread's own steps (`StepSize::THREAD`) are a heartbeat's in size but `maintain`'s in
+//! kind: they do not count an interval as one the program ran in, and its looks of the hold
+//! take `maintain`'s reach, so that a silence ages nothing and a quiet program's held slots go
+//! back at the thread's second round.
 //!
 //! A claim that makes purged pages resident again is reuse, not growth, though it raises
 //! resident memory as growth does. Charging it made the allocator chase its own tail: with
@@ -648,7 +654,17 @@ impl<O: Os> Back<'_, O> {
             size,
             &mut returned,
         );
-        let hold = self.hold_beat(read.get().unwrap_or_else(now));
+        let time = read.get().unwrap_or_else(now);
+        // The thread's look is `maintain`'s (`Back::hold_maintain_step`): the whole hold while
+        // the program runs, and in a silence the shorter one that returns a quiet program's
+        // held slots at the thread's second round. A heartbeat's look, taken by the thread
+        // between the steps of its round, would take each fine step's one look first with the
+        // whole hold, and the round's would never apply (review finding 5).
+        let hold = if size.heartbeat {
+            self.hold_beat(time)
+        } else {
+            self.hold_maintain_step(&|| time)
+        };
         let (paid, owing) = self.pay_owed();
         PassStep {
             more: pass.is_some() || hold.more || owing,
@@ -697,15 +713,33 @@ impl<O: Os> Back<'_, O> {
                 Decay::Start(word) => started = self.start_pass(seen, word),
                 _ => {}
             }
+        } else if time.wrapping_sub(seen & !ACTIVE) >= DECAY_TICKS
+            && time.wrapping_sub(seen & !ACTIVE) < 1 << 63
+        {
+            // A pass still under way an interval after it began has not been stepped by the
+            // thread: starved, or a thread a fork child inherited the word of. It is the slow
+            // paths' again, a heartbeat's step at a time, and the thread is woken: while it is
+            // under way no growth is paid, and the bound on retained memory must not rest on
+            // the scheduler.
+            let _ = self.decay_step(now, StepSize::HEARTBEAT);
+            started = true;
         }
         // Growth the thread has left unpaid past the limit is the slow paths' again, a step a
         // heartbeat, as it is where there is no thread: a grower's step alone pays half a
         // megabyte while a carve may owe tens, and the thread may be waiting for a CPU behind
-        // the very threads that carve. One load from a line only growers write.
-        if self.state.growth.load(Relaxed) >= growth_unpaid(self.space.plan().geometry()) {
-            let _ = self.pay_owed();
+        // the very threads that carve. One load from a line only growers write. Whether a
+        // pass is under way or not, as a grower pays: the rule that waits for a pass to end
+        // keeps the payments from going below the cap, and a pass the thread does not step
+        // would turn the bound off. What the step leaves owed is work for the thread, which may
+        // have read the debt as paid.
+        let mut owing = false;
+        let geometry = self.space.plan().geometry();
+        if self.state.growth.load(Relaxed) >= growth_unpaid(geometry) {
+            let step = growth_step(geometry);
+            let _ = self.pay_growth(step);
+            owing = self.state.growth.load(SeqCst) >= step;
         }
-        self.hold_note(time) || started
+        self.hold_note(time) || started || owing
     }
 
     /// Whether purge work is due that the background thread should do before it sleeps: growth
@@ -725,7 +759,8 @@ impl<O: Os> Back<'_, O> {
         if matches!(decay_look(seen, time), Decay::Start(_)) && self.retained() > self.floor() {
             return true;
         }
-        self.hold_due(time)
+        // In a silence the hold is the round's (`Back::thread_purge_steps`).
+        self.hold_due(time) && !self.silent(time)
     }
 
     /// The clocked pass the heartbeats of an interval would take, in one call: starts a pass

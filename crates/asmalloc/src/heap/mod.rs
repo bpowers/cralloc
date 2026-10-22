@@ -540,28 +540,7 @@ impl<'a, O: Os, R: Routines + Copy> Bound<'a, O, R> {
                 }
                 _ => {}
             }
-            let mut round = None;
-            while let Some(step) = cache.maintain_step_with_work() {
-                round = Some(round.unwrap_or(false) | step.work);
-                // A bounded step on the program's CPUs: a thread waiting for this one runs
-                // next (`Cache::thread_step` yields after its own).
-                os.yield_cpu();
-                returned |= cache.thread_step().returned;
-                if !step.more {
-                    break;
-                }
-            }
-            returned |= cache.thread_steps();
-            let round = round.map(|work| work | core::mem::take(&mut returned));
-            match cache.rest(&mut seen, key, round) {
-                thread::Rest::Park => os.wait(word.futex(), key | thread_word::PARKED, None),
-                thread::Rest::Sleep => {
-                    if let Some(asleep) = cache.begin_sleep(key) {
-                        os.wait(word.futex(), asleep.0, Some(every_ns));
-                        cache.end_sleep(key);
-                    }
-                }
-            }
+            cache.thread_turn(&mut seen, key, &mut returned, every_ns);
         }
     }
 

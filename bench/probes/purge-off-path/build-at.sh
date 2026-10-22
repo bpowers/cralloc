@@ -7,6 +7,10 @@
 # bench/target/NAME of this checkout.
 #
 #   scripts/heavy bench/probes/purge-off-path/build-at.sh NAME COMMIT [FILE SED-EXPRESSION]
+#   scripts/heavy bench/probes/purge-off-path/build-at.sh NAME COMMIT --edit SCRIPT
+#
+# The second form runs SCRIPT with the extracted tree's root (a diagnostic edit such as
+# probes/default-thread/diag_edit.py, or this directory's for this branch).
 #
 # For example `asmalloc-main main`, or `asmalloc-l4 purge-off-path
 # crates/asmalloc/src/back/policy.rs 's/GROWTH_UNPAID_HUGE_PAGES: usize = 8/GROWTH_UNPAID_HUGE_PAGES: usize = 2/'`.
@@ -27,7 +31,10 @@ rm -rf "$tree"
 mkdir -p "$tree"
 git -C "$root" archive "$commit" | tar -x -C "$tree"
 echo "$(git -C "$root" rev-parse "$commit") ${3:-} ${4:-}" > "$tree/BUILT-FROM"
-if [ $# -ge 4 ]; then
+if [ "${3:-}" = "--edit" ]; then
+  # A script that edits the tree in place, given its root: a scratch diagnostic build.
+  python3 -I "$4" "$tree"
+elif [ $# -ge 4 ]; then
   before="$(sha256sum "$tree/$3")"
   sed -i "$4" "$tree/$3"
   [ "$before" != "$(sha256sum "$tree/$3")" ] || { echo "build-at: $4 changed nothing" >&2; exit 1; }

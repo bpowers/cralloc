@@ -1368,6 +1368,60 @@ fn sleeping_loses_no_wake_up_under_every_schedule(
     );
 }
 
+/// As [`sleeping_loses_no_wake_up_under_every_schedule`], with the thread's whole turn
+/// (`Cache::thread_turn`: its steps, its look, its wait and its back-out) racing `waker`. The
+/// simulator's wait sleeps, as the futex does, if the word holds what it expects when it is
+/// called, until a wake. No schedule leaves the thread asleep with work due.
+fn a_turn_loses_no_wake_up_under_every_schedule(
+    name: &str,
+    bounds: Bounds,
+    due: usize,
+    waker: impl Fn(&World) + Sync,
+) {
+    let slept = AtomicUsize::new(0);
+    let found = explore(
+        bounds,
+        2,
+        || sleeping_world(due),
+        |sleeping, me| {
+            let world = &sleeping.world;
+            if me == 0 {
+                waker(world);
+            } else {
+                let machine = world.machine(1, 1);
+                let mut seen = super::thread::Seen::default();
+                let mut returned = false;
+                world
+                    .rig
+                    .cache(&machine)
+                    .thread_turn(&mut seen, sleeping.key, &mut returned, 1);
+            }
+        },
+        |_| {},
+        |sleeping, _| {
+            let world = &sleeping.world;
+            world.check(false);
+            if world.rig.os().blocked() {
+                slept.fetch_add(1, Ordering::SeqCst);
+                assert_eq!(
+                    world.rig.source.owing.load(Ordering::SeqCst),
+                    0,
+                    "the thread sleeps with work due and nobody to wake it: word {:#x}, waited on \
+                     {:?}, wakes {}",
+                    world.rig.source.thread.load().0,
+                    world.rig.os().last_timed_wait(),
+                    world.rig.os().wakes()
+                );
+            }
+        },
+    );
+    report(name, found);
+    assert!(
+        slept.load(Ordering::SeqCst) > 0,
+        "no schedule had the thread sleep"
+    );
+}
+
 /// What a grower does (`back::purge`, `Back::growth_due`): the debt added, sequentially
 /// consistent, and then the word read afresh, a sleeping thread's mark cleared and the thread
 /// woken.
@@ -1398,6 +1452,23 @@ mod run {
             Bounds::preemptions(1),
             0,
             super::grower,
+        );
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn a_turn_loses_no_wake_up_quickly() {
+        super::a_turn_loses_no_wake_up_under_every_schedule(
+            "a turn, a grower",
+            Bounds::preemptions(1),
+            0,
+            super::grower,
+        );
+        super::a_turn_loses_no_wake_up_under_every_schedule(
+            "a turn, a heartbeat",
+            Bounds::preemptions(1),
+            1,
+            super::heartbeat,
         );
     }
 

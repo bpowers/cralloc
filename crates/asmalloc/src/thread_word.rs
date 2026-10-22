@@ -56,10 +56,13 @@
 //! **Whose duty.** While a thread is awake or parked, returning memory is its work and not a
 //! slow path's (design: "Heartbeat"; [`Duty`]). A slow path reads that from the snapshot its
 //! one load took, whatever generation the word names: telling a fork child's inherited word
-//! from its own would take the generation, a second load. So a fork child of a process whose
-//! thread ran leaves its work to a thread it does not have until the first time work comes
-//! due: the cold look that would wake the thread ([`ThreadWord::rouse`]) knows the generation,
-//! makes the word the child's `NONE`, and the slow path does the work after all.
+//! from its own would take the generation, a second load. A fork child begins with no thread
+//! by construction instead: the draw of its generation, which every cold look at the word
+//! makes (a wake, [`ThreadWord::rouse`], above all), makes the word the child's `NONE`
+//! ([`ThreadWord::make_own`], `depot::generation`). Until the draw a child's slow paths leave
+//! work to a thread it does not have; the first time work comes due the draw happens and the
+//! slow path does the work after all. Growth and a pass that nobody steps have their own
+//! bounds besides (`back::purge`), which do not rest on any thread running.
 //!
 //! **Sleeping.** The thread sleeps with a timeout in state `AWAKE`, a futex wait on this word
 //! that only a wake interrupts. Before it waits it sets [`SLEEPING`] and looks once more for
@@ -223,10 +226,11 @@ impl ThreadWord {
         }
     }
 
-    /// One load of the word.
+    /// One load of the word. Sequentially consistent, as the wakers read it after making work
+    /// due (see the module documentation, "Sleeping"); on x86-64 a plain load all the same.
     #[inline(always)]
     pub fn load(&self) -> Snapshot {
-        Snapshot(self.word.load(Relaxed))
+        Snapshot(self.word.load(SeqCst))
     }
 
     /// The word, as the thread waits on it and a slow path wakes it (`Os::wait`, `Os::wake`).
@@ -463,6 +467,21 @@ impl ThreadWord {
                     os.wake(self.futex());
                     return;
                 }
+                Err(now) => seen = Snapshot(now),
+            }
+        }
+    }
+
+    /// Makes a word that names another generation this one's `NONE`, keeping the level bit:
+    /// what a fork child does when it draws its generation, so that it begins with no thread.
+    pub fn make_own(&self, key: u64) {
+        let mut seen = self.load();
+        while seen.key() != key && seen.0 & !LEVEL != 0 {
+            match self
+                .word
+                .compare_exchange(seen.0, key | (seen.0 & LEVEL), SeqCst, SeqCst)
+            {
+                Ok(_) => return,
                 Err(now) => seen = Snapshot(now),
             }
         }

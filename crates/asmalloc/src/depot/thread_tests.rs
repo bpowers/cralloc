@@ -417,8 +417,9 @@ fn a_child_that_shares_memory_is_not_a_new_process() {
     assert!(!rig.source.thread.claim_start(rig.os(), key, AWAKE));
 }
 
-/// A fork child whose parent's thread was awake inherits `AWAKE` under the parent's key: its
-/// crossings still ask for a look, and a thread of its own then wants one (second review).
+/// A fork child whose parent's thread was awake inherits `AWAKE` under the parent's key, and
+/// its generation's draw makes the word its own `NONE`: its crossings still ask for a look,
+/// and a thread of its own then wants one (second review).
 #[test]
 fn a_fork_child_of_an_awake_parent_sees_its_own_crossings() {
     let rig = rig(12, TIGHT);
@@ -430,7 +431,11 @@ fn a_fork_child_of_an_awake_parent_sees_its_own_crossings() {
     let keeper = SimCpu::new(1);
     let child = rig.cache(&keeper).thread_key();
     assert_ne!(child, parent);
-    assert_eq!(word.load(), Snapshot(parent | AWAKE));
+    assert_eq!(
+        word.load(),
+        Snapshot(child | NONE),
+        "the child began with a thread"
+    );
     rig.os().set_other_thread(true);
     word.raise_level();
     slow_path_end(&rig);
@@ -581,4 +586,52 @@ fn a_level_keeps_a_sleeping_threads_mark() {
     assert_eq!(rig.os().wakes(), 1);
     rig.source.thread.rouse_any(rig.os());
     assert_eq!(rig.os().wakes(), 1, "two wakes for one mark");
+}
+
+/// The thread does not sleep while this interval's round is still to run.
+#[test]
+fn the_thread_does_not_sleep_before_its_round() {
+    let rig = rig(12, TIGHT);
+    one_slow_path(&rig);
+    let key = started(&rig);
+    let keeper = SimCpu::new(1);
+    let thread = rig.cache(&keeper);
+    assert_eq!(thread.begin_sleep(key), None, "slept with a round due");
+    assert_eq!(rig.source.thread.load(), Snapshot(key | AWAKE));
+    thread.maintain();
+    assert!(thread.begin_sleep(key).is_some());
+}
+
+/// A turn of the thread's loop: its round, with a purge step and a yield after each of the
+/// round's steps; then a timed wait on the word it marked asleep, and the mark taken back.
+#[test]
+fn a_turn_steps_between_the_rounds_steps_and_sleeps_on_the_word_it_marked() {
+    let rig = rig(12, TIGHT);
+    one_slow_path(&rig);
+    let key = started(&rig);
+    let keeper = SimCpu::new(1);
+    let thread = rig.cache(&keeper);
+    let mut seen = Seen::default();
+    let mut returned = false;
+    let (steps, yields) = (rig.source.thread_steps(), rig.os().yields());
+    thread.thread_turn(&mut seen, key, &mut returned, 1);
+    let taken = rig.source.thread_steps() - steps;
+    assert!(
+        taken >= 2,
+        "a round without a purge step between its steps: {taken}"
+    );
+    assert!(
+        rig.os().yields() - yields >= 2 * taken as u64 - 1,
+        "a step without a yield"
+    );
+    assert_eq!(
+        rig.os().last_timed_wait(),
+        Some((key | AWAKE | SLEEPING) as u32),
+        "the wait was not on the word marked asleep"
+    );
+    assert_eq!(
+        rig.source.thread.load(),
+        Snapshot(key | AWAKE),
+        "the mark was not taken back"
+    );
 }

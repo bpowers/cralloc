@@ -139,11 +139,6 @@ mod checked {
                     self.0.fetch_add(value, order)
                 }
 
-                pub(crate) fn fetch_sub(&self, value: $int, order: Ordering) -> $int {
-                    switch_point();
-                    self.0.fetch_sub(value, order)
-                }
-
                 pub(crate) fn fetch_max(&self, value: $int, order: Ordering) -> $int {
                     switch_point();
                     self.0.fetch_max(value, order)
