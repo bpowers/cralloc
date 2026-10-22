@@ -335,9 +335,21 @@ fn fork_and_free() {
 /// The child of a fork whose parent's thread was awake got its own thread and returned its
 /// burst.
 fn child_returned(report: &BTreeMap<String, u64>) -> Result<(), String> {
-    expect(get(report, "child_status")? == 0, "the child failed", report)?;
-    expect(get(report, "child_thread")? == 1, "no thread in the child", report)?;
-    expect(get(report, "child_rss_mib")? < 72, "the child kept its burst", report)
+    expect(
+        get(report, "child_status")? == 0,
+        "the child failed",
+        report,
+    )?;
+    expect(
+        get(report, "child_thread")? == 1,
+        "no thread in the child",
+        report,
+    )?;
+    expect(
+        get(report, "child_rss_mib")? < 72,
+        "the child kept its burst",
+        report,
+    )
 }
 
 /// The modes that must not have a second thread before their burst: run before anything else
@@ -460,8 +472,16 @@ const CASES: &[Case] = &[
         },
     },
     // Fork children of a parent whose thread is awake (second review's finding).
-    Case { mode: "forkawake", env: &[], check: child_returned },
-    Case { mode: "workerfork", env: &[], check: child_returned },
+    Case {
+        mode: "forkawake",
+        env: &[],
+        check: child_returned,
+    },
+    Case {
+        mode: "workerfork",
+        env: &[],
+        check: child_returned,
+    },
     // A fork child of a parked parent: no thread for its first thread's frees, one once a
     // thread of its own frees, and the memory goes back.
     Case {
