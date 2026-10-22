@@ -30,7 +30,6 @@ pub(super) mod nr {
     pub const MUNMAP: usize = 11;
     pub const RT_SIGACTION: usize = 13;
     pub const RT_SIGPROCMASK: usize = 14;
-    pub const SCHED_YIELD: usize = 24;
     pub const MINCORE: usize = 27;
     pub const MADVISE: usize = 28;
     pub const GETPID: usize = 39;

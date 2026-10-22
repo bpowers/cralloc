@@ -483,11 +483,9 @@ fn a_sleeping_thread_is_woken_once_for_work_a_heartbeat_made_due() {
     let thread = rig.cache(&keeper);
     assert_eq!(thread.begin_sleep(key), None, "slept with work due");
     assert_eq!(rig.source.thread.load(), Snapshot(key | AWAKE));
-    let (plans, yields) = (rig.source.plans(), rig.os().yields());
+    let plans = rig.source.plans();
     assert!(thread.thread_steps(), "the work was not taken");
     assert_eq!(rig.source.plans(), plans + 1);
-    // A yield after the one step the work took.
-    assert_eq!(rig.os().yields(), yields + 1, "a step without a yield");
     assert_eq!(rig.source.owing.load(Relaxed), 0);
     assert_eq!(
         thread.begin_sleep(key),
@@ -602,8 +600,8 @@ fn the_thread_does_not_sleep_before_its_round() {
     assert!(thread.begin_sleep(key).is_some());
 }
 
-/// A turn of the thread's loop: its round, with a purge step and a yield after each of the
-/// round's steps; then a timed wait on the word it marked asleep, and the mark taken back.
+/// A turn of the thread's loop: its round, with a purge step after each of the round's steps;
+/// then a timed wait on the word it marked asleep, and the mark taken back.
 #[test]
 fn a_turn_steps_between_the_rounds_steps_and_sleeps_on_the_word_it_marked() {
     let rig = rig(12, TIGHT);
@@ -613,16 +611,12 @@ fn a_turn_steps_between_the_rounds_steps_and_sleeps_on_the_word_it_marked() {
     let thread = rig.cache(&keeper);
     let mut seen = Seen::default();
     let mut returned = false;
-    let (steps, yields) = (rig.source.thread_steps(), rig.os().yields());
+    let steps = rig.source.thread_steps();
     thread.thread_turn(&mut seen, key, &mut returned, 1);
     let taken = rig.source.thread_steps() - steps;
     assert!(
         taken >= 2,
         "a round without a purge step between its steps: {taken}"
-    );
-    assert!(
-        rig.os().yields() - yields >= 2 * taken as u64 - 1,
-        "a step without a yield"
     );
     assert_eq!(
         rig.os().last_timed_wait(),

@@ -147,7 +147,7 @@ impl<O: Os, R: Routines, S: Source> Cache<'_, O, R, S> {
     }
 
     /// One turn of the thread's loop while it is awake (`heap::Bound::run_thread`): the round
-    /// of `maintain` if one is due, a step of the purges and a yield after each of its steps,
+    /// of `maintain` if one is due, a step of the purges after each of its steps,
     /// the purges until none is due, and then its rest, a park or a timed sleep of `every_ns`,
     /// waited for here. `returned` carries memory returned between rounds to the next round's
     /// count (`Seen`).
@@ -156,9 +156,6 @@ impl<O: Os, R: Routines, S: Source> Cache<'_, O, R, S> {
         let mut round = None;
         while let Some(step) = self.maintain_step_with_work() {
             round = Some(round.unwrap_or(false) | step.work);
-            // A bounded step on the program's CPUs: a thread waiting for this one runs next
-            // (`Cache::thread_step` yields after its own).
-            self.os().yield_cpu();
             *returned |= self.thread_step().returned;
             if !step.more {
                 break;
@@ -197,15 +194,9 @@ impl<O: Os, R: Routines, S: Source> Cache<'_, O, R, S> {
     /// between the steps of a round, so that a long round (a pass over a large heap, many
     /// magazines shed) does not hold up the hold's looks and growth's payments, which
     /// heartbeats take beside a pass where slow paths return memory.
-    ///
-    /// The thread yields its CPU after the step (`Os::yield_cpu`): it runs on the program's
-    /// CPUs, and a program thread waiting for this one should wait no longer than a slow
-    /// path's step took from the request that took it.
     pub fn thread_step(&self) -> super::PurgeStep {
         let counted = self.source.clock();
-        let step = self.source.thread_step(&|| counted.now(self.os()));
-        self.os().yield_cpu();
-        step
+        self.source.thread_step(&|| counted.now(self.os()))
     }
 
     /// The thread's timed sleep, before it waits: marks its word asleep, then looks once more

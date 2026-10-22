@@ -7,6 +7,24 @@ The design is "Heartbeat", from "While the thread runs, returning memory is its 
 
 ## Summary
 
+Second round (after the review, main `040033a` merged; "Second round" below):
+
+- **A yield after each of the thread's steps was tried and taken out.** With four workers on
+  DataFusion's four CPUs every yield handed a worker a whole slice: the thread waited about
+  460 ms a run behind them, its holds and payments came late, and 10 runs of 20 peaked 40 to
+  180 MiB over (none without the yields, none on main). On Meilisearch it changed neither the
+  tail nor the workers' run-queue wait. Do not try it again without a way past that.
+- **Meilisearch's tail is level with main's**: p99.9 at 70% 44.7 ms against 45.8 (main's
+  moved from 37 to 41 to 42 to 47 with its floor change), and every thread's run-queue wait
+  is the same in every build. The first round's 6 ms did not reproduce.
+- **The log store's burst after a silence** takes 0.50 to 0.60 ms for its slowest request in
+  the first 5 ms against main's 0.68 to 0.93: the pass is off request paths. The idle drains
+  are what is left, about 0.2 ms over the thread-off build.
+- The doubling and DataFusion hold: 0.780 / 0.827 / 0.916 ms against main's 0.779 / 0.852 /
+  1.103; cgroup peak 867 against 868 MiB.
+
+First round:
+
 - **The doubling tail is gone at p90 and mostly at the maximum.** A table doubling of the
   order service takes 0.770 / 0.794 / 0.889 ms (median, p90, max of 192) against main's
   0.766 / 0.839 / 0.905 and jemalloc's 0.737 / 0.828 / 0.860. The p90 is now under
@@ -168,7 +186,8 @@ with `yield_cpu` taken out of `depot/thread.rs` by `build-at.sh`), and jemalloc.
 the thread calls `sched_yield` after each bounded step of its round and of the purges, so that
 a program thread waiting for its CPU waits at most a step.
 
-**DataFusion: the yields cost the peak.** `dftrace.py`, 20 runs each:
+**DataFusion: the yields cost the peak, and were taken out** (they are gone from the
+branch's last commit). `dftrace.py`, 20 runs each:
 
 | build | peak RssAnon, runs over 880 MiB | thread run-queue wait a run, median | thread's involuntary switches a run |
 |---|---:|---:|---:|

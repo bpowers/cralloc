@@ -142,7 +142,6 @@ struct Sleeps {
     waits: AtomicU64,
     timed: AtomicU64,
     wakes: AtomicU64,
-    yields: AtomicU64,
     /// The low half of the word the last timed wait expected, plus one; zero for none.
     expected: AtomicU64,
     /// The last wait found the word as it expected, as a futex that sleeps does, and no wake
@@ -268,7 +267,6 @@ impl<S: Shape> SimOs<S> {
                 waits: AtomicU64::new(0),
                 timed: AtomicU64::new(0),
                 wakes: AtomicU64::new(0),
-                yields: AtomicU64::new(0),
                 expected: AtomicU64::new(0),
                 blocked: core::sync::atomic::AtomicBool::new(false),
                 fences: AtomicU64::new(0),
@@ -305,11 +303,6 @@ impl<S: Shape> SimOs<S> {
     /// wake or its timeout, and no [`Os::wake`] has come since.
     pub fn blocked(&self) -> bool {
         self.sleeps.blocked.load(Ordering::SeqCst)
-    }
-
-    /// How many [`Os::yield_cpu`] calls there have been.
-    pub fn yields(&self) -> u64 {
-        self.sleeps.yields.load(Ordering::Acquire)
     }
 
     /// How many [`Os::fence_all`] calls have succeeded.
@@ -803,13 +796,6 @@ unsafe impl<S: Shape> Os for SimOs<S> {
     fn wake(&self, _: &core::sync::atomic::AtomicU64) {
         self.sleeps.blocked.store(false, Ordering::SeqCst);
         self.sleeps.wakes.fetch_add(1, Ordering::AcqRel);
-    }
-
-    fn yield_cpu(&self) {
-        self.sleeps.yields.fetch_add(1, Ordering::AcqRel);
-        // Where another thread could take the CPU, the interleaving checker may switch.
-        #[cfg(test)]
-        crate::front::check::switch_point();
     }
 
     fn more_than_one_thread(&self, forked: bool) -> bool {
