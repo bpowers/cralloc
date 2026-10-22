@@ -173,6 +173,15 @@ pub fn loadavg() -> [f64; 3] {
     [it.next().unwrap_or(0.0), it.next().unwrap_or(0.0), it.next().unwrap_or(0.0)]
 }
 
+/// This process's limit on address space (`RLIMIT_AS`), if it is finite. Every process the
+/// runner starts inherits it.
+pub fn address_space_limit() -> Option<u64> {
+    let mut l = libc::rlimit { rlim_cur: 0, rlim_max: 0 };
+    // SAFETY: getrlimit writes one rlimit.
+    let ok = unsafe { libc::getrlimit(libc::RLIMIT_AS, &mut l) } == 0;
+    (ok && l.rlim_cur != libc::RLIM_INFINITY).then_some(l.rlim_cur)
+}
+
 pub fn read_trim(path: &str) -> String {
     std::fs::read_to_string(path).map(|s| s.trim().to_string()).unwrap_or_default()
 }
