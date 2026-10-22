@@ -1,0 +1,63 @@
+diff --git a/crates/asmalloc/src/depot/slow.rs b/crates/asmalloc/src/depot/slow.rs
+index 1603cba..1253d84 100644
+--- a/crates/asmalloc/src/depot/slow.rs
++++ b/crates/asmalloc/src/depot/slow.rs
+@@ -58,6 +58,7 @@ use crate::classes::{SmallClass, is_marker};
+ use crate::front::{Cpu, Field, Routines, Spare, StoreIfEqual};
+ use crate::os::Os;
+ use core::ptr::{self, NonNull};
++use core::sync::atomic::AtomicPtr;
+ use core::sync::atomic::Ordering::{Acquire, Relaxed};
+ 
+ /// What a swap that may leave its magazine half full did (`centre_for_alloc`,
+@@ -225,6 +226,9 @@ impl<'a, O: Os, R: Routines, S: Source> Cache<'a, O, R, S> {
+                 to.store(from.load(Relaxed), Relaxed);
+             }
+         }
++        if let Some(filled) = slots.get(..level) {
++            interleave(class.size(), filled);
++        }
+         magazine.set_level(level);
+         level
+     }
+@@ -580,3 +584,40 @@ impl<'a, O: Os, R: Routines, S: Source> Cache<'a, O, R, S> {
+         self.to_depot(class, magazine);
+     }
+ }
++
++/// SCRATCH (spawn-gap experiment, not for merging): reorders a freshly filled magazine so
++/// that objects popped one after another lie a stride of slots apart, the stride being the
++/// slots a cache line covers, within units of 64 strides. The magazine pops from its top
++/// (`filled[len - 1]` first), and the fill left it in ascending address order from there.
++fn interleave(size: usize, filled: &[AtomicPtr<u8>]) {
++    if size >= 64 {
++        return;
++    }
++    // Objects `stride` slots apart share no line: a size that divides 64 sits inside lines, so
++    // 64 / size is enough; any other straddles, and needs a gap of a line between them.
++    let stride = if 64 % size == 0 { 64 / size } else { 64usize.div_ceil(size) + 1 };
++    let unit = 64 * stride;
++    let len = filled.len();
++    let mut buf = [ptr::null_mut::<u8>(); 1024];
++    if len > buf.len() {
++        return;
++    }
++    // Pop order k = 0.. is filled[len - 1 - k].
++    for (k, b) in buf.iter_mut().take(len).enumerate() {
++        *b = filled[len - 1 - k].load(Relaxed);
++    }
++    let mut k = 0;
++    let mut start = 0;
++    while start < len {
++        let l = unit.min(len - start);
++        for r in 0..stride {
++            let mut i = r;
++            while i < l {
++                filled[len - 1 - k].store(buf[start + i], Relaxed);
++                k += 1;
++                i += stride;
++            }
++        }
++        start += l;
++    }
++}
