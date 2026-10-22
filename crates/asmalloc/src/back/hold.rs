@@ -53,16 +53,33 @@
 //! held large slots at its second round, while in a busy program `maintain` holds them as the
 //! heartbeats do.
 //!
+//! **The thread.** While the background thread runs, the looks are its work (design:
+//! "Heartbeat"). Heartbeats still step the fine count, which is how the hold keeps its time,
+//! and take no look. The thread foresees its next look: after its looks it plans
+//! ([`Back::plan_hold`]) the fine count at which the soonest stamp not yet held for a hold will
+//! have been, and stores it in [`Hold::next`]; the heartbeat whose reading steps the count to
+//! it wakes the thread. Counted steps, not a timer: the count moves only with readings, so a
+//! hold measured in its steps cannot be foreseen in wall time, and in a silence, where no
+//! heartbeat steps it, no hold matures and nothing wakes the thread for one (`maintain`'s
+//! rounds return what a silence leaves). What the thread cannot foresee is told to it: a free
+//! that stamps a region when no look is planned sets one a hold ahead, and an add that takes
+//! free large memory over the floor, when the thread planned under it ([`NEXT_LEVEL`]), sets
+//! one at once. A planned look a free's stamp has since moved wakes the thread for nothing,
+//! and it plans again; a stamp already held that the look left (nothing in it could be
+//! returned) does not set the plan, and waits for the next look the thread takes for another
+//! reason, as a heartbeat's look would have left it.
+//!
 //! **How long.** One hold for every large class, [`HOLD_STEPS`]. A hold that adapted per
 //! class (doubling when a slot was claimed soon after the hold purged its region, halving on
 //! the clock) held DataFusion's peak at the same level for 9% more faults, so it was not kept
 //! (`docs/research/large-hold.md`).
 //!
-//! **The words.** The fine count, and the count of the last look and the walk's position, on
-//! the hold's line in the back end's state. A stamp per large-class region, in the header line
-//! of its metadata block, which large allocations and frees read already (`layout`): a free
-//! loads the fine count and its region's stamp, and stores the stamp only when it differs, so
-//! once per region per fine step at most. A small class's region has no stamp. All of these
+//! **The words.** The fine count, the count of the last look, the walk's position and the
+//! thread's next look, on the hold's line in the back end's state. A stamp per large-class
+//! region, in the header line of its metadata block, which large allocations and frees read
+//! already (`layout`): a free loads the fine count and its region's stamp, and writes the stamp
+//! only when it differs, so once per region per fine step at most, and then loads the
+//! thread's next look. A small class's region has no stamp. All of these
 //! are hints. A stale stamp, a lost look or a lost position returns a slot early or late, never
 //! one in use, because a purge is a claim (`region::purge_unit`); a fork that leaves a look
 //! half done leaves nothing the next step does not take up. Stamps compare with the fine count
@@ -83,7 +100,7 @@ use super::tree::Host;
 use super::word::Word;
 use crate::os::Os;
 use crate::space::{Geometry, RegionId, RegionTag};
-use core::sync::atomic::Ordering::Relaxed;
+use core::sync::atomic::Ordering::{Relaxed, SeqCst};
 use core::sync::atomic::{AtomicU32, AtomicU64};
 
 /// The fine count: its value in the high 32 bits, and the counted time of its last step in
@@ -140,14 +157,21 @@ impl Fine {
         (self.word.load(Relaxed) >> 32) as u32
     }
 
-    /// Advances the count for a reading of the counted time `time` (at most one step).
-    fn note(&self, time: u64) {
+    /// Advances the count for a reading of the counted time `time` (at most one step). Returns
+    /// the new count if this reading stepped it.
+    fn note(&self, time: u64) -> Option<u32> {
         let seen = self.word.load(Relaxed);
-        if let Some(next) = fine_read(seen, time) {
-            // A failure means another reader stepped or re-stamped, which is the same reading
-            // or a later one: nothing to retry.
-            let _ = self.word.compare_exchange(seen, next, Relaxed, Relaxed);
-        }
+        let next = fine_read(seen, time)?;
+        // A failure means another reader stepped or re-stamped, which is the same reading or a
+        // later one: nothing to retry. Sequentially consistent, as the reader that steps the
+        // count then reads the thread's word, and the thread marks its word before it reads
+        // the count (`crate::thread_word`, "Sleeping"); on x86-64 the same locked instruction.
+        let stepped = self
+            .word
+            .compare_exchange(seen, next, SeqCst, Relaxed)
+            .is_ok()
+            && next >> 32 != seen >> 32;
+        stepped.then_some((next >> 32) as u32)
     }
 }
 
@@ -165,6 +189,33 @@ pub(crate) struct Hold {
     maintained: AtomicU64,
     /// The fine count at the first look of `maintain`'s latest round, plus one; zero for none.
     maintain_looked: AtomicU32,
+    /// When the background thread should look next (see the module documentation, "The
+    /// thread"): [`NEXT_AT`] with the fine count in the low half, [`NEXT_LEVEL`], or zero.
+    next: AtomicU64,
+}
+
+/// In [`Hold::next`], with a fine count in the low half: the step of the count that reaches it
+/// wakes the thread for a look.
+const NEXT_AT: u64 = 1 << 32;
+/// [`Hold::next`]: free large memory was at or under the floor when the thread planned, so no
+/// hold can return anything; a crossing of an add over the floor sets a look at once.
+const NEXT_LEVEL: u64 = 1 << 33;
+
+/// Whether the step of the fine count to `count` reaches the look `next` sets.
+const fn reached(next: u64, count: u32) -> bool {
+    next & NEXT_AT != 0 && count.wrapping_sub(next as u32) as i32 >= 0
+}
+
+/// Of a look `armed` that a free or a crossing set and one the thread `planned`, the one that
+/// comes first; zero is no look.
+const fn sooner(armed: u64, planned: u64) -> u64 {
+    if armed & NEXT_AT == 0 {
+        planned
+    } else if planned & NEXT_AT == 0 || ((planned as u32).wrapping_sub(armed as u32) as i32) > 0 {
+        armed
+    } else {
+        planned
+    }
 }
 
 impl Hold {
@@ -175,6 +226,7 @@ impl Hold {
             at: AtomicU32::new(0),
             maintained: AtomicU64::new(0),
             maintain_looked: AtomicU32::new(0),
+            next: AtomicU64::new(0),
         }
     }
 }
@@ -253,23 +305,127 @@ impl<O: Os> Back<'_, O> {
             return;
         };
         let word = host.meta(region, at);
-        let stamp = stamp_of(self.state.hold.fine.count());
-        if word.load() != stamp {
-            word.store(stamp);
+        let count = self.state.hold.fine.count();
+        let stamp = stamp_of(count);
+        let seen = word.load();
+        // A compare-and-swap, not a store, and the thread's next look read after it: the
+        // thread's plan clears that look and then reads the stamps, so one of the two sees the
+        // other's write (`plan_hold`). A failure is another free's stamp, which arms the look.
+        if seen != stamp && word.compare_exchange(seen, stamp).is_ok() {
+            self.hold_arm(count);
+        }
+    }
+
+    /// Sets the thread's next look a hold after fine count `count`, for a free that stamped a
+    /// region then, if the thread's plan knew of no stamp to wait for. A load from the hold's
+    /// line, which the stamp read already, and a compare-and-swap only from no look.
+    fn hold_arm(&self, count: u32) {
+        let next = &self.state.hold.next;
+        if next.load(SeqCst) == 0 {
+            let at = NEXT_AT | u64::from(count.wrapping_add(HOLD_STEPS));
+            let _ = next.compare_exchange(0, at, SeqCst, Relaxed);
+        }
+    }
+
+    /// Sets the thread's next look at once, for an add that has just taken free large memory
+    /// over the floor, if the thread's plan was made under it, or knew of no stamp to wait for.
+    pub(super) fn hold_level(&self) {
+        let hold = &self.state.hold;
+        let seen = hold.next.load(SeqCst);
+        if seen == NEXT_LEVEL || seen == 0 {
+            let at = NEXT_AT | u64::from(hold.fine.count());
+            let _ = hold.next.compare_exchange(seen, at, SeqCst, Relaxed);
         }
     }
 
     /// A heartbeat's part of the hold: advances the fine count for the reading of the counted
     /// time `time`, and takes the look if the count has moved since the last one (or that one
-    /// left more to do). Between steps, two loads from the hold's line.
-    pub(super) fn hold_beat(&self, time: u64) {
+    /// left more to do). Between steps, two loads from the hold's line. Says what the look
+    /// returned, and whether it stopped at its bound with more to return.
+    pub(super) fn hold_beat(&self, time: u64) -> PassStep {
         let hold = &self.state.hold;
         hold.fine.note(time);
         let count = hold.fine.count();
         if hold.looked.load(Relaxed) == count {
-            return;
+            return PassStep::default();
         }
-        self.hold_take_look(count, |back| Reach::beat(back.space.plan().geometry()));
+        self.hold_take_look(count, |back| Reach::beat(back.space.plan().geometry()))
+    }
+
+    /// A slow path's part of the hold while the background thread returns memory: advances
+    /// the fine count for the reading `time`, and says whether this reading's step reached the
+    /// thread's next look. Two loads from the hold's line, and the second only on a step.
+    pub(super) fn hold_note(&self, time: u64) -> bool {
+        let hold = &self.state.hold;
+        hold.fine
+            .note(time)
+            .is_some_and(|count| reached(hold.next.load(SeqCst), count))
+    }
+
+    /// Whether the thread's next look is due at the reading `time`, which may step the count:
+    /// the thread's own last look before it sleeps.
+    pub(super) fn hold_due(&self, time: u64) -> bool {
+        let hold = &self.state.hold;
+        hold.fine.note(time);
+        reached(hold.next.load(SeqCst), hold.fine.count())
+    }
+
+    /// The background thread's plan for the hold, after its looks: when it should look next
+    /// (see the module documentation, "The thread"). Clears the look first and reads the
+    /// stamps after, and a free stamps and then arms the look, so a stamp this plan misses
+    /// arms its own; and keeps whichever comes first of what it planned and what was armed
+    /// meanwhile.
+    pub(crate) fn plan_hold(&self) {
+        let hold = &self.state.hold;
+        hold.next.swap(0, SeqCst);
+        let planned = if self.retained_large() <= allowance_floor(self.space.plan().geometry()) {
+            NEXT_LEVEL
+        } else {
+            let count = hold.fine.count();
+            self.hold_pending(count)
+                .map_or(0, |steps| NEXT_AT | u64::from(count.wrapping_add(steps)))
+        };
+        let mut seen = 0;
+        loop {
+            let next = sooner(seen, planned);
+            if next == seen {
+                return;
+            }
+            match hold.next.compare_exchange(seen, next, SeqCst, SeqCst) {
+                Ok(_) => return,
+                Err(now) => seen = now,
+            }
+        }
+    }
+
+    /// The fine steps from `count` until the soonest stamp of a large class's region that has
+    /// not been held for [`HOLD_STEPS`] yet has been, if any. A stamp held already is the
+    /// look's to take, or to leave, when the next look comes for another reason.
+    fn hold_pending(&self, count: u32) -> Option<u32> {
+        let plan = self.space.plan();
+        (0..self.walk_regions())
+            .filter_map(|index| {
+                let region = plan.region(index)?;
+                let RegionTag::Class(class) = self.state.table.get(region) else {
+                    return None;
+                };
+                if class.is_small() {
+                    return None;
+                }
+                let host = self.host(class)?;
+                let stamp = host.meta(region, host.layout().hold_word()?).load();
+                (stamp != 0).then_some(())?;
+                let age = count.wrapping_sub(stamp as u32);
+                if age < HOLD_STEPS {
+                    Some(HOLD_STEPS - age)
+                } else if age.wrapping_neg() <= HOLD_STEPS {
+                    // Ahead of the count: a free that read the count after it stepped.
+                    Some(HOLD_STEPS + age.wrapping_neg())
+                } else {
+                    None
+                }
+            })
+            .min()
     }
 
     /// One of `maintain`'s steps of the hold: reads the counted time through `now`, which may

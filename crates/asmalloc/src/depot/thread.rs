@@ -1,6 +1,18 @@
 //! The depot's side of the background thread's word (`crate::thread_word`): the slow path's
 //! look at the word, and the thread's decision to sleep or park (design: "Heartbeat").
 //!
+//! **Returning memory.** While the thread is awake or parked, returning memory to the OS is
+//! its work and not a slow path's. A slow path loads the word once, after its exchange and its
+//! count and before its heartbeat's chores, and the heartbeat's purge reads whose duty it is
+//! from that snapshot (`Source::purge_step`): where it is the thread's, the heartbeat keeps the
+//! clocked rules' readings and takes no purge step, and if a reading made work due that the
+//! thread does, looks at the word afresh and wakes the thread if it sleeps
+//! ([`Cache::rouse_thread`]). The
+//! thread takes the steps slow paths would have taken, the same bounded steps under the same
+//! rules, until none would do more ([`Cache::thread_steps`]), plans when it next has to look,
+//! and sleeps until then or its timeout ([`Cache::begin_sleep`]). The memory it returns is work
+//! for the rule below, as a round's is.
+//!
 //! **When the thread parks.** Its rules act on what one interval or several left unused, so a
 //! round that finds nothing does not show that the next will: a slab drained in one interval
 //! is shed in the next, what was shed is purged when its frontier has aged, and scattered
@@ -118,6 +130,55 @@ impl<O: Os, R: Routines, S: Source> Cache<'_, O, R, S> {
         self.source
             .thread()
             .attend(self.os(), self.thread_process())
+    }
+
+    /// The cold look of a slow path whose heartbeat made work due that the thread does: wakes
+    /// the thread if it sleeps, and says whether a thread of this process will do the work
+    /// (`ThreadWord::rouse`).
+    #[cold]
+    #[inline(never)]
+    pub(super) fn rouse_thread(&self) -> bool {
+        self.source.thread().rouse(self.os(), self.thread_process())
+    }
+
+    /// What the thread does after a round, while it runs: the purge steps that slow paths
+    /// leave to it, until none would do more, and then its plan for when it next has to look.
+    /// Whether they returned memory, which is work for the rule that parks it.
+    pub fn thread_steps(&self) -> bool {
+        let counted = self.source.clock();
+        let now = || counted.now(self.os());
+        let mut returned = false;
+        loop {
+            let step = self.source.thread_step(&now);
+            returned |= step.returned;
+            if !step.more {
+                break;
+            }
+        }
+        self.source.plan_thread();
+        returned
+    }
+
+    /// The thread's timed sleep, before it waits: marks its word asleep, then looks once more
+    /// for work that came due meanwhile, a round of `maintain` or a purge (see
+    /// `crate::thread_word`, "Sleeping"). Returns the word to wait on, or `None` if there is
+    /// work now, having taken the mark back.
+    pub fn begin_sleep(&self, key: u64) -> Option<Snapshot> {
+        let word = self.source.thread();
+        let asleep = word.begin_sleep(key);
+        let counted = self.source.clock();
+        let now = || counted.now(self.os());
+        if !counted.round_done(self.os()) || self.source.thread_due(&now) {
+            word.end_sleep(key);
+            return None;
+        }
+        Some(asleep)
+    }
+
+    /// The thread's back-out from a sleep, once it wakes: takes its mark back, if a waker has
+    /// not.
+    pub fn end_sleep(&self, key: u64) {
+        self.source.thread().end_sleep(key);
     }
 
     /// This process's generation as the thread's word keys it, readying the magazine area if

@@ -99,6 +99,17 @@
 //! frees and reuses the same classes never grows and never purges on its own traffic; one that
 //! frees class X and then grows class Y purges X as Y grows.
 //!
+//! **While the background thread runs** (design: "Heartbeat"), returning memory is its work.
+//! A heartbeat takes no step of a pass, no look of the hold and no payment
+//! ([`Back::heartbeat_for`]): it keeps the readings the clocked rules count time by, and wakes
+//! the thread when one of them makes a pass due or reaches the hold's next look. The debt is a
+//! count any slow path adds to and the thread pays down: once a step of growth, the grower
+//! wakes the thread if retained memory is over the cap, or drops the debt as a payment under the
+//! cap would; the thread takes the same steps a heartbeat would ([`Back::purge_steps`]) until
+//! none would do more. A grower that finds more than `policy::GROWTH_UNPAID_HUGE_PAGES` left
+//! unpaid by the growth before it pays a step itself, so that what the thread's lag can add
+//! to retained memory is bounded whatever the scheduler does.
+//!
 //! A claim that makes purged pages resident again is reuse, not growth, though it raises
 //! resident memory as growth does. Charging it made the allocator chase its own tail: with
 //! free memory over the cap, a purge of memory about to be reused caused a refault, which
@@ -147,7 +158,7 @@ use super::policy::{
     DECAY_TICKS, PURGE_ANY_RUN_EVERY, PURGE_CAP_WORDS, PURGE_MAINTAIN_STEP_PAGES,
     PURGE_MAINTAIN_STEP_WORDS, PURGE_MAX_RUN_PAGES, PURGE_MAX_RUN_WORDS, PURGE_MIN_RUN_PAGES,
     PURGE_STEP_PAGES, PURGE_STEP_WORDS, allowance_floor, decay_goal, growth_goal, growth_step,
-    retained_cap,
+    growth_unpaid, retained_cap,
 };
 use super::region::{self, Purge};
 use super::tree::Host;
@@ -155,6 +166,7 @@ use super::word::{BITS, Word};
 use crate::classes::Class;
 use crate::os::Os;
 use crate::space::{RegionId, RegionTag};
+use crate::thread_word::{Duty, Snapshot};
 use core::sync::atomic::Ordering::{Acquire, Relaxed, Release, SeqCst};
 
 /// The decay word's low bit: a pass is under way. The rest is the time the pass began, or the
@@ -324,9 +336,16 @@ impl<O: Os> Back<'_, O> {
             // crosses an eighth of the floor looks at the whole count, and over the floor asks
             // a slow path to look at the level (`crate::thread_word`).
             // Every space is made on the OS's geometry, so the step is a constant.
-            let step = const { allowance_floor(O::GEOMETRY) / 8 };
-            if crate::thread_word::crosses(old, bytes, step) && self.over_floor() {
-                self.state.thread.raise_level();
+            let floor = const { allowance_floor(O::GEOMETRY) };
+            if crate::thread_word::crosses(old, bytes, floor / 8) {
+                // The hold's floor is on large memory alone: a crossing that takes it over
+                // tells the background thread, if its plan for the hold waited for that.
+                if !class.is_small() && self.retained_large() > floor {
+                    self.hold_level();
+                }
+                if self.over_floor() {
+                    self.state.thread.raise_level();
+                }
             }
         }
     }
@@ -340,41 +359,76 @@ impl<O: Os> Back<'_, O> {
         }
     }
 
-    /// Charges `bytes` that a fill or a large allocation has just carved to the growth debt; once the debt is a step, takes it and purges as much, or what is over
-    /// the cap if that is less. The caller holds its slots by now, so the walk cannot take
-    /// them.
+    /// Charges `bytes` that a fill or a large allocation has just carved to the growth debt; once
+    /// the debt is a step, takes it and purges as much, or what is over the cap if that is
+    /// less. The caller holds its slots by now, so the walk cannot take them.
     ///
     /// The add and the take are separate atomic steps, so two growers may both see a step:
     /// the first takes it, and the second takes what accrued since, under a step, and does
     /// nothing. The few bytes it drops cost one purge later.
+    ///
+    /// While the background thread runs, the debt is the thread's to pay ([`Back::growth_due`]),
+    /// and any slow path may add to it.
     #[inline]
     pub(super) fn grow(&self, bytes: usize) {
         if bytes == 0 {
             return;
         }
         let step = growth_step(self.space.plan().geometry());
-        let debt = self
-            .state
-            .growth
-            .fetch_add(bytes, Relaxed)
-            .wrapping_add(bytes);
-        if debt >= step {
-            self.pay_growth(step);
+        // Sequentially consistent: a grower that leaves the debt to the thread then reads the
+        // thread's word, and the thread sets its mark before it reads the debt
+        // (`crate::thread_word`, "Sleeping"). On x86-64 the add is the same locked instruction.
+        let old = self.state.growth.fetch_add(bytes, SeqCst);
+        if old.wrapping_add(bytes) >= step {
+            self.growth_due(old, bytes, step);
         }
     }
 
-    /// Takes the growth debt and purges toward it: `grow`'s rare part. Out of line, because
-    /// inlined into `alloc_at` it made the compiler keep the class's layout on the stack, and
-    /// every large allocation paid 19 more stores and 18 more loads for it (4% on a pipeline
-    /// of large objects; `docs/research/memory.md`, "Small heaps").
+    /// A step or more of growth is owed, after an add of `bytes` to a debt of `old`: `grow`'s
+    /// rare part. Where slow paths return memory, takes the debt and pays a step of it
+    /// ([`Back::pay_growth`]). While the background thread runs it is the thread's: once a
+    /// step of growth, when the add crosses a multiple of the step, the grower wakes the thread
+    /// if retained memory is over the cap, and otherwise drops the debt as a payment under the
+    /// cap would. Unless more than [`policy::GROWTH_UNPAID_HUGE_PAGES`] of growth was unpaid
+    /// before this add: then the thread has not run, and the grower pays a step itself, so that
+    /// the bound on retained memory does not rest on the scheduler (design: "Heartbeat").
+    /// Out of line, because inlined into `alloc_at` it made the compiler keep the class's
+    /// layout on the stack, and every large allocation paid 19 more stores and 18 more loads
+    /// for it (4% on a pipeline of large objects; `docs/research/memory.md`, "Small heaps").
+    ///
+    /// [`policy::GROWTH_UNPAID_HUGE_PAGES`]: super::policy::GROWTH_UNPAID_HUGE_PAGES
     #[cold]
     #[inline(never)]
-    fn pay_growth(&self, step: usize) {
+    fn growth_due(&self, old: usize, bytes: usize, step: usize) {
+        let thread = &self.state.thread;
         let geometry = self.space.plan().geometry();
-        let debt = self.state.growth.swap(0, Relaxed);
+        if thread.load().duty() == Duty::Slow {
+            let _ = self.pay_growth(step);
+        } else if old >= growth_unpaid(geometry) {
+            let _ = self.pay_growth(step);
+            // The thread is behind: what this step left owed is its to pay.
+            thread.rouse_any(self.space.os());
+        } else if crate::thread_word::crosses(old, bytes, step) {
+            if self.retained() > retained_cap(geometry) {
+                thread.rouse_any(self.space.os());
+            } else {
+                // What a payment under the cap does: takes the debt and returns nothing.
+                self.state.growth.swap(0, SeqCst);
+            }
+        }
+    }
+
+    /// Takes the growth debt and purges toward it: a step of at most `PURGE_STEP_PAGES`, and
+    /// the rest stays owed. Returns the bytes purged that had been resident.
+    #[cold]
+    #[inline(never)]
+    fn pay_growth(&self, step: usize) -> usize {
+        let geometry = self.space.plan().geometry();
+        let debt = self.state.growth.swap(0, SeqCst);
         let owed = growth_goal(debt, self.retained(), retained_cap(geometry), step);
-        // A payment runs on the slow path of the request that carved, so it returns at most
-        // what a heartbeat's step may: a carve of one large slot can owe tens of megabytes.
+        // A payment may run on the slow path of the request that carved, so it returns at most
+        // what a heartbeat's step may: a carve of one large slot can owe tens of megabytes. The
+        // background thread takes the same steps.
         let goal = owed.min(PURGE_STEP_PAGES as usize * geometry.page_size());
         // One circuit of the heap from wherever the shared walk stands, counted in regions
         // finished: the lap count says nothing here, since the walk may stand one region from
@@ -394,8 +448,9 @@ impl<O: Os> Back<'_, O> {
         // a heap over the cap by fragmentation would otherwise owe a walk that returns nothing
         // on every heartbeat until the debt ran out.
         if owed > goal && purged != 0 {
-            self.state.growth.fetch_add(owed - goal, Relaxed);
+            self.state.growth.fetch_add(owed - goal, SeqCst);
         }
+        purged
     }
 
     /// The regions the walk goes round: those below the highest ever given to a class.
@@ -435,36 +490,130 @@ impl<O: Os> Back<'_, O> {
         &self.state.decay.clock
     }
 
-    /// The maintenance a slow path does on its way out: one step of decay.
+    /// The maintenance a slow path of the back end's own does on its way out (a run's
+    /// allocation or free): a step of each purge, or, while the background thread runs, what
+    /// [`Back::heartbeat_for`] leaves a slow path, waking the thread for work that came due.
     pub fn heartbeat(&self) {
-        self.heartbeat_with(&|| self.now());
+        let thread = &self.state.thread;
+        if self.heartbeat_for(&|| self.now(), thread.load()) {
+            thread.rouse_any(self.space.os());
+        }
     }
 
-    /// [`Back::heartbeat`] for a caller that keeps its own reading of the clock: `now` is
-    /// called only when the step needs the time.
+    /// [`Back::heartbeat`] where slow paths return memory, for a caller that keeps its own
+    /// reading of the clock: `now` is called only when the step needs the time.
     pub fn heartbeat_with(&self, now: &dyn Fn() -> u64) {
+        let _ = self.purge_steps(now);
+    }
+
+    /// The purge part of a slow path's heartbeat, where `seen` is the background thread's word
+    /// as the slow path read it. Where slow paths return memory ([`Duty::Slow`]), one bounded
+    /// step of each purge ([`Back::purge_steps`]). While the thread runs, none: the readings
+    /// that keep the clocked rules' time, and whether this one made work due that the thread
+    /// does, for the caller to wake it (design: "Heartbeat"): a pass it started (an interval's
+    /// pass starts here, as it would where slow paths return memory, and the thread steps it),
+    /// or a step of the fine count that reached the hold's next look. Each of those happens
+    /// on one reading, and its write comes before the caller reads the thread's word afresh
+    /// (`crate::thread_word`, "Sleeping").
+    pub fn heartbeat_for(&self, now: &dyn Fn() -> u64, seen: Snapshot) -> bool {
+        match seen.duty() {
+            Duty::Slow => {
+                let _ = self.purge_steps(now);
+                false
+            }
+            Duty::Thread => self.note_for_thread(now),
+        }
+    }
+
+    /// One bounded step of each purge a heartbeat takes: the clocked pass (started if due),
+    /// the hold's look, and growth owed. What a slow path's heartbeat does where there is no
+    /// background thread, and what the thread does in a loop while it runs. Says whether
+    /// another call would do more now, and what it returned.
+    pub fn purge_steps(&self, now: &dyn Fn() -> u64) -> PassStep {
         // The hold's fine count steps on the reading the decay step makes between passes, so
         // that the hold reads the clock itself only while a pass is under way (`hold`).
         let read = core::cell::Cell::new(None);
-        let _ = self.decay_step(
+        let mut returned = 0;
+        let pass = self.decay_step_counting(
             &|| {
                 let time = now();
                 read.set(Some(time));
                 time
             },
             StepSize::HEARTBEAT,
+            &mut returned,
         );
-        self.hold_beat(read.get().unwrap_or_else(now));
-        // Growth a carve owed past what its own payment could take, a step at a time: the
-        // payment that keeps memory within the cap of what is live, spread over slow paths.
-        // Not while a clocked pass is under way: its goal, set when it began, already counts
-        // what is over the cap, and both paying it would take the count below the cap.
-        let step = growth_step(self.space.plan().geometry());
-        if self.state.decay.word.load(Relaxed) & ACTIVE == 0
-            && self.state.growth.load(Relaxed) >= step
-        {
-            self.pay_growth(step);
+        let hold = self.hold_beat(read.get().unwrap_or_else(now));
+        let (paid, owing) = self.pay_owed();
+        PassStep {
+            more: pass.is_some() || hold.more || owing,
+            returned: returned + hold.returned + paid,
         }
+    }
+
+    /// Growth a carve owed past what its own payment could take, a step at a time: the
+    /// payment that keeps memory within the cap of what is live. Not while a clocked pass is
+    /// under way: its goal, set when it began, already counts what is over the cap, and both
+    /// paying it would take the count below the cap. Returns what the step returned, and
+    /// whether a step is still owed.
+    fn pay_owed(&self) -> (usize, bool) {
+        let step = growth_step(self.space.plan().geometry());
+        let owed = || {
+            self.state.decay.word.load(SeqCst) & ACTIVE == 0
+                && self.state.growth.load(SeqCst) >= step
+        };
+        if !owed() {
+            return (0, false);
+        }
+        let paid = self.pay_growth(step);
+        (paid, owed())
+    }
+
+    /// A slow path's heartbeat while the background thread returns memory: the readings that
+    /// keep the clocked rules' time (the interval's number, the decay word's restamp, the
+    /// hold's fine count), and the start of a pass that is due, as a heartbeat starts one where
+    /// slow paths return memory (one with nothing over the floor is ended as it starts). Whether
+    /// this reading started a pass, or stepped the fine count to the hold's next look: work
+    /// for the thread. No bitmap is read and nothing is returned to the OS.
+    fn note_for_thread(&self, now: &dyn Fn() -> u64) -> bool {
+        let state = self.state;
+        let seen = state.decay.word.load(Acquire);
+        let time = now();
+        let mut started = false;
+        if seen & ACTIVE == 0 {
+            self.note_epoch(time);
+            match decay_look(seen, time) {
+                Decay::Restamp(word) => {
+                    let _ = state
+                        .decay
+                        .word
+                        .compare_exchange(seen, word, Release, Relaxed);
+                }
+                Decay::Start(word) => started = self.start_pass(seen, word),
+                _ => {}
+            }
+        }
+        self.hold_note(time) || started
+    }
+
+    /// Whether purge work is due that the background thread should do before it sleeps: growth
+    /// owed outside a clocked pass, a pass under way or due over the floor, or a step of the
+    /// fine count that reached the hold's next look. The thread's last look, after it marked
+    /// its word asleep (`crate::thread_word`, "Sleeping"): every read is sequentially
+    /// consistent, and the reading of the counted time may step the counts itself. A pass that
+    /// is under way but not yet published is its starter's to tell the thread about.
+    pub fn purge_due(&self, now: &dyn Fn() -> u64) -> bool {
+        let state = self.state;
+        let step = growth_step(self.space.plan().geometry());
+        let seen = state.decay.word.load(SeqCst);
+        if seen & ACTIVE == 0 && state.growth.load(SeqCst) >= step || self.pass_published() {
+            return true;
+        }
+        let time = now();
+        if matches!(decay_look(seen, time), Decay::Start(_)) && self.retained() > self.floor() {
+            return true;
+        }
+        self.hold_due(time)
     }
 
     /// The clocked pass the heartbeats of an interval would take, in one call: starts a pass
@@ -534,59 +683,9 @@ impl<O: Os> Back<'_, O> {
                 return None;
             }
             Decay::Start(word) => {
-                let retained = self.retained();
-                let floor = self.floor();
-                if retained <= floor {
-                    // A pass with nothing to do, ended as it starts, so that the heartbeats
-                    // of the next interval wait instead of reading the count: nothing is
-                    // retained, or no more than the floor, which is spent freely.
-                    let _ =
-                        state
-                            .decay
-                            .word
-                            .compare_exchange(seen, word & !ACTIVE, Release, Relaxed);
+                if !self.start_pass(seen, word) {
                     return None;
                 }
-                // The once-an-interval look at the level: while the heap stays over the floor,
-                // a slow path is asked to look at the background thread's word again, so that
-                // a start refused for a passing reason is tried again (`crate::thread_word`).
-                state.thread.raise_level();
-                if state
-                    .decay
-                    .word
-                    .compare_exchange(seen, word, Release, Relaxed)
-                    .is_err()
-                {
-                    return None;
-                }
-                let over = retained.saturating_sub(retained_cap(geometry));
-                // Stops at the floor, unless the cap asks for more.
-                let goal = decay_goal(geometry, retained)
-                    .min(retained - floor)
-                    .max(over);
-                // One pass in `PURGE_ANY_RUN_EVERY` takes runs of any length, counted by
-                // passes, not by the interval's number, which a pass that comes every other
-                // interval could miss for ever. The count is a hint: a lost update moves the
-                // pass that takes short runs by one.
-                let any = state
-                    .walk
-                    .passes
-                    .fetch_add(1, Relaxed)
-                    .wrapping_add(1)
-                    .is_multiple_of(PURGE_ANY_RUN_EVERY as u32);
-                // From where the walk stands: a pass that started at the top every time spent
-                // its goal on the regions above whatever a quiet program revived each interval,
-                // and never reached the free pages of the lowest regions. The pass word is
-                // written last and once: until then no stepper finds its tag and none acts.
-                let from = state.walk.purge_at.load(Relaxed);
-                state.walk.pass_from.store(from, Relaxed);
-                let pass = Pass {
-                    tag: Pass::tag_of(word),
-                    lap: state.walk.laps.load(Relaxed) as u16,
-                    pages: pages_of(goal, page),
-                    any,
-                };
-                state.walk.pass.store(pass.pack(), Release);
                 seen = word;
             }
             Decay::Step => {}
@@ -674,6 +773,76 @@ impl<O: Os> Back<'_, O> {
                 }
             }
         }
+    }
+
+    /// Starts the clocked pass that a decay word read as `seen` and a reading of the clock say
+    /// is due, storing `word` (`Decay::Start`), if anything over the floor is retained;
+    /// whether this call started it. A pass with nothing to do is ended as it starts, so that
+    /// the heartbeats of the next interval wait instead of reading the count.
+    fn start_pass(&self, seen: u64, word: u64) -> bool {
+        let state = self.state;
+        let geometry = self.space.plan().geometry();
+        let retained = self.retained();
+        let floor = self.floor();
+        if retained <= floor {
+            // Nothing is retained, or no more than the floor, which is spent freely.
+            let _ = state
+                .decay
+                .word
+                .compare_exchange(seen, word & !ACTIVE, Release, Relaxed);
+            return false;
+        }
+        // The once-an-interval look at the level: while the heap stays over the floor, a slow
+        // path is asked to look at the background thread's word again, so that a start refused
+        // for a passing reason is tried again (`crate::thread_word`).
+        state.thread.raise_level();
+        if state
+            .decay
+            .word
+            .compare_exchange(seen, word, Release, Relaxed)
+            .is_err()
+        {
+            return false;
+        }
+        let over = retained.saturating_sub(retained_cap(geometry));
+        // Stops at the floor, unless the cap asks for more.
+        let goal = decay_goal(geometry, retained)
+            .min(retained - floor)
+            .max(over);
+        // One pass in `PURGE_ANY_RUN_EVERY` takes runs of any length, counted by passes, not by
+        // the interval's number, which a pass that comes every other interval could miss for
+        // ever. The count is a hint: a lost update moves the pass that takes short runs by one.
+        let any = state
+            .walk
+            .passes
+            .fetch_add(1, Relaxed)
+            .wrapping_add(1)
+            .is_multiple_of(PURGE_ANY_RUN_EVERY as u32);
+        // From where the walk stands: a pass that started at the top every time spent its goal
+        // on the regions above whatever a quiet program revived each interval, and never
+        // reached the free pages of the lowest regions. The pass word is written last and once:
+        // until then no stepper finds its tag and none acts. Sequentially consistent, as a
+        // starter that leaves the pass to the background thread then reads the thread's word,
+        // and the thread marks its word before it reads this one (`crate::thread_word`,
+        // "Sleeping"): on x86-64 one exchange an interval.
+        let from = state.walk.purge_at.load(Relaxed);
+        state.walk.pass_from.store(from, Relaxed);
+        let pass = Pass {
+            tag: Pass::tag_of(word),
+            lap: state.walk.laps.load(Relaxed) as u16,
+            pages: pages_of(goal, geometry.page_size()),
+            any,
+        };
+        state.walk.pass.store(pass.pack(), SeqCst);
+        true
+    }
+
+    /// Whether a clocked pass is under way and published, so that a step of it would do
+    /// something: its decay word's tag is on the pass word.
+    fn pass_published(&self) -> bool {
+        let seen = self.state.decay.word.load(SeqCst);
+        seen & ACTIVE != 0
+            && Pass::unpack(self.state.walk.pass.load(SeqCst)).tag == Pass::tag_of(seen)
     }
 
     /// Whether the walk has gone once round since `pass` began: a lap has ended since, and the

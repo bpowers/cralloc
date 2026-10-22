@@ -215,6 +215,15 @@ impl Counted {
         );
     }
 
+    /// Whether the round of the interval the count is in is done, after a reading of the
+    /// counted time (which may step the count, and so open a round): what the background
+    /// thread looks at before it sleeps.
+    pub(crate) fn round_done<O: Os + ?Sized>(&self, os: &O) -> bool {
+        let _ = self.now(os);
+        let round = self.count().wrapping_add(1);
+        self.maintained.load(Relaxed) == round_word(round, DONE)
+    }
+
     /// Whether this call starts a round of `maintain`, for tests that run a round's parts by
     /// hand.
     #[cfg(test)]

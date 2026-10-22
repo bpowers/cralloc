@@ -21,7 +21,8 @@
 //! - [`Back::alloc_run`] and `Back::free_run` serve objects bigger than a region as runs of
 //!   whole regions. [`Back::lookup`] and [`Back::usable_size`] find what an address is.
 //! - [`Back::heartbeat`] does one bounded step of the clocked pass that returns free memory to
-//!   the OS, and [`Back::trim`] returns everything it can. Fills and large allocations that
+//!   the OS (or, while the background thread runs, wakes the thread for it), and [`Back::trim`]
+//!   returns everything it can. Fills and large allocations that
 //!   carve purge toward the retained cap (`purge`); a free purges nothing but a
 //!   large slot advised for huge pages, and that only past the budget for kept grown blocks
 //!   (`policy::KEPT_GROWN_HUGE_PAGES`).
