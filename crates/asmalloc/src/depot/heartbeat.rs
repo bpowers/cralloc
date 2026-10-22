@@ -34,7 +34,9 @@
 //! - **Age limit** (`age.rs`). A look at one class of the CPU's own slab, the classes in turn,
 //!   which takes and launders the magazine loaded there if it has been loaded for an interval,
 //!   or launders one full spare of a class with nothing loaded.
-//! - **Purge.** One [`Source::purge_step`].
+//! - **Purge.** One [`Source::purge_step`]: a step of returning memory, or, while the
+//!   background thread runs, only the readings that keep its rules' time and a wake for work
+//!   they made due (`thread`).
 //! - **Idle check.** Each slow path on a CPU moves that CPU's activity counter, and every
 //!   [`LOOK_EVERY`]th heartbeat looks at one other CPU's slab, chosen from the count of
 //!   heartbeats, so that a CPU's looks go round every CPU number a slow path has run on. A
@@ -406,30 +408,27 @@ impl<O: Os, R: Routines, S: Source> Cache<'_, O, R, S> {
         }
     }
 
-    /// The chores of a large allocation or free's heartbeat that [`lone_count`] found due,
-    /// then the look at the background thread's word that ends every slow path.
+    /// The look at the background thread's word that every slow path makes, then the chores of
+    /// a large allocation or free's heartbeat that [`lone_count`] found due.
     pub fn lone_beat(&self, turn: LoneTurn) {
         self.begin_slow_path();
+        // After the count, which `lone_count` made: see `thread`, "Parking without losing a
+        // wake-up". Before the chores, which read whose duty it is to return memory from it.
+        self.after_slow_path();
         let chores = Chores {
             cpu: turn.cpu,
             ..Chores::default()
         };
         self.beat(None, chores, turn.turn);
-        self.after_slow_path();
     }
 
-    /// What follows a slow path that served `served`, if it served a small class: its own
-    /// duties, and the heartbeat's chores when its CPU's activity has passed a multiple of
-    /// [`BEAT_BYTES`]. A thread with no valid CPU has no counter, and beats every time.
+    /// What follows a slow path that served `served`, if it served a small class: the look at
+    /// the background thread's word, its own duties, and the heartbeat's chores when its CPU's
+    /// activity has passed a multiple of [`BEAT_BYTES`]. A thread with no valid CPU has no
+    /// counter, and beats every time.
     pub(super) fn heartbeat(&self, served: Option<SmallClass>, chores: Chores) {
-        self.paced(served, chores);
-        // After the call's exchange and its count: see `thread`, "Parking without losing a
-        // wake-up".
-        self.after_slow_path();
-    }
-
-    fn paced(&self, served: Option<SmallClass>, chores: Chores) {
         let Some(cpu) = chores.cpu else {
+            self.after_slow_path();
             return self.beat(served, chores, None);
         };
         // A call that installed no magazine (served straight from the source, or from the
@@ -438,13 +437,17 @@ impl<O: Os, R: Routines, S: Source> Cache<'_, O, R, S> {
             (0, Some(class)) => class.size(),
             (moved, _) => moved,
         };
-        match count(
+        let turn = count(
             self.depot,
             &self.routines,
             cpu,
             moved as u64,
             self.tuning.beat_shift,
-        ) {
+        );
+        // After the call's exchange and its count: see `thread`, "Parking without losing a
+        // wake-up". Before the chores, which read whose duty it is to return memory from it.
+        self.after_slow_path();
+        match turn {
             Some(turn) => self.beat(served, chores, Some(turn)),
             // A rule of this CPU's that an earlier call's budget turned away runs at its next
             // slow path, as the budget promises (`LAUNDER_BUDGET`), whatever the pace: it is once
@@ -540,7 +543,7 @@ impl<O: Os, R: Routines, S: Source> Cache<'_, O, R, S> {
             self.age_and_sweep(&chores, activity, looking, None, &clock);
         }
         if !chores.purged {
-            self.source.purge_step(&|| clock.now());
+            self.purge(&clock);
         }
         if generation::drains_enabled(self.depot) {
             match (chores.cpu, looking) {
@@ -562,6 +565,20 @@ impl<O: Os, R: Routines, S: Source> Cache<'_, O, R, S> {
         // shared stacks. What the budget leaves over a target the shed takes back later.
         let parked = self.overflowed.take();
         self.launder_overflow(parked, &clock, true);
+    }
+
+    /// The heartbeat's part in returning memory to the OS ([`Source::purge_step`]), by whoever
+    /// the background thread's word, as this slow path read it, says has that duty: a step
+    /// here, or, while the thread runs, a wake for work that came due. A word that turns out
+    /// to name no thread of this process (a fork child's, inherited) is made this process's,
+    /// and the step is taken here after all.
+    fn purge(&self, clock: &Clock<'_, O>) {
+        let seen = self.thread_seen.get();
+        if self.source.purge_step(&|| clock.now(), seen) && !self.rouse_thread() {
+            let _ = self
+                .source
+                .purge_step(&|| clock.now(), crate::thread_word::Snapshot(0));
+        }
     }
 
     /// The age limit's sweep step, or else its look at one class of the CPU's own slab: the

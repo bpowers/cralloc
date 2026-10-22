@@ -503,16 +503,20 @@ impl<'a, O: Os, R: Routines + Copy> Bound<'a, O, R> {
         }
     }
 
-    /// The background thread's life once started: rounds of `maintain` a step at a time, then
-    /// a sleep, or a park until a slow path wakes it (`depot::thread`). A dormant thread waits
-    /// until free memory is over the floor, and looks at the level itself each time before it
-    /// waits, so that a heap already over the floor when it was created does not wait for a
-    /// crossing that has passed. Never returns.
+    /// The background thread's life once started: rounds of `maintain` a step at a time, and
+    /// the purge steps slow paths leave to it while it runs, then a sleep, or a park until a
+    /// slow path wakes it (`depot::thread`). The sleep has a timeout, and a slow path wakes it
+    /// sooner for work that comes due (`crate::thread_word`, "Sleeping"). A dormant thread
+    /// waits until free memory is over the floor, and looks at the level itself each time
+    /// before it waits, so that a heap already over the floor when it was created does not
+    /// wait for a crossing that has passed. Never returns.
     pub(crate) fn run_thread(self, every_ns: u64) -> ! {
         let word = self.word();
         let os = self.heap.os();
         let mut seen = thread::Seen::default();
         let mut key = 0;
+        // Memory returned between rounds: work for the next round's count (`thread::Seen`).
+        let mut returned = false;
         loop {
             let now = word.load();
             let Some(back) = self.heap.started() else {
@@ -536,17 +540,7 @@ impl<'a, O: Os, R: Routines + Copy> Bound<'a, O, R> {
                 }
                 _ => {}
             }
-            let mut round = None;
-            while let Some(step) = cache.maintain_step_with_work() {
-                round = Some(round.unwrap_or(false) | step.work);
-                if !step.more {
-                    break;
-                }
-            }
-            match cache.rest(&mut seen, key, round) {
-                thread::Rest::Park => os.wait(word.futex(), key | thread_word::PARKED, None),
-                thread::Rest::Sleep => os.wait(word.futex(), word.load().0, Some(every_ns)),
-            }
+            cache.thread_turn(&mut seen, key, &mut returned, every_ns);
         }
     }
 

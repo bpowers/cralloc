@@ -4,16 +4,17 @@
 //! is a background thread"). Every slow path loads it once. The depot's side, the thread's
 //! decision to park, is `depot::thread`; the heap's, its creation, is `heap::background`.
 //!
-//! **The word.** Bits 0 to 3 are the state, bit 4 is [`LEVEL`], and the bits from
-//! [`KEY_SHIFT`] up are the generation's key: the random bits of the process generation
-//! (`depot::generation`), which lives on a page a forked child reads as zero. All zero is no
-//! thread, none wanted, no generation. The states:
+//! **The word.** Bits 0 to 3 are the state, bit 4 is [`LEVEL`], bit 5 is [`SLEEPING`], and the
+//! bits from [`KEY_SHIFT`] up are the generation's key: the random bits of the process
+//! generation (`depot::generation`), which lives on a page a forked child reads as zero. All
+//! zero is no thread, none wanted, no generation. The states:
 //!
 //! - [`NONE`]: no thread, and none wanted.
 //! - [`WANTED`]: free memory is over the floor of the allowance and the process has created a
 //!   thread of its own. A slow path that came through the Rust interface creates the thread
 //!   (`heap::background`); nothing else acts on it.
-//! - [`AWAKE`]: the thread runs rounds, and sleeps with a timeout between them.
+//! - [`AWAKE`]: the thread runs rounds, and sleeps with a timeout between them, with
+//!   [`SLEEPING`] set while it sleeps.
 //! - [`PARKED`]: the thread waits with no timeout; a slow path that finds it wakes the thread.
 //! - [`DORMANT`]: the preload library's thread, created when the program created its first
 //!   thread, waiting with no timeout until free memory is over the floor.
@@ -51,6 +52,31 @@
 //! an add looks at its own tally's old and new values only, and only one that crosses a
 //! multiple of an eighth of the floor reads the whole count: a shift and a compare on a call
 //! that was writing the line anyway.
+//!
+//! **Whose duty.** While a thread is awake or parked, returning memory is its work and not a
+//! slow path's (design: "Heartbeat"; [`Duty`]). A slow path reads that from the snapshot its
+//! one load took, whatever generation the word names: telling a fork child's inherited word
+//! from its own would take the generation, a second load. A fork child begins with no thread
+//! by construction instead: the draw of its generation, which every cold look at the word
+//! makes (a wake, [`ThreadWord::rouse`], above all), makes the word the child's `NONE`
+//! ([`ThreadWord::make_own`], `depot::generation`). Until the draw a child's slow paths leave
+//! work to a thread it does not have; the first time work comes due the draw happens and the
+//! slow path does the work after all. Growth and a pass that nobody steps have their own
+//! bounds besides (`back::purge`), which do not rest on any thread running.
+//!
+//! **Sleeping.** The thread sleeps with a timeout in state `AWAKE`, a futex wait on this word
+//! that only a wake interrupts. Before it waits it sets [`SLEEPING`] and looks once more for
+//! work that came due ([`ThreadWord::begin_sleep`]); whoever makes work due that the thread
+//! could not foresee (growth to pay for over the cap) or reaches a deadline the thread set
+//! (the next interval's pass, the hold's next look) clears the bit with a compare-and-swap and
+//! wakes it ([`ThreadWord::rouse`], [`ThreadWord::rouse_any`]). Each side writes before it
+//! reads: the thread the bit, then the state of the work; the waker the state of the work (a
+//! debt added, the counted clock stepped), then this word. Every one of those operations is
+//! sequentially consistent, so one of them sees the other's write: either the thread finds the
+//! work and does not wait, or the waker finds the bit and wakes it. The wake is a system call
+//! made once, by the waker that cleared the bit: under steady churn the bit is clear (the
+//! thread is working, or was woken already) and a slow path writes nothing. The bit is not in
+//! the slow path's mask, so a sleeping thread costs a slow path nothing.
 
 use crate::front::sync::{AtomicU64, core_u64};
 use crate::os::Os;
@@ -74,6 +100,10 @@ pub const PARKED: u64 = 8;
 const STATE: u64 = 0xf;
 /// Free memory may be over the floor: a slow path that knows the generation should look.
 pub const LEVEL: u64 = 0x10;
+/// The thread, `AWAKE`, sleeps with a timeout, and wants waking for work that comes due before
+/// it would wake. Set by the thread, cleared by whoever wakes it (see the module
+/// documentation). Not in the slow path's mask.
+pub const SLEEPING: u64 = 0x20;
 /// What sends a slow path to [`ThreadWord::attend`]: one mask, so one test.
 const ATTENTION: u64 = WANTED | PARKED | LEVEL;
 /// The generation's key starts here: a generation in marker form has its random bits above a
@@ -81,7 +111,21 @@ const ATTENTION: u64 = WANTED | PARKED | LEVEL;
 pub const KEY_SHIFT: u32 = crate::classes::MARKER_SHIFT;
 
 const _: () = assert!(STATE < 1 << KEY_SHIFT && LEVEL < 1 << KEY_SHIFT);
-const _: () = assert!(ATTENTION & (NONE | AWAKE | DORMANT | OFF) == 0);
+// The futex compares the word's low half, where every bit a waker changes must be.
+const _: () = assert!(SLEEPING < 1 << KEY_SHIFT && KEY_SHIFT < 32);
+const _: () = assert!(ATTENTION & (NONE | AWAKE | DORMANT | OFF | SLEEPING) == 0);
+const _: () = assert!(SLEEPING & (STATE | LEVEL) == 0);
+
+/// Who returns memory to the OS (design: "Heartbeat"): a slow path's heartbeat, a step of each
+/// purge at a time, or, while the background thread is awake or parked, the thread, which
+/// slow paths only wake.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Duty {
+    /// The slow paths, as when there is no thread.
+    Slow,
+    /// The background thread.
+    Thread,
+}
 
 /// The key of a generation in marker form (`depot::Generation::get`): its bits from
 /// [`KEY_SHIFT`] up, never zero for a generation.
@@ -150,6 +194,23 @@ impl Snapshot {
     pub const fn wanted(self) -> bool {
         self.state() == WANTED
     }
+
+    /// Whether the thread sleeps with a timeout and wants waking for work that comes due.
+    #[inline(always)]
+    pub const fn sleeping(self) -> bool {
+        self.0 & SLEEPING != 0
+    }
+
+    /// Who returns memory, as a slow path that does not know the generation reads it: the
+    /// thread while one is awake or parked, whatever generation the word names (see the module
+    /// documentation, "Whose duty").
+    #[inline(always)]
+    pub const fn duty(self) -> Duty {
+        match self.state() {
+            AWAKE | PARKED => Duty::Thread,
+            _ => Duty::Slow,
+        }
+    }
 }
 
 /// The thread's word.
@@ -165,10 +226,11 @@ impl ThreadWord {
         }
     }
 
-    /// One load of the word.
+    /// One load of the word. Sequentially consistent, as the wakers read it after making work
+    /// due (see the module documentation, "Sleeping"); on x86-64 a plain load all the same.
     #[inline(always)]
     pub fn load(&self) -> Snapshot {
-        Snapshot(self.word.load(Relaxed))
+        Snapshot(self.word.load(SeqCst))
     }
 
     /// The word, as the thread waits on it and a slow path wakes it (`Os::wait`, `Os::wake`).
@@ -226,7 +288,14 @@ impl ThreadWord {
                 NONE if seen.level() && os.more_than_one_thread(forked) => (WANTED, false),
                 state => (state, false),
             };
-            let next = Snapshot(key | state);
+            // A level does not wake a sleeping thread, and clearing it must not take its
+            // mark: a waker would then take the thread for working and leave it asleep.
+            let asleep = if state == AWAKE && seen.key() == key {
+                seen.0 & SLEEPING
+            } else {
+                0
+            };
+            let next = Snapshot(key | state | asleep);
             if next == seen {
                 // `WANTED` with nothing else, on a C slow path: no write, so the line every
                 // slow path reads stays shared.
@@ -313,6 +382,109 @@ impl ThreadWord {
             }
         }
         false
+    }
+
+    /// The thread's mark before a timed sleep: [`SLEEPING`] over its own `AWAKE`. Returns the
+    /// word to wait on: with the mark, or, if the word is not this thread's `AWAKE` (it has
+    /// been moved: a claim turned the default off after the thread's creation failed, say), as
+    /// it is, which a timed wait on it also handles.
+    pub fn begin_sleep(&self, key: u64) -> Snapshot {
+        let mut seen = self.load();
+        loop {
+            if seen.state_for(key) != AWAKE || seen.sleeping() {
+                return seen;
+            }
+            let next = Snapshot(seen.0 | SLEEPING);
+            match self.word.compare_exchange(seen.0, next.0, SeqCst, SeqCst) {
+                Ok(_) => return next,
+                Err(now) => seen = Snapshot(now),
+            }
+        }
+    }
+
+    /// The thread's back-out from a sleep: clears its own [`SLEEPING`] if a waker has not.
+    pub fn end_sleep(&self, key: u64) {
+        let mut seen = self.load();
+        while seen.sleeping() && seen.state_for(key) == AWAKE {
+            match self
+                .word
+                .compare_exchange(seen.0, seen.0 & !SLEEPING, SeqCst, SeqCst)
+            {
+                Ok(_) => return,
+                Err(now) => seen = Snapshot(now),
+            }
+        }
+    }
+
+    /// The cold look of a slow path that has just made work due that the thread does, or has
+    /// reached a deadline the thread set, for `process`: wakes the thread if it sleeps or is
+    /// parked, and says whether a thread of this process will do the work. A word that names
+    /// no thread of this process, as a fork child finds its parent's, is made this process's
+    /// `NONE`, keeping the level bit, and the caller does the work itself (see the module
+    /// documentation, "Whose duty"); so does a process with no generation, which has no thread.
+    #[cold]
+    #[inline(never)]
+    pub fn rouse<O: Os + ?Sized>(&self, os: &O, process: Process) -> bool {
+        let key = process.key;
+        if key == 0 {
+            return false;
+        }
+        let mut seen = Snapshot(self.word.load(SeqCst));
+        loop {
+            let (next, thread) = match seen.state_for(key) {
+                AWAKE if seen.sleeping() => (seen.0 & !SLEEPING, true),
+                AWAKE => return true,
+                PARKED => (key | AWAKE | (seen.0 & LEVEL), true),
+                _ if seen.key() != key && seen.0 & !LEVEL != 0 => (key | (seen.0 & LEVEL), false),
+                _ => return false,
+            };
+            match self.word.compare_exchange(seen.0, next, SeqCst, SeqCst) {
+                Ok(_) => {
+                    if thread {
+                        os.wake(self.futex());
+                    }
+                    return thread;
+                }
+                Err(now) => seen = Snapshot(now),
+            }
+        }
+    }
+
+    /// [`ThreadWord::rouse`] for a caller that does not know the generation (the back end):
+    /// wakes an awake thread that sleeps, whatever generation it belongs to. A parked thread
+    /// is left to the slow path's own look at the word, which follows. In a fork child whose
+    /// parent's thread slept, this wakes nobody and clears the parent's mark, once.
+    #[cold]
+    #[inline(never)]
+    pub fn rouse_any<O: Os + ?Sized>(&self, os: &O) {
+        let mut seen = Snapshot(self.word.load(SeqCst));
+        while seen.state() == AWAKE && seen.sleeping() {
+            match self
+                .word
+                .compare_exchange(seen.0, seen.0 & !SLEEPING, SeqCst, SeqCst)
+            {
+                Ok(_) => {
+                    os.wake(self.futex());
+                    return;
+                }
+                Err(now) => seen = Snapshot(now),
+            }
+        }
+    }
+
+    /// Makes a word that names another generation this one's `NONE`, keeping the level bit:
+    /// what a fork child does when it draws its generation, so that it begins with no thread.
+    pub fn make_own(&self, key: u64) {
+        let mut seen = self.load();
+        while seen.key() != key && seen.0 & !LEVEL != 0 {
+            match self
+                .word
+                .compare_exchange(seen.0, key | (seen.0 & LEVEL), SeqCst, SeqCst)
+            {
+                Ok(_) => return,
+                Err(now) => seen = Snapshot(now),
+            }
+        }
     }
 
     /// The thread's back-out: `AWAKE` over its own `PARKED`, if a slow path has not woken it
