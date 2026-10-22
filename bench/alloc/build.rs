@@ -44,6 +44,20 @@ fn main() {
     if chosen.is_empty() {
         println!("cargo:rustc-cfg=bench_system");
     }
+    // `benchrun layout`'s padN variants: N bytes of code that never runs, so that the code the
+    // linker places after it moves by exactly N (src/pad.rs). Unset or zero: no pad at all,
+    // the normal build.
+    println!("cargo:rerun-if-env-changed=BENCH_LAYOUT_PAD");
+    println!("cargo::rustc-check-cfg=cfg(bench_layout_pad)");
+    let pad: usize = std::env::var("BENCH_LAYOUT_PAD")
+        .ok()
+        .filter(|s| !s.is_empty())
+        .map(|s| s.parse().unwrap_or_else(|_| panic!("BENCH_LAYOUT_PAD={s} is not a number of bytes")))
+        .unwrap_or(0);
+    if pad > 0 {
+        println!("cargo:rustc-cfg=bench_layout_pad");
+        println!("cargo:rustc-env=BENCH_LAYOUT_PAD_BYTES={pad}");
+    }
     let need = |rel: &str| {
         let p = base.join(rel);
         assert!(p.exists(), "{} is missing; run bench/baselines/build.sh", p.display());

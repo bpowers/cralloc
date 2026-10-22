@@ -71,6 +71,21 @@ The variants move the allocator's code as well as the workload's, so a job that 
 sensitive in either; the profile says which. They are for this check only: the suite measures
 the normal build, which is what ships.
 
+**Comparing allocators on a placement-sensitive job.** `--layouts pads` builds five variants,
+`pad00` to `pad64`, in which a padding function of N bytes in bench-alloc moves all the code
+the linker places after it, the allocator's and the program's, by exactly N bytes and changes
+nothing else (`padN` takes any multiple of 16, written with two digits or more). With several
+allocators the summary also prints each one's mean and range over the layouts, and each
+against the first by the first layout's median (what single builds compare) and by the mean
+over the layouts. Run one round a session and combine the sessions with
+`probes/spawn-gap/padsweep.py`. The server jobs of `rpc-server` move by 2.5 to 5% this way
+(`docs/research/grpc-placement.md`, "How to read server jobs").
+
+```
+./target/release/benchrun layout --suite servers --only "=connect log grpc h2" \
+  --allocators asmalloc,jemalloc,tcmalloc-percpu --layouts pads --rounds 1
+```
+
 The baseline libraries and the raw results live in the main checkout, shared by every
 worktree: `bench/baselines/out` and `bench/results` there (the parent of
 `git rev-parse --git-common-dir`). `BENCH_BASELINES` and `BENCH_RESULTS` override them.

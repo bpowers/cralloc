@@ -326,9 +326,13 @@ impl<O: Os> State<O> {
     /// first heartbeat, the interval number would still be zero for them, and on a machine up
     /// for more than an interval the first reading steps the count past it: every class's
     /// first frontier would then read as an earlier interval's, and its next fill would open a
-    /// second run (`Filled::opens_run`). A heap is reserved once; the threads that start it
-    /// together each read the clock once.
+    /// second run (`Filled::opens_run`). Only a call that finds the heap not yet published
+    /// reads the clock, so it happens once a heap, or once for each thread that starts it
+    /// together with others.
     pub fn get_or_reserve(&self) -> Result<Back<'_, O>, OsError> {
+        if let Some(back) = self.get() {
+            return Ok(back);
+        }
         let back = self
             .cell
             .get_or_reserve()

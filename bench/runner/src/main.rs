@@ -144,8 +144,10 @@ fn build_cpus() -> String {
 
 /// Builds the workloads (`bench-workloads`, `bench-rpc`) with bench-alloc's `feature` ("" for
 /// glibc) into `target/<name>`. `rustflags`, when given, replaces whatever the environment
-/// sets, so that a layout variant is built with its own flags and nothing else.
-fn build_workloads(p: &Paths, name: &str, feature: &str, rustflags: Option<&str>) {
+/// sets, so that a layout variant is built with its own flags and nothing else. `pad` is the
+/// bytes of padding code a `padN` layout puts ahead of the allocator and the program; no other
+/// build gets any, whatever the environment says.
+fn build_workloads(p: &Paths, name: &str, feature: &str, rustflags: Option<&str>, pad: Option<usize>) {
     eprintln!("== building workloads for {name}");
     let mut c = Command::new("nice");
     c.args(["taskset", "-c", &build_cpus(), "cargo", "build", "--release", "-p", "bench-workloads", "-p", "bench-rpc"]);
@@ -155,6 +157,10 @@ fn build_workloads(p: &Paths, name: &str, feature: &str, rustflags: Option<&str>
     }
     if let Some(flags) = rustflags {
         c.env_remove("CARGO_ENCODED_RUSTFLAGS").env("RUSTFLAGS", flags);
+    }
+    c.env_remove("BENCH_LAYOUT_PAD");
+    if let Some(bytes) = pad {
+        c.env("BENCH_LAYOUT_PAD", bytes.to_string());
     }
     c.env("BENCH_BASELINES", &p.baselines);
     c.current_dir(&p.bench);
@@ -189,7 +195,7 @@ fn build(f: &Flags, p: &Paths) {
         }
     }
     for (name, feat) in &names {
-        build_workloads(p, name, feat, None);
+        build_workloads(p, name, feat, None, None);
     }
     let mut files: Vec<PathBuf> = asmalloc_builds(&names)
         .flat_map(|name| {
@@ -366,7 +372,9 @@ fn layout(f: &Flags, p: &Paths) {
         let _lock = paths::lock_baselines(&p.baselines).unwrap_or_else(|e| die(&e));
         let mut built: Vec<String> = Vec::new();
         for v in &variants {
-            let flags = layouts.iter().find(|l| v.layout.as_ref() == Some(&l.name)).map(|l| l.rustflags.as_str());
+            let chosen = layouts.iter().find(|l| v.layout.as_ref() == Some(&l.name));
+            let flags = chosen.map(|l| l.rustflags.as_str());
+            let pad = chosen.and_then(|l| l.pad);
             let mut want = Vec::new();
             if js.iter().any(|j| j.mode == suite::Mode::Native && run::runs_under(j, v)) {
                 want.push((v.build_name().expect("a native variant has a build"), v.feature.clone().unwrap()));
@@ -376,7 +384,7 @@ fn layout(f: &Flags, p: &Paths) {
             }
             for (name, feat) in want {
                 if !built.contains(&name) {
-                    build_workloads(p, &name, &feat, flags);
+                    build_workloads(p, &name, &feat, flags, pad);
                     built.push(name);
                 }
             }

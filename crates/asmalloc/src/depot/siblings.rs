@@ -3,8 +3,8 @@
 //! Objects of one class allocated one after another are the allocator's best evidence of
 //! siblings: instances of one type made in a loop. When different threads then write them,
 //! siblings that share a cache line take it from each other on every write. tokio allocates
-//! one 40-byte run-queue header per worker at start-up; packed side by side, they cost a gRPC
-//! server 3.6% of its cycles and the spawn jobs 15 to 18% (`docs/research/spawn-gap.md`).
+//! one 40-byte run-queue header per worker at start-up; packed side by side, they cost the
+//! spawn jobs 14% at four workers and 8% at eight (`docs/research/spawn-gap.md`).
 //!
 //! So a magazine whose fill does not continue a run of fills of its class
 //! ([`Filled::opens_run`](super::Filled)), the class's first fill of an interval, hands its

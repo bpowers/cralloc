@@ -1,4 +1,4 @@
-# Where code lands moves the gRPC server by 4%
+# Where code lands moves the gRPC server by 2.5 to 4%
 
 2026-10-22, branch `sibling-stride` (main `7a82ea4` and the branch's builds). Why
 `connect log grpc h2` ran from 3.9% below to 1.5% above main across builds of one allocator
@@ -7,23 +7,29 @@ built").
 
 ## Summary
 
-- **The cause is the service's protobuf decoder, not the allocator's code.** The slow builds
-  starve the front end: the dispatch slots the front end leaves empty account for the cycles,
-  and the extra op-cache misses, or at other placements the extra ops delivered by the
-  decoder, fall in buffa's generated view decoder (`LogRequestView::decode_view_with_ctx`,
-  `borrow_str`, `decode_varint`): over 90% of the difference. The allocator's code comes
-  earlier in the binary, so any change to its size moves the decoder.
-- **Forced, not correlated.** Builds of main identical except for a padding function of N
-  bytes ahead of everything else move all later code by exactly N. N = 0, 16, 32 and 48 ran
-  126.9, 127.1, 130.5 and 132.2k cycles a request, op-cache misses rising with them; N = 64 ran
-  132.4k, with misses back down and 5% more ops from the decoder instead. The property is the
-  decoder's address, with a period longer than a line: no single alignment decides it.
+- **Attributed to the service's protobuf decoder.** The slow builds starve the front end: the
+  dispatch slots the front end leaves empty account for the cycles, and the extra op-cache
+  misses, or at other placements the extra ops delivered by the decoder, fall in buffa's
+  generated view decoder (`LogRequestView::decode_view_with_ctx`, `borrow_str`,
+  `decode_varint`): over 90% of the difference in sampled events. That is where the samples
+  fall, not a forced result: the padding below moves all later code at once, the allocator's
+  included, and the decoder was not moved alone. The allocator's code comes earlier in the
+  binary, so any change to its size moves the decoder.
+- **The placement effect is forced, not correlated.** Builds of main identical except for a
+  padding function of N bytes ahead of everything else move all later code by exactly N.
+  N = 0, 16, 32 and 48 ran 126.9, 127.1, 130.5 and 132.2k cycles a request (4.2%), op-cache
+  misses rising with them; in a second session N = 0, 48 and 64 ran 129.2, 131.1 and 132.4k
+  (2.5%), the 64-byte shift with misses back down and 5% more ops from the decoder instead.
+  What decides it has a period longer than a line: no single alignment does.
 - **Nothing to pin in our code.** The sensitive code is not ours, and 64-byte function
   alignment would only hide the sub-line shifts (the 64-byte shift is slow too).
-- **How to read the job.** One build's number stands for any point in a range of about 4%
+- **How to read the job.** One build's number stands for any point in a range of 2.5 to 5%
   (126.9 to 132.4k here), and the same binary drifts about 2% between sessions. A comparison
-  of two builds on this job needs several placements of each (below), or one binary that
-  switches the behaviour at run time.
+  of two builds on this job needs several placements of each (`benchrun layout --layouts
+  pads`), or one binary that switches the behaviour at run time ("How to read server jobs").
+- **The standing, placement averaged out.** On gRPC h2 asmalloc leads tcmalloc per-CPU by 2.5%
+  and jemalloc by 5.4%; on rpc log c64 it is within 1% of tcmalloc per-CPU and mimalloc's crate
+  and 3.9% ahead of jemalloc.
 - **The headers.** With the stride switched at run time in one binary, separating tokio's
   run-queue headers does not move this job: 129.3k off, 129.0 with 16 siblings, 130.1 with 64,
   129.3 with whole magazines (`spawn-gap.md`). The 3.6% earlier attributed to them was
@@ -102,19 +108,49 @@ shuffling the linker's section order; both move every function at once, the allo
 included, so they show that a job is placement-sensitive but cannot hold everything else
 still. The pad does.
 
-## How to read connect log grpc h2
+## How to read server jobs
 
-- A single build's figure stands for any point in a range of about 4% (126.9 to 132.4k across
-  five placements of one source), and the same binary drifted 2.3k between two sessions.
-- To compare two builds, sweep placement on each: pads 0, 16, 32, 48 and 64 (or more), three
-  rounds each, and compare the means over placements; or, for a change of behaviour, put both
-  behaviours in one binary and switch at run time, as the stride study did.
-- Proposal for `benchrun layout`: a `padN` variant family that links a padding function of N
-  bytes ahead of the program, so that placement can be moved by a known amount with nothing
-  else changed. Not built; the diagnostic here is the recipe.
-- The RPC log jobs run the same server binary and moved 1 to 3% across builds in
-  `spawn-gap.md` while a run-time switch showed nothing; treat them the same way until they are
-  swept.
+**Which jobs share the binary.** `rpc-server` (connect-rust, `bench/rpc`) serves `connect log`,
+`connect log h2` and `connect log grpc h2` (servers suite), `rpc echo c64` and `rpc log c64`
+and `c256` (full suite) and `connect store 1M` (servers-large). Its hot path is generated
+protobuf code placed after the allocator's, so all of them can move with the allocator's code
+size. Swept: gRPC h2 and rpc log c64. The order service (`orders`) is a separate program and
+was not swept.
+
+**What one build stands for.** Over five placements (`benchrun layout --layouts pads`), each
+allocator's medians spanned 3.4 to 4.9% on gRPC h2 and 2.4 to 3.1% on rpc log c64, and the
+same binary drifted 2% between sessions. A single build's figure is one draw from that range,
+so a difference between two single builds smaller than about 4% on gRPC h2, or 3% on rpc log,
+is not a finding.
+
+**Which tool.**
+- A change of behaviour that can be made a run-time choice (an allocator rule, a tunable):
+  build one binary and switch it at run time (`bench/probes/spawn-gap/sibling-switch.patch` is
+  an example). One code layout, so placement cancels exactly; the runs' spread, about ±1%,
+  is what is left.
+- A change of code, or a comparison of allocators: sweep placement on each build with
+  `benchrun layout --layouts pads` and compare the means over the pads (the second table it
+  prints). Here three rounds of five pads separated differences of 2.5% and more, and not
+  ones under 1%. The spread between pads is larger than the noise within one, so more pads
+  help more than more rounds.
+- A job that is not placement-sensitive needs neither: run `benchrun layout --layouts pads`
+  once, and if one allocator's spread is within its noise, single builds are fine.
+
+**The standing, averaged over placement** (pads 00 to 64, three rounds of each, one build of
+each allocator at main `633c91c`'s allocator, medians per pad, then their mean; k server
+cycles a request):
+
+| Job | asmalloc | jemalloc | tcmalloc per-CPU | mimalloc-crate |
+|---|---:|---:|---:|---:|
+| connect log grpc h2, mean (range over pads) | 129.9 (128.2 to 132.6) | 136.9 (+5.4%) | 133.2 (+2.5%) | |
+| connect log grpc h2, pad00 alone | 130.5 | +4.4% | +4.8% | |
+| rpc log c64, mean (range over pads) | 123.3 (122.1 to 125.1) | 128.1 (+3.9%) | 122.1 (-0.9%) | 122.3 (-0.8%) |
+| rpc log c64, pad00 alone | 122.9 | +5.0% | +0.4% | -1.6% |
+
+asmalloc leads gRPC h2 by 2.5% over tcmalloc per-CPU and 5.4% over jemalloc once placement is
+averaged out (the standings' single build had tcmalloc level). On rpc log c64 tcmalloc per-CPU
+and mimalloc's crate are within 1% of asmalloc either way, inside every allocator's range; the
+standings' single build had asmalloc 4% behind mimalloc's crate. jemalloc trails on both.
 
 ## Method
 
@@ -123,4 +159,7 @@ all with `bench/` sources identical, listed as local `build = ...` entries in
 `bench/allocators.toml`; `benchrun run --suite servers --only "=connect log grpc h2"` under
 `scripts/measure --both-l3`, builds interleaved. Event encodings from `perf list --details` on
 Zen 5; five counters at most per session (the NMI watchdog holds one). Raw results:
-`docs/research/data/grpc-placement-2026-10-22.jsonl.gz`.
+`docs/research/data/grpc-placement-2026-10-22.jsonl.gz`; the pad sweeps,
+`docs/research/data/pad-sweeps-2026-10-22.jsonl.gz`. The padding of the first sweeps was a
+diagnostic build of N + 16 bytes; `benchrun layout`'s `padN` (`bench/alloc/src/pad.rs`) is the
+same thing built in, N bytes exactly, and `pad00` is the normal build.
