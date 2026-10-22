@@ -7,6 +7,7 @@
 //! the thread does not survive. After each run a census checks that every magazine and every
 //! object is in exactly one place.
 
+use super::siblings::{SIBLINGS, stride};
 use super::test_rig::{Rig, SimCpu, Small, TIGHT, tiny_class};
 use super::{Drained, IDLE_TICKS, Source, Tuning};
 use crate::classes::{Class, SmallClass};
@@ -88,6 +89,60 @@ fn a_filled_magazine_hands_out_ascending_addresses() {
             .collect();
         assert!(got.is_sorted(), "{count}: {got:x?}");
         assert!(cache.alloc(class).is_none(), "the source is empty");
+    }
+}
+
+/// Whether objects of `size` bytes at `a` and `b` share a cache line.
+fn share_a_line(a: usize, b: usize, size: usize) -> bool {
+    let (low, high) = (a.min(b), a.max(b));
+    (low + size - 1) / 64 == high / 64
+}
+
+/// A class smaller than a line hands out the first objects of a fill that opens a run a stride
+/// apart and the rest in ascending order: every object of the fill once, and no two handed out
+/// one after another among the siblings, or from the last of them to the next, on a shared
+/// line. The fill after it in the same interval continues the run and hands out ascending,
+/// adjacent addresses; the first fill after an interval with none opens a run again.
+#[test]
+fn a_fill_that_opens_a_run_hands_out_siblings_on_lines_of_their_own() {
+    let classes: Vec<SmallClass> = SmallClass::all().filter(|c| c.size() < 64).collect();
+    assert_eq!(classes.len(), 7);
+    for class in classes {
+        let size = class.size();
+        let capacity = class.magazine().capacity();
+        let siblings = SIBLINGS * stride(size).unwrap();
+        let rig: TestRig = Rig::new(&[class], 3 * capacity, Tuning::DEFAULT);
+        let machine = SimCpu::new(0);
+        let cache = rig.cache(&machine);
+        let mut held = Vec::new();
+        let mut magazine = || -> Vec<usize> {
+            let got: Vec<NonNull<u8>> =
+                (0..capacity).map(|_| cache.alloc(class).unwrap()).collect();
+            held.extend(&got);
+            got.iter().map(|p| p.addr().get()).collect()
+        };
+        let adjacent = |got: &[usize]| got.windows(2).all(|pair| pair[1] == pair[0] + size);
+        let strided = |got: &[usize], first: usize| {
+            for pair in got[..=siblings].windows(2) {
+                assert!(!share_a_line(pair[0], pair[1], size), "{size}: {pair:x?}");
+            }
+            assert!(adjacent(&got[siblings..]), "{size}: the rest in order");
+            let mut sorted = got.to_vec();
+            sorted.sort_unstable();
+            let all: Vec<usize> = (first..first + capacity)
+                .map(|n| super::test_rig::object(class, n).addr().get())
+                .collect();
+            assert_eq!(sorted, all, "{size}: every object of the fill, once");
+        };
+        strided(&magazine(), 0);
+        assert!(
+            adjacent(&magazine()),
+            "{size}: a fill that continues the run is dense"
+        );
+        rig.os().advance_clock(IDLE_TICKS);
+        rig.source.clock().now(rig.os());
+        strided(&magazine(), 2 * capacity);
+        rig.census(&held, false);
     }
 }
 

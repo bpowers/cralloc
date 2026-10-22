@@ -163,18 +163,18 @@ fn a_fill_within_its_claims_stops_short_on_sparse_words_and_carves_only_when_the
     // SAFETY: the test holds these slots.
     unsafe { back.launder(class, &freed) };
     let mut out = std::vec![core::ptr::null_mut(); 100];
-    let got = back.fill_within(class, &mut out[..], 10);
+    let got = back.fill_within(class, &mut out[..], 10).count;
     assert_eq!(got, 10, "one slot from each of ten words");
     assert_eq!(&out[..10], &freed[..10]);
     // A bound the free slots run out under: the rest comes from a carve.
     let mut out = std::vec![core::ptr::null_mut(); 100];
-    assert_eq!(back.fill_within(class, &mut out[..], 64), 100);
+    assert_eq!(back.fill_within(class, &mut out[..], 64).count, 100);
     assert_eq!(&out[..54], &freed[10..]);
     let end = slots[slots.len() - 1];
     assert_eq!(out[54], end.wrapping_add(8));
     // Nothing free at all: the smallest bound still carves.
     let mut out = std::vec![core::ptr::null_mut(); 100];
-    assert_eq!(back.fill_within(class, &mut out[..], 1), 100);
+    assert_eq!(back.fill_within(class, &mut out[..], 1).count, 100);
     assert_eq!(out[0], end.wrapping_add(47 * 8));
 }
 
@@ -1209,6 +1209,56 @@ fn the_interval_number_moves_only_forward() {
     assert_eq!(super::purge::epoch_after(9, 8 * DECAY_TICKS), None);
     assert_eq!(super::purge::epoch_after(9, 10 * DECAY_TICKS), Some(10));
     assert_eq!(super::purge::epoch_after(9, 7 * DECAY_TICKS), Some(7));
+}
+
+/// A fill opens a run of its class when no claim of the interval is recorded in the first
+/// region it records in: the class's first fill, and its first after an interval without one.
+/// A fill that follows another in the same interval continues the run, whether it claims from
+/// the bitmaps or carves; one that claims and then carves in the same region opens a run if its
+/// claims did, though its own claims are recorded by the time it carves. A fill that gets
+/// nothing opens nothing.
+#[test]
+fn a_fill_opens_a_run_only_as_the_first_claim_of_its_region_in_an_interval() {
+    let state = state::<Standard>();
+    let back = state.get_or_reserve().unwrap();
+    back.note_epoch(back.now());
+    let class = small(40);
+    let fill_opens = |n: usize| {
+        let mut out = std::vec![core::ptr::null_mut(); n];
+        let filled = back.fill_within(class, &mut out[..], usize::MAX);
+        assert_eq!(filled.count, n);
+        out.truncate(n);
+        (out, filled.opens_run)
+    };
+    let (first, opens) = fill_opens(200);
+    assert!(opens, "the class's first fill");
+    let (_, opens) = fill_opens(100);
+    assert!(!opens, "a carve that follows a fill of the interval");
+    // SAFETY: the test holds these slots and gives them up.
+    unsafe { back.launder(class, &first[..100]) };
+    let (again, opens) = fill_opens(50);
+    assert!(
+        !opens,
+        "a fill from the bitmaps that follows one of the interval"
+    );
+    tick(&back, 1);
+    let (_, opens) = fill_opens(10);
+    assert!(opens, "the first fill of the next interval");
+    let (_, opens) = fill_opens(10);
+    assert!(!opens);
+    tick(&back, 1);
+    // SAFETY: as above.
+    unsafe { back.launder(class, &again[..5]) };
+    let (_, opens) = fill_opens(20);
+    assert!(opens, "claims and then a carve: the claims' record decides");
+    let mut out = [core::ptr::null_mut(); 8];
+    assert!(
+        back.fill_within(small(48), &mut out[..], usize::MAX)
+            .opens_run,
+        "another class's fills have regions of their own"
+    );
+    let mut none: [*mut u8; 0] = [];
+    assert!(!back.fill_within(small(56), &mut none[..], 1).opens_run);
 }
 
 /// A fill whose run of claims leaves one region for the next records the first region's

@@ -314,19 +314,25 @@ pub(crate) fn settle<H: Host>(host: &H, region: RegionId, index: u32, bits: u64)
 /// keeps the claim a little longer. A thread stopped between its claim and this record leaves
 /// the claim uncounted until it runs again; meanwhile the slots it claimed are not free, so no
 /// purge can take them, and only the free pages beside them are exposed a little early.
+///
+/// Returns whether the word recorded no claim of this interval when this record first read
+/// it: the region's first claim of the interval, as far as the word can tell. Two claimers that
+/// record at once at the start of an interval may both be told so.
 #[inline]
-pub(crate) fn reach<H: Host>(host: &H, region: RegionId, last: u32, epoch: u64) {
+pub(crate) fn reach<H: Host>(host: &H, region: RegionId, last: u32, epoch: u64) -> bool {
     let layout = host.layout();
     let page = layout.slot_bytes(last + 1).div_ceil(layout.page_size()) as u32;
     let format = layout.frontier_format();
     let word = host.frontier(region);
     let mut seen = word.load();
+    let first = !format.claimed_in(seen, epoch);
     while let Some(next) = format.record(seen, epoch, page) {
         match word.compare_exchange(seen, next) {
-            Ok(_) => return,
+            Ok(_) => break,
             Err(found) => seen = found,
         }
     }
+    first
 }
 
 /// The page below which `region`'s reuse reached in interval `epoch` and the one before: the

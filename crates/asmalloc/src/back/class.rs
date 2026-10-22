@@ -143,6 +143,20 @@ impl Sink for Descending<'_> {
     }
 }
 
+/// What [`Back::fill_within`] did.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct Filled {
+    /// How many pointers it wrote, from position 0.
+    pub count: usize,
+    /// No claim had been recorded this interval in the region the fill first recorded its
+    /// reach in (`region::reach`): the fill does not continue a run of fills of its class. A
+    /// hint, read from a word the fill reads anyway, so a fill of the class that moved past
+    /// another filler before its first claim, and so recorded nothing there, says no. Only the
+    /// first record counts, because the fill's own record makes every later one in the same
+    /// region read as claimed.
+    pub opens_run: bool,
+}
+
 impl<'a, O: Os> Back<'a, O> {
     /// Writes up to `out.positions()` pointers to free slots of `class` into `out`, in ascending
     /// address order from position 0, and returns how many. Freed slots come first, lowest
@@ -150,7 +164,7 @@ impl<'a, O: Os> Back<'a, O> {
     /// asked means the heap is out of address space or the OS refused memory; zero means not
     /// even one slot could be had.
     pub fn fill<S: Sink + ?Sized>(&self, class: SmallClass, out: &mut S) -> usize {
-        self.fill_within(class, out, usize::MAX)
+        self.fill_within(class, out, usize::MAX).count
     }
 
     /// [`Back::fill`], except that once it has claimed from `claims` bitmap words it stops and
@@ -163,18 +177,25 @@ impl<'a, O: Os> Back<'a, O> {
         class: SmallClass,
         out: &mut S,
         claims: usize,
-    ) -> usize {
+    ) -> Filled {
         let Some(host) = self.host(class.class()) else {
-            return 0;
+            return Filled {
+                count: 0,
+                opens_run: false,
+            };
         };
         let claims = claims.max(1);
         let len = out.positions();
         let mut got = 0;
         let (mut resident, mut revived) = (0, 0);
         let mut cursor = None;
+        let mut opens_run = None;
         // The frontier of each region the run leaves, and of the one it ends in: how far its
         // claims reached before it first moved past another filler (`tree::claim_next`).
-        let mut leave = |reached: tree::Taken| self.reach_claim(&host, reached);
+        let mut leave = |reached: tree::Taken| {
+            let first = self.reach_claim(&host, reached);
+            opens_run.get_or_insert(first);
+        };
         let mut claimed = 0;
         while got < len && claimed < claims {
             let want = (len - got).min(BITS as usize) as u32;
@@ -195,7 +216,7 @@ impl<'a, O: Os> Back<'a, O> {
             );
         }
         if let Some(reached) = tree::finish_run(&host, cursor) {
-            self.reach_claim(&host, reached);
+            leave(reached);
         }
         self.unretain(class.class(), resident);
         self.retain(class.class(), revived);
@@ -207,19 +228,24 @@ impl<'a, O: Os> Back<'a, O> {
             let Some((region, first, count)) = self.carve(&host, class.class(), want) else {
                 break;
             };
-            region::reach(&host, region, first + count - 1, self.epoch());
+            let first_claim = region::reach(&host, region, first + count - 1, self.epoch());
+            opens_run.get_or_insert(first_claim);
             got = self.put_run(host.layout(), out, got, region, first, count);
             carved += host.layout().bytes_of(count);
         }
         self.grow(carved);
-        got
+        Filled {
+            count: got,
+            opens_run: got != 0 && opens_run.unwrap_or(false),
+        }
     }
 
-    /// Raises the frontier of the region of `taken` to the highest slot it took.
+    /// Raises the frontier of the region of `taken` to the highest slot it took. Whether that
+    /// was the region's first claim of the interval (`region::reach`).
     #[inline(never)]
-    fn reach_claim(&self, host: &ClassHost<'a, O>, taken: tree::Taken) {
+    fn reach_claim(&self, host: &ClassHost<'a, O>, taken: tree::Taken) -> bool {
         let high = taken.word * BITS + (BITS - 1 - taken.bits.leading_zeros());
-        region::reach(host, taken.region, high, self.epoch());
+        region::reach(host, taken.region, high, self.epoch())
     }
 
     /// Writes the addresses of the slots of leaf word `word` of `region` whose bits are set in
