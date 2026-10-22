@@ -646,8 +646,8 @@ on pinning pages.
 
 The thread sleeps while there is nothing for it to do. Its rules act on what one interval
 or several left unused, so a round that finds nothing does not show that the next will:
-a slab drained in one interval is shed in the next, what was shed is purged when its
-frontier has aged, and scattered pages wait for the pass that takes runs of any length.
+a slab drained in one interval is shed in the next, what was shed is purged by a pass
+after that, and scattered pages wait for the pass that takes runs of any length.
 So the thread parks when its rounds have found no work for as many intervals in a row as
 the longest of those waits, and no slow path has run anywhere in that time. It then waits
 on a word with no timeout, and a process that has gone silent is not woken by its
@@ -803,7 +803,7 @@ rule that returns it (`docs/research/memory.md` has the measurements behind them
 
 | What holds the memory | What returns it | When |
 |---|---|---|
-| Free slots in the bitmaps, on pages with nothing live on them, above what fills reached in the last two intervals | The clocked purge | Once an interval while more than the floor is retained: up to a quarter of the retained memory, or all of it above the cap, in runs of adjacent pages, carrying on round the heap from where the last pass stopped |
+| Free slots in the bitmaps, on pages with nothing live on them, above what fills reached in the last two intervals | The clocked purge | Once an interval while more than the floor could be returned: up to a quarter of the retained memory, or all of it above the cap, in runs of adjacent pages, carrying on round the heap from where the last pass stopped |
 | Free slots of large classes, above the floor | Heartbeats, a bounded amount each; `maintain` in a silence | Once their region has gone a short hold without a free that left a slot resident |
 | The same, whether fills reached it or not, while more than the cap is retained and the heap grows somewhere else | The carve that grows it owes as much as it takes: it returns a bounded part, and heartbeats return the rest | At that carve and the heartbeats after it, a bounded step each |
 | A large block left behind by a move, or one that grew and is freed, beyond a small budget of such memory | The move or the free (see "Large objects") | Before it releases the slot |
@@ -835,12 +835,20 @@ Nine rules stand behind the table.
   has to age the words and only a thread that holds a claim in a region writes its word.
   Once an interval a pass carries on round the heap from where the last one stopped and
   returns free pages above the frontiers: up to a quarter of the retained memory, or all of
-  it above the cap, in bounded steps spread over the heartbeats that follow. It never takes
-  pages below a frontier, however high the count. Those are the pages the next fills take,
-  and purging them only makes the program fault them back. What two intervals did not need
-  goes back, which is the rule the depot stacks and the spares follow too. A
-  frontier is a hint: a wrong one costs a purge too many or too few, never a page in use,
-  because the purge is a claim.
+  it above the cap, in bounded steps spread over the heartbeats that follow. While the
+  program runs it never takes pages below a frontier, however high the count. Those are the
+  pages the next fills take, and purging them only makes the program fault them back. What
+  two intervals did not need goes back, which is the rule the depot stacks and the spares
+  follow too. Only an interval in which some slow path ran counts toward a frontier's age.
+  A silence is not evidence that the program has stopped needing what it last used: the
+  background thread's rounds through a quiet half minute would otherwise age every
+  frontier, return the pages its own drains had just completed, and leave the first
+  requests of the next burst to fault them back
+  (`docs/research/default-thread-servers.md`). In a silence a pass takes what lies above
+  the frontiers first, and goes below them only while more than the floor could still be
+  returned, from the top of each region down, so that what stays is the lowest pages, the
+  ones the next fills take. A frontier is a hint: a wrong one costs a purge too many or
+  too few, never a page in use, because the purge is a claim.
 - **Purge in runs, and let short runs wait.** Returning memory costs a system call and a
   round of interrupts to the other CPUs for each call, whatever its size, so a pass
   returns adjacent free pages together, as one claim and one call, up to a bound on the
@@ -879,12 +887,17 @@ Nine rules stand behind the table.
   be reused and pays for it in faults, a longer one keeps the peak, and a hold that
   adapted for each class did no better than the constant. `maintain` takes the same
   bounded looks once an interval, and in a silence returns held slots at its second round.
-- **Under a floor, the clock returns nothing.** While the retained memory totals no more
-  than the floor of the allowance (see "Sizing from evidence") the clocked pass does not
-  run, and above it a pass stops at the floor. A few tens of megabytes kept by a process
-  is a price we pay freely (see "Goals"); returning them buys a small process nothing it
-  will notice, and costs it the calls and then the faults when its next burst arrives.
-  `collect` is not floored.
+- **Under a floor, the clock returns nothing.** The floor of the allowance (see "Sizing
+  from evidence") is measured against what a pass could return: resident pages with
+  nothing live on them. While that totals no more than the floor the clocked pass returns
+  nothing, and above it a pass stops at the floor. It is not measured against all the free
+  memory the heap retains. A large heap holds many times the floor in free slots on pages
+  with live neighbours, which nothing can return, so by that measure the floor would never
+  apply to it, and the last megabytes a pass could take are the ones the program uses
+  next. Each lap of the pass counts what it saw, and the next is held to that. A few tens
+  of megabytes kept by a process is a price we pay freely (see "Goals"); returning them
+  buys the process nothing it will notice, and costs it the calls and then the faults when
+  its next burst arrives. `collect` is not floored.
 - **Retained memory is counted, and growth pays for it.** The back end keeps an estimate
   of the free memory it holds that is still resident, small and large classes together.
   Frees and laundered magazines raise it; only reuse and purging lower it, and it is never
