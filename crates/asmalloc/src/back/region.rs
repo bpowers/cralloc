@@ -927,6 +927,19 @@ pub(crate) fn clean_top<H: Host>(host: &H, region: RegionId, unit: Unit) -> (u32
     (unit.start, read)
 }
 
+/// The pages of a unit not marked clean, which may be resident, and the clean words read:
+/// what a purge of the unit, if it is free, would return. Reads only.
+pub(crate) fn dirty_pages<H: Host>(host: &H, region: RegionId, unit: Unit) -> (usize, usize) {
+    let layout = host.layout();
+    let (mut dirty, mut read) = (0, 0);
+    for w in unit.start / BITS..=(unit.end - 1) / BITS {
+        let mask = bits_in_word(w, unit.start, unit.end - 1);
+        dirty += (!host.meta(region, layout.clean_word(w)).load() & mask).count_ones() as usize;
+        read += 1;
+    }
+    (dirty, read)
+}
+
 /// Whether every page of a unit is marked clean.
 fn all_clean<H: Host>(host: &H, region: RegionId, unit: Unit) -> bool {
     let layout = host.layout();

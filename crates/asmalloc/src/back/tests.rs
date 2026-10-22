@@ -1191,24 +1191,43 @@ fn a_fill_that_skips_past_another_records_only_what_it_reached_before() {
     assert_eq!(floor_at(&back, slots[0]), page_past(&back, slots[63], 8));
 }
 
-/// The interval number never goes back a step: a heartbeat that read the clock just before
-/// a boundary leaves the number a later reading wrote. A clock that has gone back by more
-/// than an interval (a resume) is taken as it is.
+/// The epoch counts the intervals in which a heartbeat ran, one a heartbeat in a later
+/// interval however many passed between, and never counts one twice: a heartbeat that read
+/// the clock just before a boundary leaves the count a later reading wrote. A clock that has
+/// gone back by more than an interval (a resume) is taken as it is and counts as a new
+/// interval.
 #[test]
-fn the_interval_number_moves_only_forward() {
+fn the_epoch_counts_intervals_in_which_heartbeats_ran() {
     let state = state::<Standard>();
     let back = state.get_or_reserve().unwrap();
     back.note_epoch(5 * DECAY_TICKS);
-    assert_eq!(back.epoch(), 5);
+    assert_eq!(back.epoch(), 1);
     back.note_epoch(5 * DECAY_TICKS - 1);
-    assert_eq!(back.epoch(), 5, "a stale reading took the number back");
+    assert_eq!(back.epoch(), 1, "a stale reading counted an interval");
+    back.note_epoch(5 * DECAY_TICKS + 9);
+    assert_eq!(back.epoch(), 1, "an interval was counted twice");
     back.note_epoch(6 * DECAY_TICKS + 7);
-    assert_eq!(back.epoch(), 6);
+    assert_eq!(back.epoch(), 2);
+    back.note_epoch(60 * DECAY_TICKS);
+    assert_eq!(
+        back.epoch(),
+        3,
+        "a silence counted as more than one interval"
+    );
     back.note_epoch(2 * DECAY_TICKS);
-    assert_eq!(back.epoch(), 2, "a clock gone back was not followed");
-    assert_eq!(super::purge::epoch_after(9, 8 * DECAY_TICKS), None);
-    assert_eq!(super::purge::epoch_after(9, 10 * DECAY_TICKS), Some(10));
-    assert_eq!(super::purge::epoch_after(9, 7 * DECAY_TICKS), Some(7));
+    assert_eq!(back.epoch(), 4, "a clock gone back was not followed");
+    back.note_epoch(3 * DECAY_TICKS);
+    assert_eq!(back.epoch(), 5);
+    let word = |interval: u64, count: u64| interval << 32 | count;
+    assert_eq!(super::purge::epoch_after(word(9, 4), 8 * DECAY_TICKS), None);
+    assert_eq!(
+        super::purge::epoch_after(word(9, 4), 10 * DECAY_TICKS),
+        Some(word(10, 5))
+    );
+    assert_eq!(
+        super::purge::epoch_after(word(9, 4), 7 * DECAY_TICKS),
+        Some(word(7, 5))
+    );
 }
 
 /// A fill whose run of claims leaves one region for the next records the first region's
@@ -1541,8 +1560,16 @@ fn over_the_cap_a_pass_spares_reuse_and_takes_idle_memory() {
         purges,
         "a pass purged what fills just reached"
     );
-    // Two intervals on it is idle; meanwhile another class is filled and freed.
+    // Two intervals on it is idle. The lap of the pass that spared it saw nothing a purge
+    // could return, so the next pass only counts. Meanwhile another class is filled and freed.
     forget_reuse(&back);
+    os.advance_clock(DECAY_TICKS);
+    beat(&back);
+    assert_eq!(
+        os.calls(Call::Purge),
+        purges,
+        "a pass held to nothing purged"
+    );
     let reused = small(512);
     let reuseds = fill(&back, reused, whole_regions(&back, reused, cap / 2));
     for &p in &reuseds {
@@ -1848,6 +1875,16 @@ fn free_memory_decays_by_quarters_from_the_top() {
         "purged what the interval reused"
     );
     assert_eq!(back.retained(), total);
+    // That pass's lap saw nothing a purge could return, so the next pass is held to nothing:
+    // it walks a lap to count what an interval without fills has left returnable.
+    os.advance_clock(DECAY_TICKS);
+    beat(&back);
+    assert!(!pass_under_way(&state));
+    assert_eq!(
+        os.calls(Call::Purge),
+        purges,
+        "a pass held to nothing purged"
+    );
     os.advance_clock(DECAY_TICKS);
     beat(&back);
     assert!(!pass_under_way(&state));
@@ -3812,6 +3849,7 @@ mod review {
             lap: 0,
             pages: 0,
             any: false,
+            count: false,
         };
         state.walk.pass.store(stale.pack(), Relaxed);
         state.decay.word.store(started, Relaxed);
@@ -3828,6 +3866,7 @@ mod review {
             lap: state.walk.laps.load(Relaxed) as u16,
             pages: 16,
             any: false,
+            count: false,
         };
         state.walk.pass.store(goal.pack(), Relaxed);
         beat(&back);
@@ -5427,3 +5466,6 @@ mod retained_reading {
 
 /// The review of counted intervals, purging by runs and `maintain`'s rate limit.
 mod burst_start_review;
+
+/// The floor measured against what a purge could return, and frontiers a silence does not age.
+mod floor_returnable;
