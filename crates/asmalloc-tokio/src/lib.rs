@@ -21,8 +21,9 @@
 //!
 //! Use this in a program that runs a tokio runtime with its timer enabled (`enable_time`, which
 //! `#[tokio::main]` does) for its whole life. A program without one, or one whose runtime may
-//! stop while the program goes on, uses asmalloc's opt-in background thread instead
-//! (`Asmalloc::start_background`, or `ASMALLOC_BACKGROUND=1` for the preload library).
+//! stop while the program goes on, leaves the work to asmalloc's background thread instead,
+//! which starts by default in a program with threads of its own
+//! (`Asmalloc::start_background` starts it at once).
 //! Running both is harmless: a round runs once an interval, whoever takes its steps. Neither
 //! survives a `fork`: the child has neither the task's runtime threads nor the background
 //! thread.
