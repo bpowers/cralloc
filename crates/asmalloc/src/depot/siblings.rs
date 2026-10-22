@@ -16,15 +16,14 @@
 //! skipped, and the bitmaps and frontiers are as the fill left them: only the order within the
 //! magazine changes.
 //!
-//! The bounds come from what the order costs. Objects handed out apart are touched apart: a
-//! tree walked in the order it was built, or a request's own objects, take more lines and lose
-//! the hardware prefetchers' stream. A program that builds a structure fills again and again,
-//! so only the first magazine of its run is affected; strided on every fill, a tree's build and
-//! walk lost 47% and a JSON parse 6%. But a server whose small classes circulate through
-//! magazines, and refill about once an interval, keeps a strided magazine's order in its
-//! working set: with whole magazines strided, the RPC log jobs lost 2 to 3%, and 1 to 2% even
-//! with only each class's first fill strided. `docs/research/spawn-gap.md`, "The rule, built",
-//! has what the bounds here cost.
+//! The run rule comes from what the order costs. Objects handed out apart are touched apart: a
+//! tree walked in the order it was built takes more lines and loses the hardware prefetchers'
+//! stream. A program that builds a structure fills again and again, so only the first magazine
+//! of its run is affected; strided on every fill, a tree's build and walk lost 47% and a JSON
+//! parse 6%. Servers whose small classes circulate keep a strided magazine's order in their
+//! working set; with one binary and the stride switched at run time, neither 64 strides nor
+//! whole magazines moved the RPC servers measured (`docs/research/spawn-gap.md`, "The rule,
+//! built"). The runtimes' sibling sets are small: tokio's headers need as many as its workers.
 //!
 //! Only classes smaller than a line, where several objects share each line. Classes of one to
 //! two lines (80 to 112 bytes) put neighbours on a shared boundary line too, but no measured
