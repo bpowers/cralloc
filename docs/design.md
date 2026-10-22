@@ -566,6 +566,20 @@ structures does, then reads memory in one direction, and hardware prefetchers fo
 each magazine handed its objects out highest first, the direction would reverse at every
 magazine, and the prefetchers would lose the stream each time.
 
+One fill is the exception. Objects of one size allocated one after another are often
+siblings: one for each worker thread, made in a loop and then written by different threads
+for the life of the process. Back to back in a class smaller than a cache line they share
+lines, and every write by one worker stalls its neighbour. A runtime's per-worker queue
+headers sat that way, and a program that did nothing but spawn tasks lost a seventh of its
+time to them, where an allocator with other size classes kept them apart by luck
+(`docs/research/spawn-gap.md`). So in classes smaller than a line, the fill that opens a
+run, one whose region shows no claim earlier in the interval, hands out its first objects a
+stride of slots apart, far enough that no two share a line, and then the ones between. No
+slot is skipped. Only the order changes, for a bounded part of one magazine, and a fill
+that continues a run is dense, so a program building a structure has its stream back after
+the first magazine. The same order on every fill cost such programs up to half again of
+their time.
+
 ### Heartbeat
 
 Slow paths do the allocator's maintenance, a bounded amount at a time. It is paced by what
