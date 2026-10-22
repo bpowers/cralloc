@@ -43,6 +43,12 @@ the same length (glibc's speed on the spawn jobs depends on it).
 - `serve.py BUILD MODE PLAN`: the order service on CPUs 0-3 and the load generator on 8-11 by
   hand, with `TRACE=` and `C2C=` as above (`MODE` `axum` or `axum-h2`).
 - `srv.py RESULTS...`: s70 medians from `benchrun` server results, with any extra counters.
+- `ab-build.sh [--trace] NAME=COMMIT...`: builds commits from `git archive` for benchrun's
+  `build = "asm-NAME"` entries (workloads, rpc-server, the order service, boa), or with
+  `--trace` the traced workloads and rpc-server into `bench/target/trc-NAME`. Under
+  `scripts/heavy`.
+- `rpc-headers.sh NAME...`: where tokio's run-queue headers land in a traced rpc-server, and
+  how many pairs share a line. Under `scripts/memlimit`.
 - `tokio-pad-queue.diff`: tokio 1.54.0 with the run queue's shared header cache-padded, for a
   local `[patch.crates-io]` (see the note).
 
