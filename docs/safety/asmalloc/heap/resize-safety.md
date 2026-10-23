@@ -5,19 +5,16 @@ routines, with the general resize (`large.rs`, HEAP-04) for everything else. The
 general resize and into the free's slow paths pass their callers' contracts on unchanged, and
 say so where they are made.
 
-## HEAP-06: `Layout::from_size_align_unchecked(new_size, old.align())` and `NonNull::new_unchecked(ptr)` in `Bound::realloc`
+## HEAP-06: `NonNull::new_unchecked(ptr)` in `Bound::realloc`
 
-**Preconditions.** For the layout: `old.align()` is a power of two, and `new_size` rounded up
-to a multiple of it is at most `isize::MAX`. For the pointer: `ptr` is not null.
+**Precondition.** `ptr` is not null.
 
 **Proof.** `Bound::realloc`'s contract is `GlobalAlloc::realloc`'s, which its two callers
 (`Asmalloc` and the simulated heaps) pass on: `ptr` is a block this allocator handed out, and
-`new_size`, rounded up to `layout.align()`, does not overflow `isize`. The alignment of a
-`Layout` is a power of two. A block is the non-null pointer of a slot or run (HEAP-01). So
-both hold. The general path (`realloc_other`) does not use this layout: it builds its own
-with `Layout::from_size_align` and returns null for a size that fails, as before, so a caller
-that broke the size rule meets the same check there; the lean path only reads the layout's
-size and alignment for the class lookup, which turns away any size that has no small class.
+a block is the non-null pointer of a slot or run (HEAP-01). The new size is looked up by
+itself (`SmallClass::of_nonzero`), with no `Layout`, so a size that breaks `realloc`'s rule
+builds nothing invalid: it has no small class, and the general path checks it with
+`Layout::from_size_align` and returns null, as before.
 
 ## HEAP-07: the copy and the push in `Bound::resize_small`
 
@@ -41,13 +38,14 @@ that this heap handed out and that the caller owns and gives up.
   commits its removal), a whole slot of that class in committed memory (`back/region.rs`,
   `carve`), with the reservation's provenance taken back from its exposed address (REAL-03 in
   `front/real-safety.md`). Nothing else holds it until this thread gives it away.
-- Each caller discharges the contract. `Bound::realloc`, `grow_block` and `shrink_block`: the
+- Each caller discharges the contract, and its `SAFETY` comment cites this entry.
+  `Bound::realloc`, `grow_block` and `shrink_block`: the
   caller's block is described by `old` as `dealloc` takes it, so it is a slot of the small
   class `of_nonzero_layout(old)` gives, `from` (the fit rule, as in `Bound::dealloc`); `kept`
   is `min(old.size(), new size)`, at most `old.size() <= from.size()` and at most the new
   size, which is at most `to.size()` (a class is at least the size it is found for). C's
-  `realloc` (MOD-05 in `c/mod-safety.md`): `from` is the class the address table gives for
-  the slot `ptr` starts (F1 and F2 in `c/slow-safety.md`), and `kept` is
+  `realloc` (MOD-05 in `c/mod-safety.md`): `from` is the class the region table gives for
+  the slot `ptr` starts (`Back::small_slot`, F1 and F2 in `c/slow-safety.md`), and `kept` is
   `min(from.size(), size)` with `to` the class of `size`.
 
 **Proof.** The copy runs only when `from != to`. Readable: `kept <= from.size()`, and the

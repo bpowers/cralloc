@@ -86,7 +86,16 @@ impl SmallClass {
     /// and a request too large to be small. A constant layout folds to a constant class.
     #[inline(always)]
     pub(crate) fn of_nonzero_layout(layout: Layout) -> Option<SmallClass> {
-        let less_one = layout.size().wrapping_sub(1) | (layout.align() - 1);
+        SmallClass::of_nonzero(layout.size(), layout.align())
+    }
+
+    /// [`SmallClass::of_nonzero_layout`] of `size` bytes aligned to `align`, a power of two,
+    /// for a caller that has the two but no `Layout`, and must not build one for a size no
+    /// `Layout` can have (`realloc`'s new size): any size is accepted, and one too large for a
+    /// small class has none.
+    #[inline(always)]
+    pub(crate) fn of_nonzero(size: usize, align: usize) -> Option<SmallClass> {
+        let less_one = size.wrapping_sub(1) | (align - 1);
         if less_one < MAX_SMALL_SIZE {
             Some(lookup::class_of(less_one))
         } else {

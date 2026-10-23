@@ -5,8 +5,9 @@ The C functions, and the `export_c_abi!` macro that exports them. F1 and F2 are 
 
 ## MOD-01: the copy and the free in `realloc_other`
 
-`realloc_other` is `realloc` for what its lean path (MOD-05) did not take, with the block
-`find` found and a size that is not zero; the lean path changed nothing before it.
+`realloc_other` is `realloc` for what its lean path (MOD-05) did not take, with the block as
+`find` describes it (from `find` itself, or `Found::Small` of the class `find_small` gave,
+the same answer) and a size that is not zero; the lean path changed nothing before it.
 
 ```rust
 old.as_ptr().copy_to_nonoverlapping(new, kept.min(size));
@@ -79,12 +80,18 @@ block of class `from` that the heap handed out, which the caller owns and gives 
 returns another block; `kept` is at most the size of `from` and of `to`.
 
 **Proof.** `realloc`'s contract: `ptr` is a block of the heap the caller owns, not null here.
-`find` returned `Found::Small(from)`, so by F1 and F2 (`slow-safety.md`) it is a slot of `from`,
-the class it was handed out as. `to` is the small class of `size` by C's rule (`small_class`),
+`process::find_small` (`Back::small_slot`) returned `from`, which it does under exactly F1's
+conditions for `Found::Small(from)` (`slow-safety.md`): the heap has started, `ptr` lies in an
+object region, the region table tags that region with the small class `from`, and `ptr` is
+the start of a slot of it (`Plan::slot_at`, bounded by the slot count `Back::lookup` checks
+for a small class; a test compares the two lookups around a block of every small class). So by
+F1 and F2 it is a slot of `from`, the class it was handed out as. `to` is the small class of `size` by C's rule (`small_class`),
 at least `size` bytes, so `kept = min(from.size(), size)` is at most both. When the call
 returns another block, `realloc` returns that block, a success, and the caller has given `ptr`
 up, as C's `realloc` does; when it returns `old` or `None`, nothing was given up, and `None`
-leads to `realloc_other` with the block untouched.
+leads to `realloc_other` with the block untouched and `Found::Small(from)`, what `find` gives
+for it. A pointer that starts no small slot is not taken here: it goes to `find`, which finds
+a large block or aborts.
 
 ## MOD-03: the pass-through calls
 
@@ -97,7 +104,7 @@ leads to `realloc_other` with the block untouched.
 heap the caller owns and gives up; `realloc` takes null or a block the caller owns.
 
 **Proof.** Each caller's own contract is the callee's, passed on unchanged (for
-`realloc_other`, with `old` the non-null `ptr`, `found` what `find` returned for it and `size`
+`realloc_other`, with `old` the non-null `ptr`, `found` what `find` returns for it (MOD-01) and `size`
 not zero, all as `realloc` checked them): the sized frees and
 `cfree` free exactly what `free` frees (their size and alignment arguments are ignored, so a
 wrong one from C cannot change which block or class is freed). `realloc(ptr, 0)` gives `ptr`

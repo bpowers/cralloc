@@ -146,6 +146,50 @@ fn the_lean_realloc_finds_the_class_malloc_would() {
 /// The lean path of C's `realloc`: many small blocks, all live, moved up a class and back
 /// down, so that pops and pushes run dry and full partway through; and a block Rust allocated
 /// in a class C would not use.
+/// C's `realloc` of a block down a class writes nothing past the block it lands in: blocks of
+/// the smaller class, every other one freed so that the moves land between live ones, keep
+/// their bytes while bigger blocks are cut down to that class.
+#[test]
+fn realloc_down_a_class_leaves_the_neighbours_alone() {
+    for _ in 0..8 {
+        let blocks: Vec<*mut c_void> = (0..256).map(|_| malloc(100)).collect();
+        for (i, &p) in blocks.iter().enumerate() {
+            // SAFETY: a live block of at least 100 bytes.
+            unsafe { p.cast::<u8>().write_bytes(i as u8, 100) };
+        }
+        let mut live = Vec::new();
+        for (i, p) in blocks.into_iter().enumerate() {
+            if i % 2 == 0 {
+                live.push((i, p));
+            } else {
+                release(p);
+            }
+        }
+        let cut: Vec<*mut c_void> = (0..128)
+            .map(|_| {
+                let p = malloc(250);
+                // SAFETY: a live block of at least 250 bytes, given up to `realloc`.
+                unsafe {
+                    p.cast::<u8>().write_bytes(0xee, 250);
+                    realloc(p, 100)
+                }
+            })
+            .collect();
+        for &(i, p) in &live {
+            // SAFETY: a live block of at least 100 bytes.
+            let bytes = unsafe { core::slice::from_raw_parts(p.cast::<u8>(), 100) };
+            assert!(
+                bytes.iter().all(|&b| b == i as u8),
+                "a live neighbour {i} was overwritten"
+            );
+        }
+        live.into_iter()
+            .map(|(_, p)| p)
+            .chain(cut)
+            .for_each(release);
+    }
+}
+
 #[test]
 fn realloc_moves_small_blocks_between_classes_and_keeps_their_bytes() {
     let class = |size| Class::of_c(Layout::from_size_align(size, 1).unwrap()).unwrap();
@@ -515,5 +559,37 @@ mod generated {
             unsafe { routines::free_sized(q, 64) };
         }
         assert!(same > 900, "{same}");
+    }
+}
+
+/// Review probe: C's `realloc` gives back the block it leaves, also when the push of the old
+/// block misses. Many blocks moved up a class and back for many rounds visit a bounded set of
+/// addresses; a path that drops the old block takes new memory every round. Other tests share
+/// the heap and move blocks in and out of these classes now and then, so a few rounds may see
+/// new addresses; most must not.
+#[test]
+fn review_c_realloc_gives_back_the_blocks_it_leaves() {
+    for (count, rounds, warm) in [(1usize, 4000usize, 100usize), (1200, 60, 30)] {
+        let mut blocks: Vec<*mut c_void> = (0..count).map(|_| malloc(100)).collect();
+        let mut seen = std::collections::BTreeSet::new();
+        let mut grown = Vec::new();
+        for _ in 0..rounds {
+            let before = seen.len();
+            for size in [250, 100] {
+                for p in blocks.iter_mut() {
+                    // SAFETY: `p` is live, and given up once the call succeeds.
+                    *p = unsafe { realloc(*p, size) };
+                    assert!(!p.is_null());
+                    seen.insert(p.addr());
+                }
+            }
+            grown.push(seen.len() - before);
+        }
+        blocks.into_iter().for_each(release);
+        let late = &grown[warm..];
+        assert!(
+            late.iter().filter(|&&g| g == 0).count() * 4 >= late.len() * 3,
+            "{count} blocks resized back and forth keep taking new addresses: {grown:?}"
+        );
     }
 }

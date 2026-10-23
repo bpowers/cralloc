@@ -17,9 +17,7 @@
 //!
 //! The ledger for the unsafe blocks here is `docs/safety/asmalloc/heap/resize-safety.md`.
 
-use super::Bound;
-#[cfg(feature = "allocator-api")]
-use super::Grant;
+use super::{Bound, Grant};
 use crate::classes::SmallClass;
 use crate::front::Routines;
 use crate::os::Os;
@@ -37,27 +35,28 @@ pub(crate) enum Caller {
 
 impl<O: Os, R: Routines + Copy> Bound<'_, O, R> {
     /// `GlobalAlloc::realloc`: the lean path, and the general resize for anything else. Null
-    /// if a move found no memory; the old block is then untouched.
+    /// if a move found no memory, or for a new size no `Layout` can have; the old block is
+    /// then untouched.
     ///
     /// # Safety
     ///
     /// As `GlobalAlloc::realloc`: `ptr` is a block this heap handed out that the caller owns,
     /// described by `old` as for [`Bound::dealloc`], and gives up unless the call returns
-    /// null; `new_size` is not zero, and rounded up to `old`'s alignment it is at most
-    /// `isize::MAX`.
+    /// null; `new_size` is not zero.
     #[inline(always)]
     pub(crate) unsafe fn realloc(self, ptr: *mut u8, old: Layout, new_size: usize) -> *mut u8 {
-        // SAFETY: HEAP-06.
-        let new = unsafe { Layout::from_size_align_unchecked(new_size, old.align()) };
+        // The new size by itself, with no `Layout`: one is built only on the general path,
+        // which checks it.
         if let (Some(from), Some(to)) = (
             SmallClass::of_nonzero_layout(old),
-            SmallClass::of_nonzero_layout(new),
+            SmallClass::of_nonzero(new_size, old.align()),
         ) {
             // SAFETY: HEAP-06.
             let block = unsafe { NonNull::new_unchecked(ptr) };
             let kept = old.size().min(new_size);
-            // SAFETY: the block is the caller's, of `from` by the fit rule, as `dealloc` takes
-            // it; `kept` is at most the old size and the new one, so at most either class.
+            // SAFETY: HEAP-07, whose preconditions this caller meets: the block is the
+            // caller's, of `from` by the fit rule, as `dealloc` takes it; `kept` is at most the
+            // old size and the new one, so at most either class.
             if let Some(moved) = unsafe { self.resize_small(block, from, to, kept, Caller::Rust) } {
                 return moved.as_ptr();
             }
@@ -92,7 +91,8 @@ impl<O: Os, R: Routines + Copy> Bound<'_, O, R> {
     /// # Safety
     ///
     /// `Allocator::grow`'s contract for a block of this heap, with `old` not empty.
-    #[cfg(feature = "allocator-api")]
+    // Compiled without the feature too, for the tests' stable hooks into it.
+    #[cfg_attr(not(any(test, feature = "allocator-api")), allow(dead_code))]
     #[inline(always)]
     pub(crate) unsafe fn grow_block(
         self,
@@ -106,7 +106,7 @@ impl<O: Os, R: Routines + Copy> Bound<'_, O, R> {
             SmallClass::of_nonzero_layout(new),
         ) {
             let kept = old.size().min(new.size());
-            // SAFETY: as in `realloc`.
+            // SAFETY: HEAP-07, met as in `realloc`.
             if let Some(moved) = unsafe { self.resize_small(ptr, from, to, kept, Caller::Rust) } {
                 if zero && moved != ptr {
                     // SAFETY: HEAP-08.
@@ -129,7 +129,8 @@ impl<O: Os, R: Routines + Copy> Bound<'_, O, R> {
     /// # Safety
     ///
     /// `Allocator::shrink`'s contract for a block of this heap, with `new` not empty.
-    #[cfg(feature = "allocator-api")]
+    // Compiled without the feature too, for the tests' stable hooks into it.
+    #[cfg_attr(not(any(test, feature = "allocator-api")), allow(dead_code))]
     #[inline(always)]
     pub(crate) unsafe fn shrink_block(
         self,
@@ -142,7 +143,7 @@ impl<O: Os, R: Routines + Copy> Bound<'_, O, R> {
             SmallClass::of_nonzero_layout(new),
         ) {
             let kept = old.size().min(new.size());
-            // SAFETY: as in `realloc`.
+            // SAFETY: HEAP-07, met as in `realloc`.
             if let Some(moved) = unsafe { self.resize_small(ptr, from, to, kept, Caller::Rust) } {
                 return Some(Grant {
                     ptr: moved,

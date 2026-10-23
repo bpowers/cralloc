@@ -114,7 +114,7 @@ or writes the range during the call and nothing in it is needed.
 block the caller owns, unused during the call, and that the caller gives up every byte past
 `size`. Its callers are the heap's for a block its owner is resizing
 (`Heap::resize_large_in_place`, `Heap::resize_in_place_by_address`, both `unsafe fn`s with the
-same promise, from `Bound::resize` and C's `realloc`), so the owner
+same promise, from `Bound::resize` and C's `realloc_other`), so the owner
 holds the slot or run for the whole call and is not using the block meanwhile: a resize has
 the block exclusively, as `realloc` and `Allocator::shrink` require. Counted from the start
 of the slot or run, which the block starts `into` bytes past (its stagger, or zero; a run is
@@ -166,7 +166,7 @@ owns and gives up, readable for `len` bytes, that `to` is a block it owns, writa
 bytes, whose contents it does not need, and disjoint from `from`, that nothing else uses
 either range, and that if it says `zeroed` the `len` bytes at `to` read as zero. The two
 callers are the moving paths of `Bound::resize` (HEAP-04, which passes the allocation's own
-report) and C's `realloc` (MOD-01, which passes `false`), and both hold both blocks.
+report) and C's `realloc_other` (MOD-01, which passes `false`), and both hold both blocks.
 
 Within the budget for kept grown blocks (`keep_grown`, true only for a slot, which counts
 the slot's charge before the copy) the move returns nothing of `from` (steps 4 and 5 do not

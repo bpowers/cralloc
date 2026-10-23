@@ -194,8 +194,14 @@ fn a_pointer_that_is_not_a_block_the_slow_path_checks_aborts() {
     use std::os::unix::process::ExitStatusExt;
     let exe = program("foreign.c");
     // Outside the heap, and into the middle of a large block: both reach the slow path, which
-    // checks. A pointer into the middle of a small block is not promised to abort.
-    for args in [&[] as &[&str], &["interior"]] {
+    // checks. A pointer into the middle of a small block is not promised to abort a free, but
+    // it is a `realloc`, which checks every pointer before it moves one.
+    for args in [
+        &[] as &[&str],
+        &["interior"],
+        &["realloc-interior"],
+        &["realloc-outside"],
+    ] {
         let out = run(true, Command::new(&exe).args(args));
         assert_eq!(out.status.signal(), Some(6), "{:?}", out.status);
         assert!(

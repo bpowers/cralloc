@@ -40,7 +40,12 @@ its size (the size is rounded up to a multiple of the alignment and the class is
 at least that, both non-decreasing; `classes::verify`). So a fitting layout's class is at least
 the requested one's, above every small class or none at all, and `dealloc` takes the large
 path, which finds the slot or run from the address. Zero-size
-layouts get a dangling, aligned pointer and are never freed (`heap/allocator.rs`). Every handle
+layouts get a dangling, aligned pointer and are never freed (`heap/allocator.rs`). `grow`,
+`grow_zeroed` and `shrink` of a non-empty block are `Bound::grow_block` and `shrink_block`
+(`heap/resize.rs`): a small block whose new layout has its class stays, with the class's
+length; one that moves to another small class is copied into a block of that class before
+it is freed (HEAP-07), and for `grow_zeroed` everything past the bytes kept, to the new
+class's length, is cleared (HEAP-08); everything else is the general resize, as before. Every handle
 reaches `HEAP`, so blocks may move between handles.
 
 ## GLOBAL-04: `free_slow` in `c_free_small`

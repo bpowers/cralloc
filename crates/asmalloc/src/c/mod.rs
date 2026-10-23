@@ -141,17 +141,23 @@ pub unsafe extern "C" fn realloc(ptr: *mut c_void, size: usize) -> *mut c_void {
         unsafe { free(ptr) };
         return ptr::null_mut();
     }
-    let found = find_or_abort(
-        old,
-        "realloc of a pointer that is not a block of asmalloc's heap",
-    );
-    // The lean path (`heap::resize`): a small block to a small class.
-    if let (Found::Small(from), Some(to)) = (found, small_class(size)) {
-        // SAFETY: MOD-05.
-        if let Some(new) = unsafe { process::resize_small(old, from, to, from.size().min(size)) } {
-            return new.as_ptr().cast();
+    // The lean path (`heap::resize`): a small block to a small class. The old class comes from
+    // the region table and the slot arithmetic alone (`find_small`); anything else, a pointer
+    // that starts no small slot included, takes the general path, which finds it or aborts.
+    let found = match (process::find_small(old.as_ptr()), small_class(size)) {
+        (Some(from), Some(to)) => {
+            let kept = from.size().min(size);
+            // SAFETY: MOD-05.
+            if let Some(new) = unsafe { process::resize_small(old, from, to, kept) } {
+                return new.as_ptr().cast();
+            }
+            Found::Small(from)
         }
-    }
+        _ => find_or_abort(
+            old,
+            "realloc of a pointer that is not a block of asmalloc's heap",
+        ),
+    };
     // SAFETY: MOD-03. the caller's promise, which the lean path left as it found it.
     unsafe { realloc_other(old, found, size) }
 }
@@ -162,9 +168,7 @@ pub unsafe extern "C" fn realloc(ptr: *mut c_void, size: usize) -> *mut c_void {
 #[inline(always)]
 fn small_class(size: usize) -> Option<SmallClass> {
     let align = if size >= C_ALIGN { C_ALIGN } else { 1 };
-    Layout::from_size_align(size, align)
-        .ok()
-        .and_then(SmallClass::of_nonzero_layout)
+    SmallClass::of_nonzero(size, align)
 }
 
 /// C's `realloc` of what its lean path does not take: a large block on either side, or a pop

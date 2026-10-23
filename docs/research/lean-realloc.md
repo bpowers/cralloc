@@ -1,33 +1,35 @@
 # A lean path for realloc of small blocks
 
-2026-10-22, branch `lean-realloc`. Measured three times against a moving main: `55848b5`
-(main `2754021` plus the `regrow` workload) against `77055c7` (the lean path) for the tables
-below; again with main `1eea9af` merged into both ("Against later mains"); and the per-call
-counts once more with main `2d208d4`, which has the shorter class lookup (`fast-lookup.md`),
-merged in. Why: `server-profile.md` found
-`realloc` of small blocks the largest allocator cost left on the servers, 2.5% of the RPC jobs'
-cycles, every call a `Vec`, `String` or buffer moving one class up.
+2026-10-22, branch `lean-realloc`. Why: `server-profile.md` found `realloc` of small blocks
+the largest allocator cost left on the servers, 2.5% of the RPC jobs' cycles, every call a
+`Vec`, `String` or buffer moving one class up. Main moved while this was measured, so each
+comparison names its main: the servers over placement against `1eea9af` (first) and
+`2754021`, the per-call counts against `437adf1`, `2d208d4` and `2754021`.
 
 ## Summary
 
-- **About 230 fewer instructions a call.** A `Vec<u8>` growing from 128 to 256 bytes costs
-  130 instructions a `realloc` (the call, the copy and the `Vec`'s growth code) against 360,
-  and 26 cycles against 62. The allocator's own part of a moving call is now 85 instructions,
-  26 of them the pop and push routines; `realloc` was 12 KiB of code and is 388 bytes.
-- **With the shorter class lookup merged, 126 instructions against 354.** The lean path
-  takes the new lookup as it is, one call a size.
-- **The servers gain 1.2 to 3.1%, at every placement** (1.9 to 2.1% on the RPC jobs against
-  `1eea9af`, below). Averaged over five code placements:
-  gRPC h2 −2.5%, Connect h2 −3.1%, rpc log c64 −2.1%, the order service −1.2%. Lean is
-  faster than main at every pad of every one of these jobs. Instructions a request fall by
-  12,200 on the RPC jobs (4.1%, about 222 per `realloc` at 55 a request) and by 1,560 on the
-  order service (8 a request).
-- **Nothing else moved.** `json 32Mi` and the large `vecgrow` jobs are level within their
-  placement noise; their instructions change by 0.2% or less, except the grow-and-free jobs,
-  whose small early steps now take the lean path.
-- **C's `realloc` gains little**: 345 instructions a call against 375. Its old class comes from
-  the address, and the validated lookup (`process::find`, about 140 instructions) is most of
-  what is left. A cheaper one is a behaviour question, below.
+- **About 230 fewer instructions a call.** Against main `437adf1`, a `Vec<u8>` growing from
+  128 to 256 bytes costs 126 instructions a `realloc` (the call, the copy and the `Vec`'s
+  growth code) against 354, and 23 cycles against 63; a `String` grown to 1 KiB, 164 against
+  362 a step. `realloc` was 12 KiB of code and is under 400 bytes.
+- **About 4% fewer instructions a request on the RPC jobs**, 12,200 at 55 reallocs a
+  request (about 222 a call), and 1.4% on the order service. This holds against both mains.
+- **About 2% faster on the two HTTP/2 RPC jobs**, averaged over five code placements, against
+  main `1eea9af`: gRPC h2 −2.1% (three runs per placement) and Connect h2 −1.9% (two). These
+  are firm. The first sweep, against `2754021`, read −2.5% and −3.1%.
+- **Not established**: the order service, −0.7% over placements (two to three runs; lean is
+  slower at pad00); rpc log c64, −0.7% (one run per placement, level or slower at three of
+  five). Against `2754021` they read −1.2% and −2.1%. That the other jobs did not move is not
+  established either: `json 32Mi` is level, but `vecgrow 1x256Mi` runs in two modes in both
+  builds and one round read +1.9% with its instructions level.
+- **C's `realloc`: 273 instructions against 375.** The old class now comes from the region
+  table and the slot check alone (`Back::small_slot`, about 70 instructions, most of them the
+  proved slot arithmetic computing the class size three times), not from the general lookup;
+  an interior pointer still aborts.
+- **Calls the lean path does not take cost slightly more**, by the extra call to the general
+  path: small to large (24 to 48 KiB) 1,866 to 1,924 instructions, large to large (40 to
+  80 KiB) 5,751 to 5,786. A small block that grows to the largest small class (16 to
+  32 KiB) gains: 1,137 to 908.
 
 ## What changed
 
@@ -38,6 +40,11 @@ class, copy, push the old block. A pop that misses has changed nothing and falls
 general resize (`large.rs`, now `#[cold]` and out of line), which decides exactly as before; a
 push that misses ends in the free's slow path, as any free's does. `GlobalAlloc::realloc`,
 `Allocator::grow`, `grow_zeroed` and `shrink`, and C's `realloc` share it.
+
+C's `realloc` takes the old class from the address with `Back::small_slot`: the region table
+and `Plan::slot_at`, the arithmetic `Back::lookup` uses for a small class, without the class's
+host and layout. A pointer that starts no small slot goes to `find`, which finds a large block
+or aborts, as before.
 
 Before, `realloc` was the general resize inlined whole: `Class::of_size` five times (the old
 class three times, the new one twice), the large-path decisions, then `alloc_grant` and
@@ -50,7 +57,9 @@ control that reserves the final capacity, in alternating phases, and reports the
 `realloc`: the call, the copy and the collection's growth code, which are the same in both
 builds. `bench/probes/lean-realloc/regrow.py 3 ...` runs the builds interleaved, three times,
 under `scripts/measure`, on CPU 2; medians. C is the glibc build of the workload with each
-build's preload library, so Rust's `System` allocator calls C's `realloc`.
+build's preload library, so Rust's `System` allocator calls C's `realloc`. This table is
+against main `2754021` and the branch's first version, whose C path still used `find` (see
+"C's realloc" for the counts now).
 
 | pattern | main instr | lean instr | main cycles | lean cycles | C main instr | C lean instr | glibc instr |
 |---|---:|---:|---:|---:|---:|---:|---:|
@@ -94,7 +103,8 @@ Instructions a request at 70% (medians over all runs): gRPC h2 299.1k to 287.0k,
 log c64 −4.0%, json −0.2%, vecgrow 1x256Mi and 64x4Mi −0.2%, 1x4Mi grow-and-free −1.1%,
 1x1Mi grow-and-free −3.0%.
 
-The profile estimated the RPC jobs would take back about 1.7%; they took back 2.5 to 3.1%.
+The profile estimated the RPC jobs would take back about 1.7%; in this first sweep they took
+back 2.5 to 3.1%, and about 2% in the second (below).
 The instructions saved per call (about 222) are close to all of what the profile's 240
 "besides the copy" counted, not two thirds of it, and the cycles follow. On json, whose pad00
 alone reads +3.0%, the mean over pads is level and the range over pads (3.5 to 4%) is wider
@@ -117,8 +127,10 @@ run) in brackets.
 | vecgrow 1x256Mi | +1.9% | 0.0% | 0.0% |
 | vecgrow 64x4Mi | +0.5% | +0.8% | +0.1% |
 
-The RPC and order-service gains hold, smaller than in the first sweep but in the same
-direction at nearly every pad, with the instructions saved unchanged. `vecgrow 1x256Mi` runs
+The HTTP/2 RPC jobs keep about 2%, lean ahead at every pad, with three and two runs per
+cell. The order service and rpc log c64 are within their noise here: lean is slower at
+pad00 on orders, and rpc log c64, one run per cell, is level or slower at three pads. The
+instructions saved are unchanged on all four. `vecgrow 1x256Mi` runs
 in two modes in both builds (2.24 or 2.38 to 2.40 cycles an element, the grow loop's
 placement mode, `memory.md`); in this one round lean landed in the slow mode at two pads
 where main did not, with instructions level, and the first sweep had lean 1.2% ahead. It
@@ -126,20 +138,22 @@ makes no small `realloc` worth counting.
 
 Per call with main `2d208d4` merged (the shorter class lookup), as the first table: `Vec`
 128 to 256 bytes 354 instructions and 66 cycles on main, 126 and 22 on the branch; 32 to 64
-305 and 126; 1 KiB to 2 KiB 416 and 188; `String` per step 362 and 164. C: 375 and 342.
+305 and 126; 1 KiB to 2 KiB 416 and 188; `String` per step 362 and 164. C: 375 and 342,
+before C took its class from `Back::small_slot`; the same with main `437adf1`.
 
 ## C's realloc
 
-C's lean path is the same pop, copy and push, with the new class from the size by C's
-16-byte rule through the same lookup. What it keeps is `process::find`, which validates that
-the pointer starts a slot (`Back::lookup`: the region table, the class's layout, a division)
-and aborts on anything else, as C's `realloc` always has. That lookup is about 140
-instructions, most of the 345. The generated C `free` instead reads the class byte from the
-region table's copy beside the slabs (`c::mirror`) without validating the slot; doing the same
-in `realloc` would bring the call to an estimated 215 instructions, but a pointer into the
-middle of a small block would then be moved and pushed, as `free` pushes one, instead of
-aborting. That is a change of behaviour on invalid input, left to a decision. A cheaper
-validated small-slot lookup in the back end is the other way.
+The first version kept `process::find` for the old class, a general lookup of about 140
+instructions (the class's host and layout, which only large classes need), and saved only 30
+instructions a call. The C `free` instead reads the class byte from the region table's copy
+beside the slabs (`c::mirror`) without checking that the pointer starts a slot; `realloc`
+must not, because it copies from the pointer: an interior pointer would copy up to a class
+size from the neighbouring slot before being pushed. So `realloc` now reads the back end's
+own region table, which never lags as the copy can, and checks the slot with the plan's
+arithmetic. A test compares it with `find` at every 8-byte step around a block of every small
+class; the preload test makes `realloc` of an interior pointer abort. Per call against
+`437adf1`: `Vec` 128 to 256 bytes 375 to 273 instructions (66 to 54 cycles), 32 to 64 340 to
+246, 1 KiB to 2 KiB 440 to 338, `String` per step 395 to 296.
 
 ## Reproducing
 
