@@ -35,6 +35,7 @@ const PAD: usize = parse_pad(match option_env!("RA_PAD") {
 /// bytes further on and nothing else changes.
 #[inline(always)]
 fn pad_here() {
+    // SAFETY: the block is `PAD` bytes of `nop`, which touch no register, flag or memory.
     unsafe { core::arch::asm!(".skip {n}, 0x90", n = const PAD, options(nomem, nostack, preserves_flags)) }
 }
 

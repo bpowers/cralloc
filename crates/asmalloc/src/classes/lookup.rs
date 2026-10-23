@@ -16,11 +16,11 @@
 //! Each entry is a constant built from the class functions, so a constant layout folds every
 //! load away.
 
-use super::{Class, MAX_SMALL_SIZE, QUANTUM, SMALL_COUNT, SmallClass};
+use super::{Class, MAX_SMALL_SIZE, QUANTUM, SMALL_COUNT, SmallClass, WORD_STRIDE};
 
-/// Where the masks start within the static's first page: past every hot word (the last ends at
-/// byte 1440 of a slab) and before the class bytes.
-pub(crate) const MASKS_PAGE_OFFSET: usize = 1536;
+/// Where the masks lie within their page: after the slot sizes, in the static's second page, at
+/// page offsets past every field of a slab (`front` asserts it).
+pub(crate) const MASKS_PAGE_OFFSET: usize = LENGTHS_PAGE_OFFSET + 2 * LENGTH_ENTRIES;
 
 /// Entries in the masks' table: one per value of a word position, so that indexing it by a
 /// class's position needs no bounds check.
@@ -35,7 +35,7 @@ pub(crate) const BY_SIZE_PAGE_OFFSET: usize = 2048;
 /// page.
 pub(crate) const BY_SIZE_CLEAR: usize = (4096 - BY_SIZE_PAGE_OFFSET) * QUANTUM;
 
-/// Entries in the slot sizes' table: one per value of `word >> 2`, so that indexing it by a
+/// Entries in the slot sizes' table: one per value of `word / WORD_STRIDE`, so that indexing it by a
 /// class's index needs no bounds check.
 const LENGTH_ENTRIES: usize = 64;
 
@@ -46,47 +46,52 @@ pub(crate) const LENGTHS_PAGE_OFFSET: usize =
 
 #[repr(C, align(4096))]
 struct Lookup {
-    _pad: [u8; MASKS_PAGE_OFFSET],
-    /// By word position (`SmallClass::word`): the class's magazine mask, zero for every other
-    /// position. Every mask fits 16 bits (`verify.rs`), and half the width puts twice the classes
-    /// on a line.
-    masks: [u16; MASK_ENTRIES],
+    _pad: [u8; BY_SIZE_PAGE_OFFSET],
     /// By `(size - 1) / QUANTUM`: entry `j` is the class of `QUANTUM * (j + 1)` bytes, which
     /// serves every size from `QUANTUM * j + 1` up to that.
     classes: [SmallClass; MAX_SMALL_SIZE / QUANTUM],
     /// By class index: the slot size, zero for every index that is not a small class. For the
     /// `Allocator` interface, which returns it.
     lengths: [u16; LENGTH_ENTRIES],
+    /// By word position (`SmallClass::word`): the class's magazine mask, zero for every other
+    /// position. Every mask fits 16 bits (`verify.rs`), and half the width puts twice the classes
+    /// on a line.
+    masks: [u16; MASK_ENTRIES],
 }
 
 const _: () = {
     use core::mem::offset_of;
-    assert!(offset_of!(Lookup, masks) == MASKS_PAGE_OFFSET);
+    assert!(align_of::<Lookup>() == 4096);
+    assert!(offset_of!(Lookup, masks) % 4096 == MASKS_PAGE_OFFSET);
     assert!(offset_of!(Lookup, classes) == BY_SIZE_PAGE_OFFSET);
     assert!(offset_of!(Lookup, lengths) % 4096 == LENGTHS_PAGE_OFFSET);
-    assert!(MASKS_PAGE_OFFSET + 2 * MASK_ENTRIES <= BY_SIZE_PAGE_OFFSET);
-    assert!(WORD_LIMIT <= MASK_ENTRIES && (WORD_LIMIT >> 2) <= LENGTH_ENTRIES);
+    assert!(MASKS_PAGE_OFFSET + 2 * MASK_ENTRIES <= 4096);
+    assert!(WORD_LIMIT <= MASK_ENTRIES && WORD_LIMIT / WORD_STRIDE <= LENGTH_ENTRIES);
     assert!(MAX_SMALL_SIZE <= u16::MAX as usize);
+};
+
+/// Each small class's magazine mask at its word position, zero at every other: what the
+/// inlined routines are handed (from [`LOOKUP`]) and what the C routines read from their copy
+/// past the slabs (`front::publish_masks`).
+pub(crate) const MASKS_BY_WORD: [u16; MASK_ENTRIES] = {
+    let mut masks = [0; MASK_ENTRIES];
+    let mut ordinal = 0;
+    while ordinal < SMALL_COUNT {
+        if let Some(class) = SmallClass::from_ordinal(ordinal) {
+            let mask = class.magazine().mask();
+            assert!(mask <= u16::MAX as usize);
+            masks[class.word()] = mask as u16;
+        }
+        ordinal += 1;
+    }
+    masks
 };
 
 /// One more than the largest value a word position can take.
 const WORD_LIMIT: usize = u8::MAX as usize + 1;
 
 static LOOKUP: Lookup = Lookup {
-    _pad: [0; MASKS_PAGE_OFFSET],
-    masks: {
-        let mut masks = [0; MASK_ENTRIES];
-        let mut ordinal = 0;
-        while ordinal < SMALL_COUNT {
-            if let Some(class) = SmallClass::from_ordinal(ordinal) {
-                let mask = class.magazine().mask();
-                assert!(mask <= u16::MAX as usize);
-                masks[class.word()] = mask as u16;
-            }
-            ordinal += 1;
-        }
-        masks
-    },
+    _pad: [0; BY_SIZE_PAGE_OFFSET],
     classes: {
         let mut table = [SmallClass::of(Class::SMALLEST); MAX_SMALL_SIZE / QUANTUM];
         let mut j = 0;
@@ -113,6 +118,7 @@ static LOOKUP: Lookup = Lookup {
         }
         lengths
     },
+    masks: MASKS_BY_WORD,
 };
 
 /// The small class of a rounded size less one, `less_one < MAX_SMALL_SIZE`.
@@ -130,7 +136,7 @@ pub(super) fn mask(class: SmallClass) -> u16 {
 /// The slot size of `class`, from the table.
 #[inline(always)]
 pub(super) fn length(class: SmallClass) -> u16 {
-    LOOKUP.lengths[class.word() >> 2]
+    LOOKUP.lengths[class.word() / WORD_STRIDE]
 }
 
 /// The table entry of word position `position`, for the proofs.
@@ -159,7 +165,7 @@ pub(crate) mod addresses {
     }
 
     pub(crate) fn length(class: SmallClass) -> usize {
-        core::ptr::from_ref(&LOOKUP.lengths[class.word() >> 2]).addr()
+        core::ptr::from_ref(&LOOKUP.lengths[class.word() / WORD_STRIDE]).addr()
     }
 
     pub(crate) fn every_mask() -> &'static [u16] {
@@ -197,7 +203,7 @@ mod tests {
         let first = SmallClass::all().next().unwrap();
         assert_eq!(
             addresses::mask(first),
-            base + MASKS_PAGE_OFFSET + 2 * first.word()
+            base + 4096 + MASKS_PAGE_OFFSET + 2 * first.word()
         );
         assert_eq!(addresses::class_byte(1), base + BY_SIZE_PAGE_OFFSET);
         assert_eq!(addresses::length(first) % 4096, LENGTHS_PAGE_OFFSET + 2);

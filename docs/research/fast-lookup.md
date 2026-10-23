@@ -1,7 +1,9 @@
 # The class lookup when the size is not a constant
 
-2026-10-22. The change is `4b4f3f4` on branch `fast-lookup`, from main `2754021`. Measured on the
-reference machine (`zen5-roofline.md`, section 2).
+2026-10-22. The change is `4b4f3f4` on branch `fast-lookup`, from main `2754021`, with the masks
+moved after the slot sizes on review; it was merged with main `1eea9af` before it went to main.
+Every measurement below is `4b4f3f4` against `2754021`, not against the main it was merged with.
+Measured on the reference machine (`zen5-roofline.md`, section 2).
 
 ## Summary
 
@@ -17,13 +19,15 @@ reference machine (`zen5-roofline.md`, section 2).
   mask in a register, and a constant class keeps it as an immediate. This rules out the two
   designs that change the Lean routines, and with them the server profile's suggestion of one
   table load giving both the word and the mask.
-- Cycles per allocate and free, averaged over four code placements: −0.21 to −0.55 on the
-  run-time-size loops (3 to 5%), unchanged on constant sizes.
+- Cycles per allocate and free, averaged over four code placements: in the executable form
+  −0.21 to −0.55 on the run-time-size loops (3 to 5%); through the GOT, the crate's default,
+  −0.32 to +0.08 (`batch_dyn` level, `pair_mix` within its spread); unchanged on constant sizes
+  in both.
 - On the log store, over five placements, the change is 1.6% lower at the mean and lower at
   every pad, within what two rounds can resolve: no regression. Of the kernel suite's 25
-  small-object jobs, 19 are faster; two cross-L3 pipelines are about 2% slower over placement,
-  and one is 16% faster, both more than the lookup can explain and probably the depot state's
-  page offset, which this change moved (below).
+  small-object jobs, 19 are faster. `pipeline t8` is 16% faster, far more than the instructions
+  saved; the gain follows the change, needs both of its halves, and its mechanism is not known
+  (below).
 
 ## What the lookup was
 
@@ -70,9 +74,9 @@ mask as an immediate (probe `v1c`, correct only for the size it ran), `pair_dyn`
    one `lea` from the slabs' address. As an integer sum it became `lea` and `or`.
 2. The class bytes, the masks and the slot sizes share one page-aligned static
    (`classes/lookup.rs`), so one base address serves every load. The masks are 16 bits (the
-   largest is 8,176), by word position, at page offsets 1536 to 2047; the class bytes stay
-   2048 bytes into the page; the slot sizes, by class index, follow them. All are clear of every
-   hot word's page offset (`front` asserts it for each class, a test checks the linked
+   largest is 8,176), by word position; the class bytes stay 2048 bytes into the first
+   page; the slot sizes, by class index, follow them, and the masks follow the slot sizes, at
+   page offsets 2176 to 2687 of the second page. All are clear of every field of a slab (`front` asserts it for each class, a test checks the linked
    addresses). `front::MASKS` is gone, and the static takes the two pages `BY_SIZE` did.
 3. `Allocator::allocate` reads the length from the slot sizes' table: one shift and one load.
 
@@ -86,7 +90,7 @@ lea   rcx,[rip+LOOKUP]
 movzx edx,BYTE PTR [rax+rcx+0x800]
 lea   rax,[rip+SLABS]
 lea   rdi,[rax+rdx*8]
-movzx esi,WORD PTR [rcx+rdx*2+0x600]
+movzx esi,WORD PTR [rcx+rdx*2+0x1880]
 ```
 
 `of_nonzero_layout` keeps its signature. Kani proves every mask entry equal to the class's
@@ -209,21 +213,19 @@ interleaved round each. Median, the change against main:
 - 19 jobs faster: the six `churn small` jobs by up to 5.7% (live=1M +0.3%), the exchanges by 0.6
   to 8.5%, the `mpmc` jobs with one side local by 1.1 to 2.8%, the local pipelines by 0.8 to
   5.9%.
-- `pipeline t8 both all-alloc` 16.5% faster, and three jobs slower by more than their spread:
-  `pipeline t2 split all-alloc` and `free-only` (+1.1%, +3.0%) and `mpmc p4 c4 both` (+2.5%).
+- `pipeline t8 both all-alloc` 16.5% faster; `mpmc p4 c4 both` 2.5% slower, level over the five
+  pads (−1.0% on the means; main's own range there is 18%).
+- `pipeline t2 split all-alloc` and `free-only` 1.1% and 3.0% slower, and 1.8 and 1.9% over the
+  pads. These jobs are bimodal for every build, at about 1.00e9 or 1.13 to 1.20e9 cycles, and
+  these sessions fell wholly in the slow mode; in the fast mode the change is level or slightly
+  ahead (the reviewer's runs). That is a mode of the job, not a cost of the change.
 
-These four were swept over the five pads, two rounds. Over placement the `mpmc` job is level
-(−1.0% over the means; main's own range 18%), the two split pipelines stay slower by 1.8 and
-1.9% (ranges 1.8 to 2.8%), and `pipeline t8` stays faster by 16.4% at every pad, with 5% fewer
-instructions and 17% fewer cycles.
-
-Seventeen percent is not two instructions a call. Both builds put `SLABS` at the start of a page,
-but `HEAP` (the depot's and back end's state, written by every slow path) moved from page offset
-0x440 to 0xd80, because `front::MASKS`' page is gone and the statics before it shifted. The
-cross-L3 pipelines run slow paths constantly, so the page offsets of what those write, against
-the slab words' and the tables', is the likely cause of both the 16% and the 2%: data
-placement, which code pads do not move. Not confirmed; pinning `HEAP`'s page offset, and
-finding which offset is fast, is a separate piece of work.
+**`pipeline t8`.** 16.4% faster at every pad, on 5% fewer instructions. Over eight builds run
+interleaved (the reviewer's), every build with the whole change is fast and both mains are slow,
+at four different page offsets of `HEAP` each way, so it is not where a static landed. Main with
+only the single `lea`, and the change with the integer sum put back, are slow too: the gain
+needs both halves. About 0.28e9 of the 0.45e9 fewer instructions are the lookup itself; the rest
+is probably less spinning in a shorter run. The mechanism is not known.
 
 ## Why the servers' fast path costs more than `pair_dyn`
 

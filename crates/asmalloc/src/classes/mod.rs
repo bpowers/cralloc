@@ -37,7 +37,7 @@ pub use divisor::Divisor;
 #[cfg(test)]
 pub(crate) use lookup::addresses as lookup_addresses;
 pub(crate) use lookup::{
-    BY_SIZE_CLEAR, BY_SIZE_PAGE_OFFSET, LENGTHS_PAGE_OFFSET, MASKS_PAGE_OFFSET,
+    BY_SIZE_CLEAR, BY_SIZE_PAGE_OFFSET, LENGTHS_PAGE_OFFSET, MASKS_BY_WORD, MASKS_PAGE_OFFSET,
 };
 pub use magazine::{
     MAGAZINE_BUDGET, MARKER, MARKER_SHIFT, MagazineSize, Marker, SLOT_BYTES, is_marker,

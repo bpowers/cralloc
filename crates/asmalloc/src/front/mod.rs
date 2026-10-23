@@ -325,17 +325,8 @@ const _: () = {
     ));
 };
 
-const MASK_TABLE: [u32; MASK_COUNT] = {
-    let mut masks = [0; MASK_COUNT];
-    let mut ordinal = 0;
-    while ordinal < SMALL_COUNT {
-        if let Some(class) = SmallClass::from_ordinal(ordinal) {
-            masks[class.word()] = class.magazine().mask() as u32;
-        }
-        ordinal += 1;
-    }
-    masks
-};
+/// The masks the C routines read, the same table the inlined routines are handed theirs from.
+const MASK_TABLE: [u16; MASK_COUNT] = crate::classes::MASKS_BY_WORD;
 
 /// The last position with a mask, which [`publish_masks`] writes last and so checks first.
 const LAST_MASKED: usize = {
