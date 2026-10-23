@@ -367,8 +367,13 @@ end:
 ```
 
 When the class is a compile-time constant, the caller's computation of the two inputs folds
-to a `lea` and a `mov`; when it is not, to a compare and a load from a table of classes by
-size.
+to a `lea` and a `mov`; when it is not, to a compare, a load from a table of classes by
+size, a `lea` for the word and a second load for the mask. The class's byte and its mask
+come from one static, placed clear of the page offsets of every slab field. The routine
+takes the mask in a register on purpose. A routine that loaded the mask itself would save
+the run-time case an instruction and cost the constant case, which has the mask as an
+immediate, half a cycle a pair or more; and the second load is not on the critical path,
+which runs through the CPU number to the slab word (`docs/research/fast-lookup.md`).
 
 An executable can read `__rseq_offset` with one load instead of two, because the linker
 gives it its own copy of the variable; that saves a cycle per pair, and a cargo feature
