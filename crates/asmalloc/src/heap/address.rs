@@ -60,6 +60,14 @@ impl<O: Os> Heap<O> {
         }
     }
 
+    /// The small class of the slot that starts at `ptr`, or `None` if no slot of a small class
+    /// starts there (including when the heap has not started): [`Heap::find`]'s
+    /// `Found::Small` answer, for less (`Back::small_slot`).
+    #[inline]
+    pub(crate) fn find_small(&self, ptr: *const u8) -> Option<SmallClass> {
+        self.back()?.small_slot(ptr)
+    }
+
     /// Allocates a large block of `size` bytes aligned to `align` (a power of two; C's 16 at
     /// least, whatever is asked). With `zero`, all of it the caller may use (its usable size)
     /// reads as zero, skipping memory the back end knows is zero. The request's C
@@ -128,7 +136,9 @@ impl<O: Os> Heap<O> {
 #[cfg(all(target_os = "linux", target_arch = "x86_64", not(miri), not(kani)))]
 pub(crate) mod process {
     use super::super::global;
+    use super::super::resize::Caller;
     use super::Found;
+    use crate::classes::SmallClass;
     use crate::os::Os;
     use core::ptr::{self, NonNull};
 
@@ -136,6 +146,12 @@ pub(crate) mod process {
     #[inline]
     pub(crate) fn find(ptr: *const u8) -> Option<Found> {
         global::process().heap().find(ptr)
+    }
+
+    /// The small class of the slot that starts at `ptr`, if one does (`Heap::find_small`).
+    #[inline(always)]
+    pub(crate) fn find_small(ptr: *const u8) -> Option<SmallClass> {
+        global::process().heap().find_small(ptr)
     }
 
     /// A large block of `size` bytes aligned to `align`, zeroed if `zero`; null if there is no
@@ -189,6 +205,25 @@ pub(crate) mod process {
         }
     }
 
+    /// The lean path of C's `realloc` (`Bound::resize_small`): the block at `ptr`, of class
+    /// `from`, resized to class `to` with its first `kept` bytes kept; `None`, having changed
+    /// nothing, when this CPU's magazine of `to` has no block to give.
+    ///
+    /// # Safety
+    ///
+    /// As for `Bound::resize_small`.
+    #[inline(always)]
+    pub(crate) unsafe fn resize_small(
+        ptr: NonNull<u8>,
+        from: SmallClass,
+        to: SmallClass,
+        kept: usize,
+    ) -> Option<NonNull<u8>> {
+        // SAFETY: the contract of `Bound::resize_small` is this function's, for the process's
+        // heap.
+        unsafe { global::process().resize_small(ptr, from, to, kept, Caller::C) }
+    }
+
     /// See `Heap::resize_in_place_by_address`.
     ///
     /// # Safety
@@ -240,7 +275,7 @@ pub(crate) mod process {
 mod tests {
     use super::*;
     use crate::SimHeap;
-    use crate::classes::MAX_SMALL_SIZE;
+    use crate::classes::{MAX_SMALL_SIZE, SmallClass};
     use core::alloc::GlobalAlloc;
 
     fn layout(size: usize, align: usize) -> Layout {
@@ -274,6 +309,45 @@ mod tests {
             );
             heap.heap.free_large(big);
             heap.dealloc(small, layout(100, 8));
+        }
+    }
+
+    /// `find_small`, which C's `realloc` takes the old class from, gives `find`'s small answer
+    /// and nothing else: the class of a block of every small class, and `None` for every
+    /// address around those blocks that starts no slot (so that `realloc` falls back to `find`,
+    /// which aborts for it), for a large block, before the heap and outside it.
+    #[test]
+    fn the_small_lookup_agrees_with_the_full_one() {
+        let heap = SimHeap::<crate::os::sim::Standard>::new();
+        assert_eq!(heap.heap.find_small(ptr_of(&0u8)), None);
+        let mut blocks = std::vec::Vec::new();
+        for class in SmallClass::all() {
+            let l = layout(class.size(), 8);
+            // SAFETY: a valid layout; freed below.
+            let p = unsafe { heap.alloc(l) };
+            assert!(!p.is_null());
+            blocks.push((p, l));
+            assert_eq!(heap.heap.find_small(p), Some(class), "{class:?}");
+            // Every 8-byte step through the block and a little either side.
+            let span = class.size().min(4096) as isize;
+            for d in (-64..span + 64).step_by(8) {
+                let q = p.wrapping_offset(d);
+                let want = match heap.heap.find(q) {
+                    Some(Found::Small(c)) => Some(c),
+                    _ => None,
+                };
+                assert_eq!(heap.heap.find_small(q), want, "{class:?} at {d}");
+            }
+        }
+        let big = heap.heap.alloc_large_aligned(50 << 10, 16, false).unwrap();
+        assert_eq!(heap.heap.find_small(big.as_ptr()), None);
+        assert_eq!(heap.heap.find_small(ptr_of(&0u8)), None);
+        // SAFETY: the test's blocks, each freed once.
+        unsafe {
+            heap.heap.free_large(big);
+            for (p, l) in blocks {
+                heap.dealloc(p, l);
+            }
         }
     }
 

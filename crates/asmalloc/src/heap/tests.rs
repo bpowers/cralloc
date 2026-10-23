@@ -220,6 +220,58 @@ fn realloc_walk<H: Inspect>(heap: &H, top: usize, full: bool) {
     unsafe { heap.dealloc(p, layout(size, align)) };
 }
 
+/// The lean path of `realloc` (`resize.rs`): `count` blocks of `from` bytes, each grown to `to`
+/// bytes and then cut to `back` bytes, all live at once, so that the pops of the new classes
+/// run dry and the pushes of the old ones run full partway through, and both misses complete
+/// as the general path and the free's slow path would. Each resize keeps its block exactly
+/// when the new size has the block's class, carries the bytes both sizes cover, and hands out
+/// a block that no live block overlaps.
+fn small_regrowth<H: Inspect>(heap: &H, count: usize, from: usize, to: usize, back: usize) {
+    let class = |size: usize| SmallClass::of_nonzero_layout(layout(size, 8)).unwrap();
+    let mut blocks: Vec<*mut u8> = (0..count)
+        .map(|i| {
+            // SAFETY: a valid, non-empty layout; the block is filled whole.
+            let p = unsafe { heap.alloc(layout(from, 8)) };
+            assert!(!p.is_null());
+            // SAFETY: as above.
+            unsafe { fill(p, from, i as u8) };
+            p
+        })
+        .collect();
+    for (old, new) in [(from, to), (to, back)] {
+        let kept = old.min(new);
+        let mut live = std::collections::BTreeSet::new();
+        for (i, p) in blocks.iter_mut().enumerate() {
+            // SAFETY: `p` is live with this layout, and `new` is a valid size.
+            let q = unsafe { heap.realloc(*p, layout(old, 8), new) };
+            assert!(!q.is_null());
+            assert_eq!(q == *p, class(old) == class(new), "{old} -> {new}");
+            // SAFETY: the first `kept` bytes were carried over; `q` is `new` bytes long.
+            unsafe {
+                assert!(holds(q, kept, i as u8), "{old} -> {new}, block {i}");
+                fill(q, new, i as u8);
+            }
+            assert!(heap.contains(q));
+            assert!(
+                live.insert(q.addr()),
+                "{old} -> {new} handed out a live block"
+            );
+            *p = q;
+        }
+        let size = class(new).size();
+        let mut sorted: Vec<usize> = live.into_iter().collect();
+        sorted.sort_unstable();
+        assert!(
+            sorted.windows(2).all(|w| w[0] + size <= w[1]),
+            "overlapping blocks"
+        );
+    }
+    for p in blocks {
+        // SAFETY: each block is live with this layout and freed once.
+        unsafe { heap.dealloc(p, layout(back, 8)) };
+    }
+}
+
 /// Zeroed allocations read as zero, also when they reuse a block that was written.
 fn zeroed<H: GlobalAlloc>(heap: &H, sizes: &[usize]) {
     for &size in sizes {
@@ -380,6 +432,18 @@ fn a_class_opens_one_run_at_start_whatever_the_clock_reads() {
 fn a_simulated_heap_resizes_in_place_and_with_headroom() {
     let heap = SimHeap::<Shape>::new();
     realloc_walk(&heap, 8 << 20, false);
+}
+
+#[test]
+fn a_simulated_heap_moves_small_blocks_up_and_down_a_class() {
+    let heap = SimHeap::<Shape>::new();
+    // Past the 128-byte class's magazine of 512 and the 256-byte class's of 256, so that both
+    // the pop and the push miss along the way.
+    let count = if cfg!(miri) { 300 } else { 1200 };
+    small_regrowth(&heap, count, 128, 256, 200);
+    // The same class both ways: nothing moves.
+    small_regrowth(&heap, 64, 100, 112, 105);
+    small_regrowth(&heap, 64, 8, 16, 9);
 }
 
 #[test]
@@ -1322,6 +1386,13 @@ mod process {
     }
 
     #[test]
+    fn the_process_heap_moves_small_blocks_up_and_down_a_class() {
+        small_regrowth(&Asmalloc, 1200, 128, 256, 200);
+        small_regrowth(&Asmalloc, 64, 100, 112, 105);
+        small_regrowth(&Asmalloc, 2000, 24, 40, 17);
+    }
+
+    #[test]
     fn the_process_heap_zeroes() {
         zeroed(&Asmalloc, &[8, 100, 4096, 40 << 10, 3 << 20]);
     }
@@ -1481,5 +1552,483 @@ mod process {
             SimAsmalloc.dealloc(p, l);
         }
         assert!(ptr::eq(SimAsmalloc::heap(), SimAsmalloc::heap()));
+    }
+}
+
+/// Probes from the review of the lean resize path (`resize.rs`).
+mod review_lean_realloc {
+    use super::*;
+    use std::collections::BTreeSet;
+    use std::format;
+
+    /// Sizes on both sides of class boundaries and of the boundary between small and large.
+    const SIZES: [usize; 27] = [
+        1,
+        7,
+        8,
+        9,
+        16,
+        24,
+        25,
+        32,
+        48,
+        64,
+        65,
+        100,
+        112,
+        113,
+        128,
+        129,
+        255,
+        256,
+        257,
+        1000,
+        4096,
+        4097,
+        MAX_SMALL_SIZE - 1,
+        MAX_SMALL_SIZE,
+        MAX_SMALL_SIZE + 1,
+        40_000,
+        70_000,
+    ];
+
+    /// Every pair of sizes at several alignments, each resize made twice so that the second
+    /// finds the magazines the first left loaded: the result is aligned, keeps the bytes both
+    /// sizes cover, stays in place exactly when both layouts have the same small class (the
+    /// design's rule for a small block), has the new layout's class, and leaves every other
+    /// live block as it was.
+    pub(super) fn every_pair<H: Inspect>(heap: &H, aligns: &[usize]) {
+        for &align in aligns {
+            // Bystanders of every small size, checked after the resizes.
+            let bystanders: Vec<(*mut u8, usize)> = SIZES
+                .iter()
+                .filter(|&&s| s <= MAX_SMALL_SIZE)
+                .flat_map(|&s| [s, s])
+                .map(|s| {
+                    // SAFETY: a valid, non-empty layout; the block is filled whole.
+                    let p = unsafe { heap.alloc(layout(s, align)) };
+                    assert!(!p.is_null());
+                    // SAFETY: as above.
+                    unsafe { fill(p, s, 0xb0) };
+                    (p, s)
+                })
+                .collect();
+            for &old in &SIZES {
+                for &new in &SIZES {
+                    for pass in 0..2 {
+                        let (lo, ln) = (layout(old, align), layout(new, align));
+                        // SAFETY: valid layouts; the block is freed once with the layout it has.
+                        unsafe {
+                            let p = heap.alloc(lo);
+                            assert!(!p.is_null());
+                            fill(p, old, 0x31);
+                            let q = heap.realloc(p, lo, new);
+                            let what = format!("{old} -> {new} align {align} pass {pass}");
+                            assert!(!q.is_null(), "{what}");
+                            assert_eq!(q.addr() % align, 0, "{what}");
+                            assert!(holds(q, old.min(new), 0x31), "{what}");
+                            let (from, to) = (super::super::small(lo), super::super::small(ln));
+                            if from.is_some() || to.is_some() {
+                                assert_eq!(q == p, from == to, "{what}");
+                            }
+                            if let Some(to) = to {
+                                assert_eq!(heap.usable(q), Some(to.size()), "{what}");
+                            }
+                            fill(q, new, 0x47);
+                            assert!(holds(q, new, 0x47), "{what}");
+                            heap.dealloc(q, ln);
+                        }
+                    }
+                }
+            }
+            for (p, s) in bystanders {
+                // SAFETY: live, as written, freed once.
+                unsafe {
+                    assert!(holds(p, s, 0xb0), "a bystander of {s} bytes changed");
+                    heap.dealloc(p, layout(s, align));
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_simulated_heap_resizes_every_pair_of_sizes_as_the_design_says() {
+        let heap = SimHeap::<Shape>::new();
+        every_pair(&heap, &[1, 8, 16, 64, 4096]);
+    }
+
+    /// A resize that moves gives the old block back. `count` blocks grown and cut back for
+    /// `rounds` rounds visit a bounded set of addresses: after the first rounds have loaded
+    /// the caches, later rounds find every block among those already seen. A lean path that
+    /// drops the old block, always or only when its push misses, takes new memory each round.
+    /// Returns the new addresses each round saw.
+    pub(super) fn regrowth_gives_blocks_back<H: Inspect>(
+        heap: &H,
+        count: usize,
+        rounds: usize,
+        small: usize,
+        big: usize,
+    ) -> Vec<usize> {
+        let mut blocks: Vec<*mut u8> = (0..count)
+            // SAFETY: a valid, non-empty layout.
+            .map(|_| unsafe { heap.alloc(layout(small, 8)) })
+            .collect();
+        let mut seen = BTreeSet::new();
+        let mut grown = Vec::new();
+        for _ in 0..rounds {
+            let before = seen.len();
+            for (old, new) in [(small, big), (big, small)] {
+                for p in blocks.iter_mut() {
+                    // SAFETY: `p` is live with this layout.
+                    *p = unsafe { heap.realloc(*p, layout(old, 8), new) };
+                    assert!(!p.is_null());
+                    seen.insert(p.addr());
+                }
+            }
+            grown.push(seen.len() - before);
+        }
+        for p in blocks {
+            // SAFETY: live with this layout, freed once.
+            unsafe { heap.dealloc(p, layout(small, 8)) };
+        }
+        grown
+    }
+
+    #[test]
+    fn a_simulated_heap_gives_back_the_blocks_a_resize_leaves() {
+        let heap = SimHeap::<Shape>::new();
+        // One block: the push never misses.
+        let grown = regrowth_gives_blocks_back(&heap, 1, 4000, 128, 256);
+        assert!(
+            grown[8..].iter().all(|&g| g == 0),
+            "one block resized back and forth keeps taking new addresses: {:?}",
+            &grown[..40]
+        );
+        // Past both magazines: pushes miss every round.
+        let grown = regrowth_gives_blocks_back(&heap, 1200, 60, 128, 256);
+        assert!(
+            grown[30..].iter().all(|&g| g == 0),
+            "1200 blocks resized back and forth keep taking new addresses: {grown:?}"
+        );
+    }
+
+    /// The C branch of the lean path (`Caller::C`, what C's `realloc` runs), on a simulated
+    /// heap of its own: blocks moved up a class and back past both magazines, so that pushes
+    /// miss every round and go to the free's slow path, give every block back.
+    #[test]
+    fn the_c_branch_of_the_lean_path_gives_back_what_a_missed_push_leaves() {
+        use super::super::resize::Caller;
+        use core::ptr::NonNull;
+        let heap = SimHeap::<Shape>::new();
+        let class = |size| SmallClass::of_nonzero_layout(layout(size, 8)).unwrap();
+        let (small, big) = (class(128), class(256));
+        let mut blocks: Vec<NonNull<u8>> = (0..1200)
+            // SAFETY: a valid, non-empty layout.
+            .map(|_| NonNull::new(unsafe { heap.alloc(layout(128, 8)) }).unwrap())
+            .collect();
+        let mut seen = BTreeSet::new();
+        let mut grown = Vec::new();
+        for _ in 0..60 {
+            let before = seen.len();
+            for (from, to) in [(small, big), (big, small)] {
+                for p in blocks.iter_mut() {
+                    // SAFETY: `p` is a live block of `from` this heap handed out, given up
+                    // when the call returns another; 128 bytes fit both classes.
+                    let moved =
+                        heap.with(|h| unsafe { h.resize_small(*p, from, to, 128, Caller::C) });
+                    // A pop that missed changed nothing: the general path would allocate.
+                    *p = match moved {
+                        Some(q) => q,
+                        None => {
+                            // SAFETY: as above, through the general path.
+                            let q = unsafe {
+                                heap.realloc(p.as_ptr(), layout(from.size(), 8), to.size())
+                            };
+                            NonNull::new(q).unwrap()
+                        }
+                    };
+                    seen.insert(p.addr());
+                }
+            }
+            grown.push(seen.len() - before);
+        }
+        for p in blocks {
+            // SAFETY: live, of the small class, freed once.
+            unsafe { heap.dealloc(p.as_ptr(), layout(128, 8)) };
+        }
+        assert!(
+            grown[30..].iter().all(|&g| g == 0),
+            "blocks moved by the C branch keep taking new addresses: {grown:?}"
+        );
+    }
+
+    #[cfg(all(target_os = "linux", target_arch = "x86_64", not(miri), not(kani)))]
+    mod process {
+        use super::*;
+        use crate::Asmalloc;
+
+        #[test]
+        fn the_process_heap_resizes_every_pair_of_sizes_as_the_design_says() {
+            every_pair(&Asmalloc, &[1, 8, 16, 64, 4096]);
+        }
+
+        #[test]
+        fn the_process_heap_gives_back_the_blocks_a_resize_leaves() {
+            let grown = regrowth_gives_blocks_back(&Asmalloc, 1, 4000, 144, 288);
+            // Other tests share the heap and may move blocks of these classes now and then;
+            // a lean path that drops the old block would take new ones every round.
+            let late = &grown[100..];
+            assert!(
+                late.iter().filter(|&&g| g == 0).count() * 4 >= late.len() * 3,
+                "one block resized back and forth keeps taking new addresses: {:?}",
+                &grown[..40]
+            );
+        }
+
+        /// `GlobalAlloc::realloc` forbids a size that overflows `isize` when rounded up to the
+        /// alignment, so this caller is wrong. Main returned null for it. The lean path builds
+        /// the layout unchecked first, and a build with debug assertions stops in the standard
+        /// library's precondition check, where HEAP-06 says the caller "meets the same check".
+        #[test]
+        fn a_realloc_to_a_size_no_layout_can_have_returns_null() {
+            let l = layout(64, 8);
+            // SAFETY: a valid layout; the block is freed once. The resize breaks `realloc`'s
+            // size rule on purpose.
+            unsafe {
+                let p = Asmalloc.alloc(l);
+                assert!(Asmalloc.realloc(p, l, isize::MAX as usize).is_null());
+                Asmalloc.dealloc(p, l);
+            }
+        }
+    }
+
+    /// A block moved down a class writes nothing past the block it lands in. Blocks of the
+    /// smaller class are allocated and filled, every other one freed, so that the blocks the
+    /// shrinks pop lie between live ones; then bigger blocks are cut to the smaller class by
+    /// `shrink`, and every live neighbour must hold what it held.
+    fn shrinks_leave_neighbours<H: Inspect>(
+        heap: &H,
+        shrink: impl Fn(*mut u8, Layout, Layout) -> *mut u8,
+    ) {
+        let (small, big) = (layout(100, 8), layout(250, 8));
+        let blocks: Vec<*mut u8> = (0..256)
+            .map(|i| {
+                // SAFETY: a valid, non-empty layout, filled whole.
+                let p = unsafe { heap.alloc(small) };
+                assert!(!p.is_null());
+                // SAFETY: as above.
+                unsafe { fill(p, 100, i as u8) };
+                p
+            })
+            .collect();
+        let (live, gone): (Vec<_>, Vec<_>) = blocks
+            .into_iter()
+            .enumerate()
+            .partition(|(i, _)| i % 2 == 0);
+        for (_, p) in gone {
+            // SAFETY: live with this layout, freed once.
+            unsafe { heap.dealloc(p, small) };
+        }
+        let mut cut = Vec::new();
+        for _ in 0..128 {
+            // SAFETY: a valid layout; the block is filled whole and handed to `shrink`.
+            let p = unsafe { heap.alloc(big) };
+            assert!(!p.is_null());
+            // SAFETY: as above.
+            unsafe { fill(p, 250, 0xee) };
+            let q = shrink(p, big, small);
+            assert!(!q.is_null());
+            // SAFETY: the first 100 bytes were kept.
+            assert!(unsafe { holds(q, 100, 0xee) });
+            cut.push(q);
+        }
+        for &(i, p) in &live {
+            // SAFETY: live, filled at the start.
+            let kept = unsafe { holds(p, 100, i as u8) };
+            assert!(kept, "a live neighbour {i} was overwritten");
+        }
+        for p in live.into_iter().map(|(_, p)| p).chain(cut) {
+            // SAFETY: each is a live block of the small class, freed once.
+            unsafe { heap.dealloc(p, small) };
+        }
+    }
+
+    #[test]
+    fn a_simulated_heap_moves_a_block_down_a_class_within_the_block_it_lands_in() {
+        let heap = SimHeap::<Shape>::new();
+        // SAFETY: `p` is a live block of `old`, given up when the call succeeds.
+        shrinks_leave_neighbours(&heap, |p, old, new| unsafe {
+            heap.realloc(p, old, new.size())
+        });
+        shrinks_leave_neighbours(&heap, |p, old, new| {
+            // SAFETY: as above, through `Allocator::shrink`'s path.
+            unsafe { heap.shrink_for_test(p, old, new) }.unwrap().0
+        });
+    }
+
+    #[cfg(all(target_os = "linux", target_arch = "x86_64", not(miri), not(kani)))]
+    #[test]
+    fn the_process_heap_moves_a_block_down_a_class_within_the_block_it_lands_in() {
+        use crate::Asmalloc;
+        // SAFETY: `p` is a live block of `old`, given up when the call succeeds.
+        shrinks_leave_neighbours(&Asmalloc, |p, old, new| unsafe {
+            Asmalloc.realloc(p, old, new.size())
+        });
+    }
+
+    /// What `Allocator::grow_zeroed` and `shrink` run (`Bound::grow_block`, `shrink_block`),
+    /// through the simulated heap's stable hooks, so that the gate runs it without the
+    /// `allocator-api` feature: every pair of sizes at several alignments. A grow into a block
+    /// an earlier tenant left dirty keeps the bytes the old layout covered, keeps or zeroes the
+    /// rest of the old block, and zeroes everything past it to the length returned; a shrink
+    /// keeps the bytes the new layout covers; a small block stays exactly when both layouts
+    /// have its class.
+    #[test]
+    fn a_simulated_heap_grows_zeroed_and_shrinks_by_the_allocator_paths() {
+        let heap = SimHeap::<Shape>::new();
+        for align in [1, 8, 16, 64] {
+            for &old in &SIZES {
+                for &new in &SIZES {
+                    let (lo, ln) = (layout(old, align), layout(new, align));
+                    let what = format!("{old} -> {new} align {align}");
+                    let same = super::super::small(lo).is_some()
+                        && super::super::small(lo) == super::super::small(ln);
+                    // SAFETY: valid layouts; each block is freed once with a layout that fits
+                    // it.
+                    unsafe {
+                        if new >= old {
+                            // Dirty blocks of the new class, back in the magazine.
+                            let dirty: Vec<*mut u8> = (0..8).map(|_| heap.alloc(ln)).collect();
+                            for &d in &dirty {
+                                d.write_bytes(0xaa, heap.usable(d).unwrap());
+                            }
+                            for &d in &dirty {
+                                heap.dealloc(d, ln);
+                            }
+                        }
+                        let p = heap.alloc(lo);
+                        assert!(!p.is_null(), "{what}");
+                        let had = heap.usable(p).unwrap();
+                        fill(p, old, 7);
+                        p.add(old).write_bytes(0x55, had - old);
+                        let (q, len) = if new >= old {
+                            heap.grow_zeroed_for_test(p, lo, ln)
+                        } else {
+                            heap.shrink_for_test(p, lo, ln)
+                        }
+                        .unwrap();
+                        let what = format!("{what}: {had} -> {len}");
+                        assert!(len >= new, "{what}");
+                        assert_eq!(q.addr() % align, 0, "{what}");
+                        assert!(holds(q, old.min(new), 7), "{what}");
+                        if super::super::small(lo).is_some() {
+                            assert_eq!(q == p, same, "{what}");
+                        }
+                        if new >= old {
+                            for i in old..had.min(len) {
+                                let b = q.add(i).read();
+                                assert!(b == 0 || b == 0x55, "{what}: byte {i} is {b:#x}");
+                            }
+                            for i in had..len {
+                                assert_eq!(q.add(i).read(), 0, "{what}: byte {i}");
+                            }
+                        }
+                        heap.dealloc(q, ln);
+                    }
+                }
+            }
+        }
+    }
+
+    /// The lean path of `Allocator::grow_zeroed`: a small block grown into a block of another
+    /// class that an earlier tenant left dirty. The bytes the old layout covered arrive, the
+    /// bytes from there to the old block's end are kept or zero, and everything past that,
+    /// to the length returned, reads as zero.
+    #[cfg(feature = "allocator-api")]
+    mod allocator {
+        use super::*;
+        use core::alloc::Allocator;
+        use core::ptr::NonNull;
+
+        fn zeroed_grow<A: Allocator>(heap: &A, old: usize, new: usize, align: usize) {
+            let (lo, ln) = (layout(old, align), layout(new, align));
+            // SAFETY: valid layouts; each block is freed once with a layout that fits it.
+            unsafe {
+                // Dirty blocks of the new class, back in the magazine.
+                let dirty: Vec<NonNull<[u8]>> =
+                    (0..8).map(|_| heap.allocate(ln).unwrap()).collect();
+                for d in &dirty {
+                    d.cast::<u8>().as_ptr().write_bytes(0xaa, d.len());
+                }
+                for d in &dirty {
+                    heap.deallocate(d.cast(), ln);
+                }
+                let p = heap.allocate(lo).unwrap();
+                let had = p.len();
+                let p = p.cast::<u8>();
+                fill(p.as_ptr(), old, 7);
+                p.as_ptr().add(old).write_bytes(0x55, had - old);
+                let q = heap.grow_zeroed(p, lo, ln).unwrap();
+                let len = q.len();
+                let q = q.cast::<u8>().as_ptr();
+                let what = format!("{old} -> {new} align {align}: {had} -> {len}");
+                assert!(len >= new, "{what}");
+                assert!(holds(q, old, 7), "{what}");
+                for i in old..had.min(len) {
+                    let b = q.add(i).read();
+                    assert!(b == 0 || b == 0x55, "{what}: byte {i} is {b:#x}");
+                }
+                for i in had..len {
+                    assert_eq!(q.add(i).read(), 0, "{what}: byte {i}");
+                }
+                heap.deallocate(NonNull::new(q).unwrap(), layout(len, align));
+            }
+        }
+
+        fn shrink<A: Allocator>(heap: &A, old: usize, new: usize, align: usize) {
+            let (lo, ln) = (layout(old, align), layout(new, align));
+            // SAFETY: valid layouts; each block is freed once with a layout that fits it.
+            unsafe {
+                let p = heap.allocate(lo).unwrap();
+                let had = p.len();
+                let p = p.cast::<u8>();
+                fill(p.as_ptr(), old, 9);
+                let q = heap.shrink(p, lo, ln).unwrap();
+                let len = q.len();
+                let what = format!("{old} -> {new} align {align}: {had} -> {len}");
+                assert!(len >= new, "{what}");
+                assert!(holds(q.cast::<u8>().as_ptr(), new, 9), "{what}");
+                if super::super::super::small(lo).is_some() {
+                    let same = super::super::super::small(lo) == super::super::super::small(ln);
+                    assert_eq!(q.cast::<u8>() == p, same, "{what}");
+                }
+                heap.deallocate(q.cast(), layout(len, align));
+            }
+        }
+
+        fn pairs<A: Allocator>(heap: &A) {
+            for align in [1, 8, 16, 64] {
+                for &old in &SIZES {
+                    for &new in &SIZES {
+                        if new >= old {
+                            zeroed_grow(heap, old, new, align);
+                        } else {
+                            shrink(heap, old, new, align);
+                        }
+                    }
+                }
+            }
+        }
+
+        #[test]
+        fn a_simulated_heap_zeroes_what_a_grow_adds_and_keeps_what_a_shrink_leaves() {
+            pairs(&SimHeap::<Shape>::new());
+        }
+
+        #[cfg(all(target_os = "linux", target_arch = "x86_64", not(miri), not(kani)))]
+        #[test]
+        fn the_process_heap_zeroes_what_a_grow_adds_and_keeps_what_a_shrink_leaves() {
+            pairs(&crate::Asmalloc);
+        }
     }
 }

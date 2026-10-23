@@ -24,6 +24,9 @@
 //!   straight from the back end (`depot::slow`).
 //! - **Large objects** (`large.rs`) skip the caches and take their class from the address. A
 //!   large allocation or free counts as a slow path and runs a heartbeat.
+//! - **Resizes** of a small block to a small class, which is nearly all of them, take a lean
+//!   path (`resize.rs`): each class found once, then nothing, or a pop, a copy and a push.
+//!   Everything else goes to the general resize (`large.rs`), out of line.
 //! - **`collect`** returns everything that can be returned now: the depot's sweep of every
 //!   slab and stack (`Cache::collect`), then the back end's purge of what is free.
 //! - **`maintain`** is one round of the clocked maintenance for the whole heap
@@ -33,6 +36,7 @@
 
 mod address;
 mod large;
+mod resize;
 mod source;
 
 #[cfg(feature = "allocator-api")]

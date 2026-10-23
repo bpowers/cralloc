@@ -66,7 +66,7 @@ impl Machine for Processor<'_> {
 
 /// The twins on a heap's slabs, for one call: a copyable form of [`Twin`].
 #[derive(Clone, Copy)]
-struct SimRoutines<'a> {
+pub(super) struct SimRoutines<'a> {
     slabs: &'a Slabs,
     processor: Processor<'a>,
 }
@@ -215,12 +215,13 @@ impl<S: Shape> SimHeap<S> {
     }
 
     /// Grows the block at `ptr` from `old` to `new` with the bytes past `old` reading as zero,
-    /// as `Allocator::grow_zeroed` does, for tests on stable Rust. Returns the block and the
-    /// length the caller may use, or `None` if there was no memory.
+    /// by what `Allocator::grow_zeroed` runs (`Bound::grow_block`), for tests on stable Rust.
+    /// Returns the block and the length the caller may use, or `None` if there was no memory.
     ///
     /// # Safety
     ///
-    /// As for `GlobalAlloc::realloc` with `ptr` and `old`; `new` is at least as large.
+    /// As for `GlobalAlloc::realloc` with `ptr` and `old`, which is not empty; `new` is at
+    /// least as large.
     #[cfg(test)]
     pub(crate) unsafe fn grow_zeroed_for_test(
         &self,
@@ -230,13 +231,34 @@ impl<S: Shape> SimHeap<S> {
     ) -> Option<(*mut u8, usize)> {
         let ptr = NonNull::new(ptr)?;
         // SAFETY: `ptr` is a live block of this heap that `old` describes, which the caller
-        // gives up unless the grow fails, and `new` is not empty.
-        let grant = self.with(|heap| unsafe { heap.resize(ptr, old, new, true) })?;
+        // gives up unless the grow fails, and `old` is not empty.
+        let grant = self.with(|heap| unsafe { heap.grow_block(ptr, old, new, true) })?;
+        Some((grant.ptr.as_ptr(), grant.len))
+    }
+
+    /// Shrinks the block at `ptr` from `old` to `new`, by what `Allocator::shrink` runs for a
+    /// size that is not zero (`Bound::shrink_block`), for tests on stable Rust. Returns the
+    /// block and the length the caller may use, or `None` if there was no memory.
+    ///
+    /// # Safety
+    ///
+    /// As for `GlobalAlloc::realloc` with `ptr` and `old`; `new` is not empty and at most as
+    /// large.
+    #[cfg(test)]
+    pub(crate) unsafe fn shrink_for_test(
+        &self,
+        ptr: *mut u8,
+        old: Layout,
+        new: Layout,
+    ) -> Option<(*mut u8, usize)> {
+        let ptr = NonNull::new(ptr)?;
+        // SAFETY: as in `grow_zeroed_for_test`, and `new` is not empty.
+        let grant = self.with(|heap| unsafe { heap.shrink_block(ptr, old, new) })?;
         Some((grant.ptr.as_ptr(), grant.len))
     }
 
     /// Runs `f` with the heap and the twins of a leased simulated thread.
-    fn with<T>(&self, f: impl FnOnce(Bound<'_, SimOs<S>, SimRoutines<'_>>) -> T) -> T {
+    pub(super) fn with<T>(&self, f: impl FnOnce(Bound<'_, SimOs<S>, SimRoutines<'_>>) -> T) -> T {
         let lease = self.lease();
         let processor = match &lease {
             Some(lease) => Processor::Thread(self.heap.os().thread(lease.index)),
@@ -280,18 +302,8 @@ unsafe impl<S: Shape> GlobalAlloc for SimHeap<S> {
     }
 
     unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
-        let (Some(block), Ok(new)) = (
-            NonNull::new(ptr),
-            Layout::from_size_align(new_size, layout.align()),
-        ) else {
-            return ptr::null_mut();
-        };
-        self.with(|heap| {
-            // SAFETY: the trait method's own contract, for a block this heap returned;
-            // `new_size` is not zero, by `realloc`'s contract.
-            unsafe { heap.resize(block, layout, new, false) }
-                .map_or(ptr::null_mut(), |grant| grant.ptr.as_ptr())
-        })
+        // SAFETY: the trait method's own contract, for a block this heap returned.
+        self.with(|heap| unsafe { heap.realloc(ptr, layout, new_size) })
     }
 }
 

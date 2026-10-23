@@ -50,7 +50,7 @@ pub mod table;
 
 use self::errno::{EINVAL, ENOMEM};
 use self::slow::{allocate, or_enomem};
-use crate::classes::{C_ALIGN, Class};
+use crate::classes::{C_ALIGN, Class, SmallClass};
 use crate::heap::{Found, process};
 use crate::os::Os;
 use crate::os::linux::LinuxOs;
@@ -141,10 +141,47 @@ pub unsafe extern "C" fn realloc(ptr: *mut c_void, size: usize) -> *mut c_void {
         unsafe { free(ptr) };
         return ptr::null_mut();
     }
-    let found = find_or_abort(
-        old,
-        "realloc of a pointer that is not a block of asmalloc's heap",
-    );
+    // The lean path (`heap::resize`): a small block to a small class. The old class comes from
+    // the region table and the slot arithmetic alone (`find_small`); anything else, a pointer
+    // that starts no small slot included, takes the general path, which finds it or aborts.
+    let found = match (process::find_small(old.as_ptr()), small_class(size)) {
+        (Some(from), Some(to)) => {
+            let kept = from.size().min(size);
+            // SAFETY: MOD-05.
+            if let Some(new) = unsafe { process::resize_small(old, from, to, kept) } {
+                return new.as_ptr().cast();
+            }
+            Found::Small(from)
+        }
+        _ => find_or_abort(
+            old,
+            "realloc of a pointer that is not a block of asmalloc's heap",
+        ),
+    };
+    // SAFETY: MOD-03. the caller's promise, which the lean path left as it found it.
+    unsafe { realloc_other(old, found, size) }
+}
+
+/// The small class of `malloc(size)`, for a size of at least one byte, from the inlined lookup
+/// the Rust fast path uses: C's rule that a block of 16 bytes or more is 16-aligned is that
+/// alignment (`Class::of_c`). `None` for a size with no small class.
+#[inline(always)]
+fn small_class(size: usize) -> Option<SmallClass> {
+    let align = if size >= C_ALIGN { C_ALIGN } else { 1 };
+    SmallClass::of_nonzero(size, align)
+}
+
+/// C's `realloc` of what its lean path does not take: a large block on either side, or a pop
+/// that missed.
+///
+/// # Safety
+///
+/// As for [`realloc`], with `old` not null, `found` what the heap found there, and `size` not
+/// zero.
+#[cold]
+#[inline(never)]
+unsafe fn realloc_other(old: NonNull<u8>, found: Found, size: usize) -> *mut c_void {
+    let ptr = old.as_ptr().cast::<c_void>();
     let Ok(layout) = Layout::from_size_align(size, 1) else {
         errno::set(ENOMEM);
         return ptr::null_mut();

@@ -1201,6 +1201,22 @@ impl<'a, O: Os> Back<'a, O> {
         }
     }
 
+    /// The small class of the slot `ptr` is the start of (handed out or not), or `None` if it
+    /// starts no slot of a small class: [`Back::lookup`]'s answer for small classes, without the
+    /// class's host and layout, which only large classes need. The region table, then the plan's
+    /// slot arithmetic (`Plan::slot_at`), whose bound is the layout's slot count for a small
+    /// class (`slots_in_region`). For C's `realloc`, which takes a block by its address alone.
+    #[inline]
+    pub fn small_slot(&self, ptr: *const u8) -> Option<SmallClass> {
+        let location = self.space.locate(ptr)?;
+        let RegionTag::Class(class) = self.state.table.get(location.region) else {
+            return None;
+        };
+        let small = class.small()?;
+        self.space.plan().slot_at(location, class)?;
+        Some(small)
+    }
+
     /// What `ptr` is the start of, if anything: a slot of a class (handed out or not), or a run
     /// of regions. One load from the region table, then arithmetic.
     pub fn lookup(&self, ptr: *const u8) -> Option<Kind> {

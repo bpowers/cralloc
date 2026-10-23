@@ -64,8 +64,8 @@ impl<O: Os, R: Routines + Copy> Bound<'_, O, R> {
             return self.allocate(new, zero);
         }
         // SAFETY: `ptr` is a live block that `old` fits, which the caller gives up unless the
-        // grow fails, and `new` is not empty.
-        let grant = unsafe { self.resize(ptr, old, new, zero) }.ok_or(AllocError)?;
+        // grow fails, and `old` is not empty.
+        let grant = unsafe { self.grow_block(ptr, old, new, zero) }.ok_or(AllocError)?;
         Ok(NonNull::slice_from_raw_parts(grant.ptr, grant.len))
     }
 
@@ -86,7 +86,7 @@ impl<O: Os, R: Routines + Copy> Bound<'_, O, R> {
             return Ok(dangling(new));
         }
         // SAFETY: as in `grow`, and `new` is not empty.
-        let grant = unsafe { self.resize(ptr, old, new, false) }.ok_or(AllocError)?;
+        let grant = unsafe { self.shrink_block(ptr, old, new) }.ok_or(AllocError)?;
         Ok(NonNull::slice_from_raw_parts(grant.ptr, grant.len))
     }
 }
