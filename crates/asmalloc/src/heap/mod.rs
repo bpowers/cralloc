@@ -351,7 +351,7 @@ impl<'a, O: Os, R: Routines + Copy> Bound<'a, O, R> {
     #[inline(always)]
     fn grant_small(self, class: SmallClass, layout: Layout, zero: Zero) -> Option<Grant> {
         let ptr = NonNull::new(self.alloc_small(class))?;
-        let len = class.size();
+        let len = class.length();
         let zeroed = match zero {
             Zero::No => 0,
             Zero::Requested => layout.size(),

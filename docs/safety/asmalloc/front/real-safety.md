@@ -37,15 +37,18 @@ below are those sections, discharged once here for every call in the file.
   stated under "What is trusted" in `docs/design.md`, and shown by the ignored test
   `limitation_a_handler_that_registers_a_thread_inside_its_first_sequence_unprotects_it` in `front/area.rs`.
 - (W): every word address comes from `Front::word(class)` for a `SmallClass`: the address of
-  `SLABS`'s first slab plus `Field::hot(class).offset()`, which is 8 times the class's word
-  position, `4 c + 2` for class index `c`: bytes 16 to 23 of chunk `c`, below 184
+  `SLABS`'s first slab plus `Field::hot(class).offset()` (formed as a pointer offset, then taken
+  as an address), which is 8 times the class's word
+  position, `4 c + 3` for class index `c`: bytes 24 to 31 of chunk `c`, below 184
   (`front/slab.rs`, with compile-time assertions), so a word of slab 0 below the
   specification's 512. `SLABS` is the `Front` static, whose slabs are at offset 0 (a compile-time
   assertion), so its symbol, which the specification calls `SLABS`, is the first slab's address.
-- (C): the mask is `front::mask(class)`, the entry of `front::MASKS` at the class's word position, built from
-  `SmallClass::magazine().mask()`; `MagazineSize` keeps `n` a power of two from 4 to 256, so
-  `k` is 2 to 8. A test checks each size's mask against the one the routines were proved for
-  (`crate::spec`, which the Lean emitter writes).
+- (C): the mask is `SmallClass::mask`, the entry of the class lookup's mask table
+  (`classes/lookup.rs`) at the class's word position, built from `SmallClass::magazine().mask()`;
+  `MagazineSize` keeps `n` a power of two from 4 to 1,024, so `k` is 2 to 10. The Kani harness
+  `every_mask_entry_is_its_classs_mask_or_zero` (`classes/verify.rs`) proves that entry equal to
+  the magazine's mask for every class, and a test checks each size's mask against the one the
+  routines were proved for (`crate::spec`, which the Lean emitter writes).
 - (L): on glibc, `__rseq_offset` is glibc's and the rseq area is in glibc's static TLS for the
   thread; on musl, the word is the crate's own in `.rodata` and the area the crate's own in the
   thread's static TLS (FRONT-01, `front/area-safety.md`), neither inside `SLABS`, a static of its
@@ -119,7 +122,7 @@ and so is every value derived from one.
 
 ## REAL-01: the inlined routines (`slab_pop`, `slab_push`, `current_cpu`)
 
-**Proof.** `pop` and `push` pass `Front::word(class)` and `front::mask(class)` for a
+**Proof.** `pop` and `push` pass `Front::word(class)` and `SmallClass::mask` for a
 `SmallClass`, under (W) and (C); (R), (L) and (S) hold as above. `current_cpu` only reads
 `__rseq_offset` and `cpu_id`. On musl, `cpu` calls `area::register` when it reads -1, between
 routines, which keeps (R) for the routines that follow; what it cannot keep is (R) for a routine
