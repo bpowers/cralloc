@@ -225,7 +225,37 @@ interleaved (the reviewer's), every build with the whole change is fast and both
 at four different page offsets of `HEAP` each way, so it is not where a static landed. Main with
 only the single `lea`, and the change with the integer sum put back, are slow too: the gain
 needs both halves. About 0.28e9 of the 0.45e9 fewer instructions are the lookup itself; the rest
-is probably less spinning in a shorter run. The mechanism is not known.
+is probably less spinning in a shorter run.
+
+**A bounded look at the mechanism** (later the same day; `bench/probes/t8`). Three diagnostic
+builds of the workloads: `pre`, main before this change (`2754021`); `post`, main with it
+(`2d208d4`); and `delay`, `post` with the slab word's address multiplied by a run-time 1 in the
+inlined fast path, which puts three cycles on the path from the size to the routine's slab-word
+load and adds two instructions. Each counts, per CPU, the Rust slow paths and every depot stack
+push and pop with its failed compare-and-swaps; the fast paths are untouched. Benchrun, three
+interleaved sessions, ns an allocation (medians, runs within 0.06):
+
+| | ns an allocation | slow paths an allocation | failed CASes | cycles / instructions an allocation (`perf stat`, all threads) |
+|---|---:|---:|---:|---|
+| `pre` | 4.18 | 0.0012 | about 80 in 70 million | 206 / 147 |
+| `post` | 3.48 | 0.0012 | about 90 | 169 / 140 |
+| `delay` | 4.26 | 0.0013 | about 75 | 208 / 149 |
+
+- Neither side collides more on main: slow paths, depot traffic and retries are the same in all
+  three, a slow path in about 800 allocations and a failed compare-and-swap in a million.
+  Store-to-load interlocks (`ls_bad_status2.stli_other`, 0.53 to 0.59 an allocation) are level
+  too, and cycles waiting on a load fall by only 6 of the 36 cycles saved.
+- Three cycles of latency on the lookup's word address, two instructions, take the whole gain
+  back, and a little more. So the job is bound by the latency of the fast path's chain from the
+  size to the slab word, not by what it executes beside it. Each of the eight stages frees an
+  object whose size it reads from the object itself, which the previous stage wrote on another
+  core, so the size arrives late, the class chain and not the CPU number is the long one, and
+  the change took a cycle or two off it.
+- The response is not proportional: a few cycles a call move the job by a sixth, both ways. A
+  two-sided pipeline runs at the pace of its slower side, and the other side spins (the
+  instructions that are neither lookup nor delay); a change that moves which side is slower, or
+  how long it waits, moves the whole job. Which side, and why the threshold sits there, was not
+  found in the time given. That part is unknown.
 
 ## Why the servers' fast path costs more than `pair_dyn`
 
