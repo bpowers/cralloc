@@ -103,7 +103,10 @@ lints() {
   # Not --all-features: some crates have features that need nightly (the testkit's
   # `allocator-api`). The allocator's `sim` feature is linted on its own.
   cargo clippy --workspace --all-targets --quiet -- -D warnings &&
-    cargo clippy -p asmalloc --all-targets --features sim --quiet -- -D warnings
+    cargo clippy -p asmalloc --all-targets --features sim --quiet -- -D warnings &&
+    # The build without the background thread is the one that asks nothing of a C library
+    # (CLAUDE.md), and nothing else builds it.
+    cargo clippy -p asmalloc --all-targets --no-default-features --quiet -- -D warnings
 }
 
 # The musl build: the allocator brings and registers its own rseq area there (front/area.rs).
