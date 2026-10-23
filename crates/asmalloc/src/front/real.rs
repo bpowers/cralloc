@@ -15,11 +15,11 @@
 //! a popped address takes the exposed provenance back; the heap exposes its reservation's
 //! provenance when it starts, so every object address has some to take.
 
+use super::SLABS;
 use super::generated::x86_64::slab as outline;
 use super::generated::x86_64_inline::slab as inline;
 use super::routines::{Routines, StackPop, StackPush, StoreIfEqual};
 use super::slab::{Cpu, Field, Slabs};
-use super::{SLABS, mask};
 use crate::classes::SmallClass;
 use core::ptr::{self, NonNull};
 
@@ -54,7 +54,7 @@ unsafe impl Routines for Real {
     #[inline(always)]
     fn pop(&self, class: SmallClass) -> Option<NonNull<u8>> {
         // SAFETY: REAL-01.
-        let address = unsafe { inline::slab_pop(SLABS.word(class), mask(class) as usize) };
+        let address = unsafe { inline::slab_pop(SLABS.word(class), class.mask()) };
         NonNull::new(ptr::with_exposed_provenance_mut(address))
     }
 
@@ -62,7 +62,7 @@ unsafe impl Routines for Real {
     fn push(&self, class: SmallClass, object: NonNull<u8>) -> bool {
         let object = object.as_ptr().expose_provenance();
         // SAFETY: REAL-01.
-        unsafe { inline::slab_push(SLABS.word(class), mask(class) as usize, object) }
+        unsafe { inline::slab_push(SLABS.word(class), class.mask(), object) }
     }
 
     #[inline]

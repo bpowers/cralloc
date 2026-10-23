@@ -143,8 +143,13 @@ for glibc) and profile, then runs them. mimalloc and jemalloc are called
 the way the `mimalloc` and `tikv-jemallocator` crates call them. Without `MI_LIB_DIR` the
 mimalloc variants are skipped.
 
-Single-thread workloads (`pair_const`, `pair_box`, `pair_dyn`, `batch_const`, `churn`) report
-user-space cycles and instructions per operation. Cross-thread workloads report nanoseconds per
+Single-thread workloads (`pair_const`, `pair_box`, `pair_dyn`, `batch_const`, `batch_dyn`,
+`pair_mix`, `batch_mix`, `churn`) report user-space cycles and instructions per allocate and free.
+`_dyn` hides a fixed size from the compiler; `_mix` cycles through the sizes the server profile
+found. Building with `RA_PAD=N` (a multiple of 16; loops start 16-aligned) moves each of their
+loops by N bytes, to average a comparison over
+code placements (`docs/research/fast-lookup.md`); `RF_SINGLE_ONLY=1` skips the cross-thread
+workloads. Cross-thread workloads report nanoseconds per
 object that each side spent working (waiting is excluded), and wall time:
 
 | Workload | Shape |

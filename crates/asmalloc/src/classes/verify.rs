@@ -257,3 +257,38 @@ fn small_classes_have_magazines_within_budget() {
         }
     }
 }
+
+/// The inlined fast paths' mask table: at each small class's word position, the mask of its
+/// magazines, which `front::real` hands to the routines, proved for exactly those masks; at
+/// every other position, zero.
+#[kani::proof]
+fn every_mask_entry_is_its_classs_mask_or_zero() {
+    let position: u8 = kani::any();
+    let entry = lookup::mask_entry(position) as usize;
+    let p = position as usize;
+    let index = p / WORD_STRIDE;
+    if p % WORD_STRIDE == WORD_START && index >= 1 && index <= SMALL_COUNT {
+        let class = SmallClass::from_ordinal(index - 1).unwrap();
+        assert!(class.word() == p);
+        assert!(entry == class.magazine().mask());
+        assert!(class.mask() == class.magazine().mask());
+    } else {
+        assert!(entry == 0);
+    }
+}
+
+/// The slot sizes' table: at each small class's index, its size, which `Allocator::allocate`
+/// returns as the block's length; at every other index, zero.
+#[kani::proof]
+fn every_length_entry_is_its_classs_size_or_zero() {
+    let index: usize = kani::any();
+    kani::assume(index < 64);
+    let entry = lookup::length_entry(index) as usize;
+    if index >= 1 && index <= SMALL_COUNT {
+        let class = Class::from_index(index as u8).unwrap();
+        assert!(entry == class.size());
+        assert!(class.small().unwrap().length() == class.size());
+    } else {
+        assert!(entry == 0);
+    }
+}
