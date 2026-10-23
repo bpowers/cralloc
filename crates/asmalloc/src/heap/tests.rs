@@ -1786,9 +1786,10 @@ mod review_lean_realloc {
         }
 
         /// `GlobalAlloc::realloc` forbids a size that overflows `isize` when rounded up to the
-        /// alignment, so this caller is wrong. Main returned null for it. The lean path builds
-        /// the layout unchecked first, and a build with debug assertions stops in the standard
-        /// library's precondition check, where HEAP-06 says the caller "meets the same check".
+        /// alignment, so this caller is wrong, and the allocator answers it with null. The lean
+        /// path once built the new layout unchecked, and a build with debug assertions stopped
+        /// in the standard library's precondition check; it now looks the class up from the
+        /// size and alignment and builds no layout.
         #[test]
         fn a_realloc_to_a_size_no_layout_can_have_returns_null() {
             let l = layout(64, 8);
