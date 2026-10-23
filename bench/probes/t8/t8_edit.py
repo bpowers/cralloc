@@ -43,8 +43,10 @@ pub struct Table(pub [AtomicU64; ROW * ROWS]);
 #[unsafe(no_mangle)]
 pub static ASMALLOC_T8PROF: Table = Table([const { AtomicU64::new(0) }; ROW * ROWS]);
 
-/// One: a run-time value the compiler cannot fold, for the delay variant.
-pub static ONE: AtomicUsize = AtomicUsize::new(1);
+/// One: a run-time value the compiler cannot fold, for the delay variant. Exported, or LLVM
+/// sees that nothing stores to it and folds the load.
+#[unsafe(no_mangle)]
+pub static ASMALLOC_T8_ONE: AtomicUsize = AtomicUsize::new(1);
 
 #[inline(always)]
 fn row() -> usize {
@@ -127,7 +129,7 @@ if DELAY:
     sub("crates/asmalloc/src/front/mod.rs", """            .wrapping_add(Field::hot(class).offset())
             .addr()""", """            .wrapping_add(Field::hot(class).offset())
             .addr()
-            .wrapping_mul(crate::prof::ONE.load(core::sync::atomic::Ordering::Relaxed))""")
+            .wrapping_mul(crate::prof::ASMALLOC_T8_ONE.load(core::sync::atomic::Ordering::Relaxed))""")
 
 sub("bench/workloads/src/main.rs", """fn main() {
     bench_alloc::init();""", """fn main() {

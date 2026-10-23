@@ -15,7 +15,7 @@ commit="${1:-HEAD}"
 common=$(git -C "$W" rev-parse --path-format=absolute --git-common-dir)/..
 export BENCH_BASELINES="${BENCH_BASELINES:-$common/bench/baselines/out}"
 unset RUSTFLAGS CARGO_ENCODED_RUSTFLAGS BENCH_LAYOUT_PAD
-for spec in pre:2754021 post:$commit delay:$commit; do
+for spec in ${T8_BUILDS:-pre:2754021 post:$commit delay:$commit}; do
   name="${spec%%:*}" rev="${spec#*:}"
   src="$W/target/src-t8-$name"
   rm -rf "$src" && mkdir -p "$src"
