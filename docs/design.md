@@ -646,7 +646,10 @@ So there is a background thread, and by default it starts itself, once two thing
 true together: the process holds more free and parked memory than the floor of the
 allowance (see "Sizing from evidence"), and the program has created a thread of its own. A
 small program's thread never runs, because the program holds nothing worth returning, and
-a program with one thread never gets one, because it may depend on staying that way. The
+a program with one thread never gets one, because it may depend on staying that way. Once
+quiet, that program keeps its free memory until it calls `maintain` or `collect`, or starts
+the thread itself. glibc's allocator keeps the same memory in the same program, and
+matching it is enough: we accept this as a limit and build no mechanism for it. The
 evidence of a second thread is the C library's own record that one was created; a library
 that keeps no such record leaves a free made by a thread other than the first as the
 evidence. Which thread happens to free the memory must not matter where the library can
