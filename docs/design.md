@@ -995,7 +995,14 @@ Nine rules stand behind the table.
   small page at a time; a page whose remainder is already resident is left alone. A
   large block allocated at its size in one call gets no huge pages: it is often touched
   sparsely, each page touched would cost 2 MiB, and the kernel later fills in any marked
-  range that is touched at all.
+  range that is touched at all. This is a limit we accept. A program that fills such
+  blocks densely and reads them at random, as a query engine does its hash tables, loses
+  a few percent of its time to page walks; servers lose nothing we can measure, because
+  their walks are on small objects. A wrong guess costs far more than a right one gains: a
+  block touched sparsely holds many times its memory, and on a machine short of free huge
+  pages the faults stall. Telling the two apart needs a look at the block while it lives,
+  which would put a second writer on a slot the design gives to its holder alone
+  (`docs/research/whole-block-huge.md`).
 - **Never split a huge page.** Returning part of a huge page frees nothing until the kernel
   splits it later, so in the huge-page part of a region, purging works only in
   whole 2 MiB units. That includes the unit holding the watermark, whose upper part was
