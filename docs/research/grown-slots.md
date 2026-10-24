@@ -4,6 +4,14 @@
 pages on `madvise`). Measured with a run-time switch in one binary; the switch is a probe, not
 product code (`bench/probes/grown-slots/`).
 
+**Update, the same day: the rule built** (branch `outgrown-count`, section 5). Rank 1 is
+built with one change: an outgrown slot advised for huge pages goes back, like a grown block's
+advised free, because kept it made a buffer regrown to 64 to 256 MiB 10 to 31% slower. Against
+main the product takes the 64-Vec job 15% faster, tpchgen 4.5% faster with 69% fewer faults,
+and Meilisearch's faults a request from about 50 to 38, at the same heap. DataFusion, the order
+service and the log store are level. The cost is tens of MiB of peak: tpchgen 578 to 633 MiB,
+64-Vec 278 to 327. The worst trail is 75 MiB over live on a 2 GiB heap, against 27 on main.
+
 ## What matters
 
 - **The budget for kept grown blocks is spent on every heap that matters, and two jobs pay
@@ -272,3 +280,103 @@ about what the program already spent on that block.*
 - The 256 MiB buffer's 9 to 13% in one session out of two.
 - tpchgen's peak: whether keeping grown frees for the full hold is what raises it, or the kept
   outgrown slots. The two variants differ by 30 MiB and the runs spread by 30 to 40.
+
+## 5. The rule built
+
+2026-10-24, branch `outgrown-count` from main `46126f0`, product build `4c0047a` against main
+in the same sessions (`bench/probes/grown-slots/build-plain.sh`, `sessions/chain.sh`,
+`chain3.sh`). The switch binary of the sections above stands for any server comparison of
+cycles, since two binaries place their code differently.
+
+**What was built.**
+- A move whose block outgrew its slot keeps the slot while the outgrown slots kept and not
+  yet taken again total at most 64 MiB (`policy::KEPT_OUTGROWN_HUGE_PAGES`).
+- The count is a word of its own. A mark in the slot's size word (`Recorded::outgrown`) says
+  which slots it holds. It goes up by the slot's charge at the keep. It comes down by what is
+  left of that charge at the claim that takes the slot again, and by the pages a purge
+  returns of a marked slot, whether the purge is the hold's, a growth payment, the clocked
+  pass or a trim, whole or in pieces. The amounts sum exactly to what the keep added.
+- A grown block's free returns a slot advised for huge pages whole, as the design says, with
+  no budget. A move that is not an outgrowth, a shrink to a sliver or a new alignment, frees
+  the old slot as the block's free would.
+- One change from rank 1, found here. An outgrown slot advised for huge pages is not kept
+  either (the next paragraph).
+
+**The change: an advised outgrown slot goes back.** The first product build kept advised
+outgrown slots, with the advice taken back. It was 10.5 to 12.6% slower than main on one
+buffer grown to 256 MiB, and 31% slower on one grown to 64 MiB eight times, with 32 MiB more
+peak (`pk3.sh`).
+- The profile (`prof256.sh`): user cycles in the program's own `memset` rose by 55M, while
+  kernel cycles fell by only 22M.
+- The faults hardly moved (838 against 881), because an advised slot faults back 2 MiB at a
+  time.
+- So writing over a resident, cold slot cost more than faulting a fresh huge page, whose
+  clearing leaves the lines in cache.
+- Returning advised outgrown slots made both jobs level with main, and kept the 64-Vec gain
+  (-18%).
+- Mode 4 of the prototype also kept these slots, with their mark. That, not keeping marked
+  frees, is what moved the 256 MiB job: the first product build returned marked frees and was
+  just as slow.
+
+**Product against main.** Medians. Kernel jobs: three rounds, one session. tpchgen: four
+rounds. DataFusion: six. Meilisearch: two sessions.
+
+| program | main | rule |
+|---|---|---|
+| 64 Vecs to 4 MiB: Mcycles / faults / peak MiB | 774 / 56.4k / 278 | 655 (-15%) / 19.4k / 327 |
+| tpchgen: Gcycles / faults / peak MiB | 25.84 / 706k / 578 | 24.67 (-4.5%) / 218k / 633 |
+| Meilisearch: faults a request / heap mean / heap peak, MiB | 53.0, 48.0 / 713, 719 / 756, 764 | 39.8, 36.3 / 733, 715 / 772, 749 |
+| DataFusion: Gcycles / faults / peak MiB | 69.80 / 1,030k / 863 | 70.09 / 1,025k / 864 |
+| order service at 2 GiB: heap, MiB | 2,186 | 2,186 |
+| HashMap 1M, json 32Mi | | within 2%; the rule does not act |
+| glibc, tpchgen | 25.22 / 291k / 515 | |
+
+- **64-Vec.** It gains half of what the prototype's rank 1 gained (-31%). The rest came from
+  keeping the drops' advised slots, which the product returns. The peak is the prototype's:
+  the kept outgrown slots fill the 64 MiB.
+- **tpchgen and Meilisearch** are the prototype's numbers. On Meilisearch the heap moves
+  within the run-to-run spread, either way.
+- **DataFusion:** the 0.4% difference in cycles is between two binaries. The switch binary had
+  the rule level (69.75 against 69.79, `df2`).
+
+**The log store** (switch binary, `servers-thread` as first measured, three rounds in
+rotating order):
+- main 349.0, 350.3, 347.1k cycles a request;
+- 16 MiB 348.5, 343.0, 345.0k;
+- 64 MiB 343.7, 348.0, 344.1k.
+
+The arms are within 1% of each other and main is not the fastest, so 337.6 against 345.0 was
+noise. The `servers-large` job agrees: 363.3, 363.4, 365.1k against 361.4 to 364.2k. The
+store makes no large moves.
+
+**One buffer to 256 MiB.** Product against main in five sessions: -2.8%, -2.0%, +18.8%,
+-0.3%, -0.6%. In the +18.8% session, main's own runs spread from 327 to 434M cycles, so I read
+it as noise. The 64 MiB job: -1.1%, -1.5%, -2.4%, +0.3%, +1.3%.
+
+**The trail** (`ptrail.sh`), on the 2 GiB heap with buffers growing into reused slots: the
+peak during growth less what is live, in MiB, round 1.
+
+| buffers | main | rule |
+|---|---:|---:|
+| 256 to 4 MiB | 25.6 | 71.5 |
+| 512 to 2 MiB | 24.8 | 42.8 |
+| 1,024 to 1 MiB | 26.9 | 74.9 |
+
+The bound holds: the trail never exceeds 64 MiB plus one slot. The simulator test
+`buffers_growing_into_reused_slots_leave_a_trail_within_the_bound` asserts the same on its
+shape. With the bound effectively removed, that test's trail is 7.2 MiB against a bound of
+2 MiB.
+
+**The count does not drift**, and needs no saturating read.
+- Every decrement is causally after the increment it answers. The keep counts before it
+  releases the slot, and a claim or a purge reads the mark only after it has claimed the slot.
+- So in the counter's modification order it never goes below zero. A reader that saw it
+  wrapped would keep nothing, since a value past the bound refuses.
+- The random runs check after every step that the count equals the charge of the free slots
+  marked. So does the threaded run of twelve tenants, purges and trims, when it is quiet, and
+  every run ends at zero.
+- One case leaves the count high, and only high: a fork child of a thread caught between its
+  keep and its release, or between a claim and its subtraction. That costs keeps, never a
+  trail.
+
+Raw data: `docs/research/data/grown-slots-built-2026-10-24.tar.gz`.
