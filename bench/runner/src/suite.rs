@@ -8,6 +8,9 @@ pub const L3A: [usize; 4] = [0, 1, 2, 3];
 pub const L3B: [usize; 4] = [8, 9, 10, 11];
 /// The core single-threaded jobs use.
 pub const SINGLE: usize = 2;
+/// The CPUs every server job runs on, its load generator on the other domain.
+/// `scripts/deep-idle` reads this line, and the constant it names, for its default CPUs.
+pub const SERVER_CPUS: [usize; 4] = L3A;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Mode {
@@ -661,7 +664,7 @@ fn server_job(s: Served, plan: String, rank: &'static str, suffix: &str) -> Job 
         mode: Mode::Native,
         program: s.program,
         args: args(s.args),
-        cpus: L3A.to_vec(),
+        cpus: SERVER_CPUS.to_vec(),
         driver: None,
         load: Some(OpenLoad { plan, rank, ..s.load }),
         metric: Metric::Served,
@@ -806,7 +809,7 @@ fn large_job(l: Large, plan: String, rank: &'static str, suffix: &str) -> Job {
         mode: Mode::Native,
         program: l.program,
         args: args(&l.args),
-        cpus: L3A.to_vec(),
+        cpus: SERVER_CPUS.to_vec(),
         driver: None,
         load: Some(OpenLoad { plan, rank, ..l.load }),
         metric: Metric::Served,
@@ -909,4 +912,66 @@ pub fn meili_tail() -> Vec<Job> {
 /// Every CPU any job may use.
 pub fn measurement_cpus() -> Vec<usize> {
     both()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::Path;
+    use std::process::Command;
+
+    fn deep_idle(args: &[&str], fixture: Option<&Path>) -> (bool, String, String) {
+        let script = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../scripts/deep-idle");
+        let mut c = Command::new(script);
+        c.args(args);
+        if let Some(f) = fixture {
+            c.env("ASMALLOC_CPUIDLE_ROOT", f);
+        }
+        let out = c.output().expect("scripts/deep-idle runs");
+        (out.status.success(), String::from_utf8_lossy(&out.stdout).into(), String::from_utf8_lossy(&out.stderr).into())
+    }
+
+    /// The script's default CPUs and cut-off are the runner's, read from this source.
+    #[test]
+    fn deep_idle_script_takes_the_runners_cpus() {
+        for j in servers().into_iter().chain(servers_large()).chain(servers_thread()) {
+            assert_eq!(j.cpus, SERVER_CPUS, "{}", j.id);
+        }
+        let (ok, out, err) = deep_idle(&["defaults"], None);
+        assert!(ok, "{err}");
+        let cpus: Vec<String> = SERVER_CPUS.iter().map(|c| c.to_string()).collect();
+        assert_eq!(out, format!("cpus {}\ndeep-latency-us {}\n", cpus.join(","), crate::cpuidle::DEEP_LATENCY_US));
+    }
+
+    #[test]
+    fn deep_idle_script_reads_a_sysfs_tree() {
+        let root = std::env::temp_dir().join(format!("benchrun-deep-idle-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        for (k, (name, lat, off)) in [("POLL", 0, 0), ("C1", 1, 0), ("C2", 18, 1), ("C3", 350, 0)].iter().enumerate() {
+            let d = root.join(format!("cpu5/cpuidle/state{k}"));
+            std::fs::create_dir_all(&d).unwrap();
+            std::fs::write(d.join("name"), format!("{name}\n")).unwrap();
+            std::fs::write(d.join("latency"), format!("{lat}\n")).unwrap();
+            std::fs::write(d.join("disable"), format!("{off}\n")).unwrap();
+        }
+        let (ok, out, err) = deep_idle(&["status", "5-6"], Some(&root));
+        assert!(ok, "{err}");
+        assert!(
+            out.contains("cpu5: POLL 0 us enabled, C1 1 us enabled, C2 18 us deep disabled, C3 350 us deep enabled"),
+            "{out}"
+        );
+        assert!(out.contains("cpu6: no idle-state counters"), "{out}");
+        assert!(out.contains("enabled on CPUs 5\n"), "{out}");
+        // Without root, the command to run instead of a change; this test is not run as root.
+        // SAFETY: getuid has no preconditions.
+        if unsafe { libc::getuid() } != 0 {
+            let (ok, _, err) = deep_idle(&["off", "5"], Some(&root));
+            assert!(!ok);
+            assert!(err.contains("sudo ") && err.contains("deep-idle off 5"), "{err}");
+            assert_eq!(std::fs::read_to_string(root.join("cpu5/cpuidle/state3/disable")).unwrap(), "0\n");
+        }
+        let (ok, _, err) = deep_idle(&["status", "0-x"], Some(&root));
+        assert!(!ok && err.contains("not a CPU list"), "{err}");
+        let _ = std::fs::remove_dir_all(&root);
+    }
 }

@@ -11,7 +11,11 @@ prints for each job:
   apart at p < 0.05 ("ranges overlap"). Otherwise the difference is inside the range: a choice
   of placement could make or undo it.
 - tails at the ranked rate (s70): p50, p99 and p99.9 in us, the median over every run (every
-  run is one build at one placement), and the range of p99.9 over the runs.
+  run is one build at one placement), and the range of p99.9 over the runs; beside them, how
+  often the server's CPUs entered deep idle states, per thousand requests (median over the
+  runs that recorded it, "not recorded" for older results), and p99.9 against the base's,
+  marked "confounded by idle" instead where the two deep-idle rates differ materially (the
+  test is benchrun's, `bench/runner/src/cpuidle.rs`, whose constants this reads).
 - memory: the resident peak under load and the resident set at the end of the run (after the
   connections closed), medians over the runs, MiB; and the cgroup peak.
 - for a saturated job (`sat`): the saturated rate and the closed loop's p50, p99 and p99.9.
@@ -22,10 +26,38 @@ import argparse
 import gzip
 import itertools
 import json
+import re
 import statistics
 from collections import defaultdict
+from pathlib import Path
 
 MiB = 2**20
+
+
+def runner_const(name):
+    """A numeric constant of benchrun's cpuidle.rs, so that this report and benchrun's judge a
+    comparison of tails by the same test."""
+    src = Path(__file__).resolve().parents[2] / "runner/src/cpuidle.rs"
+    m = re.search(rf"^pub const {name}: \w+ = ([0-9.]+);$", src.read_text(), re.M)
+    if not m:
+        raise SystemExit(f"servers.py: cannot read {name} from {src}")
+    return float(m.group(1))
+
+
+CONFOUND_RATIO = runner_const("CONFOUND_RATIO")
+CONFOUND_FLOOR = runner_const("CONFOUND_FLOOR")
+
+
+def confounded(a, b):
+    """Whether two deep-idle rates differ enough that a difference in tails between them may be
+    the CPUs' exits from deep idle and not the allocators (cpuidle.rs, `confounded`)."""
+    lo, hi = sorted((a, b))
+    return hi - lo >= CONFOUND_FLOOR and hi >= lo * CONFOUND_RATIO
+
+
+def deep_per_kreq(group):
+    idle = group.get("idle") or {}
+    return idle.get("deep_per_kreq") if idle.get("recorded") is True else None
 
 
 def records(path):
@@ -110,12 +142,18 @@ def main():
                 continue
             lat = defaultdict(list)
             p999_pad = defaultdict(list)
+            deep = []
             for r in rs:
                 g = r["served"]["groups"].get("sat" if sat else "s70", {})
                 for k in ("p50", "p99", "p999"):
                     lat[k].append(g.get("lat_us", {}).get(k))
                 p999_pad[r["_pad"]].append(g.get("lat_us", {}).get("p999"))
+                d = deep_per_kreq(g)
+                if d is not None:
+                    deep.append(d)
             res[x] |= {
+                "deep_per_kreq": statistics.median(deep) if deep else None,
+                "deep_recorded": len(deep),
                 "p999_pads": dict(sorted(p999_pad.items())),
                 "p50": statistics.median(lat["p50"]),
                 "p99": statistics.median(lat["p99"]),
@@ -152,10 +190,39 @@ def main():
             continue
         if sat:
             print("  saturated rate, req/s: " + ", ".join(f"{x} {v['rate']:.0f}" for x, v in res.items()))
-        print(f"\ntails at {'saturation (closed loop)' if sat else 's70'}, us: p50 / p99 / p99.9 (p99.9 range over runs)")
+        print(
+            f"\ntails at {'saturation (closed loop)' if sat else 's70'}, us: p50 / p99 / p99.9 (p99.9 range over runs); "
+            f"deep idle entries of the server's CPUs per thousand requests; p99.9 against {a.base}"
+        )
+        flagged = False
         for x, v in res.items():
-            print(f"  {x:18} {v['p50']:8.1f} {v['p99']:8.1f} {v['p999']:8.1f} ({v['p999_lo']:.1f} to {v['p999_hi']:.1f})")
+            d = v["deep_per_kreq"]
+            if d is None:
+                deep_cell = "deep not recorded"
+            elif v["deep_recorded"] < v["runs"]:
+                deep_cell = f"deep {d:6.1f} ({v['deep_recorded']} of {v['runs']} runs)"
+            else:
+                deep_cell = f"deep {d:6.1f}"
+            vs = ""
+            if b and x != a.base and b.get("p999") is not None:
+                bd = b["deep_per_kreq"]
+                diff = f"{v['p999'] - b['p999']:+.1f} us"
+                if d is None or bd is None:
+                    vs = f"  {diff}, idle not recorded"
+                elif confounded(d, bd):
+                    vs = "  confounded by idle"
+                    flagged = True
+                else:
+                    vs = f"  {diff}"
+                v["p999_vs_base"] = vs.strip()
+            print(f"  {x:18} {v['p50']:8.1f} {v['p99']:8.1f} {v['p999']:8.1f} ({v['p999_lo']:.1f} to {v['p999_hi']:.1f})  {deep_cell}{vs}")
             print(f"  {'':18} p99.9 by pad: " + "; ".join(f"{p} " + ",".join(f"{t:.0f}" for t in ts) for p, ts in v["p999_pads"].items()))
+        if flagged:
+            print(
+                f"  confounded by idle: the deep-idle rates differ by a factor of {CONFOUND_RATIO:g} or more (and by at "
+                f"least {CONFOUND_FLOOR:g} a thousand requests), so the p99.9 differ in how often the server's CPUs woke "
+                "from deep idle, which follows the server's speed (docs/research/h2-tail.md)"
+            )
         if not sat:
             print(f"\nmemory, MiB ({'anonymous' if anon else 'resident'} at the end): loaded peak, at the end, cgroup peak")
             for x, v in res.items():

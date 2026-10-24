@@ -6,10 +6,12 @@
 //! at the end, then `RESULT {json}` with latency percentiles, missed slots and errors for each
 //! group of segments of one name. At every mark the runner reads the server's counters
 //! (cycles, instructions, CPU time, page faults, all threads), so each group's counts per
-//! request come from the server itself, over exactly that group's segments. The server's
-//! memory comes from the runner's sampler, which reads it every `--sample-ms` (default 50 ms)
-//! for the whole run; the report keeps a 250 ms curve of it from the first mark to the end,
-//! through the silences and after the connections close.
+//! request come from the server itself, over exactly that group's segments; and the
+//! idle-state counters of the server's CPUs, so each group says how often they went into deep
+//! idle (`cpuidle.rs`). The server's memory comes from the runner's sampler, which reads it
+//! every `--sample-ms` (default 50 ms) for the whole run; the report keeps a 250 ms curve of
+//! it from the first mark to the end, through the silences and after the connections close.
+use crate::cpuidle;
 use crate::launch::{Child, MemSample, Spec};
 use crate::run::{Options, Snapshot, expand};
 use crate::suite::{Job, OpenLoad};
@@ -78,6 +80,8 @@ pub struct Mark {
     pub snap: Snapshot,
     /// The program's live bytes, from a build that counts them (`LiveBytes`).
     pub live: Option<i64>,
+    /// The idle-state counters of the server's CPUs, read just after `snap`, or why not.
+    pub idle: Result<cpuidle::Reading, String>,
 }
 
 /// Reads the live-bytes count of a server built with bench-alloc's `live-bytes` (its
@@ -203,10 +207,12 @@ pub fn drive(
     let mut marks = Vec::new();
     let mut result = None;
     let live = LiveBytes::of(server.pid);
+    let idle = cpuidle::Reader::open(Path::new(cpuidle::SYSFS_CPU), &job.cpus);
     while let Ok((_, line)) = generator.lines.recv_timeout(deadline.saturating_duration_since(Instant::now())) {
         if let Some(rest) = line.strip_prefix("MARK ") {
             // Read first: the counters should change as little as possible after the mark.
             let snap = Snapshot::take(server);
+            let idle = idle.as_ref().map_err(String::clone).and_then(cpuidle::Reader::read);
             let f: Vec<&str> = rest.split_whitespace().collect();
             let t_ms = snap.at.duration_since(server.started).as_secs_f64() * 1e3;
             let (segment, name) = match f.get(1) {
@@ -214,7 +220,7 @@ pub fn drive(
                 Some(i) => (i.parse().ok(), f.get(2).unwrap_or(&"").to_string()),
                 None => (None, String::new()),
             };
-            marks.push(Mark { segment, name, t_ms, snap, live: live.as_ref().and_then(LiveBytes::read) });
+            marks.push(Mark { segment, name, t_ms, snap, live: live.as_ref().and_then(LiveBytes::read), idle });
         } else if let Some(j) = line.strip_prefix("RESULT ") {
             result = serde_json::from_str(j).ok();
         }
@@ -236,6 +242,21 @@ pub fn drive(
     }
     let result = result.ok_or("the load generator printed no RESULT")?;
     Ok(Loaded { marks, result })
+}
+
+/// What the server's CPUs' idle states did over every segment named `name`, each from its
+/// mark to the next, or why that cannot be counted.
+fn idle_over(l: &Loaded, name: &str) -> Result<cpuidle::Window, String> {
+    let mut total: Option<cpuidle::Window> = None;
+    for w in l.marks.windows(2).filter(|w| w[0].segment.is_some() && w[0].name == name) {
+        let (a, b) = (w[0].idle.as_ref()?, w[1].idle.as_ref()?);
+        let span = cpuidle::Window::between(a, b)?;
+        match &mut total {
+            None => total = Some(span),
+            Some(t) => t.add(&span)?,
+        }
+    }
+    total.ok_or_else(|| format!("no marked segment named {name}"))
 }
 
 /// How the curve is thinned: one point per this many ms.
@@ -284,6 +305,10 @@ pub fn summarize(l: &Loaded, memory: &[MemSample], rank: &str) -> (Value, Option
         }
         let mut gj = g.clone();
         gj["server"] = server;
+        gj["idle"] = match idle_over(l, name) {
+            Ok(w) => w.to_json(n),
+            Err(why) => cpuidle::not_recorded(&why),
+        };
         groups.insert(name.clone(), gj);
     }
     // The curve, from the first mark to the last sample (after the end of the plan the
@@ -334,4 +359,63 @@ pub fn summarize(l: &Loaded, memory: &[MemSample], rank: &str) -> (Value, Option
         },
     });
     (v, primary)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::cpuidle::{Reading, StateCount};
+
+    fn reading(c2: u64, c3: u64) -> Reading {
+        let s = |name: &str, latency_us, usage| StateCount {
+            name: name.into(),
+            latency_us,
+            usage,
+            time_us: usage * 10,
+            disabled: false,
+        };
+        Reading { cpus: vec![(0, vec![s("POLL", 0, 1000), s("C1", 1, 5000), s("C2", 18, c2), s("C3", 350, c3)])] }
+    }
+
+    fn mark(segment: Option<usize>, name: &str, idle: Result<Reading, String>) -> Mark {
+        let snap = Snapshot {
+            at: Instant::now(),
+            counters: Default::default(),
+            stat: Default::default(),
+            cpu_task: Default::default(),
+        };
+        Mark { segment, name: name.into(), t_ms: 0.0, snap, live: None, idle }
+    }
+
+    #[test]
+    fn each_group_gets_its_deep_idle() {
+        let marks = vec![
+            mark(Some(0), "s70", Ok(reading(100, 10))),
+            mark(Some(1), "t", Ok(reading(130, 15))),
+            mark(Some(2), "s70", Ok(reading(131, 15))),
+            mark(Some(3), "u", Ok(reading(140, 20))),
+            mark(Some(4), "_x", Ok(reading(150, 20))),
+            // A reading that failed leaves the segments on either side of it uncounted.
+            mark(Some(5), "v", Err("no idle-state counters for CPU 0".into())),
+            mark(None, "end", Ok(reading(200, 20))),
+        ];
+        let result = json!({ "groups": {
+            "s70": { "lat_us": { "n": 2000 } },
+            "t": { "lat_us": { "n": 1000 } },
+            "u": { "lat_us": { "n": 0 } },
+            "v": { "lat_us": { "n": 1000 } },
+        }});
+        let (v, _) = summarize(&Loaded { marks, result }, &[], "s70");
+        let g = &v["groups"];
+        // Two segments of s70: 30 + 5, then 9 + 5 deep entries, over 2000 requests.
+        assert_eq!(g["s70"]["idle"]["deep_entries"], 49);
+        assert_eq!(g["s70"]["idle"]["deep_per_kreq"], 24.5);
+        assert_eq!(g["s70"]["idle"]["states"][2]["entries"], 39);
+        assert_eq!(g["t"]["idle"]["deep_per_kreq"], 1.0);
+        assert_eq!(g["u"]["idle"]["recorded"], true);
+        assert!(g["u"]["idle"]["deep_per_kreq"].is_null());
+        assert_eq!(g["v"]["idle"]["recorded"], false);
+        assert!(g["v"]["idle"]["why"].as_str().unwrap().contains("CPU 0"));
+        assert_eq!(cpuidle::per_kreq(&g["v"]["idle"]), None);
+    }
 }

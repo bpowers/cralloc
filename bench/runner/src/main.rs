@@ -18,6 +18,7 @@ mod apps;
 mod cap;
 mod clock;
 mod config;
+mod cpuidle;
 mod launch;
 mod layout;
 mod paths;

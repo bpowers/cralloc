@@ -140,8 +140,25 @@ order service) and its saturated rate falls, alike for every allocator. Every ru
 which way it ran (`idle_states`); `--idle-states free` leaves the states alone, and its
 tails measure the machine as much as the allocator.
 
+With the spinners the server's CPUs still enter C2 (18 us to leave) and C3 as the kernel
+counts them, and those exits still set tails in the tens of microseconds: at one fixed rate
+the faster server idles longer and goes deep more often (`docs/research/h2-tail.md`). So the runner reads
+the server CPUs' idle-state counters (`/sys/devices/system/cpu/cpuN/cpuidle`, no root
+needed) at every mark, and each group of a server run records, per state, its entries,
+time, name, exit latency and the CPUs where it was disabled, and the deep entries (states
+whose exit latency is above `DEEP_LATENCY_US`, `runner/src/cpuidle.rs`) per thousand
+requests (`served.groups.<group>.idle`). Each run also records the setting it started under
+(`cpuidle`). A window the counters cannot cover (none on the host, a CPU taken offline, a
+state switched during it) says why instead. A session of servers prints a warning when deep
+states are enabled on the servers' CPUs; `scripts/deep-idle status` shows them, and
+`scripts/deep-idle off` and `on` (root) switch them.
+
 `benchrun report` prints a table per server: latency and work at each rate, and memory under
-load, in the silences and after the connections close.
+load, in the silences and after the connections close. Beside the tails it prints the deep
+entries per thousand requests and each allocator's p99.9 against the reference's (`--ref`,
+or the lowest p99.9 when the reference did not run), and marks the comparison "confounded
+by idle" when the two deep-idle rates differ materially (`cpuidle::confounded` says how,
+and why).
 
 **A streaming store.** `connect store 1M` (in `servers-large`) is connect-rust's server as a log
 store (`bench/rpc`, `rpc-server store`): a million owned log records, about 1.4 GiB, of which
