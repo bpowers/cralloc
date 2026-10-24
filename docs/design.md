@@ -1013,6 +1013,29 @@ second bitmap records which free objects are still zero, so zeroed allocation sk
 before it releases their free bits. Small classes do not track this; zeroing a small object costs less
 than the bookkeeping.
 
+A zeroed request whose slot is not known to be zero clears it, and clearing makes every page
+resident whether or not the program goes on to write there. A program that asks for a large
+zeroed buffer and writes a little of it, again and again, then holds all of it for nothing.
+Returning the pages instead of clearing them would fix that program and hurt another: one
+that writes its whole buffer would pay a page fault for every page it used to find resident,
+which costs more than ten times the clearing. No size separates the two, and one size class
+can hold both at different times, so the free decides from evidence. A zeroed request of
+16 MiB or more that is answered from a slot known to be zero, so that nothing was cleared
+and none of it is resident, is marked. When it is freed, the free asks the kernel about one
+page in each sixteenth of the block. If at most one of them is resident, the tenant left the
+block mostly untouched: the slot goes back to the kernel whole, at once, and is recorded as
+zero and not retained, so the next zeroed request for it clears nothing either. Otherwise it
+is an ordinary free. Returning such a block is cheap for the reason it is right: almost
+nothing of it is resident. A block that was cleared with `memset` is never marked, so a
+tenant that writes what it is given, on a slot that stayed resident, pays what it always
+did. A request that is not zeroed is never marked either: a scratch buffer written in small
+part and taken again within the hold costs nothing as it is, and would fault on every life.
+What the look finds chooses between two valid frees and nothing else, so it does not have to
+be right. It sees pages touched, not pages written, so a block the program read widely
+counts as used, and it can miss a written run shorter than an eighth of the block. Below
+16 MiB the look would be a visible share of a block's life
+(`docs/research/meili-peak.md`).
+
 ### Large objects
 
 Large classes have no magazines. Allocation and free operate on the region bitmap directly,
