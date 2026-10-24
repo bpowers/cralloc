@@ -125,6 +125,11 @@ close.
   was 38.9 (38.2 to 47.6, six runs). gRPC over the same service and transport is not affected
   (38.3). At saturation the same job's p99.9 is 853 us against 760 to 821 for the incumbents
   (below). Not diagnosed.
+  **2026-10-24:** diagnosed in `h2-tail.md`. The slow requests are server CPUs waking from C2 or
+  C3, which the faster server reaches more often because it idles longer at the same rate. In
+  one binary, slowing the handler to jemalloc's cycles a request brings p99.9 to 40 us;
+  asmalloc at 68k to 80k requests a second has 37 to 39 us, and jemalloc at 52k has 53 to 56.
+  It is not the allocator's work, and this row's p99.9 does not compare allocators.
 - On the small servers asmalloc holds 2 to 5 MiB more than glibc and jemalloc after close
   (Sozu 25 against 16 to 19; mini-redis 48 against 35 to 46). These are small heaps.
 
