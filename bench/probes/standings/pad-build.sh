@@ -1,0 +1,51 @@
+#!/usr/bin/env bash
+# usage: pad-build.sh PART [ALLOC...]
+#   PART: workloads, or one of the servers' programs (orders, sozu, miniredis)
+#   ALLOC: asm jem tcm mim gli (default all five)
+# Builds this checkout's servers at bench-alloc's layout pads 0, 16, 32, 48 and 64
+# (BENCH_LAYOUT_PAD, as `benchrun layout --layouts pads` does) for each allocator: the workloads
+# and rpc-server into bench/target/ALLOC-pNN, a program into bench/target/ALLOC-pNN/apps/PROGRAM.
+# Local allocators.toml entries `NAME@padNN` with `build = "ALLOC-pNN"` (`pad-entries.sh`
+# prints them) then run every placement of every allocator in one benchrun session,
+# interleaved, and `probes/spawn-gap/padsweep.py` or `servers.py` combines the sessions.
+# `benchrun layout` does the same for rpc-server but builds no app, and one mechanism for both
+# keeps the sessions alike. Run under scripts/heavy. The parts share no build directory, so
+# they can build at once: a program's fat-LTO link runs on one core.
+#
+# The build names have one length, so every binary's path has one length: the path's length
+# moves the initial stack, which moved glibc's tokio jobs by up to 18% (`spawn-gap.md`).
+set -euo pipefail
+W=$(cd "$(dirname "$0")/../../.." && pwd)
+common="$(git -C "$W" rev-parse --path-format=absolute --git-common-dir)/.."
+data="${BENCH_APPS_DATA:-$common/bench/apps/target}"
+export BENCH_BASELINES="${BENCH_BASELINES:-$common/bench/baselines/out}"
+unset RUSTFLAGS CARGO_ENCODED_RUSTFLAGS
+part="${1:?usage: pad-build.sh PART [ALLOC...]}"
+shift
+allocs=("$@")
+[ ${#allocs[@]} -gt 0 ] || allocs=(asm jem tcm mim gli)
+feature() {
+  case "$1" in
+    asm) echo asmalloc ;; jem) echo je ;; tcm) echo tc ;; mim) echo mi ;; gli) echo "" ;;
+    *) echo "pad-build: unknown allocator $1" >&2; exit 2 ;;
+  esac
+}
+for a in "${allocs[@]}"; do
+  feat=$(feature "$a")
+  for pad in 00 16 32 48 64; do
+    out="$W/bench/target/$a-p$pad"
+    case "$part" in
+      workloads)
+        # One build directory for every variant, so the dependencies compile once per feature
+        # and a pad recompiles only bench-alloc and what depends on it.
+        (cd "$W/bench" && BENCH_LAYOUT_PAD=$((10#$pad)) CARGO_BUILD_BUILD_DIR="$W/bench/target/pad-build-ws" \
+           cargo build --release -p bench-workloads -p bench-rpc ${feat:+--features bench-alloc/$feat} \
+           --target-dir "$out") ;;
+      orders | sozu | miniredis)
+        (cd "$W/bench/apps/$part" && PATH="$data/inputs/$part/bin:$PATH" BENCH_LAYOUT_PAD=$((10#$pad)) \
+           CARGO_BUILD_BUILD_DIR="$data/build/$part" \
+           cargo build --release --locked ${feat:+--features $feat} --target-dir "$out/apps/$part") ;;
+      *) echo "pad-build: unknown part $part" >&2; exit 2 ;;
+    esac
+  done
+done
