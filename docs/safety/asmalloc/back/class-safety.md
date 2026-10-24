@@ -90,7 +90,26 @@ that window set the bit silently and a third party could then allocate the slot 
 being purged. Purging before the release removes that: at no point is a free slot's memory
 returned by a thread that does not hold it through a claim of its own or the program's.
 
-**Tests.** `a_block_that_grows_gets_huge_pages_until_it_is_freed` (the advised slot goes
+**The second call: a block left unwritten (`return_unwritten`).** `purge_before_release`
+first calls `return_unwritten`, which calls `purge_held` for the same slot when the block's
+size word says it was given zeroed from a slot known to be zero (`Recorded::unwritten`, set by
+`mark_unwritten` and cleared by every claim, `alloc_at`, so read here it is this tenant's) and
+a sample of its pages finds at most one in sixteen resident (BACK-CLASS-06). It runs in
+`free_slot` before `release_one`, with the same region and slot, and reads the leaf bit and
+aborts if it is set before it purges, as the advised path does. So steps 1 to 4 and the
+double-free cases above hold for it word for word: the preconditions are about who holds the
+slot, and the mark and the sample only decide whether to purge. Either outcome is a valid
+free. A slot advised for huge pages is never marked and never taken here (`mark_unwritten`
+and `return_unwritten` both pass a slot whose `huge` flag is set). When `purge_held` returns
+`false` (the slot lies in a huge-page part, has no whole page, or the OS refused) nothing was
+changed and the free goes on as an ordinary one. When it returns `true` the slot is clean and
+zero, and `free_slot` releases it with no charge and no hold stamp, as for an advised slot
+purged here.
+
+**Tests.** `heap::tests::unwritten`: a block left unwritten goes back known zero and
+uncounted, and the next tenant is not marked; a block written in full, and an unzeroed block,
+are ordinary frees; the mark survives a resize in place; a marked block that moves returns its
+old slot. `a_block_that_grows_gets_huge_pages_until_it_is_freed` (the advised slot goes
 back whole at the free, reads as zero and says so, and its advice is taken back);
 `an_advised_slot_is_purged_only_in_whole_huge_pages`; the model-based and stress tests of the
 back end run the same path with contents checked.
@@ -318,5 +337,25 @@ No leaf, zero or clean bit is written. The purged pages lie inside what the bloc
 whose clean bits `region::cover` clears right after; none is set here, so no clean bit stands
 over a page with data, and the purged pages were never in a retained count, being the held
 block's.
+
+## BACK-CLASS-06: the sample in `return_unwritten`
+
+**Block.** `self.space.resident(ptr, page)` for each sampled page.
+
+**Preconditions** (`Space::resident`, `Os::resident`). The range is whole pages inside the
+reservation (`Space::check` aborts otherwise), and nothing writes it during the call.
+
+**Proof.** `return_unwritten` runs from `purge_before_release`, inside `free_slot`, while the
+caller holds the slot: its leaf bit is clear for the program, which is freeing it (BACK-CLASS-01,
+step 2). Each sampled page is `unit.start + (2i + 1) * pages / (2 * samples)` for `i` below
+`samples`, where `pages` is `end - unit.start` and `end`, from `region::extent_of`, is at most
+`unit.end`: the page lies in `unit.start..end`, inside the slot's whole pages
+(`Layout::slot_unit`), and so inside the reservation, page-aligned and one page long. The
+program has given the block up and the allocator keeps no state in it, so nothing writes it
+during the call. `mincore` reads only page tables and writes one byte, into a local of the OS
+layer. Its answer decides only whether `purge_held` is called, and both outcomes are valid
+frees whatever it says: a page swapped out or reclaimed reads as absent and leads, at worst, to
+returning a slot whose contents nobody needs; a page reported resident leads to an ordinary
+free. An error from the call (`Err`) is taken as "not left unwritten", an ordinary free.
 
 Reviewed: 415b07e

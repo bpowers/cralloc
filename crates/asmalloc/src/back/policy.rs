@@ -222,20 +222,25 @@ pub const KEPT_GROWN_HUGE_PAGES: usize = 8;
 /// A zeroed large request of at least this many huge pages that is answered from a slot known
 /// to be zero, so that nothing was cleared and none of its pages is resident, is marked
 /// (`Back::mark_unwritten`), and its free looks at a sample of its pages to see whether the
-/// tenant left it mostly unwritten: 1, or 2 MiB. Not a bound on risk, since both outcomes of
-/// the look are ordinary frees, but the size at which the look's cost is lost in the block's
-/// life (`docs/research/meili-peak.md`).
-pub const UNWRITTEN_FLOOR_HUGE_PAGES: usize = 1;
+/// tenant left it mostly unwritten: 8, or 16 MiB. Not a bound on risk, since both outcomes of
+/// the look are ordinary frees, but the size at which the look's fixed cost, about 12k cycles
+/// for the sample and the `madvise`, is under 3% of the life of a block whose tenant writes a
+/// sixteenth of it (`docs/research/meili-peak.md`, "Evidence at the free").
+pub const UNWRITTEN_FLOOR_HUGE_PAGES: usize = 8;
 
-/// How many pages of a marked block's extent its free looks at, one `mincore` a page, evenly
-/// spaced: 16.
+/// How many pages of a marked block's extent its free looks at, one `mincore` of one page each,
+/// the middle page of each of this many equal parts: 16. Each costs about 650 cycles, present
+/// or absent. Above the floor, 16 tell a block written in a sixteenth from one written in
+/// full, which is all the rule asks.
 pub const UNWRITTEN_SAMPLES: usize = 16;
 
 /// A marked block whose free finds at most one sampled page in this many resident was left
-/// mostly unwritten, and goes back to the OS whole: 8. Its tenant wrote little enough that the
-/// next tenant is better served by zero pages it faults as it writes than by a slot it would
-/// have to clear (`docs/research/meili-peak.md`, "Answers on the rule").
-pub const UNWRITTEN_RESIDENT_ONE_IN: usize = 8;
+/// mostly unwritten, and goes back to the OS whole: 16, so at most one of the sixteen. A page
+/// faulted costs about thirteen times what clearing a resident page does, so a tenant that
+/// writes more than about a thirteenth of its block is cheaper served by a slot kept resident
+/// and cleared; at a sixteenth the next sparse tenant costs no more than the clearing did
+/// (`docs/research/meili-peak.md`, "Evidence at the free").
+pub const UNWRITTEN_RESIDENT_ONE_IN: usize = 16;
 
 /// The floor of [`UNWRITTEN_FLOOR_HUGE_PAGES`] in bytes for a geometry.
 #[inline(always)]
