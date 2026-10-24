@@ -5,6 +5,14 @@ pages on `madvise`). The standings put asmalloc's Meilisearch heap under load at
 against jemalloc's 781 (peak), with about twice jemalloc's page faults. This note accounts for
 both.
 
+**Update, the same day: the rule built** (branch `zero-by-evidence`, "Evidence at the free"
+below). The lead chose evidence over the fixed threshold. A zeroed request of 16 MiB or more
+that gets a slot known to be zero is marked. Its free samples sixteen pages and, if at most one
+is resident, returns the slot known zero. It keeps nearly all of the fixed rule's gain on
+Meilisearch: heap 718 to 733 MiB mean and 764 to 782 peak, against main's 853 to 860 and 958
+to 961 and the fixed rule's 716 to 718 and 761 to 767. Faults are 51 to 53 a request, against
+92 to 96. It costs a dense tenant nothing, since a block cleared with `memset` is never marked.
+
 ## Summary
 
 - **The gap is not free memory we hold. It is zeroed memory we write.** Meilisearch's indexer
@@ -255,6 +263,149 @@ notes found spread from 3 to 22 ms. It needs rounds before the rule ships. Plain
 moved by 0.4M a request between rounds of the same build, so the rounds here show no cycle
 change either way.
 
+## Evidence at the free
+
+Branch `zero-by-evidence` from main `226aede`. Measured on the rule's own code, with a
+probe patch (`evidence_edit.py`) that reads its floor and cut from the environment, so that
+main and the rule are one binary.
+
+**The rule.**
+- The claim clears what it cleared before: a zeroed large request is cleared with `memset`
+  unless its slot is known to be zero.
+- One addition: when a zeroed request of at least 16 MiB is answered from a slot known to be
+  zero, nothing was cleared and none of its pages is resident, so the block is marked (a bit in
+  the slot's size word, `Recorded::unwritten`).
+- At the free of a marked block, `mincore` looks at the middle page of each sixteenth of its
+  current extent. If at most one of the sixteen is resident, the slot is returned whole
+  (`region::purge_held`) and released as purged: clean, known zero, not counted, no hold stamp.
+  Otherwise it is an ordinary free.
+- Every claim clears the mark. A resize in place keeps it, and the free samples the extent the
+  block has then. A marked block that moves is not kept by the kept-grown budget, so its old
+  slot goes back behind the copy. A slot with huge-page advice is never marked. A slot that
+  cannot be returned whole (in a huge-page part, or the OS refuses) is an ordinary free.
+- A request that is not zeroed is never marked: an over-sized scratch buffer that its tenant
+  writes in small part and that is taken again within the hold costs nothing today, and
+  returned at every free it would fault on every life.
+
+**No new system call.** `mincore` was already in the OS interface (`Os::resident`, used by
+`unspill`), with the simulated OS's counterpart and ledger entries (KERNEL-08,
+RESERVATION-06). The rule calls it through `Space::resident` on single pages. That call costs
+about 650 cycles, whether the page is present or absent (`zbench`, 1,024 calls, best of
+five). Sixteen calls and the `madvise` cost about 12k cycles, 2.5 us, at a marked block's free.
+
+**zbench, main against the rule** (the rule switched on at every size to choose the floor,
+the cut at one in sixteen; medians over four interleaved pairs of runs, 30 lives a row, CPU 2,
+kcycles). Every row starts from a heap that `collect` emptied, so its first slot is known to be
+zero. "loop" takes the same slot life after life; "returned" is that slot after the program
+returned its pages itself, so it is not known to be zero; "zero" is a slot known to be zero at
+every life. Writes are one store a page, spread evenly. Selected rows; all rows are in
+`docs/research/data/meili-peak-evidence-2026-10-24.tar.gz` (`zb/`), with the sessions below:
+
+| MiB | slot | written | main | rule | rule / main |
+|---:|---|---|---:|---:|---:|
+| 1 | zero | 1/16 | 22.6 | 38.3 | 1.69 |
+| 2 | zero | 1/16 | 43.3 | 55.2 | 1.27 |
+| 4 | zero | 1/16 | 86.0 | 98.0 | 1.14 |
+| 8 | zero | 1/16 | 174.1 | 184.2 | 1.06 |
+| 8 | zero | 1/8 | 348.8 | 360.1 | 1.03 |
+| 16 | zero | 1/16 | 353.9 | 360.8 | 1.02 |
+| 16 | zero | 1/1 | 5,719.8 | 5,730.1 | 1.00 |
+| 64 | zero | 1/16 | 1,493.3 | 1,499.3 | 1.00 |
+| any | zero | none | 0.5 to 5.7 | 11.5 to 21.1 | the fixed 12k |
+| 1 | loop | 1/16 | 25.5 | 38.8 | 1.52 |
+| 16 | loop | 1/16 to 1/1 | 457 to 560 | 458 to 562 | 1.00 |
+| 64 | loop | 1/16 to 1/1 | 6,997 to 7,450 | 7,083 to 7,685 | 0.99 to 1.03 |
+| 16 | returned | 1/16 | 5,903.9 | 363.3 | 0.06 |
+| 16 | returned | 1/1 | 6,030.1 | 5,721.5 | 0.95 |
+| 64 | returned | 1/4 | 32,990.3 | 5,790.9 | 0.18 |
+| 16 | alternate | none, then all | 448 / 560 | 449 / 563 | 1.00 |
+
+- **The floor is 16 MiB.** The rule's only extra cost is the sample and the `madvise`, which
+  fall on a block marked from a slot known to be zero (the "zero" rows). With a sixteenth of the
+  block written, that is 6% of the life at 8 MiB, 2% at 16 MiB and 0.4% at 64 MiB. At 16 MiB
+  and above no row is more than 3% slower than main except a block written not at all, which
+  pays the fixed 12k cycles on a life that otherwise costs a few thousand. The 64 MiB loop rows,
+  up to 3% either way, are rows where the rule takes main's path (no block is marked), so that
+  is the spread between runs.
+- **The cut is one in sixteen, not one in eight.** A fault costs about thirteen times what
+  clearing a resident page does (1.35 against 0.1 kcycles at up to 16 MiB). So a tenant that
+  writes more than about a thirteenth is cheaper on a slot kept resident and cleared. At one in
+  eight, tenants that write between a thirteenth and an eighth would be returned and fault, at
+  up to 1.5 times main's cost. The 1 MiB "loop 1/16" row shows that cost where the sample
+  classifies the tenant sparse. At one in sixteen and 16 MiB, a sparse tenant's life on a slot
+  known to be zero (360.8 kcycles) is under main's on its resident slot (456.6).
+- **The sample count need not scale.** At 16 MiB and up the fixed cost is under 3% of a block a
+  sixteenth written. A larger count would only buy precision the cut does not need.
+- **Dense tenants pay nothing.** A block cleared with `memset` is never marked, so a tenant
+  that writes all of a reused resident slot takes main's path (loop rows, 1.00). So does a
+  dense tenant alternating with a sparse one on one slot: the dense life leaves the slot
+  resident, the sparse life's `memset` keeps it so, and neither is marked. The returned rows
+  are where the rule pays: a tenant's pages that were gone by the free leave the slot known
+  zero, and the next tenant clears nothing.
+- The rows that never mark (below the floor, or not from a known-zero slot) differ by up to 13%
+  in either direction between the two modes at 1 to 4 MiB. They take the same code, so that
+  spread is the heap's layout between the two processes, not the rule.
+
+**Meilisearch** (the rule at 16 MiB and one in sixteen, against main in the same binary and the
+fixed 8 MiB prototype):
+
+| | main | evidence rule | fixed rule | jemalloc |
+|---|---|---|---|---|
+| two minutes at 70% (3 rounds): heap mean / peak, MiB | 853–860 / 958–961 | 718–733 / 764–782 | 716–718 / 761–767 | 757 / 801 |
+| faults a request | 92–96 | 51–53 | 51–54 | 42 |
+| Mcycles a request | 16.85–17.16 | 16.37–17.01 | 16.85–16.88 | 17.79 |
+| p99 / p99.9, ms | 28.4–31.8 / 43.0–47.2 | 28.8–31.5 / 46.1–47.1 | 26.8–29.4 / 41.2–44.7 | 36.0 / 52.1 |
+| standings' job (3 rounds): heap mean / peak | 794–873 / 918–947 | 712–725 / 741–757 | 715–730 / 742–775 | |
+| a minute after close | 651–658 | 657–664 | 642–657 | |
+| burst after the silence, 50 to 500 ms: p99, ms | 3.1, 12.7, 3.0 | 11.3, 14.7, 3.1 | 3.1, 12.4, 3.1 | |
+| the same: faults a request | 16, 89, 1 | 52, 42, 1 | 16, 74, 13 | |
+
+The burst's half second is bimodal in every build: about 3 ms, or 12 to 15 ms with 40 to 90
+faults a request, as an indexing batch lands in it or not. The rule was high in two of three
+rounds, main in one of three, and the fixed rule in two of four (with the standings' run).
+Three rounds do not separate them. The fixed rule's 9.4 ms in the first note was one of
+these.
+
+**The over-count and the outgrown slots** (counting builds, one run each):
+- With the rule, every zeroed request found its slot known to be zero (7.7 a second), and
+  nothing was cleared.
+- Frees of large slots were charged 756 MiB/s against 646 resident, where main charged 1,080
+  against 878. The 50 MiB buffers now leave uncounted.
+- The outgrown slots did not change: a move refused the kept-grown budget 49.1 MiB/s against
+  48.8 on main, and as much was faulted back within 64 ms. Free large memory within the hold is
+  still 25 MiB on average (45 on main), and other classes' over-count is about 110 MiB/s. The
+  16 MiB budget stays full, so those 13 faults a request remain.
+
+**The other programs.**
+- DataFusion, eight rounds each: peak 859 to 866 MiB with the rule against 862 to 868, 1.028M
+  faults against 1.035M, 69.54 G cycles against 69.52.
+- The 2 GiB order service: level, one run each (68.3k cycles a request in both, 2,186 MiB, p99
+  22 us). Main's run was marked invalid for 0.12 CPUs of other work in the burst's first 5 ms;
+  its load segment is used.
+- The 1M log store: level, one run each (345.9k cycles a request against 347.9k, 1,428 MiB
+  against 1,430, p99.9 122 us against 124).
+
+**Proposed design text**, for "Large objects" after the paragraph on zeroed allocation in
+"Returning memory": *A zeroed request whose slot is not known to be zero clears it, which
+makes every page resident. One whose slot is known zero gets its pages untouched. When such a
+request is 16 MiB or more, its block is marked, and its free looks at one page in each
+sixteenth of the block's extent. If at most one of them is resident, the tenant left the block
+mostly unwritten, and the free returns the slot whole and releases it known to be zero and
+uncounted, with no hold. The next zeroed request then clears nothing and pays only for the
+pages it writes. Otherwise the free is an ordinary one. A block cleared with a `memset` is
+never marked, so a tenant that writes what it is given, on a slot that stayed resident, pays
+what it always did. A request that is not zeroed is never marked either: a scratch buffer
+written in small part and taken again within the hold costs nothing as it is. Every claim
+clears the mark. What the look finds decides only which of two valid frees happens. A search
+engine's indexer zeroed four 50 MiB buffers a batch and wrote a few pages of each. Clearing
+them held 150 MiB more than jemalloc, which returns every free of 8 MiB or more at once
+(`docs/research/meili-peak.md`).*
+
+**Unresolved.**
+- The burst after a silence: three rounds are bimodal in every build (above).
+- The outgrown slots' 13 faults a request (proposal 2) are untouched.
+- About 30 faults a request on main are still not split by source.
+
 ## Method
 
 - **Builds.** `bench/probes/meili-peak/build.sh` extracts main `169b5c7`, applies the edits,
@@ -280,3 +431,13 @@ change either way.
   -c 2`.
 - Raw results: `docs/research/data/meili-peak-2026-10-24.tar.gz` (benchrun's records, the
   watcher's and the samplers' files, zbench's output).
+- **The evidence rule.** `build.sh mp-ev <commit> asmalloc evidence_edit.py` (Meilisearch,
+  DataFusion, the order service, the RPC servers) and `mp-evdiag` (with `peak_edit.py`), with
+  local entries `ev-off` (`ASMALLOC_UNWRITTEN=00000000`), `ev-on` (`16777216`), both with
+  `ASMALLOC_UNWRITTEN_ONE_IN=16`, and `evd-off`/`evd-on`. Sessions: `e1` to `e3`
+  (`meili-tail`), `t1` to `t3` (`servers-thread`), `d1` (counting builds), `df3`, `orders2`,
+  `store2`. In the counting build, the region of a slot returned at its free keeps the rule of
+  its last walk, so the fault table's "hold, over 8 s" row there is the known-zero claims of the
+  50 MiB class, which fault only what their tenants write. `zbench.sh evidence <commit>
+  evidence_edit.py`, then four interleaved pairs, `zcompare.py`. `thread.py` and `apps.py`
+  summarize the servers-thread and apps sessions.
