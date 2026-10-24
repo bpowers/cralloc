@@ -517,6 +517,10 @@ fn run_one(job: &Job, a: &Allocator, cx: &Context, clock: &mut Clock) -> Value {
         Some(s) => format!("held out of deep idle by spinners on {}", bench_harness::Cpus(s.cpus.clone()).to_list()),
         None => "free".to_string(),
     };
+    // Whether the server's CPUs may enter deep idle states, as the run starts: its tails at a
+    // fixed rate depend on it (`cpuidle.rs`).
+    let cpuidle =
+        job.load.as_ref().map(|_| crate::cpuidle::setting_json(Path::new(crate::cpuidle::SYSFS_CPU), &job.cpus));
     let t0 = CpuTimes::read();
     let task0 = sys::TaskTime::read();
     let vm = sys::Vmstat::read();
@@ -665,7 +669,7 @@ fn run_one(job: &Job, a: &Allocator, cx: &Context, clock: &mut Clock) -> Value {
     let stderr_tail = std::fs::read_to_string(scratch.join("stderr.txt"))
         .map(|s| s.lines().rev().take(5).collect::<Vec<_>>().into_iter().rev().collect::<Vec<_>>().join("\n"))
         .unwrap_or_default();
-    json!({
+    let mut rec = json!({
         "type": "run",
         "session": cx.session,
         "round": cx.round,
@@ -720,7 +724,10 @@ fn run_one(job: &Job, a: &Allocator, cx: &Context, clock: &mut Clock) -> Value {
             "gate": cx.gate,
         },
         "stderr_tail": stderr_tail,
-    })
+    });
+    // Outside the literal, which is at the macro's recursion limit.
+    rec["cpuidle"] = cpuidle.into();
+    rec
 }
 
 /// Whether the process's allocator code came from where the entry says it must: for a
@@ -915,7 +922,19 @@ pub fn session(o: &Options, allocs: &[Allocator], jobs: &[Job]) -> std::io::Resu
     let mut out = std::fs::OpenOptions::new().create(true).append(true).open(&o.out)?;
     let session =
         format!("{}-{:x}", SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap().as_secs(), o.seed);
-    writeln!(out, "{}", header(o, allocs, jobs, &session, rseq))?;
+    let mut server_cpus: Vec<usize> =
+        jobs.iter().filter(|j| j.load.is_some()).flat_map(|j| j.cpus.iter().copied()).collect();
+    server_cpus.sort_unstable();
+    server_cpus.dedup();
+    let mut head = header(o, allocs, jobs, &session, rseq);
+    if !server_cpus.is_empty() {
+        let sysfs = Path::new(crate::cpuidle::SYSFS_CPU);
+        head["cpuidle"] = crate::cpuidle::setting_json(sysfs, &server_cpus);
+        if let Some(w) = crate::cpuidle::warning(sysfs, &server_cpus) {
+            eprintln!("{w}");
+        }
+    }
+    writeln!(out, "{head}")?;
     let meas: BTreeSet<usize> = crate::suite::measurement_cpus().into_iter().collect();
     let siblings: BTreeSet<usize> = meas.iter().flat_map(|&c| sys::siblings(c)).filter(|c| !meas.contains(c)).collect();
     let runner: BTreeSet<usize> = o.runner_cpus.iter().flat_map(|&c| sys::siblings(c)).collect();

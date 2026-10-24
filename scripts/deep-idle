@@ -1,0 +1,139 @@
+#!/usr/bin/env bash
+# Show, disable or enable the deep idle states of the CPUs the benchmark's servers run on.
+#
+# Why: a request that finds the CPU that would run it in a deep idle state waits for the exit
+# (18 us for C2 on the reference host), and at one fixed rate the faster server idles longer
+# and goes deep more often, so a server's tail can rank the idle states rather than the
+# allocator (docs/research/h2-tail.md). benchrun records the setting and the entries in every
+# server run, and warns when a server session starts with deep states enabled.
+#
+# Usage: scripts/deep-idle status|off|on|defaults [CPUS]
+#   status    each idle state of each CPU, its exit latency, and whether it is disabled
+#   off       disable every deep state on those CPUs (needs root)
+#   on        enable them again (needs root)
+#   defaults  the default CPUs and the cut-off, as read from the runner's source
+#   CPUS      a list such as 0-3 or 0,2,8-11. The default is the servers' CPUs, SERVER_CPUS in
+#             bench/runner/src/suite.rs, read from there so that the two cannot drift apart.
+# A state is deep when the kernel declares an exit latency above DEEP_LATENCY_US
+# (bench/runner/src/cpuidle.rs, read from there too). The setting lasts until it is changed
+# back or the machine restarts. This script never calls sudo itself: without root, `off` and
+# `on` print the command to run and exit 1.
+#   ASMALLOC_CPUIDLE_ROOT  where the CPUs are, default /sys/devices/system/cpu (tests use a
+#                          directory shaped like it).
+set -euo pipefail
+here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+self="$here/$(basename "${BASH_SOURCE[0]}")"
+suite="$here/../bench/runner/src/suite.rs"
+cpuidle_rs="$here/../bench/runner/src/cpuidle.rs"
+root="${ASMALLOC_CPUIDLE_ROOT:-/sys/devices/system/cpu}"
+
+die() {
+  echo "deep-idle: $*" >&2
+  exit 2
+}
+
+# The CPUs of `pub const NAME: [usize; N] = ...;` in suite.rs, as 0,1,2,3: its array, or the
+# array of the constant it names.
+const_cpus() {
+  local name="$1" depth="${2:-0}" rhs
+  [ "$depth" -lt 4 ] || die "cannot resolve $name in $suite"
+  rhs=$(sed -n "s/^pub const $name: \[usize; [0-9]*\] = \(.*\);$/\1/p" "$suite")
+  case "$rhs" in
+    \[*\]) echo "$rhs" | tr -d '[] ' ;;
+    [A-Z]*) const_cpus "$rhs" $((depth + 1)) ;;
+    *) die "cannot read $name from $suite" ;;
+  esac
+}
+
+deep_latency() {
+  local v
+  v=$(sed -n 's/^pub const DEEP_LATENCY_US: u64 = \([0-9][0-9]*\);$/\1/p' "$cpuidle_rs")
+  [ -n "$v" ] || die "cannot read DEEP_LATENCY_US from $cpuidle_rs"
+  echo "$v"
+}
+
+# A CPU list, 0-3,8 (checked by the caller), one CPU a line.
+expand() {
+  local part
+  for part in ${1//,/ }; do
+    seq "${part%-*}" "${part#*-}"
+  done
+}
+
+# The state directories of one CPU, in order.
+states_of() {
+  local d="$root/cpu$1/cpuidle"
+  [ -d "$d" ] || return 0
+  find "$d" -maxdepth 1 -name 'state[0-9]*' | sort -V
+}
+
+[ $# -ge 1 ] && [ $# -le 2 ] || die "usage: scripts/deep-idle status|off|on|defaults [CPUS]"
+cmd="$1"
+cut=$(deep_latency)
+list="${2:-$(const_cpus SERVER_CPUS)}"
+[[ "$list" =~ ^[0-9]+(-[0-9]+)?(,[0-9]+(-[0-9]+)?)*$ ]] || die "not a CPU list: $list"
+mapfile -t cpus < <(expand "$list")
+
+status() {
+  local c s line enabled=() absent=0
+  for c in "${cpus[@]}"; do
+    line=""
+    mapfile -t ss < <(states_of "$c")
+    if [ ${#ss[@]} -eq 0 ]; then
+      echo "cpu$c: no idle-state counters ($root/cpu$c/cpuidle)"
+      absent=1
+      continue
+    fi
+    local deep_on=0
+    for s in "${ss[@]}"; do
+      local name lat dis kind
+      name=$(< "$s/name") lat=$(< "$s/latency") dis=$(< "$s/disable")
+      kind=""
+      if [ "$lat" -gt "$cut" ]; then
+        kind=" deep"
+        [ "$dis" != 0 ] || deep_on=1
+      fi
+      line+=", $name $lat us$kind $([ "$dis" = 0 ] && echo enabled || echo disabled)"
+    done
+    echo "cpu$c: ${line#, }"
+    [ "$deep_on" = 0 ] || enabled+=("$c")
+  done
+  if [ ${#enabled[@]} -gt 0 ]; then
+    echo "deep states (exit latency above ${cut} us) enabled on CPUs ${enabled[*]}"
+  elif [ "$absent" = 0 ]; then
+    echo "every deep state (exit latency above ${cut} us) is disabled on these CPUs"
+  fi
+}
+
+# Writes `value` to the `disable` file of every deep state of the CPUs.
+set_deep() {
+  local value="$1" c s n=0
+  for c in "${cpus[@]}"; do
+    mapfile -t ss < <(states_of "$c")
+    for s in "${ss[@]}"; do
+      if [ "$(< "$s/latency")" -gt "$cut" ]; then
+        echo "$value" > "$s/disable"
+        n=$((n + 1))
+      fi
+    done
+  done
+  [ "$n" -gt 0 ] || { echo "deep-idle: no deep states on CPUs $list" >&2; exit 1; }
+}
+
+case "$cmd" in
+  status) status ;;
+  defaults)
+    echo "cpus $(const_cpus SERVER_CPUS)"
+    echo "deep-latency-us $cut"
+    ;;
+  off | on)
+    if [ "$(id -u)" -ne 0 ]; then
+      echo "deep-idle: changing idle states needs root; run:" >&2
+      echo "  sudo $self $cmd $list" >&2
+      exit 1
+    fi
+    if [ "$cmd" = off ]; then set_deep 1; else set_deep 0; fi
+    status
+    ;;
+  *) die "unknown command $cmd (status, off, on or defaults)" ;;
+esac
