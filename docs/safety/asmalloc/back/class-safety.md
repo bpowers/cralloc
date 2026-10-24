@@ -99,8 +99,14 @@ a sample of its pages finds at most one in sixteen resident (BACK-CLASS-06). It 
 aborts if it is set before it purges, as the advised path does. So steps 1 to 4 and the
 double-free cases above hold for it word for word: the preconditions are about who holds the
 slot, and the mark and the sample only decide whether to purge. Either outcome is a valid
-free. A slot advised for huge pages is never marked and never taken here (`mark_unwritten`
-and `return_unwritten` both pass a slot whose `huge` flag is set). When `purge_held` returns
+free. A slot advised for huge pages is not marked (`mark_unwritten` passes a slot whose `huge`
+flag is set), but a marked block that then grows densely in place has its slot advised
+(`region::advise_grown` sets `huge`) and keeps the mark. `return_unwritten` declines any slot
+whose `huge` flag is set, so such a free takes the advised path above. A class whose slots are
+smaller than the floor is declined first, before the size word is read: no marked block lives
+there. The mark may stay in a free slot's size word until the next claim clears it; only the
+holder reads the word, so a stale mark is read only by a free of that slot, which is a double
+free and caught by the bit's check before any purge. When `purge_held` returns
 `false` (the slot lies in a huge-page part, has no whole page, or the OS refused) nothing was
 changed and the free goes on as an ordinary one. When it returns `true` the slot is clean and
 zero, and `free_slot` releases it with no charge and no hold stamp, as for an advised slot

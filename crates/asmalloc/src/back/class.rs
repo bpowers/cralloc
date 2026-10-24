@@ -19,7 +19,8 @@ use super::group::{Gather, JUDGE, Run};
 use super::host::ClassHost;
 use super::layout::{Grow, Hints, Layout, Recorded};
 use super::policy::{
-    UNWRITTEN_RESIDENT_ONE_IN, UNWRITTEN_SAMPLES, kept_grown, move_piece, wants_huge,
+    UNWRITTEN_RESIDENT_ONE_IN, UNWRITTEN_SAMPLES, kept_grown, move_piece, unwritten_floor,
+    wants_huge,
 };
 use super::region::{self, Carve};
 use super::tree::{self, Host};
@@ -392,7 +393,7 @@ impl<'a, O: Os> Back<'a, O> {
         class: Class,
     ) -> (usize, bool) {
         let resident = |charge: usize| (charge, charge != 0);
-        if self.return_unwritten(host, region, slot) {
+        if self.return_unwritten(host, region, slot, class) {
             return (0, false);
         }
         // Only a slot that holds a whole huge page can have been advised.
@@ -435,8 +436,11 @@ impl<'a, O: Os> Back<'a, O> {
     /// the hold, finds it resident and pays nothing; returned at each free, it would fault on
     /// every life. A zeroed request has to be served from pages that read as zero, so its slot
     /// is either cleared, at a `memset` over every page, or returned; the mark lets the free
-    /// choose by what the tenant wrote. Does nothing for a slot advised for huge pages (its
-    /// free has its own rules), a small class or a run.
+    /// choose by what the tenant touched. Does nothing for a slot advised for huge pages (its
+    /// free has its own rules), a small class or a run. A slot can still be advised while
+    /// marked: a marked block that then grows densely in place has its slot advised
+    /// (`region::advise_grown` sets `huge`) and keeps the mark, and `return_unwritten` declines
+    /// any slot whose `huge` is set, so that free takes the advised path.
     pub(crate) fn mark_unwritten(&self, ptr: NonNull<u8>) {
         let Some(Kind::Slot(class)) = self.lookup(ptr.as_ptr()) else {
             return;
@@ -470,7 +474,18 @@ impl<'a, O: Os> Back<'a, O> {
     /// part, or refused by the OS) is an ordinary free.
     ///
     /// [`UNWRITTEN_RESIDENT_ONE_IN`]: super::policy::UNWRITTEN_RESIDENT_ONE_IN
-    fn return_unwritten(&self, host: &ClassHost<'a, O>, region: RegionId, slot: u32) -> bool {
+    fn return_unwritten(
+        &self,
+        host: &ClassHost<'a, O>,
+        region: RegionId,
+        slot: u32,
+        class: Class,
+    ) -> bool {
+        // A slot smaller than the floor never holds a marked block: its free pays one compare,
+        // not the load of the size word, so that it costs what it did before the rule.
+        if class.size() < const { unwritten_floor(O::GEOMETRY) } {
+            return false;
+        }
         let Some(now) = region::recorded(host, region, slot).filter(|r| r.unwritten && !r.huge)
         else {
             return false;

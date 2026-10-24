@@ -914,6 +914,134 @@ mod unwritten {
         zeroed
     }
 
+    const PAGE: usize = 4 << 10;
+
+    /// The byte offsets, from a block at its slot's start, of the pages the free of a marked
+    /// block of `size` bytes samples: the middle page of each sixteenth of its extent.
+    fn sampled(size: usize) -> Vec<usize> {
+        use crate::back::policy::UNWRITTEN_SAMPLES;
+        let pages = size.div_ceil(PAGE);
+        (0..UNWRITTEN_SAMPLES)
+            .map(|i| (2 * i + 1) * pages / (2 * UNWRITTEN_SAMPLES) * PAGE)
+            .collect()
+    }
+
+    /// A fresh heap's first block of the floor's class, at its slot's start and known to be
+    /// zero, marked as a zeroed request of it would be; the caller writes `pages` (byte offsets
+    /// of pages to touch) and frees it. Whether the free returned the slot known to be zero.
+    fn marked_free(size: usize, pages: &[usize]) -> bool {
+        let heap = SimHeap::<Native>::new();
+        let class = Class::of_size(floor().size()).unwrap();
+        let back = heap.heap.start().unwrap();
+        let block = back.alloc(class, size).unwrap();
+        assert!(block.zeroed, "a fresh slot");
+        back.mark_unwritten(block.ptr);
+        for &at in pages {
+            // SAFETY: inside the block, which the test holds.
+            unsafe { block.ptr.as_ptr().add(at).write(1) };
+        }
+        back.free(block.ptr, class);
+        next_is_zero(&heap, class)
+    }
+
+    /// The cut: one resident page among the sixteen sampled and the slot goes back; two and it
+    /// is kept.
+    #[test]
+    fn one_sampled_page_resident_returns_and_two_do_not() {
+        let size = floor().size();
+        let s = sampled(size);
+        assert!(marked_free(size, &[]), "none resident");
+        assert!(marked_free(size, &s[5..6]), "one resident");
+        assert!(!marked_free(size, &s[5..7]), "two resident");
+        assert!(!marked_free(size, &s[..8]), "half resident");
+        assert!(!marked_free(size, &s), "all resident");
+    }
+
+    /// Sixteen samples over the extent, not one and not its ends: a block written only in its
+    /// last two sixteenths is kept; one written only in its first or last page goes back.
+    #[test]
+    fn the_sample_spans_the_extent() {
+        let size = floor().size();
+        let late: Vec<usize> = (size * 14 / 16..size).step_by(PAGE).collect();
+        assert!(
+            !marked_free(size, &late),
+            "written in its last two sixteenths"
+        );
+        assert!(marked_free(size, &[0]), "written in its first page only");
+        assert!(
+            marked_free(size, &[size - PAGE]),
+            "written in its last page only"
+        );
+    }
+
+    /// After a shrink in place the free samples the extent the block has then, not its slot:
+    /// two sampled pages of the half it kept are two resident samples.
+    #[test]
+    fn a_shrunk_block_is_sampled_over_what_it_kept() {
+        let heap = SimHeap::<Native>::new();
+        let class = Class::of_size(floor().size()).unwrap();
+        let back = heap.heap.start().unwrap();
+        let block = back.alloc(class, class.size()).unwrap();
+        back.mark_unwritten(block.ptr);
+        let half = class.size() / 2;
+        // SAFETY: the test holds the block and gives up what lies past `half`.
+        unsafe { back.resize_in_place(block.ptr, half) };
+        for &at in &sampled(half)[3..5] {
+            // SAFETY: inside the block's first `half` bytes.
+            unsafe { block.ptr.as_ptr().add(at).write(1) };
+        }
+        back.free(block.ptr, class);
+        assert!(
+            !next_is_zero(&heap, class),
+            "two of the kept half's samples were resident"
+        );
+    }
+
+    /// The floor: a zeroed request a page under it is not marked; one at it is.
+    #[test]
+    fn a_zeroed_request_under_the_floor_is_not_marked() {
+        for (size, marked) in [(floor().size() - PAGE, false), (floor().size(), true)] {
+            let heap = SimHeap::<Native>::new();
+            let l = layout(size, 8);
+            // SAFETY: a valid layout; the block is written within its size and freed once.
+            unsafe {
+                let p = heap.alloc_zeroed(l);
+                p.write(1);
+                let class = class_of(&heap, p);
+                heap.dealloc(p, l);
+                assert_eq!(
+                    next_is_zero(&heap, class),
+                    marked,
+                    "a zeroed request of {size}"
+                );
+            }
+        }
+    }
+
+    /// A second free of a marked block, whose slot went back at the first, is caught before
+    /// anything is returned: the sample would find it unwritten, and only the check of its bit
+    /// stops a purge of a slot that is free.
+    #[test]
+    fn a_second_free_of_a_marked_block_aborts_before_it_purges() {
+        let heap = SimHeap::<Native>::new();
+        let class = Class::of_size(floor().size()).unwrap();
+        let back = heap.heap.start().unwrap();
+        let block = back.alloc(class, floor().size()).unwrap();
+        back.mark_unwritten(block.ptr);
+        back.free(block.ptr, class);
+        let purges = heap.os().calls(Call::Purge);
+        let caught =
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| back.free(block.ptr, class)));
+        let message = caught.expect_err("a double free aborts");
+        let text = message
+            .downcast_ref::<std::string::String>()
+            .map(|s| s.as_str())
+            .or_else(|| message.downcast_ref::<&str>().copied())
+            .unwrap_or("");
+        assert!(text.contains("double free: a large object"), "{text}");
+        assert_eq!(heap.os().calls(Call::Purge), purges, "nothing was purged");
+    }
+
     /// A tenant that writes one page of a zeroed block from a fresh slot: its free returns the
     /// slot whole, uncounted, known to be zero, and the next tenant is not marked.
     #[test]

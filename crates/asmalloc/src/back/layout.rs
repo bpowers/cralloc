@@ -375,8 +375,9 @@ pub(crate) struct Recorded {
     pub(crate) size: usize,
     pub(crate) huge: bool,
     /// Set for the tenant that got the slot zeroed and unwritten, and cleared by every claim:
-    /// it never outlives the tenant. A hint for the free (`Back::purge_before_release`),
-    /// which is correct whatever it says.
+    /// it never outlives the tenant as far as anyone reads it. It may stay in a free slot's
+    /// word until the next claim clears it, but only the slot's holder reads the word. A hint
+    /// for the free (`Back::purge_before_release`), which is correct whatever it says.
     pub(crate) unwritten: bool,
 }
 

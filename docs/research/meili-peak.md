@@ -346,6 +346,21 @@ every life. Writes are one store a page, spread evenly. Selected rows; all rows 
   in either direction between the two modes at 1 to 4 MiB. They take the same code, so that
   spread is the heap's layout between the two processes, not the rule.
 
+**What the look sees, and its limits** (from the review):
+- **It sees what the tenant touched, not what it wrote.** A page that is only read maps the
+  kernel's shared zero page, and `mincore` counts it resident. The reviewer showed it on the
+  kernel: a 20 MiB zeroed block read in full, or read one page in eight, reads as all
+  resident at the next request. So a block that is read widely and written sparsely is treated
+  as dense and freed as on main. That is a limit of the rule, not a regression.
+- **The allocator's own reads count too.** A grow in place reads the block's last piece to
+  judge its density for huge pages (`mostly_data`), and those pages then read as resident.
+- **The worst case is about an eighth, not a sixteenth.** The samples are one page in each
+  sixteenth of the extent, so a dense run just under two sixteenths long can cover only one
+  sample, and the block is returned. By the 13 to 1 cost of a fault against clearing a
+  resident page, that tenant's next life costs about 1.6 times main's.
+- **The simulated OS differs from the kernel here.** It counts a page resident only if the page
+  holds a nonzero byte, so the tests see a page only read as absent.
+
 **Meilisearch** (the rule at 16 MiB and one in sixteen, against main in the same binary and the
 fixed 8 MiB prototype):
 
@@ -390,9 +405,12 @@ these.
 makes every page resident. One whose slot is known zero gets its pages untouched. When such a
 request is 16 MiB or more, its block is marked, and its free looks at one page in each
 sixteenth of the block's extent. If at most one of them is resident, the tenant left the block
-mostly unwritten, and the free returns the slot whole and releases it known to be zero and
+mostly untouched, and the free returns the slot whole and releases it known to be zero and
 uncounted, with no hold. The next zeroed request then clears nothing and pays only for the
-pages it writes. Otherwise the free is an ordinary one. A block cleared with a `memset` is
+pages it touches. Otherwise the free is an ordinary one. The look sees pages touched, not pages
+written: a page only read maps the zero page and counts as resident, so a block read widely and
+written sparsely is freed as before. A dense run just under an eighth of the block can meet one
+sample, so the worst tenant the rule returns touched about an eighth of its block. A block cleared with a `memset` is
 never marked, so a tenant that writes what it is given, on a slot that stayed resident, pays
 what it always did. A request that is not zeroed is never marked either: a scratch buffer
 written in small part and taken again within the hold costs nothing as it is. Every claim
