@@ -78,7 +78,11 @@ fn a_block_regrown_in_a_kept_slot_keeps_its_resident_huge_page() {
     // it resident at its free.
     back.free(first, class);
     let whole = back.alloc(class, class.size()).unwrap().ptr;
-    assert_eq!(whole.addr().get() / 4096, first.addr().get() / 4096, "the same slot");
+    assert_eq!(
+        whole.addr().get() / 4096,
+        first.addr().get() / 4096,
+        "the same slot"
+    );
     pattern(whole.as_ptr(), class.size());
     let purges = os.calls(Call::Purge);
     back.free(whole, class);
