@@ -200,6 +200,12 @@ fn take<O: Os>(back: &Back<'_, O>, rng: &mut Rng, class: Class, size: usize) -> 
         back.alloc(class, size)
     }
     .unwrap();
+    // Two blocks in three are marked as a zeroed request from a slot known to be zero would
+    // be, whatever the slot's history: the free's sample and its return must keep every
+    // property below whatever the mark says (`Back::mark_unwritten`).
+    if rng.below(3) != 0 {
+        back.mark_unwritten(block.ptr);
+    }
     let room = back.room(block.ptr.as_ptr()).unwrap();
     assert!(size <= room);
     if block.zeroed {
@@ -380,7 +386,7 @@ fn run(seed: u64, steps: usize, faults: bool) -> Met {
     let (mut byte, mut met) = (0u8, Met::default());
     for at in 0..steps {
         if faults && rng.below(6) == 0 {
-            let call = [Call::Purge, Call::AdviseHuge][rng.below(2)];
+            let call = [Call::Purge, Call::AdviseHuge, Call::Resident][rng.below(3)];
             let plan = match rng.below(3) {
                 0 => Faults::NONE,
                 1 => Faults::once_after(rng.below(3) as u32),

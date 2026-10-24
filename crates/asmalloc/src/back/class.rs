@@ -18,7 +18,10 @@
 use super::group::{Gather, JUDGE, Run};
 use super::host::ClassHost;
 use super::layout::{Grow, Hints, Layout, Recorded};
-use super::policy::{kept_grown, move_piece, wants_huge};
+use super::policy::{
+    UNWRITTEN_RESIDENT_ONE_IN, UNWRITTEN_SAMPLES, kept_grown, move_piece, unwritten_floor,
+    wants_huge,
+};
 use super::region::{self, Carve};
 use super::tree::{self, Host};
 use super::word::{BITS, Word, position};
@@ -390,6 +393,9 @@ impl<'a, O: Os> Back<'a, O> {
         class: Class,
     ) -> (usize, bool) {
         let resident = |charge: usize| (charge, charge != 0);
+        if self.return_unwritten(host, region, slot, class) {
+            return (0, false);
+        }
         // Only a slot that holds a whole huge page can have been advised.
         if class.size() < self.space.plan().geometry().huge_page_size() {
             return resident(region::charge(host, region, slot));
@@ -420,6 +426,104 @@ impl<'a, O: Os> Back<'a, O> {
         } else {
             resident(region::charge(host, region, slot))
         }
+    }
+
+    /// Marks the large block at `ptr`, which the caller has just been given zeroed from a slot
+    /// known to be zero, so that none of its pages is resident and nothing cleared it: its free
+    /// looks at a sample of its pages ([`Back::purge_before_release`]). Only a block of a zeroed
+    /// request is marked. A block asked for unzeroed may be an over-sized scratch buffer that
+    /// its tenant writes in small part and frees, and the next tenant, taking it again within
+    /// the hold, finds it resident and pays nothing; returned at each free, it would fault on
+    /// every life. A zeroed request has to be served from pages that read as zero, so its slot
+    /// is either cleared, at a `memset` over every page, or returned; the mark lets the free
+    /// choose by what the tenant touched. Does nothing for a slot advised for huge pages (its
+    /// free has its own rules), a small class or a run. A slot can still be advised while
+    /// marked: a marked block that then grows densely in place has its slot advised
+    /// (`region::advise_grown` sets `huge`) and keeps the mark, and `return_unwritten` declines
+    /// any slot whose `huge` is set, so that free takes the advised path.
+    pub(crate) fn mark_unwritten(&self, ptr: NonNull<u8>) {
+        let Some(Kind::Slot(class)) = self.lookup(ptr.as_ptr()) else {
+            return;
+        };
+        if class.is_small() {
+            return;
+        }
+        let Some(host) = self.host(class) else {
+            return;
+        };
+        let (region, slot) = self.validate(&host, ptr.as_ptr(), class);
+        if let Some(now) = region::recorded(&host, region, slot).filter(|r| !r.huge) {
+            let marked = Recorded {
+                unwritten: true,
+                ..now
+            };
+            region::record(&host, region, slot, marked);
+        }
+    }
+
+    /// For a large slot the program is freeing and still holds: if its block is marked
+    /// unwritten (`mark_unwritten`) and a sample of the pages of its extent finds at most one
+    /// in [`UNWRITTEN_RESIDENT_ONE_IN`] resident, returns the slot's pages to the OS and marks
+    /// it purged: clean and known zero, so that it is not counted as retained and the next
+    /// zeroed request of it clears nothing. Whether it did.
+    ///
+    /// The sample decides nothing that matters for correctness. Returning a held slot is
+    /// always a valid free, and so is releasing it resident, whatever `mincore` says (a page
+    /// swapped out reads as absent; one that a racing thread could not touch, since the
+    /// caller holds the block). A slot that cannot be returned whole (in a region's huge-page
+    /// part, or refused by the OS) is an ordinary free.
+    ///
+    /// [`UNWRITTEN_RESIDENT_ONE_IN`]: super::policy::UNWRITTEN_RESIDENT_ONE_IN
+    fn return_unwritten(
+        &self,
+        host: &ClassHost<'a, O>,
+        region: RegionId,
+        slot: u32,
+        class: Class,
+    ) -> bool {
+        // A slot smaller than the floor never holds a marked block: its free pays one compare,
+        // not the load of the size word, so that it costs what it did before the rule.
+        if class.size() < const { unwritten_floor(O::GEOMETRY) } {
+            return false;
+        }
+        let Some(now) = region::recorded(host, region, slot).filter(|r| r.unwritten && !r.huge)
+        else {
+            return false;
+        };
+        let layout = host.layout();
+        let Some(unit) = layout.slot_unit(slot) else {
+            return false;
+        };
+        let page = layout.page_size();
+        let end = region::extent_of(layout, slot, unit, now.size, false);
+        let pages = end.saturating_sub(unit.start) as usize;
+        let samples = UNWRITTEN_SAMPLES.min(pages);
+        let base = self.space.region(region);
+        let mut resident = 0;
+        for i in 0..samples {
+            // The middle page of each of `samples` equal parts of the extent.
+            let at = unit.start as usize + (2 * i + 1) * pages / (2 * samples);
+            let ptr = base.map_addr(|a| a.saturating_add(at * page));
+            // SAFETY: BACK-CLASS-06 in docs/safety/asmalloc/back/class-safety.md. One whole page
+            // of the slot, which the caller holds and nothing writes during the call.
+            match unsafe { self.space.resident(ptr, page) } {
+                Ok(n) => resident += n,
+                Err(_) => return false,
+            }
+        }
+        if resident * UNWRITTEN_RESIDENT_ONE_IN > samples {
+            return false;
+        }
+        // As in `purge_before_release`: a second free of a free slot must not purge memory an
+        // allocation may be about to claim.
+        let (word, bit) = position(slot);
+        if tree::word(host, tree::Node::leaf(region, word)).load() & (1u64 << bit) != 0 {
+            self.abort("double free: a large object was freed while it was free");
+        }
+        // SAFETY: BACK-CLASS-01 in docs/safety/asmalloc/back/class-safety.md. The program is
+        // freeing the slot and has not been given it back, its bit was clear a moment ago,
+        // and the slot is below the watermark (`slot_in`).
+        unsafe { region::purge_held(host, region, slot) }
     }
 
     /// Frees a large slot the caller holds and gives up, found and checked by `slot_in`:
@@ -531,7 +635,13 @@ impl<'a, O: Os> Back<'a, O> {
         };
         region::reach(&host, region, slot, self.epoch());
         if let Some(before) = region::recorded(&host, region, slot) {
-            region::record(&host, region, slot, Recorded { size, ..before });
+            // The last tenant's mark is its own: whoever wants this tenant marked marks it.
+            let now = Recorded {
+                size,
+                unwritten: false,
+                ..before
+            };
+            region::record(&host, region, slot, now);
             if before.huge {
                 // The last free could not take the slot's huge-page advice back; try again,
                 // so that this block, which has not grown, does not get huge pages.
@@ -902,9 +1012,12 @@ impl<'a, O: Os> Back<'a, O> {
         let mut dest = if zeroed { Dest::Zero } else { Dest::Dirty };
         // A slot within the budget is kept whole, with both copies resident for the move;
         // anything else goes back behind the copy.
+        // A block marked unwritten is not kept: its slot is returned behind the copy, as a
+        // block its tenant left unwritten is at its free.
         let keep = match (&host, slot) {
             (Some((host, region, index)), Some(class)) => {
-                self.keep_grown(class, region::charge(host, *region, *index))
+                !region::recorded(host, *region, *index).is_some_and(|r| r.unwritten)
+                    && self.keep_grown(class, region::charge(host, *region, *index))
             }
             _ => false,
         };

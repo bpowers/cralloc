@@ -709,7 +709,9 @@ unsafe impl<S: Shape> Os for SimOs<S> {
         self.admit(Call::Resident, count).1?;
         // A page Linux would have resident is one written since it was committed or purged.
         // The simulator sees writes only by what they leave, so it counts a committed page
-        // that holds a nonzero byte, as `resident_bytes` does.
+        // that holds a nonzero byte, as `resident_bytes` does. That differs from the kernel
+        // twice: the kernel counts a page only read, which maps the shared zero page, as
+        // resident, and a page written with zeros too; the simulator counts neither.
         let resident = (first..first + count)
             .filter(|&index| self.pages.get(index) & WRITABLE != 0)
             // SAFETY: the caller promises nothing writes the range during the call, and the

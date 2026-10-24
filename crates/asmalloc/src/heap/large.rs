@@ -31,7 +31,7 @@
 //! been asked for.
 
 use super::{Bound, Grant, Heap, Zero, small};
-use crate::back::policy::{STAGGER_ROOM, STAGGER_STEP};
+use crate::back::policy::{STAGGER_ROOM, STAGGER_STEP, unwritten_floor};
 use crate::classes::Class;
 use crate::front::Routines;
 use crate::os::Os;
@@ -209,6 +209,14 @@ impl<O: Os> Heap<O> {
                 };
                 // SAFETY: HEAP-03.
                 unsafe { block.ptr.as_ptr().write_bytes(0, clear) };
+                // A zeroed block that nothing had to clear has none of its pages resident: its
+                // free looks at what its tenant wrote (`Back::mark_unwritten`).
+                if zero != Zero::No
+                    && block.zeroed
+                    && used >= unwritten_floor(back.space().plan().geometry())
+                {
+                    back.mark_unwritten(block.ptr);
+                }
                 Some(Grant {
                     ptr: block.ptr,
                     len,
