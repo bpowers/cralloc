@@ -3,7 +3,7 @@
 #![allow(missing_docs, dead_code)]
 use core::sync::atomic::{AtomicU8, AtomicU32, AtomicU64, Ordering::Relaxed};
 
-pub const N: usize = 1280;
+pub const N: usize = 1408;
 
 /// Bytes returned to the OS, by the rule that returned them. The walk's rules count what the
 /// clean bits say was resident; the slot owner's rules count the range they returned.
@@ -55,8 +55,15 @@ pub const MOVE_BYTES: usize = 33;
 /// Growth payments made, and payments that found the count under the cap.
 pub const PAYMENTS: usize = 34;
 pub const PAY_UNDER_CAP: usize = 35;
+/// Large allocations asked to be zeroed: how many, the bytes asked for, how many and how many
+/// bytes of them found their slot known to be zero, and the bytes cleared with a `memset`.
+pub const ZERO_ASKS: usize = 36;
+pub const ZERO_ASK_BYTES: usize = 37;
+pub const ZERO_KNOWN: usize = 38;
+pub const ZERO_CLEARED: usize = 39;
 /// The prototype's own counters (bench/probes/meili-peak/proto_edit.py).
 pub const PROTO_0: usize = 40;
+pub const ZERO_KNOWN_BYTES: usize = 50;
 
 /// Rules a region's last purge came from.
 pub const R_NONE: u8 = 0;
@@ -84,6 +91,10 @@ pub const CLASS_RET: usize = 768;
 /// Per small class: bytes carved and bytes revived.
 pub const CLASS_SMALL_CARVE: usize = 896;
 pub const CLASS_SMALL_REVIVE: usize = 1024;
+/// Per large class: bytes cleared by zeroed allocations, and bytes of the whole slot resident
+/// at a claim (with CLASS_FREE_RES, what tenants made resident while they held their slots).
+pub const CLASS_ZERO_CLEARED: usize = 1152;
+pub const CLASS_CLAIM_SLOTRES: usize = 1280;
 
 pub const REGIONS: usize = 4096;
 
@@ -129,6 +140,36 @@ pub fn rule(region: usize, rule: u8, fine: u32) {
         REGION_RULE[region].store(rule, Relaxed);
         REGION_FINE[region].store(fine, Relaxed);
     }
+}
+
+unsafe extern "C" {
+    fn getenv(name: *const core::ffi::c_char) -> *const core::ffi::c_char;
+}
+
+/// A number from the environment, read once and cached in `cell` (`usize::MAX` until read);
+/// zero when unset or not a number.
+pub fn env_number(cell: &core::sync::atomic::AtomicUsize, name: &core::ffi::CStr) -> usize {
+    let seen = cell.load(Relaxed);
+    if seen != usize::MAX {
+        return seen;
+    }
+    // SAFETY: getenv returns null or a NUL-terminated string.
+    let p = unsafe { getenv(name.as_ptr()) };
+    let mut v = 0usize;
+    if !p.is_null() {
+        let mut i = 0;
+        loop {
+            // SAFETY: within the NUL-terminated string.
+            let c = unsafe { *p.add(i) } as u8;
+            if !c.is_ascii_digit() {
+                break;
+            }
+            v = v.saturating_mul(10).saturating_add((c - b'0') as usize);
+            i += 1;
+        }
+    }
+    cell.store(v, Relaxed);
+    v
 }
 
 /// Age buckets in fine steps: under 32 (64 ms), 64 (125 ms, the hold), 128, 256 (0.5 s), 512

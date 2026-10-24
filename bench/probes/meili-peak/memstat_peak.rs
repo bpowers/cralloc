@@ -56,6 +56,7 @@ struct ClassStat {
 struct Snap {
     t_ms: u64,
     anon: u64,
+    thp: u64,
     self_res: u64,
     /// glibc's mallinfo2: arena, hblkhd, uordblks, fordblks, keepcost.
     glibc: [u64; 5],
@@ -75,6 +76,7 @@ impl Snap {
     const ZERO: Snap = Snap {
         t_ms: 0,
         anon: 0,
+        thp: 0,
         self_res: 0,
         glibc: [0; 5],
         req: [0; CLASSES],
@@ -353,6 +355,7 @@ struct Sampler {
     peak: Snap,
     out: Out,
     statm: i32,
+    rollup: i32,
     start_ms: u64,
     interval_ms: u64,
     state_at: usize,
@@ -396,6 +399,23 @@ impl Sampler {
         resident.saturating_sub(shared) * PAGE as u64
     }
 
+    /// AnonHugePages from smaps_rollup.
+    fn thp(&self) -> u64 {
+        if self.rollup <= 0 {
+            return 0;
+        }
+        let mut buf = [0u8; 4096];
+        // SAFETY: pread writes at most the buffer's length.
+        let n = unsafe { libc::pread(self.rollup, buf.as_mut_ptr().cast(), buf.len(), 0) };
+        let text = std::str::from_utf8(&buf[..n.max(0) as usize]).unwrap_or("");
+        text.lines()
+            .find(|l| l.starts_with("AnonHugePages:"))
+            .and_then(|l| l.split_whitespace().nth(1))
+            .and_then(|k| k.parse::<u64>().ok())
+            .unwrap_or(0)
+            * 1024
+    }
+
     fn sample(&mut self) {
         let w = &mut self.walk;
         w.snap = Snap::ZERO;
@@ -411,6 +431,7 @@ impl Sampler {
             + w.resident_once(temp, TEMP)
             + w.resident_once(state, size_of::<Sampler>());
         self.walk.snap.anon = self.anon();
+        self.walk.snap.thp = self.thp();
         // SAFETY: glibc's mallinfo2 takes no arguments and returns a struct by value.
         let mi = unsafe { mallinfo2() };
         self.walk.snap.glibc = [mi.arena, mi.hblkhd, mi.uordblks, mi.fordblks, mi.keepcost].map(|v| v as u64);
@@ -436,9 +457,10 @@ impl Sampler {
         let g = snap.glibc;
         let _ = writeln!(
             out,
-            "{label} t_ms={} anon={} self={} g_arena={} g_mmap={} g_used={} g_free={} g_top={} req={} heap={} live={} loaded={} spare={} depot={} free={} flyoung={} flold={} flnone={} above={} runs={} meta={} mags={} slabs={} retained={}",
+            "{label} t_ms={} anon={} thp={} self={} g_arena={} g_mmap={} g_used={} g_free={} g_top={} req={} heap={} live={} loaded={} spare={} depot={} free={} flyoung={} flold={} flnone={} above={} runs={} meta={} mags={} slabs={} retained={}",
             snap.t_ms,
             snap.anon,
+            snap.thp,
             snap.self_res,
             g[0],
             g[1],
@@ -585,6 +607,8 @@ extern "C" fn start() {
         s.walk.temp = temp;
         s.out.fd = fd;
         s.statm = statm;
+        // SAFETY: a literal path.
+        s.rollup = libc::open(c"/proc/self/smaps_rollup".as_ptr(), libc::O_RDONLY | libc::O_CLOEXEC);
         s.start_ms = now_ms();
         s.interval_ms = env_num(c"ASMALLOC_MEMSTAT_MS", 250).max(1);
         s.state_at = state.addr();

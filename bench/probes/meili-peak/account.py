@@ -27,10 +27,12 @@ D = dict(RET_HOLD=0, RET_PASS=1, RET_GROWTH=2, RET_TRIM=3, RET_FREE_ADVISED=4, R
          DEBT_DRY=14, DEBT_UNDER_CAP=15, LARGE_CLAIMS=16, LARGE_CLAIM_BYTES=17, LARGE_CLAIM_CLEAN=18,
          LARGE_CLAIM_NONRES=19, LARGE_FREES=20, LARGE_FREE_CHARGE=21, LARGE_FREE_RES=22, SMALL_REVIVE=23,
          RETAINED_SMALL=24, RETAINED_LARGE=25, HOLD_LOOKS=26, HOLD_FINE=27, DEBT_NOW=28, LARGE_CARVES=29,
-         KEPT=30, KEPT_REFUSED=31, MOVES=32, MOVE_BYTES=33, PAYMENTS=34, PAY_UNDER_CAP=35)
+         KEPT=30, KEPT_REFUSED=31, MOVES=32, MOVE_BYTES=33, PAYMENTS=34, PAY_UNDER_CAP=35,
+         ZERO_ASKS=36, ZERO_ASK_BYTES=37, ZERO_KNOWN=38, ZERO_CLEARED=39, PROTO_CALLS=40, PROTO_BYTES=41,
+         ZERO_KNOWN_BYTES=50)
 LARGE_FAULT_BY, SMALL_REVIVE_BY = 64, 112
 CLASS = dict(claim=128, fault=256, carve=384, free_charge=512, free_res=640, ret=768, small_carve=896,
-             small_revive=1024)
+             small_revive=1024, zero_cleared=1152, claim_slotres=1280)
 
 
 def memstat(path):
@@ -151,9 +153,10 @@ def diag_report(first, last, t):
     for name in ["RET_HOLD", "RET_PASS", "RET_GROWTH", "RET_FREE_ADVISED", "RET_MOVE", "RET_SHRINK", "RET_TRIM",
                  "CARVE_SMALL", "CARVE_LARGE", "COVER", "SMALL_REVIVE", "LARGE_CLAIM_BYTES", "LARGE_CLAIM_CLEAN",
                  "LARGE_CLAIM_NONRES", "LARGE_FREE_CHARGE", "LARGE_FREE_RES", "DEBT_TAKEN", "DEBT_OWED",
-                 "DEBT_GOAL", "DEBT_CARRIED", "DEBT_DRY", "DEBT_UNDER_CAP", "KEPT", "KEPT_REFUSED", "MOVE_BYTES"]:
+                 "DEBT_GOAL", "DEBT_CARRIED", "DEBT_DRY", "DEBT_UNDER_CAP", "KEPT", "KEPT_REFUSED", "MOVE_BYTES",
+                 "ZERO_ASK_BYTES", "ZERO_KNOWN_BYTES", "ZERO_CLEARED", "PROTO_BYTES"]:
         print(f"    {name:20s} {g(name) / MiB / secs:9.1f}")
-    for name in ["LARGE_CLAIMS", "LARGE_FREES", "LARGE_CARVES", "MOVES", "PAYMENTS", "PAY_UNDER_CAP", "HOLD_LOOKS"]:
+    for name in ["LARGE_CLAIMS", "LARGE_FREES", "LARGE_CARVES", "MOVES", "PAYMENTS", "PAY_UNDER_CAP", "HOLD_LOOKS", "ZERO_ASKS", "ZERO_KNOWN", "PROTO_CALLS"]:
         print(f"    {name:20s} {g(name) / secs:9.1f} /s")
     print("  large claims' faults by the rule that last purged the region, and how long before, MiB/s:")
     print("    " + " " * 8 + "".join(f"{a:>11s}" for a in AGES))
@@ -165,16 +168,31 @@ def diag_report(first, last, t):
     rows = []
     for size in sorted(first["classes"].keys() | last["classes"].keys()):
         pass
-    print("  by class (large), MiB/s: claimed / faulted / carved / freed charged / freed resident / returned")
+    print("  by class (large), MiB/s: claimed / faulted / carved / freed charged / freed resident / returned / zeroed by memset / slot resident at claim")
     import itertools
     sizes = class_sizes(last)
     for ci, size in sizes.items():
-        vals = [d.get(CLASS[k] + ci, 0) for k in ("claim", "fault", "carve", "free_charge", "free_res", "ret")]
+        vals = [d.get(CLASS[k] + ci, 0) for k in ("claim", "fault", "carve", "free_charge", "free_res", "ret", "zero_cleared", "claim_slotres")]
         if size > SMALL_MAX and sum(vals) > 0.5 * MiB * secs:
             print(f"    {size:>10d} " + " ".join(f"{v / MiB / secs:8.1f}" for v in vals))
     small_ret = sum(d.get(CLASS["ret"] + ci, 0) for ci, s in sizes.items() if s <= SMALL_MAX)
     small_rev = sum(d.get(CLASS["small_revive"] + ci, 0) for ci, s in sizes.items() if s <= SMALL_MAX)
     print(f"  small classes: returned {small_ret / MiB / secs:.1f} MiB/s, revived {small_rev / MiB / secs:.1f} MiB/s")
+
+
+def class_table(inside):
+    """Per class, MiB: the mean over the window, and at the sample with most anonymous memory."""
+    peak = max(inside, key=lambda s: s["anon"])
+    keys = ["req", "req_slot", "resident", "live", "free_res", "free_whole"]
+    pk = ["req_slot", "live", "free_res"]
+    print("  by class, MiB: mean over the window | at the peak sample")
+    print(f"    {'size':>10s} " + " ".join(f"{k:>9s}" for k in keys) + " | " + " ".join(f"{k:>9s}" for k in pk))
+    sizes = sorted({z for s in inside for z in s["classes"]})
+    for z in sizes:
+        m = [sum(s["classes"].get(z, {}).get(k, 0) for s in inside) / len(inside) / MiB for k in keys]
+        p = [peak["classes"].get(z, {}).get(k, 0) / MiB for k in pk]
+        if max(abs(v) for v in m + p) >= 1:
+            print(f"    {z:>10d} " + " ".join(f"{v:9.1f}" for v in m) + " | " + " ".join(f"{v:9.1f}" for v in p))
 
 
 def class_sizes(sample):
@@ -242,6 +260,8 @@ def main():
                 show(mean_cat([asm_categories(s) for s in inside]))
             if "--diag" in args:
                 diag_report(inside[0], inside[-1], inside[-1]["t_ms"] - inside[0]["t_ms"])
+            if "--classes" in args:
+                class_table(inside)
         if js:
             samp = jestat(js[0])
             for s in samp:

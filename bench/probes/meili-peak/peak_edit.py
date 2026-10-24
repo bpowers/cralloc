@@ -314,6 +314,11 @@ impl<O: Os> Back<'_, O> {
         add(LARGE_CLAIM_NONRES, nonres);
         add(CLASS_CLAIM + ci, size);
         add(CLASS_FAULT + ci, nonres);
+        let slot_start = self.space.region(region).map_addr(|a| a.saturating_add(offset - offset % class.size()));
+        let slot_len = class.size().min(1 << 30);
+        // SAFETY: as above, for the whole slot the caller holds.
+        let slot_res = unsafe { self.space.resident(slot_start, slot_len) }.map_or(0, |p| p * page);
+        add(CLASS_CLAIM_SLOTRES + ci, slot_res);
         // What the clean bits marked goes to the region's last purge (bucket 1 of no rule: a
         // region never purged, so pages past an earlier tenant's extent); what they did not
         // mark is bucket 0 of no rule: pages a tenant was given and never wrote.
@@ -347,6 +352,33 @@ impl<O: Os> Back<'_, O> {
 '''
 p = TREE / H
 p.write_text(p.read_text() + HELPERS)
+
+L = A + "heap/large.rs"
+sub(L, """                let len = block.len;
+                let clear = match zero {
+                    _ if block.zeroed => 0,
+                    Zero::No => 0,
+                    Zero::Requested => used,
+                    Zero::Whole => len,
+                };
+""", """                let len = block.len;
+                let clear = match zero {
+                    _ if block.zeroed => 0,
+                    Zero::No => 0,
+                    Zero::Requested => used,
+                    Zero::Whole => len,
+                };
+                if zero != Zero::No {
+                    crate::diag::add(crate::diag::ZERO_ASKS, 1);
+                    crate::diag::add(crate::diag::ZERO_ASK_BYTES, used);
+                    if block.zeroed {
+                        crate::diag::add(crate::diag::ZERO_KNOWN, 1);
+                        crate::diag::add(crate::diag::ZERO_KNOWN_BYTES, used);
+                    }
+                    crate::diag::add(crate::diag::ZERO_CLEARED, clear);
+                    crate::diag::add(crate::diag::CLASS_ZERO_CLEARED + class.index() as usize, clear);
+                }
+""")
 
 I = A + "back/inspect.rs"
 sub(I, "        visitor.retained(self.retained());\n",

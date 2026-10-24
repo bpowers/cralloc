@@ -97,6 +97,16 @@ fn anon() -> u64 {
     resident.saturating_sub(shared) * 4096
 }
 
+fn thp() -> u64 {
+    let text = std::fs::read_to_string("/proc/self/smaps_rollup").unwrap_or_default();
+    text.lines()
+        .find(|l| l.starts_with("AnonHugePages:"))
+        .and_then(|l| l.split_whitespace().nth(1))
+        .and_then(|k| k.parse::<u64>().ok())
+        .unwrap_or(0)
+        * 1024
+}
+
 pub fn start_stats() {
     let Ok(path) = std::env::var("JEMALLOC_MEMSTAT") else {
         return;
@@ -139,7 +149,7 @@ pub fn start_stats() {
             let mi = unsafe { mallinfo2() };
             let _ = writeln!(
                 out,
-                "je t_ms={} anon={} g_arena={} g_mmap={} g_used={} g_free={} g_top={} req={} allocated={} active={} resident={} mapped={} retained={} metadata={} pactive={} pdirty={} pmuzzy={} small={} large={}",
+                "je t_ms={} anon={} g_arena={} g_mmap={} g_used={} g_free={} g_top={} req={} allocated={} active={} resident={} mapped={} retained={} metadata={} pactive={} pdirty={} pmuzzy={} small={} large={} zeroed_big={} thp={}",
                 start.elapsed().as_millis(),
                 anon(),
                 mi.arena,
@@ -159,6 +169,8 @@ pub fn start_stats() {
                 read_usize(&format!("{a}.pmuzzy")).saturating_mul(4096),
                 read_usize(&format!("{a}.small.allocated")),
                 read_usize(&format!("{a}.large.allocated")),
+                ZEROED_BIG.load(std::sync::atomic::Ordering::Relaxed),
+                thp(),
             );
             if n.is_multiple_of(detail) {
                 let mut line = format!("jeb t_ms={}", start.elapsed().as_millis());
@@ -229,6 +241,9 @@ fn requested() -> i64 {
     SHARDS.iter().map(|s| s.0.load(std::sync::atomic::Ordering::Relaxed)).sum()
 }
 
+/// Bytes of zeroed allocations of a MiB or more.
+static ZEROED_BIG: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
 /// jemalloc, counting what the program asks for.
 pub struct Counting;
 
@@ -248,6 +263,9 @@ unsafe impl std::alloc::GlobalAlloc for Counting {
         let p = unsafe { tikv_jemallocator::Jemalloc.alloc_zeroed(layout) };
         if !p.is_null() {
             add(layout.size() as i64);
+            if layout.size() >= 1 << 20 {
+                ZEROED_BIG.fetch_add(layout.size() as u64, std::sync::atomic::Ordering::Relaxed);
+            }
         }
         p
     }
