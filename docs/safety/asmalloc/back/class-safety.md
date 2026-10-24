@@ -194,9 +194,9 @@ report) and C's `realloc_other` (MOD-01, which passes `false`), and both hold bo
 
 A slot its block outgrew (`Move::Outgrown`) and that the count of kept outgrown slots has
 room for (`keep_outgrown`, true only for a slot, which counts the slot's charge before the
-copy) is kept: the move returns nothing of `from` (steps 4 and 5 do not run), takes the
-slot's huge-page advice back (`region::unadvise`, which changes no contents), marks the size
-word (`Recorded::outgrown`, written by the holder) and releases the slot resident and counted
+copy), and that is neither marked unwritten nor advised for huge pages, is kept: the move
+returns nothing of `from` (steps 4 and 5 do not run), marks the size word
+(`Recorded::outgrown`, written by the holder) and releases the slot resident and counted
 already. The copies of steps 0 to 3 are the same, and keeping both copies resident is a
 matter of memory, not of safety. Any other move (`Move::Other`) returns the pieces behind its
 copy (step 4, without the last range) and frees the slot through `free_slot` (BACK-CLASS-01),

@@ -56,10 +56,10 @@ fn fill_and_grow<O: Shape>(
     os.calls(Call::Purge) - purges
 }
 
-/// Finding kept-slot. A block that outgrows its slot leaves it resident, within the bound on
-/// kept outgrown slots, so that a buffer grown again lands on memory it need not fault. The
-/// next block to grow there has the huge page past its old end resident already, whole;
-/// returning it frees no page table worth freeing and costs the fault it was meant to save.
+/// Finding kept-slot. A slot its last tenant left resident (a plain free of a block written
+/// whole) holds, for the next block to grow there, the huge page past its old end resident
+/// already, whole; returning it frees no page table worth freeing and costs the fault it was
+/// meant to save.
 #[test]
 #[cfg_attr(miri, ignore)]
 fn a_block_regrown_in_a_kept_slot_keeps_its_resident_huge_page() {
@@ -74,14 +74,15 @@ fn a_block_regrown_in_a_kept_slot_keeps_its_resident_huge_page() {
         1,
         "in a fresh slot the spilled page is returned, to fault whole"
     );
-    let usable = back.usable_size(first.as_ptr()).unwrap();
-    pattern(first.as_ptr(), usable);
+    // An advised block's free returns its slot; a tenant written whole and not grown leaves
+    // it resident at its free.
+    back.free(first, class);
+    let whole = back.alloc(class, class.size()).unwrap().ptr;
+    assert_eq!(whole.addr().get() / 4096, first.addr().get() / 4096, "the same slot");
+    pattern(whole.as_ptr(), class.size());
     let purges = os.calls(Call::Purge);
-    let wider = large(2 * class.size());
-    let moved = back.alloc(wider, usable).unwrap().ptr;
-    // SAFETY: both are live blocks that nothing else uses, `first` given up.
-    unsafe { back.move_large(first, moved, usable, false, crate::back::Move::Outgrown) };
-    assert_eq!(os.calls(Call::Purge), purges, "the slot is kept resident");
+    back.free(whole, class);
+    assert_eq!(os.calls(Call::Purge), purges, "the slot is left resident");
     let again = back.alloc_staggered(class, huge).unwrap().ptr;
     assert_eq!(again, first);
     // The huge page the block spills into, resident from the last tenant.
@@ -94,7 +95,6 @@ fn a_block_regrown_in_a_kept_slot_keeps_its_resident_huge_page() {
         "the growth returned a huge page that was resident whole"
     );
     back.free(again, class);
-    back.free(moved, wider);
 }
 
 /// Finding kept-slot, without a free: a block that shrinks in place inside its advised slot

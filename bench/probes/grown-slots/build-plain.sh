@@ -23,6 +23,11 @@ git -C "$root" archive "$commit" | tar -x -C "$tree"
 mkdir -p "$tree/bench/probes/grown-slots"
 cp -r "$here"/trail "$tree/bench/probes/grown-slots/"
 git -C "$root" rev-parse "$commit" > "$out/BUILT-FROM"
+# EDIT names a script of this directory to apply to the tree first (a variant, not product).
+if [ -n "${EDIT:-}" ]; then
+  python3 -I "$here/$EDIT" "$tree"
+  echo "edit $EDIT $(sha256sum "$here/$EDIT" | cut -c1-12)" >> "$out/BUILT-FROM"
+fi
 unset RUSTFLAGS CARGO_ENCODED_RUSTFLAGS BENCH_LAYOUT_PAD
 export BENCH_BASELINES="$shared/baselines/out"
 for part in "${parts[@]}"; do

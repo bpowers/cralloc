@@ -15,12 +15,12 @@
 //!   its whole huge pages advised for huge pages, and its size word records that
 //!   (`Recorded::huge`). Only the slot's holder reads or writes the flag. While it is set, a
 //!   partial purge of the slot rounds inward to whole huge pages, since purging part of a huge
-//!   page returns nothing to the OS until the kernel gets round to splitting it. The free
-//!   purges the whole slot and takes the advice back; a move that keeps the slot it outgrew
-//!   takes the advice back and leaves the pages resident; a claim of a slot whose advice could
-//!   not be taken back tries again (`Back::alloc_at`). The huge pages already faulted stay, and
-//!   that tenant's flag is clear,
-//!   so a shrink of it in place is not trimmed to whole huge pages and may purge part of one.
+//!   page returns nothing to the OS until the kernel gets round to splitting it. The free, and
+//!   the move out of a slot so advised, purge the whole slot and take the advice back, so no
+//!   advised range stays on a free slot; a claim of a slot whose advice could not be taken back
+//!   tries again (`Back::alloc_at`). The huge pages already faulted stay, and that tenant's flag
+//!   is clear, so a shrink of it in place is not trimmed to whole huge pages and may purge part
+//!   of one.
 //!   That costs memory, not only time: a partly unmapped huge page stays charged to the cgroup
 //!   whole until the kernel splits it, which it leaves to memory pressure
 //!   (`crates/asmalloc-preload/tests/programs/thp_partial.c`: purging half of each huge page of

@@ -928,10 +928,10 @@ impl<'a, O: Os> Back<'a, O> {
     ///   both copies resident during the move, while the slots so kept and not yet taken again
     ///   stay within `policy::kept_outgrown` (`keep_outgrown`): the next buffer growing through
     ///   the class takes it within milliseconds, and returned it would be faulted straight
-    ///   back. A kept slot is marked (`Recorded::outgrown`), released counted and stamped for
-    ///   the hold, and loses any huge-page advice, which must not stay on a free slot. Past the
-    ///   bound, or for a block left mostly unwritten, the rest of the slot goes back after the
-    ///   last piece, so that many buffers growing at once leave no trail.
+    ///   back. A kept slot is marked (`Recorded::outgrown`) and released counted and stamped
+    ///   for the hold. Past the bound, or for a block left mostly unwritten or advised for huge
+    ///   pages, the rest of the slot goes back after the last piece, with any advice taken
+    ///   back, so that many buffers growing at once leave no trail.
     /// - Any other move ([`Move::Other`]: a shrink to a sliver of the slot, a new alignment)
     ///   frees the old block as its free would have (`free_slot`): the pages behind the pieces
     ///   are gone, and the rest of the slot stays resident, charged and stamped, unless it is
@@ -1044,12 +1044,15 @@ impl<'a, O: Os> Back<'a, O> {
         let page = self.space.plan().geometry().page_size();
         let mut dest = if zeroed { Dest::Zero } else { Dest::Dirty };
         // An outgrown slot within the bound is kept whole, with both copies resident for the
-        // move; anything else goes back behind the copy. A block marked unwritten is not kept:
-        // its slot is returned behind the copy, as a block its tenant left unwritten is at its
-        // free.
+        // move; anything else goes back behind the copy. Two kinds are never kept. A block
+        // marked unwritten: its slot is returned, as a block its tenant left unwritten is at its
+        // free. And a block advised for huge pages: its slot's pages fault back 2 MiB at a time
+        // for a fraction of the small pages' cost, and the next block, written over memory that
+        // is resident but cold, took more time than the faults it saved (a buffer grown to
+        // 64 MiB over and over, 31% slower kept; `docs/research/grown-slots.md`).
         let keep = match (&host, slot) {
             (Some((host, region, index)), Some(class)) if why == Move::Outgrown => {
-                !region::recorded(host, *region, *index).is_some_and(|r| r.unwritten)
+                !region::recorded(host, *region, *index).is_some_and(|r| r.unwritten || r.huge)
                     && self.keep_outgrown(class, region::charge(host, *region, *index))
             }
             _ => false,
@@ -1093,8 +1096,6 @@ impl<'a, O: Os> Back<'a, O> {
             return;
         };
         if keep {
-            // The advice is the tenant's, and the next block in the slot may not grow.
-            region::unadvise(&host, region, index);
             if let Some(now) = region::recorded(&host, region, index) {
                 let marked = Recorded {
                     outgrown: true,

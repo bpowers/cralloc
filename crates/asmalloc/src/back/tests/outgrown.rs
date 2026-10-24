@@ -324,3 +324,34 @@ fn a_shrinks_move_frees_the_old_slot_as_its_free_would() {
     back.free(to, sliver);
     back.free(to2, sliver);
 }
+
+/// A block advised for huge pages that outgrows its slot returns it behind the copy, with the
+/// advice taken back, whatever room the count has: its pages fault back whole, and kept they
+/// cost the next block more than the faults they save.
+#[test]
+#[cfg_attr(miri, ignore)]
+fn an_advised_slot_outgrown_goes_back() {
+    let state = state::<Native>();
+    let back = state.get_or_reserve().unwrap();
+    let os = state.os();
+    let huge = Native::GEOMETRY.huge_page_size();
+    let class = large(512 << 10);
+    let advised = back.alloc(class, huge).unwrap().ptr;
+    move_in(&back, large(96 << 10), huge, advised, 2 * huge);
+    assert_eq!(os.huge_pages(advised), Some(HugePages::Prefer));
+    let (counted, retained) = (back.outgrown(), back.retained_large());
+    let wider = large(768 << 10);
+    let to = back.alloc(wider, 2 * huge).unwrap().ptr;
+    // SAFETY: both are live blocks that nothing else uses, `advised` given up.
+    unsafe { back.move_large(advised, to, 2 * huge, false, Move::Outgrown) };
+    assert!(patterned(to.as_ptr(), huge));
+    // SAFETY: the slot is free and nothing else uses the simulated heap meanwhile.
+    assert!(unsafe { os.is_purged(advised, class.size()) });
+    assert_eq!(os.huge_pages(advised), Some(HugePages::Avoid));
+    assert!(!kept(&back, advised));
+    assert_eq!(
+        (back.outgrown(), back.retained_large()),
+        (counted, retained)
+    );
+    back.free(to, wider);
+}
