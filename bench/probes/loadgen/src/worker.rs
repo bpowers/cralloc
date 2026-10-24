@@ -79,6 +79,10 @@ pub struct Config<'a> {
 pub struct Counters {
     pub reconnects: u64,
     pub unexpected: u64,
+    /// HTTP/2: every flow-control grant the server made, as (ns from the start, connection,
+    /// kind, value): kind 0 a connection WINDOW_UPDATE's increment, 1 a SETTINGS initial
+    /// stream window.
+    pub windows: Vec<(u64, u16, u16, u32)>,
 }
 
 fn open(addr: SocketAddr) -> io::Result<TcpStream> {

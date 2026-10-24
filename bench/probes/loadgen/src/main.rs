@@ -25,7 +25,8 @@
 //! segment; then the summary as one JSON object on a `RESULT` line (and in `--json`). `--raw`
 //! writes every request as 20 little-endian bytes: due time in ns from the start (u64),
 //! latency in ns (u64), segment index (u16), flags (u16: 1 missed its slot, 2 error, 4 closed
-//! loop). `--pid` samples the server's resident set every `--sample-ms` (default 10) into
+//! loop; over HTTP/2, 8 its body waited for the connection's send window, 16 for its stream's).
+//! `--pid` samples the server's resident set every `--sample-ms` (default 10) into
 //! `--mem` as `ms,rss_kib,file_kib`.
 //!
 //! With HTTP/1.1, `--requests FILE` instead holds whole requests (head and body) written back
@@ -334,11 +335,28 @@ fn main() {
     let mem = sampler.map(|h| h.join().expect("sampler panicked")).unwrap_or_default();
     let mut recs = Vec::new();
     let (mut reconnects, mut unexpected) = (0, 0);
+    let mut windows = Vec::new();
     for r in results {
         let (v, c) = r.unwrap_or_else(|e| die(&format!("worker: {e}")));
         recs.extend(v);
         reconnects += c.reconnects;
         unexpected += c.unexpected;
+        windows.extend(c.windows);
+    }
+    // Over HTTP/2, the server's flow-control grants beside the records: `<raw>.win`, 16 bytes
+    // each (ns from the start u64, connection u16, kind u16, value u32; see Counters).
+    if let Some(p) = o.raw.as_ref().filter(|_| !windows.is_empty()) {
+        windows.sort_unstable();
+        let mut buf = Vec::with_capacity(windows.len() * 16);
+        for (t, c, k, v) in &windows {
+            buf.extend_from_slice(&t.to_le_bytes());
+            buf.extend_from_slice(&c.to_le_bytes());
+            buf.extend_from_slice(&k.to_le_bytes());
+            buf.extend_from_slice(&v.to_le_bytes());
+        }
+        let mut w = p.clone().into_os_string();
+        w.push(".win");
+        std::fs::write(&w, buf).unwrap_or_else(|e| die(&format!("{}: {e}", p.display())));
     }
     recs.sort_unstable_by_key(|r| r.due);
     if let Some(p) = &o.raw {

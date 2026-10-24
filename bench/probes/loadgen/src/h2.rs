@@ -35,6 +35,10 @@ const PADDED: u8 = 0x8;
 const PRIORITY: u8 = 0x20;
 const MAX_WINDOW: u32 = (1 << 31) - 1;
 const DEFAULT_WINDOW: i64 = 65_535;
+/// Record flags beside worker's: the request's body waited for the connection's send window,
+/// or for its stream's.
+pub const CONN_WINDOW: u16 = 8;
+pub const STREAM_WINDOW: u16 = 16;
 
 /// The request: its header block, already HPACK-encoded, and its body.
 pub struct Request {
@@ -219,6 +223,11 @@ impl Driver<'_> {
             }
             let room = conn.window.min(s.window).min(conn.max_frame as i64);
             if room <= 0 {
+                // Which window held the body back, kept in the request's record: the server's
+                // flow control is part of its latency, and the flags say where.
+                if let Some(f) = s.inflight.as_mut() {
+                    f.flags |= if conn.window <= 0 { CONN_WINDOW } else { STREAM_WINDOW };
+                }
                 conn.blocked.push_back(slot);
                 return;
             }
@@ -417,6 +426,8 @@ impl Driver<'_> {
                     let v = u32::from_be_bytes([kv[2], kv[3], kv[4], kv[5]]);
                     match key {
                         4 => {
+                            let at = (self.cfg.thread * self.cfg.conns + c) as u16;
+                            self.counters.windows.push((now, at, 1, v));
                             let conn = &mut self.conns[c];
                             let delta = v as i64 - conn.initial;
                             conn.initial = v as i64;
@@ -442,6 +453,8 @@ impl Driver<'_> {
             WINDOW_UPDATE if p.len() == 4 => {
                 let inc = (u32::from_be_bytes([p[0], p[1], p[2], p[3]]) & 0x7fff_ffff) as i64;
                 if id == 0 {
+                    let at = (self.cfg.thread * self.cfg.conns + c) as u16;
+                    self.counters.windows.push((now, at, 0, inc as u32));
                     self.conns[c].window += inc;
                 } else if let Some(&slot) = self.conns[c].ids.get(&id) {
                     self.slots[slot].window += inc;

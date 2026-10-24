@@ -1,0 +1,57 @@
+diff --git a/bench/runner/src/main.rs b/bench/runner/src/main.rs
+index 6515055..67a8f5e 100644
+--- a/bench/runner/src/main.rs
++++ b/bench/runner/src/main.rs
+@@ -115,6 +115,7 @@ fn jobs(f: &Flags) -> (String, Vec<suite::Job>) {
+             "servers-doubling" => suite::servers_doubling(),
+             "servers-thread" => suite::servers_thread(),
+             "meili-tail" => suite::meili_tail(),
++            "h2-tail" => suite::h2_tail(),
+             _ => die(
+                 "--suite must be quick, full, backend, apps, servers, servers-sat, servers-large, servers-large-sat, \
+                  servers-doubling, servers-thread or meili-tail, \
+diff --git a/bench/runner/src/suite.rs b/bench/runner/src/suite.rs
+index 1f6a8b8..bee591a 100644
+--- a/bench/runner/src/suite.rs
++++ b/bench/runner/src/suite.rs
+@@ -906,6 +906,40 @@ pub fn meili_tail() -> Vec<Job> {
+         .collect()
+ }
+ 
++/// The rpc-server's HTTP/2 jobs with a longer 70% stretch, for the tail of Connect over HTTP/2
++/// (`docs/research/h2-tail.md`): the servers suite's day up to s70, then 20 one-second pieces
++/// at the same rate (`t00` to `t19`), each summarised apart. Connect over HTTP/2 also at other
++/// rates in place of the 70% one (`connect log h2 tail r80k`), so that a faster server can be
++/// set against a slower one at the same idleness.
++pub fn h2_tail() -> Vec<Job> {
++    let mut v = Vec::new();
++    for s in served().into_iter().filter(|s| s.id == "connect log h2" || s.id == "connect log grpc h2") {
++        let rates: &[u32] = if s.id == "connect log h2" { &[0, 45_000, 52_000, 68_000, 73_000, 80_000] } else { &[0] };
++        for &r in rates {
++            let s = Served { id: s.id, program: s.program.clone(), args: s.args, load: s.load.clone(), rates: s.rates };
++            v.push((s, r));
++        }
++    }
++    v.into_iter()
++        .map(|(s, rate)| {
++            let (r30, r70) = if rate == 0 { s.rates } else { (s.rates.0, rate) };
++            let suffix = if rate == 0 { " tail".to_string() } else { format!(" tail r{}k", rate / 1000) };
++            let mut segs = vec![
++                "_fill:closed:2".to_string(),
++                "sat:closed:4".into(),
++                format!("_w30:{r30}:1"),
++                format!("s30:{r30}:6"),
++                format!("_w70:{r70}:1"),
++                format!("s70:{r70}:6"),
++            ];
++            segs.extend((0..20).map(|i| format!("t{i:02}:{r70}:1")));
++            let mut job = server_job(s, segs.join(","), "s70", &suffix);
++            job.group = "h2-tail";
++            job
++        })
++        .collect()
++}
++
+ /// Every CPU any job may use.
+ pub fn measurement_cpus() -> Vec<usize> {
+     both()
