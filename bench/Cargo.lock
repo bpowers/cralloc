@@ -112,6 +112,7 @@ dependencies = [
  "bench-alloc",
  "bench-harness",
  "crossbeam-queue",
+ "libc",
  "rayon",
  "serde_json",
  "tokio",

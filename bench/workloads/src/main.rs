@@ -6,6 +6,7 @@
 //! Every workload prints one `BENCH_RESULT` line (see bench-harness). Threads are pinned to
 //! the CPUs in `BENCH_CPUS`, in order. Sizes and choices come from seeded generators, so each
 //! allocator serves the same sequence of requests.
+mod drift;
 mod mem;
 mod obj;
 mod single;
@@ -42,6 +43,8 @@ fn main() {
         "tiny" => mem::tiny(&args),
         "period" => mem::period(&args),
         "refill" => mem::refill(&args),
+        // Long runs at a large heap for docs/research/heap-drift.md.
+        "drift" => drift::drift(&args),
         // A probe of the slow paths' stack depth; not part of any suite.
         "stack" => stack::stack(&args),
         _ => {

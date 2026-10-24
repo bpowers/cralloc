@@ -25,6 +25,8 @@ tc = ["bench-alloc/tc"]
 sn = ["bench-alloc/sn"]
 # Not an allocator: the live-bytes count, for resident over live (../../alloc/src/live.rs).
 live-bytes = ["bench-alloc/live-bytes"]
+# Not an allocator: asmalloc with its heap broken down (../../alloc/src/memstat.rs).
+asmalloc-memstat = ["bench-alloc/asmalloc-memstat"]
 
 [dependencies]
 bench-alloc = { path = "../../alloc" }

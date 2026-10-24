@@ -14,7 +14,10 @@
 //! - `runs`, `meta` (region metadata blocks), `mags` (the magazine area), `slabs`.
 //!
 //! It writes one line per sample, and at exit the full breakdown by class and by CPU of the
-//! sample in which the program held the most (`peak`) and of one last sample (`final`).
+//! sample in which the program held the most (`peak`) and of one last sample (`final`). A
+//! program may also ask for a full breakdown at a moment of its choosing (`snapshot`, which
+//! writes `acct` lines); with `ASMALLOC_MEMSTAT_MS=0` the thread samples only then, which a
+//! heap of gigabytes, whose walk takes a while, wants.
 //!
 //! The sampler never calls the global allocator, so it does not disturb what it measures: its
 //! thread comes from `pthread_create` (glibc's own heap and `mmap`), its buffers from `mmap`,
@@ -27,6 +30,7 @@ use std::fmt::Write as _;
 use std::sync::atomic::{AtomicBool, Ordering::*};
 
 const PAGE: usize = 4096;
+const HUGE: usize = 2 << 20;
 const CLASSES: usize = asmalloc::classes::COUNT + 1;
 const CPUS: usize = 64;
 const MAX_REGIONS: usize = 4096;
@@ -45,12 +49,37 @@ struct ClassStat {
     above: u64,
     free: u64,
     free_res: u64,
-    /// Resident bytes of pages that lie wholly inside one run of free slots: purgeable.
+    /// Resident bytes of pages that lie wholly inside one run of free slots.
     free_whole: u64,
+    /// Of those, the bytes in a region's huge-page part, where the purge returns only whole
+    /// 2 MiB units ...
+    free_whole_huge: u64,
+    /// ... and the resident bytes of the units that lie wholly inside one run of free slots,
+    /// which it can return. `free_whole - free_whole_huge + free_units` is what a purge could
+    /// return now; the rest of `free_res` stays while its page or unit holds anything else.
+    free_units: u64,
     cached: [u64; 3],
     cached_res: [u64; 3],
     magazines: [u32; 3],
     meta_res: u64,
+    /// Resident pages below the watermark, and resident 2 MiB units of the huge-page part,
+    /// by how much of their carved bytes is not free in the bitmap ([`bucket`]): the
+    /// occupancy of the class's memory, as slabs by fullness are for a slab allocator.
+    pages: [u32; BUCKETS],
+    units: [u32; BUCKETS],
+}
+
+/// Occupancy buckets: empty, up to a quarter, a half, three quarters, less than full, full.
+const BUCKETS: usize = 6;
+
+fn bucket(used: u64, total: u64) -> usize {
+    if used == 0 {
+        0
+    } else if used >= total {
+        BUCKETS - 1
+    } else {
+        1 + (4 * used / total).min(3) as usize
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -112,10 +141,14 @@ impl Snap {
             free: 0,
             free_res: 0,
             free_whole: 0,
+            free_whole_huge: 0,
+            free_units: 0,
             cached: [0; 3],
             cached_res: [0; 3],
             magazines: [0; 3],
             meta_res: 0,
+            pages: [0; BUCKETS],
+            units: [0; BUCKETS],
         }; CLASSES],
         cpu_res: [[0; 2]; CPUS],
         cpus: 0,
@@ -174,7 +207,29 @@ struct Walk {
     heap_base: usize,
     region_shift: u32,
     current: usize,
+    /// Where the huge-page part of the region last reported begins, or `usize::MAX`.
+    huge_start: usize,
+    /// Free bytes in each page of the region last reported, from its first slot's page up.
+    page_free: *mut u32,
+    occ: Occupancy,
 }
+
+/// The region whose pages `page_free` counts.
+#[derive(Clone, Copy)]
+struct Occupancy {
+    active: bool,
+    class: usize,
+    rec: usize,
+    /// The first slot's address, and the page it is in.
+    first: usize,
+    first_page: usize,
+    carved_end: usize,
+    pages: usize,
+    huge_start: usize,
+}
+
+/// Pages `page_free` has room for: a 4 GiB region.
+const OCC_PAGES: usize = 1 << 20;
 
 /// Fills `out` with one byte per page of `[start, start + len)`, non-zero where resident.
 /// `start` is page-aligned. Pages the kernel cannot answer for read as not resident.
@@ -224,6 +279,59 @@ impl Walk {
         total
     }
 
+    /// Buckets the resident pages and units of the region `page_free` counts.
+    fn flush_occupancy(&mut self) {
+        let o = self.occ;
+        if !o.active {
+            return;
+        }
+        self.occ.active = false;
+        let r = self.recs[o.rec];
+        // The unit being summed: its first page, carved bytes, bytes not free, whether any of
+        // it is resident.
+        let mut unit: Option<(usize, u64, u64, bool)> = None;
+        let mut units = [0u32; BUCKETS];
+        let mut pages = [0u32; BUCKETS];
+        for i in 0..o.pages {
+            let addr = o.first_page + i * PAGE;
+            let carved = (addr + PAGE).min(o.carved_end).saturating_sub(addr.max(o.first)) as u64;
+            // SAFETY: `i < o.pages`, the counts written for this region.
+            let free = unsafe { self.page_free.add(i).read() } as u64;
+            let used = carved.saturating_sub(free);
+            let at = (addr - r.base) / PAGE;
+            // SAFETY: the record's residency bytes cover its committed pages, and the carved
+            // ones are among them.
+            let resident = at < r.pages && unsafe { self.scratch.add(r.at + at).read() } & 1 != 0;
+            if resident && carved > 0 {
+                pages[bucket(used, carved)] += 1;
+            }
+            if addr >= o.huge_start {
+                let start = addr & !(HUGE - 1);
+                if let Some((s, c, u, res)) = unit
+                    && s != start
+                {
+                    if res && c > 0 {
+                        units[bucket(u, c)] += 1;
+                    }
+                    unit = None;
+                }
+                let (s, c, u, res) = unit.unwrap_or((start, 0, 0, false));
+                unit = Some((s, c + carved, u + used, res || resident));
+            }
+        }
+        if let Some((_, c, u, res)) = unit
+            && res
+            && c > 0
+        {
+            units[bucket(u, c)] += 1;
+        }
+        let cs = &mut self.snap.classes[o.class];
+        for b in 0..BUCKETS {
+            cs.pages[b] += pages[b];
+            cs.units[b] += units[b];
+        }
+    }
+
     fn record_of(&self, address: usize) -> Option<usize> {
         let index = address.checked_sub(self.heap_base)? >> self.region_shift;
         match *self.by_index.get(index)? {
@@ -239,6 +347,7 @@ impl Visitor for Walk {
     }
 
     fn region(&mut self, region: &Region) {
+        self.flush_occupancy();
         let c = &mut self.snap.classes[region.class.index() as usize];
         c.regions += 1;
         // What is carved and committed, not the address space below the class's first slot.
@@ -247,6 +356,7 @@ impl Visitor for Walk {
         if let Some(from) = region.huge_from {
             c.huge_part += region.committed.saturating_sub(from) as u64;
         }
+        self.huge_start = region.huge_from.map_or(usize::MAX, |from| region.base.addr() + from);
         let pages = region.committed / PAGE;
         if self.count == self.recs.len() || self.used + pages > SCRATCH || region.index >= MAX_REGIONS {
             self.current = usize::MAX;
@@ -265,6 +375,24 @@ impl Visitor for Walk {
         self.current = self.count;
         self.count += 1;
         self.used += pages;
+        let first = base + region.origin;
+        let first_page = first & !(PAGE - 1);
+        let carved_end = base + region.carved.min(region.committed);
+        let occ_pages = carved_end.saturating_sub(first_page).div_ceil(PAGE);
+        if !self.page_free.is_null() && occ_pages <= OCC_PAGES {
+            // SAFETY: the buffer holds OCC_PAGES counts.
+            unsafe { self.page_free.write_bytes(0, occ_pages) };
+            self.occ = Occupancy {
+                active: true,
+                class: region.class.index() as usize,
+                rec: self.current,
+                first,
+                first_page,
+                carved_end,
+                pages: occ_pages,
+                huge_start: self.huge_start,
+            };
+        }
         let resident = self.overlap(self.current, base, pages * PAGE);
         let above = self.overlap(self.current, base + region.carved, pages * PAGE - region.carved.min(pages * PAGE));
         let c = &mut self.snap.classes[region.class.index() as usize];
@@ -291,10 +419,34 @@ impl Visitor for Walk {
         let (first, end) = (start.addr().next_multiple_of(PAGE), (start.addr() + len) & !(PAGE - 1));
         let whole =
             if self.current == usize::MAX || first >= end { 0 } else { self.overlap(self.current, first, end - first) };
+        // The whole pages and whole 2 MiB units of the run that lie in the huge-page part.
+        let (mut whole_huge, mut units) = (0, 0);
+        if self.current != usize::MAX && first < end && end > self.huge_start {
+            let from = first.max(self.huge_start);
+            whole_huge = self.overlap(self.current, from, end - from);
+            let (u0, u1) = (from.next_multiple_of(HUGE), end & !(HUGE - 1));
+            if u0 < u1 {
+                units = self.overlap(self.current, u0, u1 - u0);
+            }
+        }
+        if self.occ.active {
+            let (mut at, end) = (start.addr(), start.addr() + len);
+            while at < end {
+                let page = (at - self.occ.first_page) / PAGE;
+                let stop = (self.occ.first_page + (page + 1) * PAGE).min(end);
+                if page < self.occ.pages {
+                    // SAFETY: `page < occ.pages <= OCC_PAGES`, the buffer's length.
+                    unsafe { *self.page_free.add(page) += (stop - at) as u32 };
+                }
+                at = stop;
+            }
+        }
         let c = &mut self.snap.classes[class.index() as usize];
         c.free += len as u64;
         c.free_res += resident;
         c.free_whole += whole;
+        c.free_whole_huge += whole_huge;
+        c.free_units += units;
     }
 
     fn run(&mut self, base: *const u8, len: usize, _size: usize) {
@@ -302,6 +454,7 @@ impl Visitor for Walk {
     }
 
     fn magazine_area(&mut self, base: *const u8, carved: usize, committed: usize) {
+        self.flush_occupancy();
         self.snap.mags_carved = carved as u64;
         self.snap.mags_base = base.addr() as u64;
         self.snap.mags_committed = committed as u64;
@@ -334,6 +487,18 @@ impl Visitor for Walk {
 
     fn empties(&mut self, _size: MagazineSize, count: usize) {
         self.snap.empties += count as u32;
+    }
+}
+
+/// Bucket counts as `a/b/c/d/e/f`.
+struct Buckets<'a>(&'a [u32; BUCKETS]);
+
+impl std::fmt::Display for Buckets<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        for (i, n) in self.0.iter().enumerate() {
+            write!(f, "{}{n}", if i > 0 { "/" } else { "" })?;
+        }
+        Ok(())
     }
 }
 
@@ -391,6 +556,8 @@ struct Sampler {
     statm: i32,
     start_ms: u64,
     interval_ms: u64,
+    /// `ASMALLOC_MEMSTAT_MS=0`: sample only when [`snapshot`] asks.
+    on_demand: bool,
 }
 
 static STOP: AtomicBool = AtomicBool::new(false);
@@ -453,6 +620,7 @@ impl Sampler {
         w.count = 0;
         w.by_index = [0; MAX_REGIONS];
         w.current = usize::MAX;
+        w.occ.active = false;
         asmalloc::Asmalloc::inspect(w);
         w.snap.t_ms = now_ms() - self.start_ms;
         self.walk.snap.rss = self.rss();
@@ -525,10 +693,12 @@ impl Sampler {
             let cached: u64 = c.cached_res.iter().sum();
             let _ = writeln!(
                 out,
-                "{label}-class size={size} req={} req_slot={} free_whole={} regions={} carved={} committed={} huge_part={} resident={} live={} loaded={}/{} spare={}/{} depot={}/{} free={}/{} above={} magazines={}/{}/{} meta={}",
+                "{label}-class size={size} req={} req_slot={} free_whole={} free_whole_huge={} free_units={} regions={} carved={} committed={} huge_part={} resident={} live={} loaded={}/{} spare={}/{} depot={}/{} free={}/{} above={} magazines={}/{}/{} meta={} pages={} units={}",
                 snap.req[index],
                 snap.req_slot[index],
                 c.free_whole,
+                c.free_whole_huge,
+                c.free_units,
                 c.regions,
                 c.carved,
                 c.committed,
@@ -547,7 +717,9 @@ impl Sampler {
                 c.magazines[0],
                 c.magazines[1],
                 c.magazines[2],
-                c.meta_res
+                c.meta_res,
+                Buckets(&c.pages),
+                Buckets(&c.units)
             );
         }
         let _ = writeln!(
@@ -576,17 +748,52 @@ extern "C" fn run(_: *mut libc::c_void) -> *mut libc::c_void {
     // SAFETY: the constructor finished writing SAMPLER before creating this thread, and until
     // the exit handler has joined it nothing else touches it.
     let sampler = unsafe { &mut *SAMPLER };
-    let interval = libc::timespec {
-        tv_sec: (sampler.interval_ms / 1000) as libc::time_t,
-        tv_nsec: (sampler.interval_ms % 1000 * 1_000_000) as libc::c_long,
-    };
+    // Wakes often enough to answer a `snapshot` within milliseconds, and samples on its own
+    // once an interval unless it only answers them.
+    let poll = libc::timespec { tv_sec: 0, tv_nsec: 2_000_000 };
+    let mut last = 0;
     while !STOP.load(Acquire) {
-        sampler.sample();
-        sampler.out.flush();
+        let request = REQUEST.load(Acquire);
+        if request != DONE.load(Relaxed) {
+            sampler.sample();
+            let _ = writeln!(sampler.out, "account tag={request}");
+            let snap = sampler.walk.snap;
+            Sampler::dump(&mut sampler.out, "acct", &snap);
+            DONE.store(request, Release);
+        } else if !sampler.on_demand && now_ms() >= last + sampler.interval_ms {
+            last = now_ms();
+            sampler.sample();
+            sampler.out.flush();
+        }
         // SAFETY: nanosleep reads one timespec.
-        unsafe { libc::nanosleep(&interval, std::ptr::null_mut()) };
+        unsafe { libc::nanosleep(&poll, std::ptr::null_mut()) };
     }
     std::ptr::null_mut()
+}
+
+/// The last breakdown asked for by [`snapshot`], and the last one written.
+static REQUEST: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static DONE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+/// Whether the sampler thread runs.
+static ACTIVE: AtomicBool = AtomicBool::new(false);
+
+/// Whether [`snapshot`] can answer: the sampler runs.
+pub fn active() -> bool {
+    ACTIVE.load(Acquire)
+}
+
+/// Samples the heap now and writes its full breakdown (`acct` lines, after an
+/// `account tag=<tag>` line), and returns once it is written. `tag` must be non-zero and
+/// differ from the last call's. A caller that has stopped every other thread gets an exact
+/// breakdown.
+pub fn snapshot(tag: u64) {
+    if !active() {
+        return;
+    }
+    REQUEST.store(tag, Release);
+    while DONE.load(Acquire) != tag {
+        std::thread::sleep(std::time::Duration::from_millis(1));
+    }
 }
 
 extern "C" fn finish() {
@@ -612,7 +819,8 @@ extern "C" fn finish() {
     // SAFETY: as above; this reads the pointer, not through it.
     let state = unsafe { SAMPLER }.addr();
     let (scratch, temp) = (sampler.walk.scratch.addr(), sampler.walk.temp.addr());
-    for (start, len) in [(state, size_of::<Sampler>()), (scratch, SCRATCH), (temp, TEMP)] {
+    let page_free = sampler.walk.page_free.addr();
+    for (start, len) in [(state, size_of::<Sampler>()), (scratch, SCRATCH), (temp, TEMP), (page_free, OCC_PAGES * 4)] {
         let _ = writeln!(sampler.out, "sampler-mem {start:x} {len}");
     }
     sampler.out.flush();
@@ -640,6 +848,7 @@ extern "C" fn start() {
     // SAFETY: a literal path.
     let statm = unsafe { libc::open(c"/proc/self/statm".as_ptr(), libc::O_RDONLY | libc::O_CLOEXEC) };
     let (state, scratch, temp) = (map(size_of::<Sampler>()).cast::<Sampler>(), map(SCRATCH), map(TEMP));
+    let page_free = map(OCC_PAGES * 4).cast::<u32>();
     if fd < 0 || statm < 0 || state.is_null() || scratch.is_null() || temp.is_null() {
         return;
     }
@@ -650,10 +859,12 @@ extern "C" fn start() {
         let s = &mut *state;
         s.walk.scratch = scratch;
         s.walk.temp = temp;
+        s.walk.page_free = page_free;
         s.out.fd = fd;
         s.statm = statm;
         s.start_ms = now_ms();
-        s.interval_ms = env_num(c"ASMALLOC_MEMSTAT_MS", 10).max(1);
+        s.interval_ms = env_num(c"ASMALLOC_MEMSTAT_MS", 10);
+        s.on_demand = s.interval_ms == 0;
         PROBE_SIZE.store(env_num(c"ASMALLOC_MEMSTAT_PROBE", 0) as usize, Relaxed);
         if env_num(c"ASMALLOC_MEMSTAT_THP", 0) != 0 {
             // SAFETY: a literal path.
@@ -673,6 +884,7 @@ extern "C" fn start() {
         let mut thread: libc::pthread_t = 0;
         if libc::pthread_create(&mut thread, &attr, run, std::ptr::null_mut()) == 0 {
             THREAD = thread;
+            ACTIVE.store(true, Release);
             libc::atexit(finish);
         }
         libc::pthread_attr_destroy(&mut attr);
