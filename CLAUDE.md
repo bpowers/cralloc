@@ -115,3 +115,10 @@ binary, which any change to the allocator's size shifts. Two builds of such a jo
 compared by one number each: switch the behaviour at run time inside one binary, or compare
 means over a sweep of placements (`benchrun layout`). `docs/research/grpc-placement.md` says
 which jobs need this and why.
+
+A server's tail latency at one fixed request rate can rank the CPU's idle states instead of
+the allocator: the faster server idles longer, its CPUs sleep deeper, and the wake-up lands
+in the tail. The runner records how often each server run's CPUs went into a deep idle
+state, and the reports flag a tail comparison that this confounds; a flagged difference is
+not the allocator's. `scripts/deep-idle` shows the setting and, with root, switches the
+deep states off. `docs/research/h2-tail.md` has the evidence.
