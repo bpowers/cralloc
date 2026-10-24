@@ -17,6 +17,10 @@ what this allocator is for. The kernel suite and the C programs are regression c
   (jemalloc's 1,733 the largest but glibc's); Meilisearch 661 MiB against jemalloc's 674 and
   933 to 1,324 for the others; the 2 GiB order service 2,186 against 2,220 to 2,339. Under load
   Meilisearch's heap peaks at 949 MiB against jemalloc's 781.
+  **2026-10-24:** that gap was zeroed 50 MiB buffers cleared with `memset` and so made
+  resident (`meili-peak.md`). Since main `dc2f01a` a zeroed large block its tenant left
+  untouched goes back at its free, and on this job the heap peaks at 741 to 757 MiB (three
+  rounds), with 51 to 53 page faults a request where it took 92 to 96.
 - **Servers, tails: the best p50 and p99 on most jobs, with two exceptions.** On Connect over
   HTTP/2 asmalloc's p99.9 at 70% load is 45 us against 39 to 41 for the others, and it was 39 at
   the last standings. After a 30 s silence the log store's slowest request in the first 5 ms
