@@ -449,7 +449,13 @@ pub(crate) unsafe fn purge_held<H: Host>(host: &H, region: RegionId, slot: u32) 
 /// with `size` bytes may write: its size from the slot's stagger (a block starts at the slot's
 /// start or there), rounded up to a page, or to a huge page if `huge`, since an advised range
 /// faults a huge page at a time; within the slot's pages, `unit`.
-const fn extent_of(layout: &Layout, slot: u32, unit: Unit, size: usize, huge: bool) -> u32 {
+pub(crate) const fn extent_of(
+    layout: &Layout,
+    slot: u32,
+    unit: Unit,
+    size: usize,
+    huge: bool,
+) -> u32 {
     let page = layout.page_size();
     let written = layout.slot_bytes(slot) + layout.stagger(slot) + size;
     let end = written.div_ceil(page);

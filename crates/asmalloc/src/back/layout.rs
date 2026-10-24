@@ -365,31 +365,43 @@ impl FrontierFormat {
     }
 }
 
-/// What a large slot's size word holds: the size of the object in it, and whether the slot's
-/// whole huge pages are advised for huge pages because the object grew there. One word,
-/// written only by whoever holds the slot. A size is at most a region, 4 GiB, so the flag
-/// takes the top bit.
+/// What a large slot's size word holds: the size of the object in it, whether the slot's
+/// whole huge pages are advised for huge pages because the object grew there, and whether the
+/// object was given zeroed from a slot known to be zero, so that none of its pages was
+/// resident when its tenant got it (`Back::mark_unwritten`). One word, written only by
+/// whoever holds the slot. A size is at most a region, 4 GiB, so the flags take the top bits.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(crate) struct Recorded {
     pub(crate) size: usize,
     pub(crate) huge: bool,
+    /// Set for the tenant that got the slot zeroed and unwritten, and cleared by every claim:
+    /// it never outlives the tenant. A hint for the free (`Back::purge_before_release`),
+    /// which is correct whatever it says.
+    pub(crate) unwritten: bool,
 }
 
 impl Recorded {
     const HUGE: u64 = 1 << 63;
+    const UNWRITTEN: u64 = 1 << 62;
 
     #[inline(always)]
     pub(crate) const fn unpack(word: u64) -> Recorded {
         Recorded {
-            size: (word & !Recorded::HUGE) as usize,
+            size: (word & !(Recorded::HUGE | Recorded::UNWRITTEN)) as usize,
             huge: word & Recorded::HUGE != 0,
+            unwritten: word & Recorded::UNWRITTEN != 0,
         }
     }
 
     #[inline(always)]
     pub(crate) const fn pack(self) -> u64 {
-        let flag = if self.huge { Recorded::HUGE } else { 0 };
-        self.size as u64 | flag
+        let huge = if self.huge { Recorded::HUGE } else { 0 };
+        let unwritten = if self.unwritten {
+            Recorded::UNWRITTEN
+        } else {
+            0
+        };
+        self.size as u64 | huge | unwritten
     }
 }
 
@@ -1122,10 +1134,11 @@ mod tests {
             assert_eq!(format.floor(word, epoch), 9, "{epoch}");
         }
         assert_eq!(format.floor(word, 40 + FRONTIER_INTERVALS), 0);
-        for huge in [false, true] {
+        for (huge, unwritten) in [(false, false), (true, false), (false, true), (true, true)] {
             let recorded = Recorded {
                 size: 1 << 32,
                 huge,
+                unwritten,
             };
             assert_eq!(Recorded::unpack(recorded.pack()), recorded);
         }
