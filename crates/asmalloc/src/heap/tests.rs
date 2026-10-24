@@ -838,15 +838,15 @@ fn a_block_resized_back_and_forth_across_its_slot_boundary_settles() {
 }
 
 /// The room a block moves in with is never written, so it is never charged, kept or purged: a
-/// grown block freed with huge-page advice adds to the retained count only the pages it may
-/// have written, is kept on that charge within the budget for kept grown blocks, and a trim
-/// takes back exactly what was counted.
+/// grown block that outgrows its slot leaves it kept and counted for only the pages it may have
+/// written, with the slot's huge-page advice taken back, and a trim takes back exactly what was
+/// counted. Freed instead, the same block returns its slot whole.
 #[test]
 #[cfg_attr(miri, ignore)]
 fn the_room_a_grown_block_never_wrote_is_never_charged_kept_or_purged() {
-    use crate::back::policy::{STAGGER_ROOM, kept_grown};
-    // The block's charge must fit the budget for the slot to be kept.
-    const _: () = assert!(kept_grown(crate::os::sim::Native::GEOMETRY) >= 2 * (128 << 10));
+    use crate::back::policy::{STAGGER_ROOM, kept_outgrown};
+    // The block's charge must fit the bound for the slot to be kept.
+    const _: () = assert!(kept_outgrown(crate::os::sim::Native::GEOMETRY) >= 2 * (128 << 10));
     use crate::os::HugePages;
     use crate::os::sim::Shape as _;
     let heap = SimHeap::<crate::os::sim::Native>::new();
@@ -856,11 +856,20 @@ fn the_room_a_grown_block_never_wrote_is_never_charged_kept_or_purged() {
     // SAFETY: valid layouts; each block is written within its size and freed once with the
     // layout it has.
     unsafe {
-        let p = heap.alloc(small);
-        fill(p, small.size(), 1);
-        // Doubling past a huge page, densely: a move into a slot with headroom, and advice.
-        let q = heap.realloc(p, small, grown.size());
-        fill(q, grown.size(), 2);
+        let grow = |fresh: bool| {
+            let p = heap.alloc(small);
+            fill(p, small.size(), 1);
+            // Doubling past a huge page, densely: a move into a slot with headroom, and advice.
+            let q = heap.realloc(p, small, grown.size());
+            fill(q, grown.size(), 2);
+            assert!(
+                !fresh
+                    || heap.os().huge_pages(ptr::NonNull::new(q).unwrap())
+                        == Some(HugePages::Prefer)
+            );
+            q
+        };
+        let q = grow(true);
         let back = heap.heap.back().unwrap();
         let slot = match back.lookup(q) {
             Some(crate::back::Kind::Slot(class)) => class.size(),
@@ -868,20 +877,111 @@ fn the_room_a_grown_block_never_wrote_is_never_charged_kept_or_purged() {
         };
         let most = (grown.size() + STAGGER_ROOM).next_multiple_of(huge);
         assert!(slot >= 2 * most, "a slot of {slot}");
-        let advised = || heap.os().huge_pages(ptr::NonNull::new(q).unwrap());
-        assert_eq!(advised(), Some(HugePages::Prefer));
+        let advised = |q: *mut u8| heap.os().huge_pages(ptr::NonNull::new(q).unwrap());
+        // Freed, it goes back whole and loses its advice.
         let before = back.retained_large();
         heap.dealloc(q, grown);
+        assert_eq!(
+            back.retained_large(),
+            before,
+            "a grown block's free returns its slot"
+        );
+        assert_eq!(advised(q), Some(HugePages::Avoid));
+        // Outgrown, its slot is kept, charged what it may have written.
+        let q = grow(false);
+        let (before, counted) = (back.retained_large(), back.outgrown());
+        let r = heap.realloc(q, grown, slot + 1);
+        assert_ne!(r, q, "outgrew its slot");
         let charge = back.retained_large() - before;
         assert!(
             (grown.size()..=most).contains(&charge),
             "charged {charge} for a block of {} in a slot of {slot}",
             grown.size()
         );
-        assert_eq!(advised(), Some(HugePages::Prefer), "the slot was kept");
+        assert_eq!(
+            back.outgrown() - counted,
+            charge,
+            "the count holds the kept slot's charge"
+        );
+        assert_eq!(
+            advised(q),
+            Some(HugePages::Avoid),
+            "no advice on a free slot"
+        );
+        heap.dealloc(r, layout(slot + 1, 8));
         let held = back.retained();
         assert_eq!(back.trim(), held, "the purge takes back what was counted");
         assert_eq!(back.retained(), 0);
+        assert_eq!(back.outgrown(), 0);
+    }
+}
+
+/// Many buffers growing at once leave a trail of the slots they outgrow no larger than the
+/// bound on kept outgrown slots, even where the moves land in slots the heap returned and
+/// reuses, which pays nothing toward the cap: the trail probe's hardest case
+/// (`docs/research/grown-slots.md`). Each round grows the buffers round-robin by doubling,
+/// frees them, and collects, so that the next round grows into returned slots.
+#[test]
+#[cfg_attr(miri, ignore)]
+fn buffers_growing_into_reused_slots_leave_a_trail_within_the_bound() {
+    use crate::back::policy::kept_outgrown;
+    use crate::os::sim::Shape as _;
+    let heap = SimHeap::<crate::os::sim::Native>::new();
+    let bound = kept_outgrown(crate::os::sim::Native::GEOMETRY);
+    const N: usize = 48;
+    let (start, end) = (16usize << 10, 512usize << 10);
+    let mut trails = std::vec::Vec::new();
+    for round in 0..3 {
+        // SAFETY: valid layouts; each block is written within its size and freed once with the
+        // layout it has.
+        unsafe {
+            let mut bufs: std::vec::Vec<(*mut u8, usize)> = (0..N)
+                .map(|_| (heap.alloc(layout(start, 8)), start))
+                .collect();
+            for &(p, size) in &bufs {
+                fill(p, size, 1);
+            }
+            let back = heap.heap.back().unwrap();
+            let mut trail = 0;
+            let mut size = start;
+            while size < end {
+                for b in bufs.iter_mut() {
+                    let q = heap.realloc(b.0, layout(b.1, 8), 2 * b.1);
+                    fill(q, 2 * b.1, 2);
+                    *b = (q, 2 * b.1);
+                    // Every free large slot here is one a move left: the trail.
+                    trail = trail.max(back.retained_large());
+                    assert!(
+                        back.outgrown() <= bound + end,
+                        "round {round}: {}",
+                        back.outgrown()
+                    );
+                }
+                size *= 2;
+            }
+            trails.push(trail);
+            for (p, size) in bufs {
+                heap.dealloc(p, layout(size, 8));
+            }
+            heap.collect();
+            assert_eq!(
+                back.outgrown(),
+                0,
+                "round {round}: collect took every kept slot"
+            );
+        }
+    }
+    // Without the bound the trail is a large part of the live buffers.
+    assert!(
+        N * end / 4 > 2 * bound,
+        "the test must be able to pass the bound"
+    );
+    for (round, trail) in trails.into_iter().enumerate() {
+        assert!(
+            trail <= bound + end,
+            "round {round}: a trail of {trail}, the bound {bound}"
+        );
+        assert_ne!(trail, 0, "round {round}: nothing was kept");
     }
 }
 
@@ -1173,9 +1273,8 @@ mod unwritten {
     }
 
     /// A marked block that moves out of its slot leaves it returned behind the copy and known
-    /// to be zero. (A block of the floor is past the budget for kept grown blocks in every
-    /// geometry, so this does not reach the rule that a marked block is never kept; that
-    /// rule only matters while the floor is under the budget.)
+    /// to be zero, though the slot would fit the bound on kept outgrown slots: a marked block
+    /// is never kept.
     #[test]
     fn a_marked_block_that_moves_returns_its_old_slot() {
         let heap = SimHeap::<Native>::new();

@@ -19,7 +19,7 @@ use super::group::{Gather, JUDGE, Run};
 use super::host::ClassHost;
 use super::layout::{Grow, Hints, Layout, Recorded};
 use super::policy::{
-    UNWRITTEN_RESIDENT_ONE_IN, UNWRITTEN_SAMPLES, kept_grown, move_piece, unwritten_floor,
+    UNWRITTEN_RESIDENT_ONE_IN, UNWRITTEN_SAMPLES, kept_outgrown, move_piece, unwritten_floor,
     wants_huge,
 };
 use super::region::{self, Carve};
@@ -144,6 +144,17 @@ impl Sink for Descending<'_> {
             entry.store(slot, Relaxed);
         }
     }
+}
+
+/// Why a large block moves ([`Back::move_large`]), which decides what becomes of its slot.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Move {
+    /// It grew past what its slot holds: the slot is kept for the next buffer growing through
+    /// the class, within the bound on kept outgrown slots.
+    Outgrown,
+    /// Anything else, such as a shrink to a sliver of the slot or an alignment the slot does
+    /// not have: the slot is freed as the block's free would free it.
+    Other,
 }
 
 /// What [`Back::fill_within`] did.
@@ -374,17 +385,13 @@ impl<'a, O: Os> Back<'a, O> {
     }
 
     /// For a large slot the program is freeing and still holds: if it is advised for huge
-    /// pages because its object grew, and keeping it would take retained large-slot memory
-    /// past its budget (`keep_grown`), returns its pages to the OS first and takes the advice
-    /// back. Returns the bytes still to count as retained once the slot is released, none if
-    /// it was purged or kept (a kept slot is counted already), else its charge
+    /// pages because its object grew, returns its pages to the OS first and takes the advice
+    /// back, so that no advised range stays on a free slot; if its block was left mostly
+    /// unwritten, returns it known zero (`return_unwritten`). Returns the bytes still to count
+    /// as retained once the slot is released, none if it was purged, else its charge
     /// (`region::charge`); and whether it stays resident, for the hold (`hold`). Aborts as
-    /// `launder` does, and if the slot is free already.
-    ///
-    /// An advised slot kept within the budget is released resident and counted, with its
-    /// advice, for a buffer grown again to land on; the next block that is allocated in it
-    /// rather than grown into it has the advice taken back (`alloc_at`). Any other freed slot
-    /// stays resident (`purge`).
+    /// `launder` does, and if the slot is free already. Any other freed slot stays resident
+    /// (`purge`).
     fn purge_before_release(
         &self,
         host: &ClassHost<'a, O>,
@@ -410,9 +417,6 @@ impl<'a, O: Os> Back<'a, O> {
         let charge = region::charge(host, region, slot);
         if !region::recorded(host, region, slot).is_some_and(|r| r.huge) {
             return resident(charge);
-        }
-        if self.keep_grown(class, charge) {
-            return (0, true);
         }
         // SAFETY: BACK-CLASS-01 in docs/safety/asmalloc/back/class-safety.md. The program is
         // freeing the slot and has not been given it back, its bit was clear a moment ago,
@@ -527,9 +531,9 @@ impl<'a, O: Os> Back<'a, O> {
     }
 
     /// Frees a large slot the caller holds and gives up, found and checked by `slot_in`:
-    /// returns its pages first if it is advised for huge pages and past the budget for kept
-    /// grown blocks (`purge_before_release`), then releases it, and counts it as retained if
-    /// it is still resident. The heap above beats
+    /// returns its pages first if it is advised for huge pages, or left mostly unwritten
+    /// (`purge_before_release`), then releases it, and counts it as retained if it is still
+    /// resident. The heap above beats
     /// the heart for a large free, as it does for a large allocation (`Cache::lone_heartbeat`).
     fn free_slot(&self, host: &ClassHost<'a, O>, class: Class, region: RegionId, slot: u32) {
         let (charge, resident) = self.purge_before_release(host, region, slot, class);
@@ -618,7 +622,13 @@ impl<'a, O: Os> Back<'a, O> {
             let settled = if small {
                 region::settle(&host, taken.region, taken.word, taken.bits)
             } else {
-                region::settle_slot(&host, taken.region, slot, size)
+                let settled = region::settle_slot(&host, taken.region, slot, size);
+                if region::recorded(&host, taken.region, slot).is_some_and(|r| r.outgrown) {
+                    // What is left of the charge its keep added: the pages purges have not
+                    // taken off it since (`region::outgrown_dirty`).
+                    self.forget_outgrown(settled.resident);
+                }
+                settled
             };
             self.unretain(class, settled.resident);
             self.retain(class, settled.revived);
@@ -639,6 +649,7 @@ impl<'a, O: Os> Back<'a, O> {
             let now = Recorded {
                 size,
                 unwritten: false,
+                outgrown: false,
                 ..before
             };
             region::record(&host, region, slot, now);
@@ -908,20 +919,27 @@ impl<'a, O: Os> Back<'a, O> {
     /// Moves the contents of the large object or run at `from` to `to` and frees `from`: copies
     /// `len` bytes and gives the block up. The block is copied a piece (`policy::move_piece`)
     /// at a time, and the whole pages of `from` behind each piece go back to the OS before the
-    /// next is copied, so the two copies are both resident for one piece at most; the rest of
-    /// the slot goes back after the last piece. Aborts if `from` is not the start of a
-    /// handed-out large slot or a run.
+    /// next is copied, so the two copies are both resident for one piece at most. Aborts if
+    /// `from` is not the start of a handed-out large slot or a run.
     ///
-    /// Unlike a free, which keeps a slot's pages for the next block of its class, a move
-    /// returns them whatever the block's size, once retained large-slot memory is at the
-    /// budget for kept grown blocks (`keep_grown`): the block has just been outgrown (or
-    /// shrunk far below its slot), so its slot is unlikely to be wanted again soon, and a
-    /// program that grows many buffers would otherwise leave a trail of outgrown blocks
-    /// resident. Within the budget the slot is kept whole, both copies resident during the
-    /// move, and released as a plain free leaves it, so that a buffer grown and freed again
-    /// and again finds its slots resident instead of faulting them back each time.
+    /// What becomes of `from`'s slot depends on `why` (design: "Large objects"):
     ///
-    /// When every page of a slot went back this way, the slot is released as purged memory:
+    /// - A block that outgrew its slot ([`Move::Outgrown`]) leaves it resident, whole and with
+    ///   both copies resident during the move, while the slots so kept and not yet taken again
+    ///   stay within `policy::kept_outgrown` (`keep_outgrown`): the next buffer growing through
+    ///   the class takes it within milliseconds, and returned it would be faulted straight
+    ///   back. A kept slot is marked (`Recorded::outgrown`), released counted and stamped for
+    ///   the hold, and loses any huge-page advice, which must not stay on a free slot. Past the
+    ///   bound, or for a block left mostly unwritten, the rest of the slot goes back after the
+    ///   last piece, so that many buffers growing at once leave no trail.
+    /// - Any other move ([`Move::Other`]: a shrink to a sliver of the slot, a new alignment)
+    ///   frees the old block as its free would have (`free_slot`): the pages behind the pieces
+    ///   are gone, and the rest of the slot stays resident, charged and stamped, unless it is
+    ///   advised for huge pages and goes back whole with the advice taken back. A buffer shrunk
+    ///   to fit and grown again then finds its memory resident, as one freed and grown again
+    ///   does.
+    ///
+    /// When every page of an outgrown slot went back, the slot is released as purged memory:
     /// zero, clean and not counted as retained, exactly as the free of a slot advised for huge
     /// pages leaves it, so the free neither purges nor counts those pages again.
     ///
@@ -938,9 +956,16 @@ impl<'a, O: Os> Back<'a, O> {
     /// `len` bytes; `to` is a block of this heap the caller owns, writable for `len` bytes,
     /// whose contents it does not need, and does not overlap `from`; nothing else reads or
     /// writes either range during the call. If `zeroed`, the `len` bytes at `to` read as zero.
-    pub unsafe fn move_large(&self, from: NonNull<u8>, to: NonNull<u8>, len: usize, zeroed: bool) {
+    pub unsafe fn move_large(
+        &self,
+        from: NonNull<u8>,
+        to: NonNull<u8>,
+        len: usize,
+        zeroed: bool,
+        why: Move,
+    ) {
         // SAFETY: the caller's promise, passed on.
-        unsafe { self.move_large_with(from, to, len, zeroed, || {}) }
+        unsafe { self.move_large_with(from, to, len, zeroed, why, || {}) }
     }
 
     /// [`Back::move_large`], calling `observe` after each piece is copied and the pages
@@ -955,6 +980,7 @@ impl<'a, O: Os> Back<'a, O> {
         to: NonNull<u8>,
         len: usize,
         zeroed: bool,
+        why: Move,
         mut observe: impl FnMut(),
     ) {
         let piece = move_piece(self.space.plan().geometry());
@@ -989,17 +1015,24 @@ impl<'a, O: Os> Back<'a, O> {
             }
             _ => return,
         };
-        // Returns the slot's or run's pages in `start..end`, both page boundaries.
+        // Returns the slot's or run's pages in `start..end`, both page boundaries. Where all of
+        // a slot's went back they are marked clean, so that a free of the slot charges only
+        // what is left.
         let give_back = |start: usize, end: usize| -> bool {
             if start >= end {
                 return true;
             }
             match &host {
-                // SAFETY: BACK-CLASS-03: the caller holds the slot, and the range is inside it
-                // and is either copied already or past everything that is copied.
-                Some((host, region, index)) => unsafe {
-                    region::purge_part(host, *region, *index, start, end - start)
-                },
+                Some((host, region, index)) => {
+                    // SAFETY: BACK-CLASS-03: the caller holds the slot, and the range is inside
+                    // it and is either copied already or past everything that is copied.
+                    let gone =
+                        unsafe { region::purge_part(host, *region, *index, start, end - start) };
+                    if gone {
+                        region::mark_clean(host, *region, *index, start, end - start);
+                    }
+                    gone
+                }
                 None => {
                     // A run's block starts at the run.
                     let at = from.map_addr(|a| a.saturating_add(start));
@@ -1010,14 +1043,14 @@ impl<'a, O: Os> Back<'a, O> {
         };
         let page = self.space.plan().geometry().page_size();
         let mut dest = if zeroed { Dest::Zero } else { Dest::Dirty };
-        // A slot within the budget is kept whole, with both copies resident for the move;
-        // anything else goes back behind the copy.
-        // A block marked unwritten is not kept: its slot is returned behind the copy, as a
-        // block its tenant left unwritten is at its free.
+        // An outgrown slot within the bound is kept whole, with both copies resident for the
+        // move; anything else goes back behind the copy. A block marked unwritten is not kept:
+        // its slot is returned behind the copy, as a block its tenant left unwritten is at its
+        // free.
         let keep = match (&host, slot) {
-            (Some((host, region, index)), Some(class)) => {
+            (Some((host, region, index)), Some(class)) if why == Move::Outgrown => {
                 !region::recorded(host, *region, *index).is_some_and(|r| r.unwritten)
-                    && self.keep_grown(class, region::charge(host, *region, *index))
+                    && self.keep_outgrown(class, region::charge(host, *region, *index))
             }
             _ => false,
         };
@@ -1045,42 +1078,52 @@ impl<'a, O: Os> Back<'a, O> {
             done += step;
             observe();
         }
-        // The rest of a slot, from the last piece boundary the copy reached (or the slot's
-        // start); `free_run` purges the whole of a run.
-        if host.is_some() && !keep {
+        // The rest of an outgrown slot not kept, from the last piece boundary the copy reached
+        // (or the slot's start).
+        if host.is_some() && !keep && why == Move::Outgrown {
             let last = ((base + len) & !(piece - 1)).saturating_sub(base - into);
             all &= give_back(last, whole);
         }
-        match host {
-            Some((host, region, index)) => {
-                let Some(class) = slot else {
-                    return;
+        let Some((host, region, index)) = host else {
+            // `free_run` purges the whole of a run.
+            self.free_run(from);
+            return;
+        };
+        let Some(class) = slot else {
+            return;
+        };
+        if keep {
+            // The advice is the tenant's, and the next block in the slot may not grow.
+            region::unadvise(&host, region, index);
+            if let Some(now) = region::recorded(&host, region, index) {
+                let marked = Recorded {
+                    outgrown: true,
+                    ..now
                 };
-                if keep {
-                    // As a plain free leaves it: resident, advice and all, and counted already.
-                    self.release_all(class, &[from.as_ptr()], false);
-                    self.hold_stamp(&host, region);
-                    self.heartbeat();
-                    return;
-                }
-                // Every page went back: zero, clean, uncounted. Else a purge failed, and the
-                // slot is charged as a free charges it, an over-count of what did go back.
-                let charge = if all {
-                    region::mark_purged(&host, region, index);
-                    0
-                } else {
-                    region::charge(&host, region, index)
-                };
-                region::unadvise(&host, region, index);
-                self.release_all(class, &[from.as_ptr()], false);
-                self.retain(class, charge);
-                if charge != 0 {
-                    self.hold_stamp(&host, region);
-                }
-                self.heartbeat();
+                region::record(&host, region, index, marked);
             }
-            None => self.free_run(from),
+            // Counted already, by `keep_outgrown`.
+            self.release_all(class, &[from.as_ptr()], false);
+            self.hold_stamp(&host, region);
+        } else if why == Move::Outgrown {
+            // Every page went back: zero, clean, uncounted. Else a purge failed, and the slot
+            // is charged as a free charges it, by its clean bits.
+            let charge = if all {
+                region::mark_purged(&host, region, index);
+                0
+            } else {
+                region::charge(&host, region, index)
+            };
+            region::unadvise(&host, region, index);
+            self.release_all(class, &[from.as_ptr()], false);
+            self.retain(class, charge);
+            if charge != 0 {
+                self.hold_stamp(&host, region);
+            }
+        } else {
+            self.free_slot(&host, class, region, index);
         }
+        self.heartbeat();
     }
 
     /// Copies bytes `start..end` of a block moving from `from` to `to`, where `start..end`
@@ -1183,26 +1226,49 @@ impl<'a, O: Os> Back<'a, O> {
         copy(next, end);
     }
 
-    /// Whether a grown block's slot of `class`, moved out of or freed with huge-page advice,
-    /// is kept resident rather than returned, and if so counts it: adds the slot's `charge`
-    /// (`region::charge`) to the retained count first and keeps the slot if the count is then
-    /// within the budget (`policy::kept_grown`), else takes the charge back. Counting before
-    /// deciding means two moves under way at once cannot both see the same room: the budget
-    /// is passed by one slot at most, the last one counted before the others took theirs back.
-    fn keep_grown(&self, class: Class, charge: usize) -> bool {
-        let budget = kept_grown(self.space.plan().geometry());
-        // A slot that alone is past the budget is refused without being counted, so that a
-        // large block's charge never sits in the count for a moment, where another keep or a
-        // decay pass starting then would see it.
-        if charge > budget {
+    /// Whether the slot of `class` that a block has just outgrown, with `charge` bytes that
+    /// may be resident (`region::charge`), is kept: if the count of kept outgrown slots
+    /// (`State::outgrown`) stays within `policy::kept_outgrown` with it added. If so the slot's
+    /// charge is in that count and in the retained count; else neither changed. Adding before
+    /// deciding means two moves under way at once cannot both see the same room: the bound is
+    /// passed by one slot at most, the last one counted before the others took theirs back.
+    /// A count read above the bound keeps nothing.
+    fn keep_outgrown(&self, class: Class, charge: usize) -> bool {
+        let bound = kept_outgrown(self.space.plan().geometry());
+        // A slot that alone is past the bound is refused without being counted, so that its
+        // charge never sits in the count for a moment, where another move would see it.
+        if charge > bound {
             return false;
         }
-        self.retain(class, charge);
-        if self.retained_large() <= budget {
+        let before = self.state.outgrown.fetch_add(charge, SeqCst);
+        if before.checked_add(charge).is_some_and(|now| now <= bound) {
+            self.retain(class, charge);
             return true;
         }
-        self.unretain(class, charge);
+        self.state.outgrown.fetch_sub(charge, SeqCst);
         false
+    }
+
+    /// Takes `bytes` off the count of kept outgrown slots: what a claim of a marked slot found
+    /// left of its charge, or what a purge returned of a marked slot's pages. For each slot the
+    /// two sum to what `keep_outgrown` added, so the count is exact when nothing races, and
+    /// zero once every marked slot has been claimed or purged.
+    pub(super) fn forget_outgrown(&self, bytes: usize) {
+        if bytes != 0 {
+            self.state.outgrown.fetch_sub(bytes, SeqCst);
+        }
+    }
+
+    /// The count of kept outgrown slots (`State::outgrown`), for tests.
+    #[cfg(test)]
+    pub(crate) fn outgrown(&self) -> usize {
+        self.state.outgrown.load(SeqCst)
+    }
+
+    /// Sets the count of kept outgrown slots, for tests that want moves to return their slots.
+    #[cfg(test)]
+    pub(super) fn set_outgrown(&self, bytes: usize) {
+        self.state.outgrown.store(bytes, SeqCst);
     }
 
     /// Before the `len` bytes at `from` move into the block at `to`: if `to` is a large slot
@@ -1272,8 +1338,7 @@ impl<'a, O: Os> Back<'a, O> {
     /// Frees one slot of `class` to its bitmap. Aborts as [`Back::launder`] does. A large slot's
     /// recorded size is left as it was; the next allocation of the slot writes it.
     ///
-    /// A free of a large slot advised for huge pages, past the budget for kept grown blocks,
-    /// returns that slot's pages to the OS first, while the caller still holds the slot, and
+    /// A free of a large slot advised for huge pages returns that slot's pages to the OS first, while the caller still holds the slot, and
     /// then releases it uncounted (`purge_before_release`). Any other freed slot stays
     /// resident and counted as retained.
     ///

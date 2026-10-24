@@ -5,9 +5,10 @@
 // freed, over and over; a second buffer holds slot 0 of the class, which has no stagger, so the
 // one measured sits in slot 1. Every byte is checked after each realloc.
 //
-// With a top of 8 MiB the slot is kept resident between repetitions (policy::kept_grown), so
-// repetitions after the first show what unspill does to memory that is already resident. With
-// 16 MiB the slot goes back at each free, so every repetition is a fresh one.
+// When this was written a grown block's slot was kept resident at its free, within a budget,
+// and repetitions after the first showed what unspill does to memory that is already resident.
+// Since the free of a block advised for huge pages returns its slot whole, every repetition is
+// a fresh one; the resident case is a slot a move kept (back/tests/unspill_review.rs).
 //
 // Run by hand; it is in no test. Fault counts are exact; ticks are only as good as the core
 // is quiet.

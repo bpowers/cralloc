@@ -206,18 +206,27 @@ pub const STAGGER_ROOM: usize = STAGGER_STEP * STAGGER_SLOTS;
 /// little memory for more calls. A block of at most one piece is copied whole.
 pub const MOVE_PIECE_HUGE_PAGES: usize = 1;
 
-/// The most retained large-slot memory a grown block's slot may join instead of going back to
-/// the OS: 8 huge pages, or 16 MiB. A block that moves leaves behind the slot it outgrew, and
-/// a block advised for huge pages because it grew is freed whole; both used to be purged at
-/// once, which is right for a block grown once and wrong for a buffer grown and freed again
-/// and again, which then faulted all of its memory back on every repetition. Up to this much
-/// they are kept, resident and counted, for the next growth to land on; past it they go back.
+/// The most that outgrown slots may hold, kept resident and not yet taken again, in huge
+/// pages: 32, or 64 MiB. A block that moves because it outgrew its slot leaves that slot
+/// behind; the next buffer growing through the class takes it within milliseconds, and a slot
+/// returned at once is faulted straight back (tpchgen faulted back 2.3 GiB of them a run). So
+/// an outgrown slot is kept while the outgrown slots kept so far, counted on their own
+/// (`State::outgrown`), are within this, and goes back behind the copy past it.
 ///
-/// This is not a level on frees, which may not purge (`purge`): a plain free never purges,
-/// whatever the count. A purge here is charged only to a block the program copied or wrote
-/// in full to reach its size, so it costs at most about what the program already spent on
-/// that block, and never falls on one that was allocated, barely touched and freed.
-pub const KEPT_GROWN_HUGE_PAGES: usize = 8;
+/// The count is of those slots alone, not of free large memory, which the hold keeps above
+/// its floor by design, so that any budget set against it was always spent on a large heap.
+/// The bound is what a trail of outgrown slots may cost: where the moves land in slots the
+/// heap reuses, growth pays nothing toward the cap, and 256 buffers grown on a 2 GiB heap left
+/// 540 MiB behind them with no bound (`docs/research/grown-slots.md`).
+///
+/// It equals the retained cap today because the two bound the same thing from two sides: the
+/// cap is what free memory may reach while the heap grows by carving, and this is what a trail
+/// may reach while it grows by reuse, which the cap does not see. They are separate constants
+/// because they answer different evidence and need not move together.
+///
+/// A purge here falls only on a block the program copied to reach its size, so it costs at
+/// most about what the program already spent on that block.
+pub const KEPT_OUTGROWN_HUGE_PAGES: usize = 32;
 
 /// A zeroed large request of at least this many huge pages that is answered from a slot known
 /// to be zero, so that nothing was cleared and none of its pages is resident, is marked
@@ -248,10 +257,10 @@ pub const fn unwritten_floor(geometry: Geometry) -> usize {
     UNWRITTEN_FLOOR_HUGE_PAGES * geometry.huge_page_size()
 }
 
-/// The budget of [`KEPT_GROWN_HUGE_PAGES`] in bytes for a geometry.
+/// The bound of [`KEPT_OUTGROWN_HUGE_PAGES`] in bytes for a geometry.
 #[inline(always)]
-pub const fn kept_grown(geometry: Geometry) -> usize {
-    KEPT_GROWN_HUGE_PAGES * geometry.huge_page_size()
+pub const fn kept_outgrown(geometry: Geometry) -> usize {
+    KEPT_OUTGROWN_HUGE_PAGES * geometry.huge_page_size()
 }
 
 /// In the small-page part of a region, each commit makes at least this many pages writable

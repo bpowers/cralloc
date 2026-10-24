@@ -1680,7 +1680,7 @@ fn purge_pass(host: &Host8) -> usize {
             Step::Done => 0,
             Step::Skip(page) => page,
             Step::Unit(unit) => {
-                if let (Purge::Done(_), _) = region::purge_unit(host, region, unit) {
+                if let (Purge::Done { .. }, _) = region::purge_unit(host, region, unit) {
                     purged += 1;
                 }
                 unit.start

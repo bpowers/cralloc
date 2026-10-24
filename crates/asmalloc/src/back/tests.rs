@@ -2,7 +2,7 @@
 //! and a threaded stress test.
 
 use super::policy::{
-    DECAY_TICKS, STAGGER_ROOM, STAGGER_STEP, growth_goal, growth_step, huge_after, kept_grown,
+    DECAY_TICKS, STAGGER_ROOM, STAGGER_STEP, growth_goal, growth_step, huge_after, kept_outgrown,
     move_piece, retained_cap,
 };
 use super::{Back, Block, Kind, State};
@@ -2629,7 +2629,7 @@ fn a_moving_large_block_releases_its_old_pages_behind_the_copy() {
     // SAFETY: `old` is a live block of `len` bytes that the test gives up, `new` a live block
     // of more, and nothing else uses either.
     unsafe {
-        back.move_large_with(old, new, len, true, || {
+        back.move_large_with(old, new, len, true, crate::back::Move::Outgrown, || {
             peak = peak.max(resident());
             pieces += 1;
         });
@@ -2659,7 +2659,15 @@ fn a_moving_large_block_releases_its_old_pages_behind_the_copy() {
     pattern(one.as_ptr(), small_class.size());
     let purges = os.calls(Call::Purge);
     // SAFETY: as above.
-    unsafe { back.move_large(one, new, small_class.size(), false) };
+    unsafe {
+        back.move_large(
+            one,
+            new,
+            small_class.size(),
+            false,
+            crate::back::Move::Outgrown,
+        )
+    };
     assert!(patterned(new.as_ptr(), small_class.size()));
     assert_eq!(os.calls(Call::Purge), purges + 1);
     assert_eq!(back.retained(), ballast);
@@ -2690,7 +2698,7 @@ fn a_block_that_grows_gets_huge_pages_until_it_is_freed() {
         let new = block.ptr;
         back.resize(new, size);
         // SAFETY: both are live blocks of these sizes that nothing else uses.
-        unsafe { back.move_large(old, new, len, block.zeroed) };
+        unsafe { back.move_large(old, new, len, block.zeroed, crate::back::Move::Outgrown) };
         assert!(patterned(new.as_ptr(), len));
         new
     };
@@ -2730,7 +2738,15 @@ fn a_block_that_grows_gets_huge_pages_until_it_is_freed() {
     let block = back.alloc(new_class, new_class.size()).unwrap();
     back.resize(block.ptr, 160 << 10);
     // SAFETY: both are live blocks that nothing else uses.
-    unsafe { back.move_large(old, block.ptr, 80 << 10, block.zeroed) };
+    unsafe {
+        back.move_large(
+            old,
+            block.ptr,
+            80 << 10,
+            block.zeroed,
+            crate::back::Move::Outgrown,
+        )
+    };
     assert_eq!(os.huge_pages(block.ptr), Some(HugePages::Avoid));
     assert!(painted(block.ptr.as_ptr(), 100, 0x33));
     back.free(block.ptr, new_class);
@@ -2812,14 +2828,11 @@ fn a_block_growing_over_its_spilled_huge_page_returns_it_and_keeps_its_bytes() {
 
 /// Moves a dense block of `len` bytes of `class` into `to`, a fresh block whose object is to
 /// be `size` bytes, as the heap's growing move does.
-/// Spends the budget for kept grown blocks (`policy::kept_grown`) with a plain free of an
-/// untouched block of a class of its own, so that moves and frees of grown blocks return their
-/// pages, as they do in a process that has kept its fill. Returns the bytes left retained.
+/// Fills the count of kept outgrown slots to its bound (`policy::kept_outgrown`), so that the
+/// moves that follow return the slots they leave, as they do in a process that has kept its
+/// fill of them. Returns the bytes retained, which it does not change.
 fn spend_kept_budget<O: Os>(back: &Back<'_, O>) -> usize {
-    let class = large(kept_grown(back.space().plan().geometry()) + 1);
-    let ballast = back.alloc(class, class.size()).unwrap().ptr;
-    back.free(ballast, class);
-    assert!(back.retained_large() >= class.size());
+    back.set_outgrown(kept_outgrown(back.space().plan().geometry()));
     back.retained()
 }
 
@@ -2828,75 +2841,8 @@ fn move_in<O: Os>(back: &Back<'_, O>, class: Class, len: usize, to: NonNull<u8>,
     pattern(from.as_ptr(), len);
     back.resize(to, size);
     // SAFETY: both are live blocks that nothing else uses, and `to` is fresh.
-    unsafe { back.move_large(from, to, len, true) };
+    unsafe { back.move_large(from, to, len, true, crate::back::Move::Outgrown) };
     assert!(patterned(to.as_ptr(), len));
-}
-
-/// Within the budget for kept grown blocks, the slot a block moves out of and a grown block
-/// freed with huge-page advice both stay resident, counted and, for the second, advised, as a
-/// plain free leaves a slot; a block then allocated in the advised slot has the advice taken
-/// back. Past the budget they go back to the OS, and a plain free never does.
-#[test]
-#[cfg_attr(miri, ignore)]
-fn grown_blocks_are_kept_within_their_budget() {
-    let state = state::<Native>();
-    let back = state.get_or_reserve().unwrap();
-    let os = state.os();
-    let huge = Native::GEOMETRY.huge_page_size();
-    let budget = kept_grown(Native::GEOMETRY);
-    let (old_class, new_class) = (large(192 << 10), large(512 << 10));
-    let purges = || os.calls(Call::Purge);
-    let before = purges();
-    // A block that grows by moving, as the heap moves it: a fresh slot claimed for the size
-    // the block uses, then the move. The slot it leaves is kept, data and all.
-    let old = back.alloc(old_class, 80 << 10).unwrap().ptr;
-    pattern(old.as_ptr(), 80 << 10);
-    let new = back.alloc(new_class, 160 << 10).unwrap().ptr;
-    // SAFETY: both are live blocks that nothing else uses, and `new` is fresh.
-    unsafe { back.move_large(old, new, 80 << 10, true) };
-    assert!(patterned(new.as_ptr(), 80 << 10));
-    assert_eq!(purges(), before, "nothing went back");
-    assert!(
-        patterned(old.as_ptr(), 80 << 10),
-        "the old slot is resident"
-    );
-    // Charged the pages its block may have written, not its whole slot: the rest of the
-    // fresh slot was marked clean when it was carved.
-    let kept = back.retained_large();
-    let page = Native::GEOMETRY.page_size();
-    assert!((80 << 10..=(80 << 10) + page).contains(&kept), "{kept}");
-    assert_eq!(os.huge_pages(new), Some(HugePages::Prefer));
-    // Freed with its advice, it is kept too, advice and all, and charged its block's size in
-    // whole huge pages, which the advice may have faulted.
-    back.free(new, new_class);
-    assert_eq!(purges(), before);
-    assert_eq!(os.huge_pages(new), Some(HugePages::Prefer));
-    let advised = back.retained_large() - kept;
-    assert_eq!(advised, (160usize << 10).next_multiple_of(huge));
-    assert!(kept + advised <= budget);
-    // A block allocated in it rather than grown into it does not keep the advice.
-    let again = back.alloc(new_class, new_class.size()).unwrap();
-    assert_eq!(again.ptr, new);
-    assert!(!again.zeroed);
-    assert_eq!(os.huge_pages(new), Some(HugePages::Avoid));
-    assert_eq!(back.retained_large(), kept);
-    // Past the budget the same free returns the slot and its advice.
-    move_in(&back, large(64 << 10), huge, again.ptr, 2 * huge);
-    assert_eq!(os.huge_pages(new), Some(HugePages::Prefer));
-    let ballast = spend_kept_budget(&back);
-    let purged = purges();
-    back.free(again.ptr, new_class);
-    assert_eq!(purges(), purged + 1);
-    assert_eq!(os.huge_pages(new), Some(HugePages::Avoid));
-    assert_eq!(back.retained(), ballast);
-    // A plain free keeps its slot whatever the count: this one takes the kept slot the move
-    // left, and gives it back resident, charged its pages that are not clean.
-    let plain = back.alloc(old_class, old_class.size()).unwrap().ptr;
-    assert_eq!(plain, old);
-    assert_eq!(back.retained(), ballast - kept);
-    back.free(plain, old_class);
-    assert_eq!(purges(), purged + 1);
-    assert_eq!(back.retained(), ballast - kept + old_class.size());
 }
 
 /// What the free slot holding `ptr` is charged: its pages that are not marked clean.
@@ -2936,7 +2882,7 @@ fn extent<O: Os>(back: &Back<'_, O>, class: Class, ptr: NonNull<u8>, size: usize
 /// A large slot released resident is charged its pages that are not clean, and a claim and a
 /// purge take back exactly that, for a block at its size, one with room to grow (whose slot's
 /// pages past it were marked clean when it was carved), a staggered one, one advised for huge
-/// pages, one shrunk in place (whose tail went back and is clean) and one grown in place over
+/// pages (whose free returns the slot whole, so it is charged nothing), one shrunk in place (whose tail went back and is clean) and one grown in place over
 /// a clean tail (which `cover` clears). After each case the count is back at zero.
 #[test]
 #[cfg_attr(miri, ignore)]
@@ -2977,11 +2923,8 @@ fn a_large_slot_is_charged_its_pages_that_are_not_clean() {
                 let ptr = back.alloc(class, 2 * huge).unwrap().ptr;
                 move_in(&back, large(64 << 10), huge, ptr, 2 * huge);
                 assert_eq!(state.os().huge_pages(ptr), Some(HugePages::Prefer));
-                let advised =
-                    (2 * huge)
-                        .next_multiple_of(huge)
-                        .max(extent(&back, class, ptr, 2 * huge));
-                (ptr, advised.min(class.size()))
+                // Its free returns the slot whole and charges nothing.
+                (ptr, 0)
             }
             "shrunk" => {
                 let ptr = back.alloc(class, class.size()).unwrap().ptr;
@@ -3108,7 +3051,16 @@ fn an_advised_slot_is_purged_only_in_whole_huge_pages() {
     let to = back.alloc(large(512 << 10), 2 * class.size()).unwrap().ptr;
     let (mut pieces, purges) = (0, os.calls(Call::Purge));
     // SAFETY: both are live blocks that nothing else uses.
-    unsafe { back.move_large_with(slot, to, class.size(), true, || pieces += 1) };
+    unsafe {
+        back.move_large_with(
+            slot,
+            to,
+            class.size(),
+            true,
+            crate::back::Move::Outgrown,
+            || pieces += 1,
+        )
+    };
     assert!(patterned(to.as_ptr(), class.size()));
     // To the first boundary, then the two huge pages, each returned as it is copied.
     assert_eq!(pieces, 3);
@@ -3239,7 +3191,7 @@ fn a_sparse_block_stays_sparse_when_it_moves() {
         let before = resident();
         let purges = os.calls(Call::Purge) as usize;
         // SAFETY: both are live blocks that nothing else uses; `new` reads as zero when said.
-        unsafe { back.move_large(old, new.ptr, len, zeroed) };
+        unsafe { back.move_large(old, new.ptr, len, zeroed, crate::back::Move::Outgrown) };
         assert!(arrived(new.ptr), "zeroed {zeroed}");
         let sparse = marks.len() * page;
         let dirty_rest = if zeroed { 0 } else { new_class.size() - len };
@@ -3281,7 +3233,7 @@ fn a_block_moved_into_a_dirty_slot_arrives_whole_when_purges_fail() {
     paint(new.ptr.as_ptr(), new_class.size(), 0x77);
     os.set_faults(Call::Purge, Faults::ALWAYS);
     // SAFETY: both are live blocks that nothing else uses; `new` is not said to be zero.
-    unsafe { back.move_large(old, new.ptr, len, false) };
+    unsafe { back.move_large(old, new.ptr, len, false, crate::back::Move::Outgrown) };
     os.set_faults(Call::Purge, Faults::NONE);
     // SAFETY: a live block the test owns.
     let bytes = unsafe { core::slice::from_raw_parts(new.ptr.as_ptr(), len) };
@@ -3346,7 +3298,7 @@ fn a_dense_block_with_a_hole_moves_whole_and_keeps_the_hole() {
         let purges = os.calls(Call::Purge) as usize;
         // SAFETY: both are live blocks that nothing else uses; `new` reads as zero unless
         // painted.
-        unsafe { back.move_large(old, new.ptr, len, !dirty) };
+        unsafe { back.move_large(old, new.ptr, len, !dirty, crate::back::Move::Outgrown) };
         assert!(arrived(new.ptr), "dirty {dirty} staggered {staggered}");
         // One purge for each piece of the old block, one of the destination for each of the
         // two pieces the hole touches, and none for the dense pieces.
@@ -3401,7 +3353,7 @@ fn a_hole_is_copied_when_the_destinations_purge_fails() {
     // hole is the third call.
     os.set_faults(Call::Purge, Faults::once_after(2));
     // SAFETY: both are live blocks that nothing else uses; `new` is not said to be zero.
-    unsafe { back.move_large(old, new.ptr, len, false) };
+    unsafe { back.move_large(old, new.ptr, len, false, crate::back::Move::Outgrown) };
     os.set_faults(Call::Purge, Faults::NONE);
     // SAFETY: a live block the test owns.
     let bytes = unsafe { core::slice::from_raw_parts(new.ptr.as_ptr(), len) };
@@ -3588,7 +3540,7 @@ fn a_staggered_block_moves_and_returns_its_whole_slot() {
         }
         let new = back.alloc_staggered(new_class, len).unwrap();
         // SAFETY: both are live blocks that nothing else uses; `new` reads as zero if said.
-        unsafe { back.move_large(old, new.ptr, len, new.zeroed) };
+        unsafe { back.move_large(old, new.ptr, len, new.zeroed, crate::back::Move::Outgrown) };
         if sparse {
             // SAFETY: inside the block.
             let bytes = unsafe { core::slice::from_raw_parts(new.ptr.as_ptr(), len) };
@@ -3637,7 +3589,11 @@ fn a_moving_run_releases_its_old_pages_behind_the_copy() {
     let mut peak = 0;
     // SAFETY: `old` is a live run of `len` bytes that the test gives up, `new` a live run of
     // more, and nothing else uses either.
-    unsafe { back.move_large_with(old, new, len, true, || peak = peak.max(resident())) };
+    unsafe {
+        back.move_large_with(old, new, len, true, crate::back::Move::Outgrown, || {
+            peak = peak.max(resident())
+        })
+    };
     assert!(peak <= before + piece + Standard::GEOMETRY.page_size());
     assert!(patterned(new.as_ptr(), len));
     assert_eq!(back.lookup(old.as_ptr()), None, "the old run is free");
@@ -4243,6 +4199,9 @@ mod hold;
 
 /// Purge steps bounded in pages whatever the unit: large slots returned in pieces.
 mod pieces;
+
+/// The slots blocks outgrow: kept within their bound, and counted exactly.
+mod outgrown;
 
 /// Returning memory while the background thread runs.
 mod thread_duty;

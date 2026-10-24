@@ -187,7 +187,8 @@ pub(crate) mod process {
     }
 
     /// Moves `len` bytes of the large block at `from` to `to` and frees `from`, a piece at a
-    /// time with the old pages returned behind the copy (`Back::move_large`).
+    /// time with the old pages returned behind the copy (`Back::move_large`); `why` says whether
+    /// the block outgrew its slot.
     ///
     /// # Safety
     ///
@@ -195,12 +196,17 @@ pub(crate) mod process {
     /// and gives up, readable for `len` bytes; `to` is writable for `len` bytes and does not
     /// overlap it.
     #[cold]
-    pub(crate) unsafe fn move_large(from: NonNull<u8>, to: NonNull<u8>, len: usize) {
+    pub(crate) unsafe fn move_large(
+        from: NonNull<u8>,
+        to: NonNull<u8>,
+        len: usize,
+        why: crate::back::Move,
+    ) {
         let heap = global::process().heap();
         match heap.back() {
             // SAFETY: the contract of `Back::move_large` is this function's, and `zeroed` is
             // false, which never lets it skip a page.
-            Some(back) => unsafe { back.move_large(from, to, len, false) },
+            Some(back) => unsafe { back.move_large(from, to, len, false, why) },
             None => heap.os().abort("a move of a block when no heap exists"),
         }
     }

@@ -68,9 +68,13 @@ fn c_realloc_in<S: Shape>(sim: &SimHeap<S>, old: NonNull<u8>, size: usize) -> Op
     }?;
     // SAFETY: both are live blocks the test holds, `old` given up.
     unsafe {
-        heap.back()
-            .unwrap()
-            .move_large(old, new, kept.min(size), false)
+        heap.back().unwrap().move_large(
+            old,
+            new,
+            kept.min(size),
+            false,
+            crate::back::Move::Outgrown,
+        )
     };
     Some(new)
 }
@@ -541,7 +545,6 @@ fn roomy_runs(salt: u64, seeds: u64, steps: usize, faults: bool) {
     assert!(
         seen.met.zero != 0
             && seen.met.told != 0
-            && seen.met.advised != 0
             && seen.full != 0
             && seen.less != 0
             && seen.side_by_side != 0,
@@ -550,6 +553,14 @@ fn roomy_runs(salt: u64, seeds: u64, steps: usize, faults: bool) {
     // With commits failing, some growth must have been refused a slot and taken another, and
     // some call must have found no memory at all. With none failing, every growth of a large
     // block gets room: four times the largest block here fits a region.
+    // No free slot keeps a grown block's advice: its free and the move that keeps the slot
+    // it outgrew both take it back, which only a refused call leaves in place.
+    if !faults {
+        assert_eq!(
+            seen.met.advised, 0,
+            "advice stayed on a free slot: {seen:?}"
+        );
+    }
     if faults {
         assert!(
             seen.fell_back != 0 && seen.refused != 0,

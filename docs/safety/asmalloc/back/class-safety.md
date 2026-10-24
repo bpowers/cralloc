@@ -8,18 +8,16 @@ writes the slot's memory during the call or needs its contents after; and the sl
 the watermark.
 
 **Where it is called.** `free_slot`, the free of one large slot, calls `purge_before_release`
-before it releases the slot's bit, and it purges only when the slot is advised for huge pages
+before it releases the slot's bit, and it purges when the slot is advised for huge pages
 because its object grew there (its size word's flag, `Recorded::huge`, which only the slot's
-holder reads or writes) and keeping it would take retained large-slot memory past the budget
-for kept grown blocks (`keep_grown`, which adds the slot's charge to the count, compares, and
-takes it back if over; the charge, `region::charge`, reads only the slot's clean words, which
-only the slot's holder writes while it holds it). An earlier
-form also purged when keeping any slot would take a large-class retained count over its cap,
-and a later one purged every advised slot; each change only narrows or widens when the block
-runs, without changing what holds when it does. A kept advised slot is released with its
-advice and flag; the next allocation of it takes them back (`alloc_at`), and only the holder
-of a slot reads the flag, so a free slot that is advised changes no other path: the purge walk
-purges free slots by their pages and never reads it, and `purge_part` acts on held slots.
+holder reads or writes). Earlier forms kept an advised slot within a budget, or purged only
+past a count; each change only narrows or widens when the block runs, without changing what
+holds when it does. The advice is taken back after the purge; if the OS refuses that, the
+flag stays and the next allocation of the slot tries again (`alloc_at`). `free_slot` is
+reached from `Back::free` and `Back::free_by_address`, and from `move_large_with` for a move
+that is not an outgrowth (`Move::Other`), after the copy: there the slot is the one the
+move's caller gave up (BACK-CLASS-03), its bit still clear, and the move has returned only
+pages behind its copy, so nothing reads or needs the slot's memory any more.
 
 A slot released resident is charged its pages whose clean bit is clear (`region::charge`);
 the free writes no clean bit. A clean bit says the page has not been written since it was
@@ -169,7 +167,8 @@ past the old size, which `realloc` leaves indeterminate and the zeroing variants
 themselves; nothing records them as holding the old contents.
 
 **Tests.** `a_large_slot_that_shrinks_in_place_returns_its_tail`,
-`a_run_that_shrinks_in_place_returns_its_tail`, and through C
+`a_run_that_shrinks_in_place_returns_its_tail`, `a_grown_blocks_free_is_a_free`,
+`a_shrinks_move_frees_the_old_slot_as_its_free_would`, and through C
 `realloc_shrinking_a_large_block_returns_its_tail`.
 
 ## BACK-CLASS-03: the copies and purges in `move_large_with`
@@ -193,10 +192,15 @@ either range, and that if it says `zeroed` the `len` bytes at `to` read as zero.
 callers are the moving paths of `Bound::resize` (HEAP-04, which passes the allocation's own
 report) and C's `realloc_other` (MOD-01, which passes `false`), and both hold both blocks.
 
-Within the budget for kept grown blocks (`keep_grown`, true only for a slot, which counts
-the slot's charge before the copy) the move returns nothing of `from` (steps 4 and 5 do not
-run) and releases the slot as a plain free does, resident and counted already; the copies of steps 0 to 3 are the same, and keeping both copies
-resident is a matter of memory, not of safety.
+A slot its block outgrew (`Move::Outgrown`) and that the count of kept outgrown slots has
+room for (`keep_outgrown`, true only for a slot, which counts the slot's charge before the
+copy) is kept: the move returns nothing of `from` (steps 4 and 5 do not run), takes the
+slot's huge-page advice back (`region::unadvise`, which changes no contents), marks the size
+word (`Recorded::outgrown`, written by the holder) and releases the slot resident and counted
+already. The copies of steps 0 to 3 are the same, and keeping both copies resident is a
+matter of memory, not of safety. Any other move (`Move::Other`) returns the pieces behind its
+copy (step 4, without the last range) and frees the slot through `free_slot` (BACK-CLASS-01),
+which purges it only if it is advised, while the move's caller's claim on it still holds.
 
 0. *The windows.* Every block, whatever its length, is copied by `copy_window` over
    consecutive, disjoint ranges `start..end` of block offsets that together are `0..len`, in
@@ -234,7 +238,8 @@ resident is a matter of memory, not of safety.
    either a part already copied that ends at such a multiple (`into + done` rounded down to a
    page, to `into + boundary`: `done` is zero, which rounds down to the slot's start and so
    takes the stagger's padding, which holds nothing, or the previous multiple, which is
-   page-aligned) or, once and for a slot only, everything from the last multiple at or below
+   page-aligned) or, once and for an outgrown slot not kept only, everything from the last
+   multiple at or below
    `from + len` (or from the slot's start, if there is none) to the end of the slot. Every
    byte of the block before that start has been copied. A block of one piece or less that
    crosses no multiple gives back only that last range, the whole slot, after its one
@@ -243,7 +248,9 @@ resident is a matter of memory, not of safety.
    returns less, and then reports `false`, so step 5 does not count the range as gone. All
    lie inside `from`'s slot or run, whose start is page-aligned, and the caller holds it and
    has given it up, as in BACK-CLASS-01. The slot's bit is checked to be clear before
-   anything is purged, so a block that is already free aborts instead.
+   anything is purged, so a block that is already free aborts instead. A range of a slot that
+   went back whole is marked clean (`region::mark_clean`), by the holder, over pages that are
+   now not resident: a clean bit stays true.
 5. *The release.* The slot is marked zero only if every `give_back` reported its whole
    range returned: `purge_part` answers `true` only when the OS accepted the range it was
    given, untrimmed (`a_trimmed_purge_of_an_advised_slot_says_it_kept_part`), and the
@@ -254,8 +261,8 @@ resident is a matter of memory, not of safety.
    the slot has gone back, and
    `mark_purged` and an uncounted release leave it exactly as `purge_held` does; if any did
    not, the slot is released as resident and counted by its pages that are not clean
-   (`region::charge`), with no zero bit set and no clean bit written, which only over-counts
-   the parts that did go back. A run is freed by `free_run`, which purges
+   (`region::charge`), with no zero bit set and only the ranges that went back whole marked
+   clean. A run is freed by `free_run`, which purges
    all of it (again, for the pieces already returned; harmless) to restore its zero
    promise.
 
