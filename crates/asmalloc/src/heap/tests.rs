@@ -885,6 +885,169 @@ fn the_room_a_grown_block_never_wrote_is_never_charged_kept_or_purged() {
     }
 }
 
+/// The evidence rule for zeroed large blocks, on a heap whose blocks of the floor fit a region
+/// (`Native`'s). `size` is the floor; `class` the class a block of it takes.
+mod unwritten {
+    use super::*;
+    use crate::back::Kind;
+    use crate::back::policy::unwritten_floor;
+    use crate::os::sim::{Native, Shape as _};
+
+    fn floor() -> Layout {
+        layout(unwritten_floor(Native::GEOMETRY), 8)
+    }
+
+    fn class_of(heap: &SimHeap<Native>, p: *mut u8) -> Class {
+        match heap.heap.back().unwrap().lookup(p) {
+            Some(Kind::Slot(class)) => class,
+            other => panic!("{other:?}"),
+        }
+    }
+
+    /// Whether the next claim of `class` finds a slot known to be zero; the slot goes back as
+    /// it came.
+    fn next_is_zero(heap: &SimHeap<Native>, class: Class) -> bool {
+        let back = heap.heap.back().unwrap();
+        let block = back.alloc(class, class.size() / 2).unwrap();
+        let zeroed = block.zeroed;
+        back.free(block.ptr, class);
+        zeroed
+    }
+
+    /// A tenant that writes one page of a zeroed block from a fresh slot: its free returns the
+    /// slot whole, uncounted, known to be zero, and the next tenant is not marked.
+    #[test]
+    fn a_block_left_unwritten_goes_back_known_zero_and_uncounted() {
+        let heap = SimHeap::<Native>::new();
+        let l = floor();
+        // SAFETY: a valid layout; the block is written within its size and freed once.
+        unsafe {
+            let p = heap.alloc_zeroed(l);
+            p.write(1);
+            let class = class_of(&heap, p);
+            let back = heap.heap.back().unwrap();
+            let (counted, held) = (back.retained_large(), resident(&heap));
+            heap.dealloc(p, l);
+            assert_eq!(back.retained_large(), counted, "not counted as retained");
+            assert!(resident(&heap) < held, "its written page went back");
+            // The next tenant gets the slot zero and unmarked: its free, of a block written
+            // as little, is an ordinary one.
+            let b = back.alloc(class, l.size()).unwrap();
+            assert!(b.zeroed, "the slot is known to be zero");
+            b.ptr.as_ptr().write(1);
+            back.free(b.ptr, class);
+            assert!(
+                back.retained_large() > counted,
+                "an unmarked tenant's free keeps the slot"
+            );
+            assert!(!next_is_zero(&heap, class));
+        }
+    }
+
+    /// A tenant that writes all of its zeroed block: an ordinary free, resident and counted.
+    #[test]
+    fn a_block_written_in_full_is_an_ordinary_free() {
+        let heap = SimHeap::<Native>::new();
+        let l = floor();
+        // SAFETY: a valid layout; the block is written within its size and freed once.
+        unsafe {
+            let p = heap.alloc_zeroed(l);
+            fill(p, l.size(), 3);
+            let class = class_of(&heap, p);
+            let back = heap.heap.back().unwrap();
+            let counted = back.retained_large();
+            heap.dealloc(p, l);
+            assert!(
+                back.retained_large() >= counted + l.size(),
+                "counted as retained"
+            );
+            assert!(
+                !next_is_zero(&heap, class),
+                "kept resident, so not known to be zero"
+            );
+            // The next zeroed request clears the slot, and is not marked: written as little as
+            // the first test's, its free keeps the slot.
+            let q = heap.alloc_zeroed(l);
+            assert!((0..l.size()).step_by(509).all(|i| q.add(i).read() == 0));
+            q.write(1);
+            heap.dealloc(q, l);
+            assert!(!next_is_zero(&heap, class));
+        }
+    }
+
+    /// A request that is not zeroed is never marked, however little its tenant writes.
+    #[test]
+    fn an_unzeroed_block_is_never_marked() {
+        let heap = SimHeap::<Native>::new();
+        let l = floor();
+        // SAFETY: a valid layout; the block is written within its size and freed once.
+        unsafe {
+            let p = heap.alloc(l);
+            p.write(1);
+            let class = class_of(&heap, p);
+            heap.dealloc(p, l);
+            assert!(!next_is_zero(&heap, class));
+        }
+    }
+
+    /// The mark survives a resize in place, and the free samples the extent the block has
+    /// then. Each case starts from slots known to be zero (`trim`), so its block is marked.
+    #[test]
+    fn the_mark_survives_a_resize_in_place() {
+        let heap = SimHeap::<Native>::new();
+        let l = floor();
+        let page = Native::GEOMETRY.page_size();
+        // SAFETY: valid layouts; each block is written within its size and freed once with
+        // the layout it has.
+        unsafe {
+            let p = heap.alloc_zeroed(l);
+            let class = class_of(&heap, p);
+            let room = heap.heap.back().unwrap().room(p).unwrap();
+            let grown = l.size() + page;
+            assert!(grown <= room, "a page more fits the slot");
+            heap.dealloc(p, l);
+            for (to, dense) in [(grown, false), (l.size() - 4 * page, false), (grown, true)] {
+                let _ = heap.heap.back().unwrap().trim();
+                let p = heap.alloc_zeroed(l);
+                assert_eq!(heap.realloc(p, l, to), p, "in place");
+                if dense {
+                    fill(p, to, 5);
+                } else {
+                    p.write(1);
+                }
+                heap.dealloc(p, layout(to, 8));
+                assert_eq!(
+                    next_is_zero(&heap, class),
+                    !dense,
+                    "resized to {to}, dense {dense}"
+                );
+            }
+        }
+    }
+
+    /// A marked block that moves out of its slot leaves it returned behind the copy and known
+    /// to be zero. (A block of the floor is past the budget for kept grown blocks in every
+    /// geometry, so this does not reach the rule that a marked block is never kept; that
+    /// rule only matters while the floor is under the budget.)
+    #[test]
+    fn a_marked_block_that_moves_returns_its_old_slot() {
+        let heap = SimHeap::<Native>::new();
+        let l = floor();
+        // SAFETY: valid layouts; each block is written within its size and freed once with
+        // the layout it has.
+        unsafe {
+            let p = heap.alloc_zeroed(l);
+            let class = class_of(&heap, p);
+            p.write(9);
+            let q = heap.realloc(p, l, 2 * l.size());
+            assert_ne!(q, p, "outgrew its slot");
+            assert_eq!(q.read(), 9);
+            assert!(next_is_zero(&heap, class), "the old slot went back");
+            heap.dealloc(q, layout(2 * l.size(), 8));
+        }
+    }
+}
+
 /// A zeroed grow into a slot an earlier block left dirty: the kept bytes arrive, and the rest
 /// reads as zero, though the move skipped the old block's zero pages and allocated unzeroed.
 #[test]
