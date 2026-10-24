@@ -1018,6 +1018,25 @@ mod unwritten {
         }
     }
 
+    /// A marked block left unwritten whose return the OS refuses is an ordinary free: resident,
+    /// counted, and not taken for zero.
+    #[test]
+    fn a_refused_return_is_an_ordinary_free() {
+        let heap = SimHeap::<Native>::new();
+        let class = Class::of_size(floor().size()).unwrap();
+        let back = heap.heap.start().unwrap();
+        let block = back.alloc(class, floor().size()).unwrap();
+        back.mark_unwritten(block.ptr);
+        // SAFETY: inside the block, which the test holds; page 0 is not sampled.
+        unsafe { block.ptr.as_ptr().write(1) };
+        let counted = back.retained_large();
+        heap.os().set_faults(Call::Purge, Faults::once_after(0));
+        back.free(block.ptr, class);
+        heap.os().set_faults(Call::Purge, Faults::NONE);
+        assert!(back.retained_large() > counted, "counted as retained");
+        assert!(!next_is_zero(&heap, class), "not taken for zero");
+    }
+
     /// A second free of a marked block, whose slot went back at the first, is caught before
     /// anything is returned: the sample would find it unwritten, and only the check of its bit
     /// stops a purge of a slot that is free.
