@@ -94,6 +94,21 @@ pub static REGION_RULE: [AtomicU8; REGIONS] = [const { AtomicU8::new(0) }; REGIO
 pub static REGION_FINE: [AtomicU32; REGIONS] = [const { AtomicU32::new(0) }; REGIONS];
 /// Each large region's hold age in fine steps when last inspected; `u32::MAX` for no stamp.
 pub static REGION_AGE: [AtomicU32; REGIONS] = [const { AtomicU32::new(u32::MAX) }; REGIONS];
+/// Each region's class index, written at every carve, and where the heap's regions start, so
+/// that the sampler's counting wrapper can tell the class of any block.
+pub static REGION_CLS: [AtomicU8; REGIONS] = [const { AtomicU8::new(0) }; REGIONS];
+pub static HEAP_BASE: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+pub static REGION_SHIFT: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+
+/// The class index of the region holding `addr`, zero if unknown.
+pub fn class_of(addr: usize) -> u8 {
+    let base = HEAP_BASE.load(Relaxed);
+    if base == 0 || addr < base {
+        return 0;
+    }
+    let index = (addr - base) >> REGION_SHIFT.load(Relaxed);
+    if index < REGIONS { REGION_CLS[index].load(Relaxed) } else { 0 }
+}
 
 #[inline(always)]
 pub fn add(i: usize, v: usize) {

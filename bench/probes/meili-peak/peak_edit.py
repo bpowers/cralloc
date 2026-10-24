@@ -81,6 +81,12 @@ sub(C, """            let settled = region::settle(&host, taken.region, taken.wo
             resident += settled.resident;""", """            let settled = region::settle(&host, taken.region, taken.word, taken.bits);
             self.diag_revive(class.class(), taken.region, settled.under);
             resident += settled.resident;""")
+sub(C, "            got = self.put_run(host.layout(), out, got, region, first, count);\n",
+    "            self.diag_carve(class.class(), region);\n"
+    "            got = self.put_run(host.layout(), out, got, region, first, count);\n")
+sub(C, "            let (region, first, _) = self.carve(&host, class, 1)?;\n",
+    "            let (region, first, _) = self.carve(&host, class, 1)?;\n"
+    "            self.diag_carve(class, region);\n")
 sub(C, "        self.grow(carved);\n        Filled {",
     "        crate::diag::add(crate::diag::CARVE_SMALL, carved);\n"
     "        crate::diag::add(crate::diag::CLASS_SMALL_CARVE + class.class().index() as usize, carved);\n"
@@ -227,6 +233,20 @@ HELPERS = r'''
 impl<O: Os> Back<'_, O> {
     pub(super) fn diag_rule(&self, region: RegionId, rule: u8) {
         crate::diag::rule(region.index(), rule, self.state.hold.fine.count());
+    }
+
+    /// A carve in `region` of `class`: notes the region's class for the sampler.
+    pub(super) fn diag_carve(&self, class: crate::classes::Class, region: RegionId) {
+        let index = region.index();
+        if index < crate::diag::REGIONS {
+            crate::diag::REGION_CLS[index].store(class.index(), Relaxed);
+        }
+        if crate::diag::HEAP_BASE.load(Relaxed) == 0 {
+            let shift = self.space.plan().region_shift();
+            crate::diag::REGION_SHIFT.store(shift as usize, Relaxed);
+            let base = self.space.region(region).as_ptr().addr() - (index << shift);
+            crate::diag::HEAP_BASE.store(base, Relaxed);
+        }
     }
 
     pub(super) fn diag_inspect(&self) {

@@ -26,7 +26,8 @@ use std::fmt::Write as _;
 use std::sync::atomic::{AtomicBool, AtomicI64, AtomicUsize, Ordering::*};
 
 const PAGE: usize = 4096;
-const CLASSES: usize = asmalloc::classes::COUNT + 1;
+/// Every class index (from 1) and a last entry for blocks of no class (runs, or not known).
+const CLASSES: usize = asmalloc::classes::COUNT + 2;
 const MAX_REGIONS: usize = 4096;
 /// One byte per page of every region: enough for 128 GiB of committed regions.
 const SCRATCH: usize = 32 << 20;
@@ -649,14 +650,12 @@ fn shard() -> &'static Shard {
     &SHARDS[i]
 }
 
+/// The class index of the slot at `ptr`, from the allocator's own record of each region's
+/// class (`asmalloc::diag::class_of`); the last entry when it is not known (a run).
 fn slot_index(ptr: *mut u8) -> usize {
-    let (base, shift) = (HEAP_BASE.load(Relaxed), REGION_SHIFT.load(Relaxed));
-    if base == 0 || ptr.addr() < base {
-        return CLASSES - 1;
-    }
-    match REGION_CLASS.get((ptr.addr() - base) >> shift).map_or(0, |c| c.load(Relaxed)) {
+    match asmalloc::diag::class_of(ptr.addr()) {
         0 => CLASSES - 1,
-        c => c as usize - 1,
+        c => c as usize,
     }
 }
 
