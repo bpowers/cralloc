@@ -1,0 +1,15 @@
+# The trail a rule for grown blocks' slots leaves (docs/research/grown-slots.md): a workspace of
+# its own, built from a scratch tree that grown_edit.py has edited (build.sh ... trail).
+[workspace]
+
+[package]
+name = "trail"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+asmalloc = { path = "../../../../crates/asmalloc", features = ["executable"] }
+
+[profile.release]
+codegen-units = 1
