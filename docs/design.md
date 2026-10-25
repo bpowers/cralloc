@@ -836,8 +836,8 @@ rule that returns it (`docs/research/memory.md` has the measurements behind them
 | Free slots in the bitmaps, on pages with nothing live on them, above what fills reached in the last two intervals | The clocked purge | Once an interval while more than the floor could be returned: up to a quarter of what could be, and never past the floor, in runs of adjacent pages, carrying on round the heap from where the last pass stopped |
 | Free slots of large classes, above the floor | Heartbeats, a bounded amount each; `maintain` in a silence | Once their region has gone a short hold without a free that left a slot resident |
 | The same, whether fills reached it or not, while more than the cap is retained and the heap grows somewhere else | The carve that grows it owes as much as it takes: it returns a bounded part, and heartbeats return the rest | At that carve and the heartbeats after it, a bounded step each |
-| A large block left behind by a move, or one that grew and is freed, beyond a small budget of such memory | The move or the free (see "Large objects") | Before it releases the slot |
-| The tail of a large block that shrinks in place; the pages behind a move made in pieces | The resize (see "Large objects") | At once |
+| A slot a large block outgrew, beyond a bound on such slots that nothing has taken again | The move (see "Large objects") | Behind the copy, a piece at a time |
+| The tail of a large block that shrinks in place | The resize (see "Large objects") | At once |
 | Objects in a magazine that stays loaded | A slow path of the same CPU launders it | Once it has been loaded for an interval |
 | Objects in a CPU's full spares | That CPU's sweep launders one magazine and sends the rest to the depot | Once an interval |
 | Spares beyond the room a class still needs on a CPU | The sweep takes the depth not needed during an interval off the class's room and returns what lies above the new limit; the idle drain takes it with the slab | A magazine a heartbeat, from the interval after its last use |
@@ -1100,24 +1100,46 @@ blocks of a region or more. Being below what a block fills when it moves in, it 
 block resized back and forth across a class boundary settle in one slot instead of being
 copied on every call.
 
-When a large object has to move, the copy goes in pieces and returns the old block's pages
-behind each piece, so the two copies are never both resident. Each piece's pages are tested
+When a large object has to move, the copy goes in pieces. Each piece's pages are tested
 first. A piece with no all-zero page is one copy. Where there are zero pages the copy leaves
 them out, and the destination is purged only under them, so a block the program wrote
-sparsely stays sparse.
+sparsely stays sparse. Unless the old slot is kept, as below, each piece's pages go back
+behind it, so the two copies are never both resident.
 
-A block small enough to move in one piece is left whole behind the move, and what becomes
-of it, and of a block that grew and is then freed, depends on how much such memory is
-already kept. A buffer grown and freed again and again should find its memory resident each
-time; many buffers growing at once should not leave a trail of the blocks they outgrew. So
-the slot stays resident while retained large-slot memory is within a small budget, and goes
-back at once beyond it. This is not the level that a free must not act on. The purge falls
-only on a block the program copied or wrote in full to reach its size, so it costs at most
-about what the program has already spent on that block, and it never falls on a block that
-was allocated, barely touched and freed.
+What a growing block leaves behind is a choice between two cases that pull against each
+other. A buffer grown and freed again and again should find its memory resident each time;
+many buffers growing at once should not leave a trail of the blocks they outgrew.
 
-A kept slot is charged, against that budget and against retained memory, the pages that
-may be resident, not its whole size: a block that moved in with room to grow fills a small
+A grown block that is freed is an ordinary free. Its slot stays resident, the hold decides
+when it goes back, and it is charged as any free is: a program that grew one buffer is
+likely to grow another.
+
+A slot that a block has outgrown is kept resident, whole, while the outgrown slots that
+nothing has taken again total no more than 64 MiB, and goes back behind the copy beyond
+that. This is the one place where a free acts on a level, and it may because of what the
+level counts: only slots that a growing block left behind and that nothing has reused.
+Where buffers grow one after another, each takes the slots the last one left and the count
+stays small. Where many grow at once the slots pile up, and the count is the trail itself.
+Counting anything wider does not work. The level was first set against all retained large
+memory, which the hold keeps above its floor by design, so on any heap of size it was
+always exceeded, and every outgrown slot went back and was faulted in again within
+milliseconds (`docs/research/grown-slots.md`). The bound also limits how much the two
+copies of one moving block can hold between them. The purge falls only on a block the
+program copied to reach its size, so it costs at most about what the program has already
+spent on that block.
+
+A kept slot carries a mark in its size word. The count rises by the slot's charge when it
+is kept, and falls by what is removed when a claim takes the slot or a purge returns its
+pages. It is exact while nothing races and a hint when something does: a wrong value costs
+a keep or a purge, never a slot in use. A slot under huge-page advice is not kept. Its
+pages come back two megabytes to a fault, which costs less than writing over pages that
+have gone cold. Nor is one that still carries the mark of an unwritten zeroed block.
+
+A move for any other reason, such as a block shrunk far below its slot, returns its pieces
+behind the copy and then frees the old slot as a free of that block would.
+
+A free slot is charged, against retained memory and against that count where it applies,
+the pages that may be resident, not its whole size: a block that moved in with room to grow fills a small
 fraction of its slot. The record is the slot's clean-page bits, and a clean bit is true: it says
 the page has not been written since it was carved or last purged. Only a purge sets one, and
 the carve of a slot for the pages past the block it was carved for. A claim, and anything

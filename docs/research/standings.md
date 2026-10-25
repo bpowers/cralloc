@@ -21,6 +21,11 @@ what this allocator is for. The kernel suite and the C programs are regression c
   resident (`meili-peak.md`). Since main `dc2f01a` a zeroed large block its tenant left
   untouched goes back at its free, and on this job the heap peaks at 741 to 757 MiB (three
   rounds), with 51 to 53 page faults a request where it took 92 to 96.
+  **2026-10-25:** the merge of `outgrown-count` keeps the slots growing buffers leave behind
+  within a count of their own (`grown-slots.md`). Against the main before it, same sessions:
+  Meilisearch 36 to 40 faults a request at the same heap; tpchgen 4.5% fewer cycles and 218k
+  faults for 706k, with its peak up from 578 to 633 MiB; 64 Vecs grown to 4 MiB 15% fewer
+  cycles, peak 278 to 327 MiB; DataFusion and the 2 GiB order service level.
 - **Servers, tails: the best p50 and p99 on most jobs, with two exceptions.** On Connect over
   HTTP/2 asmalloc's p99.9 at 70% load is 45 us against 39 to 41 for the others, and it was 39 at
   the last standings. After a 30 s silence the log store's slowest request in the first 5 ms
