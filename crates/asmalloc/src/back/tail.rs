@@ -422,7 +422,8 @@ pub(crate) struct Look {
     /// time.
     pub(crate) sparse: bool,
     /// An estimate of the free pages it has resident: its pages by the share of sampled pages
-    /// that are. What the lap counts toward the floor (`purge`, "The floor").
+    /// that are. For a sparse one, what the lap counts toward the floor (`purge`, "The
+    /// floor"); a dense one's are not what a purge could return.
     pub(crate) free: usize,
     /// Bitmap words read.
     pub(crate) read: usize,

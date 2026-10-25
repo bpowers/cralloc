@@ -9,7 +9,7 @@
 # The drift workload, its probes and the memstat sampler come from heap-drift's commits
 # (DRIFT_BASE..DRIFT, bench/ only), applied over COMMIT's tree, unless DRIFT=none (a commit
 # that has them, as main since 47e88d4). HT_EDIT=0 builds COMMIT as it is, without the
-# switch: the product and main, built the same way for comparison.
+# switch: the product and main, built the same way for comparison. PAD=N: below.
 #
 # PARTs (default: workload memstat):
 #   workload    the bench workloads with bench-alloc/asmalloc, into bench/target/NAME/release
@@ -47,6 +47,12 @@ if [ "${HT_EDIT:-1}" = 1 ]; then
   stamp="$stamp, ht_edit.py $(sha256sum "$here/ht_edit.py" | cut -c1-12), ht.rs $(sha256sum "$here/ht.rs" | cut -c1-12)"
 fi
 unset RUSTFLAGS CARGO_ENCODED_RUSTFLAGS BENCH_LAYOUT_PAD
+# PAD=N moves the code after bench-alloc's pad by N bytes (`benchrun layout`), for comparing
+# two commits on a job that is sensitive to placement (docs/research/grpc-placement.md).
+if [ -n "${PAD:-}" ]; then
+  export BENCH_LAYOUT_PAD="$PAD"
+  stamp="$stamp, pad $PAD"
+fi
 export BENCH_BASELINES="$shared/baselines/out"
 for part in "${parts[@]}"; do
   case "$part" in

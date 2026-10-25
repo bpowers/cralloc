@@ -1483,7 +1483,10 @@ impl<O: Os> Back<'_, O> {
             let look = tail::look(host, region, unit);
             step.read += look.read;
             if !look.sparse || !walk.may_return {
-                step.found = look.free * page;
+                // What a purge could return: a dense huge page's free pages are left to it.
+                if look.sparse {
+                    step.found = look.free * page;
+                }
                 return Some(step);
             }
         }
