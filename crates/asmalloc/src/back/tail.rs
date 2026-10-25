@@ -42,8 +42,8 @@
 use super::layout::Unit;
 use super::policy::{TAIL_HEADROOM_HUGE_PAGES, TAIL_SAMPLE_PAGES, TAIL_SPARSE_PAGES};
 use super::region;
-use super::tree::{self, Host};
-use super::word::{BITS, Word, bits_in_word};
+use super::tree::Host;
+use super::word::Word;
 use crate::os::HugePages;
 use crate::space::RegionId;
 
