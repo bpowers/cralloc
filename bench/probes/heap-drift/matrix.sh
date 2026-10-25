@@ -12,7 +12,9 @@ out="$1" jobs="$2" builds="$3"
 shift 3
 here="$(cd "$(dirname "$0")" && pwd)"
 
-# Each job about ten minutes of asmalloc on the eight CPUs of scripts/heavy.
+# Each job about ten minutes of asmalloc on the eight CPUs of scripts/heavy, with a table of
+# sizes drawn for every phase, as the runs of 2026-10-24 were made (`tables=shared` after the
+# job's name gives phases that ask for the same sizes the same table).
 args_of() {
   case "$1" in
     steady) echo "shape=steady live=2Gi ops=15G samples=150" ;;
@@ -33,6 +35,6 @@ for job in $jobs; do
       continue
     fi
     echo "$(date -Is) $job $build"
-    "$here/run.sh" "$build" "$file" "${job_args[@]}" quiet=60 quiet_step=5 "$@" || echo "$(date -Is) $job $build failed: $?"
+    "$here/run.sh" "$build" "$file" "${job_args[@]}" tables=phase quiet=60 quiet_step=5 "$@" || echo "$(date -Is) $job $build failed: $?"
   done
 done

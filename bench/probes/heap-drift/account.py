@@ -80,6 +80,11 @@ def report(tag, h, classes, top):
     print("\n| where | MiB | of heap |\n|---|---|---|")
     for name, v in rows:
         print(f"| {name} | {v / MiB:.1f} | {v / max(h['heap'], 1):.1%} |")
+    in_units = sum(c["free_whole_huge"] - c["free_units"] for c in classes)
+    print(
+        f"\nof the free memory that cannot be returned, {in_units / MiB:.1f} MiB is whole free 4 KiB pages inside 2 MiB "
+        f"units that hold something, {(stuck - in_units) / MiB:.1f} MiB free slots on pages that hold something"
+    )
     print(f"\nsmall classes resident {sum(c['resident'] for c in small) / MiB:.0f} MiB, large {sum(c['resident'] for c in large) / MiB:.0f}; huge-page part committed {huge / MiB:.0f} MiB; back end's retained count {h['retained'] / MiB:.0f} MiB")
     def excess(c):
         return c["resident"] - max(c["req"], 0)
@@ -146,10 +151,32 @@ def diff(a, b, top):
         )
 
 
+def history(path, tags, sizes):
+    """For each class in `sizes`, over the breakdowns `tags`: what the program asked for in it,
+    the most it had asked for at any of them so far, and what the class had carved, in MiB."""
+    found = {t: c for t, _, c in blocks(path, "acct") if t in tags}
+    print(f"\nPer class at breakdowns {','.join(str(t) for t in sorted(found))}, MiB\n")
+    for size in sizes:
+        reqs, carved, resident = [], [], []
+        for t in sorted(found):
+            c = next((c for c in found[t] if c["size"] == size), None)
+            reqs.append(c["req"] / MiB if c else 0)
+            carved.append(c["carved"] / MiB if c else 0)
+            resident.append(c["resident"] / MiB if c else 0)
+        most = [max(reqs[: i + 1]) for i in range(len(reqs))]
+        for name, xs in (("asked", reqs), ("most asked", most), ("carved", carved), ("resident", resident)):
+            print(f"- {size} {name}: " + " ".join(f"{x:.0f}" for x in xs))
+
+
 def main():
     args = sys.argv[1:]
     if not args:
         sys.exit(__doc__)
+    if "--history" in args:
+        tags = {int(t) for t in args[args.index("--history") + 1].split(",")}
+        sizes = [int(s) for s in args[args.index("--sizes") + 1].split(",")]
+        history(args[0], tags, sizes)
+        return
     if "--diff" in args:
         want = [int(t) for t in args[args.index("--diff") + 1].split(",")]
         found = {tag: (tag, h, c) for tag, h, c in blocks(args[0], "acct") if tag in want}

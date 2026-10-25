@@ -37,6 +37,9 @@
 //!   those then shrunk to their exact size), the rest allocated whole, and `append` percent
 //!   of operations instead take a random cached buffer and grow it by half with `realloc`.
 //!
+//! Phases that ask for the same sizes draw the same table of sizes (`tables=phase` draws one
+//! for every phase instead).
+//!
 //! Every value is written in full when it is made. The program's own bookkeeping (the caches'
 //! slot tables, the FIFOs, the transient rings) is mapped with `mmap`, outside the allocator,
 //! and its resident pages are subtracted from the process's: `heap` in a `DRIFT` line is
@@ -707,9 +710,18 @@ fn phases(args: &Args, shape: Shape, threads: usize, unit: usize, seed: u64, sam
     };
     let ranges = parse_ranges(&args.str("ranges", "40Ki-256Ki,256Ki-4Mi,4Mi-32Mi,40Ki-32Mi"));
     let (short_hi, short_lo) = (args.usize("short_hi", 1536 << 20), args.usize("short_lo", 128 << 20));
+    // Phases that ask for the same sizes draw the same table, so that a class's share of the
+    // values is the same each time; `tables=phase` gives every phase a table of its own, whose
+    // classes' shares differ by the sampling noise of 4096 draws (tens of percent for a class
+    // that takes one draw in a hundred), as the runs of 2026-10-24 did.
+    let per_phase = args.str("tables", "shared") == "phase";
+    let sizes_of = |i: usize| match shape {
+        Shape::Large => i % ranges.len(),
+        _ => i % medians.len(),
+    };
     (0..count)
         .map(|i| {
-            let dist_seed = seed * 1000 + i as u64;
+            let dist_seed = seed * 1000 + if per_phase { i } else { sizes_of(i) } as u64;
             let (values, sizes) = match shape {
                 Shape::Large => {
                     let (lo, hi) = ranges[i % ranges.len()];
