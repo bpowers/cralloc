@@ -104,6 +104,10 @@ const TABLE: usize = 1 << 20;
 /// its last free plus one, for its own age.
 static SLACK_OF: [AtomicU32; TABLE] = [const { AtomicU32::new(0) }; TABLE];
 static FREED_AT: [AtomicU64; TABLE] = [const { AtomicU64::new(0) }; TABLE];
+/// Per slot, the size its tenant counts in `LIVE`: set at the claim, carve and resize, cleared
+/// when the holder gives the slot up, so that a slot given up twice (a move's old slot that
+/// the move then frees) is subtracted once.
+static LIVE_OF: [AtomicU64; TABLE] = [const { AtomicU64::new(0) }; TABLE];
 /// Slack in occupied slots, and live large memory (the sizes recorded), for the bound.
 static SLACK: AtomicI64 = AtomicI64::new(0);
 static LIVE: AtomicI64 = AtomicI64::new(0);
@@ -117,6 +121,11 @@ static AGE_LOOKS: AtomicU64 = AtomicU64::new(0);
 static AGE_SLOTS: AtomicU64 = AtomicU64::new(0);
 static AGE_RETURNED: AtomicU64 = AtomicU64::new(0);
 static SLACK_MAX: AtomicI64 = AtomicI64::new(0);
+
+fn set_live(k: usize, size: usize) {
+    let was = LIVE_OF[k].swap(size as u64, Relaxed);
+    LIVE.fetch_add(size as i64 - was as i64, Relaxed);
+}
 
 fn key(region: RegionId, slot: u32) -> usize {
     let h = (region.index() as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15) ^ u64::from(slot).wrapping_mul(0xBF58_476D_1CE4_E5B9);
@@ -192,14 +201,14 @@ pub(super) fn claim<O: Os>(host: &ClassHost<'_, O>, region: RegionId, slot: u32,
         let was = SLACK_OF[k].swap(left as u32, Relaxed) as i64;
         let now = SLACK.fetch_add((left * page) as i64 - was * page as i64, Relaxed);
         SLACK_MAX.fetch_max(now, Relaxed);
-        LIVE.fetch_add(size as i64, Relaxed);
+        set_live(k, size);
     }
 }
 
 /// For a carve of a fresh large slot for a block of `size` bytes: no slack, but live memory.
-pub(super) fn carved(size: usize) {
+pub(super) fn carved(region: RegionId, slot: u32, size: usize) {
     if config().bound != 0 {
-        LIVE.fetch_add(size as i64, Relaxed);
+        set_live(key(region, slot), size);
     }
 }
 
@@ -216,7 +225,8 @@ pub(super) fn resized<O: Os>(host: &ClassHost<'_, O>, region: RegionId, slot: u3
     let left = dirty(host, region, end, unit.end);
     let was = SLACK_OF[key(region, slot)].swap(left as u32, Relaxed) as i64;
     SLACK.fetch_add((left as i64 - was) * layout.page_size() as i64, Relaxed);
-    LIVE.fetch_add(size as i64 - old as i64, Relaxed);
+    let _ = old;
+    set_live(key(region, slot), size);
 }
 
 /// For the holder giving up large slot `slot` (a free, or the old slot of a move), before it
@@ -227,9 +237,7 @@ pub(super) fn left<O: Os>(back: &Back<'_, O>, host: &ClassHost<'_, O>, region: R
     if cfg.bound != 0 {
         let was = SLACK_OF[k].swap(0, Relaxed) as i64;
         SLACK.fetch_sub(was * host.layout().page_size() as i64, Relaxed);
-        if let Some(now) = region::recorded(host, region, slot) {
-            LIVE.fetch_sub(now.size as i64, Relaxed);
-        }
+        set_live(k, 0);
     }
     if cfg.age {
         FREED_AT[k].store(u64::from(back.state.hold.fine.count()) + 1, Relaxed);

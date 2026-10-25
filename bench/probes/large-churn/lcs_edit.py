@@ -40,7 +40,7 @@ edit(
     "crates/asmalloc/src/back/class.rs",
     "                region::mark_fresh(&host, region, first, size);\n",
     "                region::mark_fresh(&host, region, first, size);\n"
-    "                super::lcs::carved(size);\n",
+    "                super::lcs::carved(region, first, size);\n",
 )
 edit(
     "crates/asmalloc/src/back/class.rs",
