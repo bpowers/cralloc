@@ -176,15 +176,17 @@
 //!
 //! **The tail** (`tail`). Above the frontier, rounded up to a huge page, the huge pages hold
 //! what fills left behind. Every step looks at each of them once at its top: one wholly free
-//! goes back whole, as below; any other gets the cheap look (`tail::look`), a few sampled
-//! words, and a step that only counts counts its estimate and passes it, so that a lap that
-//! returns nothing reads about what main's look reads. A step that may return memory walks a
-//! sparse one a page at a time from the cursor, in runs within the huge page, asking the kernel
-//! to split it over each run before returning the run; if the split is refused the run stays.
-//! A split counts as the step's whole budget, so a step on a request's slow path makes one at
-//! most. The lowest huge page a step returned part of is noted in the region's tail word, and
-//! when the walk reaches the bottom of the region (or a pass or a growth payment ends in it)
-//! the advice comes off from there in one call. `trim` walks the whole huge-page part so.
+//! goes back whole, as below; any other gets the cheap look (`tail::look`), a few sampled runs
+//! of pages as long as the step's shortest. One the look calls dense is passed whole, and a
+//! step that only counts passes every one with the look's estimate, so that a lap that returns
+//! nothing reads a few words a huge page more than main's did. A step that may return memory
+//! walks a sparse one a page at a time from the cursor, in runs within the huge page, asking
+//! the kernel to split it over each run before returning the run; if the split is refused the
+//! run stays. On a request's slow path a split counts as the step's whole budget, so such a
+//! step makes one at most. The lowest huge page a step returned part of is noted in the
+//! region's tail word, and when the walk reaches the bottom of the region (or a pass or a
+//! growth payment ends in it) the advice comes off from there in one call. `trim` walks the
+//! whole huge-page part so.
 //!
 //! **Pieces.** A unit of the small-page part is the pages of the slots it covers, so one
 //! large slot is a unit as long as the slot: tens of megabytes. A purge step that may return
@@ -1480,7 +1482,7 @@ impl<O: Os> Back<'_, O> {
                     return Some(step);
                 }
             }
-            let look = tail::look(host, region, unit);
+            let look = tail::look(host, region, unit, walk.min_run);
             step.read += look.read;
             if !look.sparse || !walk.may_return {
                 // What a purge could return: a dense huge page's free pages are left to it.

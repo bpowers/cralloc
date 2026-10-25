@@ -418,11 +418,11 @@ pub(crate) fn raise<H: Host>(
 /// What the walk's cheap look at one huge page above the frontier found.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(crate) struct Look {
-    /// Enough of its sampled pages are free and resident that it is worth walking a page at a
+    /// Enough of its sampled runs are free and resident that it is worth walking a page at a
     /// time.
     pub(crate) sparse: bool,
-    /// An estimate of the free pages it has resident: its pages by the share of sampled pages
-    /// that are. For a sparse one, what the lap counts toward the floor (`purge`, "The
+    /// An estimate of the free pages it has resident in runs the walk would take: its pages by
+    /// the share of sampled runs that are. For a sparse one, what the lap counts toward the floor (`purge`, "The
     /// floor"); a dense one's are not what a purge could return.
     pub(crate) free: usize,
     /// Bitmap words read.
@@ -430,23 +430,30 @@ pub(crate) struct Look {
 }
 
 /// The cheap look at huge page `unit` of `region` (a unit of whole pages, at most one huge
-/// page): whether each of [`TAIL_SAMPLE_PAGES`] of its pages, evenly spread, is free and
-/// resident, as the walk would find it (`region::purgeable_unit`). By pages, not by leaf words:
-/// a word of a class of 1 KiB covers 16 pages, and a huge page with a live slot in every 16
-/// pages has no free word and 15 free pages in 16. Reads only, at most a page's slots' words
-/// and its clean word for each sample.
-pub(crate) fn look<H: Host>(host: &H, region: RegionId, unit: Unit) -> Look {
+/// page), for a walk that returns runs of at least `run` pages: whether each of
+/// [`TAIL_SAMPLE_PAGES`] of its aligned runs of `run` pages, evenly spread, is free and
+/// resident, as the walk would find it (`region::purgeable_unit`). By runs of pages, not by
+/// leaf words: a word of a class of 1 KiB covers 16 pages, and a huge page with a live slot in
+/// every 16 pages has no free word and 15 free pages in 16. And not by single pages: free pages
+/// scattered one or two together are free to the sample but too short for the walk, which
+/// would read the huge page a page at a time for nothing (on Meilisearch, at every burst's
+/// start). Reads only, at most a run's slots' words and its clean words for each sample.
+pub(crate) fn look<H: Host>(host: &H, region: RegionId, unit: Unit, run: u32) -> Look {
     let pages = unit.end - unit.start;
-    let samples = TAIL_SAMPLE_PAGES.min(pages);
+    let run = run.clamp(1, pages.max(1));
+    let runs = pages / run;
+    let samples = TAIL_SAMPLE_PAGES.min(runs);
     let (mut free, mut read) = (0, 0);
     for i in 0..samples {
-        let start = unit.start + (i * pages) / samples;
+        // Evenly spread, each a run further into its share than the last, so that the
+        // samples do not all land on the same phase of a pattern with a power-of-two period.
+        let start = unit.start + ((i * runs / samples + i) % runs) * run;
         let (ok, words) = region::purgeable_unit(
             host,
             region,
             Unit {
                 start,
-                end: start + 1,
+                end: start + run,
             },
         );
         read += words;

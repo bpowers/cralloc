@@ -381,7 +381,7 @@ fn the_cheap_look_is_bounded_and_tells_dense_from_sparse() {
         start: (top - 1) & !(hp - 1),
         end: ((top - 1) & !(hp - 1)) + hp,
     };
-    let dense = tail::look(&host, region0, unit);
+    let dense = tail::look(&host, region0, unit, 1);
     assert!(!dense.sparse);
     // A page of this class is one leaf word: a sample reads it, after the clean word.
     assert!(dense.read <= 2 * super::super::policy::TAIL_SAMPLE_PAGES as usize);
@@ -395,7 +395,7 @@ fn the_cheap_look_is_bounded_and_tells_dense_from_sparse() {
         .collect();
     // SAFETY: the test holds these slots and gives them up.
     unsafe { back.launder(class(), &inside) };
-    let sparse = tail::look(&host, region0, unit);
+    let sparse = tail::look(&host, region0, unit, 1);
     assert!(sparse.sparse);
 }
 
@@ -642,4 +642,49 @@ fn a_step_of_the_thread_may_split_more_than_one() {
         most = most.max(os.calls(Call::SplitHuge) - before);
     }
     assert!(most > 1, "a step of the thread made {most} splits at most");
+}
+
+/// The look samples runs as long as the walk's shortest: free pages scattered alone make a
+/// huge page sparse for a walk that takes runs of one page, and dense for one that takes runs
+/// of four, which would read it a page at a time and return nothing.
+#[test]
+fn the_cheap_look_samples_runs_as_long_as_the_walk_takes() {
+    let state = state::<Standard>();
+    let back = state.get_or_reserve().unwrap();
+    let region = back.space().plan().region_size();
+    let slots = fill(&back, class(), 2 * region / C);
+    let host = back.host(class().class()).unwrap();
+    // The top huge page of the first region, which the class carved whole.
+    let (region0, base) = region_of(&back, slots[0]);
+    let hp = (huge() / page()) as u32;
+    let top = host
+        .layout()
+        .carved_pages(Grow::unpack(host.grow(region0).load()).carved);
+    let start = ((top - 1) & !(hp - 1)) - hp;
+    let unit = super::super::layout::Unit {
+        start,
+        end: start + hp,
+    };
+    let lo = base + unit.start as usize * page();
+    let hi = base + unit.end as usize * page();
+    // Every odd page of the unit wholly free, every even one holding its slots.
+    let odd: Vec<*mut u8> = slots
+        .iter()
+        .copied()
+        .filter(|p| (lo..hi).contains(&p.addr()) && ((p.addr() - lo) / page()) % 2 == 1)
+        .collect();
+    for &p in &odd {
+        paint(p, C, 7);
+    }
+    // SAFETY: the test holds these slots and gives them up.
+    unsafe { back.launder(class(), &odd) };
+    assert!(tail::look(&host, region0, unit, 1).sparse);
+    let four = tail::look(
+        &host,
+        region0,
+        unit,
+        super::super::policy::PURGE_MIN_RUN_PAGES,
+    );
+    assert!(!four.sparse);
+    assert_eq!(four.free, 0);
 }

@@ -159,8 +159,9 @@ pub const HUGE_AFTER_HUGE_PAGES: usize = 8;
 /// (`docs/research/huge-tail.md`).
 pub const TAIL_HEADROOM_HUGE_PAGES: u32 = 8;
 
-/// The pages of a huge page above the frontier that the walk's cheap look samples before it
-/// reads the huge page a page at a time: 8, evenly spread, so that a look at a dense huge page
+/// The runs of pages (as long as the walk's shortest, `PURGE_MIN_RUN_PAGES` or one) of a huge
+/// page above the frontier that the walk's cheap look samples before it reads the huge page a
+/// page at a time: 8, evenly spread, so that a look at a dense huge page
 /// reads a few words more than main's did (its leaf words to the first live slot). Reading a dense
 /// huge page a page at a time cost the background thread four times main's walk at the start
 /// of a server's burst (`docs/research/huge-tail.md`, "The burst start"). A fixed count, not
@@ -169,7 +170,7 @@ pub const TAIL_HEADROOM_HUGE_PAGES: u32 = 8;
 pub const TAIL_SAMPLE_PAGES: u32 = 8;
 
 /// A huge page above the frontier is walked a page at a time, split and returned in part, only
-/// if at least this many of its sampled pages are free and resident: 2 of 8, a quarter of the
+/// if at least this many of its sampled runs are free and resident: 2 of 8, a quarter of the
 /// huge page or about 512 KiB. Below that, what would go back is not worth the huge page's
 /// mapping and an advice change. Each huge page is looked at afresh every lap, so one the
 /// sample misjudged is judged again.
