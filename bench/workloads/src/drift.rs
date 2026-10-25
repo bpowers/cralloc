@@ -523,7 +523,7 @@ impl Worker {
                 target = (target * run.big_factor).next_multiple_of(cache.unit).min(run.append_max);
             }
             let (p, size) =
-                if self.rng.below(100) < run.grow { self.grown(target) } else { (make(target, 0x33), target) };
+                if self.rng.below(100) < run.grow { self.grown(run, target) } else { (make(target, 0x33), target) };
             cache.put(&mut self.me, &mut self.rng, p, size);
         }
         cache.trim(&mut self.me, &mut self.rng);
@@ -543,11 +543,14 @@ impl Worker {
 
     /// A buffer built as a vector that is pushed to: doubling from `GROW_FROM` until it holds
     /// `target` bytes, and for half of them shrunk to fit.
-    fn grown(&mut self, target: usize) -> (*mut u8, usize) {
+    fn grown(&mut self, run: &Run, target: usize) -> (*mut u8, usize) {
+        // Never past what a cache slot can record, which a power of two above the largest size
+        // a slot holds would be.
+        let most = run.main.max_size();
         let mut cur = GROW_FROM.min(target);
         let mut p = make(cur, 0x22);
         while cur < target {
-            let next = (cur * 2).min(target.next_power_of_two());
+            let next = (cur * 2).min(target.next_power_of_two()).min(most);
             p = resize(p, cur, next);
             cur = next;
         }
