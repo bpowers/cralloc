@@ -383,7 +383,8 @@ fn the_cheap_look_is_bounded_and_tells_dense_from_sparse() {
     };
     let dense = tail::look(&host, region0, unit);
     assert!(!dense.sparse);
-    assert!(dense.read <= super::super::policy::TAIL_SAMPLE_WORDS as usize);
+    // A page of this class is one leaf word: a sample reads it, after the clean word.
+    assert!(dense.read <= 2 * super::super::policy::TAIL_SAMPLE_PAGES as usize);
     // Free the unit's slots and look again.
     let lo = base + unit.start as usize * page();
     let hi = base + unit.end as usize * page();
@@ -584,4 +585,61 @@ fn the_simulator_charges_huge_pages_as_linux_does() {
         os.purge(second, hp).unwrap();
         assert_eq!(os.charged_bytes(), region - 2 * hp + page());
     }
+}
+
+/// The look samples pages, not leaf words: in a class of 1 KiB a word covers 16 pages, and a
+/// huge page with one live slot in every 16 pages has no free word but 15 free pages in 16.
+/// Those go back.
+#[test]
+#[cfg_attr(miri, ignore)]
+fn a_huge_page_with_no_free_word_but_free_pages_goes_back_in_part() {
+    const K: usize = 1024;
+    let state = state::<Standard>();
+    let back = state.get_or_reserve().unwrap();
+    let os = state.os();
+    let region = back.space().plan().region_size();
+    let slots = fill(&back, small(K), 2 * region / K);
+    assert!(slots.len() > region / K);
+    for &p in &slots {
+        paint(p, K, 7);
+    }
+    let (kept, freed): (Vec<*mut u8>, Vec<*mut u8>) = slots
+        .iter()
+        .partition(|p| p.addr().is_multiple_of(16 * page()));
+    for chunk in freed.chunks(64) {
+        // SAFETY: the test holds these slots and gives them up.
+        unsafe { back.launder(small(K), chunk) };
+    }
+    let (_, charged) = memory(os);
+    age_and_beat(&back, 12);
+    let (_, after) = memory(os);
+    assert!(os.calls(Call::SplitHuge) > 0, "no split was asked for");
+    assert!(
+        charged - after > freed.len() * K / 2,
+        "charged {charged} -> {after}, {} freed",
+        freed.len() * K
+    );
+    for &p in &kept {
+        assert!(painted(p, K, 7));
+    }
+}
+
+/// The bound of point 5 is for a request's slow path: a step of the background thread's may
+/// split as many huge pages as its budget reaches.
+#[test]
+#[cfg_attr(miri, ignore)]
+fn a_step_of_the_thread_may_split_more_than_one() {
+    let state = state::<Standard>();
+    let back = state.get_or_reserve().unwrap();
+    let os = state.os();
+    let (_, _) = stranded(&back);
+    forget_reuse(&back);
+    os.advance_clock(DECAY_TICKS);
+    let mut most = 0;
+    for _ in 0..BEATS {
+        let before = os.calls(Call::SplitHuge);
+        let _ = back.thread_purge_steps(&|| back.now());
+        most = most.max(os.calls(Call::SplitHuge) - before);
+    }
+    assert!(most > 1, "a step of the thread made {most} splits at most");
 }

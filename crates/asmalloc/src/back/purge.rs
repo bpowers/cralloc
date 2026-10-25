@@ -534,8 +534,13 @@ impl<O: Os> Back<'_, O> {
         let regions = self.walk_regions().max(1);
         let (mut spent, mut finished, mut purged) = (0, 0, 0);
         while purged < goal && spent < PURGE_CAP_WORDS && finished < regions {
-            let (read, bytes, done) =
-                self.purge_step(PURGE_CAP_WORDS - spent, goal - purged, Scope::All, false);
+            let (read, bytes, done) = self.purge_step(
+                PURGE_CAP_WORDS - spent,
+                goal - purged,
+                Scope::All,
+                false,
+                true,
+            );
             spent += read;
             purged += bytes;
             finished += usize::from(done);
@@ -916,6 +921,7 @@ impl<O: Os> Back<'_, O> {
                 limit,
                 Scope::of_pass(quiet, pass.any),
                 pass.count,
+                size.heartbeat,
             );
             spent += read;
             *returned += purged;
@@ -1060,6 +1066,7 @@ impl<O: Os> Back<'_, O> {
                         false,
                         Scope::All,
                         false,
+                        false,
                     )
                     .0;
             }
@@ -1071,15 +1078,16 @@ impl<O: Os> Back<'_, O> {
     /// position on if that region is done. Stops after `budget` words of bitmap or once it
     /// has purged `limit` bytes, finishing the unit it is on, or with `counting`, walks on to
     /// count once it has. What it sees a purge could return goes into the lap's count, and a
-    /// step that ends a lap makes that count the one the clocked pass is held to. Returns the
-    /// words of bitmap read, at least one, the bytes purged, and whether it finished its
-    /// region.
+    /// step that ends a lap makes that count the one the clocked pass is held to. `one_split`
+    /// as for [`Back::purge_region`]. Returns the words of bitmap read, at least one, the bytes
+    /// purged, and whether it finished its region.
     fn purge_step(
         &self,
         budget: usize,
         limit: usize,
         scope: Scope,
         counting: bool,
+        one_split: bool,
     ) -> (usize, usize, bool) {
         let plan = self.space.plan();
         let top = self.walk_regions();
@@ -1095,7 +1103,9 @@ impl<O: Os> Back<'_, O> {
             return (1, 0, true);
         };
         let (purged, read, done, found) = match self.purgeable(region) {
-            Some(class) => self.purge_region(class, region, budget, limit, true, scope, counting),
+            Some(class) => self.purge_region(
+                class, region, budget, limit, true, scope, counting, one_split,
+            ),
             None => (0, 1, true, 0),
         };
         let walk = &self.state.walk;
@@ -1139,9 +1149,11 @@ impl<O: Os> Back<'_, O> {
     /// and leaves the cursor alone. With [`Scope::Idle`] the region is done at its frontier
     /// (`region::floor`, read once a call): a unit that starts below it is left, with the
     /// rest of the region under it. With `counting`, once it has purged `limit` bytes it walks
-    /// on within its budget, looking and purging nothing. Returns the bytes purged, the words
-    /// read, whether the walk reached the bottom, or the frontier, and the bytes of the free,
-    /// resident pages it saw and left: what a purge could still return.
+    /// on within its budget, looking and purging nothing. With `one_split`, a step that may run
+    /// on a request's slow path, a split of a huge page above the frontier (`tail`) ends the
+    /// call as if its budget were spent. Returns the bytes purged, the words read, whether the
+    /// walk reached the bottom, or the frontier, and the bytes of the free, resident pages it
+    /// saw and left: what a purge could still return.
     #[allow(clippy::too_many_arguments)]
     pub(super) fn purge_region(
         &self,
@@ -1152,6 +1164,7 @@ impl<O: Os> Back<'_, O> {
         resume: bool,
         scope: Scope,
         counting: bool,
+        one_split: bool,
     ) -> (usize, usize, bool, usize) {
         let Some(host) = self.host(class) else {
             return (0, 1, true, 0);
@@ -1199,8 +1212,9 @@ impl<O: Os> Back<'_, O> {
         // Where the last run this call purged began: a run that ends there is the tail of a
         // longer one that the cap on a run's length cut, and goes whatever its length.
         let mut below_purged = None;
-        // A split counts as a whole step (`tail`): once one is made, the step ends after the
-        // run it returns, as one that had returned its pages would. `trim` is not bounded.
+        // On a request's slow path a split counts as a whole step (`tail`): once one is made,
+        // the step ends after the run it returns, as one that had returned its pages would.
+        // The background thread's steps, and `trim`, are bounded only by their budgets.
         let mut split = false;
         let done = loop {
             // Not before the first unit: the look above may have spent the whole budget, and
@@ -1255,7 +1269,7 @@ impl<O: Os> Back<'_, O> {
                 if let Some(unit) = step.part {
                     tail::note(&host, region, unit);
                 }
-                if step.split && resume {
+                if step.split && one_split {
                     // The rest of the step's budget: every caller's loop stops at it.
                     split = true;
                     read = read.max(budget);

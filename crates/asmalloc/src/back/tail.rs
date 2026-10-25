@@ -40,7 +40,7 @@
 //! The protocol is `tla/Tail.tla`.
 
 use super::layout::Unit;
-use super::policy::{TAIL_HEADROOM_HUGE_PAGES, TAIL_SAMPLE_WORDS, TAIL_SPARSE_WORDS};
+use super::policy::{TAIL_HEADROOM_HUGE_PAGES, TAIL_SAMPLE_PAGES, TAIL_SPARSE_PAGES};
 use super::region;
 use super::tree::{self, Host};
 use super::word::{BITS, Word, bits_in_word};
@@ -418,46 +418,43 @@ pub(crate) fn raise<H: Host>(
 /// What the walk's cheap look at one huge page above the frontier found.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(crate) struct Look {
-    /// Enough of its sampled leaf words are wholly free that it is worth walking a page at a
+    /// Enough of its sampled pages are free and resident that it is worth walking a page at a
     /// time.
     pub(crate) sparse: bool,
-    /// For a sparse huge page, an estimate of the free pages it still has resident: its pages
-    /// not marked clean, by the share of sampled words that are free. What the lap counts
-    /// toward the floor (`purge`, "The floor").
+    /// An estimate of the free pages it has resident: its pages by the share of sampled pages
+    /// that are. What the lap counts toward the floor (`purge`, "The floor").
     pub(crate) free: usize,
     /// Bitmap words read.
     pub(crate) read: usize,
 }
 
 /// The cheap look at huge page `unit` of `region` (a unit of whole pages, at most one huge
-/// page): [`TAIL_SAMPLE_WORDS`] of the leaf words of the slots it covers, evenly spread, and
-/// for a sparse one its clean words too. Reads only.
+/// page): whether each of [`TAIL_SAMPLE_PAGES`] of its pages, evenly spread, is free and
+/// resident, as the walk would find it (`region::purgeable_unit`). By pages, not by leaf words:
+/// a word of a class of 1 KiB covers 16 pages, and a huge page with a live slot in every 16
+/// pages has no free word and 15 free pages in 16. Reads only, at most a page's slots' words
+/// and its clean word for each sample.
 pub(crate) fn look<H: Host>(host: &H, region: RegionId, unit: Unit) -> Look {
-    let (first, last) = host.layout().touching(unit);
-    let (low, high) = (first / BITS, last / BITS);
-    let words = high - low + 1;
-    let samples = TAIL_SAMPLE_WORDS.min(words);
-    let mut free = 0;
+    let pages = unit.end - unit.start;
+    let samples = TAIL_SAMPLE_PAGES.min(pages);
+    let (mut free, mut read) = (0, 0);
     for i in 0..samples {
-        let w = low + (i * words) / samples;
-        let mask = bits_in_word(w, first, last);
-        if tree::word(host, tree::Node::leaf(region, w)).load() & mask == mask {
-            free += 1;
-        }
-    }
-    let mut read = samples as usize;
-    let sparse = free * TAIL_SAMPLE_WORDS >= TAIL_SPARSE_WORDS * samples;
-    let estimate = if sparse {
-        let (dirty, words) = region::dirty_pages(host, region, unit);
+        let start = unit.start + (i * pages) / samples;
+        let (ok, words) = region::purgeable_unit(
+            host,
+            region,
+            Unit {
+                start,
+                end: start + 1,
+            },
+        );
         read += words;
-        dirty * free as usize / samples as usize
-    } else {
-        0
-    };
+        free += u32::from(ok);
+    }
     Look {
-        sparse,
-        free: estimate,
-        read,
+        sparse: free * TAIL_SAMPLE_PAGES >= TAIL_SPARSE_PAGES * samples,
+        free: (pages * free / samples.max(1)) as usize,
+        read: read.max(1),
     }
 }
 

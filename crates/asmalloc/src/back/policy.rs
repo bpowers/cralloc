@@ -159,16 +159,21 @@ pub const HUGE_AFTER_HUGE_PAGES: usize = 8;
 /// (`docs/research/huge-tail.md`).
 pub const TAIL_HEADROOM_HUGE_PAGES: u32 = 8;
 
-/// The leaf words of a huge page above the frontier that the walk's cheap look samples before
-/// it reads the huge page a page at a time: 8, evenly spread. Reading a dense huge page a page
-/// at a time cost the background thread four times main's walk at the start of a server's
-/// burst (`docs/research/huge-tail.md`, "The burst start").
-pub const TAIL_SAMPLE_WORDS: u32 = 8;
+/// The pages of a huge page above the frontier that the walk's cheap look samples before it
+/// reads the huge page a page at a time: 8, evenly spread, so that a look at a dense huge page
+/// reads a few words more than main's did (its leaf words to the first live slot). Reading a dense
+/// huge page a page at a time cost the background thread four times main's walk at the start
+/// of a server's burst (`docs/research/huge-tail.md`, "The burst start"). A fixed count, not
+/// one scaled with the region or the heap: it bounds the cost of a look at one huge page, and
+/// the walk's budget bounds how many it looks at.
+pub const TAIL_SAMPLE_PAGES: u32 = 8;
 
-/// A huge page above the frontier is walked a page at a time only if at least this many of
-/// its sampled words are wholly free: 4 of 8, so about half its slots or more. The stranded
-/// huge pages the rule is for hold a few objects each.
-pub const TAIL_SPARSE_WORDS: u32 = 4;
+/// A huge page above the frontier is walked a page at a time, split and returned in part, only
+/// if at least this many of its sampled pages are free and resident: 2 of 8, a quarter of the
+/// huge page or about 512 KiB. Below that, what would go back is not worth the huge page's
+/// mapping and an advice change. Each huge page is looked at afresh every lap, so one the
+/// sample misjudged is judged again.
+pub const TAIL_SPARSE_PAGES: u32 = 2;
 
 /// Only classes with at least this many slots to a page get huge pages: 4, so classes up
 /// to 1 KiB. Small objects are dense in their pages, so a huge page holds what the program
