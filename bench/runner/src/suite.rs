@@ -111,16 +111,35 @@ pub struct OpenLoad {
     /// For a proxy: the server it forwards to, started first. `{upstream}` in the job's
     /// arguments is replaced by its address.
     pub upstream: Option<Upstream>,
+    /// A directory in RAM (on /dev/shm) for the run's data, so that a server whose data lives
+    /// in files does not wait on the disk: `{ram}` in the job's arguments names it.
+    pub ram: Option<RamDir>,
 }
 
-/// The upstream of a proxy job: a binary of bench/probes/loadgen (built with glibc beside the
-/// generator, never the program under test), run on CPUs of its own in the generator's
-/// cgroup, which prints `BENCH_LISTEN addr` when it is ready and runs until killed.
+/// A run's directory on /dev/shm (`crate::run::RamGuard`): made before the server starts,
+/// holding a symbolic link `link` to `target` (`{inputs}` replaced), and removed however the
+/// run ends. The run waits for nothing: with less than `need_gib` of the machine's memory
+/// available it does not start and is recorded as invalid. Qdrant's runs copy the collection
+/// there, so that searches fault from memory and not from the disk.
+#[derive(Clone, Debug)]
+pub struct RamDir {
+    pub link: &'static str,
+    pub target: &'static str,
+    pub need_gib: u64,
+}
+
+/// The upstream of a proxy job: a binary built with glibc, never the program under test, run
+/// on CPUs of its own in the generator's cgroup, which prints `BENCH_LISTEN addr` when it is
+/// ready and runs until killed.
 #[derive(Clone, Debug)]
 pub struct Upstream {
     pub bin: &'static str,
     pub args: Vec<&'static str>,
     pub cpus: Vec<usize>,
+    /// The cargo workspace under bench/ the binary is built from: bench/probes/loadgen's, with
+    /// the generator, when `None`; else one of its own, which `build-apps` builds with glibc
+    /// into `target/upstream/<bin>` (`crate::apps::upstream_bin`).
+    pub workspace: Option<&'static str>,
 }
 
 #[derive(Clone, Debug)]
@@ -564,6 +583,7 @@ fn served() -> Vec<Served> {
         streams: 1,
         requests: None,
         upstream: None,
+        ram: None,
     };
     // HTTP/2: eight connections of eight streams, the same 64 requests at once as HTTP/1.1's
     // 64 connections.
@@ -575,6 +595,22 @@ fn served() -> Vec<Served> {
         body,
         inputs: Some("connect"),
         ..order("")
+    };
+    let router = |id, rates| Served {
+        id,
+        program: Program::App("router"),
+        args: "serve subgraphs={upstream} schema={app}/supergraph.graphql check={inputs}/requests.http",
+        load: OpenLoad {
+            requests: Some("{inputs}/requests.http"),
+            upstream: Some(Upstream {
+                bin: "subgraphs",
+                args: vec![],
+                cpus: vec![12, 13, 14],
+                workspace: Some("apps/router/subgraphs"),
+            }),
+            ..order("/")
+        },
+        rates,
     };
     vec![
         // connect-rust's log-ingest service (bench/rpc), a 50-record batch per request in
@@ -638,12 +674,26 @@ fn served() -> Vec<Served> {
             args: "proxy upstream={upstream}",
             load: OpenLoad {
                 body: "{app}/../orders/order.json",
-                upstream: Some(Upstream { bin: "upstream", args: vec!["--body", "4096"], cpus: vec![12, 13, 14] }),
+                upstream: Some(Upstream {
+                    bin: "upstream",
+                    args: vec!["--body", "4096"],
+                    cpus: vec![12, 13, 14],
+                    workspace: None,
+                }),
                 ..order("/orders")
             },
             // Every allocator saturates at 265k to 276k req/s, snmalloc slowest (2026-10-21).
             rates: (80_000, 186_000),
         },
+        // The Apollo Router, federating the four subgraphs of Apollo's demo (bench/apps/router):
+        // GraphQL queries from a fixed list, each planned (from the Router's cache), fetched
+        // from two to four subgraphs in up to three steps, and the answers merged into tens of
+        // kilobytes of JSON. The subgraphs run in one process on three CPUs of the generator's
+        // L3 and answer from memory after the first pass through the list.
+        router("router graphql", ROUTER_RATES),
+        // The same at the rates the slowest of the other four allocators sets, since glibc's
+        // half rate leaves them at 37% of their capacity at "70%": run without glibc.
+        router("router graphql fast", ROUTER_FAST_RATES),
         // The control: tokio's mini-redis, alternate SET and GET over 100k keys (Redis
         // protocol).
         Served {
@@ -656,6 +706,12 @@ fn served() -> Vec<Served> {
         },
     ]
 }
+
+/// 30% and 70% of the slowest allocator's saturated rate on `router graphql`: glibc's 4,790
+/// req/s (asmalloc 8,972, jemalloc 8,545, tcmalloc 9,024, mimalloc 8,543; 2026-10-24).
+const ROUTER_RATES: (u32, u32) = (1_440, 3_350);
+/// The same for the other four alone: jemalloc's 8,444 req/s (mimalloc 8,543 to 8,609).
+const ROUTER_FAST_RATES: (u32, u32) = (2_530, 5_910);
 
 fn server_job(s: Served, plan: String, rank: &'static str, suffix: &str) -> Job {
     Job {
@@ -738,6 +794,7 @@ fn large() -> Vec<Large> {
         streams: 1,
         requests: None,
         upstream: None,
+        ram: None,
     };
     let mut v = Vec::new();
     // 70% of the slowest saturated rate, mimalloc's: 348k, 349k and 355k req/s.
@@ -780,6 +837,39 @@ fn large() -> Vec<Large> {
         fill_s: 5,
         r70: MEILISEARCH_R70,
     });
+    // Qdrant over a million vectors of 384 floats (about 1.5 GB, in RAM) and their HNSW graphs
+    // (bench/apps/qdrant), queried for nearest neighbours by 64 connections over its REST API;
+    // in `mixed`, every 20th request replaces 20 points, which its optimizers index in the
+    // background. Each run starts from a copy of the same collection, in RAM: on the disk,
+    // whose pages the optimizers write and the searches fault back, the job's time followed
+    // the disk's load (docs/research/servers-qdrant.md). Not how Qdrant is deployed: it
+    // measures the server's CPU and memory with the disk taken out.
+    for (kind, r70) in [("search", QDRANT_SEARCH_R70), ("mixed", QDRANT_MIXED_R70)] {
+        v.push(Large {
+            id: format!("qdrant {kind}"),
+            program: Program::App("qdrant"),
+            // The driver copies `DIR/collection/storage` into `DIR/run.<pid>`.
+            args: "serve data={ram}".into(),
+            load: OpenLoad {
+                requests: Some(if kind == "search" { "{inputs}/search.http" } else { "{inputs}/mixed.http" }),
+                // The collection is 2 GB and grows to about 5 under the mixed load.
+                ram: Some(RamDir { link: "collection", target: "{inputs}/collection", need_gib: 10 }),
+                ..order.clone()
+            },
+            fill_s: 5,
+            r70,
+        });
+    }
+    // SurrealDB's in-memory engine holding 750k records with two indexes, filled as it starts
+    // (bench/apps/surrealdb): record reads, index reads and updates in SurrealQL over HTTP.
+    v.push(Large {
+        id: "surrealdb mem".into(),
+        program: Program::App("surrealdb"),
+        args: "serve check={inputs}/requests.http".into(),
+        load: OpenLoad { requests: Some("{inputs}/requests.http"), ..order.clone() },
+        fill_s: 5,
+        r70: SURREALDB_R70,
+    });
     // connect-rust's services as a log store holding a million records (bench/rpc/src/store.rs):
     // every other request ingests 50 new records (the oldest go), every other one tails the
     // 100 most recent as a server stream, in the Connect protocol over HTTP/1.1.
@@ -801,6 +891,17 @@ const STORE_R70: u32 = 36_300;
 /// 70% of the slowest allocator's saturated rate on `meilisearch hn`: mimalloc's 1,328 req/s
 /// (asmalloc 1,413, jemalloc 1,372, tcmalloc 1,423).
 const MEILISEARCH_R70: u32 = 930;
+
+/// 70% of the slowest allocator's saturated rate, the collection in RAM, on `qdrant search`
+/// (mimalloc's 3,528 req/s; the others 3,576 to 3,635) and `qdrant mixed` (asmalloc's 1,804;
+/// the others 1,822 to 1,866), two rounds, 2026-10-24.
+const QDRANT_SEARCH_R70: u32 = 2_470;
+const QDRANT_MIXED_R70: u32 = 1_260;
+
+/// 70% of the slowest allocator's saturated rate on `surrealdb mem`: glibc's 7,945 req/s
+/// (asmalloc 9,701, tcmalloc 9,000, mimalloc 8,898, jemalloc 8,659; triage builds without
+/// LTO, 2026-10-24).
+const SURREALDB_R70: u32 = 5_560;
 
 fn large_job(l: Large, plan: String, rank: &'static str, suffix: &str) -> Job {
     Job {
@@ -867,7 +968,7 @@ pub fn servers_large_sat() -> Vec<Job> {
 /// of its first 500 ms are summarised apart (`b5`, `b50`, `b500`, then `b2`), and a minute
 /// after the connections close (`idle`).
 pub fn servers_thread() -> Vec<Job> {
-    let want = ["orders axum cache 2G", "connect store 1M", "meilisearch hn"];
+    let want = ["orders axum cache 2G", "connect store 1M", "meilisearch hn", "qdrant mixed", "surrealdb mem"];
     large()
         .into_iter()
         .filter(|l| want.contains(&l.id.as_str()))

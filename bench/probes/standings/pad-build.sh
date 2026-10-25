@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # usage: pad-build.sh PART [ALLOC...]
-#   PART: workloads, or one of the servers' programs (orders, sozu, miniredis)
-#   ALLOC: asm jem tcm mim gli (default all five)
+#   PART: workloads, or one of the servers' programs (orders, sozu, miniredis, router, qdrant)
+#   ALLOC: asm jem tcm mim gli (default all five); PADS: the pads, default "00 16 32 48 64"
 # Builds this checkout's servers at bench-alloc's layout pads 0, 16, 32, 48 and 64
 # (BENCH_LAYOUT_PAD, as `benchrun layout --layouts pads` does) for each allocator: the workloads
 # and rpc-server into bench/target/ALLOC-pNN, a program into bench/target/ALLOC-pNN/apps/PROGRAM.
@@ -32,7 +32,7 @@ feature() {
 }
 for a in "${allocs[@]}"; do
   feat=$(feature "$a")
-  for pad in 00 16 32 48 64; do
+  for pad in ${PADS:-00 16 32 48 64}; do
     out="$W/bench/target/$a-p$pad"
     case "$part" in
       workloads)
@@ -41,7 +41,7 @@ for a in "${allocs[@]}"; do
         (cd "$W/bench" && BENCH_LAYOUT_PAD=$((10#$pad)) CARGO_BUILD_BUILD_DIR="$W/bench/target/pad-build-ws" \
            cargo build --release -p bench-workloads -p bench-rpc ${feat:+--features bench-alloc/$feat} \
            --target-dir "$out") ;;
-      orders | sozu | miniredis)
+      orders | sozu | miniredis | router | qdrant | surrealdb)
         (cd "$W/bench/apps/$part" && PATH="$data/inputs/$part/bin:$PATH" BENCH_LAYOUT_PAD=$((10#$pad)) \
            CARGO_BUILD_BUILD_DIR="$data/build/$part" \
            cargo build --release --locked ${feat:+--features $feat} --target-dir "$out/apps/$part") ;;

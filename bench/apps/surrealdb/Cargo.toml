@@ -1,0 +1,46 @@
+# SurrealDB with its in-memory engine, serving queries over HTTP while records are updated, as
+# a server driven by the suite's load generator. See ../README.md and src/main.rs.
+[workspace]
+resolver = "3"
+
+[package]
+name = "app-surrealdb"
+version = "0.0.0"
+edition = "2024"
+license = "MIT"
+publish = false
+
+[[bin]]
+name = "surrealdb"
+path = "src/main.rs"
+
+# The allocator under test, by the bench-alloc feature of its entry in ../../allocators.toml
+# (none: glibc). Every program forwards the same set; see ../README.md.
+[features]
+mi = ["bench-alloc/mi"]
+mi-sized = ["bench-alloc/mi-sized"]
+mi-crate = ["bench-alloc/mi-crate"]
+asmalloc = ["bench-alloc/asmalloc"]
+je = ["bench-alloc/je"]
+tc = ["bench-alloc/tc"]
+sn = ["bench-alloc/sn"]
+# Not an allocator: the live-bytes count, for resident over live (../../alloc/src/live.rs).
+live-bytes = ["bench-alloc/live-bytes"]
+
+[dependencies]
+bench-alloc = { path = "../../alloc" }
+bench-app = { path = "../common" }
+# The release's server and core, with the in-memory engine and HTTP, and without the
+# `allocator` feature, which makes jemalloc the global allocator (wrapped in SurrealDB's
+# allocation counter).
+surrealdb-server = { version = "=3.3.4", default-features = false, features = ["storage-mem", "http"] }
+surrealdb-core = { version = "=3.3.4", default-features = false, features = ["kv-mem"] }
+libc = "0.2"
+
+# SurrealDB's release profile at 3.3.4 (its workspace manifest).
+[profile.release]
+codegen-units = 1
+lto = true
+opt-level = 3
+panic = 'abort'
+strip = true

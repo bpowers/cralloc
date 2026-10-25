@@ -99,13 +99,8 @@ pub fn build(p: &Paths, program: &str, build: &str, feature: &str, cpus: &str) -
     // Nor does a layout's padding (`benchrun layout`), which builds the workloads only.
     c.env_remove("BENCH_LAYOUT_PAD");
     c.env("BENCH_BASELINES", &p.baselines);
-    // Build tools a program's fetch script provides (Sōzu's protoc) come first on PATH.
-    let tools = p.apps_data.join("inputs").join(program).join("bin");
-    if tools.is_dir() {
-        let path = std::env::var_os("PATH").unwrap_or_default();
-        let joined = std::env::join_paths(std::iter::once(tools).chain(std::env::split_paths(&path)))
-            .map_err(|e| format!("PATH: {e}"))?;
-        c.env("PATH", joined);
+    if let Some(path) = tools_path(p, program)? {
+        c.env("PATH", path);
     }
     c.current_dir(&dir);
     let t0 = Instant::now();
@@ -131,15 +126,58 @@ pub fn loadgen_bin(bench: &Path) -> std::path::PathBuf {
 }
 
 pub fn build_loadgen(p: &Paths, cpus: &str) -> Result<(), String> {
-    let st = Command::new("nice")
-        .args(["taskset", "-c", cpus, "cargo", "build", "--release", "--locked", "--target-dir"])
-        .arg(p.bench.join("target/loadgen"))
+    build_glibc(&p.bench.join("probes/loadgen"), &p.bench.join("target/loadgen"), cpus)
+        .map_err(|e| format!("the load generator's build failed: {e}"))
+}
+
+/// A proxy job's upstream binary: the generator's workspace's, or its own workspace's.
+pub fn upstream_bin(bench: &Path, u: &crate::suite::Upstream) -> std::path::PathBuf {
+    match u.workspace {
+        None => bench.join("target/loadgen/release").join(u.bin),
+        Some(_) => bench.join("target/upstream").join(u.bin).join("release").join(u.bin),
+    }
+}
+
+/// Builds an upstream that has a workspace of its own (a Router job's subgraphs), with glibc
+/// from its own lock file: like the generator, it is never the program under test. Its
+/// build tools come from the inputs of `program`, as the program's do.
+pub fn build_upstream(p: &Paths, u: &crate::suite::Upstream, program: &str, cpus: &str) -> Result<(), String> {
+    let Some(ws) = u.workspace else { return Ok(()) };
+    let target = p.bench.join("target/upstream").join(u.bin);
+    let mut c = cargo_glibc(&p.bench.join(ws), &target, cpus);
+    if let Some(path) = tools_path(p, program)? {
+        c.env("PATH", path);
+    }
+    let st = c.status().map_err(|e| format!("cargo: {e}"))?;
+    if st.success() { Ok(()) } else { Err(format!("the upstream {}'s build failed", u.bin)) }
+}
+
+fn build_glibc(dir: &Path, target: &Path, cpus: &str) -> Result<(), String> {
+    let st = cargo_glibc(dir, target, cpus).status().map_err(|e| format!("cargo: {e}"))?;
+    if st.success() { Ok(()) } else { Err(format!("cargo build in {} failed", dir.display())) }
+}
+
+fn cargo_glibc(dir: &Path, target: &Path, cpus: &str) -> Command {
+    let mut c = Command::new("nice");
+    c.args(["taskset", "-c", cpus, "cargo", "build", "--release", "--locked", "--target-dir"])
+        .arg(target)
         .env_remove("RUSTFLAGS")
         .env_remove("CARGO_ENCODED_RUSTFLAGS")
-        .current_dir(p.bench.join("probes/loadgen"))
-        .status()
-        .map_err(|e| format!("cargo: {e}"))?;
-    if st.success() { Ok(()) } else { Err("the load generator's build failed".into()) }
+        .current_dir(dir);
+    c
+}
+
+/// PATH with the build tools a program's fetch script provides (Sōzu's protoc) first, when it
+/// provides any.
+fn tools_path(p: &Paths, program: &str) -> Result<Option<std::ffi::OsString>, String> {
+    let tools = p.apps_data.join("inputs").join(program).join("bin");
+    if !tools.is_dir() {
+        return Ok(None);
+    }
+    let path = std::env::var_os("PATH").unwrap_or_default();
+    std::env::join_paths(std::iter::once(tools).chain(std::env::split_paths(&path)))
+        .map(Some)
+        .map_err(|e| format!("PATH: {e}"))
 }
 
 /// User and system time of this process's waited-for descendants.

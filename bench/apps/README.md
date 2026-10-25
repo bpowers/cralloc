@@ -19,6 +19,7 @@ four of the other:
 | `connect log grpc h2`, `connect log h2` | the log-ingest service over HTTP/2: gRPC (as connect-rust's own log_bench drives it) and the Connect protocol | tokio, a connection task between the socket and the handlers | frames, header blocks and bodies made by one task and freed by another |
 | `orders axum h2` | the axum order service over HTTP/2 | the same | the same |
 | `sozu proxy` | Sōzu 2.3.3, Clever Cloud's reverse proxy, forwarding the order service's POST to an upstream on loopback that answers 4 KiB | four single-threaded worker processes (Sōzu's own model), mio | a proxy: requests parsed and rewritten through pooled buffers, little else allocated |
+| `router graphql`, `router graphql fast` | the Apollo Router 2.19.0 federating Apollo's four-subgraph demo (`router/`): GraphQL queries planned, fetched from two to four subgraphs in up to three steps, merged into 10 to 40 KB of JSON; `fast` at rates set without glibc | tokio, hyper, work stealing | JSON trees built, merged and freed per request, many blocks freed on another worker |
 | `miniredis` | tokio's mini-redis 0.4.1, alternate SET and GET over 100k keys (Redis protocol) | tokio, one `Mutex<HashMap>` | the control: values of 32 to 512 bytes replaced in place |
 
 HTTP/2 jobs use eight connections of eight streams each: the same 64 requests at once as the
@@ -176,6 +177,20 @@ anonymous memory, from the rollups) and `largesum.py --heap` puts over live. The
 Meilisearch links jemalloc with its `malloc` override, which would take every C allocation
 whatever the global allocator, so `meilisearch/no-jemalloc` is an empty crate patched in its
 place.
+
+**A vector database.** `qdrant search` and `qdrant mixed` (in `servers-large`, `--mem-cap 12G`)
+are Qdrant 1.20.0 over a million vectors of 384 floats with HNSW graphs, queried for nearest
+neighbours over REST by 64 connections; in `mixed` every 20th request upserts 20 points, which
+Qdrant's optimizers index in the background. Each run starts from a copy of a collection that
+`qdrant/fetch.sh` builds once with Qdrant itself. Qdrant keeps "in RAM" vectors in mapped
+files, so the heap is the anonymous memory, as for Meilisearch. Qdrant's server is its binary
+crate, so its `main.rs` is compiled from cargo's checkout of its repository with its jemalloc
+lines left out (`qdrant/build.rs`). See `qdrant/README.md`.
+
+**A GraphQL router.** The Router jobs start `router/subgraphs`, a glibc process on three CPUs
+of the generator's L3, as the upstream: a proxy job's upstream may be a workspace of its own
+(`Upstream::workspace`), which `build-apps` builds with glibc into `target/upstream/`. See
+`router/README.md`.
 
 **A proxy.** Sōzu forwards to an upstream the runner starts first, on three CPUs of the
 generator's L3 domain (two of them already keep up): `upstream`, a binary of
