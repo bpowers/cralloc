@@ -2437,7 +2437,11 @@ mod review_lean_realloc {
             // The whole block is the caller's to write.
             p.write_bytes(0xff, had);
             let (q, len) = heap.grow_zeroed_for_test(p, old, new).unwrap();
-            assert_eq!((q, len), (p, 16), "the block stays, with its class's length");
+            assert_eq!(
+                (q, len),
+                (p, 16),
+                "the block stays, with its class's length"
+            );
             let tail = core::slice::from_raw_parts(q.add(old.size()), len - old.size());
             assert!(
                 tail.iter().all(|&b| b == 0xff),
