@@ -381,10 +381,10 @@ fn the_cheap_look_is_bounded_and_tells_dense_from_sparse() {
         start: (top - 1) & !(hp - 1),
         end: ((top - 1) & !(hp - 1)) + hp,
     };
-    let dense = tail::look(&host, region0, unit, 1, 0);
+    let dense = tail::look(&host, region0, unit, 0);
     assert!(!dense.sparse);
     // A page of this class is one leaf word: a sample reads it, after the clean word.
-    assert!(dense.read <= 2 * super::super::policy::TAIL_SAMPLE_RUNS as usize);
+    assert!(dense.read <= 2 * super::super::policy::TAIL_SAMPLE_PAGES as usize);
     // Free the unit's slots and look again.
     let lo = base + unit.start as usize * page();
     let hi = base + unit.end as usize * page();
@@ -395,7 +395,7 @@ fn the_cheap_look_is_bounded_and_tells_dense_from_sparse() {
         .collect();
     // SAFETY: the test holds these slots and gives them up.
     unsafe { back.launder(class(), &inside) };
-    let sparse = tail::look(&host, region0, unit, 1, 0);
+    let sparse = tail::look(&host, region0, unit, 0);
     assert!(sparse.sparse);
 }
 
@@ -644,11 +644,11 @@ fn a_step_of_the_thread_may_split_more_than_one() {
     assert!(most > 1, "a step of the thread made {most} splits at most");
 }
 
-/// The look samples runs as long as the walk's shortest: free pages scattered alone make a
-/// huge page sparse for a walk that takes runs of one page, and dense for one that takes runs
-/// of four, which would read it a page at a time and return nothing.
+/// The look's samples move with the salt and do not keep one phase of a periodic layout: a
+/// huge page whose odd pages are free and even ones are not is found sparse by nearly every
+/// salt, where samples at fixed multiples of a power of two would all fall on even pages.
 #[test]
-fn the_cheap_look_samples_runs_as_long_as_the_walk_takes() {
+fn the_cheap_look_moves_its_samples_with_the_salt() {
     let state = state::<Standard>();
     let back = state.get_or_reserve().unwrap();
     let region = back.space().plan().region_size();
@@ -678,17 +678,8 @@ fn the_cheap_look_samples_runs_as_long_as_the_walk_takes() {
     }
     // SAFETY: the test holds these slots and gives them up.
     unsafe { back.launder(class(), &odd) };
-    let run = super::super::policy::PURGE_MIN_RUN_PAGES;
-    let salts = 0..16;
-    // Each salt samples other pages, and nearly every one finds an odd page.
-    let found = salts
-        .clone()
-        .filter(|&salt| tail::look(&host, region0, unit, 1, salt).sparse)
+    let found = (0..16)
+        .filter(|&salt| tail::look(&host, region0, unit, salt).sparse)
         .count();
-    assert!(found >= 12, "{found} of 16 looks found a free page");
-    for salt in salts {
-        let four = tail::look(&host, region0, unit, run, salt);
-        assert!(!four.sparse);
-        assert_eq!(four.free, 0);
-    }
+    assert!(found >= 12, "{found} of 16 looks found two free pages");
 }

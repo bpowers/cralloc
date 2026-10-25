@@ -176,10 +176,10 @@
 //!
 //! **The tail** (`tail`). Above the frontier, rounded up to a huge page, the huge pages hold
 //! what fills left behind. Every step looks at each of them once at its top: one wholly free
-//! goes back whole, as below; any other gets the cheap look (`tail::look`), a few sampled runs
-//! of pages as long as the step's shortest. One the look calls dense is passed whole, and a
-//! step that only counts passes every one with the look's estimate, so that a lap that returns
-//! nothing reads a few words a huge page more than main's did. A step that may return memory
+//! goes back whole, as below; any other gets the cheap look (`tail::look`), a few sampled
+//! pages. One the look calls dense is passed whole, and a step that only counts passes every
+//! one with the look's estimate, so that a lap that returns nothing reads a few words a huge
+//! page more than main's did. A step that may return memory
 //! walks a sparse one a page at a time from the cursor, in runs within the huge page, asking
 //! the kernel to split it over each run before returning the run; if the split is refused the
 //! run stays. On a request's slow path a split counts as the step's whole budget, so such a
@@ -1483,7 +1483,7 @@ impl<O: Os> Back<'_, O> {
                     return Some(step);
                 }
             }
-            let look = tail::look(host, region, unit, walk.min_run, walk.salt);
+            let look = tail::look(host, region, unit, walk.salt);
             step.read += look.read;
             if !look.sparse || !walk.may_return {
                 // What a purge could return: a dense huge page's free pages are left to it.

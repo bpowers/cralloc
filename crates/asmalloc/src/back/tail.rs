@@ -40,7 +40,7 @@
 //! The protocol is `tla/Tail.tla`.
 
 use super::layout::Unit;
-use super::policy::{TAIL_HEADROOM_HUGE_PAGES, TAIL_SAMPLE_RUNS, TAIL_SPARSE_RUNS};
+use super::policy::{TAIL_HEADROOM_HUGE_PAGES, TAIL_SAMPLE_PAGES, TAIL_SPARSE_PAGES};
 use super::region;
 use super::tree::{self, Host};
 use super::word::{BITS, Word, bits_in_word};
@@ -418,11 +418,11 @@ pub(crate) fn raise<H: Host>(
 /// What the walk's cheap look at one huge page above the frontier found.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(crate) struct Look {
-    /// Enough of its sampled runs are free and resident that it is worth walking a page at a
+    /// Enough of its sampled pages are free and resident that it is worth walking a page at a
     /// time.
     pub(crate) sparse: bool,
-    /// An estimate of the free pages it has resident in runs the walk would take: its pages by
-    /// the share of sampled runs that are. For a sparse one, what the lap counts toward the floor (`purge`, "The
+    /// An estimate of the free pages it has resident: its pages by the share of sampled pages
+    /// that are. For a sparse one, what the lap counts toward the floor (`purge`, "The
     /// floor"); a dense one's are not what a purge could return.
     pub(crate) free: usize,
     /// Bitmap words read.
@@ -430,41 +430,36 @@ pub(crate) struct Look {
 }
 
 /// The cheap look at huge page `unit` of `region` (a unit of whole pages, at most one huge
-/// page), for a walk that returns runs of at least `run` pages: whether each of
-/// [`TAIL_SAMPLE_RUNS`] of its aligned runs of `run` pages is free and resident, as the walk
-/// would find it (`region::purgeable_unit`). One run is sampled in each of as many equal shares
-/// of the huge page, at a place within its share that `salt` picks, so that a walk that looks
-/// again in a later interval samples other runs. By runs of pages, not by leaf words: a word
-/// of a class of 1 KiB covers 16 pages, and a huge page with a live slot in every 16 pages has
-/// no free word and 15 free pages in 16. And by runs as long as the walk takes, not by single
-/// pages: free pages scattered one or two together are free to a sample of pages but too short
-/// for the walk, which would read the huge page a page at a time and return nothing. Reads
-/// only, at most a run's slots' words and its clean words for each sample.
-pub(crate) fn look<H: Host>(host: &H, region: RegionId, unit: Unit, run: u32, salt: u32) -> Look {
+/// page): whether each of [`TAIL_SAMPLE_PAGES`] of its pages is free and resident, as the
+/// walk would find it (`region::purgeable_unit`). One page is sampled in each of as many equal
+/// shares of the huge page, at a place within its share that `salt` picks, so that a walk that
+/// looks again in a later interval samples other pages and a huge page misjudged once is not
+/// misjudged every lap. By pages, not by leaf words: a word of a class of 1 KiB covers 16
+/// pages, and a huge page with a live slot in every 16 pages has no free word and 15 free
+/// pages in 16. Reads only, at most a page's slots' words and its clean word for each sample.
+pub(crate) fn look<H: Host>(host: &H, region: RegionId, unit: Unit, salt: u32) -> Look {
     let pages = unit.end - unit.start;
-    let run = run.clamp(1, pages.max(1));
-    let runs = pages / run;
-    let samples = TAIL_SAMPLE_RUNS.min(runs);
-    let share = runs / samples.max(1);
+    let samples = TAIL_SAMPLE_PAGES.min(pages);
+    let share = pages / samples.max(1);
     let (mut free, mut read) = (0, 0);
     for i in 0..samples {
         // A multiplicative hash of the salt and the share: any spread will do, so long as a
         // later salt moves the samples and they do not keep one phase of a periodic layout.
         let mix = (salt ^ i.wrapping_mul(0x9E37_79B9)).wrapping_mul(0x85EB_CA6B) >> 16;
-        let start = unit.start + (i * share + mix % share) * run;
+        let start = unit.start + i * share + mix % share;
         let (ok, words) = region::purgeable_unit(
             host,
             region,
             Unit {
                 start,
-                end: start + run,
+                end: start + 1,
             },
         );
         read += words;
         free += u32::from(ok);
     }
     Look {
-        sparse: free * TAIL_SAMPLE_RUNS >= TAIL_SPARSE_RUNS * samples,
+        sparse: free * TAIL_SAMPLE_PAGES >= TAIL_SPARSE_PAGES * samples,
         free: (pages * free / samples.max(1)) as usize,
         read: read.max(1),
     }

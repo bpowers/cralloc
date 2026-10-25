@@ -159,25 +159,23 @@ pub const HUGE_AFTER_HUGE_PAGES: usize = 8;
 /// (`docs/research/huge-tail.md`).
 pub const TAIL_HEADROOM_HUGE_PAGES: u32 = 8;
 
-/// The runs of pages (as long as the walk's shortest, `PURGE_MIN_RUN_PAGES` or one) of a huge
-/// page above the frontier that the walk's cheap look samples before it reads the huge page a
-/// page at a time: 8, evenly spread, so that a look at a dense huge page
-/// reads a few words more than main's did (its leaf words to the first live slot). Reading a dense
-/// huge page a page at a time cost the background thread four times main's walk at the start
-/// of a server's burst (`docs/research/huge-tail.md`, "The burst start"). A fixed count, not
-/// one scaled with the region or the heap: it bounds the cost of a look at one huge page, and
-/// the walk's budget bounds how many it looks at.
-pub const TAIL_SAMPLE_RUNS: u32 = 8;
+/// The pages of a huge page above the frontier that the walk's cheap look samples before it
+/// reads the huge page a page at a time: 8, one in each eighth of the huge page, so that a
+/// look at a dense huge page reads a few words more than main's did (its leaf words to the
+/// first live slot). Reading a dense huge page a page at a time cost the background thread
+/// four times main's walk at the start of a server's burst (`docs/research/huge-tail.md`,
+/// "The burst start"). A fixed count, not one scaled with the region or the heap: it bounds
+/// the cost of a look at one huge page, and the walk's budget bounds how many it looks at.
+pub const TAIL_SAMPLE_PAGES: u32 = 8;
 
 /// A huge page above the frontier is walked a page at a time, split and returned in part, only
-/// if at least this many of its sampled runs are free and resident: 1, so that the walk is
-/// sure to find a run to return. One free run of four pages in a sample of eight stands for an
-/// eighth of the huge page, and the huge page is above the frontier, where no fill reaches, so
-/// its mapping is worth little. Asking for two halved what the lifetime job returned: its
-/// stranded huge pages of 1 KiB slots have a live slot in most aligned runs of four pages
-/// (`docs/research/huge-tail.md`). Each huge page is looked at afresh every lap, so one the
-/// sample misjudged is judged again.
-pub const TAIL_SPARSE_RUNS: u32 = 1;
+/// if at least this many of its sampled pages are free and resident: 2 of 8, a quarter of the
+/// huge page or about 512 KiB. Below that, what would go back is not worth the huge page's
+/// mapping and an advice change. Each lap samples other pages (`tail::look`), so a huge page
+/// misjudged once is judged again. Sampling runs of four pages, as long as the walk's
+/// shortest, instead returned a third as much on the lifetime job, whose stranded huge pages
+/// have free runs of four pages that are rarely aligned to four.
+pub const TAIL_SPARSE_PAGES: u32 = 2;
 
 /// Only classes with at least this many slots to a page get huge pages: 4, so classes up
 /// to 1 KiB. Small objects are dense in their pages, so a huge page holds what the program
