@@ -22,7 +22,6 @@ use super::Back;
 use super::hold::held_for;
 use super::host::ClassHost;
 use super::layout::Recorded;
-use super::policy::HOLD_STEPS;
 use super::region::{self, Purge};
 use super::tree::{self, Host};
 use super::word::{BITS, Word};
