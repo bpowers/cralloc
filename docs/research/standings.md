@@ -26,6 +26,16 @@ what this allocator is for. The kernel suite and the C programs are regression c
   Meilisearch 36 to 40 faults a request at the same heap; tpchgen 4.5% fewer cycles and 218k
   faults for 706k, with its peak up from 578 to 633 MiB; 64 Vecs grown to 4 MiB 15% fewer
   cycles, peak 278 to 327 MiB; DataFusion and the 2 GiB order service level.
+- **2026-10-25, three real servers added** (`servers-router.md`, `servers-surrealdb.md`,
+  `servers-qdrant.md`; main `81437b0` and before). Apollo Router, over five placements, cycles a
+  request against asmalloc: tcmalloc +1.3%, mimalloc +3.0%, jemalloc +6.1%, glibc +37.7%.
+  SurrealDB's in-memory engine at 1.7 GiB: tcmalloc +7.0% (three placements each), mimalloc
+  +12.6%, jemalloc +13.6%, glibc +27.2% (single builds); p99.9 2.7 ms against 3.3 to 3.6; heap
+  1,716 MiB against 1,792 to 1,924, and 3,323 against 3,498 to 3,774 at 3.3 GiB. Qdrant's
+  cycles do not rank allocators (malloc is 2% of them); its heap a minute after close is 195
+  MiB against jemalloc's 131, pages stranded in partly used huge-page units (`huge-tail.md`).
+  `heap-drift.md` has the long-run memory table, where asmalloc leads on a steady heap and
+  trails jemalloc where class mixes wander and under churn of large blocks.
 - **Servers, tails: the best p50 and p99 on most jobs, with two exceptions.** On Connect over
   HTTP/2 asmalloc's p99.9 at 70% load is 45 us against 39 to 41 for the others, and it was 39 at
   the last standings. After a 30 s silence the log store's slowest request in the first 5 ms
