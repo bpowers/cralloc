@@ -1,0 +1,13 @@
+# In place of tikv-jemalloc-sys 0.7 for the Router's library, which names it as a dependency
+# but uses it only with its `global-allocator` feature, which the driver leaves off. Without
+# this crate the Router would still compile and link jemalloc 5.3.1 into every build, and its
+# `links = "jemalloc"` would clash with the jemalloc that bench-alloc's `je` feature links.
+[package]
+name = "tikv-jemalloc-sys"
+version = "0.7.1+5.3.1-0-g81034ce1f1373e37dc865038e1bc8eeecf559ce8"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+publish = false
+
+[features]
+profiling = []

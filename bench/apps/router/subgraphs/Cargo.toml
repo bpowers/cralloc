@@ -1,0 +1,19 @@
+# The four subgraphs the Router job federates, in one process: what the Router fetches from.
+# Built with glibc beside the load generator, never the program under test. See src/main.rs.
+[workspace]
+
+[package]
+name = "subgraphs"
+version = "0.0.0"
+edition = "2024"
+license = "MIT"
+publish = false
+
+[dependencies]
+async-graphql = "7"
+axum = { version = "0.8", default-features = false, features = ["http1", "tokio"] }
+tokio = { version = "1", features = ["rt-multi-thread", "net", "macros"] }
+serde_json = "1"
+
+[profile.release]
+debug = 1

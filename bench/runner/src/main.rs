@@ -233,11 +233,18 @@ fn asmalloc_builds(names: &[(String, String)]) -> impl Iterator<Item = &String> 
 /// servers' load generator, once, with glibc.
 fn build_apps(f: &Flags, p: &Paths) {
     let mut programs: Vec<&'static str> = Vec::new();
+    // Upstreams with workspaces of their own, by the program whose jobs start them.
+    let mut upstreams: Vec<(&'static str, suite::Upstream)> = Vec::new();
     for j in suite::apps().into_iter().chain(suite::servers()).chain(suite::servers_large()) {
-        if let Some(a) = j.program.app()
-            && !programs.contains(&a)
-        {
+        let Some(a) = j.program.app() else { continue };
+        if !programs.contains(&a) {
             programs.push(a);
+        }
+        if let Some(u) = j.load.as_ref().and_then(|l| l.upstream.clone())
+            && u.workspace.is_some()
+            && !upstreams.iter().any(|(_, v)| v.bin == u.bin)
+        {
+            upstreams.push((a, u));
         }
     }
     if let Some(list) = f.get("apps") {
@@ -252,6 +259,10 @@ fn build_apps(f: &Flags, p: &Paths) {
     let cpus = build_cpus();
     eprintln!("== building the load generator");
     apps::build_loadgen(p, &cpus).unwrap_or_else(|e| die(&e));
+    for (program, u) in upstreams.iter().filter(|(a, _)| programs.contains(a)) {
+        eprintln!("== building {program}'s upstream {}", u.bin);
+        apps::build_upstream(p, u, program, &cpus).unwrap_or_else(|e| die(&e));
+    }
     let mut summary = Vec::new();
     for program in &programs {
         apps::check_lock(p, program).unwrap_or_else(|e| die(&e));

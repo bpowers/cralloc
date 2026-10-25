@@ -1,0 +1,46 @@
+# The Apollo Router, the GraphQL federation router, serving queries over four subgraphs, as a
+# server driven by the suite's load generator. See ../README.md and src/main.rs.
+[workspace]
+resolver = "3"
+# The subgraphs are a workspace of their own, built once with glibc: never the program under
+# test.
+exclude = ["subgraphs"]
+
+[package]
+name = "app-router"
+version = "0.0.0"
+edition = "2024"
+license = "MIT"
+publish = false
+
+[[bin]]
+name = "router"
+path = "src/main.rs"
+
+# The allocator under test, by the bench-alloc feature of its entry in ../../allocators.toml
+# (none: glibc). Every program forwards the same set; see ../README.md.
+[features]
+mi = ["bench-alloc/mi"]
+mi-sized = ["bench-alloc/mi-sized"]
+mi-crate = ["bench-alloc/mi-crate"]
+asmalloc = ["bench-alloc/asmalloc"]
+je = ["bench-alloc/je"]
+tc = ["bench-alloc/tc"]
+sn = ["bench-alloc/sn"]
+# Not an allocator: the live-bytes count, for resident over live (../../alloc/src/live.rs).
+live-bytes = ["bench-alloc/live-bytes"]
+
+[dependencies]
+bench-alloc = { path = "../../alloc" }
+bench-app = { path = "../common" }
+# The release, without its default `global-allocator` feature, which makes jemalloc the global
+# allocator (wrapped in a counter of each task's bytes); the Router's manifest documents
+# turning it off to set one's own.
+apollo-router = { version = "=2.19.0", default-features = false }
+libc = "0.2"
+
+[patch.crates-io]
+tikv-jemalloc-sys = { path = "no-jemalloc-sys" }
+
+# The Router's workspace at 2.19.0 sets no release profile: its release binary is
+# `cargo build --release` with cargo's defaults (xtask/src/commands/dist.rs).

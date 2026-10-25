@@ -218,9 +218,23 @@ fn parse_result(line: &str) -> Option<Value> {
 fn execute(job: &Job, argv: &[String], env: &[(String, String)], scratch: &Path, o: &Options, g: &Groups) -> Outcome {
     let timeout = Duration::from_secs(job.timeout_s);
     let procs = g.run.procs();
+    let mut argv = argv.to_vec();
+    // A RAM directory before anything starts, so that a failure leaves nothing running; it is
+    // removed however this function returns, after its processes are reaped.
+    let _ram = match job.load.as_ref().and_then(|l| l.ram.as_ref()) {
+        Some(r) => match RamGuard::make(r, job, o) {
+            Ok(g) => {
+                for a in &mut argv {
+                    *a = a.replace("{ram}", &g.dir.display().to_string());
+                }
+                Some(g)
+            }
+            Err(e) => return Outcome::not_started(e),
+        },
+        None => None,
+    };
     // A proxy's upstream first: the proxy is started with its address.
     let mut upstream = None;
-    let mut argv = argv.to_vec();
     if let Some(u) = job.load.as_ref().and_then(|l| l.upstream.as_ref()) {
         match start_upstream(u, g, scratch, &o.bench_dir) {
             Ok((child, addr)) => {
@@ -389,6 +403,63 @@ fn execute(job: &Job, argv: &[String], env: &[(String, String)], scratch: &Path,
     Outcome { exit, timed_out, counters, memory, result, stdout_tail: tail, driver: driver_result, window, load, error }
 }
 
+/// A run's directory on /dev/shm (`suite::RamDir`), removed when dropped. Its name is
+/// `benchrun-ram-<runner pid>-<n>`; making one first removes every such directory whose runner
+/// is no longer alive, which only a runner that was killed leaves behind.
+pub struct RamGuard {
+    pub dir: PathBuf,
+}
+
+const RAM_ROOT: &str = "/dev/shm";
+const RAM_PREFIX: &str = "benchrun-ram-";
+
+impl RamGuard {
+    fn make(r: &crate::suite::RamDir, job: &Job, o: &Options) -> Result<RamGuard, String> {
+        Self::sweep();
+        let avail = mem_available_gib().ok_or("cannot read MemAvailable from /proc/meminfo")?;
+        if avail < r.need_gib as f64 {
+            return Err(format!(
+                "only {avail:.1} GiB of memory available for the run's RAM directory, {} needed",
+                r.need_gib
+            ));
+        }
+        static N: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+        let n = N.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let dir = Path::new(RAM_ROOT).join(format!("{RAM_PREFIX}{}-{n}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir(&dir).map_err(|e| format!("{}: {e}", dir.display()))?;
+        let g = RamGuard { dir };
+        std::os::unix::fs::symlink(expand(r.target, job, o), g.dir.join(r.link))
+            .map_err(|e| format!("{}: {e}", g.dir.display()))?;
+        Ok(g)
+    }
+
+    fn sweep() {
+        let Ok(entries) = std::fs::read_dir(RAM_ROOT) else { return };
+        for e in entries.flatten() {
+            let name = e.file_name().to_string_lossy().into_owned();
+            let Some(rest) = name.strip_prefix(RAM_PREFIX) else { continue };
+            let Some(pid) = rest.split('-').next().and_then(|p| p.parse::<u32>().ok()) else { continue };
+            if pid != std::process::id() && !Path::new(&format!("/proc/{pid}")).exists() {
+                let _ = std::fs::remove_dir_all(e.path());
+            }
+        }
+    }
+}
+
+impl Drop for RamGuard {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.dir);
+    }
+}
+
+fn mem_available_gib() -> Option<f64> {
+    let text = std::fs::read_to_string("/proc/meminfo").ok()?;
+    let kib: f64 =
+        text.lines().find_map(|l| l.strip_prefix("MemAvailable:"))?.split_whitespace().next()?.parse().ok()?;
+    Some(kib / (1 << 20) as f64)
+}
+
 /// Starts a proxy job's upstream and waits for its address.
 fn start_upstream(
     u: &crate::suite::Upstream,
@@ -396,7 +467,7 @@ fn start_upstream(
     scratch: &Path,
     bench: &Path,
 ) -> Result<(Child, String), String> {
-    let bin = bench.join("target/loadgen/release").join(u.bin);
+    let bin = crate::apps::upstream_bin(bench, u);
     let mut argv = vec![bin.display().to_string()];
     argv.extend(u.args.iter().map(|s| s.to_string()));
     let env: Vec<(String, String)> = std::env::vars().filter(|(k, _)| !scrubbed(k)).collect();

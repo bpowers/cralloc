@@ -1,0 +1,27 @@
+# In place of tikv-jemalloc-sys 0.7 for Qdrant, which links jemalloc through tikv-jemalloc-ctl
+# for its memory telemetry and its Pyroscope heap profiler, and through tikv-jemallocator for
+# its global allocator (the line the driver leaves out). With this crate no jemalloc is linked
+# but the suite's own (bench-alloc's `je`), whose `links = "jemalloc"` the real crate would
+# clash with, and every jemalloc control call fails as it would in a process without
+# jemalloc: Qdrant's telemetry then reports no allocator statistics, and its memory checks,
+# which read jemalloc's resident count, are skipped, the same way for every allocator.
+[package]
+name = "tikv-jemalloc-sys"
+version = "0.7.1+5.3.1-0-g81034ce1f1373e37dc865038e1bc8eeecf559ce8"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+publish = false
+
+# The real crate's features, so that every dependent's request resolves; none does anything.
+[features]
+background_threads = ["background_threads_runtime_support"]
+background_threads_runtime_support = []
+debug = []
+default = ["background_threads_runtime_support"]
+disable_cache_oblivious = []
+disable_initial_exec_tls = []
+override_allocator_on_supported_platforms = ["unprefixed_malloc_on_supported_platforms"]
+profiling = []
+profiling_libunwind = ["profiling"]
+stats = []
+unprefixed_malloc_on_supported_platforms = []

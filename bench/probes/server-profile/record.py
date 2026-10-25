@@ -15,6 +15,9 @@ executable), then at AT seconds into the plan records CPUs 0-3 for DUR seconds:
   the caller of a leaf such as memcpy or a system call's wrapper.
 - `ibs`: IBS op sampling (`ibs_op/cnt_ctl=1/`, one sample every PERIOD ops) with data
   addresses, and every page fault with its address: misses and TLB misses by data address.
+- `sched`: every context switch on those CPUs (the `context-switches` software event, one
+  sample each, and the switch records) with the kernel's call chain of the task switched out:
+  where threads block and for how long (`offcpu.py`).
 
 It snapshots the server's /proc/PID/maps during the recording, and in the first silence of the
 plan the stack pointer of every thread (from /proc/PID/task/TID/syscall), so that addresses can
@@ -43,14 +46,22 @@ JOBS = {
     "connect log": ("servers", None, 14, 6),
     "connect log h2": ("servers", None, 14, 6),
     "connect log grpc h2": ("servers", None, 14, 6),
+    "router graphql": ("servers", "router", 14, 6),
     # large-heap plans: _fill fill_s, sat 4, _w70 2, then six ten-second s70 pieces
     "orders axum cache 2G": ("servers-large", "orders", 6 + 6, 60),
     "connect store 1M": ("servers-large", None, 3 + 6, 60),
     "meilisearch hn": ("servers-large", "meilisearch", 5 + 6, 60),
+    "qdrant search": ("servers-large", "qdrant", 5 + 6, 60),
+    "qdrant mixed": ("servers-large", "qdrant", 5 + 6, 60),
+    # saturation only: _fill 5, sat 5
+    "qdrant mixed sat": ("servers-large-sat", "qdrant", 5, 5),
+    "surrealdb mem": ("servers-large", "surrealdb", 5 + 6, 60),
 }
-BUILD = {"asmalloc": "asmalloc", "jemalloc": "je", "glibc": "glibc", "asmalloc-dbg": "asmalloc-dbg",
+BUILD = {"asmalloc": "asmalloc", "jemalloc": "je", "glibc": "glibc", "tcmalloc-percpu": "tc", "mimalloc": "mi",
+         "asmalloc-dbg": "asmalloc-dbg",
          "jemalloc-dbg": "je-dbg"}
-CAP = {"orders axum cache 2G": "7G", "connect store 1M": "8G", "meilisearch hn": "12G"}
+CAP = {"orders axum cache 2G": "7G", "connect store 1M": "8G", "meilisearch hn": "12G", "qdrant search": "12G",
+       "qdrant mixed": "12G", "qdrant mixed sat": "12G", "surrealdb mem": "10G"}
 
 
 def exe_of(pid):
@@ -86,7 +97,7 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--job", required=True)
     ap.add_argument("--alloc", required=True)
-    ap.add_argument("--mode", choices=["cycles", "ibs", "none"], required=True)
+    ap.add_argument("--mode", choices=["cycles", "ibs", "sched", "none"], required=True)
     ap.add_argument("--out", required=True)
     ap.add_argument("--at", type=float)
     ap.add_argument("--dur", type=float)
@@ -144,6 +155,11 @@ def main():
             # (AMD's LBR), which name the caller of a leaf such as memcpy or a syscall wrapper.
             # dwarf unwinding of these binaries failed for nine user samples in ten.
             ev = ["-e", "cycles", "-c", str(period), "-g", "-j", "any,u"]
+        elif a.mode == "sched":
+            period = 1
+            # The software event, which needs no tracefs: a sample with the kernel's chain at
+            # every switch out, and the switch records, which time each switch back in.
+            ev = ["-e", "context-switches", "-c", "1", "-g", "--switch-events"]
         else:
             period = a.period or 500_000
             ev = ["-e", "ibs_op/cnt_ctl=1/", "-c", str(period), "-d", "-W", "--data-page-size"]

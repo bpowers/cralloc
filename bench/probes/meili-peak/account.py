@@ -229,6 +229,14 @@ def main():
         if not p or not r.get("served"):
             print(f"\n=== {r['allocator']}: no process or no plan (valid={r.get('valid')})")
             continue
+        # A driver that runs the server in a child of the same binary (Qdrant's, the Router's)
+        # starts two such processes: the server is the one whose sampler saw the most memory.
+        def peak_anon(q):
+            f = list((d / "memstat").glob(f"*.{q['pid']}")) + list((d / "jestat").glob(f"*.{q['pid']}"))
+            s = (memstat(f[0]) if "memstat" in str(f[0]) else jestat(f[0])) if f else []
+            return max((x["anon"] for x in s), default=0)
+
+        p.sort(key=peak_anon, reverse=True)
         pid, start = p[0]["pid"], p[0]["start"]
         gen = min(g["start"] for g in gens if g["start"] >= start)
         lo, hi = window(r, wname)
