@@ -7,7 +7,8 @@
 # BUILD is a directory under bench/target of this checkout (glibc, je, mi, tc, asmalloc,
 # asmalloc-memstat). The tcmalloc build gets the environment its entry in allocators.toml
 # gives it (glibc's rseq registration off, so that tcmalloc can use per-CPU caches). The
-# memstat build writes its breakdowns to OUTFILE.memstat.
+# memstat build, or any build run with HEAP_DRIFT_MEMSTAT=1 (a probe's memstat build), writes its
+# breakdowns to OUTFILE.memstat.
 #   HEAP_DRIFT_MEM      the cap, default 8G (never above 16G)
 #   HEAP_DRIFT_TIMEOUT  default 90m
 set -euo pipefail
@@ -20,8 +21,11 @@ exe="$root/bench/target/$build/release/workload"
 env=()
 case "$build" in
   tc) env+=(GLIBC_TUNABLES=glibc.pthread.rseq=0) ;;
-  asmalloc-memstat) env+=(ASMALLOC_MEMSTAT="$out.memstat" ASMALLOC_MEMSTAT_MS=0 ASMALLOC_MEMSTAT_CPU=15) ;;
+  asmalloc-memstat) HEAP_DRIFT_MEMSTAT=1 ;;
 esac
+if [ -n "${HEAP_DRIFT_MEMSTAT:-}" ]; then
+  env+=(ASMALLOC_MEMSTAT="$out.memstat" ASMALLOC_MEMSTAT_MS=0 ASMALLOC_MEMSTAT_CPU=15)
+fi
 mkdir -p "$(dirname "$out")"
 {
   echo "# $(date -Is) build=$build exe=$(readlink -f "$exe") commit=$(git -C "$root" rev-parse --short HEAD)"
