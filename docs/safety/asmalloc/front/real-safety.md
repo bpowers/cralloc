@@ -159,4 +159,4 @@ enter magazines through the slow paths come from that reservation. Words that ar
 (`Area::magazine`), so the pointers built for them with `without_provenance_mut` are never
 dereferenced.
 
-Reviewed: 415b07e
+Reviewed: 3b5a3f5

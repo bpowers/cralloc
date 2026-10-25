@@ -2416,6 +2416,37 @@ mod review_lean_realloc {
         }
     }
 
+    /// A finding of the ledger review, kept as a test that passes while the defect stands.
+    /// `Allocator::grow_zeroed`, as stabilised, promises that bytes `old_layout.size()..` to
+    /// the length returned read as zero. A small block whose new layout has its class stays
+    /// in place and nothing is cleared, so the bytes between the old layout's size and the
+    /// class size keep what the caller wrote there. When the grow is fixed this test fails:
+    /// turn its last assertion round, and tighten
+    /// `a_simulated_heap_grows_zeroed_and_shrinks_by_the_allocator_paths` and the test kit's
+    /// `zeroed_from` to the same rule.
+    #[test]
+    fn finding_a_zeroed_grow_in_place_leaves_the_old_blocks_tail_unzeroed() {
+        let heap = SimHeap::<Shape>::new();
+        let (old, new) = (layout(9, 1), layout(12, 1));
+        // SAFETY: valid layouts; the block is freed once with a layout that fits it.
+        unsafe {
+            let p = heap.alloc(old);
+            assert!(!p.is_null());
+            let had = heap.usable(p).unwrap();
+            assert_eq!(had, 16);
+            // The whole block is the caller's to write.
+            p.write_bytes(0xff, had);
+            let (q, len) = heap.grow_zeroed_for_test(p, old, new).unwrap();
+            assert_eq!((q, len), (p, 16), "the block stays, with its class's length");
+            let tail = core::slice::from_raw_parts(q.add(old.size()), len - old.size());
+            assert!(
+                tail.iter().all(|&b| b == 0xff),
+                "the grow now clears its tail: see this test's comment"
+            );
+            heap.dealloc(q, new);
+        }
+    }
+
     /// The lean path of `Allocator::grow_zeroed`: a small block grown into a block of another
     /// class that an earlier tenant left dirty. The bytes the old layout covered arrive, the
     /// bytes from there to the old block's end are kept or zero, and everything past that,
