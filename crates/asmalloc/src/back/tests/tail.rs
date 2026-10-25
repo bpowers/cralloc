@@ -384,7 +384,7 @@ fn the_cheap_look_is_bounded_and_tells_dense_from_sparse() {
     let dense = tail::look(&host, region0, unit, 1);
     assert!(!dense.sparse);
     // A page of this class is one leaf word: a sample reads it, after the clean word.
-    assert!(dense.read <= 2 * super::super::policy::TAIL_SAMPLE_PAGES as usize);
+    assert!(dense.read <= 2 * super::super::policy::TAIL_SAMPLE_RUNS as usize);
     // Free the unit's slots and look again.
     let lo = base + unit.start as usize * page();
     let hi = base + unit.end as usize * page();

@@ -40,7 +40,7 @@
 //! The protocol is `tla/Tail.tla`.
 
 use super::layout::Unit;
-use super::policy::{TAIL_HEADROOM_HUGE_PAGES, TAIL_SAMPLE_PAGES, TAIL_SPARSE_PAGES};
+use super::policy::{TAIL_HEADROOM_HUGE_PAGES, TAIL_SAMPLE_RUNS, TAIL_SPARSE_RUNS};
 use super::region;
 use super::tree::{self, Host};
 use super::word::{BITS, Word, bits_in_word};
@@ -431,7 +431,7 @@ pub(crate) struct Look {
 
 /// The cheap look at huge page `unit` of `region` (a unit of whole pages, at most one huge
 /// page), for a walk that returns runs of at least `run` pages: whether each of
-/// [`TAIL_SAMPLE_PAGES`] of its aligned runs of `run` pages, evenly spread, is free and
+/// [`TAIL_SAMPLE_RUNS`] of its aligned runs of `run` pages, evenly spread, is free and
 /// resident, as the walk would find it (`region::purgeable_unit`). By runs of pages, not by
 /// leaf words: a word of a class of 1 KiB covers 16 pages, and a huge page with a live slot in
 /// every 16 pages has no free word and 15 free pages in 16. And not by single pages: free pages
@@ -442,7 +442,7 @@ pub(crate) fn look<H: Host>(host: &H, region: RegionId, unit: Unit, run: u32) ->
     let pages = unit.end - unit.start;
     let run = run.clamp(1, pages.max(1));
     let runs = pages / run;
-    let samples = TAIL_SAMPLE_PAGES.min(runs);
+    let samples = TAIL_SAMPLE_RUNS.min(runs);
     let (mut free, mut read) = (0, 0);
     for i in 0..samples {
         // Evenly spread, each a run further into its share than the last, so that the
@@ -460,7 +460,7 @@ pub(crate) fn look<H: Host>(host: &H, region: RegionId, unit: Unit, run: u32) ->
         free += u32::from(ok);
     }
     Look {
-        sparse: free * TAIL_SAMPLE_PAGES >= TAIL_SPARSE_PAGES * samples,
+        sparse: free * TAIL_SAMPLE_RUNS >= TAIL_SPARSE_RUNS * samples,
         free: (pages * free / samples.max(1)) as usize,
         read: read.max(1),
     }
