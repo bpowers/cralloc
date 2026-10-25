@@ -50,6 +50,10 @@ for part in "${parts[@]}"; do
       (cd "$tree/bench" && cargo build --release -p bench-workloads -p bench-rpc --features "bench-alloc/$feature" \
         --target-dir "$out")
       ;;
+    preload)
+      (cd "$tree" && cargo build --release -p asmalloc-preload --target-dir "$out/preload")
+      cp "$out/preload/release/libasmalloc_preload.so" "$out/libasmalloc_preload.so"
+      ;;
     *)
       target="$out/apps/$part"
       mkdir -p "$target"
