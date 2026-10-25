@@ -196,6 +196,13 @@ pub(super) fn claim<O: Os>(host: &ClassHost<'_, O>, region: RegionId, slot: u32,
     }
 }
 
+/// For a carve of a fresh large slot for a block of `size` bytes: no slack, but live memory.
+pub(super) fn carved(size: usize) {
+    if config().bound != 0 {
+        LIVE.fetch_add(size as i64, Relaxed);
+    }
+}
+
 /// For a resize in place of the block in large slot `slot` from `old` to `size` bytes, after it.
 pub(super) fn resized<O: Os>(host: &ClassHost<'_, O>, region: RegionId, slot: u32, old: usize, size: usize) {
     if config().bound == 0 {

@@ -38,6 +38,12 @@ edit(
 )
 edit(
     "crates/asmalloc/src/back/class.rs",
+    "                region::mark_fresh(&host, region, first, size);\n",
+    "                region::mark_fresh(&host, region, first, size);\n"
+    "                super::lcs::carved(size);\n",
+)
+edit(
+    "crates/asmalloc/src/back/class.rs",
     "    fn free_slot(&self, host: &ClassHost<'a, O>, class: Class, region: RegionId, slot: u32) {\n",
     "    fn free_slot(&self, host: &ClassHost<'a, O>, class: Class, region: RegionId, slot: u32) {\n"
     "        super::lcs::left(self, host, region, slot);\n",
