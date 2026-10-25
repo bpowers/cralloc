@@ -368,8 +368,11 @@ impl FrontierFormat {
 /// What a large slot's size word holds: the size of the object in it, whether the slot's
 /// whole huge pages are advised for huge pages because the object grew there, and whether the
 /// object was given zeroed from a slot known to be zero, so that none of its pages was
-/// resident when its tenant got it (`Back::mark_unwritten`). One word, written only by
-/// whoever holds the slot. A size is at most a region, 4 GiB, so the flags take the top bits.
+/// resident when its tenant got it (`Back::mark_unwritten`), and whether the free slot was
+/// kept when its block outgrew it and is in the count of such slots (`State::outgrown`). One
+/// word, written only by whoever holds the slot, and read by its holder; a purge, which holds
+/// the slots it claims, reads it and never writes it. A size is at most a region, 4 GiB, so
+/// the flags take the top bits.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(crate) struct Recorded {
     pub(crate) size: usize,
@@ -379,18 +382,26 @@ pub(crate) struct Recorded {
     /// word until the next claim clears it, but only the slot's holder reads the word. A hint
     /// for the free (`Back::purge_before_release`), which is correct whatever it says.
     pub(crate) unwritten: bool,
+    /// Set by the move that kept the free slot its block outgrew, whose charge it added to the
+    /// count of kept outgrown slots, and cleared by the claim that takes the slot again, which
+    /// subtracts what is left of that charge. A purge of the free slot reads it and subtracts
+    /// the pages it returns, and leaves it set.
+    pub(crate) outgrown: bool,
 }
 
 impl Recorded {
     const HUGE: u64 = 1 << 63;
     const UNWRITTEN: u64 = 1 << 62;
+    const OUTGROWN: u64 = 1 << 61;
+    const FLAGS: u64 = Recorded::HUGE | Recorded::UNWRITTEN | Recorded::OUTGROWN;
 
     #[inline(always)]
     pub(crate) const fn unpack(word: u64) -> Recorded {
         Recorded {
-            size: (word & !(Recorded::HUGE | Recorded::UNWRITTEN)) as usize,
+            size: (word & !Recorded::FLAGS) as usize,
             huge: word & Recorded::HUGE != 0,
             unwritten: word & Recorded::UNWRITTEN != 0,
+            outgrown: word & Recorded::OUTGROWN != 0,
         }
     }
 
@@ -402,7 +413,8 @@ impl Recorded {
         } else {
             0
         };
-        self.size as u64 | huge | unwritten
+        let outgrown = if self.outgrown { Recorded::OUTGROWN } else { 0 };
+        self.size as u64 | huge | unwritten | outgrown
     }
 }
 
@@ -1135,11 +1147,12 @@ mod tests {
             assert_eq!(format.floor(word, epoch), 9, "{epoch}");
         }
         assert_eq!(format.floor(word, 40 + FRONTIER_INTERVALS), 0);
-        for (huge, unwritten) in [(false, false), (true, false), (false, true), (true, true)] {
+        for flags in 0..8u32 {
             let recorded = Recorded {
                 size: 1 << 32,
-                huge,
-                unwritten,
+                huge: flags & 1 != 0,
+                unwritten: flags & 2 != 0,
+                outgrown: flags & 4 != 0,
             };
             assert_eq!(Recorded::unpack(recorded.pack()), recorded);
         }

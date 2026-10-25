@@ -440,7 +440,8 @@ fn the_walk_gets_past_live_slots_across_looks() {
 }
 
 /// The frees that leave a slot resident stamp its region; a free that returns the slot first
-/// (a grown block past the budget for kept ones), and a move that returns the old slot, do not.
+/// (a block advised for huge pages because it grew), and a move that returns the old slot, do
+/// not.
 #[test]
 #[cfg_attr(miri, ignore)]
 fn only_frees_that_leave_a_slot_resident_stamp_it() {
@@ -449,16 +450,16 @@ fn only_frees_that_leave_a_slot_resident_stamp_it() {
     let os = state.os();
     let huge = Native::GEOMETRY.huge_page_size();
     beat_for(&back, os, 2, FINE_TICKS);
-    // A move within the budget keeps the old slot, and stamps its region.
+    // A move within the bound keeps the slot it outgrew, and stamps its region.
     let (kept_class, to_class) = (large(192 << 10), large(512 << 10));
     let old = back.alloc(kept_class, 80 << 10).unwrap().ptr;
     pattern(old.as_ptr(), 80 << 10);
     let new = back.alloc(to_class, 160 << 10).unwrap().ptr;
     // SAFETY: both are live blocks that nothing else uses, and `new` is fresh.
-    unsafe { back.move_large(old, new, 80 << 10, true) };
+    unsafe { back.move_large(old, new, 80 << 10, true, crate::back::Move::Outgrown) };
     assert_ne!(back.hold_stamp_at(old.as_ptr()), 0, "kept, and stamped");
     back.free(new, to_class);
-    // Past the budget, a move returns the old slot, and a grown block's free returns it.
+    // Past the bound a move returns the old slot, and a grown block's free always returns it.
     let class = large(256 << 10);
     let grown = back.alloc(class, class.size()).unwrap().ptr;
     let moved_class = large(96 << 10);
@@ -467,7 +468,7 @@ fn only_frees_that_leave_a_slot_resident_stamp_it() {
     back.resize(grown, 2 * huge);
     let _ballast = spend_kept_budget(&back);
     // SAFETY: both are live blocks that nothing else uses, and `grown` is fresh.
-    unsafe { back.move_large(from, grown, huge, true) };
+    unsafe { back.move_large(from, grown, huge, true, crate::back::Move::Outgrown) };
     // SAFETY: the slot is free and nothing else uses the simulated heap meanwhile.
     assert!(unsafe { os.is_purged(from, moved_class.size()) });
     assert_eq!(

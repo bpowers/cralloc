@@ -1253,7 +1253,12 @@ impl<O: Os> Back<'_, O> {
                                 read += words;
                                 found += dirty * page;
                                 let (outcome, _) = region::purge_unit(&host, region, cut);
-                                if let Purge::Done(bytes) = outcome {
+                                if let Purge::Done {
+                                    returned: bytes,
+                                    outgrown,
+                                } = outcome
+                                {
+                                    self.forget_outgrown(outgrown);
                                     purged += bytes;
                                     found = found.saturating_sub(bytes);
                                     below_purged = Some(cut.start);
@@ -1282,7 +1287,12 @@ impl<O: Os> Back<'_, O> {
                                 // Its look before claiming reads the words `run_below` just read
                                 // and counted; counting them twice halved what a step could purge.
                                 let (outcome, _) = region::purge_unit(&host, region, run);
-                                if let Purge::Done(bytes) = outcome {
+                                if let Purge::Done {
+                                    returned: bytes,
+                                    outgrown,
+                                } = outcome
+                                {
+                                    self.forget_outgrown(outgrown);
                                     purged += bytes;
                                     found = found.saturating_sub(bytes);
                                     below_purged = Some(run.start);

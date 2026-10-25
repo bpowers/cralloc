@@ -23,9 +23,10 @@
 //! - [`Back::heartbeat`] does one bounded step of the clocked pass that returns free memory to
 //!   the OS (or, while the background thread runs, wakes the thread for it), and [`Back::trim`]
 //!   returns everything it can. Fills and large allocations that
-//!   carve purge toward the retained cap (`purge`); a free purges nothing but a
-//!   large slot advised for huge pages, and that only past the budget for kept grown blocks
-//!   (`policy::KEPT_GROWN_HUGE_PAGES`).
+//!   carve purge toward the retained cap (`purge`); a free purges nothing but a large slot
+//!   advised for huge pages, which goes back whole, and a block left mostly unwritten. A block
+//!   that outgrows its slot leaves it resident while the slots so kept are within
+//!   `policy::KEPT_OUTGROWN_HUGE_PAGES`, counted on their own, and returns it beyond.
 //!
 //! Every change to shared state is one atomic instruction, and all-zero state means an empty
 //! heap: no regions, nothing free, nothing carved. The protocols follow the TLA+ models in
@@ -37,7 +38,7 @@
 
 mod class;
 
-pub use class::{Descending, Filled, Sink, SlotPointer};
+pub use class::{Descending, Filled, Move, Sink, SlotPointer};
 pub(crate) use hold::MAINTAIN_HOLD_ROUNDS;
 pub use purge::PassStep;
 mod group;
@@ -92,6 +93,12 @@ pub struct State<O: Os> {
     classes: [ClassState; COUNT],
     /// Bytes of free slots in the bitmaps believed to be resident (`purge`).
     retained: Retained,
+    /// The charge of the free slots kept when their blocks outgrew them and not yet taken again
+    /// (`Recorded::outgrown`), against `policy::kept_outgrown`. Raised by the move that keeps
+    /// one, lowered by the claim that takes it again and by a purge of its pages, one atomic
+    /// instruction each, by amounts that sum to what was raised (`Back::keep_outgrown`).
+    /// Wrapping: a reader that sees it as more than the bound keeps nothing.
+    outgrown: Lined<AtomicUsize>,
     /// Bytes carved since a grower last checked the cap (`purge`).
     /// Checked by the interleaving explorations (`front::sync`): the background thread and the
     /// growers race on it.
@@ -118,7 +125,7 @@ pub struct State<O: Os> {
 /// Bytes of free slots in the bitmaps believed to be resident, for small classes and large
 /// ones: what was counted in, less what was counted out. Signed: a subtraction may run ahead of
 /// the addition it answers; read as zero when negative. The decay and the cap act on the sum;
-/// the large count alone decides whether a grown block is kept (`policy::kept_grown`).
+/// the large count alone sets the hold's floor (`hold`).
 ///
 /// What is counted in and what is counted out are two tallies that only grow (and wrap), each
 /// on a line of its own, not one count. Frees and launders count in and claims and fills count
@@ -153,7 +160,7 @@ impl Retained {
     /// The count of large classes if `large`, else of small ones: what was counted in less
     /// what was counted out, which is negative while a subtraction runs ahead. A value the count
     /// had at a moment during the call (`difference`). Every caller is off the fast paths: the
-    /// decay pass that is due, the cap charged to growth, the decision to keep a grown block,
+    /// decay pass that is due, the cap charged to growth, the hold's floor,
     /// and the heap's inspection.
     fn signed(&self, large: bool) -> isize {
         let (taken, added) = (self.taken.of(large), self.added.of(large));
@@ -176,7 +183,7 @@ const EXACT_TRIES: usize = 8;
 ///
 /// If the taken tally moves on every try, the last reading is taken before added, which can
 /// only err high: by the additions after that taken load. Every caller is safe that way round:
-/// a grown block is purged rather than kept, the decay pass or the growth that pays for the cap
+/// the hold returns a little more, the decay pass or the growth that pays for the cap
 /// purges a little more, and nothing is under-counted.
 fn difference(taken: impl Fn() -> usize, added: impl Fn() -> usize) -> isize {
     let mut before = taken();
@@ -254,7 +261,7 @@ const _: () = {
     use core::mem::size_of;
     let groups = lines(size_of::<SpaceCell<crate::os::linux::LinuxOs>>())
         + lines(size_of::<RegionTable>())
-        + 6
+        + 7
         + lines(size_of::<[AtomicUsize; MAX_REGIONS]>())
         + lines(size_of::<[[u64; 2]; MAX_REGIONS]>())
         + lines(size_of::<[u64; MAX_REGIONS]>())
@@ -276,6 +283,7 @@ impl<O: Os> State<O> {
                 added: Lined::new(Tally::new()),
                 taken: Lined::new(Tally::new()),
             },
+            outgrown: Lined::new(AtomicUsize::new(0)),
             growth: Lined::new(crate::front::sync::AtomicUsize::new(0)),
             decay: Lined::new(Clocked {
                 word: AtomicU64::new(0),

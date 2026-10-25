@@ -6,9 +6,10 @@ HEAP-03 (the clear in `alloc_large`) is in `heap/mod-safety.md`.
 
 **Block.** `ptr.copy_to_nonoverlapping(grant.ptr, min(old.size(), new.size()))`, then
 `self.dealloc(ptr, old)`; or, when the old block is large, the one call
-`back.move_large(ptr, grant.ptr, min(old.size(), new.size()), grant.zeroed)`, which copies the same bytes
-in pieces, returns the old block's pages behind the copy and frees it (BACK-CLASS-03 in
-`back/class-safety.md`). Its contract is the same three facts proved below: the old block is
+`back.move_large(ptr, grant.ptr, min(old.size(), new.size()), grant.zeroed, why)`, which copies the
+same bytes in pieces, returns the old block's pages behind the copy and frees it
+(BACK-CLASS-03 in `back/class-safety.md`); `why` says whether the block outgrew its slot,
+which decides only what becomes of the freed slot. Its contract is the same three facts proved below: the old block is
 live, owned and long enough; the new one is writable for as much; they do not overlap.
 
 **Preconditions.** The source is valid for reads and the destination for writes of that many

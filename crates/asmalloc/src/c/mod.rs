@@ -215,7 +215,15 @@ unsafe fn realloc_other(old: NonNull<u8>, found: Found, size: usize) -> *mut c_v
         match (found, to) {
             // A large block is copied in pieces, its old pages returned behind the copy, and
             // freed, all by the back end.
-            (Found::Large { .. }, Some(to)) => process::move_large(old, to, n),
+            (Found::Large { .. }, Some(to)) => {
+                // `kept` is all the block could use: past it, the block outgrew its slot.
+                let why = if size > kept {
+                    crate::back::Move::Outgrown
+                } else {
+                    crate::back::Move::Other
+                };
+                process::move_large(old, to, n, why)
+            }
             _ => {
                 old.as_ptr().copy_to_nonoverlapping(new, n);
                 free(ptr);

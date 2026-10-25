@@ -31,6 +31,7 @@
 //! been asked for.
 
 use super::{Bound, Grant, Heap, Zero, small};
+use crate::back::Move;
 use crate::back::policy::{STAGGER_ROOM, STAGGER_STEP, unwritten_floor};
 use crate::classes::Class;
 use crate::front::Routines;
@@ -398,7 +399,14 @@ impl<O: Os, R: Routines + Copy> Bound<'_, O, R> {
                 // A large block is copied in pieces, its old pages returned behind the copy,
                 // and freed, all by the back end.
                 Some(back) if small(old).is_none() => {
-                    back.move_large(ptr, grant.ptr, kept, grant.zeroed)
+                    // Outgrown when the new size is more than the block's slot holds; any
+                    // other move frees the slot as the block's free would.
+                    let why = if new.size() > len {
+                        Move::Outgrown
+                    } else {
+                        Move::Other
+                    };
+                    back.move_large(ptr, grant.ptr, kept, grant.zeroed, why)
                 }
                 _ => {
                     ptr.as_ptr()

@@ -8,7 +8,7 @@
 //! where the advice does not reach), and their tests pin the fixes:
 //!
 //! - kept-slot: the page is returned whether or not the rest of it is resident. In a slot kept
-//!   resident from its last tenant (`policy::kept_grown`), or one that shrank and grows back,
+//!   resident from its last tenant (`policy::kept_outgrown`), or one that shrank and grows back,
 //!   the rest is resident, on Linux as a huge page already, and the growth throws it away and
 //!   faults it back. Measured through the preload library on Linux 7.2.9
 //!   (`crates/asmalloc-preload/tests/programs/unspill_probe.c`, 2026-10-19): every in-place
@@ -56,10 +56,10 @@ fn fill_and_grow<O: Shape>(
     os.calls(Call::Purge) - purges
 }
 
-/// Finding kept-slot. A grown block freed within the budget for kept grown blocks leaves its
-/// slot resident, so that a buffer grown again lands on memory it need not fault. The next
-/// block to grow there has the huge page past its old end resident already, whole; returning
-/// it frees no page table worth freeing and costs the fault it was meant to save.
+/// Finding kept-slot. A slot its last tenant left resident (a plain free of a block written
+/// whole) holds, for the next block to grow there, the huge page past its old end resident
+/// already, whole; returning it frees no page table worth freeing and costs the fault it was
+/// meant to save.
 #[test]
 #[cfg_attr(miri, ignore)]
 fn a_block_regrown_in_a_kept_slot_keeps_its_resident_huge_page() {
@@ -74,11 +74,19 @@ fn a_block_regrown_in_a_kept_slot_keeps_its_resident_huge_page() {
         1,
         "in a fresh slot the spilled page is returned, to fault whole"
     );
-    let usable = back.usable_size(first.as_ptr()).unwrap();
-    pattern(first.as_ptr(), usable);
-    let purges = os.calls(Call::Purge);
+    // An advised block's free returns its slot; a tenant written whole and not grown leaves
+    // it resident at its free.
     back.free(first, class);
-    assert_eq!(os.calls(Call::Purge), purges, "the slot is kept resident");
+    let whole = back.alloc(class, class.size()).unwrap().ptr;
+    assert_eq!(
+        whole.addr().get() / 4096,
+        first.addr().get() / 4096,
+        "the same slot"
+    );
+    pattern(whole.as_ptr(), class.size());
+    let purges = os.calls(Call::Purge);
+    back.free(whole, class);
+    assert_eq!(os.calls(Call::Purge), purges, "the slot is left resident");
     let again = back.alloc_staggered(class, huge).unwrap().ptr;
     assert_eq!(again, first);
     // The huge page the block spills into, resident from the last tenant.

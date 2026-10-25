@@ -15,11 +15,12 @@
 //!   its whole huge pages advised for huge pages, and its size word records that
 //!   (`Recorded::huge`). Only the slot's holder reads or writes the flag. While it is set, a
 //!   partial purge of the slot rounds inward to whole huge pages, since purging part of a huge
-//!   page returns nothing to the OS until the kernel gets round to splitting it. The free either
-//!   purges the whole slot and takes the advice back, or, within the budget for kept grown
-//!   blocks, releases it resident with its advice, which the next claim takes back
-//!   (`Back::alloc_at`). The huge pages already faulted stay, and that tenant's flag is clear,
-//!   so a shrink of it in place is not trimmed to whole huge pages and may purge part of one.
+//!   page returns nothing to the OS until the kernel gets round to splitting it. The free, and
+//!   the move out of a slot so advised, purge the whole slot and take the advice back, so no
+//!   advised range stays on a free slot; a claim of a slot whose advice could not be taken back
+//!   tries again (`Back::alloc_at`). The huge pages already faulted stay, and that tenant's flag
+//!   is clear, so a shrink of it in place is not trimmed to whole huge pages and may purge part
+//!   of one.
 //!   That costs memory, not only time: a partly unmapped huge page stays charged to the cgroup
 //!   whole until the kernel splits it, which it leaves to memory pressure
 //!   (`crates/asmalloc-preload/tests/programs/thp_partial.c`: purging half of each huge page of
@@ -27,8 +28,8 @@
 //!   two huge pages a shrink, the huge pages at the shrink's two ends, and `mark_clean` marks
 //!   those pages clean, so the retained count does not see them. A purge of a free slot may
 //!   return it in pieces across steps (`purge::piece`); in a class of a huge page or more the
-//!   pieces start at huge-page boundaries and are a huge page at least, so a slot kept with
-//!   its advice is never left with a huge page partly returned.
+//!   pieces start at huge-page boundaries and are a huge page at least, so a slot whose
+//!   advice the OS refused to take back is never left with a huge page partly returned.
 //! - **Clean bits** say a page has not been written since it was carved or last purged. Only a
 //!   purge and the first claim of a carved slot set them (`mark_fresh`, for the pages past its
 //!   block); a claim and anything that widens a held block clear them under what it may write
@@ -824,8 +825,10 @@ pub(crate) enum Purge {
     Busy,
     /// The OS refused; nothing changed.
     Failed,
-    /// The unit's pages went back to the OS; this many bytes of them had been resident.
-    Done(usize),
+    /// The unit's pages went back to the OS: how many bytes of them had been resident, and how
+    /// many of those were in free slots kept by the moves their blocks outgrew them in
+    /// (`Recorded::outgrown`), which leave the count of such slots.
+    Done { returned: usize, outgrown: usize },
 }
 
 /// Purges a unit of a region whose pages lie wholly below the watermark, if every slot touching
@@ -852,6 +855,7 @@ pub(crate) fn purge_unit<H: Host>(host: &H, region: RegionId, unit: Unit) -> (Pu
             return (Purge::Busy, read);
         }
     }
+    let outgrown = outgrown_dirty(host, region, unit, first, last);
     let page = layout.page_size();
     let (offset, len) = (
         unit.start as usize * page,
@@ -897,7 +901,41 @@ pub(crate) fn purge_unit<H: Host>(host: &H, region: RegionId, unit: Unit) -> (Pu
         }
     }
     release_range(host, region, first, last, low, high + 1);
-    (Purge::Done(cleaned * page), read)
+    (
+        Purge::Done {
+            returned: cleaned * page,
+            outgrown,
+        },
+        read,
+    )
+}
+
+/// For a purge that holds the claim of slots `first..=last` touching `unit`: the bytes of the
+/// pages of `unit` that lie inside a kept outgrown slot (`Recorded::outgrown`) and are not
+/// clean. The purge cleans every page of the unit, so this is what it takes off that slot's
+/// charge (`charge`): a slot returned in pieces subtracts each piece's own pages as it goes, and
+/// the claim that takes it again subtracts the rest, so the sum is the charge the keep added.
+/// Nothing else changes a free slot's clean bits while the claim is held. Only a large class
+/// records sizes, and a unit of one touches a few slots.
+fn outgrown_dirty<H: Host>(host: &H, region: RegionId, unit: Unit, first: u32, last: u32) -> usize {
+    let layout = host.layout();
+    if layout.size_word(first).is_none() {
+        return 0;
+    }
+    let mut bytes = 0;
+    for slot in first..=last {
+        if !recorded(host, region, slot).is_some_and(|r| r.outgrown) {
+            continue;
+        }
+        let Some(whole) = layout.slot_unit(slot) else {
+            continue;
+        };
+        let (start, end) = (whole.start.max(unit.start), whole.end.min(unit.end));
+        if start < end {
+            bytes += dirty_pages(host, region, Unit { start, end }).0 * layout.page_size();
+        }
+    }
+    bytes
 }
 
 /// Whether a unit could be purged now and would return something: not every page is already

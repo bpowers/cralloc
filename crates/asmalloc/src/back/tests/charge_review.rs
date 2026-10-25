@@ -1,5 +1,8 @@
 //! Evidence for the adversarial review of the large-slot charge and the budget for kept grown
-//! blocks (main `630883b..d6e8841`), and for the check of its fix (main `b313200`).
+//! blocks (main `630883b..d6e8841`), and for the check of its fix (main `b313200`). The budget
+//! has since become the count of kept outgrown slots (`Back::keep_outgrown`), which the tests
+//! here check too: the random runs and the threaded ones hold it to the charge of the slots
+//! marked kept at every step.
 //!
 //! The properties: a slot said to be zero reads as zero; a clean bit is true, so none stands
 //! over a page that holds data or under what a held block may write; and the retained count
@@ -41,6 +44,11 @@ struct Census {
     advised: usize,
     /// Slots with some pages marked clean and some not.
     told: usize,
+    /// The charge of the free slots marked kept by the move their block outgrew them in:
+    /// what the count of kept outgrown slots should be.
+    outgrown: usize,
+    /// How many free slots are so marked.
+    kept: usize,
 }
 
 /// Whether the `len` bytes at `at` all equal `byte`. A comparison of whole pages, which is a
@@ -140,6 +148,10 @@ fn census<S: Shape>(back: &Back<'_, Sim<S>>) -> Census {
             census.told += usize::from(clean_pages != 0 && clean_pages != unit.end - unit.start);
             let advised = super::super::region::recorded(&host, region, slot);
             census.advised += usize::from(advised.is_some_and(|r| r.huge));
+            if advised.is_some_and(|r| r.outgrown) {
+                census.outgrown += super::super::region::charge(&host, region, slot);
+                census.kept += 1;
+            }
         }
     }
     census
@@ -163,10 +175,13 @@ struct Met {
     hidden: usize,
     /// Free slots with their zero bit set.
     zero: usize,
-    /// Free slots still advised for huge pages: grown blocks kept with their advice.
+    /// Free slots still advised for huge pages, which only a refused call to take the advice
+    /// back leaves.
     advised: usize,
     /// Free slots with some pages marked clean and some not: tails told apart.
     told: usize,
+    /// Free slots kept when their blocks outgrew them.
+    kept: usize,
 }
 
 impl Met {
@@ -175,6 +190,7 @@ impl Met {
         self.zero += census.zero;
         self.advised += census.advised;
         self.told += census.told;
+        self.kept += census.kept;
     }
 
     fn join(&mut self, other: Met) {
@@ -182,6 +198,7 @@ impl Met {
         self.zero += other.zero;
         self.advised += other.advised;
         self.told += other.told;
+        self.kept += other.kept;
     }
 }
 
@@ -331,9 +348,19 @@ fn step<O: Os>(
             let (mut to, zeroed) = take(back, rng, class, asked);
             back.resize(to.ptr, size);
             let kept = from.shadow.len().min(size);
+            // Half the moves are not outgrowths, so that the free inside such a move meets every
+            // history the runs make. `REVIEW_OTHER=0` makes every move an outgrowth, as the
+            // review's mutation runs had them.
+            let why = if std::env::var_os("REVIEW_OTHER").is_some_and(|v| v == "0")
+                || rng.below(2) == 0
+            {
+                crate::back::Move::Outgrown
+            } else {
+                crate::back::Move::Other
+            };
             // SAFETY: both are live blocks the test holds, `from` given up, and `to` reads as
             // zero if the back end said so.
-            unsafe { back.move_large(from.ptr, to.ptr, kept, zeroed) };
+            unsafe { back.move_large(from.ptr, to.ptr, kept, zeroed, why) };
             assert!(
                 bytes(to.ptr, kept) == from.shadow[..kept],
                 "a move lost bytes"
@@ -426,6 +453,11 @@ fn run(seed: u64, steps: usize, faults: bool) -> Met {
             census.counted as isize,
             "seed {seed:#x} step {at}: the count against the clean bits ({census:?})"
         );
+        assert_eq!(
+            back.outgrown(),
+            census.outgrown,
+            "seed {seed:#x} step {at}: the count of kept outgrown slots ({census:?})"
+        );
         // Nor does one stand under what a held block may write, written yet or not.
         for held in &live {
             let usable = back.usable_size(held.ptr.as_ptr()).unwrap();
@@ -454,6 +486,11 @@ fn run(seed: u64, steps: usize, faults: bool) -> Met {
     let census = census(&back);
     assert_eq!((census.resident, census.wrong_zero), (0, 0), "{census:?}");
     assert_eq!(count(&state), 0, "seed {seed:#x}: left after the last trim");
+    assert_eq!(
+        back.outgrown(),
+        0,
+        "seed {seed:#x}: kept outgrown slots after the last trim"
+    );
     met
 }
 
@@ -469,9 +506,14 @@ fn runs(salt: u64, seeds: u64, steps: usize, faults: bool) {
         met.join(run(salt ^ seed, steps, faults));
     }
     assert!(
-        met.zero != 0 && met.advised != 0 && met.told != 0,
+        met.zero != 0 && met.told != 0 && met.kept != 0,
         "the runs missed a case: {met:?}"
     );
+    // No free slot keeps a grown block's advice: its free and the move that keeps the slot it
+    // outgrew both take it back, which only a refused call leaves in place.
+    if !faults {
+        assert_eq!(met.advised, 0, "advice stayed on a free slot: {met:?}");
+    }
 }
 
 #[test]
@@ -554,10 +596,18 @@ fn racing_tenants_and_purges_leave_the_count_at_the_clean_bits() {
             census.counted as isize,
             "round {round}: {census:?}"
         );
+        // Every change to the count of kept outgrown slots raced with every other, and it is
+        // still the charge of the slots marked kept: nothing drifts.
+        assert_eq!(
+            back.outgrown(),
+            census.outgrown,
+            "round {round}: {census:?}"
+        );
         back.trim();
         let census = self::census(&back);
         assert_eq!((census.resident, census.wrong_zero), (0, 0), "{census:?}");
         assert_eq!(count(state), 0, "round {round}");
+        assert_eq!(back.outgrown(), 0, "round {round}");
     }
 }
 
@@ -616,14 +666,15 @@ fn a_tenant_that_asked_for_nothing_hides_a_resident_slot_from_the_purge() {
 /// slot for each mover, not by one slot, and each of those may be as large as the budget.
 /// (`purge_before_release` has the same gap, a few instructions wide.) Here the movers are
 /// one thread whose moves nest at the first piece, which is the order sixteen threads take
-/// when each is preempted during its copy.
+/// when each is preempted during its copy. Fixed: a move counts its slot before it decides
+/// (`keep_outgrown`), so the kept slots pass the bound by one slot at most.
 #[test]
 #[cfg_attr(miri, ignore)]
 fn moves_under_way_at_once_each_keep_a_slot_past_the_budget() {
     const MOVERS: usize = 16;
     let state = state::<Native>();
     let back = state.get_or_reserve().unwrap();
-    let budget = kept_grown(Native::GEOMETRY);
+    let budget = kept_outgrown(Native::GEOMETRY);
     let (class, wider) = (large(192 << 10), large(256 << 10));
     let len = class.size() - 100;
     let blocks: Vec<(NonNull<u8>, NonNull<u8>)> = (0..MOVERS)
@@ -640,7 +691,7 @@ fn moves_under_way_at_once_each_keep_a_slot_past_the_budget() {
         let mut first = true;
         // SAFETY: both are live blocks the test holds, `from` given up.
         unsafe {
-            back.move_large_with(from, to, len, false, || {
+            back.move_large_with(from, to, len, false, crate::back::Move::Outgrown, || {
                 if core::mem::take(&mut first) {
                     nest(back, rest, len);
                 }
@@ -661,7 +712,7 @@ fn moves_under_way_at_once_each_keep_a_slot_past_the_budget() {
 /// Finding hidden-from-the-cap. The under-count the author states (a tenant after a larger one
 /// leaves the larger one's pages resident and marked clean) is bounded for one slot, by the
 /// slot less the tenant's extent, but not in total: it is one such tail for every free slot
-/// with that history, and neither the cap nor the budget for kept blocks sees any of it. Here
+/// with that history, and neither the cap nor the count of kept outgrown slots sees any of it. Here
 /// forty slots are written in full and freed, then each hosts a block a sixth of its size, as
 /// a block that moved in with headroom is, and is freed again. The count is then under the cap
 /// with five times the cap resident in free slots, so growth in another class pays nothing;
@@ -741,9 +792,13 @@ fn c_realloc(sim: &SimHeap<Native>, old: NonNull<u8>, size: usize) -> NonNull<u8
     .unwrap();
     // SAFETY: both are live blocks the test holds, `old` given up.
     unsafe {
-        heap.back()
-            .unwrap()
-            .move_large(old, new, kept.min(size), false)
+        heap.back().unwrap().move_large(
+            old,
+            new,
+            kept.min(size),
+            false,
+            crate::back::Move::Outgrown,
+        )
     };
     new
 }
@@ -974,6 +1029,11 @@ fn fill_all(seed: u64, steps: usize) -> Met {
             census.counted as isize,
             "seed {seed:#x} step {at}: the count against the clean bits ({census:?})"
         );
+        assert_eq!(
+            back.outgrown(),
+            census.outgrown,
+            "seed {seed:#x} step {at}: the count of kept outgrown slots ({census:?})"
+        );
         met.add(&census);
     }
     for owned in live.drain(..) {
@@ -991,6 +1051,7 @@ fn fill_all(seed: u64, steps: usize) -> Met {
     let census = census(&back);
     assert_eq!((census.resident, census.wrong_zero), (0, 0), "{census:?}");
     assert_eq!(back.state.retained.signed(true), 0);
+    assert_eq!(back.outgrown(), 0, "kept outgrown slots after the collect");
     met
 }
 
@@ -1000,7 +1061,7 @@ fn fills(seeds: u64, steps: usize) {
         met.join(fill_all(0x510e_527f_ade6_82d1 ^ seed, steps));
     }
     assert!(
-        met.zero != 0 && met.told != 0,
+        met.zero != 0 && met.told != 0 && met.kept != 0,
         "the runs missed a case: {met:?}"
     );
 }
@@ -1019,13 +1080,14 @@ fn a_program_that_fills_all_it_may_use_meets_no_clean_page_fully() {
 
 /// Moves on many threads at once, each out of a block of its own into a block it keeps, so
 /// that the only slots freed are those the moves leave and every one is a decision to keep or
-/// return. A decision counts its slot before it looks (`keep_grown`), and here no claim can
-/// take a slot out of the count before it is in, so the slots kept never pass the budget, at
-/// any moment and so at the end; and no update of the count is lost.
+/// return. A decision counts its slot before it looks (`keep_outgrown`), and here no claim can
+/// take a slot out of the count before it is in, so the slots kept never pass the bound, at
+/// any moment and so at the end; no update of the count is lost; and the count of kept
+/// outgrown slots is the charge of the free slots, and zero once a trim has returned them.
 #[test]
 #[ignore = "slow: run with scripts/gate --all"]
 fn racing_moves_keep_within_the_budget() {
-    let budget = kept_grown(Native::GEOMETRY);
+    let budget = kept_outgrown(Native::GEOMETRY);
     // The block moved into is more than twice the one moved, so it is never advised for huge
     // pages, and it is freed only after the count has been read.
     let (class, wider) = (large(96 << 10), large(256 << 10));
@@ -1052,7 +1114,9 @@ fn racing_moves_keep_within_the_budget() {
                         let from = back.alloc(class, len).unwrap().ptr;
                         paint(from.as_ptr(), len, stamp);
                         // SAFETY: both are live blocks this thread holds, `from` given up.
-                        unsafe { back.move_large(from, to, len, false) };
+                        unsafe {
+                            back.move_large(from, to, len, false, crate::back::Move::Outgrown)
+                        };
                         assert!(all_are(to.as_ptr(), len, stamp));
                         most.fetch_max(back.retained_large(), Relaxed);
                     }
@@ -1075,12 +1139,31 @@ fn racing_moves_keep_within_the_budget() {
             "round {round}: the count reached {most}"
         );
         assert_ne!(kept, 0, "round {round}: nothing was kept at all");
+        assert_eq!(
+            back.outgrown(),
+            kept,
+            "round {round}: the count is the kept slots' charge"
+        );
         for &to in &into {
             back.free(back.space().pointer(to).unwrap(), wider);
         }
         back.trim();
         assert_eq!(count(state), 0, "round {round}");
+        assert_eq!(
+            back.outgrown(),
+            0,
+            "round {round}: the trim took every kept slot"
+        );
     }
 }
 
 mod headroom_review;
+
+/// More seeds of the random runs, which make half their moves not outgrowths, with and without
+/// failing calls (from the review of `outgrown-count`).
+#[test]
+#[ignore = "slow: run with scripts/gate --all"]
+fn more_seeds_with_moves_of_both_kinds() {
+    runs(0x243f_6a88_85a3_08d3, 40 / DEBUG_LESS, 2500, false);
+    runs(0x1319_8a2e_0370_7344, 60 / DEBUG_LESS, 2500, true);
+}
