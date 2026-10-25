@@ -296,6 +296,9 @@ cycles, since two binaries place their code differently.
   left of that charge at the claim that takes the slot again, and by the pages a purge
   returns of a marked slot, whether the purge is the hold's, a growth payment, the clocked
   pass or a trim, whole or in pieces. The amounts sum exactly to what the keep added.
+- The count alone decides, however many pieces the block moves in. A kept slot is left whole
+  behind the move, with both copies resident while it runs, which the bound caps. A slot not
+  kept goes back behind the copy, piece by piece.
 - A grown block's free returns a slot advised for huge pages whole, as the design says, with
   no budget. A move that is not an outgrowth, a shrink to a sliver or a new alignment, frees
   the old slot as the block's free would.

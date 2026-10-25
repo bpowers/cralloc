@@ -28,8 +28,8 @@
 //!   two huge pages a shrink, the huge pages at the shrink's two ends, and `mark_clean` marks
 //!   those pages clean, so the retained count does not see them. A purge of a free slot may
 //!   return it in pieces across steps (`purge::piece`); in a class of a huge page or more the
-//!   pieces start at huge-page boundaries and are a huge page at least, so a slot kept with
-//!   its advice is never left with a huge page partly returned.
+//!   pieces start at huge-page boundaries and are a huge page at least, so a slot whose
+//!   advice the OS refused to take back is never left with a huge page partly returned.
 //! - **Clean bits** say a page has not been written since it was carved or last purged. Only a
 //!   purge and the first claim of a carved slot set them (`mark_fresh`, for the pages past its
 //!   block); a claim and anything that widens a held block clear them under what it may write

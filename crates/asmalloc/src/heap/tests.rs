@@ -994,6 +994,63 @@ fn buffers_growing_into_reused_slots_leave_a_trail_within_the_bound() {
     }
 }
 
+/// The Rust interface tells the back end whether a moving block outgrew its slot, by the
+/// slot's room and not by the old size: a growth past the room keeps the old slot as outgrown,
+/// a shrink to a sliver and a move for a new alignment that the room would hold free it as the
+/// block's free would, unmarked and out of the count.
+#[test]
+#[cfg_attr(miri, ignore)]
+fn a_move_says_whether_the_block_outgrew_its_slot() {
+    let heap = SimHeap::<crate::os::sim::Native>::new();
+    let (small, big) = (layout(48 << 10, 8), layout(96 << 10, 8));
+    // SAFETY: valid layouts; each block is written within its size and freed once with the
+    // layout it has.
+    unsafe {
+        // Outgrown: past the slot's room.
+        let p = heap.alloc(small);
+        fill(p, small.size(), 1);
+        let back = heap.heap.back().unwrap();
+        let counted = back.outgrown();
+        let room = back.room(p).unwrap();
+        let q = heap.realloc(p, small, room + 1);
+        assert_ne!(q, p);
+        assert!(back.kept_outgrown_at(p), "the slot a growth left is kept");
+        assert!(back.outgrown() > counted);
+        heap.dealloc(q, layout(room + 1, 8));
+        back.trim();
+        assert_eq!(back.outgrown(), 0);
+        // A shrink to a sliver.
+        let p = heap.alloc(big);
+        fill(p, big.size(), 2);
+        let q = heap.realloc(p, big, 1024);
+        assert_ne!(q, p, "a sliver moves");
+        assert!(
+            !back.kept_outgrown_at(p),
+            "a shrink's old slot is no outgrown slot"
+        );
+        assert_eq!(back.outgrown(), 0);
+        heap.dealloc(q, layout(1024, 8));
+        // A larger size that the room holds, at an alignment the block's start does not have:
+        // a move, but not an outgrowth. The second block of a class is staggered, so its start
+        // is not page-aligned.
+        let first = heap.alloc(small);
+        let p = heap.alloc(small);
+        assert_ne!(p.addr() % 4096, 0, "a staggered start");
+        fill(p, small.size(), 3);
+        let wider = layout(small.size() + 1024, 4096);
+        assert!(wider.size() <= back.room(p).unwrap());
+        let (q, _) = heap.grow_zeroed_for_test(p, small, wider).unwrap();
+        assert_ne!(q, p, "moved for its alignment");
+        assert!(
+            !back.kept_outgrown_at(p),
+            "a move for alignment is no outgrowth"
+        );
+        assert_eq!(back.outgrown(), 0);
+        heap.dealloc(q, wider);
+        heap.dealloc(first, small);
+    }
+}
+
 /// The evidence rule for zeroed large blocks, on a heap whose blocks of the floor fit a region
 /// (`Native`'s). `size` is the floor; `class` the class a block of it takes.
 mod unwritten {

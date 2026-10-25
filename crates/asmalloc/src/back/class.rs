@@ -1266,6 +1266,25 @@ impl<'a, O: Os> Back<'a, O> {
         self.state.outgrown.load(SeqCst)
     }
 
+    /// Whether the large slot that `ptr` starts (at its start or its stagger) is free and
+    /// marked as kept by the move its block outgrew it in, for tests.
+    #[cfg(test)]
+    pub(crate) fn kept_outgrown_at(&self, ptr: *const u8) -> bool {
+        let Some(Kind::Slot(class)) = self.lookup(ptr) else {
+            return false;
+        };
+        let (Some(host), Some(location)) = (self.host(class), self.space.locate(ptr)) else {
+            return false;
+        };
+        let Some((slot, _)) = host.layout().block_at(location.offset as usize) else {
+            return false;
+        };
+        let (word, bit) = position(slot);
+        let free =
+            tree::word(&host, tree::Node::leaf(location.region, word)).load() & (1u64 << bit) != 0;
+        free && region::recorded(&host, location.region, slot).is_some_and(|r| r.outgrown)
+    }
+
     /// Sets the count of kept outgrown slots, for tests that want moves to return their slots.
     #[cfg(test)]
     pub(super) fn set_outgrown(&self, bytes: usize) {

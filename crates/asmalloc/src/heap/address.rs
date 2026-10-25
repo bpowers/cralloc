@@ -186,6 +186,16 @@ pub(crate) mod process {
         unsafe { global::process().free_large_slow(ptr) }
     }
 
+    /// Whether the large slot `ptr` starts is free and kept as the slot a block outgrew
+    /// (`Back::kept_outgrown_at`), on the process's heap; for the C layer's tests.
+    #[cfg(test)]
+    pub(crate) fn kept_outgrown_at(ptr: *const u8) -> bool {
+        global::process()
+            .heap()
+            .back()
+            .is_some_and(|back| back.kept_outgrown_at(ptr))
+    }
+
     /// Moves `len` bytes of the large block at `from` to `to` and frees `from`, a piece at a
     /// time with the old pages returned behind the copy (`Back::move_large`); `why` says whether
     /// the block outgrew its slot.

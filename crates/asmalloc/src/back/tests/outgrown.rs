@@ -355,3 +355,109 @@ fn an_advised_slot_outgrown_goes_back() {
     );
     back.free(to, wider);
 }
+
+/// The pages of `len` bytes at `at` that the simulated OS holds resident, in bytes, page by
+/// page: what the OS says, not the clean bits.
+fn resident_in(os: &SimOs<Native>, at: NonNull<u8>, len: usize) -> usize {
+    let page = Native::GEOMETRY.page_size();
+    (0..len / page)
+        .filter(|i| {
+            let p = at.map_addr(|a| a.saturating_add(i * page));
+            // SAFETY: a page of a free slot; nothing else uses the simulated heap meanwhile.
+            !unsafe { os.is_purged(p, page) }
+        })
+        .count()
+        * page
+}
+
+/// A keep that brings the count exactly to its bound is within it.
+#[test]
+#[cfg_attr(miri, ignore)]
+fn a_keep_that_reaches_the_bound_exactly_is_kept() {
+    let state = state::<Native>();
+    let back = state.get_or_reserve().unwrap();
+    let bound = kept_outgrown(Native::GEOMETRY);
+    let (from, to) = (large(192 << 10), large(256 << 10));
+    // A block of the whole class, not staggered: its charge is the class.
+    back.set_outgrown(bound - from.size());
+    let (olds, news) = outgrow(&back, from, to, from.size(), 1);
+    assert!(kept(&back, olds[0]), "kept at the bound");
+    assert_eq!(back.outgrown(), bound);
+    back.free(news[0], to);
+}
+
+/// The count alone decides whether an outgrown slot is kept, however many pieces its block
+/// moves in. Within the bound a block of several pieces is kept whole, both copies resident
+/// for the move, which the bound caps; past it the pages go back behind each piece, so the two
+/// copies are never both resident beyond one piece, and the slot is not kept.
+#[test]
+#[cfg_attr(miri, ignore)]
+fn a_block_of_several_pieces_is_kept_whole_within_the_bound_and_returned_piece_by_piece_past_it() {
+    let piece = super::super::policy::move_piece(Native::GEOMETRY);
+    let bound = kept_outgrown(Native::GEOMETRY);
+    let (from, to) = (large(8 * piece), large(12 * piece));
+    assert!(from.size() <= bound, "a slot the bound can hold");
+    for past in [false, true] {
+        let state = state::<Native>();
+        let back = state.get_or_reserve().unwrap();
+        let os = state.os();
+        let len = from.size();
+        let old = back.alloc(from, len).unwrap().ptr;
+        pattern(old.as_ptr(), len);
+        let new = back.alloc(to, len).unwrap().ptr;
+        if past {
+            back.set_outgrown(bound);
+        }
+        let mut returned = Vec::new();
+        // SAFETY: both are live blocks that nothing else uses, `old` given up.
+        unsafe {
+            back.move_large_with(old, new, len, false, Move::Outgrown, || {
+                returned.push(len - resident_in(os, old, len));
+            })
+        };
+        assert!(patterned(new.as_ptr(), len));
+        assert!(returned.len() > 1, "a block of several pieces");
+        for (i, &gone) in returned.iter().enumerate() {
+            let want = if past { (i + 1) * piece } else { 0 };
+            assert_eq!(gone, want, "past {past}: after piece {i}");
+        }
+        assert_eq!(kept(&back, old), !past);
+        let resident = resident_in(os, old, len);
+        assert_eq!(resident, if past { 0 } else { len });
+        back.free(new, to);
+    }
+}
+
+/// A move that is not an outgrowth returns the pieces behind its copy and frees the slot as
+/// the block's free would: the free charges what the OS still holds of the slot, not the
+/// pieces already gone.
+#[test]
+#[cfg_attr(miri, ignore)]
+fn another_move_of_several_pieces_charges_only_what_stays_resident() {
+    let state = state::<Native>();
+    let back = state.get_or_reserve().unwrap();
+    let os = state.os();
+    let piece = super::super::policy::move_piece(Native::GEOMETRY);
+    let (from, to) = (large(8 * piece), large(12 * piece));
+    let old = back.alloc(from, from.size()).unwrap().ptr;
+    pattern(old.as_ptr(), from.size());
+    let len = 5 * piece;
+    let new = back.alloc(to, len).unwrap().ptr;
+    let retained = back.retained_large();
+    // SAFETY: both are live blocks that nothing else uses, `old` given up.
+    unsafe { back.move_large(old, new, len, false, Move::Other) };
+    assert!(patterned(new.as_ptr(), len));
+    let resident = resident_in(os, old, from.size());
+    assert_eq!(
+        resident,
+        from.size() - len,
+        "the pieces behind the copy went back"
+    );
+    assert_eq!(
+        back.retained_large() - retained,
+        resident,
+        "the free charges what stays resident"
+    );
+    assert!(!kept(&back, old));
+    back.free(new, to);
+}

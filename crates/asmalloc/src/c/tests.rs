@@ -312,6 +312,37 @@ fn calloc_zeroes_reused_small_and_large_blocks() {
     }
 }
 
+/// C's `realloc` tells the back end whether a moving block outgrew its slot: grown past it,
+/// the old slot is kept as an outgrown one; cut to a small block, the old slot is freed as the
+/// block's free would, and is no outgrown slot. Sizes of their own, so that no other test of
+/// the process's heap takes the slots between the call and the look.
+#[test]
+fn realloc_says_whether_the_block_outgrew_its_slot() {
+    // SAFETY: each block is live with the size used where it is written, and given up once.
+    unsafe {
+        let p = malloc(300 << 10);
+        assert!(!p.is_null());
+        p.cast::<u8>().write_bytes(5, 300 << 10);
+        let q = realloc(p, 4 << 20);
+        assert!(!q.is_null() && q != p);
+        assert!(
+            process::kept_outgrown_at(p.cast()),
+            "the slot a growth left is kept"
+        );
+        release(q);
+        let r = malloc(900 << 10);
+        assert!(!r.is_null());
+        r.cast::<u8>().write_bytes(6, 900 << 10);
+        let s = realloc(r, 1000);
+        assert!(!s.is_null() && s != r);
+        assert!(
+            !process::kept_outgrown_at(r.cast()),
+            "a shrink's old slot is no outgrown slot"
+        );
+        release(s);
+    }
+}
+
 /// A large block cut down by `realloc` stays where it is and gives its tail back: grown again
 /// in place, the kept part still holds its bytes and the rest reads as zero, which it would
 /// not if the pages had stayed. A later `realloc` that moves it copies all of that.

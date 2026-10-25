@@ -20,22 +20,25 @@ move's caller gave up (BACK-CLASS-03), its bit still clear, and the move has ret
 pages behind its copy, so nothing reads or needs the slot's memory any more.
 
 A slot released resident is charged its pages whose clean bit is clear (`region::charge`);
-the free writes no clean bit. A clean bit says the page has not been written since it was
-carved or last purged: only a purge, a shrink's purge that went back whole
-(`region::mark_clean`) and the carve of a slot (`region::mark_fresh`, for the pages past its
-block, which nothing has written) set one, each by the slot's holder (only the holder of
-every slot a bit describes writes it); the claim (`region::settle_slot`) clears the bits under
+the free itself writes no clean bit. A clean bit says the page has not been written since it
+was carved or last purged: only a purge, a range the holder returned whole (a shrink's tail,
+or a piece behind a move's copy before the move frees the slot; `region::mark_clean`) and the
+carve of a slot (`region::mark_fresh`, for the pages past its block, which nothing has
+written) set one, each by the slot's holder (only the holder of every slot a bit describes
+writes it); the claim (`region::settle_slot`) clears the bits under
 what the new tenant may write, and so does any change that widens it (`region::cover`).
 Clean bits only steer the retained count and the purge walk; no zero bit is set by any of
 this, and a claim takes a slot for zero only from its zero bit, which only a purge sets. So a
 claim never reports pages as zero that are not
 (`a_small_tenant_after_a_large_one_is_charged_what_is_resident`). The advice is taken back after the purge
-(`region::unadvise`), which changes no contents. `free_slot` is private and called by
+(`region::unadvise`), which changes no contents. `free_slot` is private and has three callers:
 `Back::free` and `Back::free_by_address` for a large class, both crate-private
-(`pub(crate)`), with the region and slot that `slot_in` found for the pointer: `Back::free`
-after `validate` has checked the pointer lies in a region tagged for the class, and
-`free_by_address` after reading the class from that region's tag. They are reached from
-`Heap::free_large` and the C `free`, each for a pointer the program is giving up.
+(`pub(crate)`), with the region and slot that `slot_in` found for the pointer (`Back::free`
+after `validate` has checked the pointer lies in a region tagged for the class,
+`free_by_address` after reading the class from that region's tag), reached from
+`Heap::free_large` and the C `free` for a pointer the program is giving up; and
+`move_large_with` for a move that is not an outgrowth, with the region and slot `validate`
+found for the block the move's caller gives up (BACK-CLASS-03).
 
 **Proof.**
 
@@ -199,8 +202,16 @@ returns nothing of `from` (steps 4 and 5 do not run), marks the size word
 (`Recorded::outgrown`, written by the holder) and releases the slot resident and counted
 already. The copies of steps 0 to 3 are the same, and keeping both copies resident is a
 matter of memory, not of safety. Any other move (`Move::Other`) returns the pieces behind its
-copy (step 4, without the last range) and frees the slot through `free_slot` (BACK-CLASS-01),
-which purges it only if it is advised, while the move's caller's claim on it still holds.
+copy (step 4, without the last range) and frees the slot through `free_slot` (BACK-CLASS-01)
+while the move's caller's claim on it still holds. That free returns the whole slot in two
+cases: it is advised for huge pages, or its block was marked unwritten and the sample of its
+extent (BACK-CLASS-06) finds at most one page in sixteen resident. On this path the sample
+reads pages the move has already returned, which read as absent, so a block whose pieces went
+back is likelier to be returned whole. Either outcome is a valid free: the slot is held, and
+returning a held slot or releasing it resident are both frees of it whatever `mincore` says.
+And the zero bit it may set is true: `purge_held` returns every whole page of the slot, those
+already returned among them, before `mark_purged` sets the bit, so every page then reads as
+zero (step 5).
 
 0. *The windows.* Every block, whatever its length, is copied by `copy_window` over
    consecutive, disjoint ranges `start..end` of block offsets that together are `0..len`, in
@@ -264,7 +275,12 @@ which purges it only if it is advised, while the move's caller's claim on it sti
    (`region::charge`), with no zero bit set and only the ranges that went back whole marked
    clean. A run is freed by `free_run`, which purges
    all of it (again, for the pieces already returned; harmless) to restore its zero
-   promise.
+   promise. The release of a move that is not an outgrowth is `free_slot`'s
+   (BACK-CLASS-01): if it returns the slot, `purge_held` has returned every whole page of
+   it, the pieces behind the copy again included, so `mark_purged`'s zero bit is true for
+   the same reason as `purge_held`'s at any free; if it does not, the slot is released
+   resident, charged by its pages that are not clean, the pieces that went back whole having
+   been marked clean by the move, with no zero bit set.
 
 The double-free cases are those of BACK-CLASS-01, with the copy added to the window.
 
@@ -275,7 +291,11 @@ The double-free cases are those of BACK-CLASS-01, with the copy added to the win
 into a clean, a dirty and a staggered dirty destination),
 `a_hole_is_copied_when_the_destinations_purge_fails`,
 `a_staggered_block_moves_and_returns_its_whole_slot`,
-`grown_blocks_are_kept_within_their_budget`, `a_large_slot_is_charged_its_pages_that_are_not_clean`,
+`a_large_slot_is_charged_its_pages_that_are_not_clean`, the slots kept and returned in
+`back::tests::outgrown` (among them
+`a_block_of_several_pieces_is_kept_whole_within_the_bound_and_returned_piece_by_piece_past_it`,
+`another_move_of_several_pieces_charges_only_what_stays_resident` and
+`a_shrinks_move_frees_the_old_slot_as_its_free_would`),
 `a_zeroed_grow_into_a_dirty_slot_reads_as_zero_past_what_it_kept`,
 `an_advised_slot_is_purged_only_in_whole_huge_pages` (a block that does not start on a
 piece boundary); the heap's and the C layer's `realloc` tests move large blocks through it

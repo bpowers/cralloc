@@ -1,5 +1,8 @@
 //! Evidence for the adversarial review of the large-slot charge and the budget for kept grown
-//! blocks (main `630883b..d6e8841`), and for the check of its fix (main `b313200`).
+//! blocks (main `630883b..d6e8841`), and for the check of its fix (main `b313200`). The budget
+//! has since become the count of kept outgrown slots (`Back::keep_outgrown`), which the tests
+//! here check too: the random runs and the threaded ones hold it to the charge of the slots
+//! marked kept at every step.
 //!
 //! The properties: a slot said to be zero reads as zero; a clean bit is true, so none stands
 //! over a page that holds data or under what a held block may write; and the retained count
@@ -345,9 +348,19 @@ fn step<O: Os>(
             let (mut to, zeroed) = take(back, rng, class, asked);
             back.resize(to.ptr, size);
             let kept = from.shadow.len().min(size);
+            // Half the moves are not outgrowths, so that the free inside such a move meets every
+            // history the runs make. `REVIEW_OTHER=0` makes every move an outgrowth, as the
+            // review's mutation runs had them.
+            let why = if std::env::var_os("REVIEW_OTHER").is_some_and(|v| v == "0")
+                || rng.below(2) == 0
+            {
+                crate::back::Move::Outgrown
+            } else {
+                crate::back::Move::Other
+            };
             // SAFETY: both are live blocks the test holds, `from` given up, and `to` reads as
             // zero if the back end said so.
-            unsafe { back.move_large(from.ptr, to.ptr, kept, zeroed, crate::back::Move::Outgrown) };
+            unsafe { back.move_large(from.ptr, to.ptr, kept, zeroed, why) };
             assert!(
                 bytes(to.ptr, kept) == from.shadow[..kept],
                 "a move lost bytes"
@@ -653,7 +666,8 @@ fn a_tenant_that_asked_for_nothing_hides_a_resident_slot_from_the_purge() {
 /// slot for each mover, not by one slot, and each of those may be as large as the budget.
 /// (`purge_before_release` has the same gap, a few instructions wide.) Here the movers are
 /// one thread whose moves nest at the first piece, which is the order sixteen threads take
-/// when each is preempted during its copy.
+/// when each is preempted during its copy. Fixed: a move counts its slot before it decides
+/// (`keep_outgrown`), so the kept slots pass the bound by one slot at most.
 #[test]
 #[cfg_attr(miri, ignore)]
 fn moves_under_way_at_once_each_keep_a_slot_past_the_budget() {
@@ -698,7 +712,7 @@ fn moves_under_way_at_once_each_keep_a_slot_past_the_budget() {
 /// Finding hidden-from-the-cap. The under-count the author states (a tenant after a larger one
 /// leaves the larger one's pages resident and marked clean) is bounded for one slot, by the
 /// slot less the tenant's extent, but not in total: it is one such tail for every free slot
-/// with that history, and neither the cap nor the budget for kept blocks sees any of it. Here
+/// with that history, and neither the cap nor the count of kept outgrown slots sees any of it. Here
 /// forty slots are written in full and freed, then each hosts a block a sixth of its size, as
 /// a block that moved in with headroom is, and is freed again. The count is then under the cap
 /// with five times the cap resident in free slots, so growth in another class pays nothing;
@@ -1144,3 +1158,12 @@ fn racing_moves_keep_within_the_budget() {
 }
 
 mod headroom_review;
+
+/// More seeds of the random runs, which make half their moves not outgrowths, with and without
+/// failing calls (from the review of `outgrown-count`).
+#[test]
+#[ignore = "slow: run with scripts/gate --all"]
+fn more_seeds_with_moves_of_both_kinds() {
+    runs(0x243f_6a88_85a3_08d3, 40 / DEBUG_LESS, 2500, false);
+    runs(0x1319_8a2e_0370_7344, 60 / DEBUG_LESS, 2500, true);
+}

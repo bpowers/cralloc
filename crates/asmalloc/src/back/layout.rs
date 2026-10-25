@@ -370,8 +370,9 @@ impl FrontierFormat {
 /// object was given zeroed from a slot known to be zero, so that none of its pages was
 /// resident when its tenant got it (`Back::mark_unwritten`), and whether the free slot was
 /// kept when its block outgrew it and is in the count of such slots (`State::outgrown`). One
-/// word, written only by whoever holds the slot: its tenant, or a purge while it claims the
-/// slot. A size is at most a region, 4 GiB, so the flags take the top bits.
+/// word, written only by whoever holds the slot, and read by its holder; a purge, which holds
+/// the slots it claims, reads it and never writes it. A size is at most a region, 4 GiB, so
+/// the flags take the top bits.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(crate) struct Recorded {
     pub(crate) size: usize,
