@@ -431,23 +431,27 @@ pub(crate) struct Look {
 
 /// The cheap look at huge page `unit` of `region` (a unit of whole pages, at most one huge
 /// page), for a walk that returns runs of at least `run` pages: whether each of
-/// [`TAIL_SAMPLE_RUNS`] of its aligned runs of `run` pages, evenly spread, is free and
-/// resident, as the walk would find it (`region::purgeable_unit`). By runs of pages, not by
-/// leaf words: a word of a class of 1 KiB covers 16 pages, and a huge page with a live slot in
-/// every 16 pages has no free word and 15 free pages in 16. And not by single pages: free pages
-/// scattered one or two together are free to the sample but too short for the walk, which
-/// would read the huge page a page at a time for nothing (on Meilisearch, at every burst's
-/// start). Reads only, at most a run's slots' words and its clean words for each sample.
-pub(crate) fn look<H: Host>(host: &H, region: RegionId, unit: Unit, run: u32) -> Look {
+/// [`TAIL_SAMPLE_RUNS`] of its aligned runs of `run` pages is free and resident, as the walk
+/// would find it (`region::purgeable_unit`). One run is sampled in each of as many equal shares
+/// of the huge page, at a place within its share that `salt` picks, so that a walk that looks
+/// again in a later interval samples other runs. By runs of pages, not by leaf words: a word
+/// of a class of 1 KiB covers 16 pages, and a huge page with a live slot in every 16 pages has
+/// no free word and 15 free pages in 16. And by runs as long as the walk takes, not by single
+/// pages: free pages scattered one or two together are free to a sample of pages but too short
+/// for the walk, which would read the huge page a page at a time and return nothing. Reads
+/// only, at most a run's slots' words and its clean words for each sample.
+pub(crate) fn look<H: Host>(host: &H, region: RegionId, unit: Unit, run: u32, salt: u32) -> Look {
     let pages = unit.end - unit.start;
     let run = run.clamp(1, pages.max(1));
     let runs = pages / run;
     let samples = TAIL_SAMPLE_RUNS.min(runs);
+    let share = runs / samples.max(1);
     let (mut free, mut read) = (0, 0);
     for i in 0..samples {
-        // Evenly spread, each a run further into its share than the last, so that the
-        // samples do not all land on the same phase of a pattern with a power-of-two period.
-        let start = unit.start + ((i * runs / samples + i) % runs) * run;
+        // A multiplicative hash of the salt and the share: any spread will do, so long as a
+        // later salt moves the samples and they do not keep one phase of a periodic layout.
+        let mix = (salt ^ i.wrapping_mul(0x9E37_79B9)).wrapping_mul(0x85EB_CA6B) >> 16;
+        let start = unit.start + (i * share + mix % share) * run;
         let (ok, words) = region::purgeable_unit(
             host,
             region,

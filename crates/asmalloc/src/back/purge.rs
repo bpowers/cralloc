@@ -1246,6 +1246,7 @@ impl<O: Os> Back<'_, O> {
                         zone,
                         floor,
                         min_run,
+                        salt: self.epoch() as u32,
                         may_return: may_return && purged < limit,
                         below_purged,
                         room: Room {
@@ -1482,7 +1483,7 @@ impl<O: Os> Back<'_, O> {
                     return Some(step);
                 }
             }
-            let look = tail::look(host, region, unit, walk.min_run);
+            let look = tail::look(host, region, unit, walk.min_run, walk.salt);
             step.read += look.read;
             if !look.sparse || !walk.may_return {
                 // What a purge could return: a dense huge page's free pages are left to it.
@@ -1621,6 +1622,8 @@ struct TailWalk {
     zone: u32,
     floor: u32,
     min_run: u32,
+    /// Moves the cheap look's samples from one interval to the next (`tail::look`).
+    salt: u32,
     /// Whether this step may still return memory.
     may_return: bool,
     below_purged: Option<u32>,

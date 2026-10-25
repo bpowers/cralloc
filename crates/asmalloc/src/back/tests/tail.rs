@@ -381,7 +381,7 @@ fn the_cheap_look_is_bounded_and_tells_dense_from_sparse() {
         start: (top - 1) & !(hp - 1),
         end: ((top - 1) & !(hp - 1)) + hp,
     };
-    let dense = tail::look(&host, region0, unit, 1);
+    let dense = tail::look(&host, region0, unit, 1, 0);
     assert!(!dense.sparse);
     // A page of this class is one leaf word: a sample reads it, after the clean word.
     assert!(dense.read <= 2 * super::super::policy::TAIL_SAMPLE_RUNS as usize);
@@ -395,7 +395,7 @@ fn the_cheap_look_is_bounded_and_tells_dense_from_sparse() {
         .collect();
     // SAFETY: the test holds these slots and gives them up.
     unsafe { back.launder(class(), &inside) };
-    let sparse = tail::look(&host, region0, unit, 1);
+    let sparse = tail::look(&host, region0, unit, 1, 0);
     assert!(sparse.sparse);
 }
 
@@ -678,13 +678,17 @@ fn the_cheap_look_samples_runs_as_long_as_the_walk_takes() {
     }
     // SAFETY: the test holds these slots and gives them up.
     unsafe { back.launder(class(), &odd) };
-    assert!(tail::look(&host, region0, unit, 1).sparse);
-    let four = tail::look(
-        &host,
-        region0,
-        unit,
-        super::super::policy::PURGE_MIN_RUN_PAGES,
-    );
-    assert!(!four.sparse);
-    assert_eq!(four.free, 0);
+    let run = super::super::policy::PURGE_MIN_RUN_PAGES;
+    let salts = 0..16;
+    // Each salt samples other pages, and nearly every one finds an odd page.
+    let found = salts
+        .clone()
+        .filter(|&salt| tail::look(&host, region0, unit, 1, salt).sparse)
+        .count();
+    assert!(found >= 12, "{found} of 16 looks found a free page");
+    for salt in salts {
+        let four = tail::look(&host, region0, unit, run, salt);
+        assert!(!four.sparse);
+        assert_eq!(four.free, 0);
+    }
 }
