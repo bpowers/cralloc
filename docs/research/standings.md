@@ -41,6 +41,12 @@ what this allocator is for. The kernel suite and the C programs are regression c
   the last standings. After a 30 s silence the log store's slowest request in the first 5 ms
   takes 0.56 ms against 0.30 to 0.46 for the incumbents (the background thread's idle drains,
   as measured when it landed).
+  **2026-10-25:** with C2 and C3 off on the server CPUs (`tails-idle-off.md`, main
+  `3b5a3f5`, five pads), asmalloc's Connect h2 p99.9 is 37.8 us against 38.6 to 41.6 for the
+  others, the lowest at every pad. gRPC h2 is 38.2 against 39.2 to 41.6. Cycles and saturated
+  rates moved under 1%. The other server jobs are not yet re-measured this way: Connect over
+  HTTP/1.1, the order service (axum, actix, h2, 2 GiB), Sozu, mini-redis, the Router, the log
+  store, the RPC c64 jobs, Meilisearch, and the saturation suites.
 - **Meilisearch** does the least work a request (16.96M cycles against 17.27 to 18.09M) and has
   the best p99.9 (43 ms against 48 to 60). It takes twice jemalloc's page faults.
 - **DataFusion** is 3% behind per-CPU tcmalloc on time, level with mimalloc and glibc, 4%
