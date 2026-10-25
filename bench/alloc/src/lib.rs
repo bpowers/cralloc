@@ -117,6 +117,24 @@ pub fn init() {
     }
 }
 
+/// Whether this build can break its heap down on demand with [`snapshot`]: asmalloc's
+/// `asmalloc-memstat` build, with its sampler on (`ASMALLOC_MEMSTAT`).
+pub fn snapshot_supported() -> bool {
+    #[cfg(feature = "asmalloc-memstat")]
+    return memstat::active();
+    #[cfg(not(feature = "asmalloc-memstat"))]
+    false
+}
+
+/// Writes the heap's full breakdown now, tagged `tag` (non-zero, a new one each call), where
+/// [`snapshot_supported`]; does nothing elsewhere.
+pub fn snapshot(tag: u64) {
+    #[cfg(feature = "asmalloc-memstat")]
+    memstat::snapshot(tag);
+    #[cfg(not(feature = "asmalloc-memstat"))]
+    let _ = tag;
+}
+
 /// What the running process can tell about its allocator.
 #[derive(Clone, Debug)]
 pub struct Description {
