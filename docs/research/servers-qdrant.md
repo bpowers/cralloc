@@ -137,13 +137,56 @@ runs of rounds 2 and 3 settled on search-cpu). The delayed settings do not act w
 this long. Main 81437b0 itself (the rule for outgrown large slots) did not move this job:
 t0's peak and after-close match the earlier arm's (528 and 195).
 
+**The candidate rule** (`ht10`: the advice comes off only where pages go back, switch
+`t1r2`; one binary linked into 0afff09's Qdrant, three rounds interleaved, all six runs on
+search-cpu, medians in MiB):
+
+| ASMALLOC_HT | heap mean / peak / +1 min (RSS anon) | cgroup anon, same | AnonHugePages peak | faults/req | Mcycles/req | p99 / p99.9 ms |
+|---|---|---|---|---|---|---|
+| t0 | 448 / 542 / 201 | 446 / 543 / 202 | 170 | 13.8 | 12.74 to 12.79 | 189 / 255 |
+| t1r2 | 423 / 525 / 161 | 424 / 524 / 161 | 140 | 14.0 | 12.71 to 12.80 | 195 / 266 |
+
+It takes 6% off the mean, 3% off the peak and 20% off the memory a minute after close:
+about two-thirds of the first version's effect on the mean and after close, less than half
+on the peak. Cycles are level; tails are within the run-to-run spread (p99 134 to 258 ms
+across runs of both). A run made 14 to 19 calls taking the advice off and 16 to 18 putting it
+back, 130 to 140 huge-page splits, and returned 59k to 64k pages (230 to 250 MiB). One
+put-back call in one run took 53M cycles, about 10 ms; the others' longest was 46k to 55k.
+**That one raise is a flag**: a 10 ms call on a request's path would be a tail of its own.
+
+Side by side, each against the `t0` of its own rounds (MiB, medians):
+
+| | first version `t1` (ht5) | candidate `t1r2` (ht10) |
+|---|---|---|
+| heap mean | 447 -> 409 (-38) | 448 -> 423 (-25) |
+| heap peak | 535 -> 496 (-39) | 542 -> 525 (-17) |
+| a minute after close | 195 -> 148 (-47) | 201 -> 161 (-40) |
+| AnonHugePages peak | 170 -> 118 | 170 -> 140 |
+| faults/req | 13.6 -> 14.0 | 13.8 -> 14.0 |
+| counters a run | not recorded (no `d1`) | 14-19 advice off, 16-18 back, 130-140 splits, 59k-64k pages returned |
+
+Where the files are, for why `t1r2` returns less than `t1`: the candidate's `HT_DIAG`
+counters (`qht/htdiag` is ht10's, three runs appended, a run's last line is its total) and
+the unit-map dumps of the ht5 `t0` and `t1` runs (`qht/t0`, `qht/t1`; read with
+`bench/probes/heap-drift/account.py` of commit 4522abd, `--label peakrss` or `final`) are in
+`docs/research/data/servers-qdrant-2026-10-24.tar.gz`, with every run's records. No unit-map
+dump was taken of the ht10 runs.
+
 Whether the extra is a constant or a share: doubling Qdrant's `indexing_threshold`, meant to
 double the optimizers' segments, lowered the peak (405 against 509 in one run), since fewer
 optimizations finish in the window; the load could not be scaled that way, so this is not
 measured. The mechanism, stranded pages of classes that grow in bursts, scales with the
 burst rather than being fixed.
 
+Raw results: `docs/research/data/servers-qdrant-2026-10-24.tar.gz` (benchrun's records,
+the watcher's and the thread-CPU probe's, the context-switch analyses, the accounts).
+
 ## Unresolved
+
+- The measured Qdrant binaries were built before a lint-only edit of the driver (a hex
+  literal's grouping and `is_multiple_of`), which changes nothing it does.
+- Qdrant writes `.qdrant-initialized` in its working directory (the runner's `bench/`) on
+  every start; it is harmless and untracked.
 
 - What makes a run settle on one search runtime or the other, and the third level of work
   within runs on search-cpu.
