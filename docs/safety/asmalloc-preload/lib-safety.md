@@ -58,9 +58,12 @@ What the preload setting adds:
   which ends the process through `Os::abort` (raw system calls, no allocation). Nothing the
   library calls can throw: the system call instruction, glibc's `__errno_location`, the
   compiler's `memcpy` and `memset`, and the C functions the background thread's start uses
-  (`getenv`, `sigfillset`, `pthread_sigmask`, `pthread_create`, `nanosleep`; PRELOAD-03).
-  `nanosleep` is a cancellation point, at which a cancelled thread unwinds, but nothing can
-  cancel the background thread: its identifier never leaves the function that creates it.
+  (`getenv`, `sigfillset`, `pthread_sigmask`, `sigaltstack`, the `pthread_attr` functions,
+  `pthread_create`, `pthread_setname_np`, `pthread_detach`, `dlsym`, `getpid`; BACKGROUND-01,
+  PRELOAD-03). None is a cancellation point, at which a cancelled thread would unwind. The
+  background thread itself waits with the `futex` system call, made directly, which is not
+  one either, and nothing can cancel it: its identifier never leaves the function that creates
+  it.
   So no exception ever unwinds out through the library's frames.
 
 ## PRELOAD-02: `#[unsafe(no_mangle)] extern "C" fn asmalloc_preload_no_unwinding`, and the binding of `rust_eh_personality` to it
@@ -80,4 +83,4 @@ only reachable when an exception unwinds into the library's own frames, which no
 can start (PRELOAD-01). If one did, it aborts, which is the behaviour Rust defines under
 `panic = "abort"`.
 
-Reviewed: 415b07e
+Reviewed: 3b5a3f5

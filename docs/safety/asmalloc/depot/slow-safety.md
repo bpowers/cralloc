@@ -18,9 +18,12 @@ or a marker, which these calls never pass).
 - For allocation, `level = held.level()`, which `Magazine::record` caps at `capacity = n - 2`,
   so the word is slot `level + 1 <= n - 1`. It is at least slot 1. For free, the level is 0, so
   slot 1.
-- Slots `1..=level` hold its objects: `fill` writes slots `1..=level` and then records `level`;
+- Slots `1..=level` hold its objects: `fill` writes slots `1..=level` and then records `level`
+  (the reordering of a fill that opens a run, `siblings::spread`, moves each of those objects
+  once along the cycles of a permutation of the slots, `Strided::place` being the rank of a
+  position in the strided order and so a bijection, and so neither repeats nor drops one);
   a magazine from a spare stack or the depot had its level recorded by whoever wrote its slots
-  (`retire`, `serve_*`, `take_loaded`, `take_chain`, `launder`) after writing them. An empty
+  (`retire`, `serve_*`, `take_loaded`, `take_chain`, `launder_held`) after writing them. An empty
   magazine has none.
 
 If the store happens, the slab now refers to the magazine and this thread no longer uses
@@ -55,4 +58,4 @@ the CPU misses and its slow path may install its own magazine, or a drain may pu
 there; the install then finds a word that is not zero and stores nothing, and the thread retires
 or serves from the two magazines it still holds, as a failed install does.
 
-Reviewed: 82e8b03
+Reviewed: 3b5a3f5

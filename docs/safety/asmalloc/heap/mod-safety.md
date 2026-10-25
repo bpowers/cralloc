@@ -30,7 +30,8 @@ The routines' slab array is used only with this heap and its depot by (B). The s
 heap's back end. This is the only `Cache::new` outside the depot's own tests, so every slow
 path, heartbeat, collect and drain of every heap rests on (B) and nothing else.
 
-There are two constructions, and each discharges (B).
+One construction ships, and it discharges (B); the simulated heap's (`heap/sim.rs`) is test
+scaffolding, outside the ledger.
 
 **The process's heap** (`unsafe { Bound::new(&HEAP, Real) }` in `global::process`).
 `Real::slabs()` is `front::SLABS`. `Real` is private to the crate, and `SLABS`'s type `Front`
@@ -53,4 +54,4 @@ before it hands a slot out; magazines hold only slots that `fill` handed out). F
 `n` is the layout's size or `len`, both at most the class size, the slot's length. Runs are not
 written. The pointer carries the reservation's provenance (`Space::slot`).
 
-Reviewed: f41dbf9
+Reviewed: 3b5a3f5

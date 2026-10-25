@@ -56,7 +56,13 @@ The allocator's thread is created first, through the same `create`, from no slow
 program's call to `pthread_create` is a moment at which creating a thread is allowed, since
 the program is creating one itself. A program that calls `pthread_create` from a signal
 handler or under a lock that thread creation takes is outside POSIX already. `CREATED_IN`
-makes the creation once per process: a forked child's ID differs from its parent's, so its
-first call creates its own. If the start fails the program's thread is still created.
+keeps all but a process's first call from trying: a forked child's ID differs from its
+parent's, so its first call tries for itself. It is a filter and nothing rests on it. A
+process whose ID equals the one recorded (a descendant that was given the ID of an ancestor
+that has exited, or the first process of a new PID namespace forked by a process that is
+itself number 1) does not try, and gets no thread from this path; a call that does try while
+a thread is running creates none, because the claim in `start_thread` is one compare-and-swap
+of the thread's word, keyed by the process generation (`thread_word`). If the start fails the
+program's thread is still created.
 
-Not yet reviewed.
+Reviewed: 3b5a3f5

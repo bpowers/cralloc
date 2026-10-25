@@ -37,7 +37,8 @@ instruction, and the compiler's model of what it does.
 5. *Memory.* Neither `nomem` nor `readonly` is given. The compiler therefore assumes the block
    may read and write any memory reachable from the pointer arguments, as the kernel does for
    `write` and `openat` (which read a buffer and a path), `read` (which writes a buffer),
-   `rt_sigaction` and `prctl`. No such memory is held in registers across the block.
+   `rt_sigaction` and `prctl`, `mincore` (which writes a vector) and `futex` (which reads the
+   word waited on). No such memory is held in registers across the block.
 6. *Provenance.* Arguments and the result are typed `*mut u8`. A pointer argument is passed with
    its provenance, which inline assembly may use as the caller's preconditions allow. The result
    of `mmap` is the address of a new mapping, and inline assembly, like a foreign function, may
@@ -52,8 +53,8 @@ instruction, and the compiler's model of what it does.
 
 **Call numbers.** The constants in `nr` are the x86-64 numbers of
 `arch/x86/entry/syscalls/syscall_64.tbl`: `read` 0, `write` 1, `close` 3, `mmap` 9, `mprotect`
-10, `munmap` 11, `rt_sigaction` 13, `rt_sigprocmask` 14, `madvise` 28, `getpid` 39, `gettid`
-186, `exit_group` 231, `tgkill` 234, `openat` 257, `getrandom` 318, `membarrier` 324. A wrong
+10, `munmap` 11, `rt_sigaction` 13, `rt_sigprocmask` 14, `mincore` 27, `madvise` 28, `getpid`
+39, `gettid` 186, `futex` 202, `exit_group` 231, `tgkill` 234, `openat` 257, `getrandom` 318, `membarrier` 324. A wrong
 number would make a different call with the same arguments, so each is checked against the
 table; `read`, `close` and `openat` were added for the topology read (`kernel.rs`, KERNEL-10),
 and its tests in `kernel.rs` read real files through them.
@@ -67,4 +68,4 @@ through this block.
 another: the sixteen call numbers against `asm/unistd_64.h`, and items 5 and 7 as they now
 read for `openat` and `read`.
 
-Reviewed: e3614f2
+Reviewed: 3b5a3f5
