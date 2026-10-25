@@ -4,7 +4,7 @@
 # process group of its own, then waits as long as the session ran (two minutes at least) before
 # the next, so teammates' builds get their turn (CLAUDE.md, "How we work"). Lines can be added to
 # the queue while it runs. Each session's output goes to DIR/log/NNN.log, and DIR/done lists
-# what ran, with start, seconds and exit status.
+# what ran, with start, seconds and exit status. QUEUE_GAP_MAX (seconds) caps the gap.
 #
 # Stopping: `touch DIR/stop` ends the loop after the running session; `kill PID` (the loop's PID
 # is in DIR/pid) stops the running session's whole process group as well and leaves nothing
@@ -48,6 +48,10 @@ open(p, "w").write("\n".join(lines))' "$dir/queue" "$line"
   printf '%03d %s %ds exit=%d %s\n' "$n" "$(date -d @"$t0" +%H:%M)" $((t1 - t0)) "$status" "$line" >> "$dir/done"
   rm -f "$dir/running"
   gap=$((t1 - t0))
+  # A session's time includes its wait for the measurement lock while teammates measure, and
+  # scripts/measure gives heavy work its turn itself; QUEUE_GAP_MAX caps the gap so that a busy
+  # lock does not double it.
+  [ -z "${QUEUE_GAP_MAX:-}" ] || [ "$gap" -le "$QUEUE_GAP_MAX" ] || gap=$QUEUE_GAP_MAX
   [ "$gap" -ge 120 ] || gap=120
   # Wait in short steps so a stop file is seen.
   end=$((t1 + gap))
