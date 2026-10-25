@@ -187,6 +187,12 @@ files, so the heap is the anonymous memory, as for Meilisearch. Qdrant's server 
 crate, so its `main.rs` is compiled from cargo's checkout of its repository with its jemalloc
 lines left out (`qdrant/build.rs`). See `qdrant/README.md`.
 
+**A document database in memory.** `surrealdb mem` and `surrealdb mem 1.5M` (in
+`servers-large`) are SurrealDB 3.3.4's in-memory engine holding 750k or 1.5M records with two
+indexes, about 1.7 and 3.8 GiB of heap, filled through its HTTP API as the server starts, then
+read by id, read through the indexes and updated in SurrealQL by 64 connections. See
+`surrealdb/README.md`.
+
 **A GraphQL router.** The Router jobs start `router/subgraphs`, a glibc process on three CPUs
 of the generator's L3, as the upstream: a proxy job's upstream may be a workspace of its own
 (`Upstream::workspace`), which `build-apps` builds with glibc into `target/upstream/`. See

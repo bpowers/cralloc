@@ -99,7 +99,7 @@ impl Model {
     /// A vector near one of the centres: point `id`'s `version`-th value, or (with `query`) the
     /// `id`-th query.
     fn vector(&self, id: u64, version: u64, query: bool) -> Vec<f32> {
-        let tag = if query { 0x7175_6572_79 } else { 0x706f_696e_74 };
+        let tag = if query { 0x0071_7565_7279 } else { 0x0070_6f69_6e74 };
         let mut r = Rng::new(
             self.seed ^ tag ^ id.wrapping_mul(0xd6e8_feb8_6659_fd93) ^ version.wrapping_mul(0xa076_1d64_78bd_642f),
         );
@@ -402,7 +402,7 @@ fn requests(d: &mut Driver) {
         } else {
             body.push_str("{\"query\":");
             vector_json(&mut body, &m.vector(k, 0, true));
-            if r.next() % 5 == 0 {
+            if r.next().is_multiple_of(5) {
                 let _ = write!(
                     body,
                     ",\"filter\":{{\"must\":[{{\"key\":\"category\",\"match\":{{\"value\":\"c{}\"}}}}]}}",

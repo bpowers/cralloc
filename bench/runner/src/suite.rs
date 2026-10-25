@@ -862,14 +862,18 @@ fn large() -> Vec<Large> {
     }
     // SurrealDB's in-memory engine holding 750k records with two indexes, filled as it starts
     // (bench/apps/surrealdb): record reads, index reads and updates in SurrealQL over HTTP.
-    v.push(Large {
-        id: "surrealdb mem".into(),
-        program: Program::App("surrealdb"),
-        args: "serve check={inputs}/requests.http".into(),
-        load: OpenLoad { requests: Some("{inputs}/requests.http"), ..order.clone() },
-        fill_s: 5,
-        r70: SURREALDB_R70,
-    });
+    // The same at twice the records (about 3.8 GiB), for memory: the load still reads and
+    // updates the first 750k, at the same rate.
+    for (id, records) in [("surrealdb mem", 750_000), ("surrealdb mem 1.5M", 1_500_000)] {
+        v.push(Large {
+            id: id.into(),
+            program: Program::App("surrealdb"),
+            args: format!("serve check={{inputs}}/requests.http records={records}"),
+            load: OpenLoad { requests: Some("{inputs}/requests.http"), ..order.clone() },
+            fill_s: 5,
+            r70: SURREALDB_R70,
+        });
+    }
     // connect-rust's services as a log store holding a million records (bench/rpc/src/store.rs):
     // every other request ingests 50 new records (the oldest go), every other one tails the
     // 100 most recent as a server stream, in the Connect protocol over HTTP/1.1.
@@ -898,10 +902,10 @@ const MEILISEARCH_R70: u32 = 930;
 const QDRANT_SEARCH_R70: u32 = 2_470;
 const QDRANT_MIXED_R70: u32 = 1_260;
 
-/// 70% of the slowest allocator's saturated rate on `surrealdb mem`: glibc's 7,945 req/s
-/// (asmalloc 9,701, tcmalloc 9,000, mimalloc 8,898, jemalloc 8,659; triage builds without
-/// LTO, 2026-10-24).
-const SURREALDB_R70: u32 = 5_560;
+/// 70% of the slowest allocator's saturated rate on `surrealdb mem`: glibc's 8,728 req/s
+/// (asmalloc 11,186, tcmalloc 10,460, mimalloc 10,001, jemalloc 9,672; SurrealDB's release
+/// profile, one round, 2026-10-25).
+const SURREALDB_R70: u32 = 6_110;
 
 fn large_job(l: Large, plan: String, rank: &'static str, suffix: &str) -> Job {
     Job {
@@ -914,7 +918,7 @@ fn large_job(l: Large, plan: String, rank: &'static str, suffix: &str) -> Job {
         driver: None,
         load: Some(OpenLoad { plan, rank, ..l.load }),
         metric: Metric::Served,
-        timeout_s: 300,
+        timeout_s: 600,
     }
 }
 
@@ -968,7 +972,14 @@ pub fn servers_large_sat() -> Vec<Job> {
 /// of its first 500 ms are summarised apart (`b5`, `b50`, `b500`, then `b2`), and a minute
 /// after the connections close (`idle`).
 pub fn servers_thread() -> Vec<Job> {
-    let want = ["orders axum cache 2G", "connect store 1M", "meilisearch hn", "qdrant mixed", "surrealdb mem"];
+    let want = [
+        "orders axum cache 2G",
+        "connect store 1M",
+        "meilisearch hn",
+        "qdrant mixed",
+        "surrealdb mem",
+        "surrealdb mem 1.5M",
+    ];
     large()
         .into_iter()
         .filter(|l| want.contains(&l.id.as_str()))
