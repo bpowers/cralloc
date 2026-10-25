@@ -43,7 +43,8 @@
 //! Every value is written in full when it is made. The program's own bookkeeping (the caches'
 //! slot tables, the FIFOs, the transient rings) is mapped with `mmap`, outside the allocator,
 //! and its resident pages are subtracted from the process's: `heap` in a `DRIFT` line is
-//! `RssAnon` less that bookkeeping, and `ratio` is `heap` over `live`.
+//! `RssAnon` less that bookkeeping, and `ratio` is `heap` over `live`. `cgroup` is the
+//! process's cgroup's `memory.current`, everything the kernel charges for it.
 //!
 //! With `account_every=N`, a build that can break its heap down (asmalloc's `memstat`) does
 //! so at every `N`-th sample, at the last sample of the load and at the last quiet one, while
@@ -637,6 +638,19 @@ fn minor_faults() -> u64 {
     stat.rsplit_once(')').and_then(|(_, rest)| rest.split_whitespace().nth(7)).and_then(|f| f.parse().ok()).unwrap_or(0)
 }
 
+/// `memory.current` of this process's cgroup (a run under `scripts/memlimit` has one of its
+/// own): the memory the kernel charges, which counts a huge page that is partly unmapped
+/// whole until the kernel splits it, where the resident set counts only the pages still
+/// mapped. Zero where it cannot be read.
+fn cgroup_current() -> u64 {
+    let cgroup = std::fs::read_to_string("/proc/self/cgroup").unwrap_or_default();
+    let Some(path) = cgroup.lines().find_map(|l| l.strip_prefix("0::")) else { return 0 };
+    std::fs::read_to_string(format!("/sys/fs/cgroup{}/memory.current", path.trim()))
+        .ok()
+        .and_then(|v| v.trim().parse().ok())
+        .unwrap_or(0)
+}
+
 struct Sampler {
     start: Instant,
     /// Breakdowns taken so far.
@@ -661,13 +675,14 @@ impl Sampler {
             -1
         };
         println!(
-            "DRIFT {{\"alloc\":\"{}\",\"kind\":\"{kind}\",\"epoch\":{epoch},\"phase\":\"{phase}\",\"ops\":{},\"t_ms\":{},\"live\":{live},\"rss_anon\":{anon},\"book\":{book},\"heap\":{heap},\"ratio\":{ratio:.5},\"thp\":{},\"pte\":{},\"minflt\":{},\"account\":{tag}}}",
+            "DRIFT {{\"alloc\":\"{}\",\"kind\":\"{kind}\",\"epoch\":{epoch},\"phase\":\"{phase}\",\"ops\":{},\"t_ms\":{},\"live\":{live},\"rss_anon\":{anon},\"book\":{book},\"heap\":{heap},\"ratio\":{ratio:.5},\"thp\":{},\"pte\":{},\"minflt\":{},\"cgroup\":{},\"account\":{tag}}}",
             bench_alloc::NAME,
             run.done.load(Relaxed),
             self.start.elapsed().as_millis(),
             status_field(&rollup, "AnonHugePages:"),
             status_field(&status, "VmPTE:"),
             minor_faults(),
+            cgroup_current(),
         );
         ratio
     }

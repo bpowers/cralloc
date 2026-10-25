@@ -212,13 +212,55 @@ struct Walk {
     /// Free bytes in each page of the region last reported, from its first slot's page up.
     page_free: *mut u32,
     occ: Occupancy,
+    /// One line for each region with a huge-page part: its 2 MiB units in address order by
+    /// occupancy, written after a breakdown.
+    maps: Text,
 }
+
+/// Text in a buffer of the sampler's own; what does not fit is dropped.
+#[derive(Clone, Copy)]
+struct Text {
+    buf: *mut u8,
+    len: usize,
+}
+
+/// The room in a `Text`.
+const TEXT: usize = 1 << 20;
+
+impl std::fmt::Write for Text {
+    fn write_str(&mut self, s: &str) -> std::fmt::Result {
+        if self.buf.is_null() || self.len + s.len() > TEXT {
+            return Ok(());
+        }
+        // SAFETY: the buffer holds TEXT bytes and the write ends inside it.
+        unsafe { self.buf.add(self.len).copy_from_nonoverlapping(s.as_ptr(), s.len()) };
+        self.len += s.len();
+        Ok(())
+    }
+}
+
+impl Text {
+    fn as_str(&self) -> &str {
+        if self.buf.is_null() {
+            return "";
+        }
+        // SAFETY: `len` bytes of the buffer were written from whole strs.
+        std::str::from_utf8(unsafe { std::slice::from_raw_parts(self.buf, self.len) }).unwrap_or("")
+    }
+}
+
+/// A unit's occupancy as one character: `.` not resident, `0` empty, `1` to `4` up to a
+/// quarter, a half, three quarters and less than full, `F` full.
+const UNIT_CHARS: [char; BUCKETS] = ['0', '1', '2', '3', '4', 'F'];
 
 /// The region whose pages `page_free` counts.
 #[derive(Clone, Copy)]
 struct Occupancy {
     active: bool,
     class: usize,
+    index: usize,
+    size: usize,
+    base: usize,
     rec: usize,
     /// The first slot's address, and the page it is in.
     first: usize,
@@ -292,6 +334,24 @@ impl Walk {
         let mut unit: Option<(usize, u64, u64, bool)> = None;
         let mut units = [0u32; BUCKETS];
         let mut pages = [0u32; BUCKETS];
+        let mut maps = self.maps;
+        if o.huge_start < o.carved_end {
+            let _ = write!(
+                maps,
+                "units region={} size={} carved_mib={} huge_from_mib={} map=",
+                o.index,
+                o.size,
+                (o.carved_end - o.base) >> 20,
+                (o.huge_start - o.base) >> 20
+            );
+        }
+        let mut close = |c: u64, u: u64, res: bool| {
+            let ch = if !res || c == 0 { '.' } else { UNIT_CHARS[bucket(u, c)] };
+            if res && c > 0 {
+                units[bucket(u, c)] += 1;
+            }
+            let _ = maps.write_char(ch);
+        };
         for i in 0..o.pages {
             let addr = o.first_page + i * PAGE;
             let carved = (addr + PAGE).min(o.carved_end).saturating_sub(addr.max(o.first)) as u64;
@@ -310,21 +370,20 @@ impl Walk {
                 if let Some((s, c, u, res)) = unit
                     && s != start
                 {
-                    if res && c > 0 {
-                        units[bucket(u, c)] += 1;
-                    }
+                    close(c, u, res);
                     unit = None;
                 }
                 let (s, c, u, res) = unit.unwrap_or((start, 0, 0, false));
                 unit = Some((s, c + carved, u + used, res || resident));
             }
         }
-        if let Some((_, c, u, res)) = unit
-            && res
-            && c > 0
-        {
-            units[bucket(u, c)] += 1;
+        if let Some((_, c, u, res)) = unit {
+            close(c, u, res);
         }
+        if o.huge_start < o.carved_end {
+            let _ = writeln!(maps);
+        }
+        self.maps = maps;
         let cs = &mut self.snap.classes[o.class];
         for b in 0..BUCKETS {
             cs.pages[b] += pages[b];
@@ -385,6 +444,9 @@ impl Visitor for Walk {
             self.occ = Occupancy {
                 active: true,
                 class: region.class.index() as usize,
+                index: region.index,
+                size: region.class.size(),
+                base,
                 rec: self.current,
                 first,
                 first_page,
@@ -621,6 +683,7 @@ impl Sampler {
         w.by_index = [0; MAX_REGIONS];
         w.current = usize::MAX;
         w.occ.active = false;
+        w.maps.len = 0;
         asmalloc::Asmalloc::inspect(w);
         w.snap.t_ms = now_ms() - self.start_ms;
         self.walk.snap.rss = self.rss();
@@ -759,6 +822,11 @@ extern "C" fn run(_: *mut libc::c_void) -> *mut libc::c_void {
             let _ = writeln!(sampler.out, "account tag={request}");
             let snap = sampler.walk.snap;
             Sampler::dump(&mut sampler.out, "acct", &snap);
+            let maps = sampler.walk.maps;
+            for line in maps.as_str().lines() {
+                let _ = writeln!(sampler.out, "acct-{line}");
+            }
+            sampler.out.flush();
             DONE.store(request, Release);
         } else if !sampler.on_demand && now_ms() >= last + sampler.interval_ms {
             last = now_ms();
@@ -849,6 +917,7 @@ extern "C" fn start() {
     let statm = unsafe { libc::open(c"/proc/self/statm".as_ptr(), libc::O_RDONLY | libc::O_CLOEXEC) };
     let (state, scratch, temp) = (map(size_of::<Sampler>()).cast::<Sampler>(), map(SCRATCH), map(TEMP));
     let page_free = map(OCC_PAGES * 4).cast::<u32>();
+    let maps = map(TEXT);
     if fd < 0 || statm < 0 || state.is_null() || scratch.is_null() || temp.is_null() {
         return;
     }
@@ -860,6 +929,7 @@ extern "C" fn start() {
         s.walk.scratch = scratch;
         s.walk.temp = temp;
         s.walk.page_free = page_free;
+        s.walk.maps = Text { buf: maps, len: 0 };
         s.out.fd = fd;
         s.statm = statm;
         s.start_ms = now_ms();

@@ -13,7 +13,7 @@ at the phase's sizes; then nothing for QUIET seconds. The server runs under an 8
 generator under 4 GiB.
 
 Every second the driver writes a JSON line to OUTFILE: the phase (its index, name and seconds
-since it began), the server's anonymous resident memory, its peak resident set, and with the
+since it began), the server's anonymous resident memory, its peak resident set, its cgroup's memory.current, and with the
 `live-bytes` build, the bytes the program holds (bench/alloc/src/live.rs). The program's live
 bytes do not depend on the allocator, so the live-bytes build's run is the denominator for
 every build's, matched by phase and second. Phases begin when the generator has read its file,
@@ -49,6 +49,15 @@ def status(pid):
     except OSError:
         pass
     return out
+
+
+def cgroup_current(pid):
+    """memory.current of the process's cgroup (the server's memlimit scope), or None."""
+    try:
+        line = next(l for l in Path(f"/proc/{pid}/cgroup").read_text().splitlines() if l.startswith("0::"))
+        return int(Path(f"/sys/fs/cgroup{line[3:].strip()}/memory.current").read_text())
+    except (OSError, StopIteration, ValueError):
+        return None
 
 
 def descendant(root, exe):
@@ -147,6 +156,7 @@ def main():
                 "t": round(now - start, 2),
                 "rss_anon": s.get("RssAnon"),
                 "hwm": s.get("VmHWM"),
+                "cgroup": cgroup_current(pid),
                 "live": live.read(),
             }
             log.write(json.dumps(rec) + "\n")
