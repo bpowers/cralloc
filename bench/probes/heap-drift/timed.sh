@@ -14,7 +14,7 @@ root="$(cd "$here/../../.." && pwd)"
 cpus="0-3,8-11"
 case "$job" in
   steady) args="shape=steady live=2Gi ops=1500M samples=30" ;;
-  shift) args="shape=shift live=2Gi ops=1500M phases=3 samples=36" ;;
+  shift) args="shape=shift live=2Gi ops=600M phases=3 samples=36" ;;
   lifetime) args="shape=lifetime ops=2400M phases=4 samples=24 long_permille=5" ;;
   swing) args="shape=swing live=1Gi ops=480M phases=6 samples=36" ;;
   large) args="shape=large live=1Gi ops=240k phases=4 samples=32" ;;

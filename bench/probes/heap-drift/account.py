@@ -4,6 +4,7 @@
 docs/research/heap-drift.md.
 
     python3 -I bench/probes/heap-drift/account.py FILE.memstat [--tags 3,7] [--classes N] [--label final]
+        [--diff A,B] [--history TAGS --sizes S,...] [--where TAG [--sizes S,...]]
 
 For each breakdown (all, or those tagged): the resident heap in MiB by category, with free
 memory split by what a purge could return now (whole free 4 KiB pages outside a huge-page part,
@@ -168,10 +169,50 @@ def history(path, tags, sizes):
             print(f"- {size} {name}: " + " ".join(f"{x:.0f}" for x in xs))
 
 
+def maps(path, tag):
+    """The unit maps written after breakdown `tag`: [(region, size, carved MiB, huge from MiB, map)]."""
+    out, cur = [], None
+    for line in Path(path).read_text().splitlines():
+        if line.startswith("account tag="):
+            cur = int(line.split("=")[1])
+        elif line.startswith("acct-units ") and cur == tag:
+            kv = dict(KV.findall(line))
+            out.append((int(kv["region"]), int(kv["size"]), int(kv["carved_mib"]), int(kv["huge_from_mib"]), kv["map"]))
+    return out
+
+
+def where(path, tag, sizes):
+    """For each region of the classes `sizes` (all, if empty) at breakdown `tag`: where its
+    sparse units are against its dense ones. A unit is dense when more than half its carved
+    bytes are not free, sparse when a quarter or less is. The highest dense unit stands in for
+    the frontier, which the sampler cannot read: the fills that last reached that high found
+    free slots no lower. Units are 2 MiB from where the huge-page part begins."""
+    print(f"\nUnits of the huge-page part at breakdown {tag}, by region (2 MiB each)\n")
+    print("| class | carved MiB | huge from MiB | units | highest dense unit at MiB | sparse above it | sparse below it | sparse runs below | map |")
+    print("|---|---|---|---|---|---|---|---|---|")
+    for region, size, carved, huge, m in sorted(maps(path, tag), key=lambda r: r[1]):
+        if sizes and size not in sizes:
+            continue
+        dense = [i for i, ch in enumerate(m) if ch in "34F"]
+        top = dense[-1] if dense else -1
+        sparse = [i for i, ch in enumerate(m) if ch in "01"]
+        above = sum(1 for i in sparse if i > top)
+        below = [i for i in sparse if i < top]
+        runs = sum(1 for k, i in enumerate(below) if k == 0 or below[k - 1] != i - 1)
+        at = huge + 2 * (top + 1) if top >= 0 else huge
+        shown = m if len(m) <= 80 else m[:80] + "..."
+        print(f"| {size} | {carved} | {huge} | {len(m)} | {at} | {above} | {len(below)} | {runs} | `{shown}` |")
+
+
 def main():
     args = sys.argv[1:]
     if not args:
         sys.exit(__doc__)
+    if "--where" in args:
+        tag = int(args[args.index("--where") + 1])
+        sizes = [int(s) for s in args[args.index("--sizes") + 1].split(",")] if "--sizes" in args else []
+        where(args[0], tag, sizes)
+        return
     if "--history" in args:
         tags = {int(t) for t in args[args.index("--history") + 1].split(",")}
         sizes = [int(s) for s in args[args.index("--sizes") + 1].split(",")]
