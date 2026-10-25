@@ -91,6 +91,13 @@ pub(crate) trait Host {
     /// (`layout::Frontier`).
     fn frontier(&self, region: RegionId) -> &Self::W;
 
+    /// A region's `Tail` word: where its huge-page advice has come off again (`tail::Tail`).
+    fn tail(&self, region: RegionId) -> &Self::W;
+
+    /// The heap's count of regions whose tail word carries a claim's mark (`tail::mark`), so
+    /// that the background thread or a heartbeat looks for them only when there are some.
+    fn tail_marks(&self) -> &Self::W;
+
     /// The class word for regions `64 * index .. 64 * index + 64`.
     fn class_word(&self, index: u32) -> &Self::W;
 
@@ -107,6 +114,10 @@ pub(crate) trait Host {
     /// Advises for or against huge pages over part of a region. `false` if the OS refused;
     /// callers that do not care may ignore it, since it is advice.
     fn advise(&self, region: RegionId, offset: usize, len: usize, advice: HugePages) -> bool;
+
+    /// Asks the OS to split the huge pages that part of a region covers in part, so that a
+    /// purge of their free pages frees memory at once. `false` if the OS refused.
+    fn split(&self, region: RegionId, offset: usize, len: usize) -> bool;
 
     /// Returns part of a region to the OS; it reads as zero afterwards.
     ///

@@ -24,11 +24,13 @@ pub enum Call {
     RegisterFence,
     /// [`crate::os::Os::fence`].
     Fence,
+    /// [`crate::os::Os::split_huge`].
+    SplitHuge,
 }
 
 impl Call {
     /// Every call.
-    pub const ALL: [Call; 9] = [
+    pub const ALL: [Call; 10] = [
         Call::Reserve,
         Call::Commit,
         Call::Purge,
@@ -38,15 +40,19 @@ impl Call {
         Call::Unmap,
         Call::RegisterFence,
         Call::Fence,
+        Call::SplitHuge,
     ];
 
     /// The error an injected failure reports: what Linux reports for the usual cause.
     pub const fn error(self) -> OsError {
         match self {
             // Out of address space or commit charge, or too many mappings.
-            Call::Reserve | Call::Commit | Call::Purge | Call::AdviseHuge | Call::Unmap => {
-                OsError::ENOMEM
-            }
+            Call::Reserve
+            | Call::Commit
+            | Call::Purge
+            | Call::AdviseHuge
+            | Call::Unmap
+            | Call::SplitHuge => OsError::ENOMEM,
             // A range that is not mapped.
             Call::Resident => OsError::ENOMEM,
             // A kernel before 4.14.

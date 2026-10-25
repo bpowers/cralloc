@@ -43,6 +43,9 @@ pub(crate) struct TestHost<W> {
     headers: Box<[(W, W)]>,
     /// Each region's `Frontier` word, which the heap keeps outside the block.
     frontiers: Box<[W]>,
+    /// Each region's `Tail` word, and the count of marked ones (`tail`).
+    tails: Box<[W]>,
+    marks: W,
     class_words: Box<[W]>,
     top: W,
     /// For each heap-wide slot, which of its pages (counting from the slot's first page) hold
@@ -78,6 +81,8 @@ impl<W: TestWord> TestHost<W> {
             meta,
             headers,
             frontiers: (0..regions).map(|_| W::new(None)).collect(),
+            tails: (0..regions).map(|_| W::new(None)).collect(),
+            marks: W::new(None),
             class_words: (0..64).map(|_| W::new(None)).collect(),
             top: W::new(None),
             dirty: (0..regions as u64 * slots)
@@ -233,6 +238,14 @@ impl<W: TestWord> Host for TestHost<W> {
         &self.frontiers[region.index()]
     }
 
+    fn tail(&self, region: RegionId) -> &W {
+        &self.tails[region.index()]
+    }
+
+    fn tail_marks(&self) -> &W {
+        &self.marks
+    }
+
     fn class_word(&self, index: u32) -> &W {
         &self.class_words[index as usize]
     }
@@ -255,6 +268,12 @@ impl<W: TestWord> Host for TestHost<W> {
     }
 
     fn advise(&self, _: RegionId, offset: usize, len: usize, _: HugePages) -> bool {
+        let page = self.layout.page_size();
+        assert!(offset.is_multiple_of(page) && len.is_multiple_of(page) && len > 0);
+        true
+    }
+
+    fn split(&self, _: RegionId, offset: usize, len: usize) -> bool {
         let page = self.layout.page_size();
         assert!(offset.is_multiple_of(page) && len.is_multiple_of(page) && len > 0);
         true

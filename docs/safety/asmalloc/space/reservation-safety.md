@@ -32,11 +32,11 @@ reservation valid until it is unmapped or that value is dropped, so liveness red
 unmapped". The invariant ends only through the unsafe `Space::unmap`, whose callers promise that
 no copy is used afterwards and that it is not a published space.
 
-## RESERVATION-01: the range calls in `commit`, `advise_huge` and `wipe_on_fork`
+## RESERVATION-01: the range calls in `commit`, `advise_huge`, `split_huge` and `wipe_on_fork`
 
-**Preconditions of `Os::commit`, `Os::advise_huge` and `Os::wipe_on_fork`.** The range is
-page-aligned, a whole number of pages, not empty, and inside one live reservation made by the
-same `Os` value. None of the three changes contents in this process.
+**Preconditions of `Os::commit`, `Os::advise_huge`, `Os::split_huge` and `Os::wipe_on_fork`.**
+The range is page-aligned, a whole number of pages, not empty, and inside one live reservation
+made by the same `Os` value. None of the four changes contents in this process.
 
 **Proof.** `check` returned, so `is_callable_range` held:
 

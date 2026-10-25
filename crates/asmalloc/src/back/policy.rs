@@ -150,6 +150,26 @@ pub const PURGE_CAP_WORDS: usize = 1 << 14;
 /// quarter of a region instead, and at least one huge page.
 pub const HUGE_AFTER_HUGE_PAGES: usize = 8;
 
+/// When claims reach above a region's tail (`tail`), the advice goes back on up to the
+/// frontier and this many huge pages beyond it: 8, or 16 MiB. With none, a class that grows
+/// back into its tail moved the boundary about ten times an interval, a call each that takes
+/// the address-space lock; 8 cut that five times and 32 seven times, with no change in memory.
+/// It is bounded because under the advice khugepaged rebuilds any huge page with one page in
+/// use, so advice over units that stay sparse brings their memory back
+/// (`docs/research/huge-tail.md`).
+pub const TAIL_HEADROOM_HUGE_PAGES: u32 = 8;
+
+/// The leaf words of a huge page above the frontier that the walk's cheap look samples before
+/// it reads the huge page a page at a time: 8, evenly spread. Reading a dense huge page a page
+/// at a time cost the background thread four times main's walk at the start of a server's
+/// burst (`docs/research/huge-tail.md`, "The burst start").
+pub const TAIL_SAMPLE_WORDS: u32 = 8;
+
+/// A huge page above the frontier is walked a page at a time only if at least this many of
+/// its sampled words are wholly free: 4 of 8, so about half its slots or more. The stranded
+/// huge pages the rule is for hold a few objects each.
+pub const TAIL_SPARSE_WORDS: u32 = 4;
+
 /// Only classes with at least this many slots to a page get huge pages: 4, so classes up
 /// to 1 KiB. Small objects are dense in their pages, so a huge page holds what the program
 /// uses. A block of a page or more is often touched in part, and with huge pages every part

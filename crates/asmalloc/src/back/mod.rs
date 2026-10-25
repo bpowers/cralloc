@@ -50,6 +50,7 @@ pub mod policy;
 mod purge;
 mod region;
 mod run;
+mod tail;
 mod tree;
 mod word;
 
@@ -66,7 +67,7 @@ mod verify;
 #[cfg(kani)]
 mod verify_slow;
 
-use self::host::{ClassHost, ClassState, Frontiers, Headers, RegionHeader};
+use self::host::{ClassHost, ClassState, Frontiers, Headers, RegionHeader, Tails};
 use crate::classes::{COUNT, Class};
 use crate::lined::{LINE, Lined};
 use crate::os::{Os, OsError};
@@ -115,6 +116,11 @@ pub struct State<O: Os> {
     headers: Lined<Headers>,
     /// Each region's frontier, for small classes (`host::Frontiers`).
     frontiers: Lined<Frontiers>,
+    /// Each region's tail word (`host::Tails`), and the count of those a claim marked
+    /// (`tail`), on a line of its own: read by every slow path's heartbeat, written when a
+    /// claim climbs into a tail and when the advice goes back on.
+    tails: Lined<Tails>,
+    marks: Lined<word::Atomic>,
     /// The background thread's word (`crate::thread_word`): read by every slow path, written
     /// a few times in a process's life.
     thread: Lined<crate::thread_word::ThreadWord>,
@@ -265,6 +271,8 @@ const _: () = {
         + lines(size_of::<[AtomicUsize; MAX_REGIONS]>())
         + lines(size_of::<[[u64; 2]; MAX_REGIONS]>())
         + lines(size_of::<[u64; MAX_REGIONS]>())
+        + lines(size_of::<[u64; MAX_REGIONS]>())
+        + 1
         + lines(size_of::<hold::Hold>());
     assert!(
         size_of::<State<crate::os::linux::LinuxOs>>()
@@ -306,6 +314,8 @@ impl<O: Os> State<O> {
             run_sizes: Lined::new([const { AtomicUsize::new(0) }; MAX_REGIONS]),
             headers: Lined::new([const { RegionHeader::new() }; MAX_REGIONS]),
             frontiers: Lined::new([const { word::Atomic::zero() }; MAX_REGIONS]),
+            tails: Lined::new([const { word::Atomic::zero() }; MAX_REGIONS]),
+            marks: Lined::new(word::Atomic::zero()),
             thread: Lined::new(crate::thread_word::ThreadWord::new()),
             hold: Lined::new(hold::Hold::new()),
         }
@@ -439,6 +449,8 @@ impl<'a, O: Os> Back<'a, O> {
             state,
             &self.state.headers,
             &self.state.frontiers,
+            &self.state.tails,
+            &self.state.marks,
             layout,
         ))
     }
