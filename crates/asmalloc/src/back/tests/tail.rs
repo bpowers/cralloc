@@ -334,6 +334,8 @@ fn trim_returns_the_tails_at_once() {
     let back = state.get_or_reserve().unwrap();
     let os = state.os();
     let (kept, freed) = stranded(&back);
+    // Fills no longer reach the tail: the advice comes off above the frontier only.
+    forget_reuse(&back);
     let (_, charged) = memory(os);
     back.trim();
     let (_, after) = memory(os);
@@ -682,4 +684,285 @@ fn the_cheap_look_moves_its_samples_with_the_salt() {
         .filter(|&salt| tail::look(&host, region0, unit, salt).sparse)
         .count();
     assert!(found >= 12, "{found} of 16 looks found two free pages");
+}
+
+/// Two regions of the class carved, every slot painted; returns the slots and, with `first`,
+/// the first region, which the class carved whole, else the second, with its base address.
+/// The first region's huge-page part starts at its second huge page.
+fn carved<'a>(back: &Back<'a, Sim>, first: bool) -> (Vec<*mut u8>, crate::space::RegionId, usize) {
+    let region = back.space().plan().region_size();
+    let slots = fill(back, class(), 2 * region / C);
+    for &p in &slots {
+        paint(p, C, 7);
+    }
+    let which = if first {
+        slots[0]
+    } else {
+        slots[slots.len() - 1]
+    };
+    let (region, base) = region_of(back, which);
+    (slots, region, base)
+}
+
+/// Gives back every slot of `region` (at `base`) whose page, counted from the region's start,
+/// `free` says.
+fn free_pages<'a>(
+    back: &Back<'a, Sim>,
+    slots: &[*mut u8],
+    base: usize,
+    free: impl Fn(usize) -> bool,
+) -> Vec<*mut u8> {
+    let region = back.space().plan().region_size();
+    let freed: Vec<*mut u8> = slots
+        .iter()
+        .copied()
+        .filter(|p| (base..base + region).contains(&p.addr()) && free((p.addr() - base) / page()))
+        .collect();
+    for chunk in freed.chunks(64) {
+        // SAFETY: the test holds these slots and gives them up.
+        unsafe { back.launder(class(), chunk) };
+    }
+    freed
+}
+
+/// The split is the walk's own count's to decide, a cut and not a rate: a huge page with three
+/// of its sixteen pages free, a run the walk would take, is never split however many laps
+/// sample it, and one half free is. Nor does a run of free pages reach across into the huge
+/// page below: the lower one's top pages are free and the upper one's bottom pages too, a run
+/// of seven pages across the boundary, and the lower one stays whole.
+#[test]
+#[cfg_attr(miri, ignore)]
+fn a_huge_page_is_split_only_past_a_quarter_free_and_a_run_stays_in_its_huge_page() {
+    let state = state::<Standard>();
+    let back = state.get_or_reserve().unwrap();
+    let os = state.os();
+    let (slots, second, base) = carved(&back, true);
+    let hp = huge() / page();
+    let freed = free_pages(&back, &slots, base, |p| {
+        let (unit, at) = (p / hp, p % hp);
+        match unit {
+            // Its top three pages: under a quarter free.
+            1 => at >= hp - 3,
+            // Half free, in runs of four, its bottom four pages among them.
+            2 => at % 8 < 4,
+            _ => false,
+        }
+    });
+    assert!(!freed.is_empty());
+    age_and_beat(&back, 30);
+    let start = back.space().region(second);
+    let at = |n: usize| start.map_addr(|a| a.saturating_add(n * huge()));
+    assert!(
+        !os.huge_mapped(at(2)),
+        "the half-free huge page was not split"
+    );
+    assert!(
+        os.huge_mapped(at(1)),
+        "a huge page under a quarter free was split, or a run reached into it from above"
+    );
+}
+
+/// The walk passes a dense huge page above the frontier at its cheap look, and does not read
+/// it a page at a time: a step over a tail whose every page holds a live slot reads a few
+/// words a huge page.
+#[test]
+#[cfg_attr(miri, ignore)]
+fn the_walk_reads_a_dense_huge_page_at_a_look() {
+    let state = state::<Standard>();
+    let back = state.get_or_reserve().unwrap();
+    let (slots, region, base) = carved(&back, true);
+    // Every page keeps its first slot.
+    let per_page = page() / C;
+    let freed: Vec<*mut u8> = slots
+        .iter()
+        .copied()
+        .filter(|p| p.addr() >= base && !((p.addr() - base) / C).is_multiple_of(per_page))
+        .collect();
+    for chunk in freed.chunks(64) {
+        // SAFETY: the test holds these slots and gives them up.
+        unsafe { back.launder(class(), chunk) };
+    }
+    forget_reuse(&back);
+    let (purged, read, _, _) = back.purge_region(
+        class().class(),
+        region,
+        usize::MAX,
+        usize::MAX,
+        true,
+        super::super::purge::Scope::Idle,
+        false,
+        false,
+    );
+    assert_eq!(purged, 0);
+    let units = back.space().plan().region_size() / huge();
+    let hp = huge() / page();
+    // A page a word for this class: a walk a page at a time reads a word a page and more.
+    assert!(
+        read < units * hp,
+        "{read} words read over {units} dense huge pages of {hp} pages"
+    );
+}
+
+/// `lower_walked`: a pass or a growth payment that ends partway through a region lowers its
+/// boundary there, without waiting for the walk to reach the region's bottom.
+#[test]
+#[cfg_attr(miri, ignore)]
+fn a_pass_that_ends_inside_a_region_lowers_its_boundary() {
+    let state = state::<Standard>();
+    let back = state.get_or_reserve().unwrap();
+    let (kept, _) = stranded(&back);
+    forget_reuse(&back);
+    let (region, _) = region_of(&back, kept[kept.len() - 1]);
+    let units = (back.space().plan().region_size() / huge()) as u32;
+    let host = back.host(class().class()).unwrap();
+    tail::note(&host, region, units - 1);
+    back.state.walk.purge_at.store(
+        region.index() as u32 + 1,
+        core::sync::atomic::Ordering::Relaxed,
+    );
+    back.lower_walked();
+    assert_eq!(word_at(&back, kept[kept.len() - 1]).from, units - 1);
+}
+
+/// The background thread is woken for a mark, and sleeps through one it cannot act on: a
+/// thread's heartbeat says there is work once a claim marked a region; `purge_due` says so
+/// too; and after the kernel refused a raise neither does until the next interval, though the
+/// region keeps its mark.
+#[test]
+#[cfg_attr(miri, ignore)]
+fn the_thread_is_woken_for_a_mark_and_not_for_a_refused_raise() {
+    let state = state::<Standard>();
+    let back = state.get_or_reserve().unwrap();
+    let os = state.os();
+    let (kept, _) = stranded(&back);
+    age_and_beat(&back, 12);
+    let awake = crate::thread_word::Snapshot(crate::thread_word::AWAKE);
+    while back.heartbeat_for(&|| back.now(), awake) {
+        while back.thread_purge_steps(&|| back.now()).more {}
+    }
+    assert!(!back.purge_due(&|| back.now()));
+    let mut held = Vec::new();
+    while back.state.marks.load() == 0 {
+        let more = fill(&back, class(), 64);
+        assert!(!more.is_empty());
+        held.extend(more);
+    }
+    assert!(
+        back.heartbeat_for(&|| back.now(), awake),
+        "a mark woke nobody"
+    );
+    assert!(
+        back.purge_due(&|| back.now()),
+        "the thread would sleep on a mark"
+    );
+    os.set_faults(Call::AdviseHuge, Faults::ALWAYS);
+    let _ = back.thread_purge_steps(&|| back.now());
+    let marked =
+        (0..back.walk_regions()).any(|index| Tail::unpack(back.state.tails[index].load()).want);
+    assert!(marked, "a refused raise dropped the mark");
+    assert!(
+        !back.purge_due(&|| back.now()),
+        "the thread would retry a refused raise in the same interval"
+    );
+    os.set_faults(Call::AdviseHuge, Faults::NONE);
+    os.advance_clock(DECAY_TICKS);
+    beat(&back);
+    assert!(
+        back.purge_due(&|| back.now())
+            || !(0..back.walk_regions())
+                .any(|index| Tail::unpack(back.state.tails[index].load()).want),
+        "the mark was forgotten after the interval"
+    );
+    let _ = kept;
+}
+
+/// The fork hook, end to end: the child's first slow path draws its generation, the depot
+/// tells the back end (`Source::forked`), and every inherited tail word asks for a repair,
+/// loses an owner bit no thread of the child holds, and shows its mark to the lookers.
+#[test]
+#[cfg_attr(miri, ignore)]
+fn a_fork_child_repairs_its_tails_at_its_first_slow_path() {
+    use core::alloc::{GlobalAlloc, Layout};
+    let heap = crate::heap::SimHeap::<Standard>::new();
+    let layout = Layout::from_size_align(64, 8).unwrap();
+    // SAFETY: valid layouts; each block is freed once.
+    let first = unsafe { heap.alloc(layout) };
+    assert!(!first.is_null());
+    // The parent draws its generation (a drain needs one), so the child's draw is a child's.
+    let _ = heap.drain(0);
+    let back = heap.heap().back().unwrap();
+    let stuck = Tail {
+        from: 2,
+        want: true,
+        busy: true,
+        stamp: back.epoch() as u32,
+        ..Tail::default()
+    };
+    back.state.tails[0].store(stuck.pack());
+    back.state.marks.fetch_and(0);
+    // SAFETY: nothing else runs.
+    unsafe { heap.os().wipe_for_fork() };
+    let mut held = Vec::new();
+    for _ in 0..64 {
+        // SAFETY: as above.
+        let p = unsafe { heap.alloc(layout) };
+        assert!(!p.is_null());
+        held.push(p);
+        if Tail::unpack(back.state.tails[0].load()).repair {
+            break;
+        }
+        // The child's first draw, if no slow path has made it yet.
+        let _ = heap.drain(0);
+    }
+    let word = Tail::unpack(back.state.tails[0].load());
+    assert!(word.repair && !word.busy && word.want, "{word:?}");
+    assert_ne!(back.state.marks.load(), 0);
+    // SAFETY: as above.
+    unsafe {
+        for p in held {
+            heap.dealloc(p, layout);
+        }
+        heap.dealloc(first, layout);
+    }
+}
+
+/// A raise whose headroom reaches past the huge page that holds the watermark goes to the
+/// region's end: above the watermark nothing is touched, and a class growing there faults
+/// huge pages again. In a region far longer than the headroom.
+#[test]
+#[cfg_attr(miri, ignore)]
+fn a_raise_past_the_watermark_goes_to_the_end() {
+    let state = state::<Native>();
+    let back = state.get_or_reserve().unwrap();
+    let region_bytes = back.space().plan().region_size();
+    let slots = fill(&back, class(), 4 * region_bytes / C);
+    assert!(!slots.is_empty());
+    let host = back.host(class().class()).unwrap();
+    let layout = *host.layout();
+    let hp = layout.huge_pages();
+    let units = layout.region_pages() / hp;
+    let plan = back.space().plan();
+    let carved = |region: crate::space::RegionId| {
+        layout.carved_pages(Grow::unpack(host.grow(region).load()).carved)
+    };
+    let region = (0..back.walk_regions())
+        .filter_map(|index| plan.region(index))
+        .filter(|&region| back.state.table.get(region) == RegionTag::Class(class().class()))
+        .max_by_key(|&region| carved(region))
+        .unwrap();
+    let from = Hints::unpack(host.hints(region).load()).huge_from.unwrap();
+    let first = from / hp;
+    assert!(first + 4 + super::super::policy::TAIL_HEADROOM_HUGE_PAGES < units);
+    tick(&back, 2);
+    let epoch = back.epoch();
+    tail::note(&host, region, first + 1);
+    assert_eq!(tail::lower(&host, region, from, epoch), tail::Change::Done);
+    assert!(tail::mark(&host, region, (first + 1) * hp + 1));
+    // The watermark two huge pages up: the headroom reaches past it.
+    let top = (first + 3) * hp;
+    assert_eq!(
+        tail::raise(&host, region, from, (first + 1) * hp + 1, top, epoch),
+        tail::Change::Done
+    );
+    assert_eq!(Tail::unpack(host.tail(region).load()).from, 0);
 }

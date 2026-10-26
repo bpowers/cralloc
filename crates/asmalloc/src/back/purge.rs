@@ -177,16 +177,20 @@
 //! **The tail** (`tail`). Above the frontier, rounded up to a huge page, the huge pages hold
 //! what fills left behind. Every step looks at each of them once at its top: one wholly free
 //! goes back whole, as below; any other gets the cheap look (`tail::look`), a few sampled
-//! pages. One the look calls dense is passed whole, and a step that only counts passes every
-//! one with the look's estimate, so that a lap that returns nothing reads a few words a huge
-//! page more than main's did. A step that may return memory
-//! walks a sparse one a page at a time from the cursor, in runs within the huge page, asking
-//! the kernel to split it over each run before returning the run; if the split is refused the
-//! run stays. On a request's slow path a split counts as the step's whole budget, so such a
-//! step makes one at most. The lowest huge page a step returned part of is noted in the
-//! region's tail word, and when the walk reaches the bottom of the region (or a pass or a
-//! growth payment ends in it) the advice comes off from there in one call. `trim` walks the
-//! whole huge-page part so.
+//! pages, at places that move with every lap. One the look calls dense is passed whole, and a
+//! step that only counts passes every one with the look's estimate, so that a lap that returns
+//! nothing reads a few words a huge page more than main's did. A step that may return memory
+//! counts a sparse one exactly (`tail::free_resident`), and splits it only if a quarter of its
+//! pages or more are free and resident (`policy::TAIL_SPLIT_SHARE`): then it walks it a page at
+//! a time from the cursor, in runs within the huge page, asking the kernel to split it over
+//! each run before returning the run. A step resumed inside a huge page that may not return
+//! memory passes the rest of it. On a request's slow path a split asked for counts as the
+//! step's whole budget, refused or not, so such a step asks for one at most; a refused split
+//! leaves the run, and no split is asked for again before the next interval. The lowest huge
+//! page a step returned part of is noted in the region's tail word, and when the walk reaches
+//! the bottom of the region (or a pass or a growth payment ends in it) the advice comes off
+//! from there in one call, never below the frontier as it then stands. `trim` walks the whole
+//! huge-page part so, and splits whatever it can return.
 //!
 //! **Pieces.** A unit of the small-page part is the pages of the slots it covers, so one
 //! large slot is a unit as long as the slot: tens of megabytes. A purge step that may return
@@ -220,8 +224,8 @@ use super::layout::{Hints, Step};
 use super::policy::{
     DECAY_TICKS, PURGE_ANY_RUN_EVERY, PURGE_CAP_WORDS, PURGE_MAINTAIN_STEP_PAGES,
     PURGE_MAINTAIN_STEP_WORDS, PURGE_MAX_RUN_PAGES, PURGE_MAX_RUN_WORDS, PURGE_MIN_RUN_PAGES,
-    PURGE_STEP_PAGES, PURGE_STEP_WORDS, allowance_floor, decay_goal, growth_goal, growth_step,
-    growth_unpaid, retained_cap,
+    PURGE_STEP_PAGES, PURGE_STEP_WORDS, TAIL_SPLIT_SHARE, allowance_floor, decay_goal, growth_goal,
+    growth_step, growth_unpaid, retained_cap,
 };
 use super::region::{self, Purge};
 use super::tail;
@@ -648,7 +652,7 @@ impl<O: Os> Back<'_, O> {
                 false
             }
             // A region whose huge-page advice should go back on is the thread's work too.
-            Duty::Thread => self.note_for_thread(now) | (self.state.marks.load() != 0),
+            Duty::Thread => self.note_for_thread(now) | self.marks_due(),
         }
     }
 
@@ -667,7 +671,8 @@ impl<O: Os> Back<'_, O> {
     }
 
     fn purge_steps_of(&self, now: &dyn Fn() -> u64, size: StepSize) -> PassStep {
-        self.raise_marked();
+        // A request's heartbeat raises one region a step; the thread, all it finds.
+        self.raise_marked(size.heartbeat);
         // The hold's fine count steps on the reading the decay step makes between passes, so
         // that the hold reads the clock itself only while a pass is under way (`hold`).
         let read = core::cell::Cell::new(None);
@@ -781,7 +786,7 @@ impl<O: Os> Back<'_, O> {
         let seen = state.decay.word.load(SeqCst);
         if seen & ACTIVE == 0 && state.growth.load(SeqCst) >= step
             || self.pass_published()
-            || self.state.marks.load() != 0
+            || self.marks_due()
         {
             return true;
         }
@@ -811,7 +816,7 @@ impl<O: Os> Back<'_, O> {
     /// purged (`StepSize::MAINTAIN`), so that a caller that yields between steps holds its
     /// thread for tens of microseconds.
     pub fn decay_pass_step(&self, now: &dyn Fn() -> u64) -> PassStep {
-        self.raise_marked();
+        self.raise_marked(false);
         let mut returned = 0;
         let more = self
             .decay_step_counting(now, StepSize::MAINTAIN, &mut returned)
@@ -1195,9 +1200,13 @@ impl<O: Os> Back<'_, O> {
             Scope::IdleAnyRun | Scope::QuietAnyRun | Scope::All => 1,
         };
         if cursor != 0 && cursor <= floor {
-            // Everything the cursor has left is below the frontier.
+            // Everything the cursor has left is below the frontier: the region is done, and a
+            // note the walk left above the frontier is lowered as at any region's bottom.
             if resume {
                 set_cursor(hints, cursor, 0);
+            }
+            if let Some(huge) = Hints::unpack(hints.load()).huge_from {
+                self.lower_tail(&host, region, huge);
             }
             return (0, 1, true, 0);
         }
@@ -1214,10 +1223,12 @@ impl<O: Os> Back<'_, O> {
         // Where the last run this call purged began: a run that ends there is the tail of a
         // longer one that the cap on a run's length cut, and goes whatever its length.
         let mut below_purged = None;
-        // On a request's slow path a split counts as a whole step (`tail`): once one is made,
-        // the step ends after the run it returns, as one that had returned its pages would.
-        // The background thread's steps, and `trim`, are bounded only by their budgets.
+        // On a request's slow path a split counts as a whole step (`tail`), refused or not:
+        // once one is asked for, the step ends after the run, as one that had returned its
+        // pages would. The background thread's steps, and `trim`, are bounded only by their
+        // budgets.
         let mut split = false;
+        let salt = self.state.walk.laps.load(Relaxed);
         let done = loop {
             // Not before the first unit: the look above may have spent the whole budget, and
             // a call that then gave up would leave the cursor at the top for the next call to
@@ -1246,7 +1257,8 @@ impl<O: Os> Back<'_, O> {
                         zone,
                         floor,
                         min_run,
-                        salt: self.epoch() as u32,
+                        salt,
+                        cut: resume,
                         may_return: may_return && purged < limit,
                         below_purged,
                         room: Room {
@@ -1421,9 +1433,50 @@ impl<O: Os> Back<'_, O> {
         }
         if done && let Some(huge) = Hints::unpack(hints.load()).huge_from {
             // Once a pass a region: the advice comes off over what the walk returned part of.
-            tail::lower(&host, region, huge, self.epoch());
+            self.lower_tail(&host, region, huge);
         }
         (purged, read, done, found)
+    }
+
+    /// Lowers `region`'s boundary (`tail::lower`) unless the kernel refused a lowering in this
+    /// interval, and notes a refusal. The owner's give-back may leave a claim's mark it
+    /// answers for (`tail`, "give_back"): the background thread is woken for it, as a claim's
+    /// heartbeat would wake it.
+    fn lower_tail(&self, host: &ClassHost<'_, O>, region: RegionId, huge: u32) {
+        if self.tail_refused(REFUSED_LOWER) {
+            return;
+        }
+        if tail::lower(host, region, huge, self.epoch()) == tail::Change::Refused {
+            self.refuse_tail(REFUSED_LOWER);
+        }
+        if self.marks_due() {
+            self.state.thread.rouse_any(self.space.os());
+        }
+    }
+
+    /// Whether the kernel refused a tail call of kind `kind` (`REFUSED_SPLIT`, `_RAISE`,
+    /// `_LOWER`) in the current counted interval: such a call is not tried again before the
+    /// next, so a program the kernel refuses (at `vm.max_map_count`, with its memory locked)
+    /// pays at most one refused call of each kind an interval, and two for a reconciliation.
+    fn tail_refused(&self, kind: u64) -> bool {
+        let seen = self.state.marks.refused.load(Relaxed);
+        seen >> 3 == self.epoch() && seen & kind != 0
+    }
+
+    /// Records that the kernel refused a tail call of kind `kind` in this interval. A hint:
+    /// a lost update costs one more refused call.
+    fn refuse_tail(&self, kind: u64) {
+        let epoch = self.epoch();
+        let word = &self.state.marks.refused;
+        let seen = word.load(Relaxed);
+        let kinds = if seen >> 3 == epoch { seen & 7 } else { 0 };
+        word.store(epoch << 3 | kinds | kind, Relaxed);
+    }
+
+    /// Whether a look for marks would do something now: some region carries a mark and the
+    /// kernel has not refused a raise in this interval.
+    fn marks_due(&self) -> bool {
+        self.state.marks.load() != 0 && !self.tail_refused(REFUSED_RAISE)
     }
 
     /// One look of the walk at the huge-page part above the frontier (`tail`), or `None` when
@@ -1463,6 +1516,7 @@ impl<O: Os> Back<'_, O> {
             part: None,
             split: false,
         };
+        let splits = walk.may_return && !self.tail_refused(REFUSED_SPLIT);
         if end.is_multiple_of(huge) || end == top {
             let unit = Unit { start, end };
             if end.is_multiple_of(huge) {
@@ -1485,13 +1539,31 @@ impl<O: Os> Back<'_, O> {
             }
             let look = tail::look(host, region, unit, walk.salt);
             step.read += look.read;
-            if !look.sparse || !walk.may_return {
+            if !look.sparse || !splits {
                 // What a purge could return: a dense huge page's free pages are left to it.
                 if look.sparse {
                     step.found = look.free * page;
                 }
                 return Some(step);
             }
+            if walk.cut {
+                // The look chose it; the walk's own count decides.
+                let (free, words) = tail::free_resident(host, region, unit);
+                step.read += words;
+                if free * TAIL_SPLIT_SHARE < end - start {
+                    return Some(step);
+                }
+            }
+        } else if !splits {
+            // Resuming inside a huge page that a step which may return memory began, in a step
+            // that may not (it only counts, or the kernel refuses splits): the rest of the huge
+            // page is passed with the look's estimate, and nothing is returned.
+            let look = tail::look(host, region, Unit { start, end }, walk.salt);
+            step.read += look.read;
+            if look.sparse {
+                step.found = look.free * page;
+            }
+            return Some(step);
         }
         let Step::Unit(small) = layout.unit_below(walk.carved, None, end) else {
             return Some(step);
@@ -1521,10 +1593,12 @@ impl<O: Os> Back<'_, O> {
             run.start as usize * page,
             (run.end - run.start) as usize * page,
         );
+        // Asked for, the split counts against a slow path's bound whatever the kernel answers.
+        step.split = true;
         if !host.split(region, offset, len) {
+            self.refuse_tail(REFUSED_SPLIT);
             return Some(step);
         }
-        step.split = true;
         let (outcome, _) = region::purge_unit(host, region, run);
         if let Purge::Done { returned, outgrown } = outcome {
             self.forget_outgrown(outgrown);
@@ -1535,17 +1609,26 @@ impl<O: Os> Back<'_, O> {
     }
 
     /// For the background thread, or a heartbeat where there is none: puts the huge-page
-    /// advice back on in every region where a claim reached above the boundary (`tail::raise`).
-    /// One load while no region is marked. The marks flag is cleared before the regions are
-    /// looked at, so a mark set meanwhile sets it again, and a region whose advice another
-    /// thread owns sets it again too, for the next look.
-    pub(super) fn raise_marked(&self) {
+    /// advice back on where a claim reached above the boundary (`tail::raise`), in every marked
+    /// region, or with `one`, a request's heartbeat, in the first it raises. One load while no
+    /// region is marked.
+    ///
+    /// The marks flag is cleared before the regions are looked at, so a mark set meanwhile
+    /// sets it again. A region whose advice another thread owns keeps its mark and does not set
+    /// the flag: its owner's give-back does (`tail`), so that an owner that does not run cannot
+    /// keep the background thread awake. An owner that never runs again is a thread a fork
+    /// left behind, and the child clears its bit (`Back::distrust_tails`). Once the kernel
+    /// refuses a raise, the region keeps its mark and no raise is tried before the next
+    /// interval; meanwhile the flag stays set but asks nothing of the thread (`marks_due`).
+    pub(super) fn raise_marked(&self, one: bool) {
         let marks = &*self.state.marks;
-        if marks.load() == 0 || marks.compare_exchange(1, 0).is_err() {
+        if marks.load() == 0
+            || self.tail_refused(REFUSED_RAISE)
+            || marks.compare_exchange(1, 0).is_err()
+        {
             return;
         }
         let plan = self.space.plan();
-        let epoch = self.epoch();
         for index in 0..self.walk_regions() {
             let Some(region) = plan.region(index) else {
                 continue;
@@ -1565,24 +1648,51 @@ impl<O: Os> Back<'_, O> {
             let layout = *host.layout();
             let top =
                 layout.carved_pages(super::layout::Grow::unpack(host.grow(region).load()).carved);
+            // The interval read for each region, after the system calls of the last.
+            let epoch = self.epoch();
             let frontier = region::floor(&host, region, epoch);
-            tail::raise(&host, region, huge, frontier, top, epoch);
-            if host.tail(region).load() & tail::WANT != 0 {
-                marks.store(1);
+            match tail::raise(&host, region, huge, frontier, top, epoch) {
+                tail::Change::None => {}
+                tail::Change::Done if !one => {}
+                change => {
+                    if change == tail::Change::Refused {
+                        self.refuse_tail(REFUSED_RAISE);
+                    }
+                    // The regions not looked at keep their marks for the next look.
+                    if index + 1 < self.walk_regions() {
+                        marks.fetch_or(1);
+                    }
+                    return;
+                }
             }
         }
     }
 
-    /// In the child of a fork: asks for a repair on every tail word the child inherited
-    /// (`tail`, "Repair"), one atomic OR each, so that the next change of each region's advice
-    /// first makes the kernel's advice agree with the word. A thread the fork cut off may have
-    /// made a late advice call after its bit was taken over, and could no longer ask for the
-    /// repair itself (`tla/Tail.tla`, `Tail_orphan`). Words that are zero, regions whose advice
-    /// never came off, are left as they are.
+    /// In the child of a fork: asks for a repair on every tail word the child inherited and
+    /// clears its owner bit (`tail`, "Repair"), one compare-and-swap each, so that the next
+    /// change of each region's advice first makes the kernel's advice agree with the word. A
+    /// thread the fork cut off may have made a late advice call after its bit was taken over,
+    /// and could no longer ask for the repair itself (`tla/Tail.tla`, `Tail_orphan`); and an
+    /// owner bit in the child belongs to a thread that does not exist there, so it is cleared
+    /// rather than left to go stale. The one exception is the forking thread itself, if it
+    /// forked from a signal handler in the middle of a change: when it carries on, its give-back
+    /// finds the bit gone and asks for a repair, as a taken-over owner does. A word left with a
+    /// claim's mark sets the marks flag, which the bit's owner would have. Words that are zero,
+    /// regions whose advice never came off, are left as they are.
     pub fn distrust_tails(&self) {
         for word in self.state.tails.iter() {
-            if word.load() != 0 {
-                word.fetch_or(tail::REPAIR);
+            let mut seen = word.load();
+            while seen != 0 {
+                let next = (seen & !tail::BUSY) | tail::REPAIR;
+                match word.compare_exchange(seen, next) {
+                    Ok(_) => {
+                        if seen & tail::WANT != 0 {
+                            self.state.marks.fetch_or(1);
+                        }
+                        break;
+                    }
+                    Err(found) => seen = found,
+                }
             }
         }
     }
@@ -1590,7 +1700,7 @@ impl<O: Os> Back<'_, O> {
     /// Lowers the boundary of the region the walk stands in, if a step returned part of its
     /// huge pages and the walk did not reach the region's bottom: when a pass or a growth
     /// payment ends partway through a region, so that the advice does not wait a pass for it.
-    fn lower_walked(&self) {
+    pub(super) fn lower_walked(&self) {
         let top = self.walk_regions();
         let seen = self.state.walk.purge_at.load(Relaxed);
         let index = if seen == 0 || seen as usize > top {
@@ -1608,10 +1718,15 @@ impl<O: Os> Back<'_, O> {
             return;
         };
         if let Some(huge) = Hints::unpack(host.hints(region).load()).huge_from {
-            tail::lower(&host, region, huge, self.epoch());
+            self.lower_tail(&host, region, huge);
         }
     }
 }
+
+/// Kinds of tail call the kernel may refuse (`Back::tail_refused`).
+const REFUSED_SPLIT: u64 = 1;
+const REFUSED_RAISE: u64 = 2;
+const REFUSED_LOWER: u64 = 4;
 
 /// Where a step of the walk stands above the frontier, for [`Back::tail_step`].
 #[derive(Clone, Copy)]
@@ -1622,8 +1737,12 @@ struct TailWalk {
     zone: u32,
     floor: u32,
     min_run: u32,
-    /// Moves the cheap look's samples from one interval to the next (`tail::look`).
+    /// Moves the cheap look's samples from one look to the next (`tail::look`): the count of
+    /// the walk's laps, which a huge page is looked at once in.
     salt: u32,
+    /// Whether a huge page is split only past the walk's own count (`TAIL_SPLIT_SHARE`):
+    /// every step but `trim`'s.
+    cut: bool,
     /// Whether this step may still return memory.
     may_return: bool,
     below_purged: Option<u32>,

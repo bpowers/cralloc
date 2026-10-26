@@ -92,6 +92,8 @@ run Fork Fork_gen_any_loss  violates NoLoss
 run Tail Tail           ok
 run Tail Tail_norepair  violates Agree
 run Tail Tail_orphan    violates Agree
+run Tail Tail_live      ok
+run Tail Tail_stuck     violates liveness
 # Review: a thread that takes the bit with the interval before the current one takes over a
 # fresh owner (TailStale.tla). Three threads.
 if [ -n "${SLOW:-}" ]; then run TailStale TailStale ok; fi

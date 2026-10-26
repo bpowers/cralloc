@@ -324,7 +324,10 @@ pub(crate) fn reach<H: Host>(host: &H, region: RegionId, last: u32, epoch: u64) 
     let layout = host.layout();
     let page = layout.slot_bytes(last + 1).div_ceil(layout.page_size()) as u32;
     if super::tail::mark(host, region, page) {
-        host.tail_marks().store(1);
+        // Sequentially consistent, as every write the background thread's sleep reads must
+        // be (`crate::thread_word`, "Sleeping"): the slow path that follows reads the thread's
+        // word and wakes it.
+        host.tail_marks().fetch_or(1);
     }
     let format = layout.frontier_format();
     let word = host.frontier(region);

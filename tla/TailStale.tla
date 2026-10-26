@@ -57,7 +57,7 @@
    `orphan` records that such a thread existed; it is for reading traces. *)
 EXTENDS Naturals, FiniteSets, TLC
 
-CONSTANTS Threads, Units, Repair, MaxEpoch, ForkRepair
+CONSTANTS Threads, Units, Repair, MaxEpoch, ForkRepair, StaleAhead
 
 U == 1..Units
 StaleAfter == 2
@@ -91,9 +91,12 @@ Init ==
     /\ orphan = FALSE
     /\ child = FALSE
 
-\* Owned as a thread that read interval e sees it: a stamp ahead of e wraps to
-\* a huge age in the code, so the bit reads as stale.
-OwnedAt(x, e) == x.busy /\ x.stamp <= e /\ e - x.stamp < StaleAfter
+\* Owned as a thread that read interval e sees it. StaleAhead TRUE is the code
+\* the review read: a stamp ahead of e wraps to a huge age, so the bit reads as
+\* stale. FALSE is the fix (Tail::owned): a stamp ahead of the reading is fresh.
+OwnedAt(x, e) ==
+    /\ x.busy
+    /\ IF x.stamp > e THEN ~StaleAhead ELSE e - x.stamp < StaleAfter
 Readings == IF epoch > 0 THEN {epoch - 1, epoch} ELSE {epoch}
 
 \* A walker returns part of unit u and notes it: CAS that lowers `low`.

@@ -168,14 +168,21 @@ pub const TAIL_HEADROOM_HUGE_PAGES: u32 = 8;
 /// the cost of a look at one huge page, and the walk's budget bounds how many it looks at.
 pub const TAIL_SAMPLE_PAGES: u32 = 8;
 
-/// A huge page above the frontier is walked a page at a time, split and returned in part, only
-/// if at least this many of its sampled pages are free and resident: 2 of 8, a quarter of the
-/// huge page or about 512 KiB. Below that, what would go back is not worth the huge page's
-/// mapping and an advice change. Each lap samples other pages (`tail::look`), so a huge page
+/// A huge page above the frontier is counted exactly (`tail::free_resident`), and so may be
+/// split, only if at least this many of its sampled pages are free and resident: 2 of 8, as
+/// the share [`TAIL_SPLIT_SHARE`] asks for. The sample only saves the count's reading on huge
+/// pages that are plainly dense; every lap samples other pages (`tail::look`), so a huge page
 /// misjudged once is judged again. Sampling runs of four pages, as long as the walk's
 /// shortest, instead returned a third as much on the lifetime job, whose stranded huge pages
 /// have free runs of four pages that are rarely aligned to four.
 pub const TAIL_SPARSE_PAGES: u32 = 2;
+
+/// A huge page above the frontier is split, and its free pages returned, only if at least one
+/// page in this many is free and resident by the walk's own count: 4, a quarter of the huge
+/// page or 512 KiB. Below that, what would go back is not worth the huge page's mapping and an
+/// advice change. A cut, not a rate: a huge page under it is never split, however many laps
+/// sample it. `trim` takes everything, and is not held to it.
+pub const TAIL_SPLIT_SHARE: u32 = 4;
 
 /// Only classes with at least this many slots to a page get huge pages: 4, so classes up
 /// to 1 KiB. Small objects are dense in their pages, so a huge page holds what the program

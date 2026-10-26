@@ -43,10 +43,32 @@
                 middle of its change) makes its late call, a fork cuts it off
                 before it can ask for the repair, and in the child the region's
                 advice differs from the word until it next changes (Tail_orphan).
-   `orphan` records that such a thread existed; it is for reading traces. *)
+   `orphan` records that such a thread existed; it is for reading traces.
+
+   Marks (Back::raise_marked). A claim that sets `want` also sets the heap's
+   flag `marks`. A looker clears the flag (one CAS) and then looks at the word:
+   if the region carries a mark and no live owner holds the bit, it takes the
+   bit to raise; if an owner holds it, it leaves the mark and does NOT set the
+   flag again, or an owner that does not run would keep the background thread
+   awake for ever. The owner answers for the mark instead: a give-back that
+   leaves `want` in the word sets the flag, and so does a give-back that finds
+   its bit taken over. A refused raise keeps its mark. The fork child's repair
+   clears the owner bit (no thread of the child owns it, but for the forking
+   thread itself, whose give-back then behaves as a taken-over owner's) and
+   sets the flag if the word carries a mark.
+
+     MarkVisible  whenever every live thread is idle and no fork repair is
+                pending, a word carrying a mark has the flag set. With a looker
+                that runs while the flag is set (the background thread, which
+                does not sleep while marks are due, or the next heartbeat), this
+                is the liveness the code relies on: every mark is looked at
+                again until a raise takes it. Answered checks it as a temporal
+                property under weak fairness of the live threads' steps
+                (Tail_live): a mark not held by an owner is eventually taken by
+                a raise, or the word loses it. *)
 EXTENDS Naturals, FiniteSets, TLC
 
-CONSTANTS Threads, Units, Repair, MaxEpoch, ForkRepair
+CONSTANTS Threads, Units, Repair, MaxEpoch, ForkRepair, ChildClears, Lowerings
 
 U == 1..Units
 StaleAfter == 2
@@ -62,9 +84,11 @@ VARIABLES
     alive,
     orphan,   \* a fork cut off an owner that had been taken over and had made
               \* its late call, before it could ask for the repair
-    child     \* a fork happened and the child has not yet run its repair
+    child,    \* a fork happened and the child has not yet run its repair
+    marks,    \* the heap's flag: some region may carry a mark not yet looked at
+    lowered   \* lowerings taken, counted only if Lowerings # 0
 
-vars == <<adv, w, epoch, returned, th, alive, orphan, child>>
+vars == <<adv, w, epoch, returned, th, alive, orphan, child, marks, lowered>>
 
 Zero == [from |-> 0, low |-> 0, want |-> FALSE, busy |-> FALSE, repair |-> FALSE, stamp |-> 0]
 Idle == [pc |-> "idle", mine |-> Zero, op |-> "none", lo |-> 0, hi |-> 0, ok |-> TRUE, next |-> Zero,
@@ -79,6 +103,8 @@ Init ==
     /\ alive = Threads
     /\ orphan = FALSE
     /\ child = FALSE
+    /\ marks = FALSE
+    /\ lowered = 0
 
 Owned(x) == x.busy /\ epoch - x.stamp < StaleAfter
 
@@ -89,22 +115,43 @@ Note(t, u) ==
     /\ IF (w.low # 0 /\ w.low <= u) \/ (w.from # 0 /\ u >= w.from)
        THEN UNCHANGED w
        ELSE w' = [w EXCEPT !.low = u]
-    /\ UNCHANGED <<adv, epoch, th, alive, orphan, child>>
+    /\ UNCHANGED <<adv, epoch, th, alive, orphan, child, marks, lowered>>
 
 \* A claim reaches into unit u, above the boundary: sets the mark.
 Mark(t, u) ==
     /\ t \in alive /\ th[t].pc = "idle"
     /\ w.from # 0 /\ u >= w.from /\ ~w.want
     /\ w' = [w EXCEPT !.want = TRUE]
-    /\ UNCHANGED <<adv, epoch, returned, th, alive, orphan, child>>
+    /\ marks' = TRUE
+    /\ UNCHANGED <<adv, epoch, returned, th, alive, orphan, child, lowered>>
+
+\* A looker clears the flag, then looks at the word (Look2).
+Look(t) ==
+    /\ t \in alive /\ th[t].pc = "idle"
+    /\ marks
+    /\ marks' = FALSE
+    /\ th' = [th EXCEPT ![t].pc = "look"]
+    /\ UNCHANGED <<adv, w, epoch, returned, alive, orphan, child, lowered>>
+
+\* The looker finds no mark, or an owner: it leaves the word and the flag alone.
+LookSkip(t) ==
+    /\ t \in alive /\ th[t].pc = "look"
+    /\ (~w.want \/ Owned(w))
+    /\ th' = [th EXCEPT ![t] = Idle]
+    /\ UNCHANGED <<adv, w, epoch, returned, alive, orphan, child, marks, lowered>>
 
 \* Take the owner bit, for a lowering or a raise; the call's range is fixed
 \* from the word as taken. A thread that finds the bit owned does nothing.
 Take(t, kind) ==
-    /\ t \in alive /\ th[t].pc = "idle"
+    /\ t \in alive
+    /\ th[t].pc = IF kind = "raise" THEN "look" ELSE "idle"
     /\ ~Owned(w)
     /\ \/ kind = "lower" /\ (w.low # 0 \/ w.repair \/ w.busy)
+          \* Lowerings # 0 bounds them, for the liveness check: in the code a region
+          \* is lowered once a pass, and not again in an interval the kernel refused.
+          /\ (Lowerings = 0 \/ lowered < Lowerings)
        \/ kind = "raise" /\ w.want
+    /\ lowered' = IF kind = "lower" /\ Lowerings # 0 THEN lowered + 1 ELSE lowered
     \* A raise goes up to any unit above the boundary, or to the end.
     /\ \E to \in (w.from + 1)..(Units + 1) :
        \* The owner clears the repair bit as it takes it and remembers that it
@@ -120,7 +167,7 @@ Take(t, kind) ==
                  \* lowering: off over [low, old); raising: on over [from, to)
                  !.lo = IF kind = "lower" THEN w.low ELSE w.from,
                  !.hi = IF kind = "lower" THEN old - 1 ELSE to - 1]]
-    /\ UNCHANGED <<adv, epoch, returned, alive, orphan, child>>
+    /\ UNCHANGED <<adv, epoch, returned, alive, orphan, child, marks>>
 
 \* Reconcile: make the kernel agree with `from` as taken. The OS may refuse
 \* after acting on any subset.
@@ -132,7 +179,7 @@ Reconcile(t) ==
           /\ th' = [th EXCEPT ![t].pc = IF ok THEN "call" ELSE "give",
                              ![t].ok = ok, ![t].called = TRUE,
                              ![t].next = [th[t].mine EXCEPT !.busy = FALSE, !.repair = ~ok]]
-    /\ UNCHANGED <<w, epoch, returned, alive, orphan, child>>
+    /\ UNCHANGED <<w, epoch, returned, alive, orphan, child, marks, lowered>>
 
 \* The advice call. A lowering with nothing below the old boundary, or a raise
 \* of an absent tail, makes none.
@@ -156,12 +203,12 @@ Call(t) ==
                     ![t].next =
                       IF ~ok THEN [base EXCEPT !.repair = TRUE,
                                                !.low = IF th[t].op = "lower" THEN m.low ELSE m.low,
-                                               !.want = IF th[t].op = "raise" THEN FALSE ELSE m.want]
+                                               !.want = m.want]
                       ELSE IF th[t].op = "lower"
                       THEN [base EXCEPT !.from = lo, !.low = 0]
                       ELSE [base EXCEPT !.from = IF hi >= Units THEN 0 ELSE hi + 1,
                                         !.want = FALSE]]
-    /\ UNCHANGED <<w, epoch, returned, alive, orphan, child>>
+    /\ UNCHANGED <<w, epoch, returned, alive, orphan, child, marks, lowered>>
 
 \* Give the bit back: if the word still carries this thread's bit, write the
 \* result, keeping a mark or a lower note set meanwhile; else ask for repair.
@@ -175,19 +222,23 @@ Give(t) ==
                            ELSE IF w.low = 0 THEN n.low
                            ELSE IF n.low < w.low THEN n.low ELSE w.low
                    low1 == IF n.from # 0 /\ low0 >= n.from THEN 0 ELSE low0
-               IN w' = [n EXCEPT !.busy = FALSE, !.stamp = m.stamp,
-                          !.want = n.want \/ (w.want /\ ~m.want),
-                          !.repair = n.repair \/ (Repair /\ w.repair),
-                          !.low = low1]
-          ELSE w' = [w EXCEPT !.repair = IF Repair THEN TRUE ELSE w.repair]
+                   want1 == n.want \/ (w.want /\ ~m.want)
+               IN /\ w' = [n EXCEPT !.busy = FALSE, !.stamp = m.stamp,
+                             !.want = want1,
+                             !.repair = n.repair \/ (Repair /\ w.repair),
+                             !.low = low1]
+                  \* The owner answers for a mark it leaves.
+                  /\ marks' = (marks \/ want1)
+          ELSE /\ w' = [w EXCEPT !.repair = IF Repair THEN TRUE ELSE w.repair]
+               /\ marks' = (marks \/ w.want)
     /\ th' = [th EXCEPT ![t] = Idle]
-    /\ UNCHANGED <<adv, epoch, returned, alive, orphan, child>>
+    /\ UNCHANGED <<adv, epoch, returned, alive, orphan, child, lowered>>
 
 \* Time passes while the program runs.
 Tick ==
     /\ epoch < MaxEpoch
     /\ epoch' = epoch + 1
-    /\ UNCHANGED <<adv, w, returned, th, alive, orphan, child>>
+    /\ UNCHANGED <<adv, w, returned, th, alive, orphan, child, marks, lowered>>
 
 \* A fork leaves a thread behind wherever it is.
 Vanish(t) ==
@@ -196,25 +247,40 @@ Vanish(t) ==
     /\ orphan' = (orphan \/ (th[t].called
                        /\ ~(w.busy /\ w.stamp = th[t].mine.stamp)))
     /\ child' = ForkRepair
-    /\ UNCHANGED <<adv, w, epoch, returned, th>>
+    /\ UNCHANGED <<adv, w, epoch, returned, th, marks, lowered>>
 
-\* The child's first slow path asks for a repair of the tail word (one
-\* fetch_or of the repair bit): it touches neither the owner bit nor anything
-\* an owner answers for, and an owner gives the bit back keeping it.
+\* The child's first slow path asks for a repair of the tail word and, with
+\* ChildClears, clears its owner bit (one CAS): no thread of the child owns it,
+\* and the forking thread, if it was mid-change, gives back as a taken-over
+\* owner. A word carrying a mark sets the flag, as its owner would have.
 ChildRepair ==
     /\ child
-    /\ w' = [w EXCEPT !.repair = TRUE]
+    /\ w' = [w EXCEPT !.repair = TRUE, !.busy = IF ChildClears THEN FALSE ELSE w.busy]
+    /\ marks' = (marks \/ (ChildClears /\ w.want))
     /\ child' = FALSE
-    /\ UNCHANGED <<adv, epoch, returned, th, alive, orphan>>
+    /\ UNCHANGED <<adv, epoch, returned, th, alive, orphan, lowered>>
 
 Next ==
     \/ \E t \in Threads, u \in U : Note(t, u) \/ Mark(t, u)
     \/ \E t \in Threads : Take(t, "lower") \/ Take(t, "raise")
     \/ \E t \in Threads : Reconcile(t) \/ Call(t) \/ Give(t) \/ Vanish(t)
+    \/ \E t \in Threads : Look(t) \/ LookSkip(t)
     \/ Tick
     \/ ChildRepair
 
 Spec == Init /\ [][Next]_vars
+
+\* The live threads' steps are taken when enabled, and a look whenever it is
+\* enabled again and again: the background thread runs while marks are due,
+\* and a heartbeat looks before it steps a pass, but a thread's own lowerings
+\* leave it idle only now and then (strong fairness). Claims, notes, forks
+\* and time are not forced.
+Step(t) ==
+    \/ LookSkip(t) \/ Take(t, "raise") \/ Reconcile(t) \/ Call(t) \/ Give(t)
+LiveSpec ==
+    /\ Spec
+    /\ \A t \in Threads : SF_vars(t \in alive /\ Look(t)) /\ WF_vars(t \in alive /\ Step(t))
+    /\ WF_vars(ChildRepair)
 
 \* Nobody live is mid-change, nobody can still write advice late, the bit is
 \* free, nothing asks for repair: the kernel agrees with the word.
@@ -224,6 +290,14 @@ Quiet ==
     /\ ~w.busy
     /\ ~w.repair
 Agree == Quiet => adv = Want(w.from)
+
+\* A mark nobody is handling is visible to the next looker.
+MarkVisible ==
+    (w.want /\ ~child /\ \A t \in alive : th[t].pc = "idle") => marks
+
+\* Every mark is eventually taken by a raise (the owner bit taken for one), or
+\* the word no longer carries it.
+Answered == w.want ~> (~w.want \/ \E t \in alive : th[t].op = "raise" /\ th[t].pc # "idle")
 
 \* Off only at or above a unit that was returned in part.
 OffOnlyReturned == \A u \in U : adv[u] = "off" => \E r \in returned : r <= u

@@ -116,11 +116,11 @@ pub struct State<O: Os> {
     headers: Lined<Headers>,
     /// Each region's frontier, for small classes (`host::Frontiers`).
     frontiers: Lined<Frontiers>,
-    /// Each region's tail word (`host::Tails`), and the count of those a claim marked
-    /// (`tail`), on a line of its own: read by every slow path's heartbeat, written when a
-    /// claim climbs into a tail and when the advice goes back on.
+    /// Each region's tail word (`host::Tails`), and the flag that some region carries a
+    /// claim's mark (`tail`), on a line of its own: read by every slow path's heartbeat,
+    /// written when a claim climbs into a tail and when the advice goes back on.
     tails: Lined<Tails>,
-    marks: Lined<word::Atomic>,
+    marks: Lined<TailMarks>,
     /// The background thread's word (`crate::thread_word`): read by every slow path, written
     /// a few times in a process's life.
     thread: Lined<crate::thread_word::ThreadWord>,
@@ -225,6 +225,26 @@ struct Clocked {
     unfloored: core::sync::atomic::AtomicBool,
 }
 
+/// The flag that some region's tail word carries a claim's mark (`tail`), which a look for
+/// marks clears and a claim or an owner's give-back sets; and which kinds of tail call the
+/// kernel refused in which interval (`Back::tail_refused`). It reads as the flag.
+struct TailMarks {
+    marks: word::Atomic,
+    /// `interval << 3 | kinds`: the kinds of call (`purge::REFUSED_SPLIT`, `_RAISE`, `_LOWER`)
+    /// refused in that counted interval. One word for the heap, not one a region: what makes
+    /// the kernel refuse (`vm.max_map_count`, locked memory, a kernel without the calls) holds
+    /// for the whole process, and the tail word has no room for an interval a kind.
+    refused: AtomicU64,
+}
+
+impl core::ops::Deref for TailMarks {
+    type Target = word::Atomic;
+
+    fn deref(&self) -> &word::Atomic {
+        &self.marks
+    }
+}
+
 /// [`Walk::returnable`] before the first lap has ended.
 const NO_LAP: usize = usize::MAX;
 
@@ -315,7 +335,10 @@ impl<O: Os> State<O> {
             headers: Lined::new([const { RegionHeader::new() }; MAX_REGIONS]),
             frontiers: Lined::new([const { word::Atomic::zero() }; MAX_REGIONS]),
             tails: Lined::new([const { word::Atomic::zero() }; MAX_REGIONS]),
-            marks: Lined::new(word::Atomic::zero()),
+            marks: Lined::new(TailMarks {
+                marks: word::Atomic::zero(),
+                refused: AtomicU64::new(0),
+            }),
             thread: Lined::new(crate::thread_word::ThreadWord::new()),
             hold: Lined::new(hold::Hold::new()),
         }
@@ -450,7 +473,7 @@ impl<'a, O: Os> Back<'a, O> {
             &self.state.headers,
             &self.state.frontiers,
             &self.state.tails,
-            &self.state.marks,
+            &self.state.marks.marks,
             layout,
         ))
     }
