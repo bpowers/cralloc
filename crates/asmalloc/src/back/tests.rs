@@ -5515,3 +5515,6 @@ mod floor_returnable;
 
 /// The huge-page tail: the rule, its bounded step, its failures and its races.
 mod tail;
+
+/// The adversarial review of the huge-page tail.
+mod tail_review;
