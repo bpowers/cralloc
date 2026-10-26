@@ -873,8 +873,9 @@ pub(crate) unsafe fn purge_part<H: Host>(
         return false;
     }
     let page = layout.page_size();
-    // SAFETY: BACK-REGION-03. the caller's promise, for a range inside the slot: trimming only shrank it.
     let purged =
+        // SAFETY: BACK-REGION-03. the caller's promise, for a range inside the slot: trimming
+        // only shrank it.
         unsafe { host.purge(region, first as usize * page, (end - first) as usize * page) };
     purged && (first, end) == whole
 }

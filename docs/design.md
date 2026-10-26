@@ -721,7 +721,13 @@ their moment differently. In a Rust program the thread is created on a heartbeat
 call that came through the Rust interface, which the C library does not use, and only if
 the calling thread has no signal blocked and is not on a signal stack, the marks of a
 handler; otherwise the next look at the level tries again. A Rust program that keeps a
-signal blocked in every thread never passes that test, and starts the thread itself. The
+signal blocked in every thread never passes that test, and starts the thread itself. One
+case the test cannot see is a limit we accept. A slow path inside a callback of the C
+library's `dl_iterate_phdr`, as when a backtrace is being symbolized, runs under a loader
+lock, and a thread created there can deadlock against another thread inside `dlopen` or
+`dlclose`. It takes the one slow path that creates the thread, once in a process, to fall
+inside such a callback at that moment, and the lock is private to the library, so no slow
+path can test for it. The
 preload library, whose caller may always
 be the C library, creates the thread when the program creates its own first thread, a
 moment that is safe by construction, and leaves it dormant until the heap is over the
@@ -732,12 +738,18 @@ variable is read once, at the process's first slow path, from the environment th
 was started with, by the allocator's own system calls. The C library's `getenv` is not
 safe against a `setenv` in another thread, and a slow path cannot know what the program's
 other threads are doing; a read that waited for the first use could also come after the
-program had entered a sandbox that forbids opening files. The thread asks for a small
-stack. The C library puts the thread's static thread-local data on that stack, and glibc
-grants a request that leaves almost nothing beside it, on which the thread would crash.
-So the request is what the thread's frames need plus the thread-local sizes of the loaded
-modules, which glibc reports, and the allocator takes the library's default where the
-library still refuses (`docs/research/thread-stack.md`). If the thread cannot be
+program had entered a sandbox that forbids opening files. A process that gained
+privileges when it was executed cannot read its own environment this way and ignores the
+variable, as the C library's `secure_getenv` would. The thread takes the C library's
+default stack. The library puts the thread's static thread-local data on that stack, and
+glibc grants a smaller request that leaves almost nothing beside the data, on which the
+thread would crash. Sizing a request to fit needs the loader's list of modules, which is
+read under a lock that a fork does not release in the child and that the program's own
+callbacks run under. The default is sized by the library against that data, and a smaller
+stack would save only address space (`docs/research/thread-stack.md`). A program that
+gives all its threads a stack of a few kilobytes gives this one the same. The thread
+names itself with a system call of the allocator's own, so that nothing opens a file when
+it starts. If the thread cannot be
 created at all the allocator carries on without it. A process under a system-call filter
 that kills on thread creation, which no allocator can detect, must turn it off. The child
 of a fork does not inherit the thread and starts its own on the same conditions, its own

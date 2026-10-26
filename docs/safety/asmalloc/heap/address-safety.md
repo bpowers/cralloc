@@ -51,3 +51,5 @@ both blocks belong to; if no heap exists the function aborts and calls nothing. 
 argument, `zeroed`, as `false`, which asks nothing of `to`: the back end then never leaves out
 a page of `to` on the strength of it reading as zero (it purges the part under any zero source
 page first, BACK-CLASS-03).
+
+Reviewed: 502257d

@@ -1,17 +1,22 @@
 //! The background thread's stack, in a program whose static thread-local data is 252,000
-//! bytes: with the old fixed request of 256 KiB, glibc gave the thread about 5 KiB below that
-//! data, and its first round of work ran into its guard page. The thread now asks for its
-//! need plus the modules' thread-local data (`heap/background.rs`, `stack_size`).
+//! bytes. With a fixed request of 256 KiB, glibc gave the thread about 5 KiB below that data,
+//! and its first round of work ran into its guard page. The thread now takes the C library's
+//! default stack, which the library sizes against its own thread-local data.
 //!
 //! The test runs the thread through its paths (a burst freed, a fragmented heap, growth over
-//! the cap, parking, a wake) and measures how deep its stack has been written: the stack is
-//! fresh memory, zero until used, so the lowest non-zero byte below the top is the deepest
-//! the thread has gone. The thread's stack pointer while it waits in a system call
-//! (`/proc/self/task/<tid>/syscall`) finds its stack; the guard pages, which `/proc/self/mem`
-//! cannot read, bound it. Each phase prints its depth; `docs/research/thread-stack.md` has
-//! the numbers.
+//! the cap, parking, a wake), in the process and again in a child forked from it, and
+//! measures three things (`docs/research/thread-stack.md` has the numbers):
 //!
-//! It takes half a minute, so it is ignored by default; `scripts/gate --all` runs it.
+//! - how deep the thread's stack has been written: the stack is fresh memory, zero until
+//!   used, so the lowest non-zero byte below the top is the deepest the thread has gone;
+//! - how much of the stack is resident (`/proc/self/pagemap`): the touched pages only;
+//! - whether the kernel keeps transparent huge pages off the stack (`nh` in its `VmFlags`),
+//!   which is what keeps an 8 MiB default stack from becoming 2 MiB resident.
+//!
+//! The thread's stack pointer while it waits in a system call (`/proc/self/task/<tid>/syscall`)
+//! finds its stack; its guard pages bound it.
+//!
+//! It takes about a minute, so it is ignored by default; `scripts/gate --all` runs it.
 
 use asmalloc::Asmalloc;
 use std::fs::File;
@@ -28,12 +33,19 @@ static ALLOCATOR: Asmalloc = Asmalloc;
 const TLS: usize = 252_000;
 
 /// How deep below the top of its stack the thread may go in this test: the thread-local
-/// data, the C library's block, and half of what the thread asks for its frames (`NEED`,
-/// 128 KiB).
+/// data, the C library's block, and 64 KiB for frames that reach 34 KiB in a debug build.
 const DEEPEST: u64 = TLS as u64 + (8 << 10) + (64 << 10);
+
+const PAGE: u64 = 4096;
 
 std::thread_local! {
     static BIG: std::cell::Cell<[u8; TLS]> = const { std::cell::Cell::new([0; TLS]) };
+}
+
+unsafe extern "C" {
+    fn fork() -> i32;
+    fn waitpid(pid: i32, status: *mut i32, options: i32) -> i32;
+    fn _exit(code: i32) -> !;
 }
 
 type Block = Box<[u8; 64]>;
@@ -65,61 +77,106 @@ fn stack_pointer(task: &Path) -> u64 {
     }
 }
 
-/// The size of the thread's stack and how far below its top it has been written.
-fn depth(task: &Path) -> (u64, u64) {
+/// The `smaps` entry of the mapping that holds `address`: its range and its `VmFlags`.
+fn mapping(address: u64) -> (u64, u64, String) {
+    let smaps = std::fs::read_to_string("/proc/self/smaps").unwrap();
+    let mut current: Option<(u64, u64)> = None;
+    for line in smaps.lines() {
+        let first = line.split_whitespace().next().unwrap_or("");
+        if let Some((lo, hi)) = first.split_once('-')
+            && let (Ok(lo), Ok(hi)) = (u64::from_str_radix(lo, 16), u64::from_str_radix(hi, 16))
+        {
+            current = Some((lo, hi));
+            continue;
+        }
+        if let (Some((lo, hi)), Some(flags)) = (current, line.strip_prefix("VmFlags:"))
+            && lo <= address
+            && address < hi
+        {
+            return (lo, hi, flags.trim().to_owned());
+        }
+    }
+    panic!("no mapping holds {address:#x}");
+}
+
+/// What the thread's stack looks like now.
+struct Stack {
+    /// The thread's own stack, between the guard pages.
+    size: u64,
+    /// How far below its top it has been written.
+    written: u64,
+    /// How much of it is resident.
+    resident: u64,
+    flags: String,
+}
+
+fn stack(task: &Path) -> Stack {
     let sp = stack_pointer(task);
-    let maps = std::fs::read_to_string("/proc/self/maps").unwrap();
-    let (lo, hi) = maps
-        .lines()
-        .find_map(|line| {
-            let (lo, hi) = line.split_whitespace().next()?.split_once('-')?;
-            let (lo, hi) = (
-                u64::from_str_radix(lo, 16).ok()?,
-                u64::from_str_radix(hi, 16).ok()?,
-            );
-            (lo <= sp && sp < hi).then_some((lo, hi))
-        })
-        .expect("a mapping holds the stack pointer");
-    // Neighbouring stacks may share the mapping; their guard pages, which cannot be read,
-    // separate them.
+    let (lo, hi, flags) = mapping(sp);
+    // Each page's entry in `/proc/self/pagemap` says whether it is present (bit 63) and
+    // whether it is a guard region (bit 58, Linux 6.14), without faulting anything in.
+    // Neighbouring stacks may share the mapping; their guard pages separate them.
+    let pages = ((hi - lo) / PAGE) as usize;
+    let mut entries = vec![0u8; pages * 8];
+    File::open("/proc/self/pagemap")
+        .unwrap()
+        .read_exact_at(&mut entries, lo / PAGE * 8)
+        .unwrap();
+    let entry = |i: usize| u64::from_le_bytes(entries[i * 8..i * 8 + 8].try_into().unwrap());
+    let present = |i: usize| entry(i) >> 63 & 1 != 0;
+    let guard = |i: usize| entry(i) >> 58 & 1 != 0;
+    let at = ((sp - lo) / PAGE) as usize;
+    let first = (0..=at).rev().find(|&i| guard(i)).map_or(0, |g| g + 1);
+    let end = (at..pages).find(|&i| guard(i)).unwrap_or(pages);
+    // Only present pages are read: a read through `/proc/self/mem` maps the zero page into
+    // an absent page, which would then count as present. An absent page was never written.
     let mem = File::open("/proc/self/mem").unwrap();
-    let pages = ((hi - lo) / 4096) as usize;
-    let mut bytes = vec![0u8; pages * 4096];
-    let readable: Vec<bool> = bytes
-        .chunks_mut(4096)
-        .enumerate()
-        .map(|(i, page)| mem.read_exact_at(page, lo + 4096 * i as u64).is_ok())
-        .collect();
-    let at = ((sp - lo) / 4096) as usize;
-    let first = (0..=at).rev().find(|&i| !readable[i]).map_or(0, |g| g + 1);
-    let end = (at..pages).find(|&i| !readable[i]).unwrap_or(pages);
-    let own = &bytes[first * 4096..end * 4096];
+    let mut own = vec![0u8; (end - first) * PAGE as usize];
+    for (i, page) in own.chunks_mut(PAGE as usize).enumerate() {
+        if present(first + i) {
+            mem.read_exact_at(page, lo + PAGE * (first + i) as u64)
+                .unwrap();
+        }
+    }
     let lowest = own.iter().position(|&b| b != 0).unwrap() as u64;
-    (own.len() as u64, own.len() as u64 - lowest)
+    let resident = (first..end).filter(|&i| present(i)).count() as u64 * PAGE;
+    Stack {
+        size: own.len() as u64,
+        written: own.len() as u64 - lowest,
+        resident,
+        flags,
+    }
 }
 
 fn on_a_worker(f: impl FnOnce() + Send + 'static) {
     thread::spawn(f).join().unwrap();
 }
 
-fn run() {
-    // Written and read through `black_box`, so that the data is not optimized away.
-    let at = std::hint::black_box(0);
-    let byte = BIG.with(|big| {
-        let cells = big.as_array_of_cells();
-        cells[at].set(7);
-        std::hint::black_box(cells)[at].get()
-    });
-    assert_eq!(byte, 7);
+/// Starts the thread and runs it through its paths; `who` names the process in the output.
+fn run(who: &str) {
     Asmalloc::start_background().unwrap();
     let (_keep, kept) = mpsc::channel::<()>();
     thread::spawn(move || kept.recv());
-    let task = allocator_task().expect("the allocator's thread");
-    let mut deepest = 0;
+    // The thread names itself as it starts.
+    let started = std::time::Instant::now();
+    let task = loop {
+        if let Some(task) = allocator_task() {
+            break task;
+        }
+        assert!(
+            started.elapsed() < Duration::from_secs(10),
+            "{who}: no thread named asmalloc"
+        );
+        thread::sleep(Duration::from_millis(10));
+    };
+    let mut last = None;
     let mut phase = |name: &str| {
-        let (size, depth) = depth(&task);
-        println!("{name}: stack {size}, written {depth} below its top");
-        deepest = deepest.max(depth);
+        let now = stack(&task);
+        println!(
+            "{who} {name}: stack {}, written {} below its top, resident {}, VmFlags {}",
+            now.size, now.written, now.resident, now.flags
+        );
+        last = Some(now);
     };
     phase("started");
     on_a_worker(|| drop(burst(128)));
@@ -145,9 +202,23 @@ fn run() {
     on_a_worker(|| drop(burst(64)));
     thread::sleep(Duration::from_secs(3));
     phase("woken");
+    let last = last.unwrap();
     assert!(
-        deepest < DEEPEST,
-        "the thread went {deepest} bytes below the top of its stack"
+        last.written < DEEPEST,
+        "{who}: the thread went {} bytes below the top of its stack",
+        last.written
+    );
+    assert!(
+        last.flags.split_whitespace().any(|flag| flag == "nh"),
+        "{who}: the stack may take huge pages: {}",
+        last.flags
+    );
+    // The touched pages, and a few the C library writes around them.
+    let touched = last.written.next_multiple_of(PAGE);
+    assert!(
+        last.resident <= touched + 4 * PAGE,
+        "{who}: {} bytes of the stack resident, {touched} touched",
+        last.resident
     );
 }
 
@@ -165,7 +236,28 @@ fn main() {
         println!("\ntest result: ok. 0 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out");
         return;
     }
-    run();
+    // Written and read through `black_box`, so that the data is not optimized away.
+    let at = std::hint::black_box(0);
+    let byte = BIG.with(|big| {
+        let cells = big.as_array_of_cells();
+        cells[at].set(7);
+        std::hint::black_box(cells)[at].get()
+    });
+    assert_eq!(byte, 7);
+    run("process");
+    // The same in a child forked while the parent's thread runs: the child has no thread and
+    // starts its own.
+    // SAFETY: the child goes on as an ordinary process and ends with `_exit`.
+    let pid = unsafe { fork() };
+    if pid == 0 {
+        let ran = std::panic::catch_unwind(|| run("child"));
+        // SAFETY: ends the child.
+        unsafe { _exit(i32::from(ran.is_err())) }
+    }
+    let mut status = 0;
+    // SAFETY: a valid pointer for the status.
+    unsafe { waitpid(pid, &mut status, 0) };
+    assert_eq!(status, 0, "the fork child failed");
     println!("test thread_stack ... ok");
     println!("\ntest result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out");
 }

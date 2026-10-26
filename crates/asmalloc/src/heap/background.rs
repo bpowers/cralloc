@@ -28,19 +28,22 @@
 //! **What remains.** A slow path through the Rust interface may still be a Rust callback that
 //! the C library runs under one of its locks (the loader's, in a backtrace, say), whose thread
 //! has no signal blocked; if it is the one that finds the thread wanted, `pthread_create` may
-//! wait on that lock. The window is one slow path, once.
+//! wait on that lock. The window is one slow path, once. Inside a `dl_iterate_phdr` callback,
+//! while another thread is in `dlopen` or `dlclose`, that wait is a deadlock with glibc
+//! (BACKGROUND-03, "Locks").
 //!
 //! The thread is created with every signal blocked (the C library's `sigfillset`, which
 //! leaves out its own internal signals, so that a change of credentials still reaches it).
 //! It holds no lock and no allocator state between steps, so process exit and a fork find it
-//! in a state they already handle; a forked child has no thread and decides afresh. Its stack
-//! is sized for its own frames plus the static thread-local data glibc carves out of it
-//! ([`stack_size`], `docs/research/thread-stack.md`). The ledger is
-//! `docs/safety/asmalloc/heap/background-safety.md`.
+//! in a state they already handle; a forked child has no thread and decides afresh. It has the
+//! C library's default stack, as the program's own threads do (`docs/research/thread-stack.md`).
+//! The ledger is `docs/safety/asmalloc/heap/background-safety.md`.
 
 use super::global::{Asmalloc, process};
+use crate::c::errno;
+use crate::os::Os;
 use crate::thread_word::{AWAKE, DORMANT, NONE, OFF, WANTED};
-use core::ffi::{c_char, c_int, c_void};
+use core::ffi::{c_int, c_void};
 use core::fmt;
 use core::ptr;
 use core::sync::atomic::AtomicBool;
@@ -48,17 +51,6 @@ use core::sync::atomic::Ordering::Relaxed;
 
 /// Set once the program calls `maintain` itself: it then gets no default thread.
 pub(super) static OPTED_OUT: AtomicBool = AtomicBool::new(false);
-
-/// The stack the thread's own frames may use: the deepest its rounds reached below the C
-/// library's block was about 8 KiB in a release build and 34 KiB in a debug one
-/// (`docs/research/thread-stack.md`). The stack is mapped lazily, so what is never touched
-/// costs address space only.
-const NEED: usize = 128 << 10;
-
-/// Room for what the C library keeps at the top of the stack besides the modules' static
-/// thread-local data: glibc's thread descriptor, its static TLS surplus for libraries loaded
-/// later, and the padding that aligns them, about 4 KiB together by default.
-const LIBRARY: usize = 64 << 10;
 
 /// `sigset_t`: 1024 bits in glibc and in musl.
 #[repr(C)]
@@ -72,13 +64,6 @@ struct SignalStack {
     size: usize,
 }
 
-/// `pthread_attr_t`: 56 bytes in glibc and in musl on x86-64, aligned to 8.
-#[repr(C, align(8))]
-struct Attr([u8; 56]);
-
-/// `pthread_create`'s error for attributes it cannot honour, such as a stack too small for
-/// the program's static thread-local data.
-const EINVAL: c_int = 22;
 /// What a start reports when the heap could not start, so that there is no generation to key
 /// the thread's word with: `ENOMEM`.
 const ENOMEM: i32 = 12;
@@ -104,11 +89,7 @@ unsafe extern "C" {
         start: extern "C" fn(*mut c_void) -> *mut c_void,
         arg: *mut c_void,
     ) -> c_int;
-    fn pthread_attr_init(attr: *mut Attr) -> c_int;
-    fn pthread_attr_setstacksize(attr: *mut Attr, size: usize) -> c_int;
-    fn pthread_attr_destroy(attr: *mut Attr) -> c_int;
     fn pthread_detach(thread: usize) -> c_int;
-    fn pthread_setname_np(thread: usize, name: *const c_char) -> c_int;
     fn sigfillset(set: *mut SigSet) -> c_int;
     fn pthread_sigmask(how: c_int, set: *const SigSet, old: *mut SigSet) -> c_int;
     fn sigaltstack(stack: *const SignalStack, old: *mut SignalStack) -> c_int;
@@ -188,20 +169,31 @@ fn signals_quiet() -> bool {
     }
 }
 
-/// Creates the thread with `create`, with every signal blocked and a small stack
-/// ([`stack_size`]), names it `asmalloc` and detaches it; the caller's mask is put back after.
-/// If the C library refuses the stack (`EINVAL`), as glibc does when what it keeps at the top
-/// of the stack leaves less than 2 KiB below it, the thread is created once more with the
-/// library's default attributes.
+/// Creates the thread with `create`, with every signal blocked and the C library's default
+/// attributes, and detaches it; the caller's mask and `errno` are put back after, so that the
+/// allocation or free that started it leaves both as it found them. The default stack is the
+/// one the library gives the program's own threads, sized by the library against its own
+/// thread-local data (`docs/research/thread-stack.md`). The thread names itself (`run`).
 ///
 /// # Safety
 ///
 /// `create` is the C library's `pthread_create`, or a function with its contract.
 unsafe fn spawn(create: CreateThread) -> Result<(), StartError> {
-    let size = stack_size();
+    let saved = errno::get();
+    // SAFETY: BACKGROUND-03; `create` passed through from the caller.
+    let made = unsafe { create_detached(create) };
+    errno::set(saved);
+    made
+}
+
+/// [`spawn`] without keeping `errno`.
+///
+/// # Safety
+///
+/// As for [`spawn`].
+unsafe fn create_detached(create: CreateThread) -> Result<(), StartError> {
     let mut all = SigSet([0; 16]);
     let mut old = SigSet([0; 16]);
-    let mut attr = Attr([0; 56]);
     let mut thread = 0usize;
     // SAFETY: BACKGROUND-03.
     unsafe {
@@ -210,128 +202,23 @@ unsafe fn spawn(create: CreateThread) -> Result<(), StartError> {
         if blocked != 0 {
             return Err(StartError(blocked));
         }
-        let attributed = pthread_attr_init(&mut attr) == 0;
-        if attributed {
-            pthread_attr_setstacksize(&mut attr, size);
-        }
-        let mut made = create(
-            &mut thread,
-            if attributed {
-                ptr::from_ref(&attr).cast()
-            } else {
-                ptr::null()
-            },
-            run,
-            ptr::null_mut(),
-        );
-        if attributed {
-            pthread_attr_destroy(&mut attr);
-            if made == EINVAL {
-                made = create(&mut thread, ptr::null(), run, ptr::null_mut());
-            }
-        }
+        let made = create(&mut thread, ptr::null(), run, ptr::null_mut());
         pthread_sigmask(SIG_SETMASK, &old, ptr::null_mut());
         if made != 0 {
             return Err(StartError(made));
         }
-        pthread_setname_np(thread, c"asmalloc".as_ptr());
         pthread_detach(thread);
     }
     Ok(())
 }
 
-/// The stack to ask for: what the thread's frames need, room for the C library's own block,
-/// and, where the library carves the static thread-local data of every module out of the
-/// stack it is asked for (glibc), that data's size, so that a program with much of it does
-/// not leave the thread a stack too small for its rounds. musl adds that data to the size it
-/// is asked for itself (`pthread_create.c`), so there it is not counted twice.
-fn stack_size() -> usize {
-    NEED + LIBRARY + static_tls()
-}
-
-/// The static thread-local data of the loaded modules: the sum of their `PT_TLS` segments,
-/// each rounded up to its alignment. A module loaded with `dlopen` is counted too, though
-/// glibc gives most of those dynamic storage instead, which only asks for more stack than
-/// needed.
-#[cfg(target_env = "gnu")]
-fn static_tls() -> usize {
-    let mut sum = 0usize;
-    // SAFETY: BACKGROUND-05.
-    unsafe { dl_iterate_phdr(add_tls, ptr::from_mut(&mut sum).cast()) };
-    sum
-}
-
-#[cfg(not(target_env = "gnu"))]
-fn static_tls() -> usize {
-    0
-}
-
-/// `dl_phdr_info`'s first four fields, which every glibc passes.
-#[cfg(target_env = "gnu")]
-#[repr(C)]
-struct ModuleInfo {
-    addr: usize,
-    name: *const c_char,
-    phdr: *const ProgramHeader,
-    phnum: u16,
-}
-
-/// `Elf64_Phdr`.
-#[cfg(target_env = "gnu")]
-#[repr(C)]
-struct ProgramHeader {
-    kind: u32,
-    flags: u32,
-    offset: u64,
-    vaddr: u64,
-    paddr: u64,
-    filesz: u64,
-    memsz: u64,
-    align: u64,
-}
-
-/// The segment of a module's thread-local data.
-#[cfg(target_env = "gnu")]
-const PT_TLS: u32 = 7;
-
-#[cfg(target_env = "gnu")]
-type EachModule = extern "C" fn(*mut ModuleInfo, usize, *mut c_void) -> c_int;
-
-// SAFETY: BACKGROUND-05.
-#[cfg(target_env = "gnu")]
-#[link(name = "c")]
-unsafe extern "C" {
-    fn dl_iterate_phdr(callback: EachModule, data: *mut c_void) -> c_int;
-}
-
-/// `dl_iterate_phdr`'s callback: adds the module's `PT_TLS` segment, rounded up to its
-/// alignment, to the sum `data` points at. It allocates nothing and cannot panic.
-#[cfg(target_env = "gnu")]
-extern "C" fn add_tls(info: *mut ModuleInfo, size: usize, data: *mut c_void) -> c_int {
-    if info.is_null() || data.is_null() || size < size_of::<ModuleInfo>() {
-        return 0;
-    }
-    // SAFETY: BACKGROUND-05.
-    let (info, sum) = unsafe { (&*info, &mut *data.cast::<usize>()) };
-    if info.phdr.is_null() {
-        return 0;
-    }
-    for i in 0..usize::from(info.phnum) {
-        // SAFETY: BACKGROUND-05.
-        let header = unsafe { &*info.phdr.add(i) };
-        if header.kind == PT_TLS {
-            let rounded = usize::try_from(header.memsz)
-                .ok()
-                .and_then(|memsz| memsz.checked_next_multiple_of(header.align.max(1) as usize))
-                .unwrap_or(usize::MAX);
-            *sum = sum.saturating_add(rounded);
-        }
-    }
-    0
-}
-
+/// The thread's body. It names itself with the crate's own system call: the C library's
+/// `pthread_setname_np` on another thread opens a file under `/proc`, which a sandbox
+/// entered after start may forbid.
 extern "C" fn run(_: *mut c_void) -> *mut c_void {
-    process().run_thread(Asmalloc::MAINTAIN_EVERY.as_nanos() as u64)
+    let heap = process();
+    heap.heap().os().name_thread(c"asmalloc");
+    heap.run_thread(Asmalloc::MAINTAIN_EVERY.as_nanos() as u64)
 }
 
 impl Asmalloc {
