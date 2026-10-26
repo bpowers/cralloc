@@ -732,7 +732,8 @@ pub(crate) fn mark_purged<H: Host>(host: &H, region: RegionId, slot: u32) {
 }
 
 /// What large slot `slot`'s size word holds, if the class records sizes. Only meaningful to
-/// the slot's holder.
+/// the slot's holder, but for the stamp of a free slot, which the hold's walk reads as a hint
+/// (`hold::walk_aged`).
 pub(crate) fn recorded<H: Host>(host: &H, region: RegionId, slot: u32) -> Option<Recorded> {
     let at = host.layout().size_word(slot)?;
     Some(Recorded::unpack(host.meta(region, at).load()))

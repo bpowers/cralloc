@@ -485,8 +485,9 @@ impl<'a, O: Os> Back<'a, O> {
         slot: u32,
         class: Class,
     ) -> bool {
-        // A slot smaller than the floor never holds a marked block: its free pays one compare,
-        // not the load of the size word, so that it costs what it did before the rule.
+        // A slot smaller than the floor never holds a marked block: one compare here, not a
+        // load of the size word. The free loads and writes that word later, to stamp the slot
+        // (`stamp_slot`), only if it stays resident.
         if class.size() < const { unwritten_floor(O::GEOMETRY) } {
             return false;
         }
@@ -723,9 +724,14 @@ impl<'a, O: Os> Back<'a, O> {
     /// free charges it. A step here is pages and never whole huge pages, as the purge walk's
     /// pieces are in a class of a huge page or more: those pieces must not split a huge page of
     /// a free slot that kept its advice, and a slot that kept it here, which only a refused call
-    /// to take it back leaves, has its range cut inward to whole huge pages by `purge_part`,
-    /// which then returns nothing a step can hold. Every other slot of a large class is advised
-    /// against huge pages, and its clean bits are per page.
+    /// to take it back leaves, has its range cut inward to whole huge pages by `purge_part`:
+    /// nothing of a step inside the slot's whole huge pages goes, and a part in its unaligned
+    /// tail, which the advice never covered, goes with `purge_part` reporting false, so its
+    /// pages stay counted. Every other slot of a large class is advised against huge pages,
+    /// and its clean bits are per page.
+    ///
+    /// Where the kernel refuses purges, as on locked memory, each claim of a slot with slack
+    /// makes this one failing call and nothing more: a documented limit (`hold`).
     ///
     /// The count already took these pages off when the claim settled. A refusal leaves them
     /// resident and not clean, as they were, and the block's free charges them.
@@ -1419,7 +1425,9 @@ impl<'a, O: Os> Back<'a, O> {
     }
 
     /// Frees one slot of `class` to its bitmap. Aborts as [`Back::launder`] does. A large slot's
-    /// recorded size is left as it was; the next allocation of the slot writes it.
+    /// recorded size is kept, for the next claim's trim (`trim_slack`), and the free writes the
+    /// fine count beside it if the slot stays resident (`stamp_slot`); the next allocation of the
+    /// slot writes the word whole.
     ///
     /// A free of a large slot advised for huge pages returns that slot's pages to the OS first, while the caller still holds the slot, and
     /// then releases it uncounted (`purge_before_release`). Any other freed slot stays

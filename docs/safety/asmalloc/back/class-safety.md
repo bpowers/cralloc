@@ -87,6 +87,16 @@ breaking it does, compared with a free that does not purge.
   purge the same interleaving frees the new owner's slot but leaves its bytes; the `madvise`
   adds the zeroing and the wrong zero bit, and makes the time between entering `free` and
   releasing the bit longer.
+- *The stamp of a late second free.* A free that leaves the slot resident writes its size word
+  (`stamp_slot`, a load and a store) before `release_one` checks the bit; below a huge page,
+  where no check of the bit comes before that, nothing has looked at the bit yet. If the slot
+  was freed and claimed again in between, the late free's store can land after the new
+  owner's claim wrote the word, and puts back the size it loaded: the old tenant's, or the new
+  one's with a stamp beside it. The new owner's recorded size may then be wrong, which is what
+  `realloc` copies and `malloc_usable_size` reports. That is the second case above, a double
+  free of a slot handed out again, which then releases the new owner's slot as well; the
+  store adds a wrong size to that corruption, and no memory-safety step of the allocator
+  rests on the word (the trim's range is bounded by the slot, BACK-CLASS-07).
 
 The earlier form of this path released the slot first and then claimed it back to purge it,
 which held a claim across the `madvise` on a slot that was nominally free: a second free in
@@ -456,6 +466,21 @@ thread may claim the slot while this one trims it. The other claimer's block may
 into the range this thread returns, and its contents there read as zero. That is the program's
 double free corrupting a block, as it would through the free alone (BACK-CLASS-01, the second
 case); the trim adds the zeroing, of pages the first claimer would not write.
+
+**A slot that kept its huge-page advice** (only a refused `unadvise` leaves one). Its claim
+computes both extents in whole huge pages, and `purge_part` cuts the step inward to whole huge
+pages inside the slot's interior, which leaves nothing of 128 pages there. Part of a step can
+still lie outside the slot's whole huge pages, in its unaligned tail, which the advice never
+covered: that part is returned and `purge_part` reports false, so no clean bit is set and the
+free charges those pages though they are gone. An over-count, never a page in use.
+
+**An accepted limit: a refused purge at the free, then a successful `unadvise`.** The free of
+an advised slot purges it whole and then takes the advice back. If the purge is refused and
+the `unadvise` succeeds, the slot is free, not advised and resident, possibly in huge pages
+the kernel has not split. A later claim's step may then return part of such a huge page,
+which frees nothing until the kernel splits it and stays charged to the cgroup meanwhile, as
+a shrink in place over a huge page does (`region`, "Huge pages for grown blocks"). It needs a
+refused `madvise` first; we accept it rather than track it.
 
 **Accounting, not safety.** The claim takes the slot's whole charge off the retained count,
 as before the trim: the pages under the block are live, the top step of the slack goes back,
