@@ -727,9 +727,17 @@ be the C library, creates the thread when the program creates its own first thre
 moment that is safe by construction, and leaves it dormant until the heap is over the
 floor: the thread looks at the level before it first sleeps, and the free that takes the
 heap over the floor wakes it. A program can turn the thread off, with a cargo feature or
-an environment variable, and can start it itself whatever the conditions say. The thread
-asks for a small stack, and takes the C library's default where the library refuses that,
-as it does when the program's thread-local data does not fit. If the thread cannot be
+an environment variable, and can start it itself whatever the conditions say. The
+variable is read once, at the process's first slow path, from the environment the process
+was started with, by the allocator's own system calls. The C library's `getenv` is not
+safe against a `setenv` in another thread, and a slow path cannot know what the program's
+other threads are doing; a read that waited for the first use could also come after the
+program had entered a sandbox that forbids opening files. The thread asks for a small
+stack. The C library puts the thread's static thread-local data on that stack, and glibc
+grants a request that leaves almost nothing beside it, on which the thread would crash.
+So the request is what the thread's frames need plus the thread-local sizes of the loaded
+modules, which glibc reports, and the allocator takes the library's default where the
+library still refuses (`docs/research/thread-stack.md`). If the thread cannot be
 created at all the allocator carries on without it. A process under a system-call filter
 that kills on thread creation, which no allocator can detect, must turn it off. The child
 of a fork does not inherit the thread and starts its own on the same conditions, its own
