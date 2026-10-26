@@ -375,3 +375,240 @@ fn slots_returned_at_their_free_are_passed_without_a_call() {
     walk("unwritten");
     back.free(live, class);
 }
+
+/// Slots freed together in one region, then the region kept young by churn until a walk may
+/// start and the slots are a hold old: the setup of the tests below. Returns the blocks, the
+/// first of them the churned one.
+fn aged_in_a_young_region<O: Os>(
+    back: &Back<'_, O>,
+    os: &SimOs<Native>,
+    class: Class,
+    n: usize,
+) -> Vec<NonNull<u8>> {
+    let blocks = one_region(back, class, n);
+    beat(back, os);
+    for b in &blocks[1..] {
+        back.free(*b, class);
+    }
+    // Two holds on, with no look between: the slots are old, and a first walk may start.
+    back.hold_set_count(back.hold_count() + 2 * HOLD_STEPS);
+    churn(back, class, blocks[0]);
+    blocks
+}
+
+/// A walk under way is more for the look to do: the next heartbeat, at the same fine step,
+/// carries it on from where it stopped, and the look's position stays at the region whose walk
+/// is unfinished. Here a look returns one slot (its bound in bytes) and the walk takes fifteen.
+#[test]
+#[cfg_attr(miri, ignore)]
+fn a_walk_under_way_is_carried_on_by_the_next_caller() {
+    let state = state::<Native>();
+    let back = state.get_or_reserve().unwrap();
+    let os = state.os();
+    unfloor(&back);
+    let class = large(64 << 10);
+    let size = class.size();
+    let blocks = aged_in_a_young_region(&back, os, class, 16);
+    let region = back
+        .space()
+        .locate(blocks[0].as_ptr())
+        .unwrap()
+        .region
+        .index() as u32;
+    let returned_before = back.state.walk.returned.load(Relaxed);
+    os.advance_clock(FINE_TICKS);
+    let mut beats = 0;
+    while blocks[1..].iter().any(|b| !purged(os, *b, size)) {
+        let before = back.retained_large();
+        back.heartbeat();
+        beats += 1;
+        assert_eq!(
+            before - back.retained_large(),
+            size,
+            "beat {beats} returned one slot"
+        );
+        if blocks[1..].iter().any(|b| !purged(os, *b, size)) {
+            assert_eq!(
+                back.hold_at(),
+                region + 1,
+                "the look left an unfinished walk"
+            );
+        }
+        assert!(beats <= 15);
+    }
+    assert_eq!(beats, 15, "all within one fine step, a beat each");
+    assert_eq!(
+        back.state.walk.returned.load(Relaxed) - returned_before,
+        15 * size,
+        "the walk's returns count toward what the purge walk counts as returned"
+    );
+    back.free(blocks[0], class);
+}
+
+/// A kept outgrown slot in a young region ages like any other free slot: not returned before
+/// it has been free for the hold, whatever walks pass it meanwhile.
+#[test]
+#[cfg_attr(miri, ignore)]
+fn a_kept_outgrown_slot_is_kept_for_its_hold() {
+    let state = state::<Native>();
+    let back = state.get_or_reserve().unwrap();
+    let os = state.os();
+    unfloor(&back);
+    let (class, wider) = (large(192 << 10), large(512 << 10));
+    let live = back.alloc(class, class.size()).unwrap().ptr;
+    paint(live.as_ptr(), class.size(), 7);
+    // Past two holds of count, so that walks may run while the slot is young.
+    while back.hold_count() < 3 * HOLD_STEPS {
+        beat(&back, os);
+    }
+    let grown = back.alloc(class, 40 << 10).unwrap().ptr;
+    // SAFETY: the test holds the block and uses none of it during the call.
+    unsafe { back.resize_in_place(grown, 120 << 10) };
+    paint(grown.as_ptr(), 120 << 10, 6);
+    let to = back.alloc(wider, wider.size()).unwrap();
+    back.resize(to.ptr, 240 << 10);
+    // SAFETY: both are live blocks the test holds, `grown` given up.
+    unsafe {
+        back.move_large(
+            grown,
+            to.ptr,
+            120 << 10,
+            to.zeroed,
+            crate::back::Move::Outgrown,
+        )
+    };
+    assert!(back.kept_outgrown_at(grown.as_ptr()));
+    let kept = back.outgrown();
+    for _ in 0..HOLD_STEPS - 2 {
+        churn(&back, class, live);
+        beat(&back, os);
+    }
+    assert!(!purged(os, grown, 120 << 10), "returned before its hold");
+    assert_eq!(back.outgrown(), kept);
+    back.free(live, class);
+    back.free(to.ptr, wider);
+}
+
+/// In a silence `maintain`'s rounds take a hold of a few steps (`Back::maintain_hold`), and a
+/// walk of a region still young by that hold takes it too: slots free for a few rounds go back
+/// at the next, where the whole hold would keep them a minute.
+#[test]
+#[cfg_attr(miri, ignore)]
+fn a_quiet_rounds_short_hold_applies_to_walks() {
+    let state = state::<Native>();
+    let back = state.get_or_reserve().unwrap();
+    let os = state.os();
+    unfloor(&back);
+    let class = large(64 << 10);
+    let size = class.size();
+    let blocks = one_region(&back, class, 16);
+    while back.hold_count() < 2 * HOLD_STEPS {
+        beat(&back, os);
+    }
+    for b in &blocks[1..] {
+        back.free(*b, class);
+    }
+    let round = |back: &Back<'_, _>| {
+        os.advance_clock(DECAY_TICKS);
+        // A free in the round's step, so that the region is young by any hold.
+        churn(back, class, blocks[0]);
+        while back.hold_maintain_step(&|| back.now()).more {}
+    };
+    let aged = state.hold.aged_returned.load(Relaxed);
+    for _ in 0..4 {
+        round(&back);
+    }
+    assert!(blocks[1..].iter().all(|b| purged(os, *b, size)));
+    assert!(state.hold.aged_returned.load(Relaxed) - aged >= 15 * size);
+    back.free(blocks[0], class);
+}
+
+/// In a class of a huge page or more the walk returns a slot in pieces of whole huge pages from
+/// its top, as the purge walk's pieces are, whatever the look's bound in bytes: here a bound of
+/// five pages, under a huge page of the design's geometry.
+#[test]
+#[cfg_attr(miri, ignore)]
+fn the_walks_pieces_are_whole_huge_pages() {
+    let plan = Geometry::DESIGN.largest_plan();
+    let class = large(4 << 20);
+    let host = TestHost::<Atomic>::new(plan, class, 1);
+    let region = host.region_at(0);
+    let layout = *host.layout();
+    let (page, huge) = (layout.page_size(), layout.huge_pages());
+    host.carve_all(region, 2);
+    let count = 5000u32;
+    host.write(region, 1);
+    let recorded = Recorded {
+        size: class.size(),
+        huge: false,
+        unwritten: false,
+        outgrown: false,
+        freed: count - HOLD_STEPS - 1,
+    };
+    region::record(&host, region, 1, recorded);
+    tree::release_one(&host, region, 0, 1);
+    let unit = layout.slot_unit(1).unwrap();
+    let mut looks = 0;
+    loop {
+        let out = walk_aged(&host, region, count, HOLD_STEPS, 5 * page, 256);
+        looks += 1;
+        if out.returned != 0 {
+            assert_eq!(out.returned % (huge as usize * page), 0, "{}", out.returned);
+        }
+        let (top, _) = region::clean_top(&host, region, unit);
+        assert!(
+            top == unit.start || top % huge == 0,
+            "a piece split a huge page: {top}"
+        );
+        if out.done {
+            break;
+        }
+        assert!(looks < 100);
+    }
+    assert!(host.is_zero(region, 1));
+    assert_eq!(
+        looks as u32,
+        (unit.end - unit.start).div_ceil(huge),
+        "a huge page a look"
+    );
+}
+
+/// The free of a slot whose purge was refused leaves it resident, and stamps it; so does the
+/// move out of a slot it did not keep whose pieces could not all go back.
+#[test]
+#[cfg_attr(miri, ignore)]
+fn a_moved_out_slot_left_resident_is_stamped() {
+    let state = state::<Native>();
+    let back = state.get_or_reserve().unwrap();
+    let os = state.os();
+    let _ballast = spend_kept_budget(&back);
+    for _ in 0..5 {
+        beat(&back, os);
+    }
+    let (class, wider) = (large(192 << 10), large(512 << 10));
+    let from = back.alloc(class, 120 << 10).unwrap().ptr;
+    paint(from.as_ptr(), 120 << 10, 6);
+    let to = back.alloc(wider, wider.size()).unwrap();
+    back.resize(to.ptr, 240 << 10);
+    os.set_faults(Call::Purge, Faults::ALWAYS);
+    // SAFETY: both are live blocks the test holds, `from` given up.
+    unsafe {
+        back.move_large(
+            from,
+            to.ptr,
+            120 << 10,
+            to.zeroed,
+            crate::back::Move::Outgrown,
+        )
+    };
+    os.set_faults(Call::Purge, Faults::NONE);
+    assert!(!back.kept_outgrown_at(from.as_ptr()));
+    let host = back.host(class).unwrap();
+    let location = back.space().locate(from.as_ptr()).unwrap();
+    let (slot, _) = host.layout().block_at(location.offset as usize).unwrap();
+    let freed = region::recorded(&host, location.region, slot)
+        .unwrap()
+        .freed;
+    assert_eq!(freed, back.hold_count() & STAMP_MASK, "stamped at the move");
+    back.free(to.ptr, wider);
+}
