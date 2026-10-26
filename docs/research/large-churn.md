@@ -57,7 +57,7 @@ counters are a probe, not product code (`bench/probes/large-churn/`).
   1. The trim to the previous tenant and per-slot ageing together. No new number. Large mix
      2.34, 1.60, 2.26, 2.23 to 1.33, 1.40, 1.53, 1.77; the in-slot climb stopped; level on
      the 64-Vec job, Meilisearch and the order service; DataFusion +0.6% cycles; tpchgen +1.6%
-     cycles and a sixth more faults for 70 MiB less peak.
+     cycles and about 60% more faults for 70 MiB less peak.
   2. Per-slot ageing alone, if tpchgen's cost decides: level or better on every job, and it
      halves what the third and fourth phases keep, but leaves the first phase's slack.
   - Not proposed: the bound at an eighth of live large memory (64-Vec +18%), the bound at
@@ -275,7 +275,7 @@ glibc on tpchgen in the same session: 24.97 Gcycles, 292k faults, 515-519 MiB.
   783 Mcycles). The bound at an eighth of live large memory costs 18% (924 Mcycles, three times
   the faults): 64 buffers regrow over and over in slots their predecessors left, a bound of
   32 MiB trims their room at each claim, and they fault it back.
-- **tpchgen** is the one job where the trim to the previous tenant costs: a sixth more faults
+- **tpchgen** is the one job where the trim to the previous tenant costs: about 60% more faults
   and 0.8% cycles (1.6% with ageing), for 50 to 90 MiB less peak, now between glibc's and
   main's. Its buffers grow back into what the trim took.
 - **DataFusion**: the trim to the previous tenant costs 0.6% cycles and 3% more faults; ageing
@@ -310,7 +310,7 @@ did not profile it.
    - Gains: the large mix 2.34, 1.60, 2.26, 2.23 to 1.33, 1.40, 1.53, 1.77, and the quiet tail
      1.14 to 1.11; the climb inside hot slots stopped (big-buffer variant 2.48 to 3.04 against
      1.37 to 1.41); a grown block's free kept for the hold costs a hold's worth of churn.
-   - Costs: tpchgen +1.6% cycles and a sixth more faults, with 70 MiB less peak; DataFusion
+   - Costs: tpchgen +1.6% cycles and about 60% more faults, with 70 MiB less peak; DataFusion
      +0.6% cycles; level elsewhere. A `madvise` on about half the large claims of the mix, each
      bounded by a step.
 2. **Per-slot ageing alone.** Level or better on every regression job, the third and fourth
