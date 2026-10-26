@@ -129,11 +129,15 @@ mask as it was, and starts nothing.
 asks (`# Safety` of both is the same sentence), and nothing else is added.
 
 Locks: `spawn` takes no lock of its own and calls nothing of the C library but
-`pthread_create` and the signal and naming calls, so a fork child, whose copy of a lock may be
+`pthread_create`, `pthread_detach`, the signal calls (`sigfillset`, `pthread_sigmask`, and
+`sigaltstack` in the test before it) and `__errno_location`, none of which but
+`pthread_create` takes a lock; the naming is the crate's own system call. So a fork child, whose copy of a lock may be
 held by a thread that does not exist there, can start the thread whenever its program could
 create one of its own (`tests/fork_loader_lock.rs`). A limit remains, the same as for any
-`pthread_create`: glibc's `pthread_create` takes `dl_load_tls_lock`, and `dlopen` and
-`dlclose` take `dl_load_write_lock` and then that one, so the slow path that starts the
+`pthread_create`: glibc's `pthread_create` takes `dl_load_tls_lock`
+(`_dl_allocate_tls_init`), and `dlopen` and `dlclose` hold `dl_load_tls_lock` and then take
+`dl_load_write_lock` (`dl_open_worker` around `_dl_add_to_namespace_list`;
+`_dl_close_worker`), the opposite order, so the slow path that starts the
 thread, once per process, deadlocks if it runs inside a `dl_iterate_phdr` callback, which
 holds `dl_load_write_lock` (std's backtrace symbolizer allocates in one), while another
 thread is inside `dlopen` or `dlclose` (reproduced by the reviewer; the case
@@ -158,3 +162,5 @@ pointers are valid for writes of a `sigset_t` and a `stack_t`.
 **Proof.** `pthread_sigmask(SIG_BLOCK, NULL, &mask)` only stores the current mask
 (POSIX: with a null `set`, `how` is ignored); `sigaltstack(NULL, &stack)` only stores the
 current alternate stack. Both targets are locals of the right layout (BACKGROUND-01).
+
+Reviewed: c832e1b
