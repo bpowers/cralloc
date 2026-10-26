@@ -1432,8 +1432,13 @@ impl<O: Os> Back<'_, O> {
             self.state.walk.returned.fetch_add(purged, Relaxed);
         }
         if done && let Some(huge) = Hints::unpack(hints.load()).huge_from {
-            // Once a pass a region: the advice comes off over what the walk returned part of.
-            self.lower_tail(&host, region, huge);
+            // Once a pass a region: the advice comes off over what the walk returned part of;
+            // for `trim`, which does not resume, even below the frontier.
+            if resume {
+                self.lower_tail(&host, region, huge);
+            } else if tail::lower_all(&host, region, huge, self.epoch()) == tail::Change::Refused {
+                self.refuse_tail(REFUSED_LOWER);
+            }
         }
         (purged, read, done, found)
     }

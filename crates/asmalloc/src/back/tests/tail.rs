@@ -333,9 +333,8 @@ fn trim_returns_the_tails_at_once() {
     let state = state::<Standard>();
     let back = state.get_or_reserve().unwrap();
     let os = state.os();
+    // Fills reach the whole tail in this interval: a trim takes the advice off all the same.
     let (kept, freed) = stranded(&back);
-    // Fills no longer reach the tail: the advice comes off above the frontier only.
-    forget_reuse(&back);
     let (_, charged) = memory(os);
     back.trim();
     let (_, after) = memory(os);
