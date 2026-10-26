@@ -63,6 +63,7 @@ use self::pages::{CHECKING, HUGE, NO_HUGE, PURGED, Pages, RESERVED, START, WIPE,
 use super::{HugePages, Os, OsError, Topology};
 use crate::classes::MagazineSize;
 use crate::space::Geometry;
+use core::ffi::CStr;
 use core::fmt;
 use core::marker::PhantomData;
 use core::ptr::NonNull;
@@ -941,6 +942,9 @@ unsafe impl<S: Shape> Os for SimOs<S> {
         self.sleeps.blocked.store(false, Ordering::SeqCst);
         self.sleeps.wakes.fetch_add(1, Ordering::AcqRel);
     }
+
+    /// Nothing: a simulated thread has no name to set.
+    fn name_thread(&self, _: &CStr) {}
 
     fn more_than_one_thread(&self, forked: bool) -> bool {
         if forked {

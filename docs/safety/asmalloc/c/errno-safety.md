@@ -22,11 +22,11 @@ musl declares the same (`include/errno.h`: `int *__errno_location(void);`) and d
 `libc.a` (`src/errno/__errno_location.c`), returning the calling thread's `errno` slot; the
 same declaration and argument hold.
 
-## ERRNO-02: `__errno_location().write(value)` in `set`
+## ERRNO-02: `__errno_location().write(value)` in `set`, and `.read()` in `get`
 
 **Preconditions.** The call is sound to make on the calling thread; the pointer it returns is
-valid for a write of an `i32`, aligned, and nothing else accesses that location during the
-write in a way that races with it.
+valid for a read or write of an `i32`, aligned, and nothing else accesses that location
+during the access in a way that races with it.
 
 **Invariants.**
 
@@ -38,7 +38,9 @@ write in a way that races with it.
   properties; read "the C library" for glibc in I2 and the proof.
 - I2. The C layer runs only on threads glibc made or initialized (the main thread, threads of
   `pthread_create`, and forked children of either), so the thread pointer and its static TLS
-  exist. The design's non-goal excludes `vfork`/`CLONE_VM` children and raw `clone` threads,
+  exist. So does `get`'s one caller, `heap::background::spawn`, which saves `errno` before
+  the C library calls that start the background thread and puts it back after: it runs on
+  a thread of the program that allocates, so one of those. The design's non-goal excludes `vfork`/`CLONE_VM` children and raw `clone` threads,
   which have no allocator support anyway; glibc's own `posix_spawn` child never allocates
   (`docs/research/linux-rseq-contract.md`, section 5).
 
@@ -49,6 +51,7 @@ possible concurrent access is a signal handler on this same thread, which is not
 instruction). A handler that runs between the store and the C caller's read can change
 `errno`, which is the ordinary C rule for errno and handlers, not a memory-safety question.
 The write is a plain `i32` store into memory glibc owns on the program's behalf and documents
-as writable by any code (`errno` is a modifiable lvalue).
+as writable by any code (`errno` is a modifiable lvalue); the read is a plain `i32` load of
+it, which any `int` value is.
 
 Reviewed: f41dbf9

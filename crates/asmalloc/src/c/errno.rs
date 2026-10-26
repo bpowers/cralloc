@@ -22,6 +22,13 @@ unsafe extern "C" {
     fn __errno_location() -> *mut c_int;
 }
 
+/// The calling thread's `errno`.
+#[cfg(any(test, feature = "background"))]
+pub(crate) fn get() -> c_int {
+    // SAFETY: ERRNO-02.
+    unsafe { __errno_location().read() }
+}
+
 /// Sets the calling thread's `errno` to `value`.
 #[cold]
 pub(crate) fn set(value: c_int) {
