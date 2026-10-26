@@ -268,27 +268,23 @@ impl<O: Os> Heap<O> {
         }
     }
 
-    /// Records a large block's new size after an in-place resize, clearing what it gains if
-    /// `zero`, and returns what the caller may use now. A block that shrinks gives the whole
-    /// pages past its new usable size back to the OS at once (`Back::resize_in_place`), so
-    /// that a buffer cut down by `realloc` does not keep its old pages until it is freed.
+    /// Records a large block's new size after an in-place resize and returns what the caller
+    /// may use now; a zeroed grow is cleared by its caller (`Bound::grow_block`). A block that
+    /// shrinks gives the whole pages past its new usable size back to the OS at once
+    /// (`Back::resize_in_place`), so that a buffer cut down by `realloc` does not keep its old
+    /// pages until it is freed.
     ///
     /// # Safety
     ///
     /// `ptr` is a live large block of this heap that the caller owns and is resizing to `new`,
     /// which fits it.
-    unsafe fn resize_large_in_place(&self, ptr: NonNull<u8>, new: Layout, zero: bool) -> Grant {
-        let before = self.usable_size(ptr.as_ptr()).unwrap_or(0);
+    unsafe fn resize_large_in_place(&self, ptr: NonNull<u8>, new: Layout) -> Grant {
         if let Some(back) = self.back() {
-            // SAFETY: the block is the caller's and `new` fits it; a resize gives up only what
+            // SAFETY: HEAP-14. the block is the caller's and `new` fits it; a resize gives up only what
             // lies past the new size.
             unsafe { back.resize_in_place(ptr, new.size()) };
         }
         let len = self.usable_size(ptr.as_ptr()).unwrap_or(new.size());
-        if zero && len > before {
-            // SAFETY: HEAP-05.
-            unsafe { ptr.as_ptr().add(before).write_bytes(0, len - before) };
-        }
         Grant {
             ptr,
             len,
@@ -323,14 +319,17 @@ impl<O: Os, R: Routines + Copy> Bound<'_, O, R> {
     ///
     /// As for [`Heap::free_large`].
     pub(crate) unsafe fn free_large_slow(self, ptr: NonNull<u8>) {
-        // SAFETY: the caller gives up the large block.
+        // SAFETY: HEAP-15. the caller gives up the large block.
         unsafe { self.heap().free_large(ptr) };
         self.heartbeat();
     }
 
     /// Resizes the block at `ptr` from `old` to `new`, in place when the next free will still
-    /// find its class, else by moving it. With `zero`, the bytes of the result past the old
-    /// block read as zero. `None` if a move found no memory; the old block is then untouched.
+    /// find its class, else by moving it. It clears nothing: `zero` says the caller is a zeroed
+    /// grow, which clears what it must itself (`Bound::grow_block`), and takes no headroom. The
+    /// grant is `zeroed` only for a block moved into memory known to read as zero, where the
+    /// bytes past those carried over do. `None` if a move found no memory; the old block is
+    /// then untouched.
     ///
     /// # Safety
     ///
@@ -374,16 +373,14 @@ impl<O: Os, R: Routines + Copy> Bound<'_, O, R> {
                     zeroed: false,
                 });
             }
-            // SAFETY: the block is the caller's, large, and `new` fits it (`in_place`).
-            return Some(unsafe { heap.resize_large_in_place(ptr, new, zero) });
+            // SAFETY: HEAP-16. the block is the caller's, large, and `new` fits it (`in_place`).
+            return Some(unsafe { heap.resize_large_in_place(ptr, new) });
         }
         // Growing a large object out of its block: take headroom. A zeroed grow takes none, so
         // that it never clears room nobody asked for.
         // Not for a run: it commits all its regions at once, so headroom would be commit charge,
         // not just address space.
         let roomy = !zero && new.size() > len && small(new).is_none();
-        // A zeroed grow clears only what lies past the bytes it keeps, and only when the new
-        // block is not known to read as zero.
         // A block with headroom records the size asked for, not the room it was given.
         let grant = plan
             .filter(|_| roomy)
@@ -413,13 +410,6 @@ impl<O: Os, R: Routines + Copy> Bound<'_, O, R> {
                         .copy_to_nonoverlapping(grant.ptr.as_ptr(), kept);
                     self.dealloc(ptr.as_ptr(), old);
                 }
-            }
-            if zero && !grant.zeroed && grant.len > kept {
-                grant
-                    .ptr
-                    .as_ptr()
-                    .add(kept)
-                    .write_bytes(0, grant.len - kept);
             }
         }
         Some(grant)

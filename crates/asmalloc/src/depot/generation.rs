@@ -92,8 +92,11 @@ fn prepare_first<O: Os>(depot: &Depot, area: Area<'_, O>) -> bool {
     if depot.common.status.load(Acquire) & READY != 0 {
         return true;
     }
-    // Before anything else a first slow path does, and only here: see `domain`.
+    // Before anything else a first slow path does, and only here: see `domain`. The
+    // environment for the same reason, and while it is still the one the process started
+    // with (`crate::environment`).
     depot.topology.discover(area.space().os());
+    depot.background_choice(area.space().os());
     let page = area.generation_page();
     let space = area.space();
     let len = O::GEOMETRY.page_size();

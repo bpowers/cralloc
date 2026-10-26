@@ -20,7 +20,10 @@
 //! They rest on the slab invariant (S) (`docs/safety/asmalloc/front/real-safety.md`): a hot word
 //! that is neither zero nor a marker names slot 1 to `n - 1` of a committed magazine of its
 //! class, and a spare head or link that is not zero names slot 0 of one. Twins are test
-//! scaffolding, so these blocks have no ledger entries of their own.
+//! scaffolding, so these blocks have no ledger entries of their own; the line below tells
+//! `scripts/ledger-check` so.
+//!
+//! Ledger: scaffolding, run only by tests and the simulated heap.
 
 use super::routines::{Routines, StackPop, StackPush, StoreIfEqual};
 use super::slab::{Cpu, Field, Slabs};

@@ -35,7 +35,8 @@
 //! - `large`: a cache of `live` bytes of buffers, log-uniform in the phase's range of
 //!   `ranges`; `grow` percent of them are built by doubling with `realloc` from 4 KiB (half of
 //!   those then shrunk to their exact size), the rest allocated whole, and `append` percent
-//!   of operations instead take a random cached buffer and grow it by half with `realloc`.
+//!   of operations instead take a random cached buffer and grow it by half with `realloc`;
+//!   `big_permille` in a thousand new buffers are `big_factor` times the size drawn.
 //!
 //! Phases that ask for the same sizes draw the same table of sizes (`tables=phase` draws one
 //! for every phase instead).
@@ -396,6 +397,9 @@ struct Run {
     long_permille: u64,
     grow: u64,
     append: u64,
+    /// `large`: one new buffer in a thousand of these is `big_factor` times the size drawn.
+    big_permille: u64,
+    big_factor: usize,
     /// The largest buffer `append` may grow to.
     append_max: usize,
     /// `lifetime`: entries each thread's FIFO has room for.
@@ -514,9 +518,12 @@ impl Worker {
         let cache = run.main;
         let appended = self.rng.below(100) < run.append && self.append(run);
         if !appended {
-            let target = phase.values.sample(&mut self.rng);
+            let mut target = phase.values.sample(&mut self.rng);
+            if self.rng.below(1000) < run.big_permille {
+                target = (target * run.big_factor).next_multiple_of(cache.unit).min(run.append_max);
+            }
             let (p, size) =
-                if self.rng.below(100) < run.grow { self.grown(target) } else { (make(target, 0x33), target) };
+                if self.rng.below(100) < run.grow { self.grown(run, target) } else { (make(target, 0x33), target) };
             cache.put(&mut self.me, &mut self.rng, p, size);
         }
         cache.trim(&mut self.me, &mut self.rng);
@@ -536,11 +543,14 @@ impl Worker {
 
     /// A buffer built as a vector that is pushed to: doubling from `GROW_FROM` until it holds
     /// `target` bytes, and for half of them shrunk to fit.
-    fn grown(&mut self, target: usize) -> (*mut u8, usize) {
+    fn grown(&mut self, run: &Run, target: usize) -> (*mut u8, usize) {
+        // Never past what a cache slot can record, which a power of two above the largest size
+        // a slot holds would be.
+        let most = run.main.max_size();
         let mut cur = GROW_FROM.min(target);
         let mut p = make(cur, 0x22);
         while cur < target {
-            let next = (cur * 2).min(target.next_power_of_two());
+            let next = (cur * 2).min(target.next_power_of_two()).min(most);
             p = resize(p, cur, next);
             cur = next;
         }
@@ -809,6 +819,8 @@ pub fn drift(args: &Args) {
         long_permille: args.num("long_permille", 20),
         grow: args.num("grow", 50),
         append: args.num("append", 20),
+        big_permille: args.num("big_permille", 0),
+        big_factor: args.usize("big_factor", 10),
         append_max: (largest * 2).min(main.max_size()),
         fifo_cap,
         main,

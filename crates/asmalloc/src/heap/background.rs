@@ -12,8 +12,10 @@
 //! it from a slow path: its caller may be the C library under its own locks. The preload
 //! library creates it when the program creates its first thread ([`Asmalloc::start_dormant`]).
 //! [`Asmalloc::start_background`] starts it whatever the conditions. `ASMALLOC_BACKGROUND=0`
-//! turns the default off, as does a build without the feature and a process that calls
-//! `maintain` itself.
+//! in the environment the process was started with turns the default off, as does a build
+//! without the feature and a process that calls `maintain` itself. The variable is read once,
+//! from the kernel's copy of that environment, so a `setenv` in the program changes nothing
+//! ([`choice`], `crate::environment`).
 //!
 //! **Limits.** A Rust program that keeps a signal blocked in every thread (one that waits for
 //! signals on a thread of its own with `sigwait`, say) never passes the test, and starts the
@@ -31,12 +33,14 @@
 //! The thread is created with every signal blocked (the C library's `sigfillset`, which
 //! leaves out its own internal signals, so that a change of credentials still reaches it).
 //! It holds no lock and no allocator state between steps, so process exit and a fork find it
-//! in a state they already handle; a forked child has no thread and decides afresh. The
-//! ledger is `docs/safety/asmalloc/heap/background-safety.md`.
+//! in a state they already handle; a forked child has no thread and decides afresh. Its stack
+//! is sized for its own frames plus the static thread-local data glibc carves out of it
+//! ([`stack_size`], `docs/research/thread-stack.md`). The ledger is
+//! `docs/safety/asmalloc/heap/background-safety.md`.
 
 use super::global::{Asmalloc, process};
 use crate::thread_word::{AWAKE, DORMANT, NONE, OFF, WANTED};
-use core::ffi::{CStr, c_char, c_int, c_void};
+use core::ffi::{c_char, c_int, c_void};
 use core::fmt;
 use core::ptr;
 use core::sync::atomic::AtomicBool;
@@ -45,12 +49,16 @@ use core::sync::atomic::Ordering::Relaxed;
 /// Set once the program calls `maintain` itself: it then gets no default thread.
 pub(super) static OPTED_OUT: AtomicBool = AtomicBool::new(false);
 
-/// The variable that turns the default thread off (`0` or empty) or starts it at once (the
-/// preload library's constructor, anything else).
-const VARIABLE: &CStr = c"ASMALLOC_BACKGROUND";
+/// The stack the thread's own frames may use: the deepest its rounds reached below the C
+/// library's block was about 8 KiB in a release build and 34 KiB in a debug one
+/// (`docs/research/thread-stack.md`). The stack is mapped lazily, so what is never touched
+/// costs address space only.
+const NEED: usize = 128 << 10;
 
-/// The thread's stack: rounds need a few kilobytes, and the stack is mapped lazily anyway.
-const STACK: usize = 256 << 10;
+/// Room for what the C library keeps at the top of the stack besides the modules' static
+/// thread-local data: glibc's thread descriptor, its static TLS surplus for libraries loaded
+/// later, and the padding that aligns them, about 4 KiB together by default.
+const LIBRARY: usize = 64 << 10;
 
 /// `sigset_t`: 1024 bits in glibc and in musl.
 #[repr(C)]
@@ -104,32 +112,17 @@ unsafe extern "C" {
     fn sigfillset(set: *mut SigSet) -> c_int;
     fn pthread_sigmask(how: c_int, set: *const SigSet, old: *mut SigSet) -> c_int;
     fn sigaltstack(stack: *const SignalStack, old: *mut SignalStack) -> c_int;
-    fn getenv(name: *const c_char) -> *const c_char;
 }
 
-/// What the environment asks for.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum Choice {
-    /// Unset: the default, on its conditions.
-    Default,
-    /// `0` or empty: no thread by default.
-    Off,
-    /// Anything else: a thread at once (the preload library's constructor).
-    On,
-}
+pub use crate::environment::Choice;
 
-/// `ASMALLOC_BACKGROUND`, read in place: `getenv` does not allocate.
+/// What `ASMALLOC_BACKGROUND` asks for in the environment the process was started with: read
+/// once per process, at its first slow path or here, whichever comes first, and the same
+/// for the rest of its life and its forked children's. A `setenv` in the program does not
+/// change it (`crate::environment`). Why this needs no C library call: BACKGROUND-02.
 pub fn choice() -> Choice {
-    // SAFETY: BACKGROUND-02.
-    let value = unsafe { getenv(VARIABLE.as_ptr()) };
-    if value.is_null() {
-        return Choice::Default;
-    }
-    // SAFETY: BACKGROUND-02.
-    match unsafe { CStr::from_ptr(value) }.to_bytes() {
-        b"" | b"0" => Choice::Off,
-        _ => Choice::On,
-    }
+    let heap = process().heap();
+    heap.depot.background_choice(heap.os())
 }
 
 /// The thread could not be created; the allocator carries on without it.
@@ -195,16 +188,17 @@ fn signals_quiet() -> bool {
     }
 }
 
-/// Creates the thread with `create`, with every signal blocked and a small stack, names it
-/// `asmalloc` and detaches it; the caller's mask is put back after. The C library refuses the
-/// small stack (`EINVAL`) when the program's static thread-local data does not fit in it, as
-/// glibc places that data on the stack; the thread is then created once more with the
+/// Creates the thread with `create`, with every signal blocked and a small stack
+/// ([`stack_size`]), names it `asmalloc` and detaches it; the caller's mask is put back after.
+/// If the C library refuses the stack (`EINVAL`), as glibc does when what it keeps at the top
+/// of the stack leaves less than 2 KiB below it, the thread is created once more with the
 /// library's default attributes.
 ///
 /// # Safety
 ///
 /// `create` is the C library's `pthread_create`, or a function with its contract.
 unsafe fn spawn(create: CreateThread) -> Result<(), StartError> {
+    let size = stack_size();
     let mut all = SigSet([0; 16]);
     let mut old = SigSet([0; 16]);
     let mut attr = Attr([0; 56]);
@@ -218,7 +212,7 @@ unsafe fn spawn(create: CreateThread) -> Result<(), StartError> {
         }
         let attributed = pthread_attr_init(&mut attr) == 0;
         if attributed {
-            pthread_attr_setstacksize(&mut attr, STACK);
+            pthread_attr_setstacksize(&mut attr, size);
         }
         let mut made = create(
             &mut thread,
@@ -244,6 +238,96 @@ unsafe fn spawn(create: CreateThread) -> Result<(), StartError> {
         pthread_detach(thread);
     }
     Ok(())
+}
+
+/// The stack to ask for: what the thread's frames need, room for the C library's own block,
+/// and, where the library carves the static thread-local data of every module out of the
+/// stack it is asked for (glibc), that data's size, so that a program with much of it does
+/// not leave the thread a stack too small for its rounds. musl adds that data to the size it
+/// is asked for itself (`pthread_create.c`), so there it is not counted twice.
+fn stack_size() -> usize {
+    NEED + LIBRARY + static_tls()
+}
+
+/// The static thread-local data of the loaded modules: the sum of their `PT_TLS` segments,
+/// each rounded up to its alignment. A module loaded with `dlopen` is counted too, though
+/// glibc gives most of those dynamic storage instead, which only asks for more stack than
+/// needed.
+#[cfg(target_env = "gnu")]
+fn static_tls() -> usize {
+    let mut sum = 0usize;
+    // SAFETY: BACKGROUND-05.
+    unsafe { dl_iterate_phdr(add_tls, ptr::from_mut(&mut sum).cast()) };
+    sum
+}
+
+#[cfg(not(target_env = "gnu"))]
+fn static_tls() -> usize {
+    0
+}
+
+/// `dl_phdr_info`'s first four fields, which every glibc passes.
+#[cfg(target_env = "gnu")]
+#[repr(C)]
+struct ModuleInfo {
+    addr: usize,
+    name: *const c_char,
+    phdr: *const ProgramHeader,
+    phnum: u16,
+}
+
+/// `Elf64_Phdr`.
+#[cfg(target_env = "gnu")]
+#[repr(C)]
+struct ProgramHeader {
+    kind: u32,
+    flags: u32,
+    offset: u64,
+    vaddr: u64,
+    paddr: u64,
+    filesz: u64,
+    memsz: u64,
+    align: u64,
+}
+
+/// The segment of a module's thread-local data.
+#[cfg(target_env = "gnu")]
+const PT_TLS: u32 = 7;
+
+#[cfg(target_env = "gnu")]
+type EachModule = extern "C" fn(*mut ModuleInfo, usize, *mut c_void) -> c_int;
+
+// SAFETY: BACKGROUND-05.
+#[cfg(target_env = "gnu")]
+#[link(name = "c")]
+unsafe extern "C" {
+    fn dl_iterate_phdr(callback: EachModule, data: *mut c_void) -> c_int;
+}
+
+/// `dl_iterate_phdr`'s callback: adds the module's `PT_TLS` segment, rounded up to its
+/// alignment, to the sum `data` points at. It allocates nothing and cannot panic.
+#[cfg(target_env = "gnu")]
+extern "C" fn add_tls(info: *mut ModuleInfo, size: usize, data: *mut c_void) -> c_int {
+    if info.is_null() || data.is_null() || size < size_of::<ModuleInfo>() {
+        return 0;
+    }
+    // SAFETY: BACKGROUND-05.
+    let (info, sum) = unsafe { (&*info, &mut *data.cast::<usize>()) };
+    if info.phdr.is_null() {
+        return 0;
+    }
+    for i in 0..usize::from(info.phnum) {
+        // SAFETY: BACKGROUND-05.
+        let header = unsafe { &*info.phdr.add(i) };
+        if header.kind == PT_TLS {
+            let rounded = usize::try_from(header.memsz)
+                .ok()
+                .and_then(|memsz| memsz.checked_next_multiple_of(header.align.max(1) as usize))
+                .unwrap_or(usize::MAX);
+            *sum = sum.saturating_add(rounded);
+        }
+    }
+    0
 }
 
 extern "C" fn run(_: *mut c_void) -> *mut c_void {
@@ -294,7 +378,7 @@ impl Asmalloc {
             Choice::Default => DORMANT,
         };
         let heap = process();
-        // SAFETY: passed through from the caller.
+        // SAFETY: BACKGROUND-03; `create` passed through from the caller.
         let _ = heap.start_thread(state, |create| unsafe { spawn(create) }, create);
     }
 }

@@ -2354,11 +2354,12 @@ mod review_lean_realloc {
 
     /// What `Allocator::grow_zeroed` and `shrink` run (`Bound::grow_block`, `shrink_block`),
     /// through the simulated heap's stable hooks, so that the gate runs it without the
-    /// `allocator-api` feature: every pair of sizes at several alignments. A grow into a block
-    /// an earlier tenant left dirty keeps the bytes the old layout covered, keeps or zeroes the
-    /// rest of the old block, and zeroes everything past it to the length returned; a shrink
-    /// keeps the bytes the new layout covers; a small block stays exactly when both layouts
-    /// have its class.
+    /// `allocator-api` feature: every pair of sizes at several alignments. The caller dirties
+    /// all of the block it was given, slack included. A grow, whether it stays or moves into a
+    /// block an earlier tenant left dirty, keeps the bytes the old layout covered and zeroes
+    /// everything from there to the length returned, as the stabilised `grow_zeroed` requires;
+    /// a shrink keeps the bytes the new layout covers; a small block stays exactly when both
+    /// layouts have its class.
     #[test]
     fn a_simulated_heap_grows_zeroed_and_shrinks_by_the_allocator_paths() {
         let heap = SimHeap::<Shape>::new();
@@ -2401,11 +2402,7 @@ mod review_lean_realloc {
                             assert_eq!(q == p, same, "{what}");
                         }
                         if new >= old {
-                            for i in old..had.min(len) {
-                                let b = q.add(i).read();
-                                assert!(b == 0 || b == 0x55, "{what}: byte {i} is {b:#x}");
-                            }
-                            for i in had..len {
+                            for i in old..len {
                                 assert_eq!(q.add(i).read(), 0, "{what}: byte {i}");
                             }
                         }
@@ -2416,10 +2413,122 @@ mod review_lean_realloc {
         }
     }
 
-    /// The lean path of `Allocator::grow_zeroed`: a small block grown into a block of another
-    /// class that an earlier tenant left dirty. The bytes the old layout covered arrive, the
-    /// bytes from there to the old block's end are kept or zero, and everything past that,
-    /// to the length returned, reads as zero.
+    /// A zeroed grow that stays in place, with the old layout given at every size that fits
+    /// the block. The caller wrote all of the block it was given, slack included; the bytes
+    /// from the old layout's size to the length returned read as zero, and those before it as
+    /// written. A small block that keeps its class (the lean path) and a large one that grows
+    /// within its slot both stay.
+    #[test]
+    fn a_zeroed_grow_in_place_clears_from_the_old_layouts_size() {
+        let heap = SimHeap::<Shape>::new();
+        for (asked, grown) in [
+            (9, 9),
+            (9, 12),
+            (9, 16),
+            (100, 112),
+            (40_000, 40_500),
+            (40_000, 41_000),
+        ] {
+            // SAFETY: valid layouts; each block is freed once with a layout that fits it.
+            unsafe {
+                let p = heap.alloc(layout(asked, 1));
+                let had = heap.usable(p).unwrap();
+                for fit in [asked, (asked + had) / 2, had]
+                    .into_iter()
+                    .filter(|&s| s <= grown)
+                {
+                    let what = format!("{asked} given {had}, as {fit} -> {grown}");
+                    fill(p, had, 7);
+                    let (q, len) = heap
+                        .grow_zeroed_for_test(p, layout(fit, 1), layout(grown, 1))
+                        .unwrap();
+                    assert_eq!(q, p, "{what}: in place");
+                    assert!(holds(q, fit, 7), "{what}");
+                    for i in fit..len {
+                        assert_eq!(q.add(i).read(), 0, "{what} of {len}: byte {i}");
+                    }
+                }
+                heap.dealloc(p, layout(asked, 1));
+            }
+        }
+    }
+
+    /// A zeroed grow that moves, also to a new alignment, into blocks an earlier tenant left
+    /// dirty: small to small, small to large, large to small (an alignment that made the old
+    /// layout large), and large to large in several pieces. The caller wrote all of the block
+    /// it was given; the old layout's bytes arrive, and everything from there to the length
+    /// returned reads as zero.
+    #[test]
+    #[cfg_attr(
+        miri,
+        ignore = "writes and reads blocks of hundreds of KiB byte by byte"
+    )]
+    fn a_zeroed_grow_that_moves_clears_from_the_old_layouts_size() {
+        let heap = SimHeap::<Shape>::new();
+        let cases = [
+            ((9, 1), (12, 64)),
+            ((100, 8), (100, 4096)),
+            ((100, 8), (300, 8)),
+            ((3000, 8), (40_000, 8)),
+            ((100, MAX_SMALL_SIZE * 2), (200, 8)),
+            ((40_000, 8), (40_000, 1 << 16)),
+            ((40_000, 8), (300_000, 8)),
+        ];
+        for ((asked, from_align), (grown, to_align)) in cases {
+            let (lo, ln) = (layout(asked, from_align), layout(grown, to_align));
+            let what = format!("{lo:?} -> {ln:?}");
+            // SAFETY: valid layouts; each block is freed once with a layout that fits it.
+            unsafe {
+                let dirty: Vec<*mut u8> = (0..4).map(|_| heap.alloc(ln)).collect();
+                for &d in &dirty {
+                    d.write_bytes(0xaa, heap.usable(d).unwrap());
+                }
+                for &d in &dirty {
+                    heap.dealloc(d, ln);
+                }
+                let p = heap.alloc(lo);
+                let had = heap.usable(p).unwrap();
+                fill(p, had, 9);
+                let (q, len) = heap.grow_zeroed_for_test(p, lo, ln).unwrap();
+                assert_ne!(q, p, "{what}: moved");
+                assert_eq!(q.addr() % to_align, 0, "{what}");
+                assert!(holds(q, asked, 9), "{what}");
+                for i in asked..len {
+                    assert_eq!(q.add(i).read(), 0, "{what} of {len}: byte {i}");
+                }
+                heap.dealloc(q, ln);
+            }
+        }
+    }
+
+    /// A zeroed grow that moves into a slot nothing has used, which the back end knows to read
+    /// as zero, so that the grow clears nothing: only the old layout's bytes are copied, and
+    /// the old block's slack, which the caller wrote, does not come along.
+    #[test]
+    fn a_zeroed_grow_into_a_fresh_slot_leaves_the_old_slack_behind() {
+        let heap = SimHeap::<Shape>::new();
+        let (lo, ln) = (layout(40_000, 8), layout(300_000, 8));
+        // SAFETY: valid layouts; the block is freed once with a layout that fits it.
+        unsafe {
+            let p = heap.alloc(lo);
+            let had = heap.usable(p).unwrap();
+            assert!(had > lo.size(), "the block has slack");
+            fill(p, had, 5);
+            let (q, len) = heap.grow_zeroed_for_test(p, lo, ln).unwrap();
+            assert_ne!(q, p);
+            assert!(holds(q, lo.size(), 5));
+            for i in lo.size()..len {
+                assert_eq!(q.add(i).read(), 0, "byte {i} of {len}");
+            }
+            heap.dealloc(q, ln);
+        }
+    }
+
+    /// `Allocator::grow_zeroed` and `shrink` for every pair of sizes, with the caller dirtying
+    /// all of the block it was given, slack included, and with blocks an earlier tenant left
+    /// dirty in the magazine a grow may move into. The bytes the old layout covered arrive, and
+    /// everything from there to the length returned reads as zero, whether the block stayed or
+    /// moved.
     #[cfg(feature = "allocator-api")]
     mod allocator {
         use super::*;
@@ -2450,11 +2559,7 @@ mod review_lean_realloc {
                 let what = format!("{old} -> {new} align {align}: {had} -> {len}");
                 assert!(len >= new, "{what}");
                 assert!(holds(q, old, 7), "{what}");
-                for i in old..had.min(len) {
-                    let b = q.add(i).read();
-                    assert!(b == 0 || b == 0x55, "{what}: byte {i} is {b:#x}");
-                }
-                for i in had..len {
+                for i in old..len {
                     assert_eq!(q.add(i).read(), 0, "{what}: byte {i}");
                 }
                 heap.deallocate(NonNull::new(q).unwrap(), layout(len, align));
