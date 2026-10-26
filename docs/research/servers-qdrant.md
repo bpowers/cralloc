@@ -258,11 +258,39 @@ the last ~10 MiB that `t1` returns after close. The 4 to 5 ms lowers over 4 GiB 
 measured harm here, but they waited for the lock with requests in flight. Lowering only the
 part that was raised would bound them.
 
+**The fix (`huge-tail-accounting` at `ae24bca`).** This build adds the review's fixes. A raise
+also now counts the free pages of non-empty huge pages in its range as resident again, aged
+like a fill. It was measured with the same method on the same day: three rounds interleaved
+with main and the product, then two sampler rounds. Medians in MiB, cgroup anon a minute
+after close:
+
+| build | heap mean / peak (RSS anon) | +1 min (cgroup anon) | AnonHugePages peak | p99 / p99.9 ms |
+|---|---|---|---|---|
+| main | 446 / 535 | 188 | 164 | 212 / 293 |
+| product `3c2265e` | 408 / 504 | 157 | 122 | 196 / 223 |
+| `ae24bca` | 410 / 488 | 144 | 116 | 220 / 272 |
+
+`ae24bca` takes 36 off the mean, 47 off the peak and 44 off the memory after close. That is
+the first version's effect; the earlier ht10 `t1` reached -44 / -60 / -41. It ran without
+error. Tails again show no order (p99 134 to 263 ms across the nine runs).
+
+The sampler rounds confirm the mechanism. `ae24bca` collapsed as often as the product
+(27 and 19 huge pages). Its gap after close was -3.6 and -3.3 MiB, which is main's baseline
+(-2.9, -3.2). Its heap a minute after close was 134 and 137, against main's 176 and 192.
+The product ran once with collapses and once without:
+
+- With 24 collapses, its gap was +10.8 and its heap 153.
+- With none, its gap was -3.6 and its heap 136.
+
+That pair isolates the effect. Nothing is left of the after-close distance to `t1`: 134 to
+137 against `t1`'s 137 to 143 in the earlier sampler rounds.
+
 The SurrealDB comparison was not run: its asmalloc arm would need two full rebuilds, and the
 prototype had no effect on that job.
 
 Files: `docs/research/data/servers-qdrant-2026-10-26.tar.gz` holds the rounds (`qprod`),
-the sampler rounds with each process's sampler output (`qms`), the traced runs (`qwl`), the
+the sampler rounds with each process's sampler output (`qms`), the `ae24bca` rounds
+(`qacct`: `a1` to `a3` plain, `s1` and `s2` with the sampler), the traced runs (`qwl`), the
 strace logs and counts (`madvise`), and the scripts that built and ran them. The probes are
 `bench/probes/server-profile/thpstat.py` and `msgap.py`.
 
