@@ -92,7 +92,7 @@ pub enum HugePages {
 /// - After `commit` succeeds the range is readable and writable until it is unmapped, and its
 ///   contents are unchanged.
 /// - After `purge` succeeds the range reads as zero and stays writable if it was.
-/// - `advise_huge` changes neither contents nor permissions.
+/// - `advise_huge` and `split_huge` change neither contents nor permissions.
 /// - After `wipe_on_fork` succeeds, a child forked later reads the range as zero; the calling
 ///   process's contents and permissions are unchanged.
 /// - A failed call may have taken effect on part of its range, but never beyond it.
@@ -138,6 +138,16 @@ pub unsafe trait Os: Sync {
         len: usize,
         advice: HugePages,
     ) -> Result<(), OsError>;
+
+    /// Asks the OS to split every huge page the range covers only in part into small pages,
+    /// so that a later purge of part of a huge page frees memory at once instead of when the
+    /// kernel gets round to splitting it (`MADV_COLD`, which splits such a huge page and marks
+    /// the range's pages as the first to reclaim). A huge page the range covers whole is left.
+    ///
+    /// # Safety
+    ///
+    /// The range follows the rules in the module documentation.
+    unsafe fn split_huge(&self, start: NonNull<u8>, len: usize) -> Result<(), OsError>;
 
     /// How many pages of a range are resident (`mincore`). No promise of this trait's safety
     /// contract depends on the answer: a wrong count only makes the allocator return a page it

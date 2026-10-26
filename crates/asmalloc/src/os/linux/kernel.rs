@@ -19,6 +19,7 @@ const MAP_NORESERVE: usize = 0x4000;
 const MADV_DONTNEED: usize = 4;
 const MADV_HUGEPAGE: usize = 14;
 const MADV_NOHUGEPAGE: usize = 15;
+const MADV_COLD: usize = 20;
 const MADV_WIPEONFORK: usize = 18;
 const MEMBARRIER_CMD_PRIVATE_EXPEDITED_RSEQ: usize = 1 << 7;
 const MEMBARRIER_CMD_REGISTER_PRIVATE_EXPEDITED_RSEQ: usize = 1 << 8;
@@ -317,7 +318,9 @@ fn unblock_sigabrt() {
 //   over-reservation and trim make the start aligned, and only the unused ends are unmapped.
 // - `commit` is mprotect to read and write, which keeps contents. `purge` is MADV_DONTNEED,
 //   after which private anonymous memory reads as zero and stays mapped with its protection.
-//   `advise_huge` is MADV_HUGEPAGE or MADV_NOHUGEPAGE, which change neither. `wipe_on_fork` is
+//   `advise_huge` is MADV_HUGEPAGE or MADV_NOHUGEPAGE, which change neither, and `split_huge`
+//   is MADV_COLD, which splits huge pages and moves pages between reclaim lists, changing
+//   neither either. `wipe_on_fork` is
 //   MADV_WIPEONFORK, which changes nothing in this process and makes a child's copy of the
 //   range read as zero. `resident` is mincore, which changes nothing in the range.
 // - A failed call reports `-errno`; mprotect and madvise may have acted on part of the range,
@@ -399,6 +402,12 @@ unsafe impl Os for LinuxOs {
         // SAFETY: KERNEL-03. the caller passes whole pages of a live reservation; the advice changes no
         // contents or permissions.
         unsafe { range_call(nr::MADVISE, start, len, advice) }
+    }
+
+    unsafe fn split_huge(&self, start: NonNull<u8>, len: usize) -> Result<(), OsError> {
+        // SAFETY: KERNEL-03. the caller passes whole pages of a live reservation; splitting a
+        // huge page and deactivating pages change no contents or permissions.
+        unsafe { range_call(nr::MADVISE, start, len, MADV_COLD) }
     }
 
     unsafe fn resident(&self, start: NonNull<u8>, len: usize) -> Result<usize, OsError> {

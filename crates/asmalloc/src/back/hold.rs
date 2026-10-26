@@ -915,7 +915,7 @@ impl<O: Os> Back<'_, O> {
             stamp |= WALKED_FROM_TOP;
         }
         let (bytes, read, done, _) =
-            self.purge_region(class, region, budget, limit, true, Scope::All, false);
+            self.purge_region(class, region, budget, limit, true, Scope::All, false, true);
         if done && stamp & WALKED_FROM_TOP != 0 {
             let _ = word.compare_exchange(stamp, 0);
         }
