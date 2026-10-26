@@ -461,9 +461,8 @@ fn a_raise_stops_at_the_frontier_and_the_headroom() {
     let hp = layout.huge_pages();
     let units = layout.region_pages() / hp;
     let plan = back.space().plan();
-    let carved = |region: RegionId| {
-        layout.carved_pages(Grow::unpack(host.grow(region).load()).carved)
-    };
+    let carved =
+        |region: RegionId| layout.carved_pages(Grow::unpack(host.grow(region).load()).carved);
     let region = (0..back.walk_regions())
         .filter_map(|index| plan.region(index))
         .filter(|&region| back.state.table.get(region) == RegionTag::Class(class().class()))
@@ -594,5 +593,462 @@ mod kernel {
             assert!(split.is_err());
             os.unmap(base, 2 * HUGE).unwrap();
         }
+    }
+}
+
+/// The pages `tail::look` samples in `unit` at `salt`: its arithmetic, restated.
+fn sampled(unit: super::super::layout::Unit, salt: u32) -> Vec<u32> {
+    let pages = unit.end - unit.start;
+    let samples = super::super::policy::TAIL_SAMPLE_PAGES.min(pages);
+    let share = pages / samples;
+    (0..samples)
+        .map(|i| {
+            let mix = (salt ^ i.wrapping_mul(0x9E37_79B9)).wrapping_mul(0x85EB_CA6B) >> 16;
+            unit.start + i * share + mix % share
+        })
+        .collect()
+}
+
+/// "Each lap samples other pages, so a huge page misjudged once is judged again." The salt is
+/// the count of intervals in which a heartbeat ran, which stands still through a silence: the
+/// time when the background thread's rounds return a quiet program's memory. A huge page
+/// above the frontier with half its pages free, none of them where this interval's samples
+/// fall, is called dense by every lap of the silence and keeps all of it.
+#[test]
+#[cfg_attr(miri, ignore)]
+fn a_huge_page_misjudged_once_is_judged_again_in_a_silence() {
+    let state = state::<Standard>();
+    let back = state.get_or_reserve().unwrap();
+    let os = state.os();
+    let region_bytes = back.space().plan().region_size();
+    let slots = fill(&back, class(), 2 * region_bytes / C);
+    for &p in &slots {
+        paint(p, C, 7);
+    }
+    forget_reuse(&back);
+    let region = region_of(&back, slots[0]);
+    let host = back.host(class().class()).unwrap();
+    let layout = *host.layout();
+    let hp = layout.huge_pages();
+    let top = layout.carved_pages(Grow::unpack(host.grow(region).load()).carved);
+    let start = (top & !(hp - 1)) - hp;
+    assert!(start >= huge_from(&back, region) && start > 0);
+    let unit = super::super::layout::Unit {
+        start,
+        end: start + hp,
+    };
+    let salt = back.epoch() as u32;
+    let seen = sampled(unit, salt);
+    let base = back.space().region(region).addr().get();
+    let freed: Vec<*mut u8> = slots
+        .iter()
+        .copied()
+        .filter(|p| {
+            let page = ((p.addr() - base) / page()) as u32;
+            (unit.start..unit.end).contains(&page) && !seen.contains(&page)
+        })
+        .collect();
+    assert!(freed.len() * C >= (hp as usize - seen.len()) * page() / 2);
+    // SAFETY: the test holds these slots and gives them up.
+    unsafe { back.launder(class(), &freed) };
+    let look = tail::look(&host, region, unit, salt);
+    assert!(
+        !look.sparse && look.free == 0,
+        "the restated samples differ: {look:?}"
+    );
+    assert!(
+        (1..8).any(|later| tail::look(&host, region, unit, salt + later).sparse),
+        "no later salt finds it either"
+    );
+    // A silence: the thread's rounds, an interval apart, and no slow path.
+    let before = charged(os);
+    for _ in 0..24 {
+        os.advance_clock(DECAY_TICKS);
+        while back.thread_purge_steps(&|| back.now()).more {}
+    }
+    assert_eq!(back.epoch() as u32, salt, "the silence counted an interval");
+    let after = charged(os);
+    assert!(
+        before.saturating_sub(after) >= freed.len() * C / 2,
+        "{} bytes free in whole pages of one huge page above the frontier; charged {before} \
+         -> {after} after 24 intervals of silence",
+        freed.len() * C
+    );
+}
+
+/// A boundary of zero is no boundary, so `tail::note` passes the region's first huge page:
+/// "a small class's slots start a few pages in (its origin), so that huge page is never
+/// mapped whole". That rests on every class that gets huge pages having an origin past the
+/// region's first page, in every geometry; nothing else checks it.
+#[test]
+fn every_class_with_huge_pages_starts_past_the_first_page() {
+    // The simulator's standard shape does not keep it (its 16-byte class starts in the first
+    // page), so no simulated test can show what happens there on the design's geometry.
+    for geometry in [crate::space::Geometry::DESIGN] {
+        let plan = geometry.largest_plan();
+        for class in crate::classes::SmallClass::all() {
+            if !super::super::policy::wants_huge(class.size(), geometry.page_size()) {
+                continue;
+            }
+            assert!(
+                plan.slot_origin(class.class()) >= geometry.page_size(),
+                "class of {} bytes has its origin in the first page of a {} KiB region",
+                class.size(),
+                plan.region_size() >> 10
+            );
+        }
+    }
+}
+
+/// A kernel that refuses every change of advice, from the region's first (no huge pages
+/// built in, or out of mappings throughout): the rule still returns the free pages, nothing
+/// is lost, the word asks for a repair and never names a boundary, no claim marks a region,
+/// and the refused calls are at most the reconcile's, once a region a pass. This holds on
+/// the branch.
+#[test]
+#[cfg_attr(miri, ignore)]
+fn a_kernel_that_refuses_all_advice_costs_a_call_a_region_a_pass() {
+    let state = state::<Standard>();
+    let back = state.get_or_reserve().unwrap();
+    let os = state.os();
+    os.set_faults(Call::AdviseHuge, Faults::ALWAYS);
+    let (kept, freed) = stranded(&back);
+    let before = charged(os);
+    let laps = |back: &Back<'_, Sim>| {
+        back.state
+            .walk
+            .laps
+            .load(core::sync::atomic::Ordering::Relaxed) as u64
+    };
+    let (advised, lap) = (os.calls(Call::AdviseHuge), laps(&back));
+    age_and_beat(&back, 12);
+    assert!(before - charged(os) > freed.len() * C / 2);
+    for &p in &kept {
+        assert!(painted(p, C, 7));
+    }
+    let mut repairs = 0;
+    for index in 0..back.walk_regions() {
+        let word = Tail::unpack(back.state.tails[index].load());
+        assert!(word.from == 0 && !word.busy && !word.want, "{word:?}");
+        repairs += u64::from(word.repair);
+    }
+    assert!(repairs > 0);
+    assert_eq!(back.state.marks.load(), 0);
+    let calls = os.calls(Call::AdviseHuge) - advised;
+    let laps = laps(&back) - lap;
+    // The lowering's own call, then the reconcile's one (the boundary is none) each pass, and
+    // a pass may end partway through a region and try once more.
+    assert!(
+        calls <= 2 * repairs * (laps + 1),
+        "{calls} refused advice calls for {repairs} regions in {laps} laps"
+    );
+    // Claims change no advice and mark nothing while there is no boundary.
+    let advised = os.calls(Call::AdviseHuge);
+    let again = fill(&back, class(), 4096);
+    assert!(!again.is_empty());
+    back.heartbeat();
+    assert_eq!(os.calls(Call::AdviseHuge), advised);
+    assert_eq!(back.state.marks.load(), 0);
+}
+
+/// `tla/Tail.tla`'s properties on the code itself, under the interleaving explorer
+/// (`back::explore`): `tail`'s functions unchanged, every operation on the tail word a step,
+/// over a kernel that records the advice of each huge page. The branch's own tests of the
+/// protocol are one randomized race and the model, and nothing ties the model to the code:
+/// the mutants of the take-over and of the give-back's merges all pass them.
+mod protocol {
+    use super::super::super::explore::{Config, Outcome, TWord, explore};
+    use super::super::super::layout::Layout;
+    use super::super::super::tail::{self, Tail};
+    use super::super::super::testhost::TestHost;
+    use super::super::super::tree::Host;
+    use super::super::super::word::Word;
+    use crate::classes::Class;
+    use crate::os::HugePages;
+    use crate::os::sim::{Shape, Standard};
+    use crate::space::RegionId;
+    use std::sync::Mutex;
+    use std::vec::Vec;
+
+    /// A test host whose kernel remembers the advice of each huge page of region 0.
+    struct Kernel {
+        host: TestHost<TWord>,
+        /// Per huge page: advised for huge pages.
+        on: Mutex<Vec<bool>>,
+    }
+
+    impl Kernel {
+        fn new() -> Kernel {
+            let plan = Standard::GEOMETRY.largest_plan();
+            let host = TestHost::<TWord>::new(plan, Class::of_size(64).unwrap(), 1);
+            let units = host.layout().region_pages() / host.layout().huge_pages();
+            Kernel {
+                host,
+                on: Mutex::new(std::vec![true; units as usize]),
+            }
+        }
+
+        fn region(&self) -> RegionId {
+            self.host.region_at(0)
+        }
+
+        /// The first page of the huge-page part: the region's second huge page.
+        fn huge(&self) -> u32 {
+            self.host.layout().huge_pages()
+        }
+
+        fn units(&self) -> u32 {
+            self.host.layout().region_pages() / self.host.layout().huge_pages()
+        }
+
+        fn word(&self) -> Tail {
+            Tail::unpack(self.host.tail(self.region()).load())
+        }
+
+        /// `Agree`'s right-hand side: the kernel's advice over the huge-page part is the
+        /// word's.
+        fn agrees(&self, tail: Tail) -> bool {
+            let on = self.on.lock().unwrap();
+            (1..self.units()).all(|unit| on[unit as usize] == (tail.from == 0 || unit < tail.from))
+        }
+
+        /// `OffOnlyReturned`: advice is off only at or above `lowest`, the lowest huge page
+        /// any walker noted.
+        fn off_only_from(&self, lowest: u32) -> bool {
+            let on = self.on.lock().unwrap();
+            (0..lowest).all(|unit| on[unit as usize])
+        }
+    }
+
+    impl Host for Kernel {
+        type W = TWord;
+
+        fn layout(&self) -> &Layout {
+            self.host.layout()
+        }
+        fn region(&self, index: usize) -> Option<RegionId> {
+            self.host.region(index)
+        }
+        fn meta(&self, region: RegionId, word: u32) -> &TWord {
+            self.host.meta(region, word)
+        }
+        fn tree_words(&self, region: RegionId, level: u8, count: u32) -> &[TWord] {
+            self.host.tree_words(region, level, count)
+        }
+        fn grow(&self, region: RegionId) -> &TWord {
+            self.host.grow(region)
+        }
+        fn hints(&self, region: RegionId) -> &TWord {
+            self.host.hints(region)
+        }
+        fn frontier(&self, region: RegionId) -> &TWord {
+            self.host.frontier(region)
+        }
+        fn tail(&self, region: RegionId) -> &TWord {
+            self.host.tail(region)
+        }
+        fn tail_marks(&self) -> &TWord {
+            self.host.tail_marks()
+        }
+        fn class_word(&self, index: u32) -> &TWord {
+            self.host.class_word(index)
+        }
+        fn class_top(&self) -> &TWord {
+            self.host.class_top()
+        }
+        fn commit(&self, region: RegionId, offset: usize, len: usize) -> bool {
+            self.host.commit(region, offset, len)
+        }
+        fn commit_meta(&self, region: RegionId, offset: usize, len: usize) -> bool {
+            self.host.commit_meta(region, offset, len)
+        }
+        fn advise(&self, _: RegionId, offset: usize, len: usize, advice: HugePages) -> bool {
+            let unit = self.layout().huge_pages() as usize * self.layout().page_size();
+            assert!(offset.is_multiple_of(unit) && len.is_multiple_of(unit) && len > 0);
+            let mut on = self.on.lock().unwrap();
+            for at in offset / unit..(offset + len) / unit {
+                on[at] = advice == HugePages::Prefer;
+            }
+            true
+        }
+        fn split(&self, region: RegionId, offset: usize, len: usize) -> bool {
+            self.host.split(region, offset, len)
+        }
+        unsafe fn purge(&self, region: RegionId, offset: usize, len: usize) -> bool {
+            // SAFETY: the caller's promise, passed on; no scenario here purges.
+            unsafe { self.host.purge(region, offset, len) }
+        }
+        fn abort(&self, message: &str) -> ! {
+            self.host.abort(message)
+        }
+    }
+
+    /// After a schedule: `Agree` as the model states it, then the repair that the next change
+    /// makes (in a fork's child, after the child's distrust of every word), and `Agree` again
+    /// with nothing left to repair.
+    fn check_agree(kernel: &Kernel, outcome: &Outcome, lowest: u32) {
+        let region = kernel.region();
+        let word = kernel.word();
+        assert!(
+            kernel.off_only_from(lowest),
+            "advice off below {lowest}: {word:?}"
+        );
+        if outcome.killed.is_empty() {
+            assert!(!word.busy, "an owner bit left set: {word:?}");
+            if !word.repair {
+                assert!(
+                    kernel.agrees(word),
+                    "Agree: {word:?} against {:?}",
+                    kernel.on.lock().unwrap()
+                );
+            }
+        } else if kernel.host.tail(region).load() != 0 {
+            // `Back::distrust_tails`, in the child.
+            kernel.host.tail(region).fetch_or(tail::REPAIR);
+        }
+        // Many intervals later, so that an owner the fork cut off is taken over.
+        let _ = tail::lower(kernel, region, kernel.huge(), 1000);
+        let word = kernel.word();
+        if !outcome.killed.is_empty() && word.busy {
+            // Nothing asked for a change (no note, and the word was zero but for the owner):
+            // the bit waits for the next note.
+            return;
+        }
+        assert!(!word.busy && !word.repair, "{word:?}");
+        assert!(
+            kernel.agrees(word),
+            "Agree after the repair: {word:?} against {:?}",
+            kernel.on.lock().unwrap()
+        );
+    }
+
+    /// `Tail.cfg`: a lowering, a second lowering two intervals later that takes the first
+    /// over if it is still under way, and a claim's mark with its raise. A boundary at the last
+    /// huge page stands before they start.
+    fn lowerings_and_a_raise(config: Config) -> usize {
+        explore(
+            config,
+            3,
+            || {
+                let kernel = Kernel::new();
+                let last = kernel.units() - 1;
+                tail::note(&kernel, kernel.region(), last);
+                let _ = tail::lower(&kernel, kernel.region(), kernel.huge(), 1);
+                assert_eq!(kernel.word().from, last);
+                kernel
+            },
+            |kernel, me| {
+                let region = kernel.region();
+                let layout = *kernel.layout();
+                match me {
+                    0 => {
+                        let _ = tail::lower(kernel, region, kernel.huge(), 3);
+                    }
+                    1 => {
+                        tail::note(kernel, region, 2);
+                        let _ = tail::lower(kernel, region, kernel.huge(), 1);
+                    }
+                    _ => {
+                        let _ = tail::mark(kernel, region, layout.region_pages());
+                        let _ =
+                            tail::raise(kernel, region, kernel.huge(), 0, layout.region_pages(), 3);
+                    }
+                }
+            },
+            |kernel, outcome| check_agree(kernel, outcome, 2),
+        )
+        .schedules
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn lowerings_and_a_raise_agree_quickly() {
+        let schedules = lowerings_and_a_raise(Config {
+            preemptions: Some(2),
+            ..Config::ALL
+        });
+        assert!(schedules > 100, "{schedules} schedules");
+    }
+
+    #[test]
+    #[ignore = "slow: run with scripts/gate --all"]
+    fn lowerings_and_a_raise_agree_fully() {
+        lowerings_and_a_raise(Config {
+            preemptions: Some(4),
+            ..Config::ALL
+        });
+    }
+
+    /// The same with a fork that leaves a thread behind at any step (`ForkRepair`).
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn lowerings_and_a_raise_agree_after_a_fork_quickly() {
+        lowerings_and_a_raise(Config {
+            preemptions: Some(2),
+            crash: true,
+            ..Config::ALL
+        });
+    }
+
+    /// A note made while another thread owns the word is kept by that owner's give-back
+    /// (`Give`'s `low0`): two walkers note and lower, and once both are done the next lowering
+    /// brings the boundary to the lowest huge page noted, in every schedule.
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn a_note_made_during_a_lowering_is_lowered_next() {
+        explore(
+            Config::ALL,
+            2,
+            Kernel::new,
+            |kernel, me| {
+                let region = kernel.region();
+                tail::note(kernel, region, if me == 0 { 2 } else { 1 });
+                let _ = tail::lower(kernel, region, kernel.huge(), 1);
+            },
+            |kernel, outcome| {
+                assert!(outcome.killed.is_empty());
+                let _ = tail::lower(kernel, kernel.region(), kernel.huge(), 1);
+                let word = kernel.word();
+                assert_eq!((word.from, word.low), (1, None), "{word:?}");
+                assert!(kernel.agrees(word));
+            },
+        );
+    }
+
+    /// A mark set while another thread owns the word is kept by that owner's give-back
+    /// (`Give`'s `want`): the claim was told that it marked the region, so the mark is there
+    /// when the lowering is done.
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn a_mark_set_during_a_lowering_is_kept() {
+        explore(
+            Config::ALL,
+            2,
+            || {
+                let kernel = Kernel::new();
+                let last = kernel.units() - 1;
+                tail::note(&kernel, kernel.region(), last);
+                let _ = tail::lower(&kernel, kernel.region(), kernel.huge(), 1);
+                (kernel, Mutex::new(false))
+            },
+            |(kernel, marked), me| {
+                let region = kernel.region();
+                if me == 0 {
+                    tail::note(kernel, region, 2);
+                    let _ = tail::lower(kernel, region, kernel.huge(), 1);
+                } else {
+                    let pages = kernel.layout().region_pages();
+                    *marked.lock().unwrap() = tail::mark(kernel, region, pages);
+                }
+            },
+            |(kernel, marked), _| {
+                let word = kernel.word();
+                assert!(
+                    *marked.lock().unwrap(),
+                    "the claim above the boundary did not mark"
+                );
+                assert!(word.want, "the mark was lost: {word:?}");
+            },
+        );
     }
 }
