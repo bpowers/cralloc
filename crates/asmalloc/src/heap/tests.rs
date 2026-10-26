@@ -2501,6 +2501,29 @@ mod review_lean_realloc {
         }
     }
 
+    /// A zeroed grow that moves into a slot nothing has used, which the back end knows to read
+    /// as zero, so that the grow clears nothing: only the old layout's bytes are copied, and
+    /// the old block's slack, which the caller wrote, does not come along.
+    #[test]
+    fn a_zeroed_grow_into_a_fresh_slot_leaves_the_old_slack_behind() {
+        let heap = SimHeap::<Shape>::new();
+        let (lo, ln) = (layout(40_000, 8), layout(300_000, 8));
+        // SAFETY: valid layouts; the block is freed once with a layout that fits it.
+        unsafe {
+            let p = heap.alloc(lo);
+            let had = heap.usable(p).unwrap();
+            assert!(had > lo.size(), "the block has slack");
+            fill(p, had, 5);
+            let (q, len) = heap.grow_zeroed_for_test(p, lo, ln).unwrap();
+            assert_ne!(q, p);
+            assert!(holds(q, lo.size(), 5));
+            for i in lo.size()..len {
+                assert_eq!(q.add(i).read(), 0, "byte {i} of {len}");
+            }
+            heap.dealloc(q, ln);
+        }
+    }
+
     /// `Allocator::grow_zeroed` and `shrink` for every pair of sizes, with the caller dirtying
     /// all of the block it was given, slack included, and with blocks an earlier tenant left
     /// dirty in the magazine a grow may move into. The bytes the old layout covered arrive, and

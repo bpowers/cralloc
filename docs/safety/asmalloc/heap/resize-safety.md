@@ -125,3 +125,5 @@ nobody else uses it.
 
 In every path the bytes `0..old.size()` are the old block's: in place they were never
 written, and moved they were copied before the clear, which starts at `old.size()`.
+
+Reviewed: 548ea25

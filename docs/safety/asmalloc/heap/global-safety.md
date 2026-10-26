@@ -92,4 +92,4 @@ whose `new_size` is not zero and does not overflow `isize` when rounded up to th
 for a block this allocator returned. Every `Asmalloc` reaches `HEAP` through `process()`, so a
 block any handle returned is a block of the heap `process()` names.
 
-Reviewed: f41dbf9
+Reviewed: 548ea25
