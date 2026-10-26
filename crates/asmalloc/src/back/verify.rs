@@ -412,7 +412,7 @@ fn a_walk_starts_at_most_once_a_hold() {
     let (began, since, steps): (u32, u32, u32) = (kani::any(), kani::any(), kani::any());
     kani::assume(steps >= 1 && steps <= HOLD_STEPS);
     let walk = AgeWalk { cursor: 0, began };
-    assert!(walk_due(walk, began.wrapping_add(since), steps) == (since + 1 >= steps));
+    assert!(walk_due(walk, began.wrapping_add(since), steps) == (since.saturating_add(1) >= steps));
     let under_way = AgeWalk {
         cursor: kani::any(),
         ..walk
