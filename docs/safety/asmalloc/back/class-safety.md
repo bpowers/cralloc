@@ -25,7 +25,7 @@ word, as its holder, with the fine count in `Recorded::freed` (`Back::stamp_slot
 changes no contents and which the hold's walk reads only as a hint (BACK-REGION-01, "A second
 caller"). A clean bit says the page has not been written since it was carved or last purged:
 only a purge, a range the holder returned whole (a shrink's tail, a piece behind a move's
-copy before the move frees the slot, or the slack a claim trims, BACK-CLASS-07;
+copy before the move frees the slot, or the slack a claim trims, BACK-CLASS-08;
 `region::mark_clean`) and the carve of a slot (`region::mark_fresh`, for the pages past its block, which nothing has
 written) set one, each by the slot's holder (only the holder of every slot a bit describes
 writes it); the claim (`region::settle_slot`) clears the bits under
@@ -96,7 +96,7 @@ breaking it does, compared with a free that does not purge.
   `realloc` copies and `malloc_usable_size` reports. That is the second case above, a double
   free of a slot handed out again, which then releases the new owner's slot as well; the
   store adds a wrong size to that corruption, and no memory-safety step of the allocator
-  rests on the word (the trim's range is bounded by the slot, BACK-CLASS-07).
+  rests on the word (the trim's range is bounded by the slot, BACK-CLASS-08).
 
 The earlier form of this path released the slot first and then claimed it back to purge it,
 which held a claim across the `madvise` on a slot that was nominally free: a second free in
@@ -406,7 +406,7 @@ free. An error from the call (`Err`) is taken as "not left unwritten", an ordina
 
 Reviewed: 415b07e
 
-## BACK-CLASS-07: `region::purge_part(...)` in `trim_slack`
+## BACK-CLASS-08: `region::purge_part(...)` in `trim_slack`
 
 **Block.** `region::purge_part(host, region, slot, from, len)` in `Back::trim_slack`, the trim
 at the claim of a free large slot: the top `policy::PURGE_STEP_PAGES` at most of the pages past

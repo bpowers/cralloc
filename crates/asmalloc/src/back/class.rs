@@ -746,7 +746,7 @@ impl<'a, O: Os> Back<'a, O> {
         };
         let from = slack.start as usize * page - layout.slot_bytes(slot);
         let len = (slack.end - slack.start) as usize * page;
-        // SAFETY: BACK-CLASS-07 in docs/safety/asmalloc/back/class-safety.md. This thread
+        // SAFETY: BACK-CLASS-08 in docs/safety/asmalloc/back/class-safety.md. This thread
         // claimed the slot a moment ago and has not handed its block out, and the range lies
         // inside the slot past everything the block may write.
         if unsafe { region::purge_part(host, region, slot, from, len) } {

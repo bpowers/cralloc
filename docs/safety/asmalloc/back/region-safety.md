@@ -133,7 +133,7 @@ given went back whole, which BACK-CLASS-03 relies on before marking a slot zero.
 callers and why their ranges are given up are BACK-CLASS-02 (the tail of an object that
 shrank in place), BACK-CLASS-03 (the part of a moving object already copied),
 BACK-CLASS-05 (`unspill`: a huge page of a block that grew in place, whose bytes are first
-copied aside and copied back after) and BACK-CLASS-07 (`trim_slack`: the pages of a slot just
+copied aside and copied back after) and BACK-CLASS-08 (`trim_slack`: the pages of a slot just
 claimed that lie past both its new block and its last tenant) in `class-safety.md`.
 
 **Review.** 2026-10-17, fresh adversarial reviewer: the protocol was accepted; three gaps were
