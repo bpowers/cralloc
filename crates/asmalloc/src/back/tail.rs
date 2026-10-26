@@ -63,15 +63,16 @@
 //! tail's partly used huge pages stay whole.
 //!
 //! **Accounting.** Under the advice for huge pages the kernel may make any huge page that holds
-//! one page wholly resident (khugepaged rebuilds it), so there the huge page is the unit of
-//! residency, as everywhere it was never split. Whenever advice comes to cover partly returned
-//! huge pages again, the caller restores that (`Back::restore_tail`): every free page of each
-//! such huge page that holds anything counts as resident, its clean bits cleared under a claim
-//! of its slots and the retained count raised, as a fill would. That is a raise's range, and
-//! the huge pages between a note the frontier has passed and the frontier, where the advice
-//! stays on. A huge page wholly returned stays as it is: nothing rebuilds one with no page
-//! present. And a raise counts as a fill's reach over its range, so the walk treats the range
-//! as below the frontier until that ages, and the next pass does not split it again at once.
+//! one page wholly resident (khugepaged rebuilds it), so there a page's clean bit may say
+//! returned of a page that is resident again. Nothing changes the clean bits or the retained
+//! count when the advice comes back; instead the tail walk does not believe clean bits where
+//! they can be wrong (`purge`, "The tail"): below the boundary, a free page of a huge page
+//! with any page not clean counts as resident to the look, the exact count, the counting
+//! step's estimate and the runs a returning step gives back. A huge page wholly clean is left
+//! as it is, since nothing rebuilds one with no page present, and above the boundary the bits
+//! are true. So the retained count never holds memory that may not be resident; it misses
+//! what khugepaged rebuilt until the walk returns it. A raise counts as a fill's reach over
+//! its range (`Back::age_raise`), so the walk does not take it back within two intervals.
 //!
 //! The protocol is `tla/Tail.tla`.
 
@@ -353,10 +354,8 @@ pub(crate) fn lower<H: Host>(host: &H, region: RegionId, huge: u32, epoch: u64) 
     lower_moved(host, region, huge, epoch, true).change
 }
 
-/// What a change of a region's advice did, and the huge pages `start..end` it left under the
-/// advice that the walk may have returned part of, whose accounting the caller restores
-/// (`Back::restore_tail`): a raise's range, or the huge pages between a note the frontier
-/// has passed and the frontier.
+/// What a change of a region's advice did, and for a raise the huge pages `start..end` it put
+/// back under the advice, which the caller counts as a fill's reach (`Back::age_raise`).
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(crate) struct Moved {
     pub(crate) change: Change,
@@ -445,14 +444,11 @@ pub(crate) fn lower_moved<H: Host>(
         }
         _ => Change::None,
     };
-    // The huge pages from a note the frontier has passed up to the frontier, which the walk
-    // may have returned part of, stay under the advice.
-    let under = owned
-        .low
-        .filter(|&low| low < reached && low * hp >= huge && change != Change::Refused)
-        .map(|low| (low, reached.min(old)));
     give_back(word, marks, mine, next);
-    Moved { change, under }
+    Moved {
+        change,
+        under: None,
+    }
 }
 
 /// For the background thread, or a heartbeat where there is none: if a claim marked
@@ -557,16 +553,24 @@ pub(crate) fn raise_moved<H: Host>(
 /// decides whether a huge page above the frontier is split (`policy::TAIL_SPLIT_SHARE`). It reads
 /// what a walk of the whole huge page reads: the leaf words of its slots, `2 MiB / size / 64`
 /// of them (32 for 1 KiB slots, 2048 for 16-byte ones), and a clean word for each page.
-pub(crate) fn free_resident<H: Host>(host: &H, region: RegionId, unit: Unit) -> (u32, usize) {
+///
+/// With `trust` false the clean bits are not believed, as in [`look`].
+pub(crate) fn free_resident<H: Host>(
+    host: &H,
+    region: RegionId,
+    unit: Unit,
+    trust: bool,
+) -> (u32, usize) {
     let (mut free, mut read) = (0, 0);
     for start in unit.start..unit.end {
-        let (ok, words) = region::purgeable_unit(
+        let (ok, words) = region::purgeable_unit_as(
             host,
             region,
             Unit {
                 start,
                 end: start + 1,
             },
+            trust,
         );
         read += words;
         free += u32::from(ok);
@@ -597,7 +601,16 @@ pub(crate) struct Look {
 /// exactly ([`free_resident`]); the count decides the split. By pages, not by leaf words: a word of a class of 1 KiB covers 16
 /// pages, and a huge page with a live slot in every 16 pages has no free word and 15 free
 /// pages in 16. Reads only, at most a page's slots' words and its clean word for each sample.
-pub(crate) fn look<H: Host>(host: &H, region: RegionId, unit: Unit, salt: u32) -> Look {
+///
+/// With `trust` false the clean bits are not believed (`purge`, "The tail"): a free page counts
+/// as resident whatever its bit says.
+pub(crate) fn look<H: Host>(
+    host: &H,
+    region: RegionId,
+    unit: Unit,
+    salt: u32,
+    trust: bool,
+) -> Look {
     let pages = unit.end - unit.start;
     let samples = TAIL_SAMPLE_PAGES.min(pages);
     let share = pages / samples.max(1);
@@ -607,13 +620,14 @@ pub(crate) fn look<H: Host>(host: &H, region: RegionId, unit: Unit, salt: u32) -
         // later salt moves the samples and they do not keep one phase of a periodic layout.
         let mix = (salt ^ i.wrapping_mul(0x9E37_79B9)).wrapping_mul(0x85EB_CA6B) >> 16;
         let start = unit.start + i * share + mix % share;
-        let (ok, words) = region::purgeable_unit(
+        let (ok, words) = region::purgeable_unit_as(
             host,
             region,
             Unit {
                 start,
                 end: start + 1,
             },
+            trust,
         );
         read += words;
         free += u32::from(ok);
