@@ -414,9 +414,6 @@ fn a_heartbeat_raises_a_bounded_number_of_regions() {
 /// resident and charged again, but their clean bits still say returned, so the retained count
 /// does not hold them, the look calls them dense, and no pass returns them until the huge page
 /// is wholly free. The test shows the memory coming back and staying.
-// Finding 5, left to the second stage by the lead's decision: compiled out until then, since
-// `scripts/gate --all` runs ignored tests.
-#[cfg(any())]
 #[test]
 #[cfg_attr(miri, ignore)]
 fn what_khugepaged_rebuilds_after_a_raise_is_returned_again() {
@@ -433,7 +430,13 @@ fn what_khugepaged_rebuilds_after_a_raise_is_returned_again() {
         assert!(!more.is_empty());
         again.extend(more);
     }
-    back.heartbeat();
+    // A request's heartbeat raises one region a step (finding 3): as many as it takes.
+    for _ in 0..8 {
+        if back.state.marks.load() == 0 {
+            break;
+        }
+        back.heartbeat();
+    }
     assert_eq!(back.state.marks.load(), 0);
     // SAFETY: as `charged`.
     let rebuilt = unsafe { os.khugepaged() };

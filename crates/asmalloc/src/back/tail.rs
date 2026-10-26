@@ -57,6 +57,17 @@
 //! each kind an interval, and two for a reconciliation, and keeps main's behaviour: free pages
 //! of whole huge pages go back, the tail's partly used huge pages stay whole.
 //!
+//! **Accounting.** Under the advice for huge pages the kernel may make any huge page that holds
+//! one page wholly resident (khugepaged rebuilds it), so there the huge page is the unit of
+//! residency, as everywhere it was never split. Whenever advice comes to cover partly returned
+//! huge pages again, the caller restores that (`Back::restore_tail`): every free page of each
+//! such huge page that holds anything counts as resident, its clean bits cleared under a claim
+//! of its slots and the retained count raised, as a fill would. That is a raise's range, and
+//! the huge pages between a note the frontier has passed and the frontier, where the advice
+//! stays on. A huge page wholly returned stays as it is: nothing rebuilds one with no page
+//! present. And a raise counts as a fill's reach over its range, so the walk treats the range
+//! as below the frontier until that ages, and the next pass does not split it again at once.
+//!
 //! The protocol is `tla/Tail.tla`.
 
 use super::layout::Unit;
@@ -330,25 +341,50 @@ fn reconcile<H: Host>(host: &H, region: RegionId, huge: u32, from: u32) -> bool 
 /// reached it since, where the advice must stay. A note the frontier has passed is dropped.
 /// A refused call keeps the note (`tla/Tail.tla`, `Call`), so that the advice comes off there
 /// once the kernel takes it.
+#[cfg(test)]
 pub(crate) fn lower<H: Host>(host: &H, region: RegionId, huge: u32, epoch: u64) -> Change {
-    lower_to(host, region, huge, epoch, true)
+    lower_moved(host, region, huge, epoch, true).change
 }
 
-/// [`lower`] for `trim`, the caller asking for everything back: the advice comes off at the
+/// `lower` for `trim`, the caller asking for everything back: the advice comes off at the
 /// noted huge page even below the frontier, and fills that reach there later raise it again.
 pub(crate) fn lower_all<H: Host>(host: &H, region: RegionId, huge: u32, epoch: u64) -> Change {
-    lower_to(host, region, huge, epoch, false)
+    lower_moved(host, region, huge, epoch, false).change
 }
 
-fn lower_to<H: Host>(host: &H, region: RegionId, huge: u32, epoch: u64, clamp: bool) -> Change {
+/// What a change of a region's advice did, and the huge pages `start..end` it left under the
+/// advice that the walk may have returned part of, whose accounting the caller restores
+/// (`Back::restore_tail`): a raise's range, or the huge pages between a dropped note and the
+/// frontier.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) struct Moved {
+    pub(crate) change: Change,
+    pub(crate) under: Option<(u32, u32)>,
+}
+
+impl Moved {
+    const NONE: Moved = Moved {
+        change: Change::None,
+        under: None,
+    };
+}
+
+/// `lower`, or with `clamp` false `lower_all`, saying what it left under the advice.
+pub(crate) fn lower_moved<H: Host>(
+    host: &H,
+    region: RegionId,
+    huge: u32,
+    epoch: u64,
+    clamp: bool,
+) -> Moved {
     let word = host.tail(region);
     let seen = word.load();
     let tail = Tail::unpack(seen);
     if tail.low.is_none() && !tail.repair {
-        return Change::None;
+        return Moved::NONE;
     }
     let Some((mine, owned)) = take(word, seen, epoch) else {
-        return Change::None;
+        return Moved::NONE;
     };
     let marks = host.tail_marks();
     let layout = host.layout();
@@ -372,7 +408,10 @@ fn lower_to<H: Host>(host: &H, region: RegionId, huge: u32, epoch: u64, clamp: b
                     ..next
                 },
             );
-            return Change::Refused;
+            return Moved {
+                change: Change::Refused,
+                under: None,
+            };
         }
     }
     let old = if owned.from == 0 {
@@ -402,8 +441,14 @@ fn lower_to<H: Host>(host: &H, region: RegionId, huge: u32, epoch: u64, clamp: b
         }
         _ => Change::None,
     };
+    // A note the frontier has passed is dropped, and the huge pages from it to the frontier,
+    // which the walk may have returned part of, stay under the advice.
+    let under = owned
+        .low
+        .filter(|&low| low < reached && low * hp >= huge)
+        .map(|low| (low, reached.min(old)));
     give_back(word, marks, mine, next);
-    change
+    Moved { change, under }
 }
 
 /// For the background thread, or a heartbeat where there is none: if a claim marked
@@ -413,6 +458,7 @@ fn lower_to<H: Host>(host: &H, region: RegionId, huge: u32, epoch: u64, clamp: b
 /// been touched, so advice there brings nothing back, and a class growing into fresh memory
 /// faults huge pages again. Clears the mark once the advice is on; a refused call keeps it,
 /// and the caller does not try again before the next interval (`Back::raise_marked`).
+#[cfg(test)]
 pub(crate) fn raise<H: Host>(
     host: &H,
     region: RegionId,
@@ -421,14 +467,26 @@ pub(crate) fn raise<H: Host>(
     top: u32,
     epoch: u64,
 ) -> Change {
+    raise_moved(host, region, huge, frontier, top, epoch).change
+}
+
+/// `raise`, saying the huge pages it put back under the advice.
+pub(crate) fn raise_moved<H: Host>(
+    host: &H,
+    region: RegionId,
+    huge: u32,
+    frontier: u32,
+    top: u32,
+    epoch: u64,
+) -> Moved {
     let word = host.tail(region);
     let seen = word.load();
     let tail = Tail::unpack(seen);
     if !tail.want {
-        return Change::None;
+        return Moved::NONE;
     }
     let Some((mine, owned)) = take(word, seen, epoch) else {
-        return Change::None;
+        return Moved::NONE;
     };
     let marks = host.tail_marks();
     let layout = host.layout();
@@ -444,12 +502,15 @@ pub(crate) fn raise<H: Host>(
         if next.repair {
             next.want = owned.want;
             give_back(word, marks, mine, next);
-            return Change::Refused;
+            return Moved {
+                change: Change::Refused,
+                under: None,
+            };
         }
     }
     if owned.from == 0 {
         give_back(word, marks, mine, next);
-        return Change::None;
+        return Moved::NONE;
     }
     let wanted = frontier.div_ceil(hp) + TAIL_HEADROOM_HUGE_PAGES;
     let to = if wanted >= top.div_ceil(hp) {
@@ -459,13 +520,15 @@ pub(crate) fn raise<H: Host>(
     };
     if to <= owned.from {
         give_back(word, marks, mine, next);
-        return Change::None;
+        return Moved::NONE;
     }
     let (offset, len) = (
         (owned.from * hp) as usize * page,
         ((to - owned.from) * hp) as usize * page,
     );
+    let mut under = None;
     let change = if host.advise(region, offset, len, HugePages::Prefer) {
+        under = Some((owned.from, to));
         next.from = if to >= end_unit { 0 } else { to };
         // What was noted above a new boundary is under the advice now; with no boundary left,
         // a note (below the old one) is kept for the next lowering.
@@ -477,7 +540,7 @@ pub(crate) fn raise<H: Host>(
         Change::Refused
     };
     give_back(word, marks, mine, next);
-    change
+    Moved { change, under }
 }
 
 /// The free pages of `unit` of `region` still resident, as the walk would return them

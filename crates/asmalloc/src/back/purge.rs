@@ -1206,7 +1206,7 @@ impl<O: Os> Back<'_, O> {
                 set_cursor(hints, cursor, 0);
             }
             if let Some(huge) = Hints::unpack(hints.load()).huge_from {
-                self.lower_tail(&host, region, huge);
+                self.lower_tail(class, &host, region, huge);
             }
             return (0, 1, true, 0);
         }
@@ -1435,7 +1435,7 @@ impl<O: Os> Back<'_, O> {
             // Once a pass a region: the advice comes off over what the walk returned part of;
             // for `trim`, which does not resume, even below the frontier.
             if resume {
-                self.lower_tail(&host, region, huge);
+                self.lower_tail(class, &host, region, huge);
             } else if tail::lower_all(&host, region, huge, self.epoch()) == tail::Change::Refused {
                 self.refuse_tail(REFUSED_LOWER);
             }
@@ -1447,15 +1447,62 @@ impl<O: Os> Back<'_, O> {
     /// interval, and notes a refusal. The owner's give-back may leave a claim's mark it
     /// answers for (`tail`, "give_back"): the background thread is woken for it, as a claim's
     /// heartbeat would wake it.
-    fn lower_tail(&self, host: &ClassHost<'_, O>, region: RegionId, huge: u32) {
+    fn lower_tail(&self, class: Class, host: &ClassHost<'_, O>, region: RegionId, huge: u32) {
         if self.tail_refused(REFUSED_LOWER) {
             return;
         }
-        if tail::lower(host, region, huge, self.epoch()) == tail::Change::Refused {
+        let epoch = self.epoch();
+        let moved = tail::lower_moved(host, region, huge, epoch, true);
+        if moved.change == tail::Change::Refused {
             self.refuse_tail(REFUSED_LOWER);
+        }
+        if let Some(under) = moved.under {
+            self.restore_tail(class, host, region, huge, under, None);
         }
         if self.marks_due() {
             self.state.thread.rouse_any(self.space.os());
+        }
+    }
+
+    /// For huge pages `under.0..under.1` of `region` that a change has left under the advice
+    /// for huge pages (`tail::Moved`): counts every free page of each that holds anything as
+    /// resident again (`region::restore_resident`), as a fill would, since under the advice
+    /// the kernel may rebuild any such huge page whole. With `epoch`, a raise's: the raised
+    /// range also counts as reached by a fill in that interval (`region::reach`), so that the
+    /// walk treats it as below the frontier, and does not split it again, until the frontier
+    /// has aged below it.
+    fn restore_tail(
+        &self,
+        class: Class,
+        host: &ClassHost<'_, O>,
+        region: RegionId,
+        huge: u32,
+        under: (u32, u32),
+        epoch: Option<u64>,
+    ) {
+        let layout = host.layout();
+        let hp = layout.huge_pages();
+        let carved = super::layout::Grow::unpack(host.grow(region).load()).carved;
+        let top = layout.carved_pages(carved);
+        let low = huge.max(layout.origin_page());
+        let mut pages = 0;
+        for unit in under.0..under.1 {
+            let (start, end) = ((unit * hp).max(low), ((unit + 1) * hp).min(top));
+            if start < end {
+                pages += region::restore_resident(host, region, Unit { start, end }).0;
+            }
+        }
+        self.retain(class, pages as usize * layout.page_size());
+        if let Some(epoch) = epoch
+            && carved != 0
+        {
+            let reach = (under.1 * hp).min(top);
+            if reach > 0 {
+                let last = layout
+                    .slot_at(reach as usize * layout.page_size() - 1)
+                    .min(carved - 1);
+                let _ = region::reach(host, region, last, epoch);
+            }
         }
     }
 
@@ -1656,7 +1703,11 @@ impl<O: Os> Back<'_, O> {
             // The interval read for each region, after the system calls of the last.
             let epoch = self.epoch();
             let frontier = region::floor(&host, region, epoch);
-            match tail::raise(&host, region, huge, frontier, top, epoch) {
+            let moved = tail::raise_moved(&host, region, huge, frontier, top, epoch);
+            if let Some(under) = moved.under {
+                self.restore_tail(class, &host, region, huge, under, Some(epoch));
+            }
+            match moved.change {
                 tail::Change::None => {}
                 tail::Change::Done if !one => {}
                 change => {
@@ -1723,7 +1774,7 @@ impl<O: Os> Back<'_, O> {
             return;
         };
         if let Some(huge) = Hints::unpack(host.hints(region).load()).huge_from {
-            self.lower_tail(&host, region, huge);
+            self.lower_tail(class, &host, region, huge);
         }
     }
 }

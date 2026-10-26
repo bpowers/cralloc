@@ -965,3 +965,160 @@ fn a_raise_past_the_watermark_goes_to_the_end() {
     );
     assert_eq!(Tail::unpack(host.tail(region).load()).from, 0);
 }
+
+/// Stage two, the accounting: once a raise puts split huge pages back under the advice, every
+/// free page of each one that holds anything counts as resident again, since khugepaged may
+/// rebuild it whole; a huge page wholly returned stays as it is; and the raised range ages
+/// like a fill, so the next interval's pass does not split it again at once.
+#[test]
+#[cfg_attr(miri, ignore)]
+fn a_raise_counts_its_huge_pages_resident_again_and_ages_like_a_fill() {
+    let state = state::<Standard>();
+    let back = state.get_or_reserve().unwrap();
+    let os = state.os();
+    let (kept, _) = stranded(&back);
+    // The top huge page's one kept slot goes too: it will be returned whole.
+    let top_kept = kept[kept.len() - 1];
+    // SAFETY: the test holds this slot and gives it up.
+    unsafe { back.launder(class(), &[top_kept]) };
+    age_and_beat(&back, 12);
+    let (region, _) = region_of(&back, top_kept);
+    let host = back.host(class().class()).unwrap();
+    let layout = *host.layout();
+    let hp = layout.huge_pages();
+    let before = Tail::unpack(host.tail(region).load());
+    assert_ne!(before.from, 0);
+    let top = layout.carved_pages(Grow::unpack(host.grow(region).load()).carved);
+    let unit = |u: u32| super::super::layout::Unit {
+        start: (u * hp).max(layout.origin_page()),
+        end: ((u + 1) * hp).min(top),
+    };
+    let last = (top - 1) / hp;
+    assert_eq!(
+        super::super::region::dirty_pages(&host, region, unit(last)).0,
+        0
+    );
+    let retained = back.retained();
+    // Claims above the boundary, then the raise.
+    let mut held = Vec::new();
+    while Tail::unpack(host.tail(region).load()).from == before.from {
+        let more = fill(&back, class(), 64);
+        assert!(!more.is_empty());
+        held.extend(more);
+        for _ in 0..4 {
+            back.heartbeat();
+        }
+    }
+    let after = Tail::unpack(host.tail(region).load());
+    let raised_to = if after.from == 0 {
+        top.div_ceil(hp)
+    } else {
+        after.from
+    };
+    for u in before.from..raised_to {
+        let (dirty, _) = super::super::region::dirty_pages(&host, region, unit(u));
+        let pages = (unit(u).end - unit(u).start) as usize;
+        if u == last {
+            assert_eq!(
+                dirty, 0,
+                "the wholly returned huge page was counted resident"
+            );
+        } else {
+            assert_eq!(
+                dirty, pages,
+                "huge page {u}: {dirty} of {pages} pages counted"
+            );
+        }
+    }
+    assert!(
+        back.retained() > retained,
+        "the retained count did not grow"
+    );
+    // The claims go back. The next interval's passes leave the raised range alone, though
+    // the claims reached only its bottom; once the frontier has aged below it, they split
+    // its huge pages again.
+    // SAFETY: the test holds these slots and gives them up.
+    unsafe { back.launder(class(), &held) };
+    let splits = os.calls(Call::SplitHuge);
+    os.advance_clock(DECAY_TICKS);
+    beat(&back);
+    // A step of the next interval's pass, that may return everything.
+    let _ = back.purge_region(
+        class().class(),
+        region,
+        usize::MAX,
+        usize::MAX,
+        true,
+        super::super::purge::Scope::Idle,
+        false,
+        false,
+    );
+    assert_eq!(
+        os.calls(Call::SplitHuge),
+        splits,
+        "the raise was undone at once"
+    );
+    age_and_beat(&back, 6);
+    assert!(
+        os.calls(Call::SplitHuge) > splits,
+        "the raised range was never split again"
+    );
+}
+
+/// Stage two: a note the frontier has passed is dropped and the advice stays on over it, so
+/// the huge pages between the note and the frontier, returned in part, count as resident
+/// again, as under a raise.
+#[test]
+#[cfg_attr(miri, ignore)]
+fn a_dropped_note_counts_its_huge_pages_resident_again() {
+    let state = state::<Standard>();
+    let back = state.get_or_reserve().unwrap();
+    let (kept, _) = stranded(&back);
+    forget_reuse(&back);
+    let at = kept[kept.len() - 1];
+    let (region, _) = region_of(&back, at);
+    let host = back.host(class().class()).unwrap();
+    let layout = *host.layout();
+    let hp = layout.huge_pages();
+    // A step that returns part of a huge page and stops there, noting it.
+    let (purged, _, done, _) = back.purge_region(
+        class().class(),
+        region,
+        usize::MAX,
+        page(),
+        true,
+        super::super::purge::Scope::Idle,
+        false,
+        true,
+    );
+    assert!(purged != 0 && !done);
+    let noted = Tail::unpack(host.tail(region).load()).low.unwrap();
+    let unit = super::super::layout::Unit {
+        start: noted * hp,
+        end: (noted + 1) * hp,
+    };
+    let (dirty, _) = super::super::region::dirty_pages(&host, region, unit);
+    assert!(dirty < hp as usize);
+    // Fills now reach above it, in this interval.
+    let top = layout.carved_pages(Grow::unpack(host.grow(region).load()).carved);
+    let _ = super::super::region::reach(
+        &host,
+        region,
+        layout.slot_at(top as usize * page() - 1),
+        back.epoch(),
+    );
+    back.state.walk.purge_at.store(
+        region.index() as u32 + 1,
+        core::sync::atomic::Ordering::Relaxed,
+    );
+    let retained = back.retained();
+    back.lower_walked();
+    let word = Tail::unpack(host.tail(region).load());
+    assert_eq!((word.from, word.low), (0, None), "{word:?}");
+    let (dirty, _) = super::super::region::dirty_pages(&host, region, unit);
+    assert_eq!(
+        dirty, hp as usize,
+        "the dropped note's huge page was not counted resident"
+    );
+    assert!(back.retained() > retained);
+}

@@ -996,6 +996,59 @@ pub(crate) fn dirty_pages<H: Host>(host: &H, region: RegionId, unit: Unit) -> (u
     (dirty, read)
 }
 
+/// For a huge page `unit` of `region` (whole pages below the watermark) that has come back
+/// under the advice for huge pages: counts every free page of it as resident again, if any of
+/// its pages is (a huge page with none, wholly returned, cannot be rebuilt by khugepaged and
+/// stays as it is). Under the advice the kernel may make any huge page that holds one page
+/// wholly resident, so there the huge page is the unit of residency, as everywhere it was
+/// never split. Clears the clean bits of each run of clean pages as a claim does: it claims
+/// every slot touching the run first (`tree::claim_exact`, all of them free, since a clean
+/// page holds nothing a claim has touched since its purge), and leaves a run it cannot claim,
+/// whose claimer clears the bits itself. Returns the pages it counted resident and the leaf
+/// and clean words it read.
+pub(crate) fn restore_resident<H: Host>(host: &H, region: RegionId, unit: Unit) -> (u32, usize) {
+    let layout = host.layout();
+    let (dirty, mut read) = dirty_pages(host, region, unit);
+    if dirty == 0 {
+        return (0, read);
+    }
+    let mut restored = 0;
+    let mut page = unit.start;
+    while page < unit.end {
+        // The next run of clean pages from `page`.
+        let clean = |p: u32| {
+            host.meta(region, layout.clean_word(p / BITS)).load() & (1u64 << (p % BITS)) != 0
+        };
+        if !clean(page) {
+            page += 1;
+            continue;
+        }
+        let start = page;
+        while page < unit.end && clean(page) {
+            page += 1;
+        }
+        let run = Unit { start, end: page };
+        let (first, last) = layout.touching(run);
+        let (low, high) = (first / BITS, last / BITS);
+        read += (high - low + 1) as usize;
+        let mut claimed = low;
+        while claimed <= high
+            && tree::claim_exact(host, region, claimed, bits_in_word(claimed, first, last))
+        {
+            claimed += 1;
+        }
+        if claimed > high {
+            for w in run.start / BITS..=(run.end - 1) / BITS {
+                let mask = bits_in_word(w, run.start, run.end - 1);
+                let old = host.meta(region, layout.clean_word(w)).fetch_and(!mask);
+                restored += (old & mask).count_ones();
+            }
+        }
+        release_range(host, region, first, last, low, claimed);
+    }
+    (restored, read)
+}
+
 /// Whether every page of a unit is marked clean.
 fn all_clean<H: Host>(host: &H, region: RegionId, unit: Unit) -> bool {
     let layout = host.layout();
