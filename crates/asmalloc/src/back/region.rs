@@ -323,6 +323,12 @@ pub(crate) fn settle<H: Host>(host: &H, region: RegionId, index: u32, bits: u64)
 pub(crate) fn reach<H: Host>(host: &H, region: RegionId, last: u32, epoch: u64) -> bool {
     let layout = host.layout();
     let page = layout.slot_bytes(last + 1).div_ceil(layout.page_size()) as u32;
+    if super::tail::mark(host, region, page) {
+        // Sequentially consistent, as every write the background thread's sleep reads must
+        // be (`crate::thread_word`, "Sleeping"): the slow path that follows reads the thread's
+        // word and wakes it.
+        host.tail_marks().fetch_or(1);
+    }
     let format = layout.frontier_format();
     let word = host.frontier(region);
     let mut seen = word.load();

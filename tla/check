@@ -61,7 +61,7 @@ run() {
         got="ok"
     elif grep -q "Invariant .* is violated" "$out"; then
         got="violates $(sed -n 's/.*Invariant \(.*\) is violated.*/\1/p' "$out" | head -1)"
-    elif grep -q "Temporal properties were violated" "$out"; then
+    elif grep -qE "Temporal propert(ies were|y .* was) violated" "$out"; then
         got="violates liveness"
     elif grep -q "Deadlock reached" "$out"; then
         got="violates deadlock"

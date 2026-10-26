@@ -87,3 +87,13 @@ run Fork Fork_any_loss      violates NoLoss
 run Fork Fork_gen           ok
 run Fork Fork_gen_any       ok
 run Fork Fork_gen_any_loss  violates NoLoss
+
+# The boundary of a huge-page tail
+run Tail Tail           ok
+run Tail Tail_norepair  violates Agree
+run Tail Tail_orphan    violates Agree
+run Tail Tail_live      ok
+run Tail Tail_stuck     violates liveness
+# A thread that read the interval before the current one, against a fresh owner
+# (TailStale.tla, from the review): with a stamp ahead of the reader read as fresh, it holds.
+run TailStale TailStale  ok

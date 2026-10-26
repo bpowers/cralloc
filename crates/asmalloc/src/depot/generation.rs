@@ -177,7 +177,8 @@ impl<O: Os, R: Routines, S: Source> Cache<'_, O, R, S> {
     /// The draw in a fork child also makes the background thread's word, which the child
     /// inherited and which may name its parent's thread, the child's: a child begins with no
     /// thread, and its slow paths return memory until it starts one of its own
-    /// (`crate::thread_word`, "Whose duty").
+    /// (`crate::thread_word`, "Whose duty"). And it tells the source, which then distrusts
+    /// what a thread cut off by the fork may have left half-changed ([`Source::forked`]).
     pub fn generation(&self) -> Option<Generation> {
         let (generation, drawn) = current(self.depot, self.area);
         if let Some(generation) = generation
@@ -187,6 +188,7 @@ impl<O: Os, R: Routines, S: Source> Cache<'_, O, R, S> {
             self.source
                 .thread()
                 .make_own(crate::thread_word::key_of(generation.get()));
+            self.source.forked();
         }
         generation
     }

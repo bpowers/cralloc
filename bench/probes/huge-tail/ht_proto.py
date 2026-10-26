@@ -269,6 +269,9 @@ sub(P, """        self.unretain(class, purged);
                     crate::ht::set_tail(region.index(), ht_lowest);
                 }
                 crate::ht::timed(&crate::ht::UNADVISE_CYC, Some(&crate::ht::UNADVISE_MAX), t0);
+                if crate::ht::tracing() {
+                    crate::ht::trace("L", crate::ht::mono_ns(), region.index() as u64, ht_lowest as u64, to as u64, 0, 0);
+                }
             }
         }
         if tail.is_some() {
@@ -276,6 +279,44 @@ sub(P, """        self.unretain(class, purged);
         }
         self.unretain(class, purged);
         if purged != 0 {""")
+
+
+# Tracing (`HT_TRACE`): every walk call in a region with a huge-page part, every advice change
+# and split the switch makes, with who ran it.
+sub(P, """    pub fn thread_purge_steps(&self, now: &dyn Fn() -> u64) -> PassStep {""",
+    """    pub fn thread_purge_steps(&self, now: &dyn Fn() -> u64) -> PassStep {
+        crate::ht::note_bg();""")
+sub(P, """        let mut first = true;
+        let mut ht_spent = 0usize;""", """        let mut first = true;
+        let ht_trace0 = if crate::ht::tracing() && Hints::unpack(hints.load()).huge_from.is_some() {
+            crate::ht::mono_ns()
+        } else {
+            0
+        };
+        let ht_splits0 = crate::ht::SPLITS.load(core::sync::atomic::Ordering::Relaxed);
+        let mut ht_spent = 0usize;""")
+sub(P, """        if tail.is_some() {
+            crate::ht::timed(&crate::ht::STEP_CYC, Some(&crate::ht::STEP_MAX), ht_t0);
+        }""", """        if tail.is_some() {
+            crate::ht::timed(&crate::ht::STEP_CYC, Some(&crate::ht::STEP_MAX), ht_t0);
+        }
+        if ht_trace0 != 0 {
+            crate::ht::trace(
+                "W",
+                ht_trace0,
+                region.index() as u64,
+                (scope as u8 as u64) << 8 | u64::from(counting) << 1 | u64::from(tail.is_some()),
+                read as u64,
+                (purged / page) as u64,
+                crate::ht::SPLITS.load(core::sync::atomic::Ordering::Relaxed) - ht_splits0,
+            );
+        }""")
+
+
+sub(P, """    pub fn heartbeat_for(&self, now: &dyn Fn() -> u64, seen: Snapshot) -> bool {
+        match seen.duty() {""", """    pub fn heartbeat_for(&self, now: &dyn Fn() -> u64, seen: Snapshot) -> bool {
+        crate::ht::note_heartbeat();
+        match seen.duty() {""")
 
 # --- Heartbeats: the interval for the counters, and with `b1` the marked regions' advice.
 sub(P, """            Duty::Thread => self.note_for_thread(now),
@@ -326,6 +367,9 @@ sub(P, """    /// Takes the growth debt and purges toward it""", """    /// Scra
             let _ = host.advise(region, from as usize * page, (to - from) as usize * page, HugePages::Prefer);
             crate::ht::timed(&crate::ht::READVISE_CYC, Some(&crate::ht::READVISE_MAX), t0);
             crate::ht::count(&crate::ht::READVISE, 1);
+            if crate::ht::tracing() {
+                crate::ht::trace("R", crate::ht::mono_ns(), index as u64, from as u64, to as u64, 0, 0);
+            }
             crate::ht::forget_splits(index);
             Some(to)
         });
