@@ -29,7 +29,9 @@
 //! ([`walk_aged`]), within the look's bounds and down to the floor as any look. The walk carries
 //! on across looks from where it stopped (the region's `AgeWalk` word), so every free slot of
 //! the region is looked at once a walk, wherever it lies. A walk starts at most once a hold
-//! (the hold the look takes): so a slot goes back between one hold and two after its free, and
+//! (the hold the look takes): so a slot goes back between one hold and two after its free
+//! where heartbeats look, and within about three where the background thread does, whose look
+//! is planned from the region's newest stamp and can arrive just before a walk may start. And
 //! a young region costs one pass over its free slots a hold, whoever makes it. Walking whenever
 //! some slot came of age was a walk at nearly every fine step under steady churn, which is the
 //! case the rule is for (a third of the steps, on a region of 3,000 slots under drifting
