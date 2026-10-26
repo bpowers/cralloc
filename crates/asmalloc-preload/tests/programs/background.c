@@ -92,6 +92,17 @@ static void others_named(const char *name, int *count, int *blocking) {
 
 static void others(int *count, int *blocking) { others_named(NULL, count, blocking); }
 
+// The allocator's thread names itself as it starts, so a look made just after it was created
+// may come first: look again for up to a second while there is none.
+static void allocator_threads(int *count, int *blocking) {
+    for (int tries = 0; tries < 100; tries++) {
+        others_named("asmalloc", count, blocking);
+        if (*count > 0) return;
+        struct timespec t = {0, 10 * 1000000};
+        nanosleep(&t, NULL);
+    }
+}
+
 static void *nothing(void *arg) { return arg; }
 
 static void one_thread(void) {
@@ -102,13 +113,13 @@ static void one_thread(void) {
 static int spawn_mode(void) {
     int count, blocking;
     one_thread();
-    others_named("asmalloc", &count, &blocking);
+    allocator_threads(&count, &blocking);
     printf("other threads %d, blocking every signal %d\n", count, blocking);
     fflush(stdout);
     pid_t child = fork();
     if (child == 0) {
         one_thread();
-        others_named("asmalloc", &count, &blocking);
+        allocator_threads(&count, &blocking);
         printf("child: other threads %d\n", count);
         exit(0);
     }
@@ -225,7 +236,7 @@ static int rewrite_mode(void) {
     setenv("ASMALLOC_BACKGROUND", "1", 1);
     int count, blocking;
     one_thread();
-    others_named("asmalloc", &count, &blocking);
+    allocator_threads(&count, &blocking);
     printf("other threads %d\n", count);
     return 0;
 }

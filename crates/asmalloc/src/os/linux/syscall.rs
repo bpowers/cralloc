@@ -33,6 +33,7 @@ pub(super) mod nr {
     pub const MINCORE: usize = 27;
     pub const MADVISE: usize = 28;
     pub const GETPID: usize = 39;
+    pub const PRCTL: usize = 157;
     pub const FUTEX: usize = 202;
     pub const GETTID: usize = 186;
     pub const EXIT_GROUP: usize = 231;

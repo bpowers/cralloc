@@ -1024,9 +1024,9 @@ impl<'a, O: Os> Back<'a, O> {
             }
             match &host {
                 Some((host, region, index)) => {
-                    // SAFETY: BACK-CLASS-03: the caller holds the slot, and the range is inside
-                    // it and is either copied already or past everything that is copied.
                     let gone =
+                        // SAFETY: BACK-CLASS-03: the caller holds the slot, and the range is
+                        // inside it and is either copied already or past everything copied.
                         unsafe { region::purge_part(host, *region, *index, start, end - start) };
                     if gone {
                         region::mark_clean(host, *region, *index, start, end - start);

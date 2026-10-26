@@ -154,7 +154,7 @@ first thread to finish its handler ends the process under every other thread's
 **`int_call` itself.** It forwards to `syscall` with three integer arguments. Its callers are
 getpid, gettid, tgkill and exit_group here, getpid in `random`, gettid and getpid in
 `threads::not_the_first`, and close in `ReadOnly`'s `Drop` (KERNEL-10), none of which takes a
-pointer. (The function's own `# Safety` comment still lists only the first four.)
+pointer.
 
 ## KERNEL-08: `mincore` in `resident`
 
@@ -293,10 +293,23 @@ more conservative: it waits for the next look at the level, or, if glibc reset i
 program had threads, for a later one. A `false` means a thread was created; the allocator's own
 thread is never created on that evidence before the program's.
 
+## KERNEL-13: `prctl(PR_SET_NAME, name)` in `name_thread`
+
+**Preconditions.** `name` points at a NUL-terminated string that stays live during the call;
+the call changes nothing the allocator or the program relies on.
+
+**Proof.** `name` is a `&CStr`, live for the call and NUL-terminated. prctl(2) with
+`PR_SET_NAME` copies at most 16 bytes from it, stopping at its NUL (`strncpy_from_user` into
+the task's `comm`), and writes no user memory. It sets the name of the calling thread only,
+which `ps`, `/proc/<pid>/task/<tid>/comm` and debuggers show and nothing in the allocator or
+the C library reads to decide anything. It opens no file. The other arguments are zero, which
+`PR_SET_NAME` ignores. The result is ignored: a thread that keeps its old name works the same.
+
 ## KERNEL-07: `unsafe impl Os for LinuxOs`
 
 The comment above the impl maps each promise of the `Os` trait to the kernel behaviour that
-provides it, and KERNEL-01 to KERNEL-06 and KERNEL-09 to KERNEL-12 cover the individual calls. The promises not covered by a
+provides it, and KERNEL-01 to KERNEL-06 and KERNEL-09 to KERNEL-13 cover the individual
+calls. The promises not covered by a
 single call:
 
 - *Valid until unmapped or dropped.* Reservations are mappings of the process. Dropping a

@@ -40,8 +40,10 @@
 //! The ledger is `docs/safety/asmalloc/heap/background-safety.md`.
 
 use super::global::{Asmalloc, process};
+use crate::c::errno;
+use crate::os::Os;
 use crate::thread_word::{AWAKE, DORMANT, NONE, OFF, WANTED};
-use core::ffi::{c_char, c_int, c_void};
+use core::ffi::{c_int, c_void};
 use core::fmt;
 use core::ptr;
 use core::sync::atomic::AtomicBool;
@@ -88,7 +90,6 @@ unsafe extern "C" {
         arg: *mut c_void,
     ) -> c_int;
     fn pthread_detach(thread: usize) -> c_int;
-    fn pthread_setname_np(thread: usize, name: *const c_char) -> c_int;
     fn sigfillset(set: *mut SigSet) -> c_int;
     fn pthread_sigmask(how: c_int, set: *const SigSet, old: *mut SigSet) -> c_int;
     fn sigaltstack(stack: *const SignalStack, old: *mut SignalStack) -> c_int;
@@ -169,14 +170,28 @@ fn signals_quiet() -> bool {
 }
 
 /// Creates the thread with `create`, with every signal blocked and the C library's default
-/// attributes, names it `asmalloc` and detaches it; the caller's mask is put back after. The
-/// default stack is the one the library gives the program's own threads, sized by the library
-/// against its own thread-local data (`docs/research/thread-stack.md`).
+/// attributes, and detaches it; the caller's mask and `errno` are put back after, so that the
+/// allocation or free that started it leaves both as it found them. The default stack is the
+/// one the library gives the program's own threads, sized by the library against its own
+/// thread-local data (`docs/research/thread-stack.md`). The thread names itself (`run`).
 ///
 /// # Safety
 ///
 /// `create` is the C library's `pthread_create`, or a function with its contract.
 unsafe fn spawn(create: CreateThread) -> Result<(), StartError> {
+    let saved = errno::get();
+    // SAFETY: BACKGROUND-03; `create` passed through from the caller.
+    let made = unsafe { create_detached(create) };
+    errno::set(saved);
+    made
+}
+
+/// [`spawn`] without keeping `errno`.
+///
+/// # Safety
+///
+/// As for [`spawn`].
+unsafe fn create_detached(create: CreateThread) -> Result<(), StartError> {
     let mut all = SigSet([0; 16]);
     let mut old = SigSet([0; 16]);
     let mut thread = 0usize;
@@ -192,14 +207,18 @@ unsafe fn spawn(create: CreateThread) -> Result<(), StartError> {
         if made != 0 {
             return Err(StartError(made));
         }
-        pthread_setname_np(thread, c"asmalloc".as_ptr());
         pthread_detach(thread);
     }
     Ok(())
 }
 
+/// The thread's body. It names itself with the crate's own system call: the C library's
+/// `pthread_setname_np` on another thread opens a file under `/proc`, which a sandbox
+/// entered after start may forbid.
 extern "C" fn run(_: *mut c_void) -> *mut c_void {
-    process().run_thread(Asmalloc::MAINTAIN_EVERY.as_nanos() as u64)
+    let heap = process();
+    heap.heap().os().name_thread(c"asmalloc");
+    heap.run_thread(Asmalloc::MAINTAIN_EVERY.as_nanos() as u64)
 }
 
 impl Asmalloc {

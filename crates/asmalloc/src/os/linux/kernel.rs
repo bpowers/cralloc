@@ -7,6 +7,7 @@
 use super::syscall::{Reg, int, nr, result, syscall};
 use crate::os::{HugePages, Os, OsError, Topology};
 use crate::space::Geometry;
+use core::ffi::CStr;
 use core::ptr::{self, NonNull};
 use core::sync::atomic::AtomicU64;
 
@@ -35,6 +36,8 @@ const STDERR: usize = 2;
 const AT_FDCWD: usize = -100isize as usize;
 const O_RDONLY: usize = 0;
 const O_CLOEXEC: usize = 0o2_000_000;
+/// `prctl`'s operation that names the calling thread.
+const PR_SET_NAME: usize = 15;
 /// `futex` operations on a word private to the process.
 const FUTEX_WAIT_PRIVATE: usize = 128;
 const FUTEX_WAKE_PRIVATE: usize = 1 | 128;
@@ -292,7 +295,8 @@ fn write_stderr(mut bytes: &[u8]) {
 ///
 /// # Safety
 ///
-/// As for [`syscall`]; the callers below are getpid, gettid, tgkill and exit_group.
+/// As for [`syscall`]; the callers below are getpid, gettid, tgkill, exit_group, the close of
+/// a [`ReadOnly`] file, and the getpid and gettid of the thread evidence (`threads`).
 unsafe fn int_call(number: usize, a: usize, b: usize, c: usize) -> usize {
     // SAFETY: KERNEL-06. passed through from the caller.
     unsafe { syscall(number, [int(a), int(b), int(c), int(0), int(0), int(0)]) }.addr()
@@ -550,6 +554,17 @@ unsafe impl Os for LinuxOs {
                     int(0),
                     int(0),
                 ],
+            )
+        };
+    }
+
+    fn name_thread(&self, name: &CStr) {
+        let name: Reg = name.as_ptr().cast_mut().cast();
+        // SAFETY: KERNEL-13.
+        let _ = unsafe {
+            syscall(
+                nr::PRCTL,
+                [int(PR_SET_NAME), name, int(0), int(0), int(0), int(0)],
             )
         };
     }

@@ -157,7 +157,18 @@ fn run(who: &str) {
     Asmalloc::start_background().unwrap();
     let (_keep, kept) = mpsc::channel::<()>();
     thread::spawn(move || kept.recv());
-    let task = allocator_task().expect("the allocator's thread");
+    // The thread names itself as it starts.
+    let started = std::time::Instant::now();
+    let task = loop {
+        if let Some(task) = allocator_task() {
+            break task;
+        }
+        assert!(
+            started.elapsed() < Duration::from_secs(10),
+            "{who}: no thread named asmalloc"
+        );
+        thread::sleep(Duration::from_millis(10));
+    };
     let mut last = None;
     let mut phase = |name: &str| {
         let now = stack(&task);

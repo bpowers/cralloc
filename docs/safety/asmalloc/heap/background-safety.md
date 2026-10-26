@@ -17,8 +17,7 @@ declarations, on x86-64 System V, where every pointer is 8 bytes in a general re
   null untyped pointer, the defaults. The start routine is `extern "C"`, one pointer in, one
   out. `CreateThread` is the same type, for the preload library's handle on the next
   `pthread_create`.
-- `int pthread_detach(pthread_t)` and `int pthread_setname_np(pthread_t, const char *)`: the
-  identifier by value as `usize`, and a NUL-terminated name.
+- `int pthread_detach(pthread_t)`: the identifier by value as `usize`.
 - `int sigfillset(sigset_t *)` and `int pthread_sigmask(int, const sigset_t *, sigset_t *)`:
   `SigSet` is `#[repr(C)]` over `[u64; 16]`, 128 bytes aligned to 8, which is `sigset_t` in
   glibc (`unsigned long __val[16]`) and musl alike. `SIG_BLOCK` is 0 and `SIG_SETMASK` 2 on
@@ -61,7 +60,12 @@ buffer on the stack, and keeps the answer in one word of the depot (`Common::swi
   disagrees: its own initial environment area is a copy of its parent's, the same bytes the
   parent read (or later bytes, if the parent wrote a title over them, which is why the child
   must not read again). A process started by `exec` has a fresh, zero word and reads its own.
-- No `/proc`, a refused open or a failed read gives the default.
+- No `/proc`, a refused open or a failed read gives the default. The open is refused
+  (`EACCES`) to a process that is not dumpable when it reads, which a setuid binary of a user
+  other than root, a setgid binary or one with file capabilities is from its start: for such
+  a process the variable is ignored, as `secure_getenv` ignores its environment. A process
+  that makes itself non-dumpable after its first slow path keeps what it read (measured: an
+  open after `prctl(PR_SET_DUMPABLE, 0)` fails with `EACCES`; the read has happened by then).
 
 ## BACKGROUND-03: `spawn` and the calls to it
 
@@ -85,8 +89,13 @@ returns or unwinds; its stack holds its deepest frames.
   it is the allocator's, which does not panic while serving (the crate's rule), and the
   library is built with `panic = "abort"` where it matters (the preload library); a Rust
   program's unwinding panic cannot start in allocator code.
-- I5. `pthread_setname_np` and `pthread_detach` are called only after `create` returned 0,
-  with the identifier it stored; a name of 8 bytes and NUL is under the 16-byte limit.
+- I5. `pthread_detach` is called only after `create` returned 0, with the identifier it
+  stored. The thread names itself at its start with the crate's own `prctl` (KERNEL-13),
+  which opens no file: the C library's `pthread_setname_np` on another thread opens
+  `/proc/self/task/<tid>/comm`, which a sandbox entered after start may forbid.
+- I8. `errno` is put back after the calls: `spawn` saves it first (ERRNO-02) and restores it
+  whatever the calls did, so the allocation or free that started the thread changes no
+  `errno`, as glibc's `free` changes none.
 - I6. The stack holds the thread. It is the C library's default, the one the program's own
   threads get, which the library sizes against its own thread-local data
   (`docs/research/thread-stack.md`). The thread's frames reach about 8 KiB in a release
@@ -111,7 +120,8 @@ passed is valid for what the call does with it. By I3 the new thread has every p
 blocked, so a handler never runs on it and process-directed signals go to the program's
 threads, while the caller's mask is unchanged after the call. By I4 the thread never returns
 into the C library with a value it would interpret, and never unwinds through an `extern "C"`
-frame. By I5 the name and detach are made on a live thread. By I6 the thread's frames fit its
+frame. By I5 the detach is made on a live thread, and naming needs no file. By I8 the
+caller's `errno` is unchanged. By I6 the thread's frames fit its
 stack, within the stated limit. A failure of `create` returns its error, leaves the caller's
 mask as it was, and starts nothing.
 
