@@ -2335,3 +2335,120 @@ fn single_frees_under_stale_bits_race_clears(preemptions: usize) {
 fn single_frees_under_stale_bits_race_clears_fully() {
     single_frees_under_stale_bits_race_clears(1);
 }
+
+/// The fine count the age walk scenarios look at, and a stamp that is a hold old by it.
+const AGE_COUNT: u32 = 1000;
+const AGE_OLD: u32 = AGE_COUNT - super::policy::HOLD_STEPS - 1;
+
+/// Writes `slot`'s size word as a tenant of `size` bytes whose free leaves it resident leaves
+/// it: its size kept, and the fine count it was freed at.
+fn stamp(host: &Host8, region: RegionId, slot: u32, size: usize, freed: u32) {
+    let recorded = super::layout::Recorded {
+        size,
+        huge: false,
+        unwritten: false,
+        outgrown: false,
+        freed,
+    };
+    region::record(host, region, slot, recorded);
+}
+
+/// A large tenant as the back end serves one: claim a slot, settle it with the size word its
+/// last tenant left, return the slack past both extents, write it, stamp it young and free it.
+fn large_tenant(host: &Host8) {
+    let Some(taken) = tree::claim(host, 1, true) else {
+        return;
+    };
+    let region = taken.region;
+    let slot = taken.word * BITS + taken.bits.trailing_zeros();
+    let last = region::recorded(host, region, slot);
+    let size = host.layout().size() / 3;
+    let settled = region::settle_slot(host, region, slot, size, last);
+    if settled.zeroed != 0 {
+        assert!(host.is_zero(region, slot), "a zeroed claim reads non-zero");
+    }
+    if let Some(slack) = settled.slack {
+        let page = host.layout().page_size();
+        let from = slack.start as usize * page - host.layout().slot_bytes(slot);
+        let len = (slack.end - slack.start) as usize * page;
+        // SAFETY: the tenant holds the slot and the range is past what it writes.
+        if unsafe { region::purge_part(host, region, slot, from, len) } {
+            region::mark_clean(host, region, slot, from, len);
+        }
+    }
+    host.write(region, slot);
+    stamp(host, region, slot, size, AGE_COUNT);
+    tree::release_one(host, region, slot / BITS, slot % BITS);
+}
+
+/// The hold's walk of a young region by its slots' own ages (`hold::walk_aged`) racing large
+/// tenants: the walk reads each stamp with no claim, but returns a slot only through
+/// `purge_unit`'s claim, so in every schedule it holds every slot it returns (`TestHost::purge`
+/// fails the schedule otherwise), a tenant's claim and its trim touch only its own slot, and
+/// no slot is lost, invented, or said to be zero while it holds data. Two slots start free,
+/// written and a hold old, one held; the tenants take and free them while the walk runs.
+fn an_age_walk_races_large_tenants(threads: usize, bound: usize) {
+    let plan = big_plan();
+    explore(
+        Config {
+            preemptions: Some(bound),
+            ..Config::ALL
+        },
+        threads,
+        || {
+            let host = Host8::new(plan, class(64 << 10), 1);
+            let region = host.region_at(0);
+            host.carve_all(region, 3);
+            for slot in 0..3 {
+                host.write(region, slot);
+                stamp(&host, region, slot, host.layout().size(), AGE_OLD);
+                if slot != 1 {
+                    free_one(&host, region, slot);
+                }
+            }
+            host
+        },
+        |host, me| match me {
+            0 => {
+                let region = host.region_at(0);
+                let walk = super::hold::walk_aged(
+                    host,
+                    region,
+                    AGE_COUNT,
+                    super::policy::HOLD_STEPS,
+                    usize::MAX,
+                    usize::MAX,
+                );
+                assert!(walk.done);
+            }
+            1 => large_tenant(host),
+            _ => {
+                free_one(host, host.region_at(0), 1);
+                large_tenant(host);
+            }
+        },
+        |host, _| {
+            let region = host.region_at(0);
+            let mut expected: BTreeSet<u32> = (0..3).collect();
+            if threads < 3 {
+                expected.remove(&1);
+            }
+            let free: BTreeSet<u32> = host.free_slots(region).into_iter().collect();
+            assert_eq!(free, expected, "a slot was lost or invented");
+            assert!(host.all_visible());
+            zero_bits_sound(host);
+        },
+    );
+}
+
+#[test]
+#[cfg_attr(miri, ignore)]
+fn an_age_walk_races_large_tenants_quickly() {
+    an_age_walk_races_large_tenants(2, 2);
+}
+
+#[test]
+#[ignore = "slow: run with scripts/gate --all"]
+fn an_age_walk_races_large_tenants_fully() {
+    an_age_walk_races_large_tenants(3, 2);
+}

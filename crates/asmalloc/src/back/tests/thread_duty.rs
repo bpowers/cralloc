@@ -771,3 +771,73 @@ fn a_quiet_programs_held_slots_go_back_at_the_threads_second_round() {
         floor >> 10
     );
 }
+
+/// A region that frees keep young, with the thread running: the thread returns its old free
+/// slots by their own ages (`hold::walk_aged`), woken about once a hold and not at every step,
+/// and no heartbeat returns anything itself. Once the program has gone quiet, the thread's
+/// rounds return the rest and leave no look planned, so nothing wakes it for the hold.
+#[test]
+#[cfg_attr(miri, ignore)]
+fn the_thread_ages_a_young_regions_slots_and_plans_nothing_once_quiet() {
+    let state = state::<Native>();
+    let back = state.get_or_reserve().unwrap();
+    let os = state.os();
+    asleep(&back);
+    back.state
+        .hold
+        .unfloored
+        .store(true, core::sync::atomic::Ordering::Relaxed);
+    let class = large(64 << 10);
+    let size = class.size();
+    let blocks: Vec<NonNull<u8>> = (0..16)
+        .map(|_| back.alloc(class, size).unwrap().ptr)
+        .collect();
+    for b in &blocks {
+        paint(b.as_ptr(), size, 7);
+    }
+    for _ in 0..2 {
+        os.advance_clock(FINE_TICKS);
+        beat_and_serve(&back);
+    }
+    for b in &blocks[1..] {
+        back.free(*b, class);
+    }
+    let (mut wakes, mut back_at) = (0, None);
+    for step in 0..3 * HOLD_STEPS {
+        back.free(blocks[0], class);
+        assert_eq!(back.alloc(class, size).unwrap().ptr, blocks[0]);
+        paint(blocks[0].as_ptr(), size, 7);
+        let purges = os.calls(Call::Purge);
+        os.advance_clock(FINE_TICKS);
+        back.heartbeat();
+        assert_eq!(os.calls(Call::Purge), purges, "a heartbeat returned memory");
+        if !sleeping(&back) {
+            wakes += 1;
+            thread_runs(&back);
+            asleep(&back);
+        }
+        // SAFETY: free slots, which nothing else uses meanwhile.
+        if back_at.is_none() && unsafe { os.is_purged(blocks[1], size) } {
+            back_at = Some(step);
+        }
+    }
+    let back_at = back_at.expect("the old slots never went back");
+    assert!(back_at + 3 >= HOLD_STEPS, "returned at step {back_at}");
+    assert!(blocks[1..].iter().all(|b| {
+        // SAFETY: as above.
+        unsafe { os.is_purged(*b, size) }
+    }));
+    assert!(wakes <= 4, "woken {wakes} times in three holds");
+    // The program goes quiet, its last buffer freed.
+    back.free(blocks[0], class);
+    back.state.thread.set(KEY | AWAKE);
+    for _ in 0..4 {
+        quiet_round(&back, os, true);
+    }
+    assert_eq!(back.retained_large(), 0);
+    assert_eq!(
+        back.hold_next() & super::super::hold::NEXT_AT,
+        0,
+        "a look planned in a silence"
+    );
+}

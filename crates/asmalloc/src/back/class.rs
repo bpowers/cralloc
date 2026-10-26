@@ -17,10 +17,10 @@
 
 use super::group::{Gather, JUDGE, Run};
 use super::host::ClassHost;
-use super::layout::{Grow, Hints, Layout, Recorded};
+use super::layout::{Grow, Hints, Layout, Recorded, Unit};
 use super::policy::{
-    UNWRITTEN_RESIDENT_ONE_IN, UNWRITTEN_SAMPLES, kept_outgrown, move_piece, unwritten_floor,
-    wants_huge,
+    PURGE_STEP_PAGES, UNWRITTEN_RESIDENT_ONE_IN, UNWRITTEN_SAMPLES, kept_outgrown, move_piece,
+    unwritten_floor, wants_huge,
 };
 use super::region::{self, Carve};
 use super::tree::{self, Host};
@@ -485,8 +485,9 @@ impl<'a, O: Os> Back<'a, O> {
         slot: u32,
         class: Class,
     ) -> bool {
-        // A slot smaller than the floor never holds a marked block: its free pays one compare,
-        // not the load of the size word, so that it costs what it did before the rule.
+        // A slot smaller than the floor never holds a marked block: one compare here, not a
+        // load of the size word. The free loads and writes that word later, to stamp the slot
+        // (`stamp_slot`), only if it stays resident.
         if class.size() < const { unwritten_floor(O::GEOMETRY) } {
             return false;
         }
@@ -537,6 +538,9 @@ impl<'a, O: Os> Back<'a, O> {
     /// the heart for a large free, as it does for a large allocation (`Cache::lone_heartbeat`).
     fn free_slot(&self, host: &ClassHost<'a, O>, class: Class, region: RegionId, slot: u32) {
         let (charge, resident) = self.purge_before_release(host, region, slot, class);
+        if resident {
+            self.stamp_slot(host, region, slot);
+        }
         let (word, bit) = position(slot);
         tree::release_one(host, region, word, bit);
         self.retain(class, charge);
@@ -594,7 +598,8 @@ impl<'a, O: Os> Back<'a, O> {
     /// Allocates one slot of `class` straight from the bitmaps: a freed slot if the class has
     /// one, lowest address first, else a carved one. For a large class, records `size` as the
     /// object's current size (see [`Back::size`]); it must be at most the class size, or the
-    /// process aborts. Small classes record nothing and ignore `size`. `None` if the heap is out
+    /// process aborts. A freed large slot first has what lies past both the new block's extent
+    /// and its last tenant's returned (`trim_slack`). Small classes record nothing and ignore `size`. `None` if the heap is out
     /// of address space, the OS refused memory, or a slot of the class does not fit in a region
     /// (use [`Back::alloc_run`]).
     pub fn alloc(&self, class: Class, size: usize) -> Option<Block> {
@@ -617,22 +622,28 @@ impl<'a, O: Os> Back<'a, O> {
             self.abort("an allocation larger than its class");
         }
         let small = class.is_small();
-        let (region, slot, zeroed) = if let Some(taken) = tree::claim(&host, 1, !small) {
+        let (region, slot, zeroed, slack) = if let Some(taken) = tree::claim(&host, 1, !small) {
             let slot = taken.word * BITS + taken.bits.trailing_zeros();
             let settled = if small {
                 region::settle(&host, taken.region, taken.word, taken.bits)
             } else {
-                let settled = region::settle_slot(&host, taken.region, slot, size);
-                if region::recorded(&host, taken.region, slot).is_some_and(|r| r.outgrown) {
+                // The size word as the last tenant left it, which says how much room it used.
+                let last = region::recorded(&host, taken.region, slot);
+                let settled = region::settle_slot(&host, taken.region, slot, size, last);
+                if last.is_some_and(|r| r.outgrown) {
                     // What is left of the charge its keep added: the pages purges have not
                     // taken off it since (`region::outgrown_dirty`).
                     self.forget_outgrown(settled.resident);
                 }
                 settled
             };
+            // The whole charge the free counted leaves the count, whatever becomes of each
+            // page: those under the block are live, the slack past both the block's extent and
+            // the last tenant's goes back below (`trim_slack`) a step at a time, and the rest
+            // stays resident and in no count until the block's free counts it again.
             self.unretain(class, settled.resident);
             self.retain(class, settled.revived);
-            (taken.region, slot, settled.zeroed != 0)
+            (taken.region, slot, settled.zeroed != 0, settled.slack)
         } else {
             let (region, first, _) = self.carve(&host, class, 1)?;
             // A large block makes resident at most what it asked for (one with headroom asks
@@ -641,15 +652,16 @@ impl<'a, O: Os> Back<'a, O> {
             if !small {
                 region::mark_fresh(&host, region, first, size);
             }
-            (region, first, true)
+            (region, first, true, None)
         };
         region::reach(&host, region, slot, self.epoch());
         if let Some(before) = region::recorded(&host, region, slot) {
-            // The last tenant's mark is its own: whoever wants this tenant marked marks it.
+            // The last tenant's marks are its own: whoever wants this tenant marked marks it.
             let now = Recorded {
                 size,
                 unwritten: false,
                 outgrown: false,
+                freed: 0,
                 ..before
             };
             region::record(&host, region, slot, now);
@@ -660,6 +672,9 @@ impl<'a, O: Os> Back<'a, O> {
                 // If the advice stayed, the block's extent is in whole huge pages.
                 region::cover(&host, region, slot);
             }
+        }
+        if let Some(slack) = slack {
+            self.trim_slack(&host, region, slot, slack);
         }
         let layout = host.layout();
         let into = layout.stagger(slot);
@@ -687,6 +702,56 @@ impl<'a, O: Os> Back<'a, O> {
             zeroed,
             len,
         })
+    }
+
+    /// The trim at a claim (design: "Large objects"): for the thread that has just claimed
+    /// large slot `slot` and not yet handed out its block, returns the top of `slack`, the
+    /// pages past both the block's extent and the extent of the slot's last tenant that are not
+    /// clean (`region::settle_slot`), at most `policy::PURGE_STEP_PAGES` of them, and marks
+    /// them clean if all of them went back.
+    ///
+    /// Inside a slot that tenants keep taking, what is resident is the high-water mark of every
+    /// tenant since the slot was last purged, and a smaller tenant after a larger one leaves the
+    /// larger one's pages beyond every purge until its free, since a purge claims the slot
+    /// first. The trim keeps the room the last tenant showed the next may need and returns only
+    /// what tenants before it wrote, so the mark comes down instead of climbing. The holder
+    /// does it, at its claim: nothing but the holder ever touches an occupied slot.
+    ///
+    /// A step at most, the bound of every other purge on a request's path: the slack can be
+    /// most of a slot of tens of megabytes, and returned at once it stalled a claim for
+    /// milliseconds (`docs/research/large-slack.md`). What a trim leaves below the step stays
+    /// in the slot, resident and in no count, until the slot's next claim trims again or its
+    /// free charges it. A step here is pages and never whole huge pages, as the purge walk's
+    /// pieces are in a class of a huge page or more: those pieces must not split a huge page of
+    /// a free slot that kept its advice, and a slot that kept it here, which only a refused call
+    /// to take it back leaves, has its range cut inward to whole huge pages by `purge_part`:
+    /// nothing of a step inside the slot's whole huge pages goes, and a part in its unaligned
+    /// tail, which the advice never covered, goes with `purge_part` reporting false, so its
+    /// pages stay counted. Every other slot of a large class is advised against huge pages,
+    /// and its clean bits are per page.
+    ///
+    /// Where the kernel refuses purges, as on locked memory, each claim of a slot with slack
+    /// makes this one failing call and nothing more: a documented limit (`hold`).
+    ///
+    /// The count already took these pages off when the claim settled. A refusal leaves them
+    /// resident and not clean, as they were, and the block's free charges them.
+    #[cold]
+    #[inline(never)]
+    fn trim_slack(&self, host: &ClassHost<'a, O>, region: RegionId, slot: u32, slack: Unit) {
+        let layout = host.layout();
+        let page = layout.page_size();
+        let slack = Unit {
+            start: slack.start.max(slack.end.saturating_sub(PURGE_STEP_PAGES)),
+            ..slack
+        };
+        let from = slack.start as usize * page - layout.slot_bytes(slot);
+        let len = (slack.end - slack.start) as usize * page;
+        // SAFETY: BACK-CLASS-08 in docs/safety/asmalloc/back/class-safety.md. This thread
+        // claimed the slot a moment ago and has not handed its block out, and the range lies
+        // inside the slot past everything the block may write.
+        if unsafe { region::purge_part(host, region, slot, from, len) } {
+            region::mark_clean(host, region, slot, from, len);
+        }
     }
 
     /// Records `size` as the current size of the large object or run starting at `ptr`, after
@@ -1099,6 +1164,7 @@ impl<'a, O: Os> Back<'a, O> {
             if let Some(now) = region::recorded(&host, region, index) {
                 let marked = Recorded {
                     outgrown: true,
+                    freed: self.fine_stamp(),
                     ..now
                 };
                 region::record(&host, region, index, marked);
@@ -1116,6 +1182,9 @@ impl<'a, O: Os> Back<'a, O> {
                 region::charge(&host, region, index)
             };
             region::unadvise(&host, region, index);
+            if charge != 0 {
+                self.stamp_slot(&host, region, index);
+            }
             self.release_all(class, &[from.as_ptr()], false);
             self.retain(class, charge);
             if charge != 0 {
@@ -1356,7 +1425,9 @@ impl<'a, O: Os> Back<'a, O> {
     }
 
     /// Frees one slot of `class` to its bitmap. Aborts as [`Back::launder`] does. A large slot's
-    /// recorded size is left as it was; the next allocation of the slot writes it.
+    /// recorded size is kept, for the next claim's trim (`trim_slack`), and the free writes the
+    /// fine count beside it if the slot stays resident (`stamp_slot`); the next allocation of the
+    /// slot writes the word whole.
     ///
     /// A free of a large slot advised for huge pages returns that slot's pages to the OS first, while the caller still holds the slot, and
     /// then releases it uncounted (`purge_before_release`). Any other freed slot stays
