@@ -1348,7 +1348,7 @@ fn short_runs_go_back_only_at_their_pass() {
     let state = state::<Standard>();
     let back = state.get_or_reserve().unwrap();
     let (slots, region, base) = carved(&back, true);
-    let hp = (huge() / page()) as usize;
+    let hp = huge() / page();
     // In each huge page above the first, every other page free: runs of one, half the pages.
     let freed = free_pages(&back, &slots, base, |p| p >= hp && p % 2 == 1);
     assert!(!freed.is_empty());
