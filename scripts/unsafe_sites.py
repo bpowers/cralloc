@@ -13,12 +13,19 @@ and the simulated heap but compile everywhere), and the routines the Lean emitte
 `front/generated/`, which carry their proofs and which `generated-check` keeps unedited.
 
 A site is an `unsafe` block, `unsafe fn`, `unsafe impl`, `unsafe trait`, `extern` block (with
-or without `unsafe`), or `#[unsafe(...)]` attribute, also under `cfg_attr`. Its justification
-is the run of comment lines directly above the line the `unsafe` is on (across attribute lines,
-not across a blank line or a line of code) and the comments after it on that line. A
+or without `unsafe`), `#[unsafe(...)]` attribute, also under `cfg_attr`, or any other use of
+the keyword, such as one passed to a macro. Its justification is the run of comment lines
+directly above the line the `unsafe` is on (across attribute lines, not across a blank line or
+a line of code), unless a block opens or a statement ends before the `unsafe` on its line,
+and the comments after it on that line. A
 contract (`unsafe fn`, `unsafe trait`) needs a `# Safety` section there; a method of a trait's
 implementation has the trait's and is not a site. Every other site must cite a ledger entry,
 or name a Kani harness as ``Kani: `harness_name` `` that a module of the crate declares.
+
+Two more rules, over every module the shipping crates declare whatever its cfg: no
+`asm!`, `naked_asm!` or `global_asm!` but in the Lean routines and the one system-call
+instruction (`SYSTEM_CALL`); and no shipping crate's manifest turns on the allocator's `sim`
+or `internals`.
 
 The scan is a small lexer and a token walk, not a Rust parser. `self_test()` runs it over
 small cases of each thing above; the gate runs it with the check.
@@ -33,9 +40,13 @@ import pathlib
 import re
 import sys
 import tempfile
+import tomllib
 from dataclasses import dataclass
 
-SHIPPING_CRATES = ("asmalloc", "asmalloc-preload")
+SHIPPING_CRATES = ("asmalloc", "asmalloc-preload", "asmalloc-tokio")
+# The file of the one system-call instruction, the only hand-written assembly (CLAUDE.md).
+SYSTEM_CALL = "crates/asmalloc/src/os/linux/syscall.rs"
+ASSEMBLY_MACROS = ("asm", "naked_asm", "global_asm")
 # Scaffolding that compiles in every build but serves only tests, relative to the root.
 SCAFFOLDING = {"crates/asmalloc/src/front/twin.rs"}
 LEAN_DIR = "crates/asmalloc/src/front/generated"
@@ -375,6 +386,8 @@ class Walker:
         self.sites: list[Site] = []
         self.files: list[pathlib.Path] = []
         self.lean = False
+        # Every `asm!`, `naked_asm!` and `global_asm!`: (file, line, macro).
+        self.assembly: list[tuple[pathlib.Path, int, str]] = []
 
     def problem(self, path: pathlib.Path, line: int, what: str) -> None:
         self.sites.append(Site(path, line, what, "", problem=True))
@@ -386,6 +399,10 @@ class Walker:
             return
         relative = path.relative_to(self.root).as_posix()
         if self.gated and relative in SCAFFOLDING:
+            return
+        # A module declared twice under exclusive cfgs (`pub mod os` with a feature, `mod os`
+        # without) is one file, walked once.
+        if path in self.files:
             return
         self.files.append(path)
         text = path.read_text()
@@ -458,6 +475,13 @@ class Walker:
             ):
                 if t.text == "include":
                     self.included(tokens, i, path, module_dir)
+            if (
+                t.kind == "ident"
+                and t.text in ASSEMBLY_MACROS
+                and i + 1 < end
+                and tokens[i + 1].text == "!"
+            ):
+                self.assembly.append((path, t.line, t.text))
             if t.kind == "ident" and t.text == "unsafe":
                 kind = self.kind(tokens, i)
                 # A method of a trait's implementation states no contract of its own: it has
@@ -518,10 +542,13 @@ class Walker:
             if j < len(tokens) and tokens[j].text == "{":
                 return "extern block"
         if j < len(tokens) and tokens[j].text == "fn":
-            # `unsafe fn(...)` is a function pointer type, not a function.
+            # `unsafe fn(...)` is a function pointer type, not a function, and not a site.
             if j + 1 < len(tokens) and tokens[j + 1].kind == "ident":
                 return "fn"
-        return None
+            return None
+        # Anything else, such as the keyword passed to a macro as a token (`m!(unsafe, p)`),
+        # is a use the scan does not understand, so it is a site that must be justified.
+        return "keyword"
 
     def site(self, tokens, i, path, kind) -> None:
         line = tokens[i].line
@@ -536,6 +563,21 @@ class Walker:
         first = i
         while first > 0 and tokens[first - 1].end_line == line:
             first -= 1
+        # A block opened or a statement ended on the line before the site makes the site
+        # part of something the comments above do not describe (`fn f() { unsafe { .. } }`
+        # under the function's documentation, `g(); unsafe { .. }`).
+        depth = 0
+        for t in tokens[first:i]:
+            if t.kind == "punct" and t.text in "{(":
+                depth += 1
+            elif t.kind == "punct" and t.text in "})":
+                depth -= 1
+            elif t.kind == "punct" and t.text == ";" and depth <= 0:
+                depth = 1
+                break
+        if depth > 0 and any(t.kind == "punct" and t.text in "{;" for t in tokens[first:i]):
+            self.sites.append(Site(path, line, kind, "\n".join(comments)))
+            return
         j, above = first - 1, line
         while j >= 0:
             t = tokens[j]
@@ -561,12 +603,17 @@ class Walker:
         self.sites.append(Site(path, line, kind, "\n".join(comments)))
 
 
-def kani_harnesses(root: pathlib.Path) -> set[str]:
-    """The Kani harnesses in the files the crates declare as modules, under any cfg."""
+def declared(root: pathlib.Path) -> Walker:
+    """A walk of every module the shipping crates declare, under any cfg."""
     walker = Walker(root, gated=False)
     for crate in SHIPPING_CRATES:
         src = root / "crates" / crate / "src"
         walker.walk_file(src / "lib.rs", src)
+    return walker
+
+
+def kani_harnesses(walker: Walker) -> set[str]:
+    """The Kani harnesses in the files the crates declare as modules, under any cfg."""
     pattern = re.compile(
         r"#\[kani::proof\][^\n]*\n(?:\s*#\[[^\n]*\n)*\s*(?:pub(?:\([^)]*\))?\s+)?fn\s+([A-Za-z0-9_]+)"
     )
@@ -576,13 +623,61 @@ def kani_harnesses(root: pathlib.Path) -> set[str]:
     return names
 
 
+def assembly_problems(walker: Walker) -> list[Site]:
+    """Hand-written assembly: every `asm!`, `naked_asm!` or `global_asm!` outside the Lean
+    routines, but for one `asm!` in the file of the system-call instruction (CLAUDE.md)."""
+    problems, allowed = [], 0
+    for path, line, macro in walker.assembly:
+        relative = path.relative_to(walker.root).as_posix()
+        if relative.startswith(LEAN_DIR + "/"):
+            continue
+        if relative == SYSTEM_CALL and macro == "asm" and allowed == 0:
+            allowed += 1
+            continue
+        problems.append(Site(path, line, f"{macro}! written by hand", "", problem=True))
+    return problems
+
+
+def manifest_problems(root: pathlib.Path) -> list[Site]:
+    """A shipping crate's manifest that turns on a feature of the allocator that never
+    ships, in its dependency on it or, for the allocator, in its default or another
+    feature that a serving build may have."""
+    problems = []
+    for crate in SHIPPING_CRATES:
+        manifest = root / "crates" / crate / "Cargo.toml"
+        if not manifest.is_file():
+            continue
+        data = tomllib.loads(manifest.read_text())
+        tables = [data.get("dependencies", {})]
+        tables += [t.get("dependencies", {}) for t in data.get("target", {}).values()]
+        for table in tables:
+            spec = table.get("asmalloc")
+            features = spec.get("features", []) if isinstance(spec, dict) else []
+            for feature in features:
+                if feature in NEVER_FEATURES:
+                    problems.append(Site(manifest, 0, f"enables `{feature}` of asmalloc", "", problem=True))
+        if crate == "asmalloc":
+            for name, implied in data.get("features", {}).items():
+                if name in NEVER_FEATURES:
+                    continue
+                for feature in implied:
+                    if feature in NEVER_FEATURES:
+                        problems.append(
+                            Site(manifest, 0, f"feature `{name}` turns on `{feature}`", "", problem=True)
+                        )
+    return problems
+
+
 def sites(root: pathlib.Path) -> tuple[list[Site], set[str]]:
-    """Every `unsafe` site in the code that ships, and the Kani harnesses that exist."""
+    """Every `unsafe` site in the code that ships, every hand-written assembly and manifest
+    that turns on a test feature as a problem, and the Kani harnesses that exist."""
     walker = Walker(root)
     for crate in SHIPPING_CRATES:
         src = root / "crates" / crate / "src"
         walker.walk_file(src / "lib.rs", src)
-    return walker.sites, kani_harnesses(root)
+    everything = declared(root)
+    found = walker.sites + assembly_problems(everything) + manifest_problems(root)
+    return found, kani_harnesses(everything)
 
 
 def verdict(site: Site, harnesses: set[str], defined) -> str | None:
@@ -732,6 +827,39 @@ pub fn f(p: *const u8) -> u8 {
     ("an unsafe trait without # Safety", {"lib.rs": "pub unsafe trait T {}\n"}, 1),
     ("chars and lifetimes", {"lib.rs": "pub fn f<'a>(p: &'a u8, c: char) -> bool { c == '\"' || c == '\\'' || c == '{' }\n" + BAD}, 1),
     ("a string with comment markers", {"lib.rs": 'const U: &str = "http://x"; const V: &str = "/* ";\n' + BAD}, 1),
+    ("the keyword passed to a macro", {"lib.rs": "pub fn f(p: *const u8) -> u8 { m!(unsafe, p) }\n"}, 1),
+    ("the keyword passed to a macro, cited",
+     {"lib.rs": "pub fn f(p: *const u8) -> u8 {\n    // SAFETY: FOO-01.\n    m!(unsafe, p)\n}\n"}, 0),
+    ("a function's doc citation over a one-line body",
+     {"lib.rs": "/// SAFETY: FOO-01.\npub fn f(p: *const u8) -> u8 { unsafe { *p } }\n"}, 1),
+    ("a statement before the site on its line",
+     {"lib.rs": "pub fn f(p: *const u8) -> u8 {\n    // SAFETY: FOO-01.\n    g(); unsafe { *p }\n}\n"}, 1),
+    ("a cited site after `let x =` and `=>`",
+     {"lib.rs": "pub fn f(p: *const u8) -> u8 {\n    match 0 {\n        // SAFETY: FOO-01.\n        _ => unsafe { *p },\n    }\n}\n"}, 0),
+    ("global_asm! written by hand", {"lib.rs": 'core::arch::global_asm!("nop");\n'}, 1),
+    ("asm! in a cfg(test) module", {"lib.rs": "#[cfg(test)]\nmod t {\n    fn f() { core::arch::asm!(\"nop\") }\n}\n"}, 1),
+    ("naked_asm! in a Lean routine",
+     {"lib.rs": "mod front;\n", "front/mod.rs": "mod generated;\n",
+      "front/generated/mod.rs": "// @generated by lean/Emit.lean. DO NOT EDIT.\n#[unsafe(naked)]\nextern \"C\" fn r() { naked_asm!(\"ret\") }\n"}, 0),
+    ("the system-call instruction",
+     {"lib.rs": "mod os;\n", "os/mod.rs": "mod linux;\n", "os/linux/mod.rs": "mod syscall;\n",
+      "os/linux/syscall.rs": "/// # Safety\n/// None.\npub unsafe fn s() {}\nfn a() { asm!(\"syscall\") }\n"}, 0),
+    ("a second asm! beside the system-call instruction",
+     {"lib.rs": "mod os;\n", "os/mod.rs": "mod linux;\n", "os/linux/mod.rs": "mod syscall;\n",
+      "os/linux/syscall.rs": "/// # Safety\n/// None.\npub unsafe fn s() {}\nfn a() { asm!(\"syscall\") }\nfn b() { asm!(\"nop\") }\n"}, 1),
+    ("a shipping crate that turns on internals",
+     {"../../asmalloc-preload/Cargo.toml":
+      '[dependencies]\nasmalloc = { path = "../asmalloc", features = ["internals"] }\n'}, 1),
+    ("a shipping crate that turns on sim for a target",
+     {"../../asmalloc-tokio/Cargo.toml":
+      '[target.\'cfg(unix)\'.dependencies]\nasmalloc = { path = "../asmalloc", features = ["sim"] }\n'}, 1),
+    ("the allocator's default that turns on internals",
+     {"../Cargo.toml": '[features]\ndefault = ["background", "internals"]\nbackground = []\ninternals = []\n'}, 1),
+    ("an allocator feature that turns on sim",
+     {"../Cargo.toml": '[features]\nfast = ["sim"]\nsim = ["internals"]\ninternals = []\n'}, 1),
+    ("manifests that leave the test features off",
+     {"../Cargo.toml": '[features]\ndefault = ["background"]\nbackground = []\nsim = ["internals"]\ninternals = []\n',
+      "../../asmalloc-preload/Cargo.toml": '[dependencies]\nasmalloc = { path = "../asmalloc" }\n'}, 0),
 ]
 
 
