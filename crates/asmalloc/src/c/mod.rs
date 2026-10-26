@@ -40,7 +40,7 @@
 //! (`routines.rs`), whose misses complete in the slow paths (`slow.rs`), which also serve every
 //! other function here. The ledger is under `docs/safety/asmalloc/c/`.
 
-mod errno;
+pub(crate) mod errno;
 mod mirror;
 mod routines;
 #[doc(hidden)]
@@ -380,12 +380,20 @@ macro_rules! export_c_abi {
         const _: () = {
             use ::core::ffi::{c_int, c_void};
 
+            // SAFETY: C-EXPORT-01, the exported name.
+            /// # Safety
+            ///
+            /// As for `asmalloc::c::realloc`.
             #[unsafe(no_mangle)]
             unsafe extern "C" fn realloc(ptr: *mut c_void, size: usize) -> *mut c_void {
                 // SAFETY: C-EXPORT-01.
                 unsafe { $crate::c::realloc(ptr, size) }
             }
 
+            // SAFETY: C-EXPORT-01, the exported name.
+            /// # Safety
+            ///
+            /// As for `asmalloc::c::reallocarray`.
             #[unsafe(no_mangle)]
             unsafe extern "C" fn reallocarray(
                 ptr: *mut c_void,
@@ -396,18 +404,30 @@ macro_rules! export_c_abi {
                 unsafe { $crate::c::reallocarray(ptr, n, size) }
             }
 
+            // SAFETY: C-EXPORT-01, the exported name.
+            /// # Safety
+            ///
+            /// As for `asmalloc::c::cfree`.
             #[unsafe(no_mangle)]
             unsafe extern "C" fn cfree(ptr: *mut c_void) {
                 // SAFETY: C-EXPORT-01.
                 unsafe { $crate::c::cfree(ptr) }
             }
 
+            // SAFETY: C-EXPORT-01, the exported name.
+            /// # Safety
+            ///
+            /// As for `asmalloc::c::free_aligned_sized`.
             #[unsafe(no_mangle)]
             unsafe extern "C" fn free_aligned_sized(ptr: *mut c_void, align: usize, size: usize) {
                 // SAFETY: C-EXPORT-01.
                 unsafe { $crate::c::free_aligned_sized(ptr, align, size) }
             }
 
+            // SAFETY: C-EXPORT-01, the exported name.
+            /// # Safety
+            ///
+            /// As for `asmalloc::c::posix_memalign`.
             #[unsafe(no_mangle)]
             unsafe extern "C" fn posix_memalign(
                 out: *mut *mut c_void,
@@ -418,37 +438,52 @@ macro_rules! export_c_abi {
                 unsafe { $crate::c::posix_memalign(out, align, size) }
             }
 
+            // SAFETY: C-EXPORT-01, the exported name. No precondition: any
+            // arguments are answered, so the function is safe.
             #[unsafe(no_mangle)]
-            unsafe extern "C" fn aligned_alloc(align: usize, size: usize) -> *mut c_void {
+            extern "C" fn aligned_alloc(align: usize, size: usize) -> *mut c_void {
                 $crate::c::aligned_alloc(align, size)
             }
 
+            // SAFETY: C-EXPORT-01, the exported name. No precondition: any
+            // arguments are answered, so the function is safe.
             #[unsafe(no_mangle)]
-            unsafe extern "C" fn memalign(align: usize, size: usize) -> *mut c_void {
+            extern "C" fn memalign(align: usize, size: usize) -> *mut c_void {
                 $crate::c::memalign(align, size)
             }
 
+            // SAFETY: C-EXPORT-01, the exported name. No precondition: any
+            // arguments are answered, so the function is safe.
             #[unsafe(no_mangle)]
-            unsafe extern "C" fn valloc(size: usize) -> *mut c_void {
+            extern "C" fn valloc(size: usize) -> *mut c_void {
                 $crate::c::valloc(size)
             }
 
+            // SAFETY: C-EXPORT-01, the exported name. No precondition: any
+            // arguments are answered, so the function is safe.
             #[unsafe(no_mangle)]
-            unsafe extern "C" fn pvalloc(size: usize) -> *mut c_void {
+            extern "C" fn pvalloc(size: usize) -> *mut c_void {
                 $crate::c::pvalloc(size)
             }
 
+            // SAFETY: C-EXPORT-01, the exported name.
+            /// # Safety
+            ///
+            /// As for `asmalloc::c::malloc_usable_size`.
             #[unsafe(no_mangle)]
             unsafe extern "C" fn malloc_usable_size(ptr: *mut c_void) -> usize {
                 // SAFETY: C-EXPORT-01.
                 unsafe { $crate::c::malloc_usable_size(ptr) }
             }
 
+            // SAFETY: C-EXPORT-01, the exported name. No precondition: any
+            // arguments are answered, so the function is safe.
             #[unsafe(no_mangle)]
-            unsafe extern "C" fn malloc_trim(pad: usize) -> c_int {
+            extern "C" fn malloc_trim(pad: usize) -> c_int {
                 $crate::c::malloc_trim(pad)
             }
 
+            // SAFETY: C-EXPORT-01, the exported name.
             #[unsafe(no_mangle)]
             extern "C" fn asmalloc_version() -> *const ::core::ffi::c_char {
                 $crate::c::asmalloc_version()

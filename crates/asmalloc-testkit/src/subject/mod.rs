@@ -104,7 +104,9 @@ pub struct Resized {
     pub grant: Grant,
     /// Bytes from the start that the interface promises to have carried over.
     pub preserved: usize,
-    /// When the interface promises the bytes from here to [`Grant::usable`] are zero.
+    /// When the interface promises the bytes from here to [`Grant::usable`] are zero. For
+    /// `Allocator::grow_zeroed` that is the old layout's size, which may be less than the old
+    /// block's length.
     pub zeroed_from: Option<usize>,
 }
 

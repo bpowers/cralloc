@@ -721,15 +721,35 @@ their moment differently. In a Rust program the thread is created on a heartbeat
 call that came through the Rust interface, which the C library does not use, and only if
 the calling thread has no signal blocked and is not on a signal stack, the marks of a
 handler; otherwise the next look at the level tries again. A Rust program that keeps a
-signal blocked in every thread never passes that test, and starts the thread itself. The
+signal blocked in every thread never passes that test, and starts the thread itself. One
+case the test cannot see is a limit we accept. A slow path inside a callback of the C
+library's `dl_iterate_phdr`, as when a backtrace is being symbolized, runs under a loader
+lock, and a thread created there can deadlock against another thread inside `dlopen` or
+`dlclose`. It takes the one slow path that creates the thread, once in a process, to fall
+inside such a callback at that moment, and the lock is private to the library, so no slow
+path can test for it. The
 preload library, whose caller may always
 be the C library, creates the thread when the program creates its own first thread, a
 moment that is safe by construction, and leaves it dormant until the heap is over the
 floor: the thread looks at the level before it first sleeps, and the free that takes the
 heap over the floor wakes it. A program can turn the thread off, with a cargo feature or
-an environment variable, and can start it itself whatever the conditions say. The thread
-asks for a small stack, and takes the C library's default where the library refuses that,
-as it does when the program's thread-local data does not fit. If the thread cannot be
+an environment variable, and can start it itself whatever the conditions say. The
+variable is read once, at the process's first slow path, from the environment the process
+was started with, by the allocator's own system calls. The C library's `getenv` is not
+safe against a `setenv` in another thread, and a slow path cannot know what the program's
+other threads are doing; a read that waited for the first use could also come after the
+program had entered a sandbox that forbids opening files. A process that gained
+privileges when it was executed cannot read its own environment this way and ignores the
+variable, as the C library's `secure_getenv` would. The thread takes the C library's
+default stack. The library puts the thread's static thread-local data on that stack, and
+glibc grants a smaller request that leaves almost nothing beside the data, on which the
+thread would crash. Sizing a request to fit needs the loader's list of modules, which is
+read under a lock that a fork does not release in the child and that the program's own
+callbacks run under. The default is sized by the library against that data, and a smaller
+stack would save only address space (`docs/research/thread-stack.md`). A program that
+gives all its threads a stack of a few kilobytes gives this one the same. The thread
+names itself with a system call of the allocator's own, so that nothing opens a file when
+it starts. If the thread cannot be
 created at all the allocator carries on without it. A process under a system-call filter
 that kills on thread creation, which no allocator can detect, must turn it off. The child
 of a fork does not inherit the thread and starts its own on the same conditions, its own
@@ -834,7 +854,9 @@ rule that returns it (`docs/research/memory.md` has the measurements behind them
 | What holds the memory | What returns it | When |
 |---|---|---|
 | Free slots in the bitmaps, on pages with nothing live on them, above what fills reached in the last two intervals | The clocked purge | Once an interval while more than the floor could be returned: up to a quarter of what could be, and never past the floor, in runs of adjacent pages, carrying on round the heap from where the last pass stopped |
-| Free slots of large classes, above the floor | Heartbeats, a bounded amount each; `maintain` in a silence | Once their region has gone a short hold without a free that left a slot resident |
+| Free pages of a huge page above that frontier that still holds live objects, when a quarter of it or more is free | The clocked purge splits the huge page and returns them, and the advice for huge pages comes off there | With the pass that reaches it |
+| Free slots of large classes, above the floor | Heartbeats, a bounded amount each; `maintain` in a silence | Once their region, or the slot itself, has gone a short hold without a free that left it resident |
+| The pages of an occupied large slot past both its block and its last tenant's | The claim of the slot (see "Large objects") | At the claim, one bounded step, from the top down |
 | The same, whether fills reached it or not, while more than the cap is retained and the heap grows somewhere else | The carve that grows it owes as much as it takes: it returns a bounded part, and heartbeats return the rest | At that carve and the heartbeats after it, a bounded step each |
 | A slot a large block outgrew, beyond a bound on such slots that nothing has taken again | The move (see "Large objects") | Behind the copy, a piece at a time |
 | The tail of a large block that shrinks in place | The resize (see "Large objects") | At once |
@@ -845,6 +867,7 @@ rule that returns it (`docs/research/memory.md` has the measurements behind them
 | Objects in steady circulation | The free that retires a full magazine launders it instead | One retirement in every few |
 | The slab of a CPU the process no longer runs on | The idle drain sends its magazines to the depot (see "Process lifecycle") | After an interval with no slow path there |
 | The part of a huge page above a region's watermark, made resident by the fault and never allocated | The purge carves it and frees it, so that the page can go whole | When the purge reaches that page |
+| Free pages of a huge page that fills still reach, or that is less than a quarter free | Nothing: the huge page is worth more whole | When the whole huge page is free, or fills stop reaching it |
 | Free slots on pages that also hold live objects | Nothing: that is fragmentation, and it stays counted | Never |
 | All of the above, without waiting for the clock | `collect`, and `malloc_trim` in C | When the program calls it |
 
@@ -912,7 +935,14 @@ Nine rules stand behind the table.
   reading of the clock, so that a silence ages a hold by one step, as it ages everything
   else by one interval. Once a region has gone a hold of some tens of steps without such a
   free, heartbeats return its free slots, a bounded amount for each heartbeat, while the
-  free large memory that is still resident exceeds the floor, and only down to it. The
+  free large memory that is still resident exceeds the floor, and only down to it. A
+  region that tenants keep taking and freeing never goes a hold without such a free, and by
+  the region's clock alone its free slots would stay for as long as the churn lasts
+  (`docs/research/large-churn.md`). So the free stamps the slot too, in its size word, and
+  a look at a region whose own stamp is young walks the region's free slots, carrying on
+  from where the last look stopped, and returns those that have themselves been free for
+  the hold. A region is walked at most once a hold, whoever looks, so the walk costs one
+  pass over its free slots a hold, and a slot goes back within a few holds of its free. The
   hold is a constant found by measurement: a shorter one returns memory that is about to
   be reused and pays for it in faults, and a longer one keeps the peak. It stays a
   constant because the two ways of doing better that were built did not. A hold that
@@ -1003,12 +1033,50 @@ Nine rules stand behind the table.
   pages the faults stall. Telling the two apart needs a look at the block while it lives,
   which would put a second writer on a slot the design gives to its holder alone
   (`docs/research/whole-block-huge.md`).
-- **Never split a huge page.** Returning part of a huge page frees nothing until the kernel
-  splits it later, so in the huge-page part of a region, purging works only in
-  whole 2 MiB units. That includes the unit holding the watermark, whose upper part was
-  made resident by the fault and never allocated: a purge first carves the rest of that
-  unit and frees it, counting it as retained, so the whole unit is ordinary free memory
-  that it can claim like any other.
+- **Split a huge page only where fills have stopped reaching.** Returning part of a huge
+  page costs the page its mapping, so below a region's frontier, in its huge-page part,
+  purging works only in whole 2 MiB units. That includes the unit holding the watermark,
+  whose upper part was made resident by the fault and never allocated: a purge first carves
+  the rest of that unit and frees it, counting it as retained, so the whole unit is ordinary
+  free memory that it can claim like any other. Above the frontier whole units are not
+  enough. Fills take the lowest free slots, so when a class's demand falls its short-lived
+  objects pack into the bottom of the region, and the top is left a few long-lived objects
+  to a huge page, each holding 2 MiB. A program whose sizes shift between phases kept most
+  of every trough that way (`docs/research/huge-tail.md`). So a step that may return memory
+  treats the huge pages above the frontier as small pages. One that is wholly free goes back
+  whole. One with a quarter of its pages or more free and resident is split, and its free
+  runs are returned. Under a quarter, what would go back is not worth the mapping, and the
+  huge page stays whole. A sample of a few pages, at places that move with every lap,
+  chooses which huge pages are counted, so a lap over dense huge pages reads little more
+  than it would without the rule. The purge asks the kernel to split a huge page before it
+  returns part of it: pages returned from a huge page that is not split leave the resident
+  set but stay charged to the cgroup until reclaim splits it, and the thread that meets the
+  limit pays tens of milliseconds for that. A split costs a slow path what a step of returns
+  does, and counts as one.
+
+  The advice follows what went back. Under the advice the kernel rebuilds any huge page
+  with one page in use, so when a pass is done with a region it takes the advice off, in
+  one call, from the lowest huge page it returned part of upward, and never below the
+  frontier as it then stands. It takes none off where nothing went back: a change of advice
+  takes the address-space lock for writing, and a server whose classes wobble paid for
+  needless ones in its tail. Each region keeps that boundary in one word. A claim that
+  reaches above the boundary marks the word, and the background thread puts the advice back
+  on, up to the frontier and a few huge pages beyond; where there is no thread a heartbeat
+  does it, one region a step. The headroom is enough that a class growing back does not
+  move its boundary many times an interval, and no more, because advice over huge pages
+  that stay sparse brings their memory back. A split huge page that fills reach again is
+  small pages until the kernel rebuilds it, which costs a program that swings by gigabytes
+  every few tens of seconds about a percent of its time.
+
+  One thread changes a region's advice at a time. It takes an owner bit in the word with
+  one compare-and-swap, makes the call, and writes the new boundary as it gives the bit
+  back; a thread that finds the bit taken leaves its mark or its note in the word and goes
+  on. An owner that has not come back after two intervals is taken over, and the new owner
+  first makes the kernel's advice agree with the word. So does the next owner after a call
+  the kernel refused, which may have acted on part of its range. A kind of call the kernel
+  refused is not made again before the next interval, so a program at its limit of
+  mappings, or with its memory locked, pays a bounded number of failed calls and keeps its
+  huge pages whole. `collect` splits whatever it can return, wherever the frontiers stand.
 
 `collect`, and `malloc_trim` in C, do all of this at once without waiting for the clock:
 drain every slab in use, launder every depot stack, and purge what is free. A program that
@@ -1065,7 +1133,8 @@ Nothing is stored: a block starts at its slot's start or at that offset, and any
 pointer into the slot is not a block.
 
 The current size of each large object is recorded out of band, one word per slot, written
-only when the object is allocated or resized. C's `realloc` needs it to know how much to
+only when the object is allocated, resized or freed. A free leaves the size there for the
+slot's next claim, and adds when the free happened. C's `realloc` needs it to know how much to
 copy, and the usable size must not be the whole slot: a caller that fills what it is told it
 may use would touch many times what it asked for.
 
@@ -1146,6 +1215,20 @@ the carve of a slot for the pages past the block it was carved for. A claim, and
 that widens a block, clears them under what the block may write. A free writes none. So a
 smaller tenant after a larger one is charged what the larger one left, and the free, the
 claim, the keep decision and the purge count a slot by the same bits and cannot disagree.
+
+That leaves the pages a larger tenant wrote past a smaller one's block resident inside an
+occupied slot, where no purge reaches them, since a purge claims the slot first. In a slot
+that tenants of many sizes keep taking, what is resident would be the high-water mark of
+them all. So the claim of a free slot returns what lies past both its new block and the
+last tenant's, whose size the free left in the size word: from the top down, and one purge
+step at most, as every return on a request's path. The last tenant's room is kept, because
+the next may need it; what earlier tenants left goes, a step at each claim. Only the
+claimer does this, before it hands the block out, because nothing but its holder touches
+an occupied slot. What a trim has not reached stays resident, and uncounted until the
+slot's free charges it. The price is page faults when a later, larger tenant needs the room
+back: a program that churns large buffers of many sizes gives a few percent of its time
+for a lower peak (`docs/research/large-slack.md`). Where the kernel refuses to take memory
+back, as it does for locked memory, each such claim makes one call that fails.
 
 Moving the pages with `mremap` instead would copy nothing, but it splits the heap's
 mapping in ways that take several more rules to undo, and it adds nothing to the memory
@@ -1278,7 +1361,10 @@ the one a Rust `Layout` of the same size implies.
   lost to the child: a small, bounded leak. A drain that was under way leaves a claim and
   markers with no drainer. The generation lives on a page that is wiped on fork, and the
   child's first slow path draws a new one, so the child sees the parent's claims and markers
-  as belonging to another generation and treats them as absent.
+  as belonging to another generation and treats them as absent. A change of huge-page
+  advice that was under way leaves an owner bit whose thread the child does not have, and
+  advice that may not match the region's word. That same slow path clears every such bit
+  and has each region's next change make the kernel's advice agree with its word first.
 - **Signals.** A handler may allocate and free. A signal aborts any sequence in flight, and
   the slow paths hold nothing that a nested call could trip over.
 
@@ -1329,7 +1415,7 @@ API.
 | Assembly routines | Lean, against a model of the instructions and of rseq | Every input, every interruption point |
 | Size classes, alignment, slot masks, bitmap word operations, address and layout arithmetic, packed words, the decisions of the clocked rules | Kani | Every input |
 | The twins | Kani, against the routines' specifications | Every state of one small slab, with an interruption before any one step |
-| The lock-free protocols as designed: the routines, magazine exchange, drain, depot stacks, summary bits, purge, start-up, fork | A TLA+ model of each, in which the OS aborts, moves, fences and forks threads, checked exhaustively with TLC | Every interleaving of the model, within small bounds |
+| The lock-free protocols as designed: the routines, magazine exchange, drain, depot stacks, summary bits, purge, the boundary of huge-page advice, start-up, fork | A TLA+ model of each, in which the OS aborts, moves, fences and forks threads, checked exhaustively with TLC | Every interleaving of the model, within small bounds |
 | The Rust that implements those protocols | Schedule explorers in the test code, which run it unchanged under every schedule within a bound | Bounded schedules, on small heaps |
 | The allocator as a whole | Model-based tests, Miri, fuzzing, and real programs under the preload library | Testing |
 | `unsafe` blocks none of the above reaches | Safety ledger | Written proof, adversarially reviewed |

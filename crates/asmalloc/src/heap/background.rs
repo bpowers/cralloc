@@ -12,8 +12,10 @@
 //! it from a slow path: its caller may be the C library under its own locks. The preload
 //! library creates it when the program creates its first thread ([`Asmalloc::start_dormant`]).
 //! [`Asmalloc::start_background`] starts it whatever the conditions. `ASMALLOC_BACKGROUND=0`
-//! turns the default off, as does a build without the feature and a process that calls
-//! `maintain` itself.
+//! in the environment the process was started with turns the default off, as does a build
+//! without the feature and a process that calls `maintain` itself. The variable is read once,
+//! from the kernel's copy of that environment, so a `setenv` in the program changes nothing
+//! ([`choice`], `crate::environment`).
 //!
 //! **Limits.** A Rust program that keeps a signal blocked in every thread (one that waits for
 //! signals on a thread of its own with `sigwait`, say) never passes the test, and starts the
@@ -26,17 +28,22 @@
 //! **What remains.** A slow path through the Rust interface may still be a Rust callback that
 //! the C library runs under one of its locks (the loader's, in a backtrace, say), whose thread
 //! has no signal blocked; if it is the one that finds the thread wanted, `pthread_create` may
-//! wait on that lock. The window is one slow path, once.
+//! wait on that lock. The window is one slow path, once. Inside a `dl_iterate_phdr` callback,
+//! while another thread is in `dlopen` or `dlclose`, that wait is a deadlock with glibc
+//! (BACKGROUND-03, "Locks").
 //!
 //! The thread is created with every signal blocked (the C library's `sigfillset`, which
 //! leaves out its own internal signals, so that a change of credentials still reaches it).
 //! It holds no lock and no allocator state between steps, so process exit and a fork find it
-//! in a state they already handle; a forked child has no thread and decides afresh. The
-//! ledger is `docs/safety/asmalloc/heap/background-safety.md`.
+//! in a state they already handle; a forked child has no thread and decides afresh. It has the
+//! C library's default stack, as the program's own threads do (`docs/research/thread-stack.md`).
+//! The ledger is `docs/safety/asmalloc/heap/background-safety.md`.
 
 use super::global::{Asmalloc, process};
+use crate::c::errno;
+use crate::os::Os;
 use crate::thread_word::{AWAKE, DORMANT, NONE, OFF, WANTED};
-use core::ffi::{CStr, c_char, c_int, c_void};
+use core::ffi::{c_int, c_void};
 use core::fmt;
 use core::ptr;
 use core::sync::atomic::AtomicBool;
@@ -44,13 +51,6 @@ use core::sync::atomic::Ordering::Relaxed;
 
 /// Set once the program calls `maintain` itself: it then gets no default thread.
 pub(super) static OPTED_OUT: AtomicBool = AtomicBool::new(false);
-
-/// The variable that turns the default thread off (`0` or empty) or starts it at once (the
-/// preload library's constructor, anything else).
-const VARIABLE: &CStr = c"ASMALLOC_BACKGROUND";
-
-/// The thread's stack: rounds need a few kilobytes, and the stack is mapped lazily anyway.
-const STACK: usize = 256 << 10;
 
 /// `sigset_t`: 1024 bits in glibc and in musl.
 #[repr(C)]
@@ -64,13 +64,6 @@ struct SignalStack {
     size: usize,
 }
 
-/// `pthread_attr_t`: 56 bytes in glibc and in musl on x86-64, aligned to 8.
-#[repr(C, align(8))]
-struct Attr([u8; 56]);
-
-/// `pthread_create`'s error for attributes it cannot honour, such as a stack too small for
-/// the program's static thread-local data.
-const EINVAL: c_int = 22;
 /// What a start reports when the heap could not start, so that there is no generation to key
 /// the thread's word with: `ENOMEM`.
 const ENOMEM: i32 = 12;
@@ -96,40 +89,21 @@ unsafe extern "C" {
         start: extern "C" fn(*mut c_void) -> *mut c_void,
         arg: *mut c_void,
     ) -> c_int;
-    fn pthread_attr_init(attr: *mut Attr) -> c_int;
-    fn pthread_attr_setstacksize(attr: *mut Attr, size: usize) -> c_int;
-    fn pthread_attr_destroy(attr: *mut Attr) -> c_int;
     fn pthread_detach(thread: usize) -> c_int;
-    fn pthread_setname_np(thread: usize, name: *const c_char) -> c_int;
     fn sigfillset(set: *mut SigSet) -> c_int;
     fn pthread_sigmask(how: c_int, set: *const SigSet, old: *mut SigSet) -> c_int;
     fn sigaltstack(stack: *const SignalStack, old: *mut SignalStack) -> c_int;
-    fn getenv(name: *const c_char) -> *const c_char;
 }
 
-/// What the environment asks for.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum Choice {
-    /// Unset: the default, on its conditions.
-    Default,
-    /// `0` or empty: no thread by default.
-    Off,
-    /// Anything else: a thread at once (the preload library's constructor).
-    On,
-}
+pub use crate::environment::Choice;
 
-/// `ASMALLOC_BACKGROUND`, read in place: `getenv` does not allocate.
+/// What `ASMALLOC_BACKGROUND` asks for in the environment the process was started with: read
+/// once per process, at its first slow path or here, whichever comes first, and the same
+/// for the rest of its life and its forked children's. A `setenv` in the program does not
+/// change it (`crate::environment`). Why this needs no C library call: BACKGROUND-02.
 pub fn choice() -> Choice {
-    // SAFETY: BACKGROUND-02.
-    let value = unsafe { getenv(VARIABLE.as_ptr()) };
-    if value.is_null() {
-        return Choice::Default;
-    }
-    // SAFETY: BACKGROUND-02.
-    match unsafe { CStr::from_ptr(value) }.to_bytes() {
-        b"" | b"0" => Choice::Off,
-        _ => Choice::On,
-    }
+    let heap = process().heap();
+    heap.depot.background_choice(heap.os())
 }
 
 /// The thread could not be created; the allocator carries on without it.
@@ -195,19 +169,31 @@ fn signals_quiet() -> bool {
     }
 }
 
-/// Creates the thread with `create`, with every signal blocked and a small stack, names it
-/// `asmalloc` and detaches it; the caller's mask is put back after. The C library refuses the
-/// small stack (`EINVAL`) when the program's static thread-local data does not fit in it, as
-/// glibc places that data on the stack; the thread is then created once more with the
-/// library's default attributes.
+/// Creates the thread with `create`, with every signal blocked and the C library's default
+/// attributes, and detaches it; the caller's mask and `errno` are put back after, so that the
+/// allocation or free that started it leaves both as it found them. The default stack is the
+/// one the library gives the program's own threads, sized by the library against its own
+/// thread-local data (`docs/research/thread-stack.md`). The thread names itself (`run`).
 ///
 /// # Safety
 ///
 /// `create` is the C library's `pthread_create`, or a function with its contract.
 unsafe fn spawn(create: CreateThread) -> Result<(), StartError> {
+    let saved = errno::get();
+    // SAFETY: BACKGROUND-03; `create` passed through from the caller.
+    let made = unsafe { create_detached(create) };
+    errno::set(saved);
+    made
+}
+
+/// [`spawn`] without keeping `errno`.
+///
+/// # Safety
+///
+/// As for [`spawn`].
+unsafe fn create_detached(create: CreateThread) -> Result<(), StartError> {
     let mut all = SigSet([0; 16]);
     let mut old = SigSet([0; 16]);
-    let mut attr = Attr([0; 56]);
     let mut thread = 0usize;
     // SAFETY: BACKGROUND-03.
     unsafe {
@@ -216,38 +202,23 @@ unsafe fn spawn(create: CreateThread) -> Result<(), StartError> {
         if blocked != 0 {
             return Err(StartError(blocked));
         }
-        let attributed = pthread_attr_init(&mut attr) == 0;
-        if attributed {
-            pthread_attr_setstacksize(&mut attr, STACK);
-        }
-        let mut made = create(
-            &mut thread,
-            if attributed {
-                ptr::from_ref(&attr).cast()
-            } else {
-                ptr::null()
-            },
-            run,
-            ptr::null_mut(),
-        );
-        if attributed {
-            pthread_attr_destroy(&mut attr);
-            if made == EINVAL {
-                made = create(&mut thread, ptr::null(), run, ptr::null_mut());
-            }
-        }
+        let made = create(&mut thread, ptr::null(), run, ptr::null_mut());
         pthread_sigmask(SIG_SETMASK, &old, ptr::null_mut());
         if made != 0 {
             return Err(StartError(made));
         }
-        pthread_setname_np(thread, c"asmalloc".as_ptr());
         pthread_detach(thread);
     }
     Ok(())
 }
 
+/// The thread's body. It names itself with the crate's own system call: the C library's
+/// `pthread_setname_np` on another thread opens a file under `/proc`, which a sandbox
+/// entered after start may forbid.
 extern "C" fn run(_: *mut c_void) -> *mut c_void {
-    process().run_thread(Asmalloc::MAINTAIN_EVERY.as_nanos() as u64)
+    let heap = process();
+    heap.heap().os().name_thread(c"asmalloc");
+    heap.run_thread(Asmalloc::MAINTAIN_EVERY.as_nanos() as u64)
 }
 
 impl Asmalloc {
@@ -294,7 +265,7 @@ impl Asmalloc {
             Choice::Default => DORMANT,
         };
         let heap = process();
-        // SAFETY: passed through from the caller.
+        // SAFETY: BACKGROUND-03; `create` passed through from the caller.
         let _ = heap.start_thread(state, |create| unsafe { spawn(create) }, create);
     }
 }

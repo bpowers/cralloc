@@ -50,3 +50,18 @@ required-features = ["background"]
 
 [lints]
 workspace = true
+
+[[test]]
+name = "thread_stack"
+harness = false
+required-features = ["background"]
+
+[[test]]
+name = "environment"
+# The switch is the background thread's.
+required-features = ["background"]
+
+[[test]]
+name = "thread_start"
+# The cases are about the thread, which a build without the feature does not have.
+required-features = ["background"]

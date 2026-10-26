@@ -61,7 +61,7 @@ impl<O: Os, R: Routines + Copy> Bound<'_, O, R> {
                 return moved.as_ptr();
             }
         }
-        // SAFETY: the caller's contract, which the lean path left as it found it.
+        // SAFETY: HEAP-09. the caller's contract, which the lean path left as it found it.
         unsafe { self.realloc_other(ptr, old, new_size) }
     }
 
@@ -79,14 +79,15 @@ impl<O: Os, R: Routines + Copy> Bound<'_, O, R> {
         ) else {
             return ptr::null_mut();
         };
-        // SAFETY: the caller's contract, and `new_size` is not zero.
+        // SAFETY: HEAP-10. the caller's contract, and `new_size` is not zero.
         unsafe { self.resize(block, old, new, false) }
             .map_or(ptr::null_mut(), |grant| grant.ptr.as_ptr())
     }
 
-    /// `Allocator::grow` and `grow_zeroed` of a block that is not empty: the lean path, with
-    /// the bytes past the old block cleared when `zero` asks and the block moved, as the
-    /// general resize clears them; and the general resize for anything else.
+    /// `Allocator::grow` and `grow_zeroed` of a block that is not empty: the lean path, and
+    /// the general resize for anything else. With `zero`, the bytes from `old.size()` to the
+    /// length returned read as zero, as the stable `grow_zeroed` requires: the old block's
+    /// slack too, which the caller may have written, whether the block stayed or moved.
     ///
     /// # Safety
     ///
@@ -101,6 +102,38 @@ impl<O: Os, R: Routines + Copy> Bound<'_, O, R> {
         new: Layout,
         zero: bool,
     ) -> Option<Grant> {
+        // SAFETY: HEAP-10; the caller's contract, passed on.
+        let grant = unsafe { self.grow_kept(ptr, old, new, zero) }?;
+        // The one clear of a zeroed grow, for every path. Only a move into memory known to
+        // read as zero leaves nothing to clear (`Grant::zeroed`).
+        if zero && !grant.zeroed {
+            // SAFETY: HEAP-08.
+            unsafe {
+                grant
+                    .ptr
+                    .as_ptr()
+                    .add(old.size())
+                    .write_bytes(0, grant.len - old.size())
+            };
+        }
+        Some(grant)
+    }
+
+    /// [`Bound::grow_block`] without the clear: the block grown, with the bytes of `old`
+    /// carried over, and whether those past them are known to read as zero. `zero` only
+    /// steers the general resize's choice of room.
+    ///
+    /// # Safety
+    ///
+    /// As for [`Bound::grow_block`].
+    #[inline(always)]
+    unsafe fn grow_kept(
+        self,
+        ptr: NonNull<u8>,
+        old: Layout,
+        new: Layout,
+        zero: bool,
+    ) -> Option<Grant> {
         if let (Some(from), Some(to)) = (
             SmallClass::of_nonzero_layout(old),
             SmallClass::of_nonzero_layout(new),
@@ -108,10 +141,7 @@ impl<O: Os, R: Routines + Copy> Bound<'_, O, R> {
             let kept = old.size().min(new.size());
             // SAFETY: HEAP-07, met as in `realloc`.
             if let Some(moved) = unsafe { self.resize_small(ptr, from, to, kept, Caller::Rust) } {
-                if zero && moved != ptr {
-                    // SAFETY: HEAP-08.
-                    unsafe { moved.as_ptr().add(kept).write_bytes(0, to.size() - kept) };
-                }
+                // Either the caller's own block or a popped one, neither known to be zero.
                 return Some(Grant {
                     ptr: moved,
                     len: to.size(),
@@ -119,7 +149,7 @@ impl<O: Os, R: Routines + Copy> Bound<'_, O, R> {
                 });
             }
         }
-        // SAFETY: the caller's contract; `new` is at least `old`, so not empty.
+        // SAFETY: HEAP-10. the caller's contract; `new` is at least `old`, so not empty.
         unsafe { self.resize(ptr, old, new, zero) }
     }
 
@@ -152,7 +182,7 @@ impl<O: Os, R: Routines + Copy> Bound<'_, O, R> {
                 });
             }
         }
-        // SAFETY: the caller's contract, and `new` is not empty.
+        // SAFETY: HEAP-10. the caller's contract, and `new` is not empty.
         unsafe { self.resize(ptr, old, new, false) }
     }
 
@@ -185,9 +215,9 @@ impl<O: Os, R: Routines + Copy> Bound<'_, O, R> {
             // A push that misses stores nothing, so the block is still the caller's, who gives
             // it up: a block of `from` this heap handed out, as both slow paths take.
             match caller {
-                // SAFETY: as just said.
+                // SAFETY: HEAP-11, as just said.
                 Caller::Rust => unsafe { self.rust_free_slow(from, ptr) },
-                // SAFETY: as just said.
+                // SAFETY: HEAP-11, as just said.
                 Caller::C => drop(unsafe { self.free_slow(from, ptr) }),
             }
         }

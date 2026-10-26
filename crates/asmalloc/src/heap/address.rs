@@ -14,6 +14,8 @@
 //!
 //! Small blocks are not served here: the C layer allocates and frees them with the generated C
 //! routines and, when those miss, the heap's slow paths (`c_alloc_small`, `c_free_small`).
+//!
+//! The ledger for the unsafe blocks here is `docs/safety/asmalloc/heap/address-safety.md`.
 
 use super::large::{growth_rooms, stays_after_shrink};
 use super::{Heap, Zero};
@@ -123,8 +125,8 @@ impl<O: Os> Heap<O> {
         let fits =
             is_large(new) && new <= room && (new >= old || stays_after_shrink(new, room, plan));
         if fits {
-            // SAFETY: the block is the caller's and live, and `new` fits its room, so what the
-            // back end gives up past `new` is the caller's to give.
+            // SAFETY: ADDRESS-01. the block is the caller's and live, and `new` fits its room,
+            // so what the back end gives up past `new` is the caller's to give.
             unsafe { back.resize_in_place(ptr, new) };
         }
         fits
@@ -182,7 +184,7 @@ pub(crate) mod process {
     /// `ptr` is a large block of the heap that the caller owns and gives up.
     #[cold]
     pub(crate) unsafe fn free_large(ptr: NonNull<u8>) {
-        // SAFETY: the contract of `Bound::free_large_slow` is this function's, word for word.
+        // SAFETY: ADDRESS-02. the contract of `Bound::free_large_slow` is this function's.
         unsafe { global::process().free_large_slow(ptr) }
     }
 
@@ -214,8 +216,8 @@ pub(crate) mod process {
     ) {
         let heap = global::process().heap();
         match heap.back() {
-            // SAFETY: the contract of `Back::move_large` is this function's, and `zeroed` is
-            // false, which never lets it skip a page.
+            // SAFETY: ADDRESS-03. the contract of `Back::move_large` is this function's, and
+            // `zeroed` is false, which never lets it skip a page.
             Some(back) => unsafe { back.move_large(from, to, len, false, why) },
             None => heap.os().abort("a move of a block when no heap exists"),
         }
@@ -235,8 +237,8 @@ pub(crate) mod process {
         to: SmallClass,
         kept: usize,
     ) -> Option<NonNull<u8>> {
-        // SAFETY: the contract of `Bound::resize_small` is this function's, for the process's
-        // heap.
+        // SAFETY: ADDRESS-02. the contract of `Bound::resize_small` is this function's, for the
+        // process's heap.
         unsafe { global::process().resize_small(ptr, from, to, kept, Caller::C) }
     }
 
@@ -250,8 +252,8 @@ pub(crate) mod process {
         old: usize,
         new: usize,
     ) -> bool {
-        // SAFETY: the contract of `Heap::resize_in_place_by_address` is this function's, for
-        // the process's heap.
+        // SAFETY: ADDRESS-02. the contract of `Heap::resize_in_place_by_address` is this
+        // function's, for the process's heap.
         unsafe {
             global::process()
                 .heap()

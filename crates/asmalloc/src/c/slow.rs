@@ -194,7 +194,7 @@ pub unsafe extern "C" fn free_slow(ptr: *mut c_void) {
 #[cold]
 #[inline(never)]
 pub unsafe extern "C" fn free_sized_slow(ptr: *mut c_void, _size: usize) {
-    // SAFETY: the caller's promise.
+    // SAFETY: SLOW-05; the caller's promise.
     unsafe { free_slow(ptr) }
 }
 
@@ -207,6 +207,6 @@ pub unsafe extern "C" fn free_sized_slow(ptr: *mut c_void, _size: usize) {
 #[cold]
 #[inline(never)]
 pub unsafe extern "C" fn free_aligned_sized_slow(ptr: *mut c_void, _align: usize, _size: usize) {
-    // SAFETY: the caller's promise.
+    // SAFETY: SLOW-05; the caller's promise.
     unsafe { free_slow(ptr) }
 }

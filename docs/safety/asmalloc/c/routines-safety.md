@@ -86,4 +86,4 @@ contract. Pointers cross the assembly as integers: `free` exposes the block's pr
 every object address lies in the heap's reservation, whose provenance the heap exposes when it
 starts.
 
-Reviewed: 415b07e
+Reviewed: 502257d

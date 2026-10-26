@@ -182,6 +182,8 @@ struct Met {
     told: usize,
     /// Free slots kept when their blocks outgrew them.
     kept: usize,
+    /// Bytes the hold returned from regions frees kept young, by the slots' own ages.
+    aged: usize,
 }
 
 impl Met {
@@ -199,6 +201,7 @@ impl Met {
         self.advised += other.advised;
         self.told += other.told;
         self.kept += other.kept;
+        self.aged += other.aged;
     }
 }
 
@@ -399,7 +402,8 @@ fn classes() -> Vec<Class> {
 }
 
 /// Random allocations, writes, frees, resizes and moves of large blocks on one thread, with
-/// the clocked pass, the growth cap and trims between them. After every step: no free slot's
+/// the clocked pass, the growth cap, the hold (with no floor, so that it acts on a heap this
+/// small) and trims between them. After every step: no free slot's
 /// zero bit is set over a byte that is not zero, and the retained count is the bytes of the
 /// free slots' pages that are not marked clean. After a trim, when nothing fails, no free slot
 /// holds data. Returns what the run met.
@@ -411,6 +415,10 @@ fn run(seed: u64, steps: usize, faults: bool) -> Met {
     let classes = classes();
     let mut live: Vec<Held> = Vec::new();
     let (mut byte, mut met) = (0u8, Met::default());
+    state
+        .hold
+        .unfloored
+        .store(true, core::sync::atomic::Ordering::Relaxed);
     for at in 0..steps {
         if faults && rng.below(6) == 0 {
             let call = [Call::Purge, Call::AdviseHuge, Call::Resident][rng.below(3)];
@@ -437,6 +445,15 @@ fn run(seed: u64, steps: usize, faults: bool) -> Met {
             1 if rng.below(3) == 0 => {
                 back.trim();
                 trimmed = true;
+            }
+            // Fine steps of the hold's count, a beat each, so that free slots age by it within
+            // a few dozen steps of the run, as they do within a fraction of an interval in a
+            // program.
+            2..=4 => {
+                for _ in 0..1 + rng.below(16) {
+                    os.advance_clock(super::super::policy::FINE_TICKS);
+                    back.heartbeat();
+                }
             }
             _ => step(&back, &mut rng, &classes, &mut live, byte, 24),
         }
@@ -491,6 +508,10 @@ fn run(seed: u64, steps: usize, faults: bool) -> Met {
         0,
         "seed {seed:#x}: kept outgrown slots after the last trim"
     );
+    met.aged = state
+        .hold
+        .aged_returned
+        .load(core::sync::atomic::Ordering::Relaxed);
     met
 }
 
@@ -506,7 +527,7 @@ fn runs(salt: u64, seeds: u64, steps: usize, faults: bool) {
         met.join(run(salt ^ seed, steps, faults));
     }
     assert!(
-        met.zero != 0 && met.told != 0 && met.kept != 0,
+        met.zero != 0 && met.told != 0 && met.kept != 0 && met.aged != 0,
         "the runs missed a case: {met:?}"
     );
     // No free slot keeps a grown block's advice: its free and the move that keeps the slot it
@@ -945,7 +966,6 @@ fn fill_all(seed: u64, steps: usize) -> Met {
                     let new = Layout::from_size_align(size, layout.align()).unwrap();
                     let kept = old.wrote.min(layout.size()).min(size);
                     let (ptr, wrote) = if grow_zeroed {
-                        let before = sim.usable_size(old.ptr.as_ptr()).unwrap();
                         // SAFETY: the test's block, which `layout` fits; `new` is larger.
                         let (ptr, len) =
                             unsafe { sim.grow_zeroed_for_test(old.ptr.as_ptr(), layout, new) }
@@ -956,9 +976,9 @@ fn fill_all(seed: u64, steps: usize) -> Met {
                             Some(len),
                             "seed {seed:#x} step {at}: a grant of {len} bytes for {size}"
                         );
-                        // Past the old block, which ended at its usable size if it stayed
-                        // and at its layout's if it moved.
-                        let from = before.max(layout.size()).min(len);
+                        // From the old layout's size to the length returned, whether the
+                        // block stayed or moved.
+                        let from = layout.size().min(len);
                         assert!(
                             all_are(ptr.wrapping_add(from), len - from, 0),
                             "seed {seed:#x} step {at}: a zeroed grow to {size} is not zero"

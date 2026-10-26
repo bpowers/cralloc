@@ -92,4 +92,11 @@ slot start that is not live (a double free, or a slot never handed out) is pushe
 when its magazine is laundered (`Back::launder` aborts on a slot already free or beyond the
 watermark), which is the design's stated double-free detection.
 
-Reviewed: f41dbf9
+## SLOW-05: `free_slow(ptr)` in `free_sized_slow` and `free_aligned_sized_slow`
+
+**Proof.** Both functions' `# Safety` is "As for `free_slow`", with a wrong size or alignment
+declared safe. They pass `ptr` unchanged and nothing else: the size and alignment are bound to
+unused parameters and reach no computation, so whatever they are cannot affect what
+`free_slow` does. `ptr` carries the caller's promise, which is `free_slow`'s word for word.
+
+Reviewed: 502257d

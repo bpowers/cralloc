@@ -5513,6 +5513,15 @@ mod burst_start_review;
 /// The floor measured against what a purge could return, and frontiers a silence does not age.
 mod floor_returnable;
 
+/// The trim at the claim of a free large slot.
+mod slack;
+
+/// Free large slots that age on their own.
+mod aging;
+
+/// The adversarial review of the trim at the claim and per-slot ageing.
+mod slack_review;
+
 /// The huge-page tail: the rule, its bounded step, its failures and its races.
 mod tail;
 

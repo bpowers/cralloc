@@ -13,6 +13,9 @@
 //        background spawn       creates and joins one thread, then prints how many threads
 //                               named `asmalloc` the process has, and the same for a forked
 //                               child that creates one of its own
+//        background rewrite     writes over its initial environment's strings and sets
+//                               ASMALLOC_BACKGROUND=1 with setenv, then creates and joins one
+//                               thread and prints how many threads named `asmalloc` it has
 //        background quiet SECS  idle, in a process that created a thread first, so that the
 //                               allocator's default thread exists
 //        background silent SECS creates a thread, frees a burst, and then does nothing at all
@@ -89,6 +92,17 @@ static void others_named(const char *name, int *count, int *blocking) {
 
 static void others(int *count, int *blocking) { others_named(NULL, count, blocking); }
 
+// The allocator's thread names itself as it starts, so a look made just after it was created
+// may come first: look again for up to a second while there is none.
+static void allocator_threads(int *count, int *blocking) {
+    for (int tries = 0; tries < 100; tries++) {
+        others_named("asmalloc", count, blocking);
+        if (*count > 0) return;
+        struct timespec t = {0, 10 * 1000000};
+        nanosleep(&t, NULL);
+    }
+}
+
 static void *nothing(void *arg) { return arg; }
 
 static void one_thread(void) {
@@ -99,13 +113,13 @@ static void one_thread(void) {
 static int spawn_mode(void) {
     int count, blocking;
     one_thread();
-    others_named("asmalloc", &count, &blocking);
+    allocator_threads(&count, &blocking);
     printf("other threads %d, blocking every signal %d\n", count, blocking);
     fflush(stdout);
     pid_t child = fork();
     if (child == 0) {
         one_thread();
-        others_named("asmalloc", &count, &blocking);
+        allocator_threads(&count, &blocking);
         printf("child: other threads %d\n", count);
         exit(0);
     }
@@ -210,8 +224,26 @@ static void sleep_ms(long ms) {
     }
 }
 
+extern char **environ;
+
+// As a program that sets its process title does (nginx, PostgreSQL): writes over the strings
+// of its initial environment in place, then sets the variable another way, before its first
+// thread.
+static int rewrite_mode(void) {
+    char *first = environ[0], *last = first;
+    for (char **e = environ; *e; e++) last = *e + strlen(*e);
+    if (first) memset(first, 'x', (size_t)(last - first));
+    setenv("ASMALLOC_BACKGROUND", "1", 1);
+    int count, blocking;
+    one_thread();
+    allocator_threads(&count, &blocking);
+    printf("other threads %d\n", count);
+    return 0;
+}
+
 int main(int argc, char **argv) {
     if (argc > 1 && strcmp(argv[1], "threads") == 0) return threads_mode();
+    if (argc > 1 && strcmp(argv[1], "rewrite") == 0) return rewrite_mode();
     if (argc > 1 && strcmp(argv[1], "spawn") == 0) return spawn_mode();
     if (argc > 2 && strcmp(argv[1], "silent") == 0) {
         one_thread();

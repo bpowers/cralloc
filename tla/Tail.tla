@@ -68,7 +68,7 @@
                 a raise, or the word loses it. *)
 EXTENDS Naturals, FiniteSets, TLC
 
-CONSTANTS Threads, Units, Repair, MaxEpoch, ForkRepair, ChildClears, Lowerings
+CONSTANTS Threads, Units, Repair, MaxEpoch, ForkRepair, ChildClears, Lowerings, RetryTake
 
 U == 1..Units
 StaleAfter == 2
@@ -92,7 +92,8 @@ vars == <<adv, w, epoch, returned, th, alive, orphan, child, marks, lowered>>
 
 Zero == [from |-> 0, low |-> 0, want |-> FALSE, busy |-> FALSE, repair |-> FALSE, stamp |-> 0]
 Idle == [pc |-> "idle", mine |-> Zero, op |-> "none", lo |-> 0, hi |-> 0, ok |-> TRUE, next |-> Zero,
-         called |-> FALSE]   \* it has made a call since it took the bit
+         called |-> FALSE,   \* it has made a call since it took the bit
+         seen |-> Zero]      \* the word a looker loaded, which its take compares against
 
 Init ==
     /\ adv = [u \in U |-> "on"]
@@ -133,18 +134,36 @@ Look(t) ==
     /\ th' = [th EXCEPT ![t].pc = "look"]
     /\ UNCHANGED <<adv, w, epoch, returned, alive, orphan, child, lowered>>
 
-\* The looker finds no mark, or an owner: it leaves the word and the flag alone.
-LookSkip(t) ==
+\* The looker loads the word (raise_moved's load), to take it with a CAS next.
+LookLoad(t) ==
     /\ t \in alive /\ th[t].pc = "look"
-    /\ (~w.want \/ Owned(w))
+    /\ th' = [th EXCEPT ![t].pc = "take", ![t].seen = w]
+    /\ UNCHANGED <<adv, w, epoch, returned, alive, orphan, child, marks, lowered>>
+
+\* The word it loaded has no mark, or an owner: it leaves the word and the flag alone.
+LookSkip(t) ==
+    /\ t \in alive /\ th[t].pc = "take"
+    /\ (~th[t].seen.want \/ Owned(th[t].seen))
     /\ th' = [th EXCEPT ![t] = Idle]
+    /\ UNCHANGED <<adv, w, epoch, returned, alive, orphan, child, marks, lowered>>
+
+\* Its CAS fails: the word changed since the load (a note, a mark, another owner). With
+\* RetryTake, the code's: it loads again. Without, it gives up, and a mark it leaves is seen
+\* by nobody (Tail_lost).
+TakeLost(t) ==
+    /\ t \in alive /\ th[t].pc = "take"
+    /\ th[t].seen.want /\ ~Owned(th[t].seen)
+    /\ w # th[t].seen
+    /\ th' = [th EXCEPT ![t] = IF RetryTake THEN [th[t] EXCEPT !.pc = "look"] ELSE Idle]
     /\ UNCHANGED <<adv, w, epoch, returned, alive, orphan, child, marks, lowered>>
 
 \* Take the owner bit, for a lowering or a raise; the call's range is fixed
 \* from the word as taken. A thread that finds the bit owned does nothing.
 Take(t, kind) ==
     /\ t \in alive
-    /\ th[t].pc = IF kind = "raise" THEN "look" ELSE "idle"
+    /\ th[t].pc = IF kind = "raise" THEN "take" ELSE "idle"
+    \* A raise's CAS succeeds only against the word it loaded.
+    /\ (kind = "raise" => w = th[t].seen)
     /\ ~Owned(w)
     /\ \/ kind = "lower" /\ (w.low # 0 \/ w.repair \/ w.busy)
           \* Lowerings # 0 bounds them, for the liveness check: in the code a region
@@ -264,7 +283,7 @@ Next ==
     \/ \E t \in Threads, u \in U : Note(t, u) \/ Mark(t, u)
     \/ \E t \in Threads : Take(t, "lower") \/ Take(t, "raise")
     \/ \E t \in Threads : Reconcile(t) \/ Call(t) \/ Give(t) \/ Vanish(t)
-    \/ \E t \in Threads : Look(t) \/ LookSkip(t)
+    \/ \E t \in Threads : Look(t) \/ LookLoad(t) \/ LookSkip(t) \/ TakeLost(t)
     \/ Tick
     \/ ChildRepair
 
@@ -276,7 +295,8 @@ Spec == Init /\ [][Next]_vars
 \* leave it idle only now and then (strong fairness). Claims, notes, forks
 \* and time are not forced.
 Step(t) ==
-    \/ LookSkip(t) \/ Take(t, "raise") \/ Reconcile(t) \/ Call(t) \/ Give(t)
+    \/ LookLoad(t) \/ LookSkip(t) \/ TakeLost(t) \/ Take(t, "raise") \/ Reconcile(t) \/ Call(t)
+    \/ Give(t)
 LiveSpec ==
     /\ Spec
     /\ \A t \in Threads : SF_vars(t \in alive /\ Look(t)) /\ WF_vars(t \in alive /\ Step(t))

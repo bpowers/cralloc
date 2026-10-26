@@ -437,6 +437,28 @@ fn the_background_thread_starts_when_asked_and_not_in_a_child() {
     }
 }
 
+/// The switch is the environment the process was started with, read before `main`: writing
+/// over that area for a process title, or a `setenv`, does not change it.
+#[test]
+fn the_switch_survives_a_process_title_and_a_setenv() {
+    let exe = program("background.c");
+    for (value, threads) in [(None, 1), (Some("0"), 0)] {
+        let mut command = Command::new(&exe);
+        command.arg("rewrite");
+        match value {
+            Some(value) => command.env("ASMALLOC_BACKGROUND", value),
+            None => command.env_remove("ASMALLOC_BACKGROUND"),
+        };
+        let out = run(true, &mut command);
+        assert!(out.status.success(), "{:?}", out.status);
+        assert_eq!(
+            String::from_utf8_lossy(&out.stdout),
+            format!("other threads {threads}\n"),
+            "ASMALLOC_BACKGROUND={value:?}"
+        );
+    }
+}
+
 /// Exit, with its handlers allocating, while the background thread sleeps or is in the middle
 /// of `maintain` (just after a burst of frees, its first rounds drain, launder and purge) and
 /// other threads allocate.

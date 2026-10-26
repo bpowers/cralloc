@@ -46,7 +46,8 @@ may both look it up and store the same value.
 ## PRELOAD-06: `start_dormant(create)` and the forwarding `create(thread, attr, start, arg)`
 
 **Preconditions.** `create` has `pthread_create`'s contract (BACKGROUND-03), and the program's
-call is forwarded with its own arguments.
+call is forwarded with its own arguments. The `#[unsafe(no_mangle)]` definition of
+`pthread_create` is a sound definition of that C symbol.
 
 **Proof.** `create` is the next `pthread_create` (PRELOAD-05), the C library's. The interposer
 is `pthread_create`'s own definition with its exact C signature (`#[unsafe(no_mangle)] extern
@@ -56,7 +57,21 @@ The allocator's thread is created first, through the same `create`, from no slow
 program's call to `pthread_create` is a moment at which creating a thread is allowed, since
 the program is creating one itself. A program that calls `pthread_create` from a signal
 handler or under a lock that thread creation takes is outside POSIX already. `CREATED_IN`
-makes the creation once per process: a forked child's ID differs from its parent's, so its
-first call creates its own. If the start fails the program's thread is still created.
+keeps all but a process's first call from trying: a forked child's ID differs from its
+parent's, so its first call tries for itself. It is a filter and nothing rests on it. A
+process whose ID equals the one recorded (a descendant that was given the ID of an ancestor
+that has exited, or the first process of a new PID namespace forked by a process that is
+itself number 1) does not try, and gets no thread from this path; a call that does try while
+a thread is running creates none, because the claim in `start_thread` is one compare-and-swap
+of the thread's word, keyed by the process generation (`thread_word`). If the start fails the
+program's thread is still created.
 
-Not yet reviewed.
+The exported name: the definition replaces the C library's `pthread_create` for every object
+that binds it dynamically, which is the purpose of interposition, and it is the C
+declaration's signature exactly, so every such caller gets a function of the type it calls.
+It replaces nothing else, and the C library's own definition stays reachable through
+`RTLD_NEXT` (PRELOAD-05), so the behaviour of the replaced symbol is the C library's plus
+the allocator's thread first. Nothing in the library or the C library assumes the address of
+`pthread_create` is the C library's.
+
+Reviewed: c832e1b

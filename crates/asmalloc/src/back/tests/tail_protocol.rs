@@ -323,3 +323,60 @@ fn a_lowering_stops_at_the_frontier() {
     assert_eq!(tail::lower(&rec, region, rec.huge(), 9), Change::Done);
     assert_eq!(rec.word().from, 2);
 }
+
+/// A note at or above the boundary is no note: the advice there is off already.
+#[test]
+fn a_note_at_or_above_the_boundary_is_ignored() {
+    let rec = Rec::new();
+    let region = rec.region();
+    rec.set(Tail {
+        from: 2,
+        ..Tail::default()
+    });
+    tail::note(&rec, region, 2);
+    tail::note(&rec, region, 3);
+    assert_eq!(rec.word().low, None);
+    tail::note(&rec, region, 1);
+    assert_eq!(rec.word().low, Some(1));
+}
+
+/// The advice never comes off below the start of the huge-page part: a note there (a huge
+/// page of the small-page part, which a walk never returns in part) lowers nothing.
+#[test]
+fn a_lowering_stays_within_the_huge_page_part() {
+    let rec = Rec::new();
+    let region = rec.region();
+    tail::note(&rec, region, 1);
+    // The huge-page part starts at huge page 2.
+    assert_eq!(tail::lower(&rec, region, 2 * rec.huge(), 1), Change::None);
+    assert_eq!(rec.calls(), 0);
+    assert_eq!(rec.word().from, 0);
+}
+
+/// A fork child's repair (`Back::distrust_tails`) may clear the bit of a live owner of the
+/// child's own: a second thread the child started before its first slow path, in the middle of
+/// a lowering. That owner is taken over: its give-back asks for a repair, and the next change
+/// makes the advice agree with the word.
+#[test]
+fn a_child_repair_that_clears_a_live_owner_takes_it_over() {
+    let rec = Rec::new();
+    let region = rec.region();
+    tail::note(&rec, region, 2);
+    rec.on_first_call(|rec| {
+        // The repair, as `distrust_tails` makes it, while the owner is in the kernel.
+        let word = rec.host.tail(rec.region());
+        let seen = word.load();
+        word.compare_exchange(seen, (seen & !tail::BUSY) | tail::REPAIR)
+            .unwrap();
+    });
+    let _ = tail::lower(&rec, region, rec.huge(), 1);
+    let word = rec.word();
+    assert!(word.repair && !word.busy, "{word:?}");
+    rec.on.lock().unwrap()[1] = false;
+    // The owner's word was never written: its note is still there, and the next lowering
+    // reconciles and makes it.
+    assert_eq!(tail::lower(&rec, region, rec.huge(), 1), Change::Done);
+    let word = rec.word();
+    assert_eq!((word.from, word.repair), (2, false), "{word:?}");
+    assert!(rec.agrees(word), "{:?}", rec.on.lock().unwrap());
+}

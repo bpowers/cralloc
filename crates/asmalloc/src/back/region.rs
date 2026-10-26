@@ -31,13 +31,17 @@
 //!   pieces start at huge-page boundaries and are a huge page at least, so a slot whose
 //!   advice the OS refused to take back is never left with a huge page partly returned.
 //! - **Clean bits** say a page has not been written since it was carved or last purged. Only a
-//!   purge and the first claim of a carved slot set them (`mark_fresh`, for the pages past its
-//!   block); a claim and anything that widens a held block clear them under what it may write
-//!   (`settle_slot`, `cover`). The retained count of a free large slot is its pages that are
-//!   not clean (`charge`).
+//!   purge, the first claim of a carved slot (`mark_fresh`, for the pages past its block) and a
+//!   holder's return of pages of its own slot (`mark_clean`: a shrink's tail, the pieces behind
+//!   a move, the slack a claim trims) set them; a claim and anything that widens a held block
+//!   clear them under what it may write (`settle_slot`, `cover`). The retained count of a free
+//!   large slot is its pages that are not clean (`charge`).
 //! - **Settling** after a claim: an allocation tests and clears the slot's zero bit (large
 //!   classes), and clears the clean bits of the pages its slots touch, and counts how much of
-//!   what it took was resident.
+//!   what it took was resident. The claim of a large slot also finds, in the same pass, the
+//!   pages past both its block's extent and the last tenant's that are not clean: the slack
+//!   that tenants before the last one left, which the claimer returns (`keep_from`,
+//!   `Back::alloc_at`).
 //! - **Frontiers** say how far up a region's reuse reached in an interval of the clock and the
 //!   one before (`Frontier`): a fill or allocation raises its region's after it claims
 //!   (`reach`), and the clocked pass leaves what lies below (`floor`). The word names its
@@ -241,6 +245,10 @@ pub(crate) struct Settled {
     /// pages it touched. They were taken out of the retained count when the pages were purged
     /// and are resident once the claimed slots are written.
     pub(crate) revived: usize,
+    /// For the claim of one large slot: the pages, from the lowest to the highest, that lie
+    /// past what the claim keeps (`keep_from`) and are not clean, if there are any. The claimer
+    /// returns them (`Back::alloc_at`). Always `None` for small classes.
+    pub(crate) slack: Option<Unit>,
 }
 
 /// After claiming `bits` of leaf word `index`: tests and clears their zero bits, and clears the
@@ -299,6 +307,7 @@ pub(crate) fn settle<H: Host>(host: &H, region: RegionId, index: u32, bits: u64)
         zeroed,
         resident: claimed.saturating_sub(cleaned * page),
         revived: (cleaned * page).saturating_sub(claimed),
+        slack: None,
     }
 }
 
@@ -608,13 +617,43 @@ pub(crate) fn cover<H: Host>(host: &H, region: RegionId, slot: u32) {
     }
 }
 
+/// The page of large slot `slot`, within its pages `unit`, from which a claim for a block of
+/// `size` bytes returns what is resident: past both the block's extent and the extent of the
+/// slot's last tenant, whose size word, `last`, the free left as it was (`Recorded::size`).
+/// Below it are the pages the new block may write and the room the last tenant showed the next
+/// may need; past it, only what tenants before the last one wrote. Both extents are in whole
+/// huge pages if the slot is still advised for them, which only a refused call to take the
+/// advice back leaves (`unadvise`). Every extent counts from the slot's stagger, whether or
+/// not its block was staggered, so it errs toward keeping a page.
+pub(crate) const fn keep_from(
+    layout: &Layout,
+    slot: u32,
+    unit: Unit,
+    size: usize,
+    last: Recorded,
+) -> u32 {
+    let new = extent_of(layout, slot, unit, size, last.huge);
+    let old = extent_of(layout, slot, unit, last.size, last.huge);
+    if new > old { new } else { old }
+}
+
 /// `settle` for one large slot, just claimed for a block of `size` bytes: tests and clears its
 /// zero bit, and clears the clean bits of the pages the block may write (`extent_of`),
 /// writing only words that change; the pages past them stay clean, which is true as long as
 /// nothing writes them. Its `resident` is the slot's pages that were not clean, counted as
 /// `charge` counts them, which is what the free or purge that left it counted; a claim of one
 /// large slot revives no other slot's pages, since a large slot is whole pages.
-pub(crate) fn settle_slot<H: Host>(host: &H, region: RegionId, slot: u32, size: usize) -> Settled {
+///
+/// With `last`, the size word the slot's last tenant left, its `slack` is the pages past
+/// `keep_from` that are not clean, found in the same pass over the slot's clean words, which
+/// the claimer returns.
+pub(crate) fn settle_slot<H: Host>(
+    host: &H,
+    region: RegionId,
+    slot: u32,
+    size: usize,
+    last: Option<Recorded>,
+) -> Settled {
     let layout = host.layout();
     let bit = 1u64 << (slot % BITS);
     let zeroed = match layout.zero_word(slot / BITS) {
@@ -633,12 +672,20 @@ pub(crate) fn settle_slot<H: Host>(host: &H, region: RegionId, slot: u32, size: 
             zeroed,
             resident: layout.size(),
             revived: 0,
+            slack: None,
         };
     };
     // One pass over the slot's clean words: count the clean pages, as `charge` does, from what
-    // each word held before this claim cleared any of it, and clear those under the block.
+    // each word held before this claim cleared any of it, clear those under the block, and find
+    // the pages past what the claim keeps that are not clean. `keep` is at or past `end`, so
+    // the bits cleared and the slack found never overlap.
     let end = extent_of(layout, slot, unit, size, false);
+    let keep = match last {
+        Some(last) => keep_from(layout, slot, unit, size, last),
+        None => unit.end,
+    };
     let mut clean = 0usize;
+    let (mut low, mut high) = (unit.end, unit.start);
     for (w, mask) in page_words(unit.start, unit.end) {
         let word = host.meta(region, layout.clean_word(w));
         let seen = word.load() & mask;
@@ -647,11 +694,20 @@ pub(crate) fn settle_slot<H: Host>(host: &H, region: RegionId, slot: u32, size: 
         if seen & inside != 0 {
             word.fetch_and(!inside);
         }
+        let slack = !seen & mask & !below(w, keep);
+        if slack != 0 {
+            low = low.min(w * BITS + slack.trailing_zeros());
+            high = w * BITS + (BITS - slack.leading_zeros());
+        }
     }
     Settled {
         zeroed,
         resident: layout.size() - clean * layout.page_size(),
         revived: 0,
+        slack: (low < high).then_some(Unit {
+            start: low,
+            end: high,
+        }),
     }
 }
 
@@ -682,7 +738,8 @@ pub(crate) fn mark_purged<H: Host>(host: &H, region: RegionId, slot: u32) {
 }
 
 /// What large slot `slot`'s size word holds, if the class records sizes. Only meaningful to
-/// the slot's holder.
+/// the slot's holder, but for the stamp of a free slot, which the hold's walk reads as a hint
+/// (`hold::walk_aged`).
 pub(crate) fn recorded<H: Host>(host: &H, region: RegionId, slot: u32) -> Option<Recorded> {
     let at = host.layout().size_word(slot)?;
     Some(Recorded::unpack(host.meta(region, at).load()))
@@ -816,8 +873,9 @@ pub(crate) unsafe fn purge_part<H: Host>(
         return false;
     }
     let page = layout.page_size();
-    // SAFETY: BACK-REGION-03. the caller's promise, for a range inside the slot: trimming only shrank it.
     let purged =
+        // SAFETY: BACK-REGION-03. the caller's promise, for a range inside the slot: trimming
+        // only shrank it.
         unsafe { host.purge(region, first as usize * page, (end - first) as usize * page) };
     purged && (first, end) == whole
 }
@@ -994,6 +1052,62 @@ pub(crate) fn dirty_pages<H: Host>(host: &H, region: RegionId, unit: Unit) -> (u
         read += 1;
     }
     (dirty, read)
+}
+
+/// For a huge page `unit` of `region` (whole pages below the watermark) that has come back
+/// under the advice for huge pages: counts every free page of it as resident again, if any of
+/// its pages is (a huge page with none, wholly returned, cannot be rebuilt by khugepaged and
+/// stays as it is). Under the advice the kernel may make any huge page that holds one page
+/// wholly resident, so there the huge page is the unit of residency, as everywhere it was
+/// never split. Clears the clean bits of each run of clean pages as a claim does: it claims
+/// every slot touching the run first (`tree::claim_exact`, all of them free, since a clean
+/// page holds nothing a claim has touched since its purge), and leaves a run it cannot claim,
+/// whose claimer clears the bits itself. Returns the pages it counted resident and the leaf
+/// and clean words it read.
+pub(crate) fn restore_resident<H: Host>(host: &H, region: RegionId, unit: Unit) -> (u32, usize) {
+    let layout = host.layout();
+    let (dirty, mut read) = dirty_pages(host, region, unit);
+    if dirty == 0 {
+        return (0, read);
+    }
+    let mut restored = 0;
+    let mut page = unit.start;
+    while page < unit.end {
+        // The next run of clean pages from `page`.
+        let clean = |p: u32| {
+            host.meta(region, layout.clean_word(p / BITS)).load() & (1u64 << (p % BITS)) != 0
+        };
+        if !clean(page) {
+            page += 1;
+            continue;
+        }
+        // The page just seen clean starts the run, whatever a second read of it would say: a
+        // claim may clear its bit meanwhile, and a run must not come out empty.
+        let start = page;
+        page += 1;
+        while page < unit.end && clean(page) {
+            page += 1;
+        }
+        let run = Unit { start, end: page };
+        let (first, last) = layout.touching(run);
+        let (low, high) = (first / BITS, last / BITS);
+        read += (high - low + 1) as usize;
+        let mut claimed = low;
+        while claimed <= high
+            && tree::claim_exact(host, region, claimed, bits_in_word(claimed, first, last))
+        {
+            claimed += 1;
+        }
+        if claimed > high {
+            for w in run.start / BITS..=(run.end - 1) / BITS {
+                let mask = bits_in_word(w, run.start, run.end - 1);
+                let old = host.meta(region, layout.clean_word(w)).fetch_and(!mask);
+                restored += (old & mask).count_ones();
+            }
+        }
+        release_range(host, region, first, last, low, claimed);
+    }
+    (restored, read)
 }
 
 /// Whether every page of a unit is marked clean.

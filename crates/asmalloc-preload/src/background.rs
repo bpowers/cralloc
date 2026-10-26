@@ -7,7 +7,10 @@
 //! dormant until a heartbeat finds the heap over the floor of the allowance, so a small
 //! multi-threaded program has a thread that never runs. `ASMALLOC_BACKGROUND=0` turns it off;
 //! any other value starts it running from the library's constructor, before `main`, as
-//! before.
+//! before. The variable is read from the environment the process was started with, by the
+//! dynamic loader's first `malloc` or else by the constructor, before `main` either way: a
+//! program that later writes a process title over that environment, or calls `setenv`,
+//! keeps the setting it started with (`asmalloc::background::choice`).
 //!
 //! The interposer forwards every call to the next `pthread_create` (`dlsym(RTLD_NEXT)`), the
 //! C library's, and creates the allocator's thread through that one too. The C library's own
@@ -66,6 +69,8 @@ fn next() -> Option<CreateThread> {
 static CONSTRUCTOR: extern "C" fn() = start;
 
 extern "C" fn start() {
+    // Reads the switch, if no `malloc` has yet, while the environment is still the one the
+    // process was started with.
     if choice() == Choice::On
         && let Some(create) = next()
     {
@@ -74,6 +79,7 @@ extern "C" fn start() {
     }
 }
 
+// SAFETY: PRELOAD-06, the exported name.
 /// The program's `pthread_create`: the allocator's thread first, at the process's first
 /// call, then the program's.
 ///
