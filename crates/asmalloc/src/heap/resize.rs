@@ -61,7 +61,7 @@ impl<O: Os, R: Routines + Copy> Bound<'_, O, R> {
                 return moved.as_ptr();
             }
         }
-        // SAFETY: the caller's contract, which the lean path left as it found it.
+        // SAFETY: HEAP-09. the caller's contract, which the lean path left as it found it.
         unsafe { self.realloc_other(ptr, old, new_size) }
     }
 
@@ -79,7 +79,7 @@ impl<O: Os, R: Routines + Copy> Bound<'_, O, R> {
         ) else {
             return ptr::null_mut();
         };
-        // SAFETY: the caller's contract, and `new_size` is not zero.
+        // SAFETY: HEAP-10. the caller's contract, and `new_size` is not zero.
         unsafe { self.resize(block, old, new, false) }
             .map_or(ptr::null_mut(), |grant| grant.ptr.as_ptr())
     }
@@ -102,7 +102,7 @@ impl<O: Os, R: Routines + Copy> Bound<'_, O, R> {
         new: Layout,
         zero: bool,
     ) -> Option<Grant> {
-        // SAFETY: the caller's contract, passed on.
+        // SAFETY: HEAP-10; the caller's contract, passed on.
         let grant = unsafe { self.grow_kept(ptr, old, new, zero) }?;
         // The one clear of a zeroed grow, for every path. Only a move into memory known to
         // read as zero leaves nothing to clear (`Grant::zeroed`).
@@ -149,7 +149,7 @@ impl<O: Os, R: Routines + Copy> Bound<'_, O, R> {
                 });
             }
         }
-        // SAFETY: the caller's contract; `new` is at least `old`, so not empty.
+        // SAFETY: HEAP-10. the caller's contract; `new` is at least `old`, so not empty.
         unsafe { self.resize(ptr, old, new, zero) }
     }
 
@@ -182,7 +182,7 @@ impl<O: Os, R: Routines + Copy> Bound<'_, O, R> {
                 });
             }
         }
-        // SAFETY: the caller's contract, and `new` is not empty.
+        // SAFETY: HEAP-10. the caller's contract, and `new` is not empty.
         unsafe { self.resize(ptr, old, new, false) }
     }
 
@@ -215,9 +215,9 @@ impl<O: Os, R: Routines + Copy> Bound<'_, O, R> {
             // A push that misses stores nothing, so the block is still the caller's, who gives
             // it up: a block of `from` this heap handed out, as both slow paths take.
             match caller {
-                // SAFETY: as just said.
+                // SAFETY: HEAP-11, as just said.
                 Caller::Rust => unsafe { self.rust_free_slow(from, ptr) },
-                // SAFETY: as just said.
+                // SAFETY: HEAP-11, as just said.
                 Caller::C => drop(unsafe { self.free_slow(from, ptr) }),
             }
         }

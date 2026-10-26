@@ -5,7 +5,8 @@
 //! which may be far bigger. `deallocate` may then be called with any size from the one
 //! requested to that length, which maps to the same class (the fit rule, proved in
 //! `classes::verify`), or, for a large block, is not consulted at all. A zero-size layout gets a
-//! dangling pointer aligned to it and no block, and a zero-size block is never freed.
+//! dangling pointer aligned to it and no block, and a zero-size block is never freed. The
+//! ledger for the unsafe blocks here is `docs/safety/asmalloc/heap/allocator-safety.md`.
 
 use super::{Bound, Zero};
 use crate::front::Routines;
@@ -41,8 +42,8 @@ impl<O: Os, R: Routines + Copy> Bound<'_, O, R> {
     #[inline]
     pub(crate) unsafe fn deallocate(self, ptr: NonNull<u8>, layout: Layout) {
         if layout.size() != 0 {
-            // SAFETY: a non-zero layout that fits a block describes the block it was allocated
-            // as, by the fit rule.
+            // SAFETY: ALLOCATOR-01. a non-zero layout that fits a block describes the block it
+            // was allocated as, by the fit rule.
             unsafe { self.dealloc(ptr.as_ptr(), layout) }
         }
     }
@@ -63,8 +64,8 @@ impl<O: Os, R: Routines + Copy> Bound<'_, O, R> {
         if old.size() == 0 {
             return self.allocate(new, zero);
         }
-        // SAFETY: `ptr` is a live block that `old` fits, which the caller gives up unless the
-        // grow fails, and `old` is not empty.
+        // SAFETY: ALLOCATOR-02. `ptr` is a live block that `old` fits, which the caller gives
+        // up unless the grow fails, and `old` is not empty.
         let grant = unsafe { self.grow_block(ptr, old, new, zero) }.ok_or(AllocError)?;
         Ok(NonNull::slice_from_raw_parts(grant.ptr, grant.len))
     }
@@ -81,11 +82,12 @@ impl<O: Os, R: Routines + Copy> Bound<'_, O, R> {
         new: Layout,
     ) -> Result<NonNull<[u8]>, AllocError> {
         if new.size() == 0 {
-            // SAFETY: `ptr` is a live block that `old` fits, which a shrink to nothing gives up.
+            // SAFETY: ALLOCATOR-03. `ptr` is a live block that `old` fits, which a shrink to
+            // nothing gives up.
             unsafe { self.deallocate(ptr, old) };
             return Ok(dangling(new));
         }
-        // SAFETY: as in `grow`, and `new` is not empty.
+        // SAFETY: ALLOCATOR-03. as in `grow`, and `new` is not empty.
         let grant = unsafe { self.shrink_block(ptr, old, new) }.ok_or(AllocError)?;
         Ok(NonNull::slice_from_raw_parts(grant.ptr, grant.len))
     }

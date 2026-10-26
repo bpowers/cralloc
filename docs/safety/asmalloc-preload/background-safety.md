@@ -46,7 +46,8 @@ may both look it up and store the same value.
 ## PRELOAD-06: `start_dormant(create)` and the forwarding `create(thread, attr, start, arg)`
 
 **Preconditions.** `create` has `pthread_create`'s contract (BACKGROUND-03), and the program's
-call is forwarded with its own arguments.
+call is forwarded with its own arguments. The `#[unsafe(no_mangle)]` definition of
+`pthread_create` is a sound definition of that C symbol.
 
 **Proof.** `create` is the next `pthread_create` (PRELOAD-05), the C library's. The interposer
 is `pthread_create`'s own definition with its exact C signature (`#[unsafe(no_mangle)] extern
@@ -64,5 +65,13 @@ itself number 1) does not try, and gets no thread from this path; a call that do
 a thread is running creates none, because the claim in `start_thread` is one compare-and-swap
 of the thread's word, keyed by the process generation (`thread_word`). If the start fails the
 program's thread is still created.
+
+The exported name: the definition replaces the C library's `pthread_create` for every object
+that binds it dynamically, which is the purpose of interposition, and it is the C
+declaration's signature exactly, so every such caller gets a function of the type it calls.
+It replaces nothing else, and the C library's own definition stays reachable through
+`RTLD_NEXT` (PRELOAD-05), so the behaviour of the replaced symbol is the C library's plus
+the allocator's thread first. Nothing in the library or the C library assumes the address of
+`pthread_create` is the C library's.
 
 Reviewed: 3b5a3f5
