@@ -331,6 +331,16 @@ fn reconcile<H: Host>(host: &H, region: RegionId, huge: u32, from: u32) -> bool 
 /// A refused call keeps the note (`tla/Tail.tla`, `Call`), so that the advice comes off there
 /// once the kernel takes it.
 pub(crate) fn lower<H: Host>(host: &H, region: RegionId, huge: u32, epoch: u64) -> Change {
+    lower_to(host, region, huge, epoch, true)
+}
+
+/// [`lower`] for `trim`, the caller asking for everything back: the advice comes off at the
+/// noted huge page even below the frontier, and fills that reach there later raise it again.
+pub(crate) fn lower_all<H: Host>(host: &H, region: RegionId, huge: u32, epoch: u64) -> Change {
+    lower_to(host, region, huge, epoch, false)
+}
+
+fn lower_to<H: Host>(host: &H, region: RegionId, huge: u32, epoch: u64, clamp: bool) -> Change {
     let word = host.tail(region);
     let seen = word.load();
     let tail = Tail::unpack(seen);
@@ -370,7 +380,11 @@ pub(crate) fn lower<H: Host>(host: &H, region: RegionId, huge: u32, epoch: u64) 
     } else {
         owned.from
     };
-    let reached = region::floor(host, region, epoch).div_ceil(hp);
+    let reached = if clamp {
+        region::floor(host, region, epoch).div_ceil(hp)
+    } else {
+        0
+    };
     let change = match owned.low {
         Some(low) if low < old && low >= reached && low * hp >= huge => {
             let (offset, len) = (
