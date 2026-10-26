@@ -452,8 +452,37 @@ repair as its first heap call.
   growing class move its boundary about ten times an interval (716 a run), 16 MiB 145, 64
   MiB 97, with no change in memory. It bounds what khugepaged may rebuild; fixed, since it
   answers a class's growth in an interval, not the region's size.
-- **8 samples, 2 free.** The samples bound a look's cost; the threshold is the table above.
-  Fixed: a look is per huge page.
+- **8 samples, 2 free.** The samples choose which huge pages to count; fixed, since a look
+  is per huge page.
+- **A quarter free, by the walk's count** (`TAIL_SPLIT_SHARE`, from the review below): the
+  cut below which a huge page is not split. Fixed, for the same reason.
+
+### After the review (2026-10-26)
+
+The adversarial review of `3c2265e` found no memory-safety defect and ten broken promises;
+`d8c8fad` answers them. What changes what is returned: a counting step resumed inside a huge
+page no longer returns its rest; the sample's places move with every lap, in a silence too;
+and the split is decided by the walk's exact count of free, resident pages, a quarter of the
+huge page or more, where before two of eight samples decided it, a rate that in time split
+huge pages a twentieth free. The count reads what a walk of the whole huge page reads: its
+slots' leaf words (32 for 1 KiB slots, 2048 for 16-byte ones) and a clean word a page, only
+for huge pages the sample calls sparse. Refused calls wait for the next interval, a request's
+heartbeat raises one region a step, an owner that does not run no longer keeps the background
+thread awake, and the advice never comes off below the frontier as it stands.
+
+Product before (`0cd82ec`) and after (`d8c8fad`) against main, one run each:
+
+| job | main | before | after |
+|---|---|---|---|
+| lifetime, 4 phases: troughs, THP at peaks, cycles/op | 3.82, 1526 MiB, 593 | 3.28, 776 MiB, 601 | 3.31, 888 MiB, 600 |
+| lifetime, 24 phases, wandering: peaks last 3, troughs, quiet | 1.227, 4.30, 4.29 | 1.145, 3.37, 3.28 | 1.155, 3.48, 3.45 |
+| mini-redis, wide phases | 1.11, 1.33, 1.33 | 1.11, 1.17, 1.17 | 1.11, 1.17, 1.18 |
+| mini-redis, small phases | 2.42 to 3.02 | 2.16 to 2.69 | 1.76 to 2.05 |
+
+The cut keeps huge pages under a quarter free that the rate split in time: the 24-phase
+troughs give back 0.11 of what the product had won (3.37 to 3.48, against main's 4.30). The
+4-phase job and mini-redis's wide phases are the same. Its small phases ended lower after
+the fixes; one run each, and not explained.
 
 ## Method and data
 

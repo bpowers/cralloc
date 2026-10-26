@@ -94,6 +94,6 @@ run Tail Tail_norepair  violates Agree
 run Tail Tail_orphan    violates Agree
 run Tail Tail_live      ok
 run Tail Tail_stuck     violates liveness
-# Review: a thread that takes the bit with the interval before the current one takes over a
-# fresh owner (TailStale.tla). Three threads.
-if [ -n "${SLOW:-}" ]; then run TailStale TailStale ok; fi
+# A thread that read the interval before the current one, against a fresh owner
+# (TailStale.tla, from the review): with a stamp ahead of the reader read as fresh, it holds.
+run TailStale TailStale  ok
