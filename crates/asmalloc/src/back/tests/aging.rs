@@ -612,3 +612,37 @@ fn a_moved_out_slot_left_resident_is_stamped() {
     assert_eq!(freed, back.hold_count() & STAMP_MASK, "stamped at the move");
     back.free(to.ptr, wider);
 }
+
+/// A walk that stops at the look's bound of words, having returned nothing, is still more for
+/// the look to do: the background thread carries every due walk to its region's bottom in one
+/// wake-up, across regions, and does not leave one under way for a later one. Eight regions of
+/// young free slots, more than one look of `maintain`'s 64 words.
+#[test]
+#[cfg_attr(miri, ignore)]
+fn the_thread_finishes_walks_that_return_nothing() {
+    let state = state::<Native>();
+    let back = state.get_or_reserve().unwrap();
+    unfloor(&back);
+    let class = large(40 << 10);
+    let per = back.space().plan().region_size() / class.size();
+    let regions: Vec<Vec<NonNull<u8>>> = (0..8).map(|_| one_region(&back, class, per)).collect();
+    back.hold_set_count(2 * HOLD_STEPS + 10);
+    for blocks in &regions {
+        for b in &blocks[1..] {
+            back.free(*b, class);
+        }
+    }
+    let retained = back.retained_large();
+    while back.thread_purge_steps(&|| back.now()).more {}
+    assert_eq!(back.retained_large(), retained, "young slots went back");
+    let host = back.host(class).unwrap();
+    for blocks in &regions {
+        let region = back.space().locate(blocks[0].as_ptr()).unwrap().region;
+        let walk = AgeWalk::unpack(host.meta(region, host.layout().age_word().unwrap()).load());
+        assert_eq!(walk.cursor, 0, "a walk was left under way");
+        assert_ne!(walk.began, 0, "a region was not walked");
+    }
+    for blocks in &regions {
+        back.free(blocks[0], class);
+    }
+}
