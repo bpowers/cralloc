@@ -1184,3 +1184,93 @@ fn the_short_runs_of_a_split_huge_page_go_back_at_the_pass_for_short_runs() {
         returned / page()
     );
 }
+
+/// Third round, on the accounting (`ae24bca`). A raise counts every clean page of the
+/// non-empty huge pages it puts back under the advice as resident, whether or not the kernel
+/// has rebuilt anything (khugepaged takes minutes). The cap acts on that count: a burst that
+/// reaches a little above the boundary in many classes at once puts the count over the cap
+/// with memory that is not there, and the next class to grow pays for it by returning pages
+/// another class freed a moment ago and is about to reuse.
+#[test]
+#[cfg_attr(miri, ignore)]
+fn a_raise_does_not_make_growth_pay_for_memory_that_is_not_resident() {
+    let state = state::<Standard>();
+    let back = state.get_or_reserve().unwrap();
+    let os = state.os();
+    let cap = retained_cap(Standard::GEOMETRY);
+    let step = growth_step(Standard::GEOMETRY);
+    let region_bytes = back.space().plan().region_size();
+    let sizes = [
+        16usize, 32, 48, 64, 80, 96, 112, 128, 160, 192, 224, 256, 320, 384, 448, 512, 640, 768,
+        896, 1024,
+    ];
+    // Every class strands a tail: one slot kept in each huge page.
+    for size in sizes {
+        let class = small(size);
+        let slots = fill(&back, class, region_bytes / size);
+        for &p in &slots {
+            paint(p, size, 7);
+        }
+        let freed: Vec<*mut u8> = slots
+            .iter()
+            .copied()
+            .filter(|p| (p.addr() % huge()) >= size)
+            .collect();
+        for chunk in freed.chunks(64) {
+            // SAFETY: the test holds these slots and gives them up.
+            unsafe { back.launder(class, chunk) };
+        }
+    }
+    age_and_beat(&back, 24);
+    let lowered = (0..back.walk_regions())
+        .filter(|&i| Tail::unpack(back.state.tails[i].load()).from != 0)
+        .count();
+    let quiet = back.retained();
+    assert!(quiet < cap / 2, "{quiet} retained after the passes");
+    // The burst: each class claims until it reaches above its boundary, and the heartbeats
+    // raise.
+    for size in sizes {
+        let class = small(size);
+        for _ in 0..4096 {
+            if back.state.marks.load() != 0 {
+                break;
+            }
+            if fill(&back, class, 8).is_empty() {
+                break;
+            }
+        }
+        for _ in 0..8 {
+            if back.state.marks.load() == 0 {
+                break;
+            }
+            back.heartbeat();
+        }
+    }
+    let counted = back.retained();
+    // SAFETY: no other thread runs, and the back end and the tests store only integers.
+    let resident = unsafe { os.resident_bytes() };
+    // A class that just freed a little, which it reuses every interval.
+    let victim = small(2048);
+    let held = fill(&back, victim, 16 * step / 2048);
+    for &p in &held {
+        paint(p, 2048, 9);
+    }
+    // SAFETY: the test holds these slots and gives them up.
+    unsafe { back.launder(victim, &held) };
+    // Another class grows.
+    let purges = os.calls(Call::Purge);
+    let grower = small(3072);
+    let grown = fill(&back, grower, 8 * step / 3072);
+    assert!(!grown.is_empty());
+    // SAFETY: as above.
+    let taken = held
+        .iter()
+        .filter(|&&p| unsafe { os.is_purged(NonNull::new(p).unwrap(), 2048) })
+        .count();
+    assert_eq!(
+        (os.calls(Call::Purge) - purges, taken),
+        (0, 0),
+        "growth paid by purging (calls, slots of the other class returned): {lowered} regions had tails, the count went {quiet} -> \
+         {counted} at the raises against a cap of {cap}, with {resident} bytes resident in all"
+    );
+}
