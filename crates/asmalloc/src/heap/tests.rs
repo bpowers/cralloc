@@ -2459,6 +2459,10 @@ mod review_lean_realloc {
     /// it was given; the old layout's bytes arrive, and everything from there to the length
     /// returned reads as zero.
     #[test]
+    #[cfg_attr(
+        miri,
+        ignore = "writes and reads blocks of hundreds of KiB byte by byte"
+    )]
     fn a_zeroed_grow_that_moves_clears_from_the_old_layouts_size() {
         let heap = SimHeap::<Shape>::new();
         let cases = [
