@@ -391,4 +391,11 @@ frees whatever it says: a page swapped out or reclaimed reads as absent and lead
 returning a slot whose contents nobody needs; a page reported resident leads to an ordinary
 free. An error from the call (`Err`) is taken as "not left unwritten", an ordinary free.
 
+## BACK-CLASS-07: `self.move_large_with(from, to, len, zeroed, why, || {})` in `move_large`
+
+**Proof.** `move_large_with`'s `# Safety` is "As for `Back::move_large`", and `move_large`
+passes its own five arguments unchanged to the same back end. The one argument it adds is
+`observe`, a closure that does nothing, which `move_large_with` calls between pieces; it reads
+and writes no memory, so it cannot touch either range while the move runs.
+
 Reviewed: 415b07e

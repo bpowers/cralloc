@@ -53,4 +53,39 @@ every geometry that hosts a large class's slot, and runs are whole regions), so 
 size does too, and the range lies in the block, which is committed whole (a carved slot's
 pages, or a committed run). `before < len`.
 
+## HEAP-14: `back.resize_in_place(ptr, new.size())` in `resize_large_in_place`
+
+**Preconditions** (`Back::resize_in_place`'s). `ptr` is a live large block of this heap that
+the caller owns, nothing reads or writes it during the call, and if the size shrinks the
+caller gives up every byte past it.
+
+**Proof.** `resize_large_in_place`'s contract: `ptr` is a live large block of this heap that
+the caller owns and is resizing to `new`, which fits it. A block the caller owns is reached by
+no other thread (it was handed to this call to be resized), and this thread does nothing else
+with it during the call. Resizing to `new` is giving up what lies past `new.size()`: the call
+returns the block with that size, which is all the caller may use afterwards
+(`resize_large_in_place` returns `Back::usable_size` after the call). The back end is the
+heap's own (`self.back()`), the one that handed the block out.
+
+## HEAP-15: `self.heap().free_large(ptr)` in `Bound::free_large_slow`
+
+**Proof.** `free_large_slow`'s contract is "As for `Heap::free_large`" and it passes `ptr`
+unchanged to that function of its own heap: the caller's promise (a large block of this heap
+that the caller owns and gives up) is the callee's, word for word. The heartbeat after it
+does not touch the block.
+
+## HEAP-16: `heap.resize_large_in_place(ptr, new, zero)` in `Bound::resize`
+
+**Preconditions** (HEAP-14's caller, `resize_large_in_place`'s). `ptr` is a live large block
+of this heap that the caller owns and is resizing to `new`, which fits it.
+
+**Proof.** `resize`'s contract is `dealloc`'s with `ptr` and `old`: a live block of this heap
+that the caller owns, described by `old`, given up only if the resize succeeds; here it
+succeeds, since an in-place resize cannot fail. The call is made only when `in_place` holds
+and `small(old)` is `None`. A layout with no small class describes a large block (GLOBAL-03),
+so the block is large. `in_place`, for a large `old`, checked that `new` fits it: `new` has no
+small class, its size rounded up to its alignment is at most `len`, which `block_len` took
+from `Back::room` (the bytes from the block's start to its slot's or run's end), the block
+stays after a shrink (`stays_after_shrink`), and `ptr` is aligned as `new` asks.
+
 Reviewed: f41dbf9

@@ -6,8 +6,13 @@ An entry is a heading in docs/safety/**/*-safety.md that starts with its ID, suc
 ledger file `docs/safety/<crate>/<path>-safety.md` covers `crates/<crate>/src/<path>.rs`.
 
 Fails if an ID cited in the code under crates/ names no entry, if two entries share an ID, or
-if no code cites an entry. Prints, without failing, the ledger files with no
-`Reviewed: <commit>` line, and those whose source file has changed since that commit.
+if no code cites an entry. Fails too if an `unsafe` block, `unsafe impl`, `unsafe extern`
+block or `#[unsafe(...)]` attribute in the code that ships cites neither a ledger entry nor a
+Kani harness, or if an `unsafe fn` or `unsafe trait` there has no `# Safety` section: a
+declaration is a contract, and the blocks that rely on it are checked one by one
+(`unsafe_sites.py` says what ships and how a site's comments are found). Prints, without
+failing, the ledger files with no `Reviewed: <commit>` line, and those whose source file has
+changed since that commit.
 
 Usage: scripts/ledger-check
 """
@@ -17,9 +22,12 @@ import re
 import subprocess
 import sys
 
+import unsafe_sites
+
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 ID = re.compile(r"(?<![A-Za-z0-9-])[A-Z]+(?:-[A-Z]+)*-[0-9]{2}(?![0-9])")
 HEADING = re.compile(r"^#+\s+(" + ID.pattern + r")", re.M)
+SAFETY_SECTION = re.compile(r"^\s*//[/!]\s*# Safety\s*$", re.M)
 REVIEWED = re.compile(r"^Reviewed: ([0-9a-f]{7,40})\b", re.M)
 
 
@@ -80,7 +88,32 @@ def main() -> int:
         for line in stale:
             print(f"  {line}")
 
+    uncovered, undocumented = [], []
+    shipping, harnesses = unsafe_sites.sites(ROOT)
+    for site in shipping:
+        where = f"{rel(site.path)}:{site.line}: unsafe {site.kind}"
+        if site.lean:
+            continue
+        if site.kind in unsafe_sites.CONTRACTS:
+            if not SAFETY_SECTION.search(site.justified):
+                undocumented.append(where)
+            continue
+        ids = ID.findall(site.justified)
+        named = [h for h in unsafe_sites.KANI_NAMED.findall(site.justified) if h in harnesses]
+        if not ids and not named:
+            uncovered.append(where)
+
     failed = 0
+    if uncovered:
+        print("ledger-check: unsafe in shipping code that cites no ledger entry or Kani harness:")
+        for line in uncovered:
+            print(f"  {line}")
+        failed = 1
+    if undocumented:
+        print("ledger-check: unsafe fn or trait in shipping code with no '# Safety' section:")
+        for line in undocumented:
+            print(f"  {line}")
+        failed = 1
     twice = sorted(i for i, files in defined.items() if len(files) > 1)
     if twice:
         print("ledger-check: IDs defined more than once:")

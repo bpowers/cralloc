@@ -61,7 +61,7 @@ use crate::space::Geometry;
 use core::fmt;
 use core::marker::PhantomData;
 use core::ptr::NonNull;
-use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicPtr, AtomicU64, Ordering};
 
 /// The heap geometry a [`SimOs`] hosts.
 pub trait Shape: 'static {
@@ -131,6 +131,10 @@ pub struct SimOs<S: Shape = Standard> {
     clock: AtomicU64,
     cpus: Cpus<SIM_THREADS>,
     topology: AtomicU64,
+    /// The environment [`Os::environment`] reads, if any ([`SimOs::set_environment`]), and how
+    /// many times it has been read.
+    environment: AtomicPtr<&'static [u8]>,
+    environment_reads: AtomicU64,
     /// What the background thread's calls did: waits, wakes, and fences of every CPU.
     sleeps: Sleeps,
     shape: PhantomData<fn() -> S>,
@@ -263,6 +267,8 @@ impl<S: Shape> SimOs<S> {
             clock: AtomicU64::new(0),
             cpus: Cpus::new(),
             topology: AtomicU64::new(0),
+            environment: AtomicPtr::new(core::ptr::null_mut()),
+            environment_reads: AtomicU64::new(0),
             sleeps: Sleeps {
                 waits: AtomicU64::new(0),
                 timed: AtomicU64::new(0),
@@ -331,6 +337,20 @@ impl<S: Shape> SimOs<S> {
     /// Sets the CPU topology [`Os::topology`] reports from now on.
     pub fn set_topology(&self, topology: SimTopology) {
         self.topology.store(topology.pack(), Ordering::Release);
+    }
+
+    /// Sets the environment [`Os::environment`] reads from now on: the kernel's bytes, entries
+    /// each ended by a NUL, or `None` for a process with no `/proc`, the default.
+    pub fn set_environment(&self, environment: Option<&'static [u8]>) {
+        let leaked = environment.map_or(core::ptr::null_mut(), |bytes| {
+            core::ptr::from_mut(alloc::boxed::Box::leak(alloc::boxed::Box::new(bytes)))
+        });
+        self.environment.store(leaked, Ordering::Release);
+    }
+
+    /// How many times [`Os::environment`] has been called.
+    pub fn environment_reads(&self) -> u64 {
+        self.environment_reads.load(Ordering::Acquire)
     }
 
     /// Sets when `call` fails from now on.
@@ -858,6 +878,24 @@ unsafe impl<S: Shape> Os for SimOs<S> {
             }
         }
         out.done()
+    }
+
+    fn environment(&self, buf: &mut [u8], mut each: impl FnMut(&[u8]) -> bool) -> bool {
+        self.environment_reads.fetch_add(1, Ordering::AcqRel);
+        let environment = self.environment.load(Ordering::Acquire);
+        if environment.is_null() || buf.is_empty() {
+            return false;
+        }
+        // SAFETY: a non-null pointer is one `set_environment` leaked, which is never freed.
+        let environment: &[u8] = unsafe { *environment };
+        for piece in environment.chunks(buf.len()) {
+            let copy = &mut buf[..piece.len()];
+            copy.copy_from_slice(piece);
+            if !each(copy) {
+                break;
+            }
+        }
+        true
     }
 
     fn abort(&self, message: &str) -> ! {

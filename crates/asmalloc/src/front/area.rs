@@ -149,7 +149,7 @@ pub(crate) fn register() {
 ///
 /// `area` is the calling thread's, and not registered.
 unsafe fn retire(area: NonNull<u8>) {
-    // SAFETY: the caller's promise.
+    // SAFETY: AREA-02; the caller's promise.
     unsafe { cpu_id(area) }.store(RETIRED, Ordering::Relaxed);
 }
 

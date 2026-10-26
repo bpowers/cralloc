@@ -204,30 +204,36 @@ CPUs, or goes back makes a drain or a purge pass come earlier or later, and both
 any time (the drain protocol, `depot/drain.rs`; a purge claims the bits of what it returns,
 `back/region.rs`).
 
-## KERNEL-10: `read_file`
+## KERNEL-10: `ReadOnly`, the files `read_file` and `environment` read
 
-**Blocks.** `syscall(OPENAT, [AT_FDCWD, path, O_RDONLY | O_CLOEXEC, 0, 0, 0])`,
-`syscall(READ, [fd, rest, rest.len(), 0, 0, 0])` in a loop, and `int_call(CLOSE, fd, 0, 0)`.
+**Blocks.** In `ReadOnly::open`, `syscall(OPENAT, [AT_FDCWD, path, O_RDONLY | O_CLOEXEC, 0,
+0, 0])`; in `ReadOnly::read`, `syscall(READ, [fd, into, into.len(), 0, 0, 0])`; in its
+`Drop`, `int_call(CLOSE, fd, 0, 0)`.
 
-**Preconditions.** `path` is a live slice whose last byte is NUL, which the function checks
-before the first call; `buf` is a live, exclusively borrowed slice.
+**Preconditions.** `path` is a live slice whose last byte is NUL, which `open` checks before
+the call; `into` is a live, exclusively borrowed slice; the descriptor a `ReadOnly` holds is
+one it opened, used by nothing else, and closed once.
 
 **Proof.** openat(2) reads the string at `path` up to its NUL, which lies inside the slice, and
 returns a new descriptor or an error; it changes no user memory. `O_CLOEXEC` keeps the
-descriptor from an `exec` that races the call. Each read(2) writes at most its length argument
-to `rest`, the unread tail of `buf`, a live slice of exactly that length, and the count it
-returns is capped at that length before it advances `len`, so `len` never passes `buf.len()`
-and `rest` is never empty when passed (an empty tail ends the loop as "does not fit"). Any bit
-pattern is a valid `u8`. An error or end of file ends the loop. close(2) releases the
-descriptor that this function opened and nothing else holds: the number came from openat in
-this call and was never stored. If a signal handler in another thread closed and reused that
-number in between, which no correct program does to a descriptor it did not open, the reads
-would read another file into `buf` and the close would close it; neither touches memory
-outside `buf`.
+descriptor from an `exec` that races the call. A `ReadOnly` is made only from a successful
+openat, its field is private, it is neither `Clone` nor `Copy`, so its `Drop` closes the
+descriptor exactly once, on every path out of `read_file` and `environment` (including the
+early returns). Each read(2) writes at most its length argument to `into`, a live slice of
+exactly that length; the count it returns is capped at that length, so `read_file`'s `len`
+never passes `buf.len()` and `environment` passes on at most the bytes read. `read_file` never
+passes an empty tail (an empty tail ends it as "does not fit"); `environment` passes its whole
+buffer each time. Any bit pattern is a valid `u8`. If a signal handler in another thread
+closed and reused the descriptor's number in between, which no correct program does to a
+descriptor it did not open, the reads would read another file and the close would close it;
+neither touches memory outside the buffers.
 
-**Where it runs.** Only from the process's first slow path (`depot::domain`), never later, so
-that a program that enters a seccomp sandbox afterwards never makes these calls. What it reads
-decides only which cache domain's depot stacks a CPU uses; no safety argument rests on it.
+**Where it runs.** Only from the process's first slow path (`depot::domain` for the topology,
+`crate::environment` for the environment), and for the environment also from the preload
+library's constructor or `Asmalloc::start_dormant` if no slow path came first, so that a
+program that enters a seccomp sandbox afterwards never makes these calls. What is read decides
+only which cache domain's depot stacks a CPU uses and whether the background thread is
+created; no safety argument rests on it.
 
 ## KERNEL-11: `futex` in `wait` and `wake`
 

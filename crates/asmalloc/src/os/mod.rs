@@ -8,8 +8,9 @@
 //! The interface is what the design needs and no more: reserve address space, make parts of it
 //! writable, return pages, steer transparent huge pages, mark a page to be wiped in forked
 //! children, unmap, fence the restartable sequences of one CPU, draw a random number, read a
-//! clock, and abort. Each implementation also fixes the [`Geometry`] the heap is laid out with,
-//! so the simulated OS can use a scaled-down heap.
+//! clock, read the CPU topology and the initial environment, and abort. Each implementation
+//! also fixes the [`Geometry`] the heap is laid out with, so the simulated OS can use a
+//! scaled-down heap.
 //!
 //! Ranges passed to the memory calls are page-aligned, a whole number of pages long, not empty,
 //! and inside one live reservation made by the same `Os` value. [`crate::space::Space`] checks
@@ -220,6 +221,16 @@ pub unsafe trait Os: Sync {
     /// process (`depot::domain`). No promise of this trait's safety contract depends on what
     /// it returns: a wrong list only puts magazines in the wrong cache domain's stacks.
     fn topology(&self, which: Topology, buf: &mut [u8]) -> Option<usize>;
+
+    /// Reads the environment the process was started with, as the kernel keeps it
+    /// (`/proc/self/environ`: `NAME=value` entries, each ended by a NUL), into `buf` a piece
+    /// at a time, and calls `each` with every piece in order until `each` returns `false` or
+    /// the environment ends. Whether it got that far: `false` if the environment cannot be
+    /// opened or a read fails, after which the pieces passed are all there is. Called once per
+    /// process (`crate::environment`). No promise of this trait's safety contract depends on
+    /// what it reads. Without the background thread's feature, `false` at once: nothing then
+    /// reads the environment.
+    fn environment(&self, buf: &mut [u8], each: impl FnMut(&[u8]) -> bool) -> bool;
 
     /// Writes `message` to standard error and ends the process abnormally.
     fn abort(&self, message: &str) -> !;

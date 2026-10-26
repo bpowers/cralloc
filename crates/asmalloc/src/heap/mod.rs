@@ -289,7 +289,7 @@ impl<'a, O: Os, R: Routines + Copy> Bound<'a, O, R> {
     #[cold]
     #[inline(never)]
     unsafe fn rust_free_slow(self, class: SmallClass, object: NonNull<u8>) {
-        // SAFETY: passed through.
+        // SAFETY: HEAP-12; passed through.
         let seen = unsafe { self.free_slow(class, object) };
         self.after_rust_slow_path(seen);
     }
@@ -378,10 +378,10 @@ impl<'a, O: Os, R: Routines + Copy> Bound<'a, O, R> {
         // SAFETY: HEAP-01.
         let object = unsafe { NonNull::new_unchecked(ptr) };
         match SmallClass::of_nonzero_layout(layout) {
-            // SAFETY: a small block is a slot of its layout's class, and every layout that
+            // SAFETY: HEAP-13. a small block is a slot of its layout's class, and every layout that
             // describes it has that class (the fit rule), so the block is of `class`.
             Some(class) => unsafe { self.free_small(class, object) },
-            // SAFETY: the block is the caller's, described by `layout`, and not null.
+            // SAFETY: HEAP-12. the block is the caller's, described by `layout`, and not null.
             None => unsafe { self.dealloc_other(object, layout) },
         }
     }
@@ -394,7 +394,8 @@ impl<'a, O: Os, R: Routines + Copy> Bound<'a, O, R> {
     #[inline(always)]
     unsafe fn free_small(self, class: SmallClass, object: NonNull<u8>) {
         if !self.routines.push(class, object) {
-            // SAFETY: a push that misses stores nothing, so the block is still the caller's.
+            // SAFETY: HEAP-11. a push that misses stores nothing, so the block is still the
+            // caller's.
             unsafe { self.rust_free_slow(class, object) }
         }
     }
@@ -408,7 +409,7 @@ impl<'a, O: Os, R: Routines + Copy> Bound<'a, O, R> {
     #[inline(never)]
     unsafe fn dealloc_other(self, object: NonNull<u8>, layout: Layout) {
         match small(layout) {
-            // SAFETY: as in `dealloc`, the layout's small class is the block's.
+            // SAFETY: HEAP-13. as in `dealloc`, the layout's small class is the block's.
             Some(class) => unsafe { self.free_small(class, object) },
             None => {
                 // SAFETY: a layout with no small class describes a large block (GLOBAL-03),

@@ -74,3 +74,38 @@ thread alone until `grow_block` returns it. `kept <= to.size()` (HEAP-07), so th
 inside the slot, and the copy wrote only `[0, kept)` of it, before. This is the same clearing
 the general resize does for a small block (HEAP-04, "The clearing of a zeroed grow"), whose
 grant is never known to be zero and whose length is the class size.
+
+## HEAP-09: `self.realloc_other(ptr, old, new_size)` in `Bound::realloc`
+
+**Preconditions** (`realloc_other`'s: "As for `Bound::realloc`"). `ptr` is a block this heap
+handed out that the caller owns, described by `old` as for `Bound::dealloc`, given up unless
+the call returns null; `new_size` is not zero.
+
+**Proof.** The contract is the caller's word for word, and `ptr`, `old` and `new_size` are
+passed unchanged. What `realloc` did before the call changed nothing the contract speaks of:
+either the lean path was not taken, or `resize_small` returned `None`, which by its contract
+means the pop missed and nothing was copied, pushed or freed, so the caller still holds
+`ptr` as it did. (The `NonNull` made for the lean path is not passed.)
+
+## HEAP-10: the calls of the general resize, `self.resize(...)`, in `realloc_other`, `grow_block` and `shrink_block`
+
+**Preconditions** (`Bound::resize`'s). As for `Bound::dealloc` with `ptr` and `old`, except
+that the caller gives the block up only if the resize succeeds; `new` has a non-zero size.
+
+**Proof.** Each caller holds the block as `dealloc` asks, and gives it up only on success:
+
+- `realloc_other`: its contract is `realloc`'s (HEAP-09), whose block is `dealloc`'s with
+  `old` and is given up unless null is returned. It checks the two things it adds itself:
+  `ptr` is not null (`NonNull::new`, which a block never is), and `new` is a `Layout` of
+  `new_size`, not zero by the contract, and `old`'s alignment. A `None` from `resize` is
+  returned as null, which leaves the block the caller's, as `realloc`'s contract says.
+- `grow_block`: its contract is `Allocator::grow`'s for a block of this heap with `old` not
+  empty: `ptr` is currently allocated, `old` fits it (the alignment it was allocated with,
+  and a size from the one asked for to the length returned, which is `dealloc`'s
+  description), and `new.size() >= old.size()`, so `new` is not empty. On failure `grow`
+  leaves the block valid, as `resize`'s `None` does.
+- `shrink_block`: `Allocator::shrink`'s contract likewise, with `new` not empty, which its
+  only caller (`Bound::shrink`) checks before the call.
+
+In `grow_block` and `shrink_block` the lean path ran first; as in HEAP-09, it either was not
+taken or returned `None` having changed nothing.

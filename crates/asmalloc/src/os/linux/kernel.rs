@@ -139,53 +139,98 @@ fn getrandom() -> Option<u64> {
     }
 }
 
-/// Reads the whole file at `path`, a NUL-terminated string, into `buf`. The bytes read, or
-/// `None` if the file cannot be opened or read or does not fit in `buf`.
-fn read_file(path: &[u8], buf: &mut [u8]) -> Option<usize> {
-    if path.last() != Some(&0) {
-        return None;
+/// A file opened for reading, closed when dropped.
+struct ReadOnly(usize);
+
+impl ReadOnly {
+    /// Opens the file at `path`, a NUL-terminated string; `None` if it cannot be opened.
+    fn open(path: &[u8]) -> Option<ReadOnly> {
+        if path.last() != Some(&0) {
+            return None;
+        }
+        let name: Reg = path.as_ptr().cast_mut();
+        // SAFETY: KERNEL-10. openat reads the NUL-terminated string at `name`, a live slice
+        // whose last byte is the NUL, and opens a new descriptor that only this value uses.
+        let fd = result(unsafe {
+            syscall(
+                nr::OPENAT,
+                [
+                    int(AT_FDCWD),
+                    name,
+                    int(O_RDONLY | O_CLOEXEC),
+                    int(0),
+                    int(0),
+                    int(0),
+                ],
+            )
+        })
+        .ok()?;
+        Some(ReadOnly(fd.addr()))
     }
-    let name: Reg = path.as_ptr().cast_mut();
-    // SAFETY: KERNEL-10. openat reads the NUL-terminated string at `name`, a live slice whose
-    // last byte is the NUL, and opens a new descriptor that only this function uses.
-    let fd = result(unsafe {
-        syscall(
-            nr::OPENAT,
-            [
-                int(AT_FDCWD),
-                name,
-                int(O_RDONLY | O_CLOEXEC),
-                int(0),
-                int(0),
-                int(0),
-            ],
-        )
-    })
-    .ok()?
-    .addr();
-    let mut len = 0;
-    let whole = loop {
-        let Some(rest) = buf.get_mut(len..).filter(|rest| !rest.is_empty()) else {
-            break false;
-        };
-        let into: Reg = rest.as_mut_ptr();
-        // SAFETY: KERNEL-10. read writes at most `rest.len()` bytes to `into`, the start of a
-        // live, exclusively borrowed slice of that length, from the descriptor opened above.
+
+    /// Reads the next bytes into `into`: how many, zero at the end of the file, `None` on an
+    /// error.
+    fn read(&self, into: &mut [u8]) -> Option<usize> {
+        let at: Reg = into.as_mut_ptr();
+        // SAFETY: KERNEL-10. read writes at most `into.len()` bytes to `at`, the start of a
+        // live, exclusively borrowed slice of that length, from the descriptor this value
+        // owns.
         let read = result(unsafe {
             syscall(
                 nr::READ,
-                [int(fd), into, int(rest.len()), int(0), int(0), int(0)],
+                [int(self.0), at, int(into.len()), int(0), int(0), int(0)],
             )
         });
-        match read {
-            Ok(n) if n.addr() == 0 => break true,
-            Ok(n) => len += n.addr().min(rest.len()),
-            Err(_) => break false,
+        read.ok().map(|n| n.addr().min(into.len()))
+    }
+}
+
+impl Drop for ReadOnly {
+    fn drop(&mut self) {
+        // SAFETY: KERNEL-10. close releases the descriptor this value opened and owns, which
+        // nothing uses after it.
+        let _ = unsafe { int_call(nr::CLOSE, self.0, 0, 0) };
+    }
+}
+
+/// Reads the whole file at `path`, a NUL-terminated string, into `buf`. The bytes read, or
+/// `None` if the file cannot be opened or read or does not fit in `buf`.
+fn read_file(path: &[u8], buf: &mut [u8]) -> Option<usize> {
+    let file = ReadOnly::open(path)?;
+    let mut len = 0;
+    loop {
+        let rest = buf.get_mut(len..).filter(|rest| !rest.is_empty())?;
+        match file.read(rest)? {
+            0 => return Some(len),
+            n => len += n,
         }
+    }
+}
+
+/// [`Os::environment`] with the background thread's feature: the kernel's copy of the
+/// environment the process was started with.
+#[cfg(feature = "background")]
+fn environment(buf: &mut [u8], mut each: impl FnMut(&[u8]) -> bool) -> bool {
+    let Some(file) = ReadOnly::open(b"/proc/self/environ\0") else {
+        return false;
     };
-    // SAFETY: KERNEL-10. close releases the descriptor opened above, which nothing else holds.
-    let _ = unsafe { int_call(nr::CLOSE, fd, 0, 0) };
-    whole.then_some(len)
+    loop {
+        match file.read(buf) {
+            None => return false,
+            Some(0) => return true,
+            Some(n) => {
+                if !each(buf.get(..n).unwrap_or(&[])) {
+                    return true;
+                }
+            }
+        }
+    }
+}
+
+/// [`Os::environment`] without the background thread: nothing reads it.
+#[cfg(not(feature = "background"))]
+fn environment(_: &mut [u8], _: impl FnMut(&[u8]) -> bool) -> bool {
+    false
 }
 
 /// Appends `bytes` to `path` at `at`; `false` if they do not fit.
@@ -538,6 +583,10 @@ unsafe impl Os for LinuxOs {
             return None;
         }
         read_file(&path[..at], buf)
+    }
+
+    fn environment(&self, buf: &mut [u8], each: impl FnMut(&[u8]) -> bool) -> bool {
+        environment(buf, each)
     }
 
     fn abort(&self, message: &str) -> ! {
