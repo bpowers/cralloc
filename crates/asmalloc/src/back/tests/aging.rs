@@ -56,9 +56,10 @@ fn churn<O: Os>(back: &Back<'_, O>, class: Class, churn: NonNull<u8>) {
 }
 
 /// Slots freed together, in a region that a free of another slot keeps young every fine step,
-/// go back once they have been free for the hold, a slot a heartbeat (the look's bound in
-/// bytes), and not before; the region's stamp stays young throughout, so the hold of the region
-/// alone would never have returned them.
+/// go back once they have been free for the hold, at the first walk after that (a walk starts
+/// once a hold, so within two holds of the free), a slot a heartbeat (the look's bound in bytes),
+/// and not before; the region's stamp stays young throughout, so the hold of the region alone
+/// would never have returned them.
 #[test]
 #[cfg_attr(miri, ignore)]
 fn old_free_slots_go_back_while_frees_keep_their_region_young() {
@@ -75,7 +76,7 @@ fn old_free_slots_go_back_while_frees_keep_their_region_young() {
         back.free(*b, class);
     }
     let mut first = None;
-    for step in 0..2 * HOLD_STEPS {
+    for step in 0..2 * HOLD_STEPS + 16 {
         churn(&back, class, blocks[0]);
         let before = back.retained_large();
         beat(&back, os);
@@ -156,23 +157,37 @@ fn the_walk_reaches_old_slots_below_young_ones_past_its_budget() {
             word,
             AgeWalk {
                 cursor: 0,
-                due: count + HOLD_STEPS - 3
+                began: count
             }
         );
-        let idle = walk_aged(&host, region, count + 1, HOLD_STEPS, limit, 256);
-        assert!(
-            idle.done && !idle.walked,
-            "walked again before anything could be old"
+        let idle = walk_aged(
+            &host,
+            region,
+            count + HOLD_STEPS - 2,
+            HOLD_STEPS,
+            limit,
+            256,
         );
-        assert!(walk_aged(&host, region, word.due, HOLD_STEPS, limit, 256).walked);
+        assert!(idle.done && !idle.walked, "walked again within the hold");
+        assert!(
+            walk_aged(
+                &host,
+                region,
+                count + HOLD_STEPS - 1,
+                HOLD_STEPS,
+                limit,
+                256
+            )
+            .walked
+        );
     }
 }
 
 /// A stamp keeps the count's low 28 bits and reads as its true age less a multiple of 2^28:
 /// never older than it is, so a stamp left for a wrap of its bits is a keep of at most two
 /// holds, never a slot returned early. Up to a hold ahead of the count is a free that read the
-/// count after the look did. A walk is due under way, at its due count, and from a due no walk
-/// wrote (more than a hold ahead).
+/// count after the look did. A walk may start a hold after the last began, and one under way
+/// may always go on.
 #[test]
 fn stamps_age_by_their_bits_and_walks_are_due_by_their_count() {
     let h = HOLD_STEPS;
@@ -204,16 +219,37 @@ fn stamps_age_by_their_bits_and_walks_are_due_by_their_count() {
         assert_eq!(until_aged(freed, at(2), 2), 0);
         assert_eq!(until_aged(freed, at(1), 2), 1);
         // Walks.
-        let due = |due: u32, cursor: u32| walk_due(AgeWalk { cursor, due }, count);
-        assert!(due(count, 0));
-        assert!(due(at(10), 7), "under way");
-        assert!(!due(at(1), 0) && !due(at(h), 0));
-        assert!(due(at(h + 1), 0), "a due no walk wrote");
-        assert!(due(count.wrapping_sub(1), 0), "past");
+        let due = |began: u32, cursor: u32| walk_due(AgeWalk { cursor, began }, count, h);
+        assert!(
+            !due(count, 0) && !due(count.wrapping_sub(h - 2), 0),
+            "within the hold"
+        );
+        assert!(due(count.wrapping_sub(h - 1), 0) && due(count.wrapping_sub(5 * h), 0));
+        assert!(due(count, 7), "under way");
+        assert!(
+            due(at(1), 0),
+            "a start the count has not reached reads as long ago"
+        );
+        // `maintain`'s shorter hold in a silence.
+        assert!(walk_due(
+            AgeWalk {
+                cursor: 0,
+                began: count
+            },
+            at(1),
+            2
+        ));
     }
     assert!(
-        walk_due(AgeWalk { cursor: 0, due: 0 }, 77),
-        "all zero is due"
+        walk_due(
+            AgeWalk {
+                cursor: 0,
+                began: 0
+            },
+            h - 1,
+            h
+        ),
+        "never walked"
     );
 }
 

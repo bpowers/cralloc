@@ -373,10 +373,11 @@ fn a_size_word_and_a_walk_word_round_trip() {
     assert!(zero.size == 0 && !zero.huge && !zero.unwritten && !zero.outgrown && zero.freed == 0);
     let walk = AgeWalk {
         cursor: kani::any(),
-        due: kani::any(),
+        began: kani::any(),
     };
     assert!(AgeWalk::unpack(walk.pack()) == walk);
-    assert!(super::hold::walk_due(AgeWalk::unpack(0), kani::any()));
+    let zero = AgeWalk::unpack(0);
+    assert!(zero.cursor == 0 && zero.began == 0);
 }
 
 /// A free slot's stamp never reads older than it is. Freed at fine count `freed` and looked at
@@ -400,26 +401,22 @@ fn a_stamp_never_reads_older_than_it_is() {
     }
 }
 
-/// A walk that wrote its due `wait` steps on, at most the hold, is not due before it and is
-/// due at it, unless the due wrapped to zero, which is due at once; one under way is always
-/// due.
+/// A young region's walk starts at most once a hold: one that began at `began` may not start
+/// again before `steps - 1` have passed, may then or later, and one under way may always go
+/// on.
 #[kani::proof]
-fn a_walk_is_due_at_the_count_it_said() {
+fn a_walk_starts_at_most_once_a_hold() {
     use super::hold::walk_due;
     use super::layout::AgeWalk;
     use super::policy::HOLD_STEPS;
-    let (count, wait, before): (u32, u32, u32) = (kani::any(), kani::any(), kani::any());
-    kani::assume(wait <= HOLD_STEPS && before < wait && count.wrapping_add(wait) != 0);
-    let walk = AgeWalk {
-        cursor: 0,
-        due: count.wrapping_add(wait),
-    };
-    assert!(!walk_due(walk, count.wrapping_add(before)));
-    assert!(walk_due(walk, count.wrapping_add(wait)));
+    let (began, since, steps): (u32, u32, u32) = (kani::any(), kani::any(), kani::any());
+    kani::assume(steps >= 1 && steps <= HOLD_STEPS);
+    let walk = AgeWalk { cursor: 0, began };
+    assert!(walk_due(walk, began.wrapping_add(since), steps) == (since + 1 >= steps));
     let under_way = AgeWalk {
         cursor: kani::any(),
         ..walk
     };
     kani::assume(under_way.cursor != 0);
-    assert!(walk_due(under_way, kani::any()));
+    assert!(walk_due(under_way, kani::any(), steps));
 }

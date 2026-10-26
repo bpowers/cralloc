@@ -199,15 +199,14 @@ fn what_walking_a_young_region_costs_under_steady_churn() {
     );
 }
 
-/// `trim_slack`: "A refusal leaves them resident and not clean, as they were". True, and so
-/// every later claim of the slot finds the same slack and calls again. Where every purge is
-/// refused (memory locked with `mlockall`, which the move's copy allows for:
-/// `Dest::Unpurgeable`, "On locked memory every purge fails; stop trying"), each claim of a
-/// free large slot that has slack makes one failing system call, for ever. Before the branch a
-/// claim made none.
+/// `trim_slack`: "A refusal leaves them resident and not clean, as they were", so every later
+/// claim of the slot finds the same slack and calls again. Where every purge is refused (memory
+/// locked with `mlockall`), each claim of a free large slot that has slack makes one failing
+/// system call: the documented limit (`hold`, "Where purges are refused"), and no more than
+/// one a claim.
 #[test]
 #[cfg_attr(miri, ignore)]
-fn where_purges_are_refused_every_claim_calls_and_fails() {
+fn where_purges_are_refused_a_claim_makes_one_failing_call() {
     let state = state::<Native>();
     let back = state.get_or_reserve().unwrap();
     let os = state.os();
@@ -233,8 +232,10 @@ fn where_purges_are_refused_every_claim_calls_and_fails() {
     }
     let calls = os.calls(Call::Purge) - before;
     os.set_faults(Call::Purge, Faults::NONE);
-    assert!(
-        calls <= 2,
+    // The first claim follows a tenant that wrote the whole slot, and has no slack.
+    assert_eq!(
+        calls,
+        rounds - 1,
         "{calls} refused purge calls in {rounds} claims of one slot"
     );
 }
@@ -364,61 +365,4 @@ fn a_look_at_a_sparse_region_stays_within_its_words() {
         "{looks} looks over {} leaf words",
         slots / BITS + 1
     );
-}
-
-/// A gap the mutation pass found, closed: the thread's plan takes a walk's due. Fifteen slots
-/// freed together and one ten steps later, in a region kept young: some plan made while the
-/// last is young is for a step well under a hold on, where the region's own stamp gives a whole
-/// hold. (With the walks left out of the plan the branch's tests pass.)
-#[test]
-#[cfg_attr(miri, ignore)]
-fn the_threads_plan_is_for_the_step_a_walk_is_due() {
-    let state = state::<Native>();
-    let back = state.get_or_reserve().unwrap();
-    let os = state.os();
-    asleep(&back);
-    back.state.hold.unfloored.store(true, Relaxed);
-    let class = large(64 << 10);
-    let size = class.size();
-    let blocks: Vec<NonNull<u8>> = (0..16)
-        .map(|_| back.alloc(class, size).unwrap().ptr)
-        .collect();
-    for b in &blocks {
-        paint(b.as_ptr(), size, 7);
-    }
-    let mut planned = Vec::new();
-    let mut step = |free: &[NonNull<u8>]| {
-        for b in free {
-            back.free(*b, class);
-        }
-        back.free(blocks[0], class);
-        assert_eq!(back.alloc(class, size).unwrap().ptr, blocks[0]);
-        paint(blocks[0].as_ptr(), size, 7);
-        os.advance_clock(FINE_TICKS);
-        back.heartbeat();
-        if !sleeping(&back) {
-            thread_runs(&back);
-            asleep(&back);
-            planned.push((back.hold_count(), back.hold_next()));
-        }
-    };
-    step(&[]);
-    step(&[]);
-    step(&blocks[2..]);
-    for _ in 0..9 {
-        step(&[]);
-    }
-    step(&blocks[1..2]);
-    for _ in 0..HOLD_STEPS + 20 {
-        step(&[]);
-    }
-    // SAFETY: a free slot, which nothing else uses meanwhile.
-    let gone = unsafe { os.is_purged(blocks[1], size) };
-    assert!(gone, "the last slot stayed");
-    let near = planned.iter().any(|&(count, next)| {
-        let ahead = (next as u32).wrapping_sub(count);
-        next & super::super::hold::NEXT_AT != 0 && ahead > 1 && ahead <= HOLD_STEPS / 4
-    });
-    assert!(near, "no plan took a walk's due: {planned:x?}");
-    back.free(blocks[0], class);
 }

@@ -448,16 +448,14 @@ const _: () = assert!(Recorded::SIZE as usize >= 1 << 32);
 
 /// Where the hold's walk of a young large region by its slots' own ages stands (`hold`): one
 /// header word, written only by the hold's looks, with a compare-and-swap against what the look
-/// read. All zero is a region never walked, whose first walk is due.
+/// read. All zero is a region never walked.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(crate) struct AgeWalk {
     /// One past the next slot the walk looks at, which goes down from the watermark; zero when
     /// no walk is under way.
     pub(crate) cursor: u32,
-    /// With no walk under way, the fine count at which the next is due: when the soonest free
-    /// slot the last walk found too young will be old enough. While one is under way, the same
-    /// for the slots it has found so far.
-    pub(crate) due: u32,
+    /// The fine count at which the last walk, or the one under way, began.
+    pub(crate) began: u32,
 }
 
 impl AgeWalk {
@@ -465,13 +463,13 @@ impl AgeWalk {
     pub(crate) const fn unpack(word: u64) -> AgeWalk {
         AgeWalk {
             cursor: word as u32,
-            due: (word >> 32) as u32,
+            began: (word >> 32) as u32,
         }
     }
 
     #[inline(always)]
     pub(crate) const fn pack(self) -> u64 {
-        self.cursor as u64 | (self.due as u64) << 32
+        self.cursor as u64 | (self.began as u64) << 32
     }
 }
 
@@ -1227,10 +1225,16 @@ mod tests {
         assert_eq!(Recorded::unpack(0).freed, 0);
         let walk = AgeWalk {
             cursor: 77,
-            due: u32::MAX,
+            began: u32::MAX,
         };
         assert_eq!(AgeWalk::unpack(walk.pack()), walk);
-        assert_eq!(AgeWalk::unpack(0), AgeWalk { cursor: 0, due: 0 });
+        assert_eq!(
+            AgeWalk::unpack(0),
+            AgeWalk {
+                cursor: 0,
+                began: 0
+            }
+        );
     }
 
     #[test]
