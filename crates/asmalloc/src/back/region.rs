@@ -1023,7 +1023,10 @@ pub(crate) fn restore_resident<H: Host>(host: &H, region: RegionId, unit: Unit) 
             page += 1;
             continue;
         }
+        // The page just seen clean starts the run, whatever a second read of it would say: a
+        // claim may clear its bit meanwhile, and a run must not come out empty.
         let start = page;
+        page += 1;
         while page < unit.end && clean(page) {
             page += 1;
         }
