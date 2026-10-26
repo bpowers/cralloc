@@ -50,3 +50,13 @@ required-features = ["background"]
 
 [lints]
 workspace = true
+
+[[test]]
+name = "thread_stack"
+harness = false
+required-features = ["background"]
+
+[[test]]
+name = "environment"
+# The switch is the background thread's.
+required-features = ["background"]

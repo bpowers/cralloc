@@ -1029,7 +1029,7 @@ impl<'a, O: Os> Back<'a, O> {
         zeroed: bool,
         why: Move,
     ) {
-        // SAFETY: the caller's promise, passed on.
+        // SAFETY: BACK-CLASS-07. the caller's promise, passed on.
         unsafe { self.move_large_with(from, to, len, zeroed, why, || {}) }
     }
 

@@ -75,6 +75,7 @@ pub use spare::{MAX_SPARES, SPARE_BUDGET, spare_limit};
 pub(crate) use stack::Stack;
 
 use crate::classes::{MagazineSize, SMALL_COUNT, SmallClass};
+use crate::environment::{Choice, Switch};
 use crate::front::sync::{AtomicU64, AtomicUsize};
 use crate::front::{Cpu, Routines, Slab};
 use crate::lined::{LINE, Lined, lines};
@@ -308,6 +309,9 @@ struct Common {
     /// Whether a generation has been drawn in this process or an ancestor, and whether this
     /// process is a fork child (`generation.rs`). Ordinary memory, inherited by a fork.
     lineage: AtomicU64,
+    /// What the environment asks of the background thread, read once per process
+    /// (`crate::environment`). Ordinary memory, inherited by a fork.
+    switch: Switch,
 }
 
 // Each group of words on lines of its own (`crate::lined`): a pool is a line per class, a line
@@ -349,6 +353,7 @@ impl Depot {
                 status: AtomicU64::new(0),
                 cpus: AtomicUsize::new(0),
                 lineage: AtomicU64::new(0),
+                switch: Switch::new(),
             }),
             owing_domains: Lined::new(AtomicU64::new(0)),
             held_domains: Lined::new(AtomicU64::new(0)),
@@ -399,6 +404,12 @@ impl Depot {
     #[cfg(test)]
     pub(crate) fn refused_magazines(&self) -> usize {
         self.refused.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// What the environment the process started with asks of the background thread, read
+    /// through `os` if no slow path has read it yet (`crate::environment`).
+    pub(crate) fn background_choice<O: Os>(&self, os: &O) -> Choice {
+        self.common.switch.get(os)
     }
 
     /// How many cache domains the stacks are kept for: 1 until start-up has found more.

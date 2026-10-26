@@ -74,8 +74,9 @@ process light.
   interface, which has a ledger entry.
 - The allocator crate has no dependencies, not even on a C library: it makes its own system
   calls. The exception is the default `background` feature: it creates the background
-  thread through the C library, so that the library knows the thread exists, and reads
-  the environment with it. Nothing else may call a C library function, and a build without
+  thread through the C library, so that the library knows the thread exists, and on glibc
+  asks it for the loaded modules' thread-local sizes, to size that thread's stack
+  (`dl_iterate_phdr`). Nothing else may call a C library function, and a build without
   default features refers only to what it must share with the library (`errno`, the rseq
   offset) and what the compiler emits (`memcpy`, `memset`). Test, fuzz and benchmark crates
   may depend on what they need.
@@ -86,6 +87,9 @@ process light.
   for the routines) or an entry in the safety ledger at
   `docs/safety/<crate>/<file>-safety.md`, named after the source file without `.rs`. An
   entry gives the preconditions, the invariants that make them hold, and a proof on paper.
+  The block's comment cites the entry's ID or names the Kani harness, and the gate fails on
+  one that does neither; an `unsafe fn` or `unsafe trait` is a contract, and needs a
+  `# Safety` section instead.
   A fresh agent that did not write the code reviews entries adversarially and records the
   commit it reviewed in the file (`Reviewed: <commit>`). Changing a block means updating its
   entry; `scripts/ledger-check` lists the files that have changed since their review, and

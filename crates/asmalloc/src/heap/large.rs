@@ -280,7 +280,7 @@ impl<O: Os> Heap<O> {
     /// which fits it.
     unsafe fn resize_large_in_place(&self, ptr: NonNull<u8>, new: Layout) -> Grant {
         if let Some(back) = self.back() {
-            // SAFETY: the block is the caller's and `new` fits it; a resize gives up only what
+            // SAFETY: HEAP-14. the block is the caller's and `new` fits it; a resize gives up only what
             // lies past the new size.
             unsafe { back.resize_in_place(ptr, new.size()) };
         }
@@ -319,7 +319,7 @@ impl<O: Os, R: Routines + Copy> Bound<'_, O, R> {
     ///
     /// As for [`Heap::free_large`].
     pub(crate) unsafe fn free_large_slow(self, ptr: NonNull<u8>) {
-        // SAFETY: the caller gives up the large block.
+        // SAFETY: HEAP-15. the caller gives up the large block.
         unsafe { self.heap().free_large(ptr) };
         self.heartbeat();
     }
@@ -373,7 +373,7 @@ impl<O: Os, R: Routines + Copy> Bound<'_, O, R> {
                     zeroed: false,
                 });
             }
-            // SAFETY: the block is the caller's, large, and `new` fits it (`in_place`).
+            // SAFETY: HEAP-16. the block is the caller's, large, and `new` fits it (`in_place`).
             return Some(unsafe { heap.resize_large_in_place(ptr, new) });
         }
         // Growing a large object out of its block: take headroom. A zeroed grow takes none, so

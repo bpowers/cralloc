@@ -36,6 +36,6 @@ pub unsafe extern "C" fn free(ptr: *mut c_void) {
 ///
 /// As for [`super::free`]. A wrong `size` is safe.
 pub unsafe extern "C" fn free_sized(ptr: *mut c_void, size: usize) {
-    // SAFETY: as for `free`.
+    // SAFETY: ROUTINES-01, as for `free`.
     unsafe { centry::c_free_sized(ptr.expose_provenance(), size) }
 }

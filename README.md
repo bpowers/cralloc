@@ -39,13 +39,14 @@ The heap returns idle memory and empties idle caches on its slow paths, so a pro
 threads all stay inside their caches would keep what it held when it went quiet. A
 background thread covers that. It starts by itself once the heap holds tens of megabytes of
 free memory and the program has created a thread of its own, and it parks while the process
-is quiet. `ASMALLOC_BACKGROUND=0` in the environment turns it off, and
+is quiet. `ASMALLOC_BACKGROUND=0` in the environment the program is started with turns it
+off (a later `setenv` does not), and
 `Asmalloc::start_background()` starts it at once. A program that would rather drive the work
 itself calls `Asmalloc::maintain()` from a timer of its own, as the `asmalloc-tokio` crate
 does from a task, and then gets no thread. A program with one thread is never given a
-second: it calls `maintain` or `collect`, or starts the thread itself. Creating the thread
-is the one thing the allocator asks of the C library, and a build without default features
-leaves it out.
+second: it calls `maintain` or `collect`, or starts the thread itself. Creating the thread,
+with a stack large enough for the program's thread-local data, is the one thing the
+allocator asks of the C library, and a build without default features leaves it out.
 
 With the preload library the thread is created when the program creates its first thread.
 `ASMALLOC_BACKGROUND=0` turns it off, and any other value starts it before `main`.
