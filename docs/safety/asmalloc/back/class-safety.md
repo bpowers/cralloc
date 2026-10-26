@@ -20,10 +20,13 @@ move's caller gave up (BACK-CLASS-03), its bit still clear, and the move has ret
 pages behind its copy, so nothing reads or needs the slot's memory any more.
 
 A slot released resident is charged its pages whose clean bit is clear (`region::charge`);
-the free itself writes no clean bit. A clean bit says the page has not been written since it
-was carved or last purged: only a purge, a range the holder returned whole (a shrink's tail,
-or a piece behind a move's copy before the move frees the slot; `region::mark_clean`) and the
-carve of a slot (`region::mark_fresh`, for the pages past its block, which nothing has
+the free itself writes no clean bit. Before it releases the slot it writes the slot's size
+word, as its holder, with the fine count in `Recorded::freed` (`Back::stamp_slot`), which
+changes no contents and which the hold's walk reads only as a hint (BACK-REGION-01, "A second
+caller"). A clean bit says the page has not been written since it was carved or last purged:
+only a purge, a range the holder returned whole (a shrink's tail, a piece behind a move's
+copy before the move frees the slot, or the slack a claim trims, BACK-CLASS-07;
+`region::mark_clean`) and the carve of a slot (`region::mark_fresh`, for the pages past its block, which nothing has
 written) set one, each by the slot's holder (only the holder of every slot a bit describes
 writes it); the claim (`region::settle_slot`) clears the bits under
 what the new tenant may write, and so does any change that widens it (`region::cover`).
@@ -392,3 +395,84 @@ returning a slot whose contents nobody needs; a page reported resident leads to 
 free. An error from the call (`Err`) is taken as "not left unwritten", an ordinary free.
 
 Reviewed: 415b07e
+
+## BACK-CLASS-07: `region::purge_part(...)` in `trim_slack`
+
+**Block.** `region::purge_part(host, region, slot, from, len)` in `Back::trim_slack`, the trim
+at the claim of a free large slot: the top `policy::PURGE_STEP_PAGES` at most of the pages past
+both the new block's extent and the extent of the slot's last tenant that are not clean.
+
+**Preconditions** (`region::purge_part`). The caller holds the slot (its free bit is clear on
+the caller's behalf), nothing reads or writes the range during the call, and nothing in it is
+needed after.
+
+**Where it is called.** Only from `Back::alloc_at`, for a large class, after `tree::claim`
+cleared the slot's free bit for this thread and `region::settle_slot` settled it, and before
+`alloc_at` returns the block, so before anyone but this thread knows the slot is taken. The
+`slack` it is given is the `Settled::slack` that `settle_slot` found for this slot in the same
+call, unchanged; `trim_slack` raises its start to at most a step below its end, which only
+shrinks it. Between the two, `alloc_at` writes the slot's size word and may take back its
+huge-page advice and clear clean bits under the block (`region::unadvise`, `region::cover`),
+none of which touches the slot's memory.
+
+**Proof.**
+
+1. *The caller holds the slot.* `tree::claim` cleared the slot's bit with a compare-and-swap
+   against a value with it set, so this thread holds it until it sets it again (the argument
+   of BACK-REGION-01, step 1); nothing in `alloc_at` sets it. No purge can claim it meanwhile,
+   and no allocation can be handed it. The program does not know the block yet.
+2. *The range lies inside the slot, past everything the new block may write.* `settle_slot`
+   finds `slack` among the pages of `Layout::slot_unit(slot)`, the pages wholly inside the
+   slot (a large slot is whole pages: Kani, `a_large_slot_is_whole_pages`), at or past
+   `keep_from(layout, slot, unit, size, last)`, which is at least
+   `extent_of(layout, slot, unit, size, huge)`: the page past the slot's start plus its stagger
+   plus `size`, rounded up to a page (to a huge page if the slot is still advised, which only
+   rounds up), clamped to the unit. The block `alloc_at` hands out starts at the slot's start
+   or at its stagger, and the caller may write its usable size, `size` from that start rounded
+   up to the end of its page (`usable`), so its last writable byte lies below that extent's
+   page. The same holds for every later resize in place, which records the new size and clears
+   the clean bits under it (`region::cover`) before the block may use it; a grow that reaches
+   trimmed pages finds them zero, which `realloc` leaves indeterminate. `from` is
+   `slack.start` in bytes less the slot's offset, at least zero since `slack.start` is at least
+   the unit's first page, and `from + len` is `slack.end` in bytes less that offset, at most the
+   slot's size; `purge_part` checks that too, and works on a subrange when the slot is advised
+   (BACK-REGION-03).
+3. *Nothing reads or writes the range, and nothing in it is needed.* The slot was free: its
+   last tenants gave up its pages at their frees, and the allocator keeps no state in object
+   memory. The new tenant's block does not reach the range (step 2), and it has not been handed
+   out. A claim that reports the slot zero has every page clean (the zero bit is set only with
+   every page clean, BACK-REGION-01, step 3), so `settle_slot` finds no slack and nothing is
+   trimmed; and the trimmed pages read as zero anyway.
+4. *The bits.* When `purge_part` says the whole range went back, the holder marks those pages
+   clean (`region::mark_clean`): it holds the one slot they lie in, which is the rule clean
+   bits have everywhere, and a clean bit over them is true until a widening of the block
+   clears it (step 2). No zero bit is written: the slot is held. When the call is refused,
+   wholly or in part, nothing is marked, and the pages stay not clean, so the block's free
+   charges them, as it charged them before this rule.
+
+**What a double free can do here.** As for any claim: if the program frees the slot's last
+tenant a second time after this claim, the release finds the bit clear and sets it, and another
+thread may claim the slot while this one trims it. The other claimer's block may then reach
+into the range this thread returns, and its contents there read as zero. That is the program's
+double free corrupting a block, as it would through the free alone (BACK-CLASS-01, the second
+case); the trim adds the zeroing, of pages the first claimer would not write.
+
+**Accounting, not safety.** The claim takes the slot's whole charge off the retained count,
+as before the trim: the pages under the block are live, the top step of the slack goes back,
+and the rest of the slot's resident pages stay resident and in no count until the block's
+free charges them again, or the slot's next claim trims another step.
+
+**Tests.** `back::tests::slack`: a claim returns what the tenants before the last left and
+keeps the last tenant's room, and the count follows; a trim returns a step at most, from the
+top, and the next claim the next step; a hot slot's resident part no longer climbs over two
+hundred tenants of random sizes; a slot advised for huge pages, or left
+unwritten, has nothing to trim and the claim makes no call; a kept outgrown slot keeps the
+room its block used and its count falls as before; a refused trim, whole or half done,
+leaves its pages not clean, charged by the free and trimmed by the next claim.
+`large_path_review::the_claim_counts_and_clears_what_two_passes_did` checks the slack the pass
+finds against direct arithmetic over random clean bits and last tenants. The random runs of
+`charge_review` (clean bits true, the count equal to the clean bits, every zero slot zero,
+with purges and advice failing) and the exploration `an_age_walk_races_large_tenants`, whose
+tenants trim (`TestHost::purge` fails a schedule in which a purger does not hold every slot it
+returns).
+

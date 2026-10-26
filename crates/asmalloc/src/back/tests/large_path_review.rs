@@ -97,11 +97,36 @@ fn the_claim_counts_and_clears_what_two_passes_did() {
                     class.size() - clean * page,
                     "{size} slot {slot} trial {trial}: the charge"
                 );
-                let settled = region::settle_slot(&host, region, slot, asked);
+                // The last tenant's size, and so what the claim keeps: the slack is the pages
+                // past both extents that were not clean, from the lowest to the highest.
+                let last = super::super::layout::Recorded {
+                    size: match rng.below(4) {
+                        0 => 0,
+                        1 => class.size(),
+                        _ => rng.below(class.size() + 1),
+                    },
+                    huge: false,
+                    unwritten: false,
+                    outgrown: false,
+                    freed: 0,
+                };
+                let kept = layout.slot_bytes(slot) + layout.stagger(slot) + last.size;
+                let keep = (kept.div_ceil(page) as u32)
+                    .clamp(unit.start, unit.end)
+                    .max(extent);
+                let dirty: Vec<u32> = (keep..unit.end).filter(|&p| !marked(&before, p)).collect();
+                let slack = dirty.first().map(|&low| (low, dirty[dirty.len() - 1] + 1));
+                let settled = region::settle_slot(&host, region, slot, asked, Some(last));
                 assert_eq!(
                     (settled.resident, settled.revived, settled.zeroed),
                     (class.size() - clean * page, 0, 0),
                     "{size} slot {slot} trial {trial} for {asked}: {before:x?}"
+                );
+                assert_eq!(
+                    settled.slack.map(|u| (u.start, u.end)),
+                    slack,
+                    "{size} slot {slot} trial {trial} for {asked} after {}: {before:x?}",
+                    last.size
                 );
                 let after: Vec<u64> = (0..layout.clean_words()).map(|w| word(w).load()).collect();
                 for p in 0..layout.region_pages() {

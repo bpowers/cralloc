@@ -1406,8 +1406,9 @@ struct Room {
 /// purge `pages` more: its top `pages`, starting at a multiple of `granule` pages, or all of it
 /// if what would be left below is shorter than `min_run` (that tail would wait for a pass that
 /// takes short runs). The cursor then names the page the piece began at, and the next step's
-/// unit (`Layout::unit_below`) is the rest of the slot below it.
-fn piece(unit: Unit, pages: u32, min_run: u32, granule: u32) -> Unit {
+/// unit (`Layout::unit_below`) is the rest of the slot below it. The hold's walk of a young
+/// region's free slots cuts its pieces the same way (`hold::walk_aged`).
+pub(super) fn piece(unit: Unit, pages: u32, min_run: u32, granule: u32) -> Unit {
     if unit.end - unit.start <= pages {
         return unit;
     }

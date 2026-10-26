@@ -415,7 +415,7 @@ fn the_walk_gets_past_live_slots_across_looks() {
     let count = back.hold_count().wrapping_add(HOLD_STEPS);
     let mut calls = 0;
     loop {
-        let (read, purged, done) = back.hold_region(
+        let (read, purged, done, _) = back.hold_region(
             region.index(),
             count,
             usize::MAX,
@@ -622,7 +622,7 @@ fn a_region_larger_than_a_looks_budget_loses_its_stamp() {
     // Looks of 4 words on a region of 12 slots, as looks of 256 words on one of more than 256.
     let (mut laps, mut words) = (0, 0);
     for _ in 0..1000 {
-        let (read, _, done) = back.hold_region(
+        let (read, _, done, _) = back.hold_region(
             region.index(),
             count,
             usize::MAX,

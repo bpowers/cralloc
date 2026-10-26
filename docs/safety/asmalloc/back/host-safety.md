@@ -30,7 +30,9 @@ that conflicts with a shared reference.
 1. *In bounds.* `at = metadata(region) + 8 * word`, made by `Space::metadata_at(region, 8 *
    word)`. Callers pass only word numbers that the
    layout names: `tree_word(level, index)` with `index` below that level's count, for a
-   large class `header_word()` and the word after it (`grow` and `hints`, words 0 and 1),
+   large class its header words, 0 to `HEADER_WORDS - 1` (`header_word()` and the word after
+   it, `grow` and `hints`; the hold's stamp, `hold_word()`; and the hold's walk by slot ages,
+   `age_word()`), which `layouts_fit` places before the first summary word,
    `clean_word(w)` with `w` below the clean count, `zero_word(w)`
    with `w` below the leaf count, and `size_word(slot)` with `slot` below the slot count (a
    slot `Plan::slot_at` accepted). The layout a host holds is the one worked out: a layout read

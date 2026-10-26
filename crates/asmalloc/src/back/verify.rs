@@ -352,3 +352,74 @@ fn a_decay_goal_is_a_quarter_or_the_floor() {
         assert!(goal == retained);
     }
 }
+
+/// A large slot's size word round-trips with every size a slot can hold, every stamp and every
+/// flag, and the region's walk word round-trips; all zero is a size word with nothing set and
+/// a walk that is due and not under way.
+#[kani::proof]
+fn a_size_word_and_a_walk_word_round_trip() {
+    use super::layout::{AgeWalk, Recorded, STAMP_MASK};
+    let size: usize = kani::any();
+    kani::assume(size <= 1 << 32);
+    let recorded = Recorded {
+        size,
+        huge: kani::any(),
+        unwritten: kani::any(),
+        outgrown: kani::any(),
+        freed: kani::any::<u32>() & STAMP_MASK,
+    };
+    assert!(Recorded::unpack(recorded.pack()) == recorded);
+    let zero = Recorded::unpack(0);
+    assert!(zero.size == 0 && !zero.huge && !zero.unwritten && !zero.outgrown && zero.freed == 0);
+    let walk = AgeWalk {
+        cursor: kani::any(),
+        due: kani::any(),
+    };
+    assert!(AgeWalk::unpack(walk.pack()) == walk);
+    assert!(super::hold::walk_due(AgeWalk::unpack(0), kani::any()));
+}
+
+/// A free slot's stamp never reads older than it is. Freed at fine count `freed` and looked at
+/// `age` steps later, at any count and with any hold up to the hold's own: the slot is old only
+/// if it has really been free for the hold, it waits at most the hold, and until its stamp's
+/// bits wrap it reads exactly its age, so it goes back as soon as it is old.
+#[kani::proof]
+fn a_stamp_never_reads_older_than_it_is() {
+    use super::hold::until_aged;
+    use super::layout::STAMP_MASK;
+    use super::policy::HOLD_STEPS;
+    let (freed, age, steps): (u32, u32, u32) = (kani::any(), kani::any(), kani::any());
+    kani::assume(steps >= 1 && steps <= HOLD_STEPS);
+    let left = until_aged(freed & STAMP_MASK, freed.wrapping_add(age), steps);
+    assert!(left <= steps);
+    if left == 0 {
+        assert!(age >= steps);
+    }
+    if age < STAMP_MASK - HOLD_STEPS {
+        assert!(left == steps.saturating_sub(age) || (age == 0 && left == steps));
+    }
+}
+
+/// A walk that wrote its due `wait` steps on, at most the hold, is not due before it and is
+/// due at it, unless the due wrapped to zero, which is due at once; one under way is always
+/// due.
+#[kani::proof]
+fn a_walk_is_due_at_the_count_it_said() {
+    use super::hold::walk_due;
+    use super::layout::AgeWalk;
+    use super::policy::HOLD_STEPS;
+    let (count, wait, before): (u32, u32, u32) = (kani::any(), kani::any(), kani::any());
+    kani::assume(wait <= HOLD_STEPS && before < wait && count.wrapping_add(wait) != 0);
+    let walk = AgeWalk {
+        cursor: 0,
+        due: count.wrapping_add(wait),
+    };
+    assert!(!walk_due(walk, count.wrapping_add(before)));
+    assert!(walk_due(walk, count.wrapping_add(wait)));
+    let under_way = AgeWalk {
+        cursor: kani::any(),
+        ..walk
+    };
+    kani::assume(under_way.cursor != 0);
+    assert!(walk_due(under_way, kani::any()));
+}

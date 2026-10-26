@@ -5512,3 +5512,9 @@ mod burst_start_review;
 
 /// The floor measured against what a purge could return, and frontiers a silence does not age.
 mod floor_returnable;
+
+/// The trim at the claim of a free large slot.
+mod slack;
+
+/// Free large slots that age on their own.
+mod aging;

@@ -84,6 +84,22 @@ second caller that claimed a freed slot back; the reviewer found that it widened
 in which a double free is silent, and it is gone: a large free now purges while it still
 holds the slot, under BACK-REGION-02 and `class-safety.md`.
 
+**A second caller: the hold's walk by slot ages** (`hold::walk_aged`, added for the
+per-slot ageing of free large slots). It calls `purge_unit` on the pages of one free slot,
+`Layout::slot_unit(slot)`, or on a piece of them: `purge::piece` of
+`Unit { end: top, ..unit }`, where `top` is the unit's clean top (`region::clean_top`, a page
+of the unit), which gives pages of that unit and no others. The slot is below the watermark:
+the walk visits slots below `upper`, which is the watermark read when the walk began
+(`Grow::carved`, capped at the slot count) or a position an earlier look of the same walk
+stored, itself below that, and the watermark only grows. The pages are whole pages of the
+slot (Kani, `a_large_slot_is_whole_pages`), so `touching` gives the slot alone and
+`purge_unit` claims it before the call. Steps 1 to 3 hold as written: they rest on the claim
+`purge_unit` makes, not on how the unit was chosen. What the walk reads before (the leaf
+word, the slot's size word and stamp, its clean bits) it reads with no claim, and it only
+decides whether to try. The exploration `an_age_walk_races_large_tenants` runs the walk against
+tenants that claim, trim, write, stamp and free the slots, and `TestHost::purge` fails any
+schedule in which the purging thread does not hold every slot it returns.
+
 ## BACK-REGION-02: `host.purge(...)` in `purge_held`
 
 **Preconditions** (`Host::purge`). No thread reads or writes the range during the call, and
@@ -115,9 +131,10 @@ without a call if nothing is left: the range purged is a subrange of the one the
 up, so the precondition still holds for it. It returns `true` only when the range it was
 given went back whole, which BACK-CLASS-03 relies on before marking a slot zero. Its
 callers and why their ranges are given up are BACK-CLASS-02 (the tail of an object that
-shrank in place), BACK-CLASS-03 (the part of a moving object already copied) and
+shrank in place), BACK-CLASS-03 (the part of a moving object already copied),
 BACK-CLASS-05 (`unspill`: a huge page of a block that grew in place, whose bytes are first
-copied aside and copied back after) in `class-safety.md`.
+copied aside and copied back after) and BACK-CLASS-07 (`trim_slack`: the pages of a slot just
+claimed that lie past both its new block and its last tenant) in `class-safety.md`.
 
 **Review.** 2026-10-17, fresh adversarial reviewer: the protocol was accepted; three gaps were
 found in the argument: exclusivity under a double free, the huge-page part not covered by the
