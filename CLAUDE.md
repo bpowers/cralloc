@@ -74,12 +74,10 @@ process light.
   interface, which has a ledger entry.
 - The allocator crate has no dependencies, not even on a C library: it makes its own system
   calls. The exception is the default `background` feature: it creates the background
-  thread through the C library, so that the library knows the thread exists, and on glibc
-  asks it for the loaded modules' thread-local sizes, to size that thread's stack
-  (`dl_iterate_phdr`). Nothing else may call a C library function, and a build without
-  default features refers only to what it must share with the library (`errno`, the rseq
-  offset) and what the compiler emits (`memcpy`, `memset`). Test, fuzz and benchmark crates
-  may depend on what they need.
+  thread through the C library, so that the library knows the thread exists. Nothing else
+  may call a C library function, and a build without default features refers only to what
+  it must share with the library (`errno`, the rseq offset) and what the compiler emits
+  (`memcpy`, `memset`). Test, fuzz and benchmark crates may depend on what they need.
 - Write good, clean Rust: small modules with one job, types that make wrong states hard to
   build, `unsafe` confined to a few well-named places.
 - Every `unsafe` block in code that ships (the allocator and the preload library, not the

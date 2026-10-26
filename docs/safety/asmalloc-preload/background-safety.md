@@ -74,4 +74,4 @@ It replaces nothing else, and the C library's own definition stays reachable thr
 the allocator's thread first. Nothing in the library or the C library assumes the address of
 `pthread_create` is the C library's.
 
-Reviewed: 3b5a3f5
+Reviewed: c832e1b

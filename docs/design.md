@@ -721,7 +721,13 @@ their moment differently. In a Rust program the thread is created on a heartbeat
 call that came through the Rust interface, which the C library does not use, and only if
 the calling thread has no signal blocked and is not on a signal stack, the marks of a
 handler; otherwise the next look at the level tries again. A Rust program that keeps a
-signal blocked in every thread never passes that test, and starts the thread itself. The
+signal blocked in every thread never passes that test, and starts the thread itself. One
+case the test cannot see is a limit we accept. A slow path inside a callback of the C
+library's `dl_iterate_phdr`, as when a backtrace is being symbolized, runs under a loader
+lock, and a thread created there can deadlock against another thread inside `dlopen` or
+`dlclose`. It takes the one slow path that creates the thread, once in a process, to fall
+inside such a callback at that moment, and the lock is private to the library, so no slow
+path can test for it. The
 preload library, whose caller may always
 be the C library, creates the thread when the program creates its own first thread, a
 moment that is safe by construction, and leaves it dormant until the heap is over the
@@ -732,12 +738,18 @@ variable is read once, at the process's first slow path, from the environment th
 was started with, by the allocator's own system calls. The C library's `getenv` is not
 safe against a `setenv` in another thread, and a slow path cannot know what the program's
 other threads are doing; a read that waited for the first use could also come after the
-program had entered a sandbox that forbids opening files. The thread asks for a small
-stack. The C library puts the thread's static thread-local data on that stack, and glibc
-grants a request that leaves almost nothing beside it, on which the thread would crash.
-So the request is what the thread's frames need plus the thread-local sizes of the loaded
-modules, which glibc reports, and the allocator takes the library's default where the
-library still refuses (`docs/research/thread-stack.md`). If the thread cannot be
+program had entered a sandbox that forbids opening files. A process that gained
+privileges when it was executed cannot read its own environment this way and ignores the
+variable, as the C library's `secure_getenv` would. The thread takes the C library's
+default stack. The library puts the thread's static thread-local data on that stack, and
+glibc grants a smaller request that leaves almost nothing beside the data, on which the
+thread would crash. Sizing a request to fit needs the loader's list of modules, which is
+read under a lock that a fork does not release in the child and that the program's own
+callbacks run under. The default is sized by the library against that data, and a smaller
+stack would save only address space (`docs/research/thread-stack.md`). A program that
+gives all its threads a stack of a few kilobytes gives this one the same. The thread
+names itself with a system call of the allocator's own, so that nothing opens a file when
+it starts. If the thread cannot be
 created at all the allocator carries on without it. A process under a system-call filter
 that kills on thread creation, which no allocator can detect, must turn it off. The child
 of a fork does not inherit the thread and starts its own on the same conditions, its own
@@ -843,7 +855,8 @@ rule that returns it (`docs/research/memory.md` has the measurements behind them
 |---|---|---|
 | Free slots in the bitmaps, on pages with nothing live on them, above what fills reached in the last two intervals | The clocked purge | Once an interval while more than the floor could be returned: up to a quarter of what could be, and never past the floor, in runs of adjacent pages, carrying on round the heap from where the last pass stopped |
 | Free pages of a huge page above that frontier that still holds live objects, when a quarter of it or more is free | The clocked purge splits the huge page and returns them, and the advice for huge pages comes off there | With the pass that reaches it |
-| Free slots of large classes, above the floor | Heartbeats, a bounded amount each; `maintain` in a silence | Once their region has gone a short hold without a free that left a slot resident |
+| Free slots of large classes, above the floor | Heartbeats, a bounded amount each; `maintain` in a silence | Once their region, or the slot itself, has gone a short hold without a free that left it resident |
+| The pages of an occupied large slot past both its block and its last tenant's | The claim of the slot (see "Large objects") | At the claim, one bounded step, from the top down |
 | The same, whether fills reached it or not, while more than the cap is retained and the heap grows somewhere else | The carve that grows it owes as much as it takes: it returns a bounded part, and heartbeats return the rest | At that carve and the heartbeats after it, a bounded step each |
 | A slot a large block outgrew, beyond a bound on such slots that nothing has taken again | The move (see "Large objects") | Behind the copy, a piece at a time |
 | The tail of a large block that shrinks in place | The resize (see "Large objects") | At once |
@@ -922,7 +935,14 @@ Nine rules stand behind the table.
   reading of the clock, so that a silence ages a hold by one step, as it ages everything
   else by one interval. Once a region has gone a hold of some tens of steps without such a
   free, heartbeats return its free slots, a bounded amount for each heartbeat, while the
-  free large memory that is still resident exceeds the floor, and only down to it. The
+  free large memory that is still resident exceeds the floor, and only down to it. A
+  region that tenants keep taking and freeing never goes a hold without such a free, and by
+  the region's clock alone its free slots would stay for as long as the churn lasts
+  (`docs/research/large-churn.md`). So the free stamps the slot too, in its size word, and
+  a look at a region whose own stamp is young walks the region's free slots, carrying on
+  from where the last look stopped, and returns those that have themselves been free for
+  the hold. A region is walked at most once a hold, whoever looks, so the walk costs one
+  pass over its free slots a hold, and a slot goes back within a few holds of its free. The
   hold is a constant found by measurement: a shorter one returns memory that is about to
   be reused and pays for it in faults, and a longer one keeps the peak. It stays a
   constant because the two ways of doing better that were built did not. A hold that
@@ -1113,7 +1133,8 @@ Nothing is stored: a block starts at its slot's start or at that offset, and any
 pointer into the slot is not a block.
 
 The current size of each large object is recorded out of band, one word per slot, written
-only when the object is allocated or resized. C's `realloc` needs it to know how much to
+only when the object is allocated, resized or freed. A free leaves the size there for the
+slot's next claim, and adds when the free happened. C's `realloc` needs it to know how much to
 copy, and the usable size must not be the whole slot: a caller that fills what it is told it
 may use would touch many times what it asked for.
 
@@ -1194,6 +1215,20 @@ the carve of a slot for the pages past the block it was carved for. A claim, and
 that widens a block, clears them under what the block may write. A free writes none. So a
 smaller tenant after a larger one is charged what the larger one left, and the free, the
 claim, the keep decision and the purge count a slot by the same bits and cannot disagree.
+
+That leaves the pages a larger tenant wrote past a smaller one's block resident inside an
+occupied slot, where no purge reaches them, since a purge claims the slot first. In a slot
+that tenants of many sizes keep taking, what is resident would be the high-water mark of
+them all. So the claim of a free slot returns what lies past both its new block and the
+last tenant's, whose size the free left in the size word: from the top down, and one purge
+step at most, as every return on a request's path. The last tenant's room is kept, because
+the next may need it; what earlier tenants left goes, a step at each claim. Only the
+claimer does this, before it hands the block out, because nothing but its holder touches
+an occupied slot. What a trim has not reached stays resident, and uncounted until the
+slot's free charges it. The price is page faults when a later, larger tenant needs the room
+back: a program that churns large buffers of many sizes gives a few percent of its time
+for a lower peak (`docs/research/large-slack.md`). Where the kernel refuses to take memory
+back, as it does for locked memory, each such claim makes one call that fails.
 
 Moving the pages with `mremap` instead would copy nothing, but it splits the heap's
 mapping in ways that take several more rules to undo, and it adds nothing to the memory

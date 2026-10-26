@@ -25,6 +25,7 @@ pub mod sim;
 pub use machine::{Aborted, Machine, Pinned, Step};
 
 use crate::space::Geometry;
+use core::ffi::CStr;
 use core::fmt;
 use core::num::NonZeroI32;
 use core::ptr::NonNull;
@@ -202,6 +203,12 @@ pub unsafe trait Os: Sync {
 
     /// Wakes a thread waiting on `word` in [`Os::wait`], if there is one (`FUTEX_WAKE_PRIVATE`).
     fn wake(&self, word: &AtomicU64);
+
+    /// Names the calling thread `name` (`prctl(PR_SET_NAME)`), as `ps` and `/proc` show it;
+    /// a name longer than 15 bytes is cut there. It opens no file, unlike the C library's
+    /// `pthread_setname_np` on another thread, so it is allowed wherever a thread is. Never
+    /// fails visibly: a thread without a name works the same.
+    fn name_thread(&self, name: &CStr);
 
     /// The evidence that the program has created a thread of its own, which the background
     /// thread's default start waits for. In a process that is not a fork child, the C

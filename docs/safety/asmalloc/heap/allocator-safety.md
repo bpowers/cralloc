@@ -47,3 +47,5 @@ gives the old block up.
   empty is no block; `deallocate` then frees nothing (ALLOCATOR-01's check).
 - `new` not empty: `shrink_block`'s contract is `Allocator::shrink`'s with `new` not empty,
   which the branch has just checked.
+
+Reviewed: 502257d

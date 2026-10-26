@@ -26,6 +26,13 @@
 //! The name matches only at the start of an entry and may be split across pieces
 //! ([`Scan`]). The first entry with the name decides, as `getenv`'s does. A process with no
 //! `/proc`, or one whose read fails before the entry, gets the default.
+//!
+//! **Privileged programs.** A process that is not dumpable at its first slow path (one started
+//! from a setuid binary of a user other than root, a setgid binary, or a binary with file
+//! capabilities) cannot open its own `/proc/self/environ` (`EACCES`), so it gets the default
+//! whatever its environment says: the variable is ignored for it, as `secure_getenv` ignores
+//! the environment of such a process. A program that makes itself non-dumpable later
+//! (`prctl(PR_SET_DUMPABLE, 0)`) keeps the setting, since the read happened before.
 
 use crate::os::Os;
 use core::sync::atomic::AtomicU64;

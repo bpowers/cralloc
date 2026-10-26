@@ -1,5 +1,6 @@
 //! The hold on free large slots: they go back to the OS once their region has had no free
-//! that left a slot resident for a short hold, down to a floor.
+//! that left a slot resident for a short hold, or once they have themselves been free for it,
+//! down to a floor.
 //!
 //! Address space is divided by class, so memory freed in one large class serves another only
 //! by way of the OS. A program whose phases use different large classes (a query engine whose
@@ -17,6 +18,26 @@
 //! believed resident, in every large class together (`Back::retained_large`), is over the floor
 //! (`policy::allowance_floor`), and only down to it. So the hold is per region, and the floor is on
 //! all of it.
+//!
+//! **Each free slot ages on its own.** A region's stamp is its latest free's, so under steady
+//! churn no region is ever a hold old, and a slot idle for minutes stays resident beside one
+//! freed a moment ago: on a cache of large buffers, a gigabyte of free slots stood that way
+//! (`docs/research/large-churn.md`). So the free that leaves a slot resident also stamps the
+//! slot, in its size word (`Recorded::freed`), as its holder, before it releases it. A look at a
+//! region whose own stamp is young walks the region's free slots from its watermark down and
+//! returns each one whose own stamp is a hold old, claiming it first as every purge does
+//! ([`walk_aged`]), within the look's bounds and down to the floor as any look. The walk carries
+//! on across looks from where it stopped (the region's `AgeWalk` word), so every free slot of
+//! the region is looked at once a walk, wherever it lies. A walk starts at most once a hold
+//! (the hold the look takes): so a slot goes back between one hold and two after its free
+//! where heartbeats look, and within about three where the background thread does, whose look
+//! is planned from the region's newest stamp and can arrive just before a walk may start. And
+//! a young region costs one pass over its free slots a hold, whoever makes it. Walking whenever
+//! some slot came of age was a walk at nearly every fine step under steady churn, which is the
+//! case the rule is for (a third of the steps, on a region of 3,000 slots under drifting
+//! demand). A walk under way is more for the look to do: the next caller carries on at once,
+//! so that a walk takes its looks one after another and not one a fine step. A region whose
+//! stamp is old goes back whole, as before.
 //!
 //! **Time is counted.** The fine count steps when a heartbeat's reading of the counted clock
 //! (`crate::clock`) finds that [`policy::FINE_TICKS`] have passed since its last step, and by
@@ -69,7 +90,10 @@
 //! bottom (a look stopped at its bound of bitmap, or at the floor), and sets the next look at
 //! the next step, as a heartbeat would take it: planning only from stamps still held let a
 //! look that stopped at its bound wait a whole hold or more, and DataFusion's peak rose by
-//! 180 MiB in one run in ten (`docs/research/purge-off-path.md`).
+//! 180 MiB in one run in ten (`docs/research/purge-off-path.md`). The walks by slot ages plan
+//! nothing: a young region's stamp already wakes the thread a hold on, which is when a walk of
+//! it may start again, and a walk under way is carried on in the same wake-up. In a silence no
+//! free stamps anything, every region's stamp goes old, and the regions go back whole.
 //!
 //! **How long.** One hold for every large class, [`HOLD_STEPS`]. A hold that adapted per
 //! class (doubling when a slot was claimed soon after the hold purged its region, halving on
@@ -89,17 +113,33 @@
 //! the look did, and is fresh; any other at least a hold behind is old, so a stamp left over
 //! for half the count's range (at a step every 2 ms, about 50 days) reads as old, not as one
 //! from the future; one left for nearly the whole range reads as fresh for a hold.
+//!
+//! A slot's own stamp is the count's low 28 bits, which is what the size word has room for
+//! beside a size of up to 4 GiB and its three flags: a wrap every 2^28 steps, six days or more.
+//! A stamp reads as its true age less a multiple of 2^28, never older ([`until_aged`]), so a
+//! slot free across a wrap of its stamp is kept up to two holds longer, and returned no
+//! earlier than it would have been. The walk reads a free slot's stamp with no claim, while
+//! another thread may claim and free the slot again: that may return a slot a moment after its
+//! free, through the claim, and nothing worse. A region's `AgeWalk` word is written only by
+//! looks, with a compare-and-swap against what the look read, so a look that read it before
+//! another moved it writes nothing; a lost write moves a walk back, which looks at some slots
+//! twice, or starts the next walk up to a hold late.
+//!
+//! **Where purges are refused** (memory locked with `mlockall`, which the move's copy allows
+//! for), every claim of a free large slot with slack makes one failing call to trim it, and its
+//! pages stay counted: a documented limit, one call a claim, not a mechanism.
 
 use super::Back;
 use super::host::ClassHost;
-use super::layout::Hints;
+use super::layout::{AgeWalk, Grow, Hints, Recorded, STAMP_MASK, Unit};
 use super::policy::{
     self, HOLD_STEPS, PURGE_MAINTAIN_STEP_PAGES, PURGE_MAINTAIN_STEP_WORDS, PURGE_STEP_WORDS,
     allowance_floor,
 };
-use super::purge::{PassStep, Scope};
-use super::tree::Host;
-use super::word::Word;
+use super::purge::{PassStep, Scope, piece};
+use super::region::{self, Purge};
+use super::tree::{self, Host};
+use super::word::{BITS, Word};
 use crate::os::Os;
 use crate::space::{Geometry, RegionId, RegionTag};
 use core::sync::atomic::Ordering::{Relaxed, SeqCst};
@@ -198,6 +238,13 @@ pub(crate) struct Hold {
     /// Checked by the interleaving explorations (`front::sync`): the thread's plan, frees and
     /// crossings race on it.
     next: crate::front::sync::AtomicU64,
+    /// For tests of the hold's mechanics on heaps no larger than the floor: the hold acts as if
+    /// the floor were zero.
+    #[cfg(test)]
+    pub(crate) unfloored: core::sync::atomic::AtomicBool,
+    /// For tests: the bytes the walks by slot ages have returned (`walk_aged`).
+    #[cfg(test)]
+    pub(crate) aged_returned: core::sync::atomic::AtomicUsize,
 }
 
 /// In [`Hold::next`], with a fine count in the low half: the step of the count that reaches it
@@ -233,6 +280,10 @@ impl Hold {
             maintained: AtomicU64::new(0),
             maintain_looked: AtomicU32::new(0),
             next: crate::front::sync::AtomicU64::new(0),
+            #[cfg(test)]
+            unfloored: core::sync::atomic::AtomicBool::new(false),
+            #[cfg(test)]
+            aged_returned: core::sync::atomic::AtomicUsize::new(0),
         }
     }
 }
@@ -268,6 +319,188 @@ const WALKED_FROM_TOP: u64 = 1 << 33;
 pub(crate) const fn held_for(stamp: u64, count: u32, steps: u32) -> bool {
     let age = count.wrapping_sub(stamp as u32);
     age >= steps && age.wrapping_neg() > HOLD_STEPS
+}
+
+/// The fine steps until a free large slot stamped `freed` (`Recorded::freed`, the count's low
+/// 28 bits) will have been free for `steps` at count `count`, zero once it has: `held_for` in
+/// the stamp's bits, at most `steps`. A stamp up to a hold ahead of the count is a free that
+/// read the count after the look did, and is fresh. A stamp reads as its true age less a
+/// multiple of 2^28, so one left for 2^28 steps or more can only read younger than it is: the
+/// slot is kept up to two holds longer, never returned early. And whatever a stamp says, the
+/// slot goes back only through a claim of it (`region::purge_unit`), so a wrong age costs a keep
+/// or a purge, never a slot in use.
+pub(crate) const fn until_aged(freed: u32, count: u32, steps: u32) -> u32 {
+    let age = count.wrapping_sub(freed) & STAMP_MASK;
+    if age.wrapping_neg() & STAMP_MASK <= HOLD_STEPS {
+        // Freed at this count, or a moment after.
+        steps
+    } else {
+        steps.saturating_sub(age)
+    }
+}
+
+/// Whether the walk of a young region by slot ages whose word says `walk` may take a step at
+/// fine count `count` with a hold of `steps`: one is under way, or the last began in the
+/// step a hold before `count` or earlier, `steps - 1` steps or more (wrapping: a start the
+/// count has not reached, which only a stale word can hold, reads as long ago). A step short
+/// of the hold, because the background thread's look comes when the region's latest stamp is
+/// a hold old, and under churn that stamp is often a free of the step before the look that
+/// began the last walk: held to the whole hold, the thread's walks came every other hold. All
+/// zero is a region never walked; its first walk may start once the count is a hold past zero.
+pub(crate) const fn walk_due(walk: AgeWalk, count: u32, steps: u32) -> bool {
+    walk.cursor != 0 || count.wrapping_sub(walk.began).saturating_add(1) >= steps
+}
+
+/// What a look's walk of one young region by its free slots' own ages did (`walk_aged`).
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub(super) struct Aged {
+    /// Metadata words read: leaf words, the size words of free slots, and the clean words of
+    /// the slots it looked at.
+    pub(super) read: usize,
+    /// Bytes returned that had been resident.
+    pub(super) returned: usize,
+    /// Of those, the bytes of kept outgrown slots (`Recorded::outgrown`).
+    pub(super) outgrown: usize,
+    /// The walk took no step (none is under way and the last began within the hold), or
+    /// reached the region's bottom.
+    pub(super) done: bool,
+    /// The walk took a step: one was under way, or one was due.
+    pub(super) walked: bool,
+}
+
+/// One look's part of the walk of a young large region by its free slots' own ages: carries on
+/// the walk under way, or starts one at the watermark if the last began `steps` or more ago
+/// (`walk_due`), and goes down the region's free slots, returning each one whose own stamp
+/// (`Recorded::freed`) is `steps` old, until it reaches the bottom, reads `budget` words or
+/// returns `limit` bytes. It looks at one slot at least, so a walk always moves.
+///
+/// So a young region is walked once a hold at most, and a slot goes back between one hold and
+/// two after its free.
+///
+/// A slot is returned as any purge returns one: claimed, its pages returned, its clean and zero
+/// bits set, and released (`region::purge_unit`). One larger than what the look may still
+/// return goes back a piece at a time from its top (`purge::piece`), the walk staying at it so
+/// that the next look carries on there. Where the walk stands is the region's `AgeWalk` word,
+/// which only this changes, with a compare-and-swap against what it read: a look abandoned part
+/// way leaves the walk where it last stood, and one that finds the word moved under it leaves
+/// it moved.
+///
+/// Each free slot that is free throughout a walk is looked at once in that walk, wherever it
+/// lies, so none is starved. A slot freed above the walk's position, or carved after the walk
+/// began, waits for the next walk. A stamp is read without a claim, from a slot another thread may
+/// claim and free again meanwhile: a hint, which at worst returns a slot a moment after its
+/// free, through the claim that every purge makes.
+pub(super) fn walk_aged<H: Host>(
+    host: &H,
+    region: RegionId,
+    count: u32,
+    steps: u32,
+    limit: usize,
+    budget: usize,
+) -> Aged {
+    let layout = host.layout();
+    let idle = Aged {
+        read: 1,
+        done: true,
+        ..Aged::default()
+    };
+    let (Some(at), Some(_)) = (layout.age_word(), layout.size_word(0)) else {
+        return idle;
+    };
+    let word = host.meta(region, at);
+    let seen = word.load();
+    let walk = AgeWalk::unpack(seen);
+    if !walk_due(walk, count, steps) {
+        return idle;
+    }
+    let (mut upper, began) = if walk.cursor != 0 {
+        (walk.cursor.min(layout.slots()), walk.began)
+    } else {
+        let carved = Grow::unpack(host.grow(region).load()).carved;
+        (carved.min(layout.slots()), count)
+    };
+    let page = layout.page_size();
+    let huge = layout.huge_pages();
+    // In whole huge pages for a class of a huge page or more, as the purge walk's pieces are,
+    // so that a slot that kept its huge-page advice is not left with one partly returned.
+    let granule = if layout.size() >= huge as usize * page {
+        huge
+    } else {
+        1
+    };
+    let mut out = Aged {
+        walked: true,
+        ..Aged::default()
+    };
+    let mut first = true;
+    let stop = |out: Aged, upper: u32| {
+        let next = AgeWalk {
+            cursor: upper,
+            began,
+        };
+        let _ = word.compare_exchange(seen, next.pack());
+        out
+    };
+    while upper > 0 {
+        if !first && (out.read >= budget || out.returned >= limit) {
+            return stop(out, upper);
+        }
+        let w = (upper - 1) / BITS;
+        // The free slots of the word below `upper`.
+        let leaf = tree::word(host, tree::Node::leaf(region, w)).load();
+        let mut bits = leaf & u64::MAX >> (w * BITS + BITS - upper);
+        out.read += 1;
+        while bits != 0 {
+            let bit = BITS - 1 - bits.leading_zeros();
+            bits &= !(1u64 << bit);
+            let slot = w * BITS + bit;
+            if !first && (out.read >= budget || out.returned >= limit) {
+                return stop(out, slot + 1);
+            }
+            first = false;
+            let freed = region::recorded(host, region, slot).map_or(0, |r| r.freed);
+            out.read += 1;
+            if until_aged(freed, count, steps) != 0 {
+                continue;
+            }
+            let Some(unit) = layout.slot_unit(slot) else {
+                continue;
+            };
+            // Free and not all clean: a slot taken since the leaf word was read, or returned
+            // already, is passed at a look.
+            let (purgeable, words) = region::purgeable_unit(host, region, unit);
+            out.read += words;
+            if !purgeable {
+                continue;
+            }
+            let most =
+                (limit.saturating_sub(out.returned).div_ceil(page)).min(u32::MAX as usize) as u32;
+            let most = most.max(granule);
+            let cut = if unit.end - unit.start > most {
+                let (top, words) = region::clean_top(host, region, unit);
+                out.read += words;
+                if top <= unit.start {
+                    continue;
+                }
+                piece(Unit { end: top, ..unit }, most, 1, granule)
+            } else {
+                unit
+            };
+            // Its look before claiming reads what `purgeable_unit` just read and counted.
+            if let (Purge::Done { returned, outgrown }, _) = region::purge_unit(host, region, cut) {
+                out.returned += returned;
+                out.outgrown += outgrown;
+                if cut.start > unit.start {
+                    // The rest of the slot, below the piece, is the next look's.
+                    return stop(out, slot + 1);
+                }
+            }
+        }
+        upper = w * BITS;
+        first = false;
+    }
+    let _ = stop(out, 0);
+    Aged { done: true, ..out }
 }
 
 /// What a look may take: regions held for `steps` fine steps, within `bytes` returned and
@@ -329,6 +562,44 @@ impl<O: Os> Back<'_, O> {
                 }
                 Err(now) => seen = now,
             }
+        }
+    }
+
+    /// The floor the hold returns free large memory down to (`policy::allowance_floor`).
+    fn hold_floor(&self) -> usize {
+        #[cfg(test)]
+        if self.state.hold.unfloored.load(Relaxed) {
+            return 0;
+        }
+        allowance_floor(self.space.plan().geometry())
+    }
+
+    /// Adds `bytes` that a look returned to what the purge walk counts as returned since its
+    /// last lap ended, as every purger's returns are (`purge`, "The floor").
+    fn count_returned(&self, bytes: usize) {
+        if bytes != 0 {
+            self.state.walk.returned.fetch_add(bytes, Relaxed);
+        }
+    }
+
+    /// The fine count as a free slot's stamp keeps it (`Recorded::freed`).
+    #[inline]
+    pub(super) fn fine_stamp(&self) -> u32 {
+        self.state.hold.fine.count() & STAMP_MASK
+    }
+
+    /// Stamps large slot `slot` with the fine count, in its size word, for the free that holds
+    /// it and is about to release it resident, so that the slot ages on its own when frees keep
+    /// its region young (`walk_aged`). The holder is the word's only writer until the release,
+    /// so a load and a store.
+    #[inline]
+    pub(super) fn stamp_slot(&self, host: &ClassHost<'_, O>, region: RegionId, slot: u32) {
+        if let Some(now) = region::recorded(host, region, slot) {
+            let stamped = Recorded {
+                freed: self.fine_stamp(),
+                ..now
+            };
+            region::record(host, region, slot, stamped);
         }
     }
 
@@ -400,7 +671,7 @@ impl<O: Os> Back<'_, O> {
     pub(crate) fn plan_hold(&self) {
         let hold = &self.state.hold;
         hold.next.swap(0, SeqCst);
-        let planned = if self.retained_large() <= allowance_floor(self.space.plan().geometry()) {
+        let planned = if self.retained_large() <= self.hold_floor() {
             NEXT_LEVEL
         } else {
             let count = hold.fine.count();
@@ -424,7 +695,8 @@ impl<O: Os> Back<'_, O> {
     /// [`HOLD_STEPS`] keeps its stamp (the looks have not walked it to its bottom: a look that
     /// stops at its bound of bitmap having returned nothing waits for the next step, as a
     /// heartbeat's does), else until the soonest stamp not yet held for the hold will have
-    /// been; `None` with no stamp at all.
+    /// been; `None` with no stamp at all. A young region's walk by slot ages may start again a
+    /// hold after the last began, and its stamp, a hold old at most, wakes the thread by then.
     fn hold_pending(&self, count: u32) -> Option<u32> {
         let plan = self.space.plan();
         (0..self.walk_regions())
@@ -526,16 +798,15 @@ impl<O: Os> Back<'_, O> {
 
     /// One look at fine count `count`: over the floor, walks the large classes' regions from
     /// where the last look stopped and purges what `reach` allows (see the module
-    /// documentation). Returns what it returned, and whether it stopped at a bound after
-    /// returning something, with more over the floor.
+    /// documentation). Returns what it returned, and whether it stopped at a bound with more
+    /// over the floor after returning something or while walking a young region's free slots
+    /// by their own ages, so that the next caller carries on at once: a walk then takes the
+    /// looks it needs one after another, not one a fine step.
     #[cold]
     #[inline(never)]
     fn hold_look(&self, count: u32, reach: Reach) -> PassStep {
-        let geometry = self.space.plan().geometry();
         // The tallies are read once a step: frees and claims write their lines.
-        let over = self
-            .retained_large()
-            .saturating_sub(allowance_floor(geometry));
+        let over = self.retained_large().saturating_sub(self.hold_floor());
         if over == 0 {
             return PassStep::default();
         }
@@ -546,17 +817,18 @@ impl<O: Os> Back<'_, O> {
         // The position is the region to look at next plus one.
         let mut next = if seen == 0 || seen > top { top } else { seen };
         let (mut spent, mut purged) = (0, 0);
-        let mut stopped = false;
+        let (mut stopped, mut walked) = (false, false);
         for _ in 0..top {
             if spent >= budget || purged >= goal {
                 stopped = true;
                 break;
             }
             let index = next - 1;
-            let (read, bytes, done) =
+            let (read, bytes, done, aged) =
                 self.hold_region(index, count, goal - purged, budget - spent, reach);
             spent += read.max(1);
             purged += bytes;
+            walked |= aged;
             if !done {
                 stopped = true;
                 break;
@@ -568,7 +840,7 @@ impl<O: Os> Back<'_, O> {
             at.store(next as u32, Relaxed);
         }
         PassStep {
-            more: stopped && purged != 0 && purged < over,
+            more: stopped && purged < over && (purged != 0 || walked),
             returned: purged,
         }
     }
@@ -576,8 +848,9 @@ impl<O: Os> Back<'_, O> {
     /// The look's work on region `index`: if it is a large class's and its stamp is one
     /// `reach` takes, purges its free units from its cursor down, within `budget` words and
     /// `limit` bytes. A region walked from its top to its bottom loses its stamp, unless a free
-    /// has stamped it since. Returns the words read, the bytes purged, and whether the region
-    /// is done.
+    /// has stamped it since. A region whose stamp is young has its free slots walked by their
+    /// own ages instead (`walk_aged`). Returns the words read, the bytes purged, whether the
+    /// region is done, and whether it was walked by slot ages.
     pub(super) fn hold_region(
         &self,
         index: usize,
@@ -585,32 +858,50 @@ impl<O: Os> Back<'_, O> {
         limit: usize,
         budget: usize,
         reach: Reach,
-    ) -> (usize, usize, bool) {
+    ) -> (usize, usize, bool, bool) {
+        let passed = (1, 0, true, false);
         let Some(region) = self.space.plan().region(index) else {
-            return (1, 0, true);
+            return passed;
         };
         // The tag first: a small class's region has no stamp to read.
         let RegionTag::Class(class) = self.state.table.get(region) else {
-            return (1, 0, true);
+            return passed;
         };
         if class.is_small() {
-            return (1, 0, true);
+            return passed;
         }
         let Some(host) = self.host(class) else {
-            return (1, 0, true);
+            return passed;
         };
         let Some(at) = host.layout().hold_word() else {
-            return (1, 0, true);
+            return passed;
         };
         let word = host.meta(region, at);
         let stamp = word.load();
-        if stamp == 0 || !held_for(stamp, count, reach.steps) {
-            return (1, 0, true);
+        if stamp == 0 {
+            return passed;
+        }
+        if !held_for(stamp, count, reach.steps) {
+            // Frees keep the region young. A region with nothing free has nothing to walk; it
+            // keeps its stamp, which the next walk from its top clears once it is old.
+            if self.purgeable(region).is_none() {
+                return passed;
+            }
+            let aged = walk_aged(&host, region, count, reach.steps, limit, budget);
+            self.forget_outgrown(aged.outgrown);
+            self.unretain(class, aged.returned);
+            self.count_returned(aged.returned);
+            #[cfg(test)]
+            self.state
+                .hold
+                .aged_returned
+                .fetch_add(aged.returned, Relaxed);
+            return (aged.read, aged.returned, aged.done, aged.walked);
         }
         if self.purgeable(region).is_none() {
             // Nothing in it is free: what was freed has been taken again.
             let _ = word.compare_exchange(stamp, 0);
-            return (1, 0, true);
+            return passed;
         }
         // A walk that starts below the top leaves the units above the cursor unlooked at, where
         // a slot freed since the cursor passed may lie, so only a walk that began at the top
@@ -630,7 +921,7 @@ impl<O: Os> Back<'_, O> {
         if done && stamp & WALKED_FROM_TOP != 0 {
             let _ = word.compare_exchange(stamp, 0);
         }
-        (read, bytes, done)
+        (read, bytes, done, false)
     }
 }
 

@@ -29,16 +29,16 @@
 //!
 //! ```text
 //! word 0                      header: Grow (watermark, committed pages), Hints (start of the
-//!                             huge-page part, purge cursor), then the hold's stamp (`hold`), on
-//!                             a line of its own
+//!                             huge-page part, purge cursor), the hold's stamp and the hold's
+//!                             walk by slot ages (`hold`), on a line of its own
 //! ...                         summary levels height down to 1
 //! ...                         leaf bitmap
 //! ...                         zero bitmap: one bit per slot, set means free and known to read
 //!                             as zero
 //! ...                         clean bitmap
 //! ...                         sizes: one word per slot, the size the object in it was last
-//!                             allocated or resized to, and whether the slot is advised for huge
-//!                             pages (`Recorded`)
+//!                             allocated or resized to, whether the slot is advised for huge
+//!                             pages, and when a free slot was freed (`Recorded`)
 //! ```
 //!
 //! With the header in the back end's state and the leaf bitmap after the sizes, each large
@@ -57,9 +57,9 @@ pub(crate) const MAX_LEVELS: usize = 5;
 /// Bytes per metadata word.
 pub(crate) const WORD_BYTES: usize = 8;
 
-/// A large class's header words at the start of its block: `Grow`, `Hints`, then the hold's
-/// stamp.
-pub(crate) const HEADER_WORDS: u32 = 3;
+/// A large class's header words at the start of its block: `Grow`, `Hints`, the hold's stamp,
+/// then the hold's walk of the region's free slots by their own ages (`AgeWalk`).
+pub(crate) const HEADER_WORDS: u32 = 4;
 
 /// Words in a cache line.
 const LINE_WORDS: u32 = (crate::lined::LINE / WORD_BYTES) as u32;
@@ -369,42 +369,63 @@ impl FrontierFormat {
 /// whole huge pages are advised for huge pages because the object grew there, and whether the
 /// object was given zeroed from a slot known to be zero, so that none of its pages was
 /// resident when its tenant got it (`Back::mark_unwritten`), and whether the free slot was
-/// kept when its block outgrew it and is in the count of such slots (`State::outgrown`). One
-/// word, written only by whoever holds the slot, and read by its holder; a purge, which holds
-/// the slots it claims, reads it and never writes it. A size is at most a region, 4 GiB, so
-/// the flags take the top bits.
+/// kept when its block outgrew it and is in the count of such slots (`State::outgrown`), and
+/// when a free slot was freed (`freed`). One word, written only by whoever holds the slot, and
+/// read by its holder; a purge, which holds the slots it claims, reads it and never writes it.
+/// The hold's walk reads `freed` of a free slot it does not hold, as a hint (`hold`).
+///
+/// A size is at most a region, 4 GiB, 33 bits; the flags take the top three bits and the
+/// stamp the 28 between.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(crate) struct Recorded {
+    /// The size of the last tenant, which the word keeps after its free: the claim of the
+    /// next tenant reads it to know how much room the last one used (`Back::alloc_at`).
     pub(crate) size: usize,
     pub(crate) huge: bool,
     /// Set for the tenant that got the slot zeroed and unwritten, and cleared by every claim:
     /// it never outlives the tenant as far as anyone reads it. It may stay in a free slot's
-    /// word until the next claim clears it, but only the slot's holder reads the word. A hint
-    /// for the free (`Back::purge_before_release`), which is correct whatever it says.
+    /// word until the next claim clears it; the hold's walk reads that word, for its stamp
+    /// only. A hint for the free (`Back::purge_before_release`), which is correct whatever it
+    /// says.
     pub(crate) unwritten: bool,
     /// Set by the move that kept the free slot its block outgrew, whose charge it added to the
     /// count of kept outgrown slots, and cleared by the claim that takes the slot again, which
     /// subtracts what is left of that charge. A purge of the free slot reads it and subtracts
     /// the pages it returns, and leaves it set.
     pub(crate) outgrown: bool,
+    /// For a free slot that its free left resident: the hold's fine count when it was freed,
+    /// its low [`STAMP_BITS`] bits (`hold::aged`). Written by the freeing holder before it
+    /// releases the slot, cleared by the claim that takes it again; meaningless in a held
+    /// slot. Wraps every 2^28 fine steps, at least six days of a step every 2 ms.
+    pub(crate) freed: u32,
 }
+
+/// The bits of the fine count a free slot's stamp keeps (`Recorded::freed`).
+pub(crate) const STAMP_BITS: u32 = 28;
+
+/// The stamp's bits, as a mask.
+pub(crate) const STAMP_MASK: u32 = (1 << STAMP_BITS) - 1;
 
 impl Recorded {
     const HUGE: u64 = 1 << 63;
     const UNWRITTEN: u64 = 1 << 62;
     const OUTGROWN: u64 = 1 << 61;
-    const FLAGS: u64 = Recorded::HUGE | Recorded::UNWRITTEN | Recorded::OUTGROWN;
+    /// The size's bits: every size up to 4 GiB, the largest region, inclusive.
+    const SIZE_BITS: u32 = 33;
+    const SIZE: u64 = (1 << Recorded::SIZE_BITS) - 1;
 
     #[inline(always)]
     pub(crate) const fn unpack(word: u64) -> Recorded {
         Recorded {
-            size: (word & !Recorded::FLAGS) as usize,
+            size: (word & Recorded::SIZE) as usize,
             huge: word & Recorded::HUGE != 0,
             unwritten: word & Recorded::UNWRITTEN != 0,
             outgrown: word & Recorded::OUTGROWN != 0,
+            freed: (word >> Recorded::SIZE_BITS) as u32 & STAMP_MASK,
         }
     }
 
+    /// The word for `self`; the size must fit its 33 bits, which every size of a slot does.
     #[inline(always)]
     pub(crate) const fn pack(self) -> u64 {
         let huge = if self.huge { Recorded::HUGE } else { 0 };
@@ -414,7 +435,42 @@ impl Recorded {
             0
         };
         let outgrown = if self.outgrown { Recorded::OUTGROWN } else { 0 };
-        self.size as u64 | huge | unwritten | outgrown
+        (self.size as u64 & Recorded::SIZE)
+            | ((self.freed & STAMP_MASK) as u64) << Recorded::SIZE_BITS
+            | huge
+            | unwritten
+            | outgrown
+    }
+}
+
+// The stamp lies between the size and the flags.
+const _: () = assert!(Recorded::SIZE_BITS + STAMP_BITS == 61);
+const _: () = assert!(Recorded::SIZE as usize >= 1 << 32);
+
+/// Where the hold's walk of a young large region by its slots' own ages stands (`hold`): one
+/// header word, written only by the hold's looks, with a compare-and-swap against what the look
+/// read. All zero is a region never walked.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) struct AgeWalk {
+    /// One past the next slot the walk looks at, which goes down from the watermark; zero when
+    /// no walk is under way.
+    pub(crate) cursor: u32,
+    /// The fine count at which the last walk, or the one under way, began.
+    pub(crate) began: u32,
+}
+
+impl AgeWalk {
+    #[inline(always)]
+    pub(crate) const fn unpack(word: u64) -> AgeWalk {
+        AgeWalk {
+            cursor: word as u32,
+            began: (word >> 32) as u32,
+        }
+    }
+
+    #[inline(always)]
+    pub(crate) const fn pack(self) -> u64 {
+        self.cursor as u64 | (self.began as u64) << 32
     }
 }
 
@@ -657,6 +713,13 @@ impl Layout {
     #[inline(always)]
     pub(crate) const fn hold_word(&self) -> Option<u32> {
         if self.sizes == 0 { None } else { Some(2) }
+    }
+
+    /// Word offset of the region's `AgeWalk`, the hold's walk of its free slots by their own
+    /// ages, in the header after the stamp, for a large class; `None` for a small class.
+    #[inline(always)]
+    pub(crate) const fn age_word(&self) -> Option<u32> {
+        if self.sizes == 0 { None } else { Some(3) }
     }
 
     /// Word offset of the size word of slot `slot`, if the class records sizes (large classes).
@@ -1148,15 +1211,31 @@ mod tests {
         }
         assert_eq!(format.floor(word, 40 + FRONTIER_INTERVALS), 0);
         for flags in 0..8u32 {
-            let recorded = Recorded {
-                size: 1 << 32,
-                huge: flags & 1 != 0,
-                unwritten: flags & 2 != 0,
-                outgrown: flags & 4 != 0,
-            };
-            assert_eq!(Recorded::unpack(recorded.pack()), recorded);
+            for (size, freed) in [(1 << 32, STAMP_MASK), (0, 1), (40 << 10, 12345)] {
+                let recorded = Recorded {
+                    size,
+                    huge: flags & 1 != 0,
+                    unwritten: flags & 2 != 0,
+                    outgrown: flags & 4 != 0,
+                    freed,
+                };
+                assert_eq!(Recorded::unpack(recorded.pack()), recorded);
+            }
         }
         assert_eq!(Recorded::unpack(4096).size, 4096);
+        assert_eq!(Recorded::unpack(0).freed, 0);
+        let walk = AgeWalk {
+            cursor: 77,
+            began: u32::MAX,
+        };
+        assert_eq!(AgeWalk::unpack(walk.pack()), walk);
+        assert_eq!(
+            AgeWalk::unpack(0),
+            AgeWalk {
+                cursor: 0,
+                began: 0
+            }
+        );
     }
 
     #[test]

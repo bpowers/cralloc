@@ -13,17 +13,11 @@ declarations, on x86-64 System V, where every pointer is 8 bytes in a general re
 
 - `int pthread_create(pthread_t *, const pthread_attr_t *, void *(*)(void *), void *)`:
   `pthread_t` is `unsigned long` in glibc and a pointer in musl, 8 bytes either way, so
-  `*mut usize` points at room of the right size and alignment. The attribute is passed as an
-  untyped pointer to an `Attr` or null. The start routine is `extern "C"`, one pointer in, one
+  `*mut usize` points at room of the right size and alignment. The attribute is passed as a
+  null untyped pointer, the defaults. The start routine is `extern "C"`, one pointer in, one
   out. `CreateThread` is the same type, for the preload library's handle on the next
   `pthread_create`.
-- `int pthread_attr_init(pthread_attr_t *)`, `int pthread_attr_setstacksize(pthread_attr_t *,
-  size_t)`, `int pthread_attr_destroy(pthread_attr_t *)`: `Attr` is `#[repr(C, align(8))]`
-  over 56 bytes. glibc's `pthread_attr_t` on x86-64 is a union of `char[56]` and `long`, 56
-  bytes aligned to 8; musl's is a union of int, long and pointer arrays, also 56 bytes aligned
-  to 8. Only pointers to it cross the calls, and `size_t` is `usize`.
-- `int pthread_detach(pthread_t)` and `int pthread_setname_np(pthread_t, const char *)`: the
-  identifier by value as `usize`, and a NUL-terminated name.
+- `int pthread_detach(pthread_t)`: the identifier by value as `usize`.
 - `int sigfillset(sigset_t *)` and `int pthread_sigmask(int, const sigset_t *, sigset_t *)`:
   `SigSet` is `#[repr(C)]` over `[u64; 16]`, 128 bytes aligned to 8, which is `sigset_t` in
   glibc (`unsigned long __val[16]`) and musl alike. `SIG_BLOCK` is 0 and `SIG_SETMASK` 2 on
@@ -35,7 +29,7 @@ declarations, on x86-64 System V, where every pointer is 8 bytes in a general re
 `#[link(name = "c")]` adds `-lc`. glibc 2.34 and later define every one of these in
 `libc.so.6`, and musl's `libc.so` too. A Rust program that links `std` links the C library
 already; a `no_std` program that keeps the default feature now links it too, which the
-feature's documentation says. `dl_iterate_phdr` is BACKGROUND-05.
+feature's documentation says.
 
 ## BACKGROUND-02: `choice`, which reads the environment without the C library
 
@@ -66,21 +60,26 @@ buffer on the stack, and keeps the answer in one word of the depot (`Common::swi
   disagrees: its own initial environment area is a copy of its parent's, the same bytes the
   parent read (or later bytes, if the parent wrote a title over them, which is why the child
   must not read again). A process started by `exec` has a fresh, zero word and reads its own.
-- No `/proc`, a refused open or a failed read gives the default.
+- No `/proc`, a refused open or a failed read gives the default. The open is refused
+  (`EACCES`) to a process that is not dumpable when it reads, which a setuid binary of a user
+  other than root, a setgid binary or one with file capabilities is from its start: for such
+  a process the variable is ignored, as `secure_getenv` ignores its environment. A process
+  that makes itself non-dumpable after its first slow path keeps what it read (measured: an
+  open after `prctl(PR_SET_DUMPABLE, 0)` fails with `EACCES`; the read has happened by then).
 
 ## BACKGROUND-03: `spawn` and the calls to it
 
-**Preconditions.** `create` has `pthread_create`'s contract. The masks and attribute passed
-are valid for the calls. The new thread runs `run` with a null argument, which it ignores, and
-`run` never returns or unwinds; its stack holds its deepest frames.
+**Preconditions.** `create` has `pthread_create`'s contract. The masks passed are valid for the
+calls. The new thread runs `run` with a null argument, which it ignores, and `run` never
+returns or unwinds; its stack holds its deepest frames.
 
 **Invariants.**
 
 - I1. `start_wanted` and `start_background` pass the C library's own `pthread_create`;
   `start_dormant` passes what its caller promises is one (the preload library passes the next
   `pthread_create` found by `dlsym(RTLD_NEXT)`, PRELOAD-05).
-- I2. `all`, `old` and `attr` are locals that outlive the calls that use them; `attr` is
-  destroyed only if `pthread_attr_init` succeeded, and passed only then.
+- I2. `all` and `old` are locals that outlive the calls that use them; the attribute pointer
+  is null, which `pthread_create` takes as the defaults.
 - I3. `pthread_sigmask(SIG_BLOCK, &all, &mut old)` after `sigfillset(&mut all)` blocks every
   signal the C library lets a program block, which leaves out its internal signals (glibc's
   `SIGCANCEL` and `SIGSETXID`), so that a change of credentials still reaches the new thread.
@@ -90,73 +89,62 @@ are valid for the calls. The new thread runs `run` with a null argument, which i
   it is the allocator's, which does not panic while serving (the crate's rule), and the
   library is built with `panic = "abort"` where it matters (the preload library); a Rust
   program's unwinding panic cannot start in allocator code.
-- I5. `pthread_setname_np` and `pthread_detach` are called only after `create` returned 0,
-  with the identifier it stored; a name of 8 bytes and NUL is under the 16-byte limit.
-- I6. The stack holds the thread. It asks for `NEED + LIBRARY + static_tls()` bytes
-  (`stack_size`). glibc carves its own block (the thread descriptor, the static TLS surplus,
-  alignment) and every module's static TLS out of the size it is asked for, and refuses with
-  `EINVAL` only when less than `MINIMAL_REST_STACK`, 2 KiB, would remain below them; so an
-  accepted request leaves `stack_size - (static TLS + glibc's block)` for the frames, and
-  nothing larger than 2 KiB is promised by acceptance alone. That was the defect of a fixed
-  256 KiB request, reproduced in `docs/research/thread-stack.md`: a program with 252,000
-  bytes of TLS got about 5 KiB and the thread died in its first round. Now `static_tls()` is
-  at least glibc's static TLS from the modules, because it sums every loaded module's
-  `PT_TLS` segment rounded up to its alignment (BACKGROUND-05), which counts each module that
-  has static TLS (those loaded at start and the `dlopen`ed ones with initial-exec TLS, which
-  the surplus holds) and some that have none. So the frames get at least `NEED + LIBRARY -
-  glibc's block`; glibc's block is about 4.5 KiB with the default tunables (measured), so
-  the frames get over 180 KiB against a deepest use of 34 KiB in a debug build and 8 KiB in a
-  release one. A limit: a program that raises `glibc.rtld.optional_static_tls` past about
-  64 KiB enlarges glibc's block past `LIBRARY`; between that and `LIBRARY + NEED - 34 KiB`
-  the thread could again get too little, and above it the request is refused and the
-  default is taken (below). musl maps the size asked for plus the TLS and its own block
-  (`pthread_create.c`: `size = guard + ROUND(stacksize + libc.tls_size +
-  __pthread_tsd_size)`), so there `static_tls()` is 0 and the frames get all of `NEED +
-  LIBRARY`. The sum saturates rather than wrap; a size the library cannot map fails the
-  call, which starts nothing.
-
-  Where each statement about the C libraries comes from, for a reviewer checking them
-  against glibc 2.43:
-  - *Measured* (glibc 2.43, `docs/research/thread-stack.md`): a 256 KiB request is accepted
-    with static TLS up to about 255.5 KB and refused with `EINVAL` from 256,000 bytes; an
-    accepted request just under that leaves a thread so little stack that it crashes; the TLS
-    and glibc's block sit at the top of the requested stack; glibc's block is about 4.5 KiB
-    with the default tunables; the thread's own frames reach 8 KiB (release) and 34 KiB
-    (debug); with the new request a program with 252,000 bytes of TLS runs.
-  - *From memory of glibc's source, not re-read* (`nptl/allocatestack.c`, `elf/dl-tls.c`):
-    that the test is `size < guard + tls_static_size_for_stack() + MINIMAL_REST_STACK`
-    rounded to a page, with `MINIMAL_REST_STACK` 2048; that the static TLS size includes the
-    surplus and the thread descriptor; that `dlopen`ed modules with initial-exec TLS take
-    their static TLS from the surplus and others get dynamic TLS; that
-    `glibc.rtld.optional_static_tls` enlarges the surplus.
-  - *Read in source* (the musl checkout at 1b76ff07): musl's `pthread_create` adds the TLS
-    and its own block to the size asked for.
-
-  Inside another `dl_iterate_phdr` callback (Rust's backtrace code allocates in one, and so
-  may reach `start_wanted`): on glibc `static_tls`'s own `dl_iterate_phdr` takes the
-  recursive `dl_load_write_lock` that this thread already holds, so it nests and iterates
-  the same unchanged list, and `pthread_create` takes no lock that the iteration holds (from
-  memory, as above); on musl `static_tls` makes no call, and musl's `dl_iterate_phdr` holds no
-  lock while its callback runs (read in source: it takes its `rdlock` only to step to the
-  next module), so `pthread_create`'s `__acquire_ptc` cannot wait on it.
-- I7. A first `create` with the attribute that `EINVAL` refused created no thread and stored
-  nothing that is used; the second `create` passes a null attribute, which `pthread_create`
-  takes as the defaults, with the same `thread`, `run` and argument, under the same mask, and
-  only after `attr` was destroyed, so nothing destroyed is passed. The default stack is the
-  one the program's own threads get.
+- I5. `pthread_detach` is called only after `create` returned 0, with the identifier it
+  stored. The thread names itself at its start with the crate's own `prctl` (KERNEL-13),
+  which opens no file: the C library's `pthread_setname_np` on another thread opens
+  `/proc/self/task/<tid>/comm`, which a sandbox entered after start may forbid.
+- I8. `errno` is put back after the calls: `spawn` saves it first (ERRNO-02) and restores it
+  whatever the calls did, so the allocation or free that started the thread changes no
+  `errno`, as glibc's `free` changes none.
+- I6. The stack holds the thread. It is the C library's default, the one the program's own
+  threads get, which the library sizes against its own thread-local data
+  (`docs/research/thread-stack.md`). The thread's frames reach about 8 KiB in a release
+  build and 34 KiB in a debug one (*measured*). glibc's default (*measured*, and read in the
+  2.43 source by the reviewer) is the soft `RLIMIT_STACK` fixed at start, 2 MiB if it is
+  unlimited and 16 KiB if it is below that, raised to at least a page plus the static
+  thread-local block plus 2048 bytes, so the frames get the limit less the static block,
+  and at least about 6 to 10 KiB: 250,000 bytes of thread-local data under `ulimit -s 256`
+  or `-s 128` left the thread 9,776 bytes, and 104 bytes under `ulimit -s 16` left 11.6 KiB.
+  musl's default (*read in source* and *measured*) is 128 KiB plus the thread-local data and
+  its own block. A limit: a process started with a stack limit below its static thread-local
+  data plus about 40 KiB, or a program that lowers the default with
+  `pthread_setattr_default_np`, gives this thread the same few KiB as its own default threads,
+  which a release build's rounds fit and a debug build's may not. Another: a program that
+  locks all its memory (`mlockall(MCL_FUTURE)`) gets the whole default stack resident, 8 MiB
+  under the usual limit, as for each of its own threads. Without that, only the pages the
+  thread touches are resident, and the kernel keeps huge pages off a thread stack (`nh` in
+  its `VmFlags`, *measured*).
 
 **Proof.** By I1 the call creates an ordinary thread of the C library. By I2 every pointer
 passed is valid for what the call does with it. By I3 the new thread has every program signal
 blocked, so a handler never runs on it and process-directed signals go to the program's
 threads, while the caller's mask is unchanged after the call. By I4 the thread never returns
 into the C library with a value it would interpret, and never unwinds through an `extern "C"`
-frame. By I5 the name and detach are made on a live thread. By I6 the thread's frames fit
-its stack. By I7 the retry is a second ordinary call with valid arguments, made only after a
-failure that created nothing. A failure of `create`, or of both, returns its error, leaves the
-caller's mask as it was, and starts nothing.
+frame. By I5 the detach is made on a live thread, and naming needs no file. By I8 the
+caller's `errno` is unchanged. By I6 the thread's frames fit its
+stack, within the stated limit. A failure of `create` returns its error, leaves the caller's
+mask as it was, and starts nothing.
 
 `start_dormant`'s call passes its own `create` through: its caller promises what `spawn`
 asks (`# Safety` of both is the same sentence), and nothing else is added.
+
+Locks: `spawn` takes no lock of its own and calls nothing of the C library but
+`pthread_create`, `pthread_detach`, the signal calls (`sigfillset`, `pthread_sigmask`, and
+`sigaltstack` in the test before it) and `__errno_location`, none of which but
+`pthread_create` takes a lock; the naming is the crate's own system call. So a fork child, whose copy of a lock may be
+held by a thread that does not exist there, can start the thread whenever its program could
+create one of its own (`tests/fork_loader_lock.rs`). A limit remains, the same as for any
+`pthread_create`: glibc's `pthread_create` takes `dl_load_tls_lock`
+(`_dl_allocate_tls_init`), and `dlopen` and `dlclose` hold `dl_load_tls_lock` and then take
+`dl_load_write_lock` (`dl_open_worker` around `_dl_add_to_namespace_list`;
+`_dl_close_worker`), the opposite order, so the slow path that starts the
+thread, once per process, deadlocks if it runs inside a `dl_iterate_phdr` callback, which
+holds `dl_load_write_lock` (std's backtrace symbolizer allocates in one), while another
+thread is inside `dlopen` or `dlclose` (reproduced by the reviewer; the case
+`a_free_in_a_callback_returns_beside_a_dlopen`, run with `ASMALLOC_REVIEW_KNOWN_FAILURES=1`).
+No cheap and sound test tells a slow path that its thread holds the loader's lock: the lock
+is private to glibc. On musl, `dl_iterate_phdr` holds no lock while its callback runs (read in
+source: it takes its read lock only to step to the next module).
 
 Re-entry: `pthread_create` allocates (the new thread's TLS and stack bookkeeping), which comes
 back into the allocator through the C interface or the Rust one. The caller holds nothing
@@ -175,48 +163,4 @@ pointers are valid for writes of a `sigset_t` and a `stack_t`.
 (POSIX: with a null `set`, `how` is ignored); `sigaltstack(NULL, &stack)` only stores the
 current alternate stack. Both targets are locals of the right layout (BACKGROUND-01).
 
-## BACKGROUND-05: `dl_iterate_phdr` and its callback `add_tls` (glibc only)
-
-**Blocks.** The declaration of `int dl_iterate_phdr(int (*)(struct dl_phdr_info *, size_t,
-void *), void *)`; the call in `static_tls`; in `add_tls`, the references made from `info`
-and `data`, and each `&*info.phdr.add(i)`.
-
-**Preconditions.** The declaration matches glibc's. The callback's pointers are valid for
-the reads made through them while it runs; `data` points at the `usize` the call passed. The
-callback does not unwind, allocate or take a lock that the iteration's lock could be ordered
-against. The call cannot deadlock where `spawn` is called.
-
-**Proof.** Declaration: glibc (`link.h`) declares it so, in `libc.so.6` since 2.34 and in the
-static library; `EachModule` is `extern "C" fn(*mut ModuleInfo, usize, *mut c_void) ->
-c_int`, the callback's C type with the info pointer typed. `ModuleInfo` is
-`#[repr(C)]` over the first four fields of `struct dl_phdr_info` (`ElfW(Addr) dlpi_addr;
-const char *dlpi_name; const ElfW(Phdr) *dlpi_phdr; ElfW(Half) dlpi_phnum;`), 8, 8, 8 and 2
-bytes at offsets 0, 8, 16 and 24, which is how glibc lays them out; the callback reads them
-only when `size`, the size of the structure glibc passes, is at least `size_of::<ModuleInfo>()`
-(32). `ProgramHeader` is `#[repr(C)]` `Elf64_Phdr` (two `u32`, six `u64`, 56 bytes).
-
-Callback: glibc calls it with a pointer to a structure it filled for one module and the
-`data` argument of the call, unchanged, in the calling thread, before `dl_iterate_phdr`
-returns. `data` is `&mut sum`, a local of `static_tls` that outlives the call and that nothing
-else refers to meanwhile, so the `&mut usize` is unique. `dlpi_phdr` points at the module's
-`dlpi_phnum` program headers, mapped for the module's life, which the iteration's lock keeps
-loaded while the callback runs; `i < phnum`, so each `add(i)` stays inside them. Null
-pointers are checked first. The callback does integer arithmetic only, with `checked_` and
-`saturating_` operations, so it cannot panic, and calls nothing.
-
-Locks: glibc's `dl_iterate_phdr` holds `dl_load_write_lock`, a recursive lock, while it
-iterates. That lock is otherwise held only for the short updates of the list of loaded
-objects (within `dlopen` and `dlclose`, which take `dl_load_lock` first) and by other
-`dl_iterate_phdr` calls while their callbacks run. So: a thread that already holds it (a
-program's callback that allocates through the Rust interface and so may start the thread)
-takes it again recursively; a thread that holds `dl_load_lock` (a constructor run by `dlopen`,
-the case "What remains" in the module's documentation names) takes the two in glibc's own
-order. The caller holds no allocator state and no lock of the allocator's (there are none),
-so a thread that holds `dl_load_write_lock` waits for nothing the caller has. The three
-callers are `start_wanted` (after a Rust slow path, with no signal blocked and not on a
-signal stack), `start_background` (the program's own call) and `start_dormant` (the preload
-library's constructor, or the program's first `pthread_create`). This is from glibc's
-`elf/dl-iteratephdr.c` and `elf/dl-load.c` as known up to 2.43; the 2.43 source was not at
-hand to read again when this entry was written, and a reviewer should check it.
-
-musl is not called: there `static_tls` is 0 (BACKGROUND-03, I6).
+Reviewed: c832e1b
