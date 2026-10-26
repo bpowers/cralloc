@@ -49,13 +49,15 @@
 //!
 //! **Refusals.** A refused lowering keeps its noted huge page, and a refused raise its mark, so
 //! that the change is made once the kernel takes it. After the kernel refuses a split, a raise
-//! or a lowering, that kind of call is not made again before the next counted interval
-//! (`Back::tail_refused`): a split's refusal leaves the tail's huge pages whole, as below the
-//! frontier; a raise's leaves the marks set but not due, so the background thread sleeps; a
-//! lowering's leaves the notes. A program the kernel refuses throughout (at `vm.max_map_count`,
-//! with its memory locked, or on a kernel without the calls) pays at most one refused call of
-//! each kind an interval, and two for a reconciliation, and keeps main's behaviour: free pages
-//! of whole huge pages go back, the tail's partly used huge pages stay whole.
+//! or a lowering, that kind of call is not made again before the counted interval or the
+//! walk's lap count moves, whichever is first (`Back::tail_refused`): the interval stands
+//! still in a silence and the lap count while no pass walks. A split's refusal leaves the
+//! tail's huge pages whole, as below the frontier; a raise's leaves the marks set but not due,
+//! so the background thread sleeps; a lowering's leaves the notes. A program the kernel refuses
+//! throughout (at `vm.max_map_count`, with its memory locked, or on a kernel without the calls)
+//! pays at most one refused call of each kind a tick of that clock, and two for a
+//! reconciliation, and keeps main's behaviour: free pages of whole huge pages go back, the
+//! tail's partly used huge pages stay whole.
 //!
 //! **Accounting.** Under the advice for huge pages the kernel may make any huge page that holds
 //! one page wholly resident (khugepaged rebuilds it), so there the huge page is the unit of
@@ -338,7 +340,9 @@ fn reconcile<H: Host>(host: &H, region: RegionId, huge: u32, from: u32) -> bool 
 ///
 /// Never below the region's frontier as it stands now (`region::floor`, rounded up to a huge
 /// page): the walk noted the huge page when it lay above the frontier, and fills may have
-/// reached it since, where the advice must stay. A note the frontier has passed is dropped.
+/// reached it since, where the advice must stay. A note the frontier has passed lowers the
+/// boundary to the frontier's huge page instead, since huge pages above it may have been
+/// returned in part too and the word keeps only the lowest noted.
 /// A refused call keeps the note (`tla/Tail.tla`, `Call`), so that the advice comes off there
 /// once the kernel takes it.
 #[cfg(test)]
@@ -346,16 +350,10 @@ pub(crate) fn lower<H: Host>(host: &H, region: RegionId, huge: u32, epoch: u64) 
     lower_moved(host, region, huge, epoch, true).change
 }
 
-/// `lower` for `trim`, the caller asking for everything back: the advice comes off at the
-/// noted huge page even below the frontier, and fills that reach there later raise it again.
-pub(crate) fn lower_all<H: Host>(host: &H, region: RegionId, huge: u32, epoch: u64) -> Change {
-    lower_moved(host, region, huge, epoch, false).change
-}
-
 /// What a change of a region's advice did, and the huge pages `start..end` it left under the
 /// advice that the walk may have returned part of, whose accounting the caller restores
-/// (`Back::restore_tail`): a raise's range, or the huge pages between a dropped note and the
-/// frontier.
+/// (`Back::restore_tail`): a raise's range, or the huge pages between a note the frontier
+/// has passed and the frontier.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(crate) struct Moved {
     pub(crate) change: Change,
@@ -369,7 +367,9 @@ impl Moved {
     };
 }
 
-/// `lower`, or with `clamp` false `lower_all`, saying what it left under the advice.
+/// `lower`, saying what it left under the advice. With `clamp` false, `trim`'s, the caller
+/// asking for everything back: the advice comes off at the note even below the frontier, and
+/// fills that reach there later raise it again.
 pub(crate) fn lower_moved<H: Host>(
     host: &H,
     region: RegionId,
@@ -424,14 +424,15 @@ pub(crate) fn lower_moved<H: Host>(
     } else {
         0
     };
-    let change = match owned.low {
-        Some(low) if low < old && low >= reached && low * hp >= huge => {
-            let (offset, len) = (
-                (low * hp) as usize * page,
-                ((old - low) * hp) as usize * page,
-            );
+    // At the noted huge page, or at the frontier's if the frontier has passed the note: the
+    // word keeps only the lowest huge page noted, and huge pages above the frontier that the
+    // walk returned part of since may lie anywhere up to the old boundary.
+    let at = owned.low.map(|low| low.max(reached));
+    let change = match at {
+        Some(at) if at < old && at * hp >= huge => {
+            let (offset, len) = ((at * hp) as usize * page, ((old - at) * hp) as usize * page);
             if host.advise(region, offset, len, HugePages::Avoid) {
-                next.from = low;
+                next.from = at;
                 Change::Done
             } else {
                 next.repair = true;
@@ -441,11 +442,11 @@ pub(crate) fn lower_moved<H: Host>(
         }
         _ => Change::None,
     };
-    // A note the frontier has passed is dropped, and the huge pages from it to the frontier,
-    // which the walk may have returned part of, stay under the advice.
+    // The huge pages from a note the frontier has passed up to the frontier, which the walk
+    // may have returned part of, stay under the advice.
     let under = owned
         .low
-        .filter(|&low| low < reached && low * hp >= huge)
+        .filter(|&low| low < reached && low * hp >= huge && change != Change::Refused)
         .map(|low| (low, reached.min(old)));
     give_back(word, marks, mine, next);
     Moved { change, under }
@@ -480,13 +481,18 @@ pub(crate) fn raise_moved<H: Host>(
     epoch: u64,
 ) -> Moved {
     let word = host.tail(region);
-    let seen = word.load();
-    let tail = Tail::unpack(seen);
-    if !tail.want {
-        return Moved::NONE;
-    }
-    let Some((mine, owned)) = take(word, seen, epoch) else {
-        return Moved::NONE;
+    // A take lost to another write of the word (a walker's note) is tried again: the look
+    // that called this cleared the marks flag, and a mark it left behind with no owner would
+    // be seen by no one (`tla/Tail.tla`, `MarkVisible`). Only a mark gone or an owner ends it.
+    let (mine, owned) = loop {
+        let seen = word.load();
+        let tail = Tail::unpack(seen);
+        if !tail.want || tail.owned(epoch) {
+            return Moved::NONE;
+        }
+        if let Some(taken) = take(word, seen, epoch) {
+            break taken;
+        }
     };
     let marks = host.tail_marks();
     let layout = host.layout();

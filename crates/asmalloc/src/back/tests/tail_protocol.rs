@@ -323,3 +323,32 @@ fn a_lowering_stops_at_the_frontier() {
     assert_eq!(tail::lower(&rec, region, rec.huge(), 9), Change::Done);
     assert_eq!(rec.word().from, 2);
 }
+
+/// A note at or above the boundary is no note: the advice there is off already.
+#[test]
+fn a_note_at_or_above_the_boundary_is_ignored() {
+    let rec = Rec::new();
+    let region = rec.region();
+    rec.set(Tail {
+        from: 2,
+        ..Tail::default()
+    });
+    tail::note(&rec, region, 2);
+    tail::note(&rec, region, 3);
+    assert_eq!(rec.word().low, None);
+    tail::note(&rec, region, 1);
+    assert_eq!(rec.word().low, Some(1));
+}
+
+/// The advice never comes off below the start of the huge-page part: a note there (a huge
+/// page of the small-page part, which a walk never returns in part) lowers nothing.
+#[test]
+fn a_lowering_stays_within_the_huge_page_part() {
+    let rec = Rec::new();
+    let region = rec.region();
+    tail::note(&rec, region, 1);
+    // The huge-page part starts at huge page 2.
+    assert_eq!(tail::lower(&rec, region, 2 * rec.huge(), 1), Change::None);
+    assert_eq!(rec.calls(), 0);
+    assert_eq!(rec.word().from, 0);
+}
