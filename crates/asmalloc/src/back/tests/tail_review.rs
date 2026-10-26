@@ -498,3 +498,101 @@ fn a_raise_stops_at_the_frontier_and_the_headroom() {
         assert_eq!(os.huge_pages(at), Some(want), "unit {unit}");
     }
 }
+
+/// The kernel's part, on the host itself: nothing else runs `LinuxOs::split_huge`, so a wrong
+/// advice number there (`MADV_FREE` or `MADV_DONTNEED` would destroy a run that a fill may
+/// claim between the split and the purge's own claim) passes every other test.
+mod kernel {
+    use crate::os::linux::LinuxOs;
+    use crate::os::{HugePages, Os};
+    use std::string::String;
+
+    const PAGE: usize = 4096;
+    const HUGE: usize = 2 << 20;
+
+    /// `AnonHugePages` of the mapping that holds `addr`, in KiB.
+    fn anon_huge_kb(addr: usize) -> usize {
+        let maps = std::fs::read_to_string("/proc/self/smaps").unwrap();
+        let mut inside = false;
+        for line in maps.lines() {
+            let first: String = line.chars().take_while(|c| !c.is_whitespace()).collect();
+            if let Some((start, end)) = first.split_once('-')
+                && let (Ok(start), Ok(end)) = (
+                    usize::from_str_radix(start, 16),
+                    usize::from_str_radix(end, 16),
+                )
+            {
+                inside = (start..end).contains(&addr);
+            } else if inside && let Some(rest) = line.strip_prefix("AnonHugePages:") {
+                return rest.trim().trim_end_matches("kB").trim().parse().unwrap();
+            }
+        }
+        panic!("no mapping holds {addr:#x}");
+    }
+
+    /// A split of part of a huge page keeps every byte, and where the kernel gave a huge page
+    /// it is no longer mapped as one afterwards; the purge of the run then reads as zero and
+    /// leaves the rest.
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn split_huge_keeps_contents_and_splits_the_huge_page() {
+        let os = LinuxOs;
+        let base = os.reserve(2 * HUGE, HUGE).unwrap();
+        let p = base.as_ptr();
+        let run = base.map_addr(|a| a.saturating_add(PAGE));
+        // SAFETY: each range is whole pages of the reservation, and nothing else uses it.
+        unsafe {
+            os.commit(base, 2 * HUGE).unwrap();
+            os.advise_huge(base, 2 * HUGE, HugePages::Prefer).unwrap();
+            for i in 0..HUGE / PAGE {
+                p.add(i * PAGE + 7).write(i as u8 | 1);
+            }
+            let before = anon_huge_kb(base.addr().get());
+            os.split_huge(run, 4 * PAGE).unwrap();
+            let after = anon_huge_kb(base.addr().get());
+            std::eprintln!("AnonHugePages {before} kB before the split, {after} after");
+            for i in 0..HUGE / PAGE {
+                assert_eq!(p.add(i * PAGE + 7).read(), i as u8 | 1, "page {i}");
+            }
+            if before >= HUGE / 1024 {
+                assert!(after < before, "{before} kB huge before, {after} after");
+            }
+            os.purge(run, 4 * PAGE).unwrap();
+            for i in 0..HUGE / PAGE {
+                let want = if (1..5).contains(&i) { 0 } else { i as u8 | 1 };
+                assert_eq!(p.add(i * PAGE + 7).read(), want, "page {i}");
+            }
+            os.unmap(base, 2 * HUGE).unwrap();
+        }
+    }
+
+    unsafe extern "C" {
+        fn mlock(addr: *const core::ffi::c_void, len: usize) -> i32;
+    }
+
+    /// The kernel refuses `MADV_COLD` over a locked mapping (`can_madv_lru_vma`), so in a
+    /// program that locks its memory every split is refused: the case
+    /// `a_heartbeat_asks_for_at_most_one_split_when_the_kernel_refuses` is about.
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn a_locked_mapping_refuses_the_split() {
+        let os = LinuxOs;
+        let base = os.reserve(2 * HUGE, HUGE).unwrap();
+        let run = base.map_addr(|a| a.saturating_add(PAGE));
+        // SAFETY: each range is whole pages of the reservation, and nothing else uses it.
+        unsafe {
+            os.commit(base, 2 * HUGE).unwrap();
+            base.as_ptr().write(1);
+            if mlock(base.as_ptr().cast(), HUGE) != 0 {
+                // No allowance to lock memory here: nothing to show.
+                std::eprintln!("mlock refused: nothing shown");
+                os.unmap(base, 2 * HUGE).unwrap();
+                return;
+            }
+            let split = os.split_huge(run, 4 * PAGE);
+            std::eprintln!("split of a locked mapping: {split:?}");
+            assert!(split.is_err());
+            os.unmap(base, 2 * HUGE).unwrap();
+        }
+    }
+}
