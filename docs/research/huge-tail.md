@@ -34,10 +34,11 @@ workload is heap-drift's (`heap-drift` at `4522abd`).
   returned nothing, and the tail moved with it (p99.9 0.1 to 0.2-0.4 ms). The candidate
   (`t1r2`) takes the advice off only over units it has just split and returned part of, once
   per region per pass, and puts it back only where it came off. A swing under about 128 MiB
-  then returns nothing and changes no advice. One cost is open: its walk above the frontier
-  reads those units page by page, and on the store the first milliseconds of a burst were
-  slower in 6 of 8 runs of the walking variants (1.2 to 2.7 ms against 0.4 to 0.8); a cheap
-  look before the walk should remove it, and is not yet measured.
+  then returns nothing and changes no advice. Its walk above the frontier read those units
+  page by page even in laps that only count, and on the store the first milliseconds of a
+  burst were slower in 6 of 8 runs of the walking variants (1.2 to 2.7 ms against 0.4 to
+  0.8). The product looks at a few pages of each unit first and walks it only in a step that
+  may return memory; its burst start is main's ("The product").
 - **Patience is a step function per trough length.** Waiting N intervals returns nothing from
   troughs shorter than about N to 2N intervals (main's behaviour, huge pages kept) and most of
   longer ones. On Qdrant, whose bursts are seconds to tens of seconds apart, patience of 30
@@ -278,10 +279,8 @@ nothing or as 128 pages (`k128`), since one slow split is the worst case either 
 - **Huge pages back sooner.** Nothing rebuilds a refilled unit faster than khugepaged. A
   `MADV_COLLAPSE` by the background thread of units fills have made dense again costs about
   6 ms a unit; telling dense units from sparse ones cheaply is not solved. Not built.
-- **The zone walk's cost at a burst start** (above). A step should look at a unit above the
-  frontier cheaply before walking it as small pages: a few of its leaf words, walking it only
-  if most are wholly free, and not at all where less than the 16 MiB a lowering needs lies
-  above the frontier. Not built or measured.
+- **The zone walk's cost at a burst start** (above). Confirmed and fixed in the product: see
+  "The product".
 - **Server-scale swings** (hours, a day) were not run; the choice there is the same step
   function.
 - **Qdrant and SurrealDB on `t1r2`** are with `real-servers` (tree `target/huge-tail-ht10`).
@@ -333,6 +332,129 @@ In the table, the clocked purge's row gains "and, in a huge-page part above the 
 of free pages, splitting their huge pages"; the row "the part of a huge page above a region's
 watermark" stays.
 
+## The product
+
+2026-10-25, branch `huge-tail-rule` (`0cd82ec`), against main `3b5a3f5`, each built as it is
+(`build.sh` with `HT_EDIT=0 DRIFT=none`), no switch. The rule is `t1r2` with four changes,
+each of which can move a server's memory against `t1r2`'s:
+
+- **A cheap look first.** Every step looks at a huge page above the frontier once, at its
+  top: wholly free, it goes back whole; otherwise 8 of its pages are sampled, one in each
+  eighth, at a place the interval's number picks. It is walked page by page only if 2 of the
+  8 are free and resident, and only by a step that may return memory. `t1r2` walked every one
+  page by page, in counting laps too.
+- **One split a step on a slow path only.** The background thread's steps split as many as
+  their budget reaches.
+- **The advice comes off when a pass or a growth payment ends in a region**, as well as when
+  the walk reaches the region's bottom.
+- **A raise that would end past the watermark's huge page goes to the region's end.**
+
+### The burst start
+
+A trace of every walk call with its thread, CPU and duration (`ht.rs` `HT_TRACE`,
+`burst.py`) showed it: in the first 10 ms after the 30 s silence the woken background thread
+ran a counting lap on a server CPU, 263 calls in 0.46 ms with main and 1050 to 1096 in 1.7 to
+1.8 ms with `t1r2`, because the lap read every huge page above the frontier page by page. No
+request's slow path walked. With the look first, on the store, 12 runs each (eight at
+`02cfdcd`, whose look sampled pages at fixed places, three of those at code pads of 16 to
+48 bytes): the burst's first 5 ms max 0.5 to 0.8 ms with main and 0.5 to
+0.9 with the product, s70 p99.9 0.1 ms in all.
+
+### How the look samples
+
+Three forms were measured on the 4-phase lifetime job (troughs; main 3.82):
+
+| look | troughs | THP at peaks MiB | cycles/op |
+|---|---|---|---|
+| 8 leaf words, half wholly free | 3.81 | 1524 | 595 |
+| 8 runs of 4 pages, 1 free (moving places) | 3.53 | 1116 | 597 |
+| 8 pages, 2 free (moving places) | 3.25 | 768 | 601 |
+| `t1r2`, no look | 3.11 | 404 | 602 |
+
+By words the look missed nearly everything: a leaf word of a 1 KiB class covers 16 pages,
+so a huge page with a live slot every 16 pages has no free word, and the run made one split.
+By aligned runs of four (the walk's shortest) it missed free runs that are not aligned. The
+look that ships samples pages. What it leaves against `t1r2` is huge pages with less than
+about a quarter of their pages free.
+
+### Against main
+
+| job | main | product |
+|---|---|---|
+| lifetime, 4 phases, plentiful huge pages: troughs, THP at peaks, cycles/op | 3.82, 1522 MiB, 595 | 3.25, 768 MiB, 601 |
+| the same, fixed size table, scarce huge pages (`02cfdcd`) | 3.72, 584 MiB, 615 | 3.17, 314 MiB, 618 |
+| lifetime, no background thread (`02cfdcd`) | 3.72, 580 MiB, 611 | 3.14, 382 MiB, 615 |
+| fast ramp (`tree depth=25`), build / walk Gcycles, 2 rounds | 9.06, 8.81 / 7.98, 8.00 | 9.72, 9.02 / 8.56, 8.53 |
+| log store 1M, Mcycles a request at s70, pad 0, 8 runs (4 at `02cfdcd`) | 0.336 to 0.345 | 0.347 to 0.353 |
+| the same, mean over pads 0 to 48, 1 run each (`02cfdcd`) | 0.345 | 0.348 |
+| order service 2 GiB (`02cfdcd`), 2 runs | 0.068, p99.9 0.0, heap 2178 MiB | the same |
+| Meilisearch, 3 runs: cycles, peak / a minute after close MiB | 16.5-16.6 M, 746-758 / 655-660 | 16.6 M (one 13.4), 748-767 / 658-663 |
+
+Memory only, one run each, under `scripts/heavy` on a busy machine (their cycles are not
+comparable):
+
+| job | main | product | others |
+|---|---|---|---|
+| lifetime, 24 phases, wandering table: peaks first, last 3; troughs; quiet; THP at peaks | 1.101, 1.226; 4.29; 4.29; 1652 MiB | 1.090, 1.146; 3.35; 3.26; 662 MiB | `t1` 1.104, 1.145; 3.21 |
+| the same, fixed table | 1.101, 1.107; 3.77; 3.76 | 1.101, 1.099; 3.22; 3.12 | `t1` 1.100, 1.097; 3.13 |
+| size shift, end of each median-384 phase | 1.506 to 1.515 | 1.359 to 1.373 | jemalloc 1.183 to 1.194, glibc 1.328 (first cycle; the run hit its time limit) |
+| the same, median 1024; quiet minute | 1.173 to 1.227; 1.168 | 1.141 to 1.147; 1.134 | jemalloc 1.253 to 1.278; 1.228 |
+
+mini-redis (heap-drift's run, under `scripts/measure --both-l3`, one run each), resident over
+live at the end of each phase:
+
+| build | wide phases | small phases | quiet |
+|---|---|---|---|
+| main | 1.11, 1.33, 1.32 | 2.32, 2.86, 2.45, 2.71 | 1.31 |
+| product | 1.11, 1.17, 1.16 | 1.97, 2.29, 2.08, 2.02 | 1.20 |
+| jemalloc | 1.11, 1.16, 1.16 | 2.55, 2.65, 2.44, 2.58 | 1.16 |
+| glibc | 1.13, 1.16, 1.29 | 4.69, 4.74, 4.84, 5.27 | 1.28 |
+
+khugepaged rebuilt 1091 huge pages in the product's wandering run (none with main), as it did
+under `t1`: units fills had made dense again.
+
+- **The ramp's walk phase** allocates nothing; the product's 7% is placement: the same
+  instructions (14.11 G), the same TLB walks and faults, cycles only.
+- **The store's cycles** are placement too: the same instructions a request (721.5 to 722.7
+  k), and over the pads main alone spans 3.8%. One round a pad; the 0.8% between the means is
+  within that.
+- **Meilisearch's burst** has a slow first half second (b500 max 20 to 28 ms against 4.2) in
+  some runs of both builds: main 4 of 12 and the product 5 of 12 over all its versions, the
+  final product 0 of 3. Traced (first-touch's `wl_edit.py`), the product made no split and no
+  advice change in Meilisearch, so the rule has no part in it.
+
+### The raise and the address-space lock
+
+On the store, the order service and Meilisearch the product never raised: on the store it
+split 85 huge pages and lowered once, all after the load closed; on the others nothing.
+On the lifetime job (strace, cores shared with heavy work) a raise took a median of 43 us and
+at most 5.7 ms, a lowering 9 us and at most 5.7 ms, a split 8 us and at most 5.8 ms; these
+are the caller's times, and the caller is the background thread, or a heartbeat where there
+is none. Whether other threads' faults queue behind a waiting raise needs a server that
+raises: Qdrant. `wl_edit.py` applies to the product's tree as it does to main's.
+
+### The protocol
+
+`tla/Tail.tla` models the region's tail word: the claim's mark, the walk's note, the owner
+bit taken by one compare-and-swap (a loser skips), the kernel call that may be refused or
+partly applied, the stale owner's takeover, the reconcile, and a fork that leaves a call
+half made. TLC 2026.10.24 (rev `2ef2af8`): `Tail.cfg` holds (17.7 M distinct states, 6
+minutes). Two findings on the way, both fixed: an owner that took the word cleared a repair
+request that a refused call had left, so the kernel and the word could disagree for ever
+(`Tail_norepair.cfg` shows it); and a fork child inherits a word whose owner's call never
+finished in the child, so the child's advice could disagree with its word
+(`Tail_orphan.cfg`, without the child's repair). The child now marks every tail word for
+repair as its first heap call.
+
+### The numbers the rule needs
+
+- **Headroom of a raise, 8 huge pages (16 MiB).** From the measured raises: none made a
+  growing class move its boundary about ten times an interval (716 a run), 16 MiB 145, 64
+  MiB 97, with no change in memory. It bounds what khugepaged may rebuild; fixed, since it
+  answers a class's growth in an interval, not the region's size.
+- **8 samples, 2 free.** The samples bound a look's cost; the threshold is the table above.
+  Fixed: a look is per huge page.
+
 ## Method and data
 
 - **Builds.** `build.sh` extracts main, applies heap-drift's `bench/` changes
@@ -347,8 +469,14 @@ watermark" stays.
   `scripts/heavy`; `servers-watch.sh` under `scripts/measure --both-l3`, with local
   `allocators.toml` entries (README). Each drift run records the free 2 MiB blocks, the
   cgroup's huge-page faults and collapses, and the machine's fallbacks.
+- **The product.** `build.sh` with `HT_EDIT=0 DRIFT=none` builds a commit as it is (`PAD=N`
+  for a code pad); `sessions/product-timed.sh`, `servers.sh` (local entries `b-main`,
+  `b-prod`), `product-wl.sh` (first-touch's trace, entries `wl-main`, `wl-prod`) under
+  `scripts/measure --both-l3`; `product-memory.sh` under `scripts/heavy`; `burstwl.py` lines a
+  burst's requests up with the traced calls.
 - **Counters.** `d1` writes the switch's counters to `HT_DIAG`; `htsumm.py` reads them (cycles
   at the 4.3 GHz TSC).
 - **Data.** `docs/research/data/huge-tail-2026-10-25.tar.gz`: the kernel probe's outputs,
   every drift run with its counters, the memstat breakdowns, the server records with their
-  huge-page samples.
+  huge-page samples. `docs/research/data/huge-tail-product-2026-10-25.tar.gz`: the product's
+  runs (`prod/`), with the address-space traces but not the per-request records.

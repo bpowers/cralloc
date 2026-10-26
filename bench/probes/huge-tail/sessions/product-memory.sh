@@ -14,6 +14,6 @@ for build in $(printf '%s\n' main prod | shuf); do
   bench/probes/huge-tail/drift.sh "$build" "$out/lifetime-shared.$build.txt" -- $long tables=shared
 done
 for build in $(printf '%s\n' main prod je glibc | shuf); do
-  bench/probes/huge-tail/drift.sh "$build" "$out/shift.$build.txt" -- $shift_args tables=phase
+  bench/probes/huge-tail/drift.sh "$build" "$out/shift.$build.txt" -- $shift_args
 done
 bench/probes/heap-drift/redis-matrix.sh "$out/redis" "live-bytes main prod je glibc"
