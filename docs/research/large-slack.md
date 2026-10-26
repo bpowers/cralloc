@@ -16,22 +16,40 @@ used here are a probe of their own (`bench/probes/large-slack/`).
   - the study's two rules: 1.33, 1.40, 1.53, 1.77.
 
   In the big-buffer variant, the first phase no longer climbs across the cycles: 1.36, 1.39,
-  1.37, 1.41, against main's 2.50, 2.72, 2.74, 2.75.
+  1.37, 1.41, against main's 2.50, 2.72, 2.74, 2.75. One run per arm: a phase's ratio moves
+  by up to about 0.3 between runs of the same code (main's third phase, and the switch off
+  against main on one binary, 1.94 against 2.30), so differences of a tenth or two between
+  trimming arms, and "better than the study's", are within noise; main against the product is
+  not. Resident memory in free large slots, read from the heap's own breakdowns, is the steadier
+  measure (section 4).
 - **The trim at once stalls a claim for milliseconds, so the product trims a step.** A claim's
   slack can be most of a slot of tens of megabytes:
   - Returned at once, the 1024-page and larger trims took 0.8 ms on average on pinned cores,
     up to 3 ms. The p99.9 trim was about 1 ms.
   - The product returns the top `PURGE_STEP_PAGES` (128 pages) of the slack at most, the
-    bound of every purge on a request's path. Its p99.9 trim is about 250 µs.
+    bound of every purge on a request's path. Its p99.9 trim is 250 to 500 µs.
   - What it leaves stays in the occupied slot, to the next claim's trim or the free.
-  - Against the trim at once, the step costs 0.02 to 0.06 of a phase's ratio.
+  - Against the trim at once, the step cost 0.02 to 0.06 of a phase's ratio, one run each:
+    within the noise above.
 - **Time is level** on the large mix (8.27 against main's 8.26 Mcycles per op, three rounds),
   the 64-Vec job and the 256 MiB job.
-- **tpchgen pays**: about +2.0% cycles and 60% more faults, for about 97 MiB less peak (539
-  against 636 MiB). Only 12% of the pages the trim returned were faulted back by the tenant
-  that trimmed them. The rest of the extra faults are later, larger tenants of the same slot
-  faulting back the room an earlier, smaller one let go.
-- **Even a 128-page `madvise` is sometimes stalled for 2 to 3 ms** on this job (eight threads
+- **Faults rise wherever large slots turn over**: tpchgen +60% (about +2.0% cycles, for
+  about 97 MiB less peak, 539 against 636 MiB), DataFusion +8% (+0.8% cycles, 13 MiB less
+  peak), Meilisearch +12% a request (+0.6% cycles, level tails and heap). On tpchgen only 12%
+  of the pages the trim returned were faulted back by the tenant that trimmed them; the rest of
+  the extra faults are later, larger tenants of the same slot faulting back the room an
+  earlier, smaller one let go. On the large mix the trimming tenant faulted back 32 to 33% of
+  what its trim returned (28 to 29% with the trim at once).
+- **A young region is walked once a hold at most** (after the review). Walking whenever some
+  slot came of age was a walk at nearly every fine step under steady churn. Once a hold, the
+  free large slots resident over the large mix's phases are within a few percent of walking
+  at every chance, on the mean, and a tenth more at the peak (section 4).
+- **The quiet minute is level with main** over three runs each (main 1.13, 1.15, 1.19; the
+  product 1.14, 1.10, 1.15). In both, what stays is the floor's 30 MiB of free large slots and
+  about 100 MiB of slack inside occupied slots, which nothing returns in a silence. The 1.19
+  against 1.08 of the first runs was run-to-run spread (section 4).
+- **Even a 128-page `madvise` is sometimes stalled for 2 to 6 ms** on this job and the order
+  service (eight threads
   and the background thread on eight CPUs), whatever its size. That is the call waiting, not
   the trim's work, and other purges on request paths presumably meet it too; it was not
   measured for them.
@@ -178,6 +196,55 @@ server's CPUs, so its switch-off arm has two runs. The product's trims on these 
 
 Of the pages trimmed, DataFusion's tenants faulted back 3 to 4%, Meilisearch's 7 to 8%, and
 the order service's 17%.
+
+## 4. After the review: the walk once a hold, free resident memory, and the quiet minute
+
+The review found that the walk planned by when its soonest young slot came of age walked a
+young region at nearly every fine step under churn (a third of the steps on a region of 3,000
+slots under drifting demand, 864 metadata words a step), and woke the background thread at
+every step when slots were freed a step apart. A walk now starts at most once a hold (a step
+short, so that the thread's look, which the region's stamp schedules, lands on it), and the
+thread plans from region stamps alone, as before the rules. A slot goes back between one hold
+and two after its free.
+
+**Free large slots resident**, summed over the large classes from the memstat build's
+breakdowns (every other sample, 64 a run) while the workload ran, in MiB:
+
+| build | large mix: mean | max | big-buffer variant: mean | max |
+|---|---|---|---|---|
+| main | 602, 568, 564 | 1,128, 1,112, 1,157 | 669 | 1,118 |
+| the product as reviewed (walk when due) | 277 | 593 | 269 | 643 |
+| the product (walk once a hold) | 281, 300, 279 | 673, 664, 657 | 319 | 678 |
+| walk twice a hold | 293, 293 | 733, 647 | 351 | 714 |
+
+Once a hold keeps 1 to 8% more on the mean and 11 to 13% more at the peak on the large mix,
+19% more on the mean of the big-buffer variant (one run), against walking whenever a slot is
+due. A walk twice a hold keeps no less than once a hold (293 on the large mix's mean, 351 on
+the big variant's), so the differences between the three ways of walking are the runs' own
+spread, about a tenth and up to a fifth on one run. Main keeps twice as much.
+
+Heap over live at every phase end, four cycles (the large mix):
+
+| build | cycle 1 | cycle 2 | cycle 3 | cycle 4 | quiet |
+|---|---|---|---|---|---|
+| main r1 | 1.94 1.56 1.91 1.95 | 2.17 1.53 1.87 2.01 | 2.18 1.54 1.89 2.08 | 2.34 1.48 2.00 2.16 | 1.13 |
+| main r2 | 1.95 1.53 1.88 2.01 | 2.23 1.60 2.01 2.00 | 2.20 1.50 2.02 1.86 | 2.16 1.54 1.98 2.15 | 1.15 |
+| main r3 | 1.96 1.42 1.98 2.16 | 2.20 1.47 1.91 2.05 | 2.19 1.51 1.73 2.21 | 2.19 1.55 1.96 1.78 | 1.19 |
+| as reviewed | 1.29 1.24 1.42 1.47 | 1.31 1.26 1.47 1.56 | 1.32 1.27 1.54 1.50 | 1.31 1.23 1.42 1.43 | 1.14 |
+| once a hold r1 | 1.29 1.20 1.51 1.50 | 1.31 1.31 1.59 1.72 | 1.30 1.27 1.46 1.50 | 1.30 1.20 1.43 1.43 | 1.14 |
+| once a hold r2 | 1.30 1.29 1.51 1.77 | 1.32 1.31 1.37 1.66 | 1.30 1.35 1.60 1.57 | 1.30 1.28 1.65 1.59 | 1.10 |
+| once a hold r3 | 1.30 1.27 1.62 1.34 | 1.29 1.19 1.48 1.65 | 1.30 1.27 1.68 1.59 | 1.33 1.26 1.45 1.46 | 1.15 |
+
+The big-buffer variant's first phase across the cycles: main 2.47, 2.68, 2.87, 2.69; as
+reviewed 1.36, 1.38, 1.38, 1.37; once a hold 1.35, 1.40, 1.39, 1.41.
+
+**The quiet minute.** The first runs' quiet column had the product at 1.19 against main's
+1.08. Three runs each of the memstat builds give main 1.13, 1.15, 1.19 and the product 1.14,
+1.10, 1.15: the same, within a spread of 0.06 for each. The breakdown at the minute's end says
+where the memory over live sits, in both: the free large slots the hold keeps at its floor
+(25 to 31 MiB; once 0 for main), a few MiB of free small slots, and about 100 to 120 MiB more
+resident in occupied slots than their tenants asked for, which is the slack the trim takes
+only at a claim, and a silence has none.
 
 ## Reproduce
 
