@@ -181,6 +181,91 @@ burst rather than being fixed.
 Raw results: `docs/research/data/servers-qdrant-2026-10-24.tar.gz` (benchrun's records,
 the watcher's and the thread-CPU probe's, the context-switch analyses, the accounts).
 
+## The tail rule as product code (2026-10-26)
+
+Branch `huge-tail-rule` at `3c2265e` (allocator as at `0cd82ec`) against main at its base
+`3b5a3f5`, each linked into 0afff09's Qdrant as it is (no switch, so build against build);
+beside them ht10's `t1` again, as the first version stand-in (ht5's build is gone).
+`qdrant mixed thread`, three rounds interleaved, medians in MiB. Cycles are not read here:
+they rank Qdrant's search routing.
+
+| build | heap mean / peak / +1 min (RSS anon) | cgroup anon, same | AnonHugePages peak | faults/req | p99 / p99.9 ms |
+|---|---|---|---|---|---|
+| main | 449 / 542 / 185 | 447 / 543 / 185 | 168 | 13.7 | 191 / 256 |
+| product | 414 / 515 / 155 | 415 / 517 / 155 | 120 | 14.5 | 192 / 226 |
+| ht10 `t1` | 405 / 482 / 144 | 405 / 495 / 148 | 126 | 14.0 | 170 / 220 |
+
+Against main, beside the earlier prototypes against their own `t0`:
+
+| | `t1` (ht5) | `t1r2` (ht10) | product | ht10 `t1`, this session |
+|---|---|---|---|---|
+| heap mean | -38 | -25 | -35 | -44 |
+| heap peak | -39 | -17 | -27 | -60 |
+| a minute after close | -47 | -40 | -30 | -41 |
+
+The product's peak runs spread from 488 to 539 and `t1`'s from 476 to 495; in two more
+rounds with the memstat sampler (below) the two were level on mean (404 and 410) and peak
+(499 and 501). What separates them reliably is after close: about 10 MiB.
+
+Tails: p99 146 to 267 ms and p99.9 205 to 345 across all nine runs, with no order between
+builds. Qdrant's tail is its search routing (see Method), not the allocator.
+
+**The after-close gap is huge pages that khugepaged rebuilt.** The run cgroup's
+`thp_collapse_alloc` (`memory.stat`, the run's own cgroup; `thpstat.py`) per run: main 0 to
+1, product 19 to 29, `t1` 10 to 19. With the sampler (`asmalloc-memstat` once a second; free
+slots on pages `mincore` calls resident, against the back end's own `retained`, the free
+bytes it believes resident; `msgap.py`), free-and-resident minus retained, MiB:
+
+| build | collapses | gap during the load | gap a minute after close |
+|---|---|---|---|
+| main | 0, 0 | within -1 to 1 outside transients | -3.9, -3.3 |
+| product | 19 (one run unrecorded) | rises in steps with the collapses: +7 after 7, +10 after 14, +12.5 after 19 | +8.9, +9.5 |
+| ht10 `t1` | 18, 15 | +2 to +3 after the last collapses | -1.2, -0.2 |
+
+So the product holds about 10 MiB resident that it counts as returned (13 more than main's
+baseline), and most of it stays for the minute after close. That is the whole after-close difference to `t1` (heap 148 against 137,
+and 148 against 143, in the same rounds). It confirms the reviewer's account on a real
+server. A raise puts the advice back over split, sparse huge pages. khugepaged rebuilds them.
+The rebuilt free pages still read as returned, so neither the count nor the look sees them.
+`t1` also collapses, but its walk reads every huge page page by page, so the memory goes back.
+
+The look's other limit, walking only huge pages with 2 of 8 sampled pages free and resident,
+leaves nothing measurable here: after close the product's extra over `t1` is no larger than
+its collapse gap (heap 11 more against a gap 10.1 more, and 5 against 9.7 MiB).
+
+**Advice calls** (strace of every `madvise` for 30 s at the 70% rate, separate untimed runs,
+one each): HUGEPAGE main 134, product 153, `t1` 161; NOHUGEPAGE 57, 87, 74; COLD (the split)
+0, 1397, 108; DONTNEED 3881, 5304, 4454. These include the large-block and to-huge advice.
+The tail rule's own calls, from the trace below: in the 30 s at 70%, 14 to 16 raises and
+12 to 16 lowers a run, over 18 MiB or the rest of the region (about 4 GiB).
+
+**What a waiting advice change does to request threads.** The product was traced with
+first-touch's `wl_edit.py`, which applied cleanly at `3c2265e`. The trace times every
+address-space call with its thread's CPU time and context switches. Every request was
+recorded; there were two runs (`advov.py`). Of 106 background advice changes, the median
+took 5 to 7 us. Most never slept. One raise took 146 us (slept 11 times). One lower took
+208 us. One pass's lowers over about 4 GiB and 18 MiB took 4.8, 0.6 and 5.2 ms, sleeping 8,
+8 and 4 times: they waited for the lock, holding the CPU for 0.05 to 0.8 ms. Between 2 and 8
+requests were in flight across those calls, and none of them reached the run's p99.
+No request at or above p99 overlapped any advice change in the measured segments of either
+run. The longest calls on Qdrant's own threads were the optimizer's large-block advice and
+moves (up to 7.4 ms, sleeping), as on main.
+
+**What it says about the rule:** the look should count a collapsed huge page as resident.
+For example, it could treat a huge page as resident whole when `mincore` or AnonHugePages
+says so, or clear the clean bits of a range the raise covers. Qdrant would then also get
+the last ~10 MiB that `t1` returns after close. The 4 to 5 ms lowers over 4 GiB ranges did no
+measured harm here, but they waited for the lock with requests in flight. Lowering only the
+part that was raised would bound them.
+
+The SurrealDB comparison was not run: its asmalloc arm would need two full rebuilds, and the
+prototype had no effect on that job.
+
+Files: `docs/research/data/servers-qdrant-2026-10-26.tar.gz` holds the rounds (`qprod`),
+the sampler rounds with each process's sampler output (`qms`), the traced runs (`qwl`), the
+strace logs and counts (`madvise`), and the scripts that built and ran them. The probes are
+`bench/probes/server-profile/thpstat.py` and `msgap.py`.
+
 ## Unresolved
 
 - The measured Qdrant binaries were built before a lint-only edit of the driver (a hex
