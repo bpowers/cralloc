@@ -5518,3 +5518,6 @@ mod slack;
 
 /// Free large slots that age on their own.
 mod aging;
+
+/// The adversarial review of the trim at the claim and per-slot ageing.
+mod slack_review;
