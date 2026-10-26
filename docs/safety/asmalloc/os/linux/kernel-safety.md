@@ -152,8 +152,9 @@ first thread to finish its handler ends the process under every other thread's
   consistent; at worst it aborts again, which the paragraph above turns into the default action.
 
 **`int_call` itself.** It forwards to `syscall` with three integer arguments. Its callers are
-getpid, gettid, tgkill and exit_group here and getpid in `random`, none of which takes a
-pointer.
+getpid, gettid, tgkill and exit_group here, getpid in `random`, gettid and getpid in
+`threads::not_the_first`, and close in `ReadOnly`'s `Drop` (KERNEL-10), none of which takes a
+pointer. (The function's own `# Safety` comment still lists only the first four.)
 
 ## KERNEL-08: `mincore` in `resident`
 
@@ -320,4 +321,4 @@ single call:
   the buffer, an empty file, a path with no NUL, a failed open, a read that fails after the
   open, and more calls on every path than the descriptor limit.
 
-Reviewed: e224366
+Reviewed: 502257d

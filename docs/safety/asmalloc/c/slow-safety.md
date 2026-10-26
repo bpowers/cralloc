@@ -99,4 +99,4 @@ declared safe. They pass `ptr` unchanged and nothing else: the size and alignmen
 unused parameters and reach no computation, so whatever they are cannot affect what
 `free_slow` does. `ptr` carries the caller's promise, which is `free_slow`'s word for word.
 
-Reviewed: f41dbf9
+Reviewed: 502257d

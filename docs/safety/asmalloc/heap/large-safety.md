@@ -24,9 +24,16 @@ path that moved; on the in-place path and on failure the caller keeps the block.
 
 `move_large` is also told whether the new block reads as zero (`grant.zeroed`). That is true
 only when the back end said the slot was fresh or purged (`Block::zeroed`) or the block is a
-run, which is always fresh or purged; a wrong `true` would let a skipped zero page show the
-new block's old bytes, which is a wrong value, not a memory error, and `Grant::zeroed` is set
-nowhere else.
+run, which is always fresh or purged, and `Grant::zeroed` is set nowhere else. More than a
+value rests on it. A wrong `true` would let a skipped zero page show the new block's old
+bytes, and it would also make `Bound::grow_block` skip the clear of a zeroed grow (HEAP-08), so
+that `grow_zeroed` returned bytes past the old size that are not zero. That breaks the
+`Allocator` contract, and a caller that relies on it, as one that takes the zero bytes for
+valid values of a type may, has undefined behaviour. So the two sources of `true` are
+obligations of this entry, not conveniences: the back end's zero bit for a large slot says the
+whole slot reads as zero (`region::settle_slot`, kept true by the rule that a tenant writes
+nothing past its recorded extent, stated on `back::Block`), and a run is purged whole at its
+free (`back/run.rs`).
 
 The general resize clears nothing, in place or moved. A zeroed grow is cleared by its one
 caller that asks for it, `Bound::grow_block` (HEAP-08 in `heap/resize-safety.md`), from the
@@ -71,4 +78,4 @@ small class, its size rounded up to its alignment is at most `len`, which `block
 from `Back::room` (the bytes from the block's start to its slot's or run's end), the block
 stays after a shrink (`stays_after_shrink`), and `ptr` is aligned as `new` asks.
 
-Reviewed: f41dbf9
+Reviewed: 502257d
