@@ -366,3 +366,86 @@ fn a_look_at_a_sparse_region_stays_within_its_words() {
         slots / BITS + 1
     );
 }
+
+/// The check of the fix (a young region walked at most once a hold): how long a free slot waits
+/// before it goes back, in a region that a free keeps young every `every` fine steps, with and
+/// without the thread. The slots are freed five steps apart. Returns the longest wait in fine
+/// steps and the thread's wakes.
+fn longest_wait(every: u32, thread: bool) -> (u32, u32) {
+    let state = state::<Native>();
+    let back = state.get_or_reserve().unwrap();
+    let os = state.os();
+    back.state.hold.unfloored.store(true, Relaxed);
+    if thread {
+        asleep(&back);
+    }
+    let class = large(64 << 10);
+    let size = class.size();
+    let blocks: Vec<NonNull<u8>> = (0..16)
+        .map(|_| back.alloc(class, size).unwrap().ptr)
+        .collect();
+    for b in &blocks {
+        paint(b.as_ptr(), size, 7);
+    }
+    let mut freed: Vec<(NonNull<u8>, u32)> = Vec::new();
+    let mut waiting = blocks[1..].to_vec();
+    let (mut longest, mut wakes) = (0, 0);
+    for step in 0..8 * HOLD_STEPS {
+        if step % 5 == 0
+            && let Some(b) = waiting.pop()
+        {
+            back.free(b, class);
+            freed.push((b, step));
+        }
+        if step % every == 0 {
+            back.free(blocks[0], class);
+            assert_eq!(back.alloc(class, size).unwrap().ptr, blocks[0]);
+            paint(blocks[0].as_ptr(), size, 7);
+        }
+        os.advance_clock(FINE_TICKS);
+        back.heartbeat();
+        if thread && !sleeping(&back) {
+            wakes += 1;
+            thread_runs(&back);
+            asleep(&back);
+        }
+        freed.retain(|&(b, at)| {
+            // SAFETY: a free slot, which nothing else uses meanwhile.
+            let gone = unsafe { os.is_purged(b, size) };
+            if gone {
+                longest = longest.max(step + 1 - at);
+            }
+            !gone
+        });
+    }
+    assert!(
+        freed.is_empty() && waiting.is_empty(),
+        "every {every} thread {thread}: {} slots never went back",
+        freed.len()
+    );
+    back.free(blocks[0], class);
+    (longest, wakes)
+}
+
+/// Every slot goes back within a bounded number of holds, however often a free keeps its
+/// region young, and the thread is woken about once a hold.
+#[test]
+#[cfg_attr(miri, ignore)]
+fn a_slot_waits_a_bounded_number_of_holds_whatever_keeps_its_region_young() {
+    for every in [1, 2, 3, 7, 20, 50, 63] {
+        for thread in [false, true] {
+            let (longest, wakes) = longest_wait(every, thread);
+            std::eprintln!(
+                "a free every {every}, thread {thread}: longest wait {longest}, wakes {wakes}"
+            );
+            assert!(
+                longest <= 3 * HOLD_STEPS + 8,
+                "a free every {every}, thread {thread}: a slot waited {longest} steps"
+            );
+            assert!(
+                wakes <= 8 * 2 + 2,
+                "every {every}: woken {wakes} times in 8 holds"
+            );
+        }
+    }
+}
