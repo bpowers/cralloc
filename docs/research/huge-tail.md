@@ -484,6 +484,56 @@ troughs give back 0.11 of what the product had won (3.37 to 3.48, against main's
 4-phase job and mini-redis's wide phases are the same. Its small phases ended lower after
 the fixes; one run each, and not explained.
 
+### The accounting and the headroom (2026-10-26)
+
+Branch `huge-tail-accounting`. One run each; the 4-phase job, the store and mini-redis under
+`scripts/measure`, the 24-phase job and the call counts under `scripts/heavy` on a busy
+machine (their cycles are not comparable).
+
+**The accounting** (`ae24bca`, measured alone against stage 1, `a16d05a`). A raise, or a
+note the frontier has passed, now counts every free page of each non-empty huge page it
+leaves under the advice as resident again, and a raise counts as a fill's reach over its
+range. On the 4-phase job the troughs and cycles did not move (3.30 against 3.28; 601
+against 597 cycles/op). On the 24-phase job the troughs went from 3.50 to 3.41, the peaks
+from 1.156 to 1.139, and khugepaged rebuilt 645 huge pages against 1423. mini-redis's wide
+phases were the same (1.16 to 1.18). The allocator's count against the resident free memory
+mincore sees, at the end of the 4-phase job: stage 1 counted 4.4 MiB less than was
+resident; the accounting counts 78.5 MiB more, pages it called resident that khugepaged had
+not yet rebuilt in that run. An overcount costs a later pass a call on pages that are not
+there and goes away with it; an undercount stayed. Advice calls on the 4-phase job: raises
+96 to 170, lowerings 183 to 169. On Qdrant the gap the product left after close closed
+(`docs/research/servers-qdrant.md`, dated section).
+
+**The review's second round** (`dee220a`) changes what is returned too: above the
+boundary a step that may return memory walks the split huge pages with neither the look nor
+the cut, so the pass for short runs takes what is left. The 24-phase troughs went to 3.18
+(peaks 1.136), the 4-phase troughs were 3.34. It doubled the system calls: on the 4-phase
+job `MADV_DONTNEED` 108 thousand to 231 thousand and `MADV_COLD` 74 thousand to 214
+thousand, at the same cycles/op (601). The split before each return is kept above the
+boundary, since a lowering at the frontier's huge page may take the advice off over huge
+pages never split.
+
+**The headroom**, two arms against the constant 8, on that product (`7c06da3`): (i) the
+frontier's rise over the last interval, at least one huge page; (ii) grow on regret, a raise
+within 4 intervals of the region's last doubling the headroom from one huge page, a lowering
+halving it, kept in a per-region word beside the tail words.
+
+| | constant 8 | (i) rise | (ii) regret |
+|---|---|---|---|
+| 4-phase: troughs, cycles/op | 3.34, 601 | 3.24, 603 | 3.34, 599 |
+| 4-phase: raises (`MADV_HUGEPAGE`, with main's own ~20) | 202 | 174 | 170 |
+| 24-phase: peaks last 3, troughs | 1.136, 3.18 | 1.137, 3.24 | 1.136, 3.19 |
+| mini-redis wide phases | 1.16 | 1.15 to 1.16 | 1.16 to 1.17 |
+| store: Mcycles a request, burst max ms (2 runs) | 0.35, 0.6 | 0.35, 0.6 to 0.7 | 0.35, 0.6 |
+
+Neither arm raised more often than the constant: the case of a class that has just started
+growing, which the 4-phase job's high phases are, did not show the 716 raises a run that no
+headroom at all made, since a raise follows a look for marks, at most a heartbeat's or a
+thread's step apart, and a floor of one huge page is enough there. Neither did better on
+memory beyond a run's noise ((i) better on the 4-phase troughs and worse on the 24-phase
+ones). So the constant stays: the regret arm matches it with a word a region more, and the
+rise arm is not consistently better.
+
 ## Method and data
 
 - **Builds.** `build.sh` extracts main, applies heap-drift's `bench/` changes
