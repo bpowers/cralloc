@@ -6,8 +6,9 @@ The process's heap, `HEAP`, over Linux, run with `Real` on `front::SLABS` throug
 ## GLOBAL-01: `unsafe impl GlobalAlloc for Asmalloc`
 
 **Obligations** (`GlobalAlloc`'s `# Safety`). Blocks are valid for their layout, aligned, and
-not handed out twice while live; the methods do not unwind; `realloc` keeps the old block's
-contents up to the smaller size and leaves the old block untouched when it returns null.
+not handed out twice while live; the methods do not unwind; `alloc_zeroed`'s block reads as
+zero for the layout's size; `realloc` keeps the old block's contents up to the smaller size
+and leaves the old block untouched when it returns null.
 
 **Proof.** Each method is the heap's. Alignment and size: a small block is a slot of the class
 of the layout, which by alignment by construction (`classes::verify`) is a multiple of the
@@ -15,7 +16,9 @@ alignment and at least the size, and slots are aligned to their class's alignmen
 is a slot of the layout's class or a run aligned as `alloc_run` was asked. Exclusivity: the
 back end hands each slot once until it is freed, and magazines hold each free object once (the
 slab invariant, `front/real-safety.md`). No unwinding: the allocator's paths never panic
-(aborts go through `Os::abort`, which does not return). `realloc` is `Bound::realloc`
+(aborts go through `Os::abort`, which does not return). `alloc_zeroed` is an allocation with
+`Zero::Requested`, which clears the layout's `size()` bytes, or skips a large slot or run the
+back end knows to be zero (HEAP-03). `realloc` is `Bound::realloc`
 (`heap/resize.rs`): its lean path keeps a small block whose new size has its class, or copies
 it into a block of the new class and frees it only after the copy (HEAP-07); everything else,
 and a lean path whose pop missed, which has changed nothing, goes to the general path, which
@@ -26,7 +29,12 @@ without touching the block, and frees the old block only after copying (HEAP-04)
 
 **Obligations** (`Allocator`'s `# Safety`). Blocks stay valid until deallocated or resized;
 any handle (all are the same ZST) may free any block; `deallocate` accepts any layout that
-fits; grow and shrink keep contents and leave the old block alone on error.
+fits; grow and shrink keep contents and leave the old block alone on error; and the methods
+zero what their documentation says (the trait's `# Safety` asks that they be correct in this
+too). As stabilised in Rust 1.100: `allocate_zeroed` returns a slice that is zero over its
+whole length, past the layout's size included; `grow_zeroed` keeps bytes `0..old.size()` and
+returns bytes `old.size()..len` zero, where `len` is the length it returns, so the old block's
+slack, which the caller may have written, is zeroed too.
 
 **Proof.** As GLOBAL-01, with: the returned length is the class size for a small block, by the
 fit rule every size from the request to it has the same class (`classes::verify`), so a
@@ -40,13 +48,17 @@ its size (the size is rounded up to a multiple of the alignment and the class is
 at least that, both non-decreasing; `classes::verify`). So a fitting layout's class is at least
 the requested one's, above every small class or none at all, and `dealloc` takes the large
 path, which finds the slot or run from the address. Zero-size
-layouts get a dangling, aligned pointer and are never freed (`heap/allocator.rs`). `grow`,
-`grow_zeroed` and `shrink` of a non-empty block are `Bound::grow_block` and `shrink_block`
-(`heap/resize.rs`): a small block whose new layout has its class stays, with the class's
-length; one that moves to another small class is copied into a block of that class before
-it is freed (HEAP-07), and for `grow_zeroed` everything past the bytes kept, to the new
-class's length, is cleared (HEAP-08); everything else is the general resize, as before. Every handle
-reaches `HEAP`, so blocks may move between handles.
+layouts get a dangling, aligned pointer and are never freed (`heap/allocator.rs`).
+`allocate_zeroed` is an allocation with `Zero::Whole`, which clears all `len` bytes it
+returns, or skips a large slot or run the back end knows to be zero (HEAP-03); a grow of an
+empty block is the same allocation. `grow`, `grow_zeroed` and `shrink` of a non-empty block
+are `Bound::grow_block` and `shrink_block` (`heap/resize.rs`): a small block whose new layout
+has its class stays, with the class's length; one that moves to another small class is copied
+into a block of that class before it is freed (HEAP-07); everything else is the general
+resize, as before. For `grow_zeroed`, whichever path served it, `grow_block` then clears
+from `old.size()` to the length returned unless the block moved into memory known to read as
+zero (HEAP-08), so the bytes the stable contract names are zero in place and moved alike.
+Every handle reaches `HEAP`, so blocks may move between handles.
 
 ## GLOBAL-04: `free_slow` in `c_free_small`
 
@@ -80,4 +92,4 @@ whose `new_size` is not zero and does not overflow `isize` when rounded up to th
 for a block this allocator returned. Every `Asmalloc` reaches `HEAP` through `process()`, so a
 block any handle returned is a block of the heap `process()` names.
 
-Reviewed: f41dbf9
+Reviewed: 548ea25

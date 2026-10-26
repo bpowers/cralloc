@@ -1,7 +1,8 @@
 //! An `Allocator` shaped like asmalloc's must pass: every block is a whole 32-byte class, the
 //! slice returned is the class, and a resize within the class happens in place. `grow_zeroed`
-//! in place zeroes only past the old class, which the trait allows, so the model must not
-//! demand zeros from the size passed in.
+//! in place must zero from the old layout's size to the class's end, the slack the caller was
+//! given included (the trait's contract as stabilised in Rust 1.100), and the model must
+//! catch one that zeroes only past the old class, as the trait's unstable wording allowed.
 #![cfg(feature = "allocator-api")]
 
 mod common;
@@ -10,11 +11,16 @@ use core::alloc::{AllocError, Allocator, Layout};
 use core::ptr::NonNull;
 use std::alloc::System;
 
+use asmalloc_testkit::failure::FailureKind;
 use asmalloc_testkit::subject::ViaAllocator;
-use asmalloc_testkit::{Config, Handoff, Profile, check};
+use asmalloc_testkit::{Config, Handoff, Profile, check, run};
 use common::{balanced, fit, ops, ops_for, profiles};
 
-struct ClassSized;
+/// `keeps_slack`: a `grow_zeroed` in place leaves the old layout's slack as the caller wrote
+/// it, which the stable contract forbids.
+struct ClassSized {
+    keeps_slack: bool,
+}
 
 const CLASS: usize = 32;
 
@@ -35,6 +41,15 @@ impl ClassSized {
     ) -> Result<NonNull<[u8]>, AllocError> {
         let nc = class(new);
         if class(old) == nc {
+            if zero && !self.keeps_slack {
+                // SAFETY: the block is the caller's whole class, and `old` fits it, so
+                // `old.size() <= nc.size()`.
+                unsafe {
+                    p.as_ptr()
+                        .add(old.size())
+                        .write_bytes(0, nc.size() - old.size())
+                };
+            }
             return Ok(NonNull::slice_from_raw_parts(p, nc.size()));
         }
         let q = if zero {
@@ -54,6 +69,8 @@ impl ClassSized {
 
 // SAFETY: blocks come from `System` with their class layout and go back with it; every layout
 // that fits a block maps to its class, since the trait allows only sizes up to the slice length.
+// The one that keeps its slack breaks only the zeroing promise, which the model checks and
+// nothing here relies on.
 unsafe impl Allocator for ClassSized {
     fn allocate(&self, l: Layout) -> Result<NonNull<[u8]>, AllocError> {
         let c = class(l);
@@ -82,8 +99,7 @@ unsafe impl Allocator for ClassSized {
         old: Layout,
         new: Layout,
     ) -> Result<NonNull<[u8]>, AllocError> {
-        // SAFETY: the caller's contract for `grow_zeroed`; in place, the old class's bytes are
-        // kept and there are none past it to zero.
+        // SAFETY: the caller's contract for `grow_zeroed`.
         unsafe { self.resize(p, old, new, true) }
     }
 
@@ -100,10 +116,19 @@ unsafe impl Allocator for ClassSized {
 
 #[test]
 fn class_sized_slices_and_in_place_growth_are_accepted() {
-    let s = ViaAllocator(ClassSized);
+    let s = ViaAllocator(ClassSized { keeps_slack: false });
     for p in profiles() {
         balanced(&check(&s, &Config::single(p, 6, ops_for(&p))), p.name);
     }
     let cfg = Config::threads(fit(Profile::MIXED), 4, Handoff::AllToAll, 6, ops(3000, 80));
     balanced(&check(&s, &cfg), "threads");
+}
+
+#[test]
+fn an_in_place_zeroed_grow_that_keeps_the_slack_is_caught() {
+    let s = ViaAllocator(ClassSized { keeps_slack: true });
+    let p = fit(Profile::MIXED);
+    let caught = (0..6).find_map(|seed| run(&s, &Config::single(p, seed, ops_for(&p))).err());
+    let f = caught.expect("an in-place grow_zeroed that keeps the slack is caught");
+    assert_eq!(f.kind, FailureKind::NotZeroed, "{f}");
 }
