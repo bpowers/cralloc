@@ -24,7 +24,9 @@ use core::sync::atomic::{AtomicBool, AtomicPtr, Ordering};
 
 /// A heap over a [`SimOs`], with its own slabs, run with twins. See the module documentation.
 pub struct SimHeap<S: Shape = Standard> {
-    pub(super) heap: Heap<SimOs<S>>,
+    // Boxed, so that a test that keeps a heap on its stack does not keep the back end's state
+    // there too: with every region's words it is hundreds of kilobytes.
+    pub(super) heap: Box<Heap<SimOs<S>>>,
     slabs: Box<Slabs<[Slab; SIM_THREADS]>>,
     leases: [AtomicBool; SIM_THREADS],
 }
@@ -141,7 +143,7 @@ impl<S: Shape> SimHeap<S> {
     /// A heap over `os`, not yet started.
     pub fn with_os(os: SimOs<S>) -> SimHeap<S> {
         SimHeap {
-            heap: Heap::new(os),
+            heap: Box::new(Heap::new(os)),
             slabs: Box::new(Slabs::new()),
             leases: [const { AtomicBool::new(false) }; SIM_THREADS],
         }

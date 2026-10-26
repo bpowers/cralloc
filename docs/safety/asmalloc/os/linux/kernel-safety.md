@@ -37,7 +37,7 @@ A thread of the process preempted inside a sequence on that CPU was preempted by
 so its abort is already pending. An abort is something every sequence must already tolerate,
 since preemption causes one at any instruction. No memory changes.
 
-## KERNEL-03: the memory calls in `reserve`, `commit`, `purge`, `advise_huge`, `unmap`
+## KERNEL-03: the memory calls in `reserve`, `commit`, `purge`, `advise_huge`, `split_huge`, `unmap`
 
 **mmap in `reserve`.** Arguments: address null (the kernel chooses, so no existing mapping is
 replaced), `span` bytes, `PROT_NONE`, `MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE`, fd -1,
@@ -62,6 +62,14 @@ nothing in it is needed, so zeroing it cannot break any Rust value or reference.
 
 **`advise_huge`: madvise `MADV_HUGEPAGE` or `MADV_NOHUGEPAGE`.** These change only how the
 kernel backs the range, never its contents or protection.
+
+**`split_huge`: madvise `MADV_COLD`** (Linux 5.4). On a range that covers part of a huge page
+the kernel splits the huge page into small pages, remapping each with the same contents
+(`madvise_cold_or_pageout_pte_range`, `split_folio`), and it moves the range's pages to the
+inactive list, which changes only the order in which reclaim considers them. Contents and
+protection are unchanged. A split that cannot be made leaves the huge page as it was. On an
+older kernel the call fails with `EINVAL` and changes nothing; the caller then returns nothing
+in part.
 
 **`wipe_on_fork`: madvise `MADV_WIPEONFORK`** (Linux 4.14). It sets a flag on the private
 anonymous mapping so that a child's copy reads as zero; the calling process's contents and

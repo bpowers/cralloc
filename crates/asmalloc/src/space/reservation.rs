@@ -260,6 +260,15 @@ impl<'os, O: Os> Space<'os, O> {
         unsafe { self.os.advise_huge(start, len, advice) }
     }
 
+    /// Asks the OS to split the huge pages a range of the reservation covers in part
+    /// ([`Os::split_huge`]). Aborts if the range is not one [`Space::is_callable_range`]
+    /// accepts.
+    pub fn split_huge(&self, start: NonNull<u8>, len: usize) -> Result<(), OsError> {
+        self.check(start, len);
+        // SAFETY: RESERVATION-01. as in `commit`.
+        unsafe { self.os.split_huge(start, len) }
+    }
+
     /// How many pages of a range of the reservation are resident. Aborts if the range is not
     /// one [`Space::is_callable_range`] accepts.
     ///

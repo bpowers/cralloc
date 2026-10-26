@@ -76,4 +76,8 @@ impl<O: Os> Source for Back<'_, O> {
     fn thread(&self) -> &crate::thread_word::ThreadWord {
         Back::thread(self)
     }
+
+    fn forked(&self) {
+        self.distrust_tails();
+    }
 }

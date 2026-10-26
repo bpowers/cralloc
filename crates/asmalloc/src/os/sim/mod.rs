@@ -35,6 +35,11 @@
 //! - Random numbers come from a seeded generator, so a test is repeatable.
 //! - The clock [`Os::ticks`] reads stands still until the test advances it
 //!   ([`SimOs::advance_clock`]), so tests of idleness need no sleeping.
+//! - Huge pages are modelled as far as their charge goes ([`SimOs::charged_bytes`]): a huge
+//!   page committed under advice for huge pages is charged whole; purging part of it without
+//!   a split first ([`Os::split_huge`]) leaves it charged whole, as Linux's deferred split
+//!   does; and [`SimOs::khugepaged`] rebuilds, charged whole, any huge page under the advice
+//!   that holds a page in use, as khugepaged does.
 //! - `abort` panics, so a test can observe it.
 //!
 //! The heap's geometry comes from a [`Shape`]: [`Standard`] for tests, Miri and fuzzing,
@@ -137,8 +142,13 @@ pub struct SimOs<S: Shape = Standard> {
     environment_reads: AtomicU64,
     /// What the background thread's calls did: waits, wakes, and fences of every CPU.
     sleeps: Sleeps,
+    /// One byte a huge page: [`MAPPED`] while it is mapped as one huge page.
+    units: alloc::boxed::Box<[core::sync::atomic::AtomicU8]>,
     shape: PhantomData<fn() -> S>,
 }
+
+/// A huge page of the simulated memory is mapped as one: charged whole whatever is resident.
+const MAPPED: u8 = 1;
 
 /// The simulated [`Os::wait`], [`Os::wake`] and [`Os::fence_all`]: counted, and a wait
 /// returns at once, so that a test drives the thread's loop one step at a time.
@@ -279,6 +289,9 @@ impl<S: Shape> SimOs<S> {
                 threads: core::sync::atomic::AtomicBool::new(false),
                 other_thread: core::sync::atomic::AtomicBool::new(false),
             },
+            units: (0..bytes / geometry.huge_page_size())
+                .map(|_| core::sync::atomic::AtomicU8::new(0))
+                .collect(),
             shape: PhantomData,
         }
     }
@@ -493,6 +506,89 @@ impl<S: Shape> SimOs<S> {
         resident * page
     }
 
+    /// Pages to a huge page.
+    fn huge_pages_per_unit(&self) -> usize {
+        S::GEOMETRY.huge_page_size() / S::GEOMETRY.page_size()
+    }
+
+    /// The huge pages `first..first + count` touches, each with whether the range covers it
+    /// whole.
+    fn units_of(&self, first: usize, count: usize) -> impl Iterator<Item = (usize, bool)> {
+        let per = self.huge_pages_per_unit();
+        let end = first + count;
+        let (lo, hi) = (first / per, end.div_ceil(per));
+        (lo..hi).map(move |u| (u, first <= u * per && (u + 1) * per <= end))
+    }
+
+    /// Whether every page of huge page `unit` has all the bits of `mask`.
+    fn unit_all(&self, unit: usize, mask: u8) -> bool {
+        let per = self.huge_pages_per_unit();
+        self.pages.all(unit * per, per, mask)
+    }
+
+    /// Bytes the cgroup would be charged for the heap: a huge page mapped as one counts whole,
+    /// every other page as [`SimOs::resident_bytes`] counts it.
+    ///
+    /// # Safety
+    ///
+    /// As [`SimOs::resident_bytes`].
+    pub unsafe fn charged_bytes(&self) -> usize {
+        let page = S::GEOMETRY.page_size();
+        let per = self.huge_pages_per_unit();
+        let mut charged = 0;
+        for (u, unit) in self.units.iter().enumerate() {
+            if unit.load(Ordering::Acquire) & MAPPED != 0 {
+                charged += per * page;
+                continue;
+            }
+            for index in u * per..(u + 1) * per {
+                if self.pages.get(index) & (RESERVED | WRITABLE) == RESERVED | WRITABLE
+                    // SAFETY: the caller's promise, page by page.
+                    && !unsafe { self.memory.is_zero(index << self.page_shift(), page) }
+                {
+                    charged += page;
+                }
+            }
+        }
+        charged
+    }
+
+    /// Whether the huge page holding `at` is mapped as one huge page.
+    pub fn huge_mapped(&self, at: NonNull<u8>) -> bool {
+        self.covering(at, 1).is_some_and(|(first, _)| {
+            self.units[first / self.huge_pages_per_unit()].load(Ordering::Acquire) & MAPPED != 0
+        })
+    }
+
+    /// One pass of khugepaged: every huge page that is not mapped as one, all of whose pages
+    /// are committed and advised for huge pages, and one of whose pages holds data, is rebuilt
+    /// as one huge page, charged whole. Returns how many. Linux collapses a huge page with
+    /// one page present (`max_ptes_none` 511 by default).
+    ///
+    /// # Safety
+    ///
+    /// As [`SimOs::resident_bytes`].
+    pub unsafe fn khugepaged(&self) -> usize {
+        let page = S::GEOMETRY.page_size();
+        let per = self.huge_pages_per_unit();
+        let mut built = 0;
+        for (u, unit) in self.units.iter().enumerate() {
+            if unit.load(Ordering::Acquire) & MAPPED != 0
+                || !self.unit_all(u, RESERVED | WRITABLE | HUGE)
+            {
+                continue;
+            }
+            // SAFETY: the caller's promise, page by page.
+            let used = (u * per..(u + 1) * per)
+                .any(|index| !unsafe { self.memory.is_zero(index << self.page_shift(), page) });
+            if used {
+                unit.fetch_or(MAPPED, Ordering::AcqRel);
+                built += 1;
+            }
+        }
+        built
+    }
+
     /// The huge-page advice last given for the page holding `at`, if any.
     pub fn huge_pages(&self, at: NonNull<u8>) -> Option<HugePages> {
         let (first, _) = self.covering(at, 1)?;
@@ -631,8 +727,8 @@ fn splitmix(state: &AtomicU64) -> u64 {
 //   `unmap` zeroes a range before releasing its pages, with release ordering that the next
 //   claim's acquire pairs with. So reserved memory reads as zero.
 // - The memory is always readable and writable, so `commit` needs only to record it, and
-//   changes no contents. `purge` zeroes its range. `advise_huge` only records, and `resident`
-//   only reads.
+//   changes no contents. `purge` zeroes its range. `advise_huge` and `split_huge` only record,
+//   and `resident` only reads.
 // - An injected failure changes nothing, or with `Faults::partially` acts on the first half of
 //   its range, never beyond it.
 // - A range must lie in one live reservation of this value. `checked_range` panics before
@@ -692,6 +788,13 @@ unsafe impl<S: Shape> Os for SimOs<S> {
             }
             self.pages.update(index, 1, WRITABLE, PURGED | CHECKING);
         }
+        // A huge page made writable under advice for huge pages faults as one huge page, so
+        // it is charged whole from its first touch; the simulator counts it so from here.
+        for (u, whole) in self.units_of(first, applied) {
+            if whole && self.unit_all(u, RESERVED | WRITABLE | HUGE) {
+                self.units[u].fetch_or(MAPPED, Ordering::AcqRel);
+            }
+        }
         result
     }
 
@@ -706,6 +809,11 @@ unsafe impl<S: Shape> Os for SimOs<S> {
                 .zero(first << self.page_shift(), applied << self.page_shift())
         };
         self.pages.update(first, applied, PURGED, 0);
+        for (u, whole) in self.units_of(first, applied) {
+            if whole {
+                self.units[u].fetch_and(!MAPPED, Ordering::AcqRel);
+            }
+        }
         result
     }
 
@@ -720,6 +828,17 @@ unsafe impl<S: Shape> Os for SimOs<S> {
         match advice {
             HugePages::Prefer => self.pages.update(first, applied, HUGE, NO_HUGE),
             HugePages::Avoid => self.pages.update(first, applied, NO_HUGE, HUGE),
+        }
+        result
+    }
+
+    unsafe fn split_huge(&self, start: NonNull<u8>, len: usize) -> Result<(), OsError> {
+        let (first, count) = self.checked_range(Call::SplitHuge, start, len);
+        let (applied, result) = self.admit(Call::SplitHuge, count);
+        for (u, whole) in self.units_of(first, applied) {
+            if !whole {
+                self.units[u].fetch_and(!MAPPED, Ordering::AcqRel);
+            }
         }
         result
     }
@@ -770,6 +889,9 @@ unsafe impl<S: Shape> Os for SimOs<S> {
                 .zero(first << self.page_shift(), applied << self.page_shift());
             self.memory
                 .close(first << self.page_shift(), applied << self.page_shift());
+        }
+        for (u, _) in self.units_of(first, applied) {
+            self.units[u].fetch_and(!MAPPED, Ordering::AcqRel);
         }
         self.pages.release(first, applied);
         result

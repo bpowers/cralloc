@@ -114,6 +114,31 @@ are valid for the calls. The new thread runs `run` with a null argument, which i
   __pthread_tsd_size)`), so there `static_tls()` is 0 and the frames get all of `NEED +
   LIBRARY`. The sum saturates rather than wrap; a size the library cannot map fails the
   call, which starts nothing.
+
+  Where each statement about the C libraries comes from, for a reviewer checking them
+  against glibc 2.43:
+  - *Measured* (glibc 2.43, `docs/research/thread-stack.md`): a 256 KiB request is accepted
+    with static TLS up to about 255.5 KB and refused with `EINVAL` from 256,000 bytes; an
+    accepted request just under that leaves a thread so little stack that it crashes; the TLS
+    and glibc's block sit at the top of the requested stack; glibc's block is about 4.5 KiB
+    with the default tunables; the thread's own frames reach 8 KiB (release) and 34 KiB
+    (debug); with the new request a program with 252,000 bytes of TLS runs.
+  - *From memory of glibc's source, not re-read* (`nptl/allocatestack.c`, `elf/dl-tls.c`):
+    that the test is `size < guard + tls_static_size_for_stack() + MINIMAL_REST_STACK`
+    rounded to a page, with `MINIMAL_REST_STACK` 2048; that the static TLS size includes the
+    surplus and the thread descriptor; that `dlopen`ed modules with initial-exec TLS take
+    their static TLS from the surplus and others get dynamic TLS; that
+    `glibc.rtld.optional_static_tls` enlarges the surplus.
+  - *Read in source* (the musl checkout at 1b76ff07): musl's `pthread_create` adds the TLS
+    and its own block to the size asked for.
+
+  Inside another `dl_iterate_phdr` callback (Rust's backtrace code allocates in one, and so
+  may reach `start_wanted`): on glibc `static_tls`'s own `dl_iterate_phdr` takes the
+  recursive `dl_load_write_lock` that this thread already holds, so it nests and iterates
+  the same unchanged list, and `pthread_create` takes no lock that the iteration holds (from
+  memory, as above); on musl `static_tls` makes no call, and musl's `dl_iterate_phdr` holds no
+  lock while its callback runs (read in source: it takes its `rdlock` only to step to the
+  next module), so `pthread_create`'s `__acquire_ptc` cannot wait on it.
 - I7. A first `create` with the attribute that `EINVAL` refused created no thread and stored
   nothing that is used; the second `create` passes a null attribute, which `pthread_create`
   takes as the defaults, with the same `thread`, `run` and argument, under the same mask, and

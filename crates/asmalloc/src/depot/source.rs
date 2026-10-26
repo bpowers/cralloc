@@ -67,6 +67,11 @@ pub trait Source {
 
     /// The background thread's word (`crate::thread_word`).
     fn thread(&self) -> &crate::thread_word::ThreadWord;
+
+    /// In the child of a fork, at its first slow path: state that a thread the fork cut off
+    /// may have left half-changed is to be distrusted (the back end's huge-page tails,
+    /// `back::tail`, "Repair").
+    fn forked(&self) {}
 }
 
 /// What a fill did ([`Source::fill`]).

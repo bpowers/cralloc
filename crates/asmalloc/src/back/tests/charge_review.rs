@@ -945,7 +945,6 @@ fn fill_all(seed: u64, steps: usize) -> Met {
                     let new = Layout::from_size_align(size, layout.align()).unwrap();
                     let kept = old.wrote.min(layout.size()).min(size);
                     let (ptr, wrote) = if grow_zeroed {
-                        let before = sim.usable_size(old.ptr.as_ptr()).unwrap();
                         // SAFETY: the test's block, which `layout` fits; `new` is larger.
                         let (ptr, len) =
                             unsafe { sim.grow_zeroed_for_test(old.ptr.as_ptr(), layout, new) }
@@ -956,9 +955,9 @@ fn fill_all(seed: u64, steps: usize) -> Met {
                             Some(len),
                             "seed {seed:#x} step {at}: a grant of {len} bytes for {size}"
                         );
-                        // Past the old block, which ended at its usable size if it stayed
-                        // and at its layout's if it moved.
-                        let from = before.max(layout.size()).min(len);
+                        // From the old layout's size to the length returned, whether the
+                        // block stayed or moved.
+                        let from = layout.size().min(len);
                         assert!(
                             all_are(ptr.wrapping_add(from), len - from, 0),
                             "seed {seed:#x} step {at}: a zeroed grow to {size} is not zero"

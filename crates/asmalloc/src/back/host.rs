@@ -85,6 +85,11 @@ pub(crate) type Headers = [RegionHeader; MAX_REGIONS];
 /// their stacks.
 pub(crate) type Frontiers = [Atomic; MAX_REGIONS];
 
+/// The `Tail` word of every region, by region number, eight to a line, as [`Frontiers`] are
+/// (`tail`). Written when the purge returns part of a huge page above a frontier, when a claim
+/// climbs into a tail, and around an advice change: a few times an interval at most.
+pub(crate) type Tails = [Atomic; MAX_REGIONS];
+
 /// The class levels of a class's summary tree.
 pub(crate) struct Summary {
     pub(crate) top: Atomic,
@@ -122,6 +127,8 @@ pub(crate) struct ClassHost<'a, O: Os> {
     pub(crate) class: &'a ClassState,
     pub(crate) headers: &'a Headers,
     pub(crate) frontiers: &'a Frontiers,
+    pub(crate) tails: &'a Tails,
+    pub(crate) marks: &'a Atomic,
     pub(crate) layout: Layout,
 }
 
@@ -132,6 +139,8 @@ impl<'a, O: Os> ClassHost<'a, O> {
         class: &'a ClassState,
         headers: &'a Headers,
         frontiers: &'a Frontiers,
+        tails: &'a Tails,
+        marks: &'a Atomic,
         layout: Layout,
     ) -> Self {
         ClassHost {
@@ -139,6 +148,8 @@ impl<'a, O: Os> ClassHost<'a, O> {
             class,
             headers,
             frontiers,
+            tails,
+            marks,
             layout,
         }
     }
@@ -221,6 +232,16 @@ impl<O: Os> Host for ClassHost<'_, O> {
     }
 
     #[inline(always)]
+    fn tail(&self, region: RegionId) -> &Atomic {
+        &self.tails[region.index() % MAX_REGIONS]
+    }
+
+    #[inline(always)]
+    fn tail_marks(&self) -> &Atomic {
+        self.marks
+    }
+
+    #[inline(always)]
     fn class_word(&self, index: u32) -> &Atomic {
         &self.class.summary.words[index as usize % CLASS_WORDS]
     }
@@ -245,6 +266,12 @@ impl<O: Os> Host for ClassHost<'_, O> {
     fn advise(&self, region: RegionId, offset: usize, len: usize, advice: HugePages) -> bool {
         self.space
             .advise_huge(self.region_at(region, offset), len, advice)
+            .is_ok()
+    }
+
+    fn split(&self, region: RegionId, offset: usize, len: usize) -> bool {
+        self.space
+            .split_huge(self.region_at(region, offset), len)
             .is_ok()
     }
 

@@ -86,9 +86,9 @@ impl<A: Allocator + Sync> Subject for ViaAllocator<A> {
                 }
             }
             .map_err(|_| Refused)?;
-            // Bytes from `old_size` to the old block's length may be kept or zeroed; only those
-            // past the old length must be zero.
-            let zeroed_from = req.zeroed.then_some(block.usable);
+            // The stable contract: every byte from the old layout's size to the new length is
+            // zero, the old block's slack included, which the model wrote.
+            let zeroed_from = req.zeroed.then_some(old_size);
             Ok(Resized {
                 grant: grant(slice, req.align, false),
                 preserved: old_size,

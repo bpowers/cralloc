@@ -92,7 +92,10 @@ pub(crate) struct Grant {
     // Only `Allocator` returns it.
     #[cfg_attr(not(feature = "allocator-api"), allow(dead_code))]
     pub(crate) len: usize,
-    /// All `len` bytes are known to read as zero: fresh or purged memory, or cleared.
+    /// The bytes past those the call carried over from an old block are known to read as
+    /// zero: all `len` of them for an allocation (fresh or purged memory, or cleared), and
+    /// those past the bytes kept for a resize that moved the block into such memory. Never
+    /// for a block resized in place, whose slack the caller may have written.
     pub(crate) zeroed: bool,
 }
 

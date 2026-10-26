@@ -53,6 +53,8 @@
 use core::sync::atomic::{AtomicU32, AtomicU64, Ordering::Relaxed};
 
 unsafe extern "C" {
+    fn syscall(n: i64, ...) -> i64;
+    fn clock_gettime(clock: i32, ts: *mut [i64; 2]) -> i32;
     fn getenv(name: *const core::ffi::c_char) -> *const core::ffi::c_char;
     fn open(path: *const core::ffi::c_char, flags: i32, mode: u32) -> i32;
     fn write(fd: i32, buf: *const u8, n: usize) -> isize;
@@ -631,5 +633,100 @@ pub fn dump(epoch: u64) {
             let _ = write(fd, b.b.as_ptr(), b.n);
             close(fd);
         }
+    }
+}
+
+// --- Tracing (`HT_TRACE=<file>`): one line a walk call in a region with a huge-page part,
+// an advice change or a split, with the time, the thread and its CPU, written at once.
+
+static TRACE_FD: core::sync::atomic::AtomicI32 = core::sync::atomic::AtomicI32::new(-2);
+static BG_TID: core::sync::atomic::AtomicI64 = core::sync::atomic::AtomicI64::new(0);
+
+fn trace_fd() -> i32 {
+    let fd = TRACE_FD.load(Relaxed);
+    if fd != -2 {
+        return fd;
+    }
+    // SAFETY: getenv returns null or a NUL-terminated string; open takes one.
+    let path = unsafe { getenv(c"HT_TRACE".as_ptr()) };
+    let fd = if path.is_null() { -1 } else { unsafe { open(path, 0o1 | 0o100 | 0o2000 | 0o2000000, 0o644) } };
+    match TRACE_FD.compare_exchange(-2, fd, Relaxed, Relaxed) {
+        Ok(_) => fd,
+        Err(found) => {
+            if fd >= 0 {
+                // SAFETY: our own descriptor.
+                unsafe { close(fd) };
+            }
+            found
+        }
+    }
+}
+
+#[inline]
+pub fn tracing() -> bool {
+    let fd = TRACE_FD.load(Relaxed);
+    fd >= 0 || (fd == -2 && trace_fd() >= 0)
+}
+
+/// The time on CLOCK_MONOTONIC, in nanoseconds, for traces.
+pub fn mono_ns() -> u64 {
+    let mut ts = [0i64; 2];
+    // SAFETY: the buffer is a timespec.
+    unsafe { clock_gettime(1, &mut ts) };
+    ts[0] as u64 * 1_000_000_000 + ts[1] as u64
+}
+
+fn tid() -> i64 {
+    // SAFETY: gettid has no arguments and no preconditions.
+    unsafe { syscall(186) }
+}
+
+/// The background thread notes itself, so that traces can say who ran a step.
+pub fn note_bg() {
+    if tracing() {
+        BG_TID.store(tid(), Relaxed);
+    }
+}
+
+/// Writes one trace line: `kind t0_ns dur_ns tid bg cpu a b c d e`.
+pub fn trace(kind: &str, t0: u64, a: u64, b: u64, c: u64, d: u64, e: u64) {
+    let fd = trace_fd();
+    if fd < 0 {
+        return;
+    }
+    let t1 = mono_ns();
+    let mut aux = 0u32;
+    // SAFETY: rdtscp has no preconditions; Linux keeps the CPU number in TSC_AUX.
+    unsafe { core::arch::x86_64::__rdtscp(&mut aux) };
+    let me = tid();
+    let mut b2 = Buf { b: [0; 768], n: 0 };
+    b2.s(kind);
+    for v in [t0, t1.saturating_sub(t0), me as u64, (me == BG_TID.load(Relaxed)) as u64, (aux & 0xfff) as u64, a, b, c, d, e] {
+        b2.s(" ");
+        b2.u(v);
+    }
+    b2.s("\n");
+    // SAFETY: the buffer holds `n` bytes.
+    unsafe {
+        let _ = write(fd, b2.b.as_ptr(), b2.n);
+    }
+}
+
+static LAST_HB: AtomicU64 = AtomicU64::new(0);
+static BURST: AtomicU64 = AtomicU64::new(0);
+
+/// At a slow path's heartbeat, with tracing: an `H` line for the first heartbeat after a
+/// second without one (the start of a burst), and for every heartbeat in the 20 ms after it.
+pub fn note_heartbeat() {
+    if !tracing() {
+        return;
+    }
+    let now = mono_ns();
+    let last = LAST_HB.swap(now, Relaxed);
+    if now.saturating_sub(last) > 1_000_000_000 {
+        BURST.store(now, Relaxed);
+        trace("H", now, now - last, 1, 0, 0, 0);
+    } else if now.saturating_sub(BURST.load(Relaxed)) < 20_000_000 {
+        trace("H", now, now - last, 0, 0, 0, 0);
     }
 }

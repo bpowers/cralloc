@@ -150,6 +150,40 @@ pub const PURGE_CAP_WORDS: usize = 1 << 14;
 /// quarter of a region instead, and at least one huge page.
 pub const HUGE_AFTER_HUGE_PAGES: usize = 8;
 
+/// When claims reach above a region's tail (`tail`), the advice goes back on up to the
+/// frontier and this many huge pages beyond it: 8, or 16 MiB. With none, a class that grows
+/// back into its tail moved the boundary about ten times an interval, a call each that takes
+/// the address-space lock; 8 cut that five times and 32 seven times, with no change in memory.
+/// It is bounded because under the advice khugepaged rebuilds any huge page with one page in
+/// use, so advice over units that stay sparse brings their memory back
+/// (`docs/research/huge-tail.md`).
+pub const TAIL_HEADROOM_HUGE_PAGES: u32 = 8;
+
+/// The pages of a huge page above the frontier that the walk's cheap look samples before it
+/// reads the huge page a page at a time: 8, one in each eighth of the huge page, so that a
+/// look at a dense huge page reads a few words more than main's did (its leaf words to the
+/// first live slot). Reading a dense huge page a page at a time cost the background thread
+/// four times main's walk at the start of a server's burst (`docs/research/huge-tail.md`,
+/// "The burst start"). A fixed count, not one scaled with the region or the heap: it bounds
+/// the cost of a look at one huge page, and the walk's budget bounds how many it looks at.
+pub const TAIL_SAMPLE_PAGES: u32 = 8;
+
+/// A huge page above the frontier is counted exactly (`tail::free_resident`), and so may be
+/// split, only if at least this many of its sampled pages are free and resident: 2 of 8, as
+/// the share [`TAIL_SPLIT_SHARE`] asks for. The sample only saves the count's reading on huge
+/// pages that are plainly dense; every lap samples other pages (`tail::look`), so a huge page
+/// misjudged once is judged again. Sampling runs of four pages, as long as the walk's
+/// shortest, instead returned a third as much on the lifetime job, whose stranded huge pages
+/// have free runs of four pages that are rarely aligned to four.
+pub const TAIL_SPARSE_PAGES: u32 = 2;
+
+/// A huge page above the frontier is split, and its free pages returned, only if at least one
+/// page in this many is free and resident by the walk's own count: 4, a quarter of the huge
+/// page or 512 KiB. Below that, what would go back is not worth the huge page's mapping and an
+/// advice change. A cut, not a rate: a huge page under it is never split, however many laps
+/// sample it. `trim` takes everything, and is not held to it.
+pub const TAIL_SPLIT_SHARE: u32 = 4;
+
 /// Only classes with at least this many slots to a page get huge pages: 4, so classes up
 /// to 1 KiB. Small objects are dense in their pages, so a huge page holds what the program
 /// uses. A block of a page or more is often touched in part, and with huge pages every part

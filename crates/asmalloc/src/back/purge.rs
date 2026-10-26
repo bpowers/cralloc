@@ -169,10 +169,28 @@
 //! **The walk** goes over the regions from the highest address down and round again from the
 //! top, skipping regions whose class summary bit says nothing in them is free. Within a region it walks units of pages
 //! from the watermark down (`Layout::unit_below`): whole pages in the small-page part, whole
-//! huge pages in the huge-page part, so a huge page is never split. At the top of a region
-//! with a huge-page part it first carves the rest of the unit that holds the watermark
-//! (`region::top_up`), so that the part of that huge page the fault made resident beyond the
-//! watermark can go with the rest.
+//! huge pages in the huge-page part below the frontier, so a huge page that fills still reach
+//! is never split. At the top of a region with a huge-page part it first carves the rest of the
+//! unit that holds the watermark (`region::top_up`), so that the part of that huge page the
+//! fault made resident beyond the watermark can go with the rest.
+//!
+//! **The tail** (`tail`). Above the frontier, rounded up to a huge page, the huge pages hold
+//! what fills left behind. Every step looks at each of them once at its top: one wholly free
+//! goes back whole, as below; any other gets the cheap look (`tail::look`), a few sampled
+//! pages, at places that move with every lap. One the look calls dense is passed whole, and a
+//! step that only counts passes every one with the look's estimate, so that a lap that returns
+//! nothing reads a few words a huge page more than main's did. A step that may return memory
+//! counts a sparse one exactly (`tail::free_resident`), and splits it only if a quarter of its
+//! pages or more are free and resident (`policy::TAIL_SPLIT_SHARE`): then it walks it a page at
+//! a time from the cursor, in runs within the huge page, asking the kernel to split it over
+//! each run before returning the run. A step resumed inside a huge page that may not return
+//! memory passes the rest of it. On a request's slow path a split asked for counts as the
+//! step's whole budget, refused or not, so such a step asks for one at most; a refused split
+//! leaves the run, and no split is asked for again before the next interval. The lowest huge
+//! page a step returned part of is noted in the region's tail word, and when the walk reaches
+//! the bottom of the region (or a pass or a growth payment ends in it) the advice comes off
+//! from there in one call, never below the frontier as it then stands. `trim` walks the whole
+//! huge-page part so, and splits whatever it can return.
 //!
 //! **Pieces.** A unit of the small-page part is the pages of the slots it covers, so one
 //! large slot is a unit as long as the slot: tens of megabytes. A purge step that may return
@@ -199,15 +217,18 @@
 //! the frontiers.
 
 use super::Back;
+use super::host::ClassHost;
+use super::layout::Layout;
 use super::layout::Unit;
 use super::layout::{Hints, Step};
 use super::policy::{
     DECAY_TICKS, PURGE_ANY_RUN_EVERY, PURGE_CAP_WORDS, PURGE_MAINTAIN_STEP_PAGES,
     PURGE_MAINTAIN_STEP_WORDS, PURGE_MAX_RUN_PAGES, PURGE_MAX_RUN_WORDS, PURGE_MIN_RUN_PAGES,
-    PURGE_STEP_PAGES, PURGE_STEP_WORDS, allowance_floor, decay_goal, growth_goal, growth_step,
-    growth_unpaid, retained_cap,
+    PURGE_STEP_PAGES, PURGE_STEP_WORDS, TAIL_SPLIT_SHARE, allowance_floor, decay_goal, growth_goal,
+    growth_step, growth_unpaid, retained_cap,
 };
 use super::region::{self, Purge};
+use super::tail;
 use super::tree::Host;
 use super::word::{BITS, Word};
 use crate::classes::Class;
@@ -519,8 +540,13 @@ impl<O: Os> Back<'_, O> {
         let regions = self.walk_regions().max(1);
         let (mut spent, mut finished, mut purged) = (0, 0, 0);
         while purged < goal && spent < PURGE_CAP_WORDS && finished < regions {
-            let (read, bytes, done) =
-                self.purge_step(PURGE_CAP_WORDS - spent, goal - purged, Scope::All, false);
+            let (read, bytes, done) = self.purge_step(
+                PURGE_CAP_WORDS - spent,
+                goal - purged,
+                Scope::All,
+                false,
+                true,
+            );
             spent += read;
             purged += bytes;
             finished += usize::from(done);
@@ -531,6 +557,9 @@ impl<O: Os> Back<'_, O> {
         // on every heartbeat until the debt ran out.
         if owed > goal && purged != 0 {
             self.state.growth.fetch_add(owed - goal, SeqCst);
+        }
+        if purged != 0 {
+            self.lower_walked();
         }
         purged
     }
@@ -622,7 +651,8 @@ impl<O: Os> Back<'_, O> {
                 let _ = self.purge_steps(now);
                 false
             }
-            Duty::Thread => self.note_for_thread(now),
+            // A region whose huge-page advice should go back on is the thread's work too.
+            Duty::Thread => self.note_for_thread(now) | self.marks_due(),
         }
     }
 
@@ -641,6 +671,8 @@ impl<O: Os> Back<'_, O> {
     }
 
     fn purge_steps_of(&self, now: &dyn Fn() -> u64, size: StepSize) -> PassStep {
+        // A request's heartbeat raises one region a step; the thread, all it finds.
+        self.raise_marked(size.heartbeat);
         // The hold's fine count steps on the reading the decay step makes between passes, so
         // that the hold reads the clock itself only while a pass is under way (`hold`).
         let read = core::cell::Cell::new(None);
@@ -752,7 +784,10 @@ impl<O: Os> Back<'_, O> {
         let state = self.state;
         let step = growth_step(self.space.plan().geometry());
         let seen = state.decay.word.load(SeqCst);
-        if seen & ACTIVE == 0 && state.growth.load(SeqCst) >= step || self.pass_published() {
+        if seen & ACTIVE == 0 && state.growth.load(SeqCst) >= step
+            || self.pass_published()
+            || self.marks_due()
+        {
             return true;
         }
         let time = now();
@@ -781,6 +816,7 @@ impl<O: Os> Back<'_, O> {
     /// purged (`StepSize::MAINTAIN`), so that a caller that yields between steps holds its
     /// thread for tens of microseconds.
     pub fn decay_pass_step(&self, now: &dyn Fn() -> u64) -> PassStep {
+        self.raise_marked(false);
         let mut returned = 0;
         let more = self
             .decay_step_counting(now, StepSize::MAINTAIN, &mut returned)
@@ -871,6 +907,7 @@ impl<O: Os> Back<'_, O> {
             if (pass.pages == 0 && !pass.count) || self.went_round(pass) {
                 // The goal is met or the walk has gone round. End the pass this thread saw,
                 // and only that one.
+                self.lower_walked();
                 let now = self.now();
                 if size.heartbeat {
                     self.note_epoch(now);
@@ -891,6 +928,7 @@ impl<O: Os> Back<'_, O> {
                 limit,
                 Scope::of_pass(quiet, pass.any),
                 pass.count,
+                size.heartbeat,
             );
             spent += read;
             *returned += purged;
@@ -1035,6 +1073,7 @@ impl<O: Os> Back<'_, O> {
                         false,
                         Scope::All,
                         false,
+                        false,
                     )
                     .0;
             }
@@ -1046,15 +1085,16 @@ impl<O: Os> Back<'_, O> {
     /// position on if that region is done. Stops after `budget` words of bitmap or once it
     /// has purged `limit` bytes, finishing the unit it is on, or with `counting`, walks on to
     /// count once it has. What it sees a purge could return goes into the lap's count, and a
-    /// step that ends a lap makes that count the one the clocked pass is held to. Returns the
-    /// words of bitmap read, at least one, the bytes purged, and whether it finished its
-    /// region.
+    /// step that ends a lap makes that count the one the clocked pass is held to. `one_split`
+    /// as for [`Back::purge_region`]. Returns the words of bitmap read, at least one, the bytes
+    /// purged, and whether it finished its region.
     fn purge_step(
         &self,
         budget: usize,
         limit: usize,
         scope: Scope,
         counting: bool,
+        one_split: bool,
     ) -> (usize, usize, bool) {
         let plan = self.space.plan();
         let top = self.walk_regions();
@@ -1070,7 +1110,9 @@ impl<O: Os> Back<'_, O> {
             return (1, 0, true);
         };
         let (purged, read, done, found) = match self.purgeable(region) {
-            Some(class) => self.purge_region(class, region, budget, limit, true, scope, counting),
+            Some(class) => self.purge_region(
+                class, region, budget, limit, true, scope, counting, one_split,
+            ),
             None => (0, 1, true, 0),
         };
         let walk = &self.state.walk;
@@ -1114,9 +1156,11 @@ impl<O: Os> Back<'_, O> {
     /// and leaves the cursor alone. With [`Scope::Idle`] the region is done at its frontier
     /// (`region::floor`, read once a call): a unit that starts below it is left, with the
     /// rest of the region under it. With `counting`, once it has purged `limit` bytes it walks
-    /// on within its budget, looking and purging nothing. Returns the bytes purged, the words
-    /// read, whether the walk reached the bottom, or the frontier, and the bytes of the free,
-    /// resident pages it saw and left: what a purge could still return.
+    /// on within its budget, looking and purging nothing. With `one_split`, a step that may run
+    /// on a request's slow path, a split of a huge page above the frontier (`tail`) ends the
+    /// call as if its budget were spent. Returns the bytes purged, the words read, whether the
+    /// walk reached the bottom, or the frontier, and the bytes of the free, resident pages it
+    /// saw and left: what a purge could still return.
     #[allow(clippy::too_many_arguments)]
     pub(super) fn purge_region(
         &self,
@@ -1127,6 +1171,7 @@ impl<O: Os> Back<'_, O> {
         resume: bool,
         scope: Scope,
         counting: bool,
+        one_split: bool,
     ) -> (usize, usize, bool, usize) {
         let Some(host) = self.host(class) else {
             return (0, 1, true, 0);
@@ -1139,10 +1184,15 @@ impl<O: Os> Back<'_, O> {
         } else {
             0
         };
+        let frontier = region::floor(&host, region, self.epoch());
         let floor = match scope {
-            Scope::Idle | Scope::IdleAnyRun => region::floor(&host, region, self.epoch()),
+            Scope::Idle | Scope::IdleAnyRun => frontier,
             Scope::All | Scope::Quiet | Scope::QuietAnyRun => 0,
         };
+        // A step that may return memory treats the huge pages above the frontier as small
+        // pages (`tail`); `trim`, which walks without resuming, the whole huge-page part. A step
+        // that only counts looks at them cheaply.
+        let may_return = !counting && limit > 0;
         // A call costs about the same whatever it returns, so the clocked pass leaves short
         // runs for a later pass, which takes runs of any length once in a while.
         let min_run = match scope {
@@ -1150,9 +1200,13 @@ impl<O: Os> Back<'_, O> {
             Scope::IdleAnyRun | Scope::QuietAnyRun | Scope::All => 1,
         };
         if cursor != 0 && cursor <= floor {
-            // Everything the cursor has left is below the frontier.
+            // Everything the cursor has left is below the frontier: the region is done, and a
+            // note the walk left above the frontier is lowered as at any region's bottom.
             if resume {
                 set_cursor(hints, cursor, 0);
+            }
+            if let Some(huge) = Hints::unpack(hints.load()).huge_from {
+                self.lower_tail(&host, region, huge);
             }
             return (0, 1, true, 0);
         }
@@ -1169,137 +1223,198 @@ impl<O: Os> Back<'_, O> {
         // Where the last run this call purged began: a run that ends there is the tail of a
         // longer one that the cap on a run's length cut, and goes whatever its length.
         let mut below_purged = None;
+        // On a request's slow path a split counts as a whole step (`tail`), refused or not:
+        // once one is asked for, the step ends after the run, as one that had returned its
+        // pages would. The background thread's steps, and `trim`, are bounded only by their
+        // budgets.
+        let mut split = false;
+        let salt = self.state.walk.laps.load(Relaxed);
         let done = loop {
             // Not before the first unit: the look above may have spent the whole budget, and
             // a call that then gave up would leave the cursor at the top for the next call to
             // do the same, for ever.
-            if !first && (read >= budget || (purged >= limit && !counting)) {
+            if !first && (read >= budget || ((purged >= limit || split) && !counting)) {
                 break false;
             }
             first = false;
             let carved = super::layout::Grow::unpack(grow.load()).carved;
             let huge_from = Hints::unpack(hints.load()).huge_from;
-            let next = match layout.unit_below(carved, huge_from, cursor) {
-                Step::Done => 0,
-                Step::Skip(page) => {
-                    read += 1;
-                    if page <= floor { 0 } else { page }
+            let zone = huge_from.map(|huge| {
+                if resume {
+                    layout.huge_ceil(frontier).max(huge)
+                } else {
+                    huge
                 }
-                Step::Unit(unit) if unit.start < floor => {
-                    read += 1;
-                    0
-                }
-                Step::Unit(unit) if purged >= limit => {
-                    // Counting only.
-                    let (ok, words) = region::purgeable_unit(&host, region, unit);
-                    read += words;
-                    if ok {
-                        let (dirty, words) = region::dirty_pages(&host, region, unit);
-                        read += words;
-                        found += dirty * page;
-                    }
-                    unit.start
-                }
-                Step::Unit(unit) => {
-                    // The run of purgeable units that ends at this one, down to the floor.
-                    // Within what the step may still purge and read, so that a run does not
-                    // carry the step far past its goal or its budget.
-                    // Never cut to under `min_run`, or a step with a few pages of its goal
-                    // left would count every run it met short and step over it: it may go
-                    // past its goal by up to `min_run - 1` pages instead.
-                    let pages = limit
-                        .saturating_sub(purged)
-                        .div_ceil(page)
-                        .max(min_run as usize);
-                    let room = Room {
+            });
+            let in_tail = zone.and_then(|zone| {
+                self.tail_step(
+                    &host,
+                    region,
+                    &layout,
+                    TailWalk {
+                        carved,
+                        cursor,
+                        zone,
                         floor,
-                        pages: (pages.min(PURGE_MAX_RUN_PAGES as usize)) as u32,
-                        words: budget.saturating_sub(read).clamp(1, PURGE_MAX_RUN_WORDS),
-                    };
-                    // A unit longer than the step may still return is one large slot (a
-                    // unit of the small-page part is the pages of the slots it covers). Cut
-                    // to what the step may still purge, not to a run's length: a run's bound
-                    // keeps a call's claims of many slots short, and a piece of one slot
-                    // claims one. In whole huge pages for a class of a huge page or more, so
-                    // that a slot that kept its huge-page advice is not left with a huge page
-                    // partly unmapped, which stays charged whole.
-                    let huge = layout.huge_pages();
-                    let granule = if layout.size() >= huge as usize * page {
-                        huge
-                    } else {
-                        1
-                    };
-                    let most = (pages.min(u32::MAX as usize) as u32).max(granule);
-                    if huge_from.is_none_or(|from| unit.end <= from) && unit.end - unit.start > most
-                    {
-                        // The whole slot first: a slot that is not free, or all clean, is
-                        // passed at a look, not a piece at a time; and a piece is cut below
-                        // the slot's clean top, what earlier pieces returned.
+                        min_run,
+                        salt,
+                        cut: resume,
+                        may_return: may_return && purged < limit,
+                        below_purged,
+                        room: Room {
+                            floor,
+                            pages: (limit
+                                .saturating_sub(purged)
+                                .div_ceil(page)
+                                .max(min_run as usize)
+                                .min(PURGE_MAX_RUN_PAGES as usize))
+                                as u32,
+                            words: budget.saturating_sub(read).clamp(1, PURGE_MAX_RUN_WORDS),
+                        },
+                    },
+                )
+            });
+            let next = if let Some(step) = in_tail {
+                read += step.read;
+                purged += step.purged;
+                found = (found + step.found).saturating_sub(step.purged);
+                if step.purged != 0 {
+                    below_purged = Some(step.next);
+                }
+                if let Some(unit) = step.part {
+                    tail::note(&host, region, unit);
+                }
+                if step.split && one_split {
+                    // The rest of the step's budget: every caller's loop stops at it.
+                    split = true;
+                    read = read.max(budget);
+                }
+                step.next
+            } else {
+                match layout.unit_below(carved, huge_from, cursor) {
+                    Step::Done => 0,
+                    Step::Skip(page) => {
+                        read += 1;
+                        if page <= floor { 0 } else { page }
+                    }
+                    Step::Unit(unit) if unit.start < floor => {
+                        read += 1;
+                        0
+                    }
+                    Step::Unit(unit) if purged >= limit => {
+                        // Counting only.
                         let (ok, words) = region::purgeable_unit(&host, region, unit);
                         read += words;
-                        if !ok {
-                            unit.start
-                        } else {
-                            let (top, words) = region::clean_top(&host, region, unit);
-                            read += words;
-                            if top <= unit.start {
-                                // Another purger cleaned the rest since the look.
-                                unit.start
-                            } else {
-                                let cut = piece(Unit { end: top, ..unit }, most, min_run, granule);
-                                // What the piece leaves resident counts; the rest of the slot,
-                                // below it, is the next step's unit and counts then.
-                                let (dirty, words) = region::dirty_pages(&host, region, cut);
-                                read += words;
-                                found += dirty * page;
-                                let (outcome, _) = region::purge_unit(&host, region, cut);
-                                if let Purge::Done {
-                                    returned: bytes,
-                                    outgrown,
-                                } = outcome
-                                {
-                                    self.forget_outgrown(outgrown);
-                                    purged += bytes;
-                                    found = found.saturating_sub(bytes);
-                                    below_purged = Some(cut.start);
-                                }
-                                cut.start
-                            }
-                        }
-                    } else {
-                        let (run, words) =
-                            self.run_below(&host, region, unit, carved, huge_from, room);
-                        read += words;
-                        // What the run leaves resident after this step counts toward the lap.
-                        if let Some(run) = run {
-                            let (dirty, words) = region::dirty_pages(&host, region, run);
+                        if ok {
+                            let (dirty, words) = region::dirty_pages(&host, region, unit);
                             read += words;
                             found += dirty * page;
                         }
-                        match run {
-                            Some(run)
-                                if run.end - run.start < min_run
-                                    && below_purged != Some(run.end) =>
-                            {
-                                run.start
-                            }
-                            Some(run) => {
-                                // Its look before claiming reads the words `run_below` just read
-                                // and counted; counting them twice halved what a step could purge.
-                                let (outcome, _) = region::purge_unit(&host, region, run);
-                                if let Purge::Done {
-                                    returned: bytes,
-                                    outgrown,
-                                } = outcome
-                                {
-                                    self.forget_outgrown(outgrown);
-                                    purged += bytes;
-                                    found = found.saturating_sub(bytes);
-                                    below_purged = Some(run.start);
+                        unit.start
+                    }
+                    Step::Unit(unit) => {
+                        // The run of purgeable units that ends at this one, down to the floor.
+                        // Within what the step may still purge and read, so that a run does not
+                        // carry the step far past its goal or its budget.
+                        // Never cut to under `min_run`, or a step with a few pages of its goal
+                        // left would count every run it met short and step over it: it may go
+                        // past its goal by up to `min_run - 1` pages instead.
+                        let pages = limit
+                            .saturating_sub(purged)
+                            .div_ceil(page)
+                            .max(min_run as usize);
+                        let room = Room {
+                            floor,
+                            pages: (pages.min(PURGE_MAX_RUN_PAGES as usize)) as u32,
+                            words: budget.saturating_sub(read).clamp(1, PURGE_MAX_RUN_WORDS),
+                        };
+                        // A unit longer than the step may still return is one large slot (a
+                        // unit of the small-page part is the pages of the slots it covers). Cut
+                        // to what the step may still purge, not to a run's length: a run's bound
+                        // keeps a call's claims of many slots short, and a piece of one slot
+                        // claims one. In whole huge pages for a class of a huge page or more, so
+                        // that a slot that kept its huge-page advice is not left with a huge page
+                        // partly unmapped, which stays charged whole.
+                        let huge = layout.huge_pages();
+                        let granule = if layout.size() >= huge as usize * page {
+                            huge
+                        } else {
+                            1
+                        };
+                        let most = (pages.min(u32::MAX as usize) as u32).max(granule);
+                        if huge_from.is_none_or(|from| unit.end <= from)
+                            && unit.end - unit.start > most
+                        {
+                            // The whole slot first: a slot that is not free, or all clean, is
+                            // passed at a look, not a piece at a time; and a piece is cut below
+                            // the slot's clean top, what earlier pieces returned.
+                            let (ok, words) = region::purgeable_unit(&host, region, unit);
+                            read += words;
+                            if !ok {
+                                unit.start
+                            } else {
+                                let (top, words) = region::clean_top(&host, region, unit);
+                                read += words;
+                                if top <= unit.start {
+                                    // Another purger cleaned the rest since the look.
+                                    unit.start
+                                } else {
+                                    let cut =
+                                        piece(Unit { end: top, ..unit }, most, min_run, granule);
+                                    // What the piece leaves resident counts; the rest of the slot,
+                                    // below it, is the next step's unit and counts then.
+                                    let (dirty, words) = region::dirty_pages(&host, region, cut);
+                                    read += words;
+                                    found += dirty * page;
+                                    let (outcome, _) = region::purge_unit(&host, region, cut);
+                                    if let Purge::Done {
+                                        returned: bytes,
+                                        outgrown,
+                                    } = outcome
+                                    {
+                                        self.forget_outgrown(outgrown);
+                                        purged += bytes;
+                                        found = found.saturating_sub(bytes);
+                                        below_purged = Some(cut.start);
+                                    }
+                                    cut.start
                                 }
-                                run.start
                             }
-                            None => unit.start,
+                        } else {
+                            let (run, words) =
+                                self.run_below(&host, region, unit, carved, huge_from, room);
+                            read += words;
+                            // What the run leaves resident after this step counts toward the lap.
+                            if let Some(run) = run {
+                                let (dirty, words) = region::dirty_pages(&host, region, run);
+                                read += words;
+                                found += dirty * page;
+                            }
+                            match run {
+                                Some(run)
+                                    if run.end - run.start < min_run
+                                        && below_purged != Some(run.end) =>
+                                {
+                                    run.start
+                                }
+                                Some(run) => {
+                                    // Its look before claiming reads the words `run_below` just read
+                                    // and counted; counting them twice halved what a step could purge.
+                                    let (outcome, _) = region::purge_unit(&host, region, run);
+                                    if let Purge::Done {
+                                        returned: bytes,
+                                        outgrown,
+                                    } = outcome
+                                    {
+                                        self.forget_outgrown(outgrown);
+                                        purged += bytes;
+                                        found = found.saturating_sub(bytes);
+                                        below_purged = Some(run.start);
+                                    }
+                                    run.start
+                                }
+                                None => unit.start,
+                            }
                         }
                     }
                 }
@@ -1316,8 +1431,341 @@ impl<O: Os> Back<'_, O> {
         if purged != 0 {
             self.state.walk.returned.fetch_add(purged, Relaxed);
         }
+        if done && let Some(huge) = Hints::unpack(hints.load()).huge_from {
+            // Once a pass a region: the advice comes off over what the walk returned part of;
+            // for `trim`, which does not resume, even below the frontier.
+            if resume {
+                self.lower_tail(&host, region, huge);
+            } else if tail::lower_all(&host, region, huge, self.epoch()) == tail::Change::Refused {
+                self.refuse_tail(REFUSED_LOWER);
+            }
+        }
         (purged, read, done, found)
     }
+
+    /// Lowers `region`'s boundary (`tail::lower`) unless the kernel refused a lowering in this
+    /// interval, and notes a refusal. The owner's give-back may leave a claim's mark it
+    /// answers for (`tail`, "give_back"): the background thread is woken for it, as a claim's
+    /// heartbeat would wake it.
+    fn lower_tail(&self, host: &ClassHost<'_, O>, region: RegionId, huge: u32) {
+        if self.tail_refused(REFUSED_LOWER) {
+            return;
+        }
+        if tail::lower(host, region, huge, self.epoch()) == tail::Change::Refused {
+            self.refuse_tail(REFUSED_LOWER);
+        }
+        if self.marks_due() {
+            self.state.thread.rouse_any(self.space.os());
+        }
+    }
+
+    /// Whether the kernel refused a tail call of kind `kind` (`REFUSED_SPLIT`, `_RAISE`,
+    /// `_LOWER`) in the current counted interval: such a call is not tried again before the
+    /// next, so a program the kernel refuses (at `vm.max_map_count`, with its memory locked)
+    /// pays at most one refused call of each kind an interval, and two for a reconciliation.
+    fn tail_refused(&self, kind: u64) -> bool {
+        let seen = self.state.marks.refused.load(Relaxed);
+        seen >> 3 == self.epoch() && seen & kind != 0
+    }
+
+    /// Records that the kernel refused a tail call of kind `kind` in this interval. A hint:
+    /// a lost update costs one more refused call.
+    fn refuse_tail(&self, kind: u64) {
+        let epoch = self.epoch();
+        let word = &self.state.marks.refused;
+        let seen = word.load(Relaxed);
+        let kinds = if seen >> 3 == epoch { seen & 7 } else { 0 };
+        word.store(epoch << 3 | kinds | kind, Relaxed);
+    }
+
+    /// Whether a look for marks would do something now: some region carries a mark and the
+    /// kernel has not refused a raise in this interval.
+    fn marks_due(&self) -> bool {
+        self.state.marks.load() != 0 && !self.tail_refused(REFUSED_RAISE)
+    }
+
+    /// One look of the walk at the huge-page part above the frontier (`tail`), or `None` when
+    /// the cursor is below `walk.zone`, the first page of that part. At the top of a huge page:
+    /// a huge page wholly free goes back whole, as below the frontier; any other gets the cheap
+    /// look (`tail::look`), and the walk passes it whole unless it is sparse and the step may
+    /// return memory. Within a sparse one, a run of free pages as in the small-page part,
+    /// within the huge page: the kernel is asked to split the huge page over the run first,
+    /// and if it refuses the run stays, as it would have without this rule.
+    fn tail_step(
+        &self,
+        host: &ClassHost<'_, O>,
+        region: RegionId,
+        layout: &Layout,
+        walk: TailWalk,
+    ) -> Option<TailStep> {
+        let top = layout.carved_pages(walk.carved);
+        let end = if walk.cursor == 0 || walk.cursor > top {
+            top
+        } else {
+            walk.cursor
+        };
+        if end <= walk.zone || end <= layout.origin_page() {
+            return None;
+        }
+        let page = layout.page_size();
+        let huge = layout.huge_pages();
+        // Nothing below the class's origin holds a slot or was ever committed, as in
+        // `Layout::unit_below`: a region whose huge-page part starts at its base has its first
+        // huge page cut there.
+        let start = ((end - 1) & !(huge - 1)).max(layout.origin_page());
+        let mut step = TailStep {
+            next: start,
+            read: 0,
+            purged: 0,
+            found: 0,
+            part: None,
+            split: false,
+        };
+        let splits = walk.may_return && !self.tail_refused(REFUSED_SPLIT);
+        if end.is_multiple_of(huge) || end == top {
+            let unit = Unit { start, end };
+            if end.is_multiple_of(huge) {
+                let (whole, words) = region::purgeable_unit(host, region, unit);
+                step.read += words;
+                if whole {
+                    // What it holds resident counts toward the lap, less what goes back.
+                    let (dirty, words) = region::dirty_pages(host, region, unit);
+                    step.read += words;
+                    step.found = dirty * page;
+                    if walk.may_return {
+                        let (outcome, _) = region::purge_unit(host, region, unit);
+                        if let Purge::Done { returned, outgrown } = outcome {
+                            self.forget_outgrown(outgrown);
+                            step.purged = returned;
+                        }
+                    }
+                    return Some(step);
+                }
+            }
+            let look = tail::look(host, region, unit, walk.salt);
+            step.read += look.read;
+            if !look.sparse || !splits {
+                // What a purge could return: a dense huge page's free pages are left to it.
+                if look.sparse {
+                    step.found = look.free * page;
+                }
+                return Some(step);
+            }
+            if walk.cut {
+                // The look chose it; the walk's own count decides.
+                let (free, words) = tail::free_resident(host, region, unit);
+                step.read += words;
+                if free * TAIL_SPLIT_SHARE < end - start {
+                    return Some(step);
+                }
+            }
+        } else if !splits {
+            // Resuming inside a huge page that a step which may return memory began, in a step
+            // that may not (it only counts, or the kernel refuses splits): the rest of the huge
+            // page is passed with the look's estimate, and nothing is returned.
+            let look = tail::look(host, region, Unit { start, end }, walk.salt);
+            step.read += look.read;
+            if look.sparse {
+                step.found = look.free * page;
+            }
+            return Some(step);
+        }
+        let Step::Unit(small) = layout.unit_below(walk.carved, None, end) else {
+            return Some(step);
+        };
+        let small = Unit {
+            start: small.start.max(start),
+            ..small
+        };
+        let room = Room {
+            floor: walk.floor.max(start),
+            ..walk.room
+        };
+        let (run, words) = self.run_below(host, region, small, walk.carved, None, room);
+        step.read += words;
+        let Some(run) = run else {
+            step.next = small.start;
+            return Some(step);
+        };
+        step.next = run.start;
+        let (dirty, words) = region::dirty_pages(host, region, run);
+        step.read += words;
+        step.found = dirty * page;
+        if run.end - run.start < walk.min_run && walk.below_purged != Some(run.end) {
+            return Some(step);
+        }
+        let (offset, len) = (
+            run.start as usize * page,
+            (run.end - run.start) as usize * page,
+        );
+        // Asked for, the split counts against a slow path's bound whatever the kernel answers.
+        step.split = true;
+        if !host.split(region, offset, len) {
+            self.refuse_tail(REFUSED_SPLIT);
+            return Some(step);
+        }
+        let (outcome, _) = region::purge_unit(host, region, run);
+        if let Purge::Done { returned, outgrown } = outcome {
+            self.forget_outgrown(outgrown);
+            step.purged = returned;
+            step.part = Some(run.start / huge);
+        }
+        Some(step)
+    }
+
+    /// For the background thread, or a heartbeat where there is none: puts the huge-page
+    /// advice back on where a claim reached above the boundary (`tail::raise`), in every marked
+    /// region, or with `one`, a request's heartbeat, in the first it raises. One load while no
+    /// region is marked.
+    ///
+    /// The marks flag is cleared before the regions are looked at, so a mark set meanwhile
+    /// sets it again. A region whose advice another thread owns keeps its mark and does not set
+    /// the flag: its owner's give-back does (`tail`), so that an owner that does not run cannot
+    /// keep the background thread awake. An owner that never runs again is a thread a fork
+    /// left behind, and the child clears its bit (`Back::distrust_tails`). Once the kernel
+    /// refuses a raise, the region keeps its mark and no raise is tried before the next
+    /// interval; meanwhile the flag stays set but asks nothing of the thread (`marks_due`).
+    pub(super) fn raise_marked(&self, one: bool) {
+        let marks = &*self.state.marks;
+        if marks.load() == 0
+            || self.tail_refused(REFUSED_RAISE)
+            || marks.compare_exchange(1, 0).is_err()
+        {
+            return;
+        }
+        let plan = self.space.plan();
+        for index in 0..self.walk_regions() {
+            let Some(region) = plan.region(index) else {
+                continue;
+            };
+            if self.state.tails[index % crate::space::MAX_REGIONS].load() & tail::WANT == 0 {
+                continue;
+            }
+            let RegionTag::Class(class) = self.state.table.get(region) else {
+                continue;
+            };
+            let Some(host) = self.host(class) else {
+                continue;
+            };
+            let Some(huge) = Hints::unpack(host.hints(region).load()).huge_from else {
+                continue;
+            };
+            let layout = *host.layout();
+            let top =
+                layout.carved_pages(super::layout::Grow::unpack(host.grow(region).load()).carved);
+            // The interval read for each region, after the system calls of the last.
+            let epoch = self.epoch();
+            let frontier = region::floor(&host, region, epoch);
+            match tail::raise(&host, region, huge, frontier, top, epoch) {
+                tail::Change::None => {}
+                tail::Change::Done if !one => {}
+                change => {
+                    if change == tail::Change::Refused {
+                        self.refuse_tail(REFUSED_RAISE);
+                    }
+                    // The regions not looked at keep their marks for the next look.
+                    if index + 1 < self.walk_regions() {
+                        marks.fetch_or(1);
+                    }
+                    return;
+                }
+            }
+        }
+    }
+
+    /// In the child of a fork: asks for a repair on every tail word the child inherited and
+    /// clears its owner bit (`tail`, "Repair"), one compare-and-swap each, so that the next
+    /// change of each region's advice first makes the kernel's advice agree with the word. A
+    /// thread the fork cut off may have made a late advice call after its bit was taken over,
+    /// and could no longer ask for the repair itself (`tla/Tail.tla`, `Tail_orphan`); and an
+    /// owner bit in the child belongs to a thread that does not exist there, so it is cleared
+    /// rather than left to go stale. The one exception is the forking thread itself, if it
+    /// forked from a signal handler in the middle of a change: when it carries on, its give-back
+    /// finds the bit gone and asks for a repair, as a taken-over owner does. A word left with a
+    /// claim's mark sets the marks flag, which the bit's owner would have. Words that are zero,
+    /// regions whose advice never came off, are left as they are.
+    pub fn distrust_tails(&self) {
+        for word in self.state.tails.iter() {
+            let mut seen = word.load();
+            while seen != 0 {
+                let next = (seen & !tail::BUSY) | tail::REPAIR;
+                match word.compare_exchange(seen, next) {
+                    Ok(_) => {
+                        if seen & tail::WANT != 0 {
+                            self.state.marks.fetch_or(1);
+                        }
+                        break;
+                    }
+                    Err(found) => seen = found,
+                }
+            }
+        }
+    }
+
+    /// Lowers the boundary of the region the walk stands in, if a step returned part of its
+    /// huge pages and the walk did not reach the region's bottom: when a pass or a growth
+    /// payment ends partway through a region, so that the advice does not wait a pass for it.
+    pub(super) fn lower_walked(&self) {
+        let top = self.walk_regions();
+        let seen = self.state.walk.purge_at.load(Relaxed);
+        let index = if seen == 0 || seen as usize > top {
+            top.saturating_sub(1)
+        } else {
+            seen as usize - 1
+        };
+        let Some(region) = self.space.plan().region(index) else {
+            return;
+        };
+        let RegionTag::Class(class) = self.state.table.get(region) else {
+            return;
+        };
+        let Some(host) = self.host(class) else {
+            return;
+        };
+        if let Some(huge) = Hints::unpack(host.hints(region).load()).huge_from {
+            self.lower_tail(&host, region, huge);
+        }
+    }
+}
+
+/// Kinds of tail call the kernel may refuse (`Back::tail_refused`).
+const REFUSED_SPLIT: u64 = 1;
+const REFUSED_RAISE: u64 = 2;
+const REFUSED_LOWER: u64 = 4;
+
+/// Where a step of the walk stands above the frontier, for [`Back::tail_step`].
+#[derive(Clone, Copy)]
+struct TailWalk {
+    carved: u32,
+    cursor: u32,
+    /// The first page of the part the walk treats as small pages.
+    zone: u32,
+    floor: u32,
+    min_run: u32,
+    /// Moves the cheap look's samples from one look to the next (`tail::look`): the count of
+    /// the walk's laps, which a huge page is looked at once in.
+    salt: u32,
+    /// Whether a huge page is split only past the walk's own count (`TAIL_SPLIT_SHARE`):
+    /// every step but `trim`'s.
+    cut: bool,
+    /// Whether this step may still return memory.
+    may_return: bool,
+    below_purged: Option<u32>,
+    room: Room,
+}
+
+/// What one look above the frontier did.
+struct TailStep {
+    /// Where the cursor goes.
+    next: u32,
+    read: usize,
+    purged: usize,
+    /// Free resident pages seen and left, in bytes: what the lap counts.
+    found: usize,
+    /// The huge page it returned part of, which the next lowering takes the advice off from.
+    part: Option<u32>,
+    /// Whether it asked for a split.
+    split: bool,
 }
 
 impl<O: Os> Back<'_, O> {

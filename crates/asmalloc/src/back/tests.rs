@@ -5512,3 +5512,12 @@ mod burst_start_review;
 
 /// The floor measured against what a purge could return, and frontiers a silence does not age.
 mod floor_returnable;
+
+/// The huge-page tail: the rule, its bounded step, its failures and its races.
+mod tail;
+
+/// The adversarial review of the huge-page tail.
+mod tail_review;
+
+/// The tail word's protocol on a host that records the advice: the review's surviving mutants.
+mod tail_protocol;
