@@ -41,9 +41,12 @@
 //! (`reconcile`). An old owner that comes back after being taken over finds its
 //! compare-and-swap refused and sets the repair bit, so the advice its late call left is put
 //! right by the next owner. In a fork's child no thread holds a bit it inherited, so the child
-//! clears every owner bit and asks for a repair at its first slow path (`Back::distrust_tails`);
-//! the forking thread, if it forked from a signal handler in the middle of a change, then gives
-//! back as a taken-over owner does. A call the kernel refused may have acted on part of its
+//! clears every owner bit and asks for a repair at the slow path that draws its generation
+//! (`Back::distrust_tails`). The clearing may meet a live owner of the child's own: the forking
+//! thread, if it forked from a signal handler in the middle of a change, or another thread the
+//! child started before that slow path. Either is then taken over: its give-back finds the bit
+//! gone and asks for a repair, and the repair makes the advice agree with the word whatever its
+//! late call did. A call the kernel refused may have acted on part of its
 //! range, so it sets the repair bit too. Either way the next change of the region's advice
 //! reconciles it first, and nothing waits or loops.
 //!
