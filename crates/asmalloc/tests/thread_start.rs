@@ -1,8 +1,9 @@
 //! The background thread's start, as a program sees it: the thread is named `asmalloc`; its
 //! start opens no file, so a process that forbids opening files after its first allocation
-//! (a seccomp filter that kills `open`, `openat` and `openat2`) survives it, by an explicit
-//! start and by the default one; and a start, explicit or through the free that finds the
-//! thread wanted, leaves `errno` as it was, whether it succeeds or fails.
+//! (a seccomp filter that kills `open`, `openat` and `openat2`) survives it and gets the
+//! thread, by an explicit start and by the default one, which the count of threads in a
+//! `status` file opened beforehand shows; and a start, explicit or through the free that
+//! finds the thread wanted, leaves `errno` as it was, whether it succeeds or fails.
 //!
 //! Each case runs this binary again as a child process with the case's mode set.
 
@@ -131,10 +132,35 @@ fn burst_on_a_worker() -> i32 {
     .unwrap()
 }
 
-/// Waits a little for the thread to appear, without opening a file: its name is checked by
-/// the case that may open files.
-fn wait_briefly() {
-    thread::sleep(Duration::from_millis(300));
+/// The process's `status` file, opened before the sandbox: read in place, it gives the
+/// count of threads without opening anything, as `default_thread.rs` reads its fields.
+fn status() -> std::fs::File {
+    std::fs::File::open("/proc/self/status").unwrap()
+}
+
+/// The process's threads, from its `status` file.
+fn threads(status: &std::fs::File) -> u64 {
+    use std::os::unix::fs::FileExt;
+    let mut buffer = [0u8; 4096];
+    let n = status.read_at(&mut buffer, 0).unwrap();
+    let text = std::str::from_utf8(&buffer[..n]).unwrap();
+    text.lines()
+        .find_map(|line| line.strip_prefix("Threads:"))
+        .and_then(|count| count.trim().parse().ok())
+        .unwrap()
+}
+
+/// Waits up to two seconds for one thread more than `before`; whether it came. The worker of
+/// a burst has been joined by then, so the one more is the allocator's.
+fn one_more_thread(status: &std::fs::File, before: u64) -> bool {
+    let started = Instant::now();
+    while started.elapsed() < Duration::from_secs(2) {
+        if threads(status) == before + 1 {
+            return true;
+        }
+        thread::sleep(Duration::from_millis(20));
+    }
+    false
 }
 
 fn has_allocator_thread() -> bool {
@@ -163,16 +189,24 @@ fn child() {
             println!("named {}", u8::from(has_allocator_thread()));
         }
         "sandbox-explicit" => {
+            let status = status();
+            let before = threads(&status);
             forbid_opening_files();
             Asmalloc::start_background().unwrap();
-            wait_briefly();
-            println!("survived");
+            println!(
+                "survived, started {}",
+                u8::from(one_more_thread(&status, before))
+            );
         }
         "sandbox-default" => {
+            let status = status();
+            let before = threads(&status);
             forbid_opening_files();
             burst_on_a_worker();
-            wait_briefly();
-            println!("survived");
+            println!(
+                "survived, started {}",
+                u8::from(one_more_thread(&status, before))
+            );
         }
         "errno-explicit" => {
             set_errno(SENTINEL);
@@ -240,7 +274,7 @@ fn a_start_opens_no_file() {
             "{mode}: killed for opening a file"
         );
         assert!(
-            status.success() && out.contains("survived"),
+            status.success() && out.contains("survived, started 1"),
             "{mode}: {status:?} {out}"
         );
     }
