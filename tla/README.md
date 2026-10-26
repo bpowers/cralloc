@@ -18,8 +18,8 @@ curl -sL -o tla2tools.jar https://github.com/tlaplus/tlaplus/releases/download/v
 ```
 
 `v1.8.0` is a rolling pre-release tag, so the file changes over time. The models were
-checked with the build that reports `TLC2 Version 2026.10.15.145915 (rev: 932d35e)`,
-SHA-256 `15d103b7e5617780bcc904c0af12f1ad242e2b345c0301136c5be4588f17edac`. The jar is
+checked with the build that reports `TLC2 Version 2026.10.24.013619 (rev: 2ef2af8)`,
+SHA-256 `d15655eeaff4b3f7b3d65c46b838bc0f35d131b2ef4b1e473689b62c98d4726f`. The jar is
 gitignored.
 
 `./check` uses `java` from `PATH` if there is one, and otherwise runs
