@@ -1274,3 +1274,32 @@ fn a_raise_does_not_make_growth_pay_for_memory_that_is_not_resident() {
          {counted} at the raises against a cap of {cap}, with {resident} bytes resident in all"
     );
 }
+
+/// Fourth round, on the accounting by distrust (`ea0e524`). Below the boundary the walk
+/// returns a non-empty huge page's clean runs again, once, and the lowering that follows makes
+/// the bits trusted. Where the kernel refuses the lowering (out of mappings, or a kernel that
+/// takes no advice) the boundary never comes down, so every lap asks for the splits and
+/// returns the same clean runs again, for as long as the tail stands.
+#[test]
+#[cfg_attr(miri, ignore)]
+fn a_refused_lowering_does_not_return_the_same_clean_runs_every_lap() {
+    let state = state::<Standard>();
+    let back = state.get_or_reserve().unwrap();
+    let os = state.os();
+    os.set_faults(Call::AdviseHuge, Faults::ALWAYS);
+    let (_, _) = stranded(&back);
+    age_and_beat(&back, 16);
+    let (purges, splits, low) = (
+        os.calls(Call::Purge),
+        os.calls(Call::SplitHuge),
+        charged(os),
+    );
+    age_and_beat(&back, 16);
+    assert_eq!(charged(os), low, "the later laps returned something");
+    assert!(
+        os.calls(Call::Purge) - purges <= 4,
+        "{} purge calls and {} split calls in 16 intervals that returned nothing",
+        os.calls(Call::Purge) - purges,
+        os.calls(Call::SplitHuge) - splits
+    );
+}
