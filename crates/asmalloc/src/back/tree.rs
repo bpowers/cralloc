@@ -119,6 +119,16 @@ pub(crate) trait Host {
     /// purge of their free pages frees memory at once. `false` if the OS refused.
     fn split(&self, region: RegionId, offset: usize, len: usize) -> bool;
 
+    /// How many pages of part of a region are resident (`mincore`): `None` if the OS refused,
+    /// or for a host that cannot tell (the default), which a caller takes for "maybe all".
+    ///
+    /// # Safety
+    ///
+    /// No thread writes the range during the call (the simulator reads it).
+    unsafe fn resident(&self, _region: RegionId, _offset: usize, _len: usize) -> Option<usize> {
+        None
+    }
+
     /// Returns part of a region to the OS; it reads as zero afterwards.
     ///
     /// # Safety

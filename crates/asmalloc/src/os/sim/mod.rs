@@ -852,11 +852,17 @@ unsafe impl<S: Shape> Os for SimOs<S> {
         // that holds a nonzero byte, as `resident_bytes` does. That differs from the kernel
         // twice: the kernel counts a page only read, which maps the shared zero page, as
         // resident, and a page written with zeros too; the simulator counts neither.
+        // A page of a huge page mapped whole is resident, whatever it holds: khugepaged's
+        // rebuild maps every page of it.
+        let per = self.huge_pages_per_unit();
         let resident = (first..first + count)
             .filter(|&index| self.pages.get(index) & WRITABLE != 0)
-            // SAFETY: the caller promises nothing writes the range during the call, and the
-            // allocator stores only integers, so its bytes are initialized.
-            .filter(|&index| !unsafe { self.page_reads_zero(index) })
+            .filter(|&index| {
+                self.units[index / per].load(Ordering::Acquire) & MAPPED != 0
+                    // SAFETY: the caller promises nothing writes the range during the call, and
+                    // the allocator stores only integers, so its bytes are initialized.
+                    || !unsafe { self.page_reads_zero(index) }
+            })
             .count();
         Ok(resident)
     }

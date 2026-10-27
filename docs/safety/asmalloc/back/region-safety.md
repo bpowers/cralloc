@@ -117,6 +117,23 @@ for the range. The one caller and why it holds the slot are BACK-CLASS-01 in
 `purge_held` declines a slot in a huge-page part (a purge there must be whole huge pages);
 that is policy, not safety. Accepted by the reviewer, 2026-10-17.
 
+## BACK-REGION-04: `host.resident(...)` in `purge_unit_as`
+
+**Preconditions** (`Host::resident`, which for the heap is `Space::resident`). No thread
+writes the range during the call.
+
+**Proof.** The call is made in `purge_unit_as` after the loop that claims every slot touching
+the unit (`tree::claim_exact` over `touching(unit)`) has succeeded and before any release: the
+same point and the same range as BACK-REGION-01's purge, whose step 1 shows that this thread
+then holds every slot touching the range. A slot's bytes are written only by its holder, so
+nothing writes the range while the claims are held. The call reads nothing the allocator relies
+on: on Linux it is `mincore`, and in the simulator it reads the range, which the claims keep
+still. Its answer only decides whether the unit is purged; a wrong answer leaves resident
+pages for a later pass or purges pages that were not resident, neither of which touches a held
+slot. The tests `a_clean_run_that_is_not_resident_costs_one_question` and
+`a_refused_question_falls_back_to_returning_the_clean_runs` run it on the simulator, which
+reads the range, under Miri as part of `back::tests`.
+
 ## BACK-REGION-03: `host.purge(...)` in `purge_part`
 
 **Preconditions** (`Host::purge`). No thread reads or writes the range during the call, and

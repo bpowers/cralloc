@@ -285,6 +285,38 @@ The product ran once with collapses and once without:
 That pair isolates the effect. Nothing is left of the after-close distance to `t1`: 134 to
 137 against `t1`'s 137 to 143 in the earlier sampler rounds.
 
+**2026-10-27: the replacement (`huge-tail-accounting` at `ea0e524`).** `ae24bca`'s accounting
+was rejected in review. In `ea0e524`, nothing is counted at a raise. Instead, the tail walk
+ignores the clean bits of non-empty huge pages under the advice. Main is now `bf837db`, with
+stage 1 of the tail rule and the large-slot rules, so every number in this paragraph is
+against `bf837db`, not `3b5a3f5`. The method is the same. Three plain rounds and three sampler
+rounds, each interleaving main, `ae24bca` and `ea0e524`. Medians in MiB:
+
+| build | heap mean / peak (RSS anon) | +1 min (cgroup anon) | heap +1 min (sampler) | gap +1 min | collapses | p99 / p99.9 ms |
+|---|---|---|---|---|---|---|
+| main `bf837db` | 394 / 483 | 139 | 143, 146, 145 | +9.4, +9.4, +9.2 | 19 to 25 | 163 / 189 |
+| `ae24bca` | 412 / 503 | 145 | 141, 137, 140 | -3.0, -3.4, -3.2 | 26 to 32 | 187 / 227 |
+| `ea0e524` | 410 / 505 | 139 | 131, 129, 131 | -3.7, -3.9, -2.8 | 24 to 31 | 181 / 221 |
+
+- **Main has moved.** Comparing across sessions, `bf837db` alone is 55 below `3b5a3f5` on
+  the mean and 46 below after close. The plain rounds no longer separate the three builds on mean, peak or cgroup
+  anon. Main's stage 1 now collapses as often as the full rule (19 to 25 huge pages in the
+  sampler rounds; plain rounds ranged from 0 to 24 for every build, so khugepaged's pace
+  varies by run). Main also keeps the product's stranded memory: +9.4 MiB, flat through the
+  minute after close.
+- **`ea0e524` gives back no less than `ae24bca`.** It gives back slightly more: its
+  allocator heap a minute after close was 129 to 131, against 137 to 141. Its gap after close
+  is main's old baseline of -3 to -4, so nothing rebuilt stays counted as returned.
+- **The under-count during the load is brief.** `ea0e524` holds up to +8 to +12 MiB more
+  resident free memory than it counts. It shows up at the burst and the close: at 31 to 47 s
+  in one run, and for one sample at 47 s in another. The third run peaked at +0.9. Each time
+  it is gone within 3 to 6 s, by the first samples after close.
+- **Tails** show no order. Single runs ranged from 144 to 220 ms at p99.
+
+The records, the sampler output and the scripts are in
+`docs/research/data/servers-qdrant-2026-10-27.tar.gz` (`qea`: `a1` to `a3` plain, `s1` to
+`s3` with the sampler).
+
 The SurrealDB comparison was not run: its asmalloc arm would need two full rebuilds, and the
 prototype had no effect on that job.
 

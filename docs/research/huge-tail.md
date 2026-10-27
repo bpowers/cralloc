@@ -565,6 +565,41 @@ memory beyond a run's noise ((i) better on the 4-phase troughs and worse on the 
 ones). So the constant stays: the regret arm matches it with a word a region more, and the
 rise arm is not consistently better.
 
+### Asking the kernel (2026-10-27)
+
+The distrust returned every clean run of a non-empty huge page under the advice, and almost
+none was resident (0.24% above). Where the kernel refused the lowering the boundary never came
+down, so the same runs were split and purged every lap (the review's fourth round: 204 splits
+and 204 purges in 16 intervals for 6 huge pages). Now (`ad11370`) the purge asks the kernel,
+once it holds the claim of a doubted clean run's slots, whether any of it is resident
+(`mincore` over the run): if none is, the run costs that call and no split or purge; if the
+kernel will not say, the run goes back as before. The question is asked under the claim, not
+over the whole huge page, because nothing may write a range `mincore` is asked about in the
+simulator, which reads it; and per run, not in the look or the exact count, which are read every
+lap and choose what to walk, so the question is paid only where a split and a purge would
+otherwise follow. While the kernel refuses lowerings the walk believes the bits until the clock
+moves, which ends the every-lap returns without a question at all.
+
+Against the distrust (`2ff7322`), the 4-phase job twice each under `scripts/measure`, the rest
+once under `scripts/heavy`:
+
+| | distrust | asking |
+|---|---|---|
+| 4-phase: peaks last 3, troughs, cycles/op | 1.104, 3.29 and 3.29, 613 and 608 | 1.104, 3.26 and 3.30, 608 and 609 |
+| 4-phase calls, thousands: `madvise` + `mincore` (`COLD`, `DONTNEED`) | 342.5 + 0.4 (147, 170) | 265.3 + 9.6 (108, 160) |
+| 24-phase: peaks last 3, troughs | 1.135, 3.32 | 1.138, 3.27 |
+| 24-phase calls, thousands: `madvise` + `mincore` | 1782 + 3 | 1447 + 63 |
+| count against `mincore`, end of the 4-phase job | 4.1 MiB under | 3.8 MiB under |
+| store: Mcycles a request; burst max ms, 4 rounds | 0.34; 0.5 to 0.6 | 0.34 to 0.35; 0.6 to 0.7 |
+
+A fifth of the 4-phase job's calls and a sixth of the 24-phase job's go, at the same memory.
+The store's burst is within the spread of earlier runs of the same build (0.5 to 0.7).
+
+Two limits stay, stated in `back/tail.rs`: a clean bit can stay wrong on pages the walk skipped
+under the advice once a lower huge page's lowering takes the advice off over them; and a lap's
+estimate counts clean free pages it does not believe, so a pass can be held to more than is
+there until the boundary comes down.
+
 ## Method and data
 
 - **Builds.** `build.sh` extracts main, applies heap-drift's `bench/` changes

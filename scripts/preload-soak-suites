@@ -93,6 +93,10 @@ suite_git() {
     # shellcheck disable=SC2086
     capped $m make -C "$src/git/$m/t" -j"$jobs" -k $opts DEFAULT_TEST_TARGET=test \
       >"$work/git.$m.log" 2>&1
+    # No counts means no test ran (a build that failed, say): leave the sum empty so that
+    # judge fails, rather than compare two empty results and pass.
+    rm -f "$work/git.$m.sum"
+    compgen -G "$src/git/$m/t/test-results/*.counts" >/dev/null || continue
     (cd "$src/git/$m/t/test-results" && for f in *.counts; do
       echo "$f $(grep -E '^(success|failed|broken|fixed)' "$f" | tr '\n' ' ')"
     done
