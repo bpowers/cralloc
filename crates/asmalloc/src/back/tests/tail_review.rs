@@ -581,6 +581,58 @@ mod kernel {
 
     unsafe extern "C" {
         fn mlock(addr: *const core::ffi::c_void, len: usize) -> i32;
+        fn madvise(addr: *mut core::ffi::c_void, len: usize, advice: i32) -> i32;
+    }
+
+    /// Fifth round: what the walk's question (`mincore`) answers on the kernel itself, at each
+    /// state the tail rule passes through. Pages returned from a split huge page are not
+    /// resident; once the huge page is rebuilt (`MADV_COLLAPSE` here, khugepaged in life) they
+    /// are; and after the rebuilt huge page is split again by the walk's own `MADV_COLD`, the
+    /// pages it did not return are still reported resident, which the simulator's answer (a
+    /// page is resident if its huge page is mapped whole or it holds a nonzero byte) does not
+    /// say of a page that reads as zero.
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn mincore_follows_a_return_a_rebuild_and_a_split() {
+        const MADV_COLLAPSE: i32 = 25;
+        let os = LinuxOs;
+        let base = os.reserve(2 * HUGE, HUGE).unwrap();
+        let p = base.as_ptr();
+        let at = |page: usize| base.map_addr(|a| a.saturating_add(page * PAGE));
+        // SAFETY: each range is whole pages of the reservation, and nothing else uses it.
+        unsafe {
+            os.commit(base, 2 * HUGE).unwrap();
+            os.advise_huge(base, 2 * HUGE, HugePages::Prefer).unwrap();
+            for i in 0..HUGE / PAGE {
+                p.add(i * PAGE + 7).write(i as u8 | 1);
+            }
+            // The walk returns pages 8..72 of the huge page.
+            os.split_huge(at(8), 64 * PAGE).unwrap();
+            os.purge(at(8), 64 * PAGE).unwrap();
+            assert_eq!(os.resident(at(8), 64 * PAGE), Ok(0), "returned pages");
+            assert_eq!(os.resident(at(72), 8 * PAGE), Ok(8), "kept pages");
+            if madvise(p.cast(), HUGE, MADV_COLLAPSE) != 0 {
+                std::eprintln!("no MADV_COLLAPSE here: the rebuild is not shown");
+                os.unmap(base, 2 * HUGE).unwrap();
+                return;
+            }
+            let rebuilt = os.resident(at(8), 64 * PAGE);
+            std::eprintln!("after the rebuild: {rebuilt:?} of 64 returned pages resident");
+            assert_eq!(rebuilt, Ok(64), "rebuilt pages");
+            // The walk asks, splits over its first run of 32 and returns it; then asks about
+            // the next run.
+            os.split_huge(at(8), 32 * PAGE).unwrap();
+            os.purge(at(8), 32 * PAGE).unwrap();
+            let rest = os.resident(at(40), 32 * PAGE);
+            std::eprintln!("after the split: {rest:?} of the next 32 clean pages resident");
+            assert_eq!(os.resident(at(8), 32 * PAGE), Ok(0));
+            assert_eq!(
+                rest,
+                Ok(32),
+                "the rest of a rebuilt huge page after its split"
+            );
+            os.unmap(base, 2 * HUGE).unwrap();
+        }
     }
 
     /// The kernel refuses `MADV_COLD` over a locked mapping (`can_madv_lru_vma`), so in a
@@ -1272,5 +1324,34 @@ fn a_raise_does_not_make_growth_pay_for_memory_that_is_not_resident() {
         (0, 0),
         "growth paid by purging (calls, slots of the other class returned): {lowered} regions had tails, the count went {quiet} -> \
          {counted} at the raises against a cap of {cap}, with {resident} bytes resident in all"
+    );
+}
+
+/// Fourth round, on the accounting by distrust (`ea0e524`). Below the boundary the walk
+/// returns a non-empty huge page's clean runs again, once, and the lowering that follows makes
+/// the bits trusted. Where the kernel refuses the lowering (out of mappings, or a kernel that
+/// takes no advice) the boundary never comes down, so every lap asks for the splits and
+/// returns the same clean runs again, for as long as the tail stands.
+#[test]
+#[cfg_attr(miri, ignore)]
+fn a_refused_lowering_does_not_return_the_same_clean_runs_every_lap() {
+    let state = state::<Standard>();
+    let back = state.get_or_reserve().unwrap();
+    let os = state.os();
+    os.set_faults(Call::AdviseHuge, Faults::ALWAYS);
+    let (_, _) = stranded(&back);
+    age_and_beat(&back, 16);
+    let (purges, splits, low) = (
+        os.calls(Call::Purge),
+        os.calls(Call::SplitHuge),
+        charged(os),
+    );
+    age_and_beat(&back, 16);
+    assert_eq!(charged(os), low, "the later laps returned something");
+    assert!(
+        os.calls(Call::Purge) - purges <= 4,
+        "{} purge calls and {} split calls in 16 intervals that returned nothing",
+        os.calls(Call::Purge) - purges,
+        os.calls(Call::SplitHuge) - splits
     );
 }

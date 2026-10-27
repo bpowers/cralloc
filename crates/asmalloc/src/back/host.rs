@@ -275,6 +275,12 @@ impl<O: Os> Host for ClassHost<'_, O> {
             .is_ok()
     }
 
+    unsafe fn resident(&self, region: RegionId, offset: usize, len: usize) -> Option<usize> {
+        // SAFETY: BACK-HOST-04. the caller promises what `Space::resident` asks: nothing writes
+        // the range during the call.
+        unsafe { self.space.resident(self.region_at(region, offset), len) }.ok()
+    }
+
     unsafe fn purge(&self, region: RegionId, offset: usize, len: usize) -> bool {
         // SAFETY: BACK-HOST-02. the caller promises what `Space::purge` asks: nothing touches the range during
         // the call and nothing in it is needed.

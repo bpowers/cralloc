@@ -898,18 +898,22 @@ pub(crate) enum Purge {
 /// Purges a unit of a region whose pages lie wholly below the watermark, if every slot touching
 /// it is free. Returns what happened and how many leaf words it read.
 pub(crate) fn purge_unit<H: Host>(host: &H, region: RegionId, unit: Unit) -> (Purge, usize) {
-    purge_unit_as(host, region, unit, true)
+    purge_unit_as(host, region, unit, true, false)
 }
 
 /// [`purge_unit`], trusting the clean bits or not. With `trust` false, for the tail walk under
 /// the advice for huge pages (`purge`, "The tail"), a unit whose pages are all marked clean is
-/// purged all the same: khugepaged may have made them resident again. What it returns that
-/// had been counted is still the pages it cleans.
+/// purged all the same if the kernel says any of it is resident (khugepaged may have made it
+/// resident again), and left (`Purge::Clean`) if it says none is, or purged if it cannot say.
+/// What it returns that had been counted is still the pages it cleans. With `split`, the
+/// tail's: once the slots are claimed and the unit is to go, the kernel is asked to split the
+/// huge page over it first, and a refusal returns nothing (`Purge::Failed`).
 pub(crate) fn purge_unit_as<H: Host>(
     host: &H,
     region: RegionId,
     unit: Unit,
     trust: bool,
+    split: bool,
 ) -> (Purge, usize) {
     let layout = host.layout();
     if trust && all_clean(host, region, unit) {
@@ -938,6 +942,19 @@ pub(crate) fn purge_unit_as<H: Host>(
         unit.start as usize * page,
         (unit.end - unit.start) as usize * page,
     );
+    // A run of clean pages the tail walk does not believe goes only if the kernel says some of
+    // it is resident, or cannot say.
+    let doubted = !trust && all_clean(host, region, unit);
+    // SAFETY: BACK-REGION-04 in docs/safety/asmalloc/back/region-safety.md. This thread holds
+    // the claim of every slot that touches the range, so nothing writes it during the call.
+    if doubted && unsafe { host.resident(region, offset, len) } == Some(0) {
+        release_range(host, region, first, last, low, high + 1);
+        return (Purge::Clean, read);
+    }
+    if split && !host.split(region, offset, len) {
+        release_range(host, region, first, last, low, high + 1);
+        return (Purge::Failed, read);
+    }
     // SAFETY: BACK-REGION-01 in docs/safety/asmalloc/back/region-safety.md. This thread holds
     // the claim of every slot that touches the range, and the range lies below the watermark.
     if !unsafe { host.purge(region, offset, len) } {
