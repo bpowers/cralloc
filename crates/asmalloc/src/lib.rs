@@ -140,6 +140,14 @@ pub mod clock;
 #[cfg(not(feature = "internals"))]
 mod clock;
 pub(crate) mod environment;
+#[cfg(all(
+    test,
+    target_os = "linux",
+    target_arch = "x86_64",
+    not(miri),
+    not(kani)
+))]
+mod fresh;
 mod heap;
 mod lined;
 /// The constants of the specification the routines were proved against, as the Lean emitter

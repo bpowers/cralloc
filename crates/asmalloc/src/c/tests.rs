@@ -314,10 +314,15 @@ fn calloc_zeroes_reused_small_and_large_blocks() {
 
 /// C's `realloc` tells the back end whether a moving block outgrew its slot: grown past it,
 /// the old slot is kept as an outgrown one; cut to a small block, the old slot is freed as the
-/// block's free would, and is no outgrown slot. Sizes of their own, so that no other test of
-/// the process's heap takes the slots between the call and the look.
+/// block's free would, and is no outgrown slot. In a process of its own (`crate::fresh`): on the
+/// heap the other tests share, one of them could take the slot between the call and the look,
+/// or fill the bound on kept outgrown slots so that the growth keeps nothing.
 #[test]
 fn realloc_says_whether_the_block_outgrew_its_slot() {
+    let path = "c::tests::realloc_says_whether_the_block_outgrew_its_slot";
+    if !crate::fresh::is_child(path) {
+        return crate::fresh::run(path);
+    }
     // SAFETY: each block is live with the size used where it is written, and given up once.
     unsafe {
         let p = malloc(300 << 10);
