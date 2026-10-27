@@ -1056,17 +1056,34 @@ Nine rules stand behind the table.
 
   The advice follows what went back. Under the advice the kernel rebuilds any huge page
   with one page in use, so when a pass is done with a region it takes the advice off, in
-  one call, from the lowest huge page it returned part of upward, and never below the
-  frontier as it then stands. It takes none off where nothing went back: a change of advice
-  takes the address-space lock for writing, and a server whose classes wobble paid for
-  needless ones in its tail. Each region keeps that boundary in one word. A claim that
-  reaches above the boundary marks the word, and the background thread puts the advice back
-  on, up to the frontier and a few huge pages beyond; where there is no thread a heartbeat
-  does it, one region a step. The headroom is enough that a class growing back does not
-  move its boundary many times an interval, and no more, because advice over huge pages
-  that stay sparse brings their memory back. A split huge page that fills reach again is
-  small pages until the kernel rebuilds it, which costs a program that swings by gigabytes
-  every few tens of seconds about a percent of its time.
+  one call, from the lowest huge page it returned part of upward, or from the frontier
+  where fills have since passed that page: never below the frontier as it then stands. It
+  takes none off where nothing went back: a change of advice takes the address-space lock
+  for writing, and a server whose classes wobble paid for needless ones in its tail. Each
+  region keeps that boundary in one word. Above it a split huge page is small pages to
+  every pass, and one that never had a part returned is still whole and is judged as below
+  it. A claim that reaches above the boundary marks the word, and the background thread
+  puts the advice back on, up to the frontier and a few huge pages beyond; where there is
+  no thread a heartbeat does it, one region a step. The headroom is enough that a class
+  growing back does not move its boundary many times an interval, and no more, because
+  advice over huge pages that stay sparse brings their memory back. It is a constant: two
+  rules that sized it from the frontier's own movement did no better. A raise counts as a
+  fill's reach over its range, so the next pass does not take straight back what the raise
+  has just covered. A split huge page that fills reach again is small pages until the
+  kernel rebuilds it, which costs a program that swings by gigabytes every few tens of
+  seconds about a percent of its time.
+
+  Under the advice the walk does not believe its own record of which pages have gone back.
+  The kernel may have rebuilt a huge page whose free pages were returned, and those pages
+  are then resident with nothing to say so. So there a free page of a huge page that holds
+  anything is taken for resident, and a pass that returns such a huge page's free runs
+  returns them all; the lowering that follows puts them where the record is true again.
+  A huge page with nothing in it cannot be rebuilt and is left alone. Counting those pages
+  as resident when the advice goes back on was built first and was wrong: the kernel takes
+  minutes to rebuild anything, so the count ran tens of megabytes over what was resident,
+  enough to put a heap over the cap and set its growth purging memory in use. What the
+  kernel has rebuilt is uncounted until fills reach it or a pass returns it, which on a
+  real server lasted seconds.
 
   One thread changes a region's advice at a time. It takes an owner bit in the word with
   one compare-and-swap, makes the call, and writes the new boundary as it gives the bit
@@ -1074,7 +1091,8 @@ Nine rules stand behind the table.
   on. An owner that has not come back after two intervals is taken over, and the new owner
   first makes the kernel's advice agree with the word. So does the next owner after a call
   the kernel refused, which may have acted on part of its range. A kind of call the kernel
-  refused is not made again before the next interval, so a program at its limit of
+  refused is not made again before the next interval, or in a silence the walk's next lap,
+  so a program at its limit of
   mappings, or with its memory locked, pays a bounded number of failed calls and keeps its
   huge pages whole. `collect` splits whatever it can return, wherever the frontiers stand.
 
