@@ -36,6 +36,7 @@ fn maintain_call(state: &State<Sim>, back: &Back<'_, Sim>) -> (bool, bool) {
 /// before, so the decay word is never an interval old at the next round, and no later call in
 /// that interval is let in: a pass every other interval.
 #[test]
+#[cfg_attr(miri, ignore)]
 fn maintain_alone_runs_a_pass_every_interval() {
     let state = state::<Standard>();
     let back = state.get_or_reserve().unwrap();
@@ -69,6 +70,7 @@ fn maintain_alone_runs_a_pass_every_interval() {
 /// start only in odd intervals or only in even ones: begun on the wrong one, they never take a
 /// short run.
 #[test]
+#[cfg_attr(miri, ignore)]
 fn maintain_alone_returns_single_free_pages_whenever_it_began() {
     use super::super::policy::PURGE_ANY_RUN_EVERY;
     for phase in 0..2 {
@@ -113,6 +115,7 @@ fn maintain_alone_returns_single_free_pages_whenever_it_began() {
 /// little after its interval began does not hold the next one back. As first built, beats an
 /// interval apart started a pass every other time.
 #[test]
+#[cfg_attr(miri, ignore)]
 fn heartbeats_an_interval_or_two_apart_start_a_pass_each_time() {
     let state = state::<Standard>();
     let back = state.get_or_reserve().unwrap();
@@ -156,6 +159,7 @@ fn heartbeats_an_interval_or_two_apart_start_a_pass_each_time() {
 /// words allows or purges more than its pages and one run past them, and the pass ends without
 /// a second starting in the interval.
 #[test]
+#[cfg_attr(miri, ignore)]
 fn the_pass_in_steps_is_bounded_steps() {
     use super::super::policy::{
         PURGE_MAINTAIN_STEP_PAGES, PURGE_MAINTAIN_STEP_WORDS, PURGE_MAX_RUN_PAGES,
@@ -206,6 +210,7 @@ fn the_pass_in_steps_is_bounded_steps() {
 /// The floor of the allowance (`policy::allowance_floor`): a heap whose retained memory is
 /// under it keeps it through any silence, with no purge call at all.
 #[test]
+#[cfg_attr(miri, ignore)]
 fn a_silence_under_the_floor_returns_nothing() {
     use super::super::policy::allowance_floor;
     let state = floored_state::<Standard>();
@@ -240,6 +245,7 @@ fn a_silence_under_the_floor_returns_nothing() {
 /// Above the floor the clocked passes take retained memory down to the floor and stop there,
 /// within a run; `trim`, which `collect` and `malloc_trim` call, still returns all of it.
 #[test]
+#[cfg_attr(miri, ignore)]
 fn the_passes_stop_at_the_floor_and_trim_goes_below_it() {
     use super::super::policy::{PURGE_ANY_RUN_EVERY, PURGE_MAX_RUN_PAGES, allowance_floor};
     let state = floored_state::<Standard>();
@@ -331,6 +337,7 @@ fn a_pass_a_few_pages_short_of_its_goal_does_not_step_over_long_runs() {
 /// sets the level bit, and a slow path's look then wants a thread if the program has one of its
 /// own. Under the floor, the clocked pass's look asks nothing; over it, it asks again.
 #[test]
+#[cfg_attr(miri, ignore)]
 fn the_add_that_crosses_the_floor_asks_for_a_look_at_the_level() {
     use super::super::policy::allowance_floor;
     use crate::thread_word::{NONE, Process, Snapshot, WANTED};

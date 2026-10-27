@@ -18,7 +18,9 @@
 #              first time, and about an hour.
 #
 #   SOAK_MEM    memory cap per run, default 4G (never above 16G); suites use 8G or 12G
-#   SOAK_SRC    where the suites' sources and builds go, default ${TMPDIR:-/tmp}/asmalloc-soak
+#   SOAK_SRC    where the suites' sources and builds go, default ${TMPDIR:-/tmp}/asmalloc-soak;
+#               not inside a Cargo workspace such as this checkout, or git's Rust part fails
+#               to build
 #   SOAK_KEEP   set to keep the work directory
 #
 # Run it under taskset: every run uses the CPUs this script is allowed, and the two-CPU runs
