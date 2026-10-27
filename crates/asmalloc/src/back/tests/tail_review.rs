@@ -665,13 +665,13 @@ fn a_huge_page_misjudged_once_is_judged_again_in_a_silence() {
     assert!(freed.len() * C >= (hp as usize - seen.len()) * page() / 2);
     // SAFETY: the test holds these slots and gives them up.
     unsafe { back.launder(class(), &freed) };
-    let look = tail::look(&host, region, unit, salt);
+    let look = tail::look(&host, region, unit, salt, true);
     assert!(
         !look.sparse && look.free == 0,
         "the restated samples differ: {look:?}"
     );
     assert!(
-        (1..8).any(|later| tail::look(&host, region, unit, salt + later).sparse),
+        (1..8).any(|later| tail::look(&host, region, unit, salt + later, true).sparse),
         "no later salt finds it either"
     );
     // A silence: the thread's rounds, an interval apart, and no slow path.
