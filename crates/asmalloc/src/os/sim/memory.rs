@@ -149,21 +149,17 @@ impl Memory {
     /// those bytes during the call.
     pub(super) unsafe fn is_zero(&self, offset: usize, len: usize) -> bool {
         debug_assert!(offset <= self.len() && len <= self.len() - offset);
-        // Callers pass whole pages, which are at least 64 bytes and aligned to their size, so
-        // the range is a whole number of aligned words; comparing words is eight times fewer
-        // steps under Miri, where a whole reservation is checked at unmap.
-        debug_assert!((offset | len).is_multiple_of(size_of::<u64>()));
-        // SAFETY: the range is inside the memory, accessible and initialized (caller), and
-        // every bit pattern is a valid `u64`; `base` has provenance for all of it; the start is
-        // 8-aligned because the base is region-aligned and the offset a multiple of 8; and
-        // nothing writes it while the shared slice lives (caller).
-        let words = unsafe {
-            core::slice::from_raw_parts(
-                self.base.as_ptr().add(offset).cast::<u64>(),
-                len / size_of::<u64>(),
-            )
-        };
-        words.iter().all(|&word| word == 0)
+        // SAFETY: the range is inside the memory, accessible and initialized (caller); `base`
+        // has provenance for all of it; and nothing writes it while the shared slice lives
+        // (caller).
+        let bytes = unsafe { core::slice::from_raw_parts(self.base.as_ptr().add(offset), len) };
+        // Byte slices compare with one `memcmp`, which Miri runs natively. A loop over the
+        // words was interpreted step by step and cost Miri tens of minutes for each test that
+        // commits a whole simulated heap, since every commit checks its pages.
+        static ZEROS: [u8; 4096] = [0; 4096];
+        bytes
+            .chunks(ZEROS.len())
+            .all(|chunk| chunk == &ZEROS[..chunk.len()])
     }
 }
 
