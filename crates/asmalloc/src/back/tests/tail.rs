@@ -1573,3 +1573,124 @@ fn a_refused_split_returns_no_page_of_its_run() {
         resident - memory(os).0
     );
 }
+
+/// Split huge pages whose free pages were all returned, under the advice again (the word with
+/// no boundary), as a raise leaves them: the walk does not believe their clean bits.
+fn under_advice_again<'a>(back: &Back<'a, Sim>, os: &Sim) -> crate::space::RegionId {
+    let (kept, _) = stranded(back);
+    let (region, _) = region_of(back, kept[kept.len() - 1]);
+    forget_reuse(back);
+    walk_once(back, region);
+    let host = back.host(class().class()).unwrap();
+    assert_ne!(Tail::unpack(host.tail(region).load()).from, 0);
+    let base = back.space().region(region);
+    // SAFETY: the range is the region's, and advice changes no contents.
+    unsafe {
+        os.advise_huge(base, back.space().plan().region_size(), HugePages::Prefer)
+            .unwrap();
+    }
+    host.tail(region).store(0);
+    region
+}
+
+/// Before it returns a run of clean pages it does not believe, the walk asks the kernel whether
+/// any of it is resident: where none is (khugepaged has rebuilt nothing), it costs that one
+/// call, and no split and no purge.
+#[test]
+#[cfg_attr(miri, ignore)]
+fn a_clean_run_that_is_not_resident_costs_one_question() {
+    let state = state::<Standard>();
+    let back = state.get_or_reserve().unwrap();
+    let os = state.os();
+    let region = under_advice_again(&back, os);
+    let (asked, splits, purges) = (
+        os.calls(Call::Resident),
+        os.calls(Call::SplitHuge),
+        os.calls(Call::Purge),
+    );
+    walk_once(&back, region);
+    assert!(os.calls(Call::Resident) > asked, "the kernel was not asked");
+    assert_eq!(
+        (
+            os.calls(Call::SplitHuge) - splits,
+            os.calls(Call::Purge) - purges
+        ),
+        (0, 0),
+        "splits and purges of clean runs that were not resident"
+    );
+}
+
+/// A refused question is taken for "maybe resident": the walk returns the clean runs as it
+/// would without the question.
+#[test]
+#[cfg_attr(miri, ignore)]
+fn a_refused_question_falls_back_to_returning_the_clean_runs() {
+    let state = state::<Standard>();
+    let back = state.get_or_reserve().unwrap();
+    let os = state.os();
+    let region = under_advice_again(&back, os);
+    os.set_faults(Call::Resident, Faults::ALWAYS);
+    let purges = os.calls(Call::Purge);
+    walk_once(&back, region);
+    assert!(
+        os.calls(Call::Purge) > purges,
+        "nothing purged when the kernel would not say"
+    );
+}
+
+/// The counting step's estimate does not believe the clean bits under the advice either: a
+/// counting walk over rebuilt huge pages counts their free pages as what a purge could
+/// return.
+#[test]
+#[cfg_attr(miri, ignore)]
+fn the_count_of_a_lap_does_not_believe_the_clean_bits_under_the_advice() {
+    let state = state::<Standard>();
+    let back = state.get_or_reserve().unwrap();
+    let os = state.os();
+    let region = under_advice_again(&back, os);
+    // SAFETY: no other thread runs, and the back end and the tests store only integers.
+    let rebuilt = unsafe { os.khugepaged() };
+    assert!(rebuilt > 0);
+    let (_, _, _, found) = back.purge_region(
+        class().class(),
+        region,
+        usize::MAX,
+        0,
+        true,
+        super::super::purge::Scope::IdleAnyRun,
+        true,
+        false,
+    );
+    assert!(
+        found >= rebuilt * huge() / 2,
+        "a lap counted {found} bytes over {rebuilt} rebuilt huge pages"
+    );
+}
+
+/// While the kernel refuses lowerings the walk believes the clean bits, so the clean runs are
+/// not asked about again and again: after a refused lowering, a walk before the clock moves
+/// asks the kernel nothing.
+#[test]
+#[cfg_attr(miri, ignore)]
+fn under_a_refused_lowering_the_clean_runs_are_not_asked_about() {
+    let state = state::<Standard>();
+    let back = state.get_or_reserve().unwrap();
+    let os = state.os();
+    let region = under_advice_again(&back, os);
+    let host = back.host(class().class()).unwrap();
+    let units = (back.space().plan().region_size() / huge()) as u32;
+    os.set_faults(Call::AdviseHuge, Faults::ALWAYS);
+    tail::note(&host, region, units - 1);
+    back.state.walk.purge_at.store(
+        region.index() as u32 + 1,
+        core::sync::atomic::Ordering::Relaxed,
+    );
+    back.lower_walked();
+    let asked = os.calls(Call::Resident);
+    walk_once(&back, region);
+    assert_eq!(
+        os.calls(Call::Resident),
+        asked,
+        "the kernel was asked about clean runs under a refused lowering"
+    );
+}

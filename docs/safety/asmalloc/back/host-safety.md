@@ -125,6 +125,13 @@ accesses that memory in a way that conflicts with a shared reference.
 5. *No conflicting access.* As BACK-HOST-01, point 5: every word is accessed only through
    `Atomic`'s atomic operations, by every thread.
 
+## BACK-HOST-04: `self.space.resident(...)` in `ClassHost::resident`
+
+**Proof.** `ClassHost::resident` is an `unsafe fn` whose `# Safety` is exactly
+`Space::resident`'s: no thread writes the range during the call. It forwards the range unchanged
+(the region's base plus the offset); `Space::resident` checks it (RESERVATION-06). The caller's
+obligation is discharged at its one call site, BACK-REGION-04.
+
 ## BACK-HOST-02: `self.space.purge(...)` in `ClassHost::purge`
 
 **Proof.** `ClassHost::purge` is an `unsafe fn` whose `# Safety` is exactly `Space::purge`'s:

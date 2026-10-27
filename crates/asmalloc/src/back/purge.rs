@@ -1570,7 +1570,10 @@ impl<O: Os> Back<'_, O> {
         step.read += words;
         let boundary = tail::Tail::unpack(host.tail(region).load()).from;
         let advised = boundary == 0 || start < boundary * huge;
-        let trust = !advised || dirty == 0;
+        // While the kernel refuses lowerings the boundary does not come down, and the bits of
+        // what the walk returned would stay doubted: so they are believed, and the clean runs
+        // are not asked about every lap, until the clock moves.
+        let trust = !advised || dirty == 0 || self.tail_refused(REFUSED_LOWER);
         // Above the boundary a huge page with a clean page has been returned in part, so it is
         // split and small pages: neither the look nor the cut has anything to protect, and a
         // step that may return memory walks it, so that the pass for short runs takes what is
@@ -1587,7 +1590,7 @@ impl<O: Os> Back<'_, O> {
                     // What it holds resident counts toward the lap, less what goes back.
                     step.found = if trust { dirty } else { (end - start) as usize } * page;
                     if walk.may_return {
-                        let (outcome, _) = region::purge_unit_as(host, region, unit, trust);
+                        let (outcome, _) = region::purge_unit_as(host, region, unit, trust, false);
                         if let Purge::Done { returned, outgrown } = outcome {
                             self.forget_outgrown(outgrown);
                             step.purged = returned;
@@ -1654,21 +1657,19 @@ impl<O: Os> Back<'_, O> {
         if run.end - run.start < walk.min_run && walk.below_purged != Some(run.end) {
             return Some(step);
         }
-        let (offset, len) = (
-            run.start as usize * page,
-            (run.end - run.start) as usize * page,
-        );
-        // Asked for, the split counts against a slow path's bound whatever the kernel answers.
+        // The purge asks the kernel to split the huge page over the run, once it holds the run's
+        // slots, and before that, for a run of clean pages it does not believe, whether any of
+        // it is resident. A call asked for counts against a slow path's bound whatever the
+        // kernel answers.
         step.split = true;
-        if !host.split(region, offset, len) {
-            self.refuse_tail(REFUSED_SPLIT);
-            return Some(step);
-        }
-        let (outcome, _) = region::purge_unit_as(host, region, run, trust);
-        if let Purge::Done { returned, outgrown } = outcome {
-            self.forget_outgrown(outgrown);
-            step.purged = returned;
-            step.part = Some(run.start / huge);
+        match region::purge_unit_as(host, region, run, trust, true) {
+            (Purge::Done { returned, outgrown }, _) => {
+                self.forget_outgrown(outgrown);
+                step.purged = returned;
+                step.part = Some(run.start / huge);
+            }
+            (Purge::Failed, _) => self.refuse_tail(REFUSED_SPLIT),
+            _ => {}
         }
         Some(step)
     }

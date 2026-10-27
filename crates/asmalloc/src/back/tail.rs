@@ -74,6 +74,23 @@
 //! what khugepaged rebuilt until the walk returns it. A raise counts as a fill's reach over
 //! its range (`Back::age_raise`), so the walk does not take it back within two intervals.
 //!
+//! Before it returns a run of pages all marked clean that it does not believe, the purge asks
+//! the kernel, under the claim of the run's slots, whether any of it is resident (`mincore`):
+//! if none is, the run costs that call and no split or purge; if the kernel will not say, the
+//! run goes back as if resident. The look and the exact count do not ask: they choose what to
+//! walk and are read every lap, and the question is cheap only where the walk would otherwise
+//! split and purge. While the kernel refuses lowerings (the boundary cannot come down, so the
+//! bits of what was returned would stay doubted), the walk believes the bits until the clock
+//! moves.
+//!
+//! Two limits. A clean bit can stay wrong where the walk skipped a page under the advice (a
+//! huge page that sampled dense or was under the cut, or a run shorter than a pass takes) and a
+//! later lowering at a lower huge page took the advice off over it: the walk then believes a
+//! bit that a rebuild before the lowering made false, and those pages stay resident and
+//! uncounted until a fill reaches them. And a lap's estimate of what a purge could return
+//! counts the clean free pages it does not believe, so until the boundary comes down a pass
+//! can be held to more than is there; under a refused lowering the bits are believed again.
+//!
 //! The protocol is `tla/Tail.tla`.
 
 use super::layout::Unit;
