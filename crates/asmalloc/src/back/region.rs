@@ -898,8 +898,21 @@ pub(crate) enum Purge {
 /// Purges a unit of a region whose pages lie wholly below the watermark, if every slot touching
 /// it is free. Returns what happened and how many leaf words it read.
 pub(crate) fn purge_unit<H: Host>(host: &H, region: RegionId, unit: Unit) -> (Purge, usize) {
+    purge_unit_as(host, region, unit, true)
+}
+
+/// [`purge_unit`], trusting the clean bits or not. With `trust` false, for the tail walk under
+/// the advice for huge pages (`purge`, "The tail"), a unit whose pages are all marked clean is
+/// purged all the same: khugepaged may have made them resident again. What it returns that
+/// had been counted is still the pages it cleans.
+pub(crate) fn purge_unit_as<H: Host>(
+    host: &H,
+    region: RegionId,
+    unit: Unit,
+    trust: bool,
+) -> (Purge, usize) {
     let layout = host.layout();
-    if all_clean(host, region, unit) {
+    if trust && all_clean(host, region, unit) {
         return (Purge::Clean, 1);
     }
     let (first, last) = layout.touching(unit);
@@ -1006,7 +1019,17 @@ fn outgrown_dirty<H: Host>(host: &H, region: RegionId, unit: Unit, first: u32, l
 /// clean, and every slot touching it is free. A look that claims nothing, as `purge_unit`
 /// makes before claiming; returns it and the leaf words read.
 pub(crate) fn purgeable_unit<H: Host>(host: &H, region: RegionId, unit: Unit) -> (bool, usize) {
-    if all_clean(host, region, unit) {
+    purgeable_unit_as(host, region, unit, true)
+}
+
+/// [`purgeable_unit`], trusting the clean bits or not, as [`purge_unit_as`].
+pub(crate) fn purgeable_unit_as<H: Host>(
+    host: &H,
+    region: RegionId,
+    unit: Unit,
+    trust: bool,
+) -> (bool, usize) {
+    if trust && all_clean(host, region, unit) {
         return (false, 1);
     }
     let (first, last) = host.layout().touching(unit);

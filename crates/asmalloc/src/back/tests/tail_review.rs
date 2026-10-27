@@ -414,9 +414,6 @@ fn a_heartbeat_raises_a_bounded_number_of_regions() {
 /// resident and charged again, but their clean bits still say returned, so the retained count
 /// does not hold them, the look calls them dense, and no pass returns them until the huge page
 /// is wholly free. The test shows the memory coming back and staying.
-// Finding 5, left to the second stage by the lead's decision: compiled out until then, since
-// `scripts/gate --all` runs ignored tests.
-#[cfg(any())]
 #[test]
 #[cfg_attr(miri, ignore)]
 fn what_khugepaged_rebuilds_after_a_raise_is_returned_again() {
@@ -433,7 +430,13 @@ fn what_khugepaged_rebuilds_after_a_raise_is_returned_again() {
         assert!(!more.is_empty());
         again.extend(more);
     }
-    back.heartbeat();
+    // A request's heartbeat raises one region a step (finding 3): as many as it takes.
+    for _ in 0..8 {
+        if back.state.marks.load() == 0 {
+            break;
+        }
+        back.heartbeat();
+    }
     assert_eq!(back.state.marks.load(), 0);
     // SAFETY: as `charged`.
     let rebuilt = unsafe { os.khugepaged() };
@@ -662,13 +665,13 @@ fn a_huge_page_misjudged_once_is_judged_again_in_a_silence() {
     assert!(freed.len() * C >= (hp as usize - seen.len()) * page() / 2);
     // SAFETY: the test holds these slots and gives them up.
     unsafe { back.launder(class(), &freed) };
-    let look = tail::look(&host, region, unit, salt);
+    let look = tail::look(&host, region, unit, salt, true);
     assert!(
         !look.sparse && look.free == 0,
         "the restated samples differ: {look:?}"
     );
     assert!(
-        (1..8).any(|later| tail::look(&host, region, unit, salt + later).sparse),
+        (1..8).any(|later| tail::look(&host, region, unit, salt + later, true).sparse),
         "no later salt finds it either"
     );
     // A silence: the thread's rounds, an interval apart, and no slow path.
@@ -1062,4 +1065,212 @@ mod protocol {
             },
         );
     }
+
+    /// Second round, on the fixes (`d8c8fad`). `MarkVisible`: once nobody is at work, a word
+    /// that carries a mark has the flag set. The model's take is one step; the code's raise
+    /// loads the word and then takes the bit with a compare-and-swap, which a walker's note in
+    /// between makes fail. The look has cleared the flag, no owner exists to set it again, and
+    /// the mark stays where no look finds it until some later lowering of the region gives
+    /// the bit back.
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn a_mark_is_visible_after_a_look_that_lost_its_take_to_a_note() {
+        explore(
+            Config::ALL,
+            2,
+            || {
+                let kernel = Kernel::new();
+                let region = kernel.region();
+                let last = kernel.units() - 1;
+                tail::note(&kernel, region, last);
+                let _ = tail::lower(&kernel, region, kernel.huge(), 1);
+                assert!(tail::mark(&kernel, region, kernel.layout().region_pages()));
+                kernel.tail_marks().fetch_or(1);
+                kernel
+            },
+            |kernel, me| {
+                let region = kernel.region();
+                if me == 0 {
+                    // `Back::raise_marked`: clear the flag, then raise the marked region.
+                    if kernel.tail_marks().compare_exchange(1, 0).is_ok() {
+                        let pages = kernel.layout().region_pages();
+                        let _ = tail::raise(kernel, region, kernel.huge(), 0, pages, 1);
+                    }
+                } else {
+                    tail::note(kernel, region, 2);
+                }
+            },
+            |kernel, _| {
+                let word = kernel.word();
+                assert!(
+                    !word.want || kernel.tail_marks().load() != 0,
+                    "a mark with the flag clear and nobody at work: {word:?}"
+                );
+            },
+        );
+    }
+
+    /// The lowering "never below the frontier" drops a note the frontier has passed. The
+    /// word keeps only the lowest huge page noted, so the drop also forgets every huge page
+    /// above the frontier that the walk returned part of since the last lowering: their
+    /// advice stays on. Lowering at the frontier instead keeps `OffOnlyReturned` (the
+    /// frontier is above the noted huge page) and takes the advice off where it should.
+    #[test]
+    fn a_note_the_frontier_passed_still_lowers_what_lies_above_the_frontier() {
+        let kernel = Kernel::new();
+        let region = kernel.region();
+        let layout = *kernel.layout();
+        let hp = layout.huge_pages();
+        // The walk returned part of huge pages 1 and 3; the word holds the lowest.
+        tail::note(&kernel, region, 3);
+        tail::note(&kernel, region, 1);
+        // Then a fill reached into huge page 2.
+        let format = layout.frontier_format();
+        let reached = format.record(0, 1, hp + 1).unwrap();
+        kernel.frontier(region).store(reached);
+        let _ = tail::lower(&kernel, region, kernel.huge(), 1);
+        let word = kernel.word();
+        assert!(
+            word.from != 0 && word.from <= 3,
+            "huge page 3, returned in part and above the frontier, keeps its advice: {word:?}"
+        );
+    }
+}
+
+/// Second round. The cut (`TAIL_SPLIT_SHARE`) protects a huge page's mapping, but it is
+/// applied to huge pages that are already split and whose advice is off: once a pass has
+/// returned the long runs of one, what is left is under a quarter, and the pass that takes
+/// runs of any length never takes it. Before the cut those pages went back at that pass.
+#[test]
+#[cfg_attr(miri, ignore)]
+fn the_short_runs_of_a_split_huge_page_go_back_at_the_pass_for_short_runs() {
+    let state = state::<Standard>();
+    let back = state.get_or_reserve().unwrap();
+    let os = state.os();
+    let region_bytes = back.space().plan().region_size();
+    let slots = fill(&back, class(), 2 * region_bytes / C);
+    for &p in &slots {
+        paint(p, C, 7);
+    }
+    let region = region_of(&back, slots[0]);
+    let host = back.host(class().class()).unwrap();
+    let layout = *host.layout();
+    let hp = layout.huge_pages();
+    assert_eq!(hp, 16);
+    let top = layout.carved_pages(Grow::unpack(host.grow(region).load()).carved);
+    let start = (top & !(hp - 1)) - hp;
+    assert!(start >= huge_from(&back, region) && start > 0);
+    let base = back.space().region(region).addr().get();
+    // A run of four pages and two pages on their own: six of sixteen.
+    let free_pages = [4, 5, 6, 7, 10, 12].map(|p| start + p);
+    let freed: Vec<*mut u8> = slots
+        .iter()
+        .copied()
+        .filter(|p| free_pages.contains(&(((p.addr() - base) / page()) as u32)))
+        .collect();
+    assert_eq!(freed.len() * C, 6 * page());
+    // SAFETY: the test holds these slots and gives them up.
+    unsafe { back.launder(class(), &freed) };
+    let before = charged(os);
+    age_and_beat(&back, 48);
+    assert!(
+        os.calls(Call::SplitHuge) > 0,
+        "the huge page was never split"
+    );
+    let returned = before.saturating_sub(charged(os));
+    assert!(
+        returned >= 6 * page(),
+        "{} of 6 free pages of a split huge page went back in 48 intervals",
+        returned / page()
+    );
+}
+
+/// Third round, on the accounting (`ae24bca`). A raise counts every clean page of the
+/// non-empty huge pages it puts back under the advice as resident, whether or not the kernel
+/// has rebuilt anything (khugepaged takes minutes). The cap acts on that count: a burst that
+/// reaches a little above the boundary in many classes at once puts the count over the cap
+/// with memory that is not there, and the next class to grow pays for it by returning pages
+/// another class freed a moment ago and is about to reuse.
+#[test]
+#[cfg_attr(miri, ignore)]
+fn a_raise_does_not_make_growth_pay_for_memory_that_is_not_resident() {
+    let state = state::<Standard>();
+    let back = state.get_or_reserve().unwrap();
+    let os = state.os();
+    let cap = retained_cap(Standard::GEOMETRY);
+    let step = growth_step(Standard::GEOMETRY);
+    let region_bytes = back.space().plan().region_size();
+    let sizes = [
+        16usize, 32, 48, 64, 80, 96, 112, 128, 160, 192, 224, 256, 320, 384, 448, 512, 640, 768,
+        896, 1024,
+    ];
+    // Every class strands a tail: one slot kept in each huge page.
+    for size in sizes {
+        let class = small(size);
+        let slots = fill(&back, class, region_bytes / size);
+        for &p in &slots {
+            paint(p, size, 7);
+        }
+        let freed: Vec<*mut u8> = slots
+            .iter()
+            .copied()
+            .filter(|p| (p.addr() % huge()) >= size)
+            .collect();
+        for chunk in freed.chunks(64) {
+            // SAFETY: the test holds these slots and gives them up.
+            unsafe { back.launder(class, chunk) };
+        }
+    }
+    age_and_beat(&back, 24);
+    let lowered = (0..back.walk_regions())
+        .filter(|&i| Tail::unpack(back.state.tails[i].load()).from != 0)
+        .count();
+    let quiet = back.retained();
+    assert!(quiet < cap / 2, "{quiet} retained after the passes");
+    // The burst: each class claims until it reaches above its boundary, and the heartbeats
+    // raise.
+    for size in sizes {
+        let class = small(size);
+        for _ in 0..4096 {
+            if back.state.marks.load() != 0 {
+                break;
+            }
+            if fill(&back, class, 8).is_empty() {
+                break;
+            }
+        }
+        for _ in 0..8 {
+            if back.state.marks.load() == 0 {
+                break;
+            }
+            back.heartbeat();
+        }
+    }
+    let counted = back.retained();
+    // SAFETY: no other thread runs, and the back end and the tests store only integers.
+    let resident = unsafe { os.resident_bytes() };
+    // A class that just freed a little, which it reuses every interval.
+    let victim = small(2048);
+    let held = fill(&back, victim, 16 * step / 2048);
+    for &p in &held {
+        paint(p, 2048, 9);
+    }
+    // SAFETY: the test holds these slots and gives them up.
+    unsafe { back.launder(victim, &held) };
+    // Another class grows.
+    let purges = os.calls(Call::Purge);
+    let grower = small(3072);
+    let grown = fill(&back, grower, 8 * step / 3072);
+    assert!(!grown.is_empty());
+    // SAFETY: as above.
+    let taken = held
+        .iter()
+        .filter(|&&p| unsafe { os.is_purged(NonNull::new(p).unwrap(), 2048) })
+        .count();
+    assert_eq!(
+        (os.calls(Call::Purge) - purges, taken),
+        (0, 0),
+        "growth paid by purging (calls, slots of the other class returned): {lowered} regions had tails, the count went {quiet} -> \
+         {counted} at the raises against a cap of {cap}, with {resident} bytes resident in all"
+    );
 }

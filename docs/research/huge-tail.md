@@ -484,6 +484,87 @@ troughs give back 0.11 of what the product had won (3.37 to 3.48, against main's
 4-phase job and mini-redis's wide phases are the same. Its small phases ended lower after
 the fixes; one run each, and not explained.
 
+### The accounting and the headroom (2026-10-26)
+
+Branch `huge-tail-accounting`. One run each; the 4-phase job, the store and mini-redis under
+`scripts/measure`, the 24-phase job and the call counts under `scripts/heavy` on a busy
+machine (their cycles are not comparable).
+
+**The restore, built, measured and rejected** (`ae24bca`, measured alone against stage 1,
+`a16d05a`). A raise, or a note the frontier has passed, counted every free page of each
+non-empty huge page it left under the advice as resident again (clearing its clean bits under
+a claim), and a raise counted as a fill's reach over its range. On the 4-phase job the troughs and cycles did not move (3.30 against 3.28; 601
+against 597 cycles/op). On the 24-phase job the troughs went from 3.50 to 3.41, the peaks
+from 1.156 to 1.139, and khugepaged rebuilt 645 huge pages against 1423. mini-redis's wide
+phases were the same (1.16 to 1.18). The allocator's count against the resident free memory
+mincore sees, at the end of the 4-phase job: stage 1 counted 4.4 MiB less than was
+resident; the accounting counts 78.5 MiB more, pages it called resident that khugepaged had
+not yet rebuilt in that run. An overcount costs a later pass a call on pages that are not
+there and goes away with it; an undercount stayed. Advice calls on the 4-phase job: raises
+96 to 170, lowerings 183 to 169. On Qdrant the gap the product left after close closed
+(`docs/research/servers-qdrant.md`, dated section). The review rejected it: the over-count
+makes growth pay for memory that is not there (twenty classes each reaching a little above
+their boundary took the simulator's count from 0.29 to 3.88 MiB against a 2 MiB cap with
+0.6 MiB resident, and the next class to grow purged slots another had just freed; the 78.5
+MiB above is the same against the real 64 MiB cap), and the restore walked the raised range
+page by page on a request's heartbeat, unbounded (a raise over a 1 GiB tail is about 260
+thousand page looks).
+
+**The accounting by distrust** (`ea0e524`), in its place. Nothing changes the clean bits or
+the count at a raise; the raise still counts as a fill's reach. Instead the tail walk does not
+believe clean bits where they can be wrong: below the boundary, a free page of a huge page
+with any page not clean counts as resident to the look, the exact count, the counting
+estimate and the runs a returning step gives back, which it purges whatever their bits say.
+A huge page wholly clean is left as it is, and above the boundary the bits are true; there a
+huge page with no clean page, never returned in part, gets the look and the cut as below.
+Against stage 1 and the restore (`460cea8`), one run each:
+
+| | stage 1 | restore | distrust |
+|---|---|---|---|
+| 4-phase: troughs, cycles/op | 3.29, 599 | 3.24, 599 | 3.27, 605 |
+| 24-phase: peaks last 3, troughs, rebuilt huge pages | 1.154, 3.51, 1256 | 1.136, 3.18, 877 | 1.135, 3.27, 852 |
+| mini-redis wide phases; quiet | 1.17 to 1.18; 1.20 | 1.15 to 1.16; 1.17 | 1.15; 1.15 |
+| store: burst max ms, 2 runs | 0.5 to 0.6 | 0.6 to 0.7 | 0.5 to 0.6 |
+| count against `mincore`, end of the 4-phase job | 11.2 MiB under | 89.2 MiB over | 0.2 MiB under |
+| 4-phase calls: `HUGEPAGE`, `NOHUGEPAGE`, `COLD`, `DONTNEED` (thousands for the last two) | 91, 178, 63, 103 | 198, 180, 122, 154 | 144, 151, 95, 102 |
+
+(The distrust's 24-phase run had scarce huge pages, 14 thousand fallbacks on the machine.)
+The tail's own counters (`acct_edit.py`) on the 24-phase job: 996 raises, 790 lowerings,
+716 thousand tail purges, each after a split; 63 thousand of them (8.9%) were of runs whose
+pages were all marked clean, 551 thousand pages, of which `mincore` found 1339 resident (0.24%)
+just before. So about 64 such purges, each with its split, follow a raise and return almost
+nothing: the price of not believing the bits. On the 4-phase job the share was 5.9%.
+
+**The review's second round** (`dee220a`) changes what is returned too: above the
+boundary a step that may return memory walks the split huge pages with neither the look nor
+the cut, so the pass for short runs takes what is left. The 24-phase troughs went to 3.18
+(peaks 1.136), the 4-phase troughs were 3.34. It doubled the system calls: on the 4-phase
+job `MADV_DONTNEED` 108 thousand to 231 thousand and `MADV_COLD` 74 thousand to 214
+thousand, at the same cycles/op (601). The split before each return is kept above the
+boundary, since a lowering at the frontier's huge page may take the advice off over huge
+pages never split.
+
+**The headroom**, two arms against the constant 8, on that product (`7c06da3`): (i) the
+frontier's rise over the last interval, at least one huge page; (ii) grow on regret, a raise
+within 4 intervals of the region's last doubling the headroom from one huge page, a lowering
+halving it, kept in a per-region word beside the tail words.
+
+| | constant 8 | (i) rise | (ii) regret |
+|---|---|---|---|
+| 4-phase: troughs, cycles/op | 3.34, 601 | 3.24, 603 | 3.34, 599 |
+| 4-phase: raises (`MADV_HUGEPAGE`, with main's own ~20) | 202 | 174 | 170 |
+| 24-phase: peaks last 3, troughs | 1.136, 3.18 | 1.137, 3.24 | 1.136, 3.19 |
+| mini-redis wide phases | 1.16 | 1.15 to 1.16 | 1.16 to 1.17 |
+| store: Mcycles a request, burst max ms (2 runs) | 0.35, 0.6 | 0.35, 0.6 to 0.7 | 0.35, 0.6 |
+
+Neither arm raised more often than the constant: the case of a class that has just started
+growing, which the 4-phase job's high phases are, did not show the 716 raises a run that no
+headroom at all made, since a raise follows a look for marks, at most a heartbeat's or a
+thread's step apart, and a floor of one huge page is enough there. Neither did better on
+memory beyond a run's noise ((i) better on the 4-phase troughs and worse on the 24-phase
+ones). So the constant stays: the regret arm matches it with a word a region more, and the
+rise arm is not consistently better.
+
 ## Method and data
 
 - **Builds.** `build.sh` extracts main, applies heap-drift's `bench/` changes

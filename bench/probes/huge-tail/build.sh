@@ -9,7 +9,8 @@
 # The drift workload, its probes and the memstat sampler come from heap-drift's commits
 # (DRIFT_BASE..DRIFT, bench/ only), applied over COMMIT's tree, unless DRIFT=none (a commit
 # that has them, as main since 47e88d4). HT_EDIT=0 builds COMMIT as it is, without the
-# switch: the product and main, built the same way for comparison. PAD=N: below.
+# switch: the product and main, built the same way for comparison. PAD=N: below. ACCT=1
+# adds the tail's call counters (acct_edit.py, the file `ACCT_DIAG` names).
 #
 # PARTs (default: workload memstat):
 #   workload    the bench workloads with bench-alloc/asmalloc, into bench/target/NAME/release
@@ -45,6 +46,13 @@ if [ "${HT_EDIT:-1}" = 1 ]; then
   cp "$here"/*.py "$here"/*.rs "$tree/bench/probes/huge-tail/"
   python3 -I "$tree/bench/probes/huge-tail/ht_edit.py" "$tree"
   stamp="$stamp, ht_edit.py $(sha256sum "$here/ht_edit.py" | cut -c1-12), ht.rs $(sha256sum "$here/ht.rs" | cut -c1-12)"
+fi
+if [ "${ACCT:-0}" = 1 ]; then
+  # The tail's call counters (acct_edit.py), for "The accounting" in the note.
+  mkdir -p "$tree/bench/probes/huge-tail"
+  cp "$here"/acct_edit.py "$here"/acct.rs "$tree/bench/probes/huge-tail/"
+  python3 -I "$tree/bench/probes/huge-tail/acct_edit.py" "$tree"
+  stamp="$stamp, acct_edit.py $(sha256sum "$here/acct_edit.py" | cut -c1-12)"
 fi
 unset RUSTFLAGS CARGO_ENCODED_RUSTFLAGS BENCH_LAYOUT_PAD
 # PAD=N moves the code after bench-alloc's pad by N bytes (`benchrun layout`), for comparing

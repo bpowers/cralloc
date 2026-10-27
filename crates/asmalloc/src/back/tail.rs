@@ -41,21 +41,38 @@
 //! (`reconcile`). An old owner that comes back after being taken over finds its
 //! compare-and-swap refused and sets the repair bit, so the advice its late call left is put
 //! right by the next owner. In a fork's child no thread holds a bit it inherited, so the child
-//! clears every owner bit and asks for a repair at its first slow path (`Back::distrust_tails`);
-//! the forking thread, if it forked from a signal handler in the middle of a change, then gives
-//! back as a taken-over owner does. A call the kernel refused may have acted on part of its
+//! clears every owner bit and asks for a repair at the slow path that draws its generation
+//! (`Back::distrust_tails`). The clearing may meet a live owner of the child's own: the forking
+//! thread, if it forked from a signal handler in the middle of a change, or another thread the
+//! child started before that slow path. Either is then taken over: its give-back finds the bit
+//! gone and asks for a repair, and the repair makes the advice agree with the word whatever its
+//! late call did. A call the kernel refused may have acted on part of its
 //! range, so it sets the repair bit too. Either way the next change of the region's advice
 //! reconciles it first, and nothing waits or loops.
 //!
 //! **Refusals.** A refused lowering keeps its noted huge page, and a refused raise its mark, so
 //! that the change is made once the kernel takes it. After the kernel refuses a split, a raise
-//! or a lowering, that kind of call is not made again before the next counted interval
-//! (`Back::tail_refused`): a split's refusal leaves the tail's huge pages whole, as below the
-//! frontier; a raise's leaves the marks set but not due, so the background thread sleeps; a
-//! lowering's leaves the notes. A program the kernel refuses throughout (at `vm.max_map_count`,
-//! with its memory locked, or on a kernel without the calls) pays at most one refused call of
-//! each kind an interval, and two for a reconciliation, and keeps main's behaviour: free pages
-//! of whole huge pages go back, the tail's partly used huge pages stay whole.
+//! or a lowering, that kind of call is not made again before the counted interval or the
+//! walk's lap count moves, whichever is first (`Back::tail_refused`): the interval stands
+//! still in a silence and the lap count while no pass walks. A split's refusal leaves the
+//! tail's huge pages whole, as below the frontier; a raise's leaves the marks set but not due,
+//! so the background thread sleeps; a lowering's leaves the notes. A program the kernel refuses
+//! throughout (at `vm.max_map_count`, with its memory locked, or on a kernel without the calls)
+//! pays at most one refused call of each kind a tick of that clock, and two for a
+//! reconciliation, and keeps main's behaviour: free pages of whole huge pages go back, the
+//! tail's partly used huge pages stay whole.
+//!
+//! **Accounting.** Under the advice for huge pages the kernel may make any huge page that holds
+//! one page wholly resident (khugepaged rebuilds it), so there a page's clean bit may say
+//! returned of a page that is resident again. Nothing changes the clean bits or the retained
+//! count when the advice comes back; instead the tail walk does not believe clean bits where
+//! they can be wrong (`purge`, "The tail"): below the boundary, a free page of a huge page
+//! with any page not clean counts as resident to the look, the exact count, the counting
+//! step's estimate and the runs a returning step gives back. A huge page wholly clean is left
+//! as it is, since nothing rebuilds one with no page present, and above the boundary the bits
+//! are true. So the retained count never holds memory that may not be resident; it misses
+//! what khugepaged rebuilt until the walk returns it. A raise counts as a fill's reach over
+//! its range (`Back::age_raise`), so the walk does not take it back within two intervals.
 //!
 //! The protocol is `tla/Tail.tla`.
 
@@ -327,28 +344,49 @@ fn reconcile<H: Host>(host: &H, region: RegionId, huge: u32, from: u32) -> bool 
 ///
 /// Never below the region's frontier as it stands now (`region::floor`, rounded up to a huge
 /// page): the walk noted the huge page when it lay above the frontier, and fills may have
-/// reached it since, where the advice must stay. A note the frontier has passed is dropped.
+/// reached it since, where the advice must stay. A note the frontier has passed lowers the
+/// boundary to the frontier's huge page instead, since huge pages above it may have been
+/// returned in part too and the word keeps only the lowest noted.
 /// A refused call keeps the note (`tla/Tail.tla`, `Call`), so that the advice comes off there
 /// once the kernel takes it.
+#[cfg(test)]
 pub(crate) fn lower<H: Host>(host: &H, region: RegionId, huge: u32, epoch: u64) -> Change {
-    lower_to(host, region, huge, epoch, true)
+    lower_moved(host, region, huge, epoch, true).change
 }
 
-/// [`lower`] for `trim`, the caller asking for everything back: the advice comes off at the
-/// noted huge page even below the frontier, and fills that reach there later raise it again.
-pub(crate) fn lower_all<H: Host>(host: &H, region: RegionId, huge: u32, epoch: u64) -> Change {
-    lower_to(host, region, huge, epoch, false)
+/// What a change of a region's advice did, and for a raise the huge pages `start..end` it put
+/// back under the advice, which the caller counts as a fill's reach (`Back::age_raise`).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) struct Moved {
+    pub(crate) change: Change,
+    pub(crate) under: Option<(u32, u32)>,
 }
 
-fn lower_to<H: Host>(host: &H, region: RegionId, huge: u32, epoch: u64, clamp: bool) -> Change {
+impl Moved {
+    const NONE: Moved = Moved {
+        change: Change::None,
+        under: None,
+    };
+}
+
+/// `lower`, saying what it left under the advice. With `clamp` false, `trim`'s, the caller
+/// asking for everything back: the advice comes off at the note even below the frontier, and
+/// fills that reach there later raise it again.
+pub(crate) fn lower_moved<H: Host>(
+    host: &H,
+    region: RegionId,
+    huge: u32,
+    epoch: u64,
+    clamp: bool,
+) -> Moved {
     let word = host.tail(region);
     let seen = word.load();
     let tail = Tail::unpack(seen);
     if tail.low.is_none() && !tail.repair {
-        return Change::None;
+        return Moved::NONE;
     }
     let Some((mine, owned)) = take(word, seen, epoch) else {
-        return Change::None;
+        return Moved::NONE;
     };
     let marks = host.tail_marks();
     let layout = host.layout();
@@ -372,7 +410,10 @@ fn lower_to<H: Host>(host: &H, region: RegionId, huge: u32, epoch: u64, clamp: b
                     ..next
                 },
             );
-            return Change::Refused;
+            return Moved {
+                change: Change::Refused,
+                under: None,
+            };
         }
     }
     let old = if owned.from == 0 {
@@ -385,14 +426,15 @@ fn lower_to<H: Host>(host: &H, region: RegionId, huge: u32, epoch: u64, clamp: b
     } else {
         0
     };
-    let change = match owned.low {
-        Some(low) if low < old && low >= reached && low * hp >= huge => {
-            let (offset, len) = (
-                (low * hp) as usize * page,
-                ((old - low) * hp) as usize * page,
-            );
+    // At the noted huge page, or at the frontier's if the frontier has passed the note: the
+    // word keeps only the lowest huge page noted, and huge pages above the frontier that the
+    // walk returned part of since may lie anywhere up to the old boundary.
+    let at = owned.low.map(|low| low.max(reached));
+    let change = match at {
+        Some(at) if at < old && at * hp >= huge => {
+            let (offset, len) = ((at * hp) as usize * page, ((old - at) * hp) as usize * page);
             if host.advise(region, offset, len, HugePages::Avoid) {
-                next.from = low;
+                next.from = at;
                 Change::Done
             } else {
                 next.repair = true;
@@ -403,7 +445,10 @@ fn lower_to<H: Host>(host: &H, region: RegionId, huge: u32, epoch: u64, clamp: b
         _ => Change::None,
     };
     give_back(word, marks, mine, next);
-    change
+    Moved {
+        change,
+        under: None,
+    }
 }
 
 /// For the background thread, or a heartbeat where there is none: if a claim marked
@@ -413,6 +458,7 @@ fn lower_to<H: Host>(host: &H, region: RegionId, huge: u32, epoch: u64, clamp: b
 /// been touched, so advice there brings nothing back, and a class growing into fresh memory
 /// faults huge pages again. Clears the mark once the advice is on; a refused call keeps it,
 /// and the caller does not try again before the next interval (`Back::raise_marked`).
+#[cfg(test)]
 pub(crate) fn raise<H: Host>(
     host: &H,
     region: RegionId,
@@ -421,14 +467,31 @@ pub(crate) fn raise<H: Host>(
     top: u32,
     epoch: u64,
 ) -> Change {
+    raise_moved(host, region, huge, frontier, top, epoch).change
+}
+
+/// `raise`, saying the huge pages it put back under the advice.
+pub(crate) fn raise_moved<H: Host>(
+    host: &H,
+    region: RegionId,
+    huge: u32,
+    frontier: u32,
+    top: u32,
+    epoch: u64,
+) -> Moved {
     let word = host.tail(region);
-    let seen = word.load();
-    let tail = Tail::unpack(seen);
-    if !tail.want {
-        return Change::None;
-    }
-    let Some((mine, owned)) = take(word, seen, epoch) else {
-        return Change::None;
+    // A take lost to another write of the word (a walker's note) is tried again: the look
+    // that called this cleared the marks flag, and a mark it left behind with no owner would
+    // be seen by no one (`tla/Tail.tla`, `MarkVisible`). Only a mark gone or an owner ends it.
+    let (mine, owned) = loop {
+        let seen = word.load();
+        let tail = Tail::unpack(seen);
+        if !tail.want || tail.owned(epoch) {
+            return Moved::NONE;
+        }
+        if let Some(taken) = take(word, seen, epoch) {
+            break taken;
+        }
     };
     let marks = host.tail_marks();
     let layout = host.layout();
@@ -444,12 +507,15 @@ pub(crate) fn raise<H: Host>(
         if next.repair {
             next.want = owned.want;
             give_back(word, marks, mine, next);
-            return Change::Refused;
+            return Moved {
+                change: Change::Refused,
+                under: None,
+            };
         }
     }
     if owned.from == 0 {
         give_back(word, marks, mine, next);
-        return Change::None;
+        return Moved::NONE;
     }
     let wanted = frontier.div_ceil(hp) + TAIL_HEADROOM_HUGE_PAGES;
     let to = if wanted >= top.div_ceil(hp) {
@@ -459,13 +525,15 @@ pub(crate) fn raise<H: Host>(
     };
     if to <= owned.from {
         give_back(word, marks, mine, next);
-        return Change::None;
+        return Moved::NONE;
     }
     let (offset, len) = (
         (owned.from * hp) as usize * page,
         ((to - owned.from) * hp) as usize * page,
     );
+    let mut under = None;
     let change = if host.advise(region, offset, len, HugePages::Prefer) {
+        under = Some((owned.from, to));
         next.from = if to >= end_unit { 0 } else { to };
         // What was noted above a new boundary is under the advice now; with no boundary left,
         // a note (below the old one) is kept for the next lowering.
@@ -477,7 +545,7 @@ pub(crate) fn raise<H: Host>(
         Change::Refused
     };
     give_back(word, marks, mine, next);
-    change
+    Moved { change, under }
 }
 
 /// The free pages of `unit` of `region` still resident, as the walk would return them
@@ -485,16 +553,24 @@ pub(crate) fn raise<H: Host>(
 /// decides whether a huge page above the frontier is split (`policy::TAIL_SPLIT_SHARE`). It reads
 /// what a walk of the whole huge page reads: the leaf words of its slots, `2 MiB / size / 64`
 /// of them (32 for 1 KiB slots, 2048 for 16-byte ones), and a clean word for each page.
-pub(crate) fn free_resident<H: Host>(host: &H, region: RegionId, unit: Unit) -> (u32, usize) {
+///
+/// With `trust` false the clean bits are not believed, as in [`look`].
+pub(crate) fn free_resident<H: Host>(
+    host: &H,
+    region: RegionId,
+    unit: Unit,
+    trust: bool,
+) -> (u32, usize) {
     let (mut free, mut read) = (0, 0);
     for start in unit.start..unit.end {
-        let (ok, words) = region::purgeable_unit(
+        let (ok, words) = region::purgeable_unit_as(
             host,
             region,
             Unit {
                 start,
                 end: start + 1,
             },
+            trust,
         );
         read += words;
         free += u32::from(ok);
@@ -525,7 +601,16 @@ pub(crate) struct Look {
 /// exactly ([`free_resident`]); the count decides the split. By pages, not by leaf words: a word of a class of 1 KiB covers 16
 /// pages, and a huge page with a live slot in every 16 pages has no free word and 15 free
 /// pages in 16. Reads only, at most a page's slots' words and its clean word for each sample.
-pub(crate) fn look<H: Host>(host: &H, region: RegionId, unit: Unit, salt: u32) -> Look {
+///
+/// With `trust` false the clean bits are not believed (`purge`, "The tail"): a free page counts
+/// as resident whatever its bit says.
+pub(crate) fn look<H: Host>(
+    host: &H,
+    region: RegionId,
+    unit: Unit,
+    salt: u32,
+    trust: bool,
+) -> Look {
     let pages = unit.end - unit.start;
     let samples = TAIL_SAMPLE_PAGES.min(pages);
     let share = pages / samples.max(1);
@@ -535,13 +620,14 @@ pub(crate) fn look<H: Host>(host: &H, region: RegionId, unit: Unit, salt: u32) -
         // later salt moves the samples and they do not keep one phase of a periodic layout.
         let mix = (salt ^ i.wrapping_mul(0x9E37_79B9)).wrapping_mul(0x85EB_CA6B) >> 16;
         let start = unit.start + i * share + mix % share;
-        let (ok, words) = region::purgeable_unit(
+        let (ok, words) = region::purgeable_unit_as(
             host,
             region,
             Unit {
                 start,
                 end: start + 1,
             },
+            trust,
         );
         read += words;
         free += u32::from(ok);
