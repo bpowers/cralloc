@@ -18,6 +18,18 @@ reach a host only from:
 A class never gives a region up. The only tag change away from `Class(class)` is `assign`
 reverting a region it took but did not publish, which no other thread has named.
 
+**Open finding, review of d36e0cb: the invariant does not hold as stated.** The region
+`assign` reverts can be named by another thread. The walks that find regions by reading the
+table (`Back::hold_region`, the hold's plan, `Back::lower_walked`, `Back::raise_marked`,
+`Back::inspect`; `Back::purgeable` is safe, since it also asks for the class's summary bit,
+which only a release into the region by that class sets) may read the tag while the loser
+holds it. A walk descheduled from there until another class has taken the region goes on with
+the first class's host. For a large first class every word it reaches is still committed (its
+block was committed whole before the tag, and commit is never undone), so BACK-HOST-01 holds,
+but the layout is not the region's: `hold_region` can then return live slots of the second
+class (`back::tests::ledger_review`). For a small first class, `inspect` can read leaf words
+the first class never committed. This file is not marked reviewed until that is fixed.
+
 ## BACK-HOST-01: `&*at` in `ClassHost::meta`
 
 **Preconditions of dereferencing `at` for a shared reference.** `at` is non-null and aligned for
@@ -44,7 +56,7 @@ that conflicts with a shared reference.
    page of a slot below the watermark) or from a summary bit that a walk from such a word set
    (summary and leaf words reached in a descent). `Space::metadata(region)` is the region's
    block, `metadata_size` bytes inside the reservation (`space::verify`,
-   `plans_keep_objects_metadata_and_magazines_apart`). `Space::metadata_at` checks the region
+   `plans_keep_their_parts_apart`). `Space::metadata_at` checks the region
    against the plan, as `Space::metadata` does, and adds the region's offset
    (`region << metadata_shift`) and then `offset` to the first block's address, which
    `Space::new` works out once from the plan (`Plan::metadata_start`, the same sum

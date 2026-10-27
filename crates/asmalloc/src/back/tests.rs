@@ -5530,3 +5530,6 @@ mod tail_review;
 
 /// The tail word's protocol on a host that records the advice: the review's surviving mutants.
 mod tail_protocol;
+
+/// Evidence for the ledger review of `class.rs`, `host.rs` and `region.rs`.
+mod ledger_review;
