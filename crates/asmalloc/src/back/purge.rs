@@ -1668,7 +1668,9 @@ impl<O: Os> Back<'_, O> {
                 step.purged = returned;
                 step.part = Some(run.start / huge);
             }
-            (Purge::Failed, _) => self.refuse_tail(REFUSED_SPLIT),
+            // A refused purge is not recorded: the walk's other purges are not either, and it
+            // says nothing about splits.
+            (Purge::Unsplit, _) => self.refuse_tail(REFUSED_SPLIT),
             _ => {}
         }
         Some(step)
