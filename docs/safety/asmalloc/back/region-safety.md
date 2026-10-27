@@ -130,9 +130,11 @@ nothing writes the range while the claims are held. The call reads nothing the a
 on: on Linux it is `mincore`, and in the simulator it reads the range, which the claims keep
 still. Its answer only decides whether the unit is purged; a wrong answer leaves resident
 pages for a later pass or purges pages that were not resident, neither of which touches a held
-slot. The tests `a_clean_run_that_is_not_resident_costs_one_question` and
-`a_refused_question_falls_back_to_returning_the_clean_runs` run it on the simulator, which
-reads the range, under Miri as part of `back::tests`.
+slot. The tests `a_clean_run_that_is_not_resident_costs_one_question`,
+`a_refused_question_falls_back_to_returning_the_clean_runs` and
+`every_clean_run_of_a_rebuilt_huge_page_goes_back` run the call on the simulator natively, on
+one thread; they are ignored under Miri, so no machine check looks for a write racing the call,
+and the claim argument above is what rests on paper.
 
 ## BACK-REGION-03: `host.purge(...)` in `purge_part`
 

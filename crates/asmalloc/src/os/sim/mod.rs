@@ -150,6 +150,9 @@ pub struct SimOs<S: Shape = Standard> {
 
 /// A huge page of the simulated memory is mapped as one: charged whole whatever is resident.
 const MAPPED: u8 = 1;
+/// Every page of a huge page was made resident at once, by a fault or a rebuild as one huge
+/// page. A page of it not purged since stays resident, after a split too, as on Linux.
+const WHOLE: u8 = 2;
 
 /// The simulated [`Os::wait`], [`Os::wake`] and [`Os::fence_all`]: counted, and a wait
 /// returns at once, so that a test drives the thread's loop one step at a time.
@@ -543,9 +546,9 @@ impl<S: Shape> SimOs<S> {
                 continue;
             }
             for index in u * per..(u + 1) * per {
-                if self.pages.get(index) & (RESERVED | WRITABLE) == RESERVED | WRITABLE
+                if self.pages.get(index) & RESERVED != 0
                     // SAFETY: the caller's promise, page by page.
-                    && !unsafe { self.memory.is_zero(index << self.page_shift(), page) }
+                    && unsafe { self.page_resident(index) }
                 {
                     charged += page;
                 }
@@ -583,7 +586,9 @@ impl<S: Shape> SimOs<S> {
             let used = (u * per..(u + 1) * per)
                 .any(|index| !unsafe { self.memory.is_zero(index << self.page_shift(), page) });
             if used {
-                unit.fetch_or(MAPPED, Ordering::AcqRel);
+                // Every page is resident again, so none is purged since.
+                self.pages.update(u * per, per, 0, PURGED);
+                unit.fetch_or(MAPPED | WHOLE, Ordering::AcqRel);
                 built += 1;
             }
         }
@@ -638,6 +643,25 @@ impl<S: Shape> SimOs<S> {
         // SAFETY: the page is inside `memory` (it has a state) and accessible (open, or the
         // memory is not guarded); the caller promises it is initialized and not written.
         unsafe { self.memory.is_zero(index << self.page_shift(), page) }
+    }
+
+    /// Whether committed page `index` is resident: in a huge page mapped whole, or made
+    /// resident whole and not purged since (a rebuild maps every page of a huge page, and a
+    /// split keeps them), or holding a nonzero byte.
+    ///
+    /// # Safety
+    ///
+    /// As [`SimOs::page_reads_zero`].
+    unsafe fn page_resident(&self, index: usize) -> bool {
+        let state = self.pages.get(index);
+        if state & WRITABLE == 0 {
+            return false;
+        }
+        let unit = self.units[index / self.huge_pages_per_unit()].load(Ordering::Acquire);
+        unit & MAPPED != 0
+            || (unit & WHOLE != 0 && state & PURGED == 0)
+            // SAFETY: the caller's promise.
+            || !unsafe { self.page_reads_zero(index) }
     }
 
     /// Panics if page `index`, which is not committed, holds a nonzero byte.
@@ -793,7 +817,7 @@ unsafe impl<S: Shape> Os for SimOs<S> {
         // it is charged whole from its first touch; the simulator counts it so from here.
         for (u, whole) in self.units_of(first, applied) {
             if whole && self.unit_all(u, RESERVED | WRITABLE | HUGE) {
-                self.units[u].fetch_or(MAPPED, Ordering::AcqRel);
+                self.units[u].fetch_or(MAPPED | WHOLE, Ordering::AcqRel);
             }
         }
         result
@@ -812,7 +836,7 @@ unsafe impl<S: Shape> Os for SimOs<S> {
         self.pages.update(first, applied, PURGED, 0);
         for (u, whole) in self.units_of(first, applied) {
             if whole {
-                self.units[u].fetch_and(!MAPPED, Ordering::AcqRel);
+                self.units[u].fetch_and(!(MAPPED | WHOLE), Ordering::AcqRel);
             }
         }
         result
@@ -852,17 +876,10 @@ unsafe impl<S: Shape> Os for SimOs<S> {
         // that holds a nonzero byte, as `resident_bytes` does. That differs from the kernel
         // twice: the kernel counts a page only read, which maps the shared zero page, as
         // resident, and a page written with zeros too; the simulator counts neither.
-        // A page of a huge page mapped whole is resident, whatever it holds: khugepaged's
-        // rebuild maps every page of it.
-        let per = self.huge_pages_per_unit();
         let resident = (first..first + count)
-            .filter(|&index| self.pages.get(index) & WRITABLE != 0)
-            .filter(|&index| {
-                self.units[index / per].load(Ordering::Acquire) & MAPPED != 0
-                    // SAFETY: the caller promises nothing writes the range during the call, and
-                    // the allocator stores only integers, so its bytes are initialized.
-                    || !unsafe { self.page_reads_zero(index) }
-            })
+            // SAFETY: the caller promises nothing writes the range during the call, and the
+            // allocator stores only integers, so its bytes are initialized.
+            .filter(|&index| unsafe { self.page_resident(index) })
             .count();
         Ok(resident)
     }
@@ -898,7 +915,7 @@ unsafe impl<S: Shape> Os for SimOs<S> {
                 .close(first << self.page_shift(), applied << self.page_shift());
         }
         for (u, _) in self.units_of(first, applied) {
-            self.units[u].fetch_and(!MAPPED, Ordering::AcqRel);
+            self.units[u].fetch_and(!(MAPPED | WHOLE), Ordering::AcqRel);
         }
         self.pages.release(first, applied);
         result

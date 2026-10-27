@@ -889,6 +889,9 @@ pub(crate) enum Purge {
     Busy,
     /// The OS refused; nothing changed.
     Failed,
+    /// The OS refused to split the huge page over the unit, which the tail asked for first;
+    /// nothing changed.
+    Unsplit,
     /// The unit's pages went back to the OS: how many bytes of them had been resident, and how
     /// many of those were in free slots kept by the moves their blocks outgrew them in
     /// (`Recorded::outgrown`), which leave the count of such slots.
@@ -907,7 +910,7 @@ pub(crate) fn purge_unit<H: Host>(host: &H, region: RegionId, unit: Unit) -> (Pu
 /// resident again), and left (`Purge::Clean`) if it says none is, or purged if it cannot say.
 /// What it returns that had been counted is still the pages it cleans. With `split`, the
 /// tail's: once the slots are claimed and the unit is to go, the kernel is asked to split the
-/// huge page over it first, and a refusal returns nothing (`Purge::Failed`).
+/// huge page over it first, and a refusal returns nothing (`Purge::Unsplit`).
 pub(crate) fn purge_unit_as<H: Host>(
     host: &H,
     region: RegionId,
@@ -953,7 +956,7 @@ pub(crate) fn purge_unit_as<H: Host>(
     }
     if split && !host.split(region, offset, len) {
         release_range(host, region, first, last, low, high + 1);
-        return (Purge::Failed, read);
+        return (Purge::Unsplit, read);
     }
     // SAFETY: BACK-REGION-01 in docs/safety/asmalloc/back/region-safety.md. This thread holds
     // the claim of every slot that touches the range, and the range lies below the watermark.

@@ -36,6 +36,14 @@ fn memory(os: &Sim) -> (usize, usize) {
 /// first slot of each huge page: the stranded tail the rule is for. Returns the slots kept
 /// and freed.
 fn stranded<'a>(back: &Back<'a, Sim>) -> (Vec<*mut u8>, Vec<*mut u8>) {
+    stranded_keeping(back, |offset| offset < C)
+}
+
+/// [`stranded`], keeping the slots that start at an offset into their huge page `keep` takes.
+fn stranded_keeping<'a>(
+    back: &Back<'a, Sim>,
+    keep: impl Fn(usize) -> bool,
+) -> (Vec<*mut u8>, Vec<*mut u8>) {
     let region = back.space().plan().region_size();
     let n = 2 * region / C;
     let slots = fill(back, class(), n);
@@ -47,9 +55,8 @@ fn stranded<'a>(back: &Back<'a, Sim>) -> (Vec<*mut u8>, Vec<*mut u8>) {
     for &p in &slots {
         paint(p, C, 7);
     }
-    let (kept, freed): (Vec<*mut u8>, Vec<*mut u8>) = slots
-        .iter()
-        .partition(|p| p.addr().is_multiple_of(huge()) || (p.addr() % huge()) < C);
+    let (kept, freed): (Vec<*mut u8>, Vec<*mut u8>) =
+        slots.iter().partition(|p| keep(p.addr() % huge()));
     for chunk in freed.chunks(64) {
         // SAFETY: the test holds these slots and gives them up.
         unsafe { back.launder(class(), chunk) };
@@ -550,7 +557,8 @@ fn a_fork_child_distrusts_every_tail() {
 }
 
 /// The simulator's model, which the tests above rest on: a huge page committed under the
-/// advice is charged whole; a purge of part of it leaves it charged until it is split; and
+/// advice is charged whole; a purge of part of it leaves it charged until it is split; a split
+/// leaves resident what was not purged since the huge page was made resident whole; and
 /// khugepaged rebuilds an advised huge page that holds anything, but not one advised against.
 #[test]
 fn the_simulator_charges_huge_pages_as_linux_does() {
@@ -576,9 +584,14 @@ fn the_simulator_charges_huge_pages_as_linux_does() {
         // khugepaged rebuilds it under the advice.
         assert_eq!(os.khugepaged(), 1);
         assert_eq!(os.charged_bytes(), region);
-        // Not under advice against.
+        // Split again, its rebuilt pages stay resident until they are purged.
         os.split_huge(base.map_addr(|a| a.saturating_add(page())), page())
             .unwrap();
+        assert_eq!(os.charged_bytes(), region);
+        os.purge(base.map_addr(|a| a.saturating_add(page())), hp - page())
+            .unwrap();
+        assert_eq!(os.charged_bytes(), region - hp + page());
+        // Not under advice against.
         os.advise_huge(base, hp, HugePages::Avoid).unwrap();
         assert_eq!(os.khugepaged(), 0);
         // A whole huge page purged is no longer charged.
@@ -1577,7 +1590,16 @@ fn a_refused_split_returns_no_page_of_its_run() {
 /// Split huge pages whose free pages were all returned, under the advice again (the word with
 /// no boundary), as a raise leaves them: the walk does not believe their clean bits.
 fn under_advice_again<'a>(back: &Back<'a, Sim>, os: &Sim) -> crate::space::RegionId {
-    let (kept, _) = stranded(back);
+    under_advice_again_keeping(back, os, |offset| offset < C)
+}
+
+/// [`under_advice_again`] over [`stranded_keeping`].
+fn under_advice_again_keeping<'a>(
+    back: &Back<'a, Sim>,
+    os: &Sim,
+    keep: impl Fn(usize) -> bool,
+) -> crate::space::RegionId {
+    let (kept, _) = stranded_keeping(back, keep);
     let (region, _) = region_of(back, kept[kept.len() - 1]);
     forget_reuse(back);
     walk_once(back, region);
@@ -1692,5 +1714,86 @@ fn under_a_refused_lowering_the_clean_runs_are_not_asked_about() {
         os.calls(Call::Resident),
         asked,
         "the kernel was asked about clean runs under a refused lowering"
+    );
+}
+
+/// A run the kernel says is not resident is left as it is: the walk neither returns it nor
+/// notes its huge page, which would take the advice off where nothing went back.
+#[test]
+#[cfg_attr(miri, ignore)]
+fn a_clean_run_that_is_not_resident_leaves_the_tail_word_alone() {
+    let state = state::<Standard>();
+    let back = state.get_or_reserve().unwrap();
+    let os = state.os();
+    let region = under_advice_again(&back, os);
+    let host = back.host(class().class()).unwrap();
+    let asked = os.calls(Call::Resident);
+    walk_once(&back, region);
+    assert!(os.calls(Call::Resident) > asked, "the kernel was not asked");
+    assert_eq!(
+        Tail::unpack(host.tail(region).load()),
+        Tail::unpack(0),
+        "the tail word changed over runs that were not resident"
+    );
+}
+
+/// The later clean runs of a rebuilt huge page go back too: the split the walk asks for over
+/// its first run leaves the rest of the rebuilt huge page resident, as the kernel does
+/// (`kernel::mincore_follows_a_return_a_rebuild_and_a_split`), and the walk asks about each
+/// run in turn.
+#[test]
+#[cfg_attr(miri, ignore)]
+fn every_clean_run_of_a_rebuilt_huge_page_goes_back() {
+    let state = state::<Standard>();
+    let back = state.get_or_reserve().unwrap();
+    let os = state.os();
+    // Two slots kept in each huge page, at its start and near its middle: two runs of free
+    // pages. The second is off the look's sample at the middle, which two pages in use would
+    // make dense.
+    let middle = huge() / 2 + 5 * page();
+    let region = under_advice_again_keeping(&back, os, |offset| {
+        offset < C || (middle..middle + C).contains(&offset)
+    });
+    let before = memory(os).1;
+    // SAFETY: no other thread runs, and the back end and the tests store only integers.
+    let rebuilt = unsafe { os.khugepaged() };
+    assert!(rebuilt > 0);
+    let purges = os.calls(Call::Purge);
+    for _ in 0..4 {
+        walk_once(&back, region);
+    }
+    // Both runs of each, each with its own call.
+    assert!(
+        os.calls(Call::Purge) - purges >= 2 * rebuilt as u64,
+        "{} purges over {rebuilt} rebuilt huge pages of two runs each",
+        os.calls(Call::Purge) - purges
+    );
+    assert!(
+        memory(os).1 <= before,
+        "charged {before} before {rebuilt} huge pages were rebuilt, {} after the walks",
+        memory(os).1
+    );
+}
+
+/// A refused purge is not a refused split: the steps go on asking for splits within the
+/// interval, as the companion test with a refused split shows they would not.
+#[test]
+#[cfg_attr(miri, ignore)]
+fn a_refused_purge_does_not_stop_the_splits() {
+    let state = state::<Standard>();
+    let back = state.get_or_reserve().unwrap();
+    let os = state.os();
+    let (_, _) = stranded(&back);
+    os.set_faults(Call::Purge, Faults::ALWAYS);
+    forget_reuse(&back);
+    os.advance_clock(DECAY_TICKS);
+    let before = os.calls(Call::SplitHuge);
+    for _ in 0..BEATS {
+        let _ = back.thread_purge_steps(&|| back.now());
+    }
+    assert!(
+        os.calls(Call::SplitHuge) - before > 1,
+        "{} splits asked for after a refused purge",
+        os.calls(Call::SplitHuge) - before
     );
 }

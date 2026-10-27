@@ -83,7 +83,10 @@
 //! bits of what was returned would stay doubted), the walk believes the bits until the clock
 //! moves.
 //!
-//! Two limits. A clean bit can stay wrong where the walk skipped a page under the advice (a
+//! Four limits. A run the kernel says is not resident is asked about again each lap while its
+//! huge page is under the advice, a call a run, bounded by the huge pages a raise's headroom
+//! leaves there. The split runs while the run's slots are claimed, so a thread that wants one
+//! of them in that time finds it busy. A clean bit can stay wrong where the walk skipped a page under the advice (a
 //! huge page that sampled dense or was under the cut, or a run shorter than a pass takes) and a
 //! later lowering at a lower huge page took the advice off over it: the walk then believes a
 //! bit that a rebuild before the lowering made false, and those pages stay resident and
