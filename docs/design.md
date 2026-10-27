@@ -231,7 +231,8 @@ that much address space, as under an address-space limit or valgrind, the region
 halved until the reservation fits, so the number of regions stays the same. The floor is
 one huge page, 2 MiB, to a region, and the regions are as many as ever, so the smallest
 reservation is about 8 GiB of address space. A process allowed less than that beside what
-it maps itself cannot start the allocator, and every allocation fails. A region is
+it maps itself cannot start the allocator, and every allocation fails. A region
+is
 assigned to a class on demand and holds only objects of that class, at
 `region_base + origin + index * class_size`. A small class's origin is a few whole pages,
 different for each class, so that the first pages of the classes in use do not all share
@@ -1220,7 +1221,8 @@ place. A heap with its full reservation gives sixteen times the block's size whe
 slot is at most a sixteenth of a region; otherwise, and in every heap that got less than
 its full reservation, the room is four times where that fits a region, and none past that.
 Each falls back to the next when the larger slot cannot be had. A grow that must hand
-back zeroed memory takes no room, so that it never clears what nobody asked for. A buffer that doubles is otherwise copied at every
+back zeroed memory takes no room, so that it never clears what nobody asked for. A buffer
+that doubles is otherwise copied at every
 doubling, and the copies add up to more than the buffer. The room is given only where a
 region still holds many such slots, because a region is never taken back from a class: a
 class with one slot to a region would let a few thousand growing buffers use every region.
