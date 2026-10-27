@@ -490,10 +490,10 @@ Branch `huge-tail-accounting`. One run each; the 4-phase job, the store and mini
 `scripts/measure`, the 24-phase job and the call counts under `scripts/heavy` on a busy
 machine (their cycles are not comparable).
 
-**The accounting** (`ae24bca`, measured alone against stage 1, `a16d05a`). A raise, or a
-note the frontier has passed, now counts every free page of each non-empty huge page it
-leaves under the advice as resident again, and a raise counts as a fill's reach over its
-range. On the 4-phase job the troughs and cycles did not move (3.30 against 3.28; 601
+**The restore, built, measured and rejected** (`ae24bca`, measured alone against stage 1,
+`a16d05a`). A raise, or a note the frontier has passed, counted every free page of each
+non-empty huge page it left under the advice as resident again (clearing its clean bits under
+a claim), and a raise counted as a fill's reach over its range. On the 4-phase job the troughs and cycles did not move (3.30 against 3.28; 601
 against 597 cycles/op). On the 24-phase job the troughs went from 3.50 to 3.41, the peaks
 from 1.156 to 1.139, and khugepaged rebuilt 645 huge pages against 1423. mini-redis's wide
 phases were the same (1.16 to 1.18). The allocator's count against the resident free memory
@@ -502,7 +502,38 @@ resident; the accounting counts 78.5 MiB more, pages it called resident that khu
 not yet rebuilt in that run. An overcount costs a later pass a call on pages that are not
 there and goes away with it; an undercount stayed. Advice calls on the 4-phase job: raises
 96 to 170, lowerings 183 to 169. On Qdrant the gap the product left after close closed
-(`docs/research/servers-qdrant.md`, dated section).
+(`docs/research/servers-qdrant.md`, dated section). The review rejected it: the over-count
+makes growth pay for memory that is not there (twenty classes each reaching a little above
+their boundary took the simulator's count from 0.29 to 3.88 MiB against a 2 MiB cap with
+0.6 MiB resident, and the next class to grow purged slots another had just freed; the 78.5
+MiB above is the same against the real 64 MiB cap), and the restore walked the raised range
+page by page on a request's heartbeat, unbounded (a raise over a 1 GiB tail is about 260
+thousand page looks).
+
+**The accounting by distrust** (`ea0e524`), in its place. Nothing changes the clean bits or
+the count at a raise; the raise still counts as a fill's reach. Instead the tail walk does not
+believe clean bits where they can be wrong: below the boundary, a free page of a huge page
+with any page not clean counts as resident to the look, the exact count, the counting
+estimate and the runs a returning step gives back, which it purges whatever their bits say.
+A huge page wholly clean is left as it is, and above the boundary the bits are true; there a
+huge page with no clean page, never returned in part, gets the look and the cut as below.
+Against stage 1 and the restore (`460cea8`), one run each:
+
+| | stage 1 | restore | distrust |
+|---|---|---|---|
+| 4-phase: troughs, cycles/op | 3.29, 599 | 3.24, 599 | 3.27, 605 |
+| 24-phase: peaks last 3, troughs, rebuilt huge pages | 1.154, 3.51, 1256 | 1.136, 3.18, 877 | 1.135, 3.27, 852 |
+| mini-redis wide phases; quiet | 1.17 to 1.18; 1.20 | 1.15 to 1.16; 1.17 | 1.15; 1.15 |
+| store: burst max ms, 2 runs | 0.5 to 0.6 | 0.6 to 0.7 | 0.5 to 0.6 |
+| count against `mincore`, end of the 4-phase job | 11.2 MiB under | 89.2 MiB over | 0.2 MiB under |
+| 4-phase calls: `HUGEPAGE`, `NOHUGEPAGE`, `COLD`, `DONTNEED` (thousands for the last two) | 91, 178, 63, 103 | 198, 180, 122, 154 | 144, 151, 95, 102 |
+
+(The distrust's 24-phase run had scarce huge pages, 14 thousand fallbacks on the machine.)
+The tail's own counters (`acct_edit.py`) on the 24-phase job: 996 raises, 790 lowerings,
+716 thousand tail purges, each after a split; 63 thousand of them (8.9%) were of runs whose
+pages were all marked clean, 551 thousand pages, of which `mincore` found 1339 resident (0.24%)
+just before. So about 64 such purges, each with its split, follow a raise and return almost
+nothing: the price of not believing the bits. On the 4-phase job the share was 5.9%.
 
 **The review's second round** (`dee220a`) changes what is returned too: above the
 boundary a step that may return memory walks the split huge pages with neither the look nor
