@@ -1,0 +1,26 @@
+# Local entries for bench/allocators.toml, appended for the server ladder of
+# docs/research/large-heap-constants.md and removed afterwards (never committed there: every
+# session without --allocators would run them). The builds are bench/target/NAME of this checkout,
+# made by build-all.sh.
+
+# The program's own live bytes, the denominator of resident over live (bench/alloc/src/live.rs).
+[[allocator]]
+name = "live-bytes"
+feature = "live-bytes"
+build = "live-bytes"
+expect = { allocator = "asmalloc", library = "executable" }
+
+# The diagnostic build (diag_edit.py): the same allocator, with counters the watcher reads.
+[[allocator]]
+name = "asmalloc-diag"
+feature = "asmalloc"
+build = "asmalloc-diag"
+expect = { allocator = "asmalloc", library = "executable" }
+
+# The same diagnostic build with the background thread off.
+[[allocator]]
+name = "asmalloc-diag-off"
+feature = "asmalloc"
+build = "asmalloc-diag"
+env = { ASMALLOC_BACKGROUND = "0" }
+expect = { allocator = "asmalloc", library = "executable" }

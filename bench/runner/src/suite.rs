@@ -1021,6 +1021,31 @@ pub fn meili_tail() -> Vec<Job> {
         .collect()
 }
 
+/// The order service as a ladder of live heaps (docs/research/large-heap-constants.md): the
+/// three sizes of `servers-large` and one of about 10 GiB, 5.6M orders, each on the large-heap
+/// day. Run each size as a session of its own with `--mem-cap` sized to it (13 GiB for 10G).
+pub fn servers_ladder() -> Vec<Job> {
+    let four = large().into_iter().find(|l| l.id == "orders axum cache 4G").expect("the 4 GiB order service");
+    let ten = Large {
+        id: "orders axum cache 10G".into(),
+        args: "axum keep=5600000 presize=1".into(),
+        fill_s: 24,
+        r70: 245_000,
+        ..four
+    };
+    large()
+        .into_iter()
+        .filter(|l| l.id.starts_with("orders axum cache"))
+        .chain([ten])
+        .map(|l| {
+            let plan = large_day(l.fill_s, l.r70);
+            let mut job = large_job(l, plan, "s70", "");
+            job.group = "servers-ladder";
+            job
+        })
+        .collect()
+}
+
 /// Every CPU any job may use.
 pub fn measurement_cpus() -> Vec<usize> {
     both()
