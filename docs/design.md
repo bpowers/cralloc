@@ -1077,7 +1077,13 @@ Nine rules stand behind the table.
   The kernel may have rebuilt a huge page whose free pages were returned, and those pages
   are then resident with nothing to say so. So there a free page of a huge page that holds
   anything is taken for resident, and a pass that returns such a huge page's free runs
-  returns them all; the lowering that follows puts them where the record is true again.
+  takes them all; the lowering that follows puts them where the record is true again.
+  For a run the record calls returned, the pass first asks the kernel whether any of it is
+  resident, once it holds the run's slots, and leaves a run that is not: one cheap call in
+  place of a split and a return that would do nothing. A kernel that will not say gets the
+  run returned. While lowerings are refused the boundary cannot come down, so the record is
+  believed again for as long as the refusal stands (see below), and the same runs are not
+  returned over and over.
   A huge page with nothing in it cannot be rebuilt and is left alone. Counting those pages
   as resident when the advice goes back on was built first and was wrong: the kernel takes
   minutes to rebuild anything, so the count ran tens of megabytes over what was resident,
