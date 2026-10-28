@@ -231,8 +231,7 @@ that much address space, as under an address-space limit or valgrind, the region
 halved until the reservation fits, so the number of regions stays the same. The floor is
 one huge page, 2 MiB, to a region, and the regions are as many as ever, so the smallest
 reservation is about 8 GiB of address space. A process allowed less than that beside what
-it maps itself cannot start the allocator, and every allocation fails. A region
-is
+it maps itself cannot start the allocator, and every allocation fails. A region is
 assigned to a class on demand and holds only objects of that class, at
 `region_base + origin + index * class_size`. A small class's origin is a few whole pages,
 different for each class, so that the first pages of the classes in use do not all share
@@ -1598,7 +1597,9 @@ A configuration that is expected to fail is kept as a test: it shows that the mo
 a flaw, and that the rule which removes it is needed.
 
 The other words that more than one thread writes have no model. A flaw in any of them
-costs memory returned late or work done twice, never a block. The background thread's
+can cost memory returned late or work done twice. It cannot cost a block: whatever those
+words decide, memory goes back only through a claim, and the claim is modelled. The
+background thread's
 handshakes, by which it parks or sleeps without losing a wake-up, are run under the
 schedule explorer against a racing slow path. The words of the clocked pass, the debt
 that growth owes, the hold's looks, and the hints that say which depot stacks owe or hold
