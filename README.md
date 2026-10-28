@@ -69,15 +69,19 @@ Limits worth knowing:
   as under valgrind, is served correctly but slowly.
 - A shared object that contains the allocator must be linked `-z nodelete`, as the preload
   library is: unloading it kills the process.
-- The heap reserves address space, not memory, and makes do with less under a limit. Under
-  a limit too small for its smallest reservation, every allocation fails.
+- The heap reserves address space, not memory, and makes do with less under a limit. Its
+  smallest reservation is about 8 GiB of address space; under a limit (`ulimit -v`,
+  `RLIMIT_AS`) that leaves less than that, every allocation fails.
 - Under strict overcommit, or a data-segment limit (`RLIMIT_DATA`), a buffer that grows is
   charged for the room it was moved into to grow in place, which can be many times its size,
   whether or not it ever writes there. Such a system fits far fewer large growing buffers
   than its memory would suggest.
 - A program that locks its memory with `mlockall` needs an unlimited `memlock` limit or
   the capability that lifts it: the heap's address-space reservation counts against the
-  limit even though nothing in it is resident.
+  limit even though nothing in it is resident. With memory locked the allocator returns
+  nothing to the OS, since the kernel refuses to take locked memory back: what the program
+  frees stays resident for reuse, and a freed block larger than a region (4 GiB, or less
+  where an address-space limit made the regions smaller) is not reused at all.
 - A C program that links asmalloc's static library against static glibc with lld needs
   `-lgcc` before the library on the link line. Otherwise lld takes glibc's 128-bit float
   helpers from the Rust runtime inside the library, whose unwind tables name a symbol that

@@ -76,8 +76,10 @@ process light.
   calls. The exception is the default `background` feature: it creates the background
   thread through the C library, so that the library knows the thread exists. Nothing else
   may call a C library function, and a build without default features refers only to what
-  it must share with the library (`errno`, the rseq offset) and what the compiler emits
-  (`memcpy`, `memset`). Test, fuzz and benchmark crates may depend on what they need.
+  it must share with the library (`errno`, the rseq offset; on musl, `errno` and the three
+  pthread key functions that unregister a thread's rseq area as it exits) and what the
+  compiler emits (`memcpy`, `memset`). Test, fuzz and benchmark crates may depend on what
+  they need.
 - Write good, clean Rust: small modules with one job, types that make wrong states hard to
   build, `unsafe` confined to a few well-named places.
 - Every `unsafe` block in code that ships (the allocator and the preload library, not the
