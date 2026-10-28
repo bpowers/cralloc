@@ -94,7 +94,7 @@ pub(crate) type Tails = Cells<Atomic, MAX_REGIONS>;
 /// The class levels of a class's summary tree.
 pub(crate) struct Summary {
     pub(crate) top: Atomic,
-    pub(crate) words: [Atomic; CLASS_WORDS],
+    pub(crate) words: Cells<Atomic, CLASS_WORDS>,
 }
 
 const _: () = assert!(
@@ -107,7 +107,7 @@ impl ClassState {
             layout: Lined::new(Memo::new()),
             summary: Lined::new(Summary {
                 top: Atomic::zero(),
-                words: [const { Atomic::zero() }; CLASS_WORDS],
+                words: Cells::new([const { Atomic::zero() }; CLASS_WORDS]),
             }),
             carving: Lined::new(AtomicU32::new(0)),
         }
@@ -244,7 +244,7 @@ impl<O: Os> Host for ClassHost<'_, O> {
 
     #[inline(always)]
     fn class_word(&self, index: u32) -> &Atomic {
-        &self.class.summary.words[index as usize % CLASS_WORDS]
+        self.class.summary.words.get(index as usize)
     }
 
     #[inline(always)]
