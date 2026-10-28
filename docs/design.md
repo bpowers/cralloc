@@ -907,7 +907,7 @@ rule that returns it (`docs/research/memory.md` has the measurements behind them
 | Objects in a CPU's full spares | That CPU's sweep launders one magazine and sends the rest to the depot | Once an interval |
 | Stock a class no longer needs on a CPU | The sweep takes the depth not needed during an interval off the class's credit and returns what lies above the new limit, full magazines to the bitmaps and empty ones to the depot; the idle drain takes it with the slab | A magazine a heartbeat, from the interval after its last use |
 | Objects in a depot stack | A heartbeat launders a magazine from the shared stack. Every stack sheds what it did not need, and each periodic look visits every stack of one other domain whose own CPUs have not looked this interval, the domains in rotation over those that hold magazines, so a domain that goes quiet sheds within a few intervals | While the shared stack is over its target, and for the depth a stack did not need during an interval |
-| Objects in steady circulation | The free that retires a full magazine launders it instead | One retirement in every few |
+| Objects in steady circulation | The free that retires a full magazine launders it instead | One retirement in 32, and up to one in 4 while the small classes' free slots beside live objects are at least a sixteenth of what they carved |
 | The slab of a CPU the process no longer runs on | The idle drain sends its magazines to the depot (see "Process lifecycle") | After an interval with no slow path there |
 | The part of a huge page above a region's watermark, made resident by the fault and never allocated | The purge carves it and frees it, so that the page can go whole | When the purge reaches that page |
 | Free pages of a huge page that fills still reach, or that is less than a quarter free | Nothing: the huge page is worth more whole | When the whole huge page is free, or fills stop reaching it |
@@ -1061,7 +1061,16 @@ Nine rules stand behind the table.
     during an interval is laundered, one magazine per heartbeat, whichever class the slow
     path was serving.
   - One retiring full magazine in every few is laundered instead of kept, so objects in
-    steady circulation are gradually replaced by the lowest free ones.
+    steady circulation are gradually replaced by the lowest free ones. How few follows
+    evidence. Each lap of the purge walk measures the small classes' free slots on pages
+    that also hold live objects, as a share of what those classes have carved: that is
+    what a higher rate reduces, and nothing else can. From a share of 1 in 64 the rate
+    doubles from one retirement in 32, and again at 1 in 32 and at 1 in 16, so a heap
+    that a fall in its short-lived objects has left fragmented launders one retirement in
+    four, and a heap in steady use, whose share stays well under the first step, pays
+    nothing. The rate steps back down once a lap as the evidence goes, and a pass that
+    finds no more than the floor retained steps it down too, so it falls in a quiet
+    program as well (`docs/research/trough-gap.md`).
 - **Huge pages only where objects are dense.** A region starts marked against transparent
   huge pages, so a lightly used class costs only the 4 KiB pages it touches. Two things
   count as evidence of dense use. A class of objects of at most a kilobyte, several to a
