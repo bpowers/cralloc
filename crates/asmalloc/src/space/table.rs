@@ -5,6 +5,7 @@
 //! means unassigned, so an all-zero table is a valid table for a heap with nothing in it.
 
 use super::{MAX_REGIONS, RegionId};
+use crate::cells::Cells;
 use crate::classes::{COUNT, Class};
 use core::sync::atomic::{AtomicU8, Ordering};
 
@@ -58,21 +59,21 @@ impl RegionTag {
 ///
 /// Entries change only by compare-and-swap, so two threads cannot both assign a region.
 pub struct RegionTable {
-    tags: [AtomicU8; MAX_REGIONS],
+    tags: Cells<AtomicU8, MAX_REGIONS>,
 }
 
 impl RegionTable {
     /// A table with every region unassigned.
     pub const fn new() -> RegionTable {
         RegionTable {
-            tags: [const { AtomicU8::new(UNASSIGNED) }; MAX_REGIONS],
+            tags: Cells::new([const { AtomicU8::new(UNASSIGNED) }; MAX_REGIONS]),
         }
     }
 
     fn entry(&self, region: RegionId) -> &AtomicU8 {
-        // `RegionId` is below MAX_REGIONS, a power of two, so the mask changes nothing; it lets
-        // the compiler drop the bounds check and its panic.
-        &self.tags[region.index() & (MAX_REGIONS - 1)]
+        // `RegionId` is below MAX_REGIONS, so the table's reduction modulo its length changes
+        // nothing, and there is no bounds check to panic.
+        self.tags.get(region.index())
     }
 
     /// What a region holds.

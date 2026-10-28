@@ -28,6 +28,7 @@
 use super::Back;
 use super::tree::Host;
 use super::word::Word;
+use crate::cells::Cells;
 use crate::classes::Class;
 use crate::lined::Lined;
 use crate::os::Os;
@@ -37,7 +38,7 @@ use core::sync::atomic::{AtomicU8, Ordering};
 /// The region table and the published tags.
 pub(super) struct Tags {
     table: Lined<RegionTable>,
-    published: Lined<[AtomicU8; MAX_REGIONS]>,
+    published: Lined<Cells<AtomicU8, MAX_REGIONS>>,
 }
 
 /// A published byte that names no class.
@@ -47,13 +48,15 @@ impl Tags {
     pub(super) const fn new() -> Tags {
         Tags {
             table: Lined::new(RegionTable::new()),
-            published: Lined::new([const { AtomicU8::new(UNPUBLISHED) }; MAX_REGIONS]),
+            published: Lined::new(Cells::new(
+                [const { AtomicU8::new(UNPUBLISHED) }; MAX_REGIONS],
+            )),
         }
     }
 
     fn published_byte(&self, region: RegionId) -> &AtomicU8 {
-        // `RegionId` is below MAX_REGIONS, a power of two: the mask drops the bounds check.
-        &self.published[region.index() & (MAX_REGIONS - 1)]
+        // `RegionId` is below MAX_REGIONS: the table's reduction changes nothing.
+        self.published.get(region.index())
     }
 
     /// The class a region was named for, if its naming has been published: for the walks.

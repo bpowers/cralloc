@@ -4,6 +4,7 @@
 use super::layout::{Layout, MAX_LEVELS, Memo, WORD_BYTES};
 use super::tree::Host;
 use super::word::Atomic;
+use crate::cells::Cells;
 use crate::lined::{LINE, Lined, lines};
 use crate::os::{HugePages, Os};
 use crate::space::{MAX_REGIONS, RegionId, Space};
@@ -70,7 +71,7 @@ impl RegionHeader {
 /// and a carving fill already writes the shared growth word. Fills, launders and frees only
 /// read `Grow`. A line each would make the state 256 KiB, which the simulated heaps the tests
 /// build on their stacks cannot hold.
-pub(crate) type Headers = [RegionHeader; MAX_REGIONS];
+pub(crate) type Headers = Cells<RegionHeader, MAX_REGIONS>;
 
 /// The `Frontier` word of every region, by region number, eight to a line: an exception to
 /// `crate::lined`'s rule, as [`Headers`] is. Large classes' are here too, not in their blocks'
@@ -83,17 +84,17 @@ pub(crate) type Headers = [RegionHeader; MAX_REGIONS];
 /// after it that reach a little higher: a handful of writes a region a second. A line each
 /// would make the state another 224 KiB, too much for the simulated heaps the tests build on
 /// their stacks.
-pub(crate) type Frontiers = [Atomic; MAX_REGIONS];
+pub(crate) type Frontiers = Cells<Atomic, MAX_REGIONS>;
 
 /// The `Tail` word of every region, by region number, eight to a line, as [`Frontiers`] are
 /// (`tail`). Written when the purge returns part of a huge page above a frontier, when a claim
 /// climbs into a tail, and around an advice change: a few times an interval at most.
-pub(crate) type Tails = [Atomic; MAX_REGIONS];
+pub(crate) type Tails = Cells<Atomic, MAX_REGIONS>;
 
 /// The class levels of a class's summary tree.
 pub(crate) struct Summary {
     pub(crate) top: Atomic,
-    pub(crate) words: [Atomic; CLASS_WORDS],
+    pub(crate) words: Cells<Atomic, CLASS_WORDS>,
 }
 
 const _: () = assert!(
@@ -106,7 +107,7 @@ impl ClassState {
             layout: Lined::new(Memo::new()),
             summary: Lined::new(Summary {
                 top: Atomic::zero(),
-                words: [const { Atomic::zero() }; CLASS_WORDS],
+                words: Cells::new([const { Atomic::zero() }; CLASS_WORDS]),
             }),
             carving: Lined::new(AtomicU32::new(0)),
         }
@@ -214,7 +215,7 @@ impl<O: Os> Host for ClassHost<'_, O> {
     fn grow(&self, region: RegionId) -> &Atomic {
         match self.layout.header_word() {
             Some(word) => self.meta(region, word),
-            None => &self.headers[region.index() % MAX_REGIONS].grow,
+            None => &self.headers.get(region.index()).grow,
         }
     }
 
@@ -222,18 +223,18 @@ impl<O: Os> Host for ClassHost<'_, O> {
     fn hints(&self, region: RegionId) -> &Atomic {
         match self.layout.header_word() {
             Some(word) => self.meta(region, word + 1),
-            None => &self.headers[region.index() % MAX_REGIONS].hints,
+            None => &self.headers.get(region.index()).hints,
         }
     }
 
     #[inline(always)]
     fn frontier(&self, region: RegionId) -> &Atomic {
-        &self.frontiers[region.index() % MAX_REGIONS]
+        self.frontiers.get(region.index())
     }
 
     #[inline(always)]
     fn tail(&self, region: RegionId) -> &Atomic {
-        &self.tails[region.index() % MAX_REGIONS]
+        self.tails.get(region.index())
     }
 
     #[inline(always)]
@@ -243,7 +244,7 @@ impl<O: Os> Host for ClassHost<'_, O> {
 
     #[inline(always)]
     fn class_word(&self, index: u32) -> &Atomic {
-        &self.class.summary.words[index as usize % CLASS_WORDS]
+        self.class.summary.words.get(index as usize)
     }
 
     #[inline(always)]

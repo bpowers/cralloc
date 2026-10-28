@@ -32,8 +32,16 @@
 use crate::os::machine::{Aborted, Machine, Step};
 use core::sync::atomic::{AtomicU8, AtomicU64, Ordering};
 
-/// The number of simulated threads a [`super::SimOs`] has.
-pub const SIM_THREADS: usize = if cfg!(kani) { 2 } else { 64 };
+/// The number of simulated threads a [`super::SimOs`] has. Under Miri, 8: a simulated heap has
+/// a slab for each, Miri retags a shared reference by visiting every atomic it covers, and with
+/// 64 slabs each call through the slabs cost it 50 ms (`scripts/miri`).
+pub const SIM_THREADS: usize = if cfg!(kani) {
+    2
+} else if cfg!(miri) {
+    8
+} else {
+    64
+};
 
 const IDLE: u8 = 0;
 const RUNNING: u8 = 1;

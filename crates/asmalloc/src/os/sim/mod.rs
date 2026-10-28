@@ -139,7 +139,7 @@ pub struct SimOs<S: Shape = Standard> {
     topology: AtomicU64,
     /// The environment [`Os::environment`] reads, if any ([`SimOs::set_environment`]), and how
     /// many times it has been read.
-    environment: AtomicPtr<&'static [u8]>,
+    environment: AtomicPtr<Environment>,
     environment_reads: AtomicU64,
     /// What the background thread's calls did: waits, wakes, and fences of every CPU.
     sleeps: Sleeps,
@@ -254,6 +254,26 @@ impl ListWriter<'_> {
     }
 }
 
+/// One environment [`SimOs::set_environment`] set, and the one it replaced. A replaced one stays
+/// until the simulated OS is dropped, since a reader may still hold it; then the whole chain is
+/// freed, so that Miri's leak check passes.
+struct Environment {
+    value: Option<&'static [u8]>,
+    older: *mut Environment,
+}
+
+impl<S: Shape> Drop for SimOs<S> {
+    fn drop(&mut self) {
+        let mut node = *self.environment.get_mut();
+        while !node.is_null() {
+            // SAFETY: each node came from `Box::into_raw` in `set_environment` and is in the
+            // chain once; with `&mut self`, no reader holds one.
+            let boxed = unsafe { alloc::boxed::Box::from_raw(node) };
+            node = boxed.older;
+        }
+    }
+}
+
 impl<S: Shape> SimOs<S> {
     /// A simulated OS with room for one reservation of the largest plan.
     pub fn new() -> SimOs<S> {
@@ -359,10 +379,24 @@ impl<S: Shape> SimOs<S> {
     /// Sets the environment [`Os::environment`] reads from now on: the kernel's bytes, entries
     /// each ended by a NUL, or `None` for a process with no `/proc`, the default.
     pub fn set_environment(&self, environment: Option<&'static [u8]>) {
-        let leaked = environment.map_or(core::ptr::null_mut(), |bytes| {
-            core::ptr::from_mut(alloc::boxed::Box::leak(alloc::boxed::Box::new(bytes)))
-        });
-        self.environment.store(leaked, Ordering::Release);
+        let node = alloc::boxed::Box::into_raw(alloc::boxed::Box::new(Environment {
+            value: environment,
+            older: core::ptr::null_mut(),
+        }));
+        let mut current = self.environment.load(Ordering::Acquire);
+        loop {
+            // SAFETY: `node` is this call's own allocation until the exchange publishes it.
+            unsafe { (*node).older = current };
+            match self.environment.compare_exchange_weak(
+                current,
+                node,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            ) {
+                Ok(_) => break,
+                Err(now) => current = now,
+            }
+        }
     }
 
     /// How many times [`Os::environment`] has been called.
@@ -1031,12 +1065,15 @@ unsafe impl<S: Shape> Os for SimOs<S> {
 
     fn environment(&self, buf: &mut [u8], mut each: impl FnMut(&[u8]) -> bool) -> bool {
         self.environment_reads.fetch_add(1, Ordering::AcqRel);
-        let environment = self.environment.load(Ordering::Acquire);
-        if environment.is_null() || buf.is_empty() {
+        let node = self.environment.load(Ordering::Acquire);
+        if node.is_null() || buf.is_empty() {
             return false;
         }
-        // SAFETY: a non-null pointer is one `set_environment` leaked, which is never freed.
-        let environment: &[u8] = unsafe { *environment };
+        // SAFETY: a non-null pointer is a node `set_environment` published, which lives until
+        // the simulated OS is dropped; its value is written only before it is published.
+        let Some(environment) = (unsafe { (*node).value }) else {
+            return false;
+        };
         for piece in environment.chunks(buf.len()) {
             let copy = &mut buf[..piece.len()];
             copy.copy_from_slice(piece);

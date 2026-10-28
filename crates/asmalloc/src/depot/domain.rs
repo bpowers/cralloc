@@ -30,7 +30,22 @@ use core::sync::atomic::Ordering::{AcqRel, Acquire, Relaxed, Release};
 use core::sync::atomic::{AtomicU8, AtomicU64};
 
 /// The most domains the depot keeps apart; machines with more fold them together.
+///
+/// Under Miri, 4. Miri retags a shared reference by visiting each atomic it covers, and the
+/// depot holds stacks for every domain and class, so with 64 domains each call through a
+/// `&Depot` cost it milliseconds and the depot's tests ran for hours (`scripts/miri`). Four
+/// domains still fold, and still have stacks of their own.
+#[cfg(not(miri))]
 pub const MAX_DOMAINS: usize = 64;
+#[cfg(miri)]
+pub const MAX_DOMAINS: usize = 4;
+
+/// The CPU numbers the table names: every CPU with a slab, or under Miri, for the reason
+/// [`MAX_DOMAINS`] gives, the first 64, which is more than any simulated machine has.
+#[cfg(not(miri))]
+const TABLE_CPUS: usize = SLAB_COUNT;
+#[cfg(miri)]
+const TABLE_CPUS: usize = 64;
 
 /// The bytes of one topology list read: room for any list a machine of [`SLAB_COUNT`] CPUs
 /// prints in ranges, and for every CPU of a 64-CPU L3 listed one by one.
@@ -64,7 +79,7 @@ const PUBLISHED: u64 = 2;
 /// The CPU table and the state of its discovery.
 pub(crate) struct Domains {
     state: AtomicU64,
-    of_cpu: [AtomicU8; SLAB_COUNT],
+    of_cpu: [AtomicU8; TABLE_CPUS],
 }
 
 impl Domains {
@@ -72,7 +87,7 @@ impl Domains {
     pub(crate) const fn new() -> Domains {
         Domains {
             state: AtomicU64::new(0),
-            of_cpu: [const { AtomicU8::new(0) }; SLAB_COUNT],
+            of_cpu: [const { AtomicU8::new(0) }; TABLE_CPUS],
         }
     }
 
@@ -162,7 +177,9 @@ impl Domains {
                 }
                 if other < SLAB_COUNT {
                     covered[other / 64] |= 1 << (other % 64);
-                    self.of_cpu[other].store(domain.0, Relaxed);
+                }
+                if let Some(byte) = self.of_cpu.get(other) {
+                    byte.store(domain.0, Relaxed);
                 }
             });
             ok &= shared && found_self;
@@ -238,18 +255,21 @@ mod tests {
     #[test]
     fn discovery_gives_each_l3_a_domain_in_order_of_its_lowest_cpu() {
         use crate::os::sim::SimTopology::*;
-        let (count, of) = found(Blocks(8));
-        assert_eq!(count, 8);
-        assert!((0..64).all(|cpu| of[cpu] == cpu / 8));
+        let cpus = crate::os::sim::SIM_THREADS;
+        // Eight L3s.
+        let width = cpus / 8;
+        let (count, of) = found(Blocks(width as u32));
+        assert_eq!(count, 8.min(MAX_DOMAINS));
+        assert!((0..cpus).all(|cpu| of[cpu] == cpu / width % MAX_DOMAINS));
         let (count, of) = found(Stripes(2));
         assert_eq!(count, 2);
-        assert!((0..64).all(|cpu| of[cpu] == cpu % 2));
+        assert!((0..cpus).all(|cpu| of[cpu] == cpu % 2));
         // Every CPU its own L3: as many domains as the table keeps apart.
         let (count, of) = found(Blocks(1));
         assert_eq!(count, MAX_DOMAINS);
-        assert!((0..64).all(|cpu| of[cpu] == cpu));
+        assert!((0..cpus).all(|cpu| of[cpu] == cpu % MAX_DOMAINS));
         // One L3 for all.
-        let (count, of) = found(Blocks(64));
+        let (count, of) = found(Blocks(cpus as u32));
         assert_eq!(count, 1);
         assert!(of.iter().all(|&d| d == 0));
     }
@@ -276,7 +296,10 @@ mod tests {
         // A second discovery changes nothing.
         os.set_topology(crate::os::sim::SimTopology::Blocks(1));
         domains.discover(&os);
-        assert_eq!(domains.count(), 16);
+        assert_eq!(
+            domains.count(),
+            (crate::os::sim::SIM_THREADS / 4).min(MAX_DOMAINS)
+        );
     }
 
     /// What a forked child inherits when the fork cut the discovery off: a claim nobody
@@ -312,13 +335,19 @@ mod tests {
     #[test]
     fn a_split_replaces_what_discovery_found() {
         let os: crate::os::sim::SimOs = crate::os::sim::SimOs::new();
-        os.set_topology(crate::os::sim::SimTopology::Blocks(32));
+        // Two L3s.
+        os.set_topology(crate::os::sim::SimTopology::Blocks(
+            crate::os::sim::SIM_THREADS as u32 / 2,
+        ));
         let domains = Domains::new();
         domains.discover(&os);
         assert_eq!(domains.count(), 2);
         domains.split(&os, 4);
-        assert_eq!(domains.count(), crate::os::sim::SIM_THREADS / 4);
-        assert!((0..64).all(|cpu| domains.of(Some(cpu)).index() == cpu / 4));
+        assert_eq!(
+            domains.count(),
+            (crate::os::sim::SIM_THREADS / 4).min(MAX_DOMAINS)
+        );
+        assert!((0..64).all(|cpu| domains.of(Some(cpu)).index() == cpu / 4 % MAX_DOMAINS));
         // Without an online list, every CPU number with a slab, folded.
         os.set_topology(crate::os::sim::SimTopology::Missing);
         domains.split(&os, 1);

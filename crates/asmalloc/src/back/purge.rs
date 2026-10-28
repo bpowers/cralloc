@@ -242,7 +242,7 @@ use super::tree::Host;
 use super::word::{BITS, Word};
 use crate::classes::Class;
 use crate::os::Os;
-use crate::space::RegionId;
+use crate::space::{MAX_REGIONS, RegionId};
 use crate::thread_word::{Duty, Snapshot};
 use core::sync::atomic::Ordering::{Acquire, Relaxed, Release, SeqCst};
 
@@ -1754,7 +1754,7 @@ impl<O: Os> Back<'_, O> {
             let Some(region) = plan.region(index) else {
                 continue;
             };
-            if self.state.tails[index % crate::space::MAX_REGIONS].load() & tail::WANT == 0 {
+            if self.state.tails.get(index).load() & tail::WANT == 0 {
                 continue;
             }
             let Some(class) = self.state.tags.published(region) else {
@@ -1808,7 +1808,7 @@ impl<O: Os> Back<'_, O> {
     /// claim's mark sets the marks flag, which the bit's owner would have. Words that are zero,
     /// regions whose advice never came off, are left as they are.
     pub fn distrust_tails(&self) {
-        for word in self.state.tails.iter() {
+        for word in (0..MAX_REGIONS).map(|index| self.state.tails.get(index)) {
             let mut seen = word.load();
             while seen != 0 {
                 let next = (seen & !tail::BUSY) | tail::REPAIR;

@@ -55,7 +55,7 @@ fn region_of<'a>(back: &Back<'a, Sim>, at: *mut u8) -> RegionId {
 }
 
 fn word_of<'a>(back: &Back<'a, Sim>, region: RegionId) -> Tail {
-    Tail::unpack(back.state.tails[region.index()].load())
+    Tail::unpack(back.state.tails.get(region.index()).load())
 }
 
 fn age_and_beat<'a>(back: &Back<'a, Sim>, intervals: usize) {
@@ -218,7 +218,7 @@ fn the_thread_sleeps_though_an_owner_that_does_not_run_holds_a_marked_region() {
         stamp: back.epoch() as u32,
         ..word
     };
-    back.state.tails[region.index()].store(stuck.pack());
+    back.state.tails.get(region.index()).store(stuck.pack());
     back.state.marks.store(1);
     assert!(
         settle(&back),
@@ -322,7 +322,7 @@ fn a_fresh_owner_is_not_taken_over_by_a_thread_with_an_older_interval() {
         low: Some(unit),
         ..Tail::default()
     };
-    back.state.tails[region.index()].store(owned.pack());
+    back.state.tails.get(region.index()).store(owned.pack());
     let advised = os.calls(Call::AdviseHuge);
     let change = tail::lower(&host, region, from, 4);
     assert_eq!(
@@ -397,7 +397,7 @@ fn a_heartbeat_raises_a_bounded_number_of_regions() {
         let _ = fill(&back, class, 2 * region / class.size());
     }
     for index in 0..back.walk_regions() {
-        marked += usize::from(Tail::unpack(back.state.tails[index].load()).want);
+        marked += usize::from(Tail::unpack(back.state.tails.get(index).load()).want);
     }
     assert!(marked >= 4, "{marked} regions marked");
     let advised = os.calls(Call::AdviseHuge);
@@ -794,7 +794,7 @@ fn a_kernel_that_refuses_all_advice_costs_a_call_a_region_a_pass() {
     }
     let mut repairs = 0;
     for index in 0..back.walk_regions() {
-        let word = Tail::unpack(back.state.tails[index].load());
+        let word = Tail::unpack(back.state.tails.get(index).load());
         assert!(word.from == 0 && !word.busy && !word.want, "{word:?}");
         repairs += u64::from(word.repair);
     }
@@ -1275,7 +1275,7 @@ fn a_raise_does_not_make_growth_pay_for_memory_that_is_not_resident() {
     }
     age_and_beat(&back, 24);
     let lowered = (0..back.walk_regions())
-        .filter(|&i| Tail::unpack(back.state.tails[i].load()).from != 0)
+        .filter(|&i| Tail::unpack(back.state.tails.get(i).load()).from != 0)
         .count();
     let quiet = back.retained();
     assert!(quiet < cap / 2, "{quiet} retained after the passes");

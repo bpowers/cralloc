@@ -249,46 +249,14 @@ mod tests {
         }
     }
 
-    const CHILD: &str = "ASMALLOC_AREA_CHILD";
-    const CHILD_DEADLINE: std::time::Duration = std::time::Duration::from_secs(120);
-
-    /// Runs the test `name` of this module again in a fresh process, in which it does its work
-    /// (`CHILD` is set), and fails if that process fails or outlives `CHILD_DEADLINE`. A fresh
-    /// process, not a fork: a child forked from the test harness's threads may inherit a lock
-    /// of std's held by one of them, and the first thread it starts then waits for it for ever.
+    /// Runs the test `name` of this module again in a fresh process (`crate::fresh`).
     fn in_fresh_process(name: &str) {
-        let mut child = std::process::Command::new(std::env::current_exe().unwrap())
-            .args([
-                "--exact",
-                &std::format!("front::area::tests::{name}"),
-                "--nocapture",
-                "--include-ignored",
-            ])
-            .env(CHILD, name)
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped())
-            .spawn()
-            .unwrap();
-        let started = std::time::Instant::now();
-        while child.try_wait().unwrap().is_none() {
-            if started.elapsed() > CHILD_DEADLINE {
-                child.kill().unwrap();
-                panic!("{name} hung: {:?}", child.wait_with_output().unwrap());
-            }
-            std::thread::sleep(std::time::Duration::from_millis(20));
-        }
-        let output = child.wait_with_output().unwrap();
-        assert!(output.status.success(), "{name} failed: {output:?}");
-        let stdout = std::string::String::from_utf8_lossy(&output.stdout);
-        assert!(
-            stdout.contains("1 passed"),
-            "{name} did not run in the child: {stdout}"
-        );
+        crate::fresh::run(&std::format!("front::area::tests::{name}"));
     }
 
     /// Whether this process is the fresh one `in_fresh_process` started for the test `name`.
     fn is_child(name: &str) -> bool {
-        std::env::var_os(CHILD).is_some_and(|v| v == name)
+        crate::fresh::is_child(&std::format!("front::area::tests::{name}"))
     }
 
     /// Runs `child` in a forked child, which must start no thread, and returns its exit code.

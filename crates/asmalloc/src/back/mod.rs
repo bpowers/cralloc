@@ -71,6 +71,7 @@ mod verify;
 mod verify_slow;
 
 use self::host::{ClassHost, ClassState, Frontiers, Headers, RegionHeader, Tails};
+use crate::cells::Cells;
 use crate::classes::{COUNT, Class};
 use crate::lined::{LINE, Lined};
 use crate::os::{Os, OsError};
@@ -114,7 +115,7 @@ pub struct State<O: Os> {
     walk: Lined<Walk>,
     /// The current size of each run, at its head region's index. Out of the regions'
     /// metadata, which must stay all zero for a region that may later go to a class.
-    run_sizes: Lined<[AtomicUsize; MAX_REGIONS]>,
+    run_sizes: Lined<Cells<AtomicUsize, MAX_REGIONS>>,
     /// Each region's header (`host::RegionHeader`). Out of the regions' metadata
     /// blocks, so that a small class whose slots never reach the bitmaps never touches its block.
     headers: Lined<Headers>,
@@ -341,10 +342,10 @@ impl<O: Os> State<O> {
                 refresh: AtomicU32::new(0),
                 top: AtomicU32::new(0),
             }),
-            run_sizes: Lined::new([const { AtomicUsize::new(0) }; MAX_REGIONS]),
-            headers: Lined::new([const { RegionHeader::new() }; MAX_REGIONS]),
-            frontiers: Lined::new([const { word::Atomic::zero() }; MAX_REGIONS]),
-            tails: Lined::new([const { word::Atomic::zero() }; MAX_REGIONS]),
+            run_sizes: Lined::new(Cells::new([const { AtomicUsize::new(0) }; MAX_REGIONS])),
+            headers: Lined::new(Cells::new([const { RegionHeader::new() }; MAX_REGIONS])),
+            frontiers: Lined::new(Cells::new([const { word::Atomic::zero() }; MAX_REGIONS])),
+            tails: Lined::new(Cells::new([const { word::Atomic::zero() }; MAX_REGIONS])),
             marks: Lined::new(TailMarks {
                 marks: word::Atomic::zero(),
                 refused: AtomicU64::new(0),

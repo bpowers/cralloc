@@ -21,7 +21,7 @@
 
 use super::{Back, Kind};
 use crate::os::{HugePages, Os};
-use crate::space::{RegionId, RegionTag};
+use crate::space::{MAX_REGIONS, RegionId, RegionTag};
 use core::ptr::NonNull;
 use core::sync::atomic::AtomicUsize;
 use core::sync::atomic::Ordering::SeqCst;
@@ -100,7 +100,8 @@ impl<O: Os> Back<'_, O> {
 
     fn run_size_word(&self, ptr: *const u8) -> Option<&AtomicUsize> {
         let location = self.space.locate(ptr)?;
-        self.state.run_sizes.get(location.region.index())
+        let index = location.region.index();
+        (index < MAX_REGIONS).then(|| self.state.run_sizes.get(index))
     }
 
     /// The number of regions in the run whose head is `head`.
