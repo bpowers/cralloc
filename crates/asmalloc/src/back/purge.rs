@@ -240,7 +240,7 @@ use super::tree::Host;
 use super::word::{BITS, Word};
 use crate::classes::Class;
 use crate::os::Os;
-use crate::space::{RegionId, RegionTag};
+use crate::space::RegionId;
 use crate::thread_word::{Duty, Snapshot};
 use core::sync::atomic::Ordering::{Acquire, Relaxed, Release, SeqCst};
 
@@ -1142,11 +1142,10 @@ impl<O: Os> Back<'_, O> {
         (read.max(1), purged, done)
     }
 
-    /// The class of a region the walk should look at: a class region whose summary bit is set.
+    /// The class of a region the walk should look at: a region published for a class (`tags`)
+    /// whose summary bit is set.
     pub(super) fn purgeable(&self, region: RegionId) -> Option<Class> {
-        let RegionTag::Class(class) = self.state.table.get(region) else {
-            return None;
-        };
+        let class = self.state.tags.published(region)?;
         let host = self.host(class)?;
         let index = region.index() as u32;
         let bit = 1u64 << (index % BITS);
@@ -1704,7 +1703,7 @@ impl<O: Os> Back<'_, O> {
             if self.state.tails[index % crate::space::MAX_REGIONS].load() & tail::WANT == 0 {
                 continue;
             }
-            let RegionTag::Class(class) = self.state.table.get(region) else {
+            let Some(class) = self.state.tags.published(region) else {
                 continue;
             };
             let Some(host) = self.host(class) else {
@@ -1786,7 +1785,7 @@ impl<O: Os> Back<'_, O> {
         let Some(region) = self.space.plan().region(index) else {
             return;
         };
-        let RegionTag::Class(class) = self.state.table.get(region) else {
+        let Some(class) = self.state.tags.published(region) else {
             return;
         };
         let Some(host) = self.host(class) else {

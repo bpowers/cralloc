@@ -1,42 +1,61 @@
 //! Evidence for the ledger review of `back/class.rs`, `back/host.rs` and `back/region.rs` at
-//! `d36e0cb`.
+//! `d36e0cb`, and the tests of its fix, the published tag (`back::tags`).
 //!
-//! The `ClassHost` invariant (`docs/safety/asmalloc/back/host-safety.md`) says a host is only
-//! given regions the table tags with its class, and that the one tag change away from a class,
-//! `Back::assign` giving back a region it took and could not publish, is of a region "no other
-//! thread has named". The walks that find regions by reading the table (`Back::hold_region`,
-//! `Back::lower_walked`, `Back::raise_marked`, `Back::inspect`) can name it: they read the tag
-//! while the loser holds it. A walk that is then descheduled until another class has taken the
-//! region goes on with the first class's host.
+//! The finding: the walks that find regions by their number (`Back::hold_region`, the hold's
+//! plan, `Back::lower_walked`, `Back::raise_marked`, `Back::inspect`) read a region's class
+//! from the table, and could read it while a thread that lost the race for its class's carving
+//! word held the region, before it gave the region back. A walk descheduled from there until
+//! another class had the region went on with the first class's host and layout.
 //!
-//! No test can put a thread between two loads of `hold_region`, so the test here plays the
-//! steps by hand: the loser's as `Back::assign` makes them, and the look's as `hold_region`
-//! makes them after its read of the tag.
+//! The walks now take a region's class from the published tag, which only the thread whose
+//! carving swing named the region writes, after the swing. No test can put a thread between
+//! two loads of a walk, so the tests play the steps by hand: the loser's as `Back::assign`
+//! makes them, and the walk's read of the class, then the walk itself once another class has
+//! the region.
 
 use super::super::hold::{Reach, held_for};
 use super::super::policy::{FINE_TICKS, HOLD_STEPS};
-use super::super::purge::Scope;
 use super::super::region;
 use super::super::tree::Host;
 use super::super::word::Word;
 use super::*;
+use crate::space::RegionId;
 use core::sync::atomic::Ordering::SeqCst;
 
-/// A look of the hold reads a region's tag while a thread that lost the race for its class's
-/// carving word still holds the region, and runs again once another large class has taken the
-/// region, allocated from it and freed a slot. It walks the region with the first class's
-/// layout. Two large classes with a leaf word each keep their bitmaps and size words at the
-/// same offsets, so the look takes the second class's free slot 1 for the first class's, and
-/// returns the first class's slot 1: the pages of the second class's slots 2 and 3, which are
-/// live.
-///
-/// Ignored because it fails (`scripts/gate --all` runs ignored tests and will fail on it until
-/// the fix). It replays `hold_region` as it stood at `d36e0cb`: the look takes its class from
-/// the table. A fix that gives scanners another source for a region's class changes the step
-/// marked "the look's first step" below, which should then find no class for the region.
+/// The loser's steps in `Back::assign` for `class`, up to its tag: the fixed metadata (and a
+/// large class's first slot) committed for the lowest unassigned region, the walks' bound
+/// raised, and the tag taken. Returns the region, which the loser then gives back.
+fn lose_a_region<O: Os>(back: &Back<'_, O>, class: Class) -> RegionId {
+    let host = back.host(class).unwrap();
+    let region = back
+        .space()
+        .plan()
+        .regions()
+        .find(|&r| back.tag(r) == RegionTag::Unassigned)
+        .unwrap();
+    let (start, end) = host.layout().fixed_commit();
+    assert!(host.commit_meta(region, start, end - start));
+    if !class.is_small() {
+        assert!(region::commit_first(&host, region).is_some());
+    }
+    back.state
+        .walk
+        .top
+        .fetch_max(region.index() as u32 + 1, SeqCst);
+    assert!(back.state.tags.take(region, RegionTag::Class(class)));
+    region
+}
+
+/// A look of the hold reads a region's class while a thread that lost the race for its
+/// class's carving word still holds the region. Before the fix it read the table, found the
+/// loser's class, and ran again once another large class had taken the region, allocated from
+/// it and freed a slot: two large classes with a leaf word each keep their bitmaps and size
+/// words at the same offsets, so it took the second class's free slot 1 for the first class's
+/// and returned the first class's slot 1, the pages of the second class's live slots 2 and 3.
+/// Now it finds no class for the region, and the hold's look, run once the other class has the
+/// region, walks it as that class's.
 #[test]
 #[cfg_attr(miri, ignore)]
-#[ignore = "fails: a look with a stale class returns another class's live slots"]
 fn a_look_that_read_the_tag_of_a_region_given_back_returns_another_classes_live_slots() {
     let state = state::<Native>();
     let back = state.get_or_reserve().unwrap();
@@ -45,37 +64,13 @@ fn a_look_that_read_the_tag_of_a_region_given_back_returns_another_classes_live_
     assert_eq!(big.size(), 2 * little.size());
     // The winner of the race for `big`'s carving word publishes its region.
     let _first = back.alloc(big, big.size()).unwrap().ptr;
-    // The loser, as `Back::assign` goes: it commits the fixed metadata and the first slot of
-    // the lowest unassigned region, raises the walks' bound and takes the tag.
-    let host = back.host(big).unwrap();
-    let region = back
-        .space()
-        .plan()
-        .regions()
-        .find(|&r| back.state.table.get(r) == RegionTag::Unassigned)
-        .unwrap();
-    let (start, end) = host.layout().fixed_commit();
-    assert!(host.commit_meta(region, start, end - start));
-    assert!(region::commit_first(&host, region).is_some());
-    back.state
-        .walk
-        .top
-        .fetch_max(region.index() as u32 + 1, SeqCst);
-    back.state
-        .table
-        .replace(region, RegionTag::Unassigned, RegionTag::Class(big))
-        .unwrap();
-    // The look's first step in `hold_region`: the tag. Then it is descheduled.
-    let RegionTag::Class(seen) = back.state.table.get(region) else {
-        panic!("the loser holds the tag");
-    };
-    assert_eq!(seen, big);
+    let region = lose_a_region(&back, big);
+    // The look's first step in `hold_region`: the region's class. The loser has not named the
+    // region, so nothing is published, and the look passes it by.
+    assert_eq!(back.state.tags.published(region), None);
     // The loser finds the carving word published and gives the region back. Its header is
     // zero again (`unprepare`); here nothing wrote it.
-    back.state
-        .table
-        .replace(region, RegionTag::Class(big), RegionTag::Unassigned)
-        .unwrap();
+    back.state.tags.give_back(region, RegionTag::Class(big));
     // Another large class takes the region, fills four slots and frees the second.
     let size = little.size();
     let blocks: Vec<NonNull<u8>> = (0..4)
@@ -90,38 +85,132 @@ fn a_look_that_read_the_tag_of_a_region_given_back_returns_another_classes_live_
         back.heartbeat();
     }
     back.free(blocks[1], little);
-    // The look runs again, with the class it read: the rest of `hold_region`.
-    let host = back.host(seen).unwrap();
-    let word = host.meta(region, host.layout().hold_word().unwrap());
-    let stamp = word.load();
-    assert_ne!(stamp, 0, "the other class's stamp, at the same word");
+    assert_eq!(back.state.tags.published(region), Some(little));
+    // The look itself, at a count by which the region's stamp is held for the hold.
+    let host = back.host(little).unwrap();
+    let stamp = host.meta(region, host.layout().hold_word().unwrap()).load();
+    assert_ne!(stamp, 0);
     let count = back.hold_count().wrapping_add(HOLD_STEPS);
     let reach = Reach::beat(Native::GEOMETRY);
     assert!(held_for(stamp, count, reach.steps));
-    // `hold_region` asks only whether this is `None`, and it is the other class's region.
-    assert_eq!(back.purgeable(region), Some(little));
-    let (purged, _, _, _) = back.purge_region(
-        seen,
-        region,
-        usize::MAX,
-        usize::MAX,
-        true,
-        Scope::All,
-        false,
-        true,
-    );
-    // The look's release walked up the big class's tree, so the big class now finds a free
-    // slot in the little class's region.
+    let _ = back.hold_region(region.index(), count, usize::MAX, usize::MAX, reach);
     let again = back.alloc(big, big.size()).unwrap().ptr;
     let mut wrong = Vec::new();
-    if purged != 0 {
-        wrong.push("the look returned pages of another class's region");
-    }
     if (0..4).any(|i| i != 1 && !painted(blocks[i].as_ptr(), size, 7)) {
         wrong.push("a live block of the little class was returned");
     }
     if back.space().locate(again.as_ptr()).unwrap().region == region {
         wrong.push("the big class was handed a slot in the little class's region");
     }
-    assert!(wrong.is_empty(), "{purged} bytes returned: {wrong:?}");
+    assert!(wrong.is_empty(), "{wrong:?}");
+}
+
+/// The same race with a small class taking the region the large class's loser gave back: a
+/// look that took the large class would have walked the small class's bitmap as the large
+/// class's, setting and clearing its summary and clean bits and returning pages of its live
+/// objects. The look finds no class while the loser holds the region, and the small class
+/// once it has the region, which the hold passes by (small classes have no stamp).
+#[test]
+#[cfg_attr(miri, ignore)]
+fn a_region_given_back_to_a_small_class_is_the_small_classs_to_the_walks() {
+    let state = state::<Native>();
+    let back = state.get_or_reserve().unwrap();
+    let os = state.os();
+    let (big, tiny) = (large(128 << 10), small(64));
+    let _first = back.alloc(big, big.size()).unwrap().ptr;
+    let region = lose_a_region(&back, big);
+    assert_eq!(back.state.tags.published(region), None);
+    back.state.tags.give_back(region, RegionTag::Class(big));
+    let objects: Vec<NonNull<u8>> = (0..64)
+        .map(|_| back.alloc(tiny.class(), tiny.size()).unwrap().ptr)
+        .collect();
+    assert!(
+        objects
+            .iter()
+            .all(|o| back.space().locate(o.as_ptr()).unwrap().region == region)
+    );
+    for o in &objects {
+        paint(o.as_ptr(), tiny.size(), 7);
+    }
+    assert_eq!(back.state.tags.published(region), Some(tiny.class()));
+    let count = back.hold_count().wrapping_add(HOLD_STEPS);
+    let reach = Reach::beat(Native::GEOMETRY);
+    let (_, purged, done, _) =
+        back.hold_region(region.index(), count, usize::MAX, usize::MAX, reach);
+    assert_eq!((purged, done), (0, true));
+    for _ in 0..4 {
+        os.advance_clock(DECAY_TICKS);
+        back.heartbeat();
+    }
+    assert!(objects.iter().all(|o| painted(o.as_ptr(), tiny.size(), 7)));
+}
+
+/// The inspection is a walk too. With two small classes, one that took the class of a region
+/// its loser held would read the leaf words of a class that never committed them once the
+/// other class had the region. It sees the region only once a class has named it, and then
+/// as that class's.
+#[test]
+#[cfg_attr(miri, ignore)]
+fn the_inspection_sees_a_region_only_as_the_class_that_named_it() {
+    use crate::stats::{Region, Visitor};
+    #[derive(Default)]
+    struct Seen(Vec<(Class, usize)>);
+    impl Visitor for Seen {
+        fn region(&mut self, region: &Region) {
+            self.0.push((region.class, region.index));
+        }
+    }
+    let state = state::<Native>();
+    let back = state.get_or_reserve().unwrap();
+    let (first, second) = (small(16), small(1024));
+    let _a = back.alloc(first.class(), first.size()).unwrap().ptr;
+    let region = lose_a_region(&back, first.class());
+    let mut seen = Seen::default();
+    back.inspect(&mut seen);
+    assert!(seen.0.iter().all(|&(_, index)| index != region.index()));
+    back.state
+        .tags
+        .give_back(region, RegionTag::Class(first.class()));
+    let b = back.alloc(second.class(), second.size()).unwrap().ptr;
+    assert_eq!(back.space().locate(b.as_ptr()).unwrap().region, region);
+    let mut seen = Seen::default();
+    back.inspect(&mut seen);
+    assert!(seen.0.contains(&(second.class(), region.index())));
+    assert!(!seen.0.contains(&(first.class(), region.index())));
+}
+
+/// In a fork's child the repair publishes each region a carving word named whose namer the
+/// fork cut off before it published: the class's carving region, and one it has carved from
+/// whose carving word has moved on. A region tagged and never named stays unpublished.
+#[test]
+#[cfg_attr(miri, ignore)]
+fn a_fork_child_publishes_the_regions_named_and_not_published() {
+    let state = state::<Native>();
+    let back = state.get_or_reserve().unwrap();
+    let class = large(64 << 10);
+    let host = back.host(class).unwrap();
+    // A region named by the carving word, carved from, its publication undone as a fork that
+    // cut its namer off after the swing would leave it.
+    let first = back.alloc(class, class.size()).unwrap().ptr;
+    let named = back.space().locate(first.as_ptr()).unwrap().region;
+    back.state.tags.unpublish(named);
+    // A second region, tagged by a thread that has not swung the carving word.
+    let tagged = lose_a_region(&back, class);
+    assert_eq!(
+        host.class.carving.load(SeqCst),
+        named.index() as u32 + 1,
+        "the carving word still names the first region"
+    );
+    back.publish_named();
+    assert_eq!(back.state.tags.published(named), Some(class));
+    assert_eq!(back.state.tags.published(tagged), None);
+    // The carving word moves on to a third region and the first, carved from, loses its byte
+    // again: the repair still publishes it.
+    back.state.tags.give_back(tagged, RegionTag::Class(class));
+    back.state.tags.unpublish(named);
+    let next = back.state.tags.published(named);
+    assert_eq!(next, None);
+    host.class.carving.store(0, SeqCst);
+    back.publish_named();
+    assert_eq!(back.state.tags.published(named), Some(class));
 }

@@ -4,31 +4,36 @@
 numbers into references into the reservation, and forwards purges to `Space`.
 
 **The `ClassHost` invariant.** `layout` is `Layout::new(space.plan().geometry(), class)` for the
-host's class, and every `RegionId` a caller passes is a region the region table tags with that
-class. `Back::host` is the only constructor, and it builds the layout that way. Region ids
-reach a host only from:
+host's class, and every `RegionId` a caller passes is a region this class has named: a carving
+word of the class has held it. Such a region is the class's for good. `Back::host` is the only
+constructor, and it builds the layout that way. Region ids reach a host only from:
 
 - the class's carving word, which holds only a region this class's `assign` took from the table
-  with a compare-and-swap from `Unassigned` to `Class(class)`;
+  with a compare-and-swap from `Unassigned` to `Class(class)` and then named with its swing;
 - the class's summary tree (`tree::child` of a class word), whose bits are set only by the walk
   up from a leaf word of one of the class's regions;
-- `Plan::locate` of a pointer whose table tag `validate` or `purgeable` has just checked is this
-  class.
+- `Back::tag_at` of a pointer into the region, whose table tag `validate`, the batch checker
+  or the free by address has just checked is this class: a pointer into a region exists only
+  once a class has named it and carved from it, so its tag is the naming class's;
+- the published tag (`Tags::published`), which every walk that finds regions by their number
+  reads (`Back::purgeable`, `Back::hold_region` and the hold's plan, `Back::lower_walked`,
+  `Back::raise_marked`, `Back::inspect`). Only the thread whose carving swing named the region
+  writes it, after the swing, and only with that class (`Back::assign`); the one other writer,
+  a fork child's repair (`Back::publish_named`), writes it only for a region the class's
+  carving word names or that has been carved from, which a swing of the class named. The byte
+  is written once (a compare-and-swap from zero) and never cleared.
 
-A class never gives a region up. The only tag change away from `Class(class)` is `assign`
-reverting a region it took but did not publish, which no other thread has named.
+A class never gives a named region up: the only tag change away from `Class(class)` is
+`assign` giving back a region it took and did not name, after its swing lost. Such a region
+was never published, so no walk has it; a pointer into it was never handed out. The tags
+cannot be reached any other way: `back::tags` keeps the table and the published bytes private
+and offers a class for a region number only through the published byte (`tla/Assign.tla`
+checks the protocol, and `Assign_table` shows a walk that read the table instead acting on a
+region another class or a run then had).
 
-**Open finding, review of d36e0cb: the invariant does not hold as stated.** The region
-`assign` reverts can be named by another thread. The walks that find regions by reading the
-table (`Back::hold_region`, the hold's plan, `Back::lower_walked`, `Back::raise_marked`,
-`Back::inspect`; `Back::purgeable` is safe, since it also asks for the class's summary bit,
-which only a release into the region by that class sets) may read the tag while the loser
-holds it. A walk descheduled from there until another class has taken the region goes on with
-the first class's host. For a large first class every word it reaches is still committed (its
-block was committed whole before the tag, and commit is never undone), so BACK-HOST-01 holds,
-but the layout is not the region's: `hold_region` can then return live slots of the second
-class (`back::tests::ledger_review`). For a small first class, `inspect` can read leaf words
-the first class never committed. This file is not marked reviewed until that is fixed.
+The reviewed finding at d36e0cb (the walks read the table, and could act on a region given
+back with the wrong class's layout, `back::tests::ledger_review`) is closed by the published
+tag.
 
 ## BACK-HOST-01: `&*at` in `ClassHost::meta`
 
@@ -72,9 +77,9 @@ that conflicts with a shared reference.
    - The fixed part is committed by `assign` before its compare-and-swap puts this class's
      tag on the region: for a small class from the block's start to the start of the leaf
      bitmap, which comes last; for a large class the whole block, header and leaf bitmap
-     included (`Layout::fixed_commit`, proved in `layouts_fit`). So any thread that learns the region through the table, the carving word or
-     the summary tree finds it committed: the OS has finished the commit before that thread's
-     acquire of the tag or word, and commit is never undone.
+     included (`Layout::fixed_commit`, proved in `layouts_fit`). So any thread that learns the region through the table, the published tag, the
+     carving word or the summary tree finds it committed: the OS has finished the commit before
+     that thread's acquire of the tag, byte or word, and commit is never undone.
    - A leaf word is touched only for a slot below the watermark, or in a descent through set
      summary bits. A carve commits the leaf words of every slot starting below the new commit
      frontier (`Layout::leaf_commit`, proved in `leaf_commits_cover_the_committed_slots`) before

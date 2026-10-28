@@ -108,7 +108,7 @@ impl<O: Os> Back<'_, O> {
         let plan = self.space.plan();
         let mut length = 1;
         while let Some(next) = plan.region(head.index() + length) {
-            if self.state.table.get(next) != RegionTag::RunTail {
+            if !self.state.tags.is_run_tail(next) {
                 break;
             }
             length += 1;
@@ -120,11 +120,9 @@ impl<O: Os> Back<'_, O> {
     /// returns `false` if any was taken already.
     fn claim_run(&self, first: usize, count: usize) -> bool {
         let plan = self.space.plan();
-        let table = &self.state.table;
-        let free = (first..first + count).all(|i| {
-            plan.region(i)
-                .is_some_and(|r| table.get(r) == RegionTag::Unassigned)
-        });
+        let tags = &self.state.tags;
+        let free =
+            (first..first + count).all(|i| plan.region(i).is_some_and(|r| tags.is_unassigned(r)));
         if !free {
             return false;
         }
@@ -134,9 +132,7 @@ impl<O: Os> Back<'_, O> {
             } else {
                 RegionTag::RunTail
             };
-            let taken = plan
-                .region(first + i)
-                .is_some_and(|r| table.replace(r, RegionTag::Unassigned, tag).is_ok());
+            let taken = plan.region(first + i).is_some_and(|r| tags.take(r, tag));
             if !taken {
                 self.unclaim_run(first, count, i);
                 return false;
@@ -155,7 +151,7 @@ impl<O: Os> Back<'_, O> {
                 RegionTag::RunTail
             };
             if let Some(region) = plan.region(first + i) {
-                let _ = self.state.table.replace(region, tag, RegionTag::Unassigned);
+                self.state.tags.give_back(region, tag);
             }
         }
     }

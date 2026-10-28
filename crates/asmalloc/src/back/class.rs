@@ -557,10 +557,10 @@ impl<'a, O: Os> Back<'a, O> {
         object: *const u8,
         class: Class,
     ) -> (RegionId, u32) {
-        let Some(location) = self.space.locate(object) else {
+        let Some((location, tag)) = self.tag_at(object) else {
             self.abort("free of a pointer outside the heap");
         };
-        if self.state.table.get(location.region) != RegionTag::Class(class) {
+        if tag != RegionTag::Class(class) {
             self.abort("free of a pointer with the wrong class");
         }
         let slot = self.slot_in(host, location.region, location.offset as usize);
@@ -1453,10 +1453,10 @@ impl<'a, O: Os> Back<'a, O> {
     /// The address is located and its slot checked once, here, rather than by a lookup and then
     /// again by the free it chooses.
     pub(crate) fn free_by_address(&self, ptr: NonNull<u8>) {
-        let Some(location) = self.space.locate(ptr.as_ptr()) else {
+        let Some((location, tag)) = self.tag_at(ptr.as_ptr()) else {
             self.abort("free of a pointer that is not the start of a heap object");
         };
-        match self.state.table.get(location.region) {
+        match tag {
             RegionTag::Class(class) if class.is_small() => self.free(ptr, class),
             RegionTag::Class(class) => {
                 let Some(host) = self.host(class) else {
@@ -1477,8 +1477,8 @@ impl<'a, O: Os> Back<'a, O> {
     /// class (`slots_in_region`). For C's `realloc`, which takes a block by its address alone.
     #[inline]
     pub fn small_slot(&self, ptr: *const u8) -> Option<SmallClass> {
-        let location = self.space.locate(ptr)?;
-        let RegionTag::Class(class) = self.state.table.get(location.region) else {
+        let (location, tag) = self.tag_at(ptr)?;
+        let RegionTag::Class(class) = tag else {
             return None;
         };
         let small = class.small()?;
@@ -1489,8 +1489,8 @@ impl<'a, O: Os> Back<'a, O> {
     /// What `ptr` is the start of, if anything: a slot of a class (handed out or not), or a run
     /// of regions. One load from the region table, then arithmetic.
     pub fn lookup(&self, ptr: *const u8) -> Option<Kind> {
-        let location = self.space.locate(ptr)?;
-        match self.state.table.get(location.region) {
+        let (location, tag) = self.tag_at(ptr)?;
+        match tag {
             RegionTag::Class(class) => {
                 let host = self.host(class)?;
                 let (slot, _) = host.layout().block_at(location.offset as usize)?;
@@ -1551,7 +1551,7 @@ impl<'a, O: Os> Back<'a, O> {
             if host.class.carving.load(SeqCst) != seen {
                 return true;
             }
-            if self.state.table.get(region) != RegionTag::Unassigned {
+            if !self.state.tags.is_unassigned(region) {
                 continue;
             }
             // Commit the fixed metadata before the region can carry this class's tag, so that
@@ -1577,12 +1577,7 @@ impl<'a, O: Os> Back<'a, O> {
                 .walk
                 .top
                 .fetch_max(region.index() as u32 + 1, SeqCst);
-            if self
-                .state
-                .table
-                .replace(region, RegionTag::Unassigned, RegionTag::Class(class))
-                .is_err()
-            {
+            if !self.state.tags.take(region, RegionTag::Class(class)) {
                 continue;
             }
             if let Some(committed) = committed {
@@ -1603,13 +1598,13 @@ impl<'a, O: Os> Back<'a, O> {
                 .compare_exchange(seen, published, SeqCst, SeqCst)
                 .is_ok()
             {
+                // Named: the region is the class's for good, and the walks may now find it.
+                self.state.tags.publish(region, class);
                 return true;
             }
+            // Not named, so not published: no walk has read this tag (`tags`).
             self.unprepare(host, region, huge);
-            let _ =
-                self.state
-                    .table
-                    .replace(region, RegionTag::Class(class), RegionTag::Unassigned);
+            self.state.tags.give_back(region, RegionTag::Class(class));
             return true;
         }
         false
@@ -1733,11 +1728,11 @@ impl<'c, 'a, O: Os> Checker<'c, 'a, O> {
     /// The region `object` lies in, checked to be the class's, with its watermark.
     #[inline(never)]
     fn meet(&self, object: *const u8) -> Met {
-        let Some(location) = self.back.space.locate(object) else {
+        let Some((location, tag)) = self.back.tag_at(object) else {
             self.back.abort("free of a pointer outside the heap");
         };
         let region = location.region;
-        if self.back.state.table.get(region) != RegionTag::Class(self.class) {
+        if tag != RegionTag::Class(self.class) {
             self.back.abort("free of a pointer with the wrong class");
         }
         let grow = self.host.grow(region);

@@ -92,7 +92,7 @@ fn check(state: &State<Sim<Native>>, held: &[Held], round: u64) -> usize {
     for &Held(class, ptr) in held {
         let location = back.space().locate(ptr.as_ptr()).unwrap();
         assert_eq!(
-            back.table().get(location.region),
+            back.tag(location.region),
             RegionTag::Class(class),
             "round {round}: a block of {class:?} in another class's region"
         );
@@ -115,7 +115,7 @@ fn check(state: &State<Sim<Native>>, held: &[Held], round: u64) -> usize {
     for region in plan.regions() {
         let at = region.index();
         let small_header = &back.state.headers[at];
-        match back.table().get(region) {
+        match back.tag(region) {
             RegionTag::Unassigned => {
                 assert!(!handed.contains_key(&at));
                 assert_eq!(

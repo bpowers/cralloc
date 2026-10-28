@@ -141,7 +141,7 @@ use super::region::{self, Purge};
 use super::tree::{self, Host};
 use super::word::{BITS, Word};
 use crate::os::Os;
-use crate::space::{Geometry, RegionId, RegionTag};
+use crate::space::{Geometry, RegionId};
 use core::sync::atomic::Ordering::{Relaxed, SeqCst};
 use core::sync::atomic::{AtomicU32, AtomicU64};
 
@@ -702,9 +702,7 @@ impl<O: Os> Back<'_, O> {
         (0..self.walk_regions())
             .filter_map(|index| {
                 let region = plan.region(index)?;
-                let RegionTag::Class(class) = self.state.table.get(region) else {
-                    return None;
-                };
+                let class = self.state.tags.published(region)?;
                 if class.is_small() {
                     return None;
                 }
@@ -863,8 +861,8 @@ impl<O: Os> Back<'_, O> {
         let Some(region) = self.space.plan().region(index) else {
             return passed;
         };
-        // The tag first: a small class's region has no stamp to read.
-        let RegionTag::Class(class) = self.state.table.get(region) else {
+        // The class first: a small class's region has no stamp to read.
+        let Some(class) = self.state.tags.published(region) else {
             return passed;
         };
         if class.is_small() {
@@ -930,8 +928,9 @@ impl<O: Os> Back<'_, O> {
 impl<O: Os> Back<'_, O> {
     /// The stamp of the large-class region that holds `ptr`.
     pub(super) fn hold_stamp_at(&self, ptr: *const u8) -> u64 {
-        let region = self.space.locate(ptr).unwrap().region;
-        let RegionTag::Class(class) = self.state.table.get(region) else {
+        let (location, tag) = self.tag_at(ptr).unwrap();
+        let region = location.region;
+        let crate::space::RegionTag::Class(class) = tag else {
             panic!("not a class region");
         };
         let host = self.host(class).unwrap();
