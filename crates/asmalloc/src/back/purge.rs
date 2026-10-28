@@ -605,6 +605,58 @@ impl<O: Os> Back<'_, O> {
         }
     }
 
+    /// How many halvings of the refresh interval the depot should take (`depot::slow`,
+    /// "Refresh"): one load of a word a lap's end writes.
+    #[inline]
+    pub fn refresh_raise(&self) -> u32 {
+        self.state.walk.refresh.load(Relaxed)
+    }
+
+    /// At the end of a lap that found `returnable` bytes a purge could return: sets the
+    /// refresh from the small classes' fragmentation, the retained count less what a purge
+    /// could return, against what they have carved (`policy::refresh_raise`). Up at once, down
+    /// a step a lap, so that a heap whose refresh has just packed it keeps the rate a while
+    /// rather than trading it back at once, and a heap that is no longer fragmented goes back
+    /// to the base rate within a few intervals.
+    ///
+    /// The lap's count is of small and large classes together, so on a heap with large free
+    /// slots resident it says less fragmentation than there is, never more. Carved bytes are
+    /// address space, not memory: a heap whose free pages have gone back is judged against its
+    /// peak, so the share reads low after a fall, and only pages that are still resident with
+    /// something on them count.
+    fn note_fragmentation(&self, returnable: usize) {
+        let plan = self.space.plan();
+        let mut carved = 0usize;
+        for index in 0..self.walk_regions() {
+            let Some(region) = plan.region(index) else {
+                continue;
+            };
+            let Some(class) = self.state.tags.published(region) else {
+                continue;
+            };
+            if !class.is_small() {
+                continue;
+            }
+            let Some(host) = self.host(class) else {
+                continue;
+            };
+            let grow = super::layout::Grow::unpack(host.grow(region).load());
+            carved = carved.saturating_add(host.layout().bytes_of(grow.carved));
+        }
+        let fragmented = self.clamped(false).saturating_sub(returnable);
+        self.step_refresh(super::policy::refresh_raise(fragmented, carved));
+    }
+
+    /// Moves the refresh toward `target`: up at once, down one step.
+    fn step_refresh(&self, target: u32) {
+        let word = &self.state.walk.refresh;
+        let now = word.load(Relaxed);
+        let next = if target >= now { target } else { now - 1 };
+        if next != now {
+            word.store(next, Relaxed);
+        }
+    }
+
     /// Counts a heartbeat's interval (`epoch_after`). Written once an interval, by the first
     /// heartbeat to see the new one.
     pub(super) fn note_epoch(&self, now: u64) {
@@ -983,7 +1035,10 @@ impl<O: Os> Back<'_, O> {
         let retained = self.retained();
         let floor = self.floor();
         if retained <= floor {
-            // Nothing is retained, or no more than the floor, which is spent freely.
+            // Nothing is retained, or no more than the floor, which is spent freely. No lap
+            // will walk to count the fragmentation, and there is no more of it than this: the
+            // refresh steps down on the clock.
+            self.step_refresh(0);
             let _ = state
                 .decay
                 .word
@@ -1136,6 +1191,7 @@ impl<O: Os> Back<'_, O> {
             walk.returnable.store(walk.seen.swap(0, Relaxed), Relaxed);
             walk.returned.store(0, Relaxed);
             walk.laps.fetch_add(1, Relaxed);
+            self.note_fragmentation(walk.returnable.load(Relaxed));
         }
         (read.max(1), purged, done)
     }

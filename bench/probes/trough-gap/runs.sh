@@ -27,6 +27,8 @@ case "$job" in
   # as fast as the heavy slice: about 4 s and 10 s.
   short2t) rung=2; args="shape=lifetime short_hi=1618Mi short_lo=136Mi long=410Mi phases=24 ops=7200M samples=96 quiet=20 quiet_step=1"; every=4 ;;
   smallt) rung=0.08; args="shape=lifetime short_hi=64Mi short_lo=5Mi long=16Mi phases=8 ops=8400M samples=96 quiet=30 quiet_step=1"; every=12 ;;
+  # The steady cache of large-heap-constants at 2 GiB: a heap with little fragmentation.
+  steady2) rung=2; args="shape=steady live=2048Mi ops=800M samples=60 quiet=20 quiet_step=1"; every=15 ;;
   small) rung=0.08; args="shape=lifetime short_hi=64Mi short_lo=5Mi long=16Mi phases=8 ops=2400M samples=96 quiet=30 quiet_step=1"; every=12 ;;
   *) echo "unknown job $job" >&2; exit 2 ;;
 esac
