@@ -20,6 +20,20 @@ feature = "asmalloc"
 build = "o-m256"
 expect = { allocator = "asmalloc", library = "executable" }
 
+# The refresh rule inside one binary (build-refresh.sh, refresh_switch.py).
+[[allocator]]
+name = "tg-rx"
+feature = "asmalloc"
+build = "rx"
+expect = { allocator = "asmalloc", library = "executable" }
+
+[[allocator]]
+name = "tg-rx-off"
+feature = "asmalloc"
+build = "rx"
+env = { TG_REFRESH = "off" }
+expect = { allocator = "asmalloc", library = "executable" }
+
 [[allocator]]
 name = "live-bytes"
 feature = "live-bytes"

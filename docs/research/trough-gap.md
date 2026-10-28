@@ -284,6 +284,51 @@ If the lead wants the design's quarter, B is the rule to write, and its price is
 above. The cap's term in A matters only on a heap retained between the floor and about four
 times the cap with little fragmentation, which no job here was.
 
+## Refresh on evidence (2026-10-28)
+
+Branch `refresh-evidence` (on `pass-goal`, which makes the pass's goal C). A fixed one in 4
+costs about 1% of cycles on every job; the rule pays it only where free slots beside live ones
+say compaction would pay.
+
+**The rule.** At the end of each lap of the purge walk the back end takes the small classes'
+fragmentation, the retained count less what the lap found returnable, against the bytes those
+classes have carved, and sets one word: how many times the depot halves `REFRESH_EVERY`
+(`policy::refresh_raise`). None under a share of 1 in 64, one for each of 1 in 64, 1 in 32 and 1
+in 16, so one in 4 from 1 in 16 up. Up at once, down a step a lap; a due pass that finds no more
+than the floor retained also steps it down, so it falls back on the clock when no lap runs. The
+free's slow path reads the word when a full magazine retires. All classes are refreshed alike:
+the retained count is one for all small classes, and what each class's pages hold is not
+counted. The shares seen: 0.6% on the steady cache and at the lifetime job's peaks, 18% at its
+troughs and 12% once the rule has packed them, which keeps the most.
+
+**Measured** inside one binary (`refresh_switch.py`: `TG_REFRESH=off` the base rate, `=4` one in 4
+always, unset the rule), timed runs on the measurement CPUs, two rounds, and the order service
+at 2 GiB in three sessions:
+
+| Job | off | rule | one in 4 always |
+|---|---|---|---|
+| lifetime 2 GiB, 18 s phases: trough GiB | 1.094, 1.127 | 0.945, 0.954 | 0.940, 0.937 |
+| the same, cycles an operation | 638.2, 639.8 | 642.7, 643.1 | 646.4, 648.5 |
+| 1.4 s phases: cycles an operation | 608.4, 608.3 | 611.8, 612.5 | 614.8, 615.4 |
+| steady cache 2 GiB: cycles an operation | 1267.2, 1277.0 | 1274.7, 1269.1 | |
+| order service 2 GiB: Mcycles a request, by session | 67.53, 67.77, 67.44 | 67.89, 67.51, 67.43 | |
+
+- **The trough gain is the constant's.** Accounted (memory runs, means of the troughs): heap
+  1,089 MiB off, 935 with the rule, 934 with one in 4; free slots beside live ones 406, 273, 269.
+- **No cost where fragmentation is low.** On the steady cache the raise stayed at none for every
+  lap (its counter), and the two arms' cycles are within each other's spread (mean 1,272 against
+  1,272). The order service never walks a lap while it serves (its free memory stays under the
+  floor), so the raise stays none; the arms are level (medians 67.51 and 67.53, memory 1.080
+  both).
+- **Where it acts it costs half the constant's price:** +0.6% on the lifetime job (the constant
+  +1.3%), +0.6% on 1.4-second phases (the constant +1.1%), where the raise sits at its most for
+  two laps in three.
+
+Not measured: 5 GiB (the run was stopped as the session wound down); `gate --all` on this branch
+(the quick gate passed). The probe's builds are `build-refresh.sh` (`rx`, `rx-stat`, from
+`ab6fe66`); the data is in
+`docs/research/data/trough-gap-refresh-2026-10-28.tar.gz`.
+
 ## Method
 
 - **Builds** (`bench/probes/trough-gap/`): `build.sh` extracts a commit, applies edit scripts and

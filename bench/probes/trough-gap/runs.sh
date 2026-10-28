@@ -21,6 +21,7 @@ out="$1" job="$2" builds="$3"
 here="$(cd "$(dirname "$0")" && pwd)"
 lhc="$here/../large-heap-constants"
 case "$job" in
+  life5) rung=5; args="shape=lifetime short_hi=4045Mi short_lo=340Mi long=1025Mi phases=6 ops=7200M samples=156 quiet=60 quiet_step=1"; every=26 ;;
   life2) rung=2; args="shape=lifetime short_hi=1618Mi short_lo=136Mi long=410Mi phases=6 ops=7200M samples=156 quiet=60 quiet_step=1"; every=26 ;;
   short2) rung=2; args="shape=lifetime short_hi=1618Mi short_lo=136Mi long=410Mi phases=24 ops=2400M samples=96 quiet=20 quiet_step=1"; every=4 ;;
   # short2 and small as their phases last on the measurement CPUs, which run them three times
@@ -34,21 +35,28 @@ case "$job" in
 esac
 [ -n "${TG_TIMED:-}" ] && export BENCH_CPUS=0-3,8-11
 mkdir -p "$out"
-for name in $(printf '%s\n' $builds | shuf); do
+for spec in $(printf '%s\n' $builds | shuf); do
+  # SPEC is NAME, or NAME@VALUE: the build NAME with TG_REFRESH=VALUE (refresh_switch.py),
+  # whose files are named NAME-VALUE.
+  build="${spec%@*}" env=() extra=()
+  name="$build"
+  if [ "$spec" != "$build" ]; then
+    env=(--env "TG_REFRESH=${spec#*@}")
+    name="$build-${spec#*@}"
+  fi
   file="$out/lifetime-$rung.$name.txt"
   if [ -f "$file" ] && tail -1 "$file" | grep -q '^# exit 0'; then
     continue
   fi
-  build="$name" env=() extra=()
-  case "$name" in
+  case "$build" in
     je-stat-acct)
       build=je-stat
       rm -f "$file.je"
-      env=(--env "JEMALLOC_ACCT=$file.je")
+      env+=(--env "JEMALLOC_ACCT=$file.je")
       extra=("account_every=$every") ;;
     *-stat-acct)
-      build="${name%-acct}"
-      env=(--env "ASMALLOC_MEMSTAT=$file.memstat" --env ASMALLOC_MEMSTAT_MS=0 --env ASMALLOC_MEMSTAT_CPU=15 --env ASMALLOC_MEMSTAT_THP=1)
+      build="${build%-acct}"
+      env+=(--env "ASMALLOC_MEMSTAT=$file.memstat" --env ASMALLOC_MEMSTAT_MS=0 --env ASMALLOC_MEMSTAT_CPU=15 --env ASMALLOC_MEMSTAT_THP=1)
       extra=("account_every=$every") ;;
   esac
   echo "$(date -Is) $job $name"

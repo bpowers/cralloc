@@ -10,7 +10,9 @@ product code:
 With `TG_REFRESH=off` in the environment the back end reports no raise, so the refresh stays at
 one retiring magazine in 32, the rule as it was; `TG_REFRESH=4` reports the most, one in 4
 always (the constant `r4`); anything else, or unset, is the rule. The environment is read once,
-from the `envp` the C library passes to `.init_array` functions, before `main`.
+from the `envp` the C library passes to `.init_array` functions, before `main`. Apply after
+large-heap-constants/diag_edit.py: the rule's raise goes into its counters (slot 1000 the raise
+now, 1001 + r how many laps or due passes left it at r).
 """
 import sys
 from pathlib import Path
@@ -26,6 +28,14 @@ s = s.replace(old, old + """        match TG_REFRESH.load(Relaxed) {
             2 => return super::policy::REFRESH_RAISE_MAX,
             _ => {}
         }
+""")
+# The raise in the diagnostic counters (diag_edit.py, applied first): slot 1000 the raise now,
+# 1001 + r the laps that left it at r.
+old = "        if next != now {\n            word.store(next, Relaxed);\n        }\n"
+if s.count(old) != 1:
+    sys.exit("refresh_switch: step_refresh not found once")
+s = s.replace(old, old + """        crate::diag::set(1000, next as usize);
+        crate::diag::add(1001 + next as usize, 1);
 """)
 s += r'''
 
