@@ -67,10 +67,12 @@ def qdrant_cycle(r, k):
             phases.append({"kind": "closed", "file": "search.http", "conns": r.choice([2, 4, 8]),
                            "secs": secs})
         elif kind == "insert":
-            phases.append({"kind": "insert", "file": "insert.http", "rate": r.choice([10, 20, 40]),
+            phases.append({"kind": "insert", "file": "insert.http", "rate": r.choice([5, 10, 20]),
                            "conns": r.choice([2, 4, 8]), "secs": secs})
         else:
-            phases.append({"kind": kind, "file": f"{kind}.http", "rate": r.choice([50, 100, 200, 300]),
+            # Rates the server keeps up with on the shared cores, beside the reference run: a
+            # backlog left at the end of a phase counts as errors.
+            phases.append({"kind": kind, "file": f"{kind}.http", "rate": r.choice([50, 100, 150, 200]),
                            "conns": conns, "secs": secs})
     # What was inserted goes again in the same cycle, so the collection keeps its size.
     if any(p["kind"] == "insert" for p in phases):
@@ -95,13 +97,13 @@ def connect_cycle(r, k):
         secs = r.choice([60, 120, 180])
         if r.random() < 0.5:
             # The store's own mix over HTTP/1.1: ingest 50 records, tail 100.
-            phases.append({"kind": "store", "file": "store.http", "rate": r.choice([2000, 5000, 10000, 20000]),
+            phases.append({"kind": "store", "file": "store.http", "rate": r.choice([1000, 2000, 4000, 6000]),
                            "conns": r.choice([4, 16, 64, 128]), "secs": secs})
         else:
             # Ingest over HTTP/2, batches of 5, 50 or 500 records.
             records = r.choice([5, 50, 500])
             phases.append({"kind": "ingest-h2", "body": f"log{records}.bin", "records": records,
-                           "rate": r.choice([500, 2000, 5000]) * 50 // records or 100,
+                           "rate": min(8000, r.choice([200, 1000, 3000]) * 50 // records),
                            "conns": r.choice([1, 2, 8, 16]), "streams": r.choice([1, 8, 32]),
                            "secs": secs})
     return phases
@@ -326,7 +328,7 @@ def http(addr, method, path, body=None):
 
 
 def loadgen(addr, phase, inputs):
-    args = [LOADGEN, "--addr", addr, "--conns", str(phase["conns"]), "--threads", "2",
+    args = [LOADGEN, "--addr", addr, "--conns", str(phase["conns"]), "--threads", str(min(2, phase["conns"])),
             "--drain-s", "120", "--label", phase["kind"]]
     secs = phase["secs"]
     # Every connection sends one request first: a server closes a connection that has sent
@@ -362,6 +364,8 @@ def main():
     ap.add_argument("--hours", type=float, required=True)
     ap.add_argument("--seed", type=int, default=1)
     ap.add_argument("--ref")
+    ap.add_argument("--reference", action="store_true",
+                    help="this run is the reference (jemalloc's): it stops only if its server dies")
     ap.add_argument("--memstat", help="the ASMALLOC_MEMSTAT path the server writes to (.<pid> added)")
     ap.add_argument("--inputs", required=True)
     ap.add_argument("--scale", type=float, default=1, help="divide every length by this (a trial run)")
@@ -447,7 +451,7 @@ def main():
                    **{f"peak_{key}": v for key, v in peaks.items()}}
             phases_out.write(json.dumps(rec) + "\n")
             phases_out.flush()
-            f = check(a.out, a.ref, a.memstat)
+            f = None if a.reference else check(a.out, a.ref, a.memstat)
             if f:
                 finding(f)
         if not alive():
@@ -470,10 +474,17 @@ def main():
             rec["memstat"] = memstat_last(a.memstat, pid)
         quiet_out.write(json.dumps(rec) + "\n")
         quiet_out.flush()
-        f = check(a.out, a.ref, a.memstat)
+        f = None if a.reference else check(a.out, a.ref, a.memstat)
         if f:
             finding(f)
     event(what="end")
+    if a.kind == "qdrant":
+        # Every point the soak inserted goes before the driver counts the collection, and the
+        # scratch collection with them if a finding stopped a cycle short.
+        http(addr, "DELETE", "/collections/scratch")
+        loadgen(addr, {"kind": "delete", "file": "delete.http", "rate": 50, "conns": 4, "secs": 20},
+                a.inputs)
+        time.sleep(60)
     # SIGTERM to the server's driver (the process that printed BENCH_LISTEN for Qdrant, the
     # server itself for connect), which stops it cleanly; the wrappers then exit.
     target = pid if a.kind == "connect" else next(
