@@ -17,6 +17,17 @@ use std::vec::Vec;
 
 type TestRig = Rig<SimOs<Small>, 2>;
 
+/// A slab for every simulated CPU, for the tests of many domains: 64 natively, 8 under Miri
+/// (`SIM_THREADS`). Those tests take their widths and domain counts from it and from
+/// `MAX_DOMAINS`, which are 64 and 64 natively, so natively they are what they always were.
+const CPUS: usize = crate::os::sim::SIM_THREADS;
+type WideRig = Rig<SimOs<Small>, CPUS>;
+
+/// How many domains `domains(width, ..)` makes: one for each `width` CPUs, folded.
+fn domain_count(width: u32) -> usize {
+    (CPUS / width as usize).clamp(1, super::MAX_DOMAINS)
+}
+
 /// Limits that keep each rule's effect apart from the others': room for one spare per stack,
 /// a depot target no test reaches, looks at the allocator's rate (a test that states how soon
 /// something happens must not look more often than the allocator does), and no rule on.
@@ -595,8 +606,8 @@ fn quiet_domains_emptied(width: u32, shed_unused: bool) -> (Option<u64>, Option<
         ..QUIET
     };
     let objects = 512;
-    let rig: Rig<SimOs<Small>, 64> = domains(width, &[a, b, busy], objects, tuning);
-    let count = crate::os::sim::SIM_THREADS / width as usize;
+    let rig: WideRig = domains(width, &[a, b, busy], objects, tuning);
+    let count = domain_count(width);
     for d in 1..count {
         let cpu = (d * width as usize) as i32;
         free_into_depot(&rig, cpu, a, 5);
@@ -643,13 +654,13 @@ fn quiet_domains_emptied(width: u32, shed_unused: bool) -> (Option<u64>, Option<
 /// domains.
 #[test]
 fn a_quiet_domain_gives_its_stacks_back_with_2_8_and_64_domains() {
-    for width in [32, 8, 1] {
+    for width in [CPUS as u32 / 2, CPUS as u32 / 8, 1] {
         let (stacks, all) = quiet_domains_emptied(width, true);
         let stacks = stacks.expect("the quiet domains' stacks are emptied");
         let all = all.expect("everything goes back");
         std::eprintln!(
             "{} domains: stacks empty after {:.3} intervals, all back after {:.3}",
-            crate::os::sim::SIM_THREADS / width as usize,
+            domain_count(width),
             stacks as f64 / IDLE_TICKS as f64,
             all as f64 / IDLE_TICKS as f64
         );
@@ -770,8 +781,9 @@ fn a_flow_between_two_domains_is_not_stopped_by_others() {
         domain_cap: target / 2 * class.size(),
         ..QUIET
     };
-    for others in [0, 1, 62] {
-        let rig: Rig<SimOs<Small>, 64> = domains(1, &[class], 1024, tuning);
+    // Every domain but the two of the flow.
+    for others in [0, 1, super::MAX_DOMAINS as i32 - 2] {
+        let rig: WideRig = domains(1, &[class], 1024, tuning);
         for n in 0..others {
             free_into_depot(&rig, 2 + n, class, 4);
         }
@@ -861,12 +873,15 @@ fn a_forked_child_reaches_every_stack_the_parent_filled() {
     };
     for collect in [false, true] {
         let objects = 256;
-        let rig: Rig<SimOs<Small>, 64> = domains(8, &[idle, busy], objects, tuning);
-        let pools: Vec<Pool> = (0..8).map(domain).chain([Pool::Shared]).collect();
+        // Eight domains, or as many as there are.
+        let count = 8.min(super::MAX_DOMAINS);
+        let width = CPUS / count;
+        let rig: WideRig = domains(width as u32, &[idle, busy], objects, tuning);
+        let pools: Vec<Pool> = (0..count).map(domain).chain([Pool::Shared]).collect();
         // Not from CPU 0, where the child runs with the age limit off: its slab would keep a
         // loaded magazine of the class.
-        for d in 0..8 {
-            free_into_depot(&rig, d * 8 + 1, idle, 7);
+        for d in 0..count {
+            free_into_depot(&rig, (d * width + 1) as i32, idle, 7);
         }
         assert!(
             pools.iter().all(|&pool| in_pool(&rig, pool, idle) > 0),
@@ -929,11 +944,11 @@ fn quiet_stacks_left(
     };
     let mut all = classes.clone();
     all.push(busy);
-    let rig: Rig<SimOs<Small>, 64> = domains(width, &all, 512, tuning);
+    let rig: WideRig = domains(width, &all, 512, tuning);
     let zero = SimCpu::new(0);
     let cache = rig.cache(&zero);
     churn(&cache, busy, 3);
-    let count = crate::os::sim::SIM_THREADS / width as usize;
+    let count = domain_count(width);
     assert_eq!(rig.depot.domain_count(), count);
     for d in 1..count {
         for &class in &classes {
@@ -983,7 +998,8 @@ fn cpu0<const N: usize>(rig: &Rig<SimOs<Small>, N>) -> Cpu {
 
 fn stock_review_quiet_domains_go_back_at_the_allocators_look_rate() {
     let mut slowest = 0;
-    for (width, held) in [(32, 2), (8, 2), (8, 5), (1, 2), (1, 5)] {
+    let (half, eighth) = (CPUS as u32 / 2, CPUS as u32 / 8);
+    for (width, held) in [(half, 2), (eighth, 2), (eighth, 5), (1, 2), (1, 5)] {
         for look_every in [1, super::LOOK_EVERY] {
             let (left, slow_paths) = quiet_stacks_left(width, held, look_every, 24);
             let emptied = left
@@ -993,8 +1009,8 @@ fn stock_review_quiet_domains_go_back_at_the_allocators_look_rate() {
             std::eprintln!(
                 "{} domains, {held} classes each, a look every {look_every}: {} stacks, \
                  empty after {emptied} intervals ({} slow paths an interval)",
-                crate::os::sim::SIM_THREADS / width as usize,
-                (crate::os::sim::SIM_THREADS / width as usize - 1) * held,
+                domain_count(width),
+                (domain_count(width) - 1) * held,
                 slow_paths / 24,
             );
             slowest = slowest.max(emptied);
