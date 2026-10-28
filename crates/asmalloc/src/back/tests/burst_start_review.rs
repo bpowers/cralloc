@@ -281,14 +281,16 @@ fn the_passes_stop_at_the_floor_and_trim_goes_below_it() {
 /// short runs, so every run the walk meets from then on is cut to under
 /// `PURGE_MIN_RUN_PAGES`, counted as a short run and stepped over: the pass walks the rest of
 /// its lap past long free runs, purging nothing, and ends only when it has gone round.
+///
+/// A pass's goal is everything the last lap counted (`policy::decay_goal`), so its remaining
+/// goal is short of a long run when the count is short of what is free now: memory freed after
+/// the lap counted. The test sets the count so.
 #[test]
 fn a_pass_a_few_pages_short_of_its_goal_does_not_step_over_long_runs() {
-    use super::super::policy::decay_goal;
     use crate::classes::MagazineSize;
     use crate::os::sim::Shape;
     use crate::space::Geometry;
-    /// As in `the_tail_of_a_run_the_cap_cut_goes_with_it`: a small-page part of 256 pages and
-    /// a pass's goal of at least a huge page, 128 pages.
+    /// As in `the_tail_of_a_run_the_cap_cut_goes_with_it`: a small-page part of 256 pages.
     enum Wide {}
     impl Shape for Wide {
         const GEOMETRY: Geometry = Geometry::new(12, 19, 22, 19, 256, 1, MagazineSize::MAX);
@@ -318,8 +320,10 @@ fn a_pass_a_few_pages_short_of_its_goal_does_not_step_over_long_runs() {
     forget_reuse(&back);
     let retained = back.retained();
     assert_eq!(retained, (upper + lower) * page);
-    let goal = decay_goal(Wide::GEOMETRY, retained);
-    assert_eq!(goal, (upper + 2) * page);
+    // A lap that counted the upper run and two pages more, and nothing purged since.
+    let goal = (upper + 2) * page;
+    state.walk.returnable.store(goal, Relaxed);
+    state.walk.returned.store(0, Relaxed);
     os.advance_clock(DECAY_TICKS);
     beat(&back);
     assert!(!pass_under_way(&state));

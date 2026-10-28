@@ -1551,9 +1551,11 @@ fn a_refused_split_is_tried_again_at_the_next_lap_in_a_silence() {
     let back = state.get_or_reserve().unwrap();
     let os = state.os();
     let (_, _) = stranded(&back);
+    // Refused from the start: a pass takes everything returnable, so a split the kernel took
+    // here would leave none for the silence to try.
+    os.set_faults(Call::SplitHuge, Faults::ALWAYS);
     age_and_beat(&back, 1);
     forget_reuse(&back);
-    os.set_faults(Call::SplitHuge, Faults::ALWAYS);
     let epoch = back.epoch();
     let splits = os.calls(Call::SplitHuge);
     for _ in 0..24 {
