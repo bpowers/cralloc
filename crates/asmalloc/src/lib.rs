@@ -134,6 +134,7 @@ pub mod c;
 #[doc(hidden)]
 pub mod front;
 
+mod cells;
 #[cfg(feature = "internals")]
 #[doc(hidden)]
 pub mod clock;

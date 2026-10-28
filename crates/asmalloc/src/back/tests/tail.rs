@@ -67,7 +67,7 @@ fn stranded_keeping<'a>(
 /// The tail word of the region holding `at`.
 fn word_at<'a>(back: &Back<'a, Sim>, at: *mut u8) -> Tail {
     let (region, _) = region_of(back, at);
-    Tail::unpack(back.state.tails[region.index()].load())
+    Tail::unpack(back.state.tails.get(region.index()).load())
 }
 
 fn region_of<'a>(back: &Back<'a, Sim>, at: *mut u8) -> (crate::space::RegionId, usize) {
@@ -148,7 +148,7 @@ fn a_refused_split_returns_nothing_in_part() {
         memory(os).1
     );
     for index in 0..back.walk_regions() {
-        assert_eq!(Tail::unpack(back.state.tails[index].load()).from, 0);
+        assert_eq!(Tail::unpack(back.state.tails.get(index).load()).from, 0);
     }
 }
 
@@ -308,7 +308,7 @@ fn below_the_frontier_nothing_changes() {
     assert_eq!(os.calls(Call::SplitHuge), 0);
     let _ = advised;
     for index in 0..back.walk_regions() {
-        let tail = Tail::unpack(back.state.tails[index].load());
+        let tail = Tail::unpack(back.state.tails.get(index).load());
         assert_eq!(tail.from, 0, "region {index} lowered under its frontier");
     }
 }
@@ -464,7 +464,7 @@ fn a_refused_purge_changes_nothing() {
     // Nothing went back, so nothing was counted out (a top-up may count in).
     assert!(back.retained() >= retained);
     for index in 0..back.walk_regions() {
-        assert_eq!(Tail::unpack(back.state.tails[index].load()).from, 0);
+        assert_eq!(Tail::unpack(back.state.tails.get(index).load()).from, 0);
     }
     let _ = kept;
 }
@@ -540,9 +540,12 @@ fn a_fork_child_distrusts_every_tail() {
     let (kept, _) = stranded(&back);
     age_and_beat(&back, 12);
     let (region, _) = region_of(&back, kept[kept.len() - 1]);
-    assert_ne!(back.state.tails[region.index()].load(), 0);
+    assert_ne!(back.state.tails.get(region.index()).load(), 0);
     back.distrust_tails();
-    for (index, word) in back.state.tails.iter().enumerate() {
+    for (index, word) in (0..crate::space::MAX_REGIONS)
+        .map(|index| back.state.tails.get(index))
+        .enumerate()
+    {
         let tail = Tail::unpack(word.load());
         if word.load() != 0 {
             assert!(tail.repair, "region {index}");
@@ -870,7 +873,7 @@ fn the_thread_is_woken_for_a_mark_and_not_for_a_refused_raise() {
     os.set_faults(Call::AdviseHuge, Faults::ALWAYS);
     let _ = back.thread_purge_steps(&|| back.now());
     let marked =
-        (0..back.walk_regions()).any(|index| Tail::unpack(back.state.tails[index].load()).want);
+        (0..back.walk_regions()).any(|index| Tail::unpack(back.state.tails.get(index).load()).want);
     assert!(marked, "a refused raise dropped the mark");
     assert!(
         !back.purge_due(&|| back.now()),
@@ -882,7 +885,7 @@ fn the_thread_is_woken_for_a_mark_and_not_for_a_refused_raise() {
     assert!(
         back.purge_due(&|| back.now())
             || !(0..back.walk_regions())
-                .any(|index| Tail::unpack(back.state.tails[index].load()).want),
+                .any(|index| Tail::unpack(back.state.tails.get(index).load()).want),
         "the mark was forgotten after the interval"
     );
     let _ = kept;
@@ -910,7 +913,7 @@ fn a_fork_child_repairs_its_tails_at_its_first_slow_path() {
         stamp: back.epoch() as u32,
         ..Tail::default()
     };
-    back.state.tails[0].store(stuck.pack());
+    back.state.tails.get(0).store(stuck.pack());
     back.state.marks.fetch_and(0);
     // SAFETY: nothing else runs.
     unsafe { heap.os().wipe_for_fork() };
@@ -920,13 +923,13 @@ fn a_fork_child_repairs_its_tails_at_its_first_slow_path() {
         let p = unsafe { heap.alloc(layout) };
         assert!(!p.is_null());
         held.push(p);
-        if Tail::unpack(back.state.tails[0].load()).repair {
+        if Tail::unpack(back.state.tails.get(0).load()).repair {
             break;
         }
         // The child's first draw, if no slow path has made it yet.
         let _ = heap.drain(0);
     }
-    let word = Tail::unpack(back.state.tails[0].load());
+    let word = Tail::unpack(back.state.tails.get(0).load());
     assert!(word.repair && !word.busy && word.want, "{word:?}");
     assert_ne!(back.state.marks.load(), 0);
     // SAFETY: as above.
@@ -1279,7 +1282,7 @@ fn a_heartbeat_that_raises_one_region_leaves_the_others_flagged() {
     back.state.marks.fetch_or(1);
     back.heartbeat();
     let left = (0..back.walk_regions())
-        .filter(|&index| Tail::unpack(back.state.tails[index].load()).want)
+        .filter(|&index| Tail::unpack(back.state.tails.get(index).load()).want)
         .count();
     assert_eq!(left, marked - 1);
     assert_ne!(

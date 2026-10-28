@@ -116,7 +116,7 @@ fn check(state: &State<Sim<Native>>, held: &[Held], round: u64) -> usize {
     let mut tagged = 0;
     for region in plan.regions() {
         let at = region.index();
-        let small_header = &back.state.headers[at];
+        let small_header = back.state.headers.get(at);
         match back.tag(region) {
             RegionTag::Unassigned => {
                 assert!(!handed.contains_key(&at));

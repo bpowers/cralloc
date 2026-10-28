@@ -311,7 +311,7 @@ fn a_look_leaves_a_small_class_region_alone() {
     let class = small(4096);
     let objects = fill(&back, class, 64);
     let region = back.space().locate(objects[0]).unwrap().region.index();
-    let header = &back.state.headers[region];
+    let header = back.state.headers.get(region);
     let before = (header.grow.load(), header.hints.load());
     let large_class = large(256 << 10);
     let (_blocks, top) = free_twice_the_floor(&back, os, large_class);
