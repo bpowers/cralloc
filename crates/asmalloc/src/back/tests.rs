@@ -435,7 +435,7 @@ fn regions_are_assigned_as_a_class_grows() {
     assert_eq!(regions.len(), 3);
     for &r in &regions {
         let region = back.space().plan().region(r).unwrap();
-        assert_eq!(back.table().get(region), RegionTag::Class(class.class()));
+        assert_eq!(back.tag(region), RegionTag::Class(class.class()));
     }
     // A region after the first is advised for huge pages from the start.
     let last = back.space().region(
@@ -752,7 +752,7 @@ fn runs_hold_objects_bigger_than_a_region() {
         back.free_by_address(p);
     }
     for r in back.space().plan().regions() {
-        assert_eq!(back.table().get(r), RegionTag::Unassigned);
+        assert_eq!(back.tag(r), RegionTag::Unassigned);
     }
 }
 
@@ -1035,7 +1035,7 @@ fn a_pass_resumes_where_the_walk_stands() {
 /// below which the clocked pass spares free pages.
 fn floor_at<O: Os>(back: &Back<'_, O>, p: *mut u8) -> u32 {
     let location = back.space().locate(p).unwrap();
-    let RegionTag::Class(class) = back.table().get(location.region) else {
+    let RegionTag::Class(class) = back.tag(location.region) else {
         panic!("not a class region");
     };
     let host = back.host(class).unwrap();
@@ -4389,17 +4389,14 @@ mod review_headers {
             let host = back.host(class).unwrap();
             let (start, end) = host.layout().fixed_commit();
             assert!(host.commit_meta(region, start, end - start));
-            state
-                .table
-                .replace(region, RegionTag::Unassigned, RegionTag::Class(class))
-                .unwrap();
+            assert!(state.tags.take(region, RegionTag::Class(class)));
             let carving = host
                 .class
                 .carving
                 .load(core::sync::atomic::Ordering::SeqCst);
             assert_ne!(carving, region.index() as u32 + 1);
         }
-        assert_eq!(state.table.get(region), RegionTag::Class(class));
+        assert_eq!(state.tags.tag(region), RegionTag::Class(class));
         let host = back.host(class).unwrap();
         assert_eq!(
             (host.grow(region).load(), host.hints(region).load()),
@@ -4427,7 +4424,14 @@ mod review_headers {
             let mut seen = Seen::default();
             back.inspect(&mut seen);
             let origin = back.space().plan().slot_origin(class);
-            assert_eq!(seen.regions, [(class, origin, 0)]);
+            // A large class's region here is tagged and not yet named, so not published, and
+            // the inspection, a walk, does not see it (`tags`).
+            let want: &[(Class, usize, usize)] = if class.is_small() {
+                &[(class, origin, 0)]
+            } else {
+                &[]
+            };
+            assert_eq!(seen.regions, want);
             assert_eq!(seen.free, 0);
             // And the region grows from there as if nothing had happened. A large class's
             // region is named by the carving word only once its assignment has stored the
@@ -4509,7 +4513,7 @@ mod review_direct {
         back.space()
             .plan()
             .regions()
-            .filter(|&r| back.table().get(r) == RegionTag::Class(class))
+            .filter(|&r| back.tag(r) == RegionTag::Class(class))
             .map(|r| {
                 let carved = Grow::unpack(host.grow(r).load()).carved;
                 (r, back.space().slot(r, class, 0).as_ptr(), carved)
@@ -5352,7 +5356,7 @@ mod review_direct {
         assert!(back.alloc(class, 1).is_none());
         state.os().set_faults(Call::Commit, Faults::NONE);
         let region = back.space().plan().region(0).unwrap();
-        assert_eq!(back.table().get(region), RegionTag::Class(class));
+        assert_eq!(back.tag(region), RegionTag::Class(class));
         region
     }
 
@@ -5530,3 +5534,6 @@ mod tail_review;
 
 /// The tail word's protocol on a host that records the advice: the review's surviving mutants.
 mod tail_protocol;
+
+/// Evidence for the ledger review of `class.rs`, `host.rs` and `region.rs`.
+mod ledger_review;

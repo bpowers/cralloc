@@ -4,19 +4,46 @@
 numbers into references into the reservation, and forwards purges to `Space`.
 
 **The `ClassHost` invariant.** `layout` is `Layout::new(space.plan().geometry(), class)` for the
-host's class, and every `RegionId` a caller passes is a region the region table tags with that
-class. `Back::host` is the only constructor, and it builds the layout that way. Region ids
-reach a host only from:
+host's class, and every `RegionId` a caller passes is a region this class has named: a carving
+word of the class has held it. Such a region is the class's for good. `Back::host` is the only
+constructor, and it builds the layout that way. Region ids reach a host only from:
 
 - the class's carving word, which holds only a region this class's `assign` took from the table
-  with a compare-and-swap from `Unassigned` to `Class(class)`;
+  with a compare-and-swap from `Unassigned` to `Class(class)` and then named with its swing;
 - the class's summary tree (`tree::child` of a class word), whose bits are set only by the walk
   up from a leaf word of one of the class's regions;
-- `Plan::locate` of a pointer whose table tag `validate` or `purgeable` has just checked is this
-  class.
+- `Tags::at` of where a pointer into the region falls, whose table tag `validate`, the batch
+  checker or the free by address has just checked is this class: a pointer into a region
+  exists only once a class has named it and carved from it, so its tag is the naming class's;
+- the published tag (`Tags::published`), which every walk that finds regions by their number
+  reads (`Back::purgeable`, `Back::hold_region` and the hold's plan, `Back::lower_walked`,
+  `Back::raise_marked`, `Back::inspect`). Only the thread whose carving swing named the region
+  writes it, after the swing, and only with that class (`Back::assign`). The one other writer
+  is a fork child's repair (`Back::publish_named`), whose read of the table may be stale, since
+  threads of the child may run beside it: it publishes `class` only if the class's carving word
+  names the region (only a won swing of the class puts it there), or if the region has been
+  carved from and the table, read again after that, still says `class`. A nonzero `carved` read
+  through `class`'s host means some class has carved from the region, whichever host it was
+  read through: two small classes share the region's header, which only carves write; a large
+  class's header is the block's first word, which a large class's loser writes with nothing
+  carved and its carves after, and where a small class's top summary word sits, nonzero only
+  once one of its slots, so one carved, is released. A region carved from was named and keeps
+  its tag for good, so the second read gives the carver (`tla/Assign.tla`: `Assign_repair`,
+  without the second read, publishes the wrong class; `Assign_repair_recheck` holds;
+  `back::tests::ledger_review` plays it against the code). The byte is written once (a
+  compare-and-swap from zero) and never cleared.
 
-A class never gives a region up. The only tag change away from `Class(class)` is `assign`
-reverting a region it took but did not publish, which no other thread has named.
+A class never gives a named region up: the only tag change away from `Class(class)` is
+`assign` giving back a region it took and did not name, after its swing lost. Such a region
+was never published, so no walk has it; a pointer into it was never handed out. The tags
+cannot be reached any other way: `back::tags` keeps the table and the published bytes private
+and offers a class for a region number only through the published byte (`tla/Assign.tla`
+checks the protocol, and `Assign_table` shows a walk that read the table instead acting on a
+region another class or a run then had).
+
+The reviewed finding at d36e0cb (the walks read the table, and could act on a region given
+back with the wrong class's layout, `back::tests::ledger_review`) is closed by the published
+tag, and the finding of the review of cb9dccf (the repair's stale read) by its second read.
 
 ## BACK-HOST-01: `&*at` in `ClassHost::meta`
 
@@ -44,7 +71,7 @@ that conflicts with a shared reference.
    page of a slot below the watermark) or from a summary bit that a walk from such a word set
    (summary and leaf words reached in a descent). `Space::metadata(region)` is the region's
    block, `metadata_size` bytes inside the reservation (`space::verify`,
-   `plans_keep_objects_metadata_and_magazines_apart`). `Space::metadata_at` checks the region
+   `plans_keep_their_parts_apart`). `Space::metadata_at` checks the region
    against the plan, as `Space::metadata` does, and adds the region's offset
    (`region << metadata_shift`) and then `offset` to the first block's address, which
    `Space::new` works out once from the plan (`Plan::metadata_start`, the same sum
@@ -60,9 +87,9 @@ that conflicts with a shared reference.
    - The fixed part is committed by `assign` before its compare-and-swap puts this class's
      tag on the region: for a small class from the block's start to the start of the leaf
      bitmap, which comes last; for a large class the whole block, header and leaf bitmap
-     included (`Layout::fixed_commit`, proved in `layouts_fit`). So any thread that learns the region through the table, the carving word or
-     the summary tree finds it committed: the OS has finished the commit before that thread's
-     acquire of the tag or word, and commit is never undone.
+     included (`Layout::fixed_commit`, proved in `layouts_fit`). So any thread that learns the region through the table, the published tag, the
+     carving word or the summary tree finds it committed: the OS has finished the commit before
+     that thread's acquire of the tag, byte or word, and commit is never undone.
    - A leaf word is touched only for a slot below the watermark, or in a descent through set
      summary bits. A carve commits the leaf words of every slot starting below the new commit
      frontier (`Layout::leaf_commit`, proved in `leaf_commits_cover_the_committed_slots`) before
@@ -151,4 +178,4 @@ fit the block (`layouts_fit_*`) and the leaf commit covers the carved slots
 (`leaf_commits_cover_the_committed_slots`); a Kani run of the protocols on a heap does not fit
 the memory cap, so the access paths are tested, not proved.
 
-Reviewed: 415b07e
+Reviewed: d38075c

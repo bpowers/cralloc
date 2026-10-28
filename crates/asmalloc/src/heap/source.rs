@@ -79,5 +79,6 @@ impl<O: Os> Source for Back<'_, O> {
 
     fn forked(&self) {
         self.distrust_tails();
+        self.publish_named();
     }
 }

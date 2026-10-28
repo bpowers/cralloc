@@ -476,7 +476,7 @@ fn a_raise_stops_at_the_frontier_and_the_headroom() {
         |region: RegionId| layout.carved_pages(Grow::unpack(host.grow(region).load()).carved);
     let region = (0..back.walk_regions())
         .filter_map(|index| plan.region(index))
-        .filter(|&region| back.state.table.get(region) == RegionTag::Class(class().class()))
+        .filter(|&region| back.tag(region) == RegionTag::Class(class().class()))
         .max_by_key(|&region| carved(region))
         .unwrap();
     let top = carved(region);

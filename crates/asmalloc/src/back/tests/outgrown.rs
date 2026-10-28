@@ -40,7 +40,7 @@ fn outgrow<O: Os>(
 /// The slot `ptr` starts, with its class's host.
 fn slot_of<'a, O: Os>(back: &Back<'a, O>, ptr: NonNull<u8>) -> (ClassHost<'a, O>, RegionId, u32) {
     let location = back.space().locate(ptr.as_ptr()).unwrap();
-    let RegionTag::Class(class) = back.table().get(location.region) else {
+    let RegionTag::Class(class) = back.tag(location.region) else {
         panic!("not a class region");
     };
     let host = back.host(class).unwrap();

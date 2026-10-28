@@ -959,7 +959,7 @@ fn a_raise_past_the_watermark_goes_to_the_end() {
     };
     let region = (0..back.walk_regions())
         .filter_map(|index| plan.region(index))
-        .filter(|&region| back.state.table.get(region) == RegionTag::Class(class().class()))
+        .filter(|&region| back.tag(region) == RegionTag::Class(class().class()))
         .max_by_key(|&region| carved(region))
         .unwrap();
     let from = Hints::unpack(host.hints(region).load()).huge_from.unwrap();
@@ -1268,7 +1268,7 @@ fn a_heartbeat_that_raises_one_region_leaves_the_others_flagged() {
     let mut marked = 0;
     for index in 0..back.walk_regions() {
         let region = back.space().plan().region(index).unwrap();
-        if back.state.table.get(region) == RegionTag::Class(class().class())
+        if back.tag(region) == RegionTag::Class(class().class())
             && Tail::unpack(host.tail(region).load()).from != 0
             && tail::mark(&host, region, host.layout().region_pages())
         {

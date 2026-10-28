@@ -52,6 +52,7 @@ pub mod policy;
 mod purge;
 mod region;
 mod run;
+mod tags;
 mod tail;
 mod tree;
 mod word;
@@ -73,7 +74,7 @@ use self::host::{ClassHost, ClassState, Frontiers, Headers, RegionHeader, Tails}
 use crate::classes::{COUNT, Class};
 use crate::lined::{LINE, Lined};
 use crate::os::{Os, OsError};
-use crate::space::{MAX_REGIONS, RegionTable, Space, SpaceCell};
+use crate::space::{MAX_REGIONS, Space, SpaceCell};
 use core::fmt;
 use core::ptr::NonNull;
 use core::sync::atomic::Ordering::SeqCst;
@@ -92,7 +93,8 @@ use core::sync::atomic::{AtomicU32, AtomicU64, AtomicUsize};
 /// share lines among regions (`host::Headers`, `host::Frontiers`).
 pub struct State<O: Os> {
     cell: Lined<SpaceCell<O>>,
-    table: Lined<RegionTable>,
+    /// The region table, and the published tags the walks read (`tags`).
+    tags: tags::Tags,
     classes: [ClassState; COUNT],
     /// Bytes of free slots in the bitmaps believed to be resident (`purge`).
     retained: Retained,
@@ -288,7 +290,8 @@ const _: () = {
     use crate::lined::lines;
     use core::mem::size_of;
     let groups = lines(size_of::<SpaceCell<crate::os::linux::LinuxOs>>())
-        + lines(size_of::<RegionTable>())
+        + lines(size_of::<crate::space::RegionTable>())
+        + lines(size_of::<[u8; MAX_REGIONS]>())
         + 7
         + lines(size_of::<[AtomicUsize; MAX_REGIONS]>())
         + lines(size_of::<[[u64; 2]; MAX_REGIONS]>())
@@ -307,7 +310,7 @@ impl<O: Os> State<O> {
     pub const fn new(os: O) -> State<O> {
         State {
             cell: Lined::new(SpaceCell::new(os)),
-            table: Lined::new(RegionTable::new()),
+            tags: tags::Tags::new(),
             classes: [const { ClassState::new() }; COUNT],
             retained: Retained {
                 added: Lined::new(Tally::new()),
@@ -458,10 +461,10 @@ impl<'a, O: Os> Back<'a, O> {
         self.state.thread()
     }
 
-    /// The class-of-region table.
-    #[inline(always)]
-    pub fn table(&self) -> &'a RegionTable {
-        &self.state.table
+    /// The table's tag for a region, for tests.
+    #[cfg(test)]
+    pub(crate) fn tag(&self, region: crate::space::RegionId) -> crate::space::RegionTag {
+        self.state.tags.tag(region)
     }
 
     /// The protocols' view of one class, if a slot of it fits in a region.

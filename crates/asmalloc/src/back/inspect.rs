@@ -11,7 +11,7 @@ use super::tree::Host;
 use super::word::{BITS, Word};
 use crate::classes::Class;
 use crate::os::Os;
-use crate::space::{RegionId, RegionTag};
+use crate::space::RegionId;
 use crate::stats::{Region, Visitor};
 
 impl<O: Os> Back<'_, O> {
@@ -20,14 +20,12 @@ impl<O: Os> Back<'_, O> {
         visitor.retained(self.retained());
         let plan = self.space.plan();
         for region in plan.regions() {
-            match self.state.table.get(region) {
-                RegionTag::Class(class) => self.inspect_region(class, region, visitor),
-                RegionTag::RunHead => {
-                    let base = self.space.region(region).as_ptr().cast_const();
-                    let len = self.run_length(region) << plan.region_shift();
-                    visitor.run(base, len, self.run_size(base));
-                }
-                _ => {}
+            if let Some(class) = self.state.tags.published(region) {
+                self.inspect_region(class, region, visitor);
+            } else if self.state.tags.is_run_head(region) {
+                let base = self.space.region(region).as_ptr().cast_const();
+                let len = self.run_length(region) << plan.region_shift();
+                visitor.run(base, len, self.run_size(base));
             }
         }
     }

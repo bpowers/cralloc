@@ -128,7 +128,7 @@ fn note_growth<S: Shape>(
 /// a block with headroom takes here, since no block asks for more than [`TOP`].
 fn side_by_side<S: Shape>(back: &Back<'_, Sim<S>>) -> bool {
     back.space().plan().regions().any(|region| {
-        let RegionTag::Class(class) = back.table().get(region) else {
+        let RegionTag::Class(class) = back.tag(region) else {
             return false;
         };
         class.size() >= 1 << 20
@@ -167,7 +167,7 @@ fn room_is_clean<S: Shape>(back: &Back<'_, Sim<S>>, live: &[Owned], reach: &mut 
         *most = (*most).max(layout.huge_ceil(end));
     }
     for region in back.space().plan().regions() {
-        let RegionTag::Class(class) = back.table().get(region) else {
+        let RegionTag::Class(class) = back.tag(region) else {
             continue;
         };
         if class.is_small() {
@@ -614,7 +614,7 @@ fn six_hundred_buffers_grown_to_64_kib_leave_room_for_another_class() {
         let back = sim.heap().back().unwrap();
         let regions = back.space().plan().regions();
         regions
-            .filter(|&r| back.table().get(r) != RegionTag::Unassigned)
+            .filter(|&r| back.tag(r) != RegionTag::Unassigned)
             .count()
     };
     for i in 0..600 {
@@ -712,7 +712,7 @@ fn a_refused_commit_of_the_roomiest_slot_leaves_its_region_for_the_next_room() {
     let tagged = || {
         let regions = back.space().plan().regions();
         regions
-            .filter(|&r| back.table().get(r) != RegionTag::Unassigned)
+            .filter(|&r| back.tag(r) != RegionTag::Unassigned)
             .count()
     };
     let slot_of = |ptr: NonNull<u8>| match back.lookup(ptr.as_ptr()) {

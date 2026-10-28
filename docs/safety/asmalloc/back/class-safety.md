@@ -411,8 +411,6 @@ passes its own five arguments unchanged to the same back end. The one argument i
 `observe`, a closure that does nothing, which `move_large_with` calls between pieces; it reads
 and writes no memory, so it cannot touch either range while the move runs.
 
-Reviewed: 415b07e
-
 ## BACK-CLASS-08: `region::purge_part(...)` in `trim_slack`
 
 **Block.** `region::purge_part(host, region, slot, from, len)` in `Back::trim_slack`, the trim
@@ -508,3 +506,4 @@ with purges and advice failing) and the exploration `an_age_walk_races_large_ten
 tenants trim (`TestHost::purge` fails a schedule in which a purger does not hold every slot it
 returns).
 
+Reviewed: d38075c

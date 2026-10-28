@@ -98,3 +98,12 @@ run Tail Tail_lost      violates MarkVisible
 # A thread that read the interval before the current one, against a fresh owner
 # (TailStale.tla, from the review): with a stamp ahead of the reader read as fresh, it holds.
 run TailStale TailStale  ok
+
+# How a class takes a region, and where a walk learns a region's class (Assign.tla): a walk
+# that took it from the table acts on a region a losing assigner gave back.
+run Assign Assign        ok
+run Assign Assign_table  violates NotAnothers
+# A fork child's repair that reads a loser's tag (from the review of the published tag): it
+# publishes the region for the wrong class unless it reads the tag again.
+run Assign Assign_repair          violates Published
+run Assign Assign_repair_recheck  ok

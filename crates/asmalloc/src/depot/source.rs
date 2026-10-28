@@ -70,7 +70,7 @@ pub trait Source {
 
     /// In the child of a fork, at its first slow path: state that a thread the fork cut off
     /// may have left half-changed is to be distrusted (the back end's huge-page tails,
-    /// `back::tail`, "Repair").
+    /// `back::tail`, "Repair"), or finished (a region named and not published, `back::tags`).
     fn forked(&self) {}
 }
 

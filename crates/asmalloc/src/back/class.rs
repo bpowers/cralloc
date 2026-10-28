@@ -560,7 +560,7 @@ impl<'a, O: Os> Back<'a, O> {
         let Some(location) = self.space.locate(object) else {
             self.abort("free of a pointer outside the heap");
         };
-        if self.state.table.get(location.region) != RegionTag::Class(class) {
+        if self.state.tags.at(location) != RegionTag::Class(class) {
             self.abort("free of a pointer with the wrong class");
         }
         let slot = self.slot_in(host, location.region, location.offset as usize);
@@ -1456,7 +1456,7 @@ impl<'a, O: Os> Back<'a, O> {
         let Some(location) = self.space.locate(ptr.as_ptr()) else {
             self.abort("free of a pointer that is not the start of a heap object");
         };
-        match self.state.table.get(location.region) {
+        match self.state.tags.at(location) {
             RegionTag::Class(class) if class.is_small() => self.free(ptr, class),
             RegionTag::Class(class) => {
                 let Some(host) = self.host(class) else {
@@ -1478,7 +1478,7 @@ impl<'a, O: Os> Back<'a, O> {
     #[inline]
     pub fn small_slot(&self, ptr: *const u8) -> Option<SmallClass> {
         let location = self.space.locate(ptr)?;
-        let RegionTag::Class(class) = self.state.table.get(location.region) else {
+        let RegionTag::Class(class) = self.state.tags.at(location) else {
             return None;
         };
         let small = class.small()?;
@@ -1490,7 +1490,7 @@ impl<'a, O: Os> Back<'a, O> {
     /// of regions. One load from the region table, then arithmetic.
     pub fn lookup(&self, ptr: *const u8) -> Option<Kind> {
         let location = self.space.locate(ptr)?;
-        match self.state.table.get(location.region) {
+        match self.state.tags.at(location) {
             RegionTag::Class(class) => {
                 let host = self.host(class)?;
                 let (slot, _) = host.layout().block_at(location.offset as usize)?;
@@ -1551,7 +1551,7 @@ impl<'a, O: Os> Back<'a, O> {
             if host.class.carving.load(SeqCst) != seen {
                 return true;
             }
-            if self.state.table.get(region) != RegionTag::Unassigned {
+            if !self.state.tags.is_unassigned(region) {
                 continue;
             }
             // Commit the fixed metadata before the region can carry this class's tag, so that
@@ -1577,12 +1577,7 @@ impl<'a, O: Os> Back<'a, O> {
                 .walk
                 .top
                 .fetch_max(region.index() as u32 + 1, SeqCst);
-            if self
-                .state
-                .table
-                .replace(region, RegionTag::Unassigned, RegionTag::Class(class))
-                .is_err()
-            {
+            if !self.state.tags.take(region, RegionTag::Class(class)) {
                 continue;
             }
             if let Some(committed) = committed {
@@ -1603,13 +1598,13 @@ impl<'a, O: Os> Back<'a, O> {
                 .compare_exchange(seen, published, SeqCst, SeqCst)
                 .is_ok()
             {
+                // Named: the region is the class's for good, and the walks may now find it.
+                self.state.tags.publish(region, class);
                 return true;
             }
+            // Not named, so not published: no walk has read this tag (`tags`).
             self.unprepare(host, region, huge);
-            let _ =
-                self.state
-                    .table
-                    .replace(region, RegionTag::Class(class), RegionTag::Unassigned);
+            self.state.tags.give_back(region, RegionTag::Class(class));
             return true;
         }
         false
@@ -1737,7 +1732,7 @@ impl<'c, 'a, O: Os> Checker<'c, 'a, O> {
             self.back.abort("free of a pointer outside the heap");
         };
         let region = location.region;
-        if self.back.state.table.get(region) != RegionTag::Class(self.class) {
+        if self.back.state.tags.at(location) != RegionTag::Class(self.class) {
             self.back.abort("free of a pointer with the wrong class");
         }
         let grow = self.host.grow(region);

@@ -96,7 +96,7 @@ fn clean_under<S: Shape>(back: &Back<'_, Sim<S>>, ptr: NonNull<u8>, len: usize) 
 fn census<S: Shape>(back: &Back<'_, Sim<S>>) -> Census {
     let mut census = Census::default();
     for region in back.space().plan().regions() {
-        let RegionTag::Class(class) = back.table().get(region) else {
+        let RegionTag::Class(class) = back.tag(region) else {
             continue;
         };
         if class.is_small() {

@@ -18,7 +18,9 @@
 //!   no region is taken and left;
 //! - a large class's region has its first slot committed;
 //! - an unassigned region is all zero: both header words, where a large class keeps them and
-//!   where a small class does;
+//!   where a small class does; and it is not published (`tags`), as a thread that published
+//!   before its swing and lost would leave it;
+//! - a region that carries a tag is published for that class;
 //! - a small class's region, of which nothing was freed, has an empty summary: the words a
 //!   large class's header would have been.
 
@@ -92,7 +94,7 @@ fn check(state: &State<Sim<Native>>, held: &[Held], round: u64) -> usize {
     for &Held(class, ptr) in held {
         let location = back.space().locate(ptr.as_ptr()).unwrap();
         assert_eq!(
-            back.table().get(location.region),
+            back.tag(location.region),
             RegionTag::Class(class),
             "round {round}: a block of {class:?} in another class's region"
         );
@@ -115,9 +117,15 @@ fn check(state: &State<Sim<Native>>, held: &[Held], round: u64) -> usize {
     for region in plan.regions() {
         let at = region.index();
         let small_header = &back.state.headers[at];
-        match back.table().get(region) {
+        match back.tag(region) {
             RegionTag::Unassigned => {
                 assert!(!handed.contains_key(&at));
+                // A thread that published before its swing and then lost would leave this.
+                assert_eq!(
+                    back.state.tags.published(region),
+                    None,
+                    "round {round}: unassigned region {at} is published"
+                );
                 assert_eq!(
                     (small_header.grow.load(), small_header.hints.load()),
                     (0, 0),
@@ -133,6 +141,13 @@ fn check(state: &State<Sim<Native>>, held: &[Held], round: u64) -> usize {
             }
             RegionTag::Class(class) => {
                 tagged += 1;
+                // At rest every namer has published, and only for its own class: a byte left
+                // by a loser of another class would have kept this namer's out.
+                assert_eq!(
+                    back.state.tags.published(region),
+                    Some(class),
+                    "round {round}: region {at} of {class:?} is published otherwise"
+                );
                 let host = back.host(class).unwrap();
                 let layout = *host.layout();
                 let grow = Grow::unpack(host.grow(region).load());

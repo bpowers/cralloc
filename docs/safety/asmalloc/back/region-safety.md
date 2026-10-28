@@ -1,12 +1,20 @@
 # Safety ledger: `crates/asmalloc/src/back/region.rs`
 
-## BACK-REGION-01: `host.purge(...)` in `purge_unit`
+Every entry here takes the `Host` it is given at its word: its layout is the layout of the
+class the region belongs to. For the heap that is the `ClassHost` invariant in
+`host-safety.md`; a host built for another class's region makes every range and slot number
+below wrong.
+
+## BACK-REGION-01: `host.purge(...)` in `purge_unit_as`
 
 **Preconditions** (`Host::purge`, which for the heap is `Space::purge`). No thread reads or
 writes the range during the call, and nothing in it is needed afterwards.
 
-**The range.** Pages `unit.start..unit.end` of the region: a run of units from
-`Layout::unit_below`, which the walk in `back/purge.rs` (`purge_unit`'s only caller) builds in
+**The range.** Pages `unit.start..unit.end` of the region. `purge_unit` is `purge_unit_as`
+trusting the clean bits and asking for no split; the callers of the two are the walk in
+`back/purge.rs` (`purge_region` and `tail_step`) and the hold's walk (below). The walk's
+range is a run of units from
+`Layout::unit_below`, which it builds in
 `run_below` by starting at one unit and extending it down by the next unit `unit_below` gives
 while that unit ends where the run starts. Every page of the run is then a page of some unit
 `unit_below` returned for the same watermark reading, so the run, like each of its units, lies
@@ -26,6 +34,19 @@ far each piece of evidence reaches:
 - For the design's geometry and sizes that are not powers of two the argument is on paper:
   `unit_below` clamps `end` to `carved_pages(carved)`, which is `floor(carved * size / page)`,
   and only ever moves `end` down from there.
+
+The walk's other ranges are parts of such units, so they lie below the watermark too, and
+`touching` is defined for any range of pages:
+
+- a piece of a unit that is one large slot (`purge::piece` of the unit below its clean top);
+- in `tail_step`, a whole huge page `start..end` with `end` a multiple of the huge page and
+  at most `carved_pages(carved)` (the cursor is capped there), and `start` the huge page's
+  first page or the class's origin page if that is higher;
+- in `tail_step`, a run of units of `unit_below(carved, None, ..)`, the first cut to start no
+  lower than the huge page, the run extended no lower than it.
+
+No range starts below the class's origin page (`unit_below` and `tail_step` both floor there),
+and the origin is a whole number of pages (`Plan::slot_origin`).
 
 The watermark only grows: a carve's compare-and-swap replaces `carved` with a larger value,
 and nothing else writes it. `region::top_up`, which the walk calls to bring the watermark to
@@ -65,10 +86,21 @@ this under interleaving.
    uses a slot after freeing it, which is outside the allocator's contract. The allocator keeps
    no state in object memory (`docs/design.md`, "Metadata never lives in freed memory"), so no
    allocator thread touches it either. Bytes of the range not in any slot do not exist: slots
-   tile the region from offset 0, and the range lies below `carved * size`.
+   tile the region from the class's origin, a page boundary the range does not start below,
+   and the range lies below the origin plus `carved * size`.
 3. *Nothing in it is needed.* Free slots have no contents anyone reads. After the purge, the
-   zero bits are set only for slots wholly inside the range, which now read as zero; slots that
-   straddle its edges keep their zero bits clear.
+   zero bits are set for slots wholly inside the range, which now read as zero. A slot that
+   straddles an edge (the first or the last, both claimed) has its zero bit set only if it is
+   whole pages and every one of them is marked clean. Such a slot reads as zero: a clean bit
+   is set only over a page just returned (a purge, `mark_purged`, `mark_clean` after
+   `purge_part` reported the whole range gone) or never written (`mark_fresh`), each by the
+   holder of the slot, and a holder clears the bits under everything its block may write
+   before it may write it (`settle_slot` at the claim, `cover` at a resize or a grown move;
+   `class-safety.md`, BACK-CLASS-01 and BACK-CLASS-08). Huge-page advice can make a clean
+   page resident again, but with zeros. The bit is written before the release, under the
+   claim. Without a split (`split` false) or with one, and whatever `trust` is, the bits are
+   written only after `host.purge` returned true; `Purge::Clean` and `Purge::Unsplit` write
+   none.
 
 The interleaving explorer checks the claim directly: `TWord` records which thread holds each
 cleared leaf bit, and `TestHost::purge` fails the schedule unless the purging thread holds every
@@ -111,7 +143,8 @@ the call or needs it after, and that the slot is below the watermark. The range 
 of `Layout::slot_unit(slot)`: `ceil(start / page)..floor(end / page)` of the slot's own
 bytes, so every byte of it is inside the slot. With the slot held, no allocation can hand it
 out, no purge walk can claim it, and the program has given it up, so the precondition holds
-for the range. The one caller and why it holds the slot are BACK-CLASS-01 in
+for the range. The two calls, both in a free's `purge_before_release` (the advised slot and
+the block left unwritten), and why the free holds the slot are BACK-CLASS-01 in
 `class-safety.md`, which also says what a double free can do.
 
 `purge_held` declines a slot in a huge-page part (a purge there must be whole huge pages);
@@ -125,7 +158,8 @@ writes the range during the call.
 **Proof.** The call is made in `purge_unit_as` after the loop that claims every slot touching
 the unit (`tree::claim_exact` over `touching(unit)`) has succeeded and before any release: the
 same point and the same range as BACK-REGION-01's purge, whose step 1 shows that this thread
-then holds every slot touching the range. A slot's bytes are written only by its holder, so
+then holds every slot touching the range, and that every byte of the range lies in one of
+them. A slot's bytes are written only by its holder, so
 nothing writes the range while the claims are held. The call reads nothing the allocator relies
 on: on Linux it is `mincore`, and in the simulator it reads the range, which the claims keep
 still. Its answer only decides whether the unit is purged; a wrong answer leaves resident
@@ -144,7 +178,10 @@ nothing in it is needed afterwards.
 **Proof.** `purge_part` is an `unsafe fn` whose caller promises that it holds the slot, that
 nothing uses the range during the call and that nothing in it is needed after. The function
 checks that `from + len` is within the slot's size, so the range is inside the slot the
-caller holds. When the slot is advised for huge pages it may then move the start up and the
+caller holds. It turns the range into pages by rounding both ends down, so a `from` that was
+not a page multiple would take the page below it: every caller passes page multiples (the
+function's documentation asks for them; BACK-CLASS-02, -03, -05 and -08 each say why theirs
+are), and a large slot starts on a page boundary. When the slot is advised for huge pages it may then move the start up and the
 end down to huge-page boundaries inside the slot (`Layout::huge_interior`), and returns
 without a call if nothing is left: the range purged is a subrange of the one the caller gave
 up, so the precondition still holds for it. It returns `true` only when the range it was
@@ -160,4 +197,4 @@ found in the argument: exclusivity under a double free, the huge-page part not c
 cited proof, and no explored test of a carve or a second purger racing a purge. All three are
 addressed above; the same reviewer checked the fixes and accepted them.
 
-Reviewed: ec47910
+Reviewed: d36e0cb
