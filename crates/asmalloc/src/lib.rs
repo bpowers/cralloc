@@ -150,6 +150,8 @@ pub(crate) mod environment;
 mod fresh;
 mod heap;
 mod lined;
+#[cfg(test)]
+mod scale;
 /// The constants of the specification the routines were proved against, as the Lean emitter
 /// writes them, for every target: the layout the Rust side builds from or asserts against.
 #[path = "front/generated/constants.rs"]

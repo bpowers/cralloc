@@ -293,20 +293,27 @@ mod tests {
         }
     }
 
-    /// An environment of megabytes with the entry last, read through the simulated OS in the
-    /// pieces the allocator reads.
+    /// An environment of megabytes (under Miri, of tens of pieces) with the entry last, read
+    /// through the simulated OS in the pieces the allocator reads.
     #[test]
     fn a_huge_environment_is_read_in_pieces() {
-        let mut environment = Vec::new();
-        for i in 0..40_000 {
-            environment.extend_from_slice(std::format!("VARIABLE_{i}=").as_bytes());
-            environment.extend_from_slice(&[b'x'; 64]);
-            environment.push(0);
-        }
-        environment.extend_from_slice(b"ASMALLOC_BACKGROUND=0\0");
-        assert!(environment.len() > 3 << 20);
+        let entries = crate::scale::under_miri(40_000, 400);
+        // Kept in a static, which the simulated OS needs and Miri does not count as leaked.
+        static ENVIRONMENT: std::sync::OnceLock<Vec<u8>> = std::sync::OnceLock::new();
+        let environment = ENVIRONMENT.get_or_init(|| {
+            let mut environment = Vec::new();
+            for i in 0..entries {
+                environment.extend_from_slice(std::format!("VARIABLE_{i}=").as_bytes());
+                environment.extend_from_slice(&[b'x'; 64]);
+                environment.push(0);
+            }
+            environment.extend_from_slice(b"ASMALLOC_BACKGROUND=0\0");
+            environment
+        });
+        assert!(environment.len() > entries * 64);
+        assert!(environment.len() > 50 * PIECE);
         let os = SimOs::<Standard>::new();
-        os.set_environment(Some(environment.leak()));
+        os.set_environment(Some(environment));
         assert_eq!(read(&os), Choice::Off);
     }
 
