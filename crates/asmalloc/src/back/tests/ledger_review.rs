@@ -214,3 +214,59 @@ fn a_fork_child_publishes_the_regions_named_and_not_published() {
     back.publish_named();
     assert_eq!(back.state.tags.published(named), Some(class));
 }
+
+/// The fork child's repair beside a thread of the child's own that loses an assignment (the
+/// review of the published tag, `tla/Assign.tla`, `Assign_repair`): the repair reads the
+/// loser's tag, and by the time it asks whether the region was carved from, another class has
+/// named the region and carved, and its namer has not yet published. Read through the first
+/// class's host, the carve is seen: two small classes share the region's header, and a large
+/// class's header is where a small class's top summary word sits, set once one of its slots
+/// is released. The repair reads the tag again and publishes nothing for the first class.
+#[test]
+#[cfg_attr(miri, ignore)]
+fn the_repair_does_not_publish_a_region_for_a_class_whose_tag_it_read_stale() {
+    let state = state::<Native>();
+    let back = state.get_or_reserve().unwrap();
+    let (first, big) = (small(16), large(64 << 10));
+    let _a = back.alloc(first.class(), first.size()).unwrap().ptr;
+    let _b = back.alloc(big, big.size()).unwrap().ptr;
+    // A second small class for each case, which has no region yet.
+    for (stale, second) in [(first.class(), small(1024)), (big, small(512))] {
+        let region = lose_a_region(&back, stale);
+        // The repair's read of the tag.
+        assert_eq!(back.tag(region), RegionTag::Class(stale));
+        back.state.tags.give_back(region, RegionTag::Class(stale));
+        // The second class names the region and carves; a slot of it is released, which sets
+        // its summary words; its namer has not published yet.
+        let objects: Vec<NonNull<u8>> = (0..4)
+            .map(|_| back.alloc(second.class(), second.size()).unwrap().ptr)
+            .collect();
+        let regions: Vec<usize> = objects
+            .iter()
+            .map(|o| back.space().locate(o.as_ptr()).unwrap().region.index())
+            .collect();
+        assert!(
+            regions.iter().all(|&r| r == region.index()),
+            "{stale:?}: the second class's objects in {regions:?}, not {}",
+            region.index()
+        );
+        back.free(objects[0], second.class());
+        back.state.tags.unpublish(region);
+        // What the first class's host reads there is a carve.
+        let host = back.host(stale).unwrap();
+        assert_ne!(
+            super::super::layout::Grow::unpack(host.grow(region).load()).carved,
+            0,
+            "{stale:?}'s host sees a carve"
+        );
+        back.publish_if_read(region, stale);
+        assert_eq!(
+            back.state.tags.published(region),
+            None,
+            "published for {stale:?}"
+        );
+        // The namer, or the repair reading the tag as it is, publishes the right class.
+        back.publish_named();
+        assert_eq!(back.state.tags.published(region), Some(second.class()));
+    }
+}

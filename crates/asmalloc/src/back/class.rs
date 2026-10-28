@@ -557,10 +557,10 @@ impl<'a, O: Os> Back<'a, O> {
         object: *const u8,
         class: Class,
     ) -> (RegionId, u32) {
-        let Some((location, tag)) = self.tag_at(object) else {
+        let Some(location) = self.space.locate(object) else {
             self.abort("free of a pointer outside the heap");
         };
-        if tag != RegionTag::Class(class) {
+        if self.state.tags.at(location) != RegionTag::Class(class) {
             self.abort("free of a pointer with the wrong class");
         }
         let slot = self.slot_in(host, location.region, location.offset as usize);
@@ -1453,10 +1453,10 @@ impl<'a, O: Os> Back<'a, O> {
     /// The address is located and its slot checked once, here, rather than by a lookup and then
     /// again by the free it chooses.
     pub(crate) fn free_by_address(&self, ptr: NonNull<u8>) {
-        let Some((location, tag)) = self.tag_at(ptr.as_ptr()) else {
+        let Some(location) = self.space.locate(ptr.as_ptr()) else {
             self.abort("free of a pointer that is not the start of a heap object");
         };
-        match tag {
+        match self.state.tags.at(location) {
             RegionTag::Class(class) if class.is_small() => self.free(ptr, class),
             RegionTag::Class(class) => {
                 let Some(host) = self.host(class) else {
@@ -1477,8 +1477,8 @@ impl<'a, O: Os> Back<'a, O> {
     /// class (`slots_in_region`). For C's `realloc`, which takes a block by its address alone.
     #[inline]
     pub fn small_slot(&self, ptr: *const u8) -> Option<SmallClass> {
-        let (location, tag) = self.tag_at(ptr)?;
-        let RegionTag::Class(class) = tag else {
+        let location = self.space.locate(ptr)?;
+        let RegionTag::Class(class) = self.state.tags.at(location) else {
             return None;
         };
         let small = class.small()?;
@@ -1489,8 +1489,8 @@ impl<'a, O: Os> Back<'a, O> {
     /// What `ptr` is the start of, if anything: a slot of a class (handed out or not), or a run
     /// of regions. One load from the region table, then arithmetic.
     pub fn lookup(&self, ptr: *const u8) -> Option<Kind> {
-        let (location, tag) = self.tag_at(ptr)?;
-        match tag {
+        let location = self.space.locate(ptr)?;
+        match self.state.tags.at(location) {
             RegionTag::Class(class) => {
                 let host = self.host(class)?;
                 let (slot, _) = host.layout().block_at(location.offset as usize)?;
@@ -1728,11 +1728,11 @@ impl<'c, 'a, O: Os> Checker<'c, 'a, O> {
     /// The region `object` lies in, checked to be the class's, with its watermark.
     #[inline(never)]
     fn meet(&self, object: *const u8) -> Met {
-        let Some((location, tag)) = self.back.tag_at(object) else {
+        let Some(location) = self.back.space.locate(object) else {
             self.back.abort("free of a pointer outside the heap");
         };
         let region = location.region;
-        if tag != RegionTag::Class(self.class) {
+        if self.back.state.tags.at(location) != RegionTag::Class(self.class) {
             self.back.abort("free of a pointer with the wrong class");
         }
         let grow = self.host.grow(region);

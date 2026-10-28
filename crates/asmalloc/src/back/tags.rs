@@ -18,8 +18,8 @@
 //! moment, which costs nothing they cannot do on their next pass.
 //!
 //! [`Tags`] keeps both bytes private and offers each reader only what it may read: the walks
-//! a region's published class ([`Tags::published`]); a holder of a pointer the table's tag at
-//! that pointer ([`Back::tag_at`]); and the assigners and runs the compare-and-swaps that move
+//! a region's published class ([`Tags::published`]); a holder of a pointer the table's tag
+//! where it falls ([`Tags::at`]); and the assigners and runs the compare-and-swaps that move
 //! regions between unassigned and a tag, and the run tags they follow. No method gives a
 //! class from a region number but the published one.
 //!
@@ -74,6 +74,17 @@ impl Tags {
             Ordering::Release,
             Ordering::Relaxed,
         );
+    }
+
+    /// The table's tag at `location`, which must be where a pointer the caller holds falls
+    /// (`Space::locate`): a pointer the program or this crate got from the region. A region is
+    /// named before anything in it is handed out, so the tag is the region's for good. A caller
+    /// with no such pointer reads [`Tags::published`] instead. (A location, not the pointer:
+    /// the callers have located the pointer already, and returning both from here changed the
+    /// code of `Back::lookup`.)
+    #[inline(always)]
+    pub(super) fn at(&self, location: Location) -> RegionTag {
+        self.table.get(location.region)
     }
 
     /// Whether the table has `region` unassigned: for the assigners and runs, which look for
@@ -145,30 +156,51 @@ impl<O: Os> Back<'_, O> {
             if tags.published(region).is_some() {
                 continue;
             }
-            let RegionTag::Class(class) = tags.table.get(region) else {
-                continue;
-            };
-            let Some(host) = self.host(class) else {
-                continue;
-            };
-            let carving = host
-                .class
-                .carving
-                .load(core::sync::atomic::Ordering::SeqCst);
-            let carved = super::layout::Grow::unpack(host.grow(region).load()).carved;
-            if carving == region.index() as u32 + 1 || carved != 0 {
-                tags.publish(region, class);
+            if let RegionTag::Class(class) = tags.table.get(region) {
+                self.publish_if_named(region, class);
             }
         }
     }
 
-    /// Where `ptr` falls and the table's tag for its region: for callers that hold `ptr`, a
-    /// pointer the program or this crate got from the region. A region is named before
-    /// anything in it is handed out, so the tag is the region's for good; a caller that has no
-    /// such pointer reads [`Tags::published`] instead.
-    #[inline(always)]
-    pub(super) fn tag_at(&self, ptr: *const u8) -> Option<(Location, RegionTag)> {
-        let location = self.space.locate(ptr)?;
-        Some((location, self.state.tags.table.get(location.region)))
+    /// [`Back::publish_named`] for one region, whose tag it read as `class`. Threads of the
+    /// child may run meanwhile, so that read may be stale: a thread of the child's own that
+    /// loses an assignment holds the tag, gives the region back, and another class names it.
+    ///
+    /// - The class's carving word naming the region settles it: only a swing of the class
+    ///   that won for the region puts it there, and a named region is the class's for good.
+    /// - Otherwise the region must have been carved from, which is read through `class`'s
+    ///   host, perhaps not the region's. A nonzero `carved` there still means some class has
+    ///   carved from the region: what a host's grow word aliases holds nothing nonzero in the
+    ///   carved field until a class has carved. Two small classes share the region's header
+    ///   in `State::headers`, written only by carves (a small class's assignment writes no
+    ///   header). A large class's header is the first word of the region's block, which a
+    ///   large class's loser writes with nothing carved, and its own carves after; a small
+    ///   class's top summary word sits there, nonzero only once one of its slots, so one
+    ///   carved, has been released. A region carved from was named and keeps its tag for
+    ///   good, so the tag read again names that carver: it is published only if that is
+    ///   still `class`.
+    fn publish_if_named(&self, region: RegionId, class: Class) {
+        let tags = &self.state.tags;
+        let Some(host) = self.host(class) else {
+            return;
+        };
+        let carving = host
+            .class
+            .carving
+            .load(core::sync::atomic::Ordering::SeqCst);
+        if carving == region.index() as u32 + 1 {
+            tags.publish(region, class);
+            return;
+        }
+        let carved = super::layout::Grow::unpack(host.grow(region).load()).carved;
+        if carved != 0 && tags.table.get(region) == RegionTag::Class(class) {
+            tags.publish(region, class);
+        }
+    }
+
+    /// [`Back::publish_if_named`], for a test that plays a stale read of the tag.
+    #[cfg(test)]
+    pub(super) fn publish_if_read(&self, region: RegionId, class: Class) {
+        self.publish_if_named(region, class);
     }
 }

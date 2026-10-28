@@ -12,16 +12,26 @@ constructor, and it builds the layout that way. Region ids reach a host only fro
   with a compare-and-swap from `Unassigned` to `Class(class)` and then named with its swing;
 - the class's summary tree (`tree::child` of a class word), whose bits are set only by the walk
   up from a leaf word of one of the class's regions;
-- `Back::tag_at` of a pointer into the region, whose table tag `validate`, the batch checker
-  or the free by address has just checked is this class: a pointer into a region exists only
-  once a class has named it and carved from it, so its tag is the naming class's;
+- `Tags::at` of where a pointer into the region falls, whose table tag `validate`, the batch
+  checker or the free by address has just checked is this class: a pointer into a region
+  exists only once a class has named it and carved from it, so its tag is the naming class's;
 - the published tag (`Tags::published`), which every walk that finds regions by their number
   reads (`Back::purgeable`, `Back::hold_region` and the hold's plan, `Back::lower_walked`,
   `Back::raise_marked`, `Back::inspect`). Only the thread whose carving swing named the region
-  writes it, after the swing, and only with that class (`Back::assign`); the one other writer,
-  a fork child's repair (`Back::publish_named`), writes it only for a region the class's
-  carving word names or that has been carved from, which a swing of the class named. The byte
-  is written once (a compare-and-swap from zero) and never cleared.
+  writes it, after the swing, and only with that class (`Back::assign`). The one other writer
+  is a fork child's repair (`Back::publish_named`), whose read of the table may be stale, since
+  threads of the child may run beside it: it publishes `class` only if the class's carving word
+  names the region (only a won swing of the class puts it there), or if the region has been
+  carved from and the table, read again after that, still says `class`. A nonzero `carved` read
+  through `class`'s host means some class has carved from the region, whichever host it was
+  read through: two small classes share the region's header, which only carves write; a large
+  class's header is the block's first word, which a large class's loser writes with nothing
+  carved and its carves after, and where a small class's top summary word sits, nonzero only
+  once one of its slots, so one carved, is released. A region carved from was named and keeps
+  its tag for good, so the second read gives the carver (`tla/Assign.tla`: `Assign_repair`,
+  without the second read, publishes the wrong class; `Assign_repair_recheck` holds;
+  `back::tests::ledger_review` plays it against the code). The byte is written once (a
+  compare-and-swap from zero) and never cleared.
 
 A class never gives a named region up: the only tag change away from `Class(class)` is
 `assign` giving back a region it took and did not name, after its swing lost. Such a region
@@ -33,20 +43,7 @@ region another class or a run then had).
 
 The reviewed finding at d36e0cb (the walks read the table, and could act on a region given
 back with the wrong class's layout, `back::tests::ledger_review`) is closed by the published
-tag.
-
-**Open finding, review of cb9dccf: the repair can publish the wrong class.**
-`Back::publish_named` reads the table's tag of an unpublished region, which is the stale read
-the published tag was made to remove, and then asks whether the region "has been carved from"
-through that class's host. If the tag was a loser's (a thread of the child's own, assigning
-while the repair runs), the loser gives the region back, another class names it and carves,
-and the repair then reads that class's carve as its own (two small classes share the grow
-word; a large class's is where a small class's top summary word is) and publishes the region
-for the first class, before the namer does. The byte is then wrong for good.
-`tla/Assign.tla` with `Assign_repair` shows it; reading the tag again after finding the
-region carved from closes it (`Assign_repair_recheck`: a region carved from keeps its tag for
-good, so a tag that still reads as the class is the carver's). This file is not marked
-reviewed until that is fixed.
+tag, and the finding of the review of cb9dccf (the repair's stale read) by its second read.
 
 ## BACK-HOST-01: `&*at` in `ClassHost::meta`
 

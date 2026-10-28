@@ -928,9 +928,9 @@ impl<O: Os> Back<'_, O> {
 impl<O: Os> Back<'_, O> {
     /// The stamp of the large-class region that holds `ptr`.
     pub(super) fn hold_stamp_at(&self, ptr: *const u8) -> u64 {
-        let (location, tag) = self.tag_at(ptr).unwrap();
+        let location = self.space.locate(ptr).unwrap();
         let region = location.region;
-        let crate::space::RegionTag::Class(class) = tag else {
+        let crate::space::RegionTag::Class(class) = self.state.tags.at(location) else {
             panic!("not a class region");
         };
         let host = self.host(class).unwrap();
