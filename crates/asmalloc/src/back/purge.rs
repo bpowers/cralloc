@@ -23,9 +23,11 @@
 //! acts again (`docs/research/memory.md`: 136 MiB free and resident under a 64 MiB cap).
 //!
 //! **Decay** (`decay_step`, one call per heartbeat). Once an interval of the clock
-//! (`policy::DECAY_TICKS`) a pass starts where the walk stands with a goal: a quarter of the
-//! retained count (`policy::decay_goal`), or everything above the cap if that is more, and
-//! never past the floor (below). Each heartbeat then does one bounded step of the walk until
+//! (`policy::DECAY_TICKS`) a pass starts where the walk stands with a goal: everything the
+//! last lap found it could return, down to the floor (below; `policy::decay_goal`). What a
+//! pass may take is already only what the frontiers say the last two intervals did not reuse,
+//! so the goal holds none of it back; the retained count and the cap play no part in it.
+//! Each heartbeat then does one bounded step of the walk until
 //! the goal is met or the walk has gone once round, back where the pass began a lap later. The
 //! goal is in bytes and the walk stops within one unit of it, whatever the slot size.
 //!
@@ -162,9 +164,9 @@
 //! free memory over the cap, a purge of memory about to be reused caused a refault, which
 //! purged more of it, until the count reached the cap (a `HashMap` rebuilt in a loop made four
 //! times the `madvise` calls). The case it leaves open, a phase change into a class whose pages
-//! decay had returned while another class's freed memory stays resident, is what the decay
-//! pass's term for everything over the cap bounds: the other class's memory, which no fill
-//! reaches any more, goes within about two intervals.
+//! decay had returned while another class's freed memory stays resident, is the clocked pass's:
+//! the other class's memory, which no fill reaches any more, goes at the first pass after its
+//! frontier has aged, within about two intervals.
 //!
 //! **The walk** goes over the regions from the highest address down and round again from the
 //! top, skipping regions whose class summary bit says nothing in them is free. Within a region it walks units of pages
@@ -713,9 +715,9 @@ impl<O: Os> Back<'_, O> {
 
     /// Growth a carve owed past what its own payment could take, a step at a time: the
     /// payment that keeps memory within the cap of what is live. Not while a clocked pass is
-    /// under way: its goal, set when it began, already counts what is over the cap, and both
-    /// paying it would take the count below the cap. Returns what the step returned, and
-    /// whether a step is still owed.
+    /// under way: the pass is already returning everything over the floor that the frontiers
+    /// allow, from the same walk position, and the debt waits for it to end, at most a lap.
+    /// Returns what the step returned, and whether a step is still owed.
     fn pay_owed(&self) -> (usize, bool) {
         let step = growth_step(self.space.plan().geometry());
         let owed = || {
@@ -1000,15 +1002,11 @@ impl<O: Os> Back<'_, O> {
         {
             return false;
         }
-        // A quarter of what is retained, or what is over the cap if that is more, and never past
-        // the floor of what a purge could return, by the last lap's count (before the first lap
-        // has ended, by the retained count, which is never less). Nothing over the floor: the
-        // pass walks a lap to count, and returns nothing.
-        let over = retained.saturating_sub(retained_cap(geometry));
+        // Everything over the floor of what a purge could return, by the last lap's count
+        // (before the first lap has ended, by the retained count, which is never less). Nothing
+        // over the floor: the pass walks a lap to count, and returns nothing.
         let returnable = self.returnable().unwrap_or(retained);
-        let goal = decay_goal(geometry, retained)
-            .max(over)
-            .min(returnable.saturating_sub(floor));
+        let goal = decay_goal(returnable, floor);
         // One pass in `PURGE_ANY_RUN_EVERY` takes runs of any length, counted by passes, not by
         // the interval's number, which a pass that comes every other interval could miss for
         // ever. The count is a hint: a lost update moves the pass that takes short runs by one.

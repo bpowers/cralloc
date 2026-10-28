@@ -55,15 +55,6 @@ pub const GROWTH_UNPAID_HUGE_PAGES: usize = 8;
 /// short next to the ten seconds over which jemalloc returns everything.
 pub const DECAY_TICKS: u64 = 1 << 32;
 
-/// A decay pass may purge the retained count shifted right by this: 2, a quarter. From the
-/// top down a quarter an interval returns 90% of what stays free within eight intervals,
-/// while memory freed and reused within an interval or two is mostly left alone.
-pub const DECAY_SHIFT: u32 = 2;
-
-/// A decay pass may always purge this much, in huge pages: 1, or 2 MiB, so that the tail of a
-/// decay ends instead of shrinking by quarters for ever.
-pub const DECAY_FLOOR_HUGE_PAGES: usize = 1;
-
 /// The most bitmap words a fill for a magazine claims from before it hands out what it has:
 /// 256. A claim takes what one word has free, from one slot to 64, at about a hundred cycles
 /// when it is one; so a magazine of up to 254 objects, the largest before magazines grew to
@@ -406,14 +397,17 @@ pub const fn move_piece(geometry: Geometry) -> usize {
     MOVE_PIECE_HUGE_PAGES * geometry.huge_page_size()
 }
 
-/// The most a decay pass may purge when the retained count is `retained` bytes: a quarter of
-/// it, or all of it once that is within the floor.
+/// The most a clocked pass may purge when the last lap found `returnable` bytes it could
+/// return, against a floor of `floor`: everything over the floor. What the pass may take is
+/// already only what the last two intervals did not reuse (the frontiers), so a share of it
+/// held back only keeps memory the program has shown it does not need: with a quarter an
+/// interval the lifetime job's 18-second troughs ended 0.43 GiB higher at 2 GiB, for a third
+/// fewer faults that cost no measurable cycles (`docs/research/trough-gap.md`, "How much a
+/// pass returns"). The retained count and the cap play no part: the count is mostly free slots
+/// beside live ones, which no purge can return, and the cap is growth's to enforce.
 #[inline(always)]
-pub const fn decay_goal(geometry: Geometry, retained: usize) -> usize {
-    let floor = DECAY_FLOOR_HUGE_PAGES * geometry.huge_page_size();
-    let part = retained >> DECAY_SHIFT;
-    let least = if retained < floor { retained } else { floor };
-    if part > least { part } else { least }
+pub const fn decay_goal(returnable: usize, floor: usize) -> usize {
+    returnable.saturating_sub(floor)
 }
 
 /// The huge pages a region of `region_huge_pages` huge pages carves before its growth switches

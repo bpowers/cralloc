@@ -332,24 +332,29 @@ fn a_large_slot_is_whole_pages() {
     assert!(start.div_ceil(page) * page == start && (end >> page.trailing_zeros()) * page == end);
 }
 
-/// A decay pass's goal is never more than is retained, is all of it once that is within the
-/// floor, at least a quarter otherwise, and zero only when nothing is retained.
+/// A clocked pass's goal is never more than the last lap found returnable, leaves exactly the
+/// floor of it when there is more, and is zero, a pass that only counts, exactly when there is
+/// no more than the floor.
 #[kani::proof]
-fn a_decay_goal_is_a_quarter_or_the_floor() {
-    use super::policy::{DECAY_SHIFT, decay_goal};
+fn a_decay_goal_is_everything_over_the_floor() {
+    use super::policy::{allowance_floor, decay_goal};
     let geometry = match kani::any::<u8>() {
         0 => Geometry::DESIGN,
         1 => Standard::GEOMETRY,
         2 => Native::GEOMETRY,
         _ => Tiny::GEOMETRY,
     };
-    let retained: usize = kani::any();
-    let goal = decay_goal(geometry, retained);
-    assert!(goal <= retained);
-    assert!(goal >= retained >> DECAY_SHIFT);
-    assert!((goal == 0) == (retained == 0));
-    if retained <= geometry.huge_page_size() {
-        assert!(goal == retained);
+    let floor = if kani::any() {
+        allowance_floor(geometry)
+    } else {
+        0
+    };
+    let returnable: usize = kani::any();
+    let goal = decay_goal(returnable, floor);
+    assert!(goal <= returnable);
+    assert!((goal == 0) == (returnable <= floor));
+    if returnable > floor {
+        assert!(returnable - goal == floor);
     }
 }
 

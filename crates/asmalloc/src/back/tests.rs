@@ -992,15 +992,17 @@ fn beat<O: Os>(back: &Back<'_, O>) {
 #[test]
 fn a_pass_resumes_where_the_walk_stands() {
     use core::sync::atomic::Ordering::Relaxed;
-    let state = state::<Standard>();
+    // With the floor, so that a pass, which takes everything over it, has a goal that ends
+    // before the walk has gone round.
+    let state = floored_state::<Standard>();
     let back = state.get_or_reserve().unwrap();
     let os = state.os();
     let (low, high) = (small(1024), small(512));
     let lows = fill(&back, low, small_part(&back, low));
-    // Enough above it that a quarter of what is retained is more than the floor, and much
-    // more than the lower class frees.
-    let floor = super::policy::DECAY_FLOOR_HUGE_PAGES * Standard::GEOMETRY.huge_page_size();
-    let highs = fill(&back, high, whole_regions(&back, high, 16 * floor));
+    // Twice the floor above it, much more than the lower class frees: the pass takes all of
+    // the lower class and as much of the higher as leaves the floor.
+    let floor = super::policy::allowance_floor(Standard::GEOMETRY);
+    let highs = fill(&back, high, whole_regions(&back, high, 2 * floor));
     let region = |p: *mut u8| back.space().locate(p).unwrap().region.index();
     assert!(region(lows[0]) < region(highs[0]));
     // SAFETY: the test holds these slots and gives them up.
@@ -1018,8 +1020,8 @@ fn a_pass_resumes_where_the_walk_stands() {
     os.advance_clock(DECAY_TICKS);
     back.decay_pass(&|| back.now());
     // The pass began there, emptied that region, went on from the top of the heap with the
-    // rest of its quarter, and stopped long before the bottom of the higher class's lowest
-    // region. A pass from the top would have spent its quarter on the higher class alone.
+    // rest of its goal, and stopped at the floor, before the bottom of the higher class's
+    // lowest region. A pass from the top would have left the lower class's pages to the floor.
     // SAFETY: no other thread runs, and the back end and this test store only integers.
     unsafe {
         assert!(
@@ -1527,8 +1529,8 @@ fn the_tail_of_a_run_the_cap_cut_goes_with_it() {
     use crate::os::sim::Shape;
     use crate::space::Geometry;
     /// 4 KiB pages, huge pages of 512 KiB and regions of 4 MiB: a small-page part of 256 pages
-    /// holds a run longer than the cap, and a pass's goal (`policy::decay_goal`, at least a
-    /// huge page) takes all of it.
+    /// holds a run longer than the cap, and a pass's goal (`policy::decay_goal`, everything
+    /// returnable in an unfloored test) takes all of it.
     enum Wide {}
     impl Shape for Wide {
         const GEOMETRY: Geometry = Geometry::new(12, 19, 22, 19, 256, 1, MagazineSize::MAX);
@@ -1613,9 +1615,10 @@ fn single_free_pages_wait_for_the_pass_that_takes_any_run() {
 }
 
 /// The frontier holds over the cap too. Memory over the cap that fills reached in the last two
-/// intervals is spared by the clocked pass however high the count; memory over the cap that no
-/// fill reached for an interval goes in one pass, down to the cap, from wherever it lies, and
-/// what is reused stays.
+/// intervals is spared by the clocked pass however high the count; memory that no fill reached
+/// for an interval goes in one pass, all of it (the test has no floor), from wherever it lies,
+/// and what is reused stays, though the count is then under the cap: the cap plays no part in
+/// the pass.
 #[test]
 #[cfg_attr(miri, ignore)]
 fn over_the_cap_a_pass_spares_reuse_and_takes_idle_memory() {
@@ -1661,11 +1664,10 @@ fn over_the_cap_a_pass_spares_reuse_and_takes_idle_memory() {
     os.advance_clock(DECAY_TICKS);
     beat(&back);
     assert!(!pass_under_way(&state));
-    let left = back.retained();
-    let page = Standard::GEOMETRY.huge_page_size();
-    assert!(
-        left <= cap && left + page > cap,
-        "{left} retained, cap {cap}"
+    assert_eq!(
+        back.retained(),
+        reuseds.len() * 512,
+        "the pass left idle memory or took reused memory"
     );
     // SAFETY: no other thread runs, and the back end and this test store only integers.
     unsafe {
@@ -1675,7 +1677,11 @@ fn over_the_cap_a_pass_spares_reuse_and_takes_idle_memory() {
                 .all(|&p| !os.is_purged(NonNull::new(p).unwrap(), 512)),
             "a pass over the cap purged what fills reached"
         );
-        assert!(os.is_purged(NonNull::new(*idles.last().unwrap()).unwrap(), 1024));
+        assert!(
+            idles
+                .iter()
+                .all(|&p| os.is_purged(NonNull::new(p).unwrap(), 1024))
+        );
     }
 }
 
@@ -1919,12 +1925,12 @@ fn a_fruitless_purge_does_not_make_the_count_forget() {
 }
 
 /// Below the cap nothing is purged until an interval has passed, and the pass at its end
-/// spares what the interval's fills reached, which here is everything. An interval later, with
-/// no fill since, one pass returns about a quarter, from the top; it does not run again until
-/// the next interval; and what stays free is all gone after enough intervals.
+/// spares what the interval's fills reached, which here is everything. The pass after it only
+/// counts what is now returnable; the one after that, with no fill since, returns all of it
+/// (the test has no floor), and no second pass runs in the same interval.
 #[test]
 #[cfg_attr(miri, ignore)]
-fn free_memory_decays_by_quarters_from_the_top() {
+fn free_memory_goes_back_in_one_pass_once_no_fill_reaches_it() {
     let state = state::<Standard>();
     let back = state.get_or_reserve().unwrap();
     let os = state.os();
@@ -1969,25 +1975,16 @@ fn free_memory_decays_by_quarters_from_the_top() {
     os.advance_clock(DECAY_TICKS);
     beat(&back);
     assert!(!pass_under_way(&state));
-    let left = back.retained();
-    assert!(
-        left <= total - total / 4 && left > total / 2,
-        "{left} of {total}"
-    );
+    assert_eq!(back.retained(), 0, "the pass left memory no fill reached");
     // SAFETY: no other thread runs, and the back end and this test store only integers.
     unsafe {
         assert!(os.is_purged(NonNull::new(highest).unwrap(), 1024));
-        assert!(!os.is_purged(NonNull::new(lowest).unwrap(), 1024));
+        assert!(os.is_purged(NonNull::new(lowest).unwrap(), 1024));
     }
     // No second pass inside the same interval.
     let purges = os.calls(Call::Purge);
     beat(&back);
     assert_eq!(os.calls(Call::Purge), purges);
-    for _ in 0..40 {
-        os.advance_clock(DECAY_TICKS);
-        beat(&back);
-    }
-    assert_eq!(back.retained(), 0);
 }
 
 /// Memory that is reused is not counted as retained and not purged: a claim lowers the count,
@@ -3813,8 +3810,19 @@ mod review {
             beat(&back);
         }
         assert!(!pass_under_way(&state));
+        assert!(
+            back.retained() < total,
+            "nothing decayed before the clock went back"
+        );
+        // More is freed, which the passes after the clock goes back must return.
+        let more = fill(&back, class, total / 1024 / 2);
+        for &p in &more {
+            paint(p, 1024, 6);
+        }
+        // SAFETY: as above.
+        unsafe { back.launder(class, &more) };
         let left = back.retained();
-        assert!(left > 0 && left < total);
+        assert!(left > 0);
         // The counter goes back by fifty intervals.
         os.advance_clock(0u64.wrapping_sub(50 * DECAY_TICKS));
         for _ in 0..20 {
