@@ -4,7 +4,8 @@
 # process group of its own, then waits as long as the session ran (two minutes at least) before
 # the next, so teammates' builds get their turn (CLAUDE.md, "How we work"). Lines can be added to
 # the queue while it runs. Each session's output goes to DIR/log/NNN.log, and DIR/done lists
-# what ran, with start, seconds and exit status. QUEUE_GAP_MAX (seconds) caps the gap.
+# what ran, with start, seconds and exit status. QUEUE_GAP_MAX (seconds) caps the gap; a line
+# that starts with `NOGAP=1 ` (heavy work, not a measurement) is followed by none.
 #
 # Stopping: `touch DIR/stop` ends the loop after the running session; `kill PID` (the loop's PID
 # is in DIR/pid) stops the running session's whole process group as well and leaves nothing
@@ -53,6 +54,9 @@ open(p, "w").write("\n".join(lines))' "$dir/queue" "$line"
   # lock does not double it.
   [ -z "${QUEUE_GAP_MAX:-}" ] || [ "$gap" -le "$QUEUE_GAP_MAX" ] || gap=$QUEUE_GAP_MAX
   [ "$gap" -ge 120 ] || gap=120
+  # A line that starts with NOGAP=1 is heavy work (scripts/heavy), not a measurement: it owes
+  # nobody a turn, and is queued here only so that it never runs beside a memory-heavy session.
+  case "$line" in NOGAP=1\ *) gap=5 ;; esac
   # Wait in short steps so a stop file is seen.
   end=$((t1 + gap))
   while [ "$(date +%s)" -lt "$end" ] && [ ! -e "$dir/stop" ]; do sleep 5 & child=$!; wait $child; child=""; done
