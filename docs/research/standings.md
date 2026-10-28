@@ -1,5 +1,204 @@
 # Standings
 
+# 2026-10-28
+
+Measured 2026-10-27 to 28 on the reference host (Ryzen 9950X, Linux 7.2.9), asmalloc at main
+`2ff7322` against jemalloc, tcmalloc (per-CPU), mimalloc and glibc. Since the 2026-10-22
+standings, main gained four changes not yet seen together on real work: huge pages above a
+region's frontier are split and returned and the advice follows (`huge-tail.md`); a claim
+trims a large slot's slack and free large slots age one by one (`large-slack.md`); a zeroed
+grow clears the old block's slack; and the background thread's start changed.
+
+## Summary
+
+- **No server job got slower or faults more.** Over five code placements asmalloc's cycles a
+  request moved by -0.6 to +0.7% on every server job against 2026-10-22 (the order service
+  over HTTP/2 -4.8%, its slow mode gone). Page faults a request at 70% are unchanged
+  (zero on every small server and the 2 GiB order service). Memory under load and after
+  close is no higher than before on any server job.
+- **Where it stands is where it stood.** asmalloc is ahead of every incumbent on every server
+  that allocates much, resolved over placement: 4.8 to 9.6% on the Connect and gRPC log
+  services, 7 to 21% on the log store, 2.1 to 3.6% against jemalloc and tcmalloc on the order
+  service (actix against tcmalloc +1.8%, inside the range), and level on Sozu, mini-redis and
+  the RPC microjobs. glibc is 15 to 49% behind where the allocator matters.
+- **Tails: the best p50, p99 and p99.9 on every small server, with deep idle off.** The C2
+  and C3 states were off on the server CPUs for every run, so no tail here ranks idle states
+  (every run's deep entries are zero; none is flagged confounded). On Connect over HTTP/2 the
+  p99.9 is 37.7 us (45.1 on 2026-10-22, with deep idle on; `tails-idle-off.md`).
+- **One p99.9 outside its earlier range: the log store,** 126.3 us (123.8 to 135.1) against
+  124.2 (118.8 to 125.0), and in the large-heap suite 123 against 114 us. Every incumbent's
+  rose by 1 to 2 us on the same job in the same sessions, and asmalloc's is still the lowest by
+  9 us. Not chased.
+- **Meilisearch takes half the faults and less heap.** 42 page faults a request (88), heap
+  under load 697 MiB mean, 894 peak (870, 949), 652 a minute after close (661); jemalloc's 749,
+  790 and 655. Cycles a request 16.76M (16.96M), the least. Its p99.9 is 44.6 ms (38.8 to 50.6)
+  against 42.6 (33.9 to 47.8); jemalloc's is 44.6 now, 48.3 then.
+- **DataFusion is 1.7% slower than on 2026-10-22** (70.62 against 69.42 Gcycles; the
+  incumbents moved +0.2 to +0.7% between the sessions), with 6% more faults and a smaller
+  peak (857 MiB, the least). `large-slack.md` measured +0.8% for the trim alone.
+- **tpchgen** under each allocator's preload library: asmalloc 25.27 Gcycles, jemalloc 24.79,
+  tcmalloc 25.04, mimalloc 24.60, glibc 25.16 (four rounds; spreads about 1 to 4%); asmalloc
+  takes the most page faults (337k against 78k to 282k), peak 559 MiB against 518 to 813.
+- **Not measured this time** (the session was wound down): the Router, SurrealDB and Qdrant;
+  the long-run memory table and the large-block mix; the 64-Vec, 256 MiB and tokio spawn
+  jobs; the kernel suite; Meilisearch's saturated rate. The 2026-10-22 figures below stand for
+  them.
+
+## Method, and what differs from 2026-10-22
+
+- As 2026-10-22 (below) for the servers: every allocator at bench-alloc's five pads,
+  interleaved, two rounds of each pad for asmalloc, jemalloc, tcmalloc and mimalloc (three for
+  Connect h2 and the order service over h2, and for the kernel suite's RPC jobs), one for
+  glibc; figures and verdicts by `bench/probes/standings/servers.py`. Saturation: three
+  rounds of pad-0 builds. Large heaps: `servers-thread`, three rounds, asmalloc in both
+  sessions of a round. DataFusion: six rounds.
+- **Deep idle off.** C2 and C3 were disabled on CPUs 0 to 3 for every session
+  (`scripts/deep-idle status` logged before each, by `bench/probes/tails-idle-off/guard.sh`);
+  on 2026-10-22 they were on. Cycles and saturated rates did not move with this switch
+  (`tails-idle-off.md`); tails did, so p99.9 against 2026-10-22 is read with that in mind.
+- **Reused builds.** The incumbents' pad builds (rpc-server, the order service, Sozu,
+  mini-redis, the Router) were copied from the `tails-idle-off` worktree, built from main
+  `3b5a3f5`, whose bench sources differ from `2ff7322` only in the drift workload; their
+  normal builds of the order service, Meilisearch and DataFusion from `large-heap-constants`,
+  `tails-idle-off` and `standings-2`. Worktree paths have one length, so binary paths do too.
+  A fresh build of jemalloc's pad-0 rpc-server here has the copy's code byte for byte; its
+  order service has the same code size and start, with 14 symbols placed differently.
+  asmalloc's builds are all new. The list with hashes is `reused.txt` in the data.
+- **tpchgen** is new to the standings: `bench/probes/standings/tpch.py`, the screening's
+  tpchgen-cli under each allocator's preload library (tcmalloc with glibc's rseq off), eight
+  CPUs, cycles of all threads, four rounds interleaved.
+- Three runs of 51 in the large-heap suite were marked invalid for other work on the
+  server's CPUs over the burst's 5 ms piece (0.10 to 0.12 CPUs) and kept, as before.
+- 87 sessions through `bench/probes/standings/queue.sh` under `scripts/measure --both-l3`.
+  Raw data: `docs/research/data/standings-2026-10-28.tar.gz`.
+
+## Servers: time
+
+k server cycles a request at 70%, asmalloc's mean over the pads (range), 2026-10-22's in
+brackets; the others against asmalloc's mean, "R" resolved, "in" inside the range.
+
+| Job | asmalloc (10-22) | jemalloc | tcmalloc per-CPU | mimalloc | glibc |
+|---|---|---|---|---|---|
+| connect log grpc h2 | 125.8 (123.3 to 127.8) (126.6) | +8.8% R | +6.0% R | +5.1% R | +16.0% R |
+| connect log h2 | 124.5 (122.6 to 126.4) (125.0) | +9.4% R | +5.8% R | +4.8% R | +15.4% R |
+| connect log | 118.4 (116.3 to 120.4) (118.4) | +9.6% R | +6.9% R | +6.5% R | +17.6% R |
+| connect store 1M | 365.8 (361.7 to 371.9) (363.1) | +7.0% R | +13.2% R | +21.4% R | +48.5% R |
+| orders axum | 68.2 (67.7 to 68.7) (67.9) | +2.9% R | +3.2% R | +7.8% R | +25.3% R |
+| orders axum cache 2G | 67.9 (67.5 to 68.4) (67.9) | +3.1% R | +3.6% R | +7.5% R | +16.8% R |
+| orders actix | 55.9 (55.2 to 56.5) (55.8) | +2.1% R | +1.8% in | +8.4% R | +27.3% R |
+| orders axum h2 | 58.2 (57.4 to 59.0) (61.1) | +2.9% R | +4.6% R | +5.7% R | +40.5% R |
+| sozu proxy | 93.2 (92.2 to 94.3) (92.7) | -0.3% in | -0.8% in | -0.6% in | -1.2% in |
+| miniredis | 35.9 (35.8 to 36.2) (36.0) | +1.0% R | +1.0% R | +0.2% in | +0.3% in |
+| rpc log c64 (kernel suite) | 123.0 (119.6 to 126.5) (122.7) | +3.0% R | -0.1% in | -0.2% in | +20.0% R |
+| rpc echo c64 (kernel suite) | 45.9 (45.6 to 46.1) (45.9) | +0.6% in | +0.4% in | +2.4% R | +6.8% R |
+
+The order service over HTTP/2 ran in its fast mode at every pad this time (57.4 to 59.0k);
+on 2026-10-22 two of asmalloc's pads ran 4 to 6% more instructions in a slow mode. tcmalloc
+still shows it at pad 16 (63.8k against 59.6 to 61.3).
+
+## Servers: tails and memory
+
+p50 / p99 / p99.9 in us at 70%, medians over runs (asmalloc 10 to 15 runs a job, glibc 5);
+deep idle off. Resident MiB under load (peak) and at the end of the run (after close),
+asmalloc / jemalloc / tcmalloc / mimalloc / glibc.
+
+| Job | asmalloc (10-22) | jemalloc | tcmalloc | mimalloc | glibc | Peak MiB | After close |
+|---|---|---|---|---|---|---|---|
+| connect log grpc h2 | 29.3 / 36.0 / 38.0 (38.3) | 31.0 / 37.8 / 39.6 | 30.3 / 37.2 / 39.0 | 30.2 / 36.6 / 38.2 | 33.2 / 39.7 / 41.7 | 12 / 15 / 13 / 25 / 8 | 12 / 7 / 13 / 24 / 7 |
+| connect log h2 | 29.0 / 36.0 / 37.7 (45.1) | 30.9 / 38.0 / 39.8 | 30.2 / 37.2 / 38.8 | 29.7 / 36.7 / 38.6 | 32.6 / 39.2 / 41.2 | 12 / 15 / 13 / 25 / 8 | 12 / 7 / 13 / 25 / 7 |
+| connect log | 27.0 / 29.5 / 31.0 (34.0) | 28.0 / 31.4 / 33.2 | 27.6 / 30.5 / 32.1 | 27.6 / 30.6 / 32.3 | 30.3 / 33.2 / 34.9 | 10 / 10 / 14 / 23 / 9 | 10 / 8 / 14 / 22 / 7 |
+| connect store 1M | 84 / 123 / **126** (124) | 88 / 131 / 136 | 92 / 140 / 147 | 97 / 143 / 184 | 129 / 6,076 / 8,892 | 1,494 / 1,770 / 1,526 / 1,547 / 2,162 | 1,435 / 1,466 / 1,526 / 1,526 / 2,162 |
+| orders axum | 15.8 / 22.0 / 23.9 (25.3) | 16.3 / 22.3 / 24.1 | 16.4 / 22.5 / 24.4 | 16.9 / 23.5 / 39.4 | 22.7 / 59.4 / 119.3 | 209 / 205 / 212 / 262 / 333 | 210 / 205 / 212 / 262 / 333 |
+| orders axum cache 2G | 15.9 / 22.1 / 24.1 (25.9) | 16.4 / 22.2 / 24.4 | 16.4 / 22.2 / 24.2 | 17.0 / 23.7 / 38.1 | 20.5 / 29.4 / 9,174 | 2,192 / 2,226 / 2,229 / 2,346 / 3,146 | 2,175 / 2,037 / 2,229 / 2,346 / 3,080 |
+| orders actix | 18.4 / 26.3 / 33.9 (33.4) | 18.5 / 25.9 / 33.2 | 18.5 / 26.0 / 33.5 | 18.9 / 39.1 / 65.1 | 28.8 / 60.8 / 71.3 | 210 / 206 / 213 / 272 / 363 | 211 / 204 / 213 / 271 / 361 |
+| orders axum h2 | 28.5 / 30.8 / 39.8 (41.6) | 28.5 / 31.1 / 41.4 | 28.5 / 32.2 / 40.8 | 28.5 / 34.1 / 89.0 | 28.4 / 41.3 / 55.5 | 209 / 206 / 212 / 262 / 395 | 210 / 205 / 212 / 262 / 395 |
+| sozu proxy | 31.8 / 54.2 / 78.1 (77.6) | 32.0 / 56.2 / 79.7 | 32.5 / 56.9 / 75.5 | 31.5 / 55.2 / 77.8 | 30.8 / 48.1 / 85.1 | 24 / 18 / 42 / 57 / 15 | 25 / 18 / 43 / 57 / 15 |
+| miniredis | 12.3 / 21.1 / 22.6 (23.1) | the same | the same | 12.3 / 21.1 / 22.8 | the same | 48 / 43 / 43 / 54 / 35 | 48 / 37 / 43 / 47 / 35 |
+
+- asmalloc has the lowest p50 and p99 on the Connect jobs, the store and the order service on
+  axum, and the lowest p99.9 on the Connect jobs and the store. On actix jemalloc's p99 is
+  0.4 us lower; on Sozu glibc has the lowest p50 and p99 (30.8 and 48.1 against 31.8 and
+  54.2); mini-redis is level.
+- **The log store's p99.9** is the one asmalloc figure outside its 2026-10-22 range (above).
+  jemalloc went 134.3 to 135.8, tcmalloc 145.4 to 146.8, mimalloc 182 to 184 in the same
+  sessions.
+- Single runs reach milliseconds on several jobs for every allocator (asmalloc's highest
+  orders axum run 487 us, jemalloc's 2,437), as `tails-idle-off.md` saw; the medians are robust
+  to them.
+
+**At saturation** (pad-0 builds, three rounds), requests a second, asmalloc (2026-10-22) and
+the others:
+
+| Job | asmalloc (10-22) | jemalloc | tcmalloc | mimalloc | glibc |
+|---|---|---|---|---|---|
+| connect log grpc h2 | 191,689 (195,485) | 177,313 | 178,914 | 186,424 | 149,477 |
+| connect log h2 | 195,579 (198,602) | 179,303 | 180,860 | 190,014 | 151,111 |
+| connect log | 207,151 (211,464) | 191,482 | 187,892 | 196,324 | 175,825 |
+| connect store 1M | 64,920 (65,604) | 59,130 | 55,478 | 51,365 | 42,189 |
+| orders axum | 387,623 (384,770) | 370,667 | 367,970 | 354,254 | 288,868 |
+| orders axum cache 2G | 386,598 (384,209) | 368,357 | 366,077 | 355,512 | 295,516 |
+| orders actix | 441,182 (436,623) | 424,292 | 432,251 | 403,402 | 343,032 |
+| orders axum h2 | 303,633 (307,080) | 303,887 | 305,065 | 300,004 | 232,666 |
+| sozu proxy | 271,309 (271,576) | 269,851 | 271,167 | 273,960 | 274,976 |
+| miniredis | 729,542 (733,507) | 729,975 | 727,713 | 729,435 | 736,011 |
+
+asmalloc has the highest rate on every job that allocates much. Its Connect rates are 1.5 to
+2.0% under 2026-10-22's, single builds of placement-sensitive jobs; tcmalloc's and
+mimalloc's fell 1.3 to 1.9% on the same jobs, and the cycles at 70% over the pads did not move.
+
+## Large heaps
+
+`servers-thread`, three rounds (asmalloc six runs, the others three), normal builds,
+anonymous MiB, medians; 2026-10-22's asmalloc figure in brackets.
+
+| | asmalloc (10-22) | jemalloc | tcmalloc | mimalloc | glibc |
+|---|---|---|---|---|---|
+| store: k cycles a request | 343 (347) | 379 | 406 | 441 | 533 |
+| store: p99.9, us | **123** (114) | 133 | 144 | 181 | 10,954 |
+| store: peak under load / a minute after close | 1,453 / 1,432 (1,453 / 1,431) | 1,763 / 1,740 | 1,520 / 1,520 | 1,543 / 1,541 | 2,071 / 2,071 |
+| store: burst, slowest of first 5 ms, us | 581 (562) | 279 | 359 | 542 | 725 |
+| orders 2G: k cycles a request | 67.9 (68.2) | 69.5 | 71.3 | 72.7 | 79.5 |
+| orders 2G: a minute after close | 2,186 (2,186) | 2,220 | 2,222 | 2,341 | 3,141 |
+| orders 2G: burst, slowest of first 5 ms, us | 151 (141) | 135 | 162 | 308 | 293 |
+| Meilisearch: M cycles a request | 16.76 (16.96) | 17.42 | 17.07 | 17.97 | 17.96 |
+| Meilisearch: p50 / p99 / p99.9, ms | 1.7 / 29.0 / 44.6 (1.7 / 27.4 / 42.6) | 2.0 / 31.2 / 44.6 | 1.8 / 31.2 / 47.4 | 2.2 / 36.7 / 51.6 | 2.2 / 39.0 / 57.5 |
+| Meilisearch: page faults a request | 42 (88) | 42 | 0.1 | 23 | 1.0 |
+| Meilisearch: heap mean / peak under load | 697 / 894 (870 / 949) | 749 / 790 | 980 / 995 | 1,675 / 1,809 | 1,191 / 1,213 |
+| Meilisearch: a minute after close | 652 (661) | 655 | 933 | 1,339 | 1,195 |
+
+Page faults a request at 70% are zero on the store and the order service for every allocator
+but glibc, as before. The burst figures are medians of three to six runs whose ranges overlap
+2026-10-22's (store 538 to 638 us now, 504 to 1,018 then).
+
+## DataFusion and tpchgen
+
+DataFusion (TPC-H SF3, four threads, six rounds, medians; 2026-10-22 in brackets):
+
+| | asmalloc | jemalloc | tcmalloc | mimalloc | glibc |
+|---|---|---|---|---|---|
+| Gcycles | 70.62 (69.42) | 72.26 (72.12) | 67.58 (67.30) | 69.96 (69.70) | 70.51 (70.04) |
+| cgroup peak, MiB | 857 (865) | 861 | 999 | 1,659 | 933 |
+| page faults | 1.09M (1.03M) | 1.03M | 0.45M | 0.12M | 0.80M |
+
+tpchgen (TPC-H SF1 to Parquet, eight threads, preload libraries, four rounds, medians): Gcycles
+asmalloc 25.27 (25.09 to 26.25), jemalloc 24.79, tcmalloc 25.04, mimalloc 24.60, glibc 25.16;
+page faults 337k, 182k, 156k, 78k, 282k; peak resident 559, 567, 540, 813, 518 MiB. No
+2026-10-22 figure; `large-slack.md` had the trim cost it about 2% of cycles and 60% more
+faults for about 97 MiB less peak.
+
+## Not measured this time
+
+The queue held the rest, in this order, and was stopped when the session wound down: the
+Router over five pads; SurrealDB at 750k (asmalloc and tcmalloc at three pads) and 1.5M;
+Qdrant's memory (`qdrant mixed thread`, three rounds); Meilisearch's saturated rate; the
+`heap-drift.md` table (steady, the wandering lifetime mix, the size shift, mini-redis's
+phases) and the large-block mix, all five allocators; the kernel suite (five rounds, which
+carries the 64-Vec, 256 MiB and tokio spawn jobs). The queue lines and the builds for all of
+them are ready (`gen-q3.sh` and `gen-q4.sh` in the data; every asmalloc build of the Router,
+SurrealDB and Qdrant is made), so they can run as they are.
+
+# 2026-10-22
+
 Measured 2026-10-22 to 2026-10-23 on the reference host (Ryzen 9950X, Linux 7.2.9), asmalloc at
 main `80643d2` against jemalloc, tcmalloc (per-CPU), mimalloc and glibc. Servers first: they are
 what this allocator is for. The kernel suite and the C programs are regression checks.
