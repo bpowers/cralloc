@@ -35,6 +35,19 @@ The reviewed finding at d36e0cb (the walks read the table, and could act on a re
 back with the wrong class's layout, `back::tests::ledger_review`) is closed by the published
 tag.
 
+**Open finding, review of cb9dccf: the repair can publish the wrong class.**
+`Back::publish_named` reads the table's tag of an unpublished region, which is the stale read
+the published tag was made to remove, and then asks whether the region "has been carved from"
+through that class's host. If the tag was a loser's (a thread of the child's own, assigning
+while the repair runs), the loser gives the region back, another class names it and carves,
+and the repair then reads that class's carve as its own (two small classes share the grow
+word; a large class's is where a small class's top summary word is) and publishes the region
+for the first class, before the namer does. The byte is then wrong for good.
+`tla/Assign.tla` with `Assign_repair` shows it; reading the tag again after finding the
+region carved from closes it (`Assign_repair_recheck`: a region carved from keeps its tag for
+good, so a tag that still reads as the class is the carver's). This file is not marked
+reviewed until that is fixed.
+
 ## BACK-HOST-01: `&*at` in `ClassHost::meta`
 
 **Preconditions of dereferencing `at` for a shared reference.** `at` is non-null and aligned for
