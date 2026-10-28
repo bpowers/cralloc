@@ -13,8 +13,10 @@
 #   MIRI_MEM      the cap on the whole run, default 12G
 #   MIRI_TIMEOUT  the wall-clock limit on the whole run, default 4h
 #   MIRI_OUT      where the logs go, default target/miri-check; a failing test's log is kept
-# Run it through scripts/heavy. The whole run took 40 minutes of wall time on the reference host
-# with six jobs and heavy work sharing its cores (docs/research/miri-check.md).
+#   MIRI_ONLY     a file of test paths, one a line: run only those (to rerun what failed)
+# Run it through scripts/heavy. It takes hours, not minutes: about twelve hours of CPU, most of
+# it in the few dozen slowest tests (docs/research/miri-check.md has the measurements and what
+# makes a test slow under Miri).
 #
 # Why one process per test: one stuck test would otherwise hold up every test after it without
 # saying which, and the limit has to be on CPU time, not wall time, because a measurement pauses
@@ -60,6 +62,10 @@ list() {
 list > "$out/all.txt"
 list --ignored > "$out/ignored.txt"
 comm -23 "$out/all.txt" "$out/ignored.txt" | grep -F -- "$filter" > "$out/tests.txt" || true
+if [ -n "${MIRI_ONLY:-}" ]; then
+  sort "$MIRI_ONLY" | comm -12 "$out/tests.txt" - > "$out/only.txt"
+  mv "$out/only.txt" "$out/tests.txt"
+fi
 total=$(wc -l < "$out/tests.txt")
 [ "$total" -gt 0 ] || { echo "miri: no test matches '$filter'" >&2; exit 2; }
 echo "miri: $total tests, $jobs at a time, ${MIRI_CPU} CPU seconds each"
