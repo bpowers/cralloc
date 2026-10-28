@@ -239,6 +239,19 @@ the low page-number bits that index the TLB's sets; the pages below it are never
 so it costs address space and nothing else. A large class's origin is zero. A 4096-byte
 table records the class of each region.
 
+A class takes a region in two steps: it writes its tag in the table, and then names the
+region in the word that says where the class is carving. When two threads each take a
+region for the same class, one of them loses the second step and takes its tag back, and
+that region can then go to another class. So a tag read from the table is the region's for
+good only if the region has been named. A caller that holds a pointer into the region
+knows that it has: no pointer exists into a region that was not named. The purge and the
+other walks find regions by number and know no such thing, and a walk that acted on a tag
+it had read just before the tag went back would work on another class's region with the
+wrong layout. So the walks never read the table. They read a second byte for each region,
+which the thread that named the region writes once, after naming it. A class's region is
+never given back, so that byte never changes, and a region named but not yet written
+there is passed over for that moment.
+
 Every pointer therefore has two properties that hold without per-object metadata:
 
 - its class is `class_of[(ptr - heap_base) >> region_shift]`, one load from a table that
@@ -1454,6 +1467,9 @@ the one a Rust `Layout` of the same size implies.
   advice that was under way leaves an owner bit whose thread the child does not have, and
   advice that may not match the region's word. That same slow path clears every such bit
   and has each region's next change make the kernel's advice agree with its word first.
+  A region that a thread of the parent had named for its class, and not yet marked as
+  named for the walks (see "Address space"), would stay hidden from the child's walks for
+  good, so that slow path also marks every region a class is carving or has carved from.
 - **Signals.** A handler may allocate and free. A signal aborts any sequence in flight, and
   the slow paths hold nothing that a nested call could trip over. The exceptions are the
   places where the allocator calls the C library, which has locks of its own: the creation
@@ -1516,7 +1532,7 @@ API.
 | Assembly routines | Lean, against a model of the instructions and of rseq | Every input, every interruption point |
 | Size classes, alignment, slot masks, bitmap word operations, address and layout arithmetic, packed words, the decisions of the clocked rules | Kani | Every input |
 | The twins | Kani, against the routines' specifications | Every state of one small slab, with an interruption before any one step |
-| These lock-free protocols as designed: the routines, magazine exchange, drain, depot stacks, summary bits, purge, the boundary of huge-page advice, start-up, fork | A TLA+ model of each, in which the OS aborts, moves, fences and forks threads, checked exhaustively with TLC | Every interleaving of the model, within small bounds |
+| These lock-free protocols as designed: the routines, magazine exchange, drain, depot stacks, summary bits, purge, the assignment of regions, the boundary of huge-page advice, start-up, fork | A TLA+ model of each, in which the OS aborts, moves, fences and forks threads, checked exhaustively with TLC | Every interleaving of the model, within small bounds |
 | The Rust that implements those protocols | Schedule explorers in the test code, which run it unchanged under every schedule within a bound | Bounded schedules, on small heaps |
 | The allocator as a whole | Model-based tests, Miri, fuzzing, and real programs under the preload library | Testing |
 | `unsafe` blocks none of the above reaches | Safety ledger | Written proof, adversarially reviewed |
@@ -1589,8 +1605,8 @@ Changes to these are reviewed separately from changes to routines.
 
 The protocols on which memory safety rests each have a TLA+ model in which the OS is an
 actor: the routines under rseq, the exchange of magazines, the drain, the depot's stacks,
-the summary bits, the purge as a claim, the boundary of huge-page advice, start-up and
-fork. In each the OS stops, moves and restarts threads, runs signal handlers, fences,
+the summary bits, the purge as a claim, the assignment of regions to classes, the boundary
+of huge-page advice, start-up and fork. In each the OS stops, moves and restarts threads, runs signal handlers, fences,
 forks, and hands out address space. TLC checks every interleaving of a few threads over a few magazines and
 objects, which is as many actors as the flaws these protocols can have need.
 A configuration that is expected to fail is kept as a test: it shows that the model can see
