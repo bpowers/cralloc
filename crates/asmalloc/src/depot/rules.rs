@@ -374,6 +374,11 @@ fn a_depot_stack_in_use_sheds_only_its_unused_depth() {
 /// every full magazine a free displaces retires to the depot or is refreshed: how many full
 /// magazines retired, and how many of them were laundered.
 fn refreshed_of(refresh_every: u64, count: usize) -> (usize, usize) {
+    refreshed_raised(refresh_every, 0, count)
+}
+
+/// [`refreshed_of`], with the source saying its fragmentation earns `raise` halvings.
+fn refreshed_raised(refresh_every: u64, raise: u32, count: usize) -> (usize, usize) {
     let class = tiny(0);
     let tuning = Tuning {
         max_spares: 0,
@@ -381,6 +386,9 @@ fn refreshed_of(refresh_every: u64, count: usize) -> (usize, usize) {
         ..QUIET
     };
     let rig: TestRig = Rig::new(&[class], count, tuning);
+    rig.source
+        .raise
+        .store(raise, core::sync::atomic::Ordering::Relaxed);
     let machine = SimCpu::new(0);
     let cache = rig.cache(&machine);
     let held: Vec<_> = (0..count).filter_map(|_| cache.alloc(class)).collect();
@@ -407,6 +415,25 @@ fn the_refresh_launders_one_retiring_magazine_in_every_few() {
     assert!(retired >= 150, "{retired}");
     assert_eq!(laundered, retired / REFRESH_EVERY as usize);
     assert_eq!(refreshed_of(0, 400).1, 0);
+}
+
+/// A source that says its heap is fragmented halves the refresh interval as often as it says,
+/// down to one in four at the most it says; a refresh that is off stays off.
+#[test]
+fn a_fragmented_source_raises_the_refresh() {
+    for raise in 1..=crate::back::policy::REFRESH_RAISE_MAX {
+        let (retired, laundered) = refreshed_raised(REFRESH_EVERY, raise, 400);
+        assert!(retired >= 150, "{retired}");
+        assert_eq!(
+            laundered,
+            retired / (REFRESH_EVERY >> raise) as usize,
+            "raise {raise}"
+        );
+    }
+    // More than the interval has halvings launders every retirement, and no more.
+    let (retired, laundered) = refreshed_raised(REFRESH_EVERY, 40, 400);
+    assert_eq!(laundered, retired);
+    assert_eq!(refreshed_raised(0, 3, 400).1, 0);
 }
 
 /// The objects of `class` on CPU `n`'s spare stacks.

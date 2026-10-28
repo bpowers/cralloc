@@ -276,6 +276,10 @@ struct Walk {
     returnable: AtomicUsize,
     /// The bytes purged since the last lap ended, by any purger.
     returned: AtomicUsize,
+    /// How many halvings of the refresh interval the small classes' fragmentation has earned
+    /// (`policy::refresh_raise`): set at each lap's end, read by the depot's slow paths
+    /// (`Back::refresh_raise`).
+    refresh: AtomicU32,
     /// One past the highest region ever about to be given to a class, zero for none: the walk
     /// goes round regions below it only. Classes take the lowest unassigned regions and runs
     /// come from the top, so in a heap of a hundred class regions a lap reads a hundred table
@@ -334,6 +338,7 @@ impl<O: Os> State<O> {
                 seen: AtomicUsize::new(0),
                 returnable: AtomicUsize::new(NO_LAP),
                 returned: AtomicUsize::new(0),
+                refresh: AtomicU32::new(0),
                 top: AtomicU32::new(0),
             }),
             run_sizes: Lined::new([const { AtomicUsize::new(0) }; MAX_REGIONS]),

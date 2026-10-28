@@ -86,6 +86,9 @@ pub(crate) struct TestSource {
     clock: crate::clock::Counted,
     /// The counted interval of each class's last fill, by ordinal.
     last_fill: Mutex<BTreeMap<usize, u32>>,
+    /// What the source says its fragmentation earns the refresh ([`Source::refresh_raise`]);
+    /// tests set it.
+    pub raise: core::sync::atomic::AtomicU32,
 }
 
 impl TestSource {
@@ -118,6 +121,7 @@ impl TestSource {
             universe,
             clock: crate::clock::Counted::new(),
             last_fill: Mutex::new(BTreeMap::new()),
+            raise: core::sync::atomic::AtomicU32::new(0),
         }
     }
 
@@ -281,6 +285,10 @@ impl Source for TestSource {
 
     fn thread(&self) -> &crate::thread_word::ThreadWord {
         &self.thread
+    }
+
+    fn refresh_raise(&self) -> u32 {
+        self.raise.load(Ordering::Relaxed)
     }
 
     fn purge_pass_step(&self, _: &dyn Fn() -> u64) -> super::PurgeStep {

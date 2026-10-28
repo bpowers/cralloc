@@ -410,6 +410,33 @@ pub const fn decay_goal(returnable: usize, floor: usize) -> usize {
     returnable.saturating_sub(floor)
 }
 
+/// The most the refresh is raised (`refresh_raise`): 3 halvings, from one retiring full
+/// magazine in `depot::REFRESH_EVERY` (32) to one in 4. One in 4 took the lifetime job's 2 GiB
+/// trough down by 16% for about 1% of cycles; one in every took little more for 10%
+/// (`docs/research/trough-gap.md`).
+pub const REFRESH_RAISE_MAX: u32 = 3;
+
+/// How many halvings of the refresh interval the fragmentation of the small classes earns:
+/// `fragmented` bytes of free slots on pages that also hold something, against `carved` bytes
+/// the small classes have carved. Zero while the share is under 1 in 64, then one more for
+/// each doubling, up to [`REFRESH_RAISE_MAX`] from 1 in 16. A heap in steady use keeps a
+/// share well under the first step (0.6% on the steady cache and at the lifetime job's peaks)
+/// and pays nothing; a heap whose short-lived objects have just died around long-lived ones
+/// keeps a fifth (the lifetime job's troughs) and gets the most. The step at 1 in 16 is low
+/// enough that the share the most buys (12% at that trough) keeps it there.
+#[inline(always)]
+pub const fn refresh_raise(fragmented: usize, carved: usize) -> u32 {
+    if carved == 0 {
+        return 0;
+    }
+    // One for each of 1 in 64, 1 in 32 and 1 in 16 that the share reaches.
+    let mut raise = 0;
+    while raise < REFRESH_RAISE_MAX && fragmented >= carved.div_ceil(64 >> raise) {
+        raise += 1;
+    }
+    raise
+}
+
 /// The huge pages a region of `region_huge_pages` huge pages carves before its growth switches
 /// to huge pages.
 #[inline(always)]

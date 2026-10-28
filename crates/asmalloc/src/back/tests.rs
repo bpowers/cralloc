@@ -1033,6 +1033,44 @@ fn a_pass_resumes_where_the_walk_stands() {
     }
 }
 
+/// The refresh follows the fragmentation a lap finds (`policy::refresh_raise`): free slots
+/// beside live ones raise it at the end of the next lap, all the way for half the carved
+/// memory; once they are taken again it comes down a step a lap; and an empty heap, whose
+/// passes end as they start, steps it down too.
+#[test]
+#[cfg_attr(miri, ignore)]
+fn the_refresh_follows_the_fragmentation_a_lap_finds() {
+    use super::policy::REFRESH_RAISE_MAX;
+    let state = state::<Standard>();
+    let back = state.get_or_reserve().unwrap();
+    let os = state.os();
+    let class = small(64);
+    let slots = fill(&back, class, small_part(&back, class));
+    let pass = || {
+        os.advance_clock(DECAY_TICKS);
+        back.decay_pass(&|| back.now());
+    };
+    pass();
+    assert_eq!(back.refresh_raise(), 0, "a heap with nothing free");
+    // Every other slot freed: every page keeps half its slots, and nothing can be returned.
+    let freed: Vec<*mut u8> = slots.iter().copied().step_by(2).collect();
+    // SAFETY: the test holds these slots and gives them up.
+    unsafe { back.launder(class, &freed) };
+    pass();
+    assert_eq!(back.refresh_raise(), REFRESH_RAISE_MAX);
+    // Taken again: the fragmentation is gone, and the raise comes down one step a lap.
+    let again = fill(&back, class, freed.len());
+    assert_eq!(again.len(), freed.len());
+    assert_eq!(back.retained(), 0);
+    // With nothing retained a due pass ends as it starts, and steps the raise down itself.
+    for step in (0..REFRESH_RAISE_MAX).rev() {
+        pass();
+        assert_eq!(back.refresh_raise(), step);
+    }
+    pass();
+    assert_eq!(back.refresh_raise(), 0);
+}
+
 /// The floor of the region `p` lies in, read in the interval the back end is in: the page
 /// below which the clocked pass spares free pages.
 fn floor_at<O: Os>(back: &Back<'_, O>, p: *mut u8) -> u32 {

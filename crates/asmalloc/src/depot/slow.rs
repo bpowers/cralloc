@@ -49,6 +49,21 @@
 //! circulation are gradually replaced by the lowest free ones, and the pages their predecessors
 //! pinned can be purged. The count is the CPU's own, in the cold part of its slab
 //! ([`Slab::count_retired`](crate::front::Slab)).
+//!
+//! **Refresh on evidence.** Where frees and allocations of a class balance on a CPU, each
+//! allocation takes the slot the last free gave back, so new objects land where old ones died,
+//! and after a fall in the program's short-lived objects the long-lived ones it goes on making
+//! stay spread over the pages of its peak, a few to a page. One in 32 replaces them too slowly
+//! to matter there; one in 4 packed every class from 160 B up and took a sixth off such a
+//! trough, and costs about 1% of cycles wherever it runs (`docs/research/trough-gap.md`). So
+//! the source says how far its fragmentation, free slots on pages that also hold objects, earns
+//! a faster refresh ([`Source::refresh_raise`]): the back end sets it once a lap of its purge
+//! walk from that fragmentation's share of what the small classes have carved, from none under
+//! 1 in 64 to one in 4 from 1 in 16, up at once and down a step a lap. A heap in steady use,
+//! whose share stays near half a percent, pays nothing. All classes are refreshed alike: what
+//! each class's pages hold is not counted, and the back end's count of free slots is one for
+//! all small classes. Classes of 128 B and down do not pack this way (their loaded magazine
+//! recycles in place and rarely retires); the refresh does what it can for the rest.
 
 use super::heartbeat::{Chores, Tried};
 use super::magazine::Magazine;
@@ -110,7 +125,8 @@ const _: () = assert!(size_of::<Obtained<'_>>() <= 16);
 /// workloads (`docs/research/memory.md`, "The parked-object rules, built"). An object in
 /// circulation survives `k` retirements with probability `(31/32)^k`: half are replaced within
 /// 22 and nineteen in twenty within 95, still fast next to the interval for any class that
-/// exchanges often enough for its pages to matter.
+/// exchanges often enough for its pages to matter. The base rate: a fragmented heap halves it
+/// up to three times ("Refresh on evidence" above).
 pub const REFRESH_EVERY: u64 = 32;
 
 impl<'a, O: Os, R: Routines, S: Source> Cache<'a, O, R, S> {
@@ -205,10 +221,15 @@ impl<'a, O: Os, R: Routines, S: Source> Cache<'a, O, R, S> {
     }
 
     /// Whether the full magazine a free on `cpu` just displaced is the one in
-    /// `refresh_every` to launder.
+    /// `refresh_every`, halved as often as the source's fragmentation earns
+    /// ([`Source::refresh_raise`]), to launder.
     fn refreshes(&self, cpu: Cpu) -> bool {
         let every = self.tuning.refresh_every;
-        every != 0 && self.slab(cpu).count_retired().is_multiple_of(every)
+        if every == 0 {
+            return false;
+        }
+        let every = (every >> self.source.refresh_raise().min(63)).max(1);
+        self.slab(cpu).count_retired().is_multiple_of(every)
     }
 
     /// Fills an empty magazine this thread holds from the source, in one call; returns its

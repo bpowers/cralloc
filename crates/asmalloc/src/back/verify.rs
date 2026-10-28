@@ -332,6 +332,24 @@ fn a_large_slot_is_whole_pages() {
     assert!(start.div_ceil(page) * page == start && (end >> page.trailing_zeros()) * page == end);
 }
 
+/// The refresh's raise is at most `REFRESH_RAISE_MAX`, none under a share of 1 in 64 or with
+/// nothing carved, the most from 1 in 16, and never less for more fragmentation.
+#[kani::proof]
+fn a_refresh_raise_follows_the_share_within_its_bounds() {
+    use super::policy::{REFRESH_RAISE_MAX, refresh_raise};
+    let (fragmented, more, carved): (usize, usize, usize) = (kani::any(), kani::any(), kani::any());
+    let raise = refresh_raise(fragmented, carved);
+    assert!(raise <= REFRESH_RAISE_MAX);
+    // A share of at least 1 in n is `fragmented >= carved.div_ceil(n)`.
+    if carved == 0 || fragmented < carved.div_ceil(64) {
+        assert!(raise == 0);
+    }
+    if carved != 0 && fragmented >= carved.div_ceil(16) {
+        assert!(raise == REFRESH_RAISE_MAX);
+    }
+    assert!(refresh_raise(fragmented.saturating_add(more), carved) >= raise);
+}
+
 /// A clocked pass's goal is never more than the last lap found returnable, leaves exactly the
 /// floor of it when there is more, and is zero, a pass that only counts, exactly when there is
 /// no more than the floor.

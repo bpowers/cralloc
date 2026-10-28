@@ -3,7 +3,7 @@
 #
 #   heavy OUTDIR JOB BUILD...      memory runs, under scripts/heavy
 #   timed OUTDIR JOB BUILD...      timed runs, one session under scripts/measure --both-l3
-#   server OUTDIR ROUND            one session of servers.sh
+#   server OUTDIR ROUND [ALLOCS]   one session of servers.sh
 #
 # Run from the repository root; it waits first until no other queue of this probe runs.
 #
@@ -20,7 +20,7 @@ while read -r kind out job rest; do
   case "$kind" in
     heavy) "$root/scripts/heavy" "$here/runs.sh" "$out" "$job" "$rest" ;;
     timed) TG_TIMED=1 "$root/scripts/measure" --both-l3 "$here/runs.sh" "$out" "$job" "$rest" ;;
-    server) "$root/scripts/measure" --both-l3 "$here/servers.sh" "$out" "$job" ;;
+    server) "$root/scripts/measure" --both-l3 "$here/servers.sh" "$out" "$job" $rest ;;
     *) echo "unknown batch kind $kind" ;;
   esac
   echo "$(date -Is) batch ended: $?"

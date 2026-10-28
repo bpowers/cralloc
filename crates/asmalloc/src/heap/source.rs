@@ -81,4 +81,8 @@ impl<O: Os> Source for Back<'_, O> {
         self.distrust_tails();
         self.publish_named();
     }
+
+    fn refresh_raise(&self) -> u32 {
+        Back::refresh_raise(self)
+    }
 }

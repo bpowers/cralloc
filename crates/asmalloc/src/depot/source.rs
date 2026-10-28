@@ -72,6 +72,14 @@ pub trait Source {
     /// may have left half-changed is to be distrusted (the back end's huge-page tails,
     /// `back::tail`, "Repair"), or finished (a region named and not published, `back::tags`).
     fn forked(&self) {}
+
+    /// How many times the depot halves its refresh interval (`slow.rs`, "Refresh"): how far
+    /// the source's free slots on pages that also hold objects say that placing new objects in
+    /// its lowest free slots would pay. Read on a free's slow path when a full magazine
+    /// retires, so it must be one load. None by default.
+    fn refresh_raise(&self) -> u32 {
+        0
+    }
 }
 
 /// What a fill did ([`Source::fill`]).
