@@ -532,7 +532,7 @@ mod tests {
 
     #[test]
     fn confounded_needs_both_ratio_and_floor() {
-        // The Connect h2 runs: asmalloc in its slow mode against jemalloc.
+        // The Connect h2 runs: cralloc in its slow mode against jemalloc.
         assert!(confounded(45.1, 21.2));
         assert!(confounded(21.2, 26.0));
         // The order service's runs, whose tails differ for another reason.

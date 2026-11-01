@@ -31,10 +31,9 @@ fn main() {
     // Every feature of this crate names an allocator.
     let chosen: Vec<String> = std::env::vars()
         .filter_map(|(k, _)| k.strip_prefix("CARGO_FEATURE_").map(|f| f.to_lowercase().replace('_', "-")))
-        // Measurement options on top of the asmalloc feature, not allocators.
+        // Measurement options on top of the cralloc feature, not allocators.
         .filter(|f| {
-            !["asmalloc-memstat", "asmalloc-background", "asmalloc-domains", "live-bytes", "memacct"]
-                .contains(&f.as_str())
+            !["cralloc-memstat", "cralloc-background", "cralloc-domains", "live-bytes", "memacct"].contains(&f.as_str())
         })
         .collect();
     if chosen.len() > 1 {

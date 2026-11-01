@@ -3,13 +3,13 @@
 # quiet run whose light work never leaves the magazines, with the thread off and on and against
 # jemalloc, natively and through the preload library, interleaved; then a summary.
 # usage: background.sh <worktree> <cpu> <rounds>
-# Needs: build.sh <worktree>/bench asmalloc bg=asmalloc-background je sys=
-#        cargo build --release -p asmalloc-preload, and bench/baselines/build.sh for jemalloc.
+# Needs: build.sh <worktree>/bench cralloc bg=cralloc-background je sys=
+#        cargo build --release -p cralloc-preload, and bench/baselines/build.sh for jemalloc.
 set -u
 root="$1"; cpu="$2"; rounds="$3"
 out="${OUT:-$root/bench/target/memory-out/background}"
 mkdir -p "$out"
-lib="$root/target/release/libasmalloc_preload.so"
+lib="$root/target/release/libcralloc_preload.so"
 je="${JE:-$(git -C "$root" rev-parse --path-format=absolute --git-common-dir)/../bench/baselines/out/jemalloc/libjemalloc.so}"
 t="$root/bench/target"
 args=(quiet live=2M sizes=small secs=16 after=pairs after_sizes=small)
@@ -19,12 +19,12 @@ run() {
     "$@" "${args[@]}" >"$out/$name.$round.log" 2>&1 || echo "$name round $round failed"
 }
 for round in $(seq 1 "$rounds"); do
-  run rust-off "$round" env -u ASMALLOC_BACKGROUND "$t/asmalloc/release/workload"
-  run rust-on "$round" env -u ASMALLOC_BACKGROUND "$t/bg/release/workload"
-  run rust-je "$round" env -u ASMALLOC_BACKGROUND "$t/je/release/workload"
-  run pre-off "$round" env -u ASMALLOC_BACKGROUND LD_PRELOAD="$lib" "$t/sys/release/workload"
-  run pre-on "$round" env ASMALLOC_BACKGROUND=1 LD_PRELOAD="$lib" "$t/sys/release/workload"
-  run pre-je "$round" env -u ASMALLOC_BACKGROUND LD_PRELOAD="$je" "$t/sys/release/workload"
+  run rust-off "$round" env -u CRALLOC_BACKGROUND "$t/cralloc/release/workload"
+  run rust-on "$round" env -u CRALLOC_BACKGROUND "$t/bg/release/workload"
+  run rust-je "$round" env -u CRALLOC_BACKGROUND "$t/je/release/workload"
+  run pre-off "$round" env -u CRALLOC_BACKGROUND LD_PRELOAD="$lib" "$t/sys/release/workload"
+  run pre-on "$round" env CRALLOC_BACKGROUND=1 LD_PRELOAD="$lib" "$t/sys/release/workload"
+  run pre-je "$round" env -u CRALLOC_BACKGROUND LD_PRELOAD="$je" "$t/sys/release/workload"
 done
 # Median anonymous resident MiB over the rounds, after the frees and at each time shown.
 python3 -I - "$out" <<'EOF'

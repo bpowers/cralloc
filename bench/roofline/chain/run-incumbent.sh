@@ -18,4 +18,4 @@ run() {
 }
 export -f run
 export out rounds bins
-flock /tmp/asmalloc-measure.lock "$root/scripts/memlimit" -m 1G -t 20m -- bash -c run
+flock /tmp/cralloc-measure.lock "$root/scripts/memlimit" -m 1G -t 20m -- bash -c run

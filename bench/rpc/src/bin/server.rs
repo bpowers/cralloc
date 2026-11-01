@@ -6,9 +6,9 @@
 //! `store` serves the log store (`bench_rpc::store`): ingest keeps records, `ServerStream`
 //! tails them; it starts with `keep` records (default 1,000,000) before it listens.
 //!
-//! Built with the `maintenance` feature (and asmalloc as the allocator), `BENCH_MAINTAIN` picks
-//! what runs asmalloc's maintenance while the server is silent: `task` a task on the runtime,
-//! `thread` asmalloc's background thread, anything else nothing.
+//! Built with the `maintenance` feature (and cralloc as the allocator), `BENCH_MAINTAIN` picks
+//! what runs cralloc's maintenance while the server is silent: `task` a task on the runtime,
+//! `thread` cralloc's background thread, anything else nothing.
 //!
 //! Workers are pinned to `BENCH_CPUS` (default: as many workers as CPUs listed). Prints
 //! `BENCH_LISTEN addr` once bound; on SIGINT or SIGTERM it stops and prints a `BENCH_RESULT`
@@ -31,12 +31,12 @@ fn main() {
     let store = (service == "store").then(|| rt.block_on(async { Arc::new(Store::new(keep)) }));
     #[cfg(feature = "maintenance")]
     if std::env::var("BENCH_MAINTAIN").as_deref() == Ok("thread") {
-        asmalloc::Asmalloc::start_background().expect("asmalloc's background thread starts");
+        cralloc::Cralloc::start_background().expect("cralloc's background thread starts");
     }
     rt.block_on(async {
         #[cfg(feature = "maintenance")]
         if std::env::var("BENCH_MAINTAIN").as_deref() == Ok("task") {
-            drop(asmalloc_tokio::spawn_maintenance().expect("a runtime with a timer"));
+            drop(cralloc_tokio::spawn_maintenance().expect("a runtime with a timer"));
         }
         let mut bound = connectrpc::server::Server::bind("127.0.0.1:0").await.expect("bind");
         // connectrpc closes a keep-alive HTTP/1.1 connection that waits 30 s for its next

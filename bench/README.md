@@ -25,7 +25,7 @@ cargo build --release -p bench-runner
 ./target/release/benchrun report results/full-*.jsonl --detail
 ```
 
-The `backend` suite is seven small jobs that each exposed a cost of asmalloc's back end
+The `backend` suite is seven small jobs that each exposed a cost of cralloc's back end
 (`docs/research/baselines.md`, "Smoke set for the back end"); run it, against the
 incumbents, on every change to the back end. `benchrun list --suite full` prints the jobs.
 `run` takes `--only TEXT` (jobs whose id
@@ -37,7 +37,7 @@ the quiet-machine gate below. Builds run on `BENCH_BUILD_CPUS` (default `12-15,2
 `run` takes no lock itself: start it under `scripts/measure --both-l3`, since the suite uses
 both L3s.
 
-`build` and `run` refuse an asmalloc build whose routines load the rseq offset at a slab hot
+`build` and `run` refuse an cralloc build whose routines load the rseq offset at a slab hot
 word's page offset (`scripts/rseq-offset-check`): every allocation of that class could wait for
 the previous one, and the session would measure the link (`docs/research/zen5-roofline.md`,
 section 16). `run` records the offsets in its session record.
@@ -49,8 +49,8 @@ commas, and `--group NAME` keeps one group's jobs (`benchrun list` prints the gr
 measuring where its code landed before looking for a cause in the allocator:
 
 ```
-./target/release/benchrun layout --suite backend --only "vecgrow 1x4Mi"   # asmalloc, five rounds
-./target/release/benchrun layout --suite full --group single-thread --allocators asmalloc,jemalloc
+./target/release/benchrun layout --suite backend --only "vecgrow 1x4Mi"   # cralloc, five rounds
+./target/release/benchrun layout --suite full --group single-thread --allocators cralloc,jemalloc
 ```
 
 `layout` builds the workloads again in several ways that place the same code at other
@@ -59,7 +59,7 @@ loop aligned to 64 bytes; the linker's function order shuffled with seed 1, and 
 runs the jobs under each, interleaved, as `run` interleaves allocators, and prints each
 layout's median against the default, the spread (largest median over smallest), the noise
 (the largest half-IQR of one layout's runs) and the spread of the process's instructions. It
-takes the shared measurement lock (`/tmp/asmalloc-measure.lock`) itself, for the
+takes the shared measurement lock (`/tmp/cralloc-measure.lock`) itself, for the
 measurement only, so do not wrap it in `flock`. `--no-build` reuses the variants built last
 time. A spread of more than about 3% beyond the noise, with instructions level, means the
 job's time depends on code placement; `perf annotate` of plain cycles samples
@@ -83,7 +83,7 @@ over the layouts. Run one round a session and combine the sessions with
 
 ```
 ./target/release/benchrun layout --suite servers --only "=connect log grpc h2" \
-  --allocators asmalloc,jemalloc,tcmalloc-percpu --layouts pads --rounds 1
+  --allocators cralloc,jemalloc,tcmalloc-percpu --layouts pads --rounds 1
 ```
 
 The baseline libraries and the raw results live in the main checkout, shared by every
@@ -101,7 +101,7 @@ cannot be rebuilt under a session.
 | `baselines/` | `build.sh` rebuilds glibc's peers into the shared `baselines/out/` (gitignored) and records versions, commits and flags in `out/manifest/`. `probe.c` is a preloaded library that reports which allocator, mode and library a process ran with. |
 | `alloc/` | `bench-alloc`: the `#[global_allocator]`, chosen by cargo feature: the allocator's usual Rust crate itself (jemalloc), or the library called the way that crate calls it. |
 | `harness/` | `bench-harness`: pinning, in-process counters over a measured phase, seeded size distributions, the result line. |
-| `backend/` | `backbench`: asmalloc's back-end launder and fill on their own, per class and pointer order. |
+| `backend/` | `backbench`: cralloc's back-end launder and fill on their own, per class and pointer order. |
 | `workloads/` | The `workload` binary: cross-thread, work-stealing and single-threaded workloads. |
 | `rpc/` | connect-rust's echo and log-ingest benchmarks as `rpc-server` (allocator under test) and `rpc-client` (fixed). See `rpc/README.md`. |
 | `apps/` | Real Rust programs, each a workspace of its own with a driver; the `apps` and `servers` suites, built by `benchrun build-apps`. See `apps/README.md`. |
@@ -117,9 +117,9 @@ cannot be rebuilt under a session.
    in) and `version()`, plus a `GlobalAlloc` unless the allocator's crate provides one; the
    four lines in `alloc/src/lib.rs` that select the module and set `#[global_allocator]`;
    and a branch in `alloc/build.rs` only if it links a library from `baselines/out`. For
-   asmalloc the feature is a path dependency,
-   `asmalloc = ["dep:asmalloc", "asmalloc/executable"]` with
-   `asmalloc = { path = "../../crates/asmalloc", optional = true }`, as `je` is for
+   cralloc the feature is a path dependency,
+   `cralloc = ["dep:cralloc", "cralloc/executable"]` with
+   `cralloc = { path = "../../crates/cralloc", optional = true }`, as `je` is for
    `tikv-jemallocator`.
 2. Add an entry to `allocators.toml` with that `feature`, the `preload` library if it has
    one, and what the process must report about itself (`expect`). A preload library must
@@ -233,7 +233,7 @@ cannot be rebuilt under a session.
 Choices that can favour one allocator, not yet tested either way; read the numbers with them:
 
 - Transparent huge pages are as the machine has them (`madvise` mode on the reference
-  machine). mimalloc asks for huge pages for its whole heap and asmalloc for dense classes
+  machine). mimalloc asks for huge pages for its whole heap and cralloc for dense classes
   past a threshold, which decides the build-and-drop jobs; a session with THP `always` would
   show the other side. `probes/memory/thp-off.py COMMAND` runs a workload with THP disabled
   for the process, which treats every allocator alike.

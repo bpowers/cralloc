@@ -1,4 +1,4 @@
-/* Size classes as crates/asmalloc/src/classes defines them, and the tables the generated
+/* Size classes as crates/cralloc/src/classes defines them, and the tables the generated
  * routines read (see gen.py for their layout). Shared by the driver and the stand-in. */
 #ifndef CENTRY_CLASSES_H
 #define CENTRY_CLASSES_H

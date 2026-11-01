@@ -29,7 +29,7 @@ pub const DEFAULT: &str = "default,loops64,shuffle1,shuffle2";
 pub const PADS: &str = "pad00,pad16,pad32,pad48,pad64";
 
 /// Every timed measurement on the machine takes this lock (CLAUDE.md, "How we work").
-const MEASURE_LOCK: &str = "/tmp/asmalloc-measure.lock";
+const MEASURE_LOCK: &str = "/tmp/cralloc-measure.lock";
 
 pub struct Layout {
     pub name: String,
@@ -90,7 +90,7 @@ pub fn parse(list: &str) -> Result<Vec<Layout>, String> {
     Ok(v)
 }
 
-/// Each allocator under each layout, as allocators of their own (`asmalloc@loops64`), so that
+/// Each allocator under each layout, as allocators of their own (`cralloc@loops64`), so that
 /// a session interleaves them as it interleaves allocators.
 pub fn variants(bases: &[Allocator], layouts: &[Layout]) -> Vec<Allocator> {
     bases

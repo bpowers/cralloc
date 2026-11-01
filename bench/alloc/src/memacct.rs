@@ -18,13 +18,13 @@
 //!   tells a private file page that was written (and so charged to this process) from one that
 //!   was only read.
 //!
-//! `bench/probes/memory/acct.py` turns this, the binary's symbol table and asmalloc's `memstat`
+//! `bench/probes/memory/acct.py` turns this, the binary's symbol table and cralloc's `memstat`
 //! breakdown into a table by structure. The handler never calls the global allocator: buffers
 //! come from `mmap` and text is formatted into a fixed buffer.
 use std::fmt::Write as _;
 
 const PAGE: usize = 4096;
-/// Mappings larger than this (asmalloc's reservation, glibc's arena reservations) are left to
+/// Mappings larger than this (cralloc's reservation, glibc's arena reservations) are left to
 /// smaps' totals and the allocator's own walk.
 const PAGEMAP_LIMIT: usize = 1 << 30;
 const READ_BUF: usize = 16 << 20;
@@ -203,7 +203,8 @@ extern "C" fn dump() {
     if !wait.is_null() {
         // SAFETY: a NUL-terminated string.
         let ms: u64 = unsafe { std::ffi::CStr::from_ptr(wait) }.to_str().ok().and_then(|s| s.parse().ok()).unwrap_or(0);
-        let ts = libc::timespec { tv_sec: (ms / 1000) as libc::time_t, tv_nsec: (ms % 1000 * 1_000_000) as libc::c_long };
+        let ts =
+            libc::timespec { tv_sec: (ms / 1000) as libc::time_t, tv_nsec: (ms % 1000 * 1_000_000) as libc::c_long };
         // SAFETY: nanosleep reads one timespec.
         unsafe { libc::nanosleep(&ts, std::ptr::null_mut()) };
     }
@@ -309,7 +310,7 @@ extern "C" fn start() {
 }
 
 /// Runs `start` before `main`. The handler it registers runs after `main` returns, after every
-/// handler registered later (asmalloc's memstat sampler, if any, has then written its own).
+/// handler registered later (cralloc's memstat sampler, if any, has then written its own).
 #[used]
 #[unsafe(link_section = ".init_array")]
 static START: extern "C" fn() = start;

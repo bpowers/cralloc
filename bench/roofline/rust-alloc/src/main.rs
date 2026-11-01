@@ -132,7 +132,7 @@ static A: je::Je = je::Je;
 static A: floors::Floor = floors::Floor;
 #[cfg(feature = "asm")]
 #[global_allocator]
-static A: asmalloc::Asmalloc = asmalloc::Asmalloc;
+static A: cralloc::Cralloc = cralloc::Cralloc;
 #[cfg(feature = "slab")]
 #[global_allocator]
 static A: slab::Slab = slab::Slab;

@@ -1,5 +1,5 @@
 -------------------------------- MODULE Tail --------------------------------
-(* The boundary of a region's huge-page tail (crates/asmalloc/src/back/tail.rs).
+(* The boundary of a region's huge-page tail (crates/cralloc/src/back/tail.rs).
 
    A region's huge-page part has units 1..N. The kernel holds advice per unit,
    "on" or "off". The tail word says where the advice is off: `from` = 0 for

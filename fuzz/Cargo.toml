@@ -1,5 +1,5 @@
 [package]
-name = "asmalloc-fuzz"
+name = "cralloc-fuzz"
 version = "0.0.0"
 edition = "2024"
 license = "Apache-2.0 OR BSD-3-Clause"
@@ -12,7 +12,7 @@ cargo-fuzz = true
 [dependencies]
 libfuzzer-sys = "0.4"
 # Fuzzing needs nightly anyway, and nightly has the `Allocator` trait.
-asmalloc-testkit = { path = "../crates/asmalloc-testkit", features = ["allocator-api"] }
+cralloc-testkit = { path = "../crates/cralloc-testkit", features = ["allocator-api"] }
 
 [[bin]]
 name = "model"

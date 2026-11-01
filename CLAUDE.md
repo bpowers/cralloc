@@ -1,4 +1,4 @@
-# asmalloc
+# cralloc
 
 A memory allocator for multithreaded Rust programs on modern Linux: per-CPU caches under
 restartable sequences, assembly fast paths generated from and proved in Lean, and lock-free
@@ -32,7 +32,7 @@ process light.
   TLA+, Miri, fuzzing and the preload checks run on demand. The slow steps have time limits
   that count the time heavy work spends paused for a measurement, so on a busy machine one
   can time out (exit 124, or a proof marked FAILED with no failing check): rerun that step
-  alone with `ASMALLOC_TEST_TIMEOUT` or `KANI_TIMEOUT` raised before reading it as a failure.
+  alone with `CRALLOC_TEST_TIMEOUT` or `KANI_TIMEOUT` raised before reading it as a failure.
 - The machine is shared. Stop only processes you started, by process ID; never kill by
   name (`pkill`, `killall`), since another teammate may be running the same tool.
 - Timed measurements do not share cores, or a cache, with anything else. Run every build,
@@ -44,7 +44,7 @@ process light.
   start heavy work any other way, or a measurement cannot pause it.
 - Everything that runs the allocator runs under a memory cap. An uncapped test once took
   57 GiB and the machine with it. `cargo test`, `cargo run` and `cargo bench` are capped by
-  the workspace's cargo runner (`scripts/run-capped`: 4 GiB unless `ASMALLOC_TEST_MEM` says
+  the workspace's cargo runner (`scripts/run-capped`: 4 GiB unless `CRALLOC_TEST_MEM` says
   otherwise). Anything started another way, such as a benchmark runner, a fuzzer, a preload
   run or a probe built with `rustc`, goes through `scripts/memlimit`. Never set a cap above
   16 GiB, and run one memory-heavy job at a time.

@@ -1,12 +1,12 @@
 module
 
-import Asmalloc.Spec.Selftest
+import Cralloc.Spec.Selftest
 meta import Lean
-public import Asmalloc.TCB.X86_64.Target
-public import Asmalloc.Impl.Selftest.X86_64
-import Asmalloc.Proof.Framework.Semantics
-public import Asmalloc.Proof.Framework.Contract
-public import Asmalloc.Spec.Selftest.Contract
+public import Cralloc.TCB.X86_64.Target
+public import Cralloc.Impl.Selftest.X86_64
+import Cralloc.Proof.Framework.Semantics
+public import Cralloc.Proof.Framework.Contract
+public import Cralloc.Spec.Selftest.Contract
 import all Init.Data.Array.Basic
 import all Init.Data.Array.DecidableEq
 import all Init.Data.Nat.Bitwise.Basic

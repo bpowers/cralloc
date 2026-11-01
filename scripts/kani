@@ -7,8 +7,8 @@
 # heaps, small unwind bounds) rather than raising it.
 #
 # Examples:
-#   scripts/kani -p asmalloc --harness the_class_function_is_monotone
-#   KANI_MEM=12G KANI_TIMEOUT=1h scripts/kani -p asmalloc --harness some_slow_harness
+#   scripts/kani -p cralloc --harness the_class_function_is_monotone
+#   KANI_MEM=12G KANI_TIMEOUT=1h scripts/kani -p cralloc --harness some_slow_harness
 #
 # One invocation runs its harnesses one after another in one cgroup, and CBMC's memory use
 # accumulates across them, so run large harnesses one per invocation (scripts/kani-all does).

@@ -47,7 +47,7 @@
 //! `RssAnon` less that bookkeeping, and `ratio` is `heap` over `live`. `cgroup` is the
 //! process's cgroup's `memory.current`, everything the kernel charges for it.
 //!
-//! With `account_every=N`, a build that can break its heap down (asmalloc's `memstat`) does
+//! With `account_every=N`, a build that can break its heap down (cralloc's `memstat`) does
 //! so at every `N`-th sample, at the last sample of the load and at the last quiet one, while
 //! every thread is stopped, so the breakdown is exact.
 use bench_harness::report::Measure;

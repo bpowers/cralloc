@@ -9,9 +9,9 @@
 # Per job, round and build (bench/target/<label>/release), interleaved by round: the cgroup's
 # memory.peak, the workload's primary metric, and in $OUT (default bench/target/memory-out/acct)
 # the accounting files a build with `memacct` writes at exit (<tag>.acct) and, for
-# asmalloc-memstat builds, the heap breakdown (<tag>.memstat). acct.py reads them.
+# cralloc-memstat builds, the heap breakdown (<tag>.memstat). acct.py reads them.
 #
-# Hold /tmp/asmalloc-measure.lock around it: the jobs run on the measurement CPUs.
+# Hold /tmp/cralloc-measure.lock around it: the jobs run on the measurement CPUs.
 set -uo pipefail
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 root="$1"; labels="$2"; rounds="$3"; shift 3

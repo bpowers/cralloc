@@ -18,14 +18,14 @@
 # (bench/runner/src/cpuidle.rs, read from there too). The setting lasts until it is changed
 # back or the machine restarts. This script never calls sudo itself: without root, `off` and
 # `on` print the command to run and exit 1.
-#   ASMALLOC_CPUIDLE_ROOT  where the CPUs are, default /sys/devices/system/cpu (tests use a
+#   CRALLOC_CPUIDLE_ROOT  where the CPUs are, default /sys/devices/system/cpu (tests use a
 #                          directory shaped like it).
 set -euo pipefail
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 self="$here/$(basename "${BASH_SOURCE[0]}")"
 suite="$here/../bench/runner/src/suite.rs"
 cpuidle_rs="$here/../bench/runner/src/cpuidle.rs"
-root="${ASMALLOC_CPUIDLE_ROOT:-/sys/devices/system/cpu}"
+root="${CRALLOC_CPUIDLE_ROOT:-/sys/devices/system/cpu}"
 
 die() {
   echo "deep-idle: $*" >&2

@@ -53,7 +53,7 @@ if command -v systemd-run >/dev/null 2>&1 \
   set +e
   # Under scripts/heavy the scope stays in the slice that a measurement pauses.
   systemd-run --user --scope -q --unit="$unit" \
-    ${ASMALLOC_HEAVY_SLICE:+--slice="$ASMALLOC_HEAVY_SLICE"} \
+    ${CRALLOC_HEAVY_SLICE:+--slice="$CRALLOC_HEAVY_SLICE"} \
     -p MemoryMax="$MEM" -p MemorySwapMax=0 \
     -- timeout --signal=TERM --kill-after=30s "$TIMEOUT" "$@"
   status=$?
@@ -72,7 +72,7 @@ if command -v systemd-run >/dev/null 2>&1 \
   fi
   exit "$status"
 else
-  # The fallback caps address space, not memory. asmalloc sizes its regions from the address
+  # The fallback caps address space, not memory. cralloc sizes its regions from the address
   # space it may reserve, so under this limit it runs with smaller regions and places large
   # blocks differently: fine for a test, wrong for a measurement, and the bench runner refuses
   # to measure under it. The usual cause is an environment without the session's systemd
@@ -80,7 +80,7 @@ else
   # and strip it inside, after the cap (`memlimit -- env -i ... command`).
   {
     echo "memlimit: WARNING: systemd-run unavailable; falling back to prlimit --as=$MEM."
-    echo "memlimit: WARNING: this limits address space, not memory, and asmalloc shrinks its"
+    echo "memlimit: WARNING: this limits address space, not memory, and cralloc shrinks its"
     echo "memlimit: WARNING: regions to fit it. Do not time anything under it."
   } >&2
   exec prlimit --as="$(to_bytes "$MEM")" -- timeout --signal=TERM --kill-after=30s "$TIMEOUT" "$@"

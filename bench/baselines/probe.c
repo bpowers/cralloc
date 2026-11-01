@@ -58,22 +58,22 @@ __attribute__((destructor)) static void bench_probe_report(void) {
     }
   }
 
-  // asmalloc is recognised by a symbol of its own in the object that serves malloc, not by a
-  // global lookup: asmalloc_version if the library exports it, else, for libraries from
-  // before it did, the unwinding stub only asmalloc-preload defines.
+  // cralloc is recognised by a symbol of its own in the object that serves malloc, not by a
+  // global lookup: cralloc_version if the library exports it, else, for libraries from
+  // before it did, the unwinding stub only cralloc-preload defines.
   const char *(*asm_version)(void) = NULL;
   bool asm_lib = false;
   if (!in_executable && map != NULL) {
     void *h = dlopen(map->l_name, RTLD_LAZY | RTLD_NOLOAD);
     if (h != NULL) {
-      asm_version = (const char *(*)(void))dlsym(h, "asmalloc_version");
-      asm_lib = asm_version != NULL || dlsym(h, "asmalloc_preload_no_unwinding") != NULL;
+      asm_version = (const char *(*)(void))dlsym(h, "cralloc_version");
+      asm_lib = asm_version != NULL || dlsym(h, "cralloc_preload_no_unwinding") != NULL;
       dlclose(h);
     }
   }
 
   const char *allocator = "glibc";
-  if (asm_lib) allocator = "asmalloc";
+  if (asm_lib) allocator = "cralloc";
   else if (tc_percpu != NULL) allocator = "tcmalloc";
   else if (mi_version != NULL) allocator = "mimalloc";
   else if (je_mallctl != NULL) allocator = "jemalloc";

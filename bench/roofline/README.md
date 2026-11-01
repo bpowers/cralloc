@@ -17,7 +17,7 @@ L3; override with the environment variables below.
 |---|---|---|
 | `kernels/` | Hand-written assembly fast paths, store-to-load forwarding, atomics, call cost, core widths, and a code-layout sweep. Cycles, instructions, retired uops and forwards per operation. | `cargo run --release -- [prefix,...]` |
 | `rust-alloc/` | Allocation workloads through Rust's global allocator for glibc, mimalloc, jemalloc and two floor allocators, single-threaded and cross-thread. | `./run.sh [workload-prefix]` |
-| `fastpath/` | A check that fails if asmalloc's own fast path stops inlining under fat LTO: the hot loop of each kind of call site must hold both rseq sequences and no call. Prints each loop's bytes. Seconds. | `taskset -c 4-7 ./check.py` |
+| `fastpath/` | A check that fails if cralloc's own fast path stops inlining under fat LTO: the hot loop of each kind of call site must hold both rseq sequences and no call. Prints each loop's bytes. Seconds. | `taskset -c 4-7 ./check.py` |
 | `oscost/` | Cost of mmap, page faults, the madvise family, mprotect, guard pages and zeroing; and (`faults`) demand faults against populate stretches and huge pages, one to four threads, huge-page advice around a slot, partial purges of huge pages, khugepaged on sparse memory. | `cargo run --release`, `target/release/faults single\|threads\|advice\|split\|khuge` |
 | `centry/` | The C entry points: candidate `malloc`, `free` and `calloc` routines reached directly, through the PLT and through the GOT; a preloadable stand-in around the best of them, compared with glibc, jemalloc, mimalloc and tcmalloc from plain C loops. | `./build.sh`, then `./run.sh run PATTERN` and `./compare.sh` |
 | `chain/` | The slab word's store-to-load chain against code placement: the generated inline free and allocation, the tree job's drop, and `c_free`/`c_malloc`, each placed at every offset in a 64-byte line and across 4 KiB, read from the generated files; and mimalloc's free and malloc moved the same way. | `cargo run --release -- FORMS [PLACES]`; see below |
@@ -48,7 +48,7 @@ CPUs those two columns are meaningless.
 ### The proved slab routines
 
 `gen_routines.py` (run at build time) emits hand-written copies of the routines in
-`crates/asmalloc/src/front/generated/`, instruction for instruction, and variants that each
+`crates/cralloc/src/front/generated/`, instruction for instruction, and variants that each
 change one thing: their placement in a cache line, their encoding (short jumps, registers,
 address arithmetic, where the mask table sits), the CPU-number test, how `__rseq_offset` is
 read, per-class entries, and an inline pop that calls its slow path. The script's docstring
@@ -82,7 +82,7 @@ RF_EVENTS=ocmiss,ldwait,stli ./target/release/roofline-chain td,if,cf 0-63   # u
 ```
 
 `gen.py`'s docstring names the forms. The kernels take the routines' text from
-`crates/asmalloc/src/front/generated/` at build time, so they always run what the generator emits.
+`crates/cralloc/src/front/generated/` at build time, so they always run what the generator emits.
 `RF_EVENTS` takes up to three events by name (the table in `src/main.rs`) or `name=0xCONFIG`, on
 plain counters; a multiplexed repetition is dropped. `RF_CPU` (2), `RF_OPS`, `RF_REPS`,
 `RF_ROUNDS` as for the kernels.
@@ -138,7 +138,7 @@ MI_LIB_DIR=/tmp/mi ./run.sh x_        # only the cross-thread workloads
 ```
 
 `run.sh` builds one binary per allocator (cargo feature `mi`, `mi_sized`, `je`, `floor_tls`,
-`floor_heap`, `asm` for asmalloc, `asm_exe` for asmalloc with its `executable` feature, or none
+`floor_heap`, `asm` for cralloc, `asm_exe` for cralloc with its `executable` feature, or none
 for glibc) and profile, then runs them. mimalloc and jemalloc are called
 the way the `mimalloc` and `tikv-jemallocator` crates call them. Without `MI_LIB_DIR` the
 mimalloc variants are skipped.

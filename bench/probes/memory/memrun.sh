@@ -12,11 +12,11 @@ for feat in ${feats//,/ }; do
   bin="$root/bench/target/$feat/release/workload"
   log="$out/$tag.$feat.log"
   stat="/dev/null"
-  case "$feat" in *-ms|asmalloc-memstat) stat="$out/$tag.$feat.memstat" ;; esac
+  case "$feat" in *-ms|cralloc-memstat) stat="$out/$tag.$feat.memstat" ;; esac
   rm -f "$log.peak"
   wrap=()
   if [ -n "${CONFINE:-}" ]; then wrap=(taskset -c "$cpus"); fi
-  ASMALLOC_MEMSTAT="$stat" ASMALLOC_MEMSTAT_MS="${MS:-10}" BENCH_CPUS="$cpus" MEMLIMIT_QUIET=1 \
+  CRALLOC_MEMSTAT="$stat" CRALLOC_MEMSTAT_MS="${MS:-10}" BENCH_CPUS="$cpus" MEMLIMIT_QUIET=1 \
     "$root/scripts/memlimit" -m "${CAP:-4G}" -t 5m -- \
     bash "$here/incg.sh" "$log.peak" "${wrap[@]}" "$bin" "$@" >"$log" 2>&1
   echo "== $tag $feat  cgroup_peak_MiB=$(awk '{printf "%.1f", $1/1048576}' "$log.peak" 2>/dev/null)"

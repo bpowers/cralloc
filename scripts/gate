@@ -85,7 +85,7 @@ tests() {
       cargo test --workspace --quiet --doc &&
       # The depot's full interleaving explorations exist only in optimized builds: a debug build
       # takes ten times as long, over ten minutes for one of them (depot/interleave.rs).
-      cargo test --release -p asmalloc --lib --quiet -- --ignored depot::interleave::run::
+      cargo test --release -p cralloc --lib --quiet -- --ignored depot::interleave::run::
   else
     cargo test --workspace --quiet
   fi
@@ -93,7 +93,7 @@ tests() {
 
 proofs() {
   MEMLIMIT_QUIET=1 KANI_TIMEOUT="${KANI_TIMEOUT:-5m}" \
-    "$here/kani" -p asmalloc --harness ::verify:: --output-format terse || return
+    "$here/kani" -p cralloc --harness ::verify:: --output-format terse || return
   if [ -n "$all" ]; then
     "$here/kani-all" verify_slow
   fi
@@ -103,10 +103,10 @@ lints() {
   # Not --all-features: some crates have features that need nightly (the testkit's
   # `allocator-api`). The allocator's `sim` feature is linted on its own.
   cargo clippy --workspace --all-targets --quiet -- -D warnings &&
-    cargo clippy -p asmalloc --all-targets --features sim --quiet -- -D warnings &&
+    cargo clippy -p cralloc --all-targets --features sim --quiet -- -D warnings &&
     # The build without the background thread is the one that asks nothing of a C library
     # (CLAUDE.md), and nothing else builds it.
-    cargo clippy -p asmalloc --all-targets --no-default-features --quiet -- -D warnings
+    cargo clippy -p cralloc --all-targets --no-default-features --quiet -- -D warnings
 }
 
 # The musl build: the allocator brings and registers its own rseq area there (front/area.rs).
@@ -118,8 +118,8 @@ musl() {
       "(rustup target add x86_64-unknown-linux-musl)"
     return 0
   fi
-  cargo clippy -p asmalloc --all-targets --target x86_64-unknown-linux-musl --quiet -- -D warnings &&
-    cargo test -p asmalloc --lib --target x86_64-unknown-linux-musl --quiet front::
+  cargo clippy -p cralloc --all-targets --target x86_64-unknown-linux-musl --quiet -- -D warnings &&
+    cargo test -p cralloc --lib --target x86_64-unknown-linux-musl --quiet front::
 }
 
 step format cargo fmt --all --check

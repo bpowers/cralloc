@@ -3,18 +3,6 @@
 version = 4
 
 [[package]]
-name = "asmalloc"
-version = "0.1.0"
-
-[[package]]
-name = "asmalloc-tokio"
-version = "0.1.0"
-dependencies = [
- "asmalloc",
- "tokio",
-]
-
-[[package]]
 name = "async-trait"
 version = "0.1.92"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -41,7 +29,7 @@ checksum = "72b3254f16251a8381aa12e40e3c4d2f0199f8c6508fbecb9d91f575e0fbb8c6"
 name = "bench-alloc"
 version = "0.0.0"
 dependencies = [
- "asmalloc",
+ "cralloc",
  "libc",
  "mimalloc",
  "snmalloc-rs",
@@ -60,8 +48,8 @@ dependencies = [
 name = "bench-backend"
 version = "0.0.0"
 dependencies = [
- "asmalloc",
  "bench-harness",
+ "cralloc",
 ]
 
 [[package]]
@@ -77,14 +65,14 @@ dependencies = [
 name = "bench-rpc"
 version = "0.0.0"
 dependencies = [
- "asmalloc",
- "asmalloc-tokio",
  "bench-alloc",
  "bench-harness",
  "buffa",
  "buffa-types",
  "bytes",
  "connectrpc",
+ "cralloc",
+ "cralloc-tokio",
  "futures",
  "http",
  "http-body",
@@ -231,6 +219,18 @@ dependencies = [
  "tower-http",
  "tracing",
  "wasm-bindgen-futures",
+]
+
+[[package]]
+name = "cralloc"
+version = "0.1.0"
+
+[[package]]
+name = "cralloc-tokio"
+version = "0.1.0"
+dependencies = [
+ "cralloc",
+ "tokio",
 ]
 
 [[package]]

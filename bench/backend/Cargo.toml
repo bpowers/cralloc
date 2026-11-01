@@ -5,7 +5,7 @@ edition.workspace = true
 license.workspace = true
 publish.workspace = true
 
-# Launder and fill of asmalloc's back end on their own, against a heap of the benchmark's own
+# Launder and fill of cralloc's back end on their own, against a heap of the benchmark's own
 # (the process's global allocator stays glibc's).
 [[bin]]
 name = "backbench"
@@ -18,5 +18,5 @@ path = "src/contend.rs"
 
 [dependencies]
 # `internals`: the back end itself is what this measures.
-asmalloc = { path = "../../crates/asmalloc", features = ["internals"] }
+cralloc = { path = "../../crates/cralloc", features = ["internals"] }
 bench-harness.workspace = true

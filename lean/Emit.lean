@@ -1,13 +1,13 @@
-import Asmalloc.TCB.Emit
-import Asmalloc.TCB.Axioms
-import Asmalloc.TCB.Audit
+import Cralloc.TCB.Emit
+import Cralloc.TCB.Axioms
+import Cralloc.TCB.Audit
 
 /-!
 # The emitter
 
 Renders every artifact (those of each registration file under
-`Asmalloc/Artifacts/`, see `Asmalloc/TCB/Emit.lean`) into Rust, by default
-under `../crates/asmalloc/src/front/generated/` (relative to `lean/`), where
+`Cralloc/Artifacts/`, see `Cralloc/TCB/Emit.lean`) into Rust, by default
+under `../crates/cralloc/src/front/generated/` (relative to `lean/`), where
 the allocator compiles them. Run it from `lean/`:
 
 * `lake env lean --run Emit.lean [DIR]` writes the files (and deletes stale
@@ -64,7 +64,7 @@ unsafe def main (args : List String) : IO UInt32 := do
   let mods ← VG.Emit.registrations
   let build ← IO.Process.spawn
     { cmd := "lake",
-      args := #["build", "--log-level=warning", "+Asmalloc.TCB.Emit"] ++
+      args := #["build", "--log-level=warning", "+Cralloc.TCB.Emit"] ++
         (mods.map ("+" ++ ·)).toArray }
   let code ← build.wait
   unless code == 0 do return code
@@ -74,7 +74,7 @@ unsafe def main (args : List String) : IO UInt32 := do
   -- project may declare one: `scripts/check_lean_imports.py` refuses the
   -- syntax, and `audit` (`VG.compilerOverrides`) the declarations.
   enableInitializersExecution
-  let imports := ("Asmalloc.TCB.Emit" :: mods).map fun m => ({ module := m.toName } : Import)
+  let imports := ("Cralloc.TCB.Emit" :: mods).map fun m => ({ module := m.toName } : Import)
   let env ← importModules imports.toArray {} (loadExts := true)
   let roots := mods.map fun m => (VG.Emit.listOf m).toName
   let problems := audit env roots

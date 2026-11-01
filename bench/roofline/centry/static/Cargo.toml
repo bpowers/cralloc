@@ -11,7 +11,7 @@ publish = false
 crate-type = ["staticlib"]
 
 [dependencies]
-asmalloc = { path = "../../../../crates/asmalloc" }
+cralloc = { path = "../../../../crates/cralloc" }
 
 [profile.release]
 opt-level = 3

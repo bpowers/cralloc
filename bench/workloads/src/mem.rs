@@ -7,7 +7,7 @@
 //!   (`order=fifo` for allocation order), then for `secs` seconds run light work and report
 //!   every 250 ms. `after=burst` allocates `burst` objects and frees them, once a millisecond,
 //!   which crosses cache boundaries if the burst is larger than a cache (`after_sizes` picks
-//!   the sizes of this phase; with twelve sizes a burst of 2000 stays inside asmalloc's
+//!   the sizes of this phase; with twelve sizes a burst of 2000 stays inside cralloc's
 //!   magazines and never reaches a slow path); `after=pairs` allocates and frees one object at a time,
 //!   which never does; `after=none` sleeps.
 //! - `touch`: `threads` pinned threads each allocate, write and free objects of every size

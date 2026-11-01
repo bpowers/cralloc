@@ -1,8 +1,8 @@
-//! Where asmalloc's resident memory is, sampled while a workload runs (feature
-//! `asmalloc-memstat`; method and results in docs/research/memory.md).
+//! Where cralloc's resident memory is, sampled while a workload runs (feature
+//! `cralloc-memstat`; method and results in docs/research/memory.md).
 //!
-//! With `ASMALLOC_MEMSTAT=<file>` set, a thread started before `main` wakes every
-//! `ASMALLOC_MEMSTAT_MS` milliseconds (default 10), walks the heap with `Asmalloc::inspect`,
+//! With `CRALLOC_MEMSTAT=<file>` set, a thread started before `main` wakes every
+//! `CRALLOC_MEMSTAT_MS` milliseconds (default 10), walks the heap with `Cralloc::inspect`,
 //! asks the kernel which pages of every range the walk names are resident (`mincore`), and
 //! attributes each resident byte to one use:
 //!
@@ -16,22 +16,22 @@
 //! It writes one line per sample, and at exit the full breakdown by class and by CPU of the
 //! sample in which the program held the most (`peak`) and of one last sample (`final`). A
 //! program may also ask for a full breakdown at a moment of its choosing (`snapshot`, which
-//! writes `acct` lines); with `ASMALLOC_MEMSTAT_MS=0` the thread samples only then, which a
+//! writes `acct` lines); with `CRALLOC_MEMSTAT_MS=0` the thread samples only then, which a
 //! heap of gigabytes, whose walk takes a while, wants.
 //!
 //! The sampler never calls the global allocator, so it does not disturb what it measures: its
 //! thread comes from `pthread_create` (glibc's own heap and `mmap`), its buffers from `mmap`,
 //! and it formats into a fixed buffer. The walk is a racy snapshot, so a sample taken while
 //! threads allocate can count an object twice or miss it; sums are exact only when the heap is
-//! quiet. It pins itself to `ASMALLOC_MEMSTAT_CPU` (default 14).
-use asmalloc::classes::{Class, MagazineSize, SmallClass};
-use asmalloc::stats::{Place, Region, Visitor};
+//! quiet. It pins itself to `CRALLOC_MEMSTAT_CPU` (default 14).
+use cralloc::classes::{Class, MagazineSize, SmallClass};
+use cralloc::stats::{Place, Region, Visitor};
 use std::fmt::Write as _;
 use std::sync::atomic::{AtomicBool, Ordering::*};
 
 const PAGE: usize = 4096;
 const HUGE: usize = 2 << 20;
-const CLASSES: usize = asmalloc::classes::COUNT + 1;
+const CLASSES: usize = cralloc::classes::COUNT + 1;
 const CPUS: usize = 64;
 const MAX_REGIONS: usize = 4096;
 /// One byte per page of every region: enough for 128 GiB of committed regions.
@@ -86,7 +86,7 @@ fn bucket(used: u64, total: u64) -> usize {
 struct Snap {
     t_ms: u64,
     rss: u64,
-    /// AnonHugePages of the process, when `ASMALLOC_MEMSTAT_THP` is set.
+    /// AnonHugePages of the process, when `CRALLOC_MEMSTAT_THP` is set.
     thp: u64,
     /// Bytes the program asked for and holds, by the class of the layout it asked with.
     req: [i64; CLASSES],
@@ -612,13 +612,13 @@ struct Sampler {
     peak: Snap,
     /// The sample with the largest resident set.
     peak_rss: Snap,
-    /// `/proc/self/smaps_rollup`, open when `ASMALLOC_MEMSTAT_THP` is set, else 0.
+    /// `/proc/self/smaps_rollup`, open when `CRALLOC_MEMSTAT_THP` is set, else 0.
     rollup: i32,
     out: Out,
     statm: i32,
     start_ms: u64,
     interval_ms: u64,
-    /// `ASMALLOC_MEMSTAT_MS=0`: sample only when [`snapshot`] asks.
+    /// `CRALLOC_MEMSTAT_MS=0`: sample only when [`snapshot`] asks.
     on_demand: bool,
 }
 
@@ -684,7 +684,7 @@ impl Sampler {
         w.current = usize::MAX;
         w.occ.active = false;
         w.maps.len = 0;
-        asmalloc::Asmalloc::inspect(w);
+        cralloc::Cralloc::inspect(w);
         w.snap.t_ms = now_ms() - self.start_ms;
         self.walk.snap.rss = self.rss();
         self.walk.snap.thp = self.thp();
@@ -907,7 +907,7 @@ fn env_num(name: &std::ffi::CStr, default: u64) -> u64 {
 
 extern "C" fn start() {
     // SAFETY: as in `env_num`.
-    let path = unsafe { libc::getenv(c"ASMALLOC_MEMSTAT".as_ptr()) };
+    let path = unsafe { libc::getenv(c"CRALLOC_MEMSTAT".as_ptr()) };
     if path.is_null() {
         return;
     }
@@ -933,16 +933,16 @@ extern "C" fn start() {
         s.out.fd = fd;
         s.statm = statm;
         s.start_ms = now_ms();
-        s.interval_ms = env_num(c"ASMALLOC_MEMSTAT_MS", 10);
+        s.interval_ms = env_num(c"CRALLOC_MEMSTAT_MS", 10);
         s.on_demand = s.interval_ms == 0;
-        PROBE_SIZE.store(env_num(c"ASMALLOC_MEMSTAT_PROBE", 0) as usize, Relaxed);
-        if env_num(c"ASMALLOC_MEMSTAT_THP", 0) != 0 {
+        PROBE_SIZE.store(env_num(c"CRALLOC_MEMSTAT_PROBE", 0) as usize, Relaxed);
+        if env_num(c"CRALLOC_MEMSTAT_THP", 0) != 0 {
             // SAFETY: a literal path.
             s.rollup = libc::open(c"/proc/self/smaps_rollup".as_ptr(), libc::O_RDONLY | libc::O_CLOEXEC);
         }
         SAMPLER = state;
     }
-    let cpu = env_num(c"ASMALLOC_MEMSTAT_CPU", 14) as usize;
+    let cpu = env_num(c"CRALLOC_MEMSTAT_CPU", 14) as usize;
     // SAFETY: plain pthread calls; the attribute and CPU set are initialized before use, and
     // `run` matches the signature pthread_create expects.
     unsafe {
@@ -967,7 +967,7 @@ extern "C" fn start() {
 static START: extern "C" fn() = start;
 
 /// Bytes the program holds, by the class of the layout it asked with (the last entry: layouts
-/// with no class). Kept by [`Counting`], the global allocator of the `asmalloc-memstat` build.
+/// with no class). Kept by [`Counting`], the global allocator of the `cralloc-memstat` build.
 static REQ: [std::sync::atomic::AtomicI64; CLASSES] = [const { std::sync::atomic::AtomicI64::new(0) }; CLASSES];
 
 /// What the sampler has learned of the heap, for [`slot_index`].
@@ -1015,15 +1015,15 @@ fn req_index(layout: std::alloc::Layout) -> usize {
     Class::of_layout(layout).map_or(CLASSES - 1, |c| c.index() as usize)
 }
 
-/// asmalloc, counting what the program asks for by class, so that a sample can set the bytes
+/// cralloc, counting what the program asks for by class, so that a sample can set the bytes
 /// asked for against the slots that hold them.
 pub struct Counting;
 
-// SAFETY: every call goes to asmalloc unchanged; the counting touches no block.
+// SAFETY: every call goes to cralloc unchanged; the counting touches no block.
 unsafe impl std::alloc::GlobalAlloc for Counting {
     unsafe fn alloc(&self, layout: std::alloc::Layout) -> *mut u8 {
         // SAFETY: the caller's promise, passed on.
-        let p = unsafe { asmalloc::Asmalloc.alloc(layout) };
+        let p = unsafe { cralloc::Cralloc.alloc(layout) };
         if !p.is_null() {
             REQ[req_index(layout)].fetch_add(layout.size() as i64, Relaxed);
             REQ_SLOT[slot_index(p)].fetch_add(layout.size() as i64, Relaxed);
@@ -1034,7 +1034,7 @@ unsafe impl std::alloc::GlobalAlloc for Counting {
 
     unsafe fn alloc_zeroed(&self, layout: std::alloc::Layout) -> *mut u8 {
         // SAFETY: the caller's promise, passed on.
-        let p = unsafe { asmalloc::Asmalloc.alloc_zeroed(layout) };
+        let p = unsafe { cralloc::Cralloc.alloc_zeroed(layout) };
         if !p.is_null() {
             REQ[req_index(layout)].fetch_add(layout.size() as i64, Relaxed);
             REQ_SLOT[slot_index(p)].fetch_add(layout.size() as i64, Relaxed);
@@ -1048,12 +1048,12 @@ unsafe impl std::alloc::GlobalAlloc for Counting {
         REQ_SLOT[slot_index(ptr)].fetch_sub(layout.size() as i64, Relaxed);
         probe(3, ptr, layout.size());
         // SAFETY: the caller's promise, passed on.
-        unsafe { asmalloc::Asmalloc.dealloc(ptr, layout) }
+        unsafe { cralloc::Cralloc.dealloc(ptr, layout) }
     }
 
     unsafe fn realloc(&self, ptr: *mut u8, layout: std::alloc::Layout, new: usize) -> *mut u8 {
         // SAFETY: the caller's promise, passed on.
-        let p = unsafe { asmalloc::Asmalloc.realloc(ptr, layout, new) };
+        let p = unsafe { cralloc::Cralloc.realloc(ptr, layout, new) };
         if !p.is_null() {
             REQ[req_index(layout)].fetch_sub(layout.size() as i64, Relaxed);
             REQ_SLOT[slot_index(ptr)].fetch_sub(layout.size() as i64, Relaxed);

@@ -1,8 +1,8 @@
 // How many buffers grown by doubling fit the heap's address space before an allocation fails,
 // for the headroom a growing block gets (docs/research/memory.md, "Headroom for growing
-// blocks"). Run it preloaded under an address-space limit, which shrinks asmalloc's regions:
+// blocks"). Run it preloaded under an address-space limit, which shrinks cralloc's regions:
 //
-//   prlimit --as=$((32 << 30)) env LD_PRELOAD=libasmalloc_preload.so grow_exhaust 1048576
+//   prlimit --as=$((32 << 30)) env LD_PRELOAD=libcralloc_preload.so grow_exhaust 1048576
 //
 // Each buffer starts at 64 KiB and doubles by realloc to FINAL bytes, and is kept. Only its
 // first byte is written, so a move copies nothing (the move leaves out zero pages) and the

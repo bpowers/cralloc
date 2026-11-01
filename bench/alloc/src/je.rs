@@ -31,7 +31,7 @@ pub fn version() -> String {
 /// resident, mapped and retained, metadata (these need jemalloc built with statistics, which
 /// tikv-jemallocator's default is not: they read as all ones), and the active, dirty and muzzy
 /// pages of all arenas, which it always keeps. For
-/// setting beside asmalloc's sampler at the same point (`docs/research/memory.md`).
+/// setting beside cralloc's sampler at the same point (`docs/research/memory.md`).
 pub fn start_stats() {
     let Ok(path) = std::env::var("JEMALLOC_MEMSTAT") else {
         return;

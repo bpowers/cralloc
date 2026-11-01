@@ -1,4 +1,4 @@
-//! asmalloc's back-end fill and launder with several threads on one class at once: what a
+//! cralloc's back-end fill and launder with several threads on one class at once: what a
 //! program whose threads all refill the same size class pays.
 //!
 //!   backcontend run [threads=8] [class=16] [every=1] [batch=1022] [rounds=2000] [pool=65536]
@@ -19,11 +19,11 @@
 //! objects moved: the cost per object to each thread, comparable with the one-thread figure.
 //! The wall time per object per thread is there too. Run it under `scripts/memlimit`.
 
-use asmalloc::back::State;
-use asmalloc::classes::Class;
-use asmalloc::os::linux::LinuxOs;
 use bench_harness::perf::{Event, Target};
 use bench_harness::{Args, Counters, Cpus};
+use cralloc::back::State;
+use cralloc::classes::Class;
+use cralloc::os::linux::LinuxOs;
 use std::sync::Barrier;
 use std::time::Instant;
 

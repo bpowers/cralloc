@@ -5,7 +5,7 @@
   perf_windows.py RUN_DIR slow SEGMENT LAT_US [TOP] while requests of SEGMENT slower than LAT_US waited
 
 RUN_DIR holds perf.data (perf record -k CLOCK_MONOTONIC), raw.bin and summary.json. Prints the
-samples per window-millisecond, the share of samples in the allocator (symbols in asmalloc::,
+samples per window-millisecond, the share of samples in the allocator (symbols in cralloc::,
 or the preloaded allocator's library), in the kernel, and the top symbols inside against
 outside the windows."""
 import bisect, collections, json, re, struct, subprocess, sys
@@ -59,7 +59,7 @@ for line in out.splitlines():
         continue
     t = int(float(m.group(2)) * 1e9) - t0
     sym, dso = m.group(3).split("+0x")[0], m.group(4).split("/")[-1]
-    if "asmalloc" in sym or "asmalloc" in dso or "jemalloc" in dso or "mimalloc" in dso or "tcmalloc" in dso:
+    if "cralloc" in sym or "cralloc" in dso or "jemalloc" in dso or "mimalloc" in dso or "tcmalloc" in dso:
         cls = "allocator"
     elif "kernel" in dso:
         cls = "kernel"

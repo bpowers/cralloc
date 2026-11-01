@@ -10,7 +10,7 @@ standin_*.S (the routines a preloadable stand-in allocator exports as malloc, fr
 see standin.c).
 
 Every routine runs a real restartable sequence against glibc's registered rseq area, like the
-routines in crates/asmalloc/src/front/generated/. The slow paths are traps (free(NULL) returns),
+routines in crates/cralloc/src/front/generated/. The slow paths are traps (free(NULL) returns),
 so a kernel that leaves the fast path fails loudly instead of measuring something else.
 
 Malloc variants take the size in rdi and return the object in rax. Free variants take the pointer

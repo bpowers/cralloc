@@ -1,6 +1,6 @@
 //! The bytes a program holds live, counted by the global allocator (feature `live-bytes`), so
 //! that an allocator's resident memory can be put over what the program asked for. A
-//! measurement option on top of asmalloc, never a build that is compared: it adds an atomic
+//! measurement option on top of cralloc, never a build that is compared: it adds an atomic
 //! add to every call. The program's live bytes do not depend on the allocator, so one run of
 //! this build gives the denominator for every allocator's runs of the same job.
 //!
@@ -28,10 +28,10 @@ fn add(n: i64) {
 
 pub struct Counting;
 
-// SAFETY: forwards every call to asmalloc unchanged; the counting touches only the table.
+// SAFETY: forwards every call to cralloc unchanged; the counting touches only the table.
 unsafe impl GlobalAlloc for Counting {
     unsafe fn alloc(&self, l: Layout) -> *mut u8 {
-        let p = unsafe { asmalloc::Asmalloc.alloc(l) };
+        let p = unsafe { cralloc::Cralloc.alloc(l) };
         if !p.is_null() {
             add(l.size() as i64);
         }
@@ -39,17 +39,17 @@ unsafe impl GlobalAlloc for Counting {
     }
     unsafe fn dealloc(&self, p: *mut u8, l: Layout) {
         add(-(l.size() as i64));
-        unsafe { asmalloc::Asmalloc.dealloc(p, l) }
+        unsafe { cralloc::Cralloc.dealloc(p, l) }
     }
     unsafe fn alloc_zeroed(&self, l: Layout) -> *mut u8 {
-        let p = unsafe { asmalloc::Asmalloc.alloc_zeroed(l) };
+        let p = unsafe { cralloc::Cralloc.alloc_zeroed(l) };
         if !p.is_null() {
             add(l.size() as i64);
         }
         p
     }
     unsafe fn realloc(&self, p: *mut u8, l: Layout, new: usize) -> *mut u8 {
-        let q = unsafe { asmalloc::Asmalloc.realloc(p, l, new) };
+        let q = unsafe { cralloc::Cralloc.realloc(p, l, new) };
         if !q.is_null() {
             add(new as i64 - l.size() as i64);
         }

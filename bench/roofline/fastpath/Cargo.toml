@@ -1,4 +1,4 @@
-# Pins asmalloc's fast path inlined: a fat-LTO binary with allocation sites of each kind, whose
+# Pins cralloc's fast path inlined: a fat-LTO binary with allocation sites of each kind, whose
 # disassembly check.py inspects. See check.py.
 [package]
 name = "roofline-fastpath"
@@ -10,11 +10,11 @@ publish = false
 [workspace]
 
 [features]
-# asmalloc's direct `__rseq_offset` load, for an executable.
-executable = ["asmalloc/executable"]
+# cralloc's direct `__rseq_offset` load, for an executable.
+executable = ["cralloc/executable"]
 
 [dependencies]
-asmalloc = { path = "../../../crates/asmalloc" }
+cralloc = { path = "../../../crates/cralloc" }
 
 [profile.release]
 opt-level = 3
