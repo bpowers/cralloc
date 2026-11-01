@@ -16,26 +16,26 @@ mi-sized = []  # the same, freeing with mi_free_size_aligned
 # The `mimalloc` crate itself, default features: the mimalloc that libmimalloc-sys bundles,
 # which is what a Rust program depending on it gets (older than third_party's).
 mi-crate = ["dep:mimalloc"]
-# asmalloc itself. `executable` reads glibc's __rseq_offset with one direct load, which is
+# cralloc itself. `executable` reads glibc's __rseq_offset with one direct load, which is
 # right for the workload binaries, which are executables.
-asmalloc = ["dep:asmalloc", "asmalloc/executable"]
-# asmalloc with a sampler thread that breaks its resident memory down by use (src/memstat.rs).
+cralloc = ["dep:cralloc", "cralloc/executable"]
+# cralloc with a sampler thread that breaks its resident memory down by use (src/memstat.rs).
 # Not an allocator of its own: build.rs does not count it. For docs/research/memory.md.
-asmalloc-memstat = ["asmalloc", "asmalloc/internals", "memacct"]
+cralloc-memstat = ["cralloc", "cralloc/internals", "memacct"]
 # Every resident page of the process at exit, for any allocator (src/memacct.rs). Not an
 # allocator: build.rs does not count it.
 memacct = []
-# asmalloc with the program's live bytes counted (src/live.rs), the denominator of resident
-# over live. A measurement option on top of the asmalloc feature: build.rs does not count it.
-live-bytes = ["asmalloc"]
-# asmalloc with its background thread, which `init` starts (asmalloc's `background` feature).
-# A measurement option on top of the asmalloc feature: build.rs does not count it.
-asmalloc-background = ["asmalloc", "asmalloc/background"]
-# asmalloc with its cache domains split by `ASMALLOC_DOMAIN_WIDTH=<n>` (CPUs n*k to n*k+n-1 in
+# cralloc with the program's live bytes counted (src/live.rs), the denominator of resident
+# over live. A measurement option on top of the cralloc feature: build.rs does not count it.
+live-bytes = ["cralloc"]
+# cralloc with its background thread, which `init` starts (cralloc's `background` feature).
+# A measurement option on top of the cralloc feature: build.rs does not count it.
+cralloc-background = ["cralloc", "cralloc/background"]
+# cralloc with its cache domains split by `CRALLOC_DOMAIN_WIDTH=<n>` (CPUs n*k to n*k+n-1 in
 # domain k) instead of by L3, which `init` applies; for measuring the depot with more domains
-# than the machine has. A measurement option on top of the asmalloc feature, never a build
+# than the machine has. A measurement option on top of the cralloc feature, never a build
 # that is compared with other allocators: build.rs does not count it.
-asmalloc-domains = ["asmalloc", "asmalloc/internals"]
+cralloc-domains = ["cralloc", "cralloc/internals"]
 # tikv-jemallocator itself, default features: its static, prefixed jemalloc build, which is
 # what a Rust service that depends on it gets.
 je = ["dep:tikv-jemallocator"]
@@ -47,5 +47,5 @@ sn = ["dep:snmalloc-rs"]
 libc.workspace = true
 tikv-jemallocator = { version = "0.6", optional = true }
 mimalloc = { version = "0.1.52", optional = true }
-asmalloc = { path = "../../crates/asmalloc", optional = true }
+cralloc = { path = "../../crates/cralloc", optional = true }
 snmalloc-rs = { version = "0.7.6", optional = true }

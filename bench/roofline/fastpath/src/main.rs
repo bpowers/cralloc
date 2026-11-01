@@ -8,7 +8,7 @@ use std::alloc::{alloc, dealloc, Layout};
 use std::hint::black_box;
 
 #[global_allocator]
-static A: asmalloc::Asmalloc = asmalloc::Asmalloc;
+static A: cralloc::Cralloc = cralloc::Cralloc;
 
 const L32: Layout = match Layout::from_size_align(32, 8) {
     Ok(layout) => layout,

@@ -4,8 +4,8 @@
 Run by build.rs; writes one Rust source file (a `global_asm!` block, extern declarations and
 tables) to the path given as the first argument. `src/routines.rs` includes it and drives it.
 
-The sequences mirror `crates/asmalloc/src/front/generated/x86_64/slab.rs` (out of line) and
-`crates/asmalloc/src/front/generated/x86_64_inline/slab.rs` (inline) instruction for
+The sequences mirror `crates/cralloc/src/front/generated/x86_64/slab.rs` (out of line) and
+`crates/cralloc/src/front/generated/x86_64_inline/slab.rs` (inline) instruction for
 instruction. Each variant changes one thing, named by its flags:
 
   short   the two conditional jumps to the slow path are rel8, to a `jmp` stub after the `ret`

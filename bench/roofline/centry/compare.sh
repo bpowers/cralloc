@@ -8,11 +8,11 @@
 # BASELINES (default: the main checkout's bench/baselines/out, read-only). tcmalloc runs twice:
 # as built (per-thread caches, because glibc owns the rseq area) and with glibc's rseq turned
 # off so that its per-CPU caches engage; the stand-ins need glibc's rseq and cannot run there.
-# asmalloc-cxx is the same with the C++ operators exported, ASMALLOC_CXX_LIB (a release build of
-# crates/asmalloc-preload/tests/programs/cxx_exports as of commit 58bf936, the last with them). asmalloc is the real library, ASMALLOC_LIB (default: this checkout's release build of
-# libasmalloc_preload.so). Builds: cloop-plt (PLT), cloop-ibt (IBT PLT, .plt.sec), cloop-noplt
-# (call through the GOT), and cloop-static, which links asmalloc in and calls its routines
-# directly; it runs only as asmalloc, with nothing preloaded.
+# cralloc-cxx is the same with the C++ operators exported, CRALLOC_CXX_LIB (a release build of
+# crates/cralloc-preload/tests/programs/cxx_exports as of commit 58bf936, the last with them). cralloc is the real library, CRALLOC_LIB (default: this checkout's release build of
+# libcralloc_preload.so). Builds: cloop-plt (PLT), cloop-ibt (IBT PLT, .plt.sec), cloop-noplt
+# (call through the GOT), and cloop-static, which links cralloc in and calls its routines
+# directly; it runs only as cralloc, with nothing preloaded.
 set -euo pipefail
 here=$(cd "$(dirname "$0")" && pwd)
 out=$here/out
@@ -29,8 +29,8 @@ repo=$(git -C "$here" rev-parse --show-toplevel)
 
 declare -A lib=(
   [glibc]=""
-  [asmalloc]="${ASMALLOC_LIB:-$repo/target/release/libasmalloc_preload.so}"
-  [asmalloc-cxx]="${ASMALLOC_CXX_LIB:-}"
+  [cralloc]="${CRALLOC_LIB:-$repo/target/release/libcralloc_preload.so}"
+  [cralloc-cxx]="${CRALLOC_CXX_LIB:-}"
   [asm-best]="$out/libstandin-best.so"
   [asm-rust]="$out/libstandin-rust.so"
   [asm-two]="$out/libstandin-two.so"
@@ -42,7 +42,7 @@ declare -A lib=(
   [tcmalloc]="$base/tcmalloc/libtcmalloc.so"
   [tcmalloc-percpu]="$base/tcmalloc/libtcmalloc.so"
 )
-order=(${RF_ALLOCS:-glibc asmalloc asm-best asm-rust jemalloc mimalloc tcmalloc tcmalloc-percpu})
+order=(${RF_ALLOCS:-glibc cralloc asm-best asm-rust jemalloc mimalloc tcmalloc tcmalloc-percpu})
 
 tmp=$(mktemp -d)
 trap 'rm -rf "$tmp"' EXIT
@@ -50,7 +50,7 @@ for r in $(seq "$rounds"); do
   for b in "${builds[@]}"; do
     for a in "${order[@]}"; do
       if [ "$b" = static ]; then
-        [ "$a" = asmalloc ] || continue
+        [ "$a" = cralloc ] || continue
       fi
       envs=()
       [ -n "${lib[$a]}" ] && [ "$b" != static ] && envs+=("LD_PRELOAD=${lib[$a]}")

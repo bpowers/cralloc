@@ -55,7 +55,7 @@ rm -rf "$out"
 mkdir -p "$out/logs"
 
 list() {
-  cargo +nightly miri test -q -p asmalloc --lib -- --list --format terse "$@" |
+  cargo +nightly miri test -q -p cralloc --lib -- --list --format terse "$@" |
     sed -n 's/: test$//p' | sort
 }
 # Building happens here, once; the tests below only run.
@@ -74,7 +74,7 @@ echo "miri: $total tests, $jobs at a time, ${MIRI_CPU} CPU seconds each"
 one() {
   local name="$1" log="$out/logs/$1.log" start=$SECONDS status
   # ulimit -t bounds each process's CPU time; the kernel kills Miri with SIGKILL past it.
-  (ulimit -t "$MIRI_CPU"; cargo +nightly miri test -q -p asmalloc --lib -- --exact "$name") \
+  (ulimit -t "$MIRI_CPU"; cargo +nightly miri test -q -p cralloc --lib -- --exact "$name") \
     > "$log" 2>&1
   local code=$?
   # The CPU time of this shell's children, which are the one test's processes: what the limit

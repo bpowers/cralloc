@@ -9,25 +9,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3bc62ac97cc33321f50863d514c3bc38a453947a8f9e781137e47c7401020aed"
 
 [[package]]
-name = "asmalloc"
-version = "0.1.0"
-
-[[package]]
-name = "asmalloc-fuzz"
-version = "0.0.0"
-dependencies = [
- "asmalloc-testkit",
- "libfuzzer-sys",
-]
-
-[[package]]
-name = "asmalloc-testkit"
-version = "0.0.0"
-dependencies = [
- "asmalloc",
-]
-
-[[package]]
 name = "cc"
 version = "1.8.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -44,6 +25,25 @@ name = "cfg-if"
 version = "1.0.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "4e7648175b45a9a48536d676f68d918270699102aa8dab5496df06904c914600"
+
+[[package]]
+name = "cralloc"
+version = "0.1.0"
+
+[[package]]
+name = "cralloc-fuzz"
+version = "0.0.0"
+dependencies = [
+ "cralloc-testkit",
+ "libfuzzer-sys",
+]
+
+[[package]]
+name = "cralloc-testkit"
+version = "0.0.0"
+dependencies = [
+ "cralloc",
+]
 
 [[package]]
 name = "find-msvc-tools"

@@ -52,8 +52,8 @@ import tempfile
 
 LEAN = pathlib.Path(__file__).resolve().parent.parent
 # A module (`Spec/` is converted), and a file whose proof the artifact uses.
-MODULE = LEAN / "Asmalloc" / "Spec" / "Selftest.lean"
-PROOF = LEAN / "Asmalloc" / "Proof" / "Selftest" / "X86_64.lean"
+MODULE = LEAN / "Cralloc" / "Spec" / "Selftest.lean"
+PROOF = LEAN / "Cralloc" / "Proof" / "Selftest" / "X86_64.lean"
 AXIOM = "VG.Spec.Selftest.vg_bad"
 
 INJECTED = """
@@ -67,8 +67,8 @@ theorem vg_bad_thm : False := vg_bad
 CORRECT = "theorem add_correct "
 
 # The second case: a module with the axiom, imported privately.
-PRIVATE = LEAN / "Asmalloc" / "Proof" / "Selftest" / "AuditPrivate.lean"
-PRIVATE_MODULE = "Asmalloc.Proof.Selftest.AuditPrivate"
+PRIVATE = LEAN / "Cralloc" / "Proof" / "Selftest" / "AuditPrivate.lean"
+PRIVATE_MODULE = "Cralloc.Proof.Selftest.AuditPrivate"
 PRIVATE_AXIOM = "VG.Proof.Selftest.AuditPrivate.vg_bad"
 PRIVATE_TEXT = """module
 
@@ -135,7 +135,7 @@ def audits_refused(tmp: str) -> bool:
     """Whether each audit command fails in a scratch module (in `tmp`),
     saying why."""
     f = pathlib.Path(tmp) / "Audit.lean"
-    f.write_text("module\n\nimport Asmalloc.TCB.Audit\nimport Asmalloc.TCB.Axioms\n\n"
+    f.write_text("module\n\nimport Cralloc.TCB.Audit\nimport Cralloc.TCB.Axioms\n\n"
                  + "".join(f"{cmd} {arg}\n".replace(" \n", "\n") for cmd, arg in AUDITS))
     r = subprocess.run(["lake", "env", "lean", str(f)], cwd=LEAN, text=True,
                        stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
@@ -206,7 +206,7 @@ def forged(witness: str, cmd: list[str], expect: str) -> bool:
         try:
             PROOF.write_text((WITNESSES / f"{witness}.lean.txt").read_text())
             b = subprocess.run(["lake", "build", "--log-level=warning",
-                                "+Asmalloc.Artifacts.Selftest.X86_64"],
+                                "+Cralloc.Artifacts.Selftest.X86_64"],
                                cwd=LEAN, capture_output=True, text=True)
             if b.returncode != 0:
                 print(f"the forgery {witness} does not build:\n{b.stdout}{b.stderr}", file=sys.stderr)
@@ -234,7 +234,7 @@ def main() -> int:
         print("the audits refuse to run in a module")
     out = emit_check({MODULE: inject_module(MODULE.read_text()),
                       PROOF: inject_private_import(PROOF.read_text())}, PRIVATE)
-    kernel = forged("skip_kernel", ["lake", "env", "leanchecker", "Asmalloc.Proof.Selftest.X86_64"],
+    kernel = forged("skip_kernel", ["lake", "env", "leanchecker", "Cralloc.Proof.Selftest.X86_64"],
                     "leanchecker found a problem")
     hijack = forged("audit_macro_hijack", ["lake", "env", "lean", "--run", "Emit.lean", "--check"],
                     "non-standard axiom: VG.Proof.Selftest.X86_64.vg_helper")

@@ -17,7 +17,7 @@ python3 scripts/check_registrations.py
 lake build --log-level=warning
 # Replays every module through the kernel: a declaration that skipped it
 # (`debug.skipKernelTC`) is rejected here.
-lake env leanchecker Asmalloc
+lake env leanchecker Cralloc
 lake env lean --run Emit.lean --check "$@"
 # Each naked function's bytes and alignment, assembled (needs llvm-mc).
 python3 scripts/check_sizes.py "$@"

@@ -3,28 +3,28 @@
 version = 4
 
 [[package]]
-name = "asmalloc"
+name = "cralloc"
 version = "0.1.0"
 
 [[package]]
-name = "asmalloc-preload"
+name = "cralloc-preload"
 version = "0.1.0"
 dependencies = [
- "asmalloc",
+ "cralloc",
 ]
 
 [[package]]
-name = "asmalloc-testkit"
+name = "cralloc-testkit"
 version = "0.0.0"
 dependencies = [
- "asmalloc",
+ "cralloc",
 ]
 
 [[package]]
-name = "asmalloc-tokio"
+name = "cralloc-tokio"
 version = "0.1.0"
 dependencies = [
- "asmalloc",
+ "cralloc",
  "tokio",
 ]
 

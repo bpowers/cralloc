@@ -222,7 +222,7 @@ pub fn largepair(args: &Args) {
 /// With `BENCH_PERF_CTL=CTL,ACK` naming the control and acknowledgement FIFOs of a
 /// `perf record -D -1 --control fifo:CTL,ACK`, the recording is on during drops alone, so that
 /// a sampled profile of the real heap covers the drop phases. Valgrind cannot stand in: it
-/// cannot map asmalloc's full reservation, and smaller regions change what a launder does.
+/// cannot map cralloc's full reservation, and smaller regions change what a launder does.
 #[inline(never)]
 fn drop_phase<T>(value: T) {
     let control = perf_control();

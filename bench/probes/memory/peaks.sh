@@ -3,7 +3,7 @@
 # Runs each named job under each build (bench/target/<label>), capped, each process in a
 # cgroup of its own, and prints that cgroup's memory.peak in MiB. Threads are pinned by the
 # workload (BENCH_CPUS); the process is not confined. Builds whose label ends in -ms or is
-# asmalloc-memstat write their breakdown to $OUT/<job>.<label>.memstat.
+# cralloc-memstat write their breakdown to $OUT/<job>.<label>.memstat.
 set -uo pipefail
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 root="$1"; feats="$2"; shift 2
@@ -15,9 +15,9 @@ run_one() {
   local bin="$root/bench/target/$feat/release/workload"
   local log="$out/$tag.$feat.log"
   local stat="/dev/null"
-  case "$feat" in *-ms|asmalloc-memstat) stat="$out/$tag.$feat.memstat" ;; esac
+  case "$feat" in *-ms|cralloc-memstat) stat="$out/$tag.$feat.memstat" ;; esac
   rm -f "$log.peak"
-  ASMALLOC_MEMSTAT="$stat" BENCH_CPUS="$cpus" MEMLIMIT_QUIET=1 "$root/scripts/memlimit" -m "${CAP:-4G}" -t 5m -- \
+  CRALLOC_MEMSTAT="$stat" BENCH_CPUS="$cpus" MEMLIMIT_QUIET=1 "$root/scripts/memlimit" -m "${CAP:-4G}" -t 5m -- \
     bash "$here/incg.sh" "$log.peak" "$bin" "$@" >"$log" 2>&1
   local peak hwm prim
   peak=$(awk '{printf "%.1f", $1/1048576}' "$log.peak" 2>/dev/null)

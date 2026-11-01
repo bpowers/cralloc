@@ -19,10 +19,10 @@ tree=$tgt/tree
 rm -rf "$tree"
 mkdir -p "$tree/bench/roofline/rust-alloc" "$tree/crates"
 cp "$repo/Cargo.toml" "$tree/"
-cp -r "$repo/crates/asmalloc" "$tree/crates/"
+cp -r "$repo/crates/cralloc" "$tree/crates/"
 cp -r "$repo/bench/roofline/rust-alloc/Cargo.toml" "$repo/bench/roofline/rust-alloc/build.rs" \
   "$repo/bench/roofline/rust-alloc/src" "$tree/bench/roofline/rust-alloc/"
-gen=$tree/crates/asmalloc/src/front/generated/x86_64_inline/slab.rs
+gen=$tree/crates/cralloc/src/front/generated/x86_64_inline/slab.rs
 cp "$gen" "$tgt/slab.rs.orig"
 build() { # tag features
   (cd "$tree/bench/roofline/rust-alloc" &&

@@ -857,7 +857,7 @@ fn gate(o: &Options, cpus: &CpuSets) -> Value {
     }
 }
 
-/// Where the routines of each asmalloc build the session runs load the thread's rseq offset from,
+/// Where the routines of each cralloc build the session runs load the thread's rseq offset from,
 /// as `scripts/rseq-offset-check` reports it, by allocator. An `Err` names the builds where one
 /// of those places shares a page offset with a slab hot word: every allocation of that class
 /// could then wait on the previous one's store, which would make the session measure the link,
@@ -866,7 +866,7 @@ fn rseq_offsets(o: &Options, allocs: &[Allocator], jobs: &[Job]) -> Result<Value
     let script = o.bench_dir.join("../scripts/rseq-offset-check");
     let mut report = serde_json::Map::new();
     let mut bad = Vec::new();
-    for a in allocs.iter().filter(|a| a.expect.allocator.as_deref() == Some("asmalloc")) {
+    for a in allocs.iter().filter(|a| a.expect.allocator.as_deref() == Some("cralloc")) {
         let mut files: Vec<PathBuf> = Vec::new();
         if let Some(build) = a.build_name() {
             for j in jobs.iter().filter(|j| j.mode == Mode::Native) {
@@ -905,7 +905,7 @@ fn rseq_offsets(o: &Options, allocs: &[Allocator], jobs: &[Job]) -> Result<Value
         Ok(Value::Object(report))
     } else {
         Err(format!(
-            "an asmalloc build loads its rseq offset at a hot word's page offset, so its fast paths \
+            "an cralloc build loads its rseq offset at a hot word's page offset, so its fast paths \
              depend on the link (docs/research/zen5-roofline.md, section 16); rebuild it or report \
              it:\n{}",
             bad.join("\n")
@@ -975,14 +975,14 @@ fn header(o: &Options, allocs: &[Allocator], jobs: &[Job], session: &str, rseq: 
 }
 
 pub fn session(o: &Options, allocs: &[Allocator], jobs: &[Job]) -> std::io::Result<()> {
-    // asmalloc sizes its regions from the address space it may reserve, so under a finite
+    // cralloc sizes its regions from the address space it may reserve, so under a finite
     // limit it runs with smaller regions and places large blocks differently: the measurement
     // would be of another allocator. scripts/memlimit sets such a limit when it cannot reach
     // systemd; the runner caps memory with cgroups of its own and never needs one.
     if let Some(limit) = sys::address_space_limit() {
         return Err(std::io::Error::other(format!(
             "refusing to measure under an address-space limit (RLIMIT_AS {limit} bytes): \
-             asmalloc would shrink its regions to fit it"
+             cralloc would shrink its regions to fit it"
         )));
     }
     let rseq = rseq_offsets(o, allocs, jobs).map_err(std::io::Error::other)?;

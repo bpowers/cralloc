@@ -10,19 +10,19 @@
 # command keep counting while it is paused.
 #
 # Usage: scripts/heavy command args...
-#   ASMALLOC_HEAVY_CPUS  the CPU list, default 12-15,28-31 (`lscpu -e` shows which CPUs
+#   CRALLOC_HEAVY_CPUS  the CPU list, default 12-15,28-31 (`lscpu -e` shows which CPUs
 #                        share an L3, and `bench/README.md`, "Pinning", which the suite uses).
-#   ASMALLOC_LOCK_DIR    where the lock files live, default /tmp.
+#   CRALLOC_LOCK_DIR    where the lock files live, default /tmp.
 set -euo pipefail
 
 [ $# -gt 0 ] || { echo "usage: scripts/heavy command args..." >&2; exit 2; }
-cpus="${ASMALLOC_HEAVY_CPUS:-12-15,28-31}"
-locks="${ASMALLOC_LOCK_DIR:-/tmp}"
-slice="asmalloc-heavy.slice"
+cpus="${CRALLOC_HEAVY_CPUS:-12-15,28-31}"
+locks="${CRALLOC_LOCK_DIR:-/tmp}"
+slice="cralloc-heavy.slice"
 
 # A measurement on both L3s holds the turnstile exclusively while it runs, so work that
 # arrives meanwhile waits here instead of starting beside it.
-exec 8>>"$locks/asmalloc-heavy.turn"
+exec 8>>"$locks/cralloc-heavy.turn"
 flock -s 8
 # Holding the turnstile means no such measurement is running, so a slice found frozen now was
 # left that way by one that was killed before it could thaw.
@@ -32,7 +32,7 @@ if command -v systemd-run >/dev/null 2>&1 \
    && systemd-run --user --scope -q --collect --slice="$slice" -- true 8>&- >/dev/null 2>&1; then
   # scripts/memlimit starts a scope of its own for the memory cap, which would leave this
   # slice; the variable tells it to stay inside.
-  export ASMALLOC_HEAVY_SLICE="$slice"
+  export CRALLOC_HEAVY_SLICE="$slice"
   # The turnstile is let go only once the command is inside its scope. A scope cannot start
   # in a frozen slice, so one that let go earlier could find the slice frozen under it and
   # would have to run outside, beside the measurement.

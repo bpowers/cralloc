@@ -1,6 +1,6 @@
 ------------------------------- MODULE Assign -------------------------------
 (* How a class takes a region, and how a walk that finds regions by scanning
-   learns a region's class (crates/asmalloc/src/back/class.rs, `Back::assign`;
+   learns a region's class (crates/cralloc/src/back/class.rs, `Back::assign`;
    back/tags.rs).
 
    A region's tag in the table is changed only by compare-and-swap. A thread

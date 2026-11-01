@@ -145,7 +145,7 @@ def main() -> int:
     if mc is None or shutil.which("llvm-nm") is None or shutil.which("llvm-readelf") is None:
         print("check_sizes: llvm-mc, llvm-nm and llvm-readelf are needed", file=sys.stderr)
         return 1
-    default = LEAN.parent / "crates" / "asmalloc" / "src" / "front" / "generated"
+    default = LEAN.parent / "crates" / "cralloc" / "src" / "front" / "generated"
     gen = pathlib.Path(sys.argv[1]) if len(sys.argv) > 1 else default
     bad = []
     count = 0

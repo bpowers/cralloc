@@ -12,7 +12,7 @@
 suite_mem="${SOAK_SUITE_MEM:-12G}"
 jobs="$(nproc)"
 mkdir -p "$src"
-redis_tmp="$(mktemp -d /tmp/asmalloc-rt.XXXXXX)" # redis's unix sockets need a short path
+redis_tmp="$(mktemp -d /tmp/cralloc-rt.XXXXXX)" # redis's unix sockets need a short path
 
 # capped MODE CMD...: one capped run, preloaded if MODE is preload.
 capped() {

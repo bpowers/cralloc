@@ -230,10 +230,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "asmalloc"
-version = "0.1.0"
-
-[[package]]
 name = "atomic-waker"
 version = "1.1.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -301,7 +297,7 @@ checksum = "72b3254f16251a8381aa12e40e3c4d2f0199f8c6508fbecb9d91f575e0fbb8c6"
 name = "bench-alloc"
 version = "0.0.0"
 dependencies = [
- "asmalloc",
+ "cralloc",
  "libc",
  "mimalloc",
  "snmalloc-rs",
@@ -454,6 +450,10 @@ checksum = "5ca28b0ae3115b884660db4118d803791fd6756b6e88f39c0f3f7859060d7566"
 dependencies = [
  "libc",
 ]
+
+[[package]]
+name = "cralloc"
+version = "0.1.0"
 
 [[package]]
 name = "crc32fast"

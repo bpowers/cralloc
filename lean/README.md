@@ -1,6 +1,6 @@
 # Lean: the assembly routines, their proofs, and the generator
 
-asmalloc's assembly is written here as Lean terms over a model of x86-64,
+cralloc's assembly is written here as Lean terms over a model of x86-64,
 proved correct against that model, and printed as Rust source. Nothing in the
 allocator is assembly written by hand: the generated files are the only
 assembly it contains, and a check fails if they differ from what Lean
@@ -11,7 +11,7 @@ This directory is a fork of the Lean framework of
 same for cryptography, taken at commit
 `bbeedea2382fb085e03f41fb844516cd761278e8`. It keeps the framework and drops
 the cryptography. Its files are derived from upstream's and stay under
-upstream's licence, Apache-2.0 OR BSD-3-Clause (the same as asmalloc's); the
+upstream's licence, Apache-2.0 OR BSD-3-Clause (the same as cralloc's); the
 upstream licence and copyright notice are in `LICENSES/verified-garbage/`.
 The Lean namespace is still `VG`, so that a file here can be compared with its
 upstream original line by line.
@@ -51,12 +51,12 @@ Changed: `Exec` has no trace; `Verified` is total correctness plus
 non-vacuity; the CPU-features constant an artifact may carry is a plain
 `&[&str]` rather than a type of upstream's crate; the emitter writes to a
 directory given on its command line, by default the allocator crate's
-`crates/asmalloc/src/front/generated/` (relative to the repository root).
+`crates/cralloc/src/front/generated/` (relative to the repository root).
 
 ## Layout
 
 ```
-Asmalloc/
+Cralloc/
   TCB/          Trusted computing base: definitions only, Lean core only
     Mem.lean        byte-addressed memory, regions
     Code.lean       structured programs, calls and stack frames, big-step semantics
@@ -79,7 +79,7 @@ Asmalloc/
     Examples/       small proved programs, one per instruction family the
                     routines rely on, showing the lemmas each needs
   Artifacts/    One registration file per routine and target, listing what it emits
-AsmallocTest/   Golden tests for the printers and the emitter, tests of the
+CrallocTest/    Golden tests for the printers and the emitter, tests of the
                 semantics on concrete states, and of the audits
 Emit.lean       Renders every artifact into the allocator crate's
                 `src/front/generated/` (or the directory given), where it is checked in
@@ -156,7 +156,7 @@ Everything in `Impl/` and `Proof/` is checked by Lean and need not be read.
   `leanchecker` replays every module through the kernel, which rejects a
   declaration elaborated without it (`debug.skipKernelTC`).
   `scripts/audit_negative.py` checks each of these against forgeries.
-* No initializers (`initialize`, `@[init]`) under `Asmalloc/`: the emitter
+* No initializers (`initialize`, `@[init]`) under `Cralloc/`: the emitter
   imports the registration files and must run none of their code.
 * Never set `maxHeartbeats` or another resource limit: a proof that hits one
   is too slow, so make it faster.
@@ -165,7 +165,7 @@ Everything in `Impl/` and `Proof/` is checked by Lean and need not be read.
   model by citing the Intel SDM. Never weaken a model or contract to make a
   proof go through.
 * The emitter runs compiled code, so nothing it runs may carry
-  `implemented_by`, `extern` or `export`, and nothing under `Asmalloc/` may
+  `implemented_by`, `extern` or `export`, and nothing under `Cralloc/` may
   declare a `csimp` theorem or an `initialize` (`TCB/Audit.lean`).
 * Never edit the generated files by hand.
 
@@ -185,7 +185,7 @@ version from `lean-toolchain`. Then, in this directory:
 
 ```sh
 lake build --log-level=warning          # every proof and golden test
-lake env lean --run Emit.lean           # write ../crates/asmalloc/src/front/generated/
+lake env lean --run Emit.lean           # write ../crates/cralloc/src/front/generated/
 lake env lean --run Emit.lean --check   # fail if those files are out of date
 lake env lean --run Emit.lean DIR       # write somewhere else
 scripts/check.sh                        # all of the checks

@@ -20,7 +20,7 @@ path = "src/main.rs"
 mi = ["bench-alloc/mi"]
 mi-sized = ["bench-alloc/mi-sized"]
 mi-crate = ["bench-alloc/mi-crate"]
-asmalloc = ["bench-alloc/asmalloc"]
+cralloc = ["bench-alloc/cralloc"]
 je = ["bench-alloc/je"]
 tc = ["bench-alloc/tc"]
 sn = ["bench-alloc/sn"]
@@ -40,7 +40,7 @@ serde_json = "1.0.154"
 # getrusage, for the page faults of a table's rehash.
 libc = "0.2"
 
-# Not a released program, so no profile of its own: the suite's, which asmalloc's design
+# Not a released program, so no profile of its own: the suite's, which cralloc's design
 # recommends to every user (fat LTO, one unit), the same for every allocator.
 [profile.release]
 lto = "fat"

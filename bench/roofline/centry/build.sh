@@ -40,7 +40,7 @@ run cc "${cflags[@]}" -fcf-protection=full -Wl,-z,ibtplt -o "$out/cloop-ibt" "$h
 run cc "${cflags[@]}" -fno-plt -o "$out/cloop-noplt" "$here/cloop.c"
 run c++ "${cflags[@]}" -o "$out/cxxloop-plt" "$here/cxxloop.cpp"
 run c++ "${cflags[@]}" -fno-plt -o "$out/cxxloop-noplt" "$here/cxxloop.cpp"
-# The loops linked with asmalloc itself as a static library (static/), so that they call its
+# The loops linked with cralloc itself as a static library (static/), so that they call its
 # generated routines directly, as a statically linked program does.
 (cd "$here/static" && run cargo build --release -q)
 run cc "${cflags[@]}" -o "$out/cloop-static" "$here/cloop.c" "$here/static/target/release/libcentry_static.a"

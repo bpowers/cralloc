@@ -229,7 +229,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "asmalloc"
+name = "cralloc"
 version = "0.1.0"
 
 [[package]]
@@ -470,7 +470,7 @@ dependencies = [
 name = "bench-alloc"
 version = "0.0.0"
 dependencies = [
- "asmalloc",
+ "cralloc",
  "libc",
  "mimalloc",
  "snmalloc-rs",

@@ -2,7 +2,7 @@
 """Checks that the registration files, which are reviewed by hand, only
 bind. Exits non-zero on violations, naming each.
 
-Registration files (`Asmalloc/Artifacts/`) state what an implementation
+Registration files (`Cralloc/Artifacts/`) state what an implementation
 chooses and bind proofs made under `Proof/`:
 
   * no theorems or lemmas;
@@ -67,11 +67,11 @@ def code_only(text: str) -> str:
 
 
 def problems(lean: pathlib.Path) -> list[str]:
-    """What is wrong under `lean` (the directory with `Asmalloc/`), one line
+    """What is wrong under `lean` (the directory with `Cralloc/`), one line
     each."""
     out = []
     for d in DIRS:
-        for f in sorted((lean / "Asmalloc" / d).rglob("*.lean")):
+        for f in sorted((lean / "Cralloc" / d).rglob("*.lean")):
             rel = f.relative_to(lean).as_posix()
             code = code_only(f.read_text())
             line = lambda i: code.count("\n", 0, i) + 1

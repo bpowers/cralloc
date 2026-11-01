@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
-"""Checks the module discipline of lean/Asmalloc/, which keeps the trusted
+"""Checks the module discipline of lean/Cralloc/, which keeps the trusted
 base small and separate from proofs. Exits non-zero on violations.
 
-  * Every file under Asmalloc/ is a Lean module (it starts with `module`,
+  * Every file under Cralloc/ is a Lean module (it starts with `module`,
     after any leading comment). The audits run only in files that are not
-    modules (the emitter's driver, AsmallocTest/).
+    modules (the emitter's driver, CrallocTest/).
   * TCB/   imports only Lean core and TCB/.
   * Spec/  imports only TCB/ and Spec/.
   * Impl/  imports only TCB/, Spec/ and Impl/: never proofs.
-  * No file under Asmalloc/ declares an initializer (`initialize`,
+  * No file under Cralloc/ declares an initializer (`initialize`,
     `builtin_initialize`, `@[init]`): the emitter imports the registration
     files and must not run code of theirs at import (Emit.lean).
   * A module of a target (one with a directory of TCB/, e.g. `X86_64`, as a
@@ -21,7 +21,7 @@ import re
 import sys
 
 LEAN = pathlib.Path(__file__).resolve().parent.parent
-LIB = LEAN / "Asmalloc"
+LIB = LEAN / "Cralloc"
 
 # The start of an import: `import`, and in a module `public`, `meta` and
 # `all` imports.
@@ -31,9 +31,9 @@ IMPORT = r"\s*(?:public\s+)?(?:meta\s+)?import\s+(?:all\s+)?"
 INIT = re.compile(r"(^|[^\w.`])(builtin_initialize|initialize)\b|@\[(builtin_)?init\b")
 
 ALLOWED_IMPORTS = {
-    "TCB": ("Lean", "Init", "Asmalloc.TCB."),
-    "Spec": ("Asmalloc.TCB.", "Asmalloc.Spec."),
-    "Impl": ("Asmalloc.TCB.", "Asmalloc.Spec.", "Asmalloc.Impl."),
+    "TCB": ("Lean", "Init", "Cralloc.TCB."),
+    "Spec": ("Cralloc.TCB.", "Cralloc.Spec."),
+    "Impl": ("Cralloc.TCB.", "Cralloc.Spec.", "Cralloc.Impl."),
 }
 
 
@@ -69,7 +69,7 @@ def main() -> int:
     for f in sorted(LIB.rglob("*.lean")):
         rel = f.relative_to(LEAN)
         if not is_module(f.read_text()):
-            errors.append(f"{rel}: not a module; every file under Asmalloc/ starts with `module`")
+            errors.append(f"{rel}: not a module; every file under Cralloc/ starts with `module`")
         for n, line in enumerate(f.read_text().splitlines(), 1):
             if INIT.search(re.sub(r'"([^"\\]|\\.)*"', '""', line).split("--")[0]):
                 errors.append(f"{rel}:{n}: an initializer, which would run when the emitter imports it")
@@ -77,7 +77,7 @@ def main() -> int:
         if own is None:
             continue
         for n, line in enumerate(f.read_text().splitlines(), 1):
-            m = re.match(IMPORT + r"(Asmalloc\.\S+)", line)
+            m = re.match(IMPORT + r"(Cralloc\.\S+)", line)
             other = m and target_of(m.group(1).split("."), targets)
             if other and other != own:
                 errors.append(f"{rel}:{n}: a module of {own} may not import {m.group(1)}, of {other}")

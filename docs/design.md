@@ -1,8 +1,8 @@
-# asmalloc design
+# cralloc design
 
 ## Summary
 
-asmalloc is a memory allocator for multithreaded Rust programs on modern Linux. It serves
+cralloc is a memory allocator for multithreaded Rust programs on modern Linux. It serves
 Rust's `GlobalAlloc` and `Allocator` traits and the C `malloc` family from one heap, so it
 works as a crate dependency or as an `LD_PRELOAD` library.
 
@@ -108,7 +108,7 @@ restarted, not resumed. `docs/research/linux-rseq-contract.md` checks these clai
 the kernel and glibc sources.
 
 The area also carries a concurrency ID, a compact numbering of a process's running threads
-that would give each thread its own cache while threads are fewer than CPUs. asmalloc
+that would give each thread its own cache while threads are fewer than CPUs. cralloc
 indexes by CPU number instead, for three reasons. It is in every kernel that has rseq. A
 thread without a registration reads zero as its concurrency ID, which is also a valid one,
 so telling the two apart would cost extra instructions on every call. And current kernels
@@ -176,10 +176,10 @@ less.
    is a valid heap, so the fast path has no initialization check.
 6. **Pure Rust plus proved assembly.** No C. The allocator is `no_std` and never allocates,
    panics, unwinds or prints while serving a request.
-7. **One platform, done fully.** asmalloc is developed and measured on x86-64, Linux 7.2,
+7. **One platform, done fully.** cralloc is developed and measured on x86-64, Linux 7.2,
    Rust 1.99, and glibc 2.43, linked dynamically or statically, or musl. The fast path needs the calling thread to have a registered
    rseq area, which Linux has offered since 4.18. A thread without one, as under valgrind,
-   still works, slowly (see "Process lifecycle"). asmalloc never hands a request to another
+   still works, slowly (see "Process lifecycle"). cralloc never hands a request to another
    allocator.
 
 ## Non-Goals
@@ -201,7 +201,7 @@ less.
 - **Heap profiling.**
 - **Allocation in a `vfork` or `CLONE_VM` child.** Such a child shares the parent's memory
   but has no rseq registration of its own, so the fast path is unprotected there.
-- **More than one instance per process.** Two copies of asmalloc, for example the preload
+- **More than one instance per process.** Two copies of cralloc, for example the preload
   library and a binary that links the crate, have separate heaps and must not free each
   other's pointers.
 
@@ -225,7 +225,7 @@ less.
 
 ### Address space
 
-At first use asmalloc reserves 16 TiB of address space, inaccessible and uncommitted. About
+At first use cralloc reserves 16 TiB of address space, inaccessible and uncommitted. About
 3940 regions of 4 GiB hold objects and the rest holds metadata and magazines. If the process cannot have
 that much address space, as under an address-space limit or valgrind, the region size is
 halved until the reservation fits, so the number of regions stays the same. The floor is
@@ -1360,7 +1360,7 @@ saved; we copy.
   C++ and the size that sized deletes carry; `docs/research/zen5-roofline.md`, section 14,
   "C++ new and delete without our operators", measures it. An implementation of every form
   but the throwing ones was built and then removed; the last commit that has it is
-  `58bf936`, under `crates/asmalloc/src/c/`.
+  `58bf936`, under `crates/cralloc/src/c/`.
 - **A size from C is a prediction, never trusted.** A sized free may use the size to find
   the class early, but the class from the address is the truth, and a wrong size behaves
   exactly like a free with no size.
@@ -1374,7 +1374,7 @@ A macro exports the C names from the crate that invokes it; a cargo feature does
 and the `LD_PRELOAD` library always exports them. A feature alone would not do: cargo
 unifies features across a workspace, and every test binary would then replace `malloc`. The
 C layer sets `errno` through the C library's accessor. In a build without the background
-thread, that and glibc's `__rseq_offset` are asmalloc's only references to a C library; on
+thread, that and glibc's `__rseq_offset` are cralloc's only references to a C library; on
 musl, where there is no `__rseq_offset` to refer to, they are `errno`'s accessor and the
 three pthread key functions that run code at thread exit. The background thread, which is
 in the default build, adds what creating it takes: the library's calls to create and
@@ -1510,8 +1510,8 @@ These hold everywhere, and the proofs and tests lean on them.
 
 | Path | Contents |
 |---|---|
-| `crates/asmalloc/` | The allocator, one module directory per component. |
-| `crates/asmalloc-preload/` | The `LD_PRELOAD` library. |
+| `crates/cralloc/` | The allocator, one module directory per component. |
+| `crates/cralloc-preload/` | The `LD_PRELOAD` library. |
 | `lean/` | The proof framework, the routines and their proofs, and the generator that writes the assembly into the allocator crate. The framework derives from verified-garbage, a project that proves assembly implementations of cryptography in Lean. |
 | `bench/` | Roofline harnesses, baselines and workloads. Not part of the workspace. |
 | `tla/` | TLA+ models of the lock-free protocols. |
@@ -1752,7 +1752,7 @@ Performance claims rest on three kinds of measurement.
   counters, which do not depend on clock frequency.
 - **Workloads**: multithreaded Rust servers and pipelines in which objects cross threads,
   compiler and data-processing runs, and established allocator benchmarks through the
-  preload library. Rust workloads are measured with asmalloc as the global allocator,
+  preload library. Rust workloads are measured with cralloc as the global allocator,
   because preloading discards Rust's sized frees.
 - **Memory**: resident and huge-page-backed memory over time, fragmentation as resident
   bytes over live bytes, page faults, and how quickly memory returns after a peak.

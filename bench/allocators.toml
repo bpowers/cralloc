@@ -21,7 +21,7 @@
 #   preload_build  a package of the repository's root workspace that `benchrun build` builds
 #            in release mode first, for a preload library that lives in this checkout
 #   build    the native build directory under target/, for variants of one feature built by
-#            hand with different allocator build-time knobs (ASMALLOC_<NAME>=...); benchrun
+#            hand with different allocator build-time knobs (CRALLOC_<NAME>=...); benchrun
 #            build leaves such entries alone
 #   same_as  makes this entry a control: an exact copy of the named allocator under another
 #            label, run as if it were a different allocator. Its results must match.
@@ -51,14 +51,14 @@ name = "mimalloc-crate"
 feature = "mi-crate"
 expect = { allocator = "mimalloc", library = "executable", version = "30302" }
 
-# asmalloc as the global allocator, whose run-time check is that a fresh Box lies in its
+# cralloc as the global allocator, whose run-time check is that a fresh Box lies in its
 # heap; and its LD_PRELOAD library from this checkout, which benchrun build builds.
 [[allocator]]
-name = "asmalloc"
-feature = "asmalloc"
-preload = "../target/release/libasmalloc_preload.so"
-preload_build = "asmalloc-preload"
-expect = { allocator = "asmalloc", library = "executable" }
+name = "cralloc"
+feature = "cralloc"
+preload = "../target/release/libcralloc_preload.so"
+preload_build = "cralloc-preload"
+expect = { allocator = "cralloc", library = "executable" }
 
 # Native: tikv-jemallocator's own static build, as a Rust service gets it. Preload: the
 # distribution's shared library.

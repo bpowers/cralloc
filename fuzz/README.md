@@ -1,6 +1,6 @@
 # Fuzz targets
 
-Coverage-guided fuzzing of the testkit's model (`crates/asmalloc-testkit`) with cargo-fuzz and
+Coverage-guided fuzzing of the testkit's model (`crates/cralloc-testkit`) with cargo-fuzz and
 libFuzzer. This crate is its own workspace because it needs nightly and `libfuzzer-sys`; the
 merge gate never builds it.
 
@@ -16,7 +16,7 @@ every block still live.
 | `model_allocator` | the `Allocator` trait: zero sizes, frees and resizes with any size the block fits, alignment changes |
 
 The allocator is the testkit's `target` module, so pointing the testkit at an allocator points
-these targets at it too: asmalloc's process heap. Setting `ASMALLOC_FUZZ_MUTANT` to a mutant's
+these targets at it too: cralloc's process heap. Setting `CRALLOC_FUZZ_MUTANT` to a mutant's
 name (`overlapping`, `misaligned`, `short`, `no_zero_fill`, `loses_contents`, `double_handout`,
 `scribbler`, `premature_reuse`) wraps the allocator in that bug, which shows the fuzzer finds it.
 
@@ -34,7 +34,7 @@ Pin to idle cores, bound the time and memory, and run from the repository root:
 cargo +nightly fuzz build
 taskset -c 8,9,24,25 fuzz/target/x86_64-unknown-linux-gnu/release/model \
     -max_total_time=60 -rss_limit_mb=2048 fuzz/corpus/model
-ASMALLOC_FUZZ_MUTANT=scribbler taskset -c 8,9,24,25 \
+CRALLOC_FUZZ_MUTANT=scribbler taskset -c 8,9,24,25 \
     fuzz/target/x86_64-unknown-linux-gnu/release/model_c -max_total_time=60 -rss_limit_mb=2048
 ```
 

@@ -3,7 +3,7 @@
 usage: acct.py [-v] [-t] PREFIX...    (PREFIX is <out>/<job>.<label>.<round>, as acct.sh writes)
 
 Reads PREFIX.acct (bench/alloc/src/memacct.rs: the cgroup's counters, smaps and the anonymous
-pages of every mapping at exit) and, for asmalloc builds, PREFIX.memstat (memstat.rs: the heap's
+pages of every mapping at exit) and, for cralloc builds, PREFIX.memstat (memstat.rs: the heap's
 regions, metadata, magazine area and slabs, and, at the sample where the program held the most,
 each class's objects by use). Prints, per prefix, KiB by structure; -v adds each symbol of the
 binary's data, each class's pages and the objects by use; -t prints one table, a column per
@@ -163,21 +163,21 @@ def classify(prefix):
             name = m['name'] if m else '?'
             hit = next((r for r in regions if r['base'] <= addr < r['base'] + r['len']), None)
             if hit:
-                add('asmalloc: object pages', hit['size'])
+                add('cralloc: object pages', hit['size'])
                 continue
             hit = next((r for r in regions if r['meta'] <= addr < r['meta'] + max(r['meta_len'], PAGE)), None)
             if hit:
-                add('asmalloc: region metadata', hit['size'])
+                add('cralloc: region metadata', hit['size'])
                 detail['metadata pages, class:offset KiB'][f"{hit['size']}:{(addr - hit['meta']) >> 10}{'' if own else ' (zero page)'}"] += PAGE
                 continue
             if mags and mags[0] <= addr < mags[1]:
-                add('asmalloc: magazine area', None)
+                add('cralloc: magazine area', None)
                 continue
             if slabs is not None and slabs <= addr < slabs + 8192 * PAGE:
-                add('asmalloc: slabs (BSS)', (addr - slabs) // PAGE)
+                add('cralloc: slabs (BSS)', (addr - slabs) // PAGE)
                 continue
             if slabs is not None and slabs + 8192 * PAGE <= addr < slabs + 8195 * PAGE:
-                add('asmalloc: C tables after the slabs (BSS)', None)
+                add('cralloc: C tables after the slabs (BSS)', None)
                 continue
             if exe and name == exe:
                 k = bisect.bisect_right(starts, addr + PAGE - 1) - 1
@@ -207,8 +207,8 @@ def classify(prefix):
 
 
 ORDER = [
-    'binary: data and BSS', 'asmalloc: slabs (BSS)', 'asmalloc: C tables after the slabs (BSS)',
-    'asmalloc: object pages', 'asmalloc: region metadata', 'asmalloc: magazine area',
+    'binary: data and BSS', 'cralloc: slabs (BSS)', 'cralloc: C tables after the slabs (BSS)',
+    'cralloc: object pages', 'cralloc: region metadata', 'cralloc: magazine area',
     'glibc heap (brk)', 'main thread stack', 'thread stacks (what is left after exit)',
     'shared libraries: data', 'other anonymous (glibc arenas, TLS)',
 ]

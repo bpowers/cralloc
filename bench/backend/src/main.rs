@@ -1,4 +1,4 @@
-//! asmalloc's back-end launder and fill on their own: cycles and instructions per object, from
+//! cralloc's back-end launder and fill on their own: cycles and instructions per object, from
 //! hardware counters, for several classes and pointer orders.
 //!
 //!   backbench run [classes=16,64,256,1024,4096] [reps=7] [batch=mag] [orders=...] [fills=...]
@@ -35,11 +35,11 @@
 //! Pin it with `BENCH_CPUS` (the first CPU listed is used) and run it under `scripts/memlimit`.
 //! Each figure is the lowest of `reps` repetitions after one untimed warm-up.
 
-use asmalloc::back::{Back, Descending, State};
-use asmalloc::classes::{Class, SmallClass};
-use asmalloc::os::linux::LinuxOs;
 use bench_harness::report::Measure;
 use bench_harness::{Args, Counters, Cpus, Rng};
+use cralloc::back::{Back, Descending, State};
+use cralloc::classes::{Class, SmallClass};
+use cralloc::os::linux::LinuxOs;
 use std::sync::atomic::AtomicPtr;
 
 static STATE: State<LinuxOs> = State::new(LinuxOs);

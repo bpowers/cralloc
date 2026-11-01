@@ -21,11 +21,11 @@ slab_call = ["slab"]    # ... the pop calls its slow path from inside the asm bl
 slab_nonnull = ["slab"] # ... and promises the compiler a non-null result
 slab_ool = ["slab"]     # out-of-line routines, as generated
 slab_pc = ["slab"]      # out of line, one entry per class
-asm = ["dep:asmalloc"]  # asmalloc itself, reading __rseq_offset through the GOT
-asm_exe = ["asm", "asmalloc/executable"]  # ... reading it with one direct load
+asm = ["dep:cralloc"]  # cralloc itself, reading __rseq_offset through the GOT
+asm_exe = ["asm", "cralloc/executable"]  # ... reading it with one direct load
 
 [dependencies]
-asmalloc = { path = "../../../crates/asmalloc", optional = true }
+cralloc = { path = "../../../crates/cralloc", optional = true }
 
 [profile.release]
 opt-level = 3

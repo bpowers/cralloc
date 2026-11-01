@@ -1,5 +1,5 @@
-name = "Asmalloc"
-defaultTargets = ["Asmalloc", "AsmallocTest"]
+name = "Cralloc"
+defaultTargets = ["Cralloc", "CrallocTest"]
 
 [leanOptions]
 autoImplicit = false
@@ -7,12 +7,12 @@ relaxedAutoImplicit = false
 warningAsError = true
 
 [[lean_lib]]
-name = "Asmalloc"
-# Every file under `Asmalloc/`, not only those some root imports.
-globs = ["Asmalloc.+"]
+name = "Cralloc"
+# Every file under `Cralloc/`, not only those some root imports.
+globs = ["Cralloc.+"]
 
 # Golden tests of the trusted printers and the emitter's driver, and tests
 # of the audits. Not modules: they evaluate code and run `#guard`.
 [[lean_lib]]
-name = "AsmallocTest"
-globs = ["AsmallocTest.+"]
+name = "CrallocTest"
+globs = ["CrallocTest.+"]

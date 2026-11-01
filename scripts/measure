@@ -10,7 +10,7 @@
 #   After a --both-l3 session heavy work is owed a turn as long as the session ran, five
 #   minutes at most, and the next --both-l3 session waits for it: sessions queued back to
 #   back once kept every build and proof on the machine frozen for an hour and a half.
-#   ASMALLOC_LOCK_DIR  where the lock files live, default /tmp.
+#   CRALLOC_LOCK_DIR  where the lock files live, default /tmp.
 #
 # `benchrun layout` takes the measurement lock itself: run it without this script.
 set -euo pipefail
@@ -21,18 +21,18 @@ if [ "${1:-}" = "--both-l3" ]; then
   shift
 fi
 [ $# -gt 0 ] || { echo "usage: scripts/measure [--both-l3] command args..." >&2; exit 2; }
-locks="${ASMALLOC_LOCK_DIR:-/tmp}"
-slice="asmalloc-heavy.slice"
+locks="${CRALLOC_LOCK_DIR:-/tmp}"
+slice="cralloc-heavy.slice"
 
 if grep -q "$slice" /proc/self/cgroup 2>/dev/null; then
   echo "measure: started under scripts/heavy; a measurement cannot pause itself" >&2
   exit 2
 fi
-unset ASMALLOC_HEAVY_SLICE
+unset CRALLOC_HEAVY_SLICE
 
 # When heavy work's turn ends, in seconds since the epoch; written and read only under the
 # measurement lock.
-owed="$locks/asmalloc-heavy.owed"
+owed="$locks/cralloc-heavy.owed"
 turn_max=300
 
 # Seconds of its turn that heavy work is still owed: nothing once the turn has passed, or
@@ -60,7 +60,7 @@ finish() {
   echo $((now + ran)) > "$owed" 2>/dev/null || true
 }
 
-exec 7>>"$locks/asmalloc-measure.lock"
+exec 7>>"$locks/cralloc-measure.lock"
 if [ "$both" = 1 ]; then
   # The wait is outside the lock, so a measurement that pauses nothing is not held up by it.
   while :; do
@@ -76,7 +76,7 @@ fi
 if [ "$both" = 1 ]; then
   # After the measurement lock, so heavy work is held back only while this one runs, not
   # while it queues behind another measurement.
-  exec 8>>"$locks/asmalloc-heavy.turn"
+  exec 8>>"$locks/cralloc-heavy.turn"
   flock -x 8
   started=$(date +%s)
   trap finish EXIT

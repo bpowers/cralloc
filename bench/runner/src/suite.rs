@@ -701,14 +701,14 @@ fn served() -> Vec<Served> {
             program: Program::App("miniredis"),
             args: "serve",
             load: OpenLoad { proto: "resp", requests: Some("{inputs}/commands.resp"), ..order("") },
-            // Slowest asmalloc 680k req/s; the others 717k to 741k.
+            // Slowest cralloc 680k req/s; the others 717k to 741k.
             rates: (204_000, 476_000),
         },
     ]
 }
 
 /// 30% and 70% of the slowest allocator's saturated rate on `router graphql`: glibc's 4,790
-/// req/s (asmalloc 8,972, jemalloc 8,545, tcmalloc 9,024, mimalloc 8,543; 2026-10-24).
+/// req/s (cralloc 8,972, jemalloc 8,545, tcmalloc 9,024, mimalloc 8,543; 2026-10-24).
 const ROUTER_RATES: (u32, u32) = (1_440, 3_350);
 /// The same for the other four alone: jemalloc's 8,444 req/s (mimalloc 8,543 to 8,609).
 const ROUTER_FAST_RATES: (u32, u32) = (2_530, 5_910);
@@ -810,7 +810,7 @@ fn large() -> Vec<Large> {
             r70,
         });
     }
-    // 70% of the slowest saturated rate: tcmalloc's 672k, then asmalloc's 664k and 660k req/s.
+    // 70% of the slowest saturated rate: tcmalloc's 672k, then cralloc's 664k and 660k req/s.
     for (size, keys, file, r70) in [
         ("0.5G", 450_000, "{inputs}/churn-450000.resp", 470_000),
         ("2G", 1_800_000, "{inputs}/churn-1800000.resp", 465_000),
@@ -889,21 +889,21 @@ fn large() -> Vec<Large> {
 }
 
 /// 70% of the slowest allocator's saturated rate on `connect store 1M`: mimalloc's 51,840
-/// req/s (asmalloc 64,062, jemalloc 59,197, tcmalloc 56,361; 2026-10-21).
+/// req/s (cralloc 64,062, jemalloc 59,197, tcmalloc 56,361; 2026-10-21).
 const STORE_R70: u32 = 36_300;
 
 /// 70% of the slowest allocator's saturated rate on `meilisearch hn`: mimalloc's 1,328 req/s
-/// (asmalloc 1,413, jemalloc 1,372, tcmalloc 1,423).
+/// (cralloc 1,413, jemalloc 1,372, tcmalloc 1,423).
 const MEILISEARCH_R70: u32 = 930;
 
 /// 70% of the slowest allocator's saturated rate, the collection in RAM, on `qdrant search`
-/// (mimalloc's 3,528 req/s; the others 3,576 to 3,635) and `qdrant mixed` (asmalloc's 1,804;
+/// (mimalloc's 3,528 req/s; the others 3,576 to 3,635) and `qdrant mixed` (cralloc's 1,804;
 /// the others 1,822 to 1,866), two rounds, 2026-10-24.
 const QDRANT_SEARCH_R70: u32 = 2_470;
 const QDRANT_MIXED_R70: u32 = 1_260;
 
 /// 70% of the slowest allocator's saturated rate on `surrealdb mem`: glibc's 8,728 req/s
-/// (asmalloc 11,186, tcmalloc 10,460, mimalloc 10,001, jemalloc 9,672; SurrealDB's release
+/// (cralloc 11,186, tcmalloc 10,460, mimalloc 10,001, jemalloc 9,672; SurrealDB's release
 /// profile, one round, 2026-10-25).
 const SURREALDB_R70: u32 = 6_110;
 
@@ -948,7 +948,7 @@ pub fn servers_doubling() -> Vec<Job> {
     vec![large_job(l, plan, "dbl", "")]
 }
 
-/// The doublings come after about 14.4M orders: at 248k req/s, 58 to 60 s in for asmalloc and
+/// The doublings come after about 14.4M orders: at 248k req/s, 58 to 60 s in for cralloc and
 /// jemalloc alike, so 14 to 16 s into the segment.
 const DOUBLING_FILL_S: u32 = 44;
 const DOUBLING_S: u32 = 28;
@@ -964,7 +964,7 @@ pub fn servers_large_sat() -> Vec<Job> {
         .collect()
 }
 
-/// What asmalloc's default background thread does to a large-heap server
+/// What cralloc's default background thread does to a large-heap server
 /// (docs/research/default-thread-servers.md): the order service at 2 GiB, the log store and
 /// Meilisearch, each filled, then half a minute at 70% (`s70`, three ten-second pieces), a
 /// silence of 30 s with the connections open, long enough for the thread to drain and park,
@@ -1062,7 +1062,7 @@ mod tests {
         let mut c = Command::new(script);
         c.args(args);
         if let Some(f) = fixture {
-            c.env("ASMALLOC_CPUIDLE_ROOT", f);
+            c.env("CRALLOC_CPUIDLE_ROOT", f);
         }
         let out = c.output().expect("scripts/deep-idle runs");
         (out.status.success(), String::from_utf8_lossy(&out.stdout).into(), String::from_utf8_lossy(&out.stderr).into())

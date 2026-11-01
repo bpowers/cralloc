@@ -218,7 +218,7 @@ values, one in ten with an expiry (`miniredis/fetch.sh`). Their day fills the he
 closed-loop load, measures the saturated rate, then holds 70% for a minute in six marked
 ten-second pieces, then the bursts and the idle close as above. Run each size as a session of
 its own with `--mem-cap` sized to it (3, 7 and 12 GiB). The denominator is the program's own
-live bytes: build the servers with `bench-alloc`'s `live-bytes` feature (asmalloc with a
+live bytes: build the servers with `bench-alloc`'s `live-bytes` feature (cralloc with a
 counter of requested bytes, never a build that is compared) and add it as an allocator entry
 with `build = "live-bytes"`; the runner reads its count at every mark (`marks_ms`), and
 `bench/probes/partial-load/largesum.py` puts each allocator's resident set over it. The

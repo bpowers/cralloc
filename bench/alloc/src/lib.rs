@@ -11,7 +11,7 @@
 //! | `mi` | `libmimalloc-sys`'s static build | the `mimalloc` crate 0.1.52 | `mi_free` |
 //! | `mi-sized` | the same | the same, with the size passed back | `mi_free_size_aligned` |
 //! | `mi-crate` | the `mimalloc` crate itself, with the mimalloc it bundles | itself | `mi_free` |
-//! | `asmalloc` | `asmalloc::Asmalloc`, `executable` feature | itself | its `dealloc` |
+//! | `cralloc` | `cralloc::Cralloc`, `executable` feature | itself | its `dealloc` |
 //! | `je` | `tikv-jemallocator` 0.6 itself, default features | itself | `sdallocx` |
 //! | `tc` | google/tcmalloc, static | as `tcmalloc-better` 0.1.19 | `TCMallocInternalDeleteSizedAligned` |
 //! | `sn` | `snmalloc-rs` 0.7 itself, default features (cmake build of its bundled snmalloc) | itself | `sn_rust_dealloc` |
@@ -50,24 +50,24 @@ static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 #[cfg(bench_layout_pad)]
 mod pad;
 
-#[cfg(feature = "asmalloc")]
+#[cfg(feature = "cralloc")]
 mod asm;
-#[cfg(feature = "asmalloc")]
+#[cfg(feature = "cralloc")]
 use asm as chosen;
-#[cfg(all(feature = "asmalloc", not(feature = "asmalloc-memstat"), not(feature = "live-bytes")))]
+#[cfg(all(feature = "cralloc", not(feature = "cralloc-memstat"), not(feature = "live-bytes")))]
 #[global_allocator]
-static GLOBAL: asmalloc::Asmalloc = asmalloc::Asmalloc;
+static GLOBAL: cralloc::Cralloc = cralloc::Cralloc;
 #[cfg(feature = "live-bytes")]
 mod live;
 #[cfg(feature = "live-bytes")]
 #[global_allocator]
 static GLOBAL: live::Counting = live::Counting;
-#[cfg(feature = "asmalloc-memstat")]
+#[cfg(feature = "cralloc-memstat")]
 #[global_allocator]
 static GLOBAL: memstat::Counting = memstat::Counting;
 #[cfg(feature = "memacct")]
 mod memacct;
-#[cfg(feature = "asmalloc-memstat")]
+#[cfg(feature = "cralloc-memstat")]
 mod memstat;
 
 #[cfg(feature = "je")]
@@ -103,35 +103,35 @@ use system as chosen;
 /// The allocator family this binary was built with.
 pub const NAME: &str = chosen::NAME;
 
-/// Starts what the allocator needs started before the workload runs: asmalloc's background
-/// thread, with the `asmalloc-background` feature, and the cache domains of
-/// `ASMALLOC_DOMAIN_WIDTH`, with `asmalloc-domains`. Nothing for any other build.
+/// Starts what the allocator needs started before the workload runs: cralloc's background
+/// thread, with the `cralloc-background` feature, and the cache domains of
+/// `CRALLOC_DOMAIN_WIDTH`, with `cralloc-domains`. Nothing for any other build.
 pub fn init() {
     #[cfg(feature = "je")]
     je::start_stats();
-    #[cfg(feature = "asmalloc-background")]
-    asmalloc::Asmalloc::start_background().expect("asmalloc's background thread starts");
-    #[cfg(feature = "asmalloc-domains")]
-    if let Some(width) = std::env::var("ASMALLOC_DOMAIN_WIDTH").ok().and_then(|w| w.parse().ok()) {
-        asmalloc::Asmalloc::split_domains(width);
+    #[cfg(feature = "cralloc-background")]
+    cralloc::Cralloc::start_background().expect("cralloc's background thread starts");
+    #[cfg(feature = "cralloc-domains")]
+    if let Some(width) = std::env::var("CRALLOC_DOMAIN_WIDTH").ok().and_then(|w| w.parse().ok()) {
+        cralloc::Cralloc::split_domains(width);
     }
 }
 
-/// Whether this build can break its heap down on demand with [`snapshot`]: asmalloc's
-/// `asmalloc-memstat` build, with its sampler on (`ASMALLOC_MEMSTAT`).
+/// Whether this build can break its heap down on demand with [`snapshot`]: cralloc's
+/// `cralloc-memstat` build, with its sampler on (`CRALLOC_MEMSTAT`).
 pub fn snapshot_supported() -> bool {
-    #[cfg(feature = "asmalloc-memstat")]
+    #[cfg(feature = "cralloc-memstat")]
     return memstat::active();
-    #[cfg(not(feature = "asmalloc-memstat"))]
+    #[cfg(not(feature = "cralloc-memstat"))]
     false
 }
 
 /// Writes the heap's full breakdown now, tagged `tag` (non-zero, a new one each call), where
 /// [`snapshot_supported`]; does nothing elsewhere.
 pub fn snapshot(tag: u64) {
-    #[cfg(feature = "asmalloc-memstat")]
+    #[cfg(feature = "cralloc-memstat")]
     memstat::snapshot(tag);
-    #[cfg(not(feature = "asmalloc-memstat"))]
+    #[cfg(not(feature = "cralloc-memstat"))]
     let _ = tag;
 }
 
@@ -168,9 +168,9 @@ pub fn describe() -> Description {
 /// `NAME`, unless the allocator can check at run time that it serves this process and finds
 /// it does not.
 fn allocator() -> &'static str {
-    #[cfg(feature = "asmalloc")]
+    #[cfg(feature = "cralloc")]
     if !asm::serves() {
-        return "not served by asmalloc";
+        return "not served by cralloc";
     }
     NAME
 }

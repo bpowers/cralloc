@@ -1,10 +1,10 @@
-//! asmalloc's C interface as a static library, for linking into the C loops (`../cloop.c`) so
+//! cralloc's C interface as a static library, for linking into the C loops (`../cloop.c`) so
 //! that they call the generated routines directly, as a statically linked program does.
 #![no_std]
 
-asmalloc::export_c_abi!();
+cralloc::export_c_abi!();
 
 #[panic_handler]
 fn panic(_: &core::panic::PanicInfo) -> ! {
-    asmalloc::abort("centry-static: panic")
+    cralloc::abort("centry-static: panic")
 }

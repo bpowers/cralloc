@@ -3,7 +3,7 @@
 # each compared with the same run without the library. On demand only; never in the gate.
 #
 # Usage: scripts/preload-soak [--long] [--suites] [name...]   (names as printed, or globs)
-#   default    the stress harness (crates/asmalloc-preload/tests/programs/soak.c) in every
+#   default    the stress harness (crates/cralloc-preload/tests/programs/soak.c) in every
 #              mode, SOAK_SECS (30) each, plain and preloaded (the signal and breakpoint
 #              modes, which allocate in signal handlers, preloaded only); then on two CPUs
 #              with 64 threads, without rseq, with the background maintenance thread, and
@@ -18,7 +18,7 @@
 #              first time, and about an hour.
 #
 #   SOAK_MEM    memory cap per run, default 4G (never above 16G); suites use 8G or 12G
-#   SOAK_SRC    where the suites' sources and builds go, default ${TMPDIR:-/tmp}/asmalloc-soak;
+#   SOAK_SRC    where the suites' sources and builds go, default ${TMPDIR:-/tmp}/cralloc-soak;
 #               not inside a Cargo workspace such as this checkout, or git's Rust part fails
 #               to build
 #   SOAK_KEEP   set to keep the work directory
@@ -45,23 +45,23 @@ done
 secs="${SOAK_SECS:-$([ $long = 1 ] && echo 600 || echo 30)}"
 seeds="${SOAK_SEEDS:-$([ $long = 1 ] && echo 3 || echo 1)}"
 mem="${SOAK_MEM:-4G}"
-src="${SOAK_SRC:-${TMPDIR:-/tmp}/asmalloc-soak}"
+src="${SOAK_SRC:-${TMPDIR:-/tmp}/cralloc-soak}"
 
-cargo build --quiet --release -p asmalloc-preload --manifest-path "$root/Cargo.toml" || exit 1
-cargo build --quiet -p asmalloc-preload --manifest-path "$root/Cargo.toml" || exit 1
-lib="$root/target/release/libasmalloc_preload.so"
-dlib="$root/target/debug/libasmalloc_preload.so"
+cargo build --quiet --release -p cralloc-preload --manifest-path "$root/Cargo.toml" || exit 1
+cargo build --quiet -p cralloc-preload --manifest-path "$root/Cargo.toml" || exit 1
+lib="$root/target/release/libcralloc_preload.so"
+dlib="$root/target/debug/libcralloc_preload.so"
 work="$(mktemp -d "${TMPDIR:-/tmp}/preload-soak.XXXXXX")"
 mkdir -p "$work/bin"
 soak="$work/bin/soak"
-cc -O2 -g -pthread -o "$soak" "$root/crates/asmalloc-preload/tests/programs/soak.c" -ldl || exit 1
+cc -O2 -g -pthread -o "$soak" "$root/crates/cralloc-preload/tests/programs/soak.c" -ldl || exit 1
 # Instruction addresses for the breakpoint mode, which aborts sequences at chosen instructions.
 objdump -d --no-show-raw-insn "$lib" | grep -oE '^ +[0-9a-f]+:' | tr -d ' :' >"$work/insns"
 objdump -d --no-show-raw-insn "$dlib" | grep -oE '^ +[0-9a-f]+:' | tr -d ' :' >"$work/insns-debug"
 # The sweep names sequences by the function that holds them.
 nm -C -S --defined-only "$lib" >"$work/funcs"
 echo "work directory: $work"
-echo "asmalloc $(git -C "$root" rev-parse --short HEAD)$(git -C "$root" diff --quiet || echo +dirty)"
+echo "cralloc $(git -C "$root" rev-parse --short HEAD)$(git -C "$root" diff --quiet || echo +dirty)"
 
 mapfile -t cpus < <(taskset -pc $$ | sed 's/.*: //' | tr ',' '\n' |
   awk -F- '{ if (NF == 2) for (i = $1; i <= $2; i++) print i; else print $1 }')
@@ -127,7 +127,7 @@ compare() {
   fi
 }
 
-# alone NAME CAP TIMEOUT CMD...: preloaded only, must exit 0 (for what only asmalloc supports).
+# alone NAME CAP TIMEOUT CMD...: preloaded only, must exit 0 (for what only cralloc supports).
 alone() {
   local name="$1" cap="$2" limit="$3"
   shift 3
@@ -173,14 +173,14 @@ for seed in $(seq 1 "$seeds"); do
     compare "no-rseq-$m-s$seed" "$mem" "$limit" env GLIBC_TUNABLES=glibc.pthread.rseq=0 \
       "$soak" "$m" secs="$secs" seed="$seed"
   done
-  # The background thread (ASMALLOC_BACKGROUND=1) drains and launders idle slabs from another
+  # The background thread (CRALLOC_BACKGROUND=1) drains and launders idle slabs from another
   # thread while these run; then a burst, a full free and a quiet period in which resident
   # memory must fall with nobody calling the allocator.
   for m in churn prodcons; do
-    compare "background-$m-s$seed" "$mem" "$limit" env ASMALLOC_BACKGROUND=1 \
+    compare "background-$m-s$seed" "$mem" "$limit" env CRALLOC_BACKGROUND=1 \
       "$soak" "$m" secs="$secs" seed="$seed"
   done
-  alone "background-quiet-s$seed" "$mem" "$limit" env ASMALLOC_BACKGROUND=1 SOAK_QUIET_CHECK=1 \
+  alone "background-quiet-s$seed" "$mem" "$limit" env CRALLOC_BACKGROUND=1 SOAK_QUIET_CHECK=1 \
     "$soak" quiet secs="$((secs / 3 + 1))" seed="$seed"
   # The debug build: debug assertions on, no LTO, different code around the routines.
   for m in churn idle signal breakpoint; do
@@ -191,7 +191,7 @@ done
 
 # Deterministic, so once: every instruction of every sequence, against the release library.
 alone sweep "$mem" 60m env SOAK_INSNS="$work/insns" SOAK_FUNCS="$work/funcs" \
-  SOAK_UNREACHED="$root/crates/asmalloc-preload/tests/programs/sweep-unreached.txt" \
+  SOAK_UNREACHED="$root/crates/cralloc-preload/tests/programs/sweep-unreached.txt" \
   taskset -c "${cpus[0]}" "$soak" sweep threads=1
 wanted sweep && grep -h 'soak sweep: [0-9]* of' "$work/sweep.preload.err" | sed 's/^/      /'
 

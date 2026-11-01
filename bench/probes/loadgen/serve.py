@@ -54,14 +54,14 @@ ALLOCS = {
     # tcmalloc's per-CPU mode needs glibc's rseq registration off (bench/allocators.toml).
     "tcmalloc": {"preload": str(BASE / "tcmalloc" / "libtcmalloc.so"), "build": "tc",
                  "env": {"GLIBC_TUNABLES": "glibc.pthread.rseq=0"}},
-    "asmalloc": {"preload": str(REPO / "target" / "release" / "libasmalloc_preload.so"), "build": "asmalloc",
+    "cralloc": {"preload": str(REPO / "target" / "release" / "libcralloc_preload.so"), "build": "cralloc",
                  "env": {}},
-    # asmalloc with its opt-in background thread, which runs the clocked maintenance once an
+    # cralloc with its opt-in background thread, which runs the clocked maintenance once an
     # interval whether or not the program allocates. Preload only.
-    "asmalloc-bg": {"preload": str(REPO / "target" / "release" / "libasmalloc_preload.so"), "build": None,
-                    "env": {"ASMALLOC_BACKGROUND": "1"}},
+    "cralloc-bg": {"preload": str(REPO / "target" / "release" / "libcralloc_preload.so"), "build": None,
+                    "env": {"CRALLOC_BACKGROUND": "1"}},
 }
-DEFAULT_ALLOCS = "glibc,jemalloc,mimalloc,tcmalloc,asmalloc"
+DEFAULT_ALLOCS = "glibc,jemalloc,mimalloc,tcmalloc,cralloc"
 # More configurations from the environment, as JSON: {"name": {"bin": PATH, "env": {...},
 # "preload": PATH}}. "bin" replaces the server binary (a build with an allocator linked in).
 ALLOCS.update({k: {"preload": "", "build": None, "env": {}, **v}
@@ -79,7 +79,7 @@ SERVERS = {
 }
 
 # A server's day. The silences are long enough for several of the allocators' clocked steps
-# (asmalloc's interval is about a second); the final `close` watches the idle server.
+# (cralloc's interval is about a second); the final `close` watches the idle server.
 CYCLES, ON_S, OFF_S, IDLE_S = 4, 2, 5, 20
 
 
@@ -163,12 +163,12 @@ def busy(before, after, cpus):
     return round(len(cpus) * used / total, 3) if total else None
 
 
-PROBE_SYMBOL = "ASMALLOC_PROBE_COUNTS"
+PROBE_SYMBOL = "CRALLOC_PROBE_COUNTS"
 
 
 def probe_reader(pid, binary):
     """A function that reads the probe build's slow-path counters out of the server's memory,
-    or None for a build without them (crates/asmalloc/src/probe.rs)."""
+    or None for a build without them (crates/cralloc/src/probe.rs)."""
     nm = subprocess.run(["nm", "-S", binary], capture_output=True, text=True).stdout
     sym = [l.split() for l in nm.splitlines() if l.endswith(" " + PROBE_SYMBOL)]
     if not sym:

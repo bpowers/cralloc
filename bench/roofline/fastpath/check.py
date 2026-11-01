@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-"""Fails if asmalloc's fast path stops inlining into its callers under fat LTO.
+"""Fails if cralloc's fast path stops inlining into its callers under fat LTO.
 
-Builds src/main.rs (fat LTO, one codegen unit) with and without asmalloc's `executable`
+Builds src/main.rs (fat LTO, one codegen unit) with and without cralloc's `executable`
 feature, disassembles each `site_*` function and checks its hot loop, from the target of its
 first backward branch to that branch: it must hold both restartable sequences (two arming
 stores to `rseq_cs` and two CPU-number compares) and no call. The calls to the slow paths sit

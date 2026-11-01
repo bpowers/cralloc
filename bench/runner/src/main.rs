@@ -200,12 +200,12 @@ fn build(f: &Flags, p: &Paths) {
     for (name, feat) in &names {
         build_workloads(p, name, feat, None, None);
     }
-    let mut files: Vec<PathBuf> = asmalloc_builds(&names)
+    let mut files: Vec<PathBuf> = cralloc_builds(&names)
         .flat_map(|name| {
             ["workload", "rpc-server"].map(|bin| p.bench.join("target").join(name).join("release").join(bin))
         })
         .collect();
-    files.push(p.bench.join("../target/release/libasmalloc_preload.so"));
+    files.push(p.bench.join("../target/release/libcralloc_preload.so"));
     check_rseq_offsets(p, files);
 }
 
@@ -225,8 +225,8 @@ fn native_builds(f: &Flags, p: &Paths) -> Vec<(String, String)> {
     names
 }
 
-fn asmalloc_builds(names: &[(String, String)]) -> impl Iterator<Item = &String> {
-    names.iter().filter(|(_, feat)| feat.starts_with("asmalloc")).map(|(name, _)| name)
+fn cralloc_builds(names: &[(String, String)]) -> impl Iterator<Item = &String> {
+    names.iter().filter(|(_, feat)| feat.starts_with("cralloc")).map(|(name, _)| name)
 }
 
 /// `benchrun build-apps`: every program of the apps and servers suites (or `--apps`), once per
@@ -287,13 +287,13 @@ fn build_apps(f: &Flags, p: &Paths) {
     for program in &programs {
         eprintln!("{program:<12} {:>8.2} GB", apps::disk_use(&p.apps_data.join("build").join(program)) as f64 / 1e9);
     }
-    let files: Vec<PathBuf> = asmalloc_builds(&names)
+    let files: Vec<PathBuf> = cralloc_builds(&names)
         .flat_map(|name| programs.iter().map(|program| run::app_bin(&p.bench, name, program)))
         .collect();
     check_rseq_offsets(p, files);
 }
 
-/// Runs `scripts/rseq-offset-check` on the asmalloc builds just made (those of `files` that
+/// Runs `scripts/rseq-offset-check` on the cralloc builds just made (those of `files` that
 /// exist), and stops if one loads its rseq offset at a hot word's page offset
 /// (docs/research/zen5-roofline.md, section 16): every allocation of that class could wait on
 /// the previous one, so no session should run on it. `run` checks again and records the
@@ -309,7 +309,7 @@ fn check_rseq_offsets(p: &Paths, mut files: Vec<PathBuf>) {
         .status()
         .unwrap_or_else(|e| die(&format!("scripts/rseq-offset-check: {e}")));
     if !st.success() {
-        die("an asmalloc build loads its rseq offset at a hot word's page offset; see above");
+        die("an cralloc build loads its rseq offset at a hot word's page offset; see above");
     }
 }
 
@@ -376,7 +376,7 @@ fn layout(f: &Flags, p: &Paths) {
     let layouts = layout::parse(f.get("layouts").unwrap_or(layout::DEFAULT)).unwrap_or_else(|e| die(&e));
     let all = allocators(f, p);
     let bases: Vec<config::Allocator> =
-        if f.get("allocators").is_some() { all } else { all.into_iter().filter(|a| a.name == "asmalloc").collect() };
+        if f.get("allocators").is_some() { all } else { all.into_iter().filter(|a| a.name == "cralloc").collect() };
     if let Some(a) = bases.iter().find(|a| a.build.is_some() || a.control_of.is_some()) {
         die(&format!("{}: layout variants are built here, so hand-built entries and controls cannot be used", a.name));
     }

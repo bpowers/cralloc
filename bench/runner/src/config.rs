@@ -55,7 +55,7 @@ pub struct Allocator {
     /// same source, so that it also tests that two builds of one allocator measure alike.
     pub build_suffix: String,
     /// A package of the repository's root workspace that `benchrun build` builds in release
-    /// mode to make the preload library (asmalloc's, which lives in this checkout).
+    /// mode to make the preload library (cralloc's, which lives in this checkout).
     pub preload_build: Option<String>,
     /// The native build directory under target/, for variants of one feature built by hand
     /// (with different allocator build-time knobs); `benchrun build` does not make them.

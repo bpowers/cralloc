@@ -5,7 +5,7 @@ Run by build.rs; writes one Rust source file (a `global_asm!` block, extern decl
 table) to the path given as the first argument.
 
 The routines are not copies: their text is read from the allocator's generated files
-(`crates/asmalloc/src/front/generated/`), so the kernels always run what the Lean generator
+(`crates/cralloc/src/front/generated/`), so the kernels always run what the Lean generator
 emits now. Only the symbols are renamed (the slabs, the size table, the slow paths, which trap
 here), and the abort handler counts aborts.
 
@@ -44,7 +44,7 @@ import re
 import sys
 
 ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", ".."))
-GEN = os.path.join(ROOT, os.environ.get("CHAIN_GEN", "crates/asmalloc/src/front/generated"))
+GEN = os.path.join(ROOT, os.environ.get("CHAIN_GEN", "crates/cralloc/src/front/generated"))
 
 # The tree job's node class (index 3): its word is SLABS + 0x78, bytes 24 to 31 of chunk 3.
 # CHAIN_CLASS=14 places it at bytes 16 to 23 instead, where it was before 2026-10-19.
