@@ -268,6 +268,7 @@ and every life-cycle state read as on x86-64.
 | `AT_RSEQ_FEATURE_SIZE`, `__rseq_size` | 33 | 28 |
 | `AT_RSEQ_ALIGN`, `__rseq_offset` | 64, +256 | 32, +256 |
 | `rseq_lifecycle` | as on x86-64 | as on x86-64 |
+| Calls with no registration, in `ls`, `sh`, threaded Python with `fork`, `cargo`, `perl` (`rseq_preload`) | 0 of 25,000 | not run |
 | `rseq_readonly`, pinned, then migrating | top bit kept, then SIGSEGV | top bit kept |
 
 Three things differ from x86-64, none of them in what the routines rely on. The signature is
