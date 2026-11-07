@@ -253,6 +253,34 @@ flips, over four runs of 300 to 600 s, under affinity, signal, `membarrier`, for
 storms: no lost update, no foreign owner, no ID of 8192 or more. Its control, never arming with 72
 threads, gave 14,200 foreign owners and 1.6e9 lost updates in 4 s.
 
+## aarch64
+
+What the design trusts holds on aarch64 as far as the probes attack it: on a kernel with 16 KiB pages
+and on a much older one with 4 KiB, every abort point aborted, no fence let a sequence commit late,
+and every life-cycle state read as on x86-64.
+
+| | M1 Max, Linux 7.2.12, 16 KiB pages | microVM on it, Linux 6.12.109, 4 KiB pages |
+|---|---|---|
+| Abort before each of 6 instructions (`rseq_abort`) | 6 aborted, none committed | the same |
+| Late commits in 20 s of drains, three threads a CPU (`rseq_drain`) | 0 of 329,338 owned, 2.8e9 commits | 0 of 388 owned, 2.8e8 commits |
+| A `membarrier` call | 6.3 us | 49 ms, on a host busy with other work |
+| The same with no barrier, 10 s | 120,393 late commits | late commits |
+| `AT_RSEQ_FEATURE_SIZE`, `__rseq_size` | 33 | 28 |
+| `AT_RSEQ_ALIGN`, `__rseq_offset` | 64, +256 | 32, +256 |
+| `rseq_lifecycle` | as on x86-64 | as on x86-64 |
+| Calls with no registration, in `ls`, `sh`, threaded Python with `fork`, `cargo`, `perl` (`rseq_preload`) | 0 of 25,000 | not run |
+| `rseq_readonly`, pinned, then migrating | top bit kept, then SIGSEGV | top bit kept |
+
+Three things differ from x86-64, none of them in what the routines rely on. The signature is
+`0xd428bc00` (`brk #0x45e0`), and registering another makes the first abort kill the process: musl's
+area did that until it registered this one. `__rseq_offset` is positive, the static thread-local data
+lying above the thread pointer. And `NR_CPUS` stops at 4096 (`arch/arm64/Kconfig`), so 8192 slabs
+cover it with room. A breakpoint needs no privilege here, so the soak's sweep runs as it does on
+x86-64.
+
+A call of 49 ms is the price of an interrupt to a virtual CPU that is not running, so a test that
+drains is slow in such a VM and not wrong. Single runs, 2026-11-07, commit c991762.
+
 ## Kernels below 7.2
 
 Developed and run on 7.2.9; the others were read, not run.

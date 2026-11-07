@@ -164,8 +164,8 @@ pub(super) fn generic_timer() -> (u64, u64) {
 /// The calling thread's thread pointer (`tpidr_el0`).
 #[cfg(all(target_arch = "aarch64", target_env = "musl"))]
 #[inline(always)]
-pub(super) fn thread_register() -> usize {
-    let pointer: usize;
+pub(super) fn thread_register() -> Reg {
+    let pointer: Reg;
     // SAFETY: SYSCALL-03. A read of a register, which touches no memory, the stack or the flags.
     unsafe {
         asm!(
