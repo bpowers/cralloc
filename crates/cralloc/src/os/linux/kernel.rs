@@ -229,15 +229,20 @@ fn page_shift_by_probing() -> u8 {
 }
 
 /// How far to shift the generic timer's count so that it runs at a few gigahertz, as the rest of
-/// the crate takes [`Os::ticks`] to: into `2^31..2^32` Hz, which makes an interval of 2^32 ticks
-/// between one and two seconds at any rate. 7 at Apple's 24 MHz, 2 at Neoverse's 1 GHz.
+/// the crate takes [`Os::ticks`] to: `32 - log2(rate)`, to the nearest whole number, which keeps an
+/// interval of 2^32 ticks within a factor of the square root of two of a second at any rate. 7 at
+/// Apple's 24 MHz, 2 at Neoverse's 1 GHz, and 2 at 1.1 GHz, where rounding down would make an
+/// interval 1.95 s. `log2(rate)` is past its whole part by a half or more exactly when
+/// `rate^2 >= 2^(2 log + 1)`.
 #[cfg(target_arch = "aarch64")]
 #[inline(always)]
 const fn timer_shift(rate: u64) -> u32 {
-    match rate.checked_ilog2() {
-        Some(log) => 31u32.saturating_sub(log),
-        None => 0,
-    }
+    let Some(log) = rate.checked_ilog2() else {
+        return 0;
+    };
+    let squared = rate as u128 * rate as u128;
+    let up = squared >= 1u128 << (2 * log + 1);
+    32u32.saturating_sub(log + up as u32)
 }
 
 /// A file opened for reading, closed when dropped.
@@ -906,7 +911,12 @@ mod tests {
             os.commit(base, 2 * page).unwrap();
             assert_eq!(p.add(page + 1).read(), 0);
             p.add(page + 1).write(42);
-            os.advise_huge(base, 2 * page, HugePages::Avoid).unwrap();
+            // A kernel built without transparent huge pages refuses the advice, and nothing else.
+            let advised = os.advise_huge(base, 2 * page, HugePages::Avoid);
+            assert!(
+                matches!(advised, Ok(()) | Err(OsError::EINVAL)),
+                "{advised:?}"
+            );
             os.purge(base, 2 * page).unwrap();
             assert_eq!(p.add(page + 1).read(), 0);
             os.unmap(base, 4 * REGION).unwrap();
@@ -924,8 +934,8 @@ mod tests {
         // SAFETY: each range is whole pages of the reservation, and nothing else uses it.
         unsafe {
             os.commit(base, pages * page).unwrap();
-            os.advise_huge(base, pages * page, HugePages::Avoid)
-                .unwrap();
+            // So that the pages are small, where the kernel has any other kind.
+            let _ = os.advise_huge(base, pages * page, HugePages::Avoid);
             assert_eq!(os.resident(base, pages * page), Ok(0));
             for i in [0, 3, 600, 1099] {
                 p.add(i * page).write(1);
@@ -980,24 +990,36 @@ mod tests {
         assert_eq!(page(), kernel);
     }
 
+    /// An interval, 2^32 ticks, stays within a factor of the square root of two of a second at
+    /// any rate. Only 24 MHz has run: the others are arithmetic.
     #[cfg(target_arch = "aarch64")]
     #[test]
-    fn the_timer_is_scaled_to_a_few_gigahertz() {
-        const LOW: u64 = 1 << 31;
-        for rate in [
+    fn the_timer_is_scaled_so_that_an_interval_is_about_a_second() {
+        assert_eq!(timer_shift(24_000_000), 7);
+        assert_eq!(timer_shift(1_000_000_000), 2);
+        assert_eq!(timer_shift(1_100_000_000), 2);
+        let rates = [
+            1_000_000,
             10_000_000,
             19_200_000,
             24_000_000,
             25_000_000,
+            50_000_000,
+            100_000_000,
+            200_000_000,
+            250_000_000,
             1_000_000_000,
-            LOW,
-            LOW - 1,
-        ] {
-            let scaled = rate << timer_shift(rate);
-            assert!((LOW..2 * LOW).contains(&scaled), "{rate}: {scaled}");
+            1_100_000_000,
+            1 << 31,
+            (1 << 32) - 1,
+        ];
+        for rate in rates {
+            let interval = (1u64 << 32) as f64 / (rate << timer_shift(rate)) as f64;
+            assert!((0.70..=1.42).contains(&interval), "{rate}: {interval} s");
         }
-        assert_eq!(timer_shift(24_000_000), 7);
-        assert_eq!(timer_shift(1_000_000_000), 2);
+        // Either side of where a rate rounds the other way: the square root of two times 2^30.
+        assert_eq!(timer_shift(1_518_500_249), 2);
+        assert_eq!(timer_shift(1_518_500_250), 1);
         // A rate no machine has still gives a shift that does not overflow.
         assert_eq!(timer_shift(0), 0);
         assert_eq!(timer_shift(u64::MAX), 0);

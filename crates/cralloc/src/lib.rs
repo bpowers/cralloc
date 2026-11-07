@@ -50,8 +50,10 @@
 //!
 //! Limits worth knowing:
 //!
-//! - x86-64 Linux, developed and tested on Linux 7.2, glibc 2.43 and Rust 1.99; older versions
-//!   are untested. It needs glibc 2.35 or later, the first that registers restartable sequences
+//! - x86-64 and aarch64 Linux, developed and tested on Linux 7.2, glibc 2.43 and Rust 1.99; older
+//!   versions are untested. aarch64's routines are hand-written until they are proved. One binary
+//!   runs on kernels with pages of 4, 16 and 64 KiB, which it finds at its first slow path, though
+//!   only 16 KiB and 4 KiB have run on hardware. It needs glibc 2.35 or later, the first that registers restartable sequences
 //!   for its threads, dynamically or statically linked, or musl in an executable: musl registers
 //!   none, so there the allocator registers its own area for each thread at its first slow path
 //!   and unregisters it as the thread exits. Statically linked musl executables are tested;

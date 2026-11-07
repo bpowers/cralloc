@@ -1,5 +1,5 @@
 // What an in-place growth of a staggered large block costs, call by call: the faults, huge-page
-// faults and TSC ticks inside realloc, the resident memory it adds before the program writes a
+// faults and timer ticks (the TSC, or on aarch64 the generic timer) inside realloc, the resident memory it adds before the program writes a
 // byte, and the same for the program's fill of the new room (Back::unspill). A buffer is grown
 // by doubling from 1 MiB to the top size, filled as it grows, and freed, over and over; a second
 // buffer holds slot 0 of the class, which has no stagger, so the one measured sits in slot 1.
@@ -21,7 +21,15 @@
 #include <string.h>
 #include <sys/prctl.h>
 #include <sys/resource.h>
+#ifdef __x86_64__
 #include <x86intrin.h>
+#else
+static inline uint64_t __rdtsc(void) {
+    uint64_t t;
+    __asm__ volatile("mrs %0, cntvct_el0" : "=r"(t));
+    return t;
+}
+#endif
 
 #define M ((size_t)1 << 20)
 

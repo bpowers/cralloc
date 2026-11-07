@@ -39,7 +39,7 @@ pub(crate) unsafe extern "C" fn slab_stack_push(offset: usize, magazine: usize) 
     core::arch::naked_asm!(
         concat!(
             ".cfi_startproc\n",
-            a64_arm_direct!(),
+            crate::cralloc_a64_arm!(),
             a64_slab_field!(),
             "tbnz x13, #0, 7f\n",
             "str x13, [x1]\n",
@@ -64,7 +64,7 @@ pub(crate) unsafe extern "C" fn slab_stack_pop(offset: usize) -> usize {
     core::arch::naked_asm!(
         concat!(
             ".cfi_startproc\n",
-            a64_arm_direct!(),
+            crate::cralloc_a64_arm!(),
             a64_slab_field!(),
             "tbnz x13, #0, 7f\n",
             "cbz x13, 7f\n",
