@@ -1,25 +1,40 @@
 # What the kernel and glibc promise about rseq
 
-cralloc's fast path trusts five things about restartable sequences. Each held, in the source of
-Linux 7.2.9 and glibc 2.43 and when attacked on the reference host. An earlier design also trusted
-the range of the concurrency ID, and that failed: after an `execve` that returns, a thread can read
-`mm_cid == 0x80000000`, on every kernel from 6.19 on. cralloc therefore indexes its caches by CPU
-number and compares that number with the slab count on every call, so memory safety does not rest on
-what the kernel writes.
+cralloc's fast path relies on the kernel and glibc behaviours in the table below. All of them hold
+in the source we read. Stress on the reference host attacked most of them; the table says which rest
+on a reading alone. The weakest evidence is for the fence the drain uses, which no probe isolates.
 
-| What we rely on | Verdict | Shown by |
+An earlier design also trusted the range of the concurrency ID, and that failed. After an `execve`
+that returns, in a process with more threads than 1.25 times its allowed CPUs, a thread can read
+`mm_cid == 0x80000000`: reproduced on 7.2.9, with the same code at every tag read from v6.19 to
+v7.4-rc1. cralloc therefore indexes its caches by CPU number and compares that number with the slab
+count on every call, so no value the kernel writes can index outside the slabs. That is all the
+compare buys. A wrong `cpu_id` in range would put two threads on one slab, so that the number is
+right is trusted and not checked (`docs/design.md`, "What is trusted").
+
+| What we rely on | Read in source | Attacked on the host by |
 |---|---|---|
-| A thread preempted, migrated or signalled inside a sequence resumes at its abort handler | Holds, given a well-formed descriptor and no system call inside. A uprobe inside one breaks it (root only, from source) | source; `cid_stress.rs`; `rseq_abort.rs`; the soak's sweep |
-| `cpu_id` is the CPU the thread runs on, changes only at an event that aborts its sequence, and is negative with no registration | Holds | source; `rseq_lifecycle.rs` |
-| `membarrier` with the rseq command returns only after every sequence in flight there has completed or been aborted | Holds. Needs a one-time registration | source; `rseq_drain.rs` (process-wide form) |
-| glibc registers a thread's area before the thread can call the allocator | Holds, from the first interposed call to the last free at thread exit | source; `rseq_lifecycle.rs`; `rseq_preload.rs` |
-| A forked child is safe. A `vfork` or `CLONE_VM` child is not, and glibc never allocates in one | Holds | source; `rseq_lifecycle.rs`; `cid_stress.rs` |
+| A thread preempted, migrated or signalled inside a sequence resumes at its abort handler | Linux 7.2.9, given a well-formed descriptor and no system call inside. A uprobe inside one breaks it (root only) | `cid_stress.rs`; `rseq_abort.rs`; the soak's breakpoint sweep |
+| It resumes with the registers, flags and FS base it was interrupted with | 7.2.9 | Nothing direct: the probes show only that the retry works. An axiom of the Lean proofs |
+| `cpu_id` is the CPU the thread runs on, and changes only at an event that aborts its sequence | 7.2.9 | The soak, indirectly. The stress probe attacked this property of `mm_cid` |
+| `cpu_id` is negative with no registration | 7.2.9, glibc 2.43 | `rseq_lifecycle.rs`; seen under valgrind. Refusal by seccomp under glibc is from source |
+| `membarrier` on every CPU returns only after every sequence in flight has completed or been aborted | 7.2.9 | `rseq_drain.rs` |
+| The same, aimed at one CPU, which is what the drain uses | tag v7.2 | No probe isolates it: a test that it returns success, and soak modes that drain |
+| glibc registers a thread's area before the thread can call the allocator | glibc 2.43 | `rseq_lifecycle.rs`; `rseq_preload.rs`. In a static program an IFUNC resolver runs before the thread pointer exists (not tested) |
+| A forked child is safe. A `vfork` or `CLONE_VM` child is not, and glibc never allocates in one | 7.2.9, glibc 2.43 | `rseq_lifecycle.rs`; `cid_stress.rs`; `rseq_preload.rs` |
+
+A registration longer than 32 bytes selects the kernel's V2 mode, and one of 32 bytes the legacy
+mode. glibc registers 33, so every probe and the sweep ran in V2. Our own area on musl registers 32.
+That legacy mode aborts as V2 does is a reading of `rseq_entry.h:545-550`: musl's tests run there,
+and no probe forces an abort in it. The soak and its sweep are in
+[verification.md](verification.md), "Tests that run the allocator".
 
 **What we refuse to rely on:**
 
 - **That `cpu_id` is in range.** Every routine compares it with 8192, unsigned, in one fused
-  micro-op. A sign test saves 4 bytes and no cycles, and would let a number of 8192 or more index
-  past the slabs.
+  micro-op. x86-64 caps `NR_CPUS` at 8192 (`arch/x86/Kconfig:1016-1019`; the host has 32), which is
+  why the slab array has that many entries. A sign test saves 4 bytes and no cycles, and would let a
+  number of 8192 or more index past the slabs.
 - **Writing the ID fields, or their being rewritten at every switch.** tcmalloc's cached slab
   pointer needs both. Under a full-size registration the top bit of `cpu_id_start` survives 1000
   `sched_yield`s and a 300 ms spin, and the first migration kills the process (`rseq_readonly.rs`).
@@ -27,9 +42,8 @@ what the kernel writes.
   are harmless.
 - **Anything seen at start-up.** The code reads neither `__rseq_size` nor the kernel version. A
   negative `cpu_id` is the whole test, and the start-up check first proposed was never built.
-- **Which registration mode a thread is in.** glibc registers 33 bytes, V2. Our own area on musl
-  registers 32, the legacy mode. They differ in when IDs are written and whether writing them is
-  fatal, not in when sequences abort.
+- **Which registration mode a thread is in.** The two modes differ in when IDs are written and
+  whether writing them is fatal, not in when sequences abort (from source, above).
 - **`membarrier` succeeding.** A failed fence backs a drain out or keeps the background thread from
   parking, and a refused registration turns draining off.
 
@@ -42,13 +56,13 @@ CPU-indexed routines through the same events.
 
 ## Aborts
 
-A registration longer than 32 bytes selects V2 (`rseq.c:429-430`). V2 checks `rseq_cs` only when the
-thread entered the kernel from user mode by an interrupt or exception, and since then was scheduled
-out, was hit by a `membarrier` interrupt, or is about to run a signal handler (`rseq.h:35-45`,
-`62-77`; `rseq_entry.h:545-554`, `599-649`). The 32-byte legacy mode writes IDs on every switch and
-checks before every signal, and after a context switch on x86-64 applies the same user-interrupt
-condition. That is enough, because a thread inside a sequence can leave user mode only by an
-interrupt or exception, unless it makes a system call.
+V2 is selected at `rseq.c:429-430`. It checks `rseq_cs` only when the thread entered the kernel from
+user mode by an interrupt or exception, and since then was scheduled out, was hit by a `membarrier`
+interrupt, or is about to run a signal handler (`rseq.h:35-45`, `62-77`; `rseq_entry.h:545-554`,
+`599-649`). The legacy mode writes IDs on every switch and checks before every signal, and after a
+context switch on x86-64 applies the same user-interrupt condition. That is enough, because a thread
+inside a sequence can leave user mode only by an interrupt or exception, unless it makes a system
+call.
 
 | Event inside a sequence | Result |
 |---|---|
@@ -61,11 +75,15 @@ interrupt or exception, unless it makes a system call.
 | System call inside the sequence | **no abort**; with `rseq_debug` on, SIGSEGV (`rseq.c:363-380`) |
 | uprobe inside the sequence | **no abort**, and `rseq_cs` is cleared: the probed instruction runs out of line, so the saved instruction pointer is outside when the check runs (`kernel/entry/common.c:58-59`, `103`). From source |
 
+Forced on the host: preemption, migration, signals and `membarrier` by `cid_stress.rs`, and a
+breakpoint by `rseq_abort.rs`. A page fault with no switch, ptrace and single-step rest on the
+source.
+
 **What an abort changes.** The kernel sets the saved instruction pointer to the abort handler and
 clears `rseq_cs` (`rseq_entry.h:437`). It changes nothing else the thread saved, so the thread
 resumes with the registers, flags and FS base it was interrupted with. If a signal handler ran
 first, `sigreturn` restores them from the frame. Memory may differ. The Lean model's `Target.rely`
-is this statement.
+is this statement, and it rests on this reading.
 
 **When `rseq_cs` is cleared.** At registration (`rseq.c:448`), at an abort, and when a check finds
 the instruction pointer outside the range (`rseq_entry.h:443`). After a commit it keeps naming the
@@ -73,9 +91,11 @@ last descriptor until the thread is next interrupted and rescheduled. So a descr
 mapped for as long as a thread might name it, and a shared object that holds the routines must not
 be unloaded.
 
-**A malformed descriptor** gets SIGSEGV only if the instruction pointer is in range and `abort_ip`
-or the signature before it is wrong (`rseq_entry.h:379-455`). `rseq_debug=1` also checks version,
-flags, alignment, and that the abort address lies outside.
+**A malformed descriptor.** A `rseq_cs` that points past user space or at unmapped memory gets
+SIGSEGV (`rseq_entry.h:390`, `453`), which is what unloading the routines would cause. If the
+instruction pointer is in range, `abort_ip` must be a user address with the registered signature
+before it, or SIGSEGV. `rseq_debug=1` also checks version, flags, alignment, and that the abort
+address lies outside.
 
 **What the generator emits.** A 32-byte descriptor, aligned to 32, in a writable section
 `__rseq_cs`, since its absolute addresses need dynamic relocations in a shared object or PIE.
@@ -105,10 +125,13 @@ it starts later begins after the caller's stores: the call has a full barrier at
 paired with the scheduler's.
 
 - **Registration.** `MEMBARRIER_CMD_REGISTER_PRIVATE_EXPEDITED_RSEQ`, once per address space, or
-  `EPERM`. A forked child inherits it (observed); `execve` clears it.
-- **Failure.** `EPERM` unregistered; `EINVAL` before 5.10 or without rseq; `ENOMEM` only from the
-  process-wide form, which allocates a CPU mask. So a drain's back-out answers `EPERM`, `EINVAL` or
-  a seccomp filter, not memory pressure.
+  `EPERM`. With more than one thread it allocates a CPU mask and waits for an RCU grace period
+  (`:465`, `:473`). A forked child inherits it (observed); `execve` clears it (from source).
+- **Failure.** `EPERM` unregistered; `EINVAL` before 5.10 or without rseq; `ENOMEM` from the
+  process-wide form and from registering with more than one thread. The per-CPU form allocates
+  nothing, so a drain's back-out answers `EPERM`, `EINVAL` or a seccomp filter, not memory pressure.
+  A failed registration turns drains off for the life of the process, with no retry
+  (`depot/generation.rs`).
 - **Shortcuts, all correct.** One user of the address space or one online CPU returns at once. A CPU
   number past `nr_cpu_ids`, not online, or running another address space returns 0 with no
   interrupt.
@@ -131,16 +154,17 @@ valid whenever one arrives.
 
 **New threads and exit.** `pthread_create` blocks all signals before `clone`
 (`nptl/pthread_create.c:805`). The new thread registers near the top of `start_thread` (`:382-387`)
-and restores the mask after that (`:438`), and nothing before the registration allocates. glibc
-never unregisters: thread-local destructors, key destructors and the release of the control block
-all run registered (`:459-465`, `598`).
+and restores the mask after that (`:438`), and nothing before the registration allocates. If its
+registration fails where its creator's succeeded, glibc aborts the process, so a process is
+registered in all its glibc threads or none. glibc never unregisters: thread-local destructors, key
+destructors and the release of the control block all run registered (`:459-465`, `598`).
 
 ### What the fields read
 
 | State | `cpu_id` | `__rseq_size` |
 |---|---|---|
 | Registered | the CPU | 33 on this kernel |
-| Disabled by `GLIBC_TUNABLES=glibc.pthread.rseq=0`, or refused (valgrind, seccomp) | -2 | 0 |
+| Disabled by `GLIBC_TUNABLES=glibc.pthread.rseq=0`, or refused (valgrind seen; seccomp under glibc from source) | -2 | 0 |
 | New thread, before it registers | 0 on a fresh stack; on a reused stack perhaps a dead thread's value (not checked) | unchanged |
 | After explicit unregistration (glibc never does this) | -1 | unchanged |
 | The crate's own area on musl, until its first slow path | -1 | not present |
@@ -208,12 +232,16 @@ the same route. A missing file or a permission error fails earlier and does not.
 | 40 | `AT_EXECVE_CHECK` | 19,951 |
 | 2 | `AT_EXECVE_CHECK` | 0 |
 
-The step from 5 to 6 threads is the threshold for per-CPU mode. The value lasted 6 to 14 ms where
-sampled, and on an idle CPU nothing bounds it. v6.18 and earlier assigned an ID immediately and are
-not affected. v6.19 to 7.3-rc7 have this code, and `sched_mm_cid_fork` and `task_mm_cid` read the
-same at 7.4-rc1 (read 2026-11-06, not run). A fast path that adds the ID to a static array unchecked
-reads a word a terabyte or more past it. A realistic trigger is a server pinned to four CPUs, with a
-blocking pool, that tries to run a script with a bad `#!` line and frees the `Command`.
+The step from 5 to 6 threads is the threshold for per-CPU mode. With all 24 CPUs allowed, 40 and 96
+threads reproduce it at the same rate. The value lasted 6 to 14 ms where sampled, and on an idle CPU
+nothing bounds it. The kernel's own comment acknowledges the window ("the fork()/execve() window
+leaves the task active with no owned CID", `core.c:10979-10989`) but treats it as an internal
+hazard. v6.18 and earlier assigned an ID immediately and are not affected. v6.19 to 7.3-rc7 have
+this code (read 2026-10-16). The ID code in `core.c` and `task_mm_cid` are unchanged at v7.3 and,
+with `rseq_entry.h`, `rseq.h` and `rseq.c`, at v7.4-rc1 (read 2026-11, not run). A fast path that
+adds the ID to a static array unchecked reads a word a terabyte or more past it. A realistic trigger
+is a server pinned to four CPUs, with a blocking pool, that tries to run a script with a bad `#!`
+line and frees the `Command`.
 
 **What did hold.** An ID comes from a per-process bitmap under the runqueue lock and changes only
 while the thread is switched out, so two running threads never share one and a change always aborts.
@@ -252,7 +280,8 @@ In `bench/probes/`, whose `README.md` has the build lines. None runs the allocat
 - **The defect has not been reported upstream, as far as the repository records.** The fix is to
   give the task an ID in that path. Sending it is the project owner's decision.
 - **No probe isolates the per-CPU fence.** `rseq_drain.rs` uses the process-wide form. The per-CPU
-  form rests on the source, a test that it returns success, and the soak's modes that drain.
+  form rests on the source, a test that it returns success, and the soak's modes that drain. No
+  probe runs in legacy mode either, and the sweep does not run on musl.
 - **Hotplug, uprobes inside a sequence, and `rseq_debug=1`** need root and were not run. The first
   two are argued from source.
 - **Static IFUNC resolvers** that allocate were not tested.

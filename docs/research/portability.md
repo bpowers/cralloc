@@ -1,21 +1,21 @@
 # What changes under musl, static linking, thread stacks and Miri
 
-Static glibc needs nothing. Static musl needs an rseq area of our own, which costs nothing
+Static glibc needs no code of ours. Static musl needs an rseq area of our own, which costs nothing
 measurable on the fast path and brings limits at the edges of a thread's life. A musl shared library
 is not supported. The background thread takes the C library's default stack, because both ways of
-asking for a size failed. Miri checks the allocator's tests on a simulated heap and has found no
-undefined behaviour, but its run is not green. `README.md`, "Limits worth knowing", is the short
-list a user needs, including limits outside this note: address-space limits, strict overcommit,
-`mlockall`.
+asking for a size failed. Miri checks the allocator's tests on a simulated heap, one seed a test,
+and has found no undefined behaviour, but its run is not green. `README.md`, "Limits worth knowing",
+is the short list a user needs, including limits outside this note: address-space limits, strict
+overcommit, `mlockall`.
 
 | Configuration | State | What differs |
 |---|---|---|
-| glibc, dynamic | developed and measured here | one more load than the `executable` feature, about a cycle a pair |
-| glibc, static | works, tested | nothing |
+| glibc, dynamic | developed and measured here | one more load than the `executable` feature, 0.2 to 1.0 cycles a pair |
+| glibc, static | works, tested | no code of ours; a static C link with lld needs `-lgcc` before our library |
 | musl, static | works, tested; `front::` tests in the gate | our own area, registered lazily |
 | musl, dynamic executable | expected to work, not tested | |
 | musl shared or preload library | not supported | the area's offset is a link-time constant only in an executable |
-| No registration (valgrind, seccomp, `glibc.pthread.rseq=0`) | correct, slow | every call takes the slow path, tens of cycles |
+| No registration (valgrind, seccomp, `glibc.pthread.rseq=0`) | correct, slow | every call takes the slow path; not measured, the design estimates tens of cycles |
 | Miri | the allocator's handle does not exist | a program declares its allocator `#[cfg(not(miri))]` |
 
 Unless noted: Linux 7.2.9, glibc 2.43, musl 1.2.5 as Rust 1.99.1's target ships it, 2026-10-17 to
@@ -23,7 +23,9 @@ Unless noted: Linux 7.2.9, glibc 2.43, musl 1.2.5 as Rust 1.99.1's target ships 
 
 ## What a musl build costs: nothing
 
-Cycles per allocate and free, one thread:
+Cycles per allocate and free, one thread, as of 2026-10-18. The default form then read a GOT slot
+and now reads a word of its own, the same two loads, and later work cut churn to about 24
+([roofline.md](roofline.md)):
 
 | | Constant pair | `Box` pair | Run-time size | Batch of 32 | Churn |
 |---|---:|---:|---:|---:|---:|
@@ -34,19 +36,22 @@ Cycles per allocate and free, one thread:
 | musl's malloc | 200 | 196 | 201 | 77 | 227 |
 
 Across threads, on five shapes of job with both sides working, the last three cralloc rows take 3.0
-to 5.8 ns an object, with overlapping ranges on every job; musl's malloc takes 83 to 414 ns. An
-immediate in place of the load of the area's offset was slower than the load (5.30 against 4.96 on a
-constant pair), so musl reads a word too. The musl batch loop's extra 0.3 cycles are not the area
-and are not explained.
+to 5.8 ns an object, with overlapping ranges on every job; musl's malloc takes 83 to 414 ns. Thin
+LTO inlines the fast path on musl as on glibc, 40 instructions a constant pair, though the crate has
+module-level assembly there. An immediate in place of the load of the area's offset was slower than
+the load (5.30 against 4.96 on a constant pair), so musl reads a word too. The musl batch loop's
+extra 0.3 cycles are not the area and are not explained.
 
 ## musl has no rseq area, so the crate brings one
 
 The crate defines a `struct rseq` in initialized thread-local data, generated from Lean, reading
 `cpu_id` -1, and a read-only word holding its `@tpoff` offset, which the routines read as they read
 glibc's `__rseq_offset`. A thread registers 32 bytes at its first slow path, the kernel's legacy
-mode, where sequences abort as they do under V2 ([linux-rseq-contract.md](linux-rseq-contract.md),
-"Aborts"). `cpu_id` is all the state a thread keeps: -1 never tried, a CPU number registered, -2
-refused or retired.
+mode. From the source, sequences abort there as they do under V2; no probe forces an abort in legacy
+mode ([linux-rseq-contract.md](linux-rseq-contract.md), "Aborts"). `cpu_id` is all the state a
+thread keeps: -1 never tried, a CPU number registered, -2 refused or retired. The kernel answers a
+second registration with `EBUSY`, another area with `EINVAL`, another signature with `EPERM`, and a
+forked child keeps the forking thread's registration (measured).
 
 **A thread must unregister before musl frees its thread-local data.** musl unmaps a detached
 thread's stack and data, then exits, and the kernel writes a registered area on the way back to user
@@ -85,13 +90,14 @@ clears the hot words and the words the C routines read from 1024. Padding the se
 alignment moved nothing.
 
 glibc places its own area at any multiple of 64, and a worker's follows the static thread-local
-size. On a hot word it cost as on musl: 7.22 cycles at 0x580 or 0x80, 8.98 at 0x40.
+size. On a hot word it cost as on musl: 8.98 cycles at 0x40, the 64-byte class's word, against 7.22
+elsewhere.
 
 **Ruled out by construction.** The kernel requires a registered area to be 32-byte aligned, so
 `cpu_id` and `rseq_cs` always sit at bytes 4 to 15 of a 32-byte chunk. Each class therefore has a
 32-byte chunk with its hot word outside those bytes, today at 24 to 31, where no 16-aligned word can
-overlap it either. Minimum cycles over three interleaved rounds at `f41dbf9`, with the word then at
-16 to 23:
+overlap it either. Minimum cycles over three interleaved rounds, against main at `f41dbf9`; the
+adopted word then sat at bytes 16 to 23:
 
 | | Before | Two hot words a chunk | One a chunk (adopted) |
 |---|---:|---:|---:|
@@ -105,9 +111,9 @@ elsewhere.
 
 ## Static linking
 
-- **Static glibc.** `libc.a` defines `__rseq_offset` and registers every thread. The allocator's
-  unit tests, the test kit's system and fork tests, and a static C program over `export_c_abi!`
-  pass.
+- **Static glibc.** `libc.a` defines `__rseq_offset` and registers every thread, so the allocator
+  needs no code of its own. The allocator's unit tests, the test kit's system and fork tests, and a
+  static C program over `export_c_abi!` pass.
 - **Static musl C programs.** `export_c_abi!` in a static library linked with `musl-gcc -static`
   replaces musl's `malloc`; musl keeps its internal allocator for its own early allocations. The
   preload suite's `threads`, `forks` and `signals` programs print what they print under musl's
@@ -118,9 +124,11 @@ elsewhere.
   `rust_eh_personality`, undefined in `no_std`. GNU ld takes them from `libgcc.a`.
 - **An object that holds the allocator must not be unloaded,** since a thread's `rseq_cs` goes on
   naming a sequence inside it. A shared object links `-z nodelete`, as the preload library does.
-- **A trap for tests.** A child forked from the harness while other test threads run may inherit a
-  lock of std's, and each thread it starts then blocks for ever. Seen once, on musl. Such tests now
-  run in a fresh process (`crate::fresh`).
+- **A trap for tests.** A child forked from a threaded harness may inherit a lock of std's, and each
+  thread it starts then blocks for ever in std's thread start. It hung the test kit's fork test in 4
+  of about 127 runs on a loaded machine, and a musl test once. The kit's child now starts its
+  threads with `pthread_create`, after which none of 300 runs hung, and other such tests run in a
+  fresh process (`crate::fresh`).
 
 ## The background thread's stack
 
@@ -162,9 +170,9 @@ with `pthread_setattr_default_np`, gives the thread the same few KiB the program
 ## Miri
 
 Miri runs neither assembly nor system calls. Our tests run on a simulated heap with the twins, under
-`-Zmiri-strict-provenance`, through `scripts/miri`: one process a test, with a CPU limit. A small
-allocator over `mmap` showed what Miri rejects: inline assembly, `MADV_DONTNEED`, partial `munmap`,
-`mprotect`, `PROT_NONE`, `MAP_NORESERVE` and integer-to-pointer casts.
+`-Zmiri-strict-provenance`, through `scripts/miri`: one process and one seed a test, with a CPU
+limit. A small allocator over `mmap` showed what Miri rejects: inline assembly, `MADV_DONTNEED`,
+partial `munmap`, `mprotect`, `PROT_NONE`, `MAP_NORESERVE` and integer-to-pointer casts.
 
 **The cost was the aliasing model, not the tests' loops.** Tests that run in 2 to 20 ms natively
 took over 15 CPU minutes, and a minute or two with Stacked Borrows off. A retag of a shared

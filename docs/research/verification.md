@@ -16,24 +16,25 @@ and heavy testing.
 | Lean, on the routines | every input, every interruption point, memory safety, clobbers, against the instruction and rseq models | the Rust slow paths, the kernel, the assembler |
 | Kani | arithmetic and packed words for every input; twins on every state of one small slab | concurrency, assembly, nested retry loops |
 | TLA+ with TLC | every interleaving of a protocol's model, a few threads and objects | the code, weak memory, flaws needing four or more views of a word |
-| Schedule explorers | the production Rust under every schedule within a bound, with forks | weak memory, anything past the preemption bound |
+| Schedule explorers | the production Rust under every schedule within a bound, with forks, in scenarios that follow the models, on small heaps | weak memory, anything past the preemption bound |
 | Model tester and fuzzers | what a program can see, through all three interfaces | interleavings it does not happen to hit |
-| Miri | undefined behaviour and data races on a simulated heap, under weak-memory emulation | the real routines and kernel; tests over its time limit |
-| Soak, breakpoint sweep, real programs | the shipped library on the real kernel, aborted at every instruction | how much of the state space they reached |
+| Miri | undefined behaviour and data races on a simulated heap, under weak-memory emulation, one seed a test | the real routines and kernel; tests over its time limit; a weak-memory flaw its one seed misses |
+| Soak (a stress harness that checks every block), breakpoint sweep, real programs | the shipped library on the real kernel, aborted at every instruction | how much of the state space they reached |
 | Safety ledger | a written proof of each `unsafe` block, adversarially reviewed | anything a reviewer misses; a review lags the code |
 
 Counts at `58ee5bf`, 2026-11-06: Lean 4.34.1, 10 routines; Kani 0.67.0, 44 quick and 24 slow
-harnesses; TLC, 12 specs and 72 configurations, 30 of them expected to fail; about 1,020 tests, 104
-marked slow; 111 ledger entries in 32 files.
+harnesses; TLC, 12 specs and 74 configurations, 30 of them expected to fail and 4 run only with
+`SLOW=1`; about 1,020 tests, 104 marked slow; 111 ledger entries in 32 files.
 
-## Where defects were actually found
+## Where the defects were found
 
-Each tool earned its place by catching something the others did not.
+This is what the records keep, not a census. Kani, the explorers, the model tester and the fuzzers
+are absent because what they catch during a change is fixed in that change and leaves little record.
 
 - **TLA+:** two drainers sharing one marker value; a child's sweep racing new drains; a fork from a
   handler that interrupted a drain, which sank the sweep and led to generations; a summary bit left
   clear in a fork child; a too-small heap chosen when start-up racers share a limited address space;
-  a walk acting on a region whose tag a losing assigner gave back. `tla/README.md` keeps each as a
+  a walk acting on a region whose tag a losing assigner gave back. `tla/models.sh` keeps each as a
   configuration expected to fail. Most came before the code, which is the point.
 - **Review of the ledger:** `Allocator::grow_zeroed` left a block's tail uncleared, which the trait
   as stabilised forbids; the thread's start waiting for ever in a fork child on a loader lock; a
@@ -59,11 +60,12 @@ registers the restart needs are intact. Any number of aborts is covered. Non-vac
 concrete witness states take every branch, so a contradictory precondition cannot pass.
 
 The proved artifact is the shipped artifact. `lean/scripts/check.sh` fails if the generated files
-differ from what Lean emits, replays every module through the kernel, audits axioms, and assembles
-each naked function to check its size and alignment. It takes minutes, and on success records
-checksums the merge gate compares. A negative test injects a hidden axiom and two forged proofs and
-requires the check to reject them. The emitter refuses an inline routine over its micro-op limit
-(`Rust.checkUops`) and a sequence whose last step is not a plain store (`Rust.checkRseq`).
+differ from what Lean emits, runs golden tests of the printers, replays every module through the
+kernel, audits axioms, and assembles each naked function to check its size and alignment. It takes
+minutes, and on success records checksums the merge gate compares. A negative test injects a hidden
+axiom and two forged proofs and requires the check to reject them. The emitter refuses an inline
+routine over its micro-op limit (`Rust.checkUops`) and a sequence whose last step is not a plain
+store (`Rust.checkRseq`).
 
 What must be trusted is `lean/Cralloc/TCB/` (instruction semantics, the rseq interruption model, the
 printers, the meaning of `asm!` operands), each routine's contract in `lean/Cralloc/Spec/`, Lean's
@@ -86,8 +88,8 @@ We forked the Lean framework of verified-garbage, a project proving assembly cry
 - **The gaps it had were real, and we filled them:** `%fs`, a `Code.rseq` constructor with abort
   states, inline rendering, exits to unverified Rust by tail call. Each became new trusted text.
 - **A call and return cost 4 cycles whatever the body,** so naked functions alone would have cost
-  8.0 against 4.2 to 5.3 inlined. Inline `asm!` needed a proof obligation about declared clobbers in
-  place of a calling convention.
+  8.0 cycles a pair against about 5 inlined. Inline `asm!` needed a proof obligation about declared
+  clobbers in place of a calling convention.
 - **Keep cross-thread atomics out of the proved routines.** A model of x86-TSO with store buffers is
   a research project. The routines hold no locked instruction. Cross-thread paths are Rust atomics,
   checked by interleaving.
@@ -149,11 +151,13 @@ not even for tests, so we wrote two small checkers in the style of CHESS (`back/
   depth-first search covers every schedule within a preemption bound. The production code runs
   unchanged.
 - A schedule may fork at any step, after which all threads but one are gone. In the middle tier a
-  thread may also migrate or have its sequence aborted.
+  thread may also migrate or have its sequence aborted. The gate runs the back end's scenarios one
+  preemption lower than `--all` does.
 - Scenarios follow the TLA+ models and check the same invariants, with a census of every magazine
   and object after each execution (`depot/interleave.rs`, `back/models.rs`).
 - They explore sequentially consistent interleavings only. Weaker orders are argued from the
-  orderings the code uses and from x86-64 being TSO, and Miri's weak-memory emulation is the check.
+  orderings the code uses and from x86-64 being TSO. Miri's weak-memory emulation checks them only
+  on the one seed each test gets, and the one such flaw it found showed on 5 of 11 seeds.
 
 ## Twins
 
@@ -189,8 +193,8 @@ test infrastructure. There is no second allocator for environments without rseq.
 - **Real programs under the preload library** must print and exit as they do without it: shell
   pipelines, git, compressors, interpreters and a cargo build (`scripts/preload-check`), and the
   test suites of git, redis, CPython, SQLite and others (`scripts/preload-soak --suites`).
-- **Miri** runs the allocator's unit tests on the simulated heap, one process a test with a CPU
-  limit ([portability.md](portability.md), "Miri").
+- **Miri** runs the allocator's unit tests on the simulated heap, one process and one seed a test,
+  with a CPU limit ([portability.md](portability.md), "Miri").
 
 ## The safety ledger
 
@@ -198,8 +202,8 @@ Every `unsafe` block in shipping code has a Kani harness, a Lean routine, or an 
 `docs/safety/<crate>/<file>-safety.md` with preconditions, invariants and a proof on paper.
 `scripts/ledger-check` fails on a block that cites neither, or an entry nothing cites. A fresh agent
 that did not write the code reviews entries and records the commit. Reviews lag the code by design:
-at `58ee5bf` the check lists every reviewed file as changed since review, the rename to cralloc
-among the causes. That list is cleared before a release.
+at `58ee5bf` the check lists all 31 reviewed files as changed since review, the rename to cralloc
+among the causes, and one file, `cells`, has had no review. That list is cleared before a release.
 
 ## What runs when
 
@@ -247,9 +251,12 @@ memory, where native needs holes, partial failure and concurrent callers.
   scenarios, a reviewed correspondence and not a refinement.
 - **A run with `rseq_debug=1` has not been done.** The kernel's stricter validation would check
   every descriptor. It needs a boot parameter or root.
-- **Weak memory beyond Miri's emulation is argued, not checked.** No tool here explores x86-TSO over
-  the production code.
+- **Weak memory is argued, and checked thinly.** `scripts/miri` runs each test once, on one seed,
+  and many-seeds mode was part of the first plan. No tool here explores x86-TSO over the production
+  code.
 - **Reach is unknown.** Coverage is not measured or gated; `cargo-llvm-cov` is installed and unused.
+- **Whether `LD_PRELOAD` reaches rustc's bundled jemalloc** was never settled, so the cargo build
+  among the real programs may test less than it seems to.
 - **Miri is not green.** 26 tests were over its limit and four failed on policy assertions on
   2026-10-28 ([portability.md](portability.md), "Miri").
 - **Not proved at all:** liveness beyond the stated fairness, fragmentation bounds, performance,
