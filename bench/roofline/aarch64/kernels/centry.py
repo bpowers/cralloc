@@ -401,6 +401,12 @@ def lean_free(p):
   .subsection 0"""
 
 
+def lean_free_swapped(p):
+    """`lean_free` with the region index, which an ALU just made, as the table load's base: a base
+    takes an ALU's result a cycle sooner than an index does."""
+    return lean_free(p).replace("ldrb w5, [x12, x4]", "ldrb w5, [x4, x12]")
+
+
 def lean_free_sized(p):
     return f"""{lean_prologue(p)}
   ldr w8, [x10, #4]
@@ -478,6 +484,15 @@ def build_lean(k):
     fn(k, free, lean_free(free))
     fn(k, sized, lean_free_sized(sized))
     fn(k, calloc, lean_calloc(calloc))
+    swapped = "rf_l_free_sw"
+    fn(k, swapped, lean_free_swapped(swapped))
+    k.kernel("cl_sw_d", f"  mov x0, #32\n  bl {malloc}\n  bl {swapped}", kind="Slab", note="lean malloc, free with the region index as base")
+    k.kernel("cl_sw_mix", f"""  ldrh w26, [x25, x24, lsl #1]
+  add x24, x24, #1
+  and x24, x24, #63
+  mov x0, x26
+  bl {malloc}
+  bl {swapped}""", setup="  mov x25, #(9 << 18)\n  add x25, x22, x25\n  mov x24, #0\n", kind="Slab", note="the same, 64 sizes")
     plt(k, malloc, malloc)
     plt(k, free, free)
     plt(k, sized, sized)
