@@ -475,7 +475,7 @@ fn growth_past_the_limit_is_paid_by_heartbeats_and_wakes_the_thread() {
 
 /// A pass under way that the thread does not step, an interval after it began, is the slow
 /// paths' again, and growth past the limit is then paid as it is without a pass: the bound
-/// does not rest on the scheduler (review finding 1).
+/// does not rest on the scheduler.
 #[test]
 #[cfg_attr(miri, ignore)]
 fn a_pass_the_thread_leaves_is_the_heartbeats_after_an_interval() {
@@ -617,8 +617,6 @@ fn the_threads_plan_keeps_a_crossings_look_under_every_schedule() {
     assert!(found.complete, "{found:?}");
 }
 
-// From the review of f258bcf (findings 1 and 5), kept as regression tests.
-
 /// The most growth left unpaid while 32 MiB is carved in 1 MiB slots (two of a slow path's
 /// purge steps each, in this geometry) over a heap 40 MiB over the cap, with four heartbeats after each carve (2 MiB of payments where heartbeats pay) and a thread that is awake and never runs.
 /// With `pass`, an interval's pass was started by a heartbeat first and left to the thread.
@@ -659,10 +657,10 @@ fn most_unpaid(pass: bool) -> usize {
 }
 
 /// Design, "Heartbeat": "the bound on retained memory must not rest on the scheduler". With a
-/// thread that does not run, growth left unpaid stays near the limit only while no clocked
-/// pass is under way. A pass that a heartbeat started for the thread is stepped by nobody,
-/// stays under way for ever, and turns the heartbeats' payments past the limit off
-/// (`pay_owed` pays nothing during a pass), so only the grower's one step a carve is left.
+/// thread that does not run, growth left unpaid stays near the limit also while a clocked pass is
+/// under way. A pass that a heartbeat started for the thread is stepped by nobody; were it to stay
+/// under way for ever with the heartbeats' payments past the limit off during a pass, only the
+/// grower's one step a carve would be left.
 #[test]
 #[cfg_attr(miri, ignore)]
 fn unpaid_growth_is_bounded_when_the_thread_does_not_run_and_a_pass_is_under_way() {

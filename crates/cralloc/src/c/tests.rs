@@ -598,13 +598,12 @@ mod generated {
     }
 }
 
-/// Review probe: C's `realloc` gives back the block it leaves, also when the push of the old
-/// block misses. Many blocks moved up a class and back for many rounds visit a bounded set of
-/// addresses; a path that drops the old block takes new memory every round. Other tests share
-/// the heap and move blocks in and out of these classes now and then, so a few rounds may see
-/// new addresses; most must not.
+/// C's `realloc` gives back the block it leaves, also when the push of the old block misses. Many
+/// blocks moved up a class and back for many rounds visit a bounded set of addresses; a path that
+/// drops the old block takes new memory every round. Other tests share the heap and move blocks in
+/// and out of these classes now and then, so a few rounds may see new addresses; most must not.
 #[test]
-fn review_c_realloc_gives_back_the_blocks_it_leaves() {
+fn c_realloc_gives_back_the_blocks_it_leaves() {
     for (count, rounds, warm) in [(1usize, 4000usize, 100usize), (1200, 60, 30)] {
         let mut blocks: Vec<*mut c_void> = (0..count).map(|_| malloc(100)).collect();
         let mut seen = std::collections::BTreeSet::new();

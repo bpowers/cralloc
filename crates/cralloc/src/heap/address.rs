@@ -412,12 +412,12 @@ mod tests {
         unsafe { heap.heap.free_large(grown) };
     }
 
-    /// Review finding empty-extent (`back::tests::charge_review`), reached through the heap as
-    /// C's `aligned_alloc(huge, 0)` reaches it: a zero-size request aligned to a huge page gets
-    /// a large slot and records a size of zero, so its free marks the whole slot clean. The
-    /// slot's earlier tenant left it resident, and no trim returns it.
+    /// A tenant of no size in a slot an earlier one left resident
+    /// (`back::tests::large_charge`), reached through the heap as C's `aligned_alloc(huge, 0)`
+    /// reaches it: a zero-size request aligned to a huge page gets a large slot and records a
+    /// size of zero. The slot stays counted, and a trim returns it.
     #[test]
-    fn a_zero_size_aligned_block_leaves_its_slot_resident_for_good() {
+    fn a_trim_returns_the_slot_of_a_zero_size_aligned_block() {
         use crate::os::sim::{Shape, Standard};
         let heap = SimHeap::<Standard>::new();
         let huge = Standard::GEOMETRY.huge_page_size();
@@ -432,7 +432,7 @@ mod tests {
         // SAFETY: the test's block, freed once.
         unsafe { heap.heap.free_large(empty) };
         let back = heap.heap.back().unwrap();
-        // Counted as resident, which it is. (As reviewed, nothing was counted.)
+        // Counted as resident, which it is.
         assert_eq!(back.retained(), huge);
         back.trim();
         // SAFETY: no other thread runs, and the heap and this test store only integers.

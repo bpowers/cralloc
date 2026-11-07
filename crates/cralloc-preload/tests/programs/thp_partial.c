@@ -3,8 +3,8 @@
 // after half of each huge page of a 64 MiB block is purged. The allocator is not involved; run
 // it in a cgroup of its own (scripts/memlimit). On Linux 7.2.9 the mapped pages halve at once
 // and the charge for the huge pages does not move: the kernel keeps a huge page whole until
-// all of it is unmapped or memory pressure splits it. (Review of the large-slot charge: a
-// shrink in place in a slot that inherited huge pages is not trimmed to them.)
+// all of it is unmapped or memory pressure splits it. (So a shrink in place in a slot that
+// inherited huge pages is not trimmed to them.)
 // usage: scripts/memlimit -m 1G -- thp_partial
 #define _GNU_SOURCE
 #include <stdio.h>

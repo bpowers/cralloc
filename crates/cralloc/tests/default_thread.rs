@@ -9,8 +9,8 @@
 //! Every case takes tens of seconds of silence, so all are ignored by default; `scripts/gate
 //! --all` runs them, in parallel. One case: `cargo test -p cralloc --test default_thread --
 //! --include-ignored worker`. A child alone: `CRALLOC_DEFAULT_THREAD_MODE=worker` and the
-//! test binary's path. The modes are the review's probe modes and the cases its findings
-//! named (`docs/research/servers.md`, "The background thread").
+//! test binary's path. Each mode is a way a program reaches the thread's start, its parking or
+//! a limit on them (`docs/research/servers.md`, "The background thread").
 
 use cralloc::Cralloc;
 use std::collections::BTreeMap;
@@ -446,8 +446,8 @@ const CASES: &[Case] = &[
         env: &[],
         check: returned,
     },
-    // Review finding 2: the main thread frees what a worker allocated. musl keeps no record of
-    // threads created, and there the evidence is a thread other than the first: a limit.
+    // The main thread frees what a worker allocated. musl keeps no record of threads created,
+    // and there the evidence is a thread other than the first: a limit.
     Case {
         mode: "mainfrees",
         env: &[],
@@ -457,19 +457,19 @@ const CASES: &[Case] = &[
             returned
         },
     },
-    // Review finding 3: the freeing thread has a signal blocked at the crossing, not after.
+    // The freeing thread has a signal blocked at the crossing, not after.
     Case {
         mode: "sigmask",
         env: &[],
         check: returned,
     },
-    // Review finding 3: the burst is freed before the second thread exists.
+    // The burst is freed before the second thread exists.
     Case {
         mode: "late",
         env: &[],
         check: returned,
     },
-    // Review finding 1: a fragmented heap over the floor; the thread parks and stays parked.
+    // A fragmented heap over the floor; the thread parks and stays parked.
     Case {
         mode: "frag",
         env: &[],
@@ -479,7 +479,7 @@ const CASES: &[Case] = &[
             expect(get(report, "wakes")? == 0, "woke while parked", report)
         },
     },
-    // Review finding 4: static thread-local data the small stack cannot hold.
+    // Static thread-local data a small stack could not hold.
     Case {
         mode: "tls",
         env: &[],
@@ -542,7 +542,7 @@ const CASES: &[Case] = &[
             )
         },
     },
-    // Fork children of a parent whose thread is awake (second review's finding).
+    // Fork children of a parent whose thread is awake.
     Case {
         mode: "forkawake",
         env: &[],

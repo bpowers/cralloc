@@ -1,22 +1,19 @@
-//! Evidence for the adversarial review of the shorter large-object path (main `ef2e43d`,
-//! `cc154bd`): the release store of a size word, the unlocked activity count, the single-slot
-//! release that looks at every level, the retained count as two tallies, the clock-led decay
-//! step, `Space::metadata_at`, and the one-pass claim.
+//! The shorter large-object path: the release store of a size word, the unlocked activity count,
+//! the single-slot release that looks at every level, the retained count as two tallies, the
+//! clock-led decay step, `Space::metadata_at`, and the one-pass claim.
 //!
-//! No schedule, input or state was found that breaks one of them, so nothing here is ignored.
-//! The tests pin what the review checked by reading, each against a reference written out
-//! here, so that a later change to the same code has something to fail:
+//! Each test holds its part against a reference written out here, so that a change to the same
+//! code has something to fail:
 //!
-//! - the claim's one pass over a slot's clean words counts and clears what the two passes it
-//!   replaced did, for every shape of clean word, a word with gaps included, and touches no
-//!   bit outside its slot;
+//! - the claim's one pass over a slot's clean words counts and clears what two passes would, for
+//!   every shape of clean word, a word with gaps included, and touches no bit outside its slot;
 //! - `Space::metadata_at` is `Space::metadata` plus the offset for every region of every plan,
 //!   a reservation that settled for smaller regions included;
 //! - a single free sets every level's bit from an all-clear path and repairs a bit cleared at
 //!   any one level, at the region's levels and the class's;
 //! - the two tallies wrap, and a subtraction ahead of its addition reads as zero;
 //! - a pass that is due with nothing retained ends at once, and memory freed after it waits
-//!   an interval, where it was returned by the next heartbeat before.
+//!   an interval.
 //!
 //! The step the single-slot release takes that `tla/Summary.tla` does not have, a look at the
 //! level above a summary word its own OR found empty, is checked in `tla/SummaryLookUp.tla`.
@@ -48,10 +45,10 @@ fn marked(words: &[u64], p: u32) -> bool {
     words[(p / BITS) as usize] >> (p % BITS) & 1 != 0
 }
 
-/// `region::settle_slot` against the two passes it replaced, worked out a page at a time: the
-/// count is of the slot's clean pages as they stood before the claim, the pages under the
-/// block lose their bits, and no other bit of the region's clean bitmap changes. Slots of one
-/// clean word, of several, and of words shared with their neighbours.
+/// `region::settle_slot` against two passes, worked out a page at a time: the count is of the
+/// slot's clean pages as they stood before the claim, the pages under the block lose their bits,
+/// and no other bit of the region's clean bitmap changes. Slots of one clean word, of several, and
+/// of words shared with their neighbours.
 #[test]
 #[cfg_attr(miri, ignore)]
 fn the_claim_counts_and_clears_what_two_passes_did() {
@@ -349,8 +346,8 @@ fn the_tallies_wrap_and_a_subtraction_ahead_reads_as_zero() {
 /// A heartbeat that finds a pass due and nothing retained ends the pass as it starts: no pass
 /// is left under way, the heartbeats of the interval after it change nothing, and memory freed
 /// in that interval is returned by the first pass an interval after the empty one, not by the
-/// next heartbeat. (Before `ef2e43d` a heartbeat with nothing retained left the decay word
-/// alone, so the first heartbeat after a free found a pass long overdue and purged at once.)
+/// next heartbeat. (A heartbeat with nothing retained that left the decay word alone would make
+/// the first heartbeat after a free find a pass long overdue and purge at once.)
 #[test]
 #[cfg_attr(miri, ignore)]
 fn an_empty_pass_ends_at_once_and_the_next_is_an_interval_later() {

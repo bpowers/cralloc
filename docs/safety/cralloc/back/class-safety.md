@@ -499,9 +499,9 @@ hundred tenants of random sizes; a slot advised for huge pages, or left
 unwritten, has nothing to trim and the claim makes no call; a kept outgrown slot keeps the
 room its block used and its count falls as before; a refused trim, whole or half done,
 leaves its pages not clean, charged by the free and trimmed by the next claim.
-`large_path_review::the_claim_counts_and_clears_what_two_passes_did` checks the slack the pass
+`large_path::the_claim_counts_and_clears_what_two_passes_did` checks the slack the pass
 finds against direct arithmetic over random clean bits and last tenants. The random runs of
-`charge_review` (clean bits true, the count equal to the clean bits, every zero slot zero,
+`large_charge` (clean bits true, the count equal to the clean bits, every zero slot zero,
 with purges and advice failing) and the exploration `an_age_walk_races_large_tenants`, whose
 tenants trim (`TestHost::purge` fails a schedule in which a purger does not hold every slot it
 returns).

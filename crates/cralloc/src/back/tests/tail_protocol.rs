@@ -1,8 +1,8 @@
 //! The tail word's protocol on a host that records the advice of each huge page
 //! (`back::tail`): the take-over of a stale owner and its reconciliation, a taken-over owner's
 //! give-back, what a give-back keeps of the marks, notes and repairs made during its
-//! ownership, the reconciliation of a raise, and the mark's boundary. Each test kills a mutant
-//! the review found surviving (`tail_review`).
+//! ownership, the reconciliation of a raise, and the mark's boundary. Each test fails on a wrong
+//! version of its step that the other tests of the tail pass.
 
 use super::super::layout::Layout;
 use super::super::tail::{self, Change, Tail};

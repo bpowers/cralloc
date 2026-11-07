@@ -1,8 +1,7 @@
 // Resident memory after a zero-size block aligned to a huge page or more is freed in a slot
-// that an earlier block left resident: the block's recorded size is zero, so its free marks
-// the whole slot clean, and neither the clocked pass nor malloc_trim returns the slot. With a
-// size of one the slot goes back. (Review of the large-slot charge; the unit tests are
-// `back::tests::charge_review` and `heap::address::tests`.)
+// that an earlier block left resident. The block's recorded size is zero; the slot must go back
+// to malloc_trim all the same, as it does with a size of one. (The unit tests are
+// `back::tests::large_charge` and `heap::address::tests`.)
 // usage: empty_aligned [SIZE]    with the library preloaded; SIZE defaults to 0
 #define _GNU_SOURCE
 #include <malloc.h>

@@ -2031,8 +2031,8 @@ mod process {
     }
 }
 
-/// Probes from the review of the lean resize path (`resize.rs`).
-mod review_lean_realloc {
+/// The lean resize path (`resize.rs`).
+mod lean_realloc {
     use super::*;
     use std::collections::BTreeSet;
     use std::format;

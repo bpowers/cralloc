@@ -1,6 +1,6 @@
 # Many threads make the process heap's first allocation at once, and the program prints how
-# many got null and the region size the heap ended with. Evidence for the review's start-up
-# finding; outside the workspace and run by hand, many launches under scripts/memlimit:
+# many got null and the region size the heap ended with. Outside the workspace and run by hand,
+# many launches under scripts/memlimit:
 #
 #   cargo build --release --manifest-path <this file> --target-dir <scratch>
 #   for i in $(seq 300); do taskset -c 2-9 <scratch>/release/start-race 1000; done | sort | uniq -c

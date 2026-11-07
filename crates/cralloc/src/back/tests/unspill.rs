@@ -1,27 +1,23 @@
-//! Review of `Back::unspill` (main `960cc3e`): a block that grows in place over the huge page
-//! holding its old end has that page returned and its first page written back, so that the
-//! page faults whole.
+//! `Back::unspill`: a block that grows in place over the huge page holding its old end has that
+//! page returned and its first page written back, so that the page faults whole.
 //!
-//! No way to lose the block's bytes was found; `a_purge_that_fails_part_way_keeps_the_bytes`
-//! covers the one case the original test left out. The two findings are of cost; both are
-//! fixed (the OS is asked whether the rest of the page is resident, and the page is set aside
-//! where the advice does not reach), and their tests pin the fixes:
+//! A growth keeps every byte of the block, also when the purge fails
+//! (`a_purge_that_fails_part_way_keeps_the_bytes`). The rest of these tests hold its cost:
 //!
-//! - kept-slot: the page is returned whether or not the rest of it is resident. In a slot kept
-//!   resident from its last tenant (`policy::kept_outgrown`), or one that shrank and grows back,
-//!   the rest is resident, on Linux as a huge page already, and the growth throws it away and
-//!   faults it back. Measured through the preload library on Linux 7.2.9
-//!   (`crates/cralloc-preload/tests/programs/unspill_probe.c`, 2026-10-19): every in-place
-//!   doubling of a buffer grown and freed over and over takes one huge-page fault inside
-//!   `realloc` where it took none. With transparent huge pages off for the process it drops
-//!   2 MiB of resident memory, and the program faults 511 small pages back where it faulted
-//!   none.
-//! - aside-ahead: the page is set aside one huge page further on, which the comment calls the
-//!   block's next spill. That is so only when the block grows by one huge page. A block that
-//!   doubles from two huge pages or more has it in the middle of its new room, inside the range
-//!   just advised, so the copy faults a whole huge page the program has not reached. The same
-//!   probe: growing 4 MiB to 8 MiB makes 4 MiB resident inside `realloc`, before the program
-//!   writes a byte.
+//! - The OS is asked whether the rest of the page is resident, and a resident page stays. In a
+//!   slot kept resident from its last tenant (`policy::kept_outgrown`), or one that shrank and
+//!   grows back, the rest is resident, on Linux as a huge page already, and returning it would
+//!   throw it away and fault it back. Measured through the preload library on Linux 7.2.9
+//!   (`crates/cralloc-preload/tests/programs/unspill_probe.c`, 2026-10-19): returned regardless,
+//!   every in-place doubling of a buffer grown and freed over and over takes one huge-page fault
+//!   inside `realloc`. With transparent huge pages off for the process it drops 2 MiB of resident
+//!   memory, and the program faults 511 small pages back.
+//! - The page is set aside where the advice does not reach. One huge page further on is the
+//!   block's next spill only when the block grows by one huge page. A block that doubles from two
+//!   huge pages or more has that page in the middle of its new room, inside the range just
+//!   advised, so the copy would fault a whole huge page the program has not reached. The same
+//!   probe: growing 4 MiB to 8 MiB that way makes 4 MiB resident inside `realloc`, before the
+//!   program writes a byte.
 
 use super::*;
 
@@ -56,10 +52,9 @@ fn fill_and_grow<O: Shape>(
     os.calls(Call::Purge) - purges
 }
 
-/// Finding kept-slot. A slot its last tenant left resident (a plain free of a block written
-/// whole) holds, for the next block to grow there, the huge page past its old end resident
-/// already, whole; returning it frees no page table worth freeing and costs the fault it was
-/// meant to save.
+/// A slot its last tenant left resident (a plain free of a block written whole) holds, for the next
+/// block to grow there, the huge page past its old end resident already, whole; returning it frees
+/// no page table worth freeing and costs the fault it was meant to save.
 #[test]
 #[cfg_attr(miri, ignore)]
 fn a_block_regrown_in_a_kept_slot_keeps_its_resident_huge_page() {
@@ -101,9 +96,9 @@ fn a_block_regrown_in_a_kept_slot_keeps_its_resident_huge_page() {
     back.free(again, class);
 }
 
-/// Finding kept-slot, without a free: a block that shrinks in place inside its advised slot
-/// keeps the huge page its new end lies in (the tail goes back in whole huge pages only), and
-/// growing back returns that resident page and faults it again, at every round.
+/// The same without a free: a block that shrinks in place inside its advised slot keeps the huge
+/// page its new end lies in (the tail goes back in whole huge pages only), and growing back must
+/// not return that resident page and fault it again, at every round.
 #[test]
 #[cfg_attr(miri, ignore)]
 fn a_block_that_shrinks_and_grows_back_keeps_its_resident_huge_page() {
@@ -134,10 +129,10 @@ fn a_block_that_shrinks_and_grows_back_keeps_its_resident_huge_page() {
     back.free(block, class);
 }
 
-/// Finding aside-ahead. The new room of a block that grows in place is the program's to
-/// write, and huge-page advice over it costs nothing until it does. The page set aside lies
-/// one huge page past the old end; when the block doubles from two huge pages that is inside
-/// the range just advised, and on Linux the copy faults that huge page whole.
+/// The new room of a block that grows in place is the program's to write, and huge-page advice
+/// over it costs nothing until it does. A page set aside one huge page past the old end would,
+/// when the block doubles from two huge pages, lie inside the range just advised, and on Linux the
+/// copy would fault that huge page whole.
 #[test]
 #[cfg_attr(miri, ignore)]
 fn a_growth_writes_no_advised_huge_page_the_program_has_not_reached() {
@@ -170,12 +165,11 @@ fn a_growth_writes_no_advised_huge_page_the_program_has_not_reached() {
     back.free(block, class);
 }
 
-/// The path the measured workload takes, which the original test does not: the block moves
-/// into its slot as it grows, so it is advised, and its clean bits are cleared to the end of
-/// the huge page it spills into (`region::cover` rounds an advised block's extent up), before
-/// it ever grows in place. The spilled page is still returned. A fix of kept-slot that asks
-/// the clean bits whether the rest of the page is resident passes the tests above and fails
-/// this one: it was tried, and on Linux it never returned the page at all.
+/// The path the measured workload takes: the block moves into its slot as it grows, so it is
+/// advised, and its clean bits are cleared to the end of the huge page it spills into
+/// (`region::cover` rounds an advised block's extent up), before it ever grows in place. The
+/// spilled page is still returned. Asking the clean bits whether the rest of the page is resident
+/// passes the tests above and fails this one: on Linux it never returns the page at all.
 #[test]
 #[cfg_attr(miri, ignore)]
 fn a_block_that_moved_in_returns_its_spilled_page_when_it_grows_in_place() {
@@ -216,11 +210,10 @@ fn a_purge_that_fails_part_way_keeps_the_bytes() {
     }
 }
 
-/// The check of the fixes (main `f14cd61`), at the edges of where the page is set aside: old
-/// and new sizes whose ends fall just before, on and just past page and huge-page boundaries,
-/// up to the slot's end. Whatever the growth does, the block keeps every byte it could use,
-/// the growth returns one huge page at most, and no advised huge page of the new room is
-/// written before the program reaches it.
+/// The edges of where the page is set aside: old and new sizes whose ends fall just before, on and
+/// just past page and huge-page boundaries, up to the slot's end. Whatever the growth does, the
+/// block keeps every byte it could use, the growth returns one huge page at most, and no advised
+/// huge page of the new room is written before the program reaches it.
 #[test]
 #[cfg_attr(miri, ignore)]
 fn a_growth_at_any_boundary_keeps_the_bytes_and_writes_no_advised_room() {

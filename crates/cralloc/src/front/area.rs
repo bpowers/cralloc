@@ -442,8 +442,8 @@ mod tests {
         assert_eq!(exit, 0);
     }
 
-    // Review finding: a thread that is registered by a signal handler while one of its own
-    // sequences is armed but has not yet read `cpu_id`.
+    // A thread that is registered by a signal handler while one of its own sequences is armed
+    // but has not yet read `cpu_id`.
     //
     // A routine arms `rseq_cs` and then reads `cpu_id`. On an unregistered thread the kernel
     // does not abort the sequence when a signal arrives between the two. If the handler

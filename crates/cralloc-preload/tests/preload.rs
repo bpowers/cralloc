@@ -614,7 +614,7 @@ fn a_process_without_rseq_is_served_fully() {
 
 /// A program that frees its burst before it creates its first thread: the thread is created
 /// dormant with the heap already over the floor, looks at the level before it first waits, and
-/// returns the burst as it does when the thread was created first (`silent`). Review finding 3.
+/// returns the burst as it does when the thread was created first (`silent`).
 #[test]
 #[ignore = "slow: run with scripts/gate --all"]
 fn a_burst_freed_before_the_first_thread_goes_back() {

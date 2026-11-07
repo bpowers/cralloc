@@ -11,7 +11,7 @@
 //! raises, the inspection) knows no such thing. Had it read the table, it could read a tag in
 //! the window before it goes back, and act on the region with that class's layout after
 //! another class has it: return its live slots, or read leaf words it never committed
-//! (`tla/Assign.tla`, `Assign_table`; `back::tests::ledger_review`). So the walks read a
+//! (`tla/Assign.tla`, `Assign_table`; `back::tests::published_tag`). So the walks read a
 //! second byte, the published tag, which the thread whose carving swing named the region
 //! writes after the swing, once: a class's region never goes back, so the class is the
 //! region's for good. A region named but not yet published is skipped by the walks for that

@@ -858,8 +858,8 @@ mod tests {
         assert_ne!(a, b);
     }
 
-    /// The behaviour the simulator models (review R2): a mark survives a second commit, and a
-    /// page can be marked before it is first committed.
+    /// The behaviour the simulator models: a mark survives a second commit, and a page can be
+    /// marked before it is first committed.
     #[test]
     fn marked_pages_read_as_zero_in_a_forked_child() {
         unsafe extern "C" {

@@ -213,8 +213,7 @@ fn a_drain_and_a_mutator_keep_one_owner_under_every_schedule(
     report("drain", found);
 }
 
-/// Two drains of one slab and a mutator: the claim lets one drain at a time (`Drain_claim`,
-/// finding 1).
+/// Two drains of one slab and a mutator: the claim lets one drain at a time (`Drain_claim`).
 fn two_drains_and_a_mutator_keep_one_owner_under_every_schedule(bounds: Bounds) {
     let found = explore(
         bounds,
@@ -632,14 +631,12 @@ fn contended_round_trips_earn_stock(bounds: Bounds) -> usize {
     earned
 }
 
-/// Finding (review of stock, commit bc301e8): the drain clears the count of stock bytes of the
-/// slab it drained with a plain store after it has given the slab back to its CPU (markers
-/// cleared in step 4's first pass, then the disposal of everything taken, a launder each for
-/// `maintain`, then the store). Stock the CPU pushes meanwhile, with the credit the drain left
-/// it, is counted and then wiped from the count, so the CPU can hold that much again past its
-/// room: `stock.rs` says the drain puts the count right. Thread 0 frees a burst on CPU 0, which
-/// has credit, while thread 1 drains CPU 0 from CPU 1; afterwards CPU 0 must count at least the
-/// stock it holds.
+/// Stock the CPU pushes while a drain is under way stays counted. The drain gives the slab back
+/// to its CPU before it has finished (markers cleared in step 4's first pass, then the disposal of
+/// everything taken, a launder each for `maintain`), so the CPU may push stock meanwhile, with the
+/// credit the drain left it; a count the drain cleared after that would wipe it, and the CPU could
+/// hold that much again past its room. Thread 0 frees a burst on CPU 0, which has credit, while
+/// thread 1 drains CPU 0 from CPU 1; afterwards CPU 0 must count at least the stock it holds.
 fn a_drain_leaves_no_stock_uncounted(bounds: Bounds) {
     use crate::front::{Field, Spare};
     let tuning = super::Tuning {
@@ -1539,14 +1536,14 @@ mod run {
 
     #[test]
     #[cfg_attr(miri, ignore)]
-    fn stock_review_a_drain_leaves_no_stock_uncounted() {
+    fn a_drain_leaves_no_stock_uncounted_quickly() {
         super::a_drain_leaves_no_stock_uncounted(Bounds::preemptions(1));
     }
 
     #[test]
     #[cfg(not(debug_assertions))]
     #[ignore = "slow: run with scripts/gate --all, optimized"]
-    fn stock_review_a_drain_leaves_no_stock_uncounted_fully() {
+    fn a_drain_leaves_no_stock_uncounted_fully() {
         super::a_drain_leaves_no_stock_uncounted(Bounds::preemptions(2));
     }
 

@@ -1401,8 +1401,8 @@ mod tests {
         }
     }
 
-    /// Review R1: a page marked to be wiped on fork can still be committed (the marks once
-    /// shared a bit with a commit in progress, and the commit never returned).
+    /// A page marked to be wiped on fork can still be committed: were a mark to share a bit with
+    /// a commit in progress, the commit would never return.
     #[test]
     fn a_page_marked_to_be_wiped_can_be_committed() {
         let os = Sim::with_capacity(region());
@@ -1415,7 +1415,7 @@ mod tests {
         assert!(os.is_writable(base, page()));
     }
 
-    /// Review R2: committing a marked page again keeps the mark, as on Linux.
+    /// Committing a marked page again keeps the mark, as on Linux.
     #[test]
     fn a_second_commit_keeps_the_wipe_mark() {
         let os = Sim::with_capacity(region());
@@ -1435,8 +1435,8 @@ mod tests {
         }
     }
 
-    /// Review R7: a drain in miniature on free-running threads. If the drainer still finds its
-    /// marker after the fence, no twin may have committed over it.
+    /// A drain in miniature on free-running threads. If the drainer still finds its marker after
+    /// the fence, no twin may have committed over it.
     #[test]
     fn no_twin_commits_over_a_marker_the_fence_left_in_place() {
         use crate::os::{Machine, Step};

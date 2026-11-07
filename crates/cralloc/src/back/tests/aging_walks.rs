@@ -1,6 +1,7 @@
-//! Evidence for the adversarial review of the trim at the claim and per-slot ageing
-//! (`large-slack-rule` at `18d9a61`). Each test states what the branch says and fails where the
-//! code does otherwise; the experiments print what they measured.
+//! What the walks by slot ages cost and how soon they return a slot (`hold::walk_aged`; `hold`,
+//! "The thread"): how often the thread is woken, the words a walk of a young region reads, and
+//! how long a free slot waits. And what a claim of a slot with slack costs where purges are
+//! refused (`Back::trim_slack`). The experiments print what they measured.
 
 use super::super::hold::walk_aged;
 use super::super::layout::{Recorded, STAMP_MASK};
@@ -38,16 +39,14 @@ fn thread_runs<O: Os>(back: &Back<'_, O>) -> usize {
     steps
 }
 
-/// `hold.rs`, "The thread": "a region is walked when it has something to return and no
-/// oftener", and the branch's own test has the thread "woken about once a hold and not at every
-/// step". That holds when the free slots were freed together. Freed one a fine step, as a
-/// program whose demand falls slowly frees them, each matures at its own step, the walk's due
-/// is the soonest of them, and the thread is woken at every fine step of the hold that follows:
-/// a futex wake from a request's slow path and a full walk of the region each 2 ms, where the
-/// region's own hold woke it once.
+/// A region is walked when it has something to return and no oftener, and the thread is woken
+/// about once a hold and not at every step, also when the free slots were freed apart. Freed one a
+/// fine step, as a program whose demand falls slowly frees them, each matures at its own step; a
+/// walk due at the soonest of them would wake the thread at every fine step of the hold that
+/// follows, a futex wake from a request's slow path and a full walk of the region each 2 ms.
 #[test]
 #[cfg_attr(miri, ignore)]
-fn slots_freed_a_step_apart_wake_the_thread_at_every_step() {
+fn slots_freed_a_step_apart_do_not_wake_the_thread_at_every_step() {
     let state = state::<Native>();
     let back = state.get_or_reserve().unwrap();
     let os = state.os();
@@ -105,8 +104,7 @@ fn slots_freed_a_step_apart_wake_the_thread_at_every_step() {
 /// What the walks of one young region cost under steady churn, in the hold's own terms: a
 /// region of 3000 slots of which about half are live, a few claimed (lowest first, as the
 /// allocator claims) and a few freed at random each fine step, and every look a heartbeat's
-/// (256 words). Before the branch a young region cost a look one load. The branch says a region
-/// is walked "when it has something to return and no oftener".
+/// (256 words). A region is walked when it has something to return and no oftener.
 #[test]
 #[cfg_attr(miri, ignore)]
 fn what_walking_a_young_region_costs_under_steady_churn() {
@@ -327,9 +325,9 @@ fn idle_slots_go_back_beside_hot_ones_at_random() {
     }
 }
 
-/// A gap the mutation pass found, closed: the walk's bound of words holds in a region whose
-/// free slots are few, where it is the check between leaf words that stops a look. (Without
-/// that check the branch's tests pass: their regions are dense with free slots.)
+/// The walk's bound of words holds in a region whose free slots are few, where it is the check
+/// between leaf words that stops a look. (The other tests of the walks have regions dense with
+/// free slots, which do not need that check.)
 #[test]
 #[cfg_attr(miri, ignore)]
 fn a_look_at_a_sparse_region_stays_within_its_words() {
@@ -367,10 +365,10 @@ fn a_look_at_a_sparse_region_stays_within_its_words() {
     );
 }
 
-/// The check of the fix (a young region walked at most once a hold): how long a free slot waits
-/// before it goes back, in a region that a free keeps young every `every` fine steps, with and
-/// without the thread. The slots are freed five steps apart. Returns the longest wait in fine
-/// steps and the thread's wakes.
+/// How long a free slot waits before it goes back, a young region being walked at most once a
+/// hold, in a region that a free keeps young every `every` fine steps, with and without the
+/// thread. The slots are freed five steps apart. Returns the longest wait in fine steps and the
+/// thread's wakes.
 fn longest_wait(every: u32, thread: bool) -> (u32, u32) {
     let state = state::<Native>();
     let back = state.get_or_reserve().unwrap();

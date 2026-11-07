@@ -1,28 +1,23 @@
-//! Review of the small classes' origins (`Plan::slot_origin`, merged as `f361b53`): slot `i`
-//! of a small class is at `region_base + origin + i * size`, and the pages below the origin
-//! are meant never to be committed, purged or handed out.
+//! The small classes' origins (`Plan::slot_origin`): slot `i` of a small class is at
+//! `region_base + origin + i * size`, and the pages below the origin are never committed, purged
+//! or handed out.
 //!
-//! The review found no input for which the arithmetic is wrong. What it found is that most of
-//! the tests cannot see an origin at all: the `Standard` and `Tiny` shapes, which the bulk of
-//! the back end's tests, Miri, the testkit's simulated suites and the tiny-heap Kani harnesses
-//! run on, have regions too small for one, so every origin there is zero
-//! (`every_simulated_shape_has_a_class_with_an_origin`, ignored because it fails). Mutating
-//! the origin out of one use at a time showed which uses no test noticed; the tests here are
-//! the ones that notice, on the shapes that do have origins: the design's geometry at every
-//! region size (arithmetic only, and on the real OS), and `Native`.
+//! Every simulated shape has classes with origins
+//! (`every_simulated_shape_has_a_class_with_an_origin`), so the back end's tests, Miri, the
+//! testkit's simulated suites and the tiny-heap Kani harnesses all run over some. The tests here
+//! are the ones that fail when an origin is left out of one of its uses, on the design's geometry
+//! at every region size (arithmetic only, and on the real OS) and on `Native`:
 //!
-//! - nothing checked that the pages below an origin stay uncommitted, the claim the design
-//!   makes for them (committing from the region's base passed every test):
+//! - the pages below an origin stay uncommitted, the claim the design makes for them:
 //!   `a_class_with_an_origin_keeps_everything_above_it`,
 //!   `a_later_region_keeps_everything_above_its_origin`, and `design::` on the real OS;
-//! - no test handed the back end a pointer below an origin:
+//! - a pointer below an origin is no block:
 //!   `freeing_*_below_the_origin_aborts`, `lookups_below_the_origin_find_nothing`;
-//! - the purge walk's units were checked on `Native` only, whose origins are at most three
-//!   pages against huge pages of sixteen, and the check allowed gaps between units:
+//! - the purge walk's units meet, with no gaps, in the design's geometry, where an origin is up to
+//!   255 pages against huge pages of 512, and on `Native`:
 //!   `purge_passes_cover_every_carved_page_above_the_origin_in_the_design_geometry`;
-//! - the slot arithmetic of `Layout`, which is what the allocator runs (`Plan::slot_at` is
-//!   used by tests and proofs only), was checked against `Plan`'s at the design's largest and
-//!   smallest region sizes only:
+//! - the slot arithmetic of `Layout`, which is what the allocator runs (`Plan::slot_at` is used
+//!   by tests and proofs only), agrees with `Plan`'s at every region size of the design:
 //!   `every_slot_is_found_from_its_address_at_every_design_region_size`.
 
 use super::super::layout::{Grow, Hints, Layout, Step};
@@ -38,12 +33,11 @@ fn design_plans() -> impl Iterator<Item = Plan> {
     (g.min_region_shift()..=g.max_region_shift()).filter_map(move |shift| g.plan(shift))
 }
 
-/// Finding, fixed: the shapes most tests run on had no origins. `Standard` (the default of the
-/// back end's tests, of `SimHeap`, and so of Miri and the testkit's simulated suites) has
-/// regions of 256 KiB, and `Tiny` (the Kani harnesses that run `touching`, `inside` and
-/// `slot_unit` for every class) of 2 KiB; a sixty-fourth of either was at most one page, so
-/// every origin rounded to zero. Origins now lie in the first `ORIGIN_SHARE`th of a region,
-/// a few pages in both.
+/// The shapes most tests run on have origins. `Standard` (the default of the back end's tests, of
+/// `SimHeap`, and so of Miri and the testkit's simulated suites) has regions of 256 KiB, and `Tiny`
+/// (the Kani harnesses that run `touching`, `inside` and `slot_unit` for every class) of 2 KiB.
+/// Origins lie in the first `ORIGIN_SHARE`th of a region, a few pages in both, where a sixty-fourth
+/// of either is at most one page and would round every origin to zero.
 #[test]
 fn every_simulated_shape_has_a_class_with_an_origin() {
     for (name, plan) in [
@@ -242,7 +236,7 @@ fn check_pass(layout: &Layout, carved: u32, huge_from: Option<u32>, what: &str) 
 /// The purge walk in the design's geometry, where an origin is up to 255 pages and a huge
 /// page 512, so a huge-page part that starts at the region's base (every region of a dense
 /// class after its first, `Back::prepare`) has its first huge page cut by the origin. The
-/// existing walk check (`layout::tests::purge_passes_tile_the_carved_pages`) covers the
+/// other walk check (`layout::tests::purge_passes_tile_the_carved_pages`) covers the
 /// simulated shapes only and does not ask the units to meet.
 #[test]
 fn purge_passes_cover_every_carved_page_above_the_origin_in_the_design_geometry() {
@@ -570,8 +564,8 @@ fn lookups_below_the_origin_find_nothing() {
     }
 }
 
-/// The region's base was slot 0 before origins, and is a multiple of the slot size from the
-/// origin for a class whose size divides its origin: a free of it must not pass for a slot.
+/// The region's base is a multiple of the slot size from the origin for a class whose size
+/// divides its origin: a free of it must not pass for a slot.
 #[test]
 #[cfg_attr(miri, ignore)]
 #[should_panic(expected = "not the start of a slot")]
@@ -601,8 +595,8 @@ fn freeing_a_slot_size_below_the_origin_in_a_batch_aborts() {
     unsafe { back.launder(class, &batch) };
 }
 
-/// And with the region's base in a batch whose slots lie far enough up that the base's old
-/// slot index, `origin / size` slots below the first, is under the watermark.
+/// And with the region's base in a batch whose slots lie far enough up that the index the base
+/// would have from the region's start, `origin / size`, is under the watermark.
 #[test]
 #[cfg_attr(miri, ignore)]
 #[should_panic(expected = "not the start of a slot")]

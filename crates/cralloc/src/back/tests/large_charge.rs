@@ -1,18 +1,14 @@
-//! Evidence for the adversarial review of the large-slot charge and the budget for kept grown
-//! blocks (main `f6e6ee3..eda46e0`), and for the check of its fix (main `4dd3bcf`). The budget
-//! has since become the count of kept outgrown slots (`Back::keep_outgrown`), which the tests
-//! here check too: the random runs and the threaded ones hold it to the charge of the slots
-//! marked kept at every step.
+//! The large-slot charge and the count of kept outgrown slots (`Back::keep_outgrown`).
 //!
 //! The properties: a slot said to be zero reads as zero; a clean bit is true, so none stands
 //! over a page that holds data or under what a held block may write; and the retained count
 //! is the bytes of the free slots' pages that are not clean. They are checked after every step
 //! of random runs against the back end and against the heap, the second by a program that
-//! fills all it is told it may use, and after threaded runs. Three tests are the first
-//! review's findings, which failed on the code as reviewed and pass since the fix.
+//! fills all it is told it may use, and after threaded runs. The random runs and the threaded
+//! ones also hold the count of kept outgrown slots to the charge of the slots marked kept.
 //!
 //! The slow runs do less in a debug build, which is what `scripts/gate --all` runs, than in a
-//! release one: `cargo test --release -p cralloc --lib charge_review -- --include-ignored`
+//! release one: `cargo test --release -p cralloc --lib large_charge -- --include-ignored`
 //! runs them in full in about a minute.
 
 use super::super::layout::Grow;
@@ -168,7 +164,7 @@ fn bytes(ptr: NonNull<u8>, len: usize) -> Vec<u8> {
 }
 
 /// What a run met, summed over its steps except where noted, so that a pass is known to have
-/// exercised the paths under review.
+/// exercised the paths these tests are for.
 #[derive(Default, Debug, Clone, Copy)]
 struct Met {
     /// The most bytes resident in free slots and marked clean at one step.
@@ -352,9 +348,9 @@ fn step<O: Os>(
             back.resize(to.ptr, size);
             let kept = from.shadow.len().min(size);
             // Half the moves are not outgrowths, so that the free inside such a move meets every
-            // history the runs make. `REVIEW_OTHER=0` makes every move an outgrowth, as the
-            // review's mutation runs had them.
-            let why = if std::env::var_os("REVIEW_OTHER").is_some_and(|v| v == "0")
+            // history the runs make. `CRALLOC_TEST_OTHER_MOVES=0` makes every move an outgrowth,
+            // to put every move through the path that keeps a slot.
+            let why = if std::env::var_os("CRALLOC_TEST_OTHER_MOVES").is_some_and(|v| v == "0")
                 || rng.below(2) == 0
             {
                 crate::back::Move::Outgrown
@@ -520,7 +516,7 @@ fn run(seed: u64, steps: usize, faults: bool) -> Met {
 /// of these then takes ten seconds or less.
 const DEBUG_LESS: u64 = if cfg!(debug_assertions) { 4 } else { 1 };
 
-/// `seeds` runs; they must between them have met every kind of free slot the review is about.
+/// `seeds` runs; they must between them have met every kind of free slot these tests are about.
 fn runs(salt: u64, seeds: u64, steps: usize, faults: bool) {
     let mut met = Met::default();
     for seed in 0..seeds {
@@ -632,21 +628,18 @@ fn racing_tenants_and_purges_leave_the_count_at_the_clean_bits() {
     }
 }
 
-/// Finding empty-extent. A tenant whose recorded size is zero, in a slot with no stagger, has
-/// an empty extent, so its free marks every page of the slot clean and charges nothing. If an
-/// earlier tenant left the slot resident, the slot is then free, resident, in no count, and
-/// wholly clean, which is what the purge walk skips (`all_clean`): neither the clocked pass
-/// nor a trim ever returns it. `charge_resident`'s argument that the walk still reaches a
-/// clean, resident tail ("the extent's pages are not clean, so the unit is not skipped")
-/// assumes an extent of at least one page.
+/// A tenant whose recorded size is zero, in a slot with no stagger, has an empty extent. A free
+/// charges the pages that are not clean whatever the tenant's size (`region::charge`), so a slot
+/// an earlier tenant left resident stays counted, and not clean. Marked clean by that empty
+/// extent, it would be free, resident, in no count, and wholly clean, which is what the purge
+/// walk skips (`all_clean`): neither the clocked pass nor a trim would ever return it.
 ///
 /// The heap reaches this with a zero-size request aligned to a huge page or more
 /// (`Class::of_aligned` gives it a slot; C's `aligned_alloc`, `memalign` and `posix_memalign`
-/// accept the size), and
-/// `a_zero_size_aligned_block_leaves_its_slot_resident_for_good` in `heap::address` shows it.
+/// accept the size): `a_trim_returns_the_slot_of_a_zero_size_aligned_block` in `heap::address`.
 #[test]
 #[cfg_attr(miri, ignore)]
-fn a_tenant_that_asked_for_nothing_hides_a_resident_slot_from_the_purge() {
+fn a_tenant_that_asked_for_nothing_leaves_a_resident_slot_to_the_purge() {
     let state = state::<Native>();
     let back = state.get_or_reserve().unwrap();
     let os = state.os();
@@ -661,8 +654,7 @@ fn a_tenant_that_asked_for_nothing_hides_a_resident_slot_from_the_purge() {
     back.free(empty.ptr, class);
     let census = census(&back);
     assert_eq!(census.resident, class.size(), "the slot is still resident");
-    // The count and the bits agree with each other, and with what is resident. (As reviewed,
-    // both said nothing was.)
+    // The count and the bits agree with each other, and with what is resident.
     assert_eq!(
         (back.retained(), census.counted),
         (class.size(), class.size())
@@ -681,17 +673,15 @@ fn a_tenant_that_asked_for_nothing_hides_a_resident_slot_from_the_purge() {
     );
 }
 
-/// Finding budget-per-mover. `move_large_with` decides to keep the slot it moves out of
-/// before the copy and counts the slot after it, so every move that is under way at once
-/// sees the count as it was and keeps its slot: the kept memory goes past the budget by one
-/// slot for each mover, not by one slot, and each of those may be as large as the budget.
-/// (`purge_before_release` has the same gap, a few instructions wide.) Here the movers are
-/// one thread whose moves nest at the first piece, which is the order sixteen threads take
-/// when each is preempted during its copy. Fixed: a move counts its slot before it decides
-/// (`keep_outgrown`), so the kept slots pass the bound by one slot at most.
+/// A move counts the slot it moves out of before it decides to keep it (`keep_outgrown`), so the
+/// kept slots pass the bound by one slot at most. Deciding before the copy and counting after it
+/// would let every move under way at once see the count as it was and keep its slot: past the
+/// budget by one slot for each mover, each of which may be as large as the budget. Here the
+/// movers are one thread whose moves nest at the first piece, which is the order sixteen threads
+/// take when each is preempted during its copy.
 #[test]
 #[cfg_attr(miri, ignore)]
-fn moves_under_way_at_once_each_keep_a_slot_past_the_budget() {
+fn moves_under_way_at_once_keep_at_most_a_slot_past_the_budget() {
     const MOVERS: usize = 16;
     let state = state::<Native>();
     let back = state.get_or_reserve().unwrap();
@@ -730,17 +720,16 @@ fn moves_under_way_at_once_each_keep_a_slot_past_the_budget() {
     );
 }
 
-/// Finding hidden-from-the-cap. The under-count the author states (a tenant after a larger one
-/// leaves the larger one's pages resident and marked clean) is bounded for one slot, by the
-/// slot less the tenant's extent, but not in total: it is one such tail for every free slot
-/// with that history, and neither the cap nor the count of kept outgrown slots sees any of it. Here
-/// forty slots are written in full and freed, then each hosts a block a sixth of its size, as
-/// a block that moved in with headroom is, and is freed again. The count is then under the cap
-/// with five times the cap resident in free slots, so growth in another class pays nothing;
-/// only the clocked pass returns it.
+/// A tenant after a larger one leaves the larger one's pages resident, and they stay in the
+/// count. Marked clean, they would be an under-count bounded for one slot, by the slot less the
+/// tenant's extent, but not in total: one such tail for every free slot with that history, which
+/// neither the cap nor the count of kept outgrown slots would see. Here forty slots are written
+/// in full and freed, then each hosts a block a sixth of its size, as a block that moved in with
+/// headroom is, and is freed again. The count is what is resident, five times the cap, so growth
+/// in another class pays for it.
 #[test]
 #[cfg_attr(miri, ignore)]
-fn tenants_after_larger_ones_hide_free_memory_from_the_cap() {
+fn tenants_after_larger_ones_hide_no_free_memory_from_the_cap() {
     const SLOTS: usize = 40;
     let state = state::<Native>();
     let back = state.get_or_reserve().unwrap();
@@ -764,7 +753,7 @@ fn tenants_after_larger_ones_hide_free_memory_from_the_cap() {
     }
     let before = census(&back);
     assert_eq!(before.resident, SLOTS * class.size());
-    // The count is what is resident. (As reviewed, it was under the cap.)
+    // The count is what is resident.
     assert_eq!(back.retained(), before.resident);
     // A phase change: another class grows by as much as is free and resident.
     let other = large(128 << 10);
@@ -1177,10 +1166,11 @@ fn racing_moves_keep_within_the_budget() {
     }
 }
 
-mod headroom_review;
+/// The growth headroom rule, on a shape with regions large enough for it.
+mod headroom;
 
 /// More seeds of the random runs, which make half their moves not outgrowths, with and without
-/// failing calls (from the review of `outgrown-count`).
+/// failing calls.
 #[test]
 #[ignore = "slow: run with scripts/gate --all"]
 fn more_seeds_with_moves_of_both_kinds() {

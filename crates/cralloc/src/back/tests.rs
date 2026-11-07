@@ -1822,11 +1822,11 @@ fn growth_pays_below_the_frontiers_after_a_short_idle_circuit() {
     assert!(growth_beside_an_idle_fragmented_class(4));
 }
 
-/// Found in review: when growth's purge walked above the frontiers first, on one budget with
-/// its walk below them, a long walk above them (48 regions of fragmentation here) meant it
-/// never reached below them, in any call, and growth over the cap never paid. Growth now walks
-/// one circuit, frontiers or not, carrying on from where the last payment stopped, so it
-/// reaches the free pages past the fragmentation within a few steps.
+/// Growth walks one circuit, frontiers or not, carrying on from where the last payment stopped,
+/// so it reaches the free pages past the fragmentation within a few steps. A purge that walked
+/// above the frontiers first, on one budget with its walk below them, would on a long walk above
+/// them (48 regions of fragmentation here) never reach below them, and growth over the cap would
+/// never pay.
 #[test]
 #[cfg_attr(miri, ignore)]
 fn growth_pays_below_the_frontiers_after_a_long_idle_circuit() {
@@ -1885,10 +1885,10 @@ fn the_pass_spares_reuse_beside_fragmentation_under_the_cap() {
     assert_eq!(reuse_beside_fragmentation(cap / 2), 0);
 }
 
-/// Found in review: free slots on pages that also hold live ones are counted as retained and
-/// can never be purged, so a heap with more than the cap of them is over the cap for good.
-/// When a pass over the cap went below the frontiers for the excess, what the program reused
-/// each interval was purged each interval. The frontier now holds over the cap too.
+/// Free slots on pages that also hold live ones are counted as retained and can never be purged,
+/// so a heap with more than the cap of them is over the cap for good. The frontier holds over the
+/// cap too: a pass that went below it for the excess would purge what the program reuses each
+/// interval, each interval.
 #[test]
 #[cfg_attr(miri, ignore)]
 fn the_pass_spares_reuse_beside_fragmentation_over_the_cap() {
@@ -1911,11 +1911,10 @@ fn pass_under_way<O: Os>(state: &State<O>) -> bool {
     state.decay.word.load(core::sync::atomic::Ordering::Relaxed) & 1 != 0
 }
 
-/// The defect the reset caused (`docs/research/memory.md`, "Purge on a clock, never on a
-/// level"): in a storm of frees every page still has a live neighbour while a purge runs, so it
-/// purges nothing. The count must keep those bytes, so that when the neighbours are freed too
-/// the memory is still known and is returned. The old code zeroed the count after a fruitless
-/// pass.
+/// In a storm of frees every page still has a live neighbour while a purge runs, so it purges
+/// nothing (`docs/research/memory.md`, "Purge on a clock, never on a level"). The count must keep
+/// those bytes, so that when the neighbours are freed too the memory is still known and is
+/// returned.
 #[test]
 #[cfg_attr(miri, ignore)]
 fn a_fruitless_purge_does_not_make_the_count_forget() {
@@ -2535,9 +2534,6 @@ fn threads_never_share_a_slot() {
     });
 }
 
-/// Evidence for the adversarial review of the memory-return machinery. Each test fails on the
-/// code as reviewed and is ignored so the gate passes; run one with
-/// `cargo test -p cralloc --lib back::tests::review -- --ignored <name>`.
 /// A large object that shrinks in place gives back the whole pages past its new usable size:
 /// they are not resident afterwards, the part kept is intact, no retained count moves, and a
 /// grow back in place finds zeroes there. A shrink inside a page makes no call.
@@ -3245,10 +3241,9 @@ fn a_sparse_block_stays_sparse_when_it_moves() {
     }
 }
 
-/// Review finding: `move_large_with` ignores the result of the purge that is meant to make a
-/// dirty destination read as zero, and then skips the source's zero pages all the same. Where
-/// `madvise(MADV_DONTNEED)` fails, as it does on locked memory (`mlockall`), the pages it skipped
-/// keep what the destination's last owner left there.
+/// `move_large_with` may skip the source's zero pages only where the purge that makes a dirty
+/// destination read as zero worked. Where `madvise(MADV_DONTNEED)` fails, as it does on locked
+/// memory (`mlockall`), a skipped page would keep what the destination's last owner left there.
 #[test]
 #[cfg_attr(miri, ignore)]
 fn a_block_moved_into_a_dirty_slot_arrives_whole_when_purges_fail() {
@@ -3636,7 +3631,9 @@ fn a_moving_run_releases_its_old_pages_behind_the_copy() {
     back.free_run(new);
 }
 
-mod review {
+/// Returning memory on heaps built to break it: the decay walk, the retained count, the cap and
+/// the clocked pass; and launders of any order and shape.
+mod memory_return {
     use super::super::layout::Grow;
     use super::super::tree::Host;
     use super::super::word::Word;
@@ -3659,15 +3656,13 @@ mod review {
         Grow::unpack(host.grow(region).load()).carved
     }
 
-    /// Finding decay-walk-wedge. `purge_region` calls `top_up` whenever a region's cursor is
-    /// zero and charges the words it read against the step's budget before the first unit. If
-    /// the watermark's huge page has a live slot more than a budget's worth of leaf words above
-    /// the page's start, `top_up` alone spends the budget, the loop breaks before any unit, the
-    /// cursor stays zero, and the next heartbeat does the same. The walk never leaves the
-    /// region: the pass never ends, and nothing in that region or any region below it is
-    /// returned by the clock.
+    /// A live slot more than a budget's worth of leaf words above the start of the watermark's
+    /// huge page. `purge_region` calls `top_up` whenever a region's cursor is zero; if `top_up`
+    /// alone spent the step's budget and the step ended before any unit, the cursor would stay
+    /// zero and the next heartbeat would do the same. The walk would never leave the region: the
+    /// pass would never end, and the clock would return nothing in that region or any below it.
     #[test]
-    fn a_live_slot_high_in_the_watermark_page_wedges_the_decay_walk() {
+    fn a_live_slot_high_in_the_watermark_page_does_not_wedge_the_decay_walk() {
         let state = state::<Wide>();
         let back = state.get_or_reserve().unwrap();
         let os = state.os();
@@ -3722,14 +3717,14 @@ mod review {
         );
     }
 
-    /// Finding count-drifts-up. `fill` subtracts what its claims found resident before it adds
-    /// what they revived, and the subtraction stops at zero. A fill from a purged page with the
-    /// count near zero loses the subtraction and keeps the addition: bytes are counted as
-    /// retained though every slot is in the program's hands. The same loss happens across
-    /// threads when a claim's `unretain` runs between a free's `release` and its `retain`
-    /// (`class.rs`, `release_all`): there the lost amount is a whole large slot.
+    /// `fill` subtracts what its claims found resident before it adds what they revived. Were
+    /// the subtraction to stop at zero, a fill from a purged page with the count near zero would
+    /// lose the subtraction and keep the addition: bytes counted as retained though every slot is
+    /// in the program's hands. The same loss would happen across threads when a claim's
+    /// `unretain` runs between a free's `release` and its `retain` (`class.rs`, `release_all`),
+    /// and there the lost amount would be a whole large slot.
     #[test]
-    fn a_fill_from_purged_memory_leaves_bytes_counted_that_are_not_free() {
+    fn a_fill_from_purged_memory_leaves_no_bytes_counted() {
         let state = state::<Standard>();
         let back = state.get_or_reserve().unwrap();
         let class = small(16);
@@ -3748,11 +3743,11 @@ mod review {
         );
     }
 
-    /// Finding count-drifts-up, across threads. A race, so it is evidence when it fails and
-    /// none when it passes: many threads allocate and free slots of one large class. When one
-    /// thread's claim lowers the count between another's `release` and `retain`, a count that
-    /// stopped at zero would lose the subtraction and keep the addition, and after a trim it
-    /// would say bytes are resident with nothing free.
+    /// The same across threads. A race, so it is evidence when it fails and none when it passes:
+    /// many threads allocate and free slots of one large class. When one thread's claim lowers the
+    /// count between another's `release` and `retain`, a count that stopped at zero would lose the
+    /// subtraction and keep the addition, and after a trim it would say bytes are resident with
+    /// nothing free.
     #[test]
     fn racing_large_frees_and_claims_leave_no_count_behind() {
         let state = state::<Native>();
@@ -3782,9 +3777,9 @@ mod review {
         );
     }
 
-    /// Finding cap-has-no-hysteresis. When the cap acted at the free, a count that hovered at
-    /// the cap fired on every launder that crossed upward, and each walked the whole
-    /// fragmented heap for nothing. Now frees and reuse never walk at all.
+    /// Frees and reuse never walk. A cap that acted at the free would fire on every launder that
+    /// crossed it upward when the count hovers at the cap, and each would walk the whole
+    /// fragmented heap for nothing.
     #[test]
     fn a_count_hovering_at_the_cap_never_walks_the_heap() {
         let state = state::<Standard>();
@@ -3825,12 +3820,13 @@ mod review {
         );
     }
 
-    /// Finding clock-back-stops-decay. `decay_look` reads a clock behind the last pass's end as
-    /// "not yet", with no limit: after the counter goes back (resume from suspend resets the
-    /// timestamp counter on most machines; a restored checkpoint) nothing decays until the
-    /// counter has caught up with where it was, however long that is.
+    /// A clock that has gone back restarts the interval from the new time (`purge`). A
+    /// `decay_look` that read a clock behind the last pass's end as "not yet", with no limit,
+    /// would let nothing decay after the counter goes back (resume from suspend resets the
+    /// timestamp counter on most machines; a restored checkpoint) until it had caught up with
+    /// where it was, however long that is.
     #[test]
-    fn a_clock_that_went_back_stops_decay_until_it_catches_up() {
+    fn decay_goes_on_after_the_clock_goes_back() {
         let state = state::<Standard>();
         let back = state.get_or_reserve().unwrap();
         let os = state.os();
@@ -3874,13 +3870,12 @@ mod review {
         );
     }
 
-    /// Finding decay-overshoots-goal. A pass's goal is checked only between steps, and a step
-    /// is bounded in words of bitmap, not bytes. A word covers 64 slots, so one step of 256
-    /// words in a region of large slots covers far more than a quarter of what is retained:
-    /// in the design's geometry 16 MiB of 1 KiB slots, 512 MiB of 32 KiB ones. The first pass
-    /// returns everything, where the design says up to a quarter.
+    /// A step is bounded in words of bitmap, not bytes. A word covers 64 slots, so one step of
+    /// 256 words in a region of large slots covers a great deal of memory: in the design's
+    /// geometry 16 MiB of 1 KiB slots, 512 MiB of 32 KiB ones. The first pass after a free must
+    /// still not return everything at once.
     #[test]
-    fn a_decay_pass_over_big_slots_returns_everything_at_once() {
+    fn a_decay_pass_over_big_slots_does_not_return_everything_at_once() {
         let state = state::<Wide>();
         let back = state.get_or_reserve().unwrap();
         let os = state.os();
@@ -3905,10 +3900,10 @@ mod review {
         );
     }
 
-    /// Finding decay-start-is-four-writes. A stepper that sees a pass under way before the
-    /// starter has published its goal must not take the pass word left by the last pass (its
-    /// goal met, so zero) for this one's and end the new pass. The window is set up by hand:
-    /// a decay word that says a pass began, and the pass word of an earlier pass.
+    /// A stepper that sees a pass under way before the starter has published its goal must not take
+    /// the pass word left by the last pass (its goal met, so zero) for this one's and end the new
+    /// pass. The window is set up by hand: a decay word that says a pass began, and the pass word
+    /// of an earlier pass.
     #[test]
     fn a_stepper_does_not_end_a_pass_whose_goal_is_not_published() {
         use super::super::purge::Pass;
@@ -3959,14 +3954,13 @@ mod review {
         assert!(state.os().calls(Call::Purge) > 0);
     }
 
-    /// Finding abandoned-pass-start-stops-decay (opened by the fix for the four-write start).
     /// The starter's compare-and-swap of the decay word and its store of the pass word are
     /// two writes. A thread that vanishes between them (a fork abandons it there) leaves a
     /// decay word that says a pass is under way and no pass word with its tag. Every stepper
-    /// then finds a tag that is not its own and returns, and nothing but a stepper ends a
-    /// pass or starts one: the child never decays again. The state is set up by hand, as in
-    /// `a_stepper_does_not_end_a_pass_whose_goal_is_not_published`, which asserts the first
-    /// half of this as intended; here the starter never comes back.
+    /// finds a tag that is not its own, and nothing but a stepper ends a pass or starts one, so
+    /// unless a stepper ends such a pass in the end the child would never decay again. The state
+    /// is set up by hand, as in `a_stepper_does_not_end_a_pass_whose_goal_is_not_published`,
+    /// which asserts the first half of this as intended; here the starter never comes back.
     #[test]
     fn a_pass_whose_starter_vanished_before_publishing_ends_some_day() {
         use super::super::purge::Pass;
@@ -4001,12 +3995,11 @@ mod review {
         );
     }
 
-    /// Finding cap-purge-stops-at-the-lap-count. The cap's purge starts wherever the shared
-    /// walk was left. A purge that stopped when the lap count changed would, from near the
-    /// bottom, look at the few regions below, end the lap, and stop without having seen the
-    /// regions that hold the freed memory. Here the walk was left at region 0 (set by hand; a
-    /// decay pass that met its goal there leaves it so), the program frees more than the cap,
-    /// all of it purgeable, in the regions above, and another class then grows.
+    /// The cap's purge starts wherever the shared walk was left. A purge that stopped when the lap
+    /// count changed would, from near the bottom, look at the few regions below, end the lap, and
+    /// stop without having seen the regions that hold the freed memory. Here the walk was left at
+    /// region 0 (set by hand; a decay pass that met its goal there leaves it so), the program frees
+    /// more than the cap, all of it purgeable, in the regions above, and another class then grows.
     #[test]
     fn the_cap_purges_wherever_the_walk_was_left() {
         use core::sync::atomic::Ordering::Relaxed;
@@ -4038,13 +4031,13 @@ mod review {
         );
     }
 
-    /// Finding top-up-creeps. For a class whose size does not divide a huge page, `top_up`
-    /// carves through the slot that straddles the page's end, which leaves the watermark just
-    /// inside the next huge page with one free slot below it. The next pass over the region
-    /// takes that for a watermark page worth purging and carves all of it too, though it was
-    /// never touched, and so on until a huge-page boundary that the size divides.
+    /// For a class whose size does not divide a huge page, `top_up` carves through the slot that
+    /// straddles the page's end, which leaves the watermark just inside the next huge page with
+    /// one free slot below it. A later pass over the region must not take that for a watermark
+    /// page worth purging and carve all of it too, though it was never touched, and so on until a
+    /// huge-page boundary that the size divides.
     #[test]
-    fn topping_up_a_straddled_huge_page_carves_untouched_ones_on_later_passes() {
+    fn topping_up_a_straddled_huge_page_carves_no_untouched_ones_on_later_passes() {
         let state = state::<Native>();
         let back = state.get_or_reserve().unwrap();
         let class = small(48);
@@ -4225,21 +4218,22 @@ mod review {
     }
 }
 
-mod charge_review;
+/// The large-slot charge: zero slots, clean bits and the retained count under random runs.
+mod large_charge;
 
-/// The check of the fix that commits a large class's first slot before `assign` takes its
-/// region: racing assignments, and every region looked at afterwards.
-mod assign_review;
+/// `assign` commits a large class's first slot before it takes its region: racing assignments,
+/// and every region looked at afterwards.
+mod assign_races;
 
-/// Review of `Back::unspill`: the huge page a growing block returns so that it faults whole.
-mod unspill_review;
+/// `Back::unspill`: the huge page a growing block returns so that it faults whole.
+mod unspill;
 
-/// Review of the shorter large-object path: the one-pass claim, `Space::metadata_at`, the
-/// single free that looks at every level, the two tallies and the clock-led decay step.
-mod large_path_review;
+/// The shorter large-object path: the one-pass claim, `Space::metadata_at`, the single free that
+/// looks at every level, the two tallies and the clock-led decay step.
+mod large_path;
 
-/// Review of the small classes' origins (`Plan::slot_origin`): the tests that see one.
-mod origin_review;
+/// The small classes' origins (`Plan::slot_origin`).
+mod origins;
 
 /// The hold on free large slots (`hold`).
 mod hold;
@@ -4253,9 +4247,9 @@ mod outgrown;
 /// Returning memory while the background thread runs.
 mod thread_duty;
 
-/// Review of the move of the region headers into the back end's state, with the leaf bitmap
-/// last in the block (`host::RegionHeader`, `layout`).
-mod review_headers {
+/// The region headers in the back end's state, with the leaf bitmap last in the block
+/// (`host::RegionHeader`, `layout`).
+mod region_headers {
     use super::super::layout::{Layout, WORD_BYTES};
     use super::super::tree::Host;
     use super::super::word::Word;
@@ -4309,8 +4303,8 @@ mod review_headers {
             touched(back.space().metadata(region).as_ptr(), len)
         }
 
-        /// What the change is for: a small class whose slots are only ever carved, used and
-        /// kept leaves every page of its region's metadata block untouched, read or written;
+        /// What the headers' place is for: a small class whose slots are only ever carved, used
+        /// and kept leaves every page of its region's metadata block untouched, read or written;
         /// and one whose slots go to the bitmaps and come back touches at most three pages of
         /// its own, with every page it touches at all in the block's first 2 MiB, under one
         /// page of page tables.
@@ -4530,11 +4524,10 @@ mod review_headers {
     }
 }
 
-/// Adversarial review of the direct path for scattered launders (`group::Direct`): the
-/// summary bits above every slot it frees, at the tree heights the design's geometry has
-/// (the simulated shapes stop at two summary levels), and slots given twice on either side of
-/// the judgement.
-mod review_direct {
+/// The direct path for scattered launders (`group::Direct`): the summary bits above every slot it
+/// frees, at the tree heights the design's geometry has (the simulated shapes stop at two summary
+/// levels), and slots given twice on either side of the judgement.
+mod direct_launder {
     use super::super::Sink;
     use super::super::layout::{Grow, MAX_LEVELS};
     use super::super::tree::{self, Host, Node};
@@ -5558,8 +5551,8 @@ mod retained_reading {
     }
 }
 
-/// The review of counted intervals, purging by runs and `maintain`'s rate limit.
-mod burst_start_review;
+/// When a clocked pass is due, its steps, and the floor of the allowance.
+mod clocked_pass;
 
 /// The floor measured against what a purge could return, and frontiers a silence does not age.
 mod floor_returnable;
@@ -5570,17 +5563,18 @@ mod slack;
 /// Free large slots that age on their own.
 mod aging;
 
-/// The adversarial review of the trim at the claim and per-slot ageing.
-mod slack_review;
+/// What the age walks cost and how soon they return a slot.
+mod aging_walks;
 
 /// The huge-page tail: the rule, its bounded step, its failures and its races.
 mod tail;
 
-/// The adversarial review of the huge-page tail.
-mod tail_review;
+/// The huge-page tail at its edges: a step that resumes inside a huge page, a refused call, an
+/// owner that does not run, a rebuilt huge page; the kernel's part and the model's properties.
+mod tail_edges;
 
-/// The tail word's protocol on a host that records the advice: the review's surviving mutants.
+/// The tail word's protocol on a host that records the advice.
 mod tail_protocol;
 
-/// Evidence for the ledger review of `class.rs`, `host.rs` and `region.rs`.
-mod ledger_review;
+/// A walk's class for a region comes from the published tag (`back::tags`).
+mod published_tag;

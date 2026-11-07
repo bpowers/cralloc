@@ -1,26 +1,25 @@
 //! The background thread's start in the child of a fork taken while another thread of the
-//! parent was inside `dl_iterate_phdr` (ledger review B).
+//! parent was inside `dl_iterate_phdr`.
 //!
 //! glibc's `dl_iterate_phdr` holds `dl_load_write_lock` while its callback runs. `fork`
 //! resets `dl_load_lock` and `dl_load_tls_lock` in the child (`posix/fork.c`, glibc 2.43) and
 //! not `dl_load_write_lock`, so a child forked at that moment inherits it locked by a thread
 //! that does not exist there. The program's own `pthread_create` still works in that child:
-//! it takes only the locks the fork reset. The allocator's start once called
-//! `dl_iterate_phdr` itself, to size the thread's stack, and waited on that lock for ever. It
-//! now creates the thread with the C library's defaults, as the program does, so an explicit
-//! start and the default start both return in such a child.
+//! it takes only the locks the fork reset. The allocator's start creates the thread with the C
+//! library's defaults, as the program does, so an explicit start and the default start both
+//! return in such a child; a start that called `dl_iterate_phdr` itself, to size the thread's
+//! stack, would wait on that lock for ever.
 //!
-//! A limit, older than the stack sizing and documented in BACKGROUND-03: a Rust slow path
-//! inside a `dl_iterate_phdr` callback, as Rust's backtrace code makes, that finds the thread
-//! wanted calls `pthread_create` with `dl_load_write_lock` held, and `pthread_create` takes
-//! `dl_load_tls_lock` (`_dl_allocate_tls_init`). A `dlopen` or `dlclose` in another thread
-//! takes the two in the other order (`dl_open_worker`, `_dl_close_worker`), so the two
-//! threads can wait on each other for ever. The case
-//! `a_free_in_a_callback_returns_beside_a_dlopen` arranges that; it fails, so it runs only
-//! with `CRALLOC_REVIEW_KNOWN_FAILURES=1`:
+//! A limit, documented in BACKGROUND-03: a Rust slow path inside a `dl_iterate_phdr` callback, as
+//! Rust's backtrace code makes, that finds the thread wanted calls `pthread_create` with
+//! `dl_load_write_lock` held, and `pthread_create` takes `dl_load_tls_lock`
+//! (`_dl_allocate_tls_init`). A `dlopen` or `dlclose` in another thread takes the two in the other
+//! order (`dl_open_worker`, `_dl_close_worker`), so the two threads can wait on each other for
+//! ever. The case `a_free_in_a_callback_returns_beside_a_dlopen` arranges that; it fails, so it
+//! runs only with `CRALLOC_TEST_KNOWN_FAILURES=1`:
 //!
 //! ```text
-//! CRALLOC_REVIEW_KNOWN_FAILURES=1 scripts/heavy cargo test -p cralloc --test fork_loader_lock
+//! CRALLOC_TEST_KNOWN_FAILURES=1 scripts/heavy cargo test -p cralloc --test fork_loader_lock
 //! ```
 //!
 //! Each case runs this binary again as a child process.
@@ -38,7 +37,7 @@ use std::time::{Duration, Instant};
 static ALLOCATOR: Cralloc = Cralloc;
 
 const MODE: &str = "CRALLOC_FORK_LOADER_LOCK_CHILD";
-const KNOWN_FAILURES: &str = "CRALLOC_REVIEW_KNOWN_FAILURES";
+const KNOWN_FAILURES: &str = "CRALLOC_TEST_KNOWN_FAILURES";
 
 /// The fork child's exit status when its work did not finish in time.
 const HUNG: i32 = 42;
@@ -136,7 +135,7 @@ extern "C" fn allocate(_: *mut c_void, _: usize, _: *mut c_void) -> i32 {
     1
 }
 
-/// The child process of the second finding: no fork.
+/// The child process of the limit's case: no fork.
 fn beside_a_dlopen() -> ! {
     let (done, wait) = mpsc::channel();
     thread::spawn(move || {

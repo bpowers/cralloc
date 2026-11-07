@@ -30,7 +30,7 @@ constructor, and it builds the layout that way. Region ids reach a host only fro
   once one of its slots, so one carved, is released. A region carved from was named and keeps
   its tag for good, so the second read gives the carver (`tla/Assign.tla`: `Assign_repair`,
   without the second read, publishes the wrong class; `Assign_repair_recheck` holds;
-  `back::tests::ledger_review` plays it against the code). The byte is written once (a
+  `back::tests::published_tag` plays it against the code). The byte is written once (a
   compare-and-swap from zero) and never cleared.
 
 A class never gives a named region up: the only tag change away from `Class(class)` is
@@ -42,7 +42,7 @@ checks the protocol, and `Assign_table` shows a walk that read the table instead
 region another class or a run then had).
 
 The reviewed finding at 0fd0853 (the walks read the table, and could act on a region given
-back with the wrong class's layout, `back::tests::ledger_review`) is closed by the published
+back with the wrong class's layout, `back::tests::published_tag`) is closed by the published
 tag, and the finding of the review of 1f52647 (the repair's stale read) by its second read.
 
 ## BACK-HOST-01: `&*at` in `ClassHost::meta`
