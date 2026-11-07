@@ -75,7 +75,13 @@ pub fn rss_of(pid: i32) -> Option<u64> {
     let path = if pid == 0 { "/proc/self/statm".to_string() } else { format!("/proc/{pid}/statm") };
     let text = std::fs::read_to_string(path).ok()?;
     let pages: u64 = text.split_whitespace().nth(1)?.parse().ok()?;
-    Some(pages * 4096)
+    Some(pages * page_size())
+}
+
+/// The kernel's page size in bytes.
+pub fn page_size() -> u64 {
+    // SAFETY: sysconf reads a constant.
+    unsafe { libc::sysconf(libc::_SC_PAGESIZE) as u64 }
 }
 
 #[cfg(test)]
