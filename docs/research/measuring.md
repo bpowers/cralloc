@@ -270,7 +270,8 @@ The placement sweep and the run-time switch are under the first trap. Beside the
 - **The IPC split of a gap:** cycles against instructions a request over one window. Share in
   instructions = log(instruction ratio) / log(cycle ratio). jemalloc on the Connect log service:
   +9.6% cycles, +9.8% instructions, so work. glibc on the order service: +25.3%, +8.3%, so mostly
-  stalls.
+  stalls. It shows what is visible and cannot exclude a stall hiding behind fast added code; stall
+  counters would ([program-effects.md](program-effects.md)).
 - **Attributing misses to heap blocks:** a diagnostic build records every allocation's layout,
   address, CPU and time; IBS op sampling (`perf c2c record -- -a -C cpus -c 4000`) gives each load's
   data address and latency; each load that missed L1 goes to the block holding its address. That
@@ -297,7 +298,9 @@ Zen 5 raw events used here (`perf list --details` has the rest):
 | Event | Code |
 |---|---|
 | Demand L1 fills: all; from L2; L3 or a core of this CCX; the other CCX | `0xff43`, `0x143`, `0x243`, `0x443` |
-| L2 requests for a line in exclusive state | `0x1064` |
+| Store or state change that hits in L2; request that misses in L2 | `0x1064`; `0x864` |
+| Any fills, with prefetch; hardware prefetch fills | `0xff44`; `0xdf5a` |
+| No retire, waiting on load data; waiting to execute | `0xa2d6`; `0x2d6` |
 | L1 dTLB misses; L2 misses starting a walk for 4 KiB; for 2 MiB | `0xff45`, `0x1045`, `0x4045` |
 | Loads blocked by an older store | `0x0224` |
 | Dispatch slots: left empty by the front end; stalled by the back end | `0x1a0` umask 1; umask `0x1e` |
