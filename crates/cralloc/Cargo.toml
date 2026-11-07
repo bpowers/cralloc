@@ -30,7 +30,7 @@ executable = []
 # unifies features across a workspace and this one would also replace `malloc` in every test
 # binary built alongside it.
 c-abi = []
-# The background thread (design: "Heartbeat"): it starts by default once the heap holds more
+# The background thread (design: "The background thread"): it starts by default once the heap holds more
 # than the floor of the allowance and the program has created a thread of its own, and parks
 # while the process is quiet; `Cralloc::start_background` starts it at once. It is created with
 # the C library's `pthread_create`, so the crate links the C library with it; a build for a

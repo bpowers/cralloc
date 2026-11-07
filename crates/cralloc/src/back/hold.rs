@@ -75,7 +75,7 @@
 //! heartbeats do.
 //!
 //! **The thread.** While the background thread runs, the looks are its work (design:
-//! "Heartbeat"). Heartbeats still step the fine count, which is how the hold keeps its time,
+//! "The background thread"). Heartbeats still step the fine count, which is how the hold keeps its time,
 //! and take no look. The thread foresees its next look: after its looks it plans
 //! ([`Back::plan_hold`]) the fine count at which the soonest stamp not yet held for a hold will
 //! have been, and stores it in [`Hold::next`]; the heartbeat whose reading steps the count to

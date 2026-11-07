@@ -175,12 +175,13 @@ The aim is to dominate the incumbents: faster than each of them, with the same m
 - **Class**: a size class. Small classes are cached in magazines; large classes are not.
 - **Region**: 4 GiB of address space that holds objects of exactly one class.
 - **Slot**: the place for one object in a region.
-- **Watermark**: how far a region's slots have ever been used. Above it, memory was never touched.
+- **Watermark**: how far a region's slots have ever been used. Above it, memory was never written.
 - **Carve**: take never-used slots at a region's watermark.
 - **Magazine**: a small aligned array of pointers to free objects of one class.
 - **Slab**: the per-CPU block of state that names the magazine loaded for each small class.
 - **Spare**: a magazine, full or empty, that a CPU keeps beside the loaded one.
-- **Marker**: a value a drain leaves in a slab word, which sends every routine to the slow path.
+- **Marker**: a value a drain leaves in a slab word, which sends every fast-path routine to the slow
+  path.
 - **Depot**: stacks of full and empty magazines, one set for each group of CPUs that share a
   last-level cache.
 - **Routine**: one of the assembly sequences generated from Lean.
@@ -188,7 +189,7 @@ The aim is to dominate the incumbents: faster than each of them, with the same m
   run.
 - **Launder**: return the objects in a magazine to their regions' bitmaps.
 - **Purge**: return the physical memory behind free objects to the OS.
-- **Retained memory**: free memory that is still resident.
+- **Retained memory**: free memory in the bitmaps that is still resident.
 - **Heartbeat**: the bounded maintenance a slow path runs when the bytes it moved pass a threshold.
 - **Interval**: 2^32 ticks of the CPU's cycle counter, about a second.
 
@@ -268,8 +269,8 @@ the slabs. A wrong value in range would put two threads on one slab, so that the
 trusted (see "What is trusted").
 
 A slab begins with a 32-byte chunk for each small class: the heads of its two spare stacks at bytes
-0 to 15, a stock word at bytes 16 to 23, and at bytes 24 to 31 the class's hot word, the one word
-the fast path reads and writes. A colder part of the slab holds counters.
+0 to 15, a word only slow paths use at bytes 16 to 23, and at bytes 24 to 31 the class's hot word,
+the one word the fast path reads and writes. A colder part of the slab holds counters.
 
 A **magazine** is a block of 8-byte entries, a power of two in size and aligned to its size. Entry 0
 is a link word used by the depot, the last entry holds the fill level while the magazine is not
@@ -497,8 +498,8 @@ Slow paths do the allocator's maintenance, a bounded amount at a time. It is pac
 not by calls: a slow path adds the bytes it moved between a magazine and anything beyond it to a
 count in its CPU's slab, and runs the maintenance, a heartbeat, each time the count passes a
 multiple of 32 KiB. An exchange counts its whole magazine, so most classes beat on every exchange
-and the smallest on a share of them. A large allocation or free counts as a slow path, and beats on
-one call in sixteen. This is mimalloc's pacing applied to a per-CPU design.
+and a few, mostly the smallest, on a share of them. A large allocation or free counts as a slow
+path, and beats on one call in sixteen. This is mimalloc's pacing applied to a per-CPU design.
 
 A heartbeat does one step of purging, one look at a class of its own slab, and laundering within a
 budget of one of the largest magazines; one heartbeat in sixteen also looks for an idle cache and at
@@ -557,11 +558,11 @@ evidence", examines sizes that follow the program.
 
 Stock is spare magazines a class keeps on a CPU beyond its fixed limit. A request handler that frees
 what it allocated moves more magazines in a burst than the fixed spares hold, and against a depot
-stack other CPUs are using each trip costs a cache line and failed compare-and-swaps. So when a
-magazine sent to the depot because the spares were full comes back to that CPU, and a
-compare-and-swap failed on either trip, the class may keep one more spare there. Full stock on a CPU
-stays within what the megabyte leaves after the fixed spares, and empty stock has a room of the same
-size.
+stack other CPUs are using each trip costs a cache line and failed compare-and-swaps. So when a CPU
+has sent a magazine to the depot because its spares were full and next takes one of that kind back,
+and a compare-and-swap failed on either trip, the class may keep one more spare there. Full stock on
+a CPU stays within what the megabyte leaves after the fixed spares, and empty stock has a room of
+the same size.
 
 What a buffer holds shrinks on the clock, by the rules below.
 
@@ -636,8 +637,8 @@ and is not charged. A large heap can sit over the cap for good: its growth alway
 has stopped using goes back by the clock, but the memory it is reusing is left alone.
 
 **Parked objects do not pin the heap.** An object parked in a magazine holds its page as surely as a
-live one, and parked objects are a random sample of wherever the heap has been. So nothing parks for
-long. A magazine does not stay loaded for more than an interval. Each CPU sweeps its full spares
+live one, and parked objects are a random sample of wherever the heap has been. So rules keep them
+moving. A magazine does not stay loaded for more than an interval. Each CPU sweeps its full spares
 once an interval, laundering one and sending the rest to the depot. A depot stack sheds the depth it
 never fell below during an interval, one magazine per heartbeat, and a heartbeat also looks at the
 stacks of another domain whose own CPUs have gone quiet. And one retiring full magazine in every few
@@ -647,18 +648,18 @@ slots on pages that also hold live objects, as a share of what those classes hav
 share of 1 in 64 the rate doubles in steps from one retirement in 32 to one in 4
 (`docs/research/memory.md`, "Refresh on evidence").
 
-**Huge pages only where objects are dense.** A region starts with `MADV_NOHUGEPAGE`, so a lightly
-used class costs only the 4 KiB pages it touches. `MADV_HUGEPAGE`, "the advice" below, takes
-evidence of dense use, of which there are two kinds. A class of objects of at most a kilobyte that
-has carved enough for one huge page to be a small fraction of it has the rest of its region advised.
-And a large block that grows, by doubling or less and past the size of a huge page, with the last
-piece it wrote at least half full, is being appended to, so the part of its slot up to the size it
-asked for is advised while it holds the block. A block that grows in place over a huge page it had
-only started has that page returned and its first bytes written back, so that the page faults whole.
-Small classes above a kilobyte never get the advice, because such a block is often touched in part
-and each part would cost 2 MiB. A large block allocated at its size in one call gets none either, a
-limit we accept: a wrong guess holds many times the block's memory, and telling dense from sparse
-would put a second writer on a slot the design gives to its holder alone
+**Huge pages only where objects are dense.** A class's first region starts with `MADV_NOHUGEPAGE`,
+so a lightly used class costs only the 4 KiB pages it touches. `MADV_HUGEPAGE`, "the advice" below,
+takes evidence of dense use, of which there are two kinds. A class of objects of at most a kilobyte
+that has carved enough for one huge page to be a small fraction of it has the rest of its region
+advised. And a large block that grows, by doubling or less and past the size of a huge page, with
+the last piece it wrote at least half full, is being appended to, so the part of its slot up to the
+size it asked for is advised while it holds the block. A block that grows in place over a huge page
+it had only started has that page returned and its first bytes written back, so that the page faults
+whole. Small classes above a kilobyte never get the advice, because such a block is often touched in
+part and each part would cost 2 MiB. A large block allocated at its size in one call gets none
+either, a limit we accept: a wrong guess holds many times the block's memory, and telling dense from
+sparse would put a second writer on a slot the design gives to its holder alone
 (`docs/research/large-blocks.md`, "Huge pages only for blocks that prove dense";
 `docs/research/program-effects.md`, "TLB and huge pages").
 
@@ -700,7 +701,7 @@ In summary:
 |---|---|---|
 | Free slots on pages with nothing live, above what fills reached in the last two intervals | The clocked purge | Once an interval, down to the floor |
 | Free pages of a huge page above that frontier, when a quarter of it or more is free | The clocked purge splits the huge page and returns them | When the pass reaches it |
-| Free slots of large classes, above the floor | Heartbeats, or `maintain` in a silence | After a short hold without a free that left them resident |
+| Free slots of large classes, above the floor | Heartbeats, or the background thread in a silence | After a short hold without a free that left them resident |
 | An occupied large slot's pages past its block and its last tenant's | The claim of the slot | At the claim, one bounded step |
 | Any retained memory, while over the cap and the heap grows elsewhere | The carve that grows the heap, and the heartbeats after it | A bounded step each |
 | A slot a large block outgrew, beyond a bound on such slots | The move | Behind the copy, a piece at a time |
@@ -759,6 +760,19 @@ together hold at most a piece more than the block. Moving the pages with `mremap
 nothing, but it splits the heap's mapping in ways that take several more rules to undo, and saves no
 memory.
 
+**Zeroed blocks.** Memory at or above the watermark is zero, and so is purged memory. For large
+classes a second bitmap records which free objects are still zero, so zeroed allocation skips the
+`memset` when it can. Small classes do not track this, since zeroing a small object costs less than
+the bookkeeping.
+
+A zeroed request whose slot is not known to be zero clears it, which makes every page resident.
+Returning the pages instead would help a program that writes little of a large zeroed buffer and
+hurt one that writes all of it, and no size separates the two, so the free decides. A zeroed request
+of 16 MiB or more answered from a slot known to be zero is marked. Its free asks the kernel about
+one page in each sixteenth of the block, and if at most one is resident the slot goes back whole, at
+once, recorded as zero and not retained. Either outcome is a valid free, so the look does not have
+to be right (`docs/research/large-blocks.md`, "Zeroed blocks: evidence at the free").
+
 **What growth leaves behind** pulls two ways: a buffer grown and freed again and again should find
 its memory resident each time, and many buffers growing at once should not leave a trail of the
 blocks they outgrew. So a slot a block has outgrown is kept resident, whole, while the outgrown
@@ -774,19 +788,6 @@ resident inside an occupied slot, where no purge reaches them. So the claim of a
 what lies past both its new block and the last tenant's, one purge step at most, at the price of
 page faults when a later, larger tenant needs the room back (`docs/research/large-blocks.md`,
 "Slack: what earlier tenants left in an occupied slot").
-
-**Zeroed blocks.** Memory at or above the watermark is zero, and so is purged memory. For large
-classes a second bitmap records which free objects are still zero, so zeroed allocation skips the
-`memset` when it can. Small classes do not track this, since zeroing a small object costs less than
-the bookkeeping.
-
-A zeroed request whose slot is not known to be zero clears it, which makes every page resident.
-Returning the pages instead would help a program that writes little of a large zeroed buffer and
-hurt one that writes all of it, and no size separates the two, so the free decides. A zeroed request
-of 16 MiB or more answered from a slot known to be zero is marked. Its free asks the kernel about
-one page in each sixteenth of the block, and if at most one is resident the slot goes back whole, at
-once, recorded as zero and not retained. Either outcome is a valid free, so the look does not have
-to be right (`docs/research/large-blocks.md`, "Zeroed blocks: evidence at the free").
 
 ### The background thread
 
@@ -976,7 +977,7 @@ part of the API.
 | Layer | Method | Strength |
 |---|---|---|
 | Assembly routines | Lean, against a model of the instructions and of rseq | Every input, every interruption point |
-| Size classes, alignment, slot masks, bitmap word operations, address and layout arithmetic, packed words, the decisions of the clocked rules | Kani | Every input |
+| Size classes, alignment, word masks, bitmap word operations, address and layout arithmetic, packed words, the decisions of the clocked rules | Kani | Every input |
 | The twins | Kani, against the routines' specifications | Every state of one small slab, with an interruption before any one step |
 | The lock-free protocols as designed: the routines, magazine exchange, drain, depot stacks, summary bits, purge, the assignment of regions, the boundary of huge-page advice, start-up, fork | A TLA+ model of each, in which the OS aborts, moves, fences and forks threads, checked exhaustively with TLC | Every interleaving of the model, within small bounds |
 | The Rust that implements those protocols | Schedule explorers in the test code, which run it unchanged under every schedule within a bound | Bounded schedules, on small heaps |
@@ -1023,8 +1024,9 @@ All assembly is generated from Lean; none is written by hand. A routine is a Lea
 specification and a proof, and the generator prints it as Rust source that is checked in. A check
 fails if the checked-in assembly differs from what Lean generates, if any proof uses an axiom beyond
 the standard ones or does not replay through Lean's kernel, or if an out-of-line routine, once
-assembled, breaks the size and alignment rules under "Front end". The check is itself tested against
-forged proofs.
+assembled, breaks the size and alignment rules under "Front end". The generator also refuses a
+routine whose commit is not a plain store or whose hot path is over its micro-op limit. The check is
+itself tested against forged proofs.
 
 For each routine we prove four things. Run to completion, it performs its specified step on the
 slab. Stopped before any instruction, including the last, it has changed nothing the specification
@@ -1033,7 +1035,7 @@ area, the slab array and the magazine the slab word names. It clobbers only the 
 declares.
 
 The proofs assume, at entry and at every retry, the part of the slab invariant a routine can see:
-its class's word is zero, a marker, or a slot address of a magazine of the class's size, and that
+its class's word is zero, a marker, or an entry address of a magazine of the class's size, and that
 magazine lies apart from the slabs, the thread's rseq area and the stack. The Rust slow paths keep
 the whole invariant. The layout constants the proofs assume are emitted with the routines, and the
 Rust code is held to them.
@@ -1069,15 +1071,15 @@ routines and on a simulated heap with the twins.
 Schedule explorers run the production code of a protocol on a few threads of which exactly one runs
 at a time, and search every schedule within a bound on preemptions. Tests interrupt each twin before
 each of its steps, and the slow paths at each of theirs, with a signal handler that allocates, a
-migration and a fork; a hardware breakpoint does the same to the real routines. A test kit drives an
-allocator through streams of operations against a shadow model of the live blocks, through every
-interface, and allocators broken on purpose keep the model honest. Fuzzing drives the same model
-from raw input. The simulated OS fails any call on demand: a failure to obtain memory must surface
-as a null return, and a failure to release memory must be survivable. Miri runs the allocator's own
-tests on a simulated heap with the twins. Real programs run with the preload library, a soak runs a
-stress harness in modes that are hard on a per-CPU allocator, and small probes each check one
-assumption about the kernel, glibc or the compiler. `docs/research/verification.md` says why each
-was chosen and what it has found.
+migration and a fork; a hardware breakpoint aborts the real routines at any instruction and runs a
+handler that allocates. A test kit drives an allocator through streams of operations against a
+shadow model of the live blocks, through every interface, and allocators broken on purpose keep the
+model honest. Fuzzing drives the same model from raw input. The simulated OS fails any call on
+demand: a failure to obtain memory must surface as a null return, and a failure to release memory
+must be survivable. Miri runs the allocator's own tests on a simulated heap with the twins. Real
+programs run with the preload library, a soak runs a stress harness in modes that are hard on a
+per-CPU allocator, and small probes each check one assumption about the kernel, glibc or the
+compiler. `docs/research/verification.md` says why each was chosen and what it has found.
 
 ### Safety ledger
 

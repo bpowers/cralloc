@@ -54,7 +54,7 @@
 //! that was writing the line anyway.
 //!
 //! **Whose duty.** While a thread is awake or parked, returning memory is its work and not a
-//! slow path's (design: "Heartbeat"; [`Duty`]). A slow path reads that from the snapshot its
+//! slow path's (design: "The background thread"; [`Duty`]). A slow path reads that from the snapshot its
 //! one load took, whatever generation the word names: telling a fork child's inherited word
 //! from its own would take the generation, a second load. A fork child begins with no thread
 //! by construction instead: the draw of its generation, which every cold look at the word
@@ -116,7 +116,7 @@ const _: () = assert!(SLEEPING < 1 << KEY_SHIFT && KEY_SHIFT < 32);
 const _: () = assert!(ATTENTION & (NONE | AWAKE | DORMANT | OFF | SLEEPING) == 0);
 const _: () = assert!(SLEEPING & (STATE | LEVEL) == 0);
 
-/// Who returns memory to the OS (design: "Heartbeat"): a slow path's heartbeat, a step of each
+/// Who returns memory to the OS (design: "The background thread"): a slow path's heartbeat, a step of each
 /// purge at a time, or, while the background thread is awake or parked, the thread, which
 /// slow paths only wake.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
