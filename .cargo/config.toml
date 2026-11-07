@@ -7,13 +7,14 @@ runner = "scripts/run-capped"
 [target.x86_64-unknown-linux-musl]
 runner = "scripts/run-capped"
 
-# This machine's CPU is the baseline on aarch64: atomics are inline LSE instructions, with no
-# run-time dispatch, and acquire loads can use RCpc. A program that builds the crate for the
-# generic target still works; its slow paths call outlined atomics.
+# The host's CPU is the baseline on aarch64 (apple-m1 here, neoverse-v2 on Graviton 4 and Grace):
+# atomics are inline LSE instructions, with no run-time dispatch, and acquire loads can use RCpc.
+# A program that builds the crate for the generic target still works, since the routines use only
+# the base instruction set and its slow paths call outlined atomics.
 [target.aarch64-unknown-linux-gnu]
 runner = "scripts/run-capped"
-rustflags = ["-Ctarget-cpu=apple-m1"]
+rustflags = ["-Ctarget-cpu=native"]
 
 [target.aarch64-unknown-linux-musl]
 runner = "scripts/run-capped"
-rustflags = ["-Ctarget-cpu=apple-m1"]
+rustflags = ["-Ctarget-cpu=native"]
