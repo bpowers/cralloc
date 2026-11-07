@@ -200,6 +200,7 @@ Each note ends with its own open questions.
 | Note | The question it answers |
 |---|---|
 | [roofline.md](roofline.md) | What gates the fast path? |
+| [firestorm.md](firestorm.md) | What gates the fast path on Apple Firestorm, and which of it should carry to other aarch64 cores? |
 | [hardware.md](hardware.md) | What does the hardware and kernel charge, and which of it is Zen 5's? |
 | [program-effects.md](program-effects.md) | How does the allocator change the program's performance? |
 | [memory.md](memory.md) | Where does memory go? |
