@@ -10,8 +10,8 @@ Everything was measured on one machine unless stated: Ryzen 9 9950X (Zen 5, two 
 
 An inlined allocate and free costs 5.0 cycles at a constant size and 7.3 at a size known only at run
 time. The floor for a per-CPU magazine under rseq is 4.0, and for any magazine 2.0. Through two calls
-every shape costs 8.0. Incumbents cost mostly 10 to 15 through `GlobalAlloc` with fat LTO. On real
-servers a pair costs about 14.
+every shape with no slow forwarding costs 8.0. Incumbents cost mostly 10 to 15 through `GlobalAlloc`
+with fat LTO. On real servers our pair costs about 14 (geometric mean over seven jobs).
 
 What sets these cycles is how each access gets its data. Ranked by what one event costs:
 
@@ -20,14 +20,14 @@ What sets these cycles is how each access gets its data. Ranked by what one even
 | A cache line moved between cores | 90 to 125 cycles in an L3, about 440 across | Per-CPU slabs: no shared line per operation |
 | A write into freed memory | 40 to 45 cycles in an L3, about 150 across, paid by the next user | A free writes only the CPU's own magazine |
 | An atomic | 20 cycles uncontended | None on the fast path; the commit is a plain store |
-| A load at the page offset of a store in flight | A loop goes from 1 cycle a step to 2, 10 or 18 to 25 | Hot words sit at offsets nothing loaded can overlap; the benchmark runner refuses a build that collides |
-| A reload that loses memory renaming: `movzx`, an absolute address, a hop across `call [mem]` | 5 to 7 cycles a hop, against 0 | Hot state is 64 bits behind a base register, which the Lean model enforces |
+| A load at the page offset of a store in flight | A loop goes from 1 cycle a step to 2, 10 or 18 to 25 | Hot words sit at offsets nothing we place can overlap, with listed limits; the benchmark runner refuses a build that collides |
+| A reload that loses memory renaming: `movzx`, an absolute address, a hop across `call [mem]` | 5 to 7 cycles a hop, against 0 | Our routines keep hot state in 64 bits behind a base register, which the Lean model enforces; a caller's `call [mem]` is its own |
 | A store whose address arrives late | About 12 cycles in a loop of mixed sizes | Take the class from the size, not through the pointer |
-| A straight run past the front end's windows | 1 cycle a call; 7 to 9 if the next load waits on memory | At most 13 fused micro-ops inlined, checked in Lean |
+| A straight run past the front end's windows | 1 cycle a call; 7 to 9 if the next load waits on memory | Out of line, size limits checked in Lean and on the bytes; inlined, the run is the caller's and nothing fixes it |
 
-With those removed, what is left in a tight loop is retirement width: a pair retires 33.7 ops, and at 8 a
-cycle that alone is 4.2 of its 4.96 cycles. In real programs it is misses and where the caller's code lands.
-Byte alignment and byte savings did not matter. [roofline.md](roofline.md)
+With those removed, a tight loop is limited mostly by op count: a pair retires 33.7 ops, which at 8 a cycle would take 4.2
+of its 4.96 cycles. In real programs what is left is misses and where the caller's code lands. Byte alignment by itself and
+byte savings did not matter. [roofline.md](roofline.md)
 
 ## What the hardware charges
 
