@@ -92,7 +92,7 @@ far is to keep objects dense and ascending, and act only on the first objects of
 | Allocator behaviour | Hardware effect | Size | What we do |
 |---|---|---|---|
 | Magazines popped in a sawtooth of addresses | Each reversal restarts the prefetcher's stream | Tree walk 2.5 times slower | Pops ascend |
-| Siblings packed, then each written by its own thread | False sharing in the program (tokio's run-queue headers) | The stride takes 8 to 14% off a spawn job; no server moved | Stride only the first objects of a run |
+| Siblings packed, then each written by its own thread | False sharing in the program (tokio's run-queue headers) | The stride takes 8 to 14% off a spawn job; no server measured moved | Stride only the first objects of a run |
 | Every fill strided, the same slots in another order | Allocation-order walks lose adjacency | Tree +47%, JSON +6% (across builds) | Rejected |
 | Allocator's shared words on one line | False sharing in metadata | Fills an allocation 6.4 to 5.6 | Shared words on their own lines |
 | Large blocks at slot starts | 64 streams in one 12-way L1 set | 40.9 against 12.0 cycles an element | Stagger by slot index |

@@ -143,7 +143,8 @@ alternates L3s between neighbours, `both` fills one then the other.
   131, 90.5, 8.07 ns a pair. glibc serves both from the top of its heap.
 - **C programs, preloaded:** `larson` (C++ through libstdc++'s operators), `xmalloc-test` (two modes
   by where the scheduler puts each pair, so its medians say little), `sh8bench`, `mstress`,
-  `cache-scratch`, `cfrac`, `espresso`.
+  `cache-scratch`, `cfrac`, `espresso`. `cache-scratch` tests nothing as built: `-O3` removes its
+  worker's `new`, `delete` and heap store, so the loop touches only the stack.
 
 Among incumbents, jemalloc and tcmalloc lead cross-thread work (and tcmalloc large objects crossing
 threads), mimalloc build-and-drop, and jemalloc is the memory floor on large heaps.

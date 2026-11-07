@@ -7,24 +7,25 @@ later access to the objects. This note is about the second.
   are within 1% on the order service and the log store. glibc fills a third more on the order
   service, and 2.5 to 3 times as many from beyond L2.
 - **Most of jemalloc's and tcmalloc's cycle gap is instructions.** No stall shows in cycles per
-  instruction, which cannot exclude one: a quarter to two fifths of jemalloc's gap is not explained
-  by its extra code at its own speed, and no stall counter has been run. Stalls do show for mimalloc
-  and glibc on some jobs, and they fall where blocks cross CPUs.
+  instruction, except tcmalloc's 1 to 2% on the Connect jobs, which is unresolved. That split cannot
+  exclude one: a quarter to two fifths of jemalloc's gap is not explained by its extra code at its
+  own speed, and no stall counter has been run. Stalls do show for mimalloc and glibc on some jobs.
 - **False sharing has one measured case in a program and one in our own metadata.** Keeping tokio's
   run-queue headers apart takes 8 to 14% off a spawn loop, and moves no server measured, at four
   CPUs on one L3. For scale, all of the program's cross-core heap loads could be worth 10 to 18% of
   the order service's cycles and 3 to 4% of the RPC jobs'. How much of that is false sharing is not
   known.
-- **Spreading objects over more lines has never been tested.** Every experiment so far reorders the
+- **Spreading objects over more lines has barely been tested.** Nearly every experiment reorders the
   same slots, and there order decides: a magazine that reversed direction every 254 objects made a
-  tree walk 2.5 times slower. Lines per object has not been varied on any server.
+  tree walk 2.5 times slower. Lines per object has been varied on a server once, for one class, and
+  fills did not move. It has not been varied across a heap.
 - **Where the program's code lands moves a server by 1 to 7%, by job**, as much as most differences
   between good allocators, and the allocator's own size decides where it lands.
 
 **For the design.** Keep objects dense and ascending. Act on a small, bounded part of what is handed
 out (the first objects of a run), so the rest keeps its adjacency. Keep allocator metadata off
-shared lines. A free writes nothing into the object. None of this has been tested against an
-allocator that spends more lines per object; ["Not yet measured"](#not-yet-measured) says how to.
+shared lines. A free writes nothing into the object. None of this has been tested against a heap
+that spends more lines per object; ["Not yet measured"](#not-yet-measured) says how to.
 
 Job names are defined in [workloads.md](workloads.md), and terms such as *run* and *frontier* in
 [memory.md](memory.md). The hardware costs behind this note are in [hardware.md](hardware.md).
@@ -59,15 +60,15 @@ request, cralloc / jemalloc:
 | Connect log gRPC, HTTP/2 | 1,689 / 1,702 | 41 / 49 | 0 / 0 | 7.3 / 6.1 |
 | Log store, 1M records | 3,018 / 2,890 | 714 / 596 | 237 / 255 | 33 / 90 |
 
-*2026-10-22, `040033a`, one op in 500,000, one to three runs. The samples are thin: 221 and 217
-cross-core samples on the order service and 26 and 31 on gRPC, so one run reads about +-7% and
-+-20%. "Level" here means within about 1% of the server's cycles.*
+*2026-10-22, `040033a`, one op in 500,000, means over one to three runs. The samples are thin: 221
+and 217 cross-core samples on the order service and 26 and 31 on gRPC, so one run reads about +-7%
+and +-20%. "Level" here means within about 1% of the server's cycles.*
 
 The largest differences are the store's cross-core loads, 723 against 576 in the medians (672 to 745
 and 504 to 707 over three runs), with the same total miss latency, and DRAM on the order service
-over HTTP/2 (36, 25 and 32 against 17, 24 and 28), which the source read as at most a few hundred
-cycles. jemalloc's own metadata misses more than ours: 246 L1-missing loads a request on the store
-against 55.
+over HTTP/2 (36, 25 and 32 against 17, 24 and 28), whose summed latency is 3,400 cycles higher in
+two runs of three; level one-build totals suggest little of it is stall. jemalloc's own metadata
+misses more than ours: 246 L1-missing loads a request on the store against 55.
 
 **glibc on the order service is where misses move.** On axum it fills 810 lines a request against
 cralloc's 612, 231 of them from beyond L2 against 94; on HTTP/2, 1,244 against 912, and 250 against
@@ -76,9 +77,9 @@ later evicts, so 20 to 28% of the blocks followed by address are freed on anothe
 split glibc's fills between its chunk headers, the program's objects and lines that move while
 threads wait for its locks.
 
-**The scale of cross-core traffic.** Most of it is not the allocator's to influence: it is the
-kernel's network path. Loads a request labelled "from another core" under cralloc, with the
-program's heap loads priced at 90 to 125 cycles:
+**The scale of cross-core traffic.** Much of it is in the kernel, not split further: 56 to 89% on
+the order service and Connect, 42% on the store. Loads a request labelled "from another core" under
+cralloc, with the program's heap loads priced at 90 to 125 cycles:
 
 | Job | All | In the kernel | Program, heap | Program's heap loads, share of cycles |
 |---|---:|---:|---:|---:|
@@ -139,9 +140,10 @@ symbol range and Rust's shims and the call are inlined into the program; the Rou
 rest is not placed: we have no evidence it is stalls, and none that it is not.
 
 **tcmalloc's extra instructions** cost 0.22 to 0.35 cycles each on the order service and the store,
-3 to 4.5 instructions a cycle, and 0.55 to 0.67 on Connect, where the server's own rate is 0.44. So
-on Connect it does pay something beyond its instructions. It has no profile, so no more can be said.
-jemalloc's extra instructions cost 0.43, in the median of the ten jobs ([servers.md](servers.md)).
+3 to 4.5 instructions a cycle, and 0.55 to 0.67 on Connect, where the server's own rate is 0.44. Its
+CPI on Connect is 1 to 2% over cralloc's, inside the placement error of +-0.012 to 0.015 on one
+binary, so that is unresolved. It has no profile, so no more can be said. jemalloc's extra
+instructions cost 0.43, in the median of the ten jobs ([servers.md](servers.md)).
 
 CPI against cralloc, per job:
 
@@ -152,6 +154,7 @@ CPI against cralloc, per job:
 | Log store, 1M records | 1.002 | 0.951 | 1.088 | 1.026 | 15% |
 | Order service, axum | 0.989 | 0.963 | 1.026 | 1.156 | 20% |
 | Order service, axum, HTTP/2 | 0.991 | 0.965 | 0.998 | 1.203 | 25% |
+| Order service, axum, 2 GiB | 0.991 | 0.967 | 1.025 | 1.068 | 28% |
 | Order service, actix | 0.978 | 0.968 | 1.036 | 1.135 | not measured |
 
 - **glibc's stalls are on the order service,** at 1.2 to 2.0 cycles per extra instruction. Some may
@@ -165,9 +168,22 @@ CPI against cralloc, per job:
 
 **A hypothesis nobody has tested.** The two allocators whose fast paths write a link into a freed
 object, mimalloc and glibc, show their CPI excess where blocks cross CPUs, and not where none do.
-The two that keep pointers in an array, jemalloc and tcmalloc, show none. The costs above say that
-write is expensive across cores, and the order service is where it would land. It fits on few jobs,
-mimalloc over HTTP/2 is an exception, and glibc's lock waits are unseparated.
+jemalloc and tcmalloc, which keep pointers in an array, show none where blocks cross. At 40 to 45
+cycles a crossing this is the right size for mimalloc, HTTP/2 apart, and about a tenth of glibc's
+excess on the small order-service jobs, so it cannot be glibc's main cost there. That price is for
+reuse by the core that allocated the object, which is mimalloc's case; glibc's tcache keeps the
+object on the freeing thread. Crossing also goes with a live heap that turns over, which three
+programs cannot separate.
+
+| Job | Crossing frees a request | The write, cycles | mimalloc's excess | glibc's excess |
+|---|---:|---:|---:|---:|
+| Order service, axum | 28 | 1.1 to 1.3k | 1.8k | 11.6k |
+| Order service, HTTP/2 | 35 | 1.4 to 1.6k | none | 13.8k |
+| Order service, 2 GiB | 39 | 1.5 to 1.7k | 1.7k | 5.0k |
+| Log store | 392 | 15.7 to 17.6k | 36k | 14k |
+
+*Excess is each allocator's extra cycles beyond its extra instructions at cralloc's CPI. Computed
+from the 2026-10-22 counts and the 2026-10-28 standings.*
 
 ## Where placement matters
 
@@ -176,7 +192,7 @@ Each row is a behaviour we found, what the hardware did with it, and what we did
 | Allocator behaviour | Hardware effect | Size | What we do |
 |---|---|---|---|
 | Magazines popped in a sawtooth of addresses | Each reversal restarts the prefetcher's stream | Tree walk 2.5 times slower | Built: pops ascend |
-| Siblings packed, then each written by its own thread | False sharing in the program | The stride takes 8 to 14% off a spawn job; no server moved | Built: stride the first objects of a run |
+| Siblings packed, then each written by its own thread | False sharing in the program | The stride takes 8 to 14% off a spawn job; no server measured moved | Built: stride the first objects of a run |
 | Every fill strided | Allocation-order walks lose adjacency | Tree +47%, JSON +6% (across builds) | Rejected |
 | Allocator's shared words on one line | False sharing in metadata | Fills an allocation 6.4 to 5.6 | Built: `lined` |
 | Large blocks at slot starts | 64 streams in one 12-way L1 set | 40.9 against 12.0 cycles an element | Built: stagger by slot index |
@@ -215,13 +231,17 @@ headers but not eight's, so a stride must cover at least as many siblings as wor
 headers are 40 of 4,950 L1-missing load samples over HTTP/1.1, and its handle and headers are 254 of
 about 5,900 over HTTP/2, where hyper spawns a task per stream. The stride moved no server measured:
 in one binary on the RPC jobs (about 1% of run spread), and across builds on the order service (59.7
-against 59.8 k cycles over HTTP/2). An earlier reading that the headers cost a gRPC job 3.6% came
-from comparing two builds, and was mostly code placement ([measuring.md](measuring.md)).
+against 59.8 k cycles over HTTP/2). Serving 33 to 40 bytes as 48 on the order service, the one time
+lines per object has been varied on a server, moved neither: axum 70.3 to 70.8 k cycles with fills
+627 and 627, HTTP/2 64.2 to 62.9 k inside a range of 62.5 to 65.2 k with fills 908 and 893. That
+class is 1.4% of allocations. An earlier reading that the headers cost a gRPC job 3.6% came from
+comparing two builds, and was mostly code placement ([measuring.md](measuring.md)).
 
-**The one share we have across allocators is the spawn job.** L1-missing load samples by block at
-four workers, cralloc / jemalloc / glibc: scheduler handle 2,387 / 2,031 / 858, run-queue headers 54
-/ 8 / 15, task cells 238 / 225 / 160, all 2,975 / 2,615 / 1,392. Over all allocators, 75 to 95% of
-L1-miss latency sits on one line of the handle.
+**The one share we have across allocators is the spawn job,** on tokio 1.53.3, before the handle's
+line was padded. L1-missing load samples by block at four workers, cralloc / jemalloc / glibc:
+scheduler handle 2,387 / 2,031 / 858, run-queue headers 54 / 8 / 15, task cells 238 / 225 / 160, all
+2,975 / 2,615 / 1,392. Over all allocators, 75 to 95% of L1-miss latency sits on one line of the
+handle.
 
 **Task memory is not the cause.** Task cells draw the same share of misses under cralloc and
 jemalloc, and magazines of 14 cells instead of 254 changed neither misses nor time (127.7 against
@@ -238,12 +258,11 @@ header shifts the block by an amount the program's earlier allocations decide: t
 ran spawn at eight workers at 192 to 227 ns a task depending on the length of its own path. tokio
 1.54 pads this one (tokio #8622), and glibc's lottery shrank to 181 to 184 ns.
 
-**Allocator-induced false sharing has one direct test in the suite.** In `cache-scratch` each thread
-frees an object another allocated, allocates its own and writes it repeatedly, so an allocator that
-reuses the slot beside another thread's object shares a line. At eight threads cralloc 0.0670 s,
-mimalloc 0.0677, jemalloc 0.0691, tcmalloc 0.0706 and 0.0717, glibc 0.0968, in a 70 ms job where
-glibc runs in two modes (2026-10-19, `e96086d`). The active form, `cache-thrash`, is not in the
-suite.
+**The suite has no working test of allocator-induced false sharing.** `cache-scratch` is meant to be
+one: each thread frees an object another allocated, allocates its own and writes it repeatedly. As
+we build it, `-O3` removes the worker's `new`, `delete` and heap store, and the disassembly shows a
+loop touching only the stack, so its results across allocators mean nothing. The active form,
+`cache-thrash`, is not in the suite.
 
 **Our own metadata had it too.** In a two-thread pipeline of large objects, six of every ten lines
 the producer took from the consumer came from words that only shared a line by accident: a class's
@@ -429,45 +448,50 @@ it" is a statement about 4 CPUs.
 
 **How we would measure it, in this order:**
 
-1. **Layout statistics from an allocation trace.** They need no counters, are exact, and cover all
-   five allocators: distinct lines covered by a request's blocks against bytes / 64; the share of
-   consecutive allocations on the same or next line; address reversals per 1,000 allocations; and
-   lines holding blocks allocated, or freed, by different CPUs. This answers "more cache lines"
-   directly, and measures the opportunity for false sharing, including the case per-CPU magazines
-   are exposed to by design: a slot freed on another CPU and reused there beside live neighbours.
-   Level with jemalloc would not show that, since jemalloc does the same. The trace wrapper costs
-   about 260 instructions a task and moves code, so compare a traced run with its own plain run. The
-   trace and shape wrappers exist as a patch at tag `research-logbooks`
-   (`bench/probes/spawn-gap/diagnostics.patch`).
+1. **Layout statistics from an allocation trace.** They need no counters and are exact: distinct
+   lines covered per 100 allocations on a CPU, against bytes / 64; the share of consecutive
+   allocations on the same or next line; address reversals per 1,000 allocations; and lines holding
+   blocks allocated, or freed, by different CPUs. This answers "more cache lines" for lines
+   allocated (step 6 answers for lines touched), and measures the opportunity for false sharing,
+   including the case per-CPU magazines are exposed to by design: a slot freed on another CPU and
+   reused there beside live neighbours. Level with jemalloc would not show that, since jemalloc does
+   the same. The trace perturbs timing, so use it for placement and never for time. The trace and
+   shape wrappers exist as a patch at tag `research-logbooks`
+   (`bench/probes/spawn-gap/diagnostics.patch`), for cralloc, jemalloc and glibc; mimalloc and
+   tcmalloc need adding, and it has no request marks.
 2. **Stall counters, over the usual placement sweep.** `ex_no_retire.load_not_complete` (`0xa2d6`),
    `ex_no_retire.not_complete` (`0x2d6`) and `de_no_dispatch_per_slot.backend_stalls` (event
-   `0x1a0`, umask `0x1e`), with off-CPU time for lock waits. These settle "instructions or stalls"
-   for all five allocators and "misses or lock waits" for glibc. Zen 5 gives five counters with the
-   NMI watchdog on and the runner uses two, so three raw events a session.
+   `0x1a0`, umask `0x1e`, raw form `0x100001ea0`), then `no_ops_from_frontend` (event `0x1a0`, umask
+   1) in a second session, since placement shows in the front end, with off-CPU time for lock waits.
+   These show whether stalls rose for each allocator, not whose: they include an allocator's own
+   misses, and they count user mode where the server's cycles are user and kernel. Zen 5 gives five
+   counters with the NMI watchdog on and the runner uses two, so three raw events a session.
 3. **A density switch in one binary.** Serve every class under a line at a line per object, and
-   separately stride every fill. Run on all servers, this gives the net of false sharing removed and
-   spread added as one causal number with placement cancelled, and it is the experiment that has
-   never run.
+   separately stride every fill. The first arm needs no new build: `SHAPE_BUMP=1-63:64` in the shape
+   wrapper, one binary, its arms compared only with each other. Run on all servers, this gives the
+   net of false sharing removed and spread added as one causal number with placement cancelled. It
+   has never run across a heap.
 4. **Fills by source and prefetch.** Demand fills `0xff43`, `0x143`, `0x243`; any fills `0xff44`,
-   since demand fills miss what a prefetcher fetched, which is the effect at issue;
+   since demand fills miss what a prefetcher fetched into L1, which is the effect at issue;
    `ls_hw_pf_dc_fills` `0xdf5a`; `0x1064` (a store or state change that hits in L2) and `0x864` (a
    request that misses in L2). `0x443` (the other CCX) reads about zero on a server pinned to one
    L3. `0x243` is "L3 or a different L2 in this CCX", and no counter separates those. Raw events
-   here are user mode, so the kernel's majority of cross-core traffic is out.
+   here are user mode, so the kernel's cross-core traffic is out.
 5. **IBS, to name candidates, each confirmed by a switch in one binary.** It gives no source or
    latency for stores, and stores and locked operations are where the spawn job's cost was, so
    stores can add addresses but cannot be weighed. A definition by line, "two CPUs touch it, one
    writes, bytes disjoint", errs towards false both ways: sparse samples rarely see one byte twice,
    and over a long window different tenants of a line read as sharers. Classifying a miss needs the
    last writer's bytes before that transfer, and byte ranges need the op's width. At one op in
-   500,000 a run gives 26 to 221 cross-core heap samples, so this proves long-lived hot structures,
+   500,000 a run gives 26 to 541 cross-core heap samples, so this proves long-lived hot structures,
    not a share. The `ldlat` filter would spend the budget on load misses. The "from another core"
    label may include a core's own dirty lines reloaded from the L3, by our reading of the kernel's
    IBS decode, unverified: a single-threaded job under IBS is the control.
-6. **For a true share, an offline replay.** One trace of the program's accesses in block-and-offset
-   terms, plus each allocator's allocation log, lets a replay count lines and set conflicts and
-   classify each transfer, as PREDATOR does. The allocator's rseq path need not be intact, since its
-   own accesses are not the question.
+6. **For a true share, an offline replay.** One trace of the program's calls and accesses in
+   block-and-offset terms. Replay the traced calls through each allocator, threads pinned, to get
+   its addresses, then count lines and set conflicts and classify each transfer, as PREDATOR does.
+   The allocator's rseq path need not be intact, since its own accesses are not the question.
+   Instrumentation changes interleaving, so a share from it is an estimate.
 7. **Controls and more CPUs.** The method must find tokio's headers on spawn with the stride off,
    lose them with it on, and report nothing on a job with private heaps. A server across both L3s
    needs the load generator moved, and changes the price of a transfer from 90 to 125 cycles to
@@ -483,7 +507,8 @@ five placements resolve 2.5% and not under 1%, so this needs the switch, not a c
   magazine costs nothing on the RPC servers, and fewer than the worker count misses headers.
 - Classes of one to two lines (80, 96, 112 bytes) also put neighbours on a shared boundary line. No
   measured case.
-- Mimalloc and glibc's stalls where blocks cross CPUs, the hypothesis above.
+- mimalloc's and glibc's stalls where blocks cross CPUs, the hypothesis above.
+- `cache-scratch` needs building so its store survives, to give the suite a test of this.
 - A 12% churn slowdown (25.4 against 22.6 cycles an operation) with 22.8M blocked loads appeared in
   one build that differed only in pass order. Its op-cache misses point at code layout, and no
   address was shown to alias a slab word. The run-time switch never showed it.
