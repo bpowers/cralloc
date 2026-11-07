@@ -81,7 +81,7 @@ as much as most differences between good allocators, and the allocator's own siz
 
 ## Where memory goes
 
-- **On a steady heap we hold the least and do not drift.** A 2 GiB cache churned for 15 billion operations ends
+- **On a steady large heap we hold the least and do not drift.** A 2 GiB cache churned for 15 billion operations ends
   at 1.105 times live: tcmalloc 1.127, jemalloc 1.148, glibc 1.27, mimalloc 2.97. Most of what is left is class
   rounding, which jemalloc pays too. A 10.6-hour Qdrant soak beside jemalloc drifted in neither.
 - **The heap's fixed numbers hold to 10 GiB.** The order service costs the same cycles a request at 10 GiB as at
@@ -91,14 +91,15 @@ as much as most differences between good allocators, and the allocator's own siz
   spread over the peak's footprint: 273 MiB of free slots beside live neighbours, against 40. The other incumbents
   hold over 2.1 GiB.
 - **When the size mix wanders, huge pages ratchet.** Free memory in a partly used 2 MiB unit could not return: 1.10
-  climbed to 1.21 times live. The tail rule took that to 1.14 for 1 to 2% of cycles on an allocation-bound job and
+  climbed to 1.21 times live. The tail rule took that to 1.14 for 1 to 1.5% of cycles on an allocation-bound job and
   nothing measurable on servers.
-- **Freed large blocks cross classes only through the OS, so no single hold time serves all programs.** DataFusion
-  needs about 125 ms to keep its peak, and Meilisearch's blocks come back up to 2 s later. Faults turned out to be the
-  cheap side of the trade: a return and refault costs 2.4 to 7 kcycles, and these rules move tens of MiB of peak for a
-  percent or two of cycles. [large-blocks.md](large-blocks.md)
-- **Most servers never engage any of this.** The order service's free memory stays under the 32 MiB floor at every
-  size to 10 GiB. [memory.md](memory.md)
+- **Freed large blocks cross classes only through the OS, so no single hold time serves all programs.** A hold of at
+  most about 125 ms keeps DataFusion's peak, and Meilisearch's blocks come back up to 2 s later. Faults turned out to be
+  the cheap side of the trade: a return and refault costs 2.4 to 7 kcycles, and these rules move tens of MiB of peak for
+  a percent or two of cycles. [large-blocks.md](large-blocks.md)
+- **Servers differ in how much of this they engage.** The order service runs no clocked, hold or growth work at any size
+  to 10 GiB, and the log store's tail rule acts only after close. Meilisearch and Qdrant do engage these rules.
+  [memory.md](memory.md)
 
 ## Servers and tails
 
