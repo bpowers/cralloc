@@ -455,7 +455,7 @@ One-way flows never reverse and never pay, and memory after a peak does not move
 ## When a server's load reaches the slow path
 
 Counts from a scratch build, never timed, and cycles from `perf` in separate runs at the same rate
-(70%), 2026-10-22 at 7619eef. Percentages are of the server's cycles.
+(70%), 2026-10-22 at 8ad5150. Percentages are of the server's cycles.
 
 | Job | Allocations a request | Slow paths a request | Mostly | Slow paths and maintenance | jemalloc's slow paths |
 |---|---:|---:|---|---:|---:|

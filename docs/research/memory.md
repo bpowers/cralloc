@@ -55,8 +55,8 @@ Resident over live, lower is better. Bold is the least.
 | Large-buffer cache, geomean of four phases, 0.5 to 5 GiB | 1.19 to 1.82 | 1.19 to 1.52 | 1.39 to 2.44 | 1.61 to 2.91 | 1.72 to 2.10 |
 
 *2026-10-24 to 28, one run a cell for the long jobs; cralloc at its latest measurement of each (from
-`7cfe3af` for the steady cache to `f3efb89` for the 2 GiB troughs), the incumbents' code unchanged
-over those days. Real servers at 70% load, resident peak, ten jobs at `e5e69b1`, others against
+`9a11f70` for the steady cache to `b622714` for the 2 GiB troughs), the incumbents' code unchanged
+over those days. Real servers at 70% load, resident peak, ten jobs at `e3753b5`, others against
 cralloc, geometric mean (geometric standard deviation): jemalloc 1.01 (x1.17), tcmalloc 1.11
 (x1.21), mimalloc 1.49 (x1.38), glibc 1.06 (x1.58). Computed from the standings' records, median of
 5 to 15 runs a job.*
@@ -96,7 +96,7 @@ stopped at each phase end and every resident page attributed.
 | Metadata | 4.6 | 38 | 4.6 | 38 |
 | Heap, with up to 5 MiB unaccounted | 2,244 | 2,280 | 935 | 677 |
 
-*2026-10-27 and 28: cralloc at `f3efb89` with the refresh rule, jemalloc built with statistics.*
+*2026-10-27 and 28: cralloc at `b622714` with the refresh rule, jemalloc built with statistics.*
 
 - **Rounding is the floor of any allocator with size classes.** glibc has none and the lowest peaks
   on this job (1.075), though it pays elsewhere.
@@ -114,14 +114,14 @@ operations, per billion: cralloc +0.00003, tcmalloc +0.00006, jemalloc -0.0006, 
 mimalloc +0.021 (least squares over 75 samples, computed from the runs). Memory is not bought with
 time: 1,271 cycles an operation against tcmalloc's 1,326, jemalloc's 1,398, glibc's 2,051 and
 mimalloc's 2,064; on the lifetime job below 595 against 619 to 888; on the size shift level with
-tcmalloc (2026-10-24 at `7cfe3af`, one memory run each, one or two timed rounds).
+tcmalloc (2026-10-24 at `9a11f70`, one memory run each, one or two timed rounds).
 
 **Threads that come and go.** The same cache filled by producers and drained by consumers, busy
 threads 8, 2, 8, 1, 8, 4 by phase: cralloc settles at 1.22 (1.21 to 1.27 over the last half).
 jemalloc swings between 1.24 and 2.5, tcmalloc is at 1.38 and still creeping, mimalloc 1.99, glibc
 2.35. Its cycles count consumers spinning, and move 17% between rounds.
 
-**Qdrant for 10.6 hours** (2026-10-27 at `994fd44`, jemalloc beside it on the same schedule; 35
+**Qdrant for 10.6 hours** (2026-10-27 at `967317c`, jemalloc beside it on the same schedule; 35
 cycles of searches, upserts, deletes and a collection built and dropped, each ending in 1 to 20
 minutes of quiet). Anonymous memory at the quiet points rose over the first fifteen cycles in both
 and then held: cralloc median 156 MiB (140 to 158), jemalloc 177 (175 to 187), both under 1 MiB an
@@ -135,7 +135,7 @@ run.
 
 ## The heap's fixed numbers hold to 10 GiB
 
-Nothing gets worse faster than the heap (2026-10-27 at `ac72e9e`; three rounds of the order service,
+Nothing gets worse faster than the heap (2026-10-27 at `536dbe8`; three rounds of the order service,
 medians; one run of the drift jobs). The order service stores an order of about 1.9 KiB and drops
 the oldest on each request.
 
@@ -239,8 +239,8 @@ the thread put it back up to the frontier plus 16 MiB.
 | mini-redis wide values | 1.33 | 1.15 to 1.18 | 1.16 | 1.25 to 1.29 |
 | mini-redis small values | 2.3 to 3.0 | 1.8 to 2.3 | 2.4 to 2.7 | 4.7 to 5.3 |
 
-*2026-10-25 to 27, one run each; rule at `4648919` for the wandering mix, `9ef2b29` and earlier for
-the others. jemalloc's and glibc's ranges are between sessions and cycles.* On Qdrant (`22d669e`,
+*2026-10-25 to 27, one run each; rule at `7bf9ff8` for the wandering mix, `c6a7328` and earlier for
+the others. jemalloc's and glibc's ranges are between sessions and cycles.* On Qdrant (`c09828f`,
 three rounds, medians) heap mean 449 to 414 MiB, peak 542 to 515, a minute after close 185 to 155,
 tails within their spread.
 
@@ -300,8 +300,8 @@ questions.
 
 *Trough over live, median of the last three, one run each. Turnover computed from each run's
 arguments (share of allocations long-lived, operations a phase, mean value 211 B, size of the
-long-lived set). Only the 12-times row has the refresh rule below; cralloc's others are `4648919`,
-`ac72e9e` and `0fd0853`.*
+long-lived set). Only the 12-times row has the refresh rule below; cralloc's others are `7bf9ff8`,
+`536dbe8` and `1d73192`.*
 
 In these runs cralloc holds the least where little is replaced, with the tail rule (4.29 without
 it), and more than jemalloc where much is, because of where the new ones go. Why tcmalloc, mimalloc
@@ -342,7 +342,7 @@ the one thing that reached this, and it reached down to 160 B.
 | No huge pages at all | 1,064 | 408 | +2 to 4%, faults 1.4 to 2.5 times |
 | Split from an eighth free, not a quarter | 1,087 | 407 | not timed |
 
-*One accounted run each, means of three troughs, at `0fd0853`; timed separately, one to three
+*One accounted run each, means of three troughs, at `1d73192`; timed separately, one to three
 rounds.*
 
 A fixed one in 4 costs about 1% wherever it runs, so the rate follows evidence. Each lap of the
@@ -357,7 +357,7 @@ down a step a lap. The share is 0.6% on the steady cache and at the peaks, 18% a
 | The same: cycles an operation | 638, 640 | 643, 643 | 646, 649 |
 | 1.4 s phases: cycles | 608, 608 | 612, 613 | 615, 615 |
 
-*2026-10-28 at `f3efb89`, a run-time switch.* On the steady cache the rule stays off (1,272 cycles
+*2026-10-28 at `b622714`, a run-time switch.* On the steady cache the rule stays off (1,272 cycles
 an operation in both arms' means), and the order service never walks a lap while it serves (67.4k to
 67.9k cycles a request in both).
 
@@ -483,7 +483,7 @@ in use, not on the heap.
 ## After a peak, and in a silence
 
 Free 218 MiB of small objects in random order, then work lightly on one thread. Anonymous MiB
-(2026-10-22 at `874b687`, median of three):
+(2026-10-22 at `c7f5c21`, median of three):
 
 | After freeing | 1.5 s | 4.5 s | 8.5 s | 12 s |
 |---|---:|---:|---:|---:|
@@ -537,7 +537,7 @@ is due and wakes it if it sleeps. What a request still returns is what its own c
 trim at a claim, a shrink's tail, the pieces behind a move, and a freed slot under advice or left
 unwritten ([large-blocks.md](large-blocks.md)). Total work does not grow (DataFusion's kernel cycles
 5.98 G against 6.02). The thread inherits the program's affinity, so a server pinned to four CPUs
-gets the work on those four. 2026-10-22 against `26b3d73` and `7619eef`, interleaved:
+gets the work on those four. 2026-10-22 against `d4f3b89` and `8ad5150`, interleaved:
 
 - The log store's slowest request in a burst's first 5 ms: 0.68 to 0.93 ms becomes 0.50 to 0.60.
   What is left is the idle drains, and it is still behind jemalloc ([servers.md](servers.md)). The

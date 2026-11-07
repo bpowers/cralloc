@@ -164,4 +164,4 @@ that the caller gives the block up only if the resize succeeds; `new` has a non-
 In `grow_kept` and `shrink_block` the lean path ran first; as in HEAP-09, it either was not
 taken or returned `None` having changed nothing.
 
-Reviewed: c18c19d
+Reviewed: a09c36e

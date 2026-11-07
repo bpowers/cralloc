@@ -42,7 +42,7 @@ and cralloc's own `realloc` is among the movers. The allocator's code comes firs
 any change to its size moves the decoder. The period is longer than a line, so no alignment fixes
 it.
 
-**How large, today** (2026-10-28 at `e5e69b1`, five placements, computed from the raw records):
+**How large, today** (2026-10-28 at `e3753b5`, five placements, computed from the raw records):
 
 | Job | Cycles over placements, median of 5 allocators (cralloc) | Instructions |
 |---|---:|---:|
@@ -249,7 +249,7 @@ geometric standard deviation over jobs (population form). Tails: the median over
 percentile.
 
 **The control.** `mimalloc-ctl` is mimalloc built a second time and run as another allocator. At
-`874b687` (2026-10-22, 56 jobs) the median absolute difference is 0.5% and the 90th percentile 2.1%.
+`c7f5c21` (2026-10-22, 56 jobs) the median absolute difference is 0.5% and the 90th percentile 2.1%.
 Four intervals exclude no difference where chance predicts 2.8: JSON -1.1%, `rpc log c256` +1.0%,
 `rpc log c64` +0.9%, BTreeMap -0.3%. The largest are jobs with modes, sh8bench 23%, none excluding
 zero. So about 1% is resolved on single-threaded jobs and a few percent on cross-thread ones; on the

@@ -22,7 +22,7 @@ and heavy testing.
 | Soak (a stress harness that checks every block), breakpoint sweep, real programs | the shipped library on the real kernel, aborted at every instruction | how much of the state space they reached |
 | Safety ledger | a written proof of each `unsafe` block, adversarially reviewed | anything a reviewer misses; a review lags the code |
 
-Counts at `85cb393`, 2026-11-06: Lean 4.34.1, 10 routines; Kani 0.67.0, 44 quick and 24 slow
+Counts at `4d811dc`, 2026-11-06: Lean 4.34.1, 10 routines; Kani 0.67.0, 44 quick and 24 slow
 harnesses; TLC, 12 specs and 74 configurations, 30 of them expected to fail and 4 run only with
 `SLOW=1`; about 1,020 tests, 104 marked slow; 111 ledger entries in 32 files.
 
@@ -101,7 +101,7 @@ We forked the Lean framework of verified-garbage, a project proving assembly cry
   and the model tester as the always-on net meanwhile.
 
 **Cost, against the estimate.** The first estimate was 1,000 to 3,000 lines of proof and 1,000 to
-2,000 of new trusted base. At `85cb393`, 335 lines of routines carry 11,233 lines of routine proofs
+2,000 of new trusted base. At `4d811dc`, 335 lines of routines carry 11,233 lines of routine proofs
 and 3,404 of framework, about 34 to 1 before the framework, beside 4,748 lines of trusted base and
 1,613 of specifications. verified-garbage runs about 12 to 1 over a far larger body. Our guess at
 the difference is that aborts add obligations at every step.
@@ -202,7 +202,7 @@ Every `unsafe` block in shipping code has a Kani harness, a Lean routine, or an 
 `docs/safety/<crate>/<file>-safety.md` with preconditions, invariants and a proof on paper.
 `scripts/ledger-check` fails on a block that cites neither, or an entry nothing cites. A fresh agent
 that did not write the code reviews entries and records the commit. Reviews lag the code by design:
-at `85cb393` the check lists all 31 reviewed files as changed since review, the rename to cralloc
+at `4d811dc` the check lists all 31 reviewed files as changed since review, the rename to cralloc
 among the causes, and one file, `cells`, has had no review. That list is cleared before a release.
 
 ## What runs when

@@ -33,7 +33,7 @@
                 published. It runs beside the child's own threads, which may be
                 assigning.
                 "none": there is no repair.
-                "carved": as the code at 1f52647: it reads the tag, then the
+                "carved": as the code at f07640f: it reads the tag, then the
                 class's carving word, then whether the region has been carved
                 from, through the host of the class it read; a carve by
                 another class that took the region meanwhile reads as this

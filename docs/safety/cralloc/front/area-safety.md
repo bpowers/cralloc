@@ -113,4 +113,4 @@ store of `RETIRED`, so no handler can find `cpu_id` -1 in between and register a
 unregistering fails (it does not, as the arguments are the registration's), the area is left as
 it is.
 
-Reviewed: c18c19d
+Reviewed: a09c36e

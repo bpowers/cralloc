@@ -108,4 +108,4 @@ and any size from the request's up to the class size has the class of the reques
 length the heap returns for a small block is its class size. So `object` is a block of
 `class`.
 
-Reviewed: c18c19d
+Reviewed: a09c36e

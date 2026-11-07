@@ -44,9 +44,9 @@ in a class's region, and to *claim* one is to take its bit in the bitmap. *Advic
 | 64 Vecs grown to 4 MiB: Mcycles, peak MiB | 655, 327 | 1,163, 305 | | 636, 266 | 1,169, 269 |
 | HashMap 1M: cycles an entry, peak MiB | 561, 204 | 631, 182 | | 432, 199 | 1,103, 208 |
 
-*First three 2026-10-28 at `e5e69b1`, medians of three to six rounds. The cache: geomean of four
+*First three 2026-10-28 at `e3753b5`, medians of three to six rounds. The cache: geomean of four
 phases, computed from each phase's end over the cycles, 2026-10-24 and 25; the ladder above at
-`ac72e9e`. The hold counts time, so this job's peak follows core speed: at 2 GiB 2.03 times live on
+`536dbe8`. The hold counts time, so this job's peak follows core speed: at 2 GiB 2.03 times live on
 the measurement CPUs, 1.39 on shared cores. Kernel jobs 2026-10-18 to 24, sessions that differ by up
 to 10%.* *DataFusion* runs TPC-H SF3 on four threads, *tpchgen* writes TPC-H SF1 to Parquet on
 eight, *Meilisearch* serves 930 requests a second. The *large-buffer cache* is 1 GiB of buffers on
@@ -90,7 +90,7 @@ to it. A silence ages a hold by one step.
 | 2 s | 1,053 to 1,244 | | 36 to 37 | 9 to 27 |
 | jemalloc | 849 to 879 | 1.02 to 1.04M | 38 | 31 |
 
-*2026-10-20 and 21 at `3ed79ce` and `0bd9b0c`, five and two rounds. Meilisearch's faults predate the
+*2026-10-20 and 21 at `3ed79ce` and `a37a3ac`, five and two rounds. Meilisearch's faults predate the
 two fixes below.*
 
 The programs differ in when reuse comes. In tpchgen, gix-hours and DataFusion, 86 to 100% of what
@@ -100,7 +100,7 @@ back a batch later: over one run 3.6 GB at 64 to 127 ms, 2.0 to 255 ms, 2.9 to 0
 of 34 MiB in about a millisecond, which is why slots now go back in pieces ([memory.md](memory.md),
 "Returning memory off request paths").
 
-**Where Meilisearch's faults came from** (2026-10-24 at `af36086`, counted by the rule that last
+**Where Meilisearch's faults came from** (2026-10-24 at `4e55114`, counted by the rule that last
 purged a slot): the `memset` of 50 MiB zeroed buffers over pages the hold returned, 23 a request;
 outgrown slots a move returned and claimed again within 64 ms, 13; slots of 5 to 20 MiB the hold
 returned and claimed 0.1 to 1 s later, 13, which jemalloc refaults too; about 30 others, not split.
@@ -168,9 +168,9 @@ the next may need it. It takes no new number.
 | jemalloc | 1.47 | 2.12 | 1.28 | 1.36 | 410 |
 | glibc | 1.45 | 1.85 | 2.63 | 2.49 | 62 |
 
-*2026-10-25. The prototype, at `6227f3b`, is one run each, and its ageing walk did not carry on
+*2026-10-25. The prototype, at `5b316cb`, is one run each, and its ageing walk did not carry on
 across looks; ageing alone was not run on what shipped. The other rows are means over phase ends of
-three runs or four cycles at `5cb773c`, computed (standard deviation as built 0.01, 0.05, 0.10,
+three runs or four cycles at `26199ba`, computed (standard deviation as built 0.01, 0.05, 0.10,
 0.13). A phase moves by up to 0.3 between runs of one code.* The big-buffer climb stops at 1.36 to
 1.41. Every build takes 8.2 to 8.4 Mcycles an operation, since the job writes every buffer it makes.
 
@@ -260,7 +260,7 @@ it carries huge-page advice, when it goes back whole.
 | Meilisearch: faults a request | 48 to 53 | 36 to 40 |
 | DataFusion: Gcycles, faults, peak MiB | 69.80, 1,030k, 863 | 70.09, 1,025k, 864 |
 
-*2026-10-24 at `873f3e2` against `875c19a`, three to six rounds, medians.* The order service and the
+*2026-10-24 at `64a31f3` against `1b0acf0`, three to six rounds, medians.* The order service and the
 log store are level. The 64 Vecs gain half of what a prototype did (-31%): the rest was keeping the
 advised slots of its drops, which what shipped returns.
 
@@ -304,7 +304,7 @@ and back 376k; a fresh page 357k to 389k. The 64 Vecs went from 5.69 to 3.97 cyc
 126 MiB of peak.
 
 **Blocks allocated whole get none: a documented limit.** A run-time switch advising every whole
-block of 2 MiB or more (2026-10-24 at `875c19a`) showed gains on batch programs and none on servers
+block of 2 MiB or more (2026-10-24 at `1b0acf0`) showed gains on batch programs and none on servers
 ([program-effects.md](program-effects.md)). On memory a wrong guess has no ceiling but the block:
 four blocks of 64 MiB with one store in 1/64 of the pages hold 256 MiB against 16, and each life
 costs 12,373k TSC ticks against 631k. A block written whole and reused pays 25 times, mostly because an
@@ -339,7 +339,7 @@ so a tenant that writes what it is given pays what it always did.
 | Faults a request | 92 to 96 | 51 to 53 | 51 to 54 | 42 |
 | Mcycles a request | 16.85 to 17.16 | 16.37 to 17.01 | 16.85 to 16.88 | 17.79 |
 
-*2026-10-24 at `ff7fc26`, in one binary.* DataFusion, the order service and the log store are level.
+*2026-10-24 at `ca08d3d`, in one binary.* DataFusion, the order service and the log store are level.
 
 - **The floor is 16 MiB.** Sixteen `mincore` calls at about 650 TSC ticks and a `madvise` are about
   12k ticks: 6% of an 8 MiB life with a sixteenth written, 2% at 16 MiB, 0.4% at 64.

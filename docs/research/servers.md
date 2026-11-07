@@ -72,7 +72,7 @@ which raises jemalloc's cycles a request on the order service by 17%, alike for 
 ## What a request asks
 
 Counts from a scratch build at the same rate as the timed runs, never timed itself, 2026-10-22 at
-7619eef. "Crossing" is blocks freed on another CPU, 1 in 64 followed by address. Median life is from
+8ad5150. "Crossing" is blocks freed on another CPU, 1 in 64 followed by address. Median life is from
 a 50 to 100 ms window, which favours short lives.
 
 | Job | Allocations a request | Commonest classes | Bytes | Reallocs | Crossing | Median life |
@@ -104,7 +104,7 @@ Frees on another CPU cost us nothing visible: a free is a push on the freeing CP
 
 ## What share of the cycles is ours
 
-Share of the server's cycles by path, two runs a job and allocator, 2026-10-22 at 7619eef, jemalloc
+Share of the server's cycles by path, two runs a job and allocator, 2026-10-22 at 8ad5150, jemalloc
 as tikv-jemallocator builds it. `perf` samples are placed by instruction with line tables, so the
 inlined fast path is counted. A fast-path figure is good to about a fifth of itself; realloc and
 slow-path figures are better. Totals are one build's.
@@ -151,7 +151,7 @@ plus 3.2%, Qdrant under glibc 1.8 to 2.5%.
 
 ## Whether a gap is instructions or stalls
 
-Cycles and instructions a request, 2026-10-28 at e5e69b1, five code placements of every build, two
+Cycles and instructions a request, 2026-10-28 at e3753b5, five code placements of every build, two
 or three runs each (glibc one), medians per placement and the mean over placements. Cycles a request
 = instructions x cycles per instruction, an exact split. Cycles and instructions count user and
 kernel. Extra cycles per extra instruction is whole-server extra cycles over extra instructions,
@@ -330,7 +330,7 @@ The pass read a floor against 185 MiB retained, of which 1.4 MiB lay on wholly f
 is free slots beside live neighbours, which nothing can return. So now the floor is measured against
 what a lap found returnable, and only intervals in which a heartbeat ran age a frontier
 (`back/purge.rs`). That leaves 21 to 27 faults. Without the thread a slow path still does this work:
-at `948a421`, before silences stopped ageing frontiers, the first slow path after a silence returned
+at `ee20140`, before silences stopped ageing frontiers, the first slow path after a silence returned
 33 to 52 MiB on Meilisearch.
 
 **Idle drains are what is left.** A drain empties each idle CPU's magazines into the bitmaps, and in
@@ -381,7 +381,7 @@ what 35 do. Under a loaded server and strace the calls measured 10 to 13 us.
 
 It starts by itself once free memory passes the floor and the program has a thread of its own;
 `docs/design.md`, "The background thread", has why. What it did on three large heaps, same binary with it on and
-off, at `dd46087` (2026-10-22); the wake-ups and parking are from 2026-10-28:
+off, at `c016881` (2026-10-22); the wake-ups and parking are from 2026-10-28:
 
 | | Meilisearch | Log store | Order service, 2 GiB |
 |---|---:|---:|---:|
@@ -472,7 +472,7 @@ Memory is its axis, and jemalloc is the smallest: heap peak / a minute after clo
 / 131, cralloc 528 / 195, tcmalloc 474 / 417. Over the 30 s at 70% the mean was jemalloc 357,
 tcmalloc 408, cralloc 438, and 410 with the rule as shipped. Most of our extra was 64 and 128-byte
 pages stranded in partly used 2 MiB units. Within a session the tail rule lowered that mean from 449
-to 414, and the build that ships reads a peak of 505 and 139 after close (`a787c9a`, 2026-10-27, not
+to 414, and the build that ships reads a peak of 505 and 139 after close (`4e28885`, 2026-10-27, not
 separated from the builds beside it; [memory.md](memory.md)). The rule's advice changes on a live
 server are mostly 5 to 7 us; the longest, 4.8 to 5.2 ms over 4 GiB, waited on the address-space lock
 with 2 to 8 requests in flight, and no request at p99 or above overlapped one.

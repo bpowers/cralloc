@@ -45,7 +45,7 @@ better than the samples below. User-mode demand fills, at 70% load, one to three
 | Connect log, HTTP/2 | 2,208 | 2,444 | 1.107 |
 | Meilisearch | 163,479 | 157,707 | 0.965 |
 
-*2026-10-22, `7619eef`.* The excess on the Connect jobs is jemalloc's own accesses: on gRPC the
+*2026-10-22, `8ad5150`.* The excess on the Connect jobs is jemalloc's own accesses: on gRPC the
 allocator's own L1 misses are 186 a request against 446, and the program's heap misses are level.
 Demand fills miss what a prefetcher fetched first, so a fill count cannot tell a dense layout from a
 sparse one by itself.
@@ -60,7 +60,7 @@ request, cralloc / jemalloc:
 | Connect log gRPC, HTTP/2 | 1,689 / 1,702 | 41 / 49 | 0 / 0 | 7.3 / 6.1 |
 | Log store, 1M records | 3,018 / 2,890 | 714 / 596 | 237 / 255 | 33 / 90 |
 
-*2026-10-22, `7619eef`, one op in 500,000, means over one to three runs. The samples are thin: 221
+*2026-10-22, `8ad5150`, one op in 500,000, means over one to three runs. The samples are thin: 221
 and 217 cross-core samples on the order service and 26 and 31 on gRPC, so one run reads about +-7%
 and +-20%. "Level" here means within about 1% of the server's cycles.*
 
@@ -72,7 +72,7 @@ misses more than ours: 246 L1-missing loads a request on the store against 55.
 
 **glibc on the order service is where misses move.** On axum it fills 810 lines a request against
 cralloc's 612, 231 of them from beyond L2 against 94; on HTTP/2, 1,244 against 912, and 250 against
-88 (2026-10-21, `575760a`, one to three rounds). The order service caches orders that another worker
+88 (2026-10-21, `cdf8819`, one to three rounds). The order service caches orders that another worker
 later evicts, so 20 to 28% of the blocks followed by address are freed on another CPU. We have not
 split glibc's fills between its chunk headers, the program's objects and lines that move while
 threads wait for its locks.
@@ -112,7 +112,7 @@ eight server jobs, geometric standard deviation across jobs in brackets:
 | mimalloc | 1.083 (x1.05) | 1.057 (x1.02) | 1.024 (x1.03) |
 | glibc | 1.254 (x1.09) | 1.175 (x1.09) | 1.067 (x1.08) |
 
-*2026-10-28, cralloc at `e5e69b1`. Each job is the mean over five code placements of per-placement
+*2026-10-28, cralloc at `e3753b5`. Each job is the mean over five code placements of per-placement
 medians (glibc one run a placement). Computed from the standings' raw results. The jobs are the
 three Connect log jobs, the log store and four order service jobs, so they are three programs.
 miniredis and the sozu proxy barely allocate and are left out; with them in, the cycles column reads
@@ -223,7 +223,7 @@ binary:
 | Connect log gRPC, k cycles a request | 129.3 | 129.0 to 130.1 |
 | RPC log, 64 connections, k cycles a request | 121.9, 122.9 | 121.9 to 122.7 |
 
-*2026-10-22, on `386a1f0`, 4 to 6 interleaved rounds, medians. "On" is the settings of 16 and 64
+*2026-10-22, on `a17a02d`, 4 to 6 interleaved rounds, medians. "On" is the settings of 16 and 64
 siblings and the whole first magazine of a run, where run. A setting of 4 separates four workers'
 headers but not eight's, so a stride must cover at least as many siblings as workers.*
 
@@ -379,7 +379,7 @@ binary that advised every whole block of 2 MiB or more:
 | Meilisearch, a request | -1.1% (inside its spread) | 3% of its walks land in such blocks |
 | Order service at 2 GiB, log store, Connect log gRPC | switch never acts | no block of 2 MiB or more |
 
-*2026-10-24, `875c19a`, 1 to 10 rounds by job, medians.*
+*2026-10-24, `1b0acf0`, 1 to 10 rounds by job, medians.*
 
 The cost of being wrong is large and has no ceiling but the block. A block touched in one page in 64
 holds 11 to 16 times its memory. Written whole and reused, each life costs 25 times what it does

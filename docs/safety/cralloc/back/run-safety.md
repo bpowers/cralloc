@@ -38,4 +38,4 @@ under Miri; fault injection makes purges fail in `random_operations_survive_os_f
 
 **Review.** 2026-10-17, fresh adversarial reviewer: accepted.
 
-Reviewed: 8cbb15e
+Reviewed: 7ddb618

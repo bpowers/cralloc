@@ -68,7 +68,7 @@ writing whole pages adds about 80 cycles.
 | 512 MiB in one pass, clock unknown, not on the curve | no counter in that pass | 535 to 566 |
 
 **Trust the first four,** which hold at 5.62 to 5.69 GHz, measured in the same runs, with heavy work
-paused (2026-10-25 at `0e297a3`). The measured rows are 15 rounds in two sessions within 3%. The
+paused (2026-10-25 at `f12368d`). The measured rows are 15 rounds in two sessions within 3%. The
 computed rows are medians of 9 single `MADV_POPULATE_WRITE` calls over that much memory (1,901 and
 2,211 cycles a page) plus the 640 cycles a fault costs over a populate at 2 and at 32 MiB. Each
 round maps, touches and unmaps, so the low end is what a thread pays for pages it just gave back. No
@@ -168,7 +168,7 @@ held an `mprotect` for a median of 5 ms when populates ran back to back.
   preempted, and 5 slept.
 
 **Rule.** A writer on the address space has to be rare and off the request path; budget milliseconds
-a call for one on a busy lock, as the 10 ms seen on Qdrant shows. (2026-10-25 at `0e297a3`, every
+a call for one on a busy lock, as the 10 ms seen on Qdrant shows. (2026-10-25 at `f12368d`, every
 call timed through a ring read from outside the process, one run per job.)
 
 ## Moving a block with `mremap` is fast, and we copy

@@ -69,7 +69,7 @@ of three runs of 40 million iterations, from user-mode counters, which do not de
   objects serial; that was not measured.
 
 **Rust, through `GlobalAlloc`, fat LTO.** Churn is 10,000 live objects of 16 to 512 bytes, one freed
-and one allocated per step at random. cralloc is 2026-10-22 at `d497711`: median of three rounds at
+and one allocated per step at random. cralloc is 2026-10-22 at `198fc46`: median of three rounds at
 each of four code placements, then the mean; placements agree within 0.3 cycles except where a range
 is shown. The executable form reads `__rseq_offset` with one load, the default form with two. The
 rest is 2026-10-17, same harness, second of two interleaved rounds. The floor is a list behind a
@@ -314,7 +314,7 @@ load instead of an immediate, costs 0.36 on the `Box` pair. The extra cycles are
 retires while a load is outstanding, with no more blocked loads. Why was not found. **Rule:** the
 inlined routine takes its mask in a register, and a constant class folds it to an immediate. The C
 routines read it from memory, since they have no constant case. (Evidence: 2026-10-17 for C, best of
-3 over 2 or 3 rounds, spread 0.05 in pairs, up to 0.8 in mixed cells; 2026-10-22 at `d497711` for
+3 over 2 or 3 rounds, spread 0.05 in pairs, up to 0.8 in mixed cells; 2026-10-22 at `198fc46` for
 Rust, four placements, three rounds.)
 
 ### The front end sets a cliff by micro-op count and by lines, not by alignment
@@ -424,7 +424,7 @@ miss through its result, at the cost of a fused test the caller makes anyway.
 **One load of `__rseq_offset` or two.** In an executable, `mov reg, [rip + __rseq_offset]` becomes a
 copy relocation, correct from the first user code. In a shared library it does not link, so a wrong
 choice is a link failure, never a run-time fault. Inlined, it is worth 0.3 to 1.0 cycles a pair (the
-two forms' difference over eight loops at `d497711`); out of line, nothing. It is the `executable`
+two forms' difference over eight loops at `198fc46`); out of line, nothing. It is the `executable`
 cargo feature; the default, the C entry points and the preload library use two loads.
 
 **Code size.** Inlined under fat LTO an allocation is about 85 bytes in place and 165 out of the
@@ -434,7 +434,7 @@ word; a run-time size adds 35 to 40 in place. An out-of-line call is 5 to 10.
 ## What bounds the inlined pair today
 
 **The hot loops run close to the core's width.** Instructions divided by cycles from the runs behind
-the Rust table (executable form, 2026-10-22 at `d497711`, mean over four placements):
+the Rust table (executable form, 2026-10-22 at `198fc46`, mean over four placements):
 
 | Loop | Cycles | Instructions | Instructions a cycle |
 |---|---:|---:|---:|
@@ -503,7 +503,7 @@ line for every size up to 512).
 
 On four of the seven profiled server jobs a pair costs 12.3 to 14.9 cycles inlined and 17.7 out of
 line, against 5 to 7.3 in the loops; jemalloc's costs 15.2 to 19.3 and 27.4 on the same jobs
-(2026-10-22 at `7619eef`, before the shorter lookup; the sums of allocation and free, whose split
+(2026-10-22 at `8ad5150`, before the shorter lookup; the sums of allocation and free, whose split
 moves with sampling skid). `servers.md` has all seven: about 14, 11 to 18. The fast path is 10.6% of
 the log store's cycles, 5.3% of Meilisearch's, 2.9% of the order service's and 1.1 to 1.3% of the
 RPC jobs'. From what was measured, not a new experiment, the difference is:
@@ -536,7 +536,7 @@ call, the copy and the collection's growth code. C's `realloc` went from 375 and
 `__rust_realloc` went from 12 KiB of code to under 400 bytes.
 
 On the RPC jobs that is about 4% fewer instructions a request (12,200, about 222 a call), and 1.4%
-on the order service. Over five code placements against main `9667fb5`, the HTTP/2 RPC jobs ran 2.1%
+on the order service. Over five code placements against main `18ca2d9`, the HTTP/2 RPC jobs ran 2.1%
 (gRPC, three runs per placement) and 1.9% (Connect, two) faster, ahead at every placement; the order
 service (-0.7%) and another RPC job (-0.7%) are within their noise. That the other jobs did not move
 is not established: `vecgrow 1x256Mi` runs in two modes, and one round read +1.9% with its
@@ -548,7 +548,7 @@ that the pointer starts a slot. `realloc` copies from the pointer, so an interio
 from the neighbouring slot. It reads the back end's own table and checks the slot
 (`Back::small_slot`), about 70 of its instructions. (Evidence: 2026-10-22, a growing collection
 against a presized control, medians of three interleaved runs; per-call figures against main
-`8980eae`.)
+`35e31c7`.)
 
 ## The C entry points
 

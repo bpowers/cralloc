@@ -48,4 +48,4 @@ gives the old block up.
 - `new` not empty: `shrink_block`'s contract is `Allocator::shrink`'s with `new` not empty,
   which the branch has just checked.
 
-Reviewed: c18c19d
+Reviewed: a09c36e

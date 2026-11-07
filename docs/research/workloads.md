@@ -112,7 +112,7 @@ threads ([memory.md](memory.md)).
 
 ## The kernel suite
 
-`benchrun run --suite full`, 55 jobs plus xmalloc-test. Figures are `874b687`, 2026-10-22, medians,
+`benchrun run --suite full`, 55 jobs plus xmalloc-test. Figures are `c7f5c21`, 2026-10-22, medians,
 in the order cralloc, per-CPU tcmalloc, jemalloc, mimalloc, glibc. `local` is one L3, `split`
 alternates L3s between neighbours, `both` fills one then the other.
 

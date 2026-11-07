@@ -54,4 +54,4 @@ The write is a plain `i32` store into memory glibc owns on the program's behalf 
 as writable by any code (`errno` is a modifiable lvalue); the read is a plain `i32` load of
 it, which any `int` value is.
 
-Reviewed: 7bad17e
+Reviewed: 6439180

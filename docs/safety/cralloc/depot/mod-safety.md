@@ -7,4 +7,4 @@ promise on unchanged. The contract itself is what MAGAZINE-01 (the committed mar
 space) and the slab invariant (S) in `front/real-safety.md` (slab words and spare links
 name this area's magazines) rely on.
 
-Reviewed: c18c19d
+Reviewed: a09c36e

@@ -15,7 +15,7 @@ per-CPU mode (sd 1.16) over the same 22, and 0.92 on the large job. Computed fro
 rounds in the baselines of 2026-10-19 at `31b46f4`; [workloads.md](workloads.md), "The kernel
 suite", says what the jobs are.
 
-Real servers split. In the standings of 2026-10-28 at `e5e69b1`, cycles a request at 70% load, means
+Real servers split. In the standings of 2026-10-28 at `e3753b5`, cycles a request at 70% load, means
 over five code placements, mimalloc is 2.8 to 4.2% ahead of jemalloc on the Connect log services, in
 4 of 5 placements and resolved only on HTTP/2 (permutation test, p = 0.04). It is 2.7 to 13.5%
 behind, ranges apart, on the order service and the log store ([workloads.md](workloads.md),

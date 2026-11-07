@@ -115,4 +115,4 @@ whoever dereferences it, in their own ledger.
 
 On the real kernel, `os::linux::kernel::tests::the_design_reservation_is_available`.
 
-Reviewed: c18c19d
+Reviewed: a09c36e
