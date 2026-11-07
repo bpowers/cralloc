@@ -107,7 +107,11 @@ unsafe extern "C" {
 /// The calling thread's area.
 fn area() -> Option<NonNull<u8>> {
     let tp = rseq::thread_pointer()?;
-    NonNull::new(tp.as_ptr().wrapping_byte_offset(super::__rseq_offset))
+    #[cfg(target_arch = "x86_64")]
+    let offset = super::__rseq_offset;
+    #[cfg(target_arch = "aarch64")]
+    let offset = super::outlined::area::offset();
+    NonNull::new(tp.as_ptr().wrapping_byte_offset(offset))
 }
 
 /// The area's `cpu_id`, which the kernel writes while the area is registered.

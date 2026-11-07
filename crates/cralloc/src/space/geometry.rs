@@ -19,7 +19,8 @@ pub const METADATA_SHIFT: u32 = 5;
 /// The shape of a heap.
 ///
 /// The design's shape is [`Geometry::DESIGN`]: 4 KiB pages, 2 MiB huge pages, at most 4096
-/// regions of 4 GiB. The region size is not fixed: when the process cannot have that much
+/// regions of 4 GiB, and [`Geometry::of_kernel`] is the same for a kernel with larger pages. The
+/// region size is not fixed: when the process cannot have that much
 /// address space, [`crate::space::Space::reserve`] halves the region size, keeping the number of
 /// regions, down to the geometry's floor. The size a reservation got is part of its [`Plan`].
 /// The simulated OS uses smaller shapes so that a heap fits in ordinary memory, and in a Kani
@@ -29,14 +30,16 @@ pub const METADATA_SHIFT: u32 = 5;
 /// A plan whose regions are smaller than a class hosts that class only as runs of regions
 /// ([`Plan::fits_region`]); a plan whose regions are smaller than the largest small class hosts
 /// only the small classes that fit ([`Plan::hosts_every_small_class`]). The second is allowed for
-/// proofs, which need heaps of a few kilobytes.
+/// proofs, which need heaps of a few kilobytes. A plan whose regions are smaller than a huge page
+/// uses no huge pages ([`Geometry::huge_pages_usable`]): the 32 MiB or 512 MiB huge page of a
+/// kernel with large pages must not set how small a heap can be.
 ///
 /// The constructor checks what the rest of the crate relies on:
 ///
 /// - regions are at most 4 GiB, so an offset within one is a `u32`;
-/// - pages are at least 64 bytes; pages divide huge pages, huge pages divide regions at every
-///   size the geometry allows, and pages divide metadata blocks, so every one of them can be
-///   committed and purged on its own;
+/// - pages are at least 64 bytes; pages divide huge pages, huge pages divide the largest regions,
+///   and pages divide metadata blocks, so every one of them can be committed and purged on its
+///   own;
 /// - a region at the smallest region size is at least as large as the largest magazine, so the
 ///   magazine area, a whole number of regions aligned to the region size, holds one and aligns
 ///   every magazine to its own size, which the fast paths' slot tests need;
@@ -53,6 +56,8 @@ pub struct Geometry {
     magazine_regions: u16,
     max_objects: u16,
     max_magazine: MagazineSize,
+    /// Whether the kernel's huge pages may be asked for: see [`Geometry::in_regions_of`].
+    huge_pages_usable: bool,
 }
 
 impl Geometry {
@@ -66,7 +71,25 @@ impl Geometry {
     /// 64 MiB there (128 GiB at the top, more than any process will use). When it is used up,
     /// the slow path finds no magazine to make and serves the request from the back end
     /// directly, so running out costs speed, never an allocation.
-    pub const DESIGN: Geometry = Geometry::new(12, 21, 32, 21, MAX_REGIONS, 32, MagazineSize::MAX);
+    pub const DESIGN: Geometry = Geometry::of_kernel(12);
+
+    /// The geometry for a kernel whose pages are `2^page_shift` bytes: the design's, with that
+    /// kernel's huge pages. A page table is a page of 8-byte entries, so a huge page, one
+    /// table's worth of pages, is `page^2 / 8` bytes: 2 MiB, 32 MiB or 512 MiB for pages of
+    /// 4 KiB, 16 KiB or 64 KiB. Regions keep the design's floor whatever the page size, so that a
+    /// process's limit on address space means the same on every kernel; a page of 64 KiB is the
+    /// largest whose metadata blocks still divide into pages there.
+    pub const fn of_kernel(page_shift: u32) -> Geometry {
+        Geometry::new(
+            page_shift,
+            2 * page_shift - 3,
+            32,
+            21,
+            MAX_REGIONS,
+            32,
+            MagazineSize::MAX,
+        )
+    }
 
     /// A geometry with pages of `2^page_shift` bytes, huge pages of `2^huge_page_shift`, regions
     /// of `2^max_region_shift` down to `2^min_region_shift`, at most `max_regions` regions in
@@ -110,7 +133,7 @@ impl Geometry {
         let valid = max_region_shift <= 32
             && page_shift >= 6
             && page_shift <= huge_page_shift
-            && huge_page_shift <= min_region_shift
+            && huge_page_shift <= max_region_shift
             && min_region_shift <= max_region_shift
             && page_shift + METADATA_SHIFT <= min_region_shift
             && magazine_regions >= 1
@@ -136,7 +159,32 @@ impl Geometry {
             magazine_regions: magazine_regions as u16,
             max_objects: objects as u16,
             max_magazine,
+            huge_pages_usable: true,
         })
+    }
+
+    /// This geometry as a plan with regions of `2^region_shift` bytes uses it. A huge page that
+    /// does not fit in such a region cannot be used, so the heap asks the kernel for none, and
+    /// what it does in units of huge pages it does in units of regions, so that its rules scale
+    /// down with the heap. Where no plan has such regions this folds to `self`, whatever the
+    /// shift.
+    #[inline(always)]
+    pub(super) const fn in_regions_of(self, region_shift: u8) -> Geometry {
+        if self.huge_page_shift <= self.min_region_shift || self.huge_page_shift <= region_shift {
+            return self;
+        }
+        Geometry {
+            huge_page_shift: region_shift,
+            huge_pages_usable: false,
+            ..self
+        }
+    }
+
+    /// Whether the heap may ask the kernel for huge pages: not where they do not fit in a
+    /// region ([`Geometry::in_regions_of`]).
+    #[inline(always)]
+    pub const fn huge_pages_usable(self) -> bool {
+        self.huge_pages_usable
     }
 
     /// Bytes per page: the unit of commit and purge.
@@ -255,6 +303,50 @@ mod tests {
         assert!(floor.hosts_every_small_class());
     }
 
+    /// The kernels aarch64 has: each has the design's regions and floor, and its own huge page.
+    #[test]
+    fn every_kernels_geometry_has_its_huge_page_and_the_designs_regions() {
+        assert_eq!(Geometry::of_kernel(12), Geometry::DESIGN);
+        for (shift, huge) in [(12, 2 << 20), (14, 32 << 20), (16, 512 << 20)] {
+            let g = Geometry::of_kernel(shift);
+            assert_eq!(g.page_size(), 1 << shift);
+            assert_eq!(g.huge_page_size(), huge);
+            assert_eq!(g.max_objects(), Geometry::DESIGN.max_objects());
+            assert_eq!(g.largest_plan().region_size(), 4 << 30);
+            let floor = g.smallest_plan();
+            assert_eq!(floor.region_size(), 2 << 20);
+            assert!(
+                floor.size() < 9 << 30,
+                "the floor is about 8 GiB on {shift}"
+            );
+            assert!(floor.hosts_every_small_class());
+        }
+    }
+
+    /// A plan whose regions cannot hold a huge page uses none, and its unit is the region; every
+    /// plan that can hold one is untouched.
+    #[test]
+    fn a_plan_uses_huge_pages_only_where_they_fit_its_regions() {
+        let g = Geometry::of_kernel(14);
+        for shift in g.min_region_shift()..=g.max_region_shift() {
+            let inside = g.plan(shift).unwrap().geometry();
+            let fits = 1usize << shift >= g.huge_page_size();
+            assert_eq!(inside.huge_pages_usable(), fits, "{shift}");
+            assert_eq!(
+                inside.huge_page_size(),
+                g.huge_page_size().min(1 << shift),
+                "{shift}"
+            );
+            assert_eq!(inside.page_size(), g.page_size());
+        }
+        for shift in Geometry::DESIGN.min_region_shift()..=Geometry::DESIGN.max_region_shift() {
+            assert_eq!(
+                Geometry::DESIGN.plan(shift).unwrap().geometry(),
+                Geometry::DESIGN
+            );
+        }
+    }
+
     #[test]
     fn the_cap_limits_magazines() {
         let capped = Geometry::new(6, 8, 11, 11, 4, 1, MagazineSize::MIN);
@@ -268,8 +360,8 @@ mod tests {
     fn bad_shapes_are_refused() {
         let max = MagazineSize::MAX;
         assert!(Geometry::try_new(12, 21, 32, 21, 4096, 1, max).is_some());
-        // Huge pages bigger than the smallest region.
-        assert!(Geometry::try_new(12, 22, 32, 21, 4096, 1, max).is_none());
+        // Huge pages bigger than the largest region.
+        assert!(Geometry::try_new(12, 21, 20, 20, 4096, 1, max).is_none());
         // Regions bigger than 4 GiB.
         assert!(Geometry::try_new(12, 21, 33, 21, 2048, 1, max).is_none());
         // A floor above the largest size.

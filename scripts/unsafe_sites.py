@@ -23,9 +23,9 @@ implementation has the trait's and is not a site. Every other site must cite a l
 or name a Kani harness as ``Kani: `harness_name` `` that a module of the crate declares.
 
 Two more rules, over every module the shipping crates declare whatever its cfg: no
-`asm!`, `naked_asm!` or `global_asm!` but in the Lean routines and the one system-call
-instruction (`SYSTEM_CALL`); and no shipping crate's manifest turns on the allocator's `sim`
-or `internals`.
+`asm!`, `naked_asm!` or `global_asm!` but in the Lean routines, the aarch64 routines that wait for
+Lean (`PROVISIONAL_DIR`) and the file of the system-call instruction (`SYSTEM_CALL`); and no
+shipping crate's manifest turns on the allocator's `sim` or `internals`.
 
 The scan is a small lexer and a token walk, not a Rust parser. `self_test()` runs it over
 small cases of each thing above; the gate runs it with the check.
@@ -44,8 +44,14 @@ import tomllib
 from dataclasses import dataclass
 
 SHIPPING_CRATES = ("cralloc", "cralloc-preload", "cralloc-tokio")
-# The file of the one system-call instruction, the only hand-written assembly (CLAUDE.md).
+# The file of the one system-call instruction, the only lasting hand-written assembly
+# (CLAUDE.md), and how many blocks it has: the instruction on each architecture, and on aarch64
+# the reads of two registers Rust has no stable way to name.
 SYSTEM_CALL = "crates/cralloc/src/os/linux/syscall.rs"
+SYSTEM_CALL_BLOCKS = 4
+# Where hand-written aarch64 routines live until Lean emits them. Unlike Lean's they cite a ledger
+# entry, so only the rule against hand-written assembly passes them by.
+PROVISIONAL_DIR = "crates/cralloc/src/front/provisional"
 ASSEMBLY_MACROS = ("asm", "naked_asm", "global_asm")
 # Scaffolding that compiles in every build but serves only tests, relative to the root.
 SCAFFOLDING = {"crates/cralloc/src/front/twin.rs"}
@@ -66,7 +72,6 @@ NEVER_FEATURES = ("sim", "internals")
 FALSE_FLAGS = {"test", "miri", "kani", "doc", "doctest", "false"}
 FIXED = {
     "target_os": "linux",
-    "target_arch": "x86_64",
     "target_family": "unix",
     "target_pointer_width": "64",
     "target_endian": "little",
@@ -625,13 +630,14 @@ def kani_harnesses(walker: Walker) -> set[str]:
 
 def assembly_problems(walker: Walker) -> list[Site]:
     """Hand-written assembly: every `asm!`, `naked_asm!` or `global_asm!` outside the Lean
-    routines, but for one `asm!` in the file of the system-call instruction (CLAUDE.md)."""
+    routines and those that wait for Lean, but for `SYSTEM_CALL_BLOCKS` `asm!`s in the file of
+    the system-call instruction (CLAUDE.md)."""
     problems, allowed = [], 0
     for path, line, macro in walker.assembly:
         relative = path.relative_to(walker.root).as_posix()
-        if relative.startswith(LEAN_DIR + "/"):
+        if relative.startswith((LEAN_DIR + "/", PROVISIONAL_DIR + "/")):
             continue
-        if relative == SYSTEM_CALL and macro == "asm" and allowed == 0:
+        if relative == SYSTEM_CALL and macro == "asm" and allowed < SYSTEM_CALL_BLOCKS:
             allowed += 1
             continue
         problems.append(Site(path, line, f"{macro}! written by hand", "", problem=True))
@@ -844,9 +850,9 @@ pub fn f(p: *const u8) -> u8 {
     ("the system-call instruction",
      {"lib.rs": "mod os;\n", "os/mod.rs": "mod linux;\n", "os/linux/mod.rs": "mod syscall;\n",
       "os/linux/syscall.rs": "/// # Safety\n/// None.\npub unsafe fn s() {}\nfn a() { asm!(\"syscall\") }\n"}, 0),
-    ("a second asm! beside the system-call instruction",
+    ("too many asm! beside the system-call instruction",
      {"lib.rs": "mod os;\n", "os/mod.rs": "mod linux;\n", "os/linux/mod.rs": "mod syscall;\n",
-      "os/linux/syscall.rs": "/// # Safety\n/// None.\npub unsafe fn s() {}\nfn a() { asm!(\"syscall\") }\nfn b() { asm!(\"nop\") }\n"}, 1),
+      "os/linux/syscall.rs": "/// # Safety\n/// None.\npub unsafe fn s() {}\nfn a() { asm!(\"syscall\") }\nfn b() { asm!(\"nop\"); asm!(\"nop\"); asm!(\"nop\"); asm!(\"nop\") }\n"}, 1),
     ("a shipping crate that turns on internals",
      {"../../cralloc-preload/Cargo.toml":
       '[dependencies]\ncralloc = { path = "../cralloc", features = ["internals"] }\n'}, 1),

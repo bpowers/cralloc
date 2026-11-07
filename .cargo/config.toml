@@ -18,3 +18,9 @@ rustflags = ["-Ctarget-cpu=native"]
 [target.aarch64-unknown-linux-musl]
 runner = "scripts/run-capped"
 rustflags = ["-Ctarget-cpu=native"]
+
+# A simulated heap is built on the stack before it is boxed, and in a debug build each call on the
+# way adds a copy. Its lines are twice as long on aarch64, which is more than the default 2 MiB of
+# a test's thread holds.
+[env]
+RUST_MIN_STACK = "8388608"
