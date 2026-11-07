@@ -898,7 +898,12 @@ mod tests {
             os.commit(base, 2 * page).unwrap();
             assert_eq!(p.add(page + 1).read(), 0);
             p.add(page + 1).write(42);
-            os.advise_huge(base, 2 * page, HugePages::Avoid).unwrap();
+            // A kernel built without transparent huge pages refuses the advice, and nothing else.
+            let advised = os.advise_huge(base, 2 * page, HugePages::Avoid);
+            assert!(
+                matches!(advised, Ok(()) | Err(OsError::EINVAL)),
+                "{advised:?}"
+            );
             os.purge(base, 2 * page).unwrap();
             assert_eq!(p.add(page + 1).read(), 0);
             os.unmap(base, 4 * REGION).unwrap();
@@ -916,8 +921,8 @@ mod tests {
         // SAFETY: each range is whole pages of the reservation, and nothing else uses it.
         unsafe {
             os.commit(base, pages * page).unwrap();
-            os.advise_huge(base, pages * page, HugePages::Avoid)
-                .unwrap();
+            // So that the pages are small, where the kernel has any other kind.
+            let _ = os.advise_huge(base, pages * page, HugePages::Avoid);
             assert_eq!(os.resident(base, pages * page), Ok(0));
             for i in [0, 3, 600, 1099] {
                 p.add(i * page).write(1);

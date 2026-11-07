@@ -141,9 +141,9 @@ fn stack(task: &Path) -> Stack {
     // an absent page, which would then count as present. An absent page was never written.
     let mem = File::open("/proc/self/mem").unwrap();
     let mut own = vec![0u8; (end - first) * page() as usize];
-    for (i, page) in own.chunks_mut(page() as usize).enumerate() {
+    for (i, chunk) in own.chunks_mut(page() as usize).enumerate() {
         if present(first + i) {
-            mem.read_exact_at(page, lo + page() * (first + i) as u64)
+            mem.read_exact_at(chunk, lo + page() * (first + i) as u64)
                 .unwrap();
         }
     }
