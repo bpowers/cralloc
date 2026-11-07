@@ -7,15 +7,21 @@
 //!
 //! The copies are written only here, and only ever in one direction: a zero becomes the right
 //! value. Every value is all-zero at load, and zero sends every free that reads it to its slow
-//! path (a zero shift or base gives an index of the pointer itself, 4096 or more for any heap
-//! address; a zero class byte has a zero mask). So a copy may lag the truth, which costs a slow
-//! path, but it never disagrees with it in a harmful direction:
+//! path (a zero class byte has a zero mask, and a zero shift or base is below). So a copy may lag
+//! the truth, which costs a slow path, but it never disagrees with it in a harmful direction.
 //!
-//! - The shift and base index are written once, the base index first, from the published
-//!   heap, which never changes for the life of the process (a forked child inherits both). A free
-//!   that sees the shift sees the base index too (stores are not reordered on x86-64, and the
-//!   shift's store is a release); one that sees only the base index computes an index of at
-//!   least the pointer's region number above zero minus the base's, far out of range.
+//! A routine's loads have no order of their own, so a free may read any of these words old and any
+//! other new, on a weakly ordered CPU for as long as a stale read lasts. Every mix has to be safe,
+//! and is:
+//!
+//! - The shift and base index are written once, from the published heap, which never changes for
+//!   the life of the process (a forked child inherits both). A free computes `(ptr >> shift) -
+//!   base index`. With a zero shift that is a heap address less a small number, far out of range.
+//!   With the shift and a zero base index it is the pointer's region number counted from address
+//!   zero, which is at least the base index, so out of range as long as the base index is: a heap
+//!   whose base index is not out of range itself is not mirrored at all, and its frees take the
+//!   slow path. In `publish` the base index's store comes first and the shift's is a release, so
+//!   that a slow path that finds the shift has the base index.
 //! - They are written from the C allocation slow paths (`note`).
 //! - A region's byte is written only when a small block of that region has just been handed out
 //!   to C, so the region is assigned to that class and has blocks. The back end never takes a
@@ -41,6 +47,11 @@ fn publish() -> Option<(u64, usize)> {
     }
     let (base, region_shift) = process::layout()?;
     let base_index = base >> region_shift;
+    if base_index < REGION_COUNT {
+        // See the module documentation: a free that read the shift and not yet the base index
+        // would take the pointer's number from zero for an index into the table.
+        return None;
+    }
     base_word.store(base_index as u64, Ordering::Relaxed);
     shift_word.store(u64::from(region_shift), Ordering::Release);
     Some((u64::from(region_shift), base_index))
