@@ -23,5 +23,5 @@ servers suite. Its release binary ships with jemalloc.
   idle client connections kept for 10 minutes instead of 10 s, since the load generator
   counts a closed connection as a broken run.
 
-`fetch.sh` also provides `protoc`, which the Router's build needs. `docs/research/servers-router.md`
-has the measurements.
+`fetch.sh` also provides `protoc`, which the Router's build needs. `docs/research/servers.md`,
+"What each program taught us", has the measurements.

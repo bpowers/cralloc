@@ -441,7 +441,7 @@ pub fn quick() -> Vec<Job> {
 }
 
 /// The shapes that exposed the back end's worst costs in the 2026-10-18 session
-/// (docs/research/baselines.md, "Smoke set for the back end"), small enough to run on every
+/// (docs/research/workloads.md, "The smoke set for the back end"), small enough to run on every
 /// change to the back end in about a minute: large objects crossing threads (a purge on every
 /// free past the large cap), a tree built and dropped (every object through the bitmaps,
 /// recycled out of address order), sh8bench preloaded (contended refills), JSON (the
@@ -470,7 +470,7 @@ pub fn backend() -> Vec<Job> {
         rust("single-thread", "json 8Mi".into(), Native, "json size=8Mi reps=3", one(), 60),
         cprog("sh8bench 16", "sh8bench", "16", both(), Metric::Wall, 60),
         // A buffer grown by doubling and freed, over and over: the large path's moves, kept
-        // slots and their charge (docs/research/memory.md, "Grown blocks kept up to a budget").
+        // slots and their charge (docs/research/large-blocks.md, "What growth leaves behind").
         rust(
             "single-thread",
             "vecgrow 1x4Mi grow-and-free".into(),
@@ -842,8 +842,8 @@ fn large() -> Vec<Large> {
     // in `mixed`, every 20th request replaces 20 points, which its optimizers index in the
     // background. Each run starts from a copy of the same collection, in RAM: on the disk,
     // whose pages the optimizers write and the searches fault back, the job's time followed
-    // the disk's load (docs/research/servers-qdrant.md). Not how Qdrant is deployed: it
-    // measures the server's CPU and memory with the disk taken out.
+    // the disk's load (docs/research/servers.md, "What each program taught us"). Not how Qdrant
+    // is deployed: it measures the server's CPU and memory with the disk taken out.
     for (kind, r70) in [("search", QDRANT_SEARCH_R70), ("mixed", QDRANT_MIXED_R70)] {
         v.push(Large {
             id: format!("qdrant {kind}"),
@@ -936,7 +936,7 @@ pub fn servers_large() -> Vec<Job> {
 
 /// The order service at 4 GiB with tables that are not pre-sized, so that each of its 64
 /// shard tables doubles once under churn, long after the store is full, rehashing every entry
-/// under the shard's lock (docs/research/servers-large.md, "The 4 GiB tail"). The load is a
+/// under the shard's lock (docs/research/servers.md, "The program's own events"). The load is a
 /// fixed rate from the start, so that the doublings come at the same order count, and so the
 /// same moment, for every allocator, inside the measured segment `dbl`. The server reports
 /// each doubling's time and page faults; the runner, the latency, faults and resident set
@@ -965,12 +965,12 @@ pub fn servers_large_sat() -> Vec<Job> {
 }
 
 /// What cralloc's default background thread does to a large-heap server
-/// (docs/research/default-thread-servers.md): the order service at 2 GiB, the log store and
-/// Meilisearch, each filled, then half a minute at 70% (`s70`, three ten-second pieces), a
-/// silence of 30 s with the connections open, long enough for the thread to drain and park,
-/// one burst at 70% marked in pieces so that its first 5 ms, the rest of its first 50 ms and
-/// of its first 500 ms are summarised apart (`b5`, `b50`, `b500`, then `b2`), and a minute
-/// after the connections close (`idle`).
+/// (docs/research/servers.md, "The background thread"): the order service at 2 GiB, the log
+/// store and Meilisearch, each filled, then half a minute at 70% (`s70`, three ten-second
+/// pieces), a silence of 30 s with the connections open, long enough for the thread to drain
+/// and park, one burst at 70% marked in pieces so that its first 5 ms, the rest of its first 50
+/// ms and of its first 500 ms are summarised apart (`b5`, `b50`, `b500`, then `b2`), and a
+/// minute after the connections close (`idle`).
 pub fn servers_thread() -> Vec<Job> {
     let want = [
         "orders axum cache 2G",
@@ -1002,9 +1002,10 @@ pub fn servers_thread() -> Vec<Job> {
         .collect()
 }
 
-/// Meilisearch's tail at 70% alone (docs/research/meili-tail.md): filled as `servers-thread`
-/// fills it, then two minutes at 70% in twelve marked pieces of ten seconds (`s70`), and no
-/// silence or burst, so that a session spends its minutes on the steady tail.
+/// Meilisearch's tail at 70% alone (docs/research/servers.md, "Tails the allocator caused"):
+/// filled as `servers-thread` fills it, then two minutes at 70% in twelve marked pieces of ten
+/// seconds (`s70`), and no silence or burst, so that a session spends its minutes on the steady
+/// tail.
 pub fn meili_tail() -> Vec<Job> {
     large()
         .into_iter()
@@ -1021,9 +1022,10 @@ pub fn meili_tail() -> Vec<Job> {
         .collect()
 }
 
-/// The order service as a ladder of live heaps (docs/research/large-heap-constants.md): the
-/// three sizes of `servers-large` and one of about 10 GiB, 5.6M orders, each on the large-heap
-/// day. Run each size as a session of its own with `--mem-cap` sized to it (13 GiB for 10G).
+/// The order service as a ladder of live heaps (docs/research/memory.md, "The heap's fixed
+/// numbers hold to 10 GiB"): the three sizes of `servers-large` and one of about 10 GiB, 5.6M
+/// orders, each on the large-heap day. Run each size as a session of its own with `--mem-cap`
+/// sized to it (13 GiB for 10G).
 pub fn servers_ladder() -> Vec<Job> {
     let four = large().into_iter().find(|l| l.id == "orders axum cache 4G").expect("the 4 GiB order service");
     let ten = Large {

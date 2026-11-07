@@ -344,7 +344,7 @@ so a tenant that writes what it is given pays what it always did.
 - **The floor is 16 MiB.** Sixteen `mincore` calls at about 650 cycles and a `madvise` are about 12k
   cycles: 6% of an 8 MiB life with a sixteenth written, 2% at 16 MiB, 0.4% at 64.
 - **The cut is one in sixteen.** A fault costs about thirteen times clearing a resident page (1.35
-  against 0.1 kcycles), so a tenant that writes more than a thirteenth is cheaper kept and cleared.
+  against 0.1 k TSC ticks), so a tenant that writes more than a thirteenth is cheaper kept and cleared.
   A dense run that meets one sample can reach about an eighth, and its next life costs about 1.6
   times.
 - **The look sees pages touched, not written.** A page only read maps the shared zero page, and

@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
-"""The mini-redis run of docs/research/heap-drift.md: a real server whose keys are overwritten
-at changing value sizes. Run from the repository root under scripts/heavy:
+"""The mini-redis run of docs/research/memory.md, "When the size mix wanders, huge pages
+ratcheted": a real server whose keys are overwritten at changing value sizes. Run from the
+repository root under scripts/heavy:
 
     scripts/heavy python3 -I bench/standings/drift/redis.py BUILD OUTFILE [--keys N]
         [--phases wide,small,...] [--rate 80000] [--quiet 60]

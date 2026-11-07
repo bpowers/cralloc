@@ -8,20 +8,20 @@
 //! routines address the word at position `p` as `SLABS + (cpu << SLAB_SHIFT) + 8 p`, and the C
 //! size tables and the region table give that position, `4 c + 3`. A load at the page offset of
 //! a hot word stored just before can wait for that store as if it were the same location
-//! (`docs/research/zen5-roofline.md`, section 16), so the hot words keep off the page offsets
-//! of what every call reads or writes and others place: a thread's rseq area, which the kernel
-//! requires to be 32-byte aligned, has `cpu_id` and `rseq_cs` at bytes 4 to 15 of a 32-byte
-//! chunk wherever the C library puts it; and an 8-byte variable aligned to 16, as the
-//! executable's copy of glibc's `__rseq_offset` is when glibc's own is, lies at bytes 0 to 7
-//! or 16 to 23. `front` asserts the rule for everything the crate places itself. One class to a
-//! chunk keeps the word's address one shift from the class index, where two to a chunk cost a
-//! run-time-size pair two cycles of arithmetic. The cold part follows on its own cache lines:
-//! the activity counter (bytes its slow paths moved), the count of its heartbeats, the drain
-//! claim, the count of full magazines the CPU's frees have
-//! retired, where the age limit's sweep of the spare stacks is, and the classes that may keep
-//! stock; then, on lines of their own that only this CPU's slow paths touch, per class a stamp
-//! of when the loaded magazine was loaded; and on a line of its own the idle check's last
-//! sighting.
+//! (`docs/research/roofline.md`, "A load at the page offset of a store in flight can stall the
+//! whole loop"), so the hot words keep off the page offsets of what every call reads or writes
+//! and others place: a thread's rseq area, which the kernel requires to be 32-byte aligned, has
+//! `cpu_id` and `rseq_cs` at bytes 4 to 15 of a 32-byte chunk wherever the C library puts it;
+//! and an 8-byte variable aligned to 16, as the executable's copy of glibc's `__rseq_offset` is
+//! when glibc's own is, lies at bytes 0 to 7 or 16 to 23. `front` asserts the rule for
+//! everything the crate places itself. One class to a chunk keeps the word's address one shift
+//! from the class index, where two to a chunk cost a run-time-size pair two cycles of
+//! arithmetic. The cold part follows on its own cache lines: the activity counter (bytes its
+//! slow paths moved), the count of its heartbeats, the drain claim, the count of full magazines
+//! the CPU's frees have retired, where the age limit's sweep of the spare stacks is, and the
+//! classes that may keep stock; then, on lines of their own that only this CPU's slow paths
+//! touch, per class a stamp of when the loaded magazine was loaded; and on a line of its own
+//! the idle check's last sighting.
 //!
 //! Every field is an atomic word and the all-zero slab is valid: no magazines, empty spare
 //! stacks, no activity, no claim, nothing retired, no sweep and no stamps.

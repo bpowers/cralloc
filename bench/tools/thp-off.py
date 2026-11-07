@@ -6,7 +6,7 @@ usage: thp-off.py COMMAND [ARGS...]   (run it as `python3 -I thp-off.py ...` ins
 The flag is inherited across fork and kept across execve, and needs no privilege. It disables
 THP even in ranges advised with MADV_HUGEPAGE, so every allocator is treated alike: it
 separates what huge pages buy an allocator from everything else
-(docs/research/memory.md, "Build phases against mimalloc").
+(docs/research/program-effects.md, "TLB and huge pages").
 """
 import ctypes
 import os

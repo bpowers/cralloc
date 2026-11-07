@@ -2,8 +2,8 @@
 
 Workload benchmarks that compare allocators on whole programs: cross-thread patterns, a
 work-stealing pool, an RPC server, single-threaded allocation-heavy shapes, and selected
-mimalloc-bench programs. Results and what they mean are in `docs/research/baselines.md`.
-The fast-path microbenchmarks are in `roofline/` and `docs/research/zen5-roofline.md`. Real
+mimalloc-bench programs. Results and what they mean are in `docs/research/standings.md`.
+The fast-path microbenchmarks are in `roofline/` and `docs/research/roofline.md`. Real
 Rust programs are the `servers` suite (connect-rust, axum and actix-web services under an
 open load) and the `apps` suite (ruff, DataFusion, boa), with their own build step and
 inputs: see `apps/README.md`.
@@ -26,7 +26,7 @@ cargo build --release -p bench-runner
 ```
 
 The `backend` suite is seven small jobs that each exposed a cost of cralloc's back end
-(`docs/research/baselines.md`, "Smoke set for the back end"); run it, against the
+(`docs/research/workloads.md`, "The smoke set for the back end"); run it, against the
 incumbents, on every change to the back end. `benchrun list --suite full` prints the jobs.
 `run` takes `--only TEXT` (jobs whose id
 contains it), `--allocators a,b`, `--rounds N`, `--out FILE`, `--seed N`, `--mem-cap SIZE`
@@ -39,8 +39,9 @@ both L3s.
 
 `build` and `run` refuse an cralloc build whose routines load the rseq offset at a slab hot
 word's page offset (`scripts/rseq-offset-check`): every allocation of that class could wait for
-the previous one, and the session would measure the link (`docs/research/zen5-roofline.md`,
-section 16). `run` records the offsets in its session record.
+the previous one, and the session would measure the link (`docs/research/roofline.md`,
+"A load at the page offset of a store in flight can stall the whole loop"). `run` records
+the offsets in its session record.
 
 `--suite` also takes several suites joined by commas, `--only` several texts joined by
 commas, and `--group NAME` keeps one group's jobs (`benchrun list` prints the groups).
@@ -80,7 +81,8 @@ against the first by the first layout's median (what single builds compare) and 
 over the layouts. Run one round a session and combine the sessions with
 `standings/padsweep.py`, or with `standings/servers.py`, which also says whether each difference
 is resolved or inside the range placement alone covers. The server jobs of `rpc-server` move by 2.5 to 5% this way
-(`docs/research/grpc-placement.md`, "How to read server jobs").
+(`docs/research/measuring.md`, "One number from each of two builds measures where the code
+landed").
 
 ```
 ./target/release/benchrun layout --suite servers --only "=connect log grpc h2" \
@@ -168,7 +170,7 @@ cannot be rebuilt under a session.
   execs. A run killed at its cap, or one that reached the cap and was slowed by reclaim, is
   recorded as invalid with that reason, and the session goes on. Every process is charged to
   some memory cgroup anyway, so the cap adds no work to allocation; an interleaved A/B is in
-  `docs/research/baselines.md` section 13.
+  `docs/research/measuring.md`, "The method in brief".
 - **Checks.** Each run must report the allocator, and for tcmalloc the mode, it was meant to
   run with, and where the allocator's code was: linked into the executable, or which shared
   library. A preload run must report the library it preloaded. Native runs report from
@@ -209,18 +211,18 @@ cannot be rebuilt under a session.
   nominal clock (4.38 GHz) for the first 250 ms of work, then boosts to 5.56 to 5.71 GHz.
   One busy core anywhere keeps the boost for all of them. Runs started after the gate took
   up to 30% longer at the same cycles, so medians of jobs ranked by time carried noise from
-  the order of the runs (`docs/research/baselines.md`, section 16). So before each run the
-  runner spins on the job's CPUs, measuring each one's clock in 5 ms windows, until all of
-  them have held their warm clock for three windows, and starts the job straight after
-  (the boost outlasts 200 ms of idle; the start takes a few). The warm clock of each CPU set
-  is learned from an 800 ms spin the first time the set is used. The warm-up comes before
-  the run's interference baseline, so it is not counted as foreign work. It adds about
-  15 ms a run, about a minute and a half to a full session. Every run records the clock it
-  got (`clock.ghz`: cycles over on-CPU time of its measured phases) and its warm-up
-  (`clock.warmup`); the report gives each job's median clock and the runs more than 5%
-  below their allocator's usual clock on that job. An allocator can set the clock itself:
-  glibc's large-object pipeline, all system calls and page faults, runs near nominal.
-  Machine settings (governor, EPP) are left as they come.
+  the order of the runs (`docs/research/measuring.md`, "A short job after idle runs at the
+  wrong clock"). So before each run the runner spins on the job's CPUs, measuring each one's
+  clock in 5 ms windows, until all of them have held their warm clock for three windows, and
+  starts the job straight after (the boost outlasts 200 ms of idle; the start takes a few).
+  The warm clock of each CPU set is learned from an 800 ms spin the first time the set is
+  used. The warm-up comes before the run's interference baseline, so it is not counted as
+  foreign work. It adds about 15 ms a run, about a minute and a half to a full session.
+  Every run records the clock it got (`clock.ghz`: cycles over on-CPU time of its measured
+  phases) and its warm-up (`clock.warmup`); the report gives each job's median clock and the
+  runs more than 5% below their allocator's usual clock on that job. An allocator can set
+  the clock itself: glibc's large-object pipeline, all system calls and page faults, runs
+  near nominal. Machine settings (governor, EPP) are left as they come.
 - **Ranking.** Each job has one primary metric (named in the report with its unit; lower is
   better except rates). The report gives medians, half the interquartile range as a
   percentage, the fastest and the smallest (peak resident set) allocator, the runner-up

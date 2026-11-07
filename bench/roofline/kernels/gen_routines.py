@@ -50,7 +50,7 @@ class V:
     per_class: bool = False
 
 
-# Out-of-line variants. Item numbers refer to the questions in docs/research/zen5-roofline.md.
+# Out-of-line variants.
 OOL = {
     "gen": V(),
     "genb": V(),  # an identical copy at other addresses: the noise floor

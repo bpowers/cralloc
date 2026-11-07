@@ -92,8 +92,8 @@ pub const DEPOT_TARGET: usize = 128 << 10;
 /// there go to the class's shared stack instead, by default: a quarter of the target, which
 /// leaves the shared stack the rest, so that a process on one domain parks what it did when
 /// there was one stack per class. Half the target was no faster on any job that crosses L3s,
-/// slower on some, and parked up to 0.7 MiB more in them (`docs/research/launder-and-fill.md`,
-/// "Domain stacks and a shared stack").
+/// slower on some, and parked up to 0.7 MiB more in them (`docs/research/magazines.md`,
+/// "One depot for the machine ran independent work at half speed").
 pub const DOMAIN_CAP: usize = DEPOT_TARGET / 4;
 
 /// The most objects one slow path launders: as many as the largest magazine holds, 1,022.

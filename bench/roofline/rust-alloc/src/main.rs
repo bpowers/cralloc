@@ -13,7 +13,8 @@
 //! A build with `RA_PAD=N` (N bytes, at build time) places every single-thread workload's loop N
 //! bytes further on and changes nothing else, so that a comparison can be averaged over code
 //! placements: the inlined fast paths' cycles move by up to a cycle a pair with where the loop
-//! lands (`docs/research/fast-lookup.md`).
+//! lands (`docs/research/roofline.md`, "The front end sets a cliff by micro-op count and by
+//! lines, not by alignment").
 
 const fn parse_pad(s: &str) -> usize {
     let b = s.as_bytes();
@@ -255,8 +256,9 @@ fn batch_dyn(n: u64, size: usize) -> u64 {
     acc
 }
 
-/// Sizes in the proportions the server profile found (`server-profile.md`): mostly 16 and 24
-/// bytes, then 8, 32, 48, 128 and a tail to 448, in a fixed shuffled order of 64.
+/// Sizes in the proportions the server profile found (`docs/research/servers.md`, "What a
+/// request asks"): mostly 16 and 24 bytes, then 8, 32, 48, 128 and a tail to 448, in a fixed
+/// shuffled order of 64.
 const MIX: [usize; 64] = {
     let counts: [(usize, usize); 11] = [
         (16, 20), (24, 20), (8, 6), (32, 4), (48, 4), (128, 4), (64, 2), (96, 1), (256, 1),

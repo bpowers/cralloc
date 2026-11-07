@@ -120,8 +120,9 @@ build_tcmalloc() {
   # builds use it for their thread-locals). Without it, -fPIC with this GCC's default
   # -mtls-dialect=gnu2 reaches every thread-local through a TLS descriptor call, an indirect
   # call through memory that on Zen 5 defeats zero-latency store forwarding: 41 to 57 cycles
-  # per malloc and free pair (docs/research/zen5-roofline.md section 14). Static links relax
-  # either model to local-exec, so this changes only the shared library.
+  # per malloc and free pair (docs/research/roofline.md, "A reload that loses memory renaming
+  # costs 5 to 7 cycles"). Static links relax either model to local-exec, so this changes only
+  # the shared library.
   local flags=(-c opt --symlink_prefix=/ --jobs="$jobs" --local_resources=cpu="$jobs"
                --experimental_cc_static_library --copt=-ftls-model=initial-exec)
   (cd "$ws" && run "$bazel" --output_user_root="$root" build "${flags[@]}" \

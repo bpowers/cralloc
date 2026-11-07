@@ -5,8 +5,9 @@
 //! moves far more magazines per burst than the fixed spare limit holds (`spare.rs`). Each one
 //! past the limit goes to the depot when freed and comes back when allocated, and those
 //! exchanges reach lines every CPU of the domain writes, and the shared stack and the bitmaps
-//! beyond them (`docs/research/launder-and-fill.md`, "sh8bench, accounted"). The rule here is
-//! that a CPU keeps what it demonstrably sends away and takes back, when the sending is costly.
+//! beyond them (`docs/research/magazines.md`, "Contention is what makes an exchange dear"). The
+//! rule here is that a CPU keeps what it demonstrably sends away and takes back, when the
+//! sending is costly.
 //!
 //! **Round trips under contention.** When a slow path sends a magazine of a class to the depot
 //! because its CPU's spare stack of that kind is at its limit, it marks the class's stock word:

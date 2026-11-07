@@ -26,23 +26,23 @@
 //! allocation, empty for a free. Work that swings both ways across a magazine's end, a few
 //! allocations and then as many frees, then crosses the far end of the new magazine too, and
 //! does on every repetition: two swaps each, for as long as the work is steady
-//! (`docs/research/rpc-slow-mode.md`). So each CPU records which way its last swaps of each
-//! class went, a hint in the class's stock word ([`Cache::plan_swap`]). A swap that reverses a
-//! swap which itself reversed the one before is evidence of such a lock, and the slow path
-//! leaves the loaded magazine half full; a reversal after a run of swaps one way is the turn of
-//! a longer swing, and stays plain. A half-full swap that any swap of the class follows before
-//! an interval of silence did not help, and the rule backs off, exponentially, before it tries
-//! again (`stock::plan_swap`). It takes
-//! the loaded magazine out of the slab with store-if-equal, storing zero, so that both
-//! magazines are its own; moves half of one's objects into the other, a copy between two
-//! magazines nobody else can reach; and installs the half full one with store-if-equal,
-//! expecting zero. Each step is one commit, and between them everything the thread holds is
-//! private. If the install finds the word changed (a thread that took the slow path meanwhile
-//! and installed its own, a drain's marker, a move to another CPU), the thread still holds both
-//! magazines and retires them or serves from them as a failed install does. No spare is needed:
-//! the loaded magazine itself receives or gives the half. A swing of less than half a magazine
-//! then never leaves it. A flow never reverses, so it never pays: one more store-if-equal and a
-//! copy of half a magazine fall only on a swap with evidence of a lock.
+//! (`docs/research/magazines.md`, "The magazine-end lock"). So each CPU records which way its
+//! last swaps of each class went, a hint in the class's stock word ([`Cache::plan_swap`]). A
+//! swap that reverses a swap which itself reversed the one before is evidence of such a lock,
+//! and the slow path leaves the loaded magazine half full; a reversal after a run of swaps one
+//! way is the turn of a longer swing, and stays plain. A half-full swap that any swap of the
+//! class follows before an interval of silence did not help, and the rule backs off,
+//! exponentially, before it tries again (`stock::plan_swap`). It takes the loaded magazine out
+//! of the slab with store-if-equal, storing zero, so that both magazines are its own; moves
+//! half of one's objects into the other, a copy between two magazines nobody else can reach;
+//! and installs the half full one with store-if-equal, expecting zero. Each step is one commit,
+//! and between them everything the thread holds is private. If the install finds the word
+//! changed (a thread that took the slow path meanwhile and installed its own, a drain's marker,
+//! a move to another CPU), the thread still holds both magazines and retires them or serves
+//! from them as a failed install does. No spare is needed: the loaded magazine itself receives
+//! or gives the half. A swing of less than half a magazine then never leaves it. A flow never
+//! reverses, so it never pays: one more store-if-equal and a copy of half a magazine fall only
+//! on a swap with evidence of a lock.
 //!
 //! **Refresh.** One full magazine in [`REFRESH_EVERY`] that a free displaces is laundered and
 //! retired empty instead of going to the spares or the depot, so the objects in steady
@@ -55,15 +55,16 @@
 //! and after a fall in the program's short-lived objects the long-lived ones it goes on making
 //! stay spread over the pages of its peak, a few to a page. One in 32 replaces them too slowly
 //! to matter there; one in 4 packed every class from 160 B up and took a sixth off such a
-//! trough, and costs about 1% of cycles wherever it runs (`docs/research/trough-gap.md`). So
-//! the source says how far its fragmentation, free slots on pages that also hold objects, earns
-//! a faster refresh ([`Source::refresh_raise`]): the back end sets it once a lap of its purge
-//! walk from that fragmentation's share of what the small classes have carved, from none under
-//! 1 in 64 to one in 4 from 1 in 16, up at once and down a step a lap. A heap in steady use,
-//! whose share stays near half a percent, pays nothing. All classes are refreshed alike: what
-//! each class's pages hold is not counted, and the back end's count of free slots is one for
-//! all small classes. Classes of 128 B and down do not pack this way (their loaded magazine
-//! recycles in place and rarely retires); the refresh does what it can for the rest.
+//! trough, and costs about 1% of cycles wherever it runs (`docs/research/memory.md`, "Refresh
+//! on evidence"). So the source says how far its fragmentation, free slots on pages that also
+//! hold objects, earns a faster refresh ([`Source::refresh_raise`]): the back end sets it once
+//! a lap of its purge walk from that fragmentation's share of what the small classes have
+//! carved, from none under 1 in 64 to one in 4 from 1 in 16, up at once and down a step a lap.
+//! A heap in steady use, whose share stays near half a percent, pays nothing. All classes are
+//! refreshed alike: what each class's pages hold is not counted, and the back end's count of
+//! free slots is one for all small classes. Classes of 128 B and down do not pack this way
+//! (their loaded magazine recycles in place and rarely retires); the refresh does what it can
+//! for the rest.
 
 use super::heartbeat::{Chores, Tried};
 use super::magazine::Magazine;
@@ -122,7 +123,7 @@ const _: () = assert!(size_of::<Obtained<'_>>() <= 16);
 /// default. Each costs a launder now and a fill later, and in a fragmented heap the fill's
 /// search of the bitmaps dominates. One in 32 kept nearly all of one in eight's effect on
 /// what stays resident after a peak, for about a third of its instructions on slow-path-heavy
-/// workloads (`docs/research/memory.md`, "The parked-object rules, built"). An object in
+/// workloads (`docs/research/memory.md`, "Parked objects pin the heap"). An object in
 /// circulation survives `k` retirements with probability `(31/32)^k`: half are replaced within
 /// 22 and nineteen in twenty within 95, still fast next to the interval for any class that
 /// exchanges often enough for its pages to matter. The base rate: a fragmented heap halves it

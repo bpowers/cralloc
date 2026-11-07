@@ -15,8 +15,8 @@
 #   MIRI_OUT      where the logs go, default target/miri-check; a failing test's log is kept
 #   MIRI_ONLY     a file of test paths, one a line: run only those (to rerun what failed)
 # Run it through scripts/heavy. It takes hours, not minutes: about twelve hours of CPU, most of
-# it in the few dozen slowest tests (docs/research/miri-check.md has the measurements and what
-# makes a test slow under Miri).
+# it in the few dozen slowest tests (docs/research/portability.md, "Miri", has the measurements
+# and what makes a test slow under Miri).
 #
 # Why one process per test: one stuck test would otherwise hold up every test after it without
 # saying which, and the limit has to be on CPU time, not wall time, because a measurement pauses

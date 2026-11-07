@@ -25,16 +25,16 @@ below are those sections, discharged once here for every call in the file.
 **Why they hold.**
 
 - (R): glibc 2.35 and later set `__rseq_offset` before any user code runs, for every thread,
-  whether or not registration succeeded (`docs/research/linux-rseq-contract.md`, "What the
-  fields read"); an unregistered thread reads `cpu_id = -2`, which the routines' unsigned
-  compare sends to the miss path. The declaration is FRONT-01 (`front/mod-safety.md`). On musl
-  the word and the area are the crate's own (FRONT-01, `front/area-safety.md`): each thread's
-  area reads -1 until `cpu` registers it (AREA-04), and -2 if refused or retired, both of which
-  the unsigned compare sends to the miss path. A registration made during a routine breaks
-  "for the whole call": a signal handler that allocates for the first time on a thread at -1,
-  between a routine's arming store and its read of `cpu_id`, registers the thread, and the
-  interrupted routine then runs to its commit unprotected. Nothing here rules that out; it is
-  stated under "What is trusted" in `docs/design.md`, and shown by the ignored test
+  whether or not registration succeeded (`docs/research/linux-rseq-contract.md`, "glibc"); an
+  unregistered thread reads `cpu_id = -2`, which the routines' unsigned compare sends to the
+  miss path. The declaration is FRONT-01 (`front/mod-safety.md`). On musl the word and the area
+  are the crate's own (FRONT-01, `front/area-safety.md`): each thread's area reads -1 until
+  `cpu` registers it (AREA-04), and -2 if refused or retired, both of which the unsigned compare
+  sends to the miss path. A registration made during a routine breaks "for the whole call": a
+  signal handler that allocates for the first time on a thread at -1, between a routine's arming
+  store and its read of `cpu_id`, registers the thread, and the interrupted routine then runs to
+  its commit unprotected. Nothing here rules that out; it is stated under "What is trusted" in
+  `docs/design.md`, and shown by the ignored test
   `limitation_a_handler_that_registers_a_thread_inside_its_first_sequence_unprotects_it` in `front/area.rs`.
 - (W): every word address comes from `Front::word(class)` for a `SmallClass`: the address of
   `SLABS`'s first slab plus `Field::hot(class).offset()` (formed as a pointer offset, then taken

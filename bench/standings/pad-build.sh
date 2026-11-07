@@ -13,7 +13,8 @@
 # they can build at once: a program's fat-LTO link runs on one core.
 #
 # The build names have one length, so every binary's path has one length: the path's length
-# moves the initial stack, which moved glibc's tokio jobs by up to 18% (`spawn-gap.md`).
+# moved glibc's tokio jobs by up to 18% (`docs/research/measuring.md`, "glibc's spawn result moved
+# with the length of the binary's path").
 set -euo pipefail
 W=$(cd "$(dirname "$0")/../.." && pwd)
 common="$(git -C "$W" rev-parse --path-format=absolute --git-common-dir)/.."

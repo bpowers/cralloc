@@ -1,13 +1,14 @@
 //! The size tables the C entry points read: a request's small class from its size, with C's
 //! 16-byte rule built in (design: "Size classes and alignment").
 //!
-//! The shapes are the ones `docs/research/zen5-roofline.md` section 14 measured as fastest for
-//! the generated `c_malloc` and `c_calloc` routines: a byte per 8-byte step of size for
-//! `malloc`, and a byte per size for the smaller range `calloc` serves inline. Each byte is the
-//! position of the class's hot word in a slab (`Field::index`), from which the routines form the
-//! word's address and find its mask; it is not the class index, since hot words sit only at bytes
-//! 16 to 31 of each 32-byte chunk (`front::slab`). They are constants built from `Class::of_c`, so they cannot drift from the
-//! classes; the tests check every entry against it anyway, from the size side.
+//! The shapes are the ones `docs/research/roofline.md`, "The C entry points", measured as
+//! fastest for the generated `c_malloc` and `c_calloc` routines: a byte per 8-byte step of size
+//! for `malloc`, and a byte per size for the smaller range `calloc` serves inline. Each byte is
+//! the position of the class's hot word in a slab (`Field::index`), from which the routines
+//! form the word's address and find its mask; it is not the class index, since hot words sit
+//! only at bytes 24 to 31 of each 32-byte chunk (`front::slab`). They are constants built from
+//! `Class::of_c`, so they cannot drift from the classes; the tests check every entry against it
+//! anyway, from the size side.
 
 use crate::classes::{Class, MAX_SMALL_SIZE, SmallClass};
 use crate::front::Field;
@@ -112,7 +113,8 @@ const fn sized_classes() -> [u8; C_SIZED_LEN] {
 
 /// Where a table the C routines read starts within its static: 2048 bytes into a page, so that
 /// the bytes of the sizes programs use most have page offsets no slab word has (a load at the page
-/// offset of a store in flight waits for it: `docs/research/zen5-roofline.md`, section 14).
+/// offset of a store in flight waits for it: `docs/research/roofline.md`, "A load at the page
+/// offset of a store in flight can stall the whole loop").
 pub(crate) const TABLE_OFF: usize = crate::spec::TABLE_OFF;
 
 /// A table of class bytes `TABLE_OFF` bytes into a page-aligned static.

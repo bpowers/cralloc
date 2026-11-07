@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
-# The mini-redis runs of docs/research/heap-drift.md: redis.py once per build, one at a time,
-# in a random order, the live-bytes build (the denominator) among them. Run from the
-# repository root under scripts/heavy, after requests.py has written the inputs:
+# The mini-redis runs of docs/research/memory.md, "When the size mix wanders, huge pages
+# ratcheted": redis.py once per build, one at a time, in a random order, the live-bytes build
+# (the denominator) among them. Run from the repository root under scripts/heavy, after
+# requests.py has written the inputs:
 #
 #   scripts/heavy bench/standings/drift/redis-matrix.sh OUTDIR "BUILD..." [redis.py options]
 #

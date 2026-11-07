@@ -2,7 +2,7 @@
 
 Small, dependency-free programs that measure what an allocator fast path can cost on the
 host, and what the kernel and the Rust toolchain add around it. The results and what they
-mean are written up in `docs/research/zen5-roofline.md`.
+mean are written up in `docs/research/roofline.md`.
 
 Each directory is a stand-alone cargo project (none belongs to a workspace). Everything is
 x86-64 Linux only and needs `perf_event_open` for user-space counters
@@ -148,9 +148,9 @@ Single-thread workloads (`pair_const`, `pair_box`, `pair_dyn`, `batch_const`, `b
 `_dyn` hides a fixed size from the compiler; `_mix` cycles through the sizes the server profile
 found. Building with `RA_PAD=N` (a multiple of 16; loops start 16-aligned) moves each of their
 loops by N bytes, to average a comparison over
-code placements (`docs/research/fast-lookup.md`); `RF_SINGLE_ONLY=1` skips the cross-thread
-workloads. Cross-thread workloads report nanoseconds per
-object that each side spent working (waiting is excluded), and wall time:
+code placements (`docs/research/roofline.md`, "The floor and where cralloc stands");
+`RF_SINGLE_ONLY=1` skips the cross-thread workloads. Cross-thread workloads report
+nanoseconds per object that each side spent working (waiting is excluded), and wall time:
 
 | Workload | Shape |
 |---|---|

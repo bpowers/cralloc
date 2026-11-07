@@ -198,7 +198,7 @@ fn huge_threshold(layout: &Layout) -> Option<u32> {
 /// Small-page commits stop at the threshold until then (`commit_to`), so the part starts at
 /// the threshold itself. Were they allowed past it, the part would start at the next huge-page
 /// boundary above the last of them, leaving up to one more huge page of the class on small
-/// pages (`docs/research/memory.md`, "Build phases against mimalloc"). Nothing small-page
+/// pages (`docs/research/memory.md`, "The huge-page threshold"). Nothing small-page
 /// purges work on lies above the threshold either, since nothing was committed there.
 fn switch_to_huge<H: Host>(host: &H, region: RegionId, need: u32) -> Option<u32> {
     let layout = host.layout();

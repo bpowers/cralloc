@@ -59,8 +59,8 @@ def artifacts : List Artifact := [
     witnessOk := pushInlineD_witnessOk },
   -- One form only: read directly, `__rseq_offset` would leave it 75 bytes,
   -- past one line by too little (`scripts/check_sizes.py`), and out of
-  -- line the direct load saves nothing (docs/research/zen5-roofline.md,
-  -- section 13).
+  -- line the direct load saves nothing (docs/research/roofline.md,
+  -- "Reaching the path: inlining, LTO and how the call is made").
   casApi.artifact VG.X86_64.target {
     code := cas
     verified := cas_verified

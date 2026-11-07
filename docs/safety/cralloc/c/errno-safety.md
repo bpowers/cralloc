@@ -42,7 +42,7 @@ during the access in a way that races with it.
   the C library calls that start the background thread and puts it back after: it runs on
   a thread of the program that allocates, so one of those. The design's non-goal excludes `vfork`/`CLONE_VM` children and raw `clone` threads,
   which have no allocator support anyway; glibc's own `posix_spawn` child never allocates
-  (`docs/research/linux-rseq-contract.md`, section 5).
+  (`docs/research/linux-rseq-contract.md`, "fork, vfork and clone").
 
 **Proof.** By I2 the thread has glibc's TLS, so by I1 the call returns a valid, aligned pointer
 to this thread's `errno`. `errno` is thread-local, so only this thread reaches it: the only

@@ -184,7 +184,8 @@ pub unsafe trait Os: Sync {
     /// Restarts every restartable sequence of the process in flight on CPU `cpu`
     /// (`MEMBARRIER_CMD_PRIVATE_EXPEDITED_RSEQ` with `MEMBARRIER_CMD_FLAG_CPU`). A CPU that is
     /// offline or does not exist has no sequence in flight, so fencing it succeeds at once.
-    /// Fails unless [`Os::register_fence`] succeeded, and may fail for want of memory.
+    /// Fails unless [`Os::register_fence`] succeeded. The kernel allocates nothing for this form,
+    /// so unlike [`Os::fence_all`] it does not fail for want of memory.
     fn fence(&self, cpu: u32) -> Result<(), OsError>;
 
     /// A full memory barrier on every CPU that runs one of the process's threads, before the

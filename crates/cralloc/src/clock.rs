@@ -4,10 +4,10 @@
 //! while the program was running. Read from the cycle counter alone, a silence of a minute is
 //! sixty intervals of such evidence, and the first slow paths after it found every loaded
 //! magazine, spare, depot stack, slab and purge frontier idle at once and tore down what the
-//! burst was about to use (`docs/research/server-latency.md`: hundreds of one-page purges and
-//! a dozen drains in the first milliseconds of each burst). So intervals are counted instead:
-//! the count steps by one when a reading finds that an interval of the cycle counter has
-//! passed since the last step, however long ago that was.
+//! burst was about to use (`docs/research/servers.md`, "The first requests after a silence":
+//! hundreds of one-page purges and a dozen drains in the first milliseconds of each burst). So
+//! intervals are counted instead: the count steps by one when a reading finds that an interval
+//! of the cycle counter has passed since the last step, however long ago that was.
 //!
 //! The rules keep reading a time in ticks, at the resolution they had: the counted time is the
 //! count times [`INTERVAL`] plus the ticks since the last step, capped just short of an
