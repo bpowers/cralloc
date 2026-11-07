@@ -192,6 +192,34 @@ mod process {
         on_the_real_routines(|n, f| spread(n, f), FULL);
     }
 
+    /// The C entry points, as a `GlobalAlloc`: their frees find a block's class by the plain loads
+    /// of the mirror (`c::mirror`), which any mix of old and new must leave safe.
+    struct CEntryPoints;
+
+    // SAFETY: `malloc` and `free` meet its contract for the sizes this test asks for, and 8 is
+    // less than the alignment `malloc` gives.
+    unsafe impl GlobalAlloc for CEntryPoints {
+        unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
+            crate::c::malloc(layout.size()).cast()
+        }
+
+        unsafe fn dealloc(&self, ptr: *mut u8, _: Layout) {
+            // SAFETY: the caller's promise: a block from `alloc`, given up once.
+            unsafe { crate::c::free(ptr.cast()) };
+        }
+    }
+
+    #[test]
+    fn blocks_keep_their_last_owners_writes_through_the_c_entry_points_quickly() {
+        let _ = pipeline(&CEntryPoints, |n, f| spread(n, f), 2, QUICK, 512);
+    }
+
+    #[test]
+    #[ignore = "slow: run with scripts/gate --all"]
+    fn blocks_keep_their_last_owners_writes_through_the_c_entry_points_fully() {
+        let _ = pipeline(&CEntryPoints, |n, f| spread(n, f), 2, FULL, 512);
+    }
+
     /// Threads taking turns on one CPU: a block's only way from a free to the next allocation is
     /// the routines' plain stores and loads, and the context switch between them.
     #[test]
