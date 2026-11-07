@@ -795,7 +795,13 @@ impl<O: Os> Back<'_, O> {
         } else {
             self.hold_maintain_step(&|| time)
         };
-        let (paid, owing) = self.pay_owed(size.splits(self.space.plan().geometry()));
+        // A payment asks for one split at most off a request's path too: it is a step.
+        let splits = if size.heartbeat {
+            Splits::on_request(self.space.plan().geometry())
+        } else {
+            Splits::One
+        };
+        let (paid, owing) = self.pay_owed(splits);
         PassStep {
             more: pass.is_some() || hold.more || owing,
             returned: returned + hold.returned + paid,
@@ -933,6 +939,7 @@ impl<O: Os> Back<'_, O> {
     /// so the next one is due in the next interval. Returns the decay word of the pass it stepped if it
     /// stopped at its budget with the pass still under way, so that more steps would do more;
     /// `None` otherwise. Adds the bytes it returned that had been resident to `returned`.
+    #[inline(never)]
     fn decay_step_counting(
         &self,
         now: &dyn Fn() -> u64,

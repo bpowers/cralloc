@@ -9,6 +9,9 @@
 //! rules huge [class]       a class of `class` bytes past its huge-page threshold, by bytes carved
 //! rules split single|bg    a fragmented huge-page part, under heartbeats, then `collect`
 //! rules stagger CPU [n]    `n` large buffers written in turn: ns an element, by request size
+//! rules fault CPU [n]      the first touch of `n` huge pages under advice, with the kernel's own
+//!                          count of what it did: what a huge-page rule charges a request when
+//!                          free blocks of that size are short or plentiful
 //! ```
 //!
 //! For `split`, run under `strace -f -e trace=madvise,write` to see which thread calls
@@ -27,6 +30,9 @@ const MIB: usize = 1 << 20;
 unsafe extern "C" {
     fn getpagesize() -> i32;
     fn sched_setaffinity(pid: i32, size: usize, mask: *const u64) -> i32;
+    fn mmap(addr: *mut u8, len: usize, prot: i32, flags: i32, fd: i32, off: isize) -> *mut u8;
+    fn madvise(addr: *mut u8, len: usize, advice: i32) -> i32;
+    fn munmap(addr: *mut u8, len: usize) -> i32;
 }
 
 fn page() -> usize {
@@ -168,9 +174,10 @@ fn huge(class: usize) {
     std::hint::black_box(&live);
 }
 
-/// One line on standard error, as a mark in a trace of system calls.
+/// One line on standard error, as a mark in a trace of system calls, in one write.
 fn mark(what: &str) {
-    eprintln!("MARK {what} rss {:.1} MiB retained {:.1} MiB", mib(rss()), mib(seen().retained));
+    let line = format!("MARK {what} rss {:.1} MiB retained {:.1} MiB\n", mib(rss()), mib(seen().retained));
+    eprint!("{line}");
 }
 
 /// Allocation and free in one small class with magazines' worth of swings, which keeps slow paths
@@ -277,6 +284,70 @@ fn stagger(cpu: usize, count: usize) {
     }
 }
 
+/// The kernel's counters that say what a huge-page fault did.
+fn vmstat() -> Vec<(String, u64)> {
+    let want = ["compact_stall", "compact_fail", "compact_success", "thp_fault_alloc", "thp_fault_fallback"];
+    let text = std::fs::read_to_string("/proc/vmstat").unwrap();
+    text.lines()
+        .filter_map(|line| line.split_once(' '))
+        .filter(|(name, _)| want.contains(name))
+        .map(|(name, value)| (name.to_string(), value.parse().unwrap()))
+        .collect()
+}
+
+/// Free blocks of the kernel's largest orders, for what a huge page needs.
+fn free_blocks() -> String {
+    let text = std::fs::read_to_string("/proc/buddyinfo").unwrap();
+    text.lines().next().unwrap().split_whitespace().skip(4).collect::<Vec<_>>().join(" ")
+}
+
+/// The first touch of `count` huge pages under `MADV_HUGEPAGE` in a mapping of its own, a byte each.
+/// The huge page's size is `page^2 / 8`.
+fn fault(cpu: usize, count: usize) {
+    pin(cpu);
+    let huge = page() * page() / 8;
+    println!("# fault: {count} huge pages of {} MiB on CPU {cpu}", huge / MIB);
+    println!("# free blocks by order: {}", free_blocks());
+    let before = vmstat();
+    let len = (count + 1) * huge;
+    const PROT_RW: i32 = 3;
+    const PRIVATE_ANON: i32 = 0x22;
+    const MADV_HUGEPAGE: i32 = 14;
+    // SAFETY: a new private mapping of `len` bytes, which nothing else knows of.
+    let base = unsafe { mmap(std::ptr::null_mut(), len, PROT_RW, PRIVATE_ANON, -1, 0) };
+    assert!(base as isize != -1, "mmap");
+    let aligned = base.wrapping_add(base.addr().next_multiple_of(huge) - base.addr());
+    // SAFETY: whole huge pages inside the mapping.
+    assert_eq!(unsafe { madvise(aligned, count * huge, MADV_HUGEPAGE) }, 0);
+    let mut ns = Vec::with_capacity(count);
+    for i in 0..count {
+        let at = aligned.wrapping_add(i * huge);
+        let start = Instant::now();
+        // SAFETY: inside the mapping, which is writable and this thread's alone.
+        unsafe { at.write_volatile(1) };
+        ns.push(start.elapsed().as_nanos() as u64);
+    }
+    let mapped = anon_huge();
+    let after = vmstat();
+    // SAFETY: the mapping made above, not used again.
+    unsafe { munmap(base, len) };
+    ns.sort_unstable();
+    let q = |p: usize| ns[(ns.len() - 1) * p / 100] as f64 / 1e3;
+    println!(
+        "# first touch, us: min {:.0} median {:.0} p90 {:.0} p99 {:.0} max {:.0}",
+        q(0),
+        q(50),
+        q(90),
+        q(99),
+        q(100)
+    );
+    println!("# huge pages mapped: {} of {count}", mapped / huge);
+    for ((name, a), (_, b)) in before.iter().zip(&after) {
+        println!("# {name}: +{}", b - a);
+    }
+    println!("# free blocks by order after: {}", free_blocks());
+}
+
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     let arg = |i: usize| args.get(i).map(String::as_str);
@@ -289,8 +360,14 @@ fn main() {
             arg(2).map_or(8, |c| c.parse().unwrap()),
             arg(3).map_or(64, |c| c.parse().unwrap()),
         ),
+        Some("fault") => fault(
+            arg(2).map_or(8, |c| c.parse().unwrap()),
+            arg(3).map_or(64, |c| c.parse().unwrap()),
+        ),
         _ => {
-            eprintln!("usage: rules cap | floor | huge [class] | split single|bg | stagger CPU [n]");
+            eprintln!(
+                "usage: rules cap | floor | huge [class] | split single|bg | stagger CPU [n] | fault CPU [n]"
+            );
             std::process::exit(2);
         }
     }

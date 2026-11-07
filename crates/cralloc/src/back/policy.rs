@@ -624,6 +624,7 @@ const _: () = {
         assert!(commit_ahead_most(g) as usize * g.page_size() == 64 * MIB);
         assert!(commit_ahead_least(g) as usize * g.page_size() >= 64 << 10);
         assert!(purge_min_run(g) as usize * g.page_size() >= 16 << 10);
+        assert!(tail_headroom(g) as usize * g.huge_page_size() >= 16 * MIB);
         // A bound on the kernel's work is pages, whatever their size.
         assert!(hold_beat(g) == 512 * g.page_size());
         // Classes up to 1 KiB where huge pages are used.
