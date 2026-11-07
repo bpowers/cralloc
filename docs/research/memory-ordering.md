@@ -200,9 +200,10 @@ this CPU's threads wrote. The C tables are constants, and the rest are above.
 
 The twins use relaxed loads and stores, as the routines' are. What orders them is the machine: a
 simulated thread's state word takes a read-modify-write at each step, which a fence and a thread
-starting on the same simulated CPU also write. That models less order than the kernel gives, because
-it falls only at steps. So a protocol that passes on the twins needs no more than the routines and
-the kernel give.
+starting on the same simulated CPU also write. The barrier falls only at steps, which is less than
+the kernel gives, but the simulator has other atomics that may give more (see "What is still
+unproved"). So the twins no longer hand a protocol the release and acquire that hid the question, and
+a pass on them is still no proof.
 
 ## What fooled us
 
@@ -271,10 +272,10 @@ row is one mutation against the tests that should see it, release builds, 4 s a 
 | Summary words, hint or sleep to acquire and release | not caught | caught |
 | A kept layout, or the domains' count, with no order | not caught, at thousands of rounds a second | caught |
 | Tags with no order | not caught | not caught on 4 seeds: this test's readers have the carving word's order, which covers the tag |
-| The simulator's barrier relaxed | not caught | caught, on 4 of 8 runs of 8 seeds |
+| The simulator's barrier relaxed | not caught | not caught on 16 seeds |
 
-Why the hardware misses so much is under "What fooled us". On the unweakened code Miri passes every
-ordering test it can run, on one seed.
+Why the hardware misses so much is under "What fooled us". On the unweakened code Miri passes all 11
+ordering tests it can run, on 16 seeds each (`91c2e7e` to `a99a5fb`, 2026-11-07, 1.5 CPU hours).
 
 **The kernel's fence**, on the real kernel with no allocator: with plain stores and loads on one side,
 store-then-load never failed, and a CPU's stores were never seen out of order after a fence. Left
@@ -315,9 +316,11 @@ transcription, and each "allowed" row shows it can see the outcome. A transcript
 - **Another core.** This M1 Max cannot show a missing release on an atomic or a missing acquire before
   a dependent load. Those rest on Miri, which does not run the real routines, and on the argument.
   `scripts/gate --all` has not been run on Neoverse V2, where atomics may behave differently.
-- **The routines and Miri.** Miri sees the twins, whose order is the simulator's. The real routines
-  have only the tests on real threads and the reading above, and those are provisional, by hand,
-  until Lean emits them.
+- **The routines and Miri.** Miri sees the twins, whose order is the simulator's, and relaxing the
+  simulator's barrier went unseen, so some other atomic of the simulator may order what the barrier
+  should. So Miri does not show that the route through a routine holds. The real routines have only
+  the tests on real threads and the reading above, and those are provisional, by hand, until Lean
+  emits them.
 - **The kernel's barriers are read, not proved.** The no-interrupt paths have a litmus test in Arm's
   model and no test on the kernel that isolates them.
 - **The fork's cut** rests on Arm's rule for `tlbi` and `dsb`, as we read it.
